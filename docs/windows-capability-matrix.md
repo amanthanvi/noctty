@@ -397,7 +397,9 @@ source-preserving config patch; Discard changes asks how many fields would be
 lost before it throws the draft away. A field that differs from its built-in
 default is marked, and its Reset button, its context menu and
 Ctrl+Shift+Delete put the default back in the draft
-([details](windows.md#windows-tabs-and-splits)). Advanced shows the pending field diff and
+([details](windows.md#windows-tabs-and-splits)). Ctrl+F searches every page
+by name, description and keywords, and `@modified` lists the fields that
+differ from their defaults. Advanced shows the pending field diff and
 keeps the plain-text escape hatch, which opens the config through the `.txt`
 association rather than the file's own. Owned snapshots survive external reloads,
 and native fields support reversible live preview, revision-aware

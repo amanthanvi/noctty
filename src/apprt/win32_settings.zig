@@ -77,6 +77,7 @@ const DT_SINGLELINE: u32 = 0x0020;
 const DT_VCENTER: u32 = 0x0004;
 const DT_CENTER: u32 = 0x0001;
 const DT_RIGHT: u32 = 0x0002;
+const DT_END_ELLIPSIS: u32 = 0x8000;
 const NULL_PEN: i32 = 8;
 const GWLP_USERDATA: i32 = -21;
 const GWLP_WNDPROC: i32 = -4;
@@ -114,6 +115,8 @@ const WM_KEYUP: UINT = 0x0101;
 const WM_SYSKEYDOWN: UINT = 0x0104;
 const WM_ACTIVATE: UINT = 0x0006;
 const WM_TIMER: UINT = 0x0113;
+const WM_CHANGEUISTATE: UINT = 0x0127;
+const WM_QUERYUISTATE: UINT = 0x0129;
 /// The quiet period before the error of a half-typed field is shown
 /// (`SettingsWindow.armValidationTimer`).
 const validation_timer_id: usize = 1;
@@ -2348,6 +2351,7 @@ pub const SettingsWindow = struct {
                 )) return false;
                 const search = self.edit_search orelse return false;
                 if (!repeat) {
+                    self.showKeyboardCues();
                     _ = SetFocus(search);
                     _ = SendMessageW(search, EM_SETSEL, 0, -1);
                 }
@@ -2360,8 +2364,9 @@ pub const SettingsWindow = struct {
             },
             VK_ESCAPE => {
                 // The field holds something to clear; an empty one leaves
-                // Escape to the dialog manager, which asks to close.
-                if (in_search and sys.GetWindowTextLengthW(control) > 0) {
+                // Escape to the dialog manager, which asks to close. While the
+                // close prompt is up, Escape is its "Keep editing".
+                if (in_search and !self.close_prompt_visible and sys.GetWindowTextLengthW(control) > 0) {
                     if (!repeat) self.clearSearch();
                     return true;
                 }
@@ -3367,8 +3372,7 @@ pub const SettingsWindow = struct {
                 self.validation_control = destination.hwnd;
                 self.setErrorStatus(self.raw_scalar_error[@intFromEnum(field)].?);
                 if (focus) if (destination.hwnd) |control| {
-                    self.setActiveSection(destination.section);
-                    self.ensureControlVisible(control);
+                    self.revealControl(destination.section, control);
                     _ = SetFocus(control);
                 };
             },
@@ -3378,7 +3382,7 @@ pub const SettingsWindow = struct {
                 self.setErrorStatus(self.owned_validation_message orelse "A settings value is invalid.");
                 if (focus) {
                     if (self.controlIndex(control)) |index| {
-                        if (self.controlSection(index)) |section| self.setActiveSection(section);
+                        if (self.controlSection(index)) |section| self.revealControl(section, control);
                     }
                     self.ensureControlVisible(control);
                     _ = SetFocus(control);
@@ -3551,7 +3555,6 @@ pub const SettingsWindow = struct {
         self.refreshAllControls();
         self.surfaceNextValidation(false);
         self.updateSaveEnabled();
-        self.refreshModifiedSearch();
     }
 
     /// The unsaved drafts this window previews, as they are shown (with the
@@ -4101,8 +4104,12 @@ pub const SettingsWindow = struct {
         const same = next.sameSearch(&self.search_query);
         self.search_query = next;
         if (same) {
-            // The message on a page with nothing found repeats what was typed.
-            if (next.active() and self.search_item_count == 0) self.refreshNativeSectionText();
+            // The message on a page with nothing found repeats what was typed,
+            // which may now wrap differently.
+            if (next.active() and self.search_item_count == 0) {
+                self.refreshNativeSectionText();
+                layoutChildren(self);
+            }
             return;
         }
         self.runSearch(true);
@@ -4112,15 +4119,48 @@ pub const SettingsWindow = struct {
     /// Empty the search field and show every row again. The field's own
     /// change notification is held back: the search runs here, once.
     fn clearSearch(self: *SettingsWindow) void {
-        const search = self.edit_search orelse return;
-        const suppressed = self.suppress_edit_events;
-        self.suppress_edit_events = true;
-        _ = sys.SetWindowTextW(search, std.unicode.utf8ToUtf16LeStringLiteral(""));
-        self.suppress_edit_events = suppressed;
         const was_active = self.search_query.active();
+        self.dropSearch();
+        if (was_active) self.runSearch(true);
+    }
+
+    /// Empty the search field and forget the search, with no pass of its own:
+    /// for a caller that shows a page next (`setActiveSection`), which lays
+    /// the page out and paints it once.
+    fn dropSearch(self: *SettingsWindow) void {
+        if (self.edit_search) |search| {
+            const suppressed = self.suppress_edit_events;
+            self.suppress_edit_events = true;
+            _ = sys.SetWindowTextW(search, std.unicode.utf8ToUtf16LeStringLiteral(""));
+            self.suppress_edit_events = suppressed;
+        }
         self.search_query = .{};
         self.killSearchAnnounce();
-        if (was_active) self.runSearch(true);
+        self.syncSearchCounts();
+    }
+
+    /// Show `section` with `control` on it and focus the control: the palette's
+    /// jump to a field, and a field whose value Settings will not take. A search
+    /// that would hide the control gives way first. Asked live, not from the
+    /// last pass: with `@modified` a row that was reset since still shows, and
+    /// the page switch runs the search again.
+    fn revealControl(self: *SettingsWindow, section: Section, control: HWND) void {
+        if (self.search_query.active()) if (self.controlIndex(control)) |index| {
+            if (index < settings_clipped_control_count and !self.searchFinds(index)) self.dropSearch();
+        };
+        self.setActiveSection(section);
+        self.ensureControlVisible(control);
+    }
+
+    /// The UI state the dialog manager keeps hiding focus rectangles in
+    /// until it sees Tab or an arrow key: a focus moved by Ctrl+F or Enter
+    /// in the search field is a keyboard move, so the focused control shows it.
+    fn showKeyboardCues(self: *SettingsWindow) void {
+        self.focus_input_mode = .keyboard;
+        const hwnd = self.hwnd orelse return;
+        const UIS_CLEAR: usize = 2;
+        const UISF_HIDEFOCUS: usize = 0x1;
+        _ = sys.SendMessageW(hwnd, WM_CHANGEUISTATE, (UISF_HIDEFOCUS << 16) | UIS_CLEAR, 0);
     }
 
     /// Enter in the search field: focus the first setting found, on the shown
@@ -4129,11 +4169,11 @@ pub const SettingsWindow = struct {
     /// with none to focus the page's rail button takes the focus.
     fn goToFirstMatch(self: *SettingsWindow) void {
         if (!self.search_query.active() or self.search_total == 0) return;
+        // The field the focus lands on is spoken; the count would follow it.
+        self.killSearchAnnounce();
+        self.showKeyboardCues();
         if (self.search_counts[@intFromEnum(self.active_section)] == 0) {
-            for (std.enums.values(Section)) |section| if (self.search_counts[@intFromEnum(section)] != 0) {
-                self.setActiveSection(section);
-                break;
-            };
+            if (firstPageWithMatches(&self.search_counts)) |section| self.setActiveSection(section);
         }
         for (self.formItems()) |item| {
             const control = self.controlHwnd(item.control_index) orelse continue;
@@ -4142,10 +4182,7 @@ pub const SettingsWindow = struct {
             _ = SetFocus(control);
             return;
         }
-        if (self.sectionButton(self.active_section)) |button| {
-            self.focus_input_mode = .keyboard;
-            _ = SetFocus(button);
-        }
+        if (self.sectionButton(self.active_section)) |button| _ = SetFocus(button);
     }
 
     /// The count is said once typing pauses (`search_announce_quiet_ms`).
@@ -4165,14 +4202,6 @@ pub const SettingsWindow = struct {
     fn searchAnnounceElapsed(self: *SettingsWindow) void {
         self.killSearchAnnounce();
         if (self.search_query.active()) self.announceText(text_summary_index);
-    }
-
-    /// A search for `@modified` follows a change to which rows differ from
-    /// their default that the user did not make in a row (Discard, a reload):
-    /// a reset or an edit leaves the row where it is until the search runs again.
-    fn refreshModifiedSearch(self: *SettingsWindow) void {
-        if (!self.search_query.modified) return;
-        self.runSearch(false);
     }
 
     /// The control index of `field`'s row.
@@ -4355,6 +4384,8 @@ pub const SettingsWindow = struct {
         self.refreshNativeSectionText();
         layoutChildren(self);
         self.applySectionVisibility();
+        // A row of this page the search no longer finds may hold the focus.
+        if (self.search_query.active()) self.keepFocusShown();
         if (self.hwnd) |hwnd| _ = RedrawWindow(hwnd, null, null, RDW_UPDATENOW | RDW_ALLCHILDREN);
         if (changed) {
             if (self.sectionProvider(next)) |provider| provider.raiseSelected();
@@ -4545,7 +4576,7 @@ pub const SettingsWindow = struct {
 
     fn summaryText(self: *const SettingsWindow, buf: []u8) []const u8 {
         if (!self.search_query.active()) return self.active_section.placeholderText();
-        return searchSummaryText(buf, self.search_total, self.search_counts[@intFromEnum(self.active_section)]);
+        return searchSummaryText(buf, &self.search_counts, self.active_section);
     }
 
     /// Whether the page shows its help text: Keybindings and Advanced do, and
@@ -4559,8 +4590,8 @@ pub const SettingsWindow = struct {
     /// bytes.
     const help_text_bytes = 2047;
     /// The longest status line kept across the close prompt: the longest
-    /// sentence names a file, which Save keeps within 230 characters.
-    const status_line_capacity = 1024;
+    /// sentence names keys a later config layer overrides, which can be long.
+    const status_line_capacity = 2048;
 
     /// The text above the form: Keybindings and Advanced have one, and a page
     /// the search found nothing on says what to do instead.
@@ -5639,8 +5670,6 @@ pub const SettingsWindow = struct {
         // The Advanced page lists the pending changes.
         self.refreshNativeSectionText();
         if (self.active_section == .advanced) layoutChildren(self);
-        // What differs from its default is what was saved again.
-        self.refreshModifiedSearch();
         self.setNote(.discarded);
     }
 
@@ -5794,8 +5823,10 @@ pub const SettingsWindow = struct {
     /// Open settings at the exact native control that owns `field`.
     pub fn openField(self: *SettingsWindow, field: SettingField) !void {
         try self.open();
-        // A search that hides the field gives way to it.
-        if (self.search_query.active() and !self.search_found[settingControlIndex(field)]) self.clearSearch();
+        // A search that hides the field gives way to it (asked live, as
+        // `revealControl` does), with no pass of its own: the page switch
+        // below lays out and paints once.
+        if (self.search_query.active() and !self.searchFinds(settingControlIndex(field))) self.dropSearch();
         const section = self.settingDestination(field).section;
         self.setActiveSection(section);
         // Asked again: the section's rows may have been made just now.
@@ -7009,12 +7040,23 @@ fn isFindShortcut(ctrl: bool, alt: bool, shift: bool) bool {
 }
 
 /// The header's line while a search is typed: how many settings it found, and
-/// how many of them the shown page has. This is what a reader announces.
-fn searchSummaryText(buf: []u8, total: usize, here: usize) []const u8 {
+/// how many of them the shown page has, or where the first are when it has
+/// none. This is what a reader announces.
+fn searchSummaryText(buf: []u8, counts: *const [section_count]u16, shown: Section) []const u8 {
+    var total: usize = 0;
+    for (counts) |count| total += count;
     if (total == 0) return "No settings match.";
     const noun = if (total == 1) "setting matches" else "settings match";
-    if (here == 0) return std.fmt.bufPrint(buf, "{d} {s}: none on this page.", .{ total, noun }) catch "";
-    return std.fmt.bufPrint(buf, "{d} {s}: {d} on this page.", .{ total, noun, here }) catch "";
+    const here = counts[@intFromEnum(shown)];
+    if (here != 0) return std.fmt.bufPrint(buf, "{d} {s}: {d} on this page.", .{ total, noun, here }) catch "";
+    const first = firstPageWithMatches(counts).?;
+    return std.fmt.bufPrint(buf, "{d} {s}: none on this page, {d} on {s}.", .{ total, noun, counts[@intFromEnum(first)], first.headerText() }) catch "";
+}
+
+/// The first page in rail order with a row the search found.
+fn firstPageWithMatches(counts: *const [section_count]u16) ?Section {
+    for (std.enums.values(Section)) |section| if (counts[@intFromEnum(section)] != 0) return section;
+    return null;
 }
 
 /// What a page with no row the search found shows in place of its rows: what
@@ -11071,14 +11113,16 @@ test "settings search finds a row by its label, caption, help and keywords, not 
 
 test "settings search says how many it found, and where, or what it looks in" {
     var buf: [SettingsWindow.help_text_bytes]u8 = undefined;
-    try std.testing.expectEqualStrings("No settings match.", searchSummaryText(&buf, 0, 0));
-    try std.testing.expectEqualStrings("1 setting matches: 1 on this page.", searchSummaryText(&buf, 1, 1));
-    try std.testing.expectEqualStrings("3 settings match: none on this page.", searchSummaryText(&buf, 3, 0));
-    try std.testing.expectEqualStrings("4 settings match: 2 on this page.", searchSummaryText(&buf, 4, 2));
-
     var counts: [section_count]u16 = @splat(0);
+    try std.testing.expectEqualStrings("No settings match.", searchSummaryText(&buf, &counts, .appearance));
+    counts[@intFromEnum(Section.appearance)] = 1;
+    try std.testing.expectEqualStrings("1 setting matches: 1 on this page.", searchSummaryText(&buf, &counts, .appearance));
+    counts[@intFromEnum(Section.appearance)] = 0;
     counts[@intFromEnum(Section.terminal)] = 2;
     counts[@intFromEnum(Section.privacy)] = 4;
+    // A page with none says where the first are: a reader hears this line.
+    try std.testing.expectEqualStrings("6 settings match: none on this page, 2 on Terminal.", searchSummaryText(&buf, &counts, .appearance));
+    try std.testing.expectEqualStrings("6 settings match: 4 on this page.", searchSummaryText(&buf, &counts, .privacy));
     var query = SearchQuery.parse("  Clip ");
     try std.testing.expectEqualStrings(
         "Nothing on this page matches \u{201C}Clip\u{201D}. Found on Terminal (2), Privacy (4). " ++
@@ -11175,7 +11219,7 @@ test "settings a search shows only the rows it finds, and the others leave the T
             for (formItemsForSection(.terminal)) |item| try std.testing.expect(sys.IsWindowVisible(settings.controlHwnd(item.control_index).?) == 0);
             try std.testing.expect(sys.IsWindowVisible(settings.text_help.?) != 0);
             try std.testing.expect(std.mem.startsWith(u8, readEditUtf8(settings.text_help.?, &text_buf).?, "Nothing on this page matches \u{201C}Padding\u{201D}. Found on Appearance (3)."));
-            try std.testing.expectEqualStrings("3 settings match: none on this page.", readEditUtf8(settings.text_summary.?, &text_buf).?);
+            try std.testing.expectEqualStrings("3 settings match: none on this page, 3 on Appearance.", readEditUtf8(settings.text_summary.?, &text_buf).?);
             // Tab from the search field reaches the rail and comes back.
             try std.testing.expectEqual(settings.btn_section_terminal.?, dialog_test.GetNextDlgTabItem(hwnd, search, 0).?);
             try std.testing.expectEqual(search, dialog_test.GetNextDlgTabItem(hwnd, settings.btn_section_terminal.?, 0).?);
@@ -11195,6 +11239,12 @@ test "settings a search shows only the rows it finds, and the others leave the T
             typeSearch(settings, "font");
             try std.testing.expect(settings.handleAccelerator(search, WM_KEYDOWN, VK_ESCAPE, 1 << 30));
             try std.testing.expect(settings.search_query.active());
+            // While the close prompt is up, Escape is its "Keep editing", even
+            // in a field with text.
+            settings.showClosePrompt();
+            try std.testing.expect(!settings.handleAccelerator(search, WM_KEYDOWN, VK_ESCAPE, 0));
+            try std.testing.expect(settings.search_query.active());
+            settings.cancelClosePrompt();
         }
     }.body);
 }
@@ -11214,11 +11264,22 @@ test "settings Enter in the search goes to the first setting found, on another p
             try std.testing.expectEqual(search, GetFocus().?);
             try std.testing.expectEqual(Section.appearance, settings.active_section);
 
-            // Found only on Terminal: Enter goes there, to the field.
+            // Found only on Terminal: Enter goes there, to the field, and the
+            // focus rectangles the dialog manager hides until a navigation key
+            // show, as they would after Tab.
+            const UISF_HIDEFOCUS: LRESULT = 0x1;
+            const hwnd = fixture.hwnd();
+            // Hidden, as a window opened with the mouse has it.
+            _ = sys.SendMessageW(hwnd, WM_CHANGEUISTATE, (@as(usize, @intCast(UISF_HIDEFOCUS)) << 16) | 1, 0); // UIS_SET
+            try std.testing.expect(sys.SendMessageW(hwnd, WM_QUERYUISTATE, 0, 0) & UISF_HIDEFOCUS != 0);
             typeSearch(settings, "scrollback");
             try std.testing.expect(settings.handleAccelerator(search, WM_KEYDOWN, VK_RETURN, 0));
             try std.testing.expectEqual(Section.terminal, settings.active_section);
             try std.testing.expectEqual(settings.fields.edit_scrollback.?, GetFocus().?);
+            try std.testing.expectEqual(@as(LRESULT, 0), sys.SendMessageW(hwnd, WM_QUERYUISTATE, 0, 0) & UISF_HIDEFOCUS);
+            // The count, armed by the typing, is not said over the field the
+            // focus went to.
+            try std.testing.expect(sys.KillTimer(hwnd, search_announce_timer_id) == 0);
 
             // Found on Privacy: the first of its three.
             _ = SetFocus(search);
@@ -11330,8 +11391,13 @@ test "settings @modified shows the rows that differ from their defaults, as thei
             try std.testing.expect(sys.IsWindowVisible(settings.fields.combo_cursor_style.?) == 0);
 
             // Discard puts every field back to what is saved, the defaults
-            // here: nothing differs, and the page says so.
+            // here. Like an edit or a reset, it leaves the rows where they
+            // are; the next run of the search finds nothing, and the page
+            // says so.
             settings.discardChangesNow();
+            try std.testing.expectEqual(@as(usize, 1), settings.search_total);
+            try std.testing.expect(sys.IsWindowVisible(settings.fields.edit_font_size.?) != 0);
+            settings.setActiveSection(.appearance);
             try std.testing.expectEqual(@as(usize, 0), settings.search_total);
             try std.testing.expect(sys.IsWindowVisible(settings.fields.edit_font_size.?) == 0);
             try std.testing.expect(std.mem.startsWith(u8, readEditUtf8(settings.text_help.?, &text_buf).?, "Nothing on this page differs from its default."));
@@ -11372,7 +11438,7 @@ test "settings the search count is said once typing pauses, as a polite live reg
             var utf8: [128]u8 = undefined;
             const said = utf8[0..try std.unicode.utf16LeToUtf8(&utf8, bstr[0..com.SysStringLen(bstr)])];
             var expected: [96]u8 = undefined;
-            try std.testing.expectEqualStrings(searchSummaryText(&expected, settings.search_total, settings.search_counts[@intFromEnum(Section.appearance)]), said);
+            try std.testing.expectEqualStrings(searchSummaryText(&expected, &settings.search_counts, .appearance), said);
 
             // Each rail button says what its page holds.
             const terminal = settings.sectionProvider(.terminal).?;
@@ -11458,6 +11524,44 @@ test "settings the palette's jump to a field clears a search that hides it" {
             try std.testing.expectEqual(@as(i32, 0), sys.GetWindowTextLengthW(settings.edit_search.?));
             try std.testing.expectEqual(Section.terminal, settings.active_section);
             try std.testing.expectEqual(settings.fields.edit_scrollback.?, GetFocus().?);
+            try std.testing.expect(sys.IsWindowVisible(settings.fields.edit_scrollback.?) != 0);
+
+            // With @modified, a row reset since the search ran still shows
+            // but would not be found again: the jump asks the search as it is
+            // now, so the field is not left hidden with the focus.
+            settings.setActiveSection(.appearance);
+            _ = sys.SetWindowTextW(settings.fields.edit_font_size.?, std.unicode.utf8ToUtf16LeStringLiteral("15"));
+            typeSearch(settings, "@modified");
+            const font_size = settings.controlIndex(settings.fields.edit_font_size.?).?;
+            try std.testing.expect(settings.search_found[font_size]);
+            settings.resetRow(font_size);
+            try settings.openField(.font_size);
+            try std.testing.expect(!settings.search_query.active());
+            try std.testing.expectEqual(settings.fields.edit_font_size.?, GetFocus().?);
+            try std.testing.expect(sys.IsWindowVisible(settings.fields.edit_font_size.?) != 0);
+        }
+    }.body);
+}
+
+test "settings a value Settings will not take is shown and focused through a search that hides it" {
+    try dialog_test.onHiddenDesktop(struct {
+        fn body() !void {
+            const fixture = try dialog_test.Fixture.start();
+            defer fixture.finish();
+            const settings = &fixture.settings;
+            typeSearch(settings, "history");
+            settings.setActiveSection(.terminal);
+            const field = settings.fields.edit_scrollback.?;
+            _ = sys.SetWindowTextW(field, std.unicode.utf8ToUtf16LeStringLiteral("abc"));
+            // Another search hides the field with the error.
+            typeSearch(settings, "font");
+            try std.testing.expect(sys.IsWindowVisible(field) == 0);
+            settings.showRawScalarErrors(null);
+            settings.surfaceNextValidation(true);
+            try std.testing.expect(!settings.search_query.active());
+            try std.testing.expectEqual(Section.terminal, settings.active_section);
+            try std.testing.expect(sys.IsWindowVisible(field) != 0);
+            try std.testing.expectEqual(field, GetFocus().?);
         }
     }.body);
 }
@@ -14920,8 +15024,6 @@ fn paintSettingsSectionButton(hwnd: HWND, settings: *SettingsWindow) void {
     else
         colors.text;
     _ = SetTextColor(hdc, text_color);
-    if (label_len > 0) _ = DrawTextW(hdc, &label, label_len, &text_rect, DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX);
-
     if (found) |count| if (count != 0) {
         var digits: [8:0]u16 = @splat(0);
         var digits_utf8: [8]u8 = undefined;
@@ -14929,8 +15031,13 @@ fn paintSettingsSectionButton(hwnd: HWND, settings: *SettingsWindow) void {
         for (text, 0..) |c, i| digits[i] = c;
         var count_rect = rect;
         count_rect.right = sectionMarkerRect(settings, rect, .invalid).left - settings.px(settings_metrics.space_2);
+        var measured = count_rect;
+        _ = DrawTextW(hdc, &digits, @intCast(text.len), &measured, DT_SINGLELINE | DT_NOPREFIX | DT_CALCRECT);
         _ = DrawTextW(hdc, &digits, @intCast(text.len), &count_rect, DT_SINGLELINE | DT_VCENTER | DT_RIGHT | DT_NOPREFIX);
+        // The label stops short of the count.
+        text_rect.right = @max(text_rect.left, count_rect.right - (measured.right - measured.left) - settings.px(settings_metrics.space_2));
     };
+    if (label_len > 0) _ = DrawTextW(hdc, &label, label_len, &text_rect, DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS);
 
     if (section) |value| {
         const marker = settings.section_markers[@intFromEnum(value)];

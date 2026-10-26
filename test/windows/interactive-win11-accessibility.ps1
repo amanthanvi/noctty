@@ -5485,6 +5485,8 @@ try {
         }
         $settingsClientRect = [NocttyAccessibilityNative]::ClientRectOnScreen($settingsHwnd)
         $settingsSectionNames = @('Appearance', 'Terminal', 'Shell', 'Privacy', 'Updates', 'Keybindings', 'Advanced')
+        # Each page's own controls, then the header's search field and the action bar,
+        # which every page shows.
         $settingsExpectedControls = [ordered]@{
             Appearance = @(
                 @{ Name = 'Font family fallbacks'; Type = [System.Windows.Automation.ControlType]::Edit },
@@ -5498,6 +5500,7 @@ try {
                 @{ Name = 'Window padding balance'; Type = [System.Windows.Automation.ControlType]::ComboBox },
                 @{ Name = 'Follow Windows accent color'; Type = [System.Windows.Automation.ControlType]::CheckBox },
                 @{ Name = 'Background blur (not supported on Windows)'; Type = [System.Windows.Automation.ControlType]::CheckBox },
+                @{ Name = 'Search settings'; Type = [System.Windows.Automation.ControlType]::Edit },
                 @{ Name = 'Save'; Type = [System.Windows.Automation.ControlType]::Button },
                 @{ Name = 'Discard changes'; Type = [System.Windows.Automation.ControlType]::Button }
             )
@@ -5506,6 +5509,7 @@ try {
                 @{ Name = 'Close confirmation'; Type = [System.Windows.Automation.ControlType]::ComboBox },
                 @{ Name = 'Copy on select'; Type = [System.Windows.Automation.ControlType]::ComboBox },
                 @{ Name = 'Clipboard trimming'; Type = [System.Windows.Automation.ControlType]::CheckBox },
+                @{ Name = 'Search settings'; Type = [System.Windows.Automation.ControlType]::Edit },
                 @{ Name = 'Save'; Type = [System.Windows.Automation.ControlType]::Button },
                 @{ Name = 'Discard changes'; Type = [System.Windows.Automation.ControlType]::Button }
             )
@@ -5513,6 +5517,7 @@ try {
                 @{ Name = 'Default command'; Type = [System.Windows.Automation.ControlType]::Edit },
                 @{ Name = 'Default profile'; Type = [System.Windows.Automation.ControlType]::ComboBox },
                 @{ Name = 'Shell integration'; Type = [System.Windows.Automation.ControlType]::ComboBox },
+                @{ Name = 'Search settings'; Type = [System.Windows.Automation.ControlType]::Edit },
                 @{ Name = 'Save'; Type = [System.Windows.Automation.ControlType]::Button },
                 @{ Name = 'Discard changes'; Type = [System.Windows.Automation.ControlType]::Button }
             )
@@ -5524,22 +5529,26 @@ try {
                 @{ Name = 'Terminal notifications'; Type = [System.Windows.Automation.ControlType]::CheckBox },
                 @{ Name = 'Clipboard-copy notification'; Type = [System.Windows.Automation.ControlType]::CheckBox },
                 @{ Name = 'Config-reload notification'; Type = [System.Windows.Automation.ControlType]::CheckBox },
+                @{ Name = 'Search settings'; Type = [System.Windows.Automation.ControlType]::Edit },
                 @{ Name = 'Save'; Type = [System.Windows.Automation.ControlType]::Button },
                 @{ Name = 'Discard changes'; Type = [System.Windows.Automation.ControlType]::Button }
             )
             Updates = @(
                 @{ Name = 'Auto-update mode'; Type = [System.Windows.Automation.ControlType]::ComboBox },
                 @{ Name = 'Auto-update channel'; Type = [System.Windows.Automation.ControlType]::ComboBox },
+                @{ Name = 'Search settings'; Type = [System.Windows.Automation.ControlType]::Edit },
                 @{ Name = 'Save'; Type = [System.Windows.Automation.ControlType]::Button },
                 @{ Name = 'Discard changes'; Type = [System.Windows.Automation.ControlType]::Button }
             )
             Keybindings = @(
                 @{ Name = 'Keybind configuration'; Type = [System.Windows.Automation.ControlType]::Button },
+                @{ Name = 'Search settings'; Type = [System.Windows.Automation.ControlType]::Edit },
                 @{ Name = 'Save'; Type = [System.Windows.Automation.ControlType]::Button },
                 @{ Name = 'Discard changes'; Type = [System.Windows.Automation.ControlType]::Button }
             )
             Advanced = @(
                 @{ Name = 'Full config editor'; Type = [System.Windows.Automation.ControlType]::Button },
+                @{ Name = 'Search settings'; Type = [System.Windows.Automation.ControlType]::Edit },
                 @{ Name = 'Save'; Type = [System.Windows.Automation.ControlType]::Button },
                 @{ Name = 'Discard changes'; Type = [System.Windows.Automation.ControlType]::Button }
             )

@@ -1725,6 +1725,25 @@ default over the file's value. Background blur and link
 previews, which Windows does not support, keep whatever the file says and
 offer no reset.
 
+**Search settings** at the right of the Settings header (Ctrl+F from
+anywhere in the window) narrows every page to the settings whose name,
+description or keywords contain every word typed, ignoring the case of ASCII
+letters; `@modified`
+narrows it to the settings that differ from their defaults, and combines with
+words (`@modified font`). Each page keeps its own place: its button on the left
+shows how many settings the search found there, and a page with none says
+which pages have them. The line under the page title says how many match in
+all and on the page shown (or, on a page with none, how many the first page
+with matches has), and screen readers hear it as a polite live region once
+typing pauses. Enter in the field goes to the first setting found, on the
+page shown or else on the first page that has one; Escape in the field clears
+it (Escape in an empty field closes Settings as before). Rows the search hides
+are out of the Tab order and the UI Automation tree. With `@modified`, the list
+is taken when the search runs: an edit, a reset, Discard changes or a reload
+leaves the rows where they are until the search changes or a page is shown
+again. A command palette jump to a setting the search hides clears the search,
+and so does Settings showing a field whose value it will not take.
+
 ## Running elevated
 
 Use **New Elevated Window** in the command palette, or bind
