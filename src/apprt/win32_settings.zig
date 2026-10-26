@@ -711,6 +711,9 @@ const StatusNote = enum {
     field_reset,
     /// A reset was asked of a field that already has its default. Names it.
     already_default,
+    /// A reset could not make what it needs (memory for the copies, or a
+    /// save in progress); the field keeps its value. Names it.
+    reset_failed,
 
     fn text(self: StatusNote) []const u8 {
         return switch (self) {
@@ -734,6 +737,7 @@ const StatusNote = enum {
             .applies_on_save => "Applies when you save.",
             .field_reset => "The setting is back to its default. Save to keep it.",
             .already_default => "The setting already has its default.",
+            .reset_failed => "Could not reset the setting; it keeps its value.",
         };
     }
 
@@ -742,7 +746,7 @@ const StatusNote = enum {
     fn takesDetail(self: StatusNote) bool {
         return switch (self) {
             .file_unopenable, .write_incomplete, .unsupported_encoding, .binary_config, .saved_overridden => true,
-            .field_reset, .already_default => true,
+            .field_reset, .already_default, .reset_failed => true,
             else => false,
         };
     }
@@ -2436,7 +2440,7 @@ pub const SettingsWindow = struct {
         switch (self.status_note) {
             // A save's result stays up whatever the draft looks like now.
             .saved, .discarded, .editor_open_failed => return self.status_note.text(),
-            .saved_overridden, .already_default => return self.noteText(),
+            .saved_overridden, .already_default, .reset_failed => return self.noteText(),
             // These are about edits that are still there to be saved.
             .field_reset,
             .save_failed,
@@ -3032,30 +3036,35 @@ pub const SettingsWindow = struct {
         const defaults = if (self.defaults) |*config| config else return;
         const pending = if (self.pending) |*config| config else return;
         if (!self.rowNeedsReset(row)) return self.setResetNote(row, .already_default);
-        resetDraftRow(pending, self.fileConfig(), defaults, row) catch |err| {
-            std.log.warn("settings: reset failed field={s} err={}", .{ row.native.binding, err });
-            return;
-        };
+        // The transaction takes no edit while a save is in progress, and the
+        // draft must not change without it.
+        if (self.transaction) |*transaction| if (transaction.pending_apply_id != null) return self.setResetNote(row, .reset_failed);
         // A reset is measured against what the file holds now. When the file
         // changed under an edit (a conflict), its value becomes the baseline
         // first, as Keep mine does: otherwise a default equal to the old
         // baseline reads as an edit given up, the field takes the file's
         // value back, and the note says it has the default.
         if (comptime row.field) |field| {
+            // Nothing here can fail: the values are copied, not allocated.
             // A half-typed number goes with its error: the field shows the default.
             inline for (comptime std.enums.values(RawScalarField)) |raw| {
                 if (comptime raw.setting() == field) if (self.raw_scalar_dirty[@intFromEnum(raw)]) self.finishRawScalarEdit(raw);
             }
             if (self.hasConflict(field)) self.resolveConflict(field, .keep_mine);
+            setSettingValue(pending, resetSettingValue(self.fileConfig(), defaults, field));
             @field(field_adapters, row.native.binding).display(self);
             self.trackFieldEdit(field);
         } else {
             const owned = comptime ownedFieldFor(row.descriptor.key);
-            if (self.current) |*current| if (self.original) |*original| if (!ownedSettingEql(current, original, owned)) {
-                copyOwnedSetting(original, current, owned) catch |err| {
-                    std.log.warn("settings: reset could not take the file's value field={s} err={}", .{ @tagName(owned), err });
-                };
+            const original = if (self.original) |*config| config else return;
+            // Every copy the reset needs is made before anything changes, so
+            // one that fails leaves the draft, its tracking and its conflict
+            // as they were; then they are stored together.
+            const prepared = prepareOwnedReset(pending, original, self.fileConfig(), defaults, owned) catch |err| {
+                std.log.warn("settings: reset failed field={s} err={}", .{ @tagName(owned), err });
+                return self.setResetNote(row, .reset_failed);
             };
+            prepared.store(pending, original);
             self.owned_text_changed[@intFromEnum(owned)] = false;
             if (self.ownedEdit(owned)) |control| self.clearValidationError(control);
             self.refreshOwnedControl(owned);
@@ -3070,6 +3079,10 @@ pub const SettingsWindow = struct {
         var writer: std.Io.Writer = .fixed(&buf);
         const label = comptime if (row.field) |field| field.label() else row.descriptor.label;
         const written = text: {
+            if (note == .reset_failed) {
+                writer.print("Could not reset {s}; it keeps its value.", .{label}) catch break :text false;
+                break :text true;
+            }
             writer.writeAll(label) catch break :text false;
             writer.writeAll(if (note == .field_reset) " is back to its default" else " already has its default") catch break :text false;
             if (self.defaults) |*defaults| writeDefaultSuffix(row, &writer, self.fileConfig(), defaults) catch break :text false;
@@ -5871,9 +5884,45 @@ fn lparamY(lParam: LPARAM) i32 {
 pub fn resetDraftRow(pending: *Config, saved: ?*const Config, defaults: *const Config, comptime row: field_model.FormField) std.mem.Allocator.Error!void {
     if (comptime row.field) |field| return setSettingValue(pending, resetSettingValue(saved, defaults, field));
     const owned = comptime ownedFieldFor(row.descriptor.key);
-    try copyOwnedSetting(pending, defaults, owned);
+    const default = try cloneOwnedSetting(pending, defaults, owned);
+    storeOwnedReset(pending, default);
+}
+
+/// What an owned field's reset stores, copied but not stored yet: the
+/// default for the draft, and for the baseline the file's value when it
+/// differs from it (a conflict, `resetFormRow`).
+const PreparedOwnedReset = struct {
+    default: OwnedSettingValue,
+    baseline: ?OwnedSettingValue,
+
+    fn store(self: PreparedOwnedReset, pending: *Config, original: *Config) void {
+        storeOwnedReset(pending, self.default);
+        if (self.baseline) |value| storeOwnedSetting(original, value);
+    }
+};
+
+/// The copies an owned field's reset needs, each in the arena of the config
+/// it goes to. A failure stores nothing; a copy made before it stays unused
+/// in its arena, freed with the config.
+fn prepareOwnedReset(
+    pending: *Config,
+    original: *Config,
+    file: ?*const Config,
+    defaults: *const Config,
+    field: OwnedSettingField,
+) std.mem.Allocator.Error!PreparedOwnedReset {
+    const default = try cloneOwnedSetting(pending, defaults, field);
+    const baseline: ?OwnedSettingValue = if (file) |current|
+        if (!ownedSettingEql(current, original, field)) try cloneOwnedSetting(original, current, field) else null
+    else
+        null;
+    return .{ .default = default, .baseline = baseline };
+}
+
+fn storeOwnedReset(pending: *Config, default: OwnedSettingValue) void {
+    storeOwnedSetting(pending, default);
     // As an emptied Default command field is (`syncCommandFromEdit`).
-    if (owned == .command) pending._command_defaulted = false;
+    if (default == .command) pending._command_defaulted = false;
 }
 
 /// What a reset of `field` puts back: its default, unless the saved value
@@ -12637,6 +12686,88 @@ test "settings a reset after the file changed under an edit is the default, to s
     }.body);
 }
 
+test "settings a reset that cannot make its copies changes nothing and says so" {
+    try dialog_test.onHiddenDesktop(struct {
+        fn body() !void {
+            // The arenas a successful reset stores into outlive the window,
+            // and the allocator under them outlives both.
+            var failing: std.testing.FailingAllocator = undefined;
+            var kept: [2]?std.heap.ArenaAllocator = .{ null, null };
+            defer for (&kept) |*slot| if (slot.*) |arena| arena.deinit();
+            const fixture = try dialog_test.Fixture.start();
+            defer fixture.finish();
+            const settings = &fixture.settings;
+            var buf: [256]u8 = undefined;
+            const arena = fixture.config._arena.?.allocator();
+            const owned: OwnedSettingField = .font_family;
+
+            // A font typed over the blank default, then the file sets another:
+            // the reset needs the default for the draft and the file's font
+            // for the baseline.
+            const family = settings.fields.edit_font_family.?;
+            const index = settings.controlIndex(family).?;
+            typeInto(family, "Consolas");
+            settings.syncOwnedControl(owned);
+            fixture.config.@"font-family" = try parseFontFamilyEditText(arena, "Cascadia Mono");
+            settings.externalConfigChanged(&fixture.config, 2);
+            try std.testing.expect(settings.owned_conflict[@intFromEnum(owned)]);
+
+            // Each allocation the reset makes fails in turn. The draft and the
+            // baseline get fresh arenas, so every copy asks the failing
+            // allocator; their own arenas come back after.
+            var fail_index: usize = 0;
+            while (fail_index < 16) : (fail_index += 1) {
+                errdefer std.debug.print("settings reset with allocation {d} failing\n", .{fail_index});
+                failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = fail_index });
+                const pending = &settings.pending.?;
+                const original = &settings.original.?;
+                const pending_arena = pending._arena.?;
+                const original_arena = original._arena.?;
+                pending._arena = std.heap.ArenaAllocator.init(failing.allocator());
+                original._arena = std.heap.ArenaAllocator.init(failing.allocator());
+                settings.resetRow(index);
+                const fresh: [2]std.heap.ArenaAllocator = .{ pending._arena.?, original._arena.? };
+                pending._arena = pending_arena;
+                original._arena = original_arena;
+                if (failing.has_induced_failure) {
+                    // Nothing was stored, so nothing points into the fresh arenas.
+                    for (fresh) |unused| unused.deinit();
+                    try std.testing.expectEqual(@as(usize, 1), settings.pending.?.@"font-family".count());
+                    try std.testing.expectEqual(@as(usize, 0), settings.original.?.@"font-family".count());
+                    try std.testing.expect(settings.owned_dirty[@intFromEnum(owned)]);
+                    try std.testing.expect(settings.owned_conflict[@intFromEnum(owned)]);
+                    try std.testing.expect(settings.hasPendingChanges());
+                    try std.testing.expect(editHoldsText(family, " \t,"));
+                    const status = try statusTextOf(settings, &buf);
+                    try std.testing.expect(std.mem.startsWith(u8, status, "Could not reset "));
+                    try std.testing.expect(std.mem.endsWith(u8, status, "; it keeps its value."));
+                    continue;
+                }
+                kept = .{ fresh[0], fresh[1] };
+                // With memory, the reset is made: the default, to save over
+                // the file's font.
+                try std.testing.expect(fail_index > 0);
+                try std.testing.expectEqual(@as(usize, 0), settings.pending.?.@"font-family".count());
+                try std.testing.expect(ownedSettingEql(&settings.original.?, &fixture.config, owned));
+                try std.testing.expect(settings.owned_dirty[@intFromEnum(owned)]);
+                try std.testing.expect(!settings.owned_conflict[@intFromEnum(owned)]);
+                break;
+            } else return error.TestUnexpectedResult;
+
+            // A number field's reset copies values and cannot run out of
+            // memory; it waits for a save in progress, changing nothing.
+            const size = settings.fields.edit_font_size.?;
+            typeInto(size, "16");
+            settings.transaction.?.pending_apply_id = 1;
+            settings.resetRow(settings.controlIndex(size).?);
+            settings.transaction.?.pending_apply_id = null;
+            try std.testing.expectEqual(@as(f32, 16), settings.pending.?.@"font-size");
+            try std.testing.expect(settings.transaction.?.entryConst(.font_size).?.dirty);
+            try std.testing.expect(std.mem.endsWith(u8, try statusTextOf(settings, &buf), "; it keeps its value."));
+        }
+    }.body);
+}
+
 test "settings a Reset button another page took is no focus to go back to, and no click of its old row" {
     try dialog_test.onHiddenDesktop(struct {
         fn body() !void {
@@ -14327,12 +14458,34 @@ fn editHoldsText(edit: HWND, comptime blank: []const u8) bool {
 }
 
 fn copyOwnedSetting(target: *Config, source: *const Config, field: OwnedSettingField) !void {
+    storeOwnedSetting(target, try cloneOwnedSetting(target, source, field));
+}
+
+/// One owned setting's value, as a config holds it.
+const OwnedSettingValue = union(OwnedSettingField) {
+    font_family: @FieldType(Config, "font-family"),
+    theme: @FieldType(Config, "theme"),
+    command: @FieldType(Config, "command"),
+    default_profile: @FieldType(Config, "default-profile"),
+};
+
+/// `source`'s value of `field`, copied into `target`'s arena but not stored.
+fn cloneOwnedSetting(target: *Config, source: *const Config, field: OwnedSettingField) std.mem.Allocator.Error!OwnedSettingValue {
     const alloc = target._arena.?.allocator();
-    switch (field) {
-        .font_family => target.@"font-family" = try source.@"font-family".clone(alloc),
-        .theme => target.theme = if (source.theme) |*value| try value.clone(alloc) else null,
-        .command => target.command = if (source.command) |*value| try value.clone(alloc) else null,
-        .default_profile => target.@"default-profile" = if (source.@"default-profile") |value| try alloc.dupeZ(u8, value) else null,
+    return switch (field) {
+        .font_family => .{ .font_family = try source.@"font-family".clone(alloc) },
+        .theme => .{ .theme = if (source.theme) |*value| try value.clone(alloc) else null },
+        .command => .{ .command = if (source.command) |*value| try value.clone(alloc) else null },
+        .default_profile => .{ .default_profile = if (source.@"default-profile") |value| try alloc.dupeZ(u8, value) else null },
+    };
+}
+
+fn storeOwnedSetting(target: *Config, value: OwnedSettingValue) void {
+    switch (value) {
+        .font_family => |v| target.@"font-family" = v,
+        .theme => |v| target.theme = v,
+        .command => |v| target.command = v,
+        .default_profile => |v| target.@"default-profile" = v,
     }
 }
 
