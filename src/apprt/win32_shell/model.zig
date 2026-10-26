@@ -29,11 +29,17 @@ pub const Window = struct {
     /// Their Tab/Pane/Node records and generational IDs remain owned by this
     /// ShellState until restore or explicit discard.
     retained_tabs: std.ArrayList(TabId) = .empty,
+    /// Panes taken out of one of this window's tabs by structural undo and
+    /// waiting in its redo history. Each keeps its generational ID, current
+    /// in the pool but in no tab's tree, until restore, explicit discard or
+    /// the window's removal.
+    retained_panes: std.ArrayList(PaneId) = .empty,
     active_tab: ?TabId = null,
 
     pub fn deinit(self: *Window, allocator: std.mem.Allocator) void {
         self.tabs.deinit(allocator);
         self.retained_tabs.deinit(allocator);
+        self.retained_panes.deinit(allocator);
     }
 };
 
@@ -125,6 +131,7 @@ pub const ShellState = struct {
             errdefer window_copy.deinit(self.allocator);
             try window_copy.tabs.appendSlice(self.allocator, window_item.tabs.items);
             try window_copy.retained_tabs.appendSlice(self.allocator, window_item.retained_tabs.items);
+            try window_copy.retained_panes.appendSlice(self.allocator, window_item.retained_panes.items);
             result.windows.appendAssumeCapacity(window_copy);
         }
         try result.tabs.appendSlice(self.allocator, self.tabs.items);
@@ -216,6 +223,18 @@ pub const ShellState = struct {
             for (window_item.retained_tabs.items) |tab_id| {
                 const tab_item = self.tabConst(tab_id) orelse return error.MissingTab;
                 if (!tab_item.window.eql(window_item.id)) return error.WrongWindow;
+            }
+            for (window_item.retained_panes.items, 0..) |pane_id, index| {
+                if (!self.pane_ids.isCurrent(pane_id)) return error.StaleRetainedPane;
+                // Retained means out of every tree: no live pane has its ID.
+                if (self.paneConst(pane_id) != null) return error.DuplicatePane;
+                for (window_item.retained_panes.items[0..index]) |prior| {
+                    if (prior.eql(pane_id)) return error.DuplicatePane;
+                }
+                for (self.windows.items) |other| {
+                    if (other.id.eql(window_item.id)) continue;
+                    for (other.retained_panes.items) |id| if (id.eql(pane_id)) return error.DuplicatePane;
+                }
             }
             if (!active_found) return error.InvalidActiveTab;
         }

@@ -47,6 +47,18 @@ pub const Intent = union(enum) {
     /// empty retained Tab/Window shell; moved Pane/Node IDs stay target-owned.
     discard_transfer: model.NodeId,
     close_pane: model.PaneId,
+    /// Undo of a split: the pane leaves its tab as `close_pane` would, but
+    /// its window retains its ID for redo instead of releasing it.
+    detach_pane: model.PaneId,
+    /// Redo of a split: a pane `detach_pane` retained splits `at` again on
+    /// the `direction` side, in half, with its own ID.
+    restore_pane: struct {
+        pane: model.PaneId,
+        at: model.PaneId,
+        direction: model.Direction,
+    },
+    /// Expire the redo that retained `pane`: its ID is released.
+    discard_detached_pane: model.PaneId,
     focus_window: model.WindowId,
     focus_tab: model.TabId,
     focus_pane: model.PaneId,

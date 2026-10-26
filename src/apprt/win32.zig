@@ -8972,6 +8972,8 @@ pub const App = struct {
             .payload = .{ .split_create = .{
                 .source_surface = source,
                 .created_surface = surface,
+                .source_pane = source.shell_id,
+                .created_pane = surface.shell_id,
                 .direction = direction,
             } },
         })) |_| {} else |err| {
@@ -10424,18 +10426,35 @@ pub const App = struct {
     }
 
     /// What a committed shell transaction asks of the platform (decision
-    /// D7). `create_*` were read at prepare (`Prepared.created`). A creation
-    /// leaves `focus_surface` to the caller, whose activation shows and
-    /// focuses the new pane; `focus = false` says so.
+    /// D7). `create_*` were read at prepare (`Prepared.created`), and the
+    /// split-tree changes by the split history adapter that committed them
+    /// (`Host.applyCommittedSplitHistory`). A creation leaves `focus_surface`
+    /// to the caller, whose activation shows and focuses the new pane;
+    /// `focus = false` says so.
     fn applyShellEffects(
         self: *App,
         effects: []const win32_shell.effect.Effect,
         opts: struct { focus: bool = true },
     ) void {
         for (effects) |effect| switch (effect) {
-            .create_window, .create_surface => {},
+            .create_window, .create_surface, .attach_surface, .detach_surface => {},
             .focus_surface => |pane| if (opts.focus) self.followShellFocus(pane),
             .persist_session => self.scheduleSessionCheckpoint(),
+        };
+    }
+
+    /// Releases a pane ID the shell model retained for a split's redo
+    /// (`discard_detached_pane`), as far as it can: a failure is logged and
+    /// leaves the ID retained by its window, which releases it when it
+    /// closes. Nothing else names the ID by then.
+    fn releaseRetainedShellPane(self: *App, pane_id: win32_shell.model.PaneId) void {
+        var prepared = self.shell_runtime.prepare(.{ .discard_detached_pane = pane_id }) catch |err| {
+            log.warn("split redo disposal kept shell pane={d}:{d} err={}", .{ pane_id.index, pane_id.generation, err });
+            return;
+        };
+        defer prepared.deinit();
+        prepared.commit(&self.shell_runtime) catch |err| {
+            log.warn("split redo disposal kept shell pane={d}:{d} err={}", .{ pane_id.index, pane_id.generation, err });
         };
     }
 
@@ -11140,7 +11159,10 @@ pub const App = struct {
         const tab = found.host.tabs.orderedRemove(current_idx);
         found.host.tabs.insertAssumeCapacity(desired, tab);
         found.host.active_tab = desired;
-        if (shell_prepared) |*prepared| prepared.commit(&self.shell_runtime) catch |err| {
+        // Clearing the history can commit to the model (a detached tab or
+        // pane it kept for undo is released), so the reorder is rebuilt on
+        // top of that rather than failing as stale.
+        if (shell_prepared) |*prepared| prepared.commitRetryingStale(&self.shell_runtime) catch |err| {
             const rollback = found.host.tabs.orderedRemove(desired);
             found.host.tabs.insertAssumeCapacity(current_idx, rollback);
             found.host.active_tab = current_idx;
@@ -15920,9 +15942,24 @@ const Host = struct {
         was_active: bool = true,
     };
 
+    /// The created pane keeps its shell model ID through the undo: its
+    /// window retains the ID while the pane waits in redo history, the redo
+    /// brings the pane back under it, and disposing the detached entry
+    /// releases it.
     const SplitCreateUndo = struct {
         source_surface: *Surface,
         created_surface: *Surface,
+        /// The two panes' shell model IDs, taken when the split was made. An
+        /// entry can outlive its source pane, or (in undo history) its
+        /// created one: another entry's disposal may free it (a redo older
+        /// than this one expires first, or a history clear stops part way),
+        /// and that pane's entries are left to their own disposal. So a
+        /// replay finds both among this window's live panes, by pointer and
+        /// then by generational ID, before it reads either
+        /// (`livePaneTabIndex`); the ID tells a pane from a newer one that
+        /// reused its memory.
+        source_pane: ?win32_shell.model.PaneId = null,
+        created_pane: ?win32_shell.model.PaneId = null,
         direction: SplitTreeSurface.Split.Direction = .right,
         detached: bool = false,
     };
@@ -15986,6 +16023,9 @@ const Host = struct {
                     // Both the detached source Tab (applied phase) and the
                     // alternate tree are duplicate references. Moved Surfaces
                     // remain owned by the live tree and must never be closed.
+                    // A tree here may name a pane another entry's disposal
+                    // freed: deinit reads none, as `Surface.ref`/`unref` are
+                    // no-ops.
                     if (value.source_tab) |*tab| {
                         tab.deinit();
                         value.source_tab = null;
@@ -16034,7 +16074,19 @@ const Host = struct {
         return null;
     }
 
+    /// Cannot fail, as on main. The model releases the ID it kept for this
+    /// redo first, so nothing the surface's close does can address it. A
+    /// release that fails (out of memory) is not a reason to keep the entry,
+    /// unlike a detached tab's (`disposeDetachedUndoTab`): a history clear
+    /// that stopped here would leave the entries after it naming panes it
+    /// had already freed, and keep refusing pane closes (`requestClose`).
+    /// The ID then stays retained by its window, unreachable, until the
+    /// window goes.
     fn disposeDetachedUndoSurface(self: *Host, surface: *Surface) void {
+        if (self.app.shell_runtime_initialized) if (surface.shell_id) |pane_id| {
+            self.app.releaseRetainedShellPane(pane_id);
+        };
+        surface.shell_id = null;
         self.structural_history_disposing = true;
         defer self.structural_history_disposing = false;
         surface.close(false);
@@ -16457,109 +16509,292 @@ const Host = struct {
 
     fn undoSplitCreateEntry(self: *Host, value: *SplitCreateUndo) !bool {
         if (value.detached) return false;
-        const found = self.app.findTabForSurface(value.source_surface) orelse return false;
-        if (found.host != self) return false;
-        const created_handle = found.tab.findHandle(value.created_surface) orelse return false;
-        var shell_prepared: ?win32_shell.runtime.Prepared = null;
-        if (self.app.shell_runtime_initialized) {
-            const pane_id = value.created_surface.shell_id orelse return error.ShellStateOutOfSync;
-            shell_prepared = try self.app.shell_runtime.prepare(.{ .close_pane = pane_id });
-        }
-        defer if (shell_prepared) |*prepared| prepared.deinit();
-
+        // Both panes are found live in one of this window's tabs before
+        // either is read: the entry may outlive them.
+        const tab_index = self.livePaneTabIndex(value.source_surface, value.source_pane) orelse return false;
+        const created_tab = self.livePaneTabIndex(value.created_surface, value.created_pane) orelse return false;
+        if (created_tab != tab_index) return false;
         const previous_tab_id = if (self.active_tab < self.tabs.items.len)
             self.tabs.items[self.active_tab].id
         else
             null;
-        const next_tree = try found.tab.tree.remove(self.app.core_app.alloc, created_handle);
-        found.tab.tree.deinit();
-        found.tab.tree = next_tree;
-        found.tab.focused = found.tab.findHandle(value.source_surface) orelse found.tab.focused;
-        value.created_surface.host_active = false;
-        value.created_surface.setVisible(false);
-        value.detached = true;
-        self.active_tab = found.index;
-        if (self.app.test_before_structural_shell_commit) |hook| {
-            try hook(self.app, value.source_surface.shell_id.?);
+        if (self.app.shell_runtime_initialized) {
+            var prepared = try self.app.shell_runtime.prepare(.{ .detach_pane = value.created_pane.? });
+            defer prepared.deinit();
+            if (self.app.test_before_structural_shell_commit) |hook| {
+                try hook(self.app, value.source_pane.?);
+            }
+            // The model keeps the pane's ID for the redo, and focus follows
+            // the close rule: the user's pane stays focused unless it was the
+            // one removed.
+            try prepared.commitRetryingStale(&self.app.shell_runtime);
+            try self.applyCommittedSplitHistory(&prepared, value.created_surface);
+        } else {
+            // Without a shell model (headless fixtures), as before it: the
+            // pane the split came from is focused.
+            const edit = try self.buildSplitHistoryEdit(.detach, value.created_surface);
+            self.installSplitHistoryEdit(edit, .detach, value.created_surface);
+            const tab = &self.tabs.items[edit.tab_index];
+            tab.focused = tab.findHandle(value.source_surface) orelse tab.focused;
+            self.active_tab = edit.tab_index;
+            hideDetachedSplitSurface(value.created_surface);
         }
-        if (shell_prepared) |*prepared| prepared.commitRetryingInterleavedFocus(&self.app.shell_runtime) catch |err| {
-            log.err("split-create undo shell commit failed err={}", .{err});
-            return err;
-        };
-        // Focus after the undo follows the close rule: the user's pane stays
-        // focused unless it was the one removed.
-        if (shell_prepared) |*prepared| self.app.applyShellEffects(prepared.effects(), .{});
+        value.detached = true;
         // The pane waits in redo history now, like a closed tab's panes.
         self.app.forgetSurfaceToast(value.created_surface);
         // The neighbours take the removed pane's space now: activating a pane
         // that is already focused and shown takes a fast path with no layout.
         self.layout() catch |err| log.warn("split-create undo layout failed err={}", .{err});
         self.notifyActiveTabUiaSelectionChanged(previous_tab_id);
-        value.created_surface.shell_id = null;
-        value.created_surface.shell_committed = false;
         return true;
     }
 
     fn redoSplitCreateEntry(self: *Host, value: *SplitCreateUndo) !bool {
         if (!value.detached) return false;
-        const found = self.app.findTabForSurface(value.source_surface) orelse return false;
-        if (found.host != self) return false;
-        var shell_prepared: ?win32_shell.runtime.Prepared = null;
-        if (self.app.shell_runtime_initialized) {
-            const pane_id = value.source_surface.shell_id orelse return error.ShellStateOutOfSync;
-            shell_prepared = try self.app.shell_runtime.prepare(.{ .split_pane = .{
-                .pane = pane_id,
-                .direction = switch (value.direction) {
-                    .left => .left,
-                    .right => .right,
-                    .up => .up,
-                    .down => .down,
-                },
-                .ratio = 0.5,
-            } });
-        }
-        defer if (shell_prepared) |*prepared| prepared.deinit();
-
+        // The detached pane is this entry's own; the pane it splits again
+        // is found live before it is read, as the entry may outlive it.
+        _ = self.livePaneTabIndex(value.source_surface, value.source_pane) orelse return false;
         const previous_tab_id = if (self.active_tab < self.tabs.items.len)
             self.tabs.items[self.active_tab].id
         else
             null;
-        const source_handle = found.tab.findHandle(value.source_surface) orelse return false;
-        const inserted = try SplitTreeSurface.init(self.app.core_app.alloc, value.created_surface);
-        defer {
-            var cleanup = inserted;
-            cleanup.deinit();
+        if (self.app.shell_runtime_initialized) {
+            var prepared = try self.app.shell_runtime.prepare(.{ .restore_pane = .{
+                .pane = value.created_pane orelse return false,
+                .at = value.source_pane.?,
+                .direction = shellSplitDirection(value.direction),
+            } });
+            defer prepared.deinit();
+            if (self.app.test_before_structural_shell_commit) |hook| try hook(self.app, value.source_pane.?);
+            // The pane comes back focused, under the ID the undo kept.
+            try prepared.commitRetryingStale(&self.app.shell_runtime);
+            try self.applyCommittedSplitHistory(&prepared, value.created_surface);
+        } else {
+            const change: SplitHistoryChange = .{ .attach = .{
+                .beside = value.source_surface,
+                .direction = value.direction,
+            } };
+            const edit = try self.buildSplitHistoryEdit(change, value.created_surface);
+            self.installSplitHistoryEdit(edit, change, value.created_surface);
+            self.active_tab = edit.tab_index;
         }
-
-        const next_tree = try found.tab.tree.split(
-            self.app.core_app.alloc,
-            source_handle,
-            value.direction,
-            0.5,
-            &inserted,
-        );
-        found.tab.tree.deinit();
-        found.tab.tree = next_tree;
-        found.tab.focused = found.tab.findHandle(value.created_surface) orelse source_handle;
         value.detached = false;
-        self.active_tab = found.index;
-        if (shell_prepared) |*prepared| {
-            prepared.commit(&self.app.shell_runtime) catch |err| {
-                log.err("split-create redo shell commit failed err={}", .{err});
-                return err;
-            };
-            value.created_surface.shell_id = prepared.created.pane;
-            value.created_surface.shell_committed = true;
-            self.app.applyShellEffects(prepared.effects(), .{});
-        }
         self.notifyActiveTabUiaSelectionChanged(previous_tab_id);
         return true;
+    }
+
+    /// The index of the tab of this window that holds `surface` live, found
+    /// without reading `surface`: a history entry can name a pane another
+    /// entry's disposal freed. Tab trees hold only live panes, so once found
+    /// the pane can be read, and with the shell model it must still carry
+    /// `pane_id`, the generational ID the entry took, or it is a newer pane
+    /// that reused the memory. Without the shell model (headless fixtures
+    /// only) the check is the pointer alone, which reused memory passes.
+    fn livePaneTabIndex(self: *const Host, surface: *Surface, pane_id: ?win32_shell.model.PaneId) ?usize {
+        for (self.tabs.items, 0..) |*tab, index| {
+            if (tab.findHandle(surface) == null) continue;
+            if (!self.app.shell_runtime_initialized) return index;
+            const expected = pane_id orelse return null;
+            const live = surface.shell_id orelse return null;
+            return if (live.eql(expected)) index else null;
+        }
+        return null;
+    }
+
+    /// Whether `trees` name exactly the panes the shell model holds in
+    /// `tabs`, each live in this window: only then may a transfer's replay
+    /// put the trees in. Each pane is found by pointer before it is read,
+    /// as another entry's disposal may have freed it (`SplitTree` refs a
+    /// pane without reading it); its shell ID then tells it from a newer
+    /// pane that reused the memory, and the count catches a live pane the
+    /// trees would drop. Without the shell model (headless fixtures only)
+    /// just the pointers are checked.
+    fn transferTreesMatchModel(
+        self: *const Host,
+        trees: []const *const SplitTreeSurface,
+        tabs: []const ?win32_shell.model.TabId,
+    ) bool {
+        const modeled = self.app.shell_runtime_initialized;
+        const state = &self.app.shell_runtime.state;
+        if (modeled) {
+            for (tabs) |tab| if (tab == null) return false;
+        }
+        var named: usize = 0;
+        for (trees) |tree| {
+            var it = tree.iterator();
+            while (it.next()) |entry| {
+                const live = for (self.tabs.items) |*tab| {
+                    if (tab.findHandle(entry.view) != null) break true;
+                } else false;
+                if (!live) return false;
+                if (!modeled) continue;
+                const pane = state.paneConst(entry.view.shell_id orelse return false) orelse return false;
+                if (!modelTabListed(tabs, pane.tab)) return false;
+                named += 1;
+            }
+        }
+        if (!modeled) return true;
+        var held: usize = 0;
+        for (state.panes.items) |pane| {
+            if (modelTabListed(tabs, pane.tab)) held += 1;
+        }
+        return named == held;
+    }
+
+    fn modelTabListed(tabs: []const ?win32_shell.model.TabId, id: win32_shell.model.TabId) bool {
+        for (tabs) |tab| if (tab.?.eql(id)) return true;
+        return false;
+    }
+
+    /// What a split-create history step does to the native split tree:
+    /// the pane leaves its tab, or joins the tab of `beside` again, on the
+    /// `direction` side of it.
+    const SplitHistoryChange = union(enum) {
+        detach,
+        attach: struct {
+            beside: *Surface,
+            direction: SplitTreeSurface.Split.Direction,
+        },
+    };
+
+    /// The tree a `SplitHistoryChange` gives the tab at `tab_index`, built
+    /// but not yet installed.
+    const SplitHistoryEdit = struct {
+        tab_index: usize,
+        next: SplitTreeSurface,
+    };
+
+    /// The native half of a committed split-create history step (decision
+    /// D7). The shell model has decided which pane leaves its tab or joins
+    /// it again, where, and which pane is focused after; the native split
+    /// tree follows the committed effects, matched by stable pane ID. Native
+    /// geometry stays native: the tree is edited, never rebuilt from the
+    /// model, so the other splits keep their ratios and a zoom on a pane that
+    /// stays survives a removal (`SplitTree.remove` carries it over), while
+    /// a pane that joins again splits its neighbour in half and resets the
+    /// zoom, as every new split does. If the native tree cannot be built, the
+    /// commit is taken back (`Prepared.rollback`): neither side has changed,
+    /// and the caller leaves the history entry where it was.
+    fn applyCommittedSplitHistory(
+        self: *Host,
+        prepared: *win32_shell.runtime.Prepared,
+        surface: *Surface,
+    ) !void {
+        const effects = prepared.effects();
+        errdefer prepared.rollback(&self.app.shell_runtime) catch |err| {
+            log.err("split history rollback failed err={}", .{err});
+        };
+        const change = try self.splitHistoryChange(effects, surface);
+        const edit = try self.buildSplitHistoryEdit(change, surface);
+
+        self.installSplitHistoryEdit(edit, change, surface);
+        // Focus and the tab in front follow the model before a pane that
+        // leaves is hidden. Hiding the pane that has the keyboard can move
+        // the keyboard (the 2026-10-15 SMALL-04 B log entry measured it for a
+        // tab's panes), and a host that gets it passes it on to its active
+        // tab's focused pane (`refocusHostAfterActivation`): by then the
+        // model's choice.
+        self.app.applyShellEffects(effects, .{});
+        switch (change) {
+            .detach => hideDetachedSplitSurface(surface),
+            .attach => surface.shell_committed = true,
+        }
+    }
+
+    /// The change the committed effects ask of the native tree. The pane
+    /// itself is the history entry's (`surface`), which must carry the
+    /// model's ID; `beside` is found among this window's panes.
+    fn splitHistoryChange(
+        self: *Host,
+        effects: []const win32_shell.effect.Effect,
+        surface: *const Surface,
+    ) !SplitHistoryChange {
+        const pane_id = surface.shell_id orelse return error.ShellStateOutOfSync;
+        for (effects) |effect| switch (effect) {
+            .detach_surface => |pane| {
+                if (!pane.eql(pane_id)) return error.ShellStateOutOfSync;
+                return .detach;
+            },
+            .attach_surface => |attach| {
+                if (!attach.pane.eql(pane_id)) return error.ShellStateOutOfSync;
+                return .{ .attach = .{
+                    .beside = self.findPaneSurface(attach.beside) orelse return error.ShellStateOutOfSync,
+                    .direction = nativeSplitDirection(attach.direction),
+                } };
+            },
+            else => {},
+        };
+        return error.ShellStateOutOfSync;
+    }
+
+    /// The live pane with shell model ID `pane_id`, in any of this window's
+    /// tabs.
+    fn findPaneSurface(self: *Host, pane_id: win32_shell.model.PaneId) ?*Surface {
+        for (self.tabs.items) |*tab| {
+            var it = tab.tree.iterator();
+            while (it.next()) |entry| {
+                const id = entry.view.shell_id orelse continue;
+                if (id.eql(pane_id)) return entry.view;
+            }
+        }
+        return null;
+    }
+
+    /// Everything a `SplitHistoryChange` can fail at: building the new tree.
+    fn buildSplitHistoryEdit(self: *Host, change: SplitHistoryChange, surface: *Surface) !SplitHistoryEdit {
+        const alloc = self.app.core_app.alloc;
+        for (self.tabs.items, 0..) |*tab, index| switch (change) {
+            .detach => {
+                const handle = tab.findHandle(surface) orelse continue;
+                return .{ .tab_index = index, .next = try tab.tree.remove(alloc, handle) };
+            },
+            .attach => |attach| {
+                const handle = tab.findHandle(attach.beside) orelse continue;
+                var inserted = try SplitTreeSurface.init(alloc, surface);
+                defer inserted.deinit();
+                return .{
+                    .tab_index = index,
+                    .next = try tab.tree.split(alloc, handle, attach.direction, 0.5, &inserted),
+                };
+            },
+        };
+        return error.ShellStateOutOfSync;
+    }
+
+    /// Installs a built tree; cannot fail. The tab keeps its focused pane
+    /// if it stays (the handles are renumbered, so it is found again), a
+    /// pane that joins is focused, and otherwise the first pane stands in
+    /// until the focus is applied.
+    fn installSplitHistoryEdit(self: *Host, edit: SplitHistoryEdit, change: SplitHistoryChange, surface: *Surface) void {
+        const tab = &self.tabs.items[edit.tab_index];
+        const focused = tab.focusedSurface();
+        tab.tree.deinit();
+        tab.tree = edit.next;
+        var first = tab.tree.iterator();
+        tab.focused = switch (change) {
+            .attach => tab.findHandle(surface).?,
+            .detach => (if (focused) |kept| tab.findHandle(kept) else null) orelse first.next().?.handle,
+        };
+    }
+
+    /// A pane taken out of its tab waits hidden in redo history. It keeps
+    /// its shell ID, which the model retains, but commits no focus.
+    fn hideDetachedSplitSurface(surface: *Surface) void {
+        surface.shell_committed = false;
+        surface.host_active = false;
+        surface.setVisible(false);
     }
 
     fn undoTabSubtreeTransferEntry(self: *Host, value: *TabSubtreeTransferUndo) !bool {
         if (!value.applied) return false;
         const source_tab = value.source_tab orelse return false;
         const target_index = self.findTabIndexById(value.target_tab_id) orelse return false;
+        // Together the two trees name the panes the combined target tab
+        // holds now; one another entry's disposal freed must not go back.
+        if (!self.transferTreesMatchModel(
+            &.{ &value.alternate_tree, &source_tab.tree },
+            &.{self.tabs.items[target_index].shell_id},
+        )) return false;
         try self.tabs.ensureUnusedCapacity(self.app.core_app.alloc, 1);
         var shell_prepared: ?win32_shell.runtime.Prepared = null;
         if (self.app.shell_runtime_initialized) {
@@ -16610,7 +16845,13 @@ const Host = struct {
     fn redoTabSubtreeTransferEntry(self: *Host, value: *TabSubtreeTransferUndo) !bool {
         if (value.applied or value.source_tab != null) return false;
         const source_index = self.findTabIndexById(value.source_tab_id) orelse return false;
-        _ = self.findTabIndexById(value.target_tab_id) orelse return false;
+        const live_target = self.findTabIndexById(value.target_tab_id) orelse return false;
+        // As for the undo: the combined tree names the panes the two tabs
+        // hold now, all live.
+        if (!self.transferTreesMatchModel(
+            &.{&value.alternate_tree},
+            &.{ self.tabs.items[live_target].shell_id, self.tabs.items[source_index].shell_id },
+        )) return false;
         var shell_prepared: ?win32_shell.runtime.Prepared = null;
         if (self.app.shell_runtime_initialized) {
             shell_prepared = try self.app.shell_runtime.prepare(.{ .set_transfer_applied = .{
@@ -18858,7 +19099,8 @@ const Host = struct {
         const moved = self.tabs.orderedRemove(a);
         self.tabs.insertAssumeCapacity(b, moved);
         self.active_tab = movedIndexAfterReorder(old_active, a, b);
-        if (shell_prepared) |*prepared| prepared.commit(&self.app.shell_runtime) catch |err| {
+        // The history clear above can have committed releases (see `moveTab`).
+        if (shell_prepared) |*prepared| prepared.commitRetryingStale(&self.app.shell_runtime) catch |err| {
             const rollback = self.tabs.orderedRemove(b);
             self.tabs.insertAssumeCapacity(a, rollback);
             self.active_tab = old_active;
@@ -19365,7 +19607,8 @@ const Host = struct {
                 .source_root = source_root,
             } },
         });
-        shell_prepared.commit(&self.app.shell_runtime) catch |err| {
+        // The history clear above can have committed releases (see `moveTab`).
+        shell_prepared.commitRetryingStale(&self.app.shell_runtime) catch |err| {
             var failed = self.structural_undo_entries.pop().?;
             const payload = &failed.payload.tab_subtree_transfer;
             const live_target_index = self.findTabIndexById(target_tab_id) orelse unreachable;
@@ -35502,6 +35745,24 @@ fn splitDirectionFromAction(value: apprt.action.SplitDirection) SplitTreeSurface
     };
 }
 
+fn shellSplitDirection(value: SplitTreeSurface.Split.Direction) win32_shell.model.Direction {
+    return switch (value) {
+        .left => .left,
+        .right => .right,
+        .up => .up,
+        .down => .down,
+    };
+}
+
+fn nativeSplitDirection(value: win32_shell.model.Direction) SplitTreeSurface.Split.Direction {
+    return switch (value) {
+        .left => .left,
+        .right => .right,
+        .up => .up,
+        .down => .down,
+    };
+}
+
 const nextTabInspectorVisible = labels.nextTabInspectorVisible;
 
 const buildHostAwareBaseTitle = labels.buildHostAwareBaseTitle;
@@ -51054,6 +51315,8 @@ test "win32 shell and native projections agree over split, move, close and resto
         .payload = .{ .split_create = .{
             .source_surface = &surface_a,
             .created_surface = &surface_e,
+            .source_pane = surface_a.shell_id,
+            .created_pane = surface_e.shell_id,
             .direction = .right,
         } },
     });
@@ -51075,6 +51338,8 @@ test "win32 shell and native projections agree over split, move, close and resto
         .payload = .{ .split_create = .{
             .source_surface = &surface_f,
             .created_surface = &surface_g,
+            .source_pane = surface_f.shell_id,
+            .created_pane = surface_g.shell_id,
             .direction = .right,
         } },
     });
@@ -51621,9 +51886,12 @@ test "win32 split_create structural undo removes and redoes the split" {
     host.tabs.items[0].tree = next_tree;
     host.tabs.items[0].focused = host.tabs.items[0].findHandle(&surface_b).?;
 
+    const pane_b = surface_b.shell_id.?;
     var split_create: Host.SplitCreateUndo = .{
         .source_surface = &surface_a,
         .created_surface = &surface_b,
+        .source_pane = surface_a.shell_id,
+        .created_pane = surface_b.shell_id,
         .direction = .down,
     };
 
@@ -51640,11 +51908,18 @@ test "win32 split_create structural undo removes and redoes the split" {
     try std.testing.expect(split_create.detached);
     try std.testing.expect(!surface_b.window_visible);
     try std.testing.expect(!surface_b.host_active);
-    try std.testing.expectEqual(@as(?win32_shell.model.PaneId, null), surface_b.shell_id);
+    // The model keeps B's ID for the redo; B commits no focus meanwhile.
+    try std.testing.expectEqual(@as(?win32_shell.model.PaneId, pane_b), surface_b.shell_id);
     try std.testing.expect(!surface_b.shell_committed);
     try std.testing.expectEqual(@as(usize, 1), app.shell_runtime.state.panes.items.len);
+    try std.testing.expectEqualSlices(
+        win32_shell.model.PaneId,
+        &.{pane_b},
+        app.shell_runtime.state.windows.items[0].retained_panes.items,
+    );
     try app.validateShellNativeMapping();
 
+    app.test_before_structural_shell_commit = null;
     try std.testing.expect(try host.redoSplitCreateEntry(&split_create));
     try std.testing.expect(host.tabs.items[0].findHandle(&surface_b) != null);
     try std.testing.expectEqual(
@@ -51653,10 +51928,469 @@ test "win32 split_create structural undo removes and redoes the split" {
     );
     try std.testing.expectEqual(@as(?*Surface, &surface_b), host.tabs.items[0].focusedSurface());
     try std.testing.expect(!split_create.detached);
-    try std.testing.expect(surface_b.shell_id != null);
+    // B is back under the ID it had.
+    try std.testing.expectEqual(@as(?win32_shell.model.PaneId, pane_b), surface_b.shell_id);
+    try std.testing.expect(app.shell_runtime.state.pane(pane_b) != null);
     try std.testing.expect(surface_b.shell_committed);
     try std.testing.expectEqual(@as(usize, 2), app.shell_runtime.state.panes.items.len);
     try app.validateShellNativeMapping();
+}
+
+test "win32 shell and native projections agree through split undo and redo, and a failed native step rolls the model back" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var core_app: CoreApp = undefined;
+    var app: App = undefined;
+    var host: Host = undefined;
+    var surface_a: Surface = undefined;
+    var surface_b: Surface = undefined;
+    var surface_c: Surface = undefined;
+    var surface_d: Surface = undefined;
+    var surface_e: Surface = undefined;
+    var surface_f: Surface = undefined;
+    var surface_g: Surface = undefined;
+    var session: TestSession = .{};
+    try session.init(.{
+        .core_app = &core_app,
+        .app = &app,
+        .hosts = &.{.{ .storage = &host, .register = true }},
+        .surfaces = &.{
+            .{ .storage = &surface_a, .host = &host, .register = true },
+            .{ .storage = &surface_b, .host = &host, .register = true },
+            .{ .storage = &surface_c, .host = &host, .register = true },
+            .{ .storage = &surface_d, .host = &host, .register = true },
+            .{ .storage = &surface_e, .host = &host, .register = true },
+            .{ .storage = &surface_f, .host = &host, .register = true },
+            .{ .storage = &surface_g, .host = &host, .register = true },
+        },
+        .shell_runtime_initialized = true,
+    });
+    defer session.deinit();
+    const Step = ShellProjectionSteps;
+    var window = try Step.openWindow(&app, &host, &.{&surface_a});
+    defer window.deinit();
+    try Step.newTab(&app, &host, 2, &surface_d, null);
+
+    // [(A | B) / C] in front of [D]: C split from A below it, the user
+    // dragged that divider to 0.3, then B split from A, a split that is in
+    // history. The user is in C and zoomed it. Ratios and zoom are native
+    // only: the model has neither.
+    try Step.split(&app, &host.tabs.items[0], &surface_a, .down, &surface_c);
+    host.tabs.items[0].tree.resizeInPlace(.root, 0.3);
+    try Step.split(&app, &host.tabs.items[0], &surface_a, .right, &surface_b);
+    try host.structural_undo_entries.append(std.testing.allocator, .{
+        .kind = .split_create,
+        .timestamp_ms = sys.GetTickCount64(),
+        .payload = .{ .split_create = .{
+            .source_surface = &surface_a,
+            .created_surface = &surface_b,
+            .source_pane = surface_a.shell_id,
+            .created_pane = surface_b.shell_id,
+            .direction = .right,
+        } },
+    });
+    Step.focus(&app, &surface_c);
+    const tab = &host.tabs.items[0];
+    tab.tree.zoom(tab.findHandle(&surface_c).?);
+    try Step.expectEqual(&app, &host, &surface_c);
+    const pane_b = surface_b.shell_id.?;
+
+    // Reserve the stack each step moves its entry to, so that only the
+    // native tree's allocation can fail below.
+    try host.structural_undo_entries.ensureTotalCapacity(std.testing.allocator, 2);
+    try host.structural_redo_entries.ensureTotalCapacity(std.testing.allocator, 2);
+    var no_memory: [0]u8 = .{};
+    var failing = std.heap.FixedBufferAllocator.init(&no_memory);
+    const working_alloc = core_app.alloc;
+
+    // Undo whose native tree cannot be built: the model had already taken
+    // B out, and takes it back, so both still say [(A | B) / C] and the
+    // entry is still the next undo.
+    core_app.alloc = failing.allocator();
+    try std.testing.expectError(error.OutOfMemory, host.applyLatestStructuralUndo());
+    core_app.alloc = working_alloc;
+    try Step.expectEqual(&app, &host, &surface_c);
+    try std.testing.expect(app.shell_runtime.state.pane(pane_b) != null);
+    try std.testing.expectEqual(@as(usize, 1), host.structural_undo_entries.items.len);
+    try std.testing.expect(!host.structural_undo_entries.items[0].payload.split_create.detached);
+
+    // Undo: B leaves, keeping its ID; C keeps focus and its zoom, and the
+    // outer divider stays where the user put it.
+    _ = try host.applyLatestStructuralUndo();
+    try Step.expectEqual(&app, &host, &surface_c);
+    try std.testing.expectEqual(@as(?SplitTreeSurface.Node.Handle, null), tab.findHandle(&surface_b));
+    try std.testing.expectEqual(@as(f16, 0.3), tab.tree.nodes[SplitTreeSurface.Node.Handle.root.idx()].split.ratio);
+    try std.testing.expectEqual(tab.findHandle(&surface_c), tab.tree.zoomed);
+    try std.testing.expect(app.shell_runtime.state.pane(pane_b) == null);
+    try std.testing.expect(app.shell_runtime.state.pane_ids.isCurrent(pane_b));
+
+    // Redo whose native tree cannot be built, with the user moving to A
+    // between its prepare and commit, so the commit is a retry: the
+    // rollback takes back the retried commit and keeps the move to A. B
+    // stays out on both sides and waits in redo history under its ID.
+    const MoveToA = struct {
+        var surface: *Surface = undefined;
+        var native_alloc: Allocator = undefined;
+        fn run(target_app: *App, _: win32_shell.model.PaneId) !void {
+            try std.testing.expect(target_app.noteSurfaceFocused(surface));
+            // From here on only the native tree allocates.
+            target_app.core_app.alloc = native_alloc;
+        }
+    };
+    MoveToA.surface = &surface_a;
+    MoveToA.native_alloc = failing.allocator();
+    app.test_before_structural_shell_commit = &MoveToA.run;
+    try std.testing.expectError(error.OutOfMemory, host.applyLatestStructuralRedo());
+    core_app.alloc = working_alloc;
+    app.test_before_structural_shell_commit = null;
+    try Step.expectEqual(&app, &host, &surface_a);
+    try std.testing.expect(app.shell_runtime.state.pane(pane_b) == null);
+    try std.testing.expectEqualSlices(
+        win32_shell.model.PaneId,
+        &.{pane_b},
+        app.shell_runtime.state.windows.items[0].retained_panes.items,
+    );
+    try std.testing.expectEqual(@as(usize, 1), host.structural_redo_entries.items.len);
+    try std.testing.expect(host.structural_redo_entries.items[0].payload.split_create.detached);
+
+    // Redo: B splits A again under its old ID and takes the focus; a new
+    // split resets the zoom, and the outer divider keeps its place.
+    _ = try host.applyLatestStructuralRedo();
+    try Step.expectEqual(&app, &host, &surface_b);
+    try std.testing.expectEqual(@as(?win32_shell.model.PaneId, pane_b), surface_b.shell_id);
+    try std.testing.expectEqual(@as(f16, 0.3), tab.tree.nodes[SplitTreeSurface.Node.Handle.root.idx()].split.ratio);
+    try std.testing.expectEqual(@as(?SplitTreeSurface.Node.Handle, null), tab.tree.zoomed);
+    try std.testing.expectEqual(@as(usize, 0), app.shell_runtime.state.windows.items[0].retained_panes.items.len);
+
+    // Undo again (the focused B goes, so its sibling A takes the focus),
+    // then drag D's tab to the front. The drag clears the history first,
+    // which releases B's ID in the model; the reorder still commits on top
+    // of that release instead of failing as stale.
+    _ = try host.applyLatestStructuralUndo();
+    try Step.expectEqual(&app, &host, &surface_a);
+    host.swapTabs(1, 0);
+    try std.testing.expectEqual(@as(u32, 2), host.tabs.items[0].id);
+    try Step.expectEqual(&app, &host, &surface_a);
+    try std.testing.expect(!app.shell_runtime.state.pane_ids.isCurrent(pane_b));
+    try std.testing.expectEqual(@as(?win32_shell.model.PaneId, null), surface_b.shell_id);
+
+    // The same with `move_tab`: split A, undo it, move A's tab back first.
+    try Step.split(&app, &host.tabs.items[1], &surface_a, .right, &surface_e);
+    try host.structural_undo_entries.append(std.testing.allocator, .{
+        .kind = .split_create,
+        .timestamp_ms = sys.GetTickCount64(),
+        .payload = .{ .split_create = .{
+            .source_surface = &surface_a,
+            .created_surface = &surface_e,
+            .source_pane = surface_a.shell_id,
+            .created_pane = surface_e.shell_id,
+            .direction = .right,
+        } },
+    });
+    const pane_e = surface_e.shell_id.?;
+    _ = try host.applyLatestStructuralUndo();
+    try std.testing.expect(try app.moveTab(.{ .surface = surface_a.core() }, .{ .amount = -1 }));
+    try std.testing.expectEqual(@as(u32, 1), host.tabs.items[0].id);
+    try Step.expectEqual(&app, &host, &surface_a);
+    try std.testing.expect(!app.shell_runtime.state.pane_ids.isCurrent(pane_e));
+
+    // And with a tab dropped onto a pane: split A, undo it, then drop D's
+    // tab to the right of A, which makes D's tab a split of A's.
+    try Step.split(&app, &host.tabs.items[0], &surface_a, .right, &surface_f);
+    try host.structural_undo_entries.append(std.testing.allocator, .{
+        .kind = .split_create,
+        .timestamp_ms = sys.GetTickCount64(),
+        .payload = .{ .split_create = .{
+            .source_surface = &surface_a,
+            .created_surface = &surface_f,
+            .source_pane = surface_a.shell_id,
+            .created_pane = surface_f.shell_id,
+            .direction = .right,
+        } },
+    });
+    const pane_f = surface_f.shell_id.?;
+    _ = try host.applyLatestStructuralUndo();
+    host.tab_drop_operation = .split_right;
+    host.tab_drop_target_surface = &surface_a;
+    try std.testing.expect(host.commitTabDropSplit(1));
+    try std.testing.expectEqual(@as(usize, 1), host.tabs.items.len);
+    try std.testing.expect(host.tabs.items[0].findHandle(&surface_d) != null);
+    try Step.expectEqual(&app, &host, &surface_d);
+    try std.testing.expect(!app.shell_runtime.state.pane_ids.isCurrent(pane_f));
+
+    // The transfer the drop made, undone and redone: both trees name live
+    // panes, so both steps go through.
+    _ = try host.applyLatestStructuralUndo();
+    try std.testing.expectEqual(@as(usize, 2), host.tabs.items.len);
+    try Step.expectEqual(&app, &host, &surface_d);
+    _ = try host.applyLatestStructuralRedo();
+    try std.testing.expectEqual(@as(usize, 1), host.tabs.items.len);
+    try Step.expectEqual(&app, &host, &surface_d);
+
+    // Undone again, its combined tree is made to name a pane no tab holds,
+    // as one another entry's disposal had freed: the redo refuses to put
+    // it back, and the windows stay as they are.
+    _ = try host.applyLatestStructuralUndo();
+    const transfer = &host.structural_redo_entries.items[host.structural_redo_entries.items.len - 1].payload.tab_subtree_transfer;
+    var stray = try SplitTreeSurface.init(std.testing.allocator, &surface_g);
+    std.mem.swap(SplitTreeSurface, &transfer.alternate_tree, &stray);
+    stray.deinit();
+    try std.testing.expectEqual(@as(?[]const u8, null), try host.applyLatestStructuralRedo());
+    try std.testing.expectEqual(@as(usize, 2), host.tabs.items.len);
+    try std.testing.expectEqual(@as(usize, 0), host.structural_redo_entries.items.len);
+    try Step.expectEqual(&app, &host, &surface_d);
+
+    // Dropped again, then undone with a pre-transfer tree that leaves out C,
+    // which is live: every pane named is live, but the model's combined tab
+    // holds one more, so the undo refuses rather than drop C.
+    Step.focus(&app, &surface_a);
+    host.tab_drop_operation = .split_right;
+    host.tab_drop_target_surface = &surface_a;
+    try std.testing.expect(host.commitTabDropSplit(1));
+    const again = &host.structural_undo_entries.items[host.structural_undo_entries.items.len - 1].payload.tab_subtree_transfer;
+    var short = try SplitTreeSurface.init(std.testing.allocator, &surface_a);
+    std.mem.swap(SplitTreeSurface, &again.alternate_tree, &short);
+    short.deinit();
+    try std.testing.expectEqual(@as(?[]const u8, null), try host.applyLatestStructuralUndo());
+    try std.testing.expectEqual(@as(usize, 1), host.tabs.items.len);
+    try std.testing.expect(host.tabs.items[0].findHandle(&surface_c) != null);
+    try Step.expectEqual(&app, &host, &surface_d);
+    try app.shell_runtime.state.validate();
+}
+
+test "win32 a split undo focuses the pane the shell model picks" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var core_app: CoreApp = undefined;
+    var app: App = undefined;
+    var host: Host = undefined;
+    var surface_a: Surface = undefined;
+    var surface_b: Surface = undefined;
+    var surface_c: Surface = undefined;
+    var session: TestSession = .{};
+    try session.init(.{
+        .core_app = &core_app,
+        .app = &app,
+        .hosts = &.{.{ .storage = &host, .register = true }},
+        .surfaces = &.{
+            .{ .storage = &surface_a, .host = &host, .register = true },
+            .{ .storage = &surface_b, .host = &host, .register = true },
+            .{ .storage = &surface_c, .host = &host, .register = true },
+        },
+        .shell_runtime_initialized = true,
+    });
+    defer session.deinit();
+    const Step = ShellProjectionSteps;
+    var window = try Step.openWindow(&app, &host, &.{&surface_a});
+    defer window.deinit();
+
+    // [C / (A | B)]: C split from A above it, then B from A, in history.
+    // The user is in B when B's split is undone. The model gives the focus
+    // to the first pane of B's sibling, A; the tree's own first pane is C.
+    try Step.split(&app, &host.tabs.items[0], &surface_a, .up, &surface_c);
+    try Step.split(&app, &host.tabs.items[0], &surface_a, .right, &surface_b);
+    try host.structural_undo_entries.append(std.testing.allocator, .{
+        .kind = .split_create,
+        .timestamp_ms = sys.GetTickCount64(),
+        .payload = .{ .split_create = .{
+            .source_surface = &surface_a,
+            .created_surface = &surface_b,
+            .source_pane = surface_a.shell_id,
+            .created_pane = surface_b.shell_id,
+            .direction = .right,
+        } },
+    });
+    try Step.expectEqual(&app, &host, &surface_b);
+    _ = try host.applyLatestStructuralUndo();
+    try Step.expectEqual(&app, &host, &surface_a);
+}
+
+/// [A | (B / C)] with both splits undone, as `ShellProjectionSteps` builds
+/// it: B split from A at `ts_b`, C from B at `ts_c`, and both undone, so redo
+/// history holds C's entry (source B) under B's (source A).
+fn testNestedUndoneSplits(
+    app: *App,
+    host: *Host,
+    view_a: *Surface,
+    view_b: *Surface,
+    view_c: *Surface,
+    ts_b: u64,
+    ts_c: u64,
+) !void {
+    const Step = ShellProjectionSteps;
+    try Step.split(app, &host.tabs.items[0], view_a, .right, view_b);
+    try host.structural_undo_entries.append(std.testing.allocator, .{
+        .kind = .split_create,
+        .timestamp_ms = ts_b,
+        .payload = .{ .split_create = .{
+            .source_surface = view_a,
+            .created_surface = view_b,
+            .source_pane = view_a.shell_id,
+            .created_pane = view_b.shell_id,
+            .direction = .right,
+        } },
+    });
+    try Step.split(app, &host.tabs.items[0], view_b, .down, view_c);
+    try host.structural_undo_entries.append(std.testing.allocator, .{
+        .kind = .split_create,
+        .timestamp_ms = ts_c,
+        .payload = .{ .split_create = .{
+            .source_surface = view_b,
+            .created_surface = view_c,
+            .source_pane = view_b.shell_id,
+            .created_pane = view_c.shell_id,
+            .direction = .down,
+        } },
+    });
+    _ = try host.applyLatestStructuralUndo();
+    _ = try host.applyLatestStructuralUndo();
+    try Step.expectEqual(app, host, view_a);
+    try std.testing.expectEqual(@as(usize, 2), host.structural_redo_entries.items.len);
+}
+
+test "win32 a split redo whose source pane is gone is refused without reading it" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var core_app: CoreApp = undefined;
+    var app: App = undefined;
+    var host: Host = undefined;
+    var surface_a: Surface = undefined;
+    var surface_b: Surface = undefined;
+    var surface_c: Surface = undefined;
+    var session: TestSession = .{};
+    try session.init(.{
+        .core_app = &core_app,
+        .app = &app,
+        .hosts = &.{.{ .storage = &host, .register = true }},
+        .surfaces = &.{
+            .{ .storage = &surface_a, .host = &host, .register = true },
+            .{ .storage = &surface_b, .host = &host, .register = true },
+            .{ .storage = &surface_c, .host = &host, .register = true },
+        },
+        .shell_runtime_initialized = true,
+    });
+    defer session.deinit();
+    var window = try ShellProjectionSteps.openWindow(&app, &host, &.{&surface_a});
+    defer window.deinit();
+    try testNestedUndoneSplits(&app, &host, &surface_a, &surface_b, &surface_c, 100, 200);
+    const pane_b = surface_b.shell_id.?;
+    const pane_c = surface_c.shell_id.?;
+
+    // B's redo is older, so it expires first: its disposal releases B and
+    // frees it (here: poisons it). C's redo, which splits B, is left.
+    try std.testing.expect(host.pruneStructuralHistoryBefore(150));
+    try std.testing.expectEqual(@as(usize, 1), host.structural_redo_entries.items.len);
+    try std.testing.expect(!app.shell_runtime.state.pane_ids.isCurrent(pane_b));
+    const kept_b = surface_b;
+    surface_b = undefined;
+    defer surface_b = kept_b;
+
+    // The redo finds no live B and refuses, reading nothing of it, and its
+    // entry goes, releasing C. Before, it read the freed B (`surface.host`).
+    try std.testing.expectEqual(@as(?[]const u8, null), try host.applyLatestStructuralRedo());
+    try std.testing.expectEqual(@as(usize, 0), host.structural_redo_entries.items.len);
+    try std.testing.expectEqual(@as(usize, 0), host.structural_undo_entries.items.len);
+    try std.testing.expect(!app.shell_runtime.state.pane_ids.isCurrent(pane_c));
+    try ShellProjectionSteps.expectEqual(&app, &host, &surface_a);
+}
+
+test "win32 a split undo whose panes are gone is refused without reading them" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var core_app: CoreApp = undefined;
+    var app: App = undefined;
+    var host: Host = undefined;
+    var surface_a: Surface = undefined;
+    var session: TestSession = .{};
+    try session.init(.{
+        .core_app = &core_app,
+        .app = &app,
+        .hosts = &.{.{ .storage = &host, .register = true }},
+        .surfaces = &.{.{ .storage = &surface_a, .host = &host, .register = true }},
+        .shell_runtime_initialized = true,
+    });
+    defer session.deinit();
+    var window = try ShellProjectionSteps.openWindow(&app, &host, &.{&surface_a});
+    defer window.deinit();
+
+    // An undo entry left naming two panes that are gone (freed memory,
+    // here never initialized), as one a history clear stopped short of, or
+    // whose panes went with a closed tab's disposal, can be.
+    var gone_source: Surface = undefined;
+    var gone_created: Surface = undefined;
+    try host.structural_undo_entries.append(std.testing.allocator, .{
+        .kind = .split_create,
+        .timestamp_ms = sys.GetTickCount64(),
+        .payload = .{ .split_create = .{
+            .source_surface = &gone_source,
+            .created_surface = &gone_created,
+            .source_pane = surface_a.shell_id,
+            .created_pane = surface_a.shell_id,
+            .direction = .right,
+        } },
+    });
+    try std.testing.expectEqual(@as(?[]const u8, null), try host.applyLatestStructuralUndo());
+    try std.testing.expectEqual(@as(usize, 0), host.structural_undo_entries.items.len);
+    try std.testing.expectEqual(@as(usize, 0), host.structural_redo_entries.items.len);
+    try ShellProjectionSteps.expectEqual(&app, &host, &surface_a);
+}
+
+test "win32 a history clear that cannot release a split's model ID still disposes it" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var core_app: CoreApp = undefined;
+    var app: App = undefined;
+    var host: Host = undefined;
+    var surface_a: Surface = undefined;
+    var surface_b: Surface = undefined;
+    var surface_c: Surface = undefined;
+    var session: TestSession = .{};
+    try session.init(.{
+        .core_app = &core_app,
+        .app = &app,
+        .hosts = &.{.{ .storage = &host, .register = true }},
+        .surfaces = &.{
+            .{ .storage = &surface_a, .host = &host, .register = true },
+            .{ .storage = &surface_b, .host = &host, .register = true },
+            .{ .storage = &surface_c, .host = &host, .register = true },
+        },
+        .shell_runtime_initialized = true,
+    });
+    defer session.deinit();
+    var window = try ShellProjectionSteps.openWindow(&app, &host, &.{&surface_a});
+    defer window.deinit();
+    try testNestedUndoneSplits(&app, &host, &surface_a, &surface_b, &surface_c, 100, 200);
+    const pane_b = surface_b.shell_id.?;
+    const pane_c = surface_c.shell_id.?;
+
+    // Count what releasing B in the model allocates, then let exactly that
+    // much succeed: the clear disposes B's redo (the newest) first, and the
+    // model release for C's runs out of memory.
+    const model_alloc = app.shell_runtime.state.allocator;
+    var counting = std.testing.FailingAllocator.init(model_alloc, .{});
+    app.shell_runtime.state.allocator = counting.allocator();
+    var dry = try app.shell_runtime.prepare(.{ .discard_detached_pane = pane_b });
+    dry.deinit();
+    app.shell_runtime.state.allocator = model_alloc;
+    var failing = std.testing.FailingAllocator.init(model_alloc, .{ .fail_index = counting.allocations });
+    app.shell_runtime.state.allocator = failing.allocator();
+    const cleared = host.tryClearStructuralHistory(.normal);
+    app.shell_runtime.state.allocator = model_alloc;
+    try std.testing.expect(failing.has_induced_failure);
+
+    // Both entries went, as on main: the clear did not stop at C's, which
+    // would have kept a redo that splits the B the clear had freed. The
+    // model keeps C's ID, unreachable, until the window goes.
+    try std.testing.expect(cleared);
+    try std.testing.expectEqual(@as(usize, 0), host.structural_redo_entries.items.len);
+    try std.testing.expect(!app.shell_runtime.state.pane_ids.isCurrent(pane_b));
+    try std.testing.expectEqualSlices(
+        win32_shell.model.PaneId,
+        &.{pane_c},
+        app.shell_runtime.state.windows.items[0].retained_panes.items,
+    );
+    try app.shell_runtime.state.validate();
+    try ShellProjectionSteps.expectEqual(&app, &host, &surface_a);
 }
 
 test "win32 runtime can initialize config" {

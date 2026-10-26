@@ -414,6 +414,223 @@ test "win32 shell restore and discard allocation failures preserve retained grap
     try std.testing.expectEqual(@as(usize, 1), state.window(window_id).?.retained_tabs.items.len);
 }
 
+test "win32 shell a split undone and redone keeps the pane's identity" {
+    const allocator = std.testing.allocator;
+    var state = model.ShellState.init(allocator);
+    defer state.deinit();
+
+    var result = try reducer.apply(&state, .create_window);
+    result.deinit(allocator);
+    const window_id = state.windows.items[0].id;
+    const split_tab = state.tabs.items[0].id;
+    const first = state.panes.items[0].id;
+    result = try reducer.apply(&state, .{ .split_pane = .{ .pane = first, .direction = .up } });
+    result.deinit(allocator);
+    const created = state.tab(split_tab).?.focused_pane;
+    // A second tab in front: the undo and redo bring the split's tab back.
+    result = try reducer.apply(&state, .{ .create_tab = .{ .window = window_id } });
+    result.deinit(allocator);
+    const other_tab = state.window(window_id).?.active_tab.?;
+
+    // Undo: the pane leaves the tree but its ID stays current, kept by its
+    // window, and the pane it split from is focused, as for a close.
+    result = try reducer.apply(&state, .{ .detach_pane = created });
+    try expectEffectKinds(&.{ .detach_surface, .focus_surface, .persist_session }, result.effects.items);
+    try std.testing.expect(result.effects.items[0].detach_surface.eql(created));
+    try std.testing.expect(result.effects.items[1].focus_surface.eql(first));
+    result.deinit(allocator);
+    try state.validate();
+    try std.testing.expect(state.pane(created) == null);
+    try std.testing.expect(state.pane_ids.isCurrent(created));
+    try std.testing.expectEqualSlices(model.PaneId, &.{created}, state.window(window_id).?.retained_panes.items);
+    try std.testing.expect(state.window(window_id).?.active_tab.?.eql(split_tab));
+    try std.testing.expectEqual(@as(usize, 1), selectors.paneCount(&state, split_tab));
+    // Kept for redo is not live: nothing can focus or close it.
+    try std.testing.expectError(error.StaleId, reducer.apply(&state, .{ .focus_pane = created }));
+    try std.testing.expectError(error.StaleId, reducer.apply(&state, .{ .close_pane = created }));
+
+    // Redo, from the other tab: the same ID splits the same pane again,
+    // above it, focused, and its tab comes back in front.
+    result = try reducer.apply(&state, .{ .focus_tab = other_tab });
+    result.deinit(allocator);
+    result = try reducer.apply(&state, .{ .restore_pane = .{ .pane = created, .at = first, .direction = .up } });
+    try expectEffectKinds(&.{ .attach_surface, .focus_surface, .persist_session }, result.effects.items);
+    const attach = result.effects.items[0].attach_surface;
+    try std.testing.expect(attach.pane.eql(created));
+    try std.testing.expect(attach.beside.eql(first));
+    try std.testing.expectEqual(model.Direction.up, attach.direction);
+    try std.testing.expect(result.effects.items[1].focus_surface.eql(created));
+    result.deinit(allocator);
+    try state.validate();
+    try std.testing.expect(state.pane(created).?.tab.eql(split_tab));
+    try std.testing.expectEqual(@as(usize, 0), state.window(window_id).?.retained_panes.items.len);
+    try std.testing.expect(state.window(window_id).?.active_tab.?.eql(split_tab));
+    try std.testing.expect(state.tab(split_tab).?.focused_pane.eql(created));
+    const root = state.node(state.tab(split_tab).?.root).?.value.split;
+    try std.testing.expectEqual(model.Axis.vertical, root.axis);
+    try std.testing.expect(state.node(root.first).?.value.pane.eql(created));
+    try std.testing.expect(state.node(root.second).?.value.pane.eql(first));
+
+    // Undo again, and the redo expires: only now is the ID released.
+    result = try reducer.apply(&state, .{ .detach_pane = created });
+    result.deinit(allocator);
+    result = try reducer.apply(&state, .{ .discard_detached_pane = created });
+    try expectEffectKinds(&.{}, result.effects.items);
+    result.deinit(allocator);
+    try state.validate();
+    try std.testing.expect(!state.pane_ids.isCurrent(created));
+    try std.testing.expectEqual(@as(usize, 0), state.window(window_id).?.retained_panes.items.len);
+    try std.testing.expectError(error.StaleId, reducer.apply(&state, .{ .discard_detached_pane = created }));
+    try std.testing.expectError(error.StaleId, reducer.apply(&state, .{ .restore_pane = .{ .pane = created, .at = first, .direction = .up } }));
+}
+
+test "win32 shell retained panes stay with their window" {
+    const allocator = std.testing.allocator;
+    var state = model.ShellState.init(allocator);
+    defer state.deinit();
+
+    var result = try reducer.apply(&state, .create_window);
+    result.deinit(allocator);
+    const kept_window = state.windows.items[0].id;
+    const kept_pane = state.panes.items[0].id;
+    result = try reducer.apply(&state, .create_window);
+    result.deinit(allocator);
+    const closing_window = state.focused_window.?;
+    const closing_tab = state.window(closing_window).?.tabs.items[0];
+    const closing_first = state.tab(closing_tab).?.focused_pane;
+    result = try reducer.apply(&state, .{ .split_pane = .{ .pane = closing_first, .direction = .right } });
+    result.deinit(allocator);
+    const retained = state.tab(closing_tab).?.focused_pane;
+    result = try reducer.apply(&state, .{ .detach_pane = retained });
+    result.deinit(allocator);
+
+    // Another window's pane cannot take it back, and the last pane of a
+    // tab cannot be detached.
+    try std.testing.expectError(error.StaleId, reducer.apply(&state, .{ .restore_pane = .{ .pane = retained, .at = kept_pane, .direction = .right } }));
+    try std.testing.expectError(error.LastPane, reducer.apply(&state, .{ .detach_pane = kept_pane }));
+    try state.validate();
+
+    // Closing the window releases it with everything else the window had.
+    result = try reducer.apply(&state, .{ .close_window = closing_window });
+    result.deinit(allocator);
+    try state.validate();
+    try std.testing.expect(!state.pane_ids.isCurrent(retained));
+    try std.testing.expect(state.window(kept_window) != null);
+}
+
+test "win32 shell detach and restore allocation failures leave the authority unchanged" {
+    const allocator = std.testing.allocator;
+    var state = model.ShellState.init(allocator);
+    defer state.deinit();
+
+    var result = try reducer.apply(&state, .create_window);
+    result.deinit(allocator);
+    const window_id = state.windows.items[0].id;
+    const first = state.panes.items[0].id;
+    result = try reducer.apply(&state, .{ .split_pane = .{ .pane = first, .direction = .down } });
+    result.deinit(allocator);
+    const created = state.tabs.items[0].focused_pane;
+    const original_allocator = state.allocator;
+
+    // Each allocation either step makes is failed in turn: every failure
+    // leaves the authority as it was, and the first index past them all
+    // succeeds.
+    var detach_failures: usize = 0;
+    while (true) : (detach_failures += 1) {
+        var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = detach_failures });
+        state.allocator = failing.allocator();
+        const attempt = reducer.apply(&state, .{ .detach_pane = created });
+        state.allocator = original_allocator;
+        var done = attempt catch |err| {
+            try std.testing.expectEqual(error.OutOfMemory, err);
+            try state.validate();
+            try std.testing.expect(state.pane(created) != null);
+            try std.testing.expectEqual(@as(usize, 0), state.window(window_id).?.retained_panes.items.len);
+            continue;
+        };
+        done.deinit(allocator);
+        break;
+    }
+    try std.testing.expect(detach_failures > 0);
+    try std.testing.expect(state.pane(created) == null);
+
+    var restore_failures: usize = 0;
+    while (true) : (restore_failures += 1) {
+        var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = restore_failures });
+        state.allocator = failing.allocator();
+        const attempt = reducer.apply(&state, .{ .restore_pane = .{ .pane = created, .at = first, .direction = .down } });
+        state.allocator = original_allocator;
+        var done = attempt catch |err| {
+            try std.testing.expectEqual(error.OutOfMemory, err);
+            try state.validate();
+            try std.testing.expect(state.pane(created) == null);
+            try std.testing.expectEqualSlices(model.PaneId, &.{created}, state.window(window_id).?.retained_panes.items);
+            continue;
+        };
+        done.deinit(allocator);
+        break;
+    }
+    try std.testing.expect(restore_failures > 0);
+    try state.validate();
+    try std.testing.expect(state.pane(created) != null);
+}
+
+test "win32 shell a window that goes with its last undo tab releases the panes it kept for redo" {
+    const allocator = std.testing.allocator;
+    var state = model.ShellState.init(allocator);
+    defer state.deinit();
+
+    // One window's only tab, [A | B] with B undone, closed for undo and then
+    // expired.
+    var result = try reducer.apply(&state, .create_window);
+    result.deinit(allocator);
+    const tab_id = state.tabs.items[0].id;
+    const first = state.panes.items[0].id;
+    result = try reducer.apply(&state, .{ .split_pane = .{ .pane = first, .direction = .right } });
+    result.deinit(allocator);
+    const retained = state.tabs.items[0].focused_pane;
+    result = try reducer.apply(&state, .{ .detach_pane = retained });
+    result.deinit(allocator);
+    result = try reducer.apply(&state, .{ .detach_tab = tab_id });
+    result.deinit(allocator);
+    try state.validate();
+    result = try reducer.apply(&state, .{ .discard_detached_tab = tab_id });
+    result.deinit(allocator);
+    try state.validate();
+    try std.testing.expectEqual(@as(usize, 0), state.windows.items.len);
+    try std.testing.expect(!state.pane_ids.isCurrent(retained));
+
+    // A window whose only tab was moved whole into another window's split,
+    // once that move expires.
+    result = try reducer.apply(&state, .create_window);
+    result.deinit(allocator);
+    const moved_tab = state.tabs.items[0].id;
+    const moved_first = state.panes.items[0].id;
+    result = try reducer.apply(&state, .{ .split_pane = .{ .pane = moved_first, .direction = .down } });
+    result.deinit(allocator);
+    const moved_retained = state.tab(moved_tab).?.focused_pane;
+    result = try reducer.apply(&state, .{ .detach_pane = moved_retained });
+    result.deinit(allocator);
+    const moved_root = state.tab(moved_tab).?.root;
+    result = try reducer.apply(&state, .create_window);
+    result.deinit(allocator);
+    const target_window = state.focused_window.?;
+    const target_pane = state.tab(state.window(target_window).?.tabs.items[0]).?.focused_pane;
+    result = try reducer.apply(&state, .{ .transfer_subtree = .{
+        .source_root = moved_root,
+        .target_pane = target_pane,
+        .direction = .right,
+    } });
+    result.deinit(allocator);
+    try state.validate();
+    result = try reducer.apply(&state, .{ .discard_transfer = moved_root });
+    result.deinit(allocator);
+    try state.validate();
+    try std.testing.expectEqual(@as(usize, 1), state.windows.items.len);
+    try std.testing.expect(!state.pane_ids.isCurrent(moved_retained));
+    try std.testing.expect(state.pane(moved_first) != null);
+}
+
 test "win32 shell ordered tab reorder preserves active identity" {
     const allocator = std.testing.allocator;
     var state = model.ShellState.init(allocator);

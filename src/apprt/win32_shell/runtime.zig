@@ -156,18 +156,30 @@ pub const Prepared = struct {
     created: Created,
     intent: intent_mod.Intent,
     expected_revision: u64,
+    /// The authority this transaction replaced, kept from commit to deinit
+    /// so that a native step failing after the commit can put it back
+    /// (`rollback`).
+    previous: ?model.ShellState = null,
+    /// The revision the commit produced: `rollback` applies only while it
+    /// is still the runtime's.
+    committed_revision: u64 = 0,
 
     pub fn deinit(self: *Prepared) void {
         if (self.next) |*next| {
             next.deinit();
             self.next = null;
         }
+        if (self.previous) |*previous| {
+            previous.deinit();
+            self.previous = null;
+        }
         self.reduction.deinit(self.allocator);
         self.reduction = .{};
     }
 
     /// What the committed transaction asks of the platform. Empty until it
-    /// commits, and when a retry found its work already done.
+    /// commits, when a retry found its work already done, and after a
+    /// rollback.
     pub fn effects(self: *const Prepared) []const reducer.Effect {
         if (self.next != null) return &.{};
         return self.reduction.effects.items;
@@ -176,26 +188,61 @@ pub const Prepared = struct {
     pub fn commit(self: *Prepared, runtime: *Runtime) !void {
         if (runtime.revision != self.expected_revision) return error.StaleRevision;
         const next = self.next orelse return;
-        runtime.state.deinit();
+        self.previous = runtime.state;
         runtime.state = next;
         self.next = null;
         runtime.bumpRevision();
+        self.committed_revision = runtime.revision;
+    }
+
+    /// Takes a commit back because the platform could not carry out its
+    /// effects: the authority it replaced returns, allocation-free, and
+    /// the effects are dropped. Only while nothing else has committed on
+    /// top of it (`StaleRevision`); the revision still moves forward, so a
+    /// transaction prepared against the rolled-back state is stale.
+    pub fn rollback(self: *Prepared, runtime: *Runtime) !void {
+        const previous = self.previous orelse return error.NotCommitted;
+        if (runtime.revision != self.committed_revision) return error.StaleRevision;
+        runtime.state.deinit();
+        runtime.state = previous;
+        self.previous = null;
+        runtime.bumpRevision();
+        self.reduction.effects.clearRetainingCapacity();
     }
 
     /// A synchronous DestroyWindow can dispatch focus messages between close
     /// prepare and commit. Rebuild the close candidate from current authority
     /// so the latest focus survives rather than stranding the removed pane.
+    /// A retry that finds its entity already gone (`StaleId`, `LastPane`)
+    /// counts the close as done.
     pub fn commitRetryingInterleavedFocus(self: *Prepared, runtime: *Runtime) !void {
+        return self.commitRetrying(runtime, .done);
+    }
+
+    /// `commitRetryingInterleavedFocus` for a change whose entities must
+    /// still be there: something else committed in between (a focus
+    /// change, or a history clear releasing what the model kept for undo,
+    /// the `discard_detached_*` intents), so the change is rebuilt on top of
+    /// it, and a retry that finds an entity gone fails, for the caller to
+    /// undo its native half.
+    pub fn commitRetryingStale(self: *Prepared, runtime: *Runtime) !void {
+        return self.commitRetrying(runtime, .failed);
+    }
+
+    fn commitRetrying(self: *Prepared, runtime: *Runtime, gone: enum { done, failed }) !void {
         self.commit(runtime) catch |err| switch (err) {
             error.StaleRevision => {
                 var retry = runtime.prepare(self.intent) catch |retry_err| switch (retry_err) {
-                    error.StaleId, error.LastPane => return,
+                    error.StaleId, error.LastPane => if (gone == .done) return else return retry_err,
                     else => return retry_err,
                 };
                 defer retry.deinit();
                 try retry.commit(runtime);
-                // What the retry did is what happened.
+                // What the retry did is what happened, and what a rollback
+                // takes back.
                 std.mem.swap(reducer.Reduction, &self.reduction, &retry.reduction);
+                std.mem.swap(?model.ShellState, &self.previous, &retry.previous);
+                self.committed_revision = retry.committed_revision;
                 if (self.next) |*stale| stale.deinit();
                 self.next = null;
             },
@@ -267,6 +314,52 @@ test "stale prepared commit cannot overwrite newer authority" {
     try first.commit(&runtime);
     try std.testing.expectError(error.StaleRevision, stale.commit(&runtime));
     try std.testing.expectEqual(@as(usize, 1), runtime.state.windows.items.len);
+}
+
+test "a rollback puts back the authority its commit replaced" {
+    const allocator = std.testing.allocator;
+    var runtime = Runtime.init(allocator);
+    defer runtime.deinit();
+
+    var window = try runtime.prepare(.create_window);
+    defer window.deinit();
+    try window.commit(&runtime);
+    const first = window.created.pane.?;
+    var split = try runtime.prepare(.{ .split_pane = .{ .pane = first, .direction = .right } });
+    defer split.deinit();
+    try split.commit(&runtime);
+    const created = split.created.pane.?;
+
+    var detach = try runtime.prepare(.{ .detach_pane = created });
+    defer detach.deinit();
+    try std.testing.expectError(error.NotCommitted, detach.rollback(&runtime));
+    try detach.commit(&runtime);
+    try std.testing.expect(runtime.state.pane(created) == null);
+    try std.testing.expectEqual(@as(usize, 3), detach.effects().len);
+
+    // The platform could not follow: the split is back as it was, with its
+    // focus, and nothing is left for the platform to apply.
+    const revision = runtime.revision;
+    try detach.rollback(&runtime);
+    try runtime.state.validate();
+    try std.testing.expect(runtime.state.pane(created) != null);
+    try std.testing.expectEqual(@as(usize, 0), runtime.state.windows.items[0].retained_panes.items.len);
+    try std.testing.expect(runtime.state.tabs.items[0].focused_pane.eql(created));
+    try std.testing.expectEqual(@as(usize, 0), detach.effects().len);
+    // The revision moves on: what was prepared against the detached state
+    // is stale.
+    try std.testing.expect(runtime.revision != revision);
+    try std.testing.expectError(error.NotCommitted, detach.rollback(&runtime));
+
+    // A commit on top of another one cannot be taken back.
+    var again = try runtime.prepare(.{ .detach_pane = created });
+    defer again.deinit();
+    try again.commit(&runtime);
+    var later = try runtime.prepare(.{ .create_tab = .{ .window = window.created.window.? } });
+    defer later.deinit();
+    try later.commit(&runtime);
+    try std.testing.expectError(error.StaleRevision, again.rollback(&runtime));
+    try std.testing.expect(runtime.state.pane(created) == null);
 }
 
 test "focus pane is allocation free and revisioned" {
