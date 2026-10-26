@@ -117,6 +117,7 @@ const WM_ACTIVATE: UINT = 0x0006;
 const WM_TIMER: UINT = 0x0113;
 const WM_CHANGEUISTATE: UINT = 0x0127;
 const WM_QUERYUISTATE: UINT = 0x0129;
+const WM_SETREDRAW: UINT = 0x000B;
 /// The quiet period before the error of a half-typed field is shown
 /// (`SettingsWindow.armValidationTimer`).
 const validation_timer_id: usize = 1;
@@ -326,8 +327,10 @@ const SIF_POS: u32 = 0x0004;
 const SIF_TRACKPOS: u32 = 0x0010;
 const TME_LEAVE: u32 = 0x00000002;
 const RDW_INVALIDATE: u32 = 0x0001;
+const RDW_ERASE: u32 = 0x0004;
 const RDW_ALLCHILDREN: u32 = 0x0080;
 const RDW_UPDATENOW: u32 = 0x0100;
+const RDW_FRAME: u32 = 0x0400;
 
 /// Sections on the left rail. Section-specific controls (e.g. the
 /// "Open in default editor" button in Advanced) are shown / hidden on
@@ -4051,7 +4054,9 @@ pub const SettingsWindow = struct {
 
     /// Run the search the field holds: find its rows, then show the page with
     /// only those, in one pass the way a page switch does, painted before
-    /// this returns. The page's Reset buttons follow its shown rows.
+    /// this returns. The page's Reset buttons follow its shown rows. The
+    /// viewport draws nothing while its rows are shown, hidden and moved
+    /// (`suspendViewportRedraw`), and is painted once after.
     fn runSearch(self: *SettingsWindow, from_top: bool) void {
         const started = bench_trace.queryPerformanceCounter();
         self.findSearchRows();
@@ -4059,16 +4064,49 @@ pub const SettingsWindow = struct {
         if (from_top) self.content_scroll_y = 0;
         self.refreshNativeSectionText();
         self.syncSearchCounts();
-        self.syncDefaultMarksShowing(false);
-        layoutChildren(self);
-        self.applySectionVisibility();
         self.keepFocusShown();
+        {
+            const suspended = self.suspendViewportRedraw();
+            defer resumeViewportRedraw(suspended);
+            self.syncDefaultMarksShowing(false);
+            layoutChildren(self);
+            self.applySectionVisibility();
+        }
         const found = bench_trace.queryPerformanceCounter();
         if (self.hwnd) |hwnd| _ = RedrawWindow(hwnd, null, null, RDW_UPDATENOW | RDW_ALLCHILDREN);
         const painted = bench_trace.queryPerformanceCounter();
         const frequency = bench_trace.queryPerformanceFrequency();
         self.proof_search_filter_us = elapsedMicroseconds(started, found, frequency);
         self.proof_search_total_us = elapsedMicroseconds(started, painted, frequency);
+    }
+
+    /// Turn the form viewport's drawing off for a pass that shows, hides and
+    /// moves many of its rows. With drawing on, each `ShowWindow` has the
+    /// window manager rework the viewport's children, which at about 200 rows
+    /// (450-600 windows) costs some 0.2 ms a window: a search that showed or
+    /// hid most of a page spent up to 100 ms there. `WM_SETREDRAW` FALSE
+    /// clears the viewport's `WS_VISIBLE` bit without hiding it, so the screen
+    /// keeps its last picture, and until `resumeViewportRedraw` no window in
+    /// the viewport counts as visible: nothing in between may decide anything
+    /// on `IsWindowVisible`. Returns the viewport when its drawing was turned
+    /// off; null when it was not shown (or is already suspended, by an outer
+    /// pass), so that only the call that turned drawing off turns it on.
+    fn suspendViewportRedraw(self: *SettingsWindow) ?HWND {
+        const viewport = self.viewport orelse return null;
+        const style: u32 = @truncate(@as(usize, @bitCast(sys.GetWindowLongPtrW(viewport, GWL_STYLE))));
+        if (style & WS_VISIBLE == 0) return null;
+        _ = sys.SendMessageW(viewport, WM_SETREDRAW, 0, 0);
+        return viewport;
+    }
+
+    /// Drawing back on after `suspendViewportRedraw`, and the whole viewport
+    /// invalidated, its frame (the scroll bar) and children included: a
+    /// window hidden while drawing was off left its pixels behind, and a
+    /// window shown was not invalidated. The caller paints (`RDW_UPDATENOW`).
+    fn resumeViewportRedraw(suspended: ?HWND) void {
+        const viewport = suspended orelse return;
+        _ = sys.SendMessageW(viewport, WM_SETREDRAW, 1, 0);
+        _ = RedrawWindow(viewport, null, null, RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_ALLCHILDREN);
     }
 
     /// How many rows the search found on `section`'s page, or null with no
@@ -4090,13 +4128,25 @@ pub const SettingsWindow = struct {
         }
     }
 
-    /// A row the search just hid cannot keep the focus: it goes to the search
-    /// field, where the search was changed from.
+    /// A focused row the search is about to hide gives the focus to the search
+    /// field first, where the search was changed from. Hidden while focused,
+    /// a field hands the focus to its parent, the viewport, where no key
+    /// reaches it (measured: after a search hid the focused field, `GetFocus()`
+    /// was the viewport). So this runs once the rows to show are known
+    /// (`activeFormRows`) and before any is hidden, and asks those rows rather
+    /// than `IsWindowVisible`, which the viewport's suspended drawing would
+    /// answer false for every row.
     fn keepFocusShown(self: *SettingsWindow) void {
         const focused = GetFocus() orelse return;
         const viewport = self.viewport orelse return;
-        if (IsChild(viewport, focused) == 0 or sys.IsWindowVisible(focused) != 0) return;
-        if (self.edit_search) |search| _ = SetFocus(search);
+        if (IsChild(viewport, focused) == 0) return;
+        const active = self.activeFormRows();
+        const stays = for (0..settings_clipped_control_count) |index| {
+            if (focused == self.controlHwnd(index) or focused == self.reset_buttons[index]) break active.controls[index];
+        } else true;
+        if (!stays) if (self.edit_search) |search| {
+            _ = SetFocus(search);
+        };
     }
 
     /// The search field's text changed: the user typed, pasted or deleted,
@@ -4399,6 +4449,8 @@ pub const SettingsWindow = struct {
             self.findSearchRows();
             self.filterShownPage();
             self.syncSearchCounts();
+            // A row of this page the search no longer finds may hold the focus.
+            if (!focus_follows) self.keepFocusShown();
         }
         // The page's Reset buttons, made hidden before the layout places
         // them; the last page's go.
@@ -4408,8 +4460,6 @@ pub const SettingsWindow = struct {
         self.refreshNativeSectionText();
         layoutChildren(self);
         self.applySectionVisibility();
-        // A row of this page the search no longer finds may hold the focus.
-        if (self.search_query.active() and !focus_follows) self.keepFocusShown();
         if (self.hwnd) |hwnd| _ = RedrawWindow(hwnd, null, null, RDW_UPDATENOW | RDW_ALLCHILDREN);
         if (changed) {
             if (self.sectionProvider(next)) |provider| provider.raiseSelected();
@@ -11286,6 +11336,61 @@ test "settings a search shows only the rows it finds, and the others leave the T
             try std.testing.expect(!settings.handleAccelerator(search, WM_KEYDOWN, VK_ESCAPE, 0));
             try std.testing.expect(settings.search_query.active());
             settings.cancelClosePrompt();
+        }
+    }.body);
+}
+
+test "settings a search pass draws the form again when it is done, and leaves nothing stale" {
+    try dialog_test.onHiddenDesktop(struct {
+        fn body() !void {
+            // Every row differs from its default, so a search shows and hides
+            // Reset buttons as well as rows.
+            const fixture = try dialog_test.Fixture.startChanged(false);
+            defer fixture.finish();
+            const settings = &fixture.settings;
+            const hwnd = fixture.hwnd();
+            const viewport = settings.viewport.?;
+            _ = SetFocus(settings.edit_search.?);
+            dialog_test.flushPaint(hwnd);
+            // Fewer rows, none, others, more, all again.
+            inline for (.{ "padding", "zzzz", "font", "o", "" }) |query| {
+                typeSearch(settings, query);
+                // Drawing is on again: the viewport and the rows it shows are
+                // visible.
+                const style: u32 = @truncate(@as(usize, @bitCast(sys.GetWindowLongPtrW(viewport, GWL_STYLE))));
+                try std.testing.expect(style & WS_VISIBLE != 0);
+                try std.testing.expect(sys.IsWindowVisible(viewport) != 0);
+                for (settings.formItems()) |item| try std.testing.expect(sys.IsWindowVisible(settings.controlHwnd(item.control_index).?) != 0);
+                // What the pass painted before it returned is what a full
+                // repaint paints: no hidden row left its pixels behind, and
+                // no row shown was left unpainted.
+                _ = dialog_test.HideCaret(null);
+                const shown = try dialog_test.Capture.take(hwnd);
+                defer shown.deinit();
+                _ = RedrawWindow(hwnd, null, null, RDW_INVALIDATE | RDW_FRAME | RDW_ALLCHILDREN | RDW_UPDATENOW);
+                const repainted = try dialog_test.Capture.take(hwnd);
+                defer repainted.deinit();
+                const all: RECT = .{ .left = 0, .top = 0, .right = @intCast(shown.width), .bottom = @intCast(shown.height) };
+                try std.testing.expectEqual(@as(usize, 0), shown.countDifferent(repainted, all, 0, 0));
+            }
+            try std.testing.expectEqual(settings.edit_search.?, GetFocus().?);
+            // A search changed while a row has the focus (UIA can set the
+            // field's value from anywhere) leaves it on a row the search still
+            // finds, and moves it to the search field from a row it hides,
+            // field or Reset button: never to the viewport, where Windows puts
+            // the focus of a window it hides.
+            typeSearch(settings, "padding");
+            _ = SetFocus(settings.fields.edit_pad_x.?);
+            typeSearch(settings, "pad");
+            try std.testing.expectEqual(settings.fields.edit_pad_x.?, GetFocus().?);
+            typeSearch(settings, "font");
+            try std.testing.expectEqual(settings.edit_search.?, GetFocus().?);
+            typeSearch(settings, "padding");
+            const reset = settings.reset_buttons[settings.controlIndex(settings.fields.edit_pad_x.?).?].?;
+            try std.testing.expect(sys.IsWindowVisible(reset) != 0);
+            _ = SetFocus(reset);
+            typeSearch(settings, "font");
+            try std.testing.expectEqual(settings.edit_search.?, GetFocus().?);
         }
     }.body);
 }
