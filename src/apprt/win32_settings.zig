@@ -221,6 +221,12 @@ const BTN_CONFLICT_KEEP: usize = 303;
 const BTN_CONFLICT_USE_DISK: usize = 304;
 const BTN_CLOSE_SAVE: usize = 305;
 const BTN_DISCARD_CHANGES: usize = 307;
+/// The id "Discard changes" carries while it is the close prompt's Discard
+/// (`placeDiscardButton`). A click is posted with the id the button has when it
+/// is made (UIA's Invoke posts it), so a second click queued on the action
+/// bar's Discard before the prompt opened still says "the bar" and cannot
+/// confirm the prompt it opened.
+const BTN_CLOSE_DISCARD: usize = 306;
 /// The search field in the header (Ctrl+F).
 const EDIT_SEARCH: usize = 309;
 /// What the search field holds at most, in UTF-16 units.
@@ -1195,6 +1201,8 @@ comptime {
         }
         if (spec.id >= BTN_RESET_FIRST and spec.id < BTN_RESET_FIRST + form_field_count)
             @compileError("Settings control ID collides with a Reset button");
+        if (spec.id == BTN_CLOSE_DISCARD)
+            @compileError("Settings control ID collides with the close prompt's Discard");
     }
 }
 
@@ -5538,6 +5546,7 @@ pub const SettingsWindow = struct {
     /// "Save and close" in the prompt.
     fn placeDiscardButton(self: *SettingsWindow) void {
         const button = self.btn_discard_changes orelse return;
+        _ = sys.SetWindowLongPtrW(button, -12, @intCast(if (self.close_prompt_visible) BTN_CLOSE_DISCARD else BTN_DISCARD_CHANGES)); // GWLP_ID
         const after = (if (self.close_prompt_visible) self.btn_close_save else self.btn_conflict_use_disk) orelse return;
         _ = SetWindowPos(button, after, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
     }
@@ -11340,6 +11349,38 @@ test "settings Enter in the search goes to the first setting found, on another p
     }.body);
 }
 
+test "settings two queued clicks on Discard changes open its prompt and discard nothing" {
+    try dialog_test.onHiddenDesktop(struct {
+        fn body() !void {
+            const fixture = try dialog_test.Fixture.startWith(true);
+            defer fixture.finish();
+            const settings = &fixture.settings;
+            _ = sys.SetWindowTextW(settings.fields.edit_font_size.?, std.unicode.utf8ToUtf16LeStringLiteral("15"));
+            try std.testing.expect(settings.hasPendingChanges());
+            const discard = settings.btn_discard_changes.?;
+            const provider = settings.control_uia_providers[settings.controlIndex(discard).?].?;
+            // Two Invokes before the window handles either: both are posted
+            // with the action bar's id.
+            const com = @import("win32_uia/com.zig");
+            try std.testing.expectEqual(com.S_OK, provider.invoke_iface.vtbl.Invoke(&provider.invoke_iface));
+            try std.testing.expectEqual(com.S_OK, provider.invoke_iface.vtbl.Invoke(&provider.invoke_iface));
+            dialog_test.pump();
+            // The first opened the prompt; the second, from before it opened,
+            // did not confirm it.
+            try std.testing.expect(settings.close_prompt_visible);
+            try std.testing.expect(settings.hasPendingChanges());
+            try std.testing.expectEqual(@as(c_int, @intCast(BTN_CLOSE_DISCARD)), sys.GetDlgCtrlID(discard));
+            // A click once the prompt is up confirms it.
+            try std.testing.expectEqual(com.S_OK, provider.invoke_iface.vtbl.Invoke(&provider.invoke_iface));
+            dialog_test.pump();
+            try std.testing.expect(!settings.close_prompt_visible);
+            try std.testing.expect(!settings.hasPendingChanges());
+            // Back on the bar, it is the bar's again.
+            try std.testing.expectEqual(@as(c_int, @intCast(BTN_DISCARD_CHANGES)), sys.GetDlgCtrlID(discard));
+        }
+    }.body);
+}
+
 test "settings a word past the sixteenth still has to match, and changing it runs the search again" {
     try dialog_test.onHiddenDesktop(struct {
         fn body() !void {
@@ -15563,8 +15604,14 @@ fn wndProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.wina
                 if (owner) |o| o.saveIfAllowed();
                 return 0;
             }
+            // The action bar's Discard asks first; a click of it that arrives
+            // once the prompt is up (queued before it opened) asks nothing more.
             if (clickedButton(id, notify, BTN_DISCARD_CHANGES)) {
-                if (owner) |o| if (o.close_prompt_visible) o.discardAndClose() else o.discardChanges();
+                if (owner) |o| if (!o.close_prompt_visible) o.discardChanges();
+                return 0;
+            }
+            if (clickedButton(id, notify, BTN_CLOSE_DISCARD)) {
+                if (owner) |o| o.discardAndClose();
                 return 0;
             }
             if (clickedButton(id, notify, BTN_CLOSE_SAVE)) {

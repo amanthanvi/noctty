@@ -6388,8 +6388,10 @@ test "PKG-39 a Windows light/dark switch leaves an unsaved Settings preview a dr
                 try std.testing.expect(settings.hasPendingChanges());
             }
 
-            // Discard takes the preview back.
+            // Discard takes the preview back. The action bar's Discard asks
+            // first; the same button, now the prompt's Discard, confirms.
             _ = sys.SendMessageW(settings.btn_discard_changes.?, bm_click, 0, 0);
+            try std.testing.expect(settings.hasPendingChanges());
             _ = sys.SendMessageW(settings.btn_discard_changes.?, bm_click, 0, 0);
             try std.testing.expect(!settings.hasPendingChanges());
             try std.testing.expect(app.settings_preview == null);
