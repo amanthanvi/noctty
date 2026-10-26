@@ -2729,9 +2729,10 @@ pub const SettingsWindow = struct {
         return self.owned_text_changed[@intFromEnum(comptime ownedFieldFor(row.descriptor.key))];
     }
 
-    /// The saved values the draft started from (`original`), if any.
-    fn savedConfig(self: *const SettingsWindow) ?*const Config {
-        return if (self.original) |*config| config else null;
+    /// What the file holds now (`current`, the last config read from it):
+    /// what a reset is measured against.
+    fn fileConfig(self: *const SettingsWindow) ?*const Config {
+        return if (self.current) |*config| config else null;
     }
 
     /// Whether `row` has an edit to save.
@@ -3031,19 +3032,30 @@ pub const SettingsWindow = struct {
         const defaults = if (self.defaults) |*config| config else return;
         const pending = if (self.pending) |*config| config else return;
         if (!self.rowNeedsReset(row)) return self.setResetNote(row, .already_default);
-        resetDraftRow(pending, self.savedConfig(), defaults, row) catch |err| {
+        resetDraftRow(pending, self.fileConfig(), defaults, row) catch |err| {
             std.log.warn("settings: reset failed field={s} err={}", .{ row.native.binding, err });
             return;
         };
+        // A reset is measured against what the file holds now. When the file
+        // changed under an edit (a conflict), its value becomes the baseline
+        // first, as Keep mine does: otherwise a default equal to the old
+        // baseline reads as an edit given up, the field takes the file's
+        // value back, and the note says it has the default.
         if (comptime row.field) |field| {
             // A half-typed number goes with its error: the field shows the default.
             inline for (comptime std.enums.values(RawScalarField)) |raw| {
                 if (comptime raw.setting() == field) if (self.raw_scalar_dirty[@intFromEnum(raw)]) self.finishRawScalarEdit(raw);
             }
+            if (self.hasConflict(field)) self.resolveConflict(field, .keep_mine);
             @field(field_adapters, row.native.binding).display(self);
             self.trackFieldEdit(field);
         } else {
             const owned = comptime ownedFieldFor(row.descriptor.key);
+            if (self.current) |*current| if (self.original) |*original| if (!ownedSettingEql(current, original, owned)) {
+                copyOwnedSetting(original, current, owned) catch |err| {
+                    std.log.warn("settings: reset could not take the file's value field={s} err={}", .{ @tagName(owned), err });
+                };
+            };
             self.owned_text_changed[@intFromEnum(owned)] = false;
             if (self.ownedEdit(owned)) |control| self.clearValidationError(control);
             self.refreshOwnedControl(owned);
@@ -3060,7 +3072,7 @@ pub const SettingsWindow = struct {
         const written = text: {
             writer.writeAll(label) catch break :text false;
             writer.writeAll(if (note == .field_reset) " is back to its default" else " already has its default") catch break :text false;
-            if (self.defaults) |*defaults| writeDefaultSuffix(row, &writer, self.savedConfig(), defaults) catch break :text false;
+            if (self.defaults) |*defaults| writeDefaultSuffix(row, &writer, self.fileConfig(), defaults) catch break :text false;
             writer.writeByte('.') catch break :text false;
             if (note == .field_reset and self.rowDirty(row)) writer.writeAll(" Save to keep it.") catch break :text false;
             break :text true;
@@ -3096,7 +3108,7 @@ pub const SettingsWindow = struct {
                 offered = true;
                 available = self.rowNeedsReset(row);
                 text.writeAll("&Reset to default") catch {};
-                writeDefaultSuffix(row, &text, self.savedConfig(), defaults) catch {};
+                writeDefaultSuffix(row, &text, self.fileConfig(), defaults) catch {};
                 text.writeAll("\t" ++ reset_shortcut_text) catch {};
             }
         };
@@ -12578,6 +12590,49 @@ test "settings a page switch away from a focused Reset button leaves the keyboar
             const rail = settings.sectionButton(.terminal).?;
             try std.testing.expectEqual(rail, GetFocus().?);
             try std.testing.expectEqual(@as(usize, BST_CHECKED), @as(usize, @bitCast(sys.SendMessageW(rail, BM_GETCHECK, 0, 0))));
+        }
+    }.body);
+}
+
+test "settings a reset after the file changed under an edit is the default, to save over the file's value" {
+    try dialog_test.onHiddenDesktop(struct {
+        fn body() !void {
+            const fixture = try dialog_test.Fixture.start();
+            defer fixture.finish();
+            const settings = &fixture.settings;
+            var buf: [256]u8 = undefined;
+            const arena = fixture.config._arena.?.allocator();
+
+            // A font typed over the blank default, then the file sets another:
+            // the edit and the file conflict.
+            const family = settings.fields.edit_font_family.?;
+            typeInto(family, "Consolas");
+            settings.syncOwnedControl(.font_family);
+            fixture.config.@"font-family" = try parseFontFamilyEditText(arena, "Cascadia Mono");
+            settings.externalConfigChanged(&fixture.config, 2);
+            try std.testing.expect(settings.owned_conflict[@intFromEnum(OwnedSettingField.font_family)]);
+            settings.resetRow(settings.controlIndex(family).?);
+            // The field keeps the default it was reset to, which differs from
+            // the file's font, so Save writes it.
+            try std.testing.expect(!editHoldsText(family, " \t,"));
+            try std.testing.expectEqual(@as(usize, 0), settings.pending.?.@"font-family".count());
+            try std.testing.expect(!settings.owned_conflict[@intFromEnum(OwnedSettingField.font_family)]);
+            try std.testing.expect(settings.owned_dirty[@intFromEnum(OwnedSettingField.font_family)]);
+            try std.testing.expect(!ownedSettingEql(&settings.original.?, &settings.pending.?, .font_family));
+            try std.testing.expect(std.mem.endsWith(u8, try statusTextOf(settings, &buf), "back to its default. Save to keep it."));
+
+            // A number typed, then the file sets another: the same.
+            const size = settings.fields.edit_font_size.?;
+            typeInto(size, "16");
+            fixture.config.@"font-size" = 18;
+            settings.externalConfigChanged(&fixture.config, 3);
+            try std.testing.expect(settings.hasConflict(.font_size));
+            settings.resetRow(settings.controlIndex(size).?);
+            try std.testing.expectEqual(@as(f32, 12), settings.pending.?.@"font-size");
+            try std.testing.expectEqual(@as(f32, 18), settings.original.?.@"font-size");
+            try std.testing.expect(!settings.hasConflict(.font_size));
+            try std.testing.expect(settings.transaction.?.entryConst(.font_size).?.dirty);
+            try std.testing.expect(std.mem.endsWith(u8, try statusTextOf(settings, &buf), "back to its default (12 pt). Save to keep it."));
         }
     }.body);
 }

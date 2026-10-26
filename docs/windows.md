@@ -1719,7 +1719,9 @@ writes the default as that key's line (`font-size = 12`); for Default profile
 it removes the line, since its default is no line at all. The comparison is
 with the value in effect, so a field an included file sets is marked too, and
 after a reset and Save the include still wins: Settings then says the saved
-value is overridden, as it does for any edit. Background blur and link
+value is overridden, as it does for any edit. A reset made after the file changed under
+an edit is measured against the file as it is now, so Save writes the
+default over the file's value. Background blur and link
 previews, which Windows does not support, keep whatever the file says and
 offer no reset.
 
