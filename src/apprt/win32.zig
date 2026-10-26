@@ -8971,6 +8971,130 @@ test "win32 settings a reset of each kind of field saves its default and leaves 
     }
 }
 
+test "win32 settings fields found by a search and edited save themselves and leave the rest of the file as it was" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    try runOnHiddenDesktop(struct {
+        fn body() !void {
+            const alloc = std.testing.allocator;
+            var core_app: CoreApp = undefined;
+            var app: App = undefined;
+            var host: Host = undefined;
+            var session: TestSession = .{};
+            try session.init(.{ .core_app = &core_app, .app = &app, .hosts = &.{.{ .storage = &host }} });
+            defer session.deinit();
+            defer testFreeConfigProblems(&app, alloc);
+            const settings_class = comptime std.unicode.utf8ToUtf16LeStringLiteral("noctty.win32.settings");
+            const viewport_class = comptime std.unicode.utf8ToUtf16LeStringLiteral("noctty.win32.settings.viewport");
+            defer {
+                app.settings_window.deinit();
+                _ = sys.UnregisterClassW(settings_class, app.settings_window.handle.hinstance);
+                _ = sys.UnregisterClassW(viewport_class, app.settings_window.handle.hinstance);
+            }
+            const wm_keydown = 0x0100;
+            const vk_return = 0x0D;
+            const bm_click = 0x00F5;
+            const cb_setcursel = 0x014E;
+            const cbn_selchange = 1;
+            const settings = &app.settings_window;
+            try settings.open();
+            const search = settings.edit_search.?;
+
+            // Text Settings does not edit around the lines it does: comments,
+            // CRLF, an optional include, a key it has no row for, and lines
+            // for two of the fields edited below, at the values the window
+            // opened with.
+            const text = "# noctty config\r\nwindow-save-state = never\r\n" ++
+                "config-file = ?missing-include.ghostty\n" ++
+                "scrollback-limit = 10000000\n" ++
+                "\n  # indented comment\nkeybind = ctrl+shift+a=new_tab\n" ++
+                "cursor-style = block\n";
+
+            // Each field is found by a word of its own and reached with Enter,
+            // one of each kind: a number, a dropdown, a checkbox and a text
+            // field whose draft is staged when it is left.
+            const Find = struct {
+                fn go(window: *win32_settings.SettingsWindow, field: *const fn (*win32_settings.SettingsWindow) ?HWND, comptime query: []const u8) !HWND {
+                    const box = window.edit_search.?;
+                    _ = sys.SetFocus(box);
+                    _ = sys.SetWindowTextW(box, std.unicode.utf8ToUtf16LeStringLiteral(query));
+                    try std.testing.expect(window.handleAccelerator(box, wm_keydown, vk_return, 0));
+                    const control = field(window).?;
+                    try std.testing.expectEqual(control, sys.GetFocus().?);
+                    return control;
+                }
+                fn scrollback(window: *win32_settings.SettingsWindow) ?HWND {
+                    return window.fields.edit_scrollback;
+                }
+                fn cursor(window: *win32_settings.SettingsWindow) ?HWND {
+                    return window.fields.combo_cursor_style;
+                }
+                fn trim(window: *win32_settings.SettingsWindow) ?HWND {
+                    return window.fields.chk_trim_trail;
+                }
+                fn fonts(window: *win32_settings.SettingsWindow) ?HWND {
+                    return window.fields.edit_font_family;
+                }
+            };
+            const scrollback = try Find.go(settings, Find.scrollback, "history");
+            _ = sys.SetWindowTextW(scrollback, std.unicode.utf8ToUtf16LeStringLiteral("5000"));
+            const cursor = try Find.go(settings, Find.cursor, "caret");
+            // Bar, where the default is Block.
+            _ = sys.SendMessageW(cursor, cb_setcursel, 0, 0);
+            const cursor_id: usize = @intCast(sys.GetDlgCtrlID(cursor));
+            _ = sys.SendMessageW(settings.hwnd.?, c.WM_COMMAND, cursor_id | (@as(usize, cbn_selchange) << 16), @bitCast(@intFromPtr(cursor)));
+            const trim = try Find.go(settings, Find.trim, "whitespace");
+            _ = sys.SendMessageW(trim, bm_click, 0, 0);
+            const fonts = try Find.go(settings, Find.fonts, "fallbacks");
+            _ = sys.SetWindowTextW(fonts, std.unicode.utf8ToUtf16LeStringLiteral("Consolas"));
+            // Leaving the field stages it.
+            _ = sys.SetFocus(search);
+
+            const original = &settings.original.?;
+            const pending = &settings.pending.?;
+            const edited = settingsUserEditedKeys(original, pending);
+            const keys = [_]SettingsConfigKey{ .@"scrollback-limit", .@"cursor-style", .@"clipboard-trim-trailing-spaces", .@"font-family" };
+            try std.testing.expectEqual(keys.len, edited.count());
+            for (keys) |key| try std.testing.expect(edited.isSet(@intFromEnum(key)));
+
+            const saved = try settingsTestSave(alloc, text, original, pending);
+            defer alloc.free(saved);
+            // Every line that assigns none of those keys is byte-identical,
+            // in order.
+            var before: std.ArrayListUnmanaged([]const u8) = .{};
+            defer before.deinit(alloc);
+            var after: std.ArrayListUnmanaged([]const u8) = .{};
+            defer after.deinit(alloc);
+            for ([_]struct { source: []const u8, lines: *std.ArrayListUnmanaged([]const u8) }{
+                .{ .source = text, .lines = &before },
+                .{ .source = saved, .lines = &after },
+            }) |side| {
+                var start: usize = 0;
+                while (start < side.source.len) {
+                    const end = if (std.mem.indexOfScalarPos(u8, side.source, start, '\n')) |newline| newline + 1 else side.source.len;
+                    const line = side.source[start..end];
+                    const key = settingsAssignmentKey(std.mem.trimRight(u8, line, "\r\n"));
+                    if (key == null or std.mem.indexOfScalar(SettingsConfigKey, &keys, key.?) == null) try side.lines.append(alloc, line);
+                    start = end;
+                }
+            }
+            try std.testing.expectEqual(before.items.len, after.items.len);
+            for (before.items, after.items) |a, b| try std.testing.expectEqualStrings(a, b);
+            // Each key is one line, but the font list, which starts with the
+            // line that clears what a lower layer sets; read back, the file
+            // holds the drafts.
+            for (keys) |key| try std.testing.expectEqual(@as(usize, if (key == .@"font-family") 2 else 1), settingsTestKeyLines(saved, key));
+            try std.testing.expect(std.mem.indexOf(u8, saved, "font-family = \nfont-family = Consolas\n") != null);
+            var reloaded = try configpkg.Config.default(alloc);
+            defer reloaded.deinit();
+            try settingsTestLoadText(&reloaded, saved);
+            inline for (win32_settings.editable_keys) |key| {
+                try std.testing.expect(!pending.changed(&reloaded, key));
+            }
+            try std.testing.expectEqual(@as(usize, 5000), reloaded.@"scrollback-limit");
+        }
+    }.body);
+}
+
 test "win32 settings patch persists optional command edits" {
     const testing = std.testing;
 

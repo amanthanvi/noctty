@@ -122,10 +122,12 @@ pub const DisplayRow = struct {
     section: Section,
     native: NativeNames,
     help: []const u8 = "",
+    /// More words Settings search finds the row by, besides its names.
+    keywords: []const u8 = "",
 };
 pub const display_rows = [_]DisplayRow{
-    .{ .kind = .action, .section = .keybindings, .native = .{ .binding = "btn_keybindings_editor", .id = 302, .order = 0, .form_label = "Keybind configuration", .caption = "Open config for keybinds", .accessible_name = "Keybind configuration" } },
-    .{ .kind = .action, .section = .advanced, .native = .{ .binding = "btn_open_editor", .id = 101, .order = 0, .form_label = "Full config editor", .caption = "Open in default editor", .accessible_name = "Full config editor" } },
+    .{ .kind = .action, .section = .keybindings, .native = .{ .binding = "btn_keybindings_editor", .id = 302, .order = 0, .form_label = "Keybind configuration", .caption = "Open config for keybinds", .accessible_name = "Keybind configuration" }, .keywords = "keybind keybinding key binding shortcut hotkey keyboard" },
+    .{ .kind = .action, .section = .advanced, .native = .{ .binding = "btn_open_editor", .id = 101, .order = 0, .form_label = "Full config editor", .caption = "Open in default editor", .accessible_name = "Full config editor" }, .keywords = "config configuration file text editor edit raw" },
 };
 /// A composite Config key can expose multiple typed scalar controls without
 /// claiming that key twice in the persistence allowlist.

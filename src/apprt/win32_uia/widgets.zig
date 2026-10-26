@@ -1964,6 +1964,11 @@ pub const SettingsSectionProvider = struct {
     detached: std.atomic.Value(bool),
     disconnected: std.atomic.Value(bool),
     marker: std.atomic.Value(u8) = std.atomic.Value(u8).init(@intFromEnum(SettingsSectionMarker.none)),
+    /// How many rows the Settings search found on this section's page, or
+    /// `no_search` while nothing is searched for.
+    search_count: std.atomic.Value(i32) = std.atomic.Value(i32).init(no_search),
+
+    const no_search: i32 = -1;
 
     const simple_vtbl: com.IRawElementProviderSimpleVtbl = .{
         .QueryInterface = QueryInterface,
@@ -2039,6 +2044,28 @@ pub const SettingsSectionProvider = struct {
         if (self.marker.swap(@intFromEnum(marker), .acq_rel) == @intFromEnum(marker)) return;
         if (!self.available()) return;
         events.raiseCurrentStringPropertyChanged(&self.base, constants.UIA_ItemStatusPropertyId);
+    }
+
+    /// Say how many settings the search found on the section's page, or with
+    /// null that nothing is searched for; also part of `ItemStatus`.
+    pub fn setSearchCount(self: *SettingsSectionProvider, count: ?u16) void {
+        const value: i32 = if (count) |found| found else no_search;
+        if (self.search_count.swap(value, .acq_rel) == value) return;
+        if (!self.available()) return;
+        events.raiseCurrentStringPropertyChanged(&self.base, constants.UIA_ItemStatusPropertyId);
+    }
+
+    /// `ItemStatus`: what the section holds, then what the search found on it.
+    pub fn itemStatus(self: *const SettingsSectionProvider, buf: []u8) []const u8 {
+        const marker = self.markerState().itemStatus();
+        const count = self.search_count.load(.acquire);
+        if (count == no_search) return marker;
+        const separator: []const u8 = if (marker.len == 0) "" else ", ";
+        return switch (count) {
+            0 => std.fmt.bufPrint(buf, "{s}{s}no settings found", .{ marker, separator }),
+            1 => std.fmt.bufPrint(buf, "{s}{s}1 setting found", .{ marker, separator }),
+            else => std.fmt.bufPrint(buf, "{s}{s}{d} settings found", .{ marker, separator, count }),
+        } catch marker;
     }
 
     pub fn raiseFocusChanged(self: *SettingsSectionProvider) void {
@@ -2121,7 +2148,8 @@ pub const SettingsSectionProvider = struct {
                 out.* = com.VARIANT.fromBstr(bstr);
             },
             constants.UIA_ItemStatusPropertyId => {
-                const bstr = allocBstrFromUtf8(self.alloc, self.markerState().itemStatus()) orelse return com.E_OUTOFMEMORY;
+                var status_buf: [96]u8 = undefined;
+                const bstr = allocBstrFromUtf8(self.alloc, self.itemStatus(&status_buf)) orelse return com.E_OUTOFMEMORY;
                 out.* = com.VARIANT.fromBstr(bstr);
             },
             constants.UIA_FrameworkIdPropertyId => return object.frameworkId(out),
@@ -9008,6 +9036,38 @@ test "SettingsSectionProvider reports what its section holds as ItemStatus" {
     try expectBstrProperty(&section.base, constants.UIA_NamePropertyId, "Appearance");
     section.setMarker(.none);
     try expectBstrProperty(&section.base, constants.UIA_ItemStatusPropertyId, "");
+}
+
+test "SettingsSectionProvider says how many settings a search found on its page" {
+    const hwnd = try settings_provider_windows.create("BUTTON");
+    defer _ = settings_provider_windows.DestroyWindow(hwnd);
+    const group = try SettingsSectionGroupProvider.create(std.testing.allocator, hwnd);
+    const section = try SettingsSectionProvider.create(std.testing.allocator, hwnd, "Privacy", 0, group);
+    group.setSection(0, section);
+    defer {
+        group.detach();
+        section.detach();
+        _ = SettingsSectionProvider.Release(&section.base);
+        _ = SettingsSectionGroupProvider.Release(&group.base);
+    }
+
+    events.testing_property_changes = 0;
+    section.setSearchCount(3);
+    try std.testing.expectEqual(@as(usize, 1), events.testing_property_changes);
+    // The same count again is not announced.
+    section.setSearchCount(3);
+    try std.testing.expectEqual(@as(usize, 1), events.testing_property_changes);
+    try expectBstrProperty(&section.base, constants.UIA_ItemStatusPropertyId, "3 settings found");
+    section.setSearchCount(1);
+    try expectBstrProperty(&section.base, constants.UIA_ItemStatusPropertyId, "1 setting found");
+    section.setSearchCount(0);
+    try expectBstrProperty(&section.base, constants.UIA_ItemStatusPropertyId, "no settings found");
+    // After what the section holds.
+    section.setMarker(.invalid);
+    try expectBstrProperty(&section.base, constants.UIA_ItemStatusPropertyId, "Has an invalid value, no settings found");
+    // No search: the section's own status alone.
+    section.setSearchCount(null);
+    try expectBstrProperty(&section.base, constants.UIA_ItemStatusPropertyId, "Has an invalid value");
 }
 
 fn testTerminalState(data: *TestTerminalStateData) TerminalState {
