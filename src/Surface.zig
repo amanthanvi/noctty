@@ -341,7 +341,7 @@ test "Surface: ending a search does not wait for room in a full app mailbox" {
     const rt_app = try alloc.create(apprt.runtime.App);
     defer alloc.destroy(rt_app);
     @memset(std.mem.asBytes(rt_app), 0);
-    rt_app.windows = .empty;
+    rt_app.registry.windows = .empty;
     rt_app.ui_thread_id = 0;
 
     const surface = try alloc.create(Surface);
