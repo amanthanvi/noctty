@@ -5,6 +5,7 @@
 const std = @import("std");
 const Config = @import("../config/Config.zig");
 const formatter = @import("../config/formatter.zig");
+const build_config = @import("../build_config.zig");
 
 pub const Section = enum { appearance, terminal, shell, privacy, updates, keybindings, advanced };
 /// When a saved edit reaches its consumer, independently of draft preview.
@@ -213,7 +214,8 @@ pub const Descriptor = struct {
         try formatter.formatEntry(self.Value(), @tagName(self.key), self.read(config), writer);
     }
     /// Defaults come from Config.default for this platform/build, never from
-    /// a second hard-coded set. No native widget or reset behavior is added.
+    /// a second hard-coded set. Settings' per-field reset names the default
+    /// it puts back with this (`FormField.writeDefault`).
     pub fn writeDefault(comptime self: Descriptor, writer: *std.Io.Writer, defaults: *const Config) !void {
         if (self.field) |field| return writeSettingValue(writer, settingValue(defaults, field));
         switch (self.default_display) {
@@ -270,6 +272,19 @@ pub const FormField = struct {
 
     pub fn kind(self: FormField) Kind {
         return if (self.descriptor.kind == .notifications) .boolean else self.descriptor.kind;
+    }
+
+    /// Whether Settings offers to put this row back to its default. A field
+    /// Windows does not support is disabled and keeps what the file says.
+    pub fn resettable(self: FormField) bool {
+        return self.descriptor.support == .available;
+    }
+
+    /// This row's default, as `Descriptor.writeDefault` writes it: one
+    /// checkbox of a projected key writes only its own member.
+    pub fn writeDefault(comptime self: FormField, writer: *std.Io.Writer, defaults: *const Config) !void {
+        if (comptime self.descriptor.projections.len != 0) return writeSettingValue(writer, settingValue(defaults, self.field.?));
+        return self.descriptor.writeDefault(writer, defaults);
     }
 };
 
@@ -389,6 +404,19 @@ pub fn settingValue(config: *const Config, field: SettingField) SettingValue {
     }
     unreachable;
 }
+/// `value` as the running app takes it, for asking whether two values mean
+/// the same: is a field at its default, did a reload override a saved one.
+/// `Config.finalize` gives an unset Auto-update channel this build's channel,
+/// and turns a Window theme of `auto` into `system` for a light/dark theme
+/// pair; `auto` and `system` both follow Windows (`resolveTheme`).
+pub fn effectiveSettingValue(value: SettingValue) SettingValue {
+    return switch (value) {
+        .auto_update_channel => |channel| .{ .auto_update_channel = channel orelse build_config.release_channel },
+        .window_theme => |theme| .{ .window_theme = if (theme == .auto) .system else theme },
+        else => value,
+    };
+}
+
 pub fn setSettingValue(config: *Config, value: SettingValue) void {
     switch (value) {
         inline else => |payload, field| {
@@ -444,7 +472,7 @@ pub fn Combo(comptime field: SettingField) type {
         // detect includes PowerShell and cmd on Windows.
         .shell_integration => &.{
             .{ .value = .none, .label = "Off" },
-            .{ .value = .detect, .label = "Automatic (includes PowerShell and cmd)" },
+            .{ .value = .detect, .label = "Automatic (with PowerShell and cmd)" },
             .{ .value = .bash, .label = "Bash" },
             .{ .value = .elvish, .label = "Elvish" },
             .{ .value = .fish, .label = "Fish" },
@@ -751,6 +779,31 @@ test "settings model has a Default profile selector beside Default command" {
     try std.testing.expect(std.mem.indexOf(u8, names.form_label.?, "Default command wins") != null);
     try std.testing.expect(std.mem.indexOf(u8, spec.help, "A Default command wins over it.") != null);
     try std.testing.expectEqual(forKey(.command).?.native.?.order + 1, names.order);
+}
+
+test "settings model names each form row's default from Config.default" {
+    var defaults = try Config.default(std.testing.allocator);
+    defer defaults.deinit();
+    inline for (form_fields) |row| {
+        var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+        defer out.deinit();
+        try row.writeDefault(&out.writer, &defaults);
+        try std.testing.expect(out.written().len != 0);
+        // A row of a projected key names its own member only.
+        if (comptime row.descriptor.projections.len != 0) try std.testing.expectEqualStrings("On", out.written());
+    }
+    // Every row offers a reset but the two Windows does not support.
+    var kept: usize = 0;
+    inline for (form_fields) |row| if (comptime !row.resettable()) {
+        kept += 1;
+        try std.testing.expect(row.descriptor.key == .@"background-blur" or row.descriptor.key == .@"link-previews");
+    };
+    try std.testing.expectEqual(@as(usize, 2), kept);
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    inline for (form_fields) |row| if (comptime row.field == .font_size) try row.writeDefault(&out.writer, &defaults);
+    var expected: [32]u8 = undefined;
+    try std.testing.expectEqualStrings(try std.fmt.bufPrint(&expected, "{d} pt", .{defaults.@"font-size"}), out.written());
 }
 
 test "settings model notification projections preserve their sibling" {

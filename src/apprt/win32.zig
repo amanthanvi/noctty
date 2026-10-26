@@ -2093,10 +2093,16 @@ fn settingsEditedValueMasked(
     reloaded: *const configpkg.Config,
     comptime key: SettingsConfigKey,
 ) bool {
-    if (key == SettingsConfigKey.@"auto-update-channel") {
-        const expected = pending.@"auto-update-channel" orelse build_config.release_channel;
-        const actual = reloaded.@"auto-update-channel" orelse build_config.release_channel;
-        return expected != actual;
+    // The reload's finalize fills in an unset channel and turns a Window theme
+    // of auto into system for a theme pair: neither overrides what was saved
+    // (a reset to the default saves exactly those).
+    if (comptime key == .@"auto-update-channel" or key == .@"window-theme") {
+        const fields = @import("win32_settings_fields.zig");
+        const field = comptime fields.forKey(key).?.field.?;
+        return !std.meta.eql(
+            fields.effectiveSettingValue(fields.settingValue(pending, field)),
+            fields.effectiveSettingValue(fields.settingValue(reloaded, field)),
+        );
     }
     return settingsDiskValueDiffers(pending, reloaded, key);
 }
@@ -32159,6 +32165,90 @@ test "win32 settings every editable key round trips through a file" {
     }
 }
 
+/// The lines of `text` that do not assign `key`, each with its line ending.
+fn settingsTestOtherLines(alloc: Allocator, text: []const u8, key: SettingsConfigKey) !std.ArrayListUnmanaged([]const u8) {
+    var lines: std.ArrayListUnmanaged([]const u8) = .{};
+    errdefer lines.deinit(alloc);
+    var start: usize = 0;
+    while (start < text.len) {
+        const end = if (std.mem.indexOfScalarPos(u8, text, start, '\n')) |newline| newline + 1 else text.len;
+        const line = text[start..end];
+        if (settingsAssignmentKey(std.mem.trimRight(u8, line, "\r\n")) != key) try lines.append(alloc, line);
+        start = end;
+    }
+    return lines;
+}
+
+fn settingsTestKeyLines(text: []const u8, key: SettingsConfigKey) usize {
+    var count: usize = 0;
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    while (lines.next()) |line| count += @intFromBool(settingsAssignmentKey(std.mem.trimRight(u8, line, "\r")) == key);
+    return count;
+}
+
+test "win32 settings a reset of each kind of field saves its default and leaves the rest of the file as it was" {
+    @setEvalBranchQuota(100_000);
+    const alloc = std.testing.allocator;
+    const field_model = @import("win32_settings_fields.zig");
+    // Every editable key away from its default, among text Settings does not
+    // edit: comments, CRLF, an optional include, a key it has no row for. The
+    // channel is the one this build is not: its own counts as the default,
+    // and a reset of it keeps the saved value (`resetSettingValue`).
+    const source = "# noctty config\r\nwindow-save-state = never\r\n" ++
+        "config-file = ?missing-include.ghostty\n" ++
+        field_model.round_trip_config ++
+        "\n  # indented comment\nkeybind = ctrl+shift+a=new_tab\n";
+    const text = try std.mem.replaceOwned(u8, alloc, source, "auto-update-channel = tip\n", if (build_config.release_channel == .tip)
+        "auto-update-channel = stable\n"
+    else
+        "auto-update-channel = tip\n");
+    defer alloc.free(text);
+    var original = try configpkg.Config.default(alloc);
+    defer original.deinit();
+    try settingsTestLoadText(&original, text);
+    var defaults = try configpkg.Config.default(alloc);
+    defer defaults.deinit();
+    var kinds: std.EnumSet(field_model.Kind) = .initEmpty();
+    inline for (field_model.form_fields) |row| if (comptime row.resettable()) {
+        errdefer std.debug.print("settings reset of {s}\n", .{row.native.binding});
+        kinds.insert(row.descriptor.kind);
+        const key: SettingsConfigKey = row.descriptor.key;
+        var pending = try original.clone(alloc);
+        defer pending.deinit();
+        try win32_settings.resetDraftRow(&pending, &original, &defaults, row);
+        // A reset is an edit of its key alone.
+        const edited = settingsUserEditedKeys(&original, &pending);
+        try std.testing.expectEqual(@as(usize, 1), edited.count());
+        try std.testing.expect(edited.isSet(@intFromEnum(key)));
+
+        const saved = try settingsTestSave(alloc, text, &original, &pending);
+        defer alloc.free(saved);
+        // Every line that does not assign the key is byte-identical, in order.
+        var before = try settingsTestOtherLines(alloc, text, key);
+        defer before.deinit(alloc);
+        var after = try settingsTestOtherLines(alloc, saved, key);
+        defer after.deinit(alloc);
+        try std.testing.expectEqual(before.items.len, after.items.len);
+        for (before.items, after.items) |a, b| try std.testing.expectEqualStrings(a, b);
+        // The key is one line now (the two font lines became one reset), or
+        // none for Default profile, whose default is the absence of the line.
+        try std.testing.expectEqual(@as(usize, if (key == .@"default-profile") 0 else 1), settingsTestKeyLines(saved, key));
+        // Read back, the row has its default and every other row what it had.
+        var reloaded = try configpkg.Config.default(alloc);
+        defer reloaded.deinit();
+        try settingsTestLoadText(&reloaded, saved);
+        inline for (win32_settings.editable_keys) |other| {
+            try std.testing.expect(!pending.changed(&reloaded, other));
+        }
+        try std.testing.expect(!defaults.changed(&reloaded, row.descriptor.key) or row.descriptor.kind == .notifications);
+    };
+    // Every kind of field was reset but background blur, the only field of
+    // its kind, which Windows does not support.
+    inline for (comptime std.enums.values(field_model.Kind)) |kind| {
+        try std.testing.expectEqual(kind != .blur, kinds.contains(kind));
+    }
+}
+
 test "win32 settings patch persists a palette theme selection" {
     const testing = std.testing;
     const ConfigKey = @import("../config/key.zig").Key;
@@ -32398,6 +32488,24 @@ test "win32 settings patch persists optional update channel edits" {
         &reloaded,
         SettingsConfigKey.@"auto-update-channel",
     ));
+}
+
+test "win32 settings a saved Match Windows theme the reload makes system is not overridden" {
+    const testing = std.testing;
+    var pending = try configpkg.Config.default(testing.allocator);
+    defer pending.deinit();
+    var reloaded = try configpkg.Config.default(testing.allocator);
+    defer reloaded.deinit();
+    // A reset of Window theme saves `auto`; with a light/dark theme pair the
+    // reload's finalize makes it `system`, which follows Windows the same way.
+    pending.@"window-theme" = .auto;
+    reloaded.@"window-theme" = .system;
+    try testing.expect(!settingsEditedValueMasked(&pending, &reloaded, .@"window-theme"));
+    reloaded.@"window-theme" = .dark;
+    try testing.expect(settingsEditedValueMasked(&pending, &reloaded, .@"window-theme"));
+    pending.@"window-theme" = .light;
+    reloaded.@"window-theme" = .light;
+    try testing.expect(!settingsEditedValueMasked(&pending, &reloaded, .@"window-theme"));
 }
 
 test "win32 settings patch persists optional auto update edits" {

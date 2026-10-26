@@ -79,6 +79,7 @@ const DT_CENTER: u32 = 0x0001;
 const NULL_PEN: i32 = 8;
 const GWLP_USERDATA: i32 = -21;
 const GWLP_WNDPROC: i32 = -4;
+const GWLP_ID: i32 = -12;
 const GWL_STYLE: i32 = -16;
 const CS_HREDRAW: u32 = 0x2;
 const CS_VREDRAW: u32 = 0x1;
@@ -123,6 +124,7 @@ const ICON_SMALL: usize = 0;
 const ICON_BIG: usize = 1;
 const VK_RETURN: usize = 0x0D;
 const VK_ESCAPE: usize = 0x1B;
+const VK_DELETE: usize = 0x2E;
 const BM_CLICK: UINT = 0x00F5;
 const DLGC_DEFPUSHBUTTON: LRESULT = 0x0010;
 const DLGC_UNDEFPUSHBUTTON: LRESULT = 0x0020;
@@ -135,6 +137,11 @@ const CB_SHOWDROPDOWN: UINT = 0x014F;
 const VK_CONTROL: i32 = 0x11;
 const VK_MENU: i32 = 0x12;
 const VK_SHIFT: i32 = 0x10;
+const WM_CONTEXTMENU: UINT = 0x007B;
+const MF_STRING: UINT = 0x0000;
+const MF_GRAYED: UINT = 0x0001;
+const TPM_RIGHTBUTTON: UINT = 0x0002;
+const TPM_RETURNCMD: UINT = 0x0100;
 const WM_MENUCHAR: UINT = 0x0120;
 /// `WM_MENUCHAR` reply: close the active menu without a beep.
 const MNC_CLOSE: u32 = 1;
@@ -181,6 +188,11 @@ const BS_PUSHBUTTON: u32 = 0x0;
 const BS_AUTORADIOBUTTON: u32 = 0x9;
 const BS_PUSHLIKE: u32 = 0x1000;
 const BS_OWNERDRAW: u32 = 0xB;
+/// Sends BN_SETFOCUS, which scrolls a focused Reset button into view.
+const BS_NOTIFY: u32 = 0x4000;
+const BS_DEFPUSHBUTTON: u32 = 0x1;
+const BS_TYPEMASK: u32 = 0xF;
+const BM_SETSTYLE: UINT = 0x00F4;
 const SS_LEFT: u32 = 0x0000;
 const SS_NOPREFIX: u32 = 0x0080;
 const BTN_OPEN_EDITOR: usize = displayFieldId("btn_open_editor");
@@ -203,6 +215,14 @@ const BTN_DISCARD_CHANGES: usize = 307;
 // close prompt's "Keep editing" button owns that ID.
 const IDCANCEL: usize = 2;
 const BTN_CLOSE_KEEP_EDITING: usize = IDCANCEL;
+/// The Reset button of form row `i` (`field_model.form_fields[i]`, which is
+/// also control `i`) has this id plus `i`.
+const BTN_RESET_FIRST: usize = 600;
+const form_field_count = field_model.form_fields.len;
+/// Puts the focused field back to its default. `handleAccelerator` takes the
+/// chord before the dialog manager, so a text field never sees it (Delete,
+/// Shift+Delete and Ctrl+Delete all edit text there).
+const reset_shortcut_text = "Ctrl+Shift+Delete";
 fn nativeFieldId(comptime binding: []const u8) usize {
     for (field_model.form_fields) |row| if (std.mem.eql(u8, row.native.binding, binding)) return row.native.id;
     @compileError("Missing Settings native control: " ++ binding);
@@ -247,6 +267,7 @@ const CBS_HASSTRINGS: u32 = 0x200;
 const OBJID_CLIENT: u32 = @bitCast(@as(i32, -4));
 const CHILDID_SELF: u32 = 0;
 const PROPID_ACC_NAME = GUID.parse("{608D3DF8-8128-4AA7-A428-F55E49267291}");
+const PROPID_ACC_DESCRIPTION = GUID.parse("{4D48DFE4-BD3F-491F-A648-492D6F20C588}");
 const CLSID_ACC_PROP_SERVICES = GUID.parse("{B5F8350B-0548-48B1-A6EE-88BD00B4A5E7}");
 const IID_IACC_PROP_SERVICES = GUID.parse("{6E26E776-04F0-495D-80E4-3330352E3169}");
 const CLSCTX_INPROC_SERVER: u32 = 0x1;
@@ -686,6 +707,10 @@ const StatusNote = enum {
     previews_live,
     /// An edit that only takes effect once it is saved.
     applies_on_save,
+    /// A field was put back to its default. Names it (`resetNoteText`).
+    field_reset,
+    /// A reset was asked of a field that already has its default. Names it.
+    already_default,
 
     fn text(self: StatusNote) []const u8 {
         return switch (self) {
@@ -707,6 +732,8 @@ const StatusNote = enum {
             .disk_value_not_adopted => "Could not take the value from disk; your edit is kept.",
             .previews_live => "Previewing now. Save to keep it.",
             .applies_on_save => "Applies when you save.",
+            .field_reset => "The setting is back to its default. Save to keep it.",
+            .already_default => "The setting already has its default.",
         };
     }
 
@@ -715,6 +742,7 @@ const StatusNote = enum {
     fn takesDetail(self: StatusNote) bool {
         return switch (self) {
             .file_unopenable, .write_incomplete, .unsupported_encoding, .binary_config, .saved_overridden => true,
+            .field_reset, .already_default => true,
             else => false,
         };
     }
@@ -1122,6 +1150,8 @@ comptime {
         for (.{ BTN_SECTION_APPEARANCE, BTN_SECTION_TERMINAL, BTN_SECTION_SHELL, BTN_SECTION_KEYBINDINGS, BTN_SECTION_ADVANCED, BTN_SECTION_PRIVACY, BTN_SECTION_UPDATES }) |id| {
             if (spec.id == id) @compileError("Settings form ID collides with section navigation");
         }
+        if (spec.id >= BTN_RESET_FIRST and spec.id < BTN_RESET_FIRST + form_field_count)
+            @compileError("Settings control ID collides with a Reset button");
     }
 }
 
@@ -1158,6 +1188,23 @@ const checkbox_captions = captions: {
     };
     break :captions result;
 };
+/// What a row's Reset button is called. Its caption is "Reset"; its name adds
+/// the field's own, so the buttons of one page read apart while the visible
+/// word still starts it (voice control matches "Reset").
+const reset_button_names = names: {
+    var result: [form_field_count][]const u8 = undefined;
+    for (field_model.form_fields, 0..) |row, i| result[i] = "Reset " ++ row.native.accessible_name;
+    break :names result;
+};
+const reset_button_help = help: {
+    var result: [form_field_count][]const u8 = undefined;
+    for (field_model.form_fields, 0..) |row, i|
+        result[i] = "Puts " ++ row.native.accessible_name ++ " back to its default. " ++ reset_shortcut_text ++ " in the field does the same.";
+    break :help result;
+};
+/// The command of a row's context menu that resets it.
+const row_menu_reset: usize = 1;
+
 /// Indices of the text providers: the header texts, then the field labels.
 const text_header_index = 0;
 const text_summary_index = 1;
@@ -1929,6 +1976,36 @@ pub const SettingsWindow = struct {
     /// separators have to be painted over.
     background_geometry: ?BackgroundGeometry = null,
 
+    /// Every editable row's value when nothing sets it: `Config.default` for
+    /// this build, made when the window opens. Null when it could not be made,
+    /// which leaves the rows unmarked and offers no reset.
+    defaults: ?Config = null,
+    /// Which form rows' draft differs from `defaults`, as the marker, the
+    /// Reset button and UIA last said it (`syncDefaultMarks`).
+    differs_from_default: [form_field_count]bool = @splat(false),
+    /// A row's Reset button: the shown page's rows that differ from their
+    /// default have one, hidden while the row does not differ. Another page's
+    /// rows give theirs up to `reset_spares` (`syncDefaultMarks`).
+    reset_buttons: [form_field_count]?HWND = @splat(null),
+    /// Reset buttons no row of the shown page holds: hidden, for the next
+    /// page's rows to take before any is made. A page switch then makes and
+    /// destroys none (about 0.6 ms to make and 0.3 ms to destroy each,
+    /// measured, so ten on Appearance took about 9 ms a round trip), and the
+    /// window holds no more buttons than the most one page has needed (ten,
+    /// on Appearance). Where a spare sits in z-order does not matter: Tab and
+    /// the arrow keys pass over a hidden window, and a Reset button has no
+    /// `WS_GROUP` to end a group with.
+    reset_spares: [form_field_count]HWND = undefined,
+    reset_spare_count: usize = 0,
+    reset_uia_providers: [form_field_count]?*win32_uia.SettingsControlProvider = @splat(null),
+    reset_uia_prev_proc: ?*const anyopaque = null,
+    /// Where each row's marker is drawn in the viewport now, or null: a
+    /// change repaints exactly where a marker was and where it goes.
+    marker_rects: [form_field_count]?RECT = @splat(null),
+    /// For tests: answers a row's context menu (the command chosen, 0 for
+    /// none) instead of the menu loop, which a test cannot drive.
+    context_menu_pick: ?*const fn (menu: win32_types.HMENU) usize = null,
+
     /// Frozen snapshot of the config at the moment the window last
     /// opened. Independently owned via `Config.clone` so an
     /// external `reload_config` that fires while the window is open
@@ -2064,10 +2141,12 @@ pub const SettingsWindow = struct {
     ///   * Enter presses the focused push button.
     ///   * An auto-repeated Escape is swallowed, so holding the key does not
     ///     toggle the close prompt open and shut.
+    ///   * Ctrl+Shift+Delete puts the focused field (or the field of the
+    ///     focused Reset button) back to its default.
     pub fn handleAccelerator(self: *SettingsWindow, target: ?HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) bool {
         // Cheapest test first: this runs for every message while Settings is open.
         if (msg != WM_KEYDOWN) return false;
-        if (wParam != 'S' and wParam != VK_RETURN and wParam != VK_ESCAPE) return false;
+        if (wParam != 'S' and wParam != VK_RETURN and wParam != VK_ESCAPE and wParam != VK_DELETE) return false;
         const hwnd = self.hwnd orelse return false;
         const control = target orelse return false;
         if (control != hwnd and IsChild(hwnd, control) == 0) return false;
@@ -2084,6 +2163,13 @@ pub const SettingsWindow = struct {
                 return true;
             },
             VK_RETURN => return self.pressFocusedButton(repeat),
+            VK_DELETE => {
+                if (!win32_input.keyPressed(VK_CONTROL) or !win32_input.keyPressed(VK_SHIFT) or
+                    win32_input.keyPressed(VK_MENU)) return false;
+                const row = self.rowOfWindow(control) orelse return false;
+                if (!repeat) self.resetRow(row);
+                return true;
+            },
             else => return repeat,
         }
     }
@@ -2108,6 +2194,8 @@ pub const SettingsWindow = struct {
         self.releaseSectionUiaProviders();
         self.releaseTextUiaProviders();
         self.releaseControlUiaProviders();
+        self.releaseResetUiaProviders();
+        self.forgetDefaults();
         self.hwnd = null;
         self.forgetFormWindows();
         self.deleteUiFont();
@@ -2348,8 +2436,9 @@ pub const SettingsWindow = struct {
         switch (self.status_note) {
             // A save's result stays up whatever the draft looks like now.
             .saved, .discarded, .editor_open_failed => return self.status_note.text(),
-            .saved_overridden => return self.noteText(),
+            .saved_overridden, .already_default => return self.noteText(),
             // These are about edits that are still there to be saved.
+            .field_reset,
             .save_failed,
             .unsupported_encoding,
             .binary_config,
@@ -2600,6 +2689,435 @@ pub const SettingsWindow = struct {
             const control = self.controlHwnd(index) orelse continue;
             provider.setDataInvalid(self.fieldIsInvalid(control));
         }
+        self.syncDefaultMarks();
+    }
+
+    /// Whether `row`'s draft differs from its default, as the app takes both
+    /// (`effectiveSettingValue`: the copies are of a finalized config, the
+    /// defaults are not). A row that cannot be reset (Windows does not support
+    /// it) is never marked.
+    fn rowDiffersFromDefault(self: *const SettingsWindow, comptime row: field_model.FormField) bool {
+        if (comptime !row.resettable()) return false;
+        const pending = if (self.pending) |*config| config else return false;
+        const defaults = if (self.defaults) |*config| config else return false;
+        if (comptime row.field) |field| return !settingValueEql(
+            field_model.effectiveSettingValue(settingValue(pending, field)),
+            field_model.effectiveSettingValue(settingValue(defaults, field)),
+        );
+        const owned = comptime ownedFieldFor(row.descriptor.key);
+        // Typed text reaches the draft when the field loses focus. Until then
+        // the field says what it holds: a blank default is differed from by
+        // any text.
+        if (self.owned_text_changed[@intFromEnum(owned)] and ownedSettingBlank(defaults, owned)) {
+            if (self.ownedEdit(owned)) |edit| return editHoldsText(edit, if (owned == .font_family) " \t," else " \t");
+        }
+        return !ownedSettingEql(pending, defaults, owned);
+    }
+
+    /// Whether a reset of `row` would change what it shows: its draft
+    /// differs from the default, or it holds text not staged yet (a number
+    /// half typed, a font list being typed) that a reset throws away.
+    fn rowNeedsReset(self: *const SettingsWindow, comptime row: field_model.FormField) bool {
+        if (comptime !row.resettable()) return false;
+        if (self.rowDiffersFromDefault(row)) return true;
+        if (comptime row.field) |field| {
+            inline for (comptime std.enums.values(RawScalarField)) |raw| {
+                if (comptime raw.setting() == field) return self.raw_scalar_dirty[@intFromEnum(raw)];
+            }
+            return false;
+        }
+        return self.owned_text_changed[@intFromEnum(comptime ownedFieldFor(row.descriptor.key))];
+    }
+
+    /// The saved values the draft started from (`original`), if any.
+    fn savedConfig(self: *const SettingsWindow) ?*const Config {
+        return if (self.original) |*config| config else null;
+    }
+
+    /// Whether `row` has an edit to save.
+    fn rowDirty(self: *const SettingsWindow, comptime row: field_model.FormField) bool {
+        if (comptime row.field) |field| {
+            const transaction = if (self.transaction) |*value| value else return false;
+            return (transaction.entryConst(field) orelse return false).dirty;
+        }
+        return self.owned_dirty[@intFromEnum(comptime ownedFieldFor(row.descriptor.key))];
+    }
+
+    /// Bring every row's "differs from its default" cue up to date: the bar
+    /// beside it, its Reset button and the field's UIA `ItemStatus`. Cheap and
+    /// idempotent, and run with every change of state, like `syncMarkers`.
+    fn syncDefaultMarks(self: *SettingsWindow) void {
+        self.syncDefaultMarksShowing(true);
+    }
+
+    /// `syncDefaultMarks`. With `show_new` false (a page switch) the shown
+    /// page's buttons are left hidden for `applySectionVisibility` to show
+    /// once the layout has placed them.
+    fn syncDefaultMarksShowing(self: *SettingsWindow, show_new: bool) void {
+        // Between two drafts (a save starting over) nothing is compared, so a
+        // focused Reset button is not hidden and shown again.
+        if (self.pending == null or self.viewport == null) return;
+        const active = self.activeFormRows();
+        // Made once, when first needed, for what this pass annotates for
+        // MSAA: the fields whose state changed and the buttons it hands out.
+        var annotations: Annotations = .{};
+        defer annotations.deinit();
+        inline for (field_model.form_fields, 0..) |row, index| {
+            const control = @field(self.fields, row.native.binding);
+            const differs = control != null and self.rowDiffersFromDefault(row);
+            if (differs != self.differs_from_default[index]) {
+                self.differs_from_default[index] = differs;
+                if (self.control_uia_providers[index]) |provider| provider.setChangedFromDefault(differs);
+                if (annotations.service()) |service| if (control) |field| setChangedDescription(service, field, differs);
+            }
+            // Only the shown page's rows hold Reset buttons, so the window
+            // has at most one page's worth (ten, on Appearance) however many
+            // fields differ in all. Rows give theirs up before rows take one.
+            if (!active.controls[index]) self.releaseResetButton(index);
+        }
+        // Every row first takes back the spare it last held, which keeps its
+        // id and MSAA name; then the others share what is left.
+        for ([_]bool{ true, false }) |own_only| for (0..form_field_count) |index| {
+            if (active.controls[index] and self.differs_from_default[index] and self.reset_buttons[index] == null)
+                self.takeResetButton(index, own_only, &annotations);
+        };
+        for (0..form_field_count) |index| if (active.controls[index]) if (self.reset_buttons[index]) |button| {
+            const differs = self.differs_from_default[index];
+            if (show_new or !differs) self.showResetButton(index, button, differs);
+        };
+        self.syncMarkerRects();
+    }
+
+    /// One `IAccPropServices`, made the first time a pass asks for it and
+    /// never asked for again if that fails.
+    const Annotations = struct {
+        made: ?*IAccPropServices = null,
+        tried: bool = false,
+
+        fn service(self: *Annotations) ?*IAccPropServices {
+            if (!self.tried) {
+                self.tried = true;
+                self.made = createAccPropServices();
+            }
+            return self.made;
+        }
+
+        fn deinit(self: *Annotations) void {
+            if (self.made) |made| made.release();
+        }
+    };
+
+    /// Row `index` gives its Reset button up with its page: hidden and kept
+    /// for another row (`reset_spares`). Focus on it (a page switch from the keyboard never
+    /// leaves it there) goes to the shown page's rail button, checked first:
+    /// an unchecked auto radio button that takes the focus clicks itself
+    /// (inferred), which would start the page switch again from inside
+    /// this one.
+    fn releaseResetButton(self: *SettingsWindow, index: usize) void {
+        const button = self.reset_buttons[index] orelse return;
+        self.reset_buttons[index] = null;
+        if (self.reset_uia_providers[index]) |provider| {
+            self.reset_uia_providers[index] = null;
+            provider.detach();
+            self.deferProviderDisconnect(@ptrCast(provider), settingsControlDisconnect, settingsControlRelease);
+        }
+        if (GetFocus() == button) if (self.sectionButton(self.active_section)) |rail| {
+            if (@as(usize, @bitCast(sys.SendMessageW(rail, BM_GETCHECK, 0, 0))) != BST_CHECKED) _ = sys.SendMessageW(rail, BM_SETCHECK, BST_CHECKED, 0);
+            _ = SetFocus(rail);
+        };
+        // The button may serve another row next: focus to go back to (after
+        // the close prompt, or when the window is active again) must not
+        // find it there, nor may it keep the default border the dialog
+        // manager gave it while it had focus.
+        if (self.close_prior_focus == button) self.close_prior_focus = null;
+        if (self.focus_before_deactivate == button) self.focus_before_deactivate = null;
+        const style: u32 = @truncate(@as(usize, @bitCast(sys.GetWindowLongPtrW(button, GWL_STYLE))));
+        if (style & BS_TYPEMASK == BS_DEFPUSHBUTTON) _ = sys.SendMessageW(button, BM_SETSTYLE, BS_PUSHBUTTON, 0);
+        setChildShown(button, false);
+        self.reset_spares[self.reset_spare_count] = button;
+        self.reset_spare_count += 1;
+    }
+
+    /// Give row `index` a Reset button, hidden: the spare that last served
+    /// it, which keeps its id and MSAA name (all `own_only` takes), another
+    /// row's spare, renamed, or a new one. It goes right after the control in
+    /// z-order, which is the order Tab and the arrows take, and beside it at
+    /// the right end of the row (`settingsFormItemRects` keeps the room). Its
+    /// id says which row it resets.
+    fn takeResetButton(self: *SettingsWindow, index: usize, own_only: bool, annotations: *Annotations) void {
+        const viewport = self.viewport orelse return;
+        const control = self.controlHwnd(index) orelse return;
+        const id: LONG_PTR = @intCast(BTN_RESET_FIRST + index);
+        const spares = self.reset_spares[0..self.reset_spare_count];
+        const own: ?usize = for (spares, 0..) |spare, i| {
+            if (sys.GetWindowLongPtrW(spare, GWLP_ID) == id) break i;
+        } else null;
+        if (own_only and own == null) return;
+        // MSAA clients (NVDA reads a Win32 button there) hear which field it
+        // resets; a spare that could not be renamed would say another's.
+        const names = if (own == null) annotations.service() else null;
+        const button = if (own) |i|
+            self.takeSpare(i)
+        else if (spares.len > 0 and names != null) renamed: {
+            const spare = self.takeSpare(spares.len - 1);
+            _ = sys.SetWindowLongPtrW(spare, GWLP_ID, id);
+            setAccessibleNameText(names.?, spare, reset_button_names[index]);
+            break :renamed spare;
+        } else made: {
+            const made = self.finishChild(
+                makePushButton(viewport, self.handle.hinstance, std.unicode.utf8ToUtf16LeStringLiteral("Reset"), BTN_RESET_FIRST + index, settings_reset_width, BS_NOTIFY),
+                self.ui_font,
+                .control,
+            ) orelse return;
+            if (names) |service| setAccessibleNameText(service, made, reset_button_names[index]);
+            break :made made;
+        };
+        _ = if (childRectIn(viewport, control)) |rect|
+            SetWindowPos(button, control, rect.right + self.px(settings_reset_gap), rect.top, self.px(settings_reset_width), self.px(settings_control_height), SWP_NOACTIVATE)
+        else
+            SetWindowPos(button, control, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        self.reset_buttons[index] = button;
+        if (self.canInitializeCustomUiaProviders()) self.attachResetUiaProvider(index);
+    }
+
+    fn takeSpare(self: *SettingsWindow, i: usize) HWND {
+        const spare = self.reset_spares[i];
+        self.reset_spare_count -= 1;
+        self.reset_spares[i] = self.reset_spares[self.reset_spare_count];
+        return spare;
+    }
+
+    /// A click on row `index`'s Reset button, from the button the row holds
+    /// and shows. A spare keeps the id of the row it last served, so a click
+    /// that reaches it late (an MSAA client's default action on a button it
+    /// found before the page changed) is not that row's.
+    fn resetButtonClicked(self: *SettingsWindow, index: usize, source: LPARAM) void {
+        const button = self.reset_buttons[index] orelse return;
+        if (@intFromPtr(button) != @as(usize, @bitCast(source)) or sys.IsWindowVisible(button) == 0) return;
+        self.resetRow(index);
+    }
+
+    fn showResetButton(self: *SettingsWindow, index: usize, button: HWND, shown: bool) void {
+        // Hiding the focused button would strand the keyboard on it.
+        if (!shown and GetFocus() == button) {
+            if (self.controlHwnd(index)) |control| {
+                if (self.focusTargetUsable(control)) _ = SetFocus(control) else self.focusAfterConflictResolution();
+            }
+        }
+        setChildShown(button, shown);
+    }
+
+    fn resetButtonIndex(self: *const SettingsWindow, hwnd: HWND) ?usize {
+        for (self.reset_buttons, 0..) |button, index| if (button == hwnd) return index;
+        return null;
+    }
+
+    /// The UIA provider of row `index`'s Reset button, a new one for each row
+    /// a button serves. The caller checks that custom providers are enabled.
+    fn attachResetUiaProvider(self: *SettingsWindow, index: usize) void {
+        const button = self.reset_buttons[index] orelse return;
+        const subclassed = sys.GetWindowLongPtrW(button, GWLP_WNDPROC) == @as(LONG_PTR, @intCast(@intFromPtr(&settingsResetButtonProc)));
+        // A spare's subclass passes on to the procedure recorded when it was
+        // made; without that record it could not.
+        if (subclassed and self.reset_uia_prev_proc == null) return;
+        const provider = win32_uia.SettingsControlProvider.create(std.heap.page_allocator, button, .button, reset_button_names[index]) catch |err| {
+            std.log.warn("settings reset UIA provider unavailable index={} err={}", .{ index, err });
+            return;
+        };
+        provider.help_text = reset_button_help[index];
+        if (subclassed) {
+            self.reset_uia_providers[index] = provider;
+            return;
+        }
+        const previous = sys.SetWindowLongPtrW(button, GWLP_WNDPROC, @as(LONG_PTR, @intCast(@intFromPtr(&settingsResetButtonProc))));
+        if (previous == 0) {
+            _ = win32_uia.SettingsControlProvider.Release(&provider.base);
+            return;
+        }
+        const proc: *const anyopaque = @ptrFromInt(@as(usize, @intCast(previous)));
+        if (self.reset_uia_prev_proc) |existing| {
+            if (existing != proc) {
+                _ = sys.SetWindowLongPtrW(button, GWLP_WNDPROC, previous);
+                _ = win32_uia.SettingsControlProvider.Release(&provider.base);
+                return;
+            }
+        } else self.reset_uia_prev_proc = proc;
+        self.reset_uia_providers[index] = provider;
+    }
+
+    fn releaseResetUiaProviders(self: *SettingsWindow) void {
+        for (&self.reset_uia_providers) |*slot| {
+            const provider = slot.* orelse continue;
+            slot.* = null;
+            provider.detach();
+            self.deferProviderDisconnect(@ptrCast(provider), settingsControlDisconnect, settingsControlRelease);
+        }
+        self.reset_uia_prev_proc = null;
+    }
+
+    /// Where row `index`'s marker goes (viewport client coordinates): a bar
+    /// left of its control, as tall as a text field.
+    fn markerRect(self: *const SettingsWindow, viewport: HWND, index: usize) ?RECT {
+        const control = self.controlHwnd(index) orelse return null;
+        const rect = childRectIn(viewport, control) orelse return null;
+        const right = rect.left - self.px(settings_marker_gap);
+        return .{ .left = right - self.px(settings_marker_width), .top = rect.top, .right = right, .bottom = rect.top + self.px(settings_control_height) };
+    }
+
+    /// Repaint the markers that moved, came or went: where each was drawn
+    /// and where it is drawn now.
+    fn syncMarkerRects(self: *SettingsWindow) void {
+        const viewport = self.viewport orelse return;
+        const active = self.activeFormRows();
+        for (0..form_field_count) |index| {
+            const next: ?RECT = if (self.differs_from_default[index] and active.controls[index]) self.markerRect(viewport, index) else null;
+            const previous = self.marker_rects[index];
+            if (std.meta.eql(previous, next)) continue;
+            if (previous) |rect| _ = InvalidateRect(viewport, &rect, 0);
+            if (next) |rect| _ = InvalidateRect(viewport, &rect, 0);
+            self.marker_rects[index] = next;
+        }
+    }
+
+    /// The marker's colour: the accent, or in High Contrast the text colour,
+    /// as the rail's marks are drawn.
+    fn markerColor(self: *const SettingsWindow) COLORREF {
+        const colors = self.theme_adapter.colors;
+        return if (colors.high_contrast) colors.text else colors.accent;
+    }
+
+    /// The row `hwnd` belongs to: its control, its label or its Reset button.
+    fn rowOfWindow(self: *const SettingsWindow, hwnd: HWND) ?usize {
+        if (self.resetButtonIndex(hwnd)) |index| return index;
+        for (self.formItems()) |item| {
+            if (item.control_index >= form_field_count) continue;
+            if (self.controlHwnd(item.control_index) == hwnd) return item.control_index;
+            if (item.label_index) |label| if (self.field_labels[label] == hwnd) return item.control_index;
+        }
+        return null;
+    }
+
+    /// The row under `point` (viewport client coordinates): its label, its
+    /// control, its Reset button, and the marker room left of them.
+    fn rowAtPoint(self: *const SettingsWindow, point: POINT) ?usize {
+        const viewport = self.viewport orelse return null;
+        for (self.formItems()) |item| {
+            if (item.control_index >= form_field_count) continue;
+            const control = self.controlHwnd(item.control_index) orelse continue;
+            var row = childRectIn(viewport, control) orelse continue;
+            row.bottom = row.top + self.px(settings_control_height);
+            if (item.label_index) |label| if (self.field_labels[label]) |text| if (childRectIn(viewport, text)) |label_rect| {
+                row.top = @min(row.top, label_rect.top);
+            };
+            row.left -= self.px(settings_marker_gap + settings_marker_width);
+            if (resettable_rows[item.control_index]) row.right += self.px(settings_reset_gap + settings_reset_width);
+            if (point.x >= row.left and point.x < row.right and point.y >= row.top and point.y < row.bottom) return item.control_index;
+        }
+        return null;
+    }
+
+    /// Put row `index` back to its default in the draft. It is an edit like
+    /// any other: it previews where the row previews, is unsaved until Save,
+    /// which writes the default as that key's line, and Discard takes it back.
+    fn resetRow(self: *SettingsWindow, index: usize) void {
+        inline for (field_model.form_fields, 0..) |row, i| if (i == index) {
+            if (comptime !row.resettable()) return;
+            return self.resetFormRow(row);
+        };
+    }
+
+    fn resetFormRow(self: *SettingsWindow, comptime row: field_model.FormField) void {
+        if (self.close_posted) return;
+        const defaults = if (self.defaults) |*config| config else return;
+        const pending = if (self.pending) |*config| config else return;
+        if (!self.rowNeedsReset(row)) return self.setResetNote(row, .already_default);
+        resetDraftRow(pending, self.savedConfig(), defaults, row) catch |err| {
+            std.log.warn("settings: reset failed field={s} err={}", .{ row.native.binding, err });
+            return;
+        };
+        if (comptime row.field) |field| {
+            // A half-typed number goes with its error: the field shows the default.
+            inline for (comptime std.enums.values(RawScalarField)) |raw| {
+                if (comptime raw.setting() == field) if (self.raw_scalar_dirty[@intFromEnum(raw)]) self.finishRawScalarEdit(raw);
+            }
+            @field(field_adapters, row.native.binding).display(self);
+            self.trackFieldEdit(field);
+        } else {
+            const owned = comptime ownedFieldFor(row.descriptor.key);
+            self.owned_text_changed[@intFromEnum(owned)] = false;
+            if (self.ownedEdit(owned)) |control| self.clearValidationError(control);
+            self.refreshOwnedControl(owned);
+            self.trackOwnedEdit(owned);
+        }
+        self.setResetNote(row, .field_reset);
+    }
+
+    /// Say what a reset did, naming the field and its default.
+    fn setResetNote(self: *SettingsWindow, comptime row: field_model.FormField, note: StatusNote) void {
+        var buf: [256]u8 = undefined;
+        var writer: std.Io.Writer = .fixed(&buf);
+        const label = comptime if (row.field) |field| field.label() else row.descriptor.label;
+        const written = text: {
+            writer.writeAll(label) catch break :text false;
+            writer.writeAll(if (note == .field_reset) " is back to its default" else " already has its default") catch break :text false;
+            if (self.defaults) |*defaults| writeDefaultSuffix(row, &writer, self.savedConfig(), defaults) catch break :text false;
+            writer.writeByte('.') catch break :text false;
+            if (note == .field_reset and self.rowDirty(row)) writer.writeAll(" Save to keep it.") catch break :text false;
+            break :text true;
+        };
+        self.freeNoteText();
+        if (written) self.note_text = self.handle.alloc.dupe(u8, writer.buffered()) catch null;
+        self.status_note = note;
+        self.setStatus(self.noteText());
+    }
+
+    /// The menu a row offers: its reset, with the default it puts back and
+    /// the key that does the same. Unavailable while the row has its default.
+    /// False when no row offers one, so the click stays the window's own (the
+    /// viewport's scroll bar has a menu of its own).
+    fn showRowMenu(self: *SettingsWindow, source: HWND, lParam: LPARAM) bool {
+        const hwnd = self.hwnd orelse return false;
+        const viewport = self.viewport orelse return false;
+        // Without the defaults (they could not be made) there is nothing to reset to.
+        const defaults = if (self.defaults) |*config| config else return false;
+        const keyboard = @as(u32, @truncate(@as(usize, @bitCast(lParam)))) == 0xFFFF_FFFF;
+        const index = (if (source != viewport) self.rowOfWindow(source) else null) orelse row: {
+            if (keyboard) break :row if (GetFocus()) |focused| self.rowOfWindow(focused) else null;
+            var point: POINT = .{ .x = lparamX(lParam), .y = lparamY(lParam) };
+            if (ScreenToClient(viewport, &point) == 0) break :row null;
+            break :row self.rowAtPoint(point);
+        } orelse return false;
+        var text_buf: [192]u8 = undefined;
+        var text: std.Io.Writer = .fixed(&text_buf);
+        var offered = false;
+        var available = false;
+        inline for (field_model.form_fields, 0..) |row, i| if (i == index) {
+            if (comptime row.resettable()) {
+                offered = true;
+                available = self.rowNeedsReset(row);
+                text.writeAll("&Reset to default") catch {};
+                writeDefaultSuffix(row, &text, self.savedConfig(), defaults) catch {};
+                text.writeAll("\t" ++ reset_shortcut_text) catch {};
+            }
+        };
+        if (!offered) return false;
+        const menu = sys.CreatePopupMenu() orelse return true;
+        defer _ = sys.DestroyMenu(menu);
+        var text_w: [192]u16 = undefined;
+        if (sys.AppendMenuW(menu, if (available) MF_STRING else MF_GRAYED, row_menu_reset, utf8ToW(&text_w, text.buffered())) == 0) return true;
+        // From the keyboard the menu opens below the control; from the mouse,
+        // where it was clicked.
+        var at: POINT = .{ .x = lparamX(lParam), .y = lparamY(lParam) };
+        if (keyboard) if (self.controlHwnd(index)) |control| {
+            var rect: RECT = undefined;
+            if (GetWindowRect(control, &rect) != 0) at = .{ .x = rect.left, .y = rect.top + self.px(settings_control_height) };
+        };
+        const picked: usize = if (self.context_menu_pick) |pick|
+            pick(menu)
+        else
+            @intCast(@max(0, sys.TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, at.x, at.y, 0, hwnd, null)));
+        if (picked == row_menu_reset) self.resetRow(index);
+        return true;
     }
 
     fn surfaceNextValidation(self: *SettingsWindow, focus: bool) void {
@@ -2789,6 +3307,11 @@ pub const SettingsWindow = struct {
         // The reload replaced the live config, so the drafts are previewed
         // again, floored like the keystrokes that made them.
         self.previewDrafts();
+        // A reset's "Save to keep it" may be about a field the file now has.
+        if (self.status_note == .field_reset) {
+            self.freeNoteText();
+            self.status_note = .none;
+        }
         self.refreshAllControls();
         self.surfaceNextValidation(false);
         self.updateSaveEnabled();
@@ -2998,6 +3521,8 @@ pub const SettingsWindow = struct {
         self.releaseSectionUiaProviders();
         self.releaseTextUiaProviders();
         self.releaseControlUiaProviders();
+        self.releaseResetUiaProviders();
+        self.forgetDefaults();
         self.hwnd = null;
         self.forgetFormWindows();
         self.text_header = null;
@@ -3169,6 +3694,15 @@ pub const SettingsWindow = struct {
         self.framed_invalid_field = null;
         self.help_shown = false;
         self.background_geometry = null;
+        self.reset_buttons = @splat(null);
+        self.reset_spare_count = 0;
+        self.differs_from_default = @splat(false);
+        self.marker_rects = @splat(null);
+    }
+
+    fn forgetDefaults(self: *SettingsWindow) void {
+        if (self.defaults) |*defaults| defaults.deinit();
+        self.defaults = null;
     }
 
     fn deferProviderDisconnect(
@@ -3275,6 +3809,7 @@ pub const SettingsWindow = struct {
             return;
         }
         provider.help_text = spec.help;
+        if (index < form_field_count) provider.changed_from_default.store(self.differs_from_default[index], .release);
         self.control_uia_prev_procs[index] = @ptrFromInt(@as(usize, @intCast(previous)));
         self.control_uia_providers[index] = provider;
         if (spec.role == .combo_box) SettingsComboPopup.attach(control);
@@ -3366,6 +3901,9 @@ pub const SettingsWindow = struct {
         const changed = self.active_section != next;
         self.materializeSection(next);
         self.active_section = next;
+        // The page's Reset buttons, made hidden before the layout places
+        // them; the last page's go.
+        self.syncDefaultMarksShowing(false);
         if (self.section_uia_group) |group| group.setSelected(@intFromEnum(next));
         self.content_scroll_y = 0;
         self.refreshNativeSectionText();
@@ -3386,6 +3924,11 @@ pub const SettingsWindow = struct {
         const delta = self.content_scroll_y - clamped;
         self.content_scroll_y = clamped;
         const viewport = self.viewport orelse return;
+        // The markers' pixels move with the rest of the viewport's.
+        for (&self.marker_rects) |*marker| if (marker.*) |*rect| {
+            rect.top += delta;
+            rect.bottom += delta;
+        };
         _ = ScrollWindowEx(viewport, 0, delta, null, null, null, null, SW_SCROLLCHILDREN | SW_INVALIDATE);
         _ = RedrawWindow(viewport, null, null, RDW_UPDATENOW | RDW_ALLCHILDREN);
         const position: SCROLLINFO = .{
@@ -3445,6 +3988,9 @@ pub const SettingsWindow = struct {
         for (0..settings_clipped_control_count) |index| if (self.control_uia_providers[index]) |provider| {
             provider.setViewportFullyClipped(!active.controls[index] or
                 viewportHidesChild(viewport, self.controlHwnd(index), client.bottom));
+        };
+        for (self.reset_uia_providers, self.reset_buttons, 0..) |slot, button, index| if (slot) |provider| {
+            provider.setViewportFullyClipped(!active.controls[index] or viewportHidesChild(viewport, button, client.bottom));
         };
         if (self.text_uia_providers[text_help_index]) |provider| {
             provider.setViewportFullyClipped(!self.help_shown or viewportHidesChild(viewport, self.text_help, client.bottom));
@@ -3928,7 +4474,8 @@ pub const SettingsWindow = struct {
     fn ensureControlVisible(self: *SettingsWindow, control: HWND) void {
         var is_form_control = false;
         for (self.formItems()) |item| {
-            if (self.controlHwnd(item.control_index) == control) {
+            const reset = if (item.control_index < form_field_count) self.reset_buttons[item.control_index] else null;
+            if (self.controlHwnd(item.control_index) == control or reset == control) {
                 is_form_control = true;
                 break;
             }
@@ -3971,6 +4518,9 @@ pub const SettingsWindow = struct {
         };
         for (self.field_labels, 0..) |label, index| if (label) |control| {
             setChildShown(control, active.labels[index]);
+        };
+        for (self.reset_buttons, 0..) |button, index| if (button) |control| {
+            setChildShown(control, active.controls[index] and self.differs_from_default[index]);
         };
     }
 
@@ -4807,6 +5357,12 @@ pub const SettingsWindow = struct {
         // or atomically refreshed after a successful save.
         self.status_note = .none;
         try self.adoptCurrentConfig();
+        // What each row is compared with for its marker and its reset. Without
+        // it the window still works, with no row marked and none to reset.
+        if (self.defaults == null) self.defaults = Config.default(self.handle.alloc) catch |err| blk: {
+            std.log.warn("settings: defaults unavailable err={}; no field can be reset", .{err});
+            break :blk null;
+        };
         stamps.mark(.create_config);
 
         if (self.class_atom == 0) {
@@ -5051,8 +5607,10 @@ pub const SettingsWindow = struct {
             if (item.label_index) |index| self.attachTextUiaProvider(text_first_label_index + index);
         };
         self.prepareSectionRows(section);
-        // Values before the providers, which cache their initial state.
+        // Values before the providers, which cache their initial state, and
+        // whether each differs from its default too.
         self.displaySectionRows(section);
+        self.syncDefaultMarks();
         if (providers) for (formItemsForSection(section)) |item| self.attachControlUiaProvider(item.control_index);
     }
 
@@ -5201,6 +5759,15 @@ const IAccPropServicesVtbl = extern struct {
         GUID,
         LPCWSTR,
     ) callconv(.winapi) HRESULT,
+    SetHwndPropServer: *const anyopaque,
+    ClearHwndProps: *const fn (
+        *anyopaque,
+        HWND,
+        u32,
+        u32,
+        [*]const GUID,
+        c_int,
+    ) callconv(.winapi) HRESULT,
 };
 
 const IAccPropServices = extern struct {
@@ -5248,6 +5815,85 @@ fn setAccessibleName(service: *IAccPropServices, hwnd_opt: ?HWND, comptime name:
             @as(u32, @bitCast(hr)),
         });
     }
+}
+
+/// `setAccessibleName` for a name made at run time.
+fn setAccessibleNameText(service: *IAccPropServices, hwnd: HWND, name: []const u8) void {
+    var name_w: [128]u16 = undefined;
+    const hr = service.vtbl.SetHwndPropStr(service.asRaw(), hwnd, OBJID_CLIENT, CHILDID_SELF, PROPID_ACC_NAME, utf8ToW(&name_w, name));
+    if (hr < 0) std.log.warn("settings: failed to set accessible name '{s}' hr=0x{x}", .{ name, @as(u32, @bitCast(hr)) });
+}
+
+/// The MSAA description of a field that differs from its default, or none.
+/// The field's UIA `ItemStatus` says the same; this is for a reader that
+/// takes a standard Edit, Button or ComboBox through MSAA, as NVDA does.
+fn setChangedDescription(service: *IAccPropServices, hwnd: HWND, changed: bool) void {
+    const hr = if (changed)
+        service.vtbl.SetHwndPropStr(service.asRaw(), hwnd, OBJID_CLIENT, CHILDID_SELF, PROPID_ACC_DESCRIPTION, std.unicode.utf8ToUtf16LeStringLiteral(win32_uia.SettingsControlProvider.changed_from_default_status))
+    else
+        service.vtbl.ClearHwndProps(service.asRaw(), hwnd, OBJID_CLIENT, CHILDID_SELF, &.{PROPID_ACC_DESCRIPTION}, 1);
+    if (hr < 0) std.log.warn("settings: failed to annotate a field's default state hr=0x{x}", .{@as(u32, @bitCast(hr))});
+}
+
+/// `child`'s window rect in `parent`'s client coordinates.
+fn childRectIn(parent: HWND, child: HWND) ?RECT {
+    var rect: RECT = undefined;
+    if (GetWindowRect(child, &rect) == 0) return null;
+    var top_left: POINT = .{ .x = rect.left, .y = rect.top };
+    var bottom_right: POINT = .{ .x = rect.right, .y = rect.bottom };
+    if (ScreenToClient(parent, &top_left) == 0 or ScreenToClient(parent, &bottom_right) == 0) return null;
+    return .{ .left = top_left.x, .top = top_left.y, .right = bottom_right.x, .bottom = bottom_right.y };
+}
+
+/// The signed coordinates a mouse message packs into `lParam`.
+fn lparamX(lParam: LPARAM) i32 {
+    return @as(i16, @bitCast(@as(u16, @truncate(@as(usize, @bitCast(lParam))))));
+}
+fn lparamY(lParam: LPARAM) i32 {
+    return @as(i16, @bitCast(@as(u16, @truncate(@as(usize, @bitCast(lParam)) >> 16))));
+}
+
+/// Put `row`'s value in `pending` back to its default (`resetSettingValue`):
+/// what a reset stages, and so what a save of it writes (the default as that
+/// key's line, or for Default profile, no line).
+pub fn resetDraftRow(pending: *Config, saved: ?*const Config, defaults: *const Config, comptime row: field_model.FormField) std.mem.Allocator.Error!void {
+    if (comptime row.field) |field| return setSettingValue(pending, resetSettingValue(saved, defaults, field));
+    const owned = comptime ownedFieldFor(row.descriptor.key);
+    try copyOwnedSetting(pending, defaults, owned);
+    // As an emptied Default command field is (`syncCommandFromEdit`).
+    if (owned == .command) pending._command_defaulted = false;
+}
+
+/// What a reset of `field` puts back: its default, unless the saved value
+/// already counts as the default, which it keeps, so a reset that undoes an
+/// edit leaves nothing to save. The saved copy is of a finalized config,
+/// where an unset Auto-update channel holds this build's channel and a
+/// Window theme of auto with a light/dark pair holds system
+/// (`effectiveSettingValue`).
+fn resetSettingValue(saved: ?*const Config, defaults: *const Config, field: SettingField) SettingValue {
+    const default = settingValue(defaults, field);
+    const kept = settingValue(saved orelse return default, field);
+    return if (settingValueEql(field_model.effectiveSettingValue(kept), field_model.effectiveSettingValue(default))) kept else default;
+}
+
+fn ownedFieldFor(comptime key: Config.Key) OwnedSettingField {
+    for (std.enums.values(OwnedSettingField)) |owned| if (owned.descriptor().key == key) return owned;
+    @compileError("Not an owned Settings key: " ++ @tagName(key));
+}
+
+/// " (12 pt)": the default a reset of `row` puts back, as the form shows it,
+/// or " (automatic)". Nothing for a text field that is blank by default.
+fn writeDefaultSuffix(comptime row: field_model.FormField, writer: *std.Io.Writer, saved: ?*const Config, defaults: *const Config) !void {
+    if (comptime row.field == null and row.descriptor.default_display == .inherited) return;
+    var buf: [128]u8 = undefined;
+    var value: std.Io.Writer = .fixed(&buf);
+    if (comptime row.field) |field|
+        try field_model.writeSettingValue(&value, resetSettingValue(saved, defaults, field))
+    else
+        try row.writeDefault(&value, defaults);
+    // An owned field writes its default as a placeholder in parentheses.
+    const text = if (comptime row.field == null) std.mem.trim(u8, value.buffered(), "()") else value.buffered();
+    try writer.print(" ({s})", .{text});
 }
 
 /// Painted field labels keep the native dark visual treatment, while MSAA
@@ -5542,6 +6188,16 @@ const settings_two_column_min_width: i32 = 664;
 const settings_field_max_width: i32 = 360;
 const settings_combo_popup_height: i32 = 160;
 const settings_content_bottom_padding: i32 = settings_metrics.space_6;
+/// The Reset button at the right end of an editable row. Every editable row
+/// keeps its room, so a control does not move or narrow when its button comes.
+const settings_reset_width: i32 = 64;
+const settings_reset_gap: i32 = settings_metrics.space_4;
+/// The bar left of a control whose value differs from the default: the
+/// viewport reaches this far left of the form, so the bar beside the first
+/// lane has room without moving the form.
+const settings_marker_gutter: i32 = settings_metrics.space_4;
+const settings_marker_width: i32 = 3;
+const settings_marker_gap: i32 = settings_metrics.space_2;
 
 const RailGeometry = struct {
     top_pad: i32,
@@ -7805,7 +8461,19 @@ test "settings checkbox and label classification agrees with form model" {
     for (labels) |seen| try std.testing.expect(seen);
 }
 
-const SettingsFieldRects = struct { label: RECT, control: RECT };
+/// A row's label and control, and for an editable row the room at the right
+/// end of its lane that its Reset button takes when the row differs from its
+/// default.
+const SettingsFieldRects = struct { label: RECT, control: RECT, reset: ?RECT = null };
+
+/// Narrow `rects.control` by the room of a Reset button and put the button
+/// there, at the end of the lane.
+fn withResetRoom(rects: *SettingsFieldRects, dpi: u32) void {
+    const width = scaleForDpi(settings_reset_width, dpi);
+    const lane_right = rects.control.right;
+    rects.control.right = @max(rects.control.left, lane_right - width - scaleForDpi(settings_reset_gap, dpi));
+    rects.reset = .{ .left = lane_right - width, .top = rects.control.top, .right = lane_right, .bottom = rects.control.bottom };
+}
 
 fn settingsFieldRects(index: usize, pane_width: i32, dpi: u32) SettingsFieldRects {
     const columns = settingsColumnCount(pane_width, dpi);
@@ -7872,7 +8540,20 @@ fn settingsFormItemRects(items: []const FormItem, pane_width: i32, dpi: u32, out
         }
         start = end;
     }
+    // Every row that can be reset keeps the room, so a control never moves or
+    // narrows when its Reset button comes or goes. A field Windows does not
+    // support never has one, and keeps the lane for its caption.
+    for (items, output[0..items.len]) |item, *rects| {
+        if (item.control_index < form_field_count and resettable_rows[item.control_index]) withResetRoom(rects, dpi);
+    }
 }
+
+/// Whether form row `i` (`field_model.form_fields[i]`) can be reset.
+const resettable_rows = rows: {
+    var result: [form_field_count]bool = undefined;
+    for (field_model.form_fields, 0..) |row, i| result[i] = row.resettable();
+    break :rows result;
+};
 
 fn settingsContentExtent(rects: []const RECT, bottom_padding: i32) i32 {
     var bottom: i32 = 0;
@@ -8210,10 +8891,12 @@ test "settings action bar follows the form's column once it has two lanes" {
         const tight = scaleForDpi(settings_two_column_min_width, dpi);
         try std.testing.expect(settingsActionColumnWidth(tight, tight, dpi) <= tight);
         try std.testing.expect(settingsActionColumnWidth(tight, tight, dpi) >= tight - 1);
-        // The right lane's controls end where the column ends.
+        // The right lane ends where the column ends: its control, then the
+        // room of its Reset button.
         var rects: [2]SettingsFieldRects = undefined;
         settingsFormItemRects(formItemsForSection(.appearance)[0..2], wide, dpi, &rects);
-        try std.testing.expectEqual(column, rects[1].control.right);
+        try std.testing.expectEqual(column, rects[1].reset.?.right);
+        try std.testing.expectEqual(rects[1].reset.?.left - scaleForDpi(settings_reset_gap, dpi), rects[1].control.right);
     }
 }
 
@@ -8307,8 +8990,8 @@ fn ChildPlacements(comptime capacity: usize) type {
 
 /// Rail buttons, header, summary, viewport, status, prompt, seven action buttons.
 const settings_frame_child_count = section_count + 12;
-/// Every label and field of the largest section, and the help text.
-const settings_form_child_count = settings_max_form_items * 2 + 1;
+/// Every label, field and Reset button of the largest section, and the help text.
+const settings_form_child_count = settings_max_form_items * 3 + 1;
 
 /// What the frame window paints besides its background colour.
 const BackgroundGeometry = struct {
@@ -8368,8 +9051,10 @@ fn layoutChildren(self: *SettingsWindow) void {
     frame.addText(self.text_header, pane_left, pane_top, prose_width, self.px(settings_header_title_height));
     frame.addText(self.text_summary, pane_left, pane_top + self.px(settings_header_summary_top), prose_width, self.px(settings_header_summary_height));
     // To the window's right edge, so its scroll bar sits at the edge of the
-    // window but only beside the form.
-    frame.add(self.viewport, pane_left, viewport_top, rect.right - pane_left, viewport_height);
+    // window but only beside the form; and a gutter left of the form's first
+    // lane, in the pane's padding, for the markers drawn beside its controls.
+    const gutter = self.px(settings_marker_gutter);
+    frame.add(self.viewport, pane_left - gutter, viewport_top, rect.right - pane_left + gutter, viewport_height);
 
     // The form, in viewport coordinates.
     const form_items = self.formItems();
@@ -8410,14 +9095,17 @@ fn layoutChildren(self: *SettingsWindow) void {
         const geometry = item_rects[index];
         if (item.label_index) |label_index| {
             const label = geometry.label;
-            form.addText(self.field_labels[label_index], label.left, label.top - scroll_y, label.right - label.left, label.bottom - label.top);
+            form.addText(self.field_labels[label_index], gutter + label.left, label.top - scroll_y, label.right - label.left, label.bottom - label.top);
         }
         // A dropdown's height is that of its open list; its closed height is
         // set afterwards (`fitComboFields`).
         const height = if (isComboControl(self, control)) self.px(settings_combo_popup_height) else self.px(settings_control_height);
-        form.add(control, geometry.control.left, geometry.control.top - scroll_y, geometry.control.right - geometry.control.left, height);
+        form.add(control, gutter + geometry.control.left, geometry.control.top - scroll_y, geometry.control.right - geometry.control.left, height);
+        if (geometry.reset) |reset| if (self.reset_buttons[item.control_index]) |button| {
+            form.add(button, gutter + reset.left, reset.top - scroll_y, reset.right - reset.left, reset.bottom - reset.top);
+        };
     }
-    if (help_rect) |help| form.addText(self.text_help, help.left, help.top - scroll_y, help.right - help.left, help.bottom - help.top);
+    if (help_rect) |help| form.addText(self.text_help, gutter + help.left, help.top - scroll_y, help.right - help.left, help.bottom - help.top);
 
     const row_top = action_bar_top + action_bar.actions_top;
     const action_gap = self.px(settings_action_gap);
@@ -8462,6 +9150,9 @@ fn layoutChildren(self: *SettingsWindow) void {
     if (self.text_help) |text| setChildShown(text, self.help_shown);
     self.proof_layout_batched = frame_batched and form_batched;
     self.syncViewportClipFlags();
+    // The markers are the viewport's own pixels, which moving its children
+    // does not repaint.
+    self.syncMarkerRects();
 
     // Moving children repaints them and whatever they uncovered. The frame's
     // own lines move only with the action bar or the column, which a window
@@ -8795,6 +9486,26 @@ const dialog_test = struct {
         fn startWith(custom_uia: bool) !*Fixture {
             const self = try prepare(custom_uia);
             errdefer self.finish();
+            try self.settings.open();
+            return self;
+        }
+
+        /// The fixture over a config in which every editable row differs
+        /// from its default (`field_model.round_trip_config`), opened.
+        fn startChanged(custom_uia: bool) !*Fixture {
+            const self = try prepare(custom_uia);
+            errdefer self.finish();
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            try tmp.dir.writeFile(.{ .sub_path = "changed.ghostty", .data = field_model.round_trip_config });
+            const path = try tmp.dir.realpathAlloc(std.testing.allocator, "changed.ghostty");
+            defer std.testing.allocator.free(path);
+            try self.config.loadFile(std.testing.allocator, path);
+            try std.testing.expect(self.config._diagnostics.empty());
+            // The fixture's `tip` is this build's own channel on a tip build,
+            // which is the default there (`effectiveSettingValue`).
+            const release_channel = @import("../build_config.zig").release_channel;
+            self.config.@"auto-update-channel" = if (release_channel == .stable) .tip else .stable;
             try self.settings.open();
             return self;
         }
@@ -9556,16 +10267,25 @@ test "settings Tab visits the fields in form order and Save last" {
             settings.syncCombo(.cursor_style);
             try std.testing.expect(sys.IsWindowEnabled(settings.btn_save.?) != 0);
 
+            // The cursor style differs from its default now, so its Reset
+            // button follows it.
+            try std.testing.expect(sys.IsWindowVisible(settings.reset_buttons[settings.controlIndex(settings.fields.combo_cursor_style.?).?].?) != 0);
             for (std.enums.values(Section)) |section| {
                 settings.setActiveSection(section);
-                // Unsupported controls are disabled and are not tab stops.
-                var fields: [settings_max_form_items]HWND = undefined;
+                // Unsupported controls are disabled and are not tab stops. A
+                // shown Reset button comes right after its field.
+                var fields: [settings_max_form_items * 2]HWND = undefined;
                 var field_count: usize = 0;
                 for (settings.formItems()) |item| {
                     const control = settings.controlHwnd(item.control_index).?;
                     if (sys.IsWindowEnabled(control) == 0) continue;
                     fields[field_count] = control;
                     field_count += 1;
+                    const reset = if (item.control_index < form_field_count) settings.reset_buttons[item.control_index] else null;
+                    if (reset) |button| if (sys.IsWindowVisible(button) != 0) {
+                        fields[field_count] = button;
+                        field_count += 1;
+                    };
                 }
                 const first = fields[0];
                 var visited: [16]HWND = undefined;
@@ -10569,6 +11289,48 @@ test "settings labels fit on one line in the narrowest two-column lane" {
     }.body);
 }
 
+test "settings dropdown choices fit their closed field in the narrowest two-column lane" {
+    try dialog_test.onHiddenDesktop(struct {
+        fn body() !void {
+            const fixture = try dialog_test.Fixture.start();
+            defer fixture.finish();
+            const settings = &fixture.settings;
+            dialog_test.makeAllSections(settings);
+            for ([_]u32{ 96, 144, 192 }) |dpi| {
+                dialog_test.simulateDpi(fixture.hwnd(), dpi);
+                // A dropdown's field is the lane less the room its Reset button keeps.
+                var lane: [1]SettingsFieldRects = undefined;
+                settingsFormItemRects(formItemsForSection(.appearance)[0..1], scaleForDpi(settings_two_column_min_width, dpi), dpi, &lane);
+                const field = lane[0].control.right - lane[0].control.left;
+                inline for (field_model.form_fields, 0..) |row, index| if (comptime row.kind() == .choice) {
+                    const combo = settings.controlHwnd(index).?;
+                    var info: SettingsComboPopup.Info = .{};
+                    try std.testing.expect(SettingsComboPopup.GetComboBoxInfo(combo, &info) != 0);
+                    var window: RECT = undefined;
+                    _ = GetWindowRect(combo, &window);
+                    // The text has the field less the drop button and frame, and an inset.
+                    const room = field - (window.right - window.left - (info.item.right - info.item.left)) - settings.px(4);
+                    const hdc = GetDC(combo) orelse return error.NoDC;
+                    defer _ = ReleaseDC(combo, hdc);
+                    const raw_font: usize = @bitCast(SendMessageW(combo, WM_GETFONT, 0, 0));
+                    const previous = SelectObject(hdc, @ptrFromInt(raw_font));
+                    defer _ = SelectObject(hdc, previous);
+                    for (field_model.Combo(row.field.?).labels) |label| {
+                        var text_w: [128:0]u16 = @splat(0);
+                        const length = try std.unicode.utf8ToUtf16Le(&text_w, label);
+                        var rect: RECT = .{ .left = 0, .top = 0, .right = 0, .bottom = 0 };
+                        _ = DrawTextW(hdc, &text_w, @intCast(length), &rect, DT_CALCRECT | DT_SINGLELINE | DT_NOPREFIX);
+                        if (rect.right - rect.left > room) {
+                            std.debug.print("\"{s}\" is {d}px in a {d}px field at {d} dpi\n", .{ label, rect.right - rect.left, room, dpi });
+                            return error.ChoiceWiderThanField;
+                        }
+                    }
+                };
+            }
+        }
+    }.body);
+}
+
 test "settings fields carry a label, a config key and palette words" {
     var catalog_items: [32]palette_catalog.Item = undefined;
     var catalog_payloads: [32]palette_catalog.Payload = undefined;
@@ -11395,6 +12157,731 @@ test "settings typing in a text field replaces the saved message" {
     }.body);
 }
 
+/// Whether `row`'s draft in `settings` holds the default.
+fn draftHasDefault(settings: *const SettingsWindow, comptime row: field_model.FormField) bool {
+    const pending = &settings.pending.?;
+    const defaults = &settings.defaults.?;
+    if (comptime row.field) |field| return settingValueEql(settingValue(pending, field), settingValue(defaults, field));
+    return ownedSettingEql(pending, defaults, comptime ownedFieldFor(row.descriptor.key));
+}
+
+fn rowLabel(comptime row: field_model.FormField) []const u8 {
+    return comptime if (row.field) |field| field.label() else row.descriptor.label;
+}
+
+test "settings marks each field that differs from its default, and its Reset button puts the default back" {
+    try dialog_test.onHiddenDesktop(struct {
+        fn body() !void {
+            @setEvalBranchQuota(20000);
+            const fixture = try dialog_test.Fixture.startChanged(false);
+            defer fixture.finish();
+            const settings = &fixture.settings;
+            const viewport = settings.viewport.?;
+            var buf: [256]u8 = undefined;
+            inline for (field_model.form_fields, 0..) |row, index| {
+                errdefer std.debug.print("settings reset of {s}\n", .{row.native.binding});
+                settings.setActiveSection(nativeSection(row.descriptor.section));
+                const control = settings.controlHwnd(index).?;
+                // Every row Windows supports differs here; the others are never
+                // marked, and offer no reset.
+                try std.testing.expectEqual(row.resettable(), settings.differs_from_default[index]);
+                if (comptime !row.resettable()) {
+                    try std.testing.expect(settings.reset_buttons[index] == null);
+                    try std.testing.expect(settings.marker_rects[index] == null);
+                } else {
+                    const button = settings.reset_buttons[index].?;
+                    try std.testing.expect(sys.IsWindowVisible(button) != 0);
+                    // The marker is left of the control and as high as its top;
+                    // the button at the right end of the row.
+                    const field_rect = dialog_test.rectIn(viewport, control);
+                    const marker = settings.marker_rects[index].?;
+                    try std.testing.expect(marker.right < field_rect.left and marker.left >= 0);
+                    try std.testing.expectEqual(field_rect.top, marker.top);
+                    const button_rect = dialog_test.rectIn(viewport, button);
+                    try std.testing.expectEqual(field_rect.right + settings.px(settings_reset_gap), button_rect.left);
+                    try std.testing.expectEqual(field_rect.top, button_rect.top);
+
+                    // Enter on the focused button, as from the keyboard.
+                    settings.ensureControlVisible(button);
+                    _ = sys.SetFocus(button);
+                    try std.testing.expect(fixture.pumpKey(@intCast(VK_RETURN)));
+                    try std.testing.expect(draftHasDefault(settings, row));
+                    try std.testing.expect(!settings.differs_from_default[index]);
+                    // The button goes, and the keyboard with it to the field.
+                    try std.testing.expect(sys.IsWindowVisible(button) == 0);
+                    try std.testing.expectEqual(control, sys.GetFocus().?);
+                    try std.testing.expect(settings.marker_rects[index] == null);
+                    const status = try statusTextOf(settings, &buf);
+                    try std.testing.expect(std.mem.startsWith(u8, status, comptime rowLabel(row) ++ " is back to its default"));
+                    try std.testing.expect(std.mem.endsWith(u8, status, ". Save to keep it."));
+                }
+            }
+            // Each reset is an edit waiting to be saved; Discard brings every
+            // mark back.
+            try std.testing.expect(sys.IsWindowEnabled(settings.btn_save.?) != 0);
+            settings.discardChangesNow();
+            inline for (field_model.form_fields, 0..) |row, index| {
+                try std.testing.expectEqual(row.resettable(), settings.differs_from_default[index]);
+            }
+            settings.setActiveSection(.appearance);
+            try std.testing.expect(sys.IsWindowVisible(settings.reset_buttons[settings.controlIndex(settings.fields.edit_font_size.?).?].?) != 0);
+        }
+    }.body);
+}
+
+test "settings Ctrl+Shift+Delete resets the focused field, and says when it already has its default" {
+    try dialog_test.onHiddenDesktop(struct {
+        fn body() !void {
+            const fixture = try dialog_test.Fixture.startChanged(false);
+            defer fixture.finish();
+            const settings = &fixture.settings;
+            const defaults = &settings.defaults.?;
+            var buf: [256]u8 = undefined;
+            var text: [64]u8 = undefined;
+            var expected: [128]u8 = undefined;
+            const edit = settings.fields.edit_font_size.?;
+            const default_text = try std.fmt.bufPrint(&text, "{d}", .{defaults.@"font-size"});
+
+            _ = sys.SetFocus(edit);
+            try dialog_test.holdKeys(.{ .ctrl = true, .shift = true });
+            defer dialog_test.holdKeys(.{}) catch {};
+            try std.testing.expect(fixture.pumpKey(@intCast(VK_DELETE)));
+            try std.testing.expectEqual(defaults.@"font-size", settings.pending.?.@"font-size");
+            var shown: [64]u8 = undefined;
+            try std.testing.expectEqualStrings(default_text, readEditUtf8(edit, &shown).?);
+            try std.testing.expectEqualStrings(
+                try std.fmt.bufPrint(&expected, "Font size is back to its default ({d} pt). Save to keep it.", .{defaults.@"font-size"}),
+                try statusTextOf(settings, &buf),
+            );
+            // Again: there is nothing to put back, and the line says so.
+            try std.testing.expect(fixture.pumpKey(@intCast(VK_DELETE)));
+            try std.testing.expectEqualStrings(
+                try std.fmt.bufPrint(&expected, "Font size already has its default ({d} pt).", .{defaults.@"font-size"}),
+                try statusTextOf(settings, &buf),
+            );
+
+            // A number half typed over the default goes with its error.
+            typeInto(edit, "1");
+            settings.validationQuietElapsed();
+            try std.testing.expectEqual(edit, settings.validation_control.?);
+            try std.testing.expect(fixture.pumpKey(@intCast(VK_DELETE)));
+            try std.testing.expectEqualStrings(default_text, readEditUtf8(edit, &shown).?);
+            try std.testing.expect(settings.validation_control == null);
+            try std.testing.expect(!settings.hasRawScalarEdits());
+
+            // On a Reset button the chord resets its field, and focus goes to it.
+            const combo = settings.fields.combo_cursor_style.?;
+            const button = settings.reset_buttons[settings.controlIndex(combo).?].?;
+            _ = sys.SetFocus(button);
+            try std.testing.expect(fixture.pumpKey(@intCast(VK_DELETE)));
+            try std.testing.expectEqual(defaults.@"cursor-style", settings.pending.?.@"cursor-style");
+            try std.testing.expectEqual(combo, sys.GetFocus().?);
+
+            // Without Shift, or with Alt, it is not taken: Delete and
+            // Ctrl+Delete edit the text.
+            _ = sys.SetFocus(edit);
+            try dialog_test.holdKeys(.{ .ctrl = true });
+            try std.testing.expect(!settings.handleAccelerator(edit, WM_KEYDOWN, VK_DELETE, 0));
+            try dialog_test.holdKeys(.{ .ctrl = true, .shift = true, .alt = true });
+            try std.testing.expect(!settings.handleAccelerator(edit, WM_KEYDOWN, VK_DELETE, 0));
+        }
+    }.body);
+}
+
+test "settings a row's context menu offers its reset, with the default and the shortcut" {
+    try dialog_test.onHiddenDesktop(struct {
+        extern "user32" fn GetMenuStringW(menu: win32_types.HMENU, item: UINT, text: [*]u16, max: c_int, flags: UINT) callconv(.winapi) c_int;
+        extern "user32" fn GetMenuState(menu: win32_types.HMENU, item: UINT, flags: UINT) callconv(.winapi) UINT;
+        const MF_BYPOSITION: UINT = 0x0400;
+        var calls: usize = 0;
+        var grayed = false;
+        var text: [128]u8 = undefined;
+        var text_len: usize = 0;
+        var answer: usize = 0;
+
+        fn pick(menu: win32_types.HMENU) usize {
+            calls += 1;
+            var wide: [128]u16 = undefined;
+            const length = GetMenuStringW(menu, 0, &wide, wide.len, MF_BYPOSITION);
+            text_len = std.unicode.utf16LeToUtf8(&text, wide[0..@intCast(@max(0, length))]) catch 0;
+            grayed = GetMenuState(menu, 0, MF_BYPOSITION) & MF_GRAYED != 0;
+            return if (grayed) 0 else answer;
+        }
+
+        fn shown() []const u8 {
+            return text[0..text_len];
+        }
+
+        fn body() !void {
+            const fixture = try dialog_test.Fixture.startChanged(false);
+            defer fixture.finish();
+            const settings = &fixture.settings;
+            settings.context_menu_pick = &pick;
+            const viewport = settings.viewport.?;
+            const defaults = &settings.defaults.?;
+            const keyboard: LPARAM = -1;
+
+            // Shift+F10 on the dropdown, as DefWindowProc hands it on.
+            const combo = settings.fields.combo_cursor_style.?;
+            _ = sys.SetFocus(combo);
+            answer = row_menu_reset;
+            _ = sys.SendMessageW(viewport, WM_CONTEXTMENU, @intFromPtr(combo), keyboard);
+            try std.testing.expectEqual(@as(usize, 1), calls);
+            try std.testing.expectEqualStrings("&Reset to default (Block)\t" ++ reset_shortcut_text, shown());
+            try std.testing.expect(!grayed);
+            try std.testing.expectEqual(defaults.@"cursor-style", settings.pending.?.@"cursor-style");
+            // Now it has its default: the reset is offered, unavailable.
+            _ = sys.SendMessageW(viewport, WM_CONTEXTMENU, @intFromPtr(combo), keyboard);
+            try std.testing.expect(grayed);
+
+            // A right-click on a label is the label's row; on the room
+            // between rows, nothing.
+            const font_size = settings.controlIndex(settings.fields.edit_font_size.?).?;
+            const label = settings.field_labels[formItemsForSection(.appearance)[1].label_index.?].?;
+            try std.testing.expectEqual(font_size, formItemsForSection(.appearance)[1].control_index);
+            const at = dialog_test.rectIn(viewport, label);
+            var point: POINT = .{ .x = at.left + 4, .y = @divTrunc(at.top + at.bottom, 2) };
+            _ = sys.ClientToScreen(viewport, &point);
+            const packed_point: LPARAM = @bitCast(@as(usize, @as(u16, @bitCast(@as(i16, @intCast(point.x))))) | (@as(usize, @as(u16, @bitCast(@as(i16, @intCast(point.y))))) << 16));
+            const before = calls;
+            _ = sys.SendMessageW(viewport, WM_CONTEXTMENU, @intFromPtr(viewport), packed_point);
+            try std.testing.expectEqual(before + 1, calls);
+            var expected: [128]u8 = undefined;
+            try std.testing.expectEqualStrings(
+                try std.fmt.bufPrint(&expected, "&Reset to default ({d} pt)\t" ++ reset_shortcut_text, .{defaults.@"font-size"}),
+                shown(),
+            );
+            try std.testing.expectEqual(defaults.@"font-size", settings.pending.?.@"font-size");
+            try std.testing.expectEqual(@as(?usize, null), settings.rowAtPoint(.{ .x = -1000, .y = -1000 }));
+
+            // A field that is blank by default names no value; one that is
+            // automatic says so.
+            _ = sys.SendMessageW(viewport, WM_CONTEXTMENU, @intFromPtr(settings.fields.edit_font_family.?), keyboard);
+            try std.testing.expectEqualStrings("&Reset to default\t" ++ reset_shortcut_text, shown());
+            settings.setActiveSection(.shell);
+            _ = sys.SendMessageW(viewport, WM_CONTEXTMENU, @intFromPtr(settings.fields.edit_command.?), keyboard);
+            try std.testing.expectEqualStrings("&Reset to default (automatic)\t" ++ reset_shortcut_text, shown());
+            try std.testing.expect(settings.pending.?.command == null);
+
+            // A row Windows does not support offers none.
+            settings.setActiveSection(.privacy);
+            const offered = calls;
+            _ = sys.SendMessageW(viewport, WM_CONTEXTMENU, @intFromPtr(settings.fields.combo_link_previews.?), keyboard);
+            try std.testing.expectEqual(offered, calls);
+        }
+    }.body);
+}
+
+test "settings Reset buttons and changed fields say what they are through UIA" {
+    try dialog_test.onHiddenDesktop(struct {
+        fn body() !void {
+            const com = @import("win32_uia/com.zig");
+            const constants = @import("win32_uia/constants.zig");
+            const events = @import("win32_uia/events.zig");
+            const fixture = try dialog_test.Fixture.startChanged(true);
+            defer fixture.finish();
+            const settings = &fixture.settings;
+            const index = settings.controlIndex(settings.fields.edit_font_size.?).?;
+            const field = settings.control_uia_providers[index].?;
+            const reset = settings.reset_uia_providers[index].?;
+
+            var value = com.VARIANT.empty();
+            try std.testing.expectEqual(com.S_OK, field.base.vtbl.GetPropertyValue(&field.base, constants.UIA_ItemStatusPropertyId, &value));
+            try expectVariantText(&value, win32_uia.SettingsControlProvider.changed_from_default_status);
+            try std.testing.expectEqual(com.S_OK, reset.base.vtbl.GetPropertyValue(&reset.base, constants.UIA_NamePropertyId, &value));
+            try expectVariantText(&value, "Reset Font size");
+            try std.testing.expectEqual(com.S_OK, reset.base.vtbl.GetPropertyValue(&reset.base, constants.UIA_HelpTextPropertyId, &value));
+            try expectVariantText(&value, "Puts Font size back to its default. " ++ reset_shortcut_text ++ " in the field does the same.");
+            try std.testing.expectEqual(com.S_OK, reset.base.vtbl.GetPropertyValue(&reset.base, constants.UIA_ControlTypePropertyId, &value));
+            try std.testing.expectEqual(constants.UIA_ButtonControlTypeId, value.value.i4);
+            try std.testing.expectEqual(com.S_OK, reset.base.vtbl.GetPropertyValue(&reset.base, constants.UIA_IsOffscreenPropertyId, &value));
+            try std.testing.expectEqual(@as(i16, com.VARIANT_FALSE), value.value.bool_val);
+
+            // Invoke resets the field, which then says it has its default.
+            const changes = events.testing_property_changes;
+            try std.testing.expectEqual(com.S_OK, reset.invoke_iface.vtbl.Invoke(&reset.invoke_iface));
+            dialog_test.pump();
+            try std.testing.expectEqual(settings.defaults.?.@"font-size", settings.pending.?.@"font-size");
+            try std.testing.expect(events.testing_property_changes > changes);
+            try std.testing.expectEqual(com.S_OK, field.base.vtbl.GetPropertyValue(&field.base, constants.UIA_ItemStatusPropertyId, &value));
+            try expectVariantText(&value, "");
+            // The hidden button is offscreen until the field differs again.
+            try std.testing.expectEqual(com.S_OK, reset.base.vtbl.GetPropertyValue(&reset.base, constants.UIA_IsOffscreenPropertyId, &value));
+            try std.testing.expectEqual(@as(i16, com.VARIANT_TRUE), value.value.bool_val);
+        }
+
+        fn expectVariantText(value: *@import("win32_uia/com.zig").VARIANT, expected: []const u8) !void {
+            const com = @import("win32_uia/com.zig");
+            defer _ = com.VariantClear(value);
+            try std.testing.expectEqual(@as(u16, com.VT_BSTR), value.vt);
+            const bstr = value.value.bstr.?;
+            var utf8: [256]u8 = undefined;
+            const len = try std.unicode.utf16LeToUtf8(&utf8, bstr[0..com.SysStringLen(bstr)]);
+            try std.testing.expectEqualStrings(expected, utf8[0..len]);
+        }
+    }.body);
+}
+
+test "settings markers draw beside changed fields in light, dark and High Contrast, and leave nothing stale" {
+    try dialog_test.onHiddenDesktop(struct {
+        fn highContrast(_: *anyopaque) bool {
+            return true;
+        }
+
+        fn darkColors(_: *anyopaque) win32_theme.ThemeColors {
+            return win32_theme.darkTheme();
+        }
+
+        /// The capture's pixel (0x00RRGGBB) as a COLORREF (0x00BBGGRR).
+        fn colorAt(capture: dialog_test.Capture, x: i32, y: i32) u32 {
+            const pixel = capture.pixels[@as(usize, @intCast(y)) * capture.width + @as(usize, @intCast(x))];
+            return ((pixel & 0xFF) << 16) | (pixel & 0xFF00) | ((pixel >> 16) & 0xFF);
+        }
+
+        fn body() !void {
+            const fixture = try dialog_test.Fixture.startChanged(false);
+            defer fixture.finish();
+            const settings = &fixture.settings;
+            const hwnd = fixture.hwnd();
+            const Mode = enum { light, dark, high_contrast };
+            const index = settings.controlIndex(settings.fields.edit_font_size.?).?;
+
+            for ([_]Mode{ .light, .dark, .high_contrast }) |mode| for ([_]u32{ 96, 144 }) |dpi| {
+                errdefer std.debug.print("settings markers in {s} at {d} dpi\n", .{ @tagName(mode), dpi });
+                settings.discardChangesNow();
+                settings.handle.themeColors = if (mode == .dark) &darkColors else null;
+                settings.handle.highContrast = if (mode == .high_contrast) &highContrast else null;
+                settings.themeChanged();
+                dialog_test.simulateDpi(hwnd, dpi);
+                settings.setActiveSection(.appearance);
+                const colors = settings.theme_adapter.colors;
+                try std.testing.expectEqual(if (mode == .high_contrast) colors.text else colors.accent, settings.markerColor());
+                try dialog_test.expectNothingStale(hwnd);
+
+                // The marker's middle, in the Settings window's coordinates.
+                const viewport_at = dialog_test.rectIn(hwnd, settings.viewport.?);
+                const marker = settings.marker_rects[index].?;
+                try std.testing.expect(marker.right - marker.left >= 1);
+                const x = viewport_at.left + @divTrunc(marker.left + marker.right, 2);
+                const y = viewport_at.top + @divTrunc(marker.top + marker.bottom, 2);
+                const marked = try dialog_test.Capture.take(hwnd);
+                defer marked.deinit();
+                try std.testing.expectEqual(settings.markerColor(), colorAt(marked, x, y));
+
+                // Scrolled, the markers go with their fields.
+                try fixture.makeFormScrollable();
+                dialog_test.Fixture.wheel(hwnd, -120);
+                try std.testing.expect(settings.content_scroll_y > 0);
+                try dialog_test.expectNothingStale(hwnd);
+                var beside: usize = 0;
+                for (settings.formItems()) |item| if (item.control_index < form_field_count) if (settings.marker_rects[item.control_index]) |moved| {
+                    try std.testing.expectEqual(dialog_test.rectIn(settings.viewport.?, settings.controlHwnd(item.control_index).?).top, moved.top);
+                    beside += 1;
+                };
+                try std.testing.expect(beside > 0);
+
+                // Reset, the marker goes and nothing is left of it.
+                settings.resetRow(index);
+                try std.testing.expect(settings.marker_rects[index] == null);
+                try dialog_test.expectNothingStale(hwnd);
+                // A section switch takes the others' markers with it.
+                settings.setActiveSection(.terminal);
+                try dialog_test.expectNothingStale(hwnd);
+                var restore: RECT = undefined;
+                _ = GetWindowRect(hwnd, &restore);
+                _ = SetWindowPos(hwnd, null, restore.left, restore.top, settings.px(960), settings.px(640), SWP_NOZORDER | SWP_NOACTIVATE);
+            };
+        }
+    }.body);
+}
+
+/// The window after `window` in z-order, passing over hidden spare Reset
+/// buttons, which Tab and the arrow keys pass over too; counts them.
+fn nextPastSpares(settings: *const SettingsWindow, window: HWND, spares: *usize) !?HWND {
+    const GW_HWNDNEXT: UINT = 2;
+    var next = sys.GetWindow(window, GW_HWNDNEXT);
+    while (next) |candidate| {
+        if (std.mem.indexOfScalar(HWND, settings.reset_spares[0..settings.reset_spare_count], candidate) == null) break;
+        try std.testing.expect(sys.IsWindowVisible(candidate) == 0);
+        spares.* += 1;
+        next = sys.GetWindow(candidate, GW_HWNDNEXT);
+    }
+    return next;
+}
+
+test "settings a Reset button stays right after its control whatever order the sections are made in" {
+    try dialog_test.onHiddenDesktop(struct {
+        fn body() !void {
+            const fixture = try dialog_test.Fixture.startChanged(false);
+            defer fixture.finish();
+            const settings = &fixture.settings;
+            // Later sections first, so most rows are made after rows that
+            // follow them. Shell is made while Terminal's rows still hold
+            // their Reset buttons (given up once Shell is shown), so its rows
+            // are put between Terminal's last field and that field's button.
+            for ([_]Section{ .privacy, .terminal, .shell, .advanced, .keybindings, .updates }) |section| {
+                settings.setActiveSection(section);
+            }
+            // Then every page, each with its own buttons, in the order the
+            // form reads.
+            for (std.enums.values(Section)) |shown| {
+                settings.setActiveSection(shown);
+                errdefer std.debug.print("settings form order with {s} shown\n", .{@tagName(shown)});
+                const GW_CHILD: UINT = 5;
+                var buttons: usize = 0;
+                var spares: usize = 0;
+                var window = sys.GetWindow(settings.viewport.?, GW_CHILD);
+                try std.testing.expectEqual(settings.text_help.?, window.?);
+                for (std.enums.values(Section)) |section| for (formItemsForSection(section)) |item| {
+                    errdefer std.debug.print("settings form order breaks in {s} at control {d}\n", .{ @tagName(section), item.control_index });
+                    if (item.label_index) |index| {
+                        window = try nextPastSpares(settings, window.?, &spares);
+                        try std.testing.expectEqual(settings.field_labels[index].?, window.?);
+                    }
+                    window = try nextPastSpares(settings, window.?, &spares);
+                    try std.testing.expectEqual(settings.controlHwnd(item.control_index).?, window.?);
+                    if (item.control_index < form_field_count) if (settings.reset_buttons[item.control_index]) |button| {
+                        window = try nextPastSpares(settings, window.?, &spares);
+                        try std.testing.expectEqual(button, window.?);
+                        buttons += 1;
+                    };
+                };
+                try std.testing.expectEqual(@as(?HWND, null), try nextPastSpares(settings, window.?, &spares));
+                try std.testing.expectEqual(settings.reset_spare_count, spares);
+                // The changed fixture differs somewhere on every page with
+                // fields, so each was checked with its buttons in place.
+                switch (shown) {
+                    .appearance, .terminal, .shell, .privacy, .updates => try std.testing.expect(buttons > 0),
+                    .keybindings, .advanced => try std.testing.expectEqual(@as(usize, 0), buttons),
+                }
+            }
+        }
+    }.body);
+}
+
+test "settings a page switch away from a focused Reset button leaves the keyboard on the new page's rail button" {
+    try dialog_test.onHiddenDesktop(struct {
+        fn body() !void {
+            const fixture = try dialog_test.Fixture.startChanged(false);
+            defer fixture.finish();
+            const settings = &fixture.settings;
+            const index = settings.controlIndex(settings.fields.edit_font_size.?).?;
+            const button = settings.reset_buttons[index].?;
+            _ = SetFocus(button);
+            try std.testing.expectEqual(button, GetFocus().?);
+            // As the command palette opens a page: no click on the rail.
+            settings.setActiveSection(.terminal);
+            try std.testing.expectEqual(Section.terminal, settings.active_section);
+            try std.testing.expectEqual(@as(?HWND, null), settings.reset_buttons[index]);
+            try std.testing.expect(sys.IsWindowVisible(button) == 0);
+            try std.testing.expect(std.mem.indexOfScalar(HWND, settings.reset_spares[0..settings.reset_spare_count], button) != null);
+            const rail = settings.sectionButton(.terminal).?;
+            try std.testing.expectEqual(rail, GetFocus().?);
+            try std.testing.expectEqual(@as(usize, BST_CHECKED), @as(usize, @bitCast(sys.SendMessageW(rail, BM_GETCHECK, 0, 0))));
+        }
+    }.body);
+}
+
+test "settings a Reset button another page took is no focus to go back to, and no click of its old row" {
+    try dialog_test.onHiddenDesktop(struct {
+        fn body() !void {
+            const fixture = try dialog_test.Fixture.startChanged(false);
+            defer fixture.finish();
+            const settings = &fixture.settings;
+            const font = settings.controlIndex(settings.fields.edit_font_size.?).?;
+            const button = settings.reset_buttons[font].?;
+            // Focused when the close prompt opens, then the page changes under
+            // the prompt: the button goes to the spares, and maybe to a row
+            // of the new page. "Keep editing" must not put focus there.
+            _ = SetFocus(button);
+            settings.showClosePrompt();
+            try std.testing.expectEqual(@as(?HWND, button), settings.close_prior_focus);
+            settings.setActiveSection(.terminal);
+            try std.testing.expect(settings.close_prior_focus != button);
+            settings.cancelClosePrompt();
+            try std.testing.expectEqual(settings.sectionButton(.terminal).?, GetFocus().?);
+            // A click that reaches the button late, with its old row's id,
+            // resets nothing.
+            const stale: WPARAM = BTN_RESET_FIRST + font;
+            _ = SendMessageW(fixture.hwnd(), WM_COMMAND, stale, @bitCast(@intFromPtr(button)));
+            try std.testing.expect(settings.differs_from_default[font]);
+            // Nor does one with the row's id from a button the row does not
+            // hold (another row's, which may once have served this one).
+            settings.setActiveSection(.appearance);
+            const held = settings.reset_buttons[font].?;
+            const other = settings.reset_buttons[settings.controlIndex(settings.fields.edit_bg_opacity.?).?].?;
+            _ = SendMessageW(fixture.hwnd(), WM_COMMAND, stale, @bitCast(@intFromPtr(other)));
+            try std.testing.expect(settings.differs_from_default[font]);
+            // From the button the row holds and shows, it does.
+            _ = SendMessageW(fixture.hwnd(), WM_COMMAND, stale, @bitCast(@intFromPtr(held)));
+            try std.testing.expect(!settings.differs_from_default[font]);
+        }
+    }.body);
+}
+
+test "settings only the shown page's rows hold Reset buttons, handed on from page to page" {
+    try dialog_test.onHiddenDesktop(struct {
+        fn body() !void {
+            // With the custom providers: a button handed to another row gets
+            // a provider of that row's.
+            const fixture = try dialog_test.Fixture.startChanged(true);
+            defer fixture.finish();
+            const settings = &fixture.settings;
+            var most: usize = 0;
+            for (std.enums.values(Section)) |section| {
+                settings.setActiveSection(section);
+                const viewport = settings.viewport.?;
+                var held: usize = 0;
+                for (settings.reset_buttons) |button| held += @intFromBool(button != null);
+                // A page's rows take spares before any button is made, so the
+                // window holds exactly as many as the most one page has needed.
+                most = @max(most, held);
+                try std.testing.expectEqual(most, held + settings.reset_spare_count);
+                for (settings.reset_spares[0..settings.reset_spare_count]) |spare| try std.testing.expect(sys.IsWindowVisible(spare) == 0);
+                for (0..form_field_count) |index| {
+                    const on_page = if (settings.controlSection(index)) |page| page == section else false;
+                    // Every row that differs on this page has its button, and
+                    // no other page's row has one: at most one page's worth.
+                    try std.testing.expectEqual(on_page and settings.differs_from_default[index], settings.reset_buttons[index] != null);
+                    // Made hidden during the switch, shown once placed:
+                    // beside its control, at the top of the row.
+                    const button = settings.reset_buttons[index] orelse continue;
+                    try std.testing.expect(sys.IsWindowVisible(button) != 0);
+                    // Whichever button a row took, its id and its provider
+                    // name that row.
+                    try std.testing.expectEqual(@as(LONG_PTR, @intCast(BTN_RESET_FIRST + index)), sys.GetWindowLongPtrW(button, GWLP_ID));
+                    const provider = settings.reset_uia_providers[index].?;
+                    try std.testing.expectEqual(button, provider.hwnd);
+                    try std.testing.expectEqualStrings(reset_button_names[index], provider.name.?);
+                    const control = childRectIn(viewport, settings.controlHwnd(index).?).?;
+                    const placed = childRectIn(viewport, button).?;
+                    try std.testing.expectEqual(control.right + settings.px(settings_reset_gap), placed.left);
+                    try std.testing.expectEqual(control.top, placed.top);
+                }
+            }
+            // Back on Appearance from pages whose rows take none, each row has
+            // the button it had, whose id and MSAA name are already its own.
+            settings.setActiveSection(.appearance);
+            const first = settings.reset_buttons;
+            settings.setActiveSection(.keybindings);
+            settings.setActiveSection(.advanced);
+            settings.setActiveSection(.appearance);
+            for (first, settings.reset_buttons) |was, now| try std.testing.expectEqual(was, now);
+        }
+    }.body);
+}
+
+test "settings a Reset button joins its row's arrow-key run and never a label's" {
+    try dialog_test.onHiddenDesktop(struct {
+        fn body() !void {
+            const fixture = try dialog_test.Fixture.startChanged(false);
+            defer fixture.finish();
+            const settings = &fixture.settings;
+            const hwnd = fixture.hwnd();
+            for (std.enums.values(Section)) |section| {
+                settings.setActiveSection(section);
+                for (settings.formItems()) |item| {
+                    if (item.control_index >= form_field_count) continue;
+                    const button = settings.reset_buttons[item.control_index] orelse continue;
+                    if (sys.IsWindowVisible(button) == 0) continue;
+                    for ([_]windows.BOOL{ 0, 1 }) |previous| {
+                        // A field or a Reset button of the form, never a label
+                        // and never outside the form.
+                        const next = dialog_test.GetNextDlgGroupItem(hwnd, button, previous).?;
+                        try std.testing.expect(settings.rowOfWindow(next) != null);
+                        try std.testing.expect(settings.textIndex(next) == null);
+                    }
+                }
+            }
+            // The button starts no group (a hidden one would still end its
+            // control's run): the notification checkboxes' run takes each
+            // shown button after its checkbox, and wraps.
+            settings.setActiveSection(.privacy);
+            const fields = &settings.fields;
+            const run = [_]HWND{
+                fields.chk_desktop_notifications.?,
+                settings.reset_buttons[settings.controlIndex(fields.chk_desktop_notifications.?).?].?,
+                fields.chk_app_notify_clipboard.?,
+                settings.reset_buttons[settings.controlIndex(fields.chk_app_notify_clipboard.?).?].?,
+                fields.chk_app_notify_config.?,
+                settings.reset_buttons[settings.controlIndex(fields.chk_app_notify_config.?).?].?,
+            };
+            for (run, 0..) |window, i| {
+                try std.testing.expectEqual(@as(u32, if (i == 0) WS_GROUP else 0), windowStyle(window) & WS_GROUP);
+                try std.testing.expectEqual(run[(i + 1) % run.len], dialog_test.GetNextDlgGroupItem(hwnd, window, 0).?);
+            }
+        }
+    }.body);
+}
+
+test "settings a config at its defaults marks no field, finalized as the app's is" {
+    try dialog_test.onHiddenDesktop(struct {
+        fn body() !void {
+            @setEvalBranchQuota(20000);
+            for ([_]bool{ false, true }) |pair| {
+                const fixture = try dialog_test.Fixture.prepare(false);
+                defer fixture.finish();
+                // Settings copies the App's config, which is finalized: an unset
+                // Auto-update channel becomes this build's channel, and with a
+                // light/dark theme pair a Window theme of auto becomes system.
+                try fixture.config.finalize();
+                try std.testing.expect(fixture.config.@"auto-update-channel" != null);
+                if (pair) fixture.config.@"window-theme" = .system;
+                try fixture.settings.open();
+                const settings = &fixture.settings;
+                for (std.enums.values(Section)) |section| settings.setActiveSection(section);
+                inline for (field_model.form_fields, 0..) |row, index| {
+                    errdefer std.debug.print("settings marked at its default: {s}\n", .{row.native.binding});
+                    try std.testing.expect(!settings.differs_from_default[index]);
+                    try std.testing.expect(settings.reset_buttons[index] == null);
+                }
+                // A choice changed and reset leaves nothing to save: the reset
+                // keeps the saved value the finalize made, which counts as the
+                // default, rather than writing the raw default as a new line.
+                const CB_GETCOUNT: UINT = 0x0146;
+                inline for (.{ SettingField.auto_update_channel, SettingField.window_theme }) |field| {
+                    errdefer std.debug.print("settings reset left an edit: {s} pair={}\n", .{ @tagName(field), pair });
+                    const combo = (if (field == .auto_update_channel) settings.fields.combo_auto_update_channel else settings.fields.combo_window_theme).?;
+                    const index = settings.controlIndex(combo).?;
+                    const choices: usize = @intCast(sys.SendMessageW(combo, CB_GETCOUNT, 0, 0));
+                    for (1..choices) |choice| {
+                        _ = sys.SendMessageW(combo, CB_SETCURSEL, choice, 0);
+                        settings.syncCombo(field);
+                        if (settings.differs_from_default[index]) break;
+                    }
+                    try std.testing.expect(settings.differs_from_default[index]);
+                    try std.testing.expect(settings.hasPendingChanges());
+                    settings.resetRow(index);
+                    try std.testing.expect(!settings.differs_from_default[index]);
+                    try std.testing.expect(!settings.hasPendingChanges());
+                    try std.testing.expect(settingValueEql(
+                        settingValue(&settings.original.?, field),
+                        settingValue(&settings.pending.?, field),
+                    ));
+                }
+            }
+        }
+    }.body);
+}
+
+test "settings a text field's marker follows what it holds before it is staged" {
+    try dialog_test.onHiddenDesktop(struct {
+        fn body() !void {
+            {
+                const fixture = try dialog_test.Fixture.start();
+                defer fixture.finish();
+                const settings = &fixture.settings;
+                const edit = settings.fields.edit_font_family.?;
+                const index = settings.controlIndex(edit).?;
+                // Typed over the blank default: marked at once, with its button.
+                typeInto(edit, "Consolas");
+                try std.testing.expect(settings.owned_text_changed[@intFromEnum(OwnedSettingField.font_family)]);
+                try std.testing.expect(settings.differs_from_default[index]);
+                try std.testing.expect(sys.IsWindowVisible(settings.reset_buttons[index].?) != 0);
+                // Separators alone are still the default.
+                typeInto(edit, " , ");
+                try std.testing.expect(!settings.differs_from_default[index]);
+                try std.testing.expect(sys.IsWindowVisible(settings.reset_buttons[index].?) == 0);
+            }
+            {
+                const fixture = try dialog_test.Fixture.startChanged(false);
+                defer fixture.finish();
+                const settings = &fixture.settings;
+                const edit = settings.fields.edit_font_family.?;
+                const index = settings.controlIndex(edit).?;
+                try std.testing.expect(settings.differs_from_default[index]);
+                // Emptied: no longer marked, though the draft is staged later.
+                typeInto(edit, "");
+                try std.testing.expect(!settings.differs_from_default[index]);
+                try std.testing.expect(sys.IsWindowVisible(settings.reset_buttons[index].?) == 0);
+                // A reset of typed text puts the default back in the field too.
+                typeInto(edit, "Cascadia Mono");
+                settings.resetRow(index);
+                var text: [64]u8 = undefined;
+                try std.testing.expectEqualStrings("", readEditUtf8(edit, &text).?);
+                try std.testing.expect(!settings.owned_text_changed[@intFromEnum(OwnedSettingField.font_family)]);
+                try std.testing.expectEqual(@as(usize, 0), settings.pending.?.@"font-family".count());
+            }
+        }
+    }.body);
+}
+
+test "settings a context menu that is no row's stays the window's own" {
+    try dialog_test.onHiddenDesktop(struct {
+        var calls: usize = 0;
+        fn pick(_: win32_types.HMENU) usize {
+            calls += 1;
+            return 0;
+        }
+
+        fn body() !void {
+            const fixture = try dialog_test.Fixture.startChanged(false);
+            defer fixture.finish();
+            const settings = &fixture.settings;
+            settings.context_menu_pick = &pick;
+            const viewport = settings.viewport.?;
+            // Right of every lane, in the pane's padding: no row's menu, so the
+            // viewport's window procedure is left to answer (its scroll bar
+            // has a menu).
+            var client: RECT = undefined;
+            _ = GetClientRect(viewport, &client);
+            var point: POINT = .{ .x = client.right - 2, .y = settings.px(30) };
+            try std.testing.expectEqual(@as(?usize, null), settings.rowAtPoint(point));
+            _ = sys.ClientToScreen(viewport, &point);
+            const at: LPARAM = @bitCast(@as(usize, @as(u16, @bitCast(@as(i16, @intCast(point.x))))) | (@as(usize, @as(u16, @bitCast(@as(i16, @intCast(point.y))))) << 16));
+            try std.testing.expect(!settings.showRowMenu(viewport, at));
+            try std.testing.expectEqual(@as(usize, 0), calls);
+            // Background blur keeps no room for a Reset button, so just right
+            // of it is no row either.
+            const blur = childRectIn(viewport, settings.fields.chk_bg_blur.?).?;
+            try std.testing.expectEqual(@as(?usize, null), settings.rowAtPoint(.{ .x = blur.right + settings.px(settings_reset_gap) + 2, .y = blur.top + 2 }));
+            // A row's own window always has its menu.
+            try std.testing.expect(settings.showRowMenu(settings.fields.edit_font_size.?, -1));
+            try std.testing.expectEqual(@as(usize, 1), calls);
+        }
+    }.body);
+}
+
+test "settings rows keep room for a Reset button, and markers sit clear of every window" {
+    for ([_]u32{ 96, 144, 192 }) |dpi| for ([_]i32{ 500, 900 }) |pane| {
+        const width = scaleForDpi(pane, dpi);
+        for (std.enums.values(Section)) |section| {
+            const items = formItemsForSection(section);
+            var rects: [settings_max_form_items]SettingsFieldRects = undefined;
+            settingsFormItemRects(items, width, dpi, rects[0..items.len]);
+            for (items, rects[0..items.len], 0..) |item, row, i| {
+                // A display row or a field Windows does not support has no
+                // Reset button, and keeps the whole lane.
+                const reset = row.reset orelse {
+                    try std.testing.expect(item.control_index >= form_field_count or !resettable_rows[item.control_index]);
+                    continue;
+                };
+                try std.testing.expectEqual(row.control.right + scaleForDpi(settings_reset_gap, dpi), reset.left);
+                try std.testing.expectEqual(scaleForDpi(settings_reset_width, dpi), reset.right - reset.left);
+                try std.testing.expectEqual(row.control.top, reset.top);
+                // The marker sits in the room left of the lane: the gutter for
+                // the first lane, the column gap for the second.
+                const marker_left = row.control.left - scaleForDpi(settings_marker_gap + settings_marker_width, dpi);
+                try std.testing.expect(marker_left >= -scaleForDpi(settings_marker_gutter, dpi));
+                const marker: RECT = .{ .left = marker_left, .top = row.control.top, .right = row.control.left, .bottom = row.control.bottom };
+                for (rects[0..items.len], 0..) |other, j| {
+                    if (i == j) continue;
+                    // A checkbox without a label has no label window.
+                    const label: ?RECT = if (items[j].label_index != null) other.label else null;
+                    for ([_]?RECT{ other.control, label, other.reset }) |optional| if (optional) |r| {
+                        try std.testing.expect(!rectsOverlap(reset, r));
+                        try std.testing.expect(!rectsOverlap(marker, r));
+                    };
+                }
+            }
+        }
+    };
+}
+
+fn rectsOverlap(a: RECT, b: RECT) bool {
+    return a.left < b.right and b.left < a.right and a.top < b.bottom and b.top < a.bottom;
+}
+
 test "settings palette row for background blur says it cannot be changed and focus stays on the section" {
     try std.testing.expect(std.mem.indexOf(u8, paletteDescriptor(.background_blur).item.subtitle, "not supported") != null);
     try std.testing.expectEqualStrings("Setting", paletteDescriptor(.font_size).item.subtitle);
@@ -11650,6 +13137,37 @@ fn settingsControlProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) ca
                 return result;
             }
         }
+    }
+    return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
+}
+
+/// A Reset button's UIA provider (`attachResetUiaProvider`). The buttons are
+/// made one at a time as rows come to differ from their defaults, so they are
+/// not among the indexed controls `settingsControlProc` serves.
+fn settingsResetButtonProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.winapi) LRESULT {
+    const owner = if (sys.GetParent(hwnd)) |parent| recoverOwner(parent) else null;
+    if (owner) |settings| {
+        const previous = settings.reset_uia_prev_proc;
+        if (settings.resetButtonIndex(hwnd)) |index| {
+            if (msg == WM_GETOBJECT) {
+                if (settings.reset_uia_providers[index]) |provider| {
+                    if (win32_uia.returnSettingsControlProvider(hwnd, wParam, lParam, provider)) |result| return result;
+                }
+            }
+            if (msg == WM_NCDESTROY) {
+                if (settings.reset_uia_providers[index]) |provider| provider.detach();
+                if (previous) |proc| {
+                    _ = sys.SetWindowLongPtrW(hwnd, GWLP_WNDPROC, @as(LONG_PTR, @intCast(@intFromPtr(proc))));
+                    return sys.CallWindowProcW(proc, hwnd, msg, wParam, lParam);
+                }
+            }
+            if (msg == WM_SETFOCUS) if (previous) |proc| {
+                const result = sys.CallWindowProcW(proc, hwnd, msg, wParam, lParam);
+                if (settings.reset_uia_providers[index]) |provider| provider.raiseFocusChanged();
+                return result;
+            };
+        }
+        if (previous) |proc| return sys.CallWindowProcW(proc, hwnd, msg, wParam, lParam);
     }
     return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
 }
@@ -12362,6 +13880,10 @@ fn wndProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.wina
             if (lParam != 0 and (notify == EN_SETFOCUS or notify == CBN_SETFOCUS or notify == BN_SETFOCUS)) {
                 if (owner) |o| if (!o.restoring_focus) o.ensureControlVisible(@ptrFromInt(@as(usize, @bitCast(lParam))));
             }
+            if (notify == BN_CLICKED and id >= BTN_RESET_FIRST and id < BTN_RESET_FIRST + form_field_count) {
+                if (owner) |o| o.resetButtonClicked(id - BTN_RESET_FIRST, lParam);
+                return 0;
+            }
             if (clickedButton(id, notify, BTN_OPEN_EDITOR) or clickedButton(id, notify, BTN_KEYBINDINGS_EDITOR)) {
                 if (owner) |o| o.handle.openInEditor(o.handle.ctx);
                 return 0;
@@ -12522,16 +14044,21 @@ fn viewportProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(
         WM_ERASEBKGND => return 1,
         WM_PRINTCLIENT => {
             var rect: RECT = undefined;
-            if (wParam != 0 and GetClientRect(hwnd, &rect) != 0) fillSolid(@ptrFromInt(wParam), rect, owner.theme_adapter.colors.window_bg);
+            if (wParam != 0 and GetClientRect(hwnd, &rect) != 0) paintViewport(owner, @ptrFromInt(wParam), rect);
             return 0;
         },
         WM_PAINT => {
             var ps: PAINTSTRUCT = undefined;
             const hdc = sys.BeginPaint(hwnd, &ps);
-            fillSolid(hdc, ps.rcPaint, owner.theme_adapter.colors.window_bg);
+            paintViewport(owner, hdc, ps.rcPaint);
             _ = sys.EndPaint(hwnd, &ps);
             return 0;
         },
+        // A label, a dropdown, a checkbox or a Reset button that was
+        // right-clicked (or Shift+F10 on it), or the room between them. A text
+        // field shows its own Cut/Copy/Paste menu and sends nothing here. What
+        // is no row's (the scroll bar) keeps DefWindowProc's menu.
+        WM_CONTEXTMENU => if (wParam != 0 and owner.showRowMenu(@ptrFromInt(wParam), lParam)) return 0,
         WM_COMMAND,
         WM_CTLCOLORMSGBOX,
         WM_CTLCOLOREDIT,
@@ -12581,6 +14108,22 @@ fn settingsControlDisconnect(ctx: *anyopaque) win32_uia.HRESULT {
 fn settingsControlRelease(ctx: *anyopaque) void {
     const provider: *win32_uia.SettingsControlProvider = @ptrCast(@alignCast(ctx));
     _ = win32_uia.SettingsControlProvider.Release(&provider.base);
+}
+
+/// The viewport's own pixels inside `clip`: the pane colour, and the marker of
+/// each row whose value differs from its default (`marker_rects`).
+fn paintViewport(owner: *const SettingsWindow, hdc: HDC, clip: RECT) void {
+    fillSolid(hdc, clip, owner.theme_adapter.colors.window_bg);
+    const color = owner.markerColor();
+    for (owner.marker_rects) |marker| if (marker) |rect| {
+        const shown: RECT = .{
+            .left = @max(rect.left, clip.left),
+            .top = @max(rect.top, clip.top),
+            .right = @min(rect.right, clip.right),
+            .bottom = @min(rect.bottom, clip.bottom),
+        };
+        if (shown.left < shown.right and shown.top < shown.bottom) fillSolid(hdc, shown, color);
+    };
 }
 
 fn paint(hwnd: HWND, owner: *SettingsWindow) void {
@@ -12706,6 +14249,26 @@ fn ownedSettingEql(a: *const Config, b: *const Config, field: OwnedSettingField)
         .command => optionalCommandEql(a.command, b.command),
         .default_profile => optionalStringEql(a.@"default-profile", b.@"default-profile"),
     };
+}
+
+/// Whether `field` is unset in `config`: no font, theme, command or profile.
+fn ownedSettingBlank(config: *const Config, field: OwnedSettingField) bool {
+    return switch (field) {
+        .font_family => config.@"font-family".count() == 0,
+        .theme => config.theme == null,
+        .command => config.command == null,
+        .default_profile => config.@"default-profile" == null,
+    };
+}
+
+/// Whether `edit` holds anything besides `blank` characters.
+fn editHoldsText(edit: HWND, comptime blank: []const u8) bool {
+    var text_w: [edit_text_max_code_units]u16 = undefined;
+    const length = GetWindowTextW(edit, &text_w, @intCast(text_w.len));
+    for (text_w[0..@intCast(@max(0, length))]) |unit| {
+        if (unit > 0x7F or std.mem.indexOfScalar(u8, blank, @intCast(unit)) == null) return true;
+    }
+    return false;
 }
 
 fn copyOwnedSetting(target: *Config, source: *const Config, field: OwnedSettingField) !void {

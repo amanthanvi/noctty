@@ -1707,6 +1707,22 @@ the CLI).
 Details for both
 are in the [capability matrix notes](windows-capability-matrix.md#notes).
 
+A Settings field whose value differs from noctty's built-in default has a bar
+in front of it (the accent color, or the text color in High Contrast) and a
+**Reset** button after it, and UI Automation reports its `ItemStatus` (MSAA
+its description) as "Changed from the default". The button, the field's context menu (right-click
+the field's label, a dropdown or a checkbox, or press Shift+F10 on one; a text
+field keeps its own Cut/Copy/Paste menu) and Ctrl+Shift+Delete in the field
+all put the default back. A reset is an edit like any other: it previews where
+the field previews, waits for Save, and Discard changes takes it back. Save
+writes the default as that key's line (`font-size = 12`); for Default profile
+it removes the line, since its default is no line at all. The comparison is
+with the value in effect, so a field an included file sets is marked too, and
+after a reset and Save the include still wins: Settings then says the saved
+value is overridden, as it does for any edit. Background blur and link
+previews, which Windows does not support, keep whatever the file says and
+offer no reset.
+
 ## Running elevated
 
 Use **New Elevated Window** in the command palette, or bind

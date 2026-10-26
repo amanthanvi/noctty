@@ -1117,6 +1117,12 @@ pub const SettingsControlProvider = struct {
     /// The field holds a value Settings will not accept
     /// (`UIA_IsDataValidForFormPropertyId`).
     data_invalid: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    /// The field's value differs from its default, which the form marks
+    /// beside it; said as the field's `ItemStatus`, so the mark is not only
+    /// drawn.
+    changed_from_default: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+
+    pub const changed_from_default_status = "Changed from the default";
 
     const vtbl: com.IRawElementProviderSimpleVtbl = .{
         .QueryInterface = QueryInterface,
@@ -1252,6 +1258,17 @@ pub const SettingsControlProvider = struct {
         );
     }
 
+    /// Say whether the field differs from its default; a change is announced
+    /// as a new `ItemStatus`.
+    pub fn setChangedFromDefault(self: *SettingsControlProvider, changed: bool) void {
+        if (self.changed_from_default.swap(changed, .acq_rel) == changed or !self.available()) return;
+        events.raiseCurrentStringPropertyChanged(&self.base, constants.UIA_ItemStatusPropertyId);
+    }
+
+    fn isField(self: *const SettingsControlProvider) bool {
+        return self.role == .edit or self.role == .combo_box or self.role == .check_box;
+    }
+
     fn isText(self: *const SettingsControlProvider) bool {
         return self.role == .text or self.role == .live_text;
     }
@@ -1375,6 +1392,11 @@ pub const SettingsControlProvider = struct {
             },
             constants.UIA_HelpTextPropertyId => if (self.help_text.len != 0) {
                 const bstr = allocBstrFromUtf8(self.alloc, self.help_text) orelse return com.E_OUTOFMEMORY;
+                out.* = com.VARIANT.fromBstr(bstr);
+            },
+            constants.UIA_ItemStatusPropertyId => if (self.isField()) {
+                const status = if (self.changed_from_default.load(.acquire)) changed_from_default_status else "";
+                const bstr = allocBstrFromUtf8(self.alloc, status) orelse return com.E_OUTOFMEMORY;
                 out.* = com.VARIANT.fromBstr(bstr);
             },
             constants.UIA_ValueValuePropertyId => if (self.role.hasValue()) {
@@ -8927,6 +8949,34 @@ test "SettingsControlProvider reports a field whose value Settings will not acce
     defer _ = SettingsControlProvider.Release(&button.base);
     value = com.VARIANT.empty();
     try std.testing.expectEqual(com.S_OK, SettingsControlProvider.GetPropertyValue(&button.base, constants.UIA_IsDataValidForFormPropertyId, &value));
+    try std.testing.expectEqual(@as(u16, com.VT_EMPTY), value.vt);
+}
+
+test "SettingsControlProvider says a field differs from its default as ItemStatus" {
+    const hwnd = try settings_provider_windows.create("EDIT");
+    defer _ = settings_provider_windows.DestroyWindow(hwnd);
+    const edit = try SettingsControlProvider.create(std.testing.allocator, hwnd, .edit, "Font size");
+    defer _ = SettingsControlProvider.Release(&edit.base);
+
+    events.testing_property_changes = 0;
+    try expectBstrProperty(&edit.base, constants.UIA_ItemStatusPropertyId, "");
+    edit.setChangedFromDefault(true);
+    // A change is announced once; the same state again is not.
+    try std.testing.expectEqual(@as(usize, 1), events.testing_property_changes);
+    edit.setChangedFromDefault(true);
+    try std.testing.expectEqual(@as(usize, 1), events.testing_property_changes);
+    try expectBstrProperty(&edit.base, constants.UIA_ItemStatusPropertyId, SettingsControlProvider.changed_from_default_status);
+    // The name a harness and voice control find the field by does not change.
+    try expectBstrProperty(&edit.base, constants.UIA_NamePropertyId, "Font size");
+    edit.setChangedFromDefault(false);
+    try std.testing.expectEqual(@as(usize, 2), events.testing_property_changes);
+    try expectBstrProperty(&edit.base, constants.UIA_ItemStatusPropertyId, "");
+
+    // A button is not a field and has no status.
+    const button = try SettingsControlProvider.create(std.testing.allocator, hwnd, .button, "Reset Font size");
+    defer _ = SettingsControlProvider.Release(&button.base);
+    var value = com.VARIANT.empty();
+    try std.testing.expectEqual(com.S_OK, SettingsControlProvider.GetPropertyValue(&button.base, constants.UIA_ItemStatusPropertyId, &value));
     try std.testing.expectEqual(@as(u16, com.VT_EMPTY), value.vt);
 }
 
