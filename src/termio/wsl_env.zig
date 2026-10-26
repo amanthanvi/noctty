@@ -1274,6 +1274,55 @@ test "WSLCACHE invalid names use the unpinned uncached probe" {
     try std.testing.expect(validDistributionName("A0._-z"));
 }
 
+test "WSLCACHE successive unanswered attempts on one key get different generations" {
+    const Host = struct {
+        var calls: usize = 0;
+        var generations: [2]u64 = @splat(0);
+        var pending_seen: usize = 0;
+        fn defaultDistribution() ?DefaultDistribution {
+            return std.unicode.utf8ToUtf16LeStringLiteral("{11111111-1111-1111-1111-111111111111}")[0..38].*;
+        }
+        fn distributionName(alloc: Allocator, _: DefaultDistribution) ?[]u8 {
+            return alloc.dupe(u8, "Ubuntu") catch null;
+        }
+        fn run(_: Allocator, _: *const EnvMap, _: []const []const u8, _: []const u8) ?bool {
+            // The caller owns the table's only entry and has left it pending.
+            // Read the generation it was given, as a waiter would.
+            probe_mutex.lock();
+            defer probe_mutex.unlock();
+            var entries = probe_cache.valueIterator();
+            const entry = entries.next() orelse return null;
+            if (entry.answer == .pending) pending_seen += 1;
+            if (calls < generations.len) generations[calls] = entry.generation;
+            calls += 1;
+            return null; // Unanswered, so the entry is removed.
+        }
+    };
+    defer {
+        probe_cache.deinit(std.heap.page_allocator);
+        probe_cache = .empty;
+    }
+    probe_cache.clearRetainingCapacity();
+    Host.calls = 0;
+    Host.pending_seen = 0;
+    const alloc = std.testing.allocator;
+    var env = EnvMap.init(alloc);
+    defer env.deinit();
+    const probe = &[_][]const u8{ "wsl.exe", "--exec", "infocmp", "xterm-ghostty" };
+    // The same question twice: the first attempt ends unanswered and leaves
+    // nothing behind, so the second inserts a fresh entry for the same key.
+    // A waiter tells the two apart only by their generations. Waiters that
+    // shared one would read the second attempt's answer, or wait behind its
+    // timeout.
+    try std.testing.expect(!cachedProbeWithHost(alloc, &env, probe, "C:\\generations", Host));
+    try std.testing.expectEqual(@as(usize, 0), probe_cache.count());
+    try std.testing.expect(!cachedProbeWithHost(alloc, &env, probe, "C:\\generations", Host));
+    try std.testing.expectEqual(@as(usize, 0), probe_cache.count());
+    try std.testing.expectEqual(@as(usize, 2), Host.calls);
+    try std.testing.expectEqual(@as(usize, 2), Host.pending_seen);
+    try std.testing.expect(Host.generations[0] != Host.generations[1]);
+}
+
 test "WSLCACHE waiters share timeout fallback even when a fresh attempt replaces it" {
     const Host = struct {
         var mutex: std.Thread.Mutex = .{};
@@ -1316,8 +1365,8 @@ test "WSLCACHE waiters share timeout fallback even when a fresh attempt replaces
             while (!release) changed.wait(&mutex);
             return null; // Stubbed timeout; never starts WSL.
         }
-        fn launch(env: *const EnvMap, answer: *bool) void {
-            answer.* = cachedProbeWithHost(std.heap.page_allocator, env, &.{ "wsl.exe", "--exec", "infocmp", "xterm-ghostty" }, "C:\\waiters", @This());
+        fn launch(alloc: Allocator, env: *const EnvMap, answer: *bool) void {
+            answer.* = cachedProbeWithHost(alloc, env, &.{ "wsl.exe", "--exec", "infocmp", "xterm-ghostty" }, "C:\\waiters", @This());
             mutex.lock();
             defer mutex.unlock();
             finished += 1;
@@ -1330,6 +1379,15 @@ test "WSLCACHE waiters share timeout fallback even when a fresh attempt replaces
     }
     var env = EnvMap.init(std.testing.allocator);
     defer env.deinit();
+    // The threads allocate the launch's name and pinned argv from this
+    // allocator, so a leak on a waiter's early return fails the test. It is
+    // checked once the last thread has joined, at the end of the test.
+    var checked: std.heap.DebugAllocator(.{ .thread_safe = true }) = .init;
+    var checked_done = false;
+    defer if (!checked_done) {
+        _ = checked.deinit();
+    };
+    const alloc = checked.allocator();
     for ([_]bool{ false, true }) |replace| {
         probe_cache.clearRetainingCapacity();
         Host.entered = false;
@@ -1338,7 +1396,7 @@ test "WSLCACHE waiters share timeout fallback even when a fresh attempt replaces
         Host.finished = 0;
         Host.calls = 0;
         var answers: [5]bool = @splat(true);
-        const owner = try std.Thread.spawn(.{}, Host.launch, .{ &env, &answers[0] });
+        const owner = try std.Thread.spawn(.{}, Host.launch, .{ alloc, &env, &answers[0] });
         var owner_joined = false;
         defer if (!owner_joined) owner.join();
         // Release before joining even if spawning a waiter fails.
@@ -1353,7 +1411,7 @@ test "WSLCACHE waiters share timeout fallback even when a fresh attempt replaces
         }
         try Host.waitFor(0);
         for (&waiters, answers[1..]) |*waiter, *answer| {
-            waiter.* = try std.Thread.spawn(.{}, Host.launch, .{ &env, answer });
+            waiter.* = try std.Thread.spawn(.{}, Host.launch, .{ alloc, &env, answer });
             spawned += 1;
         }
         try Host.waitFor(waiters.len);
@@ -1384,10 +1442,12 @@ test "WSLCACHE waiters share timeout fallback even when a fresh attempt replaces
         try std.testing.expectEqual(@as(usize, 1), Host.calls);
         try std.testing.expectEqual(@as(usize, 0), probe_cache.count());
         var fresh = false;
-        Host.launch(&env, &fresh);
+        Host.launch(alloc, &env, &fresh);
         try std.testing.expect(fresh);
         try std.testing.expectEqual(@as(usize, 2), Host.calls);
     }
+    checked_done = true;
+    try std.testing.expectEqual(std.heap.Check.ok, checked.deinit());
 }
 
 test "WSLCACHE runProbe treats exit minus one as unanswered" {
