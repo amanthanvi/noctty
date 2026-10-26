@@ -13977,6 +13977,19 @@ test "Terminal: resize with wraparound off" {
     try testing.expectEqualStrings("01", str);
 }
 
+test "Terminal: DECCOLM narrows a maximum-width terminal" {
+    // Program output reaches a reflowing resize through DECCOLM. Narrowing
+    // a page this wide frees memory for more rows than a page can hold.
+    const alloc = testing.allocator;
+    var t = try init(alloc, .{ .cols = std.math.maxInt(size.CellCountInt), .rows = 1 });
+    defer t.deinit(alloc);
+
+    t.modes.set(.enable_mode_3, true);
+    try t.deccolm(alloc, .@"80_cols");
+    try testing.expectEqual(@as(size.CellCountInt, 80), t.cols);
+    t.screens.active.assertIntegrity();
+}
+
 test "Terminal: resize with wraparound on" {
     const alloc = testing.allocator;
     const cols = 4;
