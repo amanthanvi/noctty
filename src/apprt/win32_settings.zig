@@ -5926,11 +5926,24 @@ pub const SettingsWindow = struct {
         }
     }
 
-    /// Open Settings on `section`, with focus on its rail button.
+    /// Open Settings on `section`, with focus on its rail button. The caller
+    /// asked for the page itself (the palette's Config problems asks for
+    /// Advanced, whose help text lists them), so a search gives way whether or
+    /// not it finds rows there: a page cut down by an earlier search, or one
+    /// that only says nothing on it matches, is not the page asked for. The
+    /// focus moves once, straight to the rail button, before the switch hides
+    /// the last page's rows: a focused row hidden first would hand the focus to
+    /// the viewport, and with a search, `keepFocusShown` to the search field.
+    /// The button is checked first, as `releaseResetButton` does, so taking the
+    /// focus does not click it and start the switch from inside this one.
     pub fn openSection(self: *SettingsWindow, section: Section) !void {
         try self.open();
-        self.setActiveSection(section);
-        if (self.sectionButton(section)) |button| _ = SetFocus(button);
+        if (self.search_query.active()) self.dropSearch();
+        if (self.sectionButton(section)) |button| {
+            if (@as(usize, @bitCast(sys.SendMessageW(button, BM_GETCHECK, 0, 0))) != BST_CHECKED) _ = sys.SendMessageW(button, BM_SETCHECK, BST_CHECKED, 0);
+            _ = SetFocus(button);
+        }
+        self.showSection(section, true);
     }
 
     /// Bring the settings window up. Idempotent: a subsequent open
@@ -11414,6 +11427,62 @@ test "settings a search changed while a button row has the focus keeps it there,
             typeSearch(settings, "padding");
             try std.testing.expect(sys.IsWindowVisible(button) == 0);
             try std.testing.expectEqual(settings.edit_search.?, GetFocus().?);
+        }
+    }.body);
+}
+
+test "settings a page opened for its own sake drops the search and moves the focus once, to its rail button" {
+    try dialog_test.onHiddenDesktop(struct {
+        // Every window that gets the focus, in order (`WM_SETFOCUS` as user32
+        // delivers it on this thread).
+        const FocusTrace = struct {
+            var focused: [16]HWND = undefined;
+            var len: usize = 0;
+
+            fn sent(code: c_int, wParam: WPARAM, lParam: LPARAM) callconv(.winapi) LRESULT {
+                if (code >= 0) {
+                    const message: *const dialog_test.OpenWork.CWPSTRUCT = @ptrFromInt(@as(usize, @bitCast(lParam)));
+                    if (message.message == WM_SETFOCUS and len < focused.len) {
+                        focused[len] = message.hwnd;
+                        len += 1;
+                    }
+                }
+                return dialog_test.OpenWork.CallNextHookEx(null, code, wParam, lParam);
+            }
+        };
+
+        fn body() !void {
+            const fixture = try dialog_test.Fixture.start();
+            defer fixture.finish();
+            const settings = &fixture.settings;
+            var text_buf: [SettingsWindow.help_text_bytes]u8 = undefined;
+            var expected_buf: [SettingsWindow.help_text_bytes]u8 = undefined;
+            // A search Advanced has nothing for, and the focus on a row it found.
+            typeSearch(settings, "font");
+            try std.testing.expectEqual(@as(u16, 0), settings.search_counts[@intFromEnum(Section.advanced)]);
+            const row = settings.fields.edit_font_size.?;
+            try std.testing.expect(sys.IsWindowVisible(row) != 0);
+            _ = SetFocus(row);
+
+            // The palette's Config problems.
+            FocusTrace.len = 0;
+            const hook = dialog_test.OpenWork.SetWindowsHookExW(dialog_test.OpenWork.WH_CALLWNDPROC, &FocusTrace.sent, null, sys.GetCurrentThreadId()) orelse return error.HookUnavailable;
+            const opened = settings.openSection(.advanced);
+            _ = dialog_test.OpenWork.UnhookWindowsHookEx(hook);
+            try opened;
+
+            // The page asked for, not a page the search empties.
+            try std.testing.expect(!settings.search_query.active());
+            try std.testing.expectEqual(@as(i32, 0), sys.GetWindowTextLengthW(settings.edit_search.?));
+            try std.testing.expectEqual(Section.advanced, settings.active_section);
+            try std.testing.expect(sys.IsWindowVisible(settings.text_help.?) != 0);
+            try std.testing.expectEqualStrings(settings.advancedHelpText(&expected_buf), readEditUtf8(settings.text_help.?, &text_buf).?);
+            try std.testing.expect(sys.IsWindowVisible(settings.fields.btn_open_editor.?) != 0);
+            // One focus move, straight to the rail button: not through the
+            // search field, nor the viewport the hidden row would hand it to.
+            const rail = settings.btn_section_advanced.?;
+            try std.testing.expectEqual(rail, GetFocus().?);
+            try std.testing.expectEqualSlices(HWND, &.{rail}, FocusTrace.focused[0..FocusTrace.len]);
         }
     }.body);
 }
