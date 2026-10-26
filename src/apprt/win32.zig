@@ -9093,6 +9093,8 @@ test "win32 settings fields found by a search and edited save themselves and lea
                 try std.testing.expect(!pending.changed(&reloaded, key));
             }
             try std.testing.expectEqual(@as(usize, 5000), reloaded.@"scrollback-limit");
+            try std.testing.expect(reloaded.@"cursor-style" == .bar);
+            try std.testing.expect(reloaded.@"clipboard-trim-trailing-spaces" != original.@"clipboard-trim-trailing-spaces");
         }
     }.body);
 }
