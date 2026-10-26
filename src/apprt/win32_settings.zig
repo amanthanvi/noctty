@@ -275,6 +275,7 @@ const BN_SETFOCUS: u16 = 0x0006;
 const BN_KILLFOCUS: u16 = 0x0007;
 const WM_SETTEXT: UINT = 0x000C;
 const EM_LIMITTEXT: UINT = 0x00C5;
+const EM_GETLIMITTEXT: UINT = 0x00D5;
 const EM_SETSEL: UINT = 0x00B1;
 const EM_SETCUEBANNER: UINT = 0x1501;
 const BS_AUTOCHECKBOX: u32 = 0x3;
@@ -4208,8 +4209,32 @@ pub const SettingsWindow = struct {
         if (self.search_query.active()) if (self.controlIndex(control)) |index| {
             if (index < settings_clipped_control_count and !self.searchFinds(index)) self.dropSearch();
         };
+        self.focusAhead(control);
         self.showSection(section, true);
         self.ensureControlVisible(control);
+    }
+
+    /// Give `control` the focus ahead of the page switch that shows it, so the
+    /// focus moves once, the way `openSection` moves it to its rail button.
+    /// The switch then hides the last page's rows with none of them holding
+    /// the focus: a focused Reset button given up by its row would otherwise
+    /// send it to the rail (`releaseResetButton`), and a focused field hidden
+    /// would hand it to its parent, the viewport, before the control took it.
+    /// The control may still be hidden. Its focus notification does not scroll
+    /// the form (`restoring_focus`): the caller does, once the page is laid out.
+    fn focusAhead(self: *SettingsWindow, control: HWND) void {
+        self.restoring_focus = true;
+        defer self.restoring_focus = false;
+        _ = SetFocus(control);
+    }
+
+    /// `focusAhead` for `section`'s rail button, checked first, as
+    /// `releaseResetButton` does, so taking the focus does not click it and
+    /// start the switch again from inside this one.
+    fn focusRailButtonAhead(self: *SettingsWindow, section: Section) void {
+        const button = self.sectionButton(section) orelse return;
+        if (@as(usize, @bitCast(sys.SendMessageW(button, BM_GETCHECK, 0, 0))) != BST_CHECKED) _ = sys.SendMessageW(button, BM_SETCHECK, BST_CHECKED, 0);
+        self.focusAhead(button);
     }
 
     /// The UI state the dialog manager keeps hiding focus rectangles in
@@ -4436,10 +4461,10 @@ pub const SettingsWindow = struct {
         self.showSection(next, false);
     }
 
-    /// `setActiveSection`. With `focus_follows` the caller focuses a control
-    /// of the page next, so a focused row the search hides keeps the focus
-    /// until then rather than passing it through the search field: one focus
-    /// move, one announcement.
+    /// `setActiveSection`. With `focus_follows` the caller has already given
+    /// the focus to the page's control or rail button (`focusAhead`), so no
+    /// row of the last page holds it and the search does not move it to the
+    /// search field: one focus move, one announcement.
     fn showSection(self: *SettingsWindow, next: Section, focus_follows: bool) void {
         const changed = self.active_section != next;
         self.materializeSection(next);
@@ -5912,18 +5937,16 @@ pub const SettingsWindow = struct {
         // below lays out and paints once.
         if (self.search_query.active() and !self.searchFinds(settingControlIndex(field))) self.dropSearch();
         const section = self.settingDestination(field).section;
-        self.showSection(section, true);
-        // Asked again: the section's rows may have been made just now.
-        const destination = self.settingDestination(field);
-        if (destination.hwnd) |control| {
-            self.ensureControlVisible(control);
-            // Unsupported controls are disabled: focus stays on the section.
-            if (sys.IsWindowEnabled(control) != 0) {
-                _ = SetFocus(control);
-            } else if (self.sectionButton(destination.section)) |button| {
-                _ = SetFocus(button);
-            }
+        // The page's rows first, so the control exists to take the focus
+        // before the switch (`focusAhead`): the focus moves once.
+        self.materializeSection(section);
+        const control = self.settingDestination(field).hwnd;
+        if (control) |target| {
+            // Unsupported controls are disabled: the focus goes to the page.
+            if (sys.IsWindowEnabled(target) != 0) self.focusAhead(target) else self.focusRailButtonAhead(section);
         }
+        self.showSection(section, true);
+        if (control) |target| self.ensureControlVisible(target);
     }
 
     /// Open Settings on `section`, with focus on its rail button. The caller
@@ -5932,17 +5955,13 @@ pub const SettingsWindow = struct {
     /// not it finds rows there: a page cut down by an earlier search, or one
     /// that only says nothing on it matches, is not the page asked for. The
     /// focus moves once, straight to the rail button, before the switch hides
-    /// the last page's rows: a focused row hidden first would hand the focus to
-    /// the viewport, and with a search, `keepFocusShown` to the search field.
-    /// The button is checked first, as `releaseResetButton` does, so taking the
-    /// focus does not click it and start the switch from inside this one.
+    /// the last page's rows (`focusRailButtonAhead`): a focused row hidden
+    /// first would hand the focus to the viewport, and with a search,
+    /// `keepFocusShown` to the search field.
     pub fn openSection(self: *SettingsWindow, section: Section) !void {
         try self.open();
         if (self.search_query.active()) self.dropSearch();
-        if (self.sectionButton(section)) |button| {
-            if (@as(usize, @bitCast(sys.SendMessageW(button, BM_GETCHECK, 0, 0))) != BST_CHECKED) _ = sys.SendMessageW(button, BM_SETCHECK, BST_CHECKED, 0);
-            _ = SetFocus(button);
-        }
+        self.focusRailButtonAhead(section);
         self.showSection(section, true);
     }
 
@@ -10115,6 +10134,38 @@ const dialog_test = struct {
         _ = RedrawWindow(hwnd, null, null, RDW_UPDATENOW | RDW_ALLCHILDREN);
     }
 
+    /// Every window that gets the focus between `start` and `stop`, in order:
+    /// `WM_SETFOCUS` as user32 delivers it on this thread (a thread-local
+    /// `WH_CALLWNDPROC` hook), which is what a screen reader hears as a focus
+    /// move.
+    const FocusTrace = struct {
+        var focused: [16]HWND = undefined;
+        var len: usize = 0;
+        var hook: ?*anyopaque = null;
+
+        fn sent(code: c_int, wParam: WPARAM, lParam: LPARAM) callconv(.winapi) LRESULT {
+            if (code >= 0) {
+                const message: *const OpenWork.CWPSTRUCT = @ptrFromInt(@as(usize, @bitCast(lParam)));
+                if (message.message == WM_SETFOCUS and len < focused.len) {
+                    focused[len] = message.hwnd;
+                    len += 1;
+                }
+            }
+            return OpenWork.CallNextHookEx(null, code, wParam, lParam);
+        }
+
+        fn start() !void {
+            len = 0;
+            hook = OpenWork.SetWindowsHookExW(OpenWork.WH_CALLWNDPROC, &sent, null, sys.GetCurrentThreadId()) orelse return error.HookUnavailable;
+        }
+
+        fn stop() []const HWND {
+            if (hook) |installed| _ = OpenWork.UnhookWindowsHookEx(installed);
+            hook = null;
+            return focused[0..len];
+        }
+    };
+
     /// What the window shows now equals a full repaint of it: nothing was left
     /// unpainted or stale by whatever ran before. The caret is hidden.
     fn expectNothingStale(hwnd: HWND) !void {
@@ -11433,24 +11484,6 @@ test "settings a search changed while a button row has the focus keeps it there,
 
 test "settings a page opened for its own sake drops the search and moves the focus once, to its rail button" {
     try dialog_test.onHiddenDesktop(struct {
-        // Every window that gets the focus, in order (`WM_SETFOCUS` as user32
-        // delivers it on this thread).
-        const FocusTrace = struct {
-            var focused: [16]HWND = undefined;
-            var len: usize = 0;
-
-            fn sent(code: c_int, wParam: WPARAM, lParam: LPARAM) callconv(.winapi) LRESULT {
-                if (code >= 0) {
-                    const message: *const dialog_test.OpenWork.CWPSTRUCT = @ptrFromInt(@as(usize, @bitCast(lParam)));
-                    if (message.message == WM_SETFOCUS and len < focused.len) {
-                        focused[len] = message.hwnd;
-                        len += 1;
-                    }
-                }
-                return dialog_test.OpenWork.CallNextHookEx(null, code, wParam, lParam);
-            }
-        };
-
         fn body() !void {
             const fixture = try dialog_test.Fixture.start();
             defer fixture.finish();
@@ -11465,10 +11498,9 @@ test "settings a page opened for its own sake drops the search and moves the foc
             _ = SetFocus(row);
 
             // The palette's Config problems.
-            FocusTrace.len = 0;
-            const hook = dialog_test.OpenWork.SetWindowsHookExW(dialog_test.OpenWork.WH_CALLWNDPROC, &FocusTrace.sent, null, sys.GetCurrentThreadId()) orelse return error.HookUnavailable;
+            try dialog_test.FocusTrace.start();
             const opened = settings.openSection(.advanced);
-            _ = dialog_test.OpenWork.UnhookWindowsHookEx(hook);
+            const trace = dialog_test.FocusTrace.stop();
             try opened;
 
             // The page asked for, not a page the search empties.
@@ -11482,7 +11514,123 @@ test "settings a page opened for its own sake drops the search and moves the foc
             // search field, nor the viewport the hidden row would hand it to.
             const rail = settings.btn_section_advanced.?;
             try std.testing.expectEqual(rail, GetFocus().?);
-            try std.testing.expectEqualSlices(HWND, &.{rail}, FocusTrace.focused[0..FocusTrace.len]);
+            try std.testing.expectEqualSlices(HWND, &.{rail}, trace);
+        }
+    }.body);
+}
+
+test "settings a field opened on another page takes the focus in one move, from a field or a Reset button the switch hides" {
+    try dialog_test.onHiddenDesktop(struct {
+        fn body() !void {
+            // Every row differs from its default, so Appearance's rows hold
+            // Reset buttons.
+            const fixture = try dialog_test.Fixture.startChanged(false);
+            defer fixture.finish();
+            const settings = &fixture.settings;
+            var all_once = true;
+            // The palette's jump to a field on Terminal (`openField`), and the
+            // reveal of a field whose value Settings will not take
+            // (`revealControl`, the same page switch).
+            inline for (.{ "openField", "revealControl" }) |jump| {
+                inline for (.{ "a field", "a Reset button" }) |from| {
+                    try oneMove(settings, jump, from, &all_once);
+                }
+            }
+            try std.testing.expect(all_once);
+        }
+
+        /// From Font size, or its Reset button, on Appearance, to Scrollback
+        /// limit on Terminal; says how the focus moved if not in one move.
+        fn oneMove(settings: *SettingsWindow, comptime jump: []const u8, comptime from: []const u8, all_once: *bool) !void {
+            const font_size = settings.fields.edit_font_size.?;
+            settings.setActiveSection(.appearance);
+            const start = if (comptime std.mem.eql(u8, from, "a field"))
+                font_size
+            else
+                settings.reset_buttons[settings.controlIndex(font_size).?].?;
+            try std.testing.expect(sys.IsWindowVisible(start) != 0);
+            _ = SetFocus(start);
+            try std.testing.expectEqual(start, GetFocus().?);
+
+            try dialog_test.FocusTrace.start();
+            const opened: anyerror!void = if (comptime std.mem.eql(u8, jump, "openField"))
+                settings.openField(.scrollback_limit)
+            else reveal: {
+                // As its callers do: reveal, then focus.
+                settings.revealControl(.terminal, settings.fields.edit_scrollback.?);
+                _ = SetFocus(settings.fields.edit_scrollback.?);
+                break :reveal {};
+            };
+            const trace = dialog_test.FocusTrace.stop();
+            try opened;
+
+            const target = settings.fields.edit_scrollback.?;
+            try std.testing.expectEqual(Section.terminal, settings.active_section);
+            try std.testing.expect(sys.IsWindowVisible(target) != 0);
+            try std.testing.expectEqual(target, GetFocus().?);
+            // One move, straight to the field: not first to the rail, where a
+            // Reset button given up by its row sends the focus, nor to the
+            // viewport, where Windows puts the focus of a field it hides.
+            if (trace.len == 1 and trace[0] == target) return;
+            std.debug.print("focus moves, {s} from {s}: {d}, first to the {s}\n", .{
+                jump,
+                from,
+                trace.len,
+                if (trace.len == 0) "-" else if (trace[0] == settings.viewport.?) "viewport" else if (settings.sectionForButton(trace[0]) != null) "rail" else if (trace[0] == target) "field" else "another window",
+            });
+            all_once.* = false;
+        }
+    }.body);
+}
+
+test "settings a value set on the search field through UIA is cut to the field's limit, so the field shows what is searched" {
+    try dialog_test.onHiddenDesktop(struct {
+        fn body() !void {
+            const com = @import("win32_uia/com.zig");
+            const fixture = try dialog_test.Fixture.startWith(true);
+            defer fixture.finish();
+            const settings = &fixture.settings;
+            const search = settings.edit_search.?;
+            const provider = settings.control_uia_providers[settings.controlIndex(search).?].?;
+            const value = &provider.value_iface;
+            const limit: i32 = @intCast(search_text_max_code_units);
+            var field_buf: [search_text_max_code_units * 3]u8 = undefined;
+
+            // 125 units of "font ", then "size zzzz": the first 128 units end
+            // in "siz", which finds Font size; the rest would find nothing.
+            const long = comptime blk: {
+                @setEvalBranchQuota(10_000);
+                break :blk std.unicode.utf8ToUtf16LeStringLiteral(("font " ** 25) ++ "size zzzz");
+            };
+            try std.testing.expect(long.len > search_text_max_code_units);
+            try std.testing.expectEqual(com.S_OK, value.vtbl.SetValue(value, long));
+            try std.testing.expectEqual(limit, sys.GetWindowTextLengthW(search));
+            const shown = readEditUtf8(search, &field_buf).?;
+            try std.testing.expectEqualStrings(("font " ** 25) ++ "siz", shown);
+            // What the field shows is what was searched.
+            try std.testing.expectEqualStrings(shown, settings.search_query.typedText());
+
+            // The cut never splits a character in two: a pair that would
+            // straddle the limit goes whole.
+            const pair = comptime blk: {
+                @setEvalBranchQuota(10_000);
+                break :blk std.unicode.utf8ToUtf16LeStringLiteral(("a" ** 127) ++ "\u{1F600}b");
+            };
+            try std.testing.expectEqual(com.S_OK, value.vtbl.SetValue(value, pair));
+            try std.testing.expectEqual(limit - 1, sys.GetWindowTextLengthW(search));
+
+            // A value within the limit is set as it is.
+            try std.testing.expectEqual(com.S_OK, value.vtbl.SetValue(value, std.unicode.utf8ToUtf16LeStringLiteral("padding")));
+            try std.testing.expectEqualStrings("padding", readEditUtf8(search, &field_buf).?);
+            try std.testing.expectEqualStrings("padding", settings.search_query.typedText());
+
+            // The form's text fields keep to their limit the same way, which
+            // is what `readEditUtf8` reads of them.
+            const family = settings.fields.edit_font_family.?;
+            const family_value = &settings.control_uia_providers[settings.controlIndex(family).?].?.value_iface;
+            var many = [_:0]u16{'a'} ** (edit_text_max_code_units + 100);
+            try std.testing.expectEqual(com.S_OK, family_value.vtbl.SetValue(family_value, &many));
+            try std.testing.expectEqual(@as(i32, @intCast(edit_text_max_code_units - 1)), sys.GetWindowTextLengthW(family));
         }
     }.body);
 }
@@ -15160,9 +15308,35 @@ fn settingsEditProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callc
             _ = sys.SetWindowLongPtrW(hwnd, GWLP_WNDPROC, previous);
             _ = sys.SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
         },
+        WM_SETTEXT => if (lParam != 0) {
+            if (setTextCut(hwnd, proc, wParam, @ptrFromInt(@as(usize, @bitCast(lParam))))) |result| return result;
+        },
         else => {},
     }
     return sys.CallWindowProcW(proc, hwnd, msg, wParam, lParam);
+}
+
+/// A value set from outside the field (UIA `SetValue`, which calls
+/// `SetWindowTextW`, or an MSAA `put_accValue`) arrives as `WM_SETTEXT`, which
+/// `EM_LIMITTEXT` does not limit (per its documentation), while typing and
+/// pasting stop at the limit and the code that reads a field reads only that
+/// much: the search field 128 units (`searchTextChanged`), the others 4095
+/// (`readEditUtf8`). Over the limit, the field gets the text cut to it, never
+/// through a surrogate pair, so it shows exactly what is read. Null when the
+/// text fits and goes through as it is.
+fn setTextCut(hwnd: HWND, proc: *const anyopaque, wParam: WPARAM, text: [*:0]const u16) ?LRESULT {
+    var cut: [edit_text_max_code_units]u16 = undefined;
+    const limit: usize = @intCast(@max(0, sys.SendMessageW(hwnd, EM_GETLIMITTEXT, 0, 0)));
+    if (limit >= cut.len) return null;
+    var len: usize = 0;
+    while (len <= limit and text[len] != 0) len += 1;
+    if (len <= limit) return null;
+    var keep = limit;
+    // A high surrogate last would be half a character.
+    if (keep > 0 and text[keep - 1] & 0xFC00 == 0xD800) keep -= 1;
+    @memcpy(cut[0..keep], text[0..keep]);
+    cut[keep] = 0;
+    return sys.CallWindowProcW(proc, hwnd, WM_SETTEXT, wParam, @bitCast(@intFromPtr(&cut)));
 }
 
 const FieldFrameInsets = struct { x: i32, y: i32 };
