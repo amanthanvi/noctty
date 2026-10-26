@@ -1330,8 +1330,9 @@ const SearchQuery = struct {
     /// Bytes kept of what is typed: the field holds `search_text_max_code_units`
     /// UTF-16 units, at most three bytes each.
     const capacity = search_text_max_code_units * 3;
-    /// Words past this many are not looked for.
-    const max_words = 16;
+    /// Room for every word the kept text can hold: a word and the space
+    /// after it take two bytes at least, so no word is ever left out.
+    const max_words = (capacity + 1) / 2;
     const modified_word = "@modified";
 
     /// What was typed, without the spaces around it, for the message that
@@ -1361,7 +1362,7 @@ const SearchQuery = struct {
             if (end > start) {
                 if (std.mem.eql(u8, query.lower[start..end], modified_word)) {
                     query.modified = true;
-                } else if (query.word_count < max_words) {
+                } else {
                     query.word_starts[query.word_count] = @intCast(start);
                     query.word_lens[query.word_count] = @intCast(end - start);
                     query.word_count += 1;
@@ -11087,10 +11088,18 @@ test "settings search reads the words typed and @modified, in any case" {
     try std.testing.expect(!a.sameSearch(&SearchQuery.parse("font s")));
     try std.testing.expect(!a.sameSearch(&SearchQuery.parse("font @modified")));
 
-    // Words past the limit are not looked for; the text is kept whole up to
-    // its capacity and cut only between characters.
-    query = SearchQuery.parse("a b c d e f g h i j k l m n o p q r s");
-    try std.testing.expectEqual(@as(usize, SearchQuery.max_words), query.word_count);
+    // Every word is looked for, however many the field holds: a seventeenth
+    // that no row has finds nothing, and a change to it is a new search.
+    const fonts = "font " ** 16;
+    query = SearchQuery.parse(fonts ++ "zzzz");
+    try std.testing.expectEqual(@as(usize, 17), query.word_count);
+    for (settings_search_text) |row| try std.testing.expect(!query.matchesText(row));
+    try std.testing.expect(!query.sameSearch(&SearchQuery.parse(fonts ++ "zzzy")));
+    // The most words the field's 128 units can hold: 64 of one letter.
+    query = SearchQuery.parse(("a " ** 63) ++ "a");
+    try std.testing.expectEqual(@as(usize, 64), query.word_count);
+    // The text is kept whole up to its capacity and cut only between
+    // characters.
     var long: [SearchQuery.capacity + 2]u8 = undefined;
     @memset(&long, 'x');
     // A two-byte character across the cut.
@@ -11327,6 +11336,28 @@ test "settings Enter in the search goes to the first setting found, on another p
             try std.testing.expect(settings.handleAccelerator(search, WM_KEYDOWN, VK_RETURN, 0));
             try std.testing.expectEqual(Section.appearance, settings.active_section);
             try std.testing.expectEqual(settings.btn_section_appearance.?, GetFocus().?);
+        }
+    }.body);
+}
+
+test "settings a word past the sixteenth still has to match, and changing it runs the search again" {
+    try dialog_test.onHiddenDesktop(struct {
+        fn body() !void {
+            const fixture = try dialog_test.Fixture.start();
+            defer fixture.finish();
+            const settings = &fixture.settings;
+            const fonts = "font " ** 16;
+            typeSearch(settings, fonts ++ "font");
+            try std.testing.expectEqual(@as(usize, 2), settings.search_total);
+            // A seventeenth word no row has.
+            typeSearch(settings, fonts ++ "zzzz");
+            try std.testing.expectEqual(@as(usize, 0), settings.search_total);
+            try std.testing.expectEqual(@as(usize, 0), settings.formItems().len);
+            try std.testing.expect(sys.IsWindowVisible(settings.fields.edit_font_size.?) == 0);
+            // Changed back, it finds the rows again.
+            typeSearch(settings, fonts ++ "size");
+            try std.testing.expectEqual(@as(usize, 1), settings.search_total);
+            try std.testing.expect(sys.IsWindowVisible(settings.fields.edit_font_size.?) != 0);
         }
     }.body);
 }
