@@ -1745,6 +1745,29 @@ leaves the rows where they are until the search changes or a page is shown
 again. A command palette jump to a setting the search hides clears the search,
 and so does Settings showing a field whose value it will not take.
 
+**All settings**, the last page on the left, lists every key the config file
+can hold, with the value in effect and the first sentence of what it does; a
+key that Windows accepts but does not honour (background blur, the GTK keys)
+says so instead. Up and Down select a key, which opens to its whole
+description and the line of the config file that sets it. The file is read
+for this only from a local drive, as UTF-8 or as UTF-16 with a byte order
+mark. It is never read through a symlink or junction, on the file or a folder
+above it, that leads anywhere else, such as a network share. Nor is it read
+when it or a folder above it is a cloud placeholder of OneDrive or another
+cloud-file provider, which a read would make the provider fetch first while
+the window waits. When it cannot be read, the page says so instead of a line.
+Enter, or double-clicking
+the key, opens the config file the way "Open in default editor" does (through
+the `.txt` association), which takes no line number, and the editor may put
+the cursor anywhere: go to the line shown. Ctrl+C copies the key's name, and Shift+F10
+or a right-click offers both. The value shown is the one in effect: a field you
+have changed on another page but not saved yet, even one whose change you can
+already see in the open windows, keeps its saved value here and is marked as
+changed and not saved yet. The search covers
+this page too, by each key's name, value and description, so its count counts
+every setting once: searching "padding" finds the three padding fields on
+Appearance and the four `window-padding-*` keys here, "4 settings match".
+
 ## Running elevated
 
 Use **New Elevated Window** in the command palette, or bind

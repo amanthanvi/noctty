@@ -175,6 +175,16 @@ pub const PaletteListState = struct {
     /// Optional screen-space bounds for widgets whose rows are not arranged
     /// as one contiguous vertical list (for example, terminal hint chips).
     row_bounds: ?*const fn (ctx: *anyopaque, index: usize) ?PaletteListRowBounds = null,
+    /// The list's `HelpText`: how to use it, read when it takes the focus.
+    help_text: []const u8 = "",
+    /// A row's `HelpText`, written into `buf` (what the row documents).
+    row_help: ?*const fn (ctx: *anyopaque, index: usize, buf: []u8) []const u8 = null,
+    /// The keyboard focus is on the selected row while the list has it, as in
+    /// a native list box: the fragment root answers it for `GetFocus`, and a
+    /// selection change while the list is focused is a focus change too. For
+    /// a list that takes the keyboard focus itself; a palette whose focus
+    /// stays in its query field leaves this off.
+    focus_selected_row: bool = false,
     use_com_threading: bool = false,
 };
 
@@ -374,6 +384,25 @@ pub const PaletteListProvider = struct {
         const row = self.createRow(index) orelse return;
         defer _ = PaletteRowProvider.Release(&row.base);
         events.raiseSelectionItemSelected(&row.base);
+        if (self.focusOnRows()) events.raiseFocusChanged(&row.base);
+    }
+
+    /// Whether the keyboard focus is on the selected row now
+    /// (`PaletteListState.focus_selected_row`).
+    fn focusOnRows(self: *const PaletteListProvider) bool {
+        if (!self.state.focus_selected_row) return false;
+        const callback = self.state.focused orelse return false;
+        return callback(self.state.ctx);
+    }
+
+    /// The list took the keyboard focus: with the focus on its rows, the
+    /// selected row is what a reader announces.
+    pub fn raiseFocusOnSelectedRow(self: *PaletteListProvider) void {
+        if (com.UiaClientsAreListening() == 0 or !self.focusOnRows()) return;
+        const index = self.selectedIndex() orelse return events.raiseFocusChanged(&self.base);
+        const row = self.createRow(index) orelse return;
+        defer _ = PaletteRowProvider.Release(&row.base);
+        events.raiseFocusChanged(&row.base);
     }
 
     /// Publish removal while the provider and its row fragments are still
@@ -608,7 +637,12 @@ pub const PaletteListProvider = struct {
                     callback(self.state.ctx)
                 else
                     false;
-                out.* = com.VARIANT.fromBool(focused);
+                // With the focus on its rows, the selected row has it.
+                out.* = com.VARIANT.fromBool(focused and !(self.state.focus_selected_row and self.selectedIndex() != null));
+            },
+            constants.UIA_HelpTextPropertyId => if (self.state.help_text.len != 0) {
+                const bstr = allocBstrFromUtf8(self.alloc, self.state.help_text) orelse return com.E_OUTOFMEMORY;
+                out.* = com.VARIANT.fromBstr(bstr);
             },
             else => {},
         }
@@ -749,10 +783,14 @@ pub const PaletteListProvider = struct {
             callback(self.state.ctx)
         else
             false;
-        if (focused) {
-            _ = FragmentAddRef(&self.fragment);
-            out.* = &self.fragment;
-        }
+        if (!focused) return com.S_OK;
+        if (self.state.focus_selected_row) if (self.selectedIndex()) |index| {
+            const row = self.createRow(index) orelse return com.E_OUTOFMEMORY;
+            out.* = &row.fragment;
+            return com.S_OK;
+        };
+        _ = FragmentAddRef(&self.fragment);
+        out.* = &self.fragment;
         return com.S_OK;
     }
 };
@@ -765,6 +803,11 @@ fn validPaletteBounds(bounds: com.UiaRect) bool {
         bounds.width > 0 and
         bounds.height > 0;
 }
+
+/// The most of a row's help text a client gets (`PaletteListState.row_help`).
+const row_help_capacity = 16 * 1024;
+/// `SetFocus` the window: inside `PaletteRowProvider` the name is its method.
+const focusWindow = SetFocus;
 
 const PaletteRowProvider = struct {
     const Object = object.ComObject(PaletteRowProvider, query, release);
@@ -915,6 +958,13 @@ const PaletteRowProvider = struct {
                 ) orelse return com.E_OUTOFMEMORY;
                 out.* = com.VARIANT.fromBstr(bstr);
             },
+            constants.UIA_HelpTextPropertyId => if (self.parent.state.row_help) |callback| {
+                var buf: [row_help_capacity]u8 = undefined;
+                const bstr = allocBstrFromUtf8(self.alloc, callback(self.parent.state.ctx, self.index, &buf)) orelse return com.E_OUTOFMEMORY;
+                out.* = com.VARIANT.fromBstr(bstr);
+            },
+            constants.UIA_HasKeyboardFocusPropertyId => out.* = com.VARIANT.fromBool(self.parent.focusOnRows() and self.parent.selectedIndex() == self.index),
+            constants.UIA_IsKeyboardFocusablePropertyId => out.* = com.VARIANT.fromBool(self.parent.state.focus_selected_row),
             constants.UIA_SelectionItemIsSelectedPropertyId => out.* = com.VARIANT.fromBool(self.parent.selectedIndex() == self.index),
             constants.UIA_IsOffscreenPropertyId => out.* = com.VARIANT.fromBool(self.parent.rowBounds(self.index) == null),
             constants.UIA_IsControlElementPropertyId, constants.UIA_IsContentElementPropertyId => out.* = com.VARIANT.fromBool(true),
@@ -971,7 +1021,13 @@ const PaletteRowProvider = struct {
         const self = fromFragment(p);
         if (!self.available()) return com.UIA_E_ELEMENTNOTAVAILABLE;
         if (!self.parent.rowEnabled(self.index)) return com.UIA_E_ELEMENTNOTENABLED;
-        return com.E_NOTIMPL;
+        if (!self.parent.state.focus_selected_row) return com.E_NOTIMPL;
+        // The focus is on the selected row: select it and focus the list. A
+        // list that did not take the focus (going away, or disabled) says so.
+        const hr = self.select();
+        if (hr != com.S_OK) return hr;
+        _ = focusWindow(self.parent.hwnd);
+        return if (hwndHasKeyboardFocus(self.parent.hwnd)) com.S_OK else com.UIA_E_ELEMENTNOTAVAILABLE;
     }
     fn GetFragmentRoot(p: *com.IRawElementProviderFragment, out: *?*com.IRawElementProviderFragmentRoot) callconv(.winapi) com.HRESULT {
         const self = fromFragment(p);
@@ -1034,7 +1090,7 @@ const PaletteRowProvider = struct {
     }
 };
 
-pub const settings_section_count = 7;
+pub const settings_section_count = 8;
 
 /// Stable provider for native STATIC controls that this custom settings
 /// window otherwise exposes as generic Panes through the system bridge.
@@ -5133,6 +5189,74 @@ test "PaletteListProvider exposes configurable identity and focus" {
     );
     try std.testing.expect(focus_fragment == &provider.fragment);
     _ = PaletteListProvider.FragmentRelease(focus_fragment.?);
+}
+
+test "PaletteListProvider with the focus on its rows gives it to the selected one, and reads their help text" {
+    const callbacks = struct {
+        var focused_now = true;
+        fn focused(_: *anyopaque) bool {
+            return focused_now;
+        }
+        fn rowHelp(_: *anyopaque, index: usize, buf: []u8) []const u8 {
+            return std.fmt.bufPrint(buf, "help for row {d}", .{index}) catch "";
+        }
+    };
+    callbacks.focused_now = true;
+    var state_data = TestPaletteState{ .count = 3, .selected = 1 };
+    var state = state_data.state();
+    state.keyboard_focusable = true;
+    state.focused = callbacks.focused;
+    state.help_text = "Up and Down move";
+    state.row_help = callbacks.rowHelp;
+    state.focus_selected_row = true;
+    const list = try settings_provider_windows.create("STATIC");
+    var list_alive = true;
+    defer if (list_alive) {
+        _ = settings_provider_windows.DestroyWindow(list);
+    };
+    const provider = try PaletteListProvider.create(std.testing.allocator, list, state);
+    defer _ = PaletteListProvider.Release(&provider.base);
+
+    // The list says how to use it, and leaves the focus to its selected row.
+    try expectBstrProperty(&provider.base, constants.UIA_HelpTextPropertyId, "Up and Down move");
+    var value = com.VARIANT.empty();
+    try std.testing.expectEqual(com.S_OK, PaletteListProvider.GetPropertyValue(&provider.base, constants.UIA_HasKeyboardFocusPropertyId, &value));
+    try std.testing.expectEqual(com.VARIANT_FALSE, value.value.bool_val);
+    var focus: ?*com.IRawElementProviderFragment = null;
+    try std.testing.expectEqual(com.S_OK, PaletteListProvider.FragmentRootGetFocus(&provider.fragment_root, &focus));
+    try std.testing.expectEqual(@as(usize, 1), PaletteRowProvider.fromFragment(focus.?).index);
+    _ = PaletteRowProvider.FragmentRelease(focus.?);
+
+    // Each row reads its own help text; the selected one has the focus.
+    for (0..3) |index| {
+        const row = provider.createRow(index).?;
+        defer _ = PaletteRowProvider.Release(&row.base);
+        var help: [32]u8 = undefined;
+        try expectBstrProperty(&row.base, constants.UIA_HelpTextPropertyId, try std.fmt.bufPrint(&help, "help for row {d}", .{index}));
+        for ([_]i32{ constants.UIA_HasKeyboardFocusPropertyId, constants.UIA_IsKeyboardFocusablePropertyId }, [_]bool{ index == 1, true }) |property, expected| {
+            value = com.VARIANT.empty();
+            try std.testing.expectEqual(com.S_OK, PaletteRowProvider.GetPropertyValue(&row.base, property, &value));
+            try std.testing.expectEqual(if (expected) com.VARIANT_TRUE else com.VARIANT_FALSE, value.value.bool_val);
+        }
+    }
+
+    // SetFocus on a row selects it and focuses the list.
+    const first = provider.createRow(0).?;
+    defer _ = PaletteRowProvider.Release(&first.base);
+    try std.testing.expectEqual(com.S_OK, PaletteRowProvider.SetFocus(&first.fragment));
+    try std.testing.expectEqual(@as(?usize, 0), state_data.selected_by_provider);
+    try std.testing.expect(hwndHasKeyboardFocus(list));
+    // A list window already gone (torn down while a client still holds the
+    // row) takes no focus, and the row says so rather than reporting success.
+    _ = settings_provider_windows.DestroyWindow(list);
+    list_alive = false;
+    try std.testing.expectEqual(com.UIA_E_ELEMENTNOTAVAILABLE, PaletteRowProvider.SetFocus(&first.fragment));
+
+    // A list without the focus has none to give.
+    callbacks.focused_now = false;
+    focus = null;
+    try std.testing.expectEqual(com.S_OK, PaletteListProvider.FragmentRootGetFocus(&provider.fragment_root, &focus));
+    try std.testing.expect(focus == null);
 }
 
 test "palette list and row providers propagate COM threading options" {

@@ -31,7 +31,12 @@ const settings_transaction = @import("win32_settings_transaction.zig");
 const sys = @import("win32/sys.zig");
 const config_problems = @import("win32/config_problems.zig");
 const field_model = @import("win32_settings_fields.zig");
+const settings_reference = @import("win32_settings_reference.zig");
 const bench_trace = @import("win32/bench_trace.zig");
+const local_target = @import("win32/local_target.zig");
+const config_file_load = @import("../config/file_load.zig");
+const windows_shell = @import("../config/windows_shell.zig");
+const os_path = @import("../os/path.zig");
 const SetFocus = sys.SetFocus;
 
 /// Minimal set of Win32 aliases + externs we need here. Shared ABI structs
@@ -138,6 +143,8 @@ const VK_DELETE: usize = 0x2E;
 const BM_CLICK: UINT = 0x00F5;
 const DLGC_DEFPUSHBUTTON: LRESULT = 0x0010;
 const DLGC_UNDEFPUSHBUTTON: LRESULT = 0x0020;
+const DLGC_WANTARROWS: LRESULT = 0x0001;
+const DLGC_WANTCHARS: LRESULT = 0x0080;
 const WM_GETDLGCODE: UINT = 0x0087;
 const SPI_GETWHEELSCROLLLINES: UINT = 0x0068;
 const WHEEL_DELTA: i32 = 120;
@@ -216,6 +223,7 @@ const BTN_SECTION_KEYBINDINGS: usize = 204;
 const BTN_SECTION_ADVANCED: usize = 205;
 const BTN_SECTION_PRIVACY: usize = 206;
 const BTN_SECTION_UPDATES: usize = 207;
+const BTN_SECTION_REFERENCE: usize = 208;
 const BTN_SAVE: usize = 301;
 const BTN_KEYBINDINGS_EDITOR: usize = displayFieldId("btn_keybindings_editor");
 const BTN_CONFLICT_KEEP: usize = 303;
@@ -345,6 +353,8 @@ pub const Section = enum(u32) {
     updates,
     keybindings,
     advanced,
+    /// Every config key, in one list (`ReferenceList`): the reference page.
+    reference,
 
     fn fromButtonId(id: usize) ?Section {
         return switch (id) {
@@ -355,6 +365,7 @@ pub const Section = enum(u32) {
             BTN_SECTION_UPDATES => .updates,
             BTN_SECTION_KEYBINDINGS => .keybindings,
             BTN_SECTION_ADVANCED => .advanced,
+            BTN_SECTION_REFERENCE => .reference,
             else => null,
         };
     }
@@ -368,6 +379,7 @@ pub const Section = enum(u32) {
             .updates => std.unicode.utf8ToUtf16LeStringLiteral("Updates"),
             .keybindings => std.unicode.utf8ToUtf16LeStringLiteral("Keybindings"),
             .advanced => std.unicode.utf8ToUtf16LeStringLiteral("Advanced"),
+            .reference => std.unicode.utf8ToUtf16LeStringLiteral("All settings"),
         };
     }
 
@@ -380,6 +392,7 @@ pub const Section = enum(u32) {
             .updates => "Updates",
             .keybindings => "Keybindings",
             .advanced => "Advanced",
+            .reference => "All settings",
         };
     }
 
@@ -392,6 +405,7 @@ pub const Section = enum(u32) {
             .updates => "Whether noctty checks for updates, and which releases it follows.",
             .keybindings => "Key bindings are set in the config file. Open it here, or list the current bindings from a terminal.",
             .advanced => "Open the config file in your text editor for settings that have no control here. The file Settings saves to, the problems found in the config, and changes you have not saved yet are listed below.",
+            .reference => "Every setting the config file can hold, with the value in effect and what it does. Enter opens the config file; Ctrl+C copies a setting's name.",
         };
     }
 };
@@ -745,6 +759,10 @@ const StatusNote = enum {
     /// A reset could not make what it needs (memory for the copies, or a
     /// save in progress); the field keeps its value. Names it.
     reset_failed,
+    /// The All settings page copied a key's name. Names it.
+    key_copied,
+    /// The clipboard would not take a key's name. Names it.
+    key_copy_failed,
 
     fn text(self: StatusNote) []const u8 {
         return switch (self) {
@@ -769,6 +787,8 @@ const StatusNote = enum {
             .field_reset => "The setting is back to its default. Save to keep it.",
             .already_default => "The setting already has its default.",
             .reset_failed => "Could not reset the setting; it keeps its value.",
+            .key_copied => "Copied the setting's name.",
+            .key_copy_failed => "Could not copy the setting's name.",
         };
     }
 
@@ -778,6 +798,7 @@ const StatusNote = enum {
         return switch (self) {
             .file_unopenable, .write_incomplete, .unsupported_encoding, .binary_config, .saved_overridden => true,
             .field_reset, .already_default, .reset_failed => true,
+            .key_copied, .key_copy_failed => true,
             else => false,
         };
     }
@@ -791,6 +812,8 @@ const StatusNote = enum {
             .binary_config => std.fmt.allocPrint(alloc, "Nothing was saved: {s} contains NUL bytes, so it is a binary file or text in UTF-16 or UTF-32. Save it as UTF-8 in an editor, then save again. Your edits are kept.", .{detail}),
             .file_unopenable => std.fmt.allocPrint(alloc, "Nothing was saved: {s} cannot be opened. Close any program that has it open, or check its permissions, then save again. Your edits are kept.", .{detail}),
             .write_incomplete => std.fmt.allocPrint(alloc, "Saving stopped part way through the config file, which may now be incomplete. The complete new text is kept in {s}. Copy that over the config file, then save again. Your edits are kept.", .{detail}),
+            .key_copied => std.fmt.allocPrint(alloc, "Copied {s}.", .{detail}),
+            .key_copy_failed => std.fmt.allocPrint(alloc, "Could not copy {s}: the clipboard is busy or unavailable.", .{detail}),
             else => alloc.dupe(u8, self.text()),
         };
     }
@@ -1199,7 +1222,7 @@ comptime {
             if (spec.section != null and spec.section == other.section and spec.order == other.order)
                 @compileError("Duplicate Settings form row position");
         }
-        for (.{ BTN_SECTION_APPEARANCE, BTN_SECTION_TERMINAL, BTN_SECTION_SHELL, BTN_SECTION_KEYBINDINGS, BTN_SECTION_ADVANCED, BTN_SECTION_PRIVACY, BTN_SECTION_UPDATES }) |id| {
+        for (.{ BTN_SECTION_APPEARANCE, BTN_SECTION_TERMINAL, BTN_SECTION_SHELL, BTN_SECTION_KEYBINDINGS, BTN_SECTION_ADVANCED, BTN_SECTION_PRIVACY, BTN_SECTION_UPDATES, BTN_SECTION_REFERENCE }) |id| {
             if (spec.id == id) @compileError("Settings form ID collides with section navigation");
         }
         if (spec.id >= BTN_RESET_FIRST and spec.id < BTN_RESET_FIRST + form_field_count)
@@ -1326,6 +1349,37 @@ const settings_search_text = text: {
     break :text result;
 };
 
+/// For each config key, the form rows (control indexes) that edit it: one,
+/// two for a key shown as two checkboxes (`app-notifications`), or none.
+const reference_form_rows: [settings_reference.key_count][]const usize = rows: {
+    var result: [settings_reference.key_count][]const usize = @splat(&.{});
+    for (field_model.form_fields, 0..) |row, i| {
+        const key = settings_reference.index(row.descriptor.key);
+        result[key] = result[key] ++ &[_]usize{i};
+    }
+    break :rows result;
+};
+
+/// The config key (an index into `settings_reference.keys`) each form field
+/// row edits.
+const form_row_keys: [form_field_count]u16 = keys: {
+    var result: [form_field_count]u16 = undefined;
+    for (field_model.form_fields, 0..) |row, i| result[i] = settings_reference.index(row.descriptor.key);
+    break :keys result;
+};
+
+/// For each config key, the words its form rows are searched by
+/// (`settings_search_text`), so the All settings page finds a key by
+/// everything that finds one of its fields.
+const reference_extra_search: [settings_reference.key_count][]const u8 = extra: {
+    @setEvalBranchQuota(100_000);
+    var result: [settings_reference.key_count][]const u8 = @splat("");
+    for (reference_form_rows, 0..) |rows, key| for (rows) |row| {
+        result[key] = result[key] ++ settings_search_text[row] ++ "\n";
+    };
+    break :extra result;
+};
+
 fn asciiLowerComptime(comptime text: []const u8) []const u8 {
     var lower: [text.len]u8 = undefined;
     for (text, 0..) |c, i| lower[i] = std.ascii.toLower(c);
@@ -1437,6 +1491,9 @@ fn labelIndexIsCheckbox(index: usize) bool {
     };
     return false;
 }
+
+/// The All settings page's config file (`readConfigSource`).
+pub const ConfigSource = settings_reference.ConfigSource;
 
 /// Error set returned from `AppHandle.saveAndReload`. The settings
 /// window surfaces these inline so users can re-try without losing
@@ -1934,6 +1991,11 @@ pub const AppHandle = struct {
     /// the resolved `ghostty.conf` path. Used by the Advanced-pane
     /// escape hatch.
     openInEditor: *const fn (ctx: *anyopaque) void,
+    /// Optional. Put `text` on the clipboard as plain text: the All settings
+    /// page's "Copy name". False when the clipboard would not take it. Tests
+    /// pass a recorder; none may touch the real clipboard. Without it the page
+    /// offers no copy.
+    copyText: ?*const fn (ctx: *anyopaque, text: []const u8) bool = null,
     /// Snapshot the currently-active Config. The returned pointer is
     /// only valid until the next config reload; the settings window
     /// holds it as `original` for the duration of the pending-clone
@@ -1981,6 +2043,10 @@ pub const AppHandle = struct {
     /// for the Advanced page; null when it cannot be resolved. Looking must not
     /// create the file.
     saveTarget: ?*const fn (ctx: *anyopaque, buf: []u8) ?[]const u8 = null,
+    /// Optional. The file a save writes as the All settings page reads it:
+    /// its complete path (not shortened for display) and its bytes, owned by
+    /// `alloc`, through `readConfigSource`. Without it the page names no file.
+    configSource: ?*const fn (ctx: *anyopaque, alloc: std.mem.Allocator) settings_reference.ConfigSource = null,
     /// Optional. The problems the config load found, as the Advanced page lists
     /// them (`config_problems.Problems.listText`), copied into `buf`.
     configProblems: ?*const fn (ctx: *anyopaque, buf: []u8) []const u8 = null,
@@ -2053,8 +2119,19 @@ pub const SettingsWindow = struct {
     btn_section_updates: ?HWND = null,
     btn_section_keybindings: ?HWND = null,
     btn_section_advanced: ?HWND = null,
+    btn_section_reference: ?HWND = null,
     section_button_prev_proc: ?*const anyopaque = null,
     section_hovered: ?HWND = null,
+    /// The "All settings" page: every config key (`settings_reference.Model`), built
+    /// the first time the page or a search needs it and again after the
+    /// config changes, and the list that shows it.
+    reference_model: settings_reference.Model = .{},
+    reference_stale: bool = true,
+    /// Counts the builds of `reference_model`, so what is measured from it
+    /// is measured again after one.
+    reference_generation: u64 = 0,
+    reference_list: ReferenceList = .{},
+    reference_list_class_atom: ATOM = 0,
     /// How the user last reached a section button. The rail's owner-drawn
     /// buttons paint a focus ring only in `.keyboard` mode, the way native
     /// controls honour `UISF_HIDEFOCUS`: the section that opened with the
@@ -2104,7 +2181,12 @@ pub const SettingsWindow = struct {
     /// Which form rows the search found, by control index; meaningful while
     /// `search_query` is active.
     search_found: [settings_clipped_control_count]bool = @splat(false),
-    /// How many rows the search found on each page, and on all of them.
+    /// Which config keys the search found on the All settings page, by key.
+    reference_found: [settings_reference.key_count]bool = @splat(false),
+    /// How many rows the search found on each page, and how many settings in
+    /// all: every key it found on the All settings page (which lists every
+    /// key, and finds a key by its controls' words too) and the rows of the
+    /// other pages that are no key (their "Open config" buttons).
     search_counts: [section_count]u16 = @splat(0),
     search_total: usize = 0,
     /// The rows of the shown page the search found, in form order:
@@ -2370,6 +2452,11 @@ pub const SettingsWindow = struct {
                 return true;
             },
             VK_RETURN => {
+                // The All settings list: the selected row's action.
+                if (control == self.reference_list.hwnd) {
+                    if (!repeat) self.reference_list.invokeSelected();
+                    return true;
+                }
                 if (!in_search) return self.pressFocusedButton(repeat);
                 if (!repeat) self.goToFirstMatch();
                 return true;
@@ -2428,6 +2515,8 @@ pub const SettingsWindow = struct {
         self.btn_section_updates = null;
         self.btn_section_keybindings = null;
         self.btn_section_advanced = null;
+        self.btn_section_reference = null;
+        self.forgetReference();
         self.section_button_prev_proc = null;
         self.section_hovered = null;
         // The window object outlives its HWND. A reopened window is
@@ -2655,7 +2744,7 @@ pub const SettingsWindow = struct {
         switch (self.status_note) {
             // A save's result stays up whatever the draft looks like now.
             .saved, .discarded, .editor_open_failed => return self.status_note.text(),
-            .saved_overridden, .already_default, .reset_failed => return self.noteText(),
+            .saved_overridden, .already_default, .reset_failed, .key_copied, .key_copy_failed => return self.noteText(),
             // These are about edits that are still there to be saved.
             .field_reset,
             .save_failed,
@@ -3062,6 +3151,16 @@ pub const SettingsWindow = struct {
         setChildShown(button, false);
         self.reset_spares[self.reset_spare_count] = button;
         self.reset_spare_count += 1;
+    }
+
+    /// The All settings page holds no Reset button, so the spares the form
+    /// pages gave up go while it is shown. Kept, they sit hidden beside its
+    /// list, which made the page with its menu open one USER object more than
+    /// Appearance with its row menu, the busiest form page. The form page
+    /// shown next makes what it needs again, about 0.6 ms a button.
+    fn destroyResetSpares(self: *SettingsWindow) void {
+        for (self.reset_spares[0..self.reset_spare_count]) |spare| _ = sys.DestroyWindow(spare);
+        self.reset_spare_count = 0;
     }
 
     /// Give row `index` a Reset button, hidden: the spare that last served
@@ -3567,6 +3666,7 @@ pub const SettingsWindow = struct {
         self.refreshAllControls();
         self.surfaceNextValidation(false);
         self.updateSaveEnabled();
+        self.referenceConfigChanged();
     }
 
     /// The unsaved drafts this window previews, as they are shown (with the
@@ -3792,6 +3892,8 @@ pub const SettingsWindow = struct {
         self.btn_section_updates = null;
         self.btn_section_keybindings = null;
         self.btn_section_advanced = null;
+        self.btn_section_reference = null;
+        self.forgetReference();
         self.section_button_prev_proc = null;
         self.section_hovered = null;
         self.focus_input_mode = .pointer;
@@ -4027,19 +4129,74 @@ pub const SettingsWindow = struct {
         return !self.search_query.modified or self.rowDiffersAt(index);
     }
 
-    /// Find the rows of every page the search holds, and count them.
+    /// Find the rows of every page the search holds, and count the settings
+    /// they show. A setting is counted once: on its page, a key shown as two
+    /// rows (`app-notifications`) once, and in all, as the All settings page
+    /// counts it, since every key's row there is found by its fields' words as
+    /// well (`reference_extra_search`), and with `@modified` by the same test
+    /// (`referenceRowDiffers`). The other pages' rows that are no key (their
+    /// "Open config" buttons) count one each.
     fn findSearchRows(self: *SettingsWindow) void {
         self.search_counts = @splat(0);
         self.search_total = 0;
         if (!self.search_query.active()) return;
-        for (std.enums.values(Section)) |section| for (formItemsForSection(section)) |item| {
-            const found = self.searchFinds(item.control_index);
-            self.search_found[item.control_index] = found;
-            if (found) {
+        const KeySet = std.StaticBitSet(settings_reference.key_count);
+        var form_keys: KeySet = .initEmpty();
+        var not_keys: usize = 0;
+        for (std.enums.values(Section)) |section| {
+            var page_keys: KeySet = .initEmpty();
+            for (formItemsForSection(section)) |item| {
+                const found = self.searchFinds(item.control_index);
+                self.search_found[item.control_index] = found;
+                if (!found) continue;
+                if (item.control_index < form_field_count) {
+                    const key = form_row_keys[item.control_index];
+                    if (page_keys.isSet(key)) continue;
+                    page_keys.set(key);
+                    form_keys.set(key);
+                } else not_keys += 1;
                 self.search_counts[@intFromEnum(section)] += 1;
-                self.search_total += 1;
             }
-        };
+        }
+        self.ensureReferenceModel();
+        if (!self.reference_model.built()) {
+            self.reference_found = @splat(false);
+            self.search_total = form_keys.count() + not_keys;
+            return;
+        }
+        var keys_found: u16 = 0;
+        for (&self.reference_found, 0..) |*found, key| {
+            found.* = self.referenceFinds(key);
+            if (found.*) keys_found += 1;
+        }
+        self.search_counts[@intFromEnum(Section.reference)] = keys_found;
+        self.search_total = keys_found + not_keys;
+    }
+
+    /// Whether the search finds config key `key` (an index into
+    /// `settings_reference.keys`) on the All settings page.
+    fn referenceFinds(self: *const SettingsWindow, key: usize) bool {
+        if (!self.search_query.matchesText(self.reference_model.rows[key].search)) return false;
+        return !self.search_query.modified or self.referenceRowDiffers(key);
+    }
+
+    /// Whether key `key` differs from its default: for a key with Settings
+    /// controls, as their markers say (the draft); for any other, its value
+    /// in effect (`settings_reference.Row.differs`).
+    fn referenceRowDiffers(self: *const SettingsWindow, key: usize) bool {
+        const rows = reference_form_rows[key];
+        if (rows.len != 0) {
+            for (rows) |row| if (self.rowDiffersAt(row)) return true;
+            return false;
+        }
+        return self.reference_model.rows[key].differs;
+    }
+
+    /// Whether the shown page has anything the search found: rows of its
+    /// form, or on the All settings page, keys.
+    fn pageFoundRows(self: *const SettingsWindow) bool {
+        if (self.active_section == .reference) return self.reference_list.shown_count != 0;
+        return self.search_item_count != 0;
     }
 
     /// The found rows of the shown page, in form order (`search_items`).
@@ -4061,6 +4218,7 @@ pub const SettingsWindow = struct {
         const started = bench_trace.queryPerformanceCounter();
         self.findSearchRows();
         if (self.search_query.active()) self.filterShownPage();
+        self.refreshReferenceShown(from_top);
         if (from_top) self.content_scroll_y = 0;
         self.refreshNativeSectionText();
         self.syncSearchCounts();
@@ -4142,7 +4300,10 @@ pub const SettingsWindow = struct {
         if (IsChild(viewport, focused) == 0) return;
         const active = self.activeFormRows();
         // Field rows hold Reset buttons; the display rows after them do not.
-        const stays = for (0..settings_clipped_control_count) |index| {
+        // The All settings list is hidden when the search finds no key.
+        const stays = if (focused == self.reference_list.hwnd)
+            self.referenceListShows()
+        else for (0..settings_clipped_control_count) |index| {
             if (focused == self.controlHwnd(index) or (index < form_field_count and focused == self.reset_buttons[index])) break active.controls[index];
         } else true;
         if (!stays) if (self.edit_search) |search| {
@@ -4166,7 +4327,7 @@ pub const SettingsWindow = struct {
         if (same) {
             // The message on a page with nothing found repeats what was typed,
             // which may now wrap differently.
-            if (next.active() and self.search_item_count == 0) {
+            if (next.active() and !self.pageFoundRows()) {
                 self.refreshNativeSectionText();
                 layoutChildren(self);
             }
@@ -4250,7 +4411,8 @@ pub const SettingsWindow = struct {
     /// Enter in the search field: focus the first setting found, on the shown
     /// page, or else on the first page (in rail order) that has one. A setting
     /// that cannot be changed (Windows does not support it) is passed over;
-    /// with none to focus the page's rail button takes the focus.
+    /// with none to focus the page's rail button takes the focus. On the All
+    /// settings page the list takes it, on the first key found.
     fn goToFirstMatch(self: *SettingsWindow) void {
         if (!self.search_query.active() or self.search_total == 0) return;
         // The field the focus lands on is spoken; the count would follow it.
@@ -4260,12 +4422,18 @@ pub const SettingsWindow = struct {
             if (firstPageWithMatches(&self.search_counts)) |section| self.showSection(section, true);
             // With `@modified` the counts were the last pass's; the switch
             // found again, and the first page may have none now.
-            if (self.formItems().len == 0) if (firstPageWithMatches(&self.search_counts)) |section| {
+            if (!self.pageFoundRows()) if (firstPageWithMatches(&self.search_counts)) |section| {
                 if (section != self.active_section) self.showSection(section, true);
             };
         }
         // Nothing found after all: the focus stays in the field.
-        if (self.formItems().len == 0) return;
+        if (!self.pageFoundRows()) return;
+        if (self.active_section == .reference) {
+            const list = self.reference_list.hwnd orelse return;
+            self.reference_list.selectPosition(0);
+            _ = SetFocus(list);
+            return;
+        }
         for (self.formItems()) |item| {
             const control = self.controlHwnd(item.control_index) orelse continue;
             if (sys.IsWindowEnabled(control) == 0) continue;
@@ -4383,6 +4551,7 @@ pub const SettingsWindow = struct {
             .updates => self.btn_section_updates,
             .keybindings => self.btn_section_keybindings,
             .advanced => self.btn_section_advanced,
+            .reference => self.btn_section_reference,
         };
     }
 
@@ -4467,6 +4636,9 @@ pub const SettingsWindow = struct {
     fn showSection(self: *SettingsWindow, next: Section, focus_follows: bool) void {
         const changed = self.active_section != next;
         self.materializeSection(next);
+        // The All settings list exists only while its page is shown: it goes
+        // before the next page's rows show, and comes, hidden, for the page.
+        if (changed and self.active_section == .reference) self.destroyReferenceList(next);
         self.active_section = next;
         // A search shows the found rows of the page. Found again: with
         // `@modified` what differs may have changed since it last ran.
@@ -4474,12 +4646,15 @@ pub const SettingsWindow = struct {
             self.findSearchRows();
             self.filterShownPage();
             self.syncSearchCounts();
-            // A row of this page the search no longer finds may hold the focus.
-            if (!focus_follows) self.keepFocusShown();
         }
+        self.refreshReferenceShown(false);
+        if (next == .reference) self.createReferenceList();
+        // A row of this page the search no longer finds may hold the focus.
+        if (self.search_query.active() and !focus_follows) self.keepFocusShown();
         // The page's Reset buttons, made hidden before the layout places
         // them; the last page's go.
         self.syncDefaultMarksShowing(false);
+        if (next == .reference) self.destroyResetSpares();
         if (self.section_uia_group) |group| group.setSelected(@intFromEnum(next));
         self.content_scroll_y = 0;
         self.refreshNativeSectionText();
@@ -4675,13 +4850,13 @@ pub const SettingsWindow = struct {
 
     fn summaryText(self: *const SettingsWindow, buf: []u8) []const u8 {
         if (!self.search_query.active()) return self.active_section.placeholderText();
-        return searchSummaryText(buf, &self.search_counts, self.active_section);
+        return searchSummaryText(buf, &self.search_counts, self.search_total, self.active_section);
     }
 
     /// Whether the page shows its help text: Keybindings and Advanced do, and
     /// so does a page with no row the search found, where it says so.
     fn showsHelp(self: *const SettingsWindow) bool {
-        if (self.search_query.active() and self.search_item_count == 0) return true;
+        if (self.search_query.active() and !self.pageFoundRows()) return true;
         return self.active_section == .keybindings or self.active_section == .advanced;
     }
 
@@ -4695,8 +4870,8 @@ pub const SettingsWindow = struct {
     /// The text above the form: Keybindings and Advanced have one, and a page
     /// the search found nothing on says what to do instead.
     fn helpText(self: *const SettingsWindow, buf: *[help_text_bytes]u8) []const u8 {
-        if (self.search_query.active() and self.search_item_count == 0)
-            return searchEmptyText(buf, &self.search_query, &self.search_counts);
+        if (self.search_query.active() and !self.pageFoundRows())
+            return searchEmptyText(buf, &self.search_query, &self.search_counts, self.search_total);
         return switch (self.active_section) {
             .keybindings => keybindingsHelpText(),
             .advanced => self.advancedHelpText(buf),
@@ -5141,6 +5316,13 @@ pub const SettingsWindow = struct {
         for (self.reset_buttons, 0..) |button, index| if (button) |control| {
             setChildShown(control, active.controls[index] and self.differs_from_default[index]);
         };
+        if (self.reference_list.hwnd) |list| setChildShown(list, self.referenceListShows());
+    }
+
+    /// Whether the All settings list is on screen: its page is shown, and a
+    /// search found keys there (with none, the help text says so instead).
+    fn referenceListShows(self: *const SettingsWindow) bool {
+        return self.active_section == .reference and !(self.search_query.active() and self.reference_list.shown_count == 0);
     }
 
     /// Parse a number field's text (scrollback, font size, opacity) into the
@@ -5154,13 +5336,14 @@ pub const SettingsWindow = struct {
         const p = &(self.pending orelse return);
         const edit = self.rawScalarEdit(field) orelse return;
         self.markRawScalarEdit(field);
-        var buf_w: [32]u16 = undefined;
-        const n = sys.GetWindowTextW(edit, &buf_w, @intCast(buf_w.len));
-        if (n <= 0) return self.setRawScalarValidationError(field, edit, label ++ " is required.");
-        var utf8_buf: [64]u8 = undefined;
-        const utf8 = std.unicode.utf16LeToUtf8(&utf8_buf, buf_w[0..@intCast(n)]) catch
+        // All of what the field holds (up to its limit, which a value set
+        // through UIA is cut to as well): a prefix that parsed would let a
+        // field showing text that does not parse save a value it does not show.
+        var utf8_buf: [edit_text_max_utf8]u8 = undefined;
+        const utf8 = readEditUtf8(edit, &utf8_buf) orelse
             return self.setRawScalarValidationError(field, edit, label ++ " contains invalid text.");
-        const trimmed = std.mem.trim(u8, utf8_buf[0..utf8], " \t");
+        if (utf8.len == 0) return self.setRawScalarValidationError(field, edit, label ++ " is required.");
+        const trimmed = std.mem.trim(u8, utf8, " \t");
         if (trimmed.len == 0) return self.setRawScalarValidationError(field, edit, label ++ " is required.");
         const parsed = field_model.parseScalar(setting, trimmed) catch |err|
             return self.setRawScalarValidationError(field, edit, switch (comptime field_model.descriptor(setting).validation) {
@@ -5918,6 +6101,7 @@ pub const SettingsWindow = struct {
         self.current = current_snapshot;
         self.pending = pending;
         self.initTransaction();
+        self.referenceConfigChanged();
     }
 
     /// The section and the native control that own `field`.
@@ -6178,6 +6362,7 @@ pub const SettingsWindow = struct {
         self.btn_section_updates = self.finishChild(makeSectionButton(hwnd, hinstance, btn_class, .updates, selected), self.ui_font, .control);
         self.btn_section_keybindings = self.finishChild(makeSectionButton(hwnd, hinstance, btn_class, .keybindings, selected), self.ui_font, .control);
         self.btn_section_advanced = self.finishChild(makeSectionButton(hwnd, hinstance, btn_class, .advanced, selected), self.ui_font, .control);
+        self.btn_section_reference = self.finishChild(makeSectionButton(hwnd, hinstance, btn_class, .reference, selected), self.ui_font, .control);
         if (self.sectionButton(selected)) |button| _ = sys.SendMessageW(button, BM_SETCHECK, BST_CHECKED, 0);
         self.subclassSectionButtons();
         self.initializeSectionUiaProviders();
@@ -6244,9 +6429,15 @@ pub const SettingsWindow = struct {
         // Establish native values before providers cache their initial state.
         self.refreshAllControls();
         self.initializeControlUiaProviders();
+        if (selected == .reference) {
+            self.ensureReferenceModel();
+            self.refreshReferenceShown(true);
+            self.createReferenceList();
+        }
         stamps.mark(.create_refresh);
 
         layoutChildren(self);
+        if (self.reference_list.hwnd) |list| setChildShown(list, self.referenceListShows());
         stamps.mark(.create_layout);
         _ = sys.ShowWindow(hwnd, SW_SHOWNORMAL);
         stamps.mark(.create_show);
@@ -6261,6 +6452,9 @@ pub const SettingsWindow = struct {
     /// section's rows, from the window's current draft, theme, fonts and DPI,
     /// so a section first shown late ends up as one made at open would.
     fn materializeSection(self: *SettingsWindow, section: Section) void {
+        // The All settings page has no rows of its own: its list is made with
+        // the page (`createReferenceList`), from the model made here.
+        if (section == .reference) return self.ensureReferenceModel();
         if (self.materialized.contains(section) or self.viewport == null) return;
         self.createSectionRows(section, false);
         const providers = self.canInitializeCustomUiaProviders();
@@ -6401,6 +6595,181 @@ pub const SettingsWindow = struct {
         inline for (field_model.form_fields) |row| {
             if (nativeSection(row.descriptor.section) == section) @field(field_adapters, row.native.binding).display(self);
         }
+    }
+
+    /// Build the All settings model when there is none, or the config changed
+    /// since it was built (`reference_stale`): from `current` (the config in
+    /// effect), the defaults, and the config file Settings saves to, read for
+    /// the lines that set each key when it can be shown to be local
+    /// (`AppHandle.configSource`). Without a config there is nothing to build,
+    /// and the page lists nothing.
+    fn ensureReferenceModel(self: *SettingsWindow) void {
+        if (!self.reference_stale and self.reference_model.built()) return;
+        const current = if (self.current) |*config| config else return;
+        const defaults: ?*const Config = if (self.defaults) |*config| config else null;
+        var source: settings_reference.ConfigSource = if (self.handle.configSource) |read| read(self.handle.ctx, self.handle.alloc) else .{};
+        defer source.deinit(self.handle.alloc);
+        self.reference_list.forgetOpenText(self.handle.alloc);
+        self.reference_generation +%= 1;
+        self.reference_model.build(self.handle.alloc, current, defaults, source.path, source.file, &reference_extra_search) catch |err| {
+            std.log.warn("settings: the All settings page could not be built err={}", .{err});
+            self.reference_model.deinit();
+            return;
+        };
+        self.reference_stale = false;
+    }
+
+    /// The keys the All settings list shows: every key, or with a search the
+    /// ones it found (`reference_found`), in key order. The selection stays
+    /// with its key, hidden while the search hides it. `from_top` scrolls the
+    /// list back to its first row.
+    fn refreshReferenceShown(self: *SettingsWindow, from_top: bool) void {
+        const list = &self.reference_list;
+        var count: usize = 0;
+        if (self.reference_model.built()) {
+            const filtering = self.search_query.active();
+            for (0..settings_reference.key_count) |key| if (!filtering or self.reference_found[key]) {
+                list.shown[count] = @intCast(key);
+                count += 1;
+            };
+        }
+        list.shown_count = count;
+        if (from_top) list.scroll_y = 0;
+        list.contentChanged();
+        // A reader that holds the rows asks for them again, as the palette's do.
+        if (list.provider) |provider| win32_uia.events.raiseStructureChanged(&provider.base, .children_invalidated, null);
+    }
+
+    /// The config the All settings page shows changed (a reload, a save, a
+    /// discard, the window opening): it is built again when next needed, at
+    /// once while it is shown. A search keeps the keys it found until it runs
+    /// again, as the other pages keep their rows.
+    fn referenceConfigChanged(self: *SettingsWindow) void {
+        self.reference_stale = true;
+        if (self.hwnd == null or self.active_section != .reference) return;
+        self.ensureReferenceModel();
+        self.refreshReferenceShown(false);
+    }
+
+    /// Make the All settings list, hidden, for its page: the layout places it
+    /// and `applySectionVisibility` shows it. One window, so the page costs
+    /// one window while it is shown and none otherwise.
+    fn createReferenceList(self: *SettingsWindow) void {
+        if (self.reference_list.hwnd != null) return;
+        const viewport = self.viewport orelse return;
+        if (self.reference_list_class_atom == 0) {
+            const wc: WNDCLASSEXW = .{
+                .cbSize = @sizeOf(WNDCLASSEXW),
+                .style = CS_DBLCLKS,
+                .lpfnWndProc = &referenceListProc,
+                .cbClsExtra = 0,
+                .cbWndExtra = 0,
+                .hInstance = self.handle.hinstance,
+                .hIcon = null,
+                .hCursor = sys.LoadCursorW(null, @ptrFromInt(IDC_ARROW)),
+                .hbrBackground = null,
+                .lpszMenuName = null,
+                .lpszClassName = reference_list_class_name,
+                .hIconSm = null,
+            };
+            self.reference_list_class_atom = sys.RegisterClassExW(&wc);
+            if (self.reference_list_class_atom == 0) {
+                std.log.warn("settings: the All settings list class could not be registered", .{});
+                return;
+            }
+        }
+        const list = sys.CreateWindowExW(
+            0,
+            reference_list_class_name,
+            std.unicode.utf8ToUtf16LeStringLiteral("All settings"),
+            WS_CHILD | WS_TABSTOP | WS_GROUP | WS_VSCROLL,
+            0,
+            0,
+            1,
+            1,
+            viewport,
+            @ptrFromInt(REFERENCE_LIST),
+            self.handle.hinstance,
+            self,
+        ) orelse {
+            std.log.warn("settings: the All settings list could not be made", .{});
+            return;
+        };
+        // Its scroll bar takes the theme; it draws its own text.
+        self.reference_list.hwnd = self.finishChild(list, null, .control);
+        self.reference_list.metrics = null;
+        self.reference_list.wheel_remainder = 0;
+        if (self.canInitializeCustomUiaProviders()) {
+            self.reference_list.provider = win32_uia.PaletteListProvider.create(
+                std.heap.page_allocator,
+                list,
+                referenceListUiaState(self),
+            ) catch |err| blk: {
+                std.log.warn("settings: All settings list UIA provider unavailable err={}", .{err});
+                break :blk null;
+            };
+        }
+        self.reference_list.contentChanged();
+    }
+
+    /// The All settings page goes: its list with it. A list that holds the
+    /// focus gives it to `next`'s rail button first, which takes it ahead of
+    /// the switch (`focusRailButtonAhead`), as the switch's own focus moves do.
+    fn destroyReferenceList(self: *SettingsWindow, next: Section) void {
+        const list = self.reference_list.hwnd orelse return;
+        if (GetFocus() == list) self.focusRailButtonAhead(next);
+        if (self.reference_list.provider) |provider| provider.raiseTeardown();
+        _ = sys.DestroyWindow(list);
+    }
+
+    /// The list window is gone (`WM_NCDESTROY`): its provider is let go, and
+    /// what was drawn from the model with it.
+    fn referenceListDestroyed(self: *SettingsWindow) void {
+        self.reference_list.hwnd = null;
+        self.reference_list.metrics = null;
+        if (self.reference_list.provider) |provider| {
+            self.reference_list.provider = null;
+            provider.detach();
+            self.deferProviderDisconnect(@ptrCast(provider), referenceListDisconnect, referenceListRelease);
+        }
+    }
+
+    /// Everything the All settings page holds, for a window that is gone: the
+    /// model is built again from the config the next window opens with.
+    fn forgetReference(self: *SettingsWindow) void {
+        self.reference_list.forgetOpenText(self.handle.alloc);
+        self.reference_list.shown_count = 0;
+        self.reference_list.scroll_y = 0;
+        self.reference_list.metrics = null;
+        self.reference_found = @splat(false);
+        self.reference_model.deinit();
+        self.reference_stale = true;
+    }
+
+    /// Copy key `key`'s name (an index into `settings_reference.keys`) through the
+    /// app's clipboard, and say so on the status line.
+    fn copyReferenceKey(self: *SettingsWindow, key: usize) void {
+        const copy = self.handle.copyText orelse return;
+        const name = @tagName(settings_reference.keys[key]);
+        const copied = copy(self.handle.ctx, name);
+        const note: StatusNote = if (copied) .key_copied else .key_copy_failed;
+        self.freeNoteText();
+        self.status_note = note;
+        self.note_text = note.textWithDetail(self.handle.alloc, name) catch null;
+        self.setStatus(self.noteText());
+    }
+
+    /// Whether key `key` has an edit in this window that is not saved yet: the
+    /// value the All settings page shows is the one in effect.
+    fn referenceKeyDirty(self: *const SettingsWindow, key: usize) bool {
+        for (reference_form_rows[key]) |row| if (self.rowDirtyAt(row)) return true;
+        return false;
+    }
+
+    /// `rowDirty` for form row `index`.
+    fn rowDirtyAt(self: *const SettingsWindow, index: usize) bool {
+        inline for (field_model.form_fields, 0..) |row, i| if (i == index) return self.rowDirty(row);
+        return false;
     }
 };
 
@@ -6844,6 +7213,7 @@ fn makeSectionButton(
         .updates => BTN_SECTION_UPDATES,
         .keybindings => BTN_SECTION_KEYBINDINGS,
         .advanced => BTN_SECTION_ADVANCED,
+        .reference => BTN_SECTION_REFERENCE,
     };
     const group_style: u32 = if (section == .appearance) WS_GROUP else 0;
     const tab_style: u32 = if (section == selected) WS_TABSTOP else 0;
@@ -7157,9 +7527,7 @@ fn isFindShortcut(ctrl: bool, alt: bool, shift: bool) bool {
 /// The header's line while a search is typed: how many settings it found, and
 /// how many of them the shown page has, or where the first are when it has
 /// none. This is what a reader announces.
-fn searchSummaryText(buf: []u8, counts: *const [section_count]u16, shown: Section) []const u8 {
-    var total: usize = 0;
-    for (counts) |count| total += count;
+fn searchSummaryText(buf: []u8, counts: *const [section_count]u16, total: usize, shown: Section) []const u8 {
     if (total == 0) return "No settings match.";
     const noun = if (total == 1) "setting matches" else "settings match";
     const here = counts[@intFromEnum(shown)];
@@ -7176,20 +7544,18 @@ fn firstPageWithMatches(counts: *const [section_count]u16) ?Section {
 
 /// What a page with no row the search found shows in place of its rows: what
 /// was looked for, and where it was found, or else what the search looks in.
-fn searchEmptyText(buf: []u8, query: *const SearchQuery, counts: *const [section_count]u16) []const u8 {
+fn searchEmptyText(buf: []u8, query: *const SearchQuery, counts: *const [section_count]u16, total: usize) []const u8 {
     var writer: std.Io.Writer = .fixed(buf);
-    writeSearchEmptyText(&writer, query, counts) catch {};
+    writeSearchEmptyText(&writer, query, counts, total) catch {};
     return writer.buffered();
 }
 
-fn writeSearchEmptyText(writer: *std.Io.Writer, query: *const SearchQuery, counts: *const [section_count]u16) !void {
+fn writeSearchEmptyText(writer: *std.Io.Writer, query: *const SearchQuery, counts: *const [section_count]u16, total: usize) !void {
     if (query.word_count != 0) {
         try writer.print("Nothing on this page matches \u{201C}{s}\u{201D}.", .{query.typedText()});
     } else {
         try writer.writeAll("Nothing on this page differs from its default.");
     }
-    var total: usize = 0;
-    for (counts) |count| total += count;
     if (total == 0) {
         try writer.writeAll(" Nor does anything on the other pages. The search looks in each setting's name, " ++
             "description and keywords, and @modified finds the settings that differ from their defaults. " ++
@@ -7355,6 +7721,25 @@ test "settings numeric edits reject nonfinite floats and excessive padding" {
     _ = sys.SetWindowTextW(edit, std.unicode.utf8ToUtf16LeStringLiteral("4294967295"));
     settings.syncPaddingFromEdit(.window_padding_x);
     try std.testing.expect(settings.raw_scalar_error[@intFromEnum(RawScalarField.window_padding_x)] != null);
+}
+
+test "settings a number field reads all it holds, so text past a valid start is an error, not that start" {
+    // 31 units that parse ("0.5" and 28 zeros), then one that does not. The
+    // field reads 4095 units like the others, so the whole text is checked.
+    const text = "0.5" ++ "0" ** 28 ++ "x";
+    const edit = sys.CreateWindowExW(0, std.unicode.utf8ToUtf16LeStringLiteral("EDIT"), std.unicode.utf8ToUtf16LeStringLiteral(text), 0, 0, 0, 1, 1, null, null, null, null) orelse return error.Unexpected;
+    defer _ = sys.DestroyWindow(edit);
+    var pending = try Config.default(std.testing.allocator);
+    defer pending.deinit();
+    var settings: SettingsWindow = .{ .handle = modelOnlyHandle(), .pending = pending, .fields = .{ .edit_bg_opacity = edit } };
+    settings.syncNumberFromEdit(.background_opacity);
+    try std.testing.expect(settings.raw_scalar_error[@intFromEnum(RawScalarField.background_opacity)] != null);
+    try std.testing.expectEqual(@as(f64, 1), settings.pending.?.@"background-opacity");
+    // A long text that does parse is taken whole.
+    _ = sys.SetWindowTextW(edit, std.unicode.utf8ToUtf16LeStringLiteral("0.25" ++ "0" ** 60));
+    settings.syncNumberFromEdit(.background_opacity);
+    try std.testing.expect(settings.raw_scalar_error[@intFromEnum(RawScalarField.background_opacity)] == null);
+    try std.testing.expectEqual(@as(f64, 0.25), settings.pending.?.@"background-opacity");
 }
 
 test "settings opacity preview is floored while the draft keeps the typed value" {
@@ -7739,13 +8124,13 @@ test "settings open and a first visit create each window once in its final form"
                 std.debug.print("settings open: {d} windows, {d} messages to them\n", .{ tree.len, totals.messages });
                 Work.print(&tree);
             }
-            // The frame, its 18 children (one is the viewport, one the search
+            // The frame, its 19 children (one is the viewport, one the search
             // field), and in the viewport the help text and Appearance's 10
             // fields and 9 labels. The other sections' 31 rows are made when
             // they are first shown. The status line also carries the close
             // prompt's question, and one "Discard changes" serves the bar and
             // the prompt.
-            try std.testing.expectEqual(@as(usize, 39), tree.len);
+            try std.testing.expectEqual(@as(usize, 40), tree.len);
             for (tree.slice()) |hwnd| {
                 const counts = Work.of(hwnd);
                 try std.testing.expectEqual(@as(u16, 1), counts.created);
@@ -7807,9 +8192,10 @@ test "settings open and a first visit create each window once in its final form"
             // A section shown before makes nothing.
             try Work.measureStep(settings, .{ .show = .privacy });
             try std.testing.expectEqual(@as(usize, 0), Work.created().len);
-            // Every section shown: the whole form, and still one font build.
+            // Every section shown: the whole form, the All settings list (its
+            // page is shown last), and still one font build.
             for (std.enums.values(Section)) |section| settings.setActiveSection(section);
-            try std.testing.expectEqual(@as(usize, 72), Work.Tree.of(fixture.hwnd()).len);
+            try std.testing.expectEqual(@as(usize, 74), Work.Tree.of(fixture.hwnd()).len);
             try std.testing.expectEqual(@as(u32, 1), settings.font_builds);
             try std.testing.expectEqual(@as(u32, 0), settings.theme_applications);
         }
@@ -7877,7 +8263,7 @@ test "settings sections shown in any order leave the window as one made whole at
             // Every window in the same z-order, with the same styles, place,
             // client area, check, dropdown heights, text and font, and every
             // field and text with its UIA provider.
-            try std.testing.expectEqual(@as(usize, 72), states[0].len);
+            try std.testing.expectEqual(@as(usize, 73), states[0].len);
             try State.expectSame(&states[0], &states[1]);
             try std.testing.expectEqual(providers[0], providers[1]);
             for (providers[1]) |provided| try std.testing.expect(provided);
@@ -9876,6 +10262,11 @@ fn layoutChildren(self: *SettingsWindow) void {
         };
     }
     if (help_rect) |help| form.addText(self.text_help, gutter + help.left, help.top - scroll_y, help.right - help.left, help.bottom - help.top);
+    // The All settings list fills the viewport as wide as the column and
+    // scrolls itself, so the viewport has nothing to scroll on that page.
+    if (self.reference_list.hwnd) |list| if (self.referenceListShows()) {
+        form.add(list, gutter, 0, column_width, viewport_height);
+    };
 
     const row_top = action_bar_top + action_bar.actions_top;
     const action_gap = self.px(settings_action_gap);
@@ -10256,6 +10647,13 @@ const dialog_test = struct {
         reload_then_fail: bool = false,
         /// What the window's High Contrast probe answers.
         high_contrast: bool = false,
+        /// What the All settings page's "Copy name" handed the App last, and
+        /// how many times: a recorder, so no test reaches the clipboard.
+        copied: [128]u8 = undefined,
+        copied_len: usize = 0,
+        copies: u32 = 0,
+        /// The recorder answers as a clipboard that would not take the text.
+        copy_fails: bool = false,
         /// What the Default profile dropdown is offered: `test_profiles`,
         /// whole or not yet.
         profiles_complete: bool = true,
@@ -10341,6 +10739,7 @@ const dialog_test = struct {
                 .chromeBg = &stubChromeBg,
                 .textPrimary = &stubTextPrimary,
                 .openInEditor = &openInEditor,
+                .copyText = &copyText,
                 .currentConfig = &currentConfig,
                 .saveAndReload = &saveAndReload,
                 .notifySuccess = &notifySuccess,
@@ -10354,10 +10753,23 @@ const dialog_test = struct {
             return self;
         }
 
+        fn copyText(ctx: *anyopaque, text: []const u8) bool {
+            const self: *Fixture = @ptrCast(@alignCast(ctx));
+            self.copies += 1;
+            self.copied_len = @min(text.len, self.copied.len);
+            @memcpy(self.copied[0..self.copied_len], text[0..self.copied_len]);
+            return !self.copy_fails;
+        }
+
+        fn copiedText(self: *const Fixture) []const u8 {
+            return self.copied[0..self.copied_len];
+        }
+
         fn finish(self: *Fixture) void {
             self.settings.deinit();
             _ = sys.UnregisterClassW(class_name, self.settings.handle.hinstance);
             _ = sys.UnregisterClassW(viewport_class_name, self.settings.handle.hinstance);
+            _ = sys.UnregisterClassW(reference_list_class_name, self.settings.handle.hinstance);
             self.config.deinit();
             std.testing.allocator.destroy(self);
         }
@@ -11099,6 +11511,11 @@ test "settings Tab visits the fields in form order and Save last" {
                         field_count += 1;
                     };
                 }
+                // The All settings page's one tab stop is its list.
+                if (section == .reference) {
+                    fields[field_count] = settings.reference_list.hwnd.?;
+                    field_count += 1;
+                }
                 const first = fields[0];
                 var visited: [24]HWND = undefined;
                 var count: usize = 0;
@@ -11227,24 +11644,29 @@ test "settings search finds a row by its label, caption, help and keywords, not 
 test "settings search says how many it found, and where, or what it looks in" {
     var buf: [SettingsWindow.help_text_bytes]u8 = undefined;
     var counts: [section_count]u16 = @splat(0);
-    try std.testing.expectEqualStrings("No settings match.", searchSummaryText(&buf, &counts, .appearance));
+    try std.testing.expectEqualStrings("No settings match.", searchSummaryText(&buf, &counts, 0, .appearance));
     counts[@intFromEnum(Section.appearance)] = 1;
-    try std.testing.expectEqualStrings("1 setting matches: 1 on this page.", searchSummaryText(&buf, &counts, .appearance));
+    counts[@intFromEnum(Section.reference)] = 1;
+    try std.testing.expectEqualStrings("1 setting matches: 1 on this page.", searchSummaryText(&buf, &counts, 1, .appearance));
     counts[@intFromEnum(Section.appearance)] = 0;
     counts[@intFromEnum(Section.terminal)] = 2;
     counts[@intFromEnum(Section.privacy)] = 4;
-    // A page with none says where the first are: a reader hears this line.
-    try std.testing.expectEqualStrings("6 settings match: none on this page, 2 on Terminal.", searchSummaryText(&buf, &counts, .appearance));
-    try std.testing.expectEqualStrings("6 settings match: 4 on this page.", searchSummaryText(&buf, &counts, .privacy));
+    counts[@intFromEnum(Section.reference)] = 9;
+    // The total counts each setting once: the All settings page holds every
+    // key the other pages do. A page with none says where the first are: a
+    // reader hears this line.
+    try std.testing.expectEqualStrings("9 settings match: none on this page, 2 on Terminal.", searchSummaryText(&buf, &counts, 9, .appearance));
+    try std.testing.expectEqualStrings("9 settings match: 4 on this page.", searchSummaryText(&buf, &counts, 9, .privacy));
+    try std.testing.expectEqualStrings("9 settings match: 9 on this page.", searchSummaryText(&buf, &counts, 9, .reference));
     var query = SearchQuery.parse("  Clip ");
     try std.testing.expectEqualStrings(
-        "Nothing on this page matches \u{201C}Clip\u{201D}. Found on Terminal (2), Privacy (4). " ++
+        "Nothing on this page matches \u{201C}Clip\u{201D}. Found on Terminal (2), Privacy (4), All settings (9). " ++
             "Enter in the search field goes to the first, or choose a page on the left.",
-        searchEmptyText(&buf, &query, &counts),
+        searchEmptyText(&buf, &query, &counts, 9),
     );
     query = SearchQuery.parse("@modified");
     counts = @splat(0);
-    const none = searchEmptyText(&buf, &query, &counts);
+    const none = searchEmptyText(&buf, &query, &counts, 0);
     try std.testing.expect(std.mem.startsWith(u8, none, "Nothing on this page differs from its default. Nor does anything on the other pages."));
     try std.testing.expect(std.mem.indexOf(u8, none, "Escape in the search field clears it.") != null);
     // The longest search fits the help text's room.
@@ -11252,7 +11674,321 @@ test "settings search says how many it found, and where, or what it looks in" {
     @memset(&long, 'x');
     query = SearchQuery.parse(&long);
     for (&counts) |*count| count.* = 999;
-    try std.testing.expect(std.mem.endsWith(u8, searchEmptyText(&buf, &query, &counts), "choose a page on the left."));
+    try std.testing.expect(std.mem.endsWith(u8, searchEmptyText(&buf, &query, &counts, 999), "choose a page on the left."));
+}
+
+test "settings a search counts a key shown as two rows once, on its page and in all" {
+    try dialog_test.onHiddenDesktop(struct {
+        fn body() !void {
+            const fixture = try dialog_test.Fixture.start();
+            defer fixture.finish();
+            const settings = &fixture.settings;
+            var text_buf: [SettingsWindow.help_text_bytes]u8 = undefined;
+            settings.setActiveSection(.privacy);
+            // "toast" is a keyword of both App notifications checkboxes, which
+            // are one key, and of no other setting.
+            typeSearch(settings, "toast");
+            try std.testing.expectEqual(@as(usize, 2), settings.formItems().len);
+            try std.testing.expectEqual(@as(u16, 1), settings.search_counts[@intFromEnum(Section.privacy)]);
+            try std.testing.expectEqual(@as(u16, 1), settings.search_counts[@intFromEnum(Section.reference)]);
+            try std.testing.expectEqual(@as(usize, 1), settings.search_total);
+            try std.testing.expectEqualStrings("1 setting matches: 1 on this page.", readEditUtf8(settings.text_summary.?, &text_buf).?);
+        }
+    }.body);
+}
+
+test "settings @modified on the All settings page finds a key a UTF-16 or BOM config file sets" {
+    const Lender = struct {
+        var path: []const u8 = "";
+        fn source(_: *anyopaque, alloc: std.mem.Allocator) settings_reference.ConfigSource {
+            return readConfigSource(alloc, path);
+        }
+    };
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    // What Windows PowerShell 5.1's `>` writes (UTF-16 LE with a byte order
+    // mark), and UTF-8 with one, as Notepad once saved.
+    const text = "click-repeat-interval = 500\r\n";
+    var utf16: [2 + 2 * text.len]u8 = undefined;
+    std.mem.writeInt(u16, utf16[0..2], 0xFEFF, .little);
+    for (text, 0..) |c, i| std.mem.writeInt(u16, utf16[2 + 2 * i ..][0..2], c, .little);
+    for ([_][]const u8{ &utf16, "\xef\xbb\xbf" ++ text }) |bytes| {
+        try tmp.dir.writeFile(.{ .sub_path = "config.ghostty", .data = bytes });
+        const path = try tmp.dir.realpathAlloc(std.testing.allocator, "config.ghostty");
+        defer std.testing.allocator.free(path);
+        Lender.path = path;
+        var context: u8 = 0;
+        var handle = modelOnlyHandle();
+        handle.ctx = &context;
+        handle.configSource = Lender.source;
+        // The config as the file leaves it: `finalize` would otherwise set the
+        // interval from the system.
+        var current = try Config.default(std.testing.allocator);
+        current.@"click-repeat-interval" = 500;
+        var settings: SettingsWindow = .{ .handle = handle, .current = current };
+        defer settings.current.?.deinit();
+        defer settings.reference_model.deinit();
+        settings.search_query = SearchQuery.parse("@modified");
+        settings.findSearchRows();
+        const key = settings_reference.index(.@"click-repeat-interval");
+        try std.testing.expect(settings.reference_found[key]);
+        var buf: [600]u8 = undefined;
+        var writer: std.Io.Writer = .fixed(&buf);
+        try settings.reference_model.writeLocation(&writer, &settings.reference_model.rows[key]);
+        try std.testing.expect(std.mem.startsWith(u8, writer.buffered(), "Set on line 1 of "));
+    }
+}
+
+test "settings the All settings page never follows a link to a share to read the config file" {
+    const alloc = std.testing.allocator;
+    const links = local_target.test_links;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.makeDir("real");
+    try tmp.dir.writeFile(.{ .sub_path = "real\\config.ghostty", .data = "font-size = 15\n" });
+    try tmp.dir.makeDir("cfg-on-share");
+    try tmp.dir.makeDir("cfg-local");
+    const base = try tmp.dir.realpathAlloc(alloc, ".");
+    defer alloc.free(base);
+    const join = struct {
+        fn path(a: std.mem.Allocator, root: []const u8, rel: []const u8) ![]u8 {
+            return std.fs.path.join(a, &.{ root, rel });
+        }
+    }.path;
+    // The share is on TEST-NET-1 (RFC 5737), which nothing answers: a read
+    // that followed a link there would hang on the connection, as it would
+    // on the UI thread for a share that went away. So each read is timed.
+    const share = "\\\\192.0.2.1\\noctty-test-none$";
+    const on_share = try join(alloc, base, "cfg-on-share");
+    defer alloc.free(on_share);
+    try links.junction(alloc, on_share, "\\??\\UNC\\192.0.2.1\\noctty-test-none$");
+    const local_dir = try join(alloc, base, "cfg-local");
+    defer alloc.free(local_dir);
+    const real_dir = try join(alloc, base, "real");
+    defer alloc.free(real_dir);
+    const real_nt = try std.fmt.allocPrint(alloc, "\\??\\{s}", .{real_dir});
+    defer alloc.free(real_nt);
+    try links.junction(alloc, local_dir, real_nt);
+    const file_link = try join(alloc, base, "config-on-share.ghostty");
+    defer alloc.free(file_link);
+    const dir_link = try join(alloc, base, "dir-on-share");
+    defer alloc.free(dir_link);
+    // Without the privilege (or Developer Mode) for symlinks, the junction
+    // cases run alone; CI's account has it.
+    const symlinks = try links.symlink(alloc, file_link, share ++ "\\config.ghostty", false) and
+        try links.symlink(alloc, dir_link, share, true);
+    defer {
+        tmp.dir.deleteDir("cfg-on-share") catch {};
+        tmp.dir.deleteDir("cfg-local") catch {};
+        tmp.dir.deleteFile("config-on-share.ghostty") catch {};
+        tmp.dir.deleteDir("dir-on-share") catch {};
+    }
+
+    const Case = struct { rel: []const u8, want: std.meta.Tag(settings_reference.ConfigFile), symlink: bool = false };
+    for ([_]Case{
+        .{ .rel = "real\\config.ghostty", .want = .bytes },
+        .{ .rel = "real\\absent.ghostty", .want = .missing },
+        .{ .rel = "cfg-local\\config.ghostty", .want = .bytes },
+        // An ancestor junction, a file symlink and an ancestor directory
+        // symlink to the share.
+        .{ .rel = "cfg-on-share\\config.ghostty", .want = .unavailable },
+        .{ .rel = "config-on-share.ghostty", .want = .unavailable, .symlink = true },
+        .{ .rel = "dir-on-share\\config.ghostty", .want = .unavailable, .symlink = true },
+    }) |case| {
+        if (case.symlink and !symlinks) continue;
+        errdefer std.debug.print("settings reading the config file at {s}\n", .{case.rel});
+        const path = try join(alloc, base, case.rel);
+        defer alloc.free(path);
+        var timer = try std.time.Timer.start();
+        var source = readConfigSource(alloc, path);
+        defer source.deinit(alloc);
+        try std.testing.expect(timer.read() < 5 * std.time.ns_per_s);
+        try std.testing.expectEqualStrings(path, source.path.?);
+        try std.testing.expectEqual(case.want, std.meta.activeTag(source.file));
+        // The default path's probes go the same way: a candidate behind such
+        // a link cannot be named, rather than opened.
+        timer.reset();
+        const state = localFileState(alloc, path);
+        try std.testing.expect(timer.read() < 5 * std.time.ns_per_s);
+        try std.testing.expectEqual(@as(?config_file_load.FileState, switch (case.want) {
+            .bytes => .content,
+            .missing => .missing,
+            else => null,
+        }), state);
+    }
+}
+
+test "settings the default config file is named only when every candidate it needs can be looked at" {
+    const alloc = std.testing.allocator;
+    // A probe standing in for the file system: no file is opened.
+    const Probe = struct {
+        const Kind = enum { noctty, ghostty, winghostty };
+        var unknown: ?Kind = null;
+        var content: ?Kind = null;
+        fn kind(path: []const u8) Kind {
+            if (std.mem.indexOf(u8, path, "winghostty") != null) return .winghostty;
+            return if (std.mem.endsWith(u8, path, "config.ghostty")) .noctty else .ghostty;
+        }
+        fn state(_: std.mem.Allocator, path: []const u8) ?config_file_load.FileState {
+            if (unknown == kind(path)) return null;
+            if (content == kind(path)) return .content;
+            return .missing;
+        }
+    };
+    const xdg = try config_file_load.defaultXdgPath(alloc);
+    defer alloc.free(xdg);
+    // Nothing anywhere: the noctty file.
+    Probe.unknown = null;
+    Probe.content = null;
+    const none = (try config_file_load.preferredXdgPathProbed(alloc, &Probe.state)).?;
+    defer alloc.free(none);
+    try std.testing.expectEqualStrings(xdg, none);
+    // A candidate that cannot be looked at (behind a link to a share, say):
+    // no file is named, whichever it is.
+    for (std.enums.values(Probe.Kind)) |unknown| {
+        Probe.unknown = unknown;
+        try std.testing.expectEqual(@as(?[]const u8, null), try config_file_load.preferredXdgPathProbed(alloc, &Probe.state));
+    }
+    // One with content earlier in the order decides before an unknown later.
+    Probe.unknown = .winghostty;
+    Probe.content = .noctty;
+    const found = (try config_file_load.preferredXdgPathProbed(alloc, &Probe.state)).?;
+    defer alloc.free(found);
+    try std.testing.expectEqualStrings(xdg, found);
+}
+
+test "settings the All settings page refuses a share or device path before normalizing it" {
+    const alloc = std.testing.allocator;
+    // `std.fs.path.resolve` must not see these. In Zig 0.15.2 it unwraps a
+    // null on a mixed-separator share such as `\\a\/`, a panic no `catch`
+    // stops, and the rest are no local file. Each is refused as given, by the
+    // read and by the default path's probe.
+    for ([_][]const u8{
+        "\\\\a\\/",
+        "//a/\\",
+        "\\/s/x",
+        "/\\s\\x",
+        "//s/x",
+        "\\\\s\\x\\config.ghostty",
+        "\\\\?\\UNC\\s\\x\\config.ghostty",
+        "\\??\\UNC\\s\\x\\config.ghostty",
+        "\\\\.\\pipe\\x",
+        "\\\\?\\C:\\config.ghostty",
+        "C:\\config.ghostty:stream",
+    }) |shape| {
+        errdefer std.debug.print("settings reading the config file at {s}\n", .{shape});
+        var source = readConfigSource(alloc, shape);
+        defer source.deinit(alloc);
+        try std.testing.expectEqualStrings(shape, source.path.?);
+        try std.testing.expectEqual(std.meta.Tag(settings_reference.ConfigFile).unavailable, std.meta.activeTag(source.file));
+        try std.testing.expectEqual(@as(?config_file_load.FileState, null), localFileState(alloc, shape));
+    }
+    // A local file is still read, with either separator.
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(.{ .sub_path = "config.ghostty", .data = "font-size = 15\n" });
+    const path = try tmp.dir.realpathAlloc(alloc, "config.ghostty");
+    defer alloc.free(path);
+    const slashed = try alloc.dupe(u8, path);
+    defer alloc.free(slashed);
+    std.mem.replaceScalar(u8, slashed, '\\', '/');
+    for ([_][]const u8{ path, slashed }) |local| {
+        errdefer std.debug.print("settings reading the config file at {s}\n", .{local});
+        var source = readConfigSource(alloc, local);
+        defer source.deinit(alloc);
+        try std.testing.expectEqualStrings("font-size = 15\n", source.file.bytes);
+        try std.testing.expectEqual(@as(?config_file_load.FileState, .content), localFileState(alloc, local));
+    }
+}
+
+test "settings the All settings page never opens a cloud placeholder as its provider presents it" {
+    const alloc = std.testing.allocator;
+    const cloud = local_target.test_cloud;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.makeDir("real");
+    try tmp.dir.writeFile(.{ .sub_path = "real\\config.ghostty", .data = "font-size = 15\n" });
+    try tmp.dir.makeDir("cfg-local");
+    defer tmp.dir.deleteDir("cfg-local") catch {};
+    const base = try tmp.dir.realpathAlloc(alloc, ".");
+    defer alloc.free(base);
+    const real_dir = try std.fs.path.join(alloc, &.{ base, "real" });
+    defer alloc.free(real_dir);
+    const local_dir = try std.fs.path.join(alloc, &.{ base, "cfg-local" });
+    defer alloc.free(local_dir);
+    const real_nt = try std.fmt.allocPrint(alloc, "\\??\\{s}", .{real_dir});
+    defer alloc.free(real_nt);
+    try local_target.test_links.junction(alloc, local_dir, real_nt);
+    // No real placeholder (that needs a sync provider): the seam makes the
+    // plain file read as a dehydrated one, and counts the opens that could
+    // recall it.
+    defer cloud.reset();
+    for ([_][]const u8{ "real\\config.ghostty", "cfg-local\\config.ghostty" }) |rel| {
+        errdefer std.debug.print("settings reading the config file at {s}\n", .{rel});
+        const path = try std.fs.path.join(alloc, &.{ base, rel });
+        defer alloc.free(path);
+        // Not a placeholder: read as before.
+        cloud.reset();
+        var plain = readConfigSource(alloc, path);
+        defer plain.deinit(alloc);
+        try std.testing.expectEqualStrings("font-size = 15\n", plain.file.bytes);
+        // A placeholder: refused, with nothing opened as the provider
+        // presents it, by the read and by the default path's probe.
+        cloud.name = "config.ghostty";
+        var source = readConfigSource(alloc, path);
+        defer source.deinit(alloc);
+        try std.testing.expectEqual(std.meta.Tag(settings_reference.ConfigFile).unavailable, std.meta.activeTag(source.file));
+        try std.testing.expectEqual(@as(?config_file_load.FileState, null), localFileState(alloc, path));
+        try std.testing.expectEqual(@as(usize, 0), cloud.reopened);
+        // The link opener and the editor (`local_target.open`) still open it
+        // as its provider presents it; behind the junction their direct open
+        // stops at the link, so they reach it by the walk.
+        if (std.mem.startsWith(u8, rel, "cfg-local")) {
+            const opened = local_target.open(alloc, path, false) orelse return error.TestUnexpectedResult;
+            opened.close();
+            try std.testing.expectEqual(@as(usize, 1), cloud.reopened);
+        }
+    }
+}
+
+/// The longest word (a run of letters) of `doc` that `name` does not hold.
+fn longestOwnWord(doc: []const u8, name: []const u8) ?[]const u8 {
+    var best: ?[]const u8 = null;
+    var start: usize = 0;
+    while (start < doc.len) {
+        while (start < doc.len and !std.ascii.isAlphabetic(doc[start])) start += 1;
+        var end = start;
+        while (end < doc.len and std.ascii.isAlphabetic(doc[end])) end += 1;
+        const candidate = doc[start..end];
+        const longer = candidate.len > (if (best) |word| word.len else 0);
+        if (longer and std.ascii.indexOfIgnoreCase(name, candidate) == null) best = candidate;
+        start = end;
+    }
+    return best;
+}
+
+test "settings every key is found on the All settings page by its name and by a word of its description" {
+    var settings: SettingsWindow = .{ .handle = modelOnlyHandle(), .current = try Config.default(std.testing.allocator) };
+    defer if (settings.current) |*config| config.deinit();
+    defer settings.reference_model.deinit();
+    settings.ensureReferenceModel();
+    try std.testing.expect(settings.reference_model.built());
+    for (settings_reference.keys, 0..) |key, index| {
+        const name = @tagName(key);
+        errdefer std.debug.print("settings the All settings search misses {s}\n", .{name});
+        // The name as typed in capitals, and the description's longest word
+        // that is not in the name.
+        var upper: [128]u8 = undefined;
+        const word = longestOwnWord(settings.reference_model.rows[index].doc, name) orelse return error.TestUnexpectedResult;
+        for ([_][]const u8{ std.ascii.upperString(&upper, name), word }) |typed| {
+            settings.search_query = SearchQuery.parse(typed);
+            settings.findSearchRows();
+            settings.refreshReferenceShown(true);
+            try std.testing.expect(settings.reference_found[index]);
+            const shown = settings.reference_list.shown[0..settings.reference_list.shown_count];
+            try std.testing.expect(std.mem.indexOfScalar(u16, shown, @intCast(index)) != null);
+        }
+    }
 }
 
 test "settings search field sits in the title row, clear of the line below" {
@@ -11311,9 +12047,12 @@ test "settings a search shows only the rows it finds, and the others leave the T
                 try std.testing.expectEqual(shown, sys.IsWindowVisible(control) != 0);
                 if (item.label_index) |label| try std.testing.expectEqual(shown, sys.IsWindowVisible(settings.field_labels[label].?) != 0);
             }
-            try std.testing.expectEqual(@as(usize, 3), settings.search_total);
+            // The total counts each setting once, and the All settings page
+            // has every key: the three, and `window-padding-color`.
+            try std.testing.expectEqual(@as(usize, 4), settings.search_total);
             try std.testing.expectEqual(@as(u16, 3), settings.search_counts[@intFromEnum(Section.appearance)]);
-            try std.testing.expectEqualStrings("3 settings match: 3 on this page.", readEditUtf8(settings.text_summary.?, &text_buf).?);
+            try std.testing.expectEqual(@as(u16, 4), settings.search_counts[@intFromEnum(Section.reference)]);
+            try std.testing.expectEqualStrings("4 settings match: 3 on this page.", readEditUtf8(settings.text_summary.?, &text_buf).?);
             // The help text is not shown on a page with rows found.
             try std.testing.expect(sys.IsWindowVisible(settings.text_help.?) == 0);
 
@@ -11331,8 +12070,8 @@ test "settings a search shows only the rows it finds, and the others leave the T
             try std.testing.expectEqual(@as(usize, 0), settings.formItems().len);
             for (formItemsForSection(.terminal)) |item| try std.testing.expect(sys.IsWindowVisible(settings.controlHwnd(item.control_index).?) == 0);
             try std.testing.expect(sys.IsWindowVisible(settings.text_help.?) != 0);
-            try std.testing.expect(std.mem.startsWith(u8, readEditUtf8(settings.text_help.?, &text_buf).?, "Nothing on this page matches \u{201C}Padding\u{201D}. Found on Appearance (3)."));
-            try std.testing.expectEqualStrings("3 settings match: none on this page, 3 on Appearance.", readEditUtf8(settings.text_summary.?, &text_buf).?);
+            try std.testing.expect(std.mem.startsWith(u8, readEditUtf8(settings.text_help.?, &text_buf).?, "Nothing on this page matches \u{201C}Padding\u{201D}. Found on Appearance (3), All settings (4)."));
+            try std.testing.expectEqualStrings("4 settings match: none on this page, 3 on Appearance.", readEditUtf8(settings.text_summary.?, &text_buf).?);
             // Tab from the search field reaches the rail and comes back.
             try std.testing.expectEqual(settings.btn_section_terminal.?, dialog_test.GetNextDlgTabItem(hwnd, search, 0).?);
             try std.testing.expectEqual(search, dialog_test.GetNextDlgTabItem(hwnd, settings.btn_section_terminal.?, 0).?);
@@ -11624,10 +12363,11 @@ test "settings Enter in the search goes to the first setting found, on another p
             // focus went to.
             try std.testing.expect(sys.KillTimer(hwnd, search_announce_timer_id) == 0);
 
-            // Found on Privacy: the first of its three.
+            // Found on Privacy: the first of its three rows, two settings (the
+            // two App notifications checkboxes are one).
             _ = SetFocus(search);
             typeSearch(settings, "notification");
-            try std.testing.expectEqual(@as(u16, 3), settings.search_counts[@intFromEnum(Section.privacy)]);
+            try std.testing.expectEqual(@as(u16, 2), settings.search_counts[@intFromEnum(Section.privacy)]);
             try std.testing.expect(settings.handleAccelerator(search, WM_KEYDOWN, VK_RETURN, 0));
             try std.testing.expectEqual(Section.privacy, settings.active_section);
             try std.testing.expectEqual(settings.fields.chk_desktop_notifications.?, GetFocus().?);
@@ -11690,16 +12430,23 @@ test "settings a word past the sixteenth still has to match, and changing it run
             defer fixture.finish();
             const settings = &fixture.settings;
             const fonts = "font " ** 16;
+            typeSearch(settings, "font");
+            const font_total = settings.search_total;
             typeSearch(settings, fonts ++ "font");
-            try std.testing.expectEqual(@as(usize, 2), settings.search_total);
+            try std.testing.expectEqual(font_total, settings.search_total);
+            try std.testing.expectEqual(@as(u16, 2), settings.search_counts[@intFromEnum(Section.appearance)]);
             // A seventeenth word no row has.
             typeSearch(settings, fonts ++ "zzzz");
             try std.testing.expectEqual(@as(usize, 0), settings.search_total);
             try std.testing.expectEqual(@as(usize, 0), settings.formItems().len);
             try std.testing.expect(sys.IsWindowVisible(settings.fields.edit_font_size.?) == 0);
             // Changed back, it finds the rows again.
+            typeSearch(settings, "font size");
+            const size_total = settings.search_total;
+            try std.testing.expect(size_total < font_total);
             typeSearch(settings, fonts ++ "size");
-            try std.testing.expectEqual(@as(usize, 1), settings.search_total);
+            try std.testing.expectEqual(size_total, settings.search_total);
+            try std.testing.expectEqual(@as(u16, 1), settings.search_counts[@intFromEnum(Section.appearance)]);
             try std.testing.expect(sys.IsWindowVisible(settings.fields.edit_font_size.?) != 0);
         }
     }.body);
@@ -11835,7 +12582,7 @@ test "settings the search count is said once typing pauses, as a polite live reg
             var utf8: [128]u8 = undefined;
             const said = utf8[0..try std.unicode.utf16LeToUtf8(&utf8, bstr[0..com.SysStringLen(bstr)])];
             var expected: [96]u8 = undefined;
-            try std.testing.expectEqualStrings(searchSummaryText(&expected, &settings.search_counts, .appearance), said);
+            try std.testing.expectEqualStrings(searchSummaryText(&expected, &settings.search_counts, settings.search_total, .appearance), said);
 
             // Each rail button says what its page holds.
             const terminal = settings.sectionProvider(.terminal).?;
@@ -12038,7 +12785,6 @@ test "settings arrow-key groups stop at the rail and the action bar" {
             const viewport = settings.viewport.?;
             const VK_UP: u32 = 0x26;
             const VK_DOWN: u32 = 0x28;
-            const DLGC_WANTARROWS: LRESULT = 0x0001;
             const rail = struct {
                 fn has(window: *const SettingsWindow, control: HWND) bool {
                     for (std.enums.values(Section)) |section| {
@@ -12054,7 +12800,7 @@ test "settings arrow-key groups stop at the rail and the action bar" {
             // buttons as it moves, so the rail is read rather than walked.)
             try std.testing.expectEqual(
                 settings.btn_section_appearance.?,
-                dialog_test.GetNextDlgGroupItem(hwnd, settings.btn_section_advanced.?, 0).?,
+                dialog_test.GetNextDlgGroupItem(hwnd, settings.btn_section_reference.?, 0).?,
             );
             for (std.enums.values(Section)) |section| for ([_]windows.BOOL{ 0, 1 }) |previous| {
                 try std.testing.expect(rail(settings, dialog_test.GetNextDlgGroupItem(hwnd, settings.sectionButton(section).?, previous).?));
@@ -14251,13 +14997,18 @@ test "settings a Reset button stays right after its control whatever order the s
                         buttons += 1;
                     };
                 };
+                // The All settings list, made with its page, comes last.
+                if (shown == .reference) {
+                    window = try nextPastSpares(settings, window.?, &spares);
+                    try std.testing.expectEqual(settings.reference_list.hwnd.?, window.?);
+                }
                 try std.testing.expectEqual(@as(?HWND, null), try nextPastSpares(settings, window.?, &spares));
                 try std.testing.expectEqual(settings.reset_spare_count, spares);
                 // The changed fixture differs somewhere on every page with
                 // fields, so each was checked with its buttons in place.
                 switch (shown) {
                     .appearance, .terminal, .shell, .privacy, .updates => try std.testing.expect(buttons > 0),
-                    .keybindings, .advanced => try std.testing.expectEqual(@as(usize, 0), buttons),
+                    .keybindings, .advanced, .reference => try std.testing.expectEqual(@as(usize, 0), buttons),
                 }
             }
         }
@@ -14613,9 +15364,13 @@ test "settings only the shown page's rows hold Reset buttons, handed on from pag
                 var held: usize = 0;
                 for (settings.reset_buttons) |button| held += @intFromBool(button != null);
                 // A page's rows take spares before any button is made, so the
-                // window holds exactly as many as the most one page has needed.
+                // window holds exactly as many as the most one page has needed;
+                // the All settings page, which has no rows, none at all.
                 most = @max(most, held);
-                try std.testing.expectEqual(most, held + settings.reset_spare_count);
+                if (section == .reference)
+                    try std.testing.expectEqual(@as(usize, 0), held + settings.reset_spare_count)
+                else
+                    try std.testing.expectEqual(most, held + settings.reset_spare_count);
                 for (settings.reset_spares[0..settings.reset_spare_count]) |spare| try std.testing.expect(sys.IsWindowVisible(spare) == 0);
                 for (0..form_field_count) |index| {
                     const on_page = if (settings.controlSection(index)) |page| page == section else false;
@@ -15277,10 +16032,11 @@ fn settingsEditProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callc
 /// `SetWindowTextW`, or an MSAA `put_accValue`) arrives as `WM_SETTEXT`, which
 /// `EM_LIMITTEXT` does not limit (per its documentation), while typing and
 /// pasting stop at the limit and the code that reads a field reads only that
-/// much: the search field 128 units (`searchTextChanged`), the others 4095
-/// (`readEditUtf8`). Over the limit, the field gets the text cut to it, never
-/// through a surrogate pair, so it shows exactly what is read. Null when the
-/// text fits and goes through as it is.
+/// much: the search field 128 units (`searchTextChanged`), and the fields read
+/// through `readEditUtf8` (the number fields among them, `syncNumberFromEdit`)
+/// 4095. Over the limit, the field gets the text cut to it, never through a
+/// surrogate pair, so it shows exactly what is read. Null when the text fits
+/// and goes through as it is.
 fn setTextCut(hwnd: HWND, proc: *const anyopaque, wParam: WPARAM, text: [*:0]const u16) ?LRESULT {
     var cut: [edit_text_max_code_units]u16 = undefined;
     const limit: usize = @intCast(@max(0, sys.SendMessageW(hwnd, EM_GETLIMITTEXT, 0, 0)));
@@ -16072,6 +16828,1462 @@ fn recoverOwner(hwnd: HWND) ?*SettingsWindow {
     const raw = sys.GetWindowLongPtrW(hwnd, GWLP_USERDATA);
     if (raw == 0) return null;
     return @ptrFromInt(@as(usize, @intCast(raw)));
+}
+
+/// Control id of the All settings list (`ReferenceList`).
+const REFERENCE_LIST: usize = 310;
+const reference_list_class_name = std.unicode.utf8ToUtf16LeStringLiteral("noctty.win32.settings.list");
+/// The commands of the All settings list's context menu.
+const reference_menu_copy: usize = 1;
+const reference_menu_open: usize = 2;
+/// What the list's UIA help text says: the keys it takes.
+const reference_list_help = "Up and Down move through the settings; the selected one shows its whole description and where the config file sets it. " ++
+    "Enter opens the config file, Ctrl+C copies the setting's name, and Shift+F10 offers both.";
+const reference_copy_label = "Copy name (Ctrl+C)";
+const reference_open_label = "Open config file (Enter)";
+const CS_DBLCLKS: u32 = 0x0008;
+const WM_LBUTTONDBLCLK: UINT = 0x0203;
+const SIF_DISABLENOSCROLL: u32 = 0x0008;
+
+/// The "All settings" page's list: one owner-drawn window for every config
+/// key, made when the page is shown and destroyed when it goes, so it costs
+/// one window, and only while it is on screen. Its rows are the model's
+/// (`SettingsWindow.reference_model`), filtered by the search. A row shows the
+/// key, its value in effect and the first sentence of what it does, or what
+/// Windows does with it; the selected row opens to its whole description,
+/// the lines of the config file that set it, and its two actions. UIA sees a
+/// List of ListItems (`win32_uia.PaletteListProvider`), the focus on the
+/// selected one.
+const ReferenceList = struct {
+    hwnd: ?HWND = null,
+    provider: ?*win32_uia.PaletteListProvider = null,
+    /// The rows shown, as key indexes (`settings_reference.keys`), and how many.
+    shown: [settings_reference.key_count]u16 = undefined,
+    shown_count: usize = 0,
+    /// The selected key, kept while a search hides it.
+    selected: ?u16 = null,
+    scroll_y: i32 = 0,
+    /// Wheel movement not yet turned into whole pixels (`wheelScrollPixels`).
+    wheel_remainder: i32 = 0,
+    metrics: ?Metrics = null,
+    /// The open row's text as it is drawn: what Windows does with the key and
+    /// its description, and where it is set (UTF-16, owned by the window's
+    /// allocator), for `open_key` from model build `open_generation`.
+    open_body: ?[:0]u16 = null,
+    open_location: ?[:0]u16 = null,
+    open_key: ?u16 = null,
+    open_generation: u64 = 0,
+    /// Set while a click gives the list the focus: the row clicked is
+    /// selected, not the one focusing would pick (`focused`).
+    clicking: bool = false,
+    /// What the last left-button press was on, for the double click that
+    /// may follow it (`press`).
+    pressed: Hit = .none,
+
+    /// Row geometry in pixels, measured for what it records.
+    const Metrics = struct {
+        dpi: u32,
+        width: i32,
+        font_builds: u32,
+        generation: u64,
+        open_key: ?u16,
+        pad_x: i32,
+        pad_y: i32,
+        gap: i32,
+        bar: i32,
+        /// One line of the key's font, and of the smaller one.
+        title: i32,
+        line: i32,
+        /// A closed row, and the open one.
+        row: i32,
+        open: i32,
+        /// The open row's description and location.
+        body: i32,
+        location: i32,
+        /// The two actions' widths, and the room between them.
+        copy_width: i32,
+        open_width: i32,
+        action_gap: i32,
+    };
+
+    fn owner(self: *ReferenceList) *SettingsWindow {
+        return @fieldParentPtr("reference_list", self);
+    }
+
+    fn ownerConst(self: *const ReferenceList) *const SettingsWindow {
+        return @fieldParentPtr("reference_list", self);
+    }
+
+    fn forgetOpenText(self: *ReferenceList, alloc: std.mem.Allocator) void {
+        if (self.open_body) |text| alloc.free(text);
+        if (self.open_location) |text| alloc.free(text);
+        self.open_body = null;
+        self.open_location = null;
+        self.open_key = null;
+        self.metrics = null;
+    }
+
+    /// Where the selected key is among the rows shown, if it is shown.
+    fn selectedPosition(self: *const ReferenceList) ?usize {
+        const key = self.selected orelse return null;
+        for (self.shown[0..self.shown_count], 0..) |shown, position| if (shown == key) return position;
+        return null;
+    }
+
+    /// The rows changed (a search, a rebuilt model, the page made): measure
+    /// again, keep the scroll in range and repaint.
+    fn contentChanged(self: *ReferenceList) void {
+        self.metrics = null;
+        self.syncScroll();
+        if (self.hwnd) |hwnd| _ = InvalidateRect(hwnd, null, 0);
+    }
+
+    fn clientHeight(self: *const ReferenceList) i32 {
+        const hwnd = self.hwnd orelse return 0;
+        var client: RECT = undefined;
+        if (GetClientRect(hwnd, &client) == 0) return 0;
+        return client.bottom;
+    }
+
+    /// The row geometry for the list as it is now, measured again when the
+    /// DPI, the fonts, the width, the model or the open row changed.
+    fn ensureMetrics(self: *ReferenceList) ?Metrics {
+        const hwnd = self.hwnd orelse return null;
+        const settings = self.owner();
+        var client: RECT = undefined;
+        if (GetClientRect(hwnd, &client) == 0) return null;
+        const position = self.selectedPosition();
+        const open_key: ?u16 = if (position != null) self.selected else null;
+        if (self.metrics) |metrics| {
+            if (metrics.dpi == settings.dpi and metrics.width == client.right and metrics.font_builds == settings.font_builds and
+                metrics.generation == settings.reference_generation and metrics.open_key == open_key) return metrics;
+        }
+        var metrics: Metrics = .{
+            .dpi = settings.dpi,
+            .width = client.right,
+            .font_builds = settings.font_builds,
+            .generation = settings.reference_generation,
+            .open_key = open_key,
+            .pad_x = settings.px(settings_metrics.space_5),
+            .pad_y = settings.px(settings_metrics.space_4),
+            .gap = settings.px(settings_metrics.space_2),
+            .bar = @max(1, settings.px(settings_metrics.stroke_emphasis)),
+            .title = @max(1, fontLineHeight(hwnd, settings.emphasis_font)),
+            .line = @max(1, fontLineHeight(hwnd, settings.secondary_font)),
+            .row = 0,
+            .open = 0,
+            .body = 0,
+            .location = 0,
+            .copy_width = 0,
+            .open_width = 0,
+            .action_gap = settings.px(settings_metrics.space_8),
+        };
+        metrics.row = 2 * metrics.pad_y + metrics.title + metrics.gap + metrics.line;
+        metrics.open = metrics.row;
+        if (open_key) |key| {
+            self.ensureOpenText(key);
+            const width = textWidth(metrics);
+            if (self.open_body) |text| metrics.body = measureWrapped(hwnd, settings.ui_font, text, width);
+            if (self.open_location) |text| metrics.location = measureWrapped(hwnd, settings.secondary_font, text, width);
+            if (settings.handle.copyText != null) metrics.copy_width = measureLine(hwnd, settings.secondary_font, std.unicode.utf8ToUtf16LeStringLiteral(reference_copy_label));
+            metrics.open_width = measureLine(hwnd, settings.secondary_font, std.unicode.utf8ToUtf16LeStringLiteral(reference_open_label));
+            metrics.open = 2 * metrics.pad_y + metrics.title + metrics.gap + metrics.body +
+                (if (metrics.location > 0) metrics.gap + metrics.location else 0) +
+                metrics.gap + metrics.line + metrics.pad_y;
+        }
+        self.metrics = metrics;
+        return metrics;
+    }
+
+    /// The width text wraps to in a row: inside its padding, right of the bar
+    /// that marks the open row.
+    fn textWidth(metrics: Metrics) i32 {
+        return @max(1, metrics.width - 2 * metrics.pad_x - metrics.bar);
+    }
+
+    /// The open row's text for `key`: what Windows does with it, its
+    /// description, and where the config file sets it.
+    fn ensureOpenText(self: *ReferenceList, key: u16) void {
+        const settings = self.owner();
+        if (self.open_key == key and self.open_generation == settings.reference_generation) return;
+        const alloc = settings.handle.alloc;
+        if (self.open_body) |text| alloc.free(text);
+        if (self.open_location) |text| alloc.free(text);
+        self.open_body = null;
+        self.open_location = null;
+        self.open_key = key;
+        self.open_generation = settings.reference_generation;
+        if (!settings.reference_model.built()) return;
+        const row = &settings.reference_model.rows[key];
+        var text: std.Io.Writer.Allocating = .init(alloc);
+        defer text.deinit();
+        if (settings_reference.notes[key]) |note| {
+            text.writer.writeAll(note) catch return;
+            text.writer.writeAll("\n\n") catch return;
+        }
+        text.writer.writeAll(row.doc) catch return;
+        self.open_body = std.unicode.utf8ToUtf16LeAllocZ(alloc, text.written()) catch null;
+        text.clearRetainingCapacity();
+        settings.reference_model.writeLocation(&text.writer, row) catch return;
+        if (text.written().len != 0) self.open_location = std.unicode.utf8ToUtf16LeAllocZ(alloc, text.written()) catch null;
+    }
+
+    fn rowHeight(metrics: Metrics, selected_position: ?usize, position: usize) i32 {
+        const open = if (selected_position) |selected| selected == position else false;
+        return if (open) metrics.open else metrics.row;
+    }
+
+    /// Where row `position` starts, from the top of the list's content.
+    fn rowTop(metrics: Metrics, selected_position: ?usize, position: usize) i32 {
+        var top: i32 = @as(i32, @intCast(position)) * metrics.row;
+        if (selected_position) |selected| if (selected < position) {
+            top += metrics.open - metrics.row;
+        };
+        return top;
+    }
+
+    fn contentHeight(self: *const ReferenceList, metrics: Metrics) i32 {
+        const count: i32 = @intCast(self.shown_count);
+        var height = count * metrics.row;
+        if (self.selectedPosition() != null) height += metrics.open - metrics.row;
+        return height;
+    }
+
+    /// The row at `y` (from the top of the content), if there is one.
+    fn positionAt(self: *const ReferenceList, metrics: Metrics, y: i32) ?usize {
+        if (y < 0) return null;
+        const selected = self.selectedPosition();
+        var top: i32 = 0;
+        for (0..self.shown_count) |position| {
+            const height = rowHeight(metrics, selected, position);
+            if (y < top + height) return position;
+            top += height;
+        }
+        return null;
+    }
+
+    /// Keep the scroll position in range and tell the scroll bar.
+    fn syncScroll(self: *ReferenceList) void {
+        const hwnd = self.hwnd orelse return;
+        const metrics = self.ensureMetrics() orelse return;
+        const page = self.clientHeight();
+        const content = self.contentHeight(metrics);
+        self.scroll_y = std.math.clamp(self.scroll_y, 0, @max(0, content - page));
+        const info: SCROLLINFO = .{
+            .cbSize = @sizeOf(SCROLLINFO),
+            .fMask = SIF_RANGE | SIF_PAGE | SIF_POS | SIF_DISABLENOSCROLL,
+            .nMin = 0,
+            .nMax = @max(0, content - 1),
+            .nPage = @intCast(@max(0, page)),
+            .nPos = self.scroll_y,
+            .nTrackPos = 0,
+        };
+        _ = SetScrollInfo(hwnd, SB_VERT, &info, 1);
+    }
+
+    fn scrollTo(self: *ReferenceList, y: i32) void {
+        const before = self.scroll_y;
+        self.scroll_y = y;
+        self.syncScroll();
+        if (self.scroll_y == before) return;
+        if (self.hwnd) |hwnd| _ = InvalidateRect(hwnd, null, 0);
+    }
+
+    /// Scroll so the selected row is in view: all of it when it fits, else
+    /// its top. With `.unless_shown`, a row some of which is in view stays
+    /// where it is: one being read a page at a time keeps its place when the
+    /// focus comes back, or a click lands in it.
+    fn revealSelected(self: *ReferenceList, how: enum { whole, unless_shown }) void {
+        const metrics = self.ensureMetrics() orelse return;
+        const position = self.selectedPosition() orelse return;
+        const top = rowTop(metrics, position, position);
+        const view = self.clientHeight();
+        if (how == .unless_shown and top < self.scroll_y + view and top + metrics.open > self.scroll_y) return self.syncScroll();
+        const height = @min(metrics.open, view);
+        if (top < self.scroll_y) {
+            self.scrollTo(top);
+        } else if (top + height > self.scroll_y + self.clientHeight()) {
+            self.scrollTo(top + height - self.clientHeight());
+        } else self.syncScroll();
+    }
+
+    /// Select the row at `position` (among those shown), open it, keep it in
+    /// view, and tell UIA.
+    fn selectPosition(self: *ReferenceList, position: usize) void {
+        if (position >= self.shown_count) return;
+        const key = self.shown[position];
+        if (self.selected != null and self.selected.? == key) return self.revealSelected(.unless_shown);
+        self.selected = key;
+        self.metrics = null;
+        self.revealSelected(.whole);
+        if (self.hwnd) |hwnd| _ = InvalidateRect(hwnd, null, 0);
+        if (self.provider) |provider| provider.raiseSelectionChanged(position);
+    }
+
+    /// Move the selection by `delta` rows; with none selected, to the first.
+    fn moveSelection(self: *ReferenceList, delta: isize) void {
+        if (self.shown_count == 0) return;
+        const current: isize = if (self.selectedPosition()) |position| @intCast(position) else return self.selectPosition(0);
+        const next = std.math.clamp(current + delta, 0, @as(isize, @intCast(self.shown_count - 1)));
+        self.selectPosition(@intCast(next));
+    }
+
+    /// Page Down (`down`) or Page Up. An open row taller than the list is
+    /// read through a page at a time; otherwise the selection moves by as
+    /// many rows as the list shows.
+    fn turnPage(self: *ReferenceList, down: bool) void {
+        const metrics = self.ensureMetrics() orelse return;
+        const view = self.clientHeight();
+        if (self.selectedPosition()) |position| {
+            const top = rowTop(metrics, position, position);
+            const bottom = top + metrics.open;
+            const step = @max(metrics.row, view - metrics.row);
+            if (down and bottom > self.scroll_y + view and top < self.scroll_y + view) return self.scrollTo(@min(self.scroll_y + step, bottom - view));
+            if (!down and top < self.scroll_y and bottom > self.scroll_y) return self.scrollTo(@max(self.scroll_y - step, top));
+        }
+        const rows: isize = @max(1, @divTrunc(view, metrics.row) - 1);
+        self.moveSelection(if (down) rows else -rows);
+    }
+
+    /// Enter, a double click, or UIA's Invoke on the selected row: open the
+    /// config file, where its key is set or can be added.
+    fn invokeSelected(self: *ReferenceList) void {
+        if (self.selectedPosition() == null) return;
+        const settings = self.owner();
+        settings.handle.openInEditor(settings.handle.ctx);
+    }
+
+    fn copySelected(self: *ReferenceList) void {
+        if (self.selectedPosition() == null) return;
+        self.owner().copyReferenceKey(self.selected.?);
+    }
+
+    /// The open row's actions, in client coordinates: Copy name (when the app
+    /// can copy) and Open config file.
+    fn actionRects(self: *ReferenceList, metrics: Metrics) struct { copy: ?RECT, open: ?RECT } {
+        const position = self.selectedPosition() orelse return .{ .copy = null, .open = null };
+        const top = rowTop(metrics, position, position) - self.scroll_y;
+        const y = top + 2 * metrics.pad_y + metrics.title + metrics.gap + metrics.body +
+            (if (metrics.location > 0) metrics.gap + metrics.location else 0) + metrics.gap;
+        const x = metrics.pad_x + metrics.bar;
+        const copy: ?RECT = if (metrics.copy_width > 0) .{ .left = x, .top = y, .right = x + metrics.copy_width, .bottom = y + metrics.line } else null;
+        const open_left = if (copy) |rect| rect.right + metrics.action_gap else x;
+        return .{ .copy = copy, .open = .{ .left = open_left, .top = y, .right = open_left + metrics.open_width, .bottom = y + metrics.line } };
+    }
+
+    /// What is under a point of the list.
+    const Hit = union(enum) { none, copy, open, row: usize };
+
+    /// What `point` (client coordinates) is on: an action of the open row,
+    /// or a row.
+    fn hitTest(self: *ReferenceList, point: POINT) Hit {
+        const metrics = self.ensureMetrics() orelse return .none;
+        const actions = self.actionRects(metrics);
+        if (actions.copy) |rect| if (rectContains(rect, point)) return .copy;
+        if (actions.open) |rect| if (rectContains(rect, point)) return .open;
+        const position = self.positionAt(metrics, point.y + self.scroll_y) orelse return .none;
+        return .{ .row = position };
+    }
+
+    /// A mouse button went down at `point`. What it is on is found before the
+    /// list takes the focus, which may open a row and move the rest. A double
+    /// click is the second press of a click whose first may have done just
+    /// that, so it acts on what the first press was on: a row's opens the
+    /// config file, and an action's does nothing more.
+    fn press(self: *ReferenceList, point: POINT, kind: enum { left, double, right }) void {
+        if (kind == .double) {
+            if (self.pressed == .row) self.invokeSelected();
+            self.pressed = .none;
+            return;
+        }
+        const hit = self.hitTest(point);
+        self.pressed = if (kind == .left) hit else .none;
+        if (self.hwnd) |hwnd| if (GetFocus() != hwnd) {
+            self.clicking = true;
+            defer self.clicking = false;
+            _ = SetFocus(hwnd);
+        };
+        switch (hit) {
+            .none => {},
+            .copy => if (kind == .left) self.copySelected(),
+            .open => if (kind == .left) self.invokeSelected(),
+            .row => |position| self.selectPosition(position),
+        }
+    }
+
+    /// The selected row's menu: Copy name and Open config file. From the
+    /// keyboard it opens below the row's first line, the row scrolled into
+    /// view first; from the mouse, where it was clicked, and only on a row
+    /// (the press selected it).
+    fn showMenu(self: *ReferenceList, lParam: LPARAM) void {
+        const hwnd = self.hwnd orelse return;
+        const settings = self.owner();
+        const frame = settings.hwnd orelse return;
+        if (self.selectedPosition() == null) return;
+        var at: POINT = .{ .x = lparamX(lParam), .y = lparamY(lParam) };
+        if (@as(u32, @truncate(@as(usize, @bitCast(lParam)))) == 0xFFFF_FFFF) {
+            self.revealSelected(.unless_shown);
+            const metrics = self.ensureMetrics() orelse return;
+            const position = self.selectedPosition() orelse return;
+            const below_title = rowTop(metrics, position, position) - self.scroll_y + 2 * metrics.pad_y + metrics.title;
+            at = .{ .x = metrics.pad_x, .y = std.math.clamp(below_title, 0, @max(0, self.clientHeight() - 1)) };
+            _ = sys.ClientToScreen(hwnd, &at);
+        } else {
+            var client = at;
+            _ = sys.ScreenToClient(hwnd, &client);
+            if (self.hitTest(client) == .none) return;
+        }
+        const menu = sys.CreatePopupMenu() orelse return;
+        defer _ = sys.DestroyMenu(menu);
+        if (settings.handle.copyText != null)
+            _ = sys.AppendMenuW(menu, MF_STRING, reference_menu_copy, std.unicode.utf8ToUtf16LeStringLiteral("&Copy name\tCtrl+C"));
+        _ = sys.AppendMenuW(menu, MF_STRING, reference_menu_open, std.unicode.utf8ToUtf16LeStringLiteral("&Open config file\tEnter"));
+        const picked: usize = if (settings.context_menu_pick) |pick|
+            pick(menu)
+        else
+            @intCast(@max(0, sys.TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, at.x, at.y, 0, frame, null)));
+        switch (picked) {
+            reference_menu_copy => self.copySelected(),
+            reference_menu_open => self.invokeSelected(),
+            else => {},
+        }
+    }
+
+    /// A key reaching the list. True when it was the list's.
+    fn keyDown(self: *ReferenceList, vk: usize) bool {
+        switch (vk) {
+            focus_cue.vk_up => self.moveSelection(-1),
+            focus_cue.vk_down => self.moveSelection(1),
+            focus_cue.vk_home => self.selectPosition(0),
+            focus_cue.vk_end => if (self.shown_count != 0) self.selectPosition(self.shown_count - 1),
+            focus_cue.vk_prior => self.turnPage(false),
+            focus_cue.vk_next => self.turnPage(true),
+            'C' => {
+                if (!win32_input.keyPressed(VK_CONTROL) or win32_input.keyPressed(VK_MENU) or win32_input.keyPressed(VK_SHIFT)) return false;
+                self.copySelected();
+            },
+            else => return false,
+        }
+        return true;
+    }
+
+    /// The list took the keyboard focus: a row is selected (the last one, or
+    /// the first) and in view, and UIA hears the focus on it. A click selects
+    /// the row it is on instead (`press`).
+    fn focused(self: *ReferenceList) void {
+        if (!self.clicking and self.shown_count != 0) {
+            if (self.selectedPosition() == null) {
+                self.selected = self.shown[0];
+                self.metrics = null;
+            }
+            // A window opened again keeps the key, not where it scrolled to.
+            self.revealSelected(.unless_shown);
+        }
+        if (self.hwnd) |hwnd| _ = InvalidateRect(hwnd, null, 0);
+        if (self.provider) |provider| provider.raiseFocusOnSelectedRow();
+    }
+
+    /// Row `position`'s bounds on screen while some of it is in view.
+    fn rowScreenBounds(self: *ReferenceList, position: usize) ?win32_uia.UiaRect {
+        const hwnd = self.hwnd orelse return null;
+        if (position >= self.shown_count) return null;
+        const metrics = self.ensureMetrics() orelse return null;
+        const selected = self.selectedPosition();
+        const top = rowTop(metrics, selected, position) - self.scroll_y;
+        const bottom = top + rowHeight(metrics, selected, position);
+        const view = self.clientHeight();
+        const shown_top = @max(0, top);
+        const shown_bottom = @min(view, bottom);
+        if (shown_bottom <= shown_top or sys.IsWindowVisible(hwnd) == 0) return null;
+        var origin: POINT = .{ .x = 0, .y = shown_top };
+        if (sys.ClientToScreen(hwnd, &origin) == 0) return null;
+        return .{
+            .left = @floatFromInt(origin.x),
+            .top = @floatFromInt(origin.y),
+            .width = @floatFromInt(metrics.width),
+            .height = @floatFromInt(shown_bottom - shown_top),
+        };
+    }
+
+    /// Paint the rows that `clip` meets.
+    fn paint(self: *ReferenceList, hdc: HDC, clip: RECT) void {
+        const settings = self.owner();
+        const colors = settings.theme_adapter.colors;
+        fillSolid(hdc, clip, colors.window_bg);
+        const hwnd = self.hwnd orelse return;
+        const metrics = self.ensureMetrics() orelse return;
+        _ = SetBkMode(hdc, TRANSPARENT);
+        const selected = self.selectedPosition();
+        const view = self.clientHeight();
+        const ring = focus_cue.showRing(GetFocus() == hwnd, false, settings.focus_input_mode, colors.high_contrast);
+        var top: i32 = -self.scroll_y;
+        for (0..self.shown_count) |position| {
+            const height = rowHeight(metrics, selected, position);
+            defer top += height;
+            if (top + height <= clip.top) continue;
+            if (top >= @min(clip.bottom, view)) break;
+            const row: RECT = .{ .left = 0, .top = top, .right = metrics.width, .bottom = top + height };
+            if (selected == position) self.paintOpenRow(hdc, metrics, row, self.shown[position], ring) else self.paintRow(hdc, metrics, row, self.shown[position], position + 1 < self.shown_count);
+        }
+    }
+
+    /// The key and its value on the row's first line, from `left`.
+    fn paintTitle(self: *ReferenceList, hdc: HDC, metrics: Metrics, row: RECT, key: u16, text_color: COLORREF, value_color: COLORREF) void {
+        const settings = self.owner();
+        const model_row = &settings.reference_model.rows[key];
+        const left = row.left + metrics.pad_x + metrics.bar;
+        const right = row.right - metrics.pad_x;
+        const y = row.top + metrics.pad_y;
+        var name_w: [96]u16 = undefined;
+        const name = utf8ToW(&name_w, @tagName(settings_reference.keys[key]));
+        const previous = SelectObject(hdc, settings.emphasis_font);
+        defer _ = SelectObject(hdc, previous);
+        _ = SetTextColor(hdc, text_color);
+        var name_rect: RECT = .{ .left = left, .top = y, .right = right, .bottom = y + metrics.title };
+        var measured = name_rect;
+        _ = DrawTextW(hdc, name, -1, &measured, DT_SINGLELINE | DT_NOPREFIX | DT_CALCRECT);
+        _ = DrawTextW(hdc, name, -1, &name_rect, DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+        const value_left = measured.right + settings.px(settings_metrics.space_6);
+        if (value_left >= right) return;
+        var value_buf: [256]u8 = undefined;
+        var value: std.Io.Writer = .fixed(&value_buf);
+        settings_reference.writeValue(&value, model_row) catch {};
+        if (settings.referenceKeyDirty(key)) value.writeAll(" (changed here, not saved yet)") catch {};
+        var value_w: [256]u16 = undefined;
+        _ = SelectObject(hdc, settings.ui_font);
+        _ = SetTextColor(hdc, value_color);
+        var value_rect: RECT = .{ .left = value_left, .top = y, .right = right, .bottom = y + metrics.title };
+        _ = DrawTextW(hdc, utf8ToW(&value_w, utf8Prefix(value.buffered())), -1, &value_rect, DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS | DT_VCENTER);
+    }
+
+    fn paintRow(self: *ReferenceList, hdc: HDC, metrics: Metrics, row: RECT, key: u16, separator: bool) void {
+        const settings = self.owner();
+        const colors = settings.theme_adapter.colors;
+        const model_row = &settings.reference_model.rows[key];
+        const empty = model_row.value.len == 0 and model_row.more == 0;
+        self.paintTitle(hdc, metrics, row, key, colors.text, if (empty) colors.secondary_text else colors.text);
+        // What Windows does with the key matters more than how it starts
+        // describing it.
+        const line_text = settings_reference.notes[key] orelse model_row.summary;
+        var line_w: [512]u16 = undefined;
+        const previous = SelectObject(hdc, settings.secondary_font);
+        defer _ = SelectObject(hdc, previous);
+        _ = SetTextColor(hdc, colors.secondary_text);
+        const y = row.top + metrics.pad_y + metrics.title + metrics.gap;
+        var line_rect: RECT = .{ .left = row.left + metrics.pad_x + metrics.bar, .top = y, .right = row.right - metrics.pad_x, .bottom = y + metrics.line };
+        _ = DrawTextW(hdc, utf8ToW(&line_w, utf8Prefix(line_text[0..@min(line_text.len, line_w.len - 1)])), -1, &line_rect, DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+        if (separator) {
+            const stroke = @max(1, settings.px(settings_metrics.stroke_hairline));
+            fillSolid(hdc, .{ .left = row.left + metrics.pad_x, .top = row.bottom - stroke, .right = row.right - metrics.pad_x, .bottom = row.bottom }, colors.pane_separator);
+        }
+    }
+
+    fn paintOpenRow(self: *ReferenceList, hdc: HDC, metrics: Metrics, row: RECT, key: u16, ring: bool) void {
+        const settings = self.owner();
+        const colors = settings.theme_adapter.colors;
+        // The first line on the selection colour, the rest on the pane's, and
+        // a bar down the left of the whole row. The focus ring goes round them
+        // on the pane's colour, never over the band: in High Contrast the band
+        // is Highlight, which the ring's colour is too.
+        const ring_width: i32 = if (ring) @max(1, settings.px(settings_metrics.stroke_focus)) else 0;
+        const band: RECT = .{ .left = row.left + ring_width, .top = row.top + ring_width, .right = row.right - ring_width, .bottom = row.top + 2 * metrics.pad_y + metrics.title };
+        fillSolid(hdc, band, colors.selection_bg);
+        fillSolid(hdc, .{ .left = band.left, .top = band.top, .right = band.left + metrics.bar, .bottom = row.bottom - ring_width }, colors.accent);
+        self.paintTitle(hdc, metrics, row, key, colors.selection_text, colors.selection_text);
+        const left = row.left + metrics.pad_x + metrics.bar;
+        const right = row.right - metrics.pad_x;
+        var y = band.bottom + metrics.gap;
+        const previous = SelectObject(hdc, settings.ui_font);
+        defer _ = SelectObject(hdc, previous);
+        if (self.open_body) |text| {
+            _ = SetTextColor(hdc, colors.text);
+            var rect: RECT = .{ .left = left, .top = y, .right = right, .bottom = y + metrics.body };
+            _ = DrawTextW(hdc, text.ptr, @intCast(text.len), &rect, DT_WORDBREAK | DT_NOPREFIX | DT_EXPANDTABS);
+        }
+        y += metrics.body;
+        _ = SelectObject(hdc, settings.secondary_font);
+        if (self.open_location) |text| {
+            y += metrics.gap;
+            _ = SetTextColor(hdc, colors.secondary_text);
+            var rect: RECT = .{ .left = left, .top = y, .right = right, .bottom = y + metrics.location };
+            _ = DrawTextW(hdc, text.ptr, @intCast(text.len), &rect, DT_WORDBREAK | DT_NOPREFIX);
+            y += metrics.location;
+        }
+        const actions = self.actionRects(metrics);
+        // High Contrast's accent is Highlight, a background colour: the
+        // actions are the pane's text there, as the ring is.
+        const action_color = if (colors.high_contrast) colors.text else colors.accent;
+        _ = SetTextColor(hdc, action_color);
+        if (actions.copy) |rect| {
+            var copy_rect = rect;
+            _ = DrawTextW(hdc, std.unicode.utf8ToUtf16LeStringLiteral(reference_copy_label), -1, &copy_rect, DT_SINGLELINE | DT_NOPREFIX);
+        }
+        if (actions.open) |rect| {
+            var open_rect = rect;
+            open_rect.right = right;
+            _ = DrawTextW(hdc, std.unicode.utf8ToUtf16LeStringLiteral(reference_open_label), -1, &open_rect, DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+        }
+        if (ring) strokeRect(hdc, row, if (colors.high_contrast) colors.text else colors.focus_ring, ring_width);
+    }
+};
+
+const DT_EXPANDTABS: u32 = 0x0040;
+
+fn rectContains(rect: RECT, point: POINT) bool {
+    return point.x >= rect.left and point.x < rect.right and point.y >= rect.top and point.y < rect.bottom;
+}
+
+/// `bytes` without a UTF-8 sequence cut short at its end.
+fn utf8Prefix(bytes: []const u8) []const u8 {
+    var end = bytes.len;
+    var back: usize = 0;
+    while (end > 0 and back < 4) : (back += 1) {
+        const c = bytes[end - 1];
+        if (c < 0x80) break;
+        if (c & 0xC0 == 0xC0) {
+            // A lead byte: keep it only with all of its sequence.
+            const length = std.unicode.utf8ByteSequenceLength(c) catch return bytes[0 .. end - 1];
+            return if (back + 1 >= length) bytes else bytes[0 .. end - 1];
+        }
+        end -= 1;
+    }
+    return bytes;
+}
+
+/// The height of `text` wrapped to `width` in `font`.
+fn measureWrapped(hwnd: HWND, font: HGDIOBJ, text: [:0]const u16, width: i32) i32 {
+    if (text.len == 0) return 0;
+    const hdc = GetDC(hwnd) orelse return 0;
+    defer _ = ReleaseDC(hwnd, hdc);
+    const previous = SelectObject(hdc, font);
+    defer _ = SelectObject(hdc, previous);
+    var rect: RECT = .{ .left = 0, .top = 0, .right = width, .bottom = 0 };
+    _ = DrawTextW(hdc, text.ptr, @intCast(text.len), &rect, DT_CALCRECT | DT_WORDBREAK | DT_NOPREFIX | DT_EXPANDTABS);
+    return rect.bottom - rect.top;
+}
+
+/// The width of one line of `text` in `font`.
+fn measureLine(hwnd: HWND, font: HGDIOBJ, text: [*:0]const u16) i32 {
+    const hdc = GetDC(hwnd) orelse return 0;
+    defer _ = ReleaseDC(hwnd, hdc);
+    const previous = SelectObject(hdc, font);
+    defer _ = SelectObject(hdc, previous);
+    var rect: RECT = .{ .left = 0, .top = 0, .right = 0, .bottom = 0 };
+    _ = DrawTextW(hdc, text, -1, &rect, DT_CALCRECT | DT_SINGLELINE | DT_NOPREFIX);
+    return rect.right - rect.left;
+}
+
+/// The file a save writes, as the All settings page reads it on the UI
+/// thread: `override` (the `--config-file` path the process started with) or
+/// the default the loader would pick, and its bytes. Nothing here opens a path
+/// that might lead off this machine, a share behind a link included, since
+/// one gone away could hold the UI thread for a network timeout: every look
+/// at a file, the default path's probes too, goes through `local_target`,
+/// which checks each link before it follows it. For the same reason it never
+/// opens a cloud placeholder (OneDrive and the like) in a way that could make
+/// the provider recall it (`settings_lookup`). A default whose candidates
+/// cannot all be looked at that way is not named.
+pub fn readConfigSource(alloc: std.mem.Allocator, override: ?[]const u8) settings_reference.ConfigSource {
+    const path: []const u8 = if (override) |given|
+        alloc.dupe(u8, given) catch return .{}
+    else
+        (config_file_load.preferredXdgPathProbed(alloc, &localFileState) catch return .{}) orelse
+            return .{ .file = .unavailable };
+    return .{ .path = path, .file = readConfigFile(alloc, path) };
+}
+
+/// The config file at `path`, for the lines that set each key: read only
+/// through a handle `local_target` showed to be local, and only up to a size
+/// a config file has. A file that is not there is `.missing`; one that could
+/// not be shown to be local, or read, `.unavailable`. The bytes are the
+/// caller's to free.
+fn readConfigFile(alloc: std.mem.Allocator, path: []const u8) settings_reference.ConfigFile {
+    const resolved = localConfigPath(alloc, path) orelse return .unavailable;
+    defer alloc.free(resolved);
+    return switch (local_target.lookup(alloc, resolved, .{ .read_data = true, .cloud = settings_lookup })) {
+        .missing => .missing,
+        .refused => .unavailable,
+        .file => |file| read: {
+            defer file.close();
+            break :read .{ .bytes = file.readToEndAlloc(alloc, reference_config_max_bytes) catch return .unavailable };
+        },
+    };
+}
+
+/// A default-path candidate's state for `preferredXdgPathProbed`, looked at
+/// through `local_target`; null when it cannot be shown to be local.
+fn localFileState(alloc: std.mem.Allocator, path: []const u8) ?config_file_load.FileState {
+    const resolved = localConfigPath(alloc, path) orelse return null;
+    defer alloc.free(resolved);
+    return switch (local_target.lookup(alloc, resolved, .{ .cloud = settings_lookup })) {
+        .missing => .missing,
+        .refused => null,
+        .file => |file| state: {
+            defer file.close();
+            const stat = file.stat() catch break :state null;
+            break :state if (stat.size == 0) .empty else .content;
+        },
+    };
+}
+
+/// How the All settings page treats a cloud placeholder: it refuses one, as
+/// `.unavailable`, before anything could make its provider recall it on the
+/// UI thread, where a slow or offline provider would stall the window.
+const settings_lookup: local_target.Cloud = .refuse;
+
+/// `path` normalized for `local_target`, or null when it is not a path on a
+/// drive letter. The shape is checked as given: `std.fs.path.resolve` must
+/// not see a share or device path, since in Zig 0.15.2 it unwraps a null on a
+/// mixed-separator share such as `\\a\/` (lib/std/fs/path.zig:593), a panic no
+/// `catch` stops, and a `--config-file` path reaches here as given.
+fn localConfigPath(alloc: std.mem.Allocator, path: []const u8) ?[]u8 {
+    if (!windows_shell.isDriveAbsolutePath(path) or os_path.isNetworkOrDevicePath(path) or
+        std.mem.indexOfScalar(u8, path[2..], ':') != null) return null;
+    return std.fs.path.resolve(alloc, &.{path}) catch null;
+}
+
+/// The largest config file the All settings page reads for line numbers.
+const reference_config_max_bytes = 4 * 1024 * 1024;
+
+fn referenceListUiaState(settings: *SettingsWindow) win32_uia.PaletteListState {
+    return .{
+        .ctx = settings,
+        .name = &referenceUiaName,
+        .localized_control_type = "list",
+        .keyboard_focusable = true,
+        .focused = &referenceUiaFocused,
+        .row_count = &referenceUiaRowCount,
+        .selected_index = &referenceUiaSelectedIndex,
+        .row_name = &referenceUiaRowName,
+        .row_id = &referenceUiaRowId,
+        .select_row = &referenceUiaSelectRow,
+        .invoke_row = &referenceUiaInvokeRow,
+        .row_bounds = &referenceUiaRowBounds,
+        .help_text = reference_list_help,
+        .row_help = &referenceUiaRowHelp,
+        .focus_selected_row = true,
+        .use_com_threading = settings.canInitializeCustomUiaProviders(),
+    };
+}
+
+fn referenceOwner(ctx: *anyopaque) *SettingsWindow {
+    return @ptrCast(@alignCast(ctx));
+}
+
+fn referenceUiaName(ctx: *anyopaque, buf: []u8) []const u8 {
+    _ = ctx;
+    _ = buf;
+    return "All settings";
+}
+
+fn referenceUiaFocused(ctx: *anyopaque) bool {
+    const list = referenceOwner(ctx).reference_list.hwnd orelse return false;
+    return GetFocus() == list;
+}
+
+fn referenceUiaRowCount(ctx: *anyopaque) usize {
+    return referenceOwner(ctx).reference_list.shown_count;
+}
+
+fn referenceUiaSelectedIndex(ctx: *anyopaque) ?usize {
+    return referenceOwner(ctx).reference_list.selectedPosition();
+}
+
+/// A row's name: the key, and its value in effect.
+fn referenceUiaRowName(ctx: *anyopaque, index: usize, buf: []u8) []const u8 {
+    const settings = referenceOwner(ctx);
+    const list = &settings.reference_list;
+    if (index >= list.shown_count or !settings.reference_model.built()) return "";
+    const key = list.shown[index];
+    var writer: std.Io.Writer = .fixed(buf);
+    writer.print("{s}, ", .{@tagName(settings_reference.keys[key])}) catch {};
+    settings_reference.writeValue(&writer, &settings.reference_model.rows[key]) catch {};
+    if (settings.referenceKeyDirty(key)) writer.writeAll(", changed here, not saved yet") catch {};
+    return utf8Prefix(writer.buffered());
+}
+
+/// A row's help text: what Windows does with the key, its description, and
+/// where the config file sets it.
+fn referenceUiaRowHelp(ctx: *anyopaque, index: usize, buf: []u8) []const u8 {
+    const settings = referenceOwner(ctx);
+    const list = &settings.reference_list;
+    if (index >= list.shown_count or !settings.reference_model.built()) return "";
+    const key = list.shown[index];
+    const row = &settings.reference_model.rows[key];
+    var writer: std.Io.Writer = .fixed(buf);
+    if (settings_reference.notes[key]) |note| writer.print("{s}\n\n", .{note}) catch {};
+    writer.writeAll(row.doc) catch {};
+    if (settings.reference_model.file != null) {
+        writer.writeAll("\n\n") catch {};
+        settings.reference_model.writeLocation(&writer, row) catch {};
+    }
+    return utf8Prefix(writer.buffered());
+}
+
+fn referenceUiaRowId(ctx: *anyopaque, index: usize) u64 {
+    const list = &referenceOwner(ctx).reference_list;
+    return if (index < list.shown_count) @as(u64, list.shown[index]) + 1 else 0;
+}
+
+fn referenceUiaSelectRow(ctx: *anyopaque, index: usize) void {
+    referenceOwner(ctx).reference_list.selectPosition(index);
+}
+
+fn referenceUiaInvokeRow(ctx: *anyopaque, index: usize) void {
+    const list = &referenceOwner(ctx).reference_list;
+    list.selectPosition(index);
+    list.invokeSelected();
+}
+
+fn referenceUiaRowBounds(ctx: *anyopaque, index: usize) ?win32_uia.PaletteListRowBounds {
+    return referenceOwner(ctx).reference_list.rowScreenBounds(index);
+}
+
+fn referenceListDisconnect(ctx: *anyopaque) win32_uia.HRESULT {
+    return (@as(*win32_uia.PaletteListProvider, @ptrCast(@alignCast(ctx)))).disconnect();
+}
+
+fn referenceListRelease(ctx: *anyopaque) void {
+    const provider: *win32_uia.PaletteListProvider = @ptrCast(@alignCast(ctx));
+    _ = win32_uia.PaletteListProvider.Release(&provider.base);
+}
+
+/// The All settings list's window procedure (`ReferenceList`).
+fn referenceListProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.winapi) LRESULT {
+    if (msg == WM_NCCREATE) {
+        const cs: *const CREATESTRUCTW = @ptrFromInt(@as(usize, @bitCast(lParam)));
+        if (cs.lpCreateParams) |ptr| _ = sys.SetWindowLongPtrW(hwnd, GWLP_USERDATA, @intCast(@intFromPtr(ptr)));
+    }
+    const owner = recoverOwner(hwnd) orelse return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
+    const list = &owner.reference_list;
+    switch (msg) {
+        WM_ERASEBKGND => return 1,
+        WM_PAINT => {
+            var ps: PAINTSTRUCT = undefined;
+            const hdc = sys.BeginPaint(hwnd, &ps);
+            list.paint(hdc, ps.rcPaint);
+            _ = sys.EndPaint(hwnd, &ps);
+            return 0;
+        },
+        WM_PRINTCLIENT => {
+            var rect: RECT = undefined;
+            if (wParam != 0 and GetClientRect(hwnd, &rect) != 0) list.paint(@ptrFromInt(wParam), rect);
+            return 0;
+        },
+        WM_SIZE => {
+            list.syncScroll();
+            _ = InvalidateRect(hwnd, null, 0);
+            return 0;
+        },
+        WM_GETDLGCODE => return DLGC_WANTARROWS | DLGC_WANTCHARS,
+        WM_KEYDOWN => {
+            noteSettingsInput(owner, msg, wParam);
+            if (list.keyDown(wParam)) return 0;
+        },
+        WM_SETFOCUS => {
+            list.focused();
+            return 0;
+        },
+        WM_KILLFOCUS => {
+            _ = InvalidateRect(hwnd, null, 0);
+            return 0;
+        },
+        WM_LBUTTONDOWN, WM_LBUTTONDBLCLK, WM_RBUTTONDOWN => {
+            noteSettingsInput(owner, if (msg == WM_RBUTTONDOWN) WM_RBUTTONDOWN else WM_LBUTTONDOWN, wParam);
+            list.press(.{ .x = lparamX(lParam), .y = lparamY(lParam) }, switch (msg) {
+                WM_LBUTTONDBLCLK => .double,
+                WM_RBUTTONDOWN => .right,
+                else => .left,
+            });
+            return 0;
+        },
+        WM_CONTEXTMENU => {
+            list.showMenu(lParam);
+            return 0;
+        },
+        WM_MOUSEWHEEL => {
+            const delta: i16 = @bitCast(@as(u16, @truncate(wParam >> 16)));
+            const lines = owner.wheel_lines_override orelse systemWheelScrollLines();
+            const metrics = list.ensureMetrics() orelse return 0;
+            // Three lines a notch scroll about one and a half rows.
+            const notch: i32 = if (lines == WHEEL_PAGESCROLL) list.clientHeight() else wheelNotchPixels(@divTrunc(metrics.row * 3, 2), lines);
+            const pixels = wheelScrollPixels(&list.wheel_remainder, delta, notch);
+            if (pixels != 0) list.scrollTo(list.scroll_y - pixels);
+            return 0;
+        },
+        WM_VSCROLL => {
+            const metrics = list.ensureMetrics() orelse return 0;
+            var tracking: SCROLLINFO = .{ .cbSize = @sizeOf(SCROLLINFO), .fMask = SIF_TRACKPOS, .nMin = 0, .nMax = 0, .nPage = 0, .nPos = 0, .nTrackPos = list.scroll_y };
+            const code = wParam & 0xFFFF;
+            if (code == SB_THUMBPOSITION or code == SB_THUMBTRACK) _ = GetScrollInfo(hwnd, SB_VERT, &tracking);
+            const view = list.clientHeight();
+            list.scrollTo(switch (code) {
+                SB_LINEUP => list.scroll_y - metrics.row,
+                SB_LINEDOWN => list.scroll_y + metrics.row,
+                SB_PAGEUP => list.scroll_y - @max(metrics.row, view - metrics.row),
+                SB_PAGEDOWN => list.scroll_y + @max(metrics.row, view - metrics.row),
+                SB_THUMBPOSITION, SB_THUMBTRACK => tracking.nTrackPos,
+                SB_TOP => 0,
+                SB_BOTTOM => list.contentHeight(metrics),
+                else => list.scroll_y,
+            });
+            return 0;
+        },
+        WM_GETOBJECT => if (list.provider) |provider| {
+            if (win32_uia.returnPaletteListProvider(hwnd, wParam, lParam, provider)) |result| return result;
+        },
+        WM_NCDESTROY => {
+            if (list.hwnd == hwnd) owner.referenceListDestroyed();
+            _ = sys.SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+        },
+        else => {},
+    }
+    return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
+}
+
+/// A UIA string property of `element`, as UTF-8 in `buf`.
+fn uiaStringProperty(element: *@import("win32_uia/com.zig").IRawElementProviderSimple, property: i32, buf: []u8) ![]const u8 {
+    const com = @import("win32_uia/com.zig");
+    var value = com.VARIANT.empty();
+    try std.testing.expectEqual(com.S_OK, element.vtbl.GetPropertyValue(element, property, &value));
+    defer _ = com.VariantClear(&value);
+    try std.testing.expectEqual(@as(u16, com.VT_BSTR), value.vt);
+    const bstr = value.value.bstr.?;
+    return buf[0..try std.unicode.utf16LeToUtf8(buf, bstr[0..com.SysStringLen(bstr)])];
+}
+
+test "settings the All settings page is one list of every key, made with its page and gone with it" {
+    try dialog_test.onHiddenDesktop(struct {
+        fn body() !void {
+            const fixture = try dialog_test.Fixture.start();
+            defer fixture.finish();
+            const settings = &fixture.settings;
+            const Tree = dialog_test.OpenWork.Tree;
+            settings.setActiveSection(.terminal);
+            const windows_before = Tree.of(fixture.hwnd()).len;
+
+            settings.setActiveSection(.reference);
+            const list = settings.reference_list.hwnd.?;
+            try std.testing.expect(sys.IsWindowVisible(list) != 0);
+            try std.testing.expectEqual(windows_before + 1, Tree.of(fixture.hwnd()).len);
+            try std.testing.expectEqual(settings_reference.key_count, settings.reference_list.shown_count);
+            // No row of a form shows, and the list fills the viewport's height.
+            for (0..settings_clipped_control_count) |index| if (settings.controlHwnd(index)) |control| {
+                try std.testing.expect(sys.IsWindowVisible(control) == 0);
+            };
+            var viewport: RECT = undefined;
+            _ = GetClientRect(settings.viewport.?, &viewport);
+            const placed = dialog_test.rectIn(settings.viewport.?, list);
+            try std.testing.expectEqual(@as(i32, 0), placed.top);
+            try std.testing.expectEqual(viewport.bottom, placed.bottom);
+            try dialog_test.expectNothingStale(fixture.hwnd());
+
+            // Another page: the list goes, and nothing stays of it.
+            settings.setActiveSection(.terminal);
+            try std.testing.expectEqual(@as(?HWND, null), settings.reference_list.hwnd);
+            try std.testing.expect(sys.IsWindow(list) == 0);
+            try std.testing.expectEqual(windows_before, Tree.of(fixture.hwnd()).len);
+            try dialog_test.expectNothingStale(fixture.hwnd());
+        }
+    }.body);
+}
+
+test "settings the All settings page keeps no spare Reset button beside its list, and Appearance gets its buttons back" {
+    try dialog_test.onHiddenDesktop(struct {
+        fn shownResets(settings: *const SettingsWindow) usize {
+            var count: usize = 0;
+            for (settings.reset_buttons) |button| if (button) |window| {
+                count += @intFromBool(sys.IsWindowVisible(window) != 0);
+            };
+            return count;
+        }
+
+        fn body() !void {
+            const fixture = try dialog_test.Fixture.startChanged(false);
+            defer fixture.finish();
+            const settings = &fixture.settings;
+            const Tree = dialog_test.OpenWork.Tree;
+            // Every page's rows made first, so the windows counted below are
+            // only Reset buttons and the list.
+            dialog_test.makeAllSections(settings);
+            settings.setActiveSection(.appearance);
+            const on_appearance = shownResets(settings);
+            try std.testing.expect(on_appearance > 0);
+            const windows_on_appearance = Tree.of(fixture.hwnd()).len;
+            // Appearance's buttons become spares on a page with fewer.
+            settings.setActiveSection(.keybindings);
+            try std.testing.expectEqual(on_appearance, settings.reset_spare_count);
+
+            // On All settings they go: its list is the only window it adds.
+            settings.setActiveSection(.reference);
+            try std.testing.expectEqual(@as(usize, 0), settings.reset_spare_count);
+            for (settings.reset_buttons) |button| try std.testing.expectEqual(@as(?HWND, null), button);
+            try std.testing.expectEqual(windows_on_appearance - on_appearance + 1, Tree.of(fixture.hwnd()).len);
+
+            // Back on Appearance every changed field has its button again,
+            // right after its control.
+            settings.setActiveSection(.appearance);
+            try std.testing.expectEqual(on_appearance, shownResets(settings));
+            try std.testing.expectEqual(windows_on_appearance, Tree.of(fixture.hwnd()).len);
+            for (formItemsForSection(.appearance)) |item| {
+                if (item.control_index >= form_field_count) continue;
+                const button = settings.reset_buttons[item.control_index] orelse continue;
+                const GW_HWNDNEXT: UINT = 2;
+                try std.testing.expectEqual(button, sys.GetWindow(settings.controlHwnd(item.control_index).?, GW_HWNDNEXT).?);
+            }
+            try dialog_test.expectNothingStale(fixture.hwnd());
+        }
+    }.body);
+}
+
+test "settings the All settings list takes a list's keys, and Enter, Ctrl+C and its menu act on the selected key" {
+    try dialog_test.onHiddenDesktop(struct {
+        extern "user32" fn GetMenuItemCount(menu: win32_types.HMENU) callconv(.winapi) c_int;
+        var menus: usize = 0;
+        var items: c_int = 0;
+        var answer: usize = 0;
+
+        fn pick(menu: win32_types.HMENU) usize {
+            menus += 1;
+            items = GetMenuItemCount(menu);
+            return answer;
+        }
+
+        fn body() !void {
+            const fixture = try dialog_test.Fixture.start();
+            defer fixture.finish();
+            const settings = &fixture.settings;
+            const hwnd = fixture.hwnd();
+            const list = &settings.reference_list;
+            var text_buf: [SettingsWindow.help_text_bytes]u8 = undefined;
+            settings.setActiveSection(.reference);
+            const window = list.hwnd.?;
+
+            // Tab from the rail reaches it, and the focus selects the first row.
+            try std.testing.expectEqual(window, dialog_test.GetNextDlgTabItem(hwnd, settings.btn_section_reference.?, 0).?);
+            _ = SetFocus(window);
+            try std.testing.expectEqual(@as(?usize, 0), list.selectedPosition());
+
+            // The arrows, Home and End, as the App pump hands them to the
+            // dialog manager, which leaves them to the list.
+            const last = settings_reference.key_count - 1;
+            const steps = [_]struct { vk: u32, at: usize }{
+                .{ .vk = focus_cue.vk_down, .at = 1 },
+                .{ .vk = focus_cue.vk_down, .at = 2 },
+                .{ .vk = focus_cue.vk_up, .at = 1 },
+                .{ .vk = focus_cue.vk_end, .at = last },
+                .{ .vk = focus_cue.vk_down, .at = last },
+                .{ .vk = focus_cue.vk_home, .at = 0 },
+                .{ .vk = focus_cue.vk_up, .at = 0 },
+            };
+            for (steps) |step| {
+                try std.testing.expect(fixture.pumpKey(step.vk));
+                try std.testing.expectEqual(@as(?usize, step.at), list.selectedPosition());
+                try std.testing.expectEqual(window, sys.GetFocus().?);
+            }
+            // A page down moves by rows the list shows, and back.
+            try std.testing.expect(fixture.pumpKey(focus_cue.vk_next));
+            try std.testing.expect(list.selectedPosition().? > 1);
+            try std.testing.expect(fixture.pumpKey(focus_cue.vk_prior));
+            try std.testing.expectEqual(@as(?usize, 0), list.selectedPosition());
+
+            // Enter opens the config file.
+            try std.testing.expect(fixture.pumpKey(VK_RETURN));
+            try std.testing.expectEqual(@as(u32, 1), fixture.editor_opened);
+
+            // Ctrl+C hands the selected key's name to the App, which the
+            // fixture records, and the status line says so. C alone does not.
+            _ = fixture.pumpKey(focus_cue.vk_down);
+            const name = @tagName(settings_reference.keys[list.shown[1]]);
+            try dialog_test.holdKeys(.{ .ctrl = true });
+            _ = fixture.pumpKey('C');
+            try dialog_test.holdKeys(.{});
+            try std.testing.expectEqual(@as(u32, 1), fixture.copies);
+            try std.testing.expectEqualStrings(name, fixture.copiedText());
+            var expected: [128]u8 = undefined;
+            try std.testing.expectEqualStrings(try std.fmt.bufPrint(&expected, "Copied {s}.", .{name}), readEditUtf8(settings.text_status.?, &text_buf).?);
+            _ = fixture.pumpKey('C');
+            try std.testing.expectEqual(@as(u32, 1), fixture.copies);
+            // A clipboard that would not take it.
+            fixture.copy_fails = true;
+            try dialog_test.holdKeys(.{ .ctrl = true });
+            _ = fixture.pumpKey('C');
+            try dialog_test.holdKeys(.{});
+            try std.testing.expect(std.mem.startsWith(u8, readEditUtf8(settings.text_status.?, &text_buf).?, "Could not copy "));
+            fixture.copy_fails = false;
+
+            // Shift+F10 (as DefWindowProc hands it on) offers both.
+            settings.context_menu_pick = &pick;
+            const keyboard: LPARAM = -1;
+            answer = reference_menu_copy;
+            _ = sys.SendMessageW(window, WM_CONTEXTMENU, @intFromPtr(window), keyboard);
+            try std.testing.expectEqual(@as(usize, 1), menus);
+            try std.testing.expectEqual(@as(c_int, 2), items);
+            try std.testing.expectEqual(@as(u32, 3), fixture.copies);
+            answer = reference_menu_open;
+            _ = sys.SendMessageW(window, WM_CONTEXTMENU, @intFromPtr(window), keyboard);
+            try std.testing.expectEqual(@as(u32, 2), fixture.editor_opened);
+            // Dismissed, it does nothing.
+            answer = 0;
+            _ = sys.SendMessageW(window, WM_CONTEXTMENU, @intFromPtr(window), keyboard);
+            try std.testing.expectEqual(@as(u32, 3), fixture.copies);
+            try std.testing.expectEqual(@as(u32, 2), fixture.editor_opened);
+
+            // The focus coming back shows the selected row wherever the list
+            // was scrolled to: a window opened again keeps the key.
+            _ = SetFocus(settings.edit_search.?);
+            list.selectPosition(last);
+            list.scrollTo(0);
+            _ = SetFocus(window);
+            const metrics = list.ensureMetrics().?;
+            const top = ReferenceList.rowTop(metrics, last, last);
+            try std.testing.expect(list.scroll_y > 0);
+            try std.testing.expect(top >= list.scroll_y and top < list.scroll_y + list.clientHeight());
+
+            // From the mouse, the menu is the row's the right button went down
+            // on; below the last row there is none.
+            typeSearch(settings, "Padding");
+            const before = menus;
+            const few = list.ensureMetrics().?;
+            const on_row: POINT = .{ .x = few.pad_x, .y = few.pad_y };
+            _ = sys.SendMessageW(window, WM_RBUTTONDOWN, 0, screenPoint(on_row));
+            var on_row_screen = on_row;
+            _ = sys.ClientToScreen(window, &on_row_screen);
+            _ = sys.SendMessageW(window, WM_CONTEXTMENU, @intFromPtr(window), screenPoint(on_row_screen));
+            try std.testing.expectEqual(before + 1, menus);
+            try std.testing.expectEqual(@as(?usize, 0), list.selectedPosition());
+            const opened = list.ensureMetrics().?;
+            const below: POINT = .{ .x = few.pad_x, .y = list.clientHeight() - 2 };
+            try std.testing.expect(below.y > list.contentHeight(opened) - list.scroll_y);
+            _ = sys.SendMessageW(window, WM_RBUTTONDOWN, 0, screenPoint(below));
+            var below_screen = below;
+            _ = sys.ClientToScreen(window, &below_screen);
+            _ = sys.SendMessageW(window, WM_CONTEXTMENU, @intFromPtr(window), screenPoint(below_screen));
+            try std.testing.expectEqual(before + 1, menus);
+        }
+
+        /// A screen point as `WM_CONTEXTMENU` carries it.
+        fn screenPoint(point: POINT) LPARAM {
+            return @bitCast((@as(usize, @as(u16, @bitCast(@as(i16, @intCast(point.y))))) << 16) | @as(u16, @bitCast(@as(i16, @intCast(point.x)))));
+        }
+    }.body);
+}
+
+test "settings the All settings list answers the mouse: a click selects, a double click and Open open, Copy copies" {
+    try dialog_test.onHiddenDesktop(struct {
+        fn at(point: POINT) LPARAM {
+            return @bitCast((@as(usize, @as(u16, @bitCast(@as(i16, @intCast(point.y))))) << 16) | @as(u16, @bitCast(@as(i16, @intCast(point.x)))));
+        }
+
+        fn body() !void {
+            const fixture = try dialog_test.Fixture.start();
+            defer fixture.finish();
+            const settings = &fixture.settings;
+            const list = &settings.reference_list;
+            settings.setActiveSection(.reference);
+            const window = list.hwnd.?;
+            const metrics = list.ensureMetrics().?;
+
+            // A click on the third row gives the list the focus, on that row.
+            const third: POINT = .{ .x = metrics.pad_x + metrics.bar + 1, .y = 2 * metrics.row + metrics.pad_y };
+            _ = sys.SendMessageW(window, WM_LBUTTONDOWN, 0, at(third));
+            try std.testing.expectEqual(window, sys.GetFocus().?);
+            try std.testing.expectEqual(@as(?usize, 2), list.selectedPosition());
+            try std.testing.expectEqual(@as(u32, 0), fixture.editor_opened);
+
+            // The open row's actions.
+            const opened = list.ensureMetrics().?;
+            const actions = list.actionRects(opened);
+            const copy = actions.copy.?;
+            _ = sys.SendMessageW(window, WM_LBUTTONDOWN, 0, at(.{ .x = copy.left + 1, .y = copy.top + 1 }));
+            try std.testing.expectEqual(@as(u32, 1), fixture.copies);
+            try std.testing.expectEqualStrings(@tagName(settings_reference.keys[list.shown[2]]), fixture.copiedText());
+            const open = actions.open.?;
+            _ = sys.SendMessageW(window, WM_LBUTTONDOWN, 0, at(.{ .x = open.left + 1, .y = open.top + 1 }));
+            try std.testing.expectEqual(@as(u32, 1), fixture.editor_opened);
+            // A right click on an action does neither; a double click on a
+            // row opens the file there.
+            _ = sys.SendMessageW(window, WM_RBUTTONDOWN, 0, at(.{ .x = copy.left + 1, .y = copy.top + 1 }));
+            try std.testing.expectEqual(@as(u32, 1), fixture.copies);
+            // (The open row may have scrolled the first out of view.)
+            list.scrollTo(0);
+            _ = sys.SendMessageW(window, WM_LBUTTONDOWN, 0, at(.{ .x = metrics.pad_x, .y = metrics.pad_y }));
+            _ = sys.SendMessageW(window, WM_LBUTTONDBLCLK, 0, at(.{ .x = metrics.pad_x, .y = metrics.pad_y }));
+            try std.testing.expectEqual(@as(?usize, 0), list.selectedPosition());
+            try std.testing.expectEqual(@as(u32, 2), fixture.editor_opened);
+
+            // A double click on Open config file opens it once.
+            const open_now = list.actionRects(list.ensureMetrics().?).open.?;
+            const on_open = at(.{ .x = open_now.left + 1, .y = open_now.top + 1 });
+            _ = sys.SendMessageW(window, WM_LBUTTONDOWN, 0, on_open);
+            _ = sys.SendMessageW(window, WM_LBUTTONDBLCLK, 0, on_open);
+            try std.testing.expectEqual(@as(u32, 3), fixture.editor_opened);
+
+            // A double click on the row after the open one: its first press
+            // opens that row and moves it up, so what is under the pointer at
+            // the second press is something else. The second press acts on
+            // the row the first one chose.
+            var found = false;
+            for (0..list.shown_count - 1) |open_position| {
+                list.selectPosition(open_position);
+                const before = list.ensureMetrics().?;
+                const target = open_position + 1;
+                list.scrollTo(ReferenceList.rowTop(before, open_position, open_position));
+                const point: POINT = .{ .x = before.pad_x + before.bar + 1, .y = ReferenceList.rowTop(before, open_position, target) - list.scroll_y + before.pad_y };
+                if (point.y >= list.clientHeight()) continue;
+                _ = sys.SendMessageW(window, WM_LBUTTONDOWN, 0, at(point));
+                try std.testing.expectEqual(@as(?usize, target), list.selectedPosition());
+                if (std.meta.eql(list.hitTest(point), ReferenceList.Hit{ .row = target })) continue;
+                const opened_before = fixture.editor_opened;
+                _ = sys.SendMessageW(window, WM_LBUTTONDBLCLK, 0, at(point));
+                try std.testing.expectEqual(@as(?usize, target), list.selectedPosition());
+                try std.testing.expectEqual(opened_before + 1, fixture.editor_opened);
+                try std.testing.expectEqual(@as(u32, 1), fixture.copies);
+                found = true;
+                break;
+            }
+            try std.testing.expect(found);
+        }
+    }.body);
+}
+
+test "settings the All settings list is a UIA List of ListItems, the focus on the selected one" {
+    try dialog_test.onHiddenDesktop(struct {
+        fn body() !void {
+            const com = @import("win32_uia/com.zig");
+            const constants = @import("win32_uia/constants.zig");
+            const fixture = try dialog_test.Fixture.startWith(true);
+            defer fixture.finish();
+            const settings = &fixture.settings;
+            const list = &settings.reference_list;
+            settings.setActiveSection(.reference);
+            const provider = list.provider.?;
+            var text: [16 * 1024]u8 = undefined;
+
+            var value = com.VARIANT.empty();
+            try std.testing.expectEqual(com.S_OK, provider.base.vtbl.GetPropertyValue(&provider.base, constants.UIA_ControlTypePropertyId, &value));
+            try std.testing.expectEqual(constants.UIA_ListControlTypeId, value.value.i4);
+            try std.testing.expectEqualStrings("All settings", try uiaStringProperty(&provider.base, constants.UIA_NamePropertyId, &text));
+            try std.testing.expectEqualStrings(reference_list_help, try uiaStringProperty(&provider.base, constants.UIA_HelpTextPropertyId, &text));
+
+            // The focus on the list is on its selected row: a ListItem named
+            // by its key and value, its description its help text.
+            _ = SetFocus(list.hwnd.?);
+            var focus: ?*com.IRawElementProviderFragment = null;
+            try std.testing.expectEqual(com.S_OK, provider.fragment_root.vtbl.GetFocus(&provider.fragment_root, &focus));
+            const row_fragment = focus.?;
+            defer _ = row_fragment.vtbl.Release(row_fragment);
+            var simple_ptr: ?*anyopaque = null;
+            try std.testing.expectEqual(com.S_OK, row_fragment.vtbl.QueryInterface(row_fragment, &com.IID_IRawElementProviderSimple, &simple_ptr));
+            const row: *com.IRawElementProviderSimple = @ptrCast(@alignCast(simple_ptr.?));
+            defer _ = row.vtbl.Release(row);
+            value = com.VARIANT.empty();
+            try std.testing.expectEqual(com.S_OK, row.vtbl.GetPropertyValue(row, constants.UIA_ControlTypePropertyId, &value));
+            try std.testing.expectEqual(constants.UIA_ListItemControlTypeId, value.value.i4);
+            const key = list.shown[0];
+            var expected_buf: [256]u8 = undefined;
+            const expected = referenceUiaRowName(settings, 0, &expected_buf);
+            try std.testing.expect(std.mem.startsWith(u8, expected, @tagName(settings_reference.keys[key])));
+            try std.testing.expectEqualStrings(expected, try uiaStringProperty(row, constants.UIA_NamePropertyId, &text));
+            const help = try uiaStringProperty(row, constants.UIA_HelpTextPropertyId, &text);
+            try std.testing.expect(std.mem.indexOf(u8, help, settings.reference_model.rows[key].doc) != null);
+            value = com.VARIANT.empty();
+            try std.testing.expectEqual(com.S_OK, row.vtbl.GetPropertyValue(row, constants.UIA_HasKeyboardFocusPropertyId, &value));
+            try std.testing.expectEqual(com.VARIANT_TRUE, value.value.bool_val);
+
+            // Every key is a row: the second sibling is the second key, and
+            // its Invoke selects it and opens the config file.
+            var next: ?*com.IRawElementProviderFragment = null;
+            try std.testing.expectEqual(com.S_OK, row_fragment.vtbl.Navigate(row_fragment, com.NavigateDirection_NextSibling, &next));
+            const second = next.?;
+            defer _ = second.vtbl.Release(second);
+            var invoke_ptr: ?*anyopaque = null;
+            var second_simple_ptr: ?*anyopaque = null;
+            try std.testing.expectEqual(com.S_OK, second.vtbl.QueryInterface(second, &com.IID_IRawElementProviderSimple, &second_simple_ptr));
+            const second_simple: *com.IRawElementProviderSimple = @ptrCast(@alignCast(second_simple_ptr.?));
+            defer _ = second_simple.vtbl.Release(second_simple);
+            var pattern: ?*com.IUnknown = null;
+            try std.testing.expectEqual(com.S_OK, second_simple.vtbl.GetPatternProvider(second_simple, constants.UIA_InvokePatternId, &pattern));
+            invoke_ptr = pattern;
+            const invoke: *com.IInvokeProvider = @ptrCast(@alignCast(invoke_ptr.?));
+            defer _ = invoke.vtbl.Release(invoke);
+            try std.testing.expectEqual(com.S_OK, invoke.vtbl.Invoke(invoke));
+            try std.testing.expectEqual(@as(?usize, 1), list.selectedPosition());
+            try std.testing.expectEqual(@as(u32, 1), fixture.editor_opened);
+
+            // New rows (a search, a config change) tell UIA its rows are gone.
+            const events = @import("win32_uia/events.zig");
+            events.testing_structure_changes = 0;
+            settings.refreshReferenceShown(false);
+            try std.testing.expectEqual(@as(usize, 1), events.testing_structure_changes);
+        }
+    }.body);
+}
+
+test "settings a search on the All settings page lists the keys it finds, and Enter in the field goes to the first" {
+    try dialog_test.onHiddenDesktop(struct {
+        fn body() !void {
+            const fixture = try dialog_test.Fixture.start();
+            defer fixture.finish();
+            const settings = &fixture.settings;
+            const list = &settings.reference_list;
+            const search = settings.edit_search.?;
+            var text_buf: [SettingsWindow.help_text_bytes]u8 = undefined;
+            settings.setActiveSection(.reference);
+            const window = list.hwnd.?;
+
+            typeSearch(settings, "Padding");
+            try std.testing.expectEqual(@as(usize, 4), list.shown_count);
+            for (list.shown[0..list.shown_count]) |key| try std.testing.expect(std.mem.startsWith(u8, @tagName(settings_reference.keys[key]), "window-padding-"));
+            try std.testing.expect(sys.IsWindowVisible(window) != 0);
+            try std.testing.expect(sys.IsWindowVisible(settings.text_help.?) == 0);
+            try std.testing.expectEqualStrings("4 settings match: 4 on this page.", readEditUtf8(settings.text_summary.?, &text_buf).?);
+            // Enter in the field: the list takes the focus, on the first found.
+            _ = SetFocus(search);
+            try std.testing.expect(fixture.pumpKey(VK_RETURN));
+            try std.testing.expectEqual(window, sys.GetFocus().?);
+            try std.testing.expectEqual(@as(?usize, 0), list.selectedPosition());
+
+            // A word of the descriptions alone finds keys by what they do.
+            typeSearch(settings, "ligatures");
+            var by_description = false;
+            for (list.shown[0..list.shown_count]) |key| {
+                if (std.mem.indexOf(u8, @tagName(settings_reference.keys[key]), "ligature") == null) by_description = true;
+            }
+            try std.testing.expect(by_description);
+
+            // Nothing found: the list goes from view, the page says so, and
+            // the focus it held moves to the search field.
+            _ = SetFocus(window);
+            typeSearch(settings, "zzzz");
+            try std.testing.expectEqual(@as(usize, 0), list.shown_count);
+            try std.testing.expect(sys.IsWindowVisible(window) == 0);
+            try std.testing.expect(sys.IsWindowVisible(settings.text_help.?) != 0);
+            try std.testing.expect(std.mem.startsWith(u8, readEditUtf8(settings.text_help.?, &text_buf).?, "Nothing on this page matches"));
+            try std.testing.expectEqual(search, sys.GetFocus().?);
+
+            // Cleared, every key comes back, the selection still on its key.
+            typeSearch(settings, "");
+            try std.testing.expectEqual(settings_reference.key_count, list.shown_count);
+            try std.testing.expect(sys.IsWindowVisible(window) != 0);
+            try std.testing.expectEqualStrings("window-padding-x", @tagName(settings_reference.keys[list.selected.?]));
+        }
+    }.body);
+}
+
+test "settings the All settings list draws in system colours under High Contrast" {
+    try dialog_test.onHiddenDesktop(struct {
+        /// A COLORREF as a 32-bit DIB holds it.
+        fn pixel(color: u32) u32 {
+            return ((color & 0xFF) << 16) | (color & 0xFF00) | ((color >> 16) & 0xFF);
+        }
+
+        fn body() !void {
+            for ([_]bool{ false, true }) |high_contrast| {
+                const fixture = try dialog_test.Fixture.prepare(false);
+                defer fixture.finish();
+                fixture.high_contrast = high_contrast;
+                const settings = &fixture.settings;
+                try settings.open();
+                settings.setActiveSection(.reference);
+                const list = &settings.reference_list;
+                _ = SetFocus(list.hwnd.?);
+                dialog_test.flushPaint(fixture.hwnd());
+                const capture = try dialog_test.Capture.take(list.hwnd.?);
+                defer capture.deinit();
+                const metrics = list.ensureMetrics().?;
+                const colors = settings.theme_adapter.colors;
+                try std.testing.expectEqual(high_contrast, colors.high_contrast);
+                if (high_contrast) {
+                    try std.testing.expectEqual(GetSysColor(COLOR_BTNFACE), colors.window_bg);
+                    try std.testing.expectEqual(GetSysColor(COLOR_HIGHLIGHT), colors.selection_bg);
+                }
+                // The selected row's band, clear of its text and focus ring,
+                // and the next row's room above its text.
+                const band = capture.pixels[@as(usize, @intCast(@divTrunc(metrics.pad_y, 2))) * capture.width + capture.width - @as(usize, @intCast(@divTrunc(metrics.pad_x, 2)))];
+                try std.testing.expectEqual(pixel(colors.selection_bg), band & 0xFFFFFF);
+                const next_top: usize = @intCast(metrics.open + @divTrunc(metrics.pad_y, 2));
+                const background = capture.pixels[next_top * capture.width + @as(usize, @intCast(@divTrunc(metrics.pad_x, 2)))];
+                try std.testing.expectEqual(pixel(colors.window_bg), background & 0xFFFFFF);
+                // High Contrast rings the focused row on any focus, in the
+                // pane's text colour, round the band rather than over it.
+                if (high_contrast) {
+                    const ring = capture.pixels[capture.width / 2];
+                    try std.testing.expectEqual(pixel(colors.text), ring & 0xFFFFFF);
+                    try std.testing.expect(colors.text != colors.selection_bg);
+                }
+            }
+        }
+    }.body);
+}
+
+test "settings the All settings list wraps every description inside its row, and pages through a tall one" {
+    try dialog_test.onHiddenDesktop(struct {
+        fn body() !void {
+            const fixture = try dialog_test.Fixture.start();
+            defer fixture.finish();
+            const settings = &fixture.settings;
+            const list = &settings.reference_list;
+            settings.setActiveSection(.reference);
+            const window = list.hwnd.?;
+            _ = SetFocus(window);
+            // Each key opened in turn: its text wraps to the row's width, and
+            // the row grows to hold it.
+            var tallest: usize = 0;
+            var tallest_height: i32 = 0;
+            for (0..list.shown_count) |position| {
+                list.selectPosition(position);
+                const metrics = list.ensureMetrics().?;
+                errdefer std.debug.print("settings All settings row for {s}\n", .{@tagName(settings_reference.keys[list.shown[position]])});
+                try std.testing.expect(metrics.body > 0);
+                try std.testing.expect(metrics.open > metrics.row);
+                const text = list.open_body.?;
+                const hdc = GetDC(window).?;
+                defer _ = ReleaseDC(window, hdc);
+                const previous = SelectObject(hdc, settings.ui_font);
+                defer _ = SelectObject(hdc, previous);
+                var rect: RECT = .{ .left = 0, .top = 0, .right = ReferenceList.textWidth(metrics), .bottom = 0 };
+                _ = DrawTextW(hdc, text.ptr, @intCast(text.len), &rect, DT_CALCRECT | DT_WORDBREAK | DT_NOPREFIX | DT_EXPANDTABS);
+                try std.testing.expect(rect.right <= ReferenceList.textWidth(metrics));
+                if (metrics.open > tallest_height) {
+                    tallest = position;
+                    tallest_height = metrics.open;
+                }
+            }
+            dialog_test.flushPaint(fixture.hwnd());
+
+            // The tallest is taller than the list: Page Down reads through it
+            // before it moves on, and Page Up back to its top.
+            list.selectPosition(tallest);
+            const metrics = list.ensureMetrics().?;
+            const view = list.clientHeight();
+            try std.testing.expect(metrics.open > view);
+            const top = ReferenceList.rowTop(metrics, tallest, tallest);
+            try std.testing.expectEqual(top, list.scroll_y);
+            var pages: usize = 0;
+            while (list.scroll_y + view < top + metrics.open) : (pages += 1) {
+                try std.testing.expect(fixture.pumpKey(focus_cue.vk_next));
+                try std.testing.expectEqual(@as(?usize, tallest), list.selectedPosition());
+            }
+            try std.testing.expect(pages > 0);
+            try std.testing.expectEqual(top + metrics.open - view, list.scroll_y);
+            // Where it is being read stays when the focus leaves and comes
+            // back (to the config file and back, say), and when a click lands
+            // in its text.
+            const reading = list.scroll_y;
+            _ = SetFocus(settings.edit_search.?);
+            _ = SetFocus(window);
+            try std.testing.expectEqual(reading, list.scroll_y);
+            const in_text: LPARAM = @bitCast((@as(usize, @intCast(@divTrunc(view, 2))) << 16) | @as(usize, @intCast(metrics.pad_x + metrics.bar + 1)));
+            _ = sys.SendMessageW(window, WM_LBUTTONDOWN, 0, in_text);
+            try std.testing.expectEqual(@as(?usize, tallest), list.selectedPosition());
+            try std.testing.expectEqual(reading, list.scroll_y);
+            if (tallest + 1 < list.shown_count) {
+                try std.testing.expect(fixture.pumpKey(focus_cue.vk_next));
+                try std.testing.expect(list.selectedPosition().? > tallest);
+            }
+        }
+    }.body);
 }
 
 /// The form viewport (`SettingsWindow.viewport`). It paints only the pane

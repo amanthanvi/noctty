@@ -355,9 +355,13 @@ supported on Windows", so nobody there toggles it and waits for a change.
 noctty keeps the full upstream configuration surface so that a shared config
 file loads, and only `background-blur` (below) logs a warning when it is set.
 Searching `src/` (outside `Config.zig`, the doc generators and the tests'
-deny-lists) on `e6dae0919` finds no code that acts on these keys, so setting
-them changes nothing on Windows:
+deny-lists) on `e6dae0919` finds no code that acts on these keys beyond that
+warning and the Settings controls marked "not supported on Windows", so
+setting them changes nothing on Windows:
 
+- `background-blur`: no window here can show a blur behind it (see
+  [Background blur](#background-blur)).
+- `link-previews`: links open, but no preview pops up.
 - `focus-follows-mouse`, `window-inherit-font-size`, `resize-overlay`,
   `resize-overlay-position` and `resize-overlay-duration`: the Win32 runtime has no code for them (a new
   window or tab does not inherit an adjusted font size).
@@ -368,15 +372,20 @@ them changes nothing on Windows:
 - `accent-follow-system`: it made the active tab's border and underline follow
   the Windows accent; the tab strip no longer uses an accent colour, and the
   active tab takes the terminal's background instead.
-- The GTK and X11 keys: `gtk-opengl-debug`, `gtk-single-instance`,
+- `window-subtitle` and `window-step-resize`: a forwarded command line may set
+  them (`ipc_server.zig`), and nothing reads them after that.
+- The GTK and X11 keys: `gtk-opengl-debug`,
   `gtk-custom-css`, `gtk-quick-terminal-layer`, `gtk-quick-terminal-namespace`,
   `gtk-titlebar`, `gtk-titlebar-style`, `gtk-titlebar-hide-when-maximized`,
   `gtk-toolbar-style`, `gtk-tabs-location`, `gtk-wide-tabs`,
   `x11-instance-name`, `async-backend` and `_xdg-terminal-exec`.
 
-`background-blur` is the one accepted-but-inert key that does log a warning
-(see [Background blur](#background-blur)). A Windows Terminal `bellStyle` maps
-to `bell-features` (see [the migration guide](migrate-from-windows-terminal.md#the-bell)).
+`gtk-single-instance` is not one of them: `Config.finalize` reads it as the old
+name of `single-instance`, which Windows honours. Settings' All settings page
+says what Windows does beside each key in the list, from `windows_notes` in
+`src/apprt/win32_settings_reference.zig`; a verification contract keeps that
+list and this one the same. A Windows Terminal `bellStyle` maps to
+`bell-features` (see [the migration guide](migrate-from-windows-terminal.md#the-bell)).
 
 ### Universal palette
 
@@ -395,7 +404,14 @@ share one typed, fuzzy-ranked list with:
 ### Native settings
 
 Appearance, Terminal, Shell, Privacy, Updates, Keybindings, and Advanced
-sections ship. Edits are staged until Save and applied through an atomic,
+sections ship, and an All settings page lists every config key with its
+value in effect, its description, where the config file sets it (read only
+when the file, and every link on its way, is on a local drive, and no cloud
+placeholder is on the way), and what
+Windows does with it for the keys [above](#settings-accepted-without-effect).
+Copy name puts a key's name on the clipboard, and Open config file opens the
+file through the `.txt` association (as the escape hatch below does), which
+takes no line number, so the page shows the line instead. Edits are staged until Save and applied through an atomic,
 source-preserving config patch; Discard changes asks how many fields would be
 lost before it throws the draft away. A field that differs from its built-in
 default is marked, and its Reset button, its context menu and

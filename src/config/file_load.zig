@@ -35,7 +35,11 @@ pub fn legacyForkXdgPath(alloc: Allocator) ![]const u8 {
     );
 }
 
-const FileState = enum { missing, empty, content };
+pub const FileState = enum { missing, empty, content };
+
+/// What a candidate config file holds, as a caller with its own rules for
+/// opening files sees it; null when it cannot tell.
+pub const FileProbe = *const fn (alloc: Allocator, path: []const u8) ?FileState;
 
 fn fileState(path: []const u8) FileState {
     const file = std.fs.openFileAbsolute(path, .{}) catch |err| switch (err) {
@@ -60,13 +64,32 @@ fn fileState(path: []const u8) FileState {
 ///
 /// Returned value must be freed by the caller.
 pub fn preferredXdgPath(alloc: Allocator) ![]const u8 {
+    return (try preferredXdgPathProbed(alloc, &fileStateKnown)).?;
+}
+
+fn fileStateKnown(_: Allocator, path: []const u8) ?FileState {
+    return fileState(path);
+}
+
+/// `preferredXdgPath`, each candidate looked at through `probe`. Null when
+/// the probe cannot tell what a candidate it needs holds, so the file cannot
+/// be named. Returned value must be freed by the caller.
+pub fn preferredXdgPathProbed(alloc: Allocator, probe: FileProbe) !?[]const u8 {
     const xdg_path = try defaultXdgPath(alloc);
     errdefer alloc.free(xdg_path);
     const legacy_path = try legacyGhosttyDefaultXdgPath(alloc);
     errdefer alloc.free(legacy_path);
 
-    const xdg_state = fileState(xdg_path);
-    const legacy_state = fileState(legacy_path);
+    const xdg_state = probe(alloc, xdg_path) orelse {
+        alloc.free(xdg_path);
+        alloc.free(legacy_path);
+        return null;
+    };
+    const legacy_state = probe(alloc, legacy_path) orelse {
+        alloc.free(xdg_path);
+        alloc.free(legacy_path);
+        return null;
+    };
 
     for ([_]FileState{ .content, .empty }) |wanted| {
         if (xdg_state == wanted) {
@@ -80,9 +103,14 @@ pub fn preferredXdgPath(alloc: Allocator) ![]const u8 {
     }
 
     const fork_path = try legacyForkXdgPath(alloc);
-    if (fileState(fork_path) != .missing) {
+    const fork_state = probe(alloc, fork_path);
+    if (fork_state == null or fork_state.? != .missing) {
         alloc.free(xdg_path);
         alloc.free(legacy_path);
+        if (fork_state == null) {
+            alloc.free(fork_path);
+            return null;
+        }
         return fork_path;
     }
     alloc.free(fork_path);
