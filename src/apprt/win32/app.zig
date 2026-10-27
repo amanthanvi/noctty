@@ -6452,7 +6452,7 @@ pub const App = struct {
                 surface.window_visible,
                 surface.window_focused,
             );
-            found.host.focusTabPane(found.tab, handle, surface);
+            found.host.focusTabPane(found.tab, handle);
             found.host.syncSplitDim();
             if (!needs_host_sync) {
                 surface.presentWindow();
@@ -6550,14 +6550,14 @@ pub const App = struct {
             for (host.tabs.items, 0..) |*tab, index| {
                 const tab_id = tab.shell_id orelse continue;
                 if (!tab_id.eql(pane.tab)) continue;
-                var it = tab.tree.iterator();
-                while (it.next()) |entry| {
-                    const id = entry.view.shell_id orelse continue;
-                    if (id.eql(pane_id)) tab.focused = entry.handle;
-                }
                 if (window.active_tab) |active| if (active.eql(tab_id)) {
                     host.active_tab = index;
                 };
+                var it = tab.tree.iterator();
+                while (it.next()) |entry| {
+                    const id = entry.view.shell_id orelse continue;
+                    if (id.eql(pane_id)) host.focusTabPane(tab, entry.handle);
+                }
                 host.syncSplitDim();
                 return;
             }
@@ -6682,7 +6682,7 @@ pub const App = struct {
                 found.host.active_tab,
                 surface.window_visible,
             );
-            found.host.focusTabPane(found.tab, handle, surface);
+            found.host.focusTabPane(found.tab, handle);
             found.host.syncSplitDim();
             if (!needs_host_sync) {
                 surface.setVisible(true);
@@ -6712,7 +6712,7 @@ pub const App = struct {
         );
         found.host.active_tab = found.index;
         found.host.notifyActiveTabUiaSelectionChanged(previous_tab_id);
-        found.tab.focused = handle;
+        found.host.focusTabPane(found.tab, handle);
         found.host.syncSplitDim();
         self.commitShellSurfaceFocus(surface);
         runUiActionOrLog("input mode focus sync failed", found.host.refreshModeIndicator());

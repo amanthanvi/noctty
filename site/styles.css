@@ -704,9 +704,6 @@ kbd,
   --chrome-line: light-dark(#d1d1d1, #303030);
   --chrome-tab: light-dark(#f6f6f6, #242426);
   --chrome-tab-border: light-dark(#c3c3c3, #38383a);
-  --chrome-tab-active: light-dark(#ffffff, #323236);
-  --chrome-tab-active-border: light-dark(#6872a3, #5e6ca1);
-  --chrome-underline: #6872a3;
   --chrome-text: light-dark(#606060, #9e9ea4);
   --chrome-text-strong: light-dark(#1b1b1b, #dcdce0);
   --chrome-accent: light-dark(#0078d4, #749ce0);
@@ -795,17 +792,19 @@ kbd,
   text-overflow: ellipsis;
 }
 
+/* The active tab takes the terminal's background, with no accent, and runs
+   on into the terminal through the strip's bottom line. */
 .nc-term__tab.is-active {
-  border-color: var(--chrome-tab-active-border);
-  background: var(--chrome-tab-active);
+  border-color: var(--term-bg);
+  background: var(--term-bg);
 }
 
 .nc-term__tab.is-active::after {
   content: "";
   position: absolute;
-  inset: auto -1px calc(-1 * var(--px)) -1px;
-  height: calc(2 * var(--px));
-  background: var(--chrome-underline);
+  inset: auto -1px -1px -1px;
+  height: 1px;
+  background: var(--term-bg);
 }
 
 .nc-term__close {

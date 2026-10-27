@@ -207,6 +207,7 @@ const tabButtonProc = win32.tabButtonProc;
 const tabCloseAction = win32.tabCloseAction;
 const tabContainerProc = win32.tabContainerProc;
 const tabDirectionFromWheelDelta = win32.tabDirectionFromWheelDelta;
+const tabStatusBadgeColor = win32.tabStatusBadgeColor;
 const tabStatusHeadline = win32.tabStatusHeadline;
 const tabStatusKey = win32.tabStatusKey;
 const tabStripChildVisible = win32.tabStripChildVisible;
@@ -1969,37 +1970,30 @@ pub const Host = struct {
     }
 
     /// Repaint the join where it was and where it is now when either moved
-    /// (another tab activated, tabs laid out anew, the terminal background
-    /// changed). The band clips its paint to these rects.
-    fn syncTabJoin(self: *Host) void {
+    /// (another tab activated, tabs laid out anew, the active terminal or
+    /// its background changed), and the active tab's button when the
+    /// background it shows changed: focus moved to a pane with another
+    /// background keeps the button's label and place, so nothing else
+    /// repaints it. The band clips its paint to these rects.
+    pub fn syncTabJoin(self: *Host) void {
         const join = self.activeTabJoin();
-        if (std.meta.eql(join, self.tab_join)) return;
-        if (self.hwnd) |hwnd| {
-            if (self.tab_join) |old| _ = sys.InvalidateRect(hwnd, &old.rect, 0);
-            if (join) |new| _ = sys.InvalidateRect(hwnd, &new.rect, 0);
-        }
+        const previous = self.tab_join;
+        if (std.meta.eql(join, previous)) return;
         self.tab_join = join;
-    }
-
-    /// Focus `handle`, the pane holding `surface`, in `tab`. A tab shows
-    /// its focused pane's terminal background, so focusing a pane whose
-    /// background differs repaints the tab and its join.
-    pub fn focusTabPane(self: *Host, tab: *Tab, handle: SplitTreeSurface.Node.Handle, surface: *const Surface) void {
-        if (tab.focused == handle) return;
-        const previous = tab.focusedSurface();
-        tab.focused = handle;
-        const same_background = if (previous) |value| value.tab_background == surface.tab_background else false;
-        if (!same_background) self.repaintTabOf(surface);
-    }
-
-    /// `surface`'s terminal background changed: repaint its tab's button
-    /// and, if that is the active tab, the join under it.
-    pub fn repaintTabOf(self: *Host, surface: *const Surface) void {
-        for (self.tabs.items) |*tab| {
-            const focused = tab.focusedSurface() orelse continue;
-            if (focused != surface) continue;
-            if (tab.button_hwnd) |button| _ = sys.InvalidateRect(button, null, 0);
+        const hwnd = self.hwnd orelse return;
+        if (previous) |old| _ = sys.InvalidateRect(hwnd, &old.rect, 0);
+        const new = join orelse return;
+        _ = sys.InvalidateRect(hwnd, &new.rect, 0);
+        if (previous == null or previous.?.color != new.color) {
+            if (self.tabs.items[self.active_tab].button_hwnd) |button| _ = sys.InvalidateRect(button, null, 0);
         }
+    }
+
+    /// Focus `handle` in `tab`. A tab shows its focused pane's terminal
+    /// background, so its button and join follow (`syncTabJoin`).
+    pub fn focusTabPane(self: *Host, tab: *Tab, handle: SplitTreeSurface.Node.Handle) void {
+        if (tab.focused == handle) return;
+        tab.focused = handle;
         self.syncTabJoin();
     }
 
@@ -8302,10 +8296,7 @@ pub const Host = struct {
         // High contrast draws every badge in the text color; the shapes
         // still tell the states apart.
         const high_contrast = isHighContrastActive();
-        const color = if (high_contrast)
-            fg
-        else
-            win32_program_status.badgeColor(status, theme.is_dark, theme.accent, theme.error_fg);
+        const color = if (high_contrast) fg else tabStatusBadgeColor(status, theme, bg);
         gdi.drawStatusBadge(
             hdc,
             .{ .left = left, .top = top, .right = left + size, .bottom = top + size },
@@ -9087,25 +9078,35 @@ pub const Host = struct {
         try std.testing.expectEqual(terminal_bg, tab_canvas.pixel(width - 2, height - 1));
         try std.testing.expectEqual(theme.chrome_bg, tab_canvas.pixel(0, 0));
 
-        // The label over it stays readable under either window theme. The
-        // light theme's own label colours on the default dark terminal reach
-        // 1.23:1 (active window) and about 2.2:1 (inactive, as here).
+        // The label over it reads at 4.5:1 under either window theme, in an
+        // active and an inactive window, on the default dark terminal and on
+        // the mid-tone and saturated ones where neither palette's label does
+        // (`activeTabTheme`). The light theme's own label colours on the
+        // default dark terminal reach 1.23:1 (active window) and about 2.2:1
+        // (inactive); the light palette's on #777777, 3.85:1 and 1.40:1.
         // Inside the button's fill: its top row and side columns are the band's.
         const label_rect = childRect(@divTrunc(width, 4), 2, @divTrunc(width * 3, 8), height - 4);
+        const backgrounds = [_]u32{ terminal_bg, rgb(0x77, 0x77, 0x77), rgb(0x80, 0x80, 0x80), rgb(0xFF, 0x00, 0x00), rgb(0x00, 0x78, 0xD4) };
         for ([_]ThemeColors{ win32.darkTheme(), win32.lightTheme() }) |band_theme| {
             app.resolved_theme = band_theme;
-            host.drawButton(&draw);
-            _ = BannerTestCanvas.raw.GdiFlush();
-            try std.testing.expect(tab_canvas.inked(label_rect, terminal_bg) > 0);
-            var strongest: f64 = 1;
-            var y_label = label_rect.top;
-            while (y_label < label_rect.bottom) : (y_label += 1) {
-                var x_label = label_rect.left;
-                while (x_label < label_rect.right) : (x_label += 1) {
-                    strongest = @max(strongest, testContrast(tab_canvas.pixel(x_label, y_label), terminal_bg));
+            for (backgrounds) |background| {
+                first.tab_background = background;
+                for ([_]bool{ true, false }) |window_active| {
+                    host.window_active = window_active;
+                    host.drawButton(&draw);
+                    _ = BannerTestCanvas.raw.GdiFlush();
+                    try std.testing.expect(tab_canvas.inked(label_rect, background) > 0);
+                    var strongest: f64 = 1;
+                    var y_label = label_rect.top;
+                    while (y_label < label_rect.bottom) : (y_label += 1) {
+                        var x_label = label_rect.left;
+                        while (x_label < label_rect.right) : (x_label += 1) {
+                            strongest = @max(strongest, testContrast(tab_canvas.pixel(x_label, y_label), background));
+                        }
+                    }
+                    try std.testing.expect(strongest >= 4.5);
                 }
             }
-            try std.testing.expect(strongest >= 3.0);
         }
     }
 
@@ -9197,17 +9198,93 @@ pub const Host = struct {
 
         // A new terminal background for the active tab's terminal moves it
         // as well, and one for a terminal in another tab does not.
-        second.tab_background = rgb(0x01, 0x02, 0x03);
-        host.repaintTabOf(&second);
+        second.setTabBackground(.{ .r = 0x01, .g = 0x02, .b = 0x03 });
         try std.testing.expectEqual(rgb(0x12, 0x34, 0x56), host.tab_join.?.color);
-        first.tab_background = rgb(0x0A, 0x0B, 0x0C);
-        host.repaintTabOf(&first);
+        first.setTabBackground(.{ .r = 0x0A, .g = 0x0B, .b = 0x0C });
         try std.testing.expectEqual(rgb(0x0A, 0x0B, 0x0C), host.tab_join.?.color);
 
         // With the tab bar hidden there is no join.
         app.config.@"window-show-tab-bar" = .never;
         _ = host.layoutChromeForRect(client, &changed);
         try std.testing.expect(host.tab_join == null);
+    }
+
+    test "TABLINE a pane focused by a click repaints its tab when its terminal background differs" {
+        if (builtin.os.tag != .windows) return error.SkipZigTest;
+        try runOnPrivateDesktop(clickFocusTabBackgroundTestBody);
+    }
+
+    fn clickFocusTabBackgroundTestBody() !void {
+        if (isHighContrastActive()) return error.SkipZigTest;
+        var core_app: CoreApp = undefined;
+        var app: App = undefined;
+        var host: Host = undefined;
+        var surface_a: Surface = undefined;
+        var surface_b: Surface = undefined;
+        var session: TestSession = .{};
+        try session.init(.{
+            .core_app = &core_app,
+            .app = &app,
+            .hosts = &.{.{ .storage = &host, .register = true }},
+            .surfaces = &.{
+                .{ .storage = &surface_a, .host = &host, .register = true },
+                .{ .storage = &surface_b, .host = &host },
+            },
+            .tabs = &.{.{ .host = &host, .surface = &surface_a, .id = 1 }},
+        });
+        defer session.deinit();
+
+        // One tab, [A | B] with A focused: one title, two backgrounds.
+        const inserted = try SplitTreeSurface.init(std.testing.allocator, &surface_b);
+        defer {
+            var cleanup = inserted;
+            cleanup.deinit();
+        }
+        const tab = &host.tabs.items[0];
+        const next_tree = try tab.tree.split(std.testing.allocator, .root, .right, 0.5, &inserted);
+        tab.tree.deinit();
+        tab.tree = next_tree;
+        tab.focused = tab.findHandle(&surface_a).?;
+        surface_a.title = "pwsh";
+        surface_b.title = "pwsh";
+        surface_a.tab_background = rgb(0x12, 0x34, 0x56);
+        surface_b.tab_background = rgb(0x65, 0x43, 0x21);
+
+        // The host clips its children, as a real one does, so its own
+        // repaints never reach the button. A hidden window has no update
+        // region; this one is shown on the test's private desktop.
+        const window = try BannerTestWindow.init(&host);
+        defer window.deinit(&host);
+        const style = sys.GetWindowLongPtrW(window.parent, c.GWL_STYLE);
+        _ = sys.SetWindowLongPtrW(window.parent, c.GWL_STYLE, style | c.WS_CLIPCHILDREN);
+        _ = sys.MoveWindow(window.parent, 0, 0, 1200, 300, 0);
+        _ = sys.ShowWindow(window.parent, c.SW_SHOWNOACTIVATE);
+        defer if (host.cached_window_title) |value| std.testing.allocator.free(value);
+        try host.refreshChrome();
+        const button = tab.button_hwnd orelse return error.TestUnexpectedResult;
+        const placed = tab.button_placement.rect;
+        try std.testing.expectEqual(rgb(0x12, 0x34, 0x56), host.tab_join.?.color);
+        _ = sys.ValidateRect(button, null);
+
+        // A click focuses B: its WM_SETFOCUS runs `focusChanged`, and the
+        // moved focus refreshes the chrome. The label and the button's place
+        // stay as they were, so only the background says to repaint it.
+        surface_b.focusChanged(true);
+        try host.refreshChrome();
+        try std.testing.expectEqual(tab.findHandle(&surface_b).?, tab.focused);
+        try std.testing.expectEqual(placed, tab.button_placement.rect);
+        try std.testing.expectEqual(rgb(0x65, 0x43, 0x21), host.tab_join.?.color);
+        var update: RECT = undefined;
+        try std.testing.expect(sys.GetUpdateRect(button, &update, 0) != 0);
+
+        // Back to A, which now has B's background: the tab shows the same
+        // color, and nothing repaints it.
+        surface_a.tab_background = surface_b.tab_background;
+        _ = sys.ValidateRect(button, null);
+        surface_a.focusChanged(true);
+        try host.refreshChrome();
+        try std.testing.expectEqual(tab.findHandle(&surface_a).?, tab.focused);
+        try std.testing.expectEqual(@as(BOOL, 0), sys.GetUpdateRect(button, &update, 0));
     }
 
     test "CHROME57 native activation updates only top chrome and its children" {

@@ -4007,7 +4007,7 @@ pub const Surface = struct {
         const value = colorRefFromConfig(color);
         if (value == self.tab_background) return;
         self.tab_background = value;
-        if (self.host) |host| host.repaintTabOf(self);
+        if (self.host) |host| host.syncTabJoin();
     }
 
     pub const toggleBackgroundOpacity = window_state.toggleBackgroundOpacity;

@@ -5718,26 +5718,65 @@ pub fn clientTitlebarTheme(
 /// The colors the active tab draws over `background`, its terminal's
 /// background, which it takes so it reads as part of the terminal below it
 /// (Windows Terminal's `terminalBackground` tab). Where `background` has the
-/// band's polarity this is `theme` unchanged, so a configured titlebar
-/// foreground still applies. A terminal of the other polarity, such as the
-/// default dark terminal under the light window theme, gets that polarity's
-/// label, close glyph, status badge and focus ring colors, the way
-/// `clientTitlebarTheme` does for a configured band; `theme`'s would be
-/// unreadable there (1.23:1 for the light label on `#282C34`).
+/// band's polarity these are `theme`'s, so a configured titlebar foreground
+/// still applies where it reads. A terminal of the other polarity, such as the default dark
+/// terminal under the light window theme, gets that polarity's label, close
+/// glyph, status badge and focus ring colors, the way `clientTitlebarTheme`
+/// does for a configured band; `theme`'s would be unreadable there (1.23:1
+/// for the light label on `#282C34`).
+///
+/// Neither palette reads on every background: on a mid-tone such as
+/// `#777777` the light label reaches 3.85:1 and its inactive-window shade
+/// 1.40:1. The label carries the `* ` marker, the active tab's essential cue,
+/// so the label's two colors are moved toward black or white until they
+/// reach 4.5:1 and the focus ring until it reaches 3:1 (DESIGN.md); the
+/// status badge is held to 3:1 where it is drawn (`tabStatusBadgeColor`).
 pub fn activeTabTheme(theme: *const ThemeColors, background: u32) ThemeColors {
     var result = theme.*;
     const is_dark = titlebarBandIsDark(rgbFromColorRef(background));
-    if (is_dark == theme.is_dark) return result;
-    const derived = if (is_dark) darkTheme() else lightTheme();
-    result.is_dark = is_dark;
-    result.text_primary = derived.text_primary;
-    result.text_secondary = derived.text_secondary;
-    result.text_disabled = derived.text_disabled;
-    result.button_chrome_fg = derived.button_chrome_fg;
-    result.accent = derived.accent;
-    result.error_fg = derived.error_fg;
-    result.button_active_focus_ring = derived.button_active_focus_ring;
+    if (is_dark != theme.is_dark) {
+        const derived = if (is_dark) darkTheme() else lightTheme();
+        result.is_dark = is_dark;
+        result.text_primary = derived.text_primary;
+        result.text_secondary = derived.text_secondary;
+        result.text_disabled = derived.text_disabled;
+        result.button_chrome_fg = derived.button_chrome_fg;
+        result.accent = derived.accent;
+        result.error_fg = derived.error_fg;
+        result.button_active_focus_ring = derived.button_active_focus_ring;
+    }
+    result.text_primary = readableOn(result.text_primary, background, 4.5);
+    result.text_secondary = readableOn(result.text_secondary, background, 4.5);
+    result.button_active_focus_ring = readableOn(result.button_active_focus_ring, background, 3.0);
     return result;
+}
+
+/// `color`, or the least mix of it toward black or white (whichever stands
+/// further from `background`) that reaches `minimum` contrast on
+/// `background`: that extreme itself where nothing reaches it. Black or
+/// white reaches at least 4.58:1 on any background.
+fn readableOn(color: u32, background: u32, minimum: f64) u32 {
+    const surface = rgbFromColorRef(background);
+    if (rgbFromColorRef(color).contrast(surface) >= minimum) return color;
+    const black = rgb(0, 0, 0);
+    const white = rgb(0xFF, 0xFF, 0xFF);
+    const extreme = if (rgbFromColorRef(black).contrast(surface) >= rgbFromColorRef(white).contrast(surface)) black else white;
+    const steps = 20;
+    for (1..steps) |step| {
+        const mixed = blendColorRGB(color, extreme, @as(f32, @floatFromInt(step)) / steps);
+        if (rgbFromColorRef(mixed).contrast(surface) >= minimum) return mixed;
+    }
+    return extreme;
+}
+
+/// The color of a tab's status badge on `background`, the tab's fill: the
+/// status's own color, moved toward black or white until it reaches 3:1
+/// there (DESIGN.md's floor for essential non-text indicators). On the
+/// chrome's own tab fills every status color already does; on an active
+/// tab's terminal background it may not (the light palette's accent ring on
+/// a `#0078D4` terminal is that very color).
+pub fn tabStatusBadgeColor(status: win32_program_status.Indicator, theme: *const ThemeColors, background: u32) u32 {
+    return readableOn(win32_program_status.badgeColor(status, theme.is_dark, theme.accent, theme.error_fg), background, 3.0);
 }
 
 test "the active tab draws over its terminal background with readable colors" {
@@ -5766,6 +5805,30 @@ test "the active tab draws over its terminal background with readable colors" {
         try std.testing.expectEqual(case.theme.chrome_bg, tab.chrome_bg);
         try std.testing.expectEqual(case.theme.chrome_border, tab.chrome_border);
     }
+}
+
+test "TABLINE the active tab's label reads on mid-tone terminal backgrounds" {
+    // Mid-tones where neither palette's label reaches 4.5:1 (#777777: the
+    // light label 3.85:1, its inactive-window shade 1.40:1), and saturated
+    // ones: pure red, and the Windows accent blue, where black and white
+    // are close to their worst.
+    const backgrounds = [_]u32{ rgb(0x77, 0x77, 0x77), rgb(0x80, 0x80, 0x80), rgb(0xFF, 0x00, 0x00), rgb(0x00, 0x78, 0xD4) };
+    for ([_]ThemeColors{ darkTheme(), lightTheme() }) |theme| {
+        for (backgrounds) |background| {
+            const tab = activeTabTheme(&theme, background);
+            const surface = rgbFromColorRef(background);
+            try std.testing.expect(rgbFromColorRef(tab.text_primary).contrast(surface) >= 4.5);
+            try std.testing.expect(rgbFromColorRef(tab.text_secondary).contrast(surface) >= 4.5);
+            try std.testing.expect(rgbFromColorRef(tab.button_active_focus_ring).contrast(surface) >= 3.0);
+            for ([_]win32_program_status.Indicator{ .{ .working = null }, .{ .blocked = null }, .done, .failed }) |status| {
+                try std.testing.expect(rgbFromColorRef(tabStatusBadgeColor(status, &tab, background)).contrast(surface) >= 3.0);
+            }
+        }
+    }
+    // A color that already reads is kept, and one that cannot reach the floor
+    // takes the extreme that comes closest.
+    try std.testing.expectEqual(rgb(0x12, 0x34, 0x56), readableOn(rgb(0x12, 0x34, 0x56), rgb(0xFF, 0xFF, 0xFF), 4.5));
+    try std.testing.expectEqual(rgb(0, 0, 0), readableOn(rgb(0x40, 0x40, 0x40), rgb(0x77, 0x77, 0x77), 21));
 }
 
 pub fn applyDwmThemeWithBuild(hwnd: HWND, theme: *const ThemeColors, config: *const configpkg.Config, os_build: u32) void {
