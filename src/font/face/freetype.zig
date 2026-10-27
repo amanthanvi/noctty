@@ -163,8 +163,8 @@ pub const Face = struct {
             if (entry.name_id == freetype.c.TT_NAME_ID_FONT_FAMILY) {
                 const string = entry.string[0..entry.string_len];
                 // There are other encodings that are something other than UTF-8
-                // but this is one we've seen "in the wild" so far.
-                if (entry.platform_id == freetype.c.TT_PLATFORM_MICROSOFT and entry.encoding_id == freetype.c.TT_MS_ID_UNICODE_CS) skip: {
+                // but these are the UTF-16BE ones we've seen "in the wild" so far.
+                if (isUtf16BeName(entry.platform_id, entry.encoding_id)) skip: {
                     if (string.len % 2 != 0) break :skip;
                     if (string.len > 1024) break :skip;
                     var tmp: [512]u16 = undefined;
@@ -178,6 +178,17 @@ pub const Face = struct {
         }
 
         return "";
+    }
+
+    /// Whether a name-table string is UTF-16BE. Every Unicode-platform
+    /// (platform 0) string is, and so are the Microsoft BMP and full-repertoire
+    /// encodings. Segoe UI lists its platform 0 family name first, which was
+    /// returned as raw bytes (" S e g o e   U I").
+    fn isUtf16BeName(platform_id: freetype.c.FT_UShort, encoding_id: freetype.c.FT_UShort) bool {
+        if (platform_id == freetype.c.TT_PLATFORM_APPLE_UNICODE) return true;
+        if (platform_id != freetype.c.TT_PLATFORM_MICROSOFT) return false;
+        return encoding_id == freetype.c.TT_MS_ID_UNICODE_CS or
+            encoding_id == freetype.c.TT_MS_ID_UCS_4;
     }
 
     test "face name" {
