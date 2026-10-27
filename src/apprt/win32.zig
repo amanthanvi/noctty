@@ -119,6 +119,7 @@ const app_delivery = @import("win32/app_delivery.zig");
 const save_target = @import("win32/save_target.zig");
 const focus_region = @import("win32/focus_region.zig");
 const first_frame = @import("win32/first_frame.zig");
+const clipboard_write = @import("win32/clipboard_write.zig");
 const win32_config_problems = @import("win32/config_problems.zig");
 
 // Explicit dependencies of the extracted runtime modules.
@@ -692,6 +693,7 @@ test {
     _ = @import("win32/focus_region.zig");
     _ = @import("win32/focus_cue.zig");
     _ = @import("win32/first_frame.zig");
+    _ = clipboard_write;
     _ = @import("win32_aumid.zig");
     _ = @import("win32_toast_activator.zig");
     _ = @import("win32_program_status.zig");
@@ -6173,143 +6175,60 @@ fn writeClipboardPlainText(alloc: std.mem.Allocator, owner: ?HWND, text: []const
     return writeClipboardPlainTextWith(.{}, alloc, owner, text);
 }
 
-/// The native calls `writeClipboardPlainText` makes, so a test can fail each
-/// of them without reaching the real clipboard.
-const ClipboardWriteOps = struct {
-    globalAlloc: *const fn (UINT, usize) callconv(.winapi) ?*anyopaque = sys.GlobalAlloc,
-    globalLock: *const fn (?*anyopaque) callconv(.winapi) ?*anyopaque = sys.GlobalLock,
-    globalUnlock: *const fn (?*anyopaque) callconv(.winapi) BOOL = sys.GlobalUnlock,
-    globalFree: *const fn (?*anyopaque) callconv(.winapi) ?*anyopaque = sys.GlobalFree,
-    open: *const fn (?HWND) bool = openClipboard,
-    empty: *const fn () callconv(.winapi) BOOL = sys.EmptyClipboard,
-    setData: *const fn (UINT, ?*anyopaque) callconv(.winapi) ?*anyopaque = sys.SetClipboardData,
-    close: *const fn () callconv(.winapi) BOOL = sys.CloseClipboard,
-};
-
-/// `writeClipboardPlainText` through `ops`. The text is made ready in memory
-/// of its own before the clipboard is opened, so a failure to allocate or lock
-/// it leaves what the clipboard held alone; only `SetClipboardData` failing
-/// after `EmptyClipboard` can still lose it. The memory is ours, and freed,
-/// until `SetClipboardData` takes it.
-fn writeClipboardPlainTextWith(ops: ClipboardWriteOps, alloc: std.mem.Allocator, owner: ?HWND, text: []const u8) !void {
+/// `writeClipboardPlainText` through `ops`, so a test can fail each native
+/// call without reaching the real clipboard. The text is made ready in memory
+/// of its own before the clipboard is opened (`clipboard_write.write`), so a
+/// failure to allocate or lock it leaves what the clipboard held alone; only
+/// `SetClipboardData` failing after `EmptyClipboard` can still lose it.
+fn writeClipboardPlainTextWith(ops: clipboard_write.Ops, alloc: std.mem.Allocator, owner: ?HWND, text: []const u8) !void {
     const text_w = try std.unicode.utf8ToUtf16LeAllocZ(alloc, text);
     defer alloc.free(text_w);
-    const bytes = (text_w.len + 1) * @sizeOf(u16);
-    const mem = ops.globalAlloc(c.GMEM_MOVEABLE, bytes) orelse return error.OutOfMemory;
-    var owned = true;
-    defer if (owned) {
-        _ = ops.globalFree(mem);
+    clipboard_write.write(ops, owner, &.{clipboard_write.unicodeText(text_w)}) catch |err| return switch (err) {
+        // What Settings reported for memory it could not get before this
+        // shared the clipboard writer with the terminal.
+        error.GlobalMemoryUnavailable => error.OutOfMemory,
+        error.ClipboardUnavailable => error.ClipboardUnavailable,
     };
-    const locked = ops.globalLock(mem) orelse return error.OutOfMemory;
-    const dst: [*]u16 = @ptrCast(@alignCast(locked));
-    @memcpy(dst[0 .. text_w.len + 1], text_w[0 .. text_w.len + 1]);
-    _ = ops.globalUnlock(mem);
-    if (!ops.open(owner)) return error.ClipboardUnavailable;
-    defer _ = ops.close();
-    if (ops.empty() == 0) return error.ClipboardUnavailable;
-    if (ops.setData(c.CF_UNICODETEXT, mem) == null) return error.ClipboardUnavailable;
-    // The clipboard owns the memory now.
-    owned = false;
 }
 
 test "win32 a copy that cannot make its text leaves the clipboard as it was" {
-    const Fake = struct {
-        const Step = enum { alloc, lock, unlock, free, open, empty, set_data, close };
-        const Fail = enum { none, alloc, lock, open, empty, set_data };
-        var fail: Fail = .none;
-        var steps: [16]Step = undefined;
-        var count: usize = 0;
-        var storage: [64]u16 align(8) = undefined;
-        const handle: *anyopaque = @ptrFromInt(0x1000);
-
-        fn note(step: Step) void {
-            steps[count] = step;
-            count += 1;
-        }
-        fn reset(how: Fail) void {
-            fail = how;
-            count = 0;
-            @memset(&storage, 0xAAAA);
-        }
-        fn did(step: Step) bool {
-            return std.mem.indexOfScalar(Step, steps[0..count], step) != null;
-        }
-        fn globalAlloc(_: UINT, size: usize) callconv(.winapi) ?*anyopaque {
-            note(.alloc);
-            std.debug.assert(size <= @sizeOf(@TypeOf(storage)));
-            return if (fail == .alloc) null else handle;
-        }
-        fn globalLock(mem: ?*anyopaque) callconv(.winapi) ?*anyopaque {
-            note(.lock);
-            std.debug.assert(mem == handle);
-            return if (fail == .lock) null else @ptrCast(&storage);
-        }
-        fn globalUnlock(_: ?*anyopaque) callconv(.winapi) BOOL {
-            note(.unlock);
-            return 0;
-        }
-        fn globalFree(mem: ?*anyopaque) callconv(.winapi) ?*anyopaque {
-            note(.free);
-            std.debug.assert(mem == handle);
-            return null;
-        }
-        fn open(_: ?HWND) bool {
-            note(.open);
-            return fail != .open;
-        }
-        fn empty() callconv(.winapi) BOOL {
-            note(.empty);
-            return @intFromBool(fail != .empty);
-        }
-        fn setData(format: UINT, mem: ?*anyopaque) callconv(.winapi) ?*anyopaque {
-            note(.set_data);
-            std.debug.assert(format == c.CF_UNICODETEXT and mem == handle);
-            return if (fail == .set_data) null else handle;
-        }
-        fn close() callconv(.winapi) BOOL {
-            note(.close);
-            return 1;
-        }
-    };
-    const ops: ClipboardWriteOps = .{
-        .globalAlloc = Fake.globalAlloc,
-        .globalLock = Fake.globalLock,
-        .globalUnlock = Fake.globalUnlock,
-        .globalFree = Fake.globalFree,
-        .open = Fake.open,
-        .empty = Fake.empty,
-        .setData = Fake.setData,
-        .close = Fake.close,
-    };
+    const Fake = clipboard_write.Fake;
+    const ops = Fake.ops;
     const alloc = std.testing.allocator;
 
     // Memory that cannot be had or locked: the clipboard is never opened, let
     // alone emptied, and what was allocated is freed.
-    Fake.reset(.alloc);
+    Fake.reset(.alloc, 0);
     try std.testing.expectError(error.OutOfMemory, writeClipboardPlainTextWith(ops, alloc, null, "font-size"));
     try std.testing.expect(!Fake.did(.open) and !Fake.did(.empty) and !Fake.did(.free));
-    Fake.reset(.lock);
+    Fake.reset(.lock, 0);
     try std.testing.expectError(error.OutOfMemory, writeClipboardPlainTextWith(ops, alloc, null, "font-size"));
     try std.testing.expect(!Fake.did(.open) and !Fake.did(.empty) and Fake.did(.free));
+    try std.testing.expectEqual(@as(usize, 0), Fake.leaked());
     // A clipboard that will not open or empty: ours is freed, and the
     // clipboard closed when it was opened.
-    Fake.reset(.open);
+    Fake.reset(.open, 0);
     try std.testing.expectError(error.ClipboardUnavailable, writeClipboardPlainTextWith(ops, alloc, null, "font-size"));
     try std.testing.expect(!Fake.did(.empty) and !Fake.did(.close) and Fake.did(.free));
-    Fake.reset(.empty);
+    try std.testing.expectEqual(@as(usize, 0), Fake.leaked());
+    Fake.reset(.empty, 0);
     try std.testing.expectError(error.ClipboardUnavailable, writeClipboardPlainTextWith(ops, alloc, null, "font-size"));
     try std.testing.expect(!Fake.did(.set_data) and Fake.did(.close) and Fake.did(.free));
-    Fake.reset(.set_data);
+    try std.testing.expectEqual(@as(usize, 0), Fake.leaked());
+    Fake.reset(.set_data, 0);
     try std.testing.expectError(error.ClipboardUnavailable, writeClipboardPlainTextWith(ops, alloc, null, "font-size"));
     try std.testing.expect(Fake.did(.close) and Fake.did(.free));
+    try std.testing.expectEqual(@as(usize, 0), Fake.leaked());
 
     // A copy that works: the text is ready before the clipboard is opened,
     // and the clipboard keeps the memory.
-    Fake.reset(.none);
+    Fake.reset(.none, 0);
     try writeClipboardPlainTextWith(ops, alloc, null, "font-size");
-    try std.testing.expectEqualSlices(Fake.Step, &.{ .alloc, .lock, .unlock, .open, .empty, .set_data, .close }, Fake.steps[0..Fake.count]);
+    try std.testing.expectEqualSlices(Fake.Step, &.{ .alloc, .lock, .unlock, .open, .empty, .set_data, .close }, Fake.recorded());
+    try std.testing.expectEqual(@as(usize, 1), Fake.taken());
+    try std.testing.expectEqual(@as(usize, 0), Fake.leaked() + Fake.freed());
     const expected = std.unicode.utf8ToUtf16LeStringLiteral("font-size");
-    try std.testing.expectEqualSlices(u16, expected[0 .. expected.len + 1], Fake.storage[0 .. expected.len + 1]);
+    try std.testing.expectEqualSlices(u8, std.mem.sliceAsBytes(expected[0 .. expected.len + 1]), Fake.payload(0));
 }
 pub fn settingsCurrentConfigThunk(ctx: *anyopaque) *const configpkg.Config {
     const app: *const App = @ptrCast(@alignCast(ctx));
