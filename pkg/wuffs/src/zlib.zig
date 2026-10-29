@@ -23,9 +23,19 @@ pub fn decompress(
 ) Error![]u8 {
     // Without a hint, most inputs are pixel data that compresses a few times
     // over, so start near the likely size and grow from there.
-    const initial = @min(max_len, size_hint orelse @max(4096, data.len *| 4));
-    return decompressWithInitialCapacity(alloc, data, max_len, initial);
+    const initial = size_hint orelse @max(4096, data.len *| 4);
+    // The hint may come from an untrusted sender, so never reserve more than
+    // the input can produce: deflate expands at most 1032:1 (a 258-byte
+    // match in two bits).
+    return decompressWithInitialCapacity(alloc, data, max_len, @min(
+        initial,
+        max_len,
+        @max(4096, data.len *| max_expansion),
+    ));
 }
+
+/// The largest output deflate can produce per input byte.
+const max_expansion = 1032;
 
 fn decompressWithInitialCapacity(
     alloc: Allocator,
@@ -111,10 +121,10 @@ fn decompressWithInitialCapacity(
             unreachable;
         }
 
-        // The source is the whole stream and is already closed, so the only
-        // suspension we can recover from is a full destination.
-        // If the destination buffer has room left, the source ended prematurely
-        // (truncated input or corrupt stream).
+        // The source is the whole stream and is already closed, so WUFFS
+        // reports truncation as an error and only suspends on a full
+        // destination. Treat any other suspension as a failure rather than
+        // looping on it.
         if (dest_buffer.meta.wi < dest_buffer.data.len) {
             log.warn("decode err=truncated zlib input or unexpected suspension: {s}", .{
                 c.wuffs_base__status__message(&status),

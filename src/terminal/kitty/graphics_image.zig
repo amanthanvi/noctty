@@ -424,19 +424,16 @@ pub const LoadingImage = struct {
         //
         // Raw formats know their decoded size, so the output is one
         // allocation of exactly that size when the stream is well formed.
-        const size_hint: ?usize = switch (self.image.format) {
-            .png => null,
-            .gray, .gray_alpha, .rgb, .rgba => |f| hint: {
-                const pixels = std.math.mul(
-                    usize,
-                    self.image.width,
-                    self.image.height,
-                ) catch break :hint null;
-                const len = std.math.mul(usize, pixels, f.bpp()) catch
-                    break :hint null;
-                break :hint if (len > 0 and len <= max_size) len else null;
-            },
-        };
+        // Within max_dimension the product is at most max_size, so it cannot
+        // overflow even a 32-bit usize.
+        comptime std.debug.assert(max_dimension * max_dimension * 4 <= max_size);
+        const img = &self.image;
+        const size_hint: ?usize = if (img.format == .png or
+            img.width == 0 or img.height == 0 or
+            img.width > max_dimension or img.height > max_dimension)
+            null
+        else
+            @as(usize, img.width) * img.height * img.format.bpp();
         const result = wuffs.zlib.decompress(
             alloc,
             self.data.items,
@@ -812,7 +809,7 @@ test "image load: corrupt, truncated and mis-sized zlib data fail cleanly" {
     try testing.expectError(error.InvalidData, loadZlibRgba(alloc, fixed_huffman_frame, 160, 140, 4096));
 }
 
-test "image load: zlib output is capped at the limit" {
+test "wuffs zlib: output is capped at the limit" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
@@ -826,6 +823,21 @@ test "image load: zlib output is capped at the limit" {
     try testing.expectError(
         error.Overflow,
         wuffs.zlib.decompress(alloc, fixed_huffman_frame, 1000, 160 * 120 * 4),
+    );
+}
+
+test "wuffs zlib: a size hint cannot reserve more than the input can produce" {
+    const testing = std.testing;
+
+    // A sender can declare s=10000,v=10000 (a 400 MB hint) and send ten
+    // bytes. The reservation must follow the input, not the declaration:
+    // with 1 MiB to allocate from, this has to fail as bad data, not OOM.
+    const memory = try testing.allocator.alloc(u8, 1024 * 1024);
+    defer testing.allocator.free(memory);
+    var fba: std.heap.FixedBufferAllocator = .init(memory);
+    try testing.expectError(
+        error.WuffsError,
+        wuffs.zlib.decompress(fba.allocator(), "\x78\x9c not zlib", max_size, max_size),
     );
 }
 
