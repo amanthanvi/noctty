@@ -1,5 +1,7 @@
-//! Putting data on the system clipboard, in the one order that cannot lose
-//! what is already there.
+//! Putting data on the system clipboard, with every format made ready before
+//! the clipboard is emptied, so a failure to allocate or lock memory leaves
+//! what is already there. A `SetClipboardData` failure after the empty still
+//! loses it; see `write`.
 //!
 //! `EmptyClipboard` is the point of no return: from there the previous
 //! contents are gone, and a copy that then fails to allocate or lock its
