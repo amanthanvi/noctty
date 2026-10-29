@@ -161,23 +161,31 @@ pub const Face = struct {
         for (0..count) |i| {
             const entry = self.face.getSfntName(i) catch continue;
             if (entry.name_id == freetype.c.TT_NAME_ID_FONT_FAMILY) {
-                const string = entry.string[0..entry.string_len];
-                // There are other encodings that are something other than UTF-8
-                // but these are the UTF-16BE ones we've seen "in the wild" so far.
-                if (isUtf16BeName(entry.platform_id, entry.encoding_id)) skip: {
-                    if (string.len % 2 != 0) break :skip;
-                    if (string.len > 1024) break :skip;
-                    var tmp: [512]u16 = undefined;
-                    const max = string.len / 2;
-                    for (@as([]const u16, @ptrCast(@alignCast(string))), 0..) |c, j| tmp[j] = @byteSwap(c);
-                    const len = std.unicode.utf16LeToUtf8(buf, tmp[0..max]) catch return string;
-                    return buf[0..len];
-                }
-                return string;
+                return familyNameFromRecord(
+                    entry.platform_id,
+                    entry.encoding_id,
+                    entry.string[0..entry.string_len],
+                    buf,
+                );
             }
         }
 
         return "";
+    }
+
+    /// The family name a name-table record holds. A UTF-16BE string is decoded
+    /// into `buf`; any other record, and a UTF-16BE one that is malformed or
+    /// whose UTF-8 form does not fit `buf`, is returned as the raw bytes.
+    fn familyNameFromRecord(
+        platform_id: freetype.c.FT_UShort,
+        encoding_id: freetype.c.FT_UShort,
+        string: []const u8,
+        buf: []u8,
+    ) []const u8 {
+        // There are other encodings that are something other than UTF-8
+        // but these are the UTF-16BE ones we've seen "in the wild" so far.
+        if (!isUtf16BeName(platform_id, encoding_id)) return string;
+        return utf16BeToUtf8(string, buf) orelse string;
     }
 
     /// Whether a name-table string is UTF-16BE. Every Unicode-platform
@@ -189,6 +197,32 @@ pub const Face = struct {
         if (platform_id != freetype.c.TT_PLATFORM_MICROSOFT) return false;
         return encoding_id == freetype.c.TT_MS_ID_UNICODE_CS or
             encoding_id == freetype.c.TT_MS_ID_UCS_4;
+    }
+
+    /// Decodes a UTF-16BE string into `buf`. Null when the string has an odd
+    /// length, more than 512 code units, an unpaired surrogate, or a UTF-8 form
+    /// longer than `buf`. `std.unicode.utf16LeToUtf8` asserts that its output
+    /// fits instead of returning an error, so the capacity is checked here.
+    fn utf16BeToUtf8(string: []const u8, buf: []u8) ?[]const u8 {
+        if (string.len % 2 != 0) return null;
+        if (string.len > 1024) return null;
+
+        // Read the units a byte pair at a time: the string points into the
+        // font's name table and need not be aligned for u16.
+        var units: [512]u16 = undefined;
+        const count = string.len / 2;
+        for (units[0..count], 0..) |*unit, i| {
+            unit.* = std.mem.readInt(u16, string[i * 2 ..][0..2], .big);
+        }
+
+        var it: std.unicode.Utf16LeIterator = .init(units[0..count]);
+        var len: usize = 0;
+        while (it.nextCodepoint() catch return null) |cp| {
+            const width = std.unicode.utf8CodepointSequenceLength(cp) catch return null;
+            if (len + width > buf.len) return null;
+            len += std.unicode.utf8Encode(cp, buf[len..]) catch return null;
+        }
+        return buf[0..len];
     }
 
     test "face name" {
@@ -216,6 +250,135 @@ pub const Face = struct {
 
             try testing.expectEqualStrings("Inconsolata", actual);
         }
+    }
+
+    /// A name-table string as a font stores it: the UTF-16BE bytes of `utf8`.
+    fn utf16BeBytes(alloc: Allocator, utf8: []const u8) ![]u8 {
+        const units = try std.unicode.utf8ToUtf16LeAlloc(alloc, utf8);
+        defer alloc.free(units);
+
+        const bytes = try alloc.alloc(u8, units.len * 2);
+        for (units, 0..) |unit, i| std.mem.writeInt(u16, bytes[i * 2 ..][0..2], unit, .big);
+        return bytes;
+    }
+
+    // The records below go through `familyNameFromRecord`, the decoder `name`
+    // runs on every family record, because the embedded fonts only carry
+    // (3, 1) records and cannot tell one encoding from another.
+    const platform_unicode = freetype.c.TT_PLATFORM_APPLE_UNICODE;
+    const platform_mac = freetype.c.TT_PLATFORM_MACINTOSH;
+    const platform_ms = freetype.c.TT_PLATFORM_MICROSOFT;
+    const ms_bmp = freetype.c.TT_MS_ID_UNICODE_CS;
+    const ms_ucs4 = freetype.c.TT_MS_ID_UCS_4;
+
+    test "face name platform 0 is UTF-16BE" {
+        const bytes = try utf16BeBytes(testing.allocator, "Segoe UI");
+        defer testing.allocator.free(bytes);
+
+        var buf: [1024]u8 = undefined;
+        try testing.expectEqualStrings("Segoe UI", familyNameFromRecord(platform_unicode, 3, bytes, &buf));
+    }
+
+    test "face name Microsoft encoding 10 is UTF-16BE" {
+        const bytes = try utf16BeBytes(testing.allocator, "Cascadia Code");
+        defer testing.allocator.free(bytes);
+
+        var buf: [1024]u8 = undefined;
+        try testing.expectEqualStrings("Cascadia Code", familyNameFromRecord(platform_ms, ms_ucs4, bytes, &buf));
+    }
+
+    test "face name that grows in UTF-8" {
+        // Each of these is two bytes in UTF-16 and three in UTF-8.
+        const bytes = try utf16BeBytes(testing.allocator, "日本語フォント");
+        defer testing.allocator.free(bytes);
+        try testing.expectEqual(14, bytes.len);
+
+        var buf: [1024]u8 = undefined;
+        inline for (.{
+            .{ platform_unicode, 3 },
+            .{ platform_ms, ms_bmp },
+            .{ platform_ms, ms_ucs4 },
+        }) |ids| {
+            try testing.expectEqualStrings("日本語フォント", familyNameFromRecord(ids[0], ids[1], bytes, &buf));
+        }
+    }
+
+    test "face name with a surrogate pair" {
+        const bytes = try utf16BeBytes(testing.allocator, "A\u{1D11E}B");
+        defer testing.allocator.free(bytes);
+        try testing.expectEqual(8, bytes.len);
+
+        var buf: [1024]u8 = undefined;
+        try testing.expectEqualStrings("A\u{1D11E}B", familyNameFromRecord(platform_ms, ms_ucs4, bytes, &buf));
+
+        // A half without its partner is not a name: the raw bytes come back.
+        const unpaired = "\xd8\x00\x00\x41";
+        try testing.expectEqualStrings(unpaired, familyNameFromRecord(platform_ms, ms_bmp, unpaired, &buf));
+    }
+
+    test "face name that does not fit the output buffer" {
+        // 342 x U+4E00 is 684 bytes of UTF-16 and 1026 of UTF-8: it passes the
+        // input limits and then overflows the 1024 bytes `+show-face` passes.
+        const long = try utf16BeBytes(testing.allocator, "一" ** 342);
+        defer testing.allocator.free(long);
+        try testing.expectEqual(684, long.len);
+
+        var buf: [1024]u8 = undefined;
+        inline for (.{
+            .{ platform_unicode, 3 },
+            .{ platform_ms, ms_bmp },
+            .{ platform_ms, ms_ucs4 },
+        }) |ids| {
+            const actual = familyNameFromRecord(ids[0], ids[1], long, &buf);
+            try testing.expectEqual(long.ptr, actual.ptr);
+            try testing.expectEqual(long.len, actual.len);
+        }
+
+        // One character fewer fills the buffer but for one byte.
+        const fits = try utf16BeBytes(testing.allocator, "一" ** 341);
+        defer testing.allocator.free(fits);
+        try testing.expectEqualStrings("一" ** 341, familyNameFromRecord(platform_unicode, 3, fits, &buf));
+
+        // The synthetic bold and italic paths pass 256 bytes. 85 x U+4E00 is
+        // 255 bytes, 86 is 258, and 300 ASCII characters are 300.
+        var small: [256]u8 = undefined;
+        const fits_small = try utf16BeBytes(testing.allocator, "一" ** 85);
+        defer testing.allocator.free(fits_small);
+        try testing.expectEqualStrings("一" ** 85, familyNameFromRecord(platform_ms, ms_bmp, fits_small, &small));
+
+        const too_wide = try utf16BeBytes(testing.allocator, "一" ** 86);
+        defer testing.allocator.free(too_wide);
+        try testing.expectEqual(too_wide.ptr, familyNameFromRecord(platform_ms, ms_bmp, too_wide, &small).ptr);
+
+        const too_long = try utf16BeBytes(testing.allocator, "a" ** 300);
+        defer testing.allocator.free(too_long);
+        try testing.expectEqual(too_long.ptr, familyNameFromRecord(platform_unicode, 3, too_long, &small).ptr);
+
+        // A buffer of exactly the UTF-8 length is enough.
+        var exact: [3]u8 = undefined;
+        const one = try utf16BeBytes(testing.allocator, "一");
+        defer testing.allocator.free(one);
+        try testing.expectEqualStrings("一", familyNameFromRecord(platform_unicode, 3, one, &exact));
+        var short: [2]u8 = undefined;
+        try testing.expectEqual(one.ptr, familyNameFromRecord(platform_unicode, 3, one, &short).ptr);
+    }
+
+    test "face name records that are not decoded" {
+        var buf: [1024]u8 = undefined;
+
+        // Other platforms and encodings keep the raw bytes.
+        try testing.expectEqualStrings("Menlo", familyNameFromRecord(platform_mac, 0, "Menlo", &buf));
+        try testing.expectEqualStrings("Menlo", familyNameFromRecord(platform_ms, 0, "Menlo", &buf));
+
+        // So does a UTF-16BE record that is not whole units.
+        try testing.expectEqualStrings("\x00A\x00", familyNameFromRecord(platform_unicode, 3, "\x00A\x00", &buf));
+
+        // A string at an odd address is read without an alignment requirement.
+        const bytes = try utf16BeBytes(testing.allocator, "Odd");
+        defer testing.allocator.free(bytes);
+        var shifted: [7]u8 align(2) = undefined;
+        @memcpy(shifted[1..][0..bytes.len], bytes);
+        try testing.expectEqualStrings("Odd", familyNameFromRecord(platform_unicode, 3, shifted[1..][0..bytes.len], &buf));
     }
 
     /// Return a new face that is the same as this but also has synthetic
