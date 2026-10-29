@@ -133,14 +133,18 @@ keybind = performable:ctrl+v=paste_from_clipboard
 
 Unbound, Ctrl+V reaches the program as a key. Bound as above, it pastes the
 way Windows Terminal's does: text as text, files copied in Explorer as their
-paths, and an image as the empty bracketed paste that tells a program such as
-Claude Code, opencode or herdr to read the image off the clipboard itself (see
+paths, and, when the program has bracketed paste on, an image as the empty
+bracketed paste that tells a program such as Claude Code, opencode or herdr to
+read the image off the clipboard itself (see
 [Clipboard and paste](windows.md#clipboard-and-paste)). Claude Code, for one,
 reads an image on Alt+V and ignores a bare Ctrl+V key, so a clipboard manager
 that pastes by sending Ctrl+V attaches nothing until Ctrl+V is bound.
-`performable:` hands the key back to the program when there is nothing to
-paste. Whenever the paste does happen, the program never sees Ctrl+V, so
-Vim's visual-block Ctrl+V needs Ctrl+Q instead, as in Windows Terminal.
+
+With no text or copied files to paste, Ctrl+V passes through to the program
+when bracketed paste is off. With bracketed paste on, even an empty clipboard
+sends an empty paste and Ctrl+V is consumed; the same section has the details.
+Whenever the paste does happen, the program never sees Ctrl+V, so Vim's
+visual-block Ctrl+V needs Ctrl+Q instead, as in Windows Terminal.
 
 `noctty +list-keybinds` prints the effective set, including anything not listed
 above.
