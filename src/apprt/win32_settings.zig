@@ -6701,9 +6701,10 @@ pub const SettingsWindow = struct {
         const defaults: ?*const Config.Keybinds = if (self.defaults) |*config| &config.keybind else null;
         const alloc = self.handle.alloc;
         const list = &self.keybind_list;
-        // The selection is a row of the old model: it follows its binding.
-        const was_selected: ?[]u8 = if (list.selected) |id| (if (id < self.keybind_model.rows.len) alloc.dupe(u8, self.keybind_model.rows[id].entry) catch null else null) else null;
-        defer if (was_selected) |entry| alloc.free(entry);
+        // The selection is a row of the old model: it follows its binding,
+        // which keeps its id (`keybind_model.Row.id`). Not its text, which
+        // two bindings may share.
+        const was_selected: ?u64 = if (list.selected) |id| (if (id < self.keybind_model.rows.len) self.keybind_model.rows[id].id else null) else null;
         list.selected = null;
         list.forgetOpenText(alloc);
         self.keybind_generation +%= 1;
@@ -6719,8 +6720,8 @@ pub const SettingsWindow = struct {
         if (!self.keybind_model.built()) return;
         self.keybind_found = alloc.alloc(bool, self.keybind_model.rows.len) catch &.{};
         @memset(self.keybind_found, false);
-        if (was_selected) |entry| for (self.keybind_model.rows, 0..) |row, id| {
-            if (std.mem.eql(u8, row.entry, entry)) list.selected = @intCast(id);
+        if (was_selected) |selected| for (self.keybind_model.rows, 0..) |row, id| {
+            if (row.id == selected) list.selected = @intCast(id);
         };
     }
 
@@ -18973,6 +18974,99 @@ test "settings a key binding row UIA holds on to follows its binding across a re
             try std.testing.expectEqual(@as(?usize, last_root), list.selectedPosition());
             try std.testing.expectEqual(@as(?[]const u8, null), try nameOf(removed.row, &buf));
             try std.testing.expectEqual(com.UIA_E_ELEMENTNOTAVAILABLE, removed.row.fragment.vtbl.SetFocus(removed.row.fragment));
+        }
+    }.body);
+}
+
+test "settings two key bindings written the same way are two rows to UIA, and a held one is gone when a reload swaps them" {
+    try dialog_test.onHiddenDesktop(struct {
+        const com = @import("win32_uia/com.zig");
+        const constants = @import("win32_uia/constants.zig");
+
+        /// The row at `position`, selected and held as a screen reader holds
+        /// the focused row.
+        fn hold(list: *ReferenceList, position: usize) !*com.IRawElementProviderFragment {
+            list.selectPosition(position);
+            var focus: ?*com.IRawElementProviderFragment = null;
+            try std.testing.expectEqual(com.S_OK, list.provider.?.fragment_root.vtbl.GetFocus(&list.provider.?.fragment_root, &focus));
+            return focus.?;
+        }
+
+        /// The row's UIA runtime id.
+        fn runtimeId(row: *com.IRawElementProviderFragment) ![3]i32 {
+            var array: ?*com.SAFEARRAY = null;
+            try std.testing.expectEqual(com.S_OK, row.vtbl.GetRuntimeId(row, &array));
+            defer _ = com.SafeArrayDestroy(array.?);
+            var id: [3]i32 = undefined;
+            for (&id, 0..) |*part, i| {
+                var index: i32 = @intCast(i);
+                try std.testing.expectEqual(com.S_OK, com.SafeArrayGetElement(array.?, &index, part));
+            }
+            return id;
+        }
+
+        /// A config with these bindings alone.
+        fn only(alloc: std.mem.Allocator, bindings: []const []const u8) !Config {
+            var config = try Config.default(alloc);
+            errdefer config.deinit();
+            try config.keybind.parseCLI(config._arena.?.allocator(), "clear");
+            for (bindings) |binding| try config.keybind.parseCLI(config._arena.?.allocator(), binding);
+            return config;
+        }
+
+        fn body() !void {
+            const alloc = std.testing.allocator;
+            const fixture = try dialog_test.Fixture.startWith(true);
+            defer fixture.finish();
+            const settings = &fixture.settings;
+            const list = &settings.keybind_list;
+            settings.setActiveSection(.keybindings);
+            _ = SetFocus(list.hwnd.?);
+
+            // `caps_lock+ctrl+f12` is written as `ctrl+f12` (the lock
+            // modifier is not printed): two bindings, two rows of one text.
+            var both = try only(alloc, &.{ "ctrl+f12=new_tab", "caps_lock+ctrl+f12=new_tab" });
+            defer both.deinit();
+            settings.externalConfigChanged(&both, 100);
+            try std.testing.expectEqual(@as(usize, 2), list.shown_count);
+            for (list.shown[0..2]) |id| try std.testing.expectEqualStrings("keybind = ctrl+f12=new_tab", settings.keybind_model.rows[id].entry);
+            try std.testing.expect(settings.keybind_model.rows[list.shown[0]].id != settings.keybind_model.rows[list.shown[1]].id);
+            const first = try hold(list, 0);
+            defer _ = first.vtbl.Release(first);
+            const second = try hold(list, 1);
+            defer _ = second.vtbl.Release(second);
+            try std.testing.expect(!std.mem.eql(i32, &(try runtimeId(first)), &(try runtimeId(second))));
+
+            // Hold the plain one's row; a reload puts the locked one in its
+            // place. The held row is gone: it neither names the new binding
+            // nor selects it.
+            var plain = try only(alloc, &.{"ctrl+f12=new_tab"});
+            defer plain.deinit();
+            settings.externalConfigChanged(&plain, 101);
+            const held = try hold(list, 0);
+            defer _ = held.vtbl.Release(held);
+            var locked = try only(alloc, &.{"caps_lock+ctrl+f12=new_tab"});
+            defer locked.deinit();
+            settings.externalConfigChanged(&locked, 102);
+            try std.testing.expectEqual(@as(usize, 1), list.shown_count);
+            try std.testing.expectEqualStrings("keybind = ctrl+f12=new_tab", settings.keybind_model.rows[list.shown[0]].entry);
+            // The selected binding is gone too: the selection does not move
+            // to the one written like it.
+            try std.testing.expectEqual(@as(?u16, null), list.selected);
+            var simple_ptr: ?*anyopaque = null;
+            try std.testing.expectEqual(com.S_OK, held.vtbl.QueryInterface(held, &com.IID_IRawElementProviderSimple, &simple_ptr));
+            const simple: *com.IRawElementProviderSimple = @ptrCast(@alignCast(simple_ptr.?));
+            defer _ = simple.vtbl.Release(simple);
+            var value = com.VARIANT.empty();
+            try std.testing.expectEqual(com.UIA_E_ELEMENTNOTAVAILABLE, simple.vtbl.GetPropertyValue(simple, constants.UIA_NamePropertyId, &value));
+            try std.testing.expectEqual(com.UIA_E_ELEMENTNOTAVAILABLE, held.vtbl.SetFocus(held));
+            var array: ?*com.SAFEARRAY = null;
+            try std.testing.expectEqual(com.UIA_E_ELEMENTNOTAVAILABLE, held.vtbl.GetRuntimeId(held, &array));
+            // And the same the other way round.
+            const held_locked = try hold(list, 0);
+            defer _ = held_locked.vtbl.Release(held_locked);
+            settings.externalConfigChanged(&plain, 103);
+            try std.testing.expectEqual(com.UIA_E_ELEMENTNOTAVAILABLE, held_locked.vtbl.SetFocus(held_locked));
         }
     }.body);
 }
