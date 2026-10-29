@@ -24,9 +24,9 @@ pub fn decompress(
     // Without a hint, most inputs are pixel data that compresses a few times
     // over, so start near the likely size and grow from there.
     const initial = size_hint orelse @max(4096, data.len *| 4);
-    // The hint may come from an untrusted sender, so never reserve more than
-    // the input can produce: deflate expands at most 1032:1 (a 258-byte
-    // match in two bits).
+    // The hint may come from an untrusted sender, so reserve no more than
+    // the larger of 4 KiB and what the input can produce: deflate expands
+    // at most 1032:1 (a 258-byte match in two bits).
     return decompressWithInitialCapacity(alloc, data, max_len, @min(
         initial,
         max_len,
@@ -168,7 +168,7 @@ test "zlib: decompress" {
     try std.testing.expectEqualStrings(hello_plain, out);
 }
 
-test "zlib: decompress grows the destination one byte at a time" {
+test "zlib: decompress grows a destination that starts at one byte" {
     const alloc = std.testing.allocator;
     const out = try decompressWithInitialCapacity(alloc, &hello_zlib, 1024, 1);
     defer alloc.free(out);
