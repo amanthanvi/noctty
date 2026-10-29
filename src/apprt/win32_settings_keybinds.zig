@@ -252,6 +252,8 @@ test "keybinds the list holds every binding in effect, sequences, chains, flags 
     try config.keybind.parseCLI(arena, "ctrl+alt+y=new_tab");
     try config.keybind.parseCLI(arena, "chain=close_surface");
     try config.keybind.parseCLI(arena, "mine/ctrl+b=reset");
+    // The same keys and action in a second table: another binding.
+    try config.keybind.parseCLI(arena, "other/ctrl+b=reset");
     var defaults = try Config.default(alloc);
     defer defaults.deinit();
     var model: Model = .{};
@@ -304,10 +306,22 @@ test "keybinds the list holds every binding in effect, sequences, chains, flags 
     try std.testing.expect(std.mem.indexOf(u8, chain.search, lower_summary) != null);
     try std.testing.expect(std.mem.indexOf(u8, chain.summary, close_summary) == null);
 
+    // One trigger in two tables is two bindings, with two ids.
+    var in_tables: [2]u64 = undefined;
+    var found: usize = 0;
+    for (model.rows) |row| {
+        if (std.mem.endsWith(u8, row.trigger, "/ctrl+b") and std.mem.eql(u8, row.action, "reset")) {
+            in_tables[found] = row.id;
+            found += 1;
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 2), found);
+    try std.testing.expect(in_tables[0] != in_tables[1]);
+
     // The default table's bindings by action, then each other table's (the
     // defaults have `copy_mode`), the one added last last.
     try std.testing.expectEqualStrings("", model.rows[0].table);
-    try std.testing.expectEqualStrings("mine", model.rows[model.rows.len - 1].table);
+    try std.testing.expectEqualStrings("other", model.rows[model.rows.len - 1].table);
     var tables_seen: usize = 0;
     for (model.rows[0 .. model.rows.len - 1], model.rows[1..]) |a, b| {
         errdefer std.debug.print("keybinds rows out of order: {s}={s} before {s}={s}\n", .{ a.trigger, a.action, b.trigger, b.action });

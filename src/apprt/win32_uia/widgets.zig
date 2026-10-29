@@ -888,10 +888,21 @@ const PaletteRowProvider = struct {
     fn fromInvoke(p: *com.IInvokeProvider) *PaletteRowProvider {
         return @fieldParentPtr("invoke_item", p);
     }
-    fn available(self: *const PaletteRowProvider) bool {
-        return self.parent.isAvailable() and
-            self.index < self.parent.rowCount() and
-            self.parent.rowId(self.index) == self.id;
+    /// Whether the row's item is still in the list, found by its id: the
+    /// RuntimeId names the item, so a row the list moved (a rebuild sorted
+    /// another item in before it, a search changed what is shown) is found
+    /// where it is now and stays that item, and one whose item is gone is
+    /// not available. `index` follows it. Lists with positional ids behave as
+    /// before: their id at another index is another item.
+    fn available(self: *PaletteRowProvider) bool {
+        if (!self.parent.isAvailable()) return false;
+        const count = self.parent.rowCount();
+        if (self.index < count and self.parent.rowId(self.index) == self.id) return true;
+        for (0..count) |index| if (self.parent.rowId(index) == self.id) {
+            self.index = index;
+            return true;
+        };
+        return false;
     }
 
     fn query(self: *PaletteRowProvider, iid: *const com.GUID, out: *?*anyopaque) com.HRESULT {
@@ -5679,6 +5690,33 @@ test "Palette row late query rejects a different item at the same filtered index
         com.UIA_E_ELEMENTNOTAVAILABLE,
         PaletteRowProvider.GetPropertyValue(&row.base, constants.UIA_NamePropertyId, &value),
     );
+}
+
+test "Palette row a client holds follows its item when the list reorders" {
+    var state_data = TestPaletteState{ .count = 3, .id_base = 100 };
+    var provider = try PaletteListProvider.create(std.testing.allocator, @ptrFromInt(0x1), state_data.state());
+    defer _ = PaletteListProvider.Release(&provider.base);
+    // The item of id 102, third.
+    const row = provider.createRow(2).?;
+    defer _ = PaletteRowProvider.Release(&row.base);
+
+    // An item sorted in before it: id 102 is fourth now, and the held row is
+    // that item there, named and selected as it.
+    state_data.count = 4;
+    state_data.id_base = 99;
+    var value = com.VARIANT.empty();
+    try std.testing.expectEqual(com.S_OK, PaletteRowProvider.GetPropertyValue(&row.base, constants.UIA_NamePropertyId, &value));
+    defer _ = com.VariantClear(&value);
+    const bstr = value.value.bstr.?;
+    var buf: [16]u8 = undefined;
+    try std.testing.expectEqualStrings("row 3", buf[0..try std.unicode.utf16LeToUtf8(&buf, bstr[0..com.SysStringLen(bstr)])]);
+    try std.testing.expectEqual(com.S_OK, PaletteRowProvider.Select(&row.selection_item));
+    try std.testing.expectEqual(@as(?usize, 3), state_data.selected_by_provider);
+
+    // Gone from the list: not available, at any index.
+    state_data.id_base = 200;
+    var gone = com.VARIANT.empty();
+    try std.testing.expectEqual(com.UIA_E_ELEMENTNOTAVAILABLE, PaletteRowProvider.GetPropertyValue(&row.base, constants.UIA_NamePropertyId, &gone));
 }
 
 test "Palette row selection callback may reenter provider" {
