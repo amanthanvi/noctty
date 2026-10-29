@@ -18978,6 +18978,67 @@ test "settings a key binding row UIA holds on to follows its binding across a re
     }.body);
 }
 
+test "settings a key binding reloaded with a zero of the other sign keeps its row, its selection and its UIA element" {
+    try dialog_test.onHiddenDesktop(struct {
+        const com = @import("win32_uia/com.zig");
+        const constants = @import("win32_uia/constants.zig");
+
+        /// A config with this binding alone.
+        fn only(alloc: std.mem.Allocator, binding: []const u8) !Config {
+            var config = try Config.default(alloc);
+            errdefer config.deinit();
+            try config.keybind.parseCLI(config._arena.?.allocator(), "clear");
+            try config.keybind.parseCLI(config._arena.?.allocator(), binding);
+            return config;
+        }
+
+        fn body() !void {
+            const alloc = std.testing.allocator;
+            const fixture = try dialog_test.Fixture.startWith(true);
+            defer fixture.finish();
+            const settings = &fixture.settings;
+            const list = &settings.keybind_list;
+            settings.setActiveSection(.keybindings);
+            _ = SetFocus(list.hwnd.?);
+
+            for ([_][2][]const u8{
+                .{ "ctrl+f12=scroll_page_fractional:0", "ctrl+f12=scroll_page_fractional:-0" },
+                .{ "ctrl+f12=scroll_page_fractional:-0", "ctrl+f12=scroll_page_fractional:0" },
+                .{ "ctrl+f12=scroll_page_fractional:nan", "ctrl+f12=scroll_page_fractional:nan" },
+            }, 0..) |lines, round| {
+                errdefer std.debug.print("settings reload {s} then {s}\n", .{ lines[0], lines[1] });
+                var before = try only(alloc, lines[0]);
+                defer before.deinit();
+                settings.externalConfigChanged(&before, @intCast(200 + 2 * round));
+                try std.testing.expectEqual(@as(usize, 1), list.shown_count);
+                const id = settings.keybind_model.rows[list.shown[0]].id;
+                // Selected and held, as a screen reader holds the focused row.
+                list.selectPosition(0);
+                var focus: ?*com.IRawElementProviderFragment = null;
+                try std.testing.expectEqual(com.S_OK, list.provider.?.fragment_root.vtbl.GetFocus(&list.provider.?.fragment_root, &focus));
+                const held = focus.?;
+                defer _ = held.vtbl.Release(held);
+
+                var after = try only(alloc, lines[1]);
+                defer after.deinit();
+                settings.externalConfigChanged(&after, @intCast(201 + 2 * round));
+                // The same binding: the same id, still selected, and the held
+                // row still names it and takes the focus.
+                try std.testing.expectEqual(id, settings.keybind_model.rows[list.shown[0]].id);
+                try std.testing.expectEqual(@as(?usize, 0), list.selectedPosition());
+                var simple_ptr: ?*anyopaque = null;
+                try std.testing.expectEqual(com.S_OK, held.vtbl.QueryInterface(held, &com.IID_IRawElementProviderSimple, &simple_ptr));
+                const simple: *com.IRawElementProviderSimple = @ptrCast(@alignCast(simple_ptr.?));
+                defer _ = simple.vtbl.Release(simple);
+                var value = com.VARIANT.empty();
+                try std.testing.expectEqual(com.S_OK, simple.vtbl.GetPropertyValue(simple, constants.UIA_NamePropertyId, &value));
+                _ = com.VariantClear(&value);
+                try std.testing.expectEqual(com.S_OK, held.vtbl.SetFocus(held));
+            }
+        }
+    }.body);
+}
+
 test "settings two key bindings written the same way are two rows to UIA, and a held one is gone when a reload swaps them" {
     try dialog_test.onHiddenDesktop(struct {
         const com = @import("win32_uia/com.zig");

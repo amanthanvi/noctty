@@ -55,10 +55,11 @@ pub const Row = struct {
 
 /// A binding as the config's binding set tells bindings apart: its table, its
 /// flags, its keys, each with its whole modifier value (`Trigger.foldedEqual`),
-/// and its actions in order (`Action.equal`). Its text does not do: it prints
-/// only Super, Ctrl, Alt and Shift (`Trigger.format`), so `caps_lock+ctrl+f12`
-/// and `ctrl+f12`, two bindings, are written the same. Copied into the
-/// model's arena, so a rebuild can compare its bindings with the last one's.
+/// and its actions in order (`Action.equal`, floats aside: `actionEql`). Its
+/// text does not do: it prints only Super, Ctrl, Alt and Shift
+/// (`Trigger.format`), so `caps_lock+ctrl+f12` and `ctrl+f12`, two bindings,
+/// are written the same. Copied into the model's arena, so a rebuild can
+/// compare its bindings with the last one's.
 pub const Identity = struct {
     table: []const u8 = "",
     flags: Binding.Flags = .{},
@@ -81,7 +82,7 @@ pub const Identity = struct {
         if (!std.meta.eql(a.flags, b.flags)) return false;
         if (a.keys.len != b.keys.len or a.actions.len != b.actions.len) return false;
         for (a.keys, b.keys) |x, y| if (!x.foldedEqual(y)) return false;
-        for (a.actions, b.actions) |x, y| if (!x.equal(y)) return false;
+        for (a.actions, b.actions) |x, y| if (!actionEql(x, y)) return false;
         return true;
     }
 
@@ -91,10 +92,47 @@ pub const Identity = struct {
         var hasher = std.hash.Wyhash.init(0);
         hasher.update(self.table);
         for (self.keys) |key| std.hash.autoHash(&hasher, key.hash());
-        for (self.actions) |action| std.hash.autoHash(&hasher, action.hash());
+        for (self.actions) |action| std.hash.autoHash(&hasher, actionHash(action));
         return hasher.final();
     }
 };
+
+/// Whether two actions are one for `Identity`: `Action.equal`, except for a
+/// float parameter (`scroll_page_fractional:-0`), which it compares with `==`.
+/// Under `==`, `-0` is `0` while `Action.hash` hashes their bits apart, so the
+/// lookup would not find an equal binding; and NaN is not even itself, so a
+/// binding with a NaN parameter would never be the same binding again. Here
+/// `-0` is `0`, every NaN is every other, and `actionHash` agrees.
+fn actionEql(a: Binding.Action, b: Binding.Action) bool {
+    if (std.meta.activeTag(a) != std.meta.activeTag(b)) return false;
+    return switch (a) {
+        inline else => |value, tag| switch (@TypeOf(value)) {
+            f32, f64 => value == @field(b, @tagName(tag)) or
+                (std.math.isNan(value) and std.math.isNan(@field(b, @tagName(tag)))),
+            else => a.equal(b),
+        },
+    };
+}
+
+/// `Action.hash`, with a float parameter hashed by a value equal ones share
+/// (`actionEql`): `-0` as `0`, and every NaN alike. Floats are only ever the
+/// whole parameter: `Action.hash` hashes anything else with `autoHash`, which
+/// takes no floats.
+fn actionHash(action: Binding.Action) u64 {
+    return switch (action) {
+        inline else => |value, tag| switch (@TypeOf(value)) {
+            f32, f64 => hash: {
+                const Float = @TypeOf(value);
+                const same: Float = if (std.math.isNan(value)) std.math.nan(Float) else if (value == 0) 0 else value;
+                var hasher = std.hash.Wyhash.init(0);
+                std.hash.autoHash(&hasher, tag);
+                std.hash.autoHash(&hasher, @as(std.meta.Int(.unsigned, @bitSizeOf(Float)), @bitCast(same)));
+                break :hash hasher.final();
+            },
+            else => action.hash(),
+        },
+    };
+}
 
 /// Find a row whose binding equals another: the hash finds the candidates,
 /// `Identity.eql` decides.
@@ -415,6 +453,55 @@ test "keybinds a rebuild keeps a binding's id, and gives it to no other binding"
     try model.build(alloc, &flagged.keybind, null);
     try std.testing.expectEqual(@as(usize, 1), model.rows.len);
     try std.testing.expect(model.rows[0].id != unflagged);
+}
+
+test "keybinds a float parameter is the same binding with a zero of either sign, and with any NaN" {
+    const key: Binding.Trigger = .{ .mods = .{ .ctrl = true }, .key = .{ .physical = .f12 } };
+    const Pair = struct { a: f32, b: f32 };
+    const other_nan: f32 = @bitCast(@as(u32, 0x7fc0_0001));
+    for ([_]Pair{
+        .{ .a = 0.0, .b = -0.0 },
+        .{ .a = std.math.nan(f32), .b = std.math.nan(f32) },
+        .{ .a = std.math.nan(f32), .b = other_nan },
+    }, 0..) |pair, index| {
+        errdefer std.debug.print("keybinds float pair {d}\n", .{index});
+        const a: Identity = .{ .keys = &.{key}, .actions = &.{.{ .scroll_page_fractional = pair.a }} };
+        const b: Identity = .{ .keys = &.{key}, .actions = &.{.{ .scroll_page_fractional = pair.b }} };
+        try std.testing.expect(a.eql(b) and b.eql(a));
+        try std.testing.expect(a.eql(a));
+        try std.testing.expectEqual(a.hash(), b.hash());
+    }
+    // Still not one for another value, or another action.
+    const half: Identity = .{ .keys = &.{key}, .actions = &.{.{ .scroll_page_fractional = 0.5 }} };
+    try std.testing.expect(!half.eql(.{ .keys = &.{key}, .actions = &.{.{ .scroll_page_fractional = 0.0 }} }));
+    try std.testing.expect(!half.eql(.{ .keys = &.{key}, .actions = &.{.{ .set_font_size = 0.5 }} }));
+}
+
+test "keybinds a reload that only flips a float parameter's zero, or reads nan again, keeps the id, and defaults written the other way do not differ" {
+    const alloc = std.testing.allocator;
+    for ([_][2][]const u8{
+        .{ "ctrl+f12=scroll_page_fractional:0", "ctrl+f12=scroll_page_fractional:-0" },
+        .{ "ctrl+f12=scroll_page_fractional:nan", "ctrl+f12=scroll_page_fractional:nan" },
+    }) |lines| {
+        errdefer std.debug.print("keybinds float lines {s} then {s}\n", .{ lines[0], lines[1] });
+        var first = try Config.default(alloc);
+        defer first.deinit();
+        try first.keybind.parseCLI(first._arena.?.allocator(), "clear");
+        try first.keybind.parseCLI(first._arena.?.allocator(), lines[0]);
+        var second = try Config.default(alloc);
+        defer second.deinit();
+        try second.keybind.parseCLI(second._arena.?.allocator(), "clear");
+        try second.keybind.parseCLI(second._arena.?.allocator(), lines[1]);
+        var model: Model = .{};
+        defer model.deinit();
+        try model.build(alloc, &first.keybind, &second.keybind);
+        try std.testing.expectEqual(@as(usize, 1), model.rows.len);
+        try std.testing.expect(!model.rows[0].differs);
+        const id = model.rows[0].id;
+        try model.build(alloc, &second.keybind, &first.keybind);
+        try std.testing.expectEqual(id, model.rows[0].id);
+        try std.testing.expect(!model.rows[0].differs);
+    }
 }
 
 test "keybinds an identity is the table, the flags, every modifier of every key and each action" {
