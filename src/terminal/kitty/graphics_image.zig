@@ -414,15 +414,34 @@ pub const LoadingImage = struct {
     }
 
     fn decompressZlib(self: *LoadingImage, alloc: Allocator) !void {
-        // Use the WUFFS zlib decoder rather than std.compress.flate. Every
-        // crash dump from high-frequency `o=z` streaming (termway video)
-        // faulted on the io-reader thread inside the std flate bit reader
-        // with a wild decompressor pointer, before and after the placement
-        // pin fixes. WUFFS is already linked for PNG and is memory safe.
+        // Use the WUFFS zlib decoder rather than std.compress.flate. Zig
+        // 0.15.2's buffered Decompress writes a fixed-Huffman match without
+        // checking the room left in its 64 KiB window, so a match that
+        // crosses the window's end reaches `unreachable` (ziglang/zig#24963,
+        // fixed on master after 0.15). ReleaseFast turns that into an access
+        // violation on the io-reader thread (#570). WUFFS is already linked
+        // for PNG and is memory safe.
+        //
+        // Raw formats know their decoded size, so the output is one
+        // allocation of exactly that size when the stream is well formed.
+        const size_hint: ?usize = switch (self.image.format) {
+            .png => null,
+            .gray, .gray_alpha, .rgb, .rgba => |f| hint: {
+                const pixels = std.math.mul(
+                    usize,
+                    self.image.width,
+                    self.image.height,
+                ) catch break :hint null;
+                const len = std.math.mul(usize, pixels, f.bpp()) catch
+                    break :hint null;
+                break :hint if (len > 0 and len <= max_size) len else null;
+            },
+        };
         const result = wuffs.zlib.decompress(
             alloc,
             self.data.items,
             max_size,
+            size_hint,
         ) catch |err| {
             log.warn("failed to decompress image data err={}", .{err});
             return error.DecompressionFailed;
@@ -705,6 +724,141 @@ test "image load: rgb, zlib compressed, direct, chunked with zero initial chunk"
     var img = try loading.complete(alloc);
     defer img.deinit(alloc);
     try testing.expect(img.compression == .none);
+}
+
+/// A 160x120 RGBA frame (76,800 bytes) compressed by zlib 1.3.1 with
+/// `Z_FIXED`, so every block uses the fixed Huffman code. Its output crosses
+/// the 64 KiB window that Zig 0.15.2's buffered flate decoder decodes into,
+/// and that decoder reaches `unreachable` (an access violation in ReleaseFast)
+/// when a fixed-block match straddles the window's end (#570).
+const fixed_huffman_frame = @embedFile("testdata/image-rgba-zlib_deflate_fixed-160x120-raw.data");
+
+/// The pixels of `fixed_huffman_frame`: opaque black bars on rows 0-19 and
+/// 100-119, and a horizontal gradient on the rows between.
+fn fixedHuffmanFramePixels(alloc: Allocator) ![]u8 {
+    const pixels = try alloc.alloc(u8, 160 * 120 * 4);
+    for (0..120) |y| for (0..160) |x| {
+        const v: u8 = @intCast(x * 255 / 159);
+        const px: [4]u8 = if (y < 20 or y >= 100) .{ 0, 0, 0, 255 } else .{ v, 64, 255 - v, 255 };
+        @memcpy(pixels[(y * 160 + x) * 4 ..][0..4], &px);
+    };
+    return pixels;
+}
+
+/// Transmit `data` as a zlib-compressed RGBA image in `chunk_len`-byte chunks,
+/// the way a `m=1` stream arrives, and complete it.
+fn loadZlibRgba(alloc: Allocator, data: []const u8, width: u32, height: u32, chunk_len: usize) !Image {
+    var cmd: command.Command = .{
+        .control = .{ .transmit = .{
+            .format = .rgba,
+            .medium = .direct,
+            .compression = .zlib_deflate,
+            .width = width,
+            .height = height,
+            .image_id = 570,
+            .more_chunks = true,
+        } },
+    };
+    defer cmd.deinit(alloc);
+    var loading = try LoadingImage.init(alloc, &cmd);
+    defer loading.deinit(alloc);
+    var rest = data;
+    while (rest.len > 0) {
+        const n = @min(chunk_len, rest.len);
+        try loading.addData(alloc, rest[0..n]);
+        rest = rest[n..];
+    }
+    return loading.complete(alloc);
+}
+
+test "image load: rgba, zlib with fixed Huffman blocks past 64 KiB (#570)" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    const expected = try fixedHuffmanFramePixels(alloc);
+    defer alloc.free(expected);
+
+    // Whole, and chunked at an odd size so chunk edges fall mid-symbol.
+    for ([_]usize{ fixed_huffman_frame.len, 37 }) |chunk_len| {
+        var img = try loadZlibRgba(alloc, fixed_huffman_frame, 160, 120, chunk_len);
+        defer img.deinit(alloc);
+        try testing.expect(img.compression == .none);
+        try testing.expectEqualSlices(u8, expected, img.data);
+    }
+}
+
+test "image load: corrupt, truncated and mis-sized zlib data fail cleanly" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    // Wrong Adler-32 trailer.
+    const corrupt = try alloc.dupe(u8, fixed_huffman_frame);
+    defer alloc.free(corrupt);
+    corrupt[corrupt.len - 1] ^= 0x01;
+    try testing.expectError(error.DecompressionFailed, loadZlibRgba(alloc, corrupt, 160, 120, 4096));
+
+    // Cut off mid-stream, and cut off before the trailer.
+    const half = fixed_huffman_frame[0 .. fixed_huffman_frame.len / 2];
+    try testing.expectError(error.DecompressionFailed, loadZlibRgba(alloc, half, 160, 120, 4096));
+    const no_trailer = fixed_huffman_frame[0 .. fixed_huffman_frame.len - 4];
+    try testing.expectError(error.DecompressionFailed, loadZlibRgba(alloc, no_trailer, 160, 120, 4096));
+
+    // Not zlib at all.
+    try testing.expectError(error.DecompressionFailed, loadZlibRgba(alloc, "not zlib", 160, 120, 4096));
+
+    // Declared smaller or larger than the stream decodes to: the size hint
+    // is only a starting capacity, and the length check still rejects it.
+    try testing.expectError(error.InvalidData, loadZlibRgba(alloc, fixed_huffman_frame, 160, 100, 4096));
+    try testing.expectError(error.InvalidData, loadZlibRgba(alloc, fixed_huffman_frame, 160, 140, 4096));
+}
+
+test "image load: zlib output is capped at the limit" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    const exact = try wuffs.zlib.decompress(alloc, fixed_huffman_frame, 160 * 120 * 4, null);
+    alloc.free(exact);
+    try testing.expectError(
+        error.Overflow,
+        wuffs.zlib.decompress(alloc, fixed_huffman_frame, 160 * 120 * 4 - 1, null),
+    );
+    // A hint above the limit does not let the output past it.
+    try testing.expectError(
+        error.Overflow,
+        wuffs.zlib.decompress(alloc, fixed_huffman_frame, 1000, 160 * 120 * 4),
+    );
+}
+
+test "image load: bounded fuzz of mutated zlib frames" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    // Flip bytes in, or truncate, the fixed Huffman frame. Every outcome
+    // must be a clean error or a frame of exactly the declared size.
+    var prng = std.Random.DefaultPrng.init(570);
+    const random = prng.random();
+    const buf = try alloc.alloc(u8, fixed_huffman_frame.len);
+    defer alloc.free(buf);
+    for (0..300) |_| {
+        @memcpy(buf, fixed_huffman_frame);
+        var len = buf.len;
+        if (random.boolean()) {
+            for (0..random.intRangeAtMost(usize, 1, 4)) |_| {
+                buf[random.uintLessThan(usize, len)] ^= random.intRangeAtMost(u8, 1, 255);
+            }
+        } else {
+            len = random.uintLessThan(usize, len);
+        }
+        const chunk_len = random.intRangeAtMost(usize, 1, 512);
+        if (loadZlibRgba(alloc, buf[0..len], 160, 120, chunk_len)) |img| {
+            var owned = img;
+            defer owned.deinit(alloc);
+            try testing.expectEqual(@as(usize, 160 * 120 * 4), owned.data.len);
+        } else |err| switch (err) {
+            error.DecompressionFailed, error.InvalidData => {},
+            else => return err,
+        }
+    }
 }
 
 test "image load: temporary file without correct path" {

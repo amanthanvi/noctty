@@ -11,10 +11,19 @@ const log = std.log.scoped(.wuffs_zlib);
 /// error.Overflow if the output would exceed `max_len` bytes and with
 /// error.WuffsError if the stream is malformed or truncated (including an
 /// Adler-32 mismatch).
-pub fn decompress(alloc: Allocator, data: []const u8, max_len: usize) Error![]u8 {
-    // Most inputs are pixel data that compresses a few times over, so start
-    // near the likely size and grow from there.
-    const initial = @min(max_len, @max(4096, data.len *| 4));
+///
+/// `size_hint` is the expected output length when the caller knows it (for
+/// example width * height * bpp of a raw image). A correct hint makes the
+/// output a single allocation; a wrong one only costs a regrowth.
+pub fn decompress(
+    alloc: Allocator,
+    data: []const u8,
+    max_len: usize,
+    size_hint: ?usize,
+) Error![]u8 {
+    // Without a hint, most inputs are pixel data that compresses a few times
+    // over, so start near the likely size and grow from there.
+    const initial = @min(max_len, size_hint orelse @max(4096, data.len *| 4));
     return decompressWithInitialCapacity(alloc, data, max_len, initial);
 }
 
@@ -70,7 +79,9 @@ fn decompressWithInitialCapacity(
     const limit = max_len +| 1;
     var list: std.ArrayList(u8) = .empty;
     errdefer list.deinit(alloc);
-    try list.ensureTotalCapacity(alloc, @max(1, @min(limit, initial_capacity)));
+    // Precise capacities keep the destination at or below `limit` bytes:
+    // the rounding of ensureTotalCapacity could overshoot it by half.
+    try list.ensureTotalCapacityPrecise(alloc, @max(1, @min(limit, initial_capacity)));
 
     while (true) {
         // The destination may move when the list grows. That is fine: the
@@ -118,7 +129,7 @@ fn decompressWithInitialCapacity(
             return error.Overflow;
         }
         const grow = @min(limit - list.items.len, @max(4096, list.capacity));
-        try list.ensureUnusedCapacity(alloc, grow);
+        try list.ensureTotalCapacityPrecise(alloc, list.items.len + grow);
     }
 
     // The list may have grown past the limit we asked for.
@@ -142,7 +153,7 @@ const hello_plain = "hello, wuffs zlib";
 
 test "zlib: decompress" {
     const alloc = std.testing.allocator;
-    const out = try decompress(alloc, &hello_zlib, 1024);
+    const out = try decompress(alloc, &hello_zlib, 1024, null);
     defer alloc.free(out);
     try std.testing.expectEqualStrings(hello_plain, out);
 }
@@ -173,7 +184,7 @@ test "zlib: truncated input is an error" {
     const alloc = std.testing.allocator;
     try std.testing.expectError(
         error.WuffsError,
-        decompress(alloc, hello_zlib[0 .. hello_zlib.len - 6], 1024),
+        decompress(alloc, hello_zlib[0 .. hello_zlib.len - 6], 1024, null),
     );
 }
 
@@ -181,10 +192,10 @@ test "zlib: corrupt checksum is an error" {
     const alloc = std.testing.allocator;
     var corrupt = hello_zlib;
     corrupt[corrupt.len - 1] ^= 0xff;
-    try std.testing.expectError(error.WuffsError, decompress(alloc, &corrupt, 1024));
+    try std.testing.expectError(error.WuffsError, decompress(alloc, &corrupt, 1024, null));
 }
 
 test "zlib: garbage is an error" {
     const alloc = std.testing.allocator;
-    try std.testing.expectError(error.WuffsError, decompress(alloc, "not zlib at all", 1024));
+    try std.testing.expectError(error.WuffsError, decompress(alloc, "not zlib at all", 1024, null));
 }
