@@ -2212,6 +2212,90 @@ function Test-AccessibilityAllSettingsList {
     }
 }
 
+# Every binding the build's defaults have, as `noctty.com +list-keybinds --default --plain` prints
+# them: one `keybind = keys=action` line each, a chain's later actions on `chain=` lines of their
+# own. The harness's launch adds no binding, so these are the bindings in effect.
+function Get-AccessibilityDefaultKeybinds {
+    param([Parameter(Mandatory)] [string] $ExePath)
+    $cli = Join-Path (Split-Path -Parent $ExePath) 'noctty.com'
+    if (-not (Test-Path -LiteralPath $cli)) { throw "The build has no CLI at '$cli'." }
+    $lines = @(& $cli +list-keybinds --default --plain)
+    if ($LASTEXITCODE -ne 0) { throw "'$cli +list-keybinds --default --plain' exited with $LASTEXITCODE." }
+    $entries = @($lines | Where-Object { $_ -match '^keybind = ' -and $_ -notmatch '^keybind = chain=' } | ForEach-Object { $_.Substring('keybind = '.Length) })
+    if ($entries.Count -eq 0) { throw "'$cli +list-keybinds --default --plain' printed no binding." }
+    return [string[]]$entries
+}
+
+# The Keybindings page's list, read live: a List named "Key bindings" with HelpText, one ListItem
+# per binding in $ExpectedBindings (`Get-AccessibilityDefaultKeybinds`, each `keys=action`), named
+# "keys, action" and none twice, and a row that takes the focus through UIA selected, focused and
+# carrying HelpText. A row's keys carry the binding's flags (`performable:` and the like), which
+# the CLI's lines leave out, and a chain's row its later actions after ", then ", so both are
+# taken off before comparing. Self-contained, as Test-AccessibilityAllSettingsList is.
+function Test-AccessibilityKeybindList {
+    param(
+        [Parameter(Mandatory)] [System.Windows.Automation.AutomationElement] $SettingsElement,
+        [Parameter(Mandatory)] [string[]] $ExpectedBindings
+    )
+    $element = [System.Windows.Automation.AutomationElement]
+    $listCondition = New-Object System.Windows.Automation.AndCondition(
+        (New-Object System.Windows.Automation.PropertyCondition($element::ControlTypeProperty, [System.Windows.Automation.ControlType]::List)),
+        (New-Object System.Windows.Automation.PropertyCondition($element::NameProperty, 'Key bindings'))
+    )
+    $list = $null
+    $deadline = [DateTime]::UtcNow.AddSeconds(5)
+    while ($null -eq $list -and [DateTime]::UtcNow -lt $deadline) {
+        $list = $SettingsElement.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $listCondition)
+        if ($null -eq $list) { Start-Sleep -Milliseconds 100 }
+    }
+    if ($null -eq $list) { throw "Settings 'Keybindings' page exposes no List named 'Key bindings'." }
+    $listHelp = [string]$list.GetCurrentPropertyValue($element::HelpTextProperty)
+    if ([string]::IsNullOrWhiteSpace($listHelp)) { throw 'The Key bindings List has no HelpText.' }
+    $itemCondition = New-Object System.Windows.Automation.PropertyCondition($element::ControlTypeProperty, [System.Windows.Automation.ControlType]::ListItem)
+    $items = @($list.FindAll([System.Windows.Automation.TreeScope]::Children, $itemCondition))
+    if ($items.Count -ne $ExpectedBindings.Count) { throw "The Key bindings List exposes $($items.Count) ListItems; the build's defaults have $($ExpectedBindings.Count) bindings." }
+    $expected = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+    foreach ($binding in $ExpectedBindings) { [void]$expected.Add($binding) }
+    $seen = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+    $duplicates = New-Object 'System.Collections.Generic.List[string]'
+    $badNames = New-Object 'System.Collections.Generic.List[string]'
+    foreach ($item in $items) {
+        $name = $item.Current.Name
+        $split = $name.IndexOf(', ')
+        if ($split -le 0 -or $split + 2 -ge $name.Length) { $badNames.Add($name); continue }
+        $keys = $name.Substring(0, $split) -replace '^([^/]*/)?(?:(?:global|all|unconsumed|performable):)+', '$1'
+        $actions = $name.Substring($split + 2)
+        $chain = $actions.IndexOf(', then ')
+        $first = if ($chain -ge 0) { $actions.Substring(0, $chain) } else { $actions }
+        $binding = "$keys=$first"
+        if (-not $seen.Add($binding)) { $duplicates.Add($binding) }
+    }
+    if ($badNames.Count -ne 0) { throw "Key bindings ListItems not named 'keys, action': $($badNames[0..([Math]::Min(2, $badNames.Count - 1))] -join ' | ')." }
+    if ($duplicates.Count -ne 0) { throw "Key bindings lists these more than once: $($duplicates -join ', ')." }
+    $missing = @($ExpectedBindings | Where-Object { -not $seen.Contains($_) })
+    $extra = @($seen | Where-Object { -not $expected.Contains($_) })
+    if ($missing.Count -ne 0 -or $extra.Count -ne 0) { throw "Key bindings differ from the build's defaults: not listed: $($missing -join ', '); listed but not the defaults': $($extra -join ', ')." }
+    $row = $items[1]
+    $row.SetFocus()
+    $selection = $null
+    [void]$row.TryGetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern, [ref]$selection)
+    $deadline = [DateTime]::UtcNow.AddSeconds(5)
+    while (-not ($row.Current.HasKeyboardFocus -and $null -ne $selection -and $selection.Current.IsSelected) -and [DateTime]::UtcNow -lt $deadline) {
+        Start-Sleep -Milliseconds 100
+    }
+    if (-not $row.Current.HasKeyboardFocus) { throw "Key bindings ListItem '$($row.Current.Name)' did not take the keyboard focus through UIA SetFocus." }
+    if ($null -eq $selection -or -not $selection.Current.IsSelected) { throw "Key bindings ListItem '$($row.Current.Name)' took the focus but is not selected." }
+    $rowHelp = [string]$row.GetCurrentPropertyValue($element::HelpTextProperty)
+    if ([string]::IsNullOrWhiteSpace($rowHelp)) { throw "Key bindings ListItem '$($row.Current.Name)' has no HelpText." }
+    return [ordered]@{
+        list_help_chars = $listHelp.Length
+        list_items = $items.Count
+        expected_bindings = $ExpectedBindings.Count
+        focused_item = $row.Current.Name
+        focused_item_help_chars = $rowHelp.Length
+    }
+}
+
 function Open-AccessibilitySettingsProbe {
     param(
         [Parameter(Mandatory)][System.Diagnostics.Process] $Process,
@@ -5922,6 +6006,9 @@ try {
             $allSettingsList = if ($sectionName -eq 'All settings') {
                 Test-AccessibilityAllSettingsList -SettingsElement $settingsElement -ExpectedKeys (Get-AccessibilityConfigKeys -ExePath $exe)
             } else { $null }
+            $keybindList = if ($sectionName -eq 'Keybindings') {
+                Test-AccessibilityKeybindList -SettingsElement $settingsElement -ExpectedBindings (Get-AccessibilityDefaultKeybinds -ExePath $exe)
+            } else { $null }
             $settingsSectionEvidence += [ordered]@{
                 name = $sectionName
                 selected = $true
@@ -5929,6 +6016,7 @@ try {
                 visible_content_controls = $interactiveSettingsControls.Count
                 pages = $settingsPages
                 all_settings_list = $allSettingsList
+                keybind_list = $keybindList
             }
         }
         $selectedBeforeFocus = @($sectionButtons | Where-Object {

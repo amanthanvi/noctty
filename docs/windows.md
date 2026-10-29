@@ -1759,14 +1759,32 @@ the window waits. When it cannot be read, the page says so instead of a line.
 Enter, or double-clicking
 the key, opens the config file the way "Open in default editor" does (through
 the `.txt` association), which takes no line number, and the editor may put
-the cursor anywhere: go to the line shown. Ctrl+C copies the key's name, and Shift+F10
-or a right-click offers both. The value shown is the one in effect: a field you
+the cursor anywhere: go to the line shown. Ctrl+C copies the key's name. A key
+that has a control in Settings (font size, opacity, the clipboard policies and
+the rest) has an **Edit on _page_** action: F2, or clicking it, goes to that
+control on its own page, focused, so the edit is the control's own, previews
+or waits for Save as it does there, and Save patches only that key's line. A
+key with no control says it is changed in the config file; background blur and
+link previews, whose controls Windows does not support, have no Edit and say
+why. Shift+F10 or a
+right-click offers the row's actions. The value shown is the one in effect: a field you
 have changed on another page but not saved yet, even one whose change you can
 already see in the open windows, keeps its saved value here and is marked as
 changed and not saved yet. The search covers
 this page too, by each key's name, value and description, so its count counts
 every setting once: searching "padding" finds the three padding fields on
 Appearance and the four `window-padding-*` keys here, "4 settings match".
+
+**Keybindings** lists every key binding in effect: the defaults, with the
+config file's `keybind` lines applied, key tables and sequences included. Each
+row shows the keys (with a key table's name and `/` first, and flags such as
+`global:`), the action, and the first sentence of what the action does; Up and
+Down select a binding, which opens to the action's whole description and says
+whether it is one of noctty's defaults or the config file's own. The list is
+read-only: Enter opens the config file, where bindings are changed, and Ctrl+C
+copies the binding as `keybind = ...` lines to paste there. The search covers
+the bindings too, by keys, action and description, and counts each as one
+match on this page; `@modified` keeps the ones the defaults do not have.
 
 ## Running elevated
 

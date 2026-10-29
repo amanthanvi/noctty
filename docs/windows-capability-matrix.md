@@ -411,7 +411,10 @@ placeholder is on the way), and what
 Windows does with it for the keys [above](#settings-accepted-without-effect).
 Copy name puts a key's name on the clipboard, and Open config file opens the
 file through the `.txt` association (as the escape hatch below does), which
-takes no line number, so the page shows the line instead. Edits are staged until Save and applied through an atomic,
+takes no line number, so the page shows the line instead. A key that has a
+Settings control is edited from its row on that control's own page (F2 or
+Edit), so the edit takes the control's Save path; the others, and the two
+whose controls Windows does not support, are read-only and say so. Edits are staged until Save and applied through an atomic,
 source-preserving config patch; Discard changes asks how many fields would be
 lost before it throws the draft away. A field that differs from its built-in
 default is marked, and its Reset button, its context menu and
@@ -423,8 +426,11 @@ keeps the plain-text escape hatch, which opens the config through the `.txt`
 association rather than the file's own. Owned snapshots survive external reloads,
 and native fields support reversible live preview, revision-aware
 external-edit merging, and explicit Keep mine / Use disk conflict
-resolution. Keybinding editing still uses the text config and CLI discovery
-commands.
+resolution. The Keybindings page lists every key binding in effect (the
+defaults with the config's `keybind` lines, key tables and sequences
+included), searchable with the rest, read-only: bindings are still edited in
+the text config, and Copy binding gives the `keybind = ...` lines to paste
+there.
 
 ### Tab dragging
 

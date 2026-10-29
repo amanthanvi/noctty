@@ -32,6 +32,7 @@ const sys = @import("win32/sys.zig");
 const config_problems = @import("win32/config_problems.zig");
 const field_model = @import("win32_settings_fields.zig");
 const settings_reference = @import("win32_settings_reference.zig");
+const settings_keybinds = @import("win32_settings_keybinds.zig");
 const bench_trace = @import("win32/bench_trace.zig");
 const local_target = @import("win32/local_target.zig");
 const config_file_load = @import("../config/file_load.zig");
@@ -140,6 +141,7 @@ const ICON_BIG: usize = 1;
 const VK_RETURN: usize = 0x0D;
 const VK_ESCAPE: usize = 0x1B;
 const VK_DELETE: usize = 0x2E;
+const VK_F2: usize = 0x71;
 const BM_CLICK: UINT = 0x00F5;
 const DLGC_DEFPUSHBUTTON: LRESULT = 0x0010;
 const DLGC_UNDEFPUSHBUTTON: LRESULT = 0x0020;
@@ -403,9 +405,9 @@ pub const Section = enum(u32) {
             .shell => "The program a new tab starts, and how noctty works with your shell.",
             .privacy => "What programs may do with your clipboard, links, and notifications.",
             .updates => "Whether noctty checks for updates, and which releases it follows.",
-            .keybindings => "Key bindings are set in the config file. Open it here, or list the current bindings from a terminal.",
+            .keybindings => "Key bindings are set in the config file. Every binding in effect is listed below: Enter opens the config file, and Ctrl+C copies a binding's lines.",
             .advanced => "Open the config file in your text editor for settings that have no control here. The file Settings saves to, the problems found in the config, and changes you have not saved yet are listed below.",
-            .reference => "Every setting the config file can hold, with the value in effect and what it does. Enter opens the config file; Ctrl+C copies a setting's name.",
+            .reference => "Every setting the config file can hold, with the value in effect and what it does. Enter opens the config file, Ctrl+C copies a setting's name, and F2 edits one that has a control in Settings.",
         };
     }
 };
@@ -759,9 +761,10 @@ const StatusNote = enum {
     /// A reset could not make what it needs (memory for the copies, or a
     /// save in progress); the field keeps its value. Names it.
     reset_failed,
-    /// The All settings page copied a key's name. Names it.
+    /// The All settings page copied a key's name, or the Keybindings page a
+    /// binding. Names it.
     key_copied,
-    /// The clipboard would not take a key's name. Names it.
+    /// The clipboard would not take it. Names it.
     key_copy_failed,
 
     fn text(self: StatusNote) []const u8 {
@@ -2130,7 +2133,14 @@ pub const SettingsWindow = struct {
     /// Counts the builds of `reference_model`, so what is measured from it
     /// is measured again after one.
     reference_generation: u64 = 0,
-    reference_list: ReferenceList = .{},
+    reference_list: ReferenceList = .{ .kind = .reference },
+    /// The key bindings in effect, for the Keybindings page's list, built as
+    /// `reference_model` is (`ensureKeybindModel`), and that list.
+    keybind_model: settings_keybinds.Model = .{},
+    keybind_stale: bool = true,
+    keybind_generation: u64 = 0,
+    keybind_list: ReferenceList = .{ .kind = .keybindings },
+    /// One class for both lists, registered once per window object.
     reference_list_class_atom: ATOM = 0,
     /// How the user last reached a section button. The rail's owner-drawn
     /// buttons paint a focus ring only in `.keyboard` mode, the way native
@@ -2183,10 +2193,16 @@ pub const SettingsWindow = struct {
     search_found: [settings_clipped_control_count]bool = @splat(false),
     /// Which config keys the search found on the All settings page, by key.
     reference_found: [settings_reference.key_count]bool = @splat(false),
+    /// Which bindings it found on the Keybindings page, by row of
+    /// `keybind_model` (the window's allocator's; `forgetReference`), and how
+    /// many.
+    keybind_found: []bool = &.{},
+    keybind_found_count: u16 = 0,
     /// How many rows the search found on each page, and how many settings in
     /// all: every key it found on the All settings page (which lists every
-    /// key, and finds a key by its controls' words too) and the rows of the
-    /// other pages that are no key (their "Open config" buttons).
+    /// key, and finds a key by its controls' words too), the rows of the other
+    /// pages that are no key (their "Open config" buttons), and every binding
+    /// it found on the Keybindings page (each a `keybind` line of its own).
     search_counts: [section_count]u16 = @splat(0),
     search_total: usize = 0,
     /// The rows of the shown page the search found, in form order:
@@ -2452,11 +2468,11 @@ pub const SettingsWindow = struct {
                 return true;
             },
             VK_RETURN => {
-                // The All settings list: the selected row's action.
-                if (control == self.reference_list.hwnd) {
-                    if (!repeat) self.reference_list.invokeSelected();
+                // A page's list: the selected row's action.
+                for ([_]*ReferenceList{ &self.reference_list, &self.keybind_list }) |list| if (list.hwnd != null and control == list.hwnd) {
+                    if (!repeat) list.invokeSelected();
                     return true;
-                }
+                };
                 if (!in_search) return self.pressFocusedButton(repeat);
                 if (!repeat) self.goToFirstMatch();
                 return true;
@@ -4135,7 +4151,8 @@ pub const SettingsWindow = struct {
     /// counts it, since every key's row there is found by its fields' words as
     /// well (`reference_extra_search`), and with `@modified` by the same test
     /// (`referenceRowDiffers`). The other pages' rows that are no key (their
-    /// "Open config" buttons) count one each.
+    /// "Open config" buttons) count one each, and so does each binding the
+    /// Keybindings page's list finds: it is a `keybind` line of its own.
     fn findSearchRows(self: *SettingsWindow) void {
         self.search_counts = @splat(0);
         self.search_total = 0;
@@ -4158,10 +4175,14 @@ pub const SettingsWindow = struct {
                 self.search_counts[@intFromEnum(section)] += 1;
             }
         }
+        // Each binding on the Keybindings page counts once more: it is a
+        // `keybind` line of its own.
+        const bindings_found = self.findKeybindRows();
+        self.search_counts[@intFromEnum(Section.keybindings)] += bindings_found;
         self.ensureReferenceModel();
         if (!self.reference_model.built()) {
             self.reference_found = @splat(false);
-            self.search_total = form_keys.count() + not_keys;
+            self.search_total = form_keys.count() + not_keys + bindings_found;
             return;
         }
         var keys_found: u16 = 0;
@@ -4170,7 +4191,23 @@ pub const SettingsWindow = struct {
             if (found.*) keys_found += 1;
         }
         self.search_counts[@intFromEnum(Section.reference)] = keys_found;
-        self.search_total = keys_found + not_keys;
+        self.search_total = keys_found + not_keys + bindings_found;
+    }
+
+    /// Which bindings the search finds on the Keybindings page
+    /// (`keybind_found`), by their keys, actions and what the actions do; with
+    /// `@modified`, only the ones the defaults lack. How many
+    /// (`keybind_found_count`).
+    fn findKeybindRows(self: *SettingsWindow) u16 {
+        self.ensureKeybindModel();
+        var found_count: u16 = 0;
+        for (self.keybind_found, 0..) |*found, id| {
+            const row = &self.keybind_model.rows[id];
+            found.* = self.search_query.matchesText(row.search) and (!self.search_query.modified or row.differs);
+            if (found.*) found_count +|= 1;
+        }
+        self.keybind_found_count = found_count;
+        return found_count;
     }
 
     /// Whether the search finds config key `key` (an index into
@@ -4193,9 +4230,10 @@ pub const SettingsWindow = struct {
     }
 
     /// Whether the shown page has anything the search found: rows of its
-    /// form, or on the All settings page, keys.
+    /// form, or in its list, keys or bindings.
     fn pageFoundRows(self: *const SettingsWindow) bool {
         if (self.active_section == .reference) return self.reference_list.shown_count != 0;
+        if (self.active_section == .keybindings and self.keybind_list.shown_count != 0) return true;
         return self.search_item_count != 0;
     }
 
@@ -4218,7 +4256,7 @@ pub const SettingsWindow = struct {
         const started = bench_trace.queryPerformanceCounter();
         self.findSearchRows();
         if (self.search_query.active()) self.filterShownPage();
-        self.refreshReferenceShown(from_top);
+        if (self.sectionList(self.active_section)) |list| self.refreshListShown(list, from_top);
         if (from_top) self.content_scroll_y = 0;
         self.refreshNativeSectionText();
         self.syncSearchCounts();
@@ -4303,6 +4341,8 @@ pub const SettingsWindow = struct {
         // The All settings list is hidden when the search finds no key.
         const stays = if (focused == self.reference_list.hwnd)
             self.referenceListShows()
+        else if (focused == self.keybind_list.hwnd)
+            self.keybindListShows()
         else for (0..settings_clipped_control_count) |index| {
             if (focused == self.controlHwnd(index) or (index < form_field_count and focused == self.reset_buttons[index])) break active.controls[index];
         } else true;
@@ -4412,7 +4452,8 @@ pub const SettingsWindow = struct {
     /// page, or else on the first page (in rail order) that has one. A setting
     /// that cannot be changed (Windows does not support it) is passed over;
     /// with none to focus the page's rail button takes the focus. On the All
-    /// settings page the list takes it, on the first key found.
+    /// settings page the list takes it, on the first key found, and on
+    /// Keybindings it does when no row of the form was found.
     fn goToFirstMatch(self: *SettingsWindow) void {
         if (!self.search_query.active() or self.search_total == 0) return;
         // The field the focus lands on is spoken; the count would follow it.
@@ -4441,6 +4482,11 @@ pub const SettingsWindow = struct {
             _ = SetFocus(control);
             return;
         }
+        if (self.active_section == .keybindings and self.keybind_list.shown_count != 0) if (self.keybind_list.hwnd) |list| {
+            self.keybind_list.selectPosition(0);
+            _ = SetFocus(list);
+            return;
+        };
         if (self.sectionButton(self.active_section)) |button| _ = SetFocus(button);
     }
 
@@ -4636,9 +4682,9 @@ pub const SettingsWindow = struct {
     fn showSection(self: *SettingsWindow, next: Section, focus_follows: bool) void {
         const changed = self.active_section != next;
         self.materializeSection(next);
-        // The All settings list exists only while its page is shown: it goes
-        // before the next page's rows show, and comes, hidden, for the page.
-        if (changed and self.active_section == .reference) self.destroyReferenceList(next);
+        // A page's list exists only while its page is shown: it goes before
+        // the next page's rows show, and comes, hidden, for the page.
+        if (changed) if (self.sectionList(self.active_section)) |list| self.destroyList(list, next);
         self.active_section = next;
         // A search shows the found rows of the page. Found again: with
         // `@modified` what differs may have changed since it last ran.
@@ -4647,8 +4693,10 @@ pub const SettingsWindow = struct {
             self.filterShownPage();
             self.syncSearchCounts();
         }
-        self.refreshReferenceShown(false);
-        if (next == .reference) self.createReferenceList();
+        if (self.sectionList(next)) |list| {
+            self.refreshListShown(list, false);
+            self.createList(list);
+        }
         // A row of this page the search no longer finds may hold the focus.
         if (self.search_query.active() and !focus_follows) self.keepFocusShown();
         // The page's Reset buttons, made hidden before the layout places
@@ -4857,7 +4905,10 @@ pub const SettingsWindow = struct {
     /// so does a page with no row the search found, where it says so.
     fn showsHelp(self: *const SettingsWindow) bool {
         if (self.search_query.active() and !self.pageFoundRows()) return true;
-        return self.active_section == .keybindings or self.active_section == .advanced;
+        // Keybindings' help is about the page as a whole: a search that
+        // found its row or bindings shows those alone.
+        if (self.active_section == .keybindings) return !self.search_query.active();
+        return self.active_section == .advanced;
     }
 
     /// A static text holds 2047 UTF-16 units, so the page is built in as many
@@ -5266,7 +5317,9 @@ pub const SettingsWindow = struct {
     }
 
     fn ensureControlVisible(self: *SettingsWindow, control: HWND) void {
-        var is_form_control = false;
+        // The Keybindings page's list scrolls with the page's rows when the
+        // page is too short for it.
+        var is_form_control = self.keybind_list.hwnd != null and control == self.keybind_list.hwnd.?;
         for (self.formItems()) |item| {
             const reset = if (item.control_index < form_field_count) self.reset_buttons[item.control_index] else null;
             if (self.controlHwnd(item.control_index) == control or reset == control) {
@@ -5287,7 +5340,9 @@ pub const SettingsWindow = struct {
         if (top < 0) {
             self.setContentScroll(self.content_scroll_y + top);
         } else if (bottom > client_rect.bottom) {
-            self.setContentScroll(self.content_scroll_y + (bottom - client_rect.bottom));
+            // Its bottom into view, but never its top out of it (a list taller
+            // than the viewport).
+            self.setContentScroll(self.content_scroll_y + @min(bottom - client_rect.bottom, top));
         }
     }
 
@@ -5317,12 +5372,19 @@ pub const SettingsWindow = struct {
             setChildShown(control, active.controls[index] and self.differs_from_default[index]);
         };
         if (self.reference_list.hwnd) |list| setChildShown(list, self.referenceListShows());
+        if (self.keybind_list.hwnd) |list| setChildShown(list, self.keybindListShows());
     }
 
     /// Whether the All settings list is on screen: its page is shown, and a
     /// search found keys there (with none, the help text says so instead).
     fn referenceListShows(self: *const SettingsWindow) bool {
         return self.active_section == .reference and !(self.search_query.active() and self.reference_list.shown_count == 0);
+    }
+
+    /// Whether the Keybindings page's list is on screen: as the All settings
+    /// list, for bindings.
+    fn keybindListShows(self: *const SettingsWindow) bool {
+        return self.active_section == .keybindings and !(self.search_query.active() and self.keybind_list.shown_count == 0);
     }
 
     /// Parse a number field's text (scrollback, font size, opacity) into the
@@ -6115,6 +6177,14 @@ pub const SettingsWindow = struct {
     /// Open settings at the exact native control that owns `field`.
     pub fn openField(self: *SettingsWindow, field: SettingField) !void {
         try self.open();
+        self.showField(field);
+    }
+
+    /// Show `field`'s page with the focus on its control, in a window that is
+    /// open: the palette's jump after `open`, and the All settings page's Edit,
+    /// which is inside the window already and so leaves its placement (a
+    /// snapped window stays snapped) and a close prompt that is up alone.
+    fn showField(self: *SettingsWindow, field: SettingField) void {
         // A search that hides the field gives way to it (asked live, as
         // `revealControl` does), with no pass of its own: the page switch
         // below lays out and paints once.
@@ -6429,15 +6499,16 @@ pub const SettingsWindow = struct {
         // Establish native values before providers cache their initial state.
         self.refreshAllControls();
         self.initializeControlUiaProviders();
-        if (selected == .reference) {
-            self.ensureReferenceModel();
-            self.refreshReferenceShown(true);
-            self.createReferenceList();
+        if (self.sectionList(selected)) |list| {
+            self.ensureListModel(list);
+            self.refreshListShown(list, true);
+            self.createList(list);
         }
         stamps.mark(.create_refresh);
 
         layoutChildren(self);
         if (self.reference_list.hwnd) |list| setChildShown(list, self.referenceListShows());
+        if (self.keybind_list.hwnd) |list| setChildShown(list, self.keybindListShows());
         stamps.mark(.create_layout);
         _ = sys.ShowWindow(hwnd, SW_SHOWNORMAL);
         stamps.mark(.create_show);
@@ -6453,8 +6524,10 @@ pub const SettingsWindow = struct {
     /// so a section first shown late ends up as one made at open would.
     fn materializeSection(self: *SettingsWindow, section: Section) void {
         // The All settings page has no rows of its own: its list is made with
-        // the page (`createReferenceList`), from the model made here.
+        // the page (`createList`), from the model made here. The Keybindings
+        // page's list is too, besides its row.
         if (section == .reference) return self.ensureReferenceModel();
+        if (section == .keybindings) self.ensureKeybindModel();
         if (self.materialized.contains(section) or self.viewport == null) return;
         self.createSectionRows(section, false);
         const providers = self.canInitializeCustomUiaProviders();
@@ -6619,19 +6692,83 @@ pub const SettingsWindow = struct {
         self.reference_stale = false;
     }
 
-    /// The keys the All settings list shows: every key, or with a search the
-    /// ones it found (`reference_found`), in key order. The selection stays
-    /// with its key, hidden while the search hides it. `from_top` scrolls the
-    /// list back to its first row.
+    /// Build the Keybindings page's model when there is none, or the config
+    /// changed since it was built: every binding of `current`, each marked
+    /// by whether the defaults have it.
+    fn ensureKeybindModel(self: *SettingsWindow) void {
+        if (!self.keybind_stale) return;
+        const current = if (self.current) |*config| config else return;
+        const defaults: ?*const Config.Keybinds = if (self.defaults) |*config| &config.keybind else null;
+        const alloc = self.handle.alloc;
+        const list = &self.keybind_list;
+        // The selection is a row of the old model: it follows its binding.
+        const was_selected: ?[]u8 = if (list.selected) |id| (if (id < self.keybind_model.rows.len) alloc.dupe(u8, self.keybind_model.rows[id].entry) catch null else null) else null;
+        defer if (was_selected) |entry| alloc.free(entry);
+        list.selected = null;
+        list.forgetOpenText(alloc);
+        self.keybind_generation +%= 1;
+        // Tried once per config: a failure is not tried again on every keystroke.
+        self.keybind_stale = false;
+        self.keybind_model.build(alloc, &current.keybind, defaults) catch |err| {
+            std.log.warn("settings: the key binding list could not be built err={}", .{err});
+            self.keybind_model.deinit();
+        };
+        // The found rows were the old model's.
+        alloc.free(self.keybind_found);
+        self.keybind_found = &.{};
+        if (!self.keybind_model.built()) return;
+        self.keybind_found = alloc.alloc(bool, self.keybind_model.rows.len) catch &.{};
+        @memset(self.keybind_found, false);
+        if (was_selected) |entry| for (self.keybind_model.rows, 0..) |row, id| {
+            if (std.mem.eql(u8, row.entry, entry)) list.selected = @intCast(id);
+        };
+    }
+
+    /// The list for `section`, if the page has one.
+    fn sectionList(self: *SettingsWindow, section: Section) ?*ReferenceList {
+        return switch (section) {
+            .reference => &self.reference_list,
+            .keybindings => &self.keybind_list,
+            else => null,
+        };
+    }
+
+    fn ensureListModel(self: *SettingsWindow, list: *const ReferenceList) void {
+        switch (list.kind) {
+            .reference => self.ensureReferenceModel(),
+            .keybindings => self.ensureKeybindModel(),
+        }
+    }
+
+    /// The All settings list's rows (`refreshListShown`).
     fn refreshReferenceShown(self: *SettingsWindow, from_top: bool) void {
-        const list = &self.reference_list;
+        self.refreshListShown(&self.reference_list, from_top);
+    }
+
+    /// The rows `list` shows: every row of its model, or with a search the
+    /// ones it found (`reference_found`, `keybind_found`), in the model's
+    /// order. The selection stays with its row, hidden while the search hides
+    /// it. `from_top` scrolls the list back to its first row.
+    fn refreshListShown(self: *SettingsWindow, list: *ReferenceList, from_top: bool) void {
+        const alloc = self.handle.alloc;
+        const filtering = self.search_query.active();
+        const total: usize = if (!list.modelBuilt()) 0 else switch (list.kind) {
+            .reference => settings_reference.key_count,
+            .keybindings => self.keybind_model.rows.len,
+        };
+        if (list.shown.len < total) {
+            alloc.free(list.shown);
+            list.shown = alloc.alloc(u16, total) catch &.{};
+        }
         var count: usize = 0;
-        if (self.reference_model.built()) {
-            const filtering = self.search_query.active();
-            for (0..settings_reference.key_count) |key| if (!filtering or self.reference_found[key]) {
-                list.shown[count] = @intCast(key);
-                count += 1;
+        for (0..@min(total, list.shown.len)) |id| {
+            const found = switch (list.kind) {
+                .reference => self.reference_found[id],
+                .keybindings => id < self.keybind_found.len and self.keybind_found[id],
             };
+            if (filtering and !found) continue;
+            list.shown[count] = @intCast(id);
+            count += 1;
         }
         list.shown_count = count;
         if (from_top) list.scroll_y = 0;
@@ -6640,22 +6777,43 @@ pub const SettingsWindow = struct {
         if (list.provider) |provider| win32_uia.events.raiseStructureChanged(&provider.base, .children_invalidated, null);
     }
 
-    /// The config the All settings page shows changed (a reload, a save, a
-    /// discard, the window opening): it is built again when next needed, at
-    /// once while it is shown. A search keeps the keys it found until it runs
-    /// again, as the other pages keep their rows.
+    /// The config the lists show changed (a reload, a save, a discard, the
+    /// window opening): their models are built again when next needed, at
+    /// once for a list that is shown. A search keeps the rows it found until
+    /// it runs again, as the other pages keep theirs.
     fn referenceConfigChanged(self: *SettingsWindow) void {
         self.reference_stale = true;
-        if (self.hwnd == null or self.active_section != .reference) return;
-        self.ensureReferenceModel();
-        self.refreshReferenceShown(false);
+        self.keybind_stale = true;
+        if (self.hwnd == null) return;
+        const list = self.sectionList(self.active_section) orelse return;
+        self.ensureListModel(list);
+        // A rebuilt binding model has no rows found: its bindings are found
+        // again, and the page's count, help and layout follow. The rest of the
+        // search keeps what it found, as on any page.
+        if (list.kind == .keybindings and self.search_query.active()) {
+            const was = self.keybind_found_count;
+            const now = self.findKeybindRows();
+            const counts = &self.search_counts[@intFromEnum(Section.keybindings)];
+            counts.* = counts.* - was + now;
+            self.search_total = self.search_total - was + now;
+            self.refreshListShown(list, false);
+            self.syncSearchCounts();
+            self.refreshNativeSectionText();
+            // A list that held the focus and now shows nothing gives it to
+            // the search field, as a search does, before it leaves the screen.
+            self.keepFocusShown();
+            layoutChildren(self);
+            self.applySectionVisibility();
+            return;
+        }
+        self.refreshListShown(list, false);
     }
 
-    /// Make the All settings list, hidden, for its page: the layout places it
-    /// and `applySectionVisibility` shows it. One window, so the page costs
-    /// one window while it is shown and none otherwise.
-    fn createReferenceList(self: *SettingsWindow) void {
-        if (self.reference_list.hwnd != null) return;
+    /// Make `list`, hidden, for its page: the layout places it and
+    /// `applySectionVisibility` shows it. One window, so the page costs one
+    /// window while it is shown and none otherwise.
+    fn createList(self: *SettingsWindow, list_state: *ReferenceList) void {
+        if (list_state.hwnd != null) return;
         const viewport = self.viewport orelse return;
         if (self.reference_list_class_atom == 0) {
             const wc: WNDCLASSEXW = .{
@@ -6681,69 +6839,98 @@ pub const SettingsWindow = struct {
         const list = sys.CreateWindowExW(
             0,
             reference_list_class_name,
-            std.unicode.utf8ToUtf16LeStringLiteral("All settings"),
+            switch (list_state.kind) {
+                .reference => std.unicode.utf8ToUtf16LeStringLiteral("All settings"),
+                .keybindings => std.unicode.utf8ToUtf16LeStringLiteral("Key bindings"),
+            },
             WS_CHILD | WS_TABSTOP | WS_GROUP | WS_VSCROLL,
             0,
             0,
             1,
             1,
             viewport,
-            @ptrFromInt(REFERENCE_LIST),
+            @ptrFromInt(switch (list_state.kind) {
+                .reference => REFERENCE_LIST,
+                .keybindings => KEYBIND_LIST,
+            }),
             self.handle.hinstance,
-            self,
+            list_state,
         ) orelse {
-            std.log.warn("settings: the All settings list could not be made", .{});
+            std.log.warn("settings: a settings list could not be made kind={t}", .{list_state.kind});
             return;
         };
         // Its scroll bar takes the theme; it draws its own text.
-        self.reference_list.hwnd = self.finishChild(list, null, .control);
-        self.reference_list.metrics = null;
-        self.reference_list.wheel_remainder = 0;
+        list_state.hwnd = self.finishChild(list, null, .control);
+        list_state.metrics = null;
+        list_state.wheel_remainder = 0;
         if (self.canInitializeCustomUiaProviders()) {
-            self.reference_list.provider = win32_uia.PaletteListProvider.create(
+            list_state.provider = win32_uia.PaletteListProvider.create(
                 std.heap.page_allocator,
                 list,
-                referenceListUiaState(self),
+                referenceListUiaState(list_state),
             ) catch |err| blk: {
-                std.log.warn("settings: All settings list UIA provider unavailable err={}", .{err});
+                std.log.warn("settings: settings list UIA provider unavailable kind={t} err={}", .{ list_state.kind, err });
                 break :blk null;
             };
         }
-        self.reference_list.contentChanged();
+        list_state.contentChanged();
     }
 
-    /// The All settings page goes: its list with it. A list that holds the
-    /// focus gives it to `next`'s rail button first, which takes it ahead of
-    /// the switch (`focusRailButtonAhead`), as the switch's own focus moves do.
-    fn destroyReferenceList(self: *SettingsWindow, next: Section) void {
-        const list = self.reference_list.hwnd orelse return;
+    /// `list`'s page goes: the list with it. A list that holds the focus
+    /// gives it to `next`'s rail button first, which takes it ahead of the
+    /// switch (`focusRailButtonAhead`), as the switch's own focus moves do.
+    fn destroyList(self: *SettingsWindow, list_state: *ReferenceList, next: Section) void {
+        const list = list_state.hwnd orelse return;
         if (GetFocus() == list) self.focusRailButtonAhead(next);
-        if (self.reference_list.provider) |provider| provider.raiseTeardown();
+        if (list_state.provider) |provider| provider.raiseTeardown();
         _ = sys.DestroyWindow(list);
     }
 
-    /// The list window is gone (`WM_NCDESTROY`): its provider is let go, and
+    /// A list window is gone (`WM_NCDESTROY`): its provider is let go, and
     /// what was drawn from the model with it.
-    fn referenceListDestroyed(self: *SettingsWindow) void {
-        self.reference_list.hwnd = null;
-        self.reference_list.metrics = null;
-        if (self.reference_list.provider) |provider| {
-            self.reference_list.provider = null;
+    fn listDestroyed(self: *SettingsWindow, list: *ReferenceList) void {
+        list.hwnd = null;
+        list.metrics = null;
+        if (list.provider) |provider| {
+            list.provider = null;
             provider.detach();
             self.deferProviderDisconnect(@ptrCast(provider), referenceListDisconnect, referenceListRelease);
         }
     }
 
-    /// Everything the All settings page holds, for a window that is gone: the
-    /// model is built again from the config the next window opens with.
+    /// Everything the All settings and Keybindings pages hold, for a window
+    /// that is gone: the models are built again from the config the next
+    /// window opens with.
     fn forgetReference(self: *SettingsWindow) void {
-        self.reference_list.forgetOpenText(self.handle.alloc);
-        self.reference_list.shown_count = 0;
-        self.reference_list.scroll_y = 0;
-        self.reference_list.metrics = null;
+        const alloc = self.handle.alloc;
+        for ([_]*ReferenceList{ &self.reference_list, &self.keybind_list }) |list| {
+            list.forgetOpenText(alloc);
+            list.forgetRows(alloc);
+        }
         self.reference_found = @splat(false);
         self.reference_model.deinit();
         self.reference_stale = true;
+        alloc.free(self.keybind_found);
+        self.keybind_found = &.{};
+        self.keybind_found_count = 0;
+        self.keybind_model.deinit();
+        self.keybind_stale = true;
+    }
+
+    /// Copy binding `id` (a row of `keybind_model`) as config lines through
+    /// the app's clipboard, and say so on the status line.
+    fn copyKeybind(self: *SettingsWindow, id: usize) void {
+        const copy = self.handle.copyText orelse return;
+        if (id >= self.keybind_model.rows.len) return;
+        const row = &self.keybind_model.rows[id];
+        const copied = copy(self.handle.ctx, row.entry);
+        const note: StatusNote = if (copied) .key_copied else .key_copy_failed;
+        self.freeNoteText();
+        self.status_note = note;
+        var detail_buf: [256]u8 = undefined;
+        const detail = std.fmt.bufPrint(&detail_buf, "the binding for {s}", .{row.trigger}) catch "the binding";
+        self.note_text = note.textWithDetail(self.handle.alloc, detail) catch null;
+        self.setStatus(self.noteText());
     }
 
     /// Copy key `key`'s name (an index into `settings_reference.keys`) through the
@@ -7261,6 +7448,9 @@ const settings_control_height: i32 = settings_metrics.space_9;
 const settings_combo_item_height: i32 = settings_metrics.space_9;
 const settings_field_group_gap: i32 = settings_metrics.space_5;
 const settings_field_row_pitch: i32 = 64;
+/// The least height the Keybindings page gives its list, about four bindings
+/// with one open: below it the page scrolls to the list.
+const settings_keybind_list_min_height: i32 = 240;
 /// What one wheel notch scrolls at the default of three lines per notch.
 const settings_wheel_notch_px: i32 = 64;
 const settings_column_gap: i32 = settings_metrics.space_8;
@@ -10214,7 +10404,7 @@ fn layoutChildren(self: *SettingsWindow) void {
     // The form, in viewport coordinates.
     const form_items = self.formItems();
     var item_rects: [settings_max_form_items]SettingsFieldRects = undefined;
-    var extent_rects: [settings_max_form_items * 2 + 1]RECT = undefined;
+    var extent_rects: [settings_max_form_items * 2 + 2]RECT = undefined;
     var extent_count: usize = 0;
     settingsFormItemRects(form_items, form_width, self.dpi, item_rects[0..form_items.len]);
     for (form_items, 0..) |item, index| {
@@ -10236,6 +10426,23 @@ fn layoutChildren(self: *SettingsWindow) void {
         if (help_height > 0) {
             help_rect = .{ .left = 0, .top = help_top, .right = help_width, .bottom = help_top + help_height };
             extent_rects[extent_count] = help_rect.?;
+            extent_count += 1;
+        }
+    }
+    // The Keybindings page's list: below the page's row and help, to the
+    // viewport's bottom, as wide as the column, and scrolling itself, so the
+    // page has nothing more to scroll. Where that would leave it shorter than
+    // a few rows it keeps that height, and the page scrolls to it
+    // (`ensureControlVisible` when it takes the focus).
+    var keybind_rect: ?RECT = null;
+    if (self.keybind_list.hwnd != null and self.keybindListShows()) {
+        var top: i32 = 0;
+        for (extent_rects[0..extent_count]) |extent| top = @max(top, extent.bottom);
+        if (top > 0) top += self.px(settings_field_row_pitch) - self.px(settings_control_height);
+        const min_height = self.px(settings_keybind_list_min_height);
+        keybind_rect = .{ .left = 0, .top = top, .right = column_width, .bottom = top + @max(min_height, viewport_height - top) };
+        if (viewport_height - top < min_height) {
+            extent_rects[extent_count] = keybind_rect.?;
             extent_count += 1;
         }
     }
@@ -10267,6 +10474,7 @@ fn layoutChildren(self: *SettingsWindow) void {
     if (self.reference_list.hwnd) |list| if (self.referenceListShows()) {
         form.add(list, gutter, 0, column_width, viewport_height);
     };
+    if (keybind_rect) |placed| form.add(self.keybind_list.hwnd.?, gutter + placed.left, placed.top - scroll_y, placed.right - placed.left, placed.bottom - placed.top);
 
     const row_top = action_bar_top + action_bar.actions_top;
     const action_gap = self.px(settings_action_gap);
@@ -10647,6 +10855,9 @@ const dialog_test = struct {
         reload_then_fail: bool = false,
         /// What the window's High Contrast probe answers.
         high_contrast: bool = false,
+        /// A save writes this config file the way the App's does
+        /// (`persistSettings`), patching only the keys edited.
+        save_path: ?[]const u8 = null,
         /// What the All settings page's "Copy name" handed the App last, and
         /// how many times: a recorder, so no test reaches the clipboard.
         copied: [128]u8 = undefined,
@@ -10793,9 +11004,13 @@ const dialog_test = struct {
             return &self.config;
         }
 
-        fn saveAndReload(ctx: *anyopaque, _: *const Config, _: *const Config) SaveError!void {
+        fn saveAndReload(ctx: *anyopaque, pending: *const Config, original: *const Config) SaveError!void {
             const self: *Fixture = @ptrCast(@alignCast(ctx));
             self.saved += 1;
+            if (self.save_path) |path| {
+                const app = @import("win32.zig");
+                try app.persistSettings(std.testing.allocator, path, pending, app.settingsUserEditedKeys(original, pending), null);
+            }
             if (self.reload_then_fail) {
                 // The App's reload during a save shows no preview.
                 self.config.@"background-opacity" = 1;
@@ -11511,9 +11726,10 @@ test "settings Tab visits the fields in form order and Save last" {
                         field_count += 1;
                     };
                 }
-                // The All settings page's one tab stop is its list.
-                if (section == .reference) {
-                    fields[field_count] = settings.reference_list.hwnd.?;
+                // A page's list comes after its rows: the All settings page's
+                // one tab stop, the last of the Keybindings page's.
+                if (settings.sectionList(section)) |list| {
+                    fields[field_count] = list.hwnd.?;
                     field_count += 1;
                 }
                 const first = fields[0];
@@ -11727,7 +11943,7 @@ test "settings @modified on the All settings page finds a key a UTF-16 or BOM co
         current.@"click-repeat-interval" = 500;
         var settings: SettingsWindow = .{ .handle = handle, .current = current };
         defer settings.current.?.deinit();
-        defer settings.reference_model.deinit();
+        defer settings.forgetReference();
         settings.search_query = SearchQuery.parse("@modified");
         settings.findSearchRows();
         const key = settings_reference.index(.@"click-repeat-interval");
@@ -11970,7 +12186,7 @@ fn longestOwnWord(doc: []const u8, name: []const u8) ?[]const u8 {
 test "settings every key is found on the All settings page by its name and by a word of its description" {
     var settings: SettingsWindow = .{ .handle = modelOnlyHandle(), .current = try Config.default(std.testing.allocator) };
     defer if (settings.current) |*config| config.deinit();
-    defer settings.reference_model.deinit();
+    defer settings.forgetReference();
     settings.ensureReferenceModel();
     try std.testing.expect(settings.reference_model.built());
     for (settings_reference.keys, 0..) |key, index| {
@@ -14997,10 +15213,10 @@ test "settings a Reset button stays right after its control whatever order the s
                         buttons += 1;
                     };
                 };
-                // The All settings list, made with its page, comes last.
-                if (shown == .reference) {
+                // A page's list, made with its page, comes last.
+                if (settings.sectionList(shown)) |list| {
                     window = try nextPastSpares(settings, window.?, &spares);
-                    try std.testing.expectEqual(settings.reference_list.hwnd.?, window.?);
+                    try std.testing.expectEqual(list.hwnd.?, window.?);
                 }
                 try std.testing.expectEqual(@as(?HWND, null), try nextPastSpares(settings, window.?, &spares));
                 try std.testing.expectEqual(settings.reset_spare_count, spares);
@@ -16830,37 +17046,65 @@ fn recoverOwner(hwnd: HWND) ?*SettingsWindow {
     return @ptrFromInt(@as(usize, @intCast(raw)));
 }
 
-/// Control id of the All settings list (`ReferenceList`).
+/// Control ids of the All settings list and the Keybindings page's list
+/// (`ReferenceList`, one class for both).
 const REFERENCE_LIST: usize = 310;
+const KEYBIND_LIST: usize = 311;
 const reference_list_class_name = std.unicode.utf8ToUtf16LeStringLiteral("noctty.win32.settings.list");
-/// The commands of the All settings list's context menu.
+/// The commands of a list's context menu.
 const reference_menu_copy: usize = 1;
 const reference_menu_open: usize = 2;
-/// What the list's UIA help text says: the keys it takes.
+const reference_menu_edit: usize = 3;
+/// What each list's UIA help text says: the keys it takes.
 const reference_list_help = "Up and Down move through the settings; the selected one shows its whole description and where the config file sets it. " ++
-    "Enter opens the config file, Ctrl+C copies the setting's name, and Shift+F10 offers both.";
-const reference_copy_label = "Copy name (Ctrl+C)";
+    "Enter opens the config file, Ctrl+C copies the setting's name, F2 edits a setting that has a control in Settings, and Shift+F10 offers these.";
+const keybind_list_help = "Up and Down move through the key bindings in effect; the selected one shows what its action does. " ++
+    "Enter opens the config file, where bindings are changed, Ctrl+C copies the binding as config lines, and Shift+F10 offers both.";
 const reference_open_label = "Open config file (Enter)";
+/// What the open row of a key with no Settings control says.
+const reference_read_only_note = "Settings has no control for this setting: change it in the config file.";
+/// Where an open binding comes from.
+const keybind_default_note = "One of noctty's default bindings.";
+const keybind_set_note = "Not one of the default bindings: the config file sets it.";
+
+/// Which list a `ReferenceList` is: the All settings page's keys, or the
+/// Keybindings page's bindings.
+const ListKind = enum {
+    reference,
+    keybindings,
+
+    fn copyLabel(self: ListKind) []const u8 {
+        return switch (self) {
+            .reference => "Copy name (Ctrl+C)",
+            .keybindings => "Copy binding (Ctrl+C)",
+        };
+    }
+};
 const CS_DBLCLKS: u32 = 0x0008;
 const WM_LBUTTONDBLCLK: UINT = 0x0203;
 const SIF_DISABLENOSCROLL: u32 = 0x0008;
 
-/// The "All settings" page's list: one owner-drawn window for every config
-/// key, made when the page is shown and destroyed when it goes, so it costs
-/// one window, and only while it is on screen. Its rows are the model's
-/// (`SettingsWindow.reference_model`), filtered by the search. A row shows the
-/// key, its value in effect and the first sentence of what it does, or what
-/// Windows does with it; the selected row opens to its whole description,
-/// the lines of the config file that set it, and its two actions. UIA sees a
-/// List of ListItems (`win32_uia.PaletteListProvider`), the focus on the
-/// selected one.
+/// The "All settings" page's list, and the Keybindings page's: one
+/// owner-drawn window each, made when its page is shown and destroyed when it
+/// goes, so a list costs one window, and only while it is on screen. The rows
+/// are a model's, filtered by the search: on All settings every config key
+/// (`SettingsWindow.reference_model`), a row showing the key, its value in
+/// effect and the first sentence of what it does, or what Windows does with
+/// it; on Keybindings every binding in effect (`SettingsWindow.keybind_model`),
+/// its keys, its action and what that does. The selected row opens to the
+/// whole description, where it comes from, and its actions. UIA sees a List of
+/// ListItems (`win32_uia.PaletteListProvider`), the focus on the selected one.
 const ReferenceList = struct {
+    kind: ListKind,
     hwnd: ?HWND = null,
     provider: ?*win32_uia.PaletteListProvider = null,
-    /// The rows shown, as key indexes (`settings_reference.keys`), and how many.
-    shown: [settings_reference.key_count]u16 = undefined,
+    /// The rows shown, as row ids (on All settings a key's index in
+    /// `settings_reference.keys`, on Keybindings an index into the model's
+    /// rows), and how many. The buffer has room for every row of the model,
+    /// and is the window's allocator's (`forgetRows`).
+    shown: []u16 = &.{},
     shown_count: usize = 0,
-    /// The selected key, kept while a search hides it.
+    /// The selected row's id, kept while a search hides it.
     selected: ?u16 = null,
     scroll_y: i32 = 0,
     /// Wheel movement not yet turned into whole pixels (`wheelScrollPixels`).
@@ -16900,18 +17144,26 @@ const ReferenceList = struct {
         /// The open row's description and location.
         body: i32,
         location: i32,
-        /// The two actions' widths, and the room between them.
+        /// The actions' widths (zero for one the row does not have), and the
+        /// room between them.
         copy_width: i32,
         open_width: i32,
+        edit_width: i32,
         action_gap: i32,
     };
 
     fn owner(self: *ReferenceList) *SettingsWindow {
-        return @fieldParentPtr("reference_list", self);
+        return switch (self.kind) {
+            .reference => @fieldParentPtr("reference_list", self),
+            .keybindings => @fieldParentPtr("keybind_list", self),
+        };
     }
 
     fn ownerConst(self: *const ReferenceList) *const SettingsWindow {
-        return @fieldParentPtr("reference_list", self);
+        return switch (self.kind) {
+            .reference => @fieldParentPtr("reference_list", self),
+            .keybindings => @fieldParentPtr("keybind_list", self),
+        };
     }
 
     fn forgetOpenText(self: *ReferenceList, alloc: std.mem.Allocator) void {
@@ -16921,6 +17173,107 @@ const ReferenceList = struct {
         self.open_location = null;
         self.open_key = null;
         self.metrics = null;
+    }
+
+    /// Let go of the rows shown and the buffer that holds them.
+    fn forgetRows(self: *ReferenceList, alloc: std.mem.Allocator) void {
+        alloc.free(self.shown);
+        self.shown = &.{};
+        self.shown_count = 0;
+        self.scroll_y = 0;
+        self.metrics = null;
+    }
+
+    /// Whether the list's model is built.
+    fn modelBuilt(self: *const ReferenceList) bool {
+        const settings = self.ownerConst();
+        return switch (self.kind) {
+            .reference => settings.reference_model.built(),
+            .keybindings => settings.keybind_model.built(),
+        };
+    }
+
+    /// Counts the builds of the list's model.
+    fn generation(self: *const ReferenceList) u64 {
+        const settings = self.ownerConst();
+        return switch (self.kind) {
+            .reference => settings.reference_generation,
+            .keybindings => settings.keybind_generation,
+        };
+    }
+
+    /// The field that edits the row's key from its page, when it has one: the
+    /// first of the key's Settings controls (only All settings has any). A
+    /// setting Windows does not support has a control, disabled, and no Edit.
+    fn editField(self: *const ReferenceList, id: u16) ?SettingField {
+        if (self.kind != .reference) return null;
+        const rows = reference_form_rows[id];
+        if (rows.len == 0) return null;
+        const row = field_model.form_fields[rows[0]];
+        if (row.descriptor.support == .unsupported_on_windows) return null;
+        return row.field;
+    }
+
+    /// The row's first line: the key's name and its value in effect, or the
+    /// binding's keys and its action.
+    fn writeTitle(self: *const ReferenceList, id: u16, name: *std.Io.Writer, value: *std.Io.Writer) void {
+        const settings = self.ownerConst();
+        switch (self.kind) {
+            .reference => {
+                name.writeAll(@tagName(settings_reference.keys[id])) catch {};
+                settings_reference.writeValue(value, &settings.reference_model.rows[id]) catch {};
+                if (settings.referenceKeyDirty(id)) value.writeAll(" (changed here, not saved yet)") catch {};
+            },
+            .keybindings => {
+                const row = &settings.keybind_model.rows[id];
+                name.writeAll(row.trigger) catch {};
+                value.writeAll(row.action) catch {};
+            },
+        }
+    }
+
+    /// The row's second line: what Windows does with the key or how its
+    /// description starts, or how the action's does.
+    fn summaryLine(self: *const ReferenceList, id: u16) []const u8 {
+        const settings = self.ownerConst();
+        return switch (self.kind) {
+            .reference => settings_reference.notes[id] orelse settings.reference_model.rows[id].summary,
+            .keybindings => settings.keybind_model.rows[id].summary,
+        };
+    }
+
+    /// Whether the row has no value to show (drawn in the secondary colour).
+    fn emptyValue(self: *const ReferenceList, id: u16) bool {
+        if (self.kind != .reference) return false;
+        const row = &self.ownerConst().reference_model.rows[id];
+        return row.value.len == 0 and row.more == 0;
+    }
+
+    /// The open row's text: its description, and where it comes from (or,
+    /// for a key Settings has no control for, that it is changed in the config
+    /// file), in `body` and `location`.
+    fn writeOpenText(self: *const ReferenceList, id: u16, body: *std.Io.Writer, location: *std.Io.Writer) !void {
+        const settings = self.ownerConst();
+        switch (self.kind) {
+            .reference => {
+                const row = &settings.reference_model.rows[id];
+                if (settings_reference.notes[id]) |note| try body.print("{s}\n\n", .{note});
+                try body.writeAll(row.doc);
+                try settings.reference_model.writeLocation(location, row);
+                // One with a disabled control says why in its Windows note.
+                if (reference_form_rows[id].len == 0) {
+                    if (location.end != 0) try location.writeAll("\n");
+                    try location.writeAll(reference_read_only_note);
+                }
+            },
+            .keybindings => {
+                const row = &settings.keybind_model.rows[id];
+                try body.writeAll(row.doc);
+                // Without the defaults to compare with, where it comes from is
+                // not known.
+                if (settings.keybind_model.compared) try location.writeAll(if (row.differs) keybind_set_note else keybind_default_note);
+            },
+        }
     }
 
     /// Where the selected key is among the rows shown, if it is shown.
@@ -16956,13 +17309,13 @@ const ReferenceList = struct {
         const open_key: ?u16 = if (position != null) self.selected else null;
         if (self.metrics) |metrics| {
             if (metrics.dpi == settings.dpi and metrics.width == client.right and metrics.font_builds == settings.font_builds and
-                metrics.generation == settings.reference_generation and metrics.open_key == open_key) return metrics;
+                metrics.generation == self.generation() and metrics.open_key == open_key) return metrics;
         }
         var metrics: Metrics = .{
             .dpi = settings.dpi,
             .width = client.right,
             .font_builds = settings.font_builds,
-            .generation = settings.reference_generation,
+            .generation = self.generation(),
             .open_key = open_key,
             .pad_x = settings.px(settings_metrics.space_5),
             .pad_y = settings.px(settings_metrics.space_4),
@@ -16976,6 +17329,7 @@ const ReferenceList = struct {
             .location = 0,
             .copy_width = 0,
             .open_width = 0,
+            .edit_width = 0,
             .action_gap = settings.px(settings_metrics.space_8),
         };
         metrics.row = 2 * metrics.pad_y + metrics.title + metrics.gap + metrics.line;
@@ -16985,7 +17339,9 @@ const ReferenceList = struct {
             const width = textWidth(metrics);
             if (self.open_body) |text| metrics.body = measureWrapped(hwnd, settings.ui_font, text, width);
             if (self.open_location) |text| metrics.location = measureWrapped(hwnd, settings.secondary_font, text, width);
-            if (settings.handle.copyText != null) metrics.copy_width = measureLine(hwnd, settings.secondary_font, std.unicode.utf8ToUtf16LeStringLiteral(reference_copy_label));
+            var label_w: [64]u16 = undefined;
+            if (self.editLabel(key, &label_w)) |label| metrics.edit_width = measureLine(hwnd, settings.secondary_font, label);
+            if (settings.handle.copyText != null) metrics.copy_width = measureLine(hwnd, settings.secondary_font, utf8ToW(&label_w, self.kind.copyLabel()));
             metrics.open_width = measureLine(hwnd, settings.secondary_font, std.unicode.utf8ToUtf16LeStringLiteral(reference_open_label));
             metrics.open = 2 * metrics.pad_y + metrics.title + metrics.gap + metrics.body +
                 (if (metrics.location > 0) metrics.gap + metrics.location else 0) +
@@ -17001,31 +17357,34 @@ const ReferenceList = struct {
         return @max(1, metrics.width - 2 * metrics.pad_x - metrics.bar);
     }
 
-    /// The open row's text for `key`: what Windows does with it, its
-    /// description, and where the config file sets it.
+    /// The open row's text for row `key` (`writeOpenText`), as it is drawn.
     fn ensureOpenText(self: *ReferenceList, key: u16) void {
         const settings = self.owner();
-        if (self.open_key == key and self.open_generation == settings.reference_generation) return;
+        if (self.open_key == key and self.open_generation == self.generation()) return;
         const alloc = settings.handle.alloc;
         if (self.open_body) |text| alloc.free(text);
         if (self.open_location) |text| alloc.free(text);
         self.open_body = null;
         self.open_location = null;
         self.open_key = key;
-        self.open_generation = settings.reference_generation;
-        if (!settings.reference_model.built()) return;
-        const row = &settings.reference_model.rows[key];
-        var text: std.Io.Writer.Allocating = .init(alloc);
-        defer text.deinit();
-        if (settings_reference.notes[key]) |note| {
-            text.writer.writeAll(note) catch return;
-            text.writer.writeAll("\n\n") catch return;
-        }
-        text.writer.writeAll(row.doc) catch return;
-        self.open_body = std.unicode.utf8ToUtf16LeAllocZ(alloc, text.written()) catch null;
-        text.clearRetainingCapacity();
-        settings.reference_model.writeLocation(&text.writer, row) catch return;
-        if (text.written().len != 0) self.open_location = std.unicode.utf8ToUtf16LeAllocZ(alloc, text.written()) catch null;
+        self.open_generation = self.generation();
+        if (!self.modelBuilt()) return;
+        var body: std.Io.Writer.Allocating = .init(alloc);
+        defer body.deinit();
+        var location: std.Io.Writer.Allocating = .init(alloc);
+        defer location.deinit();
+        self.writeOpenText(key, &body.writer, &location.writer) catch return;
+        self.open_body = std.unicode.utf8ToUtf16LeAllocZ(alloc, body.written()) catch null;
+        if (location.written().len != 0) self.open_location = std.unicode.utf8ToUtf16LeAllocZ(alloc, location.written()) catch null;
+    }
+
+    /// "Edit on <page> (F2)" for a row whose key has a Settings control, in
+    /// `buf`.
+    fn editLabel(self: *const ReferenceList, id: u16, buf: []u16) ?[*:0]const u16 {
+        const field = self.editField(id) orelse return null;
+        var text: [64]u8 = undefined;
+        const label = std.fmt.bufPrint(&text, "Edit on {s} (F2)", .{self.ownerConst().settingDestination(field).section.headerText()}) catch return null;
+        return utf8ToW(buf, label);
     }
 
     fn rowHeight(metrics: Metrics, selected_position: ?usize, position: usize) i32 {
@@ -17153,32 +17512,53 @@ const ReferenceList = struct {
         settings.handle.openInEditor(settings.handle.ctx);
     }
 
+    /// Ctrl+C: on All settings the key's name, on Keybindings the binding as
+    /// config lines.
     fn copySelected(self: *ReferenceList) void {
         if (self.selectedPosition() == null) return;
-        self.owner().copyReferenceKey(self.selected.?);
+        const settings = self.owner();
+        switch (self.kind) {
+            .reference => settings.copyReferenceKey(self.selected.?),
+            .keybindings => settings.copyKeybind(self.selected.?),
+        }
     }
 
-    /// The open row's actions, in client coordinates: Copy name (when the app
-    /// can copy) and Open config file.
-    fn actionRects(self: *ReferenceList, metrics: Metrics) struct { copy: ?RECT, open: ?RECT } {
-        const position = self.selectedPosition() orelse return .{ .copy = null, .open = null };
+    /// F2: edit the selected key on its control's page (`openField`), when
+    /// Settings has a control for it. True when it did.
+    fn editSelected(self: *ReferenceList) bool {
+        if (self.selectedPosition() == null) return false;
+        const field = self.editField(self.selected.?) orelse return false;
+        // The switch destroys this list, whose window may be the one handling
+        // the key or click: nothing of it is used after.
+        self.owner().showField(field);
+        return true;
+    }
+
+    /// The open row's actions, in client coordinates, left to right: Edit on
+    /// its page (a key Settings has a control for), Copy (when the app can
+    /// copy) and Open config file.
+    fn actionRects(self: *ReferenceList, metrics: Metrics) struct { edit: ?RECT, copy: ?RECT, open: ?RECT } {
+        const position = self.selectedPosition() orelse return .{ .edit = null, .copy = null, .open = null };
         const top = rowTop(metrics, position, position) - self.scroll_y;
         const y = top + 2 * metrics.pad_y + metrics.title + metrics.gap + metrics.body +
             (if (metrics.location > 0) metrics.gap + metrics.location else 0) + metrics.gap;
-        const x = metrics.pad_x + metrics.bar;
+        var x = metrics.pad_x + metrics.bar;
+        const edit: ?RECT = if (metrics.edit_width > 0) .{ .left = x, .top = y, .right = x + metrics.edit_width, .bottom = y + metrics.line } else null;
+        if (edit) |rect| x = rect.right + metrics.action_gap;
         const copy: ?RECT = if (metrics.copy_width > 0) .{ .left = x, .top = y, .right = x + metrics.copy_width, .bottom = y + metrics.line } else null;
-        const open_left = if (copy) |rect| rect.right + metrics.action_gap else x;
-        return .{ .copy = copy, .open = .{ .left = open_left, .top = y, .right = open_left + metrics.open_width, .bottom = y + metrics.line } };
+        if (copy) |rect| x = rect.right + metrics.action_gap;
+        return .{ .edit = edit, .copy = copy, .open = .{ .left = x, .top = y, .right = x + metrics.open_width, .bottom = y + metrics.line } };
     }
 
     /// What is under a point of the list.
-    const Hit = union(enum) { none, copy, open, row: usize };
+    const Hit = union(enum) { none, edit, copy, open, row: usize };
 
     /// What `point` (client coordinates) is on: an action of the open row,
     /// or a row.
     fn hitTest(self: *ReferenceList, point: POINT) Hit {
         const metrics = self.ensureMetrics() orelse return .none;
         const actions = self.actionRects(metrics);
+        if (actions.edit) |rect| if (rectContains(rect, point)) return .edit;
         if (actions.copy) |rect| if (rectContains(rect, point)) return .copy;
         if (actions.open) |rect| if (rectContains(rect, point)) return .open;
         const position = self.positionAt(metrics, point.y + self.scroll_y) orelse return .none;
@@ -17205,13 +17585,17 @@ const ReferenceList = struct {
         };
         switch (hit) {
             .none => {},
+            .edit => if (kind == .left) {
+                self.pressed = .none;
+                _ = self.editSelected();
+            },
             .copy => if (kind == .left) self.copySelected(),
             .open => if (kind == .left) self.invokeSelected(),
             .row => |position| self.selectPosition(position),
         }
     }
 
-    /// The selected row's menu: Copy name and Open config file. From the
+    /// The selected row's menu: its actions (`actionRects`). From the
     /// keyboard it opens below the row's first line, the row scrolled into
     /// view first; from the mouse, where it was clicked, and only on a row
     /// (the press selected it).
@@ -17235,14 +17619,23 @@ const ReferenceList = struct {
         }
         const menu = sys.CreatePopupMenu() orelse return;
         defer _ = sys.DestroyMenu(menu);
-        if (settings.handle.copyText != null)
-            _ = sys.AppendMenuW(menu, MF_STRING, reference_menu_copy, std.unicode.utf8ToUtf16LeStringLiteral("&Copy name\tCtrl+C"));
+        if (self.editField(self.selected.?)) |field| {
+            var item: [64]u8 = undefined;
+            var item_w: [64]u16 = undefined;
+            const text = std.fmt.bufPrint(&item, "&Edit on {s}\tF2", .{settings.settingDestination(field).section.headerText()}) catch "&Edit\tF2";
+            _ = sys.AppendMenuW(menu, MF_STRING, reference_menu_edit, utf8ToW(&item_w, text));
+        }
+        if (settings.handle.copyText != null) _ = sys.AppendMenuW(menu, MF_STRING, reference_menu_copy, switch (self.kind) {
+            .reference => std.unicode.utf8ToUtf16LeStringLiteral("&Copy name\tCtrl+C"),
+            .keybindings => std.unicode.utf8ToUtf16LeStringLiteral("&Copy binding\tCtrl+C"),
+        });
         _ = sys.AppendMenuW(menu, MF_STRING, reference_menu_open, std.unicode.utf8ToUtf16LeStringLiteral("&Open config file\tEnter"));
         const picked: usize = if (settings.context_menu_pick) |pick|
             pick(menu)
         else
             @intCast(@max(0, sys.TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, at.x, at.y, 0, frame, null)));
         switch (picked) {
+            reference_menu_edit => _ = self.editSelected(),
             reference_menu_copy => self.copySelected(),
             reference_menu_open => self.invokeSelected(),
             else => {},
@@ -17262,6 +17655,10 @@ const ReferenceList = struct {
                 if (!win32_input.keyPressed(VK_CONTROL) or win32_input.keyPressed(VK_MENU) or win32_input.keyPressed(VK_SHIFT)) return false;
                 self.copySelected();
             },
+            VK_F2 => {
+                if (win32_input.keyPressed(VK_CONTROL) or win32_input.keyPressed(VK_MENU) or win32_input.keyPressed(VK_SHIFT)) return false;
+                return self.editSelected();
+            },
             else => return false,
         }
         return true;
@@ -17271,6 +17668,10 @@ const ReferenceList = struct {
     /// the first) and in view, and UIA hears the focus on it. A click selects
     /// the row it is on instead (`press`).
     fn focused(self: *ReferenceList) void {
+        // A page too short for the Keybindings list scrolls to it first, unless
+        // the window is handing back its focus (`restoring_focus`), as the
+        // other controls' focus does.
+        if (self.kind == .keybindings and !self.owner().restoring_focus) if (self.hwnd) |hwnd| self.owner().ensureControlVisible(hwnd);
         if (!self.clicking and self.shown_count != 0) {
             if (self.selectedPosition() == null) {
                 self.selected = self.shown[0];
@@ -17288,20 +17689,31 @@ const ReferenceList = struct {
         const hwnd = self.hwnd orelse return null;
         if (position >= self.shown_count) return null;
         const metrics = self.ensureMetrics() orelse return null;
+        if (sys.IsWindowVisible(hwnd) == 0) return null;
         const selected = self.selectedPosition();
         const top = rowTop(metrics, selected, position) - self.scroll_y;
         const bottom = top + rowHeight(metrics, selected, position);
-        const view = self.clientHeight();
-        const shown_top = @max(0, top);
-        const shown_bottom = @min(view, bottom);
-        if (shown_bottom <= shown_top or sys.IsWindowVisible(hwnd) == 0) return null;
-        var origin: POINT = .{ .x = 0, .y = shown_top };
+        // The row, in screen coordinates, cut to the list's client area and to
+        // the viewport's: the Keybindings list runs past the viewport on a
+        // short window, and a row there is not on screen.
+        var origin: POINT = .{ .x = 0, .y = 0 };
         if (sys.ClientToScreen(hwnd, &origin) == 0) return null;
+        var shown: RECT = .{ .left = origin.x, .top = origin.y + @max(0, top), .right = origin.x + metrics.width, .bottom = origin.y + @min(self.clientHeight(), bottom) };
+        if (self.owner().viewport) |viewport| {
+            var client: RECT = undefined;
+            var corner: POINT = .{ .x = 0, .y = 0 };
+            if (GetClientRect(viewport, &client) == 0 or sys.ClientToScreen(viewport, &corner) == 0) return null;
+            shown.left = @max(shown.left, corner.x);
+            shown.top = @max(shown.top, corner.y);
+            shown.right = @min(shown.right, corner.x + client.right);
+            shown.bottom = @min(shown.bottom, corner.y + client.bottom);
+        }
+        if (shown.bottom <= shown.top or shown.right <= shown.left) return null;
         return .{
-            .left = @floatFromInt(origin.x),
-            .top = @floatFromInt(origin.y),
-            .width = @floatFromInt(metrics.width),
-            .height = @floatFromInt(shown_bottom - shown_top),
+            .left = @floatFromInt(shown.left),
+            .top = @floatFromInt(shown.top),
+            .width = @floatFromInt(shown.right - shown.left),
+            .height = @floatFromInt(shown.bottom - shown.top),
         };
     }
 
@@ -17327,15 +17739,20 @@ const ReferenceList = struct {
         }
     }
 
-    /// The key and its value on the row's first line, from `left`.
+    /// The row's first line (`writeTitle`): the key or the binding's keys,
+    /// and then its value or action, from `left`.
     fn paintTitle(self: *ReferenceList, hdc: HDC, metrics: Metrics, row: RECT, key: u16, text_color: COLORREF, value_color: COLORREF) void {
         const settings = self.owner();
-        const model_row = &settings.reference_model.rows[key];
         const left = row.left + metrics.pad_x + metrics.bar;
         const right = row.right - metrics.pad_x;
         const y = row.top + metrics.pad_y;
-        var name_w: [96]u16 = undefined;
-        const name = utf8ToW(&name_w, @tagName(settings_reference.keys[key]));
+        var name_buf: [192]u8 = undefined;
+        var name_text: std.Io.Writer = .fixed(&name_buf);
+        var value_buf: [256]u8 = undefined;
+        var value: std.Io.Writer = .fixed(&value_buf);
+        self.writeTitle(key, &name_text, &value);
+        var name_w: [192]u16 = undefined;
+        const name = utf8ToW(&name_w, utf8Prefix(name_text.buffered()));
         const previous = SelectObject(hdc, settings.emphasis_font);
         defer _ = SelectObject(hdc, previous);
         _ = SetTextColor(hdc, text_color);
@@ -17345,10 +17762,6 @@ const ReferenceList = struct {
         _ = DrawTextW(hdc, name, -1, &name_rect, DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
         const value_left = measured.right + settings.px(settings_metrics.space_6);
         if (value_left >= right) return;
-        var value_buf: [256]u8 = undefined;
-        var value: std.Io.Writer = .fixed(&value_buf);
-        settings_reference.writeValue(&value, model_row) catch {};
-        if (settings.referenceKeyDirty(key)) value.writeAll(" (changed here, not saved yet)") catch {};
         var value_w: [256]u16 = undefined;
         _ = SelectObject(hdc, settings.ui_font);
         _ = SetTextColor(hdc, value_color);
@@ -17359,12 +17772,8 @@ const ReferenceList = struct {
     fn paintRow(self: *ReferenceList, hdc: HDC, metrics: Metrics, row: RECT, key: u16, separator: bool) void {
         const settings = self.owner();
         const colors = settings.theme_adapter.colors;
-        const model_row = &settings.reference_model.rows[key];
-        const empty = model_row.value.len == 0 and model_row.more == 0;
-        self.paintTitle(hdc, metrics, row, key, colors.text, if (empty) colors.secondary_text else colors.text);
-        // What Windows does with the key matters more than how it starts
-        // describing it.
-        const line_text = settings_reference.notes[key] orelse model_row.summary;
+        self.paintTitle(hdc, metrics, row, key, colors.text, if (self.emptyValue(key)) colors.secondary_text else colors.text);
+        const line_text = self.summaryLine(key);
         var line_w: [512]u16 = undefined;
         const previous = SelectObject(hdc, settings.secondary_font);
         defer _ = SelectObject(hdc, previous);
@@ -17414,9 +17823,14 @@ const ReferenceList = struct {
         // actions are the pane's text there, as the ring is.
         const action_color = if (colors.high_contrast) colors.text else colors.accent;
         _ = SetTextColor(hdc, action_color);
+        var label_w: [64]u16 = undefined;
+        if (actions.edit) |rect| if (self.editLabel(key, &label_w)) |label| {
+            var edit_rect = rect;
+            _ = DrawTextW(hdc, label, -1, &edit_rect, DT_SINGLELINE | DT_NOPREFIX);
+        };
         if (actions.copy) |rect| {
             var copy_rect = rect;
-            _ = DrawTextW(hdc, std.unicode.utf8ToUtf16LeStringLiteral(reference_copy_label), -1, &copy_rect, DT_SINGLELINE | DT_NOPREFIX);
+            _ = DrawTextW(hdc, utf8ToW(&label_w, self.kind.copyLabel()), -1, &copy_rect, DT_SINGLELINE | DT_NOPREFIX);
         }
         if (actions.open) |rect| {
             var open_rect = rect;
@@ -17545,9 +17959,9 @@ fn localConfigPath(alloc: std.mem.Allocator, path: []const u8) ?[]u8 {
 /// The largest config file the All settings page reads for line numbers.
 const reference_config_max_bytes = 4 * 1024 * 1024;
 
-fn referenceListUiaState(settings: *SettingsWindow) win32_uia.PaletteListState {
+fn referenceListUiaState(list: *ReferenceList) win32_uia.PaletteListState {
     return .{
-        .ctx = settings,
+        .ctx = list,
         .name = &referenceUiaName,
         .localized_control_type = "list",
         .keyboard_focusable = true,
@@ -17559,84 +17973,103 @@ fn referenceListUiaState(settings: *SettingsWindow) win32_uia.PaletteListState {
         .select_row = &referenceUiaSelectRow,
         .invoke_row = &referenceUiaInvokeRow,
         .row_bounds = &referenceUiaRowBounds,
-        .help_text = reference_list_help,
+        .help_text = switch (list.kind) {
+            .reference => reference_list_help,
+            .keybindings => keybind_list_help,
+        },
         .row_help = &referenceUiaRowHelp,
         .focus_selected_row = true,
-        .use_com_threading = settings.canInitializeCustomUiaProviders(),
+        .use_com_threading = list.owner().canInitializeCustomUiaProviders(),
     };
 }
 
-fn referenceOwner(ctx: *anyopaque) *SettingsWindow {
+fn referenceOwner(ctx: *anyopaque) *ReferenceList {
     return @ptrCast(@alignCast(ctx));
 }
 
 fn referenceUiaName(ctx: *anyopaque, buf: []u8) []const u8 {
-    _ = ctx;
     _ = buf;
-    return "All settings";
+    return switch (referenceOwner(ctx).kind) {
+        .reference => "All settings",
+        .keybindings => "Key bindings",
+    };
 }
 
 fn referenceUiaFocused(ctx: *anyopaque) bool {
-    const list = referenceOwner(ctx).reference_list.hwnd orelse return false;
+    const list = referenceOwner(ctx).hwnd orelse return false;
     return GetFocus() == list;
 }
 
 fn referenceUiaRowCount(ctx: *anyopaque) usize {
-    return referenceOwner(ctx).reference_list.shown_count;
+    return referenceOwner(ctx).shown_count;
 }
 
 fn referenceUiaSelectedIndex(ctx: *anyopaque) ?usize {
-    return referenceOwner(ctx).reference_list.selectedPosition();
+    return referenceOwner(ctx).selectedPosition();
 }
 
-/// A row's name: the key, and its value in effect.
+/// A row's name: the key and its value in effect, or the binding's keys and
+/// its action.
 fn referenceUiaRowName(ctx: *anyopaque, index: usize, buf: []u8) []const u8 {
-    const settings = referenceOwner(ctx);
-    const list = &settings.reference_list;
-    if (index >= list.shown_count or !settings.reference_model.built()) return "";
-    const key = list.shown[index];
+    const list = referenceOwner(ctx);
+    if (index >= list.shown_count or !list.modelBuilt()) return "";
+    const id = list.shown[index];
     var writer: std.Io.Writer = .fixed(buf);
-    writer.print("{s}, ", .{@tagName(settings_reference.keys[key])}) catch {};
-    settings_reference.writeValue(&writer, &settings.reference_model.rows[key]) catch {};
-    if (settings.referenceKeyDirty(key)) writer.writeAll(", changed here, not saved yet") catch {};
-    return utf8Prefix(writer.buffered());
-}
-
-/// A row's help text: what Windows does with the key, its description, and
-/// where the config file sets it.
-fn referenceUiaRowHelp(ctx: *anyopaque, index: usize, buf: []u8) []const u8 {
-    const settings = referenceOwner(ctx);
-    const list = &settings.reference_list;
-    if (index >= list.shown_count or !settings.reference_model.built()) return "";
-    const key = list.shown[index];
-    const row = &settings.reference_model.rows[key];
-    var writer: std.Io.Writer = .fixed(buf);
-    if (settings_reference.notes[key]) |note| writer.print("{s}\n\n", .{note}) catch {};
-    writer.writeAll(row.doc) catch {};
-    if (settings.reference_model.file != null) {
-        writer.writeAll("\n\n") catch {};
-        settings.reference_model.writeLocation(&writer, row) catch {};
+    var value_buf: [512]u8 = undefined;
+    var value: std.Io.Writer = .fixed(&value_buf);
+    list.writeTitle(id, &writer, &value);
+    if (list.kind == .reference and list.ownerConst().referenceKeyDirty(id)) {
+        // "key, value, changed here, not saved yet" reads better than the
+        // drawn parenthesis.
+        value.end = 0;
+        settings_reference.writeValue(&value, &list.ownerConst().reference_model.rows[id]) catch {};
+        value.writeAll(", changed here, not saved yet") catch {};
     }
+    writer.print(", {s}", .{value.buffered()}) catch {};
     return utf8Prefix(writer.buffered());
 }
 
+/// A row's help text: on All settings what Windows does with the key, its
+/// description, where the config file sets it, and how to edit it; on
+/// Keybindings what the action does and where the binding comes from.
+fn referenceUiaRowHelp(ctx: *anyopaque, index: usize, buf: []u8) []const u8 {
+    const list = referenceOwner(ctx);
+    if (index >= list.shown_count or !list.modelBuilt()) return "";
+    const id = list.shown[index];
+    var writer: std.Io.Writer = .fixed(buf);
+    var location_buf: [1024]u8 = undefined;
+    var location: std.Io.Writer = .fixed(&location_buf);
+    list.writeOpenText(id, &writer, &location) catch {};
+    if (location.end != 0) writer.print("\n\n{s}", .{location.buffered()}) catch {};
+    if (list.editField(id)) |field| writer.print("\n\nF2 edits it on {s}.", .{list.ownerConst().settingDestination(field).section.headerText()}) catch {};
+    return utf8Prefix(writer.buffered());
+}
+
+/// A row's identity for UIA: on All settings the key's (its index is fixed);
+/// on Keybindings the binding's own (`settings_keybinds.Row.id`), so a row UIA
+/// holds across a rebuild is that binding, or gone, never the one now in its
+/// place.
 fn referenceUiaRowId(ctx: *anyopaque, index: usize) u64 {
-    const list = &referenceOwner(ctx).reference_list;
-    return if (index < list.shown_count) @as(u64, list.shown[index]) + 1 else 0;
+    const list = referenceOwner(ctx);
+    if (index >= list.shown_count) return 0;
+    return switch (list.kind) {
+        .reference => @as(u64, list.shown[index]) + 1,
+        .keybindings => list.ownerConst().keybind_model.rows[list.shown[index]].id,
+    };
 }
 
 fn referenceUiaSelectRow(ctx: *anyopaque, index: usize) void {
-    referenceOwner(ctx).reference_list.selectPosition(index);
+    referenceOwner(ctx).selectPosition(index);
 }
 
 fn referenceUiaInvokeRow(ctx: *anyopaque, index: usize) void {
-    const list = &referenceOwner(ctx).reference_list;
+    const list = referenceOwner(ctx);
     list.selectPosition(index);
     list.invokeSelected();
 }
 
 fn referenceUiaRowBounds(ctx: *anyopaque, index: usize) ?win32_uia.PaletteListRowBounds {
-    return referenceOwner(ctx).reference_list.rowScreenBounds(index);
+    return referenceOwner(ctx).rowScreenBounds(index);
 }
 
 fn referenceListDisconnect(ctx: *anyopaque) win32_uia.HRESULT {
@@ -17648,14 +18081,17 @@ fn referenceListRelease(ctx: *anyopaque) void {
     _ = win32_uia.PaletteListProvider.Release(&provider.base);
 }
 
-/// The All settings list's window procedure (`ReferenceList`).
+/// The lists' window procedure (`ReferenceList`): the window's user data is
+/// its list.
 fn referenceListProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.winapi) LRESULT {
     if (msg == WM_NCCREATE) {
         const cs: *const CREATESTRUCTW = @ptrFromInt(@as(usize, @bitCast(lParam)));
         if (cs.lpCreateParams) |ptr| _ = sys.SetWindowLongPtrW(hwnd, GWLP_USERDATA, @intCast(@intFromPtr(ptr)));
     }
-    const owner = recoverOwner(hwnd) orelse return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
-    const list = &owner.reference_list;
+    const raw = sys.GetWindowLongPtrW(hwnd, GWLP_USERDATA);
+    if (raw == 0) return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
+    const list: *ReferenceList = @ptrFromInt(@as(usize, @intCast(raw)));
+    const owner = list.owner();
     switch (msg) {
         WM_ERASEBKGND => return 1,
         WM_PAINT => {
@@ -17733,7 +18169,7 @@ fn referenceListProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) call
             if (win32_uia.returnPaletteListProvider(hwnd, wParam, lParam, provider)) |result| return result;
         },
         WM_NCDESTROY => {
-            if (list.hwnd == hwnd) owner.referenceListDestroyed();
+            if (list.hwnd == hwnd) owner.listDestroyed(list);
             _ = sys.SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
         },
         else => {},
@@ -17969,6 +18405,691 @@ test "settings the All settings list takes a list's keys, and Enter, Ctrl+C and 
     }.body);
 }
 
+/// Show the All settings page with the focus on key `key`'s row; the list's
+/// window.
+fn selectReferenceKey(settings: *SettingsWindow, key: Config.Key) !HWND {
+    settings.setActiveSection(.reference);
+    const list = &settings.reference_list;
+    const window = list.hwnd.?;
+    _ = SetFocus(window);
+    const id: u16 = @intCast(settings_reference.index(key));
+    const position = std.mem.indexOfScalar(u16, list.shown[0..list.shown_count], id) orelse return error.TestUnexpectedResult;
+    list.selectPosition(position);
+    return window;
+}
+
+/// A client point as a mouse message carries it.
+fn mousePoint(point: POINT) LPARAM {
+    return @bitCast((@as(usize, @as(u16, @bitCast(@as(i16, @intCast(point.y))))) << 16) | @as(u16, @bitCast(@as(i16, @intCast(point.x)))));
+}
+
+test "settings F2 on the All settings page edits a key on its own page, and a key with no control says the config file changes it" {
+    try dialog_test.onHiddenDesktop(struct {
+        extern "user32" fn GetMenuItemCount(menu: win32_types.HMENU) callconv(.winapi) c_int;
+        var items: c_int = 0;
+        var answer: usize = 0;
+
+        fn pick(menu: win32_types.HMENU) usize {
+            items = GetMenuItemCount(menu);
+            return answer;
+        }
+
+        fn body() !void {
+            const fixture = try dialog_test.Fixture.startWith(true);
+            defer fixture.finish();
+            const settings = &fixture.settings;
+            const list = &settings.reference_list;
+            var text: [8192]u8 = undefined;
+            const keyboard: LPARAM = -1;
+            settings.context_menu_pick = &pick;
+
+            // A key with a control: its open row offers Edit, its help says
+            // so, and F2 (as the App pump hands it to the list) moves to the
+            // control on its own page. The list goes with its page.
+            var window = try selectReferenceKey(settings, .@"font-size");
+            try std.testing.expect(list.ensureMetrics().?.edit_width > 0);
+            try std.testing.expect(std.mem.endsWith(u8, referenceUiaRowHelp(list, list.selectedPosition().?, &text), "F2 edits it on Appearance."));
+            _ = fixture.pumpKey(@intCast(VK_F2));
+            try std.testing.expectEqual(Section.appearance, settings.active_section);
+            try std.testing.expectEqual(settings.fields.edit_font_size.?, sys.GetFocus().?);
+            try std.testing.expect(sys.IsWindow(window) == 0);
+            try std.testing.expectEqual(@as(?HWND, null), list.hwnd);
+            try dialog_test.expectNothingStale(fixture.hwnd());
+
+            // Its menu offers it first, named for the page.
+            window = try selectReferenceKey(settings, .@"confirm-close-surface");
+            answer = reference_menu_edit;
+            _ = sys.SendMessageW(window, WM_CONTEXTMENU, @intFromPtr(window), keyboard);
+            try std.testing.expectEqual(@as(c_int, 3), items);
+            try std.testing.expectEqual(Section.terminal, settings.active_section);
+            try std.testing.expectEqual(settings.settingDestination(.confirm_close).hwnd.?, sys.GetFocus().?);
+
+            // And the drawn action, clicked.
+            window = try selectReferenceKey(settings, .@"copy-on-select");
+            const edit = list.actionRects(list.ensureMetrics().?).edit.?;
+            _ = sys.SendMessageW(window, WM_LBUTTONDOWN, 0, mousePoint(.{ .x = edit.left + 1, .y = edit.top + 1 }));
+            try std.testing.expectEqual(Section.terminal, settings.active_section);
+            try std.testing.expectEqual(settings.settingDestination(.copy_on_select).hwnd.?, sys.GetFocus().?);
+
+            // A search that hides the field gives way, as the palette's jump
+            // does: the key is found by its name, its field is not.
+            typeSearch(settings, "copy-on-select");
+            window = try selectReferenceKey(settings, .@"copy-on-select");
+            _ = fixture.pumpKey(@intCast(VK_F2));
+            try std.testing.expectEqual(Section.terminal, settings.active_section);
+            try std.testing.expectEqual(settings.settingDestination(.copy_on_select).hwnd.?, sys.GetFocus().?);
+            typeSearch(settings, "");
+
+            // A key with no control: no Edit, F2 does nothing, and the row
+            // says the config file changes it.
+            window = try selectReferenceKey(settings, .@"font-feature");
+            try std.testing.expectEqual(@as(i32, 0), list.ensureMetrics().?.edit_width);
+            try std.testing.expect(list.actionRects(list.ensureMetrics().?).edit == null);
+            try std.testing.expect(std.mem.indexOf(u8, referenceUiaRowHelp(list, list.selectedPosition().?, &text), reference_read_only_note) != null);
+            _ = fixture.pumpKey(@intCast(VK_F2));
+            try std.testing.expectEqual(Section.reference, settings.active_section);
+            try std.testing.expectEqual(window, sys.GetFocus().?);
+            answer = 0;
+            _ = sys.SendMessageW(window, WM_CONTEXTMENU, @intFromPtr(window), keyboard);
+            try std.testing.expectEqual(@as(c_int, 2), items);
+
+            // A setting Windows does not support has a control, disabled: no
+            // Edit, and its Windows note says why rather than the read-only line.
+            window = try selectReferenceKey(settings, .@"background-blur");
+            try std.testing.expectEqual(@as(i32, 0), list.ensureMetrics().?.edit_width);
+            const blur_help = referenceUiaRowHelp(list, list.selectedPosition().?, &text);
+            try std.testing.expect(std.mem.indexOf(u8, blur_help, "F2 edits") == null);
+            try std.testing.expect(std.mem.indexOf(u8, blur_help, reference_read_only_note) == null);
+            _ = fixture.pumpKey(@intCast(VK_F2));
+            try std.testing.expectEqual(Section.reference, settings.active_section);
+            _ = sys.SendMessageW(window, WM_CONTEXTMENU, @intFromPtr(window), keyboard);
+            try std.testing.expectEqual(@as(c_int, 2), items);
+        }
+    }.body);
+}
+
+test "settings F2 on the All settings page keeps the window where it is: a maximized window stays maximized" {
+    try dialog_test.onHiddenDesktop(struct {
+        extern "user32" fn IsZoomed(hwnd: HWND) callconv(.winapi) BOOL;
+        const SW_MAXIMIZE: c_int = 3;
+
+        fn body() !void {
+            const fixture = try dialog_test.Fixture.start();
+            defer fixture.finish();
+            const settings = &fixture.settings;
+            // On a desktop of its own (`onHiddenDesktop`), so maximizing shows
+            // nothing on the user's.
+            _ = sys.ShowWindow(fixture.hwnd(), SW_MAXIMIZE);
+            try std.testing.expect(IsZoomed(fixture.hwnd()) != 0);
+            _ = try selectReferenceKey(settings, .@"font-size");
+            _ = fixture.pumpKey(@intCast(VK_F2));
+            try std.testing.expectEqual(Section.appearance, settings.active_section);
+            try std.testing.expectEqual(settings.fields.edit_font_size.?, sys.GetFocus().?);
+            // The edit is inside the window: no `open()`, which restores a
+            // window (`SW_SHOWNORMAL`) as the palette's jump from outside does.
+            try std.testing.expect(IsZoomed(fixture.hwnd()) != 0);
+        }
+    }.body);
+}
+
+test "settings an edit begun on the All settings page round-trips through Save, the rest of the file byte-identical" {
+    try dialog_test.onHiddenDesktop(struct {
+        fn body() !void {
+            const alloc = std.testing.allocator;
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            const before =
+                "# noctty config, kept by hand\n" ++
+                "font-family = Cascadia Code\n" ++
+                "font-size   =   13\n" ++
+                "\n" ++
+                "  # an indented comment, and lines Settings has no control for\n" ++
+                "keybind = ctrl+shift+t=new_tab\n" ++
+                "window-padding-x = 4\n";
+            try tmp.dir.writeFile(.{ .sub_path = "config.ghostty", .data = before });
+            const path = try tmp.dir.realpathAlloc(alloc, "config.ghostty");
+            defer alloc.free(path);
+
+            const fixture = try dialog_test.Fixture.prepare(false);
+            defer fixture.finish();
+            try fixture.config.loadFile(alloc, path);
+            try std.testing.expect(fixture.config._diagnostics.empty());
+            fixture.save_path = path;
+            const settings = &fixture.settings;
+            try settings.open();
+
+            // Font size, which the file sets, from its row: typed into its
+            // field on Appearance.
+            _ = try selectReferenceKey(settings, .@"font-size");
+            _ = fixture.pumpKey(@intCast(VK_F2));
+            try std.testing.expectEqual(settings.fields.edit_font_size.?, sys.GetFocus().?);
+            typeInto(sys.GetFocus().?, "15");
+            // Trimming, which it does not set: its checkbox on Terminal.
+            _ = try selectReferenceKey(settings, .@"clipboard-trim-trailing-spaces");
+            _ = fixture.pumpKey(@intCast(VK_F2));
+            const checkbox = settings.settingDestination(.trim_trailing_spaces).hwnd.?;
+            try std.testing.expectEqual(checkbox, sys.GetFocus().?);
+            _ = sys.SendMessageW(checkbox, BM_CLICK, 0, 0);
+
+            settings.save();
+            try std.testing.expectEqual(@as(u32, 1), fixture.saved);
+            const after = try tmp.dir.readFileAlloc(alloc, "config.ghostty", 1 << 20);
+            defer alloc.free(after);
+            // The edited line is rewritten in place and the new key is added
+            // at the end; every other byte is the file's.
+            try std.testing.expectEqualStrings(
+                "# noctty config, kept by hand\n" ++
+                    "font-family = Cascadia Code\n" ++
+                    "font-size = 15\n" ++
+                    "\n" ++
+                    "  # an indented comment, and lines Settings has no control for\n" ++
+                    "keybind = ctrl+shift+t=new_tab\n" ++
+                    "window-padding-x = 4\n" ++
+                    "clipboard-trim-trailing-spaces = false\n",
+                after,
+            );
+            // Read back, the file holds the edits.
+            var reloaded = try Config.default(alloc);
+            defer reloaded.deinit();
+            try reloaded.loadFile(alloc, path);
+            try std.testing.expectEqual(@as(f32, 15), reloaded.@"font-size");
+            try std.testing.expect(!reloaded.@"clipboard-trim-trailing-spaces");
+            try std.testing.expectEqualStrings("Cascadia Code", reloaded.@"font-family".list.items[0]);
+        }
+    }.body);
+}
+
+test "settings the Keybindings page lists every binding in effect in one list, made with its page and gone with it" {
+    try dialog_test.onHiddenDesktop(struct {
+        extern "user32" fn GetMenuItemCount(menu: win32_types.HMENU) callconv(.winapi) c_int;
+        var items: c_int = 0;
+        var answer: usize = 0;
+
+        fn pick(menu: win32_types.HMENU) usize {
+            items = GetMenuItemCount(menu);
+            return answer;
+        }
+
+        fn body() !void {
+            const com = @import("win32_uia/com.zig");
+            const constants = @import("win32_uia/constants.zig");
+            const fixture = try dialog_test.Fixture.startWith(true);
+            defer fixture.finish();
+            const settings = &fixture.settings;
+            const Tree = dialog_test.OpenWork.Tree;
+            const list = &settings.keybind_list;
+            var text: [8192]u8 = undefined;
+            var status_buf: [SettingsWindow.help_text_bytes]u8 = undefined;
+
+            // The page's row is made the first time it is shown; the list
+            // each time, and it goes when the page does.
+            settings.setActiveSection(.keybindings);
+            settings.setActiveSection(.terminal);
+            const windows_before = Tree.of(fixture.hwnd()).len;
+            settings.setActiveSection(.keybindings);
+            const window = list.hwnd.?;
+            try std.testing.expect(sys.IsWindowVisible(window) != 0);
+            try std.testing.expectEqual(windows_before + 1, Tree.of(fixture.hwnd()).len);
+            try std.testing.expectEqual(settings.keybind_model.rows.len, list.shown_count);
+            try std.testing.expect(list.shown_count > 50);
+            // Below the page's help, as wide as its column, to the bottom.
+            const placed = dialog_test.rectIn(settings.viewport.?, window);
+            const help = dialog_test.rectIn(settings.viewport.?, settings.text_help.?);
+            try std.testing.expect(placed.top >= help.bottom);
+            var viewport: RECT = undefined;
+            _ = GetClientRect(settings.viewport.?, &viewport);
+            try std.testing.expect(placed.bottom >= viewport.bottom);
+            try dialog_test.expectNothingStale(fixture.hwnd());
+
+            // UIA: a List of the bindings, each named by its keys and action.
+            const provider = list.provider.?;
+            var value = com.VARIANT.empty();
+            try std.testing.expectEqual(com.S_OK, provider.base.vtbl.GetPropertyValue(&provider.base, constants.UIA_ControlTypePropertyId, &value));
+            try std.testing.expectEqual(constants.UIA_ListControlTypeId, value.value.i4);
+            try std.testing.expectEqualStrings("Key bindings", try uiaStringProperty(&provider.base, constants.UIA_NamePropertyId, &text));
+            try std.testing.expectEqualStrings(keybind_list_help, try uiaStringProperty(&provider.base, constants.UIA_HelpTextPropertyId, &text));
+
+            // The default copy binding: its row, as the keys reach the list.
+            _ = SetFocus(window);
+            try std.testing.expectEqual(@as(?usize, 0), list.selectedPosition());
+            const copy_row = for (list.shown[0..list.shown_count], 0..) |id, position| {
+                if (std.mem.eql(u8, settings.keybind_model.rows[id].trigger, "performable:ctrl+shift+c")) break position;
+            } else return error.TestUnexpectedResult;
+            for (0..copy_row) |_| _ = fixture.pumpKey(focus_cue.vk_down);
+            try std.testing.expectEqual(@as(?usize, copy_row), list.selectedPosition());
+            try std.testing.expectEqualStrings("performable:ctrl+shift+c, copy_to_clipboard:mixed", referenceUiaRowName(list, copy_row, &text));
+            const row_help = referenceUiaRowHelp(list, copy_row, &text);
+            try std.testing.expect(std.mem.indexOf(u8, row_help, settings.keybind_model.rows[list.shown[copy_row]].summary) != null);
+            try std.testing.expect(std.mem.endsWith(u8, row_help, keybind_default_note));
+            // Ctrl+C copies it as config lines; Enter opens the config file.
+            try dialog_test.holdKeys(.{ .ctrl = true });
+            _ = fixture.pumpKey('C');
+            try dialog_test.holdKeys(.{});
+            try std.testing.expectEqualStrings("keybind = performable:ctrl+shift+c=copy_to_clipboard:mixed", fixture.copiedText());
+            try std.testing.expectEqualStrings("Copied the binding for performable:ctrl+shift+c.", readEditUtf8(settings.text_status.?, &status_buf).?);
+            _ = fixture.pumpKey(@intCast(VK_RETURN));
+            try std.testing.expectEqual(@as(u32, 1), fixture.editor_opened);
+            // Nothing to edit here: F2 does nothing, and the menu offers Copy
+            // and Open.
+            _ = fixture.pumpKey(@intCast(VK_F2));
+            try std.testing.expectEqual(Section.keybindings, settings.active_section);
+            settings.context_menu_pick = &pick;
+            answer = reference_menu_copy;
+            _ = sys.SendMessageW(window, WM_CONTEXTMENU, @intFromPtr(window), -1);
+            try std.testing.expectEqual(@as(c_int, 2), items);
+            try std.testing.expectEqual(@as(u32, 2), fixture.copies);
+
+            // Another page: the list goes, and nothing stays of it.
+            settings.setActiveSection(.terminal);
+            try std.testing.expectEqual(@as(?HWND, null), list.hwnd);
+            try std.testing.expect(sys.IsWindow(window) == 0);
+            try std.testing.expectEqual(windows_before, Tree.of(fixture.hwnd()).len);
+            try dialog_test.expectNothingStale(fixture.hwnd());
+        }
+    }.body);
+}
+
+test "settings a search finds key bindings by their keys and actions, counts them, and Enter goes to the first" {
+    try dialog_test.onHiddenDesktop(struct {
+        fn body() !void {
+            const fixture = try dialog_test.Fixture.start();
+            defer fixture.finish();
+            const settings = &fixture.settings;
+            const list = &settings.keybind_list;
+            settings.setActiveSection(.keybindings);
+
+            // By an action: every binding that runs it, and only those, and
+            // the page counts them.
+            typeSearch(settings, "copy_to_clipboard");
+            var expected: usize = 0;
+            for (settings.keybind_model.rows) |row| {
+                if (std.mem.indexOf(u8, row.search, "copy_to_clipboard") != null) expected += 1;
+            }
+            try std.testing.expect(expected >= 3);
+            try std.testing.expectEqual(expected, list.shown_count);
+            try std.testing.expectEqual(expected, settings.search_counts[@intFromEnum(Section.keybindings)]);
+            // The page's help steps aside for what the search found.
+            try std.testing.expect(sys.IsWindowVisible(settings.text_help.?) == 0);
+            try std.testing.expectEqual(@as(i32, 0), dialog_test.rectIn(settings.viewport.?, list.hwnd.?).top);
+            for (list.shown[0..list.shown_count]) |id| {
+                try std.testing.expect(std.mem.indexOf(u8, settings.keybind_model.rows[id].search, "copy_to_clipboard") != null);
+            }
+            // Enter in the field: the page's row is not found, so the list
+            // takes the focus, on its first binding.
+            _ = SetFocus(settings.edit_search.?);
+            _ = fixture.pumpKey(@intCast(VK_RETURN));
+            try std.testing.expectEqual(list.hwnd.?, sys.GetFocus().?);
+            try std.testing.expectEqual(@as(?usize, 0), list.selectedPosition());
+
+            // By its keys.
+            typeSearch(settings, "ctrl+shift+c");
+            try std.testing.expect(list.shown_count >= 1);
+            // `@modified`: the defaults have every binding of this config.
+            typeSearch(settings, "@modified copy_to_clipboard");
+            try std.testing.expectEqual(@as(usize, 0), list.shown_count);
+            try std.testing.expect(sys.IsWindowVisible(list.hwnd.?) == 0);
+            // Nothing found: the list leaves the screen.
+            typeSearch(settings, "zzzz-no-such-binding");
+            try std.testing.expectEqual(@as(usize, 0), list.shown_count);
+            try std.testing.expect(sys.IsWindowVisible(list.hwnd.?) == 0);
+        }
+    }.body);
+}
+
+test "settings the Keybindings list ends the page, and at the least window height the page scrolls to it" {
+    try dialog_test.onHiddenDesktop(struct {
+        fn body() !void {
+            const fixture = try dialog_test.Fixture.start();
+            defer fixture.finish();
+            const settings = &fixture.settings;
+            const list = &settings.keybind_list;
+            // As tall as the work area: room for more than the list's least
+            // height below the page's help (a CI runner's 1024x768 screen has).
+            var work: RECT = .{ .left = 0, .top = 0, .right = 1024, .bottom = 728 };
+            _ = windowWorkArea(fixture.hwnd(), &work);
+            _ = SetWindowPos(fixture.hwnd(), null, work.left, work.top, @min(settings.px(900), work.right - work.left), work.bottom - work.top, SWP_NOZORDER | SWP_NOACTIVATE);
+            settings.setActiveSection(.keybindings);
+            var viewport: RECT = undefined;
+            _ = GetClientRect(settings.viewport.?, &viewport);
+            const placed = dialog_test.rectIn(settings.viewport.?, list.hwnd.?);
+            // Down to the viewport's bottom, it scrolls itself: the page has
+            // nothing to scroll (no second scroll bar beside the list's).
+            try std.testing.expect(placed.bottom - placed.top > settings.px(settings_keybind_list_min_height));
+            try std.testing.expectEqual(viewport.bottom, placed.bottom);
+            try std.testing.expectEqual(@as(i32, 0), settings.content_scroll_max);
+
+            // At the least height it keeps a few rows and runs past the
+            // viewport; taking the focus scrolls the page to it.
+            try fixture.makeFormScrollable();
+            settings.setActiveSection(.terminal);
+            settings.setActiveSection(.keybindings);
+            _ = GetClientRect(settings.viewport.?, &viewport);
+            const short = dialog_test.rectIn(settings.viewport.?, list.hwnd.?);
+            try std.testing.expect(short.bottom - short.top >= settings.px(settings_keybind_list_min_height));
+            try std.testing.expect(short.bottom > viewport.bottom);
+            try std.testing.expect(settings.content_scroll_max > 0);
+            _ = SetFocus(list.hwnd.?);
+            const shown = dialog_test.rectIn(settings.viewport.?, list.hwnd.?);
+            try std.testing.expect(shown.top >= 0);
+            try std.testing.expect(shown.bottom <= viewport.bottom or shown.top == 0);
+            try std.testing.expect(settings.content_scroll_y > 0);
+
+            // The window activated again hands the focus back to the list
+            // (`forwardFrameFocus`) without scrolling the page: a click that
+            // activated it was aimed at the controls where they were.
+            settings.setContentScroll(0);
+            settings.focus_before_deactivate = list.hwnd.?;
+            _ = SetFocus(fixture.hwnd());
+            try std.testing.expectEqual(list.hwnd.?, sys.GetFocus().?);
+            try std.testing.expectEqual(@as(i32, 0), settings.content_scroll_y);
+        }
+    }.body);
+}
+
+test "settings a reload finds the Keybindings page's bindings again, keeps the selected binding, and @modified keeps the config's own" {
+    try dialog_test.onHiddenDesktop(struct {
+        fn body() !void {
+            const alloc = std.testing.allocator;
+            const fixture = try dialog_test.Fixture.start();
+            defer fixture.finish();
+            const settings = &fixture.settings;
+            const list = &settings.keybind_list;
+            settings.setActiveSection(.keybindings);
+
+            // The selection: the default table's last binding, whose action
+            // sorts after the `new_tab` one the reload adds, so its row moves.
+            _ = SetFocus(list.hwnd.?);
+            var last_root: usize = 0;
+            for (list.shown[0..list.shown_count], 0..) |id, position| {
+                if (settings.keybind_model.rows[id].table.len == 0) last_root = position;
+            }
+            try std.testing.expect(std.mem.order(u8, settings.keybind_model.rows[list.shown[last_root]].action, "new_tab") == .gt);
+            list.selectPosition(last_root);
+            const selected_entry = try alloc.dupe(u8, settings.keybind_model.rows[list.selected.?].entry);
+            defer alloc.free(selected_entry);
+
+            // A search for a binding the config does not have yet: nothing.
+            typeSearch(settings, "ctrl+alt+shift+f12");
+            try std.testing.expectEqual(@as(usize, 0), list.shown_count);
+            try std.testing.expect(sys.IsWindowVisible(list.hwnd.?) == 0);
+            const total_before = settings.search_total;
+
+            // A reload brings it: the list finds it, the page and the total
+            // count it, and the list is back on screen.
+            var reloaded = try Config.default(alloc);
+            defer reloaded.deinit();
+            try reloaded.keybind.parseCLI(reloaded._arena.?.allocator(), "ctrl+alt+shift+f12=new_tab");
+            settings.externalConfigChanged(&reloaded, 100);
+            try std.testing.expectEqual(@as(usize, 1), list.shown_count);
+            try std.testing.expectEqualStrings("ctrl+alt+shift+f12", settings.keybind_model.rows[list.shown[0]].trigger);
+            try std.testing.expectEqual(@as(u16, 1), settings.search_counts[@intFromEnum(Section.keybindings)]);
+            try std.testing.expectEqual(total_before + 1, settings.search_total);
+            try std.testing.expect(sys.IsWindowVisible(list.hwnd.?) != 0);
+
+            // The selected binding is the same binding in the new model, one
+            // row further down.
+            try std.testing.expectEqualStrings(selected_entry, settings.keybind_model.rows[list.selected.?].entry);
+            try std.testing.expectEqual(@as(u16, @intCast(last_root + 1)), list.selected.?);
+
+            // `@modified`: the config's own binding, and nothing of the defaults.
+            typeSearch(settings, "@modified");
+            try std.testing.expectEqual(@as(usize, 1), list.shown_count);
+            try std.testing.expect(settings.keybind_model.rows[list.shown[0]].differs);
+            var buf: [SettingsWindow.help_text_bytes]u8 = undefined;
+            _ = SetFocus(list.hwnd.?);
+            try std.testing.expect(std.mem.endsWith(u8, referenceUiaRowHelp(list, 0, &buf), keybind_set_note));
+        }
+    }.body);
+}
+
+test "settings a key binding row UIA holds on to never names another binding after a reload" {
+    try dialog_test.onHiddenDesktop(struct {
+        const com = @import("win32_uia/com.zig");
+        const constants = @import("win32_uia/constants.zig");
+
+        /// A held row: its fragment and simple interfaces.
+        const Held = struct {
+            fragment: *com.IRawElementProviderFragment,
+            simple: *com.IRawElementProviderSimple,
+
+            fn release(self: Held) void {
+                _ = self.simple.vtbl.Release(self.simple);
+                _ = self.fragment.vtbl.Release(self.fragment);
+            }
+        };
+
+        /// The list's focused row (its selected one), held.
+        fn focusedRow(list: *ReferenceList) !Held {
+            const provider = list.provider.?;
+            var focus: ?*com.IRawElementProviderFragment = null;
+            try std.testing.expectEqual(com.S_OK, provider.fragment_root.vtbl.GetFocus(&provider.fragment_root, &focus));
+            const fragment = focus.?;
+            var simple: ?*anyopaque = null;
+            try std.testing.expectEqual(com.S_OK, fragment.vtbl.QueryInterface(fragment, &com.IID_IRawElementProviderSimple, &simple));
+            return .{ .fragment = fragment, .simple = @ptrCast(@alignCast(simple.?)) };
+        }
+
+        /// The row's Name, or null when the row says it is gone.
+        fn nameOf(row: Held, buf: []u8) !?[]const u8 {
+            var value = com.VARIANT.empty();
+            const hr = row.simple.vtbl.GetPropertyValue(row.simple, constants.UIA_NamePropertyId, &value);
+            if (hr == com.UIA_E_ELEMENTNOTAVAILABLE) return null;
+            try std.testing.expectEqual(com.S_OK, hr);
+            defer _ = com.VariantClear(&value);
+            const bstr = value.value.bstr.?;
+            return buf[0..try std.unicode.utf16LeToUtf8(buf, bstr[0..com.SysStringLen(bstr)])];
+        }
+
+        /// The held row still names `name` and SetFocus selects `entry`, or
+        /// it says it is gone: never another binding.
+        fn stillOrGone(settings: *SettingsWindow, row: Held, name: []const u8, entry: []const u8) !void {
+            var buf: [512]u8 = undefined;
+            if (try nameOf(row, &buf)) |now| try std.testing.expectEqualStrings(name, now);
+            const hr = row.fragment.vtbl.SetFocus(row.fragment);
+            if (hr == com.S_OK) {
+                try std.testing.expectEqualStrings(entry, settings.keybind_model.rows[settings.keybind_list.selected.?].entry);
+            } else try std.testing.expectEqual(com.UIA_E_ELEMENTNOTAVAILABLE, hr);
+        }
+
+        /// Hold the row at `position`: its name and binding, owned.
+        fn hold(settings: *SettingsWindow, position: usize) !struct { row: Held, name: []u8, entry: []u8 } {
+            const alloc = std.testing.allocator;
+            const list = &settings.keybind_list;
+            list.selectPosition(position);
+            const row = try focusedRow(list);
+            errdefer row.release();
+            var buf: [512]u8 = undefined;
+            const name = try alloc.dupe(u8, (try nameOf(row, &buf)).?);
+            errdefer alloc.free(name);
+            const entry = try alloc.dupe(u8, settings.keybind_model.rows[list.selected.?].entry);
+            return .{ .row = row, .name = name, .entry = entry };
+        }
+
+        fn body() !void {
+            const alloc = std.testing.allocator;
+            const fixture = try dialog_test.Fixture.startWith(true);
+            defer fixture.finish();
+            const settings = &fixture.settings;
+            const list = &settings.keybind_list;
+            settings.setActiveSection(.keybindings);
+            _ = SetFocus(list.hwnd.?);
+            // The default table's last binding, whose action sorts after the
+            // `new_tab` one the reload adds.
+            var last_root: usize = 0;
+            for (list.shown[0..list.shown_count], 0..) |id, position| {
+                if (settings.keybind_model.rows[id].table.len == 0) last_root = position;
+            }
+
+            // Held: the first row, which the insertion leaves where it is, and
+            // the last of the default table, which it moves down a row.
+            const first = try hold(settings, 0);
+            defer first.row.release();
+            defer alloc.free(first.name);
+            defer alloc.free(first.entry);
+            const moved = try hold(settings, last_root);
+            defer moved.row.release();
+            defer alloc.free(moved.name);
+            defer alloc.free(moved.entry);
+
+            // An insertion.
+            var added = try Config.default(alloc);
+            defer added.deinit();
+            try added.keybind.parseCLI(added._arena.?.allocator(), "ctrl+alt+shift+f12=new_tab");
+            settings.externalConfigChanged(&added, 100);
+            // The first row is its binding still, at its place.
+            var buf: [512]u8 = undefined;
+            try std.testing.expectEqualStrings(first.name, (try nameOf(first.row, &buf)).?);
+            try stillOrGone(settings, moved.row, moved.name, moved.entry);
+
+            // A deletion: the added binding goes, and the default table's last
+            // one moves back up.
+            const again = try hold(settings, last_root + 1);
+            defer again.row.release();
+            defer alloc.free(again.name);
+            defer alloc.free(again.entry);
+            try std.testing.expectEqualStrings(moved.entry, again.entry);
+            var defaults = try Config.default(alloc);
+            defer defaults.deinit();
+            settings.externalConfigChanged(&defaults, 101);
+            try std.testing.expectEqualStrings(first.name, (try nameOf(first.row, &buf)).?);
+            try stillOrGone(settings, again.row, again.name, again.entry);
+        }
+    }.body);
+}
+
+test "settings a reload that takes away the binding the list's focus is on gives the focus to the search field" {
+    try dialog_test.onHiddenDesktop(struct {
+        fn body() !void {
+            const alloc = std.testing.allocator;
+            const fixture = try dialog_test.Fixture.start();
+            defer fixture.finish();
+            const settings = &fixture.settings;
+            const list = &settings.keybind_list;
+            var added = try Config.default(alloc);
+            defer added.deinit();
+            try added.keybind.parseCLI(added._arena.?.allocator(), "ctrl+alt+shift+f12=new_tab");
+            settings.externalConfigChanged(&added, 100);
+            settings.setActiveSection(.keybindings);
+
+            // A search for the config's own binding, and Enter: the focus is
+            // on the one binding found.
+            typeSearch(settings, "ctrl+alt+shift+f12");
+            try std.testing.expectEqual(@as(usize, 1), list.shown_count);
+            _ = SetFocus(settings.edit_search.?);
+            _ = fixture.pumpKey(@intCast(VK_RETURN));
+            try std.testing.expectEqual(list.hwnd.?, sys.GetFocus().?);
+
+            // A reload without it: the list has nothing to show and leaves the
+            // screen, and the focus goes where the search's own does, to the
+            // field, not to the page behind the list.
+            var defaults = try Config.default(alloc);
+            defer defaults.deinit();
+            settings.externalConfigChanged(&defaults, 101);
+            try std.testing.expectEqual(@as(usize, 0), list.shown_count);
+            try std.testing.expect(sys.IsWindowVisible(list.hwnd.?) == 0);
+            try std.testing.expectEqual(settings.edit_search.?, sys.GetFocus().?);
+        }
+    }.body);
+}
+
+test "settings a key binding row the page's viewport hides is offscreen to UIA, and one it cuts reports only what shows" {
+    try dialog_test.onHiddenDesktop(struct {
+        const com = @import("win32_uia/com.zig");
+        const constants = @import("win32_uia/constants.zig");
+
+        /// `IsOffscreen` of the list's row `index`, through its provider.
+        fn offscreen(list: *ReferenceList, index: usize) !bool {
+            const provider = list.provider.?;
+            var child: ?*com.IRawElementProviderFragment = null;
+            try std.testing.expectEqual(com.S_OK, provider.fragment.vtbl.Navigate(&provider.fragment, com.NavigateDirection_FirstChild, &child));
+            for (0..index) |_| {
+                const here = child.?;
+                defer _ = here.vtbl.Release(here);
+                child = null;
+                try std.testing.expectEqual(com.S_OK, here.vtbl.Navigate(here, com.NavigateDirection_NextSibling, &child));
+            }
+            const row = child.?;
+            defer _ = row.vtbl.Release(row);
+            var simple: ?*anyopaque = null;
+            try std.testing.expectEqual(com.S_OK, row.vtbl.QueryInterface(row, &com.IID_IRawElementProviderSimple, &simple));
+            const element: *com.IRawElementProviderSimple = @ptrCast(@alignCast(simple.?));
+            defer _ = element.vtbl.Release(element);
+            var value = com.VARIANT.empty();
+            try std.testing.expectEqual(com.S_OK, element.vtbl.GetPropertyValue(element, constants.UIA_IsOffscreenPropertyId, &value));
+            return value.value.bool_val == com.VARIANT_TRUE;
+        }
+
+        /// A client rectangle of `hwnd` in screen coordinates.
+        fn screenClient(hwnd: HWND) RECT {
+            var rect: RECT = undefined;
+            _ = GetClientRect(hwnd, &rect);
+            var origin: POINT = .{ .x = 0, .y = 0 };
+            _ = sys.ClientToScreen(hwnd, &origin);
+            return .{ .left = origin.x, .top = origin.y, .right = origin.x + rect.right, .bottom = origin.y + rect.bottom };
+        }
+
+        /// Every row's bounds as the viewport and the list show it, at the
+        /// page's scroll now. Counts the rows hidden whole and cut.
+        fn check(settings: *SettingsWindow, whole: *usize, cut: *usize) !void {
+            const list = &settings.keybind_list;
+            const viewport = screenClient(settings.viewport.?);
+            const client = screenClient(list.hwnd.?);
+            const metrics = list.ensureMetrics().?;
+            const selected = list.selectedPosition();
+            for (0..list.shown_count) |position| {
+                errdefer std.debug.print("settings key binding row {d} of {d}\n", .{ position, list.shown_count });
+                const row_top = client.top + ReferenceList.rowTop(metrics, selected, position) - list.scroll_y;
+                const row_bottom = row_top + ReferenceList.rowHeight(metrics, selected, position);
+                const top = @max(row_top, @max(client.top, viewport.top));
+                const bottom = @min(row_bottom, @min(client.bottom, viewport.bottom));
+                const bounds = list.rowScreenBounds(position);
+                if (bottom <= top) {
+                    try std.testing.expectEqual(@as(?win32_uia.UiaRect, null), bounds);
+                    if (row_top >= viewport.bottom and row_top < client.bottom) {
+                        if (whole.* == 0) try std.testing.expect(try offscreen(list, position));
+                        whole.* += 1;
+                    }
+                    continue;
+                }
+                const shown = bounds orelse return error.TestUnexpectedResult;
+                try std.testing.expectEqual(@as(f64, @floatFromInt(top)), shown.top);
+                try std.testing.expectEqual(@as(f64, @floatFromInt(bottom - top)), shown.height);
+                if (row_bottom > viewport.bottom) {
+                    if (cut.* == 0) try std.testing.expect(!try offscreen(list, position));
+                    cut.* += 1;
+                }
+            }
+        }
+
+        fn body() !void {
+            const fixture = try dialog_test.Fixture.startWith(true);
+            defer fixture.finish();
+            const settings = &fixture.settings;
+            const list = &settings.keybind_list;
+            // The least window height: the list keeps its least height and
+            // runs past the viewport. The focus stays on the rail, so nothing
+            // has scrolled the page to the list.
+            try fixture.makeFormScrollable();
+            settings.setActiveSection(.terminal);
+            settings.setActiveSection(.keybindings);
+            try std.testing.expectEqual(@as(i32, 0), settings.content_scroll_y);
+            try std.testing.expect(sys.GetFocus() != list.hwnd.?);
+            try std.testing.expect(screenClient(list.hwnd.?).bottom > screenClient(settings.viewport.?).bottom);
+
+            var whole: usize = 0;
+            var cut: usize = 0;
+            try check(settings, &whole, &cut);
+            // Half a row more of page scroll: a row the viewport's edge did
+            // not cut before (an edge on a row boundary) is cut now.
+            const half_row = @divTrunc(list.ensureMetrics().?.row, 2);
+            settings.setContentScroll(@min(settings.content_scroll_max, half_row));
+            try check(settings, &whole, &cut);
+            try std.testing.expect(whole > 0);
+            try std.testing.expect(cut > 0);
+        }
+    }.body);
+}
+
 test "settings the All settings list answers the mouse: a click selects, a double click and Open open, Copy copies" {
     try dialog_test.onHiddenDesktop(struct {
         fn at(point: POINT) LPARAM {
@@ -18082,7 +19203,7 @@ test "settings the All settings list is a UIA List of ListItems, the focus on th
             try std.testing.expectEqual(constants.UIA_ListItemControlTypeId, value.value.i4);
             const key = list.shown[0];
             var expected_buf: [256]u8 = undefined;
-            const expected = referenceUiaRowName(settings, 0, &expected_buf);
+            const expected = referenceUiaRowName(list, 0, &expected_buf);
             try std.testing.expect(std.mem.startsWith(u8, expected, @tagName(settings_reference.keys[key])));
             try std.testing.expectEqualStrings(expected, try uiaStringProperty(row, constants.UIA_NamePropertyId, &text));
             const help = try uiaStringProperty(row, constants.UIA_HelpTextPropertyId, &text);
@@ -18171,7 +19292,7 @@ test "settings a search on the All settings page lists the keys it finds, and En
     }.body);
 }
 
-test "settings the All settings list draws in system colours under High Contrast" {
+test "settings the All settings and Keybindings lists draw in system colours under High Contrast" {
     try dialog_test.onHiddenDesktop(struct {
         /// A COLORREF as a 32-bit DIB holds it.
         fn pixel(color: u32) u32 {
@@ -18179,14 +19300,15 @@ test "settings the All settings list draws in system colours under High Contrast
         }
 
         fn body() !void {
-            for ([_]bool{ false, true }) |high_contrast| {
+            for ([_]Section{ .reference, .keybindings }) |section| for ([_]bool{ false, true }) |high_contrast| {
+                errdefer std.debug.print("settings list colours on {t}, High Contrast {}\n", .{ section, high_contrast });
                 const fixture = try dialog_test.Fixture.prepare(false);
                 defer fixture.finish();
                 fixture.high_contrast = high_contrast;
                 const settings = &fixture.settings;
                 try settings.open();
-                settings.setActiveSection(.reference);
-                const list = &settings.reference_list;
+                settings.setActiveSection(section);
+                const list = settings.sectionList(section).?;
                 _ = SetFocus(list.hwnd.?);
                 dialog_test.flushPaint(fixture.hwnd());
                 const capture = try dialog_test.Capture.take(list.hwnd.?);
@@ -18202,9 +19324,16 @@ test "settings the All settings list draws in system colours under High Contrast
                 // and the next row's room above its text.
                 const band = capture.pixels[@as(usize, @intCast(@divTrunc(metrics.pad_y, 2))) * capture.width + capture.width - @as(usize, @intCast(@divTrunc(metrics.pad_x, 2)))];
                 try std.testing.expectEqual(pixel(colors.selection_bg), band & 0xFFFFFF);
+                const margin: usize = @intCast(@divTrunc(metrics.pad_x, 2));
+                // The open row below its band, left of its text.
+                const below_band: usize = @intCast(2 * metrics.pad_y + metrics.title + @divTrunc(metrics.gap, 2));
+                try std.testing.expectEqual(pixel(colors.window_bg), capture.pixels[below_band * capture.width + margin] & 0xFFFFFF);
+                // When the open row leaves room, the next row's above its text.
                 const next_top: usize = @intCast(metrics.open + @divTrunc(metrics.pad_y, 2));
-                const background = capture.pixels[next_top * capture.width + @as(usize, @intCast(@divTrunc(metrics.pad_x, 2)))];
-                try std.testing.expectEqual(pixel(colors.window_bg), background & 0xFFFFFF);
+                if (next_top * capture.width < capture.pixels.len) {
+                    const background = capture.pixels[next_top * capture.width + margin];
+                    try std.testing.expectEqual(pixel(colors.window_bg), background & 0xFFFFFF);
+                } else try std.testing.expect(section == .keybindings);
                 // High Contrast rings the focused row on any focus, in the
                 // pane's text colour, round the band rather than over it.
                 if (high_contrast) {
@@ -18212,7 +19341,7 @@ test "settings the All settings list draws in system colours under High Contrast
                     try std.testing.expectEqual(pixel(colors.text), ring & 0xFFFFFF);
                     try std.testing.expect(colors.text != colors.selection_bg);
                 }
-            }
+            };
         }
     }.body);
 }
