@@ -567,6 +567,17 @@ pub const Image = struct {
 pub const Rect = struct {
     top_left: PageList.Pin,
     bottom_right: PageList.Pin,
+
+    /// Returns true if the grid cell is inside this rectangle. Pin.isBetween
+    /// compares page order, so its interior rows intentionally do not constrain
+    /// x. Check the column independently and use isBetween only for the row.
+    pub fn contains(self: Rect, cell: PageList.Pin) bool {
+        if (cell.x < self.top_left.x or cell.x > self.bottom_right.x) return false;
+
+        var row = cell;
+        row.x = self.top_left.x;
+        return row.isBetween(self.top_left, self.bottom_right);
+    }
 };
 
 /// Returns true if `path` is `dir` or is contained within it, requiring a

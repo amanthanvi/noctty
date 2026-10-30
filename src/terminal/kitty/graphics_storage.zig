@@ -755,7 +755,7 @@ pub const ImageStorage = struct {
         while (it.next()) |entry| {
             const img = self.imageById(entry.key_ptr.image_id) orelse continue;
             const rect = entry.value_ptr.rect(img, t) orelse continue;
-            if (target_pin.isBetween(rect.top_left, rect.bottom_right)) {
+            if (rect.contains(target_pin)) {
                 if (filter) |f| if (!f(filter_ctx, entry.value_ptr.*)) continue;
                 entry.value_ptr.deinit(t.screens.active);
                 self.placements.removeByPtr(entry.key_ptr);
@@ -1630,6 +1630,63 @@ test "storage: delete intersecting cursor" {
         .image_id = 1,
         .placement_id = .{ .tag = .external, .id = 2 },
     }) != null);
+}
+
+test "storage: delete intersecting cursor checks interior row column" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    var t = try terminal.Terminal.init(alloc, .{ .rows = 100, .cols = 100 });
+    defer t.deinit(alloc);
+    t.width_px = 100;
+    t.height_px = 100;
+    const tracked = t.screens.active.pages.countTrackedPins();
+
+    var s: ImageStorage = .{};
+    defer s.deinit(alloc, t.screens.active);
+    try s.addImage(alloc, t.screens.active, .{ .id = 1, .width = 10, .height = 10 });
+    try s.addPlacement(alloc, t.screens.active, 1, 1, .{ .location = .{ .pin = try trackPin(&t, .{ .x = 0, .y = 0 }) } });
+    try s.addPlacement(alloc, t.screens.active, 1, 2, .{ .location = .{ .pin = try trackPin(&t, .{ .x = 20, .y = 0 }) } });
+
+    // This is inside the right placement and on an interior row shared by
+    // both placements, but it is outside the left placement's columns.
+    t.screens.active.cursorAbsolute(21, 5);
+    s.delete(alloc, &t, .{ .intersect_cursor = false });
+
+    try testing.expectEqual(@as(usize, 1), s.placements.count());
+    try testing.expect(s.placements.get(.{
+        .image_id = 1,
+        .placement_id = .{ .tag = .external, .id = 1 },
+    }) != null);
+    try testing.expectEqual(tracked + 1, t.screens.active.pages.countTrackedPins());
+}
+
+test "storage: delete intersecting cell checks interior row column" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    var t = try terminal.Terminal.init(alloc, .{ .rows = 100, .cols = 100 });
+    defer t.deinit(alloc);
+    t.width_px = 100;
+    t.height_px = 100;
+    const tracked = t.screens.active.pages.countTrackedPins();
+
+    var s: ImageStorage = .{};
+    defer s.deinit(alloc, t.screens.active);
+    try s.addImage(alloc, t.screens.active, .{ .id = 1, .width = 10, .height = 10 });
+    try s.addPlacement(alloc, t.screens.active, 1, 1, .{ .location = .{ .pin = try trackPin(&t, .{ .x = 0, .y = 0 }) } });
+    try s.addPlacement(alloc, t.screens.active, 1, 2, .{ .location = .{ .pin = try trackPin(&t, .{ .x = 20, .y = 0 }) } });
+
+    // Protocol coordinates are one-based, so this targets grid cell (21, 5).
+    s.delete(alloc, &t, .{ .intersect_cell = .{
+        .x = 22,
+        .y = 6,
+    } });
+
+    try testing.expectEqual(@as(usize, 1), s.placements.count());
+    try testing.expect(s.placements.get(.{
+        .image_id = 1,
+        .placement_id = .{ .tag = .external, .id = 1 },
+    }) != null);
+    try testing.expectEqual(tracked + 1, t.screens.active.pages.countTrackedPins());
 }
 
 test "storage: delete intersecting cursor plus unused" {
