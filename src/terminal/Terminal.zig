@@ -3111,8 +3111,13 @@ pub fn resize(
 
     // Resize our tabstops
     if (self.cols != cols) {
+        const tabstops: Tabstops = try .init(
+            alloc,
+            cols,
+            TABSTOP_INTERVAL,
+        );
         self.tabstops.deinit(alloc);
-        self.tabstops = try .init(alloc, cols, 8);
+        self.tabstops = tabstops;
     }
 
     // Resize primary screen, which supports reflow
@@ -3160,6 +3165,19 @@ test "Terminal: init rejects zero dimensions" {
         .cols = 10,
         .rows = 0,
     }));
+}
+
+test "Terminal: resize preserves tabstops on allocation failure" {
+    var failing = testing.FailingAllocator.init(testing.allocator, .{});
+    const alloc = failing.allocator();
+    var t = try init(alloc, .{ .cols = 10, .rows = 1 });
+    defer t.deinit(alloc);
+
+    failing.fail_index = failing.alloc_index;
+    try testing.expectError(error.OutOfMemory, t.resize(alloc, 513, 1));
+
+    try testing.expectEqual(@as(size.CellCountInt, 10), t.cols);
+    try testing.expect(t.tabstops.get(8));
 }
 
 /// Set the pwd for the terminal.
