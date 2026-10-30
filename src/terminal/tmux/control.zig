@@ -662,6 +662,40 @@ test "tmux exceeding max_bytes" {
     try testing.expect(try c.put('\n') == null);
 }
 
+test "tmux notification after a reply filling max_bytes" {
+    // A block or %output reply stays in the buffer after it is returned
+    // (the notification points into it), so the next '%' arrives with the
+    // buffer full and must not count against max_bytes either. The tests
+    // above reach only the terminator: %sessions-changed clears the buffer.
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    {
+        const block = "hello\n%end 1578922740 269 1";
+        var c: Parser = .{ .buffer = .init(alloc), .max_bytes = block.len };
+        defer c.deinit();
+        for ("%begin 1578922740 269 1\n") |byte| try testing.expect(try c.put(byte) == null);
+        for (block) |byte| try testing.expect(try c.put(byte) == null);
+        const n = (try c.put('\n')).?;
+        try testing.expect(n == .block_end);
+        try testing.expectEqualStrings("hello", n.block_end);
+        for ("%sessions-changed") |byte| try testing.expect(try c.put(byte) == null);
+        try testing.expect((try c.put('\n')).? == .sessions_changed);
+    }
+
+    {
+        const line = "%output %1 hello world";
+        var c: Parser = .{ .buffer = .init(alloc), .max_bytes = line.len };
+        defer c.deinit();
+        for (line) |byte| try testing.expect(try c.put(byte) == null);
+        const n = (try c.put('\n')).?;
+        try testing.expect(n == .output);
+        try testing.expectEqualStrings("hello world", n.output.data);
+        for ("%sessions-changed") |byte| try testing.expect(try c.put(byte) == null);
+        try testing.expect((try c.put('\n')).? == .sessions_changed);
+    }
+}
+
 test "tmux begin/end data" {
     const testing = std.testing;
     const alloc = testing.allocator;
