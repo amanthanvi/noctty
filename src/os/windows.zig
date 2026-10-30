@@ -129,6 +129,61 @@ pub fn directVolumePath(path: *windows.PathSpace) bool {
     return directVolumePathWithMapping(path, directVolumeDeviceName);
 }
 
+pub const DeleteOpenedFileError = error{ AccessDenied, Unexpected };
+
+/// Delete the file `handle` is open on, whatever its path names now: the
+/// delete goes through a second handle to the same file (`ReOpenFile`), so
+/// no path is resolved again. `handle` must share delete access, as every
+/// `std.fs` open does. Flags as std's `DeleteFile`: POSIX semantics, and the
+/// legacy class where a file system refuses the Ex one (FAT).
+pub fn deleteOpenedFile(handle: windows.HANDLE) DeleteOpenedFileError!void {
+    const delete_handle = exp.kernel32.ReOpenFile(
+        handle,
+        windows.DELETE,
+        windows.FILE_SHARE_READ | windows.FILE_SHARE_WRITE | windows.FILE_SHARE_DELETE,
+        0,
+    );
+    if (delete_handle == windows.INVALID_HANDLE_VALUE) return switch (windows.GetLastError()) {
+        .ACCESS_DENIED, .SHARING_VIOLATION => error.AccessDenied,
+        else => |err| windows.unexpectedError(err),
+    };
+    defer windows.CloseHandle(delete_handle);
+
+    var io: windows.IO_STATUS_BLOCK = undefined;
+    var info_ex: windows.FILE_DISPOSITION_INFORMATION_EX = .{
+        .Flags = FILE_DISPOSITION_DELETE |
+            FILE_DISPOSITION_POSIX_SEMANTICS |
+            FILE_DISPOSITION_IGNORE_READONLY_ATTRIBUTE,
+    };
+    var rc = windows.ntdll.NtSetInformationFile(
+        delete_handle,
+        &io,
+        &info_ex,
+        @sizeOf(windows.FILE_DISPOSITION_INFORMATION_EX),
+        .FileDispositionInformationEx,
+    );
+    if (rc == .INVALID_PARAMETER) {
+        var info: windows.FILE_DISPOSITION_INFORMATION = .{ .DeleteFile = windows.TRUE };
+        rc = windows.ntdll.NtSetInformationFile(
+            delete_handle,
+            &io,
+            &info,
+            @sizeOf(windows.FILE_DISPOSITION_INFORMATION),
+            .FileDispositionInformation,
+        );
+    }
+    return switch (rc) {
+        .SUCCESS => {},
+        .ACCESS_DENIED, .CANNOT_DELETE, .MEDIA_WRITE_PROTECTED => error.AccessDenied,
+        else => windows.unexpectedStatus(rc),
+    };
+}
+
+// FILE_DISPOSITION_INFORMATION_EX flags (ntifs.h); std keeps its copies private.
+const FILE_DISPOSITION_DELETE: windows.ULONG = 0x00000001;
+const FILE_DISPOSITION_POSIX_SEMANTICS: windows.ULONG = 0x00000002;
+const FILE_DISPOSITION_IGNORE_READONLY_ATTRIBUTE: windows.ULONG = 0x00000010;
+
 /// Inject at the OS boundary so tests enter through the real production callers.
 /// The override and its dispatch are absent from non-test builds. Thread-local
 /// state keeps a test's refusal from affecting unrelated worker threads.
@@ -721,6 +776,14 @@ pub const exp = struct {
             nBufferLength: windows.DWORD,
             lpBuffer: windows.LPWSTR,
         ) callconv(.winapi) windows.DWORD;
+        /// https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-reopenfile
+        /// Fails with INVALID_HANDLE_VALUE, not NULL.
+        pub extern "kernel32" fn ReOpenFile(
+            hOriginalFile: windows.HANDLE,
+            dwDesiredAccess: windows.DWORD,
+            dwShareMode: windows.DWORD,
+            dwFlagsAndAttributes: windows.DWORD,
+        ) callconv(.winapi) windows.HANDLE;
     };
 
     /// The `NameType` values of `GetComputerNameExW` that name this machine.

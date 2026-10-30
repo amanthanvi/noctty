@@ -8,6 +8,7 @@ const posix = std.posix;
 const fastmem = @import("../../fastmem.zig");
 const command = @import("graphics_command.zig");
 const kitty_windows = @import("windows.zig");
+const os_windows = @import("../../os/windows.zig");
 const PageList = @import("../PageList.zig");
 const wuffs = @import("wuffs");
 const LimitedAllocator = @import("../../datastruct/main.zig").LimitedAllocator;
@@ -253,15 +254,12 @@ pub const LoadingImage = struct {
             return error.InvalidData;
         };
 
-        // We'll populate a delete path if this is a temporary file.
+        // We'll populate a delete path if this is a temporary file. It is
+        // deleted before the handle closes; see deleteTemporaryFile.
         var delete_path: ?[]const u8 = null;
         defer {
+            if (delete_path) |p| deleteTemporaryFile(file, p);
             file.close();
-            if (delete_path) |p| {
-                std.fs.cwd().deleteFile(p) catch |err| {
-                    log.warn("failed to delete temporary file: {}", .{err});
-                };
-            }
         }
 
         // Derive the path from the open handle so the file we validate is the
@@ -357,6 +355,20 @@ pub const LoadingImage = struct {
         }
 
         return path;
+    }
+
+    /// Deletes a temporary file that was validated and read: `file` is the
+    /// open handle, `path` the canonical path validatedFilePath returned.
+    /// On Windows the delete goes through the handle, so it removes the
+    /// file that was checked even if a path component was swapped since.
+    fn deleteTemporaryFile(file: std.fs.File, path: []const u8) void {
+        const result = if (comptime builtin.os.tag == .windows)
+            os_windows.deleteOpenedFile(file.handle)
+        else
+            std.fs.cwd().deleteFile(path);
+        result catch |err| {
+            log.warn("failed to delete temporary file: {}", .{err});
+        };
     }
 
     /// Returns true if path appears to be in a temporary directory.
@@ -1276,6 +1288,32 @@ test "image load: the opened file is validated, not what its path names later" {
     defer fresh.close();
     const fresh_path = try LoadingImage.validatedFilePath(fresh, &buf);
     try testing.expect(try LoadingImage.isPathInTempDir(alloc, fresh_path));
+}
+
+test "image load: a temporary file is deleted through its handle, not by its validated path" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const testing = std.testing;
+
+    var tmp_dir = try temp_dir.TempDir.init();
+    defer tmp_dir.deinit();
+    const name = "tty-graphics-protocol-image.data";
+    try tmp_dir.dir.writeFile(.{ .sub_path = name, .data = "validated" });
+
+    const file = try tmp_dir.dir.openFile(name, .{});
+    defer file.close();
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const path = try LoadingImage.validatedFilePath(file, &buf);
+
+    // After the checks, the validated path comes to name another file.
+    try tmp_dir.dir.rename(name, "moved.data");
+    try tmp_dir.dir.writeFile(.{ .sub_path = name, .data = "other" });
+
+    LoadingImage.deleteTemporaryFile(file, path);
+
+    try testing.expectError(error.FileNotFound, tmp_dir.dir.access("moved.data", .{}));
+    var other_buf: [16]u8 = undefined;
+    try testing.expectEqualStrings("other", try tmp_dir.dir.readFile(name, &other_buf));
 }
 
 test "image load: windows UNC path is rejected before open" {
