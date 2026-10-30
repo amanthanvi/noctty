@@ -6148,7 +6148,7 @@ test "PageList init more than max cols" {
 
     // We expect a single, non-standard page
     try testing.expect(s.pages.first != null);
-    try testing.expect(s.pages.first.?.data.memory.len > std_size);
+    try testing.expect(s.pages.first.?.page().memory.len > std_size);
 
     // Initial total rows should be our row count
     try testing.expectEqual(s.rows, s.total_rows);
@@ -6232,17 +6232,17 @@ test "PageList pointFromPin active from prior page" {
     var s = try init(alloc, 80, 24, null);
     defer s.deinit();
     // Grow so we take up at least 5 pages.
-    const page = &s.pages.last.?.data;
+    const page = s.pages.last.?.page();
     var cur_page = s.pages.last.?;
-    cur_page.data.pauseIntegrityChecks(true);
+    cur_page.page().pauseIntegrityChecks(true);
     for (0..page.capacity.rows * 5) |_| {
         if (try s.grow()) |new_page| {
-            cur_page.data.pauseIntegrityChecks(false);
+            cur_page.page().pauseIntegrityChecks(false);
             cur_page = new_page;
-            cur_page.data.pauseIntegrityChecks(true);
+            cur_page.page().pauseIntegrityChecks(true);
         }
     }
-    cur_page.data.pauseIntegrityChecks(false);
+    cur_page.page().pauseIntegrityChecks(false);
 
     {
         try testing.expectEqual(point.Point{
@@ -6275,17 +6275,17 @@ test "PageList pointFromPin traverse pages" {
     defer s.deinit();
 
     // Grow so we take up at least 2 pages.
-    const page = &s.pages.last.?.data;
+    const page = s.pages.last.?.page();
     var cur_page = s.pages.last.?;
-    cur_page.data.pauseIntegrityChecks(true);
+    cur_page.page().pauseIntegrityChecks(true);
     for (0..page.capacity.rows * 2) |_| {
         if (try s.grow()) |new_page| {
-            cur_page.data.pauseIntegrityChecks(false);
+            cur_page.page().pauseIntegrityChecks(false);
             cur_page = new_page;
-            cur_page.data.pauseIntegrityChecks(true);
+            cur_page.page().pauseIntegrityChecks(true);
         }
     }
-    cur_page.data.pauseIntegrityChecks(false);
+    cur_page.page().pauseIntegrityChecks(false);
 
     {
         const pages = s.totalPages();
@@ -6375,8 +6375,8 @@ test "PageList grow allows exceeding max size for active area" {
     {
         var it = s.pages.first;
         while (it) |page| : (it = page.next) {
-            page.data.size.rows = 1;
-            page.data.capacity.rows = 1;
+            page.page().size.rows = 1;
+            page.page().capacity.rows = 1;
         }
 
         // Avoid integrity check failures
@@ -6391,7 +6391,7 @@ test "PageList grow allows exceeding max size for active area" {
 
 fn fillLastPageForTest(self: *PageList) !void {
     const last = self.pages.last.?;
-    while (last.data.size.rows < last.data.capacity.rows) _ = try self.grow();
+    while (last.rows() < last.capacity().rows) _ = try self.grow();
 }
 
 fn expectLivePageSerialsValidForTest(self: *const PageList) !void {
@@ -6421,7 +6421,7 @@ test "PageList bounded pruning after split invalidation preserves live serials" 
 
     try s.split(.{
         .node = first,
-        .y = first.data.size.rows / 2,
+        .y = first.rows() / 2,
         .x = 0,
     });
     try testing.expect(!s.nodeIsValid(first, old_serial));
@@ -6446,7 +6446,7 @@ test "PageList repeated bounded pruning after split preserves live serials" {
     const first = s.pages.first.?;
     try s.split(.{
         .node = first,
-        .y = first.data.size.rows / 2,
+        .y = first.rows() / 2,
         .x = 0,
     });
 
@@ -6454,7 +6454,7 @@ test "PageList repeated bounded pruning after split preserves live serials" {
     // Prune both the old source and then that target to exercise the serial
     // floor after list order has become non-monotonic.
     for (0..2) |_| {
-        while (s.pages.last.?.data.size.rows < s.pages.last.?.data.capacity.rows) {
+        while (s.pages.last.?.rows() < s.pages.last.?.capacity().rows) {
             _ = try s.grow();
         }
         _ = try s.grow();
@@ -6529,7 +6529,7 @@ test "PageList grow prune required with a single page" {
         // This is important because it triggers a scenario where our calculated
         // minSize() which is supposed to accommodate 2 pages is no longer true.
         while (true) {
-            const layout = Page.layout(s.pages.first.?.data.capacity);
+            const layout = Page.layout(s.pages.first.?.capacity());
             if (layout.total_size > std_size) break;
             _ = try s.increaseCapacity(s.pages.first.?, .grapheme_bytes);
         }
@@ -6542,7 +6542,7 @@ test "PageList grow prune required with a single page" {
     // page.
     const rem = rem: {
         const page = s.pages.first.?;
-        break :rem page.data.capacity.rows - page.data.size.rows;
+        break :rem page.capacity().rows - page.rows();
     };
     for (0..rem) |_| try testing.expect(try s.grow() == null);
 
@@ -7476,7 +7476,7 @@ test "PageList: jump zero prompts" {
     defer s.deinit();
     try s.growRows(3);
     try testing.expect(s.pages.first == s.pages.last);
-    const page = &s.pages.first.?.data;
+    const page = s.pages.first.?.page();
     {
         const rac = page.getRowAndCell(0, 1);
         rac.row.semantic_prompt = .prompt;
@@ -7514,7 +7514,7 @@ test "Screen: jump back one prompt" {
     defer s.deinit();
     try s.growRows(3);
     try testing.expect(s.pages.first == s.pages.last);
-    const page = &s.pages.first.?.data;
+    const page = s.pages.first.?.page();
     {
         const rac = page.getRowAndCell(0, 1);
         rac.row.semantic_prompt = .prompt;
@@ -7632,7 +7632,7 @@ test "PageList grow fit in capacity" {
     defer s.deinit();
 
     // So we know we're using capacity to grow
-    const last = &s.pages.last.?.data;
+    const last = s.pages.last.?.page();
     try testing.expect(last.size.rows < last.capacity.rows);
 
     // Grow
@@ -7655,7 +7655,7 @@ test "PageList grow allocate" {
 
     // Grow to capacity
     const last_node = s.pages.last.?;
-    const last = &s.pages.last.?.data;
+    const last = s.pages.last.?.page();
     for (0..last.capacity.rows - last.size.rows) |_| {
         try testing.expect(try s.grow() == null);
     }
@@ -7684,14 +7684,14 @@ test "PageList grow prune scrollback" {
 
     // Grow to capacity
     const page1_node = s.pages.last.?;
-    const page1 = page1_node.data;
+    const page1 = page1_node.page();
     for (0..page1.capacity.rows - page1.size.rows) |_| {
         try testing.expect(try s.grow() == null);
     }
 
     // Grow and allocate one more page. Then fill that page up.
     const page2_node = (try s.grow()).?;
-    const page2 = page2_node.data;
+    const page2 = page2_node.page();
     for (0..page2.capacity.rows - page2.size.rows) |_| {
         try testing.expect(try s.grow() == null);
     }
@@ -7753,14 +7753,14 @@ test "PageList grow prune scrollback with viewport pin not in pruned page" {
 
     // Grow to capacity of first page
     const page1_node = s.pages.last.?;
-    const page1 = page1_node.data;
+    const page1 = page1_node.page();
     for (0..page1.capacity.rows - page1.size.rows) |_| {
         try testing.expect(try s.grow() == null);
     }
 
     // Grow and allocate second page, then fill it up
     const page2_node = (try s.grow()).?;
-    const page2 = page2_node.data;
+    const page2 = page2_node.page();
     for (0..page2.capacity.rows - page2.size.rows) |_| {
         try testing.expect(try s.grow() == null);
     }
@@ -7811,7 +7811,7 @@ test "PageList eraseRows invalidates viewport offset cache" {
     defer s.deinit();
 
     // Grow so we take up several pages worth of history
-    const page = &s.pages.last.?.data;
+    const page = s.pages.last.?.page();
     {
         var cur_page = s.pages.last.?;
         for (0..page.capacity.rows * 3) |_| {
@@ -7851,7 +7851,7 @@ test "PageList eraseRow invalidates viewport offset cache" {
     defer s.deinit();
 
     // Grow so we take up several pages worth of history
-    const page = &s.pages.last.?.data;
+    const page = s.pages.last.?.page();
     {
         var cur_page = s.pages.last.?;
         for (0..page.capacity.rows * 3) |_| {
@@ -7890,7 +7890,7 @@ test "PageList eraseRowBounded invalidates viewport offset cache" {
     defer s.deinit();
 
     // Grow so we take up several pages worth of history
-    const page = &s.pages.last.?.data;
+    const page = s.pages.last.?.page();
     {
         var cur_page = s.pages.last.?;
         for (0..page.capacity.rows * 3) |_| {
@@ -7930,7 +7930,7 @@ test "PageList eraseRowBounded multi-page invalidates viewport offset cache" {
     defer s.deinit();
 
     // Grow so we take up several pages worth of history
-    const page = &s.pages.last.?.data;
+    const page = s.pages.last.?.page();
     {
         var cur_page = s.pages.last.?;
         for (0..page.capacity.rows * 3) |_| {
@@ -7971,7 +7971,7 @@ test "PageList eraseRowBounded full page shift invalidates viewport offset cache
     defer s.deinit();
 
     // Grow so we take up several pages worth of history
-    const page = &s.pages.last.?.data;
+    const page = s.pages.last.?.page();
     {
         var cur_page = s.pages.last.?;
         for (0..page.capacity.rows * 4) |_| {
@@ -8014,7 +8014,7 @@ test "PageList eraseRowBounded exhausts pages invalidates viewport offset cache"
     defer s.deinit();
 
     // Grow so we take up several pages worth of history
-    const page = &s.pages.last.?.data;
+    const page = s.pages.last.?.page();
     {
         var cur_page = s.pages.last.?;
         for (0..page.capacity.rows * 3) |_| {
@@ -8058,11 +8058,11 @@ test "PageList increaseCapacity to increase styles" {
     var s = try init(alloc, 2, 2, 0);
     defer s.deinit();
 
-    const original_styles_cap = s.pages.first.?.data.capacity.styles;
+    const original_styles_cap = s.pages.first.?.capacity().styles;
 
     {
         try testing.expect(s.pages.first == s.pages.last);
-        const page = &s.pages.first.?.data;
+        const page = s.pages.first.?.page();
 
         // Write all our data so we can assert its the same after
         for (0..s.rows) |y| {
@@ -8081,7 +8081,7 @@ test "PageList increaseCapacity to increase styles" {
 
     {
         try testing.expect(s.pages.first == s.pages.last);
-        const page = &s.pages.first.?.data;
+        const page = s.pages.first.?.page();
 
         // Verify capacity doubled
         try testing.expectEqual(
@@ -8109,11 +8109,11 @@ test "PageList increaseCapacity to increase graphemes" {
     var s = try init(alloc, 2, 2, 0);
     defer s.deinit();
 
-    const original_cap = s.pages.first.?.data.capacity.grapheme_bytes;
+    const original_cap = s.pages.first.?.capacity().grapheme_bytes;
 
     {
         try testing.expect(s.pages.first == s.pages.last);
-        const page = &s.pages.first.?.data;
+        const page = s.pages.first.?.page();
 
         for (0..s.rows) |y| {
             for (0..s.cols) |x| {
@@ -8130,7 +8130,7 @@ test "PageList increaseCapacity to increase graphemes" {
 
     {
         try testing.expect(s.pages.first == s.pages.last);
-        const page = &s.pages.first.?.data;
+        const page = s.pages.first.?.page();
 
         try testing.expectEqual(original_cap * 2, page.capacity.grapheme_bytes);
 
@@ -8153,11 +8153,11 @@ test "PageList increaseCapacity to increase hyperlinks" {
     var s = try init(alloc, 2, 2, 0);
     defer s.deinit();
 
-    const original_cap = s.pages.first.?.data.capacity.hyperlink_bytes;
+    const original_cap = s.pages.first.?.capacity().hyperlink_bytes;
 
     {
         try testing.expect(s.pages.first == s.pages.last);
-        const page = &s.pages.first.?.data;
+        const page = s.pages.first.?.page();
 
         for (0..s.rows) |y| {
             for (0..s.cols) |x| {
@@ -8174,7 +8174,7 @@ test "PageList increaseCapacity to increase hyperlinks" {
 
     {
         try testing.expect(s.pages.first == s.pages.last);
-        const page = &s.pages.first.?.data;
+        const page = s.pages.first.?.page();
 
         try testing.expectEqual(original_cap * 2, page.capacity.hyperlink_bytes);
 
@@ -8197,11 +8197,11 @@ test "PageList increaseCapacity to increase string_bytes" {
     var s = try init(alloc, 2, 2, 0);
     defer s.deinit();
 
-    const original_cap = s.pages.first.?.data.capacity.string_bytes;
+    const original_cap = s.pages.first.?.capacity().string_bytes;
 
     {
         try testing.expect(s.pages.first == s.pages.last);
-        const page = &s.pages.first.?.data;
+        const page = s.pages.first.?.page();
 
         for (0..s.rows) |y| {
             for (0..s.cols) |x| {
@@ -8218,7 +8218,7 @@ test "PageList increaseCapacity to increase string_bytes" {
 
     {
         try testing.expect(s.pages.first == s.pages.last);
-        const page = &s.pages.first.?.data;
+        const page = s.pages.first.?.page();
 
         try testing.expectEqual(original_cap * 2, page.capacity.string_bytes);
 
@@ -8273,7 +8273,7 @@ test "PageList increaseCapacity returns OutOfSpace at max capacity" {
         ) catch |err| {
             // Before OutOfSpace, we should have reached maxInt
             try testing.expectEqual(error.OutOfSpace, err);
-            try testing.expectEqual(max_styles, s.pages.first.?.data.capacity.styles);
+            try testing.expectEqual(max_styles, s.pages.first.?.capacity().styles);
             break;
         };
     }
@@ -8291,7 +8291,7 @@ test "PageList increaseCapacity after col shrink" {
     try testing.expectEqual(5, s.cols);
 
     {
-        const page = &s.pages.first.?.data;
+        const page = s.pages.first.?.page();
         try testing.expectEqual(5, page.size.cols);
         try testing.expect(page.capacity.cols >= 10);
     }
@@ -8300,7 +8300,7 @@ test "PageList increaseCapacity after col shrink" {
     _ = try s.increaseCapacity(s.pages.first.?, .styles);
 
     {
-        const page = &s.pages.first.?.data;
+        const page = s.pages.first.?.page();
         // size.cols should still be 5, not reverted to capacity.cols
         try testing.expectEqual(5, page.size.cols);
         try testing.expectEqual(5, s.cols);
@@ -8316,19 +8316,19 @@ test "PageList increaseCapacity multi-page" {
 
     // Grow to create a second page
     const page1_node = s.pages.last.?;
-    page1_node.data.pauseIntegrityChecks(true);
-    for (0..page1_node.data.capacity.rows - page1_node.data.size.rows) |_| {
+    page1_node.page().pauseIntegrityChecks(true);
+    for (0..page1_node.capacity().rows - page1_node.rows()) |_| {
         try testing.expect(try s.grow() == null);
     }
-    page1_node.data.pauseIntegrityChecks(false);
+    page1_node.page().pauseIntegrityChecks(false);
     try testing.expect(try s.grow() != null);
 
     // Now we have two pages
     try testing.expect(s.pages.first != s.pages.last);
     const page2_node = s.pages.last.?;
 
-    const page1_styles_cap = s.pages.first.?.data.capacity.styles;
-    const page2_styles_cap = page2_node.data.capacity.styles;
+    const page1_styles_cap = s.pages.first.?.capacity().styles;
+    const page2_styles_cap = page2_node.capacity().styles;
 
     // Increase capacity on the first page only
     _ = try s.increaseCapacity(s.pages.first.?, .styles);
@@ -8336,13 +8336,13 @@ test "PageList increaseCapacity multi-page" {
     // First page capacity should be doubled
     try testing.expectEqual(
         page1_styles_cap * 2,
-        s.pages.first.?.data.capacity.styles,
+        s.pages.first.?.capacity().styles,
     );
 
     // Second page should be unchanged
     try testing.expectEqual(
         page2_styles_cap,
-        s.pages.last.?.data.capacity.styles,
+        s.pages.last.?.capacity().styles,
     );
 }
 
@@ -8354,7 +8354,7 @@ test "PageList increaseCapacity preserves dirty flag" {
     defer s.deinit();
 
     // Set page dirty flag and mark some rows as dirty
-    const page = &s.pages.first.?.data;
+    const page = s.pages.first.?.page();
     page.dirty = true;
 
     const rows = page.rows.ptr(page.memory);
@@ -8367,10 +8367,10 @@ test "PageList increaseCapacity preserves dirty flag" {
     const new_node = try s.increaseCapacity(s.pages.first.?, .styles);
 
     // The page dirty flag should be preserved
-    try testing.expect(new_node.data.dirty);
+    try testing.expect(new_node.page().dirty);
 
     // Row dirty flags should be preserved
-    const new_rows = new_node.data.rows.ptr(new_node.data.memory);
+    const new_rows = new_node.page().rows.ptr(new_node.page().memory);
     try testing.expect(new_rows[0].dirty);
     try testing.expect(!new_rows[1].dirty);
     try testing.expect(new_rows[2].dirty);
@@ -8409,12 +8409,12 @@ test "PageList pageIterator two pages" {
 
     // Grow to capacity
     const page1_node = s.pages.last.?;
-    const page1 = page1_node.data;
-    page1_node.data.pauseIntegrityChecks(true);
+    const page1 = page1_node.page();
+    page1_node.page().pauseIntegrityChecks(true);
     for (0..page1.capacity.rows - page1.size.rows) |_| {
         try testing.expect(try s.grow() == null);
     }
-    page1_node.data.pauseIntegrityChecks(false);
+    page1_node.page().pauseIntegrityChecks(false);
     try testing.expect(try s.grow() != null);
 
     // Iterate the active area
@@ -8422,9 +8422,9 @@ test "PageList pageIterator two pages" {
     {
         const chunk = it.next().?;
         try testing.expect(chunk.node == s.pages.first.?);
-        const start = chunk.node.data.size.rows - s.rows + 1;
+        const start = chunk.node.rows() - s.rows + 1;
         try testing.expectEqual(start, chunk.start);
-        try testing.expectEqual(chunk.node.data.size.rows, chunk.end);
+        try testing.expectEqual(chunk.node.rows(), chunk.end);
     }
     {
         const chunk = it.next().?;
@@ -8445,12 +8445,12 @@ test "PageList pageIterator history two pages" {
 
     // Grow to capacity
     const page1_node = s.pages.last.?;
-    const page1 = page1_node.data;
-    page1_node.data.pauseIntegrityChecks(true);
+    const page1 = page1_node.page();
+    page1_node.page().pauseIntegrityChecks(true);
     for (0..page1.capacity.rows - page1.size.rows) |_| {
         try testing.expect(try s.grow() == null);
     }
-    page1_node.data.pauseIntegrityChecks(false);
+    page1_node.page().pauseIntegrityChecks(false);
     try testing.expect(try s.grow() != null);
 
     // Iterate the active area
@@ -8498,12 +8498,12 @@ test "PageList pageIterator reverse two pages" {
 
     // Grow to capacity
     const page1_node = s.pages.last.?;
-    const page1 = page1_node.data;
-    page1_node.data.pauseIntegrityChecks(true);
+    const page1 = page1_node.page();
+    page1_node.page().pauseIntegrityChecks(true);
     for (0..page1.capacity.rows - page1.size.rows) |_| {
         try testing.expect(try s.grow() == null);
     }
-    page1_node.data.pauseIntegrityChecks(false);
+    page1_node.page().pauseIntegrityChecks(false);
     try testing.expect(try s.grow() != null);
 
     // Iterate the active area
@@ -8520,9 +8520,9 @@ test "PageList pageIterator reverse two pages" {
     {
         const chunk = it.next().?;
         try testing.expect(chunk.node == s.pages.first.?);
-        const start = chunk.node.data.size.rows - s.rows + 1;
+        const start = chunk.node.rows() - s.rows + 1;
         try testing.expectEqual(start, chunk.start);
-        try testing.expectEqual(chunk.node.data.size.rows, chunk.end);
+        try testing.expectEqual(chunk.node.rows(), chunk.end);
         count += chunk.end - chunk.start;
     }
     try testing.expect(it.next() == null);
@@ -8538,12 +8538,12 @@ test "PageList pageIterator reverse history two pages" {
 
     // Grow to capacity
     const page1_node = s.pages.last.?;
-    const page1 = page1_node.data;
-    page1_node.data.pauseIntegrityChecks(true);
+    const page1 = page1_node.page();
+    page1_node.page().pauseIntegrityChecks(true);
     for (0..page1.capacity.rows - page1.size.rows) |_| {
         try testing.expect(try s.grow() == null);
     }
-    page1_node.data.pauseIntegrityChecks(false);
+    page1_node.page().pauseIntegrityChecks(false);
     try testing.expect(try s.grow() != null);
 
     // Iterate the active area
@@ -8566,7 +8566,7 @@ test "PageList cellIterator" {
     var s = try init(alloc, 2, 2, 0);
     defer s.deinit();
     try testing.expect(s.pages.first == s.pages.last);
-    const page = &s.pages.first.?.data;
+    const page = s.pages.first.?.page();
     for (0..s.rows) |y| {
         for (0..s.cols) |x| {
             const rac = page.getRowAndCell(x, y);
@@ -8616,7 +8616,7 @@ test "PageList cellIterator reverse" {
     var s = try init(alloc, 2, 2, 0);
     defer s.deinit();
     try testing.expect(s.pages.first == s.pages.last);
-    const page = &s.pages.first.?.data;
+    const page = s.pages.first.?.page();
     for (0..s.rows) |y| {
         for (0..s.cols) |x| {
             const rac = page.getRowAndCell(x, y);
@@ -8666,7 +8666,7 @@ test "PageList promptIterator left_up" {
     var s = try init(alloc, 2, 20, 0);
     defer s.deinit();
     try testing.expect(s.pages.first == s.pages.last);
-    const page = &s.pages.first.?.data;
+    const page = s.pages.first.?.page();
     // Normal prompt
     {
         const rac = page.getRowAndCell(0, 3);
@@ -8723,7 +8723,7 @@ test "PageList promptIterator right_down" {
     var s = try init(alloc, 2, 20, 0);
     defer s.deinit();
     try testing.expect(s.pages.first == s.pages.last);
-    const page = &s.pages.first.?.data;
+    const page = s.pages.first.?.page();
     // Normal prompt
     {
         const rac = page.getRowAndCell(0, 3);
@@ -8780,7 +8780,7 @@ test "PageList promptIterator right_down continuation at start" {
     var s = try init(alloc, 2, 20, 0);
     defer s.deinit();
     try testing.expect(s.pages.first == s.pages.last);
-    const page = &s.pages.first.?.data;
+    const page = s.pages.first.?.page();
 
     // Prompt continuation at row 0 (no prior rows - simulates trimmed scrollback)
     {
@@ -8823,7 +8823,7 @@ test "PageList promptIterator right_down with prompt before continuation" {
     var s = try init(alloc, 2, 20, 0);
     defer s.deinit();
     try testing.expect(s.pages.first == s.pages.last);
-    const page = &s.pages.first.?.data;
+    const page = s.pages.first.?.page();
 
     // Prompt on row 2, continuation on rows 3-4
     // Starting iteration from row 3 should still find the prompt at row 2
@@ -8862,7 +8862,7 @@ test "PageList promptIterator right_down limit inclusive" {
     var s = try init(alloc, 2, 20, 0);
     defer s.deinit();
     try testing.expect(s.pages.first == s.pages.last);
-    const page = &s.pages.first.?.data;
+    const page = s.pages.first.?.page();
 
     // Prompt on row 5
     {
@@ -8894,7 +8894,7 @@ test "PageList promptIterator left_up limit inclusive" {
     var s = try init(alloc, 2, 20, 0);
     defer s.deinit();
     try testing.expect(s.pages.first == s.pages.last);
-    const page = &s.pages.first.?.data;
+    const page = s.pages.first.?.page();
 
     // Prompt on row 5
     {
@@ -8927,7 +8927,7 @@ test "PageList highlightSemanticContent prompt" {
     var s = try init(alloc, 10, 20, 0);
     defer s.deinit();
     try testing.expect(s.pages.first == s.pages.last);
-    const page = &s.pages.first.?.data;
+    const page = s.pages.first.?.page();
 
     // Prompt on row 5
     {
@@ -8981,7 +8981,7 @@ test "PageList highlightSemanticContent prompt with output" {
     var s = try init(alloc, 10, 20, 0);
     defer s.deinit();
     try testing.expect(s.pages.first == s.pages.last);
-    const page = &s.pages.first.?.data;
+    const page = s.pages.first.?.page();
 
     // Prompt on row 5
     {
@@ -9046,7 +9046,7 @@ test "PageList highlightSemanticContent prompt multiline" {
     var s = try init(alloc, 10, 20, 0);
     defer s.deinit();
     try testing.expect(s.pages.first == s.pages.last);
-    const page = &s.pages.first.?.data;
+    const page = s.pages.first.?.page();
 
     // Prompt starts on row 5
     {
@@ -9102,7 +9102,7 @@ test "PageList highlightSemanticContent prompt only" {
     var s = try init(alloc, 10, 20, 0);
     defer s.deinit();
     try testing.expect(s.pages.first == s.pages.last);
-    const page = &s.pages.first.?.data;
+    const page = s.pages.first.?.page();
 
     // Prompt on row 5 with only prompt content (no input)
     {
@@ -9146,7 +9146,7 @@ test "PageList highlightSemanticContent prompt to end of screen" {
     var s = try init(alloc, 10, 20, 0);
     defer s.deinit();
     try testing.expect(s.pages.first == s.pages.last);
-    const page = &s.pages.first.?.data;
+    const page = s.pages.first.?.page();
 
     // Single prompt on row 15, no following prompt
     {
@@ -9194,7 +9194,7 @@ test "PageList highlightSemanticContent input basic" {
     var s = try init(alloc, 10, 20, 0);
     defer s.deinit();
     try testing.expect(s.pages.first == s.pages.last);
-    const page = &s.pages.first.?.data;
+    const page = s.pages.first.?.page();
 
     // Prompt on row 5
     {
@@ -9249,7 +9249,7 @@ test "PageList highlightSemanticContent input with output" {
     var s = try init(alloc, 10, 20, 0);
     defer s.deinit();
     try testing.expect(s.pages.first == s.pages.last);
-    const page = &s.pages.first.?.data;
+    const page = s.pages.first.?.page();
 
     // Prompt on row 5
     {
@@ -9314,7 +9314,7 @@ test "PageList highlightSemanticContent input multiline with continuation" {
     var s = try init(alloc, 10, 20, 0);
     defer s.deinit();
     try testing.expect(s.pages.first == s.pages.last);
-    const page = &s.pages.first.?.data;
+    const page = s.pages.first.?.page();
 
     // Prompt on row 5
     {
@@ -9391,7 +9391,7 @@ test "PageList highlightSemanticContent input no input returns null" {
     var s = try init(alloc, 10, 20, 0);
     defer s.deinit();
     try testing.expect(s.pages.first == s.pages.last);
-    const page = &s.pages.first.?.data;
+    const page = s.pages.first.?.page();
 
     // Prompt on row 5 with only prompt, then immediately output
     {
@@ -9439,7 +9439,7 @@ test "PageList highlightSemanticContent input to end of screen" {
     var s = try init(alloc, 10, 20, 0);
     defer s.deinit();
     try testing.expect(s.pages.first == s.pages.last);
-    const page = &s.pages.first.?.data;
+    const page = s.pages.first.?.page();
 
     // Single prompt on row 15, no following prompt
     {
@@ -9487,7 +9487,7 @@ test "PageList highlightSemanticContent input prompt only returns null" {
     var s = try init(alloc, 10, 20, 0);
     defer s.deinit();
     try testing.expect(s.pages.first == s.pages.last);
-    const page = &s.pages.first.?.data;
+    const page = s.pages.first.?.page();
 
     // Prompt on row 5 with only prompt content, no input or output
     {
@@ -9534,7 +9534,7 @@ test "PageList highlightSemanticContent output basic" {
     var s = try init(alloc, 10, 20, 0);
     defer s.deinit();
     try testing.expect(s.pages.first == s.pages.last);
-    const page = &s.pages.first.?.data;
+    const page = s.pages.first.?.page();
 
     // Prompt on row 5
     {
@@ -9605,7 +9605,7 @@ test "PageList highlightSemanticContent output multiline" {
     var s = try init(alloc, 10, 20, 0);
     defer s.deinit();
     try testing.expect(s.pages.first == s.pages.last);
-    const page = &s.pages.first.?.data;
+    const page = s.pages.first.?.page();
 
     // Prompt on row 5
     {
@@ -9696,7 +9696,7 @@ test "PageList highlightSemanticContent output stops at next prompt" {
     var s = try init(alloc, 10, 20, 0);
     defer s.deinit();
     try testing.expect(s.pages.first == s.pages.last);
-    const page = &s.pages.first.?.data;
+    const page = s.pages.first.?.page();
 
     // Prompt on row 5
     {
@@ -9781,7 +9781,7 @@ test "PageList highlightSemanticContent output to end of screen" {
     var s = try init(alloc, 10, 20, 0);
     defer s.deinit();
     try testing.expect(s.pages.first == s.pages.last);
-    const page = &s.pages.first.?.data;
+    const page = s.pages.first.?.page();
 
     // Single prompt on row 15, no following prompt
     {
@@ -9853,7 +9853,7 @@ test "PageList highlightSemanticContent output no output returns null" {
     var s = try init(alloc, 10, 20, 0);
     defer s.deinit();
     try testing.expect(s.pages.first == s.pages.last);
-    const page = &s.pages.first.?.data;
+    const page = s.pages.first.?.page();
 
     // Prompt on row 5 with only prompt and input, no output
     {
@@ -9913,7 +9913,7 @@ test "PageList highlightSemanticContent output skips empty cells" {
     var s = try init(alloc, 10, 20, 0);
     defer s.deinit();
     try testing.expect(s.pages.first == s.pages.last);
-    const page = &s.pages.first.?.data;
+    const page = s.pages.first.?.page();
 
     // Prompt on row 5 - only fills first 3 cells, rest are empty with default .output
     {
@@ -9992,17 +9992,17 @@ test "PageList erase" {
     try testing.expectEqual(@as(usize, 1), s.totalPages());
 
     // Grow so we take up at least 5 pages.
-    const page = &s.pages.last.?.data;
+    const page = s.pages.last.?.page();
     var cur_page = s.pages.last.?;
-    cur_page.data.pauseIntegrityChecks(true);
+    cur_page.page().pauseIntegrityChecks(true);
     for (0..page.capacity.rows * 5) |_| {
         if (try s.grow()) |new_page| {
-            cur_page.data.pauseIntegrityChecks(false);
+            cur_page.page().pauseIntegrityChecks(false);
             cur_page = new_page;
-            cur_page.data.pauseIntegrityChecks(true);
+            cur_page.page().pauseIntegrityChecks(true);
         }
     }
-    cur_page.data.pauseIntegrityChecks(false);
+    cur_page.page().pauseIntegrityChecks(false);
     try testing.expectEqual(@as(usize, 6), s.totalPages());
 
     // Our total rows should be large
@@ -10026,17 +10026,17 @@ test "PageList erase reaccounts page size" {
     const start_size = s.page_size;
 
     // Grow so we take up at least 5 pages.
-    const page = &s.pages.last.?.data;
+    const page = s.pages.last.?.page();
     var cur_page = s.pages.last.?;
-    cur_page.data.pauseIntegrityChecks(true);
+    cur_page.page().pauseIntegrityChecks(true);
     for (0..page.capacity.rows * 5) |_| {
         if (try s.grow()) |new_page| {
-            cur_page.data.pauseIntegrityChecks(false);
+            cur_page.page().pauseIntegrityChecks(false);
             cur_page = new_page;
-            cur_page.data.pauseIntegrityChecks(true);
+            cur_page.page().pauseIntegrityChecks(true);
         }
     }
-    cur_page.data.pauseIntegrityChecks(false);
+    cur_page.page().pauseIntegrityChecks(false);
     try testing.expect(s.page_size > start_size);
 
     // Erase the entire history, we should be back to just our active set.
@@ -10052,17 +10052,17 @@ test "PageList erase row with tracked pin resets to top-left" {
     defer s.deinit();
 
     // Grow so we take up at least 5 pages.
-    const page = &s.pages.last.?.data;
+    const page = s.pages.last.?.page();
     var cur_page = s.pages.last.?;
-    cur_page.data.pauseIntegrityChecks(true);
+    cur_page.page().pauseIntegrityChecks(true);
     for (0..page.capacity.rows * 5) |_| {
         if (try s.grow()) |new_page| {
-            cur_page.data.pauseIntegrityChecks(false);
+            cur_page.page().pauseIntegrityChecks(false);
             cur_page = new_page;
-            cur_page.data.pauseIntegrityChecks(true);
+            cur_page.page().pauseIntegrityChecks(true);
         }
     }
-    cur_page.data.pauseIntegrityChecks(false);
+    cur_page.page().pauseIntegrityChecks(false);
 
     // Our total rows should be large
     try testing.expect(s.total_rows > s.rows);
@@ -10159,17 +10159,17 @@ test "PageList erase resets viewport to active if moves within active" {
     defer s.deinit();
 
     // Grow so we take up at least 5 pages.
-    const page = &s.pages.last.?.data;
+    const page = s.pages.last.?.page();
     var cur_page = s.pages.last.?;
-    cur_page.data.pauseIntegrityChecks(true);
+    cur_page.page().pauseIntegrityChecks(true);
     for (0..page.capacity.rows * 5) |_| {
         if (try s.grow()) |new_page| {
-            cur_page.data.pauseIntegrityChecks(false);
+            cur_page.page().pauseIntegrityChecks(false);
             cur_page = new_page;
-            cur_page.data.pauseIntegrityChecks(true);
+            cur_page.page().pauseIntegrityChecks(true);
         }
     }
-    cur_page.data.pauseIntegrityChecks(false);
+    cur_page.page().pauseIntegrityChecks(false);
 
     // Move our viewport to the top
     s.scroll(.{ .delta_row = -@as(isize, @intCast(s.total_rows)) });
@@ -10188,17 +10188,17 @@ test "PageList erase resets viewport if inside erased page but not active" {
     defer s.deinit();
 
     // Grow so we take up at least 5 pages.
-    const page = &s.pages.last.?.data;
+    const page = s.pages.last.?.page();
     var cur_page = s.pages.last.?;
-    cur_page.data.pauseIntegrityChecks(true);
+    cur_page.page().pauseIntegrityChecks(true);
     for (0..page.capacity.rows * 5) |_| {
         if (try s.grow()) |new_page| {
-            cur_page.data.pauseIntegrityChecks(false);
+            cur_page.page().pauseIntegrityChecks(false);
             cur_page = new_page;
-            cur_page.data.pauseIntegrityChecks(true);
+            cur_page.page().pauseIntegrityChecks(true);
         }
     }
-    cur_page.data.pauseIntegrityChecks(false);
+    cur_page.page().pauseIntegrityChecks(false);
 
     // Move our viewport to the top
     s.scroll(.{ .delta_row = -@as(isize, @intCast(s.total_rows)) });
@@ -10217,17 +10217,17 @@ test "PageList erase resets viewport to active if top is inside active" {
     defer s.deinit();
 
     // Grow so we take up at least 5 pages.
-    const page = &s.pages.last.?.data;
+    const page = s.pages.last.?.page();
     var cur_page = s.pages.last.?;
-    cur_page.data.pauseIntegrityChecks(true);
+    cur_page.page().pauseIntegrityChecks(true);
     for (0..page.capacity.rows * 5) |_| {
         if (try s.grow()) |new_page| {
-            cur_page.data.pauseIntegrityChecks(false);
+            cur_page.page().pauseIntegrityChecks(false);
             cur_page = new_page;
-            cur_page.data.pauseIntegrityChecks(true);
+            cur_page.page().pauseIntegrityChecks(true);
         }
     }
-    cur_page.data.pauseIntegrityChecks(false);
+    cur_page.page().pauseIntegrityChecks(false);
 
     // Move our viewport to the top
     s.scroll(.{ .top = {} });
@@ -10257,7 +10257,7 @@ test "PageList erase a one-row active" {
     try testing.expectEqual(@as(usize, 1), s.totalPages());
 
     // Write our letter
-    const page = &s.pages.first.?.data;
+    const page = s.pages.first.?.page();
     for (0..s.rows) |y| {
         const rac = page.getRowAndCell(0, y);
         rac.cell.* = .{
@@ -10380,13 +10380,13 @@ test "PageList eraseRowBounded full rows two pages" {
 
     // Grow to two pages so our active area straddles
     {
-        const page = &s.pages.last.?.data;
+        const page = s.pages.last.?.page();
         page.pauseIntegrityChecks(true);
         for (0..page.capacity.rows - page.size.rows) |_| _ = try s.grow();
         page.pauseIntegrityChecks(false);
         try s.growRows(5);
         try testing.expectEqual(@as(usize, 2), s.totalPages());
-        try testing.expectEqual(@as(usize, 5), s.pages.last.?.data.size.rows);
+        try testing.expectEqual(@as(usize, 5), s.pages.last.?.rows());
     }
 
     // Pins
@@ -10401,11 +10401,11 @@ test "PageList eraseRowBounded full rows two pages" {
 
     {
         try testing.expectEqual(s.pages.last.?.prev.?, p_first.node);
-        try testing.expectEqual(@as(usize, p_first.node.data.size.rows - 1), p_first.y);
+        try testing.expectEqual(@as(usize, p_first.node.rows() - 1), p_first.y);
         try testing.expectEqual(@as(usize, 0), p_first.x);
 
         try testing.expectEqual(s.pages.last.?.prev.?, p_first_out.node);
-        try testing.expectEqual(@as(usize, p_first_out.node.data.size.rows - 2), p_first_out.y);
+        try testing.expectEqual(@as(usize, p_first_out.node.rows() - 2), p_first_out.y);
         try testing.expectEqual(@as(usize, 0), p_first_out.x);
 
         try testing.expectEqual(s.pages.last.?, p_in.node);
@@ -10428,12 +10428,12 @@ test "PageList eraseRowBounded full rows two pages" {
 
     // In page in first page is shifted
     try testing.expectEqual(s.pages.last.?.prev.?, p_first.node);
-    try testing.expectEqual(@as(usize, p_first.node.data.size.rows - 2), p_first.y);
+    try testing.expectEqual(@as(usize, p_first.node.rows() - 2), p_first.y);
     try testing.expectEqual(@as(usize, 0), p_first.x);
 
     // Out page in first page should not be shifted
     try testing.expectEqual(s.pages.last.?.prev.?, p_first_out.node);
-    try testing.expectEqual(@as(usize, p_first_out.node.data.size.rows - 2), p_first_out.y);
+    try testing.expectEqual(@as(usize, p_first_out.node.rows() - 2), p_first_out.y);
     try testing.expectEqual(@as(usize, 0), p_first_out.x);
 
     // In page is shifted
@@ -10555,7 +10555,7 @@ test "PageList split retired rows have default state" {
 
     // The source page was truncated to 5 rows; peek at the retired
     // storage beyond size.rows.
-    const page = &node.data;
+    const page = node.page();
     try testing.expectEqual(@as(usize, 5), page.size.rows);
     const rows = page.rows.ptr(page.memory.ptr);
     for (5..10) |y| {
@@ -10624,13 +10624,13 @@ test "PageList eraseRow hyperlink-dense row crosses page boundary" {
     // page is exactly full and the second page holds the last 5 rows
     // of the active area.
     {
-        const page = &s.pages.last.?.data;
+        const page = s.pages.last.?.page();
         page.pauseIntegrityChecks(true);
         for (0..page.capacity.rows - page.size.rows) |_| _ = try s.grow();
         page.pauseIntegrityChecks(false);
         try s.growRows(5);
         try testing.expectEqual(@as(usize, 2), s.totalPages());
-        try testing.expectEqual(@as(usize, 5), s.pages.last.?.data.size.rows);
+        try testing.expectEqual(@as(usize, 5), s.pages.last.?.rows());
     }
 
     // Mark each active row with a codepoint so we can verify the
@@ -10649,12 +10649,12 @@ test "PageList eraseRow hyperlink-dense row crosses page boundary" {
     // second page's capacity to even create such a row; the first
     // page keeps its default capacity.
     const link_count: usize = 10;
-    while (s.pages.last.?.data.hyperlink_set.layout.cap <= link_count) {
+    while (s.pages.last.?.page().hyperlink_set.layout.cap <= link_count) {
         _ = try s.increaseCapacity(s.pages.last.?, .hyperlink_bytes);
     }
-    try testing.expect(s.pages.first.?.data.hyperlink_set.layout.cap < link_count);
+    try testing.expect(s.pages.first.?.page().hyperlink_set.layout.cap < link_count);
     {
-        const page = &s.pages.last.?.data;
+        const page = s.pages.last.?.page();
         for (0..link_count) |x| {
             var buf: [64]u8 = undefined;
             const uri = try std.fmt.bufPrint(&buf, "http://example.com/{d}", .{x});
@@ -10701,7 +10701,7 @@ test "PageList eraseRow hyperlink-dense row crosses page boundary" {
             .y = 4,
         } }).?;
         try testing.expect(list_cell.cell.hyperlink);
-        const page: *Page = &list_cell.node.data;
+        const page: *Page = list_cell.node.page();
         const id = page.lookupHyperlink(list_cell.cell).?;
         const link = page.hyperlink_set.get(page.memory, id);
         var buf: [64]u8 = undefined;
@@ -10711,7 +10711,7 @@ test "PageList eraseRow hyperlink-dense row crosses page boundary" {
 
     // All pages must pass integrity checks.
     var node_: ?*List.Node = s.pages.first;
-    while (node_) |node| : (node_ = node.next) node.data.assertIntegrity();
+    while (node_) |node| : (node_ = node.next) node.page().assertIntegrity();
 
     // Our tracked pin shifted up by one row and still points into
     // the (possibly replaced) first page.
@@ -10736,13 +10736,13 @@ test "PageList eraseRowBounded hyperlink-dense row crosses page boundary" {
     // page is exactly full and the second page holds the last 5 rows
     // of the active area.
     {
-        const page = &s.pages.last.?.data;
+        const page = s.pages.last.?.page();
         page.pauseIntegrityChecks(true);
         for (0..page.capacity.rows - page.size.rows) |_| _ = try s.grow();
         page.pauseIntegrityChecks(false);
         try s.growRows(5);
         try testing.expectEqual(@as(usize, 2), s.totalPages());
-        try testing.expectEqual(@as(usize, 5), s.pages.last.?.data.size.rows);
+        try testing.expectEqual(@as(usize, 5), s.pages.last.?.rows());
     }
 
     // Mark each active row with a codepoint so we can verify the
@@ -10761,12 +10761,12 @@ test "PageList eraseRowBounded hyperlink-dense row crosses page boundary" {
     // second page's capacity to even create such a row; the first
     // page keeps its default capacity.
     const link_count: usize = 10;
-    while (s.pages.last.?.data.hyperlink_set.layout.cap <= link_count) {
+    while (s.pages.last.?.page().hyperlink_set.layout.cap <= link_count) {
         _ = try s.increaseCapacity(s.pages.last.?, .hyperlink_bytes);
     }
-    try testing.expect(s.pages.first.?.data.hyperlink_set.layout.cap < link_count);
+    try testing.expect(s.pages.first.?.page().hyperlink_set.layout.cap < link_count);
     {
-        const page = &s.pages.last.?.data;
+        const page = s.pages.last.?.page();
         for (0..link_count) |x| {
             var buf: [64]u8 = undefined;
             const uri = try std.fmt.bufPrint(&buf, "http://example.com/{d}", .{x});
@@ -10810,7 +10810,7 @@ test "PageList eraseRowBounded hyperlink-dense row crosses page boundary" {
             .y = 4,
         } }).?;
         try testing.expect(list_cell.cell.hyperlink);
-        const page: *Page = &list_cell.node.data;
+        const page: *Page = list_cell.node.page();
         const id = page.lookupHyperlink(list_cell.cell).?;
         const link = page.hyperlink_set.get(page.memory, id);
         var buf: [64]u8 = undefined;
@@ -10820,7 +10820,7 @@ test "PageList eraseRowBounded hyperlink-dense row crosses page boundary" {
 
     // All pages must pass integrity checks.
     var node_: ?*List.Node = s.pages.first;
-    while (node_) |node| : (node_ = node.next) node.data.assertIntegrity();
+    while (node_) |node| : (node_ = node.next) node.page().assertIntegrity();
 }
 
 test "PageList clone" {
@@ -10883,7 +10883,7 @@ test "PageList clone partial trimmed left reclaims styles" {
     // Style the rows we're trimming
     {
         try testing.expect(s.pages.first == s.pages.last);
-        const page = &s.pages.first.?.data;
+        const page = s.pages.first.?.page();
 
         const style: stylepkg.Style = .{ .flags = .{ .bold = true } };
         const style_id = try page.styles.add(page.memory, style);
@@ -10915,7 +10915,7 @@ test "PageList clone partial trimmed left reclaims styles" {
 
     {
         try testing.expect(s2.pages.first == s2.pages.last);
-        const page = &s2.pages.first.?.data;
+        const page = s2.pages.first.?.page();
         try testing.expectEqual(0, page.styles.count());
     }
 }
@@ -11113,7 +11113,7 @@ test "PageList resize (no reflow) less rows" {
 
     // This is required for our writing below to work
     try testing.expect(s.pages.first == s.pages.last);
-    const page = &s.pages.first.?.data;
+    const page = s.pages.first.?.page();
 
     // Write into all rows so we don't get trim behavior
     for (0..s.rows) |y| {
@@ -11147,7 +11147,7 @@ test "PageList resize (no reflow) one rows" {
 
     // This is required for our writing below to work
     try testing.expect(s.pages.first == s.pages.last);
-    const page = &s.pages.first.?.data;
+    const page = s.pages.first.?.page();
 
     // Write into all rows so we don't get trim behavior
     for (0..s.rows) |y| {
@@ -11181,7 +11181,7 @@ test "PageList resize (no reflow) less rows cursor on bottom" {
 
     // This is required for our writing below to work
     try testing.expect(s.pages.first == s.pages.last);
-    const page = &s.pages.first.?.data;
+    const page = s.pages.first.?.page();
 
     // Write into all rows so we don't get trim behavior
     for (0..s.rows) |y| {
@@ -11233,7 +11233,7 @@ test "PageList resize (no reflow) less rows cursor in scrollback" {
 
     // This is required for our writing below to work
     try testing.expect(s.pages.first == s.pages.last);
-    const page = &s.pages.first.?.data;
+    const page = s.pages.first.?.page();
 
     // Write into all rows so we don't get trim behavior
     for (0..s.rows) |y| {
@@ -11284,7 +11284,7 @@ test "PageList resize (no reflow) less rows trims blank lines" {
     var s = try init(alloc, 10, 5, 0);
     defer s.deinit();
     try testing.expect(s.pages.first == s.pages.last);
-    const page = &s.pages.first.?.data;
+    const page = s.pages.first.?.page();
 
     // Write codepoint into first line
     {
@@ -11343,7 +11343,7 @@ test "PageList resize (no reflow) less rows trims blank lines cursor in blank li
     var s = try init(alloc, 10, 5, 0);
     defer s.deinit();
     try testing.expect(s.pages.first == s.pages.last);
-    const page = &s.pages.first.?.data;
+    const page = s.pages.first.?.page();
 
     // Write codepoint into first line
     {
@@ -11386,7 +11386,7 @@ test "PageList resize (no reflow) less rows trims blank lines erases pages" {
     var s = try init(alloc, 100, 5, 0);
     defer s.deinit();
     try testing.expect(s.pages.first == s.pages.last);
-    const page = &s.pages.first.?.data;
+    const page = s.pages.first.?.page();
 
     // Resize to take up two pages
     {
@@ -11419,7 +11419,7 @@ test "PageList resize (no reflow) more rows extends blank lines" {
     var s = try init(alloc, 10, 3, 0);
     defer s.deinit();
     try testing.expect(s.pages.first == s.pages.last);
-    const page = &s.pages.first.?.data;
+    const page = s.pages.first.?.page();
 
     // Write codepoint into first line
     {
@@ -11499,7 +11499,7 @@ test "PageList resize (no reflow) less cols" {
     var it = s.rowIterator(.right_down, .{ .screen = .{} }, null);
     while (it.next()) |offset| {
         const rac = offset.rowAndCell();
-        const cells = offset.node.data.getCells(rac.row);
+        const cells = offset.node.page().getCells(rac.row);
         try testing.expectEqual(@as(usize, 5), cells.len);
     }
 }
@@ -11523,7 +11523,7 @@ test "PageList resize (no reflow) less cols pin in trimmed cols" {
     var it = s.rowIterator(.right_down, .{ .screen = .{} }, null);
     while (it.next()) |offset| {
         const rac = offset.rowAndCell();
-        const cells = offset.node.data.getCells(rac.row);
+        const cells = offset.node.page().getCells(rac.row);
         try testing.expectEqual(@as(usize, 5), cells.len);
     }
 
@@ -11541,7 +11541,7 @@ test "PageList resize (no reflow) less cols clears graphemes" {
     defer s.deinit();
 
     // Add a grapheme.
-    const page = &s.pages.first.?.data;
+    const page = s.pages.first.?.page();
     {
         const rac = page.getRowAndCell(9, 0);
         rac.cell.* = .{
@@ -11559,7 +11559,7 @@ test "PageList resize (no reflow) less cols clears graphemes" {
 
     var it = s.pageIterator(.right_down, .{ .screen = .{} }, null);
     while (it.next()) |chunk| {
-        try testing.expectEqual(@as(usize, 0), chunk.node.data.graphemeCount());
+        try testing.expectEqual(@as(usize, 0), chunk.node.page().graphemeCount());
     }
 }
 
@@ -11578,7 +11578,7 @@ test "PageList resize (no reflow) more cols" {
     var it = s.rowIterator(.right_down, .{ .screen = .{} }, null);
     while (it.next()) |offset| {
         const rac = offset.rowAndCell();
-        const cells = offset.node.data.getCells(rac.row);
+        const cells = offset.node.page().getCells(rac.row);
         try testing.expectEqual(@as(usize, 10), cells.len);
     }
 }
@@ -11591,7 +11591,7 @@ test "PageList resize (no reflow) more cols with spacer head" {
     defer s.deinit();
     {
         try testing.expect(s.pages.first == s.pages.last);
-        const page = &s.pages.first.?.data;
+        const page = s.pages.first.?.page();
 
         {
             const rac = page.getRowAndCell(0, 0);
@@ -11634,7 +11634,7 @@ test "PageList resize (no reflow) more cols with spacer head" {
 
     {
         try testing.expect(s.pages.first == s.pages.last);
-        const page = &s.pages.first.?.data;
+        const page = s.pages.first.?.page();
 
         {
             const rac = page.getRowAndCell(0, 0);
@@ -11674,7 +11674,7 @@ test "PageList resize (no reflow) grow cols fast path with spacer head" {
     // Place a spacer_head at the last column (col 4) on two rows
     // to simulate a wide character that didn't fit at the right edge.
     {
-        const page = &s.pages.first.?.data;
+        const page = s.pages.first.?.page();
 
         // Row 0: 'x' at col 0..3, spacer_head at col 4, wrap = true
         {
@@ -11713,7 +11713,7 @@ test "PageList resize (no reflow) grow cols fast path with spacer head" {
 
     // Verify the old spacer_head positions are now narrow.
     {
-        const page = &s.pages.first.?.data;
+        const page = s.pages.first.?.page();
         {
             const rac = page.getRowAndCell(4, 0);
             try testing.expectEqual(pagepkg.Cell.Wide.narrow, rac.cell.wide);
@@ -11769,14 +11769,14 @@ test "PageList resize (no reflow) more cols forces less rows per page" {
         var it = s.pages.first;
         while (it) |page| : (it = page.next) {
             if (page == s.pages.last.?) break;
-            try testing.expectEqual(page.data.capacity.rows, page.data.size.rows);
+            try testing.expectEqual(page.capacity().rows, page.rows());
         }
     }
 
     // Now we need to resize again to a col size that further shrinks
     // our last capacity.
     {
-        const page = &s.pages.first.?.data;
+        const page = s.pages.first.?.page();
         try testing.expect(page.size.rows == page.capacity.rows);
         const new_cols = new_cols: {
             var new_cols = page.size.cols + 50;
@@ -11799,7 +11799,7 @@ test "PageList resize (no reflow) more cols forces less rows per page" {
         var it = s.pages.first;
         while (it) |page| : (it = page.next) {
             if (page == s.pages.last.?) break;
-            try testing.expectEqual(page.data.capacity.rows, page.data.size.rows);
+            try testing.expectEqual(page.capacity().rows, page.rows());
         }
     }
 }
@@ -11823,7 +11823,7 @@ test "PageList resize (no reflow) less cols then more cols" {
     var it = s.rowIterator(.right_down, .{ .screen = .{} }, null);
     while (it.next()) |offset| {
         const rac = offset.rowAndCell();
-        const cells = offset.node.data.getCells(rac.row);
+        const cells = offset.node.page().getCells(rac.row);
         try testing.expectEqual(@as(usize, 5), cells.len);
     }
 }
@@ -11843,7 +11843,7 @@ test "PageList resize (no reflow) less rows and cols" {
     var it = s.rowIterator(.right_down, .{ .screen = .{} }, null);
     while (it.next()) |offset| {
         const rac = offset.rowAndCell();
-        const cells = offset.node.data.getCells(rac.row);
+        const cells = offset.node.page().getCells(rac.row);
         try testing.expectEqual(@as(usize, 5), cells.len);
     }
 }
@@ -11893,7 +11893,7 @@ test "PageList resize less rows and cols cursor near top pushed to scrollback" {
         var it = s.rowIterator(.right_down, .{ .active = .{} }, null);
         while (it.next()) |p| {
             const rac = p.rowAndCell();
-            const cells = p.node.data.getCells(rac.row);
+            const cells = p.node.page().getCells(rac.row);
             for (cells, 0..) |*cell, x| cell.* = .{
                 .content_tag = .codepoint,
                 .content = .{ .codepoint = @intCast('A' + (x % 26)) },
@@ -11947,7 +11947,7 @@ test "PageList resize (no reflow) more rows and less cols" {
     var it = s.rowIterator(.right_down, .{ .screen = .{} }, null);
     while (it.next()) |offset| {
         const rac = offset.rowAndCell();
-        const cells = offset.node.data.getCells(rac.row);
+        const cells = offset.node.page().getCells(rac.row);
         try testing.expectEqual(@as(usize, 5), cells.len);
     }
 }
@@ -11987,7 +11987,7 @@ test "PageList resize (no reflow) empty screen" {
     var it = s.rowIterator(.right_down, .{ .screen = .{} }, null);
     while (it.next()) |offset| {
         const rac = offset.rowAndCell();
-        const cells = offset.node.data.getCells(rac.row);
+        const cells = offset.node.page().getCells(rac.row);
         try testing.expectEqual(@as(usize, 10), cells.len);
     }
 }
@@ -12006,7 +12006,7 @@ test "PageList resize (no reflow) more cols forces smaller cap" {
     var s = try init(alloc, cap.cols, cap.rows, null);
     defer s.deinit();
     try testing.expect(s.pages.first == s.pages.last);
-    const page = &s.pages.first.?.data;
+    const page = s.pages.first.?.page();
     for (0..s.rows) |y| {
         for (0..s.cols) |x| {
             const rac = page.getRowAndCell(x, y);
@@ -12026,7 +12026,7 @@ test "PageList resize (no reflow) more cols forces smaller cap" {
     var it = s.rowIterator(.right_down, .{ .screen = .{} }, null);
     while (it.next()) |offset| {
         const rac = offset.rowAndCell();
-        const cells = offset.node.data.getCells(rac.row);
+        const cells = offset.node.page().getCells(rac.row);
         try testing.expectEqual(@as(usize, cap2.cols), cells.len);
         try testing.expectEqual(@as(u21, 'A'), cells[0].content.codepoint);
     }
@@ -12042,7 +12042,7 @@ test "PageList resize (no reflow) more rows adds blank rows if cursor at bottom"
     // Grow to 5 total rows, simulating 3 active + 2 scrollback
     try s.growRows(2);
     try testing.expect(s.pages.first == s.pages.last);
-    const page = &s.pages.first.?.data;
+    const page = s.pages.first.?.page();
     for (0..s.totalRows()) |y| {
         const rac = page.getRowAndCell(0, y);
         rac.cell.* = .{
@@ -12127,7 +12127,7 @@ test "PageList resize reflow more cols no wrapped rows" {
     var s = try init(alloc, 5, 3, 0);
     defer s.deinit();
     try testing.expect(s.pages.first == s.pages.last);
-    const page = &s.pages.first.?.data;
+    const page = s.pages.first.?.page();
     for (0..s.rows) |y| {
         for (0..s.cols) |x| {
             const rac = page.getRowAndCell(x, y);
@@ -12146,7 +12146,7 @@ test "PageList resize reflow more cols no wrapped rows" {
     var it = s.rowIterator(.right_down, .{ .screen = .{} }, null);
     while (it.next()) |offset| {
         const rac = offset.rowAndCell();
-        const cells = offset.node.data.getCells(rac.row);
+        const cells = offset.node.page().getCells(rac.row);
         try testing.expectEqual(@as(usize, 10), cells.len);
         try testing.expectEqual(@as(u21, 'A'), cells[0].content.codepoint);
     }
@@ -12159,7 +12159,7 @@ test "PageList resize reflow more cols wrapped rows" {
     var s = try init(alloc, 2, 4, 0);
     defer s.deinit();
     try testing.expect(s.pages.first == s.pages.last);
-    const page = &s.pages.first.?.data;
+    const page = s.pages.first.?.page();
     for (0..s.rows) |y| {
         if (y % 2 == 0) {
             const rac = page.getRowAndCell(0, y);
@@ -12197,7 +12197,7 @@ test "PageList resize reflow more cols wrapped rows" {
         // First row should be unwrapped
         const offset = it.next().?;
         const rac = offset.rowAndCell();
-        const cells = offset.node.data.getCells(rac.row);
+        const cells = offset.node.page().getCells(rac.row);
         try testing.expect(!rac.row.wrap);
         try testing.expectEqual(@as(usize, 4), cells.len);
         try testing.expectEqual(@as(u21, 'A'), cells[0].content.codepoint);
@@ -12213,7 +12213,7 @@ test "PageList resize reflow invalidates viewport offset cache" {
     defer s.deinit();
     try s.growRows(20);
 
-    const page = &s.pages.last.?.data;
+    const page = s.pages.last.?.page();
     for (0..s.rows) |y| {
         if (y % 2 == 0) {
             const rac = page.getRowAndCell(0, y);
@@ -12275,7 +12275,7 @@ test "PageList resize reflow more cols creates multiple pages" {
     // Wrap every other row so every line is wrapped for reflow
     {
         try testing.expect(s.pages.first == s.pages.last);
-        const page = &s.pages.first.?.data;
+        const page = s.pages.first.?.page();
         for (0..s.rows) |y| {
             if (y % 2 == 0) {
                 const rac = page.getRowAndCell(0, y);
@@ -12307,8 +12307,8 @@ test "PageList resize reflow more cols creates multiple pages" {
             count += 1;
 
             // All pages should have the new capacity
-            try testing.expectEqual(newcap.cols, page.data.capacity.cols);
-            try testing.expectEqual(newcap.rows, page.data.capacity.rows);
+            try testing.expectEqual(newcap.cols, page.capacity().cols);
+            try testing.expectEqual(newcap.rows, page.capacity().rows);
         }
 
         // We should have more than one page, meaning we created at least
@@ -12328,7 +12328,7 @@ test "PageList resize reflow more cols wrap across page boundary" {
 
     // Grow to the capacity of the first page.
     {
-        const page = &s.pages.first.?.data;
+        const page = s.pages.first.?.page();
         page.pauseIntegrityChecks(true);
         for (page.size.rows..page.capacity.rows) |_| {
             _ = try s.grow();
@@ -12342,7 +12342,7 @@ test "PageList resize reflow more cols wrap across page boundary" {
     // At this point, we have some rows on the first page, and some on the second.
     // We can now wrap across the boundary condition.
     {
-        const page = &s.pages.first.?.data;
+        const page = s.pages.first.?.page();
         const y = page.size.rows - 1;
         {
             const rac = page.getRowAndCell(0, y);
@@ -12357,7 +12357,7 @@ test "PageList resize reflow more cols wrap across page boundary" {
         }
     }
     {
-        const page2 = &s.pages.last.?.data;
+        const page2 = s.pages.last.?.page();
         const y = 0;
         {
             const rac = page2.getRowAndCell(0, y);
@@ -12459,7 +12459,7 @@ test "PageList resize reflow more cols wrap across page boundary cursor in secon
 
     // Grow to the capacity of the first page.
     {
-        const page = &s.pages.first.?.data;
+        const page = s.pages.first.?.page();
         page.pauseIntegrityChecks(true);
         for (page.size.rows..page.capacity.rows) |_| {
             _ = try s.grow();
@@ -12473,7 +12473,7 @@ test "PageList resize reflow more cols wrap across page boundary cursor in secon
     // At this point, we have some rows on the first page, and some on the second.
     // We can now wrap across the boundary condition.
     {
-        const page = &s.pages.first.?.data;
+        const page = s.pages.first.?.page();
         const y = page.size.rows - 1;
         {
             const rac = page.getRowAndCell(0, y);
@@ -12488,7 +12488,7 @@ test "PageList resize reflow more cols wrap across page boundary cursor in secon
         }
     }
     {
-        const page2 = &s.pages.last.?.data;
+        const page2 = s.pages.last.?.page();
         const y = 0;
         {
             const rac = page2.getRowAndCell(0, y);
@@ -12545,7 +12545,7 @@ test "PageList resize reflow less cols wrap across page boundary cursor in secon
 
     // Grow to the capacity of the first page.
     {
-        const page = &s.pages.first.?.data;
+        const page = s.pages.first.?.page();
         page.pauseIntegrityChecks(true);
         for (page.size.rows..page.capacity.rows) |_| {
             _ = try s.grow();
@@ -12559,7 +12559,7 @@ test "PageList resize reflow less cols wrap across page boundary cursor in secon
     // At this point, we have some rows on the first page, and some on the second.
     // We can now wrap across the boundary condition.
     {
-        const page = &s.pages.first.?.data;
+        const page = s.pages.first.?.page();
         const y = page.size.rows - 1;
         {
             const rac = page.getRowAndCell(0, y);
@@ -12574,7 +12574,7 @@ test "PageList resize reflow less cols wrap across page boundary cursor in secon
         }
     }
     {
-        const page2 = &s.pages.last.?.data;
+        const page2 = s.pages.last.?.page();
         const y = 0;
         {
             const rac = page2.getRowAndCell(0, y);
@@ -12721,7 +12721,7 @@ test "PageList resize reflow more cols cursor in wrapped row" {
     var s = try init(alloc, 2, 4, 0);
     defer s.deinit();
     try testing.expect(s.pages.first == s.pages.last);
-    const page = &s.pages.first.?.data;
+    const page = s.pages.first.?.page();
     {
         {
             const rac = page.getRowAndCell(0, 0);
@@ -12772,7 +12772,7 @@ test "PageList resize reflow more cols cursor in not wrapped row" {
     var s = try init(alloc, 2, 4, 0);
     defer s.deinit();
     try testing.expect(s.pages.first == s.pages.last);
-    const page = &s.pages.first.?.data;
+    const page = s.pages.first.?.page();
     {
         {
             const rac = page.getRowAndCell(0, 0);
@@ -12823,7 +12823,7 @@ test "PageList resize reflow more cols cursor in wrapped row that isn't unwrappe
     var s = try init(alloc, 2, 4, 0);
     defer s.deinit();
     try testing.expect(s.pages.first == s.pages.last);
-    const page = &s.pages.first.?.data;
+    const page = s.pages.first.?.page();
     {
         {
             const rac = page.getRowAndCell(0, 0);
@@ -12889,7 +12889,7 @@ test "PageList resize reflow more cols no reflow preserves semantic prompt" {
     defer s.deinit();
     {
         try testing.expect(s.pages.first == s.pages.last);
-        const page = &s.pages.first.?.data;
+        const page = s.pages.first.?.page();
         const rac = page.getRowAndCell(0, 1);
         rac.row.semantic_prompt = .prompt;
     }
@@ -12901,7 +12901,7 @@ test "PageList resize reflow more cols no reflow preserves semantic prompt" {
 
     {
         try testing.expect(s.pages.first == s.pages.last);
-        const page = &s.pages.first.?.data;
+        const page = s.pages.first.?.page();
         const rac = page.getRowAndCell(0, 1);
         try testing.expect(rac.row.semantic_prompt == .prompt);
     }
@@ -12918,7 +12918,7 @@ test "PageList resize reflow exceeds hyperlink memory forcing capacity increase"
     // Grow to the capacity of the first page and add
     // one more row so that we have two pages total.
     {
-        const page = &s.pages.first.?.data;
+        const page = s.pages.first.?.page();
         page.pauseIntegrityChecks(true);
         for (page.size.rows..page.capacity.rows) |_| {
             _ = try s.grow();
@@ -12952,7 +12952,7 @@ test "PageList resize reflow exceeds hyperlink memory forcing capacity increase"
     // Almost hit string alloc cap in bottom right of first page.
     // Mark the final row as wrapped.
     {
-        const page = &s.pages.first.?.data;
+        const page = s.pages.first.?.page();
         const id = try page.insertHyperlink(.{
             .id = .{ .implicit = 0 },
             .uri = "a" ** (pagepkg.string_bytes_default - 1),
@@ -12976,7 +12976,7 @@ test "PageList resize reflow exceeds hyperlink memory forcing capacity increase"
     // Almost hit string alloc cap in top left of second page.
     // Mark the first row as a wrap continuation.
     {
-        const page = &s.pages.last.?.data;
+        const page = s.pages.last.?.page();
         const id = try page.insertHyperlink(.{
             .id = .{ .implicit = 1 },
             .uri = "a" ** (pagepkg.string_bytes_default - 1),
@@ -13012,7 +13012,7 @@ test "PageList resize reflow hyperlink dupe string alloc chunk rounding" {
     // Grow to the capacity of the first page and add
     // one more row so that we have two pages total.
     {
-        const page = &s.pages.first.?.data;
+        const page = s.pages.first.?.page();
         page.pauseIntegrityChecks(true);
         for (page.size.rows..page.capacity.rows) |_| {
             _ = try s.grow();
@@ -13058,7 +13058,7 @@ test "PageList resize reflow hyperlink dupe string alloc chunk rounding" {
     // Hyperlink A in the bottom right of the first page. Mark the final
     // row as wrapped.
     {
-        const page = &s.pages.first.?.data;
+        const page = s.pages.first.?.page();
         const id = try page.insertHyperlink(.{
             .id = .{ .implicit = 0 },
             .uri = uri_a,
@@ -13088,7 +13088,7 @@ test "PageList resize reflow hyperlink dupe string alloc chunk rounding" {
     // Hyperlink B in the top left of the second page. Mark the first
     // row as a wrap continuation.
     {
-        const page = &s.pages.last.?.data;
+        const page = s.pages.last.?.page();
         const id = try page.insertHyperlink(.{
             .id = .{ .explicit = id_b },
             .uri = uri_b,
@@ -13109,7 +13109,7 @@ test "PageList resize reflow hyperlink dupe string alloc chunk rounding" {
     var found: usize = 0;
     var node_it = s.pages.first;
     while (node_it) |node| : (node_it = node.next) {
-        const page = &node.data;
+        const page = node.page();
         for (0..page.size.rows) |y| {
             for (0..page.size.cols) |x| {
                 const rac = page.getRowAndCell(x, y);
@@ -13146,7 +13146,7 @@ test "PageList resize reflow exceeds grapheme memory forcing capacity increase" 
     // Grow to the capacity of the first page and add
     // one more row so that we have two pages total.
     {
-        const page = &s.pages.first.?.data;
+        const page = s.pages.first.?.page();
         page.pauseIntegrityChecks(true);
         for (page.size.rows..page.capacity.rows) |_| {
             _ = try s.grow();
@@ -13180,7 +13180,7 @@ test "PageList resize reflow exceeds grapheme memory forcing capacity increase" 
 
     // Fill the final row of the first page and mark it as wrapped.
     {
-        const page = &s.pages.first.?.data;
+        const page = s.pages.first.?.page();
         const y = page.size.rows - 1;
         const row = page.getRow(y);
         row.wrap = true;
@@ -13206,7 +13206,7 @@ test "PageList resize reflow exceeds grapheme memory forcing capacity increase" 
 
     // Fill the first row of the second page and mark it as a continuation.
     {
-        const page = &s.pages.last.?.data;
+        const page = s.pages.last.?.page();
         const row = page.getRow(0);
         row.wrap_continuation = true;
 
@@ -13240,7 +13240,7 @@ test "PageList resize reflow exceeds style memory forcing capacity increase" {
     // Grow to the capacity of the first page and add
     // one more row so that we have two pages total.
     {
-        const page = &s.pages.first.?.data;
+        const page = s.pages.first.?.page();
         page.pauseIntegrityChecks(true);
         for (page.size.rows..page.capacity.rows) |_| {
             _ = try s.grow();
@@ -13258,7 +13258,7 @@ test "PageList resize reflow exceeds style memory forcing capacity increase" {
     // Give each cell in the final row of the first page a unique style.
     // Mark the final row as wrapped.
     {
-        const page = &s.pages.first.?.data;
+        const page = s.pages.first.?.page();
         for (0..s.cols) |x| {
             const id = page.styles.add(
                 page.memory,
@@ -13285,7 +13285,7 @@ test "PageList resize reflow exceeds style memory forcing capacity increase" {
     // Do the same for the first row of the second page.
     // Mark the first row as a wrap continuation.
     {
-        const page = &s.pages.last.?.data;
+        const page = s.pages.last.?.page();
         for (0..s.cols) |x| {
             const id = page.styles.add(
                 page.memory,
@@ -13321,7 +13321,7 @@ test "PageList resize reflow more cols unwrap wide spacer head" {
     defer s.deinit();
     {
         try testing.expect(s.pages.first == s.pages.last);
-        const page = &s.pages.first.?.data;
+        const page = s.pages.first.?.page();
 
         {
             const rac = page.getRowAndCell(0, 0);
@@ -13365,7 +13365,7 @@ test "PageList resize reflow more cols unwrap wide spacer head" {
 
     {
         try testing.expect(s.pages.first == s.pages.last);
-        const page = &s.pages.first.?.data;
+        const page = s.pages.first.?.page();
 
         {
             const rac = page.getRowAndCell(0, 0);
@@ -13394,7 +13394,7 @@ test "PageList resize reflow more cols unwrap wide spacer head across two rows" 
     defer s.deinit();
     {
         try testing.expect(s.pages.first == s.pages.last);
-        const page = &s.pages.first.?.data;
+        const page = s.pages.first.?.page();
 
         {
             const rac = page.getRowAndCell(0, 0);
@@ -13454,7 +13454,7 @@ test "PageList resize reflow more cols unwrap wide spacer head across two rows" 
 
     {
         try testing.expect(s.pages.first == s.pages.last);
-        const page = &s.pages.first.?.data;
+        const page = s.pages.first.?.page();
 
         {
             const rac = page.getRowAndCell(0, 0);
@@ -13498,7 +13498,7 @@ test "PageList resize reflow more cols unwrap still requires wide spacer head" {
     defer s.deinit();
     {
         try testing.expect(s.pages.first == s.pages.last);
-        const page = &s.pages.first.?.data;
+        const page = s.pages.first.?.page();
 
         {
             const rac = page.getRowAndCell(0, 0);
@@ -13541,7 +13541,7 @@ test "PageList resize reflow more cols unwrap still requires wide spacer head" {
 
     {
         try testing.expect(s.pages.first == s.pages.last);
-        const page = &s.pages.first.?.data;
+        const page = s.pages.first.?.page();
 
         {
             const rac = page.getRowAndCell(0, 0);
@@ -13579,7 +13579,7 @@ test "PageList resize reflow less cols no reflow preserves semantic prompt" {
     defer s.deinit();
     {
         try testing.expect(s.pages.first == s.pages.last);
-        const page = &s.pages.first.?.data;
+        const page = s.pages.first.?.page();
         {
             const rac = page.getRowAndCell(0, 1);
             rac.row.semantic_prompt = .prompt;
@@ -13622,7 +13622,7 @@ test "PageList resize reflow less cols no reflow preserves semantic prompt on fi
     defer s.deinit();
     {
         try testing.expect(s.pages.first == s.pages.last);
-        const page = &s.pages.first.?.data;
+        const page = s.pages.first.?.page();
         const rac = page.getRowAndCell(0, 0);
         rac.row.semantic_prompt = .prompt;
     }
@@ -13634,7 +13634,7 @@ test "PageList resize reflow less cols no reflow preserves semantic prompt on fi
 
     {
         try testing.expect(s.pages.first == s.pages.last);
-        const page = &s.pages.first.?.data;
+        const page = s.pages.first.?.page();
         const rac = page.getRowAndCell(0, 0);
         try testing.expect(rac.row.semantic_prompt == .prompt);
     }
@@ -13648,7 +13648,7 @@ test "PageList resize reflow less cols wrap preserves semantic prompt" {
     defer s.deinit();
     {
         try testing.expect(s.pages.first == s.pages.last);
-        const page = &s.pages.first.?.data;
+        const page = s.pages.first.?.page();
         const rac = page.getRowAndCell(0, 0);
         rac.row.semantic_prompt = .prompt;
     }
@@ -13660,7 +13660,7 @@ test "PageList resize reflow less cols wrap preserves semantic prompt" {
 
     {
         try testing.expect(s.pages.first == s.pages.last);
-        const page = &s.pages.first.?.data;
+        const page = s.pages.first.?.page();
         const rac = page.getRowAndCell(0, 0);
         try testing.expect(rac.row.semantic_prompt == .prompt);
     }
@@ -13673,7 +13673,7 @@ test "PageList resize reflow less cols no wrapped rows" {
     var s = try init(alloc, 10, 3, 0);
     defer s.deinit();
     try testing.expect(s.pages.first == s.pages.last);
-    const page = &s.pages.first.?.data;
+    const page = s.pages.first.?.page();
     for (0..s.rows) |y| {
         const end = 4;
         assert(end < s.cols);
@@ -13697,7 +13697,7 @@ test "PageList resize reflow less cols no wrapped rows" {
             var offset_copy = offset;
             offset_copy.x = @intCast(x);
             const rac = offset_copy.rowAndCell();
-            const cells = offset.node.data.getCells(rac.row);
+            const cells = offset.node.page().getCells(rac.row);
             try testing.expectEqual(@as(usize, 5), cells.len);
             try testing.expectEqual(@as(u21, @intCast(x)), cells[x].content.codepoint);
         }
@@ -13711,7 +13711,7 @@ test "PageList resize reflow less cols wrapped rows" {
     var s = try init(alloc, 4, 2, null);
     defer s.deinit();
     try testing.expect(s.pages.first == s.pages.last);
-    const page = &s.pages.first.?.data;
+    const page = s.pages.first.?.page();
     for (0..s.rows) |y| {
         for (0..s.cols) |x| {
             const rac = page.getRowAndCell(x, y);
@@ -13741,7 +13741,7 @@ test "PageList resize reflow less cols wrapped rows" {
         // First row should be wrapped
         const offset = it.next().?;
         const rac = offset.rowAndCell();
-        const cells = offset.node.data.getCells(rac.row);
+        const cells = offset.node.page().getCells(rac.row);
         try testing.expect(rac.row.wrap);
         try testing.expectEqual(@as(usize, 2), cells.len);
         try testing.expectEqual(@as(u21, 0), cells[0].content.codepoint);
@@ -13749,7 +13749,7 @@ test "PageList resize reflow less cols wrapped rows" {
     {
         const offset = it.next().?;
         const rac = offset.rowAndCell();
-        const cells = offset.node.data.getCells(rac.row);
+        const cells = offset.node.page().getCells(rac.row);
         try testing.expect(!rac.row.wrap);
         try testing.expectEqual(@as(usize, 2), cells.len);
         try testing.expectEqual(@as(u21, 2), cells[0].content.codepoint);
@@ -13758,7 +13758,7 @@ test "PageList resize reflow less cols wrapped rows" {
         // First row should be wrapped
         const offset = it.next().?;
         const rac = offset.rowAndCell();
-        const cells = offset.node.data.getCells(rac.row);
+        const cells = offset.node.page().getCells(rac.row);
         try testing.expect(rac.row.wrap);
         try testing.expectEqual(@as(usize, 2), cells.len);
         try testing.expectEqual(@as(u21, 0), cells[0].content.codepoint);
@@ -13766,7 +13766,7 @@ test "PageList resize reflow less cols wrapped rows" {
     {
         const offset = it.next().?;
         const rac = offset.rowAndCell();
-        const cells = offset.node.data.getCells(rac.row);
+        const cells = offset.node.page().getCells(rac.row);
         try testing.expect(!rac.row.wrap);
         try testing.expectEqual(@as(usize, 2), cells.len);
         try testing.expectEqual(@as(u21, 2), cells[0].content.codepoint);
@@ -13781,7 +13781,7 @@ test "PageList resize reflow less cols wrapped rows with graphemes" {
     defer s.deinit();
     {
         try testing.expect(s.pages.first == s.pages.last);
-        const page = &s.pages.first.?.data;
+        const page = s.pages.first.?.page();
         for (0..s.rows) |y| {
             for (0..s.cols) |x| {
                 const rac = page.getRowAndCell(x, y);
@@ -13811,13 +13811,13 @@ test "PageList resize reflow less cols wrapped rows with graphemes" {
     }
 
     try testing.expect(s.pages.first == s.pages.last);
-    const page = &s.pages.first.?.data;
+    const page = s.pages.first.?.page();
     var it = s.rowIterator(.right_down, .{ .screen = .{} }, null);
     {
         // First row should be wrapped
         const offset = it.next().?;
         const rac = offset.rowAndCell();
-        const cells = offset.node.data.getCells(rac.row);
+        const cells = offset.node.page().getCells(rac.row);
         try testing.expect(rac.row.wrap);
         try testing.expectEqual(@as(usize, 2), cells.len);
         try testing.expectEqual(@as(u21, 0), cells[0].content.codepoint);
@@ -13825,7 +13825,7 @@ test "PageList resize reflow less cols wrapped rows with graphemes" {
     {
         const offset = it.next().?;
         const rac = offset.rowAndCell();
-        const cells = offset.node.data.getCells(rac.row);
+        const cells = offset.node.page().getCells(rac.row);
         try testing.expect(!rac.row.wrap);
         try testing.expect(rac.row.grapheme);
         try testing.expectEqual(@as(usize, 2), cells.len);
@@ -13839,7 +13839,7 @@ test "PageList resize reflow less cols wrapped rows with graphemes" {
         // First row should be wrapped
         const offset = it.next().?;
         const rac = offset.rowAndCell();
-        const cells = offset.node.data.getCells(rac.row);
+        const cells = offset.node.page().getCells(rac.row);
         try testing.expect(rac.row.wrap);
         try testing.expectEqual(@as(usize, 2), cells.len);
         try testing.expectEqual(@as(u21, 0), cells[0].content.codepoint);
@@ -13847,7 +13847,7 @@ test "PageList resize reflow less cols wrapped rows with graphemes" {
     {
         const offset = it.next().?;
         const rac = offset.rowAndCell();
-        const cells = offset.node.data.getCells(rac.row);
+        const cells = offset.node.page().getCells(rac.row);
         try testing.expect(!rac.row.wrap);
         try testing.expect(rac.row.grapheme);
         try testing.expectEqual(@as(usize, 2), cells.len);
@@ -13866,7 +13866,7 @@ test "PageList resize reflow less cols cursor in wrapped row" {
     var s = try init(alloc, 4, 2, null);
     defer s.deinit();
     try testing.expect(s.pages.first == s.pages.last);
-    const page = &s.pages.first.?.data;
+    const page = s.pages.first.?.page();
     for (0..s.rows) |y| {
         for (0..s.cols) |x| {
             const rac = page.getRowAndCell(x, y);
@@ -13901,7 +13901,7 @@ test "PageList resize reflow less cols wraps spacer head" {
     defer s.deinit();
     {
         try testing.expect(s.pages.first == s.pages.last);
-        const page = &s.pages.first.?.data;
+        const page = s.pages.first.?.page();
 
         {
             const rac = page.getRowAndCell(0, 0);
@@ -13959,7 +13959,7 @@ test "PageList resize reflow less cols wraps spacer head" {
 
     {
         try testing.expect(s.pages.first == s.pages.last);
-        const page = &s.pages.first.?.data;
+        const page = s.pages.first.?.page();
 
         {
             const rac = page.getRowAndCell(0, 0);
@@ -13996,7 +13996,7 @@ test "PageList resize reflow less cols cursor goes to scrollback" {
     var s = try init(alloc, 4, 2, null);
     defer s.deinit();
     try testing.expect(s.pages.first == s.pages.last);
-    const page = &s.pages.first.?.data;
+    const page = s.pages.first.?.page();
     for (0..s.rows) |y| {
         for (0..s.cols) |x| {
             const rac = page.getRowAndCell(x, y);
@@ -14027,7 +14027,7 @@ test "PageList resize reflow less cols cursor in unchanged row" {
     var s = try init(alloc, 4, 2, null);
     defer s.deinit();
     try testing.expect(s.pages.first == s.pages.last);
-    const page = &s.pages.first.?.data;
+    const page = s.pages.first.?.page();
     for (0..s.rows) |y| {
         for (0..2) |x| {
             const rac = page.getRowAndCell(x, y);
@@ -14061,7 +14061,7 @@ test "PageList resize reflow less cols cursor in blank cell" {
     var s = try init(alloc, 6, 2, null);
     defer s.deinit();
     try testing.expect(s.pages.first == s.pages.last);
-    const page = &s.pages.first.?.data;
+    const page = s.pages.first.?.page();
     for (0..s.rows) |y| {
         for (0..2) |x| {
             const rac = page.getRowAndCell(x, y);
@@ -14095,7 +14095,7 @@ test "PageList resize reflow less cols cursor in final blank cell" {
     var s = try init(alloc, 6, 2, null);
     defer s.deinit();
     try testing.expect(s.pages.first == s.pages.last);
-    const page = &s.pages.first.?.data;
+    const page = s.pages.first.?.page();
     for (0..s.rows) |y| {
         for (0..2) |x| {
             const rac = page.getRowAndCell(x, y);
@@ -14144,7 +14144,7 @@ test "PageList resize reflow pin in blank cells after line break" {
     for (cases) |case| {
         var s = try init(alloc, 6, 4, null);
         defer s.deinit();
-        const page = &s.pages.first.?.data;
+        const page = s.pages.first.?.page();
         page.getRow(0).wrap = case.wrap;
         for (case.first, 0..) |cp, x| {
             page.getRowAndCell(x, 0).cell.* = .{
@@ -14181,7 +14181,7 @@ test "PageList resize reflow less cols cursor in wrapped blank cell" {
     var s = try init(alloc, 6, 2, null);
     defer s.deinit();
     try testing.expect(s.pages.first == s.pages.last);
-    const page = &s.pages.first.?.data;
+    const page = s.pages.first.?.page();
     for (0..s.rows) |y| {
         for (0..2) |x| {
             const rac = page.getRowAndCell(x, y);
@@ -14215,7 +14215,7 @@ test "PageList resize reflow less cols blank lines" {
     var s = try init(alloc, 4, 3, 0);
     defer s.deinit();
     try testing.expect(s.pages.first == s.pages.last);
-    const page = &s.pages.first.?.data;
+    const page = s.pages.first.?.page();
     for (0..1) |y| {
         for (0..4) |x| {
             const rac = page.getRowAndCell(x, y);
@@ -14236,7 +14236,7 @@ test "PageList resize reflow less cols blank lines" {
         // First row should be wrapped
         const offset = it.next().?;
         const rac = offset.rowAndCell();
-        const cells = offset.node.data.getCells(rac.row);
+        const cells = offset.node.page().getCells(rac.row);
         try testing.expect(rac.row.wrap);
         try testing.expectEqual(@as(usize, 2), cells.len);
         try testing.expectEqual(@as(u21, 0), cells[0].content.codepoint);
@@ -14244,7 +14244,7 @@ test "PageList resize reflow less cols blank lines" {
     {
         const offset = it.next().?;
         const rac = offset.rowAndCell();
-        const cells = offset.node.data.getCells(rac.row);
+        const cells = offset.node.page().getCells(rac.row);
         try testing.expect(!rac.row.wrap);
         try testing.expectEqual(@as(usize, 2), cells.len);
         try testing.expectEqual(@as(u21, 2), cells[0].content.codepoint);
@@ -14258,7 +14258,7 @@ test "PageList resize reflow less cols blank lines between" {
     var s = try init(alloc, 4, 3, 0);
     defer s.deinit();
     try testing.expect(s.pages.first == s.pages.last);
-    const page = &s.pages.first.?.data;
+    const page = s.pages.first.?.page();
     {
         for (0..4) |x| {
             const rac = page.getRowAndCell(x, 0);
@@ -14292,7 +14292,7 @@ test "PageList resize reflow less cols blank lines between" {
     {
         const offset = it.next().?;
         const rac = offset.rowAndCell();
-        const cells = offset.node.data.getCells(rac.row);
+        const cells = offset.node.page().getCells(rac.row);
         try testing.expect(rac.row.wrap);
         try testing.expectEqual(@as(usize, 2), cells.len);
         try testing.expectEqual(@as(u21, 0), cells[0].content.codepoint);
@@ -14300,7 +14300,7 @@ test "PageList resize reflow less cols blank lines between" {
     {
         const offset = it.next().?;
         const rac = offset.rowAndCell();
-        const cells = offset.node.data.getCells(rac.row);
+        const cells = offset.node.page().getCells(rac.row);
         try testing.expect(!rac.row.wrap);
         try testing.expectEqual(@as(usize, 2), cells.len);
         try testing.expectEqual(@as(u21, 2), cells[0].content.codepoint);
@@ -14314,7 +14314,7 @@ test "PageList resize reflow less cols blank lines between no scrollback" {
     var s = try init(alloc, 5, 3, 0);
     defer s.deinit();
     try testing.expect(s.pages.first == s.pages.last);
-    const page = &s.pages.first.?.data;
+    const page = s.pages.first.?.page();
     {
         const rac = page.getRowAndCell(0, 0);
         rac.cell.* = .{
@@ -14339,7 +14339,7 @@ test "PageList resize reflow less cols blank lines between no scrollback" {
     {
         const offset = it.next().?;
         const rac = offset.rowAndCell();
-        const cells = offset.node.data.getCells(rac.row);
+        const cells = offset.node.page().getCells(rac.row);
         try testing.expect(!rac.row.wrap);
         try testing.expectEqual(@as(usize, 2), cells.len);
         try testing.expectEqual(@as(u21, 'A'), cells[0].content.codepoint);
@@ -14347,13 +14347,13 @@ test "PageList resize reflow less cols blank lines between no scrollback" {
     {
         const offset = it.next().?;
         const rac = offset.rowAndCell();
-        const cells = offset.node.data.getCells(rac.row);
+        const cells = offset.node.page().getCells(rac.row);
         try testing.expectEqual(@as(u21, 0), cells[0].content.codepoint);
     }
     {
         const offset = it.next().?;
         const rac = offset.rowAndCell();
-        const cells = offset.node.data.getCells(rac.row);
+        const cells = offset.node.page().getCells(rac.row);
         try testing.expect(!rac.row.wrap);
         try testing.expectEqual(@as(usize, 2), cells.len);
         try testing.expectEqual(@as(u21, 'C'), cells[0].content.codepoint);
@@ -14367,7 +14367,7 @@ test "PageList resize reflow less cols cursor not on last line preserves locatio
     var s = try init(alloc, 5, 5, 1);
     defer s.deinit();
     try testing.expect(s.pages.first == s.pages.last);
-    const page = &s.pages.first.?.data;
+    const page = s.pages.first.?.page();
     for (0..s.rows) |y| {
         for (0..2) |x| {
             const rac = page.getRowAndCell(x, y);
@@ -14413,11 +14413,11 @@ test "PageList erase trailing rows across pages moves pins and frees styles" {
 
     // Enough rows for a second page, the last of them styled and wrapped
     // into each other, with a pin on one that will go.
-    const first_rows = s.pages.first.?.data.capacity.rows;
+    const first_rows = s.pages.first.?.capacity().rows;
     try s.growRows(first_rows + 2);
     try testing.expect(s.pages.first != s.pages.last);
     {
-        const page = &s.pages.last.?.data;
+        const page = s.pages.last.?.page();
         const style: stylepkg.Style = .{ .flags = .{ .bold = true } };
         const id = try page.styles.add(page.memory, style);
         for (0..page.size.rows) |y| {
@@ -14437,7 +14437,7 @@ test "PageList erase trailing rows across pages moves pins and frees styles" {
         // On the page that survives, the one row that goes is styled too,
         // and the row that will end the screen wraps into it through a
         // spacer head.
-        const first = &s.pages.first.?.data;
+        const first = s.pages.first.?.page();
         const first_id = try first.styles.add(first.memory, style);
         const doomed_rac = first.getRowAndCell(0, first.size.rows - 1);
         doomed_rac.row.styled = true;
@@ -14457,7 +14457,7 @@ test "PageList erase trailing rows across pages moves pins and frees styles" {
     s.viewport_pin.* = doomed.*;
 
     // Erase every row of the last page and one more.
-    const last_rows = s.pages.last.?.data.size.rows;
+    const last_rows = s.pages.last.?.rows();
     const total = s.totalRows();
     s.eraseTrailingRows(last_rows + 1);
     try testing.expectEqual(total - last_rows - 1, s.totalRows());
@@ -14466,7 +14466,7 @@ test "PageList erase trailing rows across pages moves pins and frees styles" {
     // The pin moved to the new last row, marked garbage because its own
     // row is gone. That row no longer wraps and lost its spacer head; the
     // erased row's style went with it.
-    const page = &s.pages.last.?.data;
+    const page = s.pages.last.?.page();
     try testing.expect(doomed.node == s.pages.last.?);
     try testing.expectEqual(page.size.rows - 1, doomed.y);
     try testing.expect(doomed.garbage);
@@ -14485,7 +14485,7 @@ test "PageList resize reflow less cols no scrollback pull blank active" {
     var s = try init(alloc, 5, 5, 1);
     defer s.deinit();
     try testing.expect(s.pages.first == s.pages.last);
-    const page = &s.pages.first.?.data;
+    const page = s.pages.first.?.page();
     for (0..s.rows) |y| {
         for (0..2) |x| {
             const rac = page.getRowAndCell(x, y);
@@ -14528,7 +14528,7 @@ test "PageList resize reflow less cols copy style" {
     defer s.deinit();
     {
         try testing.expect(s.pages.first == s.pages.last);
-        const page = &s.pages.first.?.data;
+        const page = s.pages.first.?.page();
 
         // Create a style
         const style: stylepkg.Style = .{ .flags = .{ .bold = true } };
@@ -14562,8 +14562,8 @@ test "PageList resize reflow less cols copy style" {
             const style_id = rac.cell.style_id;
             try testing.expect(style_id != 0);
 
-            const style = offset.node.data.styles.get(
-                offset.node.data.memory,
+            const style = offset.node.page().styles.get(
+                offset.node.page().memory,
                 style_id,
             );
             try testing.expect(style.flags.bold);
@@ -14582,7 +14582,7 @@ test "PageList resize reflow less cols to eliminate a wide char" {
     defer s.deinit();
     {
         try testing.expect(s.pages.first == s.pages.last);
-        const page = &s.pages.first.?.data;
+        const page = s.pages.first.?.page();
 
         {
             const rac = page.getRowAndCell(0, 0);
@@ -14609,7 +14609,7 @@ test "PageList resize reflow less cols to eliminate a wide char" {
 
     {
         try testing.expect(s.pages.first == s.pages.last);
-        const page = &s.pages.first.?.data;
+        const page = s.pages.first.?.page();
 
         {
             const rac = page.getRowAndCell(0, 0);
@@ -14627,7 +14627,7 @@ test "PageList resize reflow less cols to wrap a wide char" {
     defer s.deinit();
     {
         try testing.expect(s.pages.first == s.pages.last);
-        const page = &s.pages.first.?.data;
+        const page = s.pages.first.?.page();
 
         {
             const rac = page.getRowAndCell(0, 0);
@@ -14661,7 +14661,7 @@ test "PageList resize reflow less cols to wrap a wide char" {
 
     {
         try testing.expect(s.pages.first == s.pages.last);
-        const page = &s.pages.first.?.data;
+        const page = s.pages.first.?.page();
 
         {
             const rac = page.getRowAndCell(0, 0);
@@ -14695,7 +14695,7 @@ test "PageList resize reflow less cols to wrap a multi-codepoint grapheme with a
     defer s.deinit();
     {
         try testing.expect(s.pages.first == s.pages.last);
-        const page = &s.pages.first.?.data;
+        const page = s.pages.first.?.page();
 
         // We want to make the screen look like this:
         //
@@ -14754,7 +14754,7 @@ test "PageList resize reflow less cols to wrap a multi-codepoint grapheme with a
 
     {
         try testing.expect(s.pages.first == s.pages.last);
-        const page = &s.pages.first.?.data;
+        const page = s.pages.first.?.page();
 
         {
             const rac = page.getRowAndCell(0, 0);
@@ -14816,7 +14816,7 @@ test "PageList resize reflow less cols copy kitty placeholder" {
     defer s.deinit();
     {
         try testing.expect(s.pages.first == s.pages.last);
-        const page = &s.pages.first.?.data;
+        const page = s.pages.first.?.page();
 
         // Write unicode placeholders
         for (0..s.cols - 1) |x| {
@@ -14857,7 +14857,7 @@ test "PageList resize reflow more cols clears kitty placeholder" {
     defer s.deinit();
     {
         try testing.expect(s.pages.first == s.pages.last);
-        const page = &s.pages.first.?.data;
+        const page = s.pages.first.?.page();
 
         // Write unicode placeholders
         for (0..s.cols - 1) |x| {
@@ -14900,7 +14900,7 @@ test "PageList resize reflow wrap moves kitty placeholder" {
     defer s.deinit();
     {
         try testing.expect(s.pages.first == s.pages.last);
-        const page = &s.pages.first.?.data;
+        const page = s.pages.first.?.page();
 
         // Write unicode placeholders
         for (2..s.cols - 1) |x| {
@@ -15080,7 +15080,7 @@ test "PageList resize reflow grapheme map capacity exceeded" {
     // during reflow. Since each source page can only hold this many graphemes,
     // we create two source pages with graphemes that will merge into one
     // destination page.
-    const grapheme_capacity = s.pages.first.?.data.graphemeCapacity();
+    const grapheme_capacity = s.pages.first.?.page().graphemeCapacity();
     // Use slightly more than half the capacity per page, so combined they
     // exceed the capacity of a single destination page.
     const graphemes_per_page = grapheme_capacity / 2 + grapheme_capacity / 4;
@@ -15088,7 +15088,7 @@ test "PageList resize reflow grapheme map capacity exceeded" {
     // Grow to the capacity of the first page and add more rows
     // so that we have two pages total.
     {
-        const page = &s.pages.first.?.data;
+        const page = s.pages.first.?.page();
         page.pauseIntegrityChecks(true);
         for (page.size.rows..page.capacity.rows) |_| {
             _ = try s.grow();
@@ -15110,7 +15110,7 @@ test "PageList resize reflow grapheme map capacity exceeded" {
 
     // Add graphemes to the end of the first page (last rows)
     {
-        const page = &s.pages.first.?.data;
+        const page = s.pages.first.?.page();
         const start_row = page.size.rows - graphemes_per_page;
         for (0..graphemes_per_page) |i| {
             const y = start_row + i;
@@ -15125,7 +15125,7 @@ test "PageList resize reflow grapheme map capacity exceeded" {
 
     // Add graphemes to the beginning of the second page
     {
-        const page = &s.pages.last.?.data;
+        const page = s.pages.last.?.page();
         const count = @min(graphemes_per_page, page.size.rows);
         for (0..count) |y| {
             const rac = page.getRowAndCell(0, y);
@@ -15168,7 +15168,7 @@ test "PageList resize grow cols with unwrap fixes viewport pin" {
     // Fill all rows with wrapped content (pairs that unwrap when cols increase)
     var it = s.pageIterator(.right_down, .{ .screen = .{} }, null);
     while (it.next()) |chunk| {
-        const page = &chunk.node.data;
+        const page = chunk.node.page();
         for (chunk.start..chunk.end) |y| {
             const rac = page.getRowAndCell(0, y);
             if (y % 2 == 0) {
@@ -15212,16 +15212,16 @@ test "PageList grow reuses non-standard page without leak" {
     defer s.deinit();
 
     // Increase the first page capacity to make it non-standard (larger than std_size).
-    while (s.pages.first.?.data.memory.len <= std_size) {
+    while (s.pages.first.?.page().memory.len <= std_size) {
         _ = try s.increaseCapacity(s.pages.first.?, .grapheme_bytes);
     }
 
     // The first page should now have non-standard memory size.
-    try testing.expect(s.pages.first.?.data.memory.len > std_size);
+    try testing.expect(s.pages.first.?.page().memory.len > std_size);
 
     // First, fill up the first page's capacity
     const first_page = s.pages.first.?;
-    while (first_page.data.size.rows < first_page.data.capacity.rows) {
+    while (first_page.rows() < first_page.capacity().rows) {
         _ = try s.grow();
     }
 
@@ -15231,23 +15231,23 @@ test "PageList grow reuses non-standard page without leak" {
 
     // Continue growing until we exceed max_size AND the last page is full
     while (s.page_size + PagePool.item_size <= s.maxSize() or
-        s.pages.last.?.data.size.rows < s.pages.last.?.data.capacity.rows)
+        s.pages.last.?.rows() < s.pages.last.?.capacity().rows)
     {
         _ = try s.grow();
     }
 
     // The first page should still be non-standard
-    try testing.expect(s.pages.first.?.data.memory.len > std_size);
+    try testing.expect(s.pages.first.?.page().memory.len > std_size);
 
     // Verify we have enough rows for active area (so prune path isn't skipped)
     try testing.expect(s.totalRows() >= s.rows);
 
     // Verify last page is full (so grow will need to allocate/reuse)
-    try testing.expect(s.pages.last.?.data.size.rows == s.pages.last.?.data.capacity.rows);
+    try testing.expect(s.pages.last.?.rows() == s.pages.last.?.capacity().rows);
 
     // Remember the first page memory pointer before the reuse attempt
     const first_page_ptr = s.pages.first.?;
-    const first_page_mem_ptr = s.pages.first.?.data.memory.ptr;
+    const first_page_mem_ptr = s.pages.first.?.page().memory.ptr;
 
     // Create a tracked pin pointing to the non-standard first page
     const tracked_pin = try s.trackPin(.{ .node = first_page_ptr, .x = 0, .y = 0 });
@@ -15266,7 +15266,7 @@ test "PageList grow reuses non-standard page without leak" {
 
     // If the non-standard page was properly destroyed and not reused,
     // the last page should not have the same memory pointer
-    try testing.expect(s.pages.last.?.data.memory.ptr != first_page_mem_ptr);
+    try testing.expect(s.pages.last.?.page().memory.ptr != first_page_mem_ptr);
 
     // The tracked pin should have been moved to the new first page and marked as garbage
     try testing.expectEqual(s.pages.first.?, tracked_pin.node);
@@ -15295,19 +15295,19 @@ test "PageList grow non-standard page prune protection" {
     defer s.deinit();
 
     // Make the first page non-standard
-    while (s.pages.first.?.data.memory.len <= std_size) {
+    while (s.pages.first.?.page().memory.len <= std_size) {
         _ = try s.increaseCapacity(
             s.pages.first.?,
             .grapheme_bytes,
         );
     }
-    try testing.expect(s.pages.first.?.data.memory.len > std_size);
+    try testing.expect(s.pages.first.?.page().memory.len > std_size);
 
     const first_page_node = s.pages.first.?;
-    const first_page_cap = first_page_node.data.capacity.rows;
+    const first_page_cap = first_page_node.capacity().rows;
 
     // Fill first page to capacity
-    while (first_page_node.data.size.rows < first_page_cap) _ = try s.grow();
+    while (first_page_node.rows() < first_page_cap) _ = try s.grow();
 
     // Grow until we have a second page (first page fills up first)
     var second_node: ?*List.Node = null;
@@ -15316,8 +15316,8 @@ test "PageList grow non-standard page prune protection" {
 
     // Fill the second page to capacity so that the next grow() triggers prune
     const last_node = s.pages.last.?;
-    const second_cap = last_node.data.capacity.rows;
-    while (last_node.data.size.rows < second_cap) _ = try s.grow();
+    const second_cap = last_node.capacity().rows;
+    while (last_node.rows() < second_cap) _ = try s.grow();
 
     // Now the last page is full. The next grow must either:
     // 1. Prune the first page and reuse it, OR
@@ -15334,7 +15334,7 @@ test "PageList grow non-standard page prune protection" {
     try testing.expect(s.totalRows() >= s.rows);
 
     // Verify last page is at capacity (so grow must prune or allocate new)
-    try testing.expectEqual(second_cap, last_node.data.size.rows);
+    try testing.expectEqual(second_cap, last_node.rows());
 
     // The next grow should trigger prune consideration.
     // Without the fix, this would destroy the non-standard first page,
@@ -15368,12 +15368,12 @@ test "PageList resize (no reflow) more cols remaps pins in backfill path" {
     // Trim a history row so the first page has spare capacity.
     // This triggers the backfill path in resizeWithoutReflowGrowCols.
     s.eraseHistory(.{ .history = .{ .y = 0 } });
-    try testing.expect(first_page.data.size.rows < first_page.data.capacity.rows);
+    try testing.expect(first_page.rows() < first_page.capacity().rows);
 
     // Ensure the resize takes the slow path (new capacity > current capacity).
     const new_cols: size.CellCountInt = cols + 1;
-    const adjusted = try second_page.data.capacity.adjust(.{ .cols = new_cols });
-    try testing.expect(second_page.data.capacity.cols < adjusted.cols);
+    const adjusted = try second_page.capacity().adjust(.{ .cols = new_cols });
+    try testing.expect(second_page.capacity().cols < adjusted.cols);
 
     // Track a pin in row 0 of the second page. This row will be copied
     // to the first page during backfill and the pin must be remapped.
@@ -15400,7 +15400,7 @@ test "PageList resize (no reflow) more cols remaps pins in backfill path" {
         }
     }
     try testing.expect(found);
-    try testing.expect(tracked.y < tracked.node.data.size.rows);
+    try testing.expect(tracked.y < tracked.node.rows());
 
     // Verify the pin still points to the cell with our marker content.
     const cell = tracked.rowAndCell().cell;
@@ -15417,7 +15417,7 @@ test "PageList compact std_size page returns null" {
 
     // A freshly created page should be at std_size
     const node = s.pages.first.?;
-    try testing.expect(node.data.memory.len <= std_size);
+    try testing.expect(node.page().memory.len <= std_size);
 
     // compact should return null since there's nothing to compact
     const result = try s.compact(node);
@@ -15436,11 +15436,11 @@ test "PageList compact oversized page" {
 
     // Grow until we have multiple pages
     const page1_node = s.pages.first.?;
-    page1_node.data.pauseIntegrityChecks(true);
-    for (0..page1_node.data.capacity.rows - page1_node.data.size.rows) |_| {
+    page1_node.page().pauseIntegrityChecks(true);
+    for (0..page1_node.capacity().rows - page1_node.rows()) |_| {
         _ = try s.grow();
     }
-    page1_node.data.pauseIntegrityChecks(false);
+    page1_node.page().pauseIntegrityChecks(false);
     _ = try s.grow();
     try testing.expect(s.pages.first != s.pages.last);
 
@@ -15448,7 +15448,7 @@ test "PageList compact oversized page" {
 
     // Write content to verify it's preserved
     {
-        const page = &node.data;
+        const page = node.page();
         for (0..page.size.rows) |y| {
             for (0..s.cols) |x| {
                 const rac = page.getRowAndCell(x, y);
@@ -15465,30 +15465,30 @@ test "PageList compact oversized page" {
     defer s.untrackPin(tracked);
 
     // Make the page oversized
-    while (node.data.memory.len <= std_size) {
+    while (node.page().memory.len <= std_size) {
         node = try s.increaseCapacity(node, .grapheme_bytes);
     }
-    try testing.expect(node.data.memory.len > std_size);
-    const oversized_len = node.data.memory.len;
-    const original_size = node.data.size;
+    try testing.expect(node.page().memory.len > std_size);
+    const oversized_len = node.page().memory.len;
+    const original_size = node.page().size;
     const second_node = node.next.?;
 
     // Set dirty flag after increaseCapacity
-    node.data.dirty = true;
+    node.page().dirty = true;
 
     // Compact the page
     const new_node = try s.compact(node);
     try testing.expect(new_node != null);
 
     // Verify memory is smaller
-    try testing.expect(new_node.?.data.memory.len < oversized_len);
+    try testing.expect(new_node.?.page().memory.len < oversized_len);
 
     // Verify size preserved
-    try testing.expectEqual(original_size.rows, new_node.?.data.size.rows);
-    try testing.expectEqual(original_size.cols, new_node.?.data.size.cols);
+    try testing.expectEqual(original_size.rows, new_node.?.rows());
+    try testing.expectEqual(original_size.cols, new_node.?.cols());
 
     // Verify dirty flag preserved
-    try testing.expect(new_node.?.data.dirty);
+    try testing.expect(new_node.?.page().dirty);
 
     // Verify linked list integrity
     try testing.expectEqual(new_node.?, s.pages.first.?);
@@ -15502,7 +15502,7 @@ test "PageList compact oversized page" {
     try testing.expectEqual(@as(size.CellCountInt, 10), tracked.y);
 
     // Verify content preserved
-    const page = &new_node.?.data;
+    const page = new_node.?.page();
     for (0..page.size.rows) |y| {
         for (0..s.cols) |x| {
             const rac = page.getRowAndCell(x, y);
@@ -15525,31 +15525,31 @@ test "PageList increaseCapacity from zero-capacity dimensions" {
     // or hyperlink content so the exact capacity is zero in every
     // managed dimension. Only an oversized page compacts.
     var node = s.pages.first.?;
-    while (node.data.memory.len <= std_size) {
+    while (node.page().memory.len <= std_size) {
         node = try s.increaseCapacity(node, .grapheme_bytes);
     }
     node = (try s.compact(node)).?;
-    try testing.expectEqual(0, node.data.capacity.styles);
-    try testing.expectEqual(0, node.data.capacity.grapheme_bytes);
-    try testing.expectEqual(0, node.data.capacity.string_bytes);
-    try testing.expectEqual(0, node.data.capacity.hyperlink_bytes);
+    try testing.expectEqual(0, node.capacity().styles);
+    try testing.expectEqual(0, node.capacity().grapheme_bytes);
+    try testing.expectEqual(0, node.capacity().string_bytes);
+    try testing.expectEqual(0, node.capacity().hyperlink_bytes);
 
     // Increasing each dimension from zero must actually grow it.
     // Regression: 0 * 2 == 0 used to "succeed" without growing,
     // which turned caller retry loops into infinite loops.
     node = try s.increaseCapacity(node, .styles);
-    try testing.expect(node.data.capacity.styles > 0);
+    try testing.expect(node.capacity().styles > 0);
     node = try s.increaseCapacity(node, .grapheme_bytes);
-    try testing.expect(node.data.capacity.grapheme_bytes > 0);
+    try testing.expect(node.capacity().grapheme_bytes > 0);
     node = try s.increaseCapacity(node, .string_bytes);
-    try testing.expect(node.data.capacity.string_bytes > 0);
+    try testing.expect(node.capacity().string_bytes > 0);
     node = try s.increaseCapacity(node, .hyperlink_bytes);
-    try testing.expect(node.data.capacity.hyperlink_bytes > 0);
+    try testing.expect(node.capacity().hyperlink_bytes > 0);
 
     // Increasing a non-zero dimension still doubles.
-    const styles = node.data.capacity.styles;
+    const styles = node.capacity().styles;
     node = try s.increaseCapacity(node, .styles);
-    try testing.expectEqual(styles * 2, node.data.capacity.styles);
+    try testing.expectEqual(styles * 2, node.capacity().styles);
 }
 
 test "PageList compact insufficient savings returns null" {
@@ -15566,7 +15566,7 @@ test "PageList compact insufficient savings returns null" {
     node = try s.increaseCapacity(node, .grapheme_bytes);
 
     // If the page is still at or below std_size, compact returns null
-    if (node.data.memory.len <= std_size) {
+    if (node.page().memory.len <= std_size) {
         const result = try s.compact(node);
         try testing.expectEqual(null, result);
     } else {
@@ -15575,7 +15575,7 @@ test "PageList compact insufficient savings returns null" {
         const result = try s.compact(node);
         // Either it compacted or determined insufficient savings
         if (result) |new_node| {
-            try testing.expect(new_node.data.memory.len < node.data.memory.len);
+            try testing.expect(new_node.page().memory.len < node.page().memory.len);
         }
     }
 }
@@ -15587,7 +15587,7 @@ test "PageList split at middle row" {
     var s = try init(alloc, 10, 10, 0);
     defer s.deinit();
 
-    const page = &s.pages.first.?.data;
+    const page = s.pages.first.?.page();
 
     // Write content to rows: row 0 gets codepoint 0, row 1 gets 1, etc.
     for (0..page.size.rows) |y| {
@@ -15606,8 +15606,8 @@ test "PageList split at middle row" {
     try testing.expect(s.pages.first != null);
     try testing.expect(s.pages.first.?.next != null);
 
-    const first_page = &s.pages.first.?.data;
-    const second_page = &s.pages.first.?.next.?.data;
+    const first_page = s.pages.first.?.page();
+    const second_page = s.pages.first.?.next.?.page();
 
     // First page should have rows 0-4 (5 rows)
     try testing.expectEqual(@as(usize, 5), first_page.size.rows);
@@ -15634,7 +15634,7 @@ test "PageList split at row 0 is no-op" {
     var s = try init(alloc, 10, 10, 0);
     defer s.deinit();
 
-    const page = &s.pages.first.?.data;
+    const page = s.pages.first.?.page();
 
     // Write content to all rows
     for (0..page.size.rows) |y| {
@@ -15668,7 +15668,7 @@ test "PageList split at last row" {
     var s = try init(alloc, 10, 10, 0);
     defer s.deinit();
 
-    const page = &s.pages.first.?.data;
+    const page = s.pages.first.?.page();
 
     // Write content to all rows
     for (0..page.size.rows) |y| {
@@ -15687,8 +15687,8 @@ test "PageList split at last row" {
     try testing.expect(s.pages.first != null);
     try testing.expect(s.pages.first.?.next != null);
 
-    const first_page = &s.pages.first.?.data;
-    const second_page = &s.pages.first.?.next.?.data;
+    const first_page = s.pages.first.?.page();
+    const second_page = s.pages.first.?.next.?.page();
 
     // First page should have 9 rows
     try testing.expectEqual(@as(usize, 9), first_page.size.rows);
@@ -15874,8 +15874,8 @@ test "PageList split middle page preserves linked list order" {
     // Now we have 2 pages
     const page1 = s.pages.first.?;
     const page2 = s.pages.first.?.next.?;
-    try testing.expectEqual(@as(usize, 4), page1.data.size.rows);
-    try testing.expectEqual(@as(usize, 8), page2.data.size.rows);
+    try testing.expectEqual(@as(usize, 4), page1.rows());
+    try testing.expectEqual(@as(usize, 8), page2.rows());
 
     // Split page2 at row 4 to create: page1 -> page2 (rows 0-3) -> page3 (rows 4-7)
     const split_pin2: Pin = .{ .node = page2, .y = 4, .x = 0 };
@@ -15902,9 +15902,9 @@ test "PageList split middle page preserves linked list order" {
     try testing.expect(last.next == null);
 
     // Verify row counts
-    try testing.expectEqual(@as(usize, 4), first.data.size.rows);
-    try testing.expectEqual(@as(usize, 4), middle.data.size.rows);
-    try testing.expectEqual(@as(usize, 4), last.data.size.rows);
+    try testing.expectEqual(@as(usize, 4), first.rows());
+    try testing.expectEqual(@as(usize, 4), middle.rows());
+    try testing.expectEqual(@as(usize, 4), last.rows());
 }
 
 test "PageList split last page makes new page the last" {
@@ -15922,7 +15922,7 @@ test "PageList split last page makes new page the last" {
 
     // Now split the last page
     const last_before_split = s.pages.last.?;
-    try testing.expectEqual(@as(usize, 5), last_before_split.data.size.rows);
+    try testing.expectEqual(@as(usize, 5), last_before_split.rows());
 
     const split_pin2: Pin = .{ .node = last_before_split, .y = 2, .x = 0 };
     try s.split(split_pin2);
@@ -15934,8 +15934,8 @@ test "PageList split last page makes new page the last" {
     try testing.expect(new_last.next == null);
 
     // Verify row counts: original last has 2 rows, new last has 3 rows
-    try testing.expectEqual(@as(usize, 2), last_before_split.data.size.rows);
-    try testing.expectEqual(@as(usize, 3), new_last.data.size.rows);
+    try testing.expectEqual(@as(usize, 2), last_before_split.rows());
+    try testing.expectEqual(@as(usize, 3), new_last.rows());
 }
 
 test "PageList split first page keeps original as first" {
@@ -15967,9 +15967,9 @@ test "PageList split first page keeps original as first" {
     try testing.expectEqual(second_page, inserted.next.?);
 
     // Verify row counts: first has 2, inserted has 3, second has 5
-    try testing.expectEqual(@as(usize, 2), s.pages.first.?.data.size.rows);
-    try testing.expectEqual(@as(usize, 3), inserted.data.size.rows);
-    try testing.expectEqual(@as(usize, 5), second_page.data.size.rows);
+    try testing.expectEqual(@as(usize, 2), s.pages.first.?.rows());
+    try testing.expectEqual(@as(usize, 3), inserted.rows());
+    try testing.expectEqual(@as(usize, 5), second_page.rows());
 }
 
 test "PageList split preserves wrap flags" {
@@ -15979,7 +15979,7 @@ test "PageList split preserves wrap flags" {
     var s = try init(alloc, 10, 10, 0);
     defer s.deinit();
 
-    const page = &s.pages.first.?.data;
+    const page = s.pages.first.?.page();
 
     // Set wrap flags on rows that will be in the second page after split
     // Row 5: wrap = true (this is the start of a wrapped line)
@@ -16001,7 +16001,7 @@ test "PageList split preserves wrap flags" {
     const split_pin: Pin = .{ .node = s.pages.first.?, .y = 5, .x = 0 };
     try s.split(split_pin);
 
-    const second_page = &s.pages.first.?.next.?.data;
+    const second_page = s.pages.first.?.next.?.page();
 
     // Verify wrap flags are preserved in new page
     // Original row 5 is now row 0 in second page
@@ -16033,7 +16033,7 @@ test "PageList split preserves styled cells" {
     var s = try init(alloc, 10, 10, 0);
     defer s.deinit();
 
-    const page = &s.pages.first.?.data;
+    const page = s.pages.first.?.page();
 
     // Create a style and apply it to cells in rows 5-7 (which will be in the second page)
     const style: stylepkg.Style = .{ .flags = .{ .bold = true } };
@@ -16056,8 +16056,8 @@ test "PageList split preserves styled cells" {
     const split_pin: Pin = .{ .node = s.pages.first.?, .y = 5, .x = 0 };
     try s.split(split_pin);
 
-    const first_page = &s.pages.first.?.data;
-    const second_page = &s.pages.first.?.next.?.data;
+    const first_page = s.pages.first.?.page();
+    const second_page = s.pages.first.?.next.?.page();
 
     // First page should have no styles (all styled rows moved to second page)
     try testing.expectEqual(@as(usize, 0), first_page.styles.count());
@@ -16084,7 +16084,7 @@ test "PageList split preserves grapheme clusters" {
     var s = try init(alloc, 10, 10, 0);
     defer s.deinit();
 
-    const page = &s.pages.first.?.data;
+    const page = s.pages.first.?.page();
 
     // Add a grapheme cluster to row 6 (will be row 1 in second page after split at 5)
     {
@@ -16103,8 +16103,8 @@ test "PageList split preserves grapheme clusters" {
     const split_pin: Pin = .{ .node = s.pages.first.?, .y = 5, .x = 0 };
     try s.split(split_pin);
 
-    const first_page = &s.pages.first.?.data;
-    const second_page = &s.pages.first.?.next.?.data;
+    const first_page = s.pages.first.?.page();
+    const second_page = s.pages.first.?.next.?.page();
 
     // First page should have no graphemes (the grapheme row moved to second page)
     try testing.expectEqual(@as(usize, 0), first_page.graphemeCount());
@@ -16132,7 +16132,7 @@ test "PageList split preserves hyperlinks" {
     var s = try init(alloc, 10, 10, 0);
     defer s.deinit();
 
-    const page = &s.pages.first.?.data;
+    const page = s.pages.first.?.page();
 
     // Add a hyperlink to row 7 (will be row 2 in second page after split at 5)
     const hyperlink_id = try page.insertHyperlink(.{
@@ -16152,8 +16152,8 @@ test "PageList split preserves hyperlinks" {
     const split_pin: Pin = .{ .node = s.pages.first.?, .y = 5, .x = 0 };
     try s.split(split_pin);
 
-    const first_page = &s.pages.first.?.data;
-    const second_page = &s.pages.first.?.next.?.data;
+    const first_page = s.pages.first.?.page();
+    const second_page = s.pages.first.?.next.?.page();
 
     // First page should have no hyperlinks (the hyperlink row moved to second page)
     try testing.expectEqual(@as(usize, 0), first_page.hyperlink_set.count());
