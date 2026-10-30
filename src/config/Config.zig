@@ -1515,6 +1515,22 @@ link: RepeatableLink = .{},
 /// `link`). If you want to customize URL matching, use `link` and disable this.
 @"link-url": bool = true,
 
+/// Enable hyperlinks created with the OSC 8 escape sequence. When disabled,
+/// noctty does not use the target a program puts behind OSC 8 link text:
+/// Ctrl+hover, Ctrl+click, the context menu's link selection and
+/// `copy_url_to_clipboard` see only what `link` and `link-url` match in the
+/// text itself.
+///
+/// Two things still show OSC 8 hyperlinks when disabled. A copy that
+/// includes HTML, as the default copy bindings do, keeps a web, mail or ftp
+/// target as a link. The Ctrl+hover highlight can still light an OSC 8
+/// hyperlink when the hovered text is itself a matched URL.
+///
+/// This does not affect URL matching controlled by `link-url`.
+///
+/// Available since: 1.4.0
+@"link-osc8": bool = true,
+
 /// Show link previews for a matched URL.
 ///
 /// When true, link previews are shown for all matched URLs. When false, link
