@@ -937,19 +937,24 @@ pub fn resize(
 ) !void {
     const grid_size = size.grid();
 
-    // Update the size of our pty. A pty that refuses (a pseudo console whose
-    // host is gone, a handoff session whose signal pipe closed) must not
-    // keep the grid and the renderer at the old size: the surface has the
-    // new size either way. A mode 2048 report below then says the new size
-    // while the pty may keep the old one until a later resize succeeds.
-    self.backend.resize(grid_size, size.terminal()) catch |err| {
-        log.warn("pty resize failed, resizing the terminal anyway err={}", .{err});
-    };
-
     // Enter the critical area that we want to keep small
     {
         self.renderer_state.mutex.lock();
         defer self.renderer_state.mutex.unlock();
+
+        // Resizing the pty can make the shell, or the pseudo console's host,
+        // redraw at once. Hold the same lock used by processOutput before
+        // notifying it, so that redraw cannot be parsed against the old
+        // terminal dimensions.
+        //
+        // A pty that refuses (a pseudo console whose host is gone, a handoff
+        // session whose signal pipe closed) must not keep the grid and the
+        // renderer at the old size: the surface has the new size either way.
+        // A mode 2048 report below then says the new size while the pty may
+        // keep the old one until a later resize succeeds.
+        self.backend.resize(grid_size, size.terminal()) catch |err| {
+            log.warn("pty resize failed, resizing the terminal anyway err={}", .{err});
+        };
 
         // The stream handler reads this under the same lock (DECCOLM's
         // mode 3 reset, size reports).
