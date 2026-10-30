@@ -1,6 +1,7 @@
 const colorpkg = @This();
 
 const std = @import("std");
+const lib = @import("lib.zig");
 const assert = @import("../quirks.zig").inlineAssert;
 const x11_color = @import("x11_color.zig");
 
@@ -523,7 +524,7 @@ pub const RGB = packed struct(u24) {
             return error.InvalidFormat;
         }
 
-        const color = std.fmt.parseUnsigned(u16, value, 16) catch {
+        const color = lib.parseInt(u16, value, 16) catch {
             @branchHint(.cold);
             return error.InvalidFormat;
         };
@@ -811,6 +812,12 @@ test "RGB.parse" {
     try testing.expectError(error.InvalidFormat, RGB.parse("#ffff"));
     try testing.expectError(error.InvalidFormat, RGB.parse("#fffff"));
     try testing.expectError(error.InvalidFormat, RGB.parse("#gggggg"));
+}
+
+test "RGB.parse rejects digit separators" {
+    const testing = std.testing;
+    try testing.expectError(error.InvalidFormat, RGB.parse("rgb:f_f/0/0"));
+    try testing.expectError(error.InvalidFormat, RGB.parse("#f_f000000"));
 }
 
 test "DynamicPalette: init" {

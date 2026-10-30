@@ -1,4 +1,5 @@
 const std = @import("std");
+const lib = @import("../../lib.zig");
 
 /// Parse OSC 9, which could be an iTerm2 notification or a ConEmu extension.
 pub fn parse(parser: anytype, _: ?u8) ?*@TypeOf(parser.command) {
@@ -22,7 +23,7 @@ pub fn parse(parser: anytype, _: ?u8) ?*@TypeOf(parser.command) {
                     ';' => {
                         parser.command = .{
                             .conemu_sleep = .{
-                                .duration_ms = if (std.fmt.parseUnsigned(u16, data[2..], 10)) |num| @min(num, 10_000) else |_| 100,
+                                .duration_ms = if (lib.parseInt(u16, data[2..], 10)) |num| @min(num, 10_000) else |_| 100,
                             },
                         };
                         return &parser.command;
@@ -190,7 +191,7 @@ pub fn parse(parser: anytype, _: ?u8) ?*@TypeOf(parser.command) {
                         // parse the progress value
                         parser.command.conemu_progress_report.progress = value: {
                             break :value @intCast(std.math.clamp(
-                                std.fmt.parseUnsigned(usize, data[4..], 10) catch break :value null,
+                                lib.parseInt(usize, data[4..], 10) catch break :value null,
                                 0,
                                 100,
                             ));
@@ -281,6 +282,20 @@ pub fn parse(parser: anytype, _: ?u8) ?*@TypeOf(parser.command) {
         },
     };
     return &parser.command;
+}
+
+test "OSC 9: numeric fields reject digit separators" {
+    const testing = std.testing;
+
+    var sleep = @import("../../osc.zig").Parser.init(null);
+    for ("9;1;4_2") |ch| sleep.next(ch);
+    const sleep_cmd = sleep.end(null).?.*;
+    try testing.expectEqual(100, sleep_cmd.conemu_sleep.duration_ms);
+
+    var progress = @import("../../osc.zig").Parser.init(null);
+    for ("9;4;1;4_2") |ch| progress.next(ch);
+    const progress_cmd = progress.end(null).?.*;
+    try testing.expectEqual(null, progress_cmd.conemu_progress_report.progress);
 }
 
 test "OSC 9: show desktop notification" {

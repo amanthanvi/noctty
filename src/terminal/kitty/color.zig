@@ -1,4 +1,5 @@
 const std = @import("std");
+const lib = @import("../lib.zig");
 const RGB = @import("../color.zig").RGB;
 const Terminator = @import("../osc/terminator.zig").Terminator;
 
@@ -47,7 +48,7 @@ pub const Kind = union(enum) {
 
     pub fn parse(key: []const u8) ?Kind {
         if (std.meta.stringToEnum(Special, key)) |s| return .{ .special = s };
-        return .{ .palette = std.fmt.parseUnsigned(u8, key, 10) catch return null };
+        return .{ .palette = lib.parseInt(u8, key, 10) catch return null };
     }
 
     pub fn format(
@@ -60,6 +61,15 @@ pub const Kind = union(enum) {
         }
     }
 };
+
+test "OSC: kitty color indexes reject digit separators" {
+    try std.testing.expectEqual(null, Kind.parse("1_0"));
+    try std.testing.expectEqualDeep(Kind{ .palette = 10 }, Kind.parse("10").?);
+    try std.testing.expectEqualDeep(
+        Kind{ .special = .selection_foreground },
+        Kind.parse("selection_foreground").?,
+    );
+}
 
 test "OSC: kitty color protocol kind string" {
     const testing = std.testing;

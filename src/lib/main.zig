@@ -7,6 +7,7 @@ const unionpkg = @import("union.zig");
 pub const allocator = @import("allocator.zig");
 pub const Enum = enumpkg.Enum;
 pub const checkGhosttyHEnum = enumpkg.checkGhosttyHEnum;
+pub const parseInt = @import("parse_int.zig").parseInt;
 pub const String = types.String;
 pub const Struct = structpkg.Struct;
 pub const structSizedFieldFits = structpkg.sizedFieldFits;

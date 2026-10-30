@@ -1,6 +1,7 @@
 //! https://gitlab.freedesktop.org/Per_Bothner/specifications/blob/master/proposals/semantic-prompts.md
 const std = @import("std");
 
+const lib = @import("../../lib.zig");
 const string_encoding = @import("../../../os/string_encoding.zig");
 
 const log = std.log.scoped(.osc_semantic_prompt);
@@ -152,11 +153,11 @@ pub const Option = enum {
             // If we're looking for exit_code we special case it.
             // as the first value.
             if (comptime self == .exit_code) {
-                return std.fmt.parseInt(i32, full, 10) catch {
+                return lib.parseInt(i32, full, 10) catch {
                     // Windows reports an exit code as a DWORD, so a crash
                     // is often spelled unsigned (`3221225477` for
                     // 0xC0000005). Keep the 32 bits.
-                    const unsigned = std.fmt.parseInt(u32, full, 10) catch return null;
+                    const unsigned = lib.parseInt(u32, full, 10) catch return null;
                     return @bitCast(unsigned);
                 };
             }
@@ -1277,4 +1278,14 @@ test "Option.read exit_code accepts the unsigned spelling of a 32-bit code" {
     // Past 32 bits either way is still malformed.
     try testing.expect(Option.exit_code.read("4294967296") == null);
     try testing.expect(Option.exit_code.read("-2147483649") == null);
+}
+
+test "OSC 133: exit codes reject digit separators" {
+    var p = @import("../../osc.zig").Parser.init(null);
+    for ("133;D;-4_2;aid=foo") |ch| p.next(ch);
+    const cmd = p.end(null).?.*;
+    try std.testing.expectEqual(null, cmd.semantic_prompt.readOption(.exit_code));
+
+    // The unsigned spelling of a Windows exit code is checked the same way.
+    try std.testing.expectEqual(null, Option.exit_code.read("4_294967295"));
 }
