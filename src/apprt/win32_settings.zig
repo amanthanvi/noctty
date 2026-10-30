@@ -3331,10 +3331,12 @@ pub const SettingsWindow = struct {
             if (names) |service| _ = setAccessibleNameText(service, made, reset_button_names[index]);
             break :made made;
         };
-        _ = if (childRectIn(viewport, control)) |rect|
-            SetWindowPos(button, control, rect.right + self.px(settings_reset_gap), rect.top, self.px(settings_reset_width), self.px(settings_control_height), SWP_NOACTIVATE)
-        else
-            SetWindowPos(button, control, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        // Past the row's last window, an up-down where it has one: an edit
+        // shows the button at once, with no layout after it.
+        _ = if (childRectIn(viewport, control)) |rect| placed: {
+            const end = childRectIn(viewport, self.rowEnd(index) orelse control) orelse rect;
+            break :placed SetWindowPos(button, control, end.right + self.px(settings_reset_gap), rect.top, self.px(settings_reset_width), self.px(settings_control_height), SWP_NOACTIVATE);
+        } else SetWindowPos(button, control, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
         self.reset_buttons[index] = button;
         if (self.canInitializeCustomUiaProviders()) self.attachResetUiaProvider(index);
     }
@@ -3460,6 +3462,21 @@ pub const SettingsWindow = struct {
         return null;
     }
 
+    /// The window row `index` ends with: its up-down where it has one, else
+    /// its control.
+    fn rowEnd(self: *const SettingsWindow, index: usize) ?HWND {
+        if (Companion.ofControl(index)) |kind| if (kind != .opacity_slider) {
+            if (self.companions[@intFromEnum(kind)]) |spin| return spin;
+        };
+        return self.controlHwnd(index);
+    }
+
+    /// Row `index`'s trackbar or up-down, if it has one.
+    fn companionOf(self: *const SettingsWindow, index: usize) ?HWND {
+        const kind = Companion.ofControl(index) orelse return null;
+        return self.companions[@intFromEnum(kind)];
+    }
+
     /// Where row `index` starts (viewport client coordinates): at its
     /// trackbar, left of its field, where it has one; else at its control,
     /// whose rectangle is `control`.
@@ -3484,7 +3501,10 @@ pub const SettingsWindow = struct {
                 row.top = @min(row.top, label_rect.top);
             };
             row.left -= self.px(settings_marker_gap + settings_marker_width);
-            if (resettable_rows[item.control_index]) row.right += self.px(settings_reset_gap + settings_reset_width);
+            if (resettable_rows[item.control_index]) {
+                const end = childRectIn(viewport, self.rowEnd(item.control_index) orelse control) orelse row;
+                row.right = @max(row.right, end.right) + self.px(settings_reset_gap + settings_reset_width);
+            }
             if (point.x >= row.left and point.x < row.right and point.y >= row.top and point.y < row.bottom) return item.control_index;
         }
         return null;
@@ -4471,7 +4491,8 @@ pub const SettingsWindow = struct {
         else if (focused == self.keybind_list.hwnd)
             self.keybindListShows()
         else for (0..settings_clipped_control_count) |index| {
-            if (focused == self.controlHwnd(index) or (index < form_field_count and focused == self.reset_buttons[index])) break active.controls[index];
+            if (focused == self.controlHwnd(index) or focused == self.companionOf(index) or
+                (index < form_field_count and focused == self.reset_buttons[index])) break active.controls[index];
         } else true;
         if (!stays) if (self.edit_search) |search| {
             _ = SetFocus(search);
@@ -5694,15 +5715,23 @@ pub const SettingsWindow = struct {
         const field = comptime kind.field();
         const edit = self.rawScalarEdit(field) orelse return 1;
         const p = self.pending orelse return 1;
-        const current = self.typedValue(field) orelse numberAsF64(fieldValue(&p, field.setting()));
-        const stepped = current + @as(f64, @floatFromInt(delta)) * kind.step();
         var buf: [32]u8 = undefined;
         const text = switch (kind) {
             .font_size_spin => text: {
+                const current = self.typedValue(field) orelse numberAsF64(fieldValue(&p, field.setting()));
+                const stepped = current + @as(f64, @floatFromInt(delta)) * kind.step();
                 const range = comptime field_model.descriptor(field.setting()).validation.finite_range;
                 break :text std.fmt.bufPrint(&buf, "{d}", .{@as(f32, @floatCast(std.math.clamp(stepped, range.min, range.max)))}) catch return 1;
             },
-            .scrollback_spin => std.fmt.bufPrint(&buf, "{d}", .{@as(u64, @intFromFloat(@max(0, @round(stepped))))}) catch return 1,
+            // In whole bytes, held to what the limit holds: a value typed
+            // near the top stays exact, and a step cannot overflow it.
+            .scrollback_spin => text: {
+                var utf8_buf: [edit_text_max_utf8]u8 = undefined;
+                const typed = if (readEditUtf8(edit, &utf8_buf)) |utf8| field_model.parseScalar(comptime field.setting(), utf8) catch null else null;
+                const current = typed orelse fieldValue(&p, field.setting());
+                const step: @TypeOf(current) = @as(@TypeOf(current), @intFromFloat(kind.step())) * @abs(delta);
+                break :text std.fmt.bufPrint(&buf, "{d}", .{if (delta > 0) current +| step else current -| step}) catch return 1;
+            },
             .opacity_slider => return 1,
         };
         setWindowTextUtf8(edit, text);
@@ -15550,7 +15579,7 @@ test "settings marks each field that differs from its default, and its Reset but
                     try std.testing.expectEqual(@as(?usize, index), settings.rowAtPoint(.{ .x = marker.left, .y = marker.top + 1 }));
                     try std.testing.expectEqual(field_rect.top, marker.top);
                     const button_rect = dialog_test.rectIn(viewport, button);
-                    try std.testing.expectEqual(dialog_test.rectIn(viewport, rowEnd(settings, index).?).right + settings.px(settings_reset_gap), button_rect.left);
+                    try std.testing.expectEqual(dialog_test.rectIn(viewport, settings.rowEnd(index).?).right + settings.px(settings_reset_gap), button_rect.left);
                     try std.testing.expectEqual(field_rect.top, button_rect.top);
 
                     // Enter on the focused button, as from the keyboard.
@@ -15849,15 +15878,6 @@ test "settings markers draw beside changed fields in light, dark and High Contra
 
 fn isCompanion(settings: *const SettingsWindow, hwnd: HWND) bool {
     return std.mem.indexOfScalar(?HWND, &settings.companions, hwnd) != null;
-}
-
-/// The window row `index` ends with: its up-down where it has one, else its
-/// control.
-fn rowEnd(settings: *const SettingsWindow, index: usize) ?HWND {
-    if (Companion.ofControl(index)) |kind| if (kind != .opacity_slider) {
-        if (settings.companions[@intFromEnum(kind)]) |spin| return spin;
-    };
-    return settings.controlHwnd(index);
 }
 
 /// The window after `window` in z-order, passing over hidden spare Reset
@@ -16312,7 +16332,7 @@ test "settings only the shown page's rows hold Reset buttons, handed on from pag
                     try std.testing.expectEqual(button, provider.hwnd);
                     try std.testing.expectEqualStrings(reset_button_names[index], provider.name.?);
                     const control = childRectIn(viewport, settings.controlHwnd(index).?).?;
-                    const end = childRectIn(viewport, rowEnd(settings, index).?).?;
+                    const end = childRectIn(viewport, settings.rowEnd(index).?).?;
                     const placed = childRectIn(viewport, button).?;
                     try std.testing.expectEqual(end.right + settings.px(settings_reset_gap), placed.left);
                     try std.testing.expectEqual(control.top, placed.top);
@@ -21755,6 +21775,13 @@ test "settings an up-down steps its number field, held to the field's range, and
             try std.testing.expectEqualStrings(try std.fmt.bufPrint(&expected, "{d}", .{size + 1}), readEditUtf8(font, &buf).?);
             try std.testing.expectEqual(size + 1, settings.pending.?.@"font-size");
             try std.testing.expectEqual(@as(LRESULT, @intFromFloat(@round(size + 1))), position(font_spin));
+            // The field differs from its default now, so its Reset button
+            // shows at once, with no layout after it: past the up-down, not
+            // over it.
+            const viewport = settings.viewport.?;
+            const font_reset = settings.reset_buttons[settings.controlIndex(font).?].?;
+            try std.testing.expect(sys.IsWindowVisible(font_reset) != 0);
+            try std.testing.expectEqual(childRectIn(viewport, font_spin).?.right + settings.px(settings_reset_gap), childRectIn(viewport, font_reset).?.left);
             try std.testing.expect(fixture.pumpKey(focus_cue.vk_down));
             try std.testing.expectEqual(size, settings.pending.?.@"font-size");
             try std.testing.expectEqual(font, sys.GetFocus().?);
@@ -21794,6 +21821,15 @@ test "settings an up-down steps its number field, held to the field's range, and
             try std.testing.expect(fixture.pumpKey(focus_cue.vk_down));
             try std.testing.expectEqualStrings("0", readEditUtf8(scrollback, &buf).?);
             try std.testing.expectEqual(@as(usize, 0), settings.pending.?.@"scrollback-limit");
+            // Nor above what the limit holds, and exactly: a step from the
+            // top is held there, and one down is a megabyte less.
+            const top = std.math.maxInt(@TypeOf(limit));
+            const top_text = try std.fmt.bufPrint(&expected, "{d}", .{top});
+            typeInto(scrollback, top_text);
+            try std.testing.expect(fixture.pumpKey(focus_cue.vk_up));
+            try std.testing.expectEqualStrings(top_text, readEditUtf8(scrollback, &buf).?);
+            try std.testing.expect(fixture.pumpKey(focus_cue.vk_down));
+            try std.testing.expectEqual(top - 1_000_000, settings.pending.?.@"scrollback-limit");
         }
     }.body);
 }
@@ -21996,6 +22032,17 @@ test "settings the trackbar and up-downs are named for their fields, and the tra
             _ = sys.SetFocus(slider);
             const shown = childRectIn(settings.viewport.?, slider).?;
             try std.testing.expect(shown.top >= 0 and shown.bottom <= view.bottom);
+
+            // A search that keeps its row keeps the focus on it; one that
+            // hides the row hands the focus to the search field.
+            typeSearch(settings, "opacity");
+            try std.testing.expect(sys.IsWindowVisible(slider) != 0);
+            _ = sys.SetFocus(slider);
+            typeSearch(settings, "opac");
+            try std.testing.expectEqual(slider, sys.GetFocus().?);
+            typeSearch(settings, "padding");
+            try std.testing.expect(sys.IsWindowVisible(slider) == 0);
+            try std.testing.expectEqual(settings.edit_search.?, sys.GetFocus().?);
         }
     }.body);
 }
