@@ -7948,7 +7948,7 @@ pub const App = struct {
     /// The returned local path is both checked and dispatched. In particular,
     /// never check a decoded file URI and then hand its raw spelling to ShellExecute.
     fn prepareWin32OpenTarget(alloc: Allocator, target: []const u8) !?[]const u8 {
-        if (!windows_shell.isSafeWindowsPath(target)) return null;
+        if (!isSafeLinkText(target)) return null;
         if (windows_shell.isDriveAbsolutePath(target)) {
             return try prepareWin32LocalFile(alloc, target);
         }
@@ -7964,6 +7964,12 @@ pub const App = struct {
         // unquoted %1, so either can add arguments of the program's choosing.
         // A URI has neither unencoded; std.Uri.parse takes both.
         if (std.mem.indexOfAny(u8, target, " \"") != null) return null;
+        // As upstream's UntrustedURL.decision: a web URL needs a host
+        // (`https:x` and `https:///x` have none) and a mailto URL an address.
+        if (std.ascii.eqlIgnoreCase(uri.scheme, "http") or std.ascii.eqlIgnoreCase(uri.scheme, "https")) {
+            if (uri.host == null or uri.host.?.isEmpty()) return null;
+        }
+        if (std.ascii.eqlIgnoreCase(uri.scheme, "mailto") and uri.path.isEmpty()) return null;
         for ([_][]const u8{
             "http",
             "https",
@@ -8004,8 +8010,22 @@ pub const App = struct {
         return try prepareWin32LocalFile(alloc, local_path);
     }
 
+    /// Upstream's UntrustedURL.isUnsafeCharacter set: controls, and the
+    /// invisible, bidi and line-separator characters that can disguise part
+    /// of a target. Check the raw target, before percent-encoding can hide
+    /// them, and a decoded file path. Invalid UTF-8 is refused too.
+    fn isSafeLinkText(text: []const u8) bool {
+        const view = std.unicode.Utf8View.init(text) catch return false;
+        var it = view.iterator();
+        while (it.nextCodepoint()) |cp| switch (cp) {
+            0x00...0x1F, 0x7F...0x9F, 0x061C, 0x200B...0x200F, 0x202A...0x202E, 0x2066...0x2069, 0x2028...0x2029, 0x2060, 0xFEFF => return false,
+            else => {},
+        };
+        return true;
+    }
+
     fn prepareWin32LocalFile(alloc: Allocator, path: []const u8) !?[]const u8 {
-        if (!windows_shell.isSafeWindowsPath(path) or
+        if (!isSafeLinkText(path) or
             !windows_shell.isDriveAbsolutePath(path) or
             isWin32UncOrDevicePath(path)) return null;
 
@@ -10330,7 +10350,9 @@ test "security regression win32 link opener allows known schemes and safe local 
         "https://example.com",
         // An encoded space is no argument break.
         "https://example.com/a%20b",
+        "https://example.com/文档",
         "mailto:user@example.com",
+        "mailto:a@b.c",
         "ftp://example.com/file.txt",
         "ssh:user@example.com",
         "git://example.com/repo",
@@ -10550,9 +10572,39 @@ test "security regression win32 link opener rejects unsafe schemes and executabl
         "ssh:host -oProxyCommand=x",
         "https://example.com/a\"b",
         "tel:+1 555",
+        // Hidden or reordering characters, and text that is not UTF-8.
+        "https://example.com/\u{202E}gnp.exe",
+        "https://example.com/a\u{85}b",
+        "https://example.com/a\u{200B}b",
+        "https://example.com/\xff",
+        // No host, no address.
+        "https:payload",
+        "https:///path",
+        "mailto:",
     }) |target| {
-        errdefer std.debug.print("target: {s}\n", .{target});
+        errdefer std.debug.print("target: \"{f}\"\n", .{std.zig.fmtString(target)});
         try std.testing.expect(!try App.isAllowedWin32OpenTarget(std.testing.allocator, target));
+    }
+}
+
+test "security regression win32 link opener refuses a hidden control decoded from a file URI" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    // Shown as "invoicetxt.doc"; the control file differs by one character.
+    try tmp.dir.writeFile(.{ .sub_path = "invoice\u{202E}cod.txt", .data = "text" });
+    try tmp.dir.writeFile(.{ .sub_path = "invoice\u{6587}cod.txt", .data = "text" });
+    const root = try tmp.dir.realpathAlloc(alloc, ".");
+    defer alloc.free(root);
+    for ([_]struct { []const u8, bool }{
+        .{ "%E2%80%AE", false },
+        .{ "%E6%96%87", true },
+    }) |case| {
+        const uri = try std.fmt.allocPrint(alloc, "file:///{s}/invoice{s}cod.txt", .{ root, case[0] });
+        defer alloc.free(uri);
+        errdefer std.debug.print("target: {s}\n", .{uri});
+        try std.testing.expectEqual(case[1], try App.isAllowedWin32OpenTarget(alloc, uri));
     }
 }
 
