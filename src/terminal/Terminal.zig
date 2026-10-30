@@ -1820,8 +1820,8 @@ pub fn setCursorPos(self: *Terminal, row_req: usize, col_req: usize) void {
     // Calculate our new x/y
     const row = if (row_req == 0) 1 else row_req;
     const col = if (col_req == 0) 1 else col_req;
-    const x = @min(params.x_max, col + params.x_offset) -| 1;
-    const y = @min(params.y_max, row + params.y_offset) -| 1;
+    const x = @min(params.x_max, col +| params.x_offset) -| 1;
+    const y = @min(params.y_max, row +| params.y_offset) -| 1;
 
     // If the y is unchanged then this is fast pointer math
     if (y == self.screens.active.cursor.y) {
@@ -3571,6 +3571,24 @@ fn isDirty(t: *const Terminal, pt: point.Point) bool {
 /// Clear all dirty bits. Testing only.
 fn clearDirty(t: *Terminal) void {
     t.screens.active.pages.clearDirty();
+}
+
+test "Terminal: setCursorPos saturates overflowing origin offsets" {
+    const alloc = testing.allocator;
+    var t = try init(alloc, .{ .cols = 10, .rows = 10 });
+    defer t.deinit(alloc);
+
+    t.scrolling_region = .{
+        .top = 2,
+        .bottom = 7,
+        .left = 3,
+        .right = 8,
+    };
+    t.modes.set(.origin, true);
+
+    t.setCursorPos(std.math.maxInt(usize), std.math.maxInt(usize));
+    try testing.expectEqual(@as(size.CellCountInt, 8), t.screens.active.cursor.x);
+    try testing.expectEqual(@as(size.CellCountInt, 7), t.screens.active.cursor.y);
 }
 
 test "Terminal: input with no control characters" {
