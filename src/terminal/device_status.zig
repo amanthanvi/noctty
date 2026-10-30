@@ -70,5 +70,8 @@ const Entry = struct {
 const entries: []const Entry = &.{
     .{ .name = "operating_status", .value = 5 },
     .{ .name = "cursor_position", .value = 6 },
+    // DECXCPR: the "?" form of value 6 reports the extended cursor position
+    // (adds a page number) rather than the plain CPR.
+    .{ .name = "cursor_position_extended", .value = 6, .question = true },
     .{ .name = "color_scheme", .value = 996, .question = true },
 };

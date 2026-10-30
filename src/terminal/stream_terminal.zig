@@ -345,24 +345,40 @@ pub const Handler = struct {
         self.writePty(written);
     }
 
+    /// The cursor position for a CPR/DECXCPR report, honoring origin mode
+    /// (relative to the scrolling region when DECOM is set).
+    fn cursorReportPos(self: *Handler) struct { x: usize, y: usize } {
+        return if (self.terminal.modes.get(.origin)) .{
+            .x = self.terminal.screens.active.cursor.x -| self.terminal.scrolling_region.left,
+            .y = self.terminal.screens.active.cursor.y -| self.terminal.scrolling_region.top,
+        } else .{
+            .x = self.terminal.screens.active.cursor.x,
+            .y = self.terminal.screens.active.cursor.y,
+        };
+    }
+
     fn deviceStatus(self: *Handler, req: device_status.Request) void {
         switch (req) {
             .operating_status => self.writePty("\x1B[0n"),
 
             .cursor_position => {
-                const pos: struct {
-                    x: usize,
-                    y: usize,
-                } = if (self.terminal.modes.get(.origin)) .{
-                    .x = self.terminal.screens.active.cursor.x -| self.terminal.scrolling_region.left,
-                    .y = self.terminal.screens.active.cursor.y -| self.terminal.scrolling_region.top,
-                } else .{
-                    .x = self.terminal.screens.active.cursor.x,
-                    .y = self.terminal.screens.active.cursor.y,
-                };
+                const pos = self.cursorReportPos();
 
                 var buf: [64]u8 = undefined;
                 const resp = std.fmt.bufPrintZ(&buf, "\x1B[{};{}R", .{
+                    pos.y + 1,
+                    pos.x + 1,
+                }) catch return;
+                self.writePty(resp);
+            },
+
+            // DECXCPR: extended cursor position adds a page number. Ghostty has
+            // no page memory, so the page is always 1.
+            .cursor_position_extended => {
+                const pos = self.cursorReportPos();
+
+                var buf: [64]u8 = undefined;
+                const resp = std.fmt.bufPrintZ(&buf, "\x1B[?{};{};1R", .{
                     pos.y + 1,
                     pos.x + 1,
                 }) catch return;
@@ -2880,6 +2896,64 @@ test "device status: cursor position with origin mode" {
     s.nextSlice("\x1B[6n");
     // Should report position relative to the scroll region
     try testing.expectEqualStrings("\x1B[3;5R", S.written.?);
+}
+
+test "device status: extended cursor position" {
+    var t: Terminal = try .init(testing.allocator, .{ .cols = 80, .rows = 24 });
+    defer t.deinit(testing.allocator);
+
+    const S = struct {
+        var written: ?[]const u8 = null;
+        fn writePty(_: *Handler, data: [:0]const u8) void {
+            if (written) |old| testing.allocator.free(old);
+            written = testing.allocator.dupe(u8, data) catch @panic("OOM");
+        }
+    };
+    S.written = null;
+    defer if (S.written) |old| testing.allocator.free(old);
+
+    var handler: Handler = .init(&t);
+    handler.effects.write_pty = &S.writePty;
+
+    var s: Stream = .initAlloc(testing.allocator, handler);
+    defer s.deinit();
+
+    // DECXCPR (CSI ? 6 n) reports CSI ? row ; col ; page R.
+    // Ghostty has no page memory, so page is always 1.
+    s.nextSlice("\x1B[5;3H");
+    s.nextSlice("\x1B[?6n");
+    try testing.expectEqualStrings("\x1B[?5;3;1R", S.written.?);
+}
+
+test "device status: extended cursor position with origin mode" {
+    var t: Terminal = try .init(testing.allocator, .{ .cols = 80, .rows = 24 });
+    defer t.deinit(testing.allocator);
+
+    const S = struct {
+        var written: ?[]const u8 = null;
+        fn writePty(_: *Handler, data: [:0]const u8) void {
+            if (written) |old| testing.allocator.free(old);
+            written = testing.allocator.dupe(u8, data) catch @panic("OOM");
+        }
+    };
+    S.written = null;
+    defer if (S.written) |old| testing.allocator.free(old);
+
+    var handler: Handler = .init(&t);
+    handler.effects.write_pty = &S.writePty;
+
+    var s: Stream = .initAlloc(testing.allocator, handler);
+    defer s.deinit();
+
+    // Set scroll region rows 5-20
+    s.nextSlice("\x1B[5;20r");
+    // Enable origin mode
+    s.nextSlice("\x1B[?6h");
+    // Move to row 3, col 5 within the region
+    s.nextSlice("\x1B[3;5H");
+    // DECXCPR reports position relative to the scroll region, plus page 1
+    s.nextSlice("\x1B[?6n");
+    try testing.expectEqualStrings("\x1B[?3;5;1R", S.written.?);
 }
 
 test "device status: color scheme dark" {
