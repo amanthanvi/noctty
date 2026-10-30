@@ -116,7 +116,7 @@ pub const SemanticPrompt = struct {
 
     pub const SemanticClick = union(enum) {
         none,
-        click_events,
+        click_events: osc.semantic_prompt.ClickEvents,
         cl: osc.semantic_prompt.Click,
     };
 };

@@ -6866,20 +6866,27 @@ fn maybePromptClick(self: *Surface) !bool {
         // Guarded at the start of this function
         .none => unreachable,
 
-        .click_events => {
+        .click_events => |v| {
             // For the event, we always send a left-click press event.
             // This matches what Kitty sends.
+            const key: u8, const y: u32 = switch (v) {
+                .absolute => .{ 1, pos_vp.y +| 1 },
+                .relative => .{
+                    2,
+                    promptClickRelativeRow(&screen.pages, prompt_pin, click_pin),
+                },
+            };
             var data: termio.Message.WriteReq.Small.Array = undefined;
             const resp = try std.fmt.bufPrint(
                 &data,
                 "\x1B[<0;{d};{d}M",
-                .{ pos_vp.x + 1, pos_vp.y + 1 },
+                .{ pos_vp.x + 1, y },
             );
 
             // Not that noisy since this only happens on prompt clicks.
             log.debug(
-                "sending click_events=1 event=ESC{s}",
-                .{resp[1..]},
+                "sending click_events={} event=ESC{s}",
+                .{ key, resp[1..] },
             );
 
             // Ask our IO thread to write the data
@@ -6910,6 +6917,17 @@ fn maybePromptClick(self: *Surface) !bool {
     }
 
     return true;
+}
+
+/// Returns the one-based SGR row for a click at or below the prompt.
+fn promptClickRelativeRow(
+    pages: *const terminal.PageList,
+    prompt_pin: terminal.Pin,
+    click_pin: terminal.Pin,
+) u32 {
+    const prompt_y = pages.pointFromPin(.screen, prompt_pin).?.screen.y;
+    const click_y = pages.pointFromPin(.screen, click_pin).?.screen.y;
+    return click_y - prompt_y + 1;
 }
 
 const Link = struct {
@@ -9865,4 +9883,42 @@ test "Surface: lock keys alone do not count as a mouse mods change" {
     try std.testing.expect(mouseModsChanged(stored, .{}));
     try std.testing.expect(mouseModsChanged(stored, .{ .ctrl = true, .shift = true }));
     try std.testing.expect(mouseModsChanged(.{}, .{ .super = true, .num_lock = true }));
+}
+
+test "promptClickRelativeRow" {
+    const testing = std.testing;
+    const Case = struct {
+        layout: enum { no_history, offset, cross_page, prompt_above_viewport },
+        click_y: u32,
+        expected: u32,
+    };
+    const cases = [_]Case{
+        .{ .layout = .no_history, .click_y = 1, .expected = 1 },
+        .{ .layout = .offset, .click_y = 3, .expected = 3 },
+        .{ .layout = .cross_page, .click_y = 3, .expected = 3 },
+        .{ .layout = .prompt_above_viewport, .click_y = 0, .expected = 3 },
+    };
+    for (cases) |case| {
+        var pages = try terminal.PageList.init(testing.allocator, 80, 5, null);
+        defer pages.deinit();
+        const scroll_rows: u32 = switch (case.layout) {
+            .no_history => 0,
+            .offset, .prompt_above_viewport => 10,
+            .cross_page => pages.pages.first.?.data.capacity.rows - 2,
+        };
+        for (0..scroll_rows) |_| _ = try pages.grow();
+
+        const prompt_y = if (case.layout == .prompt_above_viewport)
+            scroll_rows - 2
+        else
+            scroll_rows + 1;
+        const prompt = pages.pin(.{ .screen = .{ .y = prompt_y } }).?;
+        const click = pages.pin(.{ .viewport = .{ .x = 7, .y = case.click_y } }).?;
+        try testing.expectEqual(case.layout == .cross_page, prompt.node != click.node);
+        try testing.expectEqual(
+            case.layout == .prompt_above_viewport,
+            pages.pointFromPin(.viewport, prompt) == null,
+        );
+        try testing.expectEqual(case.expected, promptClickRelativeRow(&pages, prompt, click));
+    }
 }
