@@ -508,6 +508,26 @@ test "kittygfx more chunks with chunk increasing q" {
     }
 }
 
+test "kittygfx query of an over-long file path answers file path too long" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var t = try Terminal.init(alloc, .{ .rows = 5, .cols = 5 });
+    defer t.deinit(alloc);
+
+    const path = try alloc.alloc(u8, 40000);
+    @memset(path, 'a');
+    var cmd: Command = .{
+        .control = .{ .query = .{ .medium = .file, .image_id = 31 } },
+        .data = path,
+    };
+    defer cmd.deinit(alloc);
+
+    const resp = execute(alloc, &t, &cmd) orelse return error.TestExpectedResponse;
+    try testing.expectEqual(@as(u32, 31), resp.id);
+    try testing.expectEqualStrings("EINVAL: file path too long", resp.message);
+}
+
 test "kittygfx default format is rgba" {
     const testing = std.testing;
     const alloc = testing.allocator;

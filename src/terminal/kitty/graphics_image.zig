@@ -26,6 +26,15 @@ const max_dimension = 10000;
 /// Maximum size in bytes, taken from Kitty.
 const max_size = 400 * 1024 * 1024; // 400MB
 
+/// Maximum length in bytes of a file medium path. Zig 0.15.2 converts a
+/// Windows path into a fixed buffer of PATH_MAX_WIDE WTF-16 units without
+/// checking that it fits (`sliceToPrefixedFileW`), and a WTF-8 byte is at
+/// most one unit, so a path no longer than this always fits.
+const max_path_len = if (builtin.os.tag == .windows)
+    std.os.windows.PATH_MAX_WIDE
+else
+    std.fs.max_path_bytes - 1;
+
 /// An image that is still being loaded. The image should be initialized
 /// using init on the first chunk and then addData for each subsequent
 /// chunk. Once all chunks have been added, complete should be called
@@ -76,6 +85,8 @@ pub const LoadingImage = struct {
         }
 
         // Otherwise, the payload data is guaranteed to be a path.
+
+        if (cmd.data.len > max_path_len) return error.FilePathTooLong;
 
         if (comptime builtin.os.tag != .windows) {
             if (std.mem.indexOfScalar(u8, cmd.data, 0) != null) {
@@ -905,6 +916,50 @@ test "image load: temporary file without correct path" {
 
     // Temporary file should still be there
     try tmp_dir.dir.access(path, .{});
+}
+
+test "image load: file path longer than the path limit is refused" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    // On Windows a path past the limit wrote past Zig's fixed conversion
+    // buffer, so the guard has to run before anything converts it.
+    for ([_]usize{ max_path_len + 1, 40000 }) |len| {
+        for ([_]command.Transmission.Medium{ .file, .temporary_file }) |medium| {
+            const data = try alloc.alloc(u8, len);
+            @memset(data, 'a');
+            @memcpy(data[0..3], "C:\\");
+            var cmd: command.Command = .{
+                .control = .{ .transmit = .{
+                    .format = .rgb,
+                    .medium = medium,
+                    .width = 1,
+                    .height = 1,
+                    .image_id = 31,
+                } },
+                .data = data,
+            };
+            defer cmd.deinit(alloc);
+            try testing.expectError(error.FilePathTooLong, LoadingImage.init(alloc, &cmd));
+        }
+    }
+
+    // A path at the limit is converted and then fails as a missing file.
+    const data = try alloc.alloc(u8, max_path_len);
+    @memset(data, 'a');
+    @memcpy(data[0..3], "C:\\");
+    var cmd: command.Command = .{
+        .control = .{ .transmit = .{
+            .format = .rgb,
+            .medium = .file,
+            .width = 1,
+            .height = 1,
+            .image_id = 31,
+        } },
+        .data = data,
+    };
+    defer cmd.deinit(alloc);
+    try testing.expectError(error.InvalidData, LoadingImage.init(alloc, &cmd));
 }
 
 test "image load: network and device path spellings are refused" {
