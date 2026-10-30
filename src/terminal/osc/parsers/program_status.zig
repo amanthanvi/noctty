@@ -361,6 +361,9 @@ fn validate(data: []const u8) error{
     // outside the value alphabet as a malformed pair would turn the report
     // into one about the root record, and `state=clear:id=build!x` into a
     // clear of every record.
+    //
+    // The app, title and msg limits read raw values too: filtered, an
+    // over-limit value with a disallowed byte escaped its limit.
     var ids: kitty_metadata.ValueIterator("id", null) = .init(data);
     while (ids.next()) |v| try validateId(v);
     inline for (.{
@@ -368,7 +371,7 @@ fn validate(data: []const u8) error{
         .{ "title", max_title_encoded_bytes },
         .{ "msg", max_msg_encoded_bytes },
     }) |limit| {
-        var it: kitty_metadata.ValueIterator(limit[0], value_bytes) = .init(data);
+        var it: kitty_metadata.ValueIterator(limit[0], null) = .init(data);
         while (it.next()) |v| if (v.len > limit[1]) return error.TooLong;
     }
 
@@ -682,13 +685,36 @@ test "OSC 7501: ids" {
         "build!x",
         "my task",
         "caf\xc3\xa9",
+        "a@b",
+        "a%20b",
     };
     for (invalid) |id| {
+        for ([_]u8{ '\x1b', 0x07 }) |terminator| {
+            p.reset();
+            p.nextSlice("7501;state=clear:id=");
+            p.nextSlice(id);
+            try testing.expect(p.end(terminator) == null);
+        }
+
+        // An invalid id is never replaced by a later valid one.
         p.reset();
         p.nextSlice("7501;state=clear:id=");
         p.nextSlice(id);
+        p.nextSlice(":id=a");
         try testing.expect(p.end('\x1b') == null);
     }
+}
+
+test "OSC 7501: limits apply to values with disallowed bytes" {
+    const testing = std.testing;
+
+    var p: Parser = .init(testing.allocator);
+    defer p.deinit();
+
+    const long_app: [max_app_bytes]u8 = @splat('a');
+    p.nextSlice("7501;state=idle:app=@");
+    p.nextSlice(&long_app);
+    try testing.expect(p.end('\x1b') == null);
 }
 
 test "OSC 7501: text must decode to safe UTF-8" {
