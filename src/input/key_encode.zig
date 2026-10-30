@@ -1541,6 +1541,22 @@ test "kitty: shift+backspace emits CSI u" {
     try testing.expectEqualStrings("\x1b[127;2u", writer.buffered());
 }
 
+test "kitty: alt+backspace emits CSI u" {
+    var buf: [128]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buf);
+    try kitty(&writer, .{
+        .key = .backspace,
+        .mods = .{ .alt = true },
+        // macOS may mark Option as consumed while translating the key. With
+        // no attached control text, all modifiers must remain effective.
+        .consumed_mods = .{ .alt = true },
+        .utf8 = "",
+    }, .{
+        .kitty_flags = .{ .disambiguate = true },
+    });
+    try testing.expectEqualStrings("\x1b[127;3u", writer.buffered());
+}
+
 test "kitty: shift+enter emits CSI u" {
     var buf: [128]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buf);
