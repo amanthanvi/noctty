@@ -13,7 +13,8 @@
 //! - termio records the wake for its output under the lock, by its own rule
 //!   (`Termio.shouldWakeRendererAfterOutput`), then stamps the notify.
 //! A run fails on a seam violation: a timer armed twice in one turn, a
-//! pending deadline moved later, or Clock.saver read outside `auto`.
+//! pending deadline moved later, a pending blink completion run again, or
+//! Clock.saver read outside `auto`.
 const Sim = @This();
 
 const std = @import("std");
@@ -51,6 +52,8 @@ fail_drain: bool = false,
 work: bool = false,
 /// Synchronized output (mode 2026) holds the frame.
 sync: bool = false,
+/// The cursor's blinking mode.
+blinking: bool = false,
 wake_sources: u32 = 0,
 notified_ns: u64 = 0,
 /// The wakeup async was notified and its callback has not run.
@@ -76,6 +79,11 @@ log: [4096]Present = undefined,
 log_len: usize = 0,
 /// A drain showed the pane since the last present.
 shown: bool = false,
+/// The blink phase the last frame update drew.
+drawn_blink_visible: ?bool = null,
+/// When the pacer woke the renderer for the blink.
+blink_wakes: [64]u64 = undefined,
+blink_wake_count: usize = 0,
 /// Frame updates run in follow-up turns, held ones included.
 followup_updates: u32 = 0,
 turns: std.EnumArray(Pacer.Timer, u32) = .initFill(0),
@@ -95,6 +103,7 @@ pub const Message = union(enum) {
     visible: bool,
     config: struct { pacing: Pacer.Config, shader: ?configpkg.CustomShaderAnimation },
     split_dimmed,
+    reset_cursor_blink,
     /// A message pacing does not read that changes the frame without
     /// marking anything dirty (a search highlight).
     search,
@@ -107,6 +116,8 @@ pub const Output = struct {
     /// It begins (BSU) or ends (ESU) synchronized output.
     bsu: bool = false,
     esu: bool = false,
+    /// It sets the cursor's blinking mode (DECSCUSR).
+    blinking: ?bool = null,
 };
 
 pub fn clock(sim: *Sim) Pacer.Clock {
@@ -125,6 +136,7 @@ pub fn output(sim: *Sim, o: Output) void {
     const was_sync = sim.sync;
     if (o.bsu) sim.sync = true;
     if (o.work) sim.work = true;
+    if (o.blinking) |blinking| sim.blinking = blinking;
     if (o.esu) sim.sync = false;
     if (!Termio.shouldWakeRendererAfterOutput(
         had_work,
@@ -210,8 +222,19 @@ pub fn dueNs(sim: *const Sim, timer: Pacer.Timer) ?u64 {
     return sim.deadlines.get(timer);
 }
 
+/// When a waiting loop runs the timer: the first system tick at or after
+/// its deadline.
+pub fn runsAtNs(sim: *const Sim, timer: Pacer.Timer) ?u64 {
+    const due = sim.deadlines.get(timer) orelse return null;
+    return (due + tick_ns - 1) / tick_ns * tick_ns;
+}
+
 pub fn presents(sim: *const Sim) []const Present {
     return sim.log[0..sim.log_len];
+}
+
+pub fn blinkWakes(sim: *const Sim) []const u64 {
+    return sim.blink_wakes[0..sim.blink_wake_count];
 }
 
 pub fn lastUpdateNs(sim: *const Sim) u64 {
@@ -227,8 +250,7 @@ fn nextPassNs(sim: *const Sim) ?u64 {
     if (sim.woken) return sim.now_ns;
     var next: ?u64 = null;
     for (std.enums.values(Pacer.Timer)) |timer| {
-        const due = sim.deadlines.get(timer) orelse continue;
-        const at = (due + tick_ns - 1) / tick_ns * tick_ns;
+        const at = sim.runsAtNs(timer) orelse continue;
         next = if (next) |n| @min(n, at) else at;
     }
     return next;
@@ -324,6 +346,7 @@ pub fn drain(sim: *Sim) Pacer.Drained {
             drained.changes.insert(.config);
         },
         .split_dimmed => drained.changes.insert(.repaint),
+        .reset_cursor_blink => drained.changes.insert(.blink_reset),
         .search => {},
     };
     sim.message_count = 0;
@@ -346,7 +369,11 @@ pub fn inputs(sim: *Sim) Pacer.Inputs {
 }
 
 pub fn screen(sim: *Sim) Pacer.Screen {
-    return .{ .needs_frame = sim.work, .wake_pending = sim.wake_sources != 0 };
+    return .{
+        .needs_frame = sim.work,
+        .cursor_blinking = sim.blinking,
+        .wake_pending = sim.wake_sources != 0,
+    };
 }
 
 pub fn animation(sim: *Sim) ?Pacer.AnimationWake {
@@ -360,16 +387,17 @@ pub fn animation(sim: *Sim) ?Pacer.AnimationWake {
 
 pub fn update(sim: *Sim, request: Pacer.Update) Pacer.UpdateResult {
     if (!sim.reserve()) return .coalesced;
+    sim.drawn_blink_visible = request.blink_visible;
     if (sim.trigger.? == .due and sim.trigger.?.due == .followup) sim.followup_updates += 1;
     // updateFrame draws the work, unless synchronized output holds the
     // frame.
     if (!sim.sync) sim.work = false;
     if (sim.sync and !request.present_held) {
         sim.reserved = false;
-        return .{ .updated = .{ .held = true, .presented = false } };
+        return .{ .updated = .{ .cursor_blinking = sim.blinking, .held = true, .presented = false } };
     }
     sim.present(true);
-    return .{ .updated = .{ .held = sim.sync, .presented = true } };
+    return .{ .updated = .{ .cursor_blinking = sim.blinking, .held = sim.sync, .presented = true } };
 }
 
 pub fn draw(sim: *Sim) bool {
@@ -384,11 +412,21 @@ pub fn arm(sim: *Sim, timer: Pacer.Timer, delay_ms: u64) void {
     // On the millisecond the pacer computed it from.
     const due = (sim.now_ns / ns_per_ms + delay_ms) * ns_per_ms;
     if (sim.deadlines.get(timer)) |previous| {
+        if (timer == .blink) return sim.fail("a pending blink completion armed again");
         if (due >= previous) return sim.fail("a pending deadline moved later");
     }
     sim.deadlines.set(timer, due);
     sim.arm_count += 1;
     sim.armed_at.set(timer, sim.arm_count);
+}
+
+pub fn wake(sim: *Sim, source: State.WakeSource) void {
+    if (source == .cursor_blink) {
+        if (sim.blink_wake_count == sim.blink_wakes.len) return sim.fail("blink log full");
+        sim.blink_wakes[sim.blink_wake_count] = sim.now_ns;
+        sim.blink_wake_count += 1;
+    }
+    sim.notify(source);
 }
 
 fn reserve(sim: *Sim) bool {

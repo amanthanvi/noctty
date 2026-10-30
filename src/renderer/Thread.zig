@@ -56,8 +56,6 @@ const darwin = if (builtin.os.tag.isDarwin()) struct {
     fn setQosClass(_: QosClass) !void {}
 };
 
-const CURSOR_BLINK_INTERVAL = 600;
-
 /// Whether calls to `drawFrame` must be done from the app thread.
 ///
 /// If this is `true` then we send a `redraw_surface` message to the apprt
@@ -112,11 +110,6 @@ draw_now_c: xev.Completion = .{},
 /// The timer used for cursor blinking
 cursor_h: xev.Timer,
 cursor_c: xev.Completion = .{},
-/// The most recent request to restart the cursor blink interval. We keep
-/// this as logical state instead of resetting the xev completion: on IOCP a
-/// completed timer remains `.active` until its callback is popped, so reusing
-/// it from another callback can corrupt libxev's intrusive completion queue.
-cursor_blink_reset_at: ?std.time.Instant = null,
 
 /// The surface we're rendering to.
 surface: *apprt.Surface,
@@ -145,11 +138,6 @@ config: DerivedConfig,
 pacer: Pacer,
 
 flags: packed struct {
-    /// This is true when a blinking cursor should be visible and false
-    /// when it should not be visible. This is toggled on a timer by the
-    /// thread automatically.
-    cursor_blink_visible: bool = false,
-
     /// This is true when the inspector is active.
     has_inspector: bool = false,
 
@@ -305,12 +293,6 @@ fn threadMain_(self: *Thread) !void {
     self.state.noteWakeSource(.thread_start);
     try self.wakeup.notify();
 
-    // Start blinking only when the terminal's cursor mode requests it.
-    // Steady cursors must not keep a 500 ms renderer wake loop alive.
-    if (self.cursorShouldBlink()) {
-        self.armCursorTimerIfDead(cursorBlinkInterval());
-    }
-
     // Run
     log.debug("starting renderer thread", .{});
     defer log.debug("starting renderer thread shutdown", .{});
@@ -424,22 +406,6 @@ fn drainMailbox(self: *Thread, changes: *std.EnumSet(Pacer.Change)) !void {
 
                 // Set it on the renderer
                 try self.renderer.setFocus(v);
-
-                if (!v) {
-                    // Let an already-queued one-shot timer expire and disarm
-                    // itself. Reusing its completion here is unsafe on IOCP.
-                    self.flags.cursor_blink_visible = true;
-                    self.cursor_blink_reset_at = null;
-                } else {
-                    // If we're focused, we immediately show the cursor again
-                    // and restart the logical interval. If the completion is
-                    // active, its callback owns the eventual rearm.
-                    self.flags.cursor_blink_visible = true;
-                    self.cursor_blink_reset_at = std.time.Instant.now() catch null;
-                    if (self.cursorShouldBlink()) {
-                        self.armCursorTimerIfDead(cursorBlinkInterval());
-                    }
-                }
             },
 
             .split_dimmed => |v| {
@@ -447,13 +413,7 @@ fn drainMailbox(self: *Thread, changes: *std.EnumSet(Pacer.Change)) !void {
                 changes.insert(.repaint);
             },
 
-            .reset_cursor_blink => {
-                self.flags.cursor_blink_visible = true;
-                if (self.flags.focused and self.cursorShouldBlink()) {
-                    self.cursor_blink_reset_at = std.time.Instant.now() catch null;
-                    self.armCursorTimerIfDead(cursorBlinkInterval());
-                }
-            },
+            .reset_cursor_blink => changes.insert(.blink_reset),
 
             .font_grid => |grid| {
                 self.renderer.setFontGrid(grid.grid);
@@ -574,28 +534,6 @@ fn drawFrameWithReservation(self: *Thread, now: bool, repaint_reserved: bool) bo
     }
 }
 
-/// Arm the cursor's one-shot timer only when libxev no longer owns the
-/// completion. In particular, `.active` can mean "already completed but still
-/// queued for its callback" on IOCP, so callers must never reset or reinitialize
-/// an active cursor completion.
-fn armCursorTimerIfDead(self: *Thread, delay_ms: u64) void {
-    if (self.cursor_c.state() != .dead) return;
-    self.cursor_h.run(
-        &self.loop,
-        &self.cursor_c,
-        delay_ms,
-        Thread,
-        self,
-        cursorTimerCallback,
-    );
-}
-
-fn cursorShouldBlink(self: *Thread) bool {
-    self.state.mutex.lock();
-    defer self.state.mutex.unlock();
-    return self.state.terminal.modes.get(.cursor_blinking);
-}
-
 /// renderer.Thread's adapter at the pacer's frame seam (`Pacer.turn`): the
 /// mailbox drain, the terminal reads, the frame update and its present, and
 /// the libxev timers.
@@ -632,6 +570,7 @@ const Frame = struct {
         defer state.mutex.unlock();
         return .{
             .needs_frame = terminal_render_dirty.needsFrame(state.terminal, state.drawn_undirtied),
+            .cursor_blinking = state.terminal.modes.get(.cursor_blinking),
             // After the dirt: termio records the wake for its output before
             // it unlocks.
             .wake_pending = state.wakePending(),
@@ -680,7 +619,7 @@ const Frame = struct {
         // snapshot used to rebuild this frame.
         const frame_update: ?rendererpkg.Renderer.FrameUpdate = t.renderer.updateFrame(
             t.state,
-            t.flags.cursor_blink_visible,
+            request.blink_visible,
         ) catch |err| frame_update: {
             log.warn("error rendering err={}", .{err});
             break :frame_update null;
@@ -688,26 +627,27 @@ const Frame = struct {
         const cursor_blinking = if (frame_update) |done|
             done.cursor_blinking
         else
-            t.cursorShouldBlink();
+            f.screen().cursor_blinking;
         if (frame_update) |done| {
             if (comptime @hasDecl(apprt.Surface, "noteRendererUpdateFrame")) {
                 t.surface.noteRendererUpdateFrame(done.output_progress, cursor_blinking);
             }
         }
-        if (!cursor_blinking) t.flags.cursor_blink_visible = true;
-        if (t.flags.focused and cursor_blinking) {
-            t.armCursorTimerIfDead(cursorBlinkInterval());
-        }
 
         const held = if (frame_update) |done| done.synchronized_output else false;
         if (held and !request.present_held) {
             if (repaint_reserved) t.cancelRepaintReservation();
-            return .{ .updated = .{ .held = true, .presented = false } };
+            return .{ .updated = .{
+                .cursor_blinking = cursor_blinking,
+                .held = true,
+                .presented = false,
+            } };
         }
 
         // Draw. An owed repaint stays owed when no paint could be queued (a
         // full app mailbox), so a later pass presents the held frame.
         return .{ .updated = .{
+            .cursor_blinking = cursor_blinking,
             .held = held,
             .presented = t.drawFrameWithReservation(false, repaint_reserved),
         } };
@@ -719,13 +659,18 @@ const Frame = struct {
         return f.t.drawFrameWithReservation(false, false);
     }
 
-    /// A dead completion runs; an active one is reset through its reset
-    /// completion.
+    /// A dead completion runs. An active follow-up or animation completion
+    /// is reset through its reset completion; an active cursor completion is
+    /// left alone, because on IOCP `.active` can mean completed and queued
+    /// for its callback, and reusing it corrupts libxev's completion queue.
     pub fn arm(f: Frame, timer: Pacer.Timer, delay_ms: u64) void {
         const t = f.t;
         switch (timer) {
             .followup => runOrReset(t, &t.followup_h, &t.followup_c, &t.followup_reset_c, delay_ms, timerCallback(.followup)),
             .animation => runOrReset(t, &t.draw_h, &t.draw_c, &t.draw_reset_c, delay_ms, timerCallback(.animation)),
+            .blink => if (t.cursor_c.state() == .dead) {
+                t.cursor_h.run(&t.loop, &t.cursor_c, delay_ms, Thread, t, timerCallback(.blink));
+            },
         }
     }
 
@@ -799,16 +744,17 @@ fn drawNowCallback(
     return .rearm;
 }
 
-/// A follow-up or animation run: one `turn`. A run that error.Canceled
-/// ends is still a run (`Pacer.Trigger.due`). On IOCP a Timer.reset re-adds
-/// its completion without a callback, so a Canceled means a cancel dropped
-/// this completion and nothing else is armed for it. A reset does that when
-/// it lands in the pass its timer falls due in (libxev measures a deadline
-/// from the pass start, the pacer from its clock, so a long turn arms one
-/// earlier than the pacer counts): the timer still runs on its old
-/// deadline, its turn runs the completion again, and the reset's cancel
-/// drops that run on the next tick. Dropping the Canceled left the pacer's
-/// deadline pending for good, and the timer never ran again.
+/// A follow-up, animation or blink run: one `turn`. A run that
+/// error.Canceled ends is still a run (`Pacer.Trigger.due`). On IOCP a
+/// Timer.reset re-adds its completion without a callback, so a Canceled
+/// means a cancel dropped this completion and nothing else is armed for it.
+/// A reset does that when it lands in the pass its timer falls due in
+/// (libxev measures a deadline from the pass start, the pacer from its
+/// clock, so a long turn arms one earlier than the pacer counts): the timer
+/// still runs on its old deadline, its turn runs the completion again, and
+/// the reset's cancel drops that run on the next tick. Dropping the
+/// Canceled left the pacer's deadline pending for good, and the timer never
+/// ran again. The blink is never reset or canceled.
 fn timerCallback(comptime timer: Pacer.Timer) TimerCallback {
     return struct {
         fn callback(
@@ -831,67 +777,6 @@ fn timerCallback(comptime timer: Pacer.Timer) TimerCallback {
     }.callback;
 }
 
-fn cursorTimerCallback(
-    self_: ?*Thread,
-    _: *xev.Loop,
-    _: *xev.Completion,
-    r: xev.Timer.RunError!void,
-) xev.CallbackAction {
-    _ = r catch |err| switch (err) {
-        // This is sent when our timer is canceled. That's fine.
-        error.Canceled => return .disarm,
-
-        else => {
-            log.warn("error in cursor timer callback err={}", .{err});
-            unreachable;
-        },
-    };
-
-    const t: *Thread = self_ orelse {
-        // This shouldn't happen so we log it.
-        log.warn("render callback fired without data set", .{});
-        return .disarm;
-    };
-
-    // Input or focus regain may have requested a fresh interval while this
-    // completion was already queued. Honor the remaining logical delay here,
-    // from the timer's own callback, rather than resetting the queued object.
-    const reset_elapsed_ns: ?u64 = if (t.flags.focused)
-        if (t.cursor_blink_reset_at) |reset_at| elapsed: {
-            const now = std.time.Instant.now() catch break :elapsed 0;
-            break :elapsed now.since(reset_at);
-        } else null
-    else
-        null;
-    switch (cursorBlinkTimerDecision(
-        t.flags.focused,
-        t.cursorShouldBlink(),
-        cursorBlinkInterval(),
-        reset_elapsed_ns,
-    )) {
-        .disarm => {
-            // An unfocused surface needs no recurring cursor timer. Focus
-            // regain will arm a new one once this callback has been popped.
-            const was_visible = t.flags.cursor_blink_visible;
-            t.flags.cursor_blink_visible = true;
-            t.cursor_blink_reset_at = null;
-            if (!was_visible) (Frame{ .t = t }).wake(.cursor_blink);
-            return .disarm;
-        },
-        .rearm_after => |delay_ms| {
-            t.armCursorTimerIfDead(delay_ms);
-            return .disarm;
-        },
-        .toggle => t.cursor_blink_reset_at = null,
-    }
-
-    t.flags.cursor_blink_visible = !t.flags.cursor_blink_visible;
-    (Frame{ .t = t }).wake(.cursor_blink);
-
-    t.armCursorTimerIfDead(cursorBlinkInterval());
-    return .disarm;
-}
-
 // fn prepFrameCallback(h: *libuv.Prepare) void {
 //     _ = h;
 //
@@ -907,99 +792,6 @@ fn stopCallback(
     _ = r catch unreachable;
     self_.?.loop.stop();
     return .disarm;
-}
-
-/// Returns the interval for the blinking cursor in milliseconds.
-fn cursorBlinkInterval() u64 {
-    var interval: u64 = CURSOR_BLINK_INTERVAL;
-    if (std.valgrind.runningOnValgrind() > 0) {
-        // If we're running under Valgrind, the cursor blink adds enough
-        // churn that it makes some stalls annoying unless you're on a
-        // super powerful computer, so we delay it.
-        //
-        // This is a hack, we should change some of our cursor timer
-        // logic to be more efficient:
-        // https://github.com/ghostty-org/ghostty/issues/8003
-        interval *= 5;
-    }
-
-    return interval;
-}
-
-fn cursorBlinkRemainingMs(interval_ms: u64, elapsed_ns: u64) u64 {
-    const interval_ns = interval_ms *| std.time.ns_per_ms;
-    const remaining_ns = interval_ns -| elapsed_ns;
-    return remaining_ns / std.time.ns_per_ms +
-        @intFromBool(remaining_ns % std.time.ns_per_ms != 0);
-}
-
-const CursorBlinkTimerDecision = union(enum) {
-    disarm,
-    rearm_after: u64,
-    toggle,
-};
-
-fn cursorBlinkTimerDecision(
-    focused: bool,
-    blinking: bool,
-    interval_ms: u64,
-    reset_elapsed_ns: ?u64,
-) CursorBlinkTimerDecision {
-    if (!focused or !blinking) return .disarm;
-    if (reset_elapsed_ns) |elapsed_ns| {
-        const remaining_ms = cursorBlinkRemainingMs(interval_ms, elapsed_ns);
-        if (remaining_ms > 0) return .{ .rearm_after = remaining_ms };
-    }
-    return .toggle;
-}
-
-test "cursor blink reset deadline rounds up and clamps" {
-    const testing = std.testing;
-
-    try testing.expectEqual(@as(u64, 500), cursorBlinkRemainingMs(500, 0));
-    try testing.expectEqual(@as(u64, 500), cursorBlinkRemainingMs(500, 1));
-    try testing.expectEqual(
-        @as(u64, 1),
-        cursorBlinkRemainingMs(500, 500 * std.time.ns_per_ms - 1),
-    );
-    try testing.expectEqual(
-        @as(u64, 0),
-        cursorBlinkRemainingMs(500, 500 * std.time.ns_per_ms),
-    );
-    try testing.expectEqual(
-        @as(u64, 0),
-        cursorBlinkRemainingMs(500, 750 * std.time.ns_per_ms),
-    );
-}
-
-test "cursor blink timer decision preserves focus and reset state" {
-    const testing = std.testing;
-
-    try testing.expectEqual(
-        CursorBlinkTimerDecision.disarm,
-        cursorBlinkTimerDecision(false, true, 500, 1),
-    );
-    try testing.expectEqual(
-        CursorBlinkTimerDecision.toggle,
-        cursorBlinkTimerDecision(true, true, 500, null),
-    );
-    try testing.expectEqual(
-        CursorBlinkTimerDecision{ .rearm_after = 500 },
-        cursorBlinkTimerDecision(true, true, 500, 1),
-    );
-    try testing.expectEqual(
-        CursorBlinkTimerDecision.toggle,
-        cursorBlinkTimerDecision(true, true, 500, 500 * std.time.ns_per_ms),
-    );
-}
-
-test "cursor blink timer disarms for a steady cursor" {
-    const testing = std.testing;
-
-    try testing.expectEqual(
-        CursorBlinkTimerDecision.disarm,
-        cursorBlinkTimerDecision(true, false, 500, null),
-    );
 }
 
 test "a timer reset in the pass it falls due loses the run its callback arms next, as Canceled" {

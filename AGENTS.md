@@ -216,10 +216,11 @@ that govern each symbol you change, or that none does.
 - [renderer.md](docs/agents/log/renderer.md): `src/renderer/` and
   `src/renderer.zig` (OpenGL/WGL,
   the D3D11 beta and GL-to-D3D11 fallback, who frees the config of a failed
-  `Renderer.init` in core `Surface.init`, frame pacing and its timers in
-  `Pacer.zig` (`Pacer.turn`, `Pacer.Clock`, the port `Thread.Frame`, the
-  test adapter `pacer_sim.zig`), `win32_power.renderer_clock` and the
-  pacing timebase `src/os/monotonic.zig` (also the wake-notify stamp
+  `Renderer.init` in core `Surface.init`, frame pacing, the cursor blink
+  and their timers in `Pacer.zig` (`Pacer.turn`, `Pacer.Clock`, the port
+  `Thread.Frame`, the test adapter `pacer_sim.zig`),
+  `win32_power.renderer_clock` and the pacing timebase
+  `src/os/monotonic.zig` (also the wake-notify stamp
   `State.last_render_wakeup_notify_ns`),
   synchronized output, vsync, `RenderPass` viewport, cursor sprites,
   search highlights after a resize, the IME preedit and composition caret in

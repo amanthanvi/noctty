@@ -1,7 +1,8 @@
 //! Win32 frame pacing for one renderer thread: whether a wake or a timer
-//! run updates the frame, presents it, waits or stops, and when the
-//! follow-up and animation timers run next. One per renderer.Thread, used
-//! only on that thread; OpenGL and the D3D11 beta share it through Thread.
+//! run updates the frame, presents it, waits or stops, when the follow-up,
+//! animation and blink timers run next, and the cursor's blink phase.
+//! One per renderer.Thread, used only on that thread; OpenGL and the D3D11
+//! beta share it through Thread.
 //!
 //! Callers learn `init` and `turn`. `turn` drives the frame port its caller
 //! passes (listed on `turn`): renderer.Thread.Frame in production and
@@ -29,7 +30,9 @@ const followup_burst_ms = 128;
 /// The default system timer tick, 15.625 ms, rounded up.
 const timer_tick_ms = 16;
 
-pub const Timer = enum { followup, animation };
+const blink_interval_ms = 600;
+
+pub const Timer = enum { followup, animation, blink };
 
 pub const Trigger = union(enum) {
     /// The wakeup async fired with these State.takeWakeSources() bits. 0 is
@@ -86,6 +89,8 @@ pub const Change = enum {
     /// What the frame shows changed by itself (a split's dim), so a frame
     /// synchronized output holds is presented anyway.
     repaint,
+    /// Input asked for the cursor to show and its blink to restart.
+    blink_reset,
 };
 
 pub const Drained = struct {
@@ -109,18 +114,21 @@ pub const Inputs = struct {
 
 pub const Screen = struct {
     needs_frame: bool,
+    cursor_blinking: bool,
     /// Read under the same lock, after `needs_frame`.
     wake_pending: bool,
 };
 
 /// `frame.update`: updateFrame, then present unless synchronized output
-/// held it and !present_held.
-pub const Update = struct { present_held: bool };
+/// held it and !present_held. A blinking cursor is drawn when
+/// `blink_visible`.
+pub const Update = struct { blink_visible: bool, present_held: bool };
 
 pub const UpdateResult = union(enum) {
     /// A queued paint still holds the repaint reservation. Nothing ran.
     coalesced,
-    updated: struct { held: bool, presented: bool },
+    /// `cursor_blinking` is the mode in the snapshot the update drew.
+    updated: struct { cursor_blinking: bool, held: bool, presented: bool },
 };
 
 clock: Clock,
@@ -146,6 +154,16 @@ animating: ?AnimationWake = null,
 followup: Deadline = .{},
 animation: Deadline = .{},
 
+/// A blinking cursor is drawn now. It toggles on the blink timer.
+blink_visible: bool = false,
+/// The blink timer is armed and its run not delivered yet. It is never
+/// reset: an active IOCP completion can be queued for its callback already,
+/// and reusing it corrupts libxev's completion queue.
+blink_pending: bool = false,
+/// The latest request to restart the blink interval, in `clock` ns. The
+/// queued run waits out the rest of the interval from its own turn.
+blink_reset_ns: ?u64 = null,
+
 /// When a wake last left work behind: the follow-up burst runs from it as
 /// from a notify.
 refreshed_ns: u64 = 0,
@@ -163,6 +181,9 @@ const Deadline = struct {
 const Turn = struct {
     followup: bool = false,
     animation: bool = false,
+    /// Arm the blink timer in this many ms; the first request wins, as
+    /// only a dead completion can run.
+    blink: ?u64 = null,
 };
 
 const Pass = enum { wake, followup, animation };
@@ -188,7 +209,9 @@ pub fn init(clock: Clock) Pacer {
 ///   queued): they own the apprt repaint reservation and release every one
 ///   they do not hand to a queued paint.
 /// - `arm(Timer, delay_ms: u64) void`: runs a dead completion, resets an
-///   active one.
+///   active follow-up or animation one. `turn` never arms a pending blink.
+/// - `wake(State.WakeSource) void`: records the source, then notifies the
+///   wakeup async.
 /// Producers record a wake source before its notify, and termio records
 /// `io_output` before it releases State.mutex.
 pub fn turn(self: *Pacer, trigger: Trigger, frame: anytype) void {
@@ -196,6 +219,9 @@ pub fn turn(self: *Pacer, trigger: Trigger, frame: anytype) void {
     if (!self.started) {
         self.started = true;
         self.reconcileAnimation(&t, frame, frame.inputs());
+        // Only a blinking cursor arms its timer: a steady one must not keep
+        // a renderer wake loop alive.
+        if (frame.screen().cursor_blinking) self.armBlink(&t, blinkIntervalMs());
     }
     switch (trigger) {
         .wake => |sources| {
@@ -220,6 +246,7 @@ pub fn turn(self: *Pacer, trigger: Trigger, frame: anytype) void {
                 }
                 if (!t.animation) self.reconcileAnimation(&t, frame, frame.inputs());
             },
+            .blink => self.blinkDue(&t, frame),
         },
     }
     self.arm(&t, frame);
@@ -245,9 +272,14 @@ fn pass(self: *Pacer, t: *Turn, kind: Pass, frame: anytype) bool {
     // A frame synchronized output holds is presented by the animation
     // tick, which animates over it, and by any pass while pixels are owed.
     const present_held = self.repaint_owed or (kind == .animation and self.animating != null);
-    switch (frame.update(.{ .present_held = present_held })) {
+    switch (frame.update(.{
+        .blink_visible = self.blink_visible,
+        .present_held = present_held,
+    })) {
         .coalesced => {},
         .updated => |updated| {
+            if (!updated.cursor_blinking) self.blink_visible = true;
+            if (in.focused and updated.cursor_blinking) self.armBlink(t, blinkIntervalMs());
             // A held update stays owed: termio's 1 s reset always wakes the
             // renderer, an ESU only when it brings dirt, so the follow-up
             // polls for a clean ESU.
@@ -318,6 +350,18 @@ fn reconcile(
     // frame at once rather than an interval after its last one.
     if (changes.contains(.visibility) and in.visible) self.slot_ms = 0;
     if (changes.contains(.repaint)) self.repaint_owed = true;
+    // Focus and input show the cursor and restart its blink; losing focus
+    // lets a queued blink run lapse.
+    if (changes.contains(.focus) or changes.contains(.blink_reset)) {
+        self.blink_visible = true;
+        if (!in.focused) {
+            if (changes.contains(.focus)) self.blink_reset_ns = null;
+        } else {
+            const blinking = frame.screen().cursor_blinking;
+            if (changes.contains(.focus) or blinking) self.blink_reset_ns = self.nowNs();
+            if (blinking) self.armBlink(t, blinkIntervalMs());
+        }
+    }
     const animation_inputs: std.EnumSet(Change) = .initMany(&.{ .visibility, .focus, .config, .presentation });
     if (changes.intersectWith(animation_inputs).count() != 0) self.reconcileAnimation(t, frame, in);
 }
@@ -327,7 +371,43 @@ fn reconcileAnimation(self: *Pacer, t: *Turn, frame: anytype, in: Inputs) void {
     t.animation = true;
 }
 
+/// A blink run: toggle, wait out a restart, or stop for an unfocused or
+/// steady cursor, shown. A toggle wakes the renderer to draw it.
+fn blinkDue(self: *Pacer, t: *Turn, frame: anytype) void {
+    self.blink_pending = false;
+    if (!frame.inputs().focused or !frame.screen().cursor_blinking) {
+        const was_visible = self.blink_visible;
+        self.blink_visible = true;
+        self.blink_reset_ns = null;
+        if (!was_visible) frame.wake(.cursor_blink);
+        return;
+    }
+    if (self.blink_reset_ns) |reset_ns| {
+        const remaining_ns = blinkIntervalMs() * ns_per_ms -| (self.nowNs() -| reset_ns);
+        const remaining_ms = (remaining_ns + ns_per_ms - 1) / ns_per_ms;
+        if (remaining_ms > 0) return self.armBlink(t, remaining_ms);
+        self.blink_reset_ns = null;
+    }
+    self.blink_visible = !self.blink_visible;
+    frame.wake(.cursor_blink);
+    self.armBlink(t, blinkIntervalMs());
+}
+
+fn armBlink(self: *const Pacer, t: *Turn, delay_ms: u64) void {
+    if (!self.blink_pending and t.blink == null) t.blink = delay_ms;
+}
+
+fn blinkIntervalMs() u64 {
+    // Under Valgrind the blink adds enough churn to make stalls annoying
+    // (https://github.com/ghostty-org/ghostty/issues/8003).
+    return if (std.valgrind.runningOnValgrind() > 0) 5 * blink_interval_ms else blink_interval_ms;
+}
+
 fn arm(self: *Pacer, t: *Turn, frame: anytype) void {
+    if (t.blink) |delay_ms| {
+        frame.arm(.blink, delay_ms);
+        self.blink_pending = true;
+    }
     if (!t.followup and !t.animation) return;
     const delay_ms = self.presentDelayMs(frame.inputs()) orelse return;
     if (t.followup) self.armDeadline(frame, .followup, &self.followup, delay_ms);
@@ -897,4 +977,83 @@ test "seeded event sequences keep the pacing invariants" {
             if (!b.after_show) try testing.expect(b.ns - a.ns >= (saver_interval_ms - timer_tick_ms) * ns_per_ms);
         }
     }
+}
+
+test "a steady cursor arms no blink timer and keeps no wake loop" {
+    // #134: steady cursors must not keep a renderer wake loop alive.
+    var sim: Sim = .{};
+    var pacer = try settled(&sim);
+    try testing.expect(!sim.pending(.blink));
+    const before = sim.presents().len;
+    try sim.run(&pacer, 3000);
+    try testing.expect(!sim.pending(.blink));
+    try testing.expectEqual(@as(usize, 0), sim.blinkWakes().len);
+    try testing.expectEqual(before, sim.presents().len);
+}
+
+test "a focused blinking cursor toggles every 600 ms, each toggle waking the renderer once" {
+    var sim: Sim = .{ .blinking = true };
+    var pacer = try settled(&sim);
+    const first = sim.blinkWakes().len;
+    const presented = sim.presents().len;
+    try sim.run(&pacer, 3000);
+    const wakes = sim.blinkWakes()[first..];
+    try testing.expect(wakes.len >= 4 and wakes.len <= 5);
+    for (wakes[1..], wakes[0 .. wakes.len - 1]) |b, a| {
+        try testing.expect(b - a >= blink_interval_ms * ns_per_ms);
+        try testing.expect(b - a < (blink_interval_ms + timer_tick_ms) * ns_per_ms);
+    }
+    // Each toggle's wake presents the new phase.
+    try testing.expectEqual(presented + wakes.len, sim.presents().len);
+    // The first frame drew the cursor hidden; each toggle flips it.
+    try testing.expectEqual(@as(?bool, wakes.len % 2 == 1), sim.drawn_blink_visible);
+}
+
+test "a blink restart while the run is queued shows the cursor for a whole interval" {
+    // Input restarts the blink with the run already queued: it waits out the
+    // interval from its own turn, rounded up to a whole ms, and never arms
+    // the queued completion again (on IOCP it stays active until its
+    // callback runs; the Sim fails a run that arms it).
+    var sim: Sim = .{ .blinking = true };
+    var pacer = try settled(&sim);
+    while (sim.blinkWakes().len == 0) try sim.run(&pacer, 10);
+    const runs_ns = sim.runsAtNs(.blink).?;
+    // The restart lands 599.5 ms before the queued run: half a millisecond
+    // of the interval is left when it runs.
+    sim.advanceTo(runs_ns - blink_interval_ms * ns_per_ms + ns_per_ms / 2);
+    const reset_ns = sim.now_ns;
+    sim.send(.reset_cursor_blink);
+    try sim.run(&pacer, 0);
+    try testing.expectEqual(@as(?bool, true), sim.drawn_blink_visible);
+    const first = sim.blinkWakes().len;
+    try sim.run(&pacer, 2 * blink_interval_ms);
+    const wakes = sim.blinkWakes()[first..];
+    try testing.expect(wakes.len >= 1);
+    try testing.expect(wakes[0] >= reset_ns + blink_interval_ms * ns_per_ms);
+}
+
+test "losing focus shows the cursor and lets the blink timer lapse" {
+    var sim: Sim = .{ .blinking = true };
+    var pacer = try settled(&sim);
+    // Run to a toggle that hides the cursor.
+    while (sim.drawn_blink_visible != false) try sim.run(&pacer, 50);
+    const wakes = sim.blinkWakes().len;
+    sim.send(.{ .focus = false });
+    try sim.run(&pacer, 0);
+    try testing.expectEqual(@as(?bool, true), sim.drawn_blink_visible);
+    try sim.run(&pacer, 2 * blink_interval_ms);
+    try testing.expect(!sim.pending(.blink));
+    try testing.expectEqual(wakes, sim.blinkWakes().len);
+
+    // A cursor that turns steady while hidden is shown by the next run,
+    // with one wake, and its timer lapses.
+    sim.send(.{ .focus = true });
+    try sim.run(&pacer, 0);
+    while (sim.drawn_blink_visible != false) try sim.run(&pacer, 50);
+    sim.blinking = false;
+    const steady = sim.blinkWakes().len;
+    try sim.run(&pacer, 2 * blink_interval_ms);
+    try testing.expectEqual(steady + 1, sim.blinkWakes().len);
+    try testing.expectEqual(@as(?bool, true), sim.drawn_blink_visible);
+    try testing.expect(!sim.pending(.blink));
 }

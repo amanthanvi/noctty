@@ -543,7 +543,7 @@ foreach ($paletteActionHarness in @($newTabHarness, $undoHarness, $resizeHarness
 Invoke-ContractTable -Contracts @(
     @{
         File = (Join-Path $repoRoot 'src\renderer\Thread.zig')
-        Pattern = '(?s)fn armCursorTimerIfDead\(.*?cursor_c\.state\(\) != \.dead.*?cursor_h\.run\('
+        Pattern = '(?s)\.blink => if \(t\.cursor_c\.state\(\) == \.dead\) \{\s*t\.cursor_h\.run\('
         Kind = 'Workflow'
         Description = 'cursor blink completion is rearmed only after libxev releases it'
     }
