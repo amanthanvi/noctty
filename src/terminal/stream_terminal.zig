@@ -2290,6 +2290,9 @@ test "request mode DECRQM ANSI responses" {
         .{ "\x1b[4$p", "\x1b[4;1$y" },
         .{ "\x1b[?4$p", "\x1b[?4;2$y" },
         .{ "\x1b[9999$p", "\x1b[9999;0$y" },
+        // Unimplemented ANSI modes report permanently reset (xterm parity).
+        .{ "\x1b[1$p", "\x1b[1;4$y" },
+        .{ "\x1b[19$p", "\x1b[19;4$y" },
     };
     for (cases) |case| {
         S.calls = 0;
