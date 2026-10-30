@@ -342,6 +342,18 @@ pub fn highWord(value: usize) u16 {
     return @truncate((value >> 16) & 0xFFFF);
 }
 
+/// The button an X button message's wParam names. Back and forward are
+/// buttons 8 and 9, as X11 numbers them and upstream's GTK and macOS
+/// runtimes report them; 4 and 5 are the vertical wheel, which a program
+/// reading mouse reports would scroll for.
+pub fn xMouseButton(wParam: usize) ?input.MouseButton {
+    return switch (highWord(wParam)) {
+        c.XBUTTON1 => .eight,
+        c.XBUTTON2 => .nine,
+        else => null,
+    };
+}
+
 fn scanCodeFromLParam(lParam: LPARAM) u32 {
     return @as(u32, highWord(lParamBits(lParam))) & 0xFF;
 }
@@ -3438,6 +3450,11 @@ test "win32 XButton wParam decoding maps forward and back buttons" {
     // XBUTTON2 in HIWORD of wParam
     const wp2 = (@as(usize, c.XBUTTON2) << 16) | @as(usize, c.MK_XBUTTON2);
     try std.testing.expectEqual(c.XBUTTON2, highWord(wp2));
+
+    // Back and forward are buttons 8 and 9, never the wheel's 4 and 5.
+    try std.testing.expectEqual(input.MouseButton.eight, xMouseButton(wp1).?);
+    try std.testing.expectEqual(input.MouseButton.nine, xMouseButton(wp2).?);
+    try std.testing.expectEqual(@as(?input.MouseButton, null), xMouseButton(c.MK_XBUTTON1));
 }
 
 test "win32 quick select treats synthetic AltGr as label text instead of an action" {

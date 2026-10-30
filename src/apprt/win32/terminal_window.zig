@@ -69,7 +69,6 @@ const drawRoundedRect = win32.drawRoundedRect;
 const fillSolidRect = win32.fillSolidRect;
 const first_frame = @import("first_frame.zig");
 const gl_startup = @import("gl_startup.zig");
-const highWord = win32.highWord;
 const hostChromeNeedsFocusRepaint = win32.hostChromeNeedsFocusRepaint;
 const imeWindowForms = win32.imeWindowForms;
 const initialDecorationsVisibleForSource = win32.initialDecorationsVisibleForSource;
@@ -4558,12 +4557,7 @@ pub const Surface = struct {
     pub fn handleXMouseButton(self: *Surface, msg: UINT, wParam: WPARAM, lParam: LPARAM) void {
         if (!self.core_initialized) return;
 
-        const hi = highWord(@as(usize, @intCast(wParam)));
-        const button: input.MouseButton = switch (hi) {
-            c.XBUTTON1 => .four,
-            c.XBUTTON2 => .five,
-            else => return,
-        };
+        const button = win32_input.xMouseButton(wParam) orelse return;
         const state: input.MouseButtonState = switch (msg) {
             c.WM_XBUTTONDOWN => .press,
             c.WM_XBUTTONUP => .release,
