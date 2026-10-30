@@ -555,6 +555,9 @@ pub const Surface = struct {
     /// and by `Surface.destroyWindow` so a close-while-pending doesn't
     /// leak.
     pending_clipboard_op: ?PendingClipboardOp = null,
+    /// The checked link target this pane's open prompt is asking about
+    /// (`App.askBeforeOpeningLink`), owned on the App allocator, the same way.
+    pending_link_open: ?[]u8 = null,
     terminal_accessibility: ?*win32_terminal_accessibility.TerminalAccessibilitySession = null,
     /// Close preflight ownership. Normal close paths build both candidates
     /// before HWND/core teardown; `windowDestroyed` consumes them without
@@ -4662,6 +4665,8 @@ pub const Surface = struct {
         // pending doesn't leak the duplicated payload bytes.
         if (self.pending_clipboard_op) |*op| op.deinit(self.app.core_app.alloc);
         self.pending_clipboard_op = null;
+        if (self.pending_link_open) |target| self.app.core_app.alloc.free(target);
+        self.pending_link_open = null;
         self.render_trace.deinit(alloc);
 
         self.destroyGL();

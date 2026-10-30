@@ -6,6 +6,7 @@ const AppDelivery = win32.AppDelivery;
 const ClipboardSource = win32.ClipboardSource;
 const CloseScope = win32.CloseScope;
 const ColdToastCapture = win32.ColdToastCapture;
+const ConfirmCancelReason = @import("overlay_session.zig").ConfirmCancelReason;
 const CoreApp = @import("../../App.zig");
 const CoreSurface = @import("../../Surface.zig");
 const DWORD = win32.DWORD;
@@ -4577,7 +4578,7 @@ pub const App = struct {
             },
 
             .open_url => {
-                self.openUrl(value.url) catch |err| {
+                self.openLink(target, value.url) catch |err| {
                     // A click that does nothing reads as a broken terminal.
                     if (err == error.OpenUrlRejected) {
                         _ = self.showHostBanner(target, .info, labels.open_refused_banner) catch false;
@@ -7563,6 +7564,99 @@ pub const App = struct {
         try self.deferShellRequest(.{ .target = owned });
     }
 
+    /// `openUrl` for a link opened in a terminal, whose text the terminal's
+    /// output chose: a scheme past the web and mail ones opens only once the
+    /// user confirms it in `target`'s window.
+    fn openLink(self: *App, target: apprt.Target, url: []const u8) !void {
+        return openWin32Target(self.core_app.alloc, LinkRequest{ .app = self, .target = target }, url, LinkRequest.open);
+    }
+
+    const LinkRequest = struct {
+        app: *App,
+        target: apprt.Target,
+
+        fn open(self: LinkRequest, checked: []const u8) !void {
+            const scheme = confirmedLinkScheme(checked) orelse return self.app.deferOpenTarget(checked);
+            const surface = self.app.registry.findSurfaceForTarget(self.target) orelse return error.NoSurface;
+            try askBeforeOpeningLink(surface, scheme, checked);
+        }
+    };
+
+    /// Shows the checked `target` (so one line, the text as typed) in the
+    /// preview pane and names the app its scheme opens in, as upstream's
+    /// UntrustedURLAlert does. Cancel is the default there, so this is a
+    /// `program_request` prompt: it opens on Cancel.
+    fn askBeforeOpeningLink(surface: *Surface, scheme: []const u8, target: []const u8) !void {
+        const host = surface.host orelse return error.NoHost;
+        const alloc = surface.app.core_app.alloc;
+        const owned = try alloc.dupe(u8, target);
+        errdefer alloc.free(owned);
+        const handler = linkHandlerName(alloc, scheme, sys.AssocQueryStringW);
+        defer if (handler) |name| alloc.free(name);
+        const body = if (handler) |name|
+            try std.fmt.allocPrint(alloc, "Windows opens it with \u{201C}{s}\u{201D}. Continue only if you trust where it goes.", .{name})
+        else
+            try std.fmt.allocPrint(alloc, "Windows opens it with the app set for {s} links. Continue only if you trust where it goes.", .{scheme});
+        defer alloc.free(body);
+        try host.showConfirm(.{
+            .title = "Open link from terminal output?",
+            .body = body,
+            .accept_label = "Open link",
+            .cancel_label = "Cancel",
+            .contents = target,
+            .program_request = true,
+        }, &linkConfirmAccept, &linkConfirmCancel, surface);
+        // After showConfirm: replacing this pane's earlier prompt released
+        // the target that one held.
+        if (surface.pending_link_open) |old| alloc.free(old);
+        surface.pending_link_open = owned;
+    }
+
+    /// `userdata` is the Surface that asked; its destruction cancels the
+    /// prompt (`cancelConfirmIfOwnedBy`). This runs inside the overlay's
+    /// handlers, so `openUrl` checks the target again and only queues it.
+    fn linkConfirmAccept(userdata: ?*anyopaque) void {
+        const surface: *Surface = @ptrCast(@alignCast(userdata orelse return));
+        const target = surface.pending_link_open orelse return;
+        surface.pending_link_open = null;
+        const app = surface.app;
+        defer app.core_app.alloc.free(target);
+        app.openUrl(target) catch |err| log.warn("confirmed link open failed err={}", .{err});
+    }
+
+    fn linkConfirmCancel(userdata: ?*anyopaque, _: ConfirmCancelReason) void {
+        const surface: *Surface = @ptrCast(@alignCast(userdata orelse return));
+        const target = surface.pending_link_open orelse return;
+        surface.pending_link_open = null;
+        surface.app.core_app.alloc.free(target);
+    }
+
+    /// The name of the app Windows opens `scheme` links with for the verb
+    /// `shellExecuteOpenTarget` uses, from its registration and its
+    /// program's version resource (nothing is run), or null when there is
+    /// none or it is not one whole line of plain text. Unlike ShellExecuteW
+    /// it delivers no window messages (measured with posted and sent ones),
+    /// so the click's window procedure may call it.
+    fn linkHandlerName(alloc: Allocator, scheme: []const u8, comptime query: anytype) ?[]u8 {
+        const ASSOCF_NOTRUNCATE = 0x20;
+        const ASSOCF_INIT_IGNOREUNKNOWN = 0x400;
+        const ASSOCSTR_FRIENDLYAPPNAME = 4;
+        var scheme_w: [16:0]u16 = @splat(0);
+        if (scheme.len > scheme_w.len) return null;
+        for (scheme, 0..) |byte, i| scheme_w[i] = byte;
+        var name: [128]u16 = undefined;
+        var len: u32 = name.len;
+        if (query(ASSOCF_NOTRUNCATE | ASSOCF_INIT_IGNOREUNKNOWN, ASSOCSTR_FRIENDLYAPPNAME, &scheme_w, shell_open, &name, &len) != 0) return null;
+        // The count includes the terminator.
+        if (len < 2 or len > name.len or name[len - 1] != 0) return null;
+        const text = std.unicode.utf16LeToUtf8Alloc(alloc, name[0 .. len - 1]) catch return null;
+        if (!isSafeLinkText(text)) {
+            alloc.free(text);
+            return null;
+        }
+        return text;
+    }
+
     /// Ownership transfers only after append succeeds; callers retain their
     /// errdefer cleanup on allocation failure.
     fn deferShellRequest(self: *App, request: DeferredOpen) !void {
@@ -7834,6 +7928,167 @@ pub const App = struct {
         try std.testing.expectEqualStrings(labels.quick_select_too_many_banner, host.banner_text.?);
     }
 
+    test "a link past the web and mail schemes opens only once its prompt is accepted" {
+        if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+        var core_app: CoreApp = undefined;
+        var app: App = undefined;
+        var host: Host = undefined;
+        var surface: Surface = undefined;
+        var session: TestSession = .{};
+        try session.init(.{
+            .core_app = &core_app,
+            .app = &app,
+            .hosts = &.{.{ .storage = &host, .register = true, .next_tab_id = 2 }},
+            .surfaces = &.{.{ .storage = &surface, .host = &host, .register = true }},
+            .tabs = &.{.{ .host = &host, .surface = &surface, .id = 1 }},
+        });
+        defer session.deinit();
+
+        const Hook = struct {
+            var count: usize = 0;
+            var opened: [64]u8 = undefined;
+            var opened_len: usize = 0;
+
+            fn open(_: *App, target: []const u8) anyerror!void {
+                count += 1;
+                if (target.len > opened.len) return error.TestTargetTooLong;
+                @memcpy(opened[0..target.len], target);
+                opened_len = target.len;
+            }
+        };
+        app.test_open_target = &Hook.open;
+        // What Surface.processLinks sends for a Ctrl+click in this pane.
+        const clicked: apprt.Target = .{ .surface = surface.core() };
+
+        for ([_][]const u8{
+            "ssh:user@host",
+            "tel:+1555",
+            "magnet:?xt=urn:btih:0123456789abcdef",
+            "gemini://x",
+        }) |target| {
+            errdefer std.debug.print("target: {s}\n", .{target});
+            Hook.count = 0;
+
+            // The click asks in the pane's window, shows the exact target in
+            // the preview pane, and queues nothing.
+            try std.testing.expect(try app.performAction(clicked, .open_url, .{ .kind = .unknown, .url = target }));
+            try std.testing.expect(host.overlay_mode == .confirm);
+            const payload = host.confirm_payload orelse return error.TestExpectedPrompt;
+            const preview = payload.preview orelse return error.TestExpectedPreview;
+            try std.testing.expectEqualStrings(target, preview.text);
+            // It names the app (or the scheme, when Windows names none) and,
+            // as upstream's alert, opens on Cancel.
+            try std.testing.expect(std.mem.startsWith(u8, payload.body, "Windows opens it with "));
+            try std.testing.expect(payload.program_request);
+            try std.testing.expect(!app.runDeferredOpens());
+
+            // Cancel opens nothing.
+            host.invokeConfirmCancel();
+            try std.testing.expect(host.overlay_mode == .none);
+            try std.testing.expect(!app.runDeferredOpens());
+            try std.testing.expectEqual(@as(usize, 0), Hook.count);
+
+            // Open queues it; the message loop opens it, once.
+            try std.testing.expect(try app.performAction(clicked, .open_url, .{ .kind = .unknown, .url = target }));
+            if (host.confirm_payload) |*open| open.armed_at_ms = 0;
+            host.invokeConfirmAccept();
+            try std.testing.expect(host.overlay_mode == .none);
+            try std.testing.expectEqual(@as(usize, 0), Hook.count);
+            try std.testing.expect(app.runDeferredOpens());
+            try std.testing.expectEqual(@as(usize, 1), Hook.count);
+            try std.testing.expectEqualStrings(target, Hook.opened[0..Hook.opened_len]);
+            host.invokeConfirmAccept();
+            try std.testing.expect(!app.runDeferredOpens());
+        }
+
+        // Web and mail links still open on the click.
+        for ([_][]const u8{ "https://example.com", "mailto:a@b.c" }) |target| {
+            Hook.count = 0;
+            try std.testing.expect(try app.performAction(clicked, .open_url, .{ .kind = .unknown, .url = target }));
+            try std.testing.expect(host.overlay_mode == .none);
+            try std.testing.expect(app.runDeferredOpens());
+            try std.testing.expectEqual(@as(usize, 1), Hook.count);
+            try std.testing.expectEqualStrings(target, Hook.opened[0..Hook.opened_len]);
+        }
+
+        // Open runs the gate again: a target it refuses is never queued.
+        Hook.count = 0;
+        try std.testing.expect(try app.performAction(clicked, .open_url, .{ .kind = .unknown, .url = "ssh:user@host" }));
+        const asked = surface.pending_link_open orelse return error.TestExpectedPendingLink;
+        surface.pending_link_open = try core_app.alloc.dupe(u8, "search-ms:query=*.exe");
+        core_app.alloc.free(asked);
+        if (host.confirm_payload) |*open| open.armed_at_ms = 0;
+        host.invokeConfirmAccept();
+        try std.testing.expect(surface.pending_link_open == null);
+        try std.testing.expect(!app.runDeferredOpens());
+
+        // A pane that closes first takes its prompt with it (`Surface.destroy`
+        // cancels it, then frees the target), and a late Open does nothing.
+        try std.testing.expect(try app.performAction(clicked, .open_url, .{ .kind = .unknown, .url = "ssh:user@host" }));
+        host.cancelConfirmIfOwnedBy(@ptrCast(&surface));
+        try std.testing.expect(host.overlay_mode == .none);
+        if (surface.pending_link_open) |target| core_app.alloc.free(target);
+        surface.pending_link_open = null;
+        host.invokeConfirmAccept();
+        try std.testing.expect(!app.runDeferredOpens());
+
+        // So does its tab closing into undo history.
+        try std.testing.expect(try app.performAction(clicked, .open_url, .{ .kind = .unknown, .url = "ssh:user@host" }));
+        var entry = host.detachTabForUndo(0) orelse return error.TestExpectedDetach;
+        defer entry.dispose(&host, .host_destroy) catch {}; // Best-effort test teardown.
+        try std.testing.expect(host.overlay_mode == .none);
+        try std.testing.expect(surface.pending_link_open == null);
+        host.invokeConfirmAccept();
+        try std.testing.expect(!app.runDeferredOpens());
+        try std.testing.expectEqual(@as(usize, 0), Hook.count);
+        try std.testing.expect(try host.restoreClosedTabEntry(&entry.payload.close_tab));
+    }
+
+    test "a link prompt names the scheme's app only from one whole line of plain text" {
+        if (builtin.os.tag != .windows) return error.SkipZigTest;
+        const Fake = struct {
+            var reply: []const u16 = &.{};
+            var reply_len: u32 = 0;
+            var hr: windows.HRESULT = 0;
+
+            fn query(flags: u32, str: u32, assoc: [*:0]const u16, extra: ?[*:0]const u16, out: ?[*]u16, len: *u32) windows.HRESULT {
+                // ASSOCF_NOTRUNCATE | ASSOCF_INIT_IGNOREUNKNOWN, ASSOCSTR_FRIENDLYAPPNAME, the `open` verb.
+                if (flags != 0x420 or str != 4 or len.* != 128 or extra == null or
+                    !std.mem.eql(u16, std.mem.span(assoc), std.unicode.utf8ToUtf16LeStringLiteral("ssh")) or
+                    !std.mem.eql(u16, std.mem.span(extra.?), std.mem.span(shell_open))) return 1;
+                @memcpy(out.?[0..reply.len], reply);
+                len.* = reply_len;
+                return hr;
+            }
+        };
+        const alloc = std.testing.allocator;
+        const W = std.unicode.utf8ToUtf16LeStringLiteral;
+        for ([_]struct { []const u16, u32, windows.HRESULT, ?[]const u8 }{
+            .{ W("PuTTY\x00"), 6, 0, "PuTTY" },
+            // No association (ERROR_NO_ASSOCIATION), and S_FALSE.
+            .{ W("PuTTY\x00"), 6, @bitCast(@as(u32, 0x80070483)), null },
+            .{ W("PuTTY\x00"), 6, 1, null },
+            // No terminator, an empty name, a count past the buffer.
+            .{ W("PuTTY"), 5, 0, null },
+            .{ W("\x00"), 1, 0, null },
+            .{ W("PuTTY\x00"), 129, 0, null },
+            // Hidden or line-breaking characters, an embedded NUL.
+            .{ W("Pu\u{202E}TTY\x00"), 7, 0, null },
+            .{ W("Pu\nTTY\x00"), 7, 0, null },
+            .{ W("Pu\x00TTY\x00"), 7, 0, null },
+        }) |case| {
+            Fake.reply = case[0];
+            Fake.reply_len = case[1];
+            Fake.hr = case[2];
+            const name = App.linkHandlerName(alloc, "ssh", Fake.query);
+            defer if (name) |value| alloc.free(value);
+            if (case[3]) |expected| {
+                try std.testing.expectEqualStrings(expected, name orelse return error.TestExpectedName);
+            } else try std.testing.expect(name == null);
+        }
+    }
+
     test "deferred shell requests own payloads and run after their callers return" {
         if (builtin.os.tag != .windows) return error.SkipZigTest;
         var core_app: CoreApp = undefined;
@@ -7970,22 +8225,25 @@ pub const App = struct {
             if (uri.host == null or uri.host.?.isEmpty()) return null;
         }
         if (std.ascii.eqlIgnoreCase(uri.scheme, "mailto") and uri.path.isEmpty()) return null;
-        for ([_][]const u8{
-            "http",
-            "https",
-            "mailto",
-            "ftp",
-            "ssh",
-            "git",
-            "tel",
-            "magnet",
-            "ipfs",
-            "ipns",
-            "gemini",
-            "gopher",
-            "news",
-        }) |scheme| {
+        for (one_click_link_schemes ++ confirmed_link_schemes) |scheme| {
             if (std.ascii.eqlIgnoreCase(uri.scheme, scheme)) return target;
+        }
+        return null;
+    }
+
+    /// The schemes the gate passes to their registered handler. A link
+    /// with one of the second set opens only once the user confirms it
+    /// (`askBeforeOpeningLink`), as upstream's UntrustedURL.decision
+    /// confirms any scheme past web, mail and file.
+    const one_click_link_schemes = [_][]const u8{ "http", "https", "mailto" };
+    const confirmed_link_schemes = [_][]const u8{ "ftp", "ssh", "git", "tel", "magnet", "ipfs", "ipns", "gemini", "gopher", "news" };
+
+    /// The `confirmed_link_schemes` entry a checked target opens with, or
+    /// null for a web or mail URL or a local path (`C:` names no scheme).
+    fn confirmedLinkScheme(checked: []const u8) ?[]const u8 {
+        const colon = std.mem.indexOfScalar(u8, checked, ':') orelse return null;
+        for (confirmed_link_schemes) |scheme| {
+            if (std.ascii.eqlIgnoreCase(checked[0..colon], scheme)) return scheme;
         }
         return null;
     }
