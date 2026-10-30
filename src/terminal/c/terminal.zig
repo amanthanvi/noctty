@@ -1355,7 +1355,7 @@ test "set resize pull scrollback" {
     try testing.expect(t.?.terminal.flags.resize_pull_scrollback);
 }
 
-test "set write_pty callback" {
+test "set write_pty callback DECRQM" {
     var t: Terminal = null;
     try testing.expectEqual(Result.success, new(
         &lib.alloc.test_allocator,
@@ -1371,17 +1371,20 @@ test "set write_pty callback" {
     const S = struct {
         var last_data: ?[]u8 = null;
         var last_userdata: ?*anyopaque = null;
+        var calls: usize = 0;
 
         fn deinit() void {
             if (last_data) |d| testing.allocator.free(d);
             last_data = null;
             last_userdata = null;
+            calls = 0;
         }
 
         fn writePty(_: Terminal, ud: ?*anyopaque, ptr: [*]const u8, len: usize) callconv(lib.calling_conv) void {
             if (last_data) |d| testing.allocator.free(d);
             last_data = testing.allocator.dupe(u8, ptr[0..len]) catch @panic("OOM");
             last_userdata = ud;
+            calls += 1;
         }
     };
     defer S.deinit();
@@ -1395,6 +1398,13 @@ test "set write_pty callback" {
     vt_write(t, "\x1B[?7$p", 6);
     try testing.expect(S.last_data != null);
     try testing.expectEqualStrings("\x1B[?7;1$y", S.last_data.?);
+    try testing.expectEqual(@as(?*anyopaque, @ptrCast(&sentinel)), S.last_userdata);
+    try testing.expectEqual(1, S.calls);
+
+    const query = "\x1B[4h\x1B[4$p";
+    vt_write(t, query, query.len);
+    try testing.expectEqual(2, S.calls);
+    try testing.expectEqualStrings("\x1B[4;1$y", S.last_data.?);
     try testing.expectEqual(@as(?*anyopaque, @ptrCast(&sentinel)), S.last_userdata);
 }
 
@@ -1413,6 +1423,7 @@ test "set write_pty without callback ignores queries" {
 
     // Without setting a callback, DECRQM should be silently ignored (no crash)
     vt_write(t, "\x1B[?7$p", 6);
+    vt_write(t, "\x1B[4$p", 5);
 }
 
 test "set write_pty null clears callback" {

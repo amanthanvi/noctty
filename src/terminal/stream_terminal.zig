@@ -2187,6 +2187,7 @@ test "request mode DECRQM with write_pty callback" {
 
         // DECRQM for mode 7 (wraparound) — should be silently ignored
         s.nextSlice("\x1B[?7$p");
+        s.nextSlice("\x1B[4$p");
     }
 
     t.fullReset();
@@ -2225,6 +2226,71 @@ test "request mode DECRQM with write_pty callback" {
         // Query DECECM, which Ghostty recognizes but does not allow changing
         s.nextSlice("\x1B[?117$p");
         try testing.expectEqualStrings("\x1B[?117;4$y", S.last_response.?);
+    }
+}
+
+test "request mode DECRQM ANSI responses" {
+    var t: Terminal = try .init(testing.allocator, .{ .cols = 80, .rows = 24 });
+    defer t.deinit(testing.allocator);
+
+    const S = struct {
+        var response: [32]u8 = undefined;
+        var len: usize = 0;
+        var calls: usize = 0;
+
+        fn writePty(_: *Handler, data: [:0]const u8) void {
+            @memcpy(response[0..data.len], data);
+            len = data.len;
+            calls += 1;
+        }
+    };
+    var handler: Handler = .init(&t);
+    handler.effects.write_pty = &S.writePty;
+    var s: Stream = .initAlloc(testing.allocator, handler);
+    defer s.deinit();
+
+    // Runtime loops: the fork's `nextSlice` is inline, and upstream's
+    // `inline for` here exceeds the comptime branch quota.
+    for ([_]struct { []const u8, modes.Mode }{
+        .{ "2", .disable_keyboard },
+        .{ "4", .insert },
+        .{ "12", .send_receive_mode },
+        .{ "20", .linefeed },
+    }) |mode| {
+        for ([_]bool{ false, true, false }) |enabled| {
+            var set_buf: [8]u8 = undefined;
+            s.nextSlice(try std.fmt.bufPrint(&set_buf, "\x1b[{s}{c}", .{ mode[0], @as(u8, if (enabled) 'h' else 'l') }));
+            try testing.expectEqual(enabled, t.modes.get(mode[1]));
+            var query_buf: [8]u8 = undefined;
+            const query = try std.fmt.bufPrint(&query_buf, "\x1b[{s}$p", .{mode[0]});
+            var expected_buf: [16]u8 = undefined;
+            const expected = try std.fmt.bufPrint(&expected_buf, "\x1b[{s};{c}$y", .{ mode[0], @as(u8, if (enabled) '1' else '2') });
+            for (0..query.len + 1) |split| {
+                S.calls = 0;
+                S.len = 0;
+                s.nextSlice(query[0..split]);
+                if (split < query.len) try testing.expectEqual(0, S.calls);
+                s.nextSlice(query[split..]);
+                try testing.expectEqual(1, S.calls);
+                try testing.expectEqualStrings(expected, S.response[0..S.len]);
+                try testing.expectEqual(enabled, t.modes.get(mode[1]));
+            }
+        }
+    }
+
+    // The two namespaces must report independent states for mode 4.
+    s.nextSlice("\x1b[4h\x1b[?4l");
+    const cases = [_][2][]const u8{
+        .{ "\x1b[4$p", "\x1b[4;1$y" },
+        .{ "\x1b[?4$p", "\x1b[?4;2$y" },
+        .{ "\x1b[9999$p", "\x1b[9999;0$y" },
+    };
+    for (cases) |case| {
+        S.calls = 0;
+        S.len = 0;
+        s.nextSlice(case[0]);
+        try testing.expectEqual(1, S.calls);
+        try testing.expectEqualStrings(case[1], S.response[0..S.len]);
     }
 }
 
