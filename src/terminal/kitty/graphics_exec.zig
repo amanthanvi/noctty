@@ -10,6 +10,7 @@ const Response = command.Response;
 const LoadingImage = image.LoadingImage;
 const Image = image.Image;
 const ImageStorage = @import("graphics_storage.zig").ImageStorage;
+const TempDir = @import("../../os/TempDir.zig");
 
 const log = std.log.scoped(.kitty_gfx);
 
@@ -69,11 +70,23 @@ pub fn execute(
         .delete => delete(alloc, terminal, cmd),
 
         .transmit, .transmit_and_display => resp: {
+            const storage = &terminal.screens.active.kitty_images;
+
+            // Only direct (t=d) data can be sent in chunks, so only a
+            // direct command can continue a chunked load. A file, temporary
+            // file, or shared memory command abandons the load and is
+            // handled as a brand new transmission, as Kitty does.
+            if (storage.loading) |loading| {
+                if (cmd.transmission().?.medium != .direct) {
+                    loading.destroy(alloc);
+                    storage.loading = null;
+                }
+            }
+
             // If we're transmitting, then our `q` setting value is complicated.
             // The `q` setting inherits the value from the starting command
             // unless `q` is set >= 1 on this command. If it is, then we save
             // that as the new `q` setting.
-            const storage = &terminal.screens.active.kitty_images;
             if (storage.loading) |loading| switch (cmd.quiet) {
                 // q=0 we use whatever the start command value is
                 .no => quiet = loading.quiet,
@@ -856,6 +869,69 @@ test "kittygfx delete aborts chunked image load" {
     }
     const img = storage.imageById(1) orelse return error.TestExpectedImage;
     try testing.expectEqual(@as(usize, 6), img.data.len);
+}
+
+test "kittygfx non-direct transmission abandons chunked image load" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var t = try Terminal.init(alloc, .{ .rows = 5, .cols = 5 });
+    defer t.deinit(alloc);
+    const storage = &t.screens.active.kitty_images;
+
+    // Write a 1x1 RGB image file for a file (t=f) transmission.
+    var tmp_dir = try TempDir.init();
+    defer tmp_dir.deinit();
+    const payload = try testFilePayload(alloc, tmp_dir.dir, &.{ 1, 2, 3 });
+    defer alloc.free(payload);
+
+    // Begin a two-chunk RGB image.
+    {
+        const cmd = try command.Parser.parseString(
+            alloc,
+            "a=t,f=24,s=1,v=2,i=1,m=1;AAAA",
+        );
+        defer cmd.deinit(alloc);
+        try testing.expect(execute(alloc, &t, &cmd) == null);
+    }
+    try testing.expect(storage.loading != null);
+
+    // A file transmission can't be a continuation chunk, so it abandons
+    // the load and transmits a new image from the file.
+    {
+        const str = try std.fmt.allocPrint(
+            alloc,
+            "a=t,t=f,f=24,s=1,v=1,i=2;{s}",
+            .{payload},
+        );
+        defer alloc.free(str);
+        const cmd = try command.Parser.parseString(alloc, str);
+        defer cmd.deinit(alloc);
+        const resp = execute(alloc, &t, &cmd) orelse return error.TestExpectedResponse;
+        try testing.expect(resp.ok());
+        try testing.expectEqual(@as(u32, 2), resp.id);
+    }
+    try testing.expect(storage.loading == null);
+    try testing.expect(storage.imageById(1) == null);
+    const img = storage.imageById(2) orelse return error.TestExpectedImage;
+    try testing.expectEqualSlices(u8, &.{ 1, 2, 3 }, img.data);
+}
+
+/// Writes `data` to a file in `dir` and returns the file's absolute path,
+/// base64 encoded. The result is ready to use as the payload of a file
+/// (t=f) transmission. The caller owns the returned memory.
+fn testFilePayload(
+    alloc: Allocator,
+    dir: std.fs.Dir,
+    data: []const u8,
+) ![]u8 {
+    try dir.writeFile(.{ .sub_path = "image.data", .data = data });
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const path = try dir.realpath("image.data", &path_buf);
+    const encoder = std.base64.standard.Encoder;
+    const result = try alloc.alloc(u8, encoder.calcSize(path.len));
+    _ = encoder.encode(result, path);
+    return result;
 }
 
 test "kittygfx uppercase id delete preserves image when placement does not match" {

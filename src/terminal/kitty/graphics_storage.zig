@@ -47,7 +47,12 @@ pub const ImageStorage = struct {
     /// The set of placements for loaded images.
     placements: PlacementMap = .{},
 
-    /// Non-null if there is an in-progress loading image.
+    /// The chunked image load that is in progress, or null if there isn't
+    /// one.
+    ///
+    /// A load starts when a direct (t=d) transmission arrives with m=1
+    /// and ends when its final chunk (m=0) arrives. It is abandoned early
+    /// by a delete command or by a transmission that uses another medium.
     loading: ?*LoadingImage = null,
 
     /// The total bytes of image data that have been loaded and the limit.
