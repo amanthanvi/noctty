@@ -5,6 +5,7 @@ export module ghostty {
   }
 
   # Wrap `ssh` with Ghostty TERMINFO support
+  @complete external
   export def --wrapped ssh [...args] {
     mut ssh_env = {}
     mut ssh_opts = []
@@ -80,6 +81,7 @@ export module ghostty {
   }
 
   # Wrap `sudo` to preserve Ghostty's TERMINFO environment variable
+  @complete external
   export def --wrapped sudo [...args] {
     mut sudo_args = $args
 

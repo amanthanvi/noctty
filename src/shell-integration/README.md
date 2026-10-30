@@ -104,7 +104,10 @@ distributed module by its absolute path in the startup clause. A user-supplied
 
 Nushell provides many shell features itself, such as `title` and `cursor`,
 so our integration focuses on noctty-specific features like `sudo`,
-`ssh-env`, and `ssh-terminfo`.
+`ssh-env`, and `ssh-terminfo`. The integration's `ssh` and `sudo` wrappers keep
+your external completer (such as carapace) through `@complete external`, which
+needs Nushell 0.108 or later; an older Nushell cannot parse the module and loads
+none of it.
 
 The shell integration is automatically enabled when running Nushell in noctty,
 but you can also load it manually if shell integration is disabled. Replace the
