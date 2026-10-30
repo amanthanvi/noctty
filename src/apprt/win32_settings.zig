@@ -10752,14 +10752,15 @@ const dialog_test = struct {
             var tmp = std.testing.tmpDir(.{});
             defer tmp.cleanup();
             // The dependency the app's manifest (`dist/windows/noctty.manifest`) declares.
-            try tmp.dir.writeFile(.{ .sub_path = "comctl6.manifest", .data = 
+            const manifest =
                 \\<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
                 \\<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
                 \\  <dependency><dependentAssembly>
                 \\    <assemblyIdentity type="win32" name="Microsoft.Windows.Common-Controls" version="6.0.0.0" processorArchitecture="*" publicKeyToken="6595b64144ccf1df" language="*" />
                 \\  </dependentAssembly></dependency>
                 \\</assembly>
-            });
+            ;
+            try tmp.dir.writeFile(.{ .sub_path = "comctl6.manifest", .data = manifest });
             const path = try tmp.dir.realpathAlloc(std.testing.allocator, "comctl6.manifest");
             defer std.testing.allocator.free(path);
             const path_w = try std.unicode.utf8ToUtf16LeAllocZ(std.testing.allocator, path);
@@ -17437,6 +17438,13 @@ const SIF_DISABLENOSCROLL: u32 = 0x0008;
 /// its keys, its action and what that does. The selected row opens to the
 /// whole description, where it comes from, and its actions. UIA sees a List of
 /// ListItems (`win32_uia.PaletteListProvider`), the focus on the selected one.
+/// The colour of an open list row's actions (Edit, Copy, Open): text on the
+/// pane, so 4.5:1, which the accent is not in the light theme. In High
+/// Contrast it is the pane's text colour (Highlight is a background colour).
+fn referenceActionColor(colors: win32_theme.SettingsColors) COLORREF {
+    return colors.action_text;
+}
+
 const ReferenceList = struct {
     kind: ListKind,
     hwnd: ?HWND = null,
@@ -18176,10 +18184,7 @@ const ReferenceList = struct {
             y += metrics.location;
         }
         const actions = self.actionRects(metrics);
-        // High Contrast's accent is Highlight, a background colour: the
-        // actions are the pane's text there, as the ring is.
-        const action_color = if (colors.high_contrast) colors.text else colors.accent;
-        _ = SetTextColor(hdc, action_color);
+        _ = SetTextColor(hdc, referenceActionColor(colors));
         var label_w: [64]u16 = undefined;
         if (actions.edit) |rect| if (self.editLabel(key, &label_w)) |label| {
             var edit_rect = rect;
@@ -21042,4 +21047,25 @@ test "settings toggles round-trip through Save from a click and from Space, the 
             );
         }
     }.body);
+}
+
+test "settings an open list row's actions are text at 4.5:1 in light, dark and High Contrast" {
+    const RGB = @import("../terminal/color.zig").RGB;
+    const of = struct {
+        fn rgbOf(color: u32) RGB {
+            return .{ .r = @truncate(color), .g = @truncate(color >> 8), .b = @truncate(color >> 16) };
+        }
+    }.rgbOf;
+    // Windows 11's Aquatic and Desert contrast themes, as their files set them.
+    const aquatic: win32_theme.SettingsSystemColors = .{ .window = win32_theme.rgb(32, 32, 32), .window_text = win32_theme.rgb(255, 255, 255), .button_face = win32_theme.rgb(32, 32, 32), .button_text = win32_theme.rgb(255, 255, 255), .gray_text = win32_theme.rgb(166, 166, 166), .highlight = win32_theme.rgb(142, 227, 240), .highlight_text = win32_theme.rgb(38, 59, 80) };
+    const desert: win32_theme.SettingsSystemColors = .{ .window = win32_theme.rgb(255, 250, 239), .window_text = win32_theme.rgb(61, 61, 61), .button_face = win32_theme.rgb(255, 250, 239), .button_text = win32_theme.rgb(32, 32, 32), .gray_text = win32_theme.rgb(103, 103, 103), .highlight = win32_theme.rgb(144, 57, 9), .highlight_text = win32_theme.rgb(255, 245, 227) };
+    for ([_]win32_theme.SettingsColors{
+        win32_theme.settingsColors(win32_theme.lightTheme(), std.mem.zeroes(win32_theme.SettingsSystemColors), false),
+        win32_theme.settingsColors(win32_theme.darkTheme(), std.mem.zeroes(win32_theme.SettingsSystemColors), false),
+        win32_theme.settingsColors(win32_theme.lightTheme(), aquatic, true),
+        win32_theme.settingsColors(win32_theme.lightTheme(), desert, true),
+    }) |colors| {
+        // On the pane, below the row's selected band.
+        try std.testing.expect(of(referenceActionColor(colors)).contrast(of(colors.window_bg)) >= 4.5);
+    }
 }

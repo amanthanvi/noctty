@@ -127,6 +127,11 @@ pub const SettingsColors = struct {
     field_border: u32,
     button_bg: u32,
     button_text: u32,
+    /// Text that acts when clicked, on the pane: the Edit, Copy and Open
+    /// actions of an open All settings or Keybindings row. The accent
+    /// itself is for indicators (3:1); in the light theme it is under the
+    /// 4.5:1 text needs on the pane.
+    action_text: u32,
     /// A toggle switch that is on: the track's fill and its thumb
     /// (`win32_settings.paintToggle`). The thumb is cut out in the pane's
     /// colour, which keeps 3:1 against the accent in both app themes.
@@ -138,9 +143,13 @@ pub const SettingsColors = struct {
     high_contrast: bool,
 };
 
-/// Every pair of Settings colours one is drawn on the other, with the
+/// Every pair of Settings colours that Settings itself draws one on the
+/// other, or hands Windows for a control through `WM_CTLCOLOR*`, with the
 /// contrast it needs (DESIGN.md): 4.5:1 for text, 3:1 for a control's
 /// boundary, a state cue or a focus indicator. Disabled text is exempt.
+/// Themed controls (`DarkMode_Explorer`, `DarkMode_CFD`) draw in their own
+/// colours, which these do not cover. Read off every `SetTextColor`, fill
+/// and stroke in `win32_settings.zig`; a new one adds its pair here.
 pub const settings_contrast_pairs = [_]struct {
     foreground: []const u8,
     background: []const u8,
@@ -148,6 +157,9 @@ pub const settings_contrast_pairs = [_]struct {
     /// Whether High Contrast draws the pair too.
     high_contrast: bool = true,
 }{
+    // Text: labels, statics and the rail on the pane and the rail; the
+    // status line; a selected rail button and an open list row's title;
+    // fields and their lists; buttons; the list rows' actions.
     .{ .foreground = "text", .background = "window_bg", .minimum = 4.5 },
     .{ .foreground = "text", .background = "rail_bg", .minimum = 4.5 },
     .{ .foreground = "secondary_text", .background = "window_bg", .minimum = 4.5 },
@@ -156,16 +168,39 @@ pub const settings_contrast_pairs = [_]struct {
     .{ .foreground = "error_text", .background = "window_bg", .minimum = 4.5 },
     .{ .foreground = "selection_text", .background = "selection_bg", .minimum = 4.5 },
     .{ .foreground = "edit_text", .background = "edit_bg", .minimum = 4.5 },
+    // High Contrast's rail labels.
+    .{ .foreground = "edit_text", .background = "rail_bg", .minimum = 4.5 },
     .{ .foreground = "button_text", .background = "button_bg", .minimum = 4.5 },
+    .{ .foreground = "action_text", .background = "window_bg", .minimum = 4.5 },
+    // A rail button under the pointer; High Contrast does not fill it.
+    .{ .foreground = "text", .background = "button_bg", .minimum = 4.5, .high_contrast = false },
+    .{ .foreground = "secondary_text", .background = "button_bg", .minimum = 4.5, .high_contrast = false },
+    // Focus rings.
     .{ .foreground = "focus_ring", .background = "window_bg", .minimum = 3.0 },
     .{ .foreground = "focus_ring", .background = "rail_bg", .minimum = 3.0 },
     .{ .foreground = "focus_ring", .background = "button_bg", .minimum = 3.0 },
+    // On a selected rail button; High Contrast draws it in the selection's
+    // text colour there.
+    .{ .foreground = "focus_ring", .background = "selection_bg", .minimum = 3.0, .high_contrast = false },
+    // The changed-field marker beside a row.
     .{ .foreground = "accent", .background = "window_bg", .minimum = 3.0 },
     // The selected rail button's pill; High Contrast frames the button in
     // its text colour instead.
     .{ .foreground = "accent", .background = "selection_bg", .minimum = 3.0, .high_contrast = false },
+    // The rail's unsaved dot and invalid disc (its "!" is the button's own
+    // background on the disc) on each background a rail button has; High
+    // Contrast draws them in the text colours.
+    .{ .foreground = "accent", .background = "rail_bg", .minimum = 3.0, .high_contrast = false },
+    .{ .foreground = "accent", .background = "button_bg", .minimum = 3.0, .high_contrast = false },
+    .{ .foreground = "error_text", .background = "rail_bg", .minimum = 3.0, .high_contrast = false },
+    .{ .foreground = "error_text", .background = "selection_bg", .minimum = 3.0, .high_contrast = false },
+    .{ .foreground = "error_text", .background = "button_bg", .minimum = 3.0, .high_contrast = false },
+    // A text field's frame: at rest, focused and invalid, on both sides.
     .{ .foreground = "field_border", .background = "window_bg", .minimum = 3.0 },
     .{ .foreground = "field_border", .background = "edit_bg", .minimum = 3.0 },
+    .{ .foreground = "accent", .background = "edit_bg", .minimum = 3.0 },
+    .{ .foreground = "error_text", .background = "edit_bg", .minimum = 3.0 },
+    // Toggle switches.
     .{ .foreground = "toggle_on_track", .background = "window_bg", .minimum = 3.0 },
     .{ .foreground = "toggle_on_thumb", .background = "toggle_on_track", .minimum = 3.0 },
     .{ .foreground = "toggle_off", .background = "window_bg", .minimum = 3.0 },
@@ -199,6 +234,7 @@ pub fn settingsColors(
             .field_border = system.window_text,
             .button_bg = system.button_face,
             .button_text = system.button_text,
+            .action_text = system.button_text,
             // High Contrast draws a plain check box, not a switch; these
             // keep the system pairs all the same.
             .toggle_on_track = system.highlight,
@@ -226,6 +262,7 @@ pub fn settingsColors(
         .field_border = theme.edit_border_unfocused,
         .button_bg = theme.button_bg,
         .button_text = theme.button_fg,
+        .action_text = theme.info_fg,
         .toggle_on_track = theme.accent,
         .toggle_on_thumb = theme.overlay_bg,
         .toggle_off = theme.text_secondary,
@@ -1133,6 +1170,7 @@ test "settings high contrast uses only exact system color roles" {
     try std.testing.expectEqual(system.highlight, colors.toggle_on_track);
     try std.testing.expectEqual(system.highlight_text, colors.toggle_on_thumb);
     try std.testing.expectEqual(system.button_text, colors.toggle_off);
+    try std.testing.expectEqual(system.button_text, colors.action_text);
     try std.testing.expectEqual(@as(u32, 0), settingsDwmDarkModeValue(colors));
     try std.testing.expectEqual(
         @as(u32, 1),
