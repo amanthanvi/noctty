@@ -8030,6 +8030,7 @@ pub const App = struct {
             "jar",                "py",                "pyw",         "rb",        "pl",  "chm",     "rdp",          "library-ms",
             "searchConnector-ms", "diagcab",           "iso",         "img",       "vhd", "vhdx",    "appinstaller", "msix",
             "appx",               "settingcontent-ms", "theme",       "themepack", "xll", "website", "jnlp",         "wsc",
+            "search-ms",          "wsb",               "ica",         "wcx",
         }) |blocked| {
             if (std.ascii.eqlIgnoreCase(name, blocked)) return null;
         }
@@ -10359,9 +10360,10 @@ test "security regression win32 link opener rejects dangerous handler files" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     for ([_][]const u8{
-        "rdp",          "library-ms", "searchConnector-ms", "diagcab",           "iso",   "img",       "vhd", "vhdx",
-        "appinstaller", "msix",       "appx",               "settingcontent-ms", "theme", "themepack", "xll", "website",
-        "jnlp",         "wsc",        "exe",                "cmd",               "lnk",   "ps1",
+        "rdp",          "library-ms", "searchConnector-ms", "diagcab",           "iso",   "img",       "vhd",       "vhdx",
+        "appinstaller", "msix",       "appx",               "settingcontent-ms", "theme", "themepack", "xll",       "website",
+        "jnlp",         "wsc",        "exe",                "cmd",               "lnk",   "ps1",       "search-ms", "wsb",
+        "ica",          "wcx",
     }) |extension| {
         const name = try std.fmt.allocPrint(alloc, "dangerous.{s}", .{extension});
         defer alloc.free(name);
