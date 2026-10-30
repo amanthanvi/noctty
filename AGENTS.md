@@ -217,10 +217,10 @@ that govern each symbol you change, or that none does.
   window menu, the quick terminal (`win32_quick_terminal.zig`,
   `win32/quick_terminal_host.zig`).
 - [chrome-tabs-paint.md](docs/agents/log/chrome-tabs-paint.md): tab buttons
-  (`tabButtonProc`, `drawButton`, labels, tooltips, close X, underline,
-  `win32_tab_visual.zig`), `window-show-tab-bar`, chrome theme and system
-  accent (`win32_theme.zig`), focus cues (`win32/focus_cue.zig`),
-  `win32_icons.zig`, titlebar and tab-row icon fonts
+  (`tabButtonProc`, `drawButton`, labels, tooltips, close X, the active tab's
+  join to its terminal, `win32_tab_visual.zig`), `window-show-tab-bar`,
+  chrome theme and system accent (`win32_theme.zig`), focus cues
+  (`win32/focus_cue.zig`), `win32_icons.zig`, titlebar and tab-row icon fonts
   (`recreateTitlebarIconFonts`, `createIconFontWithGlyphs`,
   `fontGlyphCoverage`, `drawTitlebarGlyph`), chrome child z-order, host paint
   and invalidation scopes and text caches (`win32/chrome_scene.zig`:
@@ -288,9 +288,11 @@ that govern each symbol you change, or that none does.
   (`field_model.Kind.profile`, `AppHandle.profileChoices`), the
   changed-from-default marks, Reset buttons and row menu (`syncDefaultMarks`,
   `takeResetButton`, `releaseResetButton`, `resetDraftRow`, `showRowMenu`,
-  `field_model.effectiveSettingValue`), and the save path
-  (`settingsSaveAndReload`, `patchOrAppendEdits`, save target, masked
-  values).
+  `field_model.effectiveSettingValue`), Settings search (`formItems`,
+  `runSearch`, `suspendViewportRedraw`, `keepFocusShown`, `searchFinds`,
+  `revealControl`, `showKeyboardCues`, `placeDiscardButton`, `SearchQuery`),
+  and the save path (`settingsSaveAndReload`, `patchOrAppendEdits`, save
+  target, masked values).
 - [accessibility.md](docs/agents/log/accessibility.md): new widgets and UI
   events (adding a native widget, or changing its focus, children or
   notifiable properties); UIA providers under `src/apprt/win32_uia/` (COM
@@ -328,7 +330,8 @@ that govern each symbol you change, or that none does.
   (`scripts/package-windows.ps1`, `dist/windows/noctty.iss`, what Setup's
   `CloseApplications` closes), signing, the updater (including
   `RegisterApplicationRestart` while an installer closes noctty, with
-  `stagedInstallerRunning`), release workflows
+  `stagedInstallerRunning`; `pkg/wuffs/src/deflate.zig`, the raw DEFLATE
+  decoder for update payloads), release workflows
   and package managers (WinGet, Scoop,
   Chocolatey), GitHub Actions CI (path filter, caching, runners), CRLF and
   `.gitattributes` in shipped files.

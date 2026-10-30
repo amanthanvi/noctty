@@ -4,6 +4,7 @@ Dates descend; entries that share a date are not always newest first. A newer-da
 
 Corrected in other files:
 - 2026-04-16 "Do not add user-facing config knobs": `accent-follow-system` exists again, since the 2026-10-01 accent entry in chrome-tabs-paint.md added its consumer.
+  - Correction, 2026-10-26 (#596): `accent-follow-system` exists again as a key that parses, but has no effect since the 2026-10-26 tab-strip entry in chrome-tabs-paint.md removed its only consumer.
 - 2026-04-17 "`App.startup_cwd` caches the launch-time cwd": the cwd dance it describes is now one scope, `App.StartupCwd` (from `enterStartupCwd`), shared by Settings saves (`App.loadConfigAtStartupCwd`) and `.reload_config`, and a missing startup directory is not created again: the 2026-10-18 "`App.startup_cwd` is never created again" entry (#485) and the corrected 2026-04-17 `.reload_config` entry in this file. Item (5) of the 2026-10-11 PKG-21 entry in settings.md records the state before #485.
 
 See also:
