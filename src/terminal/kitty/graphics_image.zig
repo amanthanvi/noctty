@@ -9,6 +9,7 @@ const fastmem = @import("../../fastmem.zig");
 const command = @import("graphics_command.zig");
 const PageList = @import("../PageList.zig");
 const wuffs = @import("wuffs");
+const LimitedAllocator = @import("../../datastruct/main.zig").LimitedAllocator;
 
 const isNetworkOrDevicePath = @import("../../os/path.zig").isNetworkOrDevicePath;
 
@@ -483,15 +484,20 @@ pub const LoadingImage = struct {
     fn decodePng(self: *LoadingImage, alloc: Allocator) !void {
         assert(self.image.format == .png);
 
+        var limited: LimitedAllocator = .init(alloc, max_size);
+        const decode_alloc = limited.allocator();
         const result = wuffs.png.decode(
-            alloc,
+            decode_alloc,
             self.data.items,
         ) catch |err| switch (err) {
             error.WuffsError => return error.InvalidData,
-            error.OutOfMemory => return error.OutOfMemory,
+            error.OutOfMemory => if (limited.limit_exceeded)
+                return error.InvalidData
+            else
+                return error.OutOfMemory,
             error.Overflow => return error.InvalidData,
         };
-        defer alloc.free(result.data);
+        defer decode_alloc.free(result.data);
 
         if (result.data.len > max_size) {
             log.warn("png image too large size={} max_size={}", .{ result.data.len, max_size });
@@ -1279,6 +1285,36 @@ test "image load: rgb, not compressed, regular file" {
     defer img.deinit(alloc);
     try testing.expect(img.compression == .none);
     try tmp_dir.dir.access(path, .{});
+}
+
+test "image load: png rejects oversized Wuffs image before allocation" {
+    const testing = std.testing;
+
+    // Turn the small test PNG into a 32768x32767 image. Its decoded RGBA
+    // size is just under Wuffs' 4 GiB package limit but over Kitty's 400 MiB
+    // limit, which previously allowed the large allocation to happen first.
+    var data = @embedFile("testdata/image-png-none-50x76-2147483647-raw.data").*;
+    std.mem.writeInt(u32, data[16..20], 32768, .big);
+    std.mem.writeInt(u32, data[20..24], 32767, .big);
+    std.mem.writeInt(u32, data[29..33], std.hash.Crc32.hash(data[12..29]), .big);
+
+    // Refuse, and record, any request over the limit that gets past the
+    // decoder's own limit to the test's allocator.
+    var outer: LimitedAllocator = .init(testing.allocator, max_size);
+    const alloc = outer.allocator();
+
+    const cmd: command.Command = .{
+        .control = .{ .transmit = .{
+            .format = .png,
+            .medium = .direct,
+        } },
+        .data = &data,
+    };
+    var loading = try LoadingImage.init(alloc, &cmd);
+    defer loading.deinit(alloc);
+
+    try testing.expectError(error.InvalidData, loading.complete(alloc));
+    try testing.expect(!outer.limit_exceeded);
 }
 
 test "image load: png, not compressed, regular file" {
