@@ -71,7 +71,7 @@ pub const Handler = struct {
         /// valid for the lifetime of the call.
         enquiry: ?*const fn (*Handler) []const u8,
 
-        /// Called in response to XTWINOPS size queries (CSI 14/16/18 t).
+        /// Called in response to XTWINOPS size queries (CSI 14/16/18/19 t).
         /// Returns the current terminal geometry used for encoding.
         /// Return null to silently ignore the query.
         size: ?*const fn (*Handler) ?size_report.Size,
@@ -425,13 +425,14 @@ pub const Handler = struct {
                 aw.writer.print("\x1b]l{s}\x1b\\", .{title}) catch return;
             },
 
-            .csi_14_t, .csi_16_t, .csi_18_t => {
+            .csi_14_t, .csi_16_t, .csi_18_t, .csi_19_t => {
                 const get_size = self.effects.size orelse return;
                 const s = get_size(self) orelse return;
                 const report_style: size_report.Style = switch (style) {
                     .csi_14_t => .csi_14_t,
                     .csi_16_t => .csi_16_t,
                     .csi_18_t => .csi_18_t,
+                    .csi_19_t => .csi_19_t,
                     .csi_21_t => unreachable,
                 };
                 size_report.encode(
@@ -2683,6 +2684,34 @@ test "size report csi_18_t with effect" {
     s.nextSlice("\x1b[18t");
     defer testing.allocator.free(S.written.?);
     try testing.expectEqualStrings("\x1b[8;24;80t", S.written.?);
+}
+
+test "size report csi_19_t with effect" {
+    var t: Terminal = try .init(testing.allocator, .{ .cols = 80, .rows = 24 });
+    defer t.deinit(testing.allocator);
+
+    const S = struct {
+        var written: ?[]const u8 = null;
+        fn writePty(_: *Handler, data: [:0]const u8) void {
+            written = testing.allocator.dupe(u8, data) catch @panic("OOM");
+        }
+        fn getSize(_: *Handler) ?size_report.Size {
+            return .{ .rows = 24, .columns = 80, .cell_width = 9, .cell_height = 18 };
+        }
+    };
+    S.written = null;
+
+    var handler: Handler = .init(&t);
+    handler.effects.write_pty = &S.writePty;
+    handler.effects.size = &S.getSize;
+
+    var s: Stream = .initAlloc(testing.allocator, handler);
+    defer s.deinit();
+
+    // CSI 19 t - report screen size in characters
+    s.nextSlice("\x1b[19t");
+    defer testing.allocator.free(S.written.?);
+    try testing.expectEqualStrings("\x1b[9;24;80t", S.written.?);
 }
 
 test "size report no effect callback" {

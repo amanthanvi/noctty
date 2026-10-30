@@ -1666,6 +1666,7 @@ pub const StreamHandler = struct {
             .csi_14_t => self.messageWriter(.{ .size_report = .csi_14_t }),
             .csi_16_t => self.messageWriter(.{ .size_report = .csi_16_t }),
             .csi_18_t => self.messageWriter(.{ .size_report = .csi_18_t }),
+            .csi_19_t => self.messageWriter(.{ .size_report = .csi_19_t }),
             .csi_21_t => self.surfaceMessageWriter(.{ .report_title = .csi_21_t }),
         }
     }
@@ -2995,4 +2996,17 @@ test "CHA, VPA, HPR and VPR stay relative to the margins in origin mode" {
     h.stream.nextSlice("\x1b[2a\x1b[2e");
     try std.testing.expectEqual(@as(terminal.size.CellCountInt, 5), cursor.x);
     try std.testing.expectEqual(@as(terminal.size.CellCountInt, 4), cursor.y);
+}
+
+test "CSI 19 t asks for the size in characters" {
+    const alloc = std.testing.allocator;
+    var h: TestStream = undefined;
+    try h.init(alloc, .{});
+    defer h.deinit(alloc);
+
+    h.stream.nextSlice("\x1b[19t");
+    const message = switch (h.termio_mailbox) {
+        .spsc => |*value| value.queue.pop() orelse return error.NoTermioMessage,
+    };
+    try std.testing.expectEqual(termio.Message.SizeReport.csi_19_t, message.size_report);
 }

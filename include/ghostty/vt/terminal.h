@@ -76,7 +76,7 @@ extern "C" {
  * | `GHOSTTY_TERMINAL_OPT_TITLE_CHANGED`    | `GhosttyTerminalTitleChangedFn`   | Title change via OSC 0 / OSC 2            |
  * | `GHOSTTY_TERMINAL_OPT_ENQUIRY`          | `GhosttyTerminalEnquiryFn`        | ENQ character (0x05)                      |
  * | `GHOSTTY_TERMINAL_OPT_XTVERSION`        | `GhosttyTerminalXtversionFn`      | XTVERSION query (CSI > q)                 |
- * | `GHOSTTY_TERMINAL_OPT_SIZE`             | `GhosttyTerminalSizeFn`           | XTWINOPS size query (CSI 14/16/18 t)      |
+ * | `GHOSTTY_TERMINAL_OPT_SIZE`             | `GhosttyTerminalSizeFn`           | XTWINOPS size query (CSI 14/16/18/19 t)   |
  * | `GHOSTTY_TERMINAL_OPT_COLOR_SCHEME`     | `GhosttyTerminalColorSchemeFn`    | Color scheme query (CSI ? 996 n)          |
  * | `GHOSTTY_TERMINAL_OPT_DEVICE_ATTRIBUTES`| `GhosttyTerminalDeviceAttributesFn`| Device attributes query (CSI c / > c / = c)|
  * | `GHOSTTY_TERMINAL_OPT_PROGRAM_STATUS`   | `GhosttyTerminalProgramStatusFn`  | Program status report via OSC 7501        |
@@ -326,7 +326,7 @@ typedef GhosttyString (*GhosttyTerminalEnquiryFn)(GhosttyTerminal terminal,
 /**
  * Callback function type for size queries (XTWINOPS).
  *
- * Called in response to XTWINOPS size queries (CSI 14/16/18 t).
+ * Called in response to XTWINOPS size queries (CSI 14/16/18/19 t).
  * Return true and fill *out_size with the current terminal geometry,
  * or return false to silently ignore the query.
  *
@@ -638,7 +638,7 @@ typedef enum {
 
   /**
    * Callback invoked in response to XTWINOPS size queries
-   * (CSI 14/16/18 t). Set to NULL to silently ignore size queries.
+   * (CSI 14/16/18/19 t). Set to NULL to silently ignore size queries.
    *
    * Input type: GhosttyTerminalSizeFn
    */
