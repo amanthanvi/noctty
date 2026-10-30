@@ -289,11 +289,28 @@ pub const LoadingImage = struct {
         // Read the file
         var managed: std.ArrayList(u8) = .empty;
         errdefer managed.deinit(alloc);
-        const size: usize = if (t.size > 0) @min(t.size, max_size) else max_size;
-        reader.appendRemaining(alloc, &managed, .limited(size)) catch {
-            log.warn("failed to read temporary file: {?}", .{buf_reader.err});
-            return error.InvalidData;
-        };
+        if (t.size > 0) {
+            // S is the exact number of bytes to read, not a maximum:
+            // https://sw.kovidgoyal.net/kitty/graphics-protocol/#local-client
+            const size = std.math.cast(usize, t.size) orelse
+                return error.InvalidData;
+            if (size > max_size) return error.InvalidData;
+
+            // Read exact size
+            const data = reader.readAlloc(alloc, size) catch |err| {
+                log.warn("failed to read image file: {}", .{err});
+                return switch (err) {
+                    error.OutOfMemory => error.OutOfMemory,
+                    else => error.InvalidData,
+                };
+            };
+            managed = .{ .items = data, .capacity = data.len };
+        } else {
+            reader.appendRemaining(alloc, &managed, .limited(max_size)) catch {
+                log.warn("failed to read image file: {?}", .{buf_reader.err});
+                return error.InvalidData;
+            };
+        }
 
         // Set our data
         assert(self.data.items.len == 0);
@@ -1329,6 +1346,80 @@ test "image load: regular file offset skips leading bytes" {
     var loading = try LoadingImage.init(alloc, &cmd);
     defer loading.deinit(alloc);
     try testing.expectEqualSlices(u8, &.{ 4, 5, 6 }, loading.data.items);
+}
+
+test "image load: regular file size reads exactly requested bytes" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var tmp_dir = try temp_dir.TempDir.init();
+    defer tmp_dir.deinit();
+    try tmp_dir.dir.writeFile(.{
+        .sub_path = "image.data",
+        .data = &.{ 1, 2, 3, 4, 5, 6 },
+    });
+
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const path = try tmp_dir.dir.realpath("image.data", &path_buf);
+
+    const cases = [_]struct {
+        offset: u32,
+        expected: [3]u8,
+    }{
+        .{ .offset = 0, .expected = .{ 1, 2, 3 } },
+        .{ .offset = 3, .expected = .{ 4, 5, 6 } },
+    };
+    for (cases) |case| {
+        var cmd: command.Command = .{
+            .control = .{ .transmit = .{
+                .format = .rgb,
+                .medium = .file,
+                .width = 1,
+                .height = 1,
+                .size = 3,
+                .offset = case.offset,
+                .image_id = 31,
+            } },
+            .data = try alloc.dupe(u8, path),
+        };
+        defer cmd.deinit(alloc);
+
+        var loading = try LoadingImage.init(alloc, &cmd);
+        defer loading.deinit(alloc);
+        var img = try loading.complete(alloc);
+        defer img.deinit(alloc);
+
+        try testing.expectEqualSlices(u8, &case.expected, img.data);
+    }
+}
+
+test "image load: regular file size rejects short data" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var tmp_dir = try temp_dir.TempDir.init();
+    defer tmp_dir.deinit();
+    try tmp_dir.dir.writeFile(.{
+        .sub_path = "image.data",
+        .data = &.{ 1, 2 },
+    });
+
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const path = try tmp_dir.dir.realpath("image.data", &path_buf);
+    var cmd: command.Command = .{
+        .control = .{ .transmit = .{
+            .format = .rgb,
+            .medium = .file,
+            .width = 1,
+            .height = 1,
+            .size = 3,
+            .image_id = 31,
+        } },
+        .data = try alloc.dupe(u8, path),
+    };
+    defer cmd.deinit(alloc);
+
+    try testing.expectError(error.InvalidData, LoadingImage.init(alloc, &cmd));
 }
 
 test "image load: png rejects oversized Wuffs image before allocation" {
