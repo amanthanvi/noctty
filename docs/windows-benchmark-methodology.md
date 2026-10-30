@@ -203,7 +203,9 @@ with log lines that match the needle, then either drives the search thread's
 one refresh per 32 KiB of output) or runs the real search thread while output
 streams in 4 KiB writes under the terminal lock (`--mode=thread`;
 `--rate-mib-s` paces the output, and the writer's time waiting for the lock is
-reported). Recorded 2026-10-11 for PKG-36 on the Ryzen 9 9900X, Windows build
+reported). `--regex` and `--whole-word` search with those options, so every
+searcher matches through the query's compiled pattern. Recorded 2026-10-11
+for PKG-36 on the Ryzen 9 9900X, Windows build
 26300, `ReleaseFast`, with `--lines=100000` (118k matches over 358 pages, 45 x
 140, 200 MiB scrollback); medians:
 

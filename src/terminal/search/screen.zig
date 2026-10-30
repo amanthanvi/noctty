@@ -15,7 +15,7 @@ const Terminal = @import("../Terminal.zig");
 const ActiveSearch = @import("active.zig").ActiveSearch;
 const PageListSearch = @import("pagelist.zig").PageListSearch;
 const SlidingWindow = @import("sliding_window.zig").SlidingWindow;
-const QueryOptions = @import("query_options.zig").QueryOptions;
+const Pattern = @import("pattern.zig").Pattern;
 
 const log = std.log.scoped(.search_screen);
 
@@ -142,24 +142,22 @@ pub const ScreenSearch = struct {
         screen: *Screen,
         needle_unowned: []const u8,
     ) Allocator.Error!ScreenSearch {
-        return ScreenSearch.initWithOptions(alloc, screen, needle_unowned, .{}) catch |err| switch (err) {
-            error.OutOfMemory => error.OutOfMemory,
-            // Default options cannot hit unsupported regex/option paths.
-            else => unreachable,
-        };
+        return ScreenSearch.initPattern(alloc, screen, needle_unowned, null);
     }
 
-    pub fn initWithOptions(
+    /// See `SlidingWindow.initPattern`: the pattern is borrowed, and every
+    /// window this search creates borrows it too.
+    pub fn initPattern(
         alloc: Allocator,
         screen: *Screen,
         needle_unowned: []const u8,
-        query_options: QueryOptions,
-    ) SlidingWindow.InitError!ScreenSearch {
+        pattern_: ?*Pattern,
+    ) Allocator.Error!ScreenSearch {
         var result: ScreenSearch = .{
             .screen = screen,
             .rows = screen.pages.rows,
             .cols = screen.pages.cols,
-            .active = try .initWithOptions(alloc, needle_unowned, query_options),
+            .active = try .initPattern(alloc, needle_unowned, pattern_),
             .history = null,
             .state = .active,
             .active_results = .empty,
@@ -213,6 +211,11 @@ pub const ScreenSearch = struct {
         return self.active.window.needle;
     }
 
+    /// The query's compiled pattern, which this search borrows.
+    pub fn pattern(self: *const ScreenSearch) ?*Pattern {
+        return self.active.window.pattern;
+    }
+
     /// Returns the total number of matches found so far.
     pub fn matchesLen(self: *const ScreenSearch) usize {
         return self.active_results.items.len + self.history_results.items.len;
@@ -249,7 +252,7 @@ pub const ScreenSearch = struct {
         self.state = .complete;
     }
 
-    /// Handle an error from setting up or running a matcher: out of memory
+    /// Handle an error from running a matcher: out of memory
     /// is returned, and anything else is logged as `what` and ends the
     /// search through `failSearch`. The caller must hold the screen lock.
     fn failSearchUnlessOutOfMemory(
@@ -267,9 +270,7 @@ pub const ScreenSearch = struct {
     /// selected contain invalid node pointers once either dimension changes.
     ///
     /// Returns true when the reset occurred. The replacement search has
-    /// already loaded its active area through `init` in that case. A
-    /// matcher that fails to reinitialize ends the search through
-    /// `failSearch`, which also counts as a reset.
+    /// already loaded its active area through `init` in that case.
     fn resetIfDimensionsChanged(self: *ScreenSearch) Allocator.Error!bool {
         if (self.screen.pages.rows == self.rows and
             self.screen.pages.cols == self.cols)
@@ -278,15 +279,12 @@ pub const ScreenSearch = struct {
         }
 
         const previous_match_rows_revision = self.match_rows_revision;
-        const new: ScreenSearch = ScreenSearch.initWithOptions(
+        const new: ScreenSearch = try ScreenSearch.initPattern(
             self.allocator(),
             self.screen,
             self.needle(),
-            self.active.window.query_options,
-        ) catch |err| {
-            try self.failSearchUnlessOutOfMemory(err, "error reinitializing screen search after resize");
-            return true;
-        };
+            self.pattern(),
+        );
 
         self.deinit();
         self.* = new;
@@ -805,14 +803,13 @@ pub const ScreenSearch = struct {
                 // No history search yet, but we now have history. So let's
                 // initialize.
 
-                var search: PageListSearch = PageListSearch.initWithOptions(
+                var search: PageListSearch = try .initPattern(
                     alloc,
                     self.needle(),
-                    self.active.window.query_options,
+                    self.pattern(),
                     list,
                     history_node,
-                ) catch |err|
-                    return self.failSearchUnlessOutOfMemory(err, "error initializing history search");
+                );
                 errdefer search.deinit();
 
                 const pin = try list.trackPin(.{ .node = history_node });
@@ -837,13 +834,12 @@ pub const ScreenSearch = struct {
             // collect all the results into a new list. We ASSUME that
             // reloadActive is being called frequently enough that there isn't
             // a massive amount of history to search here.
-            var window: SlidingWindow = SlidingWindow.initWithOptions(
+            var window: SlidingWindow = try .initPattern(
                 alloc,
                 .forward,
                 self.needle(),
-                self.active.window.query_options,
-            ) catch |err|
-                return self.failSearchUnlessOutOfMemory(err, "error initializing active-history reconciliation search");
+                self.pattern(),
+            );
             defer window.deinit();
             while (true) {
                 _ = try window.append(history.start_pin.node);

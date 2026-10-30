@@ -29,6 +29,7 @@ const Terminal = @import("../Terminal.zig");
 
 const QueryOptions = @import("query_options.zig").QueryOptions;
 const Query = @import("query_options.zig").Query;
+const Pattern = @import("pattern.zig").Pattern;
 const ScreenSearch = @import("screen.zig").ScreenSearch;
 const SlidingWindow = @import("sliding_window.zig").SlidingWindow;
 const ViewportSearch = @import("viewport.zig").ViewportSearch;
@@ -408,10 +409,7 @@ fn changeQuery(
 
     if (self.search) |*s| {
         // If our search is unchanged, do nothing.
-        if (Query.eql(
-            .{ .needle = s.viewport.needle(), .options = s.viewport.window.query_options },
-            .{ .needle = needle, .options = query_options },
-        )) {
+        if (s.query().eql(.{ .needle = needle, .options = query_options })) {
             // Reset clears both the viewport fingerprint and sliding-window
             // buffer, so the forced notify below rescans from a clean state.
             s.viewport.reset();
@@ -702,6 +700,10 @@ pub const Event = union(enum) {
 /// Search state. Public for `src/bench/search_stream.zig`, which drives
 /// it the way `threadMain_` does.
 pub const Search = struct {
+    /// The query's compiled pattern, lent to every searcher. Null for a
+    /// literal query.
+    pattern: ?*Pattern,
+
     /// Active viewport search for the active screen.
     viewport: ViewportSearch,
 
@@ -754,8 +756,14 @@ pub const Search = struct {
         alloc: Allocator,
         needle: []const u8,
         query_options: QueryOptions,
-    ) SlidingWindow.InitError!Search {
-        var vp: ViewportSearch = try .initWithOptions(alloc, needle, query_options);
+    ) Pattern.CompileError!Search {
+        const pattern = try Pattern.forQuery(alloc, .{
+            .needle = needle,
+            .options = query_options,
+        });
+        errdefer if (pattern) |p| p.destroy(alloc);
+
+        var vp: ViewportSearch = try .initPattern(alloc, needle, pattern);
         errdefer vp.deinit();
 
         // We use dirty tracking for active area changes. Start with it
@@ -763,6 +771,7 @@ pub const Search = struct {
         vp.active_dirty = true;
 
         return .{
+            .pattern = pattern,
             .viewport = vp,
             .screens = .init(.{}),
             .screen_generations = .init(.{}),
@@ -779,8 +788,9 @@ pub const Search = struct {
     /// The caller must hold the terminal lock: a searcher whose screen is
     /// still alive untracks its pins from that screen's PageList.
     pub fn deinit(self: *Search, t: *Terminal) void {
-        self.match_rows.deinit(self.viewport.window.alloc);
-        self.notified_match_rows.deinit(self.viewport.window.alloc);
+        const alloc = self.viewport.window.alloc;
+        self.match_rows.deinit(alloc);
+        self.notified_match_rows.deinit(alloc);
         self.viewport.deinit();
         var it = self.screens.iterator();
         while (it.next()) |entry| {
@@ -790,6 +800,17 @@ pub const Search = struct {
                 entry.value.deinitScreenInvalid();
             }
         }
+
+        // Every searcher above borrowed it.
+        if (self.pattern) |p| p.destroy(alloc);
+    }
+
+    /// The query this search runs. The needle is borrowed.
+    pub fn query(self: *const Search) Query {
+        return .{
+            .needle = self.viewport.needle(),
+            .options = if (self.pattern) |p| p.options else .{},
+        };
     }
 
     fn screenIsValid(
@@ -906,23 +927,16 @@ pub const Search = struct {
             var it = t.screens.all.iterator();
             while (it.next()) |entry| {
                 if (self.screens.contains(entry.key)) continue;
-                const screen_search = ScreenSearch.initWithOptions(
+                const screen_search = ScreenSearch.initPattern(
                     alloc,
                     entry.value.*,
                     self.viewport.needle(),
-                    self.viewport.window.query_options,
+                    self.pattern,
                 ) catch |err| switch (err) {
                     error.OutOfMemory => {
                         // OOM is probably going to sink the entire ship but
                         // we can just ignore it and wait on the next
                         // reconciliation to try again.
-                        log.warn(
-                            "error initializing screen search for key={} err={}",
-                            .{ entry.key, err },
-                        );
-                        continue;
-                    },
-                    else => {
                         log.warn(
                             "error initializing screen search for key={} err={}",
                             .{ entry.key, err },
@@ -1608,6 +1622,50 @@ test "the first select with nothing selected starts at the newest match" {
             @as(usize, 2),
             thread.search.?.screens.getPtr(.primary).?.selected.?.idx,
         );
+    }
+}
+
+test "every searcher of one query borrows one Pattern" {
+    if (comptime !build_options.oniguruma) return error.SkipZigTest;
+
+    const alloc = testing.allocator;
+    try oni.testing.ensureInit();
+
+    var t: Terminal = try .init(alloc, .{
+        .cols = 10,
+        .rows = 2,
+        .max_scrollback = std.math.maxInt(usize),
+    });
+    defer t.deinit(alloc);
+    const list = &t.screens.get(.primary).?.pages;
+
+    var stream = t.vtStream();
+    defer stream.deinit();
+    stream.nextSlice("Fizz\r\n");
+    while (list.totalPages() < 3) stream.nextSlice("\r\n");
+    for (0..list.rows) |_| stream.nextSlice("\r\n");
+    stream.nextSlice("Fizz\x1b[?1049hFizz\x1b[?1049l");
+
+    var search: Search = try .init(alloc, "Fizz", .{ .whole_word = true });
+    defer search.deinit(&t);
+    const pattern = search.pattern.?;
+
+    for ([_]u16{ 10, 12 }) |cols| {
+        search.feed(alloc, &t);
+        try testing.expectEqual(pattern, search.viewport.window.pattern.?);
+        try testing.expectEqual(@as(usize, 2), search.screens.count());
+        var it = search.screens.iterator();
+        while (it.next()) |entry| {
+            try testing.expectEqual(pattern, entry.value.pattern().?);
+        }
+        const primary = search.screens.getPtr(.primary).?;
+        try testing.expectEqual(cols, primary.cols);
+        try testing.expectEqual(pattern, primary.history.?.searcher.window.pattern.?);
+
+        // A resize replaces the active screen's searcher at its next
+        // reload; the new one borrows the pattern too.
+        try t.resize(alloc, 12, 2);
+        t.flags.search_viewport_dirty = true;
     }
 }
 

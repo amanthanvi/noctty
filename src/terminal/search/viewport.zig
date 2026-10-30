@@ -8,7 +8,7 @@ const FlattenedHighlight = @import("../highlight.zig").Flattened;
 const PageList = @import("../PageList.zig");
 const SlidingWindow = @import("sliding_window.zig").SlidingWindow;
 const Terminal = @import("../Terminal.zig");
-const QueryOptions = @import("query_options.zig").QueryOptions;
+const Pattern = @import("pattern.zig").Pattern;
 
 /// Searches for a substring within the viewport of a PageList.
 ///
@@ -37,22 +37,19 @@ pub const ViewportSearch = struct {
         alloc: Allocator,
         needle_unowned: []const u8,
     ) Allocator.Error!ViewportSearch {
-        return ViewportSearch.initWithOptions(alloc, needle_unowned, .{}) catch |err| switch (err) {
-            error.OutOfMemory => error.OutOfMemory,
-            // Default options cannot hit unsupported regex/option paths.
-            else => unreachable,
-        };
+        return ViewportSearch.initPattern(alloc, needle_unowned, null);
     }
 
-    pub fn initWithOptions(
+    /// See `SlidingWindow.initPattern`: the pattern is borrowed.
+    pub fn initPattern(
         alloc: Allocator,
         needle_unowned: []const u8,
-        query_options: QueryOptions,
-    ) SlidingWindow.InitError!ViewportSearch {
+        pattern: ?*Pattern,
+    ) Allocator.Error!ViewportSearch {
         // We just do a forward search since the viewport is usually
         // pretty small so search results are instant anyways. This avoids
         // a small amount of work to reverse things.
-        var window: SlidingWindow = try .initWithOptions(alloc, .forward, needle_unowned, query_options);
+        var window: SlidingWindow = try .initPattern(alloc, .forward, needle_unowned, pattern);
         errdefer window.deinit();
         return .{
             .window = window,

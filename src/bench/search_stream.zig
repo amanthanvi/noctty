@@ -24,6 +24,9 @@
 //!                  the search of that output dominates, and a short stream
 //!                  spans only a refresh or two.
 //!
+//! `--regex` and `--whole-word` search with those options, so every
+//! searcher matches through the query's compiled pattern.
+//!
 //! Usage:
 //!   zig build bench:search-stream -- --mode=feed --lines=100000 --runs=5
 //!   zig build bench:search-stream -- --mode=thread --lines=100000 --stream-mib=8 --rate-mib-s=2 --runs=3
@@ -57,6 +60,8 @@ const Args = struct {
     cols: u16 = 140,
     scrollback_mib: usize = 200,
     needle: []const u8 = "request",
+    regex: bool = false,
+    whole_word: bool = false,
     /// `--mode=thread`: output rate in MiB/s, as a producer such as a
     /// console host limits it; 0 streams as fast as the terminal takes it.
     rate_mib_s: f64 = 0,
@@ -224,7 +229,7 @@ fn runFeed(
         writeAll(&t, history);
 
         var sink: Sink = .{ .alloc = alloc };
-        var search = try ThreadSearch.init(alloc, args.needle, .{});
+        var search = try ThreadSearch.init(alloc, args.needle, queryOptions(args));
         defer search.deinit(&t);
         // Single-threaded: `tick` takes the terminal lock only to clean up
         // after a matcher failure, and nothing else contends for it here.
@@ -271,7 +276,7 @@ fn runFeed(
     var out_writer = std.fs.File.stdout().writer(&out_buf);
     const out = &out_writer.interface;
     try out.print(
-        \\bench:search-stream mode=feed
+        \\bench:search-stream mode=feed regex={} whole-word={}
         \\  history lines      = {d} (1 in {d} matches "{s}"), {d}x{d}, scrollback {d} MiB
         \\  streamed           = {d} MiB, refresh every {d} KiB
         \\  final matches      = {d}, match rows = {d}, page nodes = {d}
@@ -282,6 +287,8 @@ fn runFeed(
         \\  stream, no search  median {d:.1} ms
         \\
     , .{
+        args.regex,
+        args.whole_word,
         args.lines,
         args.match_every,
         args.needle,
@@ -352,7 +359,7 @@ fn runThread(
     const with_median = stats.median(with_ms).?;
     const without_median = stats.median(without_ms).?;
     try out.print(
-        \\bench:search-stream mode=thread
+        \\bench:search-stream mode=thread regex={} whole-word={}
         \\  history lines      = {d} (1 in {d} matches "{s}"), {d}x{d}, scrollback {d} MiB
         \\  streamed           = {d} MiB in 4 KiB writes under the terminal lock, paced at {d} MiB/s (0 = unpaced)
         \\  final matches      = {d}, row snapshots sent = {d} (last run)
@@ -362,6 +369,8 @@ fn runThread(
         \\  slowdown           {d:.2}x
         \\
     , .{
+        args.regex,
+        args.whole_word,
         args.lines,
         args.match_every,
         args.needle,
@@ -430,7 +439,7 @@ fn streamLocked(
         var timer = try std.time.Timer.start();
         thread.send(.{ .change_query = .{
             .generation = 1,
-            .options = .{},
+            .options = queryOptions(args),
             .req = try .init(alloc, args.needle),
         } });
         try search_sink.complete.timedWait(600 * std.time.ns_per_s);
@@ -468,6 +477,10 @@ fn streamLocked(
     return result;
 }
 
+fn queryOptions(args: Args) terminal.search.QueryOptions {
+    return .{ .regex = args.regex, .whole_word = args.whole_word };
+}
+
 fn nsToMs(ns: u64) f64 {
     return @as(f64, @floatFromInt(ns)) / std.time.ns_per_ms;
 }
@@ -500,6 +513,10 @@ fn parseArgs(raw: []const []const u8) !Args {
             out.rate_mib_s = try std.fmt.parseFloat(f64, arg["--rate-mib-s=".len..]);
         } else if (std.mem.startsWith(u8, arg, "--needle=")) {
             out.needle = arg["--needle=".len..];
+        } else if (std.mem.eql(u8, arg, "--regex")) {
+            out.regex = true;
+        } else if (std.mem.eql(u8, arg, "--whole-word")) {
+            out.whole_word = true;
         } else {
             std.log.err("bench:search-stream: unknown arg '{s}'", .{arg});
             return error.InvalidArgument;

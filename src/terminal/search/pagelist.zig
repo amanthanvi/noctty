@@ -7,7 +7,7 @@ const PageList = @import("../PageList.zig");
 const Pin = PageList.Pin;
 const Terminal = @import("../Terminal.zig");
 const SlidingWindow = @import("sliding_window.zig").SlidingWindow;
-const QueryOptions = @import("query_options.zig").QueryOptions;
+const Pattern = @import("pattern.zig").Pattern;
 
 /// Searches for a term in a PageList structure.
 ///
@@ -47,20 +47,17 @@ pub const PageListSearch = struct {
         list: *PageList,
         start: *PageList.List.Node,
     ) Allocator.Error!PageListSearch {
-        return PageListSearch.initWithOptions(alloc, needle, .{}, list, start) catch |err| switch (err) {
-            error.OutOfMemory => error.OutOfMemory,
-            // Default options cannot hit unsupported regex/option paths.
-            else => unreachable,
-        };
+        return PageListSearch.initPattern(alloc, needle, null, list, start);
     }
 
-    pub fn initWithOptions(
+    /// See `SlidingWindow.initPattern`: the pattern is borrowed.
+    pub fn initPattern(
         alloc: Allocator,
         needle: []const u8,
-        query_options: QueryOptions,
+        pattern: ?*Pattern,
         list: *PageList,
         start: *PageList.List.Node,
-    ) SlidingWindow.InitError!PageListSearch {
+    ) Allocator.Error!PageListSearch {
         // We put a tracked pin into the node that we're starting from.
         // By using a tracked pin, we can keep our pagelist references safe
         // because if the pagelist prunes pages, the tracked pin will
@@ -73,7 +70,7 @@ pub const PageListSearch = struct {
         errdefer list.untrackPin(pin);
 
         // Create our sliding window we'll use for searching.
-        var window: SlidingWindow = try .initWithOptions(alloc, .reverse, needle, query_options);
+        var window: SlidingWindow = try .initPattern(alloc, .reverse, needle, pattern);
         errdefer window.deinit();
 
         // We always feed our initial page data into the window, because

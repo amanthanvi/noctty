@@ -11,7 +11,7 @@ const Screen = @import("../Screen.zig");
 const Terminal = @import("../Terminal.zig");
 const PageFormatter = @import("../formatter.zig").PageFormatter;
 const FlattenedHighlight = @import("../highlight.zig").Flattened;
-const QueryOptions = @import("query_options.zig").QueryOptions;
+const Query = @import("query_options.zig").Query;
 const Pattern = @import("pattern.zig").Pattern;
 const oni = if (build_options.oniguruma) @import("oniguruma") else struct {};
 
@@ -68,9 +68,6 @@ pub const SlidingWindow = struct {
     /// The needle we're searching for. Does own the memory.
     needle: []const u8,
 
-    /// Match behavior for the current query.
-    query_options: QueryOptions,
-
     /// The search direction. If the direction is forward then pages should
     /// be appended in forward linked list order from the PageList. If the
     /// direction is reverse then pages should be appended in reverse order.
@@ -89,15 +86,14 @@ pub const SlidingWindow = struct {
     /// when a contiguous linear view of the circular buffer is required.
     regex_buf: std.ArrayListUnmanaged(u8) = .empty,
 
-    /// The matcher for non-default query options. Null runs the literal
-    /// scan.
+    /// The matcher for non-default query options, borrowed. Null runs the
+    /// literal scan.
     pattern: ?*Pattern,
 
     const Direction = enum { forward, reverse };
     const DataBuf = CircBuf(u8, 0);
     const MetaBuf = CircBuf(Meta, undefined);
 
-    pub const InitError = Pattern.CompileError;
     pub const SearchError = Allocator.Error || Pattern.Failure;
 
     /// Information copied from a page while appending it to the window.
@@ -133,25 +129,19 @@ pub const SlidingWindow = struct {
         direction: Direction,
         needle_unowned: []const u8,
     ) Allocator.Error!SlidingWindow {
-        return SlidingWindow.initWithOptions(alloc, direction, needle_unowned, .{}) catch |err| switch (err) {
-            error.OutOfMemory => error.OutOfMemory,
-            // Default options never request the optional regex engine.
-            else => unreachable,
-        };
+        return SlidingWindow.initPattern(alloc, direction, needle_unowned, null);
     }
 
-    pub fn initWithOptions(
+    /// A window that matches with `pattern`, the query's compiled
+    /// `Pattern`, or with the literal scan when it is null. The pattern is
+    /// borrowed: it must outlive the window, and every window that shares
+    /// it runs on one thread.
+    pub fn initPattern(
         alloc: Allocator,
         direction: Direction,
         needle_unowned: []const u8,
-        query_options: QueryOptions,
-    ) InitError!SlidingWindow {
-        const pattern = try Pattern.forQuery(alloc, .{
-            .needle = needle_unowned,
-            .options = query_options,
-        });
-        errdefer if (pattern) |p| p.destroy(alloc);
-
+        pattern: ?*Pattern,
+    ) Allocator.Error!SlidingWindow {
         var data = try DataBuf.init(alloc, 0);
         errdefer data.deinit(alloc);
 
@@ -174,7 +164,6 @@ pub const SlidingWindow = struct {
             .meta = meta,
             .chunk_buf = .empty,
             .needle = needle,
-            .query_options = query_options,
             .direction = direction,
             .overlap_buf = overlap_buf,
             .pattern = pattern,
@@ -182,7 +171,6 @@ pub const SlidingWindow = struct {
     }
 
     pub fn deinit(self: *SlidingWindow) void {
-        if (self.pattern) |p| p.destroy(self.alloc);
         self.regex_buf.deinit(self.alloc);
         self.alloc.free(self.overlap_buf);
         self.alloc.free(self.needle);
@@ -845,6 +833,12 @@ pub const SlidingWindow = struct {
     }
 };
 
+/// Compile `query`, which must not be a default (literal) query.
+fn testPattern(query: Query) !*Pattern {
+    try oni.testing.ensureInit();
+    return (try Pattern.forQuery(std.testing.allocator, query)).?;
+}
+
 test "SlidingWindow empty on init" {
     const testing = std.testing;
     const alloc = testing.allocator;
@@ -950,11 +944,9 @@ test "SlidingWindow single append case sensitive" {
 
     const testing = std.testing;
     const alloc = testing.allocator;
-    try oni.testing.ensureInit();
-
-    var w: SlidingWindow = try .initWithOptions(alloc, .forward, "Boo!", .{
-        .case_sensitive = true,
-    });
+    const p = try testPattern(.{ .needle = "Boo!", .options = .{ .case_sensitive = true } });
+    defer p.destroy(alloc);
+    var w: SlidingWindow = try .initPattern(alloc, .forward, "Boo!", p);
     defer w.deinit();
 
     var s = try Screen.init(alloc, .{ .cols = 80, .rows = 24, .max_scrollback = 0 });
@@ -973,11 +965,9 @@ test "SlidingWindow non-regex regex engine prunes no-match pages" {
 
     const testing = std.testing;
     const alloc = testing.allocator;
-    try oni.testing.ensureInit();
-
-    var w: SlidingWindow = try .initWithOptions(alloc, .forward, "Needle", .{
-        .case_sensitive = true,
-    });
+    const p = try testPattern(.{ .needle = "Needle", .options = .{ .case_sensitive = true } });
+    defer p.destroy(alloc);
+    var w: SlidingWindow = try .initPattern(alloc, .forward, "Needle", p);
     defer w.deinit();
 
     var s = try Screen.init(alloc, .{ .cols = 20, .rows = 4, .max_scrollback = 1000 });
@@ -1002,11 +992,9 @@ test "SlidingWindow single append whole word" {
 
     const testing = std.testing;
     const alloc = testing.allocator;
-    try oni.testing.ensureInit();
-
-    var w: SlidingWindow = try .initWithOptions(alloc, .forward, "boo", .{
-        .whole_word = true,
-    });
+    const p = try testPattern(.{ .needle = "boo", .options = .{ .whole_word = true } });
+    defer p.destroy(alloc);
+    var w: SlidingWindow = try .initPattern(alloc, .forward, "boo", p);
     defer w.deinit();
 
     var s = try Screen.init(alloc, .{ .cols = 80, .rows = 24, .max_scrollback = 0 });
@@ -1035,11 +1023,9 @@ test "SlidingWindow whole word matches true page edge" {
 
     const testing = std.testing;
     const alloc = testing.allocator;
-    try oni.testing.ensureInit();
-
-    var w: SlidingWindow = try .initWithOptions(alloc, .forward, "boo", .{
-        .whole_word = true,
-    });
+    const p = try testPattern(.{ .needle = "boo", .options = .{ .whole_word = true } });
+    defer p.destroy(alloc);
+    var w: SlidingWindow = try .initPattern(alloc, .forward, "boo", p);
     defer w.deinit();
 
     var s = try Screen.init(alloc, .{ .cols = 80, .rows = 24, .max_scrollback = 1000 });
@@ -1072,11 +1058,9 @@ test "SlidingWindow whole word does not match synthetic page edge" {
 
     const testing = std.testing;
     const alloc = testing.allocator;
-    try oni.testing.ensureInit();
-
-    var w: SlidingWindow = try .initWithOptions(alloc, .forward, "boo", .{
-        .whole_word = true,
-    });
+    const p = try testPattern(.{ .needle = "boo", .options = .{ .whole_word = true } });
+    defer p.destroy(alloc);
+    var w: SlidingWindow = try .initPattern(alloc, .forward, "boo", p);
     defer w.deinit();
 
     var s = try Screen.init(alloc, .{ .cols = 80, .rows = 24, .max_scrollback = 1000 });
@@ -1102,11 +1086,9 @@ test "SlidingWindow whole-word literal retains full synthetic edge match" {
 
     const testing = std.testing;
     const alloc = testing.allocator;
-    try oni.testing.ensureInit();
-
-    var w: SlidingWindow = try .initWithOptions(alloc, .forward, "boo", .{
-        .whole_word = true,
-    });
+    const p = try testPattern(.{ .needle = "boo", .options = .{ .whole_word = true } });
+    defer p.destroy(alloc);
+    var w: SlidingWindow = try .initPattern(alloc, .forward, "boo", p);
     defer w.deinit();
 
     var s = try Screen.init(alloc, .{ .cols = 80, .rows = 24, .max_scrollback = 1000 });
@@ -1135,11 +1117,9 @@ test "SlidingWindow single append regex" {
 
     const testing = std.testing;
     const alloc = testing.allocator;
-    try oni.testing.ensureInit();
-
-    var w: SlidingWindow = try .initWithOptions(alloc, .forward, "b[o]{2}!", .{
-        .regex = true,
-    });
+    const p = try testPattern(.{ .needle = "b[o]{2}!", .options = .{ .regex = true } });
+    defer p.destroy(alloc);
+    var w: SlidingWindow = try .initPattern(alloc, .forward, "b[o]{2}!", p);
     defer w.deinit();
 
     var s = try Screen.init(alloc, .{ .cols = 80, .rows = 24, .max_scrollback = 0 });
@@ -1168,11 +1148,9 @@ test "SlidingWindow regex runtime error preserves window state" {
 
     const testing = std.testing;
     const alloc = testing.allocator;
-    try oni.testing.ensureInit();
-
-    var w: SlidingWindow = try .initWithOptions(alloc, .forward, "b[o]{2}!", .{
-        .regex = true,
-    });
+    const p = try testPattern(.{ .needle = "b[o]{2}!", .options = .{ .regex = true } });
+    defer p.destroy(alloc);
+    var w: SlidingWindow = try .initPattern(alloc, .forward, "b[o]{2}!", p);
     defer w.deinit();
 
     var s = try Screen.init(alloc, .{ .cols = 80, .rows = 24, .max_scrollback = 0 });
@@ -1199,11 +1177,9 @@ test "SlidingWindow regex no match preserves window state" {
 
     const testing = std.testing;
     const alloc = testing.allocator;
-    try oni.testing.ensureInit();
-
-    var w: SlidingWindow = try .initWithOptions(alloc, .forward, "boo!", .{
-        .regex = true,
-    });
+    const p = try testPattern(.{ .needle = "boo!", .options = .{ .regex = true } });
+    defer p.destroy(alloc);
+    var w: SlidingWindow = try .initPattern(alloc, .forward, "boo!", p);
     defer w.deinit();
 
     var s = try Screen.init(alloc, .{ .cols = 80, .rows = 24, .max_scrollback = 0 });
@@ -1225,11 +1201,9 @@ test "SlidingWindow regex no match defers pruning" {
 
     const testing = std.testing;
     const alloc = testing.allocator;
-    try oni.testing.ensureInit();
-
-    var w: SlidingWindow = try .initWithOptions(alloc, .forward, "b[o]{2}!", .{
-        .regex = true,
-    });
+    const p = try testPattern(.{ .needle = "b[o]{2}!", .options = .{ .regex = true } });
+    defer p.destroy(alloc);
+    var w: SlidingWindow = try .initPattern(alloc, .forward, "b[o]{2}!", p);
     defer w.deinit();
 
     var s = try Screen.init(alloc, .{ .cols = 80, .rows = 24, .max_scrollback = 1000 });
@@ -1257,11 +1231,9 @@ test "SlidingWindow regex no match keeps bounded suffix" {
 
     const testing = std.testing;
     const alloc = testing.allocator;
-    try oni.testing.ensureInit();
-
-    var w: SlidingWindow = try .initWithOptions(alloc, .forward, "y+z", .{
-        .regex = true,
-    });
+    const p = try testPattern(.{ .needle = "y+z", .options = .{ .regex = true } });
+    defer p.destroy(alloc);
+    var w: SlidingWindow = try .initPattern(alloc, .forward, "y+z", p);
     defer w.deinit();
 
     var s = try Screen.init(alloc, .{ .cols = 120, .rows = 24, .max_scrollback = 1000 });
@@ -1289,11 +1261,9 @@ test "SlidingWindow regex match can span more than literal overlap" {
 
     const testing = std.testing;
     const alloc = testing.allocator;
-    try oni.testing.ensureInit();
-
-    var w: SlidingWindow = try .initWithOptions(alloc, .forward, "startx+end", .{
-        .regex = true,
-    });
+    const p = try testPattern(.{ .needle = "startx+end", .options = .{ .regex = true } });
+    defer p.destroy(alloc);
+    var w: SlidingWindow = try .initPattern(alloc, .forward, "startx+end", p);
     defer w.deinit();
 
     var s = try Screen.init(alloc, .{ .cols = 20, .rows = 4, .max_scrollback = 1000 });
@@ -1323,11 +1293,9 @@ test "SlidingWindow reverse regex haystack preserves offset across circular spli
 
     const testing = std.testing;
     const alloc = testing.allocator;
-    try oni.testing.ensureInit();
-
-    var w: SlidingWindow = try .initWithOptions(alloc, .reverse, "abc", .{
-        .regex = true,
-    });
+    const p = try testPattern(.{ .needle = "abc", .options = .{ .regex = true } });
+    defer p.destroy(alloc);
+    var w: SlidingWindow = try .initPattern(alloc, .reverse, "abc", p);
     defer w.deinit();
 
     try w.data.ensureUnusedCapacity(alloc, 8);
@@ -1349,11 +1317,9 @@ test "SlidingWindow whole-word regex accepts hard newline page boundary" {
 
     const testing = std.testing;
     const alloc = testing.allocator;
-    try oni.testing.ensureInit();
-
-    var w: SlidingWindow = try .initWithOptions(alloc, .forward, "boo", .{
-        .whole_word = true,
-    });
+    const p = try testPattern(.{ .needle = "boo", .options = .{ .whole_word = true } });
+    defer p.destroy(alloc);
+    var w: SlidingWindow = try .initPattern(alloc, .forward, "boo", p);
     defer w.deinit();
 
     var s = try Screen.init(alloc, .{ .cols = 80, .rows = 24, .max_scrollback = 1000 });
@@ -1380,11 +1346,9 @@ test "SlidingWindow edge decision uses the page state captured at append" {
 
     const testing = std.testing;
     const alloc = testing.allocator;
-    try oni.testing.ensureInit();
-
-    var w: SlidingWindow = try .initWithOptions(alloc, .forward, "boo", .{
-        .whole_word = true,
-    });
+    const p = try testPattern(.{ .needle = "boo", .options = .{ .whole_word = true } });
+    defer p.destroy(alloc);
+    var w: SlidingWindow = try .initPattern(alloc, .forward, "boo", p);
     defer w.deinit();
 
     var s = try Screen.init(alloc, .{ .cols = 80, .rows = 24, .max_scrollback = 1000 });
@@ -1418,23 +1382,14 @@ test "SlidingWindow edge decision uses the page state captured at append" {
 }
 
 test "SlidingWindow reverse search works with non-default query options" {
+    if (comptime !build_options.oniguruma) return error.SkipZigTest;
+
     const testing = std.testing;
     const alloc = testing.allocator;
-    if (comptime !build_options.oniguruma) {
-        try testing.expectError(
-            error.UnsupportedQueryOptions,
-            SlidingWindow.initWithOptions(alloc, .reverse, "boo!", .{
-                .case_sensitive = true,
-            }),
-        );
-        return;
-    }
 
-    try oni.testing.ensureInit();
-
-    var w: SlidingWindow = try .initWithOptions(alloc, .reverse, "boo!", .{
-        .case_sensitive = true,
-    });
+    const p = try testPattern(.{ .needle = "boo!", .options = .{ .case_sensitive = true } });
+    defer p.destroy(alloc);
+    var w: SlidingWindow = try .initPattern(alloc, .reverse, "boo!", p);
     defer w.deinit();
 
     var s = try Screen.init(alloc, .{ .cols = 80, .rows = 24, .max_scrollback = 0 });
@@ -1461,11 +1416,9 @@ test "SlidingWindow reverse regex searches UTF-8 haystack in forward order" {
 
     const testing = std.testing;
     const alloc = testing.allocator;
-    try oni.testing.ensureInit();
-
-    var w: SlidingWindow = try .initWithOptions(alloc, .reverse, "caf.", .{
-        .regex = true,
-    });
+    const p = try testPattern(.{ .needle = "caf.", .options = .{ .regex = true } });
+    defer p.destroy(alloc);
+    var w: SlidingWindow = try .initPattern(alloc, .reverse, "caf.", p);
     defer w.deinit();
 
     var s = try Screen.init(alloc, .{ .cols = 80, .rows = 24, .max_scrollback = 0 });
