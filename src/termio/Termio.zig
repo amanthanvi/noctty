@@ -1250,7 +1250,7 @@ pub fn processOutput(self: *Termio, buf: []const u8) void {
         );
         // Record the wake before the lock lets the renderer see this state:
         // its follow-up leaves dirt to a recorded wake, and would otherwise
-        // draw it here and then again for the wake (`renderFollowupDecision`).
+        // draw it here and then again for the wake (`Pacer.followupDue`).
         if (should_render) self.renderer_state.noteWakeSource(.io_output);
         break :render .{
             .should_render = should_render,
@@ -1388,7 +1388,7 @@ fn processOutputLocked(self: *Termio, buf: []const u8) struct {
     };
 }
 
-fn shouldWakeRendererAfterOutput(
+pub fn shouldWakeRendererAfterOutput(
     had_render_work: bool,
     has_render_work: bool,
     queued_renderer_message: bool,

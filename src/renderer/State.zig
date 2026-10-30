@@ -141,15 +141,6 @@ pub fn wakePending(self: *const @This()) bool {
     return self.wake_sources.load(.acquire) != 0;
 }
 
-pub fn renderWakeupNotifiedRecently(self: *const @This(), window_ms: u64) bool {
-    const last = self.last_render_wakeup_notify_ns.load(.acquire);
-    if (last == 0) return false;
-
-    const now = monotonic.nowNs();
-    if (now < last) return false;
-    return now - last < window_ms * std.time.ns_per_ms;
-}
-
 /// Caller must hold `mutex`.
 pub fn noteProcessOutput(self: *@This(), byte_count: usize, tick_ms: u64) void {
     if (byte_count == 0) return;

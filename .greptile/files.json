@@ -80,6 +80,7 @@
         "src/apprt/win32/terminal_window.zig",
         "src/apprt/win32_power.zig",
         "src/os/monotonic.zig",
+        "build.zig.zon",
         "src/termio/Thread.zig",
         "src/Surface.zig"
       ]

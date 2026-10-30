@@ -59,6 +59,7 @@ a fork-owned feature. The current high-risk seams are:
 - `src/config/Config.zig`
 - `src/Surface.zig`
 - `src/renderer/Thread.zig`
+- `src/renderer/Pacer.zig` and its test adapter `src/renderer/pacer_sim.zig`
 - `src/renderer/generic.zig`
 - `src/termio/Termio.zig`
 - `src/termio/Exec.zig`
@@ -100,6 +101,13 @@ records a changed name, receiver or return type in its drift report. It
 also checks that `git grep -F '.data.resident' -- src` finds only Node's
 accessor bodies: the seal stops the old spellings, but a direct
 `node.data.resident` still compiles anywhere.
+
+Renderer scheduling is split in the fork: `Pacer.turn` decides when a frame
+updates, presents or waits and when the timers run, and `Thread.Frame` holds
+the mechanics (the mailbox drain, `updateFrame` and the present, the libxev
+timers). Adapt an upstream hunk that changes the render pass, its timers or
+the drain's timer arms in `src/renderer/Thread.zig` into one of those two;
+Thread's timer and wakeup callbacks stay one `turn` call each.
 
 The merge scope above decides which paths a window merges from upstream. It is
 not a reason to defer an upstream memory-safety fix (a use-after-free, double

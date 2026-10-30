@@ -403,7 +403,7 @@ pub fn noteFirstFrame(self: *Surface, event: first_frame.Event) void {
 
 pub fn requestFirstFrame(self: *Surface) void {
     // The renderer thread does no work at all while it believes the
-    // surface is invisible (`renderer.Pacer` gives it no interval), and
+    // surface is invisible (`Pacer.intervalMs` returns null), and
     // the occlusion state it was given was computed while the host window
     // was still hidden. Re-assert it before asking for a frame; both
     // `syncOcclusion` and `occlusionCallback` are no-ops when the state

@@ -12,7 +12,6 @@ const apprt = @import("../apprt.zig");
 const configpkg = @import("../config.zig");
 const BlockingQueue = @import("../datastruct/main.zig").BlockingQueue;
 const App = @import("../App.zig");
-const terminalpkg = @import("../terminal/main.zig");
 const terminal_render_dirty = @import("../terminal/render_dirty.zig");
 const Pacer = @import("Pacer.zig");
 
@@ -58,7 +57,6 @@ const darwin = if (builtin.os.tag.isDarwin()) struct {
 };
 
 const CURSOR_BLINK_INTERVAL = 600;
-const RENDER_FOLLOWUP_BURST_MS = 128;
 
 /// Whether calls to `drawFrame` must be done from the app thread.
 ///
@@ -97,17 +95,6 @@ stop_c: xev.Completion = .{},
 followup_h: xev.Timer,
 followup_c: xev.Completion = .{},
 followup_reset_c: xev.Completion = .{},
-render_followup_pending: bool = false,
-/// Absolute `pacingClockMs` time when the active render follow-up should fire.
-render_timer_due_ms: u64 = 0,
-present_pacer: PresentPacer = .{},
-/// Set when pacing deferred a frame update (`renderOnce` found the present
-/// slot taken) and cleared when one runs. The animation draw timer checks it:
-/// a draw-only tick that takes the slot would otherwise present stale frame
-/// data and push the deferred update out again, every interval (#297).
-frame_update_deferred: bool = false,
-/// Which passes present a frame synchronized output holds.
-held_frame: HeldFrame = .{},
 
 /// The timer used for draw calls. Draw calls don't update from the
 /// terminal state so they're much cheaper. They're used for animation
@@ -115,11 +102,6 @@ held_frame: HeldFrame = .{},
 draw_h: xev.Timer,
 draw_c: xev.Completion = .{},
 draw_reset_c: xev.Completion = .{},
-draw_active: bool = false,
-/// Absolute `pacingClockMs` time when the active draw timer should fire.
-/// This lets a focus or power-policy change shorten an already-queued slow
-/// interval.
-draw_timer_due_ms: u64 = 0,
 
 /// This async is used to force a draw immediately. This does not
 /// coalesce like the wakeup does. Only a display link notifies it, so it
@@ -159,8 +141,8 @@ app_mailbox: App.Mailbox,
 /// Configuration we need derived from the main config.
 config: DerivedConfig,
 
-/// Time and power for pacing, from the apprt when it has them.
-clock: Pacer.Clock,
+/// When this thread updates and presents frames, and arms its timers.
+pacer: Pacer,
 
 flags: packed struct {
     /// This is true when a blinking cursor should be visible and false
@@ -239,10 +221,10 @@ pub fn init(
     return .{
         .alloc = alloc,
         .config = .init(config),
-        .clock = if (@hasDecl(apprt.App, "renderer_pacing_clock"))
+        .pacer = .init(if (@hasDecl(apprt.App, "renderer_pacing_clock"))
             apprt.App.renderer_pacing_clock
         else
-            .monotonic,
+            .monotonic),
         .loop = loop,
         .wakeup = wakeup_h,
         .stop = stop_h,
@@ -329,9 +311,6 @@ fn threadMain_(self: *Thread) !void {
         self.armCursorTimerIfDead(cursorBlinkInterval());
     }
 
-    // Start the draw timer
-    self.syncDrawTimer();
-
     // Run
     log.debug("starting renderer thread", .{});
     defer log.debug("starting renderer thread shutdown", .{});
@@ -367,45 +346,6 @@ fn setQosClass(self: *const Thread) void {
     }
 }
 
-fn syncDrawTimer(self: *Thread) void {
-    const frame: Frame = .{ .t = self };
-    if (!self.flags.visible or frame.animation() == null) {
-        // We're skipping the draw timer. Stop it on the next iteration.
-        self.draw_active = false;
-        return;
-    }
-
-    // Set our active state so it knows we're running. We set this before
-    // even checking the active state in case we have a pending shutdown.
-    self.draw_active = true;
-
-    const delay_ms = self.nextDrawTimerDelayMs() orelse {
-        self.draw_active = false;
-        return;
-    };
-
-    if (self.draw_c.state() == .active) {
-        if (apprt.runtime != apprt.win32) return;
-
-        const now_ms = self.pacingClockMs();
-        if (!timerNeedsEarlierDeadline(now_ms, self.draw_timer_due_ms, delay_ms)) return;
-        frame.arm(.animation, delay_ms);
-        self.draw_timer_due_ms = now_ms +| delay_ms;
-        return;
-    }
-
-    // Start the timer which loops.
-    frame.arm(.animation, delay_ms);
-    if (apprt.runtime == apprt.win32) {
-        self.draw_timer_due_ms = self.pacingClockMs() +| delay_ms;
-    }
-}
-
-fn timerNeedsEarlierDeadline(now_ms: u64, due_ms: u64, next_delay_ms: u64) bool {
-    if (due_ms == 0) return true;
-    return next_delay_ms < due_ms -| now_ms;
-}
-
 /// Enqueue a message and wake the renderer to process it.
 ///
 /// The first notification lets the renderer make room if the mailbox is
@@ -436,8 +376,8 @@ fn notify(wakeup: *xev.Async) void {
     };
 }
 
-/// Drain the mailbox.
-fn drainMailbox(self: *Thread) !bool {
+/// Drain the mailbox, reporting in `changes` what pacing reads.
+fn drainMailbox(self: *Thread, changes: *std.EnumSet(Pacer.Change)) !void {
     // There's probably a more elegant way to do this...
     //
     // This is effectively an @autoreleasepool{} block, which we need in
@@ -445,11 +385,8 @@ fn drainMailbox(self: *Thread) !bool {
     const pool = darwin.beginAutoreleasePool();
     defer darwin.endAutoreleasePool(pool);
 
-    var handled_any = false;
     while (self.mailbox.pop()) |message| {
-        handled_any = true;
         log.debug("mailbox message={}", .{message});
-        self.held_frame.noteMessage(std.meta.activeTag(message));
         switch (message) {
             .crash => @panic("crash request, crashing intentionally"),
 
@@ -465,20 +402,13 @@ fn drainMailbox(self: *Thread) !bool {
 
                 // Becoming visible used to draw immediately here, on the
                 // assumption that frame data kept updating while hidden.
-                // It no longer does — hidden surfaces skip `updateFrame`
-                // entirely — so drawing now would present a stale frame AND
-                // start the throttle clock, deferring the real repaint by a
-                // full interval. `drainMailbox` is only ever called from
-                // `renderOnce`, which does `updateFrame` + `drawFrame` right
-                // after this, so the first visible frame is both fresh and
-                // immediate.
-                if (v) self.present_pacer = .{};
+                // It no longer does (hidden surfaces skip `updateFrame`), so
+                // the pacer's pass after this drain updates and presents at
+                // once, unpaced.
+                changes.insert(.visibility);
 
                 // Notify the renderer so it can update any state.
                 self.renderer.setVisible(v);
-
-                // Visibility changes can suppress or restart animation draws.
-                self.syncDrawTimer();
             },
 
             .focus => |v| focus: {
@@ -490,12 +420,10 @@ fn drainMailbox(self: *Thread) !bool {
 
                 // Focus affects our QoS class
                 self.setQosClass();
+                changes.insert(.focus);
 
                 // Set it on the renderer
                 try self.renderer.setFocus(v);
-
-                // We always resync our draw timer (may disable it)
-                self.syncDrawTimer();
 
                 if (!v) {
                     // Let an already-queued one-shot timer expire and disarm
@@ -514,7 +442,10 @@ fn drainMailbox(self: *Thread) !bool {
                 }
             },
 
-            .split_dimmed => |v| self.renderer.setSplitDimmed(v),
+            .split_dimmed => |v| {
+                self.renderer.setSplitDimmed(v);
+                changes.insert(.repaint);
+            },
 
             .reset_cursor_blink => {
                 self.flags.cursor_blink_visible = true;
@@ -535,11 +466,8 @@ fn drainMailbox(self: *Thread) !bool {
                 defer config.alloc.destroy(config.thread);
                 defer config.alloc.destroy(config.impl);
                 try self.changeConfig(config.thread);
+                changes.insert(.config);
                 try self.renderer.changeConfig(config.impl);
-
-                // Stop and start the draw timer to capture the new
-                // hasAnimations value.
-                self.syncDrawTimer();
             },
 
             .search_viewport_matches => |v| search: {
@@ -583,8 +511,6 @@ fn drainMailbox(self: *Thread) !bool {
             },
         }
     }
-
-    return handled_any;
 }
 
 fn changeConfig(self: *Thread, config: *const DerivedConfig) !void {
@@ -593,150 +519,6 @@ fn changeConfig(self: *Thread, config: *const DerivedConfig) !void {
 
 fn shouldAcceptSearchGeneration(self: *const Thread, generation: u64) bool {
     return self.search_generation.load(.acquire) == generation;
-}
-
-fn pacingClockMs(self: *const Thread) u64 {
-    return self.clock.now_ns(self.clock.ctx) / std.time.ns_per_ms;
-}
-
-fn minimumPresentIntervalMs(self: *const Thread) ?u64 {
-    if (apprt.runtime != apprt.win32) {
-        return if (self.flags.visible) Pacer.draw_interval_ms else null;
-    }
-    return Pacer.minimumPresentIntervalMs(
-        self.flags.focused,
-        self.flags.visible,
-        self.clock.saver(self.clock.ctx),
-        self.config.pacing,
-    );
-}
-
-fn presentWaitMs(self: *const Thread, interval_ms: u64) u64 {
-    return self.present_pacer.waitMs(self.pacingClockMs(), interval_ms);
-}
-
-fn nextPresentTimerDelayMs(self: *const Thread) ?u64 {
-    const interval_ms = self.minimumPresentIntervalMs() orelse return null;
-    const wait_ms = self.presentWaitMs(interval_ms);
-    return if (wait_ms > 0) wait_ms else interval_ms;
-}
-
-fn nextDrawTimerDelayMs(self: *const Thread) ?u64 {
-    const delay = self.nextPresentTimerDelayMs() orelse return null;
-    if (comptime @hasDecl(rendererpkg.Renderer, "hasPendingPresentation")) {
-        if (self.renderer.hasPendingPresentation()) return @max(250, delay);
-    }
-    return delay;
-}
-
-fn notePresentRequest(self: *Thread, interval_ms: u64) void {
-    self.present_pacer.take(self.pacingClockMs(), interval_ms);
-}
-
-/// When a throttled surface may present again. It takes the clock as an
-/// argument so the tests can drive it.
-const PresentPacer = struct {
-    /// Start of the present slot taken last, or 0 when the next present
-    /// need not wait.
-    slot_ms: u64 = 0,
-
-    /// How long a present must still wait. Intervals at or below
-    /// `Pacer.draw_interval_ms` are not paced.
-    fn waitMs(self: PresentPacer, now_ms: u64, interval_ms: u64) u64 {
-        if (interval_ms <= Pacer.draw_interval_ms or self.slot_ms == 0) return 0;
-        return interval_ms -| (now_ms -| self.slot_ms);
-    }
-
-    /// Take the slot for a present requested at `now_ms`. The timer that
-    /// wakes a throttled surface expires on a system tick (15.6 ms), so a
-    /// present can land most of a tick after its slot opened. Starting the
-    /// slot when it opened rather than when the present came keeps the
-    /// configured rate; without it every interval grew to the next tick, 34
-    /// to 47 ms. A present later than that (output that came late, idle)
-    /// starts a new cadence, so no catch-up burst follows it.
-    fn take(self: *PresentPacer, now_ms: u64, interval_ms: u64) void {
-        if (interval_ms <= Pacer.draw_interval_ms) {
-            self.slot_ms = 0;
-            return;
-        }
-        const late_ms = if (self.slot_ms == 0) 0 else now_ms -| (self.slot_ms +| interval_ms);
-        const credit = late_ms <= timer_tick_ms and late_ms < interval_ms;
-        self.slot_ms = if (credit) now_ms - late_ms else now_ms;
-    }
-
-    /// The default system timer tick, 15.625 ms, rounded up.
-    const timer_tick_ms = 16;
-};
-
-test "present pacer paces only throttled intervals" {
-    const testing = std.testing;
-
-    var pacer: PresentPacer = .{};
-    try testing.expectEqual(@as(u64, 0), pacer.waitMs(1000, 34));
-    pacer.take(1000, 34);
-    try testing.expectEqual(@as(u64, 24), pacer.waitMs(1010, 34));
-    try testing.expectEqual(@as(u64, 0), pacer.waitMs(1034, 34));
-
-    // A focused surface is not paced, and its presents leave no slot behind.
-    try testing.expectEqual(@as(u64, 0), pacer.waitMs(1010, Pacer.draw_interval_ms));
-    pacer.take(1010, Pacer.draw_interval_ms);
-    try testing.expectEqual(@as(u64, 0), pacer.waitMs(1011, 34));
-}
-
-test "present pacer keeps its rate when wakes land on the system tick" {
-    const testing = std.testing;
-
-    // Timer-driven presents (a deferred follow-up, a paced shader
-    // animation): xev's IOCP timer wakes on the first 15.625 ms system tick
-    // at or after its deadline, so each present lands up to a tick late.
-    const tick = struct {
-        fn atOrAfter(ms: u64) u64 {
-            const k = (ms * 1000 + 15624) / 15625;
-            return k * 15625 / 1000;
-        }
-    };
-
-    // 60, 50, 30 (the default and the saver's 34 ms), 20 and 15 fps.
-    for ([_]u64{ 17, 20, 34, 50, 67 }) |interval_ms| {
-        var pacer: PresentPacer = .{};
-        const start_ms: u64 = 1000;
-        var now_ms = start_ms;
-        pacer.take(now_ms, interval_ms);
-        var previous_ms = now_ms;
-        const presents = 300;
-        for (0..presents) |_| {
-            while (pacer.waitMs(now_ms, interval_ms) > 0) {
-                now_ms = tick.atOrAfter(now_ms + pacer.waitMs(now_ms, interval_ms));
-            }
-            pacer.take(now_ms, interval_ms);
-            // Credit for a late present never brings two in one tick.
-            try testing.expect(now_ms - previous_ms >= 15);
-            previous_ms = now_ms;
-        }
-
-        // The configured interval on average, not the next tick after it
-        // (34 ms measured from each present would be 46.875 ms, 17 ms 31.25).
-        const average_ms = (now_ms - start_ms) / presents;
-        try testing.expect(average_ms >= interval_ms - 1 and average_ms <= interval_ms);
-    }
-}
-
-test "present pacer credits only a timer tick of lateness" {
-    const testing = std.testing;
-
-    var pacer: PresentPacer = .{};
-    pacer.take(1000, 34);
-    // 10 ms late, as a tick-bound timer is: the next slot opens 34 ms
-    // after this one should have.
-    pacer.take(1044, 34);
-    try testing.expectEqual(@as(u64, 24), pacer.waitMs(1044, 34));
-    // More than a tick late (output came late): a full interval from now,
-    // so the next present cannot follow this one almost at once.
-    pacer.take(1088, 34);
-    try testing.expectEqual(@as(u64, 34), pacer.waitMs(1088, 34));
-    pacer.take(5000, 1000);
-    pacer.take(6999, 1000);
-    try testing.expectEqual(@as(u64, 1000), pacer.waitMs(6999, 1000));
 }
 
 /// Release a repaint reservation no paint will complete.
@@ -755,15 +537,6 @@ fn drawFrameWithReservation(self: *Thread, now: bool, repaint_reserved: bool) bo
     // health recovery cancels it.
     var reservation_held = repaint_reserved;
     defer if (reservation_held) self.cancelRepaintReservation();
-
-    const interval_ms = self.minimumPresentIntervalMs() orelse return false;
-
-    // `now` is upstream's forced path (`drawNowCallback`), which pacing does
-    // not apply to. Only a display link notifies `draw_now`, and the Win32
-    // renderer has none (`DisplayLink` is void), so on Win32 every draw is
-    // paced here, including the ones the apprt asks for with a wake when a
-    // WM_PAINT finds no frame reserved.
-    if (!now and self.presentWaitMs(interval_ms) > 0) return false;
 
     // If the renderer is managing a vsync on its own, we only draw
     // when we're forced to via `now`. Never true on Win32 (`hasVsync`).
@@ -788,7 +561,6 @@ fn drawFrameWithReservation(self: *Thread, now: bool, repaint_reserved: bool) bo
             self.cancelRepaintReservation();
             return false;
         }
-        self.notePresentRequest(interval_ms);
         return true;
     } else {
         // Not taken on Win32, which draws from the app thread. Nothing will
@@ -798,28 +570,7 @@ fn drawFrameWithReservation(self: *Thread, now: bool, repaint_reserved: bool) bo
             log.warn("error drawing err={}", .{err});
             return false;
         };
-        self.notePresentRequest(interval_ms);
         return true;
-    }
-}
-
-fn scheduleRenderFollowup(self: *Thread) void {
-    const delay_ms = self.nextPresentTimerDelayMs() orelse return;
-
-    if (self.render_followup_pending) {
-        if (apprt.runtime != apprt.win32) return;
-
-        const now_ms = self.pacingClockMs();
-        if (!timerNeedsEarlierDeadline(now_ms, self.render_timer_due_ms, delay_ms)) return;
-        (Frame{ .t = self }).arm(.followup, delay_ms);
-        self.render_timer_due_ms = now_ms +| delay_ms;
-        return;
-    }
-
-    self.render_followup_pending = true;
-    (Frame{ .t = self }).arm(.followup, delay_ms);
-    if (apprt.runtime == apprt.win32) {
-        self.render_timer_due_ms = self.pacingClockMs() +| delay_ms;
     }
 }
 
@@ -845,117 +596,37 @@ fn cursorShouldBlink(self: *Thread) bool {
     return self.state.terminal.modes.get(.cursor_blinking);
 }
 
-fn refreshRenderFollowupDeadline(self: *Thread) void {
-    if (apprt.runtime != apprt.win32 or !self.flags.visible) return;
-    self.state.noteRenderWakeupNotify();
-}
-
-fn renderFollowupWindowActive(self: *const Thread) bool {
-    if (apprt.runtime != apprt.win32 or !self.flags.visible) return false;
-    return self.state.renderWakeupNotifiedRecently(RENDER_FOLLOWUP_BURST_MS);
-}
-
-fn shouldContinueRenderFollowup(self: *Thread) bool {
-    if (apprt.runtime != apprt.win32 or !self.flags.visible) return false;
-
-    if (followupOwesFrameUpdate(self.frame_update_deferred, self.draw_active)) return true;
-    return (Frame{ .t = self }).screen().needs_frame;
-}
-
-/// What runs a render pass.
-const RenderPass = union(enum) {
-    /// A wake, with the sources it was asked for.
-    wake: u32,
-    /// The render follow-up timer.
-    followup,
-    /// The custom-shader draw timer, carrying a deferred frame update.
-    animation,
-};
-
-fn renderOnce(self: *Thread, pass: RenderPass) bool {
-    const frame: Frame = .{ .t = self };
-    const from_wakeup = pass == .wake;
-    self.held_frame.noteWake(pass);
-
-    // Drain mailbox work first so message-driven state changes are reflected
-    // in the same frame as terminal output wakes.
-    if (frame.drain().failed) return false;
-
-    // Invisible surfaces retain terminal state but do no renderer work. A
-    // throttled surface defers both updateFrame and presentation through the
-    // existing follow-up timer so background output cannot burn CPU at the
-    // uncapped wakeup rate.
-    const interval_ms = self.minimumPresentIntervalMs() orelse return false;
-    if (self.presentWaitMs(interval_ms) > 0) {
-        self.frame_update_deferred = true;
-        return true;
-    }
-
-    const present_held = self.held_frame.presents(pass, self.draw_active);
-    switch (frame.render(.{ .update = .{ .present_held = present_held } })) {
-        .coalesced => {},
-        .updated => |updated| {
-            // Synchronized output held the frame, so a present would show
-            // the same pixels again, once per follow-up until it ends.
-            // termio's 1 s reset always wakes the renderer, an ESU only when
-            // it brings dirt, so the update stays owed and the follow-up
-            // polls for a clean ESU.
-            self.frame_update_deferred = updated.held;
-            if (updated.held and !present_held) return true;
-            if (updated.presented) self.held_frame.notePresent();
-        },
-        .drawn => unreachable,
-    }
-
-    // On Win32, xev async wakes can coalesce while a render pass is still
-    // in flight. If terminal dirtiness reappeared during the pass, keep a
-    // short follow-up timer active so streaming output doesn't collapse to a
-    // fraction of the intended frame rate.
-    const keep_due_to_dirty = self.shouldContinueRenderFollowup();
-    if (from_wakeup and keep_due_to_dirty) self.refreshRenderFollowupDeadline();
-    return keep_due_to_dirty or self.renderFollowupWindowActive();
-}
-
-/// renderer.Thread's adapter for pacing: the mailbox drain, the terminal
-/// reads, the frame update and its present, the libxev timers and the
-/// self-wake.
+/// renderer.Thread's adapter at the pacer's frame seam (`Pacer.turn`): the
+/// mailbox drain, the terminal reads, the frame update and its present, and
+/// the libxev timers.
 const Frame = struct {
     t: *Thread,
 
-    const Timer = enum { followup, animation };
-
-    const Drained = struct { failed: bool = false };
-
-    /// The animation timer is wanted, presenting at most this often.
-    const AnimationWake = struct { delay_ms: u64 };
-
-    const Screen = struct { needs_frame: bool, wake_pending: bool };
-
-    const Render = union(enum) {
-        /// updateFrame, then present unless synchronized output held it
-        /// and !present_held.
-        update: struct { present_held: bool },
-        /// Present the current frame data without updating it.
-        draw: struct { forced: bool = false },
-    };
-
-    const Rendered = union(enum) {
-        /// A queued paint still holds the repaint reservation. Nothing ran.
-        coalesced,
-        updated: struct { held: bool, presented: bool },
-        drawn: struct { presented: bool },
-    };
-
-    fn drain(f: Frame) Drained {
-        _ = f.t.drainMailbox() catch |err| {
+    pub fn drain(f: Frame) Pacer.Drained {
+        var drained: Pacer.Drained = .{};
+        f.t.drainMailbox(&drained.changes) catch |err| {
             log.err("error draining mailbox err={}", .{err});
-            return .{ .failed = true };
+            drained.failed = true;
         };
-        return .{};
+        // A UI-thread backend requests presentation retries atomically,
+        // not through the bounded mailbox.
+        if (comptime @hasDecl(rendererpkg.Renderer, "hasPendingPresentation")) {
+            if (f.t.renderer.takePresentationPendingChanged()) drained.changes.insert(.presentation);
+        }
+        return drained;
+    }
+
+    pub fn inputs(f: Frame) Pacer.Inputs {
+        return .{
+            .focused = f.t.flags.focused,
+            .visible = f.t.flags.visible,
+            .config = f.t.config.pacing,
+            .notified_ns = f.t.state.last_render_wakeup_notify_ns.load(.acquire),
+        };
     }
 
     /// Takes State.mutex once.
-    fn screen(f: Frame) Screen {
+    pub fn screen(f: Frame) Pacer.Screen {
         const state = f.t.state;
         state.mutex.lock();
         defer state.mutex.unlock();
@@ -968,9 +639,11 @@ const Frame = struct {
     }
 
     /// Null when the animation timer is not wanted.
-    fn animation(f: Frame) ?AnimationWake {
+    pub fn animation(f: Frame) ?Pacer.AnimationWake {
         const t = f.t;
         if (comptime @hasDecl(rendererpkg.Renderer, "hasPendingPresentation")) {
+            // An occluded frame still needs a later Present(TEST), even with
+            // a steady cursor and no output: retry at 4 Hz.
             if (t.renderer.hasPendingPresentation()) return .{ .delay_ms = 250 };
         }
         // If our renderer supports animations and has them, then we
@@ -993,15 +666,8 @@ const Frame = struct {
 
     /// Owns the apprt repaint reservation: releases every one it does not
     /// hand to a queued paint.
-    fn render(f: Frame, request: Render) Rendered {
+    pub fn update(f: Frame, request: Pacer.Update) Pacer.UpdateResult {
         const t = f.t;
-        const present_held = switch (request) {
-            .draw => |draw| return .{ .drawn = .{
-                .presented = t.drawFrameWithReservation(draw.forced, false),
-            } },
-            .update => |update| update.present_held,
-        };
-
         var repaint_reserved = false;
         if (must_draw_from_app_thread and t.flags.visible and !t.renderer.hasVsync()) {
             if (comptime @hasDecl(apprt.Surface, "beginRendererFrameUpdate")) {
@@ -1019,13 +685,13 @@ const Frame = struct {
             log.warn("error rendering err={}", .{err});
             break :frame_update null;
         };
-        const cursor_blinking = if (frame_update) |update|
-            update.cursor_blinking
+        const cursor_blinking = if (frame_update) |done|
+            done.cursor_blinking
         else
             t.cursorShouldBlink();
-        if (frame_update) |update| {
+        if (frame_update) |done| {
             if (comptime @hasDecl(apprt.Surface, "noteRendererUpdateFrame")) {
-                t.surface.noteRendererUpdateFrame(update.output_progress, cursor_blinking);
+                t.surface.noteRendererUpdateFrame(done.output_progress, cursor_blinking);
             }
         }
         if (!cursor_blinking) t.flags.cursor_blink_visible = true;
@@ -1033,8 +699,8 @@ const Frame = struct {
             t.armCursorTimerIfDead(cursorBlinkInterval());
         }
 
-        const held = if (frame_update) |update| update.synchronized_output else false;
-        if (held and !present_held) {
+        const held = if (frame_update) |done| done.synchronized_output else false;
+        if (held and !request.present_held) {
             if (repaint_reserved) t.cancelRepaintReservation();
             return .{ .updated = .{ .held = true, .presented = false } };
         }
@@ -1047,20 +713,26 @@ const Frame = struct {
         } };
     }
 
+    /// Present the current frame data without updating it. Returns whether
+    /// a paint was queued.
+    pub fn draw(f: Frame) bool {
+        return f.t.drawFrameWithReservation(false, false);
+    }
+
     /// A dead completion runs; an active one is reset through its reset
     /// completion.
-    fn arm(f: Frame, timer: Timer, delay_ms: u64) void {
+    pub fn arm(f: Frame, timer: Pacer.Timer, delay_ms: u64) void {
         const t = f.t;
         switch (timer) {
-            .followup => runOrReset(t, &t.followup_h, &t.followup_c, &t.followup_reset_c, delay_ms, followupCallback),
-            .animation => runOrReset(t, &t.draw_h, &t.draw_c, &t.draw_reset_c, delay_ms, drawCallback),
+            .followup => runOrReset(t, &t.followup_h, &t.followup_c, &t.followup_reset_c, delay_ms, timerCallback(.followup)),
+            .animation => runOrReset(t, &t.draw_h, &t.draw_c, &t.draw_reset_c, delay_ms, timerCallback(.animation)),
         }
     }
 
     /// Record the source, then notify the wakeup async.
-    fn wake(f: Frame, source: rendererpkg.State.WakeSource) void {
+    pub fn wake(f: Frame, source: rendererpkg.State.WakeSource) void {
         f.t.state.noteWakeSource(source);
-        f.t.wakeup.notify() catch {};
+        notify(&f.t.wakeup);
     }
 };
 
@@ -1104,14 +776,7 @@ fn wakeupCallback(
     if (comptime @hasDecl(apprt.Surface, "noteRendererWakeupCallback")) {
         t.surface.noteRendererWakeupCallback(wake_sources);
     }
-    if (t.renderOnce(.{ .wake = wake_sources })) {
-        t.scheduleRenderFollowup();
-    }
-    // A UI-thread backend atomically requests presentation retries. Reconcile
-    // after every wake rather than relying on room in the bounded mailbox.
-    if (comptime @hasDecl(rendererpkg.Renderer, "hasPendingPresentation")) {
-        if (t.renderer.takePresentationPendingChanged()) t.syncDrawTimer();
-    }
+    t.pacer.turn(.{ .wake = wake_sources }, Frame{ .t = t });
 
     return .rearm;
 }
@@ -1127,259 +792,43 @@ fn drawNowCallback(
         return .rearm;
     };
 
-    // Draw immediately
-    const t = self_.?;
-    _ = (Frame{ .t = t }).render(.{ .draw = .{ .forced = true } });
+    // Draw immediately, outside the pacer. Only a display link notifies
+    // draw_now, and Win32 has none (renderer.md 2026-10-15 PKG-37 (3)).
+    _ = self_.?.drawFrameWithReservation(true, false);
 
     return .rearm;
 }
 
-fn drawCallback(
-    self_: ?*Thread,
-    _: *xev.Loop,
-    _: *xev.Completion,
-    r: xev.Timer.RunError!void,
-) xev.CallbackAction {
-    _ = r catch |err| switch (err) {
-        // `Timer.reset` cancels the previous completion before rearming it.
-        // The replacement timer is already scheduled; this callback belongs
-        // only to the canceled run.
-        error.Canceled => return .disarm,
-        else => unreachable,
-    };
-    const t: *Thread = self_ orelse {
-        // This shouldn't happen so we log it.
-        log.warn("render callback fired without data set", .{});
-        return .disarm;
-    };
-    const frame: Frame = .{ .t = t };
-    t.draw_timer_due_ms = 0;
-
-    // Draw. When pacing has deferred a frame update, this tick carries it
-    // instead: both paths share one present slot per interval, and a
-    // draw-only tick would keep the slot while presenting stale frame data.
-    if (t.frame_update_deferred) {
-        if (t.renderOnce(.animation)) t.scheduleRenderFollowup();
-    } else {
-        _ = frame.render(.{ .draw = .{} });
-    }
-
-    // Only continue if we're still active. `renderOnce` drains the mailbox,
-    // and a focus, visibility or config message there runs `syncDrawTimer`,
-    // which may already have re-armed this (dead) completion. Running it a
-    // second time would corrupt libxev's timer queue.
-    if (t.draw_active and t.draw_c.state() == .dead) {
-        if (t.nextDrawTimerDelayMs()) |delay_ms| {
-            frame.arm(.animation, delay_ms);
-            if (apprt.runtime == apprt.win32) {
-                t.draw_timer_due_ms = t.pacingClockMs() +| delay_ms;
+/// A follow-up or animation run: one `turn`. A run that error.Canceled
+/// ends is still a run (`Pacer.Trigger.due`). On IOCP a Timer.reset re-adds
+/// its completion without a callback, so a Canceled means a cancel dropped
+/// this completion and nothing else is armed for it. A reset does that when
+/// it lands in the pass its timer falls due in (libxev measures a deadline
+/// from the pass start, the pacer from its clock, so a long turn arms one
+/// earlier than the pacer counts): the timer still runs on its old
+/// deadline, its turn runs the completion again, and the reset's cancel
+/// drops that run on the next tick. Dropping the Canceled left the pacer's
+/// deadline pending for good, and the timer never ran again.
+fn timerCallback(comptime timer: Pacer.Timer) TimerCallback {
+    return struct {
+        fn callback(
+            self_: ?*Thread,
+            _: *xev.Loop,
+            _: *xev.Completion,
+            r: xev.Timer.RunError!void,
+        ) xev.CallbackAction {
+            _ = r catch |err| switch (err) {
+                error.Canceled => {},
+                else => unreachable,
+            };
+            const t = self_.?;
+            if (comptime timer == .followup and @hasDecl(apprt.Surface, "noteRendererFollowupCallback")) {
+                t.surface.noteRendererFollowupCallback();
             }
-        } else {
-            t.draw_active = false;
+            t.pacer.turn(.{ .due = timer }, Frame{ .t = t });
+            return .disarm;
         }
-    }
-
-    return .disarm;
-}
-
-test "draw timer shortens an active slow interval" {
-    try std.testing.expect(timerNeedsEarlierDeadline(100, 1100, 8));
-    try std.testing.expect(!timerNeedsEarlierDeadline(1095, 1100, 8));
-    try std.testing.expect(!timerNeedsEarlierDeadline(100, 108, 8));
-    try std.testing.expect(timerNeedsEarlierDeadline(100, 0, 8));
-}
-
-test "render follow-up timer shortens an active slow interval" {
-    // A focus/config change from 1 fps to focused cadence must replace the
-    // pending one-second follow-up with an 8 ms deadline.
-    try std.testing.expect(timerNeedsEarlierDeadline(200, 1200, Pacer.draw_interval_ms));
-    // Never postpone an already-earlier follow-up or reset an equal deadline.
-    try std.testing.expect(!timerNeedsEarlierDeadline(200, 208, 1000));
-    try std.testing.expect(!timerNeedsEarlierDeadline(200, 208, Pacer.draw_interval_ms));
-}
-
-fn followupCallback(
-    self_: ?*Thread,
-    _: *xev.Loop,
-    _: *xev.Completion,
-    r: xev.Timer.RunError!void,
-) xev.CallbackAction {
-    _ = r catch |err| switch (err) {
-        // A reset has already armed the replacement follow-up. Leave its
-        // pending flag and deadline intact when the canceled run reports back.
-        error.Canceled => return .disarm,
-        else => unreachable,
-    };
-    const t: *Thread = self_ orelse {
-        // This shouldn't happen so we log it.
-        log.warn("render callback fired without data set", .{});
-        return .disarm;
-    };
-    t.render_followup_pending = false;
-    t.render_timer_due_ms = 0;
-    if (comptime @hasDecl(apprt.Surface, "noteRendererFollowupCallback")) {
-        t.surface.noteRendererFollowupCallback();
-    }
-    switch (renderFollowupDecision(
-        t.shouldContinueRenderFollowup(),
-        t.renderFollowupWindowActive(),
-        t.state.wakePending(),
-    )) {
-        .render => if (t.renderOnce(.followup)) t.scheduleRenderFollowup(),
-        .poll => t.scheduleRenderFollowup(),
-        .stop => {},
-    }
-
-    return .disarm;
-}
-
-const RenderFollowupDecision = enum { stop, poll, render };
-
-/// `wake_pending`: a wake has been asked for and its callback has not run
-/// yet. The loop runs a due follow-up timer before that callback, so output
-/// that both made the terminal dirty and asked for the wake reaches the
-/// timer first. The wake renders it; if the timer did too, the wake would
-/// find the paint slot taken and present the same frame again after it.
-fn renderFollowupDecision(dirty: bool, window_active: bool, wake_pending: bool) RenderFollowupDecision {
-    if (dirty and !wake_pending) return .render;
-    if (dirty or window_active) return .poll;
-    return .stop;
-}
-
-/// A frame update pacing put off is still owed, dirt or not (a search
-/// highlight, a config change, a scroll to the bottom, a blink). The
-/// custom-shader draw timer carries it while it runs (#297); without it
-/// only the follow-up will.
-fn followupOwesFrameUpdate(deferred: bool, draw_active: bool) bool {
-    return deferred and !draw_active;
-}
-
-/// Which render passes present a frame synchronized output holds: the
-/// custom-shader draw timer's, which animates over it, and any pass while
-/// the apprt is owed pixels.
-const HeldFrame = struct {
-    /// The apprt woke the renderer because a window needs its pixels drawn
-    /// (`wakeNeedsPixels`) and no present was queued since. A WM_PAINT that
-    /// finds no frame reserved draws nothing itself, so without this an
-    /// exposed or newly shown pane stays blank until the hold ends. It
-    /// outlives a pass pacing puts off, so the follow-up that runs the
-    /// deferred update presents for it.
-    repaint_owed: bool = false,
-
-    fn noteWake(self: *HeldFrame, pass: RenderPass) void {
-        switch (pass) {
-            .wake => |sources| if (wakeNeedsPixels(sources)) {
-                self.repaint_owed = true;
-            },
-            .followup, .animation => {},
-        }
-    }
-
-    /// A mailbox message that changes what the frame shows by itself (a
-    /// split's dim): the terminal holding its output does not hold that
-    /// back, and the message's wake alone does not present a held frame.
-    fn noteMessage(self: *HeldFrame, message: std.meta.Tag(rendererpkg.Message)) void {
-        if (message == .split_dimmed) self.repaint_owed = true;
-    }
-
-    fn presents(self: HeldFrame, pass: RenderPass, draw_active: bool) bool {
-        return self.repaint_owed or (pass == .animation and draw_active);
-    }
-
-    fn notePresent(self: *HeldFrame) void {
-        self.repaint_owed = false;
-    }
-};
-
-/// Wakes from the apprt for a window that needs its pixels drawn again
-/// (exposed, newly shown, resized, recovering): a frame synchronized output
-/// holds is presented anyway for these.
-fn wakeNeedsPixels(wake_sources: u32) bool {
-    const Source = rendererpkg.State.WakeSource;
-    const pixels = Source.apprt_paint_retry.bit() |
-        Source.apprt_first_show.bit() |
-        Source.apprt_resize_settle.bit() |
-        Source.apprt_health_recovery.bit();
-    return wake_sources & pixels != 0;
-}
-
-test "render follow-up carries a deferred update unless the shader timer does" {
-    const testing = std.testing;
-
-    // A throttled surface whose only change is renderer-side: nothing is
-    // dirty, so only the owed update keeps the follow-up rendering.
-    try testing.expect(followupOwesFrameUpdate(true, false));
-    try testing.expectEqual(RenderFollowupDecision.render, renderFollowupDecision(followupOwesFrameUpdate(true, false), false, false));
-    // The draw timer runs renderOnce for it; the follow-up would re-defer
-    // at every slot the timer took.
-    try testing.expect(!followupOwesFrameUpdate(true, true));
-    try testing.expect(!followupOwesFrameUpdate(false, false));
-}
-
-test "a frame synchronized output holds is presented only for animation and owed repaints" {
-    const testing = std.testing;
-    const Source = rendererpkg.State.WakeSource;
-
-    var held: HeldFrame = .{};
-    // Output, a blink or the follow-up: the held frame is not presented.
-    held.noteWake(.{ .wake = Source.io_output.bit() | Source.cursor_blink.bit() });
-    try testing.expect(!held.presents(.{ .wake = Source.io_output.bit() }, false));
-    try testing.expect(!held.presents(.followup, false));
-    // The shader draw timer's pass animates over it, but not once the
-    // timer has stopped (focus left a `custom-shader-animation = true` pane).
-    try testing.expect(held.presents(.animation, true));
-    try testing.expect(!held.presents(.animation, false));
-    // A follow-up while the draw timer runs does not present it twice.
-    try testing.expect(!held.presents(.followup, true));
-
-    // An expose: its wake's pass is put off by pacing, so the repaint stays
-    // owed and the follow-up that runs next presents the held frame.
-    held.noteWake(.{ .wake = Source.apprt_paint_retry.bit() });
-    try testing.expect(held.presents(.followup, false));
-    held.noteWake(.followup);
-    try testing.expect(held.presents(.followup, false));
-    held.notePresent();
-    try testing.expect(!held.presents(.followup, false));
-}
-
-test "a split dim change presents a frame synchronized output holds" {
-    const testing = std.testing;
-    const Source = rendererpkg.State.WakeSource;
-
-    // The change arrives as a mailbox message, whose wake alone does not
-    // present a held frame; the message makes the pass present it. Messages
-    // that change no pixels the renderer draws by itself do not.
-    var held: HeldFrame = .{};
-    held.noteWake(.{ .wake = Source.mailbox.bit() });
-    try testing.expect(!held.presents(.{ .wake = Source.mailbox.bit() }, false));
-    held.noteMessage(.focus);
-    held.noteMessage(.visible);
-    held.noteMessage(.reset_cursor_blink);
-    try testing.expect(!held.presents(.{ .wake = Source.mailbox.bit() }, false));
-    held.noteMessage(std.meta.activeTag(rendererpkg.Message{ .split_dimmed = true }));
-    try testing.expect(held.presents(.{ .wake = Source.mailbox.bit() }, false));
-    // Pacing put the pass off: the follow-up that runs it presents.
-    try testing.expect(held.presents(.followup, false));
-    held.notePresent();
-    try testing.expect(!held.presents(.followup, false));
-}
-
-test "only apprt repaint wakes present a frame synchronized output holds" {
-    const testing = std.testing;
-    const Source = rendererpkg.State.WakeSource;
-
-    try testing.expect(!wakeNeedsPixels(0));
-    try testing.expect(!wakeNeedsPixels(Source.io_output.bit() | Source.mailbox.bit()));
-    try testing.expect(!wakeNeedsPixels(Source.cursor_blink.bit() | Source.core_surface.bit()));
-    // A paint completing behind a newer frame is the renderer's own retry,
-    // and a paint request folded into a pending one forces that paint,
-    // whose WM_PAINT asks again (`apprt_paint_retry`) if it has no frame.
-    try testing.expect(!wakeNeedsPixels(Source.apprt_repaint_retry.bit()));
-    try testing.expect(!wakeNeedsPixels(Source.apprt_paint_pending.bit()));
-    try testing.expect(wakeNeedsPixels(Source.apprt_paint_retry.bit()));
-    try testing.expect(wakeNeedsPixels(Source.io_output.bit() | Source.apprt_first_show.bit()));
-    try testing.expect(wakeNeedsPixels(Source.apprt_resize_settle.bit()));
-    try testing.expect(wakeNeedsPixels(Source.apprt_health_recovery.bit()));
+    }.callback;
 }
 
 fn cursorTimerCallback(
@@ -1553,45 +1002,61 @@ test "cursor blink timer disarms for a steady cursor" {
     );
 }
 
-test "render followup does not redraw a clean terminal" {
-    const testing = std.testing;
+test "a timer reset in the pass it falls due loses the run its callback arms next, as Canceled" {
+    // What timerCallback relies on (libxev IOCP: tick, timer_reset,
+    // process_cancellations, submit). B is due in the same pass as A, and
+    // A's callback resets it: the reset only queues a cancel, so B still
+    // runs on its old deadline. B's callback runs B again, as its turn arms
+    // it, and on the next tick the queued cancel drops that run, reported
+    // as error.Canceled. The completion is then dead and runs again.
+    const Probe = struct {
+        a: xev.Timer,
+        b: xev.Timer,
+        a_c: xev.Completion = .{},
+        b_c: xev.Completion = .{},
+        b_reset_c: xev.Completion = .{},
+        seen: [3]u8 = undefined,
+        len: usize = 0,
 
-    try testing.expectEqual(RenderFollowupDecision.poll, renderFollowupDecision(false, true, false));
-    try testing.expectEqual(RenderFollowupDecision.render, renderFollowupDecision(true, true, false));
-    try testing.expectEqual(RenderFollowupDecision.stop, renderFollowupDecision(false, false, false));
-}
+        fn onA(
+            self_: ?*@This(),
+            loop: *xev.Loop,
+            _: *xev.Completion,
+            r: xev.Timer.RunError!void,
+        ) xev.CallbackAction {
+            _ = r catch unreachable;
+            const self = self_.?;
+            self.b.reset(loop, &self.b_c, &self.b_reset_c, 1, @This(), self, onB);
+            return .disarm;
+        }
 
-test "render followup leaves dirt to a wake already on its way" {
-    const testing = std.testing;
+        fn onB(
+            self_: ?*@This(),
+            loop: *xev.Loop,
+            _: *xev.Completion,
+            r: xev.Timer.RunError!void,
+        ) xev.CallbackAction {
+            const self = self_.?;
+            self.seen[self.len] = if (r) |_| 'R' else |err| switch (err) {
+                error.Canceled => 'C',
+                else => unreachable,
+            };
+            self.len += 1;
+            if (self.len < self.seen.len) self.b.run(loop, &self.b_c, 1, @This(), self, onB);
+            return .disarm;
+        }
+    };
 
-    try testing.expectEqual(RenderFollowupDecision.render, renderFollowupDecision(true, false, false));
-    try testing.expectEqual(RenderFollowupDecision.poll, renderFollowupDecision(true, true, true));
-    try testing.expectEqual(RenderFollowupDecision.poll, renderFollowupDecision(true, false, true));
-    try testing.expectEqual(RenderFollowupDecision.poll, renderFollowupDecision(false, true, true));
-    try testing.expectEqual(RenderFollowupDecision.stop, renderFollowupDecision(false, false, true));
-}
-
-test "renderer follow-up check tracks visible terminal dirtiness" {
-    const testing = std.testing;
-
-    var term = try terminalpkg.Terminal.init(testing.allocator, .{
-        .cols = 4,
-        .rows = 3,
-    });
-    defer term.deinit(testing.allocator);
-
-    try testing.expect(!terminal_render_dirty.needsRendererWake(&term));
-
-    term.flags.dirty.palette = true;
-    try testing.expect(terminal_render_dirty.needsRendererWake(&term));
-    term.flags.dirty = .{};
-
-    term.screens.active.kitty_images.dirty = true;
-    try testing.expect(terminal_render_dirty.needsRendererWake(&term));
-    term.screens.active.kitty_images.dirty = false;
-
-    try term.printString("x");
-    try testing.expect(terminal_render_dirty.needsRendererWake(&term));
+    var loop = try xev.Loop.init(.{});
+    defer loop.deinit();
+    var probe: Probe = .{ .a = try xev.Timer.init(), .b = try xev.Timer.init() };
+    defer probe.a.deinit();
+    defer probe.b.deinit();
+    probe.a.run(&loop, &probe.a_c, 1, Probe, &probe, Probe.onA);
+    probe.b.run(&loop, &probe.b_c, 2, Probe, &probe, Probe.onB);
+    std.Thread.sleep(20 * std.time.ns_per_ms);
+    try loop.run(.until_done);
+    try std.testing.expectEqualStrings("RCR", probe.seen[0..probe.len]);
 }
 
 test "send wakes the renderer before waiting on a full mailbox" {

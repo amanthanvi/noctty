@@ -194,7 +194,7 @@ Invoke-ContractTable -Contracts @(
     @{
         File = "$rendererGeneric + src\renderer\Thread.zig :: renderer frame activity"
         Content = { $rendererGenericText + "`n" + (Get-Content -LiteralPath (Join-Path $repoRoot 'src\renderer\Thread.zig') -Raw) }
-        Pattern = '(?s)output_progress\s*=\s*null.*?\.output_progress\s*=\s*output_progress.*?noteRendererUpdateFrame\(update\.output_progress, cursor_blinking\)'
+        Pattern = '(?s)output_progress\s*=\s*null.*?\.output_progress\s*=\s*output_progress.*?noteRendererUpdateFrame\(done\.output_progress, cursor_blinking\)'
         Kind = 'Text'
         Description = 'completed frame updates remain observable even when output provenance is intentionally unavailable'
     }

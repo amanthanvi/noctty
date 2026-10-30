@@ -71,6 +71,7 @@ test {
     _ = shadertoy;
     _ = size;
     _ = Pacer;
+    _ = @import("renderer/pacer_sim.zig");
     _ = Thread;
     _ = State;
 }

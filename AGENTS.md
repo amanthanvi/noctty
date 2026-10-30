@@ -216,15 +216,21 @@ that govern each symbol you change, or that none does.
 - [renderer.md](docs/agents/log/renderer.md): `src/renderer/` and
   `src/renderer.zig` (OpenGL/WGL,
   the D3D11 beta and GL-to-D3D11 fallback, who frees the config of a failed
-  `Renderer.init` in core `Surface.init`, `Thread.zig` pacing and follow-up
-  timers, synchronized output, vsync, `RenderPass` viewport, cursor sprites,
+  `Renderer.init` in core `Surface.init`, frame pacing and its timers in
+  `Pacer.zig` (`Pacer.turn`, `Pacer.Clock`, the port `Thread.Frame`, the
+  test adapter `pacer_sim.zig`), `win32_power.renderer_clock` and the
+  pacing timebase `src/os/monotonic.zig` (also the wake-notify stamp
+  `State.last_render_wakeup_notify_ns`),
+  synchronized output, vsync, `RenderPass` viewport, cursor sprites,
   search highlights after a resize, the IME preedit and composition caret in
   `rebuildCells` and `State.Preedit.layout`, the glyph options `addGlyph` and
   `addPreeditCell` pass), the unfocused-split dim
   (`split_dim`, `Host.syncSplitDim`), `win32/pixel_format.zig`, Windows font
   discovery (`src/font/discovery_windows.zig`: the registry scan, variable
   `wght` bounds, bold matching), font fallback and `font-thicken`, renderer
-  wakeups from `termio` and typing latency, repaint during live resize
+  wakeups from `termio` and typing latency, the libxev IOCP timers the
+  renderer arms (`Thread.timerCallback`, a `Canceled` run, the libxev pin in
+  `build.zig.zon`), repaint during live resize
   (`win32/surface_presentation.zig`), and which DLLs a CLI action or the D3D11
   backend loads (the OpenGL32 static import).
 - [window-frame.md](docs/agents/log/window-frame.md): the top-level window:
@@ -392,7 +398,11 @@ that govern each symbol you change, or that none does.
 - [test-harnesses.md](docs/agents/log/test-harnesses.md): writing or running
   `test/windows/` harnesses (hidden desktops, the foreground, sandboxes, the
   interactive composite, the flagship contracts, the renderer parity harness
-  `test/windows/renderer/Invoke-RendererParity.ps1`), CI test steps (the raw
+  `test/windows/renderer/Invoke-RendererParity.ps1`, `bench-windows.ps1`'s
+  `ForceForeground` and render-trace snapshots, transient captures (a banner,
+  the overlay scrollbar) in the visible check `Invoke-VisibleD3D11Check.ps1`,
+  the PKG-37, LAT-01 and LAT-02 measurement harnesses on the
+  `origin/*-measurement-harness` branches), CI test steps (the raw
   `zig test src/apprt/win32_compositor_native.zig` step, which confines
   `win32/sys.zig`'s imports to `src/apprt`), the Zig
   test runner's probe children and thread tests (`src/pty_transport_probe.zig`,
