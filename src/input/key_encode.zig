@@ -533,6 +533,15 @@ fn legacy(
                     break :pc_style;
                 },
             }
+
+            // The normal keypad row (upstream #14145) is the character a US
+            // layout types, but another layout can type something else
+            // there: the numpad decimal types ',' on German. On the ConPTY
+            // path the layout's text goes out, as before that row existed.
+            // A numpad key without text (Ctrl, an Alt-code digit) still
+            // takes the row, and application keypad rows start with ESC.
+            if (windows_legacy and event.key.keypad() and
+                sequence[0] != 0x1b and !isControlUtf8(event.utf8)) break :pc_style;
         }
 
         // ConPTY cannot decode the CSI 27 modifier forms for these keys.
@@ -2215,6 +2224,28 @@ test "legacy: esc with utf8 (dead key state)" {
     try testing.expectEqualStrings("A", writer.buffered());
 }
 
+test "legacy: alt+escape with modify other state 2" {
+    var buf: [128]u8 = undefined;
+
+    {
+        var writer: std.Io.Writer = .fixed(&buf);
+        try legacy(&writer, .{
+            .key = .escape,
+            .mods = .{ .alt = true },
+        }, .{});
+        try testing.expectEqualStrings("\x1b\x1b", writer.buffered());
+    }
+
+    {
+        var writer: std.Io.Writer = .fixed(&buf);
+        try legacy(&writer, .{
+            .key = .escape,
+            .mods = .{ .alt = true },
+        }, .{ .modify_other_keys_state_2 = true });
+        try testing.expectEqualStrings("\x1b[27;3;27~", writer.buffered());
+    }
+}
+
 test "legacy: Windows console control table" {
     if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
     const cases = [_]struct { input: key.Key, text: []const u8, output: []const u8 }{
@@ -2496,6 +2527,37 @@ test "legacy: Windows console F13 through F24 aliases shifted function keys" {
     writer = .fixed(&buf);
     try encode(&writer, .{ .key = .f24, .mods = .{ .ctrl = true, .alt = true } }, .{ .windows_legacy = true });
     try testing.expectEqualStrings("\x1b[24;8~", writer.buffered());
+}
+
+test "legacy: Windows console modified numpad keys and the Menu key use the shared table" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    // An Alt-code digit reaches the encoder with no text. The normal keypad
+    // row sends a modified numpad key's own character, so Alt-code entry
+    // sends its digits bare where it sent ESC and each digit. A numpad key
+    // with text sends the layout's text, not the row's US character: the
+    // numpad decimal types ',' on German. The Menu key is CSI 29~, F16's
+    // distinct code, which PKG-15 saw ConPTY drop.
+    const cases = [_]struct { event: key.KeyEvent, output: []const u8 }{
+        .{ .event = .{ .key = .numpad_1, .mods = .{ .ctrl = true }, .unshifted_codepoint = '1' }, .output = "1" },
+        .{ .event = .{ .key = .numpad_1, .mods = .{ .alt = true }, .unshifted_codepoint = '1' }, .output = "1" },
+        .{ .event = .{ .key = .numpad_add, .mods = .{ .alt = true }, .unshifted_codepoint = '+' }, .output = "+" },
+        .{ .event = .{ .key = .numpad_decimal, .utf8 = ",", .unshifted_codepoint = ',' }, .output = "," },
+        .{ .event = .{ .key = .numpad_decimal, .utf8 = ".", .unshifted_codepoint = '.' }, .output = "." },
+        .{ .event = .{ .key = .numpad_7, .utf8 = "7", .unshifted_codepoint = '7' }, .output = "7" },
+        .{ .event = .{ .key = .context_menu }, .output = "\x1b[29~" },
+        .{ .event = .{ .key = .context_menu, .mods = .{ .shift = true } }, .output = "\x1b[29;2~" },
+    };
+    for (cases) |case| {
+        var buf: [128]u8 = undefined;
+        var writer: std.Io.Writer = .fixed(&buf);
+        try encode(&writer, case.event, .{ .windows_legacy = true, .alt_esc_prefix = true });
+        try testing.expectEqualStrings(case.output, writer.buffered());
+    }
+    // Application keypad mode keeps its sequence over the layout's text.
+    var buf: [128]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buf);
+    try encode(&writer, .{ .key = .numpad_decimal, .utf8 = ",", .unshifted_codepoint = ',' }, .{ .windows_legacy = true, .keypad_key_application = true });
+    try testing.expectEqualStrings("\x1bOn", writer.buffered());
 }
 
 test "legacy: ctrl+shift+minus (underscore on US)" {
@@ -2860,6 +2922,35 @@ test "legacy: keypad 1" {
     try testing.expectEqualStrings("1", writer.buffered());
 }
 
+test "legacy: keypad 1 with modify other state 2" {
+    var buf: [128]u8 = undefined;
+
+    {
+        var writer: std.Io.Writer = .fixed(&buf);
+        try legacy(&writer, .{
+            .key = .numpad_1,
+            .mods = .{ .ctrl = true },
+            .utf8 = "1",
+        }, .{
+            .modify_other_keys_state_2 = true,
+        });
+        try testing.expectEqualStrings("1", writer.buffered());
+    }
+
+    {
+        var writer: std.Io.Writer = .fixed(&buf);
+        try legacy(&writer, .{
+            .key = .numpad_1,
+            .mods = .{ .ctrl = true },
+            .utf8 = "1",
+        }, .{
+            .keypad_key_application = true,
+            .modify_other_keys_state_2 = true,
+        });
+        try testing.expectEqualStrings("\x1bO5q", writer.buffered());
+    }
+}
+
 test "legacy: keypad 1 with application keypad" {
     var buf: [128]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buf);
@@ -2959,6 +3050,91 @@ test "legacy: f1" {
             .consumed_mods = .{},
         }, .{});
         try testing.expectEqualStrings("\x1b[15;5~", writer.buffered());
+    }
+}
+
+test "legacy: f13 through f25" {
+    const Case = struct { key: key.Key, code: u8 };
+    const cases = [_]Case{
+        .{ .key = .f13, .code = 25 },
+        .{ .key = .f14, .code = 26 },
+        .{ .key = .f15, .code = 28 },
+        .{ .key = .f16, .code = 29 },
+        .{ .key = .f17, .code = 31 },
+        .{ .key = .f18, .code = 32 },
+        .{ .key = .f19, .code = 33 },
+        .{ .key = .f20, .code = 34 },
+        .{ .key = .f21, .code = 42 },
+        .{ .key = .f22, .code = 43 },
+        .{ .key = .f23, .code = 44 },
+        .{ .key = .f24, .code = 45 },
+        .{ .key = .f25, .code = 46 },
+    };
+
+    var buf: [128]u8 = undefined;
+    var expected_buf: [32]u8 = undefined;
+    for (cases) |case| {
+        {
+            var writer: std.Io.Writer = .fixed(&buf);
+            try legacy(&writer, .{ .key = case.key }, .{});
+            const expected = try std.fmt.bufPrint(
+                &expected_buf,
+                "\x1b[{}~",
+                .{case.code},
+            );
+            try testing.expectEqualStrings(expected, writer.buffered());
+        }
+
+        {
+            var writer: std.Io.Writer = .fixed(&buf);
+            try legacy(&writer, .{
+                .key = case.key,
+                .mods = .{ .ctrl = true },
+            }, .{ .modify_other_keys_state_2 = true });
+            const expected = try std.fmt.bufPrint(
+                &expected_buf,
+                "\x1b[{};5~",
+                .{case.code},
+            );
+            try testing.expectEqualStrings(expected, writer.buffered());
+        }
+    }
+}
+
+test "legacy: help and context menu" {
+    const Case = struct { key: key.Key, code: u8 };
+    const cases = [_]Case{
+        .{ .key = .help, .code = 28 },
+        .{ .key = .context_menu, .code = 29 },
+    };
+
+    var buf: [128]u8 = undefined;
+    var expected_buf: [32]u8 = undefined;
+    for (cases) |case| {
+        {
+            var writer: std.Io.Writer = .fixed(&buf);
+            try legacy(&writer, .{ .key = case.key }, .{});
+            const expected = try std.fmt.bufPrint(
+                &expected_buf,
+                "\x1b[{}~",
+                .{case.code},
+            );
+            try testing.expectEqualStrings(expected, writer.buffered());
+        }
+
+        {
+            var writer: std.Io.Writer = .fixed(&buf);
+            try legacy(&writer, .{
+                .key = case.key,
+                .mods = .{ .ctrl = true },
+            }, .{ .modify_other_keys_state_2 = true });
+            const expected = try std.fmt.bufPrint(
+                &expected_buf,
+                "\x1b[{};5~",
+                .{case.code},
+            );
+            try testing.expectEqualStrings(expected, writer.buffered());
+        }
     }
 }
 
