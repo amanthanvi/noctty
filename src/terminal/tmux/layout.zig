@@ -12,9 +12,10 @@ const ArenaAllocator = std.heap.ArenaAllocator;
 pub const Layout = struct {
     /// The width and height of this node, measured in terminal cells.
     ///
-    /// Parsing guarantees both values are at least 1. They are not
-    /// bounded above, so check that they fit your own size type before
-    /// using them (see `size.CellCountInt` for terminals).
+    /// Parsing guarantees both values are at least 1 and their product
+    /// is at most `max_cells`. Either may still be too large for your own
+    /// size type, so check before using them (see `size.CellCountInt`
+    /// for terminals).
     width: usize,
     height: usize,
 
@@ -36,7 +37,8 @@ pub const Layout = struct {
     ///
     /// `SyntaxError` means the string is not a valid layout. This includes
     /// strings that are well formed but describe a node with a width or
-    /// height of zero, or nest splits deeper than `max_depth`.
+    /// height of zero or with more than `max_cells` cells, or nest splits
+    /// deeper than `max_depth`.
     pub const ParseError = Allocator.Error || error{SyntaxError};
 
     /// The most splits `parse` accepts inside one another. `parse` and the
@@ -44,6 +46,14 @@ pub const Layout = struct {
     /// stack is small (`os.surfaceThreadSpawnConfig`). tmux adds one level
     /// per split command, so real layouts stay far below this.
     pub const max_depth = 256;
+
+    /// The most cells (width times height) `parse` accepts in one node.
+    /// tmux limits a window to 10000 cells wide and tall (`WINDOW_MAXIMUM`
+    /// in tmux.h), and every node fits in its window. The tmux viewer
+    /// gives each pane a terminal that allocates pages for all its rows up
+    /// front: at most 1.7 GB for a pane within this limit, against 34 GB
+    /// for 65535x65535, which still fits a terminal's u16 sizes.
+    pub const max_cells = 10000 * 10000;
 
     /// Parse a layout string that starts with a 4-character checksum.
     ///
@@ -117,10 +127,10 @@ pub const Layout = struct {
     /// ```
     ///
     /// Returns `SyntaxError` if the string is malformed, has trailing
-    /// characters, contains any node with a width or height of zero, or
-    /// nests splits deeper than `max_depth`. tmux never produces
-    /// zero-sized nodes, so such a string can only come from a buggy or
-    /// malicious sender.
+    /// characters, contains any node with a width or height of zero or
+    /// with more than `max_cells` cells, or nests splits deeper than
+    /// `max_depth`. tmux never produces zero-sized nodes, so such a
+    /// string can only come from a buggy or malicious sender.
     pub fn parse(alloc: Allocator, str: []const u8) ParseError!Layout {
         var offset: usize = 0;
         const root = try parseNext(
@@ -168,8 +178,10 @@ pub const Layout = struct {
         } else return error.SyntaxError;
 
         // tmux never produces zero-sized nodes, and a terminal can't
-        // have zero rows or columns, so reject them here.
+        // have zero rows or columns, so reject them here. Dividing keeps
+        // the cell count check from overflowing.
         if (width == 0 or height == 0) return error.SyntaxError;
+        if (width > max_cells / height) return error.SyntaxError;
 
         // Find X
         const x: usize = if (std.mem.indexOfScalar(
@@ -549,6 +561,22 @@ test "splits nested up to max_depth" {
     // One more split is rejected.
     const deeper = try std.mem.concat(alloc, u8, &.{ "1x1,0,0[", str.items, "]" });
     try testing.expectError(error.SyntaxError, Layout.parse(alloc, deeper));
+}
+
+test "nodes up to max_cells cells" {
+    var arena: ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // tmux's largest window is at the limit.
+    const layout: Layout = try .parse(alloc, "10000x10000,0,0,1");
+    try testing.expectEqual(10000, layout.width);
+    try testing.expectEqual(10000, layout.height);
+
+    // One cell more is rejected, and so is a product that would wrap.
+    try testing.expectError(error.SyntaxError, Layout.parse(alloc, "100000001x1,0,0,1"));
+    try testing.expectError(error.SyntaxError, Layout.parse(alloc, "1x100000001,0,0,1"));
+    try testing.expectError(error.SyntaxError, Layout.parse(alloc, "4294967296x4294967296,0,0,1"));
 }
 
 test "syntax error missing x" {

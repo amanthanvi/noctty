@@ -2050,6 +2050,57 @@ test "layout change with oversized pane becomes defunct" {
     });
 }
 
+test "layout change with a pane over max_cells becomes defunct" {
+    var viewer = try Viewer.init(testing.allocator);
+    defer viewer.deinit();
+
+    try testViewer(&viewer, &.{
+        .{ .input = .{ .tmux = .{ .block_end = "" } } },
+        .{
+            .input = .{ .tmux = .{ .session_changed = .{
+                .id = 1,
+                .name = "test",
+            } } },
+            .contains_command = "display-message",
+        },
+        .{
+            .input = .{ .tmux = .{ .block_end = "3.5a" } },
+            .contains_command = "list-windows",
+        },
+        .{
+            .input = .{ .tmux = .{
+                .block_end =
+                \\$0 @0 83 44 b7dd,83x44,0,0,0
+                ,
+            } },
+            .contains_tags = &.{ .windows, .command },
+        },
+        .{ .input = .{ .tmux = .{ .block_end = "" } } },
+        .{ .input = .{ .tmux = .{ .block_end = "" } } },
+        .{ .input = .{ .tmux = .{ .block_end = "" } } },
+        .{ .input = .{ .tmux = .{ .block_end = "" } } },
+        .{ .input = .{ .tmux = .{ .block_end = "" } } },
+        // Both sides of pane 2 fit in u16, and it is 2 cells over
+        // max_cells, the closest such a pane can be (100000001 is
+        // 17 * 5882353).
+        .{
+            .input = .{ .tmux = .{ .layout_change = .{
+                .window_id = 0,
+                .layout = "d5a6,83x44,0,0[83x22,0,0,0,2217x45106,0,23,2]",
+                .visible_layout = "d5a6,83x44,0,0[83x22,0,0,0,2217x45106,0,23,2]",
+                .raw_flags = "*",
+            } } },
+            .contains_tags = &.{.exit},
+            .check = (struct {
+                fn check(v: *Viewer, _: []const Viewer.Action) anyerror!void {
+                    try testing.expectEqual(.defunct, v.state);
+                    try testing.expect(!v.panes.contains(2));
+                }
+            }).check,
+        },
+    });
+}
+
 test "list-windows with zero size pane becomes defunct" {
     var viewer = try Viewer.init(testing.allocator);
     defer viewer.deinit();
@@ -2327,6 +2378,44 @@ test "list-windows with oversized pane frees its window" {
         .{
             .input = .{ .tmux = .{
                 .block_end = "$0 @0 83 44 3afd,83x44,0,0[83x22,0,0,0,70000x21,0,23,2]",
+            } },
+            .contains_tags = &.{.exit},
+            .check = (struct {
+                fn check(v: *Viewer, _: []const Viewer.Action) anyerror!void {
+                    try testing.expectEqual(.defunct, v.state);
+                    try testing.expectEqual(0, v.windows.items.len);
+                    try testing.expectEqual(0, v.panes.count());
+                }
+            }).check,
+        },
+    });
+}
+
+test "list-windows with a pane over max_cells frees its windows" {
+    var viewer = try Viewer.init(testing.allocator);
+    defer viewer.deinit();
+
+    try testViewer(&viewer, &.{
+        .{ .input = .{ .tmux = .{ .block_end = "" } } },
+        .{
+            .input = .{ .tmux = .{ .session_changed = .{
+                .id = 1,
+                .name = "test",
+            } } },
+            .contains_command = "display-message",
+        },
+        .{
+            .input = .{ .tmux = .{ .block_end = "3.5a" } },
+            .contains_command = "list-windows",
+        },
+        // Both windows are splits, so both layout arenas hold nodes when
+        // pane 6 of the second is rejected.
+        .{
+            .input = .{ .tmux = .{
+                .block_end =
+                \\$0 @0 165 79 ca97,165x79,0,0[165x40,0,0,0,165x38,0,41,4]
+                \\$0 @1 83 44 75a9,83x44,0,0[83x22,0,0,5,2217x45106,0,23,6]
+                ,
             } },
             .contains_tags = &.{.exit},
             .check = (struct {
