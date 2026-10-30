@@ -286,7 +286,10 @@ function __ghostty_precmd() {
       # mount here and only ask cygpath about the rest (/tmp, /home/...).
       # MSYS and Cygwin show the characters U+F001-U+F01F that a Windows
       # name holds for control bytes as the raw bytes in $PWD, so such a
-      # directory also goes through cygpath, which maps them back.
+      # directory also goes through cygpath, which maps them back in a UTF-8
+      # locale (under LANG=C its answer ends at the byte). Only C0 maps
+      # back: DEL, and C1 in a UTF-8 locale, are stripped below, so such a
+      # report names a directory that does not exist.
       [[ "$cwd" == /cygdrive/* ]] && cwd="${cwd#/cygdrive}"
       if [[ "$cwd" != *[[:cntrl:]]* && ( "$cwd" == /[A-Za-z] || "$cwd" == /[A-Za-z]/* ) ]]; then
         builtin local drive="${cwd:1:1}"
@@ -294,9 +297,10 @@ function __ghostty_precmd() {
       elif [[ "$cwd" == [A-Za-z]:[\\/]* ]]; then
         cwd="/${cwd//\\//}"
       else
-        # cygpath forks, but only when the directory changes to one that is
-        # not on a drive mount.
-        cwd=$(builtin command cygpath -m -- "$cwd" 2>/dev/null)
+        # cygpath forks, but only for a directory that is not on a drive
+        # mount or whose name holds a control byte. It gets $PWD: on Cygwin,
+        # /c/... without its /cygdrive prefix is not a drive.
+        cwd=$(builtin command cygpath -m -- "$PWD" 2>/dev/null)
         [[ "$cwd" == [A-Za-z]:/* ]] && cwd="/${cwd^}" || cwd=""
       fi
     fi
