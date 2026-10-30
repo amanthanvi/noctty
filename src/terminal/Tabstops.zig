@@ -240,6 +240,24 @@ test "Tabstops: resize to existing capacity does not allocate" {
     try t.resize(fixed.allocator(), prealloc_columns * 2);
 }
 
+test "Tabstops: resize to existing capacity makes no allocator call" {
+    // The test above also passes when the second resize reallocates, since
+    // FixedBufferAllocator remaps its last allocation to the same size in
+    // place. This allocator fails every remap and every allocation after
+    // the first, so any allocator call fails the resize.
+    var failing = std.testing.FailingAllocator.init(testing.allocator, .{
+        .fail_index = 1,
+        .resize_fail_index = 0,
+    });
+    const alloc = failing.allocator();
+    var t: Tabstops = .{};
+    defer t.deinit(alloc);
+
+    try t.resize(alloc, prealloc_columns * 2);
+    try t.resize(alloc, prealloc_columns * 2);
+    try testing.expectEqual(@as(usize, 1), failing.allocations);
+}
+
 test "Tabstops: interval" {
     var t: Tabstops = try init(testing.allocator, 80, 4);
     defer t.deinit(testing.allocator);
