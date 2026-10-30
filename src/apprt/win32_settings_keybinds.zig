@@ -637,3 +637,20 @@ test "keybinds the list holds every binding in effect, sequences, chains, flags 
     }
     try std.testing.expectEqual(config.keybind.tables.count(), tables_seen);
 }
+
+test "keybinds a string parameter copies as the config file writes it" {
+    const alloc = std.testing.allocator;
+    var config = try Config.default(alloc);
+    defer config.deinit();
+    try config.keybind.parseCLI(config._arena.?.allocator(), "ctrl+alt+t=text:\\x15");
+    var defaults = try Config.default(alloc);
+    defer defaults.deinit();
+    var model: Model = .{};
+    defer model.deinit();
+    try model.build(alloc, &config.keybind, &defaults.keybind);
+    const row = for (model.rows) |row| {
+        if (std.mem.eql(u8, row.trigger, "ctrl+alt+t")) break row;
+    } else return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("text:\\x15", row.action);
+    try std.testing.expectEqualStrings("keybind = ctrl+alt+t=text:\\x15", row.entry);
+}

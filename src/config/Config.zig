@@ -12151,7 +12151,16 @@ pub const RepeatableCommand = struct {
                 ) catch return error.OutOfMemory;
             }
 
-            writer.print(",action:\"{f}\"", .{item.action}) catch return error.OutOfMemory;
+            // Action.format writes string parameters as they are; quoted,
+            // they need the Zig escapes parseAutoStruct decodes, as the
+            // title and description get.
+            var action_buf: [4096]u8 = undefined;
+            var action: std.Io.Writer = .fixed(&action_buf);
+            action.print("{f}", .{item.action}) catch return error.OutOfMemory;
+            writer.print(
+                ",action:\"{f}\"",
+                .{std.zig.fmtString(action.buffered())},
+            ) catch return error.OutOfMemory;
 
             try formatter.formatEntry([]const u8, writer.buffered());
         }
@@ -12239,6 +12248,26 @@ pub const RepeatableCommand = struct {
         try list.parseCLI(alloc, "title:Ja,   description: pierdole,  action:text:jakie bydle");
         try list.formatEntry(formatterpkg.entryFormatter("a", &buf.writer));
         try std.testing.expectEqualSlices(u8, "a = title:\"Bobr\",action:\"text:kurwa\"\na = title:\"Ja\",description:\"pierdole\",action:\"text:jakie bydle\"\n", buf.written());
+    }
+
+    test "RepeatableCommand formatConfig escapes a quoted action's string parameter" {
+        const testing = std.testing;
+        var buf: std.Io.Writer.Allocating = .init(testing.allocator);
+        defer buf.deinit();
+
+        var arena = ArenaAllocator.init(testing.allocator);
+        defer arena.deinit();
+        const alloc = arena.allocator();
+
+        var list: RepeatableCommand = .{};
+        try list.parseCLI(alloc, "title:Bobr,action:\"text:\\\"hi\\\" \\\\x15\"");
+        try testing.expectEqualStrings("\"hi\" \\x15", list.value.items[0].action.text);
+        try list.formatEntry(formatterpkg.entryFormatter("a", &buf.writer));
+        try testing.expectEqualStrings("a = title:\"Bobr\",action:\"text:\\\"hi\\\" \\\\x15\"\n", buf.written());
+
+        var parsed: RepeatableCommand = .{};
+        try parsed.parseCLI(alloc, buf.written()["a = ".len .. buf.written().len - 1]);
+        try testing.expect(list.equal(parsed));
     }
 
     test "RepeatableCommand parseCLI commas" {
