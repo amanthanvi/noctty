@@ -537,11 +537,17 @@ fn legacy(
             // The normal keypad row (upstream #14145) is the character a US
             // layout types, but another layout can type something else
             // there: the numpad decimal types ',' on German. The layout's
-            // text takes the row's place, in the row's encoding. A numpad
-            // key without text (Ctrl, an Alt-code digit) keeps the row, and
-            // application keypad rows start with ESC.
+            // text takes the row's place: on the ConPTY path through the
+            // text encoding (Alt's ESC prefix included), elsewhere in the
+            // row's encoding. A numpad key without text (Ctrl, an Alt-code
+            // digit) keeps the row, and application keypad rows start with
+            // ESC.
             if (event.key.keypad() and sequence[0] != 0x1b and
-                !isControlUtf8(event.utf8)) return try writer.writeAll(event.utf8);
+                !isControlUtf8(event.utf8))
+            {
+                if (windows_legacy) break :pc_style;
+                return try writer.writeAll(event.utf8);
+            }
         }
 
         // ConPTY cannot decode the CSI 27 modifier forms for these keys.
@@ -2558,6 +2564,11 @@ test "legacy: Windows console modified numpad keys and the Menu key use the shar
     var writer: std.Io.Writer = .fixed(&buf);
     try encode(&writer, .{ .key = .numpad_decimal, .utf8 = ",", .unshifted_codepoint = ',' }, .{ .windows_legacy = true, .keypad_key_application = true });
     try testing.expectEqualStrings("\x1bOn", writer.buffered());
+    // Ctrl+Alt still types the layout's text (translation masks both), and
+    // Alt prefixes it with ESC as it does any other text.
+    writer = .fixed(&buf);
+    try encode(&writer, .{ .key = .numpad_decimal, .mods = .{ .ctrl = true, .alt = true }, .utf8 = ",", .unshifted_codepoint = ',' }, .{ .windows_legacy = true, .alt_esc_prefix = true });
+    try testing.expectEqualStrings("\x1b,", writer.buffered());
 }
 
 test "modify other keys 2: a numpad key sends the layout's text" {
