@@ -90,17 +90,16 @@ pub const LoadingImage = struct {
 
         if (comptime builtin.os.tag != .windows) {
             if (std.mem.indexOfScalar(u8, cmd.data, 0) != null) {
-                // posix.realpath *asserts* that the path does not have
-                // internal nulls instead of erroring.
-                log.warn("failed to get absolute path: BadPathName", .{});
+                // POSIX paths cannot contain internal nulls.
+                log.warn("invalid image path: BadPathName", .{});
                 return error.InvalidData;
             }
         }
 
-        // On Windows `realpath` opens the path, so a network share or device
-        // path (`\\server\share`, `\\?\UNC\...`, `\\.\pipe\x`) would be
-        // contacted before any other check ran. A program inside the
-        // terminal supplies this path, so refuse those shapes up front.
+        // On Windows opening a network share or device path
+        // (`\\server\share`, `\\?\UNC\...`, `\\.\pipe\x`) contacts it, so
+        // refuse those shapes before the open. A program inside the
+        // terminal supplies this path.
         if (comptime builtin.os.tag == .windows) {
             if (isNetworkOrDevicePath(cmd.data)) {
                 log.warn("refusing network or device path for image file", .{});
@@ -108,22 +107,12 @@ pub const LoadingImage = struct {
             }
         }
 
-        var abs_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const path = switch (t.medium) {
-            .direct => unreachable, // handled above
-            .file, .temporary_file => posix.realpath(cmd.data, &abs_buf) catch |err| {
-                log.warn("failed to get absolute path: {}", .{err});
-                return error.InvalidData;
-            },
-            .shared_memory => cmd.data,
-        };
-
         // Depending on the medium, load the data from the path.
         switch (t.medium) {
             .direct => unreachable, // handled above
-            .file => try result.readFile(.file, alloc, t, path),
-            .temporary_file => try result.readFile(.temporary_file, alloc, t, path),
-            .shared_memory => try result.readSharedMemory(alloc, t, path),
+            .file => try result.readFile(.file, alloc, t, cmd.data),
+            .temporary_file => try result.readFile(.temporary_file, alloc, t, cmd.data),
+            .shared_memory => try result.readSharedMemory(alloc, t, cmd.data),
         }
 
         return result;
@@ -236,34 +225,43 @@ pub const LoadingImage = struct {
             else => @compileError("readFile only supports file and temporary_file"),
         }
 
-        // Verify file seems "safe". This is logic copied directly from Kitty,
-        // mostly. This is really rough but it will catch obvious bad actors.
-        if (std.mem.startsWith(u8, path, "/proc/") or
-            std.mem.startsWith(u8, path, "/sys/") or
-            (std.mem.startsWith(u8, path, "/dev/") and
-                !std.mem.startsWith(u8, path, "/dev/shm/")))
-        {
+        // Open our file right away before we do validation. This avoids
+        // TOCTOU issues.
+        var file = std.fs.cwd().openFile(path, .{}) catch |err| {
+            log.warn("failed to open image file: {}", .{err});
             return error.InvalidData;
+        };
+
+        // We'll populate a delete path if this is a temporary file.
+        var delete_path: ?[]const u8 = null;
+        defer {
+            file.close();
+            if (delete_path) |p| {
+                std.fs.cwd().deleteFile(p) catch |err| {
+                    log.warn("failed to delete temporary file: {}", .{err});
+                };
+            }
         }
+
+        // Derive the path from the open handle so the file we validate is the
+        // exact file we read. Resolving a path before opening it would allow a
+        // cooperating process to swap a symlink or directory entry in between.
+        var abs_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const abs_path = validatedFilePath(file, &abs_buf) catch |err| {
+            log.warn("failed to validate image file path: {}", .{err});
+            return error.InvalidData;
+        };
 
         // Temporary file logic
         if (medium == .temporary_file) {
-            if (!isPathInTempDir(path)) return error.TemporaryFileNotInTempDir;
-            if (std.mem.indexOf(u8, path, "tty-graphics-protocol") == null) {
-                return error.TemporaryFileNotNamedCorrectly;
-            }
+            if (!isPathInTempDir(abs_path)) return error.TemporaryFileNotInTempDir;
+            if (std.mem.indexOf(
+                u8,
+                abs_path,
+                "tty-graphics-protocol",
+            ) == null) return error.TemporaryFileNotNamedCorrectly;
+            delete_path = abs_path;
         }
-        defer if (medium == .temporary_file) {
-            posix.unlink(path) catch |err| {
-                log.warn("failed to delete temporary file: {}", .{err});
-            };
-        };
-
-        var file = std.fs.cwd().openFile(path, .{}) catch |err| {
-            log.warn("failed to open temporary file: {}", .{err});
-            return error.InvalidData;
-        };
-        defer file.close();
 
         // File must be a regular file
         if (file.stat()) |stat| {
@@ -299,6 +297,24 @@ pub const LoadingImage = struct {
         // Set our data
         assert(self.data.items.len == 0);
         self.data = .{ .items = managed.items, .capacity = managed.capacity };
+    }
+
+    /// Returns the canonical path of an open file after applying the file
+    /// transmission blocklist.
+    fn validatedFilePath(file: std.fs.File, buf: *[std.fs.max_path_bytes]u8) ![]const u8 {
+        const path = try std.os.getFdPath(file.handle, buf);
+
+        // This is logic copied directly from Kitty, mostly. This is really
+        // rough but it will catch obvious bad actors.
+        if (std.mem.startsWith(u8, path, "/proc/") or
+            std.mem.startsWith(u8, path, "/sys/") or
+            (std.mem.startsWith(u8, path, "/dev/") and
+                !std.mem.startsWith(u8, path, "/dev/shm/")))
+        {
+            return error.InvalidData;
+        }
+
+        return path;
     }
 
     /// Returns true if path appears to be in a temporary directory.
@@ -598,6 +614,33 @@ const TestTmpDir = struct {
         const name = std.unicode.utf8ToUtf16LeStringLiteral("TMP");
         _ = std.os.windows.kernel32.SetEnvironmentVariableW(name, if (self.saved) |v| v.ptr else null);
         if (self.saved) |v| std.testing.allocator.free(v);
+    }
+};
+
+/// For Windows tests: symbolic links as an account without the symlink
+/// privilege can make them (Developer Mode).
+const test_symlink = struct {
+    extern "kernel32" fn CreateSymbolicLinkW(
+        link: [*:0]const u16,
+        target: [*:0]const u16,
+        flags: u32,
+    ) callconv(.winapi) u8;
+    const SYMBOLIC_LINK_FLAG_DIRECTORY = 0x1;
+    const SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE = 0x2;
+
+    /// A directory symlink at `link` (absolute) to `target`. False when the
+    /// account may not make one.
+    fn dir(alloc: Allocator, link: []const u8, target: []const u8) !bool {
+        const link_w = try std.unicode.utf8ToUtf16LeAllocZ(alloc, link);
+        defer alloc.free(link_w);
+        const target_w = try std.unicode.utf8ToUtf16LeAllocZ(alloc, target);
+        defer alloc.free(target_w);
+        const flags = SYMBOLIC_LINK_FLAG_DIRECTORY | SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE;
+        if (CreateSymbolicLinkW(link_w, target_w, flags) != 0) return true;
+        return switch (std.os.windows.kernel32.GetLastError()) {
+            .PRIVILEGE_NOT_HELD => false,
+            else => error.Unexpected,
+        };
     }
 };
 
@@ -1116,6 +1159,54 @@ test "image load: network and device path spellings are refused" {
     defer cmd.deinit(alloc);
     var loading = try LoadingImage.init(alloc, &cmd);
     defer loading.deinit(alloc);
+}
+
+test "image load: the opened file is validated, not what its path names later" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var tmp_dir = try temp_dir.TempDir.init();
+    defer tmp_dir.deinit();
+    try tmp_dir.dir.makeDir("allowed");
+    try tmp_dir.dir.makeDir("outside");
+    const filename = "tty-graphics-protocol-image.data";
+    try tmp_dir.dir.writeFile(.{ .sub_path = "allowed\\" ++ filename, .data = "allowed" });
+    try tmp_dir.dir.writeFile(.{ .sub_path = "outside\\" ++ filename, .data = "outside" });
+
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = try tmp_dir.dir.realpath(".", &root_buf);
+    const allowed = try std.fs.path.join(alloc, &.{ root, "allowed" });
+    defer alloc.free(allowed);
+    const outside = try std.fs.path.join(alloc, &.{ root, "outside" });
+    defer alloc.free(outside);
+    const link = try std.fs.path.join(alloc, &.{ root, "link" });
+    defer alloc.free(link);
+    const linked = try std.fs.path.join(alloc, &.{ link, filename });
+    defer alloc.free(linked);
+
+    const tmp = try TestTmpDir.set(allowed);
+    defer tmp.restore();
+
+    // Open the file outside the temporary directory through the link, then
+    // point the link at the allowed directory, as a cooperating process
+    // could between a check of the path and a later open of it.
+    if (!try test_symlink.dir(alloc, link, outside)) return error.SkipZigTest;
+    const held = try std.fs.cwd().openFile(linked, .{});
+    defer held.close();
+    try tmp_dir.dir.deleteDir("link");
+    try testing.expect(try test_symlink.dir(alloc, link, allowed));
+    defer tmp_dir.dir.deleteDir("link") catch {};
+
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const held_path = try LoadingImage.validatedFilePath(held, &buf);
+    try testing.expect(!LoadingImage.isPathInTempDir(held_path));
+
+    // The path itself now names the allowed file.
+    const fresh = try std.fs.cwd().openFile(linked, .{});
+    defer fresh.close();
+    try testing.expect(LoadingImage.isPathInTempDir(try LoadingImage.validatedFilePath(fresh, &buf)));
 }
 
 test "image load: rgb, not compressed, temporary file" {
