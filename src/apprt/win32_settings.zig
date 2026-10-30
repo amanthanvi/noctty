@@ -21112,13 +21112,22 @@ test "settings an open list row's actions are drawn at 4.5:1 in light and dark" 
             const settings = &fixture.settings;
             const hwnd = fixture.hwnd();
             // Large enough that a stroke has pixels the text covers whole.
-            dialog_test.simulateDpi(hwnd, 192);
+            dialog_test.simulateDpi(hwnd, 144);
             for ([_]bool{ false, true }) |dark| {
                 settings.handle.themeColors = if (dark) &darkColors else &lightColors;
                 settings.themeChanged();
                 const window = try selectReferenceKey(settings, .@"copy-on-select");
                 const list = &settings.reference_list;
-                const actions = list.actionRects(list.ensureMetrics().?);
+                const metrics = list.ensureMetrics().?;
+                // The open row's actions in view whatever the window's size
+                // (a CI runner's screen is 1024 x 768): the list scrolled to
+                // put their line at its top.
+                list.scrollTo(ReferenceList.rowTop(metrics, list.selectedPosition().?, list.selectedPosition().?));
+                const line = list.actionRects(metrics).open.?;
+                list.scrollTo(list.scroll_y + line.top);
+                const actions = list.actionRects(metrics);
+                errdefer std.debug.print("settings list actions at ({d},{d})-({d},{d}) in a list {d} high\n", .{ actions.open.?.left, actions.open.?.top, actions.open.?.right, actions.open.?.bottom, list.clientHeight() });
+                try std.testing.expect(actions.open.?.top >= 0 and actions.open.?.bottom <= list.clientHeight());
                 // The list painted to a memory DC, as its WM_PAINT paints it.
                 var client: RECT = undefined;
                 _ = GetClientRect(window, &client);
