@@ -279,16 +279,10 @@ pub const StreamHandler = struct {
                 @branchHint(.likely);
                 self.terminal.setCursorPos(value.row, value.col);
             },
-            .cursor_col => self.terminal.setCursorPos(self.terminal.screens.active.cursor.y + 1, value.value),
-            .cursor_row => self.terminal.setCursorPos(value.value, self.terminal.screens.active.cursor.x + 1),
-            .cursor_col_relative => self.terminal.setCursorPos(
-                self.terminal.screens.active.cursor.y + 1,
-                self.terminal.screens.active.cursor.x + 1 +| value.value,
-            ),
-            .cursor_row_relative => self.terminal.setCursorPos(
-                self.terminal.screens.active.cursor.y + 1 +| value.value,
-                self.terminal.screens.active.cursor.x + 1,
-            ),
+            .cursor_col => self.terminal.setCursorCol(value.value),
+            .cursor_row => self.terminal.setCursorRow(value.value),
+            .cursor_col_relative => self.terminal.cursorColRelative(value.value),
+            .cursor_row_relative => self.terminal.cursorRowRelative(value.value),
             .cursor_style => try self.setCursorStyle(value),
             .erase_display_below => self.terminal.eraseDisplay(.below, value),
             .erase_display_above => self.terminal.eraseDisplay(.above, value),
@@ -2977,4 +2971,28 @@ test "DECSTR restores the configured cursor style and keeps the screen" {
     const str = try h.term.plainString(alloc);
     defer alloc.free(str);
     try std.testing.expectEqualStrings("hello", str);
+}
+
+test "CHA, VPA, HPR and VPR stay relative to the margins in origin mode" {
+    const alloc = std.testing.allocator;
+    var h: TestStream = undefined;
+    try h.init(alloc, .{});
+    defer h.deinit(alloc);
+
+    // Margins rows 3-8 and columns 4-9, origin mode, cursor at 2;2 in
+    // the region (absolute row 3, column 4, both 0-based).
+    h.stream.nextSlice("\x1b[?69h\x1b[3;8r\x1b[4;9s\x1b[?6h\x1b[2;2H");
+    const cursor = &h.term.screens.active.cursor;
+
+    h.stream.nextSlice("\x1b[1G");
+    try std.testing.expectEqual(@as(terminal.size.CellCountInt, 3), cursor.x);
+    try std.testing.expectEqual(@as(terminal.size.CellCountInt, 3), cursor.y);
+
+    h.stream.nextSlice("\x1b[1d");
+    try std.testing.expectEqual(@as(terminal.size.CellCountInt, 3), cursor.x);
+    try std.testing.expectEqual(@as(terminal.size.CellCountInt, 2), cursor.y);
+
+    h.stream.nextSlice("\x1b[2a\x1b[2e");
+    try std.testing.expectEqual(@as(terminal.size.CellCountInt, 5), cursor.x);
+    try std.testing.expectEqual(@as(terminal.size.CellCountInt, 4), cursor.y);
 }
