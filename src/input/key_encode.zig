@@ -536,12 +536,12 @@ fn legacy(
 
             // The normal keypad row (upstream #14145) is the character a US
             // layout types, but another layout can type something else
-            // there: the numpad decimal types ',' on German. On the ConPTY
-            // path the layout's text goes out, as before that row existed.
-            // A numpad key without text (Ctrl, an Alt-code digit) still
-            // takes the row, and application keypad rows start with ESC.
-            if (windows_legacy and event.key.keypad() and
-                sequence[0] != 0x1b and !isControlUtf8(event.utf8)) break :pc_style;
+            // there: the numpad decimal types ',' on German. The layout's
+            // text takes the row's place, in the row's encoding. A numpad
+            // key without text (Ctrl, an Alt-code digit) keeps the row, and
+            // application keypad rows start with ESC.
+            if (event.key.keypad() and sequence[0] != 0x1b and
+                !isControlUtf8(event.utf8)) return try writer.writeAll(event.utf8);
         }
 
         // ConPTY cannot decode the CSI 27 modifier forms for these keys.
@@ -2558,6 +2558,20 @@ test "legacy: Windows console modified numpad keys and the Menu key use the shar
     var writer: std.Io.Writer = .fixed(&buf);
     try encode(&writer, .{ .key = .numpad_decimal, .utf8 = ",", .unshifted_codepoint = ',' }, .{ .windows_legacy = true, .keypad_key_application = true });
     try testing.expectEqualStrings("\x1bOn", writer.buffered());
+}
+
+test "modify other keys 2: a numpad key sends the layout's text" {
+    // modifyOtherKeys 2 turns the ConPTY encoder off, and the default
+    // encoder never had it, but the normal keypad row applies to both.
+    for ([_]Options{
+        .{ .modify_other_keys_state_2 = true },
+        .{ .modify_other_keys_state_2 = true, .windows_legacy = true },
+    }) |opts| {
+        var buf: [128]u8 = undefined;
+        var writer: std.Io.Writer = .fixed(&buf);
+        try encode(&writer, .{ .key = .numpad_decimal, .utf8 = ",", .unshifted_codepoint = ',' }, opts);
+        try testing.expectEqualStrings(",", writer.buffered());
+    }
 }
 
 test "legacy: ctrl+shift+minus (underscore on US)" {
