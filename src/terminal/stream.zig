@@ -823,7 +823,7 @@ pub fn Stream(comptime H: type) type {
 
                 // DLE through US (CAN and SUB included) do nothing here, and
                 // a binary dump is full of them, so they are not logged.
-                else => if (c < 0x10) log.warn("invalid C0 character, ignoring: 0x{x}", .{c}),
+                else => if (c < 0x10) logUnsupportedOnce("invalid C0 character, ignoring: 0x{x}", .{c}, c),
             }
         }
 
@@ -1341,7 +1341,11 @@ pub fn Stream(comptime H: type) type {
                     if (req) |r| {
                         self.handler.vt(.device_attributes, r);
                     } else {
-                        log.warn("invalid device attributes command: {f}", .{input});
+                        logUnsupportedOnce(
+                            "invalid device attributes command: {f}",
+                            .{input},
+                            if (input.params.len > 0) input.params[0] else 0,
+                        );
                         return;
                     }
                 },
@@ -1428,7 +1432,7 @@ pub fn Stream(comptime H: type) type {
                         if (modes.modeFromInt(mode_int, ansi_mode)) |mode| {
                             self.handler.vt(.set_mode, .{ .mode = mode });
                         } else {
-                            log.warn("unimplemented mode: {}", .{mode_int});
+                            logUnsupportedOnce("unimplemented mode: {}", .{mode_int}, mode_int);
                         }
                     }
                 },
@@ -1449,7 +1453,7 @@ pub fn Stream(comptime H: type) type {
                         if (modes.modeFromInt(mode_int, ansi_mode)) |mode| {
                             self.handler.vt(.reset_mode, .{ .mode = mode });
                         } else {
-                            log.warn("unimplemented mode: {}", .{mode_int});
+                            logUnsupportedOnce("unimplemented mode: {}", .{mode_int}, mode_int);
                         }
                     }
                 },
@@ -1518,9 +1522,10 @@ pub fn Stream(comptime H: type) type {
                                 self.handler.vt(.modify_key_format, format);
                             },
 
-                            else => log.warn(
+                            else => logUnsupportedOnce(
                                 "unknown CSI m with intermediate: {}",
                                 .{input.intermediates[0]},
+                                input.intermediates[0],
                             ),
                         },
 
@@ -1878,13 +1883,15 @@ pub fn Stream(comptime H: type) type {
                                         23 => self.handler.vt(.title_pop, index),
                                         else => @compileError("unreachable"),
                                     }
-                                } else log.warn(
+                                } else logUnsupportedOnce(
                                     "ignoring CSI 22/23 t with extra parameters: {f}",
                                     .{input},
+                                    input.params[0],
                                 ),
-                                else => log.warn(
+                                else => logUnsupportedOnce(
                                     "ignoring CSI t with unimplemented parameter: {f}",
                                     .{input},
+                                    input.params[0],
                                 ),
                             }
                         } else log.err(
@@ -2059,7 +2066,11 @@ pub fn Stream(comptime H: type) type {
 
                 .change_window_icon => |icon| {
                     @branchHint(.likely);
-                    log.info("OSC 1 (change icon) received and ignored icon={s}", .{icon});
+                    logUnsupportedOnce(
+                        "OSC 1 (change icon) received and ignored icon={s}",
+                        .{icon},
+                        0,
+                    );
                 },
 
                 .clipboard_contents => |clip| {
@@ -2261,7 +2272,11 @@ pub fn Stream(comptime H: type) type {
                         else => {}, // fall through
                     }
 
-                    log.warn("unimplemented ESC action: {f}", .{action});
+                    logUnsupportedOnce(
+                        "unimplemented ESC action: {f}",
+                        .{action},
+                        action.final,
+                    );
                 },
 
                 // IND - Index
@@ -2455,10 +2470,70 @@ pub fn Stream(comptime H: type) type {
                     @branchHint(.likely);
                 },
 
-                else => log.warn("unimplemented ESC action: {f}", .{action}),
+                else => logUnsupportedOnce(
+                    "unimplemented ESC action: {f}",
+                    .{action},
+                    action.final,
+                ),
             }
         }
     };
+}
+
+/// Logs an unsupported-input message at most once per distinct key
+/// per process.
+///
+/// These messages are emitted in response to input that the terminal
+/// application controls, so a misbehaving (or merely chatty) program
+/// can trigger the same message millions of times, e.g. by toggling
+/// an unimplemented mode on every frame. Each log call has a real
+/// throughput cost (formatting plus a blocking write per message)
+/// while adding no diagnostic value beyond the first occurrence.
+///
+/// The keys seen so far are tracked in a small fixed table (64 bytes)
+/// instantiated per (format, argument type) tuple, i.e. roughly per
+/// call site. Real streams only ever produce a handful of distinct
+/// unsupported values per site, so if the table ever fills, messages
+/// for further new values are suppressed as well: by that point the
+/// log already shows this class of problem and unbounded distinct
+/// values would flood it anyway.
+fn logUnsupportedOnce(
+    comptime format: []const u8,
+    args: anytype,
+    key: u16,
+) void {
+    // u32 slots so every u16 key is representable alongside an empty
+    // sentinel and so 32-bit targets (e.g. wasm32) have native
+    // atomics.
+    const empty = std.math.maxInt(u32);
+    const Static = struct {
+        var seen: [16]u32 = @splat(empty);
+    };
+
+    // The atomics make concurrent streams safe: slots are only ever
+    // claimed, never changed, so the scan can stop at the first empty
+    // slot. The worst case race is a benign duplicate message.
+    for (&Static.seen) |*slot| {
+        const cur = @atomicLoad(u32, slot, .acquire);
+        if (cur == key) return; // already logged
+        if (cur != empty) continue; // other key, keep scanning
+
+        // Empty slot: claim it for this key and log below.
+        const actual = @cmpxchgStrong(
+            u32,
+            slot,
+            empty,
+            key,
+            .acq_rel,
+            .acquire,
+        ) orelse break;
+
+        // Lost the race: suppress if it was to the same key, keep
+        // scanning otherwise.
+        if (actual == key) return;
+    } else return; // table full: suppress new values too
+
+    log.warn(format, args);
 }
 
 test Action {
