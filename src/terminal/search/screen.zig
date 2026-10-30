@@ -1967,7 +1967,7 @@ test "select after partial history erase drops a pruned selection" {
     try testing.expect(try search.select(.next));
 
     list.eraseHistory(.{ .history = .{ .y = first_rows - 1 } });
-    try testing.expect(!search.selected.?.highlight.start.garbage);
+    try testing.expect(search.selected.?.highlight.start.garbage);
 
     try testing.expect(!try search.select(.next));
     try testing.expect(search.selected == null);
