@@ -112,8 +112,8 @@ pub const ghostty: Source = .{
         // Cursor styles
         .{ .name = "Ss", .value = .{ .string = "\\E[%p1%d q" } },
 
-        // Cursor style reset
-        .{ .name = "Se", .value = .{ .string = "\\E[2 q" } },
+        // Cursor style reset (to user configured default)
+        .{ .name = "Se", .value = .{ .string = "\\E[0 q" } },
 
         // OSC 52 Clipboard
         .{ .name = "Ms", .value = .{ .string = "\\E]52;%p1%s;%p2%s\\007" } },
@@ -427,6 +427,20 @@ test "program status capability" {
         "\x1bP1+r507374=5C455D373530313B25703125735C455C5C\x1b\\",
         map.get("507374").?,
     );
+}
+
+test "cursor style reset" {
+    // DECSCUSR 0 restores the configured cursor style; 2 would force a
+    // steady block on every program that resets the cursor on exit.
+    var source: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer source.deinit();
+    try ghostty.encode(&source.writer);
+    try std.testing.expect(std.mem.indexOf(u8, source.written(), "\tSe=\\E[0 q,\n") != null);
+
+    var compiled: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer compiled.deinit();
+    try @import("compiled.zig").encode(std.testing.allocator, ghostty, &compiled.writer);
+    try std.testing.expect(std.mem.indexOf(u8, compiled.written(), "\x1b[0 q\x00") != null);
 }
 
 test "compile" {
