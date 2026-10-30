@@ -614,23 +614,33 @@ fn paletteMruKeyFromLine(alloc: std.mem.Allocator, line: []const u8) std.mem.All
     return alloc.dupeZ(u8, if (std.mem.eql(u8, escaped.written(), line)) decoded else line);
 }
 
+/// Decodes palette-mru.txt into `mru`, newest first. A line is a whole key:
+/// spaces at its ends belong to the key (`text:make ` is not `text:make`).
+fn readPaletteMru(alloc: std.mem.Allocator, raw: []const u8, mru: []?[:0]const u8) void {
+    var it = std.mem.tokenizeAny(u8, raw, "\r\n");
+    var slot: usize = 0;
+    while (it.next()) |line| {
+        if (slot >= mru.len) break;
+        mru[slot] = paletteMruKeyFromLine(alloc, line) catch continue;
+        slot += 1;
+    }
+}
+
 test "win32 palette MRU lines keep keys with line breaks and tabs, and read earlier builds' lines" {
     const alloc = std.testing.allocator;
     var file: std.Io.Writer.Allocating = .init(alloc);
     defer file.deinit();
     // A quoted command-palette-entry decodes escapes, so its formatted
     // action can hold a CR, an LF or a tab.
-    const keys = [_][]const u8{ "text:make\r", "text:a\nb", "text:x\t", "text:\\x15", "text:\"hi\" \xf0\x9f\x91\xbb", "goto_tab:1" };
+    const keys = [_][]const u8{ "text:make\r", "text:a\nb", "text:x\t", "text:\\x15", "text:\"hi\" \xf0\x9f\x91\xbb", "text:hello ", "goto_tab:1" };
     for (keys) |mru_key| try writePaletteMruLine(&file.writer, mru_key);
-    // Split and trimmed as loadPaletteMru reads the file.
-    var lines = std.mem.tokenizeAny(u8, file.written(), "\r\n");
-    for (keys) |mru_key| {
-        const line = lines.next() orelse return error.TestUnexpectedResult;
-        const read = try paletteMruKeyFromLine(alloc, std.mem.trim(u8, line, " \t"));
-        defer alloc.free(read);
-        try std.testing.expectEqualStrings(mru_key, read);
+    var read: [keys.len + 1]?[:0]const u8 = .{null} ** (keys.len + 1);
+    readPaletteMru(alloc, file.written(), &read);
+    defer for (read) |key| if (key) |k| alloc.free(k);
+    for (keys, read[0..keys.len]) |mru_key, key| {
+        try std.testing.expectEqualStrings(mru_key, key orelse return error.TestUnexpectedResult);
     }
-    try std.testing.expect(lines.next() == null);
+    try std.testing.expect(read[keys.len] == null);
     // Before upstream #13609 the action itself was escaped, so this is the
     // line an earlier build wrote for text:\x15; it reads as today's key.
     const earlier = try paletteMruKeyFromLine(alloc, "text:\\\\x15");
@@ -667,16 +677,7 @@ pub const AppControls = struct {
         const raw = file.readToEndAlloc(self.core_app.alloc, 64 * 1024) catch return;
         defer self.core_app.alloc.free(raw);
 
-        var it = std.mem.tokenizeAny(u8, raw, "\r\n");
-        var slot: usize = 0;
-        while (it.next()) |line| {
-            if (slot >= self.palette_mru.len) break;
-            const trimmed = std.mem.trim(u8, line, " \t");
-            if (trimmed.len == 0) continue;
-            const duped = paletteMruKeyFromLine(self.core_app.alloc, trimmed) catch continue;
-            self.palette_mru[slot] = duped;
-            slot += 1;
-        }
+        readPaletteMru(self.core_app.alloc, raw, &self.palette_mru);
     }
 
     /// Write `palette_mru` to the on-disk file (newest first). Failure
