@@ -132,12 +132,20 @@ fn query(alloc: Allocator, cmd: *const Command) Response {
         .placement_id = t.placement_id,
     };
 
-    // Attempt to load the image. If we cannot, then set an appropriate error.
+    // A query must attempt a complete load, then discard the result without
+    // changing image storage.
+    // https://sw.kovidgoyal.net/kitty/graphics-protocol/#querying-support-and-available-transmission-mediums
     var loading = LoadingImage.init(alloc, cmd) catch |err| {
         encodeError(&result, err);
         return result;
     };
-    loading.deinit(alloc);
+    defer loading.deinit(alloc);
+
+    var img = loading.complete(alloc) catch |err| {
+        encodeError(&result, err);
+        return result;
+    };
+    img.deinit(alloc);
 
     return result;
 }
@@ -465,6 +473,73 @@ fn encodeError(r: *Response, err: EncodeableError) void {
         error.DimensionsRequired => r.message = "EINVAL: dimensions required",
         error.DimensionsTooLarge => r.message = "EINVAL: dimensions too large",
     }
+}
+
+test "kittygfx query validates image data" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var terminal = try Terminal.init(alloc, .{ .rows = 5, .cols = 5 });
+    defer terminal.deinit(alloc);
+
+    var cmd: Command = .{
+        .control = .{ .query = .{
+            .format = .rgb,
+            .width = 1,
+            .height = 1,
+            .image_id = 31,
+        } },
+        // A 1x1 RGB image requires three bytes.
+        .data = try alloc.dupe(u8, &.{ 0, 0 }),
+    };
+    defer cmd.deinit(alloc);
+
+    const resp = execute(alloc, &terminal, &cmd) orelse return error.TestExpectedResponse;
+    try testing.expect(!resp.ok());
+    try testing.expectEqual(@as(u32, 31), resp.id);
+    try testing.expectEqualStrings("EINVAL: invalid data", resp.message);
+    try testing.expectEqual(
+        @as(usize, 0),
+        terminal.screens.active.kitty_images.images.count(),
+    );
+}
+
+test "kittygfx valid query does not replace or store image" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var terminal = try Terminal.init(alloc, .{ .rows = 5, .cols = 5 });
+    defer terminal.deinit(alloc);
+    const storage = &terminal.screens.active.kitty_images;
+
+    // Store a red pixel under the same ID used by the query.
+    {
+        const cmd = try command.Parser.parseString(
+            alloc,
+            "a=t,f=24,s=1,v=1,i=31;/wAA",
+        );
+        defer cmd.deinit(alloc);
+        const resp = execute(alloc, &terminal, &cmd) orelse return error.TestExpectedResponse;
+        try testing.expect(resp.ok());
+    }
+
+    // Successfully validate a black pixel without replacing the red one.
+    var cmd: Command = .{
+        .control = .{ .query = .{
+            .format = .rgb,
+            .width = 1,
+            .height = 1,
+            .image_id = 31,
+        } },
+        .data = try alloc.dupe(u8, &.{ 0, 0, 0 }),
+    };
+    defer cmd.deinit(alloc);
+
+    const resp = execute(alloc, &terminal, &cmd) orelse return error.TestExpectedResponse;
+    try testing.expect(resp.ok());
+    try testing.expectEqual(@as(usize, 1), storage.images.count());
+    const img = storage.imageById(31) orelse return error.TestExpectedImage;
+    try testing.expectEqualSlices(u8, &.{ 255, 0, 0 }, img.data);
 }
 
 test "kittygfx image id and number are mutually exclusive for every action" {
