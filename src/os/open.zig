@@ -15,12 +15,18 @@ const log = std.log.scoped(.@"os-open");
 /// some portable way to open URLs. If you are implementing an
 /// apprt for Ghostty, you should consider doing something special-cased
 /// for your platform.
+///
+/// Untrusted kinds (`unknown`, `osc8`) return `error.UntrustedLink`
+/// because the apprt must check them first.
 pub fn open(
     alloc: Allocator,
     kind: apprt.action.OpenUrl.Kind,
     url: []const u8,
 ) !void {
-    _ = kind;
+    // If an embedder declines an untrusted URL, refuse it rather than skip
+    // the apprt's safety checks by passing it to FileProtocolHandler, which
+    // runs whatever program the target names.
+    if (!genericOpenAllowed(kind)) return error.UntrustedLink;
     if (builtin.os.tag != .windows) return error.Unimplemented;
 
     var exe: std.process.Child = .init(
@@ -43,6 +49,25 @@ pub fn open(
     // spawn a thread to handle this so that we never block.
     const thread = try std.Thread.spawn(.{}, openThread, .{ alloc, exe });
     thread.detach();
+}
+
+/// Whether `open` may pass a link of this kind to the generic opener. Kept
+/// apart from `open` so a test checks the decision without starting a
+/// process.
+fn genericOpenAllowed(kind: apprt.action.OpenUrl.Kind) bool {
+    return switch (kind) {
+        .unknown, .osc8 => false,
+        .text, .html => true,
+    };
+}
+
+test "untrusted links have no generic opener fallback" {
+    // Not through `open`: if its refusal ever moved below the spawn, the test
+    // would start rundll32 with the target on the desktop running the suite.
+    try std.testing.expect(!genericOpenAllowed(.unknown));
+    try std.testing.expect(!genericOpenAllowed(.osc8));
+    try std.testing.expect(genericOpenAllowed(.text));
+    try std.testing.expect(genericOpenAllowed(.html));
 }
 
 fn openThread(alloc: Allocator, exe_: std.process.Child) !void {
