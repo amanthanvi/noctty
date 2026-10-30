@@ -1070,60 +1070,79 @@ pub fn resetSynchronizedOutput(self: *Termio) void {
 
 /// Clear the screen.
 pub fn clearScreen(self: *Termio, td: *ThreadData, history: bool) !void {
-    // Whether the rows above the cursor were erased; null at a prompt.
-    const erased_off_prompt: ?bool = clear: {
+    const cleared = clear: {
         self.renderer_state.mutex.lock();
         defer self.renderer_state.mutex.unlock();
-
-        // If we're on the alternate screen, we do not clear. Since this is an
-        // emulator-level screen clear, this messes up the running programs
-        // knowledge of where the cursor is and causes rendering issues. So,
-        // for alt screen, we do nothing.
-        if (self.terminal.screens.active_key == .alternate) return;
-
-        // Clear our selection
-        self.terminal.screens.active.clearSelection();
-
-        // Clear our scrollback
-        if (history) self.terminal.eraseDisplay(.scrollback, false);
-
-        // If we're not at a prompt, we just delete above the cursor.
-        if (!self.terminal.cursorIsAtPrompt()) {
-            const erased = self.terminal.screens.active.cursor.y > 0;
-            if (erased) {
-                self.terminal.screens.active.eraseActive(
-                    self.terminal.screens.active.cursor.y - 1,
-                );
-            }
-
-            // Keep the screen clear consistent by dropping Kitty graphics
-            // state alongside the text clear.
-            self.terminal.screens.active.kitty_images.delete(
-                self.terminal.screens.active.alloc,
-                &self.terminal,
-                .{ .all = true },
-            );
-
-            break :clear erased;
-        }
-
-        // At a prompt, we want to first fully clear the screen, and then after
-        // send a FF (0x0C) to the shell so that it can repaint the screen.
-        self.terminal.eraseDisplay(.complete, false);
-        break :clear null;
+        break :clear clearTerminalScreen(&self.terminal, history);
     };
 
-    // Off a prompt nothing tells the child: ConPTY still holds the erased
-    // rows and its cursor stays below them, so the next line a console
-    // program draws by ConPTY's cursor lands that many rows down. ConPTY
-    // makes the cursor's row its top row too.
-    if (erased_off_prompt) |erased| {
-        if (erased) self.ptyClear(true);
-        return;
+    switch (cleared) {
+        .none => {},
+
+        // Off a prompt nothing tells the child: ConPTY still holds the erased
+        // rows and its cursor stays below them, so the next line a console
+        // program draws by ConPTY's cursor lands that many rows down. ConPTY
+        // makes the cursor's row its top row too.
+        .above_cursor => self.ptyClear(true),
+
+        // At a prompt, we send a form-feed so the shell repaints the screen.
+        .at_prompt => try self.queueWrite(td, &[_]u8{0x0C}, false),
+    }
+}
+
+/// What `clearTerminalScreen` cleared, which decides what the child is told.
+const ScreenClear = enum {
+    /// Nothing the child needs to hear of: the alternate screen, which is
+    /// never cleared, or a cursor on the top row off a prompt.
+    none,
+    /// Off a prompt, the rows above the cursor.
+    above_cursor,
+    /// At a prompt, the whole screen.
+    at_prompt,
+};
+
+/// The terminal half of `clearScreen`, called under the renderer lock.
+fn clearTerminalScreen(t: *terminalpkg.Terminal, history: bool) ScreenClear {
+    // If we're on the alternate screen, we do not clear. Since this is an
+    // emulator-level screen clear, this messes up the running programs
+    // knowledge of where the cursor is and causes rendering issues. So,
+    // for alt screen, we do nothing.
+    if (t.screens.active_key == .alternate) return .none;
+
+    // Clear our selection
+    t.screens.active.clearSelection();
+
+    // Clear our scrollback
+    if (history) t.eraseDisplay(.scrollback, false);
+
+    // If we're not at a prompt, we just delete above the cursor.
+    if (!t.cursorIsAtPrompt()) {
+        const erased = t.screens.active.cursor.y > 0;
+        if (erased) {
+            t.screens.active.eraseActive(t.screens.active.cursor.y - 1);
+        }
+
+        // Keep the screen clear consistent by dropping Kitty graphics
+        // state alongside the text clear.
+        t.screens.active.kitty_images.delete(
+            t.screens.active.alloc,
+            t,
+            .{ .all = true },
+        );
+
+        return if (erased) .above_cursor else .none;
     }
 
-    // If we reached here it means we're at a prompt, so we send a form-feed.
-    try self.queueWrite(td, &[_]u8{0x0C}, false);
+    // At a prompt, we want to first fully clear the screen, and then after
+    // send a FF (0x0C) to the shell so that it can repaint the screen.
+    t.eraseDisplay(.complete, false);
+
+    // ED 2 at a prompt scrolls the screen into scrollback when the last
+    // non-empty row is the prompt, blank rows below it included (the #905
+    // heuristic, upstream #14668), so the scrollback erased above would
+    // get the screen back. Erase it again.
+    if (history) t.eraseDisplay(.scrollback, false);
+    return .at_prompt;
 }
 
 /// Scroll the viewport
@@ -1452,6 +1471,41 @@ pub const ThreadData = struct {
 /// not available on a particular platform.
 pub fn getProcessInfo(self: *Termio, comptime info: ProcessInfo) ?ProcessInfo.Type(info) {
     return self.backend.getProcessInfo(info);
+}
+
+test "clear screen at a prompt above blank rows leaves no scrollback" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    for ([_]bool{ true, false }) |history| {
+        var t = try terminalpkg.Terminal.init(alloc, .{ .cols = 10, .rows = 15 });
+        defer t.deinit(alloc);
+
+        // Command output, then a prompt in the middle of the screen with
+        // blank rows below it, as in a fresh window after a few commands.
+        for (0..10) |_| {
+            try t.printString("x");
+            t.carriageReturn();
+            try t.linefeed();
+        }
+        try t.semanticPrompt(.init(.prompt_start));
+        try t.printString("$ ");
+        try t.semanticPrompt(.init(.end_prompt_start_input));
+
+        try testing.expectEqual(ScreenClear.at_prompt, clearTerminalScreen(&t, history));
+        const pages = &t.screens.active.pages;
+        if (history) {
+            // "Clear the screen and scrollback": nothing is left anywhere.
+            try testing.expectEqual(@as(usize, pages.rows), pages.total_rows);
+            const str = try t.screens.active.dumpStringAlloc(alloc, .{ .screen = .{} });
+            defer alloc.free(str);
+            try testing.expectEqualStrings("", str);
+        } else {
+            // Without it ED 2 keeps the screen in scrollback, which shows
+            // the history erase above is what empties it.
+            try testing.expect(pages.total_rows > pages.rows);
+        }
+    }
 }
 
 test "shared terminal dirty helper tracks visible terminal dirtiness" {
