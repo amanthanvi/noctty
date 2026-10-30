@@ -56,6 +56,10 @@ pub const LoadingImage = struct {
     /// used if q isn't set on subsequent chunks.
     quiet: command.Command.Quiet,
 
+    /// Response identifiers from the initial load command. Subsequent chunks
+    /// omit these, so completion responses must use the saved values.
+    response: command.Response = .{},
+
     /// Initialize a chunked immage from the first image transmission.
     /// If this is a multi-chunk image, this should only be the FIRST
     /// chunk.
@@ -77,6 +81,11 @@ pub const LoadingImage = struct {
 
             .display = cmd.display(),
             .quiet = cmd.quiet,
+            .response = .{
+                .id = t.image_id,
+                .image_number = t.image_number,
+                .placement_id = t.placement_id,
+            },
         };
 
         // Special case for the direct medium, we just add the chunk directly.

@@ -160,11 +160,15 @@ fn transmit(
     cmd: *const Command,
 ) Response {
     const t = cmd.transmission().?;
-    var result: Response = .{
-        .id = t.image_id,
-        .image_number = t.image_number,
-        .placement_id = t.placement_id,
-    };
+    const storage = &terminal.screens.active.kitty_images;
+    var result: Response = if (storage.loading) |loading|
+        loading.response
+    else
+        .{
+            .id = t.image_id,
+            .image_number = t.image_number,
+            .placement_id = t.placement_id,
+        };
 
     const load = loadAndAddImage(alloc, terminal, cmd) catch |err| {
         encodeError(&result, err);
@@ -652,6 +656,70 @@ test "kittygfx conflicting identifiers are rejected before mutation" {
         defer cmd.deinit(alloc);
         try testing.expect(execute(alloc, &t, &cmd) == null);
         try testing.expectEqual(@as(usize, 1), storage.placements.count());
+    }
+}
+
+test "kittygfx chunked success response uses initial identifiers" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var t = try Terminal.init(alloc, .{ .rows = 5, .cols = 5 });
+    defer t.deinit(alloc);
+
+    {
+        const cmd = try command.Parser.parseString(
+            alloc,
+            "a=t,f=24,s=1,v=2,I=93,p=7,m=1;AAAA",
+        );
+        defer cmd.deinit(alloc);
+        try testing.expect(execute(alloc, &t, &cmd) == null);
+    }
+
+    {
+        const cmd = try command.Parser.parseString(alloc, "m=0;AAAA");
+        defer cmd.deinit(alloc);
+        const resp = execute(alloc, &t, &cmd) orelse return error.TestExpectedResponse;
+
+        try testing.expect(resp.ok());
+        try testing.expectEqual(@as(u32, 2147483647), resp.id);
+        try testing.expectEqual(@as(u32, 93), resp.image_number);
+        try testing.expectEqual(@as(u32, 7), resp.placement_id);
+
+        var buf: [128]u8 = undefined;
+        var writer: std.Io.Writer = .fixed(&buf);
+        try resp.encode(&writer);
+        try testing.expectEqualStrings(
+            "\x1b_Gi=2147483647,I=93,p=7;OK\x1b\\",
+            writer.buffered(),
+        );
+    }
+}
+
+test "kittygfx chunked error response uses initial identifiers" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var t = try Terminal.init(alloc, .{ .rows = 5, .cols = 5 });
+    defer t.deinit(alloc);
+
+    {
+        const cmd = try command.Parser.parseString(
+            alloc,
+            "a=t,f=24,s=1,v=1,i=41,p=7,m=1;AA==",
+        );
+        defer cmd.deinit(alloc);
+        try testing.expect(execute(alloc, &t, &cmd) == null);
+    }
+
+    {
+        const cmd = try command.Parser.parseString(alloc, "m=0;AA==");
+        defer cmd.deinit(alloc);
+        const resp = execute(alloc, &t, &cmd) orelse return error.TestExpectedResponse;
+
+        try testing.expect(!resp.ok());
+        try testing.expectEqual(@as(u32, 41), resp.id);
+        try testing.expectEqual(@as(u32, 7), resp.placement_id);
+        try testing.expectEqualStrings("EINVAL: invalid data", resp.message);
     }
 }
 
