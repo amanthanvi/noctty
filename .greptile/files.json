@@ -11,6 +11,7 @@
         "src/pty.zig",
         "src/pty_transport_probe.zig",
         "src/termio/**",
+        "src/os/main.zig",
         "src/build/ConptyRedist.zig",
         "scripts/stage-conpty-redist.ps1",
         "src/apprt/win32.zig",
@@ -46,6 +47,8 @@
         "src/Surface.zig",
         "src/termio/stream_handler.zig",
         "src/os/hostname.zig",
+        "src/os/file.zig",
+        "src/os/TempDir.zig",
         "src/config/windows_shell.zig",
         "src/apprt/win32.zig",
         "src/apprt/win32/app.zig",
@@ -59,6 +62,7 @@
       "description": "Self-Correction Log: renderer, GPU, pacing and fonts.",
       "scope": [
         "src/renderer/**",
+        "src/renderer.zig",
         "src/font/**",
         "src/apprt/win32/pixel_format.zig",
         "src/apprt/win32/wgl.zig",
@@ -70,7 +74,8 @@
         "src/apprt/win32/host.zig",
         "src/apprt/win32/surface_presentation.zig",
         "src/apprt/win32/terminal_window.zig",
-        "src/termio/Thread.zig"
+        "src/termio/Thread.zig",
+        "src/Surface.zig"
       ]
     },
     {
@@ -129,7 +134,8 @@
         "src/apprt/win32/terminal_window.zig",
         "src/apprt/win32_palette*.zig",
         "src/apprt/win32_universal_palette.zig",
-        "src/apprt/win32/labels.zig"
+        "src/apprt/win32/labels.zig",
+        "build.zig.zon"
       ]
     },
     {
@@ -194,12 +200,14 @@
         "src/Surface.zig",
         "src/config/url.zig",
         "src/apprt/win32/local_target.zig",
+        "test/windows/link-opener-pathext-probe.ps1",
         "src/apprt/win32.zig",
         "src/apprt/win32/app.zig",
         "src/apprt/win32/host.zig",
         "src/apprt/win32/session.zig",
         "src/apprt/win32/terminal_window.zig",
         "src/terminal/kitty/graphics_image.zig",
+        "src/terminal/kitty/windows.zig",
         "src/config/Config.zig",
         "src/config/windows_visual_studio.zig",
         "src/apprt/win32_elevation.zig",
