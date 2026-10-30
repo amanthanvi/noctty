@@ -20,5 +20,7 @@ test {
     @import("std").testing.refAllDecls(@This());
 
     // Non-public APIs
+    _ = @import("search/pattern.zig");
+    _ = @import("search/query_options.zig");
     _ = @import("search/sliding_window.zig");
 }

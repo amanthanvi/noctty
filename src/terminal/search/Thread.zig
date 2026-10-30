@@ -28,6 +28,7 @@ const Selection = @import("../Selection.zig");
 const Terminal = @import("../Terminal.zig");
 
 const QueryOptions = @import("query_options.zig").QueryOptions;
+const Query = @import("query_options.zig").Query;
 const ScreenSearch = @import("screen.zig").ScreenSearch;
 const SlidingWindow = @import("sliding_window.zig").SlidingWindow;
 const ViewportSearch = @import("viewport.zig").ViewportSearch;
@@ -407,7 +408,10 @@ fn changeQuery(
 
     if (self.search) |*s| {
         // If our search is unchanged, do nothing.
-        if (queryEquals(s.viewport.needle(), s.viewport.window.query_options, needle, query_options)) {
+        if (Query.eql(
+            .{ .needle = s.viewport.needle(), .options = s.viewport.window.query_options },
+            .{ .needle = needle, .options = query_options },
+        )) {
             // Reset clears both the viewport fingerprint and sliding-window
             // buffer, so the forced notify below rescans from a clean state.
             s.viewport.reset();
@@ -505,23 +509,6 @@ fn notifySearchCleared(self: *Thread, invalid: bool) void {
             self.opts.event_userdata,
         );
     }
-}
-
-fn queryEquals(
-    prev_needle: []const u8,
-    prev_options: QueryOptions,
-    next_needle: []const u8,
-    next_options: QueryOptions,
-) bool {
-    if (!prev_options.eql(next_options)) return false;
-
-    if (next_options.regex or next_options.case_sensitive) {
-        return std.mem.eql(u8, prev_needle, next_needle);
-    }
-
-    // Whole-word without explicit case sensitivity still uses the regex
-    // engine's ignorecase path, so equivalent queries are ASCII-insensitive.
-    return std.ascii.eqlIgnoreCase(prev_needle, next_needle);
 }
 
 fn startRefreshTimer(self: *Thread) void {
