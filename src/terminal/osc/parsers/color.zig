@@ -562,6 +562,22 @@ test "OSC 4: multiple requests" {
     }
 }
 
+test "OSC 4: the parser frees requests past the two it holds inline" {
+    const testing = std.testing;
+
+    var p = @import("../../osc.zig").Parser.init(testing.allocator);
+    defer p.deinit();
+
+    // The third request allocates; resetting the parser frees it.
+    for ("4;0;?;1;?;2;?") |ch| p.next(ch);
+    const cmd = p.end('\x1b') orelse return error.NoCommand;
+    try testing.expectEqual(3, cmd.color_operation.requests.count());
+    p.reset();
+
+    for ("104;1;2;3") |ch| p.next(ch);
+    _ = p.end('\x1b') orelse return error.NoCommand;
+}
+
 test "OSC 104:" {
     const testing = std.testing;
     const alloc = testing.allocator;
