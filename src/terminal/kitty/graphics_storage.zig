@@ -477,7 +477,7 @@ pub const ImageStorage = struct {
         self: *ImageStorage,
         alloc: Allocator,
         t: *terminal.Terminal,
-        cmd: command.Delete,
+        cmd: command.Delete.Action,
     ) void {
         switch (cmd) {
             .all => |delete_images| {

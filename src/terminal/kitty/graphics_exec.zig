@@ -43,6 +43,26 @@ pub fn execute(
     // this can change.
     var quiet = cmd.quiet;
 
+    // The protocol makes i and I mutually exclusive for every action, so this
+    // must happen before dispatch and before an action can mutate storage.
+    // https://sw.kovidgoyal.net/kitty/graphics-protocol/#requesting-image-ids-from-the-terminal
+    const identifiers = cmd.control.identifiers();
+    if (identifiers.image_id > 0 and identifiers.image_number > 0) {
+        const resp: Response = .{
+            .id = identifiers.image_id,
+            .image_number = identifiers.image_number,
+            .placement_id = identifiers.placement_id,
+            .message = "EINVAL: image ID and number are mutually exclusive",
+        };
+        log.warn("erroneous kitty graphics response: {s}", .{resp.message});
+
+        return switch (quiet) {
+            .no => resp,
+            .ok => resp,
+            .failures => null,
+        };
+    }
+
     const resp_: ?Response = switch (cmd.control) {
         .query => query(alloc, cmd),
         .display => display(alloc, terminal, cmd),
@@ -89,6 +109,7 @@ pub fn execute(
 
     return null;
 }
+
 /// Execute a "query" command.
 ///
 /// This command is used to attempt to load an image and respond with
@@ -136,9 +157,6 @@ fn transmit(
         .image_number = t.image_number,
         .placement_id = t.placement_id,
     };
-    if (t.image_id > 0 and t.image_number > 0) {
-        return .{ .message = "EINVAL: image ID and number are mutually exclusive" };
-    }
 
     const load = loadAndAddImage(alloc, terminal, cmd) catch |err| {
         encodeError(&result, err);
@@ -319,7 +337,7 @@ fn delete(
     cmd: *const Command,
 ) Response {
     const storage = &terminal.screens.active.kitty_images;
-    storage.delete(alloc, terminal, cmd.control.delete);
+    storage.delete(alloc, terminal, cmd.control.delete.action);
 
     // Delete never responds on success
     return .{};
@@ -419,6 +437,119 @@ fn encodeError(r: *Response, err: EncodeableError) void {
         error.UnsupportedDepth => r.message = "EINVAL: unsupported pixel depth",
         error.DimensionsRequired => r.message = "EINVAL: dimensions required",
         error.DimensionsTooLarge => r.message = "EINVAL: dimensions too large",
+    }
+}
+
+test "kittygfx image id and number are mutually exclusive for every action" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var t = try Terminal.init(alloc, .{ .rows = 5, .cols = 5 });
+    defer t.deinit(alloc);
+
+    const inputs = [_][]const u8{
+        "a=q,f=24,s=1,v=1,i=1,I=2,p=3;AAAA",
+        "a=t,f=24,s=1,v=1,i=1,I=2,p=3;AAAA",
+        "a=T,f=24,s=1,v=1,i=1,I=2,p=3;AAAA",
+        "a=p,i=1,I=2,p=3",
+        "a=d,d=a,i=1,I=2,p=3",
+        "a=f,i=1,I=2,p=3;AAAA",
+        "a=a,i=1,I=2,p=3",
+        "a=c,i=1,I=2,p=3",
+    };
+
+    for (inputs) |input| {
+        const cmd = try command.Parser.parseString(alloc, input);
+        defer cmd.deinit(alloc);
+
+        const resp = execute(alloc, &t, &cmd) orelse return error.TestExpectedResponse;
+        try testing.expect(!resp.ok());
+        try testing.expectEqual(@as(u32, 1), resp.id);
+        try testing.expectEqual(@as(u32, 2), resp.image_number);
+        try testing.expectEqual(@as(u32, 3), resp.placement_id);
+        try testing.expectEqualStrings(
+            "EINVAL: image ID and number are mutually exclusive",
+            resp.message,
+        );
+
+        var buf: [128]u8 = undefined;
+        var writer: std.Io.Writer = .fixed(&buf);
+        try resp.encode(&writer);
+        try testing.expectEqualStrings(
+            "\x1b_Gi=1,I=2,p=3;EINVAL: image ID and number are mutually exclusive\x1b\\",
+            writer.buffered(),
+        );
+    }
+
+    try testing.expectEqual(@as(usize, 0), t.screens.active.kitty_images.images.count());
+    try testing.expectEqual(@as(usize, 0), t.screens.active.kitty_images.placements.count());
+}
+
+test "kittygfx conflicting identifiers are rejected before mutation" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var t = try Terminal.init(alloc, .{ .rows = 5, .cols = 5 });
+    defer t.deinit(alloc);
+    const storage = &t.screens.active.kitty_images;
+
+    // Store an image so a buggy put would succeed and mutate placement state.
+    {
+        const cmd = try command.Parser.parseString(
+            alloc,
+            "a=t,f=24,s=1,v=1,i=1;/wAA",
+        );
+        defer cmd.deinit(alloc);
+        const resp = execute(alloc, &t, &cmd) orelse return error.TestExpectedResponse;
+        try testing.expect(resp.ok());
+    }
+
+    // Directly constructed commands must receive the same validation as
+    // commands produced by the parser.
+    {
+        const cmd: Command = .{ .control = .{ .display = .{
+            .image_id = 1,
+            .image_number = 2,
+            .placement_id = 7,
+            .cursor_movement = .none,
+        } } };
+        const resp = execute(alloc, &t, &cmd) orelse return error.TestExpectedResponse;
+        try testing.expect(!resp.ok());
+        try testing.expectEqual(@as(u32, 1), resp.id);
+        try testing.expectEqual(@as(u32, 2), resp.image_number);
+        try testing.expectEqual(@as(u32, 7), resp.placement_id);
+        try testing.expectEqual(@as(usize, 0), storage.placements.count());
+    }
+
+    // Add a real placement so a buggy delete would remove it.
+    {
+        const cmd = try command.Parser.parseString(alloc, "a=p,i=1,p=7,C=1");
+        defer cmd.deinit(alloc);
+        const resp = execute(alloc, &t, &cmd) orelse return error.TestExpectedResponse;
+        try testing.expect(resp.ok());
+        try testing.expectEqual(@as(usize, 1), storage.placements.count());
+    }
+
+    {
+        const cmd = try command.Parser.parseString(
+            alloc,
+            "a=d,d=i,i=1,I=2,p=7",
+        );
+        defer cmd.deinit(alloc);
+        const resp = execute(alloc, &t, &cmd) orelse return error.TestExpectedResponse;
+        try testing.expect(!resp.ok());
+        try testing.expectEqual(@as(usize, 1), storage.placements.count());
+    }
+
+    // q=2 suppresses the required error response but not the validation.
+    {
+        const cmd = try command.Parser.parseString(
+            alloc,
+            "a=d,d=i,i=1,I=2,p=7,q=2",
+        );
+        defer cmd.deinit(alloc);
+        try testing.expect(execute(alloc, &t, &cmd) == null);
+        try testing.expectEqual(@as(usize, 1), storage.placements.count());
     }
 }
 

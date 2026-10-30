@@ -357,6 +357,53 @@ pub const Command = struct {
         transmit_animation_frame: AnimationFrameLoading,
         control_animation: AnimationControl,
         compose_animation: AnimationFrameComposition,
+
+        pub const Identifiers = struct {
+            image_id: u32 = 0,
+            image_number: u32 = 0,
+            placement_id: u32 = 0,
+        };
+
+        /// Returns the image and placement identifiers for any action.
+        pub fn identifiers(self: Control) Identifiers {
+            return switch (self) {
+                .query, .transmit => |t| .{
+                    .image_id = t.image_id,
+                    .image_number = t.image_number,
+                    .placement_id = t.placement_id,
+                },
+                .transmit_and_display => |t| .{
+                    .image_id = t.transmission.image_id,
+                    .image_number = t.transmission.image_number,
+                    .placement_id = t.transmission.placement_id,
+                },
+                .display => |d| .{
+                    .image_id = d.image_id,
+                    .image_number = d.image_number,
+                    .placement_id = d.placement_id,
+                },
+                .delete => |d| .{
+                    .image_id = d.image_id,
+                    .image_number = d.image_number,
+                    .placement_id = d.placement_id,
+                },
+                .transmit_animation_frame => |f| .{
+                    .image_id = f.image_id,
+                    .image_number = f.image_number,
+                    .placement_id = f.placement_id,
+                },
+                .control_animation => |a| .{
+                    .image_id = a.image_id,
+                    .image_number = a.image_number,
+                    .placement_id = a.placement_id,
+                },
+                .compose_animation => |c| .{
+                    .image_id = c.image_id,
+                    .image_number = c.image_number,
+                    .placement_id = c.placement_id,
+                },
+            };
+        }
     };
 
     /// Take ownership over the data in this command. If the returned value
@@ -649,6 +696,9 @@ pub const Display = struct {
 };
 
 pub const AnimationFrameLoading = struct {
+    image_id: u32 = 0, // i
+    image_number: u32 = 0, // I
+    placement_id: u32 = 0, // p
     x: u32 = 0, // x
     y: u32 = 0, // y
     create_frame: u32 = 0, // c
@@ -666,6 +716,18 @@ pub const AnimationFrameLoading = struct {
 
     fn parse(kv: KV) !AnimationFrameLoading {
         var result: AnimationFrameLoading = .{};
+
+        if (kv.get('i')) |v| {
+            result.image_id = v;
+        }
+
+        if (kv.get('I')) |v| {
+            result.image_number = v;
+        }
+
+        if (kv.get('p')) |v| {
+            result.placement_id = v;
+        }
 
         if (kv.get('x')) |v| {
             result.x = v;
@@ -704,6 +766,9 @@ pub const AnimationFrameLoading = struct {
 };
 
 pub const AnimationFrameComposition = struct {
+    image_id: u32 = 0, // i
+    image_number: u32 = 0, // I
+    placement_id: u32 = 0, // p
     frame: u32 = 0, // c
     edit_frame: u32 = 0, // r
     x: u32 = 0, // x
@@ -716,6 +781,18 @@ pub const AnimationFrameComposition = struct {
 
     fn parse(kv: KV) !AnimationFrameComposition {
         var result: AnimationFrameComposition = .{};
+
+        if (kv.get('i')) |v| {
+            result.image_id = v;
+        }
+
+        if (kv.get('I')) |v| {
+            result.image_number = v;
+        }
+
+        if (kv.get('p')) |v| {
+            result.placement_id = v;
+        }
 
         if (kv.get('c')) |v| {
             result.frame = v;
@@ -762,6 +839,9 @@ pub const AnimationFrameComposition = struct {
 };
 
 pub const AnimationControl = struct {
+    image_id: u32 = 0, // i
+    image_number: u32 = 0, // I
+    placement_id: u32 = 0, // p
     action: AnimationAction = .invalid, // s
     frame: u32 = 0, // r
     gap_ms: u32 = 0, // z
@@ -777,6 +857,18 @@ pub const AnimationControl = struct {
 
     fn parse(kv: KV) !AnimationControl {
         var result: AnimationControl = .{};
+
+        if (kv.get('i')) |v| {
+            result.image_id = v;
+        }
+
+        if (kv.get('I')) |v| {
+            result.image_number = v;
+        }
+
+        if (kv.get('p')) |v| {
+            result.placement_id = v;
+        }
 
         if (kv.get('s')) |v| {
             result.action = switch (v) {
@@ -808,180 +900,196 @@ pub const AnimationControl = struct {
     }
 };
 
-pub const Delete = union(enum) {
-    // a/A
-    all: bool,
-
-    // i/I
-    id: struct {
-        delete: bool = false, // uppercase
-        image_id: u32 = 0, // i
-        placement_id: u32 = 0, // p
-    },
-
-    // n/N
-    newest: struct {
-        delete: bool = false, // uppercase
-        image_number: u32 = 0, // I
-        placement_id: u32 = 0, // p
-    },
-
-    // c/C,
-    intersect_cursor: bool,
-
-    // f/F
-    animation_frames: bool,
-
-    // p/P
-    intersect_cell: struct {
-        delete: bool = false, // uppercase
-        x: u32 = 0, // x
-        y: u32 = 0, // y
-    },
-
-    // q/Q
-    intersect_cell_z: struct {
-        delete: bool = false, // uppercase
-        x: u32 = 0, // x
-        y: u32 = 0, // y
-        z: i32 = 0, // z
-    },
-
-    // r/R
-    range: struct {
-        delete: bool = false, // uppercase
-        first: u32 = 0, // x
-        last: u32 = 0, // y
-    },
-
-    // x/X
-    column: struct {
-        delete: bool = false, // uppercase
-        x: u32 = 0, // x
-    },
-
-    // y/Y
-    row: struct {
-        delete: bool = false, // uppercase
-        y: u32 = 0, // y
-    },
-
-    // z/Z
-    z: struct {
-        delete: bool = false, // uppercase
-        z: i32 = 0, // z
-    },
+pub const Delete = struct {
+    image_id: u32 = 0, // i
+    image_number: u32 = 0, // I
+    placement_id: u32 = 0, // p
+    action: Action,
 
     fn parse(kv: KV) !Delete {
-        const what: u8 = what: {
-            const value = kv.get('d') orelse break :what 'a';
-            const c = std.math.cast(u8, value) orelse return error.InvalidFormat;
-            break :what c;
-        };
-
-        return switch (what) {
-            'a', 'A' => .{ .all = what == 'A' },
-
-            'i', 'I' => blk: {
-                var result: Delete = .{ .id = .{ .delete = what == 'I' } };
-                if (kv.get('i')) |v| {
-                    result.id.image_id = v;
-                }
-                if (kv.get('p')) |v| {
-                    result.id.placement_id = v;
-                }
-
-                break :blk result;
-            },
-
-            'n', 'N' => blk: {
-                var result: Delete = .{ .newest = .{ .delete = what == 'N' } };
-                if (kv.get('I')) |v| {
-                    result.newest.image_number = v;
-                }
-                if (kv.get('p')) |v| {
-                    result.newest.placement_id = v;
-                }
-
-                break :blk result;
-            },
-
-            'c', 'C' => .{ .intersect_cursor = what == 'C' },
-
-            'f', 'F' => .{ .animation_frames = what == 'F' },
-
-            'p', 'P' => blk: {
-                var result: Delete = .{ .intersect_cell = .{ .delete = what == 'P' } };
-                if (kv.get('x')) |v| {
-                    result.intersect_cell.x = v;
-                }
-                if (kv.get('y')) |v| {
-                    result.intersect_cell.y = v;
-                }
-
-                break :blk result;
-            },
-
-            'q', 'Q' => blk: {
-                var result: Delete = .{ .intersect_cell_z = .{ .delete = what == 'Q' } };
-                if (kv.get('x')) |v| {
-                    result.intersect_cell_z.x = v;
-                }
-                if (kv.get('y')) |v| {
-                    result.intersect_cell_z.y = v;
-                }
-                if (kv.get('z')) |v| {
-                    // We can bitcast here because of how we parse it earlier.
-                    result.intersect_cell_z.z = @bitCast(v);
-                }
-
-                break :blk result;
-            },
-
-            'r', 'R' => blk: {
-                const x = kv.get('x') orelse return error.InvalidFormat;
-                const y = kv.get('y') orelse return error.InvalidFormat;
-                if (x > y) return error.InvalidFormat;
-                break :blk .{
-                    .range = .{
-                        .delete = what == 'R',
-                        .first = x,
-                        .last = y,
-                    },
-                };
-            },
-
-            'x', 'X' => blk: {
-                var result: Delete = .{ .column = .{ .delete = what == 'X' } };
-                if (kv.get('x')) |v| {
-                    result.column.x = v;
-                }
-
-                break :blk result;
-            },
-
-            'y', 'Y' => blk: {
-                var result: Delete = .{ .row = .{ .delete = what == 'Y' } };
-                if (kv.get('y')) |v| {
-                    result.row.y = v;
-                }
-
-                break :blk result;
-            },
-
-            'z', 'Z' => blk: {
-                var result: Delete = .{ .z = .{ .delete = what == 'Z' } };
-                if (kv.get('z')) |v| {
-                    // We can bitcast here because of how we parse it earlier.
-                    result.z.z = @bitCast(v);
-                }
-
-                break :blk result;
-            },
-
-            else => return error.InvalidFormat,
+        return .{
+            .image_id = kv.get('i') orelse 0,
+            .image_number = kv.get('I') orelse 0,
+            .placement_id = kv.get('p') orelse 0,
+            .action = try .parse(kv),
         };
     }
+
+    pub const Action = union(enum) {
+        // a/A
+        all: bool,
+
+        // i/I
+        id: struct {
+            delete: bool = false, // uppercase
+            image_id: u32 = 0, // i
+            placement_id: u32 = 0, // p
+        },
+
+        // n/N
+        newest: struct {
+            delete: bool = false, // uppercase
+            image_number: u32 = 0, // I
+            placement_id: u32 = 0, // p
+        },
+
+        // c/C,
+        intersect_cursor: bool,
+
+        // f/F
+        animation_frames: bool,
+
+        // p/P
+        intersect_cell: struct {
+            delete: bool = false, // uppercase
+            x: u32 = 0, // x
+            y: u32 = 0, // y
+        },
+
+        // q/Q
+        intersect_cell_z: struct {
+            delete: bool = false, // uppercase
+            x: u32 = 0, // x
+            y: u32 = 0, // y
+            z: i32 = 0, // z
+        },
+
+        // r/R
+        range: struct {
+            delete: bool = false, // uppercase
+            first: u32 = 0, // x
+            last: u32 = 0, // y
+        },
+
+        // x/X
+        column: struct {
+            delete: bool = false, // uppercase
+            x: u32 = 0, // x
+        },
+
+        // y/Y
+        row: struct {
+            delete: bool = false, // uppercase
+            y: u32 = 0, // y
+        },
+
+        // z/Z
+        z: struct {
+            delete: bool = false, // uppercase
+            z: i32 = 0, // z
+        },
+
+        fn parse(kv: KV) !Action {
+            const what: u8 = what: {
+                const value = kv.get('d') orelse break :what 'a';
+                const c = std.math.cast(u8, value) orelse return error.InvalidFormat;
+                break :what c;
+            };
+
+            return switch (what) {
+                'a', 'A' => .{ .all = what == 'A' },
+
+                'i', 'I' => blk: {
+                    var result: Action = .{ .id = .{ .delete = what == 'I' } };
+                    if (kv.get('i')) |v| {
+                        result.id.image_id = v;
+                    }
+                    if (kv.get('p')) |v| {
+                        result.id.placement_id = v;
+                    }
+
+                    break :blk result;
+                },
+
+                'n', 'N' => blk: {
+                    var result: Action = .{ .newest = .{ .delete = what == 'N' } };
+                    if (kv.get('I')) |v| {
+                        result.newest.image_number = v;
+                    }
+                    if (kv.get('p')) |v| {
+                        result.newest.placement_id = v;
+                    }
+
+                    break :blk result;
+                },
+
+                'c', 'C' => .{ .intersect_cursor = what == 'C' },
+
+                'f', 'F' => .{ .animation_frames = what == 'F' },
+
+                'p', 'P' => blk: {
+                    var result: Action = .{ .intersect_cell = .{ .delete = what == 'P' } };
+                    if (kv.get('x')) |v| {
+                        result.intersect_cell.x = v;
+                    }
+                    if (kv.get('y')) |v| {
+                        result.intersect_cell.y = v;
+                    }
+
+                    break :blk result;
+                },
+
+                'q', 'Q' => blk: {
+                    var result: Action = .{ .intersect_cell_z = .{ .delete = what == 'Q' } };
+                    if (kv.get('x')) |v| {
+                        result.intersect_cell_z.x = v;
+                    }
+                    if (kv.get('y')) |v| {
+                        result.intersect_cell_z.y = v;
+                    }
+                    if (kv.get('z')) |v| {
+                        // We can bitcast here because of how we parse it earlier.
+                        result.intersect_cell_z.z = @bitCast(v);
+                    }
+
+                    break :blk result;
+                },
+
+                'r', 'R' => blk: {
+                    const x = kv.get('x') orelse return error.InvalidFormat;
+                    const y = kv.get('y') orelse return error.InvalidFormat;
+                    if (x > y) return error.InvalidFormat;
+                    break :blk .{
+                        .range = .{
+                            .delete = what == 'R',
+                            .first = x,
+                            .last = y,
+                        },
+                    };
+                },
+
+                'x', 'X' => blk: {
+                    var result: Action = .{ .column = .{ .delete = what == 'X' } };
+                    if (kv.get('x')) |v| {
+                        result.column.x = v;
+                    }
+
+                    break :blk result;
+                },
+
+                'y', 'Y' => blk: {
+                    var result: Action = .{ .row = .{ .delete = what == 'Y' } };
+                    if (kv.get('y')) |v| {
+                        result.row.y = v;
+                    }
+
+                    break :blk result;
+                },
+
+                'z', 'Z' => blk: {
+                    var result: Action = .{ .z = .{ .delete = what == 'Z' } };
+                    if (kv.get('z')) |v| {
+                        // We can bitcast here because of how we parse it earlier.
+                        result.z.z = @bitCast(v);
+                    }
+
+                    break :blk result;
+                },
+
+                else => return error.InvalidFormat,
+            };
+        }
+    };
 };
 
 pub const CompositionMode = enum {
@@ -1111,7 +1219,7 @@ test "delete command" {
     defer command.deinit(alloc);
 
     try testing.expect(command.control == .delete);
-    const v = command.control.delete;
+    const v = command.control.delete.action;
     try testing.expect(v == .intersect_cell);
     const dv = v.intersect_cell;
     try testing.expect(!dv.delete);
@@ -1311,7 +1419,7 @@ test "delete range command 1" {
     defer command.deinit(alloc);
 
     try testing.expect(command.control == .delete);
-    const v = command.control.delete;
+    const v = command.control.delete.action;
     try testing.expect(v == .range);
     const range = v.range;
     try testing.expect(!range.delete);
@@ -1331,7 +1439,7 @@ test "delete range command 2" {
     defer command.deinit(alloc);
 
     try testing.expect(command.control == .delete);
-    const v = command.control.delete;
+    const v = command.control.delete.action;
     try testing.expect(v == .range);
     const range = v.range;
     try testing.expect(range.delete);
