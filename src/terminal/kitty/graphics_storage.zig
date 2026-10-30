@@ -768,8 +768,8 @@ pub const ImageStorage = struct {
     }
 
     /// Evict image to make space. This will evict the oldest image,
-    /// prioritizing unused images first, as recommended by the published
-    /// Kitty spec.
+    /// prioritizing transient images and unused images as recommended by the
+    /// published Kitty spec.
     ///
     /// This will evict as many images as necessary to make space for
     /// req bytes, never the image `exclude_id` names. The screen must own
@@ -789,7 +789,12 @@ pub const ImageStorage = struct {
         const Candidate = struct {
             id: u32,
             time: std.time.Instant,
-            used: bool,
+            // Map images into four distinct blocks:
+            // 0: transient, unused
+            // 1: not transient, unused
+            // 2: transient, used
+            // 3: not transient, used
+            block: u2,
         };
 
         var candidates: std.ArrayList(Candidate) = .empty;
@@ -815,10 +820,12 @@ pub const ImageStorage = struct {
                 break :used false;
             };
 
+            const transient = img.usage.transient;
+
             try candidates.append(alloc, .{
                 .id = img.id,
                 .time = img.transmit_time,
-                .used = used,
+                .block = (if (transient) @as(u2, 0) else @as(u2, 1)) + (if (used) @as(u2, 2) else @as(u2, 0)),
             });
         }
 
@@ -835,15 +842,18 @@ pub const ImageStorage = struct {
                 ) bool {
                     _ = ctx;
 
-                    // If they're usage matches, then its based on time.
-                    if (lhs.used == rhs.used) return switch (lhs.time.order(rhs.time)) {
+                    // If images mapped into different blocks, prioritize lower
+                    // numbered blocks.
+                    if (lhs.block < rhs.block) return true;
+                    if (lhs.block > rhs.block) return false;
+
+                    // If images mapped to the same block, the oldest goes
+                    // first, then the lowest ID.
+                    return switch (lhs.time.order(rhs.time)) {
                         .lt => true,
                         .gt => false,
                         .eq => lhs.id < rhs.id,
                     };
-
-                    // If not used, then its a better candidate
-                    return !lhs.used;
                 }
             }.lessThan,
         );
@@ -3020,4 +3030,50 @@ test "storage: eviction stops once it has freed enough bytes" {
     try testing.expect(s.images.contains(2));
     try testing.expect(s.images.contains(3));
     try testing.expectEqual(@as(usize, 10), s.total_bytes);
+}
+
+test "storage: evict unused transient image" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    var t = try terminal.Terminal.init(alloc, .{ .rows = 3, .cols = 3 });
+    defer t.deinit(alloc);
+
+    var s: ImageStorage = .{ .total_limit = 192 };
+    defer s.deinit(alloc, t.screens.active);
+
+    // Equal transmit times would evict unused images in ID order, image 1
+    // first, without the hint.
+    const time = try std.time.Instant.now();
+    try s.addImage(alloc, t.screens.active, .{
+        .id = 1,
+        .data = try alloc.dupe(u8, "*" ** 64),
+        .usage = .{ .transient = false },
+        .transmit_time = time,
+    });
+    try s.addImage(alloc, t.screens.active, .{
+        .id = 2,
+        .data = try alloc.dupe(u8, "*" ** 64),
+        .usage = .{ .transient = true },
+        .transmit_time = time,
+    });
+    try s.addImage(alloc, t.screens.active, .{
+        .id = 3,
+        .data = try alloc.dupe(u8, "*" ** 64),
+        .usage = .{ .transient = true },
+        .transmit_time = time,
+    });
+    try s.addPlacement(
+        alloc,
+        t.screens.active,
+        2,
+        1,
+        .{ .location = .{ .pin = try trackPin(&t, .{ .x = 1, .y = 1 }) } },
+    );
+
+    const result = try s.evictImage(alloc, t.screens.active, 32, null);
+    try testing.expectEqual(true, result);
+    try testing.expectEqual(2, s.images.count());
+    try testing.expect(s.images.contains(1));
+    try testing.expect(s.images.contains(2));
+    try testing.expect(!s.images.contains(3));
 }

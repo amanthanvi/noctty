@@ -62,6 +62,7 @@ pub const LoadingImage = struct {
                 .height = t.height,
                 .compression = t.compression,
                 .format = t.format,
+                .usage = t.usage,
             },
 
             .display = cmd.display(),
@@ -492,6 +493,7 @@ pub const Image = struct {
     format: command.Transmission.Format = .rgb,
     compression: command.Transmission.Compression = .none,
     data: []const u8 = "",
+    usage: command.Transmission.Usage = .default,
     transmit_time: std.time.Instant = undefined,
 
     /// Set this to true if this image was loaded by a command that
