@@ -219,17 +219,17 @@ conhost answered several itself and returned nothing for others. Replies were
 identical across the three shells, and no query was answered twice. The
 values describe the probe's 100x30 grid and configured colours.
 
-| Query                                                     | Bundled: replied by noctty   | In-box                                                        |
-| --------------------------------------------------------- | ---------------------------- | ------------------------------------------------------------- |
-| DA1 `CSI c`                                               | `CSI ?62;22;52c`             | conhost: `CSI ?61;6;7;21;22;23;24;28;32;42c`                  |
-| DA2 `CSI >c`                                              | `CSI >1;10;0c`               | conhost: `CSI >0;10;1c`                                       |
-| DA3 `CSI =c`                                              | none                         | conhost: `DCS !\|00000000 ST`                                 |
-| DECRQM 2026, before and after `CSI ?2026h`                | `2`, then `1`                | `0`, then `0`: synchronized output looks unsupported          |
-| DECRQM 1004 / 9001                                        | `1` / `1` (9001: see below)  | `2` / `2`                                                     |
-| XTGETTCAP `TN`, `Co`, `RGB`                               | three replies                | none                                                          |
-| OSC 4 / 10 / 11 / 12 colour queries                       | noctty's palette and colours | none                                                          |
-| Private CPR `CSI ?6n`                                     | none                         | conhost: `CSI ?1;15;1R`                                       |
-| XTVERSION, DECRQSS, `CSI ?u`, `CSI 14/16/18t`, DSR 5, CPR | answered                     | same bytes; conhost answers DSR, CPR, DECRQSS and size itself |
+| Query                                                     | Bundled: replied by noctty    | In-box                                                        |
+| --------------------------------------------------------- | ----------------------------- | ------------------------------------------------------------- |
+| DA1 `CSI c`                                               | `CSI ?62;22;52c`              | conhost: `CSI ?61;6;7;21;22;23;24;28;32;42c`                  |
+| DA2 `CSI >c`                                              | `CSI >1;10;0c`                | conhost: `CSI >0;10;1c`                                       |
+| DA3 `CSI =c`                                              | none                          | conhost: `DCS !\|00000000 ST`                                 |
+| DECRQM 2026, before and after `CSI ?2026h`                | `2`, then `1`                 | `0`, then `0`: synchronized output looks unsupported          |
+| DECRQM 1004 / 9001                                        | `1` / `1` (9001: see below)   | `2` / `2`                                                     |
+| XTGETTCAP `TN`, `Co`, `RGB`                               | three replies                 | none                                                          |
+| OSC 4 / 10 / 11 / 12 colour queries                       | noctty's palette and colours  | none                                                          |
+| Private CPR `CSI ?6n`                                     | `CSI ?row;col;1R` (see below) | conhost: `CSI ?1;15;1R`                                       |
+| XTVERSION, DECRQSS, `CSI ?u`, `CSI 14/16/18t`, DSR 5, CPR | answered                      | same bytes; conhost answers DSR, CPR, DECRQSS and size itself |
 
 So on the in-box path a program detects conhost's capabilities rather than
 noctty's, finds no synchronized output, and waits out its own timeout for
@@ -238,7 +238,13 @@ output byte-for-byte, while the in-box stream re-rendered it. The 9001 half
 of the DECRQM row was `0` (unknown mode) when the table was measured and is
 `1` by code: the mode is now tracked (`modes.zig`, pinned by the `modeFromInt`
 test) and reported through the same `requestMode` path the measured 1004
-reply took; it was not re-measured through the pty.
+reply took; it was not re-measured through the pty. The private CPR row was
+`none` when measured, when noctty had no DECXCPR reply, and is
+`CSI ?row;col;1R` (page 1) by code: the 2026-10 upstream merge took DECXCPR
+(upstream #14673), pinned by the termio `DECXCPR reports the cursor position
+with page 1` test. Whether the bundled ConPTY passes `CSI ?6n` through to
+noctty was not measured, so this reply was not measured through the pty
+either.
 
 Measurement host: Windows `10.0.26300`; in-box `System32\conhost.exe`
 FileVersion `10.0.26100.1`; bundled `conpty.dll` FileVersion
