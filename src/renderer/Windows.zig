@@ -90,11 +90,10 @@ fn openGLCouldNotStart(surface: *const apprt.Surface) bool {
 pub fn init(alloc: std.mem.Allocator, options: renderer.Options) !Windows {
     // As for the generic renderer, the config is ours only on success: a
     // failed init leaves it to the caller (`Surface.init`) to free.
-    const config = options.config;
-    const requested = config.renderer_backend;
+    const requested = options.config.renderer_backend;
     const safe_mode = options.rt_surface.app.safe_mode;
     const recovery_preference = if (safe_mode) .@"d3d11-warp" else requested;
-    const feature = selection.unsupported(config.custom_shaders.value.items.len != 0, config.bg_image != null, false);
+    const feature = selection.unsupported(options.config.custom_shaders.value.items.len != 0, options.config.bg_image != null, false);
     var result: Windows = .{ .alloc = alloc, .rt_surface = options.rt_surface, .surface_mailbox = options.surface_mailbox, .active = undefined, .thread = options.thread };
     const skip_opengl = apprt.win32.openGLUnavailable();
     var opengl_error: ?anyerror = null;
