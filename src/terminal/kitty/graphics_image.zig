@@ -275,15 +275,15 @@ pub const LoadingImage = struct {
             return error.InvalidData;
         }
 
+        // The reader reads at its own position, not the file's, so seek it.
+        var buf: [4096]u8 = undefined;
+        var buf_reader = file.reader(&buf);
         if (t.offset > 0) {
-            file.seekTo(@intCast(t.offset)) catch |err| {
+            buf_reader.seekTo(t.offset) catch |err| {
                 log.warn("failed to seek to offset {}: {}", .{ t.offset, err });
                 return error.InvalidData;
             };
         }
-
-        var buf: [4096]u8 = undefined;
-        var buf_reader = file.reader(&buf);
         const reader = &buf_reader.interface;
 
         // Read the file
@@ -1296,6 +1296,39 @@ test "image load: rgb, not compressed, regular file" {
     defer img.deinit(alloc);
     try testing.expect(img.compression == .none);
     try tmp_dir.dir.access(path, .{});
+}
+
+test "image load: regular file offset skips leading bytes" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var tmp_dir = try temp_dir.TempDir.init();
+    defer tmp_dir.deinit();
+    try tmp_dir.dir.writeFile(.{
+        .sub_path = "image.data",
+        .data = &.{ 1, 2, 3, 4, 5, 6 },
+    });
+
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const path = try tmp_dir.dir.realpath("image.data", &path_buf);
+
+    // Without S the read runs from the offset to the end of the file.
+    var cmd: command.Command = .{
+        .control = .{ .transmit = .{
+            .format = .rgb,
+            .medium = .file,
+            .width = 1,
+            .height = 1,
+            .offset = 3,
+            .image_id = 31,
+        } },
+        .data = try alloc.dupe(u8, path),
+    };
+    defer cmd.deinit(alloc);
+
+    var loading = try LoadingImage.init(alloc, &cmd);
+    defer loading.deinit(alloc);
+    try testing.expectEqualSlices(u8, &.{ 4, 5, 6 }, loading.data.items);
 }
 
 test "image load: png rejects oversized Wuffs image before allocation" {
