@@ -91,6 +91,28 @@ pub fn lookup(alloc: std.mem.Allocator, path: []const u8, options: Options) Look
     return .{ .file = file };
 }
 
+/// The name the last component of `path` is stored under in its folder,
+/// through a guarded open of that folder. NTFS also finds a file by its 8.3
+/// alias (`CMD~1` for `.cmd`), which the shell namespace types by this long
+/// name. Null when the folder cannot be opened as local or holds no such
+/// entry.
+pub fn entryName(alloc: std.mem.Allocator, path: []const u8) ?[]u8 {
+    const leaf = std.fs.path.basename(path);
+    // The query takes a pattern, so a wildcard would name another entry.
+    if (leaf.len == 0 or std.mem.indexOfAny(u8, leaf, "*?<>\"") != null) return null;
+    const dir = open(alloc, std.fs.path.dirname(path) orelse return null, true) orelse return null;
+    defer dir.close();
+    const leaf_w = std.unicode.utf8ToUtf16LeAlloc(alloc, leaf) catch return null;
+    defer alloc.free(leaf_w);
+    var pattern = unicodeString(leaf_w);
+    var buffer: [@sizeOf(windows.FILE_DIRECTORY_INFORMATION) + windows.NAME_MAX * 2]u8 align(@alignOf(windows.FILE_DIRECTORY_INFORMATION)) = undefined;
+    var io: windows.IO_STATUS_BLOCK = undefined;
+    if (windows.ntdll.NtQueryDirectoryFile(dir.handle, null, null, null, &io, &buffer, buffer.len, .FileDirectoryInformation, windows.TRUE, &pattern, windows.TRUE) != .SUCCESS) return null;
+    const info: *const windows.FILE_DIRECTORY_INFORMATION = @ptrCast(&buffer);
+    const name_w: [*]const u16 = @ptrCast(&info.FileName);
+    return std.unicode.utf16LeToUtf8Alloc(alloc, name_w[0 .. info.FileNameLength / 2]) catch null;
+}
+
 fn notFound(status: windows.NTSTATUS) bool {
     return status == .OBJECT_NAME_NOT_FOUND or status == .OBJECT_PATH_NOT_FOUND;
 }
@@ -110,12 +132,16 @@ const CreateOptions = struct {
     pin_reparse: bool = false,
 };
 
-fn create(name_w: []const u16, parent: ?windows.HANDLE, attributes: u32, options: CreateOptions, handle: *windows.HANDLE) windows.NTSTATUS {
-    var name: windows.UNICODE_STRING = .{
-        .Length = @intCast(name_w.len * 2),
-        .MaximumLength = @intCast(name_w.len * 2),
-        .Buffer = @constCast(name_w.ptr),
+fn unicodeString(wide: []const u16) windows.UNICODE_STRING {
+    return .{
+        .Length = @intCast(wide.len * 2),
+        .MaximumLength = @intCast(wide.len * 2),
+        .Buffer = @constCast(wide.ptr),
     };
+}
+
+fn create(name_w: []const u16, parent: ?windows.HANDLE, attributes: u32, options: CreateOptions, handle: *windows.HANDLE) windows.NTSTATUS {
+    var name = unicodeString(name_w);
     var attrs: windows.OBJECT_ATTRIBUTES = .{
         .Length = @sizeOf(windows.OBJECT_ATTRIBUTES),
         .RootDirectory = parent,
@@ -601,4 +627,34 @@ test "link opener walks local volume GUID mount targets" {
     const opened = walk(alloc, normalized, false, 0, &state) orelse return error.TestUnexpectedResult;
     defer opened.close();
     try std.testing.expect(hasLocalFinalPath(opened.handle));
+}
+
+test "local target entry name is the name its folder stores" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(.{ .sub_path = "Mixed Case.txt", .data = "" });
+    const root = try tmp.dir.realpathAlloc(alloc, ".");
+    defer alloc.free(root);
+    for ([_]struct { spelled: []const u8, stored: ?[]const u8 }{
+        .{ .spelled = "mixed case.TXT", .stored = "Mixed Case.txt" },
+        .{ .spelled = "missing.txt", .stored = null },
+        // A pattern character never matches another entry.
+        .{ .spelled = "*.txt", .stored = null },
+        .{ .spelled = "Mixed Case.tx?", .stored = null },
+        .{ .spelled = "Mixed Case<txt", .stored = null },
+    }) |case| {
+        const path = try std.fs.path.join(alloc, &.{ root, case.spelled });
+        defer alloc.free(path);
+        const stored = entryName(alloc, path);
+        defer if (stored) |name| alloc.free(name);
+        try std.testing.expectEqualStrings(case.stored orelse "(none)", stored orelse "(none)");
+    }
+
+    // A folder at a drive's root, whose parent is the root itself.
+    const system_root = try std.process.getEnvVarOwned(alloc, "SystemRoot");
+    defer alloc.free(system_root);
+    const stored = entryName(alloc, system_root) orelse return error.TestUnexpectedResult;
+    defer alloc.free(stored);
+    try std.testing.expect(std.ascii.eqlIgnoreCase(std.fs.path.basename(system_root), stored));
 }

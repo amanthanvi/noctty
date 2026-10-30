@@ -7794,6 +7794,29 @@ pub const App = struct {
             try std.testing.expectEqual(@as(usize, 0), app.deferred_opens.items.len);
         }
 
+        // So does a script's 8.3 alias, which link text such as `.\CMD~1`
+        // resolves to unchanged (`Surface.existingPath`): it is refused by
+        // the name its folder stores.
+        var tmp = try internal_os.TempDir.init();
+        defer tmp.deinit();
+        try tmp.dir.writeFile(.{ .sub_path = ".cmd", .data = "fixture" });
+        const script = try tmp.dir.realpathAlloc(std.testing.allocator, ".cmd");
+        defer std.testing.allocator.free(script);
+        const alias = try test_short_path.of(std.testing.allocator, script);
+        defer std.testing.allocator.free(alias);
+        if (std.mem.eql(u8, std.fs.path.basename(alias), ".cmd")) {
+            std.log.warn("no 8.3 alias for .cmd; 8.3 names are off on this volume", .{});
+        } else {
+            try host.setBanner(.none, null);
+            try std.testing.expectError(error.OpenUrlRejected, app.performAction(.app, .open_url, .{
+                .kind = .unknown,
+                .url = alias,
+            }));
+            try std.testing.expectEqual(HostBannerKind.info, host.banner_kind);
+            try std.testing.expectEqualStrings(labels.open_refused_banner, host.banner_text.?);
+            try std.testing.expectEqual(@as(usize, 0), app.deferred_opens.items.len);
+        }
+
         // An accepted open leaves the banner alone.
         try host.setBanner(.none, null);
         try std.testing.expect(try app.performAction(.app, .open_url, .{
@@ -7999,28 +8022,47 @@ pub const App = struct {
         const os_windows = @import("../../os/windows.zig");
         if (os_windows.driveTypeForLetter(normalized[0]) == os_windows.DRIVE_REMOTE) return null;
 
-        // Windows associates even a leading-dot basename (".cmd"). Zig's
-        // extension helper treats those as Unix dotfiles with no extension.
-        const basename = std.fs.path.basename(normalized);
-        const extension = if (std.mem.lastIndexOfScalar(u8, basename, '.')) |dot| basename[dot..] else "";
+        const local_target = @import("local_target.zig");
+        const extension = handlerExtension(std.fs.path.basename(normalized));
         // Open local reparse targets through a bounded, handle-relative walk;
         // no unchecked ancestor or symlink target may reach a share or device.
-        const file = @import("local_target.zig").open(alloc, normalized, extension.len == 0) orelse return null;
+        const file = local_target.open(alloc, normalized, extension.len == 0) orelse return null;
         defer file.close();
         // The exact dispatched path had to exist for that open. Query its
         // handle: reopening the path here could follow a swapped junction.
         const stat = file.stat() catch return null;
         if (stat.kind == .directory) return normalized;
-        if (extension.len == 0) {
+        // The open also takes a name's 8.3 alias (`CMD~1` for `.cmd`,
+        // `PAYLOA~1.LIB` for `payload.library-ms`), which the shell namespace
+        // types by its long name: screen that name too.
+        const long_name = local_target.entryName(alloc, normalized) orelse return null;
+        defer alloc.free(long_name);
+        const long_extension = handlerExtension(long_name);
+        if (extension.len == 0 or long_extension.len == 0) {
             // Fail closed for DOS/PE executable signatures, including renamed
             // binaries; short/empty extensionless documents remain viewable.
+            // A file opened without its data (the spelled name has an
+            // extension) cannot be read here, and is refused.
             var magic: [2]u8 = undefined;
             const count = file.readAll(&magic) catch return null;
-            return if (count < 2 or !std.mem.eql(u8, &magic, "MZ")) normalized else null;
+            if (count >= 2 and std.mem.eql(u8, &magic, "MZ")) return null;
         }
+        for ([_][]const u8{ extension, long_extension }) |screened| {
+            if (screened.len != 0 and try isDangerousHandlerExtension(alloc, screened)) return null;
+        }
+        return normalized;
+    }
+
+    /// Windows associates even a leading-dot basename (".cmd"). Zig's
+    /// extension helper treats those as Unix dotfiles with no extension.
+    fn handlerExtension(basename: []const u8) []const u8 {
+        return if (std.mem.lastIndexOfScalar(u8, basename, '.')) |dot| basename[dot..] else "";
+    }
+
+    fn isDangerousHandlerExtension(alloc: Allocator, extension: []const u8) !bool {
         const extension_w = try std.unicode.utf8ToUtf16LeAllocZ(alloc, extension);
         defer alloc.free(extension_w);
-        if (sys.AssocIsDangerous(extension_w.ptr) != 0) return null;
+        if (sys.AssocIsDangerous(extension_w.ptr) != 0) return true;
         const name = extension[1..];
         for ([_][]const u8{
             "exe",                "com",               "bat",         "cmd",       "ps1", "psm1",    "psd1",         "ps1xml",
@@ -8032,9 +8074,9 @@ pub const App = struct {
             "appx",               "settingcontent-ms", "theme",       "themepack", "xll", "website", "jnlp",         "wsc",
             "search-ms",          "wsb",               "ica",         "wcx",
         }) |blocked| {
-            if (std.ascii.eqlIgnoreCase(name, blocked)) return null;
+            if (std.ascii.eqlIgnoreCase(name, blocked)) return true;
         }
-        return normalized;
+        return false;
     }
 
     fn isWin32UncOrDevicePath(path: []const u8) bool {
@@ -10383,6 +10425,71 @@ test "security regression win32 link opener rejects dangerous handler files" {
         const uri = try std.fmt.allocPrint(alloc, "file:///{s}", .{path});
         defer alloc.free(uri);
         try std.testing.expect(!try App.isAllowedWin32OpenTarget(alloc, uri));
+    }
+}
+
+/// For tests: `long` as GetShortPathNameW spells it, every component that has
+/// an 8.3 alias shortened (the parent folders too).
+const test_short_path = struct {
+    extern "kernel32" fn GetShortPathNameW(long: [*:0]const u16, short: [*]u16, len: u32) callconv(.winapi) u32;
+
+    fn of(alloc: Allocator, long: []const u8) ![]u8 {
+        const long_w = try std.unicode.utf8ToUtf16LeAllocZ(alloc, long);
+        defer alloc.free(long_w);
+        var short_w: [windows.PATH_MAX_WIDE]u16 = undefined;
+        const len = GetShortPathNameW(long_w.ptr, &short_w, short_w.len);
+        if (len == 0 or len >= short_w.len) return error.Unexpected;
+        return std.unicode.utf16LeToUtf8Alloc(alloc, short_w[0..len]);
+    }
+};
+
+test "security regression win32 link opener screens the long name behind an 8.3 alias" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const alloc = std.testing.allocator;
+    // In the temp folder: the checkout's drive may make no 8.3 names (a
+    // ReFS Dev Drive, a CI work drive).
+    var tmp = try internal_os.TempDir.init();
+    defer tmp.deinit();
+    for ([_]struct { name: []const u8, allowed: bool }{
+        // A leading-dot name's alias has no extension at all.
+        .{ .name = ".cmd", .allowed = false },
+        .{ .name = ".bat", .allowed = false },
+        .{ .name = ".lnk", .allowed = false },
+        .{ .name = ".url", .allowed = false },
+        .{ .name = ".msi", .allowed = false },
+        .{ .name = ".chm", .allowed = false },
+        .{ .name = ".hta", .allowed = false },
+        .{ .name = ".vbs", .allowed = false },
+        // A longer extension keeps its first three letters.
+        .{ .name = "payload.library-ms", .allowed = false },
+        .{ .name = "payload.searchConnector-ms", .allowed = false },
+        .{ .name = "payload.settingcontent-ms", .allowed = false },
+        .{ .name = "payload.themepack", .allowed = false },
+        .{ .name = "payload.diagcab", .allowed = false },
+        .{ .name = "payload.website", .allowed = false },
+        .{ .name = "payload.jnlp", .allowed = false },
+        .{ .name = "payload.psm1", .allowed = false },
+        .{ .name = "payload.psc1", .allowed = false },
+        // A document stays openable by either name.
+        .{ .name = "photo.jpeg", .allowed = true },
+        .{ .name = ".gitignore", .allowed = true },
+    }) |case| {
+        try tmp.dir.writeFile(.{ .sub_path = case.name, .data = "fixture" });
+        const long = try tmp.dir.realpathAlloc(alloc, case.name);
+        defer alloc.free(long);
+        const short = try test_short_path.of(alloc, long);
+        defer alloc.free(short);
+        if (std.mem.eql(u8, std.fs.path.basename(short), case.name)) {
+            std.log.warn("no 8.3 alias for {s}; 8.3 names are off on this volume", .{case.name});
+            return error.SkipZigTest;
+        }
+        errdefer std.debug.print("{s} as {s}\n", .{ case.name, std.fs.path.basename(short) });
+        try std.testing.expectEqual(case.allowed, try App.isAllowedWin32OpenTarget(alloc, long));
+        try std.testing.expectEqual(case.allowed, try App.isAllowedWin32OpenTarget(alloc, short));
+        std.mem.replaceScalar(u8, short, '\\', '/');
+        const uri = try std.fmt.allocPrint(alloc, "file:///{s}", .{short});
+        defer alloc.free(uri);
+        try std.testing.expectEqual(case.allowed, try App.isAllowedWin32OpenTarget(alloc, uri));
     }
 }
 
