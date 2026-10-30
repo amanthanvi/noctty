@@ -262,6 +262,41 @@ pub const ScreenSearch = struct {
         self.failSearch();
     }
 
+    /// Reinitialize cached search state after a screen resize. Reflow can
+    /// replace every PageList node, so even flattened highlights that weren't
+    /// selected contain invalid node pointers once either dimension changes.
+    ///
+    /// Returns true when the reset occurred. The replacement search has
+    /// already loaded its active area through `init` in that case. A
+    /// matcher that fails to reinitialize ends the search through
+    /// `failSearch`, which also counts as a reset.
+    fn resetIfDimensionsChanged(self: *ScreenSearch) Allocator.Error!bool {
+        if (self.screen.pages.rows == self.rows and
+            self.screen.pages.cols == self.cols)
+        {
+            return false;
+        }
+
+        const previous_match_rows_revision = self.match_rows_revision;
+        const new: ScreenSearch = ScreenSearch.initWithOptions(
+            self.allocator(),
+            self.screen,
+            self.needle(),
+            self.active.window.query_options,
+        ) catch |err| {
+            try self.failSearchUnlessOutOfMemory(err, "error reinitializing screen search after resize");
+            return true;
+        };
+
+        self.deinit();
+        self.* = new;
+        self.match_rows_revision = previous_match_rows_revision +% 1;
+
+        assert(self.screen.pages.rows == self.rows);
+        assert(self.screen.pages.cols == self.cols);
+        return true;
+    }
+
     /// Returns all matches as an owned slice (caller must free).
     /// The matches are ordered from most recent to oldest (e.g. bottom
     /// of the screen to top of the screen).
@@ -442,33 +477,9 @@ pub const ScreenSearch = struct {
     /// Feed on a complete screen search will perform some cleanup of
     /// potentially stale history results (pruned) and reclaim some memory.
     pub fn feed(self: *ScreenSearch) Allocator.Error!void {
-        // If the screen resizes, we have to reset our entire search. That
-        // isn't ideal but we don't have a better way right now to handle
-        // reflowing the search results beyond putting a tracked pin for
-        // every single result.
-        if (self.screen.pages.rows != self.rows or
-            self.screen.pages.cols != self.cols)
-        {
-            const previous_match_rows_revision = self.match_rows_revision;
-
-            // Reinit
-            const new: ScreenSearch = ScreenSearch.initWithOptions(
-                self.allocator(),
-                self.screen,
-                self.needle(),
-                self.active.window.query_options,
-            ) catch |err|
-                return self.failSearchUnlessOutOfMemory(err, "error reinitializing screen search after resize");
-
-            // Deinit/reinit
-            self.deinit();
-            self.* = new;
-            self.match_rows_revision = previous_match_rows_revision +% 1;
-
-            // New result should have matching dimensions
-            assert(self.screen.pages.rows == self.rows);
-            assert(self.screen.pages.cols == self.cols);
-        }
+        // Resize/reflow invalidates every flattened result, not just search
+        // state that needs another history feed.
+        _ = try self.resetIfDimensionsChanged();
 
         const history: *PageListSearch = if (self.history) |*h| &h.searcher else {
             // No history to feed, search is complete.
@@ -611,6 +622,10 @@ pub const ScreenSearch = struct {
 
     // A comptime matcher seam lets tests fail after accumulating results.
     fn reloadActiveWithNext(self: *ScreenSearch, comptime next: anytype) Allocator.Error!void {
+        // This check must precede all inspection of cached highlights and
+        // searchers: column reflow may have freed every node they reference.
+        if (try self.resetIfDimensionsChanged()) return;
+
         const tw = reloadActive_tw;
 
         // If our selection pin became garbage it means we scrolled off
@@ -930,6 +945,11 @@ pub const ScreenSearch = struct {
     /// access to the underlying screen, since we utilize tracked pins to
     /// ensure our selection sticks with contents changing.
     pub fn select(self: *ScreenSearch, to: Select) Allocator.Error!bool {
+        // A resize can replace any page node, including nodes retained by
+        // flattened history results. Reset before reloadActive or tracking a
+        // selected result so no pre-resize pointer is ever dereferenced.
+        _ = try self.resetIfDimensionsChanged();
+
         // All selection requires valid pins so we prune history and
         // reload our active area immediately. This ensures all search
         // results point to valid nodes.
@@ -1373,6 +1393,71 @@ test "select next" {
             .y = 2,
         } }, t.screens.active.pages.pointFromPin(.screen, sel.end).?);
     }
+}
+
+test "select after resize resets stale flattened results" {
+    const alloc = testing.allocator;
+    var t: Terminal = try .init(alloc, .{
+        .cols = 10,
+        .rows = 3,
+        .max_scrollback = std.math.maxInt(usize),
+    });
+    defer t.deinit(alloc);
+
+    var stream = t.vtStream();
+    defer stream.deinit();
+    stream.nextSlice("Fizz\r\nBuzz");
+
+    var search: ScreenSearch = try .init(alloc, t.screens.active, "Fizz");
+    defer search.deinit();
+    try search.searchAll();
+    try testing.expect(try search.select(.next));
+    try testing.expect(search.selectedMatch() != null);
+    try testing.expectEqual(@as(size.CellCountInt, 10), search.cols);
+
+    // Column reflow replaces the nodes referenced by the cached flattened
+    // active result. select() calls reloadActive(), so dimension invalidation
+    // must run before either path dereferences those old nodes.
+    try t.screens.active.pages.resize(.{ .cols = 5 });
+    try testing.expectEqual(@as(size.CellCountInt, 10), search.cols);
+
+    try testing.expect(try search.select(.next));
+    try testing.expectEqual(@as(size.CellCountInt, 5), search.cols);
+
+    const selected = search.selectedMatch().?.untracked();
+    try testing.expectEqual(@as(size.CellCountInt, 5), selected.start.node.data.size.cols);
+    try testing.expectEqual(@as(size.CellCountInt, 5), selected.end.node.data.size.cols);
+}
+
+test "reload after resize resets stale flattened results" {
+    const alloc = testing.allocator;
+    var t: Terminal = try .init(alloc, .{
+        .cols = 10,
+        .rows = 3,
+        .max_scrollback = std.math.maxInt(usize),
+    });
+    defer t.deinit(alloc);
+
+    var stream = t.vtStream();
+    defer stream.deinit();
+    stream.nextSlice("Fizz\r\nBuzz");
+
+    var search: ScreenSearch = try .init(alloc, t.screens.active, "Fizz");
+    defer search.deinit();
+    try search.searchAll();
+    try testing.expect(try search.select(.next));
+    const revision = search.matchRowsRevision();
+
+    // The search thread reloads the active area when the renderer reports
+    // a resized viewport, before any feed sees the new dimensions.
+    try t.screens.active.pages.resize(.{ .cols = 5 });
+    try search.reloadActive();
+    try testing.expectEqual(@as(size.CellCountInt, 5), search.cols);
+    try testing.expect(search.selected == null);
+    try testing.expect(search.matchRowsRevision() != revision);
+
+    const match = search.active_results.items[0].untracked();
+    try testing.expectEqual(@as(size.CellCountInt, 5), match.start.node.data.size.cols);
 }
 
 test "select in active changes contents completely" {
