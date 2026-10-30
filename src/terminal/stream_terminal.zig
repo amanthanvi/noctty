@@ -96,8 +96,12 @@ pub const Handler = struct {
         /// terminal calls this with a `clear` report without an id.
         ///
         /// Setting this also makes the terminal answer the support query,
-        /// `OSC 7501 ; ?`, through `write_pty`. While this is null, the
-        /// query gets no reply, so programs know not to send reports.
+        /// `OSC 7501 ; ?`, through `write_pty`. The reply is
+        /// `osc.program_status.query_reply`, which lists the states and
+        /// kinds the terminal accepts. While this is null, the query gets
+        /// no reply, so a program that asks sees the protocol as
+        /// unsupported. Asking is optional, so reports may still arrive.
+        /// They are dropped.
         program_status: ?*const fn (*Handler, osc.Command.ProgramStatus.Report) void,
 
         /// No effects means that the stream effectively becomes readonly
@@ -291,12 +295,14 @@ pub const Handler = struct {
             .report => |report| self.programStatusReport(report),
 
             // Only claim support when something handles the reports. The
-            // reply is always the same fixed bytes. The specification
-            // never allows sending report contents back to the program.
+            // reply is always the same fixed bytes: `?` and the lists of
+            // states and kinds we accept. The specification never allows
+            // sending report contents back to the program.
             .query => |terminator| if (self.effects.program_status != null) {
+                const reply = "\x1b]7501;" ++ osc.program_status.query_reply;
                 self.writePty(switch (terminator) {
-                    .st => "\x1b]7501;?\x1b\\",
-                    .bel => "\x1b]7501;?\x07",
+                    .st => reply ++ "\x1b\\",
+                    .bel => reply ++ "\x07",
                 });
             },
         }
@@ -2071,7 +2077,7 @@ test "program_status effect callback" {
         var last_id_len: ?usize = null;
         var last_message: [64]u8 = undefined;
         var last_message_len: ?usize = null;
-        var written: [64]u8 = undefined;
+        var written: [128]u8 = undefined;
         var written_len: usize = 0;
 
         fn reset() void {
@@ -2120,12 +2126,15 @@ test "program_status effect callback" {
     var s: Stream = .initAlloc(testing.allocator, handler);
     defer s.deinit();
 
-    // The query is answered once with the same body and terminator.
+    // The query is answered once with `?`, the states and kinds we
+    // accept, and the same terminator the query used.
+    const reply = "\x1b]7501;?:states=idle,working,done,blocked,error" ++
+        ":kinds=permission,question,auth";
     s.nextSlice("\x1b]7501;?\x1b\\");
-    try testing.expectEqualStrings("\x1b]7501;?\x1b\\", S.written[0..S.written_len]);
+    try testing.expectEqualStrings(reply ++ "\x1b\\", S.written[0..S.written_len]);
     S.written_len = 0;
     s.nextSlice("\x1b]7501;?\x07");
-    try testing.expectEqualStrings("\x1b]7501;?\x07", S.written[0..S.written_len]);
+    try testing.expectEqualStrings(reply ++ "\x07", S.written[0..S.written_len]);
     try testing.expectEqual(@as(usize, 0), S.count);
     S.written_len = 0;
 

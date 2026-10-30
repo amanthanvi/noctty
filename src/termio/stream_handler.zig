@@ -1781,15 +1781,19 @@ pub const StreamHandler = struct {
         cmd: terminal.osc.Command.ProgramStatus,
     ) void {
         switch (cmd) {
-            // The reply is always the same fixed bytes, ended the way the
-            // query was. The specification never allows sending anything a
-            // program reported back to it.
-            .query => |terminator| self.messageWriter(.{
-                .write_stable = switch (terminator) {
-                    .st => "\x1b]7501;?\x1b\\",
-                    .bel => "\x1b]7501;?\x07",
-                },
-            }),
+            // The reply is always the same fixed bytes, `?` and the lists
+            // of states and kinds we accept, ended the way the query was.
+            // The specification never allows sending anything a program
+            // reported back to it.
+            .query => |terminator| {
+                const reply = "\x1b]7501;" ++ terminal.osc.program_status.query_reply;
+                self.messageWriter(.{
+                    .write_stable = switch (terminator) {
+                        .st => reply ++ "\x1b\\",
+                        .bel => reply ++ "\x07",
+                    },
+                });
+            },
 
             .report => |report| {
                 const data = apprt.surface.Message.WriteReq.init(
@@ -2826,13 +2830,16 @@ test "OSC 7501 answers the query once and forwards reports, prompts and resets" 
     try h.init(alloc, .{ .seen_title = false });
     defer h.deinit(alloc);
 
-    // The query gets exactly one fixed reply, ended the way it was, and
-    // the surface hears nothing.
+    // The query gets exactly one fixed reply, `?` and the states and
+    // kinds we accept, ended the way it was, and the surface hears
+    // nothing.
+    const reply = "\x1b]7501;?:states=idle,working,done,blocked,error" ++
+        ":kinds=permission,question,auth";
     h.stream.nextSlice("\x1b]7501;?\x1b\\");
-    try std.testing.expectEqualStrings("\x1b]7501;?\x1b\\", popProgramStatusTestWrite(&h.termio_mailbox).?);
+    try std.testing.expectEqualStrings(reply ++ "\x1b\\", popProgramStatusTestWrite(&h.termio_mailbox).?);
     try std.testing.expect(popProgramStatusTestWrite(&h.termio_mailbox) == null);
     h.stream.nextSlice("\x1b]7501;?\x07");
-    try std.testing.expectEqualStrings("\x1b]7501;?\x07", popProgramStatusTestWrite(&h.termio_mailbox).?);
+    try std.testing.expectEqualStrings(reply ++ "\x07", popProgramStatusTestWrite(&h.termio_mailbox).?);
     try std.testing.expect(popProgramStatusTestWrite(&h.termio_mailbox) == null);
     try std.testing.expect(h.nextSurfaceMessage() == null);
 

@@ -470,7 +470,8 @@ typedef enum {
  *
  * - `state`: GHOSTTY_PROGRAM_STATUS_STATE_BLOCKED
  * - `kind`: GHOSTTY_PROGRAM_STATUS_KIND_PERMISSION
- * - `progress`: -1, because the program didn't send one
+ * - `progress`: -1, because the program didn't send one, so the work is
+ *   indeterminate
  * - `id`: empty, because this is the root record
  * - `app`: "terraform"
  * - `title`: empty
@@ -500,10 +501,12 @@ typedef struct {
    * didn't say, or when it sent a kind this version doesn't know. */
   GhosttyProgramStatusKind kind;
 
-  /** How far along the work is, from 0 through 100. Only set for
-   * GHOSTTY_PROGRAM_STATUS_STATE_WORKING and
-   * GHOSTTY_PROGRAM_STATUS_STATE_BLOCKED. It is -1 for other states, when
-   * the program didn't say, or when it sent a value outside that range. */
+  /** How far along the work is, from 0 through 100, or -1 when there is
+   * no percentage. Only set for GHOSTTY_PROGRAM_STATUS_STATE_WORKING and
+   * GHOSTTY_PROGRAM_STATUS_STATE_BLOCKED. For those states, -1 means the
+   * work is indeterminate: the program is busy but has no percentage to
+   * report. It is also -1 for other states and when the program sent a
+   * value outside that range. */
   int8_t progress;
 
   /** Which record this report is about. Empty for the root record.
@@ -516,7 +519,11 @@ typedef struct {
   GhosttyString id;
 
   /** A stable name for the program that a machine can match on, such as
-   * "cargo" or "terraform". */
+   * "cargo", "terraform", or "claude-code". Use it as a key for grouping,
+   * filtering, or choosing an icon. It is not a label. The label is
+   * `title`. Empty when the report didn't include one. See
+   * GhosttyTerminalProgramStatusFn for how an empty app is filled in from
+   * a parent record. */
   GhosttyString app;
 
   /** A short label for the record, meant for people. Programs that report
@@ -545,6 +552,9 @@ typedef struct {
  * - A GHOSTTY_PROGRAM_STATUS_STATE_CLEAR report removes the record with
  *   its id and every record beneath it, so clearing "build" also removes
  *   "build/test". A clear report with an empty id removes every record.
+ * - A record without an app takes it from its nearest ancestor that has
+ *   one. If the root record has app "deploy" and the record "us-east"
+ *   has none, show "us-east" with app "deploy" too.
  * - When a new shell prompt starts (OSC 133 A) or the program running in
  *   the terminal exits, remove `working` and `blocked` records. You may
  *   remove `idle` records too. Keep `done` and `error` records until the
@@ -725,11 +735,20 @@ typedef enum {
    * Callback invoked when the running program sends a program status
    * report via OSC 7501. Set to NULL to ignore these reports.
    *
-   * Programs check for support before sending reports by sending
-   * `OSC 7501 ; ?`. While this callback is set, the terminal answers that
-   * query through GHOSTTY_TERMINAL_OPT_WRITE_PTY. While it is NULL, the
-   * query gets no reply, so programs know the protocol isn't supported.
-   * Set a write_pty callback too, or programs never see the reply.
+   * Programs may ask whether the terminal supports the protocol by
+   * sending `OSC 7501 ; ?`. While this callback is set, the terminal
+   * answers through GHOSTTY_TERMINAL_OPT_WRITE_PTY with `?` followed by
+   * the states and kinds it accepts:
+   *
+   * @code
+   * program:  ESC ] 7501 ; ? ST
+   * terminal: ESC ] 7501 ; ?:states=idle,working,done,blocked,error:kinds=permission,question,auth ST
+   * @endcode
+   *
+   * While this callback is NULL, the query gets no reply, so a program
+   * that asks sees the protocol as unsupported. Asking is optional, so
+   * programs may send reports anyway. Those are dropped. Set a write_pty
+   * callback too, or programs never see the reply.
    *
    * The value matches upstream libghostty-vt, which numbers options this
    * fork doesn't have yet.
