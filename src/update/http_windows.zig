@@ -231,6 +231,13 @@ pub const Response = struct {
         };
     }
 
+    /// Read and drop a body nobody uses, such as a redirect's, under the
+    /// same identity-only refusal and `max_bytes` bound as `streamBody`.
+    pub fn discardBody(self: *Response, alloc: Allocator, max_bytes: u64) !void {
+        var discarding: std.Io.Writer.Discarding = .init(&.{});
+        try self.streamBody(alloc, &discarding.writer, max_bytes);
+    }
+
     pub fn read(self: *Response, buffer: []u8) !usize {
         if (self.context.closed) return error.UpdateHttpTimeout;
         if (buffer.len == 0) return 0;
@@ -530,6 +537,30 @@ test "update HTTP transport refuses every content coding but identity" {
             try std.testing.expectEqual(@as(usize, 0), out.written().len);
         } else {
             try expectBodyWithinCap(&response, &out, contents, contents.len);
+        }
+    }
+}
+
+test "update HTTP redirect bodies are discarded under the same coding refusal and bound" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const alloc = std.testing.allocator;
+    const redirect = "HTTP/1.1 302 Found\r\nLocation: https://example.invalid/next\r\n";
+    for ([_]struct { reply: []const u8, cap: u64, err: ?anyerror }{
+        .{ .reply = redirect ++ "Content-Encoding: gzip\r\nContent-Length: 8\r\nConnection: close\r\n\r\nredirect", .cap = 1024, .err = error.UnsupportedContentEncoding },
+        .{ .reply = redirect ++ "Content-Length: 8\r\nConnection: close\r\n\r\nredirect", .cap = 8, .err = null },
+        .{ .reply = redirect ++ "Content-Length: 8\r\nConnection: close\r\n\r\nredirect", .cap = 7, .err = error.HttpResponseTooLarge },
+    }) |case| {
+        var peer: FakePeer = .{ .server = try FakePeer.listenLoopback(), .mode = .capture, .response = case.reply };
+        const thread = try std.Thread.spawn(.{}, FakePeer.serve, .{&peer});
+        defer peer.finish(thread);
+        var url: [256]u8 = undefined;
+        var response = try Response.openImpl(alloc, try peer.uri(&url), &.{}, 1000, false);
+        defer response.deinit();
+        try std.testing.expectEqual(std.http.Status.found, response.status);
+        if (case.err) |err| {
+            try std.testing.expectError(err, response.discardBody(alloc, case.cap));
+        } else {
+            try response.discardBody(alloc, case.cap);
         }
     }
 }

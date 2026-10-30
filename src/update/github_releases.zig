@@ -2183,15 +2183,7 @@ fn fetchHttps(
             defer alloc.free(location);
             const next_url = try resolveRedirectTarget(alloc, current_url, location);
             errdefer alloc.free(next_url);
-            var discarded: u64 = 0;
-            var buffer: [16 * 1024]u8 = undefined;
-            while (true) {
-                const room = max_redirect_body_bytes + 1 - discarded;
-                const n = try response.read(buffer[0..@min(room, buffer.len)]);
-                if (n == 0) break;
-                discarded += n;
-                if (discarded > max_redirect_body_bytes) return error.HttpResponseTooLarge;
-            }
+            try response.discardBody(alloc, max_redirect_body_bytes);
             alloc.free(current_url);
             current_url = next_url;
             redirect_count += 1;
@@ -2531,6 +2523,10 @@ fn extractPortableZipEntry(
     // Validation read the same name; check it again where it is used. This
     // also covers std's backslash, absolute and `..` refusals.
     if (!portable_apply.isSafeZipEntryPath(name)) return error.UnsafePortableArchiveEntry;
+    switch (entry.compression_method) {
+        .store, .deflate => {},
+        else => return error.UnsupportedPortableArchive,
+    }
 
     // The local header has to agree with the central directory. A zip64
     // local header (sizes of 0xFFFFFFFF) is refused rather than parsed: no
@@ -2550,9 +2546,23 @@ fn extractPortableZipEntry(
     {
         return error.InvalidPortableArchive;
     }
+    // Every local extra field has to fit inside the declared area, as std
+    // required (it ignores up to three trailing bytes, so this does too).
+    // Their contents are not needed: zip64 sizes are refused above.
+    try zip_reader.interface.discardAll(local.filename_len);
+    var extra_left: usize = local.extra_len;
+    while (extra_left >= 4) {
+        _ = try zip_reader.interface.takeInt(u16, .little); // header ID
+        const size = try zip_reader.interface.takeInt(u16, .little);
+        if (size > extra_left - 4) return error.InvalidPortableArchive;
+        try zip_reader.interface.discardAll(size);
+        extra_left -= 4 + size;
+    }
 
     if (name[name.len - 1] == '/') {
         if (entry.uncompressed_size != 0) return error.InvalidPortableArchive;
+        // An empty entry's CRC-32 is 0.
+        if (entry.crc32 != 0) return error.PortableArchiveChecksumMismatch;
         try destination.makePath(name[0 .. name.len - 1]);
         return name;
     }
@@ -2584,7 +2594,7 @@ fn extractPortableZipEntry(
             };
             if (len != entry.uncompressed_size) return error.InvalidPortableArchive;
         },
-        else => return error.UnsupportedPortableArchive,
+        else => unreachable, // Refused before the local header was read.
     }
     crc.writer.flush() catch return file_writer.err orelse error.WriteFailed;
     if (crc.hasher.final() != entry.crc32) return error.PortableArchiveChecksumMismatch;
@@ -4347,6 +4357,8 @@ const TestZipEntry = struct {
     contents: []const u8,
     crc32: ?u32 = null,
     compressed_size: ?u32 = null,
+    /// The local header's extra area; the central directory record has none.
+    local_extra: []const u8 = "",
 };
 
 fn testZipLocalHeader(entry: TestZipEntry) std.zip.LocalFileHeader {
@@ -4361,7 +4373,7 @@ fn testZipLocalHeader(entry: TestZipEntry) std.zip.LocalFileHeader {
         .compressed_size = entry.compressed_size orelse @intCast(entry.data.len),
         .uncompressed_size = @intCast(entry.contents.len),
         .filename_len = @intCast(entry.name.len),
-        .extra_len = 0,
+        .extra_len = @intCast(entry.local_extra.len),
     };
 }
 
@@ -4374,6 +4386,7 @@ fn writeTestPortableZip(alloc: Allocator, dir: std.fs.Dir, sub_path: []const u8,
         offset.* = @intCast(zip.written().len);
         try zip.writer.writeStruct(testZipLocalHeader(entry), .little);
         try zip.writer.writeAll(entry.name);
+        try zip.writer.writeAll(entry.local_extra);
         try zip.writer.writeAll(entry.data);
     }
     const directory_offset = zip.written().len;
@@ -4457,6 +4470,25 @@ test "portable update ZIP extraction inflates fixed Huffman blocks past 64 KiB (
     try std.testing.expectEqualStrings("stored", stored);
 }
 
+test "portable update ZIP inflate decodes across short compressed reads" {
+    // Extraction reads entry data through a 16 KiB `limited` buffer, which
+    // holds this whole fixture at once. Smaller buffers make the decoder
+    // suspend for input mid-stream, around the same 64 KiB output flushes.
+    const alloc = std.testing.allocator;
+    const frame = try wuffs.zlib.decompress(alloc, fixed_huffman_zlib, 1 << 20, null);
+    defer alloc.free(frame);
+    for ([_]usize{ 1, 7, 4096 }) |buffer_len| {
+        const buffer = try alloc.alloc(u8, buffer_len);
+        defer alloc.free(buffer);
+        var input: std.Io.Reader = .fixed(fixed_huffman_deflate);
+        var data = input.limited(.unlimited, buffer);
+        var out: std.Io.Writer.Allocating = .init(alloc);
+        defer out.deinit();
+        try std.testing.expectEqual(@as(u64, frame.len), try wuffs.deflate.decompress(alloc, &data.interface, &out.writer, frame.len));
+        try std.testing.expectEqualSlices(u8, frame, out.written());
+    }
+}
+
 test "portable update ZIP extraction checks each entry's CRC-32 and sizes" {
     const alloc = std.testing.allocator;
     // Raw DEFLATE, one fixed Huffman block too short to cross std's window.
@@ -4468,6 +4500,7 @@ test "portable update ZIP extraction checks each entry's CRC-32 and sizes" {
     for ([_]struct { entry: TestZipEntry, err: anyerror }{
         .{ .entry = .{ .name = "noctty/stored", .data = hello, .contents = hello, .crc32 = 0x12345678 }, .err = error.PortableArchiveChecksumMismatch },
         .{ .entry = .{ .name = "noctty/inflated", .method = .deflate, .data = hello_deflate, .contents = hello, .crc32 = 0x12345678 }, .err = error.PortableArchiveChecksumMismatch },
+        .{ .entry = .{ .name = "noctty/directory/", .data = "", .contents = "", .crc32 = 0x12345678 }, .err = error.PortableArchiveChecksumMismatch },
         // Decodes past its declared size: std stopped there and kept the rest out.
         .{ .entry = .{ .name = "noctty/longer", .method = .deflate, .data = hello_deflate, .contents = hello[0 .. hello.len - 1] }, .err = error.InvalidPortableArchive },
         // Ends past its compressed size: std read on into the next record.
@@ -4476,6 +4509,25 @@ test "portable update ZIP extraction checks each entry's CRC-32 and sizes" {
         try writeTestPortableZip(alloc, tmp.dir, "case.zip", &.{case.entry});
         try std.testing.expectError(case.err, extractTestPortableZip(alloc, tmp.dir, "case.zip"));
     }
+}
+
+test "portable update ZIP extraction refuses a local extra field that runs past its area" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    // An extended-timestamp field (ID 0x5455) with its five data bytes, then
+    // three stray bytes, which std also ignored.
+    const framed = "\x55\x54\x05\x00\x01\x00\x00\x00\x00" ++ "\x00\x00\x00";
+    try writeTestPortableZip(alloc, tmp.dir, "framed.zip", &.{
+        .{ .name = "noctty/framed", .data = "framed", .contents = "framed", .local_extra = framed },
+    });
+    var out = try extractTestPortableZip(alloc, tmp.dir, "framed.zip");
+    out.close();
+    // The same field claiming eight data bytes overruns the nine-byte area.
+    try writeTestPortableZip(alloc, tmp.dir, "overrun.zip", &.{
+        .{ .name = "noctty/overrun", .data = "overrun", .contents = "overrun", .local_extra = "\x55\x54\x08\x00\x01\x00\x00\x00\x00" },
+    });
+    try std.testing.expectError(error.InvalidPortableArchive, extractTestPortableZip(alloc, tmp.dir, "overrun.zip"));
 }
 
 test "portable update ZIP extraction fails cleanly on corrupt deflate data" {
