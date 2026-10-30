@@ -2806,11 +2806,11 @@ pub fn eraseDisplay(
             self.screens.active.cursor.pending_wrap = false;
 
             if (comptime build_options.kitty_graphics) {
-                // Clear all Kitty graphics state for this screen
-                self.screens.active.kitty_images.delete(
+                // Clear only placements still visible after moving the active
+                // area into scrollback.
+                self.screens.active.kitty_images.clearScreen(
                     self.screens.active.alloc,
                     self,
-                    .{ .all = true },
                 );
             }
         },
@@ -2869,11 +2869,11 @@ pub fn eraseDisplay(
             self.screens.active.cursor.pending_wrap = false;
 
             if (comptime build_options.kitty_graphics) {
-                // Clear all Kitty graphics state for this screen
-                self.screens.active.kitty_images.delete(
+                // ED2 clears visible placements but preserves graphics that
+                // are wholly in scrollback.
+                self.screens.active.kitty_images.clearScreen(
                     self.screens.active.alloc,
                     self,
-                    .{ .all = true },
                 );
             }
 

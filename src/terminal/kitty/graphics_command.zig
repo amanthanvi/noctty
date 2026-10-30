@@ -1046,7 +1046,7 @@ pub const Delete = struct {
                 },
 
                 'r', 'R' => blk: {
-                    const x = kv.get('x') orelse return error.InvalidFormat;
+                    const x = kv.get('x') orelse 0;
                     const y = kv.get('y') orelse return error.InvalidFormat;
                     if (x > y) return error.InvalidFormat;
                     break :blk .{
@@ -1477,5 +1477,14 @@ test "delete range command 5" {
 
     const input = "a=d,d=R,y=5";
     for (input) |c| try p.feed(c);
-    try testing.expectError(error.InvalidFormat, p.complete(alloc));
+    const command = try p.complete(alloc);
+    defer command.deinit(alloc);
+
+    try testing.expect(command.control == .delete);
+    const v = command.control.delete.action;
+    try testing.expect(v == .range);
+    const range = v.range;
+    try testing.expect(range.delete);
+    try testing.expectEqual(@as(u32, 0), range.first);
+    try testing.expectEqual(@as(u32, 5), range.last);
 }
