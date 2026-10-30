@@ -113,6 +113,35 @@ const WM_SIZE: UINT = 0x0005;
 const WM_SETFOCUS: UINT = 0x0007;
 const WM_KILLFOCUS: UINT = 0x0008;
 const WM_VSCROLL: UINT = 0x0115;
+const WM_HSCROLL: UINT = 0x0114;
+const WM_NOTIFY: UINT = 0x004E;
+const TBM_GETPOS: UINT = 0x0400;
+const TBM_SETPOS: UINT = 0x0400 + 5;
+const TBM_SETRANGEMIN: UINT = 0x0400 + 7;
+const TBM_SETRANGEMAX: UINT = 0x0400 + 8;
+const TBM_SETPAGESIZE: UINT = 0x0400 + 21;
+const TBM_SETLINESIZE: UINT = 0x0400 + 23;
+const TBS_NOTICKS: u32 = 0x0010;
+const TBM_GETTHUMBRECT: UINT = 0x0400 + 25;
+const TBM_SETTHUMBLENGTH: UINT = 0x0400 + 27;
+const TBM_GETTHUMBLENGTH: UINT = 0x0400 + 28;
+const TBS_FIXEDLENGTH: u32 = 0x0040;
+const NM_CUSTOMDRAW: i32 = -12;
+const CDDS_PREPAINT: u32 = 0x0001;
+const CDDS_ITEMPREPAINT: u32 = 0x0001_0001;
+const CDRF_DODEFAULT: LRESULT = 0x0000;
+const CDRF_SKIPDEFAULT: LRESULT = 0x0004;
+const CDRF_NOTIFYITEMDRAW: LRESULT = 0x0020;
+const TBCD_THUMB: usize = 2;
+const TBCD_CHANNEL: usize = 3;
+const UDS_ARROWKEYS: u32 = 0x0020;
+const UDS_NOTHOUSANDS: u32 = 0x0080;
+const UDS_HOTTRACK: u32 = 0x0100;
+const UDM_SETBUDDY: UINT = 0x0400 + 105;
+const UDM_SETRANGE32: UINT = 0x0400 + 111;
+const UDM_SETPOS32: UINT = 0x0400 + 113;
+const UDM_GETPOS32: UINT = 0x0400 + 114;
+const UDN_DELTAPOS: i32 = -722;
 const WM_MOUSEWHEEL: UINT = 0x020A;
 const WM_MOUSEMOVE: UINT = 0x0200;
 const WM_MOUSELEAVE: UINT = 0x02A3;
@@ -688,6 +717,82 @@ pub const editable_keys = .{
     Config.Key.@"font-family",            Config.Key.theme,                Config.Key.command,
     Config.Key.@"default-profile",
 };
+
+/// A control that goes with a number field and writes the field as typing
+/// would (`SettingsWindow.sliderMoved`, `spinStep`), so the field keeps
+/// its whole-text read, its limit and its validation, and the opacity's
+/// preview keeps its floor: a trackbar for the opacity, an up-down for the
+/// font size and the scrollback limit. The padding fields take one value or
+/// a pair, which a single up-down cannot step, so they have none.
+const Companion = enum {
+    opacity_slider,
+    font_size_spin,
+    scrollback_spin,
+
+    const count = std.enums.values(Companion).len;
+
+    fn field(self: Companion) RawScalarField {
+        return switch (self) {
+            .opacity_slider => .background_opacity,
+            .font_size_spin => .font_size,
+            .scrollback_spin => .scrollback_limit,
+        };
+    }
+
+    fn of(self_field: RawScalarField) ?Companion {
+        return switch (self_field) {
+            .background_opacity => .opacity_slider,
+            .font_size => .font_size_spin,
+            .scrollback_limit => .scrollback_spin,
+            else => null,
+        };
+    }
+
+    /// The form control (`settings_control_specs`) the companion goes with.
+    fn controlIndex(comptime self: Companion) usize {
+        const binding = switch (self) {
+            .opacity_slider => "edit_bg_opacity",
+            .font_size_spin => "edit_font_size",
+            .scrollback_spin => "edit_scrollback",
+        };
+        inline for (settings_control_specs, 0..) |spec, index| {
+            if (comptime std.mem.eql(u8, spec.binding, binding)) return index;
+        }
+        @compileError("no control " ++ binding);
+    }
+
+    /// The companion of form control `index`, if it has one.
+    fn ofControl(index: usize) ?Companion {
+        inline for (comptime std.enums.values(Companion)) |kind| {
+            if (index == comptime kind.controlIndex()) return kind;
+        }
+        return null;
+    }
+
+    /// What one step of an up-down adds: a point of font size, a megabyte
+    /// of scrollback.
+    fn step(self: Companion) f64 {
+        return switch (self) {
+            .opacity_slider => 0.01,
+            .font_size_spin => 1,
+            .scrollback_spin => 1_000_000,
+        };
+    }
+};
+
+fn numberAsF64(value: anytype) f64 {
+    return switch (@typeInfo(@TypeOf(value))) {
+        .int, .comptime_int => @floatFromInt(value),
+        .float, .comptime_float => @floatCast(value),
+        else => @compileError("not a number"),
+    };
+}
+
+const INITCOMMONCONTROLSEX = extern struct { size: u32 = @sizeOf(INITCOMMONCONTROLSEX), classes: u32 };
+extern "comctl32" fn InitCommonControlsEx(init: *const INITCOMMONCONTROLSEX) callconv(.winapi) BOOL;
+const NMHDR = extern struct { hwndFrom: ?HWND, idFrom: usize, code: u32 };
+const NMUPDOWN = extern struct { hdr: NMHDR, pos: i32, delta: i32 };
+const NMCUSTOMDRAW = extern struct { hdr: NMHDR, stage: u32, hdc: HDC, rc: RECT, item: usize, state: u32, item_lparam: LPARAM };
 
 /// Scalar EDIT controls whose raw text can temporarily be invalid and
 /// therefore cannot yet be represented by the typed settings transaction.
@@ -2152,6 +2257,9 @@ pub const SettingsWindow = struct {
     focus_input_mode: focus_cue.InputMode = .pointer,
     /// How many times a toggle switch was painted (`paintToggle`), for tests.
     proof_toggle_paint_count: u32 = 0,
+    /// The number fields' trackbar and up-downs (`Companion`), made with
+    /// their fields' section.
+    companions: [Companion.count]?HWND = @splat(null),
     section_uia_group: ?*win32_uia.SettingsSectionGroupProvider = null,
     section_uia_providers: [section_count]?*win32_uia.SettingsSectionProvider = [_]?*win32_uia.SettingsSectionProvider{null} ** section_count,
     btn_save: ?HWND = null,
@@ -3307,11 +3415,11 @@ pub const SettingsWindow = struct {
     }
 
     /// Where row `index`'s marker goes (viewport client coordinates): a bar
-    /// left of its control, as tall as a text field.
+    /// left of the row, as tall as a text field.
     fn markerRect(self: *const SettingsWindow, viewport: HWND, index: usize) ?RECT {
         const control = self.controlHwnd(index) orelse return null;
         const rect = childRectIn(viewport, control) orelse return null;
-        const right = rect.left - self.px(settings_marker_gap);
+        const right = self.rowLeft(viewport, index, rect) - self.px(settings_marker_gap);
         return .{ .left = right - self.px(settings_marker_width), .top = rect.top, .right = right, .bottom = rect.top + self.px(settings_control_height) };
     }
 
@@ -3337,15 +3445,29 @@ pub const SettingsWindow = struct {
         return if (colors.high_contrast) colors.text else colors.accent;
     }
 
-    /// The row `hwnd` belongs to: its control, its label or its Reset button.
+    /// The row `hwnd` belongs to: its control, its label, its Reset button,
+    /// or its trackbar or up-down.
     fn rowOfWindow(self: *const SettingsWindow, hwnd: HWND) ?usize {
         if (self.resetButtonIndex(hwnd)) |index| return index;
+        inline for (comptime std.enums.values(Companion)) |kind| {
+            if (self.companions[@intFromEnum(kind)] == hwnd) return comptime kind.controlIndex();
+        }
         for (self.formItems()) |item| {
             if (item.control_index >= form_field_count) continue;
             if (self.controlHwnd(item.control_index) == hwnd) return item.control_index;
             if (item.label_index) |label| if (self.field_labels[label] == hwnd) return item.control_index;
         }
         return null;
+    }
+
+    /// Where row `index` starts (viewport client coordinates): at its
+    /// trackbar, left of its field, where it has one; else at its control,
+    /// whose rectangle is `control`.
+    fn rowLeft(self: *const SettingsWindow, viewport: HWND, index: usize, control: RECT) i32 {
+        if (Companion.ofControl(index) != .opacity_slider) return control.left;
+        const slider = self.companions[@intFromEnum(Companion.opacity_slider)] orelse return control.left;
+        const rect = childRectIn(viewport, slider) orelse return control.left;
+        return @min(rect.left, control.left);
     }
 
     /// The row under `point` (viewport client coordinates): its label, its
@@ -3356,6 +3478,7 @@ pub const SettingsWindow = struct {
             if (item.control_index >= form_field_count) continue;
             const control = self.controlHwnd(item.control_index) orelse continue;
             var row = childRectIn(viewport, control) orelse continue;
+            row.left = self.rowLeft(viewport, item.control_index, row);
             row.bottom = row.top + self.px(settings_control_height);
             if (item.label_index) |label| if (self.field_labels[label]) |text| if (childRectIn(viewport, text)) |label_rect| {
                 row.top = @min(row.top, label_rect.top);
@@ -4069,6 +4192,7 @@ pub const SettingsWindow = struct {
         self.help_shown = false;
         self.background_geometry = null;
         self.reset_buttons = @splat(null);
+        self.companions = @splat(null);
         self.reset_spare_count = 0;
         self.differs_from_default = @splat(false);
         self.described_changed = @splat(false);
@@ -5322,7 +5446,8 @@ pub const SettingsWindow = struct {
     fn ensureControlVisible(self: *SettingsWindow, control: HWND) void {
         // The Keybindings page's list scrolls with the page's rows when the
         // page is too short for it.
-        var is_form_control = self.keybind_list.hwnd != null and control == self.keybind_list.hwnd.?;
+        var is_form_control = (self.keybind_list.hwnd != null and control == self.keybind_list.hwnd.?) or
+            self.companions[@intFromEnum(Companion.opacity_slider)] == control;
         for (self.formItems()) |item| {
             const reset = if (item.control_index < form_field_count) self.reset_buttons[item.control_index] else null;
             if (self.controlHwnd(item.control_index) == control or reset == control) {
@@ -5374,6 +5499,9 @@ pub const SettingsWindow = struct {
         for (self.reset_buttons, 0..) |button, index| if (button) |control| {
             setChildShown(control, active.controls[index] and self.differs_from_default[index]);
         };
+        inline for (comptime std.enums.values(Companion)) |kind| if (self.companions[@intFromEnum(kind)]) |control| {
+            setChildShown(control, active.controls[comptime kind.controlIndex()]);
+        };
         if (self.reference_list.hwnd) |list| setChildShown(list, self.referenceListShows());
         if (self.keybind_list.hwnd) |list| setChildShown(list, self.keybindListShows());
     }
@@ -5418,6 +5546,7 @@ pub const SettingsWindow = struct {
         self.finishRawScalarEdit(field);
         setSettingValue(p, @unionInit(SettingValue, @tagName(setting), parsed));
         self.trackFieldEdit(setting);
+        self.syncCompanion(field);
     }
 
     fn displayNumberInEdit(self: *SettingsWindow, comptime field: RawScalarField) void {
@@ -5427,6 +5556,176 @@ pub const SettingsWindow = struct {
         var buf: [32]u8 = undefined;
         const text = std.fmt.bufPrintZ(&buf, "{d}", .{fieldValue(&p, field.setting())}) catch return;
         setEditText(edit, text, &self.suppress_edit_events);
+        self.syncCompanion(field);
+    }
+
+    /// Make `kind`'s window in the form, themed, its range set; hidden or
+    /// shown as its section (`shown`). Each starts a group of its own: the
+    /// arrow keys step a trackbar and are its own, and an up-down is no tab
+    /// stop and takes no focus, so no arrow-key run may land on one (the row
+    /// after an up-down has a label, which starts the next group). The
+    /// trackbar comes before its field in z-order, as it sits left of it; an
+    /// up-down after its field and the field's Reset button.
+    fn makeCompanion(self: *SettingsWindow, form: HWND, comptime kind: Companion, shown: u32) void {
+        // The classes, in whichever comctl32 the thread's activation context
+        // names (version 6 in the app, through its manifest).
+        _ = InitCommonControlsEx(&.{ .classes = 0x0004 | 0x0010 }); // ICC_BAR_CLASSES | ICC_UPDOWN_CLASS
+        const hinstance = self.handle.hinstance;
+        const window = switch (kind) {
+            .opacity_slider => sys.CreateWindowExW(0, std.unicode.utf8ToUtf16LeStringLiteral("msctls_trackbar32"), std.unicode.utf8ToUtf16LeStringLiteral(""), WS_CHILD | WS_GROUP | WS_TABSTOP | TBS_NOTICKS | TBS_FIXEDLENGTH | shown, 0, 0, 1, 1, form, null, hinstance, null),
+            else => sys.CreateWindowExW(0, std.unicode.utf8ToUtf16LeStringLiteral("msctls_updown32"), std.unicode.utf8ToUtf16LeStringLiteral(""), WS_CHILD | WS_GROUP | UDS_ARROWKEYS | UDS_HOTTRACK | UDS_NOTHOUSANDS | shown, 0, 0, 1, 1, form, null, hinstance, null),
+        };
+        const control = self.finishChild(window, null, .control) orelse return;
+        self.companions[@intFromEnum(kind)] = control;
+        if (kind == .opacity_slider) subclassKeepingPrevious(control, &settingsSliderProc);
+        switch (kind) {
+            .opacity_slider => {
+                _ = SendMessageW(control, TBM_SETRANGEMIN, 0, 0);
+                _ = SendMessageW(control, TBM_SETRANGEMAX, 1, 100);
+                _ = SendMessageW(control, TBM_SETLINESIZE, 0, 1);
+                _ = SendMessageW(control, TBM_SETPAGESIZE, 0, 10);
+            },
+            .font_size_spin, .scrollback_spin => {
+                // Its arrows step the field (`UDS_ARROWKEYS` on the buddy).
+                if (self.rawScalarEdit(kind.field())) |edit| _ = SendMessageW(control, UDM_SETBUDDY, @intFromPtr(edit), 0);
+                const range = spinRange(kind);
+                _ = SendMessageW(control, UDM_SETRANGE32, @bitCast(@as(isize, range.min)), range.max);
+            },
+        }
+    }
+
+    /// The range an up-down reports, as a screen reader reads its value: the
+    /// font size's own; the scrollback limit's in bytes, to what 32 bits hold.
+    fn spinRange(kind: Companion) struct { min: i32, max: i32 } {
+        return switch (kind) {
+            .font_size_spin => font_size: {
+                const range = comptime field_model.descriptor(Companion.font_size_spin.field().setting()).validation.finite_range;
+                break :font_size .{ .min = @intFromFloat(range.min), .max = @intFromFloat(range.max) };
+            },
+            else => .{ .min = 0, .max = std.math.maxInt(i32) },
+        };
+    }
+
+    /// Put `field`'s companion where the draft's value is: the trackbar at
+    /// its percentage, an up-down at the value (rounded, and held to its
+    /// range). Setting either sends nothing back.
+    fn syncCompanion(self: *SettingsWindow, comptime field: RawScalarField) void {
+        const kind = comptime Companion.of(field) orelse return;
+        const control = self.companions[@intFromEnum(kind)] orelse return;
+        const p = self.pending orelse return;
+        const value = numberAsF64(fieldValue(&p, field.setting()));
+        switch (kind) {
+            .opacity_slider => _ = SendMessageW(control, TBM_SETPOS, 1, @bitCast(@as(isize, sliderPosition(value)))),
+            else => {
+                const range = spinRange(kind);
+                const position: i32 = @intFromFloat(std.math.clamp(@round(value), @as(f64, @floatFromInt(range.min)), @as(f64, @floatFromInt(range.max))));
+                _ = SendMessageW(control, UDM_SETPOS32, 0, @bitCast(@as(isize, position)));
+            },
+        }
+    }
+
+    fn sliderPosition(opacity: f64) i32 {
+        return @intFromFloat(std.math.clamp(@round(opacity * 100), 0, 100));
+    }
+
+    /// The field's value as its text now parses, if it does.
+    fn typedValue(self: *const SettingsWindow, comptime field: RawScalarField) ?f64 {
+        const edit = self.rawScalarEdit(field) orelse return null;
+        var utf8_buf: [edit_text_max_utf8]u8 = undefined;
+        const utf8 = readEditUtf8(edit, &utf8_buf) orelse return null;
+        const parsed = field_model.parseScalar(comptime field.setting(), utf8) catch return null;
+        return numberAsF64(parsed);
+    }
+
+    /// The trackbar's channel and thumb in the theme's colours: the stock
+    /// channel is a light two-tone line, light in dark mode and under 1.4:1
+    /// on the light pane. Each is drawn inside the rectangle the trackbar
+    /// gives it, so what the trackbar hit-tests and repaints is what shows.
+    /// High Contrast keeps the stock trackbar, in system colours.
+    fn sliderCustomDraw(self: *SettingsWindow, draw: *const NMCUSTOMDRAW) LRESULT {
+        const colors = self.theme_adapter.colors;
+        if (colors.high_contrast) return CDRF_DODEFAULT;
+        switch (draw.stage) {
+            CDDS_PREPAINT => return CDRF_NOTIFYITEMDRAW,
+            CDDS_ITEMPREPAINT => {
+                const color: COLORREF = switch (draw.item) {
+                    TBCD_CHANNEL => colors.slider_rail,
+                    TBCD_THUMB => colors.slider_thumb,
+                    else => return CDRF_DODEFAULT,
+                };
+                const hdc = draw.hdc orelse return CDRF_DODEFAULT;
+                const rect = draw.rc;
+                const brush = CreateSolidBrush(color) orelse return CDRF_DODEFAULT;
+                defer _ = DeleteObject(brush);
+                const previous_brush = SelectObject(hdc, brush);
+                defer _ = SelectObject(hdc, previous_brush);
+                const previous_pen = SelectObject(hdc, GetStockObject(NULL_PEN));
+                defer _ = SelectObject(hdc, previous_pen);
+                // Rounded at the narrow ends: a rail, and a pill of a thumb.
+                const round = @min(rect.right - rect.left, rect.bottom - rect.top);
+                // The null pen leaves the right and bottom edges out.
+                _ = sys.RoundRect(hdc, rect.left, rect.top, rect.right + 1, rect.bottom + 1, round, round);
+                return CDRF_SKIPDEFAULT;
+            },
+            else => return CDRF_DODEFAULT,
+        }
+    }
+
+    /// The trackbar moved (`WM_HSCROLL`): its percentage goes into the
+    /// opacity field as if typed (`EN_CHANGE` then takes it into the draft
+    /// and the preview, with the preview's floor), unless the field already
+    /// says that, as "0.875" at 88 does.
+    fn sliderMoved(self: *SettingsWindow) void {
+        const slider = self.companions[@intFromEnum(Companion.opacity_slider)] orelse return;
+        const edit = self.rawScalarEdit(.background_opacity) orelse return;
+        const position: i32 = @intCast(SendMessageW(slider, TBM_GETPOS, 0, 0));
+        if (self.typedValue(.background_opacity)) |value| if (sliderPosition(value) == position) return;
+        var buf: [16]u8 = undefined;
+        const text = std.fmt.bufPrint(&buf, "{d}", .{@as(f64, @floatFromInt(position)) / 100}) catch return;
+        setWindowTextUtf8(edit, text);
+    }
+
+    /// An up-down asks to step (`UDN_DELTAPOS`): its field steps from the
+    /// value it now shows, or the draft's when its text does not parse, held
+    /// to the field's range, and the text goes in as if typed. The up-down's
+    /// own position follows from the field (`syncCompanion`), so its own
+    /// change is refused. Returns the answer to the notification.
+    fn spinStep(self: *SettingsWindow, comptime kind: Companion, delta: i32) LRESULT {
+        const field = comptime kind.field();
+        const edit = self.rawScalarEdit(field) orelse return 1;
+        const p = self.pending orelse return 1;
+        const current = self.typedValue(field) orelse numberAsF64(fieldValue(&p, field.setting()));
+        const stepped = current + @as(f64, @floatFromInt(delta)) * kind.step();
+        var buf: [32]u8 = undefined;
+        const text = switch (kind) {
+            .font_size_spin => text: {
+                const range = comptime field_model.descriptor(field.setting()).validation.finite_range;
+                break :text std.fmt.bufPrint(&buf, "{d}", .{@as(f32, @floatCast(std.math.clamp(stepped, range.min, range.max)))}) catch return 1;
+            },
+            .scrollback_spin => std.fmt.bufPrint(&buf, "{d}", .{@as(u64, @intFromFloat(@max(0, @round(stepped))))}) catch return 1,
+            .opacity_slider => return 1,
+        };
+        setWindowTextUtf8(edit, text);
+        return 1;
+    }
+
+    /// A notification from a form child (`WM_NOTIFY` to the viewport), if it
+    /// is an up-down's step or the trackbar's custom draw; null for anything
+    /// else.
+    fn companionNotify(self: *SettingsWindow, lParam: LPARAM) ?LRESULT {
+        if (lParam == 0) return null;
+        const header: *const NMHDR = @ptrFromInt(@as(usize, @bitCast(lParam)));
+        const from = header.hwndFrom orelse return null;
+        if (@as(i32, @bitCast(header.code)) == NM_CUSTOMDRAW) {
+            if (self.companions[@intFromEnum(Companion.opacity_slider)] != from) return null;
+            return self.sliderCustomDraw(@ptrFromInt(@as(usize, @bitCast(lParam))));
+        }
+        if (@as(i32, @bitCast(header.code)) != UDN_DELTAPOS) return null;
+        const change: *const NMUPDOWN = @ptrFromInt(@as(usize, @bitCast(lParam)));
+        inline for (.{ Companion.font_size_spin, Companion.scrollback_spin }) |kind| {
+            if (self.companions[@intFromEnum(kind)] == from) return self.spinStep(kind, change.delta);
+        }
+        return null;
     }
 
     fn syncFontFamilyFromEdit(self: *SettingsWindow) void {
@@ -6576,6 +6875,10 @@ pub const SettingsWindow = struct {
                     if (self.field_labels[i] != null) group = true;
                 }
                 const style: u32 = shown | if (group) WS_GROUP else 0;
+                if (comptime Companion.ofControl(item.control_index) == .opacity_slider) {
+                    self.makeCompanion(form, .opacity_slider, shown);
+                    order.place(self.companions[@intFromEnum(Companion.opacity_slider)]);
+                }
                 if (comptime item.control_index < field_model.form_fields.len) {
                     const row = comptime field_model.form_fields[item.control_index];
                     @field(self.fields, spec.binding) = switch (comptime row.kind()) {
@@ -6598,6 +6901,10 @@ pub const SettingsWindow = struct {
                     order.place(control);
                     previous_text = text;
                 }
+                if (comptime Companion.ofControl(item.control_index)) |kind| if (comptime kind != .opacity_slider) {
+                    self.makeCompanion(form, kind, shown);
+                    order.place(self.companions[@intFromEnum(kind)]);
+                };
             },
         }
         self.materialized.insert(section);
@@ -7181,14 +7488,22 @@ fn annotateAccessibleControls(self: *SettingsWindow, section: Section) void {
         if (role == .edit or role == .combo_box) break true;
     } else name_search;
     if (!named) return;
-    const service = createAccPropServices() orelse {
+    // The test's service (`annotation_service`) where there is one.
+    var annotations: SettingsWindow.Annotations = .{ .fake = self.annotation_service };
+    defer annotations.deinit();
+    const service = annotations.service() orelse {
         std.log.warn("settings: accessibility annotation service unavailable", .{});
         return;
     };
-    defer service.release();
     inline for (settings_control_specs, 0..) |spec, index| {
         if ((spec.role == .edit or spec.role == .combo_box) and spec.section == section)
             setAccessibleName(service, self.controlHwnd(index), spec.name);
+    }
+    // A field's trackbar or up-down, by the field's name; its role (slider,
+    // spin button) and value are the stock control's.
+    inline for (comptime std.enums.values(Companion)) |kind| {
+        const spec = comptime settings_control_specs[kind.controlIndex()];
+        if (spec.section == section) setAccessibleName(service, self.companions[@intFromEnum(kind)], spec.name);
     }
     // A name that did not take is tried again with the next section made.
     if (name_search) self.search_named = setAccessibleNameText(service, self.edit_search.?, search_field_name);
@@ -7464,6 +7779,12 @@ const settings_column_gap: i32 = settings_metrics.space_8;
 const settings_column_min_width: i32 = 320;
 const settings_two_column_min_width: i32 = 664;
 const settings_field_max_width: i32 = 360;
+/// The opacity field's box at the end of its trackbar's lane.
+const settings_slider_field_width: i32 = 72;
+/// The trackbar's thumb, top to bottom.
+const settings_slider_thumb_length: i32 = 20;
+/// An up-down beside its field.
+const settings_spin_width: i32 = 20;
 const settings_combo_popup_height: i32 = 160;
 const settings_content_bottom_padding: i32 = settings_metrics.space_6;
 /// The Reset button at the right end of an editable row. Every editable row
@@ -8303,6 +8624,14 @@ test "settings open stamps each creation step once when traced" {
 
 test "settings open and a first visit create each window once in its final form" {
     try dialog_test.onHiddenDesktop(struct {
+        fn expectedFrameChanges(settings: *const SettingsWindow, hwnd: HWND) u16 {
+            if (settings.isEditControl(hwnd)) return 1;
+            inline for (.{ Companion.font_size_spin, Companion.scrollback_spin }) |kind| {
+                if (settings.companions[@intFromEnum(kind)] == hwnd) return 2;
+            }
+            return 0;
+        }
+
         fn body() !void {
             const Work = dialog_test.OpenWork;
             const fixture = try dialog_test.Fixture.prepare(false);
@@ -8322,12 +8651,13 @@ test "settings open and a first visit create each window once in its final form"
                 Work.print(&tree);
             }
             // The frame, its 19 children (one is the viewport, one the search
-            // field), and in the viewport the help text and Appearance's 10
-            // fields and 9 labels. The other sections' 31 rows are made when
-            // they are first shown. The status line also carries the close
-            // prompt's question, and one "Discard changes" serves the bar and
-            // the prompt.
-            try std.testing.expectEqual(@as(usize, 40), tree.len);
+            // field), and in the viewport the help text, Appearance's 10
+            // fields and 9 labels, the opacity's trackbar and the font size's
+            // up-down. The other sections' 31 rows are made when they are
+            // first shown. The status line also carries the close prompt's
+            // question, and one "Discard changes" serves the bar and the
+            // prompt.
+            try std.testing.expectEqual(@as(usize, 42), tree.len);
             for (tree.slice()) |hwnd| {
                 const counts = Work.of(hwnd);
                 try std.testing.expectEqual(@as(u16, 1), counts.created);
@@ -8338,12 +8668,15 @@ test "settings open and a first visit create each window once in its final form"
                 try std.testing.expectEqual(@as(u16, 0), counts.style_rewrites);
                 try std.testing.expectEqual(@as(u16, 0), counts.hidden);
                 try std.testing.expect(counts.shown <= 1);
-                // One font each; the viewport draws no text.
-                try std.testing.expectEqual(@as(u16, if (hwnd == settings.viewport.?) 0 else 1), counts.fonts);
+                // One font each; the viewport, the trackbar and the up-downs
+                // draw no text.
+                try std.testing.expectEqual(@as(u16, if (hwnd == settings.viewport.? or isCompanion(settings, hwnd)) 0 else 1), counts.fonts);
                 // One theme each, when the theme service sends anything at all.
                 if (totals.themes != 0) try std.testing.expectEqual(@as(u16, 1), counts.themes);
                 // A text field asks for its frame once, after its subclass.
-                try std.testing.expectEqual(@as(u16, @intFromBool(settings.isEditControl(hwnd))), counts.frame_changes);
+                // An up-down's frame is refreshed twice by comctl32 itself,
+                // as it is made and when its buddy is set.
+                try std.testing.expectEqual(expectedFrameChanges(settings, hwnd), counts.frame_changes);
             }
             // The fonts are built once, before any child, and the theme
             // notifications the children send back rebuild nothing.
@@ -8356,7 +8689,8 @@ test "settings open and a first visit create each window once in its final form"
             // Privacy, so each of its rows is moved in once, behind Appearance's.
             const visits = [_]struct { section: Section, windows: usize, moved: u16 }{
                 .{ .section = .privacy, .windows = 12, .moved = 0 },
-                .{ .section = .terminal, .windows = 7, .moved = 1 },
+                // Its 7 windows and the scrollback limit's up-down.
+                .{ .section = .terminal, .windows = 8, .moved = 1 },
             };
             for (visits) |visit| {
                 errdefer std.debug.print("settings first visit to {s}\n", .{@tagName(visit.section)});
@@ -8377,9 +8711,9 @@ test "settings open and a first visit create each window once in its final form"
                     try std.testing.expectEqual(@as(u16, 0), counts.style_rewrites);
                     try std.testing.expectEqual(@as(u16, 0), counts.hidden);
                     try std.testing.expectEqual(@as(u16, 1), counts.shown);
-                    try std.testing.expectEqual(@as(u16, 1), counts.fonts);
+                    try std.testing.expectEqual(@as(u16, if (isCompanion(settings, counts.hwnd)) 0 else 1), counts.fonts);
                     if (totals.themes != 0) try std.testing.expectEqual(@as(u16, 1), counts.themes);
-                    try std.testing.expectEqual(@as(u16, @intFromBool(settings.isEditControl(counts.hwnd))), counts.frame_changes);
+                    try std.testing.expectEqual(expectedFrameChanges(settings, counts.hwnd), counts.frame_changes);
                 }
                 try std.testing.expectEqual(visit.windows, made);
                 var combos: usize = 0;
@@ -8392,7 +8726,7 @@ test "settings open and a first visit create each window once in its final form"
             // Every section shown: the whole form, the All settings list (its
             // page is shown last), and still one font build.
             for (std.enums.values(Section)) |section| settings.setActiveSection(section);
-            try std.testing.expectEqual(@as(usize, 74), Work.Tree.of(fixture.hwnd()).len);
+            try std.testing.expectEqual(@as(usize, 77), Work.Tree.of(fixture.hwnd()).len);
             try std.testing.expectEqual(@as(u32, 1), settings.font_builds);
             try std.testing.expectEqual(@as(u32, 0), settings.theme_applications);
         }
@@ -8460,7 +8794,7 @@ test "settings sections shown in any order leave the window as one made whole at
             // Every window in the same z-order, with the same styles, place,
             // client area, check, dropdown heights, text and font, and every
             // field and text with its UIA provider.
-            try std.testing.expectEqual(@as(usize, 73), states[0].len);
+            try std.testing.expectEqual(@as(usize, 76), states[0].len);
             try State.expectSame(&states[0], &states[1]);
             try std.testing.expectEqual(providers[0], providers[1]);
             for (providers[1]) |provided| try std.testing.expect(provided);
@@ -10338,7 +10672,7 @@ fn settingsSearchGeometry(column_width: i32, dpi: u32) SearchGeometry {
     };
 }
 /// Every label, field and Reset button of the largest section, and the help text.
-const settings_form_child_count = settings_max_form_items * 3 + 1;
+const settings_form_child_count = settings_max_form_items * 3 + 1 + Companion.count;
 
 /// What the frame window paints besides its background colour.
 const BackgroundGeometry = struct {
@@ -10470,7 +10804,33 @@ fn layoutChildren(self: *SettingsWindow) void {
         // A dropdown's height is that of its open list; its closed height is
         // set afterwards (`fitComboFields`).
         const height = if (isComboControl(self, control)) self.px(settings_combo_popup_height) else self.px(settings_control_height);
-        form.add(control, gutter + geometry.control.left, geometry.control.top - scroll_y, geometry.control.right - geometry.control.left, height);
+        var field_left = geometry.control.left;
+        var field_right = geometry.control.right;
+        // A trackbar takes the lane and leaves its field a narrow box at the
+        // end; an up-down sits at the end, beside its narrowed field.
+        if (Companion.ofControl(item.control_index)) |kind| if (self.companions[@intFromEnum(kind)]) |companion| switch (kind) {
+            .opacity_slider => {
+                const box = @min(self.px(settings_slider_field_width), @divTrunc(field_right - field_left, 2));
+                field_left = field_right - box;
+                // A thumb of a fixed length, scaled: left to itself the
+                // trackbar shortens it in a short window (it is 1 x 1 when
+                // made). It sits a fixed way below the trackbar's top, so
+                // the trackbar is moved down until the thumb's middle meets
+                // the field's.
+                const length = self.px(settings_slider_thumb_length);
+                if (SendMessageW(companion, TBM_GETTHUMBLENGTH, 0, 0) != length) _ = SendMessageW(companion, TBM_SETTHUMBLENGTH, @intCast(length), 0);
+                var thumb: RECT = .{ .left = 0, .top = 0, .right = 0, .bottom = 0 };
+                _ = SendMessageW(companion, TBM_GETTHUMBRECT, 0, @bitCast(@intFromPtr(&thumb)));
+                const drop = std.math.clamp(@divTrunc(height, 2) - @divTrunc(thumb.top + thumb.bottom, 2), 0, @divTrunc(height, 2));
+                form.add(companion, gutter + geometry.control.left, geometry.control.top - scroll_y + drop, @max(0, field_left - self.px(settings_metrics.space_4) - geometry.control.left), height - drop);
+            },
+            else => {
+                const spin = self.px(settings_spin_width);
+                field_right = @max(field_left, field_right - spin - self.px(settings_metrics.space_1));
+                form.add(companion, gutter + field_right + self.px(settings_metrics.space_1), geometry.control.top - scroll_y, spin, height);
+            },
+        };
+        form.add(control, gutter + field_left, geometry.control.top - scroll_y, field_right - field_left, height);
         if (geometry.reset) |reset| if (self.reset_buttons[item.control_index]) |button| {
             form.add(button, gutter + reset.left, reset.top - scroll_y, reset.right - reset.left, reset.bottom - reset.top);
         };
@@ -11896,8 +12256,10 @@ test "settings generated form labels immediately precede their controls" {
                 settings.setActiveSection(section);
             }
             // Tab and the arrow keys follow z-order: the help text, then each
-            // section's rows in order, a label right before its control, as if
-            // every section had been made at once.
+            // section's rows in order, a label right before its row, as if
+            // every section had been made at once. The opacity's trackbar
+            // comes before its field, as it sits left of it, and an up-down
+            // after its field.
             const GW_HWNDNEXT: UINT = 2;
             const GW_CHILD: UINT = 5;
             var window = sys.GetWindow(settings.viewport.?, GW_CHILD);
@@ -11908,8 +12270,17 @@ test "settings generated form labels immediately precede their controls" {
                     window = sys.GetWindow(window.?, GW_HWNDNEXT);
                     try std.testing.expectEqual(settings.field_labels[index].?, window.?);
                 }
+                const companion = Companion.ofControl(item.control_index);
+                if (companion == .opacity_slider) {
+                    window = sys.GetWindow(window.?, GW_HWNDNEXT);
+                    try std.testing.expectEqual(settings.companions[@intFromEnum(Companion.opacity_slider)].?, window.?);
+                }
                 window = sys.GetWindow(window.?, GW_HWNDNEXT);
                 try std.testing.expectEqual(settings.controlHwnd(item.control_index).?, window.?);
+                if (companion) |kind| if (kind != .opacity_slider) {
+                    window = sys.GetWindow(window.?, GW_HWNDNEXT);
+                    try std.testing.expectEqual(settings.companions[@intFromEnum(kind)].?, window.?);
+                };
             };
             try std.testing.expectEqual(@as(?HWND, null), sys.GetWindow(window.?, GW_HWNDNEXT));
         }
@@ -11936,11 +12307,17 @@ test "settings Tab visits the fields in form order and Save last" {
                 settings.setActiveSection(section);
                 // Unsupported controls are disabled and are not tab stops. A
                 // shown Reset button comes right after its field.
-                var fields: [settings_max_form_items * 2]HWND = undefined;
+                var fields: [settings_max_form_items * 2 + 1]HWND = undefined;
                 var field_count: usize = 0;
                 for (settings.formItems()) |item| {
                     const control = settings.controlHwnd(item.control_index).?;
                     if (sys.IsWindowEnabled(control) == 0) continue;
+                    // The opacity's trackbar before its field, as it sits
+                    // left of it. An up-down is no tab stop.
+                    if (Companion.ofControl(item.control_index) == .opacity_slider) {
+                        fields[field_count] = settings.companions[@intFromEnum(Companion.opacity_slider)].?;
+                        field_count += 1;
+                    }
                     fields[field_count] = control;
                     field_count += 1;
                     const reset = if (item.control_index < form_field_count) settings.reset_buttons[item.control_index] else null;
@@ -15162,13 +15539,18 @@ test "settings marks each field that differs from its default, and its Reset but
                     const button = settings.reset_buttons[index].?;
                     try std.testing.expect(sys.IsWindowVisible(button) != 0);
                     // The marker is left of the control and as high as its top;
-                    // the button at the right end of the row.
+                    // the button at the right end of the row, past an up-down.
                     const field_rect = dialog_test.rectIn(viewport, control);
                     const marker = settings.marker_rects[index].?;
                     try std.testing.expect(marker.right < field_rect.left and marker.left >= 0);
+                    // Left of the whole row: the trackbar, where it has one.
+                    if (Companion.ofControl(index) == .opacity_slider)
+                        try std.testing.expectEqual(dialog_test.rectIn(viewport, settings.companions[@intFromEnum(Companion.opacity_slider)].?).left - settings.px(settings_marker_gap), marker.right);
+                    // A click on the marker is the row's (its menu, `rowAtPoint`).
+                    try std.testing.expectEqual(@as(?usize, index), settings.rowAtPoint(.{ .x = marker.left, .y = marker.top + 1 }));
                     try std.testing.expectEqual(field_rect.top, marker.top);
                     const button_rect = dialog_test.rectIn(viewport, button);
-                    try std.testing.expectEqual(field_rect.right + settings.px(settings_reset_gap), button_rect.left);
+                    try std.testing.expectEqual(dialog_test.rectIn(viewport, rowEnd(settings, index).?).right + settings.px(settings_reset_gap), button_rect.left);
                     try std.testing.expectEqual(field_rect.top, button_rect.top);
 
                     // Enter on the focused button, as from the keyboard.
@@ -15465,6 +15847,19 @@ test "settings markers draw beside changed fields in light, dark and High Contra
     }.body);
 }
 
+fn isCompanion(settings: *const SettingsWindow, hwnd: HWND) bool {
+    return std.mem.indexOfScalar(?HWND, &settings.companions, hwnd) != null;
+}
+
+/// The window row `index` ends with: its up-down where it has one, else its
+/// control.
+fn rowEnd(settings: *const SettingsWindow, index: usize) ?HWND {
+    if (Companion.ofControl(index)) |kind| if (kind != .opacity_slider) {
+        if (settings.companions[@intFromEnum(kind)]) |spin| return spin;
+    };
+    return settings.controlHwnd(index);
+}
+
 /// The window after `window` in z-order, passing over hidden spare Reset
 /// buttons, which Tab and the arrow keys pass over too; counts them.
 fn nextPastSpares(settings: *const SettingsWindow, window: HWND, spares: *usize) !?HWND {
@@ -15508,12 +15903,22 @@ test "settings a Reset button stays right after its control whatever order the s
                         window = try nextPastSpares(settings, window.?, &spares);
                         try std.testing.expectEqual(settings.field_labels[index].?, window.?);
                     }
+                    const companion = Companion.ofControl(item.control_index);
+                    if (companion == .opacity_slider) {
+                        window = try nextPastSpares(settings, window.?, &spares);
+                        try std.testing.expectEqual(settings.companions[@intFromEnum(Companion.opacity_slider)].?, window.?);
+                    }
                     window = try nextPastSpares(settings, window.?, &spares);
                     try std.testing.expectEqual(settings.controlHwnd(item.control_index).?, window.?);
                     if (item.control_index < form_field_count) if (settings.reset_buttons[item.control_index]) |button| {
                         window = try nextPastSpares(settings, window.?, &spares);
                         try std.testing.expectEqual(button, window.?);
                         buttons += 1;
+                    };
+                    // An up-down after its row's button.
+                    if (companion) |kind| if (kind != .opacity_slider) {
+                        window = try nextPastSpares(settings, window.?, &spares);
+                        try std.testing.expectEqual(settings.companions[@intFromEnum(kind)].?, window.?);
                     };
                 };
                 // A page's list, made with its page, comes last.
@@ -15907,8 +16312,9 @@ test "settings only the shown page's rows hold Reset buttons, handed on from pag
                     try std.testing.expectEqual(button, provider.hwnd);
                     try std.testing.expectEqualStrings(reset_button_names[index], provider.name.?);
                     const control = childRectIn(viewport, settings.controlHwnd(index).?).?;
+                    const end = childRectIn(viewport, rowEnd(settings, index).?).?;
                     const placed = childRectIn(viewport, button).?;
-                    try std.testing.expectEqual(control.right + settings.px(settings_reset_gap), placed.left);
+                    try std.testing.expectEqual(end.right + settings.px(settings_reset_gap), placed.left);
                     try std.testing.expectEqual(control.top, placed.top);
                 }
             }
@@ -15946,6 +16352,26 @@ test "settings a Reset button joins its row's arrow-key run and never a label's"
                     }
                 }
             }
+            // No run from a field or its button reaches a trackbar or an
+            // up-down, and the trackbar's run is its own: the arrows step it.
+            for (std.enums.values(Section)) |section| {
+                settings.setActiveSection(section);
+                for (settings.formItems()) |item| {
+                    const control = settings.controlHwnd(item.control_index).?;
+                    if (sys.IsWindowVisible(control) == 0 or sys.IsWindowEnabled(control) == 0) continue;
+                    const reset = if (item.control_index < form_field_count) settings.reset_buttons[item.control_index] else null;
+                    for ([_]?HWND{ control, reset }) |maybe| if (maybe) |window| if (sys.IsWindowVisible(window) != 0) {
+                        for ([_]windows.BOOL{ 0, 1 }) |previous| {
+                            errdefer std.debug.print("settings arrow run from control {d} reaches a trackbar or up-down\n", .{item.control_index});
+                            try std.testing.expect(!isCompanion(settings, dialog_test.GetNextDlgGroupItem(hwnd, window, previous).?));
+                        }
+                    };
+                }
+            }
+            settings.setActiveSection(.appearance);
+            const slider = settings.companions[@intFromEnum(Companion.opacity_slider)].?;
+            for ([_]windows.BOOL{ 0, 1 }) |previous| try std.testing.expectEqual(slider, dialog_test.GetNextDlgGroupItem(hwnd, slider, previous).?);
+
             // The button starts no group (a hidden one would still end its
             // control's run): the notification checkboxes' run takes each
             // shown button after its checkbox, and wraps.
@@ -16577,6 +17003,26 @@ fn setTextCut(hwnd: HWND, proc: *const anyopaque, wParam: WPARAM, text: [*:0]con
 /// ones, and only its look is ours. In High Contrast it is the stock check
 /// box, in system colours. The previous procedure lives in `GWLP_USERDATA`,
 /// as for the dropdowns.
+/// Subclass for the opacity trackbar. A trackbar sends its parent no focus
+/// notification, as a field's `EN_SETFOCUS` or a button's `BN_SETFOCUS`, so
+/// focus that reaches it by Tab is seen here and scrolls it into view. The
+/// previous procedure lives in `GWLP_USERDATA`.
+fn settingsSliderProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.winapi) LRESULT {
+    const previous = sys.GetWindowLongPtrW(hwnd, GWLP_USERDATA);
+    if (previous == 0) return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
+    const proc: *const anyopaque = @ptrFromInt(@as(usize, @intCast(previous)));
+    if (msg == WM_NCDESTROY) {
+        _ = sys.SetWindowLongPtrW(hwnd, GWLP_WNDPROC, previous);
+        _ = sys.SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+        return sys.CallWindowProcW(proc, hwnd, msg, wParam, lParam);
+    }
+    const result = sys.CallWindowProcW(proc, hwnd, msg, wParam, lParam);
+    if (msg == WM_SETFOCUS) if (sys.GetParent(hwnd)) |parent| if (recoverOwner(parent)) |settings| {
+        if (!settings.restoring_focus) settings.ensureControlVisible(hwnd);
+    };
+    return result;
+}
+
 fn settingsToggleProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.winapi) LRESULT {
     const previous = sys.GetWindowLongPtrW(hwnd, GWLP_USERDATA);
     if (previous == 0) return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
@@ -20209,10 +20655,17 @@ fn viewportProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(
         WM_CTLCOLORDLG,
         WM_CTLCOLORSTATIC,
         => if (owner.hwnd) |settings| return sys.SendMessageW(settings, msg, wParam, lParam),
+        // The viewport's own scroll bar; an up-down's (lParam its window)
+        // is not the page's.
         WM_VSCROLL => {
-            owner.scrollByBar(wParam & 0xFFFF);
+            if (lParam == 0) owner.scrollByBar(wParam & 0xFFFF);
             return 0;
         },
+        WM_HSCROLL => {
+            if (lParam != 0 and owner.companions[@intFromEnum(Companion.opacity_slider)] == @as(?HWND, @ptrFromInt(@as(usize, @bitCast(lParam))))) owner.sliderMoved();
+            return 0;
+        },
+        WM_NOTIFY => if (owner.companionNotify(lParam)) |result| return result,
         WM_GETOBJECT => if (owner.viewport_uia_provider) |provider| {
             if (win32_uia.returnSettingsControlProvider(hwnd, wParam, lParam, provider)) |result| return result;
         },
@@ -21212,6 +21665,337 @@ test "settings toggles round-trip through Save from a click and from Space, the 
                     "desktop-notifications = false\n",
                 after,
             );
+        }
+    }.body);
+}
+
+test "settings the opacity trackbar steps its field from the keyboard, follows what is typed, and keeps the preview floor" {
+    try dialog_test.onHiddenDesktop(struct {
+        fn position(slider: HWND) LRESULT {
+            return SendMessageW(slider, TBM_GETPOS, 0, 0);
+        }
+
+        fn body() !void {
+            const fixture = try dialog_test.Fixture.start();
+            defer fixture.finish();
+            fixture.live_previews = true;
+            const settings = &fixture.settings;
+            const slider = settings.companions[@intFromEnum(Companion.opacity_slider)].?;
+            const edit = settings.fields.edit_bg_opacity.?;
+            var buf: [edit_text_max_utf8]u8 = undefined;
+            // It starts where the field is, at the default 1.
+            try std.testing.expectEqual(@as(f64, 1), settings.pending.?.@"background-opacity");
+            try std.testing.expectEqual(@as(LRESULT, 100), position(slider));
+
+            // The trackbar's own keys, through the dialog manager: a step
+            // of 0.01, a page of 0.1, and the ends. Each goes into the field
+            // as typing would, and from there into the draft.
+            _ = sys.SetFocus(slider);
+            const Step = struct { vk: u32, position: LRESULT, text: []const u8 };
+            for ([_]Step{
+                .{ .vk = focus_cue.vk_left, .position = 99, .text = "0.99" },
+                .{ .vk = focus_cue.vk_prior, .position = 89, .text = "0.89" },
+                .{ .vk = focus_cue.vk_next, .position = 99, .text = "0.99" },
+                .{ .vk = focus_cue.vk_right, .position = 100, .text = "1" },
+                .{ .vk = focus_cue.vk_home, .position = 0, .text = "0" },
+            }) |step| {
+                errdefer std.debug.print("settings trackbar key 0x{x}\n", .{step.vk});
+                try std.testing.expect(fixture.pumpKey(step.vk));
+                try std.testing.expectEqual(slider, sys.GetFocus().?);
+                try std.testing.expectEqual(step.position, position(slider));
+                try std.testing.expectEqualStrings(step.text, readEditUtf8(edit, &buf).?);
+                try std.testing.expectEqual(try std.fmt.parseFloat(f64, step.text), settings.pending.?.@"background-opacity");
+            }
+            // At 0 the draft is 0, and the preview keeps its floor.
+            try std.testing.expectEqual(@as(f64, 0.2), fixture.config.@"background-opacity");
+            try std.testing.expect(fixture.pumpKey(focus_cue.vk_end));
+            try std.testing.expectEqualStrings("1", readEditUtf8(edit, &buf).?);
+
+            // What is typed moves it, rounded to its step.
+            typeInto(edit, "0.5");
+            try std.testing.expectEqual(@as(LRESULT, 50), position(slider));
+            typeInto(edit, "0.875");
+            try std.testing.expectEqual(@as(LRESULT, 88), position(slider));
+            // The end of a drag reports the place it is at; the field keeps
+            // the value typed, which rounds to that place.
+            const TB_ENDTRACK: WPARAM = 8;
+            _ = SendMessageW(settings.viewport.?, WM_HSCROLL, TB_ENDTRACK, @bitCast(@intFromPtr(slider)));
+            try std.testing.expectEqualStrings("0.875", readEditUtf8(edit, &buf).?);
+            try std.testing.expectEqual(@as(f64, 0.875), settings.pending.?.@"background-opacity");
+            // A value out of range is not taken, and the trackbar stays with
+            // the draft.
+            typeInto(edit, "2");
+            try std.testing.expectEqual(@as(f64, 0.875), settings.pending.?.@"background-opacity");
+            try std.testing.expectEqual(@as(LRESULT, 88), position(slider));
+        }
+    }.body);
+}
+
+test "settings an up-down steps its number field, held to the field's range, and follows what is typed" {
+    try dialog_test.onHiddenDesktop(struct {
+        fn position(spin: HWND) LRESULT {
+            return SendMessageW(spin, UDM_GETPOS32, 0, 0);
+        }
+
+        fn body() !void {
+            const fixture = try dialog_test.Fixture.start();
+            defer fixture.finish();
+            const settings = &fixture.settings;
+            var buf: [edit_text_max_utf8]u8 = undefined;
+            var expected: [32]u8 = undefined;
+
+            // The font size: Up and Down in the field step it a point, as a
+            // number box does, and the up-down's value follows.
+            const font = settings.fields.edit_font_size.?;
+            const font_spin = settings.companions[@intFromEnum(Companion.font_size_spin)].?;
+            const size = settings.pending.?.@"font-size";
+            try std.testing.expectEqual(@as(LRESULT, @intFromFloat(@round(size))), position(font_spin));
+            _ = sys.SetFocus(font);
+            try std.testing.expect(fixture.pumpKey(focus_cue.vk_up));
+            try std.testing.expectEqualStrings(try std.fmt.bufPrint(&expected, "{d}", .{size + 1}), readEditUtf8(font, &buf).?);
+            try std.testing.expectEqual(size + 1, settings.pending.?.@"font-size");
+            try std.testing.expectEqual(@as(LRESULT, @intFromFloat(@round(size + 1))), position(font_spin));
+            try std.testing.expect(fixture.pumpKey(focus_cue.vk_down));
+            try std.testing.expectEqual(size, settings.pending.?.@"font-size");
+            try std.testing.expectEqual(font, sys.GetFocus().?);
+            // Held to the field's range, 6 to 72, and stepped from what is
+            // typed, fractions kept.
+            for ([_]struct { typed: []const u8, vk: u32, text: []const u8 }{
+                .{ .typed = "72", .vk = focus_cue.vk_up, .text = "72" },
+                .{ .typed = "6", .vk = focus_cue.vk_down, .text = "6" },
+                .{ .typed = "12.5", .vk = focus_cue.vk_up, .text = "13.5" },
+            }) |case| {
+                errdefer std.debug.print("settings up-down from {s}\n", .{case.typed});
+                typeInto(font, case.typed);
+                try std.testing.expect(fixture.pumpKey(case.vk));
+                try std.testing.expectEqualStrings(case.text, readEditUtf8(font, &buf).?);
+            }
+            try std.testing.expectEqual(@as(LRESULT, 14), position(font_spin));
+            // A click on its upper arrow steps it up.
+            var client: RECT = undefined;
+            _ = GetClientRect(font_spin, &client);
+            const upper: LPARAM = @bitCast((@as(usize, @intCast(@divTrunc(client.bottom, 4))) << 16) | @as(usize, @intCast(@divTrunc(client.right, 2))));
+            const MK_LBUTTON: WPARAM = 0x0001;
+            _ = SendMessageW(font_spin, WM_LBUTTONDOWN, MK_LBUTTON, upper);
+            _ = SendMessageW(font_spin, 0x0202, 0, upper); // WM_LBUTTONUP
+            try std.testing.expectEqualStrings("14.5", readEditUtf8(font, &buf).?);
+            try std.testing.expectEqual(@as(f32, 14.5), settings.pending.?.@"font-size");
+
+            // The scrollback limit steps a megabyte, and not below 0.
+            settings.showSection(.terminal, false);
+            const scrollback = settings.fields.edit_scrollback.?;
+            const scrollback_spin = settings.companions[@intFromEnum(Companion.scrollback_spin)].?;
+            const limit = settings.pending.?.@"scrollback-limit";
+            _ = sys.SetFocus(scrollback);
+            try std.testing.expect(fixture.pumpKey(focus_cue.vk_up));
+            try std.testing.expectEqual(limit + 1_000_000, settings.pending.?.@"scrollback-limit");
+            try std.testing.expectEqual(@as(LRESULT, @intCast(@min(limit + 1_000_000, std.math.maxInt(i32)))), position(scrollback_spin));
+            typeInto(scrollback, "0");
+            try std.testing.expect(fixture.pumpKey(focus_cue.vk_down));
+            try std.testing.expectEqualStrings("0", readEditUtf8(scrollback, &buf).?);
+            try std.testing.expectEqual(@as(usize, 0), settings.pending.?.@"scrollback-limit");
+        }
+    }.body);
+}
+
+test "settings the trackbar and up-downs round-trip through Save, the rest of the file byte-identical" {
+    try dialog_test.onHiddenDesktop(struct {
+        fn body() !void {
+            const alloc = std.testing.allocator;
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            const before =
+                "# noctty config, kept by hand\n" ++
+                "background-opacity   =   0.9\n" ++
+                "\n" ++
+                "  # an indented comment, and a line Settings has no control for\n" ++
+                "keybind = ctrl+shift+t=new_tab\n";
+            try tmp.dir.writeFile(.{ .sub_path = "config.ghostty", .data = before });
+            const path = try tmp.dir.realpathAlloc(alloc, "config.ghostty");
+            defer alloc.free(path);
+
+            const fixture = try dialog_test.Fixture.prepare(false);
+            defer fixture.finish();
+            try fixture.config.loadFile(alloc, path);
+            try std.testing.expect(fixture.config._diagnostics.empty());
+            fixture.save_path = path;
+            const settings = &fixture.settings;
+            try settings.open();
+            const size = settings.pending.?.@"font-size";
+            const limit = settings.pending.?.@"scrollback-limit";
+
+            // The opacity, which the file sets: a step down on its trackbar.
+            const slider = settings.companions[@intFromEnum(Companion.opacity_slider)].?;
+            settings.ensureControlVisible(slider);
+            _ = sys.SetFocus(slider);
+            try std.testing.expect(fixture.pumpKey(focus_cue.vk_left));
+            // The font size and the scrollback limit, which it does not: a
+            // step up on each up-down.
+            _ = sys.SetFocus(settings.fields.edit_font_size.?);
+            try std.testing.expect(fixture.pumpKey(focus_cue.vk_up));
+            settings.showSection(.terminal, false);
+            _ = sys.SetFocus(settings.fields.edit_scrollback.?);
+            try std.testing.expect(fixture.pumpKey(focus_cue.vk_up));
+
+            settings.save();
+            try std.testing.expectEqual(@as(u32, 1), fixture.saved);
+            const after = try tmp.dir.readFileAlloc(alloc, "config.ghostty", 1 << 20);
+            defer alloc.free(after);
+            // The edited line is rewritten in place and the new keys are
+            // added at the end; every other byte is the file's.
+            var expected: [512]u8 = undefined;
+            try std.testing.expectEqualStrings(try std.fmt.bufPrint(&expected, "# noctty config, kept by hand\n" ++
+                "background-opacity = 0.89\n" ++
+                "\n" ++
+                "  # an indented comment, and a line Settings has no control for\n" ++
+                "keybind = ctrl+shift+t=new_tab\n" ++
+                "font-size = {d}\n" ++
+                "scrollback-limit = {d}\n", .{ size + 1, limit + 1_000_000 }), after);
+        }
+    }.body);
+}
+
+test "settings the opacity trackbar draws its channel and thumb in the theme's colours, its thumb on the field's middle, and is stock in High Contrast" {
+    const Body = struct {
+        fn darkColors(_: *anyopaque) win32_theme.ThemeColors {
+            return win32_theme.darkTheme();
+        }
+        fn lightColors(_: *anyopaque) win32_theme.ThemeColors {
+            return win32_theme.lightTheme();
+        }
+        fn highContrast(_: *anyopaque) bool {
+            return true;
+        }
+
+        /// The capture's pixel (0x00RRGGBB) as a COLORREF (0x00BBGGRR).
+        fn colorAt(capture: dialog_test.Capture, x: i32, y: i32) u32 {
+            const pixel = capture.pixels[@as(usize, @intCast(y)) * capture.width + @as(usize, @intCast(x))];
+            return ((pixel & 0xFF) << 16) | (pixel & 0xFF00) | ((pixel >> 16) & 0xFF);
+        }
+
+        fn body() !void {
+            const controls = try dialog_test.CommonControls6.activate();
+            defer controls.deactivate();
+            const fixture = try dialog_test.Fixture.start();
+            defer fixture.finish();
+            const settings = &fixture.settings;
+            const hwnd = fixture.hwnd();
+            const slider = settings.companions[@intFromEnum(Companion.opacity_slider)].?;
+            const edit = settings.fields.edit_bg_opacity.?;
+            // Away from the ends, so the channel shows on both sides.
+            typeInto(edit, "0.5");
+            var rails: usize = 0;
+            for ([_]u32{ 96, 144, 192, 288 }) |dpi| for ([_]bool{ false, true }) |dark| {
+                errdefer std.debug.print("settings trackbar at {d} DPI, {s}\n", .{ dpi, if (dark) "dark" else "light" });
+                dialog_test.simulateDpi(hwnd, dpi);
+                settings.handle.themeColors = if (dark) &darkColors else &lightColors;
+                settings.themeChanged();
+                settings.ensureControlVisible(slider);
+                _ = RedrawWindow(hwnd, null, null, RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_ALLCHILDREN | RDW_UPDATENOW);
+                const capture = try dialog_test.printClient(hwnd);
+                defer capture.deinit();
+                const colors = settings.theme_adapter.colors;
+                const at = dialog_test.rectIn(hwnd, slider);
+                var thumb: RECT = undefined;
+                _ = SendMessageW(slider, TBM_GETTHUMBRECT, 0, @bitCast(@intFromPtr(&thumb)));
+                const TBM_GETCHANNELRECT: UINT = 0x0400 + 26;
+                var channel: RECT = undefined;
+                _ = SendMessageW(slider, TBM_GETCHANNELRECT, 0, @bitCast(@intFromPtr(&channel)));
+                const middle = at.top + @divTrunc(thumb.top + thumb.bottom, 2);
+                errdefer std.debug.print("settings trackbar ({d},{d})-({d},{d}), channel {d}..{d}, thumb {d}..{d}\n", .{ at.left, at.top, at.right, at.bottom, channel.left, channel.right, thumb.left, thumb.right });
+                // The thumb in the accent, the channel either side of it in
+                // the rail's colour (both 3:1 on the pane, by the table).
+                try std.testing.expectEqual(colors.slider_thumb, colorAt(capture, at.left + @divTrunc(thumb.left + thumb.right, 2), middle));
+                // Where there is channel beside the thumb to see: a runner's
+                // 1024 x 768 screen holds the window to 341 DIP at 288 DPI,
+                // where the trackbar is little wider than its thumb.
+                const channel_y = at.top + @divTrunc(channel.top + channel.bottom, 2);
+                if (thumb.left - channel.left >= 4) {
+                    try std.testing.expectEqual(colors.slider_rail, colorAt(capture, at.left + @divTrunc(channel.left + thumb.left, 2), channel_y));
+                    rails += 1;
+                }
+                if (channel.right - thumb.right >= 4) {
+                    try std.testing.expectEqual(colors.slider_rail, colorAt(capture, at.left + @divTrunc(thumb.right + channel.right, 2), channel_y));
+                    rails += 1;
+                }
+                // The thumb's middle is the field's.
+                const field = dialog_test.rectIn(hwnd, edit);
+                try std.testing.expect(@abs(middle - @divTrunc(field.top + field.bottom, 2)) <= 1);
+            };
+            // Both sides at 96, 144 and 192 DPI at least, in light and dark.
+            try std.testing.expect(rails >= 3 * 2 * 2);
+            // High Contrast: the stock trackbar, in system colours.
+            settings.handle.highContrast = &highContrast;
+            settings.themeChanged();
+            var draw: NMCUSTOMDRAW = std.mem.zeroes(NMCUSTOMDRAW);
+            draw.hdr.hwndFrom = slider;
+            draw.stage = CDDS_PREPAINT;
+            try std.testing.expectEqual(CDRF_DODEFAULT, settings.sliderCustomDraw(&draw));
+            settings.handle.highContrast = null;
+            settings.themeChanged();
+            try std.testing.expectEqual(CDRF_NOTIFYITEMDRAW, settings.sliderCustomDraw(&draw));
+        }
+    };
+    try dialog_test.onHiddenDesktop(Body.body);
+}
+
+test "settings the trackbar and up-downs are named for their fields, and the trackbar's focus rectangle follows the keyboard cue" {
+    try dialog_test.onHiddenDesktop(struct {
+        fn body() !void {
+            var fake: FakeAnnotations = .{};
+            const fixture = try dialog_test.Fixture.prepare(false);
+            defer fixture.finish();
+            const settings = &fixture.settings;
+            settings.annotation_service = &fake.service;
+            try settings.open();
+            dialog_test.makeAllSections(settings);
+            // MSAA reads the stock role (slider, spin button) and value; the
+            // name is the field's, as the field's own is.
+            try std.testing.expectEqualStrings("Background opacity", fake.nameOf(settings.fields.edit_bg_opacity.?));
+            try std.testing.expectEqualStrings("Background opacity", fake.nameOf(settings.companions[@intFromEnum(Companion.opacity_slider)].?));
+            try std.testing.expectEqualStrings("Font size", fake.nameOf(settings.companions[@intFromEnum(Companion.font_size_spin)].?));
+            try std.testing.expectEqualStrings("Scrollback limit", fake.nameOf(settings.companions[@intFromEnum(Companion.scrollback_spin)].?));
+
+            // The trackbar's focus rectangle is the stock one: hidden while
+            // the dialog manager hides focus cues (a click), shown once a
+            // navigation key reveals them.
+            const hwnd = fixture.hwnd();
+            settings.showSection(.appearance, false);
+            const slider = settings.companions[@intFromEnum(Companion.opacity_slider)].?;
+            settings.ensureControlVisible(slider);
+            const UIS_SET: usize = 1;
+            const UIS_CLEAR: usize = 2;
+            const UISF_HIDEFOCUS: usize = 0x1;
+            _ = SendMessageW(hwnd, WM_CHANGEUISTATE, (UISF_HIDEFOCUS << 16) | UIS_SET, 0);
+            _ = sys.SetFocus(settings.fields.edit_bg_opacity.?);
+            _ = RedrawWindow(slider, null, null, RDW_INVALIDATE | RDW_UPDATENOW);
+            const unfocused = try dialog_test.printClient(hwnd);
+            defer unfocused.deinit();
+            _ = sys.SetFocus(slider);
+            _ = RedrawWindow(slider, null, null, RDW_INVALIDATE | RDW_UPDATENOW);
+            const clicked = try dialog_test.printClient(hwnd);
+            defer clicked.deinit();
+            _ = SendMessageW(hwnd, WM_CHANGEUISTATE, (UISF_HIDEFOCUS << 16) | UIS_CLEAR, 0);
+            _ = RedrawWindow(slider, null, null, RDW_INVALIDATE | RDW_UPDATENOW);
+            const keyed = try dialog_test.printClient(hwnd);
+            defer keyed.deinit();
+            const rect = dialog_test.rectIn(hwnd, slider);
+            try std.testing.expectEqual(@as(usize, 0), clicked.countDifferent(unfocused, rect, 0, 0));
+            try std.testing.expect(keyed.countDifferent(clicked, rect, 0, 0) > 0);
+
+            // Focus that reaches it with the page scrolled past it, as Tab's
+            // does, brings it into view: a trackbar sends no focus
+            // notification of its own.
+            dialog_test.simulateDpi(hwnd, 288);
+            _ = sys.SetFocus(settings.fields.edit_font_family.?);
+            settings.setContentScroll(settings.content_scroll_max);
+            var view: RECT = undefined;
+            _ = GetClientRect(settings.viewport.?, &view);
+            try std.testing.expect(settings.content_scroll_max > 0);
+            try std.testing.expect(childRectIn(settings.viewport.?, slider).?.bottom <= 0 or childRectIn(settings.viewport.?, slider).?.top >= view.bottom);
+            _ = sys.SetFocus(slider);
+            const shown = childRectIn(settings.viewport.?, slider).?;
+            try std.testing.expect(shown.top >= 0 and shown.bottom <= view.bottom);
         }
     }.body);
 }

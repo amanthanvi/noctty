@@ -139,6 +139,12 @@ pub const SettingsColors = struct {
     toggle_on_thumb: u32,
     /// A toggle switch that is off: the track's outline and its thumb.
     toggle_off: u32,
+    /// The opacity trackbar's channel and thumb (`win32_settings`'s
+    /// `sliderCustomDraw`): the channel in the text fields' resting frame
+    /// colour, the thumb in the accent. High Contrast keeps the stock
+    /// trackbar, in system colours.
+    slider_rail: u32,
+    slider_thumb: u32,
     is_dark: bool,
     high_contrast: bool,
 };
@@ -210,6 +216,10 @@ pub const settings_contrast_pairs = [_]struct {
     .{ .foreground = "toggle_on_track", .background = "window_bg", .minimum = 3.0 },
     .{ .foreground = "toggle_on_thumb", .background = "toggle_on_track", .minimum = 3.0 },
     .{ .foreground = "toggle_off", .background = "window_bg", .minimum = 3.0 },
+    // The trackbar's channel shows its range and its thumb the value; High
+    // Contrast draws the stock trackbar.
+    .{ .foreground = "slider_rail", .background = "window_bg", .minimum = 3.0, .high_contrast = false },
+    .{ .foreground = "slider_thumb", .background = "window_bg", .minimum = 3.0, .high_contrast = false },
 };
 
 /// Resolve semantic Settings colors. High Contrast deliberately ignores every
@@ -246,6 +256,8 @@ pub fn settingsColors(
             .toggle_on_track = system.highlight,
             .toggle_on_thumb = system.highlight_text,
             .toggle_off = system.button_text,
+            .slider_rail = system.button_text,
+            .slider_thumb = system.highlight,
             .is_dark = false,
             .high_contrast = true,
         };
@@ -272,6 +284,8 @@ pub fn settingsColors(
         .toggle_on_track = theme.accent,
         .toggle_on_thumb = theme.overlay_bg,
         .toggle_off = theme.text_secondary,
+        .slider_rail = theme.edit_border_unfocused,
+        .slider_thumb = theme.accent,
         .is_dark = theme.is_dark,
         .high_contrast = false,
     };
