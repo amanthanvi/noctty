@@ -10645,6 +10645,24 @@ const dialog_test = struct {
             std.testing.allocator.free(self.pixels);
         }
 
+        /// The highest contrast any pixel inside `rect` has against
+        /// `against` (a COLORREF).
+        fn bestContrast(self: Capture, rect: RECT, against: COLORREF) f64 {
+            const RGB = @import("../terminal/color.zig").RGB;
+            const base: RGB = .{ .r = @truncate(against), .g = @truncate(against >> 8), .b = @truncate(against >> 16) };
+            var best: f64 = 0;
+            var y = @max(0, rect.top);
+            while (y < @min(rect.bottom, @as(i32, @intCast(self.height)))) : (y += 1) {
+                var x = @max(0, rect.left);
+                while (x < @min(rect.right, @as(i32, @intCast(self.width)))) : (x += 1) {
+                    const pixel = self.pixels[@as(usize, @intCast(y)) * self.width + @as(usize, @intCast(x))];
+                    const color: RGB = .{ .r = @truncate(pixel >> 16), .g = @truncate(pixel >> 8), .b = @truncate(pixel) };
+                    best = @max(best, color.contrast(base));
+                }
+            }
+            return best;
+        }
+
         fn rows(self: Capture, top: i32, bottom: i32) []const u32 {
             const first: usize = @intCast(std.math.clamp(top, 0, @as(i32, @intCast(self.height))));
             const last: usize = @intCast(std.math.clamp(bottom, top, @as(i32, @intCast(self.height))));
@@ -10669,6 +10687,26 @@ const dialog_test = struct {
     };
 
     extern "user32" fn PrintWindow(hwnd: HWND, hdc: HDC, flags: UINT) callconv(.winapi) BOOL;
+
+    /// What `draw(context, hdc, clip)` draws into a memory DC the size of
+    /// `client`: a paint function's own output, nothing of the screen's.
+    fn paintInto(client: RECT, context: anytype, comptime draw: anytype) !Capture {
+        if (client.right <= 0 or client.bottom <= 0) return error.NoClientArea;
+        const memory = sys.CreateCompatibleDC(null) orelse return error.NoDC;
+        defer _ = sys.DeleteDC(memory);
+        const info: BITMAPINFO = .{ .biWidth = client.right, .biHeight = -client.bottom };
+        var bits: ?*anyopaque = null;
+        const bitmap = CreateDIBSection(memory, &info, 0, &bits, null, 0) orelse return error.NoBitmap;
+        defer _ = DeleteObject(bitmap);
+        const previous = SelectObject(memory, bitmap);
+        defer _ = SelectObject(memory, previous);
+        draw(context, memory, client);
+        _ = GdiFlush();
+        const width: usize = @intCast(client.right);
+        const height: usize = @intCast(client.bottom);
+        const source: [*]const u32 = @ptrCast(@alignCast(bits.?));
+        return .{ .pixels = try std.testing.allocator.dupe(u32, source[0 .. width * height]), .width = width, .height = height };
+    }
 
     /// The client area of `hwnd` as `PrintWindow` gives it: the window
     /// repainted (one `WM_PAINT`) and each child's pixels as they stand, so
@@ -16895,8 +16933,18 @@ fn drawSectionMarker(
     defer {
         if (previous_font) |value| _ = SelectObject(hdc, value);
     }
-    _ = SetTextColor(hdc, background);
+    _ = SetTextColor(hdc, sectionMarkerGlyph(settings.theme_adapter.colors, background));
     _ = DrawTextW(hdc, std.unicode.utf8ToUtf16LeStringLiteral("!"), 1, &glyph, DT_SINGLELINE | DT_VCENTER | DT_CENTER | DT_NOPREFIX);
+}
+
+/// The colour of the invalid disc's "!", text on the error colour and so
+/// held to 4.5:1. The rail button's own background was not, on a selected
+/// button in the light theme (4.32:1); the pane's colour is, in both app
+/// themes (5.38:1 light, 7.35:1 dark), whatever the button's state. High
+/// Contrast keeps the button's background: a system pair with the disc's
+/// text colour.
+fn sectionMarkerGlyph(colors: win32_theme.SettingsColors, button_background: COLORREF) COLORREF {
+    return if (colors.high_contrast) button_background else colors.window_bg;
 }
 
 fn settingsSectionButtonProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.winapi) LRESULT {
@@ -21049,23 +21097,85 @@ test "settings toggles round-trip through Save from a click and from Space, the 
     }.body);
 }
 
-test "settings an open list row's actions are text at 4.5:1 in light, dark and High Contrast" {
-    const RGB = @import("../terminal/color.zig").RGB;
-    const of = struct {
-        fn rgbOf(color: u32) RGB {
-            return .{ .r = @truncate(color), .g = @truncate(color >> 8), .b = @truncate(color >> 16) };
+test "settings an open list row's actions are drawn at 4.5:1 in light and dark" {
+    const Body = struct {
+        fn darkColors(_: *anyopaque) win32_theme.ThemeColors {
+            return win32_theme.darkTheme();
         }
-    }.rgbOf;
-    // Windows 11's Aquatic and Desert contrast themes, as their files set them.
-    const aquatic: win32_theme.SettingsSystemColors = .{ .window = win32_theme.rgb(32, 32, 32), .window_text = win32_theme.rgb(255, 255, 255), .button_face = win32_theme.rgb(32, 32, 32), .button_text = win32_theme.rgb(255, 255, 255), .gray_text = win32_theme.rgb(166, 166, 166), .highlight = win32_theme.rgb(142, 227, 240), .highlight_text = win32_theme.rgb(38, 59, 80) };
-    const desert: win32_theme.SettingsSystemColors = .{ .window = win32_theme.rgb(255, 250, 239), .window_text = win32_theme.rgb(61, 61, 61), .button_face = win32_theme.rgb(255, 250, 239), .button_text = win32_theme.rgb(32, 32, 32), .gray_text = win32_theme.rgb(103, 103, 103), .highlight = win32_theme.rgb(144, 57, 9), .highlight_text = win32_theme.rgb(255, 245, 227) };
-    for ([_]win32_theme.SettingsColors{
-        win32_theme.settingsColors(win32_theme.lightTheme(), std.mem.zeroes(win32_theme.SettingsSystemColors), false),
-        win32_theme.settingsColors(win32_theme.darkTheme(), std.mem.zeroes(win32_theme.SettingsSystemColors), false),
-        win32_theme.settingsColors(win32_theme.lightTheme(), aquatic, true),
-        win32_theme.settingsColors(win32_theme.lightTheme(), desert, true),
-    }) |colors| {
-        // On the pane, below the row's selected band.
-        try std.testing.expect(of(referenceActionColor(colors)).contrast(of(colors.window_bg)) >= 4.5);
-    }
+        fn lightColors(_: *anyopaque) win32_theme.ThemeColors {
+            return win32_theme.lightTheme();
+        }
+
+        fn body() !void {
+            const fixture = try dialog_test.Fixture.start();
+            defer fixture.finish();
+            const settings = &fixture.settings;
+            const hwnd = fixture.hwnd();
+            // Large enough that a stroke has pixels the text covers whole.
+            dialog_test.simulateDpi(hwnd, 192);
+            for ([_]bool{ false, true }) |dark| {
+                settings.handle.themeColors = if (dark) &darkColors else &lightColors;
+                settings.themeChanged();
+                const window = try selectReferenceKey(settings, .@"copy-on-select");
+                const list = &settings.reference_list;
+                const actions = list.actionRects(list.ensureMetrics().?);
+                // The list painted to a memory DC, as its WM_PAINT paints it.
+                var client: RECT = undefined;
+                _ = GetClientRect(window, &client);
+                const painted = try dialog_test.paintInto(client, list, ReferenceList.paint);
+                defer painted.deinit();
+                // Every pixel of anti-aliased text lies between the text's
+                // colour and the pane's, so the best one reaches 4.5:1 only
+                // if the text's own colour does.
+                const pane = settings.theme_adapter.colors.window_bg;
+                var best: f64 = 0;
+                for ([_]?RECT{ actions.edit, actions.copy, actions.open }) |maybe| if (maybe) |rect| {
+                    best = @max(best, painted.bestContrast(rect, pane));
+                };
+                errdefer std.debug.print("settings list actions ({s}): best pixel {d:.2}:1 against the pane\n", .{ if (dark) "dark" else "light", best });
+                try std.testing.expect(best >= 4.5);
+            }
+        }
+    };
+    try dialog_test.onHiddenDesktop(Body.body);
+}
+
+test "settings the invalid section mark's glyph is drawn at 4.5:1 on its disc, a selected section's included" {
+    const Body = struct {
+        fn darkColors(_: *anyopaque) win32_theme.ThemeColors {
+            return win32_theme.darkTheme();
+        }
+        fn lightColors(_: *anyopaque) win32_theme.ThemeColors {
+            return win32_theme.lightTheme();
+        }
+
+        fn body() !void {
+            const fixture = try dialog_test.Fixture.start();
+            defer fixture.finish();
+            const settings = &fixture.settings;
+            const hwnd = fixture.hwnd();
+            dialog_test.simulateDpi(hwnd, 192);
+            // An invalid font size: Appearance, the section shown and so the
+            // selected rail button, gets the disc.
+            typeInto(settings.fields.edit_font_size.?, "1");
+            settings.validationQuietElapsed();
+            const button = settings.sectionButton(.appearance).?;
+            for ([_]bool{ false, true }) |dark| {
+                settings.handle.themeColors = if (dark) &darkColors else &lightColors;
+                settings.themeChanged();
+                _ = RedrawWindow(hwnd, null, null, RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_ALLCHILDREN | RDW_UPDATENOW);
+                const capture = try dialog_test.printClient(hwnd);
+                defer capture.deinit();
+                const outer = dialog_test.rectIn(hwnd, button);
+                const inner: RECT = .{ .left = 0, .top = 0, .right = outer.right - outer.left, .bottom = outer.bottom - outer.top };
+                const disc = sectionMarkerRect(settings, inner, .invalid);
+                const in_window: RECT = .{ .left = outer.left + disc.left, .top = outer.top + disc.top, .right = outer.left + disc.right, .bottom = outer.top + disc.bottom };
+                const fill = sectionMarkerFill(settings.theme_adapter.colors, .invalid, true);
+                const best = capture.bestContrast(in_window, fill);
+                errdefer std.debug.print("settings invalid mark ({s}): best glyph pixel {d:.2}:1 against the disc\n", .{ if (dark) "dark" else "light", best });
+                try std.testing.expect(best >= 4.5);
+            }
+        }
+    };
+    try dialog_test.onHiddenDesktop(Body.body);
 }

@@ -146,8 +146,9 @@ pub const SettingsColors = struct {
 /// Every pair of Settings colours that Settings itself draws one on the
 /// other, or hands Windows for a control through `WM_CTLCOLOR*`, with the
 /// contrast it needs (DESIGN.md): 4.5:1 for text, 3:1 for a control's
-/// boundary, a state cue or a focus indicator. Disabled text is exempt.
-/// Themed controls (`DarkMode_Explorer`, `DarkMode_CFD`) draw in their own
+/// boundary, a state cue or a focus indicator. Exempt, and so not listed:
+/// disabled text, and the separators (`rail_separator`, `pane_separator`, a
+/// list row's rule), which are decoration and carry no state. Themed controls (`DarkMode_Explorer`, `DarkMode_CFD`) draw in their own
 /// colours, which these do not cover. Read off every `SetTextColor`, fill
 /// and stroke in `win32_settings.zig`; a new one adds its pair here.
 pub const settings_contrast_pairs = [_]struct {
@@ -195,6 +196,11 @@ pub const settings_contrast_pairs = [_]struct {
     .{ .foreground = "error_text", .background = "rail_bg", .minimum = 3.0, .high_contrast = false },
     .{ .foreground = "error_text", .background = "selection_bg", .minimum = 3.0, .high_contrast = false },
     .{ .foreground = "error_text", .background = "button_bg", .minimum = 3.0, .high_contrast = false },
+    // The invalid disc's "!" is text, in the pane's colour on the disc
+    // (`win32_settings.sectionMarkerGlyph`). High Contrast draws it in the
+    // button's own background, whose pair with the disc's text colour is
+    // the text pair above (text on the rail, or the selection's).
+    .{ .foreground = "window_bg", .background = "error_text", .minimum = 4.5, .high_contrast = false },
     // A text field's frame: at rest, focused and invalid, on both sides.
     .{ .foreground = "field_border", .background = "window_bg", .minimum = 3.0 },
     .{ .foreground = "field_border", .background = "edit_bg", .minimum = 3.0 },
