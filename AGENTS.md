@@ -290,7 +290,9 @@ that govern each symbol you change, or that none does.
   `os/color_scheme.zig`), what a log line may print of a command, an
   argument, an environment value or a directory (`os/redact.zig`,
   `Command.redacted()`); path safety (`os.path.isNetworkOrDevicePath`,
-  `OBJ_DONT_REPARSE`) for every program-reported path before it is opened
+  `OBJ_DONT_REPARSE` opens: `apprt/win32/local_target.zig` `lookup` and
+  `windows_shell.ntOpenDontReparse`, and the length of a path before either
+  converts it) for every program-reported path before it is opened
   (OSC 7/9;9/1337 pwd), and for kitty graphics `t=f`/`t=t` files, which use
   an ordinary open whose canonical path is checked afterwards, so the open
   itself can still reach a share (`terminal/kitty/graphics_image.zig` and

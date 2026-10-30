@@ -51,6 +51,9 @@ pub const Lookup = union(enum) {
 
 /// `open`, telling a missing file from one that could not be opened as local.
 pub fn lookup(alloc: std.mem.Allocator, path: []const u8, options: Options) Lookup {
+    // Zig 0.15.2's `sliceToPrefixedFileW` writes past its fixed buffer for a
+    // longer path; a WTF-8 byte is at most one unit, so this always fits.
+    if (path.len > windows.PATH_MAX_WIDE) return .refused;
     const root_len = localRoot(path) orelse return .refused;
     // Under `.refuse` there is no direct open: an open that follows no link
     // still reaches a placeholder's provider, which can recall it then.
@@ -495,6 +498,33 @@ test "local target lookup refuses links to a share before opening them, and tell
             try std.testing.expectEqualStrings("font-size = 15\n", buf[0..try found.file.readAll(&buf)]);
         }
     };
+}
+
+test "local target lookup refuses a path past PATH_MAX_WIDE before converting it" {
+    const alloc = std.testing.allocator;
+    // Zig 0.15.2 converts a path into a fixed buffer of PATH_MAX_WIDE units
+    // without checking that it fits, and a longer name overflows the walk's
+    // 16-bit name length: either panic ends the process.
+    for ([_]usize{ windows.PATH_MAX_WIDE + 1, 40000 }) |len| {
+        const path = try alloc.alloc(u8, len);
+        defer alloc.free(path);
+        @memset(path, 'a');
+        @memcpy(path[0..3], "C:\\");
+        for (std.enums.values(Cloud)) |cloud| {
+            try std.testing.expectEqual(Lookup.refused, lookup(alloc, path, .{ .cloud = cloud }));
+        }
+    }
+
+    // A path at the bound is looked at: the walk finds no such folder.
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const base = try tmp.dir.realpathAlloc(alloc, ".");
+    defer alloc.free(base);
+    const path = try alloc.alloc(u8, windows.PATH_MAX_WIDE);
+    defer alloc.free(path);
+    @memset(path, 'a');
+    _ = try std.fmt.bufPrint(path, "{s}\\absent\\", .{base});
+    try std.testing.expectEqual(Lookup.missing, lookup(alloc, path, .{ .cloud = .refuse }));
 }
 
 test "local target lookup refuses a cloud placeholder before opening it as its provider presents it" {

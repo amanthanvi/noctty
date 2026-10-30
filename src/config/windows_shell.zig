@@ -2357,6 +2357,9 @@ pub fn ntOpenDontReparse(
     options: windows.ULONG,
     handle: *windows.HANDLE,
 ) ?windows.NTSTATUS {
+    // Zig 0.15.2's `sliceToPrefixedFileW` writes past its fixed buffer for a
+    // longer path; a WTF-8 byte is at most one unit, so this always fits.
+    if (path.len > windows.PATH_MAX_WIDE) return null;
     var wide = windows.sliceToPrefixedFileW(null, path) catch return null;
     // Older Windows also treats the DOS drive-letter mapping as a reparse.
     // Resolve just that mapping without opening a filesystem target, and accept
@@ -5098,6 +5101,21 @@ test "appExecLinkTarget reads the third string and rejects a cut, foreign or odd
     var zeroed = [_]u8{0} ** 512;
     @memcpy(zeroed[0..40], record[0..40]);
     try std.testing.expect(appExecLinkTarget(&zeroed, &out) == null);
+}
+
+test "ntOpenDontReparse refuses a path past PATH_MAX_WIDE before converting it" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const alloc = std.testing.allocator;
+    // Zig 0.15.2 converts a path into a fixed buffer of PATH_MAX_WIDE units
+    // without checking that it fits, and a panic there ends the process.
+    for ([_]usize{ windows.PATH_MAX_WIDE + 1, 40000 }) |len| {
+        const path = try alloc.alloc(u8, len);
+        defer alloc.free(path);
+        @memset(path, 'a');
+        @memcpy(path[0..3], "C:\\");
+        var handle: windows.HANDLE = undefined;
+        try std.testing.expectEqual(@as(?windows.NTSTATUS, null), ntOpenDontReparse(path, windows.FILE_READ_ATTRIBUTES, 0, &handle));
+    }
 }
 
 test "shell discovery refuses reparse ancestors before reading the target" {

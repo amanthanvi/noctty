@@ -10,6 +10,7 @@ See also:
 - Counting Settings-open work in a trace per window-creation interval, not per PID (Windows reuses PIDs across cold launches): the 2026-10-19 "Windows reused PIDs within a SETSTALL cohort" entry in test-harnesses.md.
 - The profile list and the `default-profile` resolution that the Default profile row shows (`Config._default_profile`, and a Visual Studio lookup that got no answer): the 2026-10-23 PROFILES part 2 and part 3 entries in launch-and-paths.md.
 - What `ShellExecuteW("open")` does with a file that has no association, which item (7) of the 2026-10-15 PKG-40b entry left unmeasured: it starts `OpenWith.exe` from a service host, outside the caller's private desktop: trap (2) of the 2026-10-30 LINKS-83 entry in launch-and-paths.md.
+- The as-given shape check of trap 14 of the 2026-10-27 All settings entry also needs a length bound, which `local_target.lookup` now applies before it converts the path (Zig's conversion panics past PATH_MAX_WIDE, and a `--config-file` path reaches it as given): the 2026-10-30 PATH-BOUND entry in launch-and-paths.md.
 
 - 2026-10-30: D26 9.5 part 1 (toggle switches, theme tokens). Four traps.
   1. **The test binary has no manifest, so its controls are classic.** A Settings capture in a test shows the unthemed USER32 controls no user sees: light `#F0F0F0` push buttons in dark mode, and themes that `SetWindowTheme` cannot change. Activate comctl32 6 on the test thread (`dialog_test.CommonControls6`) before making windows.
