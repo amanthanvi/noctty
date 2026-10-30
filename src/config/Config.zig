@@ -1454,6 +1454,13 @@ input: RepeatableReadableIO = .{},
 /// This can be changed at runtime but will only affect new terminal surfaces.
 @"scrollback-limit": usize = 10_000_000, // 10MB
 
+/// Compatibility setting from upstream Ghostty, which uses it to compress
+/// scrollback pages while the terminal is idle.
+///
+/// This has no effect in the Windows-only fork, which does not compress
+/// scrollback.
+@"scrollback-compression": bool = true,
+
 /// Control when the scrollbar is shown to scroll the scrollback buffer.
 ///
 /// The default value is `system`.
@@ -2572,6 +2579,13 @@ keybind: Keybinds = .{},
 /// Specified as either hex (`#RRGGBB` or `RRGGBB`) or a named X11 color.
 @"window-titlebar-foreground": ?Color = null,
 
+/// Compatibility setting from upstream Ghostty's macOS and GTK apps, where it
+/// controls when drag handles are shown over splits. Valid values are
+/// `always`, `auto` and `never`.
+///
+/// This has no effect in the Windows-only fork.
+@"drag-handle": DragHandle = .auto,
+
 /// This controls when resize overlays are shown. Resize overlays are a
 /// transient popup that shows the size of the terminal while the surfaces are
 /// being resized. The possible options are:
@@ -3532,6 +3546,11 @@ keybind: Keybinds = .{},
 /// Retained compatibility setting from the removed GTK runtime.
 ///
 /// This has no effect in the Windows-only fork.
+@"gtk-tabs-inverted": bool = false,
+
+/// Retained compatibility setting from the removed GTK runtime.
+///
+/// This has no effect in the Windows-only fork.
 @"gtk-titlebar-hide-when-maximized": bool = false,
 
 /// Retained compatibility setting from the removed GTK runtime.
@@ -3548,6 +3567,11 @@ keybind: Keybinds = .{},
 ///
 /// This has no effect in the Windows-only fork.
 @"gtk-wide-tabs": bool = true,
+
+/// Retained compatibility setting from the removed GTK runtime.
+///
+/// This has no effect in the Windows-only fork.
+@"gtk-horizontal-tab-scroll": bool = true,
 
 /// Retained compatibility setting from the removed GTK runtime.
 ///
@@ -12499,6 +12523,13 @@ pub const WindowShowTabBar = enum {
     never,
 };
 
+/// See drag-handle
+pub const DragHandle = enum {
+    always,
+    auto,
+    never,
+};
+
 /// See resize-overlay
 pub const ResizeOverlay = enum {
     always,
@@ -13746,6 +13777,24 @@ test "command-palette-entry in a config file: clear empties the palette, an empt
     try restored.loadReader(alloc, &restore_reader, "C:\\noctty-test\\config.ghostty");
     try testing.expect(restored._diagnostics.empty());
     try testing.expectEqual(inputpkg.command.defaults.len, restored.@"command-palette-entry".cval().len);
+}
+
+test "a config shared with upstream 1.4 on macOS or Linux loads its platform keys without a problem" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var cfg = try Config.default(alloc);
+    defer cfg.deinit();
+    var reader: std.Io.Reader = .fixed(
+        "drag-handle = never\n" ++
+            "scrollback-compression = false\n" ++
+            "gtk-tabs-inverted = true\n" ++
+            "gtk-horizontal-tab-scroll = false\n",
+    );
+    try cfg.loadReader(alloc, &reader, "C:\\noctty-test\\config.ghostty");
+    try testing.expect(cfg._diagnostics.empty());
+    try testing.expectEqual(DragHandle.never, cfg.@"drag-handle");
+    try testing.expect(!cfg.@"scrollback-compression");
 }
 
 test "default quit-after-last-window-closed is enabled in the Windows fork" {
