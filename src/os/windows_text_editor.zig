@@ -71,15 +71,14 @@ fn openWith(alloc: std.mem.Allocator, path: []const u8, comptime query_associati
         if (std.mem.eql(u8, component, ".") or std.mem.eql(u8, component, "..")) continue;
         if (component[component.len - 1] == '.' or component[component.len - 1] == ' ') return error.OpenConfigRejected;
     }
-    const normalized = try std.fs.path.resolve(alloc, &.{path});
-    defer alloc.free(normalized);
-    if (!shell.isDriveAbsolutePath(normalized) or
-        os_windows.driveTypeForLetter(normalized[0]) == os_windows.DRIVE_REMOTE) return error.OpenConfigRejected;
-    const file = local_path.open(alloc, normalized, false) orelse return error.OpenConfigRejected;
-    defer file.close();
-    if ((try file.stat()).kind != .file) return error.OpenConfigRejected;
+    const found = switch (try local_path.open(alloc, path, .{})) {
+        .found => |hit| hit,
+        .missing, .refused => return error.OpenConfigRejected,
+    };
+    defer found.deinit(alloc);
+    if ((try found.file.stat()).kind != .file) return error.OpenConfigRejected;
 
-    const path_w = try std.unicode.utf8ToUtf16LeAllocZ(alloc, normalized);
+    const path_w = try std.unicode.utf8ToUtf16LeAllocZ(alloc, found.path);
     defer alloc.free(path_w);
     // SEE_MASK_CLASSNAME requires the association's ProgID, not its extension.
     // Let the shell resolve .txt (including UserChoice), without reading or

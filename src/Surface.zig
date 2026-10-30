@@ -32,8 +32,6 @@ const Command = @import("Command.zig");
 const terminal = @import("terminal/main.zig");
 const configpkg = @import("config.zig");
 const configUrl = @import("config/url.zig");
-// The link opener's local-only lookup, used for the existence check of a link
-// so that a link into a share is never stat-ed (Windows only, see `existingPath`).
 const Duration = configpkg.Config.Duration;
 const input = @import("input.zig");
 const App = @import("App.zig");
@@ -3176,12 +3174,14 @@ fn existingPath(
     // wait on the server first. It also answers with a status where
     // `faccessatW` has an `unreachable`.
     if (builtin.os.tag == .windows) {
-        const file = internal_os.local_path.open(alloc, resolved, false) orelse {
-            alloc.free(resolved);
-            return null;
+        defer alloc.free(resolved);
+        return switch (try internal_os.local_path.open(alloc, resolved, .{})) {
+            .found => |found| found: {
+                found.file.close();
+                break :found found.path;
+            },
+            .missing, .refused => null,
         };
-        file.close();
-        return resolved;
     }
 
     std.fs.accessAbsolute(resolved, .{}) catch {

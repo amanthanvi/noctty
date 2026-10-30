@@ -1,8 +1,10 @@
-//! Bounded local-only handle lookup for the link opener, the editor and the
-//! Settings config read. No unchecked reparse target is opened, including
-//! targets reached through another local symlink.
+//! A bounded open on a local drive, for the link opener, the editor and the
+//! Settings config read: no unchecked reparse target is opened, including
+//! targets reached through another local symlink, so nothing it opens
+//! contacts a share.
 const std = @import("std");
 const builtin = @import("builtin");
+const Allocator = std.mem.Allocator;
 const windows = std.os.windows;
 const os_windows = @import("windows.zig");
 const os_path = @import("path.zig");
@@ -11,14 +13,7 @@ const OBJ_DONT_REPARSE = 0x1000;
 const STATUS_REPARSE_POINT_ENCOUNTERED = 0xc000050b;
 const IO_REPARSE_TAG_CLOUD = 0x9000001a;
 
-pub fn open(alloc: std.mem.Allocator, path: []const u8, read_data: bool) ?std.fs.File {
-    return switch (lookup(alloc, path, .{ .read_data = read_data })) {
-        .file => |file| file,
-        .missing, .refused => null,
-    };
-}
-
-/// What a lookup does with a cloud-files placeholder (OneDrive and the like)
+/// What `open` does with a cloud-files placeholder (OneDrive and the like)
 /// on the way.
 pub const Cloud = enum {
     /// Open it as its provider presents it, which may first recall it from
@@ -27,42 +22,110 @@ pub const Cloud = enum {
     /// Refuse it, and anything else marked for recall from remote storage,
     /// before anything opens it in a way that could recall it: for a read on
     /// the UI thread, where a slow or offline provider would stall the window.
+    /// The data is then read through a reopen of the checked handle.
     refuse,
 };
 
-pub const Options = struct {
-    /// Open the result to read its data, not only its attributes.
-    read_data: bool = false,
+pub const How = struct {
+    /// Open the file to read its data, not only its attributes.
+    data: bool = false,
     cloud: Cloud = .open,
 };
 
-/// What `lookup` found at a path.
-pub const Lookup = union(enum) {
-    /// The local file or directory, opened.
-    file: std.fs.File,
-    /// Nothing is there: the walk reached a local, verified folder in which
-    /// the next name does not exist. No link was left unchecked to say so.
+/// What `open` found at a path.
+pub const Opened = union(enum) {
+    found: Found,
+    /// Nothing is there: a folder shown to be local lacks the next name. No
+    /// link was left unchecked to say so.
     missing,
-    /// The path or a link on it leads somewhere that cannot be shown to be
-    /// local (a share, a mapped drive, a device), or opening failed.
+    /// Not a local drive path, a link on the way leads somewhere that cannot
+    /// be shown to be local (a share, a mapped drive, a device), or opening
+    /// failed.
     refused,
 };
 
-/// `open`, telling a missing file from one that could not be opened as local.
-pub fn lookup(alloc: std.mem.Allocator, path: []const u8, options: Options) Lookup {
+/// The local file or directory `open` found.
+pub const Found = struct {
+    /// The path as given, resolved: drive-absolute. Owned by the caller.
+    path: []u8,
+    /// Open for its attributes (and its data with `How.data`), sharing read,
+    /// write and delete.
+    file: std.fs.File,
+
+    pub fn deinit(self: Found, alloc: Allocator) void {
+        self.file.close();
+        alloc.free(self.path);
+    }
+
+    /// The name the folder stores the last component under, read through a
+    /// guarded open of that folder. NTFS also finds a file by its 8.3 alias
+    /// (`CMD~1` for `.cmd`), which the shell namespace types by this long
+    /// name. Null when there is no such entry, or out of memory.
+    pub fn storedName(self: Found, alloc: Allocator) ?[]u8 {
+        const leaf = std.fs.path.basename(self.path);
+        // The query takes a pattern, so a wildcard would name another entry.
+        if (leaf.len == 0 or std.mem.indexOfAny(u8, leaf, "*?<>\"") != null) return null;
+        const dir = switch (lookup(alloc, std.fs.path.dirname(self.path) orelse return null, .{ .data = true })) {
+            .file => |file| file,
+            .missing, .refused => return null,
+        };
+        defer dir.close();
+        const leaf_w = std.unicode.utf8ToUtf16LeAlloc(alloc, leaf) catch return null;
+        defer alloc.free(leaf_w);
+        var pattern = unicodeString(leaf_w);
+        var buffer: [@sizeOf(windows.FILE_DIRECTORY_INFORMATION) + windows.NAME_MAX * 2]u8 align(@alignOf(windows.FILE_DIRECTORY_INFORMATION)) = undefined;
+        var io: windows.IO_STATUS_BLOCK = undefined;
+        if (windows.ntdll.NtQueryDirectoryFile(dir.handle, null, null, null, &io, &buffer, buffer.len, .FileDirectoryInformation, windows.TRUE, &pattern, windows.TRUE) != .SUCCESS) return null;
+        const info: *const windows.FILE_DIRECTORY_INFORMATION = @ptrCast(&buffer);
+        const name_w: [*]const u16 = @ptrCast(&info.FileName);
+        return std.unicode.utf16LeToUtf8Alloc(alloc, name_w[0 .. info.FileNameLength / 2]) catch null;
+    }
+};
+
+/// Open what `path` names, on a local drive only. As given, `path` must be
+/// drive-absolute (`X:\` or `X:/`) with no `:` after the drive: Zig 0.15.2's
+/// `resolve` panics on some other shapes (a share whose second name is the
+/// other separator, `\\a\/`). It is then resolved, and refused past
+/// PATH_MAX_WIDE bytes. The drive must be fixed, removable, a CD-ROM or a RAM
+/// disk; each name is opened under OBJ_DONT_REPARSE relative to its checked
+/// parent, a symlink or junction is followed only to a local drive or a
+/// direct Volume{GUID} (at most 32 hops and 256 names), and the handle's
+/// final path must be local. Nothing waits on a network: `.missing` never
+/// comes from a share. Out of memory in the resolve propagates; inside the
+/// walk the path is refused.
+pub fn open(alloc: Allocator, path: []const u8, how: How) Allocator.Error!Opened {
+    if (!os_path.isDriveAbsolutePath(path) or std.mem.indexOfScalar(u8, path[2..], ':') != null) return .refused;
+    const resolved = try std.fs.path.resolve(alloc, &.{path});
+    const looked = lookup(alloc, resolved, how);
+    if (looked != .file) alloc.free(resolved);
+    return switch (looked) {
+        .file => |file| .{ .found = .{ .path = resolved, .file = file } },
+        .missing => .missing,
+        .refused => .refused,
+    };
+}
+
+/// What `lookup` found at a resolved path.
+const Lookup = union(enum) {
+    file: std.fs.File,
+    missing,
+    refused,
+};
+
+fn lookup(alloc: Allocator, path: []const u8, how: How) Lookup {
     // Zig 0.15.2's `sliceToPrefixedFileW` writes past its fixed buffer for a
     // longer path; a WTF-8 byte is at most one unit, so this always fits.
     if (path.len > windows.PATH_MAX_WIDE) return .refused;
     const root_len = localRoot(path) orelse return .refused;
     // Under `.refuse` there is no direct open: an open that follows no link
     // still reaches a placeholder's provider, which can recall it then.
-    if (options.cloud == .open) {
+    if (how.cloud == .open) {
         var wide = windows.sliceToPrefixedFileW(null, path) catch return .refused;
         // Windows 10 can reject the DOS drive alias itself under OBJ_DONT_REPARSE.
         // Resolve only that alias; all filesystem components retain the guard.
         if (root_len == 3 and !os_windows.directVolumePath(&wide)) return .refused;
         var handle: windows.HANDLE = undefined;
-        const status = create(wide.span(), null, OBJ_DONT_REPARSE, .{ .read_data = options.read_data }, &handle);
+        const status = create(wide.span(), null, OBJ_DONT_REPARSE, .{ .read_data = how.data }, &handle);
         if (status == .SUCCESS) return .{ .file = .{ .handle = handle } };
         // Under OBJ_DONT_REPARSE a reparse point on the way is reported before a
         // missing name after it, so a missing name here crossed no link.
@@ -75,14 +138,14 @@ pub fn lookup(alloc: std.mem.Allocator, path: []const u8, options: Options) Look
     // could race into a share during that scan, before the final-path check.
     // Under `.refuse` each name is opened as itself, for its attributes only,
     // and the data only once the last one has been shown to be no placeholder.
-    var state: Walk = .{ .cloud = options.cloud };
-    const walk_data = options.read_data and options.cloud == .open;
+    var state: Walk = .{ .cloud = how.cloud };
+    const walk_data = how.data and how.cloud == .open;
     const file = walk(alloc, path, walk_data, 0, &state) orelse return if (state.not_found) .missing else .refused;
     if (!hasLocalFinalPath(file.handle)) {
         file.close();
         return .refused;
     }
-    if (options.read_data and !walk_data) {
+    if (how.data and !walk_data) {
         // The same file again, through its handle (an empty name relative to
         // it, as ReOpenFile does), not by its path.
         defer file.close();
@@ -91,28 +154,6 @@ pub fn lookup(alloc: std.mem.Allocator, path: []const u8, options: Options) Look
         return .{ .file = .{ .handle = data } };
     }
     return .{ .file = file };
-}
-
-/// The name the last component of `path` is stored under in its folder,
-/// through a guarded open of that folder. NTFS also finds a file by its 8.3
-/// alias (`CMD~1` for `.cmd`), which the shell namespace types by this long
-/// name. Null when the folder cannot be opened as local or holds no such
-/// entry.
-pub fn entryName(alloc: std.mem.Allocator, path: []const u8) ?[]u8 {
-    const leaf = std.fs.path.basename(path);
-    // The query takes a pattern, so a wildcard would name another entry.
-    if (leaf.len == 0 or std.mem.indexOfAny(u8, leaf, "*?<>\"") != null) return null;
-    const dir = open(alloc, std.fs.path.dirname(path) orelse return null, true) orelse return null;
-    defer dir.close();
-    const leaf_w = std.unicode.utf8ToUtf16LeAlloc(alloc, leaf) catch return null;
-    defer alloc.free(leaf_w);
-    var pattern = unicodeString(leaf_w);
-    var buffer: [@sizeOf(windows.FILE_DIRECTORY_INFORMATION) + windows.NAME_MAX * 2]u8 align(@alignOf(windows.FILE_DIRECTORY_INFORMATION)) = undefined;
-    var io: windows.IO_STATUS_BLOCK = undefined;
-    if (windows.ntdll.NtQueryDirectoryFile(dir.handle, null, null, null, &io, &buffer, buffer.len, .FileDirectoryInformation, windows.TRUE, &pattern, windows.TRUE) != .SUCCESS) return null;
-    const info: *const windows.FILE_DIRECTORY_INFORMATION = @ptrCast(&buffer);
-    const name_w: [*]const u16 = @ptrCast(&info.FileName);
-    return std.unicode.utf16LeToUtf8Alloc(alloc, name_w[0 .. info.FileNameLength / 2]) catch null;
 }
 
 fn notFound(status: windows.NTSTATUS) bool {
@@ -170,7 +211,7 @@ fn create(name_w: []const u16, parent: ?windows.HANDLE, attributes: u32, options
     );
 }
 
-fn walk(alloc: std.mem.Allocator, path: []const u8, read_data: bool, depth: usize, state: *Walk) ?std.fs.File {
+fn walk(alloc: Allocator, path: []const u8, read_data: bool, depth: usize, state: *Walk) ?std.fs.File {
     if (depth >= 32) return null;
     const root_len = localRoot(path) orelse return null;
     var root_w = windows.sliceToPrefixedFileW(null, path[0..root_len]) catch return null;
@@ -309,7 +350,7 @@ pub const test_cloud = struct {
     }
 };
 
-fn reparseTarget(alloc: std.mem.Allocator, buffer: []const u8, tag: u32, parent: []const u8) ?[]u8 {
+fn reparseTarget(alloc: Allocator, buffer: []const u8, tag: u32, parent: []const u8) ?[]u8 {
     // Validate the returned buffer before viewing its UTF-16 substitute name.
     if (buffer.len < 20 or std.mem.readInt(u32, buffer[0..4], .little) != tag) return null;
     const length: usize = std.mem.readInt(u16, buffer[4..6], .little);
@@ -380,7 +421,7 @@ pub const test_links = struct {
 
     /// A symlink at `link` (absolute) to `target`. False when the account may
     /// not make one (no SeCreateSymbolicLinkPrivilege and no Developer Mode).
-    pub fn symlink(alloc: std.mem.Allocator, link: []const u8, target: []const u8, is_dir: bool) !bool {
+    pub fn symlink(alloc: Allocator, link: []const u8, target: []const u8, is_dir: bool) !bool {
         const link_w = try std.unicode.utf8ToUtf16LeAllocZ(alloc, link);
         defer alloc.free(link_w);
         const target_w = try std.unicode.utf8ToUtf16LeAllocZ(alloc, target);
@@ -395,7 +436,7 @@ pub const test_links = struct {
 
     /// Make the empty folder `dir` (absolute) a junction to `nt_target`, an
     /// NT path such as `\??\UNC\host\share`. Needs no privilege.
-    pub fn junction(alloc: std.mem.Allocator, dir: []const u8, nt_target: []const u8) !void {
+    pub fn junction(alloc: Allocator, dir: []const u8, nt_target: []const u8) !void {
         var dir_w = try windows.sliceToPrefixedFileW(null, dir);
         const handle = try windows.OpenFile(dir_w.span(), .{
             .access_mask = windows.GENERIC_WRITE | windows.SYNCHRONIZE,
@@ -422,7 +463,7 @@ pub const test_links = struct {
     }
 };
 
-test "local target lookup refuses links to a share before opening them, and tells a missing file apart" {
+test "local path open refuses links to a share before opening them, and tells a missing file apart" {
     const alloc = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -433,12 +474,12 @@ test "local target lookup refuses links to a share before opening them, and tell
     const base = try tmp.dir.realpathAlloc(alloc, ".");
     defer alloc.free(base);
     const at = struct {
-        fn path(a: std.mem.Allocator, root: []const u8, rel: []const u8) ![]u8 {
+        fn path(a: Allocator, root: []const u8, rel: []const u8) ![]u8 {
             return std.fs.path.join(a, &.{ root, rel });
         }
     };
     // Links to a share on TEST-NET-1 (RFC 5737), which no route reaches:
-    // following one would hang on the connection, so each lookup is timed.
+    // following one would hang on the connection, so each open is timed.
     const share = "\\\\192.0.2.1\\noctty-test-none$";
     const junction_dir = try at.path(alloc, base, "to-share");
     defer alloc.free(junction_dir);
@@ -456,7 +497,7 @@ test "local target lookup refuses links to a share before opening them, and tell
     defer alloc.free(dir_link);
     const symlinks = try test_links.symlink(alloc, file_link, share ++ "\\config.ghostty", false) and
         try test_links.symlink(alloc, dir_link, share, true);
-    if (!symlinks) std.log.warn("local target test: this account cannot make symlinks; the junction cases ran alone", .{});
+    if (!symlinks) std.log.warn("local path test: this account cannot make symlinks; the junction cases ran alone", .{});
     // The links go first, removed as links (never followed), so the tree's
     // cleanup never reaches the share.
     defer {
@@ -466,13 +507,13 @@ test "local target lookup refuses links to a share before opening them, and tell
         tmp.dir.deleteDir("dir-to-share") catch {};
     }
 
-    const Case = struct { rel: []const u8, want: std.meta.Tag(Lookup), symlink: bool = false };
+    const Case = struct { rel: []const u8, want: std.meta.Tag(Opened), symlink: bool = false };
     const cases = [_]Case{
-        .{ .rel = "real\\config.ghostty", .want = .file },
+        .{ .rel = "real\\config.ghostty", .want = .found },
         .{ .rel = "real\\absent.ghostty", .want = .missing },
         .{ .rel = "absent\\config.ghostty", .want = .missing },
         // A local junction is followed and checked.
-        .{ .rel = "to-real\\config.ghostty", .want = .file },
+        .{ .rel = "to-real\\config.ghostty", .want = .found },
         .{ .rel = "to-real\\absent.ghostty", .want = .missing },
         // An ancestor junction to a share.
         .{ .rel = "to-share\\config.ghostty", .want = .refused },
@@ -484,22 +525,23 @@ test "local target lookup refuses links to a share before opening them, and tell
     // through a second handle, which must find the same things.
     for (std.enums.values(Cloud)) |cloud| for (cases) |case| {
         if (case.symlink and !symlinks) continue;
-        errdefer std.debug.print("local target lookup of {s} (cloud {t})\n", .{ case.rel, cloud });
+        errdefer std.debug.print("local path open of {s} (cloud {t})\n", .{ case.rel, cloud });
         const path = try at.path(alloc, base, case.rel);
         defer alloc.free(path);
         var timer = try std.time.Timer.start();
-        const found = lookup(alloc, path, .{ .read_data = true, .cloud = cloud });
-        defer if (found == .file) found.file.close();
+        const opened = try open(alloc, path, .{ .data = true, .cloud = cloud });
+        defer if (opened == .found) opened.found.deinit(alloc);
         try std.testing.expect(timer.read() < 5 * std.time.ns_per_s);
-        try std.testing.expectEqual(case.want, std.meta.activeTag(found));
-        if (found == .file) {
+        try std.testing.expectEqual(case.want, std.meta.activeTag(opened));
+        if (opened == .found) {
+            try std.testing.expectEqualStrings(path, opened.found.path);
             var buf: [32]u8 = undefined;
-            try std.testing.expectEqualStrings("font-size = 15\n", buf[0..try found.file.readAll(&buf)]);
+            try std.testing.expectEqualStrings("font-size = 15\n", buf[0..try opened.found.file.readAll(&buf)]);
         }
     };
 }
 
-test "local target lookup refuses a path past PATH_MAX_WIDE before converting it" {
+test "local path open refuses a path past PATH_MAX_WIDE before converting it" {
     const alloc = std.testing.allocator;
     // Zig 0.15.2 converts a path into a fixed buffer of PATH_MAX_WIDE units
     // without checking that it fits, and a longer name overflows the walk's
@@ -510,7 +552,7 @@ test "local target lookup refuses a path past PATH_MAX_WIDE before converting it
         @memset(path, 'a');
         @memcpy(path[0..3], "C:\\");
         for (std.enums.values(Cloud)) |cloud| {
-            try std.testing.expectEqual(Lookup.refused, lookup(alloc, path, .{ .cloud = cloud }));
+            try std.testing.expectEqual(Opened.refused, try open(alloc, path, .{ .cloud = cloud }));
         }
     }
 
@@ -523,10 +565,10 @@ test "local target lookup refuses a path past PATH_MAX_WIDE before converting it
     defer alloc.free(path);
     @memset(path, 'a');
     _ = try std.fmt.bufPrint(path, "{s}\\absent\\", .{base});
-    try std.testing.expectEqual(Lookup.missing, lookup(alloc, path, .{ .cloud = .refuse }));
+    try std.testing.expectEqual(Opened.missing, try open(alloc, path, .{ .cloud = .refuse }));
 }
 
-test "local target lookup refuses a cloud placeholder before opening it as its provider presents it" {
+test "local path open refuses a cloud placeholder before opening it as its provider presents it" {
     const alloc = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -558,46 +600,44 @@ test "local target lookup refuses a cloud placeholder before opening it as its p
         .{ .name = "cloud.ghostty", .attributes = windows.FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS, .rel = "real\\cloud.ghostty" },
         .{ .name = "cloud.ghostty", .attributes = windows.FILE_ATTRIBUTE_OFFLINE, .rel = "real\\cloud.ghostty" },
     }) |case| {
-        errdefer std.debug.print("local target lookup of {s} with {s} as a placeholder ({x})\n", .{ case.rel, case.name, case.attributes });
+        errdefer std.debug.print("local path open of {s} with {s} as a placeholder ({x})\n", .{ case.rel, case.name, case.attributes });
         test_cloud.reset();
         test_cloud.name = case.name;
         test_cloud.attributes = case.attributes;
         const path = try std.fs.path.join(alloc, &.{ base, case.rel });
         defer alloc.free(path);
-        for ([_]bool{ true, false }) |read_data| {
-            try std.testing.expectEqual(Lookup.refused, lookup(alloc, path, .{ .read_data = read_data, .cloud = .refuse }));
+        for ([_]bool{ true, false }) |data| {
+            try std.testing.expectEqual(Opened.refused, try open(alloc, path, .{ .data = data, .cloud = .refuse }));
         }
         try std.testing.expectEqual(@as(usize, 0), test_cloud.reopened);
     }
 
-    // `.open` (the link opener and the editor, through `open`) still opens a
-    // placeholder as its provider presents it.
+    // `.open` (the link opener and the editor) still opens a placeholder as
+    // its provider presents it.
     test_cloud.reset();
     test_cloud.name = "cloud.ghostty";
     const behind = try std.fs.path.join(alloc, &.{ base, "to-real\\cloud.ghostty" });
     defer alloc.free(behind);
-    const opened = open(alloc, behind, true) orelse return error.TestUnexpectedResult;
-    opened.close();
+    switch (try open(alloc, behind, .{ .data = true })) {
+        .found => |found| found.deinit(alloc),
+        else => return error.TestUnexpectedResult,
+    }
     try std.testing.expectEqual(@as(usize, 1), test_cloud.reopened);
 }
 
-test "link opener maps DOS roots on production fast opens without fallback" {
-    try testProductionDosMapping(false);
+test "local path open maps DOS roots on production fast opens without fallback" {
+    try testProductionDosMapping(.open);
 }
 
-test "link opener maps DOS roots on production walked opens without fallback" {
-    try testProductionDosMapping(true);
+test "local path open maps DOS roots on production walked opens without fallback" {
+    // `.refuse` never opens the whole path at once: every name is walked.
+    try testProductionDosMapping(.refuse);
 }
 
-fn testProductionDosMapping(comptime walked: bool) !void {
+fn testProductionDosMapping(cloud: Cloud) !void {
     const Reject = struct {
         fn map(_: [*:0]const u16, _: []u16) ?[]const u16 {
             return null;
-        }
-    };
-    const Opener = struct {
-        fn run(alloc: std.mem.Allocator, path: []const u8, state: *Walk) ?std.fs.File {
-            return if (walked) walk(alloc, path, true, 0, state) else open(alloc, path, true);
         }
     };
     const alloc = std.testing.allocator;
@@ -606,84 +646,164 @@ fn testProductionDosMapping(comptime walked: bool) !void {
     try tmp.dir.writeFile(.{ .sub_path = "safe.txt", .data = "safe" });
     const path = try tmp.dir.realpathAlloc(alloc, "safe.txt");
     defer alloc.free(path);
-    var state: Walk = .{};
+    const how: How = .{ .data = true, .cloud = cloud };
     // Enter the actual production path, injecting only the OS device query.
     os_windows.TestHooks.direct_volume_mapping = Reject.map;
     defer os_windows.TestHooks.direct_volume_mapping = null;
-    const refused = Opener.run(alloc, path, &state);
-    defer if (refused) |file| file.close();
-    try std.testing.expectEqual(null, refused);
+    const refused = try open(alloc, path, how);
+    defer if (refused == .found) refused.found.deinit(alloc);
+    try std.testing.expect(refused != .found);
     // Consulting a mapped copy but opening the original DOS path must fail
     // too, even on Windows 11 where that original path would open normally.
     os_windows.TestHooks.direct_volume_mapping = os_windows.TestHooks.unavailableVolume;
-    const redirected = Opener.run(alloc, path, &state);
-    defer if (redirected) |file| file.close();
-    try std.testing.expectEqual(null, redirected);
+    const redirected = try open(alloc, path, how);
+    defer if (redirected == .found) redirected.found.deinit(alloc);
+    try std.testing.expect(redirected != .found);
     os_windows.TestHooks.direct_volume_mapping = null;
-    const opened = Opener.run(alloc, path, &state) orelse return error.TestUnexpectedResult;
-    defer opened.close();
+    const opened = switch (try open(alloc, path, how)) {
+        .found => |hit| hit,
+        else => return error.TestUnexpectedResult,
+    };
+    defer opened.deinit(alloc);
     var data: [4]u8 = undefined;
-    try std.testing.expectEqual(@as(usize, 4), try opened.read(&data));
+    try std.testing.expectEqual(@as(usize, 4), try opened.file.read(&data));
     try std.testing.expectEqualStrings("safe", &data);
-    try std.testing.expect(hasLocalFinalPath(opened.handle));
 }
 
-test "link opener allows only the cloud reparse tag family" {
-    for (0..16) |variant| {
-        try std.testing.expect(isCloudTag(IO_REPARSE_TAG_CLOUD | (@as(u32, @intCast(variant)) << 12)));
-    }
-    for ([_]u32{ windows.IO_REPARSE_TAG_SYMLINK, windows.IO_REPARSE_TAG_MOUNT_POINT, 0x9000001b, 0x9001001a, 0xa000001a }) |tag| {
-        try std.testing.expect(!isCloudTag(tag));
-    }
-}
-
-test "link opener walks local volume GUID mount targets" {
+test "local path open allows only the cloud reparse tag family" {
     const alloc = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = "safe.txt", .data = "safe" });
-    const file = try tmp.dir.openFile("safe.txt", .{});
-    defer file.close();
-    var wide: [windows.PATH_MAX_WIDE]u16 = undefined;
-    const count = os_windows.GetFinalPathNameByHandleW(file.handle, &wide, wide.len, 1);
-    try std.testing.expect(count > 0 and count < wide.len);
-    const name = try std.unicode.utf16LeToUtf8Alloc(alloc, wide[0..count]);
-    defer alloc.free(name);
-    const normalized = try std.fs.path.resolve(alloc, &.{ name, "" });
-    defer alloc.free(normalized);
-    try std.testing.expect(localRoot(normalized) != null);
-    var state: Walk = .{};
-    const opened = walk(alloc, normalized, false, 0, &state) orelse return error.TestUnexpectedResult;
-    defer opened.close();
-    try std.testing.expect(hasLocalFinalPath(opened.handle));
+    try tmp.dir.makeDir("real");
+    try tmp.dir.writeFile(.{ .sub_path = "real\\cloud.ghostty", .data = "" });
+    try tmp.dir.makeDir("to-real");
+    defer tmp.dir.deleteDir("to-real") catch {};
+    const base = try tmp.dir.realpathAlloc(alloc, ".");
+    defer alloc.free(base);
+    const real_dir = try std.fs.path.join(alloc, &.{ base, "real" });
+    defer alloc.free(real_dir);
+    const junction_dir = try std.fs.path.join(alloc, &.{ base, "to-real" });
+    defer alloc.free(junction_dir);
+    const real_nt = try std.fmt.allocPrint(alloc, "\\??\\{s}", .{real_dir});
+    defer alloc.free(real_nt);
+    try test_links.junction(alloc, junction_dir, real_nt);
+    // Behind a junction `.open` walks to the name, which reads its tag.
+    const path = try std.fs.path.join(alloc, &.{ base, "to-real\\cloud.ghostty" });
+    defer alloc.free(path);
+    defer test_cloud.reset();
+
+    // Cloud tags differ only in their 4-bit variant field: each is reopened
+    // as its provider presents it under `.open`, and refused under `.refuse`.
+    for (0..16) |variant| {
+        errdefer std.debug.print("local path open of a cloud tag variant {d}\n", .{variant});
+        test_cloud.reset();
+        test_cloud.name = "cloud.ghostty";
+        test_cloud.tag = IO_REPARSE_TAG_CLOUD | (@as(u32, @intCast(variant)) << 12);
+        switch (try open(alloc, path, .{})) {
+            .found => |found| found.deinit(alloc),
+            else => return error.TestUnexpectedResult,
+        }
+        try std.testing.expectEqual(@as(usize, 1), test_cloud.reopened);
+        try std.testing.expectEqual(Opened.refused, try open(alloc, path, .{ .cloud = .refuse }));
+    }
+    // Any other tag on a file that is no link is refused, under either policy.
+    for ([_]u32{ windows.IO_REPARSE_TAG_SYMLINK, windows.IO_REPARSE_TAG_MOUNT_POINT, 0x9000001b, 0x9001001a, 0xa000001a }) |tag| {
+        errdefer std.debug.print("local path open of a reparse tag {x}\n", .{tag});
+        test_cloud.reset();
+        test_cloud.name = "cloud.ghostty";
+        test_cloud.tag = tag;
+        for (std.enums.values(Cloud)) |cloud| {
+            try std.testing.expectEqual(Opened.refused, try open(alloc, path, .{ .cloud = cloud }));
+        }
+        try std.testing.expectEqual(@as(usize, 0), test_cloud.reopened);
+    }
 }
 
-test "local target entry name is the name its folder stores" {
+test "local path open walks local volume GUID mount targets" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.makeDir("real");
+    try tmp.dir.writeFile(.{ .sub_path = "real\\safe.txt", .data = "safe" });
+    try tmp.dir.makeDir("by-volume");
+    defer tmp.dir.deleteDir("by-volume") catch {};
+    const base = try tmp.dir.realpathAlloc(alloc, ".");
+    defer alloc.free(base);
+    // A junction to the folder by its volume's GUID, as a mount point names a
+    // volume (`\??\Volume{...}\`): the walk reaches the folder through the
+    // volume's own root, with no drive letter on the way.
+    var real = try tmp.dir.openDir("real", .{});
+    defer real.close();
+    var wide: [windows.PATH_MAX_WIDE]u16 = undefined;
+    const count = os_windows.GetFinalPathNameByHandleW(real.fd, &wide, wide.len, 1);
+    try std.testing.expect(count > 0 and count < wide.len);
+    const by_guid = try std.unicode.utf16LeToUtf8Alloc(alloc, wide[0..count]);
+    defer alloc.free(by_guid);
+    try std.testing.expect(std.mem.startsWith(u8, by_guid, "\\\\?\\Volume{"));
+    const guid_nt = try std.fmt.allocPrint(alloc, "\\??\\{s}", .{by_guid[4..]});
+    defer alloc.free(guid_nt);
+    const junction_dir = try std.fs.path.join(alloc, &.{ base, "by-volume" });
+    defer alloc.free(junction_dir);
+    try test_links.junction(alloc, junction_dir, guid_nt);
+
+    const path = try std.fs.path.join(alloc, &.{ junction_dir, "safe.txt" });
+    defer alloc.free(path);
+    for (std.enums.values(Cloud)) |cloud| {
+        errdefer std.debug.print("local path open through a volume GUID junction (cloud {t})\n", .{cloud});
+        const opened = switch (try open(alloc, path, .{ .data = true, .cloud = cloud })) {
+            .found => |hit| hit,
+            else => return error.TestUnexpectedResult,
+        };
+        defer opened.deinit(alloc);
+        var data: [4]u8 = undefined;
+        try std.testing.expectEqual(@as(usize, 4), try opened.file.read(&data));
+        try std.testing.expectEqualStrings("safe", &data);
+    }
+
+    // The same file named by that volume path is refused as given: only a
+    // drive path is taken, and no caller hands `open` another.
+    const guid_file = try std.fs.path.join(alloc, &.{ by_guid, "safe.txt" });
+    defer alloc.free(guid_file);
+    try std.testing.expectEqual(Opened.refused, try open(alloc, guid_file, .{}));
+}
+
+test "local path open finds the name its folder stores" {
     const alloc = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     try tmp.dir.writeFile(.{ .sub_path = "Mixed Case.txt", .data = "" });
     const root = try tmp.dir.realpathAlloc(alloc, ".");
     defer alloc.free(root);
-    for ([_]struct { spelled: []const u8, stored: ?[]const u8 }{
-        .{ .spelled = "mixed case.TXT", .stored = "Mixed Case.txt" },
-        .{ .spelled = "missing.txt", .stored = null },
-        // A pattern character never matches another entry.
-        .{ .spelled = "*.txt", .stored = null },
-        .{ .spelled = "Mixed Case.tx?", .stored = null },
-        .{ .spelled = "Mixed Case<txt", .stored = null },
-    }) |case| {
-        const path = try std.fs.path.join(alloc, &.{ root, case.spelled });
+    const spelled = try std.fs.path.join(alloc, &.{ root, "mixed case.TXT" });
+    defer alloc.free(spelled);
+    const found = switch (try open(alloc, spelled, .{})) {
+        .found => |hit| hit,
+        else => return error.TestUnexpectedResult,
+    };
+    defer found.deinit(alloc);
+    const stored = found.storedName(alloc) orelse return error.TestUnexpectedResult;
+    defer alloc.free(stored);
+    try std.testing.expectEqualStrings("Mixed Case.txt", stored);
+
+    // A pattern character never matches another entry: no such name opens.
+    for ([_][]const u8{ "missing.txt", "*.txt", "Mixed Case.tx?", "Mixed Case<txt" }) |name| {
+        errdefer std.debug.print("local path open of {s}\n", .{name});
+        const path = try std.fs.path.join(alloc, &.{ root, name });
         defer alloc.free(path);
-        const stored = entryName(alloc, path);
-        defer if (stored) |name| alloc.free(name);
-        try std.testing.expectEqualStrings(case.stored orelse "(none)", stored orelse "(none)");
+        const opened = try open(alloc, path, .{});
+        defer if (opened == .found) opened.found.deinit(alloc);
+        try std.testing.expect(opened != .found);
     }
 
     // A folder at a drive's root, whose parent is the root itself.
     const system_root = try std.process.getEnvVarOwned(alloc, "SystemRoot");
     defer alloc.free(system_root);
-    const stored = entryName(alloc, system_root) orelse return error.TestUnexpectedResult;
-    defer alloc.free(stored);
-    try std.testing.expect(std.ascii.eqlIgnoreCase(std.fs.path.basename(system_root), stored));
+    const windows_dir = switch (try open(alloc, system_root, .{})) {
+        .found => |hit| hit,
+        else => return error.TestUnexpectedResult,
+    };
+    defer windows_dir.deinit(alloc);
+    const windows_name = windows_dir.storedName(alloc) orelse return error.TestUnexpectedResult;
+    defer alloc.free(windows_name);
+    try std.testing.expect(std.ascii.eqlIgnoreCase(std.fs.path.basename(system_root), windows_name));
 }

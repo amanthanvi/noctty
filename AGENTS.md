@@ -291,7 +291,7 @@ that govern each symbol you change, or that none does.
   argument, an environment value or a directory (`os/redact.zig`,
   `Command.redacted()`); path safety (`os.path.isNetworkOrDevicePath`,
   `OBJ_DONT_REPARSE` opens: the bounded local open `os/local_path.zig`
-  (`lookup`, `open`, `test_links`, `test_cloud`) and
+  (`open`, `Found.storedName`, `test_links`, `test_cloud`) and
   `windows_shell.ntOpenDontReparse`, and the length of a path before either
   converts it) for every program-reported path before it is opened
   (OSC 7/9;9/1337 pwd), and for kitty graphics `t=f`/`t=t` files, which use
@@ -302,7 +302,7 @@ that govern each symbol you change, or that none does.
   Zig converts it);
   link and quick-select path detection and opening (the opener's gate:
   `prepareWin32OpenTarget`, `prepareWin32LocalFile`, `isSafeLinkText`,
-  `local_path.entryName`, and its hidden-desktop probe
+  `local_path.Found.storedName`, and its hidden-desktop probe
   `test/windows/link-opener-pathext-probe.ps1`; the link prompt:
   `App.openLink`, `askBeforeOpeningLink`, `confirmedLinkScheme`,
   `linkHandlerName`, `labels.linkPromptBody`,
