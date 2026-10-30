@@ -999,14 +999,21 @@ pub fn init(
 
     // Create our terminal grid with the initial size
     const app_mailbox: App.Mailbox = .{ .rt_app = rt_app, .mailbox = &app.mailbox };
-    var renderer_impl = try Renderer.init(alloc, .{
-        .config = try .init(alloc, config),
-        .font_grid = font_grid,
-        .size = size,
-        .surface_mailbox = .{ .surface = self, .app = app_mailbox },
-        .rt_surface = rt_surface,
-        .thread = &self.renderer_thread,
-    });
+    var renderer_impl = renderer: {
+        // Renderer.init takes ownership of the config only on success, after
+        // which the errdefer below frees it, so this errdefer must end here.
+        var renderer_config = try Renderer.DerivedConfig.init(alloc, config);
+        errdefer renderer_config.deinit();
+
+        break :renderer try Renderer.init(alloc, .{
+            .config = renderer_config,
+            .font_grid = font_grid,
+            .size = size,
+            .surface_mailbox = .{ .surface = self, .app = app_mailbox },
+            .rt_surface = rt_surface,
+            .thread = &self.renderer_thread,
+        });
+    };
     // The renderer's GL objects belong to this surface's context, which a
     // later step (`finalizeSurfaceInit`, the renderer thread) can leave
     // un-current. Rebind it before deleting them, and abandon them if that
@@ -1164,14 +1171,18 @@ pub fn init(
         var io_mailbox = try termio.Mailbox.initSPSC(alloc);
         errdefer io_mailbox.deinit(alloc);
 
+        // Termio.init takes ownership of the config only on success.
+        var io_config = try termio.Termio.DerivedConfig.init(
+            alloc,
+            config,
+            app.config_conditional_state,
+        );
+        errdefer io_config.deinit();
+
         try termio.Termio.init(&self.io, alloc, .{
             .size = size,
             .full_config = config,
-            .config = try termio.Termio.DerivedConfig.init(
-                alloc,
-                config,
-                app.config_conditional_state,
-            ),
+            .config = io_config,
             .backend = .{ .exec = io_exec },
             .mailbox = io_mailbox,
             .renderer_state = &self.renderer_state,
