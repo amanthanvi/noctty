@@ -16565,13 +16565,19 @@ fn paintToggle(settings: *SettingsWindow, hwnd: HWND, hdc: HDC, look: ToggleLook
     const track_height = parts.track.bottom - parts.track.top;
     _ = sys.RoundRect(hdc, parts.track.left, parts.track.top, parts.track.right, parts.track.bottom, track_height, track_height);
 
-    const thumb = CreateSolidBrush(shade.thumb) orelse return;
-    defer _ = DeleteObject(thumb);
-    _ = SelectObject(hdc, thumb);
-    _ = SelectObject(hdc, GetStockObject(NULL_PEN));
-    // The null pen leaves the right and bottom edges out.
-    const thumb_height = parts.thumb.bottom - parts.thumb.top;
-    _ = sys.RoundRect(hdc, parts.thumb.left, parts.thumb.top, parts.thumb.right + 1, parts.thumb.bottom + 1, thumb_height, thumb_height);
+    // The thumb in a scope of its own: its brush is deselected before it is
+    // deleted (a brush still selected into a DC is not deleted, and leaks).
+    {
+        const thumb = CreateSolidBrush(shade.thumb) orelse return;
+        defer _ = DeleteObject(thumb);
+        const previous_thumb_brush = SelectObject(hdc, thumb);
+        defer _ = SelectObject(hdc, previous_thumb_brush);
+        const previous_thumb_pen = SelectObject(hdc, GetStockObject(NULL_PEN));
+        defer _ = SelectObject(hdc, previous_thumb_pen);
+        // The null pen leaves the right and bottom edges out.
+        const thumb_height = parts.thumb.bottom - parts.thumb.top;
+        _ = sys.RoundRect(hdc, parts.thumb.left, parts.thumb.top, parts.thumb.right + 1, parts.thumb.bottom + 1, thumb_height, thumb_height);
+    }
 
     var label: [128:0]u16 = undefined;
     const label_len = GetWindowTextW(hwnd, &label, @intCast(label.len));
@@ -20791,6 +20797,7 @@ test "settings shows no light control in dark mode, and no dark one in light mod
 
 test "settings check boxes are toggle switches that show their state, and plain check boxes in High Contrast" {
     const Body = struct {
+        extern "user32" fn GetGuiResources(process: windows.HANDLE, flags: u32) callconv(.winapi) u32;
         var high_contrast = false;
         fn darkColors(_: *anyopaque) win32_theme.ThemeColors {
             return win32_theme.darkTheme();
@@ -20887,6 +20894,17 @@ test "settings check boxes are toggle switches that show their state, and plain 
                 settings.themeChanged();
                 _ = RedrawWindow(toggle, null, null, RDW_INVALIDATE | RDW_UPDATENOW);
                 try std.testing.expect(settings.proof_toggle_paint_count > paints);
+
+                // Painting gives back every GDI object it makes, in each
+                // state: fifty paints later the process holds no more.
+                for ([_]bool{ true, false }) |on| {
+                    _ = SendMessageW(toggle, BM_SETCHECK, if (on) BST_CHECKED else 0, 0);
+                    const GR_GDIOBJECTS: u32 = 0;
+                    const process: windows.HANDLE = @ptrFromInt(std.math.maxInt(usize)); // GetCurrentProcess
+                    const before = GetGuiResources(process, GR_GDIOBJECTS);
+                    for (0..50) |_| _ = RedrawWindow(toggle, null, null, RDW_INVALIDATE | RDW_UPDATENOW);
+                    try std.testing.expectEqual(before, GetGuiResources(process, GR_GDIOBJECTS));
+                }
             };
         }
     };
