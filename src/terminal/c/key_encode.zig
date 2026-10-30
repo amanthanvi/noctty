@@ -52,6 +52,11 @@ pub const Option = enum(c_int) {
     modify_other_keys_state_2 = 4,
     kitty_flags = 5,
     macos_option_as_alt = 6,
+    /// DEC Backarrow Key Mode (DECBKM)
+    /// See https://vt100.net/dec/ek-vt3xx-tp-002.pdf page 170
+    /// If `false` (the default), `backspace` emits 0x7f
+    /// If `true`, `backspace` emits 0x08
+    backarrow_key_mode = 7,
 
     /// Input type expected for setting the option.
     pub fn InType(comptime self: Option) type {
@@ -61,6 +66,7 @@ pub const Option = enum(c_int) {
             .ignore_keypad_with_numlock,
             .alt_esc_prefix,
             .modify_other_keys_state_2,
+            .backarrow_key_mode,
             => bool,
             .kitty_flags => u8,
             .macos_option_as_alt => OptionAsAlt,
@@ -114,6 +120,7 @@ fn setoptTyped(
             }
             opts.macos_option_as_alt = value.*;
         },
+        .backarrow_key_mode => opts.backarrow_key_mode = value.*,
     }
 }
 

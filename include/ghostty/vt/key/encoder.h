@@ -86,24 +86,31 @@ typedef enum {
 typedef enum {
     /** Terminal DEC mode 1: cursor key application mode (value: bool) */
     GHOSTTY_KEY_ENCODER_OPT_CURSOR_KEY_APPLICATION = 0,
-    
+
     /** Terminal DEC mode 66: keypad key application mode (value: bool) */
     GHOSTTY_KEY_ENCODER_OPT_KEYPAD_KEY_APPLICATION = 1,
-    
+
     /** Terminal DEC mode 1035: ignore keypad with numlock (value: bool) */
     GHOSTTY_KEY_ENCODER_OPT_IGNORE_KEYPAD_WITH_NUMLOCK = 2,
-    
+
     /** Terminal DEC mode 1036: alt sends escape prefix (value: bool) */
     GHOSTTY_KEY_ENCODER_OPT_ALT_ESC_PREFIX = 3,
-    
+
     /** xterm modifyOtherKeys mode 2 (value: bool) */
     GHOSTTY_KEY_ENCODER_OPT_MODIFY_OTHER_KEYS_STATE_2 = 4,
-    
+
     /** Kitty keyboard protocol flags (value: GhosttyKittyKeyFlags bitmask) */
     GHOSTTY_KEY_ENCODER_OPT_KITTY_FLAGS = 5,
-    
+
     /** macOS option-as-alt setting (value: GhosttyOptionAsAlt) */
     GHOSTTY_KEY_ENCODER_OPT_MACOS_OPTION_AS_ALT = 6,
+
+    /** Backarrow key mode (value: bool)
+     * See https://vt100.net/dec/ek-vt3xx-tp-002.pdf page 170
+     * If `false` (the default), `backspace` emits 0x7f
+     * If `true`, `backspace` emits 0x08
+     */
+    GHOSTTY_KEY_ENCODER_OPT_BACKARROW_KEY_MODE = 7,
 } GhosttyKeyEncoderOption;
 
 /**
@@ -203,17 +210,17 @@ GHOSTTY_API void ghostty_key_encoder_setopt_from_terminal(GhosttyKeyEncoder enco
  * size_t required = 0;
  * GhosttyResult result = ghostty_key_encoder_encode(encoder, event, NULL, 0, &required);
  * assert(result == GHOSTTY_OUT_OF_SPACE);
- * 
+ *
  * // Allocate buffer of required size
  * char *buf = malloc(required);
- * 
+ *
  * // Encode with properly sized buffer
  * size_t written = 0;
  * result = ghostty_key_encoder_encode(encoder, event, buf, required, &written);
  * assert(result == GHOSTTY_SUCCESS);
- * 
+ *
  * // Use the encoded sequence...
- * 
+ *
  * free(buf);
  * @endcode
  *
@@ -224,7 +231,7 @@ GHOSTTY_API void ghostty_key_encoder_setopt_from_terminal(GhosttyKeyEncoder enco
  * char buf[128];
  * size_t written = 0;
  * GhosttyResult result = ghostty_key_encoder_encode(encoder, event, buf, sizeof(buf), &written);
- * 
+ *
  * if (result == GHOSTTY_SUCCESS) {
  *   // Write the encoded sequence to the terminal
  *   write(pty_fd, buf, written);

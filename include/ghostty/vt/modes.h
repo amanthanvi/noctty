@@ -70,6 +70,7 @@ extern "C" {
 #define GHOSTTY_MODE_REVERSE_WRAP     (ghostty_mode_new(45, false))  /**< Reverse wrap */
 #define GHOSTTY_MODE_ALT_SCREEN_LEGACY (ghostty_mode_new(47, false)) /**< Alternate screen (legacy) */
 #define GHOSTTY_MODE_KEYPAD_KEYS      (ghostty_mode_new(66, false))  /**< Application keypad */
+#define GHOSTTY_MODE_BACKARROW_KEY_MODE (ghostty_mode_new(67, false))  /**< Backarrow key mode (DECBKM) */
 #define GHOSTTY_MODE_LEFT_RIGHT_MARGIN (ghostty_mode_new(69, false)) /**< Left/right margin mode */
 #define GHOSTTY_MODE_NORMAL_MOUSE     (ghostty_mode_new(1000, false)) /**< Normal mouse tracking */
 #define GHOSTTY_MODE_BUTTON_MOUSE     (ghostty_mode_new(1002, false)) /**< Button-event mouse tracking */

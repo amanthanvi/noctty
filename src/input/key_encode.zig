@@ -18,6 +18,12 @@ pub const Options = struct {
     /// Terminal DEC mode 66
     keypad_key_application: bool = false,
 
+    // DEC Backarrow Key Mode (DECBKM)
+    // See https://vt100.net/dec/ek-vt3xx-tp-002.pdf page 170
+    // If `false` (the default), `backspace` emits 0x7f
+    // If `true`, `backspace` emits 0x08
+    backarrow_key_mode: bool = false,
+
     /// Terminal DEC mode 1035
     ignore_keypad_with_numlock: bool = false,
 
@@ -64,6 +70,7 @@ pub const Options = struct {
             .alt_esc_prefix = t.modes.get(.alt_esc_prefix),
             .cursor_key_application = t.modes.get(.cursor_keys),
             .keypad_key_application = t.modes.get(.keypad_keys),
+            .backarrow_key_mode = t.modes.get(.backarrow_key_mode),
             .ignore_keypad_with_numlock = t.modes.get(.ignore_keypad_with_numlock),
             .modify_other_keys_state_2 = t.flags.modify_other_keys_2,
             .kitty_flags = t.screens.active.kitty_keyboard.current(),
@@ -499,6 +506,7 @@ fn legacy(
         opts.keypad_key_application,
         opts.ignore_keypad_with_numlock,
         opts.modify_other_keys_state_2,
+        opts.backarrow_key_mode,
     )) |sequence| pc_style: {
         // If we have UTF-8 text, then we never emit PC style function
         // keys. Many function keys (escape, enter, backspace) have
@@ -529,6 +537,9 @@ fn legacy(
 
         // ConPTY cannot decode the CSI 27 modifier forms for these keys.
         // Keep committed IME text above and negotiated keyboard modes intact.
+        // Backspace ignores DECBKM: ConPTY's input parser decodes DEL as
+        // Backspace and BS as Ctrl+Backspace, and conhost applies the
+        // program's DECBKM itself when it encodes the key for the program.
         if (windows_legacy) {
             const legacy_sequence: ?[]const u8 = switch (event.key) {
                 .enter => "\r",
@@ -782,6 +793,7 @@ fn pcStyleFunctionKey(
     keypad_key_application_req: bool,
     ignore_keypad_with_numlock: bool,
     modify_other_keys: bool, // True if state 2
+    backarrow_key_mode: bool,
 ) ?[]const u8 {
     // We only want binding-sensitive mods because lock keys
     // and directional modifiers (left/right) don't matter for
@@ -833,6 +845,10 @@ fn pcStyleFunctionKey(
             // any set mods require an exact match
             continue;
         }
+
+        if (backarrow_key_mode)
+            if (entry.sequence_decbkm) |sequence|
+                return sequence;
 
         return entry.sequence;
     }
@@ -1426,9 +1442,20 @@ test "kitty: enter, backspace, tab" {
         try testing.expectEqualStrings("\r", writer.buffered());
     }
     {
+        // DECBKM reset
         var writer: std.Io.Writer = .fixed(&buf);
         try kitty(&writer, .{ .key = .backspace, .mods = .{}, .utf8 = "" }, .{
             .kitty_flags = .{ .disambiguate = true },
+            .backarrow_key_mode = false,
+        });
+        try testing.expectEqualStrings("\x7f", writer.buffered());
+    }
+    {
+        // DECBKM set (Kitty does not support DECBKM so there should be no change)
+        var writer: std.Io.Writer = .fixed(&buf);
+        try kitty(&writer, .{ .key = .backspace, .mods = .{}, .utf8 = "" }, .{
+            .kitty_flags = .{ .disambiguate = true },
+            .backarrow_key_mode = true,
         });
         try testing.expectEqualStrings("\x7f", writer.buffered());
     }
@@ -2113,6 +2140,43 @@ test "legacy: backspace with utf8 (dead key state)" {
     try testing.expectEqualStrings("", writer.buffered());
 }
 
+test "kitty: backspace (DECBKM reset) (report_all: true)" {
+    var buf: [128]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buf);
+    try kitty(&writer, .{
+        .key = .backspace,
+    }, .{
+        .kitty_flags = .{
+            .disambiguate = true,
+            .report_events = true,
+            .report_alternates = true,
+            .report_all = true,
+            .report_associated = true,
+        },
+        .backarrow_key_mode = false,
+    });
+    try testing.expectEqualStrings("\x1b[127u", writer.buffered());
+}
+
+test "kitty: backspace (DECBKM set) (report_all: true)" {
+    // Kitty does not support DECBKM so there should be no difference.
+    var buf: [128]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buf);
+    try kitty(&writer, .{
+        .key = .backspace,
+    }, .{
+        .kitty_flags = .{
+            .disambiguate = true,
+            .report_events = true,
+            .report_alternates = true,
+            .report_all = true,
+            .report_associated = true,
+        },
+        .backarrow_key_mode = true,
+    });
+    try testing.expectEqualStrings("\x1b[127u", writer.buffered());
+}
+
 test "legacy: enter with utf8 (dead key state)" {
     var buf: [128]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buf);
@@ -2182,6 +2246,27 @@ test "legacy: Windows console Tab and Backspace modifiers" {
             } else try expected.writeByte(if (mods.ctrl) 0x08 else 0x7f);
             try encode(&writer, .{ .key = input, .mods = mods }, .{ .windows_legacy = true });
             try testing.expectEqualStrings(expected.buffered(), writer.buffered());
+        }
+    }
+}
+
+test "legacy: Windows console Backspace ignores DECBKM" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    // ConPTY's VT input parser reads these bytes, not the program: it
+    // decodes DEL as Backspace and BS as Ctrl+Backspace, and encodes the
+    // key for the program under the program's own DECBKM. Applying DECBKM
+    // here as well would give the program the other key.
+    var buf: [128]u8 = undefined;
+    for ([_]bool{ false, true }) |backarrow_key_mode| {
+        const opts: Options = .{ .windows_legacy = true, .backarrow_key_mode = backarrow_key_mode };
+        var writer: std.Io.Writer = .fixed(&buf);
+        try encode(&writer, .{ .key = .backspace }, opts);
+        try testing.expectEqualStrings("\x7f", writer.buffered());
+        for (function_keys.modifiers) |mods| {
+            writer = .fixed(&buf);
+            try encode(&writer, .{ .key = .backspace, .mods = mods }, opts);
+            const expected = [_]u8{ 0x1b, if (mods.ctrl) 0x08 else 0x7f };
+            try testing.expectEqualStrings(if (mods.alt) &expected else expected[1..], writer.buffered());
         }
     }
 }
@@ -2526,6 +2611,50 @@ test "legacy: ctrl+shift+backspace" {
     try testing.expectEqualStrings("\x08", writer.buffered());
 }
 
+test "legacy: backspace (DECBKM reset)" {
+    var buf: [128]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buf);
+    try legacy(&writer, .{
+        .key = .backspace,
+        .mods = .{},
+    }, .{ .backarrow_key_mode = false });
+    try testing.expectEqualStrings("\x7f", writer.buffered());
+}
+
+test "legacy: backspace (DECBKM reset, with ctrl)" {
+    var buf: [128]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buf);
+    try legacy(&writer, .{
+        .key = .backspace,
+        .mods = .{
+            .ctrl = true,
+        },
+    }, .{ .backarrow_key_mode = false });
+    try testing.expectEqualStrings("\x08", writer.buffered());
+}
+
+test "legacy: backspace (DECBKM set)" {
+    var buf: [128]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buf);
+    try legacy(&writer, .{
+        .key = .backspace,
+        .mods = .{},
+    }, .{ .backarrow_key_mode = true });
+    try testing.expectEqualStrings("\x08", writer.buffered());
+}
+
+test "legacy: backspace (DECBKM set, with ctrl)" {
+    var buf: [128]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buf);
+    try legacy(&writer, .{
+        .key = .backspace,
+        .mods = .{
+            .ctrl = true,
+        },
+    }, .{ .backarrow_key_mode = true });
+    try testing.expectEqualStrings("\x7f", writer.buffered());
+}
+
 test "legacy: ctrl+shift+char with modify other state 2" {
     var buf: [128]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buf);
@@ -2842,15 +2971,26 @@ test "legacy: super and other mods on macOS with text" {
     try testing.expectEqualStrings("", writer.buffered());
 }
 
-test "legacy: backspace with DEL utf8" {
+test "legacy: backspace with DEL utf8 (DECBKM reset)" {
     var buf: [128]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buf);
     try legacy(&writer, .{
         .key = .backspace,
         .utf8 = &.{0x7F},
         .unshifted_codepoint = 0x08,
-    }, .{});
+    }, .{ .backarrow_key_mode = false });
     try testing.expectEqualStrings("\x7F", writer.buffered());
+}
+
+test "legacy: backspace with DEL utf8 (DECBKM set)" {
+    var buf: [128]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buf);
+    try legacy(&writer, .{
+        .key = .backspace,
+        .utf8 = &.{0x7F},
+        .unshifted_codepoint = 0x08,
+    }, .{ .backarrow_key_mode = true });
+    try testing.expectEqualStrings("\x08", writer.buffered());
 }
 
 test "ctrlseq: normal ctrl c" {
