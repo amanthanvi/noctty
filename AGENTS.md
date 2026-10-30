@@ -300,7 +300,10 @@ that govern each symbol you change, or that none does.
   link and quick-select path detection and opening (the opener's gate:
   `prepareWin32OpenTarget`, `prepareWin32LocalFile`, `isSafeLinkText`,
   `local_target.entryName`, and its hidden-desktop probe
-  `test/windows/link-opener-pathext-probe.ps1`).
+  `test/windows/link-opener-pathext-probe.ps1`; the link prompt:
+  `App.openLink`, `askBeforeOpeningLink`, `confirmedLinkScheme`,
+  `linkHandlerName`, `labels.linkPromptBody`,
+  `Surface.setPendingLinkOpen`/`takePendingLinkOpen`).
 - [clipboard.md](docs/agents/log/clipboard.md): clipboard reads and writes,
   CF_HTML (`win32_clipboard_html.zig`), open retries, what a copy puts on the
   clipboard (formats and owner, as Remote Desktop's redirection sees them),

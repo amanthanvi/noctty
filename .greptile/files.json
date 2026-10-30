@@ -213,7 +213,8 @@
         "src/config/windows_visual_studio.zig",
         "src/apprt/win32_elevation.zig",
         "src/cli/list_profiles.zig",
-        "src/config/command.zig"
+        "src/config/command.zig",
+        "src/apprt/win32/labels.zig"
       ]
     },
     {
