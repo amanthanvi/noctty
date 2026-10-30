@@ -118,25 +118,25 @@ pub fn add(
     var entries = try readEntries(alloc, file);
     defer deinitEntries(alloc, &entries);
 
-    // Add or update entry
-    const gop = try entries.getOrPut(hostname);
-    const result: AddResult = if (!gop.found_existing) add: {
+    // Update the timestamp of an existing entry, or insert a new one. For a
+    // new entry, dupe both strings up front so a failed allocation never
+    // leaves a half-built slot (borrowed key, undefined value) for the
+    // `deinitEntries` defer to walk.
+    const result: AddResult = if (entries.getPtr(hostname)) |existing| update: {
+        existing.timestamp = std.time.timestamp();
+        break :update .updated;
+    } else add: {
         const hostname_copy = try alloc.dupe(u8, hostname);
         errdefer alloc.free(hostname_copy);
         const terminfo_copy = try alloc.dupe(u8, "xterm-ghostty");
         errdefer alloc.free(terminfo_copy);
 
-        gop.key_ptr.* = hostname_copy;
-        gop.value_ptr.* = .{
-            .hostname = gop.key_ptr.*,
+        try entries.put(hostname_copy, .{
+            .hostname = hostname_copy,
             .timestamp = std.time.timestamp(),
             .terminfo_version = terminfo_copy,
-        };
+        });
         break :add .added;
-    } else update: {
-        // Update timestamp for existing entry
-        gop.value_ptr.timestamp = std.time.timestamp();
-        break :update .updated;
     };
 
     if (comptime release_before_rename) {
@@ -635,6 +635,39 @@ test "disk cache reads survive allocation failure" {
             var entries = entries_const;
             deinitEntries(alloc, &entries);
             // Reached a run with no induced failure: every path covered.
+            if (!failing.has_induced_failure) break;
+        } else |err| {
+            try testing.expectEqual(error.OutOfMemory, err);
+        }
+    }
+}
+
+test "disk cache add survives allocation failure" {
+    const testing = std.testing;
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const tmp_path = try tmp.dir.realpathAlloc(testing.allocator, ".");
+    defer testing.allocator.free(tmp_path);
+    const path = try std.fs.path.join(testing.allocator, &.{ tmp_path, "cache" });
+    defer testing.allocator.free(path);
+
+    const cache: DiskCache = .{ .path = path };
+
+    // Fail the Nth allocation for every N until add completes. A failed add
+    // must not leak or leave a half-built map entry. The FailingAllocator
+    // is backed by testing.allocator to catch either. Each iteration starts
+    // from a clean cache file.
+    var fail_index: usize = 0;
+    while (true) : (fail_index += 1) {
+        std.fs.cwd().deleteFile(path) catch {};
+        var failing = std.testing.FailingAllocator.init(
+            testing.allocator,
+            .{ .fail_index = fail_index },
+        );
+        const alloc = failing.allocator();
+
+        if (cache.add(alloc, "user@example.com")) |_| {
             if (!failing.has_induced_failure) break;
         } else |err| {
             try testing.expectEqual(error.OutOfMemory, err);

@@ -226,7 +226,9 @@ fn listEntries(
     const now = std.time.timestamp();
 
     for (items.items) |entry| {
-        const age_days = @divTrunc(now - entry.timestamp, std.time.s_per_day);
+        // Saturating so a garbage timestamp can't overflow; clamp at 0 so a
+        // future timestamp reads as today rather than a negative age.
+        const age_days = @divTrunc(@max(0, now -| entry.timestamp), std.time.s_per_day);
         if (age_days == 0) {
             try writer.print("  {s} (today)\n", .{entry.hostname});
         } else if (age_days == 1) {
@@ -235,6 +237,35 @@ fn listEntries(
             try writer.print("  {s} ({d} days ago)\n", .{ entry.hostname, age_days });
         }
     }
+}
+
+test "listEntries survives garbage timestamps" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    // The cache file is plain text, so a timestamp can be any i64.
+    var entries = std.StringHashMap(Entry).init(alloc);
+    defer entries.deinit();
+    try entries.put("future.example", .{
+        .hostname = "future.example",
+        .timestamp = std.math.maxInt(i64),
+        .terminfo_version = "xterm-ghostty",
+    });
+    try entries.put("past.example", .{
+        .hostname = "past.example",
+        .timestamp = std.math.minInt(i64),
+        .terminfo_version = "xterm-ghostty",
+    });
+
+    var buf: [256]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buf);
+    try listEntries(alloc, &entries, &writer);
+    try testing.expectEqualStrings(
+        "Cached hosts (2):\n" ++
+            "  future.example (today)\n" ++
+            "  past.example (106751991167300 days ago)\n",
+        writer.buffered(),
+    );
 }
 
 test {
