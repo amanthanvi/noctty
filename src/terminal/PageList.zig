@@ -42,11 +42,56 @@ pub const List = DoublyLinkedList(Node);
 /// A single node within the PageList linked list.
 ///
 /// This isn't pub because you can access the type via List.Node.
+///
+/// Outside PageList's node lifecycle (initPages, grow's reuse of the first
+/// page, createPageExt) reach the page only through page(), rows(), cols()
+/// and capacity(). Names, receivers and return types are upstream Ghostty's
+/// (since 421fe8dab), so ported hunks compile as written. This fork has no
+/// page compression: a node is resident from createPageExt to destroyNodeExt,
+/// and all four are O(1), infallible, allocation-free and take no lock.
+///
+/// page() returns the same pointer until PageList destroys or reuses the
+/// node (grow reuses a pruned first node with a new serial). A caller that
+/// caches a node checks the (node, serial) pair with nodeIsValid.
+///
+/// Porting upstream names this fork does not have:
+///   pageAssumeResident()       -> page() (or add it, upstream's body, with
+///                                 the first ported hunk that needs it)
+///   pageIfResident()           -> page(); drop the null arm
+///   pagePreservingState(alloc) -> page(); drop the try and the deinit
+///   storage(), Storage         -> drop the .compressed arm
+///   switch (node.data)         -> the hunk depends on compression: adapt it
+///                                 and record that in the drift report
+///   .owned = .pool / .heap     -> drop it. destroyNodeExt infers the pool from
+///                                 memory.len <= std_size, which holds only
+///                                 while nothing heap-allocates a page at or
+///                                 below std_size (upstream's compact does;
+///                                 this fork's returns null there).
+/// rows() is size.rows (populated rows); page().rows is the Row offset.
 const Node = struct {
     prev: ?*Node = null,
     next: ?*Node = null,
     data: Page,
     serial: u64,
+
+    /// The page and its memory. Writes go here: node.page().size.rows = n.
+    pub inline fn page(self: *Node) *Page {
+        return &self.data;
+    }
+
+    /// Populated rows. Read metadata here, not through page().size.
+    pub inline fn rows(self: *const Node) size.CellCountInt {
+        return self.data.size.rows;
+    }
+
+    /// This node's own width; it can differ from PageList.cols during a resize.
+    pub inline fn cols(self: *const Node) size.CellCountInt {
+        return self.data.size.cols;
+    }
+
+    pub inline fn capacity(self: *const Node) Capacity {
+        return self.data.capacity;
+    }
 };
 
 /// The memory pool we get page nodes from.
@@ -5964,6 +6009,34 @@ test "PageList" {
         .offset = 0,
         .len = s.rows,
     }, s.scrollbar());
+}
+
+test "PageList node accessors follow the node's page" {
+    const testing = std.testing;
+
+    var s = try init(testing.allocator, 80, 24, null);
+    defer s.deinit();
+
+    // Fill the first page, then grow into a second one.
+    const first = s.pages.first.?;
+    while (first.rows() < first.capacity().rows) _ = try s.grow();
+    const last = (try s.grow()).?;
+    try testing.expect(last != first);
+
+    // The metadata readers take a const node.
+    var node_ = s.pages.first;
+    while (node_) |node| : (node_ = node.next) {
+        const c: *const List.Node = node;
+        try testing.expectEqual(s.cols, c.cols());
+        try testing.expect(c.rows() <= c.capacity().rows);
+    }
+
+    // A write through page() is what rows() reads.
+    const last_rows = last.rows();
+    last.page().size.rows -= 1;
+    try testing.expectEqual(last_rows - 1, last.rows());
+    last.page().size.rows += 1;
+    try testing.expectEqual(last_rows, last.rows());
 }
 
 test "PageList init error" {
