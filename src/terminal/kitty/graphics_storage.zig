@@ -1011,6 +1011,31 @@ pub const ImageStorage = struct {
             };
         }
 
+        /// Returns the placement offset clamped within the first cell. Pixel
+        /// geometry may temporarily be unavailable, in which case there is no
+        /// valid offset within the cell.
+        pub fn cellOffset(
+            self: Placement,
+            t: *const terminal.Terminal,
+        ) struct {
+            x: u32,
+            y: u32,
+        } {
+            const cell_width: u32 = t.width_px / t.cols;
+            const cell_height: u32 = t.height_px / t.rows;
+
+            return .{
+                .x = if (cell_width > 0)
+                    @min(self.x_offset, cell_width - 1)
+                else
+                    0,
+                .y = if (cell_height > 0)
+                    @min(self.y_offset, cell_height - 1)
+                else
+                    0,
+            };
+        }
+
         /// Calculates the size of this placement's image in pixels,
         /// taking in to account the source rectangle and the specified rows
         /// and columns.
@@ -1041,6 +1066,7 @@ pub const ImageStorage = struct {
             // count and the height by the row count, because it should be.
             const cell_width: u32 = t.width_px / t.cols;
             const cell_height: u32 = t.height_px / t.rows;
+            const cell_offset = self.cellOffset(t);
 
             // If we have a specified cols AND rows then we calculate
             // the width and height from them directly, we don't need
@@ -1050,8 +1076,8 @@ pub const ImageStorage = struct {
                 const calc_height = saturatingMul(cell_height, self.rows);
 
                 return .{
-                    .width = calc_width,
-                    .height = calc_height,
+                    .width = calc_width -| cell_offset.x,
+                    .height = calc_height -| cell_offset.y,
                 };
             }
 
@@ -1061,7 +1087,10 @@ pub const ImageStorage = struct {
             // If only the columns were specified, we determine
             // the height of the image based on the aspect ratio.
             if (self.columns > 0) {
-                const calc_width = saturatingMul(cell_width, self.columns);
+                const calc_width = saturatingMul(
+                    cell_width,
+                    self.columns,
+                ) -| cell_offset.x;
                 const calc_height = scaleDimension(calc_width, height, width);
 
                 return .{
@@ -1073,7 +1102,10 @@ pub const ImageStorage = struct {
             // Otherwise, only the rows were specified, so we
             // determine the width based on the aspect ratio.
             {
-                const calc_height = saturatingMul(cell_height, self.rows);
+                const calc_height = saturatingMul(
+                    cell_height,
+                    self.rows,
+                ) -| cell_offset.y;
                 const calc_width = scaleDimension(calc_height, width, height);
 
                 return .{
@@ -1101,15 +1133,16 @@ pub const ImageStorage = struct {
             // Otherwise we calculate the pixel size, divide by
             // cell size, and round up to the nearest integer.
             const calc_size = self.calculatedSize(image, t);
+            const cell_offset = self.cellOffset(t);
             return .{
                 .cols = std.math.divCeil(
                     u32,
-                    calc_size.width +| self.x_offset,
+                    calc_size.width +| cell_offset.x,
                     t.width_px / t.cols,
                 ) catch 0,
                 .rows = std.math.divCeil(
                     u32,
-                    calc_size.height +| self.y_offset,
+                    calc_size.height +| cell_offset.y,
                     t.height_px / t.rows,
                 ) catch 0,
             };
@@ -1139,7 +1172,7 @@ pub const ImageStorage = struct {
             // The clipped rows hold this many pixels of the drawn image: a
             // y offset is blank space above the image in its first row.
             const rows_px = saturatingMul(t.height_px / t.rows, count);
-            const image_px = rows_px -| self.y_offset;
+            const image_px = rows_px -| self.cellOffset(t).y;
             const scaled: u64 = @as(u64, src.height) * image_px / dest_height;
 
             // Without a row count the drawn height follows the source's, so
@@ -1149,13 +1182,14 @@ pub const ImageStorage = struct {
             const crop: u64 = if (self.rows == 0 and image_px > 0) @max(1, scaled) else scaled;
             if (crop >= src.height) return false;
 
-            // A y offset adds grid rows beyond the requested ones, so the
-            // clip can cover all of those; zero rows would mean unscaled.
+            // Zero rows would mean unscaled.
             if (self.rows > 0 and count >= self.rows) return false;
 
             self.source_y = src.y + @as(u32, @intCast(crop));
             self.source_height = src.height - @as(u32, @intCast(crop));
-            self.y_offset -|= rows_px;
+
+            // The offset is less than a cell, so the clipped rows held it.
+            self.y_offset = 0;
             if (self.rows > 0) self.rows -= count;
             return true;
         }
@@ -1177,7 +1211,7 @@ pub const ImageStorage = struct {
             // The rows that remain show this many pixels of the drawn image,
             // the first of them less the y offset above the image.
             const rows_px = saturatingMul(t.height_px / t.rows, span - count);
-            const image_px = @min(rows_px -| self.y_offset, dest_height);
+            const image_px = @min(rows_px -| self.cellOffset(t).y, dest_height);
             const height: u64 = @as(u64, src.height) * image_px / dest_height;
 
             // A zero source height would read as the full image, so a
@@ -2058,6 +2092,57 @@ test "storage: aspect ratio calculation when only columns or rows specified" {
     }
 }
 
+test "storage: cell offsets stay within explicit destination rectangle" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var t = try terminal.Terminal.init(alloc, .{ .cols = 5, .rows = 5 });
+    defer t.deinit(alloc);
+    t.width_px = 50; // 10 px per col
+    t.height_px = 100; // 20 px per row
+
+    // Explicit columns and rows describe the far cell boundaries. Offsets
+    // move the near edge inward without moving those far edges.
+    const placement: ImageStorage.Placement = .{
+        .location = .{ .virtual = {} },
+        .x_offset = 3,
+        .y_offset = 4,
+        .columns = 2,
+        .rows = 1,
+    };
+    const actual = placement.calculatedSize(.{ .width = 4, .height = 3 }, &t);
+    try testing.expectEqual(@as(u32, 17), actual.width);
+    try testing.expectEqual(@as(u32, 16), actual.height);
+    try testing.expectEqual(@as(u32, 2), placement.gridSize(.{ .width = 4, .height = 3 }, &t).cols);
+    try testing.expectEqual(@as(u32, 1), placement.gridSize(.{ .width = 4, .height = 3 }, &t).rows);
+}
+
+test "storage: cell offsets clamp to cell bounds" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var t = try terminal.Terminal.init(alloc, .{ .cols = 5, .rows = 5 });
+    defer t.deinit(alloc);
+    t.width_px = 50; // 10 px per col
+    t.height_px = 100; // 20 px per row
+
+    const placement: ImageStorage.Placement = .{
+        .location = .{ .virtual = {} },
+        .x_offset = std.math.maxInt(u32),
+        .y_offset = std.math.maxInt(u32),
+        .columns = 1,
+        .rows = 1,
+    };
+    const offset = placement.cellOffset(&t);
+    try testing.expectEqual(@as(u32, 9), offset.x);
+    try testing.expectEqual(@as(u32, 19), offset.y);
+
+    // Even hostile offsets leave one pixel inside the requested cell.
+    const actual = placement.calculatedSize(.{ .width = 1, .height = 1 }, &t);
+    try testing.expectEqual(@as(u32, 1), actual.width);
+    try testing.expectEqual(@as(u32, 1), actual.height);
+}
+
 test "storage: default source rectangle is intersected before sizing" {
     const testing = std.testing;
     const alloc = testing.allocator;
@@ -2146,8 +2231,8 @@ test "storage: placement geometry handles untrusted dimensions" {
         try testing.expectEqual(max, actual.height);
     }
 
-    // Pixel offsets are protocol-controlled too. Include them without
-    // allowing the grid-size numerator to wrap.
+    // Pixel offsets are protocol-controlled too. Clamp them to the cell
+    // before including them in grid geometry.
     t.width_px = 2;
     t.height_px = 2;
     {
@@ -2157,8 +2242,8 @@ test "storage: placement geometry handles untrusted dimensions" {
             .y_offset = max,
         };
         const actual = placement.gridSize(.{ .width = 1, .height = 1 }, &t);
-        try testing.expectEqual(max, actual.cols);
-        try testing.expectEqual(max, actual.rows);
+        try testing.expectEqual(@as(u32, 1), actual.cols);
+        try testing.expectEqual(@as(u32, 1), actual.rows);
     }
 
     const pin = try trackPin(&t, .{ .x = 0, .y = 0 });
@@ -2975,9 +3060,9 @@ test "storage: clipping a placement off the top accounts for its y offset" {
         .y_offset = 5,
     });
 
-    // An offset of 15px leaves the first row blank and puts 5px of blank
-    // in the second, so scrolling the first row off clips nothing and
-    // leaves a 5px offset.
+    // An offset stays inside the first cell, so 15px on a 10px cell is
+    // 9px, and the first row holds 1px of the image: scrolling it off clips
+    // 1px and leaves no offset.
     try storage.addPlacement(alloc, t.screens.active, 1, 2, .{
         .location = .{ .pin = try trackPin(&t, .{ .x = 5, .y = 0 }) },
         .y_offset = 15,
@@ -2994,10 +3079,10 @@ test "storage: clipping a placement off the top accounts for its y offset" {
     }
     {
         const p = testPlacement(&t, 1, 2) orelse return error.TestUnexpectedResult;
-        try testing.expectEqual(@as(u32, 0), p.source_y);
-        try testing.expectEqual(@as(u32, 20), p.source_height);
-        try testing.expectEqual(@as(u32, 5), p.y_offset);
-        try testing.expectEqual(@as(u32, 3), p.gridSize(storage.imageById(1).?, &t).rows);
+        try testing.expectEqual(@as(u32, 1), p.source_y);
+        try testing.expectEqual(@as(u32, 19), p.source_height);
+        try testing.expectEqual(@as(u32, 0), p.y_offset);
+        try testing.expectEqual(@as(u32, 2), p.gridSize(storage.imageById(1).?, &t).rows);
     }
     try testing.expectEqual(
         @as(?point.Coordinate, .{ .x = 0, .y = 0 }),
