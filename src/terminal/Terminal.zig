@@ -1062,9 +1062,15 @@ pub fn cursorLeft(self: *Terminal, count_req: usize) void {
     var count = @max(count_req, 1);
 
     // If we are in no wrap mode, then we move the cursor left and exit
-    // since this is the fastest and most typical path.
+    // since this is the fastest and most typical path. Like cursorRight,
+    // we stop at the left margin unless the cursor is already left of it.
     if (wrap_mode == .none) {
-        self.screens.active.cursorLeft(@min(count, self.screens.active.cursor.x));
+        const x = self.screens.active.cursor.x;
+        const left_margin = if (x < self.scrolling_region.left)
+            0
+        else
+            self.scrolling_region.left;
+        self.screens.active.cursorLeft(@min(count, x - left_margin));
         self.screens.active.cursor.pending_wrap = false;
         return;
     }
@@ -9406,6 +9412,57 @@ test "Terminal: cursorLeft no wrap" {
         const str = try t.plainString(testing.allocator);
         defer testing.allocator.free(str);
         try testing.expectEqualStrings("A\nB", str);
+    }
+}
+
+test "Terminal: cursorLeft stops at left margin" {
+    const alloc = testing.allocator;
+    var t = try init(alloc, .{ .rows = 5, .cols = 5 });
+    defer t.deinit(alloc);
+
+    t.scrolling_region.left = 2;
+    t.setCursorPos(1, 4);
+    t.cursorLeft(100);
+    try t.print('X');
+
+    {
+        const str = try t.plainString(testing.allocator);
+        defer testing.allocator.free(str);
+        try testing.expectEqualStrings("  X", str);
+    }
+}
+
+test "Terminal: cursorLeft left of left margin" {
+    const alloc = testing.allocator;
+    var t = try init(alloc, .{ .rows = 5, .cols = 5 });
+    defer t.deinit(alloc);
+
+    t.scrolling_region.left = 3;
+    t.setCursorPos(1, 3);
+    t.cursorLeft(100);
+    try t.print('X');
+
+    {
+        const str = try t.plainString(testing.allocator);
+        defer testing.allocator.free(str);
+        try testing.expectEqualStrings("X", str);
+    }
+}
+
+test "Terminal: backspace at left margin" {
+    const alloc = testing.allocator;
+    var t = try init(alloc, .{ .rows = 5, .cols = 5 });
+    defer t.deinit(alloc);
+
+    t.scrolling_region.left = 2;
+    t.setCursorPos(1, 3);
+    t.backspace();
+    try t.print('X');
+
+    {
+        const str = try t.plainString(testing.allocator);
+        defer testing.allocator.free(str);
+        try testing.expectEqualStrings("  X", str);
     }
 }
 
