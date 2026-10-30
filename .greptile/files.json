@@ -51,6 +51,7 @@
         "src/os/file.zig",
         "src/os/TempDir.zig",
         "src/os/local_path.zig",
+        "src/os/path.zig",
         "src/config/windows_shell.zig",
         "src/apprt/win32.zig",
         "src/apprt/win32/app.zig",

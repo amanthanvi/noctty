@@ -1277,9 +1277,25 @@ pub const StreamHandler = struct {
         // ConEmu's OSC 9;9 usually carries a plain Windows path (the form
         // Windows Terminal documents, oh-my-posh's `osc99` and nushell send),
         // which is not a URI. OSC 7 stays strict and never takes this branch.
-        if (comptime builtin.os.tag == .windows) {
-            if (conemu and try self.reportConemuPwd(url)) return;
-        }
+        // 9;9 carries no host, so there is no locality check, as in Windows
+        // Terminal; the path is screened as an OSC 7 path is. Its scratch is
+        // its own, so upstream's below stays where upstream has it.
+        if (comptime builtin.os.tag == .windows) if (conemu) plain: {
+            var arena_alloc: std.heap.ArenaAllocator = .init(self.alloc);
+            var stack_alloc = std.heap.stackFallback(1024, arena_alloc.allocator());
+            defer arena_alloc.deinit();
+            const path = internal_os.local_path.pwd(stack_alloc.get(), .{ .conemu = url }) catch |err| switch (err) {
+                // Not a plain path: a URL, read below (noctty's cmd
+                // integration sends `kitty-shell-cwd://localhost/%P`).
+                error.NotPlainPath => break :plain,
+                error.OutOfMemory => return error.OutOfMemory,
+                else => {
+                    log.warn("OSC 9;9 pwd refused: {t}", .{err});
+                    return;
+                },
+            };
+            return self.setReportedPwd(path);
+        };
 
         // Attempt to parse this file-style URI using options appropriate
         // for this OSC 7 context (e.g. kitty-shell-cwd expects the full,
@@ -1333,39 +1349,19 @@ pub const StreamHandler = struct {
         var stack_alloc = std.heap.stackFallback(1024, arena_alloc.allocator());
         defer arena_alloc.deinit();
         const scratch = stack_alloc.get();
-        const path = decodeOsc7PathForPwd(scratch, uri) catch |err| switch (err) {
-            error.InvalidOsc7Path => {
-                log.warn("OSC 7 path is a network or device path or contains unsafe bytes", .{});
-                return;
-            },
-            else => return err,
-        };
+        const raw = try uri.path.toRawMaybeAlloc(scratch);
+        const path = if (comptime builtin.os.tag == .windows)
+            internal_os.local_path.pwd(scratch, .{ .url_path = raw }) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => {
+                    log.warn("OSC 7 pwd refused: {t}", .{err});
+                    return;
+                },
+            }
+        else
+            raw;
 
         try self.setReportedPwd(path);
-    }
-
-    /// The plain-path form of ConEmu's OSC 9;9. Returns false when `value` is
-    /// not a drive-absolute path, so that the caller reads it as a URL (noctty's
-    /// cmd integration sends `kitty-shell-cwd://localhost/%P`); true when it
-    /// handled the report, including by refusing it.
-    ///
-    /// 9;9 carries no host, so there is no locality check here, as in Windows
-    /// Terminal; the path gets the same screening as an OSC 7 path.
-    fn reportConemuPwd(self: *StreamHandler, value: []const u8) !bool {
-        var arena_alloc: std.heap.ArenaAllocator = .init(self.alloc);
-        var stack_alloc = std.heap.stackFallback(1024, arena_alloc.allocator());
-        defer arena_alloc.deinit();
-        const scratch = stack_alloc.get();
-
-        const local = (try configpkg.windows_shell.conemuPathToLocal(scratch, value)) orelse return false;
-        const path = screenWindowsPwd(local) catch |err| switch (err) {
-            error.InvalidOsc7Path => {
-                log.warn("OSC 9;9 path contains unsafe bytes", .{});
-                return true;
-            },
-        };
-        try self.setReportedPwd(path);
-        return true;
     }
 
     /// Record `path` as the working directory and tell the surface.
@@ -1386,30 +1382,6 @@ pub const StreamHandler = struct {
             try self.windowTitle(path);
             self.seen_title = false;
         }
-    }
-
-    fn decodeOsc7PathForPwd(
-        alloc: Allocator,
-        uri: std.Uri,
-    ) ![]const u8 {
-        const raw_path = try uri.path.toRawMaybeAlloc(alloc);
-        if (builtin.os.tag != .windows) return raw_path;
-
-        return try screenWindowsPwd(try configpkg.windows_shell.osc7PathToLocal(alloc, raw_path));
-    }
-
-    /// Refuse a Windows path that is not safe to keep as the working directory.
-    ///
-    /// A network share or device path is not a working directory this
-    /// terminal acts on: spawning already replaces it with the home folder
-    /// and links to such paths are never opened. Keeping it as the pwd would
-    /// let later consumers (relative link resolution, session files) touch
-    /// it, so refuse it here, like the link opener does. WSL paths are
-    /// normalized to `/...` before this and are unaffected.
-    fn screenWindowsPwd(path: []const u8) error{InvalidOsc7Path}![]const u8 {
-        if (!configpkg.windows_shell.isSafeWindowsPath(path)) return error.InvalidOsc7Path;
-        if (internal_os.path.isNetworkOrDevicePath(path)) return error.InvalidOsc7Path;
-        return path;
     }
 
     fn colorOperation(
@@ -2251,39 +2223,6 @@ test "a stopped reader gives up waiting on a full mailbox and sends nothing afte
     try std.testing.expectEqual(@as(@TypeOf(termio_queue.len), 64), termio_queue.len);
 }
 
-test "decodeOsc7PathForPwd handles Windows file URI with a single fallback allocator" {
-    const uri = try internal_os.uri.parse("file://localhost/C:/Users/test/project", .{
-        .mac_address = false,
-        .raw_path = false,
-    });
-
-    var arena_alloc = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena_alloc.deinit();
-    var stack_alloc = std.heap.stackFallback(1024, arena_alloc.allocator());
-    const path = try StreamHandler.decodeOsc7PathForPwd(stack_alloc.get(), uri);
-
-    if (builtin.os.tag == .windows) {
-        try std.testing.expectEqualStrings("C:\\Users\\test\\project", path);
-    } else {
-        try std.testing.expectEqualStrings("/C:/Users/test/project", path);
-    }
-}
-
-test "security regression OSC 7 pwd rejects percent-decoded Windows controls" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const uri = try internal_os.uri.parse("file://localhost/C:/evil%00INJ=1%0Ab", .{
-        .mac_address = false,
-        .raw_path = false,
-    });
-    try std.testing.expectError(
-        error.InvalidOsc7Path,
-        StreamHandler.decodeOsc7PathForPwd(arena.allocator(), uri),
-    );
-}
-
 test "PKG16 integrated cmd prompt clears stale keyboard modes" {
     if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
 
@@ -2400,60 +2339,22 @@ test "cmd OSC 9;9 URI updates terminal pwd" {
 
 test "OSC 7 pwd refuses network and device paths" {
     if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    const alloc = std.testing.allocator;
 
-    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
-    defer arena.deinit();
+    var h: TestStream = undefined;
+    try h.init(alloc, .{});
+    defer h.deinit(alloc);
 
-    const refused = [_][]const u8{
-        "kitty-shell-cwd://localhost/\\\\server\\share",
-        "kitty-shell-cwd://localhost/\\\\server\\share\\dir",
-        "kitty-shell-cwd://localhost/\\\\?\\UNC\\server\\share\\dir",
-        "kitty-shell-cwd://localhost/\\\\?\\C:\\Users\\me",
-        "kitty-shell-cwd://localhost/\\\\.\\pipe\\x",
-        "kitty-shell-cwd://localhost/\\\\.\\GLOBALROOT\\Device\\Mup\\server\\share",
-        "kitty-shell-cwd://localhost/\\\\server/share",
-        "kitty-shell-cwd://localhost//server/share",
-        "kitty-shell-cwd://localhost/\\/server/share",
-        "file://localhost/%5C%5Cserver%5Cshare",
-        "file://localhost/%5C%5C%3F%5CUNC%5Cserver%5Cshare",
-        "file://localhost/%5C%5C.%5Cpipe%5Cx",
-        "file://localhost//server/share",
-        "file://localhost/%2F%2Fserver/share",
-        "file://localhost/%2F/server/share",
-        "file://localhost/%5C/server/share",
-        "file://localhost/%3F%3F/UNC/server/share",
-        "file://localhost/%3F%3F/GLOBALROOT/Device/Mup/server/share",
-        "kitty-shell-cwd://localhost//??/UNC/server/share",
-    };
-    for (refused) |url| {
-        const uri = try internal_os.uri.parse(url, .{
-            .mac_address = false,
-            .raw_path = std.mem.startsWith(u8, url, "kitty-shell-cwd://"),
-        });
-        std.testing.expectError(
-            error.InvalidOsc7Path,
-            StreamHandler.decodeOsc7PathForPwd(arena.allocator(), uri),
-        ) catch |err| {
-            std.debug.print("accepted: {s}\n", .{url});
-            return err;
-        };
-    }
+    h.stream.nextSlice("\x1b]7;file://localhost/C:/Users/test\x1b\\");
+    try h.expectPwd("C:\\Users\\test");
+    var first = try h.expectSurfaceMessage();
+    first.deinit();
 
-    // Local drive and WSL paths are unaffected.
-    const accepted = [_]struct { []const u8, []const u8 }{
-        .{ "kitty-shell-cwd://localhost/C:\\Users\\me", "C:\\Users\\me" },
-        .{ "file://localhost/C:/Users/me", "C:\\Users\\me" },
-        .{ "file://localhost/home/me", "/home/me" },
-        .{ "kitty-shell-cwd://localhost/\\\\wsl.localhost\\Ubuntu\\home\\me", "/home/me" },
-    };
-    for (accepted) |case| {
-        const uri = try internal_os.uri.parse(case[0], .{
-            .mac_address = false,
-            .raw_path = std.mem.startsWith(u8, case[0], "kitty-shell-cwd://"),
-        });
-        const path = try StreamHandler.decodeOsc7PathForPwd(arena.allocator(), uri);
-        try std.testing.expectEqualStrings(case[1], path);
-    }
+    // A share, percent-encoded: the previous pwd stays and the surface hears
+    // nothing (`local_path.pwd` has every spelling).
+    h.stream.nextSlice("\x1b]7;file://localhost/%5C%5Cserver%5Cshare\x1b\\");
+    try h.expectPwd("C:\\Users\\test");
+    try std.testing.expect(h.nextSurfaceMessage() == null);
 }
 
 /// A stream handler wired to a real terminal and an app mailbox, for tests
@@ -2596,26 +2497,14 @@ test "OSC 9;9 sets the pwd from a plain Windows path" {
     try h.init(alloc, .{});
     defer h.deinit(alloc);
 
-    // The forms Windows Terminal's docs, oh-my-posh's `osc99` and nushell send:
-    // a plain path, quoted or not, with either separator.
-    const accepted = [_]struct { []const u8, []const u8 }{
-        .{ "C:\\Users\\test\\project", "C:\\Users\\test\\project" },
-        .{ "\"C:\\Users\\test\\my project\"", "C:\\Users\\test\\my project" },
-        .{ "D:/work/noctty", "D:\\work\\noctty" },
-        .{ "C:\\", "C:\\" },
-    };
-    for (accepted) |case| {
-        var seq: std.ArrayList(u8) = .empty;
-        defer seq.deinit(alloc);
-        try seq.writer(alloc).print("\x1b]9;9;{s}\x1b\\", .{case[0]});
-        h.stream.nextSlice(seq.items);
-
-        try h.expectPwd(case[1]);
-        var message = try h.expectSurfaceMessage();
-        defer message.deinit();
-        try std.testing.expect(message == .pwd_change);
-        try std.testing.expect(h.nextSurfaceMessage() == null);
-    }
+    // A plain path, as Windows Terminal's docs, oh-my-posh's `osc99` and
+    // nushell send it (`local_path.pwd` has every form).
+    h.stream.nextSlice("\x1b]9;9;\"C:\\Users\\test\\my project\"\x1b\\");
+    try h.expectPwd("C:\\Users\\test\\my project");
+    var message = try h.expectSurfaceMessage();
+    defer message.deinit();
+    try std.testing.expect(message == .pwd_change);
+    try std.testing.expect(h.nextSurfaceMessage() == null);
 
     // The UNC form `wslpath -w` prints, the recipe Windows Terminal documents
     // for WSL, is the distro's own path, as in an OSC 7 URL.
@@ -2644,31 +2533,11 @@ test "OSC 9;9 pwd keeps the network and device screening" {
     var first = try h.expectSurfaceMessage();
     first.deinit();
 
-    // None of these is a drive-absolute path, or each is a network or device
-    // path after conversion: the previous pwd stays and the surface hears
+    // A share falls through to the URL parse, which refuses it; a drive path
+    // with DEL, the one control byte the OSC parser passes on, is refused by
+    // the screening. Either way the previous pwd stays and the surface hears
     // nothing, the same as for OSC 7.
-    const refused = [_][]const u8{
-        "\\\\server\\share",
-        "\\\\server\\share\\dir",
-        "\"\\\\server\\share\"",
-        "\\\\?\\C:\\Users\\me",
-        "\\\\?\\UNC\\server\\share",
-        "\\\\.\\pipe\\x",
-        "\\\\.\\GLOBALROOT\\Device\\Mup\\server\\share",
-        "//server/share",
-        // Drive-absolute, but with a control byte. The parser drops most C0
-        // bytes from an OSC; DEL goes through.
-        "C:\\a\x7fb",
-        // Not drive-absolute.
-        "C:Users\\me",
-        "Users\\me",
-        "\\Users\\me",
-        "/mnt/c/Users/me",
-        "\"C:\\Users\\me",
-        "C:\\Users\\me\"",
-        "\"\"C:\\Users\\me\"\"",
-    };
-    for (refused) |value| {
+    for ([_][]const u8{ "\\\\server\\share", "C:\\a\x7fb" }) |value| {
         var seq: std.ArrayList(u8) = .empty;
         defer seq.deinit(alloc);
         try seq.writer(alloc).print("\x1b]9;9;{s}\x1b\\", .{value});
@@ -2679,12 +2548,6 @@ test "OSC 9;9 pwd keeps the network and device screening" {
         };
         try std.testing.expect(h.nextSurfaceMessage() == null);
     }
-
-    // The screening itself, for what cannot reach it through an OSC: the
-    // parser drops or ends the sequence on most control bytes.
-    try std.testing.expectError(error.InvalidOsc7Path, StreamHandler.screenWindowsPwd("C:\\a\x01b"));
-    try std.testing.expectError(error.InvalidOsc7Path, StreamHandler.screenWindowsPwd("\\\\server\\share"));
-    try std.testing.expectEqualStrings("C:\\a", try StreamHandler.screenWindowsPwd("C:\\a"));
 }
 
 test "OSC 7 stays strict: a plain path or a host that is not this machine" {

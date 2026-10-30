@@ -2,7 +2,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const windows = std.os.windows;
-const shell = @import("../config/windows_shell.zig");
+const os_path = @import("path.zig");
 const os_windows = @import("windows.zig");
 const local_path = @import("local_path.zig");
 
@@ -63,8 +63,8 @@ fn execute(info: *ShellExecuteInfo) !bool {
 fn openWith(alloc: std.mem.Allocator, path: []const u8, comptime query_association: anytype, comptime shell_execute: anytype) !void {
     // Screen before opening anything, including any reparse target. The class
     // override must never make a network or device path acceptable.
-    if (!shell.isSafeWindowsPath(path) or !shell.isDriveAbsolutePath(path) or
-        @import("path.zig").isNetworkOrDevicePath(path) or
+    if (!os_path.isSafeWindowsPath(path) or !os_path.isDriveAbsolutePath(path) or
+        os_path.isNetworkOrDevicePath(path) or
         std.mem.indexOfScalar(u8, path[2..], ':') != null) return error.OpenConfigRejected;
     var components = std.mem.tokenizeAny(u8, path[3..], "/\\");
     while (components.next()) |component| {

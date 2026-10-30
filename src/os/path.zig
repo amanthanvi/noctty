@@ -105,6 +105,90 @@ pub fn drivePathToWindows(alloc: Allocator, drive: u8, rest: []const u8) Allocat
     return try buf.toOwnedSlice(alloc);
 }
 
+/// Whether a reported directory is one a WSL shell gives: POSIX (`/home/me`),
+/// or the UNC form Windows names a distro's files by.
+pub fn isWslPath(path: []const u8) bool {
+    return std.mem.startsWith(u8, path, "/") or
+        std.mem.startsWith(u8, path, "\\\\wsl.localhost\\") or
+        std.mem.startsWith(u8, path, "\\\\wsl$\\");
+}
+
+/// A distro's `\\wsl.localhost\D\rest` or `\\wsl$\D\rest` as its own `/rest`;
+/// any other path as it is.
+pub fn normalizeWslPath(alloc: Allocator, path: []const u8) Allocator.Error![]const u8 {
+    if (std.mem.startsWith(u8, path, "/")) return try alloc.dupe(u8, path);
+
+    for ([_][]const u8{
+        "\\\\wsl.localhost\\",
+        "\\\\wsl$\\",
+    }) |prefix| {
+        if (!std.mem.startsWith(u8, path, prefix)) continue;
+
+        const rest = path[prefix.len..];
+        const distro_sep = std.mem.indexOfAny(u8, rest, "/\\") orelse return try alloc.dupe(u8, "/");
+        const distro_rest = trimLeadingSeparators(rest[distro_sep..]);
+        if (distro_rest.len == 0) return try alloc.dupe(u8, "/");
+
+        var buf: std.ArrayList(u8) = .empty;
+        defer buf.deinit(alloc);
+        try buf.append(alloc, '/');
+        try appendNormalizedPath(&buf, alloc, distro_rest);
+        return try buf.toOwnedSlice(alloc);
+    }
+
+    return try alloc.dupe(u8, path);
+}
+
+/// Whether `path` is a file URI's path to a drive (`/C:/x`).
+pub fn isWindowsUriPath(path: []const u8) bool {
+    return path.len >= 4 and
+        path[0] == '/' and
+        std.ascii.isAlphabetic(path[1]) and
+        path[2] == ':' and
+        isSeparator(path[3]);
+}
+
+/// The Windows path of a file URI's drive path (`/C:/x` is `C:\x`).
+pub fn uriPathToWindows(alloc: Allocator, path: []const u8) Allocator.Error![]const u8 {
+    return try drivePathToWindows(alloc, path[1], path[3..]);
+}
+
+/// True for a UNC path that still carries the leading `/` of the URI it came
+/// from, e.g. `/\\server\share\dir`. cmd's `$P` expands to a raw UNC path, so
+/// `kitty-shell-cwd://localhost/$P` yields exactly this shape.
+///
+/// The remainder must be backslash-separated. Backslashes are legal in POSIX
+/// filenames, so a WSL or POSIX shell could in principle report a directory
+/// such as `/\\server/share`; requiring that no forward slash appears after
+/// the URI separator keeps that case on the WSL path where it belongs, while
+/// still matching everything cmd's `$P` can produce (cmd always emits
+/// backslashes).
+pub fn isUncUriPath(path: []const u8) bool {
+    if (path.len < 4) return false;
+    if (path[0] != '/' or path[1] != '\\' or path[2] != '\\') return false;
+    if (isSeparator(path[3])) return false;
+
+    // Must be backslash-separated throughout: a forward slash proves this is a
+    // POSIX path that merely begins with backslashes, not the form cmd's `$P`
+    // produces.
+    if (std.mem.indexOfScalar(u8, path[3..], '/') != null) return false;
+
+    // A UNC path needs both a host and a non-empty share (`\\server\share`).
+    // `/\\server` alone is a legal POSIX filename, never a usable UNC path.
+    const host = path[3..];
+    const sep = std.mem.indexOfScalar(u8, host, '\\') orelse return false;
+    return sep + 1 < host.len;
+}
+
+/// Return true when a Windows path contains no bytes that can terminate or
+/// split a CreateProcess environment/current-directory value or a window title.
+pub fn isSafeWindowsPath(path: []const u8) bool {
+    for (path) |byte| {
+        if (std.ascii.isControl(byte)) return false;
+    }
+    return true;
+}
+
 fn trimLeadingSeparators(path: []const u8) []const u8 {
     return std.mem.trimLeft(u8, path, "/\\");
 }
@@ -115,6 +199,14 @@ fn appendWindowsPath(
     path: []const u8,
 ) Allocator.Error!void {
     for (path) |c| try buf.append(alloc, if (c == '/') '\\' else c);
+}
+
+fn appendNormalizedPath(
+    buf: *std.ArrayList(u8),
+    alloc: Allocator,
+    path: []const u8,
+) Allocator.Error!void {
+    for (path) |c| try buf.append(alloc, if (c == '\\') '/' else c);
 }
 
 fn isSeparator(c: u8) bool {
@@ -182,4 +274,15 @@ test "isNetworkOrDevicePath" {
         "\\?\\x",
         "/?x",
     }) |p| try testing.expect(!isNetworkOrDevicePath(p));
+}
+
+test "isUncUriPath only matches uri-carried unc paths" {
+    try testing.expect(isUncUriPath("/\\\\server\\share"));
+    try testing.expect(isUncUriPath("/\\\\s\\a"));
+    try testing.expect(!isUncUriPath("/home/aman"));
+    try testing.expect(!isUncUriPath("//server/share"));
+    try testing.expect(!isUncUriPath("\\\\server\\share"));
+    try testing.expect(!isUncUriPath("/\\\\"));
+    try testing.expect(!isUncUriPath("/\\\\\\share"));
+    try testing.expect(!isUncUriPath("/C:/Users"));
 }

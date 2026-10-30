@@ -1,10 +1,12 @@
 //! Which local Windows path a program-reported (or noctty-held) path names,
-//! and whether noctty may act on it: the file link or quick-select text
-//! names (`linkTarget`, `isLocalShape`), and a bounded open on a local drive
-//! for the link opener, the editor and the Settings config read (`open`).
-//! Only `open` touches the filesystem. No unchecked reparse target is
-//! opened, including targets reached through another local symlink, so
-//! nothing it opens contacts a share.
+//! and whether noctty may act on it: the directory an OSC 7 or OSC 9;9
+//! report names (`pwd`), the file link or quick-select text names
+//! (`linkTarget`, `isLocalShape`), and a bounded open on a local drive for
+//! the link opener, the editor and the Settings config read (`open`).
+//! Only `open` touches the filesystem (`linkTarget` and `Found.storedName`
+//! through it). No unchecked reparse target is opened, including targets
+//! reached through another local symlink, so nothing it opens contacts a
+//! share.
 const std = @import("std");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
@@ -106,6 +108,84 @@ pub fn open(alloc: Allocator, path: []const u8, how: How) Allocator.Error!Opened
         .missing => .missing,
         .refused => .refused,
     };
+}
+
+/// A directory a program reported.
+pub const Report = union(enum) {
+    /// The decoded path of an OSC 7 (or URL-form OSC 9;9) `file://` or
+    /// `kitty-shell-cwd://` URL, whose host the caller showed is this machine
+    /// (`os.hostname.isLocal`).
+    url_path: []const u8,
+    /// An OSC 9;9 value as sent: `C:\x` or `C:/x`, either in one pair of
+    /// double quotes (oh-my-posh's `osc99`, nushell), or the
+    /// `\\wsl.localhost\Distro\...` / `\\wsl$\...` path `wslpath -w` prints,
+    /// the recipe Windows Terminal documents for WSL.
+    conemu: []const u8,
+};
+
+pub const PwdError = Allocator.Error || error{
+    /// `.conemu` only: not a plain path, so the caller reads the value as a
+    /// URL (noctty's cmd integration sends `kitty-shell-cwd://localhost/%P`).
+    NotPlainPath,
+    /// A share or device path, in any spelling, after translation.
+    NetworkOrDevicePath,
+    /// A C0 or DEL byte, which could split a CreateProcess current directory
+    /// or environment value, or a window title.
+    UnsafeBytes,
+};
+
+/// The pwd to keep for a report, allocated in `alloc`. Touches no file, so it
+/// is safe on the io thread. The result is a drive-absolute `X:\...` (a file
+/// URI's `/C:/x` and a 9;9 `C:/x` included); a POSIX path a WSL shell
+/// (`/home/me`, also from `\\wsl.localhost\D\home\me`) or an MSYS2 shell
+/// (`/c/Users/me`) reported, kept POSIX so a later WSL launch can inherit it;
+/// or any other spelling that passed the screening, kept as given. Launch code
+/// (`spawnCwd`, `shellPwd`, `safeCurrentDirectory`) reads this format, and
+/// `linkTarget` reads it back as `Pane.dir`.
+pub fn pwd(alloc: Allocator, report: Report) PwdError![]const u8 {
+    const path = switch (report) {
+        .url_path => |raw| try osc7PathToLocal(alloc, raw),
+        .conemu => |value| try conemuPathToLocal(alloc, value) orelse return error.NotPlainPath,
+    };
+    errdefer alloc.free(path);
+    // A network share or device path is not a directory this terminal acts
+    // on: spawning already replaces it with the home folder and links to such
+    // paths are never opened. Keeping it would let later readers (relative
+    // link resolution, session files) touch it.
+    if (!os_path.isSafeWindowsPath(path)) return error.UnsafeBytes;
+    if (os_path.isNetworkOrDevicePath(path)) return error.NetworkOrDevicePath;
+    return path;
+}
+
+/// A local path from OSC 7 as a Windows path string. WSL paths stay WSL-style
+/// so they can be inherited into later WSL shells.
+fn osc7PathToLocal(alloc: Allocator, path: []const u8) Allocator.Error![]const u8 {
+    if (os_path.isWindowsUriPath(path)) return try os_path.uriPathToWindows(alloc, path);
+    // A UNC path carried in a URI keeps the URI's leading `/`. Strip it before
+    // the WSL check below, which would otherwise treat the whole string as a
+    // POSIX path and hand back an unusable `/\\server\share` cwd.
+    if (os_path.isUncUriPath(path)) {
+        const unc = path[1..];
+        if (os_path.isWslPath(unc)) return try os_path.normalizeWslPath(alloc, unc);
+        return try alloc.dupe(u8, unc);
+    }
+    if (os_path.isWslPath(path)) return try os_path.normalizeWslPath(alloc, path);
+    return try alloc.dupe(u8, path);
+}
+
+/// The Windows path in the plain form of ConEmu's OSC 9;9 (`Report.conemu`),
+/// or null for anything else, which the caller reads as a URL. Only a
+/// drive-absolute path qualifies, plus the WSL form, which maps to the
+/// distro's own `/home/me` exactly as it does in an OSC 7 URL. Any other UNC
+/// path, a device path and a relative path are not taken.
+fn conemuPathToLocal(alloc: Allocator, value: []const u8) Allocator.Error!?[]const u8 {
+    const path = if (value.len >= 2 and value[0] == '"' and value[value.len - 1] == '"') value[1 .. value.len - 1] else value;
+    // A quote left over is not part of any Windows path.
+    if (std.mem.indexOfScalar(u8, path, '"') != null) return null;
+    if (os_path.isDriveAbsolutePath(path)) return try os_path.drivePathToWindows(alloc, path[0], path[3..]);
+    if (std.mem.startsWith(u8, path, "\\\\wsl.localhost\\") or
+        std.mem.startsWith(u8, path, "\\\\wsl$\\")) return try os_path.normalizeWslPath(alloc, path);
+    return null;
 }
 
 /// The pane link or quick-select text was printed in.
@@ -1111,6 +1191,167 @@ test "local path open finds the name its folder stores" {
     const windows_name = windows_dir.storedName(alloc) orelse return error.TestUnexpectedResult;
     defer alloc.free(windows_name);
     try std.testing.expect(std.ascii.eqlIgnoreCase(std.fs.path.basename(system_root), windows_name));
+}
+
+/// `pwd(report)` is `want`.
+fn expectPwd(want: []const u8, report: Report) !void {
+    const alloc = std.testing.allocator;
+    const got = pwd(alloc, report) catch |err| {
+        std.debug.print("pwd of {s}: {t}\n", .{ switch (report) {
+            inline else => |text| text,
+        }, err });
+        return err;
+    };
+    defer alloc.free(got);
+    try std.testing.expectEqualStrings(want, got);
+}
+
+/// The raw path of an OSC 7 URL, decoded as the stream handler does.
+fn testUrlPath(alloc: Allocator, url: []const u8) ![]const u8 {
+    const uri = try @import("uri.zig").parse(url, .{
+        .mac_address = false,
+        .raw_path = std.mem.startsWith(u8, url, "kitty-shell-cwd://"),
+    });
+    return uri.path.toRawMaybeAlloc(alloc);
+}
+
+test "pwd keeps a file URI's drive path as a Windows path, with a single fallback allocator" {
+    // `std.heap.stackFallback(...).get()` is single-use, so the decode and
+    // `pwd` share the one allocator the stream handler takes from it.
+    var arena_alloc = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_alloc.deinit();
+    var stack_alloc = std.heap.stackFallback(1024, arena_alloc.allocator());
+    const scratch = stack_alloc.get();
+    const raw = try testUrlPath(scratch, "file://localhost/C:/Users/test/project");
+    try std.testing.expectEqualStrings("C:\\Users\\test\\project", try pwd(scratch, .{ .url_path = raw }));
+    try expectPwd("C:\\Users\\aman\\src", .{ .url_path = "/C:/Users/aman/src" });
+}
+
+test "pwd of an OSC 7 path keeps WSL and POSIX paths and refuses shares and devices" {
+    const alloc = std.testing.allocator;
+    for ([_]struct { []const u8, []const u8 }{
+        .{ "kitty-shell-cwd://localhost/C:\\Users\\me", "C:\\Users\\me" },
+        .{ "file://localhost/C:/Users/me", "C:\\Users\\me" },
+        .{ "file://localhost/home/me", "/home/me" },
+        .{ "kitty-shell-cwd://localhost/\\\\wsl.localhost\\Ubuntu\\home\\me", "/home/me" },
+        // fish under MSYS2 reports `/c/...`; it stays POSIX (`linkTarget`
+        // reads it back as `C:\...` outside WSL).
+        .{ "file://localhost/c/Users/me", "/c/Users/me" },
+    }) |case| {
+        var arena = std.heap.ArenaAllocator.init(alloc);
+        defer arena.deinit();
+        try expectPwd(case[1], .{ .url_path = try testUrlPath(arena.allocator(), case[0]) });
+    }
+    // A UNC path carried in a URI loses the URI's `/`, so it is the share it
+    // names and is refused; one into WSL is still the distro's own path.
+    try expectPwd("/home/aman", .{ .url_path = "/\\\\wsl.localhost\\Ubuntu\\home\\aman" });
+    try expectPwd("/home/aman/src", .{ .url_path = "/home/aman/src" });
+    for ([_][]const u8{
+        "/\\\\server\\share\\dir",
+        "/\\\\server\\share",
+        // Backslashes are legal in POSIX names, so `/\\server/share` stays the
+        // POSIX path it spells, which is still a share's shape to Windows.
+        "/\\\\server/share",
+        "/\\\\server",
+        "/\\\\server\\",
+    }) |raw| try std.testing.expectError(error.NetworkOrDevicePath, pwd(alloc, .{ .url_path = raw }));
+
+    // Every share and device spelling, after the URL's percent-decoding.
+    for ([_][]const u8{
+        "kitty-shell-cwd://localhost/\\\\server\\share",
+        "kitty-shell-cwd://localhost/\\\\server\\share\\dir",
+        "kitty-shell-cwd://localhost/\\\\?\\UNC\\server\\share\\dir",
+        "kitty-shell-cwd://localhost/\\\\?\\C:\\Users\\me",
+        "kitty-shell-cwd://localhost/\\\\.\\pipe\\x",
+        "kitty-shell-cwd://localhost/\\\\.\\GLOBALROOT\\Device\\Mup\\server\\share",
+        "kitty-shell-cwd://localhost/\\\\server/share",
+        "kitty-shell-cwd://localhost//server/share",
+        "kitty-shell-cwd://localhost/\\/server/share",
+        "file://localhost/%5C%5Cserver%5Cshare",
+        "file://localhost/%5C%5C%3F%5CUNC%5Cserver%5Cshare",
+        "file://localhost/%5C%5C.%5Cpipe%5Cx",
+        "file://localhost//server/share",
+        "file://localhost/%2F%2Fserver/share",
+        "file://localhost/%2F/server/share",
+        "file://localhost/%5C/server/share",
+        "file://localhost/%3F%3F/UNC/server/share",
+        "file://localhost/%3F%3F/GLOBALROOT/Device/Mup/server/share",
+        "kitty-shell-cwd://localhost//??/UNC/server/share",
+    }) |url| {
+        var arena = std.heap.ArenaAllocator.init(alloc);
+        defer arena.deinit();
+        const raw = try testUrlPath(arena.allocator(), url);
+        std.testing.expectError(error.NetworkOrDevicePath, pwd(arena.allocator(), .{ .url_path = raw })) catch |err| {
+            std.debug.print("accepted: {s}\n", .{url});
+            return err;
+        };
+    }
+}
+
+test "security regression pwd refuses percent-decoded control bytes" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const raw = try testUrlPath(arena.allocator(), "file://localhost/C:/evil%00INJ=1%0Ab");
+    try std.testing.expectError(error.UnsafeBytes, pwd(arena.allocator(), .{ .url_path = raw }));
+    // DEL is the one control byte the OSC parser passes on.
+    try std.testing.expectError(error.UnsafeBytes, pwd(std.testing.allocator, .{ .conemu = "C:\\a\x7fb" }));
+    try std.testing.expectError(error.UnsafeBytes, pwd(std.testing.allocator, .{ .conemu = "C:\\a\x01b" }));
+}
+
+test "pwd reads the plain path of OSC 9;9" {
+    for ([_]struct { []const u8, []const u8 }{
+        .{ "C:\\Users\\aman\\src", "C:\\Users\\aman\\src" },
+        // oh-my-posh quotes the path.
+        .{ "\"C:\\Users\\aman\\src\"", "C:\\Users\\aman\\src" },
+        .{ "\"C:\\Users\\test\\my project\"", "C:\\Users\\test\\my project" },
+        // A path with spaces needs no quotes of its own.
+        .{ "C:\\Program Files\\Git", "C:\\Program Files\\Git" },
+        // A forward slash is the other separator, and the letter keeps its case.
+        .{ "d:/work/noctty", "d:\\work\\noctty" },
+        .{ "D:/work/noctty", "D:\\work\\noctty" },
+        .{ "C:\\", "C:\\" },
+        .{ "C:/", "C:\\" },
+        // The UNC form `wslpath -w` prints is the distro's own path.
+        .{ "\\\\wsl.localhost\\Ubuntu\\home\\aman\\src", "/home/aman/src" },
+        .{ "\\\\wsl$\\Ubuntu\\home\\aman", "/home/aman" },
+        .{ "\"\\\\wsl.localhost\\Ubuntu-24.04\\mnt\\data\"", "/mnt/data" },
+        .{ "\\\\wsl.localhost\\Ubuntu", "/" },
+    }) |case| try expectPwd(case[1], .{ .conemu = case[0] });
+}
+
+test "pwd leaves every OSC 9;9 value but a plain path to the URL parse" {
+    for ([_][]const u8{
+        // The URL forms, including the one noctty's cmd integration sends.
+        "kitty-shell-cwd://localhost/C:\\Users\\aman",
+        "file://localhost/C:/Users/aman",
+        // Not drive-absolute, and not WSL's own UNC form: a share or device
+        // path, which the URL parse then refuses.
+        "",
+        "\"\"",
+        "C:",
+        "C:Users",
+        "C:Users\\me",
+        "Users\\aman",
+        "\\Users\\aman",
+        "/mnt/c/Users",
+        "\\\\server\\share",
+        "\\\\server\\share\\dir",
+        "\"\\\\server\\share\"",
+        "\\\\server\\wsl.localhost\\share",
+        "\\\\?\\C:\\Users\\me",
+        "\\\\?\\UNC\\server\\share",
+        "\\\\.\\pipe\\x",
+        "\\\\.\\GLOBALROOT\\Device\\Mup\\server\\share",
+        "//server/share",
+        "\\\\wsl",
+        // One pair of quotes only, and both of them.
+        "\"\"C:\\Users\"\"",
+        "\"C:\\Users",
+        "C:\\Users\"",
+    }) |value| std.testing.expectError(error.NotPlainPath, pwd(std.testing.allocator, .{ .conemu = value })) catch |err| {
+        std.debug.print("taken: {s}\n", .{value});
+        return err;
+    };
 }
 
 /// `linkTarget(text, pane)` is `want`, or null when `want` is.
