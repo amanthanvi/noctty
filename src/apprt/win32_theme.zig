@@ -127,8 +127,48 @@ pub const SettingsColors = struct {
     field_border: u32,
     button_bg: u32,
     button_text: u32,
+    /// A toggle switch that is on: the track's fill and its thumb
+    /// (`win32_settings.paintToggle`). The thumb is cut out in the pane's
+    /// colour, which keeps 3:1 against the accent in both app themes.
+    toggle_on_track: u32,
+    toggle_on_thumb: u32,
+    /// A toggle switch that is off: the track's outline and its thumb.
+    toggle_off: u32,
     is_dark: bool,
     high_contrast: bool,
+};
+
+/// Every pair of Settings colours one is drawn on the other, with the
+/// contrast it needs (DESIGN.md): 4.5:1 for text, 3:1 for a control's
+/// boundary, a state cue or a focus indicator. Disabled text is exempt.
+pub const settings_contrast_pairs = [_]struct {
+    foreground: []const u8,
+    background: []const u8,
+    minimum: f64,
+    /// Whether High Contrast draws the pair too.
+    high_contrast: bool = true,
+}{
+    .{ .foreground = "text", .background = "window_bg", .minimum = 4.5 },
+    .{ .foreground = "text", .background = "rail_bg", .minimum = 4.5 },
+    .{ .foreground = "secondary_text", .background = "window_bg", .minimum = 4.5 },
+    .{ .foreground = "secondary_text", .background = "rail_bg", .minimum = 4.5 },
+    .{ .foreground = "secondary_text", .background = "edit_bg", .minimum = 4.5 },
+    .{ .foreground = "error_text", .background = "window_bg", .minimum = 4.5 },
+    .{ .foreground = "selection_text", .background = "selection_bg", .minimum = 4.5 },
+    .{ .foreground = "edit_text", .background = "edit_bg", .minimum = 4.5 },
+    .{ .foreground = "button_text", .background = "button_bg", .minimum = 4.5 },
+    .{ .foreground = "focus_ring", .background = "window_bg", .minimum = 3.0 },
+    .{ .foreground = "focus_ring", .background = "rail_bg", .minimum = 3.0 },
+    .{ .foreground = "focus_ring", .background = "button_bg", .minimum = 3.0 },
+    .{ .foreground = "accent", .background = "window_bg", .minimum = 3.0 },
+    // The selected rail button's pill; High Contrast frames the button in
+    // its text colour instead.
+    .{ .foreground = "accent", .background = "selection_bg", .minimum = 3.0, .high_contrast = false },
+    .{ .foreground = "field_border", .background = "window_bg", .minimum = 3.0 },
+    .{ .foreground = "field_border", .background = "edit_bg", .minimum = 3.0 },
+    .{ .foreground = "toggle_on_track", .background = "window_bg", .minimum = 3.0 },
+    .{ .foreground = "toggle_on_thumb", .background = "toggle_on_track", .minimum = 3.0 },
+    .{ .foreground = "toggle_off", .background = "window_bg", .minimum = 3.0 },
 };
 
 /// Resolve semantic Settings colors. High Contrast deliberately ignores every
@@ -159,6 +199,11 @@ pub fn settingsColors(
             .field_border = system.window_text,
             .button_bg = system.button_face,
             .button_text = system.button_text,
+            // High Contrast draws a plain check box, not a switch; these
+            // keep the system pairs all the same.
+            .toggle_on_track = system.highlight,
+            .toggle_on_thumb = system.highlight_text,
+            .toggle_off = system.button_text,
             .is_dark = false,
             .high_contrast = true,
         };
@@ -181,6 +226,9 @@ pub fn settingsColors(
         .field_border = theme.edit_border_unfocused,
         .button_bg = theme.button_bg,
         .button_text = theme.button_fg,
+        .toggle_on_track = theme.accent,
+        .toggle_on_thumb = theme.overlay_bg,
+        .toggle_off = theme.text_secondary,
         .is_dark = theme.is_dark,
         .high_contrast = false,
     };
@@ -1021,6 +1069,40 @@ test "settings field frames keep 3:1 against the pane and the field" {
     }
 }
 
+test "settings colours keep their contrast in light, dark and every shipped High Contrast theme" {
+    const RGB = @import("../terminal/color.zig").RGB;
+    const of = struct {
+        fn rgbOf(color: u32) RGB {
+            return .{ .r = @truncate(color), .g = @truncate(color >> 8), .b = @truncate(color >> 16) };
+        }
+    }.rgbOf;
+    // The contrast themes Windows 11 ships, as their files set them
+    // (`%WINDIR%\Resources\Ease of Access Themes`): hc1 (Dusk), hc2 (Night
+    // sky), hcblack (Aquatic) and hcwhite (Desert).
+    const shipped = [_]SettingsSystemColors{
+        .{ .window = rgb(45, 50, 54), .window_text = rgb(255, 255, 255), .button_face = rgb(45, 50, 54), .button_text = rgb(182, 246, 240), .gray_text = rgb(166, 166, 166), .highlight = rgb(161, 191, 222), .highlight_text = rgb(33, 45, 59) },
+        .{ .window = rgb(0, 0, 0), .window_text = rgb(255, 255, 255), .button_face = rgb(0, 0, 0), .button_text = rgb(255, 238, 50), .gray_text = rgb(166, 166, 166), .highlight = rgb(214, 180, 253), .highlight_text = rgb(43, 43, 43) },
+        .{ .window = rgb(32, 32, 32), .window_text = rgb(255, 255, 255), .button_face = rgb(32, 32, 32), .button_text = rgb(255, 255, 255), .gray_text = rgb(166, 166, 166), .highlight = rgb(142, 227, 240), .highlight_text = rgb(38, 59, 80) },
+        .{ .window = rgb(255, 250, 239), .window_text = rgb(61, 61, 61), .button_face = rgb(255, 250, 239), .button_text = rgb(32, 32, 32), .gray_text = rgb(103, 103, 103), .highlight = rgb(144, 57, 9), .highlight_text = rgb(255, 245, 227) },
+    };
+    var palettes: [2 + shipped.len]SettingsColors = undefined;
+    palettes[0] = settingsColors(lightTheme(), std.mem.zeroes(SettingsSystemColors), false);
+    palettes[1] = settingsColors(darkTheme(), std.mem.zeroes(SettingsSystemColors), false);
+    for (shipped, 2..) |system, index| palettes[index] = settingsColors(lightTheme(), system, true);
+    var failed = false;
+    for (palettes, 0..) |colors, index| inline for (settings_contrast_pairs) |pair| {
+        const ratio = of(@field(colors, pair.foreground)).contrast(of(@field(colors, pair.background)));
+        if (ratio < pair.minimum and (pair.high_contrast or !colors.high_contrast)) {
+            std.debug.print("palette {d}: {s} on {s} is {d:.2}:1, under {d:.1}:1\n", .{ index, pair.foreground, pair.background, ratio, pair.minimum });
+            failed = true;
+        }
+    };
+    try std.testing.expect(!failed);
+    // The toggle's state is not its colour alone: the thumb moves too.
+    // Still, on and off differ by more than the fill.
+    for (palettes[0..2]) |colors| try std.testing.expect(colors.toggle_on_track != colors.toggle_off);
+}
+
 test "settings high contrast uses only exact system color roles" {
     const system = SettingsSystemColors{
         .window = 11,
@@ -1048,6 +1130,9 @@ test "settings high contrast uses only exact system color roles" {
     try std.testing.expectEqual(system.window, colors.edit_bg);
     try std.testing.expectEqual(system.window_text, colors.edit_text);
     try std.testing.expectEqual(system.window_text, colors.field_border);
+    try std.testing.expectEqual(system.highlight, colors.toggle_on_track);
+    try std.testing.expectEqual(system.highlight_text, colors.toggle_on_thumb);
+    try std.testing.expectEqual(system.button_text, colors.toggle_off);
     try std.testing.expectEqual(@as(u32, 0), settingsDwmDarkModeValue(colors));
     try std.testing.expectEqual(
         @as(u32, 1),

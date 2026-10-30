@@ -122,6 +122,7 @@ const WM_SYSKEYDOWN: UINT = 0x0104;
 const WM_ACTIVATE: UINT = 0x0006;
 const WM_TIMER: UINT = 0x0113;
 const WM_CHANGEUISTATE: UINT = 0x0127;
+const WM_UPDATEUISTATE: UINT = 0x0128;
 const WM_QUERYUISTATE: UINT = 0x0129;
 const WM_SETREDRAW: UINT = 0x000B;
 /// The quiet period before the error of a half-typed field is shown
@@ -2149,6 +2150,8 @@ pub const SettingsWindow = struct {
     /// navigation key arrives. The native EDIT / COMBOBOX / BUTTON
     /// children already behave this way through the dialog manager.
     focus_input_mode: focus_cue.InputMode = .pointer,
+    /// How many times a toggle switch was painted (`paintToggle`), for tests.
+    proof_toggle_paint_count: u32 = 0,
     section_uia_group: ?*win32_uia.SettingsSectionGroupProvider = null,
     section_uia_providers: [section_count]?*win32_uia.SettingsSectionProvider = [_]?*win32_uia.SettingsSectionProvider{null} ** section_count,
     btn_save: ?HWND = null,
@@ -6657,6 +6660,9 @@ pub const SettingsWindow = struct {
         for (items) |item| if (settings_control_specs[item.control_index].role == .edit) {
             if (self.controlHwnd(item.control_index)) |control| subclassKeepingPrevious(control, &settingsEditProc);
         };
+        for (items) |item| if (settings_control_specs[item.control_index].role == .check_box) {
+            if (self.controlHwnd(item.control_index)) |control| subclassKeepingPrevious(control, &settingsToggleProc);
+        };
         for (items) |item| if (settings_control_specs[item.control_index].role == .edit) {
             if (self.controlHwnd(item.control_index)) |control|
                 _ = SetWindowPos(control, null, 0, 0, 0, 0, SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
@@ -10661,6 +10667,148 @@ const dialog_test = struct {
             return count;
         }
     };
+
+    extern "user32" fn PrintWindow(hwnd: HWND, hdc: HDC, flags: UINT) callconv(.winapi) BOOL;
+
+    /// The client area of `hwnd` as `PrintWindow` gives it: the window
+    /// repainted (one `WM_PAINT`) and each child's pixels as they stand, so
+    /// a child left stale shows as the screen shows it. Only this window's
+    /// pixels: `Capture.take` reads the desktop's screen surface, and on a
+    /// hidden desktop the parts of a large window (2144 x 1353 at 288 DPI)
+    /// read the interactive desktop's pixels instead. So a capture that is
+    /// kept, or of a window that may outgrow the screen, goes through here.
+    fn printClient(hwnd: HWND) !Capture {
+        var rect: RECT = undefined;
+        if (GetClientRect(hwnd, &rect) == 0 or rect.right <= 0 or rect.bottom <= 0) return error.NoClientArea;
+        const memory = sys.CreateCompatibleDC(null) orelse return error.NoDC;
+        defer _ = sys.DeleteDC(memory);
+        const info: BITMAPINFO = .{ .biWidth = rect.right, .biHeight = -rect.bottom };
+        var bits: ?*anyopaque = null;
+        const bitmap = CreateDIBSection(memory, &info, 0, &bits, null, 0) orelse return error.NoBitmap;
+        defer _ = DeleteObject(bitmap);
+        const previous = SelectObject(memory, bitmap);
+        defer _ = SelectObject(memory, previous);
+        // `PW_RENDERFULLCONTENT` is left out: it asks the compositor, which
+        // a hidden desktop does not have.
+        const PW_CLIENTONLY: UINT = 1;
+        if (PrintWindow(hwnd, memory, PW_CLIENTONLY) == 0) return error.PrintWindowFailed;
+        _ = GdiFlush();
+        const width: usize = @intCast(rect.right);
+        const height: usize = @intCast(rect.bottom);
+        const source: [*]const u32 = @ptrCast(@alignCast(bits.?));
+        return .{ .pixels = try std.testing.allocator.dupe(u32, source[0 .. width * height]), .width = width, .height = height };
+    }
+
+    /// Write `capture` as a 32-bit BMP named `name` into the directory
+    /// `NOCTTY_SETTINGS_CAPTURE_DIR` names, when it is set: evidence for a
+    /// reviewer, never read back.
+    fn saveCapture(capture: Capture, name: []const u8) !void {
+        const dir_path = std.process.getEnvVarOwned(std.testing.allocator, "NOCTTY_SETTINGS_CAPTURE_DIR") catch return;
+        defer std.testing.allocator.free(dir_path);
+        var dir = try std.fs.openDirAbsolute(dir_path, .{});
+        defer dir.close();
+        const file = try dir.createFile(name, .{});
+        defer file.close();
+        const width: u32 = @intCast(capture.width);
+        const height: u32 = @intCast(capture.height);
+        var header: [54]u8 = @splat(0);
+        header[0] = 'B';
+        header[1] = 'M';
+        std.mem.writeInt(u32, header[2..6], 54 + width * height * 4, .little);
+        std.mem.writeInt(u32, header[10..14], 54, .little);
+        std.mem.writeInt(u32, header[14..18], 40, .little);
+        std.mem.writeInt(i32, header[18..22], @intCast(width), .little);
+        std.mem.writeInt(i32, header[22..26], -@as(i32, @intCast(height)), .little);
+        std.mem.writeInt(u16, header[26..28], 1, .little);
+        std.mem.writeInt(u16, header[28..30], 32, .little);
+        try file.writeAll(&header);
+        try file.writeAll(std.mem.sliceAsBytes(capture.pixels));
+    }
+
+    /// comctl32 6 active on this thread while it lasts. The app's manifest
+    /// asks for it and the test binary has none, so without this a window
+    /// made in a test is a classic, unthemed control, which no user sees.
+    const CommonControls6 = struct {
+        context: windows.HANDLE,
+        cookie: usize,
+
+        const ACTCTXW = extern struct {
+            cbSize: u32 = @sizeOf(ACTCTXW),
+            dwFlags: u32 = 0,
+            lpSource: [*:0]const u16,
+            wProcessorArchitecture: u16 = 0,
+            wLangId: u16 = 0,
+            lpAssemblyDirectory: ?[*:0]const u16 = null,
+            lpResourceName: ?[*:0]const u16 = null,
+            lpApplicationName: ?[*:0]const u16 = null,
+            hModule: ?*anyopaque = null,
+        };
+        extern "kernel32" fn CreateActCtxW(*const ACTCTXW) callconv(.winapi) windows.HANDLE;
+        extern "kernel32" fn ActivateActCtx(windows.HANDLE, *usize) callconv(.winapi) BOOL;
+        extern "kernel32" fn DeactivateActCtx(u32, usize) callconv(.winapi) BOOL;
+        extern "kernel32" fn ReleaseActCtx(windows.HANDLE) callconv(.winapi) void;
+
+        fn activate() !CommonControls6 {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            // The dependency the app's manifest (`dist/windows/noctty.manifest`) declares.
+            try tmp.dir.writeFile(.{ .sub_path = "comctl6.manifest", .data = 
+                \\<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+                \\<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+                \\  <dependency><dependentAssembly>
+                \\    <assemblyIdentity type="win32" name="Microsoft.Windows.Common-Controls" version="6.0.0.0" processorArchitecture="*" publicKeyToken="6595b64144ccf1df" language="*" />
+                \\  </dependentAssembly></dependency>
+                \\</assembly>
+            });
+            const path = try tmp.dir.realpathAlloc(std.testing.allocator, "comctl6.manifest");
+            defer std.testing.allocator.free(path);
+            const path_w = try std.unicode.utf8ToUtf16LeAllocZ(std.testing.allocator, path);
+            defer std.testing.allocator.free(path_w);
+            // The context reads the file here, so it may go with the directory.
+            const context = CreateActCtxW(&.{ .lpSource = path_w });
+            if (context == windows.INVALID_HANDLE_VALUE) return error.ActivationContextUnavailable;
+            var cookie: usize = 0;
+            if (ActivateActCtx(context, &cookie) == 0) {
+                ReleaseActCtx(context);
+                return error.ActivationContextUnavailable;
+            }
+            return .{ .context = context, .cookie = cookie };
+        }
+
+        fn deactivate(self: CommonControls6) void {
+            _ = DeactivateActCtx(0, self.cookie);
+            ReleaseActCtx(self.context);
+        }
+    };
+
+    /// The colour most of `rect`'s pixels have (0x00RRGGBB).
+    fn dominantColor(capture: Capture, rect: RECT) ?u32 {
+        var counts = std.AutoHashMap(u32, u32).init(std.testing.allocator);
+        defer counts.deinit();
+        var best: ?u32 = null;
+        var best_count: u32 = 0;
+        var y = @max(0, rect.top);
+        while (y < @min(rect.bottom, @as(i32, @intCast(capture.height)))) : (y += 1) {
+            var x = @max(0, rect.left);
+            while (x < @min(rect.right, @as(i32, @intCast(capture.width)))) : (x += 1) {
+                const pixel = capture.pixels[@as(usize, @intCast(y)) * capture.width + @as(usize, @intCast(x))] & 0xFFFFFF;
+                const entry = counts.getOrPut(pixel) catch return null;
+                if (!entry.found_existing) entry.value_ptr.* = 0;
+                entry.value_ptr.* += 1;
+                if (entry.value_ptr.* > best_count) {
+                    best_count = entry.value_ptr.*;
+                    best = pixel;
+                }
+            }
+        }
+        return best;
+    }
+
+    /// WCAG relative luminance of a 0x00RRGGBB pixel.
+    fn luminanceOf(pixel: u32) f64 {
+        const RGB = @import("../terminal/color.zig").RGB;
+        return (RGB{ .r = @truncate(pixel >> 16), .g = @truncate(pixel >> 8), .b = @truncate(pixel) }).luminance();
+    }
 
     /// Lay the window out as on a monitor at `dpi`, the way `WM_DPICHANGED`
     /// does (fonts, metrics, layout), without moving it to such a monitor.
@@ -16269,6 +16417,194 @@ fn setTextCut(hwnd: HWND, proc: *const anyopaque, wParam: WPARAM, text: [*:0]con
     return sys.CallWindowProcW(proc, hwnd, WM_SETTEXT, wParam, @bitCast(@intFromPtr(&cut)));
 }
 
+/// A check box painted as a toggle switch (`paintToggle`). The BUTTON is
+/// still a `BS_AUTOCHECKBOX` underneath: its check state, Space, a click,
+/// `BN_CLICKED`, `BM_SETCHECK` and the UIA Toggle pattern are the stock
+/// ones, and only its look is ours. In High Contrast it is the stock check
+/// box, in system colours. The previous procedure lives in `GWLP_USERDATA`,
+/// as for the dropdowns.
+fn settingsToggleProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.winapi) LRESULT {
+    const previous = sys.GetWindowLongPtrW(hwnd, GWLP_USERDATA);
+    if (previous == 0) return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
+    const proc: *const anyopaque = @ptrFromInt(@as(usize, @intCast(previous)));
+    if (msg == WM_NCDESTROY) {
+        _ = sys.SetWindowLongPtrW(hwnd, GWLP_WNDPROC, previous);
+        _ = sys.SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+        return sys.CallWindowProcW(proc, hwnd, msg, wParam, lParam);
+    }
+    const settings = (if (sys.GetParent(hwnd)) |parent| recoverOwner(parent) else null) orelse
+        return sys.CallWindowProcW(proc, hwnd, msg, wParam, lParam);
+    if (settings.theme_adapter.colors.high_contrast) return sys.CallWindowProcW(proc, hwnd, msg, wParam, lParam);
+    switch (msg) {
+        WM_ERASEBKGND => return 1,
+        WM_PAINT => {
+            var ps: PAINTSTRUCT = undefined;
+            const hdc = BeginPaint(hwnd, &ps);
+            defer _ = EndPaint(hwnd, &ps);
+            paintToggle(settings, hwnd, hdc, toggleLook(hwnd, proc));
+            return 0;
+        },
+        WM_PRINTCLIENT => {
+            if (wParam != 0) paintToggle(settings, hwnd, @ptrFromInt(wParam), toggleLook(hwnd, proc));
+            return 0;
+        },
+        // Read through the stock procedure below, never repainted for.
+        BM_GETCHECK, BM_GETSTATE => return sys.CallWindowProcW(proc, hwnd, msg, wParam, lParam),
+        else => {},
+    }
+    // The stock button draws some changes at once, outside WM_PAINT: a
+    // classic one its whole face on BM_SETCHECK, even one that changes
+    // nothing, and its focus rectangle on WM_SETFOCUS. After those, and
+    // after anything that changed the look, the switch is painted over
+    // before this returns, so the stock drawing is never what stays.
+    const before = toggleLook(hwnd, proc);
+    const result = sys.CallWindowProcW(proc, hwnd, msg, wParam, lParam);
+    const redraw = switch (msg) {
+        BM_SETCHECK, BM_SETSTATE, BM_CLICK, WM_SETFOCUS, WM_KILLFOCUS, WM_SETTEXT, WM_SETFONT, WM_UPDATEUISTATE, WM_ENABLE => true,
+        else => !std.meta.eql(before, toggleLook(hwnd, proc)),
+    };
+    if (redraw) _ = RedrawWindow(hwnd, null, null, RDW_INVALIDATE | RDW_UPDATENOW);
+    return result;
+}
+
+/// What a toggle shows. `hot` is the stock button's hover state, which a
+/// themed (comctl32 6) button keeps.
+const ToggleLook = struct {
+    on: bool,
+    pressed: bool,
+    focused: bool,
+    hot: bool,
+    enabled: bool,
+};
+
+fn toggleLook(hwnd: HWND, proc: *const anyopaque) ToggleLook {
+    const BST_HOT: usize = 0x0200;
+    const state: usize = @bitCast(sys.CallWindowProcW(proc, hwnd, BM_GETSTATE, 0, 0));
+    return .{
+        .on = @as(usize, @bitCast(sys.CallWindowProcW(proc, hwnd, BM_GETCHECK, 0, 0))) == BST_CHECKED,
+        .pressed = state & BST_PUSHED != 0,
+        .focused = GetFocus() == hwnd,
+        .hot = state & BST_HOT != 0,
+        .enabled = sys.IsWindowEnabled(hwnd) != 0,
+    };
+}
+
+/// The parts of a toggle in a `rect` client area at `px` scale: the track
+/// at the left, centred on the height, its thumb at the end the state names,
+/// and the label after it. Windows 11's switch is 40 x 20 with a 12 thumb,
+/// 14 under the pointer, and 17 x 14 pressed.
+const ToggleParts = struct {
+    track: RECT,
+    thumb: RECT,
+    label: RECT,
+};
+
+fn toggleParts(settings: *const SettingsWindow, rect: RECT, look: ToggleLook) ToggleParts {
+    const track_width = settings.px(40);
+    const track_height = settings.px(20);
+    const left = rect.left + settings.px(settings_metrics.stroke_focus + settings_metrics.space_1);
+    const top = rect.top + @divTrunc(rect.bottom - rect.top - track_height, 2);
+    const track: RECT = .{ .left = left, .top = top, .right = left + track_width, .bottom = top + track_height };
+    const thumb_height = settings.px(if (look.pressed or (look.hot and look.enabled)) 14 else 12);
+    const thumb_width = if (look.pressed) settings.px(17) else thumb_height;
+    const margin = @divTrunc(track_height - thumb_height, 2);
+    const thumb_left = if (look.on) track.right - margin - thumb_width else track.left + margin;
+    const thumb_top = track.top + margin;
+    return .{
+        .track = track,
+        .thumb = .{ .left = thumb_left, .top = thumb_top, .right = thumb_left + thumb_width, .bottom = thumb_top + thumb_height },
+        .label = .{
+            .left = track.right + settings.px(settings_metrics.space_4),
+            .top = rect.top,
+            .right = rect.right - settings.px(settings_metrics.stroke_focus + settings_metrics.space_1),
+            .bottom = rect.bottom,
+        },
+    };
+}
+
+/// The colours of a toggle in `look`: the track's fill and outline, the
+/// thumb, and the label. On and off differ by the thumb's place as well
+/// as by colour; a disabled toggle keeps the shapes in the disabled colour.
+fn toggleColors(colors: win32_theme.SettingsColors, look: ToggleLook) struct { fill: COLORREF, outline: COLORREF, thumb: COLORREF, label: COLORREF } {
+    if (!look.enabled) return .{
+        .fill = if (look.on) colors.disabled_text else colors.window_bg,
+        .outline = colors.disabled_text,
+        .thumb = if (look.on) colors.window_bg else colors.disabled_text,
+        .label = colors.disabled_text,
+    };
+    return .{
+        .fill = if (look.on) colors.toggle_on_track else colors.window_bg,
+        .outline = if (look.on) colors.toggle_on_track else colors.toggle_off,
+        .thumb = if (look.on) colors.toggle_on_thumb else colors.toggle_off,
+        .label = colors.secondary_text,
+    };
+}
+
+fn paintToggle(settings: *SettingsWindow, hwnd: HWND, hdc: HDC, look: ToggleLook) void {
+    const PS_INSIDEFRAME: i32 = 6;
+    var rect: RECT = undefined;
+    if (GetClientRect(hwnd, &rect) == 0) return;
+    settings.proof_toggle_paint_count +%= 1;
+    const colors = settings.theme_adapter.colors;
+    const background = CreateSolidBrush(colors.window_bg) orelse return;
+    defer _ = DeleteObject(background);
+    _ = FillRect(hdc, &rect, background);
+    const parts = toggleParts(settings, rect, look);
+    const shade = toggleColors(colors, look);
+
+    const fill = CreateSolidBrush(shade.fill) orelse return;
+    defer _ = DeleteObject(fill);
+    const outline = sys.CreatePen(PS_INSIDEFRAME, @max(1, settings.px(settings_metrics.stroke_hairline)), shade.outline) orelse return;
+    defer _ = DeleteObject(outline);
+    const previous_brush = SelectObject(hdc, fill);
+    const previous_pen = SelectObject(hdc, outline);
+    defer {
+        if (previous_pen) |value| _ = SelectObject(hdc, value);
+        if (previous_brush) |value| _ = SelectObject(hdc, value);
+    }
+    const track_height = parts.track.bottom - parts.track.top;
+    _ = sys.RoundRect(hdc, parts.track.left, parts.track.top, parts.track.right, parts.track.bottom, track_height, track_height);
+
+    const thumb = CreateSolidBrush(shade.thumb) orelse return;
+    defer _ = DeleteObject(thumb);
+    _ = SelectObject(hdc, thumb);
+    _ = SelectObject(hdc, GetStockObject(NULL_PEN));
+    // The null pen leaves the right and bottom edges out.
+    const thumb_height = parts.thumb.bottom - parts.thumb.top;
+    _ = sys.RoundRect(hdc, parts.thumb.left, parts.thumb.top, parts.thumb.right + 1, parts.thumb.bottom + 1, thumb_height, thumb_height);
+
+    var label: [128:0]u16 = undefined;
+    const label_len = GetWindowTextW(hwnd, &label, @intCast(label.len));
+    const font: usize = @bitCast(SendMessageW(hwnd, WM_GETFONT, 0, 0));
+    const previous_font = if (font != 0) SelectObject(hdc, @ptrFromInt(font)) else null;
+    defer {
+        if (previous_font) |value| _ = SelectObject(hdc, value);
+    }
+    _ = SetBkMode(hdc, TRANSPARENT);
+    _ = SetTextColor(hdc, shade.label);
+    var text_rect = parts.label;
+    if (label_len > 0) _ = DrawTextW(hdc, &label, label_len, &text_rect, DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS);
+
+    if (focus_cue.showRing(look.focused, !look.enabled, settings.focus_input_mode, false)) {
+        const ring = CreateSolidBrush(colors.focus_ring) orelse return;
+        defer _ = DeleteObject(ring);
+        // Round the switch and its label, as a check box's focus rectangle
+        // hugs its text, not the empty width of the row.
+        var measured = parts.label;
+        if (label_len > 0) _ = DrawTextW(hdc, &label, label_len, &measured, DT_SINGLELINE | DT_NOPREFIX | DT_CALCRECT);
+        var focus_rect = rect;
+        focus_rect.right = @min(rect.right, @max(parts.track.right, measured.right) + settings.px(settings_metrics.space_2 + settings_metrics.stroke_focus));
+        var layer: i32 = 0;
+        while (layer < @max(1, settings.px(settings_metrics.stroke_focus)) and focus_rect.right > focus_rect.left and focus_rect.bottom > focus_rect.top) : (layer += 1) {
+            _ = FrameRect(hdc, &focus_rect, ring);
+            focus_rect.left += 1;
+            focus_rect.top += 1;
+            focus_rect.right -= 1;
+            focus_rect.bottom -= 1;
+        }
+    }
+}
+
 const FieldFrameInsets = struct { x: i32, y: i32 };
 
 /// What a text field's frame takes from each side of a `width` x `height`
@@ -20336,4 +20672,352 @@ test "win32_settings: keybinding help points to discoverability commands" {
     try std.testing.expect(std.mem.indexOf(u8, text, "+explain-config --keybind=<action>") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "keybind = ctrl+a>n=new_window") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "keybind = chain=goto_split:left") != null);
+}
+
+test "settings shows no light control in dark mode, and no dark one in light mode, at 100, 150, 200 and 300% DPI" {
+    const Body = struct {
+        fn darkColors(_: *anyopaque) win32_theme.ThemeColors {
+            return win32_theme.darkTheme();
+        }
+        // The app's light theme whole: the fixture's own colours put a dark
+        // rail in it.
+        fn lightColors(_: *anyopaque) win32_theme.ThemeColors {
+            return win32_theme.lightTheme();
+        }
+
+        const Check = struct {
+            var root: HWND = undefined;
+            /// The page's viewport: what of a row it hides is not shown.
+            var viewport: RECT = undefined;
+            var capture: *const dialog_test.Capture = undefined;
+            var dark: bool = true;
+            var label: []const u8 = "";
+            var checked: usize = 0;
+            var wrong: usize = 0;
+
+            fn each(child: HWND, _: LPARAM) callconv(.winapi) BOOL {
+                if (sys.IsWindowVisible(child) == 0) return 1;
+                var r = dialog_test.rectIn(root, child);
+                if (sys.GetParent(child) != root) {
+                    r.left = @max(r.left, viewport.left);
+                    r.top = @max(r.top, viewport.top);
+                    r.right = @min(r.right, viewport.right);
+                    r.bottom = @min(r.bottom, viewport.bottom);
+                    if (r.right <= r.left or r.bottom <= r.top) return 1;
+                }
+                // Only what the window shows: a page scrolled past its rows
+                // keeps them, out of the viewport's sight.
+                if (r.right <= 0 or r.bottom <= 0 or r.left >= @as(i32, @intCast(capture.width)) or r.top >= @as(i32, @intCast(capture.height))) return 1;
+                const color = dialog_test.dominantColor(capture.*, r) orelse return 1;
+                const luminance = dialog_test.luminanceOf(color);
+                checked += 1;
+                // Every dark surface here is below 0.05 and every light one
+                // above 0.75 (`win32_theme`); a stock control left light is
+                // #F0F0F0, 0.87.
+                if (if (dark) luminance > 0.2 else luminance < 0.5) {
+                    var class_w: [64]u16 = undefined;
+                    const length = dialog_test.GetClassNameW(child, &class_w, class_w.len);
+                    std.debug.print("{s}: {f} id={d} ({d},{d})-({d},{d}) is mostly 0x{x:0>6}\n", .{
+                        label,
+                        std.unicode.fmtUtf16Le(class_w[0..@intCast(@max(0, length))]),
+                        sys.GetDlgCtrlID(child),
+                        r.left,
+                        r.top,
+                        r.right,
+                        r.bottom,
+                        color,
+                    });
+                    wrong += 1;
+                }
+                return 1;
+            }
+        };
+
+        fn body() !void {
+            const controls = try dialog_test.CommonControls6.activate();
+            defer controls.deactivate();
+            const fixture = try dialog_test.Fixture.start();
+            defer fixture.finish();
+            const settings = &fixture.settings;
+            const hwnd = fixture.hwnd();
+            // A toggle that is on and one that is off on the same page.
+            settings.showSection(.privacy, false);
+            _ = sys.SendMessageW(settings.fields.chk_app_notify_config.?, BM_SETCHECK, 0, 0);
+            for ([_]bool{ true, false }) |dark| {
+                settings.handle.themeColors = if (dark) &darkColors else &lightColors;
+                settings.themeChanged();
+                for ([_]u32{ 96, 144, 192, 288 }) |dpi| {
+                    dialog_test.simulateDpi(hwnd, dpi);
+                    for (std.enums.values(Section)) |section| {
+                        settings.showSection(section, false);
+                        // The whole page, a viewport at a time: at 300% the
+                        // toggles are below the first one.
+                        var viewport: RECT = undefined;
+                        _ = GetClientRect(settings.viewport.?, &viewport);
+                        var scroll: i32 = 0;
+                        var part: usize = 0;
+                        while (true) : (part += 1) {
+                            settings.setContentScroll(scroll);
+                            // Everything painted afresh: this is about colours.
+                            // Whether a change leaves pixels stale is
+                            // `expectNothingStale`'s business.
+                            _ = RedrawWindow(hwnd, null, null, RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_ALLCHILDREN | RDW_UPDATENOW);
+                            const capture = try dialog_test.printClient(hwnd);
+                            defer capture.deinit();
+                            var name_buf: [64]u8 = undefined;
+                            const name = try std.fmt.bufPrint(&name_buf, "{s}-{d}-{s}-{d}", .{ if (dark) "dark" else "light", dpi, @tagName(section), part });
+                            var file_buf: [80]u8 = undefined;
+                            try dialog_test.saveCapture(capture, try std.fmt.bufPrint(&file_buf, "{s}.bmp", .{name}));
+                            Check.root = hwnd;
+                            Check.viewport = dialog_test.rectIn(hwnd, settings.viewport.?);
+                            Check.capture = &capture;
+                            Check.dark = dark;
+                            Check.label = name;
+                            _ = sys.EnumChildWindows(hwnd, Check.each, 0);
+                            if (scroll >= settings.content_scroll_max) break;
+                            scroll = @min(settings.content_scroll_max, scroll + viewport.bottom);
+                        }
+                        settings.setContentScroll(0);
+                    }
+                }
+            }
+            // Every page's controls were looked at, at every scale.
+            try std.testing.expect(Check.checked > 2 * 4 * std.enums.values(Section).len * 10);
+            try std.testing.expectEqual(@as(usize, 0), Check.wrong);
+        }
+    };
+    try dialog_test.onHiddenDesktop(Body.body);
+}
+
+test "settings check boxes are toggle switches that show their state, and plain check boxes in High Contrast" {
+    const Body = struct {
+        var high_contrast = false;
+        fn darkColors(_: *anyopaque) win32_theme.ThemeColors {
+            return win32_theme.darkTheme();
+        }
+        // The app's light theme whole: the fixture's own colours put a dark
+        // rail in it.
+        fn lightColors(_: *anyopaque) win32_theme.ThemeColors {
+            return win32_theme.lightTheme();
+        }
+        fn highContrast(_: *anyopaque) bool {
+            return high_contrast;
+        }
+
+        /// The capture's pixel at `x`, `y` of `control`'s client area, as a
+        /// COLORREF.
+        fn colorIn(capture: dialog_test.Capture, root: HWND, control: HWND, x: i32, y: i32) u32 {
+            const r = dialog_test.rectIn(root, control);
+            const pixel = capture.pixels[@as(usize, @intCast(r.top + y)) * capture.width + @as(usize, @intCast(r.left + x))];
+            return ((pixel & 0xFF) << 16) | (pixel & 0xFF00) | ((pixel >> 16) & 0xFF);
+        }
+
+        fn body() !void {
+            const fixture = try dialog_test.Fixture.start();
+            defer fixture.finish();
+            const settings = &fixture.settings;
+            const hwnd = fixture.hwnd();
+            settings.handle.highContrast = &highContrast;
+            settings.showSection(.privacy, false);
+            const toggle = settings.fields.chk_app_notify_config.?;
+
+            for ([_]bool{ false, true }) |dark| for ([_]u32{ 96, 144 }) |dpi| {
+                high_contrast = false;
+                settings.handle.themeColors = if (dark) &darkColors else &lightColors;
+                settings.themeChanged();
+                dialog_test.simulateDpi(hwnd, dpi);
+                settings.ensureControlVisible(toggle);
+                const colors = settings.theme_adapter.colors;
+                var client: RECT = undefined;
+                _ = GetClientRect(toggle, &client);
+
+                for ([_]bool{ true, false, true }) |on| {
+                    dialog_test.flushPaint(hwnd);
+                    // A state set from outside is on screen when the message
+                    // returns: no paint is left waiting for it.
+                    const painted = settings.proof_toggle_paint_count;
+                    _ = SendMessageW(toggle, BM_SETCHECK, if (on) BST_CHECKED else 0, 0);
+                    try std.testing.expect(settings.proof_toggle_paint_count > painted);
+                    var pending: RECT = undefined;
+                    try std.testing.expectEqual(@as(BOOL, 0), sys.GetUpdateRect(toggle, &pending, 0));
+                    const capture = try dialog_test.printClient(hwnd);
+                    defer capture.deinit();
+                    const look: ToggleLook = .{ .on = on, .pressed = false, .focused = false, .hot = false, .enabled = true };
+                    const parts = toggleParts(settings, client, look);
+                    const centre_y = @divTrunc(parts.track.top + parts.track.bottom, 2);
+                    const thumb_x = @divTrunc(parts.thumb.left + parts.thumb.right, 2);
+                    // The thumb, at the end that names the state.
+                    try std.testing.expectEqual(if (on) colors.toggle_on_thumb else colors.toggle_off, colorIn(capture, hwnd, toggle, thumb_x, centre_y));
+                    if (on) try std.testing.expect(thumb_x > @divTrunc(parts.track.left + parts.track.right, 2)) else try std.testing.expect(thumb_x < @divTrunc(parts.track.left + parts.track.right, 2));
+                    // The track: filled when on, an outline round the pane's
+                    // colour when off.
+                    const inside_x = if (on) parts.track.left + @divTrunc(parts.track.bottom - parts.track.top, 2) else parts.track.right - @divTrunc(parts.track.bottom - parts.track.top, 2);
+                    try std.testing.expectEqual(if (on) colors.toggle_on_track else colors.window_bg, colorIn(capture, hwnd, toggle, inside_x, centre_y));
+                    try std.testing.expectEqual(if (on) colors.toggle_on_track else colors.toggle_off, colorIn(capture, hwnd, toggle, @divTrunc(parts.track.left + parts.track.right, 2), parts.track.top));
+                    // No ring: the focus is elsewhere.
+                    try std.testing.expectEqual(colors.window_bg, colorIn(capture, hwnd, toggle, 0, 0));
+                }
+
+                // Every label fits its place, unshortened.
+                inline for (.{ "chk_desktop_notifications", "chk_app_notify_clipboard", "chk_app_notify_config" }) |binding| {
+                    const control = @field(settings.fields, binding).?;
+                    var rect: RECT = undefined;
+                    _ = GetClientRect(control, &rect);
+                    const parts = toggleParts(settings, rect, .{ .on = false, .pressed = false, .focused = false, .hot = false, .enabled = true });
+                    var label: [128:0]u16 = undefined;
+                    const length = GetWindowTextW(control, &label, label.len);
+                    const dc = sys.GetDC(control).?;
+                    defer _ = sys.ReleaseDC(control, dc);
+                    const previous = SelectObject(dc, @ptrFromInt(@as(usize, @bitCast(SendMessageW(control, WM_GETFONT, 0, 0)))));
+                    defer _ = SelectObject(dc, previous);
+                    var measured: RECT = .{ .left = 0, .top = 0, .right = 0, .bottom = 0 };
+                    _ = DrawTextW(dc, &label, length, &measured, DT_SINGLELINE | DT_NOPREFIX | DT_CALCRECT);
+                    try std.testing.expect(measured.right <= parts.label.right - parts.label.left);
+                }
+
+                // High Contrast: the stock check box, nothing of the switch.
+                high_contrast = true;
+                settings.themeChanged();
+                const paints = settings.proof_toggle_paint_count;
+                _ = RedrawWindow(toggle, null, null, RDW_INVALIDATE | RDW_UPDATENOW);
+                _ = SendMessageW(toggle, BM_SETCHECK, 0, 0);
+                dialog_test.flushPaint(hwnd);
+                try std.testing.expectEqual(paints, settings.proof_toggle_paint_count);
+                high_contrast = false;
+                settings.themeChanged();
+                _ = RedrawWindow(toggle, null, null, RDW_INVALIDATE | RDW_UPDATENOW);
+                try std.testing.expect(settings.proof_toggle_paint_count > paints);
+            };
+        }
+    };
+    try dialog_test.onHiddenDesktop(Body.body);
+}
+
+test "settings toggle switches keep the keyboard, the focus ring and UIA Toggle of a check box" {
+    const Body = struct {
+        fn body() !void {
+            const fixture = try dialog_test.Fixture.startWith(true);
+            defer fixture.finish();
+            const settings = &fixture.settings;
+            const hwnd = fixture.hwnd();
+            settings.showSection(.privacy, false);
+            const toggle = settings.fields.chk_app_notify_config.?;
+            const index = settings.controlIndex(toggle).?;
+            const provider = settings.control_uia_providers[index].?;
+            try std.testing.expectEqual(win32_uia.SettingsControlProvider.Role.check_box, provider.role);
+            const before = SendMessageW(toggle, BM_GETCHECK, 0, 0) == BST_CHECKED;
+
+            // Space toggles, as on a check box: the button, the draft and
+            // the UIA Toggle state follow.
+            _ = sys.SetFocus(toggle);
+            settings.focus_input_mode = .keyboard;
+            const VK_SPACE: usize = 0x20;
+            _ = SendMessageW(toggle, WM_KEYDOWN, VK_SPACE, 0x00390001);
+            _ = SendMessageW(toggle, WM_KEYUP, VK_SPACE, @bitCast(@as(usize, 0xC0390001)));
+            dialog_test.pump();
+            const after = SendMessageW(toggle, BM_GETCHECK, 0, 0) == BST_CHECKED;
+            try std.testing.expect(after != before);
+            try std.testing.expectEqual(after, settings.pending.?.@"app-notifications".@"config-reload");
+            const com = @import("win32_uia/com.zig");
+            var state: i32 = -1;
+            try std.testing.expectEqual(com.S_OK, provider.toggle_iface.vtbl.get_ToggleState(&provider.toggle_iface, &state));
+            try std.testing.expectEqual(@as(i32, @intFromBool(after)), state);
+
+            // The ring shows with keyboard focus, and not with the pointer's.
+            const colors = settings.theme_adapter.colors;
+            dialog_test.flushPaint(hwnd);
+            {
+                const capture = try dialog_test.printClient(hwnd);
+                defer capture.deinit();
+                const r = dialog_test.rectIn(hwnd, toggle);
+                const pixel = capture.pixels[@as(usize, @intCast(r.top)) * capture.width + @as(usize, @intCast(r.left + 8))];
+                try std.testing.expectEqual(colors.focus_ring, ((pixel & 0xFF) << 16) | (pixel & 0xFF00) | ((pixel >> 16) & 0xFF));
+                // It rounds the switch and the label, not the empty rest of
+                // the row.
+                const far = capture.pixels[@as(usize, @intCast(r.top)) * capture.width + @as(usize, @intCast(r.right - 2))];
+                try std.testing.expectEqual(colors.window_bg, ((far & 0xFF) << 16) | (far & 0xFF00) | ((far >> 16) & 0xFF));
+            }
+            settings.focus_input_mode = .pointer;
+            _ = InvalidateRect(toggle, null, 0);
+            dialog_test.flushPaint(hwnd);
+            {
+                const capture = try dialog_test.printClient(hwnd);
+                defer capture.deinit();
+                const r = dialog_test.rectIn(hwnd, toggle);
+                const pixel = capture.pixels[@as(usize, @intCast(r.top)) * capture.width + @as(usize, @intCast(r.left + 8))];
+                try std.testing.expectEqual(colors.window_bg, ((pixel & 0xFF) << 16) | (pixel & 0xFF00) | ((pixel >> 16) & 0xFF));
+            }
+        }
+    };
+    try dialog_test.onHiddenDesktop(Body.body);
+}
+
+test "settings toggles round-trip through Save from a click and from Space, the rest of the file byte-identical" {
+    try dialog_test.onHiddenDesktop(struct {
+        fn body() !void {
+            const alloc = std.testing.allocator;
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            const before =
+                "# noctty config, kept by hand\n" ++
+                "clipboard-trim-trailing-spaces   =   true\n" ++
+                "\n" ++
+                "  # an indented comment, and a line Settings has no control for\n" ++
+                "keybind = ctrl+shift+t=new_tab\n";
+            try tmp.dir.writeFile(.{ .sub_path = "config.ghostty", .data = before });
+            const path = try tmp.dir.realpathAlloc(alloc, "config.ghostty");
+            defer alloc.free(path);
+
+            const fixture = try dialog_test.Fixture.prepare(false);
+            defer fixture.finish();
+            try fixture.config.loadFile(alloc, path);
+            try std.testing.expect(fixture.config._diagnostics.empty());
+            fixture.save_path = path;
+            const settings = &fixture.settings;
+            try settings.open();
+
+            // Trimming, which the file sets: a click on its switch.
+            settings.showSection(.terminal, false);
+            const trim = settings.fields.chk_trim_trail.?;
+            settings.ensureControlVisible(trim);
+            try std.testing.expectEqual(@as(LRESULT, BST_CHECKED), SendMessageW(trim, BM_GETCHECK, 0, 0));
+            var client: RECT = undefined;
+            _ = GetClientRect(trim, &client);
+            const parts = toggleParts(settings, client, .{ .on = true, .pressed = false, .focused = false, .hot = false, .enabled = true });
+            const at: LPARAM = @bitCast((@as(usize, @intCast(@divTrunc(parts.track.top + parts.track.bottom, 2))) << 16) | @as(usize, @intCast(@divTrunc(parts.track.left + parts.track.right, 2))));
+            const MK_LBUTTON: WPARAM = 0x0001;
+            _ = SendMessageW(trim, WM_LBUTTONDOWN, MK_LBUTTON, at);
+            _ = SendMessageW(trim, 0x0202, 0, at); // WM_LBUTTONUP
+            dialog_test.pump();
+            try std.testing.expectEqual(@as(LRESULT, 0), SendMessageW(trim, BM_GETCHECK, 0, 0));
+            try std.testing.expect(!settings.pending.?.@"clipboard-trim-trailing-spaces");
+
+            // Desktop notifications, which it does not set: Space on its switch.
+            settings.showSection(.privacy, false);
+            const notify = settings.fields.chk_desktop_notifications.?;
+            settings.ensureControlVisible(notify);
+            _ = sys.SetFocus(notify);
+            const VK_SPACE: usize = 0x20;
+            _ = SendMessageW(notify, WM_KEYDOWN, VK_SPACE, 0x00390001);
+            _ = SendMessageW(notify, WM_KEYUP, VK_SPACE, @bitCast(@as(usize, 0xC0390001)));
+            dialog_test.pump();
+            try std.testing.expect(!settings.pending.?.@"desktop-notifications");
+
+            settings.save();
+            try std.testing.expectEqual(@as(u32, 1), fixture.saved);
+            const after = try tmp.dir.readFileAlloc(alloc, "config.ghostty", 1 << 20);
+            defer alloc.free(after);
+            // The edited line is rewritten in place and the new key is added
+            // at the end; every other byte is the file's.
+            try std.testing.expectEqualStrings(
+                "# noctty config, kept by hand\n" ++
+                    "clipboard-trim-trailing-spaces = false\n" ++
+                    "\n" ++
+                    "  # an indented comment, and a line Settings has no control for\n" ++
+                    "keybind = ctrl+shift+t=new_tab\n" ++
+                    "desktop-notifications = false\n",
+                after,
+            );
+        }
+    }.body);
 }
