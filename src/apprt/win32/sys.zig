@@ -708,8 +708,6 @@ pub extern "shell32" fn DragAcceptFiles(hWnd: HWND, fAccept: BOOL) callconv(.win
 
 pub extern "shlwapi" fn AssocIsDangerous(pszAssoc: LPCWSTR) callconv(.winapi) BOOL;
 
-pub const AssocQueryStringW = @import("../../os/windows.zig").AssocQueryStringW;
-
 pub extern "shell32" fn DragQueryFileW(hDrop: *anyopaque, iFile: UINT, lpszFile: ?[*]u16, cch: UINT) callconv(.winapi) UINT;
 
 pub extern "shell32" fn DragFinish(hDrop: *anyopaque) callconv(.winapi) void;

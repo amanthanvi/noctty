@@ -60,8 +60,8 @@ pub const FOLDERID_LocalAppData = windows.FOLDERID_LocalAppData;
 
 pub extern "kernel32" fn GetACP() callconv(.winapi) windows.UINT;
 pub extern "kernel32" fn GetOEMCP() callconv(.winapi) windows.UINT;
-/// The one declaration: the text editor opener and the Win32 runtime
-/// (`sys.AssocQueryStringW`) both use it.
+/// The one declaration: the text editor opener and the Win32 runtime's
+/// link prompt both use it.
 pub extern "shlwapi" fn AssocQueryStringW(flags: u32, str: u32, assoc: [*:0]const u16, extra: ?[*:0]const u16, out: ?[*]u16, len: *u32) callconv(.winapi) windows.HRESULT;
 /// std's `DeviceIoControl` wrapper drops the byte count, which a reader of
 /// variable-length output (reparse data) needs.

@@ -7593,7 +7593,7 @@ pub const App = struct {
         const alloc = surface.app.core_app.alloc;
         const owned = try alloc.dupe(u8, link);
         errdefer alloc.free(owned);
-        const handler = linkHandlerName(alloc, scheme, sys.AssocQueryStringW);
+        const handler = linkHandlerName(alloc, scheme, internal_os.windows.AssocQueryStringW);
         defer if (handler == .app) alloc.free(handler.app);
         const body = try labels.linkPromptBody(alloc, handler, scheme);
         defer alloc.free(body);
@@ -8004,7 +8004,7 @@ pub const App = struct {
             try std.testing.expectEqualStrings(link, preview.text);
             // The body is the one for its scheme and what Windows says
             // opens it now: a machine's handler is no fixed answer.
-            const handler = linkHandlerName(alloc, scheme, sys.AssocQueryStringW);
+            const handler = linkHandlerName(alloc, scheme, internal_os.windows.AssocQueryStringW);
             defer if (handler == .app) alloc.free(handler.app);
             const body = try labels.linkPromptBody(alloc, handler, scheme);
             defer alloc.free(body);

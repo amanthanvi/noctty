@@ -343,7 +343,9 @@
         "src/terminal/search/Thread.zig",
         "scripts/windows-harness-history.ps1",
         "src/apprt/win32/test_support.zig",
-        "src/apprt/win32/registry.zig"
+        "src/apprt/win32/registry.zig",
+        "src/apprt/win32_compositor_native.zig",
+        "src/apprt/win32/sys.zig"
       ]
     },
     {
