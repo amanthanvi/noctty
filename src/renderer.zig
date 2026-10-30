@@ -29,6 +29,7 @@ else
 pub const Direct3D11 = if (build_config.d3d11) @import("renderer/Direct3D11.zig") else struct {};
 pub const Options = @import("renderer/Options.zig");
 pub const Overlay = @import("renderer/Overlay.zig");
+pub const Pacer = @import("renderer/Pacer.zig");
 pub const Thread = @import("renderer/Thread.zig");
 pub const State = @import("renderer/State.zig");
 pub const CursorStyle = cursor.Style;
@@ -69,6 +70,7 @@ test {
     _ = message;
     _ = shadertoy;
     _ = size;
+    _ = Pacer;
     _ = Thread;
     _ = State;
 }

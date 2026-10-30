@@ -78,6 +78,7 @@
         "src/apprt/win32/host.zig",
         "src/apprt/win32/surface_presentation.zig",
         "src/apprt/win32/terminal_window.zig",
+        "src/apprt/win32_power.zig",
         "src/os/monotonic.zig",
         "src/termio/Thread.zig",
         "src/Surface.zig"

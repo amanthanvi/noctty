@@ -495,6 +495,7 @@ test "a rate-limited warning logs once per interval and counts the rest" {
 
 pub const App = struct {
     pub const must_draw_from_app_thread = true;
+    pub const renderer_pacing_clock = win32_power.renderer_clock;
 
     core_app: *CoreApp,
     config: configpkg.Config,

@@ -1,8 +1,8 @@
-//! Win32 power-state sampling, notifications, and render pacing policy.
+//! Win32 power-state sampling and notifications, and the renderer's pacing
+//! clock.
 
 const std = @import("std");
-const configpkg = @import("../config.zig");
-const monotonic = @import("../os/monotonic.zig");
+const Pacer = @import("../renderer/Pacer.zig");
 const sys = @import("win32/sys.zig");
 
 const log = std.log.scoped(.win32_power);
@@ -33,10 +33,6 @@ const OBJID_WINDOW: LONG = 0;
 const CHILDID_SELF: LONG = 0;
 
 const POLL_INTERVAL_MS: u64 = 30 * std.time.ms_per_s;
-/// Focused, non-saver surfaces keep this cadence, which must stay equal to
-/// the renderer thread's DRAW_INTERVAL (asserted there at comptime).
-pub const DEFAULT_PRESENT_INTERVAL_MS: u64 = 8;
-const SAVER_PRESENT_INTERVAL_MS: u64 = 34;
 
 const GUID_ACDC_POWER_SOURCE = GUID.parse("{5D3E9A59-E9D5-4B00-A6BD-FF34FF516548}");
 const GUID_POWER_SAVING_STATUS = GUID.parse("{E00958C0-C213-4ACE-AC77-FECCED2EEEA5}");
@@ -149,11 +145,6 @@ pub const Snapshot = struct {
     pub fn isSaver(self: Snapshot) bool {
         return self.battery_saver or self.energy_saver;
     }
-};
-
-pub const PolicyConfig = struct {
-    unfocused_render_fps: u32,
-    power_saver_rendering: configpkg.PowerSaverRendering,
 };
 
 /// A single-source update. Each variant writes only its own bit, so one
@@ -461,41 +452,16 @@ fn pollIfStaleWith(now: u64, read: PowerStatusReader) void {
     publishPolledSnapshot(parseSystemPowerStatus(raw, snapshot()), generation);
 }
 
-/// Monotonic millisecond clock for render pacing (`os/monotonic`, QPC).
-pub fn pacingClockMs() u64 {
-    return monotonic.nowNs() / std.time.ns_per_ms;
-}
+/// The renderer's pacing clock (`apprt.App.renderer_pacing_clock`): QPC
+/// time, and whether Battery Saver or Energy Saver is on.
+pub const renderer_clock: Pacer.Clock = .{
+    .now_ns = Pacer.Clock.monotonic.now_ns,
+    .saver = rendererSaver,
+};
 
-/// Whether saver-specific pacing is active for the current configuration.
-pub fn saverRenderingActive(mode: configpkg.PowerSaverRendering, state: Snapshot) bool {
-    return switch (mode) {
-        // `auto` follows Battery Saver OR Energy Saver, never plain battery.
-        .auto => state.isSaver(),
-        .on => true,
-        .off => false,
-    };
-}
-
-/// Pure render-pacing policy. `null` means the surface must not present.
-/// Focused, visible, non-saver surfaces retain the existing 8 ms cadence.
-pub fn minimumPresentIntervalMs(
-    focused: bool,
-    visible: bool,
-    state: Snapshot,
-    config: PolicyConfig,
-) ?u64 {
-    if (!visible) return null;
-
-    const saver_active = saverRenderingActive(config.power_saver_rendering, state);
-    if (focused and !saver_active) return DEFAULT_PRESENT_INTERVAL_MS;
-
-    const unfocused_interval = fpsIntervalMs(config.unfocused_render_fps);
-    if (!focused and !saver_active) return unfocused_interval;
-
-    return if (focused)
-        SAVER_PRESENT_INTERVAL_MS
-    else
-        @max(SAVER_PRESENT_INTERVAL_MS, unfocused_interval);
+fn rendererSaver(_: ?*anyopaque) bool {
+    pollIfStale();
+    return snapshot().isSaver();
 }
 
 /// Pure host-window visibility decision. A host presents only while its
@@ -571,14 +537,6 @@ pub fn queryHostVisibility(
         ),
         .cloaked = cloaked,
     };
-}
-
-fn fpsIntervalMs(fps: u32) u64 {
-    const normalized: u64 = @max(1, @as(u64, fps));
-    return @max(
-        DEFAULT_PRESENT_INTERVAL_MS,
-        (std.time.ms_per_s + normalized - 1) / normalized,
-    );
 }
 
 fn packSnapshot(value: Snapshot) u8 {
@@ -779,107 +737,6 @@ test "power notification parsing accepts registered settings" {
     try std.testing.expect(parsePowerSettingNotification(&malformed) == null);
 }
 
-test "power render policy preserves focused non-saver pacing" {
-    const config: PolicyConfig = .{
-        .unfocused_render_fps = 30,
-        .power_saver_rendering = .auto,
-    };
-    try std.testing.expectEqual(@as(?u64, 8), minimumPresentIntervalMs(
-        true,
-        true,
-        .{ .on_battery = false },
-        config,
-    ));
-    // Battery alone is NOT a saver trigger. `auto` is documented in
-    // Config.zig ("Battery Saver is active, or ... Energy Saver is active")
-    // and docs/windows.md as following the saver signals only, so an
-    // unplugged laptop with saver off keeps its full cadence, focused or not.
-    try std.testing.expectEqual(@as(?u64, 8), minimumPresentIntervalMs(
-        true,
-        true,
-        .{ .on_battery = true },
-        config,
-    ));
-    // 60 fps here so the expected value distinguishes the unfocused cap (17)
-    // from saver pacing (34) instead of colliding with it at 30 fps.
-    var sixty = config;
-    sixty.unfocused_render_fps = 60;
-    try std.testing.expectEqual(@as(?u64, 17), minimumPresentIntervalMs(
-        false,
-        true,
-        .{ .on_battery = true },
-        sixty,
-    ));
-    try std.testing.expect(!saverRenderingActive(.auto, .{ .on_battery = true }));
-    // Either saver source alone drives `auto`.
-    try std.testing.expect(saverRenderingActive(.auto, .{ .battery_saver = true }));
-    try std.testing.expect(saverRenderingActive(.auto, .{ .energy_saver = true }));
-    try std.testing.expectEqual(@as(?u64, null), minimumPresentIntervalMs(
-        true,
-        false,
-        .{ .on_battery = true, .battery_saver = true },
-        config,
-    ));
-}
-
-test "power render policy caps saver and unfocused surfaces" {
-    const sixty_fps: PolicyConfig = .{
-        .unfocused_render_fps = 60,
-        .power_saver_rendering = .auto,
-    };
-    try std.testing.expectEqual(@as(?u64, 17), minimumPresentIntervalMs(
-        false,
-        true,
-        .{},
-        sixty_fps,
-    ));
-    var uncapped = sixty_fps;
-    uncapped.unfocused_render_fps = 1000;
-    try std.testing.expectEqual(@as(?u64, 8), minimumPresentIntervalMs(
-        false,
-        true,
-        .{},
-        uncapped,
-    ));
-    try std.testing.expectEqual(@as(?u64, 34), minimumPresentIntervalMs(
-        true,
-        true,
-        .{ .on_battery = true, .battery_saver = true },
-        sixty_fps,
-    ));
-    try std.testing.expectEqual(@as(?u64, 34), minimumPresentIntervalMs(
-        false,
-        true,
-        .{ .on_battery = true, .battery_saver = true },
-        sixty_fps,
-    ));
-    // Energy Saver on AC power paces identically; the source does not matter
-    // once either is set.
-    try std.testing.expectEqual(@as(?u64, 34), minimumPresentIntervalMs(
-        true,
-        true,
-        .{ .on_battery = false, .energy_saver = true },
-        sixty_fps,
-    ));
-
-    var forced = sixty_fps;
-    forced.power_saver_rendering = .on;
-    try std.testing.expectEqual(@as(?u64, 34), minimumPresentIntervalMs(
-        true,
-        true,
-        .{},
-        forced,
-    ));
-
-    forced.power_saver_rendering = .off;
-    try std.testing.expectEqual(@as(?u64, 8), minimumPresentIntervalMs(
-        true,
-        true,
-        .{ .battery_saver = true, .energy_saver = true },
-        forced,
-    ));
-}
-
 test "power saver sources do not erase each other in either order" {
     resetPowerGlobalsForTest();
     defer resetPowerGlobalsForTest();
@@ -893,7 +750,6 @@ test "power saver sources do not erase each other in either order" {
         snapshot(),
     );
     try std.testing.expect(snapshot().isSaver());
-    try std.testing.expect(saverRenderingActive(.auto, snapshot()));
 
     // ...and the reverse ordering: Energy Saver on, then Battery Saver OFF.
     resetPowerGlobalsForTest();
@@ -904,7 +760,6 @@ test "power saver sources do not erase each other in either order" {
         snapshot(),
     );
     try std.testing.expect(snapshot().isSaver());
-    try std.testing.expect(saverRenderingActive(.auto, snapshot()));
 
     // Both on, then only one clears: still saver.
     resetPowerGlobalsForTest();
@@ -917,10 +772,11 @@ test "power saver sources do not erase each other in either order" {
     publishSetting(.{ .energy_saver = false });
     try std.testing.expect(!snapshot().isSaver());
 
-    // `on_battery` is not a saver source and never contributes.
+    // `on_battery` is not a saver source and never contributes: `auto`
+    // follows the saver signals only (Config.zig, docs/windows.md), so an
+    // unplugged laptop with saver off keeps its full cadence.
     publishSetting(.{ .on_battery = true });
     try std.testing.expect(!snapshot().isSaver());
-    try std.testing.expect(!saverRenderingActive(.auto, snapshot()));
 }
 
 fn resetPowerGlobalsForTest() void {

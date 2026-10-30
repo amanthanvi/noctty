@@ -14,7 +14,7 @@ const BlockingQueue = @import("../datastruct/main.zig").BlockingQueue;
 const App = @import("../App.zig");
 const terminalpkg = @import("../terminal/main.zig");
 const terminal_render_dirty = @import("../terminal/render_dirty.zig");
-const win32_power = @import("../apprt/win32_power.zig");
+const Pacer = @import("Pacer.zig");
 
 const Allocator = std.mem.Allocator;
 const log = std.log.scoped(.renderer_thread);
@@ -57,16 +57,8 @@ const darwin = if (builtin.os.tag.isDarwin()) struct {
     fn setQosClass(_: QosClass) !void {}
 };
 
-const DRAW_INTERVAL = 8; // 120 FPS
 const CURSOR_BLINK_INTERVAL = 600;
 const RENDER_FOLLOWUP_BURST_MS = 128;
-
-comptime {
-    // The power policy returns this same interval for focused, non-saver
-    // surfaces so their pacing stays exactly what it was before adaptive
-    // rendering existed. Keep the two constants in lockstep.
-    std.debug.assert(DRAW_INTERVAL == win32_power.DEFAULT_PRESENT_INTERVAL_MS);
-}
 
 /// Whether calls to `drawFrame` must be done from the app thread.
 ///
@@ -166,6 +158,9 @@ app_mailbox: App.Mailbox,
 /// Configuration we need derived from the main config.
 config: DerivedConfig,
 
+/// Time and power for pacing, from the apprt when it has them.
+clock: Pacer.Clock,
+
 flags: packed struct {
     /// This is true when a blinking cursor should be visible and false
     /// when it should not be visible. This is toggled on a timer by the
@@ -186,14 +181,12 @@ flags: packed struct {
 
 pub const DerivedConfig = struct {
     custom_shader_animation: configpkg.CustomShaderAnimation,
-    unfocused_render_fps: u32,
-    power_saver_rendering: configpkg.PowerSaverRendering,
+    pacing: Pacer.Config,
 
     pub fn init(config: *const configpkg.Config) DerivedConfig {
         return .{
             .custom_shader_animation = config.@"custom-shader-animation",
-            .unfocused_render_fps = config.@"unfocused-render-fps",
-            .power_saver_rendering = config.@"power-saver-rendering",
+            .pacing = .init(config),
         };
     }
 };
@@ -245,6 +238,10 @@ pub fn init(
     return .{
         .alloc = alloc,
         .config = .init(config),
+        .clock = if (@hasDecl(apprt.App, "renderer_pacing_clock"))
+            apprt.App.renderer_pacing_clock
+        else
+            .monotonic,
         .loop = loop,
         .wakeup = wakeup_h,
         .stop = stop_h,
@@ -412,7 +409,7 @@ fn syncDrawTimer(self: *Thread) void {
     if (self.draw_c.state() == .active) {
         if (apprt.runtime != apprt.win32) return;
 
-        const now_ms = win32_power.pacingClockMs();
+        const now_ms = self.pacingClockMs();
         if (!timerNeedsEarlierDeadline(now_ms, self.draw_timer_due_ms, delay_ms)) return;
         self.draw_h.reset(
             &self.loop,
@@ -437,7 +434,7 @@ fn syncDrawTimer(self: *Thread) void {
         drawCallback,
     );
     if (apprt.runtime == apprt.win32) {
-        self.draw_timer_due_ms = win32_power.pacingClockMs() +| delay_ms;
+        self.draw_timer_due_ms = self.pacingClockMs() +| delay_ms;
     }
 }
 
@@ -635,30 +632,24 @@ fn shouldAcceptSearchGeneration(self: *const Thread, generation: u64) bool {
     return self.search_generation.load(.acquire) == generation;
 }
 
-fn powerSnapshot(self: *const Thread) win32_power.Snapshot {
-    _ = self;
-    if (apprt.runtime != apprt.win32) return .{};
-    win32_power.pollIfStale();
-    return win32_power.snapshot();
+fn pacingClockMs(self: *const Thread) u64 {
+    return self.clock.now_ns(self.clock.ctx) / std.time.ns_per_ms;
 }
 
 fn minimumPresentIntervalMs(self: *const Thread) ?u64 {
     if (apprt.runtime != apprt.win32) {
-        return if (self.flags.visible) DRAW_INTERVAL else null;
+        return if (self.flags.visible) Pacer.draw_interval_ms else null;
     }
-    return win32_power.minimumPresentIntervalMs(
+    return Pacer.minimumPresentIntervalMs(
         self.flags.focused,
         self.flags.visible,
-        self.powerSnapshot(),
-        .{
-            .unfocused_render_fps = self.config.unfocused_render_fps,
-            .power_saver_rendering = self.config.power_saver_rendering,
-        },
+        self.clock.saver(self.clock.ctx),
+        self.config.pacing,
     );
 }
 
 fn presentWaitMs(self: *const Thread, interval_ms: u64) u64 {
-    return self.present_pacer.waitMs(win32_power.pacingClockMs(), interval_ms);
+    return self.present_pacer.waitMs(self.pacingClockMs(), interval_ms);
 }
 
 fn nextPresentTimerDelayMs(self: *const Thread) ?u64 {
@@ -676,7 +667,7 @@ fn nextDrawTimerDelayMs(self: *const Thread) ?u64 {
 }
 
 fn notePresentRequest(self: *Thread, interval_ms: u64) void {
-    self.present_pacer.take(win32_power.pacingClockMs(), interval_ms);
+    self.present_pacer.take(self.pacingClockMs(), interval_ms);
 }
 
 /// When a throttled surface may present again. It takes the clock as an
@@ -687,9 +678,9 @@ const PresentPacer = struct {
     slot_ms: u64 = 0,
 
     /// How long a present must still wait. Intervals at or below
-    /// `DRAW_INTERVAL` are not paced.
+    /// `Pacer.draw_interval_ms` are not paced.
     fn waitMs(self: PresentPacer, now_ms: u64, interval_ms: u64) u64 {
-        if (interval_ms <= DRAW_INTERVAL or self.slot_ms == 0) return 0;
+        if (interval_ms <= Pacer.draw_interval_ms or self.slot_ms == 0) return 0;
         return interval_ms -| (now_ms -| self.slot_ms);
     }
 
@@ -701,7 +692,7 @@ const PresentPacer = struct {
     /// to 47 ms. A present later than that (output that came late, idle)
     /// starts a new cadence, so no catch-up burst follows it.
     fn take(self: *PresentPacer, now_ms: u64, interval_ms: u64) void {
-        if (interval_ms <= DRAW_INTERVAL) {
+        if (interval_ms <= Pacer.draw_interval_ms) {
             self.slot_ms = 0;
             return;
         }
@@ -724,8 +715,8 @@ test "present pacer paces only throttled intervals" {
     try testing.expectEqual(@as(u64, 0), pacer.waitMs(1034, 34));
 
     // A focused surface is not paced, and its presents leave no slot behind.
-    try testing.expectEqual(@as(u64, 0), pacer.waitMs(1010, DRAW_INTERVAL));
-    pacer.take(1010, DRAW_INTERVAL);
+    try testing.expectEqual(@as(u64, 0), pacer.waitMs(1010, Pacer.draw_interval_ms));
+    pacer.take(1010, Pacer.draw_interval_ms);
     try testing.expectEqual(@as(u64, 0), pacer.waitMs(1011, 34));
 }
 
@@ -861,7 +852,7 @@ fn scheduleRenderFollowup(self: *Thread) void {
     if (self.render_followup_pending) {
         if (apprt.runtime != apprt.win32) return;
 
-        const now_ms = win32_power.pacingClockMs();
+        const now_ms = self.pacingClockMs();
         if (!timerNeedsEarlierDeadline(now_ms, self.render_timer_due_ms, delay_ms)) return;
         self.render_h.reset(
             &self.loop,
@@ -886,7 +877,7 @@ fn scheduleRenderFollowup(self: *Thread) void {
         renderCallback,
     );
     if (apprt.runtime == apprt.win32) {
-        self.render_timer_due_ms = win32_power.pacingClockMs() +| delay_ms;
+        self.render_timer_due_ms = self.pacingClockMs() +| delay_ms;
     }
 }
 
@@ -1108,7 +1099,7 @@ fn drawCallback(
         if (t.nextDrawTimerDelayMs()) |delay_ms| {
             t.draw_h.run(&t.loop, &t.draw_c, delay_ms, Thread, t, drawCallback);
             if (apprt.runtime == apprt.win32) {
-                t.draw_timer_due_ms = win32_power.pacingClockMs() +| delay_ms;
+                t.draw_timer_due_ms = t.pacingClockMs() +| delay_ms;
             }
         } else {
             t.draw_active = false;
@@ -1128,10 +1119,10 @@ test "draw timer shortens an active slow interval" {
 test "render follow-up timer shortens an active slow interval" {
     // A focus/config change from 1 fps to focused cadence must replace the
     // pending one-second follow-up with an 8 ms deadline.
-    try std.testing.expect(timerNeedsEarlierDeadline(200, 1200, DRAW_INTERVAL));
+    try std.testing.expect(timerNeedsEarlierDeadline(200, 1200, Pacer.draw_interval_ms));
     // Never postpone an already-earlier follow-up or reset an equal deadline.
     try std.testing.expect(!timerNeedsEarlierDeadline(200, 208, 1000));
-    try std.testing.expect(!timerNeedsEarlierDeadline(200, 208, DRAW_INTERVAL));
+    try std.testing.expect(!timerNeedsEarlierDeadline(200, 208, Pacer.draw_interval_ms));
 }
 
 fn renderCallback(
