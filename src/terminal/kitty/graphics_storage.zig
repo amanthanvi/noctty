@@ -521,7 +521,9 @@ pub const ImageStorage = struct {
         const placements_before = self.placements.count();
         const images_before = self.images.count();
 
-        // Delete unused placements and images
+        // Delete unused placements and images. Placements whose rows were
+        // pruned are not visible, but they would keep their images in use.
+        _ = self.removeGarbagePlacements(t.screens.active);
         self.deleteVisiblePlacements(alloc, t, true);
         var image_it = self.images.iterator();
         while (image_it.next()) |entry| {
@@ -1588,6 +1590,45 @@ test "storage: placement whose rows were pruned has no rect and is reclaimed" {
         tracked + 1,
         t.screens.active.pages.countTrackedPins(),
     );
+}
+
+test "storage: clear screen frees an image whose placement rows were pruned" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var t = try terminal.Terminal.init(alloc, .{
+        .cols = 10,
+        .rows = 3,
+        .max_scrollback = 1,
+    });
+    defer t.deinit(alloc);
+
+    var s: ImageStorage = .{};
+    defer s.deinit(alloc, t.screens.active);
+    try s.addImage(alloc, t.screens.active, .{
+        .id = 1,
+        .data = try alloc.dupe(u8, "*" ** 64),
+    });
+
+    const tracked = t.screens.active.pages.countTrackedPins();
+    const pin = try trackPin(&t, .{ .x = 0, .y = 0 });
+    try s.addPlacement(alloc, t.screens.active, 1, 0, .{
+        .location = .{ .pin = pin },
+    });
+
+    t.screens.active.cursorAbsolute(0, t.rows - 1);
+    for (0..100_000) |_| {
+        if (pin.garbage) break;
+        try t.index();
+    } else return error.TestUnexpectedResult;
+
+    s.dirty = false;
+    s.clearScreen(alloc, &t);
+    try testing.expectEqual(@as(usize, 0), s.placements.count());
+    try testing.expectEqual(@as(usize, 0), s.images.count());
+    try testing.expectEqual(@as(usize, 0), s.total_bytes);
+    try testing.expectEqual(tracked, t.screens.active.pages.countTrackedPins());
+    try testing.expect(s.dirty);
 }
 
 test "storage: delete all visible placements and matching images" {
