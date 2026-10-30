@@ -600,6 +600,9 @@ fn writePaletteMruLine(writer: *std.Io.Writer, mru_key: []const u8) std.Io.Write
 /// The key a palette-mru.txt line holds: the line's escapes decoded when
 /// escaping the result gives the line back, otherwise the line as it is.
 fn paletteMruKeyFromLine(alloc: std.mem.Allocator, line: []const u8) std.mem.Allocator.Error![:0]u8 {
+    // An odd run of trailing backslashes escapes the closing quote, and Zig
+    // 0.15.2's parseWrite then reads past the end of the literal.
+    if ((line.len - std.mem.trimEnd(u8, line, "\\").len) % 2 == 1) return alloc.dupeZ(u8, line);
     const quoted = try std.mem.concat(alloc, u8, &.{ "\"", line, "\"" });
     defer alloc.free(quoted);
     const decoded = std.zig.string_literal.parseAlloc(alloc, quoted) catch |err| switch (err) {
@@ -646,8 +649,9 @@ test "win32 palette MRU lines keep keys with line breaks and tabs, and read earl
     const earlier = try paletteMruKeyFromLine(alloc, "text:\\\\x15");
     defer alloc.free(earlier);
     try std.testing.expectEqualStrings("text:\\x15", earlier);
-    // A line that is not an escaped key is kept as it is.
-    for ([_][]const u8{ "text:a\"b", "text:\\q" }) |line| {
+    // A line that is not an escaped key is kept as it is, including one
+    // whose last backslash would escape the closing quote.
+    for ([_][]const u8{ "text:a\"b", "text:\\q", "text:C:\\", "text:\\\\\\" }) |line| {
         const kept = try paletteMruKeyFromLine(alloc, line);
         defer alloc.free(kept);
         try std.testing.expectEqualStrings(line, kept);
