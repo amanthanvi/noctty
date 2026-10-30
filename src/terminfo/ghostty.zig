@@ -106,6 +106,10 @@ pub const ghostty: Source = .{
         // Curly, dashed, etc underlines
         .{ .name = "Smulx", .value = .{ .string = "\\E[4:%p1%dm" } },
 
+        // Overline
+        .{ .name = "Smol", .value = .{ .string = "\\E[53m" } },
+        .{ .name = "Rmol", .value = .{ .string = "\\E[55m" } },
+
         // Colored underlines
         .{ .name = "Setulc", .value = .{ .string = "\\E[58:2::%p1%{65536}%/%d:%p1%{256}%/%{255}%&%d:%p1%{255}%&%d%;m" } },
 
@@ -441,6 +445,15 @@ test "cursor style reset" {
     defer compiled.deinit();
     try @import("compiled.zig").encode(std.testing.allocator, ghostty, &compiled.writer);
     try std.testing.expect(std.mem.indexOf(u8, compiled.written(), "\x1b[0 q\x00") != null);
+}
+
+test "overline capabilities" {
+    // tmux passes SGR 53 through only to a terminal that advertises Smol.
+    var source: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer source.deinit();
+    try ghostty.encode(&source.writer);
+    try std.testing.expect(std.mem.indexOf(u8, source.written(), "\tSmol=\\E[53m,\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, source.written(), "\tRmol=\\E[55m,\n") != null);
 }
 
 test "compile" {
