@@ -794,6 +794,46 @@ const NMHDR = extern struct { hwndFrom: ?HWND, idFrom: usize, code: u32 };
 const NMUPDOWN = extern struct { hdr: NMHDR, pos: i32, delta: i32 };
 const NMCUSTOMDRAW = extern struct { hdr: NMHDR, stage: u32, hdc: HDC, rc: RECT, item: usize, state: u32, item_lparam: LPARAM };
 
+test "settings mirrors of the SDK's notification and init structs keep its layout" {
+    // Read from the Windows SDK's headers (10.0.28000.0): NMHDR in winuser.h;
+    // NMUPDOWN, NMCUSTOMDRAW (tagNMCUSTOMDRAWINFO) and INITCOMMONCONTROLSEX in
+    // commctrl.h. None sits in a pshpack region (commctrl.h's pshpack1 ones
+    // hold the list, tree and tab key-down structs, the pager's NMPGSCROLL
+    // and the task dialog's; winuser.h's pshpack2 one the dialog templates),
+    // so each has natural alignment. These are LLP64's offsets, the same on
+    // x64 and ARM64.
+    comptime {
+        if (@sizeOf(usize) != 8) @compileError("these layouts are LLP64's (8-byte pointers)");
+    }
+    const expectEqual = std.testing.expectEqual;
+    // NMHDR: hwndFrom, idFrom (UINT_PTR), code (UINT).
+    try expectEqual(@as(usize, 24), @sizeOf(NMHDR));
+    try expectEqual(@as(usize, 0), @offsetOf(NMHDR, "hwndFrom"));
+    try expectEqual(@as(usize, 8), @offsetOf(NMHDR, "idFrom"));
+    try expectEqual(@as(usize, 16), @offsetOf(NMHDR, "code"));
+    // NMUPDOWN: hdr, iPos, iDelta (int).
+    try expectEqual(@as(usize, 32), @sizeOf(NMUPDOWN));
+    try expectEqual(@as(usize, 0), @offsetOf(NMUPDOWN, "hdr"));
+    try expectEqual(@as(usize, 24), @offsetOf(NMUPDOWN, "pos"));
+    try expectEqual(@as(usize, 28), @offsetOf(NMUPDOWN, "delta"));
+    // NMCUSTOMDRAW: hdr, dwDrawStage (DWORD), hdc, rc (RECT), dwItemSpec
+    // (DWORD_PTR), uItemState (UINT), lItemlParam (LPARAM).
+    try expectEqual(@as(usize, 80), @sizeOf(NMCUSTOMDRAW));
+    try expectEqual(@as(usize, 0), @offsetOf(NMCUSTOMDRAW, "hdr"));
+    try expectEqual(@as(usize, 24), @offsetOf(NMCUSTOMDRAW, "stage"));
+    try expectEqual(@as(usize, 32), @offsetOf(NMCUSTOMDRAW, "hdc"));
+    try expectEqual(@as(usize, 40), @offsetOf(NMCUSTOMDRAW, "rc"));
+    try expectEqual(@as(usize, 56), @offsetOf(NMCUSTOMDRAW, "item"));
+    try expectEqual(@as(usize, 64), @offsetOf(NMCUSTOMDRAW, "state"));
+    try expectEqual(@as(usize, 72), @offsetOf(NMCUSTOMDRAW, "item_lparam"));
+    try expectEqual(@as(usize, 16), @sizeOf(RECT));
+    // INITCOMMONCONTROLSEX: dwSize, dwICC (DWORD); dwSize is the struct's own size.
+    try expectEqual(@as(usize, 8), @sizeOf(INITCOMMONCONTROLSEX));
+    try expectEqual(@as(usize, 0), @offsetOf(INITCOMMONCONTROLSEX, "size"));
+    try expectEqual(@as(usize, 4), @offsetOf(INITCOMMONCONTROLSEX, "classes"));
+    try expectEqual(@as(u32, 8), (INITCOMMONCONTROLSEX{ .classes = 0 }).size);
+}
+
 /// Scalar EDIT controls whose raw text can temporarily be invalid and
 /// therefore cannot yet be represented by the typed settings transaction.
 const RawScalarField = enum {
