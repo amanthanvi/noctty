@@ -2173,6 +2173,82 @@ test "prune keeps a history match across a page boundary" {
     try testing.expectEqual(1, search.history_results.items.len);
 }
 
+test "select after history page split ignores moved results" {
+    const alloc = testing.allocator;
+    var t: Terminal = try .init(alloc, .{
+        .cols = 10,
+        .rows = 2,
+        .max_scrollback = std.math.maxInt(usize),
+    });
+    defer t.deinit(alloc);
+    const list: *PageList = &t.screens.active.pages;
+
+    var stream = t.vtStream();
+    defer stream.deinit();
+
+    const first = list.pages.first.?;
+    while (first.data.size.rows < first.data.capacity.rows) stream.nextSlice("\r\n");
+    stream.nextSlice("error");
+    for (0..list.rows + 1) |_| stream.nextSlice("\r\n");
+
+    var search: ScreenSearch = try .init(alloc, t.screens.active, "error");
+    defer search.deinit();
+    try search.searchAll();
+    try testing.expectEqual(1, search.history_results.items.len);
+
+    try list.split(.{
+        .node = first,
+        .y = first.data.size.rows / 2,
+        .x = 0,
+    });
+
+    try testing.expect(!try search.select(.next));
+    try testing.expect(search.selected == null);
+}
+
+test "select after a split of the active top page drops a match wrapped into it" {
+    // History results skip matches that start on the active area's top
+    // page, but a match that starts above it and wraps into it keeps its
+    // trailing chunk there. A capacity split of that page (the cursor's,
+    // in Screen.splitForCapacity) moves the end of the chunk out of it.
+    const alloc = testing.allocator;
+    var t: Terminal = try .init(alloc, .{
+        .cols = 2,
+        .rows = 2,
+        .max_scrollback = std.math.maxInt(usize),
+    });
+    defer t.deinit(alloc);
+    const list: *PageList = &t.screens.active.pages;
+
+    var stream = t.vtStream();
+    defer stream.deinit();
+
+    const first = list.pages.first.?;
+    while (first.data.size.rows < first.data.capacity.rows) stream.nextSlice("\r\n");
+    // "er" ends the first page; "ro" and "r" are the next page's two rows,
+    // which are the active area.
+    stream.nextSlice("error");
+    const top = list.pages.last.?;
+    try testing.expect(top != first);
+    try testing.expectEqual(2, top.data.size.rows);
+    try testing.expectEqual(top, list.getTopLeft(.active).node);
+
+    var search: ScreenSearch = try .init(alloc, t.screens.active, "error");
+    defer search.deinit();
+    try search.searchAll();
+    try testing.expectEqual(0, search.active_results.items.len);
+    try testing.expectEqual(1, search.history_results.items.len);
+    const chunks = search.history_results.items[0].chunks.slice();
+    try testing.expectEqual(first, chunks.items(.node)[0]);
+    try testing.expectEqual(top, chunks.items(.node)[chunks.len - 1]);
+
+    try list.split(.{ .node = top, .y = 1, .x = 0 });
+    try testing.expectEqual(1, top.data.size.rows);
+
+    try testing.expect(!try search.select(.next));
+    try testing.expect(search.selected == null);
+}
+
 test "screen search no scrollback has no history" {
     const alloc = testing.allocator;
     var t: Terminal = try .init(alloc, .{
