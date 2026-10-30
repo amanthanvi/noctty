@@ -877,11 +877,14 @@ pub const Viewer = struct {
         errdefer actions.shrinkRetainingCapacity(actions_len);
 
         // This stores our new window state from this list-windows output.
-        // Ownership of each Window's layout arena transfers into
-        // `self.windows` via syncLayouts; this list only owns the
-        // ArrayList buffer itself.
+        // Each Window owns a layout arena until syncLayouts copies it into
+        // self.windows. A later line that fails to parse must free the
+        // windows already built.
         var windows: std.ArrayList(Window) = .empty;
-        defer windows.deinit(self.alloc);
+        errdefer {
+            for (windows.items) |*window| window.deinit(self.alloc);
+            windows.deinit(self.alloc);
+        }
 
         // Parse all our windows
         var it = std.mem.splitScalar(u8, content, '\n');
@@ -923,9 +926,14 @@ pub const Viewer = struct {
 
         // Sync into self.windows first. The `.windows` action must point at
         // `self.windows.items` (stable for the duration of next()), not the
-        // temporary list buffer which is freed by the defer above — otherwise
+        // temporary list buffer which is freed below — otherwise
         // logging/formatting the action is a use-after-free.
         try self.syncLayouts(windows.items);
+        // Layout arenas now belong to self.windows. Drop our copies without
+        // freeing them, then release only the temporary buffer.
+        var transferred = windows;
+        windows = .empty;
+        transferred.deinit(self.alloc);
         try actions.append(arena_alloc, .{ .windows = self.windows.items });
     }
 
@@ -2260,6 +2268,74 @@ test "window_add queues list_windows when queue empty" {
         .{
             .input = .{ .tmux = .exit },
             .contains_tags = &.{.exit},
+        },
+    });
+}
+
+test "list-windows parse failure frees earlier windows" {
+    var viewer = try Viewer.init(testing.allocator);
+    defer viewer.deinit();
+
+    try testViewer(&viewer, &.{
+        .{ .input = .{ .tmux = .{ .block_end = "" } } },
+        .{
+            .input = .{ .tmux = .{ .session_changed = .{
+                .id = 1,
+                .name = "test",
+            } } },
+            .contains_command = "display-message",
+        },
+        .{
+            .input = .{ .tmux = .{ .block_end = "3.5a" } },
+            .contains_command = "list-windows",
+        },
+        // First line is a real window, split so that its layout arena
+        // holds the child nodes. The second is not, so parsing stops
+        // after the first layout arena has been allocated.
+        .{
+            .input = .{ .tmux = .{
+                .block_end =
+                \\$0 @0 165 79 ca97,165x79,0,0[165x40,0,0,0,165x38,0,41,4]
+                \\not a window
+                ,
+            } },
+            .contains_tags = &.{.exit},
+        },
+    });
+}
+
+test "list-windows with oversized pane frees its window" {
+    var viewer = try Viewer.init(testing.allocator);
+    defer viewer.deinit();
+
+    try testViewer(&viewer, &.{
+        .{ .input = .{ .tmux = .{ .block_end = "" } } },
+        .{
+            .input = .{ .tmux = .{ .session_changed = .{
+                .id = 1,
+                .name = "test",
+            } } },
+            .contains_command = "display-message",
+        },
+        .{
+            .input = .{ .tmux = .{ .block_end = "3.5a" } },
+            .contains_command = "list-windows",
+        },
+        // The layout parses, so the window's layout arena exists, and
+        // then syncLayouts rejects the pane that does not fit in a
+        // terminal.
+        .{
+            .input = .{ .tmux = .{
+                .block_end = "$0 @0 83 44 3afd,83x44,0,0[83x22,0,0,0,70000x21,0,23,2]",
+            } },
+            .contains_tags = &.{.exit},
+            .check = (struct {
+                fn check(v: *Viewer, _: []const Viewer.Action) anyerror!void {
+                    try testing.expectEqual(.defunct, v.state);
+                    try testing.expectEqual(0, v.windows.items.len);
+                    try testing.expectEqual(0, v.panes.count());
+                }
+            }).check,
         },
     });
 }
