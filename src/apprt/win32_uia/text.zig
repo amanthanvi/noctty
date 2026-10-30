@@ -104,7 +104,7 @@ const ScreenRows = struct {
             if (pin.node == node) return self.node_top + pin.y;
             if (pin.node == node.next) {
                 self.node = pin.node;
-                self.node_top += node.data.size.rows;
+                self.node_top += node.rows();
                 return self.node_top + pin.y;
             }
         }
@@ -222,7 +222,7 @@ fn snapshotDocumentWindow(
     var visible_end: usize = 0;
     for (pin_map.items, 0..) |pin, index| {
         const screen_y = rows.of(pin) orelse return error.UnknownPoint;
-        const cell = pin.node.data.getRowAndCell(pin.x, pin.y).cell;
+        const cell = pin.node.page().getRowAndCell(pin.x, pin.y).cell;
         cell_for_byte[index] = .{
             .row = @intCast(@as(i64, @intCast(screen_y)) - viewport_y),
             .column = pin.x,

@@ -7265,7 +7265,7 @@ fn openUrl(
 /// if there is no hyperlink.
 fn osc8URI(self: *Surface, pin: terminal.Pin) ?[]const u8 {
     _ = self;
-    const page = &pin.node.data;
+    const page = pin.node.page();
     const cell = pin.rowAndCell().cell;
     const link_id = page.lookupHyperlink(cell) orelse return null;
     const entry = page.hyperlink_set.get(page.memory, link_id);
@@ -10068,7 +10068,7 @@ test "promptClickRelativeRow" {
         const scroll_rows: u32 = switch (case.layout) {
             .no_history => 0,
             .offset, .prompt_above_viewport => 10,
-            .cross_page => pages.pages.first.?.data.capacity.rows - 2,
+            .cross_page => pages.pages.first.?.capacity().rows - 2,
         };
         for (0..scroll_rows) |_| _ = try pages.grow();
 

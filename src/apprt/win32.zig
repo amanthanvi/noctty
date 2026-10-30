@@ -4832,7 +4832,7 @@ test "win32 terminal undo keeps nonzero live rows, wrap and snapshot margins" {
         try std.testing.expect(t.screens.active.cursor.pending_wrap);
         try std.testing.expectEqual(region, t.scrolling_region);
         const row = t.screens.active.cursor.page_row;
-        const cells = t.screens.active.cursor.page_pin.node.data.getCells(row);
+        const cells = t.screens.active.cursor.page_pin.node.page().getCells(row);
         try std.testing.expectEqual(@as(u21, 'f'), cells[0].codepoint());
     }
 }
@@ -4870,7 +4870,7 @@ test "win32 terminal undo anchors a cursor above or below the last text row" {
         t.fullReset();
         _ = restoreTerminalUndoState(&t, snapshot, true);
         const row = t.screens.active.cursor.page_row;
-        const cells = t.screens.active.cursor.page_pin.node.data.getCells(row);
+        const cells = t.screens.active.cursor.page_pin.node.page().getCells(row);
         try std.testing.expectEqual(@as(u21, if (saved_y == 1) 't' else 0), cells[0].codepoint());
         try std.testing.expectEqual(@as(terminal.size.CellCountInt, 0), t.screens.active.cursor.y);
     }
@@ -4882,7 +4882,7 @@ test "win32 terminal undo aligns content after replay prunes history" {
     defer t.deinit(alloc);
     var stream = t.vtStream();
     defer stream.deinit();
-    const history_lines = @as(usize, t.screens.active.pages.pages.first.?.data.capacity.rows) * 4;
+    const history_lines = @as(usize, t.screens.active.pages.pages.first.?.capacity().rows) * 4;
     for (0..history_lines) |_| stream.nextSlice("history\r\n");
     stream.nextSlice("\x1b[4;1H\x1b[Jprompt");
     const captured_rows = t.screens.active.pages.total_rows;
@@ -4897,7 +4897,7 @@ test "win32 terminal undo aligns content after replay prunes history" {
     _ = restoreTerminalUndoState(&t, snapshot, true);
     try std.testing.expect(t.screens.active.pages.total_rows < captured_rows);
     const row = t.screens.active.cursor.page_row;
-    const cells = t.screens.active.cursor.page_pin.node.data.getCells(row);
+    const cells = t.screens.active.cursor.page_pin.node.page().getCells(row);
     try std.testing.expectEqual(@as(u21, 'p'), cells[0].codepoint());
     try std.testing.expectEqual(@as(terminal.size.CellCountInt, 0), t.screens.active.cursor.y);
 }
@@ -4915,7 +4915,7 @@ test "win32 terminal undo aligns content with scrollback and trailing blank rows
     _ = restoreTerminalUndoState(&t, snapshot, true);
     try std.testing.expectEqual(@as(terminal.size.CellCountInt, 0), t.screens.active.cursor.y);
     const row = t.screens.active.cursor.page_row;
-    const cells = t.screens.active.cursor.page_pin.node.data.getCells(row);
+    const cells = t.screens.active.cursor.page_pin.node.page().getCells(row);
     try std.testing.expectEqual(@as(u21, 'p'), cells[0].codepoint());
     const all = try t.screens.active.dumpStringAlloc(alloc, .{ .screen = .{} });
     defer alloc.free(all);

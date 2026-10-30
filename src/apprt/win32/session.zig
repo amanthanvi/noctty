@@ -1409,7 +1409,7 @@ pub fn captureTerminalScrollbackSnapshotAlloc(
 
     const all = terminal_state.screens.active.selectAll() orelse return null;
     var end = all.end();
-    end.x = end.node.data.size.cols - 1;
+    end.x = end.node.cols() - 1;
 
     const plain_capacity = remaining_budget.* -| win32_session_state.scrollback_snapshot_storage_overhead;
     if (plain_capacity == 0) {
