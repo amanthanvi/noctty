@@ -36,8 +36,14 @@ pub const Layout = struct {
     ///
     /// `SyntaxError` means the string is not a valid layout. This includes
     /// strings that are well formed but describe a node with a width or
-    /// height of zero.
+    /// height of zero, or nest splits deeper than `max_depth`.
     pub const ParseError = Allocator.Error || error{SyntaxError};
+
+    /// The most splits `parse` accepts inside one another. `parse` and the
+    /// tmux viewer recurse once per split on the pty reader thread, whose
+    /// stack is small (`os.surfaceThreadSpawnConfig`). tmux adds one level
+    /// per split command, so real layouts stay far below this.
+    pub const max_depth = 256;
 
     /// Parse a layout string that starts with a 4-character checksum.
     ///
@@ -111,15 +117,17 @@ pub const Layout = struct {
     /// ```
     ///
     /// Returns `SyntaxError` if the string is malformed, has trailing
-    /// characters, or contains any node with a width or height of zero.
-    /// tmux never produces zero-sized nodes, so such a string can only
-    /// come from a buggy or malicious sender.
+    /// characters, contains any node with a width or height of zero, or
+    /// nests splits deeper than `max_depth`. tmux never produces
+    /// zero-sized nodes, so such a string can only come from a buggy or
+    /// malicious sender.
     pub fn parse(alloc: Allocator, str: []const u8) ParseError!Layout {
         var offset: usize = 0;
         const root = try parseNext(
             alloc,
             str,
             &offset,
+            0,
         );
         if (offset != str.len) return error.SyntaxError;
         return root;
@@ -129,6 +137,7 @@ pub const Layout = struct {
         alloc: Allocator,
         str: []const u8,
         offset: *usize,
+        depth: usize,
     ) ParseError!Layout {
         // Find the first `x` to grab the width.
         const width: usize = if (std.mem.indexOfScalar(
@@ -215,6 +224,8 @@ pub const Layout = struct {
             },
 
             '{', '[' => |opening| content: {
+                if (depth == max_depth) return error.SyntaxError;
+
                 var nodes: std.ArrayList(Layout) = .empty;
                 defer nodes.deinit(alloc);
 
@@ -226,6 +237,7 @@ pub const Layout = struct {
                         alloc,
                         str,
                         offset,
+                        depth + 1,
                     ));
 
                     // We should not reach the end of string here because
@@ -518,6 +530,25 @@ test "parseWithChecksum zero size with valid checksum" {
     const str = "83x44,0,0[83x22,0,0,0,0x21,0,23,2]";
     try testing.expectEqualStrings("52aa", &Checksum.calculate(str).asString());
     try testing.expectError(error.SyntaxError, Layout.parseWithChecksum(arena.allocator(), "52aa," ++ str));
+}
+
+test "splits nested up to max_depth" {
+    var arena: ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var str: std.ArrayList(u8) = .empty;
+    for (0..Layout.max_depth) |_| try str.appendSlice(alloc, "1x1,0,0[");
+    try str.appendSlice(alloc, "1x1,0,0,1");
+    try str.appendNTimes(alloc, ']', Layout.max_depth);
+
+    var layout = try Layout.parse(alloc, str.items);
+    for (0..Layout.max_depth) |_| layout = layout.content.vertical[0];
+    try testing.expectEqual(1, layout.content.pane);
+
+    // One more split is rejected.
+    const deeper = try std.mem.concat(alloc, u8, &.{ "1x1,0,0[", str.items, "]" });
+    try testing.expectError(error.SyntaxError, Layout.parse(alloc, deeper));
 }
 
 test "syntax error missing x" {
