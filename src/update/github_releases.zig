@@ -2485,14 +2485,16 @@ fn validatePortableZipEntries(alloc: Allocator, zip_path: []const u8) !void {
 /// 64 KiB window reaches `unreachable` there, a segfault in ReleaseFast
 /// (#570, ziglang/zig#24963), and for any malformed deflate entry it unwraps
 /// the file reader's null error (`stream.err.?`). The checks below are
-/// std's; the inflater is WUFFS, and each entry's size and CRC-32 must match
-/// its central directory record, which std never checked.
+/// std's; the inflater is WUFFS. Unlike std, a file's decoded size and CRC-32
+/// must match its central directory record, and a directory's recorded ones
+/// must be 0 (its stored bytes are not decoded, as in std).
 fn extractPortableZip(alloc: Allocator, destination: std.fs.Dir, zip_path: []const u8) !void {
     var zip_file = try std.fs.openFileAbsolute(zip_path, .{});
     defer zip_file.close();
     var reader_buffer: [64 * 1024]u8 = undefined;
     var zip_reader = zip_file.reader(&reader_buffer);
-    // The output file's, the CRC's and the entry data's buffers.
+    // A local extra area (at most 64 KiB) first, then the output file's,
+    // the CRC's and the entry data's buffers.
     const buffers = try alloc.alloc(u8, 96 * 1024);
     defer alloc.free(buffers);
     var iterator = std.zip.Iterator.init(&zip_reader) catch return error.InvalidPortableArchive;
@@ -2546,17 +2548,19 @@ fn extractPortableZipEntry(
     {
         return error.InvalidPortableArchive;
     }
-    // Every local extra field has to fit inside the declared area, as std
-    // required (it ignores up to three trailing bytes, so this does too).
-    // Their contents are not needed: zip64 sizes are refused above.
-    try zip_reader.interface.discardAll(local.filename_len);
-    var extra_left: usize = local.extra_len;
-    while (extra_left >= 4) {
-        _ = try zip_reader.interface.takeInt(u16, .little); // header ID
-        const size = try zip_reader.interface.takeInt(u16, .little);
-        if (size > extra_left - 4) return error.InvalidPortableArchive;
-        try zip_reader.interface.discardAll(size);
-        extra_left -= 4 + size;
+    // As in std, the whole declared local extra area must be in the file,
+    // and each field must fit inside it; a tail too short for a field is
+    // ignored. Field contents are not needed, since zip64 sizes are refused
+    // above. Read the area rather than discard it: in Zig 0.15.2 a
+    // positional File.Reader's discard returns 0 at the end of the file, and
+    // discardAll then loops forever.
+    const extra = buffers[0..local.extra_len];
+    try zip_reader.seekTo(entry.file_offset + @sizeOf(std.zip.LocalFileHeader) + local.filename_len);
+    try zip_reader.interface.readSliceAll(extra);
+    var extra_offset: usize = 0;
+    while (extra_offset + 4 <= extra.len) {
+        extra_offset += 4 + std.mem.readInt(u16, extra[extra_offset + 2 ..][0..2], .little);
+        if (extra_offset > extra.len) return error.InvalidPortableArchive;
     }
 
     if (name[name.len - 1] == '/') {
@@ -4391,39 +4395,46 @@ fn writeTestPortableZip(alloc: Allocator, dir: std.fs.Dir, sub_path: []const u8,
     }
     const directory_offset = zip.written().len;
     for (entries, offsets) |entry, offset| {
-        const local = testZipLocalHeader(entry);
-        try zip.writer.writeStruct(std.zip.CentralDirectoryFileHeader{
-            .signature = std.zip.central_file_header_sig,
-            .version_made_by = 20,
-            .version_needed_to_extract = local.version_needed_to_extract,
-            .flags = local.flags,
-            .compression_method = local.compression_method,
-            .last_modification_time = local.last_modification_time,
-            .last_modification_date = local.last_modification_date,
-            .crc32 = local.crc32,
-            .compressed_size = local.compressed_size,
-            .uncompressed_size = local.uncompressed_size,
-            .filename_len = local.filename_len,
-            .extra_len = 0,
-            .comment_len = 0,
-            .disk_number = 0,
-            .internal_file_attributes = 0,
-            .external_file_attributes = 0,
-            .local_file_header_offset = offset,
-        }, .little);
+        try zip.writer.writeStruct(testZipCentralHeader(testZipLocalHeader(entry), offset), .little);
         try zip.writer.writeAll(entry.name);
     }
-    try zip.writer.writeStruct(std.zip.EndRecord{
+    try zip.writer.writeStruct(testZipEndRecord(entries.len, directory_offset, zip.written().len - directory_offset, 0), .little);
+    try dir.writeFile(.{ .sub_path = sub_path, .data = zip.written() });
+}
+
+fn testZipCentralHeader(local: std.zip.LocalFileHeader, local_offset: usize) std.zip.CentralDirectoryFileHeader {
+    return .{
+        .signature = std.zip.central_file_header_sig,
+        .version_made_by = 20,
+        .version_needed_to_extract = local.version_needed_to_extract,
+        .flags = local.flags,
+        .compression_method = local.compression_method,
+        .last_modification_time = local.last_modification_time,
+        .last_modification_date = local.last_modification_date,
+        .crc32 = local.crc32,
+        .compressed_size = local.compressed_size,
+        .uncompressed_size = local.uncompressed_size,
+        .filename_len = local.filename_len,
+        .extra_len = 0,
+        .comment_len = 0,
+        .disk_number = 0,
+        .internal_file_attributes = 0,
+        .external_file_attributes = 0,
+        .local_file_header_offset = @intCast(local_offset),
+    };
+}
+
+fn testZipEndRecord(count: usize, directory_offset: usize, directory_len: usize, comment_len: usize) std.zip.EndRecord {
+    return .{
         .signature = std.zip.end_record_sig,
         .disk_number = 0,
         .central_directory_disk_number = 0,
-        .record_count_disk = @intCast(entries.len),
-        .record_count_total = @intCast(entries.len),
-        .central_directory_size = @intCast(zip.written().len - directory_offset),
+        .record_count_disk = @intCast(count),
+        .record_count_total = @intCast(count),
+        .central_directory_size = @intCast(directory_len),
         .central_directory_offset = @intCast(directory_offset),
-        .comment_len = 0,
-    }, .little);
-    try dir.writeFile(.{ .sub_path = sub_path, .data = zip.written() });
+        .comment_len = @intCast(comment_len),
+    };
 }
 
 /// Validate and extract `sub_path` into a fresh `out` directory beside it.
@@ -4528,6 +4539,33 @@ test "portable update ZIP extraction refuses a local extra field that runs past 
         .{ .name = "noctty/overrun", .data = "overrun", .contents = "overrun", .local_extra = "\x55\x54\x08\x00\x01\x00\x00\x00\x00" },
     });
     try std.testing.expectError(error.InvalidPortableArchive, extractTestPortableZip(alloc, tmp.dir, "overrun.zip"));
+}
+
+test "portable update ZIP extraction refuses a local header cut off by the end of the archive" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    // std read the whole declared extra area before ignoring a tail too
+    // short to be a field, so an area past the end of the file failed. Here
+    // the central directory comes first and the end record's comment holds
+    // a directory's local header, which declares three extra bytes the file
+    // does not have; in the second case its name is cut short too, where
+    // skipping it with discardAll looped forever.
+    const entry: TestZipEntry = .{ .name = "noctty/directory/", .data = "", .contents = "" };
+    var local = testZipLocalHeader(entry);
+    local.extra_len = 3;
+    const directory_len = @sizeOf(std.zip.CentralDirectoryFileHeader) + entry.name.len;
+    for ([_][]const u8{ entry.name, entry.name[0..5] }) |name_left| {
+        var zip: std.Io.Writer.Allocating = .init(alloc);
+        defer zip.deinit();
+        try zip.writer.writeStruct(testZipCentralHeader(local, directory_len + @sizeOf(std.zip.EndRecord)), .little);
+        try zip.writer.writeAll(entry.name);
+        try zip.writer.writeStruct(testZipEndRecord(1, 0, directory_len, @sizeOf(std.zip.LocalFileHeader) + name_left.len), .little);
+        try zip.writer.writeStruct(local, .little);
+        try zip.writer.writeAll(name_left);
+        try tmp.dir.writeFile(.{ .sub_path = "cut.zip", .data = zip.written() });
+        try std.testing.expectError(error.EndOfStream, extractTestPortableZip(alloc, tmp.dir, "cut.zip"));
+    }
 }
 
 test "portable update ZIP extraction fails cleanly on corrupt deflate data" {
