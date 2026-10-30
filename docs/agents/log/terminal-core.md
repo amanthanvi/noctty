@@ -7,6 +7,7 @@ Corrected in other files:
 
 See also:
 - Program-reported paths (OSC 7 / 9;9 / 1337 pwd, kitty graphics `t=f`/`t=t` files) are screened before any open: the 2026-10-06 entry in launch-and-paths.md. A kitty graphics file is also validated on the opened handle, and its path is length-checked before Zig converts it: the 2026-10-30 kitty file-medium entry in launch-and-paths.md.
+- The bounded local open that the kitty file medium could not import from apprt is `os/local_path.zig` now: the 2026-10-30 PATH-POLICY part 1 entry in launch-and-paths.md.
 - Search-thread test teardown and atomic failure observations: the 2026-10-18 "The stock Zig 0.15.2 test runner" entry (#457) in test-harnesses.md; its completion-event wait and 30-second hang guard: the 2026-10-19 SEARCH100 entry (#489) in the same file.
 - A log line must not carry a directory (`stream_handler.zig`'s `terminal pwd` prints a reported one through `os/redact.zig`): the 2026-10-25 LIST-PROFILES entry in launch-and-paths.md.
 - Column reflow of a pty without scrollback: when the columns change, `Screen.resize` first clears the prompt mark of the blank rows below the cursor (`unmarkBlankRowsBelowCursor`; Clink's input-zone line feeds had marked them through `Terminal.index`), before the prompt clear that redraw shells get, so a row only that prompt clear empties keeps its mark: the 2026-10-25 CLINK-RESIZE-01 entry in conpty.md.

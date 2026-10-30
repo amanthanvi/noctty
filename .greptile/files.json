@@ -50,6 +50,7 @@
         "src/os/hostname.zig",
         "src/os/file.zig",
         "src/os/TempDir.zig",
+        "src/os/local_path.zig",
         "src/config/windows_shell.zig",
         "src/apprt/win32.zig",
         "src/apprt/win32/app.zig",
@@ -200,7 +201,6 @@
         "src/apprt/win32_link_preview.zig",
         "src/Surface.zig",
         "src/config/url.zig",
-        "src/apprt/win32/local_target.zig",
         "test/windows/link-opener-pathext-probe.ps1",
         "src/apprt/win32.zig",
         "src/apprt/win32/app.zig",
@@ -239,6 +239,7 @@
       "scope": [
         "src/apprt/win32_settings*.zig",
         "src/apprt/win32/save_target.zig",
+        "src/os/local_path.zig",
         "test/windows/settings-uia-*.ps1",
         "src/apprt/win32.zig",
         "src/apprt/win32/app.zig",

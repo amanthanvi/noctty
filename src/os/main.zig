@@ -61,6 +61,7 @@ pub const hostname = @import("hostname.zig");
 pub const i18n = @import("i18n.zig");
 pub const mach = if (builtin.os.tag.isDarwin()) @import("mach.zig") else struct {};
 pub const color_scheme = @import("color_scheme.zig");
+pub const local_path = @import("local_path.zig");
 pub const path = @import("path.zig");
 pub const passwd = @import("passwd.zig");
 pub const redact = @import("redact.zig");
@@ -160,5 +161,7 @@ test {
     } else if (comptime builtin.os.tag.isDarwin()) {
         _ = mach;
         _ = macos;
+    } else if (comptime builtin.os.tag == .windows) {
+        _ = local_path;
     }
 }

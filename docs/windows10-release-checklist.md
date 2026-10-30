@@ -403,7 +403,7 @@ to the next shell.
 
 **W10-28 Ctrl+click on a local file path (Core).** Gate: `directVolumePath` and
 `directVolumeDeviceName` (`os/windows.zig`), used by the link opener
-(`win32/local_target.zig`). Create a text file on a local drive with
+(`os/local_path.zig`). Create a text file on a local drive with
 `Set-Content "$env:TEMP\noctty-link.txt" hello`, print its path with
 `"$env:TEMP\noctty-link.txt"`, and Ctrl+click the printed path. Expected: the
 file opens in the application registered for `.txt` (Notepad on a clean image).

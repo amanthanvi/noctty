@@ -80,6 +80,13 @@ pub extern "kernel32" fn GetDriveTypeW(
     lpRootPathName: ?windows.LPCWSTR,
 ) callconv(.winapi) windows.UINT;
 
+pub extern "kernel32" fn GetFinalPathNameByHandleW(
+    hFile: windows.HANDLE,
+    lpszFilePath: [*]u16,
+    cchFilePath: windows.DWORD,
+    dwFlags: windows.DWORD,
+) callconv(.winapi) windows.DWORD;
+
 /// `GetDriveTypeW` return values, as documented at
 /// https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-getdrivetypew
 pub const DRIVE_UNKNOWN: windows.UINT = 0;

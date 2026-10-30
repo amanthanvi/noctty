@@ -4,7 +4,7 @@ const builtin = @import("builtin");
 const windows = std.os.windows;
 const shell = @import("../config/windows_shell.zig");
 const os_windows = @import("windows.zig");
-const local_target = @import("../apprt/win32/local_target.zig");
+const local_path = @import("local_path.zig");
 
 pub const failure_message = "Could not open the config file in a text editor. Check that the file is accessible and a text editor is installed, then try again.";
 
@@ -75,7 +75,7 @@ fn openWith(alloc: std.mem.Allocator, path: []const u8, comptime query_associati
     defer alloc.free(normalized);
     if (!shell.isDriveAbsolutePath(normalized) or
         os_windows.driveTypeForLetter(normalized[0]) == os_windows.DRIVE_REMOTE) return error.OpenConfigRejected;
-    const file = local_target.open(alloc, normalized, false) orelse return error.OpenConfigRejected;
+    const file = local_path.open(alloc, normalized, false) orelse return error.OpenConfigRejected;
     defer file.close();
     if ((try file.stat()).kind != .file) return error.OpenConfigRejected;
 

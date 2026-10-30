@@ -8350,11 +8350,10 @@ pub const App = struct {
         const os_windows = @import("../../os/windows.zig");
         if (os_windows.driveTypeForLetter(normalized[0]) == os_windows.DRIVE_REMOTE) return null;
 
-        const local_target = @import("local_target.zig");
         const extension = handlerExtension(std.fs.path.basename(normalized));
         // Open local reparse targets through a bounded, handle-relative walk;
         // no unchecked ancestor or symlink target may reach a share or device.
-        const file = local_target.open(alloc, normalized, extension.len == 0) orelse return null;
+        const file = internal_os.local_path.open(alloc, normalized, extension.len == 0) orelse return null;
         defer file.close();
         // The exact dispatched path had to exist for that open. Query its
         // handle: reopening the path here could follow a swapped junction.
@@ -8363,7 +8362,7 @@ pub const App = struct {
         // The open also takes a name's 8.3 alias (`CMD~1` for `.cmd`,
         // `PAYLOA~1.LIB` for `payload.library-ms`), which the shell namespace
         // types by its long name: screen that name too.
-        const long_name = local_target.entryName(alloc, normalized) orelse return null;
+        const long_name = internal_os.local_path.entryName(alloc, normalized) orelse return null;
         defer alloc.free(long_name);
         const long_extension = handlerExtension(long_name);
         if (extension.len == 0 or long_extension.len == 0) {

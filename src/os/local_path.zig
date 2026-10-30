@@ -4,9 +4,8 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const windows = std.os.windows;
-const os_windows = @import("../../os/windows.zig");
-const shell = @import("../../config/windows_shell.zig");
-const sys = @import("sys.zig");
+const os_windows = @import("windows.zig");
+const os_path = @import("path.zig");
 
 const OBJ_DONT_REPARSE = 0x1000;
 const STATUS_REPARSE_POINT_ENCOUNTERED = 0xc000050b;
@@ -329,7 +328,7 @@ fn reparseTarget(alloc: std.mem.Allocator, buffer: []const u8, tag: u32, parent:
         return std.fs.path.resolve(alloc, &.{ parent, target }) catch null;
     }
     const stripped = if (std.mem.startsWith(u8, target, "\\??\\")) target[4..] else target;
-    if (shell.isDriveAbsolutePath(stripped)) return alloc.dupe(u8, stripped) catch null;
+    if (os_path.isDriveAbsolutePath(stripped)) return alloc.dupe(u8, stripped) catch null;
     // Volume mount points (including volumes without a drive letter) use this
     // exact local-volume namespace. Other device/NT namespaces remain refused.
     if (tag == windows.IO_REPARSE_TAG_MOUNT_POINT and std.mem.startsWith(u8, stripped, "Volume{"))
@@ -339,7 +338,7 @@ fn reparseTarget(alloc: std.mem.Allocator, buffer: []const u8, tag: u32, parent:
 
 fn localRoot(path: []const u8) ?usize {
     var root_len: usize = undefined;
-    if (shell.isDriveAbsolutePath(path)) {
+    if (os_path.isDriveAbsolutePath(path)) {
         root_len = 3;
         if (std.mem.indexOfScalar(u8, path[2..], ':') != null) return null;
     } else {
@@ -363,12 +362,12 @@ fn hasLocalFinalPath(handle: windows.HANDLE) bool {
     var buffer: [windows.PATH_MAX_WIDE]u16 = undefined;
     // VOLUME_NAME_DOS normally gives a drive path. A mounted local volume may
     // have no drive letter; VOLUME_NAME_GUID still identifies its local root.
-    var count = sys.GetFinalPathNameByHandleW(handle, &buffer, buffer.len, 0);
-    if (count == 0) count = sys.GetFinalPathNameByHandleW(handle, &buffer, buffer.len, 1);
+    var count = os_windows.GetFinalPathNameByHandleW(handle, &buffer, buffer.len, 0);
+    if (count == 0) count = os_windows.GetFinalPathNameByHandleW(handle, &buffer, buffer.len, 1);
     if (count == 0 or count >= buffer.len) return false;
     const name = std.unicode.utf16LeToUtf8Alloc(std.heap.page_allocator, buffer[0..count]) catch return false;
     defer std.heap.page_allocator.free(name);
-    const path = if (name.len >= 7 and shell.isDriveAbsolutePath(name[4..]) and std.mem.startsWith(u8, name, "\\\\?\\")) name[4..] else name;
+    const path = if (name.len >= 7 and os_path.isDriveAbsolutePath(name[4..]) and std.mem.startsWith(u8, name, "\\\\?\\")) name[4..] else name;
     return localRoot(path) != null;
 }
 
@@ -646,7 +645,7 @@ test "link opener walks local volume GUID mount targets" {
     const file = try tmp.dir.openFile("safe.txt", .{});
     defer file.close();
     var wide: [windows.PATH_MAX_WIDE]u16 = undefined;
-    const count = sys.GetFinalPathNameByHandleW(file.handle, &wide, wide.len, 1);
+    const count = os_windows.GetFinalPathNameByHandleW(file.handle, &wide, wide.len, 1);
     try std.testing.expect(count > 0 and count < wide.len);
     const name = try std.unicode.utf16LeToUtf8Alloc(alloc, wide[0..count]);
     defer alloc.free(name);

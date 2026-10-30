@@ -4685,12 +4685,7 @@ fn isUncUriPath(path: []const u8) bool {
     return sep + 1 < host.len;
 }
 
-pub fn isDriveAbsolutePath(path: []const u8) bool {
-    return path.len >= 3 and
-        std.ascii.isAlphabetic(path[0]) and
-        path[1] == ':' and
-        isSeparator(path[2]);
-}
+pub const isDriveAbsolutePath = internal_os.path.isDriveAbsolutePath;
 
 /// A drive-absolute path that is not a network or device path and not on a
 /// network drive, so a metadata query cannot wait on a network timeout.

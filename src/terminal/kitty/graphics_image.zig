@@ -9,6 +9,7 @@ const fastmem = @import("../../fastmem.zig");
 const command = @import("graphics_command.zig");
 const kitty_windows = @import("windows.zig");
 const os_windows = @import("../../os/windows.zig");
+const local_path = @import("../../os/local_path.zig");
 const PageList = @import("../PageList.zig");
 const wuffs = @import("wuffs");
 const LimitedAllocator = @import("../../datastruct/main.zig").LimitedAllocator;
@@ -705,35 +706,6 @@ const TestTmpDir = struct {
     }
 };
 
-/// For Windows tests: symbolic links as an account without the symlink
-/// privilege can make them (Developer Mode).
-/// A copy of `apprt/win32/local_target.zig` `test_links.symlink`, which
-/// terminal code cannot import: change both together.
-const test_symlink = struct {
-    extern "kernel32" fn CreateSymbolicLinkW(
-        link: [*:0]const u16,
-        target: [*:0]const u16,
-        flags: u32,
-    ) callconv(.winapi) u8;
-    const SYMBOLIC_LINK_FLAG_DIRECTORY = 0x1;
-    const SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE = 0x2;
-
-    /// A directory symlink at `link` (absolute) to `target`. False when the
-    /// account may not make one.
-    fn dir(alloc: Allocator, link: []const u8, target: []const u8) !bool {
-        const link_w = try std.unicode.utf8ToUtf16LeAllocZ(alloc, link);
-        defer alloc.free(link_w);
-        const target_w = try std.unicode.utf8ToUtf16LeAllocZ(alloc, target);
-        defer alloc.free(target_w);
-        const flags = SYMBOLIC_LINK_FLAG_DIRECTORY | SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE;
-        if (CreateSymbolicLinkW(link_w, target_w, flags) != 0) return true;
-        return switch (std.os.windows.kernel32.GetLastError()) {
-            .PRIVILEGE_NOT_HELD => false,
-            else => error.Unexpected,
-        };
-    }
-};
-
 // This specifically tests we ALLOW invalid RGB data because Kitty
 // documents that this should work.
 test "image load with invalid RGB data" {
@@ -1282,11 +1254,11 @@ test "image load: the opened file is validated, not what its path names later" {
     // Open the file outside the temporary directory through the link, then
     // point the link at the allowed directory, as a cooperating process
     // could between a check of the path and a later open of it.
-    if (!try test_symlink.dir(alloc, link, outside)) return error.SkipZigTest;
+    if (!try local_path.test_links.symlink(alloc, link, outside, true)) return error.SkipZigTest;
     const held = try std.fs.cwd().openFile(linked, .{});
     defer held.close();
     try tmp_dir.dir.deleteDir("link");
-    try testing.expect(try test_symlink.dir(alloc, link, allowed));
+    try testing.expect(try local_path.test_links.symlink(alloc, link, allowed, true));
     defer tmp_dir.dir.deleteDir("link") catch {};
 
     var buf: [std.fs.max_path_bytes]u8 = undefined;
@@ -1577,7 +1549,7 @@ test "image load: windows file reached through a symlink to a share is refused" 
     defer alloc.free(share);
     const link = try std.fs.path.join(alloc, &.{ root, "link" });
     defer alloc.free(link);
-    if (!try test_symlink.dir(alloc, link, share)) return error.SkipZigTest;
+    if (!try local_path.test_links.symlink(alloc, link, share, true)) return error.SkipZigTest;
     defer tmp_dir.dir.deleteDir("link") catch {};
     const linked = try std.fs.path.join(alloc, &.{ link, "image.data" });
     defer alloc.free(linked);

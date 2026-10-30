@@ -83,6 +83,15 @@ pub fn isNetworkOrDevicePath(path: []const u8) bool {
         path[2] == '?' and isSeparator(path[3]);
 }
 
+/// Whether `path` is a Windows drive-absolute path: a letter, `:` and a
+/// separator of either kind (`C:\x`, `c:/x`).
+pub fn isDriveAbsolutePath(path: []const u8) bool {
+    return path.len >= 3 and
+        std.ascii.isAlphabetic(path[0]) and
+        path[1] == ':' and
+        isSeparator(path[2]);
+}
+
 fn isSeparator(c: u8) bool {
     return c == '/' or c == '\\';
 }

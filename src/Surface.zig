@@ -34,7 +34,6 @@ const configpkg = @import("config.zig");
 const configUrl = @import("config/url.zig");
 // The link opener's local-only lookup, used for the existence check of a link
 // so that a link into a share is never stat-ed (Windows only, see `existingPath`).
-const local_target = @import("apprt/win32/local_target.zig");
 const Duration = configpkg.Config.Duration;
 const input = @import("input.zig");
 const App = @import("App.zig");
@@ -3177,7 +3176,7 @@ fn existingPath(
     // wait on the server first. It also answers with a status where
     // `faccessatW` has an `unreachable`.
     if (builtin.os.tag == .windows) {
-        const file = local_target.open(alloc, resolved, false) orelse {
+        const file = internal_os.local_path.open(alloc, resolved, false) orelse {
             alloc.free(resolved);
             return null;
         };
