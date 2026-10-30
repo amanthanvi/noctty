@@ -538,15 +538,16 @@ pub const ScreenSearch = struct {
         while (i < results.len) : (i += 1) {
             const hl = &results[i];
 
-            // Everything from here forward we assume is invalid because
-            // our history results only get older.
+            // Only PageList.reset raises page_serial_min. Results are newest
+            // to oldest, so this result and every older one predate that
+            // reset: drop them without validating each chunk.
             if (hl.chunks.items(.serial)[0] < self.screen.pages.page_serial_min) break;
 
-            // A page can also be replaced in place, such as by compaction.
-            // In that case its old serial remains above page_serial_min, so
-            // validate the captured pointer and serial against the live list.
-            // Older results may live on unrelated pages and remain usable,
-            // so only this result is removed.
+            // Ordinary pruning, layout changes and replacements leave
+            // page_serial_min alone, so validate the captured pointer and
+            // serial pairs against the live list. Older results may live on
+            // unrelated pages and remain usable, so only this result is
+            // removed.
             if (!live.resultIsValid(hl)) {
                 hl.deinit(alloc);
                 continue;
@@ -2392,12 +2393,16 @@ test "matchRows gives the rows pointFromPin gives, across pages, pruning and cle
 
     // Prune the oldest pages without telling the search. A pruned page is
     // reused as the newest one, so its old matches map near the bottom.
-    while (list.page_serial_min == 0) : (line += 1) {
+    const first_serial = list.pages.first.?.serial;
+    while (list.pages.first.?.serial == first_serial) : (line += 1) {
         if (line > 1_000_000) return error.TestScrollbackNeverPruned;
         s.nextSlice(lines[line % lines.len]);
     }
     const oldest = search.history_results.items[search.history_results.items.len - 1];
-    try testing.expect(oldest.chunks.items(.serial)[0] < list.page_serial_min);
+    try testing.expect(!list.nodeIsValid(
+        oldest.chunks.items(.node)[0],
+        oldest.chunks.items(.serial)[0],
+    ));
     try testExpectPointFromPinRows(&search);
 
     // Once the search has caught up.

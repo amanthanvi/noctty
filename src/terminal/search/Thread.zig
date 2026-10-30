@@ -1515,8 +1515,10 @@ test "notified match rows follow streamed output while the scrollback is pruned"
     try thread.changeQuery("Fizz", .{}, 1);
     const s = &thread.search.?;
 
+    // A prune moves the first page to the end of the list.
+    const first_serial = list.pages.first.?.serial;
     var rounds: usize = 0;
-    while (rounds < 4 or list.page_serial_min == 0) : (rounds += 1) {
+    while (rounds < 4 or list.pages.first.?.serial == first_serial) : (rounds += 1) {
         if (rounds > 10_000) return error.TestScrollbackNeverPruned;
 
         // What the search thread does until the search completes.

@@ -121,22 +121,28 @@ pool: MemoryPool,
 /// The list of pages in the screen.
 pages: List,
 
-/// A monotonically increasing serial number that is incremented each
-/// time a page is allocated or reused as new. The serial is assigned to
-/// the Node.
+/// The next globally unique page generation for this PageList. A generation
+/// is assigned whenever a page is allocated or reused as new.
 ///
 /// The serial number can be used to detect whether the page is identical
 /// to the page that was originally referenced by a pointer. Since we reuse
 /// and pool memory, pointer stability is not guaranteed, but the serial
-/// will always be different for different allocations.
+/// will always be different for different page generations.
 ///
 /// Developer note: we never do overflow checking on this. If we created
 /// a new page every second it'd take 584 billion years to overflow. We're
 /// going to risk it.
 page_serial: u64,
 
-/// The lowest still valid serial number that could exist. This allows
-/// for quick comparisons to find invalid pages in references.
+/// A conservative lower bound on live page generations. This is an epoch for
+/// whole-list invalidation, not the generation of the first page or the exact
+/// minimum live generation. Page generations are not monotonic in list order:
+/// replacement and split operations can put a fresh generation before older
+/// live pages.
+///
+/// A generation below this value is definitely invalid. A generation at or
+/// above it is only potentially valid and must still be checked against the
+/// live list with `nodeIsValid` before its coordinates are used.
 page_serial_min: u64,
 
 /// Generation of row coordinates after structural edits that can keep page
@@ -3385,11 +3391,9 @@ pub fn grow(self: *PageList) Allocator.Error!?*List.Node {
         self.pages.insertAfter(last, first);
         self.total_rows += 1;
 
-        // We also need to reset the serial number. Since this is the only
-        // place we ever reuse a serial number, we also can safely set
-        // page_serial_min to be one more than the old serial because we
-        // only ever prune the oldest pages.
-        self.page_serial_min = first.serial + 1;
+        // Reusing the node gives it a fresh generation. Do not advance
+        // page_serial_min here: generations are not monotonic in list order,
+        // so older live successors may have lower generations.
         first.serial = self.page_serial;
         self.page_serial += 1;
 
@@ -4083,9 +4087,8 @@ pub fn eraseActive(
 /// and the page becomes underutilized (size < capacity).
 ///
 /// Callers must ensure that the erased range only removes pages from
-/// the front or back of the linked list, never the middle. Middle-page
-/// erasure would create serial gaps that page_serial_min cannot
-/// represent, leaving dangling references in consumers such as search.
+/// the front or back of the linked list, never the middle. The pin and row
+/// accounting in this operation is only defined for those boundary ranges.
 /// Use the public eraseHistory/eraseActive wrappers which enforce this.
 fn eraseRows(
     self: *PageList,
@@ -4212,16 +4215,9 @@ fn erasePage(self: *PageList, node: *List.Node) void {
     // Must not be the final page.
     assert(node.next != null or node.prev != null);
 
-    // We only support erasing from the front or back, never the middle.
-    // Middle erasure would create serial gaps that page_serial_min can't
-    // represent. If this ever needs to change, we'll need a more
-    // sophisticated invalidation mechanism.
+    // We only support erasing from the front or back, never the middle. The
+    // public erase operations maintain this contract by construction.
     assert(node.prev == null or node.next == null);
-
-    // If we're erasing the first page, update page_serial_min so that
-    // any external references holding this page's serial will know it
-    // has been invalidated.
-    if (node.prev == null) self.page_serial_min = node.next.?.serial;
 
     // Update any tracked pins to move to the previous or next page.
     const pin_keys = self.tracked_pins.keys();
@@ -6311,6 +6307,103 @@ test "PageList grow allows exceeding max size for active area" {
     // enough for the active area.
     _ = try s.grow();
     try testing.expectEqual(start_pages + 1, s.totalPages());
+}
+
+fn fillLastPageForTest(self: *PageList) !void {
+    const last = self.pages.last.?;
+    while (last.data.size.rows < last.data.capacity.rows) _ = try self.grow();
+}
+
+fn expectLivePageSerialsValidForTest(self: *const PageList) !void {
+    const testing = std.testing;
+    var node = self.pages.first;
+    while (node) |live| : (node = live.next) {
+        try testing.expect(live.serial >= self.page_serial_min);
+        try testing.expect(live.serial < self.page_serial);
+        try testing.expect(self.nodeIsValid(live, live.serial));
+    }
+}
+
+test "PageList repeated bounded pruning after split preserves live serials" {
+    const testing = std.testing;
+
+    var s = try init(
+        testing.allocator,
+        80,
+        24,
+        3 * PagePool.item_size,
+    );
+    defer s.deinit();
+
+    while (s.totalPages() < 3) _ = try s.grow();
+    const first = s.pages.first.?;
+    try s.split(.{
+        .node = first,
+        .y = first.data.size.rows / 2,
+        .x = 0,
+    });
+
+    // The split target has a fresh serial but precedes older successor pages.
+    // Prune both the old source and then that target to exercise the serial
+    // floor after list order has become non-monotonic.
+    for (0..2) |_| {
+        while (s.pages.last.?.data.size.rows < s.pages.last.?.data.capacity.rows) {
+            _ = try s.grow();
+        }
+        _ = try s.grow();
+
+        try s.expectLivePageSerialsValidForTest();
+    }
+}
+
+test "PageList bounded pruning after front replacement preserves live serials" {
+    const testing = std.testing;
+
+    var s = try init(
+        testing.allocator,
+        80,
+        24,
+        2 * PagePool.item_size,
+    );
+    defer s.deinit();
+
+    while (s.totalPages() < 2) _ = try s.grow();
+    const old = s.pages.first.?;
+    const old_serial = old.serial;
+    const replacement = try s.increaseCapacity(old, null);
+    try testing.expect(replacement != old);
+    try testing.expect(!s.nodeIsValid(old, old_serial));
+
+    try s.fillLastPageForTest();
+    _ = try s.grow();
+
+    try s.expectLivePageSerialsValidForTest();
+}
+
+test "PageList bounded pruning after middle replacement preserves live serials" {
+    const testing = std.testing;
+
+    var s = try init(
+        testing.allocator,
+        80,
+        24,
+        3 * PagePool.item_size,
+    );
+    defer s.deinit();
+
+    while (s.totalPages() < 3) _ = try s.grow();
+    const old = s.pages.first.?.next.?;
+    const old_serial = old.serial;
+    const replacement = try s.increaseCapacity(old, null);
+    try testing.expect(replacement != old);
+    try testing.expect(!s.nodeIsValid(old, old_serial));
+
+    // Prune the original first page and then the fresh middle replacement.
+    for (0..2) |_| {
+        try s.fillLastPageForTest();
+        _ = try s.grow();
+        try s.expectLivePageSerialsValidForTest();
+    }
 }
 
 test "PageList grow prune required with a single page" {
@@ -14757,19 +14850,43 @@ test "PageList reset invalidates stale untracked refs even if node memory is reu
     var s = try init(alloc, 80, 24, null);
     defer s.deinit();
 
-    const old_serial = s.pages.first.?.serial;
-    try testing.expect(old_serial >= s.page_serial_min);
-    try testing.expect(old_serial < s.page_serial);
+    var stale_nodes: [page_preheat * 4]*List.Node = undefined;
+    var stale_serials: [stale_nodes.len]u64 = undefined;
+    var stale_len: usize = 0;
+    var reused: ?struct { *List.Node, u64 } = null;
 
-    s.reset();
+    while (stale_len < stale_nodes.len and reused == null) {
+        const old_node = s.pages.first.?;
+        const old_serial = old_node.serial;
+        try testing.expect(old_serial >= s.page_serial_min);
+        try testing.expect(old_serial < s.page_serial);
+        stale_nodes[stale_len] = old_node;
+        stale_serials[stale_len] = old_serial;
+        stale_len += 1;
 
-    // The important safety property is that stale serials are rejected before
-    // the node pointer is inspected. Reset rebuilds the page list from the
-    // pools, so old untracked refs may contain node pointers that are no
-    // longer safe to dereference.
+        s.reset();
+
+        const new_node = s.pages.first.?;
+        for (stale_nodes[0..stale_len], stale_serials[0..stale_len]) |node, serial| {
+            if (node == new_node) {
+                reused = .{ node, serial };
+                break;
+            }
+        }
+    }
+
+    try testing.expect(reused != null);
+    const old_node, const old_serial = reused.?;
+    const new_node = s.pages.first.?;
+    const new_serial = new_node.serial;
+
+    // Reset advances the epoch before rebuilding from the node pool. Reject
+    // the stale generation before inspecting its pointer, even when that exact
+    // address now belongs to a new live generation.
+    try testing.expectEqual(old_node, new_node);
     try testing.expect(old_serial < s.page_serial_min);
-
-    const new_serial = s.pages.first.?.serial;
+    try testing.expect(!s.nodeIsValid(old_node, old_serial));
+    try testing.expect(s.nodeIsValid(new_node, new_serial));
     try testing.expect(new_serial >= s.page_serial_min);
     try testing.expect(new_serial < s.page_serial);
 }
