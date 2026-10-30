@@ -6824,6 +6824,10 @@ fn maybePromptClick(self: *Surface) !bool {
     // prompt clicks because we can't move if we're not in a prompt!
     if (!t.cursorIsAtPrompt()) return false;
 
+    // A press reported under mouse tracking resets the click count, and its
+    // release must be reported too rather than moving the cursor.
+    if (self.mouse.left_click_count == 0) return false;
+
     // If we have a selection currently, then releasing the mouse
     // completes the selection and we don't do prompt moving. I don't
     // love this logic, I think it should be generalized to "if the
@@ -6940,6 +6944,47 @@ fn promptClickRelativeRow(
     const prompt_y = pages.pointFromPin(.screen, prompt_pin).?.screen.y;
     const click_y = pages.pointFromPin(.screen, click_pin).?.screen.y;
     return click_y - prompt_y + 1;
+}
+
+test "Surface: the release of a press reported to a program is not a prompt click" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var t: terminal.Terminal = try .init(alloc, .{ .cols = 20, .rows = 4 });
+    defer t.deinit(alloc);
+    {
+        var stream = t.vtStream();
+        defer stream.deinit();
+        stream.nextSlice("\x1b]133;A;cl=line\x07> \x1b]133;B\x07hello");
+    }
+    var mutex: std.Thread.Mutex = .{};
+
+    // Only the fields a prompt click reads are set; the rest is zeroed.
+    const rt_surface = try alloc.create(apprt.runtime.Surface);
+    defer alloc.destroy(rt_surface);
+    @memset(std.mem.asBytes(rt_surface), 0);
+    const surface = try alloc.create(Surface);
+    defer alloc.destroy(surface);
+    @memset(std.mem.asBytes(surface), 0);
+    surface.rt_surface = rt_surface;
+    surface.renderer_state.mutex = &mutex;
+    surface.renderer_state.terminal = &t;
+    surface.config.cursor_click_to_move = true;
+    surface.size = .{
+        .screen = .{ .width = 200, .height = 80 },
+        .cell = .{ .width = 10, .height = 20 },
+        .padding = .{},
+    };
+    // A prompt click writes arrow keys; read-only drops them, so no IO
+    // thread is needed.
+    surface.readonly = true;
+
+    // Reporting a press zeroes the click count: its release is reported too.
+    try testing.expect(!try surface.maybePromptClick());
+
+    // An unreported click at the prompt moves the cursor.
+    surface.mouse.left_click_count = 1;
+    try testing.expect(try surface.maybePromptClick());
 }
 
 const Link = struct {
