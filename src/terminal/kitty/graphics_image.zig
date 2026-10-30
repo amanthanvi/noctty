@@ -68,6 +68,10 @@ pub const LoadingImage = struct {
         // These can be overwritten by the data loading process. For example,
         // PNG loading sets the width/height from the data.
         const t = cmd.transmission().?;
+
+        // Validated here rather than while parsing so the response can
+        // carry the image id, matching Kitty's initialize_load_data.
+        if (t.format_unknown) return error.UnsupportedFormat;
         var result: LoadingImage = .{
             .image = .{
                 .id = t.image_id,

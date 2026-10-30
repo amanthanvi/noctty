@@ -191,13 +191,13 @@ pub const Parser = struct {
             else => return error.InvalidFormat,
         };
 
-        // Determine our quiet value
+        // Determine our quiet value. The spec specifies 0 and 1 but Kitty
+        // allows anything greater than 1 to suppress.
         const quiet: Command.Quiet = if (self.kv.get('q')) |v| quiet: {
             break :quiet switch (v) {
                 0 => .no,
                 1 => .ok,
-                2 => .failures,
-                else => return error.InvalidFormat,
+                else => .failures,
             };
         } else .no;
 
@@ -440,6 +440,11 @@ pub const Command = struct {
 
 pub const Transmission = struct {
     format: Format = .rgba, // f
+    /// Set when "f" carried a value we don't recognize. Kitty rejects these
+    /// while handling the command so the EINVAL response can carry the image
+    /// id, so we defer to `LoadingImage.init`. `format` is meaningless when
+    /// this is set.
+    format_unknown: bool = false,
     medium: Medium = .direct, // t
     width: u32 = 0, // s
     height: u32 = 0, // v
@@ -504,9 +509,13 @@ pub const Transmission = struct {
         if (kv.get('f')) |v| {
             result.format = switch (v) {
                 24 => .rgb,
-                32 => .rgba,
+                0, 32 => .rgba,
                 100 => .png,
-                else => return error.InvalidFormat,
+                else => unknown: {
+                    // Defer returning an error until the image is processed.
+                    result.format_unknown = true;
+                    break :unknown .rgba;
+                },
             };
         }
 
@@ -653,19 +662,13 @@ pub const Display = struct {
         }
 
         if (kv.get('C')) |v| {
-            result.cursor_movement = switch (v) {
-                0 => .after,
-                1 => .none,
-                else => return error.InvalidFormat,
-            };
+            // Kitty only tests this against 1 so any other value moves the cursor.
+            result.cursor_movement = if (v == 1) .none else .after;
         }
 
         if (kv.get('U')) |v| {
-            result.virtual_placement = switch (v) {
-                0 => false,
-                1 => true,
-                else => return error.InvalidFormat,
-            };
+            // Kitty stores this in a bool, so any non-zero value is virtual.
+            result.virtual_placement = v != 0;
         }
 
         if (kv.get('z')) |v| {
@@ -750,11 +753,8 @@ pub const AnimationFrameLoading = struct {
         }
 
         if (kv.get('X')) |v| {
-            result.composition_mode = switch (v) {
-                0 => .alpha_blend,
-                1 => .overwrite,
-                else => return error.InvalidFormat,
-            };
+            // Kitty tests this only against 1
+            result.composition_mode = if (v == 1) .overwrite else .alpha_blend;
         }
 
         if (kv.get('Y')) |v| {
@@ -827,11 +827,8 @@ pub const AnimationFrameComposition = struct {
         }
 
         if (kv.get('C')) |v| {
-            result.composition_mode = switch (v) {
-                0 => .alpha_blend,
-                1 => .overwrite,
-                else => return error.InvalidFormat,
-            };
+            // Kitty tests this against zero for compose so any non-zero overwrites
+            result.composition_mode = if (v == 0) .alpha_blend else .overwrite;
         }
 
         return result;
@@ -871,12 +868,13 @@ pub const AnimationControl = struct {
         }
 
         if (kv.get('s')) |v| {
+            // Kitty ignores values it doesn't know, leaving the animation
+            // state untouched, which is what `.invalid` means here.
             result.action = switch (v) {
-                0 => .invalid,
                 1 => .stop,
                 2 => .run_wait,
                 3 => .run,
-                else => return error.InvalidFormat,
+                else => .invalid,
             };
         }
 
@@ -1533,4 +1531,147 @@ test "delete range command 6" {
     try testing.expect(!range.delete);
     try testing.expectEqual(@as(u32, 0), range.first);
     try testing.expectEqual(@as(u32, 0), range.last);
+}
+
+// Kitty range-checks non-flag keys while handling the command, not while
+// parsing, so a bad value never drops the command (which would make a
+// response impossible even when the client gave an id). The flag keys
+// "a", "d", "t" and "o" are the exception.
+
+test "unknown format value is deferred to execution" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    const command = try Parser.parseString(alloc, "a=t,f=42,i=31,s=1,v=1");
+    defer command.deinit(alloc);
+
+    try testing.expect(command.control == .transmit);
+    try testing.expect(command.control.transmit.format_unknown);
+    try testing.expectEqual(@as(u32, 31), command.control.transmit.image_id);
+}
+
+test "zero format value is rgba" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    const command = try Parser.parseString(alloc, "a=t,f=0,i=31,s=1,v=1");
+    defer command.deinit(alloc);
+
+    try testing.expect(command.control == .transmit);
+    const v = command.control.transmit;
+    try testing.expect(!v.format_unknown);
+    try testing.expectEqual(Transmission.Format.rgba, v.format);
+}
+
+test "known format values are not unknown" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    for ([_]struct { []const u8, Transmission.Format }{
+        .{ "f=24", .rgb },
+        .{ "f=32", .rgba },
+        .{ "f=100", .png },
+    }) |entry| {
+        const command = try Parser.parseString(alloc, entry[0]);
+        defer command.deinit(alloc);
+
+        const v = command.control.transmit;
+        try testing.expect(!v.format_unknown);
+        try testing.expectEqual(entry[1], v.format);
+    }
+}
+
+test "quiet value above two suppresses all responses" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    const command = try Parser.parseString(alloc, "a=t,q=3,i=31,s=1,v=1");
+    defer command.deinit(alloc);
+
+    try testing.expectEqual(Command.Quiet.failures, command.quiet);
+}
+
+test "cursor movement value above one moves the cursor" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    const command = try Parser.parseString(alloc, "a=p,i=31,C=2");
+    defer command.deinit(alloc);
+
+    try testing.expect(command.control == .display);
+    try testing.expectEqual(
+        Display.CursorMovement.after,
+        command.control.display.cursor_movement,
+    );
+}
+
+test "virtual placement value above one is virtual" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    const command = try Parser.parseString(alloc, "a=p,i=31,U=2");
+    defer command.deinit(alloc);
+
+    try testing.expect(command.control == .display);
+    try testing.expect(command.control.display.virtual_placement);
+}
+
+test "animation frame composition value above one alpha blends" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    const command = try Parser.parseString(alloc, "a=f,i=31,X=2");
+    defer command.deinit(alloc);
+
+    try testing.expect(command.control == .transmit_animation_frame);
+    try testing.expectEqual(
+        CompositionMode.alpha_blend,
+        command.control.transmit_animation_frame.composition_mode,
+    );
+}
+
+test "animation compose value above one overwrites" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    const command = try Parser.parseString(alloc, "a=c,i=31,C=2");
+    defer command.deinit(alloc);
+
+    try testing.expect(command.control == .compose_animation);
+    try testing.expectEqual(
+        CompositionMode.overwrite,
+        command.control.compose_animation.composition_mode,
+    );
+}
+
+test "animation control action above three is ignored" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    const command = try Parser.parseString(alloc, "a=a,i=31,s=4");
+    defer command.deinit(alloc);
+
+    try testing.expect(command.control == .control_animation);
+    try testing.expectEqual(
+        AnimationControl.AnimationAction.invalid,
+        command.control.control_animation.action,
+    );
+}
+
+test "unknown flag key values still fail parsing" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    // Kitty rejects these while parsing too. See gen/apc_parsers.py.
+    for ([_][]const u8{
+        "a=z,i=31", // action
+        "a=d,d=w,i=31", // delete action
+        "a=t,t=q,i=31", // transmission medium
+        "a=t,o=q,i=31", // compression
+    }) |input| {
+        try testing.expectError(
+            error.InvalidFormat,
+            Parser.parseString(alloc, input),
+        );
+    }
 }
