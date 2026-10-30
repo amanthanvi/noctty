@@ -71,7 +71,10 @@ pub fn allocTmpDir(allocator: std.mem.Allocator) std.mem.Allocator.Error![]const
         if (len > 0) {
             // Trim the UTF-16 string before encoding as UT8-8 so that the
             // returned slice's length matches its underlying allocation.
-            const trimmed = std.mem.trimEnd(u16, buf[0..len], &.{std.fs.path.sep});
+            var trimmed = std.mem.trimEnd(u16, buf[0..len], &.{std.fs.path.sep});
+            // A drive root keeps its separator: "C:" is the drive's current
+            // directory, not its root.
+            if (trimmed.len > 0 and trimmed[trimmed.len - 1] == ':') trimmed = buf[0 .. trimmed.len + 1];
             if (std.unicode.utf16LeToUtf8Alloc(allocator, trimmed)) |utf8| {
                 return utf8;
             } else |e| switch (e) {
@@ -120,4 +123,26 @@ test "allocTmpDir without TMP follows GetTempPathW to TEMP" {
     const dir = try allocTmpDir(alloc);
     defer freeTmpDir(alloc, dir);
     try testing.expectEqualStrings("C:\\noctty-test-temp", dir);
+}
+
+test "allocTmpDir keeps the separator of a drive root" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    const kernel32 = std.os.windows.kernel32;
+    const tmp_name = std.unicode.utf8ToUtf16LeStringLiteral("TMP");
+
+    const saved_tmp = if (std.process.getenvW(tmp_name)) |v| try alloc.dupeZ(u16, v) else null;
+    defer if (saved_tmp) |v| alloc.free(v);
+    defer _ = kernel32.SetEnvironmentVariableW(tmp_name, if (saved_tmp) |v| v.ptr else null);
+
+    try testing.expect(kernel32.SetEnvironmentVariableW(
+        tmp_name,
+        std.unicode.utf8ToUtf16LeStringLiteral("C:\\"),
+    ) != 0);
+
+    const dir = try allocTmpDir(alloc);
+    defer freeTmpDir(alloc, dir);
+    try testing.expectEqualStrings("C:\\", dir);
 }
