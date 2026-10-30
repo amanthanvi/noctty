@@ -21920,7 +21920,6 @@ test "settings the opacity trackbar draws its channel and thumb in the theme's c
             const edit = settings.fields.edit_bg_opacity.?;
             // Away from the ends, so the channel shows on both sides.
             typeInto(edit, "0.5");
-            var rails: usize = 0;
             for ([_]u32{ 96, 144, 192, 288 }) |dpi| for ([_]bool{ false, true }) |dark| {
                 errdefer std.debug.print("settings trackbar at {d} DPI, {s}\n", .{ dpi, if (dark) "dark" else "light" });
                 dialog_test.simulateDpi(hwnd, dpi);
@@ -21944,22 +21943,23 @@ test "settings the opacity trackbar draws its channel and thumb in the theme's c
                 try std.testing.expectEqual(colors.slider_thumb, colorAt(capture, at.left + @divTrunc(thumb.left + thumb.right, 2), middle));
                 // Where there is channel beside the thumb to see: a runner's
                 // 1024 x 768 screen holds the window to 341 DIP at 288 DPI,
-                // where the trackbar is little wider than its thumb.
+                // where the trackbar is little wider than its thumb. Below
+                // 288 DPI there is room on both sides, and both are read.
                 const channel_y = at.top + @divTrunc(channel.top + channel.bottom, 2);
+                var sides: u8 = 0;
                 if (thumb.left - channel.left >= 4) {
                     try std.testing.expectEqual(colors.slider_rail, colorAt(capture, at.left + @divTrunc(channel.left + thumb.left, 2), channel_y));
-                    rails += 1;
+                    sides += 1;
                 }
                 if (channel.right - thumb.right >= 4) {
                     try std.testing.expectEqual(colors.slider_rail, colorAt(capture, at.left + @divTrunc(thumb.right + channel.right, 2), channel_y));
-                    rails += 1;
+                    sides += 1;
                 }
+                if (dpi < 288) try std.testing.expectEqual(@as(u8, 2), sides);
                 // The thumb's middle is the field's.
                 const field = dialog_test.rectIn(hwnd, edit);
                 try std.testing.expect(@abs(middle - @divTrunc(field.top + field.bottom, 2)) <= 1);
             };
-            // Both sides at 96, 144 and 192 DPI at least, in light and dark.
-            try std.testing.expect(rails >= 3 * 2 * 2);
             // High Contrast: the stock trackbar, in system colours.
             settings.handle.highContrast = &highContrast;
             settings.themeChanged();
