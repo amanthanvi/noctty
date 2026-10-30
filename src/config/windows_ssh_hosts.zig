@@ -8,7 +8,13 @@ pub const max_hosts: usize = 256;
 pub const max_file_size: usize = 1024 * 1024;
 pub const max_alias_len: usize = 255;
 pub const max_include_files: usize = 16;
-const ssh_config_read_budget_ns: u64 = 50 * std.time.ns_per_ms;
+/// Wall-clock budget for one discovery's config reads. Tests read small
+/// local files on a machine that may be busy compiling, where 50 ms can pass
+/// before the reader thread runs; the bounded-read tests pass their own.
+const ssh_config_read_budget_ns: u64 = if (builtin.is_test)
+    10 * std.time.ns_per_s
+else
+    50 * std.time.ns_per_ms;
 
 var read_warning_mutex: std.Thread.Mutex = .{};
 var read_warning_logged = false;
