@@ -1046,16 +1046,18 @@ pub const Delete = struct {
                 },
 
                 'r', 'R' => blk: {
-                    const x = kv.get('x') orelse 0;
-                    const y = kv.get('y') orelse return error.InvalidFormat;
-                    if (x > y) return error.InvalidFormat;
-                    break :blk .{
-                        .range = .{
-                            .delete = what == 'R',
-                            .first = x,
-                            .last = y,
-                        },
-                    };
+                    // Both bounds default to zero when omitted and no
+                    // validation is performed; an inverted or zero range
+                    // simply matches no images.
+                    var result: Action = .{ .range = .{ .delete = what == 'R' } };
+                    if (kv.get('x')) |v| {
+                        result.range.first = v;
+                    }
+                    if (kv.get('y')) |v| {
+                        result.range.last = v;
+                    }
+
+                    break :blk result;
                 },
 
                 'x', 'X' => blk: {
@@ -1448,6 +1450,9 @@ test "delete range command 2" {
 }
 
 test "delete range command 3" {
+    // An inverted range is accepted; it simply matches no images. This
+    // matches kitty, which does no validation and filters with
+    // `x <= image_id <= y`.
     const testing = std.testing;
     const alloc = testing.allocator;
     var p = Parser.init(alloc, 1024 * 1024);
@@ -1455,10 +1460,21 @@ test "delete range command 3" {
 
     const input = "a=d,d=R,x=5,y=4";
     for (input) |c| try p.feed(c);
-    try testing.expectError(error.InvalidFormat, p.complete(alloc));
+    const command = try p.complete(alloc);
+    defer command.deinit(alloc);
+
+    try testing.expect(command.control == .delete);
+    const v = command.control.delete.action;
+    try testing.expect(v == .range);
+    const range = v.range;
+    try testing.expect(range.delete);
+    try testing.expectEqual(@as(u32, 5), range.first);
+    try testing.expectEqual(@as(u32, 4), range.last);
 }
 
 test "delete range command 4" {
+    // An omitted upper bound defaults to zero, which matches no images
+    // since image IDs are always non-zero.
     const testing = std.testing;
     const alloc = testing.allocator;
     var p = Parser.init(alloc, 1024 * 1024);
@@ -1466,7 +1482,16 @@ test "delete range command 4" {
 
     const input = "a=d,d=R,x=5";
     for (input) |c| try p.feed(c);
-    try testing.expectError(error.InvalidFormat, p.complete(alloc));
+    const command = try p.complete(alloc);
+    defer command.deinit(alloc);
+
+    try testing.expect(command.control == .delete);
+    const v = command.control.delete.action;
+    try testing.expect(v == .range);
+    const range = v.range;
+    try testing.expect(range.delete);
+    try testing.expectEqual(@as(u32, 5), range.first);
+    try testing.expectEqual(@as(u32, 0), range.last);
 }
 
 test "delete range command 5" {
@@ -1487,4 +1512,25 @@ test "delete range command 5" {
     try testing.expect(range.delete);
     try testing.expectEqual(@as(u32, 0), range.first);
     try testing.expectEqual(@as(u32, 5), range.last);
+}
+
+test "delete range command 6" {
+    // Both bounds omitted defaults to the empty range [0, 0].
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    var p = Parser.init(alloc, 1024 * 1024);
+    defer p.deinit();
+
+    const input = "a=d,d=r";
+    for (input) |c| try p.feed(c);
+    const command = try p.complete(alloc);
+    defer command.deinit(alloc);
+
+    try testing.expect(command.control == .delete);
+    const v = command.control.delete.action;
+    try testing.expect(v == .range);
+    const range = v.range;
+    try testing.expect(!range.delete);
+    try testing.expectEqual(@as(u32, 0), range.first);
+    try testing.expectEqual(@as(u32, 0), range.last);
 }

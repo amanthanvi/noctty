@@ -661,15 +661,10 @@ pub const ImageStorage = struct {
             },
 
             .range => |v| range: {
-                // The lower bound defaults to zero when x is omitted.
-                if (v.last == 0) {
-                    log.warn("delete range upper bound must be greater than zero", .{});
-                    break :range;
-                }
-                if (v.first > v.last) {
-                    log.warn("delete range 'x' ({}) must be less than or equal to 'y' ({})", .{ v.first, v.last });
-                    break :range;
-                }
+                // Both bounds default to zero when omitted. An inverted range
+                // or a zero upper bound is not an error, it just selects
+                // nothing: image IDs are always non-zero.
+                if (v.last == 0 or v.first > v.last) break :range;
 
                 // Mark dirty to force redraw
                 self.dirty = true;
@@ -2318,6 +2313,41 @@ test "storage: uppercase range deletes unplaced image data" {
     });
     try testing.expectEqual(@as(usize, 1), s.images.count());
     try testing.expect(s.images.contains(3));
+}
+
+test "storage: delete images by empty range" {
+    // Ranges that select nothing are a silent no-op, matching kitty, which
+    // performs no validation and filters with `x <= image_id <= y`.
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    var t = try terminal.Terminal.init(alloc, .{ .rows = 3, .cols = 3 });
+    defer t.deinit(alloc);
+    const tracked = t.screens.active.pages.countTrackedPins();
+
+    var s: ImageStorage = .{};
+    defer s.deinit(alloc, t.screens.active);
+    try s.addImage(alloc, t.screens.active, .{ .id = 1 });
+    try s.addImage(alloc, t.screens.active, .{ .id = 2 });
+    try s.addPlacement(alloc, t.screens.active, 1, 1, .{ .location = .{ .pin = try trackPin(&t, .{ .x = 1, .y = 1 }) } });
+    try s.addPlacement(alloc, t.screens.active, 2, 1, .{ .location = .{ .pin = try trackPin(&t, .{ .x = 1, .y = 1 }) } });
+
+    // Inverted range.
+    s.delete(alloc, &t, .{ .range = .{ .delete = true, .first = 5, .last = 4 } });
+    try testing.expectEqual(@as(usize, 2), s.images.count());
+    try testing.expectEqual(@as(usize, 2), s.placements.count());
+
+    // Upper bound omitted, so it defaults to zero.
+    s.delete(alloc, &t, .{ .range = .{ .delete = true, .first = 5, .last = 0 } });
+    try testing.expectEqual(@as(usize, 2), s.images.count());
+    try testing.expectEqual(@as(usize, 2), s.placements.count());
+
+    // Both bounds omitted. Image IDs are never zero so this matches nothing.
+    s.delete(alloc, &t, .{ .range = .{ .delete = true, .first = 0, .last = 0 } });
+    try testing.expectEqual(@as(usize, 2), s.images.count());
+    try testing.expectEqual(@as(usize, 2), s.placements.count());
+
+    // Both placements survive, so both of their pins are still tracked.
+    try testing.expectEqual(tracked + 2, t.screens.active.pages.countTrackedPins());
 }
 
 test "storage: erase display preserves scrollback and reclaims unplaced images" {
