@@ -1449,11 +1449,17 @@ pub inline fn scrollClear(self: *Screen) !void {
         }
     }
 
-    // A grow that fails partway can still have moved the cursor pin.
-    errdefer self.cursorReload();
+    // Reload the cursor on both paths, before the style and hyperlink
+    // restore above: a grow that fails partway can still have moved the
+    // cursor pin. A prune marks the cursor pin it moves as garbage. The pin
+    // does point at a real location, and cursorReload keeps it when that
+    // location is in the active area, so clear the flag.
+    defer {
+        self.cursor.page_pin.garbage = false;
+        self.cursorReload();
+    }
 
     try self.pages.scrollClear();
-    self.cursorReload();
 
     if (comptime build_options.kitty_graphics) {
         // No matter what, scrolling marks our image state as dirty since
@@ -4191,6 +4197,7 @@ test "Screen scrollClear that prunes the cursor page keeps cursor style and hype
     // top-left is on the page the cursor pin was moved to.
     try testing.expect(s.pages.pages.first.? != old_first);
     try testing.expect(s.cursor.page_pin.node == s.pages.pages.first.?);
+    try testing.expect(!s.cursor.page_pin.garbage);
 
     const page = &s.cursor.page_pin.node.data;
     try testing.expect(s.cursor.style_id != style.default_id);
@@ -4238,6 +4245,7 @@ test "Screen scrollClear that prunes the cursor page before a partial page" {
     // and the cursor ended up on a later page.
     try testing.expect(s.pages.pages.first.? == middle);
     try testing.expect(s.cursor.page_pin.node != middle);
+    try testing.expect(!s.cursor.page_pin.garbage);
 
     const page = &s.cursor.page_pin.node.data;
     try testing.expect(s.cursor.style_id != style.default_id);
@@ -4254,6 +4262,60 @@ test "Screen scrollClear that prunes the cursor page before a partial page" {
 
     // Printing attaches the style and hyperlink to a cell.
     try s.testWriteString("B");
+}
+
+// The prune moves the cursor pin to the top-left of the new first page and
+// marks it garbage. When that cell is also the new active top-left, the
+// cursor keeps the pin, and Kitty placements and prompt records copy the
+// cursor pin with its flag.
+test "Screen scrollClear that prunes the cursor page leaves the cursor pin live" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    const rows = 30;
+    var s = try init(alloc, .{ .cols = 2000, .rows = rows, .max_scrollback = 1 });
+    defer s.deinit();
+    const page_rows = s.pages.pages.first.?.data.capacity.rows;
+    try testing.expect(page_rows < rows - 1);
+
+    // Two full pages of blank rows.
+    for (0..2 * page_rows - 1) |_| try s.testWriteString("\n");
+    try testing.expectEqual(@as(usize, 2), s.pages.totalPages());
+    try testing.expectEqual(page_rows, s.pages.pages.last.?.data.size.rows);
+
+    // Split the first page so that its last row is the active top-left and
+    // the middle page holds the rest of the active area above the full
+    // last page.
+    try s.pages.split(.{
+        .node = s.pages.pages.first.?,
+        .y = 2 * page_rows - rows + 1,
+    });
+    const old_first = s.pages.pages.first.?;
+    const middle = old_first.next.?;
+
+    // Only the top row has text, so the clear grows one row, and that grow
+    // prunes the first page.
+    s.cursorAbsolute(0, 0);
+    try testing.expect(s.cursor.page_pin.node == old_first);
+    try s.testWriteString("x");
+    s.cursorAbsolute(0, 0);
+    try s.setAttribute(.{ .bold = {} });
+    try s.startHyperlink("https://example.com/", null);
+
+    try s.scrollClear();
+
+    try testing.expect(s.pages.pages.first.? == middle);
+    try testing.expect(s.cursor.page_pin.node == middle);
+    try testing.expectEqual(@as(size.CellCountInt, 0), s.cursor.x);
+    try testing.expectEqual(@as(size.CellCountInt, 0), s.cursor.y);
+    try testing.expect(!s.cursor.page_pin.garbage);
+
+    const page = &s.cursor.page_pin.node.data;
+    try testing.expect(page.styles.refCount(page.memory, s.cursor.style_id) > 0);
+    try testing.expect(page.hyperlink_set.refCount(
+        page.memory,
+        s.cursor.hyperlink_id,
+    ) > 0);
 }
 
 // cursorChangePin migrates the style before the hyperlink. If the
