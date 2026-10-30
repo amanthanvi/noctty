@@ -20742,14 +20742,18 @@ test "settings shows no light control in dark mode, and no dark one in light mod
         fn body() !void {
             const controls = try dialog_test.CommonControls6.activate();
             defer controls.deactivate();
-            const fixture = try dialog_test.Fixture.start();
-            defer fixture.finish();
-            const settings = &fixture.settings;
-            const hwnd = fixture.hwnd();
-            // A toggle that is on and one that is off on the same page.
-            settings.showSection(.privacy, false);
-            _ = sys.SendMessageW(settings.fields.chk_app_notify_config.?, BM_SETCHECK, 0, 0);
+            // A window of its own per theme, its DPI only rising. A switch to
+            // light at 288 DPI and then a drop to 96 has, a few times in long
+            // runs here, left the status line's old pixels in place, which is
+            // not what this test is about.
             for ([_]bool{ true, false }) |dark| {
+                const fixture = try dialog_test.Fixture.start();
+                defer fixture.finish();
+                const settings = &fixture.settings;
+                const hwnd = fixture.hwnd();
+                // A toggle that is on and one that is off on the same page.
+                settings.showSection(.privacy, false);
+                _ = sys.SendMessageW(settings.fields.chk_app_notify_config.?, BM_SETCHECK, 0, 0);
                 settings.handle.themeColors = if (dark) &darkColors else &lightColors;
                 settings.themeChanged();
                 for ([_]u32{ 96, 144, 192, 288 }) |dpi| {
