@@ -232,7 +232,7 @@ pub const Parser = struct {
                 usize,
                 line[@intCast(starts[1])..@intCast(ends[1])],
                 10,
-            ) catch unreachable;
+            ) catch break :cmd;
             const data = line[@intCast(starts[2])..@intCast(ends[2])];
 
             // Important: do not clear buffer here since name points to it
@@ -263,7 +263,7 @@ pub const Parser = struct {
                 usize,
                 line[@intCast(starts[1])..@intCast(ends[1])],
                 10,
-            ) catch unreachable;
+            ) catch break :cmd;
             const name = line[@intCast(starts[2])..@intCast(ends[2])];
 
             // Important: do not clear buffer here since name points to it
@@ -303,7 +303,7 @@ pub const Parser = struct {
                 usize,
                 line[@intCast(starts[1])..@intCast(ends[1])],
                 10,
-            ) catch unreachable;
+            ) catch break :cmd;
             const layout = line[@intCast(starts[2])..@intCast(ends[2])];
             const visible_layout = line[@intCast(starts[3])..@intCast(ends[3])];
             const raw_flags = line[@intCast(starts[4])..@intCast(ends[4])];
@@ -341,7 +341,7 @@ pub const Parser = struct {
                 usize,
                 line[@intCast(starts[1])..@intCast(ends[1])],
                 10,
-            ) catch unreachable;
+            ) catch break :cmd;
 
             self.buffer.clearRetainingCapacity();
             self.state = .idle;
@@ -371,7 +371,7 @@ pub const Parser = struct {
                 usize,
                 line[@intCast(starts[1])..@intCast(ends[1])],
                 10,
-            ) catch unreachable;
+            ) catch break :cmd;
             const name = line[@intCast(starts[2])..@intCast(ends[2])];
 
             // Important: do not clear buffer here since name points to it
@@ -402,12 +402,12 @@ pub const Parser = struct {
                 usize,
                 line[@intCast(starts[1])..@intCast(ends[1])],
                 10,
-            ) catch unreachable;
+            ) catch break :cmd;
             const pane_id = std.fmt.parseInt(
                 usize,
                 line[@intCast(starts[2])..@intCast(ends[2])],
                 10,
-            ) catch unreachable;
+            ) catch break :cmd;
 
             self.buffer.clearRetainingCapacity();
             self.state = .idle;
@@ -464,7 +464,7 @@ pub const Parser = struct {
                 usize,
                 line[@intCast(starts[2])..@intCast(ends[2])],
                 10,
-            ) catch unreachable;
+            ) catch break :cmd;
             const name = line[@intCast(starts[3])..@intCast(ends[3])];
 
             // Important: do not clear buffer here since client/name point to it
@@ -876,4 +876,31 @@ test "tmux client-session-changed" {
     try testing.expectEqualStrings("/dev/pts/1", n.client_session_changed.client);
     try testing.expectEqual(2, n.client_session_changed.session_id);
     try testing.expectEqualStrings("mysession", n.client_session_changed.name);
+}
+
+test "tmux notifications with an id too large for usize are dropped" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var c: Parser = .{ .buffer = .init(alloc) };
+    defer c.deinit();
+    const big = "99999999999999999999999";
+    for ([_][]const u8{
+        "%output %" ++ big ++ " hello",
+        "%session-changed $" ++ big ++ " name",
+        "%layout-change @" ++ big ++ " b25d,80x24,0,0,0 b25d,80x24,0,0,0 *",
+        "%window-add @" ++ big,
+        "%window-renamed @" ++ big ++ " name",
+        "%window-pane-changed @" ++ big ++ " %1",
+        "%window-pane-changed @1 %" ++ big,
+        "%client-session-changed /dev/pts/1 $" ++ big ++ " name",
+    }) |line| {
+        for (line) |byte| try testing.expect(try c.put(byte) == null);
+        try testing.expect(try c.put('\n') == null);
+        try testing.expectEqual(.idle, c.state);
+    }
+
+    for ("%window-add @1") |byte| try testing.expect(try c.put(byte) == null);
+    const n = (try c.put('\n')).?;
+    try testing.expectEqual(1, n.window_add.id);
 }
