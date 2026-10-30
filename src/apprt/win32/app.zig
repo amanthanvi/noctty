@@ -7959,6 +7959,11 @@ pub const App = struct {
             return try prepareWin32FileUri(alloc, uri);
         }
 
+        // ShellExecuteW writes the URL into its handler's registered command
+        // line as it is: a quote ends a quoted "%1" and a space splits an
+        // unquoted %1, so either can add arguments of the program's choosing.
+        // A URI has neither unencoded; std.Uri.parse takes both.
+        if (std.mem.indexOfAny(u8, target, " \"") != null) return null;
         for ([_][]const u8{
             "http",
             "https",
@@ -10323,6 +10328,8 @@ test "security regression win32 link opener allows known schemes and safe local 
     for ([_][]const u8{
         "http://example.com",
         "https://example.com",
+        // An encoded space is no argument break.
+        "https://example.com/a%20b",
         "mailto:user@example.com",
         "ftp://example.com/file.txt",
         "ssh:user@example.com",
@@ -10537,7 +10544,14 @@ test "security regression win32 link opener rejects unsafe schemes and executabl
         "C:\\tmp\\x.chm",
         "C:\\tmp\\safe.txt:payload.exe",
         "relative/readme.txt",
+        // An OSC 8 target can hold what a printed URL cannot: arguments for
+        // the scheme's handler.
+        "magnet:?xt=a\" --x \"",
+        "ssh:host -oProxyCommand=x",
+        "https://example.com/a\"b",
+        "tel:+1 555",
     }) |target| {
+        errdefer std.debug.print("target: {s}\n", .{target});
         try std.testing.expect(!try App.isAllowedWin32OpenTarget(std.testing.allocator, target));
     }
 }
