@@ -3671,6 +3671,7 @@ fn updateStageFailureMessage(alloc: Allocator, err: anyerror) ![]u8 {
         error.UnsafePortableArchiveEntry => "the portable ZIP contains an unsafe path",
         error.DuplicatePortableArchiveEntry => "the portable ZIP contains duplicate paths",
         error.InvalidPortableArchive, error.InvalidPortableArchiveRoot => "the portable ZIP layout is invalid",
+        error.PortableArchiveChecksumMismatch => "a portable ZIP entry failed its CRC-32 check",
         error.UnsupportedPortableArchive => "the portable ZIP uses an unsupported format",
         error.PortableArchiveTooLarge => "the portable ZIP exceeds safe extraction limits",
         error.IncompletePortablePayload => "the portable ZIP payload is incomplete",
@@ -3683,6 +3684,7 @@ fn updateStageFailureMessage(alloc: Allocator, err: anyerror) ![]u8 {
         error.UpdateHttpNotFound => "a required release asset was not found",
         error.UpdateHttpRateLimited => "GitHub rate limited the update download",
         error.UnexpectedHttpStatus => "GitHub returned an unexpected HTTP status",
+        error.UnsupportedContentEncoding => "the download was sent compressed although only identity was accepted",
         else => null,
     };
 

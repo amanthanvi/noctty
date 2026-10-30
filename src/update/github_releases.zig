@@ -1,5 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
+const wuffs = @import("wuffs");
 const build_config = @import("../build_config.zig");
 const internal_os = @import("../os/main.zig");
 const conpty_redist = @import("conpty_redist.zig");
@@ -2409,8 +2410,8 @@ fn extractAndVerifyPortableZip(
     errdefer portable_apply.cleanupUpdatePath(partial_root) catch {};
     try std.fs.cwd().makePath(partial_root);
 
-    // `std.zip.extract` creates every entry relative to this handle, so the
-    // archive cannot escape it. The handle itself is still resolved by
+    // `extractPortableZip` creates every entry relative to this handle, so
+    // the archive cannot escape it. The handle itself is still resolved by
     // pathname, so confirm it is the directory we asked for before anything
     // is written through it: a junction planted at `payload.partial` between
     // the makePath and this open would otherwise redirect the whole payload.
@@ -2420,14 +2421,7 @@ fn extractAndVerifyPortableZip(
     if (!try lockedHandleMatchesPath(alloc, partial_root, destination.fd)) {
         return error.InvalidPortableUpdatePath;
     }
-    var zip_file = try std.fs.openFileAbsolute(zip_path, .{});
-    defer zip_file.close();
-    var reader_buffer: [64 * 1024]u8 = undefined;
-    var zip_reader = zip_file.reader(&reader_buffer);
-    var diagnostics: std.zip.Diagnostics = .{ .allocator = alloc };
-    defer diagnostics.deinit();
-    try std.zip.extract(destination, &zip_reader, .{ .diagnostics = &diagnostics });
-    if (!std.mem.eql(u8, diagnostics.root_dir, "noctty")) return error.InvalidPortableArchiveRoot;
+    try extractPortableZip(alloc, destination, zip_path);
     destination.close();
     destination_open = false;
 
@@ -2489,6 +2483,113 @@ fn validatePortableZipEntries(alloc: Allocator, zip_path: []const u8) !void {
             return error.DuplicatePortableArchiveEntry;
         }
     }
+}
+
+/// Extract a ZIP that `validatePortableZipEntries` accepted into
+/// `destination`, creating every entry relative to that handle.
+///
+/// This replaces `std.zip.extract`, which inflates with Zig 0.15.2's
+/// std.compress.flate: a fixed-Huffman match that crosses the end of its
+/// 64 KiB window reaches `unreachable` there, a segfault in ReleaseFast
+/// (#570, ziglang/zig#24963), and for any malformed deflate entry it unwraps
+/// the file reader's null error (`stream.err.?`). The checks below are
+/// std's; the inflater is WUFFS, and each entry's size and CRC-32 must match
+/// its central directory record, which std never checked.
+fn extractPortableZip(alloc: Allocator, destination: std.fs.Dir, zip_path: []const u8) !void {
+    var zip_file = try std.fs.openFileAbsolute(zip_path, .{});
+    defer zip_file.close();
+    var reader_buffer: [64 * 1024]u8 = undefined;
+    var zip_reader = zip_file.reader(&reader_buffer);
+    // The output file's, the CRC's and the entry data's buffers.
+    const buffers = try alloc.alloc(u8, 96 * 1024);
+    defer alloc.free(buffers);
+    var iterator = std.zip.Iterator.init(&zip_reader) catch return error.InvalidPortableArchive;
+    var diagnostics: std.zip.Diagnostics = .{ .allocator = alloc };
+    defer diagnostics.deinit();
+    var name_buffer: [max_portable_name_bytes]u8 = undefined;
+    while (iterator.next() catch return error.InvalidPortableArchive) |entry| {
+        const name = try extractPortableZipEntry(alloc, &zip_reader, entry, &name_buffer, destination, buffers);
+        try diagnostics.nextFilename(name);
+    }
+    if (!std.mem.eql(u8, diagnostics.root_dir, "noctty")) return error.InvalidPortableArchiveRoot;
+}
+
+fn extractPortableZipEntry(
+    alloc: Allocator,
+    zip_reader: *std.fs.File.Reader,
+    entry: std.zip.Iterator.Entry,
+    name_buffer: *[max_portable_name_bytes]u8,
+    destination: std.fs.Dir,
+    buffers: []u8,
+) ![]const u8 {
+    if (entry.filename_len == 0 or entry.filename_len > max_portable_name_bytes) {
+        return error.UnsafePortableArchiveEntry;
+    }
+    const name = name_buffer[0..entry.filename_len];
+    try zip_reader.seekTo(entry.header_zip_offset + @sizeOf(std.zip.CentralDirectoryFileHeader));
+    try zip_reader.interface.readSliceAll(name);
+    // Validation read the same name; check it again where it is used. This
+    // also covers std's backslash, absolute and `..` refusals.
+    if (!portable_apply.isSafeZipEntryPath(name)) return error.UnsafePortableArchiveEntry;
+
+    // The local header has to agree with the central directory. A zip64
+    // local header (sizes of 0xFFFFFFFF) is refused rather than parsed: no
+    // entry may exceed max_portable_entry_bytes anyway.
+    try zip_reader.seekTo(entry.file_offset);
+    const local = try zip_reader.interface.takeStruct(std.zip.LocalFileHeader, .little);
+    if (!std.mem.eql(u8, &local.signature, &std.zip.local_file_header_sig) or
+        local.version_needed_to_extract != entry.version_needed_to_extract or
+        local.last_modification_time != entry.last_modification_time or
+        local.last_modification_date != entry.last_modification_date or
+        @as(u16, @bitCast(local.flags)) != @as(u16, @bitCast(entry.flags)) or
+        local.compression_method != entry.compression_method or
+        (local.crc32 != 0 and local.crc32 != entry.crc32) or
+        (local.compressed_size != 0 and local.compressed_size != entry.compressed_size) or
+        (local.uncompressed_size != 0 and local.uncompressed_size != entry.uncompressed_size) or
+        local.filename_len != entry.filename_len)
+    {
+        return error.InvalidPortableArchive;
+    }
+
+    if (name[name.len - 1] == '/') {
+        if (entry.uncompressed_size != 0) return error.InvalidPortableArchive;
+        try destination.makePath(name[0 .. name.len - 1]);
+        return name;
+    }
+    var parent = try destination.makeOpenPath(std.fs.path.dirname(name).?, .{});
+    defer parent.close();
+    const file = try parent.createFile(std.fs.path.basename(name), .{ .exclusive = true });
+    defer file.close();
+    var file_writer = file.writer(buffers[0 .. 64 * 1024]);
+    var crc = file_writer.interface.hashed(std.hash.Crc32.init(), buffers[64 * 1024 ..][0 .. 16 * 1024]);
+    try zip_reader.seekTo(entry.file_offset + @sizeOf(std.zip.LocalFileHeader) + local.filename_len + local.extra_len);
+    switch (entry.compression_method) {
+        .store => {
+            if (entry.compressed_size != entry.uncompressed_size) return error.InvalidPortableArchive;
+            zip_reader.interface.streamExact64(&crc.writer, entry.uncompressed_size) catch |err| switch (err) {
+                error.ReadFailed => return zip_reader.err orelse err,
+                error.WriteFailed => return file_writer.err orelse err,
+                error.EndOfStream => return error.InvalidPortableArchive,
+            };
+        },
+        .deflate => {
+            // Bounded by the entry's compressed size: unlike std, inflate
+            // cannot read on into the next entry or the central directory.
+            var data = zip_reader.interface.limited(.limited64(entry.compressed_size), buffers[80 * 1024 ..]);
+            const len = wuffs.deflate.decompress(alloc, &data.interface, &crc.writer, entry.uncompressed_size) catch |err| switch (err) {
+                error.ReadFailed => return zip_reader.err orelse err,
+                error.WriteFailed => return file_writer.err orelse err,
+                error.WuffsError, error.Overflow => return error.InvalidPortableArchive,
+                error.OutOfMemory => return error.OutOfMemory,
+            };
+            if (len != entry.uncompressed_size) return error.InvalidPortableArchive;
+        },
+        else => return error.UnsupportedPortableArchive,
+    }
+    crc.writer.flush() catch return file_writer.err orelse error.WriteFailed;
+    if (crc.hasher.final() != entry.crc32) return error.PortableArchiveChecksumMismatch;
+    try file_writer.end();
+    return name;
 }
 
 fn verifyPortablePayloadManifest(path: []const u8) !void {
@@ -4234,6 +4335,183 @@ test "portable update ZIP preflight binds EOCD to archive end" {
         error.InvalidPortableArchive,
         validatePortableZipEntries(alloc, trailing_path),
     );
+}
+
+const TestZipEntry = struct {
+    name: []const u8,
+    method: std.zip.CompressionMethod = .store,
+    /// What the archive holds for the entry: raw DEFLATE for `.deflate`.
+    data: []const u8,
+    /// What the entry decodes to; the CRC-32 and sizes derive from it and
+    /// `data` unless overridden below.
+    contents: []const u8,
+    crc32: ?u32 = null,
+    compressed_size: ?u32 = null,
+};
+
+fn testZipLocalHeader(entry: TestZipEntry) std.zip.LocalFileHeader {
+    return .{
+        .signature = std.zip.local_file_header_sig,
+        .version_needed_to_extract = 20,
+        .flags = @bitCast(@as(u16, 0)),
+        .compression_method = entry.method,
+        .last_modification_time = 0,
+        .last_modification_date = 0x21, // 1980-01-01
+        .crc32 = entry.crc32 orelse std.hash.Crc32.hash(entry.contents),
+        .compressed_size = entry.compressed_size orelse @intCast(entry.data.len),
+        .uncompressed_size = @intCast(entry.contents.len),
+        .filename_len = @intCast(entry.name.len),
+        .extra_len = 0,
+    };
+}
+
+fn writeTestPortableZip(alloc: Allocator, dir: std.fs.Dir, sub_path: []const u8, entries: []const TestZipEntry) !void {
+    var zip: std.Io.Writer.Allocating = .init(alloc);
+    defer zip.deinit();
+    const offsets = try alloc.alloc(u32, entries.len);
+    defer alloc.free(offsets);
+    for (entries, offsets) |entry, *offset| {
+        offset.* = @intCast(zip.written().len);
+        try zip.writer.writeStruct(testZipLocalHeader(entry), .little);
+        try zip.writer.writeAll(entry.name);
+        try zip.writer.writeAll(entry.data);
+    }
+    const directory_offset = zip.written().len;
+    for (entries, offsets) |entry, offset| {
+        const local = testZipLocalHeader(entry);
+        try zip.writer.writeStruct(std.zip.CentralDirectoryFileHeader{
+            .signature = std.zip.central_file_header_sig,
+            .version_made_by = 20,
+            .version_needed_to_extract = local.version_needed_to_extract,
+            .flags = local.flags,
+            .compression_method = local.compression_method,
+            .last_modification_time = local.last_modification_time,
+            .last_modification_date = local.last_modification_date,
+            .crc32 = local.crc32,
+            .compressed_size = local.compressed_size,
+            .uncompressed_size = local.uncompressed_size,
+            .filename_len = local.filename_len,
+            .extra_len = 0,
+            .comment_len = 0,
+            .disk_number = 0,
+            .internal_file_attributes = 0,
+            .external_file_attributes = 0,
+            .local_file_header_offset = offset,
+        }, .little);
+        try zip.writer.writeAll(entry.name);
+    }
+    try zip.writer.writeStruct(std.zip.EndRecord{
+        .signature = std.zip.end_record_sig,
+        .disk_number = 0,
+        .central_directory_disk_number = 0,
+        .record_count_disk = @intCast(entries.len),
+        .record_count_total = @intCast(entries.len),
+        .central_directory_size = @intCast(zip.written().len - directory_offset),
+        .central_directory_offset = @intCast(directory_offset),
+        .comment_len = 0,
+    }, .little);
+    try dir.writeFile(.{ .sub_path = sub_path, .data = zip.written() });
+}
+
+/// Validate and extract `sub_path` into a fresh `out` directory beside it.
+fn extractTestPortableZip(alloc: Allocator, dir: std.fs.Dir, sub_path: []const u8) !std.fs.Dir {
+    const zip_path = try dir.realpathAlloc(alloc, sub_path);
+    defer alloc.free(zip_path);
+    try validatePortableZipEntries(alloc, zip_path);
+    try dir.deleteTree("out");
+    try dir.makeDir("out");
+    var out = try dir.openDir("out", .{});
+    errdefer out.close();
+    try extractPortableZip(alloc, out, zip_path);
+    return out;
+}
+
+/// #609's fixture: a 160x120 RGBA frame (76,800 bytes) compressed by zlib
+/// 1.3.1 with `Z_FIXED`, so every block uses the fixed Huffman code and its
+/// matches cross std.compress.flate's 64 KiB window. The raw DEFLATE stream a
+/// ZIP holds sits between the 2-byte zlib header and the Adler-32 trailer.
+const fixed_huffman_zlib = @embedFile("../terminal/kitty/testdata/image-rgba-zlib_deflate_fixed-160x120-raw.data");
+const fixed_huffman_deflate = fixed_huffman_zlib[2 .. fixed_huffman_zlib.len - 4];
+
+test "portable update ZIP extraction inflates fixed Huffman blocks past 64 KiB (#570)" {
+    const alloc = std.testing.allocator;
+    // The zlib decoder checks the encoder's Adler-32, so these are the bytes
+    // zlib compressed.
+    const frame = try wuffs.zlib.decompress(alloc, fixed_huffman_zlib, 1 << 20, null);
+    defer alloc.free(frame);
+    try std.testing.expectEqual(@as(usize, 160 * 120 * 4), frame.len);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try writeTestPortableZip(alloc, tmp.dir, "fixed.zip", &.{
+        .{ .name = "noctty/", .data = "", .contents = "" },
+        .{ .name = "noctty/themes/fixed", .method = .deflate, .data = fixed_huffman_deflate, .contents = frame },
+        .{ .name = "noctty/LICENSE", .data = "stored", .contents = "stored" },
+    });
+    var out = try extractTestPortableZip(alloc, tmp.dir, "fixed.zip");
+    defer out.close();
+    const inflated = try out.readFileAlloc(alloc, "noctty/themes/fixed", 1 << 20);
+    defer alloc.free(inflated);
+    try std.testing.expectEqualSlices(u8, frame, inflated);
+    const stored = try out.readFileAlloc(alloc, "noctty/LICENSE", 64);
+    defer alloc.free(stored);
+    try std.testing.expectEqualStrings("stored", stored);
+}
+
+test "portable update ZIP extraction checks each entry's CRC-32 and sizes" {
+    const alloc = std.testing.allocator;
+    // Raw DEFLATE, one fixed Huffman block too short to cross std's window.
+    const hello = "hello, wuffs deflate";
+    const hello_deflate = "\xcb\x48\xcd\xc9\xc9\xd7\x51\x28\x2f\x4d\x4b\x2b\x56\x48\x49\x4d\xcb\x49\x2c\x49\x05\x00";
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    // std.zip.extract wrote every one of these without an error.
+    for ([_]struct { entry: TestZipEntry, err: anyerror }{
+        .{ .entry = .{ .name = "noctty/stored", .data = hello, .contents = hello, .crc32 = 0x12345678 }, .err = error.PortableArchiveChecksumMismatch },
+        .{ .entry = .{ .name = "noctty/inflated", .method = .deflate, .data = hello_deflate, .contents = hello, .crc32 = 0x12345678 }, .err = error.PortableArchiveChecksumMismatch },
+        // Decodes past its declared size: std stopped there and kept the rest out.
+        .{ .entry = .{ .name = "noctty/longer", .method = .deflate, .data = hello_deflate, .contents = hello[0 .. hello.len - 1] }, .err = error.InvalidPortableArchive },
+        // Ends past its compressed size: std read on into the next record.
+        .{ .entry = .{ .name = "noctty/overrun", .method = .deflate, .data = hello_deflate, .contents = hello, .compressed_size = hello_deflate.len - 3 }, .err = error.InvalidPortableArchive },
+    }) |case| {
+        try writeTestPortableZip(alloc, tmp.dir, "case.zip", &.{case.entry});
+        try std.testing.expectError(case.err, extractTestPortableZip(alloc, tmp.dir, "case.zip"));
+    }
+}
+
+test "portable update ZIP extraction fails cleanly on corrupt deflate data" {
+    const alloc = std.testing.allocator;
+    const frame = try wuffs.zlib.decompress(alloc, fixed_huffman_zlib, 1 << 20, null);
+    defer alloc.free(frame);
+    const data = try alloc.alloc(u8, fixed_huffman_deflate.len);
+    defer alloc.free(data);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var prng = std.Random.DefaultPrng.init(570);
+    const random = prng.random();
+    // Byte flips and truncations: each must end in a clean error or, where
+    // a flip happens to keep the stream, the exact frame the CRC-32 names.
+    for (0..100) |i| {
+        @memcpy(data, fixed_huffman_deflate);
+        var len = data.len;
+        if (i % 4 == 0) {
+            len = random.intRangeLessThan(usize, data.len / 2, data.len);
+        } else for (0..random.intRangeAtMost(usize, 1, 4)) |_| {
+            data[random.uintLessThan(usize, data.len)] ^= random.int(u8) | 1;
+        }
+        try writeTestPortableZip(alloc, tmp.dir, "fuzz.zip", &.{
+            .{ .name = "noctty/fuzz", .method = .deflate, .data = data[0..len], .contents = frame },
+        });
+        if (extractTestPortableZip(alloc, tmp.dir, "fuzz.zip")) |out_dir| {
+            var out = out_dir;
+            defer out.close();
+            const inflated = try out.readFileAlloc(alloc, "noctty/fuzz", 1 << 20);
+            defer alloc.free(inflated);
+            try std.testing.expectEqualSlices(u8, frame, inflated);
+        } else |err| switch (err) {
+            error.InvalidPortableArchive, error.PortableArchiveChecksumMismatch => {},
+            else => return err,
+        }
+    }
 }
 
 test "portable update serializes helper launch handoff" {

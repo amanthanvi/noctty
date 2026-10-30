@@ -159,7 +159,10 @@ pub const Response = struct {
         if (WinHttpSetOption(request, option_max_response_header_size, &head_limit, @sizeOf(u32)) == 0) return failure();
         var header_text: std.Io.Writer.Allocating = .init(alloc);
         defer header_text.deinit();
-        try header_text.writer.writeAll("Accept-Encoding: gzip, deflate, identity\r\n");
+        // Identity only: the feed's JSON is small and release assets are
+        // already compressed, and refusing every other coding keeps update
+        // bodies away from Zig 0.15.2's std.compress decoders (#570).
+        try header_text.writer.writeAll("Accept-Encoding: identity\r\n");
         for (headers) |entry| {
             if (std.mem.indexOfAny(u8, entry.name, "\r\n:") != null or
                 std.mem.indexOfAny(u8, entry.value, "\r\n") != null) return error.InvalidHttpHeader;
@@ -189,36 +192,40 @@ pub const Response = struct {
     }
 
     pub fn header(self: *Response, alloc: Allocator, query: u32) !?[]u8 {
+        return self.headerAt(alloc, query, null);
+    }
+
+    /// `index` selects one of several fields with the same name and is
+    /// advanced past it, as `WinHttpQueryHeaders` does.
+    fn headerAt(self: *Response, alloc: Allocator, query: u32, index: ?*u32) !?[]u8 {
         // The aggregate response head was already capped at 8 KiB above.
         var buffer: [8192]u16 = undefined;
         var len: u32 = @sizeOf(@TypeOf(buffer));
-        if (WinHttpQueryHeaders(self.request, query, null, &buffer, &len, null) == 0) {
+        if (WinHttpQueryHeaders(self.request, query, null, &buffer, &len, index) == 0) {
             if (@intFromEnum(windows.kernel32.GetLastError()) == error_winhttp_header_not_found) return null;
             return failure();
         }
         return try std.unicode.utf16LeToUtf8Alloc(alloc, buffer[0 .. len / 2]);
     }
 
+    /// Requests ask for identity, so any other coding in any
+    /// Content-Encoding field means a misbehaving server or proxy. Refuse it
+    /// rather than decode it, or pass coded bytes on as the body.
+    fn requireIdentityEncoding(self: *Response, alloc: Allocator) !void {
+        var index: u32 = 0;
+        while (try self.headerAt(alloc, query_content_encoding, &index)) |value| {
+            defer alloc.free(value);
+            var codings = std.mem.tokenizeAny(u8, value, ", \t");
+            while (codings.next()) |coding| {
+                if (!std.ascii.eqlIgnoreCase(coding, "identity")) return error.UnsupportedContentEncoding;
+            }
+        }
+    }
+
     pub fn streamBody(self: *Response, alloc: Allocator, writer: *std.Io.Writer, max_bytes: u64) !void {
-        const encoding_text = try self.header(alloc, query_content_encoding);
-        defer if (encoding_text) |text| alloc.free(text);
-        const encoding: std.http.ContentEncoding = if (encoding_text) |text|
-            std.http.ContentEncoding.fromString(text) orelse return error.UnsupportedCompressionMethod
-        else
-            .identity;
-        const decompress_buffer: []u8 = switch (encoding) {
-            .identity => &.{},
-            .zstd => try alloc.alloc(u8, std.compress.zstd.default_window_len),
-            .deflate, .gzip => try alloc.alloc(u8, std.compress.flate.max_window_len),
-            .compress => return error.UnsupportedCompressionMethod,
-        };
-        defer if (decompress_buffer.len > 0) alloc.free(decompress_buffer);
-        var transfer_buffer: [64]u8 = undefined;
+        try self.requireIdentityEncoding(alloc);
         var raw_reader: BodyReader = .{ .response = self };
-        raw_reader.interface.buffer = &transfer_buffer;
-        var decompress: std.http.Decompress = undefined;
-        const body_reader = decompress.init(&raw_reader.interface, decompress_buffer, encoding);
-        streamBounded(body_reader, writer, max_bytes) catch |err| switch (err) {
+        streamBounded(&raw_reader.interface, writer, max_bytes) catch |err| switch (err) {
             error.ReadFailed => return raw_reader.err orelse err,
             else => |other| return other,
         };
@@ -458,7 +465,7 @@ test "update HTTP timeout interrupts stalled response headers and body" {
     }
 }
 
-test "update requests send exactly one User-Agent through the production transport" {
+test "update requests send exactly one User-Agent and accept only identity through the production transport" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
     var peer: FakePeer = .{ .server = try FakePeer.listenLoopback(), .mode = .capture };
     const thread = try std.Thread.spawn(.{}, FakePeer.serve, .{&peer});
@@ -471,72 +478,45 @@ test "update requests send exactly one User-Agent through the production transpo
     finished = true;
     const head = peer.head[0..peer.head_len];
     try std.testing.expect(std.mem.startsWith(u8, head, "GET /fake-feed?escaped=%2F HTTP/1.1\r\n"));
-    var count: usize = 0;
+    var user_agents: usize = 0;
+    var accept_encodings: usize = 0;
     var lines = std.mem.splitSequence(u8, head, "\r\n");
     while (lines.next()) |line| {
         if (std.ascii.startsWithIgnoreCase(line, "user-agent:")) {
-            count += 1;
+            user_agents += 1;
             try std.testing.expectEqualStrings("User-Agent: noctty-updater", line);
         }
+        if (std.ascii.startsWithIgnoreCase(line, "accept-encoding:")) {
+            accept_encodings += 1;
+            try std.testing.expectEqualStrings("Accept-Encoding: identity", line);
+        }
     }
-    try std.testing.expectEqual(@as(usize, 1), count);
+    try std.testing.expectEqual(@as(usize, 1), user_agents);
+    try std.testing.expectEqual(@as(usize, 1), accept_encodings);
     try std.testing.expect(std.mem.indexOf(u8, head, "Accept: application/octet-stream") != null or std.mem.indexOf(u8, head, "accept: application/octet-stream") != null);
 }
 
-test "update HTTP transport decodes gzip aliases and deflate with the decompressed cap" {
+test "update HTTP transport refuses every content coding but identity" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
     const alloc = std.testing.allocator;
     const contents = "fake update metadata";
+    // `contents` gzipped: a server that ignores the request's identity-only
+    // Accept-Encoding gets refused, not decoded.
     const gzip_bytes = "\x1f\x8b\x08\x00\x00\x00\x00\x00\x02\xff\x4b\x4b\xcc\x4e\x55\x28\x2d\x48\x49\x2c\x49\x55\xc8\x4d\x2d\x49\x04\x32\x12\x01\xb6\x57\x0f\xe1\x14\x00\x00\x00";
-    const deflate_bytes = "\x78\x9c\x4b\x4b\xcc\x4e\x55\x28\x2d\x48\x49\x2c\x49\x55\xc8\x4d\x2d\x49\x04\x32\x12\x01\x4e\xe7\x07\x9c";
-    for ([_]struct { encoding: []const u8, bytes: []const u8 }{
-        .{ .encoding = "gzip", .bytes = gzip_bytes },
-        .{ .encoding = "x-gzip", .bytes = gzip_bytes },
-        .{ .encoding = "deflate", .bytes = deflate_bytes },
+    for ([_]struct { fields: []const u8, bytes: []const u8, refused: bool }{
+        .{ .fields = "Content-Encoding: gzip\r\n", .bytes = gzip_bytes, .refused = true },
+        .{ .fields = "Content-Encoding: x-gzip\r\n", .bytes = gzip_bytes, .refused = true },
+        .{ .fields = "Content-Encoding: deflate\r\n", .bytes = contents, .refused = true },
+        .{ .fields = "Content-Encoding: zstd\r\n", .bytes = contents, .refused = true },
+        .{ .fields = "Content-Encoding: br\r\n", .bytes = contents, .refused = true },
+        .{ .fields = "Content-Encoding: identity, gzip\r\n", .bytes = gzip_bytes, .refused = true },
+        // Only the second field names a coding.
+        .{ .fields = "Content-Encoding: identity\r\nContent-Encoding: gzip\r\n", .bytes = gzip_bytes, .refused = true },
+        .{ .fields = "", .bytes = contents, .refused = false },
+        .{ .fields = "Content-Encoding: IDENTITY\r\n", .bytes = contents, .refused = false },
     }) |case| {
-        for ([_]u64{ contents.len, contents.len - 1 }) |cap| {
-            const reply = try std.fmt.allocPrint(alloc, "HTTP/1.1 200 OK\r\nContent-Encoding: {s}\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n{s}", .{ case.encoding, case.bytes.len, case.bytes });
-            defer alloc.free(reply);
-            var peer: FakePeer = .{ .server = try FakePeer.listenLoopback(), .mode = .capture, .response = reply };
-            const thread = try std.Thread.spawn(.{}, FakePeer.serve, .{&peer});
-            defer peer.finish(thread);
-            var url: [256]u8 = undefined;
-            var response = try Response.openImpl(alloc, try peer.uri(&url), &.{}, 1000, false);
-            defer response.deinit();
-            var out: std.Io.Writer.Allocating = .init(alloc);
-            defer out.deinit();
-            try expectBodyWithinCap(&response, &out, contents, cap);
-        }
-    }
-}
-
-test "update HTTP transport decodes a large gzip body across reader boundaries" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-    const alloc = std.testing.allocator;
-    const contents = try alloc.alloc(u8, 48 * 1024 + 17);
-    defer alloc.free(contents);
-    var random = std.Random.DefaultPrng.init(0x706b673632);
-    random.random().bytes(contents);
-    var compressed: std.Io.Writer.Allocating = .init(alloc);
-    defer compressed.deinit();
-    // A gzip member with one stored DEFLATE block keeps the encoded fixture
-    // larger than 16 KiB without relying on Zig 0.15's unfinished compressor.
-    try compressed.writer.writeAll("\x1f\x8b\x08\x00\x00\x00\x00\x00\x00\xff\x01");
-    var lengths: [4]u8 = undefined;
-    const block_len: u16 = @intCast(contents.len);
-    std.mem.writeInt(u16, lengths[0..2], block_len, .little);
-    std.mem.writeInt(u16, lengths[2..4], ~block_len, .little);
-    try compressed.writer.writeAll(&lengths);
-    try compressed.writer.writeAll(contents);
-    var footer: [8]u8 = undefined;
-    std.mem.writeInt(u32, footer[0..4], std.hash.Crc32.hash(contents), .little);
-    std.mem.writeInt(u32, footer[4..8], @intCast(contents.len), .little);
-    try compressed.writer.writeAll(&footer);
-    // Both encoded and decoded data must span the transport's 16 KiB buffer.
-    try std.testing.expect(compressed.written().len > 16 * 1024);
-    const reply = try std.fmt.allocPrint(alloc, "HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n{s}", .{ compressed.written().len, compressed.written() });
-    defer alloc.free(reply);
-    for ([_]usize{ contents.len, contents.len - 1 }) |cap| {
+        const reply = try std.fmt.allocPrint(alloc, "HTTP/1.1 200 OK\r\n{s}Content-Length: {d}\r\nConnection: close\r\n\r\n{s}", .{ case.fields, case.bytes.len, case.bytes });
+        defer alloc.free(reply);
         var peer: FakePeer = .{ .server = try FakePeer.listenLoopback(), .mode = .capture, .response = reply };
         const thread = try std.Thread.spawn(.{}, FakePeer.serve, .{&peer});
         defer peer.finish(thread);
@@ -545,7 +525,12 @@ test "update HTTP transport decodes a large gzip body across reader boundaries" 
         defer response.deinit();
         var out: std.Io.Writer.Allocating = .init(alloc);
         defer out.deinit();
-        try expectBodyWithinCap(&response, &out, contents, cap);
+        if (case.refused) {
+            try std.testing.expectError(error.UnsupportedContentEncoding, response.streamBody(alloc, &out.writer, 1024));
+            try std.testing.expectEqual(@as(usize, 0), out.written().len);
+        } else {
+            try expectBodyWithinCap(&response, &out, contents, contents.len);
+        }
     }
 }
 

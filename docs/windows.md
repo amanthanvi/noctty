@@ -2123,6 +2123,8 @@ the response headers, and each body read. A stalled request is canceled before
 the worker finishes, so a later check can retry. A download that keeps making
 progress may take longer than 30 seconds. Requests use Windows' certificate
 trust with TLS 1.2 or later; checksum and publisher verification still apply.
+They accept only uncompressed responses, and a response that arrives
+compressed anyway is refused.
 
 Upstream Ghostty is leaving GitHub, so the maintainer periodically checks
 that the `upstream` remote and the release-feed host are still live and
