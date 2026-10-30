@@ -7043,7 +7043,9 @@ fn linkAtPin(
     const line = screen.selectLine(.{
         .pin = mouse_pin,
         .whitespace = null,
-        .semantic_prompt_boundary = false,
+        // Respect semantic prompt boundaries so link/path matching doesn't
+        // merge shell prompt content with the text beside it.
+        .semantic_prompt_boundary = true,
     }) orelse return null;
 
     var strmap: terminal.StringMap = undefined;
@@ -7075,6 +7077,54 @@ fn linkAtPin(
     }
 
     return null;
+}
+
+test "Surface: a link does not run from a prompt into the command after it" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var config = try configpkg.Config.default(alloc);
+    defer config.deinit();
+    var derived = try DerivedConfig.init(alloc, &config);
+    defer derived.deinit();
+
+    // Only what linkAtPin reads is set.
+    const surface = try alloc.create(Surface);
+    defer alloc.destroy(surface);
+    @memset(std.mem.asBytes(surface), 0);
+    surface.alloc = alloc;
+    surface.config.links = derived.links;
+    surface.io.terminal = try .init(alloc, .{ .cols = 40, .rows = 3 });
+    defer surface.io.terminal.deinit(alloc);
+    surface.renderer_state.terminal = &surface.io.terminal;
+    {
+        // Ubuntu's default bash prompt ends in a path, which the URL regex
+        // continues across the space into the command typed after it. cmd
+        // sends no C mark, so what follows stays input, URLs included.
+        var stream = surface.io.terminal.vtStream();
+        defer stream.deinit();
+        stream.nextSlice("\x1b]133;A\x1b\\me@host:~/src$ \x1b]133;B\x1b\\ls docs\r\nsee https://example.com/a");
+    }
+    const Probe = struct {
+        fn link(s: *Surface, x: u16, y: u16) !?[:0]const u8 {
+            const screen = s.io.terminal.screens.active;
+            const pin = screen.pages.pin(.{ .active = .{ .x = x, .y = y } }).?;
+            const found = try s.linkAtPin(pin, null) orelse return null;
+            return try screen.selectionString(testing.allocator, .{ .sel = found.selection, .trim = false });
+        }
+    };
+
+    const prompt = try Probe.link(surface, 8, 0) orelse return error.TestUnexpectedResult;
+    defer alloc.free(prompt);
+    try testing.expectEqualStrings("~/src$", prompt);
+
+    const command = try Probe.link(surface, 18, 0);
+    defer if (command) |text| alloc.free(text);
+    try testing.expectEqualStrings("", command orelse "");
+
+    const url = try Probe.link(surface, 10, 1) orelse return error.TestUnexpectedResult;
+    defer alloc.free(url);
+    try testing.expectEqualStrings("https://example.com/a", url);
 }
 
 /// This returns the mouse mods to consider for link highlighting or
