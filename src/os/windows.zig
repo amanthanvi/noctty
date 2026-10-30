@@ -42,6 +42,7 @@ pub const HMODULE = windows.HMODULE;
 pub const HANDLE_FLAG_INHERIT = windows.HANDLE_FLAG_INHERIT;
 pub const INFINITE = windows.INFINITE;
 pub const INVALID_HANDLE_VALUE = windows.INVALID_HANDLE_VALUE;
+pub const MAX_PATH = windows.MAX_PATH;
 pub const OPEN_EXISTING = windows.OPEN_EXISTING;
 pub const PIPE_ACCESS_OUTBOUND = windows.PIPE_ACCESS_OUTBOUND;
 pub const PIPE_TYPE_BYTE = windows.PIPE_TYPE_BYTE;
@@ -715,6 +716,11 @@ pub const exp = struct {
             lpBuffer: ?windows.LPWSTR,
             nSize: *windows.DWORD,
         ) callconv(.winapi) windows.BOOL;
+        /// https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-gettemppathw
+        pub extern "kernel32" fn GetTempPathW(
+            nBufferLength: windows.DWORD,
+            lpBuffer: windows.LPWSTR,
+        ) callconv(.winapi) windows.DWORD;
     };
 
     /// The `NameType` values of `GetComputerNameExW` that name this machine.

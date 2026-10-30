@@ -31,13 +31,9 @@ pub fn init() !TempDir {
     var rand_buf: [RANDOM_BYTES]u8 = undefined;
 
     // The parent is always a handle of our own, so `close` can close it.
-    // Without a temp directory it is the current directory opened again,
-    // never `std.fs.cwd()` itself, which on Windows is the process's own
-    // current-directory handle.
     var dir = dir: {
         const cwd = std.fs.cwd();
-        const tmp_dir = allocTmpDir(std.heap.page_allocator) orelse
-            break :dir try cwd.openDir(".", .{});
+        const tmp_dir = try allocTmpDir(std.heap.page_allocator);
         defer freeTmpDir(std.heap.page_allocator, tmp_dir);
         break :dir try cwd.openDir(tmp_dir, .{});
     };

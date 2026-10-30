@@ -149,6 +149,7 @@ test "Windows surface thread stack carries a 64 KiB read batch and joins" {
 }
 
 test {
+    _ = file;
     _ = i18n;
     _ = path;
     _ = uri;
