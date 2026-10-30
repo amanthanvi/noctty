@@ -2941,3 +2941,17 @@ test "DECXCPR reports the cursor position with page 1" {
     h.stream.nextSlice("\x1b[5;20r\x1b[?6h\x1b[3;5H\x1b[?6n");
     try expectIssue149Write(&h.termio_mailbox, "\x1b[?3;5;1R");
 }
+
+test "DECRQSS SGR reports the underline style and overline" {
+    const alloc = std.testing.allocator;
+    var h: TestStream = undefined;
+    try h.init(alloc, .{});
+    defer h.deinit(alloc);
+
+    h.stream.nextSlice("\x1b[4:3;53m\x1bP$qm\x1b\\");
+    try expectIssue149Write(&h.termio_mailbox, "\x1bP1$r0;4:3;53m\x1b\\");
+
+    // Every attribute and two direct colors still fit the reply buffer.
+    h.stream.nextSlice("\x1b[0;1;2;3;4:5;53;5;7;8;9;38:2::255:255:255;48:2::255:255:255m\x1bP$qm\x1b\\");
+    try expectIssue149Write(&h.termio_mailbox, "\x1bP1$r0;1;2;3;4:5;53;5;7;8;9;38:2::255:255:255;48:2::255:255:255m\x1b\\");
+}

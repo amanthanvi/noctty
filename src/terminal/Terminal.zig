@@ -2987,58 +2987,63 @@ pub fn printAttributes(self: *Terminal, buf: []u8) ![]const u8 {
     try writer.writeByte('0');
 
     const pen = self.screens.active.cursor.style;
-    var attrs: [8]u8 = @splat(0);
+    var attrs: [9]u8 = @splat(0);
     var i: usize = 0;
 
     if (pen.flags.bold) {
-        attrs[i] = '1';
+        attrs[i] = 1;
         i += 1;
     }
 
     if (pen.flags.faint) {
-        attrs[i] = '2';
+        attrs[i] = 2;
         i += 1;
     }
 
     if (pen.flags.italic) {
-        attrs[i] = '3';
+        attrs[i] = 3;
         i += 1;
     }
 
     if (pen.flags.underline != .none) {
-        attrs[i] = '4';
+        attrs[i] = 4;
+        i += 1;
+    }
+
+    if (pen.flags.overline) {
+        attrs[i] = 53;
         i += 1;
     }
 
     if (pen.flags.blink) {
-        attrs[i] = '5';
+        attrs[i] = 5;
         i += 1;
     }
 
     if (pen.flags.inverse) {
-        attrs[i] = '7';
+        attrs[i] = 7;
         i += 1;
     }
 
     if (pen.flags.invisible) {
-        attrs[i] = '8';
+        attrs[i] = 8;
         i += 1;
     }
 
     if (pen.flags.strikethrough) {
-        attrs[i] = '9';
+        attrs[i] = 9;
         i += 1;
     }
 
-    for (attrs[0..i]) |c| {
-        // Preserve underline styles. Kind of a hack to special case '4'
+    for (attrs[0..i]) |attr| {
+        // Preserve underline styles. Kind of a hack to special case 4
         // here but its easier than changing how we do all attributes.
-        if (c == '4' and pen.flags.underline != .single) {
+        if (attr == 4 and pen.flags.underline != .single) {
             try writer.print(";4:{}", .{@intFromEnum(pen.flags.underline)});
             continue;
         }
 
-        try writer.print(";{c}", .{c});
+        try writer.print(";{}", .{attr});
     }
 
     switch (pen.fg_color) {
@@ -13047,11 +13052,12 @@ test "Terminal: printAttributes" {
         try t.setAttribute(.inverse);
         try t.setAttribute(.invisible);
         try t.setAttribute(.strikethrough);
+        try t.setAttribute(.overline);
         try t.setAttribute(.{ .direct_color_fg = .{ .r = 100, .g = 200, .b = 255 } });
         try t.setAttribute(.{ .direct_color_bg = .{ .r = 101, .g = 102, .b = 103 } });
         defer t.setAttribute(.unset) catch unreachable;
         const buf = try t.printAttributes(&storage);
-        try testing.expectEqualStrings("0;1;2;3;4;5;7;8;9;38:2::100:200:255;48:2::101:102:103", buf);
+        try testing.expectEqualStrings("0;1;2;3;4;53;5;7;8;9;38:2::100:200:255;48:2::101:102:103", buf);
     }
 
     const Case = struct {
