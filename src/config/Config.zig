@@ -12036,7 +12036,7 @@ pub const RepeatableCommand = struct {
         alloc: Allocator,
         input_: ?[]const u8,
     ) !void {
-        // Unset or empty input clears the list
+        // Unset or empty input restores the default entries
         const input = input_ orelse "";
         if (input.len == 0) {
             log.info("config has 'command-palette-entry =', using default entries", .{});
