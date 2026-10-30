@@ -140,8 +140,10 @@ pub const StreamHandler = struct {
             log.warn("failed to set default cursor style: {}", .{err});
         };
 
-        // The config could have changed any of our colors so update mode 2031
-        self.messageWriter(.{ .color_scheme_report = .{ .force = false } });
+        // The config could have changed any of our colors, but the mode
+        // 2031 report is sent by Termio.changeConfig. This runs on the io
+        // thread, which is the only reader of the termio mailbox, so
+        // sending to it here would deadlock if the mailbox were full.
     }
 
     inline fn surfaceMessageWriter(
@@ -2007,11 +2009,11 @@ fn countIssue149ColorSchemeReports(mailbox: *termio.Mailbox) usize {
     return count;
 }
 
-test "issue149 config change queues exactly one color scheme report" {
-    // `Termio.changeConfig` installs the new derived config and then calls
-    // this, which queues the mode 2031 report. That queued message is the
-    // single source of the report bytes: a second direct write here would
-    // deliver every OS scheme flip twice.
+test "issue149 config change queues no color scheme report, even into a full mailbox" {
+    // `Termio.changeConfig` calls this on the IO thread, the only reader of
+    // the termio mailbox, and then writes the mode 2031 report itself. A
+    // report queued here would arrive twice, and with the mailbox full the
+    // send would wait for the IO thread, which is this thread, forever.
     var term = try terminal.Terminal.init(std.testing.allocator, .{
         .cols = 80,
         .rows = 24,
@@ -2068,18 +2070,19 @@ test "issue149 config change queues exactly one color scheme report" {
 
     stream.handler.changeConfig(&dark);
     try std.testing.expectEqual(
-        @as(usize, 1),
+        @as(usize, 0),
         countIssue149ColorSchemeReports(&termio_mailbox),
     );
 
-    // An unrelated reload still reports once, not zero and not twice. This is
-    // deliberate and predates issue #149: any config change can move the
-    // palette, so mode 2031 subscribers are re-notified. See `changeConfig`.
+    // A burst of query replies from the reader can fill the mailbox before a
+    // reload reaches the IO thread.
+    const queue = termio_mailbox.spsc.queue;
+    while (queue.push(.{ .inspector = false }, .{ .instant = {} }) > 0) {}
     var light = try termio.DerivedConfig.init(std.testing.allocator, &config, .{ .theme = .light });
     defer light.deinit();
     stream.handler.changeConfig(&light);
     try std.testing.expectEqual(
-        @as(usize, 1),
+        @as(usize, 0),
         countIssue149ColorSchemeReports(&termio_mailbox),
     );
 }

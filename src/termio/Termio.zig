@@ -872,12 +872,9 @@ pub fn changeConfig(self: *Termio, td: *ThreadData, config: *DerivedConfig) !voi
     // Deinit our old config. We do this in the lock because the
     // stream handler may be referencing the old config (i.e. enquiry resp)
     //
-    // This must happen before `StreamHandler.changeConfig` below: that queues
-    // the mode 2031 report, and the queued message is drained against
-    // `self.config`. Installing after it would answer with the outgoing
-    // scheme. There is deliberately no direct write here — the queued report
-    // is the single source of these bytes, so an OS scheme flip produces
-    // exactly one report.
+    // This must happen before the mode 2031 report below, which reads the
+    // scheme from `self.config`: installing after it would answer with the
+    // outgoing scheme.
     installDerivedConfig(&self.config, config);
 
     // Update our stream handler. The stream handler uses the same
@@ -904,6 +901,14 @@ pub fn changeConfig(self: *Termio, td: *ThreadData, config: *DerivedConfig) !voi
         break :cursor color.toTerminalRGB() orelse break :cursor null;
     };
 
+    // The config could have changed any of our colors so update mode 2031.
+    // This is written directly rather than queued as a color_scheme_report
+    // message because we're on the io thread, the only reader of our
+    // mailbox: if the mailbox were full, queueing would wait forever.
+    self.colorSchemeReportLocked(td, false) catch |err| {
+        log.warn("error sending color scheme report err={}", .{err});
+    };
+
     // Set the image size limits
     var it = self.terminal.screens.all.iterator();
     while (it.next()) |entry| {
@@ -917,7 +922,7 @@ pub fn changeConfig(self: *Termio, td: *ThreadData, config: *DerivedConfig) !voi
 }
 
 /// Replace the live derived config. Split out so the ordering contract with
-/// the queued mode 2031 report is testable: whatever is installed here is what
+/// the mode 2031 report is testable: whatever is installed here is what
 /// `colorSchemeReportLocked` will report.
 fn installDerivedConfig(current: *DerivedConfig, replacement: *DerivedConfig) void {
     current.deinit();
@@ -1583,10 +1588,9 @@ test "issue149 OS scheme flip reports only the newly installed scheme" {
     defer installed.deinit();
     var replacement = try DerivedConfig.init(testing.allocator, &config, .{ .theme = .dark });
 
-    // `changeConfig` installs before `StreamHandler.changeConfig` queues the
-    // mode 2031 report, and that queued message is drained against the live
-    // config. So whatever this leaves installed is exactly what gets reported:
-    // the incoming scheme, never the outgoing one.
+    // `changeConfig` installs before it writes the mode 2031 report, which
+    // reads the live config. So whatever this leaves installed is exactly
+    // what gets reported: the incoming scheme, never the outgoing one.
     installDerivedConfig(&installed, &replacement);
 
     try testing.expectEqual(configpkg.ConditionalState.Theme.dark, installed.conditional_state.theme);
