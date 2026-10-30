@@ -416,7 +416,7 @@ pub const StreamHandler = struct {
             .dcs_put => try self.dcsPut(value),
             .dcs_unhook => try self.dcsUnhook(),
             .apc_start => self.apc.start(),
-            .apc_end => try self.apcEnd(),
+            .apc_end => try self.apcEnd(value.terminated),
             .apc_put => self.apc.feed(self.alloc, value),
 
             // Unimplemented
@@ -601,9 +601,16 @@ pub const StreamHandler = struct {
         }
     }
 
-    pub fn apcEnd(self: *StreamHandler) !void {
+    /// Finish the current APC and run its command. `terminated` is false
+    /// when the APC was cancelled or aborted, and then nothing runs.
+    pub fn apcEnd(self: *StreamHandler, terminated: bool) !void {
         var cmd = self.apc.end() orelse return;
         defer cmd.deinit(self.alloc);
+
+        // ECMA-48 says a cancelled or aborted string is thrown away, so
+        // its command must not run. end() above still resets the APC
+        // handler and frees what it collected.
+        if (!terminated) return;
 
         // log.warn("APC command: {}", .{cmd});
         switch (cmd) {
@@ -3009,4 +3016,23 @@ test "CSI 19 t asks for the size in characters" {
         .spsc => |*value| value.queue.pop() orelse return error.NoTermioMessage,
     };
     try std.testing.expectEqual(termio.Message.SizeReport.csi_19_t, message.size_report);
+}
+
+test "a cancelled or aborted Kitty graphics APC runs nothing" {
+    const alloc = std.testing.allocator;
+    var h: TestStream = undefined;
+    try h.init(alloc, .{});
+    defer h.deinit(alloc);
+    const storage = &h.term.screens.active.kitty_images;
+
+    // CAN and SUB cancel the APC, and CSI (0x9B) aborts it.
+    for ([_][]const u8{ "\x18", "\x1a", "\x9b" }) |ending| {
+        h.stream.nextSlice("\x1b_Ga=t,f=24,s=1,v=1,i=7,q=2;AAAA");
+        h.stream.nextSlice(ending);
+        try std.testing.expect(storage.imageById(7) == null);
+    }
+
+    // The same command ended by ST stores the image.
+    h.stream.nextSlice("\x1b_Ga=t,f=24,s=1,v=1,i=7,q=2;AAAA\x1b\\");
+    try std.testing.expect(storage.imageById(7) != null);
 }

@@ -108,7 +108,7 @@ pub const Action = union(Key) {
     dcs_put: u8,
     dcs_unhook,
     apc_start,
-    apc_end,
+    apc_end: ApcEnd,
     apc_put: u8,
     end_hyperlink,
     active_status_display: ansi.StatusDisplay,
@@ -259,6 +259,21 @@ pub const Action = union(Key) {
         pub fn cval(self: Print) Print.C {
             return .{ .cp = @intCast(self.cp) };
         }
+    };
+
+    /// Sent when an APC string ends, for any reason.
+    ///
+    /// An APC is only complete when it ends with the string terminator,
+    /// either `ESC \` or the 8-bit 0x9C. A program can also stop an APC
+    /// partway through. CAN (0x18) or SUB (0x1A) cancels it, and any other
+    /// 8-bit control byte, such as CSI (0x9B), aborts it. ECMA-48 says a
+    /// string stopped this way must be thrown away, so a handler should
+    /// only act on the APC when `terminated` is true.
+    pub const ApcEnd = extern struct {
+        /// True when the string terminator ended the APC. False when the
+        /// APC was cancelled or aborted, in which case its contents
+        /// should be discarded.
+        terminated: bool,
     };
 
     pub const InvokeCharset = lib.Struct(lib.target, struct {
@@ -767,7 +782,9 @@ pub fn Stream(comptime H: type) type {
                     .dcs_unhook => self.handler.vt(.dcs_unhook, {}),
                     .apc_start => self.handler.vt(.apc_start, {}),
                     .apc_put => |code| self.handler.vt(.apc_put, code),
-                    .apc_end => self.handler.vt(.apc_end, {}),
+                    .apc_end => self.handler.vt(.apc_end, .{
+                        .terminated = c == std.ascii.control_code.esc or c == 0x9C,
+                    }),
                 }
             }
         }

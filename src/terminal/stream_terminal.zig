@@ -246,7 +246,7 @@ pub const Handler = struct {
             // APC
             .apc_start => self.apc_handler.start(),
             .apc_put => self.apc_handler.feed(self.terminal.gpa(), value),
-            .apc_end => self.apcEnd(),
+            .apc_end => self.apcEnd(value.terminated),
 
             // Effect-based handlers
             .bell => self.bell(),
@@ -720,10 +720,17 @@ pub const Handler = struct {
         }
     }
 
-    fn apcEnd(self: *Handler) void {
+    /// Finish the current APC and run its command. `terminated` is false
+    /// when the APC was cancelled or aborted, and then nothing runs.
+    fn apcEnd(self: *Handler, terminated: bool) void {
         const alloc = self.terminal.gpa();
         var cmd = self.apc_handler.end() orelse return;
         defer cmd.deinit(alloc);
+
+        // ECMA-48 says a cancelled or aborted string is thrown away, so
+        // its command must not run. end() above still resets the APC
+        // handler and frees what it collected.
+        if (!terminated) return;
 
         switch (cmd) {
             .kitty => |*kitty_cmd| if (comptime build_options.kitty_graphics) {
@@ -3278,4 +3285,26 @@ test "kitty graphics via APC" {
     const storage = &t.screens.active.kitty_images;
     const img = storage.imageById(1).?;
     try testing.expectEqual(.rgb, img.format);
+}
+
+test "kitty graphics APC cancelled or aborted is discarded" {
+    if (comptime !build_options.kitty_graphics) return error.SkipZigTest;
+
+    // CAN (0x18) and SUB (0x1A) cancel the APC, and CSI (0x9B), like
+    // any 8-bit control other than ST, aborts it. Either way the
+    // transmit command must not run, so image 7 is never stored.
+    for ([_][]const u8{ "\x18", "\x1a", "\x9b" }) |ending| {
+        var t: Terminal = try .init(testing.allocator, .{ .cols = 10, .rows = 10 });
+        defer t.deinit(testing.allocator);
+
+        const handler: Handler = .init(&t);
+        var s: Stream = .initAlloc(testing.allocator, handler);
+        defer s.deinit();
+
+        s.nextSlice("\x1b_Ga=t,f=24,s=1,v=1,i=7;AAAA");
+        s.nextSlice(ending);
+
+        const storage = &t.screens.active.kitty_images;
+        try testing.expect(storage.imageById(7) == null);
+    }
 }
