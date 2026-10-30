@@ -1017,15 +1017,17 @@ test "image cleanup preserves live pending data without a graphics device" {
     try std.testing.expectEqual(@as(u32, 0), state.images.count());
 }
 
-test "kitty placement whose rows were pruned is not drawn" {
-    const TestAPI = struct {
-        pub const Texture = struct {
-            pub fn deinit(self: @This()) void {
-                _ = self;
-            }
-        };
+/// A graphics API for tests whose textures need no cleanup.
+const NoopTestAPI = struct {
+    pub const Texture = struct {
+        pub fn deinit(self: @This()) void {
+            _ = self;
+        }
     };
-    const Images = ForAPI(TestAPI);
+};
+
+test "kitty placement whose rows were pruned is not drawn" {
+    const Images = ForAPI(NoopTestAPI);
     const testing = std.testing;
     const alloc = testing.allocator;
 
@@ -1083,14 +1085,7 @@ test "kitty placement whose rows were pruned is not drawn" {
 }
 
 test "kitty renderer uses the intersected source rectangle" {
-    const TestAPI = struct {
-        pub const Texture = struct {
-            pub fn deinit(self: @This()) void {
-                _ = self;
-            }
-        };
-    };
-    const Images = ForAPI(TestAPI);
+    const Images = ForAPI(NoopTestAPI);
     const testing = std.testing;
     const alloc = testing.allocator;
 

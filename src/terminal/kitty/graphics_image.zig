@@ -699,6 +699,8 @@ const TestTmpDir = struct {
 
 /// For Windows tests: symbolic links as an account without the symlink
 /// privilege can make them (Developer Mode).
+/// A copy of `apprt/win32/local_target.zig` `test_links.symlink`, which
+/// terminal code cannot import: change both together.
 const test_symlink = struct {
     extern "kernel32" fn CreateSymbolicLinkW(
         link: [*:0]const u16,
@@ -1144,8 +1146,8 @@ test "image load: file path longer than the path limit is refused" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    // On Windows a path past the limit wrote past Zig's fixed conversion
-    // buffer, so the guard has to run before anything converts it.
+    // On Windows a path past the limit panicked in Zig's fixed conversion
+    // buffer (Debug), so the guard has to run before anything converts it.
     for ([_]usize{ max_path_len + 1, 40000 }) |len| {
         for ([_]command.Transmission.Medium{ .file, .temporary_file }) |medium| {
             const data = try alloc.alloc(u8, len);
