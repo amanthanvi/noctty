@@ -2225,27 +2225,53 @@ test "handoff adopted execution reuses pipes without spawn job or terminate" {
 }
 
 test "Subprocess.init frees the env it takes when it fails" {
-    // A first put into an empty map allocates this many times.
-    var counting = std.testing.FailingAllocator.init(std.testing.allocator, .{});
-    var probe = EnvMap.init(counting.allocator());
-    try probe.put("TERM", "xterm-256color");
-    probe.deinit();
+    const testing = std.testing;
 
-    // Without a resources dir, init puts TERM and then COLORTERM: fail the
-    // second put while the env holds the first. Before the fix nobody freed
-    // it, since the caller cannot tell what the env grew into.
-    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{
-        .fail_index = counting.alloc_index,
-    });
-    try std.testing.expectError(error.OutOfMemory, Subprocess.init(std.testing.allocator, .{
-        .env = EnvMap.init(failing.allocator()),
-        .resources_dir = null,
-        .term = "xterm-256color",
-        .rt_pre_exec_info = undefined,
-        .rt_post_fork_info = undefined,
-    }));
-    try std.testing.expect(failing.has_induced_failure);
-    try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+    const Run = struct {
+        fn initWithEnv(alloc: Allocator) !void {
+            var env: EnvMap = .init(alloc);
+            {
+                errdefer env.deinit();
+                try env.put("HOME", "C:\\Users\\noctty");
+                try env.put("SHELL", "cmd.exe");
+            }
+
+            // The env is not freed here once init has it: the failing
+            // allocator reports it as a leak unless init freed it. A direct
+            // command skips profile discovery, and xterm-256color and no
+            // resources dir skip the terminfo and WSL probes.
+            var subprocess = try Subprocess.init(alloc, .{
+                .command = .{ .direct = &.{"cmd.exe"} },
+                .env = env,
+                .resources_dir = null,
+                .term = "xterm-256color",
+                .rt_pre_exec_info = undefined,
+                .rt_post_fork_info = undefined,
+            });
+            subprocess.deinit();
+        }
+    };
+
+    // Fail each allocation in turn, while building the env and inside init,
+    // as std.testing.checkAllAllocationFailures does. That function cannot
+    // be used directly: init deliberately falls back to a basic shell when
+    // building the command fails, so some runs succeed despite the failure.
+    // Every run must still free all it allocated.
+    const count = count: {
+        var failing: testing.FailingAllocator = .init(testing.allocator, .{});
+        try Run.initWithEnv(failing.allocator());
+        break :count failing.alloc_index;
+    };
+    for (0..count) |fail_index| {
+        var failing: testing.FailingAllocator = .init(testing.allocator, .{
+            .fail_index = fail_index,
+        });
+        Run.initWithEnv(failing.allocator()) catch |err| switch (err) {
+            error.OutOfMemory => {},
+            else => return err,
+        };
+        try testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+    }
 }
 
 /// Builds the argv array for the process we should exec for the
