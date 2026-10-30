@@ -45,52 +45,49 @@ pub const List = DoublyLinkedList(Node);
 ///
 /// Outside PageList's node lifecycle (initPages, grow's reuse of the first
 /// page, createPageExt) reach the page only through page(), rows(), cols()
-/// and capacity(). Names, receivers and return types are upstream Ghostty's
+/// and capacity(): upstream Ghostty's names, receivers and return types
 /// (since 421fe8dab), so ported hunks compile as written. This fork has no
-/// page compression: a node is resident from createPageExt to destroyNodeExt,
-/// and all four are O(1), infallible, allocation-free and take no lock.
+/// page compression; docs/upstream-merge-policy.md says what upstream's
+/// other node names become in a port.
 ///
 /// page() returns the same pointer until PageList destroys or reuses the
 /// node (grow reuses a pruned first node with a new serial). A caller that
 /// caches a node checks the (node, serial) pair with nodeIsValid.
-///
-/// Porting upstream names this fork does not have:
-///   pageAssumeResident()       -> page() (or add it, upstream's body, with
-///                                 the first ported hunk that needs it)
-///   pageIfResident()           -> page(); drop the null arm
-///   pagePreservingState(alloc) -> page(); drop the try and the deinit
-///   storage(), Storage         -> drop the .compressed arm
-///   switch (node.data)         -> the hunk depends on compression: adapt it
-///                                 and record that in the drift report
-///   .owned = .pool / .heap     -> drop it. destroyNodeExt infers the pool from
-///                                 memory.len <= std_size, which holds only
-///                                 while nothing heap-allocates a page at or
-///                                 below std_size (upstream's compact does;
-///                                 this fork's returns null there).
-/// rows() is size.rows (populated rows); page().rows is the Row offset.
 const Node = struct {
     prev: ?*Node = null,
     next: ?*Node = null,
-    data: Page,
+    data: Data,
     serial: u64,
+
+    /// Spelling, not a seam: upstream's `.data = .{ .resident = ... }` lines
+    /// apply unchanged, and `node.data.size`, `&node.data` or
+    /// `switch (node.data)` stop the build.
+    const Data = struct { resident: Page };
+
+    comptime {
+        if (@sizeOf(Data) != @sizeOf(Page)) @compileError(
+            "Node.Data adds nothing to Page; a second field or variant " ++
+                "(compression, owned) is a design change, not a port",
+        );
+    }
 
     /// The page and its memory. Writes go here: node.page().size.rows = n.
     pub inline fn page(self: *Node) *Page {
-        return &self.data;
+        return &self.data.resident;
     }
 
     /// Populated rows. Read metadata here, not through page().size.
     pub inline fn rows(self: *const Node) size.CellCountInt {
-        return self.data.size.rows;
+        return self.data.resident.size.rows;
     }
 
     /// This node's own width; it can differ from PageList.cols during a resize.
     pub inline fn cols(self: *const Node) size.CellCountInt {
-        return self.data.size.cols;
+        return self.data.resident.size.cols;
     }
 
     pub inline fn capacity(self: *const Node) Capacity {
-        return self.data.capacity;
+        return self.data.resident.capacity;
     }
 };
 
@@ -544,7 +541,7 @@ fn initPages(
         // Initialize the first set of pages to contain our viewport so that
         // the top of the first page is always the active area.
         node.* = .{
-            .data = .initBuf(.init(page_buf), layout),
+            .data = .{ .resident = .initBuf(.init(page_buf), layout) },
             .serial = serial.*,
         };
         node.page().size.rows = @min(rem, node.capacity().rows);
@@ -3438,7 +3435,7 @@ pub fn grow(self: *PageList) Allocator.Error!?*List.Node {
         assert(buf.len <= std_size);
 
         // Initialize our new page and reinsert it as the last
-        first.data = .initBuf(.init(buf), Page.layout(cap));
+        first.data = .{ .resident = .initBuf(.init(buf), Page.layout(cap)) };
         first.page().size.rows = 1;
         self.pages.insertAfter(last, first);
         self.total_rows += 1;
@@ -3704,7 +3701,7 @@ inline fn createPageExt(
         @memset(page_buf, 0);
 
     page.* = .{
-        .data = .initBuf(.init(page_buf), layout),
+        .data = .{ .resident = .initBuf(.init(page_buf), layout) },
         .serial = serial.*,
     };
     page.page().size.rows = 0;
@@ -3741,6 +3738,9 @@ fn destroyNodeExt(
     // Update our accounting for page size
     if (total_size) |v| v.* -= page.memory.len;
 
+    // initPages and createPageExt take a pool item exactly when the page
+    // fits std_size, so the size says who owns it. A port that heap-allocates
+    // a smaller page (upstream's compact does) needs upstream's Node.owned.
     if (page.memory.len <= std_size) {
         // Reset the memory to zero so it can be reused
         @memset(page.memory, 0);

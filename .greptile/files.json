@@ -43,6 +43,7 @@
       "description": "Self-Correction Log: terminal core (VT parser, PageList, OSC parsers, search thread, core Surface).",
       "scope": [
         "src/terminal/**",
+        "src/inspector/widgets/pagelist.zig",
         "pkg/wuffs/**",
         "src/Surface.zig",
         "src/termio/stream_handler.zig",

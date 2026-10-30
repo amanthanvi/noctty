@@ -186,7 +186,10 @@ that govern each symbol you change, or that none does.
   modifyOtherKeys flags set (`CSI <99u`, `CSI >4;0m`).
 - [terminal-core.md](docs/agents/log/terminal-core.md): `src/terminal/` (VT
   parser limits, `PageList` and its page serials (`page_serial_min`,
-  `nodeIsValid`, the source renewal in `PageList.split`), OSC parsers,
+  `nodeIsValid`, the source renewal in `PageList.split`), `PageList.Node`'s
+  accessors (`page()`, `rows()`, `cols()`, `capacity()`, `Node.Data`), the
+  owner inference in `destroyNodeExt`, and their callers in
+  `src/inspector/widgets/pagelist.zig`, OSC parsers,
   OSC 133 exit codes, prompt typeahead
   in `semantic_command.zig`, the scrollback search thread and its cached
   results (`ScreenSearch.pruneHistory`, `LiveNodes`), the selection and

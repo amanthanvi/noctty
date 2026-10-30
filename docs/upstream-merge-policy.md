@@ -76,6 +76,28 @@ those changes must be adapted around fork-owned Windows behavior rather than
 overwriting it. If neither rule resolves a conflict cleanly, add the change to
 the window's deferred list with a written reason; do not force it through.
 
+`PageList.Node` reaches its page through upstream's accessors (`page()`,
+`rows()`, `cols()` and `capacity()`), so a ported hunk that uses them
+applies as written and is not an adaptation to record. Upstream's other
+node names come with page compression, which the fork does not have. A hunk
+that uses one is an adaptation, and this is what each becomes:
+
+- `pageAssumeResident()` and `metadata()`: `page()` where the node is
+  mutable; otherwise add the accessor with upstream's resident arm alone
+  (`&self.data.resident`) in the first port that needs it.
+- `pageIfResident()`: `page()`; drop the null arm.
+- `pagePreservingState(alloc)`: `page()`; drop the `try` and the `deinit`.
+- `isCompressed()`: `false`; drop the branch it guards.
+- `storage()` and `Storage`: drop the `.compressed` arm.
+- `switch (node.data)`: the hunk depends on compression; adapt it.
+- `.owned = .pool` or `.heap`: drop it. `destroyNodeExt` infers the owner
+  from the page's size, which holds only while no port heap-allocates a page
+  at or below `std_size` (upstream's `compact` does; the fork's leaves such
+  a page alone and takes a smaller result from the pool).
+
+Each window diffs upstream's Node accessor block against the fork's and
+records a changed name, receiver or return type in its drift report.
+
 The merge scope above decides which paths a window merges from upstream. It is
 not a reason to defer an upstream memory-safety fix (a use-after-free, double
 free, data race or resource leak) whose code also exists in the fork. When such
