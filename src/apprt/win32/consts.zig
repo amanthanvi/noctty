@@ -61,6 +61,14 @@ pub const SW_FORCEMINIMIZE = 11;
 pub const SW_RESTORE = 9;
 pub const SW_MAXIMIZE = 3;
 pub const SW_HIDE = 0;
+/// `AssocQueryStringW` flags and the string a link prompt asks for
+/// (`shlwapi.h`).
+pub const ASSOCF_NOTRUNCATE: u32 = 0x00000020;
+pub const ASSOCF_INIT_IGNOREUNKNOWN: u32 = 0x00000400;
+pub const ASSOCSTR_FRIENDLYAPPNAME: u32 = 4;
+/// `HRESULT_FROM_WIN32(ERROR_NO_ASSOCIATION)`: no app is set for the
+/// scheme or type `AssocQueryStringW` was asked about.
+pub const HRESULT_NO_ASSOCIATION: i32 = @bitCast(@as(u32, 0x80070483));
 /// `WINDOWPLACEMENT.flags`: a minimized window restores to maximized.
 pub const WPF_RESTORETOMAXIMIZED = 0x0002;
 const WM_APP = 0x8000;

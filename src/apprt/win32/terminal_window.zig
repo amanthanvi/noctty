@@ -4665,8 +4665,7 @@ pub const Surface = struct {
         // pending doesn't leak the duplicated payload bytes.
         if (self.pending_clipboard_op) |*op| op.deinit(self.app.core_app.alloc);
         self.pending_clipboard_op = null;
-        if (self.pending_link_open) |target| self.app.core_app.alloc.free(target);
-        self.pending_link_open = null;
+        if (self.takePendingLinkOpen()) |link| self.app.core_app.alloc.free(link);
         self.render_trace.deinit(alloc);
 
         self.destroyGL();
@@ -5260,6 +5259,21 @@ pub const Surface = struct {
             self.app.hostTabStatus(self).index + 1,
             self.effectiveTitle(),
         );
+    }
+
+    /// Keeps `link` (owned on the App allocator) for this pane's link
+    /// prompt, freeing the one an earlier prompt left.
+    pub fn setPendingLinkOpen(self: *Surface, link: []u8) void {
+        if (self.takePendingLinkOpen()) |old| self.app.core_app.alloc.free(old);
+        self.pending_link_open = link;
+    }
+
+    /// The link this pane's prompt was asking about, now the caller's to
+    /// free, or null when no prompt holds one.
+    pub fn takePendingLinkOpen(self: *Surface) ?[]u8 {
+        const link = self.pending_link_open orelse return null;
+        self.pending_link_open = null;
+        return link;
     }
 
     /// What the clipboard holds: its text, else (for `include_files`) the

@@ -39,7 +39,6 @@ comptime {
 }
 
 extern "shell32" fn ShellExecuteExW(info: *ShellExecuteInfo) callconv(.winapi) windows.BOOL;
-extern "shlwapi" fn AssocQueryStringW(flags: u32, str: u32, assoc: [*:0]const u16, extra: ?[*:0]const u16, out: ?[*]u16, len: *u32) callconv(.winapi) windows.HRESULT;
 extern "ole32" fn CoInitializeEx(reserved: ?*anyopaque, flags: u32) callconv(.winapi) windows.HRESULT;
 extern "ole32" fn CoUninitialize() callconv(.winapi) void;
 
@@ -48,7 +47,7 @@ pub fn open(alloc: std.mem.Allocator, path: []const u8) !void {
 }
 
 fn queryAssociation(flags: u32, str: u32, assoc: [*:0]const u16, extra: ?[*:0]const u16, out: ?[*]u16, len: *u32) !windows.HRESULT {
-    return AssocQueryStringW(flags, str, assoc, extra, out, len);
+    return os_windows.AssocQueryStringW(flags, str, assoc, extra, out, len);
 }
 
 fn execute(info: *ShellExecuteInfo) !bool {

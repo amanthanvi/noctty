@@ -1665,6 +1665,43 @@ test "the close prompt for a tab behind the front one names it as the clipboard 
     );
 }
 
+/// The prompt a link from terminal output raises before it opens
+/// (`App.askBeforeOpeningLink`).
+pub const link_prompt_title = "Open link from terminal output?";
+pub const link_prompt_accept_label = "Open link";
+
+/// What Windows says opens a link's scheme, for `linkPromptBody`.
+pub const LinkHandler = union(enum) {
+    /// The app's name, one whole line of plain text.
+    app: []const u8,
+    /// An app is set, but Windows gave no name that can be shown.
+    unnamed,
+    /// No app is set for the scheme (ERROR_NO_ASSOCIATION).
+    none,
+};
+
+pub fn linkPromptBody(alloc: Allocator, handler: LinkHandler, scheme: []const u8) ![]u8 {
+    const tail = " Continue only if you trust where it goes.";
+    return switch (handler) {
+        .app => |name| std.fmt.allocPrint(alloc, "Windows opens it with \u{201C}{s}\u{201D}." ++ tail, .{name}),
+        .unnamed => std.fmt.allocPrint(alloc, "Windows opens it with the app set for {s} links." ++ tail, .{scheme}),
+        .none => std.fmt.allocPrint(alloc, "No app is set for {s} links; Windows may ask you to pick one." ++ tail, .{scheme}),
+    };
+}
+
+test "a link prompt names the app, the scheme, or that no app is set" {
+    const alloc = std.testing.allocator;
+    for ([_]struct { LinkHandler, []const u8 }{
+        .{ .{ .app = "PuTTY" }, "Windows opens it with \u{201C}PuTTY\u{201D}. Continue only if you trust where it goes." },
+        .{ .unnamed, "Windows opens it with the app set for ssh links. Continue only if you trust where it goes." },
+        .{ .none, "No app is set for ssh links; Windows may ask you to pick one. Continue only if you trust where it goes." },
+    }) |case| {
+        const body = try linkPromptBody(alloc, case[0], "ssh");
+        defer alloc.free(body);
+        try std.testing.expectEqualStrings(case[1], body);
+    }
+}
+
 /// Render `data` for the confirm preview pane.
 ///
 /// The payload is shown as it is, matching upstream Ghostty's GTK and

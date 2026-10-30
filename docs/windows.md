@@ -2273,7 +2273,9 @@ A Ctrl+click (or Ctrl in quick select) opens an `http`, `https` or `mailto`
 link at once. A link with one of the other schemes noctty opens (`ftp`,
 `ssh`, `git`, `tel`, `magnet`, `ipfs`, `ipns`, `gemini`, `gopher`, `news`)
 asks first: the prompt shows the exact link and the app Windows will open it
-in, and starts on Cancel. Links with any other scheme are not opened.
+in (or says no app is set), and starts on Cancel. A Ctrl+click on a `file:`
+link to this machine follows the path rules below. Links with any other
+scheme are not opened.
 
 The same matcher finds paths for Ctrl+click links and double-click selection:
 `C:\dir\file`, `C:/dir/file`, `\\server\share\file`, `.\file` and
