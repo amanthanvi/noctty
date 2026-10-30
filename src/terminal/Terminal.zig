@@ -3031,6 +3031,13 @@ pub fn printAttributes(self: *Terminal, buf: []u8) ![]const u8 {
     }
 
     for (attrs[0..i]) |c| {
+        // Preserve underline styles. Kind of a hack to special case '4'
+        // here but its easier than changing how we do all attributes.
+        if (c == '4' and pen.flags.underline != .single) {
+            try writer.print(";4:{}", .{@intFromEnum(pen.flags.underline)});
+            continue;
+        }
+
         try writer.print(";{c}", .{c});
     }
 
@@ -13047,13 +13054,23 @@ test "Terminal: printAttributes" {
         try testing.expectEqualStrings("0;1;2;3;4;5;7;8;9;38:2::100:200:255;48:2::101:102:103", buf);
     }
 
-    {
-        try t.setAttribute(.{ .underline = .single });
-        defer t.setAttribute(.unset) catch unreachable;
+    const Case = struct {
+        underline: sgr.Attribute.Underline,
+        expected: []const u8,
+    };
+    for ([_]Case{
+        .{ .underline = .single, .expected = "0;4" },
+        .{ .underline = .double, .expected = "0;4:2" },
+        .{ .underline = .curly, .expected = "0;4:3" },
+        .{ .underline = .dotted, .expected = "0;4:4" },
+        .{ .underline = .dashed, .expected = "0;4:5" },
+    }) |case| {
+        try t.setAttribute(.{ .underline = case.underline });
         const buf = try t.printAttributes(&storage);
-        try testing.expectEqualStrings("0;4", buf);
+        try testing.expectEqualStrings(case.expected, buf);
     }
 
+    try t.setAttribute(.unset);
     {
         const buf = try t.printAttributes(&storage);
         try testing.expectEqualStrings("0", buf);
