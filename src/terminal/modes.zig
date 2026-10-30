@@ -52,6 +52,16 @@ pub const ModeState = struct {
         }
     }
 
+    /// Get the value a mode is reset to.
+    pub fn getDefault(self: *const ModeState, mode: Mode) bool {
+        switch (mode) {
+            inline else => |mode_comptime| {
+                const entry = comptime entryForMode(mode_comptime);
+                return @field(self.default, entry.name);
+            },
+        }
+    }
+
     /// Save the state of the given mode. This can then be restored
     /// with restore. This will only be accurate if the previous
     /// mode was saved exactly once and not restored. Otherwise this

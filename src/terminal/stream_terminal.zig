@@ -8,6 +8,7 @@ const device_attributes = @import("device_attributes.zig");
 const device_status = @import("device_status.zig");
 const stream = @import("stream.zig");
 const Action = stream.Action;
+const CursorStyleReq = @import("ansi.zig").CursorStyle;
 const Screen = @import("Screen.zig");
 const modes = @import("modes.zig");
 const osc_color = @import("osc/parsers/color.zig");
@@ -167,19 +168,7 @@ pub const Handler = struct {
                 self.terminal.screens.active.cursor.y + 1 +| value.value,
                 self.terminal.screens.active.cursor.x + 1,
             ),
-            .cursor_style => {
-                const blink = switch (value) {
-                    .default, .steady_block, .steady_bar, .steady_underline => false,
-                    .blinking_block, .blinking_bar, .blinking_underline => true,
-                };
-                const style: Screen.CursorStyle = switch (value) {
-                    .default, .blinking_block, .steady_block => .block,
-                    .blinking_bar, .steady_bar => .bar,
-                    .blinking_underline, .steady_underline => .underline,
-                };
-                self.terminal.modes.set(.cursor_blinking, blink);
-                self.terminal.screens.active.cursor.cursor_style = style;
-            },
+            .cursor_style => self.setCursorStyle(value),
             .erase_display_below => self.terminal.eraseDisplay(.below, value),
             .erase_display_above => self.terminal.eraseDisplay(.above, value),
             .erase_display_complete => self.terminal.eraseDisplay(.complete, value),
@@ -244,6 +233,10 @@ pub const Handler = struct {
             },
             .active_status_display => self.terminal.status_display = value,
             .decaln => try self.terminal.decaln(),
+            .soft_reset => {
+                self.terminal.softReset();
+                self.setCursorStyle(.default);
+            },
             .full_reset => {
                 self.terminal.fullReset();
                 self.programStatusReport(.{ .state = .clear });
@@ -481,6 +474,20 @@ pub const Handler = struct {
 
         const func = self.effects.title_changed orelse return;
         func(self);
+    }
+
+    fn setCursorStyle(self: *Handler, value: CursorStyleReq) void {
+        const blink = switch (value) {
+            .default, .steady_block, .steady_bar, .steady_underline => false,
+            .blinking_block, .blinking_bar, .blinking_underline => true,
+        };
+        const style: Screen.CursorStyle = switch (value) {
+            .default, .blinking_block, .steady_block => .block,
+            .blinking_bar, .steady_bar => .bar,
+            .blinking_underline, .steady_underline => .underline,
+        };
+        self.terminal.modes.set(.cursor_blinking, blink);
+        self.terminal.screens.active.cursor.cursor_style = style;
     }
 
     fn requestMode(self: *Handler, mode: modes.Mode) void {

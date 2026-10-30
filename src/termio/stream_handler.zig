@@ -323,6 +323,10 @@ pub const StreamHandler = struct {
                 };
                 self.semantic_output.resetForFullReset();
             },
+            .soft_reset => {
+                self.terminal.softReset();
+                try self.setCursorStyle(.default);
+            },
             .set_mode => try self.setMode(value.mode, true),
             .reset_mode => try self.setMode(value.mode, false),
             .save_mode => self.terminal.modes.save(value.mode),
@@ -2954,4 +2958,23 @@ test "DECRQSS SGR reports the underline style and overline" {
     // Every attribute and two direct colors still fit the reply buffer.
     h.stream.nextSlice("\x1b[0;1;2;3;4:5;53;5;7;8;9;38:2::255:255:255;48:2::255:255:255m\x1bP$qm\x1b\\");
     try expectIssue149Write(&h.termio_mailbox, "\x1bP1$r0;1;2;3;4:5;53;5;7;8;9;38:2::255:255:255;48:2::255:255:255m\x1b\\");
+}
+
+test "DECSTR restores the configured cursor style and keeps the screen" {
+    const alloc = std.testing.allocator;
+    var h: TestStream = undefined;
+    try h.init(alloc, .{});
+    defer h.deinit(alloc);
+
+    h.stream.nextSlice("hello\x1b[4h\x1b[?6h\x1b[6 q\x1b[3;4H\x1b[!p");
+    try std.testing.expect(!h.term.modes.get(.insert));
+    try std.testing.expect(!h.term.modes.get(.origin));
+    try std.testing.expectEqual(terminal.CursorStyle.block, h.term.screens.active.cursor.cursor_style);
+    try std.testing.expect(h.term.modes.get(.cursor_blinking));
+    try std.testing.expectEqual(@as(terminal.size.CellCountInt, 3), h.term.screens.active.cursor.x);
+    try std.testing.expectEqual(@as(terminal.size.CellCountInt, 2), h.term.screens.active.cursor.y);
+
+    const str = try h.term.plainString(alloc);
+    defer alloc.free(str);
+    try std.testing.expectEqualStrings("hello", str);
 }
