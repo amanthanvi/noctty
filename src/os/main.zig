@@ -68,6 +68,7 @@ pub const redact = @import("redact.zig");
 pub const xdg = @import("xdg.zig");
 pub const windows = @import("windows.zig");
 pub const macos = if (builtin.os.tag.isDarwin()) @import("macos.zig") else struct {};
+pub const monotonic = @import("monotonic.zig");
 pub const shell = @import("shell.zig");
 pub const uri = @import("uri.zig");
 
@@ -287,6 +288,7 @@ test "Windows surface thread stack carries local_path.open through a junction cy
 test {
     _ = file;
     _ = i18n;
+    _ = monotonic;
     _ = path;
     _ = uri;
     _ = shell;

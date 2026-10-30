@@ -6,6 +6,7 @@ const Inspector = @import("../inspector/main.zig").Inspector;
 const terminalpkg = @import("../terminal/main.zig");
 const render_dirty = @import("../terminal/render_dirty.zig");
 const inputpkg = @import("../input.zig");
+const monotonic = @import("../os/monotonic.zig");
 
 /// The mutex that must be held while reading any of the data in the
 /// members of this state. Note that the state itself is NOT protected
@@ -30,10 +31,11 @@ preedit: ?Preedit = null,
 /// need about the mouse.
 mouse: Mouse = .{},
 
-/// Wall-clock milliseconds of the most recent renderer wake notify. This is
-/// used by Win32 to keep a short follow-up render loop active even when the
-/// underlying async wake primitive coalesces multiple notifies together.
-last_render_wakeup_notify_ms: std.atomic.Value(u64) = .init(0),
+/// `os/monotonic` nanoseconds of the most recent renderer wake notify, or 0
+/// before the first. This is used by Win32 to keep a short follow-up render
+/// loop active even when the underlying async wake primitive coalesces
+/// multiple notifies together.
+last_render_wakeup_notify_ns: std.atomic.Value(u64) = .init(0),
 
 /// Set of `WakeSource` bits contributed by every notify since the renderer
 /// thread last consumed them. The wake primitive coalesces, so a single
@@ -119,7 +121,7 @@ pub const WakeSource = enum(u5) {
 };
 
 pub fn noteRenderWakeupNotify(self: *@This()) void {
-    self.last_render_wakeup_notify_ms.store(@intCast(std.time.milliTimestamp()), .release);
+    self.last_render_wakeup_notify_ns.store(monotonic.nowNs(), .release);
 }
 
 /// Record the reason for a wake. Callers must do this before notifying, so
@@ -140,12 +142,12 @@ pub fn wakePending(self: *const @This()) bool {
 }
 
 pub fn renderWakeupNotifiedRecently(self: *const @This(), window_ms: u64) bool {
-    const last = self.last_render_wakeup_notify_ms.load(.acquire);
+    const last = self.last_render_wakeup_notify_ns.load(.acquire);
     if (last == 0) return false;
 
-    const now: u64 = @intCast(std.time.milliTimestamp());
+    const now = monotonic.nowNs();
     if (now < last) return false;
-    return now - last < window_ms;
+    return now - last < window_ms * std.time.ns_per_ms;
 }
 
 /// Caller must hold `mutex`.
