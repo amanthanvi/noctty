@@ -984,8 +984,36 @@ pub const ImageStorage = struct {
             return std.math.cast(u32, rounded) orelse std.math.maxInt(u32);
         }
 
+        pub const SourceRect = struct {
+            x: u32,
+            y: u32,
+            width: u32,
+            height: u32,
+        };
+
+        /// Returns the requested source rectangle intersected with the image.
+        /// A zero width or height requests the full corresponding image
+        /// dimension before intersection, as defined by the Kitty protocol.
+        pub fn sourceRect(self: Placement, image: Image) SourceRect {
+            const x = @min(self.source_x, image.width);
+            const y = @min(self.source_y, image.height);
+            return .{
+                .x = x,
+                .y = y,
+                .width = @min(
+                    if (self.source_width > 0) self.source_width else image.width,
+                    image.width - x,
+                ),
+                .height = @min(
+                    if (self.source_height > 0) self.source_height else image.height,
+                    image.height - y,
+                ),
+            };
+        }
+
         /// Calculates the size of this placement's image in pixels,
-        /// taking in to account the specified rows and columns.
+        /// taking in to account the source rectangle and the specified rows
+        /// and columns.
         pub fn calculatedSize(
             self: Placement,
             image: Image,
@@ -994,9 +1022,9 @@ pub const ImageStorage = struct {
             width: u32,
             height: u32,
         } {
-            // Height / width of the image in px.
-            const width = if (self.source_width > 0) self.source_width else image.width;
-            const height = if (self.source_height > 0) self.source_height else image.height;
+            const source = self.sourceRect(image);
+            const width = source.width;
+            const height = source.height;
 
             // If we don't have any specified cols or rows then the placement
             // should be the native size of the image, and doesn't need to be
@@ -1089,23 +1117,6 @@ pub const ImageStorage = struct {
             //       in such a case it seems safe to return 0 for this.
         }
 
-        /// The source rows the renderer samples, as prepKittyPlacement in
-        /// renderer/image.zig computes them: the requested top clamped to
-        /// the image, and an unset height meaning the image's full height.
-        fn sourceRows(self: Placement, image: Image) struct {
-            y: u32,
-            height: u32,
-        } {
-            const y = @min(image.height, self.source_y);
-            return .{
-                .y = y,
-                .height = if (self.source_height > 0)
-                    @min(image.height - y, self.source_height)
-                else
-                    image.height,
-            };
-        }
-
         /// Permanently clip `count` grid rows off the top of this placement
         /// by moving the top of its source rectangle down, which sets the
         /// source top and height explicitly. Used when a scroll moves part
@@ -1121,7 +1132,7 @@ pub const ImageStorage = struct {
             count: u32,
         ) bool {
             assert(count > 0);
-            const src = self.sourceRows(image);
+            const src = self.sourceRect(image);
             const dest_height = self.calculatedSize(image, t).height;
             if (src.height == 0 or dest_height == 0) return false;
 
@@ -1159,7 +1170,7 @@ pub const ImageStorage = struct {
             span: u32,
         ) bool {
             assert(count < span);
-            const src = self.sourceRows(image);
+            const src = self.sourceRect(image);
             const dest_height = self.calculatedSize(image, t).height;
             if (src.height == 0 or dest_height == 0) return false;
 
@@ -2047,6 +2058,48 @@ test "storage: aspect ratio calculation when only columns or rows specified" {
     }
 }
 
+test "storage: default source rectangle is intersected before sizing" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var t = try terminal.Terminal.init(alloc, .{ .cols = 5, .rows = 5 });
+    defer t.deinit(alloc);
+
+    const placement: ImageStorage.Placement = .{
+        .location = .{ .virtual = {} },
+        .source_x = 3,
+        .source_y = 1,
+    };
+    const actual = placement.calculatedSize(.{ .width = 4, .height = 3 }, &t);
+    try testing.expectEqual(@as(u32, 1), actual.width);
+    try testing.expectEqual(@as(u32, 2), actual.height);
+}
+
+test "storage: explicit source rectangle is intersected before sizing" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var t = try terminal.Terminal.init(alloc, .{ .cols = 10, .rows = 10 });
+    defer t.deinit(alloc);
+    t.width_px = 100;
+    t.height_px = 100;
+
+    // The requested 8x8 rectangle intersects this 10x10 image as 2x3.
+    // With a two-column destination, the clipped 2:3 aspect ratio produces
+    // a 20x30 pixel destination.
+    const placement: ImageStorage.Placement = .{
+        .location = .{ .virtual = {} },
+        .source_x = 8,
+        .source_y = 7,
+        .source_width = 8,
+        .source_height = 8,
+        .columns = 2,
+    };
+    const actual = placement.calculatedSize(.{ .width = 10, .height = 10 }, &t);
+    try testing.expectEqual(@as(u32, 20), actual.width);
+    try testing.expectEqual(@as(u32, 30), actual.height);
+}
+
 test "storage: placement geometry handles untrusted dimensions" {
     const testing = std.testing;
     const alloc = testing.allocator;
@@ -2151,14 +2204,16 @@ test "storage: aspect scaling of an untrusted source size with ordinary cells" {
     t.height_px = 40; // 20 px per row
 
     // The cell size times one column or row fits, but the side scaled by
-    // the aspect ratio of a 4294967295 px source dimension does not.
+    // the aspect ratio of a 4294967295 px dimension does not. The source
+    // rectangle is intersected with the image, so the dimension is the
+    // image's.
     {
         const placement: ImageStorage.Placement = .{
             .location = .{ .virtual = {} },
             .columns = 1,
             .source_height = max,
         };
-        const actual = placement.calculatedSize(.{ .width = 1, .height = 1 }, &t);
+        const actual = placement.calculatedSize(.{ .width = 1, .height = max }, &t);
         try testing.expectEqual(@as(u32, 10), actual.width);
         try testing.expectEqual(max, actual.height);
     }
@@ -2168,7 +2223,7 @@ test "storage: aspect scaling of an untrusted source size with ordinary cells" {
             .rows = 1,
             .source_width = max,
         };
-        const actual = placement.calculatedSize(.{ .width = 1, .height = 1 }, &t);
+        const actual = placement.calculatedSize(.{ .width = max, .height = 1 }, &t);
         try testing.expectEqual(max, actual.width);
         try testing.expectEqual(@as(u32, 20), actual.height);
     }

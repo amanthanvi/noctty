@@ -493,17 +493,7 @@ pub fn ForAPI(comptime GraphicsAPI: type) type {
                 // account the rows / columns specified by the placement.
                 const dest_size = p.calculatedSize(image.*, t);
 
-                // Calculate the source rectangle
-                const source_x = @min(image.width, p.source_x);
-                const source_y = @min(image.height, p.source_y);
-                const source_width = if (p.source_width > 0)
-                    @min(image.width - source_x, p.source_width)
-                else
-                    image.width;
-                const source_height = if (p.source_height > 0)
-                    @min(image.height - source_y, p.source_height)
-                else
-                    image.height;
+                const source = p.sourceRect(image.*);
 
                 // Get the viewport-relative Y position of the placement.
                 const y_pos: i32 = @as(i32, @intCast(img_top_y)) - @as(i32, @intCast(top_y));
@@ -519,10 +509,10 @@ pub fn ForAPI(comptime GraphicsAPI: type) type {
                         .height = dest_size.height,
                         .cell_offset_x = p.x_offset,
                         .cell_offset_y = p.y_offset,
-                        .source_x = source_x,
-                        .source_y = source_y,
-                        .source_width = source_width,
-                        .source_height = source_height,
+                        .source_x = source.x,
+                        .source_y = source.y,
+                        .source_width = source.width,
+                        .source_height = source.height,
                     });
                 }
             }
@@ -1089,4 +1079,54 @@ test "kitty placement whose rows were pruned is not drawn" {
     screen.pages.scroll(.top);
     state.kittyUpdate(alloc, &t, cell_size);
     try testing.expectEqual(@as(usize, 0), state.kitty_placements.items.len);
+}
+
+test "kitty renderer uses the intersected source rectangle" {
+    const TestAPI = struct {
+        pub const Texture = struct {
+            pub fn deinit(self: @This()) void {
+                _ = self;
+            }
+        };
+    };
+    const Images = ForAPI(TestAPI);
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var t = try terminal.Terminal.init(alloc, .{ .rows = 3, .cols = 3 });
+    defer t.deinit(alloc);
+    t.width_px = 30;
+    t.height_px = 30;
+
+    var state: Images.State = .empty;
+    defer state.deinit(alloc);
+
+    const screen = t.screens.active;
+    const pixels = try alloc.alloc(u8, 4 * 3 * 3);
+    @memset(pixels, 0);
+    try screen.kitty_images.addImage(alloc, screen, .{
+        .id = 1,
+        .width = 4,
+        .height = 3,
+        .format = .rgb,
+        .data = pixels,
+        .transmit_time = try std.time.Instant.now(),
+    });
+    const pin = try screen.pages.trackPin(screen.cursor.page_pin.*);
+    try screen.kitty_images.addPlacement(alloc, screen, 1, 1, .{
+        .location = .{ .pin = pin },
+        .source_x = 3,
+        .source_y = 1,
+    });
+
+    state.kittyUpdate(alloc, &t, .{ .width = 10, .height = 10 });
+    try testing.expectEqual(@as(usize, 1), state.kitty_placements.items.len);
+
+    const placement = state.kitty_placements.items[0];
+    try testing.expectEqual(@as(u32, 1), placement.width);
+    try testing.expectEqual(@as(u32, 2), placement.height);
+    try testing.expectEqual(@as(u32, 3), placement.source_x);
+    try testing.expectEqual(@as(u32, 1), placement.source_y);
+    try testing.expectEqual(@as(u32, 1), placement.source_width);
+    try testing.expectEqual(@as(u32, 2), placement.source_height);
 }
