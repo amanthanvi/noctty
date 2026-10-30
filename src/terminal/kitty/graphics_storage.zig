@@ -29,11 +29,10 @@ pub const ImageStorage = struct {
     /// if it cares about this value.
     dirty: bool = false,
 
-    /// This is the next automatically assigned image ID. We start mid-way
-    /// through the u32 range to avoid collisions with buggy programs.
-    /// TODO: This isn't good enough, it's perfectly legal for programs
-    ///       to use IDs in the latter half of the range and collisions
-    ///       are not gracefully handled.
+    /// This is the next automatically assigned image ID for images
+    /// transmitted without an ID or number. We start mid-way through
+    /// the u32 range to stay clear of the low IDs client programs
+    /// typically pick. See nextImageId.
     next_image_id: u32 = 2147483647,
 
     /// This is the next automatically assigned placement ID. This is never
@@ -103,6 +102,40 @@ pub const ImageStorage = struct {
         }
 
         self.total_limit = limit;
+    }
+
+    /// Returns the next ID to automatically assign to an image that
+    /// was transmitted without an explicit ID (i=). The result is
+    /// never zero (zero means "no ID") and never an ID currently in
+    /// use, so an automatic ID never replaces an existing image.
+    pub fn nextImageId(
+        self: *ImageStorage,
+        mode: enum { explicit, implicit },
+    ) u32 {
+        // Starting ID depends on mode.
+        var id: u32 = switch (mode) {
+            // Yeah, starting from 1 is wasteful. This matches what Kitty
+            // does. In the future we can probably cache a low-water-mark
+            // based on delete behavior.
+            .explicit => 1,
+            .implicit => self.next_image_id,
+        };
+
+        // Go through all possible images. We have +2 because we can
+        // exceed the total by 1 (new ID).
+        const count: usize = self.images.count();
+        for (0..count + 2) |_| {
+            if (id != 0 and !self.images.contains(id)) break;
+            id +%= 1;
+        }
+
+        // Zero is never allowed.
+        if (id == 0) id = 1;
+
+        // Keep track of our next image id for implicit to speed that up.
+        if (mode == .implicit) self.next_image_id = id +% 1;
+
+        return id;
     }
 
     /// Add an already-loaded image to the storage. This will automatically
@@ -3604,4 +3637,53 @@ test "storage: evict unused transient image" {
     try testing.expect(s.images.contains(1));
     try testing.expect(s.images.contains(2));
     try testing.expect(!s.images.contains(3));
+}
+
+test "storage: nextImageId number matches Kitty get_free_client_id" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    var t = try terminal.Terminal.init(alloc, .{ .rows = 3, .cols = 3 });
+    defer t.deinit(alloc);
+
+    var s: ImageStorage = .{};
+    defer s.deinit(alloc, t.screens.active);
+
+    // Empty storage returns 1, as does Kitty.
+    try testing.expectEqual(@as(u32, 1), s.nextImageId(.explicit));
+
+    // Contiguous IDs from 1: the next ID after them.
+    try s.addImage(alloc, t.screens.active, .{ .id = 1 });
+    try s.addImage(alloc, t.screens.active, .{ .id = 2 });
+    try s.addImage(alloc, t.screens.active, .{ .id = 3 });
+    try testing.expectEqual(@as(u32, 4), s.nextImageId(.explicit));
+
+    // The first gap is filled, even when higher IDs exist.
+    try s.addImage(alloc, t.screens.active, .{ .id = 100 });
+    s.delete(alloc, &t, .{ .id = .{ .image_id = 2, .delete = true } });
+    try testing.expectEqual(@as(u32, 2), s.nextImageId(.explicit));
+
+    // 1 is reused as soon as it is free.
+    s.delete(alloc, &t, .{ .id = .{ .image_id = 1, .delete = true } });
+    try testing.expectEqual(@as(u32, 1), s.nextImageId(.explicit));
+}
+
+test "storage: nextImageId implicit skips in-use ids and zero" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    var t = try terminal.Terminal.init(alloc, .{ .rows = 3, .cols = 3 });
+    defer t.deinit(alloc);
+
+    var s: ImageStorage = .{};
+    defer s.deinit(alloc, t.screens.active);
+
+    // A client image already sits on the counter's first two values.
+    try s.addImage(alloc, t.screens.active, .{ .id = 2147483647 });
+    try s.addImage(alloc, t.screens.active, .{ .id = 2147483648 });
+    try testing.expectEqual(@as(u32, 2147483649), s.nextImageId(.implicit));
+    try testing.expectEqual(@as(u32, 2147483650), s.nextImageId(.implicit));
+
+    // Wrapping skips zero, which means "no ID" protocol-wide.
+    s.next_image_id = std.math.maxInt(u32);
+    try testing.expectEqual(std.math.maxInt(u32), s.nextImageId(.implicit));
+    try testing.expectEqual(@as(u32, 1), s.nextImageId(.implicit));
 }

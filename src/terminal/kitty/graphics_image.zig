@@ -559,10 +559,13 @@ pub const Image = struct {
     usage: command.Transmission.Usage = .default,
     transmit_time: std.time.Instant = undefined,
 
-    /// Set this to true if this image was loaded by a command that
-    /// doesn't specify an ID or number, since such commands should
-    /// not be responded to, even though we do currently give them
-    /// IDs in the public range (which is bad!).
+    /// Set this if the image was loaded without an ID or number. Such
+    /// images must not receive responses. Kitty gives these client ID
+    /// 0 (unaddressable); our storage keys everything by one public
+    /// u32 ID, so they get an ID from the upper half of the range
+    /// that is guaranteed unused at assignment time, but a client
+    /// that explicitly transmits that ID later can still replace
+    /// them.
     implicit_id: bool = false,
 
     pub const Error = error{

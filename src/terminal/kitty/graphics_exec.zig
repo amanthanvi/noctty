@@ -421,12 +421,12 @@ fn loadAndAddImage(
 
     // If the image has no ID, we assign one
     if (loading.image.id == 0) {
-        loading.image.id = storage.next_image_id;
-        storage.next_image_id +%= 1;
-
-        // If the image also has no number then its auto-ID is "implicit".
-        // See the doc comment on the Image.implicit_id field for more detail.
-        if (loading.image.number == 0) loading.image.implicit_id = true;
+        if (loading.image.number > 0) {
+            loading.image.id = storage.nextImageId(.explicit);
+        } else {
+            loading.image.id = storage.nextImageId(.implicit);
+            loading.image.implicit_id = true;
+        }
     }
 
     // If this is chunked, this is the beginning of a new chunked transmission.
@@ -681,7 +681,7 @@ test "kittygfx chunked success response uses initial identifiers" {
         const resp = execute(alloc, &t, &cmd) orelse return error.TestExpectedResponse;
 
         try testing.expect(resp.ok());
-        try testing.expectEqual(@as(u32, 2147483647), resp.id);
+        try testing.expectEqual(@as(u32, 1), resp.id);
         try testing.expectEqual(@as(u32, 93), resp.image_number);
         try testing.expectEqual(@as(u32, 7), resp.placement_id);
 
@@ -689,7 +689,7 @@ test "kittygfx chunked success response uses initial identifiers" {
         var writer: std.Io.Writer = .fixed(&buf);
         try resp.encode(&writer);
         try testing.expectEqualStrings(
-            "\x1b_Gi=2147483647,I=93,p=7;OK\x1b\\",
+            "\x1b_Gi=1,I=93,p=7;OK\x1b\\",
             writer.buffered(),
         );
     }
@@ -1485,4 +1485,106 @@ test "kittygfx out of range display keys are tolerated" {
     var it = storage.placements.iterator();
     const entry = it.next() orelse return error.TestExpectedPlacement;
     try testing.expect(entry.value_ptr.location == .virtual);
+}
+
+/// Executes each command and expects the response it gives: an OK response
+/// with `id`, or none for null.
+fn testExecuteIds(
+    t: *Terminal,
+    cases: []const struct { []const u8, ?u32 },
+) !void {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    for (cases) |case| {
+        const cmd = try command.Parser.parseString(alloc, case[0]);
+        defer cmd.deinit(alloc);
+        const resp = execute(alloc, t, &cmd);
+        const id = case[1] orelse {
+            try testing.expect(resp == null);
+            continue;
+        };
+        const r = resp orelse return error.TestExpectedResponse;
+        try testing.expect(r.ok());
+        try testing.expectEqual(id, r.id);
+    }
+}
+
+test "kittygfx number-based transmission assigns smallest free id" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var t = try Terminal.init(alloc, .{ .rows = 5, .cols = 5 });
+    defer t.deinit(alloc);
+    const storage = &t.screens.active.kitty_images;
+
+    try testExecuteIds(&t, &.{
+        // Empty storage: the first free ID is 1, as in Kitty.
+        .{ "a=t,f=24,s=1,v=1,I=42;/wAA", 1 },
+
+        // Occupy ID 2 explicitly; the next number gets 3.
+        .{ "a=t,f=24,s=1,v=1,i=2;/wAA", 2 },
+        .{ "a=t,f=24,s=1,v=1,I=43;/wAA", 3 },
+
+        // Deleting ID 1 opens a gap that the next number fills.
+        .{ "a=d,d=I,i=1", null },
+        .{ "a=t,f=24,s=1,v=1,I=44;/wAA", 1 },
+    });
+
+    try testing.expectEqual(@as(usize, 3), storage.images.count());
+    try testing.expectEqual(@as(u32, 44), storage.imageById(1).?.number);
+    try testing.expectEqual(@as(u32, 0), storage.imageById(2).?.number);
+    try testing.expectEqual(@as(u32, 43), storage.imageById(3).?.number);
+}
+
+test "kittygfx number-based id assignment does not replace client image" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var t = try Terminal.init(alloc, .{ .rows = 5, .cols = 5 });
+    defer t.deinit(alloc);
+    const storage = &t.screens.active.kitty_images;
+
+    try testExecuteIds(&t, &.{
+        // A client stores and places a red pixel on the ID the old wrapping
+        // counter would assign first.
+        .{ "a=t,f=24,s=1,v=1,i=2147483647;/wAA", 2147483647 },
+        .{ "a=p,i=2147483647,C=1", 2147483647 },
+
+        // A number-based transmission must not collide with it.
+        .{ "a=t,f=24,s=1,v=1,I=42;AAD/", 1 },
+    });
+
+    // The client's image and placement are untouched.
+    try testing.expectEqual(@as(usize, 2), storage.images.count());
+    try testing.expectEqual(@as(usize, 1), storage.placements.count());
+    const img = storage.imageById(2147483647) orelse return error.TestExpectedImage;
+    try testing.expectEqualSlices(u8, &.{ 255, 0, 0 }, img.data);
+}
+
+test "kittygfx implicit id assignment does not replace client image" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var t = try Terminal.init(alloc, .{ .rows = 5, .cols = 5 });
+    defer t.deinit(alloc);
+    const storage = &t.screens.active.kitty_images;
+
+    try testExecuteIds(&t, &.{
+        // A client stores and places a red pixel on the ID the implicit
+        // counter assigns first.
+        .{ "a=t,f=24,s=1,v=1,i=2147483647;/wAA", 2147483647 },
+        .{ "a=p,i=2147483647,C=1", 2147483647 },
+
+        // Transmit without an ID or number: no response, and the counter
+        // skips over the in-use ID instead of replacing that image.
+        .{ "a=t,f=24,s=1,v=1;AAD/", null },
+    });
+
+    try testing.expectEqual(@as(usize, 2), storage.images.count());
+    try testing.expectEqual(@as(usize, 1), storage.placements.count());
+    const img = storage.imageById(2147483647) orelse return error.TestExpectedImage;
+    try testing.expectEqualSlices(u8, &.{ 255, 0, 0 }, img.data);
+    const implicit = storage.imageById(2147483648) orelse return error.TestExpectedImage;
+    try testing.expect(implicit.implicit_id);
+    try testing.expectEqualSlices(u8, &.{ 0, 0, 255 }, implicit.data);
 }
