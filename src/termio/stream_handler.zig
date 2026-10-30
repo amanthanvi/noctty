@@ -709,7 +709,7 @@ pub const StreamHandler = struct {
     }
 
     fn requestModeUnknown(self: *StreamHandler, mode_raw: u16, ansi: bool) !void {
-        self.sendModeReport(self.terminal.modes.getReport(.{ .value = @truncate(mode_raw), .ansi = ansi }));
+        self.sendModeReport(self.terminal.modes.getReport(.{ .value = mode_raw, .ansi = ansi }));
     }
 
     fn sendModeReport(self: *StreamHandler, report: terminal.modes.Report) void {
@@ -2893,4 +2893,19 @@ test "OSC 22 with an empty shape gives the pointer back" {
     h.stream.nextSlice("\x1b]22;\x1b\\");
     try std.testing.expectEqual(@as(?terminal.MouseShape, .default), S.nextShape(h.app_queue));
     try std.testing.expect(S.nextShape(h.app_queue) == null);
+}
+
+test "DECRQM answers a mode past 15 bits as not recognized" {
+    const alloc = std.testing.allocator;
+    var h: TestStream = undefined;
+    try h.init(alloc, .{});
+    defer h.deinit(alloc);
+
+    // Cut to 15 bits, these would read wraparound (7) and insert (4).
+    h.stream.nextSlice("\x1b[?32775$p");
+    try expectIssue149Write(&h.termio_mailbox, "\x1b[?32775;0$y");
+    h.stream.nextSlice("\x1b[4h\x1b[32772$p");
+    try expectIssue149Write(&h.termio_mailbox, "\x1b[32772;0$y");
+    h.stream.nextSlice("\x1b[4$p");
+    try expectIssue149Write(&h.termio_mailbox, "\x1b[4;1$y");
 }

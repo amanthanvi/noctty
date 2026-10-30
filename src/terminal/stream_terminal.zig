@@ -474,7 +474,7 @@ pub const Handler = struct {
 
     fn requestModeUnknown(self: *Handler, mode_raw: u16, ansi: bool) void {
         const report = self.terminal.modes.getReport(.{
-            .value = @truncate(mode_raw),
+            .value = mode_raw,
             .ansi = ansi,
         });
         self.sendModeReport(report);
@@ -2218,6 +2218,12 @@ test "request mode DECRQM with write_pty callback" {
         s.nextSlice("\x1B[?7l");
         s.nextSlice("\x1B[?7$p");
         try testing.expectEqualStrings("\x1B[?7;2$y", S.last_response.?);
+
+        // A large unknown mode must not alias wraparound mode 7.
+        const before = t.modes;
+        s.nextSlice("\x1B[?32775$p");
+        try testing.expectEqualStrings("\x1B[?32775;0$y", S.last_response.?);
+        try testing.expectEqualDeep(before, t.modes);
 
         // Query an unknown mode
         s.nextSlice("\x1B[?9999$p");
