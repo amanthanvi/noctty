@@ -10663,6 +10663,41 @@ const dialog_test = struct {
             return best;
         }
 
+        /// The pixels inside the circle inscribed in `rect`, `inset` pixels
+        /// in from its edge (so none of the corners outside it): how many
+        /// there are, how many are `fill` exactly (a COLORREF), and the
+        /// highest contrast any of the others has against `fill`.
+        const DiscPixels = struct { total: usize, fill: usize, best: f64 };
+
+        fn inDisc(self: Capture, rect: RECT, inset: i32, fill: COLORREF) DiscPixels {
+            const RGB = @import("../terminal/color.zig").RGB;
+            const base: RGB = .{ .r = @truncate(fill), .g = @truncate(fill >> 8), .b = @truncate(fill >> 16) };
+            // In half pixels, so a pixel's centre is a whole number.
+            const center_x: i64 = rect.left + rect.right;
+            const center_y: i64 = rect.top + rect.bottom;
+            const radius: i64 = @divTrunc(@min(rect.right - rect.left, rect.bottom - rect.top), 2) - inset;
+            var result: DiscPixels = .{ .total = 0, .fill = 0, .best = 0 };
+            if (radius <= 0) return result;
+            var y = @max(0, rect.top);
+            while (y < @min(rect.bottom, @as(i32, @intCast(self.height)))) : (y += 1) {
+                var x = @max(0, rect.left);
+                while (x < @min(rect.right, @as(i32, @intCast(self.width)))) : (x += 1) {
+                    const dx: i64 = 2 * @as(i64, x) + 1 - center_x;
+                    const dy: i64 = 2 * @as(i64, y) + 1 - center_y;
+                    if (dx * dx + dy * dy > 4 * radius * radius) continue;
+                    result.total += 1;
+                    const pixel = self.pixels[@as(usize, @intCast(y)) * self.width + @as(usize, @intCast(x))];
+                    const color: RGB = .{ .r = @truncate(pixel >> 16), .g = @truncate(pixel >> 8), .b = @truncate(pixel) };
+                    if (color.r == base.r and color.g == base.g and color.b == base.b) {
+                        result.fill += 1;
+                    } else {
+                        result.best = @max(result.best, color.contrast(base));
+                    }
+                }
+            }
+            return result;
+        }
+
         fn rows(self: Capture, top: i32, bottom: i32) []const u32 {
             const first: usize = @intCast(std.math.clamp(top, 0, @as(i32, @intCast(self.height))));
             const last: usize = @intCast(std.math.clamp(bottom, top, @as(i32, @intCast(self.height))));
@@ -13808,6 +13843,86 @@ test "settings rail marks draw for unsaved and invalid sections at 100% and 150%
     }.body);
 }
 
+test "settings a pressed rail button draws its mark and focus ring in the selection pair in High Contrast" {
+    try dialog_test.onHiddenDesktop(struct {
+        fn highContrast(_: *anyopaque) bool {
+            return true;
+        }
+
+        /// The capture's pixel (0x00RRGGBB) as a COLORREF (0x00BBGGRR).
+        fn colorAt(capture: dialog_test.Capture, x: i32, y: i32) u32 {
+            const pixel = capture.pixels[@as(usize, @intCast(y)) * capture.width + @as(usize, @intCast(x))];
+            return ((pixel & 0xFF) << 16) | (pixel & 0xFF00) | ((pixel >> 16) & 0xFF);
+        }
+
+        fn body() !void {
+            const fixture = try dialog_test.Fixture.start();
+            defer fixture.finish();
+            const settings = &fixture.settings;
+            const hwnd = fixture.hwnd();
+            settings.handle.highContrast = &highContrast;
+            settings.themeChanged();
+            dialog_test.simulateDpi(hwnd, 144);
+            const colors = settings.theme_adapter.colors;
+            try std.testing.expect(colors.high_contrast);
+            // The pairs differ, or the test could not tell them apart.
+            try std.testing.expect(colors.text != colors.selection_text);
+            try std.testing.expect(colors.focus_ring != colors.selection_text);
+
+            // Appearance invalid, and another section shown: its rail
+            // button is marked and not selected.
+            typeInto(settings.fields.edit_font_size.?, "1");
+            settings.validationQuietElapsed();
+            settings.showSection(.terminal, false);
+            const button = settings.sectionButton(.appearance).?;
+            try std.testing.expectEqual(win32_uia.SettingsSectionMarker.invalid, settings.section_markers[@intFromEnum(Section.appearance)]);
+            try std.testing.expect(SendMessageW(button, BM_GETCHECK, 0, 0) != BST_CHECKED);
+
+            // A press, as the pointer makes it: focus and the pushed state,
+            // the section not yet chosen.
+            var client: RECT = undefined;
+            _ = GetClientRect(button, &client);
+            const MK_LBUTTON: usize = 0x0001;
+            const point: isize = (@as(isize, @divTrunc(client.bottom, 2)) << 16) | @as(isize, settings.px(settings_metrics.space_2));
+            _ = SendMessageW(button, WM_LBUTTONDOWN, MK_LBUTTON, point);
+            defer _ = sys.ReleaseCapture();
+            try std.testing.expect((SendMessageW(button, BM_GETSTATE, 0, 0) & BST_PUSHED) != 0);
+            try std.testing.expect(SendMessageW(button, BM_GETCHECK, 0, 0) != BST_CHECKED);
+            try std.testing.expectEqual(@as(?HWND, button), GetFocus());
+
+            _ = RedrawWindow(hwnd, null, null, RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_ALLCHILDREN | RDW_UPDATENOW);
+            const capture = try dialog_test.printClient(hwnd);
+            defer capture.deinit();
+            const outer = dialog_test.rectIn(hwnd, button);
+            const inner: RECT = .{ .left = 0, .top = 0, .right = outer.right - outer.left, .bottom = outer.bottom - outer.top };
+            const middle = outer.top + @divTrunc(inner.bottom, 2);
+            // Filled like a selected button.
+            try std.testing.expectEqual(colors.selection_bg, colorAt(capture, outer.left + settings.px(settings_metrics.space_4), outer.top + settings.px(settings_metrics.space_4)));
+            // The disc in HighlightText, the text paired with that fill, not
+            // ButtonText (1.46:1 on Highlight in Aquatic).
+            const disc = sectionMarkerRect(settings, inner, .invalid);
+            const in_window: RECT = .{ .left = outer.left + disc.left, .top = outer.top + disc.top, .right = outer.left + disc.right, .bottom = outer.top + disc.bottom };
+            try std.testing.expectEqual(colors.selection_text, colorAt(capture, in_window.left + settings.px(3), middle));
+            // Its "!" in the fill's colour: the pair again, the other way round.
+            const disc_pixels = capture.inDisc(in_window, settings.px(2), colors.selection_text);
+            try std.testing.expect(disc_pixels.fill * 2 >= disc_pixels.total);
+            try std.testing.expect(disc_pixels.best >= contrastOf(colors.selection_bg, colors.selection_text) - 0.01);
+            // The focus ring, which High Contrast shows for pointer focus
+            // too, in HighlightText: in the focus colour (Highlight) it
+            // would vanish into the fill.
+            const ring_x = outer.left + settings.px(settings_metrics.space_1);
+            try std.testing.expectEqual(colors.selection_text, colorAt(capture, ring_x, middle));
+        }
+
+        fn contrastOf(a: COLORREF, b: COLORREF) f64 {
+            const RGB = @import("../terminal/color.zig").RGB;
+            const first: RGB = .{ .r = @truncate(a), .g = @truncate(a >> 8), .b = @truncate(a >> 16) };
+            const second: RGB = .{ .r = @truncate(b), .g = @truncate(b >> 8), .b = @truncate(b >> 16) };
+            return first.contrast(second);
+        }
+    }.body);
+}
+
 test "settings an empty focused text field shows that it has focus" {
     try dialog_test.onHiddenDesktop(struct {
         fn body() !void {
@@ -16792,7 +16907,10 @@ fn paintSettingsSectionButton(hwnd: HWND, settings: *SettingsWindow) void {
         settings.focus_input_mode,
         colors.high_contrast,
     );
-    const fill_color = if (selected or pressed)
+    // A pressed button is filled like a selected one, and everything drawn
+    // on it takes the colours paired with that fill.
+    const on_selection = selected or pressed;
+    const fill_color = if (on_selection)
         colors.selection_bg
     else if (hovered and !colors.high_contrast)
         colors.button_bg
@@ -16832,7 +16950,7 @@ fn paintSettingsSectionButton(hwnd: HWND, settings: *SettingsWindow) void {
     // While a search is typed, a page it found nothing on reads quieter, and
     // one it found rows on says how many beside its marker's place.
     const found: ?u16 = if (section) |value| settings.searchCountOf(value) else null;
-    const text_color = if (selected or pressed)
+    const text_color = if (on_selection)
         colors.selection_text
     else if (colors.high_contrast)
         colors.edit_text
@@ -16861,11 +16979,11 @@ fn paintSettingsSectionButton(hwnd: HWND, settings: *SettingsWindow) void {
 
     if (section) |value| {
         const marker = settings.section_markers[@intFromEnum(value)];
-        if (marker != .none) drawSectionMarker(hdc, settings, rect, marker, fill_color, selected);
+        if (marker != .none) drawSectionMarker(hdc, settings, rect, marker, fill_color, on_selection);
     }
 
     if (focused) {
-        const ring_color = if (colors.high_contrast and selected) colors.selection_text else colors.focus_ring;
+        const ring_color = if (colors.high_contrast and on_selection) colors.selection_text else colors.focus_ring;
         const ring = CreateSolidBrush(ring_color) orelse return;
         defer _ = DeleteObject(ring);
         var focus_rect = rect;
@@ -16896,9 +17014,10 @@ fn sectionMarkerRect(settings: *const SettingsWindow, rect: RECT, marker: win32_
 
 /// The color the mark is filled with. High Contrast has one text color per
 /// background, so the disc and the dot differ by shape; the error color there
-/// is ButtonText, which the selected button's Highlight fill does not carry.
-fn sectionMarkerFill(colors: win32_theme.SettingsColors, marker: win32_uia.SettingsSectionMarker, selected: bool) COLORREF {
-    if (colors.high_contrast) return if (selected) colors.selection_text else colors.text;
+/// is ButtonText, which a button filled with Highlight (selected, or pressed)
+/// does not carry.
+fn sectionMarkerFill(colors: win32_theme.SettingsColors, marker: win32_uia.SettingsSectionMarker, on_selection: bool) COLORREF {
+    if (colors.high_contrast) return if (on_selection) colors.selection_text else colors.text;
     return if (marker == .invalid) colors.error_text else colors.accent;
 }
 
@@ -16912,11 +17031,11 @@ fn drawSectionMarker(
     rect: RECT,
     marker: win32_uia.SettingsSectionMarker,
     background: COLORREF,
-    selected: bool,
+    on_selection: bool,
 ) void {
     const invalid = marker == .invalid;
     const bounds = sectionMarkerRect(settings, rect, marker);
-    const fill = sectionMarkerFill(settings.theme_adapter.colors, marker, selected);
+    const fill = sectionMarkerFill(settings.theme_adapter.colors, marker, on_selection);
     const brush = CreateSolidBrush(fill) orelse return;
     defer _ = DeleteObject(brush);
     const previous_brush = SelectObject(hdc, brush);
@@ -21180,9 +21299,14 @@ test "settings the invalid section mark's glyph is drawn at 4.5:1 on its disc, a
                 const disc = sectionMarkerRect(settings, inner, .invalid);
                 const in_window: RECT = .{ .left = outer.left + disc.left, .top = outer.top + disc.top, .right = outer.left + disc.right, .bottom = outer.top + disc.bottom };
                 const fill = sectionMarkerFill(settings.theme_adapter.colors, .invalid, true);
-                const best = capture.bestContrast(in_window, fill);
-                errdefer std.debug.print("settings invalid mark ({s}): best glyph pixel {d:.2}:1 against the disc\n", .{ if (dark) "dark" else "light", best });
-                try std.testing.expect(best >= 4.5);
+                // Only pixels inside the disc: the rectangle's corners are
+                // the button's own fill, which in the dark theme is itself
+                // 4.67:1 against the disc. Most of them are the disc's
+                // colour, so it is the disc being read.
+                const disc_pixels = capture.inDisc(in_window, settings.px(2), fill);
+                errdefer std.debug.print("settings invalid mark ({s}): {d} of {d} pixels the disc's colour, best other {d:.2}:1 against it\n", .{ if (dark) "dark" else "light", disc_pixels.fill, disc_pixels.total, disc_pixels.best });
+                try std.testing.expect(disc_pixels.fill * 2 >= disc_pixels.total);
+                try std.testing.expect(disc_pixels.best >= 4.5);
             }
         }
     };
