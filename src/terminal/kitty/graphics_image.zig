@@ -282,13 +282,12 @@ pub const LoadingImage = struct {
         }
 
         // File must be a regular file
-        if (file.stat()) |stat| {
-            if (stat.kind != .file) {
-                log.warn("file is not a regular file kind={}", .{stat.kind});
-                return error.InvalidData;
-            }
-        } else |err| {
+        const stat = file.stat() catch |err| {
             log.warn("failed to stat file: {}", .{err});
+            return error.InvalidData;
+        };
+        if (stat.kind != .file) {
+            log.warn("file is not a regular file kind={}", .{stat.kind});
             return error.InvalidData;
         }
 
@@ -312,6 +311,15 @@ pub const LoadingImage = struct {
             const size = std.math.cast(usize, t.size) orelse
                 return error.InvalidData;
             if (size > max_size) return error.InvalidData;
+
+            // Refuse an S the file cannot hold before allocating S bytes.
+            if (t.offset > stat.size or size > stat.size - t.offset) {
+                log.warn(
+                    "image file too short offset={} size={} file_size={}",
+                    .{ t.offset, size, stat.size },
+                );
+                return error.InvalidData;
+            }
 
             // Read exact size
             const data = reader.readAlloc(alloc, size) catch |err| {
@@ -1772,6 +1780,58 @@ test "image load: regular file size rejects short data" {
     defer cmd.deinit(alloc);
 
     try testing.expectError(error.InvalidData, LoadingImage.init(alloc, &cmd));
+}
+
+test "image load: regular file size past the file is refused before allocation" {
+    const testing = std.testing;
+
+    var tmp_dir = try temp_dir.TempDir.init();
+    defer tmp_dir.deinit();
+    try tmp_dir.dir.writeFile(.{
+        .sub_path = "image.data",
+        .data = &.{ 1, 2, 3, 4, 5, 6 },
+    });
+
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const path = try tmp_dir.dir.realpath("image.data", &path_buf);
+
+    // Room for the canonical path buffer, not for a 1 MiB read.
+    var limited: LimitedAllocator = .init(testing.allocator, 256 * 1024);
+    const alloc = limited.allocator();
+
+    const cases = [_]struct {
+        offset: u32,
+        size: u32,
+        expected: ?[3]u8,
+    }{
+        .{ .offset = 3, .size = 1024 * 1024, .expected = null },
+        .{ .offset = 7, .size = 3, .expected = null },
+        .{ .offset = 3, .size = 3, .expected = .{ 4, 5, 6 } },
+    };
+    for (cases) |case| {
+        var cmd: command.Command = .{
+            .control = .{ .transmit = .{
+                .format = .rgb,
+                .medium = .file,
+                .width = 1,
+                .height = 1,
+                .size = case.size,
+                .offset = case.offset,
+                .image_id = 31,
+            } },
+            .data = try alloc.dupe(u8, path),
+        };
+        defer cmd.deinit(alloc);
+
+        const expected = case.expected orelse {
+            try testing.expectError(error.InvalidData, LoadingImage.init(alloc, &cmd));
+            continue;
+        };
+        var loading = try LoadingImage.init(alloc, &cmd);
+        defer loading.deinit(alloc);
+        try testing.expectEqualSlices(u8, &expected, loading.data.items);
+    }
+    try testing.expect(!limited.limit_exceeded);
 }
 
 test "image load: png rejects oversized Wuffs image before allocation" {
