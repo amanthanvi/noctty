@@ -304,17 +304,17 @@ pub const LoadingImage = struct {
     /// Returns true if path appears to be in a temporary directory.
     /// Copies logic from Kitty.
     fn isPathInTempDir(path: []const u8) bool {
-        if (std.mem.startsWith(u8, path, "/tmp")) return true;
-        if (std.mem.startsWith(u8, path, "/dev/shm")) return true;
+        if (isPathInDir("/tmp", path)) return true;
+        if (isPathInDir("/dev/shm", path)) return true;
         const dir = temp_dir.allocTmpDir(std.heap.page_allocator) catch return false;
         defer temp_dir.freeTmpDir(std.heap.page_allocator, dir);
-        if (std.mem.startsWith(u8, path, dir)) return true;
+        if (isPathInDir(dir, path)) return true;
 
         // The temporary dir is sometimes a symlink. On macOS for
         // example /tmp is /private/var/...
         var buf: [std.fs.max_path_bytes]u8 = undefined;
         if (posix.realpath(dir, &buf)) |real_dir| {
-            if (std.mem.startsWith(u8, path, real_dir)) return true;
+            if (isPathInDir(real_dir, path)) return true;
         } else |_| {}
 
         return false;
@@ -545,6 +545,60 @@ pub const Image = struct {
 pub const Rect = struct {
     top_left: PageList.Pin,
     bottom_right: PageList.Pin,
+};
+
+/// Returns true if `path` is `dir` or is contained within it, requiring a
+/// path-separator boundary so similarly prefixed directories do not match.
+fn isPathInDir(dir: []const u8, path: []const u8) bool {
+    if (dir.len == 0 or !std.mem.startsWith(u8, path, dir)) return false;
+    if (path.len == dir.len or std.fs.path.isSep(dir[dir.len - 1])) return true;
+    return std.fs.path.isSep(path[dir.len]);
+}
+
+test "temporary file path must be inside directory" {
+    const testing = std.testing;
+
+    try testing.expect(isPathInDir("/tmp", "/tmp/tty-graphics-protocol-image.data"));
+    try testing.expect(isPathInDir("/tmp/", "/tmp/tty-graphics-protocol-image.data"));
+    try testing.expect(isPathInDir("/tmp", "/tmp"));
+
+    try testing.expect(!isPathInDir("", "/tmp/tty-graphics-protocol-image.data"));
+    try testing.expect(!isPathInDir("/tmp", "/tmpX/tty-graphics-protocol-image.data"));
+    try testing.expect(!isPathInDir("/dev/shm", "/dev/shm-evil/tty-graphics-protocol-image.data"));
+    try testing.expect(!isPathInDir("/custom/tmp", "/custom/tmp-suffix/tty-graphics-protocol-image.data"));
+
+    if (comptime builtin.os.tag != .windows) return;
+    try testing.expect(isPathInDir("C:\\Temp", "C:\\Temp\\tty-graphics-protocol-image.data"));
+    try testing.expect(isPathInDir("C:\\Temp\\", "C:\\Temp\\tty-graphics-protocol-image.data"));
+    try testing.expect(isPathInDir("C:\\Temp", "C:\\Temp/tty-graphics-protocol-image.data"));
+    try testing.expect(isPathInDir("C:\\", "C:\\tty-graphics-protocol-image.data"));
+    try testing.expect(!isPathInDir("C:\\Temp", "C:\\Temp2\\tty-graphics-protocol-image.data"));
+    try testing.expect(!isPathInDir("C:\\Temp", "C:\\Templates\\tty-graphics-protocol-image.data"));
+}
+
+/// Points TMP, which GetTempPathW reads first, at `dir` until the returned
+/// value's restore is called, so a test can name the temporary directory.
+const TestTmpDir = struct {
+    saved: ?[:0]u16,
+
+    fn set(dir: []const u8) !TestTmpDir {
+        const alloc = std.testing.allocator;
+        const name = std.unicode.utf8ToUtf16LeStringLiteral("TMP");
+
+        // getenvW points into the environment block, which a change can move.
+        const saved = if (std.process.getenvW(name)) |v| try alloc.dupeZ(u16, v) else null;
+        errdefer if (saved) |v| alloc.free(v);
+        const dir_w = try std.unicode.utf8ToUtf16LeAllocZ(alloc, dir);
+        defer alloc.free(dir_w);
+        if (std.os.windows.kernel32.SetEnvironmentVariableW(name, dir_w) == 0) return error.Unexpected;
+        return .{ .saved = saved };
+    }
+
+    fn restore(self: TestTmpDir) void {
+        const name = std.unicode.utf8ToUtf16LeStringLiteral("TMP");
+        _ = std.os.windows.kernel32.SetEnvironmentVariableW(name, if (self.saved) |v| v.ptr else null);
+        if (self.saved) |v| std.testing.allocator.free(v);
+    }
 };
 
 // This specifically tests we ALLOW invalid RGB data because Kitty
@@ -916,6 +970,51 @@ test "image load: temporary file without correct path" {
 
     // Temporary file should still be there
     try tmp_dir.dir.access(path, .{});
+}
+
+test "image load: temporary file outside directory prefix is rejected" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var tmp_dir = try temp_dir.TempDir.init();
+    defer tmp_dir.deinit();
+    try tmp_dir.dir.makeDir("temp");
+    try tmp_dir.dir.makeDir("temp-suffix");
+
+    const filename = "tty-graphics-protocol-image.data";
+    const data = @embedFile("testdata/image-rgb-none-20x15-2147483647-raw.data");
+    var outside_dir = try tmp_dir.dir.openDir("temp-suffix", .{});
+    defer outside_dir.close();
+    try outside_dir.writeFile(.{ .sub_path = filename, .data = data });
+
+    var trusted_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const trusted_path = try tmp_dir.dir.realpath("temp", &trusted_buf);
+    var outside_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const outside_path = try outside_dir.realpath(filename, &outside_buf);
+
+    // The temporary directory is `temp`, so `temp-suffix` only shares its
+    // name's prefix.
+    const tmp = try TestTmpDir.set(trusted_path);
+    defer tmp.restore();
+
+    var cmd: command.Command = .{
+        .control = .{ .transmit = .{
+            .format = .rgb,
+            .medium = .temporary_file,
+            .compression = .none,
+            .width = 20,
+            .height = 15,
+            .image_id = 31,
+        } },
+        .data = try alloc.dupe(u8, outside_path),
+    };
+    defer cmd.deinit(alloc);
+    try testing.expectError(error.TemporaryFileNotInTempDir, LoadingImage.init(alloc, &cmd));
+
+    // Rejection must happen before temporary-file cleanup is armed.
+    try outside_dir.access(filename, .{});
 }
 
 test "image load: file path longer than the path limit is refused" {
