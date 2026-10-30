@@ -4,7 +4,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const oni = @import("oniguruma");
 const config_url = @import("../config/url.zig");
-const windows_shell = @import("../config/windows_shell.zig");
+const local_path = @import("../os/local_path.zig");
 const QuickSelectAlphabet = @import("../config/Config.zig").QuickSelectAlphabet;
 const terminal = @import("../terminal/main.zig");
 const point = terminal.point;
@@ -116,41 +116,18 @@ pub const Match = struct {
 /// What firing a label does with the matched text.
 pub const Action = enum { copy, open, paste };
 
-/// Whether `text` has the shape of a file on this machine: a drive path
-/// (`C:\x`, `C:/x`) or a relative one (`.\x`, `src\main.zig:12`). It says
-/// nothing about whether the file exists or may be opened; the opener's own
-/// checks decide that. A share, a device path and a rooted `/x` are not local
-/// shapes, and neither is anything that is not only a path, such as a URL.
-///
-/// With `msys_drive_paths` (a pane that is not WSL), an MSYS2 or Cygwin drive
-/// path (`/c/x`, `/cygdrive/c/x`) is one too, because a Ctrl+click opens it
-/// as `C:\x` (`windows_shell.msysDrivePathToWindows`).
-pub fn isLocalPath(text: []const u8, msys_drive_paths: bool) bool {
-    const path = config_url.splitLocation(text) orelse text;
-    if (path.len == 0) return false;
-    if (msys_drive_paths and windows_shell.isMsysDrivePath(path))
-        return std.mem.indexOfScalar(u8, path, ':') == null;
-    const separators = "\\/";
-    if (path.len > 3 and std.ascii.isAlphabetic(path[0]) and path[1] == ':' and
-        std.mem.indexOfScalar(u8, separators, path[2]) != null)
-    {
-        return std.mem.indexOfScalar(u8, path[2..], ':') == null;
-    }
-    if (std.mem.indexOfScalar(u8, separators, path[0]) != null) return false;
-    if (std.mem.indexOfScalar(u8, path, ':') != null) return false;
-    return std.mem.indexOfAny(u8, path, separators) != null;
-}
-
 /// Resolve the action for a fired label. Ctrl asks to open and Alt asks to
 /// paste; anything not openable degrades to a copy rather than being refused,
 /// so a mistyped modifier never silently does nothing.
 ///
 /// A local path counts as openable here: the opener refuses a missing file, a
 /// program or a script and says so, which is better than a copy nobody asked
-/// for. `msys_drive_paths` is `isLocalPath`'s.
-pub fn resolveAction(text: []const u8, ctrl: bool, alt: bool, msys_drive_paths: bool) Action {
+/// for. Outside WSL (`wsl` false) an MSYS2 or Cygwin drive path is one too
+/// (`local_path.isLocalShape`), because a click opens it through the same
+/// resolver.
+pub fn resolveAction(text: []const u8, ctrl: bool, alt: bool, wsl: bool) Action {
     if (ctrl) {
-        const openable = isLocalPath(text, msys_drive_paths) or (beginsWithAllowedScheme(text) catch |err| blk: {
+        const openable = local_path.isLocalShape(text, wsl) or (beginsWithAllowedScheme(text) catch |err| blk: {
             std.log.warn("quick select scheme validation failed err={}", .{err});
             break :blk false;
         });
@@ -165,42 +142,42 @@ test "hints: ctrl falls back to copy for targets that cannot be opened" {
     try oni.testing.ensureInit();
 
     // Ctrl opens real, allowlisted URLs and files on this machine, in any pane.
-    for ([_]bool{ false, true }) |msys| {
-        try testing.expectEqual(Action.open, resolveAction("https://example.com", true, false, msys));
-        try testing.expectEqual(Action.open, resolveAction("C:\\work\\notes.txt", true, false, msys));
-        try testing.expectEqual(Action.open, resolveAction("C:/work/notes.txt:12:5", true, false, msys));
-        try testing.expectEqual(Action.open, resolveAction(".\\src\\main.zig:12:5", true, false, msys));
-        try testing.expectEqual(Action.open, resolveAction("src\\main.zig(12,5)", true, false, msys));
+    for ([_]bool{ false, true }) |wsl| {
+        try testing.expectEqual(Action.open, resolveAction("https://example.com", true, false, wsl));
+        try testing.expectEqual(Action.open, resolveAction("C:\\work\\notes.txt", true, false, wsl));
+        try testing.expectEqual(Action.open, resolveAction("C:/work/notes.txt:12:5", true, false, wsl));
+        try testing.expectEqual(Action.open, resolveAction(".\\src\\main.zig:12:5", true, false, wsl));
+        try testing.expectEqual(Action.open, resolveAction("src\\main.zig(12,5)", true, false, wsl));
 
         // Everything else Ctrl is pressed on degrades to copy, never to open.
-        try testing.expectEqual(Action.copy, resolveAction("\\\\server\\share\\x", true, false, msys));
-        try testing.expectEqual(Action.copy, resolveAction("//server/share/x", true, false, msys));
-        try testing.expectEqual(Action.copy, resolveAction("\\\\?\\C:\\x", true, false, msys));
-        try testing.expectEqual(Action.copy, resolveAction("/x/y", true, false, false));
-        try testing.expectEqual(Action.copy, resolveAction("/home/me/notes.txt", true, false, msys));
-        try testing.expectEqual(Action.copy, resolveAction("C:\\a\\b.txt:stream", true, false, msys));
-        try testing.expectEqual(Action.copy, resolveAction("/c/a/b.txt:stream", true, false, msys));
-        try testing.expectEqual(Action.copy, resolveAction("deadbeef", true, false, msys));
-        try testing.expectEqual(Action.copy, resolveAction("192.168.1.10", true, false, msys));
-        try testing.expectEqual(Action.copy, resolveAction("2001:db8::1", true, false, msys));
-        try testing.expectEqual(Action.copy, resolveAction("550e8400-e29b-41d4-a716-446655440000", true, false, msys));
-        try testing.expectEqual(Action.copy, resolveAction("file:///C:/evil.exe", true, false, msys));
+        try testing.expectEqual(Action.copy, resolveAction("\\\\server\\share\\x", true, false, wsl));
+        try testing.expectEqual(Action.copy, resolveAction("//server/share/x", true, false, wsl));
+        try testing.expectEqual(Action.copy, resolveAction("\\\\?\\C:\\x", true, false, wsl));
+        try testing.expectEqual(Action.copy, resolveAction("/x/y", true, false, true));
+        try testing.expectEqual(Action.copy, resolveAction("/home/me/notes.txt", true, false, wsl));
+        try testing.expectEqual(Action.copy, resolveAction("C:\\a\\b.txt:stream", true, false, wsl));
+        try testing.expectEqual(Action.copy, resolveAction("/c/a/b.txt:stream", true, false, wsl));
+        try testing.expectEqual(Action.copy, resolveAction("deadbeef", true, false, wsl));
+        try testing.expectEqual(Action.copy, resolveAction("192.168.1.10", true, false, wsl));
+        try testing.expectEqual(Action.copy, resolveAction("2001:db8::1", true, false, wsl));
+        try testing.expectEqual(Action.copy, resolveAction("550e8400-e29b-41d4-a716-446655440000", true, false, wsl));
+        try testing.expectEqual(Action.copy, resolveAction("file:///C:/evil.exe", true, false, wsl));
 
         // Alt pastes; Ctrl wins over Alt so a chord cannot both open and paste.
-        try testing.expectEqual(Action.paste, resolveAction("deadbeef", false, true, msys));
-        try testing.expectEqual(Action.open, resolveAction("https://example.com", true, true, msys));
-        try testing.expectEqual(Action.copy, resolveAction("file:///C:/evil.exe", true, true, msys));
+        try testing.expectEqual(Action.paste, resolveAction("deadbeef", false, true, wsl));
+        try testing.expectEqual(Action.open, resolveAction("https://example.com", true, true, wsl));
+        try testing.expectEqual(Action.copy, resolveAction("file:///C:/evil.exe", true, true, wsl));
 
         // No modifier always copies.
-        try testing.expectEqual(Action.copy, resolveAction("https://example.com", false, false, msys));
-        try testing.expectEqual(Action.copy, resolveAction("/c/work/notes.txt", false, false, msys));
+        try testing.expectEqual(Action.copy, resolveAction("https://example.com", false, false, wsl));
+        try testing.expectEqual(Action.copy, resolveAction("/c/work/notes.txt", false, false, wsl));
     }
 
     // An MSYS2 or Cygwin drive path opens, as a Ctrl+click does, outside WSL
     // (#514); in a WSL pane it is a Linux path, which is copied as before.
     for ([_][]const u8{ "/c/work/notes.txt", "/c/work/notes.txt:12:5", "/cygdrive/d/src/main.zig(12,5)", "/x/y" }) |text| {
-        try testing.expectEqual(Action.open, resolveAction(text, true, false, true));
-        try testing.expectEqual(Action.copy, resolveAction(text, true, false, false));
+        try testing.expectEqual(Action.open, resolveAction(text, true, false, false));
+        try testing.expectEqual(Action.copy, resolveAction(text, true, false, true));
     }
 }
 
@@ -1016,52 +993,6 @@ test "hints: a path ends at its quote, bracket, punctuation or semicolon" {
     }
 }
 
-test "hints: local path shapes are openable and everything else is not" {
-    for ([_]bool{ false, true }) |msys| {
-        try std.testing.expect(isLocalPath("C:\\work\\notes.txt", msys));
-        try std.testing.expect(isLocalPath("c:/work/notes.txt", msys));
-        try std.testing.expect(isLocalPath("C:\\work\\notes.txt:3:4", msys));
-        try std.testing.expect(isLocalPath(".\\a.txt", msys));
-        try std.testing.expect(isLocalPath("..\\a.txt", msys));
-        try std.testing.expect(isLocalPath("src/config/url.zig", msys));
-        try std.testing.expect(isLocalPath("src\\main.zig(12,5)", msys));
-
-        for ([_][]const u8{
-            "",
-            "C:",
-            "C:\\",
-            "C:5",
-            "\\\\server\\share\\x",
-            "//server/share/x",
-            "/\\server\\share\\x",
-            "\\\\?\\C:\\x",
-            "/Users/x",
-            "/cd/x",
-            // A drive's root never is, like `C:\` (#520 review): these are
-            // switches far more often (`cmd /c`, `xcopy /s /e`).
-            "/c",
-            "/c/",
-            "/cygdrive/c",
-            "/c/..",
-            "/c/x/..",
-            "C:\\a\\b.txt:stream",
-            "/c/a/b.txt:stream",
-            "https://example.com/a",
-            "file:///C:/x",
-            "notes.txt",
-            "deadbeef",
-            "192.168.1.10",
-            "2001:db8::1",
-        }) |text| try std.testing.expect(!isLocalPath(text, msys));
-    }
-
-    // An MSYS2 or Cygwin drive path is local only outside WSL (#514).
-    for ([_][]const u8{ "/c/work/notes.txt", "/c/work/notes.txt:3:4", "/cygdrive/c/work", "/c/w" }) |text| {
-        try std.testing.expect(isLocalPath(text, true));
-        try std.testing.expect(!isLocalPath(text, false));
-    }
-}
-
 // Windows command lines are full of single-letter switches, and `url.regex`
 // matches each as a rooted path (`/c` in `cmd /c "dir"`). Ctrl copies them in
 // every pane; only a path below a drive's root opens outside WSL (#514, #520
@@ -1101,8 +1032,8 @@ test "hints: a single-letter switch is never a drive's root" {
     try testing.expectEqual(expected.len, scan.matches.len);
     for (expected, 0..) |want, index| {
         try testing.expectEqualStrings(want[0], scan.matchText(index));
-        try testing.expectEqual(want[1], resolveAction(want[0], true, false, true));
-        try testing.expectEqual(want[2], resolveAction(want[0], true, false, false));
+        try testing.expectEqual(want[1], resolveAction(want[0], true, false, false));
+        try testing.expectEqual(want[2], resolveAction(want[0], true, false, true));
     }
 }
 

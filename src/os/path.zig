@@ -92,6 +92,31 @@ pub fn isDriveAbsolutePath(path: []const u8) bool {
         isSeparator(path[2]);
 }
 
+/// The Windows path a drive path written another way names (`/C:/x` in a
+/// file URI, `/c/x` from MSYS2). `rest` is what follows the `X:` and its
+/// first separator.
+pub fn drivePathToWindows(alloc: Allocator, drive: u8, rest: []const u8) Allocator.Error![]const u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(alloc);
+
+    try buf.append(alloc, drive);
+    try buf.appendSlice(alloc, ":\\");
+    try appendWindowsPath(&buf, alloc, trimLeadingSeparators(rest));
+    return try buf.toOwnedSlice(alloc);
+}
+
+fn trimLeadingSeparators(path: []const u8) []const u8 {
+    return std.mem.trimLeft(u8, path, "/\\");
+}
+
+fn appendWindowsPath(
+    buf: *std.ArrayList(u8),
+    alloc: Allocator,
+    path: []const u8,
+) Allocator.Error!void {
+    for (path) |c| try buf.append(alloc, if (c == '/') '\\' else c);
+}
+
 fn isSeparator(c: u8) bool {
     return c == '/' or c == '\\';
 }

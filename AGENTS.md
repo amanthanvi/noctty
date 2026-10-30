@@ -304,7 +304,8 @@ that govern each symbol you change, or that none does.
   `terminal/kitty/windows.zig`, the `t=t` delete through the opened handle
   in `os/windows.zig` `deleteOpenedFile`, and the length of a path before
   Zig converts it);
-  link and quick-select path detection and opening (the opener's gate:
+  link and quick-select path detection and opening (`os/local_path.zig`
+  `linkTarget` and `isLocalShape`; the opener's gate:
   `prepareWin32OpenTarget`, `prepareWin32LocalFile`, `isSafeLinkText`,
   `local_path.Found.storedName`, and its hidden-desktop probe
   `test/windows/link-opener-pathext-probe.ps1`; the link prompt:

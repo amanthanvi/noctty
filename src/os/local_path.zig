@@ -1,7 +1,10 @@
-//! A bounded open on a local drive, for the link opener, the editor and the
-//! Settings config read: no unchecked reparse target is opened, including
-//! targets reached through another local symlink, so nothing it opens
-//! contacts a share.
+//! Which local Windows path a program-reported (or noctty-held) path names,
+//! and whether noctty may act on it: the file link or quick-select text
+//! names (`linkTarget`, `isLocalShape`), and a bounded open on a local drive
+//! for the link opener, the editor and the Settings config read (`open`).
+//! Only `open` touches the filesystem. No unchecked reparse target is
+//! opened, including targets reached through another local symlink, so
+//! nothing it opens contacts a share.
 const std = @import("std");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
@@ -103,6 +106,308 @@ pub fn open(alloc: Allocator, path: []const u8, how: How) Allocator.Error!Opened
         .missing => .missing,
         .refused => .refused,
     };
+}
+
+/// The pane link or quick-select text was printed in.
+pub const Pane = struct {
+    /// The pane's directory, for relative text: a reported pwd, or the launch
+    /// or restored directory. Null when it has none.
+    dir: ?[]const u8 = null,
+    /// The pane's launch command runs WSL (`Surface.launchesWsl`): there
+    /// `/c/x` is a Linux path, in any other pane `C:\x`.
+    wsl: bool,
+};
+
+/// The local path to open for link text, owned by `alloc`, or null, which
+/// leaves the text to the opener as written: a URL, an absolute Windows path
+/// with no location, or text that names nothing local.
+///
+/// - A compiler's `file:12:5` or `file(12,5)` is not part of the name, but a
+///   name can end that way, so the whole text is tried first.
+/// - Relative text is read against `pane.dir`, and is null without one.
+///   Absolute text, rooted `\x` included, ignores `pane.dir`.
+/// - Outside WSL an MSYS2 or Cygwin drive path is a Windows path:
+///   `/c/Users/me` and `/cygdrive/c/Users/me` are `C:\Users\me`, as text and
+///   as `pane.dir` (fish under MSYS2 reports `/c/...` in its OSC 7, and `/c`
+///   for the drive's root). Such text gives the Windows path even when
+///   nothing is there, so the opener refuses it as it refuses that path typed
+///   with a drive letter. A drive's root as text (`/c`, as in `cmd /c`) is
+///   not read, nor is a `..` above the drive.
+///
+/// Whether a file is there is asked through `open`, which never contacts a
+/// share; call it without the renderer mutex held. No text or directory
+/// makes it panic or abort.
+pub fn linkTarget(alloc: Allocator, text: []const u8, pane: Pane) Allocator.Error!?[]const u8 {
+    const dir: ?[]const u8 = if (std.fs.path.isAbsolute(text)) null else pane.dir orelse return null;
+    if (pane.wsl) return resolveOpenPath(alloc, dir, text);
+    return resolveMsysOpenPath(alloc, dir, text);
+}
+
+/// Whether link text has the shape of a file on this machine, which a click
+/// opens through `linkTarget`: a drive path (`C:\x`, `C:/x`), a relative one
+/// (`.\x`, `src\main.zig:12`), and outside WSL an MSYS2 or Cygwin drive path
+/// (`/c/x`, `/cygdrive/c/x`). It says nothing about whether the file exists
+/// or may be opened, and looks at no file. A share, a device path and any
+/// other rooted `/x` are not local shapes, and neither is anything that is
+/// not only a path, such as a URL.
+pub fn isLocalShape(text: []const u8, wsl: bool) bool {
+    const path = splitLocation(text) orelse text;
+    if (path.len == 0) return false;
+    if (!wsl and msysDriveRoot(path, 1) != null)
+        return std.mem.indexOfScalar(u8, path, ':') == null;
+    if (path.len > 3 and os_path.isDriveAbsolutePath(path))
+        return std.mem.indexOfScalar(u8, path[2..], ':') == null;
+    const separators = "\\/";
+    if (std.mem.indexOfScalar(u8, separators, path[0]) != null) return false;
+    if (std.mem.indexOfScalar(u8, path, ':') != null) return false;
+    return std.mem.indexOfAny(u8, path, separators) != null;
+}
+
+/// `resolveOpenPath` for a pane that is not WSL, reading an MSYS2 or Cygwin
+/// drive path as the Windows path it names (`linkTarget`).
+fn resolveMsysOpenPath(alloc: Allocator, dir: ?[]const u8, text: []const u8) Allocator.Error!?[]const u8 {
+    if (try msysToWindows(alloc, text, 1)) |path| {
+        const found = resolveOpenPath(alloc, null, path) catch |err| {
+            alloc.free(path);
+            return err;
+        };
+        if (found == null) return path;
+        alloc.free(path);
+        return found;
+    }
+    const base = dir orelse return resolveOpenPath(alloc, null, text);
+    const windows_base = try msysToWindows(alloc, base, 0);
+    defer if (windows_base) |p| alloc.free(p);
+    return resolveOpenPath(alloc, windows_base orelse base, text);
+}
+
+/// What link text names on disk, as an owned path, or null (`linkTarget`).
+/// `dir` is null for an absolute path and the pane's directory for a
+/// relative one.
+fn resolveOpenPath(alloc: Allocator, dir: ?[]const u8, text: []const u8) Allocator.Error!?[]const u8 {
+    const bare = splitLocation(text);
+    if (dir == null) {
+        // The opener checks an absolute path itself; only a location needs us.
+        const stripped = bare orelse return null;
+        if (try existingPath(alloc, null, text)) |whole| {
+            alloc.free(whole);
+            return null;
+        }
+        return existingPath(alloc, null, stripped);
+    }
+    if (try existingPath(alloc, dir, text)) |whole| return whole;
+    return existingPath(alloc, dir, bare orelse return null);
+}
+
+/// `path` as an absolute path, if it exists. Relative to `dir` when that is
+/// set.
+fn existingPath(alloc: Allocator, dir: ?[]const u8, path: []const u8) Allocator.Error!?[]const u8 {
+    // Zig's `resolve` indexes an empty slice (a panic) when a drive-relative
+    // name such as `D:x` is joined onto a path (measured with `b:x`, `D:x`).
+    // No default pattern produces one, but a custom `link` regex can.
+    // Zig's parser takes any byte before the ':' as a drive (`1:x` panics too).
+    if (path.len >= 2 and path[1] == ':' and !std.fs.path.isAbsolute(path)) return null;
+
+    // A share or device path is never resolved either: `resolve` unwraps a null
+    // on a server whose share is a lone separator (`\\a\/`), and it is the
+    // opener's to refuse anyway.
+    if (os_path.isNetworkOrDevicePath(path)) return null;
+
+    // The same two panics as a base: a drive with no root (`C:`, `b:x`) and
+    // `\\a\/`. A pane's directory should be neither, but a launch directory
+    // is not screened like a reported one.
+    if (dir) |base| if (!std.fs.path.isAbsolute(base) or os_path.isNetworkOrDevicePath(base)) return null;
+
+    // Always the output of `resolve`, which `windowsPathIsRepresentable`
+    // needs: it also folds `.`, `..` and mixed separators out of absolute text.
+    const resolved = if (dir) |base|
+        try std.fs.path.resolve(alloc, &.{ base, path })
+    else
+        try std.fs.path.resolve(alloc, &.{path});
+    defer alloc.free(resolved);
+
+    // Link text is arbitrary, so resolution can produce a string Windows
+    // cannot represent as a path: "https://example.com" becomes
+    // "C:\Users\me\https:\example.com". Screen the result before anything
+    // hands it to the filesystem.
+    if (!windowsPathIsRepresentable(resolved)) return null;
+
+    // The bounded open answers whether it exists, not `accessAbsolute`. It
+    // refuses a path that is not on a local drive letter, a mapped network
+    // drive, and a symlink or junction that leads to a share
+    // (`C:\link\x.txt:12` into a share), all before anything touches the
+    // network; `accessAbsolute` follows such a link, and the UI thread would
+    // wait on the server first. It also answers with a status where
+    // `faccessatW` has an `unreachable`.
+    return switch (try open(alloc, resolved, .{})) {
+        .found => |found| found: {
+            found.file.close();
+            break :found found.path;
+        },
+        .missing, .refused => null,
+    };
+}
+
+/// Whether `path` is a local path Windows can address, which must be the output
+/// of `std.fs.path.resolve`.
+///
+/// Defence in depth in front of `open`, which refuses every shape this does
+/// but a device name, and answers NT's own refusals with a status. It was the
+/// one gate while `existingPath` asked `accessAbsolute`, whose `faccessatW`
+/// maps `STATUS_OBJECT_NAME_INVALID` to `unreachable` (a process abort), and
+/// is kept so that no link text reaches the filesystem in a shape NT calls
+/// malformed. Shapes we cannot cheaply prove safe are rejected, which only
+/// costs the link its file-path interpretation.
+fn windowsPathIsRepresentable(path: []const u8) bool {
+    // Also not for a network share or device path. The pwd can no longer be
+    // one (the stream handler refuses it), and a launch directory is screened
+    // before `resolve` too; this keeps a third gate in front of the open.
+    if (os_path.isNetworkOrDevicePath(path)) return false;
+
+    // `resolve` does not always return an absolute path: a pwd opening with
+    // `\/` comes back as `server\share\file`.
+    if (!std.fs.path.isAbsolute(path)) return false;
+
+    var rest = path;
+
+    if (rest.len >= 2 and rest[1] == ':' and std.ascii.isAlphabetic(rest[0])) {
+        rest = rest[2..];
+    }
+
+    const leaf_start = if (std.mem.lastIndexOfAny(u8, rest, "/\\")) |i| i + 1 else 0;
+    const dirs = rest[0..leaf_start];
+    const leaf = rest[leaf_start..];
+
+    // Outside the leaf a ':' names a directory Windows cannot address, which
+    // is the shape a URL takes once it is resolved against the terminal pwd.
+    if (std.mem.indexOfScalar(u8, dirs, ':') != null) return false;
+    if (!windowsNameIsAddressable(dirs)) return false;
+
+    // The leaf may carry one alternate-data-stream separator. NT accepts any
+    // character in a stream name, control characters included, but both sides
+    // of the ':' must be non-empty, and a second ':' introduces a stream
+    // *type* that NT validates against a fixed set ("$DATA" and friends).
+    // Rather than model that set we admit a single separator only. (`open`
+    // takes no ':' after the drive, so a stream never reaches the disk; these
+    // checks only keep the shapes NT calls malformed out of it.)
+    const ads = std.mem.indexOfScalar(u8, leaf, ':') orelse
+        return !windowsNameIsDevice(leaf) and windowsNameIsAddressable(leaf);
+    const name = leaf[0..ads];
+    if (windowsNameIsDevice(name)) return false;
+    // `resolve` does not fold `.` or `..` when a stream follows (`C:\x\.:12`),
+    // and NT answers STATUS_OBJECT_NAME_INVALID for the name (found by a sweep
+    // of short strings; `...:x` and `a.:x` are fine).
+    if (std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, "..")) return false;
+    const stream = leaf[ads + 1 ..];
+    if (name.len == 0 or stream.len == 0) return false;
+    if (std.mem.indexOfScalar(u8, stream, ':') != null) return false;
+    // Windows drops trailing dots and spaces from a component, so a stream made
+    // of nothing else (`b:.`, `b: `) is empty by the time NT sees it, and NT
+    // answers STATUS_OBJECT_NAME_INVALID. `b:x.` and `b: x` are fine
+    // (measured: not found).
+    if (std.mem.trimRight(u8, stream, ". ").len == 0) return false;
+    // A NUL would truncate in a wide-string API, so a check could run against
+    // a shorter path than the one we hand back to be opened.
+    if (std.mem.indexOfScalar(u8, stream, 0) != null) return false;
+    return windowsNameIsAddressable(name);
+}
+
+/// Whether a final path component names a DOS device (`NUL`, `con.txt`,
+/// `COM1`, `CONOUT$`), however it is spelled: case, trailing spaces, and an
+/// extension (older Windows maps `NUL.txt` to NUL too).
+///
+/// `RtlGetFullPathName_U` turns such a final component into `\\.\nul`, so the
+/// path converted is not the one checked (measured with `C:\x\nul:12`,
+/// `./nul`, `nul.` and `nul `, which aborted `faccessatW` when it ran here).
+/// `con`, `aux`, `prn`, `com9`, `lpt1` and `nul.txt` were not mapped on
+/// Windows 11 build 26200, where they are ordinary file names, but older
+/// Windows maps them. They are refused too: this is the one place that has to
+/// hold on every build, and the only check here that `open` does not repeat.
+fn windowsNameIsDevice(name: []const u8) bool {
+    const stem = std.mem.trimRight(u8, name[0 .. std.mem.indexOfScalar(u8, name, '.') orelse name.len], " ");
+    for ([_][]const u8{ "CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$" }) |device| {
+        if (std.ascii.eqlIgnoreCase(stem, device)) return true;
+    }
+    return stem.len == 4 and std.ascii.isDigit(stem[3]) and
+        (std.ascii.eqlIgnoreCase(stem[0..3], "COM") or std.ascii.eqlIgnoreCase(stem[0..3], "LPT"));
+}
+
+/// Whether `name` uses only characters NT accepts in a file name. It may
+/// contain path separators, but no drive prefix and no stream separator.
+///
+/// `<>"|?*` are never legal, and neither are the C0 controls. DEL is legal:
+/// NT treats 0x7f like any other byte, so `std.ascii.isControl` would be too
+/// broad here.
+fn windowsNameIsAddressable(name: []const u8) bool {
+    if (std.mem.indexOfAny(u8, name, "<>\"|?*") != null) return false;
+    for (name) |c| if (c < 0x20) return false;
+    return true;
+}
+
+/// The Windows path an MSYS2 or Cygwin program means by `path`, an absolute
+/// path on a drive: MSYS2 (Git Bash included) prints `C:\Users\me` as
+/// `/c/Users/me`, and Cygwin as `/cygdrive/c/Users/me`. Null unless it names
+/// something at least `min_depth` levels below the drive's root (`msysDriveRoot`).
+/// The drive is not checked: whatever opens the result refuses a letter that
+/// is not a local drive.
+fn msysToWindows(alloc: Allocator, path: []const u8, min_depth: usize) Allocator.Error!?[]const u8 {
+    const rooted = msysDriveRoot(path, min_depth) orelse return null;
+    return try os_path.drivePathToWindows(alloc, std.ascii.toUpper(rooted[1]), rooted[2..]);
+}
+
+/// `path` from its `/<letter>` on, without the `/cygdrive` prefix, when it
+/// names something at least `min_depth` levels below the drive's root and no
+/// `..` leaves the drive. A name of only dots and spaces adds no level:
+/// Windows drops a final one (`C:\...` is `C:\`). Link text needs a level
+/// (`/c` alone is nearly always a switch: `cmd /c`, `findstr /c:x`), a
+/// pane's directory none (`cd /c`). `//server/share` and `/\server` never
+/// start with a letter.
+fn msysDriveRoot(path: []const u8, min_depth: usize) ?[]const u8 {
+    const rooted = if (std.mem.startsWith(u8, path, "/cygdrive/")) path["/cygdrive".len..] else path;
+    if (rooted.len < 2 or rooted[0] != '/' or !std.ascii.isAlphabetic(rooted[1])) return null;
+    if (rooted.len > 2 and rooted[2] != '/') return null;
+    var depth: usize = 0;
+    var names = std.mem.tokenizeAny(u8, rooted[2..], "/\\");
+    while (names.next()) |name| {
+        if (std.mem.eql(u8, name, "..")) {
+            depth = std.math.sub(usize, depth, 1) catch return null;
+        } else if (std.mem.trim(u8, name, ". ").len > 0) {
+            depth += 1;
+        }
+    }
+    return if (depth >= min_depth) rooted else null;
+}
+
+/// The path in `text` without the location a compiler or test runner appends:
+/// `:line`, `:line:col`, `(line)` or `(line,col)`. Null when there is none.
+///
+/// Nothing here says the rest is a path. A name can end in `(1)`, so a caller
+/// that opens something tries the whole text first.
+fn splitLocation(text: []const u8) ?[]const u8 {
+    var end = text.len;
+    if (end > 0 and text[end - 1] == ')') {
+        const paren = std.mem.lastIndexOfScalar(u8, text, '(') orelse return null;
+        const inner = text[paren + 1 .. end - 1];
+        const comma = std.mem.indexOfScalar(u8, inner, ',');
+        if (!allDigits(inner[0 .. comma orelse inner.len])) return null;
+        if (comma) |i| if (!allDigits(inner[i + 1 ..])) return null;
+        end = paren;
+    } else {
+        for (0..2) |_| {
+            const colon = std.mem.lastIndexOfScalar(u8, text[0..end], ':') orelse break;
+            if (!allDigits(text[colon + 1 .. end])) break;
+            end = colon;
+        }
+    }
+    // A drive letter alone is not a path.
+    if (end == text.len or end < 2) return null;
+    return text[0..end];
+}
+
+fn allDigits(text: []const u8) bool {
+    if (text.len == 0) return false;
+    for (text) |c| if (!std.ascii.isDigit(c)) return false;
+    return true;
 }
 
 /// What `lookup` found at a resolved path.
@@ -806,4 +1111,775 @@ test "local path open finds the name its folder stores" {
     const windows_name = windows_dir.storedName(alloc) orelse return error.TestUnexpectedResult;
     defer alloc.free(windows_name);
     try std.testing.expect(std.ascii.eqlIgnoreCase(std.fs.path.basename(system_root), windows_name));
+}
+
+/// `linkTarget(text, pane)` is `want`, or null when `want` is.
+fn expectLinkTarget(want: ?[]const u8, text: []const u8, pane: Pane) !void {
+    const alloc = std.testing.allocator;
+    const got = try linkTarget(alloc, text, pane);
+    defer if (got) |p| alloc.free(p);
+    std.testing.expectEqualStrings(want orelse "(null)", got orelse "(null)") catch |err| {
+        std.debug.print("link target of {s} (dir {s}, wsl {})\n", .{ text, pane.dir orelse "(none)", pane.wsl });
+        return err;
+    };
+}
+
+/// For tests: `windows_path` as MSYS2 prints it (`/c/x/y`), after `prefix`
+/// (`/cygdrive` for Cygwin's form).
+pub fn testMsysPath(alloc: Allocator, prefix: []const u8, windows_path: []const u8) ![]u8 {
+    const path = try std.fmt.allocPrint(alloc, "{s}/{c}{s}", .{
+        prefix,
+        std.ascii.toLower(windows_path[0]),
+        windows_path[2..],
+    });
+    std.mem.replaceScalar(u8, path, '\\', '/');
+    return path;
+}
+
+test "link target: text Windows cannot name gives null, and no text aborts" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try tmp.dir.realpathAlloc(alloc, ".");
+    defer alloc.free(dir);
+
+    // Positive controls: near misses of the refused shapes are ordinary
+    // names, found with and without a location. DEL is legal in a name.
+    for ([_][]const u8{ "leaf\x7f", "nul1", "nulls.txt", "console", "com", "com10", "lpt", "aux1.txt", "...x", "a.b" }) |name| {
+        try tmp.dir.writeFile(.{ .sub_path = name, .data = "" });
+        const want = try std.fs.path.join(alloc, &.{ dir, name });
+        defer alloc.free(want);
+        const absolute = try std.fmt.allocPrint(alloc, "{s}:12", .{want});
+        defer alloc.free(absolute);
+        const relative = try std.fmt.allocPrint(alloc, "{s}(3,4)", .{name});
+        defer alloc.free(relative);
+        for ([_]bool{ false, true }) |wsl| {
+            try expectLinkTarget(want, absolute, .{ .wsl = wsl });
+            try expectLinkTarget(want, relative, .{ .dir = dir, .wsl = wsl });
+        }
+    }
+
+    // A final name older Windows maps to a DOS device gives null even where
+    // it is an ordinary file, as these are on Windows 11: `open` would find
+    // them, and this is the one refusal it does not repeat.
+    for ([_][]const u8{ "con", "Aux.log", "prn", "com9", "LPT1.txt", "nul.txt" }) |name| {
+        try tmp.dir.writeFile(.{ .sub_path = name, .data = "" });
+        const absolute = try std.fmt.allocPrint(alloc, "{s}\\{s}:12", .{ dir, name });
+        defer alloc.free(absolute);
+        const relative = try std.fmt.allocPrint(alloc, "{s}(1,2)", .{name});
+        defer alloc.free(relative);
+        for ([_]bool{ false, true }) |wsl| {
+            try expectLinkTarget(null, absolute, .{ .wsl = wsl });
+            try expectLinkTarget(null, relative, .{ .dir = dir, .wsl = wsl });
+        }
+    }
+
+    // Each of these, as written and in the pane's directory, with a location
+    // so the resolver looks: a ':' in a directory (a URL resolved against the
+    // pwd), a wildcard, a C0 control, a stream (the open takes no ':' after
+    // the drive), a stream on `.` or `..` or of only dots and spaces, and a
+    // DOS device leaf (NT rejects them; `faccessatW` turned each rejection
+    // into `unreachable`). None may abort, and none names a file.
+    for ([_][]const u8{
+        "https:\\example.com",
+        "foo\\bar:baz\\qux",
+        "a*b",
+        "dir*x\\leaf",
+        "bad\x01name\\leaf",
+        "leaf\x1f",
+        "file.txt:stream",
+        "file.txt:str\x01eam",
+        "magnet:?xt=urn",
+        "a:",
+        ":stream",
+        "a:b:c",
+        "magnet:?xt=urn:btih:0000",
+        "file.txt:str\x00eam",
+        "b:.",
+        "b: ",
+        "b:..",
+        "b:. .",
+        "b:x.",
+        "b: x",
+        "nul",
+        "NUL",
+        "nul.",
+        "nul ",
+        "nul.txt",
+        "con",
+        "Aux.log",
+        "prn",
+        "com1",
+        "LPT9.txt",
+        "conin$",
+        "CONOUT$",
+        ".:x",
+        "..:a",
+        "...:x",
+        "a.:x",
+    }) |name| {
+        const absolute = try std.fmt.allocPrint(alloc, "{s}\\{s}:12", .{ dir, name });
+        defer alloc.free(absolute);
+        const relative = try std.fmt.allocPrint(alloc, "{s}(1,2)", .{name});
+        defer alloc.free(relative);
+        for ([_]bool{ false, true }) |wsl| {
+            try expectLinkTarget(null, absolute, .{ .wsl = wsl });
+            try expectLinkTarget(null, relative, .{ .dir = dir, .wsl = wsl });
+        }
+    }
+
+    // Text longer than Windows can name, with a location so it is looked at
+    // without one: Zig's path conversion would write past its buffer.
+    const long = try alloc.alloc(u8, 40000);
+    defer alloc.free(long);
+    @memset(long, 'a');
+    @memcpy(long[0..3], "C:\\");
+    @memcpy(long[long.len - 3 ..], ":12");
+    for ([_]bool{ false, true }) |wsl| try expectLinkTarget(null, long, .{ .wsl = wsl });
+
+    // Shares and device paths, in every spelling `resolve` can leave, are
+    // never looked at.
+    for ([_][]const u8{
+        "\\\\server\\share\\file:1",
+        "//server/share/file:1",
+        "\\\\?\\UNC\\server\\share\\file:1",
+        "\\\\?\\C:\\Users\\me\\Documents:1",
+        "\\\\.\\pipe\\x:1",
+        "\\\\.\\GLOBALROOT\\Device\\Mup\\server\\share\\file:1",
+    }) |text| for ([_]bool{ false, true }) |wsl| try expectLinkTarget(null, text, .{ .dir = dir, .wsl = wsl });
+}
+
+test "link target: link text resolves to the file it names, without its line and column" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(.{ .sub_path = "a.txt", .data = "" });
+    try tmp.dir.writeFile(.{ .sub_path = "weird(1)", .data = "" });
+    try tmp.dir.makePath("sub dir");
+    try tmp.dir.writeFile(.{ .sub_path = "sub dir/b.zig", .data = "" });
+    const dir = try tmp.dir.realpathAlloc(alloc, ".");
+    defer alloc.free(dir);
+
+    // Text that is not MSYS2's reads the same in every pane.
+    for ([_]bool{ false, true }) |wsl| {
+        const Case = struct { text: []const u8, expect: ?[]const u8 };
+        for ([_]Case{
+            .{ .text = "a.txt", .expect = "a.txt" },
+            .{ .text = ".\\a.txt", .expect = "a.txt" },
+            .{ .text = "a.txt:12:5", .expect = "a.txt" },
+            .{ .text = "a.txt:12", .expect = "a.txt" },
+            .{ .text = "sub dir\\b.zig(3,4)", .expect = "sub dir\\b.zig" },
+            .{ .text = "sub dir/b.zig:7", .expect = "sub dir\\b.zig" },
+            .{ .text = "sub dir\\b.zig(12)", .expect = "sub dir\\b.zig" },
+            // A name that ends like a location is tried whole first.
+            .{ .text = "weird(1)", .expect = "weird(1)" },
+            .{ .text = "missing.txt:1", .expect = null },
+            .{ .text = "missing(3,4)", .expect = null },
+            // Two location groups at most, and only digits make one.
+            .{ .text = "a.txt:1:2:3", .expect = null },
+            .{ .text = "a.txt:x", .expect = null },
+            .{ .text = "a.txt(1,)", .expect = null },
+            // A URL has no such file, and must not reach the filesystem as a path.
+            .{ .text = "https://example.com/a:1", .expect = null },
+        }) |case| {
+            const want = if (case.expect) |name| try std.fs.path.join(alloc, &.{ dir, name }) else null;
+            defer if (want) |p| alloc.free(p);
+            try expectLinkTarget(want, case.text, .{ .dir = dir, .wsl = wsl });
+        }
+        // No directory, no relative link.
+        try expectLinkTarget(null, "a.txt", .{ .wsl = wsl });
+
+        // An absolute path is left to the opener unless a location has to go.
+        for ([_][]const u8{ "a.txt", "weird(1)", "sub dir\\b.zig" }) |name| {
+            const absolute = try std.fs.path.join(alloc, &.{ dir, name });
+            defer alloc.free(absolute);
+            try expectLinkTarget(null, absolute, .{ .dir = dir, .wsl = wsl });
+        }
+        for ([_]struct { name: []const u8, suffix: []const u8 }{
+            .{ .name = "a.txt", .suffix = ":12:5" },
+            .{ .name = "sub dir\\b.zig", .suffix = "(3,4)" },
+        }) |case| {
+            const text = try std.fmt.allocPrint(alloc, "{s}\\{s}{s}", .{ dir, case.name, case.suffix });
+            defer alloc.free(text);
+            const want = try std.fs.path.join(alloc, &.{ dir, case.name });
+            defer alloc.free(want);
+            try expectLinkTarget(want, text, .{ .wsl = wsl });
+        }
+        {
+            const missing = try std.fmt.allocPrint(alloc, "{s}\\missing.txt:12", .{dir});
+            defer alloc.free(missing);
+            try expectLinkTarget(null, missing, .{ .wsl = wsl });
+        }
+
+        // Text a program can print must never abort the process: a location
+        // can leave a stream of only dots and spaces (`b:.`), a DOS device
+        // leaf, or a share whose second name is a lone separator, on which
+        // `resolve` unwraps a null. None needs a file on disk.
+        for ([_][]const u8{
+            "/pkg42-nowhere/b:.:1",
+            "C:\\pkg42-nowhere\\b: :12",
+            "C:\\pkg42-nowhere\\b: (1,2)",
+            "C:/pkg42-nowhere/./b:..:3",
+            "C:\\pkg42-nowhere\\nul:12",
+            "C:\\pkg42-nowhere\\nul(1,2)",
+            "/pkg42-nowhere/nul:1",
+            "C:\\pkg42-nowhere\\NUL.",
+            // A path with no drive letter is the opener's to refuse.
+            "/pkg42-nowhere/a.txt:1",
+            "\\\\a\\/",
+            "\\\\a\\/:12",
+            "\\\\a\\/:12:5",
+            "\\\\a\\/(3,4)",
+            "//C/\\:12",
+            "//./\\(3,4)",
+        }) |text| try expectLinkTarget(null, text, .{ .wsl = wsl });
+        // A stream on `.` or `..` is invalid to NT (and `resolve` keeps it), so
+        // the whole text is never looked at; its location-less form is the
+        // folder it names, which exists. Nothing may abort or leak.
+        for ([_][]const u8{ "C:\\.:12", "C:/.:12", "C:\\\\.:12", "C:\\..:12" }) |text| {
+            const got = try linkTarget(alloc, text, .{ .wsl = wsl });
+            defer if (got) |p| alloc.free(p);
+            if (got) |p| try std.testing.expectEqualStrings("C:\\", p);
+        }
+        // A drive-relative name has no sensible meaning against the pane's
+        // directory, and `resolve` panics on one.
+        for ([_][]const u8{
+            "./b:.:1",
+            "./b:.",
+            "b: :12",
+            ".\\b: (1,2)",
+            "D:x",
+            "b:x:12",
+            "1:x",
+            "_:x:12",
+            "./nul",
+            ".\\nul:3",
+            "nul",
+        }) |text| try expectLinkTarget(null, text, .{ .dir = dir, .wsl = wsl });
+        for ([_][]const u8{ "./.:12", ".\\.:12", "..\\.:12", ".\\..:12" }) |text| {
+            const got = try linkTarget(alloc, text, .{ .dir = dir, .wsl = wsl });
+            if (got) |p| alloc.free(p);
+        }
+        // A share or device path is never looked at, with or without a location.
+        for ([_][]const u8{
+            "\\\\server\\share\\a.txt:1",
+            "//server/share/a.txt:1",
+            "\\\\?\\UNC\\server\\share\\a.txt(1,2)",
+            "\\\\.\\pipe\\x:3",
+        }) |text| try expectLinkTarget(null, text, .{ .wsl = wsl });
+    }
+}
+
+test "link target: rooted text ignores the pane's directory" {
+    const alloc = std.testing.allocator;
+    const system_root = try std.process.getEnvVarOwned(alloc, "SystemRoot");
+    defer alloc.free(system_root);
+    if (!os_path.isDriveAbsolutePath(system_root)) return error.SkipZigTest;
+    // Rooted text names the hosts file on the pane's drive; read against the
+    // pane's directory, as relative text is, it would be found.
+    const hosts = try std.fmt.allocPrint(alloc, "{s}\\System32\\drivers\\etc\\hosts", .{system_root});
+    defer alloc.free(hosts);
+    const users = try std.fmt.allocPrint(alloc, "{s}\\Users", .{system_root[0..2]});
+    defer alloc.free(users);
+    for ([_][]const u8{ "", ":12", "(3,4)" }) |suffix| {
+        const rooted = try std.fmt.allocPrint(alloc, "{s}{s}", .{ hosts[2..], suffix });
+        defer alloc.free(rooted);
+        for ([_]bool{ false, true }) |wsl| try expectLinkTarget(null, rooted, .{ .dir = users, .wsl = wsl });
+    }
+    // Positive control: with its drive letter and a location it is found.
+    const located = try std.fmt.allocPrint(alloc, "{s}:12", .{hosts});
+    defer alloc.free(located);
+    try expectLinkTarget(hosts, located, .{ .dir = users, .wsl = false });
+}
+
+test "link target: an MSYS2 or Cygwin drive path is the Windows path it names (#514)" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(.{ .sub_path = "a.txt", .data = "" });
+    try tmp.dir.makePath("conf.d");
+    try tmp.dir.writeFile(.{ .sub_path = "conf.d/b.zig", .data = "" });
+    const dir = try tmp.dir.realpathAlloc(alloc, ".");
+    defer alloc.free(dir);
+    if (!os_path.isDriveAbsolutePath(dir)) return error.SkipZigTest;
+
+    const Case = struct { prefix: []const u8 = "", text: []const u8, expect: []const u8 };
+    for ([_]Case{
+        // The reporter's case: `pwd` printed a folder.
+        .{ .text = "conf.d", .expect = "conf.d" },
+        .{ .text = "a.txt", .expect = "a.txt" },
+        .{ .prefix = "/cygdrive", .text = "a.txt", .expect = "a.txt" },
+        // A location comes off, as for the same path with a drive letter.
+        .{ .text = "conf.d\\b.zig:12:5", .expect = "conf.d\\b.zig" },
+        .{ .prefix = "/cygdrive", .text = "conf.d\\b.zig(3,4)", .expect = "conf.d\\b.zig" },
+        // A missing file is still the Windows path, for the opener to refuse
+        // as it refuses that path typed with a drive letter.
+        .{ .text = "missing.txt", .expect = "missing.txt" },
+        .{ .text = "missing.txt:12", .expect = "missing.txt:12" },
+    }) |case| {
+        const windows_text = try std.fs.path.join(alloc, &.{ dir, case.text });
+        defer alloc.free(windows_text);
+        const text = try testMsysPath(alloc, case.prefix, windows_text);
+        defer alloc.free(text);
+        const want = try std.fs.path.join(alloc, &.{ dir, case.expect });
+        defer alloc.free(want);
+        want[0] = std.ascii.toUpper(want[0]);
+        try expectLinkTarget(want, text, .{ .wsl = false });
+        // In WSL (and before #514) the text goes to the opener as written,
+        // which refuses it.
+        try expectLinkTarget(null, text, .{ .wsl = true });
+    }
+
+    // Only the form MSYS2 and Cygwin print; the drive is not checked, so a
+    // letter that is no drive gives its Windows path for the opener to refuse.
+    for ([_]struct { []const u8, []const u8 }{
+        .{ "/c/Users/noctty-msys-test/.config/fish/conf.d", "C:\\Users\\noctty-msys-test\\.config\\fish\\conf.d" },
+        .{ "/cygdrive/c/Users/noctty-msys-test", "C:\\Users\\noctty-msys-test" },
+        .{ "/D/noctty-msys-test", "D:\\noctty-msys-test" },
+        // A location stays on when nothing is there without it either.
+        .{ "/c/noctty-msys-test/main.zig:12:5", "C:\\noctty-msys-test\\main.zig:12:5" },
+        // A doubled separator never makes a share out of the rest.
+        .{ "/c//server/share", "C:\\server\\share" },
+        // `..` is fine while it stays below the drive's root.
+        .{ "/c/noctty-msys-test/../y", "C:\\noctty-msys-test\\..\\y" },
+        .{ "/c/.../noctty-msys-test", "C:\\...\\noctty-msys-test" },
+    }) |case| {
+        try expectLinkTarget(case[1], case[0], .{ .wsl = false });
+        try std.testing.expect(isLocalShape(case[0], false));
+    }
+
+    // A relative link in a pane whose directory is an MSYS2 path (fish under
+    // MSYS2 reports `/c/...` in its OSC 7) resolves against the Windows path.
+    {
+        const msys_dir = try testMsysPath(alloc, "", dir);
+        defer alloc.free(msys_dir);
+        const want = try std.fs.path.join(alloc, &.{ dir, "conf.d\\b.zig" });
+        defer alloc.free(want);
+        want[0] = std.ascii.toUpper(want[0]);
+        try expectLinkTarget(want, "conf.d/b.zig:7", .{ .dir = msys_dir, .wsl = false });
+        try expectLinkTarget(null, "conf.d/b.zig:7", .{ .dir = msys_dir, .wsl = true });
+        // A Windows directory still works.
+        const plain = try std.fs.path.join(alloc, &.{ dir, "a.txt" });
+        defer alloc.free(plain);
+        try expectLinkTarget(plain, "a.txt", .{ .dir = dir, .wsl = false });
+    }
+
+    // A drive's root is a directory a shell reports (`cd /c; pwd`), in every
+    // spelling: a `.`, or a `..` back to the root.
+    {
+        const below_root = try std.fs.path.join(alloc, &.{ dir[3..], "a.txt" });
+        defer alloc.free(below_root);
+        const letter = std.ascii.toLower(dir[0]);
+        for ([_][]const u8{ "/{c}", "/{c}/", "/cygdrive/{c}", "/cygdrive/{c}/", "/{c}/.", "/{c}/x/.." }) |form| {
+            const root = try std.mem.replaceOwned(u8, alloc, form, "{c}", &.{letter});
+            defer alloc.free(root);
+            const got = try linkTarget(alloc, below_root, .{ .dir = root, .wsl = false });
+            defer if (got) |p| alloc.free(p);
+            const found: []const u8 = got orelse "C:\\(null)";
+            std.testing.expect(std.ascii.eqlIgnoreCase(found[3..], below_root)) catch |err| {
+                std.debug.print("pane directory {s}\n", .{root});
+                return err;
+            };
+        }
+    }
+
+    // A drive's root is not read from link text: a lone `/c` is nearly always
+    // a switch (`cmd /c "x"`, `findstr /c:x`, `xcopy /s /e`), and a `..` above
+    // the drive is MSYS2's own root. The opener gets the text as written and
+    // refuses it (#520 review).
+    for ([_][]const u8{
+        "/c",      "/C",        "/d",         "/s",    "/e",       "/c/",        "/cygdrive/c",    "/cygdrive/c/",
+        "/c/x/..", "/c/..",     "/c/...",     "/c/.",  "/c/ .",    "/c/x/../..", "/c/x/../../y",   "/cygdrive/c/..",
+        "/",       "/cygdrive", "/cygdrive/", "/cd/x", "/home/me", "/usr/bin",   "/cygdrive/cd/x", "/1/x",
+        "/_/x",    "/C:/Users",
+    }) |text| {
+        try expectLinkTarget(null, text, .{ .wsl = false });
+        try std.testing.expect(!isLocalShape(text, false));
+    }
+
+    // A letter that is no drive here is the Windows path too, which the opener
+    // refuses; nothing is looked up for it.
+    for ("BHJKMNOPQRSTUVWY") |letter| {
+        if (os_windows.driveTypeForLetter(letter) != os_windows.DRIVE_NO_ROOT_DIR) continue;
+        const text = try std.fmt.allocPrint(alloc, "/{c}/file.txt:3", .{std.ascii.toLower(letter)});
+        defer alloc.free(text);
+        const want = try std.fmt.allocPrint(alloc, "{c}:\\file.txt:3", .{letter});
+        defer alloc.free(want);
+        try expectLinkTarget(want, text, .{ .wsl = false });
+        break;
+    }
+
+    // Shares, devices and rooted paths that are not drives stay as they are,
+    // as text and as the pane's directory.
+    for ([_][]const u8{
+        "//server/share/a.txt",
+        "//server/share/a.txt:1",
+        "//c/share/a.txt",
+        "/\\server\\share\\a.txt",
+        "//?/UNC/server/share/a.txt",
+        "//./pipe/x",
+        "/home/me/a.txt",
+        "/cd/a.txt:1",
+        "/cygdrive/cd/a.txt",
+        "\\c\\Users",
+        "c/Users",
+    }) |text| try expectLinkTarget(null, text, .{ .wsl = false });
+    for ([_][]const u8{ "//server/share", "/\\server\\share", "//c/share", "//?/UNC/server/share", "\\\\.\\pipe\\x", "/home/me", "c/Users" }) |share| {
+        try expectLinkTarget(null, "a.txt", .{ .dir = share, .wsl = false });
+    }
+}
+
+test "link target: a link through a symlink to a share is never stat-ed" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    tmp.dir.symLink("\\\\pkg42-no-such-host\\share", "link", .{ .is_directory = true }) catch |err| switch (err) {
+        error.AccessDenied => return error.SkipZigTest, // no symlink privilege
+        else => return err,
+    };
+    const dir = try tmp.dir.realpathAlloc(alloc, ".");
+    defer alloc.free(dir);
+
+    // `accessAbsolute` follows the link and waits on the (here nonexistent)
+    // server on the calling thread; `open` refuses it first, which is also
+    // why this has a bound.
+    var timer = try std.time.Timer.start();
+    for ([_][]const u8{ "link\\report.txt:12", "link/report.txt", "link\\sub\\a.cs(3,4)" }) |text| {
+        try expectLinkTarget(null, text, .{ .dir = dir, .wsl = false });
+        const absolute = try std.fs.path.join(alloc, &.{ dir, text });
+        defer alloc.free(absolute);
+        try expectLinkTarget(null, absolute, .{ .wsl = false });
+    }
+    try std.testing.expect(timer.read() < 2 * std.time.ns_per_s);
+}
+
+test "link target: a relative link never resolves onto a network or device pwd" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(.{ .sub_path = "file.txt", .data = "" });
+    const dir = try tmp.dir.realpathAlloc(alloc, ".");
+    defer alloc.free(dir);
+    for ([_]bool{ false, true }) |wsl| {
+        for ([_][]const u8{
+            "\\\\server\\share",
+            "//server/share",
+            "\\\\?\\UNC\\server\\share\\dir",
+            "\\\\.\\pipe",
+            "\\/server/share",
+            "/\\\\server/share",
+            // The NT namespace prefix is reachable from a reported pwd of
+            // `/??/UNC/server/share`, which `resolve` turns into `\??\UNC\...`.
+            "/??/UNC/server/share",
+            "\\??\\UNC\\server\\share",
+        }) |reported| try expectLinkTarget(null, "file.txt", .{ .dir = reported, .wsl = wsl });
+        // A local pwd still resolves.
+        const want = try std.fs.path.join(alloc, &.{ dir, "file.txt" });
+        defer alloc.free(want);
+        try expectLinkTarget(want, "file.txt", .{ .dir = dir, .wsl = wsl });
+    }
+}
+
+test "link target: a pwd that is no absolute local path gives null and never aborts" {
+    // `resolve` does not always return an absolute path (a pwd that opens
+    // with `\/` comes back as `server\share\file.txt`), and it panics on a
+    // base that is a drive with no root (`C:`, `b:x`) or a share whose second
+    // name is the other separator (`\\a\/`).
+    for ([_]bool{ false, true }) |wsl| for ([_][]const u8{
+        "#x",
+        "relative",
+        "",
+        "/\\\\server/share",
+        "kitty-shell-cwd:",
+        "\\/server/share",
+        "/\\server\\share",
+        "C:",
+        "b:x",
+        "1:x",
+        "\\\\a\\/",
+        "//a/\\",
+    }) |reported| {
+        try expectLinkTarget(null, "file.txt", .{ .dir = reported, .wsl = wsl });
+        try expectLinkTarget(null, "file.txt:12", .{ .dir = reported, .wsl = wsl });
+    };
+}
+
+test "link target: quick select's local shapes are the ones a click opens" {
+    for ([_]bool{ false, true }) |wsl| {
+        for ([_][]const u8{
+            "C:\\work\\notes.txt",
+            "c:/work/notes.txt",
+            "C:\\work\\notes.txt:3:4",
+            ".\\a.txt",
+            "..\\a.txt",
+            "src/config/url.zig",
+            "src\\main.zig(12,5)",
+            "src\\main.cs(12)",
+            "src/main.zig:7",
+            ".\\src\\main.zig:12:5",
+            // Not a location, so the whole text is the path.
+            "C:\\a\\x(foo)",
+            "C:\\a\\x(1,)",
+            "C:\\Program Files (x86)",
+        }) |text| std.testing.expect(isLocalShape(text, wsl)) catch |err| {
+            std.debug.print("shape of {s} (wsl {})\n", .{ text, wsl });
+            return err;
+        };
+
+        for ([_][]const u8{
+            "",
+            "C:",
+            "C:\\",
+            "C:5",
+            ":12",
+            "\\\\server\\share\\x",
+            "//server/share/x",
+            "/\\server\\share\\x",
+            "\\\\?\\C:\\x",
+            "/Users/x",
+            "/cd/x",
+            // A drive's root never is, like `C:\` (#520 review): these are
+            // switches far more often (`cmd /c`, `xcopy /s /e`).
+            "/c",
+            "/c/",
+            "/cygdrive/c",
+            "/c/..",
+            "/c/x/..",
+            "C:\\a\\b.txt:stream",
+            "C:\\a\\b.zig:",
+            "C:\\a\\b.zig:x",
+            "/c/a/b.txt:stream",
+            "a.zig:1:2:3",
+            "https://example.com/a",
+            "file:///C:/x",
+            "notes.txt",
+            "deadbeef",
+            "192.168.1.10",
+            "2001:db8::1",
+        }) |text| std.testing.expect(!isLocalShape(text, wsl)) catch |err| {
+            std.debug.print("shape of {s} (wsl {})\n", .{ text, wsl });
+            return err;
+        };
+    }
+
+    // An MSYS2 or Cygwin drive path is local only outside WSL (#514).
+    for ([_][]const u8{ "/c/work/notes.txt", "/c/work/notes.txt:3:4", "/cygdrive/c/work", "/c/w" }) |text| {
+        try std.testing.expect(isLocalShape(text, false));
+        try std.testing.expect(!isLocalShape(text, true));
+    }
+}
+
+/// The longest string a sweep builds.
+const sweep_max_len = 16;
+
+/// `each(context, s)` for every string `s` over `alphabet` of up to `max_len`
+/// bytes, shortest first. Returns how many strings that was.
+fn forEachString(alphabet: []const u8, max_len: usize, context: anytype, comptime each: anytype) !usize {
+    if (max_len > sweep_max_len) return error.SweepTooLong;
+    var text: [sweep_max_len]u8 = undefined;
+    var indexes: [sweep_max_len]usize = undefined;
+    var count: usize = 0;
+    for (0..max_len + 1) |len| {
+        @memset(indexes[0..len], 0);
+        while (true) {
+            for (indexes[0..len], 0..) |index, i| text[i] = alphabet[index];
+            try each(context, text[0..len]);
+            count += 1;
+            var i = len;
+            while (i > 0) : (i -= 1) {
+                indexes[i - 1] += 1;
+                if (indexes[i - 1] < alphabet.len) break;
+                indexes[i - 1] = 0;
+            } else break;
+        }
+    }
+    return count;
+}
+
+/// `text`, bare and with each location suffix, through `isLocalShape` and
+/// through `linkTarget` in each kind of pane against each of `dirs`.
+fn sweepOne(dirs: []const ?[]const u8, text: []const u8) !void {
+    const alloc = std.testing.allocator;
+    for ([_][]const u8{ "", ":12", ":12:5", "(3,4)" }) |suffix| {
+        var buf: [64]u8 = undefined;
+        const full = try std.fmt.bufPrint(&buf, "{s}{s}", .{ text, suffix });
+        for ([_]bool{ false, true }) |wsl| {
+            _ = isLocalShape(full, wsl);
+            // Absolute text ignores the directory: one pass is enough.
+            const each = if (std.fs.path.isAbsolute(full)) dirs[0..1] else dirs;
+            for (each) |base| {
+                const got = try linkTarget(alloc, full, .{ .dir = base, .wsl = wsl });
+                if (got) |p| alloc.free(p);
+            }
+        }
+    }
+}
+
+/// The sets a sweep runs through `sweepOne`.
+const SweepSizes = struct {
+    /// Every string over the alphabet of up to this many bytes.
+    length: usize,
+    /// Every `url.regex` match, once, in every string over the alphabet of
+    /// up to this many bytes (0: none).
+    regex_length: usize = 0,
+    /// The first `random` strings of up to `sweep_random_len` bytes drawn
+    /// from `seed`, of which this run takes each one whose index is `part`
+    /// modulo `parts`: runs that differ only in `part` split them.
+    random: usize = 0,
+    seed: u64 = 0x514,
+    part: usize = 0,
+    parts: usize = 1,
+};
+
+/// How many strings each set of a sweep took through `sweepOne`, and how
+/// many strings the regex was searched in.
+const SweepCount = struct { strings: usize, searched: usize = 0, matches: usize = 0, random: usize = 0 };
+
+/// The longest random string a sweep draws.
+const sweep_random_len = 8;
+
+/// The sets of `sizes` over `alphabet` through `sweepOne` against no
+/// directory, a tmp dir, a share and an MSYS root: no panic, no abort, no
+/// leak (`std.testing.allocator`).
+fn sweepLinkText(alphabet: []const u8, sizes: SweepSizes) !SweepCount {
+    if (sizes.parts == 0 or sizes.part >= sizes.parts) return error.SweepPart;
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(.{ .sub_path = "a.txt", .data = "" });
+    const dir = try tmp.dir.realpathAlloc(alloc, ".");
+    defer alloc.free(dir);
+    const bases = [_]?[]const u8{ null, dir, "\\/server/share", "/c" };
+    var count: SweepCount = .{
+        .strings = try forEachString(alphabet, sizes.length, @as([]const ?[]const u8, &bases), sweepOne),
+    };
+    if (sizes.regex_length > 0) count.searched, count.matches = try sweepRegexMatches(alphabet, sizes.regex_length, &bases);
+    var text: [sweep_random_len]u8 = undefined;
+    var prng = std.Random.DefaultPrng.init(sizes.seed);
+    const r = prng.random();
+    for (0..sizes.random) |i| {
+        const len = r.uintAtMost(usize, sweep_random_len);
+        for (text[0..len]) |*c| c.* = alphabet[r.uintLessThan(usize, alphabet.len)];
+        if (i % sizes.parts != sizes.part) continue;
+        try sweepOne(&bases, text[0..len]);
+        count.random += 1;
+    }
+    return count;
+}
+
+/// Every distinct `url.regex` match in every string over `alphabet` of up to
+/// `max_len` bytes through `sweepOne`: the link text a click or quick select
+/// on such a line can give. Each string is searched from its start and again
+/// from the end of each match, as quick select does; the renderer searches
+/// the rest of a line as a string of its own, a shorter string here. Returns
+/// how many strings were searched and how many matches ran.
+fn sweepRegexMatches(alphabet: []const u8, max_len: usize, dirs: []const ?[]const u8) !struct { usize, usize } {
+    const oni = @import("oniguruma");
+    const url = @import("../config/url.zig");
+    const alloc = std.testing.allocator;
+    try oni.testing.ensureInit();
+    var re = try oni.Regex.init(url.regex, .{}, oni.Encoding.utf8, oni.Syntax.default, null);
+    defer re.deinit();
+    // A match is a string over the alphabet too: one bit per such string,
+    // at its number in bijective base `alphabet.len`, runs each match once
+    // however many strings hold it.
+    var digit = [_]usize{0} ** 256;
+    for (alphabet, 1..) |c, d| digit[c] = d;
+    var total: usize = 1;
+    for (0..max_len) |_| total = try std.math.add(usize, try std.math.mul(usize, total, alphabet.len), 1);
+    var seen = try std.DynamicBitSetUnmanaged.initEmpty(alloc, total);
+    defer seen.deinit(alloc);
+    const Search = struct {
+        re: *oni.Regex,
+        region: oni.Region = .{},
+        digit: *const [256]usize,
+        base: usize,
+        seen: *std.DynamicBitSetUnmanaged,
+        dirs: []const ?[]const u8,
+        matches: usize = 0,
+
+        fn each(self: *@This(), text: []const u8) !void {
+            var offset: usize = 0;
+            while (offset < text.len) {
+                _ = self.re.searchAdvanced(text, offset, text.len, &self.region, .{}) catch |err| switch (err) {
+                    error.Mismatch => return,
+                    else => return err,
+                };
+                const start: usize = @intCast(self.region.starts()[0]);
+                const end: usize = @intCast(self.region.ends()[0]);
+                if (end <= start) return;
+                const match = text[start..end];
+                var number: usize = 0;
+                for (match) |c| number = number * self.base + self.digit[c];
+                if (!self.seen.isSet(number)) {
+                    self.seen.set(number);
+                    try sweepOne(self.dirs, match);
+                    self.matches += 1;
+                }
+                offset = end;
+            }
+        }
+    };
+    var search: Search = .{ .re = &re, .digit = &digit, .base = alphabet.len, .seen = &seen, .dirs = dirs };
+    defer search.region.deinit();
+    const searched = try forEachString(alphabet, max_len, &search, Search.each);
+    return .{ searched, search.matches };
+}
+
+const sweep_alphabet = "Cc:\\/. nul<*?\"|\x01\x7f(1,)";
+
+test "link target: no short text aborts or leaks" {
+    _ = try sweepLinkText(sweep_alphabet, .{ .length = 3 });
+}
+
+test "link target: no short pane directory aborts or leaks" {
+    // No directory makes `linkTarget` abort, and `Pane.dir` is whatever a
+    // launch or a report left: every directory of up to 3 bytes over the
+    // sweep's alphabet, under relative text with and without a location, in
+    // both kinds of pane.
+    const Each = struct {
+        fn dir(_: void, base: []const u8) !void {
+            const alloc = std.testing.allocator;
+            for ([_][]const u8{ "a.txt", "a.txt:12", "..\\a(3,4)" }) |text| {
+                for ([_]bool{ false, true }) |wsl| {
+                    const got = try linkTarget(alloc, text, .{ .dir = base, .wsl = wsl });
+                    if (got) |p| alloc.free(p);
+                }
+            }
+        }
+    };
+    _ = try forEachString(sweep_alphabet, 3, {}, Each.dir);
+}
+
+test "link target: no text in the full sweep aborts or leaks" {
+    // The PKG-42 sweep's sizes, rerun for every new path-to-filesystem seam:
+    // hours, so only on request (`NOCTTY_RUN_LOCAL_PATH_SWEEP=1`). Its sets
+    // are sized by `NOCTTY_LOCAL_PATH_SWEEP_LENGTH`, `_REGEX_LENGTH` and
+    // `_RANDOM` (`SweepSizes`); `_SEED`, `_PART` and `_PARTS` let processes
+    // split the random strings.
+    const alloc = std.testing.allocator;
+    const run = std.process.getEnvVarOwned(alloc, "NOCTTY_RUN_LOCAL_PATH_SWEEP") catch return error.SkipZigTest;
+    defer alloc.free(run);
+    if (!std.mem.eql(u8, run, "1")) return error.SkipZigTest;
+    const Env = struct {
+        fn number(a: Allocator, name: []const u8, default: usize) !usize {
+            const value = std.process.getEnvVarOwned(a, name) catch return default;
+            defer a.free(value);
+            return std.fmt.parseInt(usize, value, 0);
+        }
+    };
+    const sizes: SweepSizes = .{
+        .length = try Env.number(alloc, "NOCTTY_LOCAL_PATH_SWEEP_LENGTH", 5),
+        .regex_length = try Env.number(alloc, "NOCTTY_LOCAL_PATH_SWEEP_REGEX_LENGTH", 6),
+        .random = try Env.number(alloc, "NOCTTY_LOCAL_PATH_SWEEP_RANDOM", 22_000_000),
+        .seed = try Env.number(alloc, "NOCTTY_LOCAL_PATH_SWEEP_SEED", 0x514),
+        .part = try Env.number(alloc, "NOCTTY_LOCAL_PATH_SWEEP_PART", 0),
+        .parts = try Env.number(alloc, "NOCTTY_LOCAL_PATH_SWEEP_PARTS", 1),
+    };
+    const count = try sweepLinkText(sweep_alphabet, sizes);
+    std.debug.print("local path sweep: {d} strings of up to {d} bytes; {d} url.regex matches in {d} strings of up to {d}; " ++
+        "{d} random of {d} (seed 0x{x}, part {d} of {d})\n", .{
+        count.strings, sizes.length, count.matches, count.searched, sizes.regex_length,
+        count.random,  sizes.random, sizes.seed,    sizes.part,     sizes.parts,
+    });
 }

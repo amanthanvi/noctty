@@ -3213,7 +3213,7 @@ pub const Surface = struct {
         }
 
         // Outside WSL, `/c/x` opens as `C:\x`, as a Ctrl+click on it does.
-        const action = win32_hints.resolveAction(payload, ctrl, alt, !self.core().launchesWsl());
+        const action = win32_hints.resolveAction(payload, ctrl, alt, self.core().launchesWsl());
 
         self.closeQuickSelect(true);
         if (action == .open) {

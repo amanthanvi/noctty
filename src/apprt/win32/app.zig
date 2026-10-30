@@ -7890,7 +7890,7 @@ pub const App = struct {
         }
 
         // So does a script's 8.3 alias, which link text such as `.\CMD~1`
-        // resolves to unchanged (`Surface.existingPath`): it is refused by
+        // resolves to unchanged (`internal_os.local_path.linkTarget`): it is refused by
         // the name its folder stores.
         var tmp = try internal_os.TempDir.init();
         defer tmp.deinit();
@@ -10570,10 +10570,9 @@ test "win32 link opener opens the Windows path of an MSYS2 link, never the text 
         const windows_path = try std.fs.path.join(alloc, &.{ root, case.name });
         defer alloc.free(windows_path);
         for ([_][]const u8{ "", "/cygdrive" }) |prefix| {
-            const text = try std.fmt.allocPrint(alloc, "{s}/{c}{s}", .{ prefix, std.ascii.toLower(windows_path[0]), windows_path[2..] });
+            const text = try internal_os.local_path.testMsysPath(alloc, prefix, windows_path);
             defer alloc.free(text);
-            std.mem.replaceScalar(u8, text, '\\', '/');
-            const mapped = try windows_shell.msysDrivePathToWindows(alloc, text) orelse return error.TestUnexpectedResult;
+            const mapped = try internal_os.local_path.linkTarget(alloc, text, .{ .wsl = false }) orelse return error.TestUnexpectedResult;
             defer alloc.free(mapped);
             try std.testing.expectEqual(case.allowed, try App.isAllowedWin32OpenTarget(alloc, mapped));
             // What a Ctrl+click handed the opener before #514.
@@ -10585,7 +10584,7 @@ test "win32 link opener opens the Windows path of an MSYS2 link, never the text 
     for ("BHJKMNOPQRSTUVWY") |letter| {
         if (internal_os.windows.driveTypeForLetter(letter) != internal_os.windows.DRIVE_NO_ROOT_DIR) continue;
         const text = [_]u8{ '/', std.ascii.toLower(letter), '/', 'x' };
-        const mapped = try windows_shell.msysDrivePathToWindows(alloc, &text) orelse return error.TestUnexpectedResult;
+        const mapped = try internal_os.local_path.linkTarget(alloc, &text, .{ .wsl = false }) orelse return error.TestUnexpectedResult;
         defer alloc.free(mapped);
         try std.testing.expect(!try App.isAllowedWin32OpenTarget(alloc, mapped));
         break;

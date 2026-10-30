@@ -4761,16 +4761,7 @@ fn uriPathToWindows(alloc: Allocator, path: []const u8) ![]const u8 {
     return try drivePathToWindows(alloc, path[1], path[3..]);
 }
 
-/// `rest` is what follows the `X:` and its first separator.
-fn drivePathToWindows(alloc: Allocator, drive: u8, rest: []const u8) ![]const u8 {
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(alloc);
-
-    try buf.append(alloc, drive);
-    try buf.appendSlice(alloc, ":\\");
-    try appendWindowsPath(&buf, alloc, trimLeadingSeparators(rest));
-    return try buf.toOwnedSlice(alloc);
-}
+const drivePathToWindows = internal_os.path.drivePathToWindows;
 
 /// The Windows path in the plain form of ConEmu's OSC 9;9: `C:\Users\me`,
 /// `C:/Users/me`, or either in one pair of double quotes, as oh-my-posh's
@@ -4795,75 +4786,12 @@ pub fn conemuPathToLocal(alloc: Allocator, value: []const u8) !?[]const u8 {
     return null;
 }
 
-/// The Windows path an MSYS2 or Cygwin program means by an absolute path on a
-/// drive: MSYS2 (Git Bash included) prints `C:\Users\me` as `/c/Users/me`, and
-/// Cygwin as `/cygdrive/c/Users/me`. Returns null for anything else:
-/// - a drive's root (`/c`, `/c/`, `/c/x/..`): in text a lone `/c` is nearly
-///   always a switch (`cmd /c`, `findstr /c:x`), and a drive root is never a
-///   link (`url.regex` does not match `C:\`). A shell's directory, where `/c`
-///   is meant, takes `msysDriveDirToWindows`;
-/// - a `..` above the drive, which MSYS2 reads as its own root (`/c/..` is `/`);
-/// - a first segment of more than one letter (`/cd/x`), a rooted path that is
-///   not a drive (`/home/me`, `/usr/bin`), and every network or device shape,
-///   since `//server/share` and `/\server` never start with a letter.
-///
-/// Only for a pane that is not WSL: there `/c/x` is a Linux path. The drive is
-/// not checked; whatever opens the result must refuse a letter that is not a
-/// local drive, as it does for the same text written `C:\x`.
-pub fn msysDrivePathToWindows(alloc: Allocator, path: []const u8) Allocator.Error!?[]const u8 {
-    return msysToWindows(alloc, path, 1);
-}
-
-/// `msysDrivePathToWindows` for a directory a shell reports (`pwd`, OSC 7),
-/// where `/c` is `C:\`.
-pub fn msysDriveDirToWindows(alloc: Allocator, path: []const u8) Allocator.Error!?[]const u8 {
-    return msysToWindows(alloc, path, 0);
-}
-
-/// Whether `msysDrivePathToWindows` reads `path` as a drive path.
-pub fn isMsysDrivePath(path: []const u8) bool {
-    return msysDriveRoot(path, 1) != null;
-}
-
-fn msysToWindows(alloc: Allocator, path: []const u8, min_depth: usize) Allocator.Error!?[]const u8 {
-    const rooted = msysDriveRoot(path, min_depth) orelse return null;
-    return try drivePathToWindows(alloc, std.ascii.toUpper(rooted[1]), rooted[2..]);
-}
-
-/// `path` from its `/<letter>` on, without the `/cygdrive` prefix, when it
-/// names something at least `min_depth` levels below the drive's root and no
-/// `..` leaves the drive. A name of only dots and spaces adds no level:
-/// Windows drops a final one (`C:\...` is `C:\`).
-fn msysDriveRoot(path: []const u8, min_depth: usize) ?[]const u8 {
-    const rooted = if (std.mem.startsWith(u8, path, "/cygdrive/")) path["/cygdrive".len..] else path;
-    if (rooted.len < 2 or rooted[0] != '/' or !std.ascii.isAlphabetic(rooted[1])) return null;
-    if (rooted.len > 2 and rooted[2] != '/') return null;
-    var depth: usize = 0;
-    var names = std.mem.tokenizeAny(u8, rooted[2..], "/\\");
-    while (names.next()) |name| {
-        if (std.mem.eql(u8, name, "..")) {
-            depth = std.math.sub(usize, depth, 1) catch return null;
-        } else if (std.mem.trim(u8, name, ". ").len > 0) {
-            depth += 1;
-        }
-    }
-    return if (depth >= min_depth) rooted else null;
-}
-
 fn appendNormalizedPath(
     buf: *std.ArrayList(u8),
     alloc: Allocator,
     path: []const u8,
 ) !void {
     for (path) |c| try buf.append(alloc, if (c == '\\') '/' else c);
-}
-
-fn appendWindowsPath(
-    buf: *std.ArrayList(u8),
-    alloc: Allocator,
-    path: []const u8,
-) !void {
-    for (path) |c| try buf.append(alloc, if (c == '/') '\\' else c);
 }
 
 /// A machine for `defaultCommandWithHost`: the `pwsh.exe` on `PATH` (null when
@@ -5973,91 +5901,6 @@ test "conemuPathToLocal leaves everything but a drive-absolute path to the calle
         "C:\\Users\"",
     }) |value| {
         try testing.expect(try conemuPathToLocal(alloc, value) == null);
-    }
-}
-
-test "msysDrivePathToWindows reads the drive paths MSYS2 and Cygwin print" {
-    const testing = std.testing;
-    const alloc = testing.allocator;
-
-    const cases = [_]struct { []const u8, []const u8 }{
-        // The reporter's `pwd` in an MSYS2 fish (#514).
-        .{ "/c/Users/FengYu/.config/fish/conf.d", "C:\\Users\\FengYu\\.config\\fish\\conf.d" },
-        .{ "/cygdrive/c/Users/me", "C:\\Users\\me" },
-        .{ "/D/work", "D:\\work" },
-        // A location stays on for the resolver to take off.
-        .{ "/c/src/main.zig:12:5", "C:\\src\\main.zig:12:5" },
-        // A doubled separator never makes a share out of the rest.
-        .{ "/c//server/share", "C:\\server\\share" },
-        // `..` is fine while it stays below the drive's root.
-        .{ "/c/x/../y", "C:\\x\\..\\y" },
-        .{ "/c/.../x", "C:\\...\\x" },
-    };
-    for (cases) |case| {
-        const result = try msysDrivePathToWindows(alloc, case[0]) orelse return error.TestUnexpectedResult;
-        defer alloc.free(result);
-        try testing.expectEqualStrings(case[1], result);
-        try testing.expect(isMsysDrivePath(case[0]));
-        const dir = try msysDriveDirToWindows(alloc, case[0]) orelse return error.TestUnexpectedResult;
-        defer alloc.free(dir);
-        try testing.expectEqualStrings(case[1], dir);
-    }
-
-    // A drive's root is a directory a shell can report (`cd /c; pwd`), but
-    // never link text: `cmd /c "x"`, `findstr /c:x` and `xcopy /s /e` would
-    // open the root of C:, S: and E: (#520 review).
-    for ([_]struct { []const u8, []const u8 }{
-        .{ "/c", "C:\\" },
-        .{ "/C", "C:\\" },
-        .{ "/c/", "C:\\" },
-        .{ "/cygdrive/c", "C:\\" },
-        .{ "/cygdrive/c/", "C:\\" },
-        .{ "/c/.", "C:\\." },
-        .{ "/c/x/..", "C:\\x\\.." },
-        // Windows drops a final name of dots and spaces.
-        .{ "/c/...", "C:\\..." },
-        .{ "/c/ .", "C:\\ ." },
-    }) |case| {
-        try testing.expect(try msysDrivePathToWindows(alloc, case[0]) == null);
-        try testing.expect(!isMsysDrivePath(case[0]));
-        const dir = try msysDriveDirToWindows(alloc, case[0]) orelse return error.TestUnexpectedResult;
-        defer alloc.free(dir);
-        try testing.expectEqualStrings(case[1], dir);
-    }
-
-    for ([_][]const u8{
-        // A `..` above the drive is MSYS2's own root (`/c/..` is `/`).
-        "/c/..",
-        "/c/x/../..",
-        "/c/x/../../y",
-        "/cygdrive/c/..",
-        "",
-        "/",
-        "c/Users",
-        "C:\\Users",
-        "C:/Users",
-        // noctty's Git Bash integration sends this form, a Windows path.
-        "/C:/Users",
-        "/cd/x",
-        "/home/me",
-        "/usr/bin",
-        "/cygdrive",
-        "/cygdrive/",
-        "/cygdrive/cd/x",
-        "/1/x",
-        "/_/x",
-        "\\c\\Users",
-        // Shares and devices are never drives.
-        "//server/share",
-        "//c/share",
-        "/\\server\\share",
-        "\\\\server\\share",
-        "//?/UNC/server/share",
-        "\\\\.\\pipe\\x",
-    }) |path| {
-        try testing.expect(try msysDrivePathToWindows(alloc, path) == null);
-        try testing.expect(!isMsysDrivePath(path));
-        try testing.expect(try msysDriveDirToWindows(alloc, path) == null);
     }
 }
 
