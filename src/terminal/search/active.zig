@@ -92,15 +92,11 @@ pub const ActiveSearch = struct {
         // Next, add enough overlap to cover needle.len - 1 bytes (if it
         // exists) so we can cover the overlap.
         while (node_) |node| : (node_ = node.prev) {
-            // If the last row of this node isn't wrapped we can't overlap.
-            const row = node.page().getRow(node.rows() - 1);
-            if (!row.wrap) break;
-
             // We could be more accurate here and count bytes since the
             // last wrap but its complicated and unlikely multiple pages
             // wrap so this should be fine.
-            const added = try self.window.append(node);
-            if (added >= self.window.needle.len - 1) break;
+            const appended = try self.window.appendIfWrapped(node) orelse break;
+            if (appended.content_len >= self.window.needle.len - 1) break;
         }
 
         // Return the last node we added to our window.

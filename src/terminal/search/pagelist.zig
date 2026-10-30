@@ -139,7 +139,7 @@ pub const PageListSearch = struct {
         // get our desired amount of data.
         var node_: ?*PageList.List.Node = self.pin.node.prev;
         while (node_) |node| : (node_ = node.prev) {
-            rem -|= try self.window.append(node);
+            rem -|= (try self.window.append(node)).content_len;
 
             // Move our tracked pin to the new node.
             self.pin.node = node;

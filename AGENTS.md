@@ -192,8 +192,9 @@ that govern each symbol you change, or that none does.
   `src/inspector/widgets/pagelist.zig`, OSC parsers,
   OSC 133 exit codes, prompt typeahead
   in `semantic_command.zig`, the scrollback search thread and its cached
-  results (`ScreenSearch.pruneHistory`, `LiveNodes`), the selection and
-  search-highlight rows of `RenderState` (`render.zig`),
+  results (`ScreenSearch.pruneHistory`, `LiveNodes`), what a search window
+  copies at append (`SlidingWindow.append`, `AppendResult`), the selection
+  and search-highlight rows of `RenderState` (`render.zig`),
   `TerminalFormatter`/`ScreenFormatter` output for undo snapshots and Copy as
   HTML, Kitty graphics commands, placements and deletes in
   `kitty/graphics_command.zig`, `kitty/graphics_storage.zig` and

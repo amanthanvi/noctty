@@ -6,6 +6,7 @@ const build_options = @import("terminal_options");
 const point = @import("../point.zig");
 const size = @import("../size.zig");
 const PageList = @import("../PageList.zig");
+const Page = @import("../page.zig").Page;
 const Screen = @import("../Screen.zig");
 const Terminal = @import("../Terminal.zig");
 const PageFormatter = @import("../formatter.zig").PageFormatter;
@@ -99,10 +100,28 @@ pub const SlidingWindow = struct {
     pub const InitError = Pattern.CompileError;
     pub const SearchError = Allocator.Error || Pattern.Failure;
 
+    /// Information copied from a page while appending it to the window.
+    ///
+    /// Callers use `last_row_wrapped` to decide whether an adjacent page can
+    /// contribute to a cross-page match without reading the node again.
+    pub const AppendResult = struct {
+        content_len: usize,
+        last_row_wrapped: bool,
+    };
+
     const Meta = struct {
         node: *PageList.List.Node,
         serial: u64,
+        rows: size.CellCountInt,
         cell_map: std.ArrayList(point.Coordinate),
+
+        /// What preceded the node's text in screen order when it was
+        /// appended: the previous node's hard newline, text whose byte the
+        /// window does not have (a soft wrap), or nothing.
+        before: Pattern.Edge,
+
+        /// Whether another node followed it when it was appended.
+        has_next: bool,
 
         pub fn deinit(self: *Meta, alloc: Allocator) void {
             self.cell_map.deinit(alloc);
@@ -402,12 +421,8 @@ pub const SlidingWindow = struct {
         var it = self.meta.iterator(.forward);
         const meta = it.next() orelse return .none;
         return switch (self.direction) {
-            .forward => {
-                const prev = meta.node.prev orelse return .none;
-                const byte = hardNewlineAfterNode(prev) orelse return .unknown;
-                return .{ .byte = byte };
-            },
-            .reverse => if (meta.node.next != null) .unknown else .none,
+            .forward => meta.before,
+            .reverse => if (meta.has_next) .unknown else .none,
         };
     }
 
@@ -416,12 +431,8 @@ pub const SlidingWindow = struct {
         var it = self.meta.iterator(.reverse);
         const meta = it.next() orelse return .none;
         return switch (self.direction) {
-            .forward => if (meta.node.next != null) .unknown else .none,
-            .reverse => {
-                const prev = meta.node.prev orelse return .none;
-                const byte = hardNewlineAfterNode(prev) orelse return .unknown;
-                return .{ .byte = byte };
-            },
+            .forward => if (meta.has_next) .unknown else .none,
+            .reverse => meta.before,
         };
     }
 
@@ -434,11 +445,6 @@ pub const SlidingWindow = struct {
         const idx = self.data.tail + offset;
         const storage_idx = if (idx < cap) idx else idx - cap;
         return self.data.storage[storage_idx];
-    }
-
-    fn hardNewlineAfterNode(node: *PageList.List.Node) ?u8 {
-        const row = node.page().getRow(node.rows() - 1);
-        return if (row.wrap) null else '\n';
     }
 
     /// Return a flattened highlight for the given start and length.
@@ -466,6 +472,12 @@ pub const SlidingWindow = struct {
 
         self.chunk_buf.clearRetainingCapacity();
         var result: FlattenedHighlight = .empty;
+
+        // A reverse cross-page match needs the row count of the last meta in
+        // search order after the chunks themselves are reversed. Snapshot it
+        // while traversing Meta rather than dereferencing a PageList node after
+        // the terminal lock has been released.
+        var cross_page_end_rows: ?size.CellCountInt = null;
 
         // Go through the meta nodes to find our start.
         const tl: struct {
@@ -533,7 +545,7 @@ pub const SlidingWindow = struct {
                         .node = meta.node,
                         .serial = meta.serial,
                         .start = @intCast(map.y),
-                        .end = meta.node.rows(),
+                        .end = meta.rows,
                     });
 
                     break :tl .{
@@ -568,7 +580,7 @@ pub const SlidingWindow = struct {
                         .node = meta.node,
                         .serial = meta.serial,
                         .start = 0,
-                        .end = meta.node.rows(),
+                        .end = meta.rows,
                     });
 
                     meta_consumed += meta.cell_map.items.len;
@@ -578,6 +590,7 @@ pub const SlidingWindow = struct {
                 // We found it
                 const map = meta.cell_map.items[meta_i];
                 result.bot_x = map.x;
+                cross_page_end_rows = meta.rows;
                 self.chunk_buf.appendAssumeCapacity(.{
                     .node = meta.node,
                     .serial = meta.serial,
@@ -651,7 +664,7 @@ pub const SlidingWindow = struct {
                     // order.
                     assert(nodes.len >= 2);
                     starts[0] = ends[0] - 1;
-                    ends[0] = nodes[0].rows();
+                    ends[0] = cross_page_end_rows.?;
                     ends[nodes.len - 1] = starts[nodes.len - 1] + 1;
                     starts[nodes.len - 1] = 0;
                 } else {
@@ -680,18 +693,56 @@ pub const SlidingWindow = struct {
     /// the sliding window; data isn't pruned until it is consumed
     /// via a search (via next()).
     ///
-    /// Returns the number of bytes of content added to the sliding window.
-    /// The total bytes will be larger since this omits metadata, but it is
-    /// an accurate measure of the text content size added.
+    /// The content length is the number of bytes of content added to the
+    /// sliding window. The total bytes will be larger since this omits
+    /// metadata, but it is an accurate measure of the text content size
+    /// added.
+    ///
+    /// This reads the node and its neighbours, so the caller must hold the
+    /// necessary locks. `next()` then reads only what the window copied.
     pub fn append(
         self: *SlidingWindow,
         node: *PageList.List.Node,
-    ) Allocator.Error!usize {
+    ) Allocator.Error!AppendResult {
+        const page = node.page();
+        const last_row_wrapped = page.getRow(page.size.rows - 1).wrap;
+        return self.appendPage(node, page, last_row_wrapped);
+    }
+
+    /// Append a node only when its last row is soft wrapped.
+    ///
+    /// It is used when loading the overlap around an otherwise complete
+    /// search region.
+    pub fn appendIfWrapped(
+        self: *SlidingWindow,
+        node: *PageList.List.Node,
+    ) Allocator.Error!?AppendResult {
+        const page = node.page();
+        const last_row_wrapped = page.getRow(page.size.rows - 1).wrap;
+        if (!last_row_wrapped) return null;
+        return try self.appendPage(node, page, last_row_wrapped);
+    }
+
+    /// Copy one page into the window's owned search buffers.
+    fn appendPage(
+        self: *SlidingWindow,
+        node: *PageList.List.Node,
+        page: *const Page,
+        last_row_wrapped: bool,
+    ) Allocator.Error!AppendResult {
         // Initialize our metadata for the node.
         var meta: Meta = .{
             .node = node,
             .serial = node.serial,
+            .rows = page.size.rows,
             .cell_map = .empty,
+            .before = before: {
+                const prev = node.prev orelse break :before .none;
+                const prev_page = prev.page();
+                if (prev_page.getRow(prev_page.size.rows - 1).wrap) break :before .unknown;
+                break :before .{ .byte = '\n' };
+            },
+            .has_next = node.next != null,
         };
         errdefer meta.deinit(self.alloc);
 
@@ -702,7 +753,7 @@ pub const SlidingWindow = struct {
 
         // Encode the page into the buffer.
         const formatter: PageFormatter = formatter: {
-            var formatter: PageFormatter = .init(meta.node.page(), .{
+            var formatter: PageFormatter = .init(page, .{
                 .emit = .plain,
                 .unwrap = true,
             });
@@ -720,8 +771,7 @@ pub const SlidingWindow = struct {
 
         // If the node we're adding isn't soft-wrapped, we add the
         // trailing newline.
-        const row = node.page().getRow(node.rows() - 1);
-        if (!row.wrap) {
+        if (!last_row_wrapped) {
             encoded.writer.writeByte('\n') catch return error.OutOfMemory;
             try meta.cell_map.append(
                 self.alloc,
@@ -737,7 +787,10 @@ pub const SlidingWindow = struct {
         const written = encoded.written();
         if (written.len == 0) {
             self.assertIntegrity();
-            return 0;
+            return .{
+                .content_len = 0,
+                .last_row_wrapped = last_row_wrapped,
+            };
         }
 
         // Get our written data. If we're doing a reverse search then we
@@ -760,7 +813,10 @@ pub const SlidingWindow = struct {
         self.meta.appendAssumeCapacity(meta);
 
         self.assertIntegrity();
-        return written.len;
+        return .{
+            .content_len = written.len,
+            .last_row_wrapped = last_row_wrapped,
+        };
     }
 
     /// Only for tests!
@@ -1317,6 +1373,48 @@ test "SlidingWindow whole-word regex accepts hard newline page boundary" {
     const sel = h.untracked();
     try testing.expectEqual(second_node, sel.start.node);
     try testing.expectEqual(second_node, sel.end.node);
+}
+
+test "SlidingWindow edge decision uses the page state captured at append" {
+    if (comptime !build_options.oniguruma) return error.SkipZigTest;
+
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    try oni.testing.ensureInit();
+
+    var w: SlidingWindow = try .initWithOptions(alloc, .forward, "boo", .{
+        .whole_word = true,
+    });
+    defer w.deinit();
+
+    var s = try Screen.init(alloc, .{ .cols = 80, .rows = 24, .max_scrollback = 1000 });
+    defer s.deinit();
+
+    const first_page_rows = s.pages.pages.first.?.capacity().rows;
+    for (0..first_page_rows - 1) |_| try s.testWriteString("\n");
+    try s.testWriteString("tail");
+    try s.testWriteString("\n");
+    try testing.expect(s.pages.pages.first != s.pages.pages.last);
+    try s.testWriteString("boo ok");
+
+    const first_node: *PageList.List.Node = s.pages.pages.first.?;
+    const second_node = first_node.next.?;
+    _ = try w.append(second_node);
+
+    // The previous page ended its last line with a hard newline when the
+    // window took this one. The window is scanned without the terminal lock,
+    // so the scan decides with that state even after a writer wraps the line.
+    const last_row = first_node.page().getRow(first_node.rows() - 1);
+    try testing.expect(!last_row.wrap);
+    last_row.wrap = true;
+    defer last_row.wrap = false;
+
+    const h = (try w.next()) orelse return error.TestExpectedMatch;
+    const sel = h.untracked();
+    try testing.expectEqual(second_node, sel.start.node);
+    try testing.expectEqual(second_node, sel.end.node);
+    try testing.expectEqual(@as(size.CellCountInt, 0), sel.start.x);
+    try testing.expectEqual(@as(size.CellCountInt, 2), sel.end.x);
 }
 
 test "SlidingWindow reverse search works with non-default query options" {

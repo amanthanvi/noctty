@@ -141,37 +141,35 @@ pub const ViewportSearch = struct {
         var node_ = entries[0].node.prev;
         var added: usize = 0;
         while (node_) |node| : (node_ = node.prev) {
-            // If the last row of this node isn't wrapped we can't overlap.
-            const row = node.page().getRow(node.rows() - 1);
-            if (!row.wrap) break;
-
             // We could be more accurate here and count bytes since the
             // last wrap but its complicated and unlikely multiple pages
             // wrap so this should be fine.
-            added += try self.window.append(node);
+            const appended = try self.window.appendIfWrapped(node) orelse break;
+            added += appended.content_len;
             if (added >= self.window.needle.len - 1) break;
         }
 
         // We can use our fingerprint nodes to initialize our sliding
         // window, since we already traversed the viewport once.
+        var end_append: SlidingWindow.AppendResult = undefined;
         for (entries) |entry| {
-            _ = try self.window.append(entry.node);
+            end_append = try self.window.append(entry.node);
         }
 
         // Add any trailing overlap as well.
         trailing: {
             const end: *PageList.List.Node = entries[entries.len - 1].node;
-            if (!end.page().getRow(end.rows() - 1).wrap) break :trailing;
+            if (!end_append.last_row_wrapped) break :trailing;
 
             node_ = end.next;
             added = 0;
             while (node_) |node| : (node_ = node.next) {
-                added += try self.window.append(node);
+                const appended = try self.window.append(node);
+                added += appended.content_len;
                 if (added >= self.window.needle.len - 1) break;
 
                 // If this row doesn't wrap, then we can quit
-                const row = node.page().getRow(node.rows() - 1);
-                if (!row.wrap) break;
+                if (!appended.last_row_wrapped) break;
             }
         }
 
