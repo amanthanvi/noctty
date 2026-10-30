@@ -596,27 +596,17 @@ fn create(name_w: []const u16, parent: ?windows.HANDLE, attributes: u32, options
     );
 }
 
+/// Recurses once per link, up to 32 deep, and each frame stays live across
+/// the call (the pinned link, its deferred closes and frees). A kitty
+/// graphics open runs on the pty reader, a surface thread spawned with 1 MiB
+/// (`os.surfaceThreadSpawnConfig`), so this frame holds no name or reparse
+/// buffer: `openRoot` and `readLinkTarget` hold those, and return before the
+/// walk recurses.
 fn walk(alloc: Allocator, path: []const u8, read_data: bool, depth: usize, state: *Walk) ?std.fs.File {
     if (depth >= 32) return null;
     const root_len = localRoot(path) orelse return null;
-    var root_w = windows.sliceToPrefixedFileW(null, path[0..root_len]) catch return null;
-    if (root_len == 3 and !os_windows.directVolumePath(&root_w)) return null;
-    if (root_len == 49) {
-        // OBJ_DONT_REPARSE rejects the mount manager's Volume{GUID} alias.
-        // Read that mapping without opening it, accept only a direct volume
-        // device name (no intermediate filesystem path), then keep the guard.
-        var alias_w: [44:0]u16 = undefined;
-        for (path[4..48], 0..) |ch, i| alias_w[i] = ch;
-        alias_w[44] = 0;
-        var device: [512]u16 = undefined;
-        const volume = os_windows.directVolumeDeviceName(&alias_w, &device) orelse return null;
-        @memcpy(root_w.data[0..volume.len], volume);
-        root_w.data[volume.len] = '\\';
-        root_w.len = volume.len + 1;
-        root_w.data[root_w.len] = 0;
-    }
     var parent: windows.HANDLE = undefined;
-    if (create(root_w.span(), null, OBJ_DONT_REPARSE, .{ .no_follow = true }, &parent) != .SUCCESS) return null;
+    if (!openRoot(path, root_len, &parent)) return null;
     var own_parent = true;
     defer if (own_parent) windows.CloseHandle(parent);
     const root_info = attributeTag(parent) orelse return null;
@@ -654,9 +644,7 @@ fn walk(alloc: Allocator, path: []const u8, read_data: bool, depth: usize, state
             windows.CloseHandle(child);
             child = pinned;
             if (info.ReparseTag == windows.IO_REPARSE_TAG_SYMLINK or info.ReparseTag == windows.IO_REPARSE_TAG_MOUNT_POINT) {
-                var buffer: [windows.MAXIMUM_REPARSE_DATA_BUFFER_SIZE]u8 align(4) = @splat(0);
-                windows.DeviceIoControl(child, windows.FSCTL_GET_REPARSE_POINT, null, &buffer) catch return null;
-                const target = reparseTarget(alloc, &buffer, info.ReparseTag, path[0..start]) orelse return null;
+                const target = readLinkTarget(alloc, child, info.ReparseTag, path[0..start]) orelse return null;
                 defer alloc.free(target);
                 const joined = std.fs.path.resolve(alloc, &.{ target, path[if (last) end else end + 1..] }) catch return null;
                 defer alloc.free(joined);
@@ -685,6 +673,39 @@ fn walk(alloc: Allocator, path: []const u8, read_data: bool, depth: usize, state
     }
     own_parent = false;
     return .{ .handle = parent };
+}
+
+/// Open the root of `path` (`localRoot`'s `root_len` bytes) under
+/// OBJ_DONT_REPARSE as `parent`, its DOS drive or Volume{GUID} alias resolved
+/// to a direct volume device. Never inlined: its name buffers (a PathSpace is
+/// 64 KiB) must not join the walk's frame.
+noinline fn openRoot(path: []const u8, root_len: usize, parent: *windows.HANDLE) bool {
+    var root_w = windows.sliceToPrefixedFileW(null, path[0..root_len]) catch return false;
+    if (root_len == 3 and !os_windows.directVolumePath(&root_w)) return false;
+    if (root_len == 49) {
+        // OBJ_DONT_REPARSE rejects the mount manager's Volume{GUID} alias.
+        // Read that mapping without opening it, accept only a direct volume
+        // device name (no intermediate filesystem path), then keep the guard.
+        var alias_w: [44:0]u16 = undefined;
+        for (path[4..48], 0..) |ch, i| alias_w[i] = ch;
+        alias_w[44] = 0;
+        var device: [512]u16 = undefined;
+        const volume = os_windows.directVolumeDeviceName(&alias_w, &device) orelse return false;
+        @memcpy(root_w.data[0..volume.len], volume);
+        root_w.data[volume.len] = '\\';
+        root_w.len = volume.len + 1;
+        root_w.data[root_w.len] = 0;
+    }
+    return create(root_w.span(), null, OBJ_DONT_REPARSE, .{ .no_follow = true }, parent) == .SUCCESS;
+}
+
+/// The target of the symlink or junction `link` (pinned, tag `tag`), from
+/// `reparseTarget`. Never inlined: its 16 KiB reparse buffer must not join
+/// the walk's frame.
+noinline fn readLinkTarget(alloc: Allocator, link: windows.HANDLE, tag: u32, parent: []const u8) ?[]u8 {
+    var buffer: [windows.MAXIMUM_REPARSE_DATA_BUFFER_SIZE]u8 align(4) = @splat(0);
+    windows.DeviceIoControl(link, windows.FSCTL_GET_REPARSE_POINT, null, &buffer) catch return null;
+    return reparseTarget(alloc, &buffer, tag, parent);
 }
 
 fn attributeTag(handle: windows.HANDLE) ?windows.FILE_ATTRIBUTE_TAG_INFO {

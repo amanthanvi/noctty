@@ -165,7 +165,10 @@ call sites before relying on it. You are done when you can name the entries
 that govern each symbol you change, or that none does.
 
 - [conpty.md](docs/agents/log/conpty.md): `src/pty.zig`, the pty reader (and
-  its stack size, `os.surfaceThreadSpawnConfig`) and write pool in
+  its stack size, `os.surfaceThreadSpawnConfig`, and how much of it code
+  uses, `stackUse` in `os/main.zig`, including the reparse walk the kitty
+  file open runs there: `os/local_path.zig` `walk`, `openRoot`,
+  `readLinkTarget`) and write pool in
   `termio/Exec.zig`, `ResizePseudoConsole` and the renderer lock
   `Termio.resize` holds across it, in-box conhost
   versus the bundled `conpty.dll`/`OpenConsole.exe`
@@ -296,12 +299,14 @@ that govern each symbol you change, or that none does.
   argument, an environment value or a directory (`os/redact.zig`,
   `Command.redacted()`); path safety (`os.path.isNetworkOrDevicePath`,
   `OBJ_DONT_REPARSE` opens: the bounded local open `os/local_path.zig`
-  (`open`, `Found.storedName`, `test_links`, `test_cloud`) and
+  (`open` and its link walk, `Found.storedName`, `test_links`,
+  `test_cloud`) and
   `windows_shell.ntOpenDontReparse`, and the length of a path before either
   converts it) for every program-reported path before it is opened
-  (OSC 7/9;9/1337 pwd), and for kitty graphics `t=f`/`t=t` files, which use
-  an ordinary open whose canonical path is checked afterwards, so the open
-  itself can still reach a share (`terminal/kitty/graphics_image.zig` and
+  (OSC 7/9;9/1337 pwd), and for kitty graphics `t=f`/`t=t` files, which on
+  Windows open through `os/local_path.zig` `open` (no share contacted, a
+  path that is not drive-absolute refused) and check the opened handle's
+  canonical path afterwards (`terminal/kitty/graphics_image.zig` and
   `terminal/kitty/windows.zig`, the `t=t` delete through the opened handle
   in `os/windows.zig` `deleteOpenedFile`, and the length of a path before
   Zig converts it);

@@ -640,6 +640,20 @@ The advisory texts are GitHub security advisories on `ghostty-org/ghostty`
   highlight shifted text until the search resets.
 - Kitty `t=f`/`t=t` still contacts a share before refusing it, as upstream
   does; the deferred `OBJ_DONT_REPARSE` open would stop that.
+- Since the window, the path-policy series closes that on Windows and
+  diverges from upstream there: `readFile` opens through
+  `os/local_path.zig` `open`, which refuses a share behind a link or a
+  mapped drive before any SMB contact, and refuses a path that is not
+  drive-absolute (relative, rooted or drive-relative), which upstream
+  resolves against the process's current directory. The same open also
+  refuses an alternate data stream (`C:\x\img.data:s`), a drive whose
+  DOS name is not a direct volume device (a SUBST drive), and, behind a
+  link, a name with a reparse tag that is no link and no cloud
+  placeholder (WOF, dedup); upstream's open loads all three. The
+  maintainer approved these three as fail-closed on 2026-10-30, matching
+  the link opener's measured SUBST refusal (the 2026-10-30 PATH-POLICY
+  part 5 entry in docs/agents/log/terminal-core.md). The next window's
+  report should carry this divergence.
 - Of the maintainer decisions above, Git's prompt title stays an open risk,
   and the custom-scheme confirm is open until its PR lands.
 

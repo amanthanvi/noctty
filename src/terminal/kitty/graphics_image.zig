@@ -249,8 +249,21 @@ pub const LoadingImage = struct {
         defer alloc.destroy(abs_buf);
 
         // Open our file right away before we do validation. This avoids
-        // TOCTOU issues.
-        var file = std.fs.cwd().openFile(path, .{}) catch |err| {
+        // TOCTOU issues. On Windows the open is local_path's, which refuses a
+        // link or a mapped drive to a share before any SMB contact (an
+        // ordinary open would follow it and wait on the server), and a path
+        // that is not drive-absolute, which would resolve against noctty's own
+        // current directory, a place the client knows nothing about.
+        var file = if (comptime builtin.os.tag == .windows) switch (try local_path.open(alloc, path, .{ .data = true })) {
+            .found => |found| hit: {
+                alloc.free(found.path);
+                break :hit found.file;
+            },
+            else => |opened| {
+                log.warn("failed to open image file: {t}", .{opened});
+                return error.InvalidData;
+            },
+        } else std.fs.cwd().openFile(path, .{}) catch |err| {
             log.warn("failed to open image file: {}", .{err});
             return error.InvalidData;
         };
@@ -1530,8 +1543,7 @@ test "image load: windows canonical path check rejects a file reached through a 
 test "image load: windows file reached through a symlink to a share is refused" {
     if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
 
-    const testing = std.testing;
-    const alloc = testing.allocator;
+    const alloc = std.testing.allocator;
 
     var tmp_dir = try temp_dir.TempDir.init();
     defer tmp_dir.deinit();
@@ -1544,7 +1556,9 @@ test "image load: windows file reached through a symlink to a share is refused" 
 
     // A local-looking path whose directory is a symlink to the loopback
     // administrative share: it passes every check of the raw path, and the
-    // open follows the link to SMB.
+    // load's open (`local_path.open`) refuses the link without contacting
+    // the share. A timing test cannot tell that from a share that does not
+    // answer, so this share answers.
     const share = try std.fmt.allocPrint(alloc, "\\\\localhost\\{c}$\\{s}\\real", .{ root[0], root[3..] });
     defer alloc.free(share);
     const link = try std.fs.path.join(alloc, &.{ root, "link" });
@@ -1554,12 +1568,18 @@ test "image load: windows file reached through a symlink to a share is refused" 
     const linked = try std.fs.path.join(alloc, &.{ link, "image.data" });
     defer alloc.free(linked);
 
-    // Positive control: the link reaches the file, so the refusal below
-    // is the canonical path check. Without the server service or an
-    // administrative token it does not, and the test is skipped.
+    // Positive control: an ordinary open follows the link on purpose, to
+    // show the share answers and holds the file. Without the server service
+    // or an administrative token it does not, and the test is skipped.
     const control = std.fs.cwd().openFile(linked, .{}) catch return error.SkipZigTest;
     control.close();
 
+    try expectFileLoad(alloc, linked, false);
+}
+
+/// Loads `path` as a `t=f` file, and checks that it loads (`loads`) or that
+/// it is refused with `InvalidData`.
+fn expectFileLoad(alloc: Allocator, path: []const u8, loads: bool) !void {
     var cmd: command.Command = .{
         .control = .{ .transmit = .{
             .format = .rgb,
@@ -1569,10 +1589,157 @@ test "image load: windows file reached through a symlink to a share is refused" 
             .height = 15,
             .image_id = 31,
         } },
-        .data = try alloc.dupe(u8, linked),
+        .data = try alloc.dupe(u8, path),
     };
     defer cmd.deinit(alloc);
-    try testing.expectError(error.InvalidData, LoadingImage.init(alloc, &cmd));
+    if (loads) {
+        var loading = try LoadingImage.init(alloc, &cmd);
+        defer loading.deinit(alloc);
+        var img = try loading.complete(alloc);
+        defer img.deinit(alloc);
+    } else {
+        try std.testing.expectError(error.InvalidData, LoadingImage.init(alloc, &cmd));
+    }
+}
+
+test "image load: windows file through a link to a share that does not answer is refused at once" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var tmp_dir = try temp_dir.TempDir.init();
+    defer tmp_dir.deinit();
+    try tmp_dir.dir.makeDir("real");
+    const data = @embedFile("testdata/image-rgb-none-20x15-2147483647-raw.data");
+    try tmp_dir.dir.writeFile(.{ .sub_path = "real\\image.data", .data = data });
+
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = try tmp_dir.dir.realpath(".", &root_buf);
+    const real = try std.fs.path.join(alloc, &.{ root, "real" });
+    defer alloc.free(real);
+
+    // A directory symlink to a share on TEST-NET-1 (RFC 5737), which no route
+    // reaches: an open that followed it would wait on the connection. (Windows
+    // refuses a junction to a share at once, so only a symlink shows this.)
+    // Positive control: the same shape of link to a local folder loads.
+    const Case = struct { name: []const u8, target: []const u8, loads: bool };
+    for ([_]Case{
+        .{ .name = "to-local", .target = real, .loads = true },
+        .{ .name = "to-share", .target = "\\\\192.0.2.1\\noctty-test-none$", .loads = false },
+    }) |case| {
+        const link = try std.fs.path.join(alloc, &.{ root, case.name });
+        defer alloc.free(link);
+        if (!try local_path.test_links.symlink(alloc, link, case.target, true)) {
+            std.log.warn("kitty share-link test: this account cannot make symlinks", .{});
+            return error.SkipZigTest;
+        }
+        defer tmp_dir.dir.deleteDir(case.name) catch {};
+        const linked = try std.fs.path.join(alloc, &.{ link, "image.data" });
+        defer alloc.free(linked);
+
+        var timer = try std.time.Timer.start();
+        try expectFileLoad(alloc, linked, case.loads);
+        try testing.expect(timer.read() < 5 * std.time.ns_per_s);
+    }
+}
+
+test "image load: windows file path that is not drive-absolute is refused" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var tmp_dir = try temp_dir.TempDir.init();
+    defer tmp_dir.deinit();
+    const data = @embedFile("testdata/image-rgb-none-20x15-2147483647-raw.data");
+    try tmp_dir.dir.writeFile(.{ .sub_path = "image.data", .data = data });
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const real_path = try tmp_dir.dir.realpath("image.data", &path_buf);
+    const cwd = try std.process.getCwdAlloc(alloc);
+    defer alloc.free(cwd);
+    if (!kitty_windows.isDriveAbsolute(real_path) or !std.ascii.eqlIgnoreCase(cwd[0..2], real_path[0..2]))
+        return error.SkipZigTest;
+
+    // The same file as text the client cannot mean: relative to noctty's own
+    // current directory, rooted on its drive, or relative on its drive.
+    const relative = try std.fs.path.relative(alloc, cwd, real_path);
+    defer alloc.free(relative);
+    const drive_relative = try std.fmt.allocPrint(alloc, "{s}{s}", .{ real_path[0..2], relative });
+    defer alloc.free(drive_relative);
+    const Case = struct { path: []const u8, loads: bool };
+    for ([_]Case{
+        // Positive control: the drive-absolute path loads.
+        .{ .path = real_path, .loads = true },
+        .{ .path = relative, .loads = false },
+        .{ .path = real_path[2..], .loads = false },
+        .{ .path = drive_relative, .loads = false },
+    }) |case| {
+        errdefer std.debug.print("kitty image path {s}\n", .{case.path});
+        try expectFileLoad(alloc, case.path, case.loads);
+    }
+}
+
+test "image load: windows file the bounded open cannot show is plain local data is refused" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const alloc = std.testing.allocator;
+
+    var tmp_dir = try temp_dir.TempDir.init();
+    defer tmp_dir.deinit();
+    try tmp_dir.dir.makeDir("real");
+    try tmp_dir.dir.makeDir("to-real");
+    defer tmp_dir.dir.deleteDir("to-real") catch {};
+    const data = @embedFile("testdata/image-rgb-none-20x15-2147483647-raw.data");
+    try tmp_dir.dir.writeFile(.{ .sub_path = "real\\image.data", .data = data });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = try tmp_dir.dir.realpath(".", &root_buf);
+    const file = try std.fs.path.join(alloc, &.{ root, "real\\image.data" });
+    defer alloc.free(file);
+
+    // Positive control for each case below: the plain file loads.
+    try expectFileLoad(alloc, file, true);
+
+    // An alternate data stream of the file, holding the same image: `open`
+    // takes no ':' after the drive (a volume without streams skips this).
+    const has_stream = if (tmp_dir.dir.writeFile(.{ .sub_path = "real\\image.data:s", .data = data })) true else |_| false;
+    if (has_stream) {
+        const stream = try std.fmt.allocPrint(alloc, "{s}:s", .{file});
+        defer alloc.free(stream);
+        try expectFileLoad(alloc, stream, false);
+    }
+
+    // A drive whose DOS name maps to anything but a direct volume device, as
+    // a SUBST drive's `\??\C:\folder` does (`os.windows.directVolumeDeviceName`
+    // refuses it), injected at the OS seam the open consults.
+    const Reject = struct {
+        fn map(_: [*:0]const u16, _: []u16) ?[]const u16 {
+            return null;
+        }
+    };
+    os_windows.TestHooks.direct_volume_mapping = Reject.map;
+    defer os_windows.TestHooks.direct_volume_mapping = null;
+    try expectFileLoad(alloc, file, false);
+    os_windows.TestHooks.direct_volume_mapping = null;
+
+    // Behind a junction the open walks each name, and refuses one whose
+    // reparse tag is no link and no cloud placeholder (here WOF compression,
+    // read through `test_cloud`). Positive control: the junction loads.
+    const real = try std.fs.path.join(alloc, &.{ root, "real" });
+    defer alloc.free(real);
+    const junction = try std.fs.path.join(alloc, &.{ root, "to-real" });
+    defer alloc.free(junction);
+    const real_nt = try std.fmt.allocPrint(alloc, "\\??\\{s}", .{real});
+    defer alloc.free(real_nt);
+    try local_path.test_links.junction(alloc, junction, real_nt);
+    const linked = try std.fs.path.join(alloc, &.{ junction, "image.data" });
+    defer alloc.free(linked);
+    try expectFileLoad(alloc, linked, true);
+    defer local_path.test_cloud.reset();
+    local_path.test_cloud.name = "image.data";
+    local_path.test_cloud.attributes = std.os.windows.FILE_ATTRIBUTE_REPARSE_POINT;
+    local_path.test_cloud.tag = 0x80000017; // IO_REPARSE_TAG_WOF
+    try expectFileLoad(alloc, linked, false);
 }
 
 test "image load: rgb, not compressed, temporary file" {
