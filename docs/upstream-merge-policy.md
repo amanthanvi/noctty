@@ -96,7 +96,10 @@ that uses one is an adaptation, and this is what each becomes:
   a page alone and takes a smaller result from the pool).
 
 Each window diffs upstream's Node accessor block against the fork's and
-records a changed name, receiver or return type in its drift report.
+records a changed name, receiver or return type in its drift report. It
+also checks that `git grep -F '.data.resident' -- src` finds only Node's
+accessor bodies: the seal stops the old spellings, but a direct
+`node.data.resident` still compiles anywhere.
 
 The merge scope above decides which paths a window merges from upstream. It is
 not a reason to defer an upstream memory-safety fix (a use-after-free, double
