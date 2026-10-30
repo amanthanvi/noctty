@@ -408,7 +408,7 @@ pub const ScreenSearch = struct {
             var it = pages.pages.first;
             while (it) |node| : (it = node.next) {
                 try first_rows.putNoClobber(alloc, node, row);
-                row += node.data.size.rows;
+                row += node.rows();
             }
             return .{ .first_rows = first_rows };
         }
@@ -1549,8 +1549,8 @@ test "select after resize resets stale flattened results" {
     try testing.expectEqual(@as(size.CellCountInt, 5), search.cols);
 
     const selected = search.selectedMatch().?.untracked();
-    try testing.expectEqual(@as(size.CellCountInt, 5), selected.start.node.data.size.cols);
-    try testing.expectEqual(@as(size.CellCountInt, 5), selected.end.node.data.size.cols);
+    try testing.expectEqual(@as(size.CellCountInt, 5), selected.start.node.cols());
+    try testing.expectEqual(@as(size.CellCountInt, 5), selected.end.node.cols());
 }
 
 test "reload after resize resets stale flattened results" {
@@ -1581,7 +1581,7 @@ test "reload after resize resets stale flattened results" {
     try testing.expect(search.matchRowsRevision() != revision);
 
     const match = search.active_results.items[0].untracked();
-    try testing.expectEqual(@as(size.CellCountInt, 5), match.start.node.data.size.cols);
+    try testing.expectEqual(@as(size.CellCountInt, 5), match.start.node.cols());
 }
 
 test "select in active changes contents completely" {
@@ -1957,7 +1957,7 @@ test "select after partial history erase drops a pruned selection" {
     stream.nextSlice("error\r\n");
     const first = list.pages.first.?;
     while (list.totalPages() < 3) stream.nextSlice("\r\n");
-    const first_rows = first.data.size.rows;
+    const first_rows = first.rows();
 
     var search: ScreenSearch = try .init(alloc, t.screens.active, "error");
     defer search.deinit();
@@ -2119,7 +2119,7 @@ test "LiveNodes agrees with PageList.nodeIsValid" {
     var list: PageList = try .init(alloc, 10, 2, null);
     defer list.deinit();
     const first = list.pages.first.?;
-    while (first.data.size.rows < first.data.capacity.rows) _ = try list.grow();
+    while (first.rows() < first.capacity().rows) _ = try list.grow();
     _ = try list.grow();
 
     const old_serial = first.serial;
@@ -2157,7 +2157,7 @@ test "prune keeps a history match across a page boundary" {
 
     // The first page's last row ends in "hell" and the match wraps onto
     // the second page.
-    const first_page_rows = list.pages.first.?.data.capacity.rows;
+    const first_page_rows = list.pages.first.?.capacity().rows;
     for (0..first_page_rows - 1) |_| stream.nextSlice("\r\n");
     for (0..list.cols - 4) |_| stream.nextSlice("x");
     stream.nextSlice("hello, world");
@@ -2187,7 +2187,7 @@ test "select after history page split ignores moved results" {
     defer stream.deinit();
 
     const first = list.pages.first.?;
-    while (first.data.size.rows < first.data.capacity.rows) stream.nextSlice("\r\n");
+    while (first.rows() < first.capacity().rows) stream.nextSlice("\r\n");
     stream.nextSlice("error");
     for (0..list.rows + 1) |_| stream.nextSlice("\r\n");
 
@@ -2198,7 +2198,7 @@ test "select after history page split ignores moved results" {
 
     try list.split(.{
         .node = first,
-        .y = first.data.size.rows / 2,
+        .y = first.rows() / 2,
         .x = 0,
     });
 
@@ -2224,13 +2224,13 @@ test "select after a split of the active top page drops a match wrapped into it"
     defer stream.deinit();
 
     const first = list.pages.first.?;
-    while (first.data.size.rows < first.data.capacity.rows) stream.nextSlice("\r\n");
+    while (first.rows() < first.capacity().rows) stream.nextSlice("\r\n");
     // "er" ends the first page; "ro" and "r" are the next page's two rows,
     // which are the active area.
     stream.nextSlice("error");
     const top = list.pages.last.?;
     try testing.expect(top != first);
-    try testing.expectEqual(2, top.data.size.rows);
+    try testing.expectEqual(2, top.rows());
     try testing.expectEqual(top, list.getTopLeft(.active).node);
 
     var search: ScreenSearch = try .init(alloc, t.screens.active, "error");
@@ -2243,7 +2243,7 @@ test "select after a split of the active top page drops a match wrapped into it"
     try testing.expectEqual(top, chunks.items(.node)[chunks.len - 1]);
 
     try list.split(.{ .node = top, .y = 1, .x = 0 });
-    try testing.expectEqual(1, top.data.size.rows);
+    try testing.expectEqual(1, top.rows());
 
     try testing.expect(!try search.select(.next));
     try testing.expect(search.selected == null);

@@ -81,19 +81,19 @@ pub const ActiveSearch = struct {
             // page that contains the active area. We go to the previous
             // page once more since its the first page of our required
             // overlap.
-            if (rem <= node.data.size.rows) {
+            if (rem <= node.rows()) {
                 node_ = node.prev;
                 break;
             }
 
-            rem -= node.data.size.rows;
+            rem -= node.rows();
         }
 
         // Next, add enough overlap to cover needle.len - 1 bytes (if it
         // exists) so we can cover the overlap.
         while (node_) |node| : (node_ = node.prev) {
             // If the last row of this node isn't wrapped we can't overlap.
-            const row = node.data.getRow(node.data.size.rows - 1);
+            const row = node.page().getRow(node.rows() - 1);
             if (!row.wrap) break;
 
             // We could be more accurate here and count bytes since the

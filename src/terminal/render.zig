@@ -438,7 +438,7 @@ pub const RenderState = struct {
             row_serials[y] = row_pin.node.serial;
 
             // Get all our cells in the page.
-            const p: *page.Page = &row_pin.node.data;
+            const p: *page.Page = row_pin.node.page();
             const page_rac = row_pin.rowAndCell();
 
             dirty: {
@@ -863,7 +863,7 @@ pub const RenderState = struct {
 
         // Grab our link ID
         const link_pin: PageList.Pin = row_pins[viewport_point.y];
-        const link_page: *page.Page = &link_pin.node.data;
+        const link_page: *page.Page = link_pin.node.page();
         const link = link: {
             const rac = link_page.getRowAndCell(
                 viewport_point.x,
@@ -892,7 +892,7 @@ pub const RenderState = struct {
             for (0.., cells.items(.raw)) |x, cell| {
                 if (!cell.hyperlink) continue;
 
-                const other_page: *page.Page = &pin.node.data;
+                const other_page: *page.Page = pin.node.page();
                 const other = link: {
                     const rac = other_page.getRowAndCell(x, pin.y);
                     const link_id = other_page.lookupHyperlink(rac.cell) orelse continue;
@@ -1471,7 +1471,7 @@ test "linkCells with scrollback spanning pages" {
     defer s.deinit();
 
     const pages = &t.screens.active.pages;
-    const first_page_cap = pages.pages.first.?.data.capacity.rows;
+    const first_page_cap = pages.pages.first.?.capacity().rows;
 
     // Fill first page
     for (0..first_page_cap - 1) |_| s.nextSlice("\r\n");

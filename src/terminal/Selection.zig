@@ -154,12 +154,12 @@ pub fn topLeft(self: Selection, s: *const Screen) Pin {
         .reverse => self.end(),
         .mirrored_forward => pin: {
             var p = self.start();
-            p.x = @min(self.end().x, p.node.data.size.cols - 1);
+            p.x = @min(self.end().x, p.node.cols() - 1);
             break :pin p;
         },
         .mirrored_reverse => pin: {
             var p = self.end();
-            p.x = @min(self.start().x, p.node.data.size.cols - 1);
+            p.x = @min(self.start().x, p.node.cols() - 1);
             break :pin p;
         },
     };
@@ -172,12 +172,12 @@ pub fn bottomRight(self: Selection, s: *const Screen) Pin {
         .reverse => self.start(),
         .mirrored_forward => pin: {
             var p = self.end();
-            p.x = @min(self.start().x, p.node.data.size.cols - 1);
+            p.x = @min(self.start().x, p.node.cols() - 1);
             break :pin p;
         },
         .mirrored_reverse => pin: {
             var p = self.start();
-            p.x = @min(self.end().x, p.node.data.size.cols - 1);
+            p.x = @min(self.end().x, p.node.cols() - 1);
             break :pin p;
         },
     };
@@ -328,12 +328,12 @@ pub fn containedRowCached(
     if (self.rectangle) return init(
         start: {
             var copy: Pin = pin;
-            copy.x = @min(tl.x, copy.node.data.size.cols - 1);
+            copy.x = @min(tl.x, copy.node.cols() - 1);
             break :start copy;
         },
         end: {
             var copy: Pin = pin;
-            copy.x = @min(br.x, copy.node.data.size.cols - 1);
+            copy.x = @min(br.x, copy.node.cols() - 1);
             break :end copy;
         },
         true,
@@ -350,7 +350,7 @@ pub fn containedRowCached(
             tl_pin,
             end: {
                 var copy: Pin = pin;
-                copy.x = copy.node.data.size.cols - 1;
+                copy.x = copy.node.cols() - 1;
                 break :end copy;
             },
             false,
@@ -382,7 +382,7 @@ pub fn containedRowCached(
         },
         end: {
             var copy: Pin = pin;
-            copy.x = copy.node.data.size.cols - 1;
+            copy.x = copy.node.cols() - 1;
             break :end copy;
         },
         false,
@@ -427,7 +427,7 @@ pub fn adjust(
             var current = end_pin.*;
             while (current.down(1)) |next| : (current = next) {
                 const rac = next.rowAndCell();
-                const cells = next.node.data.getCells(rac.row);
+                const cells = next.node.page().getCells(rac.row);
                 if (page.Cell.hasTextAny(cells)) {
                     end_pin.* = next;
                     break;
@@ -489,7 +489,7 @@ pub fn adjust(
             );
             while (it.next()) |next| {
                 const rac = next.rowAndCell();
-                const cells = next.node.data.getCells(rac.row);
+                const cells = next.node.page().getCells(rac.row);
                 if (page.Cell.hasTextAny(cells)) {
                     end_pin.* = next;
                     end_pin.x = @intCast(cells.len - 1);
@@ -500,7 +500,7 @@ pub fn adjust(
 
         .beginning_of_line => end_pin.x = 0,
 
-        .end_of_line => end_pin.x = end_pin.node.data.size.cols - 1,
+        .end_of_line => end_pin.x = end_pin.node.cols() - 1,
     }
 }
 
@@ -1061,7 +1061,7 @@ test "Selection: rectangle corners clamp across mixed-width pages" {
     const first = s.pages.pages.first.?;
     try s.pages.split(.{ .node = first, .y = 1 });
     const second = first.next.?;
-    second.data.size.cols = 2;
+    second.page().size.cols = 2;
 
     const sel = Selection.init(
         .{ .node = first, .x = 3 },
@@ -1638,7 +1638,7 @@ test "Selection: containedRow clamps mixed-width pages" {
     try s.pages.split(.{ .node = first, .y = 1 });
     const middle = first.next.?;
     const last = middle.next.?;
-    middle.data.size.cols = 2;
+    middle.page().size.cols = 2;
 
     const linear = Selection.init(
         .{ .node = first, .x = 1 },

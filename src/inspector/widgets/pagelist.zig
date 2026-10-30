@@ -58,7 +58,7 @@ pub const Inspector = struct {
             var index: usize = pages.totalPages();
             var node = pages.pages.last;
             while (node) |page_node| : (node = page_node.prev) {
-                const page = &page_node.data;
+                const page = page_node.page();
                 row_offset -= page.size.rows;
                 index -= 1;
 
@@ -549,8 +549,9 @@ pub const CellChooser = struct {
 
         if (cell.cell.style_id != stylepkg.default_id) {
             cimgui.c.ImGui_SeparatorText("Style");
-            const style = cell.node.data.styles.get(
-                cell.node.data.memory,
+            const page = cell.node.page();
+            const style = page.styles.get(
+                page.memory,
                 cell.cell.style_id,
             ).*;
             widgets.style.table(style, null);
@@ -585,7 +586,7 @@ fn hyperlinkTable(cell: PageList.Cell) void {
     )) return;
     defer cimgui.c.ImGui_EndTable();
 
-    const page = &cell.node.data;
+    const page = cell.node.page();
     const link_id = page.lookupHyperlink(cell.cell) orelse {
         cimgui.c.ImGui_TableNextRow();
         _ = cimgui.c.ImGui_TableSetColumnIndex(0);
@@ -640,7 +641,7 @@ fn graphemeTable(cell: PageList.Cell) void {
     )) return;
     defer cimgui.c.ImGui_EndTable();
 
-    const page = &cell.node.data;
+    const page = cell.node.page();
     const cps = page.lookupGrapheme(cell.cell) orelse {
         cimgui.c.ImGui_TableNextRow();
         _ = cimgui.c.ImGui_TableSetColumnIndex(0);
@@ -747,7 +748,7 @@ pub const CellInfo = struct {
             _ = cimgui.c.ImGui_TableSetColumnIndex(2);
             if (cimgui.c.ImGui_BeginListBox("##cell_grapheme", .{ .x = 0, .y = 0 })) {
                 defer cimgui.c.ImGui_EndListBox();
-                if (cell.node.data.lookupGrapheme(cell.cell)) |cps| {
+                if (cell.node.page().lookupGrapheme(cell.cell)) |cps| {
                     var buf: [96]u8 = undefined;
                     for (cps) |cp| {
                         const label = std.fmt.bufPrintZ(&buf, "U+{X}", .{cp}) catch "U+?";
@@ -845,7 +846,7 @@ pub const CellInfo = struct {
             widgets.helpMarker("OSC8 hyperlink ID associated with this cell.");
             _ = cimgui.c.ImGui_TableSetColumnIndex(2);
 
-            const link_id = cell.node.data.lookupHyperlink(cell.cell) orelse 0;
+            const link_id = cell.node.page().lookupHyperlink(cell.cell) orelse 0;
             cimgui.c.ImGui_Text("id=%d", link_id);
         }
     }
