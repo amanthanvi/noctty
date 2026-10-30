@@ -1078,30 +1078,7 @@ fn cursorScrollAboveRotate(self: *Screen) !void {
                 // room for what we didn't have space for
                 const new_node = self.increaseCapacity(
                     current,
-                    switch (err) {
-                        // Rehash the sets
-                        error.StyleSetNeedsRehash,
-                        error.HyperlinkSetNeedsRehash,
-                        => null,
-
-                        // Increase style memory
-                        error.StyleSetOutOfMemory,
-                        => .styles,
-
-                        // Increase string memory
-                        error.StringAllocOutOfMemory,
-                        => .string_bytes,
-
-                        // Increase hyperlink memory
-                        error.HyperlinkSetOutOfMemory,
-                        error.HyperlinkMapOutOfMemory,
-                        => .hyperlink_bytes,
-
-                        // Increase grapheme memory
-                        error.GraphemeMapOutOfMemory,
-                        error.GraphemeAllocOutOfMemory,
-                        => .grapheme_bytes,
-                    },
+                    PageList.IncreaseCapacity.forCloneError(err),
                 ) catch |e| switch (e) {
                     // See insertLines which takes the same approach for
                     // the same errors. We can't gracefully recover from
