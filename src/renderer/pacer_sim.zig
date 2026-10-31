@@ -376,6 +376,10 @@ pub fn screen(sim: *Sim) Pacer.Screen {
     };
 }
 
+pub fn cursorBlinking(sim: *Sim) bool {
+    return sim.blinking;
+}
+
 pub fn animation(sim: *Sim) ?Pacer.AnimationWake {
     if (sim.presentation_pending) return .{ .delay_ms = 250 };
     return switch (sim.shader orelse return null) {

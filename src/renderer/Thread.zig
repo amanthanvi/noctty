@@ -577,6 +577,15 @@ const Frame = struct {
         };
     }
 
+    /// Reads only the mode, so a blink decision does not walk the rows
+    /// `needsFrame` checks on a clean terminal.
+    pub fn cursorBlinking(f: Frame) bool {
+        const state = f.t.state;
+        state.mutex.lock();
+        defer state.mutex.unlock();
+        return state.terminal.modes.get(.cursor_blinking);
+    }
+
     /// Null when the animation timer is not wanted.
     pub fn animation(f: Frame) ?Pacer.AnimationWake {
         const t = f.t;

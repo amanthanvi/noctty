@@ -202,6 +202,8 @@ pub fn init(clock: Clock) Pacer {
 ///   Change. It arms no timer and never calls `turn`.
 /// - `inputs() Inputs`: takes no lock.
 /// - `screen() Screen`: takes State.mutex once.
+/// - `cursorBlinking() bool`: the cursor mode alone, under State.mutex,
+///   for blink decisions that do not need `screen`'s dirt check.
 /// - `animation() ?AnimationWake`: may take the D3D11 dispatcher mutex, so
 ///   `turn` calls it only when an input it depends on changed, on the first
 ///   turn and when the animation timer comes due.
@@ -221,7 +223,7 @@ pub fn turn(self: *Pacer, trigger: Trigger, frame: anytype) void {
         self.reconcileAnimation(&t, frame, frame.inputs());
         // Only a blinking cursor arms its timer: a steady one must not keep
         // a renderer wake loop alive.
-        if (frame.screen().cursor_blinking) self.armBlink(&t, blinkIntervalMs());
+        if (frame.cursorBlinking()) self.armBlink(&t, blinkIntervalMs());
     }
     switch (trigger) {
         .wake => |sources| {
@@ -357,7 +359,7 @@ fn reconcile(
         if (!in.focused) {
             if (changes.contains(.focus)) self.blink_reset_ns = null;
         } else {
-            const blinking = frame.screen().cursor_blinking;
+            const blinking = frame.cursorBlinking();
             if (changes.contains(.focus) or blinking) self.blink_reset_ns = self.nowNs();
             if (blinking) self.armBlink(t, blinkIntervalMs());
         }
@@ -375,7 +377,7 @@ fn reconcileAnimation(self: *Pacer, t: *Turn, frame: anytype, in: Inputs) void {
 /// steady cursor, shown. A toggle wakes the renderer to draw it.
 fn blinkDue(self: *Pacer, t: *Turn, frame: anytype) void {
     self.blink_pending = false;
-    if (!frame.inputs().focused or !frame.screen().cursor_blinking) {
+    if (!frame.inputs().focused or !frame.cursorBlinking()) {
         const was_visible = self.blink_visible;
         self.blink_visible = true;
         self.blink_reset_ns = null;
