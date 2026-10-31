@@ -6175,7 +6175,7 @@ pub const App = struct {
         }
         if (self.jump_list) |*jump_list| jump_list.scheduleIfStartupPending();
         if (clone_state_from) |source| {
-            if (source.host) |existing| try self.inheritHostWindowState(host, existing, keeps.position);
+            if (source.host) |existing| try self.inheritHostWindowState(host, existing, keeps.position, config);
         }
 
         host.power_notifications = win32_power.Notifications.init(hwnd);
