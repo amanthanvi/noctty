@@ -25,7 +25,9 @@
 //!                  spans only a refresh or two.
 //!
 //! `--regex` and `--whole-word` search with those options, so every
-//! searcher matches through the query's compiled pattern.
+//! searcher matches through the query's compiled pattern. Matching lines
+//! carry `--match-text` (default: the needle); give a regex a text it
+//! matches, such as `--regex --needle=req[a-z]+ --match-text=request`.
 //!
 //! Usage:
 //!   zig build bench:search-stream -- --mode=feed --lines=100000 --runs=5
@@ -60,6 +62,8 @@ const Args = struct {
     cols: u16 = 140,
     scrollback_mib: usize = 200,
     needle: []const u8 = "request",
+    /// The word a matching line carries; null means the needle itself.
+    match_text: ?[]const u8 = null,
     regex: bool = false,
     whole_word: bool = false,
     /// `--mode=thread`: output rate in MiB/s, as a producer such as a
@@ -103,7 +107,7 @@ fn buildLines(
         const n = first + i;
         const line = out[i * args.line_len ..][0..args.line_len];
         @memset(line, '.');
-        const word: []const u8 = if (n % args.match_every == 0) args.needle else "reply";
+        const word: []const u8 = if (n % args.match_every == 0) args.match_text orelse args.needle else "reply";
         _ = std.fmt.bufPrint(
             line[0 .. args.line_len - 2],
             "{d:0>8} GET /api/items/{d} {s} status={d} bytes={d} ",
@@ -111,7 +115,7 @@ fn buildLines(
         ) catch {
             // A cut line could lose the needle and measure another workload.
             std.log.err(
-                "bench:search-stream: --line-len={d} is too short for the line text and --needle",
+                "bench:search-stream: --line-len={d} is too short for the line text and --match-text",
                 .{args.line_len},
             );
             return error.InvalidArgument;
@@ -520,6 +524,8 @@ fn parseArgs(raw: []const []const u8) !Args {
             out.rate_mib_s = try std.fmt.parseFloat(f64, arg["--rate-mib-s=".len..]);
         } else if (std.mem.startsWith(u8, arg, "--needle=")) {
             out.needle = arg["--needle=".len..];
+        } else if (std.mem.startsWith(u8, arg, "--match-text=")) {
+            out.match_text = arg["--match-text=".len..];
         } else if (std.mem.eql(u8, arg, "--regex")) {
             out.regex = true;
         } else if (std.mem.eql(u8, arg, "--whole-word")) {
@@ -534,7 +540,8 @@ fn parseArgs(raw: []const []const u8) !Args {
     // hold at least one line.
     if (out.runs == 0 or out.match_every == 0 or out.line_len < 64 or
         out.line_len > 1024 * 1024 or out.stream_mib == 0 or
-        out.needle.len == 0 or out.rows == 0 or out.cols == 0)
+        out.needle.len == 0 or (out.match_text != null and out.match_text.?.len == 0) or
+        out.rows == 0 or out.cols == 0)
     {
         return error.InvalidArgument;
     }
