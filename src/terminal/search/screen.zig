@@ -959,22 +959,31 @@ pub const ScreenSearch = struct {
         }
     }
 
+    /// Return the match at the given index in newest-to-oldest order
+    /// (0 = most recent match). Returns null if the index is out of
+    /// range.
+    ///
+    /// This does not require read/write access to the underlying screen.
+    pub fn matchAt(self: *const ScreenSearch, idx: usize) ?FlattenedHighlight {
+        const active_len = self.active_results.items.len;
+        if (idx < active_len) {
+            return self.active_results.items[active_len - 1 - idx];
+        }
+
+        const history_len = self.history_results.items.len;
+        if (idx < active_len + history_len) {
+            return self.history_results.items[idx - active_len];
+        }
+
+        return null;
+    }
+
     /// Return the selected match.
     ///
     /// This does not require read/write access to the underlying screen.
     pub fn selectedMatch(self: *const ScreenSearch) ?FlattenedHighlight {
         const sel = self.selected orelse return null;
-        const active_len = self.active_results.items.len;
-        if (sel.idx < active_len) {
-            return self.active_results.items[active_len - 1 - sel.idx];
-        }
-
-        const history_len = self.history_results.items.len;
-        if (sel.idx < active_len + history_len) {
-            return self.history_results.items[sel.idx - active_len];
-        }
-
-        return null;
+        return self.matchAt(sel.idx);
     }
 
     pub const Select = enum {

@@ -245,7 +245,7 @@ fn apply(self: *Thread, req: QuerySearch.Request) void {
     if (report.match_rows) |rows| cb(.{ .match_rows = rows }, generation, ud);
     if (report.selected) |selected| cb(.{ .selected_match = switch (selected) {
         .none => null,
-        .match => |m| .{ .idx = m.idx, .highlight = m.highlight },
+        .match => |m| m,
     } }, generation, ud);
     if (report.complete) cb(.complete, generation, ud);
 }
@@ -477,10 +477,7 @@ pub const Event = union(enum) {
     /// can tell the query from one that matches nothing.
     invalid_query,
 
-    pub const SelectedMatch = struct {
-        idx: usize,
-        highlight: FlattenedHighlight,
-    };
+    pub const SelectedMatch = QuerySearch.Selected.Match;
 };
 
 const TestUserData = struct {

@@ -1,13 +1,17 @@
 //! One search query over a terminal, stepped by one thread: which query
 //! runs, when the terminal is read under its lock, what changed since the
 //! last report, where the first select goes, and ending a query whose
-//! pattern fails at run time. The search thread (`Thread.zig`) is a shell
-//! that turns each `Report` into events.
+//! pattern fails at run time. It runs upstream's `TerminalSearch` and owns
+//! the query's `Pattern`. The search thread (`Thread.zig`) is a shell that
+//! turns each `Report` into events.
+//!
+//! The private parts map onto upstream's search thread functions
+//! (`changeNeedle`, `feedLocked`, `select`, `notify` and its
+//! `NotifyState`), so upstream fixes to them port here.
 const std = @import("std");
 const build_options = @import("terminal_options");
 const testing = std.testing;
 const Allocator = std.mem.Allocator;
-const point = @import("../point.zig");
 const FlattenedHighlight = @import("../highlight.zig").Flattened;
 const UntrackedHighlight = @import("../highlight.zig").Untracked;
 const PageList = @import("../PageList.zig");
@@ -16,9 +20,8 @@ const ScreenSet = @import("../ScreenSet.zig");
 const Terminal = @import("../Terminal.zig");
 const Pattern = @import("pattern.zig").Pattern;
 const Query = @import("query_options.zig").Query;
-const QueryOptions = @import("query_options.zig").QueryOptions;
 const ScreenSearch = @import("screen.zig").ScreenSearch;
-const ViewportSearch = @import("viewport.zig").ViewportSearch;
+const TerminalSearch = @import("terminal.zig").TerminalSearch;
 const oni = if (build_options.oniguruma) @import("oniguruma") else struct {};
 
 const log = std.log.scoped(.search_thread);
@@ -28,7 +31,7 @@ pub const QuerySearch = struct {
     term: Term,
 
     /// The running query, if any.
-    search: ?Search = null,
+    current: ?Current = null,
 
     pub const Term = struct {
         terminal: *Terminal,
@@ -73,17 +76,20 @@ pub const QuerySearch = struct {
 
     pub const Selected = union(enum) {
         none,
-        match: struct {
+        match: Match,
+
+        pub const Match = struct {
             /// From the newest match, 0 being the newest.
             idx: usize,
             highlight: FlattenedHighlight,
-        },
+        };
     };
 
     /// What changed since the previous report: a null field did not. A
-    /// query that starts a search, clears one or is invalid reports every
-    /// field, and an equivalent query replays every field. Slices are
-    /// borrowed until the next step or deinit.
+    /// query that replaces or clears a search, or is invalid, reports every
+    /// field, and an equivalent query replays every field; a first query
+    /// reports what it found. Slices are borrowed until the next step or
+    /// deinit.
     pub const Report = struct {
         state: State,
         total: ?Total = null,
@@ -118,38 +124,158 @@ pub const QuerySearch = struct {
         if (req.query) |query| switch (self.changeQuery(query)) {
             .started => {},
             .replay => force = true,
-            .cleared => |total| return self.cleared(total),
+            .cleared => |total| {
+                // The new search's first feed may have failed: this clear
+                // ends it too.
+                _ = self.endIfFailed();
+                return self.cleared(total);
+            },
         };
         if (req.refresh) self.refresh();
         if (req.select) |to| self.select(to);
 
-        const s = if (self.search) |*s| s else return .{ .state = .idle };
+        const cur = if (self.current) |*cur| cur else return .{ .state = .idle };
 
         // A search reports what its query, refresh or select left before it
         // makes progress, as the search thread notified before it ticked.
         const slice = req.query == null and !req.refresh and req.select == null;
-        if (slice and s.reported and !s.isComplete()) {
-            switch (s.tick()) {
+        if (slice and cur.reported and !cur.search.isComplete()) {
+            switch (cur.search.tick()) {
                 .complete, .progress => {},
                 .blocked => {
                     self.term.mutex.lock();
                     defer self.term.mutex.unlock();
-                    s.feed(self.alloc, self.term.terminal);
+                    self.feedLocked(cur);
                 },
             }
         }
 
-        // A failed pattern finds nothing from then on, in any searcher.
-        if (s.failure()) |err| {
-            log.warn("search query ended by a pattern failure err={}", .{err});
-            self.stop();
-            return self.cleared(.{ .count = 0 });
-        }
-
-        var report = s.report(self.alloc, force);
-        report.state = if (s.isComplete()) .waiting else .busy;
+        // Building the report collects the viewport matches, which runs the
+        // pattern too, so the failure check comes after it.
+        const report = self.notify(cur, force);
+        if (self.endIfFailed()) return self.cleared(.{ .count = 0 });
         return report;
     }
+
+    /// End the query if its pattern has failed in any searcher, and say
+    /// whether it did. A failed pattern finds nothing from then on.
+    fn endIfFailed(self: *QuerySearch) bool {
+        const cur = if (self.current) |*cur| cur else return false;
+        const p = cur.pattern orelse return false;
+        const err = p.failure() orelse return false;
+        log.warn("search query ended by a pattern failure err={}", .{err});
+        self.stop();
+        return true;
+    }
+
+    /// The search of one query and what has been reported of it.
+    const Current = struct {
+        search: TerminalSearch,
+
+        /// Lent to every searcher; null for a literal query.
+        pattern: ?*Pattern,
+
+        notified: NotifyState = .{},
+        rows: MatchRows = .{},
+
+        /// True once anything has been reported.
+        reported: bool = false,
+
+        fn init(alloc: Allocator, query_: Query) Pattern.CompileError!Current {
+            const pattern = try Pattern.forQuery(alloc, query_);
+            errdefer if (pattern) |p| p.destroy(alloc);
+            return .{
+                .search = try .initPattern(alloc, query_.needle, pattern),
+                .pattern = pattern,
+            };
+        }
+
+        /// The query this search runs. The needle is borrowed.
+        fn query(self: *const Current) Query {
+            return .{
+                .needle = self.search.needle(),
+                .options = if (self.pattern) |p| p.options else .{},
+            };
+        }
+    };
+
+    /// What was last reported, in the shape of upstream's search thread
+    /// `NotifyState`.
+    const NotifyState = struct {
+        /// The active screen key the state below was captured against.
+        key: ScreenSet.Key = .primary,
+
+        /// Last notified total matches count
+        total: ?usize = null,
+
+        /// Last notified selected match
+        selected: ?SelectedMatch = null,
+
+        /// True if we sent the complete notification yet.
+        complete: bool = false,
+
+        const SelectedMatch = struct {
+            idx: usize,
+            highlight: UntrackedHighlight,
+        };
+    };
+
+    /// The active screen's match rows, rebuilt under the terminal lock only
+    /// when the screen or its match-row revision changes, so a report never
+    /// touches terminal state.
+    const MatchRows = struct {
+        rows: std.ArrayList(u32) = .empty,
+        notified: std.ArrayList(u32) = .empty,
+
+        /// The searcher the rows were built from: its screen, that
+        /// screen's ScreenSet generation, and its match-row revision.
+        screen: ?ScreenSet.Key = null,
+        generation: usize = 0,
+        revision: u64 = 0,
+
+        fn deinit(self: *MatchRows, alloc: Allocator) void {
+            self.rows.deinit(alloc);
+            self.notified.deinit(alloc);
+        }
+
+        fn clear(self: *MatchRows) void {
+            self.rows.clearRetainingCapacity();
+            self.screen = null;
+            self.revision = 0;
+        }
+
+        /// The caller must hold the terminal lock.
+        fn refresh(self: *MatchRows, alloc: Allocator, s: *TerminalSearch) void {
+            // The searcher the rows came from was removed by the feed.
+            if (self.screen) |key| {
+                if (s.screen_generations.get(key) != self.generation) self.clear();
+            }
+
+            const screen_search = s.activeScreenSearch() orelse return self.clear();
+            const revision = screen_search.matchRowsRevision();
+            if (self.screen == s.active_key and self.revision == revision) return;
+
+            screen_search.collectMatchRows(alloc, &self.rows) catch |err| {
+                log.warn("error rebuilding search match rows err={}", .{err});
+                return;
+            };
+            self.screen = s.active_key;
+            self.generation = s.screen_generations.get(s.active_key).?;
+            self.revision = revision;
+        }
+
+        /// The rows, when they differ from the reported ones or `force`.
+        fn unreported(self: *MatchRows, alloc: Allocator, force: bool) ?[]const u32 {
+            if (!force and std.mem.eql(u32, self.rows.items, self.notified.items)) return null;
+            self.notified.ensureTotalCapacity(alloc, self.rows.items.len) catch |err| {
+                log.warn("error caching notified search match rows err={}", .{err});
+                return null;
+            };
+            self.notified.clearRetainingCapacity();
+            self.notified.appendSliceAssumeCapacity(self.rows.items);
+            return self.rows.items;
+        }
+    };
 
     const QueryChange = union(enum) {
         /// A new search started without ending another, or nothing changed.
@@ -168,16 +294,16 @@ pub const QuerySearch = struct {
             query.options,
         });
 
-        if (self.search) |*s| {
-            if (s.query().eql(query)) {
+        if (self.current) |*cur| {
+            if (cur.query().eql(query)) {
                 // Reset clears both the viewport fingerprint and sliding-window
                 // buffer, so the forced report rescans from a clean state.
-                s.viewport.reset();
-                s.stale_viewport_matches = true;
+                cur.search.viewport.reset();
+                cur.search.stale_viewport_matches = true;
 
                 self.term.mutex.lock();
                 defer self.term.mutex.unlock();
-                s.feed(self.alloc, self.term.terminal);
+                self.feedLocked(cur);
                 return .replay;
             }
         }
@@ -186,30 +312,28 @@ pub const QuerySearch = struct {
         // searched for is reported by the one clear of the previous results,
         // not by a second one after it (which would show "no matches" first).
         var invalid = false;
-        var next: ?Search = null;
+        var next: ?Current = null;
         if (query.needle.len > 0) {
-            if (Search.init(self.alloc, query.needle, query.options)) |search| {
-                next = search;
-            } else |err| switch (err) {
-                // The previous search still stops: its results would
-                // otherwise be reported for the new query.
-                error.OutOfMemory => log.warn("error initializing search query err={}", .{err}),
-                error.InvalidPattern, error.UnsupportedQueryOptions => {
-                    log.warn("error initializing search query err={}", .{err});
-                    invalid = true;
-                },
+            if (Current.init(self.alloc, query)) |cur| {
+                next = cur;
+            } else |err| {
+                // Out of memory is not an invalid query, but the previous
+                // search still stops: its results would otherwise be
+                // reported for the new query.
+                log.warn("error initializing search query err={}", .{err});
+                invalid = err != error.OutOfMemory;
             }
         }
 
-        const replaced = self.search != null;
+        const replaced = self.current != null;
         self.stop();
 
         // No needle means stop the search, and an invalid one starts none.
-        self.search = next;
-        if (self.search) |*s| {
+        self.current = next;
+        if (self.current) |*cur| {
             self.term.mutex.lock();
             defer self.term.mutex.unlock();
-            s.feed(self.alloc, self.term.terminal);
+            self.feedLocked(cur);
         }
 
         if (invalid) return .{ .cleared = .invalid };
@@ -220,7 +344,7 @@ pub const QuerySearch = struct {
     /// Every field cleared, with the total `total`.
     fn cleared(self: *const QuerySearch, total: Total) Report {
         return .{
-            .state = if (self.search != null) .busy else .idle,
+            .state = if (self.current != null) .busy else .idle,
             .total = total,
             .viewport_matches = &.{},
             .match_rows = &.{},
@@ -228,504 +352,122 @@ pub const QuerySearch = struct {
         };
     }
 
-    fn refresh(self: *QuerySearch) void {
-        const s = if (self.search) |*s| s else return;
-        self.term.mutex.lock();
-        defer self.term.mutex.unlock();
-        s.feed(self.alloc, self.term.terminal);
-    }
-
-    fn select(self: *QuerySearch, to: ScreenSearch.Select) void {
-        const s = if (self.search) |*s| s else return;
-        self.term.mutex.lock();
-        defer self.term.mutex.unlock();
-        s.select(self.alloc, self.term.terminal, to) catch |err|
-            log.warn("error selecting search match err={}", .{err});
-    }
-
-    fn stop(self: *QuerySearch) void {
-        const s = if (self.search) |*s| s else return;
-        {
-            self.term.mutex.lock();
-            defer self.term.mutex.unlock();
-            s.deinit(self.term.terminal);
-        }
-        self.search = null;
-    }
-};
-
-/// Search state: the searchers of one query, and what has been reported.
-const Search = struct {
-    /// The query's compiled pattern, lent to every searcher. Null for a
-    /// literal query.
-    pattern: ?*Pattern,
-
-    /// Active viewport search for the active screen.
-    viewport: ViewportSearch,
-
-    /// The searchers for all the screens.
-    screens: std.EnumMap(ScreenSet.Key, ScreenSearch),
-
-    /// ScreenSet generations captured when each searcher was initialized.
-    /// Allocators may reuse a destroyed Screen address, so pointer equality
-    /// alone cannot distinguish replacement screens from stale handles.
-    screen_generations: std.EnumMap(ScreenSet.Key, usize),
-
-    /// All state related to screen switches, collected so that when
-    /// we switch screens it makes everything related stale, too.
-    last_screen: ScreenState,
-
-    /// True if we reported the completion yet.
-    last_complete: bool,
-
-    /// True once anything has been reported.
-    reported: bool,
-
-    /// The last viewport matches we found.
-    stale_viewport_matches: bool,
-
-    /// The viewport matches last reported.
-    viewport_matches: std.ArrayList(FlattenedHighlight),
-
-    /// Match rows for the active screen. Rebuilt while the terminal lock
-    /// is held so downstream consumers never have to touch terminal state.
-    match_rows: std.ArrayList(u32),
-
-    /// Inputs used to build the current match row snapshot.
-    match_rows_screen: ?ScreenSet.Key,
-    match_rows_revision: u64,
-
-    /// Last match rows snapshot reported.
-    notified_match_rows: std.ArrayList(u32),
-
-    const ScreenState = struct {
-        /// Last active screen key
-        key: ScreenSet.Key,
-
-        /// Last notified total matches count
-        total: ?usize = null,
-
-        /// Last notified selected match index
-        selected: ?SelectedMatch = null,
-
-        const SelectedMatch = struct {
-            idx: usize,
-            highlight: UntrackedHighlight,
-        };
-    };
-
-    fn init(
-        alloc: Allocator,
-        needle: []const u8,
-        query_options: QueryOptions,
-    ) Pattern.CompileError!Search {
-        const pattern = try Pattern.forQuery(alloc, .{
-            .needle = needle,
-            .options = query_options,
-        });
-        errdefer if (pattern) |p| p.destroy(alloc);
-
-        var vp: ViewportSearch = try .initPattern(alloc, needle, pattern);
-        errdefer vp.deinit();
-
-        // We use dirty tracking for active area changes. Start with it
-        // dirty so the first change is re-searched.
-        vp.active_dirty = true;
-
-        return .{
-            .pattern = pattern,
-            .viewport = vp,
-            .screens = .init(.{}),
-            .screen_generations = .init(.{}),
-            .last_screen = .{ .key = .primary },
-            .last_complete = false,
-            .reported = false,
-            .stale_viewport_matches = true,
-            .viewport_matches = .empty,
-            .match_rows = .empty,
-            .match_rows_screen = null,
-            .match_rows_revision = 0,
-            .notified_match_rows = .empty,
-        };
-    }
-
-    /// The caller must hold the terminal lock: a searcher whose screen is
-    /// still alive untracks its pins from that screen's PageList.
-    fn deinit(self: *Search, t: *Terminal) void {
-        const alloc = self.viewport.window.alloc;
-        self.clearViewportMatches();
-        self.viewport_matches.deinit(alloc);
-        self.match_rows.deinit(alloc);
-        self.notified_match_rows.deinit(alloc);
-        self.viewport.deinit();
-        var it = self.screens.iterator();
-        while (it.next()) |entry| {
-            if (self.screenIsValid(&t.screens, entry.key, entry.value)) {
-                entry.value.deinit();
-            } else {
-                entry.value.deinitScreenInvalid();
-            }
-        }
-
-        // Every searcher above borrowed it.
-        if (self.pattern) |p| p.destroy(alloc);
-    }
-
-    /// The query's run-time pattern failure, which ends the query.
-    fn failure(self: *const Search) ?Pattern.Failure {
-        const p = self.pattern orelse return null;
-        return p.failure();
-    }
-
-    /// The query this search runs. The needle is borrowed.
-    fn query(self: *const Search) Query {
-        return .{
-            .needle = self.viewport.needle(),
-            .options = if (self.pattern) |p| p.options else .{},
-        };
-    }
-
-    fn screenIsValid(
-        self: *const Search,
-        screens: *const ScreenSet,
-        key: ScreenSet.Key,
-        search: *const ScreenSearch,
-    ) bool {
-        const generation = self.screen_generations.get(key) orelse return false;
-        if (generation != screens.generation(key)) return false;
-        const actual = screens.get(key) orelse return false;
-        return actual == search.screen;
-    }
-
-    /// Returns true if all searches on all screens are complete.
-    fn isComplete(self: *Search) bool {
-        var it = self.screens.iterator();
-        while (it.next()) |entry| {
-            if (!entry.value.state.isComplete()) return false;
-        }
-
-        return true;
-    }
-
-    const Tick = enum {
-        /// All searches are complete.
-        complete,
-
-        /// Progress was made on at least one screen.
-        progress,
-
-        /// All incomplete searches are blocked on feed.
-        blocked,
-    };
-
-    /// Scan copied data without the big lock. Returns overall progress.
-    fn tick(self: *Search) Tick {
-        var result: Tick = .complete;
-        var it = self.screens.iterator();
-        while (it.next()) |entry| {
-            if (entry.value.tick()) {
-                result = .progress;
-            } else |err| switch (err) {
-                // Ignore... nothing we can do.
-                error.OutOfMemory => log.warn(
-                    "error ticking screen search key={} err={}",
-                    .{ entry.key, err },
-                ),
-
-                // Ignore, good for us. State remains whatever it is.
-                error.SearchComplete => {},
-
-                // Ignore, too, progressed
-                error.FeedRequired => switch (result) {
-                    // If we think we're complete, we're not because we're
-                    // blocked now (nothing made progress).
-                    .complete => result = .blocked,
-
-                    // If we made some progress, we remain in progress
-                    // since blocked means no progress at all.
-                    .progress => {},
-
-                    // If we're blocked already then we remain blocked.
-                    .blocked => {},
-                },
-            }
-        }
-
-        // log.debug("tick result={}", .{result});
-        return result;
-    }
-
-    fn clearMatchRowsCache(self: *Search) void {
-        self.match_rows.clearRetainingCapacity();
-        self.match_rows_screen = null;
-        self.match_rows_revision = 0;
-    }
-
-    /// Update any state that requires the terminal, such as feeding
-    /// additional data to the searches or updating the active screen. The
-    /// caller must hold the terminal lock.
-    fn feed(
-        self: *Search,
-        alloc: Allocator,
-        t: *Terminal,
-    ) void {
-        // Update our active screen
-        if (t.screens.active_key != self.last_screen.key) {
-            // The default values will force resets of a bunch of other
-            // state too to force recalculations and notifications.
-            self.last_screen = .{ .key = t.screens.active_key };
-        }
-
-        // Reconcile our screens with the terminal screens. Remove
-        // searchers for screens that no longer exist and add searchers
-        // for screens that do exist but we don't have yet.
-        {
-            // Remove screens we have that no longer exist or were destroyed
-            // and rebuilt (possibly at the same address) since.
-            var it = self.screens.iterator();
-            while (it.next()) |entry| {
-                if (!self.screenIsValid(&t.screens, entry.key, entry.value)) {
-                    if (self.match_rows_screen) |key| {
-                        if (key == entry.key) self.clearMatchRowsCache();
-                    }
-                    entry.value.deinitScreenInvalid();
-                    _ = self.screens.remove(entry.key);
-                    _ = self.screen_generations.remove(entry.key);
-                }
-            }
-        }
-        {
-            // Add screens that exist but we don't have yet.
-            var it = t.screens.all.iterator();
-            while (it.next()) |entry| {
-                if (self.screens.contains(entry.key)) continue;
-                const screen_search = ScreenSearch.initPattern(
-                    alloc,
-                    entry.value.*,
-                    self.viewport.needle(),
-                    self.pattern,
-                ) catch |err| switch (err) {
-                    error.OutOfMemory => {
-                        // OOM is probably going to sink the entire ship but
-                        // we can just ignore it and wait on the next
-                        // reconciliation to try again.
-                        log.warn(
-                            "error initializing screen search for key={} err={}",
-                            .{ entry.key, err },
-                        );
-                        continue;
-                    },
-                };
-                self.screens.put(entry.key, screen_search);
-                self.screen_generations.put(
-                    entry.key,
-                    t.screens.generation(entry.key),
-                );
-            }
-        }
+    /// Feed the search from the terminal state and rebuild the match rows.
+    /// The terminal mutex must be held by the caller.
+    fn feedLocked(self: *QuerySearch, cur: *Current) void {
+        const t = self.term.terminal;
 
         // See the `search_viewport_dirty` flag on the terminal to know
         // what exactly this is for. But, if this is set, we know the renderer
-        // found the viewport/active area dirty, so we should mark it as
-        // dirty in our viewport searcher so it forces a re-search.
-        if (t.flags.search_viewport_dirty) {
-            t.flags.search_viewport_dirty = false;
+        // found the viewport/active area dirty, so the active area must be
+        // re-scanned.
+        const active_dirty = t.flags.search_viewport_dirty;
+        t.flags.search_viewport_dirty = false;
 
-            // Mark our viewport dirty so it researches the active
-            self.viewport.active_dirty = true;
-
-            // Reload our active area for our active screen
-            if (self.screens.getPtr(t.screens.active_key)) |screen_search| {
-                screen_search.reloadActive() catch |err| switch (err) {
-                    error.OutOfMemory => log.warn(
-                        "error reloading active area for screen key={} err={}",
-                        .{ t.screens.active_key, err },
-                    ),
-                };
-            }
-        }
-
-        // Check our viewport for changes.
-        if (self.viewport.update(&t.screens.active.pages)) |updated| {
-            if (updated) self.stale_viewport_matches = true;
-        } else |err| switch (err) {
-            error.OutOfMemory => log.warn(
-                "error updating viewport search err={}",
-                .{err},
-            ),
-        }
-
-        // Feed data
-        var it = self.screens.iterator();
-        while (it.next()) |entry| {
-            if (entry.value.state.needsFeed()) {
-                entry.value.feed() catch |err| switch (err) {
-                    error.OutOfMemory => log.warn(
-                        "error feeding screen search key={} err={}",
-                        .{ entry.key, err },
-                    ),
-                };
-            }
-        }
-
-        const screen_search = self.screens.getPtr(self.last_screen.key) orelse {
-            self.clearMatchRowsCache();
-            return;
-        };
-        const match_rows_revision = screen_search.matchRowsRevision();
-        const same_match_rows_screen = if (self.match_rows_screen) |key|
-            key == self.last_screen.key
-        else
-            false;
-        if (same_match_rows_screen and
-            self.match_rows_revision == match_rows_revision) return;
-
-        screen_search.collectMatchRows(alloc, &self.match_rows) catch |err| {
-            log.warn("error rebuilding search match rows err={}", .{err});
-            return;
-        };
-        self.match_rows_screen = self.last_screen.key;
-        self.match_rows_revision = match_rows_revision;
+        cur.search.feed(t, active_dirty);
+        cur.rows.refresh(self.alloc, &cur.search);
     }
 
-    /// Select a match on the active screen, scrolling to it when it is not
-    /// visible. The caller must hold the terminal lock.
-    fn select(
-        self: *Search,
-        alloc: Allocator,
-        t: *Terminal,
-        sel: ScreenSearch.Select,
-    ) Allocator.Error!void {
+    fn refresh(self: *QuerySearch) void {
+        const cur = if (self.current) |*cur| cur else return;
+        self.term.mutex.lock();
+        defer self.term.mutex.unlock();
+        self.feedLocked(cur);
+    }
+
+    fn select(self: *QuerySearch, to: ScreenSearch.Select) void {
+        const cur = if (self.current) |*cur| cur else return;
+        self.term.mutex.lock();
+        defer self.term.mutex.unlock();
+
         // A screen can be removed or replaced between refresh ticks (and the
         // refresh timer stops while the surface is unfocused). Reconcile while
         // holding the terminal lock before touching any ScreenSearch pins.
-        self.feed(alloc, t);
-        const screen_search = self.screens.getPtr(self.last_screen.key) orelse return;
+        self.feedLocked(cur);
+        const screen_search = cur.search.activeScreenSearch() orelse return;
 
         // With nothing selected yet, either direction starts at the newest match,
         // the one nearest the bottom of the screen. `.prev` alone would start at
         // the oldest, which sends the first Enter after typing to the top of the
         // scrollback.
-        const dir: ScreenSearch.Select = if (screen_search.selected == null) .next else sel;
+        const dir: ScreenSearch.Select = if (screen_search.selected == null) .next else to;
 
-        // Make the selection. Ignore the result because we don't
-        // care if the selection didn't change.
-        _ = try screen_search.select(dir);
-
-        // Grab our match if we have one. If we don't have a selection
-        // then we do nothing.
-        const flattened = screen_search.selectedMatch() orelse return;
+        const selected = cur.search.select(self.term.terminal, dir, .if_needed) catch |err| {
+            log.warn("error selecting search match err={}", .{err});
+            return;
+        };
 
         // No matter what we reset our selected match cache. The next report
         // then carries the selection, so the renderer learns the screen
         // scrolled.
-        self.last_screen.selected = null;
-
-        // Grab the current screen and see if this match is visible within
-        // the viewport already. If it is, we do nothing.
-        const screen = t.screens.get(self.last_screen.key) orelse return;
-
-        // Grab the viewport. Viewports and selections are usually small
-        // so this check isn't very expensive, despite appearing O(N^2),
-        // both Ns are usually equal to 1.
-        var it = screen.pages.pageIterator(
-            .right_down,
-            .{ .viewport = .{} },
-            null,
-        );
-        const hl_chunks = flattened.chunks.slice();
-        while (it.next()) |chunk| {
-            for (0..hl_chunks.len) |i| {
-                const hl_chunk = hl_chunks.get(i);
-                if (chunk.overlaps(.{
-                    .node = hl_chunk.node,
-                    .start = hl_chunk.start,
-                    .end = hl_chunk.end,
-                })) return;
-            }
-        }
-
-        screen.scroll(.{ .pin = flattened.startPin() });
+        if (selected) cur.notified.selected = null;
     }
 
-    fn clearViewportMatches(self: *Search) void {
-        const alloc = self.viewport.window.alloc;
-        for (self.viewport_matches.items) |*hl| hl.deinit(alloc);
-        self.viewport_matches.clearRetainingCapacity();
+    fn stop(self: *QuerySearch) void {
+        const cur = if (self.current) |*cur| cur else return;
+        {
+            self.term.mutex.lock();
+            defer self.term.mutex.unlock();
+            cur.search.deinit(self.term.terminal);
+        }
+        cur.rows.deinit(self.alloc);
+
+        // Every searcher above borrowed it.
+        if (cur.pattern) |p| p.destroy(self.alloc);
+        self.current = null;
     }
 
     /// What changed since the last report, or everything when forced.
     ///
-    /// This doesn't require any locking as it only reads internal state.
-    fn report(self: *Search, alloc: Allocator, force: bool) QuerySearch.Report {
-        self.reported = true;
-        var result: QuerySearch.Report = .{ .state = .busy };
-        const screen_search = self.screens.getPtr(self.last_screen.key) orelse return result;
+    /// This doesn't require any locking as it only reads search-owned state.
+    fn notify(self: *QuerySearch, cur: *Current, force: bool) Report {
+        cur.reported = true;
+        const s = &cur.search;
+        const state = &cur.notified;
+        var result: Report = .{ .state = if (s.isComplete()) .waiting else .busy };
+
+        // A screen switch makes all previously notified per-screen state
+        // stale, so reset it to force recalculations and notifications.
+        if (state.key != s.active_key) {
+            state.key = s.active_key;
+            state.total = null;
+            state.selected = null;
+        }
+
+        const screen_search = s.activeScreenSearch() orelse return result;
 
         // Check our total match data
         const total = screen_search.matchesLen();
-        if (force or total != self.last_screen.total) {
+        if (force or total != state.total) {
             log.debug("notifying total matches={}", .{total});
-            self.last_screen.total = total;
+            state.total = total;
             result.total = .{ .count = total };
         }
 
-        // Check our viewport matches. If they're stale, we do the
-        // viewport search now. We do this as part of reporting and not
-        // tick because the viewport search is very fast and doesn't
-        // require ticked progress or feeds.
-        if (force or self.stale_viewport_matches) viewport: {
-            // We always make stale as false. Even if we fail below
-            // we require a re-feed to re-search the viewport. The feed
-            // process will make it stale again.
-            self.stale_viewport_matches = false;
+        // Check our viewport matches. If they're stale, we collect them
+        // now. We do this as part of notify and not tick because the
+        // viewport search is very fast and doesn't require ticked progress
+        // or feeds.
+        if (force or s.stale_viewport_matches) viewport: {
+            const matches = s.viewportMatches() catch |err| {
+                log.warn("error collecting viewport matches err={}", .{err});
+                break :viewport;
+            };
 
-            self.clearViewportMatches();
-            while (self.viewport.next()) |hl| {
-                var hl_cloned = hl.clone(alloc) catch |err| {
-                    log.warn("error collecting viewport matches err={}", .{err});
-
-                    // Reset the viewport so we force an update on the
-                    // next feed instead of reporting a partial match set.
-                    self.clearViewportMatches();
-                    self.viewport.reset();
-                    break :viewport;
-                };
-                self.viewport_matches.append(alloc, hl_cloned) catch |err| {
-                    log.warn("error collecting viewport matches err={}", .{err});
-                    hl_cloned.deinit(alloc);
-                    self.clearViewportMatches();
-                    self.viewport.reset();
-                    break :viewport;
-                };
-            }
-
-            log.debug("notifying viewport matches len={}", .{self.viewport_matches.items.len});
-            result.viewport_matches = self.viewport_matches.items;
+            log.debug("notifying viewport matches len={}", .{matches.len});
+            result.viewport_matches = matches;
         }
 
-        if (force or !std.mem.eql(u32, self.match_rows.items, self.notified_match_rows.items)) match_rows: {
-            self.notified_match_rows.ensureTotalCapacity(
-                alloc,
-                self.match_rows.items.len,
-            ) catch |err| switch (err) {
-                error.OutOfMemory => {
-                    log.warn("error caching notified search match rows err={}", .{err});
-                    break :match_rows;
-                },
-            };
-            self.notified_match_rows.clearRetainingCapacity();
-            self.notified_match_rows.appendSliceAssumeCapacity(self.match_rows.items);
-
-            log.debug("notifying search match rows len={}", .{self.match_rows.items.len});
-            result.match_rows = self.match_rows.items;
+        if (cur.rows.unreported(self.alloc, force)) |rows| {
+            log.debug("notifying search match rows len={}", .{rows.len});
+            result.match_rows = rows;
         }
 
         // Check our last selected match data.
         if (screen_search.selected) |m| match: {
             const flattened = screen_search.selectedMatch() orelse break :match;
             const untracked = flattened.untracked();
-            if (self.last_screen.selected) |prev| {
+            if (state.selected) |prev| {
                 if (!force and prev.idx == m.idx and prev.highlight.eql(untracked)) {
                     // Same selection, don't update it.
                     break :match;
@@ -733,7 +475,7 @@ const Search = struct {
             }
 
             // New selection, notify!
-            self.last_screen.selected = .{
+            state.selected = .{
                 .idx = m.idx,
                 .highlight = untracked,
             };
@@ -743,16 +485,16 @@ const Search = struct {
                 .idx = m.idx,
                 .highlight = flattened,
             } };
-        } else if (force or self.last_screen.selected != null) {
+        } else if (force or state.selected != null) {
             log.debug("notifying selection cleared", .{});
-            self.last_screen.selected = null;
+            state.selected = null;
             result.selected = .none;
         }
 
-        // Report our completion if we just completed.
-        if (!self.last_complete and self.isComplete()) {
+        // Send our complete notification if we just completed.
+        if (!state.complete and s.isComplete()) {
             log.debug("notifying search complete", .{});
-            self.last_complete = true;
+            state.complete = true;
             result.complete = true;
         }
 
@@ -1240,46 +982,91 @@ test "a pattern that fails at run time ends the query with one clear" {
     try testing.expectEqual(totals + 1, seen.totals);
 }
 
-test "every searcher of one query borrows one Pattern" {
+test "a pattern that fails while the report is built ends the query with one clear" {
     if (comptime !build_options.oniguruma) return error.SkipZigTest;
 
     const alloc = testing.allocator;
     try oni.testing.ensureInit();
 
+    var mutex: std.Thread.Mutex = .{};
     var t: Terminal = try .init(alloc, .{
         .cols = 10,
         .rows = 2,
         .max_scrollback = std.math.maxInt(usize),
     });
     defer t.deinit(alloc);
-    const list = &t.screens.get(.primary).?.pages;
+    const list = &t.screens.active.pages;
 
+    // A match on the first page, and the active area pages later.
     var stream = t.vtStream();
     defer stream.deinit();
     stream.nextSlice("Fizz\r\n");
     while (list.totalPages() < 3) stream.nextSlice("\r\n");
-    for (0..list.rows) |_| stream.nextSlice("\r\n");
-    stream.nextSlice("Fizz\x1b[?1049hFizz\x1b[?1049l");
+    stream.nextSlice("Fizz");
 
-    var search: Search = try .init(alloc, "Fizz", .{ .whole_word = true });
-    defer search.deinit(&t);
-    const pattern = search.pattern.?;
+    var qs: QuerySearch = .init(alloc, .{ .terminal = &t, .mutex = &mutex });
+    defer qs.deinit();
+    var seen: TestObserved = .{};
+    defer seen.deinit();
 
-    for ([_]u16{ 10, 12 }) |cols| {
-        search.feed(alloc, &t);
-        try testing.expectEqual(pattern, search.viewport.window.pattern.?);
-        try testing.expectEqual(@as(usize, 2), search.screens.count());
-        var it = search.screens.iterator();
-        while (it.next()) |entry| {
-            try testing.expectEqual(pattern, entry.value.pattern().?);
-        }
-        const primary = search.screens.getPtr(.primary).?;
-        try testing.expectEqual(cols, primary.cols);
-        try testing.expectEqual(pattern, primary.history.?.searcher.window.pattern.?);
+    try seen.run(&qs, .{ .query = .{ .needle = "Fizz", .options = .{ .whole_word = true } } });
+    try testing.expectEqual(QuerySearch.State.waiting, seen.state);
+    try testing.expectEqual(@as(?usize, 2), seen.count());
 
-        // A resize replaces the active screen's searcher at its next
-        // reload; the new one borrows the pattern too.
-        try t.resize(alloc, 12, 2);
-        t.flags.search_viewport_dirty = true;
-    }
+    // The search is caught up, so a refresh after the viewport moves to
+    // another page feeds no new text: only the report's viewport
+    // collection runs the pattern.
+    t.scrollViewport(.top);
+    const tw = @import("pattern.zig").find_tw;
+    defer tw.reset();
+    tw.errorAlways(.search, error.RetryLimit);
+    const totals = seen.totals;
+    try seen.take(qs.step(.{ .refresh = true }));
+    try tw.end(.reset);
+
+    try testing.expectEqual(QuerySearch.State.idle, seen.state);
+    try testing.expectEqual(totals + 1, seen.totals);
+    try testing.expectEqual(@as(?usize, 0), seen.count());
+    try testing.expectEqual(@as(?usize, 0), seen.viewport_len);
+    try testing.expectEqualSlices(u32, &.{}, seen.rows);
+}
+
+test "a replacing query whose first feed fails ends with one clear" {
+    if (comptime !build_options.oniguruma) return error.SkipZigTest;
+
+    const alloc = testing.allocator;
+    try oni.testing.ensureInit();
+
+    var mutex: std.Thread.Mutex = .{};
+    var t: Terminal = try .init(alloc, .{ .cols = 20, .rows = 2 });
+    defer t.deinit(alloc);
+
+    var stream = t.vtStream();
+    defer stream.deinit();
+    stream.nextSlice("Fizz Buzz");
+
+    var qs: QuerySearch = .init(alloc, .{ .terminal = &t, .mutex = &mutex });
+    defer qs.deinit();
+    var seen: TestObserved = .{};
+    defer seen.deinit();
+
+    try seen.run(&qs, .{ .query = .{ .needle = "Fizz" } });
+    try testing.expectEqual(@as(?usize, 1), seen.count());
+
+    // The new query's first feed scans the active area with its pattern.
+    const tw = @import("pattern.zig").find_tw;
+    defer tw.reset();
+    tw.errorAlways(.search, error.RetryLimit);
+    const totals = seen.totals;
+    try seen.take(qs.step(.{ .query = .{ .needle = "Buzz", .options = .{ .whole_word = true } } }));
+    try tw.end(.reset);
+
+    // That clear both ends the previous search and the failed one.
+    try testing.expectEqual(QuerySearch.State.idle, seen.state);
+    try testing.expectEqual(totals + 1, seen.totals);
+    try testing.expectEqual(@as(?usize, 0), seen.count());
+
+    try seen.take(qs.step(.{}));
+    try testing.expectEqual(QuerySearch.State.idle, seen.state);
+    try testing.expectEqual(totals + 1, seen.totals);
 }
