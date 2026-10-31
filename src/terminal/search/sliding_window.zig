@@ -207,6 +207,11 @@ pub const SlidingWindow = struct {
     /// reserves what a scan needs. A pattern that fails at run time finds
     /// nothing (see `Pattern.failure`).
     pub fn next(self: *SlidingWindow) ?FlattenedHighlight {
+        // An empty needle represents an inactive search. Searching for it
+        // would otherwise produce a zero-length match, which highlight()
+        // cannot represent because its end offset is inclusive.
+        if (self.needle.len == 0) return null;
+
         if (self.pattern) |pattern| return self.nextPattern(pattern);
 
         const slices = slices: {
@@ -906,6 +911,25 @@ test "SlidingWindow empty on init" {
     defer w.deinit();
     try testing.expectEqual(0, w.data.len());
     try testing.expectEqual(0, w.meta.len());
+}
+
+test "SlidingWindow empty needle has no matches" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var w: SlidingWindow = try .init(alloc, .forward, "");
+    defer w.deinit();
+
+    var s = try Screen.init(alloc, .{
+        .cols = 80,
+        .rows = 24,
+        .max_scrollback = 0,
+    });
+    defer s.deinit();
+    try s.testWriteString("hello");
+
+    _ = try w.append(s.pages.pages.first.?);
+    try testing.expectEqual(null, w.next());
 }
 
 test "SlidingWindow single append" {
