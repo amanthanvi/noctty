@@ -1,0 +1,42 @@
+a-wd A-p1  main med=9.0 p95=16.4 max=20 spk=1.012 busy=14.0 in/out=0/240 slow=0
+a-wd B-p1  paci med=8.7 p95=16.4 max=20 spk=1.012 busy=11.2 in/out=0/240 slow=0
+a-wd B-p2  paci med=9.3 p95=17.0 max=22 spk=1.025 busy=12.3 in/out=0/240 slow=0
+a-wd A-p2  main med=9.8 p95=16.6 max=25 spk=1.017 busy=15.4 in/out=0/240 slow=0
+a-wd A-p3  main med=8.7 p95=16.6 max=20 spk=1.017 busy=10.6 in/out=0/240 slow=0
+a-wd B-p3  paci med=7.8 p95=16.8 max=24 spk=1.012 busy=6.9 in/out=0/240 slow=0
+a-wd B-p4  paci med=9.1 p95=16.4 max=18 spk=1.017 busy=9.1 in/out=0/240 slow=0
+a-wd A-p4  main med=8.9 p95=16.6 max=21 spk=1.012 busy=10.5 in/out=0/240 slow=0
+a-wd A-p5  main med=9.6 p95=16.8 max=23 spk=1.004 busy=9.5 in/out=0/240 slow=0
+a-wd B-p5  paci med=9.6 p95=1183.6 max=2359 spk=0.904 busy=21.5 in/out=0/240 slow=20 wd=[1946,491C,439C]
+a-wd B-p6  paci med=9.7 p95=16.8 max=21 spk=1.021 busy=15.4 in/out=0/240 slow=0
+a-wd A-p6  main med=9.0 p95=16.7 max=31 spk=1.021 busy=13.0 in/out=0/240 slow=0
+a-wd A-p7  main med=8.7 p95=16.8 max=23 spk=1.017 busy=12.4 in/out=0/240 slow=0
+a-wd B-p7  paci med=9.3 p95=15.6 max=26 spk=1.017 busy=12.7 in/out=0/240 slow=0
+a-wd B-p8  paci med=8.8 p95=16.6 max=26 spk=1.012 busy=8.7 in/out=0/240 slow=0
+a-wd A-p8  main med=8.5 p95=16.6 max=27 spk=1.012 busy=7.5 in/out=0/240 slow=0
+a-wd A-p9  main med=8.0 p95=16.4 max=22 spk=1.021 busy=7.5 in/out=0/240 slow=0
+a-wd B-p9  paci med=8.7 p95=16.2 max=26 spk=1.017 busy=18.4 in/out=0/240 slow=0
+a-wd B-p10 paci med=9.2 p95=16.6 max=28 spk=1.017 busy=9.5 in/out=0/240 slow=0
+a-wd A-p10 main med=8.9 p95=16.4 max=24 spk=1.008 busy=18.6 in/out=0/240 slow=0
+a-wd A-p11 main med=8.3 p95=16.5 max=26 spk=1.021 busy=14.3 in/out=0/240 slow=0
+a-wd B-p11 paci med=8.5 p95=16.9 max=26 spk=1.017 busy=11.9 in/out=0/240 slow=0
+a-wd B-p12 paci med=9.5 p95=17.1 max=24 spk=1.025 busy=18.0 in/out=0/240 slow=0
+a-wd A-p12 main med=9.8 p95=17.2 max=27 spk=1.025 busy=31.5 in/out=0/240 slow=0
+a-wd A-p13 main med=9.6 p95=16.8 max=29 spk=1.017 busy=21.6 in/out=0/240 slow=0
+a-wd B-p13 paci med=10.1 p95=17.1 max=25 spk=1.025 busy=26.4 in/out=0/240 slow=0
+a-wd B-p14 paci med=10.0 p95=17.1 max=31 spk=1.029 busy=24.3 in/out=0/240 slow=0
+-wd2 A-p1  main med=8.9 p95=16.3 max=20 spk=1.008 busy=18.4 in/out=0/240 slow=0
+-wd2 B-p1  paci med=8.9 p95=16.2 max=25 spk=1.012 busy=15.0 in/out=0/240 slow=0
+-wd2 B-p2  paci med=9.6 p95=16.2 max=28 spk=1.025 busy=14.5 in/out=0/240 slow=0 wd=[521<]
+-wd2 A-p2  main med=9.8 p95=16.6 max=24 spk=1.025 busy=16.7 in/out=0/240 slow=0
+-wd2 A-p3  main med=8.8 p95=16.5 max=20 spk=1.012 busy=12.3 in/out=0/240 slow=0
+-wd2 B-p3  paci med=9.0 p95=16.6 max=20 spk=1.017 busy=12.6 in/out=0/240 slow=0
+-wd2 B-p4  paci med=9.2 p95=16.5 max=17 spk=1.008 busy=22.0 in/out=0/240 slow=0
+-wd2 A-p4  main med=9.3 p95=16.6 max=19 spk=1.017 busy=18.5 in/out=0/240 slow=0
+-wd2 A-p5  main med=9.4 p95=16.1 max=17 spk=1.008 busy=12.3 in/out=0/240 slow=0
+-wd2 B-p5  paci med=8.4 p95=16.6 max=31 spk=1.012 busy=15.7 in/out=0/240 slow=0
+-wd2 B-p6  paci med=9.5 p95=16.9 max=22 spk=1.012 busy=19.7 in/out=0/240 slow=0
+-wd2 A-p6  main med=9.3 p95=16.6 max=29 spk=1.012 busy=18.2 in/out=0/240 slow=0
+
+main-cur {"runs": 19, "keys_in_burst": 0, "keys_outside_burst": 4560, "slow_keys_gt500": 0, "slow_keys_gt500_in_burst": 0, "slow_keys_gt500_outside_burst": 0, "slow_keys_gt500_outside_burst_no_cdb": 0, "slow_keys_gt500_slow_before_any_cdb": 0, "slow_keys_gt500_slow_before_any_cdb_outside_burst": 0, "slow_keys_largest_stage_hist": {}, "keys_pooled_in_burst": {"n": 0, "median": null, "p95": null, "max": null}, "keys_pooled_outside_burst": {"n": 4560, "median": 9.03, "p95": 16.63, "max": 31.28}, "keys_pooled_in_burst_no_cdb": {"n": 0, "median": null, "p95": null, "max": null}, "keys_pooled_outside_burst_no_cdb": {"n": 4560, "median": 9.03, "p95": 16.63, "max": 31.28}, "keys_pooled_1s_after_burst": {"n": 0, "median": null, "p95": null, "max": null}, "run_max_display_ms": [17.1, 18.6, 19.9, 20.0, 20.0, 20.2, 20.5, 21.6, 22.7, 23.2, 24.0, 24.1, 24.6, 25.8, 27.0, 27.1, 28.6, 28.9, 31.3], "run_p95_display_ms": {"n": 19, "median": 16.58, "p95": 16.82, "max": 17.2}, "run_median_display_ms": {"n": 19, "median": 8.96, "p95": 9.82, "max": 9.84}, "swaps_per_key": {"n": 19, "median": 1.02, "p95": 1.02, "max": 1.02}, "cpu_busy_pct": {"n": 19, "median": 14.0, "p95": 21.6, "max": 31.5}, "bursts_with_keys": 0, "per_burst_max_ms": {"n": 0, "median": null, "p95": null, "max": null}, "per_burst_max_ms_no_cdb": {"n": 0, "median": null, "p95": null, "max": null}, "per_burst_drain_after_end_ms": {"n": 0, "median": null, "p95": null, "max": null}, "per_burst_drain_after_end_ms_no_cdb": {"n": 0, "median": null, "p95": null, "max": null}, "bursts_max_over_2500ms": 0, "bursts_max_over_2500ms_no_cdb": 0, "bursts_drain_over_250ms_no_cdb": 0, "wd_stalls": 0, "wd_stalls_cdb_caused": 0, "wd_stall_max_ms": 0, "wd_stall_max_ms_not_cdb_caused": 0, "wd_stall_max_ms_not_cdb_overlap": 0, "wd_stalls_during_keys": 0, "wd_stall_max_ms_during_keys_not_cdb_caused": 0, "wd_stalls_not_starting_in_burst": 0, "wd_stall_ms_list_not_cdb_caused": []}
+pacing-cur {"runs": 20, "keys_in_burst": 0, "keys_outside_burst": 4800, "slow_keys_gt500": 20, "slow_keys_gt500_in_burst": 0, "slow_keys_gt500_outside_burst": 20, "slow_keys_gt500_outside_burst_no_cdb": 0, "slow_keys_gt500_slow_before_any_cdb": 11, "slow_keys_gt500_slow_before_any_cdb_outside_burst": 11, "slow_keys_largest_stage_hist": {"outside post->key_msg": 16, "outside pty_output->frame_update": 4}, "keys_pooled_in_burst": {"n": 0, "median": null, "p95": null, "max": null}, "keys_pooled_outside_burst": {"n": 4800, "median": 9.17, "p95": 16.8, "max": 2358.81}, "keys_pooled_in_burst_no_cdb": {"n": 0, "median": null, "p95": null, "max": null}, "keys_pooled_outside_burst_no_cdb": {"n": 4753, "median": 9.11, "p95": 16.66, "max": 50.01}, "keys_pooled_1s_after_burst": {"n": 0, "median": null, "p95": null, "max": null}, "run_max_display_ms": [17.1, 18.1, 19.8, 20.3, 21.4, 21.9, 22.4, 23.8, 24.1, 24.8, 24.9, 25.5, 25.7, 26.2, 26.4, 27.8, 27.9, 30.6, 30.7, 2358.8], "run_p95_display_ms": {"n": 20, "median": 16.63, "p95": 17.14, "max": 1183.56}, "run_median_display_ms": {"n": 20, "median": 9.19, "p95": 10.0, "max": 10.06}, "swaps_per_key": {"n": 20, "median": 1.02, "p95": 1.02, "max": 1.03}, "cpu_busy_pct": {"n": 20, "median": 14.75, "p95": 24.3, "max": 26.4}, "bursts_with_keys": 0, "per_burst_max_ms": {"n": 0, "median": null, "p95": null, "max": null}, "per_burst_max_ms_no_cdb": {"n": 0, "median": null, "p95": null, "max": null}, "per_burst_drain_after_end_ms": {"n": 0, "median": null, "p95": null, "max": null}, "per_burst_drain_after_end_ms_no_cdb": {"n": 0, "median": null, "p95": null, "max": null}, "bursts_max_over_2500ms": 0, "bursts_max_over_2500ms_no_cdb": 0, "bursts_drain_over_250ms_no_cdb": 0, "wd_stalls": 4, "wd_stalls_cdb_caused": 2, "wd_stall_max_ms": 1946.0, "wd_stall_max_ms_not_cdb_caused": 1946.0, "wd_stall_max_ms_not_cdb_overlap": 521.0, "wd_stalls_during_keys": 3, "wd_stall_max_ms_during_keys_not_cdb_caused": 1946.0, "wd_stalls_not_starting_in_burst": 2, "wd_stall_ms_list_not_cdb_caused": [1946.0, 521.0]}
