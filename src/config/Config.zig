@@ -1265,6 +1265,11 @@ command: ?Command = null,
 ///     shell integration with a `-e`-executed command, you must either
 ///     name your binary appropriately or source the shell integration script
 ///     manually.
+///
+/// `-e` wins over a file `config-file` names, which is read after the
+/// command line: the command and the settings above are applied again once
+/// every config file has been read, with or without a theme. An `-e` with
+/// nothing after it is refused and changes nothing.
 @"initial-command": ?Command = null,
 
 /// Controls when command finished notifications are sent. There are
@@ -3777,6 +3782,13 @@ _default_profile_file: ?[:0]const u8 = null,
 _command_cli: ?[:0]const u8 = null,
 _initial_command_cli: ?[:0]const u8 = null,
 
+/// The command `-e` was given on the command line, word by word, when the
+/// parse took it: `finalize` applies it and the settings `-e` implies again
+/// (`finalizeECommand`), so `-e` wins over a file `config-file` names (read
+/// after the command line) whether or not a theme replays the log. Null for
+/// no `-e`, and for an `-e` refused for want of a command.
+_e_command: ?[]const [:0]const u8 = null,
+
 /// `--elevated-profile-env=KEY=VALUE` on the command line, which
 /// `new_window_elevated:user:<id>` passes for each of the profile's
 /// variables. `finalize` puts them over `env` once every config file has
@@ -5439,6 +5451,29 @@ fn finalizeCliLaunch(self: *Config) Allocator.Error!void {
         }
     }
     if (self._initial_command_cli) |value| _ = try self.applyCliValue("initial-command", value);
+    self.finalizeECommand();
+}
+
+/// Apply `-e`'s command (`_e_command`) again, over the files read after the
+/// command line. A replay with `-e` last (a theme's, a new conditional
+/// state's) has already given these values, and this gives them again.
+fn finalizeECommand(self: *Config) void {
+    const command = self._e_command orelse return;
+    self.applyECommand(command);
+}
+
+/// What `-e` with `command` sets: the command, and the settings it implies
+/// (see `initial-command`). The parse and `finalizeECommand` both apply it
+/// here, so both give the same values.
+fn applyECommand(self: *Config, command: []const [:0]const u8) void {
+    self.@"initial-command" = .{ .direct = command };
+    self.@"single-instance" = .false;
+    self.@"gtk-single-instance" = .false;
+    self.@"quit-after-last-window-closed" = true;
+    self.@"quit-after-last-window-closed-delay" = null;
+    if (self.@"shell-integration" != .none) {
+        self.@"shell-integration" = .detect;
+    }
 }
 
 /// The value of `arg` when it is `--<key>=<value>` and the field parse takes
@@ -5966,6 +6001,67 @@ test "a refused --command= does not claim a config file's command as the command
         try testing.expectEqualStrings("other.exe", cfg.command.?.shell);
         try testing.expectEqual(@as(usize, 1), testDefaultProfileProblems(&cfg));
     }
+}
+
+test "-e wins over a file read after the command line, as a replay with -e last does" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    // `testLoadDefaultProfile` reads the include after the command line, as
+    // a file `config-file` names is read, and sets no theme, so nothing
+    // replays the log.
+    const Case = struct { include: []const u8, shell_integration: ShellIntegration };
+    for ([_]Case{
+        .{
+            .include = "initial-command = pwsh.exe\nquit-after-last-window-closed = false\n" ++
+                "quit-after-last-window-closed-delay = 5s\nshell-integration = fish\n",
+            .shell_integration = .detect,
+        },
+        // `-e` leaves `none` as it is, as it does when it comes last.
+        .{ .include = "shell-integration = none\n", .shell_integration = .none },
+    }) |case| {
+        var cfg = try testLoadDefaultProfile(alloc, "", &.{ "-e", "cmd.exe" }, case.include);
+        defer cfg.deinit();
+        const initial = cfg.@"initial-command".?;
+        try testing.expect(initial == .direct);
+        try testing.expectEqualStrings("cmd.exe", initial.direct[0]);
+        try testing.expect(cfg.@"quit-after-last-window-closed");
+        try testing.expect(cfg.@"quit-after-last-window-closed-delay" == null);
+        try testing.expectEqual(case.shell_integration, cfg.@"shell-integration");
+    }
+    // An `-e` refused for want of a command changes nothing: the file's
+    // values stand.
+    {
+        var cfg = try testLoadDefaultProfile(alloc, "", &.{"-e"}, "initial-command = pwsh.exe\nquit-after-last-window-closed = false\n");
+        defer cfg.deinit();
+        try testing.expect(cfg._e_command == null);
+        try testing.expectEqualStrings("pwsh.exe", cfg.@"initial-command".?.shell);
+        try testing.expect(!cfg.@"quit-after-last-window-closed");
+    }
+}
+
+test "-e still wins in a copy of the config, finalized again" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    var cfg = try testLoadDefaultProfile(alloc, "", &.{ "-e", "cmd.exe" }, "");
+    defer cfg.deinit();
+    // A deep copy keeps the command `-e` was given, and finalized again over
+    // a later value, as a reload's would be, `-e` wins again.
+    var copy = try cfg.clone(alloc);
+    defer copy.deinit();
+    try testing.expectEqualStrings("cmd.exe", copy._e_command.?[0]);
+    copy.@"quit-after-last-window-closed" = false;
+    copy.@"initial-command" = null;
+    try copy.finalize();
+    try testing.expect(copy.@"quit-after-last-window-closed");
+    try testing.expect(copy.@"initial-command".? == .direct);
+    try testing.expectEqualStrings("cmd.exe", copy.@"initial-command".?.direct[0]);
+    // A shallow copy, as a new window's (`apprt.surface.newConfig`), holds
+    // `-e`'s values and its command.
+    var shallow = cfg.shallowClone(alloc);
+    defer shallow.deinit();
+    try testing.expect(shallow.@"quit-after-last-window-closed");
+    try testing.expectEqualStrings("cmd.exe", shallow.@"initial-command".?.direct[0]);
+    try testing.expectEqualStrings("cmd.exe", shallow._e_command.?[0]);
 }
 
 test "a refused --initial-command= leaves -e its place" {
@@ -7251,15 +7347,9 @@ pub fn parseManuallyHook(
             return false;
         }
 
-        // See "command" docs for the implied configurations and why.
-        self.@"initial-command" = .{ .direct = command.items };
-        self.@"single-instance" = .false;
-        self.@"gtk-single-instance" = .false;
-        self.@"quit-after-last-window-closed" = true;
-        self.@"quit-after-last-window-closed-delay" = null;
-        if (self.@"shell-integration" != .none) {
-            self.@"shell-integration" = .detect;
-        }
+        // See "initial-command" docs for the implied configurations and why.
+        self._e_command = command.items;
+        self.applyECommand(command.items);
 
         // Do not continue, we consumed everything.
         return false;
@@ -7495,6 +7585,11 @@ pub fn clone(
     if (self._default_profile_file) |value| result._default_profile_file = try alloc_arena.dupeZ(u8, value);
     if (self._command_cli) |value| result._command_cli = try alloc_arena.dupeZ(u8, value);
     if (self._initial_command_cli) |value| result._initial_command_cli = try alloc_arena.dupeZ(u8, value);
+    if (self._e_command) |words| {
+        const copy = try alloc_arena.alloc([:0]const u8, words.len);
+        for (words, copy) |word, *slot| slot.* = try alloc_arena.dupeZ(u8, word);
+        result._e_command = copy;
+    }
     if (self._default_profile) |profile| result._default_profile = try profile.clone(alloc_arena);
     result._default_profile_failure = self._default_profile_failure;
     if (self._undecodable_file) |skipped| result._undecodable_file = try alloc_arena.dupeZ(u8, skipped);

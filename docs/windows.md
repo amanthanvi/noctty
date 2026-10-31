@@ -957,9 +957,10 @@ forwarding). On the command line, `default-profile`, `command` and
 `config-file`, which is otherwise read after the command line. A command-line
 `command` or `initial-command` that is refused (`--command=direct:`) is
 reported and ignored, so the last value the command line gave that is
-accepted is the one that wins. The exception is `-e`: an `initial-command`
-line in a file included with `config-file` still replaces `-e` when the
-config is first loaded. A launch that names a
+accepted is the one that wins. `-e` wins over those lines too, with or
+without a theme: its command and the settings it implies are applied again
+once every config file has been read. An `-e` with nothing after it is
+refused and changes nothing. A launch that names a
 profile with `--default-profile` (a jump-list entry for a user profile)
 starts without the saved session, as `-e` does.
 
