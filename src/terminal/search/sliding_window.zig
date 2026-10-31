@@ -326,7 +326,7 @@ pub const SlidingWindow = struct {
 
         // Our data offset now moves to needle.len - 1 from the end so
         // that we can handle the overlap case.
-        self.data_offset = self.data.len() - self.needle.len + 1;
+        self.data_offset = self.data.len() - (self.needle.len - 1);
 
         self.assertIntegrity();
         return null;
@@ -1585,6 +1585,40 @@ test "SlidingWindow literal no match keeps whole pages and moves the offset" {
     try testing.expect(w.next() == null);
     try testing.expectEqual(data_len, w.data.len());
     try testing.expectEqual(data_len - w.needle.len + 1, w.data_offset);
+}
+
+test "SlidingWindow literal no match keeps exactly needle.len - 1 bytes" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var w: SlidingWindow = try .init(alloc, .forward, "nope!");
+    defer w.deinit();
+
+    var s = try Screen.init(alloc, .{ .cols = 80, .rows = 24, .max_scrollback = 1000 });
+    defer s.deinit();
+
+    // A full first page with no match, then a page holding only "zzz".
+    const first_page_rows = s.pages.pages.first.?.capacity().rows;
+    for (0..first_page_rows - 1) |_| try s.testWriteString("\n");
+    for (0..s.pages.cols) |_| try s.testWriteString("x");
+    try s.testWriteString("\n");
+    try testing.expect(s.pages.pages.first != s.pages.pages.last);
+    try s.testWriteString("zzz");
+
+    const node: *PageList.List.Node = s.pages.pages.first.?;
+    _ = try w.append(node);
+    _ = try w.append(node.next.?);
+    {
+        var it = w.meta.iterator(.reverse);
+        try testing.expectEqual(w.needle.len - 1, it.next().?.cell_map.items.len);
+    }
+
+    // The prune drops the first page and keeps the last page's bytes,
+    // exactly the `needle.len - 1` an overlap needs.
+    try testing.expect(w.next() == null);
+    try testing.expectEqual(1, w.meta.len());
+    try testing.expectEqual(w.needle.len - 1, w.data.len());
+    try testing.expectEqual(0, w.data_offset);
 }
 
 test "SlidingWindow single append no match" {
