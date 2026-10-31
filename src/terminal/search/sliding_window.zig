@@ -207,15 +207,12 @@ pub const SlidingWindow = struct {
     /// reserves what a scan needs. A pattern that fails at run time finds
     /// nothing (see `Pattern.failure`).
     pub fn next(self: *SlidingWindow) ?FlattenedHighlight {
-        const using_regex_engine = self.pattern != null;
-        const slices = slices: {
-            const data_len = self.data.len();
-            if (data_len == 0) return null;
+        if (self.pattern) |pattern| return self.nextPattern(pattern);
 
-            // Literal matching needs at least needle.len bytes. Regex matching
-            // may match shorter than its pattern source, so it cannot use this
-            // literal fast-fail path.
-            if (!using_regex_engine and data_len < self.needle.len) return null;
+        const slices = slices: {
+            // If we have less data then the needle then we can't possibly match
+            const data_len = self.data.len();
+            if (data_len < self.needle.len) return null;
 
             break :slices self.data.getPtrSlice(
                 self.data_offset,
@@ -223,68 +220,130 @@ pub const SlidingWindow = struct {
             );
         };
 
-        if (self.pattern) |pattern| {
-            if (self.patternMatch(pattern, slices[0], slices[1])) |match| {
-                return self.highlight(match.start, match.len);
-            }
-        } else {
-            // Search the first slice for the needle.
-            if (std.ascii.indexOfIgnoreCase(slices[0], self.needle)) |idx| {
-                return self.highlight(
-                    idx,
-                    self.needle.len,
-                );
-            }
-
-            // Search the overlap buffer for the needle.
-            if (slices[0].len > 0 and slices[1].len > 0) overlap: {
-                // Get up to needle.len - 1 bytes from each side (as much as
-                // we can) and store it in the overlap buffer.
-                const prefix: []const u8 = prefix: {
-                    const len = @min(slices[0].len, self.needle.len - 1);
-                    const idx = slices[0].len - len;
-                    break :prefix slices[0][idx..];
-                };
-                const suffix: []const u8 = suffix: {
-                    const len = @min(slices[1].len, self.needle.len - 1);
-                    break :suffix slices[1][0..len];
-                };
-                const overlap_len = prefix.len + suffix.len;
-                assert(overlap_len <= self.overlap_buf.len);
-                @memcpy(self.overlap_buf[0..prefix.len], prefix);
-                @memcpy(self.overlap_buf[prefix.len..overlap_len], suffix);
-
-                // Search the overlap
-                const idx = std.ascii.indexOfIgnoreCase(
-                    self.overlap_buf[0..overlap_len],
-                    self.needle,
-                ) orelse break :overlap;
-
-                // We found a match in the overlap buffer. We need to map the
-                // index back to the data buffer in order to get our selection.
-                return self.highlight(
-                    slices[0].len - prefix.len + idx,
-                    self.needle.len,
-                );
-            }
-
-            // Search the last slice for the needle.
-            if (std.ascii.indexOfIgnoreCase(slices[1], self.needle)) |idx| {
-                return self.highlight(
-                    slices[0].len + idx,
-                    self.needle.len,
-                );
-            }
+        // Search the first slice for the needle.
+        if (std.ascii.indexOfIgnoreCase(slices[0], self.needle)) |idx| {
+            return self.highlight(
+                idx,
+                self.needle.len,
+            );
         }
 
-        const retain_len = if (self.pattern) |p|
-            p.retainLen()
-        else if (self.needle.len == 0)
-            0
-        else
-            self.needle.len - 1;
+        // Search the overlap buffer for the needle.
+        if (slices[0].len > 0 and slices[1].len > 0) overlap: {
+            // Get up to needle.len - 1 bytes from each side (as much as
+            // we can) and store it in the overlap buffer.
+            const prefix: []const u8 = prefix: {
+                const len = @min(slices[0].len, self.needle.len - 1);
+                const idx = slices[0].len - len;
+                break :prefix slices[0][idx..];
+            };
+            const suffix: []const u8 = suffix: {
+                const len = @min(slices[1].len, self.needle.len - 1);
+                break :suffix slices[1][0..len];
+            };
+            const overlap_len = prefix.len + suffix.len;
+            assert(overlap_len <= self.overlap_buf.len);
+            @memcpy(self.overlap_buf[0..prefix.len], prefix);
+            @memcpy(self.overlap_buf[prefix.len..overlap_len], suffix);
+
+            // Search the overlap
+            const idx = std.ascii.indexOfIgnoreCase(
+                self.overlap_buf[0..overlap_len],
+                self.needle,
+            ) orelse break :overlap;
+
+            // We found a match in the overlap buffer. We need to map the
+            // index back to the data buffer in order to get our selection.
+            return self.highlight(
+                slices[0].len - prefix.len + idx,
+                self.needle.len,
+            );
+        }
+
+        // Search the last slice for the needle.
+        if (std.ascii.indexOfIgnoreCase(slices[1], self.needle)) |idx| {
+            return self.highlight(
+                slices[0].len + idx,
+                self.needle.len,
+            );
+        }
+
+        // Special case 1-lengthed needles to delete the entire buffer.
+        if (self.needle.len == 1) {
+            self.clearAndRetainCapacity();
+            self.assertIntegrity();
+            return null;
+        }
+
+        // No match. We keep `needle.len - 1` bytes available to
+        // handle the future overlap case.
+        prune: {
+            var meta_it = self.meta.iterator(.reverse);
+            var saved: usize = 0;
+            while (meta_it.next()) |meta| {
+                const needed = self.needle.len - 1 - saved;
+                if (meta.cell_map.items.len >= needed) {
+                    // We save up to this meta. We set our data offset
+                    // to exactly where it needs to be to continue
+                    // searching.
+                    self.data_offset = meta.cell_map.items.len - needed;
+                    break;
+                }
+
+                saved += meta.cell_map.items.len;
+            } else {
+                // If we exited the while loop naturally then we
+                // never got the amount we needed and so there is
+                // nothing to prune.
+                assert(saved < self.needle.len - 1);
+                break :prune;
+            }
+
+            const prune_count = self.meta.len() - meta_it.idx;
+            if (prune_count == 0) {
+                // This can happen if we need to save up to the first
+                // meta value to retain our window.
+                break :prune;
+            }
+
+            // We can now delete all the metas up to but NOT including
+            // the meta we found through meta_it.
+            meta_it = self.meta.iterator(.forward);
+            var prune_data_len: usize = 0;
+            for (0..prune_count) |_| {
+                const meta = meta_it.next().?;
+                prune_data_len += meta.cell_map.items.len;
+                meta.deinit(self.alloc);
+            }
+            self.meta.deleteOldest(prune_count);
+            self.data.deleteOldest(prune_data_len);
+        }
+
+        // Our data offset now moves to needle.len - 1 from the end so
+        // that we can handle the overlap case.
+        self.data_offset = self.data.len() - self.needle.len + 1;
+
+        self.assertIntegrity();
+        return null;
+    }
+
+    /// `next` for a window with a pattern. A regex can match fewer bytes
+    /// than its source, so it has no fast fail on short data, and a scan
+    /// that finds nothing keeps the suffix `Pattern.retainLen` asks for.
+    fn nextPattern(self: *SlidingWindow, pattern: *Pattern) ?FlattenedHighlight {
+        const data_len = self.data.len();
+        if (data_len == 0) return null;
+
+        const slices = self.data.getPtrSlice(
+            self.data_offset,
+            data_len - self.data_offset,
+        );
+        if (self.patternMatch(pattern, slices[0], slices[1])) |match| {
+            return self.highlight(match.start, match.len);
+        }
 
         // Special case zero-overlap searches to delete the entire buffer.
+        const retain_len = pattern.retainLen();
         if (retain_len == 0) {
             self.clearAndRetainCapacity();
             self.assertIntegrity();
@@ -1481,6 +1540,27 @@ test "SlidingWindow single append single char" {
     }
     try testing.expect(w.next() == null);
     try testing.expect(w.next() == null);
+}
+
+test "SlidingWindow literal no match keeps whole pages and moves the offset" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var w: SlidingWindow = try .init(alloc, .forward, "nope!");
+    defer w.deinit();
+
+    var s = try Screen.init(alloc, .{ .cols = 80, .rows = 24, .max_scrollback = 0 });
+    defer s.deinit();
+    try s.testWriteString("hello. boo! hello. boo!");
+    _ = try w.append(s.pages.pages.first.?);
+    const data_len = w.data.len();
+
+    // Upstream's prune drops whole pages only, and the offset keeps the
+    // `needle.len - 1` bytes a match that continues into the next page
+    // needs.
+    try testing.expect(w.next() == null);
+    try testing.expectEqual(data_len, w.data.len());
+    try testing.expectEqual(data_len - w.needle.len + 1, w.data_offset);
 }
 
 test "SlidingWindow single append no match" {
