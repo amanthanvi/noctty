@@ -1741,8 +1741,9 @@ line sets the same key, that value still wins, and Settings says so, naming
 each such setting with the line that wins: "overrides font-size (line 2 of
 included.conf)". The theme is read before the config file, so a value the
 config file sets wins over the theme's. When noctty's command line names a
-Default profile (a jump-list entry does), Settings shows and saves the config
-files' value, and its label names no line.
+Default profile (a jump-list entry does), that choice is for that process
+only: Settings shows and saves the config files' value, and its label names
+the file and line that set that value, if any.
 
 **Search settings** at the right of the Settings header (Ctrl+F from
 anywhere in the window) narrows every page to the settings whose name,
@@ -1774,8 +1775,10 @@ the theme's file) or the command line, and says when a line of the config
 file sets the key too and does not take effect (for a key whose lines can add
 up, such as `font-family` or `keybind`, only that the file has a line for it
 too, since a later line can clear or replace it). A command
-line's `command`, `initial-command` or `default-profile` wins over a file
-read after it, and is named as the command line's. A value no line sets but
+line's `command` or `initial-command` wins over a file read after it, and is
+named as the command line's. A command line's `default-profile` is for that
+process only: the page shows the config files' value, as the Shell page does,
+and names the file and line that set it. A value no line sets but
 noctty worked out when it read the config (`click-repeat-interval`, from
 Windows' double-click time) says that. The file is read
 for this only from a local drive, as UTF-8 or as UTF-16 with a byte order
