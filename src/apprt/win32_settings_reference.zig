@@ -565,9 +565,13 @@ pub const Model = struct {
 
     /// For a value from elsewhere: the line of this file that it overrides,
     /// or, for a key whose lines can add up, only that this file has one too.
-    /// Whether such a line still counts depends on the lines after it (an
-    /// empty value clears a list; a later `keybind` for the same keys
-    /// replaces it), which the replay log does not say.
+    /// Whether such a line still counts depends on the lines after it, which
+    /// the replay log does not say. An empty value resets by each field's own
+    /// rule (`font-family =` clears the families; `keybind =` and
+    /// `command-palette-entry =` put the defaults back, and `keybind = clear`
+    /// clears every binding), a command-line `font-family` replaces the
+    /// families before it, and a later `keybind` for the same keys replaces
+    /// the entry.
     fn writeOverridden(self: *const Model, writer: *std.Io.Writer, row: *const Row) !void {
         const path = self.file orelse return;
         if (!self.lines_known or row.lines.count == 0) return;
@@ -586,7 +590,7 @@ pub fn savedOrigin(config: *const Config, key: Key, defaults: ?*const Config) or
     return origin.of(config, key, defaults);
 }
 
-/// Whether `key`'s lines add up rather than replace one another: a list
+/// Whether `key`'s lines can add up rather than replace one another: a list
 /// (`font-family`, `config-file`, `link`), or a map that each line adds an
 /// entry to (`keybind`, `palette`, `key-remap`, the `profile-*` keys). Packed
 /// flags (`app-notifications`) start from the default on every line, and
@@ -990,6 +994,74 @@ test "settings reference does not claim a reset accumulating assignment still co
         var writer: std.Io.Writer = .fixed(&buf);
         try model.writeLocation(&writer, &model.rows[index(case.key)]);
         try testing.expectEqualStrings(try std.fmt.bufPrint(&expected, "Set on line {d} of {s}, a file config-file names. {s} also has a setting for it, on line {d}.", .{ case.included_line, included_path, path, case.line }), writer.buffered());
+    }
+}
+
+test "settings reference default-profile's shown value and location, with and without a command-line override" {
+    const alloc = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(.{ .sub_path = "included.conf", .data = "default-profile = pwsh.exe\n" });
+    try tmp.dir.writeFile(.{ .sub_path = "config", .data = "\n" });
+    const path = try tmp.dir.realpathAlloc(alloc, "config");
+    defer alloc.free(path);
+    const included_path = try tmp.dir.realpathAlloc(alloc, "included.conf");
+    defer alloc.free(included_path);
+
+    const Where = union(enum) {
+        /// Line 1 of the included file, and the line of the config file it
+        /// overrides, if any.
+        included: ?usize,
+        /// A line of the config file.
+        target: usize,
+        not_set,
+    };
+    const Case = struct { text: []const u8, cli: bool, value: ?[]const u8, where: Where };
+    for ([_]Case{
+        // `config-file` after the config file's own line, and before it: the
+        // included file is read after the whole config file either way.
+        .{ .text = "font-size = 12\ndefault-profile = cmd.exe\nconfig-file = included.conf\n", .cli = true, .value = "pwsh.exe", .where = .{ .included = 2 } },
+        .{ .text = "config-file = included.conf\ndefault-profile = cmd.exe\n", .cli = true, .value = "pwsh.exe", .where = .{ .included = 2 } },
+        // The same without the command line's value.
+        .{ .text = "config-file = included.conf\ndefault-profile = cmd.exe\n", .cli = false, .value = "pwsh.exe", .where = .{ .included = 2 } },
+        // Only the included file sets it.
+        .{ .text = "config-file = included.conf\n", .cli = true, .value = "pwsh.exe", .where = .{ .included = null } },
+        // No file sets it.
+        .{ .text = "font-size = 12\n", .cli = true, .value = null, .where = .not_set },
+        // An optional include that is missing sets nothing.
+        .{ .text = "default-profile = cmd.exe\nconfig-file = ?missing.conf\n", .cli = true, .value = "cmd.exe", .where = .{ .target = 1 } },
+    }, 0..) |case, n| {
+        errdefer std.debug.print("settings reference default-profile case {d}\n", .{n});
+        try tmp.dir.writeFile(.{ .sub_path = "config", .data = case.text });
+        var current = try Config.default(alloc);
+        defer current.deinit();
+        try current.loadFile(alloc, path);
+        const cli_args: []const []const u8 = if (case.cli) &.{"--default-profile=user:py312"} else &.{};
+        var args: TestArgs = .{ .list = cli_args };
+        try current.loadIter(alloc, &args);
+        try current.loadRecursiveFiles(alloc);
+        try current.finalize();
+        // The value Settings shows (`useSavedValues`).
+        const shown = current.defaultProfileFromFiles();
+        if (case.value) |want| try testing.expectEqualStrings(want, shown.?) else try testing.expect(shown == null);
+
+        const extra: [key_count][]const u8 = @splat("");
+        var model: Model = .{};
+        defer model.deinit();
+        try model.build(alloc, &current, null, path, .{ .bytes = case.text }, &extra);
+        var buf: [1024]u8 = undefined;
+        var expected: [1024]u8 = undefined;
+        var writer: std.Io.Writer = .fixed(&buf);
+        try model.writeLocation(&writer, &model.rows[index(.@"default-profile")]);
+        const want = switch (case.where) {
+            .included => |overridden| if (overridden) |line|
+                try std.fmt.bufPrint(&expected, "Set on line 1 of {s}, a file config-file names. Line {d} of {s} sets it too, and does not take effect.", .{ included_path, line, path })
+            else
+                try std.fmt.bufPrint(&expected, "Set on line 1 of {s}, a file config-file names.", .{included_path}),
+            .target => |line| try std.fmt.bufPrint(&expected, "Set on line {d} of {s}.", .{ line, path }),
+            .not_set => try std.fmt.bufPrint(&expected, "Not set in {s}.", .{path}),
+        };
+        try testing.expectEqualStrings(want, writer.buffered());
     }
 }
 

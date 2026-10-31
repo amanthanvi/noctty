@@ -84,11 +84,12 @@ pub fn of(config: *const Config, key: Key, defaults: ?*const Config) Origin {
     return scan(config, key, defaults, false);
 }
 
-/// Where the config files' value of `key` came from: as `of`, with the
-/// command line's arguments left out. For a value the files give but the
-/// command line overrides in this process, which is the value Settings shows
-/// for `default-profile` (`Config.defaultProfileFromFiles`). `.default` when
-/// no file set the key.
+/// Where the config files' value of `key` came from: as `of`, counting only
+/// lines of files (the command line's arguments, and any step the log has no
+/// place for, are left out). For a value the files give but the command line
+/// overrides in this process, which is the value Settings shows for
+/// `default-profile` (`Config.defaultProfileFromFiles`). `.default` when no
+/// file set the key.
 pub fn ofFiles(config: *const Config, key: Key) Origin {
     return scan(config, key, null, true);
 }
@@ -99,7 +100,7 @@ fn scan(config: *const Config, key: Key, defaults: ?*const Config, comptime file
     var last_cli: ?Origin = null;
     const steps = config._replay_steps.items;
     for (steps, 0..) |step, i| switch (step) {
-        .arg => |arg| if (!(files_only and arg.location == .cli) and stepSets(config, arg.value, arg.location, key)) {
+        .arg => |arg| if ((!files_only or arg.location == .file) and stepSets(config, arg.value, arg.location, key)) {
             last = place(config, arg.location, false);
             if (arg.location == .cli) last_cli = last;
         },
@@ -109,7 +110,8 @@ fn scan(config: *const Config, key: Key, defaults: ?*const Config, comptime file
                 if (cond.key == .theme) theme = true;
                 if (!config._conditional_state.match(cond)) break false;
             } else true;
-            if (applies and stepSets(config, arg.arg, arg.location, key)) last = place(config, arg.location, theme);
+            if (applies and (!files_only or arg.location == .file) and stepSets(config, arg.arg, arg.location, key))
+                last = place(config, arg.location, theme);
         },
         // The arguments after `-e` are its command's, not settings. An `-e`
         // with no command after it was refused (the loader noted "missing
@@ -481,6 +483,193 @@ test "origin: rejected -e does not change origins" {
     try std.testing.expect(!cfg.@"quit-after-last-window-closed");
     try expectFile(of(&cfg, .@"quit-after-last-window-closed", null), path, 1, .config);
     try std.testing.expect(of(&cfg, .@"initial-command", null) == .default);
+}
+
+/// Command-line arguments with no places: `cli.Location.fromIter` gives
+/// `.none` for an iterator without a `location` method.
+const PlainArgs = struct {
+    list: []const []const u8,
+    index: usize = 0,
+
+    pub fn next(self: *PlainArgs) ?[]const u8 {
+        if (self.index >= self.list.len) return null;
+        defer self.index += 1;
+        return self.list[self.index];
+    }
+};
+
+test "origin: ofFiles counts only lines of files" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(.{ .sub_path = "config", .data = "font-size = 13\n" });
+    const path = try tmp.dir.realpathAlloc(alloc, "config");
+    defer alloc.free(path);
+
+    // A step with no place after a file's line: the file's line stays the
+    // files' origin, though `of` says the value came from somewhere unplaced.
+    var cfg = try Config.default(alloc);
+    defer cfg.deinit();
+    try cfg.loadFile(alloc, path);
+    var args: PlainArgs = .{ .list = &.{"--font-size=15"} };
+    try cfg.loadIter(alloc, &args);
+    try cfg.finalize();
+    try std.testing.expectEqual(@as(f32, 15), cfg.@"font-size");
+    try std.testing.expect(of(&cfg, .@"font-size", null) == .unplaced);
+    try expectFile(ofFiles(&cfg, .@"font-size"), path, 1, .config);
+
+    // With no file line, no file is the origin.
+    var bare = try Config.default(alloc);
+    defer bare.deinit();
+    var more: PlainArgs = .{ .list = &.{"--font-size=15"} };
+    try bare.loadIter(alloc, &more);
+    try bare.finalize();
+    try std.testing.expect(ofFiles(&bare, .@"font-size") == .default);
+}
+
+/// Load `path` (holding `text`), the command line `args`, and the files
+/// `config-file` names, and finalize, as the app does.
+fn loadWithArgs(alloc: std.mem.Allocator, dir: std.fs.Dir, path: []const u8, text: []const u8, args: []const []const u8) !Config {
+    try dir.writeFile(.{ .sub_path = "config", .data = text });
+    var cfg = try Config.default(alloc);
+    errdefer cfg.deinit();
+    try cfg.loadFile(alloc, path);
+    var it: TestArgs = .{ .list = args };
+    try cfg.loadIter(alloc, &it);
+    try cfg.loadRecursiveFiles(alloc);
+    try cfg.finalize();
+    return cfg;
+}
+
+/// That `cfg` holds `-e cmd.exe`'s values, and names the `-e` at `index` as
+/// where they came from.
+fn expectE(cfg: *const Config, index: usize) !void {
+    const initial = cfg.@"initial-command" orelse return error.TestExpectedEqual;
+    try std.testing.expect(initial == .direct);
+    try std.testing.expectEqualStrings("cmd.exe", initial.direct[0]);
+    try std.testing.expect(cfg.@"quit-after-last-window-closed");
+    try std.testing.expectEqual(Origin{ .cli = index }, of(cfg, .@"initial-command", null));
+    try std.testing.expectEqual(Origin{ .cli = index }, of(cfg, .@"quit-after-last-window-closed", null));
+}
+
+test "origin: -e wins over an included file with or without a theme, and is named as the command line's" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(.{ .sub_path = "x.conf", .data = "quit-after-last-window-closed = false\ninitial-command = pwsh.exe\n" });
+    try tmp.dir.writeFile(.{ .sub_path = "mytheme", .data = "background = #101010\n" });
+    try tmp.dir.writeFile(.{ .sub_path = "config", .data = "\n" });
+    const path = try tmp.dir.realpathAlloc(alloc, "config");
+    defer alloc.free(path);
+    const included_path = try tmp.dir.realpathAlloc(alloc, "x.conf");
+    defer alloc.free(included_path);
+    const theme_path = try tmp.dir.realpathAlloc(alloc, "mytheme");
+    defer alloc.free(theme_path);
+    const themed = try std.fmt.allocPrint(alloc, "config-file = x.conf\ntheme = {s}\n", .{theme_path});
+    defer alloc.free(themed);
+    const config_file_arg = try std.fmt.allocPrint(alloc, "--config-file={s}", .{included_path});
+    defer alloc.free(config_file_arg);
+
+    // No theme: nothing replays the log, and before `finalize` applied `-e`
+    // again the include's values won here.
+    {
+        var cfg = try loadWithArgs(alloc, tmp.dir, path, "config-file = x.conf\n", &.{ "-e", "cmd.exe" });
+        defer cfg.deinit();
+        try expectE(&cfg, 0);
+    }
+    // A theme replays the log with `-e` last, so `-e` won here before the
+    // loader change too: the rule is the same with or without a theme, and
+    // an origin that let includes win would fail here.
+    {
+        var cfg = try loadWithArgs(alloc, tmp.dir, path, themed, &.{ "-e", "cmd.exe" });
+        defer cfg.deinit();
+        try expectE(&cfg, 0);
+    }
+    // The include named on the command line, as a reload with
+    // `--config-file` reads it.
+    {
+        var cfg = try loadWithArgs(alloc, tmp.dir, path, "font-size = 12\n", &.{ config_file_arg, "-e", "cmd.exe" });
+        defer cfg.deinit();
+        try expectE(&cfg, 1);
+    }
+    // An `-e` refused for want of a command: the include's values and
+    // origins stand.
+    {
+        var cfg = try loadWithArgs(alloc, tmp.dir, path, "config-file = x.conf\n", &.{"-e"});
+        defer cfg.deinit();
+        try std.testing.expect(!cfg.@"quit-after-last-window-closed");
+        try std.testing.expectEqualStrings("pwsh.exe", cfg.@"initial-command".?.shell);
+        try expectFile(of(&cfg, .@"quit-after-last-window-closed", null), included_path, 1, .included);
+        try expectFile(of(&cfg, .@"initial-command", null), included_path, 2, .included);
+    }
+}
+
+test "origin: after a light/dark flip, -e's values and their origin still agree" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(.{ .sub_path = "x.conf", .data = "quit-after-last-window-closed = false\ninitial-command = pwsh.exe\n" });
+    try tmp.dir.writeFile(.{ .sub_path = "config", .data = "\n" });
+    const path = try tmp.dir.realpathAlloc(alloc, "config");
+    defer alloc.free(path);
+
+    var cfg = try loadWithArgs(alloc, tmp.dir, path, "config-file = x.conf\n", &.{ "-e", "cmd.exe" });
+    defer cfg.deinit();
+    try expectE(&cfg, 0);
+    // A new conditional state replays the log into a new config and
+    // finalizes it.
+    cfg._conditional_set.insert(.theme);
+    var flipped = (try cfg.changeConditionalState(.{ .theme = .dark })).?;
+    defer flipped.deinit();
+    try expectE(&flipped, 0);
+}
+
+test "origin: -e and the command-line settings around it" {
+    const alloc = std.testing.allocator;
+    const Case = struct {
+        args: []const []const u8,
+        /// `initial-command`'s words, or null for none.
+        words: ?[]const []const u8,
+        initial: Origin,
+        /// `command`, when the case sets it.
+        command: ?[]const u8 = null,
+    };
+    for ([_]Case{
+        // An empty word is still a word: `-e` is taken.
+        .{ .args = &.{ "-e", "" }, .words = &.{""}, .initial = .{ .cli = 0 } },
+        // Nothing after `-e`: it is refused.
+        .{ .args = &.{"-e"}, .words = null, .initial = .default },
+        // Everything after `-e` is its command's, a flag and a second `-e`
+        // included.
+        .{ .args = &.{ "-e", "cmd.exe", "--font-size=99" }, .words = &.{ "cmd.exe", "--font-size=99" }, .initial = .{ .cli = 0 } },
+        .{ .args = &.{ "-e", "-e", "cmd.exe" }, .words = &.{ "-e", "cmd.exe" }, .initial = .{ .cli = 0 } },
+        .{ .args = &.{ "-e", "foo.exe", "--initial-command=x.exe" }, .words = &.{ "foo.exe", "--initial-command=x.exe" }, .initial = .{ .cli = 0 } },
+        // `-e` after `--initial-command=` wins over it.
+        .{ .args = &.{ "--initial-command=x.exe", "-e", "foo.exe" }, .words = &.{"foo.exe"}, .initial = .{ .cli = 1 } },
+        // `--command=` and `-e` set different keys, and both stand.
+        .{ .args = &.{ "--command=vim.exe", "-e", "foo.exe" }, .words = &.{"foo.exe"}, .initial = .{ .cli = 1 }, .command = "vim.exe" },
+    }) |case| {
+        errdefer std.debug.print("origin: -e case {d} argument(s), first {s}\n", .{ case.args.len, case.args[0] });
+        var cfg = try Config.default(alloc);
+        defer cfg.deinit();
+        var args: TestArgs = .{ .list = case.args };
+        try cfg.loadIter(alloc, &args);
+        try cfg.finalize();
+        if (case.words) |words| {
+            const initial = cfg.@"initial-command" orelse return error.TestExpectedEqual;
+            try std.testing.expect(initial == .direct);
+            try std.testing.expectEqual(words.len, initial.direct.len);
+            for (words, initial.direct) |want, have| try std.testing.expectEqualStrings(want, have);
+        } else try std.testing.expect(cfg.@"initial-command" == null);
+        try std.testing.expectEqual(case.initial, of(&cfg, .@"initial-command", null));
+        // A setting among `-e`'s words sets nothing.
+        try std.testing.expect(cfg.@"font-size" != 99);
+        try std.testing.expect(of(&cfg, .@"font-size", null) == .default);
+        if (case.command) |command| {
+            try std.testing.expectEqualStrings(command, cfg.command.?.shell);
+            try std.testing.expectEqual(Origin{ .cli = 0 }, of(&cfg, .command, null));
+        }
+    }
 }
 
 test "origin: a value no step set is derived when it differs from the default" {
