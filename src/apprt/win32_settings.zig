@@ -11182,11 +11182,12 @@ const dialog_test = struct {
     /// Every part is read while it lies on the window's monitor. A window
     /// partly on its monitor, with a child in the gap below that monitor
     /// (beside a taller one), has now and then had that child come back black
-    /// from `PrintWindow` in runs beside other test runs, although the child
-    /// had painted and paints its own colours when asked directly
-    /// (`WM_PRINTCLIENT`). So a client area that is not wholly on its monitor
-    /// is moved there a monitor-sized piece at a time, each piece read in
-    /// turn, and the window put back where it was.
+    /// from `PrintWindow` in runs beside other test runs, while the child drew
+    /// its own colours when asked directly (`WM_PRINTCLIENT`). That strongly
+    /// suggests an artifact of capturing off the monitor; the mechanism inside
+    /// Windows is not established. So a client area that is not wholly on its
+    /// monitor is moved there a monitor-sized piece at a time, each piece read
+    /// in turn, and the window put back where it was.
     fn printClient(hwnd: HWND) !Capture {
         return printClientInPieces(hwnd, null);
     }
