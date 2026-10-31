@@ -548,6 +548,14 @@ fn loadWithArgs(alloc: std.mem.Allocator, dir: std.fs.Dir, path: []const u8, tex
     return cfg;
 }
 
+/// `command` when it is a shell command, or a test failure (not a panic) for
+/// none or a direct one.
+fn shellCommand(command: ?Config.Command) ![:0]const u8 {
+    const value = command orelse return error.TestUnexpectedResult;
+    if (value != .shell) return error.TestUnexpectedResult;
+    return value.shell;
+}
+
 /// That `cfg` holds `-e cmd.exe`'s values, and names the `-e` at `index` as
 /// where they came from.
 fn expectE(cfg: *const Config, index: usize) !void {
@@ -605,7 +613,7 @@ test "origin: -e wins over an included file with or without a theme, and is name
         var cfg = try loadWithArgs(alloc, tmp.dir, path, "config-file = x.conf\n", &.{"-e"});
         defer cfg.deinit();
         try std.testing.expect(!cfg.@"quit-after-last-window-closed");
-        try std.testing.expectEqualStrings("pwsh.exe", cfg.@"initial-command".?.shell);
+        try std.testing.expectEqualStrings("pwsh.exe", try shellCommand(cfg.@"initial-command"));
         try expectFile(of(&cfg, .@"quit-after-last-window-closed", null), included_path, 1, .included);
         try expectFile(of(&cfg, .@"initial-command", null), included_path, 2, .included);
     }
@@ -628,7 +636,7 @@ test "origin: a refused -e leaves an accepted --initial-command= the origin, wit
     for ([_][]const u8{ "config-file = x.conf\n", themed }) |text| {
         var cfg = try loadWithArgs(alloc, tmp.dir, path, text, &.{ "--initial-command=cmd.exe", "-e" });
         defer cfg.deinit();
-        try std.testing.expectEqualStrings("cmd.exe", cfg.@"initial-command".?.shell);
+        try std.testing.expectEqualStrings("cmd.exe", try shellCommand(cfg.@"initial-command"));
         try std.testing.expectEqual(Origin{ .cli = 0 }, of(&cfg, .@"initial-command", null));
     }
 }
@@ -684,7 +692,7 @@ test "origin: after a light/dark flip, -e's values and their origin still agree"
     // A new conditional state replays the log into a new config and
     // finalizes it.
     cfg._conditional_set.insert(.theme);
-    var flipped = (try cfg.changeConditionalState(.{ .theme = .dark })).?;
+    var flipped = (try cfg.changeConditionalState(.{ .theme = .dark })) orelse return error.TestUnexpectedResult;
     defer flipped.deinit();
     try expectE(&flipped, 0);
 }
@@ -731,7 +739,7 @@ test "origin: -e and the command-line settings around it" {
         try std.testing.expect(cfg.@"font-size" != 99);
         try std.testing.expect(of(&cfg, .@"font-size", null) == .default);
         if (case.command) |command| {
-            try std.testing.expectEqualStrings(command, cfg.command.?.shell);
+            try std.testing.expectEqualStrings(command, try shellCommand(cfg.command));
             try std.testing.expectEqual(Origin{ .cli = 0 }, of(&cfg, .command, null));
         }
     }

@@ -1043,7 +1043,10 @@ test "settings reference default-profile's shown value and location, with and wi
         try current.finalize();
         // The value Settings shows (`useSavedValues`).
         const shown = current.defaultProfileFromFiles();
-        if (case.value) |want| try testing.expectEqualStrings(want, shown.?) else try testing.expect(shown == null);
+        if (case.value) |want|
+            try testing.expectEqualStrings(want, shown orelse return error.TestUnexpectedResult)
+        else
+            try testing.expect(shown == null);
 
         const extra: [key_count][]const u8 = @splat("");
         var model: Model = .{};

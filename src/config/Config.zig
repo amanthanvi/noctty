@@ -5463,9 +5463,12 @@ fn finalizeECommand(self: *Config) void {
 }
 
 /// What `-e` with `command` sets: the command, and the settings it implies
-/// (see `initial-command`). The parse and `finalizeECommand` both apply it
-/// here, so both give the same values.
-fn applyECommand(self: *Config, command: []const [:0]const u8) void {
+/// (see `initial-command`). This is the one place those settings are
+/// written: the parse calls it when `-e` has a command, and
+/// `finalizeECommand` calls it to apply `-e` again over the files read after
+/// the command line, so both give the same values. Public so that
+/// `finalizeECommand` can move out of this file as it is.
+pub fn applyECommand(self: *Config, command: []const [:0]const u8) void {
     self.@"initial-command" = .{ .direct = command };
     self.@"single-instance" = .false;
     self.@"gtk-single-instance" = .false;
@@ -6003,6 +6006,22 @@ test "a refused --command= does not claim a config file's command as the command
     }
 }
 
+/// `command` when it is a shell command, or a test failure (not a panic) for
+/// none or a direct one.
+fn testShellCommand(command: ?Command) ![:0]const u8 {
+    const value = command orelse return error.TestUnexpectedResult;
+    if (value != .shell) return error.TestUnexpectedResult;
+    return value.shell;
+}
+
+/// `command`'s words when it is a direct command, or a test failure (not a
+/// panic) for none or a shell one.
+fn testDirectCommand(command: ?Command) ![]const [:0]const u8 {
+    const value = command orelse return error.TestUnexpectedResult;
+    if (value != .direct) return error.TestUnexpectedResult;
+    return value.direct;
+}
+
 test "-e wins over a file read after the command line, as a replay with -e last does" {
     const testing = std.testing;
     const alloc = testing.allocator;
@@ -6021,9 +6040,7 @@ test "-e wins over a file read after the command line, as a replay with -e last 
     }) |case| {
         var cfg = try testLoadDefaultProfile(alloc, "", &.{ "-e", "cmd.exe" }, case.include);
         defer cfg.deinit();
-        const initial = cfg.@"initial-command".?;
-        try testing.expect(initial == .direct);
-        try testing.expectEqualStrings("cmd.exe", initial.direct[0]);
+        try testing.expectEqualStrings("cmd.exe", (try testDirectCommand(cfg.@"initial-command"))[0]);
         try testing.expect(cfg.@"quit-after-last-window-closed");
         try testing.expect(cfg.@"quit-after-last-window-closed-delay" == null);
         try testing.expectEqual(case.shell_integration, cfg.@"shell-integration");
@@ -6034,7 +6051,7 @@ test "-e wins over a file read after the command line, as a replay with -e last 
         var cfg = try testLoadDefaultProfile(alloc, "", &.{"-e"}, "initial-command = pwsh.exe\nquit-after-last-window-closed = false\n");
         defer cfg.deinit();
         try testing.expect(cfg._e_command == null);
-        try testing.expectEqualStrings("pwsh.exe", cfg.@"initial-command".?.shell);
+        try testing.expectEqualStrings("pwsh.exe", try testShellCommand(cfg.@"initial-command"));
         try testing.expect(!cfg.@"quit-after-last-window-closed");
     }
 }
@@ -6048,20 +6065,19 @@ test "-e still wins in a copy of the config, finalized again" {
     // a later value, as a reload's would be, `-e` wins again.
     var copy = try cfg.clone(alloc);
     defer copy.deinit();
-    try testing.expectEqualStrings("cmd.exe", copy._e_command.?[0]);
+    try testing.expectEqualStrings("cmd.exe", (copy._e_command orelse return error.TestUnexpectedResult)[0]);
     copy.@"quit-after-last-window-closed" = false;
     copy.@"initial-command" = null;
     try copy.finalize();
     try testing.expect(copy.@"quit-after-last-window-closed");
-    try testing.expect(copy.@"initial-command".? == .direct);
-    try testing.expectEqualStrings("cmd.exe", copy.@"initial-command".?.direct[0]);
+    try testing.expectEqualStrings("cmd.exe", (try testDirectCommand(copy.@"initial-command"))[0]);
     // A shallow copy, as a new window's (`apprt.surface.newConfig`), holds
     // `-e`'s values and its command.
     var shallow = cfg.shallowClone(alloc);
     defer shallow.deinit();
     try testing.expect(shallow.@"quit-after-last-window-closed");
-    try testing.expectEqualStrings("cmd.exe", shallow.@"initial-command".?.direct[0]);
-    try testing.expectEqualStrings("cmd.exe", shallow._e_command.?[0]);
+    try testing.expectEqualStrings("cmd.exe", (try testDirectCommand(shallow.@"initial-command"))[0]);
+    try testing.expectEqualStrings("cmd.exe", (shallow._e_command orelse return error.TestUnexpectedResult)[0]);
 }
 
 test "a refused -e leaves an accepted --initial-command= before it in force" {
@@ -6069,8 +6085,8 @@ test "a refused -e leaves an accepted --initial-command= before it in force" {
     const alloc = testing.allocator;
     var cfg = try testLoadDefaultProfile(alloc, "", &.{ "--initial-command=cmd.exe", "-e" }, "initial-command = pwsh.exe\n");
     defer cfg.deinit();
-    try testing.expectEqualStrings("cmd.exe", cfg._initial_command_cli.?);
-    try testing.expectEqualStrings("cmd.exe", cfg.@"initial-command".?.shell);
+    try testing.expectEqualStrings("cmd.exe", cfg._initial_command_cli orelse return error.TestUnexpectedResult);
+    try testing.expectEqualStrings("cmd.exe", try testShellCommand(cfg.@"initial-command"));
 }
 
 test "a refused --initial-command= leaves -e its place" {
