@@ -176,14 +176,13 @@ fn searchUntilComplete(
     alloc: std.mem.Allocator,
     search: *ThreadSearch,
     t: *Terminal,
-    mutex: *std.Thread.Mutex,
     sink: *Sink,
 ) void {
     search.feed(alloc, t);
     while (true) {
         search.notify(alloc, &Sink.callback, 1, sink, false);
         if (search.isComplete()) break;
-        switch (search.tick(mutex)) {
+        switch (search.tick()) {
             .complete, .progress => {},
             .blocked => search.feed(alloc, t),
         }
@@ -231,14 +230,11 @@ fn runFeed(
         var sink: Sink = .{ .alloc = alloc };
         var search = try ThreadSearch.init(alloc, args.needle, queryOptions(args));
         defer search.deinit(&t);
-        // Single-threaded: `tick` takes the terminal lock only to clean up
-        // after a matcher failure, and nothing else contends for it here.
-        var mutex: std.Thread.Mutex = .{};
 
         // `changeQuery`'s initial feed, then the search thread's loop until
         // the search completes.
         var timer = try std.time.Timer.start();
-        searchUntilComplete(alloc, &search, &t, &mutex, &sink);
+        searchUntilComplete(alloc, &search, &t, &sink);
         initial_ms[run] = nsToMs(timer.read());
 
         // Streaming with a refresh after every `refresh_bytes` of output.
@@ -255,7 +251,7 @@ fn runFeed(
             t.flags.search_viewport_dirty = true;
 
             var refresh_timer = try std.time.Timer.start();
-            searchUntilComplete(alloc, &search, &t, &mutex, &sink);
+            searchUntilComplete(alloc, &search, &t, &sink);
             try refresh_all.append(alloc, nsToMs(refresh_timer.read()));
         }
         stream_ms[run] = nsToMs(stream_timer.read());

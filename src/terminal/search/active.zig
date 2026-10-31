@@ -102,7 +102,7 @@ pub const ActiveSearch = struct {
 
     /// Find the next match for the needle in the active area. This returns
     /// null when there are no more matches.
-    pub fn next(self: *ActiveSearch) SlidingWindow.SearchError!?FlattenedHighlight {
+    pub fn next(self: *ActiveSearch) ?FlattenedHighlight {
         return self.window.next();
     }
 };
@@ -121,7 +121,7 @@ test "simple search" {
     _ = try search.update(&t.screens.active.pages);
 
     {
-        const h = (try search.next()).?;
+        const h = search.next().?;
         const sel = h.untracked();
         try testing.expectEqual(point.Point{ .active = .{
             .x = 0,
@@ -133,7 +133,7 @@ test "simple search" {
         } }, t.screens.active.pages.pointFromPin(.active, sel.end).?);
     }
     {
-        const h = (try search.next()).?;
+        const h = search.next().?;
         const sel = h.untracked();
         try testing.expectEqual(point.Point{ .active = .{
             .x = 0,
@@ -144,7 +144,7 @@ test "simple search" {
             .y = 2,
         } }, t.screens.active.pages.pointFromPin(.active, sel.end).?);
     }
-    try testing.expect((try search.next()) == null);
+    try testing.expect(search.next() == null);
 }
 
 test "clear screen and search" {
@@ -166,7 +166,7 @@ test "clear screen and search" {
     _ = try search.update(&t.screens.active.pages);
 
     {
-        const h = (try search.next()).?;
+        const h = search.next().?;
         const sel = h.untracked();
         try testing.expectEqual(point.Point{ .active = .{
             .x = 0,
@@ -177,5 +177,5 @@ test "clear screen and search" {
             .y = 1,
         } }, t.screens.active.pages.pointFromPin(.active, sel.end).?);
     }
-    try testing.expect((try search.next()) == null);
+    try testing.expect(search.next() == null);
 }

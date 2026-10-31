@@ -2,9 +2,14 @@
 //! case-insensitive literal scan does not cover: a regular expression,
 //! whole-word or case-sensitive matching, run through oniguruma. A window
 //! without a pattern runs the literal scan.
+//!
+//! One pattern serves every window of one query, so all of them must run
+//! on one thread (the search thread): the failure latch and the match
+//! limits are shared.
 const std = @import("std");
 const testing = std.testing;
 const Allocator = std.mem.Allocator;
+const tripwire = @import("../../tripwire.zig");
 const build_options = @import("terminal_options");
 const query_options = @import("query_options.zig");
 const Query = query_options.Query;
@@ -13,13 +18,23 @@ const oni = if (build_options.oniguruma) @import("oniguruma") else struct {};
 
 const log = std.log.scoped(.search_pattern);
 
+/// Where a test can make the engine fail at run time.
+pub const find_tw = tripwire.module(enum { search }, Pattern.Failure);
+
 pub const Pattern = struct {
     /// The regex source: the needle escaped unless it is a regex, wrapped
     /// in word boundaries for whole-word matching.
     source: []u8,
     regex: if (build_options.oniguruma) oni.Regex else void,
+
+    /// The engine's limits for each search: oniguruma's defaults.
+    match_param: if (build_options.oniguruma) oni.MatchParam else void,
+
     needle_len: usize,
     options: QueryOptions,
+
+    /// The first run-time failure. From then on `find` finds nothing.
+    failed: ?Failure = null,
 
     /// Which edges of a haystack the pattern can tell apart from text
     /// beyond them, parsed once from `source`.
@@ -33,7 +48,8 @@ pub const Pattern = struct {
         UnsupportedQueryOptions,
     };
 
-    /// A run-time matcher failure.
+    /// A run-time matcher failure: a retry or stack limit, oniguruma
+    /// running out of memory, or any other engine error.
     pub const Failure = error{ RetryLimit, StackLimit, Memory, Engine };
 
     /// Regexes can be arbitrary-width. Keep a generous bounded suffix on
@@ -95,10 +111,14 @@ pub const Pattern = struct {
         };
         errdefer regex.deinit();
 
+        var match_param = oni.MatchParam.init() catch return error.OutOfMemory;
+        errdefer match_param.deinit();
+
         const self = try alloc.create(Pattern);
         self.* = .{
             .source = source,
             .regex = regex,
+            .match_param = match_param,
             .needle_len = query.needle.len,
             .options = query.options,
             .sensitivity = .parse(source),
@@ -107,7 +127,10 @@ pub const Pattern = struct {
     }
 
     pub fn destroy(self: *Pattern, alloc: Allocator) void {
-        if (comptime build_options.oniguruma) self.regex.deinit();
+        if (comptime build_options.oniguruma) {
+            self.match_param.deinit();
+            self.regex.deinit();
+        }
         alloc.free(self.source);
         alloc.destroy(self);
     }
@@ -115,8 +138,14 @@ pub const Pattern = struct {
     /// The match `h.pick` asks for. A match that touches an edge the
     /// pattern is sensitive to is skipped unless that edge is the real end
     /// of the text or its byte allows the match there.
-    pub fn find(self: *Pattern, h: Haystack) Failure!?Span {
+    ///
+    /// A run-time failure is latched (see `failure`) and finds nothing, here
+    /// and in every later call. This never allocates through a Zig
+    /// allocator; oniguruma's own allocations can fail, which latches
+    /// `Memory`.
+    pub fn find(self: *Pattern, h: Haystack) ?Span {
         if (comptime !build_options.oniguruma) unreachable;
+        if (self.failed != null) return null;
 
         var search_start: usize = 0;
         var found: ?Span = null;
@@ -124,17 +153,13 @@ pub const Pattern = struct {
             var region: oni.Region = .{};
             defer region.deinit();
 
-            _ = self.regex.searchAdvanced(h.text, search_start, h.text.len, &region, .{
-                .find_not_empty = true,
-            }) catch |err| switch (err) {
+            self.search(h.text, search_start, &region) catch |err| switch (err) {
                 error.Mismatch => break,
-                error.RetryLimitInMatchOver,
-                error.RetryLimitInSearchOver,
-                error.SubexpCallLimitInSearchOver,
-                => return error.RetryLimit,
-                error.MatchStackLimitOver => return error.StackLimit,
-                error.Memory => return error.Memory,
-                else => return error.Engine,
+                else => |failure_| {
+                    log.warn("search pattern failed err={}", .{failure_});
+                    self.failed = failure_;
+                    return null;
+                },
             };
 
             const starts = region.starts();
@@ -156,6 +181,11 @@ pub const Pattern = struct {
         return found;
     }
 
+    /// The first run-time failure, if the pattern has failed.
+    pub fn failure(self: *const Pattern) ?Failure {
+        return self.failed;
+    }
+
     /// The suffix a window keeps after a scan finds nothing, so a match
     /// that continues into the next page is still found.
     pub fn retainLen(self: *const Pattern) usize {
@@ -173,6 +203,32 @@ pub const Pattern = struct {
         }
 
         return self.needle_len - 1;
+    }
+
+    fn search(
+        self: *Pattern,
+        text: []const u8,
+        start: usize,
+        region: *oni.Region,
+    ) (Failure || error{Mismatch})!void {
+        try find_tw.check(.search);
+        _ = self.regex.searchAdvancedWithParam(text, start, text.len, region, .{
+            .find_not_empty = true,
+        }, &self.match_param) catch |err| return switch (err) {
+            error.Mismatch => error.Mismatch,
+            error.RetryLimitInMatchOver,
+            error.RetryLimitInSearchOver,
+            error.SubexpCallLimitInSearchOver,
+            => error.RetryLimit,
+            error.MatchStackLimitOver => error.StackLimit,
+            error.Memory => error.Memory,
+            else => error.Engine,
+        };
+    }
+
+    /// Only for tests!
+    fn testSetSearchRetryLimit(self: *Pattern, limit: usize) !void {
+        try self.match_param.setRetryLimitInSearch(limit);
     }
 
     fn touchesSyntheticEdge(self: *const Pattern, h: Haystack, start: usize, end: usize) bool {
@@ -343,14 +399,15 @@ pub const Pattern = struct {
     };
 };
 
-/// Compile `query`, which must not be a default (literal) query.
-fn testPattern(query: Query) !*Pattern {
+/// Only for tests! Compile `query`, which must not be a default (literal)
+/// query.
+pub fn testPattern(query: Query) !*Pattern {
     try oni.testing.ensureInit();
     return (try Pattern.forQuery(testing.allocator, query)).?;
 }
 
 /// `find` over `text` with the given edges, picking the first match.
-fn testFind(p: *Pattern, text: []const u8, before: Pattern.Edge, after: Pattern.Edge) !?Pattern.Span {
+fn testFind(p: *Pattern, text: []const u8, before: Pattern.Edge, after: Pattern.Edge) ?Pattern.Span {
     return p.find(.{ .text = text, .before = before, .after = after, .pick = .first });
 }
 
@@ -387,52 +444,52 @@ test "regex edge sensitivity detects anchors and character classes" {
     for ([_][]const u8{ "\\Afoo", "\\Gfoo" }) |source| {
         const p = try testPattern(.{ .needle = source, .options = .{ .regex = true } });
         defer p.destroy(alloc);
-        try testing.expectEqual(whole, (try testFind(p, "foo", .none, .unknown)).?);
-        try testing.expectEqual(null, try testFind(p, "foo", .{ .byte = '\n' }, .none));
-        try testing.expectEqual(null, try testFind(p, "foo", .{ .byte = 'x' }, .none));
-        try testing.expectEqual(null, try testFind(p, "foo", .unknown, .none));
+        try testing.expectEqual(whole, (testFind(p, "foo", .none, .unknown)).?);
+        try testing.expectEqual(null, testFind(p, "foo", .{ .byte = '\n' }, .none));
+        try testing.expectEqual(null, testFind(p, "foo", .{ .byte = 'x' }, .none));
+        try testing.expectEqual(null, testFind(p, "foo", .unknown, .none));
     }
 
     // Absolute end anchors, the other way around.
     for ([_][]const u8{ "foo\\Z", "foo\\z" }) |source| {
         const p = try testPattern(.{ .needle = source, .options = .{ .regex = true } });
         defer p.destroy(alloc);
-        try testing.expectEqual(whole, (try testFind(p, "foo", .unknown, .none)).?);
-        try testing.expectEqual(null, try testFind(p, "foo", .none, .{ .byte = '\n' }));
-        try testing.expectEqual(null, try testFind(p, "foo", .none, .{ .byte = 'x' }));
-        try testing.expectEqual(null, try testFind(p, "foo", .none, .unknown));
+        try testing.expectEqual(whole, (testFind(p, "foo", .unknown, .none)).?);
+        try testing.expectEqual(null, testFind(p, "foo", .none, .{ .byte = '\n' }));
+        try testing.expectEqual(null, testFind(p, "foo", .none, .{ .byte = 'x' }));
+        try testing.expectEqual(null, testFind(p, "foo", .none, .unknown));
     }
 
     // A word boundary anywhere makes both edges depend on the byte there.
     {
         const p = try testPattern(.{ .needle = "\\bfoo", .options = .{ .regex = true } });
         defer p.destroy(alloc);
-        try testing.expectEqual(whole, (try testFind(p, "foo", .none, .none)).?);
-        try testing.expectEqual(whole, (try testFind(p, "foo", .{ .byte = '\n' }, .{ .byte = ' ' })).?);
-        try testing.expectEqual(null, try testFind(p, "foo", .{ .byte = 'x' }, .none));
-        try testing.expectEqual(null, try testFind(p, "foo", .unknown, .none));
-        try testing.expectEqual(null, try testFind(p, "foo", .none, .{ .byte = 'x' }));
-        try testing.expectEqual(null, try testFind(p, "foo", .none, .unknown));
+        try testing.expectEqual(whole, (testFind(p, "foo", .none, .none)).?);
+        try testing.expectEqual(whole, (testFind(p, "foo", .{ .byte = '\n' }, .{ .byte = ' ' })).?);
+        try testing.expectEqual(null, testFind(p, "foo", .{ .byte = 'x' }, .none));
+        try testing.expectEqual(null, testFind(p, "foo", .unknown, .none));
+        try testing.expectEqual(null, testFind(p, "foo", .none, .{ .byte = 'x' }));
+        try testing.expectEqual(null, testFind(p, "foo", .none, .unknown));
     }
 
     // Anchors inside a character class are bytes, so no edge matters.
     {
         const p = try testPattern(.{ .needle = "[^$^]+", .options = .{ .regex = true } });
         defer p.destroy(alloc);
-        try testing.expectEqual(whole, (try testFind(p, "foo", .unknown, .unknown)).?);
-        try testing.expectEqual(whole, (try testFind(p, "foo", .{ .byte = 'x' }, .{ .byte = 'x' })).?);
+        try testing.expectEqual(whole, (testFind(p, "foo", .unknown, .unknown)).?);
+        try testing.expectEqual(whole, (testFind(p, "foo", .{ .byte = 'x' }, .{ .byte = 'x' })).?);
     }
 
     // Line anchors accept a newline or the real end on each side.
     {
         const p = try testPattern(.{ .needle = "^foo$", .options = .{ .regex = true } });
         defer p.destroy(alloc);
-        try testing.expectEqual(whole, (try testFind(p, "foo", .none, .none)).?);
-        try testing.expectEqual(whole, (try testFind(p, "foo", .{ .byte = '\n' }, .{ .byte = '\n' })).?);
-        try testing.expectEqual(null, try testFind(p, "foo", .{ .byte = 'x' }, .none));
-        try testing.expectEqual(null, try testFind(p, "foo", .unknown, .none));
-        try testing.expectEqual(null, try testFind(p, "foo", .none, .{ .byte = 'x' }));
-        try testing.expectEqual(null, try testFind(p, "foo", .none, .unknown));
+        try testing.expectEqual(whole, (testFind(p, "foo", .none, .none)).?);
+        try testing.expectEqual(whole, (testFind(p, "foo", .{ .byte = '\n' }, .{ .byte = '\n' })).?);
+        try testing.expectEqual(null, testFind(p, "foo", .{ .byte = 'x' }, .none));
+        try testing.expectEqual(null, testFind(p, "foo", .unknown, .none));
+        try testing.expectEqual(null, testFind(p, "foo", .none, .{ .byte = 'x' }));
+        try testing.expectEqual(null, testFind(p, "foo", .none, .unknown));
     }
 }
 
@@ -447,7 +504,7 @@ test "regex edge sensitivity ignores literal anchor bytes" {
         defer p.destroy(alloc);
         try testing.expectEqual(
             Pattern.Span{ .start = 0, .len = 3 },
-            (try testFind(p, "a\nb", .unknown, .unknown)).?,
+            (testFind(p, "a\nb", .unknown, .unknown)).?,
         );
     }
 
@@ -458,7 +515,7 @@ test "regex edge sensitivity ignores literal anchor bytes" {
         defer p.destroy(alloc);
         try testing.expectEqual(
             Pattern.Span{ .start = 0, .len = text.len },
-            (try testFind(p, text, .unknown, .unknown)).?,
+            (testFind(p, text, .unknown, .unknown)).?,
         );
     }
 
@@ -466,21 +523,21 @@ test "regex edge sensitivity ignores literal anchor bytes" {
     {
         const p = try testPattern(.{ .needle = "foo|^bar", .options = .{ .regex = true } });
         defer p.destroy(alloc);
-        try testing.expectEqual(null, try testFind(p, "bar", .{ .byte = 'x' }, .unknown));
-        try testing.expect(try testFind(p, "bar", .{ .byte = '\n' }, .unknown) != null);
+        try testing.expectEqual(null, testFind(p, "bar", .{ .byte = 'x' }, .unknown));
+        try testing.expect(testFind(p, "bar", .{ .byte = '\n' }, .unknown) != null);
     }
     {
         const p = try testPattern(.{ .needle = "foo$|bar", .options = .{ .regex = true } });
         defer p.destroy(alloc);
-        try testing.expectEqual(null, try testFind(p, "foo", .unknown, .{ .byte = 'x' }));
-        try testing.expect(try testFind(p, "foo", .unknown, .{ .byte = '\n' }) != null);
+        try testing.expectEqual(null, testFind(p, "foo", .unknown, .{ .byte = 'x' }));
+        try testing.expect(testFind(p, "foo", .unknown, .{ .byte = '\n' }) != null);
     }
     {
         const p = try testPattern(.{ .needle = "(?:^bar$)", .options = .{ .regex = true } });
         defer p.destroy(alloc);
-        try testing.expectEqual(null, try testFind(p, "bar", .unknown, .none));
-        try testing.expectEqual(null, try testFind(p, "bar", .none, .unknown));
-        try testing.expect(try testFind(p, "bar", .{ .byte = '\n' }, .{ .byte = '\n' }) != null);
+        try testing.expectEqual(null, testFind(p, "bar", .unknown, .none));
+        try testing.expectEqual(null, testFind(p, "bar", .none, .unknown));
+        try testing.expect(testFind(p, "bar", .{ .byte = '\n' }, .{ .byte = '\n' }) != null);
     }
 }
 
@@ -491,13 +548,57 @@ test "whole-word regex edge sensitivity preserves embedded anchors" {
     const p = try testPattern(.{ .needle = "^boo", .options = .{ .regex = true, .whole_word = true } });
     defer p.destroy(alloc);
     const whole: Pattern.Span = .{ .start = 0, .len = 3 };
-    try testing.expectEqual(whole, (try testFind(p, "boo", .none, .none)).?);
-    try testing.expectEqual(whole, (try testFind(p, "boo", .{ .byte = '\n' }, .{ .byte = ' ' })).?);
+    try testing.expectEqual(whole, (testFind(p, "boo", .none, .none)).?);
+    try testing.expectEqual(whole, (testFind(p, "boo", .{ .byte = '\n' }, .{ .byte = ' ' })).?);
 
     // A space is a word boundary but not a line start: the `^` survived the
     // whole-word wrap.
-    try testing.expectEqual(null, try testFind(p, "boo", .{ .byte = ' ' }, .none));
-    try testing.expectEqual(null, try testFind(p, "boo", .unknown, .none));
-    try testing.expectEqual(null, try testFind(p, "boo", .none, .{ .byte = 'x' }));
-    try testing.expectEqual(null, try testFind(p, "boo", .none, .unknown));
+    try testing.expectEqual(null, testFind(p, "boo", .{ .byte = ' ' }, .none));
+    try testing.expectEqual(null, testFind(p, "boo", .unknown, .none));
+    try testing.expectEqual(null, testFind(p, "boo", .none, .{ .byte = 'x' }));
+    try testing.expectEqual(null, testFind(p, "boo", .none, .unknown));
+}
+
+test "a run-time failure latches and finds nothing" {
+    if (comptime !build_options.oniguruma) return error.SkipZigTest;
+    const alloc = testing.allocator;
+
+    // Nested quantifiers backtrack over every way to split the run of `a`.
+    // The pattern needs no literal (`(a*)*b` over text without a `b` fails
+    // before it backtracks: oniguruma looks for the `b` first).
+    const text = "aaaaaaaaaaaaaaaac";
+    const query: Query = .{ .needle = "(a+)+$", .options = .{ .regex = true } };
+
+    // The positive control: with oniguruma's default limits the scan ends
+    // with no match and no failure.
+    {
+        const p = try testPattern(query);
+        defer p.destroy(alloc);
+        try testing.expectEqual(null, testFind(p, text, .none, .none));
+        try testing.expectEqual(null, p.failure());
+        try testing.expectEqual(
+            Pattern.Span{ .start = 0, .len = 3 },
+            testFind(p, "aaa", .none, .none).?,
+        );
+    }
+
+    const p = try testPattern(query);
+    defer p.destroy(alloc);
+    try p.testSetSearchRetryLimit(100);
+    try testing.expectEqual(null, testFind(p, text, .none, .none));
+    try testing.expectEqual(@as(?Pattern.Failure, error.RetryLimit), p.failure());
+
+    // Latched: text the pattern does match now finds nothing too.
+    try testing.expectEqual(null, testFind(p, "aaa", .none, .none));
+    try testing.expectEqual(@as(?Pattern.Failure, error.RetryLimit), p.failure());
+
+    // The same limit leaves a pattern that does not backtrack matching.
+    const simple = try testPattern(.{ .needle = "a*b", .options = .{ .regex = true } });
+    defer simple.destroy(alloc);
+    try simple.testSetSearchRetryLimit(100);
+    try testing.expectEqual(
+        Pattern.Span{ .start = 0, .len = 2 },
+        testFind(simple, "ab", .none, .none).?,
+    );
+    try testing.expectEqual(null, simple.failure());
 }

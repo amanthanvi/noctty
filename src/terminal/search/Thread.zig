@@ -223,57 +223,81 @@ fn threadMain_(self: *Thread) !void {
             return;
         }
 
-        const s: *Search = if (self.search) |*s| s else {
-            // If we're not actively searching, we can block the loop
-            // until it does some work.
-            try self.loop.run(.once);
-            continue;
-        };
-
-        // If we have an active search, we always send any pending
-        // notifications. Even if the search is complete, there may be
-        // notifications to send.
-        if (self.opts.event_cb) |cb| {
-            s.notify(
-                self.alloc,
-                cb,
-                self.event_generation,
-                self.opts.event_userdata,
-                false,
-            );
-        }
-
-        if (s.isComplete()) {
-            // If our search is complete, there's no more work to do, we
-            // can block until we have an xev action.
-            try self.loop.run(.once);
-            continue;
-        }
-
-        // Tick the search. This will trigger any event callbacks, lock
-        // for data loading, etc.
-        switch (s.tick(self.opts.mutex)) {
-            // We're complete now when we were not before. Notify!
-            .complete => {},
-
-            // Forward progress was made.
-            .progress => {},
-
-            // All searches are blocked. Let's grab the lock and feed data.
-            .blocked => {
-                self.opts.mutex.lock();
-                defer self.opts.mutex.unlock();
-                s.feed(self.alloc, self.opts.terminal);
-            },
-        }
-
         // We have an active search, so we only want to process messages
         // we have but otherwise return immediately so we can continue the
-        // search. If the above completed the search, we still want to
-        // go around the loop as quickly as possible to send notifications,
-        // and then we'll block on the loop next time.
-        try self.loop.run(.no_wait);
+        // search. If the search completed, we still go around the loop as
+        // quickly as possible to send notifications, and then block on the
+        // loop next time. With no search, or a complete one, we block until
+        // there is some work.
+        if (self.work()) {
+            try self.loop.run(.no_wait);
+        } else {
+            try self.loop.run(.once);
+        }
     }
+}
+
+/// One round of search work: end a query whose pattern failed, send any
+/// pending notifications, and tick an incomplete search. Returns true when
+/// there is more to do without waiting for a message or the refresh timer.
+fn work(self: *Thread) bool {
+    const s: *Search = if (self.search) |*s| s else return false;
+
+    // A pattern that failed at run time finds nothing from then on, in any
+    // searcher, so the query ends before anything else is reported.
+    if (s.failure()) |err| {
+        log.warn("search query ended by a pattern failure err={}", .{err});
+        self.endSearch();
+        self.notifySearchCleared(false);
+        self.syncRefreshTimer();
+        return false;
+    }
+
+    // If we have an active search, we always send any pending
+    // notifications. Even if the search is complete, there may be
+    // notifications to send.
+    if (self.opts.event_cb) |cb| {
+        s.notify(
+            self.alloc,
+            cb,
+            self.event_generation,
+            self.opts.event_userdata,
+            false,
+        );
+    }
+
+    // If our search is complete, there's no more work to do.
+    if (s.isComplete()) return false;
+
+    // Tick the search. This will trigger any event callbacks, lock
+    // for data loading, etc.
+    switch (s.tick()) {
+        // We're complete now when we were not before. Notify!
+        .complete => {},
+
+        // Forward progress was made.
+        .progress => {},
+
+        // All searches are blocked. Let's grab the lock and feed data.
+        .blocked => {
+            self.opts.mutex.lock();
+            defer self.opts.mutex.unlock();
+            s.feed(self.alloc, self.opts.terminal);
+        },
+    }
+
+    return true;
+}
+
+/// Stop the current search, releasing its pins under the terminal lock.
+fn endSearch(self: *Thread) void {
+    const s = if (self.search) |*s| s else return;
+    {
+        self.opts.mutex.lock();
+        defer self.opts.mutex.unlock();
+        s.deinit(self.opts.terminal);
+    }
+    self.search = null;
 }
 
 /// Enqueue a message and wake the search thread to process it.
@@ -455,16 +479,8 @@ fn changeQuery(
 
     // Stop the previous search. When the search changes then we need to emit
     // that it stopped.
-    var cleared_previous = false;
-    if (self.search) |*s| {
-        {
-            self.opts.mutex.lock();
-            defer self.opts.mutex.unlock();
-            s.deinit(self.opts.terminal);
-        }
-        self.search = null;
-        cleared_previous = true;
-    }
+    const cleared_previous = self.search != null;
+    self.endSearch();
     if (cleared_previous or invalid) self.notifySearchCleared(invalid);
 
     // The previous search is gone even when the new one could not be set up:
@@ -805,6 +821,12 @@ pub const Search = struct {
         if (self.pattern) |p| p.destroy(alloc);
     }
 
+    /// The query's run-time pattern failure, which ends the query.
+    pub fn failure(self: *const Search) ?Pattern.Failure {
+        const p = self.pattern orelse return null;
+        return p.failure();
+    }
+
     /// The query this search runs. The needle is borrowed.
     pub fn query(self: *const Search) Query {
         return .{
@@ -846,13 +868,12 @@ pub const Search = struct {
         blocked,
     };
 
-    /// Scan copied data without the big lock, taking it only for failure
-    /// cleanup that releases screen-owned pins. Returns overall progress.
-    pub fn tick(self: *Search, mutex: *Mutex) Tick {
+    /// Scan copied data without the big lock. Returns overall progress.
+    pub fn tick(self: *Search) Tick {
         var result: Tick = .complete;
         var it = self.screens.iterator();
         while (it.next()) |entry| {
-            if (entry.value.tickWithMutex(mutex)) {
+            if (entry.value.tick()) {
                 result = .progress;
             } else |err| switch (err) {
                 // Ignore... nothing we can do.
@@ -1051,11 +1072,7 @@ pub const Search = struct {
             defer arena.deinit();
             const arena_alloc = arena.allocator();
             var results: std.ArrayList(FlattenedHighlight) = .empty;
-            while (self.viewport.next() catch |err| {
-                log.warn("error collecting viewport matches err={}", .{err});
-                self.viewport.reset();
-                break :viewport;
-            }) |hl| {
+            while (self.viewport.next()) |hl| {
                 const hl_cloned = hl.clone(arena_alloc) catch |err| switch (err) {
                     error.OutOfMemory => {
                         log.warn(
@@ -1526,7 +1543,7 @@ test "notified match rows follow streamed output while the scrollback is pruned"
         while (true) {
             s.notify(alloc, &TestUserData.callback, 1, &ud, false);
             if (s.isComplete()) break;
-            if (s.tick(&mutex) == .blocked) s.feed(alloc, &t);
+            if (s.tick() == .blocked) s.feed(alloc, &t);
         }
 
         // The rows `pointFromPin` gives for every match.
@@ -1623,6 +1640,74 @@ test "the first select with nothing selected starts at the newest match" {
             thread.search.?.screens.getPtr(.primary).?.selected.?.idx,
         );
     }
+}
+
+test "a pattern that fails at run time clears the search once" {
+    if (comptime !build_options.oniguruma) return error.SkipZigTest;
+
+    const alloc = testing.allocator;
+    try oni.testing.ensureInit();
+
+    var mutex: std.Thread.Mutex = .{};
+    var t: Terminal = try .init(alloc, .{
+        .cols = 10,
+        .rows = 2,
+        .max_scrollback = std.math.maxInt(usize),
+    });
+    defer t.deinit(alloc);
+    const list = &t.screens.active.pages;
+
+    var stream = t.vtStream();
+    defer stream.deinit();
+    for (0..3) |_| {
+        stream.nextSlice("Fizz\r\n");
+        const pages = list.totalPages();
+        while (list.totalPages() == pages) stream.nextSlice("\r\n");
+    }
+    for (0..list.rows) |_| stream.nextSlice("\r\n");
+    stream.nextSlice("Fizz");
+    const tracked_pins = list.countTrackedPins();
+
+    var ud: TestUserData = .{};
+    defer ud.deinit();
+    var thread: Thread = try .init(alloc, .{
+        .mutex = &mutex,
+        .terminal = &t,
+        .event_cb = &TestUserData.callback,
+        .event_userdata = &ud,
+    });
+    defer thread.deinit();
+
+    try thread.changeQuery("Fizz", .{ .whole_word = true }, 1);
+    thread.refresh_active = true;
+
+    // Search until some of the history has matched, and report it.
+    const s = &thread.search.?;
+    const primary = s.screens.getPtr(.primary).?;
+    while (primary.history_results.items.len == 0) try testing.expect(thread.work());
+    try testing.expect(!primary.state.isComplete());
+    s.notify(alloc, &TestUserData.callback, 1, &ud, false);
+    try testing.expect(ud.total > 1);
+
+    // The engine fails partway through the history.
+    const tw = @import("pattern.zig").find_tw;
+    defer tw.end(.reset) catch unreachable;
+    tw.errorAlways(.search, error.RetryLimit);
+    const total_events = ud.total_events;
+    while (thread.work()) {}
+
+    try testing.expect(thread.search == null);
+    try testing.expect(!thread.refresh_active);
+    try testing.expectEqual(total_events + 1, ud.total_events);
+    try testing.expectEqual(0, ud.total);
+    try testing.expectEqual(0, ud.viewport.len);
+    try testing.expectEqualSlices(u32, &.{}, ud.rows);
+    try testing.expect(!ud.invalid);
+    try testing.expectEqual(tracked_pins, list.countTrackedPins());
+
+    // Nothing is left to do until the next query.
+    try testing.expect(!thread.work());
+    try testing.expectEqual(total_events + 1, ud.total_events);
 }
 
 test "every searcher of one query borrows one Pattern" {
