@@ -11178,12 +11178,85 @@ const dialog_test = struct {
     /// hidden desktop the parts of a large window (2144 x 1353 at 288 DPI)
     /// read the interactive desktop's pixels instead. So a capture that is
     /// kept, or of a window that may outgrow the screen, goes through here.
+    ///
+    /// Every part is read while it lies on the window's monitor. A window
+    /// partly on its monitor, with a child in the gap below that monitor
+    /// (beside a taller one), has now and then had that child come back black
+    /// from `PrintWindow` in runs beside other test runs, although the child
+    /// had painted and paints its own colours when asked directly
+    /// (`WM_PRINTCLIENT`). So a client area that is not wholly on its monitor
+    /// is moved there a monitor-sized piece at a time, each piece read in
+    /// turn, and the window put back where it was.
     fn printClient(hwnd: HWND) !Capture {
+        return printClientInPieces(hwnd, null);
+    }
+
+    /// How many pieces the last `printClient` read with the window moved:
+    /// none for a client area read where it is.
+    var moved_pieces: usize = 0;
+
+    /// `printClient`, in pieces no larger than `most` when it is given, even
+    /// for a window wholly on its monitor.
+    fn printClientInPieces(hwnd: HWND, most: ?POINT) !Capture {
+        moved_pieces = 0;
+        if (most) |size| if (size.x <= 0 or size.y <= 0) return error.EmptyPiece;
         var rect: RECT = undefined;
         if (GetClientRect(hwnd, &rect) == 0 or rect.right <= 0 or rect.bottom <= 0) return error.NoClientArea;
+        const monitor = monitorOf(hwnd) orelse return error.NoMonitor;
+        var window: RECT = undefined;
+        if (GetWindowRect(hwnd, &window) == 0) return error.NoWindowRect;
+        var origin: POINT = .{ .x = 0, .y = 0 };
+        if (sys.ClientToScreen(hwnd, &origin) == 0) return error.NoClientOrigin;
+        const width: usize = @intCast(rect.right);
+        const height: usize = @intCast(rect.bottom);
+        const pixels = try std.testing.allocator.alloc(u32, width * height);
+        errdefer std.testing.allocator.free(pixels);
+        if (most == null and origin.x >= monitor.left and origin.y >= monitor.top and
+            origin.x + rect.right <= monitor.right and origin.y + rect.bottom <= monitor.bottom)
+        {
+            try printClientPiece(hwnd, rect, rect, pixels);
+            return .{ .pixels = pixels, .width = width, .height = height };
+        }
+        errdefer _ = sys.SetWindowPos(hwnd, null, window.left, window.top, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+        const piece_width = @min(monitor.right - monitor.left, if (most) |size| size.x else std.math.maxInt(i32));
+        const piece_height = @min(monitor.bottom - monitor.top, if (most) |size| size.y else std.math.maxInt(i32));
+        var top: i32 = 0;
+        while (top < rect.bottom) : (top += piece_height) {
+            var left: i32 = 0;
+            while (left < rect.right) : (left += piece_width) {
+                // The piece's top left corner on the monitor's.
+                const x = monitor.left - left - (origin.x - window.left);
+                const y = monitor.top - top - (origin.y - window.top);
+                if (sys.SetWindowPos(hwnd, null, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE) == 0) return error.MoveFailed;
+                // What the move left to paint, painted as the screen would.
+                if (RedrawWindow(hwnd, null, null, RDW_UPDATENOW | RDW_ALLCHILDREN) == 0) return error.RedrawFailed;
+                const piece: RECT = .{
+                    .left = left,
+                    .top = top,
+                    .right = @min(rect.right, left + piece_width),
+                    .bottom = @min(rect.bottom, top + piece_height),
+                };
+                // The move kept the window's size (no DPI change resized it)
+                // and put the piece on the monitor.
+                var moved: RECT = undefined;
+                var at: POINT = .{ .x = piece.left, .y = piece.top };
+                if (GetClientRect(hwnd, &moved) == 0 or moved.right != rect.right or moved.bottom != rect.bottom) return error.CaptureResized;
+                if (sys.ClientToScreen(hwnd, &at) == 0 or at.x < monitor.left or at.y < monitor.top or
+                    at.x + (piece.right - piece.left) > monitor.right or at.y + (piece.bottom - piece.top) > monitor.bottom) return error.PieceOffMonitor;
+                try printClientPiece(hwnd, rect, piece, pixels);
+                moved_pieces += 1;
+            }
+        }
+        if (sys.SetWindowPos(hwnd, null, window.left, window.top, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE) == 0) return error.RestoreFailed;
+        return .{ .pixels = pixels, .width = width, .height = height };
+    }
+
+    /// `PrintWindow` of `hwnd`'s client area `client`, the pixels inside
+    /// `piece` copied into `pixels` (the whole client area's, top row first).
+    fn printClientPiece(hwnd: HWND, client: RECT, piece: RECT, pixels: []u32) !void {
         const memory = sys.CreateCompatibleDC(null) orelse return error.NoDC;
         defer _ = sys.DeleteDC(memory);
-        const info: BITMAPINFO = .{ .biWidth = rect.right, .biHeight = -rect.bottom };
+        const info: BITMAPINFO = .{ .biWidth = client.right, .biHeight = -client.bottom };
         var bits: ?*anyopaque = null;
         const bitmap = CreateDIBSection(memory, &info, 0, &bits, null, 0) orelse return error.NoBitmap;
         defer _ = DeleteObject(bitmap);
@@ -11194,10 +11267,21 @@ const dialog_test = struct {
         const PW_CLIENTONLY: UINT = 1;
         if (PrintWindow(hwnd, memory, PW_CLIENTONLY) == 0) return error.PrintWindowFailed;
         _ = GdiFlush();
-        const width: usize = @intCast(rect.right);
-        const height: usize = @intCast(rect.bottom);
+        const width: usize = @intCast(client.right);
         const source: [*]const u32 = @ptrCast(@alignCast(bits.?));
-        return .{ .pixels = try std.testing.allocator.dupe(u32, source[0 .. width * height]), .width = width, .height = height };
+        const left: usize = @intCast(piece.left);
+        const right: usize = @intCast(piece.right);
+        for (@as(usize, @intCast(piece.top))..@as(usize, @intCast(piece.bottom))) |row| {
+            @memcpy(pixels[row * width + left .. row * width + right], source[row * width + left .. row * width + right]);
+        }
+    }
+
+    /// The rect of the monitor `hwnd` is on, or the nearest one.
+    fn monitorOf(hwnd: HWND) ?RECT {
+        const monitor = sys.MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) orelse return null;
+        var info: MONITORINFO = .{ .cbSize = @sizeOf(MONITORINFO), .rcMonitor = undefined, .rcWork = undefined, .dwFlags = 0 };
+        if (sys.GetMonitorInfoW(monitor, &info) == 0) return null;
+        return info.rcMonitor;
     }
 
     /// Write `capture` as a 32-bit BMP named `name` into the directory
@@ -21448,6 +21532,60 @@ test "settings shows no light control in dark mode, and no dark one in light mod
         }
     };
     try dialog_test.onHiddenDesktop(Body.body);
+}
+
+test "settings a capture of a window partly off its monitor reads each piece on the monitor, and puts the window back" {
+    try dialog_test.onHiddenDesktop(struct {
+        fn body() !void {
+            const fixture = try dialog_test.Fixture.start();
+            defer fixture.finish();
+            const hwnd = fixture.hwnd();
+            _ = dialog_test.HideCaret(null);
+            const monitor = dialog_test.monitorOf(hwnd).?;
+            var window: RECT = undefined;
+            try std.testing.expect(GetWindowRect(hwnd, &window) != 0);
+            const flags = SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE;
+
+            // Wholly on the monitor, read where it is.
+            try std.testing.expect(sys.SetWindowPos(hwnd, null, monitor.left, monitor.top, 0, 0, flags) != 0);
+            _ = RedrawWindow(hwnd, null, null, RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_ALLCHILDREN | RDW_UPDATENOW);
+            const on = try dialog_test.printClient(hwnd);
+            defer on.deinit();
+            try std.testing.expectEqual(@as(usize, 0), dialog_test.moved_pieces);
+
+            // Half of it past the monitor's right edge and half below its
+            // bottom, read in one piece and in pieces smaller than the window
+            // (as a window larger than its monitor is): the same pixels, and
+            // the window where it was put.
+            const x = monitor.right - @divTrunc(window.right - window.left, 2);
+            const y = monitor.bottom - @divTrunc(window.bottom - window.top, 2);
+            try std.testing.expect(sys.SetWindowPos(hwnd, null, x, y, 0, 0, flags) != 0);
+            for ([_]?POINT{ null, .{ .x = 300, .y = 200 } }) |most| {
+                _ = RedrawWindow(hwnd, null, null, RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_ALLCHILDREN | RDW_UPDATENOW);
+                const off = try dialog_test.printClientInPieces(hwnd, most);
+                defer off.deinit();
+                // Read moved: in one piece, or in as many as cover it.
+                const pieces: usize = if (most) |size|
+                    (std.math.divCeil(usize, on.width, @intCast(size.x)) catch unreachable) * (std.math.divCeil(usize, on.height, @intCast(size.y)) catch unreachable)
+                else
+                    1;
+                try std.testing.expectEqual(pieces, dialog_test.moved_pieces);
+                var after: RECT = undefined;
+                try std.testing.expect(GetWindowRect(hwnd, &after) != 0);
+                try std.testing.expectEqual(x, after.left);
+                try std.testing.expectEqual(y, after.top);
+                try std.testing.expectEqual(on.width, off.width);
+                try std.testing.expectEqual(on.height, off.height);
+                var different: usize = 0;
+                for (on.pixels, off.pixels) |a, b| {
+                    if (a != b) different += 1;
+                }
+                try std.testing.expectEqual(@as(usize, 0), different);
+            }
+            // A piece size of nothing is refused, not looped on.
+            try std.testing.expectError(error.EmptyPiece, dialog_test.printClientInPieces(hwnd, .{ .x = 0, .y = 200 }));
+        }
+    }.body);
 }
 
 test "settings check boxes are toggle switches that show their state, and plain check boxes in High Contrast" {
