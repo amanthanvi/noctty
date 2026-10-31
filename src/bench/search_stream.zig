@@ -154,6 +154,8 @@ const Sink = struct {
     row_values: usize = 0,
     rows: usize = 0,
     total: usize = 0,
+    /// The query did not compile; the search reports nothing more.
+    invalid: bool = false,
     complete: std.Thread.ResetEvent = .{},
 
     fn callback(event: SearchThread.Event, _: u64, ud: ?*anyopaque) void {
@@ -162,6 +164,10 @@ const Sink = struct {
             .match_rows => |rows| self.matchRows(rows),
             .total_matches => |v| self.total = v,
             .complete => self.complete.set(),
+            .invalid_query => {
+                self.invalid = true;
+                self.complete.set();
+            },
             else => {},
         }
     }
@@ -182,7 +188,7 @@ const Sink = struct {
             if (report.match_rows) |rows| self.matchRows(rows);
             if (report.total) |total| switch (total) {
                 .count => |n| self.total = n,
-                .invalid => {},
+                .invalid => self.invalid = true,
             };
             if (report.state != .busy) return;
             report = qs.step(.{});
@@ -239,6 +245,7 @@ fn runFeed(
         var timer = try std.time.Timer.start();
         sink.run(&search, .{ .query = .{ .needle = args.needle, .options = queryOptions(args) } });
         initial_ms[run] = nsToMs(timer.read());
+        if (sink.invalid) return error.InvalidQuery;
 
         // Streaming with a refresh after every `refresh_bytes` of output.
         var stream = t.vtStream();
@@ -443,6 +450,7 @@ fn streamLocked(
         } });
         try search_sink.complete.timedWait(600 * std.time.ns_per_s);
         result.initial_ms = nsToMs(timer.read());
+        if (search_sink.invalid) return error.InvalidQuery;
     }
 
     const ns_per_byte: f64 = if (args.rate_mib_s > 0)
