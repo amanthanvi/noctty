@@ -2,7 +2,9 @@
 
 pub const options = @import("terminal_options");
 
+pub const Query = @import("search/query_options.zig").Query;
 pub const QueryOptions = @import("search/query_options.zig").QueryOptions;
+pub const QuerySearch = @import("search/query_search.zig").QuerySearch;
 
 pub const Active = @import("search/active.zig").ActiveSearch;
 pub const PageList = @import("search/pagelist.zig").PageListSearch;

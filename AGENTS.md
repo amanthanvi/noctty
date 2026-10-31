@@ -195,8 +195,9 @@ that govern each symbol you change, or that none does.
   results (`ScreenSearch.pruneHistory`, `LiveNodes`), what a search window
   copies at append (`SlidingWindow.append`, `AppendResult`), the regex,
   whole-word and case matcher and its run-time failure latch
-  (`search/pattern.zig`: `Pattern`), the selection and search-highlight
-  rows of `RenderState` (`render.zig`),
+  (`search/pattern.zig`: `Pattern`), one query over a terminal and its
+  reports (`search/query_search.zig`: `QuerySearch.step`), the selection
+  and search-highlight rows of `RenderState` (`render.zig`),
   `TerminalFormatter`/`ScreenFormatter` output for undo snapshots and Copy as
   HTML, Kitty graphics commands, placements and deletes in
   `kitty/graphics_command.zig`, `kitty/graphics_storage.zig` and

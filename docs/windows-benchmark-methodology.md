@@ -198,9 +198,9 @@ lists the slowest in the job summary.
 ### Scrollback search under streaming output
 
 `bench:search-stream` is a diagnostic, not a CI gate. It fills the scrollback
-with log lines that match the needle, then either drives the search thread's
-`Search` state the way the thread does (`--mode=feed`: the initial search, then
-one refresh per 32 KiB of output) or runs the real search thread while output
+with log lines that match the needle, then either steps a `QuerySearch` the way
+the search thread does (`--mode=feed`: the initial search, then one refresh per
+32 KiB of output) or runs the real search thread while output
 streams in 4 KiB writes under the terminal lock (`--mode=thread`;
 `--rate-mib-s` paces the output, and the writer's time waiting for the lock is
 reported). `--regex` and `--whole-word` search with those options, so every
@@ -214,6 +214,10 @@ for PKG-36 on the Ryzen 9 9900X, Windows build
 | Initial search (`--mode=feed --stream-mib=4 --runs=5`)                         |      3,294 ms | 265 ms |
 | One refresh, `Search.feed` plus `notify` (same run, n = 640)                   |       27.7 ms | 3.8 ms |
 | Writer's lock wait, 8 MiB at 2 MiB/s (`--mode=thread --rate-mib-s=2 --runs=3`) |      2,668 ms | 565 ms |
+
+The refresh row predates `QuerySearch`: it timed the search thread's
+`Search.feed` plus `notify`, which a `QuerySearch.step` refresh replaced with
+the same feed and report (read from the code), so the numbers stay comparable.
 
 ```powershell
 zig build bench:search-stream -- --mode=feed --lines=100000 --stream-mib=4 --runs=5

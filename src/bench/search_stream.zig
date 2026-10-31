@@ -1,8 +1,7 @@
 //! Headless benchmark: scrollback search while output streams.
 //!
 //! Fills a Terminal's scrollback with log-like lines, most of which match
-//! the needle, and drives the search thread's `Search` state the way the
-//! search thread does (`notify`, `tick`, `feed` under the terminal lock).
+//! the needle, and steps a `QuerySearch` the way the search thread does.
 //!
 //! Two modes:
 //!
@@ -10,9 +9,10 @@
 //!                  prefilled history, then streams `--stream-mib` of new
 //!                  lines and, after every `--refresh-kib` of output (the
 //!                  renderer marks the viewport dirty on every frame and the
-//!                  search thread refreshes every 24 ms), times one
-//!                  `Search.feed` (active-area reload, history feed and the
-//!                  match-row rebuild) plus the `notify` that follows it.
+//!                  search thread refreshes every 24 ms), times one refresh
+//!                  step (active-area reload, history feed and the
+//!                  match-row rebuild, then its report) and the steps that
+//!                  follow it until the search is caught up.
 //!
 //!   --mode=thread  The real search thread. Streams `--stream-mib` into the
 //!                  terminal under the terminal lock, as the IO thread does,
@@ -36,7 +36,7 @@ const bench_core = @import("bench_core");
 const terminal = bench_core.terminal;
 const Terminal = terminal.Terminal;
 const SearchThread = terminal.search.Thread;
-const ThreadSearch = SearchThread.Search;
+const QuerySearch = terminal.search.QuerySearch;
 const stats = @import("stats.zig");
 
 pub const std_options: std.Options = .{ .log_level = .err };
@@ -152,42 +152,43 @@ const Sink = struct {
     alloc: std.mem.Allocator,
     row_messages: usize = 0,
     row_values: usize = 0,
+    rows: usize = 0,
     total: usize = 0,
     complete: std.Thread.ResetEvent = .{},
 
     fn callback(event: SearchThread.Event, _: u64, ud: ?*anyopaque) void {
         const self: *Sink = @ptrCast(@alignCast(ud.?));
         switch (event) {
-            .match_rows => |rows| {
-                const copy = self.alloc.dupe(u32, rows) catch return;
-                self.alloc.free(copy);
-                self.row_messages += 1;
-                self.row_values += rows.len;
-            },
+            .match_rows => |rows| self.matchRows(rows),
             .total_matches => |v| self.total = v,
             .complete => self.complete.set(),
             else => {},
         }
     }
-};
 
-/// Feed the search, then run the search thread's loop until it completes.
-fn searchUntilComplete(
-    alloc: std.mem.Allocator,
-    search: *ThreadSearch,
-    t: *Terminal,
-    sink: *Sink,
-) void {
-    search.feed(alloc, t);
-    while (true) {
-        search.notify(alloc, &Sink.callback, 1, sink, false);
-        if (search.isComplete()) break;
-        switch (search.tick()) {
-            .complete, .progress => {},
-            .blocked => search.feed(alloc, t),
+    fn matchRows(self: *Sink, rows: []const u32) void {
+        const copy = self.alloc.dupe(u32, rows) catch return;
+        self.alloc.free(copy);
+        self.row_messages += 1;
+        self.row_values += rows.len;
+        self.rows = rows.len;
+    }
+
+    /// Step with `req`, then until the search is caught up, as the search
+    /// thread does, taking what each report carries as the callback would.
+    fn run(self: *Sink, qs: *QuerySearch, req: QuerySearch.Request) void {
+        var report = qs.step(req);
+        while (true) {
+            if (report.match_rows) |rows| self.matchRows(rows);
+            if (report.total) |total| switch (total) {
+                .count => |n| self.total = n,
+                .invalid => {},
+            };
+            if (report.state != .busy) return;
+            report = qs.step(.{});
         }
     }
-}
+};
 
 fn runFeed(
     alloc: std.mem.Allocator,
@@ -228,13 +229,15 @@ fn runFeed(
         writeAll(&t, history);
 
         var sink: Sink = .{ .alloc = alloc };
-        var search = try ThreadSearch.init(alloc, args.needle, queryOptions(args));
-        defer search.deinit(&t);
+        // Single-threaded: nothing else contends for the lock here.
+        var mutex: std.Thread.Mutex = .{};
+        var search: QuerySearch = .init(alloc, .{ .terminal = &t, .mutex = &mutex });
+        defer search.deinit();
 
-        // `changeQuery`'s initial feed, then the search thread's loop until
-        // the search completes.
+        // The query's initial feed, then the search thread's loop until the
+        // search completes.
         var timer = try std.time.Timer.start();
-        searchUntilComplete(alloc, &search, &t, &sink);
+        sink.run(&search, .{ .query = .{ .needle = args.needle, .options = queryOptions(args) } });
         initial_ms[run] = nsToMs(timer.read());
 
         // Streaming with a refresh after every `refresh_bytes` of output.
@@ -251,13 +254,13 @@ fn runFeed(
             t.flags.search_viewport_dirty = true;
 
             var refresh_timer = try std.time.Timer.start();
-            searchUntilComplete(alloc, &search, &t, &sink);
+            sink.run(&search, .{ .refresh = true });
             try refresh_all.append(alloc, nsToMs(refresh_timer.read()));
         }
         stream_ms[run] = nsToMs(stream_timer.read());
 
         final_total = sink.total;
-        final_rows = search.match_rows.items.len;
+        final_rows = sink.rows;
         final_nodes = 0;
         var node_it = t.screens.active.pages.pages.first;
         while (node_it) |node| : (node_it = node.next) final_nodes += 1;
