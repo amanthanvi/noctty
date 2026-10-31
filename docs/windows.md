@@ -1725,6 +1725,25 @@ default over the file's value. Background blur and link
 previews, which Windows does not support, keep whatever the file says and
 offer no reset.
 
+A field's label also says, at its right end, where the saved value comes from
+when a line sets it: "Set in noctty.conf, line 4" for a line of a config file
+(the one Settings saves to, or a file `config-file` names, by its file name),
+"Set by the theme Nord, line 7" for a line of the theme's file, and "Set on
+the command line" for an argument noctty was started with. A field that no
+line sets says nothing there: its value is the default, or one noctty worked
+out when it read the config. MSAA reads the same in the field's description,
+after "Changed from the default" when that applies. The label describes the
+saved value in effect, not an edit waiting for Save, so a field whose value
+comes from an included file or the command line says so before you change it.
+Save writes the edit to the config file Settings saves to, and to no other
+file. When a file read after it (one that `config-file` names) or the command
+line sets the same key, that value still wins, and Settings says so, naming
+each such setting with the line that wins: "overrides font-size (line 2 of
+included.conf)". The theme is read before the config file, so a value the
+config file sets wins over the theme's. When noctty's command line names a
+Default profile (a jump-list entry does), Settings shows and saves the config
+files' value, and its label names no line.
+
 **Search settings** at the right of the Settings header (Ctrl+F from
 anywhere in the window) narrows every page to the settings whose name,
 description or keywords contain every word typed, ignoring the case of ASCII
@@ -1749,7 +1768,16 @@ and so does Settings showing a field whose value it will not take.
 can hold, with the value in effect and the first sentence of what it does; a
 key that Windows accepts but does not honour (background blur, the GTK keys)
 says so instead. Up and Down select a key, which opens to its whole
-description and the line of the config file that sets it. The file is read
+description and the line of the config file that sets it. A value set
+elsewhere names the file and line that set it (a file `config-file` names,
+the theme's file) or the command line, and says when a line of the config
+file sets the key too and does not take effect (for a key whose lines can add
+up, such as `font-family` or `keybind`, only that the file has a line for it
+too, since a later line can clear or replace it). A command
+line's `command`, `initial-command` or `default-profile` wins over a file
+read after it, and is named as the command line's. A value no line sets but
+noctty worked out when it read the config (`click-repeat-interval`, from
+Windows' double-click time) says that. The file is read
 for this only from a local drive, as UTF-8 or as UTF-16 with a byte order
 mark. It is never read through a symlink or junction, on the file or a folder
 above it, that leads anywhere else, such as a network share. Nor is it read

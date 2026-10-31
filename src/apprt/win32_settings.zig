@@ -20,6 +20,7 @@
 const std = @import("std");
 const windows = std.os.windows;
 const Config = @import("../config/Config.zig");
+const config_origin = @import("../config/origin.zig");
 const cli_help = @import("../cli/help.zig");
 const win32_types = @import("win32_types.zig");
 const win32_theme = @import("win32_theme.zig");
@@ -83,6 +84,7 @@ const DT_VCENTER: u32 = 0x0004;
 const DT_CENTER: u32 = 0x0001;
 const DT_RIGHT: u32 = 0x0002;
 const DT_END_ELLIPSIS: u32 = 0x8000;
+const DT_PATH_ELLIPSIS: u32 = 0x4000;
 const NULL_PEN: i32 = 8;
 const GWLP_USERDATA: i32 = -21;
 const GWLP_WNDPROC: i32 = -4;
@@ -209,6 +211,8 @@ const WM_CTLCOLORLISTBOX: UINT = 0x0134;
 const WM_CTLCOLORBTN: UINT = 0x0135;
 const WM_CTLCOLORDLG: UINT = 0x0136;
 const WM_CTLCOLORSTATIC: UINT = 0x0138;
+const WM_DRAWITEM: UINT = 0x002B;
+const SS_OWNERDRAW: u32 = 0x000D;
 const WM_APP: UINT = 0x8000;
 // Keep Settings-private window messages out of the App pump's reserved
 // WM_APP+1..+6 range; the pump consumes those before DispatchMessageW.
@@ -1722,14 +1726,20 @@ fn saveFailureNote(err: SaveError) StatusNote {
 /// the settings, in the words a config file uses for them, when the app told
 /// which; the pointer to the log it used to give is gone, since a GUI launch
 /// has none to read.
-fn maskedNotificationBody(buf: []u8, keys: ?[]const u8) []const u8 {
+/// The masked-save notification's body: the settings with where each value
+/// that wins is set (`detail`), or, when that does not fit `buf`, the
+/// settings alone (`keys`), or else a sentence without them.
+fn maskedNotificationBody(buf: []u8, detail: ?[]const u8, keys: ?[]const u8) []const u8 {
     const generic = "A later config file or a command-line option overrides them, so they will not take effect. Check the config-file lines and the launch options.";
-    const named = keys orelse return generic;
-    return std.fmt.bufPrint(
-        buf,
-        "{s}: a later config file or a command-line option overrides the saved value, so it will not take effect. Check the config-file lines and the launch options.",
-        .{named},
-    ) catch generic;
+    for ([_]?[]const u8{ detail, keys }) |candidate| {
+        const named = candidate orelse continue;
+        return std.fmt.bufPrint(
+            buf,
+            "{s}: a later config file or a command-line option overrides the saved value, so it will not take effect. Check the config-file lines and the launch options.",
+            .{named},
+        ) catch continue;
+    }
+    return generic;
 }
 
 pub fn saveReloadOutcome(result: SaveError!void) SaveReloadOutcome {
@@ -2412,10 +2422,20 @@ pub const SettingsWindow = struct {
     /// Which form rows' draft differs from `defaults`, as the marker, the
     /// Reset button and UIA last said it (`syncDefaultMarks`).
     differs_from_default: [form_field_count]bool = @splat(false),
-    /// Whether each field's MSAA description says it differs from its
-    /// default: what the last annotation that took said, tried again on
-    /// every pass until it matches `differs_from_default`.
-    described_changed: [form_field_count]bool = @splat(false),
+    /// What each field's MSAA description says (`fieldDescription`), as a
+    /// hash of the text the last annotation that took set (0: none), tried
+    /// again on every pass until it matches.
+    described: [form_field_count]u64 = @splat(0),
+    /// Where each made row's saved value comes from, as its label shows it on
+    /// the right and its MSAA description says (`OriginNote`). A switch has
+    /// no label, and its row no room beside its caption, so it says so only
+    /// in its description. Worked out when the row is made and once per
+    /// config Settings holds (`syncOriginNotes`), never on a paint, a search
+    /// or a page switch.
+    origin_notes: [form_field_count]OriginNote = @splat(.{}),
+    /// How many times a row's origin was looked up (`config.origin.of`), for
+    /// tests.
+    proof_origin_lookups: u32 = 0,
     /// For tests: the annotation service the marks use in place of oleacc's.
     annotation_service: ?*IAccPropServices = null,
     /// A row's Reset button: the shown page's rows that differ from their
@@ -3246,9 +3266,14 @@ pub const SettingsWindow = struct {
             }
             // An annotation can fail (low memory), so what MSAA says is
             // followed on its own and tried again until it takes.
-            if (control) |field| if (self.described_changed[index] != differs) if (annotations.service()) |service| {
-                if (setChangedDescription(service, field, differs)) self.described_changed[index] = differs;
-            };
+            if (control) |field| {
+                var description_buf: [OriginNote.capacity + 64]u8 = undefined;
+                const description = self.fieldDescription(index, differs, &description_buf);
+                const wanted = descriptionHash(description);
+                if (self.described[index] != wanted) if (annotations.service()) |service| {
+                    if (setFieldDescription(service, field, description)) self.described[index] = wanted;
+                };
+            }
             // Only the shown page's rows hold Reset buttons, so the window
             // has at most one page's worth (ten, on Appearance) however many
             // fields differ in all. Rows give theirs up before rows take one.
@@ -4254,7 +4279,8 @@ pub const SettingsWindow = struct {
         self.companions = @splat(null);
         self.reset_spare_count = 0;
         self.differs_from_default = @splat(false);
-        self.described_changed = @splat(false);
+        self.described = @splat(0);
+        self.origin_notes = @splat(.{});
         self.marker_rects = @splat(null);
     }
 
@@ -6460,24 +6486,31 @@ pub const SettingsWindow = struct {
         self.freeNoteText();
         self.status_note = if (masked) .saved_overridden else .saved;
         // The settings the save wrote that something later overrides, by the
-        // names a config file knows them by.
+        // names a config file knows them by, and where the value that wins
+        // is set, read from the config the save reloaded.
         const masked_keys: ?[]const u8 = if (masked)
             if (self.handle.maskedKeys) |lend| lend(self.handle.ctx) else null
         else
             null;
-        if (masked_keys) |keys| {
-            self.note_text = StatusNote.saved_overridden.textWithDetail(self.handle.alloc, keys) catch null;
-        }
-        self.adoptCurrentConfig() catch |err| {
+        const adopted = if (self.adoptCurrentConfig()) |_| true else |err| failed: {
             std.log.err("settings: failed to refresh saved config snapshot err={}", .{err});
+            break :failed false;
+        };
+        var masked_detail: ?[]u8 = null;
+        defer if (masked_detail) |detail| self.handle.alloc.free(detail);
+        if (masked_keys) |keys| {
+            masked_detail = if (adopted) self.maskedDetail(keys) catch null else null;
+            self.note_text = StatusNote.saved_overridden.textWithDetail(self.handle.alloc, masked_detail orelse keys) catch null;
+        }
+        if (!adopted) {
             if (should_close) self.cancelClosePrompt();
             return;
-        };
+        }
         self.refreshAllControls();
         self.updateSaveEnabled();
         if (masked) {
             var body_buf: [1024]u8 = undefined;
-            const body = maskedNotificationBody(&body_buf, masked_keys);
+            const body = maskedNotificationBody(&body_buf, masked_detail, masked_keys);
             self.handle.notifySuccess(
                 self.handle.ctx,
                 "Settings saved, but some values are overridden",
@@ -6491,6 +6524,29 @@ pub const SettingsWindow = struct {
         } else if (self.close_prompt_visible and !self.hasPendingChanges()) {
             self.cancelClosePrompt();
         }
+    }
+
+    /// The masked keys `keys` names (comma separated, as the App lends them),
+    /// each with where the value that overrides it is set in `current`:
+    /// "font-size (line 2 of included.conf)". Owned by the caller.
+    fn maskedDetail(self: *const SettingsWindow, keys: []const u8) ![]u8 {
+        const current = if (self.current) |*config| config else return error.NoConfig;
+        var out: std.Io.Writer.Allocating = .init(self.handle.alloc);
+        errdefer out.deinit();
+        var names = std.mem.splitSequence(u8, keys, ", ");
+        var first = true;
+        while (names.next()) |name| {
+            if (!first) try out.writer.writeAll(", ");
+            first = false;
+            try out.writer.writeAll(name);
+            const key = std.meta.stringToEnum(Config.Key, name) orelse continue;
+            switch (settings_reference.savedOrigin(current, key, null)) {
+                .file => |file| try out.writer.print(" (line {d} of {s})", .{ file.line, std.fs.path.basename(file.path) }),
+                .cli => try out.writer.writeAll(" (the command line)"),
+                .default, .derived, .unplaced => {},
+            }
+        }
+        return out.toOwnedSlice();
     }
 
     fn completeSynchronousSave(self: *SettingsWindow, apply_id: ?ApplyId, masked: bool) void {
@@ -6937,8 +6993,11 @@ pub const SettingsWindow = struct {
                 const spec = comptime settings_control_specs[item.control_index];
                 const text = comptime spec.role == .text;
                 var group = formGroupStarts(index, previous_text, text);
+                if (comptime item.control_index < form_field_count) _ = self.refreshOriginNote(item.control_index);
                 if (item.label_index) |i| {
-                    self.field_labels[i] = self.finishChild(makeStatic(form, hinstance, spec.label.?, shown | WS_GROUP), self.secondary_font, .control);
+                    // Drawn by the viewport (`paintFieldLabel`), with the
+                    // row's origin note on the right.
+                    self.field_labels[i] = self.finishChild(makeStatic(form, hinstance, spec.label.?, shown | WS_GROUP | SS_OWNERDRAW), self.secondary_font, .control);
                     order.place(self.field_labels[i]);
                     if (self.field_labels[i] != null) group = true;
                 }
@@ -7159,13 +7218,124 @@ pub const SettingsWindow = struct {
         if (list.provider) |provider| win32_uia.events.raiseStructureChanged(&provider.base, .children_invalidated, null);
     }
 
+    /// Work out row `index`'s origin note from `current`; whether it changed.
+    fn refreshOriginNote(self: *SettingsWindow, index: usize) bool {
+        var note: OriginNote = .{};
+        if (self.current) |*current| {
+            self.proof_origin_lookups +%= 1;
+            const found = settings_reference.savedOrigin(current, field_model.form_fields[index].descriptor.key, null);
+            var writer: std.Io.Writer = .fixed(&note.buf);
+            writeOriginNote(&writer, found) catch {
+                // A file name too long for the label: the line alone.
+                writer = .fixed(&note.buf);
+                if (found == .file) writer.print("Set in a file, line {d}", .{found.file.line}) catch {};
+            };
+            note.len = @intCast(writer.buffered().len);
+        }
+        const old = &self.origin_notes[index];
+        if (std.mem.eql(u8, old.text(), note.text())) return false;
+        old.* = note;
+        return true;
+    }
+
+    /// `current` changed: every made row's origin note again, on every page,
+    /// its label repainted and its description renewed when the note changed.
+    fn syncOriginNotes(self: *SettingsWindow) void {
+        var changed = false;
+        for (std.enums.values(Section)) |section| for (formItemsForSection(section)) |item| {
+            if (item.control_index >= form_field_count) continue;
+            if (self.controlHwnd(item.control_index) == null) continue;
+            if (!self.refreshOriginNote(item.control_index)) continue;
+            changed = true;
+            if (item.label_index) |label_index| if (self.field_labels[label_index]) |label| {
+                _ = InvalidateRect(label, null, 0);
+            };
+        };
+        if (changed and self.pending != null) self.syncDefaultMarks();
+    }
+
+    /// The origin note of the row `label` names, when it has one.
+    fn labelOriginNote(self: *const SettingsWindow, label: HWND) ?[]const u8 {
+        for (std.enums.values(Section)) |section| for (formItemsForSection(section)) |item| {
+            if (item.control_index >= form_field_count) continue;
+            const label_index = item.label_index orelse continue;
+            if (self.field_labels[label_index] != label) continue;
+            const note = self.origin_notes[item.control_index].text();
+            return if (note.len == 0) null else note;
+        };
+        return null;
+    }
+
+    /// A field's MSAA description: that it differs from its default, and
+    /// where its saved value comes from, written to `buf`. Empty for neither.
+    fn fieldDescription(self: *const SettingsWindow, index: usize, differs: bool, buf: []u8) []const u8 {
+        const note = self.origin_notes[index].text();
+        const changed = win32_uia.SettingsControlProvider.changed_from_default_status;
+        return if (differs and note.len != 0)
+            std.fmt.bufPrint(buf, "{s}. {s}.", .{ changed, note }) catch changed
+        else if (differs)
+            changed
+        else if (note.len != 0)
+            std.fmt.bufPrint(buf, "{s}.", .{note}) catch ""
+        else
+            "";
+    }
+
+    /// A form row's label, drawn by the viewport (`SS_OWNERDRAW`): the label
+    /// on the left, in the colours a label takes, and its origin note on the
+    /// right in the same. When the line is too narrow for both, the label is
+    /// shortened, not the note.
+    fn paintFieldLabel(self: *SettingsWindow, draw: *const sys.DRAWITEMSTRUCT) void {
+        const colors = self.theme_adapter.colors;
+        const hdc = draw.hDC;
+        const rect = draw.rcItem;
+        fillSolid(hdc, rect, colors.window_bg);
+        const font: HGDIOBJ = @ptrFromInt(@as(usize, @bitCast(SendMessageW(draw.hwndItem, WM_GETFONT, 0, 0))));
+        const previous_font = if (font) |value| SelectObject(hdc, value) else null;
+        defer {
+            if (previous_font) |value| _ = SelectObject(hdc, value);
+        }
+        _ = sys.SetBkMode(hdc, TRANSPARENT);
+        _ = SetTextColor(hdc, if (sys.IsWindowEnabled(draw.hwndItem) == 0) colors.disabled_text else colors.secondary_text);
+        var label: [256:0]u16 = undefined;
+        const length = GetWindowTextW(draw.hwndItem, &label, @intCast(label.len));
+        var label_right = rect.right;
+        if (self.labelOriginNote(draw.hwndItem)) |note| {
+            // The label keeps its width, up to half the line; the note takes
+            // what is left, its file name shortened in the middle so that the
+            // line number stays (the MSAA description has it whole).
+            const gap = self.px(settings_metrics.space_4);
+            var label_size: RECT = .{ .left = 0, .top = 0, .right = 0, .bottom = 0 };
+            if (length > 0) _ = DrawTextW(hdc, &label, length, &label_size, DT_SINGLELINE | DT_NOPREFIX | DT_CALCRECT);
+            const keep = @min(label_size.right - label_size.left, @divTrunc(rect.right - rect.left - gap, 2));
+            const room = rect.right - rect.left - gap - keep;
+            var note_w: [OriginNote.capacity + 1:0]u16 = undefined;
+            const wide = utf8ToW(&note_w, note);
+            var measured: RECT = .{ .left = 0, .top = 0, .right = 0, .bottom = 0 };
+            _ = DrawTextW(hdc, wide, -1, &measured, DT_SINGLELINE | DT_NOPREFIX | DT_CALCRECT);
+            if (room > 0) {
+                var note_rect = rect;
+                note_rect.left = rect.right - @min(measured.right - measured.left, room);
+                _ = DrawTextW(hdc, wide, -1, &note_rect, DT_SINGLELINE | DT_NOPREFIX | DT_RIGHT | DT_PATH_ELLIPSIS);
+                label_right = note_rect.left - gap;
+            }
+        }
+        if (length > 0) {
+            var label_rect = rect;
+            label_rect.right = label_right;
+            _ = DrawTextW(hdc, &label, length, &label_rect, DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+        }
+    }
+
     /// The config the lists show changed (a reload, a save, a discard, the
     /// window opening): their models are built again when next needed, at
     /// once for a list that is shown. A search keeps the rows it found until
-    /// it runs again, as the other pages keep theirs.
+    /// it runs again, as the other pages keep theirs. The form's origin notes
+    /// are worked out again at once.
     fn referenceConfigChanged(self: *SettingsWindow) void {
         self.reference_stale = true;
         self.keybind_stale = true;
+        self.syncOriginNotes();
         if (self.hwnd == null) return;
         const list = self.sectionList(self.active_section) orelse return;
         self.ensureListModel(list);
@@ -7429,16 +7599,55 @@ fn setAccessibleNameText(service: *IAccPropServices, hwnd: HWND, name: []const u
     return hr >= 0;
 }
 
-/// The MSAA description of a field that differs from its default, or none.
-/// The field's UIA `ItemStatus` says the same; this is for a reader that
-/// takes a standard Edit, Button or ComboBox through MSAA, as NVDA does.
-fn setChangedDescription(service: *IAccPropServices, hwnd: HWND, changed: bool) bool {
-    const hr = if (changed)
-        service.vtbl.SetHwndPropStr(service.asRaw(), hwnd, OBJID_CLIENT, CHILDID_SELF, PROPID_ACC_DESCRIPTION, std.unicode.utf8ToUtf16LeStringLiteral(win32_uia.SettingsControlProvider.changed_from_default_status))
+/// Set a field's MSAA description to `text` (`SettingsWindow.fieldDescription`:
+/// that it differs from its default, and where its saved value comes from),
+/// or clear it for none. The field's UIA `ItemStatus` says the first; this is
+/// for a reader that takes a standard Edit, Button or ComboBox through MSAA,
+/// as NVDA does.
+fn setFieldDescription(service: *IAccPropServices, hwnd: HWND, text: []const u8) bool {
+    var wide: [OriginNote.capacity + 64:0]u16 = undefined;
+    const hr = if (text.len != 0)
+        service.vtbl.SetHwndPropStr(service.asRaw(), hwnd, OBJID_CLIENT, CHILDID_SELF, PROPID_ACC_DESCRIPTION, utf8ToW(&wide, text))
     else
         service.vtbl.ClearHwndProps(service.asRaw(), hwnd, OBJID_CLIENT, CHILDID_SELF, &.{PROPID_ACC_DESCRIPTION}, 1);
-    if (hr < 0) std.log.warn("settings: failed to annotate a field's default state hr=0x{x}", .{@as(u32, @bitCast(hr))});
+    if (hr < 0) std.log.warn("settings: failed to annotate a field's description hr=0x{x}", .{@as(u32, @bitCast(hr))});
     return hr >= 0;
+}
+
+/// A description's hash for `SettingsWindow.described`: 0 for none.
+fn descriptionHash(text: []const u8) u64 {
+    if (text.len == 0) return 0;
+    return std.hash.Wyhash.hash(0, text) | 1;
+}
+
+/// Where a form row's saved value comes from, as its label shows it on the
+/// right: a line of a file, named by the file's name, or the command line
+/// (`writeOriginNote`). Empty for a default, or a value noctty worked out.
+const OriginNote = struct {
+    /// A file name of 255 UTF-16 units is at most 765 bytes of UTF-8, and
+    /// "Set by the theme " and ", line " with the number take under 64.
+    const capacity = 255 * 3 + 64;
+    len: u16 = 0,
+    buf: [capacity]u8 = undefined,
+
+    fn text(self: *const OriginNote) []const u8 {
+        return self.buf[0..self.len];
+    }
+};
+
+/// Write what a form row's label says about `found` (`config.origin`).
+fn writeOriginNote(writer: *std.Io.Writer, found: config_origin.Origin) std.Io.Writer.Error!void {
+    switch (found) {
+        .file => |file| {
+            const name = std.fs.path.basename(file.path);
+            if (file.kind == .theme)
+                try writer.print("Set by the theme {s}, line {d}", .{ name, file.line })
+            else
+                try writer.print("Set in {s}, line {d}", .{ name, file.line });
+        },
+        .cli => try writer.writeAll("Set on the command line"),
+        .default, .derived, .unplaced => {},
+    }
 }
 
 /// `child`'s window rect in `parent`'s client coordinates.
@@ -11594,6 +11803,13 @@ const dialog_test = struct {
         /// A save writes this config file the way the App's does
         /// (`persistSettings`), patching only the keys edited.
         save_path: ?[]const u8 = null,
+        /// After writing `save_path`, the save reads it again, with the files
+        /// it includes, into `config`, and reports the edited keys whose
+        /// value something read later overrides, as the App does
+        /// (`settingsMaskedKeyNames`, `SaveError.SavedButMasked`).
+        reload_from_disk: bool = false,
+        masked: [@import("win32.zig").settings_masked_keys_capacity]u8 = undefined,
+        masked_len: usize = 0,
         /// What the All settings page's "Copy name" handed the App last, and
         /// how many times: a recorder, so no test reaches the clipboard.
         copied: [128]u8 = undefined,
@@ -11694,6 +11910,7 @@ const dialog_test = struct {
                 .previewField = &previewField,
                 .highContrast = &highContrast,
                 .profileChoices = &profileChoices,
+                .maskedKeys = &maskedKeys,
                 .onClosed = &onClosed,
             });
             self.settings.wheel_lines_override = 3;
@@ -11710,6 +11927,11 @@ const dialog_test = struct {
 
         fn copiedText(self: *const Fixture) []const u8 {
             return self.copied[0..self.copied_len];
+        }
+
+        fn maskedKeys(ctx: *anyopaque) ?[]const u8 {
+            const self: *Fixture = @ptrCast(@alignCast(ctx));
+            return if (self.masked_len == 0) null else self.masked[0..self.masked_len];
         }
 
         fn finish(self: *Fixture) void {
@@ -11745,7 +11967,22 @@ const dialog_test = struct {
             self.saved += 1;
             if (self.save_path) |path| {
                 const app = @import("win32.zig");
-                try app.persistSettings(std.testing.allocator, path, pending, app.settingsUserEditedKeys(original, pending), null);
+                const edited = app.settingsUserEditedKeys(original, pending);
+                try app.persistSettings(std.testing.allocator, path, pending, edited, null);
+                if (self.reload_from_disk) {
+                    var reloaded = Config.default(std.testing.allocator) catch return error.ReloadFailed;
+                    read: {
+                        reloaded.loadFile(std.testing.allocator, path) catch break :read;
+                        reloaded.loadRecursiveFiles(std.testing.allocator) catch break :read;
+                        self.masked_len = app.settingsMaskedKeyNames(&self.masked, edited, pending, &reloaded).len;
+                        self.config.deinit();
+                        self.config = reloaded;
+                        if (self.masked_len != 0) return error.SavedButMasked;
+                        return;
+                    }
+                    reloaded.deinit();
+                    return error.ReloadFailed;
+                }
             }
             if (self.reload_then_fail) {
                 // The App's reload during a save shows no preview.
@@ -14637,15 +14874,21 @@ test "settings a save that something overrides names the settings and no log" {
     try std.testing.expect(StatusNote.saved_overridden.takesDetail());
 
     var buf: [1024]u8 = undefined;
-    const named = maskedNotificationBody(&buf, "font-size, theme");
+    const named = maskedNotificationBody(&buf, null, "font-size, theme");
     try std.testing.expect(std.mem.startsWith(u8, named, "font-size, theme: a later config file"));
     // A GUI launch has no log to read.
     try std.testing.expect(std.mem.indexOf(u8, named, "log") == null);
-    const unnamed = maskedNotificationBody(&buf, null);
+    const detailed = maskedNotificationBody(&buf, "font-size (line 2 of included.conf)", "font-size");
+    try std.testing.expect(std.mem.startsWith(u8, detailed, "font-size (line 2 of included.conf): a later config file"));
+    const unnamed = maskedNotificationBody(&buf, null, null);
     try std.testing.expect(std.mem.indexOf(u8, unnamed, "Check the config-file lines") != null);
-    // Names too long for the buffer fall back to the sentence without them.
+    // A detail too long for the buffer gives way to the names alone, and
+    // names too long to the sentence without them.
+    var medium: [200]u8 = undefined;
+    const long_detail = "font-size (line 2 of " ++ "a" ** 200 ++ ".conf)";
+    try std.testing.expect(std.mem.startsWith(u8, maskedNotificationBody(&medium, long_detail, "font-size"), "font-size: a later config file"));
     var small: [16]u8 = undefined;
-    try std.testing.expectEqualStrings(unnamed, maskedNotificationBody(&small, "font-size, theme"));
+    try std.testing.expectEqualStrings(unnamed, maskedNotificationBody(&small, long_detail, "font-size, theme"));
 }
 
 test "settings the Advanced page lists the save target, the config problems and the pending changes" {
@@ -16147,7 +16390,7 @@ test "settings a reset after the file changed under an edit is the default, to s
 const FakeAnnotations = struct {
     service: IAccPropServices = .{ .vtbl = &vtbl },
     fail: bool = false,
-    entries: [96]Entry = undefined,
+    entries: [2 * form_field_count]Entry = undefined,
     count: usize = 0,
 
     const Entry = struct {
@@ -16155,6 +16398,10 @@ const FakeAnnotations = struct {
         name: [96]u8 = undefined,
         name_len: usize = 0,
         described: bool = false,
+        description: [description_capacity]u8 = undefined,
+        description_len: usize = 0,
+
+        const description_capacity = OriginNote.capacity + 64;
     };
 
     const E_OUTOFMEMORY: HRESULT = @bitCast(@as(u32, 0x8007000E));
@@ -16203,14 +16450,19 @@ const FakeAnnotations = struct {
         const record = self.entry(hwnd);
         if (std.meta.eql(prop, PROPID_ACC_NAME)) {
             record.name_len = std.unicode.utf16LeToUtf8(&record.name, std.mem.span(text)) catch 0;
-        } else record.described = true;
+        } else {
+            record.described = true;
+            record.description_len = std.unicode.utf16LeToUtf8(&record.description, std.mem.span(text)) catch 0;
+        }
         return 0;
     }
 
     fn clearHwndProps(raw: *anyopaque, hwnd: HWND, _: u32, _: u32, _: [*]const GUID, _: c_int) callconv(.winapi) HRESULT {
         const self = fromRaw(raw);
         if (self.fail) return E_OUTOFMEMORY;
-        self.entry(hwnd).described = false;
+        const record = self.entry(hwnd);
+        record.described = false;
+        record.description_len = 0;
         return 0;
     }
 
@@ -16222,6 +16474,11 @@ const FakeAnnotations = struct {
     fn describedOf(self: *FakeAnnotations, hwnd: HWND) bool {
         for (self.entries[0..self.count]) |*record| if (record.hwnd == hwnd) return record.described;
         return false;
+    }
+
+    fn descriptionOf(self: *FakeAnnotations, hwnd: HWND) []const u8 {
+        for (self.entries[0..self.count]) |*record| if (record.hwnd == hwnd) return record.description[0..record.description_len];
+        return "";
     }
 
     /// Every Reset button the window has, held or spare, has the MSAA name
@@ -16238,6 +16495,268 @@ const FakeAnnotations = struct {
         }
     }
 };
+
+test "settings an origin note names a file by its name and line, the theme, or the command line" {
+    var buf: [OriginNote.capacity]u8 = undefined;
+    const Case = struct { found: config_origin.Origin, text: []const u8 };
+    for ([_]Case{
+        .{ .found = .{ .file = .{ .path = "C:\\Users\\me\\noctty\\included.conf", .line = 2, .kind = .included } }, .text = "Set in included.conf, line 2" },
+        .{ .found = .{ .file = .{ .path = "C:\\Users\\me\\noctty\\config", .line = 9, .kind = .config } }, .text = "Set in config, line 9" },
+        .{ .found = .{ .file = .{ .path = "C:\\themes\\Nord", .line = 7, .kind = .theme } }, .text = "Set by the theme Nord, line 7" },
+        .{ .found = .{ .cli = 3 }, .text = "Set on the command line" },
+        // A default, and what noctty works out, say nothing: the Reset
+        // button's marker already says whether a value is the default.
+        .{ .found = .default, .text = "" },
+        .{ .found = .{ .derived = .automatic }, .text = "" },
+        .{ .found = .unplaced, .text = "" },
+    }) |case| {
+        var writer: std.Io.Writer = .fixed(&buf);
+        try writeOriginNote(&writer, case.found);
+        try std.testing.expectEqualStrings(case.text, writer.buffered());
+    }
+}
+
+/// The label HWND of form row `index`.
+fn fieldLabelOf(settings: *const SettingsWindow, index: usize) ?HWND {
+    for (std.enums.values(Section)) |section| for (formItemsForSection(section)) |item| {
+        if (item.control_index != index) continue;
+        return settings.field_labels[item.label_index orelse return null];
+    };
+    return null;
+}
+
+test "settings a row says where its saved value comes from, in its label and its MSAA description, worked out once per config" {
+    try dialog_test.onHiddenDesktop(struct {
+        const Painted = struct { settings: *SettingsWindow, label: HWND };
+        fn paintLabel(context: Painted, hdc: HDC, client: RECT) void {
+            const draw: sys.DRAWITEMSTRUCT = .{ .CtlType = 5, .CtlID = 0, .itemID = 0, .itemAction = 1, .itemState = 0, .hwndItem = context.label, .hDC = hdc, .rcItem = client, .itemData = 0 };
+            context.settings.paintFieldLabel(&draw);
+        }
+
+        fn body() !void {
+            const alloc = std.testing.allocator;
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            try tmp.dir.writeFile(.{ .sub_path = "mytheme", .data = "cursor-style = underline\n" });
+            try tmp.dir.writeFile(.{ .sub_path = "included.conf", .data = "\nfont-size = 15\n" });
+            const theme_path = try tmp.dir.realpathAlloc(alloc, "mytheme");
+            defer alloc.free(theme_path);
+            const text = try std.fmt.allocPrint(alloc, "scrollback-limit = 5000\nfont-size = 12\nconfig-file = included.conf\ntheme = {s}\nclipboard-trim-trailing-spaces = true\n", .{theme_path});
+            defer alloc.free(text);
+            try tmp.dir.writeFile(.{ .sub_path = "noctty.conf", .data = text });
+            const path = try tmp.dir.realpathAlloc(alloc, "noctty.conf");
+            defer alloc.free(path);
+
+            var fake: FakeAnnotations = .{};
+            const fixture = try dialog_test.Fixture.prepare(false);
+            defer fixture.finish();
+            try fixture.config.loadFile(alloc, path);
+            try fixture.config.loadRecursiveFiles(alloc);
+            try fixture.config.finalize();
+            try std.testing.expect(fixture.config._diagnostics.empty());
+            const settings = &fixture.settings;
+            settings.annotation_service = &fake.service;
+            try settings.open();
+            dialog_test.makeAllSections(settings);
+
+            const Case = struct { field: HWND, note: []const u8, differs: bool };
+            for ([_]Case{
+                // An included file's line wins over the target's.
+                .{ .field = settings.fields.edit_font_size.?, .note = "Set in included.conf, line 2", .differs = true },
+                .{ .field = settings.fields.edit_scrollback.?, .note = "Set in noctty.conf, line 1", .differs = true },
+                .{ .field = settings.fields.combo_cursor_style.?, .note = "Set by the theme mytheme, line 1", .differs = true },
+                .{ .field = settings.fields.edit_theme.?, .note = "Set in noctty.conf, line 4", .differs = true },
+                // A line that sets the default value is still where it is set.
+                .{ .field = settings.fields.chk_trim_trail.?, .note = "Set in noctty.conf, line 5", .differs = false },
+                .{ .field = settings.fields.edit_bg_opacity.?, .note = "", .differs = false },
+            }) |case| {
+                const index = settings.controlIndex(case.field).?;
+                errdefer std.debug.print("settings origin note of {s}\n", .{field_model.form_fields[index].native.binding});
+                try std.testing.expectEqualStrings(case.note, settings.origin_notes[index].text());
+                try std.testing.expectEqual(case.differs, settings.differs_from_default[index]);
+                var buf: [FakeAnnotations.Entry.description_capacity]u8 = undefined;
+                const expected = if (case.note.len == 0)
+                    ""
+                else if (case.differs)
+                    try std.fmt.bufPrint(&buf, "Changed from the default. {s}.", .{case.note})
+                else
+                    try std.fmt.bufPrint(&buf, "{s}.", .{case.note});
+                try std.testing.expectEqualStrings(expected, fake.descriptionOf(case.field));
+            }
+
+            // The label draws its note at its right end, where a row with no
+            // note has only the window's background.
+            const background = settings.theme_adapter.colors.window_bg;
+            for ([_]struct { field: HWND, noted: bool }{
+                .{ .field = settings.fields.edit_font_size.?, .noted = true },
+                .{ .field = settings.fields.edit_bg_opacity.?, .noted = false },
+            }) |case| {
+                const label = fieldLabelOf(settings, settings.controlIndex(case.field).?).?;
+                var client: RECT = undefined;
+                try std.testing.expect(GetClientRect(label, &client) != 0);
+                const capture = try dialog_test.paintInto(client, Painted{ .settings = settings, .label = label }, paintLabel);
+                defer capture.deinit();
+                const left: RECT = .{ .left = 0, .top = 0, .right = @divTrunc(client.right, 3), .bottom = client.bottom };
+                const right: RECT = .{ .left = client.right - @divTrunc(client.right, 3), .top = 0, .right = client.right, .bottom = client.bottom };
+                try std.testing.expect(capture.bestContrast(left, background) > 3);
+                if (case.noted)
+                    try std.testing.expect(capture.bestContrast(right, background) > 3)
+                else
+                    try std.testing.expect(capture.bestContrast(right, background) < 1.01);
+            }
+
+            // The shown page's labels go through the viewport's WM_DRAWITEM.
+            settings.setActiveSection(.appearance);
+            dialog_test.pump();
+            _ = sys.UpdateWindow(fixture.hwnd());
+            {
+                const label = fieldLabelOf(settings, settings.controlIndex(settings.fields.edit_font_size.?).?).?;
+                try std.testing.expect((@as(u32, @truncate(@as(usize, @bitCast(sys.GetWindowLongPtrW(label, GWL_STYLE))))) & 0x1F) == SS_OWNERDRAW);
+                const rect = childRectIn(fixture.hwnd(), label).?;
+                const capture = try dialog_test.Capture.take(fixture.hwnd());
+                defer capture.deinit();
+                const width = rect.right - rect.left;
+                try std.testing.expect(capture.bestContrast(.{ .left = rect.right - @divTrunc(width, 3), .top = rect.top, .right = rect.right, .bottom = rect.bottom }, background) > 3);
+            }
+
+            // Pages, searches and paints read the notes; none works them out.
+            const lookups = settings.proof_origin_lookups;
+            for (std.enums.values(Section)) |section| {
+                settings.setActiveSection(section);
+                dialog_test.pump();
+            }
+            settings.setActiveSection(.appearance);
+            typeSearch(settings, "font");
+            dialog_test.pump();
+            typeSearch(settings, "");
+            dialog_test.pump();
+            _ = sys.UpdateWindow(fixture.hwnd());
+            try std.testing.expectEqual(lookups, settings.proof_origin_lookups);
+
+            // A new config works them out once more, one per made row, and a
+            // note that changed renews the row's description.
+            try tmp.dir.writeFile(.{ .sub_path = "other.conf", .data = "font-size = 15\n" });
+            const other_path = try tmp.dir.realpathAlloc(alloc, "other.conf");
+            defer alloc.free(other_path);
+            var next = try Config.default(alloc);
+            defer next.deinit();
+            try next.loadFile(alloc, other_path);
+            settings.externalConfigChanged(&next, 2);
+            var made: u32 = 0;
+            for (0..form_field_count) |index| {
+                if (settings.controlHwnd(index) != null) made += 1;
+            }
+            try std.testing.expectEqual(lookups + made, settings.proof_origin_lookups);
+            const font_size = settings.fields.edit_font_size.?;
+            try std.testing.expectEqualStrings("Set in other.conf, line 1", settings.origin_notes[settings.controlIndex(font_size).?].text());
+            try std.testing.expectEqualStrings("Changed from the default. Set in other.conf, line 1.", fake.descriptionOf(font_size));
+            try std.testing.expectEqualStrings("", fake.descriptionOf(settings.fields.edit_scrollback.?));
+        }
+    }.body);
+}
+
+test "settings a long origin note is shortened, and the field's label keeps its place" {
+    try dialog_test.onHiddenDesktop(struct {
+        const Painted = struct { settings: *SettingsWindow, label: HWND };
+        fn paintLabel(context: Painted, hdc: HDC, client: RECT) void {
+            const draw: sys.DRAWITEMSTRUCT = .{ .CtlType = 5, .CtlID = 0, .itemID = 0, .itemAction = 1, .itemState = 0, .hwndItem = context.label, .hDC = hdc, .rcItem = client, .itemData = 0 };
+            context.settings.paintFieldLabel(&draw);
+        }
+
+        fn body() !void {
+            const alloc = std.testing.allocator;
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            // Longer than a note held before review (96 bytes in all).
+            const long_name = "a-config-file-whose-name-is-much-longer-than-the-label-it-is-drawn-beside-and-longer-than-a-note-once-held.conf";
+            try tmp.dir.writeFile(.{ .sub_path = long_name, .data = "font-size = 15\n" });
+            try tmp.dir.writeFile(.{ .sub_path = "noctty.conf", .data = "config-file = " ++ long_name ++ "\n" });
+            const path = try tmp.dir.realpathAlloc(alloc, "noctty.conf");
+            defer alloc.free(path);
+
+            const fixture = try dialog_test.Fixture.prepare(false);
+            defer fixture.finish();
+            try fixture.config.loadFile(alloc, path);
+            try fixture.config.loadRecursiveFiles(alloc);
+            try fixture.config.finalize();
+            const settings = &fixture.settings;
+            try settings.open();
+            const index = settings.controlIndex(settings.fields.edit_font_size.?).?;
+            try std.testing.expectEqualStrings("Set in " ++ long_name ++ ", line 1", settings.origin_notes[index].text());
+            const label = fieldLabelOf(settings, index).?;
+            var client: RECT = undefined;
+            try std.testing.expect(GetClientRect(label, &client) != 0);
+
+            const with_note = try dialog_test.paintInto(client, Painted{ .settings = settings, .label = label }, paintLabel);
+            defer with_note.deinit();
+            const kept = settings.origin_notes[index];
+            settings.origin_notes[index] = .{};
+            const without_note = try dialog_test.paintInto(client, Painted{ .settings = settings, .label = label }, paintLabel);
+            defer without_note.deinit();
+            settings.origin_notes[index] = kept;
+
+            // The label's start is drawn as it is with no note; the note is
+            // in the right half.
+            const start: RECT = .{ .left = 0, .top = 0, .right = settings.px(40), .bottom = client.bottom };
+            try std.testing.expect(without_note.bestContrast(start, settings.theme_adapter.colors.window_bg) > 3);
+            try std.testing.expectEqual(@as(usize, 0), with_note.countDifferent(without_note, start, 0, 0));
+            const right: RECT = .{ .left = @divTrunc(client.right, 2), .top = 0, .right = client.right, .bottom = client.bottom };
+            try std.testing.expect(with_note.bestContrast(right, settings.theme_adapter.colors.window_bg) > 3);
+        }
+    }.body);
+}
+
+test "settings Save of a value an included file overrides writes the target file only, and names the line that wins" {
+    try dialog_test.onHiddenDesktop(struct {
+        fn body() !void {
+            const alloc = std.testing.allocator;
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            const included_before = "\nfont-size = 15\n";
+            try tmp.dir.writeFile(.{ .sub_path = "included.conf", .data = included_before });
+            try tmp.dir.writeFile(.{ .sub_path = "noctty.conf", .data = "font-size = 12\nconfig-file = included.conf\n" });
+            const path = try tmp.dir.realpathAlloc(alloc, "noctty.conf");
+            defer alloc.free(path);
+
+            const fixture = try dialog_test.Fixture.prepare(false);
+            defer fixture.finish();
+            try fixture.config.loadFile(alloc, path);
+            try fixture.config.loadRecursiveFiles(alloc);
+            try std.testing.expect(fixture.config._diagnostics.empty());
+            fixture.save_path = path;
+            fixture.reload_from_disk = true;
+            const settings = &fixture.settings;
+            try settings.open();
+            settings.setActiveSection(.appearance);
+            const field = settings.fields.edit_font_size.?;
+            const index = settings.controlIndex(field).?;
+            // Before any edit, the row says the value in effect is not the
+            // target file's.
+            try std.testing.expectEqualStrings("Set in included.conf, line 2", settings.origin_notes[index].text());
+
+            typeInto(field, "18");
+            settings.save();
+            try std.testing.expectEqual(@as(u32, 1), fixture.saved);
+            // The edit goes to the file Settings saves to, on the line that
+            // set it; the included file is not touched.
+            const after = try tmp.dir.readFileAlloc(alloc, "noctty.conf", 1 << 20);
+            defer alloc.free(after);
+            try std.testing.expectEqualStrings("font-size = 18\nconfig-file = included.conf\n", after);
+            const included_after = try tmp.dir.readFileAlloc(alloc, "included.conf", 1 << 20);
+            defer alloc.free(included_after);
+            try std.testing.expectEqualStrings(included_before, included_after);
+            // The status says the saved value is not used, and which line wins.
+            try std.testing.expectEqual(StatusNote.saved_overridden, settings.status_note);
+            try std.testing.expectEqualStrings(
+                "Saved, but a later config file or command-line option overrides font-size (line 2 of included.conf), so the saved value is not used.",
+                settings.noteText(),
+            );
+            // The row shows the value in effect, and still where it comes from.
+            try std.testing.expectEqual(@as(f32, 15), settings.current.?.@"font-size");
+            try std.testing.expectEqualStrings("Set in included.conf, line 2", settings.origin_notes[index].text());
+        }
+    }.body);
+}
 
 test "settings a Reset button whose MSAA name cannot change serves no other row, and is named on the next try" {
     try dialog_test.onHiddenDesktop(struct {
@@ -16269,10 +16788,12 @@ test "settings a Reset button whose MSAA name cannot change serves no other row,
             try std.testing.expect(waiting > 0);
             // A field reset now keeps the description it had in MSAA.
             const scrollback = settings.fields.edit_scrollback.?;
-            try std.testing.expect(fake.describedOf(scrollback));
+            var kept: [FakeAnnotations.Entry.description_capacity]u8 = undefined;
+            const before = try std.fmt.bufPrint(&kept, "{s}", .{fake.descriptionOf(scrollback)});
+            try std.testing.expectEqualStrings("Changed from the default. Set in changed.ghostty, line 1.", before);
             settings.resetRow(settings.controlIndex(scrollback).?);
             try std.testing.expect(!settings.differs_from_default[settings.controlIndex(scrollback).?]);
-            try std.testing.expect(fake.describedOf(scrollback));
+            try std.testing.expectEqualStrings(before, fake.descriptionOf(scrollback));
 
             // Names can be set again: the next pass gives the rows their
             // buttons, named, and the description follows the reset.
@@ -16285,7 +16806,9 @@ test "settings a Reset button whose MSAA name cannot change serves no other row,
                 try std.testing.expectEqual(settings.differs_from_default[index], settings.reset_buttons[index] != null);
                 if (settings.reset_buttons[index]) |button| try std.testing.expect(sys.IsWindowVisible(button) != 0);
             }
-            try std.testing.expect(!fake.describedOf(scrollback));
+            // The saved value still comes from the file; only that it differs
+            // from the default goes.
+            try std.testing.expectEqualStrings("Set in changed.ghostty, line 1.", fake.descriptionOf(scrollback));
         }
     }.body);
 }
@@ -20777,6 +21300,13 @@ fn viewportProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(
             return 0;
         },
         WM_NOTIFY => if (owner.companionNotify(lParam)) |result| return result,
+        WM_DRAWITEM => if (lParam != 0) {
+            const draw: *const sys.DRAWITEMSTRUCT = @ptrFromInt(@as(usize, @bitCast(lParam)));
+            if (std.mem.indexOfScalar(?HWND, &owner.field_labels, draw.hwndItem) != null) {
+                owner.paintFieldLabel(draw);
+                return 1;
+            }
+        },
         WM_GETOBJECT => if (owner.viewport_uia_provider) |provider| {
             if (win32_uia.returnSettingsControlProvider(hwnd, wParam, lParam, provider)) |result| return result;
         },

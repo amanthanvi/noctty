@@ -12,10 +12,18 @@
 //! A step counts when it applies now (its conditions match the config's
 //! conditional state), when it parsed (the loader left no diagnostic at its
 //! place), and when it sets the key: by name, through a compatibility name
-//! (`Config.compatibility`), or as one of the keys `-e` implies. What the log
-//! cannot see: a value written into a config in memory (a Settings draft, or
-//! `finalize`'s own choices) leaves no step. Given a default config, `of` tells
-//! such a value from the default and calls it `.derived`.
+//! (`Config.compatibility`), or as one of the keys `-e` implies (an `-e` with
+//! a command). What the log cannot see: a value written into a config in
+//! memory (a Settings draft, or `finalize`'s own choices) leaves no step.
+//! Given a default config, `of` tells such a value from the default and calls
+//! it `.derived`.
+//!
+//! Three keys `finalize` sets back to the command line's value over any file
+//! read after the command line (an included file): `command`,
+//! `initial-command` and `default-profile`. For those the command line's step
+//! is the origin whenever the config holds a command-line value for them,
+//! which is what `finalize` applies; every config the app holds has been
+//! finalized.
 
 const std = @import("std");
 const cli_args = @import("../cli/args.zig");
@@ -73,10 +81,27 @@ pub const Derivation = enum {
 /// the key from the default; without it such a value reads as `.default`. A
 /// returned path borrows from `config`.
 pub fn of(config: *const Config, key: Key, defaults: ?*const Config) Origin {
+    return scan(config, key, defaults, false);
+}
+
+/// Where the config files' value of `key` came from: as `of`, with the
+/// command line's arguments left out. For a value the files give but the
+/// command line overrides in this process, which is the value Settings shows
+/// for `default-profile` (`Config.defaultProfileFromFiles`). `.default` when
+/// no file set the key.
+pub fn ofFiles(config: *const Config, key: Key) Origin {
+    return scan(config, key, null, true);
+}
+
+fn scan(config: *const Config, key: Key, defaults: ?*const Config, comptime files_only: bool) Origin {
     var last: ?Origin = null;
-    for (config._replay_steps.items) |step| switch (step) {
-        .arg => |arg| if (stepSets(config, arg.value, arg.location, key)) {
+    // The last command-line step that set the key (`restoredFromCli`).
+    var last_cli: ?Origin = null;
+    const steps = config._replay_steps.items;
+    for (steps, 0..) |step, i| switch (step) {
+        .arg => |arg| if (!(files_only and arg.location == .cli) and stepSets(config, arg.value, arg.location, key)) {
             last = place(config, arg.location, false);
+            if (arg.location == .cli) last_cli = last;
         },
         .conditional_arg => |arg| {
             var theme = false;
@@ -86,17 +111,33 @@ pub fn of(config: *const Config, key: Key, defaults: ?*const Config) Origin {
             } else true;
             if (applies and stepSets(config, arg.arg, arg.location, key)) last = place(config, arg.location, theme);
         },
-        // The arguments after `-e` are its command's, not settings.
+        // The arguments after `-e` are its command's, not settings. An `-e`
+        // with no command after it was refused (the loader noted "missing
+        // command"), and set none of the keys it implies.
         .@"-e" => |location| {
-            if (impliedByE(key)) last = place(config, location, false);
+            const has_command = i + 1 < steps.len and steps[i + 1] == .arg;
+            if (!files_only and has_command and impliedByE(key)) last = place(config, location, false);
             break;
         },
         .expand, .diagnostic => {},
     };
+    if (!files_only) if (last_cli) |found| if (restoredFromCli(config, key)) return found;
     if (last) |found| return found;
     const reference = defaults orelse return .default;
     return switch (key) {
         inline else => |comptime_key| if (config.changed(reference, comptime_key)) .{ .derived = .automatic } else .default,
+    };
+}
+
+/// Whether `finalize` sets `key` back to a value the command line gave it, over
+/// what a file read after the command line set (`Config.finalizeCliLaunch`, and
+/// the `default-profile` the command line names for this process).
+fn restoredFromCli(config: *const Config, key: Key) bool {
+    return switch (key) {
+        .command => config._command_cli != null,
+        .@"initial-command" => config._initial_command_cli != null,
+        .@"default-profile" => config._default_profile_cli != null,
+        else => false,
     };
 }
 
@@ -108,11 +149,31 @@ fn stepSets(config: *const Config, text: []const u8, location: Location, key: Ke
     const name = body[0 .. eq orelse body.len];
     const value: ?[]const u8 = if (eq) |at| body[at + 1 ..] else null;
     if (!setsKey(name, value, key)) return false;
+    // A key whose value is any text cannot refuse one, so a problem noted at
+    // its line is about what the value names (`finalize` checks
+    // `default-profile`, `profile-order` and `profile-hidden`), and the line
+    // set it all the same.
+    if (value != null and takesAnyText(key)) return true;
     // A line that did not parse set nothing; the loader noted it there.
     if (location != .none) for (config._diagnostics.list.items) |diag| {
         if (std.mem.eql(u8, diag.key, name) and samePlace(diag.location, location)) return false;
     };
     return true;
+}
+
+/// Whether `key`'s field takes any text it is given: a string, or a list of
+/// strings.
+fn takesAnyText(key: Key) bool {
+    return switch (key) {
+        inline else => |k| comptime anyText: {
+            const T = @FieldType(Config, @tagName(k));
+            const U = switch (@typeInfo(T)) {
+                .optional => |optional| optional.child,
+                else => T,
+            };
+            break :anyText U == [:0]const u8 or U == []const u8 or U == Config.RepeatableString;
+        },
+    };
 }
 
 /// Whether an argument named `name` with `value` sets `key`, compatibility
@@ -334,6 +395,92 @@ test "origin: -e sets the keys it implies, and its command's words set nothing" 
     try std.testing.expectEqual(Origin{ .cli = 1 }, of(&cfg, .@"initial-command", null));
     try std.testing.expectEqual(Origin{ .cli = 1 }, of(&cfg, .@"quit-after-last-window-closed", null));
     try std.testing.expect(of(&cfg, .@"scrollback-limit", null) == .default);
+}
+
+test "origin: a command-line value finalize restores over an included file is the command line's" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(.{ .sub_path = "x.conf", .data = "command = pwsh.exe\ninitial-command = pwsh.exe\ndefault-profile = pwsh\nfont-size = 15\n" });
+    try tmp.dir.writeFile(.{ .sub_path = "config", .data = "config-file = x.conf\n" });
+    const path = try tmp.dir.realpathAlloc(alloc, "config");
+    defer alloc.free(path);
+    const included_path = try tmp.dir.realpathAlloc(alloc, "x.conf");
+    defer alloc.free(included_path);
+
+    var cfg = try Config.default(alloc);
+    defer cfg.deinit();
+    try cfg.loadFile(alloc, path);
+    var args: TestArgs = .{ .list = &.{ "--command=cmd.exe", "--initial-command=cmd.exe", "--default-profile=cmd", "--font-size=11" } };
+    try cfg.loadIter(alloc, &args);
+    try cfg.loadRecursiveFiles(alloc);
+    try cfg.finalize();
+
+    // The included file is read after the command line; `finalize` puts the
+    // command line's values back for these three, and not for the others.
+    try std.testing.expectEqualStrings("cmd.exe", cfg.command.?.shell);
+    try std.testing.expectEqual(Origin{ .cli = 0 }, of(&cfg, .command, null));
+    try std.testing.expectEqualStrings("cmd.exe", cfg.@"initial-command".?.shell);
+    try std.testing.expectEqual(Origin{ .cli = 1 }, of(&cfg, .@"initial-command", null));
+    try std.testing.expectEqualStrings("cmd", cfg.@"default-profile".?);
+    try std.testing.expectEqual(Origin{ .cli = 2 }, of(&cfg, .@"default-profile", null));
+    // The files' own value, which Settings shows, came from the included file;
+    // a key no file sets has no file origin.
+    try expectFile(ofFiles(&cfg, .@"default-profile"), included_path, 3, .included);
+    try std.testing.expect(ofFiles(&cfg, .@"font-family") == .default);
+    try std.testing.expectEqual(@as(f32, 15), cfg.@"font-size");
+    try expectFile(of(&cfg, .@"font-size", null), included_path, 4, .included);
+}
+
+test "origin: a line finalize reports a problem at still set the key" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(.{ .sub_path = "x.conf", .data = "\ndefault-profile = pwsh\nprofile-order = no profile at all\n" });
+    try tmp.dir.writeFile(.{ .sub_path = "config", .data = "command = cmd.exe\nconfig-file = x.conf\n" });
+    const path = try tmp.dir.realpathAlloc(alloc, "config");
+    defer alloc.free(path);
+    const included_path = try tmp.dir.realpathAlloc(alloc, "x.conf");
+    defer alloc.free(included_path);
+
+    var cfg = try Config.default(alloc);
+    defer cfg.deinit();
+    try cfg.loadFile(alloc, path);
+    try cfg.loadRecursiveFiles(alloc);
+    try cfg.finalize();
+
+    // A config file's `command` leaves `default-profile` unused, and
+    // `profile-order` names nothing: `finalize` says so at their lines.
+    var noted: usize = 0;
+    for (cfg._diagnostics.list.items) |diag| {
+        if (std.mem.eql(u8, diag.key, "default-profile") or std.mem.eql(u8, diag.key, "profile-order")) noted += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 2), noted);
+    try std.testing.expectEqualStrings("pwsh", cfg.@"default-profile".?);
+    try expectFile(of(&cfg, .@"default-profile", null), included_path, 2, .included);
+    try expectFile(of(&cfg, .@"profile-order", null), included_path, 3, .included);
+}
+
+test "origin: rejected -e does not change origins" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(.{ .sub_path = "config", .data = "quit-after-last-window-closed = false\n" });
+    const path = try tmp.dir.realpathAlloc(alloc, "config");
+    defer alloc.free(path);
+
+    var cfg = try Config.default(alloc);
+    defer cfg.deinit();
+    try cfg.loadFile(alloc, path);
+    var args: TestArgs = .{ .list = &.{"-e"} };
+    try cfg.loadIter(alloc, &args);
+    try cfg.finalize();
+    // `-e` with no command is refused: the file's value stays, and so does
+    // its origin.
+    try std.testing.expect(!cfg._diagnostics.empty());
+    try std.testing.expect(!cfg.@"quit-after-last-window-closed");
+    try expectFile(of(&cfg, .@"quit-after-last-window-closed", null), path, 1, .config);
+    try std.testing.expect(of(&cfg, .@"initial-command", null) == .default);
 }
 
 test "origin: a value no step set is derived when it differs from the default" {

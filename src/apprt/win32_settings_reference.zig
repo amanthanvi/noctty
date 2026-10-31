@@ -5,6 +5,7 @@
 
 const std = @import("std");
 const Config = @import("../config/Config.zig");
+const origin = @import("../config/origin.zig");
 const formatter = @import("../config/formatter.zig");
 const help_strings = @import("help_strings");
 const field_model = @import("win32_settings_fields.zig");
@@ -395,6 +396,13 @@ pub const Row = struct {
     differs: bool = false,
     /// The lines of the config file Settings saves to that set the key.
     lines: Lines = .{},
+    /// Where the effective value came from (`config.origin`); a file's path
+    /// is the model's own copy.
+    origin: origin.Origin = .default,
+    /// Whether the key's lines can add up rather than replace one another
+    /// (`accumulates`): the last line is then not always the only one that
+    /// counts.
+    accumulates: bool = false,
 };
 
 pub const Model = struct {
@@ -500,6 +508,15 @@ pub const Model = struct {
                 .search = search_text,
                 .differs = differs,
                 .lines = lines[i],
+                .accumulates = accumulates(key),
+                .origin = switch (savedOrigin(current, key, defaults)) {
+                    .file => |place| .{ .file = .{ .path = try alloc.dupe(u8, place.path), .line = place.line, .kind = place.kind } },
+                    // Only `finalize` gives a key a value no step set, and
+                    // only these keys; any other such value was written into
+                    // the config in memory, which is not where it came from.
+                    .derived => |how| if (resolvedWhenUnset(key)) .{ .derived = how } else .default,
+                    else => |other| other,
+                },
             };
         }
         self.file = if (file_path) |path| try alloc.dupe(u8, path) else null;
@@ -509,8 +526,31 @@ pub const Model = struct {
     }
 
     /// What `row` says about where its key is set, written to `writer`;
-    /// nothing when Settings names no config file and reads none.
+    /// nothing when Settings names no config file and reads none. A value
+    /// that comes from somewhere other than that file (`Row.origin`: a file
+    /// `config-file` names, the theme, another default config file, the
+    /// command line) is named with its file and line, and a line of this file
+    /// that it overrides is said not to take effect.
     pub fn writeLocation(self: *const Model, writer: *std.Io.Writer, row: *const Row) !void {
+        switch (row.origin) {
+            .file => |file| if (self.file == null or !samePath(file.path, self.file.?)) {
+                try writer.print("Set on line {d} of {s}{s}", .{ file.line, file.path, switch (file.kind) {
+                    .included => ", a file config-file names.",
+                    .theme => ", the theme.",
+                    .config => ".",
+                } });
+                return self.writeOverridden(writer, row);
+            },
+            .cli => {
+                try writer.writeAll("Set on the command line.");
+                return self.writeOverridden(writer, row);
+            },
+            .derived => if (self.file != null and self.lines_known and row.lines.count == 0) {
+                return writer.print("Not set in {s}: noctty chose this value when it read the config.", .{self.file.?});
+            },
+            .unplaced => return writer.writeAll("Set, but not in a file or on the command line."),
+            .default => {},
+        }
         const path = self.file orelse {
             if (!self.lines_known) try writer.writeAll("Not known where it is set: Settings could not tell which config file to read.");
             return;
@@ -522,7 +562,78 @@ pub const Model = struct {
             else => try writer.print("Set on {d} lines of {s}, the last on line {d}.", .{ row.lines.count, path, row.lines.last }),
         }
     }
+
+    /// For a value from elsewhere: the line of this file that it overrides,
+    /// or, for a key whose lines can add up, only that this file has one too.
+    /// Whether such a line still counts depends on the lines after it (an
+    /// empty value clears a list; a later `keybind` for the same keys
+    /// replaces it), which the replay log does not say.
+    fn writeOverridden(self: *const Model, writer: *std.Io.Writer, row: *const Row) !void {
+        const path = self.file orelse return;
+        if (!self.lines_known or row.lines.count == 0) return;
+        if (row.accumulates) return writer.print(" {s} also has a setting for it, on line {d}.", .{ path, row.lines.last });
+        try writer.print(" Line {d} of {s} sets it too, and does not take effect.", .{ row.lines.last, path });
+    }
 };
+
+/// Where the value Settings shows for `key` comes from (`config.origin.of`).
+/// When noctty's command line named a `default-profile` for this process,
+/// Settings shows the config files' value instead
+/// (`Config.defaultProfileFromFiles`), which that argument did not set: its
+/// origin is the last file line that set it (`config.origin.ofFiles`).
+pub fn savedOrigin(config: *const Config, key: Key, defaults: ?*const Config) origin.Origin {
+    if (key == .@"default-profile" and config._default_profile_cli != null) return origin.ofFiles(config, key);
+    return origin.of(config, key, defaults);
+}
+
+/// Whether `key`'s lines add up rather than replace one another: a list
+/// (`font-family`, `config-file`, `link`), or a map that each line adds an
+/// entry to (`keybind`, `palette`, `key-remap`, the `profile-*` keys). Packed
+/// flags (`app-notifications`) start from the default on every line, and
+/// replace.
+pub fn accumulates(key: Key) bool {
+    return switch (key) {
+        inline else => |k| comptime typeAccumulates(@FieldType(Config, @tagName(k))),
+    };
+}
+
+fn typeAccumulates(comptime T: type) bool {
+    @setEvalBranchQuota(20000);
+    const U = switch (@typeInfo(T)) {
+        .optional => |optional| optional.child,
+        else => T,
+    };
+    if (@typeInfo(U) != .@"struct") return false;
+    const name = @typeName(U);
+    for ([_][]const u8{ "Repeatable", "profile_map", "Keybinds", "Palette", "RemapSet", "QuickSelectPatterns" }) |part| {
+        if (std.mem.indexOf(u8, name, part) != null) return true;
+    }
+    return false;
+}
+
+test "settings reference knows which keys' lines add up" {
+    for ([_]Key{ .@"font-family", .@"config-file", .keybind, .palette, .@"key-remap", .@"quick-select-patterns", .@"profile-command", .env, .link, .@"command-palette-entry", .input }) |key| {
+        errdefer std.debug.print("expected {s} to accumulate\n", .{@tagName(key)});
+        try testing.expect(accumulates(key));
+    }
+    for ([_]Key{ .@"font-size", .@"window-padding-x", .@"app-notifications", .theme, .command, .background, .@"default-profile", .@"cursor-style" }) |key| {
+        errdefer std.debug.print("expected {s} to replace\n", .{@tagName(key)});
+        try testing.expect(!accumulates(key));
+    }
+}
+
+/// Whether two Windows paths name the same file as written: letters in any
+/// case, and `/` for `\`. The loader and Settings each name the config file
+/// by its absolute path, but not always with the same letters.
+fn samePath(a: []const u8, b: []const u8) bool {
+    if (a.len != b.len) return false;
+    for (a, b) |x, y| {
+        const nx = if (x == '/') '\\' else std.ascii.toLower(x);
+        const ny = if (y == '/') '\\' else std.ascii.toLower(y);
+        if (nx != ny) return false;
+    }
+    return true;
+}
 
 /// The value as a row shows it: the first value, and how many more there
 /// are; "not set" for none.
@@ -752,4 +863,195 @@ test "settings reference finds where a BOM or UTF-16 config sets a key, and @mod
     var writer: std.Io.Writer = .fixed(&buf);
     try model.writeLocation(&writer, &model.rows[index(.@"font-size")]);
     try testing.expectEqualStrings("Not set in f.", writer.buffered());
+}
+
+/// Command-line arguments with the places the loader gives them.
+const TestArgs = struct {
+    list: []const []const u8,
+    at: usize = 0,
+
+    pub fn next(self: *TestArgs) ?[]const u8 {
+        if (self.at >= self.list.len) return null;
+        defer self.at += 1;
+        return self.list[self.at];
+    }
+
+    pub fn location(self: *const TestArgs, _: std.mem.Allocator) std.mem.Allocator.Error!?@import("../cli/diagnostics.zig").Location {
+        return .{ .cli = self.at - 1 };
+    }
+};
+
+test "settings reference says where a value comes from: an included file, the theme, the command line, and the line of this file it overrides" {
+    const alloc = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(.{ .sub_path = "mytheme", .data = "background = #101010\n" });
+    try tmp.dir.writeFile(.{ .sub_path = "included.conf", .data = "\nfont-size = 15\nkeybind = ctrl+shift+y=new_tab\n" });
+    const theme_path = try tmp.dir.realpathAlloc(alloc, "mytheme");
+    defer alloc.free(theme_path);
+    const text = try std.fmt.allocPrint(alloc, "font-size = 12\nconfig-file = included.conf\ntheme = {s}\nkeybind = ctrl+shift+u=new_tab\n", .{theme_path});
+    defer alloc.free(text);
+    try tmp.dir.writeFile(.{ .sub_path = "config", .data = text });
+    const path = try tmp.dir.realpathAlloc(alloc, "config");
+    defer alloc.free(path);
+    const included_path = try tmp.dir.realpathAlloc(alloc, "included.conf");
+    defer alloc.free(included_path);
+
+    var current = try Config.default(alloc);
+    defer current.deinit();
+    try current.loadFile(alloc, path);
+    var args: TestArgs = .{ .list = &.{"--scrollback-limit=7"} };
+    try current.loadIter(alloc, &args);
+    try current.loadRecursiveFiles(alloc);
+    try current.finalize();
+    var defaults = try Config.default(alloc);
+    defer defaults.deinit();
+
+    // Settings names the file in other letters than the loader did.
+    const named = try std.ascii.allocUpperString(alloc, path);
+    defer alloc.free(named);
+    const extra: [key_count][]const u8 = @splat("");
+    var model: Model = .{};
+    defer model.deinit();
+    try model.build(alloc, &current, &defaults, named, .{ .bytes = text }, &extra);
+
+    var buf: [1024]u8 = undefined;
+    var expected: [1024]u8 = undefined;
+    const Case = struct { key: Key, text: []const u8 };
+    for ([_]Case{
+        .{ .key = .@"font-size", .text = try std.fmt.bufPrint(expected[0..512], "Set on line 2 of {s}, a file config-file names. Line 1 of {s} sets it too, and does not take effect.", .{ included_path, named }) },
+        .{ .key = .background, .text = try std.fmt.bufPrint(expected[512..], "Set on line 1 of {s}, the theme.", .{theme_path}) },
+    }) |case| {
+        errdefer std.debug.print("settings reference origin of {s}\n", .{@tagName(case.key)});
+        var writer: std.Io.Writer = .fixed(&buf);
+        try model.writeLocation(&writer, &model.rows[index(case.key)]);
+        try testing.expectEqualStrings(case.text, writer.buffered());
+    }
+    var writer: std.Io.Writer = .fixed(&buf);
+    try model.writeLocation(&writer, &model.rows[index(.@"scrollback-limit")]);
+    try testing.expectEqualStrings("Set on the command line.", writer.buffered());
+    // A key whose lines can add up: the included file's line is the last
+    // one, and this file's is only said to be there, for whether it still
+    // counts depends on what came after it.
+    writer = .fixed(&buf);
+    try model.writeLocation(&writer, &model.rows[index(.keybind)]);
+    try testing.expectEqualStrings(try std.fmt.bufPrint(&expected, "Set on line 3 of {s}, a file config-file names. {s} also has a setting for it, on line 4.", .{ included_path, named }), writer.buffered());
+    // A line of the file itself is said as before.
+    writer = .fixed(&buf);
+    try model.writeLocation(&writer, &model.rows[index(.theme)]);
+    try testing.expectEqualStrings(try std.fmt.bufPrint(&expected, "Set on line 3 of {s}.", .{named}), writer.buffered());
+    // A value `finalize` works out, which no line sets: the keys it fills in
+    // even in a test build.
+    var derived: usize = 0;
+    for (resolved_when_unset) |key| if (model.rows[index(key)].origin == .derived) {
+        derived += 1;
+        writer = .fixed(&buf);
+        try model.writeLocation(&writer, &model.rows[index(key)]);
+        try testing.expectEqualStrings(try std.fmt.bufPrint(&expected, "Not set in {s}: noctty chose this value when it read the config.", .{named}), writer.buffered());
+    };
+    try testing.expect(derived > 0);
+    // Any other key's value no step set reads as the default.
+    for (keys, 0..) |key, i| if (model.rows[i].origin == .derived) try testing.expect(resolvedWhenUnset(key));
+}
+
+test "settings reference does not claim a reset accumulating assignment still contributes" {
+    const alloc = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    // The included file clears both lists the config file added to.
+    try tmp.dir.writeFile(.{ .sub_path = "included.conf", .data = "keybind = clear\nfont-family =\n" });
+    const text = "keybind = ctrl+shift+u=new_tab\nfont-family = Cascadia Code\nconfig-file = included.conf\n";
+    try tmp.dir.writeFile(.{ .sub_path = "config", .data = text });
+    const path = try tmp.dir.realpathAlloc(alloc, "config");
+    defer alloc.free(path);
+    const included_path = try tmp.dir.realpathAlloc(alloc, "included.conf");
+    defer alloc.free(included_path);
+
+    var current = try Config.default(alloc);
+    defer current.deinit();
+    try current.loadFile(alloc, path);
+    try current.loadRecursiveFiles(alloc);
+    try current.finalize();
+    try testing.expectEqual(@as(usize, 0), current.keybind.set.bindings.count());
+    try testing.expectEqual(@as(usize, 0), current.@"font-family".list.items.len);
+
+    const extra: [key_count][]const u8 = @splat("");
+    var model: Model = .{};
+    defer model.deinit();
+    try model.build(alloc, &current, null, path, .{ .bytes = text }, &extra);
+    var buf: [1024]u8 = undefined;
+    var expected: [1024]u8 = undefined;
+    const Case = struct { key: Key, included_line: usize, line: usize };
+    for ([_]Case{
+        .{ .key = .keybind, .included_line = 1, .line = 1 },
+        .{ .key = .@"font-family", .included_line = 2, .line = 2 },
+    }) |case| {
+        errdefer std.debug.print("settings reference reset of {s}\n", .{@tagName(case.key)});
+        var writer: std.Io.Writer = .fixed(&buf);
+        try model.writeLocation(&writer, &model.rows[index(case.key)]);
+        try testing.expectEqualStrings(try std.fmt.bufPrint(&expected, "Set on line {d} of {s}, a file config-file names. {s} also has a setting for it, on line {d}.", .{ case.included_line, included_path, path, case.line }), writer.buffered());
+    }
+}
+
+test "settings reference saved default-profile keeps its included-file origin under a CLI override" {
+    const alloc = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    // The config file names A, a file it includes names B, and noctty's
+    // command line names C.
+    try tmp.dir.writeFile(.{ .sub_path = "included.conf", .data = "default-profile = pwsh.exe\n" });
+    const text = "font-size = 12\ndefault-profile = cmd.exe\nconfig-file = included.conf\n";
+    try tmp.dir.writeFile(.{ .sub_path = "config", .data = text });
+    const path = try tmp.dir.realpathAlloc(alloc, "config");
+    defer alloc.free(path);
+    const included_path = try tmp.dir.realpathAlloc(alloc, "included.conf");
+    defer alloc.free(included_path);
+
+    var current = try Config.default(alloc);
+    defer current.deinit();
+    try current.loadFile(alloc, path);
+    var args: TestArgs = .{ .list = &.{ "--default-profile=user:py312", "--font-size=14" } };
+    try current.loadIter(alloc, &args);
+    try current.loadRecursiveFiles(alloc);
+    try current.finalize();
+    // The command line's value is the one in effect in this process, but
+    // Settings shows, and saves over, the files': B, the included file's,
+    // read last. That is where it comes from, not the config file's A.
+    try testing.expectEqualStrings("user:py312", current.@"default-profile".?);
+    try testing.expectEqual(origin.Origin{ .cli = 0 }, origin.of(&current, .@"default-profile", null));
+    try testing.expectEqualStrings("pwsh.exe", current.defaultProfileFromFiles().?);
+    const shown = savedOrigin(&current, .@"default-profile", null);
+    try testing.expect(shown == .file);
+    try testing.expectEqualStrings(included_path, shown.file.path);
+    try testing.expectEqual(@as(usize, 1), shown.file.line);
+    // Any other key the command line sets keeps that origin.
+    try testing.expectEqual(@as(usize, 1), savedOrigin(&current, .@"font-size", null).cli);
+
+    const extra: [key_count][]const u8 = @splat("");
+    var model: Model = .{};
+    defer model.deinit();
+    try model.build(alloc, &current, null, path, .{ .bytes = text }, &extra);
+    var buf: [1024]u8 = undefined;
+    var expected: [1024]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buf);
+    try model.writeLocation(&writer, &model.rows[index(.@"default-profile")]);
+    try testing.expectEqualStrings(try std.fmt.bufPrint(&expected, "Set on line 1 of {s}, a file config-file names. Line 2 of {s} sets it too, and does not take effect.", .{ included_path, path }), writer.buffered());
+
+    // With no `default-profile` line in the config file, the included file's
+    // line is still named, not "Not set".
+    const bare = "config-file = included.conf\n";
+    try tmp.dir.writeFile(.{ .sub_path = "config", .data = bare });
+    var only_included = try Config.default(alloc);
+    defer only_included.deinit();
+    try only_included.loadFile(alloc, path);
+    var again: TestArgs = .{ .list = &.{"--default-profile=user:py312"} };
+    try only_included.loadIter(alloc, &again);
+    try only_included.loadRecursiveFiles(alloc);
+    try only_included.finalize();
+    var bare_model: Model = .{};
+    defer bare_model.deinit();
+    try bare_model.build(alloc, &only_included, null, path, .{ .bytes = bare }, &extra);
+    writer = .fixed(&buf);
+    try bare_model.writeLocation(&writer, &bare_model.rows[index(.@"default-profile")]);
+    try testing.expectEqualStrings(try std.fmt.bufPrint(&expected, "Set on line 1 of {s}, a file config-file names.", .{included_path}), writer.buffered());
 }
