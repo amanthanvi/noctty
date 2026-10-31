@@ -6064,6 +6064,15 @@ test "-e still wins in a copy of the config, finalized again" {
     try testing.expectEqualStrings("cmd.exe", shallow._e_command.?[0]);
 }
 
+test "a refused -e leaves an accepted --initial-command= before it in force" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    var cfg = try testLoadDefaultProfile(alloc, "", &.{ "--initial-command=cmd.exe", "-e" }, "initial-command = pwsh.exe\n");
+    defer cfg.deinit();
+    try testing.expectEqualStrings("cmd.exe", cfg._initial_command_cli.?);
+    try testing.expectEqualStrings("cmd.exe", cfg.@"initial-command".?.shell);
+}
+
 test "a refused --initial-command= leaves -e its place" {
     const testing = std.testing;
     const alloc = testing.allocator;
@@ -7311,9 +7320,6 @@ pub fn parseManuallyHook(
     }
 
     if (std.mem.eql(u8, arg, "-e")) {
-        // `-e` comes after any `--initial-command=` and wins over it.
-        self._initial_command_cli = null;
-
         // Add the special -e marker. This prevents:
         // (1) config-file from adding args to the end (see #2908)
         // (2) dark/light theme from making this conditional
@@ -7346,6 +7352,10 @@ pub fn parseManuallyHook(
 
             return false;
         }
+
+        // `-e` comes after any `--initial-command=` and wins over it, when it
+        // has a command: a refused `-e` changes nothing.
+        self._initial_command_cli = null;
 
         // See "initial-command" docs for the implied configurations and why.
         self._e_command = command.items;

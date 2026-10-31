@@ -13,10 +13,10 @@
 //! conditional state), when it parsed (the loader left no diagnostic at its
 //! place), and when it sets the key: by name, through a compatibility name
 //! (`Config.compatibility`), or as one of the keys `-e` implies (an `-e` with
-//! a command). What the log cannot see: a value written into a config in
-//! memory (a Settings draft, or `finalize`'s own choices) leaves no step.
-//! Given a default config, `of` tells such a value from the default and calls
-//! it `.derived`.
+//! a command; `shell-integration` only when `-e` made it `detect`). What the
+//! log cannot see: a value written into a config in memory (a Settings draft,
+//! or `finalize`'s own choices) leaves no step. Given a default config, `of`
+//! tells such a value from the default and calls it `.derived`.
 //!
 //! Three keys `finalize` sets back to the command line's value over any file
 //! read after the command line (an included file): `command`,
@@ -118,7 +118,7 @@ fn scan(config: *const Config, key: Key, defaults: ?*const Config, comptime file
         // command"), and set none of the keys it implies.
         .@"-e" => |location| {
             const has_command = i + 1 < steps.len and steps[i + 1] == .arg;
-            if (!files_only and has_command and impliedByE(key)) last = place(config, location, false);
+            if (!files_only and has_command and setByE(config, key)) last = place(config, location, false);
             break;
         },
         .expand, .diagnostic => {},
@@ -216,9 +216,16 @@ const compatibility = [_]Compatibility{
     .{ .name = "bold-is-bright", .keys = &.{.@"bold-color"}, .when = .truthy },
 };
 
-/// The keys `-e` sets (see `command`'s documentation). It also turns a
-/// `shell-integration` other than `none` into `detect`; that one keeps the
-/// origin of its own line.
+/// Whether an `-e` with a command set `key` (`Config.applyECommand`): the
+/// keys it always sets, and `shell-integration` unless that is `none`, which
+/// `-e` leaves as it is. `finalize` applies `-e` again over every file, so
+/// the value in `config` is the one `-e` left.
+fn setByE(config: *const Config, key: Key) bool {
+    if (key == .@"shell-integration") return config.@"shell-integration" != .none;
+    return impliedByE(key);
+}
+
+/// The keys `-e` always sets (see `initial-command`'s documentation).
 fn impliedByE(key: Key) bool {
     return switch (key) {
         .@"initial-command",
@@ -601,6 +608,64 @@ test "origin: -e wins over an included file with or without a theme, and is name
         try std.testing.expectEqualStrings("pwsh.exe", cfg.@"initial-command".?.shell);
         try expectFile(of(&cfg, .@"quit-after-last-window-closed", null), included_path, 1, .included);
         try expectFile(of(&cfg, .@"initial-command", null), included_path, 2, .included);
+    }
+}
+
+test "origin: a refused -e leaves an accepted --initial-command= the origin, with or without a theme" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(.{ .sub_path = "x.conf", .data = "initial-command = pwsh.exe\n" });
+    try tmp.dir.writeFile(.{ .sub_path = "mytheme", .data = "background = #101010\n" });
+    try tmp.dir.writeFile(.{ .sub_path = "config", .data = "\n" });
+    const path = try tmp.dir.realpathAlloc(alloc, "config");
+    defer alloc.free(path);
+    const theme_path = try tmp.dir.realpathAlloc(alloc, "mytheme");
+    defer alloc.free(theme_path);
+    const themed = try std.fmt.allocPrint(alloc, "config-file = x.conf\ntheme = {s}\n", .{theme_path});
+    defer alloc.free(themed);
+
+    for ([_][]const u8{ "config-file = x.conf\n", themed }) |text| {
+        var cfg = try loadWithArgs(alloc, tmp.dir, path, text, &.{ "--initial-command=cmd.exe", "-e" });
+        defer cfg.deinit();
+        try std.testing.expectEqualStrings("cmd.exe", cfg.@"initial-command".?.shell);
+        try std.testing.expectEqual(Origin{ .cli = 0 }, of(&cfg, .@"initial-command", null));
+    }
+}
+
+test "origin: -e's shell-integration is -e's unless it is none, with or without a theme" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(.{ .sub_path = "mytheme", .data = "background = #101010\n" });
+    try tmp.dir.writeFile(.{ .sub_path = "config", .data = "\n" });
+    const path = try tmp.dir.realpathAlloc(alloc, "config");
+    defer alloc.free(path);
+    const theme_path = try tmp.dir.realpathAlloc(alloc, "mytheme");
+    defer alloc.free(theme_path);
+    const themed = try std.fmt.allocPrint(alloc, "config-file = x.conf\ntheme = {s}\n", .{theme_path});
+    defer alloc.free(themed);
+
+    const Case = struct { include: []const u8, want: Config.ShellIntegration, by_e: bool };
+    for ([_]Case{
+        // `-e` turns `fish` into `detect`, and is where the value came from.
+        .{ .include = "shell-integration = fish\n", .want = .detect, .by_e = true },
+        // `-e` leaves `none`, and the include's line stands.
+        .{ .include = "shell-integration = none\n", .want = .none, .by_e = false },
+    }) |case| {
+        try tmp.dir.writeFile(.{ .sub_path = "x.conf", .data = case.include });
+        const x_path = try tmp.dir.realpathAlloc(alloc, "x.conf");
+        defer alloc.free(x_path);
+        for ([_][]const u8{ "config-file = x.conf\n", themed }) |text| {
+            errdefer std.debug.print("origin: -e shell-integration case {s}", .{case.include});
+            var cfg = try loadWithArgs(alloc, tmp.dir, path, text, &.{ "-e", "cmd.exe" });
+            defer cfg.deinit();
+            try std.testing.expectEqual(case.want, cfg.@"shell-integration");
+            if (case.by_e)
+                try std.testing.expectEqual(Origin{ .cli = 0 }, of(&cfg, .@"shell-integration", null))
+            else
+                try expectFile(of(&cfg, .@"shell-integration", null), x_path, 1, .included);
+        }
     }
 }
 

@@ -1065,6 +1065,55 @@ test "settings reference default-profile's shown value and location, with and wi
     }
 }
 
+test "settings reference names -e for the shell-integration it set, and the file for a none it left" {
+    const alloc = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(.{ .sub_path = "mytheme", .data = "background = #101010\n" });
+    const theme_path = try tmp.dir.realpathAlloc(alloc, "mytheme");
+    defer alloc.free(theme_path);
+    try tmp.dir.writeFile(.{ .sub_path = "config", .data = "\n" });
+    const path = try tmp.dir.realpathAlloc(alloc, "config");
+    defer alloc.free(path);
+    const themed = try std.fmt.allocPrint(alloc, "config-file = included.conf\ntheme = {s}\n", .{theme_path});
+    defer alloc.free(themed);
+
+    const Case = struct { include: []const u8, by_e: bool };
+    for ([_]Case{
+        .{ .include = "shell-integration = fish\n", .by_e = true },
+        .{ .include = "shell-integration = none\n", .by_e = false },
+    }) |case| {
+        try tmp.dir.writeFile(.{ .sub_path = "included.conf", .data = case.include });
+        const included_path = try tmp.dir.realpathAlloc(alloc, "included.conf");
+        defer alloc.free(included_path);
+        for ([_][]const u8{ "config-file = included.conf\n", themed }) |text| {
+            errdefer std.debug.print("settings reference -e shell-integration case {s}", .{case.include});
+            try tmp.dir.writeFile(.{ .sub_path = "config", .data = text });
+            var current = try Config.default(alloc);
+            defer current.deinit();
+            try current.loadFile(alloc, path);
+            var args: TestArgs = .{ .list = &.{ "-e", "cmd.exe" } };
+            try current.loadIter(alloc, &args);
+            try current.loadRecursiveFiles(alloc);
+            try current.finalize();
+
+            const extra: [key_count][]const u8 = @splat("");
+            var model: Model = .{};
+            defer model.deinit();
+            try model.build(alloc, &current, null, path, .{ .bytes = text }, &extra);
+            var buf: [1024]u8 = undefined;
+            var expected: [1024]u8 = undefined;
+            var writer: std.Io.Writer = .fixed(&buf);
+            try model.writeLocation(&writer, &model.rows[index(.@"shell-integration")]);
+            const want = if (case.by_e)
+                "Set on the command line."
+            else
+                try std.fmt.bufPrint(&expected, "Set on line 1 of {s}, a file config-file names.", .{included_path});
+            try testing.expectEqualStrings(want, writer.buffered());
+        }
+    }
+}
+
 test "settings reference saved default-profile keeps its included-file origin under a CLI override" {
     const alloc = testing.allocator;
     var tmp = testing.tmpDir(.{});
