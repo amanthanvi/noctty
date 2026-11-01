@@ -90,7 +90,6 @@ const configpkg = @import("../../config.zig");
 const configuredHostWindowPosition = win32.configuredHostWindowPosition;
 const currentInstallDir = win32.currentInstallDir;
 const darkTheme = win32.darkTheme;
-const defaultProfileForKey = win32.defaultProfileForKey;
 const default_title = win32.default_title;
 const deinitImeWindowFormsTracePath = win32.deinitImeWindowFormsTracePath;
 const desiredMoveIndex = win32.desiredMoveIndex;
@@ -123,7 +122,6 @@ const isSafeStartupCwd = win32.isSafeStartupCwd;
 const isSystemDarkMode = win32.isSystemDarkMode;
 const jumpListRebuildThreadMain = win32.jumpListRebuildThreadMain;
 const keepExplicitWorkingDirectory = win32.keepExplicitWorkingDirectory;
-const keepProfileSources = win32.keepProfileSources;
 const labels = @import("labels.zig");
 const lastError = child_window.lastError;
 const launcherQuickSlotAssignmentNeedsChange = win32.launcherQuickSlotAssignmentNeedsChange;
@@ -227,10 +225,8 @@ const shouldResetNewTabWorkingDirectory = win32.shouldResetNewTabWorkingDirector
 const shouldUseIntegratedTitlebar = win32.shouldUseIntegratedTitlebar;
 const splitDirectionFromAction = win32.splitDirectionFromAction;
 const splitTreeEquivalent = win32.splitTreeEquivalent;
-const sshProfileAlias = win32.sshProfileAlias;
 const startupHostWindowStyle = win32.startupHostWindowStyle;
 const std = @import("std");
-const storedProfileKeyEquals = win32.storedProfileKeyEquals;
 const suppressStartupLoaderErrorDialogs = win32.suppressStartupLoaderErrorDialogs;
 const surfaceActivationNeedsHostSync = win32.surfaceActivationNeedsHostSync;
 const surfaceFocusStateChanged = win32.surfaceFocusStateChanged;
@@ -309,7 +305,6 @@ const createTestHostWindow = win32.createTestHostWindow;
 const lightTheme = win32.lightTheme;
 const runOnHiddenDesktop = win32.runOnHiddenDesktop;
 const settingChangeAffectsTheme = win32.settingChangeAffectsTheme;
-const settingsDefaultProfileOutcome = win32.settingsDefaultProfileOutcome;
 const settingsDraftProfileLabel = win32.settingsDraftProfileLabel;
 const terminalAccessibilityCapture = win32.terminalAccessibilityCapture;
 const terminalAccessibilityDeferProviderRelease = win32.terminalAccessibilityDeferProviderRelease;
@@ -5191,7 +5186,7 @@ pub const App = struct {
     /// except an SSH profile's (`keepExplicitWorkingDirectory`).
     /// That rebuild replays the files as they were last read, which during a
     /// palette theme preview is newer than the app config's profiles and
-    /// launch (`keepProfileSources`), so those are put back after it; the
+    /// launch (`pane_launch.keepSources`), so those are put back after it; the
     /// arguments cannot set any of them (`forwardedKeyAllowed`).
     pub fn applyNewWindowLaunch(
         self: *const App,
@@ -5199,7 +5194,7 @@ pub const App = struct {
         arguments: ?[]const [:0]const u8,
     ) !?*const windows_shell.Profile {
         try applyNewWindowArguments(self.core_app.alloc, config, arguments);
-        if (arguments) |argv| if (argv.len > 0) try keepProfileSources(config, &self.config);
+        if (arguments) |argv| if (argv.len > 0) try configpkg.pane_launch.keepSources(config, &self.config);
         const forwarded_directory = if (arguments) |argv| forwardedArgvSetsKey(argv, "working-directory") else false;
         const directory = config.@"working-directory";
         const profile = try self.applyDefaultProfileLaunch(config);
@@ -5220,7 +5215,7 @@ pub const App = struct {
     pub fn noteProfileLaunch(self: *App, surface: *Surface, profile: *const windows_shell.Profile) !void {
         try appendOwnedString(self.core_app.alloc, &surface.launch_profile_key, profile.key);
         surface.launched_ssh = profile.kind == .ssh;
-        if (sshProfileAlias(profile)) |alias| {
+        if (windows_shell.sshProfileAlias(profile)) |alias| {
             try appendOwnedString(self.core_app.alloc, &surface.tab_title_override, alias);
         }
     }
@@ -5376,7 +5371,7 @@ pub const App = struct {
         source: *Surface,
     ) !?[]const u8 {
         const key = source.launch_profile_key orelse return null;
-        const profile = defaultProfileForKey(config, key) orelse profile: {
+        const profile = configpkg.pane_launch.defaultProfileForKey(config, key) orelse profile: {
             const host = source.host orelse return null;
             break :profile (try host.profileForKey(key)) orelse return null;
         };
@@ -5394,7 +5389,7 @@ pub const App = struct {
         key: []const u8,
         temporary: *?[]windows_shell.Profile,
     ) !?*const windows_shell.Profile {
-        if (defaultProfileForKey(&self.config, key)) |profile| return profile;
+        if (configpkg.pane_launch.defaultProfileForKey(&self.config, key)) |profile| return profile;
         if (source_host) |host| return try host.profileForKey(key);
         const profiles = try listProfilesForConfig(self.core_app.alloc, &self.config, windows_shell.listProfiles);
         temporary.* = profiles;
@@ -5430,7 +5425,7 @@ pub const App = struct {
             else => null,
         };
 
-        const surface_title = sshProfileAlias(profile) orelse profile.label;
+        const surface_title = windows_shell.sshProfileAlias(profile) orelse profile.label;
         const title_w = try std.unicode.utf8ToUtf16LeAllocZ(self.core_app.alloc, surface_title);
         defer self.core_app.alloc.free(title_w);
         const surface = try self.createWindowSurface(&config, title_w.ptr, .{
@@ -5895,8 +5890,8 @@ pub const App = struct {
     pub fn defaultShellProfileIndex(self: *const App, profiles: []const windows_shell.Profile) ?usize {
         // A `default-profile` the picker does not show (hidden) leaves the
         // choice to the caller rather than to its command's shell.
-        if (!self.config._command_defaulted or self.config._default_profile != null) return null;
-        return windows_shell.profileIndexForDefaultCommand(profiles, self.config.command orelse return null);
+        if (configpkg.pane_launch.defaultProfile(&self.config) != null) return null;
+        return windows_shell.profileIndexForDefaultCommand(profiles, configpkg.pane_launch.nocttyCommand(&self.config) orelse return null);
     }
 
     pub fn applyLauncherQuickSlotPreferences(self: *App, profiles: []windows_shell.Profile) void {
@@ -5917,7 +5912,7 @@ pub const App = struct {
         var duplicate_slot: ?usize = null;
         for (self.launcher_quick_slot_keys, 0..) |existing, index| {
             if (existing) |value| {
-                if (storedProfileKeyEquals(value, key)) {
+                if (windows_shell.storedProfileKeyEquals(value, key)) {
                     duplicate_slot = index;
                     break;
                 }
@@ -9820,49 +9815,59 @@ pub const App = struct {
 };
 
 test "win32 Settings' profile choices follow what the loaded config made of the value" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
     const alloc = std.testing.allocator;
+    const fixtures = configpkg.pane_launch.fixtures;
+    // No window, so no window's list at all.
     var app: App = undefined;
     app.registry.hosts = .empty;
-    app.config = try configpkg.Config.default(alloc);
-    defer app.config.deinit();
-    const arena = app.config._arena.?.allocator();
-    app.config.@"default-profile" = try arena.dupeZ(u8, "ssh:box");
 
-    // Looked up and not found (no ssh.exe here): not found, not "SSH: box",
-    // with no window's list at all.
-    app.config._default_profile_failure = .not_found;
-    var failed = try settingsProfileChoicesThunk(&app, alloc, "ssh:box", null, false);
-    defer failed.deinit(alloc);
-    try std.testing.expect(failed.saved_label == null);
-    try std.testing.expect(failed.saved_not_found);
+    // Looked up and not found (the test machine has no ssh.exe): not found,
+    // not "SSH: box".
+    {
+        app.config = try fixtures.load(alloc, .{ .file = "default-profile = ssh:box\n" });
+        defer app.config.deinit();
+        var failed = try settingsProfileChoicesThunk(&app, alloc, "ssh:box", null, false);
+        defer failed.deinit(alloc);
+        try std.testing.expect(failed.saved_label == null);
+        try std.testing.expect(failed.saved_not_found);
+    }
 
     // Visual Studio did not answer: apart from every row, and not missing.
-    app.config.@"default-profile" = try arena.dupeZ(u8, "vs:newest:cmd");
-    app.config._default_profile_failure = .unavailable;
-    try std.testing.expect(settingsDefaultProfileOutcome(&app.config, "vs:newest:cmd") == .unavailable);
-    try std.testing.expect(settingsDefaultProfileOutcome(&app.config, "vs:6bb7cfd9:cmd") == .untried);
-    var unavailable = try settingsProfileChoicesThunk(&app, alloc, "vs:newest:cmd", null, false);
-    defer unavailable.deinit(alloc);
-    try std.testing.expectEqual(@as(?usize, null), unavailable.selected);
-    try std.testing.expect(unavailable.saved_label == null);
-    try std.testing.expect(!unavailable.saved_not_found);
-    app.config.@"default-profile" = try arena.dupeZ(u8, "ssh:box");
+    {
+        app.config = try configpkg.Config.default(alloc);
+        defer app.config.deinit();
+        var reader: std.Io.Reader = .fixed("default-profile = vs:newest:cmd\n");
+        try app.config.loadReader(alloc, &reader, "C:\\noctty-test\\config.ghostty");
+        try configpkg.pane_launch.finalizeWith(&app.config, fixtures.Machine{ .visual_studio_answers = false });
+        var unavailable = try settingsProfileChoicesThunk(&app, alloc, "vs:newest:cmd", null, false);
+        defer unavailable.deinit(alloc);
+        try std.testing.expectEqual(@as(?usize, null), unavailable.selected);
+        try std.testing.expect(unavailable.saved_label == null);
+        try std.testing.expect(!unavailable.saved_not_found);
+    }
 
     // Resolved: the label it starts under.
-    app.config._default_profile_failure = .none;
-    app.config._default_profile = .{ .kind = .ssh, .key = "ssh:box", .label = "SSH: box", .command = .{ .direct = &.{} } };
-    var resolved = try settingsProfileChoicesThunk(&app, alloc, "ssh:box", null, false);
-    defer resolved.deinit(alloc);
-    try std.testing.expectEqualStrings("SSH: box", resolved.saved_label.?);
+    {
+        app.config = try fixtures.load(alloc, .{ .file = "profile-command = py: cmd.exe /k py.cmd\nprofile-name = py: Python\ndefault-profile = py\n" });
+        defer app.config.deinit();
+        var resolved = try settingsProfileChoicesThunk(&app, alloc, "py", null, false);
+        defer resolved.deinit(alloc);
+        try std.testing.expectEqualStrings("Python", resolved.saved_label orelse "");
+        try std.testing.expect(!resolved.saved_not_found);
+    }
 
-    // The files' value in a window whose command line named another: the
-    // load did not look it up, so neither answer above is about it.
-    app.config._default_profile = null;
-    app.config._default_profile_failure = .not_found;
-    app.config.@"default-profile" = try arena.dupeZ(u8, "user:py312");
-    var untried = try settingsProfileChoicesThunk(&app, alloc, "ssh:box", null, false);
-    defer untried.deinit(alloc);
-    try std.testing.expectEqualStrings("SSH: box", untried.saved_label.?);
+    // The files' value in a window whose command line named another (which
+    // the lookup found nothing for): the load did not look the files' value
+    // up, so it gets the label it starts under.
+    {
+        app.config = try fixtures.load(alloc, .{ .file = "default-profile = ssh:box\n", .argv = &.{"--default-profile=user:py312"} });
+        defer app.config.deinit();
+        var untried = try settingsProfileChoicesThunk(&app, alloc, "ssh:box", null, false);
+        defer untried.deinit(alloc);
+        try std.testing.expectEqualStrings("SSH: box", untried.saved_label orelse "");
+        try std.testing.expect(!untried.saved_not_found);
+    }
 }
 
 test "win32 Settings names a staged ssh: profile the list left out by its label" {

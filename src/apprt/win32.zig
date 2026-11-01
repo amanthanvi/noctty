@@ -490,7 +490,6 @@ pub const session_runtime = .{
     .c = c,
     .cli_args = cli_args,
     .configpkg = configpkg,
-    .defaultProfileForKey = defaultProfileForKey,
     .default_title = default_title,
     .gl_startup = gl_startup,
     .internal_os = internal_os,
@@ -508,7 +507,6 @@ pub const session_runtime = .{
     .setMinimizedNormalRect = setMinimizedNormalRect,
     .shouldInheritSplitWorkingDirectory = shouldInheritSplitWorkingDirectory,
     .shouldResetNewTabWorkingDirectory = shouldResetNewTabWorkingDirectory,
-    .startupNamesProfile = startupNamesProfile,
     .std = std,
     .sys = sys,
     .terminal = terminal,
@@ -1452,18 +1450,6 @@ pub fn keepExplicitWorkingDirectory(
     config.@"working-directory" = directory;
 }
 
-/// `default-profile`'s profile when `key` names it. A pane it started
-/// carries its key, and the config holds the profile resolved, so a split,
-/// an elevated window or a restore of that pane needs no list (no WSL probe
-/// on the UI thread) and finds the profile though discovery may list none
-/// such: an alias outside the SSH config, a distribution WSL did not list.
-pub fn defaultProfileForKey(config: *const configpkg.Config, key: []const u8) ?*const windows_shell.Profile {
-    if (config._default_profile) |*profile| {
-        if (profileKeyEquals(profile.*, key)) return profile;
-    }
-    return null;
-}
-
 /// The profile `new_window_elevated` hands the elevated process: the
 /// action's own, else the pane's, a `default-profile` pane's included.
 /// `elevatesBySelector` decides whether it goes as its key or as its
@@ -1479,30 +1465,18 @@ pub fn elevatedProfileKey(action_key: []const u8, pane_key: ?[]const u8) ?[]cons
 
 /// Whether `new_window_elevated` names the profile `key` to the elevated
 /// process (`RelaunchProfile.selector`) instead of passing its command and
-/// variables: a Visual Studio shell, which the elevated process finds as the
-/// picker does (a `cmd.exe /k` line with `&` in its path reaches it as
-/// written), or a user profile whose live `profile-command` line was read
-/// from a config file, which the elevated process reads too, so the line and
-/// the variables reach it as written and stay off the elevated command line.
-/// A profile defined only by a `--profile-command` option is not forwarded,
-/// so it is still passed as arguments. So is every profile when elevation may
-/// change the account (`same_account` false: a standard user elevated with an
-/// administrator's credentials, `win32_elevation.elevationKeepsAccount`),
-/// since that account reads its own config, which need not have the profile
-/// or, for a Visual Studio shell, may say `visual-studio-profiles = none`.
+/// variables: when the config files alone give it
+/// (`pane_launch.filesDefine`), which the elevated process reads too, so a
+/// Visual Studio shell's `cmd.exe /k` line with `&` in its path, a user
+/// profile's line and its variables reach it as written and stay off the
+/// elevated command line. Every profile is passed as arguments when
+/// elevation may change the account (`same_account` false: a standard user
+/// elevated with an administrator's credentials,
+/// `win32_elevation.elevationKeepsAccount`), since that account reads its
+/// own config, which need not have the profile or, for a Visual Studio
+/// shell, may say `visual-studio-profiles = none`.
 pub fn elevatesBySelector(config: *const configpkg.Config, key: []const u8, same_account: bool) bool {
-    if (!same_account) return false;
-    if (std.ascii.startsWithIgnoreCase(key, "vs:")) return true;
-    if (!std.ascii.startsWithIgnoreCase(key, "user:")) return false;
-    const id = key["user:".len..];
-    if (config.@"profile-command".get(id) == null) return false;
-    if (configpkg.pane_launch.profilePlace(config, "profile-command", id) != .file) return false;
-    // A variable given on the command line (`--profile-env=<id>: ...`), or a
-    // `--profile-env=` that cleared them, is not forwarded either, so such a
-    // profile is passed with its variables. Nor is an `--env=` argument,
-    // which `%NAME%` in the profile's lines may have read.
-    if (configpkg.pane_launch.profileWrittenOnCommandLine(config, "profile-env", id)) return false;
-    return !configpkg.pane_launch.commandLineSetsEnv(config);
+    return same_account and configpkg.pane_launch.filesDefine(config, key);
 }
 
 fn splitWorkingDirectoryCandidate(live_pwd: ?[]const u8, cached_pwd: ?[]const u8) ?[]const u8 {
@@ -2278,7 +2252,7 @@ fn settingsDiskEditConflict(
 }
 
 /// `settingsDiskValueDiffers` for the conflict check. Settings' copies hold
-/// the files' `default-profile` (`SettingsWindow.useSavedValues`), while the
+/// the files' `default-profile` (`pane_launch.asWritten`), while the
 /// load also reads this process's command line, whose `--default-profile`
 /// (a jump-list or elevated window) wins there: compare what the files say.
 /// The masked check after a save keeps the value the process runs with.
@@ -2289,7 +2263,7 @@ fn settingsDiskEditDiffers(
 ) bool {
     if (key == .@"default-profile") {
         const mine = known.@"default-profile";
-        const theirs = disk.defaultProfileFromFiles();
+        const theirs = configpkg.pane_launch.filesDefaultProfile(disk);
         if (mine == null or theirs == null) return mine != null or theirs != null;
         return !std.mem.eql(u8, mine.?, theirs.?);
     }
@@ -2452,7 +2426,7 @@ fn settingsDiskValueDiffers(
 ) bool {
     // The window keeps a command nobody set as automatic (null); the load
     // fills in the one it found.
-    if (key == .command and disk._command_defaulted and known.command == null) return false;
+    if (key == .command and configpkg.pane_launch.nocttyCommand(disk) != null and known.command == null) return false;
     return known.changed(disk, key);
 }
 
@@ -2884,16 +2858,6 @@ pub fn layoutActionResult(success: bool) !bool {
 
 const SessionRestoreTransaction = session_module.SessionRestoreTransaction;
 
-/// A profile named on the command line (`--default-profile=<reference>`,
-/// which a jump-list link to a user profile carries) makes an explicit
-/// launch, as an explicit directory does: it neither restores nor saves the
-/// session, and its first window runs that profile. A link to a profile
-/// with a directory of its own has no `--working-directory=` to say so.
-fn startupNamesProfile(config: *const configpkg.Config) bool {
-    const reference = config._default_profile_cli orelse return false;
-    return reference.len > 0;
-}
-
 pub const SessionOwnerLock = session_module.SessionOwnerLock;
 
 fn writeOpenUrlTrace(file: std.fs.File, url: []const u8) !void {
@@ -3228,18 +3192,18 @@ test "win32 Settings' profile choices name a resolved default the list lacks by 
         // Whatever the list: absent, partial or complete.
         for ([_]bool{ false, true }) |complete| {
             const list: []const windows_shell.Profile = if (complete) &profiles else profiles[0..1];
-            var failed = try settingsProfileChoices(alloc, list, complete, value, .unresolved);
+            var failed = try settingsProfileChoices(alloc, list, complete, value, .not_found);
             defer failed.deinit(alloc);
             try std.testing.expectEqual(@as(?usize, null), failed.selected);
             try std.testing.expect(failed.saved_label == null);
             try std.testing.expect(failed.saved_not_found);
         }
-        var unlisted_failed = try settingsProfileChoices(alloc, &.{}, false, value, .unresolved);
+        var unlisted_failed = try settingsProfileChoices(alloc, &.{}, false, value, .not_found);
         defer unlisted_failed.deinit(alloc);
         try std.testing.expect(unlisted_failed.saved_not_found);
     }
     // Nor does it take a listed row by the list's rules.
-    var failed_listed = try settingsProfileChoices(alloc, &profiles, true, "pwsh", .unresolved);
+    var failed_listed = try settingsProfileChoices(alloc, &profiles, true, "pwsh", .not_found);
     defer failed_listed.deinit(alloc);
     try std.testing.expectEqual(@as(?usize, null), failed_listed.selected);
 
@@ -6132,7 +6096,7 @@ pub fn settingsProfileChoicesThunk(
     ask: bool,
 ) Allocator.Error!win32_settings.ProfileChoices {
     const app: *App = @ptrCast(@alignCast(ctx));
-    const outcome = settingsDefaultProfileOutcome(&app.config, reference);
+    const outcome = configpkg.pane_launch.outcome(&app.config, reference);
     var result = if (app.settingsProfileList(ask)) |list|
         try settingsProfileChoices(alloc, list.profiles, list.complete, reference, outcome)
     else
@@ -6160,38 +6124,6 @@ pub fn settingsDraftProfileLabel(
     return try windows_shell.referenceLabelWithoutList(alloc, value);
 }
 
-/// What `config` made of `reference` when it loaded. It looked its own
-/// value up, `vs:` keys included. It did not look at a value the command
-/// line or a `command` line kept it from using, or at one that is not its
-/// value.
-pub fn settingsDefaultProfileOutcome(config: *const configpkg.Config, reference: ?[]const u8) SettingsDefaultProfile {
-    const value = config.@"default-profile" orelse return .untried;
-    if (reference == null or !std.mem.eql(u8, value, reference.?)) return .untried;
-    if (config._default_profile) |*profile| return .{ .resolved = profile };
-    return switch (config._default_profile_failure) {
-        .none => .untried,
-        .not_found => .unresolved,
-        .unavailable => .unavailable,
-    };
-}
-
-/// What the loaded config made of the `default-profile` value Settings asks
-/// about.
-const SettingsDefaultProfile = union(enum) {
-    /// Not looked up (see `settingsProfileChoicesThunk`).
-    untried,
-    /// The profile new terminals start.
-    resolved: *const windows_shell.Profile,
-    /// It names nothing that can start here: new terminals start the
-    /// automatic default.
-    unresolved,
-    /// Visual Studio did not answer the lookup in full: new terminals start
-    /// the automatic default until a reload asks again, and the value may
-    /// be right, so it names no listed row (a cached list may hold the
-    /// instance it would have found) and is not called missing.
-    unavailable,
-};
-
 /// The Default profile dropdown's items, from a window's `profiles` (hidden
 /// ones marked), and the one `reference` starts. When the loaded config
 /// looked `reference` up (`outcome`), its answer decides: the resolved
@@ -6208,7 +6140,7 @@ fn settingsProfileChoices(
     profiles: []const windows_shell.Profile,
     complete: bool,
     reference: ?[]const u8,
-    outcome: SettingsDefaultProfile,
+    outcome: configpkg.pane_launch.Outcome,
 ) Allocator.Error!win32_settings.ProfileChoices {
     const items = try alloc.alloc(win32_settings.ProfileChoice, profiles.len);
     var made: usize = 0;
@@ -6237,7 +6169,7 @@ fn settingsProfileChoices(
             result.selected = profileIndexByKey(profiles, profile.key);
             if (result.selected == null) result.saved_label = try alloc.dupe(u8, profile.label);
         },
-        .unresolved => result.saved_not_found = true,
+        .not_found => result.saved_not_found = true,
         .unavailable => {},
         // A `wsl:` or `ssh:` value starts without being listed (an alias
         // outside the SSH config).
@@ -7870,15 +7802,13 @@ test "win32 settings disk check compares the files' default-profile in a window 
     // holds the files' value, so that is what the file is judged by.
     const alloc = std.testing.allocator;
     const light: configpkg.ConditionalState = .{};
-    var disk = try configpkg.Config.default(alloc);
+    const load = configpkg.pane_launch.fixtures.load;
+    const window_argv: []const []const u8 = &.{"--default-profile=user:py312"};
+    var disk = try load(alloc, .{ .file = "default-profile = pwsh\n", .argv = window_argv });
     defer disk.deinit();
-    const arena = disk._arena.?.allocator();
-    disk._default_profile_cli = try arena.dupeZ(u8, "user:py312");
-    disk.@"default-profile" = disk._default_profile_cli;
-    disk._default_profile_file = try arena.dupeZ(u8, "pwsh");
     var original = try disk.clone(alloc);
     defer original.deinit();
-    original.@"default-profile" = original.defaultProfileFromFiles();
+    configpkg.pane_launch.asWritten(&original);
     var pending = try original.clone(alloc);
     defer pending.deinit();
     pending.@"default-profile" = "cmd.exe";
@@ -7888,25 +7818,27 @@ test "win32 settings disk check compares the files' default-profile in a window 
     // The file is as the window found it.
     try std.testing.expect(!settingsDiskEditConflict(&original, &pending, &disk, light, edited));
     try std.testing.expect(!try settingsDiskVerdict(alloc, null, &original, &pending, &disk, light, edited));
-    // Someone else changed it, even to the command line's value.
-    for ([_][:0]const u8{ "powershell.exe", "user:py312" }) |value| {
-        disk._default_profile_file = value;
-        try std.testing.expect(settingsDiskEditConflict(&original, &pending, &disk, light, edited));
+    // Someone else changed it, even to the command line's value, or removed
+    // it.
+    for ([_][]const u8{ "default-profile = powershell.exe\n", "default-profile = user:py312\n", "" }) |file| {
+        var changed = try load(alloc, .{ .file = file, .argv = window_argv });
+        defer changed.deinit();
+        try std.testing.expect(settingsDiskEditConflict(&original, &pending, &changed, light, edited));
     }
-    // ... or removed it.
-    disk._default_profile_file = null;
-    try std.testing.expect(settingsDiskEditConflict(&original, &pending, &disk, light, edited));
     // To the value the user is setting: nothing is lost.
-    disk._default_profile_file = "cmd.exe";
-    try std.testing.expect(!settingsDiskEditConflict(&original, &pending, &disk, light, edited));
+    {
+        var same = try load(alloc, .{ .file = "default-profile = cmd.exe\n", .argv = window_argv });
+        defer same.deinit();
+        try std.testing.expect(!settingsDiskEditConflict(&original, &pending, &same, light, edited));
+    }
 
     // After the save, the command line's value still wins in this window,
     // which the save reports; in another window the reload holds the edit.
     var buf: [settings_masked_keys_capacity]u8 = undefined;
     try std.testing.expectEqualStrings("default-profile", settingsMaskedKeyNames(&buf, edited, &pending, &disk));
-    disk._default_profile_cli = null;
-    disk.@"default-profile" = "cmd.exe";
-    try std.testing.expectEqualStrings("", settingsMaskedKeyNames(&buf, edited, &pending, &disk));
+    var other_window = try load(alloc, .{ .file = "default-profile = cmd.exe\n" });
+    defer other_window.deinit();
+    try std.testing.expectEqualStrings("", settingsMaskedKeyNames(&buf, edited, &pending, &other_window));
 }
 
 test "win32 settings disk edit does not mistake the resolved default command for an edit" {
@@ -7925,7 +7857,7 @@ test "win32 settings disk edit does not mistake the resolved default command for
     var resolved = try original.clone(alloc);
     defer resolved.deinit();
     try configpkg.pane_launch.useAutomatic(&resolved);
-    try std.testing.expect(resolved.command != null and resolved._command_defaulted);
+    try std.testing.expect(configpkg.pane_launch.nocttyCommand(&resolved) != null);
     try std.testing.expect(!settingsDiskEditConflict(&original, &pending, &resolved, light, edited));
 
     // A command written in the file is another matter.
@@ -9326,50 +9258,6 @@ const clearQuickSlotPinsRequested = labels.clearQuickSlotPinsRequested;
 pub const resolveProfileSelection = labels.resolveProfileSelection;
 
 pub const profileIndexByKey = labels.profileIndexByKey;
-const profileKeyEquals = labels.profileKeyEquals;
-pub const storedProfileKeyEquals = labels.storedProfileKeyEquals;
-
-/// Give `dst` the profile sources of `src`: the keys the profile lists are
-/// built from. A palette theme preview reads the config files again, and a
-/// profile line edited on disk since the last reload would otherwise reach
-/// the app config while the lists the hosts, the jump list and a running
-/// discovery hold stay as they were, so a picker launch and a split of the
-/// same profile could run different definitions. The lists are only dropped
-/// on a reload (`config_change`), which then sees the change. They are not
-/// dropped here: the open palette borrows its host's profile strings.
-/// Choosing a theme (`commitPaletteTheme`) saves it and reloads through
-/// `settingsSaveAndReload`, so that reload applies any profile edits. `env`
-/// is a source too: a profile's `%NAME%` reads it. For the same reason `dst`
-/// keeps the launch `src` resolved: `command` and the `default-profile`
-/// profile, which `finalize` found from the files read again, so a new tab
-/// would run an edited default profile's definition. A forwarded new
-/// window's config, built again from those files when a theme is set, gets
-/// them back from the app config the same way (`App.applyNewWindowLaunch`).
-pub fn keepProfileSources(dst: *configpkg.Config, src: *const configpkg.Config) !void {
-    const alloc = dst._arena.?.allocator();
-    dst.command = if (src.command) |command| try command.clone(alloc) else null;
-    dst._command_defaulted = src._command_defaulted;
-    dst._command_from_file = src._command_from_file;
-    dst.@"default-profile" = if (src.@"default-profile") |reference| try alloc.dupeZ(u8, reference) else null;
-    dst._default_profile = if (src._default_profile) |profile| try profile.clone(alloc) else null;
-    // And what Settings reads of it: whether the lookup found nothing, and
-    // the files' value beside a command line's.
-    dst._default_profile_failure = src._default_profile_failure;
-    dst._default_profile_cli = if (src._default_profile_cli) |value| try alloc.dupeZ(u8, value) else null;
-    dst._default_profile_file = if (src._default_profile_file) |value| try alloc.dupeZ(u8, value) else null;
-    dst.@"ssh-config-hosts" = src.@"ssh-config-hosts";
-    dst.env = try src.env.clone(alloc);
-    dst.@"visual-studio-profiles" = src.@"visual-studio-profiles";
-    dst.@"profile-command" = try src.@"profile-command".clone(alloc);
-    dst.@"profile-name" = try src.@"profile-name".clone(alloc);
-    dst.@"profile-working-directory" = try src.@"profile-working-directory".clone(alloc);
-    dst.@"profile-env" = try src.@"profile-env".clone(alloc);
-    dst.@"profile-order" = try src.@"profile-order".clone(alloc);
-    dst.@"profile-hidden" = try src.@"profile-hidden".clone(alloc);
-    // Where those lines were read goes with them (New Elevated Window names
-    // a profile whose line came from a file).
-    dst._profile_places = try configpkg.pane_launch.cloneProfilePlaces(src, alloc);
-}
 
 /// Whether a reload changed a key the profile lists are built from: a
 /// `profile-*` key (a removal included), `visual-studio-profiles`, `env`
@@ -9547,12 +9435,6 @@ const buildInspectorPanelTitleText = labels.buildInspectorPanelTitleText;
 const buildInspectorPanelHintText = labels.buildInspectorPanelHintText;
 
 const buildProfileChromeBadgeText = labels.buildProfileChromeBadgeText;
-
-pub fn sshProfileAlias(profile: *const windows_shell.Profile) ?[]const u8 {
-    if (profile.kind != .ssh or !std.mem.startsWith(u8, profile.key, "ssh:")) return null;
-    const alias = profile.key["ssh:".len..];
-    return if (alias.len > 0) alias else null;
-}
 
 pub fn sshAliasFromLaunchKey(launched_ssh: bool, key: ?[]const u8) ?[]const u8 {
     if (!launched_ssh) return null;
@@ -12357,7 +12239,7 @@ pub fn applyQuickSlotPreferenceOrder(
         const key = key_opt orelse continue;
         var found: ?usize = null;
         for (profiles, 0..) |profile, index| {
-            if (profileKeyEquals(profile, key)) {
+            if (windows_shell.profileKeyEquals(profile, key)) {
                 found = index;
                 break;
             }
@@ -21052,7 +20934,7 @@ test "win32 ssh profile surface config uses home working directory" {
     try std.testing.expect(clone.@"working-directory".? == .path);
     try std.testing.expect(!std.mem.eql(u8, "C:\\work", clone.@"working-directory".?.path));
     try std.testing.expectEqual(configpkg.Config.ShellIntegration.none, clone.@"shell-integration");
-    try std.testing.expectEqualStrings("production", sshProfileAlias(&profile).?);
+    try std.testing.expectEqualStrings("production", windows_shell.sshProfileAlias(&profile).?);
 }
 
 test "win32 ssh hardening also holds on the split launch path" {
@@ -21650,11 +21532,6 @@ test "win32 an elevated window names a file-defined user profile and passes a co
     try tmp.dir.writeFile(.{ .sub_path = "config.ghostty", .data = 
         \\profile-command = filed: cmd.exe /k "C:\a b\x.cmd"
         \\profile-env = filed: TOKEN=secret
-        \\profile-command = both: one.exe
-        \\profile-command = gone: gone.exe
-        \\profile-command = gone:
-        \\profile-command = envcli: four.exe
-        \\profile-env = envcli: MODE=file
         \\
     });
     const path = try tmp.dir.realpathAlloc(alloc, "config.ghostty");
@@ -21663,69 +21540,23 @@ test "win32 an elevated window names a file-defined user profile and passes a co
     defer cfg.deinit();
     try cfg.loadFile(alloc, path);
     var args: cli_args.ArgsIterator(cli_args.SliceIterator) = .{
-        .iterator = cli_args.sliceIterator(&.{ "--profile-command=clionly: two.exe", "--profile-command=both: three.exe", "--profile-env=envcli: OTHER=cli" }),
+        .iterator = cli_args.sliceIterator(&.{"--profile-command=clionly: two.exe"}),
     };
     try cfg.loadIter(alloc, &args);
     try cfg.finalize();
     try std.testing.expect(cfg._diagnostics.empty());
 
     // The elevated process reads the files, so a profile they define is
-    // named; one the command line defines (or last changed) is passed.
+    // named (`pane_launch.filesDefine`); one the command line defines (or
+    // last changed) is passed.
     try std.testing.expect(elevatesBySelector(&cfg, "user:filed", true));
-    try std.testing.expect(elevatesBySelector(&cfg, "USER:FILED", true));
+    try std.testing.expect(!elevatesBySelector(&cfg, "user:clionly", true));
     // A standard user's elevation runs as another account, which reads its
     // own config: the profile is passed, so it runs there too.
     try std.testing.expect(!elevatesBySelector(&cfg, "user:filed", false));
-    try std.testing.expect(!elevatesBySelector(&cfg, "user:clionly", true));
-    try std.testing.expect(!elevatesBySelector(&cfg, "user:both", true));
-    // A file's profile with a variable from the command line: the elevated
-    // process would not get that variable, so the profile is passed.
-    try std.testing.expect(!elevatesBySelector(&cfg, "user:envcli", true));
-    // `--profile-env=` cleared every profile's variables, which the files
-    // would give the elevated process back: every profile is passed.
-    {
-        var cleared = try configpkg.Config.default(alloc);
-        defer cleared.deinit();
-        try cleared.loadFile(alloc, path);
-        var reset: cli_args.ArgsIterator(cli_args.SliceIterator) = .{
-            .iterator = cli_args.sliceIterator(&.{"--profile-env="}),
-        };
-        try cleared.loadIter(alloc, &reset);
-        try cleared.finalize();
-        try std.testing.expect(cleared.@"profile-env".count() == 0);
-        try std.testing.expect(!elevatesBySelector(&cleared, "user:filed", true));
-        // An `--env=` argument, which `%NAME%` may read, is not forwarded
-        // either.
-        var with_env = try configpkg.Config.default(alloc);
-        defer with_env.deinit();
-        try with_env.loadFile(alloc, path);
-        var env_arg: cli_args.ArgsIterator(cli_args.SliceIterator) = .{
-            .iterator = cli_args.sliceIterator(&.{"--env=TOOLS=C:\\Tools"}),
-        };
-        try with_env.loadIter(alloc, &env_arg);
-        try with_env.finalize();
-        try std.testing.expect(!elevatesBySelector(&with_env, "user:filed", true));
-        // Kept for a conditional rebuild, which replays the argument.
-        with_env._conditional_set.insert(.theme);
-        var with_env_dark = (try with_env.changeConditionalState(.{ .theme = .dark })).?;
-        defer with_env_dark.deinit();
-        try std.testing.expect(!elevatesBySelector(&with_env_dark, "user:filed", true));
-        // Nothing reset: named.
-        var plain = try configpkg.Config.default(alloc);
-        defer plain.deinit();
-        try plain.loadFile(alloc, path);
-        try plain.finalize();
-        try std.testing.expect(elevatesBySelector(&plain, "user:filed", true));
-    }
-    // Nothing to name: a removed or unknown profile, a detected one.
-    try std.testing.expect(!elevatesBySelector(&cfg, "user:gone", true));
-    try std.testing.expect(!elevatesBySelector(&cfg, "user:nosuch", true));
-    try std.testing.expect(!elevatesBySelector(&cfg, "pwsh.exe", true));
-    try std.testing.expect(!elevatesBySelector(&cfg, "filed", true));
     // A Visual Studio shell is found by the elevated process as by the
     // picker, so its own `cmd.exe /k` line reaches it as written.
     try std.testing.expect(elevatesBySelector(&cfg, "vs:6bb7cfd9:cmd", true));
-    try std.testing.expect(elevatesBySelector(&cfg, "VS:6BB7CFD9:PWSH", true));
     // Not when UAC may switch to another account: that account's own config
     // can say `visual-studio-profiles = none`, under which the key names
     // nothing and the elevated window would start the automatic shell. The
@@ -21762,14 +21593,6 @@ test "win32 an elevated window names a file-defined user profile and passes a co
         for (vs_argv, elevated.command.?.direct) |want, got| try std.testing.expectEqualStrings(want, got);
     }
 
-    // A config rebuilt for a conditional state (a theme) records the places
-    // again.
-    cfg._conditional_set.insert(.theme);
-    var replayed = (try cfg.changeConditionalState(.{ .theme = .dark })).?;
-    defer replayed.deinit();
-    try std.testing.expect(elevatesBySelector(&replayed, "user:filed", true));
-    try std.testing.expect(!elevatesBySelector(&replayed, "user:clionly", true));
-
     // What the elevated process is given for a detected profile and for a
     // command-line one is as before: the argv, and the variables for the
     // latter.
@@ -21781,12 +21604,6 @@ test "win32 an elevated window names a file-defined user profile and passes a co
     const cli_only = try win32_elevation.buildRelaunchParameters(alloc, &argv, null, "C:\\work", "C:\\startup", .{ .command = .{ .command = .{ .direct = &.{"two.exe"} }, .env = &env } });
     defer alloc.free(cli_only);
     try std.testing.expectEqualStrings("--working-directory=C:\\work --command=direct:two.exe --initial-command= --elevated-profile-env=MODE=cli", cli_only);
-
-    // A clone (a reload installs the app config as one) keeps the decision.
-    var reloaded = try cfg.clone(alloc);
-    defer reloaded.deinit();
-    try std.testing.expect(elevatesBySelector(&reloaded, "user:filed", true));
-    try std.testing.expect(!elevatesBySelector(&reloaded, "user:clionly", true));
 }
 
 test "win32 a forwarded new window keeps the default-profile launch when a theme is set" {

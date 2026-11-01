@@ -107,7 +107,7 @@ pub fn of(config: *const Config, key: Key, defaults: ?*const Config) Origin {
 /// lines of files (the command line's arguments, and any step the log has no
 /// place for, are left out). For a value the files give but the command line
 /// overrides in this process, which is the value Settings shows for
-/// `default-profile` (`Config.defaultProfileFromFiles`). `.default` when no
+/// `default-profile` (`pane_launch.filesDefaultProfile`). `.default` when no
 /// file set the key.
 pub fn ofFiles(config: *const Config, key: Key) Origin {
     return scan(config, .list, key, null, true);

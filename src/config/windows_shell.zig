@@ -132,6 +132,34 @@ pub const Profile = struct {
     }
 };
 
+/// Whether two profile keys, as noctty stores them (a pane's launch key, a
+/// quick slot's), name one profile: an `ssh:` key exactly, its prefix
+/// included (OpenSSH aliases are case-sensitive), any other key in any
+/// case. A reference a user writes (`default-profile`, `profile-order`) is
+/// read by `resolveProfileReference` and `referenceProfileIndex` instead,
+/// which also take the `ssh:` prefix in any case.
+pub fn storedProfileKeyEquals(a: []const u8, b: []const u8) bool {
+    if (std.ascii.startsWithIgnoreCase(a, "ssh:") or std.ascii.startsWithIgnoreCase(b, "ssh:")) {
+        return std.mem.eql(u8, a, b);
+    }
+    return std.ascii.eqlIgnoreCase(a, b);
+}
+
+/// Whether `key` is `profile`'s key, by `storedProfileKeyEquals`; an SSH
+/// profile's key only exactly.
+pub fn profileKeyEquals(profile: Profile, key: []const u8) bool {
+    if (profile.kind == .ssh) return std.mem.eql(u8, profile.key, key);
+    return storedProfileKeyEquals(profile.key, key);
+}
+
+/// The alias an SSH profile connects to (its key after `ssh:`), or null for
+/// another kind of profile or an empty alias.
+pub fn sshProfileAlias(profile: *const Profile) ?[]const u8 {
+    if (profile.kind != .ssh or !std.mem.startsWith(u8, profile.key, "ssh:")) return null;
+    const alias = profile.key["ssh:".len..];
+    return if (alias.len > 0) alias else null;
+}
+
 /// One environment variable a user profile sets (`profile-env`), its value
 /// with `%NAME%` already expanded.
 pub const EnvEntry = struct {

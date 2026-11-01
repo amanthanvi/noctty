@@ -130,7 +130,6 @@ const input = @import("../../input.zig");
 const inspectorPanelVisibleForState = win32.inspectorPanelVisibleForState;
 const internal_os = @import("../../os/main.zig");
 const isHighContrastActive = win32.isHighContrastActive;
-const keepProfileSources = win32.keepProfileSources;
 const keyEventFromWin32Message = win32.keyEventFromWin32Message;
 const keyEventTogglesCommandPalette = win32.keyEventTogglesCommandPalette;
 const keyPressed = win32.keyPressed;
@@ -269,7 +268,6 @@ const fontIsFaceForTest = win32.fontIsFaceForTest;
 const icon_font_test_missing_face = win32.icon_font_test_missing_face;
 const installedTitlebarIconFaceForTest = win32.installedTitlebarIconFaceForTest;
 const ToastTestWindow = win32.ToastTestWindow;
-const applyDefaultProfileConfig = win32.applyDefaultProfileConfig;
 const buttonTooltipAction = win32.buttonTooltipAction;
 const cli_args = @import("../../cli/args.zig");
 const detachHostReference = win32.detachHostReference;
@@ -2250,7 +2248,7 @@ pub const Host = struct {
     /// the `.app` `config_change` that drops the request, so it is dropped
     /// here; left in, a `new_window` while the preview is live would open
     /// the layout. For the same reason it keeps the `running` config's
-    /// profile sources (`keepProfileSources`).
+    /// profile sources (`pane_launch.keepSources`).
     pub fn finishPaletteThemeConfig(
         preview: *configpkg.Config,
         running: *const configpkg.Config,
@@ -2260,7 +2258,7 @@ pub const Host = struct {
         try setConfigTheme(preview, name);
         try preview.finalize();
         App.forgetLaunchLayout(preview);
-        try keepProfileSources(preview, running);
+        try configpkg.pane_launch.keepSources(preview, running);
     }
 
     pub fn swapRuntimeConfigFromPalette(self: *Host, new_config: configpkg.Config) configpkg.Config {
@@ -4580,7 +4578,7 @@ pub const Host = struct {
             profiles,
             null,
             null,
-            if (self.app.config._default_profile) |profile| profile.key else null,
+            if (configpkg.pane_launch.defaultProfile(&self.app.config)) |profile| profile.key else null,
             self.app.launcher_profile_hint,
             self.selected_profile,
         ) orelse self.app.defaultShellProfileIndex(profiles) orelse
@@ -10632,15 +10630,11 @@ test "win32 a palette theme preview keeps the running profile definitions until 
     defer alloc.free(theme);
 
     // The running config, which the hosts' lists were built from.
-    var running = try configpkg.Config.default(alloc);
+    var running = try configpkg.pane_launch.fixtures.load(alloc, .{ .file = "profile-command = x: old.exe\nprofile-env = x: MODE=old\nssh-config-hosts = false\n" });
     defer running.deinit();
-    var running_args: cli_args.ArgsIterator(cli_args.SliceIterator) = .{
-        .iterator = cli_args.sliceIterator(&.{ "--profile-command=x: old.exe", "--profile-env=x: MODE=old", "--ssh-config-hosts=false" }),
-    };
-    try running.loadIter(alloc, &running_args);
-    try running.finalize();
 
-    // The files read again for the preview, edited since.
+    // The files read again for the preview, edited since (given here as
+    // arguments, so their lines are not a file's).
     const edited = [_][]const u8{ "--profile-command=x: new.exe", "--profile-name=x: New", "--profile-env=x: MODE=new" };
     var preview = try configpkg.Config.default(alloc);
     defer preview.deinit();
@@ -10654,9 +10648,8 @@ test "win32 a palette theme preview keeps the running profile definitions until 
     try std.testing.expect(!userProfileKeysChanged(&running, &preview));
     try std.testing.expectEqualStrings("old.exe", preview.@"profile-command".get("x").?);
     // And where they were read, which New Elevated Window decides by: the
-    // running config's places, not the edited files' (the env line is the
-    // second argument there, the third here).
-    try std.testing.expectEqual(configpkg.pane_launch.profilePlace(&running, "profile-env", "x").cli, configpkg.pane_launch.profilePlace(&preview, "profile-env", "x").cli);
+    // running config's places, so `x` is still a profile the files give.
+    try std.testing.expect(configpkg.pane_launch.filesDefine(&preview, "user:x"));
 
     // The next reload, which reads the edited files, sees the change and
     // drops the lists (the `config_change` path).
@@ -10666,98 +10659,6 @@ test "win32 a palette theme preview keeps the running profile definitions until 
     try reloaded.loadIter(alloc, &reload_args);
     try reloaded.finalize();
     try std.testing.expect(userProfileKeysChanged(&preview, &reloaded));
-}
-
-test "win32 a palette theme preview keeps the default-profile launch until a reload" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-    const alloc = std.testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = "preview-theme", .data = "background = #102030\n" });
-    const theme = try tmp.dir.realpathAlloc(alloc, "preview-theme");
-    defer alloc.free(theme);
-
-    const Launch = struct {
-        fn expect(config: *const configpkg.Config, line: []const u8, mode: []const u8) !void {
-            var clone = config.shallowClone(std.testing.allocator);
-            defer clone.deinit();
-            _ = (try applyDefaultProfileConfig(&clone)).?;
-            try std.testing.expectEqualStrings(line, clone._profile_launch.?.command_line);
-            try std.testing.expectEqualStrings(mode, clone.env.map.get("MODE").?);
-        }
-    };
-
-    // The running config: `default-profile = py`, resolved.
-    var running = try configpkg.Config.default(alloc);
-    defer running.deinit();
-    var running_args: cli_args.ArgsIterator(cli_args.SliceIterator) = .{
-        .iterator = cli_args.sliceIterator(&.{ "--profile-command=py: old.exe", "--profile-env=py: MODE=old", "--default-profile=py" }),
-    };
-    try running.loadIter(alloc, &running_args);
-    try running.finalize();
-    try Launch.expect(&running, "old.exe", "old");
-
-    // The files read again for the preview: the same `default-profile`
-    // with its profile edited since, and one that names another profile.
-    inline for (.{
-        &[_][]const u8{ "--profile-command=py: new.exe", "--profile-env=py: MODE=new", "--default-profile=py" },
-        &[_][]const u8{ "--profile-command=py: old.exe", "--profile-env=py: MODE=old", "--profile-command=other: other.exe", "--default-profile=other" },
-    }) |edited| {
-        var preview = try configpkg.Config.default(alloc);
-        defer preview.deinit();
-        var args: cli_args.ArgsIterator(cli_args.SliceIterator) = .{ .iterator = cli_args.sliceIterator(edited) };
-        try preview.loadIter(alloc, &args);
-        try Host.finishPaletteThemeConfig(&preview, &running, theme);
-        try std.testing.expectEqual(@as(u8, 0x10), preview.background.r);
-        // A new tab runs the definition the lists hold: the running one.
-        try std.testing.expectEqualStrings("old.exe", preview.@"profile-command".get("py").?);
-        try std.testing.expectEqualStrings("py", preview.@"default-profile".?);
-        try Launch.expect(&preview, "old.exe", "old");
-        try std.testing.expect(!userProfileKeysChanged(&running, &preview));
-    }
-
-    // With no `default-profile` running, files that add one start nothing
-    // new before the reload either.
-    var plain = try configpkg.Config.default(alloc);
-    defer plain.deinit();
-    try plain.finalize();
-    var added = try configpkg.Config.default(alloc);
-    defer added.deinit();
-    var added_args: cli_args.ArgsIterator(cli_args.SliceIterator) = .{
-        .iterator = cli_args.sliceIterator(&.{ "--profile-command=py: new.exe", "--default-profile=py" }),
-    };
-    try added.loadIter(alloc, &added_args);
-    try Host.finishPaletteThemeConfig(&added, &plain, theme);
-    try std.testing.expect(added._default_profile == null);
-    try std.testing.expect(added.command == null);
-    var clone = added.shallowClone(alloc);
-    defer clone.deinit();
-    try std.testing.expect(try applyDefaultProfileConfig(&clone) == null);
-
-    // What Settings reads of the running value stays too: a command-line
-    // value the lookup found nothing for, over the files' own, while the
-    // files read again for the preview say nothing about it.
-    try tmp.dir.writeFile(.{ .sub_path = "running.ghostty", .data = "default-profile = pwsh\n" });
-    try tmp.dir.writeFile(.{ .sub_path = "reread.ghostty", .data = "font-size = 13\n" });
-    const running_path = try tmp.dir.realpathAlloc(alloc, "running.ghostty");
-    defer alloc.free(running_path);
-    const reread_path = try tmp.dir.realpathAlloc(alloc, "reread.ghostty");
-    defer alloc.free(reread_path);
-    var missing = try configpkg.Config.default(alloc);
-    defer missing.deinit();
-    try missing.loadFile(alloc, running_path);
-    var missing_args: cli_args.ArgsIterator(cli_args.SliceIterator) = .{ .iterator = cli_args.sliceIterator(&.{"--default-profile=nosuch"}) };
-    try missing.loadIter(alloc, &missing_args);
-    try missing.finalize();
-    try std.testing.expectEqual(configpkg.pane_launch.DefaultProfileFailure.not_found, missing._default_profile_failure);
-    try std.testing.expectEqualStrings("pwsh", missing.defaultProfileFromFiles().?);
-    var reread = try configpkg.Config.default(alloc);
-    defer reread.deinit();
-    try reread.loadFile(alloc, reread_path);
-    try Host.finishPaletteThemeConfig(&reread, &missing, theme);
-    try std.testing.expectEqualStrings("nosuch", reread.@"default-profile".?);
-    try std.testing.expectEqual(configpkg.pane_launch.DefaultProfileFailure.not_found, reread._default_profile_failure);
-    try std.testing.expectEqualStrings("pwsh", reread.defaultProfileFromFiles().?);
 }
 
 test "win32 failed cloned-host registration detaches the host reference" {

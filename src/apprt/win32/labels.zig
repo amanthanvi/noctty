@@ -684,18 +684,6 @@ pub fn clearQuickSlotPinsRequested(vk: WPARAM, alt_pressed: bool, shift_pressed:
     return vk == c.VK_0 or vk == c.VK_NUMPAD0;
 }
 
-pub fn storedProfileKeyEquals(a: []const u8, b: []const u8) bool {
-    if (std.ascii.startsWithIgnoreCase(a, "ssh:") or std.ascii.startsWithIgnoreCase(b, "ssh:")) {
-        return std.mem.eql(u8, a, b);
-    }
-    return std.ascii.eqlIgnoreCase(a, b);
-}
-
-pub fn profileKeyEquals(profile: windows_shell.Profile, key: []const u8) bool {
-    if (profile.kind == .ssh) return std.mem.eql(u8, profile.key, key);
-    return storedProfileKeyEquals(profile.key, key);
-}
-
 pub fn resolveProfileSelection(
     profiles: []const windows_shell.Profile,
     input_text: []const u8,
@@ -719,7 +707,7 @@ pub fn resolveProfileSelection(
             std.mem.eql(u8, profile.label, input_text)
         else
             std.ascii.eqlIgnoreCase(profile.label, input_text);
-        if (profileKeyEquals(profile, input_text) or label_matches) {
+        if (windows_shell.profileKeyEquals(profile, input_text) or label_matches) {
             exact_match = index;
             break;
         }
@@ -738,7 +726,7 @@ pub fn resolveProfileSelection(
 
 pub fn profileIndexByKey(profiles: []const windows_shell.Profile, key: []const u8) ?usize {
     for (profiles, 0..) |profile, index| {
-        if (profileKeyEquals(profile, key)) return index;
+        if (windows_shell.profileKeyEquals(profile, key)) return index;
     }
     return null;
 }
@@ -765,7 +753,7 @@ pub fn preferredProfileIndex(
         null;
     if (preferred_key) |key| {
         for (profiles, 0..) |profile, index| {
-            if (profileKeyEquals(profile, key)) return index;
+            if (windows_shell.profileKeyEquals(profile, key)) return index;
         }
     }
     if (default_key) |key| {
@@ -2565,7 +2553,7 @@ fn buildPinnedProfileSlotText(alloc: Allocator, pinned_slot_ordinal: ?usize) ![]
 pub fn findLauncherQuickSlotOrdinal(slot_keys: [3]?[:0]const u8, key: []const u8) ?usize {
     for (slot_keys, 0..) |slot_key, index| {
         if (slot_key) |value| {
-            if (storedProfileKeyEquals(value, key)) return index;
+            if (windows_shell.storedProfileKeyEquals(value, key)) return index;
         }
     }
     return null;

@@ -1153,8 +1153,8 @@ fn allocForwardedWorkingDirectoryArg(
 /// whatever a shortcut names) is nothing the user asked for, and a forwarded
 /// directory wins over the pinned one (`App.applyNewWindowLaunch`).
 pub fn forwardsLauncherDirectory(config: *const configpkg.Config) bool {
-    if (!config._command_defaulted or config._default_profile_cli != null) return true;
-    const profile = config._default_profile orelse return true;
+    if (configpkg.pane_launch.commandLineNamesProfile(config)) return true;
+    const profile = configpkg.pane_launch.defaultProfile(config) orelse return true;
     const directory = profile.working_directory orelse return true;
     return directory == .inherit;
 }
@@ -3155,31 +3155,27 @@ test "win32 IPC server start and stop cycles leak no handles" {
 
 test "win32 a launch forwards its own directory unless default-profile pins one" {
     const alloc = std.testing.allocator;
-    const py = "--profile-command=py: cmd.exe /k py";
-    const default = "--default-profile=py";
+    const load = configpkg.pane_launch.fixtures.load;
+    const py = "profile-command = py: cmd.exe /k py\n";
+    const default = "default-profile = py\n";
     inline for (.{
-        .{ &[_][]const u8{}, true },
-        .{ &[_][]const u8{ py, default }, true },
-        .{ &[_][]const u8{ py, "--profile-working-directory=py: inherit", default }, true },
-        .{ &[_][]const u8{ py, "--profile-working-directory=py: D:\\pinned", default }, false },
-        .{ &[_][]const u8{ py, "--profile-working-directory=py: home", default }, false },
+        .{ "", true },
+        .{ py ++ default, true },
+        .{ py ++ "profile-working-directory = py: inherit\n" ++ default, true },
+        .{ py ++ "profile-working-directory = py: D:\\pinned\n" ++ default, false },
+        .{ py ++ "profile-working-directory = py: home\n" ++ default, false },
         // A command runs instead of the profile, so nothing is pinned.
-        .{ &[_][]const u8{ py, "--profile-working-directory=py: D:\\pinned", default, "--command=cmd.exe" }, true },
+        .{ py ++ "profile-working-directory = py: D:\\pinned\n" ++ default ++ "command = cmd.exe\n", true },
     }) |case| {
-        var config = try configpkg.Config.default(alloc);
+        // The files set it: the running instance reads them too.
+        var config = try load(alloc, .{ .file = case[0] });
         defer config.deinit();
-        var iter: cli_args.ArgsIterator(cli_args.SliceIterator) = .{
-            .iterator = cli_args.sliceIterator(case[0]),
-        };
-        try config.loadIter(alloc, &iter);
-        try config.finalize();
-        // As if the files set it: the running instance reads them too.
-        config._default_profile_cli = null;
         try std.testing.expectEqual(case[1], forwardsLauncherDirectory(&config));
         // It does not read a launch's command-line `default-profile`, so
         // such a launch says where it was started.
-        config._default_profile_cli = "py";
-        try std.testing.expect(forwardsLauncherDirectory(&config));
+        var named = try load(alloc, .{ .file = case[0], .argv = &.{"--default-profile=py"} });
+        defer named.deinit();
+        try std.testing.expect(forwardsLauncherDirectory(&named));
     }
 }
 
