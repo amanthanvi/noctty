@@ -3641,6 +3641,13 @@ $layout = $harness.Layout
 # Since #443 the default shell is pwsh when installed, where `%TEMP%` is not expanded and the launcher
 # never runs ("Timed out waiting for terminal marker launcher output" in release evidence 39164175922).
 $accessibilityLaunchArguments = @(Get-InteractiveWin11LaunchArguments -Layout $layout)
+# Settings shows a Reset button beside each field whose value in effect differs
+# from its default (D26 9.2, #583), and a command-line value counts. Pinning
+# cmd.exe changes Default command, so its page has one control more. The seeded
+# `window-theme = system` follows Windows like the default, so it adds none.
+$settingsLaunchChangedFields = @(
+    if (@($accessibilityLaunchArguments | Where-Object { $_ -like '--command=*' }).Count -gt 0) { 'Default command' }
+)
 $exe = Get-InteractiveWin11ExePath -RepoRoot $repoRoot
 if ((Get-InteractiveWin11LaunchAction -ExePath $exe -Rebuild:$Rebuild -BuildInputs (Get-InteractiveWin11DefaultBuildInputs -RepoRoot $repoRoot)) -eq 'build') {
     Invoke-InteractiveWin11Build -RepoRoot $repoRoot
@@ -5647,7 +5654,8 @@ try {
         $settingsClientRect = [NocttyAccessibilityNative]::ClientRectOnScreen($settingsHwnd)
         $settingsSectionNames = @('Appearance', 'Terminal', 'Shell', 'Privacy', 'Updates', 'Keybindings', 'Advanced', 'All settings')
         # Each page's own controls, then the header's search field and the action bar,
-        # which every page shows.
+        # which every page shows. The loop below adds the Reset buttons this launch
+        # puts beside the fields it changes.
         $settingsExpectedControls = [ordered]@{
             Appearance = @(
                 @{ Name = 'Font family fallbacks'; Type = [System.Windows.Automation.ControlType]::Edit },
@@ -5719,6 +5727,15 @@ try {
                 @{ Name = 'Save'; Type = [System.Windows.Automation.ControlType]::Button },
                 @{ Name = 'Discard changes'; Type = [System.Windows.Automation.ControlType]::Button }
             )
+        }
+        foreach ($changedField in $settingsLaunchChangedFields) {
+            $changedFieldSections = @($settingsExpectedControls.Keys | Where-Object {
+                @($settingsExpectedControls[$_] | Where-Object { $_.Name -eq $changedField }).Count -gt 0
+            })
+            if ($changedFieldSections.Count -ne 1) {
+                throw "Settings field '$changedField', changed by this launch, is on $($changedFieldSections.Count) pages of the expected list; expected one."
+            }
+            $settingsExpectedControls[$changedFieldSections[0]] += , @{ Name = "Reset $changedField"; Type = [System.Windows.Automation.ControlType]::Button }
         }
         Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(5)) -Description "Settings cycle $settingsCycle section UIA tree" -Condition {
             $script:settingsElementsProbe = @($settingsElement.FindAll(
