@@ -36,38 +36,38 @@ const log = std.log.scoped(.config);
 /// `--command=`, `--initial-command=` and `--default-profile=`, the files'
 /// `default-profile`, which layer set `command`, and where a profile line was
 /// read.
-pub fn note(self: *Config, alloc: Allocator, arg: []const u8, iter: anytype) Allocator.Error!void {
+pub fn note(config: *Config, alloc: Allocator, arg: []const u8, iter: anytype) Allocator.Error!void {
     // Only a value the field parse takes changes `command` (and so which layer
     // set it, and what `finalize` puts back); a refused one leaves all of
     // that as it was and is reported by the parse that follows.
-    if (try takenCliValue(self, "command", arg)) |value| {
+    if (try takenCliValue(config, "command", arg)) |value| {
         const location = try cli.Location.fromIter(iter, alloc);
-        self._command_defaulted = false;
-        self._command_from_file = location == .file;
-        if (location == .cli) self._command_cli = try alloc.dupeZ(u8, value);
+        config._command_defaulted = false;
+        config._command_from_file = location == .file;
+        if (location == .cli) config._command_cli = try alloc.dupeZ(u8, value);
     }
     if (std.mem.startsWith(u8, arg, "--initial-command=")) {
         if ((try cli.Location.fromIter(iter, alloc)) == .cli) {
-            if (try takenCliValue(self, "initial-command", arg)) |value| {
-                self._initial_command_cli = try alloc.dupeZ(u8, value);
+            if (try takenCliValue(config, "initial-command", arg)) |value| {
+                config._initial_command_cli = try alloc.dupeZ(u8, value);
             }
         }
     }
     if (std.mem.startsWith(u8, arg, "--default-profile=")) {
         const value = arg["--default-profile=".len..];
         if ((try cli.Location.fromIter(iter, alloc)) == .cli) {
-            self._default_profile_cli = try alloc.dupeZ(u8, value);
+            config._default_profile_cli = try alloc.dupeZ(u8, value);
         } else {
-            self._default_profile_file = if (value.len == 0) null else try alloc.dupeZ(u8, value);
+            config._default_profile_file = if (value.len == 0) null else try alloc.dupeZ(u8, value);
         }
     }
     // The place a profile line writes, for a problem only finalize sees.
-    try recordProfilePlace(self, alloc, arg, iter);
+    try recordProfilePlace(config, alloc, arg, iter);
 }
 
 /// `Config.consumeManuallyHook`: takes `--elevated-profile-env=KEY=VALUE`.
 pub fn consume(
-    self: *Config,
+    config: *Config,
     alloc: Allocator,
     arg: []const u8,
     iter: anytype,
@@ -83,14 +83,14 @@ pub fn consume(
     // that exists to win over every file.
     const refused: ?[:0]const u8 = if (location == .file) "unknown field" else if (eq == 0) "value required" else null;
     if (refused) |message| {
-        try self._diagnostics.append(alloc, .{
+        try config._diagnostics.append(alloc, .{
             .key = try alloc.dupeZ(u8, "elevated-profile-env"),
             .message = message,
             .location = location,
         });
         return true;
     }
-    try self._elevated_profile_env.append(alloc, .{
+    try config._elevated_profile_env.append(alloc, .{
         .key = try alloc.dupeZ(u8, value[0..eq]),
         .value = try alloc.dupeZ(u8, value[eq + 1 ..]),
     });
@@ -100,36 +100,36 @@ pub fn consume(
 /// The launch half of `Config.finalize`, after the theme and before the
 /// automatic default. Tests resolve `default-profile` through fixed lookups
 /// (no PATH search), so they load it through this same call.
-pub fn finalize(self: *Config) !void {
-    const visual_studio = self.@"visual-studio-profiles";
-    try finalizeWith(self, if (comptime builtin.is_test)
+pub fn finalize(config: *Config) !void {
+    const visual_studio = config.@"visual-studio-profiles";
+    try finalizeWith(config, if (comptime builtin.is_test)
         fixtures.Machine{ .visual_studio = visual_studio }
     else
         windows_shell.ReferenceHost{ .visual_studio = visual_studio });
 }
 
 /// `finalize` with the lookups `machine` makes for `default-profile`.
-pub fn finalizeWith(self: *Config, machine: anytype) !void {
+pub fn finalizeWith(config: *Config, machine: anytype) !void {
     // Before the default command: `default-profile` can name a user profile,
     // which has to have passed these checks.
-    try finalizeProfiles(self);
-    try finalizeCliLaunch(self);
-    try finalizeDefaultProfileSetting(self);
+    try finalizeProfiles(config);
+    try finalizeCliLaunch(config);
+    try finalizeDefaultProfileSetting(config);
     // `default-profile` stands in for the automatic default.
     if (comptime builtin.os.tag == .windows) {
-        if (self.command == null) try applyDefaultProfile(self, machine);
+        if (config.command == null) try applyDefaultProfile(config, machine);
     }
     // Over `env` once every file has been read, and after `default-profile`
     // resolved: a profile's `%NAME%` reads `env` (`expandProfileText`).
-    if (self._elevated_profile_env.items.len > 0) {
-        try windows_shell.layerEnv(self._arena.?.allocator(), &self.env, self._elevated_profile_env.items);
+    if (config._elevated_profile_env.items.len > 0) {
+        try windows_shell.layerEnv(config._arena.?.allocator(), &config.env, config._elevated_profile_env.items);
     }
 }
 
 /// Resolve the automatic Windows command without hiding whether it was explicit.
-pub fn useAutomatic(self: *Config) !void {
-    if (self.command != null) return;
-    setAutomaticCommand(self, "windows-default", try windows_shell.defaultCommand(self._arena.?.allocator()));
+pub fn useAutomatic(config: *Config) !void {
+    if (config.command != null) return;
+    setAutomaticCommand(config, "windows-default", try windows_shell.defaultCommand(config._arena.?.allocator()));
 }
 
 /// Give a config with no `command` the one safe mode starts, so a recovery
@@ -137,16 +137,16 @@ pub fn useAutomatic(self: *Config) !void {
 /// `Config.finalize`, which then has no default to look for: safe mode
 /// searches no `PATH`. The command stays marked automatic. A command already
 /// set stays.
-pub fn useRecovery(self: *Config) !void {
-    if (self.command != null) return;
-    setAutomaticCommand(self, "windows-recovery", try windows_shell.recoveryCommand(self._arena.?.allocator()));
+pub fn useRecovery(config: *Config) !void {
+    if (config.command != null) return;
+    setAutomaticCommand(config, "windows-recovery", try windows_shell.recoveryCommand(config._arena.?.allocator()));
 }
 
 /// Set `command` to `cmd`, chosen by noctty rather than a config layer.
-fn setAutomaticCommand(self: *Config, comptime src: []const u8, cmd: Command) void {
+fn setAutomaticCommand(config: *Config, comptime src: []const u8, cmd: Command) void {
     log.info("default shell src=" ++ src ++ " value={f}", .{cmd.redacted()});
-    self.command = cmd;
-    self._command_defaulted = true;
+    config.command = cmd;
+    config._command_defaulted = true;
 }
 
 /// The profile `default-profile` resolved to when the config was loaded. A
@@ -163,10 +163,8 @@ pub fn defaultProfile(config: *const Config) ?*const windows_shell.Profile {
 /// on the UI thread) and finds the profile though discovery may list none
 /// such: an alias outside the SSH config, a distribution WSL did not list.
 pub fn defaultProfileForKey(config: *const Config, key: []const u8) ?*const windows_shell.Profile {
-    if (config._default_profile) |*profile| {
-        if (windows_shell.profileKeyEquals(profile.*, key)) return profile;
-    }
-    return null;
+    const profile = defaultProfile(config) orelse return null;
+    return if (windows_shell.profileKeyEquals(profile.*, key)) profile else null;
 }
 
 /// The command noctty chose: the automatic default, Safe Recovery's or
@@ -183,7 +181,7 @@ pub fn nocttyCommand(config: *const Config) ?Command {
 pub fn outcome(config: *const Config, reference: ?[]const u8) Outcome {
     const value = config.@"default-profile" orelse return .untried;
     if (reference == null or !std.mem.eql(u8, value, reference.?)) return .untried;
-    if (config._default_profile) |*profile| return .{ .resolved = profile };
+    if (defaultProfile(config)) |profile| return .{ .resolved = profile };
     return switch (config._default_profile_failure) {
         .none => .untried,
         .not_found => .not_found,
@@ -300,12 +298,12 @@ pub fn keepSources(dst: *Config, src: *const Config) Allocator.Error!void {
 /// downstream sees a field of a profile the user was told does not exist.
 /// Every other profile check runs while the line is parsed
 /// (`profile_map.check`).
-fn finalizeProfiles(self: *Config) Allocator.Error!void {
-    try finalizeProfileField(self, ProfileMap.Name, &self.@"profile-name", "profile-name");
-    try finalizeProfileField(self, ProfileMap.Text, &self.@"profile-working-directory", "profile-working-directory");
-    try finalizeProfileField(self, ProfileMap.Env, &self.@"profile-env", "profile-env");
-    try finalizeProfileReferences(self, "profile-order");
-    try finalizeProfileReferences(self, "profile-hidden");
+fn finalizeProfiles(config: *Config) Allocator.Error!void {
+    try finalizeProfileField(config, ProfileMap.Name, &config.@"profile-name", "profile-name");
+    try finalizeProfileField(config, ProfileMap.Text, &config.@"profile-working-directory", "profile-working-directory");
+    try finalizeProfileField(config, ProfileMap.Env, &config.@"profile-env", "profile-env");
+    try finalizeProfileReferences(config, "profile-order");
+    try finalizeProfileReferences(config, "profile-hidden");
 }
 
 /// Report each `profile-order` or `profile-hidden` value that can name no
@@ -314,18 +312,18 @@ fn finalizeProfiles(self: *Config) Allocator.Error!void {
 /// shell this machine lacks (`wsl:docker-desktop`, an `ssh:` host) is not
 /// reported, so a shared config loads quietly everywhere. A reference is not
 /// a secret, so the message quotes it, as `default-profile`'s does.
-fn finalizeProfileReferences(self: *Config, comptime key: [:0]const u8) Allocator.Error!void {
-    const alloc = self._arena.?.allocator();
-    for (@field(self, key).list.items) |reference| {
-        if (windows_shell.referenceCanName(reference, &self.@"profile-command")) continue;
-        try appendFinalizeProblem(self, .{
+fn finalizeProfileReferences(config: *Config, comptime key: [:0]const u8) Allocator.Error!void {
+    const alloc = config._arena.?.allocator();
+    for (@field(config, key).list.items) |reference| {
+        if (windows_shell.referenceCanName(reference, &config.@"profile-command")) continue;
+        try appendFinalizeProblem(config, .{
             .key = key,
             .message = try std.fmt.allocPrintSentinel(alloc, "\"{s}\" names no profile: use a profile-command id, " ++
                 "a key such as pwsh.exe, wsl:<distribution>, ssh:<alias> or vs:newest:cmd, or a name such as pwsh, git, cmd or wsl{s}", .{
                 reference,
                 if (hasInlineComment(reference)) " (comments go on a line of their own)" else "",
             }, 0),
-            .location = try profilePlace(self, key, reference).clone(alloc),
+            .location = try profilePlace(config, key, reference).clone(alloc),
         });
     }
 }
@@ -341,20 +339,20 @@ fn hasInlineComment(value: []const u8) bool {
 }
 
 fn finalizeProfileField(
-    self: *Config,
+    config: *Config,
     comptime Map: type,
     map: *Map,
     comptime key: [:0]const u8,
 ) Allocator.Error!void {
-    const alloc = self._arena.?.allocator();
+    const alloc = config._arena.?.allocator();
     var index: usize = 0;
     while (index < map.entries.items.len) {
         const id = map.entries.items[index].id;
-        if (self.@"profile-command".contains(id)) {
+        if (config.@"profile-command".contains(id)) {
             index += 1;
             continue;
         }
-        try self._diagnostics.append(alloc, .{
+        try config._diagnostics.append(alloc, .{
             .key = key,
             .message = try std.fmt.allocPrintSentinel(
                 alloc,
@@ -362,7 +360,7 @@ fn finalizeProfileField(
                 .{id},
                 0,
             ),
-            .location = try profilePlace(self, key, id).clone(alloc),
+            .location = try profilePlace(config, key, id).clone(alloc),
         });
         _ = map.entries.orderedRemove(index);
     }
@@ -378,10 +376,10 @@ pub const ProfilePlace = struct {
 
 /// A copy of `_profile_places` in `alloc` (another config's arena): the ids
 /// and locations are copied, the keys are static.
-pub fn cloneProfilePlaces(self: *const Config, alloc: Allocator) Allocator.Error!std.ArrayListUnmanaged(ProfilePlace) {
+pub fn cloneProfilePlaces(config: *const Config, alloc: Allocator) Allocator.Error!std.ArrayListUnmanaged(ProfilePlace) {
     var out: std.ArrayListUnmanaged(ProfilePlace) = .empty;
-    try out.ensureTotalCapacity(alloc, self._profile_places.items.len);
-    for (self._profile_places.items) |place| {
+    try out.ensureTotalCapacity(alloc, config._profile_places.items.len);
+    for (config._profile_places.items) |place| {
         out.appendAssumeCapacity(.{
             .key = place.key,
             .id = try alloc.dupe(u8, place.id),
@@ -393,11 +391,11 @@ pub fn cloneProfilePlaces(self: *const Config, alloc: Allocator) Allocator.Error
 
 /// The place of the last line that wrote `id` for `key`, or none (a value
 /// set by code, not by a line).
-fn profilePlace(self: *const Config, key: []const u8, id: []const u8) cli.Location {
-    var index = self._profile_places.items.len;
+fn profilePlace(config: *const Config, key: []const u8, id: []const u8) cli.Location {
+    var index = config._profile_places.items.len;
     while (index > 0) {
         index -= 1;
-        const place = self._profile_places.items[index];
+        const place = config._profile_places.items[index];
         if (std.mem.eql(u8, place.key, key) and std.ascii.eqlIgnoreCase(place.id, id)) return place.location;
     }
     return .none;
@@ -406,8 +404,8 @@ fn profilePlace(self: *const Config, key: []const u8, id: []const u8) cli.Locati
 /// Whether any argument on noctty's command line wrote `id` for `key`
 /// (`--profile-env=<id>: ...`), or cleared every id (`--profile-env=`), which
 /// a process that reads only the config files would not see.
-fn profileWrittenOnCommandLine(self: *const Config, key: []const u8, id: []const u8) bool {
-    for (self._profile_places.items) |place| {
+fn profileWrittenOnCommandLine(config: *const Config, key: []const u8, id: []const u8) bool {
+    for (config._profile_places.items) |place| {
         if (place.location != .cli or !std.mem.eql(u8, place.key, key)) continue;
         if (place.id.len == 0 or std.ascii.eqlIgnoreCase(place.id, id)) return true;
     }
@@ -417,8 +415,8 @@ fn profileWrittenOnCommandLine(self: *const Config, key: []const u8, id: []const
 /// Whether noctty's command line has an `--env=` argument. A process that
 /// reads only the config files (an elevated window) would not get it, and a
 /// user profile's `%NAME%` reads `env` entries first.
-fn commandLineSetsEnv(self: *const Config) bool {
-    for (self._replay_steps.items) |step| switch (step) {
+fn commandLineSetsEnv(config: *const Config) bool {
+    for (config._replay_steps.items) |step| switch (step) {
         .arg => |arg| if (arg.location == .cli and std.mem.startsWith(u8, arg.value, "--env=")) return true,
         else => {},
     };
@@ -429,7 +427,7 @@ fn commandLineSetsEnv(self: *const Config) bool {
 /// `profile-*` key, or a value of `default-profile`, `profile-order` or
 /// `profile-hidden` (recorded under the value itself). A line the parser
 /// will refuse writes nothing and is not recorded.
-fn recordProfilePlace(self: *Config, alloc: Allocator, arg: []const u8, iter: anytype) Allocator.Error!void {
+fn recordProfilePlace(config: *Config, alloc: Allocator, arg: []const u8, iter: anytype) Allocator.Error!void {
     if (!std.mem.startsWith(u8, arg, "--profile-") and !std.mem.startsWith(u8, arg, "--default-profile=")) return;
     const eq = std.mem.indexOfScalar(u8, arg, '=') orelse return;
     const key = arg[2..eq];
@@ -440,7 +438,7 @@ fn recordProfilePlace(self: *Config, alloc: Allocator, arg: []const u8, iter: an
         // sees a command-line reset (New Elevated Window would otherwise
         // name a file's profile, whose variables the elevated process reads
         // back from the files).
-        if (std.mem.eql(u8, key, "profile-env")) try self._profile_places.append(alloc, .{
+        if (std.mem.eql(u8, key, "profile-env")) try config._profile_places.append(alloc, .{
             .key = "profile-env",
             .id = "",
             .location = try cli.Location.fromIter(iter, alloc),
@@ -449,7 +447,7 @@ fn recordProfilePlace(self: *Config, alloc: Allocator, arg: []const u8, iter: an
     }
     inline for (.{ "default-profile", "profile-order", "profile-hidden" }) |reference_key| {
         if (std.mem.eql(u8, key, reference_key)) {
-            try self._profile_places.append(alloc, .{
+            try config._profile_places.append(alloc, .{
                 .key = reference_key,
                 .id = try alloc.dupe(u8, value),
                 .location = try cli.Location.fromIter(iter, alloc),
@@ -465,7 +463,7 @@ fn recordProfilePlace(self: *Config, alloc: Allocator, arg: []const u8, iter: an
     }) |field| {
         if (std.mem.eql(u8, key, field[0])) {
             const parsed = ProfileMap.check(field[1], value) catch return;
-            try self._profile_places.append(alloc, .{
+            try config._profile_places.append(alloc, .{
                 .key = field[0],
                 .id = try alloc.dupe(u8, parsed.id),
                 .location = try cli.Location.fromIter(iter, alloc),
@@ -480,38 +478,38 @@ fn recordProfilePlace(self: *Config, alloc: Allocator, arg: []const u8, iter: an
 /// included file (read after the command line). What was kept is the last
 /// value the field parse took (`takenCliValue`), so a later one it refused
 /// does not replace it.
-fn finalizeCliLaunch(self: *Config) Allocator.Error!void {
-    if (self._command_cli) |value| {
-        if (try applyCliValue(self, "command", value)) {
-            self._command_defaulted = false;
-            self._command_from_file = false;
+fn finalizeCliLaunch(config: *Config) Allocator.Error!void {
+    if (config._command_cli) |value| {
+        if (try applyCliValue(config, "command", value)) {
+            config._command_defaulted = false;
+            config._command_from_file = false;
         }
     }
-    if (self._initial_command_cli) |value| _ = try applyCliValue(self, "initial-command", value);
-    finalizeECommand(self);
+    if (config._initial_command_cli) |value| _ = try applyCliValue(config, "initial-command", value);
+    finalizeECommand(config);
 }
 
 /// Apply `-e`'s command (`_e_command`) again, over the files read after the
 /// command line. A replay with `-e` last (a theme's, a new conditional
 /// state's) has already given these values, and this gives them again.
-fn finalizeECommand(self: *Config) void {
-    const command = self._e_command orelse return;
-    self.applyECommand(command);
+fn finalizeECommand(config: *Config) void {
+    const command = config._e_command orelse return;
+    config.applyECommand(command);
 }
 
 /// The value of `arg` when it is `--<key>=<value>` and the field parse takes
 /// it. It is parsed here, into the field, by the same `applyCliValue` the
 /// parse that follows uses (and `finalizeCliLaunch` repeats), so the answer is
 /// that parse's, with no copy of its rules (a blank value, `direct:`).
-fn takenCliValue(self: *Config, comptime key: []const u8, arg: []const u8) Allocator.Error!?[]const u8 {
+fn takenCliValue(config: *Config, comptime key: []const u8, arg: []const u8) Allocator.Error!?[]const u8 {
     const prefix = "--" ++ key ++ "=";
     if (!std.mem.startsWith(u8, arg, prefix)) return null;
     const value = arg[prefix.len..];
-    return if (try applyCliValue(self, key, value)) value else null;
+    return if (try applyCliValue(config, key, value)) value else null;
 }
 
-fn applyCliValue(self: *Config, comptime key: []const u8, value: []const u8) Allocator.Error!bool {
-    cli.args.parseIntoField(Config, self._arena.?.allocator(), self, key, value) catch |err| {
+fn applyCliValue(config: *Config, comptime key: []const u8, value: []const u8) Allocator.Error!bool {
+    cli.args.parseIntoField(Config, config._arena.?.allocator(), config, key, value) catch |err| {
         if (err == error.OutOfMemory) return error.OutOfMemory;
         return false;
     };
@@ -521,11 +519,11 @@ fn applyCliValue(self: *Config, comptime key: []const u8, value: []const u8) All
 /// Add a problem `finalize` found, unless the config already has it:
 /// `finalize` can run again on a finalized config (a new window's clone of
 /// the app config is finalized again with its forwarded arguments).
-fn appendFinalizeProblem(self: *Config, diag: cli.Diagnostic) Allocator.Error!void {
-    for (self._diagnostics.items()) |have| {
+fn appendFinalizeProblem(config: *Config, diag: cli.Diagnostic) Allocator.Error!void {
+    for (config._diagnostics.items()) |have| {
         if (sameDiagnostic(have, diag)) return;
     }
-    try self._diagnostics.append(self._arena.?.allocator(), diag);
+    try config._diagnostics.append(config._arena.?.allocator(), diag);
 }
 
 /// The same problem: the same key, message and place.
@@ -543,17 +541,17 @@ fn sameDiagnostic(a: cli.Diagnostic, b: cli.Diagnostic) bool {
 /// wins over the files (included ones are read after the command line), and
 /// one that a `command` from a config file overrides is a config problem.
 /// Safe mode starts with a `command` noctty chose, so this stays quiet there.
-fn finalizeDefaultProfileSetting(self: *Config) Allocator.Error!void {
-    if (self._default_profile_cli) |value| {
-        self.@"default-profile" = if (value.len == 0) null else value;
+fn finalizeDefaultProfileSetting(config: *Config) Allocator.Error!void {
+    if (config._default_profile_cli) |value| {
+        config.@"default-profile" = if (value.len == 0) null else value;
     }
-    if (self.@"default-profile" == null or self._default_profile != null) return;
-    if (self.command == null or self._command_defaulted or !self._command_from_file) return;
-    const alloc = self._arena.?.allocator();
-    try appendFinalizeProblem(self, .{
+    if (config.@"default-profile" == null or config._default_profile != null) return;
+    if (config.command == null or config._command_defaulted or !config._command_from_file) return;
+    const alloc = config._arena.?.allocator();
+    try appendFinalizeProblem(config, .{
         .key = "default-profile",
         .message = "is not used, because a config file sets command; remove the command line to start the profile",
-        .location = try profilePlace(self, "default-profile", self.@"default-profile".?).clone(alloc),
+        .location = try profilePlace(config, "default-profile", config.@"default-profile".?).clone(alloc),
     });
 }
 
@@ -562,11 +560,11 @@ fn finalizeDefaultProfileSetting(self: *Config) Allocator.Error!void {
 /// marked automatic as the default it replaces, and the profile itself in
 /// `_default_profile`. A value that names nothing that can start is a config
 /// problem, and `command` stays unset for the automatic default.
-fn applyDefaultProfile(self: *Config, host: anytype) !void {
-    if (self.command != null) return;
-    const reference = self.@"default-profile" orelse return;
-    const alloc = self._arena.?.allocator();
-    var user = try windows_shell.UserProfiles.init(alloc, self);
+fn applyDefaultProfile(config: *Config, host: anytype) !void {
+    if (config.command != null) return;
+    const reference = config.@"default-profile" orelse return;
+    const alloc = config._arena.?.allocator();
+    var user = try windows_shell.UserProfiles.init(alloc, config);
     defer user.deinit();
     // A failed lookup (not memory) is a profile that cannot start, as for
     // the automatic default, which also looks the shells up here.
@@ -575,8 +573,8 @@ fn applyDefaultProfile(self: *Config, host: anytype) !void {
         if (err == error.VisualStudioUnavailable) {
             // The value may be right: reported apart from one that names
             // nothing, and the next load (a reload) asks again.
-            self._default_profile_failure = .unavailable;
-            try appendFinalizeProblem(self, .{
+            config._default_profile_failure = .unavailable;
+            try appendFinalizeProblem(config, .{
                 .key = "default-profile",
                 .message = try std.fmt.allocPrintSentinel(
                     alloc,
@@ -584,7 +582,7 @@ fn applyDefaultProfile(self: *Config, host: anytype) !void {
                     .{reference},
                     0,
                 ),
-                .location = try profilePlace(self, "default-profile", reference).clone(alloc),
+                .location = try profilePlace(config, "default-profile", reference).clone(alloc),
             });
             return;
         }
@@ -592,8 +590,8 @@ fn applyDefaultProfile(self: *Config, host: anytype) !void {
         break :found null;
     };
     const profile = resolved orelse {
-        self._default_profile_failure = .not_found;
-        try appendFinalizeProblem(self, .{
+        config._default_profile_failure = .not_found;
+        try appendFinalizeProblem(config, .{
             .key = "default-profile",
             .message = try std.fmt.allocPrintSentinel(
                 alloc,
@@ -601,14 +599,14 @@ fn applyDefaultProfile(self: *Config, host: anytype) !void {
                 .{reference},
                 0,
             ),
-            .location = try profilePlace(self, "default-profile", reference).clone(alloc),
+            .location = try profilePlace(config, "default-profile", reference).clone(alloc),
         });
         return;
     };
     log.info("default shell src=default-profile key={s}", .{profile.key});
-    self.command = profile.command;
-    self._command_defaulted = true;
-    self._default_profile = profile;
+    config.command = profile.command;
+    config._command_defaulted = true;
+    config._default_profile = profile;
 }
 
 pub const DefaultProfileFailure = enum {
