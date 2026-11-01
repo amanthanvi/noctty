@@ -132,6 +132,19 @@ fn resolvedWhenUnset(key: Key) bool {
     return std.mem.indexOfScalar(Key, &resolved_when_unset, key) != null;
 }
 
+/// Whether a key the app works out when unset differs from its default:
+/// whether a step of the config as it was loaded set it, in any layer (the
+/// file Settings saves to, a file `config-file` names, the theme, the command
+/// line), which is what its origin (`config.origin`) says. A refused line set
+/// nothing. Neither the file as it is now nor whether it can be read changes
+/// what was loaded, so neither changes this; they only say where.
+fn resolvedDiffers(found: origin.Origin) bool {
+    return switch (found) {
+        .file, .cli, .unplaced => true,
+        .derived, .default => false,
+    };
+}
+
 /// Write `raw` (a doc comment from `help_strings`) as plain text: inline code
 /// keeps its text without the backticks, `**bold**` and `*emphasis*` lose
 /// their stars, a link keeps its label and its address in parentheses, a
@@ -336,10 +349,6 @@ pub const TargetLines = struct {
     /// For each key, the lines that name it and do not hold an assignment the
     /// loader took for it: refused, or written since the file was read.
     untaken: [key_count]Lines = @splat(.{}),
-    /// For each key, the lines of the file the loader took for it when it read
-    /// the file, whatever they hold now: what the config in effect was given,
-    /// for whether it differs (`Row.differs`). `set` is for where.
-    loaded: [key_count]Lines = @splat(.{}),
 
     /// `text` is the file at `path` as it is now, decoded
     /// (`decodeConfigText`); `index` is the config read from it, with its
@@ -349,10 +358,9 @@ pub const TargetLines = struct {
         defer alloc.free(steps);
         var self: TargetLines = .{};
         errdefer self.deinit(alloc);
-        for (steps) |step| {
-            var keys_buf: [origin.max_keys_per_step]Key = undefined;
-            for (index_.keysSet(step, &keys_buf)) |key| mark(&self.loaded[index(key)], step.line);
-        }
+        // A file the loader read twice (a config file that a file it
+        // includes names back) has two steps at each of its lines; the pass
+        // below visits each line of the text once, so each counts once.
         var reader: std.Io.Reader = .fixed(text);
         var lines: cli_parse.LineIterator = .{ .r = &reader };
         var at: usize = 0;
@@ -450,10 +458,11 @@ pub const Row = struct {
     /// value, the Windows note, the documentation and the words of the
     /// key's Settings controls.
     search: []const u8 = "",
-    /// Whether the effective value differs from the default
-    /// (`resolved_when_unset` keys: whether the loader took a line of the
-    /// config file for them, when that is known (`TargetLines.loaded`); else
-    /// their value too).
+    /// Whether the effective value differs from the default. For the keys
+    /// the app works out when unset (`resolved_when_unset`): whether a step of
+    /// the config as it was loaded set them, in any layer (`resolvedDiffers`),
+    /// whatever the file Settings saves to holds now or whether it can be
+    /// read.
     differs: bool = false,
     /// The lines of the config file Settings saves to that set the key, as
     /// the loader took them and as they still are (`TargetLines.set`): a line
@@ -554,13 +563,8 @@ pub const Model = struct {
 
             // The lines of the file that set the key, as the loader took them.
             const set = target.set[i];
-            // A key `finalize` works out differs when the loader took a line
-            // of the file for it, as the config in effect was read: a line it
-            // refused does not count, and a line changed since still does,
-            // for the app still uses what it read. With the file unread that
-            // is not known, so its value decides, as for any other key: shown
-            // as changed rather than hidden.
-            const differs = if (resolvedWhenUnset(key) and lines_known) target.loaded[i].count != 0 else if (defaults) |config| changed: {
+            const found = savedOriginIn(&problems, key, defaults);
+            const differs = if (resolvedWhenUnset(key)) resolvedDiffers(found) else if (defaults) |config| changed: {
                 default_entries.clearRetainingCapacity();
                 try writeEntries(&default_entries.writer, config, key);
                 break :changed !std.mem.eql(u8, current_entries.written(), default_entries.written());
@@ -585,7 +589,6 @@ pub const Model = struct {
             const search_text = try search.toOwnedSlice();
             for (search_text) |*c| c.* = std.ascii.toLower(c.*);
 
-            const found = savedOriginIn(&problems, key, defaults);
             rows[i] = .{
                 .doc = plain,
                 .summary = summaryOf(plain),
@@ -1049,14 +1052,15 @@ test "settings reference finds where a BOM or UTF-16 config sets a key, and @mod
     current.@"click-repeat-interval" = 500;
 
     // A file that is there but cannot be read as text: where a key is set is
-    // not known, so it is not said to be unset, and a key `finalize` works out
-    // is changed by its value.
+    // not known, so it is not said to be unset. Whether a key `finalize` works
+    // out is changed is what was loaded, and this config was not loaded from
+    // any file: its interval is a value written in memory, not a change.
     for ([_]ConfigFile{ .unavailable, .{ .bytes = &[_]u8{ 0xff, 0xfe, 0x00, 0xd8 } } }) |file| {
         var model: Model = .{};
         defer model.deinit();
         try model.build(testing.allocator, &current, &defaults, "f", file, &extra);
         try testing.expect(!model.lines_known);
-        try testing.expect(model.rows[index(.@"click-repeat-interval")].differs);
+        try testing.expect(!model.rows[index(.@"click-repeat-interval")].differs);
         try testing.expect(!model.rows[index(.term)].differs);
         var writer: std.Io.Writer = .fixed(&buf);
         try model.writeLocation(&writer, &model.rows[index(.@"font-size")]);
@@ -1692,4 +1696,181 @@ test "settings reference counts the lines of a generated config with 5000 refuse
     var writer: std.Io.Writer = .fixed(&buf);
     try model.writeLocation(&writer, font);
     try testing.expectEqualStrings(try std.fmt.bufPrint(&expected, "Set on 2500 lines of {s}, the last on line 9999. 2500 lines of {s} mention it, the last on line 9997, and do not take effect.", .{ path, path }), writer.buffered());
+}
+
+test "settings reference counts a line once when the loader read the file Settings saves to twice" {
+    const alloc = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    // The config file includes a file that names it back: the loader reads
+    // the config file, then the included file, then the config file again,
+    // and only then notes the cycle. The default file is not among the files
+    // it remembers having read (`loadRecursiveFiles`).
+    try tmp.dir.writeFile(.{ .sub_path = "extra.conf", .data = "font-size = 15\nconfig-file = config\n" });
+    const text = "font-size = 12\nfont-size = 13\nconfig-file = extra.conf\n";
+    try tmp.dir.writeFile(.{ .sub_path = "config", .data = text });
+    const path = try tmp.dir.realpathAlloc(alloc, "config");
+    defer alloc.free(path);
+    var current = try Config.default(alloc);
+    defer current.deinit();
+    try current.loadFile(alloc, path);
+    try current.loadRecursiveFiles(alloc);
+    try current.finalize();
+
+    // Read twice: two steps at each of its lines.
+    const steps = try origin.fileSteps(alloc, &current, path, &samePath);
+    defer alloc.free(steps);
+    var at_first: usize = 0;
+    for (steps) |step| {
+        if (step.line == 1) at_first += 1;
+    }
+    try testing.expectEqual(@as(usize, 2), at_first);
+
+    // The second read comes after the included file, so its line 2 is the
+    // one in effect, and the origin.
+    try testing.expectEqual(@as(f32, 13), current.@"font-size");
+    const found = origin.of(&current, .@"font-size", null);
+    try testing.expect(found == .file);
+    try testing.expect(samePath(path, found.file.path));
+    try testing.expectEqual(@as(usize, 2), found.file.line);
+
+    // Each line of the file counts once.
+    var problems = try origin.Index.init(alloc, &current);
+    defer problems.deinit(alloc);
+    var target = try TargetLines.init(alloc, &problems, path, text);
+    defer target.deinit(alloc);
+    try testing.expectEqual(Lines{ .count = 2, .last = 2 }, target.set[index(.@"font-size")]);
+
+    // And All settings says so.
+    const extra: [key_count][]const u8 = @splat("");
+    var model: Model = .{};
+    defer model.deinit();
+    try model.build(alloc, &current, null, path, .{ .bytes = text }, &extra);
+    var buf: [1024]u8 = undefined;
+    var expected: [1024]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buf);
+    try model.writeLocation(&writer, &model.rows[index(.@"font-size")]);
+    try testing.expectEqualStrings(try std.fmt.bufPrint(&expected, "Set on 2 lines of {s}, the last on line 2.", .{path}), writer.buffered());
+}
+
+/// How Settings could read the file it saves to when it built the model.
+const TestRead = enum { readable, unavailable, undecodable };
+
+/// Load `text` (the file `config`, with `extra.conf` beside it holding
+/// `extra_text`) and `args` into `current`, as the app does, and build
+/// `model` with the file read as `file` says. Returns the file's path, the
+/// caller's to free; `current` is the caller's to deinit.
+fn buildLoaded(alloc: std.mem.Allocator, dir: std.fs.Dir, text: []const u8, extra_text: []const u8, args: []const []const u8, model: *Model, current: *Config, defaults: *const Config, file: TestRead) ![]u8 {
+    try dir.writeFile(.{ .sub_path = "extra.conf", .data = extra_text });
+    try dir.writeFile(.{ .sub_path = "config", .data = text });
+    const path = try dir.realpathAlloc(alloc, "config");
+    errdefer alloc.free(path);
+    current.* = try Config.default(alloc);
+    errdefer current.deinit();
+    try current.loadFile(alloc, path);
+    var it: TestArgs = .{ .list = args };
+    try current.loadIter(alloc, &it);
+    try current.loadRecursiveFiles(alloc);
+    try current.finalize();
+    const extra: [key_count][]const u8 = @splat("");
+    try model.build(alloc, current, defaults, path, switch (file) {
+        .readable => .{ .bytes = text },
+        .unavailable => .unavailable,
+        .undecodable => .{ .bytes = &[_]u8{ 0xff, 0xfe, 0x00, 0xd8 } },
+    }, &extra);
+    return path;
+}
+
+test "settings reference a file Settings cannot read now leaves what counts as changed as it was loaded" {
+    const alloc = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var defaults = try Config.default(alloc);
+    defer defaults.deinit();
+    try defaults.finalize();
+
+    const Case = struct {
+        text: []const u8,
+        key: Key,
+        value: []const u8,
+        differs: bool,
+        /// The origin's line in the config file, or null for one `finalize`
+        /// worked out.
+        line: ?usize,
+    };
+    for ([_]Case{
+        // A value `finalize` works out from another key the file sets (the
+        // bold family from the family): no line sets it, so it is no change,
+        // though it is not the default.
+        .{ .text = "font-family = Cascadia Code\n", .key = .@"font-family-bold", .value = "Cascadia Code", .differs = false, .line = null },
+        // A value the file sets to the default: a line set it, so it is a
+        // change, though it equals the default.
+        .{ .text = "click-repeat-interval = 0\n", .key = .@"click-repeat-interval", .value = "0", .differs = true, .line = 1 },
+    }) |case| {
+        for ([_]TestRead{ .readable, .unavailable, .undecodable }) |file| {
+            errdefer std.debug.print("settings reference readable-then-not case {s}, file {s}\n", .{ @tagName(case.key), @tagName(file) });
+            var current: Config = undefined;
+            var model: Model = .{};
+            defer model.deinit();
+            const path = try buildLoaded(alloc, tmp.dir, case.text, "\n", &.{}, &model, &current, &defaults, file);
+            defer alloc.free(path);
+            defer current.deinit();
+            try testing.expectEqual(file == .readable, model.lines_known);
+            const row = &model.rows[index(case.key)];
+            try testing.expectEqualStrings(case.value, row.value);
+            try testing.expectEqual(case.differs, row.differs);
+            if (case.line) |line| {
+                try testing.expect(row.origin == .file);
+                try testing.expect(samePath(path, row.origin.file.path));
+                try testing.expectEqual(line, row.origin.file.line);
+            } else try testing.expect(row.origin == .derived);
+        }
+    }
+}
+
+test "settings reference a value the app works out set only in an included file is changed, and the file named" {
+    const alloc = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var defaults = try Config.default(alloc);
+    defer defaults.deinit();
+    try defaults.finalize();
+    var current: Config = undefined;
+    var model: Model = .{};
+    defer model.deinit();
+    const path = try buildLoaded(alloc, tmp.dir, "config-file = extra.conf\n", "click-repeat-interval = 500\n", &.{}, &model, &current, &defaults, .readable);
+    defer alloc.free(path);
+    defer current.deinit();
+    const extra_path = try tmp.dir.realpathAlloc(alloc, "extra.conf");
+    defer alloc.free(extra_path);
+    const row = &model.rows[index(.@"click-repeat-interval")];
+    try testing.expectEqualStrings("500", row.value);
+    try testing.expect(row.differs);
+    var buf: [1024]u8 = undefined;
+    var expected: [1024]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buf);
+    try model.writeLocation(&writer, row);
+    try testing.expectEqualStrings(try std.fmt.bufPrint(&expected, "Set on line 1 of {s}, a file config-file names.", .{extra_path}), writer.buffered());
+}
+
+test "settings reference a value the app works out set only on the command line is changed, and the command line named" {
+    const alloc = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var defaults = try Config.default(alloc);
+    defer defaults.deinit();
+    try defaults.finalize();
+    var current: Config = undefined;
+    var model: Model = .{};
+    defer model.deinit();
+    const path = try buildLoaded(alloc, tmp.dir, "\n", "\n", &.{"--click-repeat-interval=500"}, &model, &current, &defaults, .readable);
+    defer alloc.free(path);
+    defer current.deinit();
+    const row = &model.rows[index(.@"click-repeat-interval")];
+    try testing.expectEqualStrings("500", row.value);
+    try testing.expect(row.differs);
+    var buf: [1024]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buf);
+    try model.writeLocation(&writer, row);
+    try testing.expectEqualStrings("Set on the command line.", writer.buffered());
 }
