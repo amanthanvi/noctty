@@ -690,12 +690,11 @@ const Frame = struct {
     }
 };
 
-const TimerCallback = *const fn (
-    ?*Thread,
-    *xev.Loop,
-    *xev.Completion,
-    xev.Timer.RunError!void,
-) xev.CallbackAction;
+const TimerCallback = TimerCallbackOf(Thread);
+
+fn TimerCallbackOf(comptime R: type) type {
+    return *const fn (?*R, *xev.Loop, *xev.Completion, xev.Timer.RunError!void) xev.CallbackAction;
+}
 
 fn runOrReset(
     t: *Thread,
@@ -765,9 +764,15 @@ fn drawNowCallback(
 /// Canceled left the pacer's deadline pending for good, and the timer never
 /// ran again. The blink is never reset or canceled.
 fn timerCallback(comptime timer: Pacer.Timer) TimerCallback {
+    return timerRunCallback(Thread, timer);
+}
+
+/// timerCallback over any receiver with `timerDue`, so a test can drive
+/// the production callback without a Thread.
+fn timerRunCallback(comptime R: type, comptime timer: Pacer.Timer) TimerCallbackOf(R) {
     return struct {
         fn callback(
-            self_: ?*Thread,
+            self_: ?*R,
             _: *xev.Loop,
             _: *xev.Completion,
             r: xev.Timer.RunError!void,
@@ -776,14 +781,44 @@ fn timerCallback(comptime timer: Pacer.Timer) TimerCallback {
                 error.Canceled => {},
                 else => unreachable,
             };
-            const t = self_.?;
-            if (comptime timer == .followup and @hasDecl(apprt.Surface, "noteRendererFollowupCallback")) {
-                t.surface.noteRendererFollowupCallback();
-            }
-            t.pacer.turn(.{ .due = timer }, Frame{ .t = t });
+            self_.?.timerDue(timer);
             return .disarm;
         }
     }.callback;
+}
+
+fn timerDue(t: *Thread, comptime timer: Pacer.Timer) void {
+    if (comptime timer == .followup and @hasDecl(apprt.Surface, "noteRendererFollowupCallback")) {
+        t.surface.noteRendererFollowupCallback();
+    }
+    t.pacer.turn(.{ .due = timer }, Frame{ .t = t });
+}
+
+test "timerCallback hands the pacer a run that error.Canceled ends, as due" {
+    // The real-loop test below pins that libxev reports the dropped run as
+    // Canceled; this pins what the production callback does with it.
+    const Recorder = struct {
+        seen: [4]Pacer.Timer = undefined,
+        len: usize = 0,
+
+        fn timerDue(self: *@This(), comptime timer: Pacer.Timer) void {
+            self.seen[self.len] = timer;
+            self.len += 1;
+        }
+    };
+    var recorder: Recorder = .{};
+    var loop: xev.Loop = undefined;
+    var c: xev.Completion = .{};
+    inline for (.{ Pacer.Timer.followup, Pacer.Timer.animation }) |timer| {
+        const cb = timerRunCallback(Recorder, timer);
+        try std.testing.expectEqual(xev.CallbackAction.disarm, cb(&recorder, &loop, &c, error.Canceled));
+        try std.testing.expectEqual(xev.CallbackAction.disarm, cb(&recorder, &loop, &c, {}));
+    }
+    try std.testing.expectEqualSlices(
+        Pacer.Timer,
+        &.{ .followup, .followup, .animation, .animation },
+        recorder.seen[0..recorder.len],
+    );
 }
 
 // fn prepFrameCallback(h: *libuv.Prepare) void {
