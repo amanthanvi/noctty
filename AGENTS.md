@@ -305,7 +305,9 @@ that govern each symbol you change, or that none does.
   `command` (what a config load decides of
   the launch, in the same file: `finalize`, `default-profile` resolution and
   its problems, the automatic default, the `Ledger` a load keeps in
-  `Config._launch` (which layer set `command`, the profile places),
+  `Config._launch` (which layer set `command`, the profile places, what
+  `note` records) and why it stays beside `config.origin` with
+  `origin.Derivation` at `.automatic`,
   `useRecovery`, the queries `defaultProfile`, `nocttyCommand`,
   `commandLineNamesProfile`, `filesDefine` and `defaultProfileForKey`, and
   `keepSources`), profile
