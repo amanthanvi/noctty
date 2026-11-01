@@ -6,10 +6,11 @@ keys walk the matches, the "Invalid pattern" label for a regex that does not
 compile, that Escape closes the bar without turning its chip to "Searching"
 and start_search reopens it on the same query, that Escape at the focused
 terminal (the end_search binding) does not turn the chip to "Searching"
-either, and the narrow-pane collapse that drops the toggles and then
-previous/next instead of overlapping them. Run with -Bin <source bin
-directory> -Run <new evidence directory>. The run directory must not
-already exist.
+either, that Escape on a focused
+search button closes the bar of that button's pane, and the narrow-pane
+collapse that drops the toggles and then previous/next instead of
+overlapping them. Run with -Bin <source bin directory> -Run <new evidence
+directory>. The run directory must not already exist.
 
 Never switches desktops, injects real input or touches the clipboard: every
 action is a posted window message. The search copies nothing, and the
@@ -70,6 +71,12 @@ public static class Ds {
         IntPtr found=IntPtr.Zero;
         EnumChildWindows(host,(c,p)=> { if(GetDlgCtrlID(c)==id) { found=c; return false; } return true; },IntPtr.Zero);
         return found;
+    }
+    // Every child of `host` with the control ID.
+    public static IntPtr[] Children(IntPtr host,int id) {
+        var list=new List<IntPtr>();
+        EnumChildWindows(host,(c,p)=> { if(GetDlgCtrlID(c)==id) list.Add(c); return true; },IntPtr.Zero);
+        return list.ToArray();
     }
     public static bool Alive(IntPtr h) { return IsWindow(h); }
     public static bool Visible(IntPtr h) { return IsWindowVisible(h); }
@@ -154,6 +161,12 @@ function Wait-Label($h,[scriptblock]$Is,[int]$Seconds=6) {
     return (Label $h)
 }
 function Press-Edit($h,[int]$Key) { [Ds]::Key([Ds]::Child($h,$Id.Edit),$Key) }
+# The search control `$id` of the pane `$pane`: the bar spans its pane's width.
+function Pane-Child($h,$pane,[int]$id) {
+    $p=[Ds]::RectOf($pane)
+    foreach($c in [Ds]::Children($h,$id)) { $r=[Ds]::RectOf($c); if($r.Left -ge $p.Left -and $r.Right -le $p.Right) { return $c } }
+    return [IntPtr]::Zero
+}
 function Set-Query($h,[string]$Text) {
     # An edit of the query as a user's typing makes: the text changes and
     # EN_CHANGE reaches the search bar.
@@ -168,7 +181,7 @@ function Launch-Case([string]$Name) {
     # may hold spaces without any quoting for cmd.exe.
     @("working-directory = $dir",'command = cmd.exe /d /c fill.cmd','shell-integration = none','single-instance = false','window-save-state = never','confirm-close-surface = false',
       'copy-on-select = false','clipboard-read = deny','clipboard-write = deny',
-      'keybind = f4=start_search') | Set-Content -LiteralPath $config
+      'keybind = f4=start_search','keybind = f5=new_split:right') | Set-Content -LiteralPath $config
     $exe=Join-Path $dir 'noctty.exe'
     $pi=[HiddenLocal]::Spawn($exe,('"{0}" --config-file="{1}"' -f $exe,$config),$dir,$desktopPath)
     $script:processes.Add(@{Case=$Name;Pid=$pi.pid})
@@ -300,6 +313,50 @@ try {
         $hiddenChip=Label $h
         Check 'Escape at the terminal leaves the hidden chip on its count' ($closed -and $hiddenChip -eq $typed) $typed $hiddenChip
         $script:samples.Add(@{Name='terminal escape'; Labels=@($typed,$hiddenChip)})
+    } finally { Close-Case $case }
+
+    # Escape on a focused search button closes the bar of the button's pane.
+    # Two panes search; the left one is made active, then the right one's
+    # close button takes the focus and gets the Escape. The mirror, from the
+    # left pane's button, is the control that the check tells panes apart.
+    $case=Launch-Case 'button-escape'
+    try {
+        $h=$case.Host
+        Start-Sleep -Milliseconds 4000
+        Open-Search $h
+        [Ds]::Chars([Ds]::Child($h,$Id.Edit),'needlex')
+        [void](Wait-Label $h { param($t) $t -match '^\d+$' })
+        [Ds]::Key((Pane $h),0x74)            # F5: new_split:right
+        [void](Wait-Until { @([HiddenLocal]::Surfaces($h)).Count -eq 2 } 8)
+        Start-Sleep -Milliseconds 4000       # the new pane prints its 60 lines
+        $panes=@([HiddenLocal]::Surfaces($h) | Sort-Object { [Ds]::RectOf($_).Left })
+        $left=$panes[0]; $right=$panes[1]
+        [Ds]::Key($right,0x73)               # F4 in the right pane
+        [void](Wait-Until { $e=Pane-Child $h $right $Id.Edit; $e -ne [IntPtr]::Zero -and [Ds]::Visible($e) } 8)
+        [Ds]::Chars((Pane-Child $h $right $Id.Edit),'needlex')
+        Start-Sleep -Milliseconds 800
+        $leftEdit=Pane-Child $h $left $Id.Edit; $rightEdit=Pane-Child $h $right $Id.Edit
+        $open=@{ Left=[Ds]::Visible($leftEdit); Right=[Ds]::Visible($rightEdit) }
+        Check 'both panes search' ($open.Left -and $open.Right -and $leftEdit -ne $rightEdit) @{Left=$true;Right=$true} $open
+        # The left pane becomes active through its edit, then the right
+        # pane's close button takes the focus.
+        [Ds]::FocusOn($leftEdit); Start-Sleep -Milliseconds 200
+        $rightClose=Pane-Child $h $right $Id.Close
+        [Ds]::FocusOn($rightClose); Start-Sleep -Milliseconds 200
+        $focused=([Ds]::FocusOf($h) -eq $rightClose)
+        [Ds]::Key($rightClose,0x1B)
+        [void](Wait-Until { -not [Ds]::Visible($rightEdit) } 4)
+        $after=@{ ButtonFocused=$focused; RightOpen=[Ds]::Visible($rightEdit); LeftOpen=[Ds]::Visible($leftEdit); FocusOnRightPane=([Ds]::FocusOf($h) -eq $right) }
+        Check 'Escape on a focused button closes its own pane''s bar and focuses that pane' ($after.ButtonFocused -and -not $after.RightOpen -and $after.LeftOpen -and $after.FocusOnRightPane) @{ButtonFocused=$true;RightOpen=$false;LeftOpen=$true;FocusOnRightPane=$true} $after
+        # The mirror: the right pane is active, the left pane's button closes the left bar.
+        [Ds]::FocusOn($right); Start-Sleep -Milliseconds 200
+        $leftClose=Pane-Child $h $left $Id.Close
+        [Ds]::FocusOn($leftClose); Start-Sleep -Milliseconds 200
+        [Ds]::Key($leftClose,0x1B)
+        [void](Wait-Until { -not [Ds]::Visible($leftEdit) } 4)
+        $mirror=@{ LeftOpen=[Ds]::Visible($leftEdit); FocusOnLeftPane=([Ds]::FocusOf($h) -eq $left) }
+        Check 'the left pane''s button closes the left bar the same way' (-not $mirror.LeftOpen -and $mirror.FocusOnLeftPane) @{LeftOpen=$false;FocusOnLeftPane=$true} $mirror
+        $script:samples.Add(@{Name='button escape'; After=$after; Mirror=$mirror})
     } finally { Close-Case $case }
 
     # F079: the controls of the bar as the pane narrows.

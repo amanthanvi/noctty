@@ -4460,11 +4460,6 @@ pub const Host = struct {
         for (0..@abs(steps)) |_| _ = self.activateTabByDirection(direction);
     }
 
-    pub fn dismissActiveSearch(self: *Host) bool {
-        const surface = self.activeSurface() orelse return false;
-        return surface.dockedSearch(.{ .key = .{ .event = .down, .at = .button, .vk = c.VK_ESCAPE } }) catch false;
-    }
-
     fn toggleCommandPaletteFromButton(self: *Host) bool {
         const surface = self.activeSurface() orelse return false;
         _ = surface.toggleCommandPalette() catch return false;

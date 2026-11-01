@@ -356,7 +356,8 @@ pub const DockedSearch = struct {
                 c.VK_ESCAPE => dismiss,
                 else => .{},
             },
-            // Enter on a button is its click, and Tab its focus step.
+            // Enter on a button is its click, and Tab its focus step. Escape
+            // ends the search of the button's own pane, when there is one.
             .button => if (k.event != .down) .{} else switch (k.vk) {
                 c.VK_F3 => self.navigate(step),
                 c.VK_ESCAPE => if (self.active or self.open) dismiss else .{ .handled = true },
@@ -965,10 +966,18 @@ test "Escape at the edit sends .end with focus_terminal" {
     }
 }
 
+test "Escape at a button ends its own pane's search" {
+    var search = try testSearching(std.testing.allocator, "needlex");
+    defer search.deinit();
+    const out = try search.apply(testKey(.down, .button, c.VK_ESCAPE, .{}), 0);
+    try std.testing.expect(out.handled);
+    try std.testing.expect(out.focus_terminal);
+    try testCommand(out, .end);
+}
+
 test "Escape at a button with nothing open asks nothing of the core" {
     var search = try testSearching(std.testing.allocator, "needlex");
     defer search.deinit();
-    try testCommand(try search.apply(testKey(.down, .button, c.VK_ESCAPE, .{}), 0), .end);
     _ = try search.apply(.{ .core = .ended }, 0);
     const closed = try search.apply(testKey(.down, .button, c.VK_ESCAPE, .{}), 0);
     try std.testing.expect(closed.handled);

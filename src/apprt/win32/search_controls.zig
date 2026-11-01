@@ -1549,10 +1549,6 @@ pub fn searchButtonKey(v: *Host, hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: 
         else => return null,
     };
     if (msg == c.WM_SYSKEYDOWN) v.noteChromeKeyInput(c.VK_TAB);
-    if (msg == c.WM_KEYDOWN and wParam == c.VK_ESCAPE) {
-        _ = v.dismissActiveSearch();
-        return 0;
-    }
     const handled = surface.dockedSearch(searchKey(event, .button, wParam, lParam)) catch |err| blk: {
         logUiActionError("docked search button key failed", err);
         break :blk true;
