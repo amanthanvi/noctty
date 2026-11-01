@@ -8760,12 +8760,13 @@ pub const App = struct {
     /// shows another layer naming it. The fresh read is held to the rule the
     /// disk check before an ordinary save holds it to (`settingsDiskVerdict`):
     /// an included or theme file that is there and will not open, or does not
-    /// decode, stops the save. So does a file a reading could not open or
-    /// read whole (`settings_patch.unreadConfigFile`: an include that would
-    /// not open, or one or a theme whose read failed partway through), judged
-    /// on the reading in `state`, since switching to it reads the theme
-    /// again; and a read that fails. Nothing is written then, and `detail`
-    /// names the file.
+    /// decode, stops the save, and so does a file the load or its reading in
+    /// `state` could not open or read whole (`settings_patch.unreadConfigFile`:
+    /// an include that would not open, or one or a theme whose read failed
+    /// partway through). Each reading this decides from is held to the last
+    /// rule again, since switching to `state` reads the theme again; and a
+    /// read that fails stops it. Nothing is written then, and `detail` names
+    /// the file.
     fn settingsProfileEditsFromDisk(
         arena: Allocator,
         alloc: Allocator,

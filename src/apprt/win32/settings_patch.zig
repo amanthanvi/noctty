@@ -560,7 +560,12 @@ pub const Unread = struct {
     /// How the status line names it: "the theme file <path>" or "the
     /// included file <path>", no value.
     pub fn describe(self: Unread, alloc: Allocator) Allocator.Error![]u8 {
-        return std.fmt.allocPrint(alloc, "{s} {s}", .{ if (self.theme) "the theme file" else "the included file", self.path });
+        return std.fmt.allocPrint(alloc, "{s} {s}", .{ self.noun(), self.path });
+    }
+
+    /// The words `describe` puts before the path.
+    pub fn noun(self: Unread) []const u8 {
+        return if (self.theme) "the theme file" else "the included file";
     }
 };
 

@@ -1994,12 +1994,28 @@ fn settingsDiskEditConflict(
     state: configpkg.ConditionalState,
     user_edited: SettingsEditedKeySet,
 ) bool {
-    var applied: ?configpkg.Config = disk.changeConditionalState(state) catch |err| blk: {
-        log.warn("settings save: could not apply the conditional state to the config file err={}", .{err});
-        break :blk null;
-    };
+    var applied = settingsDiskInState(disk, state);
     defer if (applied) |*config| config.deinit();
-    const effective: *const configpkg.Config = if (applied) |*config| config else disk;
+    return settingsDiskEditConflictIn(original, pending, if (applied) |*config| config else disk, user_edited);
+}
+
+/// `disk` in the app's conditional state, or null when that is the state it
+/// was loaded in or the switch failed (logged): then `disk` is the reading.
+fn settingsDiskInState(disk: *const configpkg.Config, state: configpkg.ConditionalState) ?configpkg.Config {
+    return disk.changeConditionalState(state) catch |err| {
+        log.warn("settings save: could not apply the conditional state to the config file err={}", .{err});
+        return null;
+    };
+}
+
+/// `settingsDiskEditConflict` on `effective`, the file already in the app's
+/// conditional state.
+fn settingsDiskEditConflictIn(
+    original: *const configpkg.Config,
+    pending: *const configpkg.Config,
+    effective: *const configpkg.Config,
+    user_edited: SettingsEditedKeySet,
+) bool {
     inline for (win32_settings.editable_keys) |key| {
         if (user_edited.isSet(@intFromEnum(key)) and
             settingsDiskEditDiffers(original, effective, key) and
@@ -2164,12 +2180,21 @@ pub fn settingsDiskVerdict(
     }
     // A file the load opened and could not read whole (an include or theme
     // whose read failed partway through), or could not open since the probe
-    // above: the save's reload would apply the same partial load.
-    if (@import("win32/settings_patch.zig").unreadConfigFile(disk)) |unread| {
-        try setSettingsFailureDetail(alloc, detail, "{s} {s}", .{ if (unread.theme) "the theme file" else "the included file", unread.path });
-        return error.FileUnopenable;
+    // above: the save's reload would apply the same partial load. Asked of
+    // the load and of the reading in the app's light/dark state, which reads
+    // that state's theme again and is the one the reload applies; both theme
+    // names are held to it, as to the probe.
+    var applied = settingsDiskInState(disk, state);
+    defer if (applied) |*config| config.deinit();
+    const effective: *const configpkg.Config = if (applied) |*config| config else disk;
+    const readings = [_]*const configpkg.Config{ disk, effective };
+    for (readings[0..if (applied != null) 2 else 1]) |reading| {
+        if (@import("win32/settings_patch.zig").unreadConfigFile(reading)) |unread| {
+            try setSettingsFailureDetail(alloc, detail, "{s} {s}", .{ unread.noun(), unread.path });
+            return error.FileUnopenable;
+        }
     }
-    return settingsDiskEditConflict(original, pending, disk, state, user_edited);
+    return settingsDiskEditConflictIn(original, pending, effective, user_edited);
 }
 
 /// What the palette says when a theme pick could not be saved. Two causes are
@@ -7967,7 +7992,7 @@ test "win32 settings patch replaces the whole font list and resets lower layers"
     try std.testing.expectEqualStrings("font-family = \n", out.items);
 }
 
-test "win32 settings patch preserves CRLF including multiline and appended edits" {
+test "win32 settings save preserves CRLF including multiline and appended edits, and a missing final newline" {
     const alloc = std.testing.allocator;
     var pending = try configpkg.Config.default(alloc);
     defer pending.deinit();
@@ -7977,10 +8002,17 @@ test "win32 settings patch preserves CRLF including multiline and appended edits
     var edited: SettingsEditedKeySet = .initEmpty();
     edited.set(@intFromEnum(SettingsConfigKey.@"font-size"));
     edited.set(@intFromEnum(SettingsConfigKey.@"font-family"));
-    var out: std.ArrayListUnmanaged(u8) = .{};
-    defer out.deinit(alloc);
-    try patchOrAppendEdits(alloc, "# keep\r\nfont-size = 12\r\ncopy-on-select = false", &pending, edited, &out);
-    try std.testing.expectEqualStrings("# keep\r\nfont-size = 13.25\r\ncopy-on-select = false\r\nfont-family = \r\nfont-family = A\r\nfont-family = B\r\n", out.items);
+    var scratch = try save_target.Scratch.init();
+    defer scratch.deinit();
+    try scratch.tmp.dir.writeFile(.{ .sub_path = "config.ghostty", .data = "# keep\r\nfont-size = 12\r\ncopy-on-select = false" });
+    const path = try scratch.path("config.ghostty");
+    defer alloc.free(path);
+    // Through the save: the file had no final newline and still has none
+    // (it used to gain one), while every line the save wrote ends in CRLF.
+    try persistSettings(alloc, path, &pending, edited, &.{}, null);
+    const saved = try scratch.tmp.dir.readFileAlloc(alloc, "config.ghostty", 1 << 16);
+    defer alloc.free(saved);
+    try std.testing.expectEqualStrings("# keep\r\nfont-size = 13.25\r\ncopy-on-select = false\r\nfont-family = \r\nfont-family = A\r\nfont-family = B", saved);
 }
 
 /// A draft that turns `copy-on-select` on, and the set naming it as the edit.
@@ -8323,18 +8355,29 @@ test "win32 settings save of ordinary settings alone keeps a file's missing fina
     }
 }
 
-test "win32 settings save writes no NUL, on any save path, and leaves the file as it was" {
+test "win32 settings save writes no NUL, with or without a profile edit, and leaves the file as it was" {
     const alloc = std.testing.allocator;
-    const raw = "font-size = 12\n";
     var scratch = try save_target.Scratch.init();
     defer scratch.deinit();
-    try scratch.tmp.dir.writeFile(.{ .sub_path = "config.ghostty", .data = raw });
     const path = try scratch.path("config.ghostty");
     defer alloc.free(path);
-    // An ordinary setting whose value holds a NUL, which nothing in the
-    // window lets through: the save stops before it writes.
     var pending = try configpkg.Config.default(alloc);
     defer pending.deinit();
+    // A profile edit holding one, in a file that ends in a newline (the case
+    // the file-end step's own check skips): `patchProfileEdits` refuses it,
+    // and the save stops before it writes.
+    const profiles = "profile-command = py: python.exe\n";
+    try scratch.tmp.dir.writeFile(.{ .sub_path = "config.ghostty", .data = profiles });
+    const folder: []const @import("win32/settings_patch.zig").Edit = &.{.{ .field = .folder, .id = "py", .op = .{ .set = "C:\\a\x00b" } }};
+    try std.testing.expectError(error.SerializeFailed, persistSettings(alloc, path, &pending, .initEmpty(), folder, null));
+    const after_profiles = try scratch.tmp.dir.readFileAlloc(alloc, "config.ghostty", 1 << 16);
+    defer alloc.free(after_profiles);
+    try std.testing.expect(std.mem.eql(u8, profiles, after_profiles));
+    // An ordinary setting whose value holds one, which nothing in the
+    // window lets through and only the check on the final text looks for:
+    // stopped the same way.
+    const raw = "font-size = 12\n";
+    try scratch.tmp.dir.writeFile(.{ .sub_path = "config.ghostty", .data = raw });
     try pending.@"font-family".parseCLI(pending._arena.?.allocator(), "a\x00b");
     var edited: SettingsEditedKeySet = .initEmpty();
     edited.set(@intFromEnum(SettingsConfigKey.@"font-family"));
@@ -8366,6 +8409,51 @@ test "win32 settings disk check stops an ordinary save on an included file whose
     try whole.loadReader(alloc, &reader, "C:\\noctty-test\\more.conf");
     detail.clear(alloc);
     try std.testing.expect(!try settingsDiskVerdict(alloc, &detail, &same, &same, &whole, .{}, .initEmpty()));
+}
+
+test "win32 settings disk check stops an ordinary save on the theme of the app's light/dark state whose read failed" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(.{ .sub_path = "light", .data = "font-size = 13\n" });
+    try tmp.dir.writeFile(.{ .sub_path = "dark", .data = "font-size = 14\n" });
+    const light = try tmp.dir.realpathAlloc(alloc, "light");
+    defer alloc.free(light);
+    const dark = try tmp.dir.realpathAlloc(alloc, "dark");
+    defer alloc.free(dark);
+    const text = try std.fmt.allocPrint(alloc, "theme = light:{s},dark:{s}\n", .{ light, dark });
+    defer alloc.free(text);
+    try tmp.dir.writeFile(.{ .sub_path = "config", .data = text });
+    const path = try tmp.dir.realpathAlloc(alloc, "config");
+    defer alloc.free(path);
+    // Loaded as `Config.load` loads it, in the light state.
+    var disk = try configpkg.Config.default(alloc);
+    defer disk.deinit();
+    try disk.loadFile(alloc, path);
+    try disk.loadRecursiveFiles(alloc);
+    try disk.finalize();
+    try std.testing.expect(@import("win32/settings_patch.zig").unreadConfigFile(&disk) == null);
+    var same = try configpkg.Config.default(alloc);
+    defer same.deinit();
+    var detail: win32_settings.FailureDetail = .{};
+    defer detail.clear(alloc);
+    const dark_state: configpkg.ConditionalState = .{ .theme = .dark };
+    {
+        // Another program locks the dark theme's bytes: it opens, which the
+        // probe sees, and its read fails, which only the dark reading reads.
+        var lock = try tmp.dir.openFile("dark", .{ .mode = .read_write, .lock = .exclusive });
+        defer lock.close();
+        try std.testing.expectError(error.FileUnopenable, settingsDiskVerdict(alloc, &detail, &same, &same, &disk, dark_state, .initEmpty()));
+        const expected = try std.fmt.allocPrint(alloc, "the theme file {s}", .{dark});
+        defer alloc.free(expected);
+        try std.testing.expect(std.mem.eql(u8, expected, detail.text orelse return error.TestExpectedDetail));
+        // In the light state the reload reads the light theme alone.
+        detail.clear(alloc);
+        try std.testing.expect(!try settingsDiskVerdict(alloc, &detail, &same, &same, &disk, .{}, .initEmpty()));
+    }
+    // Read whole: no problem.
+    detail.clear(alloc);
+    try std.testing.expect(!try settingsDiskVerdict(alloc, &detail, &same, &same, &disk, dark_state, .initEmpty()));
 }
 
 test "win32 settings save writes a config only the extended path form reaches" {
