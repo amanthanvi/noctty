@@ -530,10 +530,12 @@ pub const Model = struct {
     /// that comes from somewhere other than that file (`Row.origin`: a file
     /// `config-file` names, the theme, another default config file, the
     /// command line) is named with its file and line, and a line of this file
-    /// that it overrides is said not to take effect.
+    /// that it overrides is said not to take effect. A value from a line of
+    /// this file is named by that line (`writeTargetLine`).
     pub fn writeLocation(self: *const Model, writer: *std.Io.Writer, row: *const Row) !void {
         switch (row.origin) {
-            .file => |file| if (self.file == null or !samePath(file.path, self.file.?)) {
+            .file => |file| {
+                if (self.file != null and samePath(file.path, self.file.?)) return self.writeTargetLine(writer, row, file.line);
                 try writer.print("Set on line {d} of {s}{s}", .{ file.line, file.path, switch (file.kind) {
                     .included => ", a file config-file names.",
                     .theme => ", the theme.",
@@ -563,7 +565,24 @@ pub const Model = struct {
         }
     }
 
-    /// For a value from elsewhere: the line of this file that it overrides,
+    /// A value from line `line` of the file Settings saves to, the line the
+    /// loader took (`Row.origin`), as the form rows name it. The file's own
+    /// lines that name the key (`Row.lines`) need not end there: a line that
+    /// sets the key under another name (`bold-is-bright` for `bold-color`,
+    /// `gtk-single-instance` for `single-instance`) is not among them, and a
+    /// line the loader refused is. Such a line after or before the one taken
+    /// is said not to take effect (`writeOverridden`).
+    fn writeTargetLine(self: *const Model, writer: *std.Io.Writer, row: *const Row, line: usize) !void {
+        const path = self.file.?;
+        const last_is_taken = self.lines_known and row.lines.last == line;
+        if (last_is_taken and row.lines.count > 1)
+            return writer.print("Set on {d} lines of {s}, the last on line {d}.", .{ row.lines.count, path, line });
+        try writer.print("Set on line {d} of {s}.", .{ line, path });
+        if (!last_is_taken) try self.writeOverridden(writer, row);
+    }
+
+    /// For a value from elsewhere, or from another line of this file: the
+    /// line of this file that it overrides,
     /// or, for a key whose lines can add up, only that this file has one too.
     /// Whether such a line still counts depends on the lines after it, which
     /// the replay log does not say. An empty value resets by each field's own
@@ -1178,4 +1197,63 @@ test "settings reference saved default-profile keeps its included-file origin un
     writer = .fixed(&buf);
     try bare_model.writeLocation(&writer, &bare_model.rows[index(.@"default-profile")]);
     try testing.expectEqualStrings(try std.fmt.bufPrint(&expected, "Set on line 1 of {s}, a file config-file names.", .{included_path}), writer.buffered());
+}
+
+test "settings reference names the line of the file Settings saves to that the loader took" {
+    const alloc = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(.{ .sub_path = "config", .data = "\n" });
+    const path = try tmp.dir.realpathAlloc(alloc, "config");
+    defer alloc.free(path);
+    var defaults = try Config.default(alloc);
+    defer defaults.deinit();
+    try defaults.finalize();
+
+    const Want = struct { key: Key, line: usize, refused: ?usize = null };
+    const File = struct { text: []const u8, want: []const Want };
+    for ([_]File{
+        .{
+            // A key set only under another name; a line the loader refused
+            // after one it took; `single-instance` from its alias alone.
+            .text = "bold-is-bright = true\nfont-size = 13\nfont-size = abc\ngtk-single-instance = false\n",
+            .want = &.{
+                .{ .key = .@"bold-color", .line = 1 },
+                .{ .key = .@"font-size", .line = 2, .refused = 3 },
+                .{ .key = .@"single-instance", .line = 4 },
+                .{ .key = .@"gtk-single-instance", .line = 4 },
+            },
+        },
+        .{
+            // `single-instance` wins over its alias, whose line does not take
+            // effect.
+            .text = "single-instance = false\ngtk-single-instance = true\n",
+            .want = &.{
+                .{ .key = .@"single-instance", .line = 1 },
+                .{ .key = .@"gtk-single-instance", .line = 1, .refused = 2 },
+            },
+        },
+    }) |file| {
+        try tmp.dir.writeFile(.{ .sub_path = "config", .data = file.text });
+        var current = try Config.default(alloc);
+        defer current.deinit();
+        try current.loadFile(alloc, path);
+        try current.finalize();
+        const extra: [key_count][]const u8 = @splat("");
+        var model: Model = .{};
+        defer model.deinit();
+        try model.build(alloc, &current, &defaults, path, .{ .bytes = file.text }, &extra);
+        var buf: [1024]u8 = undefined;
+        var expected: [1024]u8 = undefined;
+        for (file.want) |want| {
+            errdefer std.debug.print("settings reference location of {s}\n", .{@tagName(want.key)});
+            var writer: std.Io.Writer = .fixed(&buf);
+            try model.writeLocation(&writer, &model.rows[index(want.key)]);
+            const text = if (want.refused) |line|
+                try std.fmt.bufPrint(&expected, "Set on line {d} of {s}. Line {d} of {s} sets it too, and does not take effect.", .{ want.line, path, line, path })
+            else
+                try std.fmt.bufPrint(&expected, "Set on line {d} of {s}.", .{ want.line, path });
+            try testing.expectEqualStrings(text, writer.buffered());
+        }
+    }
 }

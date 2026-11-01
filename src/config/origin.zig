@@ -23,9 +23,13 @@
 //! `initial-command` and `default-profile`. For those the command line's step
 //! is the origin whenever the config holds a command-line value for them,
 //! which is what `finalize` applies; every config the app holds has been
-//! finalized.
+//! finalized. Two more choices of `finalize` are followed: it puts every
+//! `--elevated-profile-env=` it took over `env` (`elevatedEnv`), and it
+//! settles `single-instance` and its alias `gtk-single-instance` together
+//! (`SingleInstance`).
 
 const std = @import("std");
+const builtin = @import("builtin");
 const cli_args = @import("../cli/args.zig");
 const Location = @import("../cli/diagnostics.zig").Location;
 const Config = @import("Config.zig");
@@ -80,6 +84,17 @@ pub const Derivation = enum {
 /// default config, finalized as `config` was, to tell a value something gave
 /// the key from the default; without it such a value reads as `.default`. A
 /// returned path borrows from `config`.
+///
+/// A step loaded through an iterator with no `location` method has no place
+/// (`.none`), so a problem the loader noted for it cannot be matched to it:
+/// such a step counts as having set the key even when the loader refused
+/// it, and the origin is `.unplaced`. Matching the problem by key alone
+/// would also drop a later step of that key that was taken. No config the app
+/// reads origins from is loaded that way: the command line, the config files
+/// and a replay all give places. The one such iterator, for the arguments a
+/// running instance is forwarded for a new window
+/// (`ipc_server.ForwardedArgIterator`), loads that window's own config, which
+/// nothing asks for an origin.
 pub fn of(config: *const Config, key: Key, defaults: ?*const Config) Origin {
     return scan(config, key, defaults, false);
 }
@@ -98,11 +113,22 @@ fn scan(config: *const Config, key: Key, defaults: ?*const Config, comptime file
     var last: ?Origin = null;
     // The last command-line step that set the key (`restoredFromCli`).
     var last_cli: ?Origin = null;
+    // `finalize` settles these two keys together (`SingleInstance`).
+    const single_instance = key == .@"single-instance" or key == .@"gtk-single-instance";
+    var fold: SingleInstance = .{};
+    // The last `--elevated-profile-env=` the loader took (`elevatedEnv`).
+    var elevated: ?Origin = null;
+    // Whether an `-e` with a command set the key.
+    var by_e = false;
     const steps = config._replay_steps.items;
     for (steps, 0..) |step, i| switch (step) {
-        .arg => |arg| if ((!files_only or arg.location == .file) and stepSets(config, arg.value, arg.location, key)) {
-            last = place(config, arg.location, false);
-            if (arg.location == .cli) last_cli = last;
+        .arg => |arg| if (!files_only or arg.location == .file) {
+            if (stepSets(config, arg.value, arg.location, key)) {
+                last = place(config, arg.location, false);
+                if (arg.location == .cli) last_cli = last;
+            }
+            if (single_instance) fold.see(config, arg.value, arg.location, false);
+            if (key == .env and elevatedEnv(arg.value, arg.location)) elevated = place(config, arg.location, false);
         },
         .conditional_arg => |arg| {
             var theme = false;
@@ -110,20 +136,28 @@ fn scan(config: *const Config, key: Key, defaults: ?*const Config, comptime file
                 if (cond.key == .theme) theme = true;
                 if (!config._conditional_state.match(cond)) break false;
             } else true;
-            if (applies and (!files_only or arg.location == .file) and stepSets(config, arg.arg, arg.location, key))
-                last = place(config, arg.location, theme);
+            if (applies and (!files_only or arg.location == .file)) {
+                if (stepSets(config, arg.arg, arg.location, key)) last = place(config, arg.location, theme);
+                if (single_instance) fold.see(config, arg.arg, arg.location, theme);
+            }
         },
         // The arguments after `-e` are its command's, not settings. An `-e`
         // with no command after it was refused (the loader noted "missing
         // command"), and set none of the keys it implies.
         .@"-e" => |location| {
             const has_command = i + 1 < steps.len and steps[i + 1] == .arg;
-            if (!files_only and has_command and setByE(config, key)) last = place(config, location, false);
+            if (!files_only and has_command and setByE(config, key)) {
+                last = place(config, location, false);
+                by_e = true;
+            }
             break;
         },
         .expand, .diagnostic => {},
     };
     if (!files_only) if (last_cli) |found| if (restoredFromCli(config, key)) return found;
+    // `finalize` puts these over `env` once every file has been read.
+    if (elevated) |found| return found;
+    if (single_instance and !by_e) if (fold.decided()) |found| return found;
     if (last) |found| return found;
     const reference = defaults orelse return .default;
     return switch (key) {
@@ -223,6 +257,65 @@ const compatibility = [_]Compatibility{
 fn setByE(config: *const Config, key: Key) bool {
     if (key == .@"shell-integration") return config.@"shell-integration" != .none;
     return impliedByE(key);
+}
+
+/// What `Config.finalize` reads to settle `single-instance` and its GTK alias
+/// `gtk-single-instance` together. It takes `single-instance` unless that is
+/// `detect`, then the alias unless that is `detect`, works out a `detect`
+/// that is left, and gives the alias the result. So both keys have the
+/// origin of the step that decided: the last step that set `single-instance`
+/// to a value other than `detect`, else the last step that set the alias to
+/// one. An accepted `-e` sets both after every file (`Config.applyECommand`)
+/// and is theirs. When both are `detect`, each key's own last step is its
+/// origin, as for any other key: a `gtk-single-instance = desktop` line, which
+/// sets both to `detect`, names both.
+const SingleInstance = struct {
+    single: ?Set = null,
+    alias: ?Set = null,
+
+    const Set = struct { origin: Origin, detect: bool };
+
+    fn see(self: *SingleInstance, config: *const Config, text: []const u8, location: Location, theme: bool) void {
+        if (stepSets(config, text, location, .@"single-instance"))
+            self.single = .{ .origin = place(config, location, theme), .detect = setsDetect(text) };
+        if (stepSets(config, text, location, .@"gtk-single-instance"))
+            self.alias = .{ .origin = place(config, location, theme), .detect = setsDetect(text) };
+    }
+
+    /// The step whose value both keys hold, or null when `finalize` worked it
+    /// out from `detect`.
+    fn decided(self: SingleInstance) ?Origin {
+        if (self.single) |set| if (!set.detect) return set.origin;
+        if (self.alias) |set| if (!set.detect) return set.origin;
+        return null;
+    }
+};
+
+/// Whether the argument `text`, which set `single-instance` or
+/// `gtk-single-instance`, left it `detect`: an empty value resets it to that
+/// default, and `desktop`, the alias's compatibility value, sets both keys to
+/// it.
+fn setsDetect(text: []const u8) bool {
+    const eq = std.mem.indexOfScalar(u8, text, '=') orelse return true;
+    const value = text[eq + 1 ..];
+    const Value = Config.GtkSingleInstance;
+    const set: Value = if (value.len == 0) Value.default else std.meta.stringToEnum(Value, value) orelse .detect;
+    return set == .detect;
+}
+
+/// Whether the argument `text`, applied at `location`, is an
+/// `--elevated-profile-env=NAME=VALUE` the loader took
+/// (`Config.consumeManuallyHook`): not a file's line, and with a name before
+/// the `=`. `finalize` puts every one it took over `env` once every file has
+/// been read, so the last is where `env`'s value came from, over a file read
+/// after the command line. The words of `-e`'s command are not arguments,
+/// and `scan` stops before them.
+fn elevatedEnv(text: []const u8, location: Location) bool {
+    if (builtin.os.tag != .windows) return false;
+    const prefix = "--elevated-profile-env=";
+    if (location == .file or !std.mem.startsWith(u8, text, prefix)) return false;
+    const eq = std.mem.indexOfScalar(u8, text[prefix.len..], '=') orelse return false;
+    return eq > 0;
 }
 
 /// The keys `-e` always sets (see `initial-command`'s documentation).
@@ -758,4 +851,143 @@ test "origin: a value no step set is derived when it differs from the default" {
     try std.testing.expectEqual(Origin{ .derived = .automatic }, of(&cfg, .@"font-size", &defaults));
     // Without a default config to compare with, it reads as the default.
     try std.testing.expect(of(&cfg, .@"font-size", null) == .default);
+}
+
+test "origin: single-instance and its alias gtk-single-instance name the step finalize took both values from, with or without a theme" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(.{ .sub_path = "mytheme", .data = "background = #101010\n" });
+    try tmp.dir.writeFile(.{ .sub_path = "config", .data = "\n" });
+    const path = try tmp.dir.realpathAlloc(alloc, "config");
+    defer alloc.free(path);
+    const theme_path = try tmp.dir.realpathAlloc(alloc, "mytheme");
+    defer alloc.free(theme_path);
+    const theme_line = try std.fmt.allocPrint(alloc, "theme = {s}\n", .{theme_path});
+    defer alloc.free(theme_line);
+    var defaults = try Config.default(alloc);
+    defer defaults.deinit();
+    try defaults.finalize();
+
+    const Where = union(enum) { line: usize, cli: usize, default };
+    const Case = struct {
+        text: []const u8,
+        args: []const []const u8 = &.{},
+        /// The value both keys hold, or null for one `finalize` worked out
+        /// from `detect`.
+        value: ?Config.GtkSingleInstance,
+        /// Where both keys' value came from.
+        where: Where,
+    };
+    for ([_]Case{
+        // Only the alias: `finalize` copies it into `single-instance`.
+        .{ .text = "gtk-single-instance = false\n", .value = .false, .where = .{ .line = 1 } },
+        // Both: `single-instance` wins, and is copied into the alias.
+        .{ .text = "single-instance = true\ngtk-single-instance = false\n", .value = .true, .where = .{ .line = 1 } },
+        // `single-instance` left `detect`: the alias decides.
+        .{ .text = "single-instance = detect\ngtk-single-instance = false\n", .value = .false, .where = .{ .line = 2 } },
+        // Neither: worked out, as before.
+        .{ .text = "font-size = 12\n", .value = null, .where = .default },
+        // An accepted `-e` sets both, over every file.
+        .{ .text = "gtk-single-instance = true\n", .args = &.{ "-e", "cmd.exe" }, .value = .false, .where = .{ .cli = 0 } },
+        // `desktop` sets both to `detect`, over an earlier `single-instance`,
+        // and its line is named for both.
+        .{ .text = "single-instance = true\ngtk-single-instance = desktop\n", .value = null, .where = .{ .line = 2 } },
+    }, 0..) |case, n| {
+        for ([_]bool{ false, true }) |themed| {
+            errdefer std.debug.print("origin: single-instance case {d}, theme {}\n", .{ n, themed });
+            const text = try std.mem.concat(alloc, u8, &.{ case.text, if (themed) theme_line else "" });
+            defer alloc.free(text);
+            var cfg = try loadWithArgs(alloc, tmp.dir, path, text, case.args);
+            defer cfg.deinit();
+            if (case.value) |want| try std.testing.expectEqual(want, cfg.@"single-instance");
+            try std.testing.expectEqual(cfg.@"single-instance", cfg.@"gtk-single-instance");
+            for ([_]Key{ .@"single-instance", .@"gtk-single-instance" }) |key| {
+                errdefer std.debug.print("origin: of {s}\n", .{@tagName(key)});
+                const found = of(&cfg, key, &defaults);
+                switch (case.where) {
+                    .line => |line| try expectFile(found, path, line, .config),
+                    .cli => |index| try std.testing.expectEqual(Origin{ .cli = index }, found),
+                    .default => try std.testing.expect(found == .default),
+                }
+            }
+        }
+    }
+}
+
+test "origin: an --elevated-profile-env= the loader took is env's origin over every file, with or without a theme" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    // The included file is read after the command line; its
+    // `elevated-profile-env` line is refused, as any file's.
+    try tmp.dir.writeFile(.{ .sub_path = "x.conf", .data = "env = MODE=include\nelevated-profile-env = MODE=file\n" });
+    try tmp.dir.writeFile(.{ .sub_path = "mytheme", .data = "background = #101010\n" });
+    try tmp.dir.writeFile(.{ .sub_path = "config", .data = "\n" });
+    const path = try tmp.dir.realpathAlloc(alloc, "config");
+    defer alloc.free(path);
+    const included_path = try tmp.dir.realpathAlloc(alloc, "x.conf");
+    defer alloc.free(included_path);
+    const theme_path = try tmp.dir.realpathAlloc(alloc, "mytheme");
+    defer alloc.free(theme_path);
+    const plain = "env = MODE=config\nconfig-file = x.conf\n";
+    const themed = try std.fmt.allocPrint(alloc, plain ++ "theme = {s}\n", .{theme_path});
+    defer alloc.free(themed);
+
+    const Case = struct {
+        args: []const []const u8,
+        mode: []const u8,
+        /// The command-line argument env's value came from, or null for the
+        /// included file's line.
+        cli: ?usize,
+    };
+    for ([_]Case{
+        .{ .args = &.{"--elevated-profile-env=MODE=cli"}, .mode = "cli", .cli = 0 },
+        // `finalize` puts it over an `--env=` after it too.
+        .{ .args = &.{ "--elevated-profile-env=MODE=cli", "--env=OTHER=1" }, .mode = "cli", .cli = 0 },
+        // The last one taken is named.
+        .{ .args = &.{ "--font-size=12", "--elevated-profile-env=A=1", "--elevated-profile-env=MODE=cli" }, .mode = "cli", .cli = 2 },
+        // Refused for want of a name: the included file's line stands.
+        .{ .args = &.{"--elevated-profile-env=nothing"}, .mode = "include", .cli = null },
+        .{ .args = &.{"--elevated-profile-env==x"}, .mode = "include", .cli = null },
+        // A word of `-e`'s command sets nothing.
+        .{ .args = &.{ "-e", "cmd.exe", "--elevated-profile-env=MODE=cli" }, .mode = "include", .cli = null },
+    }, 0..) |case, n| {
+        for ([_][]const u8{ plain, themed }) |text| {
+            errdefer std.debug.print("origin: elevated-profile-env case {d}, theme {}\n", .{ n, text.len != plain.len });
+            var cfg = try loadWithArgs(alloc, tmp.dir, path, text, case.args);
+            defer cfg.deinit();
+            try std.testing.expectEqualStrings(case.mode, cfg.env.map.get("MODE") orelse return error.TestUnexpectedResult);
+            const found = of(&cfg, .env, null);
+            if (case.cli) |index|
+                try std.testing.expectEqual(Origin{ .cli = index }, found)
+            else
+                try expectFile(found, included_path, 1, .included);
+            // The files' origin leaves the command line out.
+            try expectFile(ofFiles(&cfg, .env), included_path, 1, .included);
+        }
+    }
+}
+
+test "origin: a refused argument with no place still counts as set" {
+    // The limit `of` documents: the loader's problem for a step with no place
+    // cannot be matched to it. No config the app asks for an origin is loaded
+    // through such an iterator.
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(.{ .sub_path = "config", .data = "font-size = 13\n" });
+    const path = try tmp.dir.realpathAlloc(alloc, "config");
+    defer alloc.free(path);
+    var cfg = try Config.default(alloc);
+    defer cfg.deinit();
+    try cfg.loadFile(alloc, path);
+    var args: PlainArgs = .{ .list = &.{"--font-size=abc"} };
+    try cfg.loadIter(alloc, &args);
+    try cfg.finalize();
+    try std.testing.expect(!cfg._diagnostics.empty());
+    try std.testing.expectEqual(@as(f32, 13), cfg.@"font-size");
+    try std.testing.expect(of(&cfg, .@"font-size", null) == .unplaced);
+    try expectFile(ofFiles(&cfg, .@"font-size"), path, 1, .config);
 }

@@ -6528,7 +6528,10 @@ pub const SettingsWindow = struct {
 
     /// The masked keys `keys` names (comma separated, as the App lends them),
     /// each with where the value that overrides it is set in `current`:
-    /// "font-size (line 2 of included.conf)". Owned by the caller.
+    /// "font-size (line 2 of included.conf)". That is the value in effect
+    /// (`config.origin.of`), not the files' value a row shows
+    /// (`settings_reference.savedOrigin`): a command line's `default-profile`
+    /// masks a saved one, and is what is named. Owned by the caller.
     fn maskedDetail(self: *const SettingsWindow, keys: []const u8) ![]u8 {
         const current = if (self.current) |*config| config else return error.NoConfig;
         var out: std.Io.Writer.Allocating = .init(self.handle.alloc);
@@ -6540,7 +6543,7 @@ pub const SettingsWindow = struct {
             first = false;
             try out.writer.writeAll(name);
             const key = std.meta.stringToEnum(Config.Key, name) orelse continue;
-            switch (settings_reference.savedOrigin(current, key, null)) {
+            switch (config_origin.of(current, key, null)) {
                 .file => |file| try out.writer.print(" (line {d} of {s})", .{ file.line, std.fs.path.basename(file.path) }),
                 .cli => try out.writer.writeAll(" (the command line)"),
                 .default, .derived, .unplaced => {},
@@ -11808,6 +11811,9 @@ const dialog_test = struct {
         /// value something read later overrides, as the App does
         /// (`settingsMaskedKeyNames`, `SaveError.SavedButMasked`).
         reload_from_disk: bool = false,
+        /// The command line that reload reads after `save_path`, with its
+        /// places, as `Config.load` reads noctty's.
+        reload_args: []const []const u8 = &.{},
         masked: [@import("win32.zig").settings_masked_keys_capacity]u8 = undefined,
         masked_len: usize = 0,
         /// What the All settings page's "Copy name" handed the App last, and
@@ -11973,6 +11979,9 @@ const dialog_test = struct {
                     var reloaded = Config.default(std.testing.allocator) catch return error.ReloadFailed;
                     read: {
                         reloaded.loadFile(std.testing.allocator, path) catch break :read;
+                        const cli_args = @import("../cli/args.zig");
+                        var args: cli_args.ArgsIterator(cli_args.SliceIterator) = .{ .iterator = cli_args.sliceIterator(self.reload_args) };
+                        reloaded.loadIter(std.testing.allocator, &args) catch break :read;
                         reloaded.loadRecursiveFiles(std.testing.allocator) catch break :read;
                         self.masked_len = app.settingsMaskedKeyNames(&self.masked, edited, pending, &reloaded).len;
                         self.config.deinit();
@@ -16754,6 +16763,56 @@ test "settings Save of a value an included file overrides writes the target file
             // The row shows the value in effect, and still where it comes from.
             try std.testing.expectEqual(@as(f32, 15), settings.current.?.@"font-size");
             try std.testing.expectEqualStrings("Set in included.conf, line 2", settings.origin_notes[index].text());
+        }
+    }.body);
+}
+
+test "settings Save of a default profile the command line overrides names the command line, not the saved line" {
+    try dialog_test.onHiddenDesktop(struct {
+        fn body() !void {
+            const alloc = std.testing.allocator;
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            try tmp.dir.writeFile(.{ .sub_path = "noctty.conf", .data = "default-profile = pwsh.exe\n" });
+            const path = try tmp.dir.realpathAlloc(alloc, "noctty.conf");
+            defer alloc.free(path);
+
+            // noctty was started with `--default-profile=` (a jump-list link,
+            // New Elevated Window): that value wins in this process, before
+            // the save and after its reload.
+            const argv: []const []const u8 = &.{"--default-profile=user:py312"};
+            const fixture = try dialog_test.Fixture.prepare(false);
+            defer fixture.finish();
+            try fixture.config.loadFile(alloc, path);
+            const cli_args = @import("../cli/args.zig");
+            var args: cli_args.ArgsIterator(cli_args.SliceIterator) = .{ .iterator = cli_args.sliceIterator(argv) };
+            try fixture.config.loadIter(alloc, &args);
+            try std.testing.expect(fixture.config._diagnostics.empty());
+            fixture.save_path = path;
+            fixture.reload_from_disk = true;
+            fixture.reload_args = argv;
+            const settings = &fixture.settings;
+            try settings.open();
+            settings.setActiveSection(.shell);
+            // Settings shows the file's value (PowerShell), and saves Command
+            // Prompt over it.
+            const combo = settings.fields.combo_default_profile.?;
+            try std.testing.expectEqual(@as(LRESULT, 1), sys.SendMessageW(combo, CB_GETCURSEL, 0, 0));
+            _ = sys.SendMessageW(combo, CB_SETCURSEL, 2, 0);
+            const id: usize = @intCast(sys.GetDlgCtrlID(combo));
+            _ = sys.SendMessageW(settings.hwnd.?, WM_COMMAND, id | (@as(usize, CBN_SELCHANGE) << 16), @bitCast(@intFromPtr(combo)));
+            settings.save();
+            try std.testing.expectEqual(@as(u32, 1), fixture.saved);
+            const after = try tmp.dir.readFileAlloc(alloc, "noctty.conf", 1 << 20);
+            defer alloc.free(after);
+            try std.testing.expectEqualStrings("default-profile = cmd.exe\n", after);
+            // The status names what wins, the command line, not the line the
+            // save just wrote.
+            try std.testing.expectEqual(StatusNote.saved_overridden, settings.status_note);
+            try std.testing.expectEqualStrings(
+                "Saved, but a later config file or command-line option overrides default-profile (the command line), so the saved value is not used.",
+                settings.noteText(),
+            );
         }
     }.body);
 }
