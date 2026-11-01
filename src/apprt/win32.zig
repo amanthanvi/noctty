@@ -8145,27 +8145,29 @@ test "win32 settings save of a profile edit beside a setting keeps a profile lin
     _ = Edit;
 }
 
-test "win32 settings save that deletes a file's last line keeps the blank line before it, and the file's missing final newline" {
+test "win32 settings save that deletes a file's unterminated last line keeps every line left as it was, the blank line before it too" {
     const alloc = std.testing.allocator;
     const Edit = @import("win32/settings_patch.zig").Edit;
     const removal: []const Edit = &.{.{ .field = .command, .id = "py", .op = .delete }};
-    // Terra's case, LF and CRLF: the blank line stays as it was.
+    // The missing final newline was the deleted line's: nothing is taken
+    // off the lines left.
     for ([_][2][]const u8{
-        .{ "# keep\n\nprofile-command = py: cmd", "# keep\n" },
-        .{ "# keep\r\n\r\nprofile-command = py: cmd", "# keep\r\n" },
-        .{ "\xef\xbb\xbf# keep\r\n\r\nprofile-command = py: cmd", "\xef\xbb\xbf# keep\r\n" },
+        .{ "# keep\n\nprofile-command = py: cmd", "# keep\n\n" },
+        .{ "# keep\r\n\r\nprofile-command = py: cmd", "# keep\r\n\r\n" },
+        .{ "\xef\xbb\xbf# keep\r\n\r\nprofile-command = py: cmd", "\xef\xbb\xbf# keep\r\n\r\n" },
+        .{ "# keep\r\n\r\nprofile-command = py: cmd\r", "# keep\r\n\r\n" },
     }) |case| {
         var loaded = try settingsTestProfileSave(alloc, case[0], false, removal, case[1]);
         defer loaded.deinit();
         try std.testing.expect(loaded.@"profile-command".get("py") == null);
     }
 }
-
-test "win32 settings save that removes a bare-CR file's only line beside a new setting keeps the bare CR" {
+test "win32 settings save that removes a file's only line beside a new setting ends the new setting's line" {
     const alloc = std.testing.allocator;
     const Edit = @import("win32/settings_patch.zig").Edit;
     const removal: []const Edit = &.{.{ .field = .command, .id = "py", .op = .delete }};
-    var loaded = try settingsTestProfileSave(alloc, "profile-command = py: cmd\r", true, removal, "copy-on-select = true\r");
+    // The bare CR was the deleted line's; the new line ends as new lines do.
+    var loaded = try settingsTestProfileSave(alloc, "profile-command = py: cmd\r", true, removal, "copy-on-select = true\r\n");
     defer loaded.deinit();
     try std.testing.expect(loaded.@"profile-command".get("py") == null);
     try std.testing.expect(loaded.@"copy-on-select" == .true);
@@ -8174,15 +8176,15 @@ test "win32 settings save that removes a bare-CR file's only line beside a new s
     defer empty.deinit();
     try std.testing.expect(empty.@"profile-command".get("py") == null);
 }
-
-test "win32 settings save beside a setting that deletes the final profile line keeps CRLF, BOM and bare-CR files' ending" {
+test "win32 settings save beside a setting that deletes the final profile line leaves CRLF, BOM and bare-CR files' other lines their own ending" {
     const alloc = std.testing.allocator;
     const Edit = @import("win32/settings_patch.zig").Edit;
     const removal: []const Edit = &.{.{ .field = .command, .id = "py", .op = .delete }};
     for ([_][2][]const u8{
-        .{ "font-size = 12\r\nprofile-command = py: cmd", "font-size = 12\r\ncopy-on-select = true" },
-        .{ "\xef\xbb\xbffont-size = 12\r\nprofile-command = py: cmd", "\xef\xbb\xbffont-size = 12\r\ncopy-on-select = true" },
-        .{ "font-size = 12\r\nprofile-command = py: cmd\r", "font-size = 12\r\ncopy-on-select = true\r" },
+        .{ "font-size = 12\nprofile-command = py: cmd", "font-size = 12\ncopy-on-select = true\n" },
+        .{ "font-size = 12\r\nprofile-command = py: cmd", "font-size = 12\r\ncopy-on-select = true\r\n" },
+        .{ "\xef\xbb\xbffont-size = 12\r\nprofile-command = py: cmd", "\xef\xbb\xbffont-size = 12\r\ncopy-on-select = true\r\n" },
+        .{ "font-size = 12\r\nprofile-command = py: cmd\r", "font-size = 12\r\ncopy-on-select = true\r\n" },
         .{ "font-size = 12\r\nprofile-command = py: cmd\r\n", "font-size = 12\r\ncopy-on-select = true\r\n" },
     }) |case| {
         var loaded = try settingsTestProfileSave(alloc, case[0], true, removal, case[1]);
@@ -8192,6 +8194,29 @@ test "win32 settings save beside a setting that deletes the final profile line k
     }
 }
 
+test "win32 settings save that keeps a file's unterminated last line, changed in place or with lines after it, still ends the file without a line ending" {
+    const alloc = std.testing.allocator;
+    const Edit = @import("win32/settings_patch.zig").Edit;
+    const command: []const Edit = &.{.{ .field = .command, .id = "py", .op = .{ .set = "cmd2" } }};
+    const new_profile: []const Edit = &.{.{ .field = .command, .id = "dev", .op = .{ .set = "cmd.exe" } }};
+    const Case = struct { raw: []const u8, ordinary: bool, edits: []const Edit, expected: []const u8 };
+    for ([_]Case{
+        // Changed in place.
+        .{ .raw = "font-size = 12\nprofile-command = py: cmd", .ordinary = false, .edits = command, .expected = "font-size = 12\nprofile-command = py: cmd2" },
+        .{ .raw = "font-size = 12\r\nprofile-command = py: cmd\r", .ordinary = false, .edits = command, .expected = "font-size = 12\r\nprofile-command = py: cmd2\r" },
+        // Changed in place, a setting after it.
+        .{ .raw = "font-size = 12\nprofile-command = py: cmd", .ordinary = true, .edits = command, .expected = "font-size = 12\nprofile-command = py: cmd2\ncopy-on-select = true" },
+        // Kept, a profile after it.
+        .{ .raw = "font-size = 12\r\nfont-family = x", .ordinary = false, .edits = new_profile, .expected = "font-size = 12\r\nfont-family = x\r\n\r\nprofile-command = dev: cmd.exe" },
+        .{ .raw = "profile-command = py: cmd\r", .ordinary = false, .edits = new_profile, .expected = "profile-command = py: cmd\r\n\r\nprofile-command = dev: cmd.exe\r" },
+    }) |case| {
+        var loaded = try settingsTestProfileSave(alloc, case.raw, case.ordinary, case.edits, case.expected);
+        defer loaded.deinit();
+        if (case.edits.ptr == command.ptr) {
+            try std.testing.expect(std.mem.eql(u8, "cmd2", loaded.@"profile-command".get("py").?));
+        } else try std.testing.expect(std.mem.eql(u8, "cmd.exe", loaded.@"profile-command".get("dev").?));
+    }
+}
 test "win32 settings save writes a config only the extended path form reaches" {
     const alloc = std.testing.allocator;
     var scratch = try save_target.Scratch.init();

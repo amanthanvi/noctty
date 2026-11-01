@@ -181,7 +181,9 @@ fn deletes(edit: Edit, info: Info) bool {
 /// it (`persistSettings`): it hands both patchers the text ending in a
 /// complete line ending (`terminate`), so neither ever sees a last line
 /// without one, and gives the result the file's own ending once
-/// (`restore`).
+/// (`restore`). That ending belongs to the file's last line: it stays with
+/// that line, or the line now after it, and goes with it when the line is
+/// deleted.
 pub const FileEnd = enum {
     /// Nothing past a byte order mark, or an LF last.
     terminated,
@@ -196,48 +198,82 @@ pub const FileEnd = enum {
         return if (text[text.len - 1] == '\r') .bare_cr else .none;
     }
 
-    /// `raw`, ending in a complete line ending, into `out`: a bare CR gets
-    /// its LF, and a last line with no ending gets the one most of the
-    /// file's lines have.
+    /// The comment lines `terminate` puts before and after the file's last
+    /// line, so `restore` can tell whether the patches kept it. Both
+    /// patchers copy a comment as it is, and a config file never holds a NUL
+    /// (`persistSettings` refuses one), so no line of the file reads as one
+    /// of these.
+    const before_last = "#\x00 the file's last line follows";
+    const after_last = "#\x00 the file's last line was above";
+
+    /// `raw` into `out`, its last line ended and marked. A bare CR gets its
+    /// LF, and a last line with no ending gets the one most of the file's
+    /// lines have; a comment line goes before it and one after
+    /// (`before_last`, `after_last`), ending as most lines then do, so no
+    /// patcher's choice of line ending changes. A file that ends in a line
+    /// ending is copied as it is.
     pub fn terminate(self: FileEnd, alloc: Allocator, raw: []const u8, out: *std.ArrayListUnmanaged(u8)) Allocator.Error!void {
-        try out.appendSlice(alloc, raw);
-        switch (self) {
-            .terminated => {},
-            .bare_cr => try out.append(alloc, '\n'),
-            .none => try out.appendSlice(alloc, if (mostlyCrlf(raw)) "\r\n" else "\n"),
-        }
+        if (self == .terminated) return out.appendSlice(alloc, raw);
+        var crlf, var lf = lineEndings(raw);
+        const last_ending: []const u8 = if (self == .bare_cr) "\n" else if (crlf > lf) "\r\n" else "\n";
+        if (self == .bare_cr or crlf > lf) crlf += 1 else lf += 1;
+        const ending: []const u8 = if (crlf > lf) "\r\n" else "\n";
+        const last = if (std.mem.lastIndexOfScalar(u8, raw, '\n')) |at| at + 1 else if (std.mem.startsWith(u8, raw, utf8_bom)) utf8_bom.len else 0;
+        try out.appendSlice(alloc, raw[0..last]);
+        try out.appendSlice(alloc, before_last);
+        try out.appendSlice(alloc, ending);
+        try out.appendSlice(alloc, raw[last..]);
+        try out.appendSlice(alloc, last_ending);
+        try out.appendSlice(alloc, after_last);
+        try out.appendSlice(alloc, ending);
     }
 
     /// Give `text`, patched from what `terminate` made, the file's own
-    /// ending: for `.none` exactly one line ending comes off the end, and for
-    /// `.bare_cr` the last one becomes a CR. Text that ends in none (every
-    /// line deleted) is left as it is.
+    /// ending, and take the marks out. When the last line is still there (as
+    /// it was, or changed in place), the line that is last now ends as the
+    /// file did: exactly one line ending comes off for `.none`, and for
+    /// `.bare_cr` the last one becomes a CR, whether that line is the old
+    /// last line or one added after it. When the last line was deleted,
+    /// nothing changes: every line left keeps its own ending.
     pub fn restore(self: FileEnd, text: *std.ArrayListUnmanaged(u8)) void {
+        if (self == .terminated) return;
+        const before = std.mem.indexOf(u8, text.items, before_last) orelse return;
+        const before_end = lineEnd(text.items, before);
+        const after = std.mem.indexOfPos(u8, text.items, before_end, after_last) orelse return;
+        const after_end = lineEnd(text.items, after);
+        const kept = after > before_end;
+        removeRange(text, after, after_end);
+        removeRange(text, before, before_end);
+        if (!kept) return;
         const ending: usize = if (std.mem.endsWith(u8, text.items, "\r\n")) 2 else if (std.mem.endsWith(u8, text.items, "\n")) 1 else 0;
         if (ending == 0) return;
-        switch (self) {
-            .terminated => {},
-            .none => text.shrinkRetainingCapacity(text.items.len - ending),
-            .bare_cr => {
-                text.shrinkRetainingCapacity(text.items.len - ending);
-                text.appendAssumeCapacity('\r');
-            },
-        }
+        text.shrinkRetainingCapacity(text.items.len - ending);
+        if (self == .bare_cr) text.appendAssumeCapacity('\r');
+    }
+
+    /// The index just past the line ending of the line at `at`.
+    fn lineEnd(items: []const u8, at: usize) usize {
+        return if (std.mem.indexOfScalarPos(u8, items, at, '\n')) |lf| lf + 1 else items.len;
+    }
+
+    fn removeRange(text: *std.ArrayListUnmanaged(u8), from: usize, to: usize) void {
+        std.mem.copyForwards(u8, text.items[from..], text.items[to..]);
+        text.shrinkRetainingCapacity(text.items.len - (to - from));
     }
 };
 
 const utf8_bom = "\xef\xbb\xbf";
 
-/// Whether more of `raw`'s line endings are CRLF than LF, as the patchers
-/// count them.
-fn mostlyCrlf(raw: []const u8) bool {
+/// How many of `raw`'s line endings are CRLF and how many LF, as the
+/// patchers count them.
+fn lineEndings(raw: []const u8) struct { usize, usize } {
     var crlf: usize = 0;
     var lf: usize = 0;
     var start: usize = 0;
     while (std.mem.indexOfScalarPos(u8, raw, start, '\n')) |at| : (start = at + 1) {
         if (at > start and raw[at - 1] == '\r') crlf += 1 else lf += 1;
     }
-    return crlf > lf;
+    return .{ crlf, lf };
 }
 
 /// The line `edit` writes, without its line ending, from `arena`.
@@ -386,12 +422,13 @@ pub fn patchProfileEdits(alloc: Allocator, raw: []const u8, edits: []const Edit,
 ///   are deleted; a tombstone leaves any other file's dormant.
 /// - A label, folder or variable changed or added: `.set`. One taken out:
 ///   its removal where another file still gives it a value, else `.delete`.
-pub fn profileEdits(arena: Allocator, problems: *const origin.Index, original: *const Config, pending: *const Config, path: []const u8, same: origin.SamePath) ![]Edit {
+pub fn profileEdits(arena: Allocator, problems: []const origin.Index, original: *const Config, pending: *const Config, path: []const u8, same: origin.SamePath) ![]Edit {
     var edits: std.ArrayListUnmanaged(Edit) = .empty;
     var removed: std.ArrayListUnmanaged([]const u8) = .empty;
     const takeBack = struct {
-        fn op(p: *const origin.Index, field: Field, id: []const u8, name: ?[]const u8, target: []const u8, s: origin.SamePath) Edit.Op {
-            return if (p.givesElsewhere(field.key(), id, name, target, s)) .unset else .delete;
+        fn op(readings: []const origin.Index, field: Field, id: []const u8, name: ?[]const u8, target: []const u8, s: origin.SamePath) Edit.Op {
+            for (readings) |*p| if (p.givesElsewhere(field.key(), id, name, target, s)) return .unset;
+            return .delete;
         }
     }.op;
 
@@ -470,41 +507,51 @@ pub fn profileEdits(arena: Allocator, problems: *const origin.Index, original: *
     return edits.toOwnedSlice(arena);
 }
 
-/// The path of a `config-file` that is there and that `config`'s load could
-/// not open, if any. The loader records it as a problem and goes past it
-/// (`Config.loadRecursiveFiles`), so the layers miss what it says, and a save
-/// that decided from them whether another file still names a removed
-/// profile would decide blind: it stops instead. A missing one
-/// (`FileNotFound`) or a directory (`IsDir`) is the loader's to report, as
-/// the disk check before a save lets them through (`settingsDiskVerdict`).
-pub fn unopenedConfigFile(config: *const Config) ?[]const u8 {
-    const prefix = "error opening config-file ";
+/// A file `config`'s load found and could not read whole, if any: a
+/// `config-file` that is there and would not open, or one or a theme whose
+/// read failed partway through (`LineIterator.read_failed`, which reads as
+/// the end of the file). The loader records each as a problem and goes on,
+/// so the layers miss what the file says, and a save that decided from them
+/// whether another file still names a removed profile would decide blind: it
+/// stops instead. A missing include (`FileNotFound`) or a directory (`IsDir`)
+/// is the loader's to report, as the disk check before a save lets them
+/// through (`settingsDiskVerdict`).
+pub fn unreadConfigFile(config: *const Config) ?struct { theme: bool, path: []const u8 } {
     for (config._diagnostics.items()) |diag| {
         const message: []const u8 = diag.message;
-        if (!std.mem.startsWith(u8, message, prefix)) continue;
-        const end = std.mem.lastIndexOf(u8, message, ": error.") orelse continue;
-        // Missing, or a directory: what the disk check lets through too
-        // (`settingsFileProbe`).
-        const err = message[end + 2 ..];
+        const prefix_len, const theme = for ([_]struct { []const u8, bool }{
+            .{ "error opening config-file ", false },
+            .{ "error reading config-file ", false },
+            .{ "error reading theme ", true },
+        }) |prefix| {
+            if (std.mem.startsWith(u8, message, prefix[0])) break .{ prefix[0].len, prefix[1] };
+        } else continue;
+        const end_at = std.mem.lastIndexOf(u8, message, ": error.") orelse continue;
+        if (end_at < prefix_len) continue;
+        // Missing, or a directory: what the disk check lets through too.
+        const err = message[end_at + 2 ..];
         if (std.mem.eql(u8, err, "error.FileNotFound") or std.mem.eql(u8, err, "error.IsDir")) continue;
-        return message[prefix.len..end];
+        return .{ .theme = theme, .path = message[prefix_len..end_at] };
     }
     return null;
 }
 
-/// Whether anything but this file's lines names profile `id`: another layer
-/// defines it or gives one of its fields a value, or a reference names it
-/// (`profile-order`, `profile-hidden`, `default-profile`, as the config the
-/// index was made from holds them). Deleting its last `profile-command`
-/// line would then leave the loader something that names no profile.
-fn referencedElsewhere(problems: *const origin.Index, id: []const u8, path: []const u8, same: origin.SamePath) bool {
-    for ([_]Field{ .command, .name, .folder, .env }) |field| {
-        if (problems.givesElsewhere(field.key(), id, null, path, same)) return true;
-    }
-    const config = problems.config;
-    if (config.@"default-profile") |value| if (namesProfile(value, id)) return true;
-    for ([_][]const [:0]const u8{ config.@"profile-order".list.items, config.@"profile-hidden".list.items }) |values| {
-        for (values) |value| if (namesProfile(value, id)) return true;
+/// Whether anything but this file's lines names profile `id`, in any of
+/// `readings`: another layer defines it or gives one of its fields a value,
+/// or a reference names it (`profile-order`, `profile-hidden`,
+/// `default-profile`, as the config the index was made from holds them).
+/// Deleting its last `profile-command` line would then leave the loader
+/// something that names no profile.
+fn referencedElsewhere(readings: []const origin.Index, id: []const u8, path: []const u8, same: origin.SamePath) bool {
+    for (readings) |*problems| {
+        for ([_]Field{ .command, .name, .folder, .env }) |field| {
+            if (problems.givesElsewhere(field.key(), id, null, path, same)) return true;
+        }
+        const config = problems.config;
+        if (config.@"default-profile") |value| if (namesProfile(value, id)) return true;
+        for ([_][]const [:0]const u8{ config.@"profile-order".list.items, config.@"profile-hidden".list.items }) |values| {
+            for (values) |value| if (namesProfile(value, id)) return true;
+        }
     }
     return false;
 }
@@ -551,24 +598,39 @@ pub fn writeEditName(writer: *std.Io.Writer, edit: Edit) !void {
 
 /// The edits a save of `pending` makes to the file `path` (`profileEdits`),
 /// from `arena`; none, without indexing anything, when no profile changed.
-/// `layers` is the config as it was read last (the app's), which tells what
-/// the other files and the command line say now: an external reload since
-/// `original` was copied may have changed them.
-pub fn editsForSave(arena: Allocator, alloc: Allocator, layers: *const Config, original: *const Config, pending: *const Config, path: []const u8, same: origin.SamePath) ![]Edit {
+///
+/// `readings` are the config's layers as read: the config read last (the
+/// app's) and, for a save, the files read again just before it. A removal
+/// keeps a line (its tombstone, or a take-back) when any reading shows
+/// another layer naming what is removed, and lines are deleted only when
+/// none does: a read that went wrong can miss a definition (an include the
+/// loader stopped reading partway through looks like its end, follow-up
+/// CONFIG-READ-ERROR-TRUNCATES), but cannot invent one. Each reading is
+/// taken in `state`, the light/dark state the app applies now
+/// (`CoreApp.config_conditional_state`): a `theme = light:A,dark:B` file can
+/// define a profile in one state only, `Config.load` hands over the light
+/// one, and the state may have changed since Settings opened.
+pub fn editsForSave(arena: Allocator, alloc: Allocator, readings: []const *const Config, state: configpkg.ConditionalState, original: *const Config, pending: *const Config, path: []const u8, same: origin.SamePath) ![]Edit {
     if (original.@"profile-command".equal(pending.@"profile-command") and
         original.@"profile-name".equal(pending.@"profile-name") and
         original.@"profile-working-directory".equal(pending.@"profile-working-directory") and
         original.@"profile-env".equal(pending.@"profile-env")) return &.{};
-    // The layers as the app applies them, in the light/dark state of the
-    // config Settings was opened on (the app's, which `updateConfig`
-    // conditions): a `theme = light:A,dark:B` file can define a profile in
-    // one state only, and `Config.load` hands over the light one.
-    var conditioned = try layers.changeConditionalState(original._conditional_state);
-    defer if (conditioned) |*value| value.deinit();
-    var problems = try origin.Index.init(alloc, if (conditioned) |*value| value else layers);
-    defer problems.deinit(alloc);
-    return profileEdits(arena, &problems, original, pending, path, same);
+    std.debug.assert(readings.len != 0 and readings.len <= max_readings);
+    var conditioned: [max_readings]?Config = @splat(null);
+    defer for (&conditioned) |*value| if (value.*) |*config| config.deinit();
+    var indexes: [max_readings]origin.Index = undefined;
+    var made: usize = 0;
+    defer for (indexes[0..made]) |*index| index.deinit(alloc);
+    for (readings, 0..) |reading, i| {
+        conditioned[i] = try reading.changeConditionalState(state);
+        indexes[i] = try origin.Index.init(alloc, if (conditioned[i]) |*config| config else reading);
+        made += 1;
+    }
+    return profileEdits(arena, indexes[0..made], original, pending, path, same);
 }
+
+/// The most readings of the layers `editsForSave` takes.
+const max_readings = 2;
 
 /// Name each field of `edits` that `reloaded` does not hold (`editHeld`),
 /// comma separated, after a separator when `after`. Returns whether it
@@ -838,7 +900,7 @@ test "settings patch: profileEdits writes what the editor staged, and the loader
     defer problems.deinit(alloc);
     var edit_arena: std.heap.ArenaAllocator = .init(alloc);
     defer edit_arena.deinit();
-    const edits = try profileEdits(edit_arena.allocator(), &problems, &original, &pending, path, &testSamePath);
+    const edits = try profileEdits(edit_arena.allocator(), &.{problems}, &original, &pending, path, &testSamePath);
     var out: std.ArrayListUnmanaged(u8) = .empty;
     defer out.deinit(alloc);
     try patchProfileEdits(alloc, text, edits, &out);
@@ -867,9 +929,9 @@ test "settings patch: profileEdits writes what the editor staged, and the loader
     try expectSameText("profile-name team", masked.written());
 
     // A save works out the same edits, and none when nothing changed.
-    const again = try editsForSave(edit_arena.allocator(), alloc, &original, &original, &pending, path, &testSamePath);
+    const again = try editsForSave(edit_arena.allocator(), alloc, &.{&original}, .{}, &original, &pending, path, &testSamePath);
     try testing.expectEqual(edits.len, again.len);
-    try testing.expectEqual(@as(usize, 0), (try editsForSave(edit_arena.allocator(), alloc, &original, &original, &original, path, &testSamePath)).len);
+    try testing.expectEqual(@as(usize, 0), (try editsForSave(edit_arena.allocator(), alloc, &.{&original}, .{}, &original, &original, path, &testSamePath)).len);
 }
 
 test "settings patch: lines are read as the loader reads them" {
@@ -930,52 +992,70 @@ test "settings patch: a line the loader skips for its two CRs is never matched o
     try expectSameText("Python", got.name.get("py").?);
 }
 
-test "settings patch: FileEnd hands the patchers a complete last line and gives the result the file's own ending once" {
+test "settings patch: FileEnd hands the patchers a complete, marked last line, and its ending stays with that line" {
     const alloc = testing.allocator;
-    const Case = struct { raw: []const u8, end: FileEnd, terminated: []const u8 };
-    for ([_]Case{
-        .{ .raw = "", .end = .terminated, .terminated = "" },
-        .{ .raw = "\xef\xbb\xbf", .end = .terminated, .terminated = "\xef\xbb\xbf" },
-        .{ .raw = "a\n", .end = .terminated, .terminated = "a\n" },
-        .{ .raw = "a\r\n", .end = .terminated, .terminated = "a\r\n" },
-        .{ .raw = "a", .end = .none, .terminated = "a\n" },
-        .{ .raw = "a\r\nb", .end = .none, .terminated = "a\r\nb\r\n" },
-        .{ .raw = "\xef\xbb\xbfa\r\nb", .end = .none, .terminated = "\xef\xbb\xbfa\r\nb\r\n" },
-        .{ .raw = "a\r", .end = .bare_cr, .terminated = "a\r\n" },
-        .{ .raw = "a\nb\r", .end = .bare_cr, .terminated = "a\nb\r\n" },
+    // A file that ends in a line ending is handed over as it is; one that
+    // does not gets its last line ended and marked, and comes back the same
+    // when nothing is patched.
+    for ([_]struct { raw: []const u8, end: FileEnd }{
+        .{ .raw = "", .end = .terminated },
+        .{ .raw = "\xef\xbb\xbf", .end = .terminated },
+        .{ .raw = "a\n", .end = .terminated },
+        .{ .raw = "a\r\n", .end = .terminated },
+        .{ .raw = "a", .end = .none },
+        .{ .raw = "a\r\nb", .end = .none },
+        .{ .raw = "\xef\xbb\xbfa\r\nb", .end = .none },
+        .{ .raw = "\xef\xbb\xbfb", .end = .none },
+        .{ .raw = "a\r", .end = .bare_cr },
+        .{ .raw = "a\nb\r", .end = .bare_cr },
     }) |case| {
         try testing.expectEqual(case.end, FileEnd.of(case.raw));
         var out: std.ArrayListUnmanaged(u8) = .empty;
         defer out.deinit(alloc);
         try case.end.terminate(alloc, case.raw, &out);
-        try expectSameText(case.terminated, out.items);
-        // Restored with nothing patched, the bytes are the file's again.
+        if (case.end == .terminated) try expectSameText(case.raw, out.items) else {
+            // Every line ends; the last line sits between the marks.
+            try testing.expect(std.mem.endsWith(u8, out.items, "\n"));
+            try testing.expect(std.mem.indexOf(u8, out.items, FileEnd.before_last) != null);
+        }
         case.end.restore(&out);
         try expectSameText(case.raw, out.items);
     }
-    // Exactly one line ending comes off, and a bare CR's CRLF or LF becomes
-    // a CR; text that ends in none is left alone.
-    for ([_]struct { end: FileEnd, patched: []const u8, restored: []const u8 }{
-        .{ .end = .none, .patched = "# keep\n\n", .restored = "# keep\n" },
-        .{ .end = .none, .patched = "# keep\r\n\r\n", .restored = "# keep\r\n" },
-        .{ .end = .none, .patched = "", .restored = "" },
-        .{ .end = .bare_cr, .patched = "a\r\nb\r\n", .restored = "a\r\nb\r" },
-        .{ .end = .bare_cr, .patched = "a\nb\n", .restored = "a\nb\r" },
-        .{ .end = .bare_cr, .patched = "\xef\xbb\xbf", .restored = "\xef\xbb\xbf" },
-        .{ .end = .terminated, .patched = "a\n", .restored = "a\n" },
+    // The last line deleted: nothing is taken off, so the blank line before
+    // it keeps its LF. Kept, with a line added after it: the added line ends
+    // as the file did.
+    for ([_]struct { raw: []const u8, delete_last: bool, append: []const u8, restored: []const u8 }{
+        .{ .raw = "# keep\n\nlast", .delete_last = true, .append = "", .restored = "# keep\n\n" },
+        .{ .raw = "# keep\r\n\r\nlast", .delete_last = true, .append = "", .restored = "# keep\r\n\r\n" },
+        .{ .raw = "a\nlast", .delete_last = true, .append = "new\n", .restored = "a\nnew\n" },
+        .{ .raw = "last", .delete_last = true, .append = "", .restored = "" },
+        .{ .raw = "a\nlast\r", .delete_last = true, .append = "", .restored = "a\n" },
+        .{ .raw = "a\nlast", .delete_last = false, .append = "new\n", .restored = "a\nlast\nnew" },
+        .{ .raw = "a\r\nlast\r", .delete_last = false, .append = "new\r\n", .restored = "a\r\nlast\r\nnew\r" },
     }) |case| {
         var out: std.ArrayListUnmanaged(u8) = .empty;
         defer out.deinit(alloc);
-        try out.appendSlice(alloc, case.patched);
-        case.end.restore(&out);
+        const end_kind = FileEnd.of(case.raw);
+        try end_kind.terminate(alloc, case.raw, &out);
+        // What the patchers would do: take out the marked line, add at the
+        // end.
+        if (case.delete_last) {
+            const from = std.mem.indexOf(u8, out.items, FileEnd.before_last).?;
+            const first = FileEnd.lineEnd(out.items, from);
+            const to = FileEnd.lineEnd(out.items, first);
+            FileEnd.removeRange(&out, first, to);
+        }
+        try out.appendSlice(alloc, case.append);
+        end_kind.restore(&out);
         try expectSameText(case.restored, out.items);
     }
 }
 
-test "settings patch: a removal is decided in the light/dark state Settings was opened in, so a profile only the dark theme defines keeps its tombstone" {
+/// A config file `theme = light:<light>,dark:<dark>` that defines `py`, in
+/// `tmp` as `config`, where only the dark theme defines `py` too. Returns its
+/// path, the caller's to free.
+fn testThemedProfile(tmp: *std.testing.TmpDir) ![]u8 {
     const alloc = testing.allocator;
-    var tmp = testing.tmpDir(.{});
-    defer tmp.cleanup();
     try tmp.dir.writeFile(.{ .sub_path = "none.conf", .data = "\n" });
     try tmp.dir.writeFile(.{ .sub_path = "light", .data = "\n" });
     try tmp.dir.writeFile(.{ .sub_path = "dark", .data = "profile-command = py: python.exe -X dark\n" });
@@ -986,7 +1066,28 @@ test "settings patch: a removal is decided in the light/dark state Settings was 
     const text = try std.fmt.allocPrint(alloc, "theme = light:{s},dark:{s}\nprofile-command = py: python.exe\n", .{ light, dark });
     defer alloc.free(text);
     try tmp.dir.writeFile(.{ .sub_path = "config", .data = text });
-    const path = try tmp.dir.realpathAlloc(alloc, "config");
+    return tmp.dir.realpathAlloc(alloc, "config");
+}
+
+/// The op `editsForSave` gives the removal of `py`'s command, read from
+/// `readings` in `state`, for a draft made in `opened`.
+fn testRemovalOp(readings: []const *const Config, state: configpkg.ConditionalState, opened: *const Config, path: []const u8) !Edit.Op {
+    const alloc = testing.allocator;
+    var pending = try opened.clone(alloc);
+    defer pending.deinit();
+    try pending.@"profile-command".parseCLI(pending._arena.?.allocator(), "py:");
+    var edit_arena: std.heap.ArenaAllocator = .init(alloc);
+    defer edit_arena.deinit();
+    const edits = try editsForSave(edit_arena.allocator(), alloc, readings, state, opened, &pending, path, &testSamePath);
+    for (edits) |e| if (e.field == .command) return e.op;
+    return error.TestExpectedRemoval;
+}
+
+test "settings patch: a removal is decided in the light/dark state the app applies, so a profile only the dark theme defines keeps its tombstone" {
+    const alloc = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = try testThemedProfile(&tmp);
     defer alloc.free(path);
     const none = try tmp.dir.realpathAlloc(alloc, "none.conf");
     defer alloc.free(none);
@@ -994,39 +1095,113 @@ test "settings patch: a removal is decided in the light/dark state Settings was 
     var layers = try testLoad(alloc, none, path);
     defer layers.deinit();
     try testing.expectEqual(@TypeOf(layers._conditional_state.theme).light, layers._conditional_state.theme);
+    var dark = (try layers.changeConditionalState(.{ .theme = .dark })).?;
+    defer dark.deinit();
 
-    for ([_]@TypeOf(layers._conditional_state.theme){ .dark, .light }) |theme| {
-        // The config Settings was opened on, in the state the app applied.
-        var applied = (try layers.changeConditionalState(.{ .theme = theme })) orelse try layers.clone(alloc);
-        defer applied.deinit();
-        var pending = try applied.clone(alloc);
+    // Dark: the dark theme still defines `py`, so its line becomes the
+    // tombstone. Light: nothing else does, and the line goes.
+    try testing.expectEqual(Edit.Op.unset, std.meta.activeTag(try testRemovalOp(&.{&layers}, .{ .theme = .dark }, &dark, path)));
+    try testing.expectEqual(Edit.Op.delete, std.meta.activeTag(try testRemovalOp(&.{&layers}, .{ .theme = .light }, &layers, path)));
+    // A reload in the dark state holds the dark theme's `py`: the masking
+    // check names a deletion it would have undone.
+    var masked: std.Io.Writer.Allocating = .init(alloc);
+    defer masked.deinit();
+    const deletion = [_]Edit{.{ .field = .command, .id = "py", .op = .delete }};
+    try testing.expect(try writeMasked(&masked.writer, &deletion, &dark, false));
+    try expectSameText("profile-command py", masked.written());
+}
+
+test "settings patch: a removal made in Settings opened in one light/dark state is decided in the one the app switched to, for a profile and each of its fields" {
+    const alloc = testing.allocator;
+    const Theme = @FieldType(configpkg.ConditionalState, "theme");
+    const defines = "profile-command = py: python.exe -X theme\nprofile-name = py: Themed\nprofile-working-directory = py: C:\\theme\nprofile-env = py: V=theme\n";
+    for ([_][2]Theme{ .{ .light, .dark }, .{ .dark, .light } }) |pair| {
+        const opened_in, const now = pair;
+        errdefer std.debug.print("opened in {t}, now {t}\n", .{ opened_in, now });
+        var tmp = testing.tmpDir(.{});
+        defer tmp.cleanup();
+        // Only the theme of the state the app switched to defines `py` and
+        // its fields again.
+        try tmp.dir.writeFile(.{ .sub_path = "none.conf", .data = "\n" });
+        try tmp.dir.writeFile(.{ .sub_path = "light", .data = if (now == .light) defines else "\n" });
+        try tmp.dir.writeFile(.{ .sub_path = "dark", .data = if (now == .dark) defines else "\n" });
+        const light = try tmp.dir.realpathAlloc(alloc, "light");
+        defer alloc.free(light);
+        const dark = try tmp.dir.realpathAlloc(alloc, "dark");
+        defer alloc.free(dark);
+        const text = try std.fmt.allocPrint(alloc, "theme = light:{s},dark:{s}\nprofile-command = py: python.exe\nprofile-name = py: Python\nprofile-working-directory = py: C:\\src\nprofile-env = py: V=1\n", .{ light, dark });
+        defer alloc.free(text);
+        try tmp.dir.writeFile(.{ .sub_path = "config", .data = text });
+        const path = try tmp.dir.realpathAlloc(alloc, "config");
+        defer alloc.free(path);
+        const none = try tmp.dir.realpathAlloc(alloc, "none.conf");
+        defer alloc.free(none);
+        // The save's fresh read: the light state, as `Config.load` hands it.
+        var fresh = try testLoad(alloc, none, path);
+        defer fresh.deinit();
+        // The config Settings opened on, in the state it was then.
+        var opened = (try fresh.changeConditionalState(.{ .theme = opened_in })) orelse try fresh.clone(alloc);
+        defer opened.deinit();
+
+        // The whole profile: decided now, the theme keeps its tombstone; in
+        // the state Settings opened in, the line would go.
+        try testing.expectEqual(Edit.Op.unset, std.meta.activeTag(try testRemovalOp(&.{&fresh}, .{ .theme = now }, &opened, path)));
+        try testing.expectEqual(Edit.Op.delete, std.meta.activeTag(try testRemovalOp(&.{&fresh}, .{ .theme = opened_in }, &opened, path)));
+
+        // Its name, folder and variable taken out, the profile kept.
+        var pending = try opened.clone(alloc);
         defer pending.deinit();
-        try pending.@"profile-command".parseCLI(pending._arena.?.allocator(), "py:");
-
-        var edit_arena: std.heap.ArenaAllocator = .init(alloc);
-        defer edit_arena.deinit();
-        const edits = try editsForSave(edit_arena.allocator(), alloc, &layers, &applied, &pending, path, &testSamePath);
-        var command: ?Edit = null;
-        for (edits) |e| if (e.field == .command) {
-            command = e;
-        };
-        // Dark: the dark theme still defines `py`, so its line becomes the
-        // tombstone. Light: nothing else does, and the line goes.
-        try testing.expect(command != null);
-        try testing.expectEqual(if (theme == .dark) Edit.Op.unset else Edit.Op.delete, std.meta.activeTag(command.?.op));
-        // A reload in the dark state holds the dark theme's `py`: the
-        // masking check names a deletion it would have undone.
-        if (theme == .dark) {
-            var masked: std.Io.Writer.Allocating = .init(alloc);
-            defer masked.deinit();
-            const deletion = [_]Edit{.{ .field = .command, .id = "py", .op = .delete }};
-            try testing.expect(try writeMasked(&masked.writer, &deletion, &applied, false));
-            try expectSameText("profile-command py", masked.written());
+        pending.@"profile-name".remove("py");
+        pending.@"profile-working-directory".remove("py");
+        try pending.@"profile-env".parseCLI(pending._arena.?.allocator(), "py: V=");
+        for ([_]struct { Theme, Edit.Op }{ .{ now, .unset }, .{ opened_in, .delete } }) |decided| {
+            var edit_arena: std.heap.ArenaAllocator = .init(alloc);
+            defer edit_arena.deinit();
+            const edits = try editsForSave(edit_arena.allocator(), alloc, &.{&fresh}, .{ .theme = decided[0] }, &opened, &pending, path, &testSamePath);
+            var seen: usize = 0;
+            for (edits) |e| {
+                try testing.expect(e.field != .command);
+                try testing.expectEqual(std.meta.activeTag(decided[1]), std.meta.activeTag(e.op));
+                seen += 1;
+            }
+            try testing.expectEqual(@as(usize, 3), seen);
         }
     }
 }
 
-test "settings patch: a config-file the load found and could not open is named, and a missing one or a directory is not" {
+test "settings patch: a removal keeps its tombstone when the config as last read names the profile, though the fresh read missed it" {
+    const alloc = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(.{ .sub_path = "none.conf", .data = "\n" });
+    try tmp.dir.writeFile(.{ .sub_path = "more.conf", .data = "profile-name = py: Python\n" });
+    const more = try tmp.dir.realpathAlloc(alloc, "more.conf");
+    defer alloc.free(more);
+    const text = try std.fmt.allocPrint(alloc, "profile-command = py: python.exe\nconfig-file = {s}\n", .{more});
+    defer alloc.free(text);
+    try tmp.dir.writeFile(.{ .sub_path = "config", .data = text });
+    const path = try tmp.dir.realpathAlloc(alloc, "config");
+    defer alloc.free(path);
+    const none = try tmp.dir.realpathAlloc(alloc, "none.conf");
+    defer alloc.free(none);
+    // The config as last read: the include labels `py`.
+    var held = try testLoad(alloc, none, path);
+    defer held.deinit();
+    // A read that missed the include's line, as one that stopped partway
+    // through would: no problem recorded, and no label.
+    try tmp.dir.writeFile(.{ .sub_path = "more.conf", .data = "\n" });
+    var fresh = try testLoad(alloc, none, path);
+    defer fresh.deinit();
+    try testing.expect(fresh._diagnostics.empty());
+    try testing.expect(fresh.@"profile-name".get("py") == null);
+
+    // Either reading naming `py` keeps the tombstone; deleted only when
+    // neither does.
+    try testing.expectEqual(Edit.Op.unset, std.meta.activeTag(try testRemovalOp(&.{ &fresh, &held }, .{}, &held, path)));
+    try testing.expectEqual(Edit.Op.delete, std.meta.activeTag(try testRemovalOp(&.{&fresh}, .{}, &held, path)));
+}
+
+test "settings patch: a config-file the load could not open or read whole, or a theme it could not read whole, is named, and a missing one or a directory is not" {
     const alloc = testing.allocator;
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -1054,7 +1229,7 @@ test "settings patch: a config-file the load found and could not open is named, 
         var config = try testLoad(alloc, none, path);
         defer config.deinit();
         try testing.expect(!config._diagnostics.empty());
-        try testing.expect(unopenedConfigFile(&config) == null);
+        try testing.expect(unreadConfigFile(&config) == null);
     }
     // One another program holds with no sharing while the load runs: named.
     // (`std`'s `.lock` is a byte-range lock on Windows: the open succeeds,
@@ -1072,7 +1247,30 @@ test "settings patch: a config-file the load found and could not open is named, 
         var config = try testLoad(alloc, none, path);
         defer config.deinit();
         try testing.expect(config.@"profile-command".get("py") == null);
-        try expectSameText(held, unopenedConfigFile(&config) orelse return error.TestExpectedUnopenedFile);
+        const unread = unreadConfigFile(&config) orelse return error.TestExpectedUnreadFile;
+        try expectSameText(held, unread.path);
+        try testing.expect(!unread.theme);
+    }
+    // One whose read fails partway through: named, though it opened; and a
+    // theme the same.
+    {
+        var config = try Config.default(alloc);
+        defer config.deinit();
+        var buf: [16]u8 = undefined;
+        var failing = @import("../../cli/args.zig").TestFailingReader.init("profile-name = py: P\nprofile-comm", &buf);
+        try config.loadReader(alloc, &failing.interface, held);
+        const unread = unreadConfigFile(&config) orelse return error.TestExpectedUnreadFile;
+        try expectSameText(held, unread.path);
+        try testing.expect(!unread.theme);
+
+        var themed = try Config.default(alloc);
+        defer themed.deinit();
+        const arena = themed._arena.?.allocator();
+        const message = try std.fmt.allocPrintSentinel(arena, "error reading theme {s}: error.ReadFailed", .{held}, 0);
+        try themed._diagnostics.append(arena, .{ .message = message });
+        const theme = unreadConfigFile(&themed) orelse return error.TestExpectedUnreadFile;
+        try expectSameText(held, theme.path);
+        try testing.expect(theme.theme);
     }
 }
 
@@ -1103,7 +1301,7 @@ test "settings patch: a removed profile keeps its tombstone while anything else 
 
     var edit_arena: std.heap.ArenaAllocator = .init(alloc);
     defer edit_arena.deinit();
-    const edits = try editsForSave(edit_arena.allocator(), alloc, &layers, &original, &pending, path, &testSamePath);
+    const edits = try editsForSave(edit_arena.allocator(), alloc, &.{&layers}, .{}, &original, &pending, path, &testSamePath);
     var out: std.ArrayListUnmanaged(u8) = .empty;
     defer out.deinit(alloc);
     try patchProfileEdits(alloc, text, edits, &out);

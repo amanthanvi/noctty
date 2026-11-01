@@ -984,7 +984,7 @@ test "settings profiles: a draft the page changed saves and reads back as the pa
 
     var arena: std.heap.ArenaAllocator = .init(alloc);
     defer arena.deinit();
-    const edits = try settings_patch.editsForSave(arena.allocator(), alloc, &original, &original, &draft, path, &struct {
+    const edits = try settings_patch.editsForSave(arena.allocator(), alloc, &.{&original}, .{}, &original, &draft, path, &struct {
         fn same(a: []const u8, b: []const u8) bool {
             return std.ascii.eqlIgnoreCase(a, b);
         }

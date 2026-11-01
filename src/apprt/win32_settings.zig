@@ -12937,7 +12937,7 @@ const dialog_test = struct {
                 // The profile editor's changes, as the App works them out.
                 var profile_arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
                 defer profile_arena.deinit();
-                const profile_edits = settings_patch.editsForSave(profile_arena.allocator(), std.testing.allocator, &self.config, original, pending, path, &settings_reference.samePath) catch
+                const profile_edits = settings_patch.editsForSave(profile_arena.allocator(), std.testing.allocator, &.{&self.config}, self.config._conditional_state, original, pending, path, &settings_reference.samePath) catch
                     return error.OutOfMemory;
                 try app.persistSettings(std.testing.allocator, path, pending, edited, profile_edits, null);
                 if (self.reload_from_disk) {

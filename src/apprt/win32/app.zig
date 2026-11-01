@@ -8668,34 +8668,18 @@ pub const App = struct {
         // layers `original` was read from.
         var profile_arena: std.heap.ArenaAllocator = .init(alloc);
         defer profile_arena.deinit();
-        var profile_edits = settings_patch.editsForSave(profile_arena.allocator(), alloc, &self.config, original, pending, target_path, &settings_reference.samePath) catch |err|
+        // In the light/dark state the app applies now, which may have
+        // changed since Settings opened (`settings_patch.editsForSave`).
+        const state = self.core_app.config_conditional_state;
+        var profile_edits = settings_patch.editsForSave(profile_arena.allocator(), alloc, &.{&self.config}, state, original, pending, target_path, &settings_reference.samePath) catch |err|
             return settingsProfileEditsFailed(err);
         // Whether another file still names a removed profile decides a
         // tombstone or a deletion, and `self.config` is as of the last reload:
         // a file that gained the profile since, with no reload, would be
         // missed and the profile come back. With profile edits to make, the
-        // layers are read from disk again, held to the rule the disk check
-        // before an ordinary save holds them to (`settingsDiskVerdict`): an
-        // included or theme file that is there and will not open, or one
-        // that does not decode, stops the save, so the edits are never
-        // decided from a partial read. So does an include this very load
-        // could not open, and a read that fails.
+        // layers are read from disk again (`settingsProfileEditsFromDisk`).
         if (profile_edits.len != 0) {
-            var disk = self.loadConfigAtStartupCwd() catch |err| {
-                log.warn("settings save: could not read the config files again for the profile edits err={}", .{err});
-                return error.ReloadFailed;
-            };
-            defer disk.deinit();
-            self.settings_failure_detail.clear(alloc);
-            _ = try settingsDiskVerdict(alloc, &self.settings_failure_detail, original, pending, &disk, self.core_app.config_conditional_state, .initEmpty());
-            if (settings_patch.unopenedConfigFile(&disk)) |path| {
-                const text = std.fmt.allocPrint(alloc, "the included file {s}", .{path}) catch return error.OutOfMemory;
-                defer alloc.free(text);
-                self.settings_failure_detail.set(alloc, text);
-                return error.FileUnopenable;
-            }
-            profile_edits = settings_patch.editsForSave(profile_arena.allocator(), alloc, &disk, original, pending, target_path, &settings_reference.samePath) catch |err|
-                return settingsProfileEditsFailed(err);
+            profile_edits = try settingsProfileEditsFromDisk(profile_arena.allocator(), alloc, &self.settings_failure_detail, self.loadConfigAtStartupCwd(), &self.config, state, original, pending, target_path);
         }
         // No-op short-circuit: if the user pressed Save without
         // changing anything, don't touch the filesystem. On a
@@ -8753,6 +8737,45 @@ pub const App = struct {
         // The reload read the file again, so what is wrong in it is news.
         _ = self.reportRecordedConfigProblems();
         if (masked.len > 0) return error.SavedButMasked;
+    }
+
+    /// The profile edits a save makes, worked out against the config layers
+    /// read again from disk (`fresh`, the read's result, owned here) and
+    /// against `held`, the config as last read, in `state`
+    /// (`settings_patch.editsForSave`): a removal keeps its line when either
+    /// shows another layer naming it. The fresh read is held to the rule the
+    /// disk check before an ordinary save holds it to (`settingsDiskVerdict`):
+    /// an included or theme file that is there and will not open, or does not
+    /// decode, stops the save. So does a file the read could not open or read
+    /// whole (`settings_patch.unreadConfigFile`: an include that would not
+    /// open, or one or a theme whose read failed partway through), and a read
+    /// that fails. Nothing is written then, and `detail` names the file.
+    fn settingsProfileEditsFromDisk(
+        arena: Allocator,
+        alloc: Allocator,
+        detail: *win32_settings.FailureDetail,
+        fresh: anyerror!configpkg.Config,
+        held: *const configpkg.Config,
+        state: configpkg.ConditionalState,
+        original: *const configpkg.Config,
+        pending: *const configpkg.Config,
+        target_path: []const u8,
+    ) win32_settings.SaveError![]settings_patch.Edit {
+        var disk = fresh catch |err| {
+            log.warn("settings save: could not read the config files again for the profile edits err={}", .{err});
+            return error.ReloadFailed;
+        };
+        defer disk.deinit();
+        detail.clear(alloc);
+        _ = try settingsDiskVerdict(alloc, detail, original, pending, &disk, state, .initEmpty());
+        if (settings_patch.unreadConfigFile(&disk)) |unread| {
+            const text = std.fmt.allocPrint(alloc, "{s} {s}", .{ if (unread.theme) "the theme file" else "the included file", unread.path }) catch return error.OutOfMemory;
+            defer alloc.free(text);
+            detail.set(alloc, text);
+            return error.FileUnopenable;
+        }
+        return settings_patch.editsForSave(arena, alloc, &.{ &disk, held }, state, original, pending, target_path, &settings_reference.samePath) catch |err|
+            settingsProfileEditsFailed(err);
     }
 
     /// The profile edits could not be worked out: no memory, or the layers
@@ -9028,6 +9051,49 @@ pub const App = struct {
             .path = owned,
             .from_settings = self.settings_window.hwnd != null,
         } });
+    }
+
+    test "settings a profile save's fresh read stops the save when a file was not read whole, and decides from it and the held config otherwise" {
+        const alloc = std.testing.allocator;
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        try tmp.dir.writeFile(.{ .sub_path = "config", .data = "profile-command = py: python.exe\n" });
+        const path = try tmp.dir.realpathAlloc(alloc, "config");
+        defer alloc.free(path);
+        var held = try configpkg.Config.default(alloc);
+        defer held.deinit();
+        try held.loadFile(alloc, path);
+        var pending = try held.clone(alloc);
+        defer pending.deinit();
+        try pending.@"profile-command".parseCLI(pending._arena.?.allocator(), "py:");
+        var detail: win32_settings.FailureDetail = .{};
+        defer detail.clear(alloc);
+        var arena: std.heap.ArenaAllocator = .init(alloc);
+        defer arena.deinit();
+
+        // A file whose read fails partway through: the save stops, naming it.
+        {
+            var fresh = try configpkg.Config.default(alloc);
+            errdefer fresh.deinit();
+            var buf: [16]u8 = undefined;
+            var failing = @import("../../cli/args.zig").TestFailingReader.init("profile-command = py: python.exe\nprofile-na", &buf);
+            try fresh.loadReader(alloc, &failing.interface, path);
+            try std.testing.expectError(error.FileUnopenable, App.settingsProfileEditsFromDisk(arena.allocator(), alloc, &detail, fresh, &held, .{}, &held, &pending, path));
+            const expected = try std.fmt.allocPrint(alloc, "the included file {s}", .{path});
+            defer alloc.free(expected);
+            try std.testing.expect(std.mem.eql(u8, expected, detail.text.?));
+        }
+        // A read that fails: the save stops.
+        try std.testing.expectError(error.ReloadFailed, App.settingsProfileEditsFromDisk(arena.allocator(), alloc, &detail, error.AccessDenied, &held, .{}, &held, &pending, path));
+        // A whole read: the edits, and nothing else names `py`, so its line goes.
+        {
+            var fresh = try configpkg.Config.default(alloc);
+            errdefer fresh.deinit();
+            try fresh.loadFile(alloc, path);
+            const edits = try App.settingsProfileEditsFromDisk(arena.allocator(), alloc, &detail, fresh, &held, .{}, &held, &pending, path);
+            try std.testing.expectEqual(@as(usize, 4), edits.len);
+            try std.testing.expect(edits[0].field == .command and edits[0].op == .delete);
+        }
     }
 
     test "SET editor request stays deferred, rechecks safety and reports host failure" {
