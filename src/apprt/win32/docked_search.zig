@@ -196,14 +196,15 @@ pub const DockedSearch = struct {
     /// Every edit or toggle clears it, because the answer belongs to the
     /// query that was searched.
     invalid: bool = false,
-    /// When the debounce started; 0 when none is waiting.
-    last_edit_ms: i64 = 0,
-    /// False while an edit waits out the debounce, and when the core's
-    /// answer says nothing about the query (a null total, or a null
-    /// selection with no total).
-    searched: bool = true,
+    /// When the debounce fires; null when no edit waits for it.
+    deadline: ?i64 = null,
+    /// The core's answer says nothing of the query (a null total, or a null
+    /// selection with no total), or the bar closed on a query: the chip
+    /// reads "Searching" and navigation searches again. Unlike the
+    /// debounce, it drops no report and keeps no timer running.
+    awaiting: bool = false,
     /// A query was edited or searched and not stopped since. The core
-    /// searches for `query` when this is set and `searched` is too.
+    /// searches for `query` when this is set and no debounce waits.
     active: bool = false,
     /// The rows of the matches, owned, for the scrollbar markers.
     match_rows: []const u32 = &.{},
@@ -249,7 +250,7 @@ pub const DockedSearch = struct {
             .chip = self.query.len > 0,
             .results = self.results(),
             .options = self.options,
-            .wants_tick = self.open and self.query.len > 0 and !self.searched,
+            .wants_tick = self.open and self.deadline != null,
             .match_rows = self.match_rows,
         };
     }
@@ -265,8 +266,8 @@ pub const DockedSearch = struct {
             self.total = null;
             self.selected_raw = null;
         }
-        self.searched = initial.len == 0 or restore;
-        self.last_edit_ms = 0;
+        self.deadline = null;
+        self.awaiting = false;
         var out: Outcome = if (initial.len > 0 and !live) self.issue() else .{ .handled = true, .timer_changed = true };
         out.frame = .shown;
         return out;
@@ -283,10 +284,10 @@ pub const DockedSearch = struct {
         if (self.query.len == 0) return .{ .handled = true };
         // Not live: the core has no search for the query, or the debounce
         // or the core's answer is still to come.
-        if (!self.active or !self.searched) return self.issue();
+        if (!self.active or self.deadline != null or self.awaiting) return self.issue();
         // The selection moves at once; the core's report of it follows.
         self.selected_raw = self.advance(dir);
-        self.searched = self.selected_raw != null or self.total != null;
+        self.awaiting = self.selected_raw == null and self.total == null;
         return .{ .handled = true, .core = .{ .navigate = dir } };
     }
 
@@ -391,8 +392,8 @@ pub const DockedSearch = struct {
 
     /// The query, which is not empty, goes to the core now.
     fn issue(self: *DockedSearch) Outcome {
-        self.searched = true;
-        self.last_edit_ms = 0;
+        self.deadline = null;
+        self.awaiting = false;
         self.setActive(true);
         return .{
             .handled = true,
@@ -409,8 +410,8 @@ pub const DockedSearch = struct {
         self.selected_raw = null;
         self.invalid = false;
         if (!active) {
-            self.searched = self.query.len == 0;
-            self.last_edit_ms = 0;
+            self.deadline = null;
+            self.awaiting = self.query.len > 0;
         }
         if (self.match_rows.len > 0) self.alloc.free(self.match_rows);
         self.match_rows = &.{};
@@ -418,26 +419,24 @@ pub const DockedSearch = struct {
 
     /// The debounce fires once per edit, 40 ms after it.
     fn debounceDue(self: *const DockedSearch, now_ms: i64) bool {
-        if (self.query.len == 0) return false;
-        if (self.searched) return false;
-        if (self.last_edit_ms == 0) return false;
-        return (now_ms - self.last_edit_ms) >= debounce_ms;
+        const deadline = self.deadline orelse return false;
+        return now_ms >= deadline;
     }
 
     fn report(self: *DockedSearch, core: Input.Core) Allocator.Error!Outcome {
         if (core == .ended) return self.close();
         // While the debounce waits, a report belongs to the query before
         // the edit: it would overwrite "Searching" and the markers.
-        if (self.query.len > 0 and !self.searched) return .{};
+        if (self.deadline != null) return .{};
         switch (core) {
             .total => |total| {
                 self.total = total.total;
                 self.invalid = total.invalid;
-                self.searched = total.total != null;
+                self.awaiting = total.total == null;
             },
             .selected => |selected| {
                 self.selected_raw = if (selected) |number| if (number == 0) null else number - 1 else null;
-                self.searched = self.shownSelected() != null or self.total != null;
+                self.awaiting = self.shownSelected() == null and self.total == null;
             },
             .rows => |rows| {
                 if (std.mem.eql(u32, self.match_rows, rows)) return .{};
@@ -453,7 +452,7 @@ pub const DockedSearch = struct {
 
     fn results(self: *const DockedSearch) Results {
         if (self.query.len == 0) return .idle;
-        if (!self.searched) return .pending;
+        if (self.deadline != null or self.awaiting) return .pending;
         const total = self.total orelse return .pending;
         if (self.invalid) return .invalid;
         if (total == 0) return .none;
@@ -468,7 +467,7 @@ pub const DockedSearch = struct {
         return if (index < total) index + 1 else null;
     }
 
-    /// A new query starts the debounce (`now_ms`) and drops what the core
+    /// A new query starts the debounce at `now_ms` and drops what the core
     /// said of the old one; an empty one waits for nothing. Copies first, so
     /// on OutOfMemory nothing changed.
     fn setQuery(self: *DockedSearch, next: []const u8, now_ms: i64) Allocator.Error!void {
@@ -482,8 +481,8 @@ pub const DockedSearch = struct {
             self.total = null;
             self.selected_raw = null;
             self.invalid = false;
-            self.last_edit_ms = 0;
-            self.searched = true;
+            self.deadline = null;
+            self.awaiting = false;
             return;
         }
 
@@ -491,8 +490,8 @@ pub const DockedSearch = struct {
         self.total = null;
         self.selected_raw = null;
         self.invalid = false;
-        self.last_edit_ms = now_ms;
-        self.searched = false;
+        self.deadline = now_ms + debounce_ms;
+        self.awaiting = false;
     }
 };
 
@@ -1005,4 +1004,33 @@ test "PKG32 default F3 and Shift+F3 match the docked search F3 and Enter directi
         try std.testing.expectEqual(binding.dir, try testCommand(try search.apply(testKey(.down, .edit, c.VK_RETURN, binding.mods), 0), .navigate));
         try std.testing.expectEqual(binding.dir, try testCommand(try search.apply(testKey(.down, .button, c.VK_F3, binding.mods), 0), .navigate));
     }
+}
+
+test "Enter before the first total, then total 12, reads 12" {
+    var search = try testSearching(std.testing.allocator, "needlex");
+    defer search.deinit();
+    // The search went to the core and nothing has come back: Enter asks
+    // the core to step, and its total arrives after.
+    try std.testing.expectEqual(NavigateSearch.previous, try testCommand(try search.apply(testKey(.down, .edit, c.VK_RETURN, .{}), 0), .navigate));
+    _ = try search.apply(.{ .core = .{ .total = .{ .total = 12 } } }, 0);
+    var buf: [48]u8 = undefined;
+    try std.testing.expectEqualStrings("12", search.view().results.text(&buf));
+    try std.testing.expect(!search.view().wants_tick);
+}
+
+test "a core clear while open stops wants_tick" {
+    var search = try testSearching(std.testing.allocator, "needlex");
+    defer search.deinit();
+    _ = try search.apply(.{ .core = .{ .total = .{ .total = 12 } } }, 0);
+    _ = try search.apply(.{ .core = .{ .selected = 1 } }, 0);
+    // A `search:` binding with no text clears the core's search under the
+    // open bar.
+    _ = try search.apply(.{ .core = .{ .total = .{ .total = null } } }, 0);
+    _ = try search.apply(.{ .core = .{ .selected = null } }, 0);
+    _ = try search.apply(.{ .core = .{ .rows = &.{} } }, 0);
+    try std.testing.expect(!search.view().wants_tick);
+    var buf: [48]u8 = undefined;
+    try std.testing.expectEqualStrings("Searching", search.view().results.text(&buf));
+    // Enter searches again rather than stepping a search that is gone.
+    try std.testing.expectEqualStrings("needlex", (try testCommand(try search.apply(testKey(.down, .edit, c.VK_RETURN, .{}), 0), .search)).text);
 }
