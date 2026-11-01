@@ -55,7 +55,7 @@ const leaves = .{
         .file = "notifications.zig",
         .module = @import("notifications.zig"),
         .source = @embedFile("notifications.zig"),
-        .pub_decls = 12,
+        .pub_decls = 7,
     },
 };
 

@@ -299,6 +299,7 @@ pub fn Fixtures(comptime runtime: anytype) type {
                     .shell_compositor = win32_compositor.Backend.init(.{}, null),
                     .shell_runtime = win32_shell.runtime.Runtime.init(self.allocator),
                     .shell_runtime_initialized = options.shell_runtime_initialized,
+                    .notifications = .init(self.allocator, null, options.app.notificationPanes()),
                 };
                 self.app = options.app;
                 self.app_initialized = true;
@@ -417,7 +418,7 @@ pub fn Fixtures(comptime runtime: anytype) type {
                     runtime.appDropSettingsPreview(app);
                     app.config.deinit();
                     app.registry.deinit(self.allocator);
-                    app.toast_removals.deinit(self.allocator);
+                    app.notifications.deinit();
                     runtime.appDiscardDeferredOpens(app);
                 }
                 if (self.core_app_initialized) self.core_app.?.deinit();
