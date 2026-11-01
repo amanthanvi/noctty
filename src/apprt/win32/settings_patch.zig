@@ -187,6 +187,22 @@ fn endLastLine(line: *Line, dominant: Ending) void {
     line.ending = if (std.mem.endsWith(u8, line.text, "\r")) .lf else dominant;
 }
 
+/// Whether `raw`, a config file's text, ends without a newline: it has text
+/// past a UTF-8 byte order mark, and its last byte is not an LF.
+pub fn lacksFinalNewline(raw: []const u8) bool {
+    const text = if (std.mem.startsWith(u8, raw, "\xef\xbb\xbf")) raw[3..] else raw;
+    return text.len != 0 and text[text.len - 1] != '\n';
+}
+
+/// `text` without the line ending at its end, if it has one: a save that
+/// patched a file which had none there gives it none (`lacksFinalNewline`),
+/// whichever line the patches left last.
+pub fn withoutFinalNewline(text: []const u8) []const u8 {
+    if (std.mem.endsWith(u8, text, "\r\n")) return text[0 .. text.len - 2];
+    if (std.mem.endsWith(u8, text, "\n")) return text[0 .. text.len - 1];
+    return text;
+}
+
 /// The line `edit` writes, without its line ending, from `arena`.
 fn editLine(arena: Allocator, edit: Edit) ![]const u8 {
     var out: std.Io.Writer.Allocating = .init(arena);
@@ -525,11 +541,19 @@ pub fn writeMasked(writer: *std.Io.Writer, edits: []const Edit, reloaded: *const
 
 const testing = std.testing;
 
+/// Assert two texts are the same without printing either: a profile's command
+/// line or a variable's value can be a secret, and a failed
+/// `expectEqualStrings` prints both strings. Every test of profile text uses
+/// this, for row text, file bytes and messages alike.
+fn expectSameText(expected: []const u8, actual: []const u8) !void {
+    try testing.expect(std.mem.eql(u8, expected, actual));
+}
+
 fn testPatch(raw: []const u8, edits: []const Edit, expected: []const u8) !void {
     var out: std.ArrayListUnmanaged(u8) = .empty;
     defer out.deinit(testing.allocator);
     try patchProfileEdits(testing.allocator, raw, edits, &out);
-    try testing.expectEqualStrings(expected, out.items);
+    try expectSameText(expected, out.items);
 }
 
 test "settings patch: a field's last line is replaced, and another profile's lines are not touched" {
@@ -670,7 +694,7 @@ const TestMaps = struct {
             for ([_]*const TestMaps{ &self, &other }) |maps| for (@field(maps, field).entries.items) |entry| {
                 const a = @field(self, field).get(entry.id) orelse return error.TestExpectedEqual;
                 const b = @field(other, field).get(entry.id) orelse return error.TestExpectedEqual;
-                try testing.expectEqualStrings(a, b);
+                try expectSameText(a, b);
             };
         }
         for ([_]*const TestMaps{ &self, &other }) |maps| for (maps.env.entries.items) |entry| {
@@ -683,7 +707,7 @@ const TestMaps = struct {
                 var other_it = b.iterator();
                 while (other_it.next()) |okv| {
                     if (!std.ascii.eqlIgnoreCase(kv.key_ptr.*, okv.key_ptr.*)) continue;
-                    try testing.expectEqualStrings(kv.value_ptr.*, okv.value_ptr.*);
+                    try expectSameText(kv.value_ptr.*, okv.value_ptr.*);
                     found = true;
                 }
                 try testing.expect(found);
@@ -772,7 +796,7 @@ test "settings patch: profileEdits writes what the editor staged, and the loader
     // py keeps a tombstone, since the file read before this one defines it;
     // solo's lines go; dev gets a block, and so does team's label, which
     // this file had no line for.
-    try testing.expectEqualStrings(
+    try expectSameText(
         "# mine\nprofile-command = py:\nconfig-file = x.conf\n\nprofile-command = dev: d.exe /k\nprofile-name = dev: Dev\nprofile-env = dev: MODE=1\n\nprofile-name = team: Mine\n",
         out.items,
     );
@@ -782,16 +806,16 @@ test "settings patch: profileEdits writes what the editor staged, and the loader
     defer reloaded.deinit();
     try testing.expect(reloaded.@"profile-command".get("py") == null);
     try testing.expect(reloaded.@"profile-command".get("solo") == null);
-    try testing.expectEqualStrings("d.exe /k", reloaded.@"profile-command".get("dev").?);
-    try testing.expectEqualStrings("Dev", reloaded.@"profile-name".get("dev").?);
-    try testing.expectEqualStrings("1", reloaded.@"profile-env".get("dev").?.map.get("MODE").?);
+    try expectSameText("d.exe /k", reloaded.@"profile-command".get("dev").?);
+    try expectSameText("Dev", reloaded.@"profile-name".get("dev").?);
+    try expectSameText("1", reloaded.@"profile-env".get("dev").?.map.get("MODE").?);
     // The file read later still gives team's label: the edit is masked, and
     // the status names that field alone.
-    try testing.expectEqualStrings("Team", reloaded.@"profile-name".get("team").?);
+    try expectSameText("Team", reloaded.@"profile-name".get("team").?);
     var masked: std.Io.Writer.Allocating = .init(alloc);
     defer masked.deinit();
     try testing.expect(try writeMasked(&masked.writer, edits, &reloaded, false));
-    try testing.expectEqualStrings("profile-name team", masked.written());
+    try expectSameText("profile-name team", masked.written());
 
     // A save works out the same edits, and none when nothing changed.
     const again = try editsForSave(edit_arena.allocator(), alloc, &original, &original, &pending, path, &testSamePath);
@@ -858,7 +882,7 @@ test "settings patch: a file with no newline at its end has none after a line is
         var out: std.ArrayListUnmanaged(u8) = .empty;
         defer out.deinit(testing.allocator);
         try patchProfileEdits(testing.allocator, case.raw, case.edits, &out);
-        try testing.expectEqualStrings(case.expected, out.items);
+        try expectSameText(case.expected, out.items);
         // It reads back as the edits asked for.
         const body = if (std.mem.startsWith(u8, out.items, "\xef\xbb\xbf")) out.items[3..] else out.items;
         const got = try TestMaps.read(alloc, body);
@@ -878,7 +902,7 @@ test "settings patch: a file with no newline at its end has none after a line is
         var again: std.ArrayListUnmanaged(u8) = .empty;
         defer again.deinit(testing.allocator);
         try patchProfileEdits(testing.allocator, out.items, &.{}, &again);
-        try testing.expectEqualStrings(out.items, again.items);
+        try expectSameText(out.items, again.items);
     }
 }
 
@@ -893,7 +917,7 @@ test "settings patch: a line the loader skips for its two CRs is never matched o
     const raw = "profile-command = py: python.exe\r\n" ++ refused ++ "\n";
     var reader: std.Io.Reader = .fixed(raw);
     var lines: LineIterator = .{ .r = &reader };
-    try testing.expectEqualStrings("--profile-command=py: python.exe", lines.next().?);
+    try expectSameText("--profile-command=py: python.exe", lines.next().?);
     try testing.expect(lines.next().?.ptr == LineIterator.skipped_line.ptr);
     try testing.expect(lines.next() == null);
 
@@ -902,9 +926,9 @@ test "settings patch: a line the loader skips for its two CRs is never matched o
     try patchProfileEdits(testing.allocator, raw, &.{.{ .field = .name, .id = "py", .op = .{ .set = "Python" } }}, &out);
     // The skipped line's bytes are kept, and the label goes after the
     // profile's last line the loader reads.
-    try testing.expectEqualStrings("profile-command = py: python.exe\r\nprofile-name = py: Python\r\n" ++ refused ++ "\n", out.items);
+    try expectSameText("profile-command = py: python.exe\r\nprofile-name = py: Python\r\n" ++ refused ++ "\n", out.items);
     const got = try TestMaps.read(alloc, out.items);
-    try testing.expectEqualStrings("Python", got.name.get("py").?);
+    try expectSameText("Python", got.name.get("py").?);
 }
 
 test "settings patch: a last line that ends in a bare CR gets an LF when a line goes after it, so the reader still takes it" {
@@ -922,10 +946,10 @@ test "settings patch: a last line that ends in a bare CR gets an LF when a line 
     try patchProfileEdits(testing.allocator, raw, &.{.{ .field = .folder, .id = "py", .op = .{ .set = "C:\\src" } }}, &out);
     // The CR and an LF are a CRLF; the new last line has no line ending,
     // as the file's had none.
-    try testing.expectEqualStrings(raw ++ "\nprofile-working-directory = py: C:\\src", out.items);
+    try expectSameText(raw ++ "\nprofile-working-directory = py: C:\\src", out.items);
     const got = try TestMaps.read(alloc, out.items);
-    try testing.expectEqualStrings(label, got.name.get("py").?);
-    try testing.expectEqualStrings("C:\\src", got.folder.get("py").?);
+    try expectSameText(label, got.name.get("py").?);
+    try expectSameText("C:\\src", got.folder.get("py").?);
     // So for a profile's block at the end of an LF file.
     try testPatch("font-size = 12\r", &.{.{ .field = .command, .id = "dev", .op = .{ .set = "cmd.exe" } }}, "font-size = 12\r\n\nprofile-command = dev: cmd.exe");
 }
@@ -964,10 +988,24 @@ test "settings patch: a removed profile keeps its tombstone while anything else 
     // `solo`, named by nothing else, goes; the others keep their tombstones:
     // another file's label, `profile-hidden` and `profile-order` (read from
     // the config read last) still name them.
-    try testing.expectEqualStrings(
+    try expectSameText(
         "profile-command = labelled:\nprofile-command = hid:\nprofile-hidden = hid\nprofile-command = ordered:\nprofile-order = user:Ordered\n",
         out.items,
     );
+}
+
+test "settings patch: an edit holding a line break is refused, and nothing is written" {
+    for ([_]Edit{
+        .{ .field = .command, .id = "py", .op = .{ .set = "cmd.exe\nfont-size = 99" } },
+        .{ .field = .name, .id = "py", .op = .{ .set = "P\r" } },
+        .{ .field = .env, .id = "py", .name = "A\nB", .op = .unset },
+        .{ .field = .folder, .id = "py\n", .op = .{ .set = "C:\\x" } },
+    }) |line_break| {
+        var out: std.ArrayListUnmanaged(u8) = .empty;
+        defer out.deinit(testing.allocator);
+        try testing.expectError(error.LineBreak, patchProfileEdits(testing.allocator, "profile-command = py: python.exe\n", &.{line_break}, &out));
+        try testing.expectEqual(@as(usize, 0), out.items.len);
+    }
 }
 
 test "settings patch: a masked field is named by key, id and variable, never by its value" {
@@ -996,11 +1034,11 @@ test "settings patch: a masked field is named by key, id and variable, never by 
     defer masked.deinit();
     try masked.writer.writeAll("font-size");
     try testing.expect(try writeMasked(&masked.writer, &edits, &reloaded, true));
-    try testing.expectEqualStrings("font-size, profile-env team x, profile-command gone", masked.written());
     try testing.expect(std.mem.indexOf(u8, masked.written(), "secret") == null);
+    try expectSameText("font-size, profile-env team x, profile-command gone", masked.written());
 
     var none: std.Io.Writer.Allocating = .init(alloc);
     defer none.deinit();
     try testing.expect(!try writeMasked(&none.writer, edits[1..2], &reloaded, false));
-    try testing.expectEqualStrings("", none.written());
+    try expectSameText("", none.written());
 }

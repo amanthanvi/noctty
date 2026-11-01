@@ -641,6 +641,14 @@ pub fn checkVariableValue(id: []const u8, name: []const u8, value: []const u8) ?
     return checkText(.env, id, text);
 }
 
+/// Assert two texts are the same without printing either: a profile's command
+/// line or a variable's value can be a secret, and a failed
+/// `expectEqualStrings` prints both strings. Every test of profile text uses
+/// this, for row text, file bytes and messages alike.
+fn expectSameText(expected: []const u8, actual: []const u8) !void {
+    try testing.expect(std.mem.eql(u8, expected, actual));
+}
+
 test "profile checks take a line of exactly the reader's length, and refuse one byte more" {
     const too_long = "That is too long for one line of the config file.";
     const max = LineIterator.max_line_len;
@@ -663,7 +671,7 @@ test "profile checks take a line of exactly the reader's length, and refuse one 
         try std.testing.expectEqual(max - 2 + extra, try written(.command, "profile-command", command));
         if (accepted) {
             try std.testing.expect(checkCommand("py", command) == null);
-        } else try std.testing.expectEqualStrings(too_long, checkCommand("py", command).?);
+        } else try expectSameText(too_long, checkCommand("py", command).?);
 
         const value = buf[0 .. 4075 + extra];
         @memset(value, 'v');
@@ -672,7 +680,7 @@ test "profile checks take a line of exactly the reader's length, and refuse one 
         try std.testing.expectEqual(max - 2 + extra, try written(.env, "profile-env", variable));
         if (accepted) {
             try std.testing.expect(checkVariableValue("py", "V", value) == null);
-        } else try std.testing.expectEqualStrings(too_long, checkVariableValue("py", "V", value).?);
+        } else try expectSameText(too_long, checkVariableValue("py", "V", value).?);
 
         const label = buf[0 .. 4072 + extra + 2];
         @memset(label, 'n');
@@ -681,7 +689,7 @@ test "profile checks take a line of exactly the reader's length, and refuse one 
         try std.testing.expectEqual(max - 2 + extra, try written(.name, "profile-name", label));
         if (accepted) {
             try std.testing.expect(checkText(.name, "py", label) == null);
-        } else try std.testing.expectEqualStrings(too_long, checkText(.name, "py", label).?);
+        } else try expectSameText(too_long, checkText(.name, "py", label).?);
     }
 }
 
@@ -827,7 +835,7 @@ test "settings profiles: a row for each profile and each of its fields, in defin
     try model.build(alloc, &config, &config);
     const text = try testRowsText(alloc, &model);
     defer alloc.free(text);
-    try testing.expectEqualStrings(
+    try expectSameText(
         \\new_profile New profile =
         \\profile Python = user:py (hidden)
         \\command Command line = python.exe
@@ -869,7 +877,7 @@ test "settings profiles: what the draft changed is marked, and a removed variabl
     try model.build(alloc, &draft, &original);
     const text = try testRowsText(alloc, &model);
     defer alloc.free(text);
-    try testing.expectEqualStrings(
+    try expectSameText(
         \\new_profile New profile =
         \\profile Python = user:py (changed here, not saved yet)
         \\command Command line = python.exe -X utf8 (changed here, not saved yet)
@@ -885,7 +893,7 @@ test "settings profiles: what the draft changed is marked, and a removed variabl
         \\
     , text);
     // The variable keeps its place and its spelling.
-    try testing.expectEqualStrings("A", draft.@"profile-env".get("py").?.map.keys()[0]);
+    try expectSameText("A", draft.@"profile-env".get("py").?.map.keys()[0]);
     // A removed profile goes from the rows; defining it again brings it back.
     try removeProfile(&original, &draft, "py");
     try model.build(alloc, &draft, &original);
@@ -929,9 +937,12 @@ test "settings profiles: the checks refuse what the loader would, and never repe
     for ([_][]const u8{ "", "=1", "TOKEN=", "TOKEN" }) |text| {
         try testing.expect(checkNewVariable("py", text) == .refused);
     }
-    const ok = checkNewVariable("py", " TOKEN = " ++ secret ++ " ");
-    try testing.expectEqualStrings("TOKEN", ok.ok.name);
-    try testing.expectEqualStrings(secret, ok.ok.value);
+    const ok = switch (checkNewVariable("py", " TOKEN = " ++ secret ++ " ")) {
+        .ok => |variable| variable,
+        .refused => return error.TestUnexpectedResult,
+    };
+    try expectSameText("TOKEN", ok.name);
+    try expectSameText(secret, ok.value);
 }
 
 test "settings profiles: a draft the page changed saves and reads back as the page shows it" {
@@ -997,6 +1008,6 @@ test "settings profiles: a draft the page changed saves and reads back as the pa
     defer alloc.free(shown_text);
     const saved_text = try testRowsText(alloc, &saved);
     defer alloc.free(saved_text);
-    try testing.expectEqualStrings(shown_text, saved_text);
-    try testing.expectEqualStrings("\" Quoted \"", reloaded.@"profile-name".get("py").?);
+    try expectSameText(shown_text, saved_text);
+    try expectSameText("\" Quoted \"", reloaded.@"profile-name".get("py").?);
 }

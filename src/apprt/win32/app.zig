@@ -8668,7 +8668,23 @@ pub const App = struct {
         // layers `original` was read from.
         var profile_arena: std.heap.ArenaAllocator = .init(alloc);
         defer profile_arena.deinit();
-        const profile_edits = try settings_patch.editsForSave(profile_arena.allocator(), alloc, &self.config, original, pending, target_path, &settings_reference.samePath);
+        var profile_edits = try settings_patch.editsForSave(profile_arena.allocator(), alloc, &self.config, original, pending, target_path, &settings_reference.samePath);
+        // Whether another file still names a removed profile decides a
+        // tombstone or a deletion, and `self.config` is as of the last reload:
+        // a file that gained the profile since, with no reload, would be
+        // missed and the profile come back. With profile edits to make, the
+        // layers are read from disk again. Should that fail, the edits stand
+        // as worked out, and the masking check after the save reports a
+        // profile that came back.
+        if (profile_edits.len != 0) {
+            if (self.loadConfigAtStartupCwd()) |fresh| {
+                var disk = fresh;
+                defer disk.deinit();
+                profile_edits = try settings_patch.editsForSave(profile_arena.allocator(), alloc, &disk, original, pending, target_path, &settings_reference.samePath);
+            } else |err| {
+                log.warn("settings save: could not read the config files again for the profile edits err={}", .{err});
+            }
+        }
         // No-op short-circuit: if the user pressed Save without
         // changing anything, don't touch the filesystem. On a
         // first-run machine with no existing config file, the write

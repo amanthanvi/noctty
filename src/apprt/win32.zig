@@ -6871,12 +6871,21 @@ pub fn persistSettings(
     ) catch return error.SerializeFailed;
     // Profile definitions, by identity: `patchOrAppendEdits` never sees
     // their keys.
+    const settings_patch = @import("win32/settings_patch.zig");
     var profiles_patched: std.ArrayListUnmanaged(u8) = .{};
     defer profiles_patched.deinit(alloc);
     const final: []const u8 = if (profile_edits.len == 0) patched.items else profiles: {
-        @import("win32/settings_patch.zig").patchProfileEdits(alloc, patched.items, profile_edits, &profiles_patched) catch
+        settings_patch.patchProfileEdits(alloc, patched.items, profile_edits, &profiles_patched) catch
             return error.SerializeFailed;
-        break :profiles profiles_patched.items;
+        // A file with no newline at its end gets none from a profile edit
+        // (`patchProfileEdits`). `patchOrAppendEdits` ends a setting it
+        // appends with one, and the profile patcher keeps the newline it is
+        // given, so the rule is applied to the two together. A save with no
+        // profile edit is as before.
+        break :profiles if (settings_patch.lacksFinalNewline(raw_before))
+            settings_patch.withoutFinalNewline(profiles_patched.items)
+        else
+            profiles_patched.items;
     };
 
     // Ensure target's parent directory exists. `config_edit.openPath`
@@ -8024,6 +8033,66 @@ test "win32 settings save keeps hard links together" {
     try scratch.expectContent("config.ghostty", "copy-on-select = true\n");
     try scratch.expectContent("dotfile", "copy-on-select = true\n");
     try scratch.expectNames(&.{ "config.ghostty", "dotfile" });
+}
+
+test "win32 settings save of a profile edit and a newly appended setting keeps a file's missing final newline" {
+    const alloc = std.testing.allocator;
+    const Edit = @import("win32/settings_patch.zig").Edit;
+    const label: []const Edit = &.{.{ .field = .name, .id = "py", .op = .{ .set = "Python" } }};
+    const new_profile: []const Edit = &.{.{ .field = .command, .id = "dev", .op = .{ .set = "cmd.exe" } }};
+    const Case = struct { raw: []const u8, edits: []const Edit, expected: []const u8 };
+    // `copy-on-select` has no line in any of these files, so the ordinary
+    // patcher appends it; the profile edit is patched after it.
+    const cases = [_]Case{
+        .{ .raw = "profile-command = py: python.exe", .edits = label, .expected = "profile-command = py: python.exe\nprofile-name = py: Python\ncopy-on-select = true" },
+        .{ .raw = "# keep\r\nprofile-command = py: python.exe", .edits = label, .expected = "# keep\r\nprofile-command = py: python.exe\r\nprofile-name = py: Python\r\ncopy-on-select = true" },
+        .{ .raw = "\xef\xbb\xbf# keep\r\nprofile-command = py: python.exe", .edits = label, .expected = "\xef\xbb\xbf# keep\r\nprofile-command = py: python.exe\r\nprofile-name = py: Python\r\ncopy-on-select = true" },
+        .{ .raw = "font-size = 12", .edits = new_profile, .expected = "font-size = 12\ncopy-on-select = true\n\nprofile-command = dev: cmd.exe" },
+        .{ .raw = "# keep\r\nfont-size = 12", .edits = new_profile, .expected = "# keep\r\nfont-size = 12\r\ncopy-on-select = true\r\n\r\nprofile-command = dev: cmd.exe" },
+        .{ .raw = "\xef\xbb\xbffont-size = 12", .edits = new_profile, .expected = "\xef\xbb\xbffont-size = 12\ncopy-on-select = true\n\nprofile-command = dev: cmd.exe" },
+    };
+    for (cases, 0..) |case, index| {
+        errdefer std.debug.print("case {d}\n", .{index});
+        var scratch = try save_target.Scratch.init();
+        defer scratch.deinit();
+        try scratch.tmp.dir.writeFile(.{ .sub_path = "config.ghostty", .data = case.raw });
+        const path = try scratch.path("config.ghostty");
+        defer alloc.free(path);
+        var draft = try settingsTestCopyOnSelectEdit(alloc);
+        defer draft.pending.deinit();
+        try persistSettings(alloc, path, &draft.pending, draft.edited, case.edits, null);
+        // Compared without printing: the bytes hold command lines.
+        const saved = try scratch.tmp.dir.readFileAlloc(alloc, "config.ghostty", 1 << 20);
+        defer alloc.free(saved);
+        try std.testing.expect(std.mem.eql(u8, case.expected, saved));
+        // It reads back as the edits asked for.
+        var loaded = try configpkg.Config.default(alloc);
+        defer loaded.deinit();
+        try loaded.loadFile(alloc, path);
+        try std.testing.expect(loaded._diagnostics.empty());
+        try std.testing.expect(loaded.@"copy-on-select" == .true);
+        if (case.edits.ptr == label.ptr) {
+            try std.testing.expect(std.mem.eql(u8, "Python", loaded.@"profile-name".get("py").?));
+        } else try std.testing.expect(std.mem.eql(u8, "cmd.exe", loaded.@"profile-command".get("dev").?));
+    }
+    // A file that ends in a newline keeps it, and one with no profile edit
+    // is saved as before: `patchOrAppendEdits` ends a setting it appends.
+    for ([_]struct { raw: []const u8, edits: []const Edit, expected: []const u8 }{
+        .{ .raw = "profile-command = py: python.exe\n", .edits = label, .expected = "profile-command = py: python.exe\nprofile-name = py: Python\ncopy-on-select = true\n" },
+        .{ .raw = "font-size = 12", .edits = &.{}, .expected = "font-size = 12\ncopy-on-select = true\n" },
+    }) |case| {
+        var scratch = try save_target.Scratch.init();
+        defer scratch.deinit();
+        try scratch.tmp.dir.writeFile(.{ .sub_path = "config.ghostty", .data = case.raw });
+        const path = try scratch.path("config.ghostty");
+        defer alloc.free(path);
+        var draft = try settingsTestCopyOnSelectEdit(alloc);
+        defer draft.pending.deinit();
+        try persistSettings(alloc, path, &draft.pending, draft.edited, case.edits, null);
+        const saved = try scratch.tmp.dir.readFileAlloc(alloc, "config.ghostty", 1 << 20);
+        defer alloc.free(saved);
+        try std.testing.expect(std.mem.eql(u8, case.expected, saved));
+    }
 }
 
 test "win32 settings save writes a config only the extended path form reaches" {

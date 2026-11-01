@@ -394,7 +394,7 @@ pub const PaletteListProvider = struct {
     /// Whether the keyboard focus is on the selected row now
     /// (`PaletteListState.focus_selected_row`).
     fn focusOnRows(self: *const PaletteListProvider) bool {
-        if (!self.state.focus_selected_row) return false;
+        if (!self.isAvailable() or !self.state.focus_selected_row) return false;
         const callback = self.state.focused orelse return false;
         return callback(self.state.ctx);
     }
@@ -456,8 +456,21 @@ pub const PaletteListProvider = struct {
     }
 
     fn rowId(self: *const PaletteListProvider, index: usize) u64 {
+        // A detached list has no rows (`rowCount`), so no id is compared.
+        if (!self.isAvailable()) return index + 1;
         const callback = self.state.row_id orelse return index + 1;
         return callback(self.state.ctx, index);
+    }
+
+    /// Whether row `index` has a Value (`PaletteListState.row_value`). Asked
+    /// once, when the row's provider is made: what interfaces a row answers
+    /// for is then its own, and a client that holds the row after the owner
+    /// went never makes it call back (`PaletteRowProvider.has_value`).
+    fn rowHasValue(self: *const PaletteListProvider, index: usize) bool {
+        if (!self.isAvailable()) return false;
+        const callback = self.state.row_value orelse return false;
+        var buf: [row_help_capacity]u8 = undefined;
+        return callback(self.state.ctx, index, &buf) != null;
     }
 
     fn geometry(self: *const PaletteListProvider) ?PaletteListGeometry {
@@ -684,6 +697,7 @@ pub const PaletteListProvider = struct {
     ) callconv(.winapi) com.HRESULT {
         const self = fromFragment(self_fragment);
         out.* = null;
+        if (!self.isAvailable()) return com.UIA_E_ELEMENTNOTAVAILABLE;
         const count = self.rowCount();
         if (count == 0) return com.S_OK;
         const index = switch (direction) {
@@ -826,6 +840,10 @@ const PaletteRowProvider = struct {
     parent: *PaletteListProvider,
     index: usize,
     id: u64,
+    /// Whether the row has a Value pattern, asked when it was made
+    /// (`PaletteListProvider.rowHasValue`): `QueryInterface` and
+    /// `GetPatternProvider` read this, never the owner.
+    has_value: bool,
 
     const simple_vtbl: com.IRawElementProviderSimpleVtbl = .{
         .QueryInterface = QueryInterface,
@@ -886,6 +904,7 @@ const PaletteRowProvider = struct {
             .parent = parent,
             .index = index,
             .id = id,
+            .has_value = parent.rowHasValue(index),
         };
         return self;
     }
@@ -909,17 +928,12 @@ const PaletteRowProvider = struct {
     /// when the row has none, or for lack of memory (`missing` says which).
     fn valueBstr(self: *PaletteRowProvider, missing: *bool) com.BSTR {
         missing.* = true;
+        if (!self.parent.isAvailable()) return null;
         const callback = self.parent.state.row_value orelse return null;
         var buf: [row_help_capacity]u8 = undefined;
         const text = callback(self.parent.state.ctx, self.index, &buf) orelse return null;
         missing.* = false;
         return allocBstrFromUtf8(self.alloc, text);
-    }
-    /// Whether the row has a Value.
-    fn hasValue(self: *PaletteRowProvider) bool {
-        const callback = self.parent.state.row_value orelse return false;
-        var buf: [row_help_capacity]u8 = undefined;
-        return callback(self.parent.state.ctx, self.index, &buf) != null;
     }
     /// Whether the row's item is still in the list, found by its id: the
     /// RuntimeId names the item, so a row the list moved (a rebuild sorted
@@ -940,7 +954,7 @@ const PaletteRowProvider = struct {
 
     fn query(self: *PaletteRowProvider, iid: *const com.GUID, out: *?*anyopaque) com.HRESULT {
         out.* = null;
-        if (iidEqual(iid, &com.IID_IUnknown) or iidEqual(iid, &com.IID_IRawElementProviderSimple)) out.* = @ptrCast(&self.base) else if (iidEqual(iid, &com.IID_IRawElementProviderFragment)) out.* = @ptrCast(&self.fragment) else if (iidEqual(iid, &com.IID_ISelectionItemProvider)) out.* = @ptrCast(&self.selection_item) else if (self.parent.state.invoke_row != null and iidEqual(iid, &com.IID_IInvokeProvider)) out.* = @ptrCast(&self.invoke_item) else if (iidEqual(iid, &com.IID_IValueProvider) and self.hasValue()) out.* = @ptrCast(&self.value_item) else return com.E_NOINTERFACE;
+        if (iidEqual(iid, &com.IID_IUnknown) or iidEqual(iid, &com.IID_IRawElementProviderSimple)) out.* = @ptrCast(&self.base) else if (iidEqual(iid, &com.IID_IRawElementProviderFragment)) out.* = @ptrCast(&self.fragment) else if (iidEqual(iid, &com.IID_ISelectionItemProvider)) out.* = @ptrCast(&self.selection_item) else if (self.parent.state.invoke_row != null and iidEqual(iid, &com.IID_IInvokeProvider)) out.* = @ptrCast(&self.invoke_item) else if (iidEqual(iid, &com.IID_IValueProvider) and self.has_value) out.* = @ptrCast(&self.value_item) else return com.E_NOINTERFACE;
         _ = self.refcount.fetchAdd(1, .monotonic);
         return com.S_OK;
     }
@@ -987,7 +1001,7 @@ const PaletteRowProvider = struct {
         } else if (pattern == constants.UIA_InvokePatternId and self.parent.state.invoke_row != null) {
             out.* = @ptrCast(&self.invoke_item);
             _ = self.addRef();
-        } else if (pattern == constants.UIA_ValuePatternId and self.hasValue()) {
+        } else if (pattern == constants.UIA_ValuePatternId and self.has_value) {
             out.* = @ptrCast(&self.value_item);
             _ = self.addRef();
         }
@@ -1024,7 +1038,7 @@ const PaletteRowProvider = struct {
                 const bstr = self.valueBstr(&missing);
                 if (bstr) |value| out.* = com.VARIANT.fromBstr(value) else if (!missing) return com.E_OUTOFMEMORY;
             },
-            constants.UIA_ValueIsReadOnlyPropertyId => if (self.hasValue()) {
+            constants.UIA_ValueIsReadOnlyPropertyId => if (self.has_value) {
                 out.* = com.VARIANT.fromBool(true);
             },
             else => {},
@@ -5665,6 +5679,14 @@ test "PaletteListProvider fragment navigation reaches rows and parent" {
     try std.testing.expectEqual(@as(u32, 3), PaletteListProvider.FragmentRelease(parent.?));
 }
 
+/// Assert two texts are the same without printing either: a profile's command
+/// line or a variable's value can be a secret, and a failed
+/// `expectEqualStrings` prints both strings. Every test of profile text uses
+/// this, for row text, file bytes and messages alike.
+fn expectSameText(expected: []const u8, actual: []const u8) !void {
+    try std.testing.expect(std.mem.eql(u8, expected, actual));
+}
+
 test "Palette row exposes a read-only Value only for a row that has one" {
     const Values = struct {
         fn value(_: *anyopaque, index: usize, buf: []u8) ?[]const u8 {
@@ -5695,7 +5717,7 @@ test "Palette row exposes a read-only Value only for a row that has one" {
     defer com.SysFreeString(bstr);
     var text_buf: [32]u8 = undefined;
     const text = text_buf[0..try std.unicode.utf16LeToUtf8(&text_buf, bstr.?[0..com.SysStringLen(bstr)])];
-    try std.testing.expectEqualStrings("shown text", text);
+    try expectSameText("shown text", text);
     var read_only: com.BOOL = 0;
     try std.testing.expectEqual(com.S_OK, PaletteRowProvider.GetIsReadOnly(&with.value_item, &read_only));
     try std.testing.expectEqual(@as(com.BOOL, 1), read_only);
@@ -5739,6 +5761,203 @@ test "Palette row reports a Value it has no memory for as E_OUTOFMEMORY, never a
     try std.testing.expectEqual(com.E_OUTOFMEMORY, PaletteRowProvider.GetPropertyValue(&row.base, constants.UIA_ValueValuePropertyId, &value));
     try std.testing.expectEqual(@as(u16, com.VT_EMPTY), value.vt);
     failing.fail_index = std.math.maxInt(usize);
+}
+
+test "Palette row a client holds after its list detached never calls back into the owner, and every query is not available" {
+    // An owner whose every callback counts the calls made once it is gone.
+    const Owner = struct {
+        gone: bool = false,
+        calls_after_gone: u32 = 0,
+        fn of(ctx: *anyopaque) *@This() {
+            return @ptrCast(@alignCast(ctx));
+        }
+        fn touch(ctx: *anyopaque) void {
+            const self = of(ctx);
+            if (self.gone) self.calls_after_gone += 1;
+        }
+        fn name(ctx: *anyopaque, buf: []u8) []const u8 {
+            touch(ctx);
+            return std.fmt.bufPrint(buf, "list", .{}) catch "";
+        }
+        fn focused(ctx: *anyopaque) bool {
+            touch(ctx);
+            return true;
+        }
+        fn rowCount(ctx: *anyopaque) usize {
+            touch(ctx);
+            return 2;
+        }
+        fn selectedIndex(ctx: *anyopaque) ?usize {
+            touch(ctx);
+            return 0;
+        }
+        fn rowName(ctx: *anyopaque, index: usize, buf: []u8) []const u8 {
+            touch(ctx);
+            return std.fmt.bufPrint(buf, "row {d}", .{index}) catch "";
+        }
+        fn rowEnabled(ctx: *anyopaque, _: usize) bool {
+            touch(ctx);
+            return true;
+        }
+        fn rowId(ctx: *anyopaque, index: usize) u64 {
+            touch(ctx);
+            return 100 + index;
+        }
+        fn selectRow(ctx: *anyopaque, _: usize) void {
+            touch(ctx);
+        }
+        fn invokeRow(ctx: *anyopaque, _: usize) void {
+            touch(ctx);
+        }
+        fn rowHelp(ctx: *anyopaque, _: usize, buf: []u8) []const u8 {
+            touch(ctx);
+            return std.fmt.bufPrint(buf, "help", .{}) catch "";
+        }
+        fn rowValue(ctx: *anyopaque, index: usize, buf: []u8) ?[]const u8 {
+            touch(ctx);
+            if (index != 0) return null;
+            return std.fmt.bufPrint(buf, "shown text", .{}) catch null;
+        }
+    };
+    var owner: Owner = .{};
+    const state: PaletteListState = .{
+        .ctx = &owner,
+        .name = Owner.name,
+        .focused = Owner.focused,
+        .row_count = Owner.rowCount,
+        .selected_index = Owner.selectedIndex,
+        .row_name = Owner.rowName,
+        .row_enabled = Owner.rowEnabled,
+        .row_id = Owner.rowId,
+        .select_row = Owner.selectRow,
+        .invoke_row = Owner.invokeRow,
+        .row_help = Owner.rowHelp,
+        .row_value = Owner.rowValue,
+        .focus_selected_row = true,
+    };
+    var provider = try PaletteListProvider.create(std.testing.allocator, @ptrFromInt(0x1), state);
+    defer _ = PaletteListProvider.Release(&provider.base);
+    // Two rows a client holds: one with a Value, one without.
+    const with = provider.createRow(0).?;
+    defer _ = PaletteRowProvider.Release(&with.base);
+    const without = provider.createRow(1).?;
+    defer _ = PaletteRowProvider.Release(&without.base);
+
+    // The owner tears the list down, then goes.
+    provider.detach();
+    owner.gone = true;
+
+    // The interfaces a row answers for are its own: no call back.
+    var iface: ?*anyopaque = null;
+    try std.testing.expectEqual(com.S_OK, PaletteRowProvider.QueryInterface(&with.base, &com.IID_IValueProvider, &iface));
+    const value_iface: *com.IValueProvider = @ptrCast(@alignCast(iface.?));
+    defer _ = PaletteRowProvider.ValueRelease(value_iface);
+    try std.testing.expectEqual(com.E_NOINTERFACE, PaletteRowProvider.QueryInterface(&without.base, &com.IID_IValueProvider, &iface));
+    try std.testing.expectEqual(@as(u32, 0), owner.calls_after_gone);
+    // Every query is not available.
+    var bstr: com.BSTR = null;
+    try std.testing.expectEqual(com.UIA_E_ELEMENTNOTAVAILABLE, PaletteRowProvider.GetValue(value_iface, &bstr));
+    try std.testing.expect(bstr == null);
+    var read_only: com.BOOL = 0;
+    try std.testing.expectEqual(com.UIA_E_ELEMENTNOTAVAILABLE, PaletteRowProvider.GetIsReadOnly(value_iface, &read_only));
+    try std.testing.expectEqual(com.UIA_E_ELEMENTNOTAVAILABLE, PaletteRowProvider.SetValue(value_iface, std.unicode.utf8ToUtf16LeStringLiteral("x")));
+    for ([_]i32{
+        constants.UIA_NamePropertyId,
+        constants.UIA_HelpTextPropertyId,
+        constants.UIA_ValueValuePropertyId,
+        constants.UIA_ValueIsReadOnlyPropertyId,
+        constants.UIA_HasKeyboardFocusPropertyId,
+        constants.UIA_SelectionItemIsSelectedPropertyId,
+        constants.UIA_IsEnabledPropertyId,
+    }) |property| {
+        var value = com.VARIANT.empty();
+        try std.testing.expectEqual(com.UIA_E_ELEMENTNOTAVAILABLE, PaletteRowProvider.GetPropertyValue(&with.base, property, &value));
+        try std.testing.expectEqual(@as(u16, com.VT_EMPTY), value.vt);
+    }
+    var pattern: ?*com.IUnknown = null;
+    try std.testing.expectEqual(com.UIA_E_ELEMENTNOTAVAILABLE, PaletteRowProvider.GetPatternProvider(&with.base, constants.UIA_ValuePatternId, &pattern));
+    try std.testing.expect(pattern == null);
+    try std.testing.expectEqual(com.UIA_E_ELEMENTNOTAVAILABLE, PaletteRowProvider.Select(&with.selection_item));
+    try std.testing.expectEqual(com.UIA_E_ELEMENTNOTAVAILABLE, PaletteRowProvider.Invoke(&with.invoke_item));
+    try std.testing.expectEqual(com.UIA_E_ELEMENTNOTAVAILABLE, PaletteRowProvider.SetFocus(&with.fragment));
+    var next: ?*com.IRawElementProviderFragment = null;
+    try std.testing.expectEqual(com.UIA_E_ELEMENTNOTAVAILABLE, PaletteRowProvider.Navigate(&with.fragment, com.NavigateDirection_NextSibling, &next));
+    // The list itself, held as well.
+    var list_value = com.VARIANT.empty();
+    try std.testing.expectEqual(com.UIA_E_ELEMENTNOTAVAILABLE, PaletteListProvider.GetPropertyValue(&provider.base, constants.UIA_NamePropertyId, &list_value));
+    try std.testing.expectEqual(com.UIA_E_ELEMENTNOTAVAILABLE, PaletteListProvider.FragmentNavigate(&provider.fragment, com.NavigateDirection_FirstChild, &next));
+    try std.testing.expect(next == null);
+    try std.testing.expectEqual(com.UIA_E_ELEMENTNOTAVAILABLE, PaletteListProvider.FragmentRootGetFocus(&provider.fragment_root, &next));
+    provider.raiseFocusOnSelectedRow();
+    provider.raiseSelectionChanged(0);
+
+    // Not one call reached the owner after it went.
+    try std.testing.expectEqual(@as(u32, 0), owner.calls_after_gone);
+}
+
+test "Palette row a client holds finds its Value by id after the list moved, is not available once removed, and never calls back with a stale index" {
+    const Owner = struct {
+        rows: TestPaletteState,
+        stale_calls: u32 = 0,
+        fn value(ctx: *anyopaque, index: usize, buf: []u8) ?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            if (index >= self.rows.count) {
+                self.stale_calls += 1;
+                return null;
+            }
+            return std.fmt.bufPrint(buf, "value {d}", .{self.rows.id_base + index}) catch null;
+        }
+        fn rowCount(ctx: *anyopaque) usize {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            return self.rows.count;
+        }
+        fn rowId(ctx: *anyopaque, index: usize) u64 {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            return self.rows.id_base + index;
+        }
+    };
+    var owner: Owner = .{ .rows = .{ .count = 3, .id_base = 100 } };
+    var state = owner.rows.state();
+    state.ctx = &owner;
+    state.row_count = Owner.rowCount;
+    state.row_id = Owner.rowId;
+    state.selected_index = null;
+    state.row_value = Owner.value;
+    // The rest read `ctx` as a TestPaletteState: none is asked here.
+    state.row_enabled = null;
+    state.select_row = null;
+    state.invoke_row = null;
+    state.geometry = null;
+    state.row_bounds = null;
+    var provider = try PaletteListProvider.create(std.testing.allocator, @ptrFromInt(0x1), state);
+    defer _ = PaletteListProvider.Release(&provider.base);
+    // The row at index 2, id 102, held by a client.
+    const row = provider.createRow(2).?;
+    defer _ = PaletteRowProvider.Release(&row.base);
+    var bstr: com.BSTR = null;
+
+    // The list moved: id 102 is at index 1 now. Its Value is its own.
+    owner.rows.id_base = 101;
+    try std.testing.expectEqual(com.S_OK, PaletteRowProvider.GetValue(&row.value_item, &bstr));
+    var text_buf: [32]u8 = undefined;
+    const text = text_buf[0..try std.unicode.utf16LeToUtf8(&text_buf, bstr.?[0..com.SysStringLen(bstr)])];
+    com.SysFreeString(bstr);
+    bstr = null;
+    try expectSameText("value 102", text);
+
+    // The list shrank and the item is gone: the old index is past the end.
+    owner.rows = .{ .count = 1, .id_base = 100 };
+    var iface: ?*anyopaque = null;
+    try std.testing.expectEqual(com.S_OK, PaletteRowProvider.QueryInterface(&row.base, &com.IID_IValueProvider, &iface));
+    const value_iface: *com.IValueProvider = @ptrCast(@alignCast(iface.?));
+    defer _ = PaletteRowProvider.ValueRelease(value_iface);
+    try std.testing.expectEqual(@as(u32, 0), owner.stale_calls);
+    try std.testing.expectEqual(com.UIA_E_ELEMENTNOTAVAILABLE, PaletteRowProvider.GetValue(value_iface, &bstr));
+    var value = com.VARIANT.empty();
+    try std.testing.expectEqual(com.UIA_E_ELEMENTNOTAVAILABLE, PaletteRowProvider.GetPropertyValue(&row.base, constants.UIA_ValueValuePropertyId, &value));
+    var pattern: ?*com.IUnknown = null;
+    try std.testing.expectEqual(com.UIA_E_ELEMENTNOTAVAILABLE, PaletteRowProvider.GetPatternProvider(&row.base, constants.UIA_ValuePatternId, &pattern));
+    try std.testing.expectEqual(@as(u32, 0), owner.stale_calls);
 }
 
 test "Palette row retains its parent and balances QueryInterface refs" {

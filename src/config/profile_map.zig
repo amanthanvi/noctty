@@ -210,8 +210,13 @@ fn writeLine(writer: *std.Io.Writer, key: []const u8, id: []const u8, parts: []c
 /// loading would change given a pair of quotes. An empty `text` writes the
 /// removal `key = id:`. For `profile-env`, `text` is `NAME=VALUE`, or `NAME=`,
 /// which takes the variable back. Settings' profile editor writes its lines
-/// with this, so each reads back as the value it was given.
+/// with this, so each reads back as the value it was given. A CR or LF in
+/// `id` or `text` is refused (`error.LineBreak`), and nothing is written.
 pub fn writeProfileLine(writer: *std.Io.Writer, comptime kind: Kind, key: []const u8, id: []const u8, text: []const u8) !void {
+    // One line, always: a CR or LF in the id or the text would end it, and
+    // what follows would be read as a line of its own. Settings refuses
+    // both before a value gets here; this is the last gate.
+    if (std.mem.indexOfAny(u8, id, "\r\n") != null or std.mem.indexOfAny(u8, text, "\r\n") != null) return error.LineBreak;
     if (text.len == 0) return writer.print("{s} = {s}:\n", .{ key, id });
     if (kind == .name and nameNeedsQuotes(text)) return writeLine(writer, key, id, &.{ "\"", text, "\"" });
     return writeLine(writer, key, id, &.{text});
@@ -438,6 +443,28 @@ pub fn ProfileMap(comptime kind: Kind) type {
             };
         }
     };
+}
+
+test "profile map: writeProfileLine refuses a CR or LF in the id or the text, and writes nothing" {
+    var buf: [128]u8 = undefined;
+    for ([_][2][]const u8{
+        .{ "py", "cmd.exe\nfont-size = 99" },
+        .{ "py", "cmd.exe\r" },
+        .{ "p\ny", "cmd.exe" },
+        .{ "py\r", "" },
+    }) |pair| {
+        var writer: std.Io.Writer = .fixed(&buf);
+        try std.testing.expectError(error.LineBreak, writeProfileLine(&writer, .command, "profile-command", pair[0], pair[1]));
+        try std.testing.expectEqual(@as(usize, 0), writer.buffered().len);
+    }
+}
+
+/// Assert two texts are the same without printing either: a profile's command
+/// line or a variable's value can be a secret, and a failed
+/// `expectEqualStrings` prints both strings. Every test of profile text uses
+/// this, for row text, file bytes and messages alike.
+fn expectSameText(expected: []const u8, actual: []const u8) !void {
+    try std.testing.expect(std.mem.eql(u8, expected, actual));
 }
 
 test "profile map: text values are kept byte for byte and keep first-seen order" {
@@ -688,10 +715,10 @@ test "profile map: a line writeProfileLine writes reads back as its value" {
         try writeProfileLine(&out.writer, .command, "profile-command", "py", text);
         var map: Command = .{};
         try testApplyLine(.command, &map, alloc, "profile-command", out.written());
-        try testing.expectEqualStrings(text, map.get("py").?);
+        try expectSameText(text, map.get("py").?);
         out.clearRetainingCapacity();
         try writeProfileLine(&out.writer, .command, "profile-command", "py", "");
-        try testing.expectEqualStrings("profile-command = py:\n", out.written());
+        try expectSameText("profile-command = py:\n", out.written());
         try testApplyLine(.command, &map, alloc, "profile-command", out.written());
         try testing.expect(map.get("py") == null);
         try testing.expect(map.entries.items[0].removed);
@@ -703,7 +730,7 @@ test "profile map: a line writeProfileLine writes reads back as its value" {
         try writeProfileLine(&out.writer, .name, "profile-name", "py", text);
         var map: Name = .{};
         try testApplyLine(.name, &map, alloc, "profile-name", out.written());
-        try testing.expectEqualStrings(text, map.get("py").?);
+        try expectSameText(text, map.get("py").?);
     }
 
     // A variable, and taking it back.
@@ -711,7 +738,7 @@ test "profile map: a line writeProfileLine writes reads back as its value" {
     try writeProfileLine(&out.writer, .env, "profile-env", "py", "PATH=C:\\x;%PATH%");
     var env: Env = .{};
     try testApplyLine(.env, &env, alloc, "profile-env", out.written());
-    try testing.expectEqualStrings("C:\\x;%PATH%", env.get("py").?.map.get("PATH").?);
+    try expectSameText("C:\\x;%PATH%", env.get("py").?.map.get("PATH").?);
     out.clearRetainingCapacity();
     try writeProfileLine(&out.writer, .env, "profile-env", "py", "path=");
     try testApplyLine(.env, &env, alloc, "profile-env", out.written());
@@ -724,5 +751,5 @@ test "profile map: a line writeProfileLine writes reads back as its value" {
     try testing.expectEqual(LineIterator.max_line_len + 1, out.written().len);
     var dir: Text = .{};
     try testApplyLine(.text, &dir, alloc, "profile-working-directory", out.written());
-    try testing.expectEqualStrings(long, dir.get("py").?);
+    try expectSameText(long, dir.get("py").?);
 }
