@@ -7,6 +7,7 @@ const input = @import("../../input.zig");
 
 const sys = @import("sys.zig");
 const c = @import("consts.zig");
+const docked_search = @import("docked_search.zig");
 
 const log = std.log.scoped(.win32);
 
@@ -460,6 +461,17 @@ fn pinnedKeyboardState() ?*const [256]u8 {
 fn pinnedKey(vk: i32) ?u8 {
     const state = pinnedKeyboardState() orelse return null;
     return state[std.math.cast(u8, vk) orelse return 0];
+}
+
+/// The modifiers held for the key message being handled, as the chrome's
+/// key rules and the docked search take them. A test pins them with
+/// `TestingKeyboard`; AltGr reads as Ctrl plus Alt.
+pub fn chromeKeyMods() docked_search.Mods {
+    return .{
+        .shift = keyPressed(c.VK_SHIFT),
+        .ctrl = keyPressed(c.VK_CONTROL),
+        .alt = keyPressed(c.VK_MENU),
+    };
 }
 
 pub fn keyPressed(vk: i32) bool {

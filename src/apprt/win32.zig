@@ -8926,16 +8926,6 @@ pub fn scrollbarProc(
 
 const tabButtonKeyAction = labels.tabButtonKeyAction;
 
-/// The modifiers held for the key message being handled. A test pins them
-/// with `TestingKeyboard`; AltGr reads as Ctrl plus Alt.
-fn chromeKeyMods() labels.KeyMods {
-    return .{
-        .shift = keyPressed(c.VK_SHIFT),
-        .ctrl = keyPressed(c.VK_CONTROL),
-        .alt = keyPressed(c.VK_MENU),
-    };
-}
-
 const moveTabAmountToEdge = labels.moveTabAmountToEdge;
 
 pub const profileChromeVisible = win32_chrome_state.profileVisible;
@@ -10550,7 +10540,7 @@ pub fn hostButtonProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) cal
         // Enter and Tab on [+], [v] and the docked search buttons. May
         // click, so touch nothing after it.
         if (msg == c.WM_KEYDOWN and !v.isOverlayButton(hwnd) and v.bannerButtonOf(hwnd) == null) {
-            if (v.handleChromeButtonKey(hwnd, wParam, chromeKeyMods(), lParam)) return 0;
+            if (v.handleChromeButtonKey(hwnd, wParam, win32_input.chromeKeyMods(), lParam)) return 0;
         }
         if (search_controls.searchButtonKey(v, hwnd, msg, wParam, lParam)) |result| return result;
         switch (msg) {
@@ -10572,9 +10562,7 @@ pub fn hostButtonProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) cal
                     v.syncBannerExpiry();
                 }
                 if (v.searchControlSurface(hwnd)) |surface| {
-                    _ = surface.dockedSearch(.{ .key = .{ .event = .blur, .at = .button } }) catch |err| {
-                        logUiActionError("docked search blur failed", err);
-                    };
+                    runUiActionOrLog("docked search blur failed", surface.dockedSearch(.blur));
                 }
             },
             c.WM_MOUSEMOVE => {
@@ -10779,7 +10767,7 @@ pub fn tabButtonProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) call
                 c.WM_KEYDOWN => {
                     v.noteChromeKeyInput(wParam);
                     if (v.handleFocusRegionKey(hwnd, wParam, true)) return 0;
-                    if (tabButtonKeyAction(wParam, chromeKeyMods())) |action| {
+                    if (tabButtonKeyAction(wParam, win32_input.chromeKeyMods())) |action| {
                         switch (action) {
                             // The menu key opens the same menu a right click
                             // does, on this tab, and its release is swallowed
@@ -10879,7 +10867,7 @@ pub fn tabButtonProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) call
                 // Shift+F10 is a system key, so it arrives here and not as a
                 // WM_KEYDOWN. Plain F10 stays with the window.
                 c.WM_SYSKEYDOWN => {
-                    if (wParam == c.VK_F10 and tabButtonKeyAction(wParam, chromeKeyMods()) == .context_menu) {
+                    if (wParam == c.VK_F10 and tabButtonKeyAction(wParam, win32_input.chromeKeyMods()) == .context_menu) {
                         v.noteChromeKeyInput(c.VK_APPS);
                         if ((lParamBits(lParam) & c.KF_REPEAT) == 0 and
                             v.showTabContextMenu(hwnd, index, .keyboard)) return 0;
@@ -10888,7 +10876,7 @@ pub fn tabButtonProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) call
                 // Without these, `DefWindowProc` posts a second
                 // WM_CONTEXTMENU when the key comes back up.
                 c.WM_KEYUP, c.WM_SYSKEYUP => {
-                    if (labels.tabButtonSwallowsKeyUp(wParam, chromeKeyMods())) return 0;
+                    if (labels.tabButtonSwallowsKeyUp(wParam, win32_input.chromeKeyMods())) return 0;
                 },
                 // The keyboard form (-1, -1) was served on the key-down. A
                 // right click opens the menu from WM_RBUTTONUP and never
@@ -11488,9 +11476,7 @@ pub fn hostWindowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) cal
                             if (child_hwnd) |child| {
                                 if (v.searchControlSurface(child)) |surface| {
                                     if (surface.searchBarButtonRole(child)) |role| {
-                                        _ = surface.dockedSearch(.{ .click = role }) catch |err| {
-                                            logUiActionError("docked search button failed", err);
-                                        };
+                                        runUiActionOrLog("docked search button failed", surface.dockedSearch(.{ .click = role }));
                                     }
                                     return 0;
                                 }

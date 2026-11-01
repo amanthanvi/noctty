@@ -7,8 +7,11 @@
 //! (`Outcome`); `view` says what to draw. Nothing here calls the core, Win32
 //! or the clock, and `apply` finishes its whole state change before it
 //! returns, so the core can call back into it while the caller carries out
-//! an Outcome. A View's slices, and a `Command.search` text, are valid until
-//! the next `apply`, a re-entrant one included.
+//! an Outcome. A View's slices are valid until the next `apply`, a
+//! re-entrant one included, with one exception the adapter relies on: the
+//! query's storage, which a View's `query` and a `Command.search` text
+//! borrow, changes only on `.open` and `.edit`, so they outlive the `.blur`
+//! and `.core` applies that the adapter's own frame and core steps cause.
 //!
 //! **Debounce rationale.**  Scrollback search is O(lines * query_len).
 //! Re-running on every WM_COMMAND / EN_CHANGE would stall the UI on
@@ -24,10 +27,10 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const c = @import("consts.zig");
 
-pub const debounce_ms: i64 = 40;
+const debounce_ms: i64 = 40;
 
 /// The regex, case and whole-word toggles, as the core takes them.
-pub const QueryOptions = @import("../../terminal/search/query_options.zig").QueryOptions;
+const QueryOptions = @import("../../terminal/search/query_options.zig").QueryOptions;
 
 const NavigateSearch = @import("../../input.zig").Binding.Action.NavigateSearch;
 
@@ -60,21 +63,27 @@ pub const Input = union(enum) {
     /// A key message at the edit or a button, once the procedure has taken
     /// Ctrl+F6, Tab and the edit's WM_CHAR swallow.
     key: Key,
+    /// WM_KILLFOCUS at the edit or a button: the Alt+R/C/W press is
+    /// forgotten.
+    blur,
     /// The host's search timer fired.
     tick,
     /// A core action for this pane.
     core: Core,
 
     pub const Key = struct {
-        /// WM_KEYDOWN, WM_SYSKEYDOWN, WM_SYSCHAR, WM_KILLFOCUS.
-        event: enum { down, sys_down, sys_char, blur },
-        at: enum { edit, button },
+        event: Event,
+        at: At,
         vk: usize = 0,
         mods: Mods = .{},
         /// lParam bits 16..24.
         scan: u9 = 0,
         /// KF_REPEAT: an autorepeat of a held key.
         repeat: bool = false,
+
+        /// WM_KEYDOWN, WM_SYSKEYDOWN and WM_SYSCHAR.
+        pub const Event = enum { down, sys_down, sys_char };
+        pub const At = enum { edit, button };
     };
 
     pub const Core = union(enum) {
@@ -89,7 +98,7 @@ pub const Input = union(enum) {
 };
 
 /// What the core must do: at most one per `apply`.
-pub const Command = union(enum) {
+const Command = union(enum) {
     /// `setSearchQuery(text, options)`.
     search: struct { text: []const u8, options: QueryOptions },
     /// `setSearchQuery("", .{})`.
@@ -168,13 +177,9 @@ pub const Results = union(enum) {
             .count => .found,
         };
     }
-
-    pub fn eql(a: Results, b: Results) bool {
-        return std.meta.eql(a, b);
-    }
 };
 
-pub const View = struct {
+const View = struct {
     open: bool,
     query: []const u8,
     /// The query is not empty, so the layout gives the chip a slot (it may
@@ -241,12 +246,16 @@ pub const DockedSearch = struct {
                 .close => dismiss,
             },
             .key => |k| self.key(k),
+            .blur => blk: {
+                self.pending_scan = null;
+                break :blk .{};
+            },
             .tick => if (self.open and self.debounceDue(now_ms)) self.issue() else .{},
             .core => |core| try self.report(core),
         };
         // A hidden chip is left alone, so a close announces nothing; `.shown`
         // writes it when the bar opens again.
-        out.results_changed = self.open and !before.eql(self.results());
+        out.results_changed = self.open and !std.meta.eql(before, self.results());
         return out;
     }
 
@@ -322,17 +331,13 @@ pub const DockedSearch = struct {
 
     fn key(self: *DockedSearch, k: Input.Key) Outcome {
         switch (k.event) {
-            .blur => {
-                self.pending_scan = null;
-                return .{};
-            },
             // Swallowed when it is the character of the Alt+R/C/W just
             // handled, found by scan code: on another layout the character
             // need not be Latin.
             .sys_char => {
-                const pending = self.pending_scan;
+                const handled = self.pending_scan == k.scan;
                 self.pending_scan = null;
-                return .{ .handled = if (pending) |scan| scan == k.scan else false };
+                return .{ .handled = handled };
             },
             .down => {},
             // Alt+R, Alt+C and Alt+W flip regex, case and whole word: Alt
@@ -397,15 +402,13 @@ pub const DockedSearch = struct {
             .prev, .next, .close => unreachable,
         }
         var out: Outcome = if (self.query.len > 0) self.issue() else .{ .handled = true };
-        // A search under the old options says nothing of the new ones.
-        self.total = null;
-        self.selected_raw = null;
-        self.invalid = false;
         out.toggled = role;
         return out;
     }
 
-    /// The query, which is not empty, goes to the core now.
+    /// The query, which is not empty, goes to the core now, and what the
+    /// core said of the last search (under the old query or the old
+    /// options) is dropped.
     fn issue(self: *DockedSearch) Outcome {
         self.deadline = null;
         self.awaiting = false;
@@ -487,32 +490,28 @@ pub const DockedSearch = struct {
     /// on OutOfMemory nothing changed.
     fn setQuery(self: *DockedSearch, next: []const u8, now_ms: i64) Allocator.Error!void {
         const next_owned: ?[]u8 = if (next.len > 0) try self.alloc.dupe(u8, next) else null;
-        errdefer if (next_owned) |value| self.alloc.free(value);
-
         if (self.query.len > 0) self.alloc.free(self.query);
-
-        if (next.len == 0) {
-            self.query = &.{};
-            self.total = null;
-            self.selected_raw = null;
-            self.invalid = false;
-            self.deadline = null;
-            self.awaiting = false;
-            return;
-        }
-
-        self.query = next_owned.?;
+        self.query = next_owned orelse &.{};
         self.total = null;
         self.selected_raw = null;
         self.invalid = false;
-        self.deadline = now_ms + debounce_ms;
         self.awaiting = false;
+        self.deadline = if (next.len > 0) now_ms + debounce_ms else null;
     }
 };
 
 // =====================================================================
 // Tests
 // =====================================================================
+
+/// What the core sends back from `invalidateSearchResults`,
+/// `setSearchQuery("")` and `endSearch` while it has a search, before they
+/// return.
+const test_null_clears = [_]Input{
+    .{ .core = .{ .total = .{ .total = null } } },
+    .{ .core = .{ .selected = null } },
+    .{ .core = .{ .rows = &.{} } },
+};
 
 /// A pane whose query `text` has reached the core.
 fn testSearching(alloc: Allocator, text: []const u8) !DockedSearch {
@@ -704,22 +703,15 @@ test "re-entrant null clears right after .stop and .invalidate change nothing vi
     _ = try search.apply(.{ .core = .{ .total = .{ .total = 12 } } }, 0);
     _ = try search.apply(.{ .core = .{ .selected = 1 } }, 0);
     _ = try search.apply(.{ .core = .{ .rows = &.{3} } }, 0);
-    // What the core sends back from `invalidateSearchResults` and
-    // `setSearchQuery("")` while it has a search, before they return.
-    const clears = [_]Input{
-        .{ .core = .{ .total = .{ .total = null } } },
-        .{ .core = .{ .selected = null } },
-        .{ .core = .{ .rows = &.{} } },
-    };
     for ([_][]const u8{ "needlex", "" }) |text| {
         _ = try search.apply(.{ .edit = text }, 2000);
         const shown = search.view().results;
-        for (clears) |in| {
+        for (test_null_clears) |in| {
             const out = try search.apply(in, 2000);
             try std.testing.expect(!out.results_changed);
             try std.testing.expect(!out.markers_changed);
         }
-        try std.testing.expect(shown.eql(search.view().results));
+        try std.testing.expect(std.meta.eql(shown, search.view().results));
     }
 }
 
@@ -730,7 +722,7 @@ test "OutOfMemory on an edit leaves the state unchanged" {
     defer search.deinit();
     const shown = search.view().results;
     try std.testing.expectError(error.OutOfMemory, search.apply(.{ .edit = "other" }, 2000));
-    try std.testing.expect(shown.eql(search.view().results));
+    try std.testing.expect(std.meta.eql(shown, search.view().results));
     const command = try testCommand(try search.apply(.{ .click = .regex }, 2001), .search);
     try std.testing.expectEqualStrings("needle", command.text);
 }
@@ -839,7 +831,7 @@ test "navigation previews 1/60 to 2/60 and wraps; the core's echo of the same in
     try std.testing.expectEqualStrings("60/60", search.view().results.text(&buf));
 }
 
-test "a close click sends .end with focus_terminal; ended alone hides without moving focus" {
+test "a close click sends .end with focus_terminal and leaves the hiding to end_search" {
     var search = try testSearching(std.testing.allocator, "needlex");
     defer search.deinit();
     _ = try search.apply(.{ .core = .{ .total = .{ .total = 12 } } }, 0);
@@ -849,21 +841,10 @@ test "a close click sends .end with focus_terminal; ended alone hides without mo
     try std.testing.expectEqual(.same, click.frame);
     try testCommand(click, .end);
     try std.testing.expect(search.view().open);
-
-    // What `endSearch` sends back before it returns: the clears, then
-    // end_search.
-    _ = try search.apply(.{ .core = .{ .total = .{ .total = null } } }, 0);
-    _ = try search.apply(.{ .core = .{ .selected = null } }, 0);
-    _ = try search.apply(.{ .core = .{ .rows = &.{} } }, 0);
-    const ended = try search.apply(.{ .core = .ended }, 0);
-    try std.testing.expect(!ended.focus_terminal);
-    try std.testing.expectEqual(.hidden, ended.frame);
-    try std.testing.expect(ended.core == null);
-    try std.testing.expect(!search.view().open);
 }
 
 /// A key press as the procedures forward it.
-fn testKey(event: @FieldType(Input.Key, "event"), at: @FieldType(Input.Key, "at"), vk: usize, mods: Mods) Input {
+fn testKey(event: Input.Key.Event, at: Input.Key.At, vk: usize, mods: Mods) Input {
     return .{ .key = .{ .event = event, .at = at, .vk = vk, .mods = mods } };
 }
 
@@ -882,7 +863,7 @@ test "the direction table: Enter, Down and F3 step down (core .previous), with S
         .{ .vk = c.VK_F3, .mods = shift, .dir = .next },
     };
     for (edit_rows) |row| {
-        for ([_]@FieldType(Input.Key, "event"){ .down, .sys_down }) |event| {
+        for ([_]Input.Key.Event{ .down, .sys_down }) |event| {
             const out = try search.apply(testKey(event, .edit, row.vk, row.mods), 0);
             try std.testing.expect(out.handled);
             try std.testing.expectEqual(row.dir, try testCommand(out, .navigate));
@@ -948,7 +929,7 @@ test "Alt+R/C/W toggle once per press and swallow their WM_SYSCHAR by scan code;
     _ = try search.apply(.{ .key = .{ .event = .sys_down, .at = .edit, .vk = 'X', .mods = alt, .scan = r_scan } }, 0);
     try std.testing.expect(!(try search.apply(.{ .key = char }, 0)).handled);
     _ = try search.apply(.{ .key = .{ .event = .sys_down, .at = .edit, .vk = 'W', .mods = alt, .scan = r_scan } }, 0);
-    _ = try search.apply(.{ .key = .{ .event = .blur, .at = .edit } }, 0);
+    _ = try search.apply(.blur, 0);
     try std.testing.expect(!(try search.apply(.{ .key = char }, 0)).handled);
     try std.testing.expect(!search.view().options.whole_word);
 
@@ -964,7 +945,7 @@ test "Alt+R/C/W toggle once per press and swallow their WM_SYSCHAR by scan code;
 test "Escape at the edit sends .end with focus_terminal" {
     var search = try testSearching(std.testing.allocator, "needlex");
     defer search.deinit();
-    for ([_]@FieldType(Input.Key, "event"){ .down, .sys_down }) |event| {
+    for ([_]Input.Key.Event{ .down, .sys_down }) |event| {
         const out = try search.apply(testKey(event, .edit, c.VK_ESCAPE, .{}), 0);
         try std.testing.expect(out.handled);
         try std.testing.expect(out.focus_terminal);
@@ -1079,12 +1060,7 @@ test "close: end_search, then the clears, on a bar showing results change no chi
         try std.testing.expect(!ended.focus_terminal);
         try std.testing.expect(ended.core == null);
         // The clears reach a closed bar: no chip, and no markers to clear.
-        const clears = [_]Input{
-            .{ .core = .{ .total = .{ .total = null } } },
-            .{ .core = .{ .selected = null } },
-            .{ .core = .{ .rows = &.{} } },
-        };
-        for (clears) |in| {
+        for (test_null_clears) |in| {
             const out = try search.apply(in, 0);
             try std.testing.expect(!out.results_changed);
             try std.testing.expect(!out.markers_changed);
@@ -1115,4 +1091,23 @@ test "an open while the debounce waits, or after a core clear, searches at once"
     // The core cleared its search under the open bar.
     _ = try search.apply(.{ .core = .{ .total = .{ .total = null } } }, 1020);
     try std.testing.expectEqualStrings("abc", (try testCommand(try search.apply(.{ .open = "" }, 1030), .search)).text);
+}
+
+test "only .open and .edit replace the query's storage, which Command.search borrows" {
+    var search = try testSearching(std.testing.allocator, "needlex");
+    defer search.deinit();
+    const query = search.view().query.ptr;
+    for ([_]Input{
+        .blur,
+        testKey(.down, .edit, c.VK_RETURN, .{}),
+        .{ .click = .regex },
+        .tick,
+        .{ .core = .{ .total = .{ .total = 3 } } },
+        .{ .core = .{ .rows = &.{ 1, 2 } } },
+        .{ .core = .ended },
+        .{ .open = "needlex" },
+    }) |in| {
+        _ = try search.apply(in, 5000);
+        try std.testing.expectEqual(query, search.view().query.ptr);
+    }
 }

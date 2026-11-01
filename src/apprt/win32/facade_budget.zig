@@ -49,7 +49,7 @@ const leaves = .{
         .file = "docked_search.zig",
         .module = @import("docked_search.zig"),
         .source = @embedFile("docked_search.zig"),
-        .pub_decls = 10,
+        .pub_decls = 6,
     },
 };
 
