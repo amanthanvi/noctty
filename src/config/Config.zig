@@ -1710,6 +1710,16 @@ class: ?[:0]const u8 = null,
 /// profile defined before it. Profiles are listed in the order of the first
 /// `profile-command` line naming each id.
 ///
+/// Settings' Profiles page edits the `profile-command`, `profile-name`,
+/// `profile-working-directory` and `profile-env` lines of the file it saves
+/// to, one field at a time: it changes the line that sets the field in place,
+/// puts a field the file has no line for after its profile's last line (or,
+/// for a profile the file has no line for, in a block of its own at the end
+/// of the file), and removes a profile by
+/// deleting its lines, or with `profile-command = <id>:` when something else
+/// still names it (another file or the command line, `profile-order`,
+/// `profile-hidden` or `default-profile`). Every other line stays as it is.
+///
 /// Only whole lines that start with `#` are comments, and a line can be at
 /// most 4094 bytes long (a longer one is reported and skipped).
 @"profile-command": ProfileMap.Command = .{},
@@ -3921,8 +3931,53 @@ pub fn loadReader(self: *Config, alloc: Allocator, reader: *std.Io.Reader, path:
     var line_iter: cli.args.LineIterator = .{ .r = source, .filepath = path };
     var iter: ConfigFileIterator = .{ .inner = &line_iter };
     try self.loadIter(alloc, &iter);
+    // A read that failed partway through reads as the end of the file, and
+    // what came after is missing: a problem, as a file that will not open
+    // is (`loadRecursiveFiles`).
+    if (line_iter.read_failed) try self.noteReadFailure("config-file", path, true);
 
     try self.expandPaths(std.fs.path.dirname(path).?);
+}
+
+test "a config file whose read fails partway through is a problem, and what was read before it applies" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    var cfg = try Config.default(alloc);
+    defer cfg.deinit();
+    var buf: [16]u8 = undefined;
+    var failing = cli.args.TestFailingReader.init("font-size = 13\nprofile-command = py: x\nfont-fam", &buf);
+    try cfg.loadReader(alloc, &failing.interface, "C:\\noctty-test\\more.conf");
+    try testing.expect(cfg.@"font-size" == 13);
+    try testing.expect(cfg.@"profile-command".get("py") != null);
+    var found: usize = 0;
+    for (cfg._diagnostics.items()) |diag| {
+        if (!std.mem.startsWith(u8, diag.message, "error reading ")) continue;
+        // The path and the error; never the file's text.
+        try testing.expectEqualStrings("error reading config-file C:\\noctty-test\\more.conf: error.ReadFailed", diag.message);
+        found += 1;
+    }
+    try testing.expectEqual(@as(usize, 1), found);
+    // A whole file records nothing of the kind.
+    var whole = try Config.default(alloc);
+    defer whole.deinit();
+    var reader: std.Io.Reader = .fixed("font-size = 13\nprofile-command = py: x\n");
+    try whole.loadReader(alloc, &reader, "C:\\noctty-test\\more.conf");
+    try testing.expect(whole._diagnostics.empty());
+    try testing.expect(whole.@"font-size" == 13);
+}
+
+/// A read of `what` (`config-file`, `theme`) at `path` that failed partway
+/// through (`LineIterator.read_failed`): recorded as a problem, "error
+/// reading <what> <path>: error.ReadFailed", which never holds the file's
+/// text. `replay` keeps it in the replay log too, as the other problems of a
+/// config file are kept.
+fn noteReadFailure(self: *Config, what: []const u8, path: []const u8, replay: bool) !void {
+    const arena_alloc = self._arena.?.allocator();
+    const diag: cli.Diagnostic = .{
+        .message = try std.fmt.allocPrintSentinel(arena_alloc, "error reading {s} {s}: {}", .{ what, path, error.ReadFailed }, 0),
+    };
+    try self._diagnostics.append(arena_alloc, diag);
+    if (replay) try self._replay_steps.append(arena_alloc, .{ .diagnostic = diag });
 }
 
 /// The byte order of the UTF-16 text `reader` starts with, if its first two
@@ -5080,6 +5135,9 @@ fn loadTheme(self: *Config, theme: Theme) !void {
     var line_iter: cli.args.LineIterator = .{ .r = reader, .filepath = path };
     var iter: ConfigFileIterator = .{ .inner = &line_iter };
     try new_config.loadIter(alloc_gpa, &iter);
+    // As for a config file (`loadReader`); kept out of the replay log, as
+    // the theme's other problems are (below).
+    if (line_iter.read_failed) try new_config.noteReadFailure("theme", path, false);
 
     // The theme file's own problems (an over-long line) stay in
     // `_diagnostics` but not in the replay log: every `finalize` reads the

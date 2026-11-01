@@ -1550,6 +1550,15 @@ pub const LineIterator = struct {
     pub const skipped_line: []const u8 = &skipped_line_storage;
     var skipped_line_storage = [_]u8{ '-', '-' };
 
+    /// Whether `next` reads `line`, the bytes of a line before its `\n` (a
+    /// CRLF line's CR, and any other CR, included), rather than skip it as
+    /// too long (`skipped_line`): at most `max_line_len` bytes, or one more
+    /// when the last is a CR. Anything that has to read a config file's
+    /// lines as the loader does asks this.
+    pub fn takes(line: []const u8) bool {
+        return line.len <= max_line_len or (line.len == max_line_len + 1 and line[line.len - 1] == '\r');
+    }
+
     /// Our stateful reader.
     r: *std.Io.Reader,
 
@@ -1567,6 +1576,12 @@ pub const LineIterator = struct {
     /// is formatted to be compatible with the parse function.
     entry: [MAX_LINE_SIZE + 1]u8 = [_]u8{ '-', '-' } ++ ([_]u8{0} ** (MAX_LINE_SIZE - 1)),
 
+    /// Whether reading the input failed (`error.ReadFailed`) before its end.
+    /// `next` stops there as at the end, as it always has, so what came after
+    /// was never read: a caller that has to know asks this
+    /// (`Config.loadReader` records it as a problem).
+    read_failed: bool = false,
+
     pub fn init(reader: *std.Io.Reader) Self {
         return .{ .r = reader };
     }
@@ -1583,7 +1598,7 @@ pub const LineIterator = struct {
         // fillMore asserts that the buffer has available capacity,
         // so skip this if it's full.
         if (self.r.bufferedLen() < self.r.buffer.len) {
-            self.r.fillMore() catch {};
+            self.r.fillMore() catch |err| self.noteRead(err);
         }
 
         var writer: std.Io.Writer = .fixed(self.entry[2..]);
@@ -1596,22 +1611,29 @@ pub const LineIterator = struct {
                 error.WriteFailed => {
                     // Longer than the entry buffer. Skip to the end of the
                     // line, so the rest of the file is still read.
-                    _ = self.r.discardDelimiterInclusive('\n') catch {};
+                    _ = self.r.discardDelimiterInclusive('\n') catch |err| discard: {
+                        self.noteRead(err);
+                        break :discard 0;
+                    };
                     self.line += 1;
                     return skipped_line;
                 },
                 else => {
                     log.warn("cannot read from \"{s}\": {}", .{ self.filepath, e });
+                    self.noteRead(e);
                     return null;
                 },
             };
-            _ = self.r.discardDelimiterInclusive('\n') catch {};
+            _ = self.r.discardDelimiterInclusive('\n') catch |err| discard: {
+                self.noteRead(err);
+                break :discard 0;
+            };
 
             var entry = writer.buffered();
             self.line += 1;
             // The byte past `max_line_len` is there only for a CRLF line's
             // CR, so a CRLF file has the same limit as an LF one.
-            if (entry.len > max_line_len and entry[entry.len - 1] != '\r') return skipped_line;
+            if (!takes(entry)) return skipped_line;
 
             // Trim any whitespace (including CR) around it
             const trim = std.mem.trim(u8, entry, whitespace ++ "\r");
@@ -1625,7 +1647,7 @@ pub const LineIterator = struct {
             // more data.
             if (entry.len == 0 or entry[0] == '#') {
                 if (self.r.seek == self.r.end) {
-                    self.r.fillMore() catch {};
+                    self.r.fillMore() catch |err| self.noteRead(err);
                 }
                 continue;
             }
@@ -1663,6 +1685,12 @@ pub const LineIterator = struct {
         // of our buffer so that we can trick the CLI parser to treat it
         // as CLI args.
         return self.entry[0 .. entry.len + 2];
+    }
+
+    /// A read that ended in `err`: the end of the input is no failure, a
+    /// failed read is (`read_failed`).
+    fn noteRead(self: *Self, err: anyerror) void {
+        if (err == error.ReadFailed) self.read_failed = true;
     }
 
     /// Returns a location for a diagnostic message.
@@ -1854,6 +1882,83 @@ test "LineIterator skips a line longer than its buffer and reads on" {
     try testing.expectEqual(LineIterator.skipped_line.ptr, iter.next().?.ptr);
     try testing.expectEqual(@as(usize, 9), iter.line);
     try testing.expectEqual(@as(?[]const u8, null), iter.next());
+}
+
+test "LineIterator reads a line at 4095 bytes only when it ends in a CR, skips one at 4096, and takes says so" {
+    const testing = std.testing;
+    const max = LineIterator.max_line_len;
+    const Case = struct { line: []const u8, read: bool };
+    // Each line as the reader holds it: its bytes before the LF, every CR
+    // included.
+    const cases = [_]Case{
+        .{ .line = "a=" ++ "x" ** (max - 2), .read = true },
+        .{ .line = "a=" ++ "x" ** (max - 1), .read = false },
+        .{ .line = "a=" ++ "x" ** (max - 2) ++ "\r", .read = true },
+        .{ .line = "a=" ++ "x" ** (max - 3) ++ "\r\r", .read = true },
+        .{ .line = "a=" ++ "x" ** (max - 2) ++ "\r\r", .read = false },
+        .{ .line = "a=" ++ "x" ** (max - 1) ++ "\r", .read = false },
+        .{ .line = "a=" ++ "x" ** max ++ "\r\r", .read = false },
+    };
+    for (cases) |case| {
+        try testing.expectEqual(case.read, LineIterator.takes(case.line));
+        // With an LF after it and a line after that, and as the last line.
+        for ([_]bool{ true, false }) |newline| {
+            var text_buf: [max + 16]u8 = undefined;
+            const text = if (newline)
+                try std.fmt.bufPrint(&text_buf, "{s}\nb=1\n", .{case.line})
+            else
+                try std.fmt.bufPrint(&text_buf, "{s}", .{case.line});
+            var f: std.Io.Reader = .fixed(text);
+            var buf: [2048]u8 = undefined;
+            var r = f.limited(.unlimited, &buf);
+            var iter: LineIterator = .{ .r = &r.interface, .filepath = "t" };
+            const arg = iter.next().?;
+            if (case.read) {
+                try testing.expect(arg.ptr != LineIterator.skipped_line.ptr);
+                try testing.expectEqualStrings(std.mem.trimEnd(u8, case.line, "\r"), arg[2..]);
+            } else try testing.expectEqual(LineIterator.skipped_line.ptr, arg.ptr);
+            if (newline) try testing.expectEqualStrings("--b=1", iter.next().?);
+            try testing.expectEqual(@as(?[]const u8, null), iter.next());
+        }
+    }
+}
+
+/// For tests: a reader that hands over `chunk` and then fails, as a file
+/// that opens and then cannot be read past some point does.
+pub const TestFailingReader = struct {
+    interface: std.Io.Reader,
+    chunk: []const u8,
+    given: usize = 0,
+
+    pub fn init(chunk: []const u8, buffer: []u8) TestFailingReader {
+        return .{ .interface = .{ .vtable = &.{ .stream = stream }, .buffer = buffer, .seek = 0, .end = 0 }, .chunk = chunk };
+    }
+
+    fn stream(r: *std.Io.Reader, w: *std.Io.Writer, limit: std.Io.Limit) std.Io.Reader.StreamError!usize {
+        const self: *TestFailingReader = @fieldParentPtr("interface", r);
+        if (self.given == self.chunk.len) return error.ReadFailed;
+        const n = try w.write(limit.sliceConst(self.chunk[self.given..]));
+        self.given += n;
+        return n;
+    }
+};
+
+test "LineIterator stops at a failed read as at the end, and says the read failed" {
+    const testing = std.testing;
+    var buf: [16]u8 = undefined;
+    var failing = TestFailingReader.init("a=1\nb=2\nc=", &buf);
+    var iter: LineIterator = .{ .r = &failing.interface, .filepath = "t" };
+    try testing.expectEqualStrings("--a=1", iter.next().?);
+    try testing.expectEqualStrings("--b=2", iter.next().?);
+    try testing.expectEqual(@as(?[]const u8, null), iter.next());
+    try testing.expect(iter.read_failed);
+    // The end of the input is no failure.
+    var f: std.Io.Reader = .fixed("a=1\nb=2");
+    var whole: LineIterator = .{ .r = &f, .filepath = "t" };
+    try testing.expectEqualStrings("--a=1", whole.next().?);
+    try testing.expectEqualStrings("--b=2", whole.next().?);
+    try testing.expectEqual(@as(?[]const u8, null), whole.next());
+    try testing.expect(!whole.read_failed);
 }
 
 test "parse reports a skipped line with its place and keeps the rest" {

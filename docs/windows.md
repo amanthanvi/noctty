@@ -1013,9 +1013,55 @@ Limits:
   running noctty was given with `--config-file` is not known to it.
 - A profile that runs `ssh.exe` is restored with the session like any other
   profile; a detected `ssh:` profile is not.
-- The Settings window does not edit the `profile-*` lines; it leaves them,
-  and every line it does not edit, as they are when it saves. Its Shell
-  page sets `default-profile` (see above).
+- The Settings window edits the `profile-*` lines on its Profiles page (see
+  [Editing profiles in Settings](#editing-profiles-in-settings)) and leaves
+  every line it does not edit as it is. Its Shell page sets `default-profile`
+  (see above).
+
+### Editing profiles in Settings
+
+The Profiles page of Settings lists your profiles in the order of their
+`profile-command` lines. Each one's command line, name, starting folder and
+variables are rows of their own. A variable's value is masked in its row
+(`PATH = ••••••`) and shown only while you type into it, since it can hold a
+secret; screen readers get each row's name without its value, and read the
+value on request (a variable's as "value hidden"). Enter types into the
+selected row's field,
+and Enter, Tab or moving elsewhere keeps what you typed, while Escape puts the
+field back. Delete takes a name, a starting folder or a variable out; on a
+profile's own row it removes the profile, after a second Delete and a status
+line that says what removing it does. Insert or Ctrl+N adds a profile: its id
+first, then its command line. An id cannot be changed, because sessions,
+layouts and the jump list name the profile by it; a new id is a new profile.
+Settings refuses what loading would report (see
+[Ids, renaming and removing](#ids-renaming-and-removing)), an empty command
+line, a line break, a value too long for one line of the file, and a variable
+without a name or a value. The status line says why, without repeating the
+value. A field Settings refuses stays open with what you typed: switching
+pages stops at it, and closing Settings or quitting noctty asks about it as
+about any unsaved change. So does a new profile whose id you typed, until you
+type its command line or press Escape to drop it. Like any other setting, these changes are a draft
+until you Save, and Discard changes or closing without saving drops them.
+
+Save writes only what changed, to the file Settings saves to. The line that
+sets a field is changed where it is, a new field goes after its profile's
+lines, and a new profile's lines go at the end of the file. A removed
+profile's lines are deleted. When something else still names its id
+(another file or noctty's command line defines it or sets one of its
+fields, or `profile-order`, `profile-hidden` or `default-profile` names
+it), its `profile-command` line becomes `profile-command = <id>:` instead,
+which removes the profile whatever the other lines say and keeps those
+references from becoming config problems. Comments, other profiles and every other line
+stay as they were. A field that a file read later (one `config-file` names)
+or the command line sets again is saved all the same, and Settings says which
+line wins.
+
+Removing the profile `default-profile` names leaves `default-profile` as it
+is: new tabs then open the automatic shell, and Shell > Default profile shows
+the value marked "(not found)" until you choose another. A profile defined on
+noctty's command line is shown and not changed. `profile-order` and
+`profile-hidden` are not edited there: a hidden profile is marked, and both
+are changed in the config file.
 
 ### Listing profiles
 

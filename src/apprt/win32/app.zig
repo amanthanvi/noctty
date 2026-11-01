@@ -265,6 +265,8 @@ const win32_recovery = @import("../win32_recovery.zig");
 const win32_session_persistence = @import("../win32_session_persistence.zig");
 const win32_session_state = @import("../win32_session_state.zig");
 const win32_settings = @import("../win32_settings.zig");
+const settings_reference = @import("../win32_settings_reference.zig");
+const settings_patch = @import("settings_patch.zig");
 const win32_shell = @import("../win32_shell.zig");
 const win32_structural_history = @import("../win32_structural_history.zig");
 const win32_taskbar_progress = @import("../win32_taskbar_progress.zig");
@@ -8661,6 +8663,24 @@ pub const App = struct {
         // default-drop would strip the reset line, and the include
         // would re-apply its non-default value on next reload.
         const user_edited = settingsUserEditedKeys(original, pending);
+        // The profile editor's changes, by field (`settings_patch`): what the
+        // file must hold for `pending`'s profiles, worked out against the
+        // layers `original` was read from.
+        var profile_arena: std.heap.ArenaAllocator = .init(alloc);
+        defer profile_arena.deinit();
+        // In the light/dark state the app applies now, which may have
+        // changed since Settings opened (`settings_patch.editsForSave`).
+        const state = self.core_app.config_conditional_state;
+        var profile_edits = settings_patch.editsForSave(profile_arena.allocator(), alloc, &.{&self.config}, state, original, pending, target_path, &settings_reference.samePath) catch |err|
+            return settingsProfileEditsFailed(err);
+        // Whether another file still names a removed profile decides a
+        // tombstone or a deletion, and `self.config` is as of the last reload:
+        // a file that gained the profile since, with no reload, would be
+        // missed and the profile come back. With profile edits to make, the
+        // layers are read from disk again (`settingsProfileEditsFromDisk`).
+        if (profile_edits.len != 0) {
+            profile_edits = try settingsProfileEditsFromDisk(profile_arena.allocator(), alloc, &self.settings_failure_detail, self.loadConfigAtStartupCwd(), &self.config, state, original, pending, target_path);
+        }
         // No-op short-circuit: if the user pressed Save without
         // changing anything, don't touch the filesystem. On a
         // first-run machine with no existing config file, the write
@@ -8668,10 +8688,10 @@ pub const App = struct {
         // `error.FileIsEmpty` warnings on every subsequent load.
         // On an existing file, skipping also avoids an unnecessary
         // mtime bump.
-        if (user_edited.count() == 0) return;
+        if (user_edited.count() == 0 and profile_edits.len == 0) return;
 
         self.settings_failure_detail.clear(alloc);
-        try persistSettings(alloc, target_path, pending, user_edited, &self.settings_failure_detail);
+        try persistSettings(alloc, target_path, pending, user_edited, profile_edits, &self.settings_failure_detail);
 
         // Saving can repair the config on disk, but recovery applies it only
         // after restart, as the safe-mode banner promises.
@@ -8694,7 +8714,34 @@ pub const App = struct {
         // generic write failure. The status line names the fields.
         self.settings_masked_keys.clear(alloc);
         var masked_buf: [settings_masked_keys_capacity]u8 = undefined;
-        const masked = settingsMaskedKeyNames(&masked_buf, user_edited, pending, &reloaded);
+        // The keys, then each profile field the reload does not hold, by
+        // name only (`settings_patch.writeEditName`).
+        var masked_text: std.Io.Writer.Allocating = .init(alloc);
+        defer masked_text.deinit();
+        masked_text.writer.writeAll(settingsMaskedKeyNames(&masked_buf, user_edited, pending, &reloaded)) catch return error.OutOfMemory;
+        // The profile fields as `updateConfig` will apply them: a theme can
+        // define a profile in one light/dark state only.
+        var reloaded_applied: ?configpkg.Config = if (profile_edits.len == 0) null else reloaded.changeConditionalState(self.core_app.config_conditional_state) catch |err| applied: {
+            log.warn("settings save: could not apply the light/dark state to the reload for its check err={}", .{err});
+            break :applied null;
+        };
+        defer if (reloaded_applied) |*value| value.deinit();
+        // A file the reload could not read whole: what it missed is no
+        // override, and the save says that instead, naming the file.
+        const report = settings_patch.reloadReport(&masked_text.writer, profile_edits, if (reloaded_applied) |*value| value else &reloaded, masked_text.written().len > 0) catch return error.OutOfMemory;
+        switch (report) {
+            .unread => |unread| {
+                const text = unread.describe(alloc) catch return error.OutOfMemory;
+                defer alloc.free(text);
+                self.settings_failure_detail.set(alloc, text);
+                log.warn("settings save: saved, but the reload could not read a config file whole, so the saved values may not all be in effect", .{});
+                self.core_app.updateConfig(self, &reloaded) catch return error.ReloadFailed;
+                _ = self.reportRecordedConfigProblems();
+                return error.SavedButUnread;
+            },
+            .held, .masked => {},
+        }
+        const masked = masked_text.written();
         if (masked.len > 0) {
             std.log.warn("settings save: saved but masked by a later config-file layer: {s}", .{masked});
             self.settings_masked_keys.set(alloc, masked);
@@ -8704,6 +8751,71 @@ pub const App = struct {
         // The reload read the file again, so what is wrong in it is news.
         _ = self.reportRecordedConfigProblems();
         if (masked.len > 0) return error.SavedButMasked;
+    }
+
+    /// The profile edits a save makes, worked out against the config layers
+    /// read again from disk (`fresh`, the read's result, owned here) and
+    /// against `held`, the config as last read, in `state`
+    /// (`settings_patch.editsForSave`): a removal keeps its line when either
+    /// shows another layer naming it. The fresh read is held to the rule the
+    /// disk check before an ordinary save holds it to (`settingsDiskVerdict`):
+    /// an included or theme file that is there and will not open, or does not
+    /// decode, stops the save. So does a file a reading could not open or
+    /// read whole (`settings_patch.unreadConfigFile`: an include that would
+    /// not open, or one or a theme whose read failed partway through), judged
+    /// on the reading in `state`, since switching to it reads the theme
+    /// again; and a read that fails. Nothing is written then, and `detail`
+    /// names the file.
+    fn settingsProfileEditsFromDisk(
+        arena: Allocator,
+        alloc: Allocator,
+        detail: *win32_settings.FailureDetail,
+        fresh: anyerror!configpkg.Config,
+        held: *const configpkg.Config,
+        state: configpkg.ConditionalState,
+        original: *const configpkg.Config,
+        pending: *const configpkg.Config,
+        target_path: []const u8,
+    ) win32_settings.SaveError![]settings_patch.Edit {
+        var disk = fresh catch |err| {
+            log.warn("settings save: could not read the config files again for the profile edits err={}", .{err});
+            return error.ReloadFailed;
+        };
+        defer disk.deinit();
+        detail.clear(alloc);
+        _ = try settingsDiskVerdict(alloc, detail, original, pending, &disk, state, .initEmpty());
+        // Each reading in the app's state first: switching it reads the
+        // selected theme again, and that read is what the removal is decided
+        // from, so it is the one whose problems count. A reading already in
+        // that state is used as it is.
+        var disk_now = disk.changeConditionalState(state) catch |err| return settingsProfileEditsFailed(err);
+        defer if (disk_now) |*value| value.deinit();
+        var held_now = held.changeConditionalState(state) catch |err| return settingsProfileEditsFailed(err);
+        defer if (held_now) |*value| value.deinit();
+        const readings = [_]*const configpkg.Config{
+            if (disk_now) |*value| value else &disk,
+            if (held_now) |*value| value else held,
+        };
+        // The fresh read, and the held config if it was read again here.
+        for (readings[0..if (held_now != null) 2 else 1]) |reading| {
+            if (settings_patch.unreadConfigFile(reading)) |unread| {
+                const text = unread.describe(alloc) catch return error.OutOfMemory;
+                defer alloc.free(text);
+                detail.set(alloc, text);
+                return error.FileUnopenable;
+            }
+        }
+        return settings_patch.editsForSave(arena, alloc, &readings, state, original, pending, target_path, &settings_reference.samePath) catch |err|
+            settingsProfileEditsFailed(err);
+    }
+
+    /// The profile edits could not be worked out: no memory, or the layers
+    /// could not be put in the app's light/dark state, which would decide a
+    /// removal blind. Nothing is saved.
+    fn settingsProfileEditsFailed(err: anyerror) win32_settings.SaveError {
+        if (err == error.OutOfMemory) return error.OutOfMemory;
+        log.warn("settings save: the profile edits could not be worked out err={}", .{err});
+        return error.ReloadFailed;
     }
 
     fn settingsTargetPath(self: *App, alloc: Allocator) win32_settings.SaveError![]const u8 {
@@ -8970,6 +9082,117 @@ pub const App = struct {
             .path = owned,
             .from_settings = self.settings_window.hwnd != null,
         } });
+    }
+
+    test "settings a profile save's fresh read stops the save when a file was not read whole, and decides from it and the held config otherwise" {
+        const alloc = std.testing.allocator;
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        try tmp.dir.writeFile(.{ .sub_path = "config", .data = "profile-command = py: python.exe\n" });
+        const path = try tmp.dir.realpathAlloc(alloc, "config");
+        defer alloc.free(path);
+        var held = try configpkg.Config.default(alloc);
+        defer held.deinit();
+        try held.loadFile(alloc, path);
+        var pending = try held.clone(alloc);
+        defer pending.deinit();
+        try pending.@"profile-command".parseCLI(pending._arena.?.allocator(), "py:");
+        var detail: win32_settings.FailureDetail = .{};
+        defer detail.clear(alloc);
+        var arena: std.heap.ArenaAllocator = .init(alloc);
+        defer arena.deinit();
+
+        // A file whose read fails partway through: the save stops, naming it.
+        {
+            var fresh = try configpkg.Config.default(alloc);
+            errdefer fresh.deinit();
+            var buf: [16]u8 = undefined;
+            var failing = @import("../../cli/args.zig").TestFailingReader.init("profile-command = py: python.exe\nprofile-na", &buf);
+            try fresh.loadReader(alloc, &failing.interface, path);
+            try std.testing.expectError(error.FileUnopenable, App.settingsProfileEditsFromDisk(arena.allocator(), alloc, &detail, fresh, &held, .{}, &held, &pending, path));
+            const expected = try std.fmt.allocPrint(alloc, "the included file {s}", .{path});
+            defer alloc.free(expected);
+            try std.testing.expect(std.mem.eql(u8, expected, detail.text.?));
+        }
+        // A read that fails: the save stops.
+        try std.testing.expectError(error.ReloadFailed, App.settingsProfileEditsFromDisk(arena.allocator(), alloc, &detail, error.AccessDenied, &held, .{}, &held, &pending, path));
+        // A whole read: the edits, and nothing else names `py`, so its line goes.
+        {
+            var fresh = try configpkg.Config.default(alloc);
+            errdefer fresh.deinit();
+            try fresh.loadFile(alloc, path);
+            const edits = try App.settingsProfileEditsFromDisk(arena.allocator(), alloc, &detail, fresh, &held, .{}, &held, &pending, path);
+            try std.testing.expectEqual(@as(usize, 4), edits.len);
+            try std.testing.expect(edits[0].field == .command and edits[0].op == .delete);
+        }
+    }
+
+    test "settings a profile save stops when the theme of the app's light/dark state cannot be read whole as that state is applied" {
+        const alloc = std.testing.allocator;
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        try tmp.dir.writeFile(.{ .sub_path = "light", .data = "\n" });
+        try tmp.dir.writeFile(.{ .sub_path = "dark", .data = "\n" });
+        const light = try tmp.dir.realpathAlloc(alloc, "light");
+        defer alloc.free(light);
+        const dark = try tmp.dir.realpathAlloc(alloc, "dark");
+        defer alloc.free(dark);
+        const text = try std.fmt.allocPrint(alloc, "theme = light:{s},dark:{s}\nprofile-command = py: python.exe\n", .{ light, dark });
+        defer alloc.free(text);
+        try tmp.dir.writeFile(.{ .sub_path = "config", .data = text });
+        const path = try tmp.dir.realpathAlloc(alloc, "config");
+        defer alloc.free(path);
+        const load = struct {
+            fn config(a: Allocator, file: []const u8) !configpkg.Config {
+                var cfg = try configpkg.Config.default(a);
+                errdefer cfg.deinit();
+                try cfg.loadFile(a, file);
+                try cfg.loadRecursiveFiles(a);
+                try cfg.finalize();
+                return cfg;
+            }
+        }.config;
+        // The config as last read, in the dark state the app is in, from
+        // before the dark theme defined `py`; the draft removes `py`.
+        var loaded = try load(alloc, path);
+        defer loaded.deinit();
+        var held = (try loaded.changeConditionalState(.{ .theme = .dark })).?;
+        defer held.deinit();
+        var pending = try held.clone(alloc);
+        defer pending.deinit();
+        try pending.@"profile-command".parseCLI(pending._arena.?.allocator(), "py:");
+        // The dark theme defines `py` now.
+        try tmp.dir.writeFile(.{ .sub_path = "dark", .data = "profile-command = py: python.exe -X dark\n" });
+        const before = try tmp.dir.readFileAlloc(alloc, "config", 1 << 16);
+        defer alloc.free(before);
+        var detail: win32_settings.FailureDetail = .{};
+        defer detail.clear(alloc);
+        var arena: std.heap.ArenaAllocator = .init(alloc);
+        defer arena.deinit();
+        const dark_state: configpkg.ConditionalState = .{ .theme = .dark };
+
+        // Another program locks the dark theme's bytes: it opens, which the
+        // disk check sees, and its read fails, which only applying the dark
+        // state reads. The theme loader opens its file itself, so a reader
+        // cannot be put in its place; std's `.lock` is the byte-range lock
+        // that does this.
+        {
+            var lock = try tmp.dir.openFile("dark", .{ .mode = .read_write, .lock = .exclusive });
+            defer lock.close();
+            const fresh = try load(alloc, path);
+            try std.testing.expectError(error.FileUnopenable, App.settingsProfileEditsFromDisk(arena.allocator(), alloc, &detail, fresh, &held, dark_state, &held, &pending, path));
+            const expected = try std.fmt.allocPrint(alloc, "the theme file {s}", .{dark});
+            defer alloc.free(expected);
+            try std.testing.expect(std.mem.eql(u8, expected, detail.text.?));
+        }
+        // Nothing was written.
+        const after = try tmp.dir.readFileAlloc(alloc, "config", 1 << 16);
+        defer alloc.free(after);
+        try std.testing.expect(std.mem.eql(u8, before, after));
+        // Read whole: the dark theme's `py` keeps the tombstone.
+        const fresh = try load(alloc, path);
+        const edits = try App.settingsProfileEditsFromDisk(arena.allocator(), alloc, &detail, fresh, &held, dark_state, &held, &pending, path);
+        for (edits) |e| if (e.field == .command) try std.testing.expect(e.op == .unset);
     }
 
     test "SET editor request stays deferred, rechecks safety and reports host failure" {

@@ -2425,7 +2425,9 @@ pub const Host = struct {
             break :blk self.app.settingsSaveAndReload(&pending, &original);
         });
         switch (save_outcome) {
-            .completed, .completed_masked => {},
+            // A theme pick makes no profile edit, so its save is never
+            // `completed_unread`; were it, the theme was saved as well.
+            .completed, .completed_masked, .completed_unread => {},
             .failed => |err| {
                 log.warn("palette theme save failed theme={s} err={}", .{ theme_name, err });
                 // Roll back without another allocation: `original` is already

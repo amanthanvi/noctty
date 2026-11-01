@@ -33,6 +33,7 @@ const builtin = @import("builtin");
 const cli_args = @import("../cli/args.zig");
 const Location = @import("../cli/diagnostics.zig").Location;
 const Config = @import("Config.zig");
+const profile_map = @import("profile_map.zig");
 const Key = @import("key.zig").Key;
 
 pub const Origin = union(enum) {
@@ -157,7 +158,146 @@ pub const Index = struct {
     pub fn keysSet(self: *const Index, step: FileStep, out: *[max_keys_per_step]Key) []const Key {
         return stepKeys(self.config, .{ .set = &self.refused }, step, out);
     }
+
+    /// Where one field of one user profile got its value: the `profile-*`
+    /// key `key`, the profile `id`, and for `profile-env` the variable `name`
+    /// (null for any of the profile's variables). Ids and names compare
+    /// ASCII case-insensitively, as the loader compares them.
+    ///
+    /// The origin is the last step that wrote that field, by the rules `of`
+    /// counts a step by (it applies now, and the loader took it), in any
+    /// layer:
+    /// - a line for that id (and variable), its removal included (`<id>:`,
+    ///   `<id>: NAME=`);
+    /// - `profile-env = <id>:`, which takes back all of the profile's
+    ///   variables, once one was set;
+    /// - an empty value (`key =`), which takes back every profile's, once the
+    ///   field was set.
+    ///
+    /// `profile-command = <id>:` makes a profile's other fields dormant without
+    /// changing them, so it is the origin of the command only. `.default`
+    /// when no step wrote the field, or for a key that is not a `profile-*`
+    /// key. Settings' profile editor names the line that masks a saved
+    /// field with this.
+    pub fn ofProfile(self: *const Index, key: Key, id: []const u8, name: ?[]const u8) Origin {
+        return profileScan(self.config, .{ .set = &self.refused }, key, id, name);
+    }
+
+    /// Whether one field of one user profile (as `ofProfile` names it, with
+    /// `name` given for `profile-env`) has a value from the steps that are not
+    /// lines of the file `path` (`same` compares paths): the field as it
+    /// would be without that file's lines, read in the loader's order, so a
+    /// later removal in another file counts. Settings' profile editor asks
+    /// this before taking a field out of the file it saves to: when another
+    /// file still gives the field a value, deleting the line is not enough,
+    /// and it writes the field's removal instead. For `profile-env` with
+    /// `name` null (any of the profile's variables), a variable taken back
+    /// by name does not count against the others, so the answer leans to
+    /// yes: only `<id>:` and `profile-env =` clear them.
+    pub fn givesElsewhere(self: *const Index, key: Key, id: []const u8, name: ?[]const u8, path: []const u8, same: SamePath) bool {
+        const kind = profileKind(key) orelse return false;
+        var live = false;
+        for (self.config._replay_steps.items) |step| {
+            const text: []const u8, const location: Location = switch (step) {
+                .arg => |arg| .{ arg.value, arg.location },
+                .conditional_arg => |arg| applies: {
+                    for (arg.conditions) |cond| {
+                        if (!self.config._conditional_state.match(cond)) break :applies .{ "", .none };
+                    }
+                    break :applies .{ arg.arg, arg.location };
+                },
+                .@"-e" => break,
+                .expand, .diagnostic => continue,
+            };
+            if (location == .file and same(location.file.path, path)) continue;
+            switch (profileStepEffect(self.config, .{ .set = &self.refused }, kind, key, text, location, id, name)) {
+                .none => {},
+                .set => live = true,
+                // Asked about any of a profile's variables (`name` null),
+                // one taken back leaves the others: only a reset clears them.
+                .removed => if (kind != .env or name != null) {
+                    live = false;
+                },
+                .reset => live = false,
+            }
+        }
+        return live;
+    }
 };
+
+fn profileKind(key: Key) ?profile_map.Kind {
+    return switch (key) {
+        .@"profile-command" => .command,
+        .@"profile-name" => .name,
+        .@"profile-working-directory" => .text,
+        .@"profile-env" => .env,
+        else => null,
+    };
+}
+
+fn profileScan(config: *const Config, refused: Refused, key: Key, id: []const u8, name: ?[]const u8) Origin {
+    const kind = profileKind(key) orelse return .default;
+    var last: ?Candidate = null;
+    for (config._replay_steps.items) |step| switch (step) {
+        .arg => |arg| if (profileStepWrites(config, refused, kind, key, arg.value, arg.location, id, name, last != null)) {
+            last = .{ .location = arg.location };
+        },
+        .conditional_arg => |arg| {
+            var theme = false;
+            const applies = for (arg.conditions) |cond| {
+                if (cond.key == .theme) theme = true;
+                if (!config._conditional_state.match(cond)) break false;
+            } else true;
+            if (applies and profileStepWrites(config, refused, kind, key, arg.arg, arg.location, id, name, last != null))
+                last = .{ .location = arg.location, .theme = theme };
+        },
+        // The arguments after `-e` are its command's words.
+        .@"-e" => break,
+        .expand, .diagnostic => {},
+    };
+    return if (last) |found| found.origin(config) else .default;
+}
+
+/// Whether the argument `text` wrote the field `ofProfile` asks about.
+/// `seen`: whether an earlier step wrote it, since a value that takes
+/// everything back changes only what was there.
+fn profileStepWrites(config: *const Config, refused: Refused, kind: profile_map.Kind, key: Key, text: []const u8, location: Location, id: []const u8, name: ?[]const u8, seen: bool) bool {
+    return switch (profileStepEffect(config, refused, kind, key, text, location, id, name)) {
+        .none => false,
+        .set, .removed => true,
+        .reset => seen,
+    };
+}
+
+/// What the argument `text` did to one field of one profile.
+const ProfileEffect = enum {
+    none,
+    /// Gave it a value.
+    set,
+    /// Removed it by name: `<id>:` (a profile's removal, for
+    /// `profile-command`), or `<id>: NAME=`.
+    removed,
+    /// Took it back with everything else: `key =`, or `profile-env = <id>:`.
+    reset,
+};
+
+fn profileStepEffect(config: *const Config, refused: Refused, kind: profile_map.Kind, key: Key, text: []const u8, location: Location, id: []const u8, name: ?[]const u8) ProfileEffect {
+    if (!stepSets(config, refused, text, location, key)) return .none;
+    const eq = std.mem.indexOfScalar(u8, text, '=') orelse return .none;
+    const value = std.mem.trim(u8, text[eq + 1 ..], &std.ascii.whitespace);
+    if (value.len == 0) return .reset;
+    const parsed = switch (kind) {
+        inline else => |k| profile_map.check(k, value),
+    } catch return .none;
+    if (!std.ascii.eqlIgnoreCase(parsed.id, id)) return .none;
+    if (kind != .env) return if (parsed.text.len == 0) .removed else .set;
+    if (parsed.text.len == 0) return .reset;
+    const sign = std.mem.indexOfScalar(u8, parsed.text, '=') orelse return .none;
+    if (name) |wanted| {
+        if (!std.ascii.eqlIgnoreCase(std.mem.trim(u8, parsed.text[0..sign], &std.ascii.whitespace), wanted)) return .none;
+    }
+    return if (std.mem.trim(u8, parsed.text[sign + 1 ..], &std.ascii.whitespace).len == 0) .removed else .set;
+}
 
 /// A problem the loader noted: the name it gave and where (`Index`).
 const Problem = struct {
@@ -1303,4 +1443,97 @@ test "origin: a lookup compares the config-file names once, not once for each st
     errdefer std.debug.print("origin: {d} config-file names compared\n", .{test_included_comparisons});
     try std.testing.expect(test_included_comparisons <= 2 * n);
     try expectFile(problems.of(.@"font-size", &defaults), path, 2 * n, .config);
+}
+
+test "origin: a profile field's origin is the last step that wrote it, by id and variable" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    // The included file is read after the config file: it removes the profile
+    // (its fields go dormant, unchanged) and takes back every label.
+    try tmp.dir.writeFile(.{ .sub_path = "x.conf", .data = "profile-command = py:\nprofile-name =\n" });
+    const text =
+        \\profile-command = py: cmd.exe
+        \\profile-name = py: Python
+        \\profile-env = py: PATH=a
+        \\profile-env = PY: path=b
+        \\profile-env = py: HOME=h
+        \\profile-env = py: =refused
+        \\profile-env = py:
+        \\profile-env = py: TEMP=t
+        \\profile-working-directory = PY: home
+        \\config-file = x.conf
+        \\
+    ;
+    try tmp.dir.writeFile(.{ .sub_path = "config", .data = "\n" });
+    const path = try tmp.dir.realpathAlloc(alloc, "config");
+    defer alloc.free(path);
+    const included_path = try tmp.dir.realpathAlloc(alloc, "x.conf");
+    defer alloc.free(included_path);
+    var cfg = try loadWithArgs(alloc, tmp.dir, path, text, &.{"--profile-env=py: CLI=1"});
+    defer cfg.deinit();
+    var problems = try Index.init(alloc, &cfg);
+    defer problems.deinit(alloc);
+
+    // The removal in the included file is the command's origin; ids compare
+    // without case.
+    try expectFile(problems.ofProfile(.@"profile-command", "PY", null), included_path, 1, .included);
+    // The label was taken back by the included file's `profile-name =`.
+    try expectFile(problems.ofProfile(.@"profile-name", "py", null), included_path, 2, .included);
+    // `py:` took back PATH (folded) and HOME; TEMP came after it.
+    try expectFile(problems.ofProfile(.@"profile-env", "py", "Path"), path, 7, .config);
+    try expectFile(problems.ofProfile(.@"profile-env", "py", "home"), path, 7, .config);
+    try expectFile(problems.ofProfile(.@"profile-env", "py", "TEMP"), path, 8, .config);
+    // Any of the profile's variables: the command line's, read after the
+    // config file.
+    try std.testing.expectEqual(Origin{ .cli = 0 }, problems.ofProfile(.@"profile-env", "py", null));
+    // The command line is read before the files a config file includes, but
+    // after the config file itself: its variable was taken back by nothing.
+    try std.testing.expectEqual(Origin{ .cli = 0 }, problems.ofProfile(.@"profile-env", "py", "cli"));
+    // Nothing wrote these: a variable never set (the refused line set none),
+    // a profile with no such field, another key.
+    try std.testing.expect(problems.ofProfile(.@"profile-env", "py", "NOPE") == .default);
+    try std.testing.expect(problems.ofProfile(.@"profile-env", "ghost", null) == .default);
+    try std.testing.expect(problems.ofProfile(.@"font-size", "py", null) == .default);
+    // The removal leaves the folder as it was: line 9 is still its origin.
+    try expectFile(problems.ofProfile(.@"profile-working-directory", "py", null), path, 9, .config);
+}
+
+test "origin: whether another layer gives a profile field a value, without the lines of one file" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    // The included file is read after the config file, and the command line
+    // between the two.
+    try tmp.dir.writeFile(.{ .sub_path = "x.conf", .data = "profile-command = py: b.exe\nprofile-command = other: o.exe\nprofile-command = other:\nprofile-env = py: L=1\nprofile-env = py: K=\n" });
+    try tmp.dir.writeFile(.{ .sub_path = "config", .data = "\n" });
+    const path = try tmp.dir.realpathAlloc(alloc, "config");
+    defer alloc.free(path);
+    const included_path = try tmp.dir.realpathAlloc(alloc, "x.conf");
+    defer alloc.free(included_path);
+    const text = "profile-command = py: a.exe\nprofile-env = py: K=1\nprofile-env = py: J=1\nprofile-command = other: t.exe\nconfig-file = x.conf\n";
+    var cfg = try loadWithArgs(alloc, tmp.dir, path, text, &.{"--profile-name=py: From the command line"});
+    defer cfg.deinit();
+    var problems = try Index.init(alloc, &cfg);
+    defer problems.deinit(alloc);
+    const same = struct {
+        fn eql(a: []const u8, b: []const u8) bool {
+            return std.ascii.eqlIgnoreCase(a, b);
+        }
+    }.eql;
+
+    // Without the config file's lines: the included file defines py, defines
+    // and then removes other, and takes K back; the command line names py.
+    try std.testing.expect(problems.givesElsewhere(.@"profile-command", "PY", null, path, &same));
+    try std.testing.expect(!problems.givesElsewhere(.@"profile-command", "other", null, path, &same));
+    try std.testing.expect(!problems.givesElsewhere(.@"profile-env", "py", "k", path, &same));
+    try std.testing.expect(!problems.givesElsewhere(.@"profile-env", "py", "J", path, &same));
+    // Any of py's variables: L is still set there after K is taken back.
+    try std.testing.expect(problems.givesElsewhere(.@"profile-env", "py", null, path, &same));
+    try std.testing.expect(problems.givesElsewhere(.@"profile-name", "py", null, path, &same));
+    try std.testing.expect(!problems.givesElsewhere(.@"profile-working-directory", "py", null, path, &same));
+    // Without the included file's lines: the config file's.
+    try std.testing.expect(problems.givesElsewhere(.@"profile-command", "other", null, included_path, &same));
+    try std.testing.expect(problems.givesElsewhere(.@"profile-env", "py", "K", included_path, &same));
+    try std.testing.expect(!problems.givesElsewhere(.@"font-size", "py", null, path, &same));
 }
