@@ -12192,18 +12192,23 @@ const dialog_test = struct {
     extern "user32" fn GetKeyboardState(keys: *[256]u8) callconv(.winapi) BOOL;
     extern "user32" fn SetKeyboardState(keys: *const [256]u8) callconv(.winapi) BOOL;
 
+    /// The keyboard a test body on a hidden desktop runs with (`run`): no key
+    /// down and no toggle on, until `holdKeys` changes it.
+    threadlocal var keyboard: ?win32_input.TestingKeyboard = null;
+
     /// Make exactly these modifiers the ones the calling thread sees held, and
-    /// no other key. The whole 256-entry table is replaced, then read back
-    /// through `GetKeyState`, which is what the code under test reads: a
-    /// table the system refreshed from the real keyboard in between fails here
-    /// with the key that leaked, not later in an unrelated assertion.
+    /// no other key: in the test thread's pinned keyboard, which the code
+    /// under test reads (`win32_input.keyPressed`), and in its key table,
+    /// which Windows reads. Read back through the readers, so a keyboard that
+    /// was not pinned fails here, not later in an unrelated assertion.
     fn holdKeys(held: struct { ctrl: bool = false, alt: bool = false, shift: bool = false }) !void {
         var keys: [256]u8 = @splat(0);
         const down: u8 = 0x80;
         if (held.ctrl) keys[VK_CONTROL] = down;
         if (held.alt) keys[VK_MENU] = down;
         if (held.shift) keys[VK_SHIFT] = down;
-        try std.testing.expect(SetKeyboardState(&keys) != 0);
+        const pinned = keyboard orelse return error.TestKeyboardNotPinned;
+        pinned.set(&keys);
         try std.testing.expectEqual(held.ctrl, win32_input.keyPressed(VK_CONTROL));
         try std.testing.expectEqual(held.alt, win32_input.keyPressed(VK_MENU));
         try std.testing.expectEqual(held.shift, win32_input.keyPressed(VK_SHIFT));
@@ -12734,6 +12739,18 @@ const dialog_test = struct {
         if (SetThreadDesktop(desktop) == 0) {
             result.* = error.SkipZigTest;
             return;
+        }
+        // A new thread's key table starts as a copy of the real keyboard's,
+        // so a test thread made while the person running the suite holds
+        // Shift, Ctrl or Alt saw it held, and F2 on the All settings page was
+        // then another chord the list leaves alone (SETTINGS-F2-TEST-FLAKE).
+        // Every body runs with an empty keyboard instead, which `holdKeys`
+        // changes; the readers answer from it and the thread's table holds it.
+        const pinned = win32_input.TestingKeyboard.pinNone();
+        keyboard = pinned;
+        defer {
+            keyboard = null;
+            pinned.release();
         }
         body() catch |err| {
             if (@errorReturnTrace()) |trace| std.debug.dumpStackTrace(trace.*);
@@ -22662,6 +22679,28 @@ test "settings F2 on the All settings page keeps the window where it is: a maxim
             // The edit is inside the window: no `open()`, which restores a
             // window (`SW_SHOWNORMAL`) as the palette's jump from outside does.
             try std.testing.expect(IsZoomed(fixture.hwnd()) != 0);
+        }
+    }.body);
+}
+
+test "settings dialog tests run with an empty keyboard: a modifier in the test thread's key table does not make F2 another chord" {
+    try dialog_test.onHiddenDesktop(struct {
+        fn body() !void {
+            const fixture = try dialog_test.Fixture.start();
+            defer fixture.finish();
+            const settings = &fixture.settings;
+            // A new thread's key table starts as a copy of the real keyboard's,
+            // so a test thread made while the person running the suite holds
+            // Shift starts with it down: put it there.
+            var keys: [256]u8 = @splat(0);
+            keys[VK_SHIFT] = 0x80;
+            try std.testing.expect(dialog_test.SetKeyboardState(&keys) != 0);
+            // F2 is still F2: it edits the key on its own page.
+            _ = try selectReferenceKey(settings, .@"font-size");
+            _ = fixture.pumpKey(@intCast(VK_F2));
+            const edit = settings.fields.edit_font_size orelse return error.TestExpectedControl;
+            try std.testing.expectEqual(edit, sys.GetFocus() orelse return error.TestExpectedFocus);
+            try std.testing.expect(!win32_input.keyPressed(VK_SHIFT));
         }
     }.body);
 }
