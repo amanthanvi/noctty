@@ -190,7 +190,10 @@ pub const Index = struct {
     /// later removal in another file counts. Settings' profile editor asks
     /// this before taking a field out of the file it saves to: when another
     /// file still gives the field a value, deleting the line is not enough,
-    /// and it writes the field's removal instead.
+    /// and it writes the field's removal instead. For `profile-env` with
+    /// `name` null (any of the profile's variables), a variable taken back
+    /// by name does not count against the others, so the answer leans to
+    /// yes: only `<id>:` and `profile-env =` clear them.
     pub fn givesElsewhere(self: *const Index, key: Key, id: []const u8, name: ?[]const u8, path: []const u8, same: SamePath) bool {
         const kind = profileKind(key) orelse return false;
         var live = false;
@@ -210,7 +213,12 @@ pub const Index = struct {
             switch (profileStepEffect(self.config, .{ .set = &self.refused }, kind, key, text, location, id, name)) {
                 .none => {},
                 .set => live = true,
-                .removed, .reset => live = false,
+                // Asked about any of a profile's variables (`name` null),
+                // one taken back leaves the others: only a reset clears them.
+                .removed => if (kind != .env or name != null) {
+                    live = false;
+                },
+                .reset => live = false,
             }
         }
         return live;
@@ -1497,7 +1505,7 @@ test "origin: whether another layer gives a profile field a value, without the l
     defer tmp.cleanup();
     // The included file is read after the config file, and the command line
     // between the two.
-    try tmp.dir.writeFile(.{ .sub_path = "x.conf", .data = "profile-command = py: b.exe\nprofile-command = other: o.exe\nprofile-command = other:\nprofile-env = py: K=\n" });
+    try tmp.dir.writeFile(.{ .sub_path = "x.conf", .data = "profile-command = py: b.exe\nprofile-command = other: o.exe\nprofile-command = other:\nprofile-env = py: L=1\nprofile-env = py: K=\n" });
     try tmp.dir.writeFile(.{ .sub_path = "config", .data = "\n" });
     const path = try tmp.dir.realpathAlloc(alloc, "config");
     defer alloc.free(path);
@@ -1520,6 +1528,8 @@ test "origin: whether another layer gives a profile field a value, without the l
     try std.testing.expect(!problems.givesElsewhere(.@"profile-command", "other", null, path, &same));
     try std.testing.expect(!problems.givesElsewhere(.@"profile-env", "py", "k", path, &same));
     try std.testing.expect(!problems.givesElsewhere(.@"profile-env", "py", "J", path, &same));
+    // Any of py's variables: L is still set there after K is taken back.
+    try std.testing.expect(problems.givesElsewhere(.@"profile-env", "py", null, path, &same));
     try std.testing.expect(problems.givesElsewhere(.@"profile-name", "py", null, path, &same));
     try std.testing.expect(!problems.givesElsewhere(.@"profile-working-directory", "py", null, path, &same));
     // Without the included file's lines: the config file's.

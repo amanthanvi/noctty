@@ -1712,8 +1712,10 @@ class: ?[:0]const u8 = null,
 ///
 /// Settings' Profiles page edits the `profile-command`, `profile-name`,
 /// `profile-working-directory` and `profile-env` lines of the file it saves
-/// to, one field at a time: it changes the line that sets the field, adds a
-/// new profile's lines at the end of the file, and removes a profile by
+/// to, one field at a time: it changes the line that sets the field in place,
+/// puts a field the file has no line for after its profile's last line (or,
+/// for a profile the file has no line for, in a block of its own at the end
+/// of the file), and removes a profile by
 /// deleting its lines, or with `profile-command = <id>:` when something else
 /// still names it (another file or the command line, `profile-order`,
 /// `profile-hidden` or `default-profile`). Every other line stays as it is.

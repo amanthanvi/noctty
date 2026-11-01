@@ -7901,6 +7901,10 @@ pub const SettingsWindow = struct {
         if (edit.name) |name| self.handle.alloc.free(name);
         self.profile_list.metrics = null;
         if (self.profile_list.hwnd) |list| _ = InvalidateRect(list, null, 0);
+        // Typed text was an edit Save and Discard were enabled for
+        // (`profileEditTyped`); a field that goes without changing the
+        // draft takes that back.
+        if (edit.typed) self.updateSaveEnabled();
     }
 
     fn releaseProfileEditProvider(self: *SettingsWindow, edit: *ProfileEdit) void {
@@ -21221,6 +21225,14 @@ test "settings a profile's field is typed into in place, and Save writes its lin
             const list = &settings.profile_list;
             list.selectPosition(2);
             const windows_before = Tree.of(fixture.hwnd()).len;
+
+            // Typing enables Save; Escape puts the field back, and Save with it.
+            try std.testing.expect(fixture.pumpKey(VK_RETURN));
+            typeInto((try openEdit(settings)).hwnd.?, "x");
+            try std.testing.expect(sys.IsWindowEnabled(settings.btn_save.?) != 0);
+            try std.testing.expect(fixture.pumpKey(VK_ESCAPE));
+            try std.testing.expect(sys.IsWindowEnabled(settings.btn_save.?) == 0);
+            try std.testing.expect(!settings.hasPendingChanges());
 
             // Enter opens a text field on the row: one window more, named
             // after the field for UIA, holding the value.
