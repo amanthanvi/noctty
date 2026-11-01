@@ -452,7 +452,7 @@ fn hiddenIn(config: *const Config, id: []const u8) bool {
 /// (`pane_launch.ProfilePlace`), in lower case.
 fn commandLineIds(a: Allocator, config: *const Config) Allocator.Error!std.StringHashMapUnmanaged(void) {
     var last: std.StringHashMapUnmanaged(bool) = .empty;
-    for (config._profile_places.items) |place| {
+    for (config._launch.profile_places.items) |place| {
         if (!std.mem.eql(u8, place.key, @tagName(Config.Key.@"profile-command"))) continue;
         const key = try a.dupe(u8, place.id);
         for (key) |*c| c.* = std.ascii.toLower(c.*);
@@ -553,7 +553,10 @@ pub fn followFile(original: *Config, draft: *Config, replacement: *const Config)
         config.@"profile-name" = try replacement.@"profile-name".clone(a);
         config.@"profile-working-directory" = try replacement.@"profile-working-directory".clone(a);
         config.@"profile-env" = try replacement.@"profile-env".clone(a);
-        config._profile_places = try configpkg.pane_launch.cloneProfilePlaces(replacement, a);
+        // Where those lines were read goes with them; the ledger's copy
+        // is the public way to take it (`pane_launch.Ledger.clone`), and the
+        // rest of that copy stays in the draft's arena unused.
+        config._launch.profile_places = (try replacement._launch.clone(a)).profile_places;
     }
 }
 
