@@ -297,7 +297,9 @@ that govern each symbol you change, or that none does.
 - [launch-and-paths.md](docs/agents/log/launch-and-paths.md): which process a
   terminal starts and with what environment: a new pane's launch
   (`src/config/pane_launch.zig` `prepare`, its `Origin` and `Stamp`,
-  `defaultApplies`), the default `command` (what a config load decides of
+  `defaultApplies`; where `App.createNewTab` and `App.createNewSplit`
+  call it against `applySplitWorkingDirectoryFromSource`), the default
+  `command` (what a config load decides of
   the launch, in the same file: `finalize`, `default-profile` resolution and
   its problems, the automatic default, the `Ledger` a load keeps in
   `Config._launch` (which layer set `command`, the profile places),
