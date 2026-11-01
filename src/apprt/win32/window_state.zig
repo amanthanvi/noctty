@@ -1,5 +1,7 @@
 //! Win32 window state, extracted without changing transition order.
 const win32 = @import("../win32.zig");
+const build_config = @import("../../build_config.zig");
+const win32_types = @import("../win32_types.zig");
 const runtime = win32.window_state_runtime;
 const App = runtime.App;
 const HWND = runtime.HWND;
@@ -195,11 +197,18 @@ pub fn shouldApplyConfigDecorations(decorations_visible_overridden: bool) bool {
 }
 
 /// `positioned`: `WindowKeeps.position`.
-pub fn inheritHostWindowState(self: *App, destination: *Host, source: *Host, positioned: bool) !void {
+pub fn inheritHostWindowState(self: *App, destination: *Host, source: *Host, positioned: bool, config: *const configpkg.Config) !void {
     const dst_hwnd = destination.hwnd orelse return;
     const src_hwnd = source.hwnd orelse return;
     const fullscreen = if (source.activeSurface()) |surface| surface.fullscreen else false;
-    const placed = try newWindowPlacement(self, src_hwnd, fullscreen, dst_hwnd, null);
+    var placed = try newWindowPlacement(self, src_hwnd, fullscreen, dst_hwnd, null);
+    // The destination renderer is not initialized yet. Avoid initially
+    // showing a monitor-sized OpenGL clone; the later surface placement
+    // corrects this provisional choice against the actual backend.
+    if (fullscreen and src_hwnd != dst_hwnd) {
+        const candidate = config.@"window-show-tab-bar" == .never and config.renderer == .opengl;
+        placed.rect = fullscreenRectForCandidate(placed.rect, candidate);
+    }
     if (sys.SetWindowPos(
         dst_hwnd,
         null,
@@ -673,7 +682,123 @@ pub fn applyWindowStart(self: *Surface, start: WindowStart) void {
     }
 }
 
+// Candidate workaround: extend only into a row or column that intersects no
+// other monitor. This is geometry, not proof that the driver stays composed.
+const FullscreenEdges = struct {
+    monitor: RECT,
+    bottom: bool = true,
+    right: bool = true,
+    top: bool = true,
+    left: bool = true,
+
+    fn consider(self: *FullscreenEdges, other: RECT) void {
+        const m = self.monitor;
+        if (std.meta.eql(m, other)) return;
+        const horizontal = other.left < m.right and other.right > m.left;
+        const vertical = other.top < m.bottom and other.bottom > m.top;
+        if (horizontal and other.top <= m.bottom and other.bottom > m.bottom) self.bottom = false;
+        if (vertical and other.left <= m.right and other.right > m.right) self.right = false;
+        if (horizontal and other.top < m.top and other.bottom >= m.top) self.top = false;
+        if (vertical and other.left < m.left and other.right >= m.left) self.left = false;
+    }
+
+    fn extended(self: FullscreenEdges) ?RECT {
+        var rect = self.monitor;
+        // Fail closed at the integer limits, including unusual virtual-display
+        // coordinates; never overflow while applying optional geometry.
+        if (self.bottom and rect.bottom < std.math.maxInt(i32)) {
+            rect.bottom += 1;
+        } else if (self.right and rect.right < std.math.maxInt(i32)) {
+            rect.right += 1;
+        } else if (self.top and rect.top > std.math.minInt(i32)) {
+            rect.top -= 1;
+        } else if (self.left and rect.left > std.math.minInt(i32)) {
+            rect.left -= 1;
+        } else return null;
+        return rect;
+    }
+};
+
+fn candidateFullscreenRect(monitor: RECT) ?RECT {
+    const Collector = struct {
+        fn visit(_: sys.HMONITOR, _: win32_types.HDC, rect: *RECT, data: LPARAM) callconv(.winapi) win32_types.BOOL {
+            const edges: *FullscreenEdges = @ptrFromInt(@as(usize, @bitCast(data)));
+            edges.consider(rect.*);
+            return 1;
+        }
+    };
+    var edges: FullscreenEdges = .{ .monitor = monitor };
+    if (sys.EnumDisplayMonitors(null, null, Collector.visit, @bitCast(@intFromPtr(&edges))) == 0) return null;
+    return edges.extended();
+}
+
+test "win32 fullscreen candidate chooses an unoccupied edge" {
+    const m: RECT = .{ .left = 0, .top = 0, .right = 100, .bottom = 100 };
+    var edges: FullscreenEdges = .{ .monitor = m };
+    // A corner touch or a gap leaves the whole extra row available.
+    edges.consider(.{ .left = 100, .top = 100, .right = 200, .bottom = 200 });
+    edges.consider(.{ .left = 0, .top = 101, .right = 100, .bottom = 200 });
+    try std.testing.expectEqualDeep(RECT{ .left = 0, .top = 0, .right = 100, .bottom = 101 }, edges.extended().?);
+    edges.consider(.{ .left = 0, .top = 100, .right = 100, .bottom = 200 });
+    try std.testing.expectEqualDeep(RECT{ .left = 0, .top = 0, .right = 101, .bottom = 100 }, edges.extended().?);
+    edges.consider(.{ .left = 100, .top = 25, .right = 200, .bottom = 75 });
+    try std.testing.expectEqualDeep(RECT{ .left = 0, .top = -1, .right = 100, .bottom = 100 }, edges.extended().?);
+    edges.consider(.{ .left = 0, .top = -100, .right = 100, .bottom = 0 });
+    try std.testing.expectEqualDeep(RECT{ .left = -1, .top = 0, .right = 100, .bottom = 100 }, edges.extended().?);
+    edges.consider(.{ .left = -100, .top = 0, .right = 0, .bottom = 100 });
+    try std.testing.expect(edges.extended() == null);
+}
+
+fn fullscreenCandidateWanted(tab_bar_shown: bool, core_initialized: bool, opengl_active: bool) bool {
+    return !tab_bar_shown and core_initialized and opengl_active;
+}
+
+test "win32 fullscreen candidate gate requires hidden tabs and initialized OpenGL" {
+    const cases = [_]struct { tabs: bool, core: bool, gl: bool, expected: bool }{
+        .{ .tabs = false, .core = false, .gl = false, .expected = false },
+        .{ .tabs = false, .core = false, .gl = true, .expected = false },
+        .{ .tabs = false, .core = true, .gl = false, .expected = false },
+        .{ .tabs = false, .core = true, .gl = true, .expected = true },
+        .{ .tabs = true, .core = false, .gl = false, .expected = false },
+        .{ .tabs = true, .core = false, .gl = true, .expected = false },
+        .{ .tabs = true, .core = true, .gl = false, .expected = false },
+        .{ .tabs = true, .core = true, .gl = true, .expected = false },
+    };
+    for (cases) |case| try std.testing.expectEqual(case.expected, fullscreenCandidateWanted(case.tabs, case.core, case.gl));
+}
+
+fn surfaceWantsFullscreenCandidate(self: *const Surface) bool {
+    const host = self.host orelse return false;
+    // Do not read the uninitialized core. The renderer may have fallen back
+    // from the configured backend, so check the active backend instead.
+    const opengl_active = if (!self.core_initialized) false else if (comptime build_config.d3d11)
+        self.core_surface.renderer.opengl.load(.acquire) != null
+    else
+        true;
+    return fullscreenCandidateWanted(host.shouldShowTabBar(), self.core_initialized, opengl_active);
+}
+
+test "win32 fullscreen candidate surface gate handles absent and uninitialized core" {
+    var app = placementTestApp();
+    var host: Host = .{ .app = &app, .id = 1 };
+    var surface: Surface = .{ .app = &app, .host = null, .core_initialized = false };
+    try std.testing.expect(!surfaceWantsFullscreenCandidate(&surface));
+    surface.host = &host;
+    try std.testing.expect(!surfaceWantsFullscreenCandidate(&surface));
+}
+
+fn fullscreenRectForCandidate(screen: RECT, candidate: bool) RECT {
+    if (!candidate) return screen;
+    if (candidateFullscreenRect(screen)) |extended| return extended;
+    log.debug("fullscreen composition candidate: no free monitor edge or monitor enumeration failed", .{});
+    return screen;
+}
+
 pub fn enterFullscreen(self: *Surface) !void {
+    return enterFullscreenWithCandidate(self, surfaceWantsFullscreenCandidate(self));
+}
+
+fn enterFullscreenWithCandidate(self: *Surface, candidate: bool) !void {
     const hwnd = self.windowHwnd() orelse return;
     // A minimized window comes back first. SetWindowPos would move only
     // its icon, and it would return from the taskbar as a popup at its
@@ -691,7 +816,7 @@ pub fn enterFullscreen(self: *Surface) !void {
     self.fullscreen = true;
     try self.applyWindowStyle();
 
-    const screen = monitor.info.rcMonitor;
+    const screen = fullscreenRectForCandidate(monitor.info.rcMonitor, candidate);
     if (sys.SetWindowPos(
         hwnd,
         if (self.topmost) HWND_TOPMOST else null,
@@ -978,6 +1103,10 @@ pub fn refreshSharedWindowFrame(self: *Surface) void {
 /// Gives this surface's window the state of `source`'s, keeping what
 /// `keeps` names.
 pub fn inheritWindowStateFrom(self: *Surface, source: *const Surface, keeps: WindowKeeps) !void {
+    return inheritWindowStateFromWithCandidate(self, source, keeps, null);
+}
+
+fn inheritWindowStateFromWithCandidate(self: *Surface, source: *const Surface, keeps: WindowKeeps, candidate: ?bool) !void {
     // The size core init gave the window, before it takes the source's
     // state.
     var own_size: ?WindowSize = null;
@@ -1015,7 +1144,10 @@ pub fn inheritWindowStateFrom(self: *Surface, source: *const Surface, keeps: Win
 
     const hwnd = self.windowHwnd() orelse return;
     const source_hwnd = source.windowHwnd() orelse return;
-    const placed = try newWindowPlacement(self.app, source_hwnd, source.fullscreen, hwnd, own_size);
+    var placed = try newWindowPlacement(self.app, source_hwnd, source.fullscreen, hwnd, own_size);
+    if (source.fullscreen and hwnd != source_hwnd) {
+        placed.rect = fullscreenRectForCandidate(placed.rect, candidate orelse surfaceWantsFullscreenCandidate(self));
+    }
     var flags = newWindowSetPosFlags(keeps.position, own_size != null, placed) | c.SWP_FRAMECHANGED;
     // Another tab of the source's own window is already where it goes.
     if (hwnd == source_hwnd) flags |= c.SWP_NOMOVE | c.SWP_NOSIZE;
@@ -1490,7 +1622,27 @@ test "win32 leaveFullscreen and new_window keep the normal rect of a maximized w
                 try std.testing.expectEqual(maximized, sys.IsZoomed(hwnd) != 0);
                 var before: RECT = undefined;
                 try std.testing.expect(sys.GetWindowRect(hwnd, &before) != 0);
-                try surface.enterFullscreen();
+                const monitor = try windowMonitor(hwnd);
+                try enterFullscreenWithCandidate(&surface, true);
+                var fullscreen_rect: RECT = undefined;
+                try std.testing.expect(sys.GetWindowRect(hwnd, &fullscreen_rect) != 0);
+                try std.testing.expectEqualDeep(candidateFullscreenRect(monitor.info.rcMonitor) orelse monitor.info.rcMonitor, fullscreen_rect);
+                var client: RECT = undefined;
+                try std.testing.expect(sys.GetClientRect(hwnd, &client) != 0);
+                try std.testing.expectEqual(fullscreen_rect.right - fullscreen_rect.left, client.right - client.left);
+                try std.testing.expectEqual(fullscreen_rect.bottom - fullscreen_rect.top, client.bottom - client.top);
+                // A single unzoomed pane, without search or chrome, occupies
+                // the entire fullscreen host client, including the extra pixel.
+                const layout = @import("../win32_layout.zig");
+                const pane = layout.splitSurfacePlacement(
+                    .{ .left = 0, .top = 0, .right = client.right, .bottom = client.bottom },
+                    .{ .x = 0, .y = 0, .width = 1, .height = 1 },
+                    false,
+                    false,
+                    0,
+                );
+                try std.testing.expectEqual(client.right, pane.pane_rect.right);
+                try std.testing.expectEqual(client.bottom, pane.pane_rect.bottom);
                 try surface.leaveFullscreen();
                 try std.testing.expectEqual(maximized, sys.IsZoomed(hwnd) != 0);
                 var rect: RECT = undefined;
@@ -1687,7 +1839,7 @@ test "win32 a host opened from a minimized host starts on screen" {
             // `createHost` gives the new host the source's place before
             // anything is shown.
             const clone = try app.createHost(title, &app.config, .{});
-            try app.inheritHostWindowState(clone, source, false);
+            try app.inheritHostWindowState(clone, source, false, &app.config);
             var rect: RECT = undefined;
             try std.testing.expect(sys.GetWindowRect(clone.hwnd.?, &rect) != 0);
             try std.testing.expectEqual(restored.right - restored.left, rect.right - rect.left);
@@ -1874,6 +2026,54 @@ test "win32 a new window is not maximized by a restore-to-maximized flag left on
     }.body);
 }
 
+test "win32 fullscreen clone host receives provisional candidate before show" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    try runOnHiddenDesktop(struct {
+        fn body() !void {
+            _ = sys.SetThreadDpiAwarenessContext(-4);
+            var core_app: CoreApp = undefined;
+            var app: App = undefined;
+            var source_host: Host = undefined;
+            var clone_host: Host = undefined;
+            var source: Surface = undefined;
+            var session: TestSession = .{};
+            try session.init(.{
+                .core_app = &core_app,
+                .app = &app,
+                .hosts = &.{ .{ .storage = &source_host, .id = 1 }, .{ .storage = &clone_host, .id = 2 } },
+                .surfaces = &.{.{ .storage = &source, .host = &source_host }},
+                .tabs = &.{.{ .host = &source_host, .surface = &source, .id = 1 }},
+            });
+            defer session.deinit();
+            const source_window = try placementTestSurface(&app, 50, 50);
+            defer _ = sys.DestroyWindow(source_window.hwnd.?);
+            const clone_window = try placementTestSurface(&app, 700, 300);
+            defer _ = sys.DestroyWindow(clone_window.hwnd.?);
+            source_host.hwnd = source_window.hwnd;
+            clone_host.hwnd = clone_window.hwnd;
+            source.fullscreen = true;
+            const monitor = try windowMonitor(source_window.hwnd.?);
+            const screen = monitor.info.rcMonitor;
+            const cases = [_]struct { tabs: configpkg.Config.WindowShowTabBar, renderer: configpkg.Config.RendererBackend, candidate: bool }{
+                .{ .tabs = .never, .renderer = .opengl, .candidate = true },
+                .{ .tabs = .always, .renderer = .opengl, .candidate = false },
+                .{ .tabs = .never, .renderer = .d3d11, .candidate = false },
+            };
+            var config = app.config;
+            for (cases) |case| {
+                config.@"window-show-tab-bar" = case.tabs;
+                config.renderer = case.renderer;
+                try inheritHostWindowState(&app, &clone_host, &source_host, false, &config);
+                var rect: RECT = undefined;
+                try std.testing.expect(sys.GetWindowRect(clone_window.hwnd.?, &rect) != 0);
+                const expected = if (case.candidate) candidateFullscreenRect(screen) orelse screen else screen;
+                try std.testing.expectEqualDeep(expected, rect);
+                try std.testing.expect(sys.IsWindowVisible(clone_window.hwnd.?) == 0);
+            }
+        }
+    }.body);
+}
+
 test "win32 a new window from a fullscreen window covers the same monitor" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
     try runOnHiddenDesktop(struct {
@@ -1901,6 +2101,22 @@ test "win32 a new window from a fullscreen window covers the same monitor" {
                 try std.testing.expect(sys.GetWindowRect(clone.hwnd.?, &rect) != 0);
                 try std.testing.expectEqualDeep(RECT{ .left = full.left, .top = full.top, .right = full.right, .bottom = full.bottom }, rect);
             }
+
+            // Use nonzero return state so the copy assertions can fail if
+            // inheritance drops it.
+            source.restore_rect = .{ .left = 30, .top = 40, .right = 670, .bottom = 520 };
+            source.restore_placement.rcNormalPosition = .{ .left = 31, .top = 41, .right = 671, .bottom = 521 };
+            source.restore_placement.showCmd = c.SW_MAXIMIZE;
+            // An OpenGL clone with hidden tabs uses the same candidate as
+            // entering fullscreen. Its return geometry remains the source's.
+            const screen: RECT = .{ .left = full.left, .top = full.top, .right = full.right, .bottom = full.bottom };
+            const candidate_rect = candidateFullscreenRect(screen) orelse screen;
+            try inheritWindowStateFromWithCandidate(&clone, &source, .{}, true);
+            var candidate_actual: RECT = undefined;
+            try std.testing.expect(sys.GetWindowRect(clone.hwnd.?, &candidate_actual) != 0);
+            try std.testing.expectEqualDeep(candidate_rect, candidate_actual);
+            try std.testing.expectEqualDeep(source.restore_rect, clone.restore_rect);
+            try std.testing.expectEqualDeep(source.restore_placement, clone.restore_placement);
 
             // Minimized, the source's own rect is a sliver under the
             // taskbar; the monitor is still where it is fullscreen.
