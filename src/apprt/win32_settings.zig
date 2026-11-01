@@ -20463,9 +20463,21 @@ const ReferenceList = struct {
     /// Select the row at `position` (among those shown), open it, keep it in
     /// view, and tell UIA.
     fn selectPosition(self: *ReferenceList, position: usize) void {
-        if (position >= self.shown_count) return;
+        _ = self.selectRequested(position);
+    }
+
+    /// `selectPosition`, saying whether the row at `position` is the
+    /// selected one now: false when there is none there, or when the
+    /// Profiles page held the selection (a field it could not keep, or a
+    /// kept change that rebuilt the rows, so `position` no longer names that
+    /// row).
+    fn selectRequested(self: *ReferenceList, position: usize) bool {
+        if (position >= self.shown_count) return false;
         const key = self.shown[position];
-        if (self.selected != null and self.selected.? == key) return self.revealSelected(.unless_shown);
+        if (self.selected != null and self.selected.? == key) {
+            self.revealSelected(.unless_shown);
+            return true;
+        }
         if (self.kind == .profiles) {
             // The Profiles page's open field belongs to its row, and saves to
             // its profile: it is kept before the selection moves, as a click
@@ -20476,7 +20488,7 @@ const ReferenceList = struct {
             // does a kept change that rebuilt the rows, which `position` no
             // longer names.
             const before = self.generation();
-            if (!self.owner().profileEditDone() or self.generation() != before) return;
+            if (!self.owner().profileEditDone() or self.generation() != before) return false;
             self.owner().disarmProfileRemoval();
         }
         self.selected = key;
@@ -20484,6 +20496,7 @@ const ReferenceList = struct {
         self.revealSelected(.whole);
         if (self.hwnd) |hwnd| _ = InvalidateRect(hwnd, null, 0);
         if (self.provider) |provider| provider.raiseSelectionChanged(position);
+        return true;
     }
 
     /// Move the selection by `delta` rows; with none selected, to the first.
@@ -21107,7 +21120,11 @@ fn referenceUiaSelectRow(ctx: *anyopaque, index: usize) void {
 
 fn referenceUiaInvokeRow(ctx: *anyopaque, index: usize) void {
     const list = referenceOwner(ctx);
-    list.selectPosition(index);
+    // An Invoke acts on the row it names. When the selection could not move
+    // there (the Profiles page kept an open field first and rebuilt its
+    // rows, or held a field it could not keep), it is dropped, rather than
+    // run on the row still selected; the client invokes again.
+    if (!list.selectRequested(index)) return;
     list.invokeSelected();
 }
 
@@ -22084,6 +22101,49 @@ test "settings a save whose reload could not read an included file whole says so
             const expected = try std.fmt.allocPrint(alloc, "Saved, but the included file {s} could not be read whole, so the saved values may not all be in effect until it can be read.", .{more});
             defer alloc.free(expected);
             try expectSameText(expected, try statusTextOf(settings, &buf));
+        }
+    }.body);
+}
+
+test "settings a UIA Invoke on another profile's row while a change is open keeps the change and opens nothing it did not name" {
+    try dialog_test.onHiddenDesktop(struct {
+        fn body() !void {
+            const keyboard = win32_input.TestingKeyboard.pinNone();
+            defer keyboard.release();
+            const alloc = std.testing.allocator;
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var text: std.Io.Writer.Allocating = .init(alloc);
+            defer text.deinit();
+            for (0..30) |i| try text.writer.print("profile-command = p{d}: cmd{d}.exe\n", .{ i, i });
+            var path: []u8 = &.{};
+            const fixture = try profileFixture(&tmp, text.written(), &path);
+            defer alloc.free(path);
+            defer fixture.finish();
+            const settings = &fixture.settings;
+            const list = &settings.profile_list;
+            // p29's command line row, found by what it is.
+            const p29 = settings.profile_model.findField(.command, "p29", null) orelse return error.TestExpectedRow;
+            const far = for (list.shown[0..list.shown_count], 0..) |id, position| {
+                if (id == p29) break position;
+            } else return error.TestExpectedRow;
+            // p0's command line field, typed into.
+            list.selectPosition(2);
+            try std.testing.expect(fixture.pumpKey(VK_RETURN));
+            typeInto((try openEdit(settings)).hwnd.?, "cmd0.exe /k");
+            // What a UIA client's Invoke on p29's command line row calls.
+            referenceUiaInvokeRow(list, far);
+            // The change was kept for p0, and no field was opened again: the
+            // rows were rebuilt, so the Invoke no longer named a row.
+            try std.testing.expect(settings.profile_edit == null);
+            try expectSameText("cmd0.exe /k", settings.pending.?.@"profile-command".get("p0") orelse return error.TestExpectedCommand);
+            // Invoked again, it opens the row it names.
+            const target = list.shown[far];
+            referenceUiaInvokeRow(list, far);
+            try std.testing.expectEqual(@as(?u16, target), list.selected);
+            try std.testing.expectEqual(ProfileEdit.Kind.command, (try openEdit(settings)).kind);
+            try expectSameText("p29", (try openEdit(settings)).id());
+            try std.testing.expect(fixture.pumpKey(VK_ESCAPE));
         }
     }.body);
 }

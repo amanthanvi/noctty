@@ -2162,6 +2162,13 @@ pub fn settingsDiskVerdict(
         try setSettingsFailureDetail(alloc, detail, "the file {s}", .{path});
         return error.UnsupportedEncoding;
     }
+    // A file the load opened and could not read whole (an include or theme
+    // whose read failed partway through), or could not open since the probe
+    // above: the save's reload would apply the same partial load.
+    if (@import("win32/settings_patch.zig").unreadConfigFile(disk)) |unread| {
+        try setSettingsFailureDetail(alloc, detail, "{s} {s}", .{ if (unread.theme) "the theme file" else "the included file", unread.path });
+        return error.FileUnopenable;
+    }
     return settingsDiskEditConflict(original, pending, disk, state, user_edited);
 }
 
@@ -6869,26 +6876,26 @@ pub fn persistSettings(
     defer terminated.deinit(alloc);
     var profiles_patched: std.ArrayListUnmanaged(u8) = .{};
     defer profiles_patched.deinit(alloc);
-    const final: []const u8 = if (profile_edits.len == 0) ordinary: {
-        patchOrAppendEdits(alloc, raw_before, pending, user_edited, &patched) catch return error.SerializeFailed;
-        break :ordinary patched.items;
-    } else profiles: {
-        // The end of the file is handled once, for both patchers: they get
-        // the text ending in a complete line ending, the file's own kind, so
-        // neither sees a last line without one, and the result gets the
-        // ending the file had (`settings_patch.FileEnd`). A save with no
-        // profile edit is as before: `patchOrAppendEdits` ends a setting it
-        // appends with a newline.
-        const end = settings_patch.FileEnd.of(raw_before);
-        try end.terminate(alloc, raw_before, &terminated);
-        patchOrAppendEdits(alloc, terminated.items, pending, user_edited, &patched) catch return error.SerializeFailed;
+    // The end of the file is handled once, for every save: the patchers get
+    // the text ending in a complete line ending, the file's own kind, so
+    // neither sees a last line without one, and the result gets the ending
+    // the file had (`settings_patch.FileEnd`): a file with no final newline
+    // keeps none, and a bare CR at its end stays one.
+    const end = settings_patch.FileEnd.of(raw_before);
+    try end.terminate(alloc, raw_before, &terminated);
+    patchOrAppendEdits(alloc, terminated.items, pending, user_edited, &patched) catch return error.SerializeFailed;
+    const result = if (profile_edits.len == 0) &patched else profiles: {
         settings_patch.patchProfileEdits(alloc, patched.items, profile_edits, &profiles_patched) catch
             return error.SerializeFailed;
-        // Fails when a mark is not where it was put, or a NUL is left: the
-        // file is then not written.
-        end.restore(&profiles_patched) catch return error.SerializeFailed;
-        break :profiles profiles_patched.items;
+        break :profiles &profiles_patched;
     };
+    // Fails when a mark is not where it was put, or a NUL is left: the file
+    // is then not written.
+    end.restore(result) catch return error.SerializeFailed;
+    const final: []const u8 = result.items;
+    // No config file holds a NUL (`settingsTextProblem` refuses one), so a
+    // NUL here is the save's own, whatever wrote it: nothing is written.
+    if (std.mem.indexOfScalar(u8, final, 0) != null) return error.SerializeFailed;
 
     // Ensure target's parent directory exists. `config_edit.openPath`
     // creates `%APPDATA%\ghostty\` for the default path, but a user
@@ -8077,11 +8084,11 @@ test "win32 settings save of a profile edit and a newly appended setting keeps a
             try std.testing.expect(std.mem.eql(u8, "Python", loaded.@"profile-name".get("py").?));
         } else try std.testing.expect(std.mem.eql(u8, "cmd.exe", loaded.@"profile-command".get("dev").?));
     }
-    // A file that ends in a newline keeps it, and one with no profile edit
-    // is saved as before: `patchOrAppendEdits` ends a setting it appends.
+    // A file that ends in a newline keeps it, and so does a save with no
+    // profile edit keep a file's missing one (it used to add it).
     for ([_]struct { raw: []const u8, edits: []const Edit, expected: []const u8 }{
         .{ .raw = "profile-command = py: python.exe\n", .edits = label, .expected = "profile-command = py: python.exe\nprofile-name = py: Python\ncopy-on-select = true\n" },
-        .{ .raw = "font-size = 12", .edits = &.{}, .expected = "font-size = 12\ncopy-on-select = true\n" },
+        .{ .raw = "font-size = 12", .edits = &.{}, .expected = "font-size = 12\ncopy-on-select = true" },
     }) |case| {
         var scratch = try save_target.Scratch.init();
         defer scratch.deinit();
@@ -8292,6 +8299,73 @@ test "win32 settings save that removes an unterminated last variable line while 
         }, "profile-command = py: cmd\nprofile-env = py: A=1\nprofile-env = py: B=2");
         defer loaded.deinit();
     }
+}
+
+test "win32 settings save of ordinary settings alone keeps a file's missing final newline and a bare CR at its end" {
+    const alloc = std.testing.allocator;
+    // The reader holds a 4,094-byte line ending in a CR, which it takes; a
+    // CRLF after that CR would make it 4,096 bytes, which it skips.
+    const long = "font-family = " ++ "x" ** (4094 - "font-family = ".len);
+    for ([_][2][]const u8{
+        .{ "font-size = 12", "font-size = 12\ncopy-on-select = true" },
+        .{ "# keep\r\nfont-size = 12", "# keep\r\nfont-size = 12\r\ncopy-on-select = true" },
+        .{ "\xef\xbb\xbffont-size = 12", "\xef\xbb\xbffont-size = 12\ncopy-on-select = true" },
+        .{ "font-size = 12\r\n" ++ long ++ "\r", "font-size = 12\r\n" ++ long ++ "\r\ncopy-on-select = true\r" },
+        // Changed in place, it stays the last line with no line ending.
+        .{ "font-size = 12\ncopy-on-select = false", "font-size = 12\ncopy-on-select = true" },
+        // A file that ends in one keeps it.
+        .{ "font-size = 12\n", "font-size = 12\ncopy-on-select = true\n" },
+    }) |case| {
+        var loaded = try settingsTestProfileSave(alloc, case[0], true, &.{}, case[1]);
+        defer loaded.deinit();
+        try std.testing.expect(loaded.@"copy-on-select" == .true);
+        try std.testing.expect(loaded.@"font-size" == 12);
+    }
+}
+
+test "win32 settings save writes no NUL, on any save path, and leaves the file as it was" {
+    const alloc = std.testing.allocator;
+    const raw = "font-size = 12\n";
+    var scratch = try save_target.Scratch.init();
+    defer scratch.deinit();
+    try scratch.tmp.dir.writeFile(.{ .sub_path = "config.ghostty", .data = raw });
+    const path = try scratch.path("config.ghostty");
+    defer alloc.free(path);
+    // An ordinary setting whose value holds a NUL, which nothing in the
+    // window lets through: the save stops before it writes.
+    var pending = try configpkg.Config.default(alloc);
+    defer pending.deinit();
+    try pending.@"font-family".parseCLI(pending._arena.?.allocator(), "a\x00b");
+    var edited: SettingsEditedKeySet = .initEmpty();
+    edited.set(@intFromEnum(SettingsConfigKey.@"font-family"));
+    try std.testing.expectError(error.SerializeFailed, persistSettings(alloc, path, &pending, edited, &.{}, null));
+    const after = try scratch.tmp.dir.readFileAlloc(alloc, "config.ghostty", 1 << 16);
+    defer alloc.free(after);
+    try std.testing.expect(std.mem.eql(u8, raw, after));
+}
+
+test "win32 settings disk check stops an ordinary save on an included file whose read failed partway through" {
+    const alloc = std.testing.allocator;
+    var disk = try configpkg.Config.default(alloc);
+    defer disk.deinit();
+    var buf: [16]u8 = undefined;
+    var failing = @import("../cli/args.zig").TestFailingReader.init("font-size = 13\nfont-fam", &buf);
+    try disk.loadReader(alloc, &failing.interface, "C:\\noctty-test\\more.conf");
+    var same = try configpkg.Config.default(alloc);
+    defer same.deinit();
+    var detail: win32_settings.FailureDetail = .{};
+    defer detail.clear(alloc);
+    var edited: SettingsEditedKeySet = .initEmpty();
+    edited.set(@intFromEnum(SettingsConfigKey.@"font-size"));
+    try std.testing.expectError(error.FileUnopenable, settingsDiskVerdict(alloc, &detail, &same, &same, &disk, .{}, edited));
+    try std.testing.expect(std.mem.eql(u8, "the included file C:\\noctty-test\\more.conf", detail.text orelse return error.TestExpectedDetail));
+    // A whole read: no problem, and no conflict.
+    var whole = try configpkg.Config.default(alloc);
+    defer whole.deinit();
+    var reader: std.Io.Reader = .fixed("font-size = 13\n");
+    try whole.loadReader(alloc, &reader, "C:\\noctty-test\\more.conf");
+    detail.clear(alloc);
+    try std.testing.expect(!try settingsDiskVerdict(alloc, &detail, &same, &same, &whole, .{}, .initEmpty()));
 }
 
 test "win32 settings save writes a config only the extended path form reaches" {

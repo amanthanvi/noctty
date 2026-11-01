@@ -6,6 +6,7 @@
 const std = @import("std");
 const Config = @import("../config/Config.zig");
 const origin = @import("../config/origin.zig");
+const pane_launch = @import("../config/pane_launch.zig");
 const cli_parse = @import("../cli/args.zig");
 const formatter = @import("../config/formatter.zig");
 const help_strings = @import("help_strings");
@@ -720,7 +721,7 @@ pub const Model = struct {
 /// Where the value Settings shows for `key` comes from (`config.origin.of`).
 /// When noctty's command line named a `default-profile` for this process,
 /// Settings shows the config files' value instead
-/// (`Config.defaultProfileFromFiles`), which that argument did not set: its
+/// (`pane_launch.filesDefaultProfile`), which that argument did not set: its
 /// origin is the last file line that set it (`config.origin.ofFiles`).
 pub fn savedOrigin(config: *const Config, key: Key, defaults: ?*const Config) origin.Origin {
     if (key == .@"default-profile" and config._launch.default_profile_cli != null) return origin.ofFiles(config, key);
@@ -1249,8 +1250,9 @@ test "settings reference default-profile's shown value and location, with and wi
         try current.loadIter(alloc, &args);
         try current.loadRecursiveFiles(alloc);
         try current.finalize();
-        // The value Settings shows (`useSavedValues`).
-        const shown = current.defaultProfileFromFiles();
+        // The value Settings shows: the files' (`pane_launch.asWritten`
+        // puts it in Settings' copy).
+        const shown = pane_launch.filesDefaultProfile(&current);
         if (case.value) |want|
             try testing.expectEqualStrings(want, shown orelse return error.TestUnexpectedResult)
         else
@@ -1351,7 +1353,7 @@ test "settings reference saved default-profile keeps its included-file origin un
     // read last. That is where it comes from, not the config file's A.
     try testing.expectEqualStrings("user:py312", current.@"default-profile".?);
     try testing.expectEqual(origin.Origin{ .cli = 0 }, origin.of(&current, .@"default-profile", null));
-    try testing.expectEqualStrings("pwsh.exe", current.defaultProfileFromFiles().?);
+    try testing.expectEqualStrings("pwsh.exe", pane_launch.filesDefaultProfile(&current) orelse return error.TestUnexpectedResult);
     const shown = savedOrigin(&current, .@"default-profile", null);
     try testing.expect(shown == .file);
     try testing.expectEqualStrings(included_path, shown.file.path);

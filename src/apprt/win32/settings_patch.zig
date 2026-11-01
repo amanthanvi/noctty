@@ -578,7 +578,7 @@ pub fn reloadReport(masked: *std.Io.Writer, edits: []const Edit, reload: *const 
 }
 
 /// A file `config`'s load found and could not read whole, if any: a
-/// `config-file` that is there and would not open, or one or a theme whose
+/// `config-file` or theme that is there and would not open, or one whose
 /// read failed partway through (`LineIterator.read_failed`, which reads as
 /// the end of the file). The loader records each as a problem and goes on,
 /// so the layers miss what the file says, and a save that decided from them
@@ -589,6 +589,17 @@ pub fn reloadReport(masked: *std.Io.Writer, edits: []const Edit, reload: *const 
 pub fn unreadConfigFile(config: *const Config) ?Unread {
     for (config._diagnostics.items()) |diag| {
         const message: []const u8 = diag.message;
+        // A theme the load could not open (`themepkg.open`): the light/dark
+        // switch reads it again after the save's probe, and it may have
+        // become unopenable in between. The path is the last quoted name,
+        // just before the error.
+        if (std.mem.startsWith(u8, message, "failed to load theme ") or std.mem.startsWith(u8, message, "not reading theme from ")) {
+            const quote_end = std.mem.lastIndexOf(u8, message, "\": error.") orelse continue;
+            const theme_err = message[quote_end + 3 ..];
+            if (std.mem.eql(u8, theme_err, "error.FileNotFound") or std.mem.eql(u8, theme_err, "error.IsDir")) continue;
+            const quote_start = std.mem.lastIndexOfScalar(u8, message[0..quote_end], '"') orelse continue;
+            return .{ .theme = true, .path = message[quote_start + 1 .. quote_end] };
+        }
         const prefix_len, const theme = for ([_]struct { []const u8, bool }{
             .{ "error opening config-file ", false },
             .{ "error reading config-file ", false },
@@ -1171,6 +1182,55 @@ test "settings patch: FileEnd.restore matches only whole mark lines, and fails w
     try out.appendSlice(alloc, "a\nlast\n");
     try testing.expectError(error.MarksDisturbed, FileEnd.none.restore(&out));
     try testing.expectError(error.MarksDisturbed, FileEnd.bare_cr.restore(&out));
+}
+
+test "settings patch: a theme the light/dark switch could not open is named, a missing one is not" {
+    const alloc = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(.{ .sub_path = "none.conf", .data = "\n" });
+    try tmp.dir.writeFile(.{ .sub_path = "light", .data = "\n" });
+    try tmp.dir.writeFile(.{ .sub_path = "dark", .data = "profile-command = py: python.exe -X dark\n" });
+    const light = try tmp.dir.realpathAlloc(alloc, "light");
+    defer alloc.free(light);
+    const dark = try tmp.dir.realpathAlloc(alloc, "dark");
+    defer alloc.free(dark);
+    const text = try std.fmt.allocPrint(alloc, "theme = light:{s},dark:{s}\nprofile-command = py: python.exe\n", .{ light, dark });
+    defer alloc.free(text);
+    try tmp.dir.writeFile(.{ .sub_path = "config", .data = text });
+    const path = try tmp.dir.realpathAlloc(alloc, "config");
+    defer alloc.free(path);
+    const none = try tmp.dir.realpathAlloc(alloc, "none.conf");
+    defer alloc.free(none);
+    var fresh = try testLoad(alloc, none, path);
+    defer fresh.deinit();
+    try testing.expect(unreadConfigFile(&fresh) == null);
+    // Another program holds the dark theme with no sharing as the switch to
+    // dark reads it, after the save's probe: it does not open.
+    {
+        const wide = try std.os.windows.sliceToPrefixedFileW(null, dark);
+        const handle = std.os.windows.kernel32.CreateFileW(wide.span().ptr, std.os.windows.GENERIC_READ, 0, null, std.os.windows.OPEN_EXISTING, 0, null);
+        if (handle == std.os.windows.INVALID_HANDLE_VALUE) return error.CouldNotHoldFile;
+        defer std.os.windows.CloseHandle(handle);
+        var switched = (try fresh.changeConditionalState(.{ .theme = .dark })) orelse return error.TestExpectedSwitch;
+        defer switched.deinit();
+        const unread = unreadConfigFile(&switched) orelse return error.TestExpectedUnread;
+        try testing.expect(unread.theme);
+        try expectSameText(dark, unread.path);
+    }
+    // A theme that is not there is the loader's to report: not named.
+    var missing = try Config.default(alloc);
+    defer missing.deinit();
+    const arena = missing._arena.?.allocator();
+    for ([_][]const u8{
+        "failed to load theme from the path \"C:\\noctty-test\\gone\"",
+        "failed to load theme \"Gone\" from the file \"C:\\noctty-test\\Gone\": error.FileNotFound",
+        "not reading theme from \"C:\\noctty-test\\dir\": it is a directory",
+    }) |message| try missing._diagnostics.append(arena, .{ .message = try arena.dupeZ(u8, message) });
+    try testing.expect(unreadConfigFile(&missing) == null);
+    // Opening a named theme that failed: named.
+    try missing._diagnostics.append(arena, .{ .message = try arena.dupeZ(u8, "failed to load theme \"Mine\" from the file \"C:\\noctty-test\\Mine\": error.AccessDenied") });
+    try expectSameText("C:\\noctty-test\\Mine", (unreadConfigFile(&missing) orelse return error.TestExpectedUnread).path);
 }
 
 test "settings patch: a reload that could not read a file whole reports the file, not an override" {
