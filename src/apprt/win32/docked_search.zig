@@ -99,7 +99,8 @@ pub const Command = union(enum) {
     /// `navigate_search`, in the core's terms: matches are numbered newest
     /// first, so the visible Up (previous) button asks for `.next`.
     navigate: NavigateSearch,
-    /// `endSearch()`, which reports `.core.ended` before it returns.
+    /// `endSearch()`, which reports `.core.ended` and then, when the core
+    /// had a search, the null clears, before it returns.
     end,
 };
 
@@ -115,12 +116,15 @@ pub const Outcome = struct {
     /// buttons. First, so the toggle is announced before the results.
     toggled: ?Role = null,
     /// Write `view().results` to the chip and raise its live region once.
+    /// Only while the bar is open: a closed bar's chip is hidden.
     results_changed: bool = false,
     /// Clear the scrollbar markers and refresh the scrollbar window.
     markers_changed: bool = false,
     /// `relayout`: the chip appeared or went, so lay the host out again.
-    /// `shown`: write `view().query` to the edit, lay out, repaint and
-    /// focus the edit. `hidden`: hide the controls, lay out and repaint.
+    /// `shown`: write `view().query` to the edit and `view().results` to the
+    /// chip (which may be stale from while the bar was closed), lay out,
+    /// repaint and focus the edit. `hidden`: hide the controls, lay out and
+    /// repaint.
     frame: enum { same, relayout, shown, hidden } = .same,
     /// Refresh the host's search timer (`view().wants_tick`).
     timer_changed: bool = false,
@@ -239,7 +243,9 @@ pub const DockedSearch = struct {
             .tick => if (self.open and self.debounceDue(now_ms)) self.issue() else .{},
             .core => |core| try self.report(core),
         };
-        out.results_changed = !before.eql(self.results());
+        // A hidden chip is left alone, so a close announces nothing; `.shown`
+        // writes it when the bar opens again.
+        out.results_changed = self.open and !before.eql(self.results());
         return out;
     }
 
@@ -304,6 +310,8 @@ pub const DockedSearch = struct {
         };
     }
 
+    /// The core's `endSearch` reports end_search, which hides the bar,
+    /// before its clears, so they reach a closed bar and write no chip.
     const dismiss: Outcome = .{ .handled = true, .core = .end, .focus_terminal = true };
 
     fn key(self: *DockedSearch, k: Input.Key) Outcome {
@@ -1033,4 +1041,49 @@ test "a core clear while open stops wants_tick" {
     try std.testing.expectEqualStrings("Searching", search.view().results.text(&buf));
     // Enter searches again rather than stepping a search that is gone.
     try std.testing.expectEqualStrings("needlex", (try testCommand(try search.apply(testKey(.down, .edit, c.VK_RETURN, .{}), 0), .search)).text);
+}
+
+test "close: end_search, then the clears, on a bar showing results change no chip" {
+    // `endSearch` reports end_search and then the clears, whether the bar's
+    // close sent `.end` or the end_search binding (Escape at the terminal)
+    // called it with no `.end` at all.
+    for ([_]bool{ true, false }) |from_bar| {
+        var search = try testSearching(std.testing.allocator, "needlex");
+        defer search.deinit();
+        _ = try search.apply(.{ .core = .{ .total = .{ .total = 12 } } }, 0);
+        _ = try search.apply(.{ .core = .{ .selected = 3 } }, 0);
+        _ = try search.apply(.{ .core = .{ .rows = &.{7} } }, 0);
+        if (from_bar) try testCommand(try search.apply(.{ .click = .close }, 0), .end);
+        // The close hides the chip and leaves it alone: dropping the totals
+        // must not write "Searching" into it (and raise its live region)
+        // while it is still shown.
+        const ended = try search.apply(.{ .core = .ended }, 0);
+        try std.testing.expectEqual(.hidden, ended.frame);
+        try std.testing.expect(ended.markers_changed);
+        try std.testing.expect(!ended.results_changed);
+        try std.testing.expect(!ended.focus_terminal);
+        try std.testing.expect(ended.core == null);
+        // The clears reach a closed bar: no chip, and no markers to clear.
+        const clears = [_]Input{
+            .{ .core = .{ .total = .{ .total = null } } },
+            .{ .core = .{ .selected = null } },
+            .{ .core = .{ .rows = &.{} } },
+        };
+        for (clears) |in| {
+            const out = try search.apply(in, 0);
+            try std.testing.expect(!out.results_changed);
+            try std.testing.expect(!out.markers_changed);
+            try std.testing.expectEqual(.same, out.frame);
+        }
+        const closed = search.view();
+        try std.testing.expect(!closed.open);
+        try std.testing.expect(!closed.wants_tick);
+        try std.testing.expectEqual(@as(usize, 0), closed.match_rows.len);
+        // A later report under the closed bar writes no chip either, though
+        // its rows still reach the markers.
+        try std.testing.expect(!(try search.apply(.{ .core = .{ .total = .{ .total = 5 } } }, 0)).results_changed);
+        const rows = try search.apply(.{ .core = .{ .rows = &.{4} } }, 0);
+        try std.testing.expect(rows.markers_changed);
+        try std.testing.expect(!rows.results_changed);
+    }
 }

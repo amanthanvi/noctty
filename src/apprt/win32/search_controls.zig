@@ -1503,6 +1503,8 @@ fn applyDockedSearch(self: *Surface, out: docked_search.Outcome) anyerror!void {
         .relayout => if (self.host) |host| try host.layout(),
         .shown => if (self.host) |host| {
             _ = try SurfaceControls.setSearchBarEditText(self, self.docked_search.view().query);
+            // A closed bar's chip is not written, so it may be stale.
+            _ = try self.syncSearchBarResultsText();
             try host.layout();
             host.forceHostCompositionPaint();
             if (self.search_bar_edit_hwnd) |edit_hwnd| {
