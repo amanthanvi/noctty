@@ -124,6 +124,8 @@
         "src/apprt/win32_tween.zig",
         "src/apprt/win32/focus_cue.zig",
         "src/apprt/win32/gdi.zig",
+        "src/apprt/win32/child_window.zig",
+        "src/apprt/win32/text.zig",
         "src/apprt/win32/labels.zig",
         "src/apprt/win32/chrome_layout.zig"
       ]
@@ -141,6 +143,8 @@
         "src/apprt/win32/terminal_window.zig",
         "src/apprt/win32_palette*.zig",
         "src/apprt/win32_universal_palette.zig",
+        "src/apprt/win32/child_window.zig",
+        "src/apprt/win32/text.zig",
         "src/apprt/win32/labels.zig",
         "build.zig.zon"
       ]

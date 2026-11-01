@@ -50,6 +50,33 @@ pub fn childRect(x: i32, y: i32, width: i32, height: i32) RECT {
     };
 }
 
+pub fn rectInset(rect: RECT, inset_x: i32, inset_y: i32) RECT {
+    return .{
+        .left = rect.left + inset_x,
+        .top = rect.top + inset_y,
+        .right = rect.right - inset_x,
+        .bottom = rect.bottom - inset_y,
+    };
+}
+
+pub fn rectUnion(a: RECT, b: RECT) RECT {
+    return .{
+        .left = @min(a.left, b.left),
+        .top = @min(a.top, b.top),
+        .right = @max(a.right, b.right),
+        .bottom = @max(a.bottom, b.bottom),
+    };
+}
+
+pub fn rectOffset(rect: RECT, dx: i32, dy: i32) RECT {
+    return .{
+        .left = rect.left + dx,
+        .top = rect.top + dy,
+        .right = rect.right + dx,
+        .bottom = rect.bottom + dy,
+    };
+}
+
 pub const TabButtonPlacement = struct { top: i32, height: i32 };
 
 /// Keep the restored truncation and bottom edge exact: the parent owns the

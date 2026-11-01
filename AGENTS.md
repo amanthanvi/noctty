@@ -120,9 +120,10 @@ reading step under [Self-Correction Log](#self-correction-log).
   `src/apprt/win32_theme.zig` owns theme policy; focused modules under
   `src/apprt/win32/` own session capture and restore, the quick terminal host,
   window state, surface presentation, the docked search controls, overlay and
-  palette orchestration, the chrome scene, Win32 constants/externs,
-  labels/input, startup/render tracing, chrome rectangle math, and GDI paint
-  primitives.
+  palette orchestration, the chrome scene, child-control plumbing
+  (`child_window.zig`), Win32 constants/externs, labels/input, owned and
+  bounded text (`text.zig`), startup/render tracing, chrome rectangle math,
+  and GDI paint primitives.
 - Windows packaging: `dist/windows/` + `scripts/package-windows.ps1`
 - libghostty-vt headers: `include/ghostty/`
 
@@ -256,8 +257,9 @@ that govern each symbol you change, or that none does.
   (`recreateTitlebarIconFonts`, `createIconFontWithGlyphs`,
   `fontGlyphCoverage`, `drawTitlebarGlyph`), chrome child z-order, host paint
   and invalidation scopes and text caches (`win32/chrome_scene.zig`:
-  `paintChrome`, `invalidateChrome*`, `repaintTopChrome`; `appendOwnedString`),
-  tweens.
+  `paintChrome`, `invalidateChrome*`, `repaintTopChrome`; `appendOwnedString`
+  in `win32/text.zig`), the child placement cache (`ChildPlacement`,
+  `applyChromeChildRect` in `win32/child_window.zig`), tweens.
 - [chrome-overlays.md](docs/agents/log/chrome-overlays.md): the command
   palette (`win32_palette.zig`, `win32/palette_controller.zig`, ranking, MRU
   and its `palette-mru.txt` lines: `writePaletteMruLine`, palette list, the
@@ -268,7 +270,8 @@ that govern each symbol you change, or that none does.
   `invokeConfirmAccept`/`Cancel` lifetime; its paint text in
   `labels.buildOverlayPaintLabelText`), the profile
   overlay, host banners and the update notice, overlay EDIT writes
-  (`setOverlayEditText`).
+  (`setOverlayEditText`, and `syncWindowTextUtf8CachedAfterSet` in
+  `win32/child_window.zig`).
 - [search-scrollbar.md](docs/agents/log/search-scrollbar.md): the docked
   search bar (`win32_search_bar.zig`, `searchEditProc` in
   `win32/search_controls.zig`, visible Up/Down versus
@@ -413,13 +416,16 @@ that govern each symbol you change, or that none does.
   `src/terminal/search/Thread.zig`), the shared Win32 test fixtures
   (`win32/test_support.zig`, `TestSession`), PSReadLine history isolation
   (`scripts/windows-harness-history.ps1`, `--command=cmd.exe` pins), a bash
-  probe's `HISTFILE`, and a test count or result that contradicts the code.
+  probe's `HISTFILE`, a failing test's error name (the installed test
+  executable), and a test count or result that contradicts the code.
 - [tooling.md](docs/agents/log/tooling.md): declaring `extern` functions or
   structs, casting Win32 handles and `LPARAM`/`LRESULT` (`@intCast`,
   `@bitCast`, `@ptrFromInt`), passing `[:0]u16` to text APIs, renaming or moving
   Zig declarations (the `src/apprt/win32.zig` split into `win32/*.zig`),
-  `union(enum)` tests, PowerShell language traps, and `gh`,
-  git and codex commands.
+  adding a name to `src/apprt/win32.zig` or to one of its `*_runtime` bags
+  (the budget in `win32/facade_budget.zig`, and the facade importer list in
+  `Contracts.20-Zig.ps1`), `union(enum)` tests, PowerShell language traps, and
+  `gh`, git and codex commands.
 
 A comment that cites AGENTS.md (by date, issue number, symbol or an old line
 number such as `AGENTS.md:75`) means a log entry. Run

@@ -3,7 +3,7 @@ const win32 = @import("../win32.zig");
 const runtime = win32.chrome_scene_runtime;
 const Allocator = runtime.Allocator;
 const CaptionButton = runtime.CaptionButton;
-const ChildPlacement = runtime.ChildPlacement;
+const ChildPlacement = child_window.ChildPlacement;
 const ChromeRepaintMask = runtime.ChromeRepaintMask;
 const HDC = runtime.HDC;
 const HWND = runtime.HWND;
@@ -24,6 +24,7 @@ const buildProfileHintText = runtime.buildProfileHintText;
 const buildProfileOverlayLabel = runtime.buildProfileOverlayLabel;
 const c = runtime.c;
 const centeredRect = runtime.centeredRect;
+const child_window = @import("child_window.zig");
 const clientTitlebarTheme = runtime.clientTitlebarTheme;
 const confirmBodyPaintRect = runtime.confirmBodyPaintRect;
 const confirmTitlePaintRect = runtime.confirmTitlePaintRect;
@@ -47,7 +48,6 @@ const overlayEditFrameVisible = runtime.overlayEditFrameVisible;
 const overlayEditText = runtime.overlayEditText;
 const overlayFeedbackLineRect = runtime.overlayFeedbackLineRect;
 const overlayLabelReservation = runtime.overlayLabelReservation;
-const overlayPaintCacheDirty = runtime.overlayPaintCacheDirty;
 const paintRectVisible = runtime.paintRectVisible;
 const paint_text = runtime.paint_text;
 const profileChromeAccent = runtime.profileChromeAccent;
@@ -467,12 +467,12 @@ pub const HostScene = struct {
             );
 
             const surface = self.activeSurface();
-            const overlay_paint_dirty = overlayPaintCacheDirty(
+            const overlay_paint_dirty = win32_chrome_state.overlayPaintCacheDirty(
                 self.chrome_text_dirty.overlay,
                 self.overlay_mode,
-                self.cached_overlay_paint_label_w,
-                self.cached_overlay_paint_feedback_w,
-                self.cached_overlay_paint_badge_w,
+                self.cached_overlay_paint_label_w != null,
+                self.cached_overlay_paint_feedback_w != null,
+                self.cached_overlay_paint_badge_w != null,
             );
             if (overlay_paint_dirty) {
                 const overlay_text = std.mem.trim(u8, overlayEditText(self) catch "", " \t\r\n");
