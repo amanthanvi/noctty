@@ -8746,10 +8746,12 @@ pub const App = struct {
     /// shows another layer naming it. The fresh read is held to the rule the
     /// disk check before an ordinary save holds it to (`settingsDiskVerdict`):
     /// an included or theme file that is there and will not open, or does not
-    /// decode, stops the save. So does a file the read could not open or read
-    /// whole (`settings_patch.unreadConfigFile`: an include that would not
-    /// open, or one or a theme whose read failed partway through), and a read
-    /// that fails. Nothing is written then, and `detail` names the file.
+    /// decode, stops the save. So does a file a reading could not open or
+    /// read whole (`settings_patch.unreadConfigFile`: an include that would
+    /// not open, or one or a theme whose read failed partway through), judged
+    /// on the reading in `state`, since switching to it reads the theme
+    /// again; and a read that fails. Nothing is written then, and `detail`
+    /// names the file.
     fn settingsProfileEditsFromDisk(
         arena: Allocator,
         alloc: Allocator,
@@ -8768,13 +8770,28 @@ pub const App = struct {
         defer disk.deinit();
         detail.clear(alloc);
         _ = try settingsDiskVerdict(alloc, detail, original, pending, &disk, state, .initEmpty());
-        if (settings_patch.unreadConfigFile(&disk)) |unread| {
-            const text = std.fmt.allocPrint(alloc, "{s} {s}", .{ if (unread.theme) "the theme file" else "the included file", unread.path }) catch return error.OutOfMemory;
-            defer alloc.free(text);
-            detail.set(alloc, text);
-            return error.FileUnopenable;
+        // Each reading in the app's state first: switching it reads the
+        // selected theme again, and that read is what the removal is decided
+        // from, so it is the one whose problems count. A reading already in
+        // that state is used as it is.
+        var disk_now = disk.changeConditionalState(state) catch |err| return settingsProfileEditsFailed(err);
+        defer if (disk_now) |*value| value.deinit();
+        var held_now = held.changeConditionalState(state) catch |err| return settingsProfileEditsFailed(err);
+        defer if (held_now) |*value| value.deinit();
+        const readings = [_]*const configpkg.Config{
+            if (disk_now) |*value| value else &disk,
+            if (held_now) |*value| value else held,
+        };
+        // The fresh read, and the held config if it was read again here.
+        for (readings[0..if (held_now != null) 2 else 1]) |reading| {
+            if (settings_patch.unreadConfigFile(reading)) |unread| {
+                const text = std.fmt.allocPrint(alloc, "{s} {s}", .{ if (unread.theme) "the theme file" else "the included file", unread.path }) catch return error.OutOfMemory;
+                defer alloc.free(text);
+                detail.set(alloc, text);
+                return error.FileUnopenable;
+            }
         }
-        return settings_patch.editsForSave(arena, alloc, &.{ &disk, held }, state, original, pending, target_path, &settings_reference.samePath) catch |err|
+        return settings_patch.editsForSave(arena, alloc, &readings, state, original, pending, target_path, &settings_reference.samePath) catch |err|
             settingsProfileEditsFailed(err);
     }
 
@@ -9094,6 +9111,74 @@ pub const App = struct {
             try std.testing.expectEqual(@as(usize, 4), edits.len);
             try std.testing.expect(edits[0].field == .command and edits[0].op == .delete);
         }
+    }
+
+    test "settings a profile save stops when the theme of the app's light/dark state cannot be read whole as that state is applied" {
+        const alloc = std.testing.allocator;
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        try tmp.dir.writeFile(.{ .sub_path = "light", .data = "\n" });
+        try tmp.dir.writeFile(.{ .sub_path = "dark", .data = "\n" });
+        const light = try tmp.dir.realpathAlloc(alloc, "light");
+        defer alloc.free(light);
+        const dark = try tmp.dir.realpathAlloc(alloc, "dark");
+        defer alloc.free(dark);
+        const text = try std.fmt.allocPrint(alloc, "theme = light:{s},dark:{s}\nprofile-command = py: python.exe\n", .{ light, dark });
+        defer alloc.free(text);
+        try tmp.dir.writeFile(.{ .sub_path = "config", .data = text });
+        const path = try tmp.dir.realpathAlloc(alloc, "config");
+        defer alloc.free(path);
+        const load = struct {
+            fn config(a: Allocator, file: []const u8) !configpkg.Config {
+                var cfg = try configpkg.Config.default(a);
+                errdefer cfg.deinit();
+                try cfg.loadFile(a, file);
+                try cfg.loadRecursiveFiles(a);
+                try cfg.finalize();
+                return cfg;
+            }
+        }.config;
+        // The config as last read, in the dark state the app is in, from
+        // before the dark theme defined `py`; the draft removes `py`.
+        var loaded = try load(alloc, path);
+        defer loaded.deinit();
+        var held = (try loaded.changeConditionalState(.{ .theme = .dark })).?;
+        defer held.deinit();
+        var pending = try held.clone(alloc);
+        defer pending.deinit();
+        try pending.@"profile-command".parseCLI(pending._arena.?.allocator(), "py:");
+        // The dark theme defines `py` now.
+        try tmp.dir.writeFile(.{ .sub_path = "dark", .data = "profile-command = py: python.exe -X dark\n" });
+        const before = try tmp.dir.readFileAlloc(alloc, "config", 1 << 16);
+        defer alloc.free(before);
+        var detail: win32_settings.FailureDetail = .{};
+        defer detail.clear(alloc);
+        var arena: std.heap.ArenaAllocator = .init(alloc);
+        defer arena.deinit();
+        const dark_state: configpkg.ConditionalState = .{ .theme = .dark };
+
+        // Another program locks the dark theme's bytes: it opens, which the
+        // disk check sees, and its read fails, which only applying the dark
+        // state reads. The theme loader opens its file itself, so a reader
+        // cannot be put in its place; std's `.lock` is the byte-range lock
+        // that does this.
+        {
+            var lock = try tmp.dir.openFile("dark", .{ .mode = .read_write, .lock = .exclusive });
+            defer lock.close();
+            const fresh = try load(alloc, path);
+            try std.testing.expectError(error.FileUnopenable, App.settingsProfileEditsFromDisk(arena.allocator(), alloc, &detail, fresh, &held, dark_state, &held, &pending, path));
+            const expected = try std.fmt.allocPrint(alloc, "the theme file {s}", .{dark});
+            defer alloc.free(expected);
+            try std.testing.expect(std.mem.eql(u8, expected, detail.text.?));
+        }
+        // Nothing was written.
+        const after = try tmp.dir.readFileAlloc(alloc, "config", 1 << 16);
+        defer alloc.free(after);
+        try std.testing.expect(std.mem.eql(u8, before, after));
+        // Read whole: the dark theme's `py` keeps the tombstone.
+        const fresh = try load(alloc, path);
+        const edits = try App.settingsProfileEditsFromDisk(arena.allocator(), alloc, &detail, fresh, &held, dark_state, &held, &pending, path);
+        for (edits) |e| if (e.field == .command) try std.testing.expect(e.op == .unset);
     }
 
     test "SET editor request stays deferred, rechecks safety and reports host failure" {

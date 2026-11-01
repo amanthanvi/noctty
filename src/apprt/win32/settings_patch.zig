@@ -200,9 +200,11 @@ pub const FileEnd = enum {
 
     /// The comment lines `terminate` puts before and after the file's last
     /// line, so `restore` can tell whether the patches kept it. Both
-    /// patchers copy a comment as it is, and a config file never holds a NUL
-    /// (`persistSettings` refuses one), so no line of the file reads as one
-    /// of these.
+    /// patchers copy a comment as it is. A NUL is in neither the file
+    /// (`persistSettings` refuses one) nor any line the save writes
+    /// (`patchProfileEdits` and `writeProfileLine` refuse one), so no other
+    /// line holds one of these; `restore` still matches only whole lines, and
+    /// fails if a NUL is left once the marks are out.
     const before_last = "#\x00 the file's last line follows";
     const after_last = "#\x00 the file's last line was above";
 
@@ -229,26 +231,51 @@ pub const FileEnd = enum {
     }
 
     /// Give `text`, patched from what `terminate` made, the file's own
-    /// ending, and take the marks out. When the last line is still there (as
-    /// it was, or changed in place), the line that is last now ends as the
-    /// file did: exactly one line ending comes off for `.none`, and for
-    /// `.bare_cr` the last one becomes a CR, whether that line is the old
-    /// last line or one added after it. When the last line was deleted,
-    /// nothing changes: every line left keeps its own ending.
-    pub fn restore(self: FileEnd, text: *std.ArrayListUnmanaged(u8)) void {
+    /// ending, and take the marks out. Only the last line itself, kept or
+    /// changed in place, is ever between the marks: a line patched in after
+    /// it goes after the second mark (`patchProfileEdits`), and the ordinary
+    /// patcher adds lines only at the end. So when anything is between them,
+    /// the last line survived, and the line that is last now ends as the file
+    /// did: exactly one line ending comes off for `.none`, and for `.bare_cr`
+    /// the last one becomes a CR, whether that line is the old last line or
+    /// one added after it. When nothing is, the last line was deleted, and
+    /// every line left keeps its own ending. Fails, and the save with it, if
+    /// a mark is not found as a whole line, or a NUL is left once the marks
+    /// are out.
+    pub fn restore(self: FileEnd, text: *std.ArrayListUnmanaged(u8)) error{MarksDisturbed}!void {
         if (self == .terminated) return;
-        const before = std.mem.indexOf(u8, text.items, before_last) orelse return;
+        const before = markLine(text.items, 0, before_last) orelse return error.MarksDisturbed;
         const before_end = lineEnd(text.items, before);
-        const after = std.mem.indexOfPos(u8, text.items, before_end, after_last) orelse return;
+        const after = markLine(text.items, before_end, after_last) orelse return error.MarksDisturbed;
         const after_end = lineEnd(text.items, after);
         const kept = after > before_end;
         removeRange(text, after, after_end);
         removeRange(text, before, before_end);
+        if (std.mem.indexOfScalar(u8, text.items, 0) != null) return error.MarksDisturbed;
         if (!kept) return;
         const ending: usize = if (std.mem.endsWith(u8, text.items, "\r\n")) 2 else if (std.mem.endsWith(u8, text.items, "\n")) 1 else 0;
         if (ending == 0) return;
         text.shrinkRetainingCapacity(text.items.len - ending);
         if (self == .bare_cr) text.appendAssumeCapacity('\r');
+    }
+
+    /// The start of the first line from `from` that is exactly `mark`, with
+    /// its line ending; a match inside another line is none.
+    fn markLine(items: []const u8, from: usize, mark: []const u8) ?usize {
+        var at = from;
+        while (std.mem.indexOfPos(u8, items, at, mark)) |found| : (at = found + 1) {
+            const starts = found == 0 or items[found - 1] == '\n' or
+                (found == utf8_bom.len and std.mem.startsWith(u8, items, utf8_bom));
+            const rest = items[found + mark.len ..];
+            if (starts and (std.mem.startsWith(u8, rest, "\n") or std.mem.startsWith(u8, rest, "\r\n"))) return found;
+        }
+        return null;
+    }
+
+    /// Whether `text`, a line without its ending, is one of the marks: no
+    /// line of the file, so no line a new block needs a blank line after.
+    fn isMark(text: []const u8) bool {
+        return std.mem.eql(u8, text, before_last) or std.mem.eql(u8, text, after_last);
     }
 
     /// The index just past the line ending of the line at `at`.
@@ -314,6 +341,19 @@ fn editLine(arena: Allocator, edit: Edit) ![]const u8 {
 /// the patcher such a line: `persistSettings` gives it text that ends in a
 /// line ending and restores the file's own ending after (`FileEnd`).
 pub fn patchProfileEdits(alloc: Allocator, raw: []const u8, edits: []const Edit, out: *std.ArrayListUnmanaged(u8)) !void {
+    // A NUL is no config text, and could be taken for `FileEnd`'s marks:
+    // an edit holding one (a variable name a file loaded, say) is refused
+    // before anything is patched, so nothing of it is written.
+    for (edits) |e| {
+        const set_value: []const u8 = switch (e.op) {
+            .set => |value| value,
+            else => "",
+        };
+        for ([_][]const u8{ e.id, e.name orelse "", set_value }) |part| {
+            if (std.mem.indexOfScalar(u8, part, 0) != null) return error.NulByte;
+        }
+    }
+
     var arena_state: std.heap.ArenaAllocator = .init(alloc);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
@@ -374,14 +414,19 @@ pub fn patchProfileEdits(alloc: Allocator, raw: []const u8, edits: []const Edit,
             const new_line: Line = .{ .text = new_text, .ending = dominant, .info = readLine(new_text) };
             if (after) |index| {
                 if (lines.items[index].ending == .none) lines.items[index].ending = dominant;
-                try lines.insert(arena, index + 1, new_line);
+                // After the file's marked last line, the new line goes after
+                // the mark that follows it: only that line is ever between
+                // the marks (`FileEnd.restore`).
+                var at = index + 1;
+                if (at < lines.items.len and std.mem.eql(u8, lines.items[at].text, FileEnd.after_last)) at += 1;
+                try lines.insert(arena, at, new_line);
                 continue;
             }
             // A profile this file has no line for: a block of its own at the
             // end of the file.
             var last_kept: ?*Line = null;
             for (lines.items) |*line| {
-                if (!line.deleted) last_kept = line;
+                if (!line.deleted and !FileEnd.isMark(line.text)) last_kept = line;
             }
             if (last_kept) |line| {
                 if (line.ending == .none) line.ending = dominant;
@@ -1018,7 +1063,7 @@ test "settings patch: FileEnd hands the patchers a complete, marked last line, a
             try testing.expect(std.mem.endsWith(u8, out.items, "\n"));
             try testing.expect(std.mem.indexOf(u8, out.items, FileEnd.before_last) != null);
         }
-        case.end.restore(&out);
+        try case.end.restore(&out);
         try expectSameText(case.raw, out.items);
     }
     // The last line deleted: nothing is taken off, so the blank line before
@@ -1046,7 +1091,7 @@ test "settings patch: FileEnd hands the patchers a complete, marked last line, a
             FileEnd.removeRange(&out, first, to);
         }
         try out.appendSlice(alloc, case.append);
-        end_kind.restore(&out);
+        try end_kind.restore(&out);
         try expectSameText(case.restored, out.items);
     }
 }
@@ -1081,6 +1126,26 @@ fn testRemovalOp(readings: []const *const Config, state: configpkg.ConditionalSt
     const edits = try editsForSave(edit_arena.allocator(), alloc, readings, state, opened, &pending, path, &testSamePath);
     for (edits) |e| if (e.field == .command) return e.op;
     return error.TestExpectedRemoval;
+}
+
+test "settings patch: FileEnd.restore matches only whole mark lines, and fails when a mark or a NUL is left" {
+    const alloc = testing.allocator;
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    defer out.deinit(alloc);
+    try FileEnd.none.terminate(alloc, "a\nlast", &out);
+    // A line that holds the second mark's text inside it, ahead of the real
+    // mark, is not taken for it; the mark goes, the NUL it holds stays, and
+    // the save fails.
+    const planted = "profile-env = py: " ++ FileEnd.after_last ++ "=\n";
+    const at = std.mem.indexOf(u8, out.items, FileEnd.before_last).?;
+    const first = FileEnd.lineEnd(out.items, at);
+    try out.insertSlice(alloc, FileEnd.lineEnd(out.items, first), planted);
+    try testing.expectError(error.MarksDisturbed, FileEnd.none.restore(&out));
+    // A mark that is gone fails it too.
+    out.clearRetainingCapacity();
+    try out.appendSlice(alloc, "a\nlast\n");
+    try testing.expectError(error.MarksDisturbed, FileEnd.none.restore(&out));
+    try testing.expectError(error.MarksDisturbed, FileEnd.bare_cr.restore(&out));
 }
 
 test "settings patch: a removal is decided in the light/dark state the app applies, so a profile only the dark theme defines keeps its tombstone" {

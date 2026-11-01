@@ -6884,7 +6884,9 @@ pub fn persistSettings(
         patchOrAppendEdits(alloc, terminated.items, pending, user_edited, &patched) catch return error.SerializeFailed;
         settings_patch.patchProfileEdits(alloc, patched.items, profile_edits, &profiles_patched) catch
             return error.SerializeFailed;
-        end.restore(&profiles_patched);
+        // Fails when a mark is not where it was put, or a NUL is left: the
+        // file is then not written.
+        end.restore(&profiles_patched) catch return error.SerializeFailed;
         break :profiles profiles_patched.items;
     };
 
@@ -8217,6 +8219,81 @@ test "win32 settings save that keeps a file's unterminated last line, changed in
         } else try std.testing.expect(std.mem.eql(u8, "cmd.exe", loaded.@"profile-command".get("dev").?));
     }
 }
+test "win32 settings save that replaces an unterminated file's only profile with a new one puts no blank line before it" {
+    const alloc = std.testing.allocator;
+    const Edit = @import("win32/settings_patch.zig").Edit;
+    // In the order `profileEdits` gives them: a new profile's entry comes
+    // after every existing one, so the removal is patched first.
+    const swap: []const Edit = &.{
+        .{ .field = .command, .id = "py", .op = .delete },
+        .{ .field = .command, .id = "dev", .op = .{ .set = "cmd.exe" } },
+    };
+    // Nothing is left before the new block, so it starts the file; with a
+    // line before it, the blank line between them stays.
+    for ([_][2][]const u8{
+        .{ "profile-command = py: cmd", "profile-command = dev: cmd.exe\n" },
+        .{ "profile-command = py: cmd\r", "profile-command = dev: cmd.exe\r\n" },
+        .{ "font-size = 12\nprofile-command = py: cmd", "font-size = 12\n\nprofile-command = dev: cmd.exe\n" },
+    }) |case| {
+        var loaded = try settingsTestProfileSave(alloc, case[0], false, swap, case[1]);
+        defer loaded.deinit();
+        try std.testing.expect(loaded.@"profile-command".get("py") == null);
+        try std.testing.expect(std.mem.eql(u8, "cmd.exe", loaded.@"profile-command".get("dev").?));
+    }
+}
+
+test "win32 settings save of a removal whose loaded variable name holds a NUL stops, and the file is unchanged" {
+    const alloc = std.testing.allocator;
+    const Edit = @import("win32/settings_patch.zig").Edit;
+    // Sol's case: an include's variable name holds the second mark's text;
+    // its removal, which another file still gives, would write it.
+    const raw = "profile-command = py: cmd";
+    for ([_][]const Edit{
+        &.{.{ .field = .env, .id = "py", .name = "#\x00 the file's last line was above", .op = .unset }},
+        &.{.{ .field = .env, .id = "py", .name = "A", .op = .{ .set = "x\x00y" } }},
+    }) |edits| {
+        var scratch = try save_target.Scratch.init();
+        defer scratch.deinit();
+        try scratch.tmp.dir.writeFile(.{ .sub_path = "config.ghostty", .data = raw });
+        const path = try scratch.path("config.ghostty");
+        defer alloc.free(path);
+        var pending = try configpkg.Config.default(alloc);
+        defer pending.deinit();
+        try std.testing.expectError(error.SerializeFailed, persistSettings(alloc, path, &pending, .initEmpty(), edits, null));
+        const after = try scratch.tmp.dir.readFileAlloc(alloc, "config.ghostty", 1 << 16);
+        defer alloc.free(after);
+        try std.testing.expect(std.mem.eql(u8, raw, after));
+    }
+}
+
+test "win32 settings save that removes an unterminated last variable line while adding another ends the new line, and an in-place change keeps the file unterminated" {
+    const alloc = std.testing.allocator;
+    const raw = "profile-command = py: cmd\nprofile-env = py: A=1";
+    // In the order `profileEdits` gives them: the new variable, then the
+    // removal. The last line goes, so nothing is taken off the new one.
+    {
+        var loaded = try settingsTestProfileSave(alloc, raw, false, &.{
+            .{ .field = .env, .id = "py", .name = "B", .op = .{ .set = "2" } },
+            .{ .field = .env, .id = "py", .name = "A", .op = .delete },
+        }, "profile-command = py: cmd\nprofile-env = py: B=2\n");
+        defer loaded.deinit();
+    }
+    // Changed in place: still the last line, still unterminated.
+    {
+        var loaded = try settingsTestProfileSave(alloc, raw, false, &.{
+            .{ .field = .env, .id = "py", .name = "A", .op = .{ .set = "2" } },
+        }, "profile-command = py: cmd\nprofile-env = py: A=2");
+        defer loaded.deinit();
+    }
+    // Kept, a new variable after it: the new line is last and unterminated.
+    {
+        var loaded = try settingsTestProfileSave(alloc, raw, false, &.{
+            .{ .field = .env, .id = "py", .name = "B", .op = .{ .set = "2" } },
+        }, "profile-command = py: cmd\nprofile-env = py: A=1\nprofile-env = py: B=2");
+        defer loaded.deinit();
+    }
+}
+
 test "win32 settings save writes a config only the extended path form reaches" {
     const alloc = std.testing.allocator;
     var scratch = try save_target.Scratch.init();

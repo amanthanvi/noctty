@@ -211,12 +211,16 @@ fn writeLine(writer: *std.Io.Writer, key: []const u8, id: []const u8, parts: []c
 /// removal `key = id:`. For `profile-env`, `text` is `NAME=VALUE`, or `NAME=`,
 /// which takes the variable back. Settings' profile editor writes its lines
 /// with this, so each reads back as the value it was given. A CR or LF in
-/// `id` or `text` is refused (`error.LineBreak`), and nothing is written.
+/// `id` or `text` is refused (`error.LineBreak`), and so is a NUL
+/// (`error.NulByte`); nothing is written then.
 pub fn writeProfileLine(writer: *std.Io.Writer, comptime kind: Kind, key: []const u8, id: []const u8, text: []const u8) !void {
     // One line, always: a CR or LF in the id or the text would end it, and
     // what follows would be read as a line of its own. Settings refuses
-    // both before a value gets here; this is the last gate.
+    // both before a value gets here; this is the last gate. A NUL is no
+    // config text either, and Settings' save marks lines with one
+    // (`settings_patch.FileEnd`).
     if (std.mem.indexOfAny(u8, id, "\r\n") != null or std.mem.indexOfAny(u8, text, "\r\n") != null) return error.LineBreak;
+    if (std.mem.indexOfScalar(u8, id, 0) != null or std.mem.indexOfScalar(u8, text, 0) != null) return error.NulByte;
     if (text.len == 0) return writer.print("{s} = {s}:\n", .{ key, id });
     if (kind == .name and nameNeedsQuotes(text)) return writeLine(writer, key, id, &.{ "\"", text, "\"" });
     return writeLine(writer, key, id, &.{text});
@@ -443,6 +447,19 @@ pub fn ProfileMap(comptime kind: Kind) type {
             };
         }
     };
+}
+
+test "profile map: writeProfileLine refuses a NUL in the id or the text, and writes nothing" {
+    var buf: [128]u8 = undefined;
+    for ([_][2][]const u8{
+        .{ "py", "PATH=a\x00b" },
+        .{ "py", "#\x00 the file's last line was above=" },
+        .{ "p\x00y", "cmd.exe" },
+    }) |pair| {
+        var writer: std.Io.Writer = .fixed(&buf);
+        try std.testing.expectError(error.NulByte, writeProfileLine(&writer, .env, "profile-env", pair[0], pair[1]));
+        try std.testing.expectEqual(@as(usize, 0), writer.buffered().len);
+    }
 }
 
 test "profile map: writeProfileLine refuses a CR or LF in the id or the text, and writes nothing" {
