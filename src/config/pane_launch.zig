@@ -47,8 +47,8 @@ pub const Origin = union(enum) {
     /// (automation's `+new-tab`, `+new-split`).
     inherit: Source,
     /// An ordinary split, which starts the source pane's profile as it is
-    /// defined now.
-    split: Source,
+    /// defined now, by the key the source recorded (`Stamp.key`).
+    split: ?[]const u8,
     /// A profile chosen from the picker, the palette or a quick slot.
     chosen: *const windows_shell.Profile,
     /// A Session Layout pane, by the profile key it was saved with.
@@ -114,51 +114,35 @@ pub const Stamp = struct {
 pub fn prepare(pane: *Config, origin: Origin, context: anytype) !Stamp {
     switch (origin) {
         .fresh => |fresh| return try startDefault(pane, fresh.named_directory, context.first),
-        .inherit => |source| {
-            const command = source.command orelse return try startSource(pane, source, context);
-            // The snapshot, not the current definition: a reload since the
-            // source started does not change what an inherited launch runs.
-            pane.command = try command.clone(pane._arena.?.allocator());
-            pane._launch.command_from = .layer;
-            const user = if (source.user) |launch| try useUserLaunch(pane, launch) else null;
-            if (source.ssh) try hardenSsh(pane);
-            return .{ .key = source.key, .ssh = source.ssh, .user = user };
-        },
-        .split => |source| return try startSource(pane, source, context),
+        .inherit => |source| return try startInherited(pane, source, context),
+        .split => |key| return try startSource(pane, key, context),
         .chosen => |profile| {
             var stamp = try startChosen(pane, profile);
             stamp.title = windows_shell.sshProfileAlias(profile);
             return stamp;
         },
-        .restored => |saved| {
-            // The ordinary first window runs `initial-command` (`-e`, or the
-            // option), which `Surface.init` prefers while the process's
-            // first pane is made: the first pane of a restored session or a
-            // launched layout would run the wrong command.
-            pane.@"initial-command" = null;
-            // Only its own profile leaves its key on the pane: a later split
-            // of the restored pane would look a refused one up again.
-            if (saved) |key| {
-                if (try startRestored(pane, key, context)) |stamp| return .{ .key = key, .user = stamp.user };
-            }
-            // Restore never connects over SSH by itself: with an SSH
-            // `default-profile` the pane gets the automatic shell, in place
-            // of the SSH command the load made the default (a session saves
-            // an SSH pane without its profile).
-            if (defaultApplies(pane, context.first) and defaultProfile(pane).?.kind == .ssh) {
-                setAutomaticCommand(pane, .automatic, try context.automatic(pane._arena.?.allocator()));
-                return .{};
-            }
-            return try startDefault(pane, false, context.first);
-        },
+        .restored => |saved| return try startRestored(pane, saved, context),
     }
 }
 
-/// The source pane's profile as defined now, by its key, else the default
+/// What the source pane started, as it started it: the snapshot, not the
+/// current definition, so a reload since the source started does not change
+/// what an inherited launch runs. A source that recorded no command (only
+/// headless fixtures make one) starts its profile as a split does.
+fn startInherited(pane: *Config, source: Source, context: anytype) !Stamp {
+    const command = source.command orelse return try startSource(pane, source.key, context);
+    pane.command = try command.clone(pane._arena.?.allocator());
+    pane._launch.command_from = .layer;
+    const user = try useUserLaunch(pane, source.user);
+    if (source.ssh) try hardenSsh(pane);
+    return .{ .key = source.key, .ssh = source.ssh, .user = user };
+}
+
+/// The source pane's profile as defined now, by its `key`, else the default
 /// profile, for a source that recorded no profile or one no longer there.
-fn startSource(pane: *Config, source: Source, context: anytype) !Stamp {
-    if (source.key) |key| {
-        if (defaultProfileForKey(pane, key) orelse try context.listed(key)) |profile| return try startProfile(pane, profile);
+fn startSource(pane: *Config, key: ?[]const u8, context: anytype) !Stamp {
+    if (key) |source_key| {
+        if (defaultProfileForKey(pane, source_key) orelse try context.listed(source_key)) |profile| return try startProfile(pane, profile);
     }
     return try startDefault(pane, false, context.first);
 }
@@ -171,6 +155,30 @@ fn startChosen(pane: *Config, profile: *const windows_shell.Profile) !Stamp {
     return try startProfile(pane, profile);
 }
 
+/// A Session Layout pane: its own profile by the key it was `saved` with,
+/// else the default one, and never a connection over SSH.
+fn startRestored(pane: *Config, saved: ?[]const u8, context: anytype) !Stamp {
+    // The ordinary first window runs `initial-command` (`-e`, or the
+    // option), which `Surface.init` prefers while the process's first pane
+    // is made: the first pane of a restored session or a launched layout
+    // would run the wrong command.
+    pane.@"initial-command" = null;
+    // Only its own profile leaves its key on the pane: a later split of the
+    // restored pane would look a refused one up again.
+    if (saved) |key| {
+        if (try startSavedKey(pane, key, context)) |stamp| return .{ .key = key, .user = stamp.user };
+    }
+    // Restore never connects over SSH by itself: with an SSH
+    // `default-profile` the pane gets the automatic shell, in place of the
+    // SSH command the load made the default (a session saves an SSH pane
+    // without its profile).
+    if (defaultApplies(pane, context.first) and defaultProfile(pane).?.kind == .ssh) {
+        setAutomaticCommand(pane, .automatic, try context.automatic(pane._arena.?.allocator()));
+        return .{};
+    }
+    return try startDefault(pane, false, context.first);
+}
+
 /// A Session Layout pane's own profile, by its saved key: `default-profile`'s
 /// with no list, else its window's, else, with no window yet, the one
 /// discovery lists. Restore relaunches a pane unattended at startup, and an
@@ -178,10 +186,13 @@ fn startChosen(pane: *Config, profile: *const windows_shell.Profile) !Stamp {
 /// key's prefix in any case before any lookup (a state file's case variant
 /// misses the exact SSH lookup, and so would slip past a refusal by kind),
 /// and by its kind after. Null when nothing restorable has the key.
-fn startRestored(pane: *Config, key: []const u8, context: anytype) !?Stamp {
+fn startSavedKey(pane: *Config, key: []const u8, context: anytype) !?Stamp {
     if (std.ascii.startsWithIgnoreCase(key, "ssh:")) return null;
     if (defaultProfileForKey(pane, key)) |profile| return try startSaved(pane, profile);
     if (context.windowed()) return try startSaved(pane, (try context.listed(key)) orelse return null);
+    // The allocator the pane's arena was made on (`Config.shallowClone`; the
+    // app's, for `apprt.surface.newConfig`): the list is freed before this
+    // returns, and the Stamp borrows nothing from it.
     const alloc = pane._arena.?.child_allocator;
     const profiles = try context.discover(alloc);
     defer windows_shell.deinitProfiles(alloc, profiles);
@@ -230,7 +241,7 @@ fn startProfile(pane: *Config, profile: *const windows_shell.Profile) !Stamp {
     pane.command = try profile.command.clone(alloc);
     // `default-profile` no longer applies to this pane.
     pane._launch.command_from = .layer;
-    const user = if (profile.user) |launch| try useUserLaunch(pane, launch) else null;
+    const user = try useUserLaunch(pane, profile.user);
     if (profile.working_directory) |dir| switch (dir) {
         .path => |path| pane.@"working-directory" = .{ .path = try alloc.dupe(u8, path) },
         .home => pane.@"working-directory" = try homeDirectory(pane, profile),
@@ -241,12 +252,13 @@ fn startProfile(pane: *Config, profile: *const windows_shell.Profile) !Stamp {
 }
 
 /// Give `pane` a user profile's variables and command line, and return its
-/// copy of the line. The variables go on a copy: a shallow clone shares the
-/// app config's map, so writing into it would change every later launch. A
-/// profile variable replaces a global `env` variable of the same name in any
-/// case, as Windows compares names (a profile `PATH` replaces a global
-/// `Path`).
-fn useUserLaunch(pane: *Config, launch: windows_shell.UserLaunch) !windows_shell.UserLaunch {
+/// copy of the line; nothing for a launch that is no user profile's. The
+/// variables go on a copy: a shallow clone shares the app config's map, so
+/// writing into it would change every later launch. A profile variable
+/// replaces a global `env` variable of the same name in any case, as Windows
+/// compares names (a profile `PATH` replaces a global `Path`).
+fn useUserLaunch(pane: *Config, user: ?windows_shell.UserLaunch) !?windows_shell.UserLaunch {
+    const launch = user orelse return null;
     const alloc = pane._arena.?.allocator();
     var env = try pane.env.clone(alloc);
     try windows_shell.layerEnv(alloc, &env, launch.env);
@@ -1889,9 +1901,6 @@ test "Windows safe mode swaps only the automatic command for cmd.exe" {
         "cmd.exe",
     ));
     try testing.expectEqualStrings("/D", automatic.command.?.direct[1]);
-    // The default lookup leaves a command that is already set alone.
-    try useAutomatic(&automatic, fixtures.Machine{ .default_shell = "C:\\Program Files\\PowerShell\\7\\pwsh.exe" });
-    try testing.expectEqualStrings("/D", automatic.command.?.direct[1]);
     try testing.expectEqual(Ledger.CommandFrom.recovery, automatic._launch.command_from);
 
     // A command somebody set is not replaced.
@@ -2165,6 +2174,15 @@ fn testDirectory(config: *const Config) []const u8 {
     };
 }
 
+/// That `pane` runs SSH as every launch path hardens it: no shell
+/// integration, in USERPROFILE. Skipped where there is no USERPROFILE.
+fn testExpectHardenedSsh(pane: *const Config) !void {
+    var home_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const home = (try windows_ssh_hosts.userProfileDir(&home_buf)) orelse return error.SkipZigTest;
+    try std.testing.expectEqual(Config.ShellIntegration.none, pane.@"shell-integration");
+    try std.testing.expectEqualStrings(home, testDirectory(pane));
+}
+
 test "prepare: a fresh pane runs default-profile's profile, except the first pane of -e" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
     const testing = std.testing;
@@ -2252,8 +2270,6 @@ test "prepare: a fresh pane runs default-profile's profile, except the first pan
     // An SSH default is hardened and starts in USERPROFILE whatever the
     // launch named, with its alias as the tab title.
     {
-        var home_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const home = (try windows_ssh_hosts.userProfileDir(&home_buf)) orelse return error.SkipZigTest;
         var cfg = try fixtures.loadWith(alloc, "default-profile = ssh:prod\n", .{ .ssh = true });
         defer cfg.deinit();
         for ([_]bool{ false, true }) |named_directory| {
@@ -2264,8 +2280,7 @@ test "prepare: a fresh pane runs default-profile's profile, except the first pan
             try testing.expectEqualStrings("ssh:prod", stamp.key orelse "");
             try testing.expect(stamp.ssh);
             try testing.expectEqualStrings("prod", stamp.title orelse "");
-            try testing.expectEqualStrings(home, testDirectory(&pane));
-            try testing.expectEqual(Config.ShellIntegration.none, pane.@"shell-integration");
+            try testExpectHardenedSsh(&pane);
             try testing.expectEqual(Config.ShellIntegration.detect, cfg.@"shell-integration");
         }
     }
@@ -2375,8 +2390,6 @@ test "prepare: a chosen profile starts in home unless it pins a directory or inh
     // SSH: the two-word argv, hardened, in USERPROFILE (a path, so it
     // outranks an inherited directory), the alias as its title.
     {
-        var ssh_home_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const ssh_home = (try windows_ssh_hosts.userProfileDir(&ssh_home_buf)) orelse return error.SkipZigTest;
         const argv = [_][:0]const u8{ "C:\\Windows\\System32\\OpenSSH\\ssh.exe", "production" };
         const profile: windows_shell.Profile = .{ .kind = .ssh, .key = "ssh:production", .label = "SSH: production", .command = .{ .direct = &argv } };
         var pane = try testPane(alloc, &cfg);
@@ -2388,8 +2401,7 @@ test "prepare: a chosen profile starts in home unless it pins a directory or inh
         try testing.expect(stamp.ssh);
         try testing.expectEqualStrings("production", stamp.title orelse "");
         try testing.expectEqualStrings("production", (try testDirectCommand(pane.command))[1]);
-        try testing.expectEqualStrings(ssh_home, testDirectory(&pane));
-        try testing.expectEqual(Config.ShellIntegration.none, pane.@"shell-integration");
+        try testExpectHardenedSsh(&pane);
     }
 }
 
@@ -2452,8 +2464,6 @@ test "prepare: an inherited launch repeats the source's as it started" {
     // An SSH source's command, hardened again; a pane that ran no profile
     // (`-e`) has no key to repeat.
     {
-        var home_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const home = (try windows_ssh_hosts.userProfileDir(&home_buf)) orelse return error.SkipZigTest;
         const ssh = [_][:0]const u8{ "C:\\Windows\\System32\\OpenSSH\\ssh.exe", "production" };
         var pane = try testPane(alloc, &cfg);
         defer pane.deinit();
@@ -2463,8 +2473,7 @@ test "prepare: an inherited launch repeats the source's as it started" {
         try testing.expectEqualStrings("ssh:production", stamp.key orelse "");
         try testing.expect(stamp.ssh and stamp.title == null and stamp.user == null);
         try testing.expectEqualStrings("production", (try testDirectCommand(pane.command))[1]);
-        try testing.expectEqual(Config.ShellIntegration.none, pane.@"shell-integration");
-        try testing.expectEqualStrings(home, testDirectory(&pane));
+        try testExpectHardenedSsh(&pane);
 
         const one_shot = [_][:0]const u8{ "cmd.exe", "/c", "one-shot.cmd" };
         var e_pane = try testPane(alloc, &cfg);
@@ -2473,13 +2482,10 @@ test "prepare: an inherited launch repeats the source's as it started" {
         try testing.expect(e_stamp.key == null and e_stamp.user == null);
         try testing.expectEqualStrings("one-shot.cmd", (try testDirectCommand(e_pane.command))[2]);
     }
-    // A source with no command (headless fixtures): its profile by its key,
-    // the default's without a list, else the window's; with neither, the
-    // default profile.
+    // A source with no command (headless fixtures) starts its key's
+    // profile as a split does; with none, the default profile.
     for ([_]struct { key: ?[]const u8, started: []const u8, listed: usize }{
-        .{ .key = "USER:PY", .started = "user:py", .listed = 0 },
         .{ .key = "user:tool", .started = "user:tool", .listed = 1 },
-        .{ .key = "user:gone", .started = "user:py", .listed = 1 },
         .{ .key = null, .started = "user:py", .listed = 0 },
     }) |row| {
         var pane = try testPane(alloc, &cfg);
@@ -2522,7 +2528,7 @@ test "prepare: a split starts the source's profile as it is defined now" {
         var pane = try testPane(alloc, &cfg);
         defer pane.deinit();
         var context: fixtures.Context = .{ .window = profiles };
-        const stamp = try prepare(&pane, .{ .split = .{ .key = row.key } }, &context);
+        const stamp = try prepare(&pane, .{ .split = row.key }, &context);
         testing.expectEqualStrings(row.started, stamp.key orelse "") catch |err| {
             std.debug.print("split of {s}\n", .{row.key});
             return err;
@@ -2536,31 +2542,27 @@ test "prepare: a split starts the source's profile as it is defined now" {
 
     // An SSH profile is hardened on this path too.
     {
-        var ssh_home_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const ssh_home = (try windows_ssh_hosts.userProfileDir(&ssh_home_buf)) orelse return error.SkipZigTest;
         const argv = [_][:0]const u8{ "C:\\Windows\\System32\\OpenSSH\\ssh.exe", "production" };
         const ssh = [_]windows_shell.Profile{.{ .kind = .ssh, .key = "ssh:production", .label = "SSH: production", .command = .{ .direct = &argv } }};
         var pane = try testPane(alloc, &cfg);
         defer pane.deinit();
         pane.@"shell-integration" = .bash;
         var context: fixtures.Context = .{ .window = &ssh };
-        const stamp = try prepare(&pane, .{ .split = .{ .key = "ssh:production", .ssh = true } }, &context);
+        const stamp = try prepare(&pane, .{ .split = "ssh:production" }, &context);
         try testing.expectEqualStrings("ssh:production", stamp.key orelse "");
         try testing.expect(stamp.ssh and stamp.title == null);
-        try testing.expectEqual(Config.ShellIntegration.none, pane.@"shell-integration");
-        try testing.expectEqualStrings(ssh_home, testDirectory(&pane));
+        try testExpectHardenedSsh(&pane);
     }
 
-    // A source that ran no profile, a one-shot command among them: the
-    // command is not repeated, and with no default profile nothing starts.
+    // A source that ran no profile (a one-shot command among them): with no
+    // default profile nothing starts, and no list is asked.
     {
         var plain = try fixtures.load(alloc, .{});
         defer plain.deinit();
-        const one_shot = [_][:0]const u8{ "cmd.exe", "/c", "one-shot.cmd" };
         var pane = try testPane(alloc, &plain);
         defer pane.deinit();
         var context: fixtures.Context = .{ .window = profiles };
-        const stamp = try prepare(&pane, .{ .split = .{ .command = .{ .direct = &one_shot } } }, &context);
+        const stamp = try prepare(&pane, .{ .split = null }, &context);
         try testing.expect(stamp.key == null and pane.command == null);
         try testing.expectEqual(@as(usize, 0), context.listed_count);
     }
@@ -2651,6 +2653,31 @@ test "prepare: a restored pane runs its saved profile, and never connects over S
         try testing.expectEqual(row.discovered_count, context.discover_count);
         if (row.key == null) try testing.expect(pane.command == null);
     }
+    // Visual Studio 2022's pair, hidden under `newest` behind 18's, still
+    // restores by its key, with a window and without one.
+    {
+        const vs_newest = try testVisualStudioPair(alloc);
+        defer windows_shell.deinitProfiles(alloc, vs_newest);
+        try testing.expectEqual(@as(usize, 4), vs_newest.len);
+        for (vs_newest) |profile| try testing.expectEqual(std.mem.startsWith(u8, profile.key, "vs:486bb794:"), profile.hidden);
+        for ([_]bool{ true, false }) |with_window| {
+            var pane = try testPane(alloc, &plain);
+            defer pane.deinit();
+            var context: fixtures.Context = if (with_window) .{ .window = vs_newest } else .{ .discovered = vs_newest };
+            const stamp = try prepare(&pane, .{ .restored = "vs:486bb794:cmd" }, &context);
+            try testing.expectEqualStrings("vs:486bb794:cmd", stamp.key orelse "");
+            try testing.expect(std.mem.indexOf(u8, (stamp.user orelse return error.TestUnexpectedResult).command_line, "\\2022\\Community\\") != null);
+            try testing.expectEqualStrings(home, testDirectory(&pane));
+        }
+        var pane = try testPane(alloc, &plain);
+        defer pane.deinit();
+        var context: fixtures.Context = .{ .window = vs_newest };
+        const stamp = try prepare(&pane, .{ .restored = "vs:486bb794:pwsh" }, &context);
+        try testing.expectEqualStrings("vs:486bb794:pwsh", stamp.key orelse "");
+        try testing.expectEqualStrings("-NoExit", (try testDirectCommand(pane.command))[1]);
+        try testing.expectEqualStrings(home, testDirectory(&pane));
+    }
+
     // The pane's own profile alone: none of the default profile's variables.
     {
         var pane = try testPane(alloc, &cfg);
@@ -2677,6 +2704,32 @@ test "prepare: a restored pane runs its saved profile, and never connects over S
             try testing.expectEqualStrings("C:\\work", testDirectory(&pane));
         }
     }
+}
+
+/// Visual Studio 18 and 2022 as `windows_shell.appendVisualStudioProfiles`
+/// lists them under `newest`, from fixed answers: 2022's pair is hidden.
+fn testVisualStudioPair(alloc: Allocator) ![]windows_shell.Profile {
+    const vs = windows_shell.visual_studio;
+    const Fixed = struct {
+        pub fn query(_: @This(), a: Allocator) !vs.Discovery {
+            const list = try a.alloc(vs.Instance, 2);
+            list[0] = .{ .id = "486bb794", .path = "C:\\Program Files\\Microsoft Visual Studio\\2022\\Community", .version_text = "17.14.37628.2", .version = vs.version(17, 14), .install_date = 1, .suffix = "2022" };
+            list[1] = .{ .id = "6bb7cfd9", .path = "C:\\Program Files\\Microsoft Visual Studio\\18\\Community", .version_text = "18.10.12201.205", .version = vs.version(18, 10), .install_date = 2, .suffix = "18" };
+            return .{ .instances = list };
+        }
+        pub fn installDirectory(_: @This(), _: []const u8) bool {
+            return true;
+        }
+        pub fn file(_: @This(), _: []const u8) bool {
+            return true;
+        }
+        pub fn lookup(_: @This(), a: Allocator, exe: []const u8) !?[]u8 {
+            if (std.mem.eql(u8, exe, "cmd.exe")) return try a.dupe(u8, "C:\\Windows\\System32\\cmd.exe");
+            if (std.mem.eql(u8, exe, "pwsh.exe")) return try a.dupe(u8, "C:\\Program Files\\PowerShell\\7\\pwsh.exe");
+            return null;
+        }
+    };
+    return try windows_shell.appendVisualStudioProfiles(alloc, try alloc.alloc(windows_shell.Profile, 0), .newest, .x64, Fixed{}, Fixed{}, null);
 }
 
 test "the automatic default is the shell the machine finds, where nothing else set command" {

@@ -21003,7 +21003,7 @@ test "win32 a split or an elevated window of a default-profile pane needs no pro
     // nothing): the config has the profile.
     var config = app.config.shallowClone(alloc);
     defer config.deinit();
-    const split = try configpkg.pane_launch.prepare(&config, .{ .split = .{ .key = "USER:PY" } }, app.launchContext(&unlisted));
+    const split = try configpkg.pane_launch.prepare(&config, .{ .split = "USER:PY" }, app.launchContext(&unlisted));
     try std.testing.expectEqualStrings("user:py", split.key orelse "");
     try std.testing.expectEqualStrings("cmd.exe", config.command.?.direct[0]);
     try std.testing.expect(unlisted.profiles == null);

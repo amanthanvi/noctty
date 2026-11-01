@@ -132,6 +132,7 @@ const onHostCloakEvent = win32.onHostCloakEvent;
 const ownedBytesEquals = paint_text.ownedBytesEquals;
 const paint_text = @import("text.zig");
 const palette_controller = @import("palette_controller.zig");
+const pane_launch = configpkg.pane_launch;
 const persistMergedRecoveryReadyAtPath = win32.persistMergedRecoveryReadyAtPath;
 const persistSettings = win32.persistSettings;
 const pixel_format = @import("pixel_format.zig");
@@ -983,7 +984,7 @@ pub const App = struct {
                 errdefer config.deinit();
                 // Recovery runs `cmd /D`, which loads no profile and skips AutoRun,
                 // and so needs no PATH search.
-                try configpkg.pane_launch.useRecovery(&config);
+                try pane_launch.useRecovery(&config);
                 try config.finalize();
                 break :config config;
             } else try configpkg.Config.load(core_app.alloc),
@@ -3804,8 +3805,8 @@ pub const App = struct {
                 // the app config's profiles and launch, so those are put back
                 // before it; the arguments cannot set any of them
                 // (`forwardedKeyAllowed`).
-                if (forwarded_arguments) |argv| if (argv.len > 0) try configpkg.pane_launch.keepSources(&config, &self.config);
-                const launch = try configpkg.pane_launch.prepare(&config, .{ .fresh = .{
+                if (forwarded_arguments) |argv| if (argv.len > 0) try pane_launch.keepSources(&config, &self.config);
+                const launch = try pane_launch.prepare(&config, .{ .fresh = .{
                     .named_directory = if (forwarded_arguments) |argv| forwardedArgvSetsKey(argv, "working-directory") else false,
                 } }, self.launchContext(null));
                 if (config.@"launch-layout") |name| {
@@ -5232,7 +5233,7 @@ pub const App = struct {
         Hook.calls = 0;
         app.test_create_window_surface = &Hook.createSurface;
 
-        const launch: configpkg.pane_launch.Stamp = .{ .key = "ssh:prod", .ssh = true, .title = "prod" };
+        const launch: pane_launch.Stamp = .{ .key = "ssh:prod", .ssh = true, .title = "prod" };
         // The key's copy fails, then the title's: no surface is made, so a
         // restore's transaction never misses one, and nothing leaks.
         for (0..2) |fail_index| {
@@ -5285,7 +5286,7 @@ pub const App = struct {
 
     /// What `surface` launched, for a pane that repeats its launch or starts
     /// its profile.
-    fn launchSource(surface: *const Surface) configpkg.pane_launch.Source {
+    fn launchSource(surface: *const Surface) pane_launch.Source {
         return .{
             .command = surface.launch_command,
             .user = surface.launch_user,
@@ -5321,8 +5322,8 @@ pub const App = struct {
         // explicit target's directory, which reads the command for its WSL
         // fallback.
         const inherited: ?*Surface = if (inherit_launch_config) source else null;
-        var launch: configpkg.pane_launch.Stamp = if (inherited) |surface|
-            try configpkg.pane_launch.prepare(&config, .{ .inherit = launchSource(surface) }, self.launchContext(surface.host))
+        var launch: pane_launch.Stamp = if (inherited) |surface|
+            try pane_launch.prepare(&config, .{ .inherit = launchSource(surface) }, self.launchContext(surface.host))
         else
             .{};
         if (source) |surface| {
@@ -5336,7 +5337,7 @@ pub const App = struct {
             }
         }
         // A tab that inherits no launch runs the default profile, if any.
-        if (inherited == null) launch = try configpkg.pane_launch.prepare(&config, .{ .fresh = .{} }, self.launchContext(null));
+        if (inherited == null) launch = try pane_launch.prepare(&config, .{ .fresh = .{} }, self.launchContext(null));
         if (working_directory) |cwd| try applyAutomationWorkingDirectory(&config, cwd);
         const surface = try self.createWindowSurface(&config, default_title, .{
             .host_id = if (source) |value| value.host_id else null,
@@ -5363,11 +5364,11 @@ pub const App = struct {
         var config = try apprt.surface.newConfig(self.core_app, &self.config, .split);
         defer config.deinit();
         config.@"working-directory" = self.config.@"working-directory";
-        const origin: configpkg.pane_launch.Origin = if (inherit_launch_config)
+        const origin: pane_launch.Origin = if (inherit_launch_config)
             .{ .inherit = launchSource(source) }
         else
-            .{ .split = launchSource(source) };
-        const launch = try configpkg.pane_launch.prepare(&config, origin, self.launchContext(source.host));
+            .{ .split = source.launch_profile_key };
+        const launch = try pane_launch.prepare(&config, origin, self.launchContext(source.host));
         // An SSH launch keeps its hardened directory, an SSH default's too:
         // a local pane's directory means nothing to ssh.exe.
         if (shouldInheritSplitWorkingDirectory(source.launched_ssh or launch.ssh)) {
@@ -5572,7 +5573,7 @@ pub const App = struct {
         key: []const u8,
         temporary: *?[]windows_shell.Profile,
     ) !?*const windows_shell.Profile {
-        if (configpkg.pane_launch.defaultProfileForKey(&self.config, key)) |profile| return profile;
+        if (pane_launch.defaultProfileForKey(&self.config, key)) |profile| return profile;
         if (source_host) |host| return try host.profileForKey(key);
         const profiles = try listProfilesForConfig(self.core_app.alloc, &self.config, windows_shell.listProfiles);
         temporary.* = profiles;
@@ -5597,7 +5598,7 @@ pub const App = struct {
             },
         );
         defer config.deinit();
-        const launch = try configpkg.pane_launch.prepare(&config, .{ .chosen = profile }, self.launchContext(null));
+        const launch = try pane_launch.prepare(&config, .{ .chosen = profile }, self.launchContext(null));
 
         const tab_id = switch (open_target) {
             .split => blk: {
@@ -5626,7 +5627,7 @@ pub const App = struct {
     pub fn createWindow(self: *App, title: LPCWSTR) !void {
         // The first window runs the app config itself, and a clone only when
         // a default profile's variables, line and directory go on it.
-        if (!configpkg.pane_launch.defaultApplies(&self.config, self.core_app.first)) {
+        if (!pane_launch.defaultApplies(&self.config, self.core_app.first)) {
             _ = try self.createWindowSurface(&self.config, title, .{});
             return;
         }
@@ -5634,7 +5635,7 @@ pub const App = struct {
         defer config.deinit();
         // Explorer's "Open in noctty" and a jump-list folder start a first
         // window with `--working-directory=` when no instance runs.
-        const launch = try configpkg.pane_launch.prepare(&config, .{ .fresh = .{
+        const launch = try pane_launch.prepare(&config, .{ .fresh = .{
             .named_directory = self.explicit_startup_working_directory,
         } }, self.launchContext(null));
         _ = try self.createWindowSurface(&config, title, .{ .launch = launch });
@@ -6073,8 +6074,8 @@ pub const App = struct {
     pub fn defaultShellProfileIndex(self: *const App, profiles: []const windows_shell.Profile) ?usize {
         // A `default-profile` the picker does not show (hidden) leaves the
         // choice to the caller rather than to its command's shell.
-        if (configpkg.pane_launch.defaultProfile(&self.config) != null) return null;
-        return windows_shell.profileIndexForDefaultCommand(profiles, configpkg.pane_launch.nocttyCommand(&self.config) orelse return null);
+        if (pane_launch.defaultProfile(&self.config) != null) return null;
+        return windows_shell.profileIndexForDefaultCommand(profiles, pane_launch.nocttyCommand(&self.config) orelse return null);
     }
 
     pub fn applyLauncherQuickSlotPreferences(self: *App, profiles: []windows_shell.Profile) void {
@@ -10000,7 +10001,7 @@ pub const App = struct {
 test "win32 Settings' profile choices follow what the loaded config made of the value" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
     const alloc = std.testing.allocator;
-    const fixtures = configpkg.pane_launch.fixtures;
+    const fixtures = pane_launch.fixtures;
     // No window, so no window's list at all.
     var app: App = undefined;
     app.registry.hosts = .empty;
