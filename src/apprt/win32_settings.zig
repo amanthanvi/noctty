@@ -2436,6 +2436,13 @@ pub const SettingsWindow = struct {
     /// How many times a row's origin was looked up (`config.origin.of`), for
     /// tests.
     proof_origin_lookups: u32 = 0,
+    /// The file Settings saves to as it is now, against `current`, for the
+    /// notes of rows whose value came from one of its lines (`targetNow`):
+    /// read once per config Settings holds, when a note first names a line
+    /// of a file. Null when Settings names no file or cannot read it.
+    target_now: ?TargetNow = null,
+    /// Whether `target_now` was read for the config Settings holds.
+    target_read: bool = false,
     /// For tests: the annotation service the marks use in place of oleacc's.
     annotation_service: ?*IAccPropServices = null,
     /// A row's Reset button: the shown page's rows that differ from their
@@ -7227,11 +7234,18 @@ pub const SettingsWindow = struct {
         if (self.current) |*current| {
             self.proof_origin_lookups +%= 1;
             const found = settings_reference.savedOrigin(current, field_model.form_fields[index].descriptor.key, null);
+            const changed = switch (found) {
+                .file => |file| self.originLineChanged(file),
+                else => false,
+            };
             var writer: std.Io.Writer = .fixed(&note.buf);
-            writeOriginNote(&writer, found) catch {
+            writeOriginNote(&writer, found, changed) catch {
                 // A file name too long for the label: the line alone.
                 writer = .fixed(&note.buf);
-                if (found == .file) writer.print("Set in a file, line {d}", .{found.file.line}) catch {};
+                if (found == .file) {
+                    writer.print("Set in a file, line {d}", .{found.file.line}) catch {};
+                    if (changed) writer.writeAll(origin_changed_note) catch {};
+                }
             };
             note.len = @intCast(writer.buffered().len);
         }
@@ -7239,6 +7253,53 @@ pub const SettingsWindow = struct {
         if (std.mem.eql(u8, old.text(), note.text())) return false;
         old.* = note;
         return true;
+    }
+
+    /// Whether `file`, the line a row's value came from, is a line of the file
+    /// Settings saves to that no longer holds what the loader took there
+    /// (`settings_reference.TargetLines.holds`). Not known, and so not said,
+    /// for any other file, which Settings does not read.
+    fn originLineChanged(self: *SettingsWindow, file: config_origin.Origin.File) bool {
+        const now = self.targetNow() orelse return false;
+        return settings_reference.samePath(file.path, now.path) and !now.lines.holds(file.line);
+    }
+
+    /// The file Settings saves to as it is now (`target_now`), read the first
+    /// time it is asked for after the config changed.
+    fn targetNow(self: *SettingsWindow) ?*const TargetNow {
+        if (!self.target_read) {
+            self.target_read = true;
+            self.target_now = self.readTargetNow();
+        }
+        return if (self.target_now) |*now| now else null;
+    }
+
+    fn readTargetNow(self: *const SettingsWindow) ?TargetNow {
+        const read = self.handle.configSource orelse return null;
+        const current = if (self.current) |*config| config else return null;
+        const alloc = self.handle.alloc;
+        var source = read(self.handle.ctx, alloc);
+        defer source.deinit(alloc);
+        const path = source.path orelse return null;
+        var arena: std.heap.ArenaAllocator = .init(alloc);
+        defer arena.deinit();
+        const text: []const u8 = switch (source.file) {
+            .missing => "",
+            .bytes => |bytes| (settings_reference.decodeConfigText(arena.allocator(), bytes) catch return null) orelse return null,
+            .none, .unavailable => return null,
+        };
+        var lines = settings_reference.TargetLines.init(alloc, current, path, text) catch return null;
+        const owned = alloc.dupe(u8, path) catch {
+            lines.deinit(alloc);
+            return null;
+        };
+        return .{ .path = owned, .lines = lines };
+    }
+
+    fn forgetTarget(self: *SettingsWindow) void {
+        if (self.target_now) |*now| now.deinit(self.handle.alloc);
+        self.target_now = null;
+        self.target_read = false;
     }
 
     /// `current` changed: every made row's origin note again, on every page,
@@ -7338,6 +7399,7 @@ pub const SettingsWindow = struct {
     fn referenceConfigChanged(self: *SettingsWindow) void {
         self.reference_stale = true;
         self.keybind_stale = true;
+        self.forgetTarget();
         self.syncOriginNotes();
         if (self.hwnd == null) return;
         const list = self.sectionList(self.active_section) orelse return;
@@ -7458,6 +7520,7 @@ pub const SettingsWindow = struct {
     /// window opens with.
     fn forgetReference(self: *SettingsWindow) void {
         const alloc = self.handle.alloc;
+        self.forgetTarget();
         for ([_]*ReferenceList{ &self.reference_list, &self.keybind_list }) |list| {
             list.forgetOpenText(alloc);
             list.forgetRows(alloc);
@@ -7628,8 +7691,9 @@ fn descriptionHash(text: []const u8) u64 {
 /// (`writeOriginNote`). Empty for a default, or a value noctty worked out.
 const OriginNote = struct {
     /// A file name of 255 UTF-16 units is at most 765 bytes of UTF-8, and
-    /// "Set by the theme " and ", line " with the number take under 64.
-    const capacity = 255 * 3 + 64;
+    /// "Set by the theme " and ", line " with the number take under 64, and
+    /// `origin_changed_note` under 32 more.
+    const capacity = 255 * 3 + 96;
     len: u16 = 0,
     buf: [capacity]u8 = undefined,
 
@@ -7638,8 +7702,24 @@ const OriginNote = struct {
     }
 };
 
+/// The file Settings saves to as it is now (`SettingsWindow.target_now`).
+const TargetNow = struct {
+    path: []const u8,
+    lines: settings_reference.TargetLines,
+
+    fn deinit(self: *TargetNow, alloc: std.mem.Allocator) void {
+        alloc.free(self.path);
+        self.lines.deinit(alloc);
+    }
+};
+
+/// What a form row's note adds when the line it names has changed since the
+/// file was read (`SettingsWindow.originLineChanged`).
+const origin_changed_note = "; the file has changed since";
+
 /// Write what a form row's label says about `found` (`config.origin`).
-fn writeOriginNote(writer: *std.Io.Writer, found: config_origin.Origin) std.Io.Writer.Error!void {
+/// `changed`: the line named no longer holds what the loader took there.
+fn writeOriginNote(writer: *std.Io.Writer, found: config_origin.Origin, changed: bool) std.Io.Writer.Error!void {
     switch (found) {
         .file => |file| {
             const name = std.fs.path.basename(file.path);
@@ -7647,6 +7727,7 @@ fn writeOriginNote(writer: *std.Io.Writer, found: config_origin.Origin) std.Io.W
                 try writer.print("Set by the theme {s}, line {d}", .{ name, file.line })
             else
                 try writer.print("Set in {s}, line {d}", .{ name, file.line });
+            if (changed) try writer.writeAll(origin_changed_note);
         },
         .cli => try writer.writeAll("Set on the command line"),
         .default, .derived, .unplaced => {},
@@ -11814,6 +11895,9 @@ const dialog_test = struct {
         /// The command line that reload reads after `save_path`, with its
         /// places, as `Config.load` reads noctty's.
         reload_args: []const []const u8 = &.{},
+        /// The file `AppHandle.configSource` reads, as the App's does; none
+        /// when null.
+        source_path: ?[]const u8 = null,
         masked: [@import("win32.zig").settings_masked_keys_capacity]u8 = undefined,
         masked_len: usize = 0,
         /// What the All settings page's "Copy name" handed the App last, and
@@ -11918,6 +12002,7 @@ const dialog_test = struct {
                 .profileChoices = &profileChoices,
                 .maskedKeys = &maskedKeys,
                 .onClosed = &onClosed,
+                .configSource = &configSource,
             });
             self.settings.wheel_lines_override = 3;
             return self;
@@ -11938,6 +12023,12 @@ const dialog_test = struct {
         fn maskedKeys(ctx: *anyopaque) ?[]const u8 {
             const self: *Fixture = @ptrCast(@alignCast(ctx));
             return if (self.masked_len == 0) null else self.masked[0..self.masked_len];
+        }
+
+        fn configSource(ctx: *anyopaque, alloc: std.mem.Allocator) settings_reference.ConfigSource {
+            const self: *Fixture = @ptrCast(@alignCast(ctx));
+            const path = self.source_path orelse return .{};
+            return readConfigSource(alloc, path);
         }
 
         fn finish(self: *Fixture) void {
@@ -16523,7 +16614,7 @@ test "settings an origin note names a file by its name and line, the theme, or t
         .{ .found = .unplaced, .text = "" },
     }) |case| {
         var writer: std.Io.Writer = .fixed(&buf);
-        try writeOriginNote(&writer, case.found);
+        try writeOriginNote(&writer, case.found, false);
         try std.testing.expectEqualStrings(case.text, writer.buffered());
     }
 }
@@ -16816,6 +16907,50 @@ test "settings Save of a default profile the command line overrides names the co
                 "Saved, but a later config file or command-line option overrides default-profile (the command line), so the saved value is not used.",
                 settings.noteText(),
             );
+        }
+    }.body);
+}
+
+test "settings an origin-note says when the line it names has changed since the file was read" {
+    try dialog_test.onHiddenDesktop(struct {
+        fn body() !void {
+            const alloc = std.testing.allocator;
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            try tmp.dir.writeFile(.{ .sub_path = "noctty.conf", .data = "font-size = 13\nscrollback-limit = 5000\n" });
+            const path = try tmp.dir.realpathAlloc(alloc, "noctty.conf");
+            defer alloc.free(path);
+
+            const fixture = try dialog_test.Fixture.prepare(false);
+            defer fixture.finish();
+            try fixture.config.loadFile(alloc, path);
+            fixture.source_path = path;
+            const settings = &fixture.settings;
+            try settings.open();
+            dialog_test.makeAllSections(settings);
+            const font = settings.controlIndex(settings.fields.edit_font_size.?).?;
+            const scrollback = settings.controlIndex(settings.fields.edit_scrollback.?).?;
+            try std.testing.expectEqualStrings("Set in noctty.conf, line 1", settings.origin_notes[font].text());
+            try std.testing.expectEqualStrings("Set in noctty.conf, line 2", settings.origin_notes[scrollback].text());
+
+            // The first line taken out, and the config not read again: both
+            // lines named no longer hold what was read there.
+            try tmp.dir.writeFile(.{ .sub_path = "noctty.conf", .data = "scrollback-limit = 5000\n" });
+            settings.externalConfigChanged(&fixture.config, 2);
+            try std.testing.expectEqualStrings("Set in noctty.conf, line 1; the file has changed since", settings.origin_notes[font].text());
+            try std.testing.expectEqualStrings("Set in noctty.conf, line 2; the file has changed since", settings.origin_notes[scrollback].text());
+
+            // Read again: the line is current, and so is the note.
+            var reloaded = try Config.default(alloc);
+            reloaded.loadFile(alloc, path) catch |err| {
+                reloaded.deinit();
+                return err;
+            };
+            fixture.config.deinit();
+            fixture.config = reloaded;
+            settings.externalConfigChanged(&fixture.config, 3);
+            try std.testing.expectEqualStrings("Set in noctty.conf, line 1", settings.origin_notes[scrollback].text());
+            try std.testing.expectEqualStrings("", settings.origin_notes[font].text());
         }
     }.body);
 }

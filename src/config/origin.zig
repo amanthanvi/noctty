@@ -120,49 +120,91 @@ pub const Lines = struct {
 /// the loader did.
 pub const SamePath = *const fn (a: []const u8, b: []const u8) bool;
 
-/// The lines of the file `path` that set `key` and apply now, by the rules
-/// `of` counts a step by: the line parsed (or the key takes any text), it
-/// names the key or a compatibility name that sets it, and its conditions
-/// match. A line the loader refused is not among them. A line a later step
-/// overrides still is: this says which lines set the key, and `of` which one
-/// is in effect.
-pub fn linesIn(config: *const Config, key: Key, path: []const u8, same: SamePath) Lines {
-    return fileLines(config, key, path, same, null);
-}
+/// A step at a line of a file that applies now, as the loader recorded it.
+pub const FileStep = struct {
+    /// 1-based.
+    line: usize,
+    /// The argument, as `cli.args.LineIterator` gives the line
+    /// (`--key=value`). Borrows from the config.
+    text: []const u8,
+    location: Location,
+};
 
-/// Whether line `line` of the file `path` sets `key` and applies now
-/// (`linesIn`'s rules).
-pub fn setsAt(config: *const Config, key: Key, path: []const u8, line: usize, same: SamePath) bool {
-    return fileLines(config, key, path, same, line).count != 0;
-}
-
-fn fileLines(config: *const Config, key: Key, path: []const u8, same: SamePath, only: ?usize) Lines {
-    var result: Lines = .{};
+/// The steps at lines of the file `path` that apply now (their conditions
+/// match), in line order, from one pass over the log. `same` compares paths.
+/// A step the loader refused is among them: `keysSet` says which keys a step
+/// set. The texts borrow from `config`; the slice is the caller's, from
+/// `alloc`.
+pub fn fileSteps(alloc: std.mem.Allocator, config: *const Config, path: []const u8, same: SamePath) std.mem.Allocator.Error![]FileStep {
+    var steps: std.ArrayList(FileStep) = .empty;
+    errdefer steps.deinit(alloc);
     for (config._replay_steps.items) |step| switch (step) {
-        .arg => |arg| countLine(&result, config, arg.value, arg.location, key, path, same, only),
+        .arg => |arg| try addFileStep(alloc, &steps, arg.value, arg.location, path, same),
         .conditional_arg => |arg| {
             const applies = for (arg.conditions) |cond| {
                 if (!config._conditional_state.match(cond)) break false;
             } else true;
-            if (applies) countLine(&result, config, arg.arg, arg.location, key, path, same, only);
+            if (applies) try addFileStep(alloc, &steps, arg.arg, arg.location, path, same);
         },
         // The arguments after `-e` are its command's words. The loader puts
         // every file's lines before the marker.
         .@"-e" => break,
         .expand, .diagnostic => {},
     };
-    return result;
+    // In line order already, unless the file was read more than once.
+    std.sort.block(FileStep, steps.items, {}, struct {
+        fn lessThan(_: void, a: FileStep, b: FileStep) bool {
+            return a.line < b.line;
+        }
+    }.lessThan);
+    return steps.toOwnedSlice(alloc);
 }
 
-fn countLine(result: *Lines, config: *const Config, text: []const u8, location: Location, key: Key, path: []const u8, same: SamePath, only: ?usize) void {
+fn addFileStep(alloc: std.mem.Allocator, steps: *std.ArrayList(FileStep), text: []const u8, location: Location, path: []const u8, same: SamePath) std.mem.Allocator.Error!void {
     const file = switch (location) {
         .file => |file| file,
         .cli, .none => return,
     };
-    if (only) |line| if (file.line != line) return;
-    if (!same(file.path, path) or !stepSets(config, text, location, key)) return;
-    result.count +|= 1;
-    result.last = file.line;
+    if (!same(file.path, path)) return;
+    try steps.append(alloc, .{ .line = file.line, .text = text, .location = location });
+}
+
+/// The most keys one step sets (`keysSet`).
+pub const max_keys_per_step = most: {
+    var most: usize = 1;
+    for (compatibility) |entry| most = @max(most, entry.keys.len);
+    break :most most;
+};
+
+/// The keys `step` set, written to `out`: the key its name names, or the keys
+/// of the compatibility name it uses, each only when the loader took the
+/// step for it (`stepSets`, the rule `of` counts by). None for a step the
+/// loader refused.
+pub fn keysSet(config: *const Config, step: FileStep, out: *[max_keys_per_step]Key) []const Key {
+    if (!std.mem.startsWith(u8, step.text, "--")) return out[0..0];
+    const body = step.text[2..];
+    const eq = std.mem.indexOfScalar(u8, body, '=');
+    const name = body[0 .. eq orelse body.len];
+    const value: ?[]const u8 = if (eq) |at| body[at + 1 ..] else null;
+    // As `setsKey`: a compatibility name whose handler takes the value sets
+    // its keys; otherwise the name is the key.
+    var own: [1]Key = undefined;
+    const candidates: []const Key = for (compatibility) |entry| {
+        if (std.mem.eql(u8, entry.name, name)) {
+            if (entry.applies(value)) break entry.keys;
+            break &.{};
+        }
+    } else &.{};
+    const keys: []const Key = if (candidates.len != 0) candidates else if (std.meta.stringToEnum(Key, name)) |key| named: {
+        own[0] = key;
+        break :named &own;
+    } else &.{};
+    var n: usize = 0;
+    for (keys) |key| if (stepSets(config, step.text, step.location, key)) {
+        out[n] = key;
+        n += 1;
+    };
+    return out[0..n];
 }
 
 fn scan(config: *const Config, key: Key, defaults: ?*const Config, comptime files_only: bool) Origin {

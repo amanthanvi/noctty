@@ -6,6 +6,7 @@
 const std = @import("std");
 const Config = @import("../config/Config.zig");
 const origin = @import("../config/origin.zig");
+const cli_parse = @import("../cli/args.zig");
 const formatter = @import("../config/formatter.zig");
 const help_strings = @import("help_strings");
 const field_model = @import("win32_settings_fields.zig");
@@ -316,48 +317,77 @@ pub fn decodeConfigText(alloc: std.mem.Allocator, bytes: []const u8) std.mem.All
     };
 }
 
-/// Count the lines of config file `text` that name each key, whether or not
-/// the loader took them. A line names a key when, without the spaces around
-/// it, it starts with the key's name followed by `=` (or is the name alone);
-/// lines starting with `#` are comments. That a line names a key does not
-/// make it set the key: the loader may have refused its value, or not read
-/// the line yet (`scanUntaken`).
-pub fn scanLines(text: []const u8, out: *[key_count]Lines) void {
-    out.* = @splat(.{});
-    var number: usize = 0;
-    var lines = std.mem.splitScalar(u8, text, '\n');
-    while (lines.next()) |line| {
-        number +|= 1;
-        const key = lineKey(line) orelse continue;
-        const entry = &out[index(key)];
-        entry.count +|= 1;
-        entry.last = number;
-    }
-}
+/// The file Settings saves to as it is now, read against the steps the
+/// loader took from it (`current`'s replay log). Built in one pass over the
+/// log (`config.origin.fileSteps`) and one over the text.
+///
+/// A line of the file still holds what the loader took when its text, read
+/// the way the loader reads a line (`cli.args.LineIterator`: trimmed, the
+/// `key = value` split trimmed, quotes around the value dropped), is the
+/// argument the loader recorded at that line number. A line the file has
+/// changed since, or that moved because lines above it were added or taken
+/// out, does not hold it, even when it holds the same assignment elsewhere.
+pub const TargetLines = struct {
+    /// The line numbers (1-based) that still hold what the loader took.
+    held: std.DynamicBitSetUnmanaged = .{},
+    /// For each key, the lines that hold an assignment the loader took for it
+    /// (by its name, or a compatibility name that sets it).
+    set: [key_count]Lines = @splat(.{}),
+    /// For each key, the lines that name it and do not hold an assignment the
+    /// loader took for it: refused, or written since the file was read.
+    untaken: [key_count]Lines = @splat(.{}),
 
-/// Count the lines of `text`, the file at `path`, that name a key the loader
-/// did not take from that line in `current` (`config.origin.setsAt`): a line
-/// whose value it refused, or one written after it read the file.
-fn scanUntaken(text: []const u8, current: *const Config, path: []const u8, out: *[key_count]Lines) void {
-    out.* = @splat(.{});
-    var number: usize = 0;
-    var lines = std.mem.splitScalar(u8, text, '\n');
-    while (lines.next()) |line| {
-        number +|= 1;
-        const key = lineKey(line) orelse continue;
-        if (origin.setsAt(current, key, path, number, &samePath)) continue;
-        const entry = &out[index(key)];
-        entry.count +|= 1;
-        entry.last = number;
+    /// `text` is the file at `path` as it is now, decoded
+    /// (`decodeConfigText`); `current` is the config read from it.
+    pub fn init(alloc: std.mem.Allocator, current: *const Config, path: []const u8, text: []const u8) std.mem.Allocator.Error!TargetLines {
+        const steps = try origin.fileSteps(alloc, current, path, &samePath);
+        defer alloc.free(steps);
+        var self: TargetLines = .{};
+        errdefer self.deinit(alloc);
+        var reader: std.Io.Reader = .fixed(text);
+        var lines: cli_parse.LineIterator = .{ .r = &reader };
+        var at: usize = 0;
+        while (lines.next()) |entry| {
+            const number = lines.line;
+            while (at < steps.len and steps[at].line < number) at += 1;
+            var keys_buf: [origin.max_keys_per_step]Key = undefined;
+            var taken: []const Key = &.{};
+            for (steps[at..]) |step| {
+                if (step.line != number) break;
+                if (!std.mem.eql(u8, step.text, entry)) continue;
+                if (self.held.bit_length <= number) try self.held.resize(alloc, number + 1, false);
+                self.held.set(number);
+                taken = origin.keysSet(current, step, &keys_buf);
+                break;
+            }
+            for (taken) |key| mark(&self.set[index(key)], number);
+            const named = argKey(entry) orelse continue;
+            if (std.mem.indexOfScalar(Key, taken, named) == null) mark(&self.untaken[index(named)], number);
+        }
+        return self;
     }
-}
 
-/// The key a line of a config file names (`scanLines`), if any.
-fn lineKey(line: []const u8) ?Key {
-    const trimmed = std.mem.trim(u8, line, " \t\r");
-    if (trimmed.len == 0 or trimmed[0] == '#') return null;
-    const name = std.mem.trimRight(u8, trimmed[0 .. std.mem.indexOfScalar(u8, trimmed, '=') orelse trimmed.len], " \t");
-    return std.meta.stringToEnum(Key, name);
+    pub fn deinit(self: *TargetLines, alloc: std.mem.Allocator) void {
+        self.held.deinit(alloc);
+        self.* = .{};
+    }
+
+    /// Whether line `line` still holds what the loader took there.
+    pub fn holds(self: *const TargetLines, line: usize) bool {
+        return line < self.held.bit_length and self.held.isSet(line);
+    }
+
+    fn mark(lines: *Lines, number: usize) void {
+        lines.count +|= 1;
+        lines.last = number;
+    }
+};
+
+/// The key an argument (`--key=value`, or `--key`) names, if any.
+fn argKey(arg: []const u8) ?Key {
+    if (!std.mem.startsWith(u8, arg, "--")) return null;
+    const body = arg[2..];
+    return std.meta.stringToEnum(Key, body[0 .. std.mem.indexOfScalar(u8, body, '=') orelse body.len]);
 }
 
 /// Write `key`'s value in `config` the way a config file sets it: a line
@@ -416,16 +446,20 @@ pub const Row = struct {
     /// them, when that is known; else their value too).
     differs: bool = false,
     /// The lines of the config file Settings saves to that set the key, as
-    /// the loader took them (`config.origin.linesIn`): a line whose value it
-    /// refused is not among them.
+    /// the loader took them and as they still are (`TargetLines.set`): a line
+    /// whose value it refused, or one changed since, is not among them.
     set: Lines = .{},
-    /// The lines of that file that name the key and that the loader did not
-    /// take (`scanUntaken`): refused, or written after the config was read.
-    /// They do not take effect.
+    /// The lines of that file that name the key and do not hold an
+    /// assignment the loader took for it (`TargetLines.untaken`): refused, or
+    /// written since the config was read. They do not take effect.
     untaken: Lines = .{},
     /// Where the effective value came from (`config.origin`); a file's path
     /// is the model's own copy.
     origin: origin.Origin = .default,
+    /// Whether `origin` is a line of the file Settings saves to that no
+    /// longer holds what the loader took there (`TargetLines.holds`): the
+    /// file changed since it was read, at that line or above it.
+    origin_changed: bool = false,
     /// Whether the key's lines can add up rather than replace one another
     /// (`accumulates`): the last line is then not always the only one that
     /// counts.
@@ -469,13 +503,19 @@ pub const Model = struct {
         var arena: std.heap.ArenaAllocator = .init(gpa);
         errdefer arena.deinit();
         const alloc = arena.allocator();
-        var untaken: [key_count]Lines = @splat(.{});
+        // The file as it is now, against what the loader took from it.
+        var target: TargetLines = .{};
+        defer target.deinit(gpa);
         const lines_known = switch (file) {
-            .none, .missing => true,
+            .none => true,
+            .missing => missing: {
+                target = try TargetLines.init(gpa, current, file_path orelse "", "");
+                break :missing true;
+            },
             .unavailable => false,
             .bytes => |bytes| known: {
                 const text = try decodeConfigText(alloc, bytes) orelse break :known false;
-                if (file_path) |path| scanUntaken(text, current, path, &untaken) else scanLines(text, &untaken);
+                target = try TargetLines.init(gpa, current, file_path orelse "", text);
                 break :known true;
             },
         };
@@ -500,7 +540,7 @@ pub const Model = struct {
             while (values.next()) |_| more +|= 1;
 
             // The lines of the file that set the key, as the loader took them.
-            const set: Lines = if (file_path) |path| origin.linesIn(current, key, path, &samePath) else .{};
+            const set = target.set[i];
             // A key `finalize` works out differs when a line of the file sets
             // it; a line the loader refused does not. With the file unread
             // that is not known, so its value decides, as for any other key:
@@ -530,6 +570,7 @@ pub const Model = struct {
             const search_text = try search.toOwnedSlice();
             for (search_text) |*c| c.* = std.ascii.toLower(c.*);
 
+            const found = savedOrigin(current, key, defaults);
             rows[i] = .{
                 .doc = plain,
                 .summary = summaryOf(plain),
@@ -538,15 +579,19 @@ pub const Model = struct {
                 .search = search_text,
                 .differs = differs,
                 .set = set,
-                .untaken = untaken[i],
+                .untaken = target.untaken[i],
                 .accumulates = accumulates(key),
-                .origin = switch (savedOrigin(current, key, defaults)) {
+                .origin = switch (found) {
                     .file => |place| .{ .file = .{ .path = try alloc.dupe(u8, place.path), .line = place.line, .kind = place.kind } },
                     // Only `finalize` gives a key a value no step set, and
                     // only these keys; any other such value was written into
                     // the config in memory, which is not where it came from.
                     .derived => |how| if (resolvedWhenUnset(key)) .{ .derived = how } else .default,
                     else => |other| other,
+                },
+                .origin_changed = lines_known and switch (found) {
+                    .file => |place| if (file_path) |path| samePath(place.path, path) and !target.holds(place.line) else false,
+                    else => false,
                 },
             };
         }
@@ -598,13 +643,21 @@ pub const Model = struct {
     }
 
     /// A value from line `line` of the file Settings saves to, the line the
-    /// loader took (`Row.origin`), as the form rows name it. The lines of the
+    /// loader took (`Row.origin`), as the form rows name it. When that line no
+    /// longer holds what the loader took (`Row.origin_changed`), it is still
+    /// named, as where the value came from, and said to have changed. The lines of the
     /// file that set the key (`Row.set`) need not end there: a line under
     /// another name (`bold-is-bright` for `bold-color`, `gtk-single-instance`
     /// for `single-instance`) can win over them. Such a line before or after
     /// the one taken is said not to take effect (`writeOtherLines`).
     fn writeTargetLine(self: *const Model, writer: *std.Io.Writer, row: *const Row, line: usize) !void {
         const path = self.file.?;
+        // The line no longer holds what was read there: still where the value
+        // came from, but the line named may now hold other text.
+        if (row.origin_changed) {
+            try writer.print("Set on line {d} of {s} when noctty read it; that line has changed since.", .{ line, path });
+            return self.writeOtherLines(writer, row, null);
+        }
         if (row.set.count > 1 and row.set.last == line)
             try writer.print("Set on {d} lines of {s}, the last on line {d}.", .{ row.set.count, path, line })
         else
@@ -695,7 +748,7 @@ test "settings reference knows which keys' lines add up" {
 /// Whether two Windows paths name the same file as written: letters in any
 /// case, and `/` for `\`. The loader and Settings each name the config file
 /// by its absolute path, but not always with the same letters.
-fn samePath(a: []const u8, b: []const u8) bool {
+pub fn samePath(a: []const u8, b: []const u8) bool {
     if (a.len != b.len) return false;
     for (a, b) |x, y| {
         const nx = if (x == '/') '\\' else std.ascii.toLower(x);
@@ -767,20 +820,22 @@ test "settings reference summary is the first sentence" {
 }
 
 test "settings reference counts the lines of the config file that name each key" {
-    var lines: [key_count]Lines = undefined;
-    scanLines(
-        "# font-size = 99 is a comment\r\n" ++
-            "font-size = 14\r\n" ++
-            "\r\n" ++
-            "  keybind = ctrl+a=copy_to_clipboard\r\n" ++
-            "keybind=ctrl+b=paste_from_clipboard\r\n" ++
-            "not-a-key = 1\r\n" ++
-            "font-size=15",
-        &lines,
-    );
-    try testing.expectEqual(Lines{ .count = 2, .last = 7 }, lines[index(.@"font-size")]);
-    try testing.expectEqual(Lines{ .count = 2, .last = 5 }, lines[index(.keybind)]);
-    try testing.expectEqual(Lines{}, lines[index(.theme)]);
+    // A config that read nothing from the file: every line that names a key
+    // is one the loader did not take.
+    var current = try Config.default(testing.allocator);
+    defer current.deinit();
+    var lines = try TargetLines.init(testing.allocator, &current, "f", "# font-size = 99 is a comment\r\n" ++
+        "font-size = 14\r\n" ++
+        "\r\n" ++
+        "  keybind = ctrl+a=copy_to_clipboard\r\n" ++
+        "keybind=ctrl+b=paste_from_clipboard\r\n" ++
+        "not-a-key = 1\r\n" ++
+        "font-size=15");
+    defer lines.deinit(testing.allocator);
+    try testing.expectEqual(Lines{ .count = 2, .last = 7 }, lines.untaken[index(.@"font-size")]);
+    try testing.expectEqual(Lines{ .count = 2, .last = 5 }, lines.untaken[index(.keybind)]);
+    try testing.expectEqual(Lines{}, lines.untaken[index(.theme)]);
+    try testing.expectEqual(Lines{}, lines.set[index(.@"font-size")]);
 }
 
 test "settings reference rows carry the effective value, its count and the location" {
@@ -1384,4 +1439,133 @@ test "settings reference says a line of the file Settings saves to sets a key on
             try testing.expectEqualStrings(expected[0..size], writer.buffered());
         }
     }
+}
+
+/// The location `writeLocation` gives `want`'s keys after the loader read
+/// `read` and the file was then changed to `now`, not read again; `@` in
+/// each text stands for the file's path. The value in effect is still
+/// `font-size = 13`, as read.
+fn expectChangedFile(read: []const u8, now: []const u8, want: []const struct { key: Key, text: []const u8 }) !void {
+    const alloc = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(.{ .sub_path = "config", .data = read });
+    const path = try tmp.dir.realpathAlloc(alloc, "config");
+    defer alloc.free(path);
+    var defaults = try Config.default(alloc);
+    defer defaults.deinit();
+    try defaults.finalize();
+    var current = try Config.default(alloc);
+    defer current.deinit();
+    try current.loadFile(alloc, path);
+    try current.finalize();
+    try testing.expectEqual(@as(f32, 13), current.@"font-size");
+    try tmp.dir.writeFile(.{ .sub_path = "config", .data = now });
+    const extra: [key_count][]const u8 = @splat("");
+    var model: Model = .{};
+    defer model.deinit();
+    try model.build(alloc, &current, &defaults, path, .{ .bytes = now }, &extra);
+    var buf: [2048]u8 = undefined;
+    var expected: [2048]u8 = undefined;
+    for (want) |row| {
+        errdefer std.debug.print("settings reference location of {s}\n", .{@tagName(row.key)});
+        var writer: std.Io.Writer = .fixed(&buf);
+        try model.writeLocation(&writer, &model.rows[index(row.key)]);
+        const size = std.mem.replacementSize(u8, row.text, "@", path);
+        _ = std.mem.replace(u8, row.text, "@", path, expected[0..size]);
+        try testing.expectEqualStrings(expected[0..size], writer.buffered());
+    }
+    try testing.expectEqualStrings("13", model.rows[index(.@"font-size")].value);
+}
+
+const changed_since = " when noctty read it; that line has changed since.";
+
+test "settings reference changed file: the same line, now a value the loader would refuse" {
+    try expectChangedFile("font-size = 13\n", "font-size = abc\n", &.{
+        .{ .key = .@"font-size", .text = "Set on line 1 of @" ++ changed_since ++ " Line 1 of @ mentions it, and does not take effect." },
+    });
+}
+
+test "settings reference changed file: the same line, now another value the loader would take" {
+    // The value in effect is still 13, as read.
+    try expectChangedFile("font-size = 13\n", "font-size = 14\n", &.{
+        .{ .key = .@"font-size", .text = "Set on line 1 of @" ++ changed_since ++ " Line 1 of @ mentions it, and does not take effect." },
+    });
+}
+
+test "settings reference changed file: the line taken out, and the next one moved up" {
+    try expectChangedFile("font-size = 13\nscrollback-limit = 5000\n", "scrollback-limit = 5000\n", &.{
+        .{ .key = .@"font-size", .text = "Set on line 1 of @" ++ changed_since },
+        .{ .key = .@"scrollback-limit", .text = "Set on line 2 of @" ++ changed_since ++ " Line 1 of @ mentions it, and does not take effect." },
+    });
+}
+
+test "settings reference changed file: a line put in above the one taken" {
+    try expectChangedFile("font-size = 13\n", "# added\nfont-size = 13\n", &.{
+        .{ .key = .@"font-size", .text = "Set on line 1 of @" ++ changed_since ++ " Line 2 of @ mentions it, and does not take effect." },
+    });
+}
+
+test "settings reference changed file: written differently and read the same, the line still holds" {
+    // The loader would take the same argument from it (spaces, quotes and a
+    // CR dropped), so it is not a change.
+    try expectChangedFile("font-size = 13\n", "  font-size=\"13\"  \r\n", &.{
+        .{ .key = .@"font-size", .text = "Set on line 1 of @." },
+    });
+}
+
+/// A config of `lines` generated lines: every tenth sets `font-size` to a
+/// value the loader refuses, every tenth after it `scrollback-limit`, and the
+/// rest are assignments it takes and comments.
+fn generatedConfig(alloc: std.mem.Allocator, lines: usize) ![]u8 {
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    errdefer out.deinit();
+    for (0..lines) |i| switch (i % 10) {
+        0 => try out.writer.writeAll("font-size = abc\n"),
+        1 => try out.writer.writeAll("scrollback-limit = lots\n"),
+        2, 3, 4 => try out.writer.print("font-size = {d}\n", .{8 + i % 20}),
+        5, 6 => try out.writer.print("scrollback-limit = {d}\n", .{1000 + i}),
+        7 => try out.writer.writeAll(if (i % 20 == 7) "cursor-style = bar\n" else "cursor-style = block\n"),
+        8 => try out.writer.print("window-padding-x = {d}\n", .{i % 9}),
+        else => try out.writer.print("# comment {d}\n", .{i}),
+    };
+    return out.toOwnedSlice();
+}
+
+test "settings reference counts the lines of a large generated config" {
+    const alloc = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const text = try generatedConfig(alloc, 3000);
+    defer alloc.free(text);
+    try tmp.dir.writeFile(.{ .sub_path = "config", .data = text });
+    const path = try tmp.dir.realpathAlloc(alloc, "config");
+    defer alloc.free(path);
+    var current = try Config.default(alloc);
+    defer current.deinit();
+    try current.loadFile(alloc, path);
+    var defaults = try Config.default(alloc);
+    defer defaults.deinit();
+    const extra: [key_count][]const u8 = @splat("");
+    var model: Model = .{};
+    defer model.deinit();
+    try model.build(alloc, &current, &defaults, path, .{ .bytes = text }, &extra);
+
+    // Line i + 1 holds line i of the generator.
+    const font = &model.rows[index(.@"font-size")];
+    try testing.expectEqual(Lines{ .count = 900, .last = 2995 }, font.set);
+    try testing.expectEqual(Lines{ .count = 300, .last = 2991 }, font.untaken);
+    try testing.expectEqualStrings("22", font.value);
+    const scrollback = &model.rows[index(.@"scrollback-limit")];
+    try testing.expectEqual(Lines{ .count = 600, .last = 2997 }, scrollback.set);
+    try testing.expectEqual(Lines{ .count = 300, .last = 2992 }, scrollback.untaken);
+    const cursor = &model.rows[index(.@"cursor-style")];
+    try testing.expectEqual(Lines{ .count = 300, .last = 2998 }, cursor.set);
+    try testing.expectEqual(Lines{}, cursor.untaken);
+
+    var buf: [1024]u8 = undefined;
+    var expected: [1024]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buf);
+    try model.writeLocation(&writer, font);
+    try testing.expectEqualStrings(try std.fmt.bufPrint(&expected, "Set on 900 lines of {s}, the last on line 2995. 300 lines of {s} mention it, the last on line 2991, and do not take effect.", .{ path, path }), writer.buffered());
 }
