@@ -3,6 +3,12 @@
 //! pairing. No HWND creation, painting or keybind dispatch: those belong to
 //! the Win32 surface layer (`search_controls.zig`).
 //!
+//! `apply` takes an input and returns what the window must do (`Outcome`);
+//! `view` says what to draw. Nothing here calls the core, Win32 or the
+//! clock, and `apply` finishes its whole state change before it returns, so
+//! the core can call back into it while the caller carries out an Outcome.
+//! A View's slices are valid until the next `apply`.
+//!
 //! **Debounce rationale.**  Scrollback search is O(lines * query_len).
 //! Re-running on every WM_COMMAND / EN_CHANGE would stall the UI on
 //! large histories.  A 40 ms window batches rapid keystrokes into a
@@ -48,6 +54,74 @@ pub const Toggles = packed struct {
     _padding: u4 = 0,
 };
 
+pub const Input = union(enum) {
+    /// A core action for this pane.
+    core: Core,
+
+    pub const Core = union(enum) {
+        total: struct { total: ?usize, invalid: bool = false },
+        /// 1-based, newest first (`apprtSearchSelectedIndex`).
+        selected: ?usize,
+        /// Copied: the caller may free its slice once `apply` returns.
+        rows: []const u32,
+    };
+};
+
+/// What the window must do after an `apply`.
+pub const Outcome = struct {
+    /// Write `view().results` to the chip and raise its live region once.
+    results_changed: bool = false,
+    /// Clear the scrollbar markers and refresh the scrollbar window.
+    markers_changed: bool = false,
+};
+
+/// What the results chip says.
+pub const Results = union(enum) {
+    /// No query.
+    idle,
+    /// The debounce, or the core's first answer, is still to come.
+    pending,
+    /// The core could not compile the query.
+    invalid,
+    none,
+    /// `selected` is 1-based and newest first, as the core numbers matches.
+    count: struct { selected: ?usize, total: usize },
+
+    pub const Tone = enum { pending, no_match, found };
+
+    pub fn text(self: Results, buf: *[48]u8) []const u8 {
+        return switch (self) {
+            .idle => "Type to search",
+            .pending => "Searching",
+            .invalid => "Invalid pattern",
+            .none => "No matches",
+            // Two usize values and a slash fit in 48 bytes.
+            .count => |count| if (count.selected) |selected|
+                std.fmt.bufPrint(buf, "{d}/{d}", .{ selected, count.total }) catch unreachable
+            else
+                std.fmt.bufPrint(buf, "{d}", .{count.total}) catch unreachable,
+        };
+    }
+
+    pub fn tone(self: Results) Tone {
+        return switch (self) {
+            .idle, .pending => .pending,
+            .invalid, .none => .no_match,
+            .count => .found,
+        };
+    }
+
+    pub fn eql(a: Results, b: Results) bool {
+        return std.meta.eql(a, b);
+    }
+};
+
+pub const View = struct {
+    results: Results,
+    /// Rows of the matches, for the scrollbar markers.
+    match_rows: []const u32,
+};
+
 /// Alt+R, Alt+C and Alt+W flip the regex, case and whole-word flags from the
 /// docked search bar. Alt has to be held without Ctrl, since AltGr reports as
 /// Ctrl+Alt and types characters on many layouts, and without Shift.
@@ -85,8 +159,10 @@ pub const DockedSearch = struct {
     visible: bool = false,
     query: []u8 = &.{},
     toggles: Toggles = .{},
+    /// What the core last reported: the total, and the selected match's
+    /// newest-first index (the core's 1-based number minus one).
     total: ?usize = null,
-    selected: ?usize = null,
+    selected_raw: ?usize = null,
     /// The core could not compile the query (an invalid regular expression).
     /// Every edit or toggle clears it, because the answer belongs to the
     /// query that was searched.
@@ -100,11 +176,6 @@ pub const DockedSearch = struct {
     active: bool = false,
     /// The query the core is searching for, owned.
     needle: ?[:0]const u8 = null,
-    /// What the core last reported: the total, its newest-first index and
-    /// that index as the chip shows it.
-    core_total: ?usize = null,
-    selected_raw: ?usize = null,
-    core_selected: ?usize = null,
     /// The rows of the matches, owned, for the scrollbar markers.
     match_rows: []const u32 = &.{},
     toggle_keys: ToggleKeys = .{},
@@ -121,6 +192,66 @@ pub const DockedSearch = struct {
         if (self.needle) |value| self.alloc.free(value);
         if (self.match_rows.len > 0) self.alloc.free(self.match_rows);
         self.* = undefined;
+    }
+
+    /// Fails only to copy what the input carries, and then changes nothing.
+    pub fn apply(self: *DockedSearch, in: Input, now_ms: i64) Allocator.Error!Outcome {
+        _ = now_ms;
+        const before = self.results();
+        var out: Outcome = switch (in) {
+            .core => |core| try self.report(core),
+        };
+        out.results_changed = !before.eql(self.results());
+        return out;
+    }
+
+    pub fn view(self: *const DockedSearch) View {
+        return .{
+            .results = self.results(),
+            .match_rows = self.match_rows,
+        };
+    }
+
+    fn report(self: *DockedSearch, core: Input.Core) Allocator.Error!Outcome {
+        // While the debounce waits, a report belongs to the query before
+        // the edit: it would overwrite "Searching" and the markers.
+        if (self.query.len > 0 and !self.searched) return .{};
+        switch (core) {
+            .total => |total| {
+                self.total = total.total;
+                self.invalid = total.invalid;
+                self.searched = total.total != null;
+            },
+            .selected => |selected| {
+                self.selected_raw = if (selected) |number| if (number == 0) null else number - 1 else null;
+                self.searched = self.shownSelected() != null or self.total != null;
+            },
+            .rows => |rows| {
+                if (std.mem.eql(u32, self.match_rows, rows)) return .{};
+                const copy: []const u32 = if (rows.len == 0) &.{} else try self.alloc.dupe(u32, rows);
+                if (self.match_rows.len > 0) self.alloc.free(self.match_rows);
+                self.match_rows = copy;
+                return .{ .markers_changed = true };
+            },
+        }
+        return .{};
+    }
+
+    fn results(self: *const DockedSearch) Results {
+        if (self.query.len == 0) return .idle;
+        if (!self.searched) return .pending;
+        const total = self.total orelse return .pending;
+        if (self.invalid) return .invalid;
+        if (total == 0) return .none;
+        return .{ .count = .{ .selected = self.shownSelected(), .total = total } };
+    }
+
+    /// The selected match's 1-based number, or null when the core has not
+    /// selected one among those it counted.
+    fn shownSelected(self: *const DockedSearch) ?usize {
+        const index = self.selected_raw orelse return null;
+        const total = self.total orelse return null;
+        return if (index < total) index + 1 else null;
     }
 
     // -----------------------------------------------------------------
@@ -148,7 +279,7 @@ pub const DockedSearch = struct {
         if (next.len == 0) {
             self.query = &.{};
             self.total = null;
-            self.selected = null;
+            self.selected_raw = null;
             self.invalid = false;
             self.last_edit_ms = 0;
             self.searched = true;
@@ -157,7 +288,7 @@ pub const DockedSearch = struct {
 
         self.query = next_owned.?;
         self.total = null;
-        self.selected = null;
+        self.selected_raw = null;
         self.invalid = false;
         self.last_edit_ms = now_ms;
         self.searched = false;
@@ -189,7 +320,7 @@ pub const DockedSearch = struct {
 
     fn invalidateResults(self: *DockedSearch, now_ms: i64) void {
         self.total = null;
-        self.selected = null;
+        self.selected_raw = null;
         self.invalid = false;
         if (self.query.len == 0) {
             self.searched = true;
@@ -259,11 +390,11 @@ test "setQuery clears stale results for a new search" {
     try bar.setQuery("foo", 1000);
     bar.total = 8;
     bar.searched = true;
-    bar.selected = 4;
+    bar.selected_raw = 4;
 
     try bar.setQuery("bar", 1100);
     try std.testing.expectEqual(@as(?usize, null), bar.total);
-    try std.testing.expectEqual(@as(?usize, null), bar.selected);
+    try std.testing.expectEqual(@as(?usize, null), bar.selected_raw);
     try std.testing.expect(!bar.searched);
     try std.testing.expectEqual(@as(i64, 1100), bar.last_edit_ms);
 }
@@ -280,7 +411,7 @@ test "empty query clears results" {
 
     try bar.setQuery("", 2000);
     try std.testing.expectEqual(@as(?usize, null), bar.total);
-    try std.testing.expectEqual(@as(?usize, null), bar.selected);
+    try std.testing.expectEqual(@as(?usize, null), bar.selected_raw);
 }
 
 test "setQuery starts debounce" {
@@ -327,11 +458,11 @@ test "toggle invalidates stale results for non-empty query" {
     try bar.setQuery("needle", 1000);
     try std.testing.expect(bar.forceSearch());
     bar.total = 10;
-    bar.selected = 3;
+    bar.selected_raw = 3;
 
     bar.toggleRegex(2000);
     try std.testing.expectEqual(@as(?usize, null), bar.total);
-    try std.testing.expectEqual(@as(?usize, null), bar.selected);
+    try std.testing.expectEqual(@as(?usize, null), bar.selected_raw);
     try std.testing.expect(!bar.searched);
     try std.testing.expectEqual(@as(i64, 2000), bar.last_edit_ms);
     try std.testing.expect(bar.shouldRunSearch(2041));
@@ -344,11 +475,11 @@ test "toggleCase invalidates stale results for non-empty query" {
     try bar.setQuery("needle", 1000);
     try std.testing.expect(bar.forceSearch());
     bar.total = 10;
-    bar.selected = 3;
+    bar.selected_raw = 3;
 
     bar.toggleCase(2000);
     try std.testing.expectEqual(@as(?usize, null), bar.total);
-    try std.testing.expectEqual(@as(?usize, null), bar.selected);
+    try std.testing.expectEqual(@as(?usize, null), bar.selected_raw);
     try std.testing.expect(!bar.searched);
     try std.testing.expectEqual(@as(i64, 2000), bar.last_edit_ms);
     try std.testing.expect(bar.shouldRunSearch(2041));
@@ -361,11 +492,11 @@ test "toggleWord invalidates stale results for non-empty query" {
     try bar.setQuery("needle", 1000);
     try std.testing.expect(bar.forceSearch());
     bar.total = 10;
-    bar.selected = 3;
+    bar.selected_raw = 3;
 
     bar.toggleWord(2000);
     try std.testing.expectEqual(@as(?usize, null), bar.total);
-    try std.testing.expectEqual(@as(?usize, null), bar.selected);
+    try std.testing.expectEqual(@as(?usize, null), bar.selected_raw);
     try std.testing.expect(!bar.searched);
     try std.testing.expectEqual(@as(i64, 2000), bar.last_edit_ms);
     try std.testing.expect(bar.shouldRunSearch(2041));
@@ -439,4 +570,88 @@ test "win32 search toggle accelerators need Alt without Ctrl, Shift or AltGr" {
     _ = keys.keyDown('R', alt, r_scan);
     _ = keys.keyDown('X', alt, r_scan);
     try std.testing.expect(!keys.consumeChar(r_scan));
+}
+
+/// A pane whose query `text` has reached the core.
+fn testSearching(alloc: Allocator, text: []const u8) !DockedSearch {
+    var search = DockedSearch.init(alloc);
+    errdefer search.deinit();
+    try search.setQuery(text, 1000);
+    _ = search.forceSearch();
+    return search;
+}
+
+test "core index 1 of 2500 reads 1/2500 (newest first)" {
+    var search = try testSearching(std.testing.allocator, "needlex");
+    defer search.deinit();
+    var buf: [48]u8 = undefined;
+    _ = try search.apply(.{ .core = .{ .total = .{ .total = 2500 } } }, 0);
+    try std.testing.expectEqualStrings("2500", search.view().results.text(&buf));
+    for ([_]usize{ 1, 2, 3 }) |number| {
+        _ = try search.apply(.{ .core = .{ .selected = number } }, 0);
+        var want: [16]u8 = undefined;
+        try std.testing.expectEqualStrings(
+            try std.fmt.bufPrint(&want, "{d}/2500", .{number}),
+            search.view().results.text(&buf),
+        );
+    }
+}
+
+test "duplicate total and selected callbacks report no change" {
+    var search = try testSearching(std.testing.allocator, "needlex");
+    defer search.deinit();
+    const total: Input = .{ .core = .{ .total = .{ .total = 12 } } };
+    try std.testing.expect((try search.apply(total, 0)).results_changed);
+    try std.testing.expect(!(try search.apply(total, 0)).results_changed);
+    const selected: Input = .{ .core = .{ .selected = 3 } };
+    try std.testing.expect((try search.apply(selected, 0)).results_changed);
+    try std.testing.expect(!(try search.apply(selected, 0)).results_changed);
+    var buf: [48]u8 = undefined;
+    try std.testing.expectEqualStrings("3/12", search.view().results.text(&buf));
+    try std.testing.expectEqual(Results.Tone.found, search.view().results.tone());
+}
+
+test "an invalid pattern reads Invalid pattern with exactly one results change" {
+    var search = try testSearching(std.testing.allocator, "need(");
+    defer search.deinit();
+    // What the core sends for a query that does not compile: the zero total
+    // marked invalid, then the clear's selection and rows.
+    const reports = [_]Input{
+        .{ .core = .{ .total = .{ .total = 0, .invalid = true } } },
+        .{ .core = .{ .selected = null } },
+        .{ .core = .{ .rows = &.{} } },
+    };
+    var changes: usize = 0;
+    for (reports) |in| {
+        const out = try search.apply(in, 0);
+        if (out.results_changed) changes += 1;
+        try std.testing.expect(!out.markers_changed);
+    }
+    try std.testing.expectEqual(@as(usize, 1), changes);
+    var buf: [48]u8 = undefined;
+    try std.testing.expectEqualStrings("Invalid pattern", search.view().results.text(&buf));
+    try std.testing.expectEqual(Results.Tone.no_match, search.view().results.tone());
+}
+
+test "match rows are copied; the caller may free its slice after apply" {
+    const alloc = std.testing.allocator;
+    var search = try testSearching(alloc, "needlex");
+    defer search.deinit();
+    const rows = try alloc.dupe(u32, &.{ 3, 9, 40 });
+    const out = try search.apply(.{ .core = .{ .rows = rows } }, 0);
+    alloc.free(rows);
+    try std.testing.expect(out.markers_changed);
+    try std.testing.expect(!out.results_changed);
+    try std.testing.expectEqualSlices(u32, &.{ 3, 9, 40 }, search.view().match_rows);
+    try std.testing.expect(!(try search.apply(.{ .core = .{ .rows = &.{ 3, 9, 40 } } }, 0)).markers_changed);
+}
+
+test "OutOfMemory copying rows leaves the state unchanged" {
+    // The query is allocation 0 and the first rows allocation 1.
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 2 });
+    var search = try testSearching(failing.allocator(), "needlex");
+    defer search.deinit();
+    _ = try search.apply(.{ .core = .{ .rows = &.{ 1, 2 } } }, 0);
+    try std.testing.expectError(error.OutOfMemory, search.apply(.{ .core = .{ .rows = &.{ 5, 6, 7 } } }, 0));
+    try std.testing.expectEqualSlices(u32, &.{ 1, 2 }, search.view().match_rows);
 }

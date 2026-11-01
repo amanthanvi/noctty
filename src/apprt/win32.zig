@@ -330,7 +330,6 @@ pub const search_controls_runtime = .{
     .adjustColor = adjustColor,
     .advanceSearchSelectedRaw = advanceSearchSelectedRaw,
     .blendColorRGB = blendColorRGB,
-    .buildSearchBarResultsText = buildSearchBarResultsText,
     .buttonColorsFromTheme = buttonColorsFromTheme,
     .c = c,
     .chromeKeyMods = chromeKeyMods,
@@ -9051,17 +9050,9 @@ const dockedSearchEnterDirection = labels.dockedSearchEnterDirection;
 
 const dockedSearchArrowDirection = labels.dockedSearchArrowDirection;
 
-pub const searchSelectedRawFromCoreDisplay = labels.searchSelectedRawFromCoreDisplay;
-
-pub const searchSelectedDisplayFromRaw = labels.searchSelectedDisplayFromRaw;
+const searchSelectedDisplayFromRaw = labels.searchSelectedDisplayFromRaw;
 
 const advanceSearchSelectedRaw = labels.advanceSearchSelectedRaw;
-
-pub const searchBarSearchedStateForTotal = labels.searchBarSearchedStateForTotal;
-
-pub const searchBarSearchedStateForSelected = labels.searchBarSearchedStateForSelected;
-
-pub const searchBarDisplayStateChanged = labels.searchBarDisplayStateChanged;
 
 pub const profileChromeVisible = win32_chrome_state.profileVisible;
 
@@ -9214,8 +9205,6 @@ pub const shouldShowPaneCount = labels.shouldShowPaneCount;
 
 pub const visibleTabRange = labels.visibleTabRange;
 
-const buildSearchBarResultsText = labels.buildSearchBarResultsText;
-
 const SearchBarButtonRole = labels.SearchBarButtonRole;
 
 const searchBarButtonCommandId = labels.searchBarButtonCommandId;
@@ -9225,8 +9214,6 @@ const searchBarButtonLabel = labels.searchBarButtonLabel;
 const showSearchBarResults = labels.showSearchBarResults;
 const searchBarNeedsRelayoutForQueryChange = labels.searchBarNeedsRelayoutForQueryChange;
 const searchBarShouldInvalidateCoreSearchOnEdit = labels.searchBarShouldInvalidateCoreSearchOnEdit;
-
-pub const shouldAcceptCoreSearchUpdates = labels.shouldAcceptCoreSearchUpdates;
 
 const searchBarChromeLayout = chrome_layout.searchBarChromeLayout;
 const searchBarFit = chrome_layout.searchBarFit;
@@ -11526,7 +11513,7 @@ pub fn hostWindowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) cal
                         _ = sys.SetBkMode(hdc, c.TRANSPARENT);
                         _ = sys.SetTextColor(hdc, if (v.isSearchBarResultsLabel(child))
                             if (v.searchControlSurface(child)) |surface|
-                                searchBarResultsVisual(&v.app.resolved_theme, &surface.docked_search).fg
+                                searchBarResultsVisual(&v.app.resolved_theme, surface.docked_search.view().results.tone()).fg
                             else
                                 v.app.resolved_theme.text_secondary
                         else if (v.overlay_hint_hwnd != null and child == v.overlay_hint_hwnd.?)

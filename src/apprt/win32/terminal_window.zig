@@ -129,18 +129,12 @@ const scrollbarPaintKeyChanged = win32.scrollbarPaintKeyChanged;
 const scrollbarProxyPointFromSurfaceCoords = win32.scrollbarProxyPointFromSurfaceCoords;
 const scrollbarProxyPointFromSurfaceCursor = win32.scrollbarProxyPointFromSurfaceCursor;
 const scrollbar_class_name = win32.scrollbar_class_name;
-const searchBarDisplayStateChanged = win32.searchBarDisplayStateChanged;
-const searchBarSearchedStateForSelected = win32.searchBarSearchedStateForSelected;
-const searchBarSearchedStateForTotal = win32.searchBarSearchedStateForTotal;
-const searchSelectedDisplayFromRaw = win32.searchSelectedDisplayFromRaw;
-const searchSelectedRawFromCoreDisplay = win32.searchSelectedRawFromCoreDisplay;
 const docked_search = @import("docked_search.zig");
 const search_controls = @import("search_controls.zig");
 const selectClipboardContents = win32.selectClipboardContents;
 const session_module = @import("session.zig");
 const setWindowData = child_window.setWindowData;
 const sharesHostWindowState = win32.sharesHostWindowState;
-const shouldAcceptCoreSearchUpdates = win32.shouldAcceptCoreSearchUpdates;
 const shouldApplyConfigDecorations = win32.shouldApplyConfigDecorations;
 const shouldDispatchOcclusion = win32.shouldDispatchOcclusion;
 const shouldShowSurfaceImmediately = win32.shouldShowSurfaceImmediately;
@@ -2619,7 +2613,7 @@ pub const Surface = struct {
         };
     }
 
-    fn clearScrollbarMarkers(self: *Surface) void {
+    pub fn clearScrollbarMarkers(self: *Surface) void {
         if (self.scrollbar_markers.len > 0) {
             self.app.core_app.alloc.free(self.scrollbar_markers);
             self.scrollbar_markers = &.{};
@@ -2630,12 +2624,13 @@ pub const Surface = struct {
 
     fn rebuildScrollbarMarkers(self: *Surface, marker_budget: usize) !void {
         self.clearScrollbarMarkers();
-        if (marker_budget == 0 or self.docked_search.match_rows.len == 0 or self.scrollbar.total == 0) return;
+        const match_rows = self.docked_search.view().match_rows;
+        if (marker_budget == 0 or match_rows.len == 0 or self.scrollbar.total == 0) return;
 
         const alloc = self.app.core_app.alloc;
-        const rows = try alloc.alloc(usize, self.docked_search.match_rows.len);
+        const rows = try alloc.alloc(usize, match_rows.len);
         defer alloc.free(rows);
-        for (self.docked_search.match_rows, 0..) |row, i| rows[i] = @intCast(row);
+        for (match_rows, 0..) |row, i| rows[i] = @intCast(row);
 
         self.scrollbar_markers = try win32_scrollbar_geometry.downsampleMarkers(
             alloc,
@@ -3843,6 +3838,8 @@ pub const Surface = struct {
 
     pub const handleSearchToggleClick = search_controls.SurfaceControls.handleSearchToggleClick;
 
+    pub const dockedSearch = search_controls.SurfaceControls.dockedSearch;
+
     pub fn closeDockedSearchBar(self: *Surface, stop_search: bool, refocus_terminal: bool) anyerror!void {
         if (stop_search) {
             _ = try self.core_surface.endSearch();
@@ -3855,7 +3852,7 @@ pub const Surface = struct {
         const host = self.host orelse return;
         self.docked_search.close();
         self.docked_search.total = null;
-        self.docked_search.selected = null;
+        self.docked_search.selected_raw = null;
         try self.setSearchActive(false, "");
         _ = self.hideSearchBarControls();
         host.refreshSearchTimerState();
@@ -3891,7 +3888,7 @@ pub const Surface = struct {
         }
         if (!restore_live_results) {
             self.docked_search.total = null;
-            self.docked_search.selected = null;
+            self.docked_search.selected_raw = null;
         }
         self.docked_search.searched = initial.len == 0 or restore_live_results;
         self.docked_search.last_edit_ms = 0;
@@ -4912,11 +4909,8 @@ pub const Surface = struct {
     pub fn setSearchActive(self: *Surface, active: bool, needle: []const u8) !void {
         const alloc = self.app.core_app.alloc;
         self.docked_search.active = active;
-        self.docked_search.core_total = null;
-        self.docked_search.selected_raw = null;
-        self.docked_search.core_selected = null;
         self.docked_search.total = null;
-        self.docked_search.selected = null;
+        self.docked_search.selected_raw = null;
         self.docked_search.invalid = false;
         if (!active) {
             self.docked_search.searched = self.docked_search.query.len == 0;
@@ -4937,71 +4931,6 @@ pub const Surface = struct {
             try appendOwnedString(alloc, &self.docked_search.needle, null);
         }
         _ = try self.syncSearchBarResultsText();
-        try self.refreshScrollbarWindow();
-    }
-
-    pub fn setSearchTotal(self: *Surface, total: ?usize, invalid: bool) !void {
-        if (!shouldAcceptCoreSearchUpdates(&self.docked_search)) return;
-        const selected = searchSelectedDisplayFromRaw(self.docked_search.selected_raw, total);
-        const searched = searchBarSearchedStateForTotal(total);
-        if (self.docked_search.core_total == total and
-            self.docked_search.core_selected == selected and
-            self.docked_search.invalid == invalid and
-            !searchBarDisplayStateChanged(&self.docked_search, searched, total, selected))
-        {
-            return;
-        }
-        self.docked_search.core_total = total;
-        self.docked_search.searched = searched;
-        self.docked_search.total = total;
-        self.docked_search.invalid = invalid;
-        self.docked_search.core_selected = selected;
-        self.docked_search.selected = selected;
-        _ = try self.syncSearchBarResultsText();
-    }
-
-    pub fn setSearchSelected(self: *Surface, selected: ?usize) !void {
-        if (!shouldAcceptCoreSearchUpdates(&self.docked_search)) return;
-        const raw = searchSelectedRawFromCoreDisplay(selected);
-        const display = searchSelectedDisplayFromRaw(raw, self.docked_search.core_total);
-        const searched = searchBarSearchedStateForSelected(display, self.docked_search.core_total);
-        if (self.docked_search.selected_raw == raw and
-            self.docked_search.core_selected == display and
-            !searchBarDisplayStateChanged(&self.docked_search, searched, self.docked_search.core_total, display))
-        {
-            return;
-        }
-        self.docked_search.selected_raw = raw;
-        self.docked_search.core_selected = display;
-        self.docked_search.searched = searched;
-        self.docked_search.selected = display;
-        _ = try self.syncSearchBarResultsText();
-    }
-
-    pub fn setSearchSelectedDisplay(self: *Surface, selected: ?usize) !void {
-        const searched = searchBarSearchedStateForSelected(selected, self.docked_search.core_total);
-        if (self.docked_search.core_selected == selected and
-            !searchBarDisplayStateChanged(&self.docked_search, searched, self.docked_search.core_total, selected))
-        {
-            return;
-        }
-        self.docked_search.core_selected = selected;
-        self.docked_search.searched = searched;
-        self.docked_search.selected = selected;
-        _ = try self.syncSearchBarResultsText();
-    }
-
-    pub fn setSearchMatchRows(self: *Surface, rows: []const u32) !void {
-        if (!shouldAcceptCoreSearchUpdates(&self.docked_search)) return;
-        if (std.mem.eql(u32, self.docked_search.match_rows, rows)) return;
-
-        const alloc = self.app.core_app.alloc;
-        if (self.docked_search.match_rows.len > 0) alloc.free(self.docked_search.match_rows);
-        self.docked_search.match_rows = if (rows.len == 0)
-            &.{}
-        else
-            try alloc.dupe(u32, rows);
-        self.clearScrollbarMarkers();
         try self.refreshScrollbarWindow();
     }
 

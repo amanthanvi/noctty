@@ -22,7 +22,6 @@ const advanceSearchSelectedRaw = runtime.advanceSearchSelectedRaw;
 const applyChildRect = child_window.applyChildRect;
 const applyChildVisibility = child_window.applyChildVisibility;
 const blendColorRGB = runtime.blendColorRGB;
-const buildSearchBarResultsText = runtime.buildSearchBarResultsText;
 const buttonColorsFromTheme = runtime.buttonColorsFromTheme;
 const c = runtime.c;
 const childRect = chrome_layout.childRect;
@@ -32,6 +31,7 @@ const chrome_layout = @import("chrome_layout.zig");
 const createIconFontForFace = runtime.createIconFontForFace;
 const decorativeUiaName = runtime.decorativeUiaName;
 const detachChromeControlProvider = runtime.detachChromeControlProvider;
+const docked_search = @import("docked_search.zig");
 const dockedSearchArrowDirection = runtime.dockedSearchArrowDirection;
 const dockedSearchCoreDirectionFromKeyAction = runtime.dockedSearchCoreDirectionFromKeyAction;
 const dockedSearchEnterDirection = runtime.dockedSearchEnterDirection;
@@ -1314,14 +1314,12 @@ pub const SurfaceControls = struct {
 
     pub fn syncSearchBarResultsText(self: *Surface) !bool {
         const hwnd = self.search_bar_results_hwnd orelse return false;
-        const alloc = self.app.core_app.alloc;
-        const text = try buildSearchBarResultsText(alloc, &self.docked_search);
-        defer alloc.free(text);
+        var buf: [48]u8 = undefined;
         const changed = try syncWindowTextUtf8Cached(
-            alloc,
+            self.app.core_app.alloc,
             hwnd,
             &self.search_bar_results_cache,
-            text,
+            self.docked_search.view().results.text(&buf),
         );
         if (changed) {
             if (self.search_bar_results_uia_provider) |provider| provider.raiseLiveRegionChanged();
@@ -1395,13 +1393,26 @@ pub const SurfaceControls = struct {
         }
 
         _ = try self.core_surface.performBindingAction(.{ .navigate_search = dir });
+        const before = self.docked_search.view().results;
         self.docked_search.selected_raw = advanceSearchSelectedRaw(
             self.docked_search.selected_raw,
-            self.docked_search.core_total,
+            self.docked_search.total,
             dir,
             self.docked_search.toggles.wrap,
         );
-        try self.setSearchSelectedDisplay(searchSelectedDisplayFromRaw(self.docked_search.selected_raw, self.docked_search.core_total));
+        self.docked_search.searched = searchSelectedDisplayFromRaw(self.docked_search.selected_raw, self.docked_search.total) != null or
+            self.docked_search.total != null;
+        if (!before.eql(self.docked_search.view().results)) _ = try self.syncSearchBarResultsText();
+        return true;
+    }
+
+    /// Hands `in` to this pane's search and carries out what it returns.
+    /// True when the input was search's (a window procedure returns 0).
+    /// The core calls back into this synchronously, so the error set is
+    /// explicit: dockedSearch, the core, App.performAction, dockedSearch.
+    pub fn dockedSearch(self: *Surface, in: docked_search.Input) anyerror!bool {
+        const out = try self.docked_search.apply(in, @intCast(sys.GetTickCount64()));
+        try applyDockedSearch(self, out);
         return true;
     }
 
@@ -1434,6 +1445,16 @@ pub const SurfaceControls = struct {
         return true;
     }
 };
+
+/// Carries out an Outcome. Nothing after the core step may use a View taken
+/// before it: the core's synchronous reports can free what it borrows.
+fn applyDockedSearch(self: *Surface, out: docked_search.Outcome) anyerror!void {
+    if (out.results_changed) _ = try self.syncSearchBarResultsText();
+    if (out.markers_changed) {
+        self.clearScrollbarMarkers();
+        try self.refreshScrollbarWindow();
+    }
+}
 
 pub fn searchButtonKey(v: *Host, hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) ?LRESULT {
     // Alt+R / Alt+C / Alt+W flip the search flags from a focused search
