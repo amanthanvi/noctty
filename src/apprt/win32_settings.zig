@@ -12936,10 +12936,13 @@ test "settings @modified on the All settings page finds a key a UTF-16 or BOM co
         var handle = modelOnlyHandle();
         handle.ctx = &context;
         handle.configSource = Lender.source;
-        // The config as the file leaves it: `finalize` would otherwise set the
-        // interval from the system.
+        // The config the loader reads from the file, without `finalize`,
+        // which would otherwise set the interval from the system.
         var current = try Config.default(std.testing.allocator);
-        current.@"click-repeat-interval" = 500;
+        current.loadFile(std.testing.allocator, path) catch |err| {
+            current.deinit();
+            return err;
+        };
         var settings: SettingsWindow = .{ .handle = handle, .current = current };
         defer settings.current.?.deinit();
         defer settings.forgetReference();

@@ -109,6 +109,62 @@ pub fn ofFiles(config: *const Config, key: Key) Origin {
     return scan(config, key, null, true);
 }
 
+/// How many lines of one file set a key, and the last of them.
+pub const Lines = struct {
+    count: u32 = 0,
+    /// 1-based, as diagnostics print it; 0 when `count` is 0.
+    last: usize = 0,
+};
+
+/// Compares two paths, for a caller that names a file in other letters than
+/// the loader did.
+pub const SamePath = *const fn (a: []const u8, b: []const u8) bool;
+
+/// The lines of the file `path` that set `key` and apply now, by the rules
+/// `of` counts a step by: the line parsed (or the key takes any text), it
+/// names the key or a compatibility name that sets it, and its conditions
+/// match. A line the loader refused is not among them. A line a later step
+/// overrides still is: this says which lines set the key, and `of` which one
+/// is in effect.
+pub fn linesIn(config: *const Config, key: Key, path: []const u8, same: SamePath) Lines {
+    return fileLines(config, key, path, same, null);
+}
+
+/// Whether line `line` of the file `path` sets `key` and applies now
+/// (`linesIn`'s rules).
+pub fn setsAt(config: *const Config, key: Key, path: []const u8, line: usize, same: SamePath) bool {
+    return fileLines(config, key, path, same, line).count != 0;
+}
+
+fn fileLines(config: *const Config, key: Key, path: []const u8, same: SamePath, only: ?usize) Lines {
+    var result: Lines = .{};
+    for (config._replay_steps.items) |step| switch (step) {
+        .arg => |arg| countLine(&result, config, arg.value, arg.location, key, path, same, only),
+        .conditional_arg => |arg| {
+            const applies = for (arg.conditions) |cond| {
+                if (!config._conditional_state.match(cond)) break false;
+            } else true;
+            if (applies) countLine(&result, config, arg.arg, arg.location, key, path, same, only);
+        },
+        // The arguments after `-e` are its command's words. The loader puts
+        // every file's lines before the marker.
+        .@"-e" => break,
+        .expand, .diagnostic => {},
+    };
+    return result;
+}
+
+fn countLine(result: *Lines, config: *const Config, text: []const u8, location: Location, key: Key, path: []const u8, same: SamePath, only: ?usize) void {
+    const file = switch (location) {
+        .file => |file| file,
+        .cli, .none => return,
+    };
+    if (only) |line| if (file.line != line) return;
+    if (!same(file.path, path) or !stepSets(config, text, location, key)) return;
+    result.count +|= 1;
+    result.last = file.line;
+}
+
 fn scan(config: *const Config, key: Key, defaults: ?*const Config, comptime files_only: bool) Origin {
     var last: ?Origin = null;
     // The last command-line step that set the key (`restoredFromCli`).
@@ -260,15 +316,20 @@ fn setByE(config: *const Config, key: Key) bool {
 }
 
 /// What `Config.finalize` reads to settle `single-instance` and its GTK alias
-/// `gtk-single-instance` together. It takes `single-instance` unless that is
-/// `detect`, then the alias unless that is `detect`, works out a `detect`
-/// that is left, and gives the alias the result. So both keys have the
-/// origin of the step that decided: the last step that set `single-instance`
-/// to a value other than `detect`, else the last step that set the alias to
-/// one. An accepted `-e` sets both after every file (`Config.applyECommand`)
-/// and is theirs. When both are `detect`, each key's own last step is its
-/// origin, as for any other key: a `gtk-single-instance = desktop` line, which
-/// sets both to `detect`, names both.
+/// `gtk-single-instance` together. Each key holds what the last accepted
+/// assignment to it left there, a reset to the default (`detect`) included.
+/// `finalize` then takes `single-instance` unless it holds `detect`, else the
+/// alias unless it holds `detect`, works out a `detect` that is left, and
+/// gives the alias the result. So both keys have one origin: if the last
+/// accepted assignment to `single-instance` leaves it other than `detect`,
+/// that assignment's; otherwise, if the last accepted assignment to the alias
+/// leaves it other than `detect`, that one's. An earlier
+/// `single-instance = false` that a later `single-instance = detect` replaced
+/// does not count: the alias decides then. An accepted `-e` sets both after
+/// every file (`Config.applyECommand`) and is theirs. When both keys hold
+/// `detect`, each key's own last step is its origin, as for any other key: a
+/// `gtk-single-instance = desktop` line, which sets both to `detect`, names
+/// both.
 const SingleInstance = struct {
     single: ?Set = null,
     alias: ?Set = null,
@@ -886,6 +947,9 @@ test "origin: single-instance and its alias gtk-single-instance name the step fi
         .{ .text = "single-instance = true\ngtk-single-instance = false\n", .value = .true, .where = .{ .line = 1 } },
         // `single-instance` left `detect`: the alias decides.
         .{ .text = "single-instance = detect\ngtk-single-instance = false\n", .value = .false, .where = .{ .line = 2 } },
+        // The last step that set `single-instance` left `detect`, replacing
+        // an earlier `false`: the alias decides, not that `false`.
+        .{ .text = "single-instance = false\nsingle-instance = detect\ngtk-single-instance = true\n", .value = .true, .where = .{ .line = 3 } },
         // Neither: worked out, as before.
         .{ .text = "font-size = 12\n", .value = null, .where = .default },
         // An accepted `-e` sets both, over every file.

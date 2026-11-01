@@ -260,11 +260,8 @@ pub fn summaryOf(plain: []const u8) []const u8 {
     return line;
 }
 
-/// The lines of a config file that set each key: how many, and the last.
-pub const Lines = struct {
-    count: u32 = 0,
-    last: u32 = 0,
-};
+/// Lines of a config file for one key: how many, and the last.
+pub const Lines = origin.Lines;
 
 /// The config file Settings saves to, as the All settings page could read it.
 pub const ConfigFile = union(enum) {
@@ -319,24 +316,48 @@ pub fn decodeConfigText(alloc: std.mem.Allocator, bytes: []const u8) std.mem.All
     };
 }
 
-/// Count the lines of config file `text` that set each key. A line sets a
-/// key when, without the spaces around it, it starts with the key's name
-/// followed by `=` (or is the name alone); lines starting with `#` are
-/// comments.
+/// Count the lines of config file `text` that name each key, whether or not
+/// the loader took them. A line names a key when, without the spaces around
+/// it, it starts with the key's name followed by `=` (or is the name alone);
+/// lines starting with `#` are comments. That a line names a key does not
+/// make it set the key: the loader may have refused its value, or not read
+/// the line yet (`scanUntaken`).
 pub fn scanLines(text: []const u8, out: *[key_count]Lines) void {
     out.* = @splat(.{});
-    var number: u32 = 0;
+    var number: usize = 0;
     var lines = std.mem.splitScalar(u8, text, '\n');
     while (lines.next()) |line| {
         number +|= 1;
-        const trimmed = std.mem.trim(u8, line, " \t\r");
-        if (trimmed.len == 0 or trimmed[0] == '#') continue;
-        const name = std.mem.trimRight(u8, trimmed[0 .. std.mem.indexOfScalar(u8, trimmed, '=') orelse trimmed.len], " \t");
-        const key = std.meta.stringToEnum(Key, name) orelse continue;
+        const key = lineKey(line) orelse continue;
         const entry = &out[index(key)];
         entry.count +|= 1;
         entry.last = number;
     }
+}
+
+/// Count the lines of `text`, the file at `path`, that name a key the loader
+/// did not take from that line in `current` (`config.origin.setsAt`): a line
+/// whose value it refused, or one written after it read the file.
+fn scanUntaken(text: []const u8, current: *const Config, path: []const u8, out: *[key_count]Lines) void {
+    out.* = @splat(.{});
+    var number: usize = 0;
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    while (lines.next()) |line| {
+        number +|= 1;
+        const key = lineKey(line) orelse continue;
+        if (origin.setsAt(current, key, path, number, &samePath)) continue;
+        const entry = &out[index(key)];
+        entry.count +|= 1;
+        entry.last = number;
+    }
+}
+
+/// The key a line of a config file names (`scanLines`), if any.
+fn lineKey(line: []const u8) ?Key {
+    const trimmed = std.mem.trim(u8, line, " \t\r");
+    if (trimmed.len == 0 or trimmed[0] == '#') return null;
+    const name = std.mem.trimRight(u8, trimmed[0 .. std.mem.indexOfScalar(u8, trimmed, '=') orelse trimmed.len], " \t");
+    return std.meta.stringToEnum(Key, name);
 }
 
 /// Write `key`'s value in `config` the way a config file sets it: a line
@@ -391,11 +412,17 @@ pub const Row = struct {
     /// key's Settings controls.
     search: []const u8 = "",
     /// Whether the effective value differs from the default
-    /// (`resolved_when_unset` keys: whether the config file sets them, when
-    /// that is known; else their value too).
+    /// (`resolved_when_unset` keys: whether a line of the config file sets
+    /// them, when that is known; else their value too).
     differs: bool = false,
-    /// The lines of the config file Settings saves to that set the key.
-    lines: Lines = .{},
+    /// The lines of the config file Settings saves to that set the key, as
+    /// the loader took them (`config.origin.linesIn`): a line whose value it
+    /// refused is not among them.
+    set: Lines = .{},
+    /// The lines of that file that name the key and that the loader did not
+    /// take (`scanUntaken`): refused, or written after the config was read.
+    /// They do not take effect.
+    untaken: Lines = .{},
     /// Where the effective value came from (`config.origin`); a file's path
     /// is the model's own copy.
     origin: origin.Origin = .default,
@@ -442,13 +469,13 @@ pub const Model = struct {
         var arena: std.heap.ArenaAllocator = .init(gpa);
         errdefer arena.deinit();
         const alloc = arena.allocator();
-        var lines: [key_count]Lines = @splat(.{});
+        var untaken: [key_count]Lines = @splat(.{});
         const lines_known = switch (file) {
             .none, .missing => true,
             .unavailable => false,
             .bytes => |bytes| known: {
                 const text = try decodeConfigText(alloc, bytes) orelse break :known false;
-                scanLines(text, &lines);
+                if (file_path) |path| scanUntaken(text, current, path, &untaken) else scanLines(text, &untaken);
                 break :known true;
             },
         };
@@ -472,10 +499,13 @@ pub const Model = struct {
             var more: u32 = 0;
             while (values.next()) |_| more +|= 1;
 
-            // A key `finalize` works out differs when the file sets it. With
-            // the file unread that is not known, so its value decides, as
-            // for any other key: shown as changed rather than hidden.
-            const differs = if (resolvedWhenUnset(key) and lines_known) lines[i].count != 0 else if (defaults) |config| changed: {
+            // The lines of the file that set the key, as the loader took them.
+            const set: Lines = if (file_path) |path| origin.linesIn(current, key, path, &samePath) else .{};
+            // A key `finalize` works out differs when a line of the file sets
+            // it; a line the loader refused does not. With the file unread
+            // that is not known, so its value decides, as for any other key:
+            // shown as changed rather than hidden.
+            const differs = if (resolvedWhenUnset(key) and lines_known) set.count != 0 else if (defaults) |config| changed: {
                 default_entries.clearRetainingCapacity();
                 try writeEntries(&default_entries.writer, config, key);
                 break :changed !std.mem.eql(u8, current_entries.written(), default_entries.written());
@@ -507,7 +537,8 @@ pub const Model = struct {
                 .more = more,
                 .search = search_text,
                 .differs = differs,
-                .lines = lines[i],
+                .set = set,
+                .untaken = untaken[i],
                 .accumulates = accumulates(key),
                 .origin = switch (savedOrigin(current, key, defaults)) {
                     .file => |place| .{ .file = .{ .path = try alloc.dupe(u8, place.path), .line = place.line, .kind = place.kind } },
@@ -531,7 +562,10 @@ pub const Model = struct {
     /// `config-file` names, the theme, another default config file, the
     /// command line) is named with its file and line, and a line of this file
     /// that it overrides is said not to take effect. A value from a line of
-    /// this file is named by that line (`writeTargetLine`).
+    /// this file is named by that line (`writeTargetLine`). Only lines the
+    /// loader took are said to set a key (`Row.set`); a line that names the
+    /// key and that it did not take is said only to mention it
+    /// (`Row.untaken`).
     pub fn writeLocation(self: *const Model, writer: *std.Io.Writer, row: *const Row) !void {
         switch (row.origin) {
             .file => |file| {
@@ -541,48 +575,47 @@ pub const Model = struct {
                     .theme => ", the theme.",
                     .config => ".",
                 } });
-                return self.writeOverridden(writer, row);
+                return self.writeOtherLines(writer, row, null);
             },
             .cli => {
                 try writer.writeAll("Set on the command line.");
-                return self.writeOverridden(writer, row);
-            },
-            .derived => if (self.file != null and self.lines_known and row.lines.count == 0) {
-                return writer.print("Not set in {s}: noctty chose this value when it read the config.", .{self.file.?});
+                return self.writeOtherLines(writer, row, null);
             },
             .unplaced => return writer.writeAll("Set, but not in a file or on the command line."),
-            .default => {},
+            .derived, .default => {},
         }
         const path = self.file orelse {
             if (!self.lines_known) try writer.writeAll("Not known where it is set: Settings could not tell which config file to read.");
             return;
         };
         if (!self.lines_known) return writer.print("Not known where {s} sets it: Settings reads only a file on a local drive, as text, and could not read this one.", .{path});
-        switch (row.lines.count) {
-            0 => try writer.print("Not set in {s}.", .{path}),
-            1 => try writer.print("Set on line {d} of {s}.", .{ row.lines.last, path }),
-            else => try writer.print("Set on {d} lines of {s}, the last on line {d}.", .{ row.lines.count, path, row.lines.last }),
-        }
+        // No step set the key: a line of this file that names it was not taken.
+        if (row.origin == .derived)
+            try writer.print("Not set in {s}: noctty chose this value when it read the config.", .{path})
+        else
+            try writer.print("Not set in {s}.", .{path});
+        return self.writeOtherLines(writer, row, null);
     }
 
     /// A value from line `line` of the file Settings saves to, the line the
-    /// loader took (`Row.origin`), as the form rows name it. The file's own
-    /// lines that name the key (`Row.lines`) need not end there: a line that
-    /// sets the key under another name (`bold-is-bright` for `bold-color`,
-    /// `gtk-single-instance` for `single-instance`) is not among them, and a
-    /// line the loader refused is. Such a line after or before the one taken
-    /// is said not to take effect (`writeOverridden`).
+    /// loader took (`Row.origin`), as the form rows name it. The lines of the
+    /// file that set the key (`Row.set`) need not end there: a line under
+    /// another name (`bold-is-bright` for `bold-color`, `gtk-single-instance`
+    /// for `single-instance`) can win over them. Such a line before or after
+    /// the one taken is said not to take effect (`writeOtherLines`).
     fn writeTargetLine(self: *const Model, writer: *std.Io.Writer, row: *const Row, line: usize) !void {
         const path = self.file.?;
-        const last_is_taken = self.lines_known and row.lines.last == line;
-        if (last_is_taken and row.lines.count > 1)
-            return writer.print("Set on {d} lines of {s}, the last on line {d}.", .{ row.lines.count, path, line });
-        try writer.print("Set on line {d} of {s}.", .{ line, path });
-        if (!last_is_taken) try self.writeOverridden(writer, row);
+        if (row.set.count > 1 and row.set.last == line)
+            try writer.print("Set on {d} lines of {s}, the last on line {d}.", .{ row.set.count, path, line })
+        else
+            try writer.print("Set on line {d} of {s}.", .{ line, path });
+        return self.writeOtherLines(writer, row, line);
     }
 
-    /// For a value from elsewhere, or from another line of this file: the
-    /// line of this file that it overrides,
+    /// The lines of this file that do not give the value in effect, after
+    /// what gave it (`taken`: the line of this file that did, if any).
+    ///
+    /// A line that set the key and is overridden is said not to take effect,
     /// or, for a key whose lines can add up, only that this file has one too.
     /// Whether such a line still counts depends on the lines after it, which
     /// the replay log does not say. An empty value resets by each field's own
@@ -591,11 +624,25 @@ pub const Model = struct {
     /// clears every binding), a command-line `font-family` replaces the
     /// families before it, and a later `keybind` for the same keys replaces
     /// the entry.
-    fn writeOverridden(self: *const Model, writer: *std.Io.Writer, row: *const Row) !void {
+    ///
+    /// A line that names the key and that the loader did not take (refused,
+    /// or written after it read the file) is said only to mention the key,
+    /// and not to take effect.
+    fn writeOtherLines(self: *const Model, writer: *std.Io.Writer, row: *const Row, taken: ?usize) !void {
         const path = self.file orelse return;
-        if (!self.lines_known or row.lines.count == 0) return;
-        if (row.accumulates) return writer.print(" {s} also has a setting for it, on line {d}.", .{ path, row.lines.last });
-        try writer.print(" Line {d} of {s} sets it too, and does not take effect.", .{ row.lines.last, path });
+        const set = row.set;
+        if (set.count > 0 and (taken == null or set.last != taken.?)) {
+            if (row.accumulates)
+                try writer.print(" {s} also has a setting for it, on line {d}.", .{ path, set.last })
+            else
+                try writer.print(" Line {d} of {s} sets it too, and does not take effect.", .{ set.last, path });
+        }
+        const untaken = row.untaken;
+        if (!self.lines_known or untaken.count == 0) return;
+        if (untaken.count == 1)
+            try writer.print(" Line {d} of {s} mentions it, and does not take effect.", .{ untaken.last, path })
+        else
+            try writer.print(" {d} lines of {s} mention it, the last on line {d}, and do not take effect.", .{ untaken.count, path, untaken.last });
     }
 };
 
@@ -719,7 +766,7 @@ test "settings reference summary is the first sentence" {
     try testing.expectEqualStrings("Version 1.2.0 is out.", summaryOf("Version 1.2.0 is out. More."));
 }
 
-test "settings reference counts the lines of the config file that set each key" {
+test "settings reference counts the lines of the config file that name each key" {
     var lines: [key_count]Lines = undefined;
     scanLines(
         "# font-size = 99 is a comment\r\n" ++
@@ -737,20 +784,27 @@ test "settings reference counts the lines of the config file that set each key" 
 }
 
 test "settings reference rows carry the effective value, its count and the location" {
-    var current = try Config.default(testing.allocator);
+    const alloc = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const text = "font-size = 15\n";
+    try tmp.dir.writeFile(.{ .sub_path = "config", .data = text });
+    const path = try tmp.dir.realpathAlloc(alloc, "config");
+    defer alloc.free(path);
+    var current = try Config.default(alloc);
     defer current.deinit();
-    var defaults = try Config.default(testing.allocator);
+    try current.loadFile(alloc, path);
+    var defaults = try Config.default(alloc);
     defer defaults.deinit();
-    current.@"font-size" = 15;
     const extra: [key_count][]const u8 = @splat("");
     var model: Model = .{};
     defer model.deinit();
-    try model.build(testing.allocator, &current, &defaults, "C:\\cfg\\config", .{ .bytes = "font-size = 15\n" }, &extra);
+    try model.build(alloc, &current, &defaults, path, .{ .bytes = text }, &extra);
 
     const font = &model.rows[index(.@"font-size")];
     try testing.expectEqualStrings("15", font.value);
     try testing.expect(font.differs);
-    try testing.expectEqual(@as(u32, 1), font.lines.count);
+    try testing.expectEqual(@as(u32, 1), font.set.count);
     try testing.expect(std.mem.indexOf(u8, font.search, "font-size\n15\n") != null);
 
     const scrollback = &model.rows[index(.@"scrollback-limit")];
@@ -760,13 +814,26 @@ test "settings reference rows carry the effective value, its count and the locat
     const palette = &model.rows[index(.palette)];
     try testing.expect(palette.more > 0);
 
-    var buf: [256]u8 = undefined;
+    var buf: [1024]u8 = undefined;
+    var expected: [1024]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buf);
     try model.writeLocation(&writer, font);
-    try testing.expectEqualStrings("Set on line 1 of C:\\cfg\\config.", writer.buffered());
+    try testing.expectEqualStrings(try std.fmt.bufPrint(&expected, "Set on line 1 of {s}.", .{path}), writer.buffered());
     writer = .fixed(&buf);
     try model.writeLocation(&writer, scrollback);
-    try testing.expectEqualStrings("Not set in C:\\cfg\\config.", writer.buffered());
+    try testing.expectEqualStrings(try std.fmt.bufPrint(&expected, "Not set in {s}.", .{path}), writer.buffered());
+
+    // A config the loader did not read from that file: its line names the
+    // key, but set nothing.
+    var unread = try Config.default(alloc);
+    defer unread.deinit();
+    unread.@"font-size" = 15;
+    var unread_model: Model = .{};
+    defer unread_model.deinit();
+    try unread_model.build(alloc, &unread, &defaults, path, .{ .bytes = text }, &extra);
+    writer = .fixed(&buf);
+    try unread_model.writeLocation(&writer, &unread_model.rows[index(.@"font-size")]);
+    try testing.expectEqualStrings(try std.fmt.bufPrint(&expected, "Not set in {s}. Line 1 of {s} mentions it, and does not take effect.", .{ path, path }), writer.buffered());
 
     // A key Windows does not honour says so in what the search reads.
     const blur = &model.rows[index(.@"background-blur")];
@@ -795,18 +862,39 @@ test "settings reference a config that sets nothing has no key away from its def
 }
 
 test "settings reference keys the app works out when unset count as changed only when the file sets them" {
-    var current = try Config.default(testing.allocator);
-    defer current.deinit();
-    var defaults = try Config.default(testing.allocator);
+    const alloc = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(.{ .sub_path = "config", .data = "\n" });
+    const path = try tmp.dir.realpathAlloc(alloc, "config");
+    defer alloc.free(path);
+    var defaults = try Config.default(alloc);
     defer defaults.deinit();
-    current.@"click-repeat-interval" = 500;
     const extra: [key_count][]const u8 = @splat("");
+
+    // The value `finalize` works out, with no file.
+    var worked_out = try Config.default(alloc);
+    defer worked_out.deinit();
+    worked_out.@"click-repeat-interval" = 500;
     var model: Model = .{};
     defer model.deinit();
-    try model.build(testing.allocator, &current, &defaults, null, .none, &extra);
+    try model.build(alloc, &worked_out, &defaults, null, .none, &extra);
     try testing.expect(!model.rows[index(.@"click-repeat-interval")].differs);
-    try model.build(testing.allocator, &current, &defaults, "f", .{ .bytes = "click-repeat-interval = 500" }, &extra);
-    try testing.expect(model.rows[index(.@"click-repeat-interval")].differs);
+
+    // A line that sets it, and one whose value the loader refused, which
+    // sets nothing.
+    for ([_]struct { text: []const u8, differs: bool }{
+        .{ .text = "click-repeat-interval = 500", .differs = true },
+        .{ .text = "click-repeat-interval = abc", .differs = false },
+    }) |case| {
+        errdefer std.debug.print("settings reference differs case {s}\n", .{case.text});
+        try tmp.dir.writeFile(.{ .sub_path = "config", .data = case.text });
+        var current = try Config.default(alloc);
+        defer current.deinit();
+        try current.loadFile(alloc, path);
+        try model.build(alloc, &current, &defaults, path, .{ .bytes = case.text }, &extra);
+        try testing.expectEqual(case.differs, model.rows[index(.@"click-repeat-interval")].differs);
+    }
 }
 
 /// `text` as the bytes of a UTF-16 file in `order`, byte order mark first.
@@ -836,32 +924,49 @@ test "settings reference reads the config file in the encodings Config reads" {
 }
 
 test "settings reference finds where a BOM or UTF-16 config sets a key, and @modified with it" {
-    var current = try Config.default(testing.allocator);
-    defer current.deinit();
-    var defaults = try Config.default(testing.allocator);
+    const alloc = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(.{ .sub_path = "config", .data = "\n" });
+    const path = try tmp.dir.realpathAlloc(alloc, "config");
+    defer alloc.free(path);
+    var defaults = try Config.default(alloc);
     defer defaults.deinit();
-    // As `Config` leaves it after reading the file below: `finalize` would set
-    // the interval from the system when the file did not.
-    current.@"font-size" = 15;
-    current.@"click-repeat-interval" = 500;
     const extra: [key_count][]const u8 = @splat("");
-    const text = "click-repeat-interval = 500\r\nfont-size = 15\r\n";
+    // The third line names a key with a value the loader refuses.
+    const text = "click-repeat-interval = 500\r\nfont-size = 15\r\nscrollback-limit = lots\r\n";
     const files = [_][]const u8{ "\xef\xbb\xbf" ++ text, &utf16File(text, .little), &utf16File(text, .big) };
-    var buf: [256]u8 = undefined;
+    var buf: [1024]u8 = undefined;
+    var expected: [1024]u8 = undefined;
     for (files) |file| {
+        // Read by the loader, as the app does; without `finalize`, which would
+        // set the interval from the system when the file did not.
+        try tmp.dir.writeFile(.{ .sub_path = "config", .data = file });
+        var loaded = try Config.default(alloc);
+        defer loaded.deinit();
+        try loaded.loadFile(alloc, path);
         var model: Model = .{};
         defer model.deinit();
-        try model.build(testing.allocator, &current, &defaults, "f", .{ .bytes = file }, &extra);
+        try model.build(alloc, &loaded, &defaults, path, .{ .bytes = file }, &extra);
         const interval = &model.rows[index(.@"click-repeat-interval")];
         // The first line's key is found, so it is changed, and where.
         try testing.expect(interval.differs);
         var writer: std.Io.Writer = .fixed(&buf);
         try model.writeLocation(&writer, interval);
-        try testing.expectEqualStrings("Set on line 1 of f.", writer.buffered());
+        try testing.expectEqualStrings(try std.fmt.bufPrint(&expected, "Set on line 1 of {s}.", .{path}), writer.buffered());
         writer = .fixed(&buf);
         try model.writeLocation(&writer, &model.rows[index(.@"font-size")]);
-        try testing.expectEqualStrings("Set on line 2 of f.", writer.buffered());
+        try testing.expectEqualStrings(try std.fmt.bufPrint(&expected, "Set on line 2 of {s}.", .{path}), writer.buffered());
+        writer = .fixed(&buf);
+        try model.writeLocation(&writer, &model.rows[index(.@"scrollback-limit")]);
+        try testing.expectEqualStrings(try std.fmt.bufPrint(&expected, "Not set in {s}. Line 3 of {s} mentions it, and does not take effect.", .{ path, path }), writer.buffered());
     }
+
+    // As `Config` leaves it after reading those files.
+    var current = try Config.default(alloc);
+    defer current.deinit();
+    current.@"font-size" = 15;
+    current.@"click-repeat-interval" = 500;
 
     // A file that is there but cannot be read as text: where a key is set is
     // not known, so it is not said to be unset, and a key `finalize` works out
@@ -1199,7 +1304,7 @@ test "settings reference saved default-profile keeps its included-file origin un
     try testing.expectEqualStrings(try std.fmt.bufPrint(&expected, "Set on line 1 of {s}, a file config-file names.", .{included_path}), writer.buffered());
 }
 
-test "settings reference names the line of the file Settings saves to that the loader took" {
+test "settings reference says a line of the file Settings saves to sets a key only when the loader took it" {
     const alloc = testing.allocator;
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -1210,7 +1315,8 @@ test "settings reference names the line of the file Settings saves to that the l
     defer defaults.deinit();
     try defaults.finalize();
 
-    const Want = struct { key: Key, line: usize, refused: ?usize = null };
+    // `@` stands for the file's path.
+    const Want = struct { key: Key, text: []const u8 };
     const File = struct { text: []const u8, want: []const Want };
     for ([_]File{
         .{
@@ -1218,22 +1324,46 @@ test "settings reference names the line of the file Settings saves to that the l
             // after one it took; `single-instance` from its alias alone.
             .text = "bold-is-bright = true\nfont-size = 13\nfont-size = abc\ngtk-single-instance = false\n",
             .want = &.{
-                .{ .key = .@"bold-color", .line = 1 },
-                .{ .key = .@"font-size", .line = 2, .refused = 3 },
-                .{ .key = .@"single-instance", .line = 4 },
-                .{ .key = .@"gtk-single-instance", .line = 4 },
+                .{ .key = .@"bold-color", .text = "Set on line 1 of @." },
+                .{ .key = .@"font-size", .text = "Set on line 2 of @. Line 3 of @ mentions it, and does not take effect." },
+                .{ .key = .@"single-instance", .text = "Set on line 4 of @." },
+                .{ .key = .@"gtk-single-instance", .text = "Set on line 4 of @." },
             },
         },
         .{
-            // `single-instance` wins over its alias, whose line does not take
-            // effect.
+            // `single-instance` wins over its alias, whose line set it but
+            // does not take effect.
             .text = "single-instance = false\ngtk-single-instance = true\n",
             .want = &.{
-                .{ .key = .@"single-instance", .line = 1 },
-                .{ .key = .@"gtk-single-instance", .line = 1, .refused = 2 },
+                .{ .key = .@"single-instance", .text = "Set on line 1 of @." },
+                .{ .key = .@"gtk-single-instance", .text = "Set on line 1 of @. Line 2 of @ sets it too, and does not take effect." },
             },
         },
-    }) |file| {
+        .{
+            // Only a refused line: nothing set the key.
+            .text = "font-size = abc\n",
+            .want = &.{.{ .key = .@"font-size", .text = "Not set in @. Line 1 of @ mentions it, and does not take effect." }},
+        },
+        .{
+            // A refused line before a taken one: the taken one is named.
+            .text = "font-size = abc\nfont-size = 13\n",
+            .want = &.{.{ .key = .@"font-size", .text = "Set on line 2 of @. Line 1 of @ mentions it, and does not take effect." }},
+        },
+        .{
+            // Only the lines the loader took are counted as setting it.
+            .text = "font-size = 12\nfont-size = abc\nfont-size = 13\n",
+            .want = &.{.{ .key = .@"font-size", .text = "Set on 2 lines of @, the last on line 3. Line 2 of @ mentions it, and does not take effect." }},
+        },
+        .{
+            // A later `single-instance = detect` replaces the earlier
+            // `false`, and the alias decides.
+            .text = "single-instance = false\nsingle-instance = detect\ngtk-single-instance = true\n",
+            .want = &.{
+                .{ .key = .@"single-instance", .text = "Set on line 3 of @. Line 2 of @ sets it too, and does not take effect." },
+                .{ .key = .@"gtk-single-instance", .text = "Set on line 3 of @." },
+            },
+        },
+    }, 0..) |file, n| {
         try tmp.dir.writeFile(.{ .sub_path = "config", .data = file.text });
         var current = try Config.default(alloc);
         defer current.deinit();
@@ -1243,17 +1373,15 @@ test "settings reference names the line of the file Settings saves to that the l
         var model: Model = .{};
         defer model.deinit();
         try model.build(alloc, &current, &defaults, path, .{ .bytes = file.text }, &extra);
-        var buf: [1024]u8 = undefined;
-        var expected: [1024]u8 = undefined;
+        var buf: [2048]u8 = undefined;
+        var expected: [2048]u8 = undefined;
         for (file.want) |want| {
-            errdefer std.debug.print("settings reference location of {s}\n", .{@tagName(want.key)});
+            errdefer std.debug.print("settings reference file {d}, location of {s}\n", .{ n, @tagName(want.key) });
             var writer: std.Io.Writer = .fixed(&buf);
             try model.writeLocation(&writer, &model.rows[index(want.key)]);
-            const text = if (want.refused) |line|
-                try std.fmt.bufPrint(&expected, "Set on line {d} of {s}. Line {d} of {s} sets it too, and does not take effect.", .{ want.line, path, line, path })
-            else
-                try std.fmt.bufPrint(&expected, "Set on line {d} of {s}.", .{ want.line, path });
-            try testing.expectEqualStrings(text, writer.buffered());
+            const size = std.mem.replacementSize(u8, want.text, "@", path);
+            _ = std.mem.replace(u8, want.text, "@", path, expected[0..size]);
+            try testing.expectEqualStrings(expected[0..size], writer.buffered());
         }
     }
 }

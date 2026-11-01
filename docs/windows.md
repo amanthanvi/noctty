@@ -1775,7 +1775,10 @@ elsewhere names the file and line that set it (a file `config-file` names,
 the theme's file) or the command line, and says when a line of the config
 file sets the key too and does not take effect (for a key whose lines can add
 up, such as `font-family` or `keybind`, only that the file has a line for it
-too, since a later line can clear or replace it). A command
+too, since a later line can clear or replace it). Only a line noctty took when
+it read the file is said to set a key: a line whose value it refused, or one
+written since it last read the file, is said to mention the key and not to
+take effect. A command
 line's `command` or `initial-command` wins over a file read after it, and is
 named as the command line's. A command line's `default-profile` is for that
 process only: the page shows the config files' value, as the Shell page does,
