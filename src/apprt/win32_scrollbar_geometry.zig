@@ -340,7 +340,10 @@ pub fn downsampleMarkers(
     if (matches.len <= max_markers) {
         const out = try alloc.alloc(f32, matches.len);
         for (matches, 0..) |row, i| {
-            out[i] = @floatCast(@as(f64, @floatFromInt(row)) / rows_f);
+            // A row past the end (match rows from before a scrollback prune
+            // shrank the total) sits at the track's end, as the bucket path
+            // clamps it to its last bin.
+            out[i] = @floatCast(@min(@as(f64, @floatFromInt(row)) / rows_f, 1.0));
         }
         return out;
     }
@@ -383,6 +386,20 @@ pub fn downsampleMarkers(
 // Tests
 // ===========================================================================
 
+test "downsampleMarkers keeps a row past the end at the track's end on both paths" {
+    // The fast path, as the bucket path: no position past 1.0.
+    const few = [_]usize{ 10, 100, 250 };
+    const fast = try downsampleMarkers(std.testing.allocator, &few, 100, 10);
+    defer std.testing.allocator.free(fast);
+    try std.testing.expectEqual(@as(usize, 3), fast.len);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.1), fast[0], 1e-6);
+    try std.testing.expectEqual(@as(f32, 1.0), fast[1]);
+    try std.testing.expectEqual(@as(f32, 1.0), fast[2]);
+    const many = [_]usize{ 0, 50, 99, 250 };
+    const binned = try downsampleMarkers(std.testing.allocator, &many, 100, 2);
+    defer std.testing.allocator.free(binned);
+    for (binned) |pos| try std.testing.expect(pos >= 0 and pos <= 1.0);
+}
 test "init is hidden" {
     const s = ScrollbarState.init();
     try std.testing.expectEqual(Visibility.hidden, s.visibility);

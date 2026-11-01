@@ -274,7 +274,8 @@ try {
         Start-Sleep -Milliseconds 4000
         Open-Search $h
         [Ds]::Chars([Ds]::Child($h,$Id.Edit),'needlex')
-        $typed=Wait-Label $h { param($t) $t -match '^\d+$' }
+        # The full total: a count taken while fill.cmd still prints is partial.
+        $typed=Wait-Label $h { param($t) $t -eq '60' } 15
         Press-Edit $h 0x1B
         [void](Wait-Until { -not [Ds]::Visible([Ds]::Child($h,$Id.Edit)) } 4)
         $closed=-not [Ds]::Visible([Ds]::Child($h,$Id.Edit))
@@ -302,7 +303,7 @@ try {
         Start-Sleep -Milliseconds 4000
         Open-Search $h
         [Ds]::Chars([Ds]::Child($h,$Id.Edit),'needlex')
-        $typed=Wait-Label $h { param($t) $t -match '^\d+$' }
+        $typed=Wait-Label $h { param($t) $t -eq '60' } 15
         $pane=Pane $h
         [Ds]::FocusOn($pane); Start-Sleep -Milliseconds 200
         $focused=([Ds]::FocusOf($h) -eq $pane)
@@ -325,7 +326,7 @@ try {
         Start-Sleep -Milliseconds 4000
         Open-Search $h
         [Ds]::Chars([Ds]::Child($h,$Id.Edit),'needlex')
-        [void](Wait-Label $h { param($t) $t -match '^\d+$' })
+        [void](Wait-Label $h { param($t) $t -eq '60' } 15)
         [Ds]::Key((Pane $h),0x74)            # F5: new_split:right
         [void](Wait-Until { @([HiddenLocal]::Surfaces($h)).Count -eq 2 } 8)
         Start-Sleep -Milliseconds 4000       # the new pane prints its 60 lines
