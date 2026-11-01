@@ -952,8 +952,9 @@ pub const Surface = struct {
             // Must stay ahead of every path below that can show the host
             // window (`SW_SHOWNOACTIVATE` / `presentWindow`): applying the
             // layered style to an already-visible window is what produces an
-            // opaque-then-fade flash. No unit test observes that ordering
-            // — see the doc comment on `applyInitialBackgroundOpacity`.
+            // opaque-then-fade flash. The window-start fixture reads the
+            // style at the first show ("... layered at their opacity at the
+            // first show" in window_state.zig).
             self.applyInitialBackgroundOpacity(if (keeps.background_opacity) null else opts.clone_state_from);
             try host.refreshChrome();
             try host.layout();

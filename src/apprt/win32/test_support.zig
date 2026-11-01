@@ -527,7 +527,9 @@ pub fn Fixtures(comptime runtime: anytype) type {
             /// `createHost` put it and a first window at the fixed rect below.
             pub var initial_size: ?apprt.action.InitialSize = null;
 
-            pub const FirstShow = struct { rect: RECT, zoomed: bool, style: u32 };
+            /// `ex_style` and `alpha` are the layered style and alpha the
+            /// window first appeared with (#234: before any show).
+            pub const FirstShow = struct { rect: RECT, zoomed: bool, style: u32, ex_style: u32, alpha: ?u8 };
             pub const swp_showwindow: UINT = 0x0040;
 
             pub fn init(self: *WindowStartTestApp) !void {
@@ -629,6 +631,8 @@ pub fn Fixtures(comptime runtime: anytype) type {
                             .rect = rect,
                             .zoomed = sys.IsZoomed(hwnd) != 0,
                             .style = @truncate(@as(usize, @bitCast(sys.GetWindowLongPtrW(hwnd, c.GWL_STYLE)))),
+                            .ex_style = testHostExStyle(hwnd),
+                            .alpha = if (testHostIsLayered(hwnd)) testLayeredAlpha(hwnd) else null,
                         };
                         shown = true;
                     }

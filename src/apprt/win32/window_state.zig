@@ -1132,11 +1132,9 @@ pub fn applyWindowStyle(self: *Surface) !void {
 /// would write to the live window rather than no-op through
 /// `activeSharedHostWindowHwnd`.
 ///
-/// The unit tests cover this function against a live HWND, but nothing
-/// unit-testable reaches `Surface.init` (it needs a GL context and a real
-/// `CoreSurface`), so neither the call site nor its ordering against the
-/// first show is machine-checked. Both were verified by running the app
-/// and reading back `GWL_EXSTYLE` / `GetLayeredWindowAttributes`.
+/// `WindowStartTestApp` runs the real `Surface.init` with stand-ins for the
+/// GL context and the core, and reads `GWL_EXSTYLE` and the layered alpha at
+/// the window's first show, which pins the call site and its ordering.
 ///
 /// Failure is logged rather than propagated: a window that could not be
 /// layered is still a usable window.
@@ -2944,4 +2942,246 @@ test "win32 hostSurfaceCount tracks surfaces attached to one host" {
     try host.tabs.append(std.testing.allocator, try Tab.init(std.testing.allocator, 2, &second));
     try std.testing.expectEqual(@as(usize, 2), first.hostSurfaceCount());
     try std.testing.expect(!shouldResizeHostForInitialSize(first.hostSurfaceCount()));
+}
+
+// The tests below pin what the window-state fan-out (`syncHostWindowState`:
+// each window action, `.cell_size`, `.size_limit`, `.initial_size` and a
+// pane's `config_change` copy the acting pane's window state into every other
+// pane of its window through `inheritWindowStateFrom`, which ends in
+// `ShowWindow(SW_RESTORE)` or `maximizeWithPlacement` on the same HWND) and the
+// tab-switch re-application (`syncSharedHostWindowState`) do today, measured
+// before one copy of the window state moves onto the Window.
+
+test "win32 a first window and a window opened from it are layered at their opacity at the first show" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    try runOnHiddenDesktop(struct {
+        fn body() !void {
+            var fixture: WindowStartTestApp = .{};
+            try fixture.init();
+            defer fixture.deinit();
+            const app = &fixture.app;
+            const Fixture = WindowStartTestApp;
+            app.config.@"background-opacity" = 0.5;
+
+            // Layered before any show (#234): no opaque frame, then a fade.
+            try app.createWindow(default_title);
+            const source = fixture.newest();
+            var shown = Fixture.first_show orelse return error.TestWindowNeverShown;
+            try std.testing.expect(shown.ex_style & c.WS_EX_LAYERED != 0);
+            try std.testing.expectEqual(@as(?u8, 128), shown.alpha);
+
+            // A copy shows at its source's opacity before it takes the
+            // source's state.
+            try std.testing.expect(try app.performAction(.app, .new_window, .{ .arguments = null }));
+            shown = Fixture.first_show orelse return error.TestWindowNeverShown;
+            try std.testing.expect(shown.ex_style & c.WS_EX_LAYERED != 0);
+            try std.testing.expectEqual(@as(?u8, 128), shown.alpha);
+            fixture.closeWindow(fixture.newest());
+
+            // A copy of a window the user forced opaque is never shown faded.
+            try std.testing.expect(try app.performAction(.{ .surface = source.core() }, .toggle_background_opacity, {}));
+            try std.testing.expect(!testHostIsLayered(source.windowHwnd().?));
+            try std.testing.expect(try app.performAction(.app, .new_window, .{ .arguments = null }));
+            shown = Fixture.first_show orelse return error.TestWindowNeverShown;
+            try std.testing.expect(shown.ex_style & c.WS_EX_LAYERED == 0);
+            try std.testing.expectEqual(@as(?u8, null), shown.alpha);
+        }
+    }.body);
+}
+
+test "win32 a config change or size limit on the active pane of a minimized window with two panes restores it" {
+    // Measured: the fan-out's SW_RESTORE on the same HWND brings a
+    // minimized window back. The one-pane window, which has no other pane
+    // to copy into, is the control that stays minimized.
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    try runOnHiddenDesktop(struct {
+        fn body() !void {
+            var fixture: WindowStartTestApp = .{};
+            try fixture.init();
+            defer fixture.deinit();
+            const app = &fixture.app;
+            const limit: apprt.action.SizeLimit = .{ .min_width = 120, .min_height = 60, .max_width = 0, .max_height = 0 };
+
+            try app.createWindow(default_title);
+            const single = fixture.newest();
+            const single_hwnd = single.windowHwnd().?;
+            try app.createWindow(default_title);
+            const pair = fixture.newest();
+            const pair_hwnd = pair.windowHwnd().?;
+            _ = try app.createWindowSurface(&app.config, default_title, .{ .host_id = pair.host_id });
+            try std.testing.expectEqual(pair, pair.host.?.activeSurface().?);
+
+            for ([_]*Surface{ single, pair }) |pane| {
+                const hwnd = pane.windowHwnd().?;
+                _ = sys.ShowWindow(hwnd, c.SW_SHOWMINNOACTIVE);
+                try std.testing.expect(sys.IsIconic(hwnd) != 0);
+                try std.testing.expect(try app.performAction(.{ .surface = pane.core() }, .config_change, .{ .config = &app.config }));
+            }
+            try std.testing.expect(sys.IsIconic(single_hwnd) != 0);
+            try std.testing.expect(sys.IsIconic(pair_hwnd) == 0);
+
+            for ([_]*Surface{ single, pair }) |pane| {
+                const hwnd = pane.windowHwnd().?;
+                _ = sys.ShowWindow(hwnd, c.SW_SHOWMINNOACTIVE);
+                try std.testing.expect(sys.IsIconic(hwnd) != 0);
+                try std.testing.expect(try app.performAction(.{ .surface = pane.core() }, .size_limit, limit));
+            }
+            try std.testing.expect(sys.IsIconic(single_hwnd) != 0);
+            try std.testing.expect(sys.IsIconic(pair_hwnd) == 0);
+        }
+    }.body);
+}
+
+test "win32 a reload leaves the active window active, but activates a minimized window with two panes it restores" {
+    // Measured: each window's fan-out ends in SW_RESTORE on its HWND. On a
+    // normal window that changes nothing; on a minimized one it restores
+    // and activates it, which is also the control that the probe sees an
+    // activation.
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    try runOnHiddenDesktop(struct {
+        fn body() !void {
+            var fixture: WindowStartTestApp = .{};
+            try fixture.init();
+            defer fixture.deinit();
+            const app = &fixture.app;
+
+            var firsts: [2]*Surface = undefined;
+            for (&firsts) |*first| {
+                try app.createWindow(default_title);
+                first.* = fixture.newest();
+                _ = try app.createWindowSurface(&app.config, default_title, .{ .host_id = first.*.host_id });
+            }
+            const older = firsts[0].windowHwnd().?;
+            const newer = firsts[1].windowHwnd().?;
+            _ = sys.SetActiveWindow(older);
+            try std.testing.expectEqual(@as(?HWND, older), sys.GetActiveWindow());
+            try reload(app);
+            try std.testing.expectEqual(@as(?HWND, older), sys.GetActiveWindow());
+
+            _ = sys.ShowWindow(newer, c.SW_SHOWMINNOACTIVE);
+            _ = sys.SetActiveWindow(older);
+            try std.testing.expectEqual(@as(?HWND, older), sys.GetActiveWindow());
+            try reload(app);
+            const after = sys.GetActiveWindow();
+            try std.testing.expect(sys.IsIconic(newer) == 0);
+            try std.testing.expectEqual(@as(?HWND, newer), after);
+        }
+
+        /// A reload: each pane's config change, then the app's.
+        fn reload(app: *App) !void {
+            for (app.registry.windows.items) |pane| {
+                try std.testing.expect(try app.performAction(.{ .surface = pane.core() }, .config_change, .{ .config = &app.config }));
+            }
+            try std.testing.expect(try app.performAction(.app, .config_change, .{ .config = &app.config }));
+        }
+    }.body);
+}
+
+test "win32 a new window takes the pane metrics of the pane it is opened from" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    try runOnHiddenDesktop(struct {
+        fn body() !void {
+            var fixture: WindowStartTestApp = .{};
+            try fixture.init();
+            defer fixture.deinit();
+            const app = &fixture.app;
+            const Fixture = WindowStartTestApp;
+
+            try app.createWindow(default_title);
+            const source = fixture.newest();
+            const target: apprt.Target = .{ .surface = source.core() };
+            try std.testing.expect(try app.performAction(target, .cell_size, .{ .width = 9, .height = 18 }));
+            try std.testing.expect(try app.performAction(target, .size_limit, .{ .min_width = 90, .min_height = 72, .max_width = 0, .max_height = 0 }));
+            try std.testing.expect(try app.performAction(target, .initial_size, .{ .width = 640, .height = 400 }));
+
+            // Its own core init asks for another client size, as a font of
+            // its own would.
+            Fixture.initial_size = .{ .width = 500, .height = 300 };
+            defer Fixture.initial_size = null;
+            try std.testing.expect(try app.performAction(.app, .new_window, .{ .arguments = null }));
+            const clone = fixture.newest();
+            try std.testing.expect(clone != source);
+            try std.testing.expectEqual(source.cell_size_pixels, clone.cell_size_pixels);
+            try std.testing.expect(sizeLimitEquals(source.size_limit, clone.size_limit));
+            try std.testing.expectEqual(source.default_client_size, clone.default_client_size);
+        }
+    }.body);
+}
+
+test "win32 Windows sends WM_GETMINMAXINFO to a top-level window and never to a terminal child on SetWindowPos" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const Counter = struct {
+        var top_level: usize = 0;
+        var child: usize = 0;
+        var top_prev: ?*const anyopaque = null;
+        var child_prev: ?*const anyopaque = null;
+
+        fn topProc(hwnd: HWND, msg: UINT, wp: usize, lp: LPARAM) callconv(.winapi) isize {
+            if (msg == c.WM_GETMINMAXINFO) top_level += 1;
+            return sys.CallWindowProcW(top_prev, hwnd, msg, wp, lp);
+        }
+
+        fn childProc(hwnd: HWND, msg: UINT, wp: usize, lp: LPARAM) callconv(.winapi) isize {
+            if (msg == c.WM_GETMINMAXINFO) child += 1;
+            return sys.CallWindowProcW(child_prev, hwnd, msg, wp, lp);
+        }
+
+        fn subclass(hwnd: HWND, proc: anytype) ?*const anyopaque {
+            return @ptrFromInt(@as(usize, @bitCast(sys.SetWindowLongPtrW(hwnd, c.GWLP_WNDPROC, @bitCast(@intFromPtr(proc))))));
+        }
+    };
+    const top = sys.CreateWindowExW(0, prompt_label_class, std.unicode.utf8ToUtf16LeStringLiteral(""), WS_OVERLAPPEDWINDOW, 0, 0, 640, 480, null, null, sys.GetModuleHandleW(null), null) orelse return lastError();
+    defer _ = sys.DestroyWindow(top);
+    const child = sys.CreateWindowExW(0, prompt_label_class, std.unicode.utf8ToUtf16LeStringLiteral(""), win32.surfaceWindowStyle(), 0, 0, 100, 100, top, null, sys.GetModuleHandleW(null), null) orelse return lastError();
+    Counter.top_prev = Counter.subclass(top, &Counter.topProc);
+    Counter.child_prev = Counter.subclass(child, &Counter.childProc);
+    const flags: UINT = c.SWP_NOZORDER | c.SWP_NOACTIVATE;
+    // The positive control: the top-level window is asked.
+    if (sys.SetWindowPos(top, null, 10, 10, 600, 400, flags) == 0) return lastError();
+    try std.testing.expect(Counter.top_level > 0);
+    for ([_][2]i32{ .{ 300, 200 }, .{ 40, 30 }, .{ 2000, 1500 } }) |size| {
+        if (sys.SetWindowPos(child, null, 5, 5, size[0], size[1], flags) == 0) return lastError();
+    }
+    if (sys.SetWindowPos(child, null, 0, 0, 0, 0, flags | c.SWP_NOMOVE | c.SWP_NOSIZE | c.SWP_FRAMECHANGED | c.SWP_SHOWWINDOW) == 0) return lastError();
+    try std.testing.expectEqual(@as(usize, 0), Counter.child);
+}
+
+test "win32 goto_tab, not a tab click, gives the window the state of a pane whose copy diverged" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    try runOnHiddenDesktop(struct {
+        fn body() !void {
+            var fixture: WindowStartTestApp = .{};
+            try fixture.init();
+            defer fixture.deinit();
+            const app = &fixture.app;
+
+            try app.createWindow(default_title);
+            const first = fixture.newest();
+            const host = first.host.?;
+            const hwnd = host.hwnd.?;
+            const second = try app.createWindowSurface(&app.config, default_title, .{ .host_id = first.host_id });
+            try std.testing.expectEqual(first, host.activeSurface().?);
+
+            // A config change of the background tab: its copy of the
+            // window's opacity changes, the window does not.
+            var faded = try app.config.clone(std.testing.allocator);
+            defer faded.deinit();
+            faded.@"background-opacity" = 0.5;
+            try std.testing.expect(try app.performAction(.{ .surface = second.core() }, .config_change, .{ .config = &faded }));
+            try std.testing.expect(!testHostIsLayered(hwnd));
+
+            // A tab click activates the tab before the surface, so nothing
+            // is re-applied.
+            try std.testing.expect(host.activateTabIndex(1));
+            try std.testing.expect(!testHostIsLayered(hwnd));
+            try std.testing.expect(host.activateTabIndex(0));
+            try std.testing.expect(!testHostIsLayered(hwnd));
+
+            // goto_tab re-applies the copy that differs.
+            try std.testing.expect(try app.performAction(.{ .surface = first.core() }, .goto_tab, .next));
+            try std.testing.expectEqual(second, host.activeSurface().?);
+            try std.testing.expect(testHostIsLayered(hwnd));
+            try std.testing.expectEqual(@as(?u8, 128), testLayeredAlpha(hwnd));
+        }
+    }.body);
 }
