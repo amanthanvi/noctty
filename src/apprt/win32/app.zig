@@ -5,7 +5,6 @@ const Allocator = win32.Allocator;
 const AppDelivery = win32.AppDelivery;
 const ClipboardSource = win32.ClipboardSource;
 const CloseScope = win32.CloseScope;
-const ColdToastCapture = win32.ColdToastCapture;
 const ConfirmCancelReason = @import("overlay_session.zig").ConfirmCancelReason;
 const CoreApp = @import("../../App.zig");
 const CoreSurface = @import("../../Surface.zig");
@@ -140,7 +139,6 @@ const processDeferredUiaDisconnect = win32.processDeferredUiaDisconnect;
 const profileDiscoveryThreadMain = win32.profileDiscoveryThreadMain;
 const profileIndexByKey = win32.profileIndexByKey;
 const ptypkg = @import("../../pty.zig");
-const pumpUntilColdToastActivation = win32.pumpUntilColdToastActivation;
 const queueTerminalHandoff = win32.queueTerminalHandoff;
 const quickSelectProc = win32.quickSelectProc;
 const quick_select_class_name = win32.quick_select_class_name;
@@ -6789,15 +6787,15 @@ pub const App = struct {
             log.info("toast activation start in a copy that registers no activator", .{});
             return .{};
         }
-        var capture: ColdToastCapture = .{};
+        var capture: notifications.ColdToastCapture = .{};
         win32_toast_activator.bind(capture.sink());
         // `startToastActivator` binds the App channel once it exists.
         defer win32_toast_activator.bind(null);
         win32_toast_activator.register() catch return .{};
 
-        if (!pumpUntilColdToastActivation(&capture, cold_toast_activation_wait_ms))
+        if (!notifications.pumpUntilColdToastActivation(&capture, cold_toast_activation_wait_ms))
             log.warn("toast activation start: no activation within {d} ms", .{cold_toast_activation_wait_ms});
-        return capture.target();
+        return capture.activation;
     }
 
     /// Like `activateSurface`, but neither shows, raises nor focuses the

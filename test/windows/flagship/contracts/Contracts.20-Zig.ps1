@@ -96,9 +96,10 @@ foreach ($movedWin32TestModule in $movedWin32TestFloors.Keys) {
 # once the owned-string helpers (from win32.zig and labels.zig) and
 # utf8BoundedPrefix moved in. session.zig's floor is 28 since its five
 # restore-by-key tests became rows of pane_launch.zig's `prepare` table (pane
-# launch step 4b). notifications.zig's 21 are the toast lifecycle's and the
-# click's tests at its interface, which replaced App's, Host's, Surface's and
-# Registry's.
+# launch step 4b). notifications.zig's 23 are the toast lifecycle's, the
+# click's and the cold toast wait's tests at its interface, which replaced
+# App's, Host's, Surface's and Registry's, and the two cold-wait tests that
+# moved from win32.zig.
 # Lower one only for a deliberate consolidation.
 # test_support.zig declares no tests, so it has no floor.
 $extractedWin32TestModules = [ordered]@{
@@ -116,7 +117,7 @@ $extractedWin32TestModules = [ordered]@{
     'chrome_scene.zig' = @{ Binding = 'chrome_scene'; Floor = 1 }
     'child_window.zig' = @{ Binding = 'child_window'; Floor = 3 }
     'text.zig' = @{ Binding = 'paint_text'; Floor = 11 }
-    'notifications.zig' = @{ Binding = 'notifications'; Floor = 21 }
+    'notifications.zig' = @{ Binding = 'notifications'; Floor = 23 }
 }
 $win32RootTestBlock = [regex]::Match(
     $win32RuntimeText,

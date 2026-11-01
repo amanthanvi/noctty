@@ -7,13 +7,21 @@
 //! (closed, or waiting in undo or redo history), and every toast of the
 //! process leaves at exit. A removal names the tag and the group, never the
 //! AUMID alone and never `Clear`: other noctty processes share the AUMID.
+//!
+//! It also holds the cold start's wait for its click (`ColdToastCapture`,
+//! `pumpUntilColdToastActivation`): what a `-ToastActivated` start receives
+//! before the App's channel exists, which the App then hands to `click`.
 const std = @import("std");
+const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const Target = @import("../action.zig").Target;
+const c = @import("consts.zig");
 const sys = @import("sys.zig");
 const win32_program_status = @import("../win32_program_status.zig");
 const toast_activation = @import("../win32_toast_activation.zig");
+const win32_toast_activator = @import("../win32_toast_activator.zig");
 const win32_toast_winrt = @import("../win32_toast_winrt.zig");
+const win32_types = @import("../win32_types.zig");
 
 const log = std.log.scoped(.win32);
 
@@ -495,6 +503,51 @@ pub const Notifications = struct {
         std.log.info("info notification (no visible target): {s} — {s}", .{ caption, message.written() });
     }
 };
+
+/// Receives the first `Activate` of a cold `-ToastActivated` start, before
+/// the App channel exists. `Activate` runs on this thread, inside the wait's
+/// message pump.
+pub const ColdToastCapture = struct {
+    received: bool = false,
+    activation: toast_activation.ActivationTarget = .{},
+
+    pub fn sink(self: *ColdToastCapture) win32_toast_activator.Sink {
+        return .{ .ctx = self, .deliver = deliver };
+    }
+
+    fn deliver(ctx: *anyopaque, launch: []const u8) void {
+        const self: *ColdToastCapture = @ptrCast(@alignCast(ctx));
+        if (self.received) return;
+        self.received = true;
+        self.activation = toast_activation.parseLaunchArg(launch) catch .{};
+    }
+};
+
+/// Dispatch this thread's messages until `capture` has its call or
+/// `timeout_ms` has passed, and say whether the call came. COM hands an
+/// incoming call to this STA as a message, so the dispatch is what runs
+/// `Activate`. The deadline is the wait's own, with no timer that could fail
+/// to arm, and a quit met on the way is put back for the main loop.
+pub fn pumpUntilColdToastActivation(capture: *const ColdToastCapture, timeout_ms: u32) bool {
+    const deadline = sys.GetTickCount64() + timeout_ms;
+    var msg: sys.MSG = undefined;
+    while (!capture.received) {
+        while (sys.PeekMessageW(&msg, null, 0, 0, c.PM_REMOVE) != 0) {
+            if (msg.message == c.WM_QUIT) {
+                sys.PostQuitMessage(@bitCast(@as(u32, @truncate(msg.wParam))));
+                return capture.received;
+            }
+            _ = sys.TranslateMessage(&msg);
+            _ = sys.DispatchMessageW(&msg);
+            if (capture.received) return true;
+        }
+        const now = sys.GetTickCount64();
+        if (now >= deadline) break;
+        const remaining: win32_types.DWORD = @intCast(deadline - now);
+        if (sys.MsgWaitForMultipleObjectsEx(0, null, remaining, c.QS_ALLINPUT, c.MWMO_INPUTAVAILABLE) == c.WAIT_FAILED) break;
+    }
+    return capture.received;
+}
 
 /// A pane's toast tag: its core surface id, 16 hex digits. One tag per pane,
 /// so a newer toast from the pane replaces its older one in Action Center.
@@ -1392,4 +1445,82 @@ test "a window opening with no click kept presents nothing" {
     t.panes.put(0x2002, testing.inTab(2, 0, "cargo build"));
     try std.testing.expectEqual(Outcome.done, t.n.click(.window_opened));
     try t.panes.expectPresented(&.{});
+}
+
+const ColdToastWaitTest = struct {
+    const Timer = struct {
+        var capture: ColdToastCapture = .{};
+
+        fn fire(_: ?sys.HWND, _: sys.UINT, id: win32_types.UINT_PTR, _: win32_types.DWORD) callconv(.winapi) void {
+            _ = sys.KillTimer(null, id);
+            ColdToastCapture.deliver(&capture, "wgh://activate?surface=3&pid=8&action=focus");
+        }
+    };
+
+    fn body() !void {
+        // Nothing comes: the wait returns at its deadline, not later.
+        var none: ColdToastCapture = .{};
+        const start = sys.GetTickCount64();
+        try std.testing.expect(!pumpUntilColdToastActivation(&none, 60));
+        const waited = sys.GetTickCount64() - start;
+        try std.testing.expect(waited >= 40);
+        try std.testing.expect(waited < 2000);
+
+        // A call dispatched by the pump (here a timer procedure, as COM's call
+        // is a dispatched message) ends it well before the deadline.
+        Timer.capture = .{};
+        try std.testing.expect(sys.SetTimer(null, 0, 10, @ptrCast(&Timer.fire)) != 0);
+        const call_start = sys.GetTickCount64();
+        try std.testing.expect(pumpUntilColdToastActivation(&Timer.capture, 10_000));
+        try std.testing.expect(sys.GetTickCount64() - call_start < 5000);
+        try std.testing.expect(Timer.capture.activation.eql(.{ .surface_id = 3, .pid = 8, .action = .focus }));
+
+        // A quit ends the wait and stays queued for the main loop.
+        var quit_capture: ColdToastCapture = .{};
+        sys.PostQuitMessage(7);
+        try std.testing.expect(!pumpUntilColdToastActivation(&quit_capture, 10_000));
+        var msg: sys.MSG = undefined;
+        try std.testing.expect(sys.PeekMessageW(&msg, null, c.WM_QUIT, c.WM_QUIT, c.PM_REMOVE) != 0);
+        try std.testing.expectEqual(@as(sys.WPARAM, 7), msg.wParam);
+    }
+
+    fn run(result: *anyerror!void) void {
+        body() catch |err| {
+            // The test fails on the runner's thread; this trace shows which
+            // check failed.
+            if (@errorReturnTrace()) |trace| std.debug.dumpStackTrace(trace.*);
+            result.* = err;
+        };
+    }
+};
+
+test "the cold toast activation wait ends on its call or at its deadline" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    // A fresh thread, so the pump dispatches nothing another test queued.
+    var result: anyerror!void = {};
+    const thread = try std.Thread.spawn(.{}, ColdToastWaitTest.run, .{&result});
+    thread.join();
+    return result;
+}
+
+test "a cold toast activation start keeps the first call and reads nothing else as a target" {
+    const callback = win32_toast_activator.testCallback();
+    // `Activate` reads only the launch string.
+    const aumid: ?[*:0]const u16 = null;
+
+    var capture: ColdToastCapture = .{};
+    win32_toast_activator.bind(capture.sink());
+    defer win32_toast_activator.bind(null);
+    _ = callback.vtbl.Activate(callback, aumid, std.unicode.utf8ToUtf16LeStringLiteral("wgh://activate?surface=3&pid=8&action=focus"), null, 0);
+    _ = callback.vtbl.Activate(callback, aumid, std.unicode.utf8ToUtf16LeStringLiteral("wgh://activate?surface=4&pid=8"), null, 0);
+    try std.testing.expect(capture.received);
+    try std.testing.expect(capture.activation.eql(.{ .surface_id = 3, .pid = 8, .action = .focus }));
+
+    // A call that carried nothing readable still ends the wait, and its
+    // target is the empty one, which only presents the primary window.
+    var unreadable: ColdToastCapture = .{};
+    win32_toast_activator.bind(unreadable.sink());
+    _ = callback.vtbl.Activate(callback, aumid, std.unicode.utf8ToUtf16LeStringLiteral("--command=evil.exe"), null, 0);
+    try std.testing.expect(unreadable.received);
+    try std.testing.expect(unreadable.activation.eql(.{}));
 }
