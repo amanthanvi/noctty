@@ -219,6 +219,7 @@
         "src/terminal/kitty/graphics_image.zig",
         "src/terminal/kitty/windows.zig",
         "src/config/Config.zig",
+        "src/config/pane_launch.zig",
         "src/config/windows_visual_studio.zig",
         "src/apprt/win32_elevation.zig",
         "src/cli/list_profiles.zig",

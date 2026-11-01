@@ -295,7 +295,10 @@ that govern each symbol you change, or that none does.
   (the X buttons: `win32_input.xMouseButton`, and the button codes
   `src/input/mouse_encode.zig` writes), wheel and context-menu input.
 - [launch-and-paths.md](docs/agents/log/launch-and-paths.md): which process a
-  terminal starts and with what environment: the default `command`, profile
+  terminal starts and with what environment: the default `command` (what a
+  config load decides of the launch, `src/config/pane_launch.zig`:
+  `finalize`, `default-profile` resolution and its problems, the profile
+  places, `useAutomatic`, `useRecovery`), profile
   discovery and user-defined profiles (`src/config/windows_shell.zig`: the
   `profile-*` keys, `default-profile`, `profile-order`, `profile-hidden`,
   `verbatimCommandLine`, `arrangeProfiles`; Visual Studio developer shells in
@@ -368,8 +371,8 @@ that govern each symbol you change, or that none does.
   `startup_cwd` on reload, diagnostics shown in the GUI, conditional replay
   (`Replay.Iterator`, `Config.finalize`, `loadTheme`,
   `changeConditionalState`), command-line values put
-  back over `config-file` includes (`Config.parseManuallyHook`,
-  `finalizeCliLaunch`), `newConfig` shallow
+  back over `config-file` includes (`Config.parseManuallyHook`, and `note`
+  and `finalizeCliLaunch` in `src/config/pane_launch.zig`), `newConfig` shallow
   clones, what `Surface.DerivedConfig` must own, `RepeatableCommand.clone`
   and its C mirror (`value_c`, `Command.cval`), `+edit-config` and opening
   the config file, adding config keys.

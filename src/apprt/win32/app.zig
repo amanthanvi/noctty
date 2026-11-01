@@ -994,7 +994,7 @@ pub const App = struct {
                 errdefer config.deinit();
                 // Recovery runs `cmd /D`, which loads no profile and skips AutoRun,
                 // and so needs no PATH search.
-                try config.useWindowsRecoveryCommand();
+                try configpkg.pane_launch.useRecovery(&config);
                 try config.finalize();
                 break :config config;
             } else try configpkg.Config.load(core_app.alloc),

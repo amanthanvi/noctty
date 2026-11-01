@@ -1355,7 +1355,7 @@ pub fn sessionFullscreenWindowPlacement(
 pub fn applyRestoredDefaultLaunch(self: *const App, config: *configpkg.Config) !?*const windows_shell.Profile {
     if (self.defaultProfileApplies(config) and config._default_profile.?.kind == .ssh) {
         config.command = null;
-        try config.resolveWindowsDefaultCommand();
+        try configpkg.pane_launch.useAutomatic(config);
         return null;
     }
     return try self.applyDefaultProfileLaunch(config);
