@@ -160,7 +160,8 @@
         "src/apprt/win32/search_controls.zig",
         "src/apprt/win32/terminal_window.zig",
         "src/apprt/win32/docked_search.zig",
-        "src/apprt/win32_scrollbar_geometry.zig"
+        "src/apprt/win32_scrollbar_geometry.zig",
+        "src/Surface.zig"
       ]
     },
     {
