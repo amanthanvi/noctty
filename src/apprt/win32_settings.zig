@@ -7852,8 +7852,10 @@ pub const SettingsWindow = struct {
                     break :reveal self.selectedProfileRow() orelse
                         return self.refuseProfileEdit(how, "A new profile needs a command line too: press Enter to type it, or Escape to drop the profile.");
                 };
+                // The command line field takes the id's place; should it not
+                // be made (no memory, no window), no field is open.
                 self.beginProfileEdit(.new_command, row, text);
-                return false;
+                return self.profile_edit == null;
             },
             .new_command, .command => blk: {
                 if (settings_profiles.checkCommand(id, text)) |message| return self.refuseProfileEdit(how, message);
@@ -21888,6 +21890,43 @@ test "settings a new profile's id typed on a row a search hides is not passed ov
             try std.testing.expectEqual(ProfileEdit.Kind.new_command, (try openEdit(settings)).kind);
             try std.testing.expect(!settings.search_query.active());
             try std.testing.expect(sys.IsWindowVisible((try openEdit(settings)).hwnd.?) != 0);
+        }
+    }.body);
+}
+
+test "settings a new profile's id kept says whether a field is open, whichever allocation on the way fails" {
+    try dialog_test.onHiddenDesktop(struct {
+        fn body() !void {
+            const keyboard = win32_input.TestingKeyboard.pinNone();
+            defer keyboard.release();
+            const alloc = std.testing.allocator;
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var path: []u8 = &.{};
+            const fixture = try profileFixture(&tmp, "profile-command = py: python.exe\n", &path);
+            defer alloc.free(path);
+            defer fixture.finish();
+            const settings = &fixture.settings;
+            const real = settings.handle.alloc;
+            defer settings.handle.alloc = real;
+            var failing = std.testing.FailingAllocator.init(real, .{});
+            // Fail the first allocation from the Enter on, then the second,
+            // and so on, until one Enter allocates nothing that fails.
+            var at: usize = 0;
+            while (at < 64) : (at += 1) {
+                if (settings.profile_edit != null) settings.cancelProfileEdit();
+                try std.testing.expect(fixture.pumpKey(VK_INSERT));
+                typeInto((try openEdit(settings)).hwnd.?, "dev");
+                failing = std.testing.FailingAllocator.init(real, .{ .fail_index = at });
+                settings.handle.alloc = failing.allocator();
+                const none_open = settings.commitProfileEdit(.stay);
+                settings.handle.alloc = real;
+                errdefer std.debug.print("failing allocation {d}\n", .{at});
+                try std.testing.expectEqual(settings.profile_edit == null, none_open);
+                if (!failing.has_induced_failure) break;
+            } else return error.TestTooManyAllocations;
+            // The run that failed nothing went on to the command line.
+            try std.testing.expectEqual(ProfileEdit.Kind.new_command, (try openEdit(settings)).kind);
         }
     }.body);
 }

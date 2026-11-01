@@ -8668,22 +8668,34 @@ pub const App = struct {
         // layers `original` was read from.
         var profile_arena: std.heap.ArenaAllocator = .init(alloc);
         defer profile_arena.deinit();
-        var profile_edits = try settings_patch.editsForSave(profile_arena.allocator(), alloc, &self.config, original, pending, target_path, &settings_reference.samePath);
+        var profile_edits = settings_patch.editsForSave(profile_arena.allocator(), alloc, &self.config, original, pending, target_path, &settings_reference.samePath) catch |err|
+            return settingsProfileEditsFailed(err);
         // Whether another file still names a removed profile decides a
         // tombstone or a deletion, and `self.config` is as of the last reload:
         // a file that gained the profile since, with no reload, would be
         // missed and the profile come back. With profile edits to make, the
-        // layers are read from disk again. Should that fail, the edits stand
-        // as worked out, and the masking check after the save reports a
-        // profile that came back.
+        // layers are read from disk again, held to the rule the disk check
+        // before an ordinary save holds them to (`settingsDiskVerdict`): an
+        // included or theme file that is there and will not open, or one
+        // that does not decode, stops the save, so the edits are never
+        // decided from a partial read. So does an include this very load
+        // could not open, and a read that fails.
         if (profile_edits.len != 0) {
-            if (self.loadConfigAtStartupCwd()) |fresh| {
-                var disk = fresh;
-                defer disk.deinit();
-                profile_edits = try settings_patch.editsForSave(profile_arena.allocator(), alloc, &disk, original, pending, target_path, &settings_reference.samePath);
-            } else |err| {
+            var disk = self.loadConfigAtStartupCwd() catch |err| {
                 log.warn("settings save: could not read the config files again for the profile edits err={}", .{err});
+                return error.ReloadFailed;
+            };
+            defer disk.deinit();
+            self.settings_failure_detail.clear(alloc);
+            _ = try settingsDiskVerdict(alloc, &self.settings_failure_detail, original, pending, &disk, self.core_app.config_conditional_state, .initEmpty());
+            if (settings_patch.unopenedConfigFile(&disk)) |path| {
+                const text = std.fmt.allocPrint(alloc, "the included file {s}", .{path}) catch return error.OutOfMemory;
+                defer alloc.free(text);
+                self.settings_failure_detail.set(alloc, text);
+                return error.FileUnopenable;
             }
+            profile_edits = settings_patch.editsForSave(profile_arena.allocator(), alloc, &disk, original, pending, target_path, &settings_reference.samePath) catch |err|
+                return settingsProfileEditsFailed(err);
         }
         // No-op short-circuit: if the user pressed Save without
         // changing anything, don't touch the filesystem. On a
@@ -8723,7 +8735,14 @@ pub const App = struct {
         var masked_text: std.Io.Writer.Allocating = .init(alloc);
         defer masked_text.deinit();
         masked_text.writer.writeAll(settingsMaskedKeyNames(&masked_buf, user_edited, pending, &reloaded)) catch return error.OutOfMemory;
-        _ = settings_patch.writeMasked(&masked_text.writer, profile_edits, &reloaded, masked_text.written().len > 0) catch return error.OutOfMemory;
+        // The profile fields as `updateConfig` will apply them: a theme can
+        // define a profile in one light/dark state only.
+        var reloaded_applied: ?configpkg.Config = if (profile_edits.len == 0) null else reloaded.changeConditionalState(self.core_app.config_conditional_state) catch |err| applied: {
+            log.warn("settings save: could not apply the light/dark state to the reload for its check err={}", .{err});
+            break :applied null;
+        };
+        defer if (reloaded_applied) |*value| value.deinit();
+        _ = settings_patch.writeMasked(&masked_text.writer, profile_edits, if (reloaded_applied) |*value| value else &reloaded, masked_text.written().len > 0) catch return error.OutOfMemory;
         const masked = masked_text.written();
         if (masked.len > 0) {
             std.log.warn("settings save: saved but masked by a later config-file layer: {s}", .{masked});
@@ -8734,6 +8753,15 @@ pub const App = struct {
         // The reload read the file again, so what is wrong in it is news.
         _ = self.reportRecordedConfigProblems();
         if (masked.len > 0) return error.SavedButMasked;
+    }
+
+    /// The profile edits could not be worked out: no memory, or the layers
+    /// could not be put in the app's light/dark state, which would decide a
+    /// removal blind. Nothing is saved.
+    fn settingsProfileEditsFailed(err: anyerror) win32_settings.SaveError {
+        if (err == error.OutOfMemory) return error.OutOfMemory;
+        log.warn("settings save: the profile edits could not be worked out err={}", .{err});
+        return error.ReloadFailed;
     }
 
     fn settingsTargetPath(self: *App, alloc: Allocator) win32_settings.SaveError![]const u8 {

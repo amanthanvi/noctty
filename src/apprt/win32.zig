@@ -6862,30 +6862,30 @@ pub fn persistSettings(
 
     var patched: std.ArrayListUnmanaged(u8) = .{};
     defer patched.deinit(alloc);
-    patchOrAppendEdits(
-        alloc,
-        raw_before,
-        pending,
-        user_edited,
-        &patched,
-    ) catch return error.SerializeFailed;
     // Profile definitions, by identity: `patchOrAppendEdits` never sees
     // their keys.
     const settings_patch = @import("win32/settings_patch.zig");
+    var terminated: std.ArrayListUnmanaged(u8) = .{};
+    defer terminated.deinit(alloc);
     var profiles_patched: std.ArrayListUnmanaged(u8) = .{};
     defer profiles_patched.deinit(alloc);
-    const final: []const u8 = if (profile_edits.len == 0) patched.items else profiles: {
+    const final: []const u8 = if (profile_edits.len == 0) ordinary: {
+        patchOrAppendEdits(alloc, raw_before, pending, user_edited, &patched) catch return error.SerializeFailed;
+        break :ordinary patched.items;
+    } else profiles: {
+        // The end of the file is handled once, for both patchers: they get
+        // the text ending in a complete line ending, the file's own kind, so
+        // neither sees a last line without one, and the result gets the
+        // ending the file had (`settings_patch.FileEnd`). A save with no
+        // profile edit is as before: `patchOrAppendEdits` ends a setting it
+        // appends with a newline.
+        const end = settings_patch.FileEnd.of(raw_before);
+        try end.terminate(alloc, raw_before, &terminated);
+        patchOrAppendEdits(alloc, terminated.items, pending, user_edited, &patched) catch return error.SerializeFailed;
         settings_patch.patchProfileEdits(alloc, patched.items, profile_edits, &profiles_patched) catch
             return error.SerializeFailed;
-        // A file with no newline at its end gets none from a profile edit
-        // (`patchProfileEdits`). `patchOrAppendEdits` ends a setting it
-        // appends with one, and the profile patcher keeps the newline it is
-        // given, so the rule is applied to the two together. A save with no
-        // profile edit is as before.
-        break :profiles if (settings_patch.lacksFinalNewline(raw_before))
-            settings_patch.withoutFinalNewline(profiles_patched.items)
-        else
-            profiles_patched.items;
+        end.restore(&profiles_patched);
+        break :profiles profiles_patched.items;
     };
 
     // Ensure target's parent directory exists. `config_edit.openPath`
@@ -8092,6 +8092,103 @@ test "win32 settings save of a profile edit and a newly appended setting keeps a
         const saved = try scratch.tmp.dir.readFileAlloc(alloc, "config.ghostty", 1 << 20);
         defer alloc.free(saved);
         try std.testing.expect(std.mem.eql(u8, case.expected, saved));
+    }
+}
+
+/// Save `raw` (as `config.ghostty` in a scratch directory) through the real
+/// `persistSettings`, with `copy-on-select` edited when `ordinary`, and check
+/// the bytes without printing them (they hold command lines). Then read the
+/// file back, for the caller to check; an empty file is not read (the loader
+/// refuses one, `FileIsEmpty`), and comes back as the defaults.
+fn settingsTestProfileSave(alloc: Allocator, raw: []const u8, ordinary: bool, edits: []const @import("win32/settings_patch.zig").Edit, expected: []const u8) !configpkg.Config {
+    var scratch = try save_target.Scratch.init();
+    defer scratch.deinit();
+    try scratch.tmp.dir.writeFile(.{ .sub_path = "config.ghostty", .data = raw });
+    const path = try scratch.path("config.ghostty");
+    defer alloc.free(path);
+    var draft = try settingsTestCopyOnSelectEdit(alloc);
+    defer draft.pending.deinit();
+    const edited: SettingsEditedKeySet = if (ordinary) draft.edited else .initEmpty();
+    try persistSettings(alloc, path, &draft.pending, edited, edits, null);
+    const saved = try scratch.tmp.dir.readFileAlloc(alloc, "config.ghostty", 1 << 20);
+    defer alloc.free(saved);
+    try std.testing.expect(std.mem.eql(u8, expected, saved));
+    var loaded = try configpkg.Config.default(alloc);
+    errdefer loaded.deinit();
+    if (saved.len == 0) return loaded;
+    try loaded.loadFile(alloc, path);
+    try std.testing.expect(loaded._diagnostics.empty());
+    return loaded;
+}
+
+test "win32 settings save of a profile edit beside a setting keeps a profile line at the reader's limit that ends in a bare CR" {
+    const alloc = std.testing.allocator;
+    const Edit = @import("win32/settings_patch.zig").Edit;
+    // A CRLF file whose last line is a 4,094-byte label and a CR, no LF:
+    // 4,095 bytes as the reader holds it, which it takes.
+    const label = "x" ** 4075;
+    const name_line = "profile-name = py: " ++ label;
+    try std.testing.expectEqual(@as(usize, 4094), name_line.len);
+    const raw = "profile-command = py: python.exe\r\n" ++ name_line ++ "\r";
+    var loaded = try settingsTestProfileSave(
+        alloc,
+        raw,
+        true,
+        &.{.{ .field = .folder, .id = "py", .op = .{ .set = "C:\\src" } }},
+        "profile-command = py: python.exe\r\n" ++ name_line ++ "\r\nprofile-working-directory = py: C:\\src\r\ncopy-on-select = true\r",
+    );
+    defer loaded.deinit();
+    // The label still loads, and so do the new lines.
+    try std.testing.expect(std.mem.eql(u8, label, loaded.@"profile-name".get("py") orelse return error.TestExpectedLabel));
+    try std.testing.expect(std.mem.eql(u8, "C:\\src", loaded.@"profile-working-directory".get("py").?));
+    try std.testing.expect(loaded.@"copy-on-select" == .true);
+    _ = Edit;
+}
+
+test "win32 settings save that deletes a file's last line keeps the blank line before it, and the file's missing final newline" {
+    const alloc = std.testing.allocator;
+    const Edit = @import("win32/settings_patch.zig").Edit;
+    const removal: []const Edit = &.{.{ .field = .command, .id = "py", .op = .delete }};
+    // Terra's case, LF and CRLF: the blank line stays as it was.
+    for ([_][2][]const u8{
+        .{ "# keep\n\nprofile-command = py: cmd", "# keep\n" },
+        .{ "# keep\r\n\r\nprofile-command = py: cmd", "# keep\r\n" },
+        .{ "\xef\xbb\xbf# keep\r\n\r\nprofile-command = py: cmd", "\xef\xbb\xbf# keep\r\n" },
+    }) |case| {
+        var loaded = try settingsTestProfileSave(alloc, case[0], false, removal, case[1]);
+        defer loaded.deinit();
+        try std.testing.expect(loaded.@"profile-command".get("py") == null);
+    }
+}
+
+test "win32 settings save that removes a bare-CR file's only line beside a new setting keeps the bare CR" {
+    const alloc = std.testing.allocator;
+    const Edit = @import("win32/settings_patch.zig").Edit;
+    const removal: []const Edit = &.{.{ .field = .command, .id = "py", .op = .delete }};
+    var loaded = try settingsTestProfileSave(alloc, "profile-command = py: cmd\r", true, removal, "copy-on-select = true\r");
+    defer loaded.deinit();
+    try std.testing.expect(loaded.@"profile-command".get("py") == null);
+    try std.testing.expect(loaded.@"copy-on-select" == .true);
+    // A file whose only line goes, with nothing else saved, is empty.
+    var empty = try settingsTestProfileSave(alloc, "profile-command = py: cmd", false, removal, "");
+    defer empty.deinit();
+    try std.testing.expect(empty.@"profile-command".get("py") == null);
+}
+
+test "win32 settings save beside a setting that deletes the final profile line keeps CRLF, BOM and bare-CR files' ending" {
+    const alloc = std.testing.allocator;
+    const Edit = @import("win32/settings_patch.zig").Edit;
+    const removal: []const Edit = &.{.{ .field = .command, .id = "py", .op = .delete }};
+    for ([_][2][]const u8{
+        .{ "font-size = 12\r\nprofile-command = py: cmd", "font-size = 12\r\ncopy-on-select = true" },
+        .{ "\xef\xbb\xbffont-size = 12\r\nprofile-command = py: cmd", "\xef\xbb\xbffont-size = 12\r\ncopy-on-select = true" },
+        .{ "font-size = 12\r\nprofile-command = py: cmd\r", "font-size = 12\r\ncopy-on-select = true\r" },
+        .{ "font-size = 12\r\nprofile-command = py: cmd\r\n", "font-size = 12\r\ncopy-on-select = true\r\n" },
+    }) |case| {
+        var loaded = try settingsTestProfileSave(alloc, case[0], true, removal, case[1]);
+        defer loaded.deinit();
+        try std.testing.expect(loaded.@"profile-command".get("py") == null);
+        try std.testing.expect(loaded.@"copy-on-select" == .true);
     }
 }
 
