@@ -301,26 +301,39 @@ fn stepKeys(config: *const Config, refused: Refused, step: FileStep, out: *[max_
     return out[0..n];
 }
 
+/// A step's place, kept as `scan` passes over the log. Only the step that
+/// wins is made an `Origin` (`place`): telling an included file from the
+/// others looks its path up among every `config-file` name, so doing that
+/// for each step a lookup passes would multiply the steps by the names.
+const Candidate = struct {
+    location: Location,
+    theme: bool = false,
+
+    fn origin(self: Candidate, config: *const Config) Origin {
+        return place(config, self.location, self.theme);
+    }
+};
+
 fn scan(config: *const Config, refused: Refused, key: Key, defaults: ?*const Config, comptime files_only: bool) Origin {
-    var last: ?Origin = null;
+    var last: ?Candidate = null;
     // The last command-line step that set the key (`restoredFromCli`).
-    var last_cli: ?Origin = null;
+    var last_cli: ?Candidate = null;
     // `finalize` settles these two keys together (`SingleInstance`).
     const single_instance = key == .@"single-instance" or key == .@"gtk-single-instance";
     var fold: SingleInstance = .{};
     // The last `--elevated-profile-env=` the loader took (`elevatedEnv`).
-    var elevated: ?Origin = null;
+    var elevated: ?Candidate = null;
     // Whether an `-e` with a command set the key.
     var by_e = false;
     const steps = config._replay_steps.items;
     for (steps, 0..) |step, i| switch (step) {
         .arg => |arg| if (!files_only or arg.location == .file) {
             if (stepSets(config, refused, arg.value, arg.location, key)) {
-                last = place(config, arg.location, false);
+                last = .{ .location = arg.location };
                 if (arg.location == .cli) last_cli = last;
             }
             if (single_instance) fold.see(config, refused, arg.value, arg.location, false);
-            if (key == .env and elevatedEnv(arg.value, arg.location)) elevated = place(config, arg.location, false);
+            if (key == .env and elevatedEnv(arg.value, arg.location)) elevated = .{ .location = arg.location };
         },
         .conditional_arg => |arg| {
             var theme = false;
@@ -329,7 +342,7 @@ fn scan(config: *const Config, refused: Refused, key: Key, defaults: ?*const Con
                 if (!config._conditional_state.match(cond)) break false;
             } else true;
             if (applies and (!files_only or arg.location == .file)) {
-                if (stepSets(config, refused, arg.arg, arg.location, key)) last = place(config, arg.location, theme);
+                if (stepSets(config, refused, arg.arg, arg.location, key)) last = .{ .location = arg.location, .theme = theme };
                 if (single_instance) fold.see(config, refused, arg.arg, arg.location, theme);
             }
         },
@@ -339,18 +352,18 @@ fn scan(config: *const Config, refused: Refused, key: Key, defaults: ?*const Con
         .@"-e" => |location| {
             const has_command = i + 1 < steps.len and steps[i + 1] == .arg;
             if (!files_only and has_command and setByE(config, key)) {
-                last = place(config, location, false);
+                last = .{ .location = location };
                 by_e = true;
             }
             break;
         },
         .expand, .diagnostic => {},
     };
-    if (!files_only) if (last_cli) |found| if (restoredFromCli(config, key)) return found;
+    if (!files_only) if (last_cli) |found| if (restoredFromCli(config, key)) return found.origin(config);
     // `finalize` puts these over `env` once every file has been read.
-    if (elevated) |found| return found;
-    if (single_instance and !by_e) if (fold.decided()) |found| return found;
-    if (last) |found| return found;
+    if (elevated) |found| return found.origin(config);
+    if (single_instance and !by_e) if (fold.decided()) |found| return found.origin(config);
+    if (last) |found| return found.origin(config);
     const reference = defaults orelse return .default;
     return switch (key) {
         inline else => |comptime_key| if (config.changed(reference, comptime_key)) .{ .derived = .automatic } else .default,
@@ -469,20 +482,20 @@ const SingleInstance = struct {
     single: ?Set = null,
     alias: ?Set = null,
 
-    const Set = struct { origin: Origin, detect: bool };
+    const Set = struct { candidate: Candidate, detect: bool };
 
     fn see(self: *SingleInstance, config: *const Config, refused: Refused, text: []const u8, location: Location, theme: bool) void {
         if (stepSets(config, refused, text, location, .@"single-instance"))
-            self.single = .{ .origin = place(config, location, theme), .detect = setsDetect(text) };
+            self.single = .{ .candidate = .{ .location = location, .theme = theme }, .detect = setsDetect(text) };
         if (stepSets(config, refused, text, location, .@"gtk-single-instance"))
-            self.alias = .{ .origin = place(config, location, theme), .detect = setsDetect(text) };
+            self.alias = .{ .candidate = .{ .location = location, .theme = theme }, .detect = setsDetect(text) };
     }
 
     /// The step whose value both keys hold, or null when `finalize` worked it
     /// out from `detect`.
-    fn decided(self: SingleInstance) ?Origin {
-        if (self.single) |set| if (!set.detect) return set.origin;
-        if (self.alias) |set| if (!set.detect) return set.origin;
+    fn decided(self: SingleInstance) ?Candidate {
+        if (self.single) |set| if (!set.detect) return set.candidate;
+        if (self.alias) |set| if (!set.detect) return set.candidate;
         return null;
     }
 };
@@ -539,9 +552,12 @@ fn place(config: *const Config, location: Location, theme: bool) Origin {
     };
 }
 
-/// Whether `path` is one of the files `config-file` names.
+/// Whether `path` is one of the files `config-file` names. A pass over every
+/// name (the list keeps a name given more than once), so it is asked only
+/// for the step that wins (`Candidate`).
 fn included(config: *const Config, path: []const u8) bool {
     for (config.@"config-file".value.items) |entry| {
+        if (builtin.is_test) test_included_comparisons += 1;
         const named = switch (entry) {
             .optional, .required => |named| named,
         };
@@ -549,6 +565,9 @@ fn included(config: *const Config, path: []const u8) bool {
     }
     return false;
 }
+
+/// For tests: how many `config-file` names `included` has compared.
+var test_included_comparisons: usize = 0;
 
 fn samePlace(a: Location, b: Location) bool {
     return switch (a) {
@@ -1191,6 +1210,17 @@ test "origin: a refused argument with no place still counts as set" {
     try expectFile(ofFiles(&cfg, .@"font-size"), path, 1, .config);
 }
 
+/// That `Index` gives the free functions' answer for every key of `cfg`.
+fn expectIndexMatches(alloc: std.mem.Allocator, cfg: *const Config, defaults: *const Config) !void {
+    var problems = try Index.init(alloc, cfg);
+    defer problems.deinit(alloc);
+    for (std.enums.values(Key)) |key| {
+        errdefer std.debug.print("origin: Index differs for {s}\n", .{@tagName(key)});
+        try std.testing.expectEqualDeep(of(cfg, key, defaults), problems.of(key, defaults));
+        try std.testing.expectEqualDeep(ofFiles(cfg, key), problems.ofFiles(key));
+    }
+}
+
 test "origin: an Index answers as the free functions do" {
     const alloc = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
@@ -1202,20 +1232,75 @@ test "origin: an Index answers as the free functions do" {
     defer alloc.free(path);
     const theme_path = try tmp.dir.realpathAlloc(alloc, "mytheme");
     defer alloc.free(theme_path);
-    const text = try std.fmt.allocPrint(alloc, "font-size = 13\nfont-size = abc\nbold-is-bright = true\ngtk-single-instance = false\nscrollback-limit = 5\nconfig-file = x.conf\ntheme = {s}\n", .{theme_path});
+    var defaults = try Config.default(alloc);
+    defer defaults.deinit();
+    try defaults.finalize();
+    const text = try std.fmt.allocPrint(alloc, "font-size = 13\nfont-size = abc\nbold-is-bright = true\nsingle-instance = detect\ngtk-single-instance = false\nscrollback-limit = 5\nconfig-file = x.conf\ntheme = {s}\n", .{theme_path});
     defer alloc.free(text);
-    var cfg = try loadWithArgs(alloc, tmp.dir, path, text, &.{ "--font-size=abc", "--default-profile=cmd", "--elevated-profile-env=MODE=cli", "-e", "cmd.exe" });
+    const command_line: []const []const u8 = &.{ "--font-size=abc", "--default-profile=cmd", "--elevated-profile-env=MODE=cli" };
+
+    // With an accepted `-e`, which sets both `single-instance` keys.
+    {
+        var cfg = try loadWithArgs(alloc, tmp.dir, path, text, command_line ++ &[_][]const u8{ "-e", "cmd.exe" });
+        defer cfg.deinit();
+        try std.testing.expect(!cfg._diagnostics.empty());
+        try expectIndexMatches(alloc, &cfg, &defaults);
+    }
+    // Without `-e`, so the `single-instance` fold decides: the alias's line
+    // 5, as `single-instance` holds `detect`. Then rebuilt for the dark
+    // state: the replay reads the theme again for it, and the steps it read
+    // for the light state no longer apply.
+    {
+        var cfg = try loadWithArgs(alloc, tmp.dir, path, text, command_line);
+        defer cfg.deinit();
+        try expectFile(of(&cfg, .@"single-instance", &defaults), path, 5, .config);
+        try expectIndexMatches(alloc, &cfg, &defaults);
+        cfg._conditional_set.insert(.theme);
+        var flipped = (try cfg.changeConditionalState(.{ .theme = .dark })) orelse return error.TestUnexpectedResult;
+        defer flipped.deinit();
+        try std.testing.expectEqual(@as(@TypeOf(flipped._conditional_state.theme), .dark), flipped._conditional_state.theme);
+        try expectFile(of(&flipped, .@"single-instance", &defaults), path, 5, .config);
+        try expectIndexMatches(alloc, &flipped, &defaults);
+    }
+}
+
+test "origin: a lookup compares the config-file names once, not once for each step it passes" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    // n pairs: a `config-file` name the list keeps each time it is given, and
+    // a `font-size` line.
+    const n = 1000;
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    defer out.deinit();
+    for (0..n) |_| try out.writer.writeAll("config-file = ?missing.conf\nfont-size = 13\n");
+    try tmp.dir.writeFile(.{ .sub_path = "config", .data = out.written() });
+    const path = try tmp.dir.realpathAlloc(alloc, "config");
+    defer alloc.free(path);
+    var cfg = try Config.default(alloc);
     defer cfg.deinit();
-    try std.testing.expect(!cfg._diagnostics.empty());
+    try cfg.loadFile(alloc, path);
+    try cfg.loadRecursiveFiles(alloc);
+    try cfg.finalize();
+    try std.testing.expectEqual(@as(usize, n), cfg.@"config-file".value.items.len);
+    try std.testing.expectEqual(@as(f32, 13), cfg.@"font-size");
     var defaults = try Config.default(alloc);
     defer defaults.deinit();
     try defaults.finalize();
 
+    // The last line of each wins, in this file, which no `config-file` line
+    // names.
+    try expectFile(of(&cfg, .@"font-size", &defaults), path, 2 * n, .config);
+    try expectFile(of(&cfg, .@"config-file", &defaults), path, 2 * n - 1, .config);
+
+    // Every key, as the All settings page asks: only those two keys' winning
+    // lines are classified, each with one pass over the n names. Classifying
+    // every step a lookup passes would take about 2n² comparisons.
     var problems = try Index.init(alloc, &cfg);
     defer problems.deinit(alloc);
-    for (std.enums.values(Key)) |key| {
-        errdefer std.debug.print("origin: Index differs for {s}\n", .{@tagName(key)});
-        try std.testing.expectEqualDeep(of(&cfg, key, &defaults), problems.of(key, &defaults));
-        try std.testing.expectEqualDeep(ofFiles(&cfg, key), problems.ofFiles(key));
-    }
+    test_included_comparisons = 0;
+    for (std.enums.values(Key)) |key| _ = problems.of(key, &defaults);
+    errdefer std.debug.print("origin: {d} config-file names compared\n", .{test_included_comparisons});
+    try std.testing.expect(test_included_comparisons <= 2 * n);
+    try expectFile(problems.of(.@"font-size", &defaults), path, 2 * n, .config);
 }
