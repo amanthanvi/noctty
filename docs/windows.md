@@ -1022,7 +1022,11 @@ Limits:
 
 The Profiles page of Settings lists your profiles in the order of their
 `profile-command` lines. Each one's command line, name, starting folder and
-variables are rows of their own. Enter types into the selected row's field,
+variables are rows of their own. A variable's value is masked in its row
+(`PATH = ••••••`) and shown only while you type into it, since it can hold a
+secret; screen readers get each row's name without its value, and read the
+value on request (a variable's as "value hidden"). Enter types into the
+selected row's field,
 and Enter, Tab or moving elsewhere keeps what you typed, while Escape puts the
 field back. Delete takes a name, a starting folder or a variable out; on a
 profile's own row it removes the profile, after a second Delete and a status
@@ -1033,8 +1037,10 @@ Settings refuses what loading would report (see
 [Ids, renaming and removing](#ids-renaming-and-removing)), an empty command
 line, a line break, a value too long for one line of the file, and a variable
 without a name or a value. The status line says why, without repeating the
-value. Like any other setting, these changes are a draft until you Save, and
-Discard changes or closing without saving drops them.
+value. A field Settings refuses stays open with what you typed: switching
+pages stops at it, and closing Settings or quitting noctty asks about it as
+about any unsaved change. Like any other setting, these changes are a draft
+until you Save, and Discard changes or closing without saving drops them.
 
 Save writes only what changed, to the file Settings saves to. The line that
 sets a field is changed where it is, a new field goes after its profile's

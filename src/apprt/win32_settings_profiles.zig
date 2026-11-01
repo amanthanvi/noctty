@@ -7,6 +7,11 @@
 //!
 //! A command line or a variable's value can hold a secret. Nothing here logs
 //! one, and the messages the checks return name the field, never its value.
+//! A row's UIA Name names the field and its profile, never a value: what the
+//! row shows is its read-only Value (`writeRowValue`), read on request. A
+//! variable's value is masked in the row and in that Value
+//! (`masked_value`), and shown only in the text field while it is typed
+//! into; the search does not find a variable by its value.
 //! `profile-order` and `profile-hidden` are shown, not edited.
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -185,7 +190,7 @@ pub const Model = struct {
                     .profile = index,
                     .variable = @intCast(variable_index),
                     .identity = identity(.variable, id, variable.name),
-                    .search = try lower(a, &.{ "environment variable\n", shown, "\n", id, "\n", variable.name, "=", variable.value }),
+                    .search = try lower(a, &.{ "environment variable\n", shown, "\n", id, "\n", variable.name }),
                 });
             }
             try rows.append(a, .{ .kind = .add_variable, .profile = index, .identity = identity(.add_variable, id, null), .search = try lower(a, &.{ "add environment variable\n", shown, "\n", id }) });
@@ -250,7 +255,7 @@ pub const Model = struct {
             },
             .variable => {
                 const variable = &self.profiles[row.profile].variables[row.variable];
-                try writer.writeAll(variable.value);
+                try writer.writeAll(masked_value);
                 if (variable.changed) try writer.writeAll(changed_mark);
             },
         }
@@ -306,7 +311,9 @@ pub const Model = struct {
         }
     }
 
-    /// The row's UIA name: what it is, whose it is, and its value.
+    /// The row's UIA name: what it is, whose it is and what is true of it,
+    /// never a value ("Command line of py312", "Variable PATH of py312").
+    /// What the row shows is its Value (`writeRowValue`).
     pub fn writeUiaName(self: *const Model, row: Row, writer: *std.Io.Writer) std.Io.Writer.Error!void {
         switch (row.kind) {
             .new_profile => try writer.writeAll("New profile"),
@@ -318,8 +325,10 @@ pub const Model = struct {
             .add_variable => try writer.print("Add variable to {s}", .{self.profiles[row.profile].id}),
             .command, .name, .folder, .variable => {
                 const profile = &self.profiles[row.profile];
-                try writer.print("{s} of {s}, ", .{ self.title(row), profile.id });
-                if (self.emptyValue(row)) try writer.writeAll("none") else try self.writeValueText(row, writer);
+                if (row.kind == .variable)
+                    try writer.print("Variable {s} of {s}", .{ profile.variables[row.variable].name, profile.id })
+                else
+                    try writer.print("{s} of {s}", .{ self.title(row), profile.id });
                 const changed = switch (row.kind) {
                     .command => profile.changed.command,
                     .name => profile.changed.name,
@@ -330,6 +339,20 @@ pub const Model = struct {
                 if (changed) try writer.writeAll(", changed here, not saved yet");
             },
         }
+    }
+
+    /// The row's read-only UIA Value, what it shows: the command line (a
+    /// profile's row shows it too), the label or the starting folder ("none"
+    /// for neither), `value_hidden` for a variable. False for a row with no
+    /// value (New profile, Add variable).
+    pub fn writeRowValue(self: *const Model, row: Row, writer: *std.Io.Writer) std.Io.Writer.Error!bool {
+        switch (row.kind) {
+            .new_profile, .add_variable => return false,
+            .profile => try writer.writeAll(self.profiles[row.profile].command),
+            .variable => try writer.writeAll(value_hidden),
+            .command, .name, .folder => if (self.emptyValue(row)) try writer.writeAll("none") else try self.writeValueText(row, writer),
+        }
+        return true;
     }
 
     /// The field's value alone, without the mark `writeValue` adds.
@@ -346,6 +369,13 @@ pub const Model = struct {
 };
 
 const changed_mark = " (changed here, not saved yet)";
+
+/// How a row shows a variable's value: masked, so a screenshot or someone
+/// looking on does not get it. The text field shows it while it is typed
+/// into.
+pub const masked_value = "\u{2022}" ** 6;
+/// A variable row's UIA Value, in words.
+pub const value_hidden = "value hidden";
 
 /// What is true of a profile, in words, between `open` and `close`:
 /// "(default profile, hidden)".
@@ -419,7 +449,7 @@ fn hiddenIn(config: *const Config, id: []const u8) bool {
 }
 
 /// The ids whose `profile-command` was last written by noctty's command line
-/// (`Config.ProfilePlace`), in lower case.
+/// (`pane_launch.ProfilePlace`), in lower case.
 fn commandLineIds(a: Allocator, config: *const Config) Allocator.Error!std.StringHashMapUnmanaged(void) {
     var last: std.StringHashMapUnmanaged(bool) = .empty;
     for (config._profile_places.items) |place| {
@@ -523,7 +553,7 @@ pub fn followFile(original: *Config, draft: *Config, replacement: *const Config)
         config.@"profile-name" = try replacement.@"profile-name".clone(a);
         config.@"profile-working-directory" = try replacement.@"profile-working-directory".clone(a);
         config.@"profile-env" = try replacement.@"profile-env".clone(a);
-        config._profile_places = try replacement.cloneProfilePlaces(a);
+        config._profile_places = try configpkg.pane_launch.cloneProfilePlaces(replacement, a);
     }
 }
 
@@ -542,9 +572,7 @@ pub fn checkText(comptime kind: profile_map.Kind, id: []const u8, text: []const 
         .text => "profile-working-directory",
         .env => "profile-env",
     };
-    // The compact form `writeProfileLine` falls back to, `key=id:text`, with
-    // a label's quotes.
-    if (key.len + 1 + id.len + 1 + text.len + 2 > LineIterator.max_line_len) return "That is too long for one line of the config file.";
+    if (!fitsOneLine(kind, key, id, text)) return "That is too long for one line of the config file.";
     var buf: [LineIterator.max_line_len]u8 = undefined;
     const value = std.fmt.bufPrint(&buf, "{s}: {s}", .{ id, text }) catch return "That is too long for one line of the config file.";
     _ = profile_map.check(kind, value) catch |err| return switch (err) {
@@ -558,6 +586,17 @@ pub fn checkText(comptime kind: profile_map.Kind, id: []const u8, text: []const 
         error.ProfileNotUtf8 => "That text cannot be saved.",
     };
     return null;
+}
+
+/// Whether the line Save writes for `text` (`profile_map.writeProfileLine`,
+/// in whichever form it picks, with a label's quotes when it needs them) is
+/// one the config reader takes: measured, not reckoned.
+fn fitsOneLine(comptime kind: profile_map.Kind, key: []const u8, id: []const u8, text: []const u8) bool {
+    // The longest line the reader takes, and its `\n`.
+    var buf: [LineIterator.max_line_len + 1]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buf);
+    profile_map.writeProfileLine(&writer, kind, key, id, text) catch return false;
+    return true;
 }
 
 /// A new profile's id, refused: not 1 to 64 of `[A-Za-z0-9._-]`, reserved, or
@@ -600,6 +639,50 @@ pub fn checkVariableValue(id: []const u8, name: []const u8, value: []const u8) ?
     var buf: [LineIterator.max_line_len + 1]u8 = undefined;
     const text = std.fmt.bufPrint(&buf, "{s}={s}", .{ name, value }) catch return "That is too long for one line of the config file.";
     return checkText(.env, id, text);
+}
+
+test "profile checks take a line of exactly the reader's length, and refuse one byte more" {
+    const too_long = "That is too long for one line of the config file.";
+    const max = LineIterator.max_line_len;
+    // What Save writes, less its `\n`.
+    const written = struct {
+        fn len(comptime kind: profile_map.Kind, key: []const u8, text: []const u8) !usize {
+            var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+            defer out.deinit();
+            try profile_map.writeProfileLine(&out.writer, kind, key, "py", text);
+            return out.written().len - 1;
+        }
+    }.len;
+    var buf: [max + 8]u8 = undefined;
+    // Lines of 4,092 to 4,095 bytes, each in the compact form: a command, a
+    // variable `V`, and a label that needs its quotes.
+    for (0..4) |extra| {
+        const accepted = max - 2 + extra <= max;
+        const command = buf[0 .. 4073 + extra];
+        @memset(command, 'x');
+        try std.testing.expectEqual(max - 2 + extra, try written(.command, "profile-command", command));
+        if (accepted) {
+            try std.testing.expect(checkCommand("py", command) == null);
+        } else try std.testing.expectEqualStrings(too_long, checkCommand("py", command).?);
+
+        const value = buf[0 .. 4075 + extra];
+        @memset(value, 'v');
+        var text_buf: [max + 8]u8 = undefined;
+        const variable = try std.fmt.bufPrint(&text_buf, "V={s}", .{value});
+        try std.testing.expectEqual(max - 2 + extra, try written(.env, "profile-env", variable));
+        if (accepted) {
+            try std.testing.expect(checkVariableValue("py", "V", value) == null);
+        } else try std.testing.expectEqualStrings(too_long, checkVariableValue("py", "V", value).?);
+
+        const label = buf[0 .. 4072 + extra + 2];
+        @memset(label, 'n');
+        label[0] = '"';
+        label[label.len - 1] = '"';
+        try std.testing.expectEqual(max - 2 + extra, try written(.name, "profile-name", label));
+        if (accepted) {
+            try std.testing.expect(checkText(.name, "py", label) == null);
+        } else try std.testing.expectEqualStrings(too_long, checkText(.name, "py", label).?);
+    }
 }
 
 // Changes to the draft. Each takes a value its check passed, and allocates in
@@ -716,6 +799,8 @@ fn testRowsText(alloc: Allocator, model: *const Model) ![]u8 {
         defer value.deinit();
         try model.writeValue(row, &value.writer);
         if (value.written().len != 0) try out.writer.print(" {s}", .{value.written()});
+        // A variable's value as the draft holds it, which the row masks.
+        if (row.kind == .variable) try out.writer.print(" [{s}]", .{model.profiles[row.profile].variables[row.variable].value});
         try out.writer.writeAll("\n");
     }
     return out.toOwnedSlice();
@@ -748,8 +833,8 @@ test "settings profiles: a row for each profile and each of its fields, in defin
         \\command Command line = python.exe
         \\name Name = Python
         \\folder Starting folder =
-        \\variable PATH = C:\py;%PATH%
-        \\variable MODE = 1
+        \\variable PATH = •••••• [C:\py;%PATH%]
+        \\variable MODE = •••••• [1]
         \\add_variable Add variable =
         \\profile dev = user:dev (default profile)
         \\command Command line = cmd.exe /k
@@ -790,7 +875,7 @@ test "settings profiles: what the draft changed is marked, and a removed variabl
         \\command Command line = python.exe -X utf8 (changed here, not saved yet)
         \\name Name = Python (changed here, not saved yet)
         \\folder Starting folder =
-        \\variable A = 10 (changed here, not saved yet)
+        \\variable A = •••••• (changed here, not saved yet) [10]
         \\add_variable Add variable =
         \\profile new = user:new (new, not saved yet)
         \\command Command line = n.exe

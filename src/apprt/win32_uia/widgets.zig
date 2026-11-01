@@ -179,6 +179,10 @@ pub const PaletteListState = struct {
     help_text: []const u8 = "",
     /// A row's `HelpText`, written into `buf` (what the row documents).
     row_help: ?*const fn (ctx: *anyopaque, index: usize, buf: []u8) []const u8 = null,
+    /// A row's read-only Value (the Value pattern), written into `buf`, or
+    /// null for a row without one: what the row shows, read on request. A
+    /// row's Name, HelpText and the events the list raises do not carry it.
+    row_value: ?*const fn (ctx: *anyopaque, index: usize, buf: []u8) ?[]const u8 = null,
     /// The keyboard focus is on the selected row while the list has it, as in
     /// a native list box: the fragment root answers it for `GetFocus`, and a
     /// selection change while the list is focused is a focus change too. For
@@ -816,6 +820,7 @@ const PaletteRowProvider = struct {
     fragment: com.IRawElementProviderFragment,
     selection_item: com.ISelectionItemProvider,
     invoke_item: com.IInvokeProvider,
+    value_item: com.IValueProvider,
     refcount: std.atomic.Value(u32),
     alloc: std.mem.Allocator,
     parent: *PaletteListProvider,
@@ -858,6 +863,14 @@ const PaletteRowProvider = struct {
         .Release = InvokeRelease,
         .Invoke = Invoke,
     };
+    const value_vtbl: com.IValueProviderVtbl = .{
+        .QueryInterface = ValueQueryInterface,
+        .AddRef = ValueAddRef,
+        .Release = ValueRelease,
+        .SetValue = SetValue,
+        .get_Value = GetValue,
+        .get_IsReadOnly = GetIsReadOnly,
+    };
 
     fn create(alloc: std.mem.Allocator, parent: *PaletteListProvider, index: usize, id: u64) !*PaletteRowProvider {
         const self = try alloc.create(PaletteRowProvider);
@@ -867,6 +880,7 @@ const PaletteRowProvider = struct {
             .fragment = .{ .vtbl = &fragment_vtbl },
             .selection_item = .{ .vtbl = &selection_vtbl },
             .invoke_item = .{ .vtbl = &invoke_vtbl },
+            .value_item = .{ .vtbl = &value_vtbl },
             .refcount = std.atomic.Value(u32).init(1),
             .alloc = alloc,
             .parent = parent,
@@ -888,6 +902,25 @@ const PaletteRowProvider = struct {
     fn fromInvoke(p: *com.IInvokeProvider) *PaletteRowProvider {
         return @fieldParentPtr("invoke_item", p);
     }
+    fn fromValue(p: *com.IValueProvider) *PaletteRowProvider {
+        return @fieldParentPtr("value_item", p);
+    }
+    /// The row's Value (`PaletteListState.row_value`), as a fresh BSTR; null
+    /// when the row has none, or for lack of memory (`missing` says which).
+    fn valueBstr(self: *PaletteRowProvider, missing: *bool) ?com.BSTR {
+        missing.* = true;
+        const callback = self.parent.state.row_value orelse return null;
+        var buf: [row_help_capacity]u8 = undefined;
+        const text = callback(self.parent.state.ctx, self.index, &buf) orelse return null;
+        missing.* = false;
+        return allocBstrFromUtf8(self.alloc, text);
+    }
+    /// Whether the row has a Value.
+    fn hasValue(self: *PaletteRowProvider) bool {
+        const callback = self.parent.state.row_value orelse return false;
+        var buf: [row_help_capacity]u8 = undefined;
+        return callback(self.parent.state.ctx, self.index, &buf) != null;
+    }
     /// Whether the row's item is still in the list, found by its id: the
     /// RuntimeId names the item, so a row the list moved (a rebuild sorted
     /// another item in before it, a search changed what is shown) is found
@@ -907,7 +940,7 @@ const PaletteRowProvider = struct {
 
     fn query(self: *PaletteRowProvider, iid: *const com.GUID, out: *?*anyopaque) com.HRESULT {
         out.* = null;
-        if (iidEqual(iid, &com.IID_IUnknown) or iidEqual(iid, &com.IID_IRawElementProviderSimple)) out.* = @ptrCast(&self.base) else if (iidEqual(iid, &com.IID_IRawElementProviderFragment)) out.* = @ptrCast(&self.fragment) else if (iidEqual(iid, &com.IID_ISelectionItemProvider)) out.* = @ptrCast(&self.selection_item) else if (self.parent.state.invoke_row != null and iidEqual(iid, &com.IID_IInvokeProvider)) out.* = @ptrCast(&self.invoke_item) else return com.E_NOINTERFACE;
+        if (iidEqual(iid, &com.IID_IUnknown) or iidEqual(iid, &com.IID_IRawElementProviderSimple)) out.* = @ptrCast(&self.base) else if (iidEqual(iid, &com.IID_IRawElementProviderFragment)) out.* = @ptrCast(&self.fragment) else if (iidEqual(iid, &com.IID_ISelectionItemProvider)) out.* = @ptrCast(&self.selection_item) else if (self.parent.state.invoke_row != null and iidEqual(iid, &com.IID_IInvokeProvider)) out.* = @ptrCast(&self.invoke_item) else if (self.parent.state.row_value != null and iidEqual(iid, &com.IID_IValueProvider)) out.* = @ptrCast(&self.value_item) else return com.E_NOINTERFACE;
         _ = self.refcount.fetchAdd(1, .monotonic);
         return com.S_OK;
     }
@@ -915,6 +948,7 @@ const PaletteRowProvider = struct {
     const FragmentQueryInterface = Object.Interface("fragment").QueryInterface;
     const SelectionQueryInterface = Object.Interface("selection_item").QueryInterface;
     const InvokeQueryInterface = Object.Interface("invoke_item").QueryInterface;
+    const ValueQueryInterface = Object.Interface("value_item").QueryInterface;
     fn addRef(self: *PaletteRowProvider) u32 {
         return self.refcount.fetchAdd(1, .monotonic) + 1;
     }
@@ -922,6 +956,7 @@ const PaletteRowProvider = struct {
     const FragmentAddRef = Object.Interface("fragment").AddRef;
     const SelectionAddRef = Object.Interface("selection_item").AddRef;
     const InvokeAddRef = Object.Interface("invoke_item").AddRef;
+    const ValueAddRef = Object.Interface("value_item").AddRef;
     fn release(self: *PaletteRowProvider) u32 {
         const previous = self.refcount.fetchSub(1, .acq_rel);
         if (previous == 1) {
@@ -935,6 +970,7 @@ const PaletteRowProvider = struct {
     const FragmentRelease = Object.Interface("fragment").Release;
     const SelectionRelease = Object.Interface("selection_item").Release;
     const InvokeRelease = Object.Interface("invoke_item").Release;
+    const ValueRelease = Object.Interface("value_item").Release;
     fn getProviderOptions(p: *com.IRawElementProviderSimple, out: *i32) callconv(.winapi) com.HRESULT {
         const self = fromBase(p);
         out.* = com.ProviderOptions_ServerSideProvider |
@@ -950,6 +986,9 @@ const PaletteRowProvider = struct {
             _ = self.addRef();
         } else if (pattern == constants.UIA_InvokePatternId and self.parent.state.invoke_row != null) {
             out.* = @ptrCast(&self.invoke_item);
+            _ = self.addRef();
+        } else if (pattern == constants.UIA_ValuePatternId and self.hasValue()) {
+            out.* = @ptrCast(&self.value_item);
             _ = self.addRef();
         }
         return com.S_OK;
@@ -980,12 +1019,41 @@ const PaletteRowProvider = struct {
             constants.UIA_IsOffscreenPropertyId => out.* = com.VARIANT.fromBool(self.parent.rowBounds(self.index) == null),
             constants.UIA_IsControlElementPropertyId, constants.UIA_IsContentElementPropertyId => out.* = com.VARIANT.fromBool(true),
             constants.UIA_IsEnabledPropertyId => out.* = com.VARIANT.fromBool(self.parent.rowEnabled(self.index)),
+            constants.UIA_ValueValuePropertyId => {
+                var missing = true;
+                const bstr = self.valueBstr(&missing);
+                if (bstr) |value| out.* = com.VARIANT.fromBstr(value) else if (!missing) return com.E_OUTOFMEMORY;
+            },
+            constants.UIA_ValueIsReadOnlyPropertyId => if (self.hasValue()) {
+                out.* = com.VARIANT.fromBool(true);
+            },
             else => {},
         }
         return com.S_OK;
     }
     fn getHostRawElementProvider(_: *com.IRawElementProviderSimple, out: *?*com.IRawElementProviderSimple) callconv(.winapi) com.HRESULT {
         out.* = null;
+        return com.S_OK;
+    }
+    /// A row's Value is read-only: what it shows is changed elsewhere (the
+    /// Profiles page's text field).
+    fn SetValue(p: *com.IValueProvider, _: ?[*:0]const u16) callconv(.winapi) com.HRESULT {
+        const self = fromValue(p);
+        if (!self.available()) return com.UIA_E_ELEMENTNOTAVAILABLE;
+        return com.UIA_E_ELEMENTNOTENABLED;
+    }
+    fn GetValue(p: *com.IValueProvider, out: *com.BSTR) callconv(.winapi) com.HRESULT {
+        const self = fromValue(p);
+        out.* = null;
+        if (!self.available()) return com.UIA_E_ELEMENTNOTAVAILABLE;
+        var missing = true;
+        out.* = self.valueBstr(&missing) orelse return if (missing) com.UIA_E_INVALIDOPERATION else com.E_OUTOFMEMORY;
+        return com.S_OK;
+    }
+    fn GetIsReadOnly(p: *com.IValueProvider, out: *com.BOOL) callconv(.winapi) com.HRESULT {
+        const self = fromValue(p);
+        out.* = 1;
+        if (!self.available()) return com.UIA_E_ELEMENTNOTAVAILABLE;
         return com.S_OK;
     }
     fn Navigate(p: *com.IRawElementProviderFragment, direction: i32, out: *?*com.IRawElementProviderFragment) callconv(.winapi) com.HRESULT {
@@ -5595,6 +5663,50 @@ test "PaletteListProvider fragment navigation reaches rows and parent" {
     try std.testing.expectEqual(com.S_OK, PaletteRowProvider.Navigate(next.?, com.NavigateDirection_Parent, &parent));
     try std.testing.expect(parent != null);
     try std.testing.expectEqual(@as(u32, 3), PaletteListProvider.FragmentRelease(parent.?));
+}
+
+test "Palette row exposes a read-only Value only for a row that has one" {
+    const Values = struct {
+        fn value(_: *anyopaque, index: usize, buf: []u8) ?[]const u8 {
+            if (index != 0) return null;
+            return std.fmt.bufPrint(buf, "shown text", .{}) catch null;
+        }
+    };
+    var state_data = TestPaletteState{ .count = 2 };
+    var state = state_data.state();
+    state.row_value = &Values.value;
+    var provider = try PaletteListProvider.create(std.testing.allocator, @ptrFromInt(0x1), state);
+    defer _ = PaletteListProvider.Release(&provider.base);
+    const with = provider.createRow(0).?;
+    defer _ = PaletteRowProvider.Release(&with.base);
+    const without = provider.createRow(1).?;
+    defer _ = PaletteRowProvider.Release(&without.base);
+
+    var pattern: ?*com.IUnknown = null;
+    try std.testing.expectEqual(com.S_OK, PaletteRowProvider.GetPatternProvider(&with.base, constants.UIA_ValuePatternId, &pattern));
+    try std.testing.expect(pattern != null);
+    try std.testing.expectEqual(@as(u32, 1), PaletteRowProvider.ValueRelease(@ptrCast(@alignCast(pattern.?))));
+    var none: ?*com.IUnknown = null;
+    try std.testing.expectEqual(com.S_OK, PaletteRowProvider.GetPatternProvider(&without.base, constants.UIA_ValuePatternId, &none));
+    try std.testing.expect(none == null);
+
+    var bstr: com.BSTR = null;
+    try std.testing.expectEqual(com.S_OK, PaletteRowProvider.GetValue(&with.value_item, &bstr));
+    defer com.SysFreeString(bstr);
+    var text_buf: [32]u8 = undefined;
+    const text = text_buf[0..try std.unicode.utf16LeToUtf8(&text_buf, bstr.?[0..com.SysStringLen(bstr)])];
+    try std.testing.expectEqualStrings("shown text", text);
+    var read_only: com.BOOL = 0;
+    try std.testing.expectEqual(com.S_OK, PaletteRowProvider.GetIsReadOnly(&with.value_item, &read_only));
+    try std.testing.expectEqual(@as(com.BOOL, 1), read_only);
+    try std.testing.expectEqual(com.UIA_E_ELEMENTNOTENABLED, PaletteRowProvider.SetValue(&with.value_item, std.unicode.utf8ToUtf16LeStringLiteral("x")));
+    var empty: com.BSTR = null;
+    try std.testing.expectEqual(com.UIA_E_INVALIDOPERATION, PaletteRowProvider.GetValue(&without.value_item, &empty));
+    // The Name stays the row's own.
+    var name = com.VARIANT.empty();
+    try std.testing.expectEqual(com.S_OK, PaletteRowProvider.GetPropertyValue(&with.base, constants.UIA_NamePropertyId, &name));
+    defer _ = com.VariantClear(&name);
+    try std.testing.expectEqual(@as(u16, com.VT_BSTR), name.vt);
 }
 
 test "Palette row retains its parent and balances QueryInterface refs" {

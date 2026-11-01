@@ -5026,6 +5026,19 @@ pub const SettingsWindow = struct {
     /// row of the last page holds it and the search does not move it to the
     /// search field: one focus move, one announcement.
     fn showSection(self: *SettingsWindow, next: Section, focus_follows: bool) void {
+        // Leaving the Profiles page keeps its open field first. A value
+        // Settings refuses stops the switch: the field keeps its text and
+        // the focus, its reason on the status line, and the rail stays on
+        // Profiles.
+        if (self.active_section == .profiles and next != .profiles and self.profile_edit != null) {
+            if (!self.commitProfileEdit(.leaving)) {
+                self.applySectionVisibility();
+                if (self.profile_edit) |edit| if (edit.hwnd) |field| {
+                    _ = SetFocus(field);
+                };
+                return;
+            }
+        }
         const changed = self.active_section != next;
         self.materializeSection(next);
         // A page's list exists only while its page is shown: it goes before
@@ -5180,15 +5193,12 @@ pub const SettingsWindow = struct {
     /// A close request from the caption, Alt+F4 or Escape: close at once when
     /// clean, otherwise ask what to do with the unsaved changes.
     fn requestClose(self: *SettingsWindow, hwnd: HWND) void {
-        // What a profile field holds counts as an edit, as when it loses the
-        // focus. A value Settings refuses keeps the window open, with the
-        // field and its reason, as it stops a save: Escape puts it back.
-        if (self.profile_edit != null and !self.commitProfileEdit(.blur)) {
-            if (self.profile_edit) |edit| if (edit.hwnd) |field| {
-                _ = SetFocus(field);
-            };
-            return;
-        }
+        // What a profile field holds is kept, as when it loses the focus. A
+        // value Settings refuses stays in the field with its reason, and is
+        // an edit like any other (`profileEditTypedInto`): the close prompt
+        // asks about it. Its Save stops at the value, Discard drops it, and
+        // Keep editing goes back to it.
+        if (self.profile_edit != null) _ = self.commitProfileEdit(.leaving);
         switch (closeRequestAction(self.hasPendingChanges(), self.close_prompt_visible, self.close_posted)) {
             .close_now => self.closeNow(hwnd),
             .show_prompt, .focus_prompt => self.showClosePrompt(),
@@ -6473,9 +6483,9 @@ pub const SettingsWindow = struct {
     /// quit has to wait.
     pub fn holdQuitForUnsavedChanges(self: *SettingsWindow) bool {
         const hwnd = self.hwnd orelse return false;
-        // What a profile field holds counts as an edit (`requestClose`); a
-        // refused one goes with the app.
-        if (self.profile_edit != null) _ = self.commitProfileEdit(.closing);
+        // What a profile field holds counts as an edit (`requestClose`): a
+        // refused one stays, and holds the quit at the close prompt.
+        if (self.profile_edit != null) _ = self.commitProfileEdit(.leaving);
         if (self.close_posted or !self.hasPendingChanges()) return false;
         if (sys.IsIconic(hwnd) != 0) _ = sys.ShowWindow(hwnd, SW_RESTORE);
         _ = SetForegroundWindow(hwnd);
@@ -7688,9 +7698,13 @@ pub const SettingsWindow = struct {
         _ = sys.SendMessageW(hwnd, EM_LIMITTEXT, LineIterator.max_line_len, 0);
         subclassKeepingPrevious(hwnd, &profileEditProc);
         edit.hwnd = hwnd;
+        // A new profile's command line field holds the id typed before it:
+        // an edit from the start (`profileEditTypedInto`).
+        edit.typed = kind == .new_command;
         edit.writeLabel();
         self.profile_edit = edit;
         const stored = &self.profile_edit.?;
+        if (stored.typed) self.updateSaveEnabled();
         if (self.canInitializeCustomUiaProviders()) {
             stored.provider = win32_uia.SettingsControlProvider.create(std.heap.page_allocator, hwnd, .edit, stored.label()) catch |err| blk: {
                 std.log.warn("settings: profile field UIA provider unavailable err={}", .{err});
@@ -7763,12 +7777,16 @@ pub const SettingsWindow = struct {
     /// the draft. A value Settings refuses keeps the field open, its reason on
     /// the status line, whether the focus is in it (`.stay`: Enter, Tab,
     /// Save) or went elsewhere in the window (`.blur`), so a save started
-    /// with the mouse stops at it too. When the field has to go (`.closing`:
-    /// its page goes, or the window or the app closes), a refused value is
-    /// dropped and the status line says so. A new profile or variable left
-    /// empty by a blur or a close is just let go. Returns whether no field is
+    /// with the mouse stops at it too. Leaving the page or the window
+    /// (`.leaving`: a page switch, a close request, the app quitting) keeps
+    /// a refused value the same way, and also stops at a new profile with
+    /// its id typed and no command line yet, which a blur lets go: the
+    /// caller then stops, and the close prompt asks about the field
+    /// (`profileEditTypedInto`). When the field has to go (`.closing`: its
+    /// page goes), a refused value is dropped and the status line says so. A
+    /// new variable left empty is just let go. Returns whether no field is
     /// open any more.
-    fn commitProfileEdit(self: *SettingsWindow, how: enum { stay, blur, closing }) bool {
+    fn commitProfileEdit(self: *SettingsWindow, how: enum { stay, blur, leaving, closing }) bool {
         const edit = &(self.profile_edit orelse return true);
         const hwnd = edit.hwnd orelse return true;
         const alloc = self.handle.alloc;
@@ -7793,6 +7811,8 @@ pub const SettingsWindow = struct {
             else => false,
         };
         if (how != .stay and new_kind and text.len == 0) {
+            if (how == .leaving and edit.kind == .new_command)
+                return self.refuseProfileEdit(how, "A new profile needs a command line: type it, or press Escape to drop the profile.");
             self.cancelProfileEdit();
             return true;
         }
@@ -7801,7 +7821,9 @@ pub const SettingsWindow = struct {
                 if (settings_profiles.checkNewId(pending, text)) |message| return self.refuseProfileEdit(how, message);
                 // The id is taken; the command line comes next, in its own
                 // field, on the same row. A field that lost the focus keeps
-                // nothing: a profile needs both.
+                // nothing: a profile needs both. Leaving stops at it.
+                if (how == .leaving)
+                    return self.refuseProfileEdit(how, "A new profile needs a command line too: press Enter to type it, or Escape to drop the profile.");
                 if (how != .stay) {
                     self.cancelProfileEdit();
                     self.setProfileNote(.said, "No profile was added: a profile needs an id and a command line.", .{});
@@ -7854,7 +7876,7 @@ pub const SettingsWindow = struct {
     }
 
     /// A value Settings will not take (`message` names the field, never the
-    /// value). Returns whether the field went (`.blur`).
+    /// value). Returns whether the field went (`.closing`).
     fn refuseProfileEdit(self: *SettingsWindow, how: anytype, message: []const u8) bool {
         if (how == .closing) {
             self.cancelProfileEdit();
@@ -8300,8 +8322,8 @@ pub const SettingsWindow = struct {
     /// switch (`focusRailButtonAhead`), as the switch's own focus moves do.
     fn destroyList(self: *SettingsWindow, list_state: *ReferenceList, next: Section) void {
         const list = list_state.hwnd orelse return;
-        // A field being typed into goes with the page, kept as when it loses
-        // the focus.
+        // A field still open goes with the page, kept as when it loses the
+        // focus (`showSection` has stopped at a refused one already).
         if (list_state.kind == .profiles) _ = self.commitProfileEdit(.closing);
         if (GetFocus() == list) self.focusRailButtonAhead(next);
         if (list_state.provider) |provider| provider.raiseTeardown();
@@ -20890,6 +20912,9 @@ fn referenceListUiaState(list: *ReferenceList) win32_uia.PaletteListState {
             .profiles => profile_list_help,
         },
         .row_help = &referenceUiaRowHelp,
+        // A profile row's command line, label or folder, read on request:
+        // its Name never carries one.
+        .row_value = if (list.kind == .profiles) &profileUiaRowValue else null,
         .focus_selected_row = true,
         .use_com_threading = list.owner().canInitializeCustomUiaProviders(),
     };
@@ -20943,6 +20968,18 @@ fn referenceUiaRowName(ctx: *anyopaque, index: usize, buf: []u8) []const u8 {
         value.writeAll(", changed here, not saved yet") catch {};
     }
     writer.print(", {s}", .{value.buffered()}) catch {};
+    return utf8Prefix(writer.buffered());
+}
+
+/// A Profiles row's read-only Value (`settings_profiles.Model.writeRowValue`):
+/// what the row shows, a variable's value hidden. Null for a row with none.
+fn profileUiaRowValue(ctx: *anyopaque, index: usize, buf: []u8) ?[]const u8 {
+    const list = referenceOwner(ctx);
+    const id = list.shownId(index) orelse return null;
+    const model = &list.ownerConst().profile_model;
+    var writer: std.Io.Writer = .fixed(buf);
+    const has = model.writeRowValue(model.rows[id], &writer) catch true;
+    if (!has) return null;
     return utf8Prefix(writer.buffered());
 }
 
@@ -21153,6 +21190,10 @@ fn profileRowName(settings: *SettingsWindow, position: usize, buf: []u8) []const
     return referenceUiaRowName(&settings.profile_list, position, buf);
 }
 
+fn profileRowValue(settings: *SettingsWindow, position: usize, buf: []u8) ?[]const u8 {
+    return profileUiaRowValue(&settings.profile_list, position, buf);
+}
+
 test "settings the Profiles page lists the profiles and their fields, made with its page and gone with it" {
     try dialog_test.onHiddenDesktop(struct {
         fn body() !void {
@@ -21176,9 +21217,14 @@ test "settings the Profiles page lists the profiles and their fields, made with 
             var buf: [256]u8 = undefined;
             try std.testing.expectEqualStrings("New profile", profileRowName(settings, 0, &buf));
             try std.testing.expectEqualStrings("Python, profile user:py", profileRowName(settings, 1, &buf));
-            try std.testing.expectEqualStrings("Command line of py, python.exe", profileRowName(settings, 2, &buf));
-            try std.testing.expectEqualStrings("Starting folder of py, none", profileRowName(settings, 4, &buf));
-            try std.testing.expectEqualStrings("MODE of py, 1", profileRowName(settings, 5, &buf));
+            try std.testing.expectEqualStrings("Command line of py", profileRowName(settings, 2, &buf));
+            try std.testing.expectEqualStrings("Starting folder of py", profileRowName(settings, 4, &buf));
+            try std.testing.expectEqualStrings("Variable MODE of py", profileRowName(settings, 5, &buf));
+            // What a row shows is its Value; a variable's is hidden.
+            try std.testing.expectEqualStrings("python.exe", profileRowValue(settings, 2, &buf).?);
+            try std.testing.expectEqualStrings("none", profileRowValue(settings, 4, &buf).?);
+            try std.testing.expectEqualStrings("value hidden", profileRowValue(settings, 5, &buf).?);
+            try std.testing.expect(profileRowValue(settings, 0, &buf) == null);
             try std.testing.expectEqualStrings("Profiles", referenceUiaName(&settings.profile_list, &buf));
             // A Default profile chosen on Shell marks its profile here.
             settings.pending.?.@"default-profile" = try settings.pending.?._arena.?.allocator().dupeZ(u8, "user:py");
@@ -21202,6 +21248,67 @@ test "settings the Profiles page lists the profiles and their fields, made with 
             settings.setActiveSection(.terminal);
             try std.testing.expectEqual(without_list, Tree.of(fixture.hwnd()).len);
             try dialog_test.expectNothingStale(fixture.hwnd());
+        }
+    }.body);
+}
+
+test "settings no profile value reaches a row's Name or HelpText, and a variable's value is hidden in the row too" {
+    try dialog_test.onHiddenDesktop(struct {
+        fn body() !void {
+            const keyboard = win32_input.TestingKeyboard.pinNone();
+            defer keyboard.release();
+            const alloc = std.testing.allocator;
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var path: []u8 = &.{};
+            const command_secret = "cmd-s3ntinel-4417";
+            const env_secret = "env-s3ntinel-9032";
+            const fixture = try profileFixture(&tmp, "profile-command = py: tool.exe --key=" ++ command_secret ++ "\nprofile-env = py: TOKEN=" ++ env_secret ++ "\nprofile-working-directory = py: C:\\work\n", &path);
+            defer alloc.free(path);
+            defer fixture.finish();
+            const settings = &fixture.settings;
+            const list = &settings.profile_list;
+            var buf: [4096]u8 = undefined;
+            const contains = struct {
+                fn check(text: []const u8, needle: []const u8) bool {
+                    return std.mem.indexOf(u8, text, needle) != null;
+                }
+            }.check;
+            // The list's own Name.
+            try std.testing.expect(!contains(referenceUiaName(list, &buf), command_secret));
+            var command_values: usize = 0;
+            for (0..list.shown_count) |position| {
+                // Open each row, so its HelpText is the open row's text.
+                list.selectPosition(position);
+                const name = referenceUiaRowName(list, position, &buf);
+                try std.testing.expect(!contains(name, command_secret) and !contains(name, env_secret));
+                var help_buf: [8192]u8 = undefined;
+                const help = referenceUiaRowHelp(list, position, &help_buf);
+                try std.testing.expect(!contains(help, command_secret) and !contains(help, env_secret));
+                // What the row draws, and its Value: the variable's hidden.
+                var title_buf: [512]u8 = undefined;
+                var title: std.Io.Writer = .fixed(&title_buf);
+                var value_buf: [512]u8 = undefined;
+                var value: std.Io.Writer = .fixed(&value_buf);
+                list.writeTitle(list.shown[position], &title, &value);
+                try std.testing.expect(!contains(title.buffered(), env_secret) and !contains(value.buffered(), env_secret));
+                try std.testing.expect(!contains(list.summaryLine(list.shown[position]), env_secret));
+                if (profileRowValue(settings, position, &buf)) |row_value| {
+                    try std.testing.expect(!contains(row_value, env_secret));
+                    if (contains(row_value, command_secret)) command_values += 1;
+                }
+            }
+            // The profile's row and its command line row show the command
+            // line, so their Values have it.
+            try std.testing.expectEqual(@as(usize, 2), command_values);
+            // The text field shows the variable's value while it is typed
+            // into; that is the field's own Value.
+            const variable = settings.profile_model.findField(.variable, "py", "TOKEN").?;
+            for (list.shown[0..list.shown_count], 0..) |id, position| if (id == variable) list.selectPosition(position);
+            try std.testing.expect(fixture.pumpKey(VK_RETURN));
+            var field_buf: [128]u8 = undefined;
+            try std.testing.expect(contains(readEditUtf8((try openEdit(settings)).hwnd.?, &field_buf).?, env_secret));
+            try std.testing.expect(fixture.pumpKey(VK_ESCAPE));
         }
     }.body);
 }
@@ -21268,7 +21375,8 @@ test "settings a profile's field is typed into in place, and Save writes its lin
             try std.testing.expect(settings.hasPendingChanges());
             try std.testing.expect(settings.canSave());
             try std.testing.expectEqual(@as(usize, 1), settings.pendingFieldCount());
-            try std.testing.expectEqualStrings("Command line of py, python.exe -X utf8, changed here, not saved yet", profileRowName(settings, 2, &buf));
+            try std.testing.expectEqualStrings("Command line of py, changed here, not saved yet", profileRowName(settings, 2, &buf));
+            try std.testing.expectEqualStrings("python.exe -X utf8", profileRowValue(settings, 2, &buf).?);
 
             settings.save();
             try std.testing.expectEqual(@as(u32, 1), fixture.saved);
@@ -21276,7 +21384,8 @@ test "settings a profile's field is typed into in place, and Save writes its lin
             defer alloc.free(after);
             try std.testing.expectEqualStrings("# mine\nprofile-command = py: python.exe -X utf8\nprofile-name = py: Python\nprofile-command = other: o.exe\n", after);
             try std.testing.expect(!settings.hasPendingChanges());
-            try std.testing.expectEqualStrings("Command line of py, python.exe -X utf8", profileRowName(settings, 2, &buf));
+            try std.testing.expectEqualStrings("Command line of py", profileRowName(settings, 2, &buf));
+            try std.testing.expectEqualStrings("python.exe -X utf8", profileRowValue(settings, 2, &buf).?);
         }
     }.body);
 }
@@ -21426,7 +21535,185 @@ test "settings a value the Profiles page refuses keeps its field, never repeats 
             try std.testing.expect(fixture.pumpKey(VK_ESCAPE));
             try std.testing.expect(settings.profile_edit == null);
             try std.testing.expect(!settings.close_prompt_visible);
-            try std.testing.expectEqualStrings("Command line of py, python.exe", profileRowName(settings, 2, &buf));
+            try std.testing.expectEqualStrings("Command line of py", profileRowName(settings, 2, &buf));
+            try std.testing.expectEqualStrings("python.exe", profileRowValue(settings, 2, &buf).?);
+        }
+    }.body);
+}
+
+/// A Settings window on one profile, with its command line field open and
+/// holding a value Settings refuses, typed and not yet kept.
+fn refusedProfileField(tmp: *std.testing.TmpDir, path: *[]u8) !struct { fixture: *dialog_test.Fixture, edit: HWND } {
+    const fixture = try profileFixture(tmp, "profile-command = py: python.exe\n", path);
+    errdefer std.testing.allocator.free(path.*);
+    errdefer fixture.finish();
+    const settings = &fixture.settings;
+    settings.profile_list.selectPosition(2);
+    if (!fixture.pumpKey(VK_RETURN)) return error.TestExpectedProfileEdit;
+    const edit = (try openEdit(settings)).hwnd.?;
+    typeInto(edit, "direct:x");
+    return .{ .fixture = fixture, .edit = edit };
+}
+
+const refused_command = "Error: A profile's command line cannot start with direct: or shell:.";
+
+test "settings a refused profile field holds the app's quit at the close prompt, whose Save stops at it" {
+    try dialog_test.onHiddenDesktop(struct {
+        fn body() !void {
+            const keyboard = win32_input.TestingKeyboard.pinNone();
+            defer keyboard.release();
+            const alloc = std.testing.allocator;
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var path: []u8 = &.{};
+            const open = try refusedProfileField(&tmp, &path);
+            defer alloc.free(path);
+            defer open.fixture.finish();
+            const fixture = open.fixture;
+            const settings = &fixture.settings;
+            var buf: [512]u8 = undefined;
+            // The app quitting is held at the close prompt; the field stays.
+            try std.testing.expect(settings.holdQuitForUnsavedChanges());
+            try std.testing.expect(settings.close_prompt_visible);
+            try std.testing.expectEqual(open.edit, (try openEdit(settings)).hwnd.?);
+            // Its Save stops at the value and keeps the window, saying why.
+            _ = sys.SendMessageW(settings.btn_save.?, BM_CLICK, 0, 0);
+            try std.testing.expectEqual(@as(u32, 0), fixture.saved);
+            try std.testing.expect(!settings.close_prompt_visible);
+            try std.testing.expect(!settings.takeQuitAfterClose());
+            try std.testing.expectEqual(@as(u32, 0), fixture.closed);
+            try std.testing.expectEqualStrings(refused_command, try statusTextOf(settings, &buf));
+            try std.testing.expectEqual(open.edit, (try openEdit(settings)).hwnd.?);
+            try std.testing.expectEqualStrings("direct:x", readEditUtf8(open.edit, &buf).?);
+            // Asked again, Discard drops it, and the quit goes on.
+            try std.testing.expect(settings.holdQuitForUnsavedChanges());
+            settings.discardAndClose();
+            dialog_test.pump();
+            try std.testing.expectEqual(@as(u32, 1), fixture.closed);
+            try std.testing.expectEqual(@as(u32, 0), fixture.saved);
+        }
+    }.body);
+}
+
+test "settings a refused profile field holds Settings' close at the close prompt, and Keep editing goes back to it" {
+    try dialog_test.onHiddenDesktop(struct {
+        fn body() !void {
+            const keyboard = win32_input.TestingKeyboard.pinNone();
+            defer keyboard.release();
+            const alloc = std.testing.allocator;
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var path: []u8 = &.{};
+            const open = try refusedProfileField(&tmp, &path);
+            defer alloc.free(path);
+            defer open.fixture.finish();
+            const fixture = open.fixture;
+            const settings = &fixture.settings;
+            var buf: [512]u8 = undefined;
+            _ = sys.SendMessageW(fixture.hwnd(), WM_CLOSE, 0, 0);
+            try std.testing.expect(settings.close_prompt_visible);
+            try std.testing.expectEqual(@as(u32, 0), fixture.closed);
+            try std.testing.expectEqual(open.edit, (try openEdit(settings)).hwnd.?);
+            // Keep editing: the field, its text and its reason.
+            try std.testing.expect(fixture.pumpKey(VK_ESCAPE));
+            try std.testing.expect(!settings.close_prompt_visible);
+            try std.testing.expectEqual(open.edit, (try openEdit(settings)).hwnd.?);
+            try std.testing.expectEqual(open.edit, sys.GetFocus().?);
+            try std.testing.expectEqualStrings(refused_command, try statusTextOf(settings, &buf));
+            try std.testing.expectEqualStrings("direct:x", readEditUtf8(open.edit, &buf).?);
+            // Save and close stops at it too, and keeps the window.
+            _ = sys.SendMessageW(fixture.hwnd(), WM_CLOSE, 0, 0);
+            try std.testing.expect(settings.close_prompt_visible);
+            _ = sys.SendMessageW(settings.btn_save.?, BM_CLICK, 0, 0);
+            try std.testing.expectEqual(@as(u32, 0), fixture.saved);
+            try std.testing.expectEqual(@as(u32, 0), fixture.closed);
+            try std.testing.expectEqualStrings(refused_command, try statusTextOf(settings, &buf));
+            // Discard drops it with the window.
+            _ = sys.SendMessageW(fixture.hwnd(), WM_CLOSE, 0, 0);
+            try std.testing.expect(settings.close_prompt_visible);
+            settings.discardAndClose();
+            dialog_test.pump();
+            try std.testing.expectEqual(@as(u32, 1), fixture.closed);
+            try std.testing.expectEqual(@as(u32, 0), fixture.saved);
+        }
+    }.body);
+}
+
+test "settings a refused profile field stops a page switch, keeping its text, its focus and its reason" {
+    try dialog_test.onHiddenDesktop(struct {
+        fn body() !void {
+            const keyboard = win32_input.TestingKeyboard.pinNone();
+            defer keyboard.release();
+            const alloc = std.testing.allocator;
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var path: []u8 = &.{};
+            const open = try refusedProfileField(&tmp, &path);
+            defer alloc.free(path);
+            defer open.fixture.finish();
+            const settings = &open.fixture.settings;
+            var buf: [512]u8 = undefined;
+            settings.setActiveSection(.terminal);
+            try std.testing.expectEqual(Section.profiles, settings.active_section);
+            try std.testing.expectEqual(open.edit, (try openEdit(settings)).hwnd.?);
+            try std.testing.expectEqual(open.edit, sys.GetFocus().?);
+            try std.testing.expectEqualStrings(refused_command, try statusTextOf(settings, &buf));
+            try std.testing.expectEqualStrings("direct:x", readEditUtf8(open.edit, &buf).?);
+            // The rail still shows Profiles as the page.
+            try std.testing.expectEqual(@as(usize, BST_CHECKED), @as(usize, @bitCast(sys.SendMessageW(settings.sectionButton(.profiles).?, BM_GETCHECK, 0, 0))));
+            try std.testing.expectEqual(@as(usize, BST_UNCHECKED), @as(usize, @bitCast(sys.SendMessageW(settings.sectionButton(.terminal).?, BM_GETCHECK, 0, 0))));
+            // Escape puts the field back, and the switch goes on.
+            try std.testing.expect(open.fixture.pumpKey(VK_ESCAPE));
+            try std.testing.expect(settings.profile_edit == null);
+            settings.setActiveSection(.terminal);
+            try std.testing.expectEqual(Section.terminal, settings.active_section);
+        }
+    }.body);
+}
+
+test "settings a new profile's id with no command line yet stops a page switch and a close, and the close prompt asks about it" {
+    try dialog_test.onHiddenDesktop(struct {
+        fn body() !void {
+            const keyboard = win32_input.TestingKeyboard.pinNone();
+            defer keyboard.release();
+            const alloc = std.testing.allocator;
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var path: []u8 = &.{};
+            const fixture = try profileFixture(&tmp, "profile-command = py: python.exe\n", &path);
+            defer alloc.free(path);
+            defer fixture.finish();
+            const settings = &fixture.settings;
+            var buf: [256]u8 = undefined;
+            try std.testing.expect(fixture.pumpKey(VK_INSERT));
+            typeInto((try openEdit(settings)).hwnd.?, "dev");
+
+            // The id alone: a page switch stops at it, saying what is missing.
+            settings.setActiveSection(.terminal);
+            try std.testing.expectEqual(Section.profiles, settings.active_section);
+            try std.testing.expectEqual(ProfileEdit.Kind.new_id, (try openEdit(settings)).kind);
+            try std.testing.expectEqualStrings("Error: A new profile needs a command line too: press Enter to type it, or Escape to drop the profile.", try statusTextOf(settings, &buf));
+            try std.testing.expect(fixture.pumpKey(VK_RETURN));
+            const command = (try openEdit(settings)).hwnd.?;
+            try std.testing.expectEqual(ProfileEdit.Kind.new_command, (try openEdit(settings)).kind);
+            // The id typed before it makes the empty command line field an
+            // edit: Save is enabled, and a close asks.
+            try std.testing.expect(settings.hasPendingChanges());
+            try std.testing.expect(sys.IsWindowEnabled(settings.btn_save.?) != 0);
+            _ = sys.SendMessageW(fixture.hwnd(), WM_CLOSE, 0, 0);
+            try std.testing.expect(settings.close_prompt_visible);
+            try std.testing.expectEqual(@as(u32, 0), fixture.closed);
+            try std.testing.expect(fixture.pumpKey(VK_ESCAPE));
+            try std.testing.expect(!settings.close_prompt_visible);
+            try std.testing.expectEqualStrings("Error: A new profile needs a command line: type it, or press Escape to drop the profile.", try statusTextOf(settings, &buf));
+            try std.testing.expectEqual(command, (try openEdit(settings)).hwnd.?);
+
+            // Typed, the page switch goes on and the profile is in the draft.
+            typeInto(command, "cmd.exe /k");
+            settings.setActiveSection(.terminal);
+            try std.testing.expectEqual(Section.terminal, settings.active_section);
+            try std.testing.expect(settings.profile_edit == null);
+            try std.testing.expect(settings.pending.?.@"profile-command".get("dev") != null);
         }
     }.body);
 }
@@ -21456,11 +21743,12 @@ test "settings variables are added, typed into and taken out, and Discard brings
             typeInto((try openEdit(settings)).hwnd.?, "TOKEN=abc");
             try std.testing.expect(fixture.pumpKey(VK_TAB));
             try std.testing.expect(settings.profile_edit == null);
-            try std.testing.expectEqualStrings("TOKEN of py, abc, changed here, not saved yet", profileRowName(settings, list.selectedPosition().?, &buf));
+            try std.testing.expectEqualStrings("Variable TOKEN of py, changed here, not saved yet", profileRowName(settings, list.selectedPosition().?, &buf));
+            try std.testing.expectEqualStrings("abc", settings.pending.?.@"profile-env".get("py").?.map.get("TOKEN").?);
             // The other variable goes on one Delete, and only on Delete:
             // Ctrl+C, a copy elsewhere, does nothing here.
             list.selectPosition(5);
-            try std.testing.expectEqualStrings("MODE of py, 1", profileRowName(settings, 5, &buf));
+            try std.testing.expectEqualStrings("Variable MODE of py", profileRowName(settings, 5, &buf));
             {
                 var ctrl = [_]u8{0} ** 256;
                 ctrl[VK_CONTROL] = 0x80;
@@ -21468,14 +21756,14 @@ test "settings variables are added, typed into and taken out, and Discard brings
                 defer keyboard.set(&([_]u8{0} ** 256));
                 _ = fixture.pumpKey('C');
             }
-            try std.testing.expectEqualStrings("MODE of py, 1", profileRowName(settings, 5, &buf));
+            try std.testing.expectEqualStrings("Variable MODE of py", profileRowName(settings, 5, &buf));
             try std.testing.expectEqual(@as(usize, 1), settings.pendingFieldCount());
             try std.testing.expect(fixture.pumpKey(VK_DELETE));
             try std.testing.expectEqual(@as(usize, 2), settings.pendingFieldCount());
 
             settings.discardChangesNow();
             try std.testing.expect(!settings.hasPendingChanges());
-            try std.testing.expectEqualStrings("MODE of py, 1", profileRowName(settings, 5, &buf));
+            try std.testing.expectEqualStrings("Variable MODE of py", profileRowName(settings, 5, &buf));
             try std.testing.expectEqualStrings("Add variable to py", profileRowName(settings, 6, &buf));
         }
     }.body);
@@ -21519,7 +21807,8 @@ test "settings the Profiles page follows the file's profiles until it changes on
             try std.testing.expect(settings.hasPendingChanges());
             try std.testing.expectEqual(@as(usize, 1), settings.pendingFieldCount());
             try std.testing.expectEqual(@as(usize, 11), settings.profile_list.shown_count);
-            try std.testing.expectEqualStrings("Name of py, Py, changed here, not saved yet", profileRowName(settings, 3, &buf));
+            try std.testing.expectEqualStrings("Name of py, changed here, not saved yet", profileRowName(settings, 3, &buf));
+            try std.testing.expectEqualStrings("Py", profileRowValue(settings, 3, &buf).?);
 
             // A field open on a profile the file then removes goes with it,
             // once nothing else is changed.

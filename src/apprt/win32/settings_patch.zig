@@ -118,12 +118,11 @@ const whitespace = " \t";
 
 /// What `text` (one line, without its line ending) writes to a `profile-*`
 /// key, if anything the loader would take.
-fn readLine(text: []const u8) ?Info {
-    // A line longer than the reader takes is skipped whole; one CR at its
-    // end is a line ending's, which does not count.
-    const content = if (std.mem.endsWith(u8, text, "\r")) text[0 .. text.len - 1] else text;
-    if (content.len > LineIterator.max_line_len) return null;
-    const trimmed = std.mem.trim(u8, text, whitespace ++ "\r");
+fn readLine(segment: []const u8) ?Info {
+    // A line longer than the reader takes is skipped whole. `segment` is the
+    // line as the reader sees it, every CR before its `\n` included.
+    if (!LineIterator.takes(segment)) return null;
+    const trimmed = std.mem.trim(u8, segment, whitespace ++ "\r");
     if (trimmed.len == 0 or trimmed[0] == '#') return null;
     const eq = std.mem.indexOfScalar(u8, trimmed, '=') orelse return null;
     const field = Field.fromName(std.mem.trim(u8, trimmed[0..eq], whitespace)) orelse return null;
@@ -210,8 +209,11 @@ fn editLine(arena: Allocator, edit: Edit) ![]const u8 {
 ///
 /// Every other line is copied byte for byte: comments, blank lines, other
 /// keys, other profiles, lines the loader refuses, earlier lines for the same
-/// field (they do not take effect). A UTF-8 byte order mark is kept, and new
-/// lines take the ending most of the file's lines have.
+/// field (they do not take effect). A UTF-8 byte order mark is kept, new
+/// lines take the ending most of the file's lines have, and a file with no
+/// newline at its end has none after the patch either: a line that was last
+/// gets the file's ending when a line goes after it, and the line that is
+/// last then has none.
 pub fn patchProfileEdits(alloc: Allocator, raw: []const u8, edits: []const Edit, out: *std.ArrayListUnmanaged(u8)) !void {
     var arena_state: std.heap.ArenaAllocator = .init(alloc);
     defer arena_state.deinit();
@@ -237,10 +239,15 @@ pub fn patchProfileEdits(alloc: Allocator, raw: []const u8, edits: []const Edit,
         try lines.append(arena, .{
             .text = body,
             .ending = if (last) .none else if (crlf) .crlf else .lf,
-            .info = readLine(body),
+            // Read as the loader reads it: all of `segment`, the CRLF line's
+            // CR too (`LineIterator.takes`).
+            .info = readLine(segment),
         });
     }
     const dominant: Ending = if (crlf_count > lf_count) .crlf else .lf;
+    // A file that does not end in a newline still does not once patched
+    // (`ends` below); an empty one gets them.
+    const final_newline = lines.items.len == 0 or lines.items[lines.items.len - 1].ending != .none;
 
     for (edits) |edit| switch (edit.op) {
         .delete => for (lines.items) |*line| {
@@ -289,6 +296,18 @@ pub fn patchProfileEdits(alloc: Allocator, raw: []const u8, edits: []const Edit,
             try lines.append(arena, new_line);
         },
     };
+
+    // Whatever line is last now ends as the file's last line did. A line
+    // that was last and now has one after it got the file's ending above.
+    if (!final_newline) {
+        var index = lines.items.len;
+        while (index > 0) {
+            index -= 1;
+            if (lines.items[index].deleted) continue;
+            lines.items[index].ending = .none;
+            break;
+        }
+    }
 
     if (bom) try out.appendSlice(alloc, utf8_bom);
     for (lines.items) |line| {
@@ -562,7 +581,7 @@ test "settings patch: a new field joins its profile's lines, and a new profile g
             .{ .field = .name, .id = "dev", .op = .{ .set = " Dev " } },
             .{ .field = .env, .id = "dev", .name = "MODE", .op = .{ .set = "x" } },
         },
-        "font-size = 12\n\nprofile-command = dev: pwsh.exe -NoLogo\nprofile-name = dev: \" Dev \"\nprofile-env = dev: MODE=x\n",
+        "font-size = 12\n\nprofile-command = dev: pwsh.exe -NoLogo\nprofile-name = dev: \" Dev \"\nprofile-env = dev: MODE=x",
     );
     // An empty file.
     try testPatch("", &.{.{ .field = .command, .id = "a", .op = .{ .set = "x.exe" } }}, "profile-command = a: x.exe\n");
@@ -801,6 +820,81 @@ test "settings patch: lines are read as the loader reads them" {
         &.{.{ .field = .name, .id = "py", .op = .{ .set = value } }},
         "profile-name = py: " ++ value ++ "\n",
     );
+}
+
+test "settings patch: a file with no newline at its end has none after a line is added at its end" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    const new_profile: []const Edit = &.{
+        .{ .field = .command, .id = "dev", .op = .{ .set = "cmd.exe" } },
+        .{ .field = .name, .id = "dev", .op = .{ .set = "Dev" } },
+    };
+    const new_field: []const Edit = &.{.{ .field = .folder, .id = "py", .op = .{ .set = "C:\\src" } }};
+    // LF, CRLF and a byte order mark with CRLF, each without a final
+    // newline: the previous line is ended, the new last line is not.
+    const Case = struct { raw: []const u8, edits: []const Edit, expected: []const u8 };
+    const cases = [_]Case{
+        .{ .raw = "font-size = 12", .edits = new_profile, .expected = "font-size = 12\n\nprofile-command = dev: cmd.exe\nprofile-name = dev: Dev" },
+        .{ .raw = "font-size = 12\r\nfont-family = x", .edits = new_profile, .expected = "font-size = 12\r\nfont-family = x\r\n\r\nprofile-command = dev: cmd.exe\r\nprofile-name = dev: Dev" },
+        .{ .raw = "\xef\xbb\xbffont-size = 12\r\nfont-family = x", .edits = new_profile, .expected = "\xef\xbb\xbffont-size = 12\r\nfont-family = x\r\n\r\nprofile-command = dev: cmd.exe\r\nprofile-name = dev: Dev" },
+        .{ .raw = "profile-command = py: python.exe", .edits = new_field, .expected = "profile-command = py: python.exe\nprofile-working-directory = py: C:\\src" },
+        .{ .raw = "profile-command = py: python.exe\r\nprofile-name = py: P", .edits = new_field, .expected = "profile-command = py: python.exe\r\nprofile-name = py: P\r\nprofile-working-directory = py: C:\\src" },
+        .{ .raw = "\xef\xbb\xbfprofile-command = py: python.exe\r\nprofile-name = py: P", .edits = new_field, .expected = "\xef\xbb\xbfprofile-command = py: python.exe\r\nprofile-name = py: P\r\nprofile-working-directory = py: C:\\src" },
+        // The last line deleted: the line before it is last, with no newline.
+        .{ .raw = "profile-command = py: python.exe\nprofile-name = py: P", .edits = &.{.{ .field = .name, .id = "py", .op = .delete }}, .expected = "profile-command = py: python.exe" },
+    };
+    for (cases) |case| {
+        var out: std.ArrayListUnmanaged(u8) = .empty;
+        defer out.deinit(testing.allocator);
+        try patchProfileEdits(testing.allocator, case.raw, case.edits, &out);
+        try testing.expectEqualStrings(case.expected, out.items);
+        // It reads back as the edits asked for.
+        const body = if (std.mem.startsWith(u8, out.items, "\xef\xbb\xbf")) out.items[3..] else out.items;
+        const got = try TestMaps.read(alloc, body);
+        const original = if (std.mem.startsWith(u8, case.raw, "\xef\xbb\xbf")) case.raw[3..] else case.raw;
+        var want = try TestMaps.read(alloc, original);
+        for (case.edits) |e| switch (e.field) {
+            .command => try want.command.parseCLI(alloc, try std.fmt.allocPrint(alloc, "{s}: {s}", .{ e.id, e.op.set })),
+            .name => switch (e.op) {
+                .set => |value| try want.name.parseCLI(alloc, try std.fmt.allocPrint(alloc, "{s}: {s}", .{ e.id, value })),
+                else => want.name.remove(e.id),
+            },
+            .folder => try want.folder.parseCLI(alloc, try std.fmt.allocPrint(alloc, "{s}: {s}", .{ e.id, e.op.set })),
+            .env => unreachable,
+        };
+        try got.expectEqual(want);
+        // A second patch with no edit keeps the bytes.
+        var again: std.ArrayListUnmanaged(u8) = .empty;
+        defer again.deinit(testing.allocator);
+        try patchProfileEdits(testing.allocator, out.items, &.{}, &again);
+        try testing.expectEqualStrings(out.items, again.items);
+    }
+}
+
+test "settings patch: a line the loader skips for its two CRs is never matched or changed" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    // 4,096 bytes before the LF: one more than the reader holds, so the
+    // loader skips the line, though less one CR it would be 4,095.
+    const refused = "profile-name = py: " ++ "x" ** 4075 ++ "\r\r";
+    try testing.expectEqual(@as(usize, LineIterator.max_line_len + 2), refused.len);
+    const raw = "profile-command = py: python.exe\r\n" ++ refused ++ "\n";
+    var reader: std.Io.Reader = .fixed(raw);
+    var lines: LineIterator = .{ .r = &reader };
+    try testing.expectEqualStrings("--profile-command=py: python.exe", lines.next().?);
+    try testing.expect(lines.next().?.ptr == LineIterator.skipped_line.ptr);
+    try testing.expect(lines.next() == null);
+
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    defer out.deinit(testing.allocator);
+    try patchProfileEdits(testing.allocator, raw, &.{.{ .field = .name, .id = "py", .op = .{ .set = "Python" } }}, &out);
+    // The skipped line's bytes are kept, and the label goes after the
+    // profile's last line the loader reads.
+    try testing.expectEqualStrings("profile-command = py: python.exe\r\nprofile-name = py: Python\r\n" ++ refused ++ "\n", out.items);
+    const got = try TestMaps.read(alloc, out.items);
+    try testing.expectEqualStrings("Python", got.name.get("py").?);
 }
 
 test "settings patch: a removed profile keeps its tombstone while anything else names it" {

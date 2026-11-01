@@ -1550,6 +1550,15 @@ pub const LineIterator = struct {
     pub const skipped_line: []const u8 = &skipped_line_storage;
     var skipped_line_storage = [_]u8{ '-', '-' };
 
+    /// Whether `next` reads `line`, the bytes of a line before its `\n` (a
+    /// CRLF line's CR, and any other CR, included), rather than skip it as
+    /// too long (`skipped_line`): at most `max_line_len` bytes, or one more
+    /// when the last is a CR. Anything that has to read a config file's
+    /// lines as the loader does asks this.
+    pub fn takes(line: []const u8) bool {
+        return line.len <= max_line_len or (line.len == max_line_len + 1 and line[line.len - 1] == '\r');
+    }
+
     /// Our stateful reader.
     r: *std.Io.Reader,
 
@@ -1611,7 +1620,7 @@ pub const LineIterator = struct {
             self.line += 1;
             // The byte past `max_line_len` is there only for a CRLF line's
             // CR, so a CRLF file has the same limit as an LF one.
-            if (entry.len > max_line_len and entry[entry.len - 1] != '\r') return skipped_line;
+            if (!takes(entry)) return skipped_line;
 
             // Trim any whitespace (including CR) around it
             const trim = std.mem.trim(u8, entry, whitespace ++ "\r");
