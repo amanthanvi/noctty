@@ -2443,6 +2443,10 @@ pub const SettingsWindow = struct {
     target_now: ?TargetNow = null,
     /// Whether `target_now` was read for the config Settings holds.
     target_read: bool = false,
+    /// `current`'s loader problems, indexed (`config.origin.Index`) for the
+    /// rows' origins: made the first time a row asks, and dropped with
+    /// `current` (`forgetTarget`). It borrows `current`.
+    origin_index: ?config_origin.Index = null,
     /// For tests: the annotation service the marks use in place of oleacc's.
     annotation_service: ?*IAccPropServices = null,
     /// A row's Reset button: the shown page's rows that differ from their
@@ -2764,6 +2768,7 @@ pub const SettingsWindow = struct {
         self.pending = null;
         if (self.original) |*o| o.deinit();
         self.original = null;
+        self.forgetTarget();
         if (self.current) |*c| c.deinit();
         self.current = null;
         // An open Default profile list keeps the rows it shows, so a choice
@@ -3879,6 +3884,7 @@ pub const SettingsWindow = struct {
             }
         }
 
+        self.forgetTarget();
         if (self.current) |*old| old.deinit();
         self.current = replacement;
         replacement_owned = false;
@@ -7233,7 +7239,11 @@ pub const SettingsWindow = struct {
         var note: OriginNote = .{};
         if (self.current) |*current| {
             self.proof_origin_lookups +%= 1;
-            const found = settings_reference.savedOrigin(current, field_model.form_fields[index].descriptor.key, null);
+            const key = field_model.form_fields[index].descriptor.key;
+            const found = if (self.originIndex()) |problems|
+                settings_reference.savedOriginIn(problems, key, null)
+            else
+                settings_reference.savedOrigin(current, key, null);
             const changed = switch (found) {
                 .file => |file| self.originLineChanged(file),
                 else => false,
@@ -7274,9 +7284,20 @@ pub const SettingsWindow = struct {
         return if (self.target_now) |*now| now else null;
     }
 
-    fn readTargetNow(self: *const SettingsWindow) ?TargetNow {
+    /// `origin_index`, made the first time it is asked for after `current`
+    /// changed; null when it cannot be made (the rows then look up without
+    /// it).
+    fn originIndex(self: *SettingsWindow) ?*const config_origin.Index {
+        if (self.origin_index == null) {
+            const current = if (self.current) |*config| config else return null;
+            self.origin_index = config_origin.Index.init(self.handle.alloc, current) catch return null;
+        }
+        return &self.origin_index.?;
+    }
+
+    fn readTargetNow(self: *SettingsWindow) ?TargetNow {
         const read = self.handle.configSource orelse return null;
-        const current = if (self.current) |*config| config else return null;
+        const problems = self.originIndex() orelse return null;
         const alloc = self.handle.alloc;
         var source = read(self.handle.ctx, alloc);
         defer source.deinit(alloc);
@@ -7288,7 +7309,7 @@ pub const SettingsWindow = struct {
             .bytes => |bytes| (settings_reference.decodeConfigText(arena.allocator(), bytes) catch return null) orelse return null,
             .none, .unavailable => return null,
         };
-        var lines = settings_reference.TargetLines.init(alloc, current, path, text) catch return null;
+        var lines = settings_reference.TargetLines.init(alloc, problems, path, text) catch return null;
         const owned = alloc.dupe(u8, path) catch {
             lines.deinit(alloc);
             return null;
@@ -7296,10 +7317,15 @@ pub const SettingsWindow = struct {
         return .{ .path = owned, .lines = lines };
     }
 
+    /// Drop what was worked out from `current` (`target_now`,
+    /// `origin_index`): before `current` is replaced or freed, which the
+    /// index borrows, and when it changed.
     fn forgetTarget(self: *SettingsWindow) void {
         if (self.target_now) |*now| now.deinit(self.handle.alloc);
         self.target_now = null;
         self.target_read = false;
+        if (self.origin_index) |*problems| problems.deinit(self.handle.alloc);
+        self.origin_index = null;
     }
 
     /// `current` changed: every made row's origin note again, on every page,

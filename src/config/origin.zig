@@ -95,8 +95,12 @@ pub const Derivation = enum {
 /// running instance is forwarded for a new window
 /// (`ipc_server.ForwardedArgIterator`), loads that window's own config, which
 /// nothing asks for an origin.
+///
+/// Each step's acceptance is checked against the loader's problems by a pass
+/// over them. A caller that asks about many keys or many lines of one config
+/// uses an `Index`, which looks them up instead.
 pub fn of(config: *const Config, key: Key, defaults: ?*const Config) Origin {
-    return scan(config, key, defaults, false);
+    return scan(config, .list, key, defaults, false);
 }
 
 /// Where the config files' value of `key` came from: as `of`, counting only
@@ -106,8 +110,101 @@ pub fn of(config: *const Config, key: Key, defaults: ?*const Config) Origin {
 /// `default-profile` (`Config.defaultProfileFromFiles`). `.default` when no
 /// file set the key.
 pub fn ofFiles(config: *const Config, key: Key) Origin {
-    return scan(config, key, null, true);
+    return scan(config, .list, key, null, true);
 }
+
+/// A config with its loader's problems indexed by place and key, for a
+/// caller that asks about many keys or many lines of one config (Settings,
+/// once for each config it holds). Whether a step was refused is then one
+/// hash lookup, where the free functions take a pass over every problem, and
+/// a config with thousands of refused lines made that quadratic. `of`,
+/// `ofFiles` and `keysSet` answer as the free functions would. It borrows
+/// `config`, which must not change or go away while the index is used.
+pub const Index = struct {
+    config: *const Config,
+    refused: RefusedSet = .{},
+
+    pub fn init(alloc: std.mem.Allocator, config: *const Config) std.mem.Allocator.Error!Index {
+        var self: Index = .{ .config = config };
+        errdefer self.refused.deinit(alloc);
+        for (config._diagnostics.list.items) |diag| {
+            // A step with no place is never matched to a problem (`of`).
+            if (diag.location == .none) continue;
+            try self.refused.put(alloc, .{ .name = diag.key, .location = diag.location }, {});
+        }
+        return self;
+    }
+
+    pub fn deinit(self: *Index, alloc: std.mem.Allocator) void {
+        self.refused.deinit(alloc);
+        self.* = undefined;
+    }
+
+    /// `config.origin.of`, with the index.
+    pub fn of(self: *const Index, key: Key, defaults: ?*const Config) Origin {
+        return scan(self.config, .{ .set = &self.refused }, key, defaults, false);
+    }
+
+    /// `config.origin.ofFiles`, with the index.
+    pub fn ofFiles(self: *const Index, key: Key) Origin {
+        return scan(self.config, .{ .set = &self.refused }, key, null, true);
+    }
+
+    /// The keys `step` (one of `fileSteps`) set, written to `out`: the key its
+    /// name names, or the keys of the compatibility name it uses, each only
+    /// when the loader took the step for it (the rule `of` counts by). None for
+    /// a step the loader refused.
+    pub fn keysSet(self: *const Index, step: FileStep, out: *[max_keys_per_step]Key) []const Key {
+        return stepKeys(self.config, .{ .set = &self.refused }, step, out);
+    }
+};
+
+/// A problem the loader noted: the name it gave and where (`Index`).
+const Problem = struct {
+    name: []const u8,
+    location: Location,
+};
+
+const RefusedSet = std.HashMapUnmanaged(Problem, void, struct {
+    pub fn hash(_: @This(), problem: Problem) u64 {
+        var hasher = std.hash.Wyhash.init(0);
+        hasher.update(problem.name);
+        switch (problem.location) {
+            .none => hasher.update("n"),
+            .cli => |at| {
+                hasher.update("c");
+                hasher.update(std.mem.asBytes(&at));
+            },
+            .file => |file| {
+                hasher.update("f");
+                hasher.update(file.path);
+                hasher.update(std.mem.asBytes(&file.line));
+            },
+        }
+        return hasher.final();
+    }
+
+    pub fn eql(_: @This(), a: Problem, b: Problem) bool {
+        return std.mem.eql(u8, a.name, b.name) and samePlace(a.location, b.location);
+    }
+}, std.hash_map.default_max_load_percentage);
+
+/// Where `stepSets` looks for the loader's problems: the config's list, read
+/// in full for each question, or an `Index`'s set.
+const Refused = union(enum) {
+    list,
+    set: *const RefusedSet,
+
+    fn at(self: Refused, config: *const Config, name: []const u8, location: Location) bool {
+        switch (self) {
+            .list => for (config._diagnostics.list.items) |diag| {
+                if (std.mem.eql(u8, diag.key, name) and samePlace(diag.location, location)) return true;
+            },
+            .set => |set| return set.contains(.{ .name = name, .location = location }),
+        }
+        return false;
+    }
+};
 
 /// How many lines of one file set a key, and the last of them.
 pub const Lines = struct {
@@ -132,8 +229,8 @@ pub const FileStep = struct {
 
 /// The steps at lines of the file `path` that apply now (their conditions
 /// match), in line order, from one pass over the log. `same` compares paths.
-/// A step the loader refused is among them: `keysSet` says which keys a step
-/// set. The texts borrow from `config`; the slice is the caller's, from
+/// A step the loader refused is among them: `Index.keysSet` says which keys a
+/// step set. The texts borrow from `config`; the slice is the caller's, from
 /// `alloc`.
 pub fn fileSteps(alloc: std.mem.Allocator, config: *const Config, path: []const u8, same: SamePath) std.mem.Allocator.Error![]FileStep {
     var steps: std.ArrayList(FileStep) = .empty;
@@ -169,18 +266,15 @@ fn addFileStep(alloc: std.mem.Allocator, steps: *std.ArrayList(FileStep), text: 
     try steps.append(alloc, .{ .line = file.line, .text = text, .location = location });
 }
 
-/// The most keys one step sets (`keysSet`).
+/// The most keys one step sets (`Index.keysSet`).
 pub const max_keys_per_step = most: {
     var most: usize = 1;
     for (compatibility) |entry| most = @max(most, entry.keys.len);
     break :most most;
 };
 
-/// The keys `step` set, written to `out`: the key its name names, or the keys
-/// of the compatibility name it uses, each only when the loader took the
-/// step for it (`stepSets`, the rule `of` counts by). None for a step the
-/// loader refused.
-pub fn keysSet(config: *const Config, step: FileStep, out: *[max_keys_per_step]Key) []const Key {
+/// `Index.keysSet`.
+fn stepKeys(config: *const Config, refused: Refused, step: FileStep, out: *[max_keys_per_step]Key) []const Key {
     if (!std.mem.startsWith(u8, step.text, "--")) return out[0..0];
     const body = step.text[2..];
     const eq = std.mem.indexOfScalar(u8, body, '=');
@@ -200,14 +294,14 @@ pub fn keysSet(config: *const Config, step: FileStep, out: *[max_keys_per_step]K
         break :named &own;
     } else &.{};
     var n: usize = 0;
-    for (keys) |key| if (stepSets(config, step.text, step.location, key)) {
+    for (keys) |key| if (stepSets(config, refused, step.text, step.location, key)) {
         out[n] = key;
         n += 1;
     };
     return out[0..n];
 }
 
-fn scan(config: *const Config, key: Key, defaults: ?*const Config, comptime files_only: bool) Origin {
+fn scan(config: *const Config, refused: Refused, key: Key, defaults: ?*const Config, comptime files_only: bool) Origin {
     var last: ?Origin = null;
     // The last command-line step that set the key (`restoredFromCli`).
     var last_cli: ?Origin = null;
@@ -221,11 +315,11 @@ fn scan(config: *const Config, key: Key, defaults: ?*const Config, comptime file
     const steps = config._replay_steps.items;
     for (steps, 0..) |step, i| switch (step) {
         .arg => |arg| if (!files_only or arg.location == .file) {
-            if (stepSets(config, arg.value, arg.location, key)) {
+            if (stepSets(config, refused, arg.value, arg.location, key)) {
                 last = place(config, arg.location, false);
                 if (arg.location == .cli) last_cli = last;
             }
-            if (single_instance) fold.see(config, arg.value, arg.location, false);
+            if (single_instance) fold.see(config, refused, arg.value, arg.location, false);
             if (key == .env and elevatedEnv(arg.value, arg.location)) elevated = place(config, arg.location, false);
         },
         .conditional_arg => |arg| {
@@ -235,8 +329,8 @@ fn scan(config: *const Config, key: Key, defaults: ?*const Config, comptime file
                 if (!config._conditional_state.match(cond)) break false;
             } else true;
             if (applies and (!files_only or arg.location == .file)) {
-                if (stepSets(config, arg.arg, arg.location, key)) last = place(config, arg.location, theme);
-                if (single_instance) fold.see(config, arg.arg, arg.location, theme);
+                if (stepSets(config, refused, arg.arg, arg.location, key)) last = place(config, arg.location, theme);
+                if (single_instance) fold.see(config, refused, arg.arg, arg.location, theme);
             }
         },
         // The arguments after `-e` are its command's, not settings. An `-e`
@@ -275,8 +369,9 @@ fn restoredFromCli(config: *const Config, key: Key) bool {
     };
 }
 
-/// Whether the argument `text`, applied at `location`, set `key`.
-fn stepSets(config: *const Config, text: []const u8, location: Location, key: Key) bool {
+/// Whether the argument `text`, applied at `location`, set `key`. `refused`
+/// is where the loader's problems are looked up.
+fn stepSets(config: *const Config, refused: Refused, text: []const u8, location: Location, key: Key) bool {
     if (!std.mem.startsWith(u8, text, "--")) return false;
     const body = text[2..];
     const eq = std.mem.indexOfScalar(u8, body, '=');
@@ -289,9 +384,7 @@ fn stepSets(config: *const Config, text: []const u8, location: Location, key: Ke
     // set it all the same.
     if (value != null and takesAnyText(key)) return true;
     // A line that did not parse set nothing; the loader noted it there.
-    if (location != .none) for (config._diagnostics.list.items) |diag| {
-        if (std.mem.eql(u8, diag.key, name) and samePlace(diag.location, location)) return false;
-    };
+    if (location != .none and refused.at(config, name, location)) return false;
     return true;
 }
 
@@ -378,10 +471,10 @@ const SingleInstance = struct {
 
     const Set = struct { origin: Origin, detect: bool };
 
-    fn see(self: *SingleInstance, config: *const Config, text: []const u8, location: Location, theme: bool) void {
-        if (stepSets(config, text, location, .@"single-instance"))
+    fn see(self: *SingleInstance, config: *const Config, refused: Refused, text: []const u8, location: Location, theme: bool) void {
+        if (stepSets(config, refused, text, location, .@"single-instance"))
             self.single = .{ .origin = place(config, location, theme), .detect = setsDetect(text) };
-        if (stepSets(config, text, location, .@"gtk-single-instance"))
+        if (stepSets(config, refused, text, location, .@"gtk-single-instance"))
             self.alias = .{ .origin = place(config, location, theme), .detect = setsDetect(text) };
     }
 
@@ -1096,4 +1189,33 @@ test "origin: a refused argument with no place still counts as set" {
     try std.testing.expectEqual(@as(f32, 13), cfg.@"font-size");
     try std.testing.expect(of(&cfg, .@"font-size", null) == .unplaced);
     try expectFile(ofFiles(&cfg, .@"font-size"), path, 1, .config);
+}
+
+test "origin: an Index answers as the free functions do" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(.{ .sub_path = "x.conf", .data = "font-size = 15\nscrollback-limit = lots\ndefault-profile = pwsh\n" });
+    try tmp.dir.writeFile(.{ .sub_path = "mytheme", .data = "background = #101010\nforeground = nope\n" });
+    try tmp.dir.writeFile(.{ .sub_path = "config", .data = "\n" });
+    const path = try tmp.dir.realpathAlloc(alloc, "config");
+    defer alloc.free(path);
+    const theme_path = try tmp.dir.realpathAlloc(alloc, "mytheme");
+    defer alloc.free(theme_path);
+    const text = try std.fmt.allocPrint(alloc, "font-size = 13\nfont-size = abc\nbold-is-bright = true\ngtk-single-instance = false\nscrollback-limit = 5\nconfig-file = x.conf\ntheme = {s}\n", .{theme_path});
+    defer alloc.free(text);
+    var cfg = try loadWithArgs(alloc, tmp.dir, path, text, &.{ "--font-size=abc", "--default-profile=cmd", "--elevated-profile-env=MODE=cli", "-e", "cmd.exe" });
+    defer cfg.deinit();
+    try std.testing.expect(!cfg._diagnostics.empty());
+    var defaults = try Config.default(alloc);
+    defer defaults.deinit();
+    try defaults.finalize();
+
+    var problems = try Index.init(alloc, &cfg);
+    defer problems.deinit(alloc);
+    for (std.enums.values(Key)) |key| {
+        errdefer std.debug.print("origin: Index differs for {s}\n", .{@tagName(key)});
+        try std.testing.expectEqualDeep(of(&cfg, key, &defaults), problems.of(key, &defaults));
+        try std.testing.expectEqualDeep(ofFiles(&cfg, key), problems.ofFiles(key));
+    }
 }
