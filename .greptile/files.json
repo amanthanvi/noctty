@@ -309,6 +309,7 @@
         "src/apprt/win32/session.zig",
         "src/apprt/win32/terminal_window.zig",
         "src/apprt/win32/window_state.zig",
+        "src/apprt/win32/notifications.zig",
         "src/apprt/win32_aumid.zig",
         "src/apprt/win32_jump_list.zig",
         "src/apprt/win32_toast*.zig",

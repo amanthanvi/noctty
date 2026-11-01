@@ -28,9 +28,9 @@ const budget = .{
         .test_support_runtime = 52,
     },
     // The facade's pub declarations: what the files that import it can reach.
-    .facade_pub_decls = 535,
+    .facade_pub_decls = 527,
     // Root declarations of win32.zig whose value is a field access (`a.b`).
-    .facade_aliases = 278,
+    .facade_aliases = 277,
     // Fields of win32.App named `test_*`.
     .app_test_hooks = 10,
 };
@@ -50,6 +50,12 @@ const leaves = .{
         .module = @import("docked_search.zig"),
         .source = @embedFile("docked_search.zig"),
         .pub_decls = 6,
+    },
+    .{
+        .file = "notifications.zig",
+        .module = @import("notifications.zig"),
+        .source = @embedFile("notifications.zig"),
+        .pub_decls = 12,
     },
 };
 

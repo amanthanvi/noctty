@@ -89,6 +89,7 @@ const mouseButtonFromMessage = win32.mouseButtonFromMessage;
 const mouseButtonStateFromMessage = win32.mouseButtonStateFromMessage;
 const mouseModsFromWParam = win32.mouseModsFromWParam;
 const normalizedBackgroundOpacity = win32.normalizedBackgroundOpacity;
+const notifications = @import("notifications.zig");
 const openClipboard = win32.openClipboard;
 const optionalOwnedStringEquals = paint_text.optionalOwnedStringEquals;
 const ownedStringEquals = paint_text.ownedStringEquals;
@@ -195,7 +196,6 @@ const WindowStartTestApp = win32.WindowStartTestApp;
 const builtin = @import("builtin");
 const createTestChromeChild = win32.createTestChromeChild;
 const default_title = win32.default_title;
-const expectedToastRemoval = win32.expectedToastRemoval;
 const host_class_name = win32.host_class_name;
 const palette_list_class_name = win32.palette_list_class_name;
 const prompt_button_class = child_window.prompt_button_class;
@@ -5562,7 +5562,7 @@ test "win32 untitled OSC 9 toast is titled by its tab" {
     try w.osc(&w.q, "", "x");
     try w.recorder.expect(.title, "cargo build");
     try w.recorder.expect(.attribution, "Tab 2: cargo build");
-    try w.recorder.expectLaunchFor(&w.q, 2);
+    try w.recorder.expectLaunch(w.q.core().id, 2, w.q.host_id);
 }
 
 test "win32 seeing a tab removes its panes' toasts" {
@@ -5598,8 +5598,8 @@ test "win32 seeing a tab removes its panes' toasts" {
     var q_buf: [64]u8 = undefined;
     // In the split tree's order.
     try w.recorder.expectRemovals(&.{
-        try expectedToastRemoval(&q_buf, 0x2003),
-        try expectedToastRemoval(&p_buf, 0x2002),
+        try notifications.testing.expectedRemoval(&q_buf, 0x2003),
+        try notifications.testing.expectedRemoval(&p_buf, 0x2002),
     });
     try std.testing.expectEqual(@as(?u64, null), w.p.toast_outstanding);
     try std.testing.expectEqual(@as(?u64, null), w.q.toast_outstanding);

@@ -38,8 +38,6 @@ const SurfaceInitOptions = win32.SurfaceInitOptions;
 const SystemWheelSettings = win32.SystemWheelSettings;
 const Tab = win32.Tab;
 const ThemeColors = win32.ThemeColors;
-const ToastRequest = win32.ToastRequest;
-const ToastSink = win32.ToastSink;
 const UINT = win32.UINT;
 const UINT_PTR = win32.UINT_PTR;
 const UpdateCheckCompletion = win32.UpdateCheckCompletion;
@@ -66,7 +64,6 @@ const beginOpenGLStartupDiagnostics = win32.beginOpenGLStartupDiagnostics;
 const beginRecoveryStartup = win32.beginRecoveryStartup;
 const bench_trace = @import("bench_trace.zig");
 const buildInstallerApplyArgs = win32.buildInstallerApplyArgs;
-const buildToastLaunchForSurface = win32.buildToastLaunchForSurface;
 const build_config = @import("../../build_config.zig");
 const builtin = @import("builtin");
 const c = @import("consts.zig");
@@ -129,6 +126,7 @@ const log = win32.log;
 const logBackgroundBlurUnsupported = win32.logBackgroundBlurUnsupported;
 const logForwardedArgvRejection = win32.logForwardedArgvRejection;
 const markRecoveryAttemptAtPath = win32.markRecoveryAttemptAtPath;
+const notifications = @import("notifications.zig");
 const onHostCloakEvent = win32.onHostCloakEvent;
 const ownedBytesEquals = paint_text.ownedBytesEquals;
 const paint_text = @import("text.zig");
@@ -238,9 +236,6 @@ const tab_tooltip_class_name = win32.tab_tooltip_class_name;
 const tabsCloseConfirmCount = win32.tabsCloseConfirmCount;
 const tabsCloseConfirmCountNoWait = win32.tabsCloseConfirmCountNoWait;
 const toastActivatorSink = win32.toastActivatorSink;
-const toastGroup = win32.toastGroup;
-const toastTag = win32.toastTag;
-const toast_group_max = win32.toast_group_max;
 const undecoratedKeepsFrame = win32.undecoratedKeepsFrame;
 const unixMillis = win32.unixMillis;
 const updateApplyConfirmAccept = win32.updateApplyConfirmAccept;
@@ -295,7 +290,6 @@ const createTestChromeChild = win32.createTestChromeChild;
 const BOOL = win32.BOOL;
 const InitialShow = win32.InitialShow;
 const POINT = win32.POINT;
-const TestToastRecorder = win32.TestToastRecorder;
 const ToastTestWindow = win32.ToastTestWindow;
 const cliConfigFileOverrideArgs = win32.cliConfigFileOverrideArgs;
 const cli_args = @import("../../cli/args.zig");
@@ -814,7 +808,7 @@ pub const App = struct {
     /// Where `showToast` sends toasts: `winrt_toast` in the product, a
     /// recorder in tests, so no test can reach Action Center. `null`
     /// sends every notification to the banner fallback.
-    toast_sink: ?ToastSink = null,
+    toast_sink: ?notifications.ToastSink = null,
     /// Panes (core surface ids, never pointers) whose toast is to be taken
     /// out of Action Center, oldest first. Flushed from the posted
     /// `WM_WINHOSTTY_TOAST_REMOVALS`: a history call is a cross-process COM
@@ -9488,7 +9482,7 @@ pub const App = struct {
     fn showToast(
         self: *App,
         target: apprt.Target,
-        request: ToastRequest,
+        request: notifications.ToastRequest,
         sender_title: []const u8,
     ) !bool {
         var shown = request;
@@ -9515,38 +9509,16 @@ pub const App = struct {
 
         var message: std.Io.Writer.Allocating = .init(self.core_app.alloc);
         defer message.deinit();
-        composeToastFallback(&message.writer, sender_title, request.body, request.attribution) catch
+        notifications.composeFallback(&message.writer, sender_title, request.body, request.attribution) catch
             return error.OutOfMemory;
         if (try self.showHostBanner(target, .info, message.written())) return false;
         // Final local fallback: pass the composed message as the body so
         // notifications with an empty `body` (e.g. settings-save success,
         // where title alone carries the signal) still render something
         // readable.
-        const caption = if (toastFallbackTitled(sender_title)) sender_title else "noctty";
+        const caption = if (notifications.fallbackTitled(sender_title)) sender_title else "noctty";
         try showInfoMessage(target, caption, message.written());
         return false;
-    }
-
-    fn toastFallbackTitled(title: []const u8) bool {
-        return title.len > 0 and !std.mem.eql(u8, title, "noctty");
-    }
-
-    /// The banner says what the toast would have: `<title>: <body>`, the
-    /// body alone when the title is empty or just "noctty", and the tab
-    /// the toast came from after a dash.
-    fn composeToastFallback(
-        writer: *std.Io.Writer,
-        title: []const u8,
-        body: []const u8,
-        attribution: ?[]const u8,
-    ) std.Io.Writer.Error!void {
-        const titled = toastFallbackTitled(title);
-        if (titled) try writer.writeAll(title);
-        if (body.len > 0) {
-            if (titled) try writer.writeAll(": ");
-            try writer.writeAll(body);
-        }
-        if (attribution) |line| try writer.print(" \u{2014} {s}", .{line});
     }
 
     /// A notification a program asked for (OSC 9, OSC 777), one noctty
@@ -9571,10 +9543,6 @@ pub const App = struct {
         _ = try self.showToast(target, .{ .title = title, .body = body }, title);
     }
 
-    /// The most of a tab's title a toast shows, in bytes, before the
-    /// ellipsis.
-    const toast_tab_title_max = 64;
-
     /// Show a toast from `surface` that says which tab it came from and
     /// focuses `surface` when clicked. An untitled one (OSC 9 has no title)
     /// is titled by its tab, as Windows Terminal does. Showing a toast is a
@@ -9586,15 +9554,15 @@ pub const App = struct {
         title: []const u8,
         body: []const u8,
     ) !void {
-        var title_buf: [toast_tab_title_max + "\u{2026}".len]u8 = undefined;
+        var title_buf: [notifications.tab_title_max + "\u{2026}".len]u8 = undefined;
         var tab_title: std.Io.Writer = .fixed(&title_buf);
         var context_buf: [160]u8 = undefined;
         var context: std.Io.Writer = .fixed(&context_buf);
         const attribution: ?[]const u8 = if (Host.findTabForSurface(surface)) |found| context: {
             const name = toastTabName(found.tab, surface);
-            try self.writeToastContext(&context, found.host, found.index, name);
+            try notifications.writeTabLine(&context, found.index, self.notificationWindow(found.host), name);
             if (title.len == 0) {
-                try win32_program_status.writeSanitized(&tab_title, name, toast_tab_title_max);
+                try win32_program_status.writeSanitized(&tab_title, name, notifications.tab_title_max);
             }
             break :context context.buffered();
         } else null;
@@ -9607,7 +9575,7 @@ pub const App = struct {
         // closing the pane or exiting takes it out (`queueToastRemoval`).
         const surface_id = surface.core().id;
         var tag_buf: [16]u8 = undefined;
-        var group_buf: [toast_group_max]u8 = undefined;
+        var group_buf: [notifications.toast_group_max]u8 = undefined;
         // A removal still queued for the pane's older toast would take this
         // one, which replaces it, away too. Taken off before the show, which
         // can pump messages that flush the queue; put back if Windows
@@ -9618,8 +9586,8 @@ pub const App = struct {
             .body = body,
             .attribution = attribution,
             .launch = launch,
-            .tag = toastTag(&tag_buf, surface_id),
-            .group = toastGroup(&group_buf),
+            .tag = notifications.toastTag(&tag_buf, surface_id),
+            .group = notifications.toastGroup(&group_buf),
         }, title) catch |err| {
             if (was_queued) self.restoreToastRemoval(surface_id);
             return err;
@@ -9710,12 +9678,12 @@ pub const App = struct {
             self.toast_removals.clearRetainingCapacity();
             return;
         };
-        var group_buf: [toast_group_max]u8 = undefined;
-        const group = toastGroup(&group_buf);
+        var group_buf: [notifications.toast_group_max]u8 = undefined;
+        const group = notifications.toastGroup(&group_buf);
         while (self.toast_removals.items.len > 0) {
             const surface_id = self.toast_removals.orderedRemove(0);
             var tag_buf: [16]u8 = undefined;
-            sink.remove_tag(sink.ctx, toastTag(&tag_buf, surface_id), group) catch |err| {
+            sink.remove_tag(sink.ctx, notifications.toastTag(&tag_buf, surface_id), group) catch |err| {
                 log.warn("toast removal failed err={}", .{err});
             };
         }
@@ -9729,8 +9697,8 @@ pub const App = struct {
         if (!self.toast_group_used) return;
         self.toast_group_used = false;
         const sink = self.toast_sink orelse return;
-        var group_buf: [toast_group_max]u8 = undefined;
-        sink.remove_group(sink.ctx, toastGroup(&group_buf)) catch |err| {
+        var group_buf: [notifications.toast_group_max]u8 = undefined;
+        sink.remove_group(sink.ctx, notifications.toastGroup(&group_buf)) catch |err| {
             log.warn("toast group removal at exit failed err={}", .{err});
         };
     }
@@ -9741,37 +9709,29 @@ pub const App = struct {
         return shown.effectiveTitle() orelse "noctty";
     }
 
-    /// The line a toast from tab `index` of `host` carries, naming the
-    /// tab: `Tab N: <title>`, `Tab N of window M: <title>` while more than
-    /// one window is open, or `Tab N of the quick terminal: <title>`. The
-    /// quick terminal is not counted as a window, so a window and an idle
-    /// quick terminal don't number the window. The numbers are noctty's
-    /// own, so a program can't pass for another tab; the title is
-    /// sanitized and cut to `toast_tab_title_max` bytes.
-    fn writeToastContext(
-        self: *const App,
-        writer: *std.Io.Writer,
-        host: *const Host,
-        index: usize,
-        tab_name: []const u8,
-    ) std.Io.Writer.Error!void {
-        try writer.print("Tab {d}", .{index + 1});
-        if (host.quick_terminal) {
-            try writer.writeAll(" of the quick terminal");
-        } else {
-            var window_count: usize = 0;
-            var number: ?usize = null;
-            for (self.registry.hosts.items) |item| {
-                if (item.quick_terminal) continue;
-                window_count += 1;
-                if (item == host) number = window_count;
+    /// The launch string a click on `surface`'s toast brings back.
+    pub fn buildToastLaunchForSurface(alloc: Allocator, surface: *Surface) Allocator.Error![]u8 {
+        const tab_id = if (surface.host) |host| blk: {
+            for (host.tabs.items) |*tab| {
+                if (tab.findHandle(surface) != null) break :blk tab.id;
             }
-            if (window_count > 1) {
-                if (number) |n| try writer.print(" of window {d}", .{n});
-            }
+            break :blk null;
+        } else null;
+        return notifications.buildLaunch(alloc, surface.core().id, tab_id, surface.host_id);
+    }
+
+    /// The window `host` is, as a toast from it names it. Every host but the
+    /// quick terminal counts, a window kept empty for undo included.
+    fn notificationWindow(self: *const App, host: *const Host) notifications.Window {
+        if (host.quick_terminal) return .quick_terminal;
+        var open: u32 = 0;
+        var number: ?u32 = null;
+        for (self.registry.hosts.items) |item| {
+            if (item.quick_terminal) continue;
+            open += 1;
+            if (item == host) number = open;
         }
-        try writer.writeAll(": ");
-        try win32_program_status.writeSanitized(writer, tab_name, toast_tab_title_max);
+        return .{ .ordinary = .{ .number = number, .open = open } };
     }
 
     fn showChildExited(
@@ -11589,7 +11549,7 @@ test "win32 a refused toast becomes a banner that names its tab once" {
     try w.osc(&w.front, "noctty", "Copied selection to clipboard");
     try w.recorder.expect(.title, "noctty");
     try w.recorder.expect(.attribution, "Tab 1: pwsh");
-    try w.recorder.expectLaunchFor(&w.front, 1);
+    try w.recorder.expectLaunch(w.front.core().id, 1, w.front.host_id);
     try std.testing.expectEqualStrings("Copied selection to clipboard \u{2014} Tab 1: pwsh", w.host.banner_text.?);
 
     // An app notification names no tab; one with only a title (a Settings
@@ -11609,17 +11569,17 @@ test "win32 a refused toast becomes a banner that names its tab once" {
     // With no window to hold a banner the same text goes to the log.
     var line: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer line.deinit();
-    try App.composeToastFallback(&line.writer, "claude is done", "", "Tab 2: cargo build");
+    try notifications.composeFallback(&line.writer, "claude is done", "", "Tab 2: cargo build");
     try std.testing.expectEqualStrings("claude is done \u{2014} Tab 2: cargo build", line.written());
 }
 
 test "win32 exit removes this process's group only" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
-    var group_buf: [toast_group_max]u8 = undefined;
+    var group_buf: [notifications.toast_group_max]u8 = undefined;
     var line_buf: [64]u8 = undefined;
-    const own_group = try std.fmt.bufPrint(&line_buf, "group {s}", .{toastGroup(&group_buf)});
+    const own_group = try std.fmt.bufPrint(&line_buf, "group {s}", .{notifications.toastGroup(&group_buf)});
 
-    var recorder: TestToastRecorder = .{};
+    var recorder: notifications.testing.Recorder = .{};
     defer recorder.deinit();
 
     // A process that showed no toast makes no history call at exit.

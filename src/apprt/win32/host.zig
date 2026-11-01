@@ -143,6 +143,7 @@ const movedIndexAfterReorder = win32.movedIndexAfterReorder;
 const nativeSplitDirection = win32.nativeSplitDirection;
 const ncRectToWin32 = win32.ncRectToWin32;
 const nextTabOverviewSelection = win32.nextTabOverviewSelection;
+const notifications = @import("notifications.zig");
 const optionalOwnedStringEquals = paint_text.optionalOwnedStringEquals;
 const overlayActionLayoutForWidth = win32.overlayActionLayoutForWidth;
 const overlayButtonDisconnectThunk = win32.overlayButtonDisconnectThunk;
@@ -271,7 +272,6 @@ const ToastTestWindow = win32.ToastTestWindow;
 const buttonTooltipAction = win32.buttonTooltipAction;
 const cli_args = @import("../../cli/args.zig");
 const detachHostReference = win32.detachHostReference;
-const expectedToastRemoval = win32.expectedToastRemoval;
 const highContrastThemeFromSysColors = win32.highContrastThemeFromSysColors;
 const patchOrAppendEdits = win32.patchOrAppendEdits;
 const rgb = win32.rgb;
@@ -10743,7 +10743,7 @@ test "win32 closing a pane removes its toast" {
     try std.testing.expect(try w.host.undoSplitCreateEntry(&split_create));
     w.app.flushToastRemovals();
     var q_buf: [64]u8 = undefined;
-    const q_removal = try expectedToastRemoval(&q_buf, 0x2003);
+    const q_removal = try notifications.testing.expectedRemoval(&q_buf, 0x2003);
     try w.recorder.expectRemovals(&.{q_removal});
 
     try w.osc(&w.p, "", "x");
@@ -10751,7 +10751,7 @@ test "win32 closing a pane removes its toast" {
     w.app.windowDestroyed(&w.p);
     w.app.flushToastRemovals();
     var buf: [64]u8 = undefined;
-    try w.recorder.expectRemovals(&.{ q_removal, try expectedToastRemoval(&buf, 0x2002) });
+    try w.recorder.expectRemovals(&.{ q_removal, try notifications.testing.expectedRemoval(&buf, 0x2002) });
     try std.testing.expectEqual(@as(?u64, 0x1001), w.front.toast_outstanding);
 }
 
@@ -10781,7 +10781,7 @@ test "win32 a toast shown while its tab is undo-closed is removed" {
     try std.testing.expectEqual(@as(?u64, null), w.p.toast_outstanding);
     w.app.flushToastRemovals();
     var buf: [64]u8 = undefined;
-    try w.recorder.expectRemovals(&.{try expectedToastRemoval(&buf, 0x2002)});
+    try w.recorder.expectRemovals(&.{try notifications.testing.expectedRemoval(&buf, 0x2002)});
 }
 
 test "win32 palette theme preview can restore original config clone" {
