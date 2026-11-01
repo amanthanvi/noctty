@@ -10656,7 +10656,7 @@ test "win32 a palette theme preview keeps the running profile definitions until 
     // And where they were read, which New Elevated Window decides by: the
     // running config's places, not the edited files' (the env line is the
     // second argument there, the third here).
-    try std.testing.expectEqual(running.profilePlace("profile-env", "x").cli, preview.profilePlace("profile-env", "x").cli);
+    try std.testing.expectEqual(configpkg.pane_launch.profilePlace(&running, "profile-env", "x").cli, configpkg.pane_launch.profilePlace(&preview, "profile-env", "x").cli);
 
     // The next reload, which reads the edited files, sees the change and
     // drops the lists (the `config_change` path).
@@ -10749,14 +10749,14 @@ test "win32 a palette theme preview keeps the default-profile launch until a rel
     var missing_args: cli_args.ArgsIterator(cli_args.SliceIterator) = .{ .iterator = cli_args.sliceIterator(&.{"--default-profile=nosuch"}) };
     try missing.loadIter(alloc, &missing_args);
     try missing.finalize();
-    try std.testing.expectEqual(configpkg.Config.DefaultProfileFailure.not_found, missing._default_profile_failure);
+    try std.testing.expectEqual(configpkg.pane_launch.DefaultProfileFailure.not_found, missing._default_profile_failure);
     try std.testing.expectEqualStrings("pwsh", missing.defaultProfileFromFiles().?);
     var reread = try configpkg.Config.default(alloc);
     defer reread.deinit();
     try reread.loadFile(alloc, reread_path);
     try Host.finishPaletteThemeConfig(&reread, &missing, theme);
     try std.testing.expectEqualStrings("nosuch", reread.@"default-profile".?);
-    try std.testing.expectEqual(configpkg.Config.DefaultProfileFailure.not_found, reread._default_profile_failure);
+    try std.testing.expectEqual(configpkg.pane_launch.DefaultProfileFailure.not_found, reread._default_profile_failure);
     try std.testing.expectEqualStrings("pwsh", reread.defaultProfileFromFiles().?);
 }
 

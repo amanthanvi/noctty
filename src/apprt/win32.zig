@@ -1496,13 +1496,13 @@ pub fn elevatesBySelector(config: *const configpkg.Config, key: []const u8, same
     if (!std.ascii.startsWithIgnoreCase(key, "user:")) return false;
     const id = key["user:".len..];
     if (config.@"profile-command".get(id) == null) return false;
-    if (config.profilePlace("profile-command", id) != .file) return false;
+    if (configpkg.pane_launch.profilePlace(config, "profile-command", id) != .file) return false;
     // A variable given on the command line (`--profile-env=<id>: ...`), or a
     // `--profile-env=` that cleared them, is not forwarded either, so such a
     // profile is passed with its variables. Nor is an `--env=` argument,
     // which `%NAME%` in the profile's lines may have read.
-    if (config.profileWrittenOnCommandLine("profile-env", id)) return false;
-    return !config.commandLineSetsEnv();
+    if (configpkg.pane_launch.profileWrittenOnCommandLine(config, "profile-env", id)) return false;
+    return !configpkg.pane_launch.commandLineSetsEnv(config);
 }
 
 fn splitWorkingDirectoryCandidate(live_pwd: ?[]const u8, cached_pwd: ?[]const u8) ?[]const u8 {
@@ -7346,7 +7346,7 @@ test "win32 settings automatic command is not masked by default resolution" {
     defer pending.deinit();
     var reloaded = try configpkg.Config.default(std.testing.allocator);
     defer reloaded.deinit();
-    try reloaded.resolveWindowsDefaultCommand();
+    try configpkg.pane_launch.useAutomatic(&reloaded);
     try std.testing.expect(reloaded.command != null);
     try std.testing.expect(!settingsEditedValueMasked(&pending, &reloaded, .command));
     try settingsTestLoadText(&reloaded, "command = direct:cmd.exe\n");
@@ -7924,7 +7924,7 @@ test "win32 settings disk edit does not mistake the resolved default command for
 
     var resolved = try original.clone(alloc);
     defer resolved.deinit();
-    try resolved.resolveWindowsDefaultCommand();
+    try configpkg.pane_launch.useAutomatic(&resolved);
     try std.testing.expect(resolved.command != null and resolved._command_defaulted);
     try std.testing.expect(!settingsDiskEditConflict(&original, &pending, &resolved, light, edited));
 
@@ -9368,7 +9368,7 @@ pub fn keepProfileSources(dst: *configpkg.Config, src: *const configpkg.Config) 
     dst.@"profile-hidden" = try src.@"profile-hidden".clone(alloc);
     // Where those lines were read goes with them (New Elevated Window names
     // a profile whose line came from a file).
-    dst._profile_places = try src.cloneProfilePlaces(alloc);
+    dst._profile_places = try configpkg.pane_launch.cloneProfilePlaces(src, alloc);
 }
 
 /// Whether a reload changed a key the profile lists are built from: a
@@ -25619,7 +25619,7 @@ test "win32 safe mode theme selection and acceptance preserve recovery" {
     try session.init(.{ .core_app = &core, .app = &app, .hosts = &.{.{ .storage = &host }} });
     defer session.deinit();
     app.safe_mode = true;
-    try app.config.useWindowsRecoveryCommand();
+    try configpkg.pane_launch.useRecovery(&app.config);
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     try tmp.dir.writeFile(.{ .sub_path = "config", .data = "command = pwsh.exe\n" });

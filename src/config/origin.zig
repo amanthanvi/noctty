@@ -371,8 +371,8 @@ fn scan(config: *const Config, refused: Refused, key: Key, defaults: ?*const Con
 }
 
 /// Whether `finalize` sets `key` back to a value the command line gave it, over
-/// what a file read after the command line set (`Config.finalizeCliLaunch`, and
-/// the `default-profile` the command line names for this process).
+/// what a file read after the command line set (`pane_launch.finalizeCliLaunch`,
+/// and the `default-profile` the command line names for this process).
 fn restoredFromCli(config: *const Config, key: Key) bool {
     return switch (key) {
         .command => config._command_cli != null,
