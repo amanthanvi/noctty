@@ -9731,7 +9731,7 @@ pub fn appMessageWindowProc(hwnd: HWND, message: UINT, wparam: WPARAM, lparam: L
                 },
                 .toast => |activation| {
                     defer delivery.toast_pending.store(false, .release);
-                    app.receiveToastActivation(activation);
+                    if (app.notifications.click(.{ .target = activation }) == .needs_window) app.openWindowForToastClick();
                 },
                 .uia_disconnect => |pending| processDeferredUiaDisconnect(delivery, pending),
             }
@@ -10058,22 +10058,27 @@ const Pkg19NativeDeliveryTest = struct {
         _ = sys.SendMessageW(a, update.message, 0, update.lParam);
         try std.testing.expect(app_a.delivery.?.update_running.load(.acquire));
 
+        var panes_a: notifications.testing.FakePanes = .{};
+        var panes_b: notifications.testing.FakePanes = .{};
+        app_a.notifications = .init(std.testing.allocator, null, panes_a.panes());
+        app_b.notifications = .init(std.testing.allocator, null, panes_b.panes());
+        // No pid: another process's click, which looks only for the primary
+        // window.
         const activation: win32_toast_activation.ActivationTarget = .{ .window_id = 19, .tab_id = 7 };
         app_a.delivery.?.toast_pending.store(true, .release);
         try std.testing.expect(app_a.delivery.?.post(c.WM_WINHOSTTY_TOAST_ACTIVATION, .{ .toast = activation }));
         const toast = try queued(a, c.WM_WINHOSTTY_TOAST_ACTIVATION);
         _ = sys.SendMessageW(a, toast.message, 0, 0);
         _ = sys.SendMessageW(b, toast.message, 0, toast.lParam);
-        try std.testing.expect(app_a.pending_toast_activation == null);
-        try std.testing.expect(app_b.pending_toast_activation == null);
+        try panes_a.expectPresented(&.{});
+        try panes_b.expectPresented(&.{});
         try std.testing.expect(app_a.delivery.?.toast_pending.load(.acquire));
         _ = sys.SendMessageW(a, toast.message, 0, toast.lParam);
-        try std.testing.expect(activation.eql(app_a.pending_toast_activation.?));
+        try panes_a.expectPresented(&.{.primary});
         try std.testing.expect(!app_a.delivery.?.toast_pending.load(.acquire));
-        app_a.pending_toast_activation = null;
         app_a.delivery.?.toast_pending.store(true, .release);
         _ = sys.SendMessageW(a, toast.message, 0, toast.lParam);
-        try std.testing.expect(app_a.pending_toast_activation == null);
+        try panes_a.expectPresented(&.{.primary});
         try std.testing.expect(app_a.delivery.?.toast_pending.load(.acquire));
     }
 };
@@ -10115,6 +10120,8 @@ const ToastActivatorDeliveryTest = struct {
         defer session.deinit();
         try app.createMessageWindow();
         defer Pkg19NativeDeliveryTest.closeAppWindow(&app);
+        var panes: notifications.testing.FakePanes = .{};
+        app.notifications = .init(alloc, null, panes.panes());
         win32_toast_activator.bind(toastActivatorSink(app.delivery.?));
         defer win32_toast_activator.bind(null);
         const callback = win32_toast_activator.testCallback();
@@ -10124,20 +10131,20 @@ const ToastActivatorDeliveryTest = struct {
         defer alloc.free(launch);
         try std.testing.expectEqual(win32_uia.S_OK, callback.vtbl.Activate(callback, aumid, launch, null, 0));
         // Activate only posted: the App has not seen it yet.
-        try std.testing.expect(app.pending_toast_activation == null);
+        try panes.expectPresented(&.{});
         try dispatch(&app);
-        // With no surface the activation waits for one, exactly as a click
-        // through the popup's handler does.
-        try std.testing.expect(target.eql(app.pending_toast_activation.?));
+        // The click looks for its tab, its window and the primary window,
+        // exactly as a click through the popup's handler does.
+        const looked: []const notifications.Present = &.{ .{ .tab = .{ .window = 19, .tab = 7 } }, .{ .window = 19 }, .primary };
+        try panes.expectPresented(looked);
         try std.testing.expect(!app.delivery.?.toast_pending.load(.acquire));
 
         // What noctty cannot read posts nothing and changes nothing.
-        app.pending_toast_activation = null;
         const malformed = std.unicode.utf8ToUtf16LeStringLiteral("wgh://activate?surface=x");
         try std.testing.expectEqual(win32_uia.S_OK, callback.vtbl.Activate(callback, aumid, malformed, null, 0));
         try std.testing.expectEqual(win32_uia.S_OK, callback.vtbl.Activate(callback, aumid, null, null, 0));
         try std.testing.expectError(error.TestMissingDeliveryMessage, dispatch(&app));
-        try std.testing.expect(app.pending_toast_activation == null);
+        try panes.expectPresented(looked);
     }
 
     fn onceBody() !void {
@@ -10149,6 +10156,8 @@ const ToastActivatorDeliveryTest = struct {
         defer session.deinit();
         try app.createMessageWindow();
         defer Pkg19NativeDeliveryTest.closeAppWindow(&app);
+        var panes: notifications.testing.FakePanes = .{};
+        app.notifications = .init(alloc, null, panes.panes());
         win32_toast_activator.bind(toastActivatorSink(app.delivery.?));
         defer win32_toast_activator.bind(null);
         const callback = win32_toast_activator.testCallback();
@@ -10162,20 +10171,20 @@ const ToastActivatorDeliveryTest = struct {
         // The popup's own handler delivers the click first.
         winrtToastActivationCallback(app.delivery.?, launch);
         try dispatch(&app);
-        try std.testing.expect(target.eql(app.pending_toast_activation.?));
-        app.pending_toast_activation = null;
+        const looked: []const notifications.Present = &.{ .{ .pane = 41 }, .primary };
+        try panes.expectPresented(looked);
 
         // Then COM delivers the same click: it is dropped.
         try std.testing.expectEqual(win32_uia.S_OK, callback.vtbl.Activate(callback, aumid, launch_w, null, 0));
         try dispatch(&app);
-        try std.testing.expect(app.pending_toast_activation == null);
+        try panes.expectPresented(looked);
 
         // So is the same click forwarded by a cold start, which would
         // otherwise open a window here.
         const launch_z = try alloc.dupeZ(u8, launch);
         defer alloc.free(launch_z);
         try std.testing.expect(try app.performAction(.app, .new_window, .{ .arguments = &.{launch_z} }));
-        try std.testing.expect(app.pending_toast_activation == null);
+        try panes.expectPresented(looked);
         try std.testing.expectEqual(@as(usize, 0), app.registry.hosts.items.len);
 
         // Another toast is another click.
@@ -10184,7 +10193,7 @@ const ToastActivatorDeliveryTest = struct {
         defer alloc.free(other_w);
         try std.testing.expectEqual(win32_uia.S_OK, callback.vtbl.Activate(callback, aumid, other_w, null, 0));
         try dispatch(&app);
-        try std.testing.expect(other.eql(app.pending_toast_activation.?));
+        try panes.expectPresented(&.{ .{ .pane = 41 }, .primary, .{ .pane = 42 }, .primary });
     }
 
     fn windowBody() !void {
@@ -10196,6 +10205,8 @@ const ToastActivatorDeliveryTest = struct {
         defer session.deinit();
         try app.createMessageWindow();
         defer Pkg19NativeDeliveryTest.closeAppWindow(&app);
+        var panes: notifications.testing.FakePanes = .{};
+        app.notifications = .init(alloc, null, panes.panes());
         win32_toast_activator.bind(toastActivatorSink(app.delivery.?));
         defer win32_toast_activator.bind(null);
         const callback = win32_toast_activator.testCallback();
@@ -10220,7 +10231,6 @@ const ToastActivatorDeliveryTest = struct {
         defer alloc.free(launch);
         try std.testing.expectEqual(win32_uia.S_OK, callback.vtbl.Activate(callback, aumid, launch, null, 0));
         try dispatch(&app);
-        try std.testing.expect(target.eql(app.pending_toast_activation.?));
         try core.tick(&app);
         try std.testing.expectEqual(@as(usize, 1), Hook.windows_made);
 
@@ -10233,15 +10243,17 @@ const ToastActivatorDeliveryTest = struct {
         // Before the startup windows exist, the first of them takes the
         // click instead.
         app.startup_windows_opened = false;
-        app.pending_toast_activation = null;
         const early: win32_toast_activation.ActivationTarget = .{ .surface_id = 6, .pid = sys.GetCurrentProcessId(), .action = .focus };
         const early_w = try launchFor(alloc, early);
         defer alloc.free(early_w);
         try std.testing.expectEqual(win32_uia.S_OK, callback.vtbl.Activate(callback, aumid, early_w, null, 0));
         try dispatch(&app);
         try core.tick(&app);
-        try std.testing.expect(early.eql(app.pending_toast_activation.?));
         try std.testing.expectEqual(@as(usize, 1), Hook.windows_made);
+        panes.presents = 0;
+        panes.put(6, notifications.testing.inTab(1, 0, ""));
+        _ = app.notifications.click(.window_opened);
+        try panes.expectPresented(&.{.{ .pane = 6 }});
     }
 };
 
@@ -23306,228 +23318,6 @@ test "win32 activeSurfaceForHost isolates taskbar progress by host and tab" {
     const host_b_after_tab_switch = app.registry.activeSurfaceForHost(host_b.id).?.taskbar_progress.?;
     try std.testing.expectEqual(win32_taskbar_progress.ProgressState.@"error", host_b_after_tab_switch.state);
     try std.testing.expectEqual(@as(?u8, 80), host_b_after_tab_switch.progress);
-}
-
-test "win32 resolveToastActivationSurface prefers exact surface id" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    var app: App = undefined;
-    app.registry.windows = .empty;
-    app.registry.hosts = .empty;
-    defer app.registry.deinit(std.testing.allocator);
-
-    var primary: Surface = undefined;
-    primary.core_surface = undefined;
-    primary.core_surface.id = 101;
-
-    var exact: Surface = undefined;
-    exact.core_surface = undefined;
-    exact.core_surface.id = 202;
-
-    try app.registry.addWindow(std.testing.allocator, &primary);
-    try app.registry.addWindow(std.testing.allocator, &exact);
-
-    const resolved = app.registry.resolveToastActivationSurface(.{
-        .pid = sys.GetCurrentProcessId(),
-        .surface_id = 202,
-        .window_id = 999,
-        .action = .focus,
-    });
-    try std.testing.expectEqual(@as(?*Surface, &exact), resolved);
-}
-
-test "win32 resolveToastActivationSurface finds split pane by exact surface id" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    var app: App = undefined;
-    app.registry.windows = .empty;
-    app.registry.hosts = .empty;
-    defer app.registry.deinit(std.testing.allocator);
-
-    var host: Host = undefined;
-    host.id = 66;
-    host.tabs = .empty;
-    host.active_tab = 0;
-    defer {
-        for (host.tabs.items) |*tab| tab.deinit();
-        host.tabs.deinit(std.testing.allocator);
-    }
-
-    var primary: Surface = undefined;
-    primary.core_surface = undefined;
-    primary.core_surface.id = 501;
-    primary.host = &host;
-    primary.host_id = host.id;
-
-    var split: Surface = undefined;
-    split.core_surface = undefined;
-    split.core_surface.id = 502;
-    split.host = &host;
-    split.host_id = host.id;
-
-    try host.tabs.append(std.testing.allocator, try Tab.init(std.testing.allocator, 1, &primary));
-    const inserted = try SplitTreeSurface.init(std.testing.allocator, &split);
-    defer {
-        var cleanup = inserted;
-        cleanup.deinit();
-    }
-    var prev_tree = host.tabs.items[0].tree;
-    const next_tree = try prev_tree.split(
-        std.testing.allocator,
-        host.tabs.items[0].focused,
-        .right,
-        0.5,
-        &inserted,
-    );
-    host.tabs.items[0].tree = next_tree;
-    prev_tree.deinit();
-
-    try app.registry.addHost(std.testing.allocator, &host);
-    try app.registry.addWindow(std.testing.allocator, &primary);
-
-    const resolved = app.registry.resolveToastActivationSurface(.{
-        .pid = sys.GetCurrentProcessId(),
-        .surface_id = 502,
-        .action = .focus,
-    });
-    try std.testing.expectEqual(@as(?*Surface, &split), resolved);
-}
-
-test "win32 resolveToastActivationSurface falls back to primary surface" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    var app: App = undefined;
-    app.registry.windows = .empty;
-    app.registry.hosts = .empty;
-    defer app.registry.deinit(std.testing.allocator);
-
-    var host: Host = undefined;
-    host.id = 77;
-    host.tabs = .empty;
-    host.active_tab = 0;
-    defer {
-        for (host.tabs.items) |*tab| tab.deinit();
-        host.tabs.deinit(std.testing.allocator);
-    }
-
-    var primary: Surface = undefined;
-    primary.core_surface = undefined;
-    primary.core_surface.id = 303;
-    primary.host = &host;
-    primary.host_id = host.id;
-
-    try host.tabs.append(std.testing.allocator, try Tab.init(std.testing.allocator, 1, &primary));
-    try app.registry.addHost(std.testing.allocator, &host);
-    try app.registry.addWindow(std.testing.allocator, &primary);
-
-    const resolved = app.registry.resolveToastActivationSurface(.{
-        .pid = sys.GetCurrentProcessId(),
-        .surface_id = 999,
-        .window_id = 999,
-        .action = .focus,
-    });
-    try std.testing.expectEqual(@as(?*Surface, &primary), resolved);
-}
-
-test "win32 resolveToastActivationSurface prefers requested host tab when surface is stale" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    var app: App = undefined;
-    app.registry.windows = .empty;
-    app.registry.hosts = .empty;
-    defer app.registry.deinit(std.testing.allocator);
-
-    var host: Host = undefined;
-    host.id = 88;
-    host.tabs = .empty;
-    host.active_tab = 0;
-    defer {
-        for (host.tabs.items) |*tab| tab.deinit();
-        host.tabs.deinit(std.testing.allocator);
-    }
-
-    var tab0_surface: Surface = undefined;
-    tab0_surface.core_surface = undefined;
-    tab0_surface.core_surface.id = 401;
-    tab0_surface.host = &host;
-    tab0_surface.host_id = host.id;
-
-    var tab1_surface: Surface = undefined;
-    tab1_surface.core_surface = undefined;
-    tab1_surface.core_surface.id = 402;
-    tab1_surface.host = &host;
-    tab1_surface.host_id = host.id;
-
-    try host.tabs.append(std.testing.allocator, try Tab.init(std.testing.allocator, 1, &tab0_surface));
-    try host.tabs.append(std.testing.allocator, try Tab.init(std.testing.allocator, 2, &tab1_surface));
-    try app.registry.addHost(std.testing.allocator, &host);
-    try app.registry.addWindow(std.testing.allocator, &tab0_surface);
-    try app.registry.addWindow(std.testing.allocator, &tab1_surface);
-
-    const resolved = app.registry.resolveToastActivationSurface(.{
-        .pid = sys.GetCurrentProcessId(),
-        .surface_id = 999,
-        .tab_id = 2,
-        .window_id = host.id,
-        .action = .focus,
-    });
-    try std.testing.expectEqual(@as(?*Surface, &tab1_surface), resolved);
-}
-
-test "a click's ids are this process's only with its pid; a foreign pid only presents" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    var app: App = undefined;
-    app.registry.windows = .empty;
-    app.registry.hosts = .empty;
-    defer app.registry.deinit(std.testing.allocator);
-
-    var host: Host = undefined;
-    host.id = 93;
-    host.tabs = .empty;
-    host.active_tab = 0;
-    defer {
-        for (host.tabs.items) |*tab| tab.deinit();
-        host.tabs.deinit(std.testing.allocator);
-    }
-
-    var first: Surface = undefined;
-    first.core_surface = undefined;
-    first.core_surface.id = 601;
-    first.host = &host;
-    first.host_id = host.id;
-
-    var second: Surface = undefined;
-    second.core_surface = undefined;
-    second.core_surface.id = 602;
-    second.host = &host;
-    second.host_id = host.id;
-
-    try host.tabs.append(std.testing.allocator, try Tab.init(std.testing.allocator, 1, &first));
-    try host.tabs.append(std.testing.allocator, try Tab.init(std.testing.allocator, 2, &second));
-    try app.registry.addHost(std.testing.allocator, &host);
-    try app.registry.addWindow(std.testing.allocator, &first);
-    try app.registry.addWindow(std.testing.allocator, &second);
-
-    // The pane's own launch (`notifications.zig` tests the string) names
-    // this process and routes to it.
-    const own: win32_toast_activation.ActivationTarget = .{
-        .surface_id = 602,
-        .tab_id = 2,
-        .window_id = host.id,
-        .pid = sys.GetCurrentProcessId(),
-        .action = .focus,
-    };
-    try std.testing.expectEqual(@as(?*Surface, &second), app.registry.resolveToastActivationSurface(own));
-
-    // The same ids from another process, or from a launch with no pid, are
-    // not this process's: only the primary surface is presented.
-    var foreign = own;
-    foreign.pid = sys.GetCurrentProcessId() +% 4;
-    try std.testing.expectEqual(@as(?*Surface, &first), app.registry.resolveToastActivationSurface(foreign));
-    var unnamed = own;
-    unnamed.pid = null;
-    try std.testing.expectEqual(@as(?*Surface, &first), app.registry.resolveToastActivationSurface(unnamed));
 }
 
 /// One window whose second tab holds the background pane `p`, which a

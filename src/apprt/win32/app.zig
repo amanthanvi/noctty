@@ -854,14 +854,6 @@ pub const App = struct {
     /// chdir back to this value around `settingsSaveAndReload`'s
     /// reload so argv-relative paths re-resolve identically.
     startup_cwd: ?[]u8 = null,
-    /// A toast activation waiting for a window: the one a cold
-    /// `-ToastActivated` start received (`awaitColdToastActivation`), a
-    /// `wgh://activate?...` argument, or one that arrived while no surface
-    /// existed. Consumed once after the first window spawns. Its ids are
-    /// resolved only when its pid is this process's
-    /// (`resolveToastActivationSurface`); otherwise the primary surface is
-    /// presented.
-    pending_toast_activation: ?win32_toast_activation.ActivationTarget = null,
     /// Started by COM for a click in Action Center (`win32_toast_activator`,
     /// argv `-ToastActivated -Embedding`): `run` waits for the launch string
     /// before deciding whether to forward it or start locally.
@@ -870,11 +862,9 @@ pub const App = struct {
     /// instance in place of this process's argv
     /// (`ipc_server.tryForwardStartupToExistingInstance`).
     cold_toast_activation: ?win32_toast_activation.ActivationTarget = null,
-    /// Drops the second delivery of one click (popup handler and COM).
-    toast_click_filter: win32_toast_activation.RepeatFilter = .{},
     /// `run` has made its startup windows (or decided on none), so a toast
     /// click with no surface to present opens one
-    /// (`receiveToastActivation`).
+    /// (`openWindowForToastClick`).
     startup_windows_opened: bool = false,
     /// The command line's one-shot `--launch-layout=<name>`, which `run`
     /// opens instead of the first window (or forwards to the running
@@ -1008,21 +998,6 @@ pub const App = struct {
         self.cli_class = cliClass(core_app.alloc) catch null;
         // Snapshot the startup cwd for reload-time restoration.
         self.startup_cwd = std.process.getCwdAlloc(core_app.alloc) catch null;
-        // A `wgh://activate?...` argument on the command line. Windows never
-        // starts noctty with one: a click in Action Center reaches a cold
-        // start through COM (`-ToastActivated`, `awaitColdToastActivation`).
-        // It is honored for a launch by hand or a script, and the same string
-        // is what a cold start forwards to a running instance. Silent on
-        // absence or malformed input.
-        self.pending_toast_activation = scanToastActivationArg(core_app.alloc);
-        if (self.pending_toast_activation) |target| {
-            log.info("toast activation received surface={?} tab={?} window={?} action={?}", .{
-                target.surface_id,
-                target.tab_id,
-                target.window_id,
-                target.action,
-            });
-        }
         // AUMID registration MUST precede any HWND creation so
         // taskbar-grouping / toast attribution picks up our identity
         // on the first window. Both swallow failures (warn +
@@ -1066,6 +1041,21 @@ pub const App = struct {
         };
         const sink: ?notifications.ToastSink = if (self.winrt_toast) |*toast| .winrt(toast) else null;
         self.notifications = .init(core_app.alloc, sink, self.notificationPanes());
+        // A `wgh://activate?...` argument on the command line. Windows never
+        // starts noctty with one: a click in Action Center reaches a cold
+        // start through COM (`-ToastActivated`, `awaitColdToastActivation`).
+        // It is honored for a launch by hand or a script, and the same string
+        // is what a cold start forwards to a running instance. Silent on
+        // absence or malformed input.
+        if (scanToastActivationArg(core_app.alloc)) |target| {
+            log.info("toast activation received surface={?} tab={?} window={?} action={?}", .{
+                target.surface_id,
+                target.tab_id,
+                target.window_id,
+                target.action,
+            });
+            _ = self.notifications.click(.{ .start = target });
+        }
 
         // Install the PowerShell shell-integration script into
         // %LOCALAPPDATA%\noctty\shell-integration\powershell\
@@ -1316,7 +1306,7 @@ pub const App = struct {
             const activation = self.awaitColdToastActivation();
             self.cold_toast_activation = activation;
             // Forwarded below, or presented once the first window exists.
-            self.pending_toast_activation = activation;
+            _ = self.notifications.click(.{ .start = activation });
         }
 
         const forwarded = if (self.embedding_mode or self.safe_mode)
@@ -3756,10 +3746,10 @@ pub const App = struct {
                         }
                         // A cold start forwards a click this process may
                         // also have had from the toast's popup handler.
-                        if (!self.admitToastActivation(activation)) return true;
-                        if (self.handleToastActivation(activation)) return true;
-                        self.pending_toast_activation = activation;
-                        forwarded_arguments = null;
+                        switch (self.notifications.click(.{ .target = activation })) {
+                            .done => return true,
+                            .needs_window => forwarded_arguments = null,
+                        }
                     },
                 }
                 var config = try apprt.surface.newConfig(
@@ -5146,7 +5136,7 @@ pub const App = struct {
             const created = try alloc.create(Surface);
             errdefer alloc.destroy(created);
             try created.init(self, title, config, opts);
-            if (opts.host_id == null) self.consumePendingToastActivation();
+            if (opts.host_id == null) _ = self.notifications.click(.window_opened);
             break :blk created;
         };
         recordLaunch(alloc, surface, key, opts.launch.ssh, tab_title);
@@ -6756,32 +6746,12 @@ pub const App = struct {
         };
     }
 
-    fn handleToastActivation(self: *App, activation: win32_toast_activation.ActivationTarget) bool {
-        if (activation.action) |action| switch (action) {
-            .focus => {},
-        };
-
-        const surface = self.registry.resolveToastActivationSurface(activation) orelse return false;
-        surface.present();
-        return true;
-    }
-
-    /// Whether `activation` is a new click, not the second delivery of one
-    /// (the popup's in-process handler and the COM activator both report a
-    /// popup click when both exist).
-    fn admitToastActivation(self: *App, activation: win32_toast_activation.ActivationTarget) bool {
-        return self.toast_click_filter.admit(activation, std.time.milliTimestamp());
-    }
-
-    /// A click from the toast's popup handler or the COM activator. With no
-    /// surface to present (`initial-window = false`, or the last window
-    /// closed under `quit-after-last-window-closed = false`), it asks for a
-    /// window the way a forwarded click does, and that window presents it
-    /// (`consumePendingToastActivation`), as a cold start's would.
-    pub fn receiveToastActivation(self: *App, activation: win32_toast_activation.ActivationTarget) void {
-        if (!self.admitToastActivation(activation)) return;
-        if (self.handleToastActivation(activation)) return;
-        self.pending_toast_activation = activation;
+    /// A toast click with nothing to present (`initial-window = false`, or
+    /// the last window closed under `quit-after-last-window-closed = false`)
+    /// asks for a window the way a forwarded click does, and that window
+    /// presents it (`Notifications.click(.window_opened)`), as a cold
+    /// start's would.
+    pub fn openWindowForToastClick(self: *App) void {
         // Before the startup windows exist the first of them takes it, and a
         // terminal handoff server's windows come only from handoffs.
         if (!self.startup_windows_opened or self.embedding_mode) return;
@@ -6828,13 +6798,6 @@ pub const App = struct {
         if (!pumpUntilColdToastActivation(&capture, cold_toast_activation_wait_ms))
             log.warn("toast activation start: no activation within {d} ms", .{cold_toast_activation_wait_ms});
         return capture.target();
-    }
-
-    fn consumePendingToastActivation(self: *App) void {
-        const activation = self.pending_toast_activation orelse return;
-        if (self.handleToastActivation(activation)) {
-            self.pending_toast_activation = null;
-        }
     }
 
     /// Like `activateSurface`, but neither shows, raises nor focuses the
@@ -9467,7 +9430,13 @@ pub const App = struct {
 
     /// The App's side of `notifications.Panes`.
     pub fn notificationPanes(self: *App) notifications.Panes {
-        return .{ .ctx = self, .find = findNotificationPane, .banner = notificationBanner, .wake = wakeNotificationFlush };
+        return .{
+            .ctx = self,
+            .find = findNotificationPane,
+            .present = presentNotificationTarget,
+            .banner = notificationBanner,
+            .wake = wakeNotificationFlush,
+        };
     }
 
     /// Windows first, then the tabs' trees (`Registry.findSurfaceById`), and
@@ -9483,6 +9452,24 @@ pub const App = struct {
             .window = self.notificationWindow(found.host),
         } else null;
         return .{ .window_id = surface.host_id, .tab = tab };
+    }
+
+    fn presentNotificationTarget(ctx: *anyopaque, which: notifications.Present) bool {
+        const self: *App = @ptrCast(@alignCast(ctx));
+        const surface = self.notificationTargetSurface(which) orelse return false;
+        surface.present();
+        return true;
+    }
+
+    /// The pane `which` names. Pane ids are looked up in the windows first,
+    /// then the tabs' trees (`Registry.findSurfaceById`).
+    fn notificationTargetSurface(self: *App, which: notifications.Present) ?*Surface {
+        return switch (which) {
+            .pane => |id| self.registry.findSurfaceById(id),
+            .tab => |tab| if (self.registry.findHostById(tab.window)) |host| host.focusedSurfaceForTab(tab.tab) else null,
+            .window => |id| if (self.registry.findHostById(id)) |host| host.activeSurface() else null,
+            .primary => self.registry.primarySurface(),
+        };
     }
 
     fn notificationBanner(ctx: *anyopaque, from: notifications.From, text: []const u8) bool {
@@ -11318,7 +11305,7 @@ test "win32 safe mode notice waits for the launch to resolve on disk" {
     try std.testing.expect(!safe.release(true));
 }
 
-test "win32 the notification panes adapter reports a pane's tab, name, window and reach" {
+test "win32 the notification panes adapter reports a pane's tab, name, window and reach, and finds what a click presents" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
     var w: ToastTestWindow = .{};
     try w.init(true);
@@ -11339,6 +11326,34 @@ test "win32 the notification panes adapter reports a pane's tab, name, window an
         var cleanup = inserted;
         cleanup.deinit();
     }
+
+    // What a click presents, through the real Registry and Host: a pane by
+    // id, also a split pane only its tab's tree holds; a tab's focused pane,
+    // not its window's active one; a window's active pane; the first
+    // window's; nothing for an id no pane, tab or window has. Compared by
+    // pane id, so a failure prints two numbers: printing a `*Surface`
+    // against null formats the fixture's whole Surface, undefined fields
+    // included, and ended the test process in a mutation run.
+    const Presented = struct {
+        fn id(app: *App, which: notifications.Present) ?u64 {
+            const surface = app.notificationTargetSurface(which) orelse return null;
+            return surface.core().id;
+        }
+    };
+    w.app.registry.removeWindow(&w.q);
+    try std.testing.expectEqual(@as(?u64, 0x2003), Presented.id(&w.app, .{ .pane = 0x2003 }));
+    try w.app.registry.addWindow(std.testing.allocator, &w.q);
+    try std.testing.expectEqual(@as(?u64, 0x2002), Presented.id(&w.app, .{ .tab = .{ .window = 7, .tab = 2 } }));
+    try std.testing.expectEqual(@as(?u64, 0x1001), Presented.id(&w.app, .{ .window = 7 }));
+    try std.testing.expectEqual(@as(?u64, 0x3003), Presented.id(&w.app, .{ .window = 8 }));
+    try std.testing.expectEqual(@as(?u64, 0x1001), Presented.id(&w.app, .primary));
+    for ([_]notifications.Present{
+        .{ .pane = 0x9999 },
+        .{ .tab = .{ .window = 7, .tab = 9 } },
+        .{ .tab = .{ .window = 9, .tab = 2 } },
+        .{ .window = 9 },
+    }) |unknown| try std.testing.expectEqual(@as(?u64, null), Presented.id(&w.app, unknown));
+
     w.q.title = "vim";
     for ([_]u64{ 0x2002, 0x2003 }) |id| {
         try std.testing.expectEqual(@as(u32, 7), panes.find(panes.ctx, id).?.window_id);

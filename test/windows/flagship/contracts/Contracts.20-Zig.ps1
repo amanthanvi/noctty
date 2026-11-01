@@ -89,17 +89,20 @@ foreach ($movedWin32TestModule in $movedWin32TestFloors.Keys) {
 # of named tests the module declared when it was cut out: 59, 43, 23, 33, 10, 41,
 # 15, 4, 2, 7 and 1 below, the numbers the #584 to #590 reviews measured as the
 # tests a module filter runs above the no-match control. Registry adds 7
-# tests in R06b (#592). child_window.zig holds the 3 tests that moved out of
+# tests in R06b (#592); its floor is 6 since its toast lookup test became
+# notifications.zig's click tests, with `resolveToastActivationSurface`
+# (notifications PR 3). child_window.zig holds the 3 tests that moved out of
 # win32.zig with the child-control plumbing, and text.zig the 11 it declares
 # once the owned-string helpers (from win32.zig and labels.zig) and
 # utf8BoundedPrefix moved in. session.zig's floor is 28 since its five
 # restore-by-key tests became rows of pane_launch.zig's `prepare` table (pane
-# launch step 4b). notifications.zig's 15 are the toast lifecycle's tests at
-# its interface, which replaced App's, Host's and Surface's toast tests.
+# launch step 4b). notifications.zig's 21 are the toast lifecycle's and the
+# click's tests at its interface, which replaced App's, Host's, Surface's and
+# Registry's.
 # Lower one only for a deliberate consolidation.
 # test_support.zig declares no tests, so it has no floor.
 $extractedWin32TestModules = [ordered]@{
-    'registry.zig' = @{ Binding = 'registry_module'; Floor = 7 }
+    'registry.zig' = @{ Binding = 'registry_module'; Floor = 6 }
     'app.zig' = @{ Binding = 'app_module'; Floor = 59 }
     'host.zig' = @{ Binding = 'host_module'; Floor = 43 }
     'terminal_window.zig' = @{ Binding = 'terminal_window_module'; Floor = 23 }
@@ -113,7 +116,7 @@ $extractedWin32TestModules = [ordered]@{
     'chrome_scene.zig' = @{ Binding = 'chrome_scene'; Floor = 1 }
     'child_window.zig' = @{ Binding = 'child_window'; Floor = 3 }
     'text.zig' = @{ Binding = 'paint_text'; Floor = 11 }
-    'notifications.zig' = @{ Binding = 'notifications'; Floor = 15 }
+    'notifications.zig' = @{ Binding = 'notifications'; Floor = 21 }
 }
 $win32RootTestBlock = [regex]::Match(
     $win32RuntimeText,

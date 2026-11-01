@@ -97,14 +97,29 @@ pub const Pane = struct {
     };
 };
 
+/// What a click brings forward (`Panes.present`).
+pub const Present = union(enum) {
+    pane: u64,
+    /// The tab's focused pane.
+    tab: struct { window: u32, tab: u32 },
+    /// The window's active pane.
+    window: u32,
+    /// The first window's active pane.
+    primary,
+};
+
 /// What the module asks of the App (a port). Adapters: the App's
-/// (`App.notificationPanes`), `testing.FakePanes` and `none`. No call may
-/// call back into `Notifications`.
+/// (`App.notificationPanes`), `testing.FakePanes` and `none`. `find` and
+/// `wake` call nothing back. `present` activates a window, whose activation
+/// and focus handling call `seen`, and `banner` changes a window: the module
+/// keeps nothing of its list across either.
 pub const Panes = struct {
     ctx: *anyopaque,
     /// null: no pane has this id. The strings are borrowed until the next
     /// call on this port.
     find: *const fn (ctx: *anyopaque, pane: u64) ?Pane,
+    /// Bring `which` forward; false: there is no such pane, tab or window.
+    present: *const fn (ctx: *anyopaque, which: Present) bool,
     /// An info banner in the window of `from` (`.app`: the primary window);
     /// false: no window can hold it.
     banner: *const fn (ctx: *anyopaque, from: From, text: []const u8) bool,
@@ -112,11 +127,15 @@ pub const Panes = struct {
     /// false: no message window.
     wake: *const fn (ctx: *anyopaque) bool,
 
-    /// Finds nothing, holds no banner and never wakes.
-    pub const none: Panes = .{ .ctx = undefined, .find = findNone, .banner = bannerNone, .wake = wakeNone };
+    /// Finds nothing, presents nothing, holds no banner and never wakes.
+    pub const none: Panes = .{ .ctx = undefined, .find = findNone, .present = presentNone, .banner = bannerNone, .wake = wakeNone };
 
     fn findNone(_: *anyopaque, _: u64) ?Pane {
         return null;
+    }
+
+    fn presentNone(_: *anyopaque, _: Present) bool {
+        return false;
     }
 
     fn bannerNone(_: *anyopaque, _: From, _: []const u8) bool {
@@ -126,6 +145,27 @@ pub const Panes = struct {
     fn wakeNone(_: *anyopaque) bool {
         return false;
     }
+};
+
+/// What reaches `Notifications.click`.
+pub const Click = union(enum) {
+    /// A click from the toast's popup handler or the COM activator (through
+    /// the App's message window), or one a cold start forwarded: a repeat
+    /// of a click inside `RepeatFilter.window_ms` is dropped.
+    target: toast_activation.ActivationTarget,
+    /// The click this process was started for (a `wgh://activate?...`
+    /// argument, or what a cold `-ToastActivated` start received): kept
+    /// for the first window, unfiltered.
+    start: toast_activation.ActivationTarget,
+    /// A new window's first pane exists: a kept click is presented now.
+    window_opened,
+};
+
+pub const Outcome = enum {
+    done,
+    /// Nothing could be presented and the click is kept: the caller decides
+    /// whether to open a window for it.
+    needs_window,
 };
 
 pub const Notifications = struct {
@@ -140,6 +180,10 @@ pub const Notifications = struct {
     /// This process showed a tagged toast, so its group may hold toasts at
     /// exit.
     group_used: bool = false,
+    /// Drops the second delivery of one click (popup handler and COM).
+    click_filter: toast_activation.RepeatFilter = .{},
+    /// The click waiting for a window to present it; the newest wins.
+    kept: ?toast_activation.ActivationTarget = null,
 
     const Entry = struct {
         pane: u64,
@@ -279,6 +323,58 @@ pub const Notifications = struct {
                 log.warn("toast removal failed err={}", .{err});
             };
         }
+    }
+
+    /// A click on a toast, or a window it waits for. It brings forward the
+    /// pane it names, else that pane's tab, else its window, else the
+    /// primary window. With nothing to bring forward (`initial-window =
+    /// false`, or the last window closed under
+    /// `quit-after-last-window-closed = false`) it is kept for the next
+    /// window, and `.needs_window` asks the caller for one. Presenting
+    /// activates a window, so this never runs inside WM_ACTIVATE or a focus
+    /// callback.
+    pub fn click(self: *Notifications, what: Click) Outcome {
+        switch (what) {
+            .target => |target| {
+                // The popup's handler and the COM activator can both report
+                // one popup click, and a cold start forwards one this
+                // process may have had already.
+                if (!self.click_filter.admit(target, std.time.milliTimestamp())) return .done;
+                if (self.bringForward(target)) return .done;
+                self.kept = target;
+                return .needs_window;
+            },
+            .start => |target| self.kept = target,
+            .window_opened => if (self.kept) |target| {
+                if (self.bringForward(target)) self.kept = null;
+            },
+        }
+        return .done;
+    }
+
+    fn bringForward(self: *Notifications, target: toast_activation.ActivationTarget) bool {
+        // Exhaustive on purpose: a new action must be handled here.
+        if (target.action) |action| switch (action) {
+            .focus => {},
+        };
+        const panes = self.panes;
+        // Ids are this process's only when the toast is: a click on another
+        // noctty's toast (COM hands it to whichever process registered the
+        // activator, or to a new one after that process ended) must not pick
+        // a window or tab that happens to share a number here.
+        if (target.pid != sys.GetCurrentProcessId()) return panes.present(panes.ctx, .primary);
+        if (target.surface_id) |pane| {
+            if (panes.present(panes.ctx, .{ .pane = pane })) return true;
+        }
+        if (target.window_id) |window| {
+            // The toast's tab before its window's active one: the pane of an
+            // old toast can be gone from a tab that is still there.
+            if (target.tab_id) |tab| {
+                if (panes.present(panes.ctx, .{ .tab = .{ .window = window, .tab = tab } })) return true;
+            }
+            if (panes.present(panes.ctx, .{ .window = window })) return true;
+        }
+        return panes.present(panes.ctx, .primary);
     }
 
     fn takeRemovable(self: *Notifications) ?u64 {
@@ -616,9 +712,18 @@ pub const testing = struct {
         banner_from: ?From = null,
         banner_buf: [256]u8 = undefined,
         banner_text: ?[]const u8 = null,
+        /// Every `present` asked for, in order, found or not.
+        presented: [16]Present = undefined,
+        presents: usize = 0,
 
         pub fn panes(self: *FakePanes) Panes {
-            return .{ .ctx = self, .find = find, .banner = banner, .wake = wake };
+            return .{ .ctx = self, .find = find, .present = present, .banner = banner, .wake = wake };
+        }
+
+        /// The `present` calls so far are exactly `expected`, in order.
+        pub fn expectPresented(self: *const FakePanes, expected: []const Present) !void {
+            try std.testing.expectEqual(expected.len, self.presents);
+            for (expected, self.presented[0..self.presents]) |want, got| try std.testing.expectEqual(want, got);
         }
 
         /// Add pane `id`, or change what is known of it.
@@ -649,6 +754,23 @@ pub const testing = struct {
                 if (item.id == id) return item.pane;
             }
             return null;
+        }
+
+        /// As the App's: a pane by id, a tab by window and tab id, and a
+        /// window, or any window for the primary one, that has a tab.
+        fn present(ctx: *anyopaque, which: Present) bool {
+            const self: *FakePanes = @ptrCast(@alignCast(ctx));
+            self.presented[self.presents] = which;
+            self.presents += 1;
+            for (self.items[0..self.len]) |item| switch (which) {
+                .pane => |id| if (item.id == id) return true,
+                .tab => |want| if (item.pane.tab) |tab| {
+                    if (item.pane.window_id == want.window and tab.id == want.tab) return true;
+                },
+                .window => |id| if (item.pane.window_id == id and item.pane.tab != null) return true,
+                .primary => if (item.pane.tab != null) return true,
+            };
+            return false;
         }
 
         fn banner(ctx: *anyopaque, from: From, text: []const u8) bool {
@@ -1159,4 +1281,115 @@ test "out of memory drops what it cannot build, and a toast it cannot track stil
         try std.testing.expectEqual(@as(usize, 1), t.recorder.shown);
         try std.testing.expect(t.panes.banner_from == null);
     }
+}
+
+/// A click on a toast of this process.
+fn ownClick(target: toast_activation.ActivationTarget) Click {
+    var own = target;
+    own.pid = sys.GetCurrentProcessId();
+    own.action = .focus;
+    return .{ .target = own };
+}
+
+test "a click from another process, or with no pid, presents only the primary window" {
+    var t: TestNotifications = .{};
+    t.init();
+    defer t.deinit();
+    t.panes.put(0x2002, testing.inTab(2, 1, "cargo build"));
+
+    // The ids are another process's: one that happens to match here must
+    // not be picked.
+    const ids: toast_activation.ActivationTarget = .{ .surface_id = 0x2002, .tab_id = 2, .window_id = 7, .action = .focus };
+    var foreign = ids;
+    foreign.pid = sys.GetCurrentProcessId() +% 4;
+    try std.testing.expectEqual(Outcome.done, t.n.click(.{ .target = foreign }));
+    try t.panes.expectPresented(&.{.primary});
+    try std.testing.expectEqual(Outcome.done, t.n.click(.{ .target = ids }));
+    try t.panes.expectPresented(&.{ .primary, .primary });
+
+    // The same ids from this process name the pane.
+    try std.testing.expectEqual(Outcome.done, t.n.click(ownClick(ids)));
+    try t.panes.expectPresented(&.{ .primary, .primary, .{ .pane = 0x2002 } });
+}
+
+test "a click presents its pane, else its window's tab, else its window, else the primary window" {
+    var t: TestNotifications = .{};
+    t.init();
+    defer t.deinit();
+    t.panes.put(0x2002, testing.inTab(2, 1, "cargo build"));
+
+    // The toast's pane is gone, but its tab is still there.
+    _ = t.n.click(ownClick(.{ .surface_id = 0x9999, .tab_id = 2, .window_id = 7 }));
+    try t.panes.expectPresented(&.{ .{ .pane = 0x9999 }, .{ .tab = .{ .window = 7, .tab = 2 } } });
+    // So is its window, without the tab.
+    t.panes.presents = 0;
+    _ = t.n.click(ownClick(.{ .surface_id = 0x9999, .tab_id = 9, .window_id = 7 }));
+    try t.panes.expectPresented(&.{ .{ .pane = 0x9999 }, .{ .tab = .{ .window = 7, .tab = 9 } }, .{ .window = 7 } });
+    // And with its window gone too, the primary window.
+    t.panes.presents = 0;
+    _ = t.n.click(ownClick(.{ .window_id = 8 }));
+    try t.panes.expectPresented(&.{ .{ .window = 8 }, .primary });
+}
+
+test "the same click twice acts once, also with another click in between" {
+    var t: TestNotifications = .{};
+    t.init();
+    defer t.deinit();
+    t.panes.put(0x1001, testing.inTab(1, 0, "pwsh"));
+    t.panes.put(0x2002, testing.inTab(2, 1, "cargo build"));
+
+    const first = ownClick(.{ .surface_id = 0x1001 });
+    const second = ownClick(.{ .surface_id = 0x2002 });
+    for ([_]Click{ first, second, first, second }) |what| {
+        try std.testing.expectEqual(Outcome.done, t.n.click(what));
+    }
+    try t.panes.expectPresented(&.{ .{ .pane = 0x1001 }, .{ .pane = 0x2002 } });
+}
+
+test "a click with nowhere to go asks for a window, and the newest is presented once one opens" {
+    var t: TestNotifications = .{};
+    t.init();
+    defer t.deinit();
+
+    try std.testing.expectEqual(Outcome.needs_window, t.n.click(ownClick(.{ .surface_id = 0x1001 })));
+    try std.testing.expectEqual(Outcome.needs_window, t.n.click(ownClick(.{ .surface_id = 0x2002 })));
+    t.panes.presents = 0;
+    // A window that opens empty presents nothing yet.
+    _ = t.n.click(.window_opened);
+    try t.panes.expectPresented(&.{ .{ .pane = 0x2002 }, .primary });
+
+    t.panes.presents = 0;
+    t.panes.put(0x2002, testing.inTab(2, 0, "cargo build"));
+    try std.testing.expectEqual(Outcome.done, t.n.click(.window_opened));
+    try t.panes.expectPresented(&.{.{ .pane = 0x2002 }});
+    // Presented once.
+    _ = t.n.click(.window_opened);
+    try t.panes.expectPresented(&.{.{ .pane = 0x2002 }});
+}
+
+test "the click a process starts for is kept unfiltered for its first window" {
+    var t: TestNotifications = .{};
+    t.init();
+    defer t.deinit();
+    const own = ownClick(.{ .surface_id = 0x2002 }).target;
+
+    // A start presents nothing until a window opens, and does not count
+    // as a delivery of the click.
+    try std.testing.expectEqual(Outcome.done, t.n.click(.{ .start = own }));
+    try std.testing.expectEqual(Outcome.done, t.n.click(.{ .start = own }));
+    try t.panes.expectPresented(&.{});
+    t.panes.put(0x2002, testing.inTab(2, 0, "cargo build"));
+    _ = t.n.click(.window_opened);
+    try t.panes.expectPresented(&.{.{ .pane = 0x2002 }});
+    try std.testing.expectEqual(Outcome.done, t.n.click(.{ .target = own }));
+    try t.panes.expectPresented(&.{ .{ .pane = 0x2002 }, .{ .pane = 0x2002 } });
+}
+
+test "a window opening with no click kept presents nothing" {
+    var t: TestNotifications = .{};
+    t.init();
+    defer t.deinit();
+    t.panes.put(0x2002, testing.inTab(2, 0, "cargo build"));
+    try std.testing.expectEqual(Outcome.done, t.n.click(.window_opened));
+    try t.panes.expectPresented(&.{});
 }
