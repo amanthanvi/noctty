@@ -58,7 +58,6 @@ const applyDefaultProfileConfig = win32.applyDefaultProfileConfig;
 const applyDwmThemeWithBuild = win32.applyDwmThemeWithBuild;
 const applyNewWindowArguments = win32.applyNewWindowArguments;
 const applyProfileLaunchConfig = win32.applyProfileLaunchConfig;
-const applyProfileSurfaceConfig = win32.applyProfileSurfaceConfig;
 const applyQuickSlotPreferenceOrder = win32.applyQuickSlotPreferenceOrder;
 const applySplitWorkingDirectoryFromSource = win32.applySplitWorkingDirectoryFromSource;
 const applySshLaunchHardening = win32.applySshLaunchHardening;
@@ -121,7 +120,6 @@ const isPortableModeActive = win32.isPortableModeActive;
 const isSafeStartupCwd = win32.isSafeStartupCwd;
 const isSystemDarkMode = win32.isSystemDarkMode;
 const jumpListRebuildThreadMain = win32.jumpListRebuildThreadMain;
-const keepExplicitWorkingDirectory = win32.keepExplicitWorkingDirectory;
 const labels = @import("labels.zig");
 const lastError = child_window.lastError;
 const launcherQuickSlotAssignmentNeedsChange = win32.launcherQuickSlotAssignmentNeedsChange;
@@ -3789,10 +3787,7 @@ pub const App = struct {
                         return true;
                     }
                 }
-                const default_profile = self.applyNewWindowLaunch(
-                    &config,
-                    forwarded_arguments,
-                ) catch |err| switch (err) {
+                applyNewWindowArguments(self.core_app.alloc, &config, forwarded_arguments) catch |err| switch (err) {
                     // Defense in depth: `applyNewWindowArguments` enforces
                     // the same filter independently. Treat a rejection as
                     // handled so it cannot abort the app tick. Logged here
@@ -3807,15 +3802,28 @@ pub const App = struct {
                     },
                     else => return err,
                 };
+                // The launch comes after the arguments: with a theme set,
+                // their `finalize` builds the config again from its replay
+                // steps, which would drop the profile's variables, line and
+                // directory. That rebuild replays the files as they were last
+                // read, which during a palette theme preview are newer than
+                // the app config's profiles and launch, so those are put back
+                // before it; the arguments cannot set any of them
+                // (`forwardedKeyAllowed`).
+                if (forwarded_arguments) |argv| if (argv.len > 0) try configpkg.pane_launch.keepSources(&config, &self.config);
+                const launch = try configpkg.pane_launch.prepare(&config, .{ .fresh = .{
+                    .named_directory = if (forwarded_arguments) |argv| forwardedArgvSetsKey(argv, "working-directory") else false,
+                } }, self.launchContext());
                 if (config.@"launch-layout") |name| {
                     const banner_host = if (self.registry.findSurfaceForTarget(target)) |source| source.host else null;
                     _ = self.launchNamedLayout(name, banner_host);
                     return true;
                 }
                 const source = self.registry.newWindowSource(target);
-                const window_surface = self.createWindowSurface(&config, default_title, .{
+                _ = self.createWindowSurface(&config, default_title, .{
                     .clone_state_from = source,
                     .forwarded_arguments = forwarded_arguments,
+                    .launch = launch,
                 }) catch |err| {
                     // A request forwarded by another process was acknowledged
                     // when it was queued, so say here that nothing opened.
@@ -3827,7 +3835,6 @@ pub const App = struct {
                     if (banner_host) |host| host.setBanner(.err, "New window could not be opened.") catch {};
                     return err;
                 };
-                if (default_profile) |profile| try self.noteProfileLaunch(window_surface, profile);
                 return true;
             },
 
@@ -5159,55 +5166,118 @@ pub const App = struct {
         title: LPCWSTR,
         opts: SurfaceInitOptions,
     ) !*Surface {
-        if (self.test_create_window_surface) |hook| {
-            return try hook(self, config, title, opts);
-        }
-        const surface = try self.core_app.alloc.create(Surface);
-        errdefer self.core_app.alloc.destroy(surface);
-
-        try surface.init(self, title, config, opts);
-        if (opts.host_id == null) self.consumePendingToastActivation();
+        // What the surface keeps of its launch is copied before the surface
+        // exists: once it does it is its window's, so nothing after it may
+        // fail (a restore's transaction learns the window only from the
+        // surface returned, and a forwarded new window says it could not be
+        // opened when this fails).
+        const alloc = self.core_app.alloc;
+        const key = if (opts.launch.key) |value| try alloc.dupeZ(u8, value) else null;
+        errdefer if (key) |value| alloc.free(value);
+        const tab_title = if (opts.launch.title) |value| try alloc.dupeZ(u8, value) else null;
+        errdefer if (tab_title) |value| alloc.free(value);
+        const surface = if (self.test_create_window_surface) |hook|
+            try hook(self, config, title, opts)
+        else blk: {
+            const created = try alloc.create(Surface);
+            errdefer alloc.destroy(created);
+            try created.init(self, title, config, opts);
+            if (opts.host_id == null) self.consumePendingToastActivation();
+            break :blk created;
+        };
+        recordLaunch(alloc, surface, key, opts.launch.ssh, tab_title);
         return surface;
+    }
+
+    /// What a surface keeps of its launch: the key that splits, session
+    /// restore and elevation look its profile up by, whether it connects
+    /// over SSH, and the SSH alias as its tab title. It takes `key` and
+    /// `tab_title`, copies in `alloc`, and cannot fail.
+    fn recordLaunch(alloc: Allocator, surface: *Surface, key: ?[:0]const u8, ssh: bool, tab_title: ?[:0]const u8) void {
+        if (key) |value| adoptOwnedString(alloc, &surface.launch_profile_key, value);
+        if (ssh) surface.launched_ssh = true;
+        if (tab_title) |value| adoptOwnedString(alloc, &surface.tab_title_override, value);
+    }
+
+    /// Put `value`, allocated in `alloc`, in `target`, as `appendOwnedString`
+    /// puts a copy: an equal string already there stays, and `value` is
+    /// freed.
+    fn adoptOwnedString(alloc: Allocator, target: *?[:0]const u8, value: [:0]const u8) void {
+        if (target.*) |old| {
+            if (std.mem.eql(u8, old, value)) return alloc.free(value);
+            alloc.free(old);
+        }
+        target.* = value;
+    }
+
+    test "a surface's launch is copied before the surface exists, so a failure leaves no surface" {
+        if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+        var core_app: CoreApp = undefined;
+        var app: App = undefined;
+        var created: Surface = undefined;
+        var session: TestSession = .{};
+        try session.init(.{
+            .core_app = &core_app,
+            .app = &app,
+            .surfaces = &.{.{ .storage = &created, .free_launch_profile_key_on_deinit = true }},
+        });
+        defer session.deinit();
+        defer appendOwnedString(std.testing.allocator, &created.tab_title_override, null) catch unreachable;
+
+        const Hook = struct {
+            var surface: *Surface = undefined;
+            var calls: usize = 0;
+
+            fn createSurface(_: *App, _: *const configpkg.Config, _: LPCWSTR, _: SurfaceInitOptions) anyerror!*Surface {
+                calls += 1;
+                return surface;
+            }
+        };
+        Hook.surface = &created;
+        Hook.calls = 0;
+        app.test_create_window_surface = &Hook.createSurface;
+
+        const launch: configpkg.pane_launch.Stamp = .{ .key = "ssh:prod", .ssh = true, .title = "prod" };
+        // The key's copy fails, then the title's: no surface is made, so a
+        // restore's transaction never misses one, and nothing leaks.
+        for (0..2) |fail_index| {
+            var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = fail_index });
+            core_app.alloc = failing.allocator();
+            defer core_app.alloc = std.testing.allocator;
+            try std.testing.expectError(error.OutOfMemory, app.createWindowSurface(&app.config, default_title, .{ .launch = launch }));
+            try std.testing.expectEqual(@as(usize, 0), Hook.calls);
+        }
+        // Past the copies nothing allocates: a surface made is a whole one.
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 2 });
+        core_app.alloc = failing.allocator();
+        defer core_app.alloc = std.testing.allocator;
+        const surface = try app.createWindowSurface(&app.config, default_title, .{ .launch = launch });
+        try std.testing.expectEqual(@as(usize, 1), Hook.calls);
+        try std.testing.expectEqualStrings("ssh:prod", surface.launch_profile_key orelse "");
+        try std.testing.expect(surface.launched_ssh);
+        try std.testing.expectEqualStrings("prod", surface.tab_title_override orelse "");
+    }
+
+    /// What `pane_launch.prepare` asks of the app about a new pane.
+    pub const LaunchContext = struct {
+        /// The process's first pane, which runs `initial-command` (`-e`).
+        first: bool,
+    };
+
+    pub fn launchContext(self: *const App) LaunchContext {
+        return .{ .first = self.core_app.first };
     }
 
     /// `applyDefaultProfileConfig`, unless this is the surface that runs
     /// `initial-command` (`-e`): the first one of the process, whichever path
     /// creates it. A restore clears `initial-command` first.
     pub fn applyDefaultProfileLaunch(self: *const App, config: *configpkg.Config) !?*const windows_shell.Profile {
-        if (!self.defaultProfileApplies(config)) return null;
+        if (!configpkg.pane_launch.defaultApplies(config, self.core_app.first)) return null;
         return try applyDefaultProfileConfig(config);
     }
 
-    /// A new window's forwarded arguments (`applyNewWindowArguments`), then
-    /// `applyDefaultProfileLaunch`. In that order: with a theme set, the
-    /// arguments' `finalize` builds the config again from its replay steps,
-    /// which would drop the profile's variables, line and directory. A
-    /// directory the arguments carry still wins over the profile's own,
-    /// except an SSH profile's (`keepExplicitWorkingDirectory`).
-    /// That rebuild replays the files as they were last read, which during a
-    /// palette theme preview is newer than the app config's profiles and
-    /// launch (`pane_launch.keepSources`), so those are put back after it; the
-    /// arguments cannot set any of them (`forwardedKeyAllowed`).
-    pub fn applyNewWindowLaunch(
-        self: *const App,
-        config: *configpkg.Config,
-        arguments: ?[]const [:0]const u8,
-    ) !?*const windows_shell.Profile {
-        try applyNewWindowArguments(self.core_app.alloc, config, arguments);
-        if (arguments) |argv| if (argv.len > 0) try configpkg.pane_launch.keepSources(config, &self.config);
-        const forwarded_directory = if (arguments) |argv| forwardedArgvSetsKey(argv, "working-directory") else false;
-        const directory = config.@"working-directory";
-        const profile = try self.applyDefaultProfileLaunch(config);
-        if (forwarded_directory) keepExplicitWorkingDirectory(config, profile, directory);
-        return profile;
-    }
-
     pub const applyRestoredDefaultLaunch = session_module.applyRestoredDefaultLaunch;
-
-    pub fn defaultProfileApplies(self: *const App, config: *const configpkg.Config) bool {
-        if (!config._command_defaulted or config._default_profile == null) return false;
-        return !(config.@"initial-command" != null and self.core_app.first);
-    }
 
     /// What a surface launched from `profile` keeps: the key that splits,
     /// session restore and elevation look the profile up by, and for SSH
@@ -5414,7 +5484,7 @@ pub const App = struct {
             },
         );
         defer config.deinit();
-        try applyProfileSurfaceConfig(&config, profile);
+        const launch = try configpkg.pane_launch.prepare(&config, .{ .chosen = profile }, self.launchContext());
 
         const tab_id = switch (open_target) {
             .split => blk: {
@@ -5425,10 +5495,10 @@ pub const App = struct {
             else => null,
         };
 
-        const surface_title = windows_shell.sshProfileAlias(profile) orelse profile.label;
+        const surface_title = launch.title orelse profile.label;
         const title_w = try std.unicode.utf8ToUtf16LeAllocZ(self.core_app.alloc, surface_title);
         defer self.core_app.alloc.free(title_w);
-        const surface = try self.createWindowSurface(&config, title_w.ptr, .{
+        return try self.createWindowSurface(&config, title_w.ptr, .{
             .host_id = if (open_target == .window) null else if (source) |v| v.host_id else null,
             .tab_insert_index = if (open_target == .tab and source != null and source.?.host != null)
                 windowNewTabInsertIndex(source.?.host.?, self.config.@"window-new-tab-position")
@@ -5436,25 +5506,25 @@ pub const App = struct {
                 null,
             .tab_id = tab_id,
             .clone_state_from = if (open_target == .window) self.registry.newWindowSource(target) else source,
+            .launch = launch,
         });
-        try self.noteProfileLaunch(surface, profile);
-        return surface;
     }
 
     pub fn createWindow(self: *App, title: LPCWSTR) !void {
-        if (!self.defaultProfileApplies(&self.config)) {
+        // The first window runs the app config itself, and a clone only when
+        // a default profile's variables, line and directory go on it.
+        if (!configpkg.pane_launch.defaultApplies(&self.config, self.core_app.first)) {
             _ = try self.createWindowSurface(&self.config, title, .{});
             return;
         }
         var config = try apprt.surface.newConfig(self.core_app, &self.config, .window);
         defer config.deinit();
-        const directory = config.@"working-directory";
-        const profile = try self.applyDefaultProfileLaunch(&config);
         // Explorer's "Open in noctty" and a jump-list folder start a first
         // window with `--working-directory=` when no instance runs.
-        if (self.explicit_startup_working_directory) keepExplicitWorkingDirectory(&config, profile, directory);
-        const surface = try self.createWindowSurface(&config, title, .{});
-        if (profile) |value| try self.noteProfileLaunch(surface, value);
+        const launch = try configpkg.pane_launch.prepare(&config, .{ .fresh = .{
+            .named_directory = self.explicit_startup_working_directory,
+        } }, self.launchContext());
+        _ = try self.createWindowSurface(&config, title, .{ .launch = launch });
     }
 
     fn createAdoptedWindow(

@@ -1,4 +1,8 @@
-//! Which command a new pane runs: the launch side of a config load.
+//! Which command a new pane runs, from which profile, with which variables and
+//! directory.
+//!
+//! `prepare` gives a new pane's config the launch its `Origin` calls for and
+//! says what the pane records of it (`Stamp`).
 //!
 //! `Config.parseManuallyHook` and `consumeManuallyHook` hand each argument to
 //! `note` and `consume`, which keep the command line's accepted `--command=`,
@@ -21,6 +25,8 @@ const Config = @import("Config.zig");
 const Command = @import("command.zig").Command;
 const ProfileMap = @import("profile_map.zig");
 const windows_shell = @import("windows_shell.zig");
+const windows_ssh_hosts = @import("windows_ssh_hosts.zig");
+const internal_os = @import("../os/main.zig");
 const cli_diags = @import("../cli/diagnostics.zig");
 
 const cli = struct {
@@ -30,6 +36,151 @@ const cli = struct {
 };
 
 const log = std.log.scoped(.config);
+
+/// How a new pane comes to be, which decides what of a launch it takes.
+pub const Origin = union(enum) {
+    /// A pane nothing chose a launch for: the first window, a plain new tab
+    /// or window, the quick terminal, a forwarded new window. It runs
+    /// `default-profile`'s profile when one applies (`defaultApplies`).
+    fresh: Fresh,
+    /// A profile chosen from the picker, the palette or a quick slot.
+    chosen: *const windows_shell.Profile,
+
+    pub const Fresh = struct {
+        /// The launch named its directory (`--working-directory=` on noctty's
+        /// command line, or in a forwarded new window's arguments), which
+        /// wins over the one the default profile pins: the default replaces
+        /// what runs, not where such a launch starts. An SSH profile keeps its
+        /// own: a local directory means nothing to the remote shell.
+        named_directory: bool = false,
+    };
+};
+
+/// What a new pane records of its launch (`SurfaceInitOptions.launch`): the
+/// key a split, a restore and elevation look its profile up by, whether it
+/// connects over SSH, the SSH alias as its tab title, and a user profile's
+/// line and variables, which the tabs and splits that repeat its launch run.
+/// It borrows from the pane's config and the profile it started, so the
+/// window gets it before that config is freed.
+pub const Stamp = struct {
+    key: ?[]const u8 = null,
+    ssh: bool = false,
+    title: ?[]const u8 = null,
+    user: ?windows_shell.UserLaunch = null,
+};
+
+/// Give `pane` the launch `origin` calls for, and say what the pane records
+/// of it. `pane` is the new pane's shallow clone of the app config
+/// (`apprt.surface.newConfig`), never the app config itself, and everything
+/// written goes into its arena: `command` is replaced, never freed (the old
+/// value is the app config's), and `env` is replaced by a copy. Call it once
+/// the pane's base directory is set, and before a directory the launch asks
+/// for (an automation `cwd`) goes over it. `context` is what the app knows of
+/// the pane: `first`, whether it is the process's first, which runs
+/// `initial-command` (`-e`) and no profile.
+pub fn prepare(pane: *Config, origin: Origin, context: anytype) !Stamp {
+    switch (origin) {
+        .fresh => |fresh| return try startDefault(pane, fresh.named_directory, context.first),
+        .chosen => |profile| {
+            // Home, unless the profile pins a directory of its own or asks for
+            // the ordinary rules (`inherit`), which `startProfile` gives it.
+            if (profile.working_directory == null) pane.@"working-directory" = try homeDirectory(pane, profile);
+            var stamp = try startProfile(pane, profile);
+            stamp.title = windows_shell.sshProfileAlias(profile);
+            return stamp;
+        },
+    }
+}
+
+/// Whether a pane nothing chose a launch for runs `default-profile`'s
+/// profile: the load resolved one and no launch replaced its command since,
+/// and the pane is not the first one of a process with `initial-command`
+/// (`-e`), whichever path creates it, which runs that command.
+pub fn defaultApplies(config: *const Config, first: bool) bool {
+    if (!config._command_defaulted or config._default_profile == null) return false;
+    return !(config.@"initial-command" != null and first);
+}
+
+/// `default-profile`'s launch, for a pane nothing chose one for. The load
+/// made the profile's command the default `command`; this gives the pane the
+/// rest of it, as a pick from the picker gets it, except that with no
+/// `profile-working-directory` the directory the ordinary rules gave stays,
+/// as for `command`.
+fn startDefault(pane: *Config, named_directory: bool, first: bool) !Stamp {
+    if (!defaultApplies(pane, first)) return .{};
+    const profile = defaultProfile(pane).?;
+    const directory = pane.@"working-directory";
+    var stamp = try startProfile(pane, profile);
+    if (named_directory and profile.kind != .ssh) pane.@"working-directory" = directory;
+    stamp.title = windows_shell.sshProfileAlias(profile);
+    return stamp;
+}
+
+/// Start `profile` on `pane`, with what has to hold on every launch path: a
+/// user profile's line and variables, its pinned directory (a path, `home`,
+/// or `inherit`, which leaves the ordinary rules' directory), and an SSH
+/// profile's hardening. A split's own directory inheritance, applied after
+/// this, still replaces the directory.
+fn startProfile(pane: *Config, profile: *const windows_shell.Profile) !Stamp {
+    const alloc = pane._arena.?.allocator();
+    pane.command = try profile.command.clone(alloc);
+    // `default-profile` no longer applies to this pane.
+    pane._command_defaulted = false;
+    const user = if (profile.user) |launch| try useUserLaunch(pane, launch) else null;
+    if (profile.working_directory) |dir| switch (dir) {
+        .path => |path| pane.@"working-directory" = .{ .path = try alloc.dupe(u8, path) },
+        .home => pane.@"working-directory" = try homeDirectory(pane, profile),
+        .inherit => {},
+    };
+    if (profile.kind == .ssh) try hardenSsh(pane);
+    return .{ .key = profile.key, .ssh = profile.kind == .ssh, .user = user };
+}
+
+/// Give `pane` a user profile's variables and command line, and return its
+/// copy of the line. The variables go on a copy: a shallow clone shares the
+/// app config's map, so writing into it would change every later launch. A
+/// profile variable replaces a global `env` variable of the same name in any
+/// case, as Windows compares names (a profile `PATH` replaces a global
+/// `Path`).
+fn useUserLaunch(pane: *Config, launch: windows_shell.UserLaunch) !windows_shell.UserLaunch {
+    const alloc = pane._arena.?.allocator();
+    var env = try pane.env.clone(alloc);
+    try windows_shell.layerEnv(alloc, &env, launch.env);
+    pane.env = env;
+    const copy = try launch.clone(alloc);
+    pane._profile_launch = copy;
+    return copy;
+}
+
+/// Home for a profile launch. A bare `.home` set on a pane's config after
+/// `Config.finalize` is not resolved again: Exec then starts the program in
+/// noctty's own current directory (measured: the directory noctty was
+/// started in), so a profile gets the path itself. For a Start menu launch
+/// that directory is the install folder, the start folder of the installer's
+/// shortcut (read from the installed `.lnk`, not measured by a launch). Only
+/// a profile that runs `wsl.exe` keeps `.home`, which gives it `--cd ~` (the
+/// Linux home) where a Windows path would give `--cd /mnt/c/Users/<name>`.
+fn homeDirectory(pane: *Config, profile: *const windows_shell.Profile) !Config.WorkingDirectory {
+    if (windows_shell.isWslCommand(profile.command)) return .home;
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const home = (internal_os.home(&buf) catch null) orelse return .home;
+    return .{ .path = try pane._arena.?.allocator().dupe(u8, home) };
+}
+
+fn hardenSsh(pane: *Config) !void {
+    // Shell integration injection rewrites the two-element ssh argv into a
+    // space-joined, unquoted `cmd.exe /C` string. A remote session cannot use
+    // it anyway: the integration scripts run locally.
+    pane.@"shell-integration" = .none;
+
+    // `.home` alone loses to an inherited working directory, so resolve the
+    // path explicitly and let the drive-absolute branch of the cwd resolver
+    // take it. This is the same directory `ssh` itself expands `~` to.
+    var home_buf: [std.fs.max_path_bytes]u8 = undefined;
+    if (try windows_ssh_hosts.userProfileDir(&home_buf)) |home| {
+        pane.@"working-directory" = .{ .path = try pane._arena.?.allocator().dupe(u8, home) };
+    }
+}
 
 /// What `arg` sets of the launch, read before the field parse
 /// (`Config.parseManuallyHook` calls this first): the command line's accepted
@@ -619,8 +770,8 @@ pub const DefaultProfileFailure = enum {
     unavailable,
 };
 
-/// Test adapters: a machine with fixed answers, and a load as `Config.load`
-/// makes it.
+/// Test adapters: a machine with fixed answers, what the app knows of a new
+/// pane, and a load as `Config.load` makes it.
 pub const fixtures = struct {
     /// Fixed lookups for `default-profile` in tests: no PATH search, and
     /// one Visual Studio 18 instead of the machine's.
@@ -628,6 +779,8 @@ pub const fixtures = struct {
         visual_studio: windows_shell.VisualStudioProfiles = .newest,
         /// False: Setup Configuration fails, and lists nothing.
         visual_studio_answers: bool = true,
+        /// True: OpenSSH is installed, so an `ssh:` reference resolves.
+        ssh: bool = false,
 
         pub fn visualStudio(self: Machine, alloc: Allocator, complete: *bool) ![]windows_shell.Profile {
             const vs = windows_shell.visual_studio;
@@ -670,13 +823,19 @@ pub const fixtures = struct {
             return null;
         }
 
-        pub fn sshExecutable(_: Machine, _: Allocator) !?[]u8 {
-            return null;
+        pub fn sshExecutable(self: Machine, alloc: Allocator) !?[]u8 {
+            if (!self.ssh) return null;
+            return try alloc.dupe(u8, "C:\\Windows\\System32\\OpenSSH\\ssh.exe");
         }
 
         pub fn get(_: Machine, _: Allocator, _: []const u8) Allocator.Error!?[]u8 {
             return null;
         }
+    };
+
+    /// What the app knows of a new pane (`prepare`'s `context`).
+    pub const Context = struct {
+        first: bool = false,
     };
 
     pub const Load = struct {
@@ -1719,4 +1878,255 @@ test "keepSources: a config built again from the files keeps the running launch"
     try testing.expectEqualStrings("nosuch", reread.@"default-profile".?);
     try testing.expect(outcome(&reread, "nosuch") == .not_found);
     try testing.expectEqualStrings("pwsh", filesDefaultProfile(&reread).?);
+}
+
+/// The user profiles `config` defines, built as discovery builds them.
+fn testUserProfiles(alloc: Allocator, config: *const Config) ![]windows_shell.Profile {
+    var user = try windows_shell.UserProfiles.init(alloc, config);
+    defer user.deinit();
+    return try windows_shell.appendUserProfiles(alloc, try alloc.alloc(windows_shell.Profile, 0), user.definitions, windows_shell.ProcessEnvironment{});
+}
+
+/// A new pane's config: a shallow clone of `config` in `C:\work`, as the
+/// ordinary rules left it.
+fn testPane(alloc: Allocator, config: *const Config) !Config {
+    var pane = config.shallowClone(alloc);
+    errdefer pane.deinit();
+    pane.@"working-directory" = .{ .path = try pane._arena.?.allocator().dupe(u8, "C:\\work") };
+    return pane;
+}
+
+/// Where `config` starts: its path, `~` for `.home`, or "" for neither.
+fn testDirectory(config: *const Config) []const u8 {
+    const directory = config.@"working-directory" orelse return "";
+    return switch (directory) {
+        .path => |path| path,
+        .home => "~",
+        .inherit => "",
+    };
+}
+
+test "prepare: a fresh pane runs default-profile's profile, except the first pane of -e" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    const files =
+        \\env = Path=C:\global
+        \\env = KEEP=1
+        \\profile-command = py: cmd.exe /k py
+        \\profile-env = py: PATH=C:\profile
+        \\profile-env = py: MODE=profile
+        \\profile-working-directory = py: D:\pinned
+        \\profile-command = ubuntu: wsl.exe -d Ubuntu
+        \\profile-working-directory = ubuntu: home
+        \\
+    ;
+    const Row = struct {
+        default: []const u8 = "",
+        argv: []const []const u8 = &.{},
+        first: bool = false,
+        named_directory: bool = false,
+        /// The key the pane records; null for no launch of the default.
+        key: ?[]const u8 = null,
+        line: bool = false,
+        directory: []const u8 = "C:\\work",
+    };
+    for ([_]Row{
+        // No default profile, nothing to start.
+        .{},
+        .{ .default = "py", .key = "user:py", .line = true, .directory = "D:\\pinned" },
+        // The first pane of a launch with `-e` runs that command; a later
+        // pane of it runs the profile.
+        .{ .default = "py", .argv = &.{ "-e", "vim.exe" }, .first = true },
+        .{ .default = "py", .argv = &.{ "-e", "vim.exe" }, .key = "user:py", .line = true, .directory = "D:\\pinned" },
+        // A directory the launch named wins over the pinned one.
+        .{ .default = "py", .named_directory = true, .key = "user:py", .line = true },
+        // A wsl.exe profile in home keeps `.home`, which gives `--cd ~`.
+        .{ .default = "ubuntu", .key = "user:ubuntu", .line = true, .directory = "~" },
+        .{ .default = "ubuntu", .named_directory = true, .key = "user:ubuntu", .line = true },
+        // A profile that pins nothing keeps the ordinary rules' directory.
+        .{ .default = "wsl:Ubuntu", .key = "wsl:Ubuntu" },
+        .{ .default = "vs:6bb7cfd9:cmd", .key = "vs:6bb7cfd9:cmd", .line = true },
+    }) |row| {
+        const text = try std.fmt.allocPrint(alloc, "{s}default-profile = {s}\n", .{ files, row.default });
+        defer alloc.free(text);
+        var cfg = try fixtures.load(alloc, .{ .file = text, .argv = row.argv });
+        defer cfg.deinit();
+        var pane = try testPane(alloc, &cfg);
+        defer pane.deinit();
+        const stamp = try prepare(&pane, .{ .fresh = .{ .named_directory = row.named_directory } }, fixtures.Context{ .first = row.first });
+        testing.expectEqualStrings(row.key orelse "", stamp.key orelse "") catch |err| {
+            std.debug.print("default-profile = {s}, first={}\n", .{ row.default, row.first });
+            return err;
+        };
+        try testing.expect(!stamp.ssh and stamp.title == null);
+        try testing.expectEqual(row.line, stamp.user != null);
+        try testing.expectEqualStrings(row.directory, testDirectory(&pane));
+        // Started: no longer noctty's choice, so the default does not
+        // stack on it.
+        if (row.key != null) try testing.expect(!defaultApplies(&pane, false));
+    }
+
+    // The profile's variables go on a copy, and its command is the pane's.
+    {
+        var cfg = try fixtures.load(alloc, .{ .file = files ++ "default-profile = py\n" });
+        defer cfg.deinit();
+        var pane = try testPane(alloc, &cfg);
+        defer pane.deinit();
+        const stamp = try prepare(&pane, .{ .fresh = .{} }, fixtures.Context{});
+        try testing.expectEqualStrings("cmd.exe /k py", (stamp.user orelse return error.TestUnexpectedResult).command_line);
+        // The profile's PATH replaces the global Path whatever the case.
+        try testing.expectEqualStrings("C:\\profile", pane.env.map.get("PATH") orelse "");
+        try testing.expect(pane.env.map.get("Path") == null);
+        try testing.expectEqualStrings("1", pane.env.map.get("KEEP") orelse "");
+        try testing.expectEqualStrings("profile", pane.env.map.get("MODE") orelse "");
+        // The app config's map and command, which the clone shared, stay.
+        try testing.expectEqualStrings("C:\\global", cfg.env.map.get("Path") orelse "");
+        try testing.expect(cfg.env.map.get("MODE") == null);
+        const words = try testDirectCommand(pane.command);
+        try testing.expectEqualStrings("cmd.exe", words[0]);
+        try testing.expect(words.ptr != (try testDirectCommand(cfg.command)).ptr);
+    }
+
+    // An SSH default is hardened and starts in USERPROFILE whatever the
+    // launch named, with its alias as the tab title.
+    {
+        var home_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const home = (try windows_ssh_hosts.userProfileDir(&home_buf)) orelse return error.SkipZigTest;
+        var cfg = try Config.default(alloc);
+        defer cfg.deinit();
+        var reader: std.Io.Reader = .fixed("default-profile = ssh:prod\n");
+        try cfg.loadReader(alloc, &reader, "C:\\noctty-test\\config.ghostty");
+        try finalizeWith(&cfg, fixtures.Machine{ .ssh = true });
+        for ([_]bool{ false, true }) |named_directory| {
+            var pane = try testPane(alloc, &cfg);
+            defer pane.deinit();
+            const stamp = try prepare(&pane, .{ .fresh = .{ .named_directory = named_directory } }, fixtures.Context{});
+            try testing.expectEqualStrings("ssh:prod", stamp.key orelse "");
+            try testing.expect(stamp.ssh);
+            try testing.expectEqualStrings("prod", stamp.title orelse "");
+            try testing.expectEqualStrings(home, testDirectory(&pane));
+            try testing.expectEqual(Config.ShellIntegration.none, pane.@"shell-integration");
+            try testing.expectEqual(Config.ShellIntegration.detect, cfg.@"shell-integration");
+        }
+    }
+}
+
+test "prepare: a chosen profile starts in home unless it pins a directory or inherits" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    var cfg = try fixtures.load(alloc, .{ .file = 
+        \\env = Path=C:\global
+        \\env = KEEP=1
+        \\profile-command = plain: cmd.exe /k echo "a&b"
+        \\profile-env = plain: PATH=C:\profile
+        \\profile-env = plain: NEW=2
+        \\profile-command = home: tool.exe
+        \\profile-working-directory = home: home
+        \\profile-command = inh: tool.exe
+        \\profile-working-directory = inh: inherit
+        \\profile-command = pin: tool.exe
+        \\profile-working-directory = pin: D:\pinned dir
+        \\profile-command = ubuntu: wsl.exe -d Ubuntu
+        \\profile-command = wslhome: C:\Windows\System32\wsl.exe -d Ubuntu
+        \\profile-working-directory = wslhome: home
+        \\
+    });
+    defer cfg.deinit();
+    try testing.expect(cfg._diagnostics.empty());
+    // A command the app config has, which the pane's clone shares.
+    cfg.command = .{ .shell = "pwsh.exe" };
+    const profiles = try testUserProfiles(alloc, &cfg);
+    defer windows_shell.deinitProfiles(alloc, profiles);
+    var home_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const home = (try internal_os.home(&home_buf)) orelse return error.SkipZigTest;
+
+    // Home as a path: a bare `.home` on a pane's config would start in
+    // noctty's own folder. A wsl.exe launch keeps `.home`, which gives
+    // `--cd ~` (the Linux home), not `/mnt/c/Users/<name>`.
+    const pwsh = [_][:0]const u8{"C:\\Program Files\\PowerShell\\7\\pwsh.exe"};
+    const powershell = [_][:0]const u8{"C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"};
+    const cmd = [_][:0]const u8{"C:\\Windows\\System32\\cmd.exe"};
+    const git_bash = [_][:0]const u8{ "C:\\Program Files\\Git\\bin\\bash.exe", "--login", "-i" };
+    const wsl_default = [_][:0]const u8{"C:\\Windows\\System32\\wsl.exe"};
+    const wsl_distro = [_][:0]const u8{ "C:\\Windows\\System32\\wsl.exe", "-d", "Ubuntu" };
+    const detected = [_]windows_shell.Profile{
+        .{ .kind = .pwsh, .key = "pwsh.exe", .label = "PowerShell", .command = .{ .direct = &pwsh } },
+        .{ .kind = .powershell, .key = "powershell.exe", .label = "Windows PowerShell", .command = .{ .direct = &powershell } },
+        .{ .kind = .cmd, .key = "cmd.exe", .label = "Command Prompt", .command = .{ .direct = &cmd } },
+        .{ .kind = .git_bash, .key = "git-bash", .label = "Git Bash", .command = .{ .direct = &git_bash } },
+        .{ .kind = .wsl_default, .key = "wsl-default", .label = "WSL", .command = .{ .direct = &wsl_default } },
+        .{ .kind = .wsl_distro, .key = "wsl:Ubuntu", .label = "Ubuntu", .command = .{ .direct = &wsl_distro } },
+    };
+    for (&detected) |*profile| {
+        var pane = try testPane(alloc, &cfg);
+        defer pane.deinit();
+        const stamp = try prepare(&pane, .{ .chosen = profile }, fixtures.Context{});
+        try testing.expectEqualStrings(profile.key, stamp.key orelse "");
+        try testing.expect(stamp.user == null and stamp.title == null);
+        const wsl = profile.kind == .wsl_default or profile.kind == .wsl_distro;
+        try testing.expectEqualStrings(if (wsl) "~" else home, testDirectory(&pane));
+    }
+    for ([_]struct { key: []const u8, directory: []const u8 }{
+        .{ .key = "user:plain", .directory = home },
+        .{ .key = "user:home", .directory = home },
+        // `inherit`: the directory the ordinary rules gave stays.
+        .{ .key = "user:inh", .directory = "C:\\work" },
+        .{ .key = "user:pin", .directory = "D:\\pinned dir" },
+        .{ .key = "user:ubuntu", .directory = "~" },
+        .{ .key = "user:wslhome", .directory = "~" },
+    }) |row| {
+        const profile = for (profiles) |*profile| {
+            if (std.mem.eql(u8, profile.key, row.key)) break profile;
+        } else return error.TestUnexpectedResult;
+        var pane = try testPane(alloc, &cfg);
+        defer pane.deinit();
+        const stamp = try prepare(&pane, .{ .chosen = profile }, fixtures.Context{});
+        try testing.expectEqualStrings(row.key, stamp.key orelse "");
+        try testing.expectEqualStrings(row.directory, testDirectory(&pane));
+        if (std.mem.eql(u8, row.key, "user:ubuntu")) {
+            // What Exec then runs (`Surface` passes `wd == .home`).
+            const command = pane.command orelse return error.TestUnexpectedResult;
+            const prepared = try windows_shell.prepareCommand(alloc, command, null, true, false);
+            defer prepared.deinit(alloc);
+            const argv = prepared.direct;
+            const cd = for (argv, 0..) |arg, i| {
+                if (std.mem.eql(u8, arg, "--cd")) break i;
+            } else return error.TestExpectedCd;
+            try testing.expectEqualStrings("~", argv[cd + 1]);
+        }
+        if (!std.mem.eql(u8, row.key, "user:plain")) continue;
+        // The line the pane runs as written, and the profile's variables on
+        // a copy: its PATH replaces the global Path whatever the case.
+        try testing.expectEqualStrings("cmd.exe /k echo \"a&b\"", (stamp.user orelse return error.TestUnexpectedResult).command_line);
+        try testing.expectEqual(@as(usize, 4), (try testDirectCommand(pane.command)).len);
+        try testing.expectEqualStrings("C:\\profile", pane.env.map.get("PATH") orelse "");
+        try testing.expect(pane.env.map.get("Path") == null);
+        try testing.expectEqualStrings("1", pane.env.map.get("KEEP") orelse "");
+        try testing.expectEqualStrings("2", pane.env.map.get("NEW") orelse "");
+        try testing.expectEqual(@as(usize, 2), cfg.env.count());
+        try testing.expectEqualStrings("C:\\global", cfg.env.map.get("Path") orelse "");
+        // The app config's command is not freed or replaced.
+        try testing.expectEqualStrings("pwsh.exe", try testShellCommand(cfg.command));
+    }
+
+    // SSH: the two-word argv, hardened, in USERPROFILE (a path, so it
+    // outranks an inherited directory), the alias as its title.
+    {
+        var ssh_home_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const ssh_home = (try windows_ssh_hosts.userProfileDir(&ssh_home_buf)) orelse return error.SkipZigTest;
+        const argv = [_][:0]const u8{ "C:\\Windows\\System32\\OpenSSH\\ssh.exe", "production" };
+        const profile: windows_shell.Profile = .{ .kind = .ssh, .key = "ssh:production", .label = "SSH: production", .command = .{ .direct = &argv } };
+        var pane = try testPane(alloc, &cfg);
+        defer pane.deinit();
+        pane.@"shell-integration" = .bash;
+        const stamp = try prepare(&pane, .{ .chosen = &profile }, fixtures.Context{});
+        try testing.expectEqualStrings("ssh:production", stamp.key orelse "");
+        try testing.expect(stamp.ssh);
+        try testing.expectEqualStrings("production", stamp.title orelse "");
+        try testing.expectEqualStrings("production", (try testDirectCommand(pane.command))[1]);
+        try testing.expectEqualStrings(ssh_home, testDirectory(&pane));
+        try testing.expectEqual(Config.ShellIntegration.none, pane.@"shell-integration");
+    }
 }

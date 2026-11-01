@@ -1351,7 +1351,7 @@ pub fn sessionFullscreenWindowPlacement(
 /// an SSH `default-profile` the pane gets the automatic shell, in place
 /// of the SSH command `Config` made the default.
 pub fn applyRestoredDefaultLaunch(self: *const App, config: *configpkg.Config) !?*const windows_shell.Profile {
-    if (self.defaultProfileApplies(config) and config._default_profile.?.kind == .ssh) {
+    if (configpkg.pane_launch.defaultApplies(config, self.core_app.first) and config._default_profile.?.kind == .ssh) {
         config.command = null;
         try configpkg.pane_launch.useAutomatic(config);
         return null;
