@@ -81,9 +81,11 @@ foreach ($movedWin32TestModule in $movedWin32TestFloors.Keys) {
 # of named tests the module declared when it was cut out: 59, 43, 23, 33, 10, 41,
 # 15, 4, 2, 7 and 1 below, the numbers the #584 to #590 reviews measured as the
 # tests a module filter runs above the no-match control. Registry adds 7
-# tests in R06b (#592). Lower one only for a
-# deliberate consolidation. test_support.zig declares no tests, so it has no
-# floor.
+# tests in R06b (#592). child_window.zig holds the 3 tests that moved out of
+# win32.zig with the child-control plumbing, and text.zig the 11 it declares
+# once the owned-string helpers (from win32.zig and labels.zig) and
+# utf8BoundedPrefix moved in. Lower one only for a deliberate consolidation.
+# test_support.zig declares no tests, so it has no floor.
 $extractedWin32TestModules = [ordered]@{
     'registry.zig' = @{ Binding = 'registry_module'; Floor = 7 }
     'app.zig' = @{ Binding = 'app_module'; Floor = 59 }
@@ -97,6 +99,8 @@ $extractedWin32TestModules = [ordered]@{
     'overlay_session.zig' = @{ Binding = 'overlay_session'; Floor = 2 }
     'palette_controller.zig' = @{ Binding = 'palette_controller'; Floor = 7 }
     'chrome_scene.zig' = @{ Binding = 'chrome_scene'; Floor = 1 }
+    'child_window.zig' = @{ Binding = 'child_window'; Floor = 3 }
+    'text.zig' = @{ Binding = 'paint_text'; Floor = 11 }
 }
 $win32RootTestBlock = [regex]::Match(
     $win32RuntimeText,

@@ -1,4 +1,5 @@
 const std = @import("std");
+const Allocator = std.mem.Allocator;
 
 /// Write a terminated prefix without allocating or splitting surrogate pairs.
 /// Invalid UTF-8 anywhere in src produces empty output, including past the cap.
@@ -28,6 +29,75 @@ pub fn replaceCachedUtf16(alloc: std.mem.Allocator, target: *?[:0]const u16, tex
     const replacement = try std.unicode.utf8ToUtf16LeAllocZ(alloc, text);
     if (target.*) |old| alloc.free(old);
     target.* = replacement;
+}
+
+pub fn appendOwnedString(
+    alloc: Allocator,
+    target: *?[:0]const u8,
+    value: ?[]const u8,
+) !void {
+    if (value) |next_value| {
+        if (target.*) |existing| {
+            if (std.mem.eql(u8, existing, next_value)) return;
+        }
+    } else if (target.* == null) {
+        return;
+    }
+
+    // Allocate first, then free the old slot. Reversing the order
+    // means that (a) an OOM leaves `*target` holding a still-valid
+    // previous allocation instead of a dangling freed pointer, and
+    // (b) a caller passing a `value` that aliases the current slot
+    // is copied to fresh storage before the free, avoiding UAF.
+    const next: ?[:0]const u8 = if (value) |v| try alloc.dupeZ(u8, v) else null;
+    if (target.*) |existing| alloc.free(existing);
+    target.* = next;
+}
+
+pub fn ownedStringEquals(current: ?[:0]const u8, value: []const u8) bool {
+    return if (current) |existing|
+        std.mem.eql(u8, existing, value)
+    else
+        false;
+}
+
+pub fn ownedBytesEquals(current: ?[]const u8, value: []const u8) bool {
+    return if (current) |existing|
+        std.mem.eql(u8, existing, value)
+    else
+        false;
+}
+
+pub fn optionalOwnedStringEquals(current: ?[:0]const u8, value: ?[]const u8) bool {
+    return if (value) |existing|
+        ownedStringEquals(current, existing)
+    else
+        current == null;
+}
+
+/// The longest prefix of `text` that fits `limit` bytes without splitting
+/// a UTF-8 sequence.
+///
+/// For UI Automation names, which are converted to a `BSTR` and rejected
+/// outright if the conversion fails: a name that overflows its caller's
+/// buffer has to come back shortened, never empty, because the caller is
+/// usually a live region that is about to be announced.
+///
+/// Deliberately simpler than the back-off in `buildConfirmPreview`, which
+/// must not drag its cut through orphan continuation bytes because it is
+/// showing arbitrary payload bytes and reports how many it showed. Names
+/// come from strings this process built, so a plain walk is enough.
+pub fn utf8BoundedPrefix(text: []const u8, limit: usize) []const u8 {
+    if (text.len <= limit) return text;
+    var end = limit;
+    // A UTF-8 sequence is at most 4 bytes, so the lead byte is at most 3
+    // positions back.
+    var steps: usize = 0;
+    while (steps < 4 and end > 0) : (steps += 1) {
+        if ((text[end] & 0xC0) != 0x80) break;
+        end -= 1;
+    }
+    return text[0..end];
 }
 
 test "bounded UTF-16 long ASCII and BMP text preserve buffer guards" {
@@ -102,4 +172,95 @@ test "replaceCachedUtf16 preserves cache on invalid input and replaces with empt
     try replaceCachedUtf16(alloc, &cache, "");
     try std.testing.expectEqual(@as(usize, 0), cache.?.len);
     try std.testing.expectEqual(@as(u16, 0), cache.?[0]);
+}
+
+test "win32 utf8BoundedPrefix never splits a codepoint" {
+    try std.testing.expectEqualStrings("abc", utf8BoundedPrefix("abc", 8));
+    try std.testing.expectEqualStrings("abc", utf8BoundedPrefix("abc", 3));
+    try std.testing.expectEqualStrings("ab", utf8BoundedPrefix("abc", 2));
+    try std.testing.expectEqualStrings("", utf8BoundedPrefix("abc", 0));
+
+    // "aé" is 3 bytes; a 2-byte limit lands mid-sequence and has to back
+    // off to 1 rather than hand back half a codepoint.
+    const accented = "a\u{e9}b";
+    try std.testing.expectEqualStrings("a", utf8BoundedPrefix(accented, 2));
+    try std.testing.expectEqualStrings("a\u{e9}", utf8BoundedPrefix(accented, 3));
+
+    // A 4-byte sequence, cut at every interior offset.
+    const emoji = "x\u{1f600}y";
+    try std.testing.expectEqualStrings("x", utf8BoundedPrefix(emoji, 2));
+    try std.testing.expectEqualStrings("x", utf8BoundedPrefix(emoji, 3));
+    try std.testing.expectEqualStrings("x", utf8BoundedPrefix(emoji, 4));
+    try std.testing.expectEqualStrings("x\u{1f600}", utf8BoundedPrefix(emoji, 5));
+
+    // Every result is valid UTF-8, which is what the BSTR conversion needs.
+    for (0..emoji.len + 2) |limit| {
+        try std.testing.expect(std.unicode.utf8ValidateSlice(utf8BoundedPrefix(emoji, limit)));
+    }
+}
+
+test "win32 appendOwnedString replaces existing value and frees old allocation" {
+    const testing = std.testing;
+    var target: ?[:0]const u8 = null;
+    try appendOwnedString(testing.allocator, &target, "alpha");
+    try testing.expect(target != null);
+    try testing.expectEqualStrings("alpha", target.?);
+
+    try appendOwnedString(testing.allocator, &target, "beta");
+    try testing.expect(target != null);
+    try testing.expectEqualStrings("beta", target.?);
+
+    try appendOwnedString(testing.allocator, &target, null);
+    try testing.expect(target == null);
+}
+
+test "win32 appendOwnedString skips exact same-value reallocation" {
+    const testing = std.testing;
+    var target: ?[:0]const u8 = null;
+    defer if (target) |value| testing.allocator.free(value);
+
+    try appendOwnedString(testing.allocator, &target, "alpha");
+    const before = target.?.ptr;
+    try appendOwnedString(testing.allocator, &target, "alpha");
+    try testing.expect(target != null);
+    try testing.expect(target.?.ptr == before);
+
+    try appendOwnedString(testing.allocator, &target, null);
+    try testing.expect(target == null);
+    try appendOwnedString(testing.allocator, &target, null);
+    try testing.expect(target == null);
+}
+
+test "win32 appendOwnedString leaves target untouched on OOM" {
+    // OOM must leave `target.*` pointing at the existing allocation.
+    const testing = std.testing;
+    var arena: [64]u8 = undefined;
+    var fixed: std.heap.FixedBufferAllocator = .init(&arena);
+    const alloc = fixed.allocator();
+
+    var target: ?[:0]const u8 = null;
+    try appendOwnedString(alloc, &target, "warm-up");
+    try testing.expectEqualStrings("warm-up", target.?);
+
+    // Force an allocation failure with a value too large to fit.
+    const huge = "x" ** 512;
+    const before = target.?.ptr;
+    try testing.expectError(error.OutOfMemory, appendOwnedString(alloc, &target, huge));
+    try testing.expect(target != null);
+    try testing.expect(target.?.ptr == before);
+    try testing.expectEqualStrings("warm-up", target.?);
+}
+
+test "win32 optionalOwnedStringEquals handles present and null values" {
+    try std.testing.expect(optionalOwnedStringEquals(null, null));
+    try std.testing.expect(!optionalOwnedStringEquals(null, "pwsh"));
+    try std.testing.expect(optionalOwnedStringEquals("pwsh", "pwsh"));
+    try std.testing.expect(!optionalOwnedStringEquals("pwsh", "cmd"));
+    try std.testing.expect(!optionalOwnedStringEquals("pwsh", null));
+}
+
+test "win32 ownedBytesEquals handles present and missing values" {
+    try std.testing.expect(!ownedBytesEquals(null, "v1.2.3"));
+    try std.testing.expect(ownedBytesEquals("v1.2.3", "v1.2.3"));
+    try std.testing.expect(!ownedBytesEquals("v1.2.3", "v1.2.4"));
 }

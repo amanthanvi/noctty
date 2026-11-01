@@ -12,28 +12,28 @@ const win32 = @import("../win32.zig");
 const budget = .{
     // Entries in each `pub const *_runtime` bag on the facade.
     .bags = .{
-        .chrome_scene_runtime = 67,
+        .chrome_scene_runtime = 65,
         .chrome_scene_test_runtime = 4,
-        .overlay_session_runtime = 58,
+        .overlay_session_runtime = 45,
         .overlay_session_test_runtime = 5,
-        .palette_controller_runtime = 48,
+        .palette_controller_runtime = 44,
         .palette_controller_test_runtime = 7,
-        .search_controls_runtime = 86,
+        .search_controls_runtime = 68,
         .search_controls_test_runtime = 4,
-        .window_state_runtime = 27,
-        .window_state_test_runtime = 23,
+        .window_state_runtime = 26,
+        .window_state_test_runtime = 22,
         .host_test_runtime = 2,
-        .surface_presentation_runtime = 13,
+        .surface_presentation_runtime = 12,
         .surface_presentation_test_runtime = 3,
-        .session_runtime = 58,
+        .session_runtime = 55,
         .session_test_runtime = 2,
-        .quick_terminal_host_runtime = 34,
-        .test_support_runtime = 55,
+        .quick_terminal_host_runtime = 32,
+        .test_support_runtime = 52,
     },
     // The facade's pub declarations: what the files that import it can reach.
-    .facade_pub_decls = 575,
+    .facade_pub_decls = 558,
     // Root declarations of win32.zig whose value is a field access (`a.b`).
-    .facade_aliases = 322,
+    .facade_aliases = 318,
     // Fields of win32.App named `test_*`.
     .app_test_hooks = 10,
 };
@@ -41,7 +41,14 @@ const budget = .{
 /// Leaf modules under win32/, each `.{ .file, .module, .source, .pub_decls }`.
 /// None of a leaf's own `@import`s may be a `facade_owners` path; what those
 /// imports import in turn is not checked.
-const leaves = .{};
+const leaves = .{
+    .{
+        .file = "child_window.zig",
+        .module = @import("child_window.zig"),
+        .source = @embedFile("child_window.zig"),
+        .pub_decls = 16,
+    },
+};
 
 /// The facade, the files that own its App, Host and Surface, and
 /// `../../apprt.zig`, which re-exports the facade as `apprt.win32` (a leaf

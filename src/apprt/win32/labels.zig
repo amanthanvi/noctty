@@ -15,6 +15,7 @@ const win32_taskbar_progress = @import("../win32_taskbar_progress.zig");
 const win32_search_bar = @import("../win32_search_bar.zig");
 const win32_types = @import("../win32_types.zig");
 const c = @import("consts.zig");
+const paint_text = @import("text.zig");
 
 const ThemeColors = win32_theme.ThemeColors;
 const HostOverlayMode = win32_theme.HostOverlayMode;
@@ -22,7 +23,6 @@ const darkTheme = win32_theme.darkTheme;
 const adjustColor = win32_theme.adjustColor;
 const overlayAccentColor = win32_theme.overlayAccentColor;
 const rgb = win32_theme.rgb;
-const LayoutChildPaintPlan = win32_chrome_state.LayoutChildPaintPlan;
 const PaletteSnapshot = win32_palette.Snapshot;
 const RankedIndex = win32_palette.RankedIndex;
 const PaletteStableId = @TypeOf((@as(win32_palette.catalog.Item, undefined)).id);
@@ -32,6 +32,7 @@ const tokenizePaletteQuery = win32_palette.tokenizeQuery;
 const rankPaletteEntry = win32_palette.rankEntry;
 const rankedIndicesForQuery = win32_palette.rankedForQuery;
 const RECT = win32_types.RECT;
+const ownedStringEquals = paint_text.ownedStringEquals;
 const LPCWSTR = win32_types.LPCWSTR;
 const WPARAM = usize;
 
@@ -150,13 +151,6 @@ pub const ProfileSelection = union(enum) {
     ambiguous: usize,
     invalid,
 };
-
-pub fn ownedStringEquals(current: ?[:0]const u8, value: []const u8) bool {
-    return if (current) |existing|
-        std.mem.eql(u8, existing, value)
-    else
-        false;
-}
 
 /// Keyboard focus stops inside the overlay row, in tab order.
 /// `preview` is the confirm pane: it takes focus so a keyboard user
@@ -474,16 +468,8 @@ pub fn searchBarDisplayStateChanged(
         search_bar.selected != selected;
 }
 
-pub fn inspectorVisibilityChangeNeedsHostRelayout(changed: bool) bool {
-    return changed;
-}
-
 pub fn inspectorPanelVisibleForState(overlay_mode: HostOverlayMode, active_tab_has_inspector: bool) bool {
     return overlay_mode == .none and active_tab_has_inspector;
-}
-
-pub fn layoutChildPaintPlan(chrome_changed: bool, content_changed: bool) LayoutChildPaintPlan {
-    return win32_chrome_state.layoutChildPaintPlan(chrome_changed, content_changed);
 }
 
 pub fn overlayAcceptButtonVisible(mode: HostOverlayMode) bool {
@@ -698,16 +684,8 @@ pub fn clearQuickSlotPinsRequested(vk: WPARAM, alt_pressed: bool, shift_pressed:
     return vk == c.VK_0 or vk == c.VK_NUMPAD0;
 }
 
-pub fn startsWithIgnoreCase(haystack: []const u8, prefix: []const u8) bool {
-    if (prefix.len > haystack.len) return false;
-    for (haystack[0..prefix.len], prefix) |a, b| {
-        if (std.ascii.toLower(a) != std.ascii.toLower(b)) return false;
-    }
-    return true;
-}
-
 pub fn storedProfileKeyEquals(a: []const u8, b: []const u8) bool {
-    if (startsWithIgnoreCase(a, "ssh:") or startsWithIgnoreCase(b, "ssh:")) {
+    if (std.ascii.startsWithIgnoreCase(a, "ssh:") or std.ascii.startsWithIgnoreCase(b, "ssh:")) {
         return std.mem.eql(u8, a, b);
     }
     return std.ascii.eqlIgnoreCase(a, b);
@@ -745,8 +723,8 @@ pub fn resolveProfileSelection(
             exact_match = index;
             break;
         }
-        if (startsWithIgnoreCase(profile.key, input_text) or
-            startsWithIgnoreCase(profile.label, input_text))
+        if (std.ascii.startsWithIgnoreCase(profile.key, input_text) or
+            std.ascii.startsWithIgnoreCase(profile.label, input_text))
         {
             unique_match = index;
             match_count += 1;
@@ -850,18 +828,6 @@ pub fn resizeSplitFallbackDelta(value: apprt.action.ResizeSplit) ResizeSplitFall
         .up => .{ .height = -amount },
         .down => .{ .height = amount },
     };
-}
-
-fn nextInspectorVisible(current: bool, mode: apprt.action.Inspector) bool {
-    return switch (mode) {
-        .toggle => !current,
-        .show => true,
-        .hide => false,
-    };
-}
-
-pub fn nextTabInspectorVisible(active_tab_has_inspector: bool, mode: apprt.action.Inspector) bool {
-    return nextInspectorVisible(active_tab_has_inspector, mode);
 }
 
 pub fn buildHostAwareBaseTitle(
@@ -1254,33 +1220,6 @@ pub fn searchBarButtonShowsLabel(role: SearchBarButtonRole, button_width: i32) b
     return false;
 }
 
-pub fn rectInset(rect: RECT, inset_x: i32, inset_y: i32) RECT {
-    return .{
-        .left = rect.left + inset_x,
-        .top = rect.top + inset_y,
-        .right = rect.right - inset_x,
-        .bottom = rect.bottom - inset_y,
-    };
-}
-
-pub fn rectUnion(a: RECT, b: RECT) RECT {
-    return .{
-        .left = @min(a.left, b.left),
-        .top = @min(a.top, b.top),
-        .right = @max(a.right, b.right),
-        .bottom = @max(a.bottom, b.bottom),
-    };
-}
-
-pub fn rectOffset(rect: RECT, dx: i32, dy: i32) RECT {
-    return .{
-        .left = rect.left + dx,
-        .top = rect.top + dy,
-        .right = rect.right + dx,
-        .bottom = rect.bottom + dy,
-    };
-}
-
 pub fn searchBarResultsVisual(
     theme: *const ThemeColors,
     bar: *const win32_search_bar.SearchBar,
@@ -1370,31 +1309,6 @@ pub fn buildTabOverviewOverlayLabel(
 ) ![]u8 {
     if (total <= 1) return try alloc.dupe(u8, "Tab");
     return try std.fmt.allocPrint(alloc, "Tab {d}/{d}", .{ current_index + 1, total });
-}
-
-/// The longest prefix of `text` that fits `limit` bytes without splitting
-/// a UTF-8 sequence.
-///
-/// For UI Automation names, which are converted to a `BSTR` and rejected
-/// outright if the conversion fails: a name that overflows its caller's
-/// buffer has to come back shortened, never empty, because the caller is
-/// usually a live region that is about to be announced.
-///
-/// Deliberately simpler than the back-off in `buildConfirmPreview`, which
-/// must not drag its cut through orphan continuation bytes because it is
-/// showing arbitrary payload bytes and reports how many it showed. Names
-/// come from strings this process built, so a plain walk is enough.
-pub fn utf8BoundedPrefix(text: []const u8, limit: usize) []const u8 {
-    if (text.len <= limit) return text;
-    var end = limit;
-    // A UTF-8 sequence is at most 4 bytes, so the lead byte is at most 3
-    // positions back.
-    var steps: usize = 0;
-    while (steps < 4 and end > 0) : (steps += 1) {
-        if ((text[end] & 0xC0) != 0x80) break;
-        end -= 1;
-    }
-    return text[0..end];
 }
 
 /// The prompt text carried by an active confirm overlay. Chrome paint
@@ -2333,22 +2247,6 @@ pub fn commandPaletteBannerText(
     return try buf.toOwnedSlice(alloc);
 }
 
-pub fn overlayPaintCacheDirty(
-    overlay_text_dirty: bool,
-    overlay_mode: HostOverlayMode,
-    cached_label_w: ?[:0]const u16,
-    cached_feedback_w: ?[:0]const u16,
-    cached_badge_w: ?[:0]const u16,
-) bool {
-    return win32_chrome_state.overlayPaintCacheDirty(
-        overlay_text_dirty,
-        overlay_mode,
-        cached_label_w != null,
-        cached_feedback_w != null,
-        cached_badge_w != null,
-    );
-}
-
 pub fn buildInspectorPanelTitleText(
     alloc: Allocator,
     host: HostTabStatus,
@@ -2760,24 +2658,6 @@ test "win32 resizeSplitFallbackDelta maps directions to window deltas" {
         ResizeSplitFallbackDelta{ .width = 0, .height = 12 },
         resizeSplitFallbackDelta(.{ .amount = 12, .direction = .down }),
     );
-}
-
-test "win32 nextInspectorVisible follows requested mode" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    try std.testing.expect(nextInspectorVisible(false, .toggle));
-    try std.testing.expect(!nextInspectorVisible(true, .toggle));
-    try std.testing.expect(nextInspectorVisible(false, .show));
-    try std.testing.expect(!nextInspectorVisible(true, .hide));
-}
-
-test "win32 tab inspector toggle hides any active pane inspector" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    try std.testing.expect(nextTabInspectorVisible(false, .toggle));
-    try std.testing.expect(!nextTabInspectorVisible(true, .toggle));
-    try std.testing.expect(nextTabInspectorVisible(true, .show));
-    try std.testing.expect(!nextTabInspectorVisible(false, .hide));
 }
 
 test "win32 buildHostAwareBaseTitle prefixes host tab position" {
@@ -4007,33 +3887,6 @@ test "win32 confirm overlay falls back once its payload is dropped" {
     try std.testing.expectEqualStrings("", body);
 }
 
-test "win32 utf8BoundedPrefix never splits a codepoint" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    try std.testing.expectEqualStrings("abc", utf8BoundedPrefix("abc", 8));
-    try std.testing.expectEqualStrings("abc", utf8BoundedPrefix("abc", 3));
-    try std.testing.expectEqualStrings("ab", utf8BoundedPrefix("abc", 2));
-    try std.testing.expectEqualStrings("", utf8BoundedPrefix("abc", 0));
-
-    // "aé" is 3 bytes; a 2-byte limit lands mid-sequence and has to back
-    // off to 1 rather than hand back half a codepoint.
-    const accented = "a\u{e9}b";
-    try std.testing.expectEqualStrings("a", utf8BoundedPrefix(accented, 2));
-    try std.testing.expectEqualStrings("a\u{e9}", utf8BoundedPrefix(accented, 3));
-
-    // A 4-byte sequence, cut at every interior offset.
-    const emoji = "x\u{1f600}y";
-    try std.testing.expectEqualStrings("x", utf8BoundedPrefix(emoji, 2));
-    try std.testing.expectEqualStrings("x", utf8BoundedPrefix(emoji, 3));
-    try std.testing.expectEqualStrings("x", utf8BoundedPrefix(emoji, 4));
-    try std.testing.expectEqualStrings("x\u{1f600}", utf8BoundedPrefix(emoji, 5));
-
-    // Every result is valid UTF-8, which is what the BSTR conversion needs.
-    for (0..emoji.len + 2) |limit| {
-        try std.testing.expect(std.unicode.utf8ValidateSlice(utf8BoundedPrefix(emoji, limit)));
-    }
-}
-
 test "win32 confirm body text is the one the overlay feedback lane draws" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
@@ -4565,26 +4418,6 @@ test "win32 buildHostBannerText prefixes info and error banners" {
     const err = try buildHostBannerText(std.testing.allocator, .err, "ready");
     defer std.testing.allocator.free(err);
     try std.testing.expectEqualStrings("Error: ready", err);
-}
-
-test "win32 overlayPaintCacheDirty ignores repaint-only dirtiness" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    const cached = std.unicode.utf8ToUtf16LeStringLiteral("ok");
-
-    try std.testing.expect(!overlayPaintCacheDirty(false, .search, cached, cached, null));
-    try std.testing.expect(!overlayPaintCacheDirty(false, .profile, cached, cached, cached));
-
-    try std.testing.expect(overlayPaintCacheDirty(true, .search, cached, cached, null));
-    try std.testing.expect(overlayPaintCacheDirty(false, .search, null, cached, null));
-    try std.testing.expect(overlayPaintCacheDirty(false, .profile, cached, cached, null));
-}
-
-test "win32 inspector visibility changes require host relayout" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    try std.testing.expect(inspectorVisibilityChangeNeedsHostRelayout(true));
-    try std.testing.expect(!inspectorVisibilityChangeNeedsHostRelayout(false));
 }
 
 test "win32 inspector panel visibility is tab scoped" {

@@ -120,9 +120,10 @@ reading step under [Self-Correction Log](#self-correction-log).
   `src/apprt/win32_theme.zig` owns theme policy; focused modules under
   `src/apprt/win32/` own session capture and restore, the quick terminal host,
   window state, surface presentation, the docked search controls, overlay and
-  palette orchestration, the chrome scene, Win32 constants/externs,
-  labels/input, startup/render tracing, chrome rectangle math, and GDI paint
-  primitives.
+  palette orchestration, the chrome scene, child-control plumbing
+  (`child_window.zig`), Win32 constants/externs, labels/input, owned and
+  bounded text (`text.zig`), startup/render tracing, chrome rectangle math,
+  and GDI paint primitives.
 - Windows packaging: `dist/windows/` + `scripts/package-windows.ps1`
 - libghostty-vt headers: `include/ghostty/`
 
@@ -256,8 +257,9 @@ that govern each symbol you change, or that none does.
   (`recreateTitlebarIconFonts`, `createIconFontWithGlyphs`,
   `fontGlyphCoverage`, `drawTitlebarGlyph`), chrome child z-order, host paint
   and invalidation scopes and text caches (`win32/chrome_scene.zig`:
-  `paintChrome`, `invalidateChrome*`, `repaintTopChrome`; `appendOwnedString`),
-  tweens.
+  `paintChrome`, `invalidateChrome*`, `repaintTopChrome`; `appendOwnedString`
+  in `win32/text.zig`), the child placement cache (`ChildPlacement`,
+  `applyChromeChildRect` in `win32/child_window.zig`), tweens.
 - [chrome-overlays.md](docs/agents/log/chrome-overlays.md): the command
   palette (`win32_palette.zig`, `win32/palette_controller.zig`, ranking, MRU
   and its `palette-mru.txt` lines: `writePaletteMruLine`, palette list, the
@@ -268,7 +270,8 @@ that govern each symbol you change, or that none does.
   `invokeConfirmAccept`/`Cancel` lifetime; its paint text in
   `labels.buildOverlayPaintLabelText`), the profile
   overlay, host banners and the update notice, overlay EDIT writes
-  (`setOverlayEditText`).
+  (`setOverlayEditText`, and `syncWindowTextUtf8CachedAfterSet` in
+  `win32/child_window.zig`).
 - [search-scrollbar.md](docs/agents/log/search-scrollbar.md): the docked
   search bar (`win32_search_bar.zig`, `searchEditProc` in
   `win32/search_controls.zig`, visible Up/Down versus

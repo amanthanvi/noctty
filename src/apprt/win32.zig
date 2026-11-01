@@ -111,6 +111,7 @@ const bench_trace = @import("win32/bench_trace.zig");
 const labels = @import("win32/labels.zig");
 const paint_text = @import("win32/text.zig");
 const win32_input = @import("win32/input.zig");
+const child_window = @import("win32/child_window.zig");
 const chrome_layout = @import("win32/chrome_layout.zig");
 const gdi = @import("win32/gdi.zig");
 const c = @import("win32/consts.zig");
@@ -126,7 +127,6 @@ const win32_config_problems = @import("win32/config_problems.zig");
 pub const chrome_scene_runtime = .{
     .Allocator = Allocator,
     .CaptionButton = CaptionButton,
-    .ChildPlacement = ChildPlacement,
     .ChromeRepaintMask = ChromeRepaintMask,
     .HDC = HDC,
     .HWND = HWND,
@@ -170,7 +170,6 @@ pub const chrome_scene_runtime = .{
     .overlayEditText = overlayEditText,
     .overlayFeedbackLineRect = overlayFeedbackLineRect,
     .overlayLabelReservation = overlayLabelReservation,
-    .overlayPaintCacheDirty = overlayPaintCacheDirty,
     .paintRectVisible = paintRectVisible,
     .paint_text = paint_text,
     .profileChromeAccent = profileChromeAccent,
@@ -211,8 +210,6 @@ pub const overlay_session_runtime = .{
     .OverlayConfirmText = OverlayConfirmText,
     .OverlayFocusSlot = OverlayFocusSlot,
     .WPARAM = WPARAM,
-    .appendOwnedString = appendOwnedString,
-    .applyChildVisibility = applyChildVisibility,
     .buildCommandPaletteFeedbackText = buildCommandPaletteFeedbackText,
     .buildCommandPaletteOverlayLabel = buildCommandPaletteOverlayLabel,
     .buildConfirmBodyText = buildConfirmBodyText,
@@ -229,12 +226,9 @@ pub const overlay_session_runtime = .{
     .confirmPromptUiaName = confirmPromptUiaName,
     .destroySubclassedWindow = destroySubclassedWindow,
     .detachChromeControlProvider = detachChromeControlProvider,
-    .editSnapshot = editSnapshot,
     .hostButtonProc = hostButtonProc,
     .host_overlay_height = host_overlay_height,
-    .lastError = lastError,
     .log = log,
-    .nativeEditSelection = nativeEditSelection,
     .nextVisibleOverlayFocusSlot = nextVisibleOverlayFocusSlot,
     .overlayAcceptButtonVisible = overlayAcceptButtonVisible,
     .overlayCancelLabel = overlayCancelLabel,
@@ -245,18 +239,10 @@ pub const overlay_session_runtime = .{
     .palette_max_visible_rows = palette_max_visible_rows,
     .palette_row_height = palette_row_height,
     .program_confirm_arming_ms = program_confirm_arming_ms,
-    .prompt_button_class = prompt_button_class,
-    .prompt_edit_class = prompt_edit_class,
-    .prompt_label_class = prompt_label_class,
-    .readWindowTextUtf8Alloc = readWindowTextUtf8Alloc,
     .refocusActiveSurface = refocusActiveSurface,
     .runUiActionOrLog = runUiActionOrLog,
-    .selectNativeEditRange = selectNativeEditRange,
-    .setWindowData = setWindowData,
     .shouldRefocusAfterOverlayHide = shouldRefocusAfterOverlayHide,
     .std = std,
-    .syncWindowTextUtf8Cached = syncWindowTextUtf8Cached,
-    .syncWindowTextUtf8CachedAfterSet = syncWindowTextUtf8CachedAfterSet,
     .sys = sys,
     .win32_uia = win32_uia,
 };
@@ -288,16 +274,13 @@ pub const palette_controller_runtime = .{
     .UINT = UINT,
     .WNDCLASSEXW = WNDCLASSEXW,
     .WPARAM = WPARAM,
-    .appendOwnedString = appendOwnedString,
     .c = c,
     .drawRectBorder = drawRectBorder,
     .fillSolidRect = fillSolidRect,
     .host_overlay_height = host_overlay_height,
     .lParamBits = lParamBits,
-    .lastError = lastError,
     .log = log,
     .overlayEditText = overlayEditText,
-    .ownedStringEquals = ownedStringEquals,
     .paint_text = paint_text,
     .paletteCompletionText = paletteCompletionText,
     .palette_catalog_label_bytes = palette_catalog_label_bytes,
@@ -317,7 +300,6 @@ pub const palette_controller_runtime = .{
     .win32_palette = win32_palette,
     .win32_settings = win32_settings,
     .win32_uia = win32_uia,
-    .windowData = windowData,
 };
 
 pub const palette_controller_test_runtime = if (builtin.is_test) .{
@@ -333,7 +315,6 @@ pub const palette_controller_test_runtime = if (builtin.is_test) .{
 pub const search_controls_runtime = .{
     .Allocator = Allocator,
     .ButtonColors = ButtonColors,
-    .ChildPlacement = ChildPlacement,
     .DRAWITEMSTRUCT = DRAWITEMSTRUCT,
     .DWORD = DWORD,
     .HDC = HDC,
@@ -349,13 +330,10 @@ pub const search_controls_runtime = .{
     .WPARAM = WPARAM,
     .adjustColor = adjustColor,
     .advanceSearchSelectedRaw = advanceSearchSelectedRaw,
-    .applyChildRect = applyChildRect,
-    .applyChildVisibility = applyChildVisibility,
     .blendColorRGB = blendColorRGB,
     .buildSearchBarResultsText = buildSearchBarResultsText,
     .buttonColorsFromTheme = buttonColorsFromTheme,
     .c = c,
-    .childRect = childRect,
     .chromeKeyMods = chromeKeyMods,
     .createIconFontForFace = createIconFontForFace,
     .decorativeUiaName = Surface.decorativeUiaName,
@@ -364,7 +342,6 @@ pub const search_controls_runtime = .{
     .dockedSearchCoreDirectionFromKeyAction = dockedSearchCoreDirectionFromKeyAction,
     .dockedSearchEnterDirection = dockedSearchEnterDirection,
     .drawRoundedRect = drawRoundedRect,
-    .editSnapshot = editSnapshot,
     .fillSolidRect = fillSolidRect,
     .focusableHwnd = focusableHwnd,
     .fontGlyphCoverage = fontGlyphCoverage,
@@ -378,19 +355,9 @@ pub const search_controls_runtime = .{
     .keyPressed = keyPressed,
     .lParamBits = lParamBits,
     .labels = labels,
-    .lastError = lastError,
     .log = log,
     .logUiActionError = logUiActionError,
-    .nativeEditSelection = nativeEditSelection,
     .overlayAccentColor = overlayAccentColor,
-    .prompt_button_class = prompt_button_class,
-    .prompt_edit_class = prompt_edit_class,
-    .prompt_label_class = prompt_label_class,
-    .readWindowTextUtf8Alloc = readWindowTextUtf8Alloc,
-    .rectEquals = rectEquals,
-    .rectInset = rectInset,
-    .rectOffset = rectOffset,
-    .rectUnion = rectUnion,
     .scheduleDeferredUiaDisconnect = scheduleDeferredUiaDisconnect,
     .searchBarBottomLine = searchBarBottomLine,
     .searchBarButtonCommandId = searchBarButtonCommandId,
@@ -406,11 +373,8 @@ pub const search_controls_runtime = .{
     .searchBarToolbarVisual = searchBarToolbarVisual,
     .searchButtonKeyAction = searchButtonKeyAction,
     .searchSelectedDisplayFromRaw = searchSelectedDisplayFromRaw,
-    .selectNativeEditRange = selectNativeEditRange,
-    .setWindowData = setWindowData,
     .showSearchBarResults = showSearchBarResults,
     .std = std,
-    .syncWindowTextUtf8Cached = syncWindowTextUtf8Cached,
     .sys = sys,
     .terminal = terminal,
     .terminalDisconnectThunk = terminalDisconnectThunk,
@@ -447,7 +411,6 @@ pub const window_state_runtime = .{
     .configuredHostWindowPosition = configuredHostWindowPosition,
     .effectiveBackgroundOpacity = effectiveBackgroundOpacity,
     .forwardedArgvSetsKey = forwardedArgvSetsKey,
-    .lastError = lastError,
     .log = log,
     .scaleInitialClientSize = scaleInitialClientSize,
     .std = std,
@@ -471,7 +434,6 @@ pub const window_state_test_runtime = if (builtin.is_test) .{
     .monitorInfo = monitorInfo,
     .placementTestApp = placementTestApp,
     .placementTestSurface = placementTestSurface,
-    .prompt_label_class = prompt_label_class,
     .runOnHiddenDesktop = runOnHiddenDesktop,
     .testHostIsLayered = testHostIsLayered,
     .testLayeredAlpha = testLayeredAlpha,
@@ -491,7 +453,6 @@ pub const surface_presentation_runtime = .{
     .apprt = apprt,
     .c = c,
     .first_frame = first_frame,
-    .lastError = lastError,
     .log = log,
     .rendererpkg = rendererpkg,
     .std = std,
@@ -522,7 +483,6 @@ pub const session_runtime = .{
     .WINDOWPLACEMENT = WINDOWPLACEMENT,
     .WindowStart = WindowStart,
     .WorkAreas = WorkAreas,
-    .appendOwnedString = appendOwnedString,
     .applyDefaultProfileConfig = applyDefaultProfileConfig,
     .applyProfileSurfaceConfig = applyProfileSurfaceConfig,
     .apprt = apprt,
@@ -534,7 +494,6 @@ pub const session_runtime = .{
     .default_title = default_title,
     .gl_startup = gl_startup,
     .internal_os = internal_os,
-    .lastError = lastError,
     .listProfilesForConfig = listProfilesForConfig,
     .log = log,
     .makeParentDirAbsolute = makeParentDirAbsolute,
@@ -549,7 +508,6 @@ pub const session_runtime = .{
     .setMinimizedNormalRect = setMinimizedNormalRect,
     .shouldInheritSplitWorkingDirectory = shouldInheritSplitWorkingDirectory,
     .shouldResetNewTabWorkingDirectory = shouldResetNewTabWorkingDirectory,
-    .startsWithIgnoreCase = startsWithIgnoreCase,
     .startupNamesProfile = startupNamesProfile,
     .std = std,
     .sys = sys,
@@ -587,7 +545,6 @@ pub const quick_terminal_host_runtime = .{
     .Surface = Surface,
     .SurfaceInitOptions = SurfaceInitOptions,
     .Tab = Tab,
-    .appendOwnedString = appendOwnedString,
     .apprt = apprt,
     .builtin = builtin,
     .c = c,
@@ -599,7 +556,6 @@ pub const quick_terminal_host_runtime = .{
     .palette_list_class_name = palette_list_class_name,
     .rectEqual = rectEqual,
     .scrollbar_class_name = scrollbar_class_name,
-    .setWindowData = setWindowData,
     .std = std,
     .sys = sys,
     .win32_quick_terminal = win32_quick_terminal,
@@ -624,9 +580,6 @@ pub const test_support_runtime = if (builtin.is_test) .{
     .host_class_name = host_class_name,
     .palette_list_class_name = palette_list_class_name,
     .scrollbar_class_name = scrollbar_class_name,
-    .prompt_label_class = prompt_label_class,
-    .lastError = lastError,
-    .appendOwnedString = appendOwnedString,
     .surfaceDropPayloadCallback = surfaceDropPayloadCallback,
     .workspaceRectToScreen = workspaceRectToScreen,
     .monitorInfo = monitorInfo,
@@ -698,6 +651,8 @@ test {
     _ = @import("win32/focus_cue.zig");
     _ = @import("win32/first_frame.zig");
     _ = @import("win32/facade_budget.zig");
+    _ = child_window;
+    _ = paint_text;
     _ = clipboard_write;
     _ = @import("win32_aumid.zig");
     _ = @import("win32_toast_activator.zig");
@@ -908,23 +863,9 @@ const MINMAXINFO = sys.MINMAXINFO;
 pub const LOGFONTW = sys.LOGFONTW;
 pub const NONCLIENTMETRICSW = sys.NONCLIENTMETRICSW;
 
-pub fn lastError() std.posix.UnexpectedError {
-    return windows.unexpectedError(windows.kernel32.GetLastError());
-}
-
-pub fn setWindowData(hwnd: HWND, ptr: ?*anyopaque) void {
-    const raw: LONG_PTR = if (ptr) |value|
-        @intCast(@intFromPtr(value))
-    else
-        0;
-    _ = sys.SetWindowLongPtrW(hwnd, c.GWLP_USERDATA, raw);
-}
-
-fn windowData(comptime T: type, hwnd: HWND) ?*T {
-    const raw = sys.GetWindowLongPtrW(hwnd, c.GWLP_USERDATA);
-    if (raw == 0) return null;
-    return @ptrFromInt(@as(usize, @intCast(raw)));
-}
+const lastError = child_window.lastError;
+const setWindowData = child_window.setWindowData;
+const windowData = child_window.windowData;
 
 const RTL_OSVERSIONINFOW = sys.RTL_OSVERSIONINFOW;
 
@@ -990,13 +931,12 @@ pub const palette_row_height: i32 = 36;
 /// Max rows visible at once; beyond this, mouse wheel scrolls.
 const palette_max_visible_rows: usize = 7;
 pub const default_title = std.unicode.utf8ToUtf16LeStringLiteral("noctty");
-pub const prompt_label_class = std.unicode.utf8ToUtf16LeStringLiteral("STATIC");
+const prompt_label_class = child_window.prompt_label_class;
 /// `DrawText` flags shared by the chrome paint fallback and the
 /// owner-draw handler for the confirm prompt lines.
 pub const confirm_prompt_text_format: u32 = c.DT_LEFT | c.DT_VCENTER |
     c.DT_SINGLELINE | c.DT_NOPREFIX | c.DT_END_ELLIPSIS;
-const prompt_edit_class = std.unicode.utf8ToUtf16LeStringLiteral("EDIT");
-pub const prompt_button_class = std.unicode.utf8ToUtf16LeStringLiteral("BUTTON");
+const prompt_button_class = child_window.prompt_button_class;
 const titlebar_icon_font_fluent = std.unicode.utf8ToUtf16LeStringLiteral("Segoe Fluent Icons");
 const titlebar_icon_font_mdl2 = std.unicode.utf8ToUtf16LeStringLiteral("Segoe MDL2 Assets");
 const titlebar_glyph_minimize = std.unicode.utf8ToUtf16LeStringLiteral("\u{E921}");
@@ -1552,8 +1492,8 @@ pub fn elevatedProfileKey(action_key: []const u8, pane_key: ?[]const u8) ?[]cons
 /// or, for a Visual Studio shell, may say `visual-studio-profiles = none`.
 pub fn elevatesBySelector(config: *const configpkg.Config, key: []const u8, same_account: bool) bool {
     if (!same_account) return false;
-    if (startsWithIgnoreCase(key, "vs:")) return true;
-    if (!startsWithIgnoreCase(key, "user:")) return false;
+    if (std.ascii.startsWithIgnoreCase(key, "vs:")) return true;
+    if (!std.ascii.startsWithIgnoreCase(key, "user:")) return false;
     const id = key["user:".len..];
     if (config.@"profile-command".get(id) == null) return false;
     if (config.profilePlace("profile-command", id) != .file) return false;
@@ -4433,14 +4373,6 @@ const ConfirmCancelReason = overlay_session.ConfirmCancelReason;
 
 pub const ConfirmPayload = overlay_session.ConfirmPayload;
 
-pub const ChildPlacement = struct {
-    hwnd: ?HWND = null,
-    rect: RECT = .{ .left = 0, .top = 0, .right = 0, .bottom = 0 },
-    rect_known: bool = false,
-    visible: bool = false,
-    visible_known: bool = false,
-};
-
 pub const ScrollbarPolicy = enum {
     never,
     dynamic,
@@ -4468,7 +4400,7 @@ pub const Tab = struct {
     cached_button_label_max_width: usize = 0,
     cached_button_show_pane_count: bool = false,
     button_label_cache_valid: bool = false,
-    button_placement: ChildPlacement = .{},
+    button_placement: child_window.ChildPlacement = .{},
     /// What the tab strip shows for the programs in this tab (OSC 7501),
     /// kept so a change repaints the button and reaches assistive
     /// technology once. Owned by `Host.refreshTabStatus`.
@@ -5150,28 +5082,7 @@ pub fn sanitizeTitleAlloc(alloc: Allocator, title: []const u8) Allocator.Error!?
     return try out.toOwnedSlice(alloc);
 }
 
-pub fn appendOwnedString(
-    alloc: Allocator,
-    target: *?[:0]const u8,
-    value: ?[]const u8,
-) !void {
-    if (value) |next_value| {
-        if (target.*) |existing| {
-            if (std.mem.eql(u8, existing, next_value)) return;
-        }
-    } else if (target.* == null) {
-        return;
-    }
-
-    // Allocate first, then free the old slot. Reversing the order
-    // means that (a) an OOM leaves `*target` holding a still-valid
-    // previous allocation instead of a dangling freed pointer, and
-    // (b) a caller passing a `value` that aliases the current slot
-    // is copied to fresh storage before the free, avoiding UAF.
-    const next: ?[:0]const u8 = if (value) |v| try alloc.dupeZ(u8, v) else null;
-    if (target.*) |existing| alloc.free(existing);
-    target.* = next;
-}
+const appendOwnedString = paint_text.appendOwnedString;
 
 pub fn appendSanitizedTitle(
     alloc: Allocator,
@@ -5183,113 +5094,7 @@ pub fn appendSanitizedTitle(
     try appendOwnedString(alloc, target, if (sanitized) |value| value else title);
 }
 
-pub const ownedStringEquals = labels.ownedStringEquals;
-
-pub fn ownedBytesEquals(current: ?[]const u8, value: []const u8) bool {
-    return if (current) |existing|
-        std.mem.eql(u8, existing, value)
-    else
-        false;
-}
-
-pub fn optionalOwnedStringEquals(current: ?[:0]const u8, value: ?[]const u8) bool {
-    return if (value) |existing|
-        ownedStringEquals(current, existing)
-    else
-        current == null;
-}
-
-fn syncWindowTextUtf8Cached(
-    alloc: Allocator,
-    hwnd: HWND,
-    cached: *?[:0]const u8,
-    value: []const u8,
-) !bool {
-    if (ownedStringEquals(cached.*, value)) return false;
-    try appendOwnedString(alloc, cached, value);
-    const value_w = try std.unicode.utf8ToUtf16LeAllocZ(alloc, value);
-    defer alloc.free(value_w);
-    _ = sys.SetWindowTextW(hwnd, value_w.ptr);
-    return true;
-}
-
-fn syncWindowTextUtf8CachedAfterSet(
-    alloc: Allocator,
-    hwnd: HWND,
-    cached: *?[:0]const u8,
-    value: []const u8,
-) !bool {
-    if (ownedStringEquals(cached.*, value)) return false;
-    const value_w = try std.unicode.utf8ToUtf16LeAllocZ(alloc, value);
-    defer alloc.free(value_w);
-    _ = sys.SetWindowTextW(hwnd, value_w.ptr);
-    try appendOwnedString(alloc, cached, value);
-    return true;
-}
-
 pub const overlayEditText = overlay_session.overlayEditText;
-
-fn syncChildPlacementTarget(placement: *ChildPlacement, hwnd: HWND) void {
-    if (placement.hwnd == null or placement.hwnd.? != hwnd) {
-        placement.* = .{ .hwnd = hwnd };
-    }
-}
-
-pub fn applyChildRect(hwnd: HWND, placement: *ChildPlacement, rect: RECT) bool {
-    syncChildPlacementTarget(placement, hwnd);
-    if (placement.rect_known and rectEquals(placement.rect, rect)) return false;
-    _ = sys.MoveWindow(
-        hwnd,
-        rect.left,
-        rect.top,
-        @max(0, rect.right - rect.left),
-        @max(0, rect.bottom - rect.top),
-        0,
-    );
-    placement.rect = rect;
-    placement.rect_known = true;
-    return true;
-}
-
-/// `applyChildRect` for chrome children, which have to repaint themselves
-/// after a move.
-///
-/// `MoveWindow` runs with `bRepaint = FALSE` so a relayout never forces a
-/// paint of the terminal surfaces, and the host carries `WS_CLIPCHILDREN`, so
-/// the parent's own chrome-band repaint is clipped out of every child rect. A
-/// moved chrome child therefore keeps whatever pixels happened to be on screen
-/// at its new position -- the strip background, or the stale image of the
-/// button that used to sit there -- until something else invalidates it.
-///
-/// `Host.layout` covers the moves it makes itself via
-/// `invalidateChromeChildPaint`, but `Host.refreshChrome` and
-/// `Surface.refreshWindowTitle` also relayout the tab strip through
-/// `syncTabButtons` and invalidate only the parent. Whichever of them runs
-/// first after a tab is inserted does the move, and the placement cache then
-/// makes the miss permanent: the next `layout` sees no rect change and skips
-/// the child invalidation, so the button stays unpainted at its new slot while
-/// its old image survives underneath the neighbour that took its place.
-///
-/// Tying the invalidation to the move keeps correctness from depending on
-/// which caller happens to relayout the strip first. It costs one
-/// `InvalidateRect` per child that actually moved, so idle repaints are
-/// unaffected.
-pub fn applyChromeChildRect(hwnd: HWND, placement: *ChildPlacement, rect: RECT) bool {
-    if (!applyChildRect(hwnd, placement, rect)) return false;
-    // Chrome children are owner-drawn over their full client area, so the
-    // erase pass would only add a flash of background under the new paint.
-    _ = sys.InvalidateRect(hwnd, null, 0);
-    return true;
-}
-
-pub fn applyChildVisibility(hwnd: HWND, placement: *ChildPlacement, visible: bool) bool {
-    syncChildPlacementTarget(placement, hwnd);
-    if (placement.visible_known and placement.visible == visible) return false;
-    _ = sys.ShowWindow(hwnd, if (visible) c.SW_SHOW else c.SW_HIDE);
-    placement.visible = visible;
-    placement.visible_known = true;
-    return true;
-}
 
 /// Raise `child` to the top of its siblings, for a chrome child shown over
 /// a terminal pane. A child is created at the bottom of the z-order, below
@@ -5873,131 +5678,6 @@ pub fn applyDwmThemeWithBuild(hwnd: HWND, theme: *const ThemeColors, config: *co
         c.DWMSBT_NONE,
         supportsDwmSystemBackdropAttribute(os_build),
     );
-}
-
-fn utf16CodeUnitOffsetToUtf8ByteOffset(text: []const u8, target_units: usize) usize {
-    var byte_offset: usize = 0;
-    var utf16_units: usize = 0;
-    while (byte_offset < text.len) {
-        const sequence_len = std.unicode.utf8ByteSequenceLength(text[byte_offset]) catch return byte_offset;
-        const end = byte_offset + @as(usize, sequence_len);
-        if (end > text.len) return byte_offset;
-        const codepoint = std.unicode.utf8Decode(text[byte_offset..end]) catch return byte_offset;
-        const codepoint_units: usize = if (codepoint > 0xFFFF) 2 else 1;
-        if (utf16_units + codepoint_units > target_units) return byte_offset;
-        utf16_units += codepoint_units;
-        byte_offset = end;
-        if (utf16_units == target_units) return byte_offset;
-    }
-    return text.len;
-}
-
-fn utf8ByteOffsetToUtf16CodeUnitOffset(text: []const u8, target_bytes: usize) usize {
-    const target = @min(target_bytes, text.len);
-    var byte_offset: usize = 0;
-    var utf16_units: usize = 0;
-    while (byte_offset < target) {
-        const sequence_len = std.unicode.utf8ByteSequenceLength(text[byte_offset]) catch return utf16_units;
-        const end = byte_offset + @as(usize, sequence_len);
-        if (end > target or end > text.len) return utf16_units;
-        const codepoint = std.unicode.utf8Decode(text[byte_offset..end]) catch return utf16_units;
-        utf16_units += if (codepoint > 0xFFFF) 2 else 1;
-        byte_offset = end;
-    }
-    return utf16_units;
-}
-
-test "Win32 edit offsets preserve supplementary Unicode boundaries" {
-    const text = "a🚀b";
-    const utf16_offsets = [_]usize{ 0, 1, 3, 4 };
-    const utf8_offsets = [_]usize{ 0, 1, 5, 6 };
-    for (utf16_offsets, utf8_offsets) |utf16_offset, utf8_offset| {
-        try std.testing.expectEqual(
-            utf8_offset,
-            utf16CodeUnitOffsetToUtf8ByteOffset(text, utf16_offset),
-        );
-        try std.testing.expectEqual(
-            utf16_offset,
-            utf8ByteOffsetToUtf16CodeUnitOffset(text, utf8_offset),
-        );
-    }
-    try std.testing.expectEqual(@as(usize, 1), utf16CodeUnitOffsetToUtf8ByteOffset(text, 2));
-    try std.testing.expectEqual(@as(usize, 1), utf8ByteOffsetToUtf16CodeUnitOffset(text, 2));
-}
-
-test "Win32 edit caret chooses the active selection endpoint" {
-    try std.testing.expectEqual(@as(u32, 2), editSelectionCaretEndpoint(.{ 2, 8 }, 2));
-    try std.testing.expectEqual(@as(u32, 8), editSelectionCaretEndpoint(.{ 2, 8 }, 8));
-    try std.testing.expectEqual(@as(u32, 2), editSelectionCaretEndpoint(.{ 2, 8 }, 3));
-    try std.testing.expectEqual(@as(u32, 8), editSelectionCaretEndpoint(.{ 2, 8 }, 7));
-    try std.testing.expectEqual(@as(u32, 5), editSelectionCaretEndpoint(.{ 5, 5 }, 99));
-}
-
-fn nativeEditSelection(hwnd: HWND) [2]u32 {
-    var start: u32 = 0;
-    var end: u32 = 0;
-    _ = sys.SendMessageW(
-        hwnd,
-        c.EM_GETSEL,
-        @intFromPtr(&start),
-        @bitCast(@intFromPtr(&end)),
-    );
-    return .{ start, end };
-}
-
-fn editSelectionCaretEndpoint(selection: [2]u32, native_caret: u32) u32 {
-    if (selection[0] == selection[1]) return selection[0];
-    const distance_to_start = if (native_caret >= selection[0])
-        native_caret - selection[0]
-    else
-        selection[0] - native_caret;
-    const distance_to_end = if (native_caret >= selection[1])
-        native_caret - selection[1]
-    else
-        selection[1] - native_caret;
-    return if (distance_to_start < distance_to_end) selection[0] else selection[1];
-}
-
-fn nativeEditCaret(hwnd: HWND, selection: [2]u32) u32 {
-    if (selection[0] == selection[1]) return selection[0];
-    if (sys.GetFocus() != hwnd) return selection[1];
-    var point: POINT = undefined;
-    if (sys.GetCaretPos(&point) == 0) return selection[1];
-    const x: u16 = @bitCast(@as(i16, @truncate(point.x)));
-    const y: u16 = @bitCast(@as(i16, @truncate(point.y)));
-    const packed_point: LPARAM = @bitCast(@as(usize, x) | (@as(usize, y) << 16));
-    const result = sys.SendMessageW(hwnd, c.EM_CHARFROMPOS, 0, packed_point);
-    const native_caret: u32 = @intCast(@as(usize, @bitCast(result)) & 0xFFFF);
-    return editSelectionCaretEndpoint(selection, native_caret);
-}
-
-fn editSnapshot(
-    alloc: Allocator,
-    hwnd: HWND,
-    value: []const u8,
-) !win32_uia.TerminalSnapshot {
-    const document_text = try alloc.dupe(u8, value);
-    const selection = nativeEditSelection(hwnd);
-    const start = utf16CodeUnitOffsetToUtf8ByteOffset(value, selection[0]);
-    const end = utf16CodeUnitOffsetToUtf8ByteOffset(value, selection[1]);
-    const caret = utf16CodeUnitOffsetToUtf8ByteOffset(value, nativeEditCaret(hwnd, selection));
-    return .{
-        .document_text = document_text,
-        .visible_range = .{ .start = 0, .end = document_text.len },
-        .caret_offset = caret,
-        .selection_range = .{ .start = @min(start, end), .end = @max(start, end) },
-    };
-}
-
-fn selectNativeEditRange(
-    hwnd: HWND,
-    snapshot_text: []const u8,
-    range: win32_uia.OffsetRange,
-) void {
-    const start = utf8ByteOffsetToUtf16CodeUnitOffset(snapshot_text, range.start);
-    const end = utf8ByteOffsetToUtf16CodeUnitOffset(snapshot_text, range.end);
-    _ = sys.SendMessageW(hwnd, c.EM_SETSEL, start, @intCast(end));
-    _ = sys.SetFocus(hwnd);
 }
 
 pub fn quickSelectNameThunk(ctx: *anyopaque, buf: []u8) []const u8 {
@@ -9385,58 +9065,6 @@ test "copied terminal text keeps only web and mail links as anchors" {
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, fragment, "</a>"));
 }
 
-test "win32 appendOwnedString replaces existing value and frees old allocation" {
-    const testing = std.testing;
-    var target: ?[:0]const u8 = null;
-    try appendOwnedString(testing.allocator, &target, "alpha");
-    try testing.expect(target != null);
-    try testing.expectEqualStrings("alpha", target.?);
-
-    try appendOwnedString(testing.allocator, &target, "beta");
-    try testing.expect(target != null);
-    try testing.expectEqualStrings("beta", target.?);
-
-    try appendOwnedString(testing.allocator, &target, null);
-    try testing.expect(target == null);
-}
-
-test "win32 appendOwnedString skips exact same-value reallocation" {
-    const testing = std.testing;
-    var target: ?[:0]const u8 = null;
-    defer if (target) |value| testing.allocator.free(value);
-
-    try appendOwnedString(testing.allocator, &target, "alpha");
-    const before = target.?.ptr;
-    try appendOwnedString(testing.allocator, &target, "alpha");
-    try testing.expect(target != null);
-    try testing.expect(target.?.ptr == before);
-
-    try appendOwnedString(testing.allocator, &target, null);
-    try testing.expect(target == null);
-    try appendOwnedString(testing.allocator, &target, null);
-    try testing.expect(target == null);
-}
-
-test "win32 appendOwnedString leaves target untouched on OOM" {
-    // OOM must leave `target.*` pointing at the existing allocation.
-    const testing = std.testing;
-    var arena: [64]u8 = undefined;
-    var fixed: std.heap.FixedBufferAllocator = .init(&arena);
-    const alloc = fixed.allocator();
-
-    var target: ?[:0]const u8 = null;
-    try appendOwnedString(alloc, &target, "warm-up");
-    try testing.expectEqualStrings("warm-up", target.?);
-
-    // Force an allocation failure with a value too large to fit.
-    const huge = "x" ** 512;
-    const before = target.?.ptr;
-    try testing.expectError(error.OutOfMemory, appendOwnedString(alloc, &target, huge));
-    try testing.expect(target != null);
-    try testing.expect(target.?.ptr == before);
-    try testing.expectEqualStrings("warm-up", target.?);
-}
-
 /// Window procedure for the tab strip's title tooltip.
 ///
 /// The popup is owned by the host but is a top-level window, so nothing about
@@ -9665,11 +9293,7 @@ pub const searchBarDisplayStateChanged = labels.searchBarDisplayStateChanged;
 
 pub const profileChromeVisible = win32_chrome_state.profileVisible;
 
-pub const inspectorVisibilityChangeNeedsHostRelayout = labels.inspectorVisibilityChangeNeedsHostRelayout;
-
 pub const inspectorPanelVisibleForState = labels.inspectorPanelVisibleForState;
-
-pub const layoutChildPaintPlan = labels.layoutChildPaintPlan;
 
 const overlayAcceptButtonVisible = labels.overlayAcceptButtonVisible;
 
@@ -9698,8 +9322,6 @@ const quickSlotShortcutProfileIndex = labels.quickSlotShortcutProfileIndex;
 const quickSlotPinOrdinalFromKey = labels.quickSlotPinOrdinalFromKey;
 
 const clearQuickSlotPinsRequested = labels.clearQuickSlotPinsRequested;
-
-const startsWithIgnoreCase = labels.startsWithIgnoreCase;
 
 pub const resolveProfileSelection = labels.resolveProfileSelection;
 
@@ -9858,8 +9480,6 @@ pub fn nativeSplitDirection(value: win32_shell.model.Direction) SplitTreeSurface
     };
 }
 
-pub const nextTabInspectorVisible = labels.nextTabInspectorVisible;
-
 pub const buildHostAwareBaseTitle = labels.buildHostAwareBaseTitle;
 
 pub const hostTabLabelMaxWidth = labels.hostTabLabelMaxWidth;
@@ -9886,12 +9506,6 @@ const searchBarChromeLayout = chrome_layout.searchBarChromeLayout;
 const searchBarFit = chrome_layout.searchBarFit;
 
 const searchBarButtonShowsLabel = labels.searchBarButtonShowsLabel;
-
-pub const rectInset = labels.rectInset;
-
-const rectUnion = labels.rectUnion;
-
-const rectOffset = labels.rectOffset;
 
 const searchBarGroupRect = search_controls.searchBarGroupRect;
 
@@ -9923,13 +9537,10 @@ const buildOverlayAcceptLabel = labels.buildOverlayAcceptLabel;
 
 const buildOverlayHintText = labels.buildOverlayHintText;
 const buildConfirmBodyText = labels.buildConfirmBodyText;
-pub const utf8BoundedPrefix = labels.utf8BoundedPrefix;
 
 const overlayCancelLabel = labels.overlayCancelLabel;
 
 pub const buildHostBannerText = labels.buildHostBannerText;
-
-const overlayPaintCacheDirty = labels.overlayPaintCacheDirty;
 
 const buildInspectorPanelTitleText = labels.buildInspectorPanelTitleText;
 
@@ -10029,21 +9640,6 @@ const buildCommandPaletteOverlayLabel = labels.buildCommandPaletteOverlayLabel;
 const buildCommandPaletteFeedbackText = labels.buildCommandPaletteFeedbackText;
 
 const paletteCompletionText = labels.paletteCompletionText;
-
-fn readWindowTextUtf8Alloc(alloc: Allocator, hwnd: HWND) ![:0]u8 {
-    const len_w = sys.GetWindowTextLengthW(hwnd);
-    if (len_w <= 0) return try alloc.dupeZ(u8, "");
-
-    const needed: usize = @intCast(len_w + 1);
-    var buf_w = try alloc.alloc(u16, needed);
-    defer alloc.free(buf_w);
-    buf_w[needed - 1] = 0;
-
-    const copied = sys.GetWindowTextW(hwnd, buf_w.ptr, @intCast(needed));
-    if (copied < 0) return lastError();
-
-    return try std.unicode.utf16LeToUtf8AllocZ(alloc, buf_w[0..@intCast(copied)]);
-}
 
 fn wmCommandChildHwnd(lParam: LPARAM) ?HWND {
     if (lParam == 0) return null;
@@ -11200,7 +10796,7 @@ fn confirmPromptUiaName(
 ) []const u8 {
     if (mode != .confirm) return "";
     const text = cached orelse return "";
-    return std.fmt.bufPrint(buf, "{s}", .{utf8BoundedPrefix(text, buf.len)}) catch fallback;
+    return std.fmt.bufPrint(buf, "{s}", .{paint_text.utf8BoundedPrefix(text, buf.len)}) catch fallback;
 }
 
 /// Whether a confirm prompt line is rendered by its own child window
@@ -11215,7 +10811,7 @@ fn confirmPromptUiaName(
 pub fn confirmPromptLineOwnedByChild(
     mode: HostOverlayMode,
     hwnd: ?HWND,
-    placement: ChildPlacement,
+    placement: child_window.ChildPlacement,
 ) bool {
     if (mode != .confirm) return false;
     return hwnd != null and placement.visible;
@@ -12807,8 +12403,8 @@ pub fn selectedProfileSelectionNeedsChange(
     next_key: []const u8,
 ) bool {
     return current_index != next_index or
-        !ownedStringEquals(selected_profile_key, next_key) or
-        !ownedStringEquals(launcher_profile_key, next_key);
+        !paint_text.ownedStringEquals(selected_profile_key, next_key) or
+        !paint_text.ownedStringEquals(launcher_profile_key, next_key);
 }
 
 fn startupProfilePickerEnabled(raw: []const u8) bool {
@@ -25501,24 +25097,6 @@ test "win32 surfaceFocusedActivationNeedsHostSync requires actual surface focus"
     try std.testing.expect(surfaceFocusedActivationNeedsHostSync(false, true, 2, 2, true, false));
 }
 
-test "win32 optionalOwnedStringEquals handles present and null values" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    try std.testing.expect(optionalOwnedStringEquals(null, null));
-    try std.testing.expect(!optionalOwnedStringEquals(null, "pwsh"));
-    try std.testing.expect(optionalOwnedStringEquals("pwsh", "pwsh"));
-    try std.testing.expect(!optionalOwnedStringEquals("pwsh", "cmd"));
-    try std.testing.expect(!optionalOwnedStringEquals("pwsh", null));
-}
-
-test "win32 ownedBytesEquals handles present and missing values" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    try std.testing.expect(!ownedBytesEquals(null, "v1.2.3"));
-    try std.testing.expect(ownedBytesEquals("v1.2.3", "v1.2.3"));
-    try std.testing.expect(!ownedBytesEquals("v1.2.3", "v1.2.4"));
-}
-
 test "win32 scrollbarNeedsHeartbeatForState skips stable hidden dynamic bars" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
@@ -25589,7 +25167,7 @@ test "win32 overlay dismissal restores focus only from owned controls" {
 }
 
 fn expectOverlayEditText(host: *Host, expected: []const u8) !void {
-    const text = try readWindowTextUtf8Alloc(std.testing.allocator, host.overlay_edit_hwnd.?);
+    const text = try child_window.readWindowTextUtf8Alloc(std.testing.allocator, host.overlay_edit_hwnd.?);
     defer std.testing.allocator.free(text);
     try std.testing.expectEqualStrings(expected, text);
 }
@@ -25625,7 +25203,7 @@ test "win32 title prompt refills its text when the active surface changes" {
     // the tab strip and layout passes have nothing to do.
     const parent = try createTestHostWindow();
     defer _ = sys.DestroyWindow(parent);
-    host.overlay_edit_hwnd = try createTestChromeChild(parent, prompt_edit_class);
+    host.overlay_edit_hwnd = try createTestChromeChild(parent, child_window.prompt_edit_class);
     host.overlay_accept_hwnd = try createTestChromeChild(parent, prompt_button_class);
     host.overlay_cancel_hwnd = try createTestChromeChild(parent, prompt_button_class);
     // `Host.deinit` frees these caches, and the session never runs it.
@@ -25798,8 +25376,8 @@ test "win32 confirm prompt lines fall back to paint independently" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
     const hwnd: HWND = @ptrFromInt(0x1000);
-    const shown: ChildPlacement = .{ .visible = true, .visible_known = true };
-    const hidden: ChildPlacement = .{};
+    const shown: child_window.ChildPlacement = .{ .visible = true, .visible_known = true };
+    const hidden: child_window.ChildPlacement = .{};
 
     try std.testing.expect(confirmPromptLineOwnedByChild(.confirm, hwnd, shown));
 
@@ -25934,68 +25512,6 @@ test "win32 profileKind label and hint colors follow profile accent" {
     try std.testing.expectEqual(rgb(12, 96, 126), profileKindHintColor(.pwsh, false));
     try std.testing.expectEqual(rgb(120, 80, 4), profileKindLabelColor(.git_bash, false));
     try std.testing.expectEqual(rgb(140, 96, 8), profileKindHintColor(.git_bash, false));
-}
-
-test "win32 chrome child placement invalidates a moved button" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    // Off-screen so the fixture never flashes over the desktop. An update
-    // region is per-window bookkeeping, so it survives being off-screen.
-    const hinstance = sys.GetModuleHandleW(null);
-    const parent = sys.CreateWindowExW(
-        0,
-        prompt_label_class,
-        std.unicode.utf8ToUtf16LeStringLiteral(""),
-        c.WS_POPUP | c.WS_VISIBLE | c.WS_CLIPCHILDREN,
-        -4000,
-        -4000,
-        1280,
-        64,
-        null,
-        null,
-        hinstance,
-        null,
-    ) orelse return lastError();
-    defer _ = sys.DestroyWindow(parent);
-
-    const button = sys.CreateWindowExW(
-        0,
-        prompt_button_class,
-        std.unicode.utf8ToUtf16LeStringLiteral("2: tab"),
-        c.WS_CHILD | c.WS_VISIBLE | c.BS_OWNERDRAW,
-        0,
-        0,
-        220,
-        32,
-        parent,
-        null,
-        hinstance,
-        null,
-    ) orelse return lastError();
-    defer _ = sys.DestroyWindow(button);
-
-    var placement: ChildPlacement = .{};
-    _ = applyChromeChildRect(button, &placement, childRect(0, 0, 220, 32));
-
-    // Baseline: the plain helper moves with `bRepaint = FALSE` and leaves
-    // nothing to repaint. That is what the terminal surfaces want, and it is
-    // why a tab button shifted right by a mid-strip insert stayed unpainted
-    // at its new slot while its old image survived under its neighbour.
-    var update: RECT = undefined;
-    _ = sys.ValidateRect(button, null);
-    try std.testing.expect(applyChildRect(button, &placement, childRect(220, 0, 220, 32)));
-    try std.testing.expectEqual(@as(BOOL, 0), sys.GetUpdateRect(button, &update, 0));
-
-    // The chrome variant leaves the button invalidated wherever it lands.
-    _ = sys.ValidateRect(button, null);
-    try std.testing.expect(applyChromeChildRect(button, &placement, childRect(440, 0, 210, 32)));
-    try std.testing.expect(sys.GetUpdateRect(button, &update, 0) != 0);
-
-    // An unchanged rect stays a no-op, so a settled strip does not repaint on
-    // every chrome sync.
-    _ = sys.ValidateRect(button, null);
-    try std.testing.expect(!applyChromeChildRect(button, &placement, childRect(440, 0, 210, 32)));
-    try std.testing.expectEqual(@as(BOOL, 0), sys.GetUpdateRect(button, &update, 0));
 }
 
 test "win32 scrollbarProxyPointFromSurfaceCursor tracks the right-edge hover band" {

@@ -21,12 +21,13 @@ const WINDOWPLACEMENT = runtime.WINDOWPLACEMENT;
 const WindowStart = runtime.WindowStart;
 const WindowStartTestApp = win32.test_support.WindowStartTestApp;
 const WorkAreas = runtime.WorkAreas;
-const appendOwnedString = runtime.appendOwnedString;
+const appendOwnedString = paint_text.appendOwnedString;
 const applyDefaultProfileConfig = runtime.applyDefaultProfileConfig;
 const applyProfileSurfaceConfig = runtime.applyProfileSurfaceConfig;
 const apprt = runtime.apprt;
 const builtin = runtime.builtin;
 const c = runtime.c;
+const child_window = @import("child_window.zig");
 const cli_args = runtime.cli_args;
 const configpkg = runtime.configpkg;
 const createTestHostWindow = win32.test_support.createTestHostWindow;
@@ -34,11 +35,12 @@ const defaultProfileForKey = runtime.defaultProfileForKey;
 const default_title = runtime.default_title;
 const gl_startup = runtime.gl_startup;
 const internal_os = runtime.internal_os;
-const lastError = runtime.lastError;
+const lastError = child_window.lastError;
 const listProfilesForConfig = runtime.listProfilesForConfig;
 const log = runtime.log;
 const makeParentDirAbsolute = runtime.makeParentDirAbsolute;
 const markRecoveryAttemptAtPath = runtime.markRecoveryAttemptAtPath;
+const paint_text = @import("text.zig");
 const placementTestApp = win32.test_support.placementTestApp;
 const placementTestSurface = win32.test_support.placementTestSurface;
 const profileIndexByKey = runtime.profileIndexByKey;
@@ -52,7 +54,6 @@ const setAsideCrashedSessionState = runtime.setAsideCrashedSessionState;
 const setMinimizedNormalRect = runtime.setMinimizedNormalRect;
 const shouldInheritSplitWorkingDirectory = runtime.shouldInheritSplitWorkingDirectory;
 const shouldResetNewTabWorkingDirectory = runtime.shouldResetNewTabWorkingDirectory;
-const startsWithIgnoreCase = runtime.startsWithIgnoreCase;
 const startupNamesProfile = runtime.startupNamesProfile;
 const std = runtime.std;
 const sys = runtime.sys;
@@ -755,7 +756,7 @@ pub fn applyRestoredProfileConfig(
 ) !bool {
     // SSH stays refused below; any other pane of `default-profile`
     // restores without a list.
-    if (!startsWithIgnoreCase(key, "ssh:")) {
+    if (!std.ascii.startsWithIgnoreCase(key, "ssh:")) {
         if (defaultProfileForKey(&self.config, key)) |profile| {
             if (!isSessionRestorableProfile(profile)) return false;
             try applyProfileSurfaceConfig(config, profile);
@@ -1656,7 +1657,7 @@ pub fn applyProfileConfigByKey(
     profiles: []const windows_shell.Profile,
     key: []const u8,
 ) !bool {
-    if (startsWithIgnoreCase(key, "ssh:")) return false;
+    if (std.ascii.startsWithIgnoreCase(key, "ssh:")) return false;
     const index = profileIndexByKey(profiles, key) orelse return false;
     const profile = &profiles[index];
     if (!isSessionRestorableProfile(profile)) return false;

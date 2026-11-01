@@ -52,7 +52,7 @@ const adoptedInitialShow = win32.adoptedInitialShow;
 const appLifecycleWindowProc = win32.appLifecycleWindowProc;
 const appMessageWindowProc = win32.appMessageWindowProc;
 const appQuitConfirmAccept = win32.appQuitConfirmAccept;
-const appendOwnedString = win32.appendOwnedString;
+const appendOwnedString = paint_text.appendOwnedString;
 const applyAutomationWorkingDirectory = win32.applyAutomationWorkingDirectory;
 const applyDefaultProfileConfig = win32.applyDefaultProfileConfig;
 const applyDwmThemeWithBuild = win32.applyDwmThemeWithBuild;
@@ -75,6 +75,7 @@ const buildToastLaunchForSurface = win32.buildToastLaunchForSurface;
 const build_config = @import("../../build_config.zig");
 const builtin = @import("builtin");
 const c = @import("consts.zig");
+const child_window = @import("child_window.zig");
 const claimSharedIdentity = win32.claimSharedIdentity;
 const class_name = win32.class_name;
 const cliClass = win32.cliClass;
@@ -124,7 +125,7 @@ const jumpListRebuildThreadMain = win32.jumpListRebuildThreadMain;
 const keepExplicitWorkingDirectory = win32.keepExplicitWorkingDirectory;
 const keepProfileSources = win32.keepProfileSources;
 const labels = @import("labels.zig");
-const lastError = win32.lastError;
+const lastError = child_window.lastError;
 const launcherQuickSlotAssignmentNeedsChange = win32.launcherQuickSlotAssignmentNeedsChange;
 const launcherQuickSlotPinsAlreadyClear = win32.launcherQuickSlotPinsAlreadyClear;
 const layoutActionResult = win32.layoutActionResult;
@@ -135,9 +136,9 @@ const log = win32.log;
 const logBackgroundBlurUnsupported = win32.logBackgroundBlurUnsupported;
 const logForwardedArgvRejection = win32.logForwardedArgvRejection;
 const markRecoveryAttemptAtPath = win32.markRecoveryAttemptAtPath;
-const nextTabInspectorVisible = win32.nextTabInspectorVisible;
 const onHostCloakEvent = win32.onHostCloakEvent;
-const ownedBytesEquals = win32.ownedBytesEquals;
+const ownedBytesEquals = paint_text.ownedBytesEquals;
+const paint_text = @import("text.zig");
 const palette_controller = @import("palette_controller.zig");
 const persistMergedRecoveryReadyAtPath = win32.persistMergedRecoveryReadyAtPath;
 const persistSettings = win32.persistSettings;
@@ -187,7 +188,7 @@ const sendNewTabIpc = win32.sendNewTabIpc;
 const sendNewWindowIpc = win32.sendNewWindowIpc;
 const sendPerformActionIpc = win32.sendPerformActionIpc;
 const session_module = @import("session.zig");
-const setWindowData = win32.setWindowData;
+const setWindowData = child_window.setWindowData;
 const setWindowIcon = win32.setWindowIcon;
 const settingsAppIconThunk = win32.settingsAppIconThunk;
 const settingsChromeBgThunk = win32.settingsChromeBgThunk;
@@ -294,7 +295,7 @@ const writePersistentFileAlloc = win32.writePersistentFileAlloc;
 const LRESULT = win32.LRESULT;
 const WPARAM = win32.WPARAM;
 const palette_list_class_name = win32.palette_list_class_name;
-const prompt_label_class = win32.prompt_label_class;
+const prompt_label_class = child_window.prompt_label_class;
 const TestSession = win32.TestSession;
 const createTestChromeChild = win32.createTestChromeChild;
 const BOOL = win32.BOOL;
@@ -491,6 +492,25 @@ test "a rate-limited warning logs once per interval and counts the rest" {
     try std.testing.expectEqual(@as(?u32, null), warning.take(60_999, 60_000));
     try std.testing.expectEqual(@as(?u32, 2), warning.take(61_000, 60_000));
     try std.testing.expectEqual(@as(?u32, null), warning.take(61_001, 60_000));
+}
+
+fn nextTabInspectorVisible(active_tab_has_inspector: bool, mode: apprt.action.Inspector) bool {
+    return switch (mode) {
+        .toggle => !active_tab_has_inspector,
+        .show => true,
+        .hide => false,
+    };
+}
+
+test "win32 tab inspector toggle hides any active pane inspector" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    try std.testing.expect(nextTabInspectorVisible(false, .toggle));
+    try std.testing.expect(!nextTabInspectorVisible(true, .toggle));
+    try std.testing.expect(nextTabInspectorVisible(false, .show));
+    try std.testing.expect(nextTabInspectorVisible(true, .show));
+    try std.testing.expect(!nextTabInspectorVisible(false, .hide));
+    try std.testing.expect(!nextTabInspectorVisible(true, .hide));
 }
 
 pub const App = struct {
