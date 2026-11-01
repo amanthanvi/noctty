@@ -109,11 +109,11 @@ pub fn toggleQuickTerminal(self: *App) !void {
                 .window,
             );
             defer config.deinit();
-            const fresh_profile = try self.applyDefaultProfileLaunch(&config);
+            const launch = try configpkg.pane_launch.prepare(&config, .{ .fresh = .{} }, self.launchContext(null));
             const fresh = try self.createWindowSurface(&config, quick_terminal_title, .{
                 .host_id = host.id,
+                .launch = launch,
             });
-            if (fresh_profile) |profile| try self.noteProfileLaunch(fresh, profile);
             // Floating is the surface's state: the window follows the
             // active tab's.
             try fresh.setFloatWindow(.on);
@@ -149,7 +149,7 @@ pub fn toggleQuickTerminal(self: *App) !void {
         .window,
     );
     defer config.deinit();
-    const default_profile = try self.applyDefaultProfileLaunch(&config);
+    const launch = try configpkg.pane_launch.prepare(&config, .{ .fresh = .{} }, self.launchContext(null));
     const surface = try self.createWindowSurface(&config, quick_terminal_title, .{
         .quick_terminal = true,
         // Passive first-show: `Surface.init` uses `SW_SHOWNOACTIVATE`
@@ -158,8 +158,8 @@ pub fn toggleQuickTerminal(self: *App) !void {
         // with `keyboard-interactivity = none` would still activate the
         // window even though the later `present()` call is skipped.
         .show = if (want_focus) .activate else .no_activate,
+        .launch = launch,
     });
-    if (default_profile) |profile| try self.noteProfileLaunch(surface, profile);
     try surface.setFloatWindow(.on);
     if (surface.windowHwnd()) |top_level| {
         self.applyQuickTerminalGeometry(top_level, true) catch |err| {
@@ -531,16 +531,19 @@ test "win32 toggle_quick_terminal opens a fresh floating tab instead of showing 
 }
 
 /// What a quick terminal toggle hands `createWindowSurface`, for the
-/// `default-profile` test: the program and the profile's variable.
+/// `default-profile` test: the launch key, the program, the profile's
+/// variable and the pinned directory.
 const QuickTerminalDefaultProfile = struct {
     /// Copies: the config is freed when the toggle returns.
     var arena: std.heap.ArenaAllocator = undefined;
+    var key: ?[]const u8 = null;
     var program: ?[]const u8 = null;
     var mode: ?[]const u8 = null;
     var dir: ?[]const u8 = null;
 
-    fn see(config: *const configpkg.Config) !void {
+    fn see(config: *const configpkg.Config, opts: SurfaceInitOptions) !void {
         const a = arena.allocator();
+        key = if (opts.launch.key) |value| try a.dupe(u8, value) else null;
         program = try a.dupe(u8, config.command.?.direct[0]);
         mode = if (config.env.map.get("MODE")) |value| try a.dupe(u8, value) else null;
         dir = if (config.@"working-directory") |wd| switch (wd) {
@@ -550,12 +553,12 @@ const QuickTerminalDefaultProfile = struct {
     }
 
     fn fresh(app: *App, config: *const configpkg.Config, title: LPCWSTR, opts: SurfaceInitOptions) anyerror!*Surface {
-        try see(config);
+        try see(config, opts);
         return try QuickTerminalFreshTab.createSurface(app, config, title, opts);
     }
 
     fn create(_: *App, config: *const configpkg.Config, _: LPCWSTR, opts: SurfaceInitOptions) anyerror!*Surface {
-        try see(config);
+        try see(config, opts);
         try std.testing.expect(opts.host_id == null);
         return error.TestWindowCreateFailed;
     }
@@ -575,7 +578,7 @@ test "win32 toggle_quick_terminal runs default-profile in a new window and a fre
             try fixture.app.config.@"profile-working-directory".parseCLI(arena, "py: D:\\pinned");
             fixture.app.config.@"default-profile" = "py";
             try fixture.app.config.finalize();
-            try std.testing.expectEqualStrings("user:py", if (fixture.app.config._default_profile) |profile| profile.key else "");
+            try std.testing.expectEqualStrings("user:py", if (configpkg.pane_launch.defaultProfile(&fixture.app.config)) |profile| profile.key else "");
             QuickTerminalDefaultProfile.arena = .init(std.testing.allocator);
             defer QuickTerminalDefaultProfile.arena.deinit();
 
@@ -594,28 +597,32 @@ test "win32 toggle_quick_terminal runs default-profile in a new window and a fre
             try fixture.app.toggleQuickTerminal();
             try std.testing.expect(!fixture.visible());
 
-            // The fresh tab it opens runs the profile and keeps its key.
+            // The fresh tab it opens is a fresh pane (`pane_launch.prepare`):
+            // the profile in its pinned directory, whose key the tab keeps.
             QuickTerminalFreshTab.fixture = &fixture;
             QuickTerminalFreshTab.calls = 0;
-            QuickTerminalDefaultProfile.program = null;
+            QuickTerminalDefaultProfile.key = null;
             fixture.app.test_create_window_surface = &QuickTerminalDefaultProfile.fresh;
             defer appendOwnedString(alloc, &fixture.host.cached_window_title, null) catch unreachable;
             defer appendOwnedString(alloc, &fixture.fresh.launch_profile_key, null) catch unreachable;
             try fixture.app.toggleQuickTerminal();
             try std.testing.expectEqual(@as(usize, 1), QuickTerminalFreshTab.calls);
+            try std.testing.expectEqualStrings("user:py", QuickTerminalDefaultProfile.key orelse "");
             try std.testing.expectEqualStrings("cmd.exe", QuickTerminalDefaultProfile.program orelse "");
             try std.testing.expectEqualStrings("profile", QuickTerminalDefaultProfile.mode orelse "");
             try std.testing.expectEqualStrings("D:\\pinned", QuickTerminalDefaultProfile.dir orelse "");
             try std.testing.expectEqualStrings("user:py", fixture.fresh.launch_profile_key orelse "");
 
-            // With no quick terminal yet, the window it creates runs it too.
+            // With no quick terminal yet, the window it creates is one too.
             fixture.host.quick_terminal = false;
             defer fixture.host.quick_terminal = true;
-            QuickTerminalDefaultProfile.program = null;
+            QuickTerminalDefaultProfile.key = null;
             fixture.app.test_create_window_surface = &QuickTerminalDefaultProfile.create;
             try std.testing.expectError(error.TestWindowCreateFailed, fixture.app.toggleQuickTerminal());
+            try std.testing.expectEqualStrings("user:py", QuickTerminalDefaultProfile.key orelse "");
             try std.testing.expectEqualStrings("cmd.exe", QuickTerminalDefaultProfile.program orelse "");
             try std.testing.expectEqualStrings("profile", QuickTerminalDefaultProfile.mode orelse "");
+            try std.testing.expectEqualStrings("D:\\pinned", QuickTerminalDefaultProfile.dir orelse "");
             // The app config is left as it was.
             try std.testing.expect(fixture.app.config.env.map.get("MODE") == null);
         }

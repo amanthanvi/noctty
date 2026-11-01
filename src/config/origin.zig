@@ -375,9 +375,9 @@ fn scan(config: *const Config, refused: Refused, key: Key, defaults: ?*const Con
 /// and the `default-profile` the command line names for this process).
 fn restoredFromCli(config: *const Config, key: Key) bool {
     return switch (key) {
-        .command => config._command_cli != null,
-        .@"initial-command" => config._initial_command_cli != null,
-        .@"default-profile" => config._default_profile_cli != null,
+        .command => config._launch.command_cli != null,
+        .@"initial-command" => config._launch.initial_command_cli != null,
+        .@"default-profile" => config._launch.default_profile_cli != null,
         else => false,
     };
 }

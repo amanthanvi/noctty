@@ -1,18 +1,22 @@
-//! Which command a new pane runs: the launch side of a config load.
+//! Which command a new pane runs, from which profile, with which variables and
+//! directory.
+//!
+//! `prepare` gives a new pane's config the launch its `Origin` calls for and
+//! says what the pane records of it (`Stamp`).
 //!
 //! `Config.parseManuallyHook` and `consumeManuallyHook` hand each argument to
 //! `note` and `consume`, which keep the command line's accepted `--command=`,
 //! `--initial-command=` and `--default-profile=`, which layer set `command`,
 //! where each `profile-*` line was read and the `--elevated-profile-env=`
-//! values. `finalize`, which `Config.finalize` calls before its automatic
-//! default, checks the profile fields and references, puts the command line's
-//! launch values back over the files read after it, resolves
-//! `default-profile` through a machine (`windows_shell.ReferenceHost`, or
-//! `fixtures.Machine` in tests) and puts the elevated profile's variables over
-//! `env`. `useRecovery` (Safe Recovery, before `Config.finalize`) and
-//! `useAutomatic` (the automatic default) set a `command` noctty chose.
+//! values. `finalize`, which `Config.finalize` calls, checks the profile fields
+//! and references, puts the command line's launch values back over the files
+//! read after it, resolves `default-profile`, else the automatic default,
+//! through a machine (`windows_shell.ReferenceHost`, or `fixtures.Machine` in
+//! tests), and puts the elevated profile's variables over `env`.
+//! `useRecovery` (Safe Recovery, before `Config.finalize`) sets the `command`
+//! safe mode runs.
 //!
-//! What a load decided lives in `Config`'s `_` launch fields.
+//! What a load decided lives in `Config._launch`, a `Ledger`.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -21,6 +25,8 @@ const Config = @import("Config.zig");
 const Command = @import("command.zig").Command;
 const ProfileMap = @import("profile_map.zig");
 const windows_shell = @import("windows_shell.zig");
+const windows_ssh_hosts = @import("windows_ssh_hosts.zig");
+const internal_os = @import("../os/main.zig");
 const cli_diags = @import("../cli/diagnostics.zig");
 
 const cli = struct {
@@ -30,6 +36,265 @@ const cli = struct {
 };
 
 const log = std.log.scoped(.config);
+
+/// How a new pane comes to be, which decides what of a launch it takes.
+pub const Origin = union(enum) {
+    /// A pane nothing chose a launch for: the first window, a plain new tab
+    /// or window, the quick terminal, a forwarded new window. It runs
+    /// `default-profile`'s profile when one applies (`defaultApplies`).
+    fresh: Fresh,
+    /// A tab or split that repeats the source pane's launch as it started
+    /// (automation's `+new-tab`, `+new-split`).
+    inherit: Source,
+    /// An ordinary split, which starts the source pane's profile as it is
+    /// defined now, by the key the source recorded (`Stamp.key`).
+    split: ?[]const u8,
+    /// A profile chosen from the picker, the palette or a quick slot.
+    chosen: *const windows_shell.Profile,
+    /// A Session Layout pane, by the profile key it was saved with.
+    restored: ?[]const u8,
+
+    pub const Fresh = struct {
+        /// The launch named its directory (`--working-directory=` on noctty's
+        /// command line, or in a forwarded new window's arguments), which
+        /// wins over the one the default profile pins: the default replaces
+        /// what runs, not where such a launch starts. An SSH profile keeps its
+        /// own: a local directory means nothing to the remote shell.
+        named_directory: bool = false,
+    };
+};
+
+/// What a source pane launched, as it recorded it (`Stamp`): the command it
+/// started, a user profile's line and variables, its profile key, and
+/// whether it connects over SSH.
+pub const Source = struct {
+    command: ?Command = null,
+    user: ?windows_shell.UserLaunch = null,
+    key: ?[]const u8 = null,
+    ssh: bool = false,
+};
+
+/// What a new pane records of its launch (`SurfaceInitOptions.launch`): the
+/// key a split, a restore and elevation look its profile up by, whether it
+/// connects over SSH, the SSH alias as its tab title, and a user profile's
+/// line and variables, which the tabs and splits that repeat its launch run.
+/// It borrows from the pane's config and what the pane started from (the
+/// profile, the source pane, the saved key), so the window gets it before
+/// that config is freed.
+pub const Stamp = struct {
+    key: ?[]const u8 = null,
+    ssh: bool = false,
+    title: ?[]const u8 = null,
+    user: ?windows_shell.UserLaunch = null,
+};
+
+/// Give `pane` the launch `origin` calls for, and say what the pane records
+/// of it. `pane` is the new pane's shallow clone of the app config
+/// (`apprt.surface.newConfig`), never the app config itself, and everything
+/// written goes into its arena: `command` is replaced, never freed (the old
+/// value is the app config's), and `env` is replaced by a copy. Call it once
+/// the pane's base directory is set, and before a directory the launch asks
+/// for (an automation `cwd`, a restored pane's) goes over it; a split's own
+/// directory inheritance comes after it too, since it reads the command
+/// started (WSL) and whether it is SSH. `context` is what the app knows of
+/// the pane:
+///
+/// - `first`: whether it is the process's first pane, which runs
+///   `initial-command` (`-e`) and no profile;
+/// - `windowed()`: whether the pane opens in a window, whose list `listed`
+///   reads;
+/// - `listed(key)`: that window's profile for `key`, or null;
+/// - `discover(alloc)`: every profile, listed for a pane with no window
+///   (discovery starts WSL probes); `prepare` frees the list;
+/// - `automatic(alloc)`: the automatic default command.
+///
+/// A key `default-profile` resolved to is answered from the config, with no
+/// list. The Stamp borrows from `pane`, the source pane and the saved key,
+/// never from a discovered list.
+pub fn prepare(pane: *Config, origin: Origin, context: anytype) !Stamp {
+    switch (origin) {
+        .fresh => |fresh| return try startDefault(pane, fresh.named_directory, context.first),
+        .inherit => |source| return try startInherited(pane, source, context),
+        .split => |key| return try startSource(pane, key, context),
+        .chosen => |profile| {
+            var stamp = try startChosen(pane, profile);
+            stamp.title = windows_shell.sshProfileAlias(profile);
+            return stamp;
+        },
+        .restored => |saved| return try startRestored(pane, saved, context),
+    }
+}
+
+/// What the source pane started, as it started it: the snapshot, not the
+/// current definition, so a reload since the source started does not change
+/// what an inherited launch runs. A source that recorded no command (only
+/// headless fixtures make one) starts its profile as a split does.
+fn startInherited(pane: *Config, source: Source, context: anytype) !Stamp {
+    const command = source.command orelse return try startSource(pane, source.key, context);
+    pane.command = try command.clone(pane._arena.?.allocator());
+    pane._launch.command_from = .layer;
+    const user = try useUserLaunch(pane, source.user);
+    if (source.ssh) try hardenSsh(pane);
+    return .{ .key = source.key, .ssh = source.ssh, .user = user };
+}
+
+/// The source pane's profile as defined now, by its `key`, else the default
+/// profile, for a source that recorded no profile or one no longer there.
+fn startSource(pane: *Config, key: ?[]const u8, context: anytype) !Stamp {
+    if (key) |source_key| {
+        if (defaultProfileForKey(pane, source_key) orelse try context.listed(source_key)) |profile| return try startProfile(pane, profile);
+    }
+    return try startDefault(pane, false, context.first);
+}
+
+/// A profile started for itself (chosen, restored): in home, unless it pins
+/// a directory of its own or asks for the ordinary rules (`inherit`), which
+/// `startProfile` gives it.
+fn startChosen(pane: *Config, profile: *const windows_shell.Profile) !Stamp {
+    if (profile.working_directory == null) pane.@"working-directory" = try homeDirectory(pane, profile);
+    return try startProfile(pane, profile);
+}
+
+/// A Session Layout pane: its own profile by the key it was `saved` with,
+/// else the default one, and never a connection over SSH.
+fn startRestored(pane: *Config, saved: ?[]const u8, context: anytype) !Stamp {
+    // The ordinary first window runs `initial-command` (`-e`, or the
+    // option), which `Surface.init` prefers while the process's first pane
+    // is made: the first pane of a restored session or a launched layout
+    // would run the wrong command.
+    pane.@"initial-command" = null;
+    // Only its own profile leaves its key on the pane: a later split of the
+    // restored pane would look a refused one up again.
+    if (saved) |key| {
+        if (try startSavedKey(pane, key, context)) |stamp| return .{ .key = key, .user = stamp.user };
+    }
+    // Restore never connects over SSH by itself: with an SSH
+    // `default-profile` the pane gets the automatic shell, in place of the
+    // SSH command the load made the default (a session saves an SSH pane
+    // without its profile).
+    if (defaultApplies(pane, context.first) and defaultProfile(pane).?.kind == .ssh) {
+        setAutomaticCommand(pane, .automatic, try context.automatic(pane._arena.?.allocator()));
+        return .{};
+    }
+    return try startDefault(pane, false, context.first);
+}
+
+/// A Session Layout pane's own profile, by its saved key: `default-profile`'s
+/// with no list, else its window's, else, with no window yet, the one
+/// discovery lists. Restore relaunches a pane unattended at startup, and an
+/// SSH profile would dial out with no interaction, so it is refused: by the
+/// key's prefix in any case before any lookup (a state file's case variant
+/// misses the exact SSH lookup, and so would slip past a refusal by kind),
+/// and by its kind after. Null when nothing restorable has the key.
+fn startSavedKey(pane: *Config, key: []const u8, context: anytype) !?Stamp {
+    if (std.ascii.startsWithIgnoreCase(key, "ssh:")) return null;
+    if (defaultProfileForKey(pane, key)) |profile| return try startSaved(pane, profile);
+    if (context.windowed()) return try startSaved(pane, (try context.listed(key)) orelse return null);
+    // The allocator the pane's arena was made on (`Config.shallowClone`; the
+    // app's, for `apprt.surface.newConfig`): the list is freed before this
+    // returns, and the Stamp borrows nothing from it.
+    const alloc = pane._arena.?.child_allocator;
+    const profiles = try context.discover(alloc);
+    defer windows_shell.deinitProfiles(alloc, profiles);
+    for (profiles) |*profile| {
+        if (windows_shell.profileKeyEquals(profile.*, key)) return try startSaved(pane, profile);
+    }
+    return null;
+}
+
+fn startSaved(pane: *Config, profile: *const windows_shell.Profile) !?Stamp {
+    if (profile.kind == .ssh) return null;
+    return try startChosen(pane, profile);
+}
+
+/// Whether a pane nothing chose a launch for runs `default-profile`'s
+/// profile: the load resolved one and no launch replaced its command since,
+/// and the pane is not the first one of a process with `initial-command`
+/// (`-e`), whichever path creates it, which runs that command.
+pub fn defaultApplies(config: *const Config, first: bool) bool {
+    if (config._launch.command_from == .layer or config._launch.default_profile == null) return false;
+    return !(config.@"initial-command" != null and first);
+}
+
+/// `default-profile`'s launch, for a pane nothing chose one for. The load
+/// made the profile's command the default `command`; this gives the pane the
+/// rest of it, as a pick from the picker gets it, except that with no
+/// `profile-working-directory` the directory the ordinary rules gave stays,
+/// as for `command`.
+fn startDefault(pane: *Config, named_directory: bool, first: bool) !Stamp {
+    if (!defaultApplies(pane, first)) return .{};
+    const profile = defaultProfile(pane).?;
+    const directory = pane.@"working-directory";
+    var stamp = try startProfile(pane, profile);
+    if (named_directory and profile.kind != .ssh) pane.@"working-directory" = directory;
+    stamp.title = windows_shell.sshProfileAlias(profile);
+    return stamp;
+}
+
+/// Start `profile` on `pane`, with what has to hold on every launch path: a
+/// user profile's line and variables, its pinned directory (a path, `home`,
+/// or `inherit`, which leaves the ordinary rules' directory), and an SSH
+/// profile's hardening. A split's own directory inheritance, applied after
+/// this, still replaces the directory.
+fn startProfile(pane: *Config, profile: *const windows_shell.Profile) !Stamp {
+    const alloc = pane._arena.?.allocator();
+    pane.command = try profile.command.clone(alloc);
+    // `default-profile` no longer applies to this pane.
+    pane._launch.command_from = .layer;
+    const user = try useUserLaunch(pane, profile.user);
+    if (profile.working_directory) |dir| switch (dir) {
+        .path => |path| pane.@"working-directory" = .{ .path = try alloc.dupe(u8, path) },
+        .home => pane.@"working-directory" = try homeDirectory(pane, profile),
+        .inherit => {},
+    };
+    if (profile.kind == .ssh) try hardenSsh(pane);
+    return .{ .key = profile.key, .ssh = profile.kind == .ssh, .user = user };
+}
+
+/// Give `pane` a user profile's variables and command line, and return its
+/// copy of the line; nothing for a launch that is no user profile's. The
+/// variables go on a copy: a shallow clone shares the app config's map, so
+/// writing into it would change every later launch. A profile variable
+/// replaces a global `env` variable of the same name in any case, as Windows
+/// compares names (a profile `PATH` replaces a global `Path`).
+fn useUserLaunch(pane: *Config, user: ?windows_shell.UserLaunch) !?windows_shell.UserLaunch {
+    const launch = user orelse return null;
+    const alloc = pane._arena.?.allocator();
+    var env = try pane.env.clone(alloc);
+    try windows_shell.layerEnv(alloc, &env, launch.env);
+    pane.env = env;
+    return try launch.clone(alloc);
+}
+
+/// Home for a profile launch. A bare `.home` set on a pane's config after
+/// `Config.finalize` is not resolved again: Exec then starts the program in
+/// noctty's own current directory (measured: the directory noctty was
+/// started in), so a profile gets the path itself. For a Start menu launch
+/// that directory is the install folder, the start folder of the installer's
+/// shortcut (read from the installed `.lnk`, not measured by a launch). Only
+/// a profile that runs `wsl.exe` keeps `.home`, which gives it `--cd ~` (the
+/// Linux home) where a Windows path would give `--cd /mnt/c/Users/<name>`.
+fn homeDirectory(pane: *Config, profile: *const windows_shell.Profile) !Config.WorkingDirectory {
+    if (windows_shell.isWslCommand(profile.command)) return .home;
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const home = (internal_os.home(&buf) catch null) orelse return .home;
+    return .{ .path = try pane._arena.?.allocator().dupe(u8, home) };
+}
+
+fn hardenSsh(pane: *Config) !void {
+    // Shell integration injection rewrites the two-element ssh argv into a
+    // space-joined, unquoted `cmd.exe /C` string. A remote session cannot use
+    // it anyway: the integration scripts run locally.
+    pane.@"shell-integration" = .none;
+
+    // `.home` alone loses to an inherited working directory, so resolve the
+    // path explicitly and let the drive-absolute branch of the cwd resolver
+    // take it. This is the same directory `ssh` itself expands `~` to.
+    var home_buf: [std.fs.max_path_bytes]u8 = undefined;
+    if (try windows_ssh_hosts.userProfileDir(&home_buf)) |home| {
+        pane.@"working-directory" = .{ .path = try pane._arena.?.allocator().dupe(u8, home) };
+    }
+}
 
 /// What `arg` sets of the launch, read before the field parse
 /// (`Config.parseManuallyHook` calls this first): the command line's accepted
@@ -42,23 +307,23 @@ pub fn note(config: *Config, alloc: Allocator, arg: []const u8, iter: anytype) A
     // that as it was and is reported by the parse that follows.
     if (try takenCliValue(config, "command", arg)) |value| {
         const location = try cli.Location.fromIter(iter, alloc);
-        config._command_defaulted = false;
-        config._command_from_file = location == .file;
-        if (location == .cli) config._command_cli = try alloc.dupeZ(u8, value);
+        config._launch.command_from = .layer;
+        config._launch.command_from_file = location == .file;
+        if (location == .cli) config._launch.command_cli = try alloc.dupeZ(u8, value);
     }
     if (std.mem.startsWith(u8, arg, "--initial-command=")) {
         if ((try cli.Location.fromIter(iter, alloc)) == .cli) {
             if (try takenCliValue(config, "initial-command", arg)) |value| {
-                config._initial_command_cli = try alloc.dupeZ(u8, value);
+                config._launch.initial_command_cli = try alloc.dupeZ(u8, value);
             }
         }
     }
     if (std.mem.startsWith(u8, arg, "--default-profile=")) {
         const value = arg["--default-profile=".len..];
         if ((try cli.Location.fromIter(iter, alloc)) == .cli) {
-            config._default_profile_cli = try alloc.dupeZ(u8, value);
+            config._launch.default_profile_cli = try alloc.dupeZ(u8, value);
         } else {
-            config._default_profile_file = if (value.len == 0) null else try alloc.dupeZ(u8, value);
+            config._launch.default_profile_file = if (value.len == 0) null else try alloc.dupeZ(u8, value);
         }
     }
     // The place a profile line writes, for a problem only finalize sees.
@@ -90,16 +355,16 @@ pub fn consume(
         });
         return true;
     }
-    try config._elevated_profile_env.append(alloc, .{
+    try config._launch.elevated_profile_env.append(alloc, .{
         .key = try alloc.dupeZ(u8, value[0..eq]),
         .value = try alloc.dupeZ(u8, value[eq + 1 ..]),
     });
     return true;
 }
 
-/// The launch half of `Config.finalize`, after the theme and before the
-/// automatic default. Tests resolve `default-profile` through fixed lookups
-/// (no PATH search), so they load it through this same call.
+/// The launch half of `Config.finalize`, after the theme. Tests resolve
+/// `default-profile` and the automatic default through fixed lookups (no
+/// PATH search), so they load them through this same call.
 pub fn finalize(config: *Config) !void {
     const visual_studio = config.@"visual-studio-profiles";
     try finalizeWith(config, if (comptime builtin.is_test)
@@ -108,7 +373,8 @@ pub fn finalize(config: *Config) !void {
         windows_shell.ReferenceHost{ .visual_studio = visual_studio });
 }
 
-/// `finalize` with the lookups `machine` makes for `default-profile`.
+/// `finalize` with the lookups `machine` makes for `default-profile` and the
+/// automatic default.
 pub fn finalizeWith(config: *Config, machine: anytype) !void {
     // Before the default command: `default-profile` can name a user profile,
     // which has to have passed these checks.
@@ -118,35 +384,46 @@ pub fn finalizeWith(config: *Config, machine: anytype) !void {
     // `default-profile` stands in for the automatic default.
     if (comptime builtin.os.tag == .windows) {
         if (config.command == null) try applyDefaultProfile(config, machine);
+        try useAutomatic(config, machine);
     }
     // Over `env` once every file has been read, and after `default-profile`
     // resolved: a profile's `%NAME%` reads `env` (`expandProfileText`).
-    if (config._elevated_profile_env.items.len > 0) {
-        try windows_shell.layerEnv(config._arena.?.allocator(), &config.env, config._elevated_profile_env.items);
+    if (config._launch.elevated_profile_env.items.len > 0) {
+        try windows_shell.layerEnv(config._arena.?.allocator(), &config.env, config._launch.elevated_profile_env.items);
     }
 }
 
-/// Resolve the automatic Windows command without hiding whether it was explicit.
-pub fn useAutomatic(config: *Config) !void {
+/// Give a config with no `command` the shell `machine` finds
+/// (`windows_shell.defaultCommand`: PATH pwsh, then Windows PowerShell, then
+/// cmd.exe), marked automatic. None when the machine has none: the test
+/// machines leave `command` unset unless a test names a shell.
+fn useAutomatic(config: *Config, machine: anytype) !void {
     if (config.command != null) return;
-    setAutomaticCommand(config, "windows-default", try windows_shell.defaultCommand(config._arena.?.allocator()));
+    const command = (try machine.defaultShell(config._arena.?.allocator())) orelse return;
+    setAutomaticCommand(config, .automatic, command);
 }
 
 /// Give a config with no `command` the one safe mode starts, so a recovery
 /// launch runs neither the user's PowerShell profile nor AutoRun. Call it before
 /// `Config.finalize`, which then has no default to look for: safe mode
-/// searches no `PATH`. The command stays marked automatic. A command already
-/// set stays.
+/// searches no `PATH`. The command is noctty's, from `.recovery`. A command
+/// already set stays.
 pub fn useRecovery(config: *Config) !void {
     if (config.command != null) return;
-    setAutomaticCommand(config, "windows-recovery", try windows_shell.recoveryCommand(config._arena.?.allocator()));
+    setAutomaticCommand(config, .recovery, try windows_shell.recoveryCommand(config._arena.?.allocator()));
 }
 
-/// Set `command` to `cmd`, chosen by noctty rather than a config layer.
-fn setAutomaticCommand(config: *Config, comptime src: []const u8, cmd: Command) void {
+/// Set `command` to `cmd`, chosen by noctty rather than a config layer: the
+/// automatic default or Safe Recovery's.
+fn setAutomaticCommand(config: *Config, comptime from: Ledger.CommandFrom, cmd: Command) void {
+    const src = switch (from) {
+        .automatic => "windows-default",
+        .recovery => "windows-recovery",
+        .layer, .default_profile => @compileError("not an automatic command"),
+    };
     log.info("default shell src=" ++ src ++ " value={f}", .{cmd.redacted()});
     config.command = cmd;
-    config._command_defaulted = true;
+    config._launch.command_from = from;
 }
 
 /// The profile `default-profile` resolved to when the config was loaded. A
@@ -154,7 +431,7 @@ fn setAutomaticCommand(config: *Config, comptime src: []const u8, cmd: Command) 
 /// one) leaves it set, so whether it is what a pane starts also needs
 /// `nocttyCommand`.
 pub fn defaultProfile(config: *const Config) ?*const windows_shell.Profile {
-    return if (config._default_profile) |*profile| profile else null;
+    return if (config._launch.default_profile) |*profile| profile else null;
 }
 
 /// `default-profile`'s profile when `key` names it. A pane it started
@@ -171,7 +448,7 @@ pub fn defaultProfileForKey(config: *const Config, key: []const u8) ?*const wind
 /// `default-profile`'s. Null when a config layer set `command`, or when none
 /// is set.
 pub fn nocttyCommand(config: *const Config) ?Command {
-    return if (config._command_defaulted) config.command else null;
+    return if (config._launch.command_from != .layer) config.command else null;
 }
 
 /// What the loaded config made of `reference`, a `default-profile` value
@@ -182,7 +459,7 @@ pub fn outcome(config: *const Config, reference: ?[]const u8) Outcome {
     const value = config.@"default-profile" orelse return .untried;
     if (reference == null or !std.mem.eql(u8, value, reference.?)) return .untried;
     if (defaultProfile(config)) |profile| return .{ .resolved = profile };
-    return switch (config._default_profile_failure) {
+    return switch (config._launch.default_profile_failure) {
         .none => .untried,
         .not_found => .not_found,
         .unavailable => .unavailable,
@@ -206,15 +483,15 @@ pub const Outcome = union(enum) {
 /// The `default-profile` the config files give: the setting itself, unless
 /// noctty's command line named one, which wins in this process only.
 pub fn filesDefaultProfile(config: *const Config) ?[:0]const u8 {
-    if (config._default_profile_cli == null) return config.@"default-profile";
-    return config._default_profile_file;
+    if (config._launch.default_profile_cli == null) return config.@"default-profile";
+    return config._launch.default_profile_file;
 }
 
 /// Whether noctty's command line names a profile
 /// (`--default-profile=<reference>`, which a jump-list link to a user
 /// profile carries). An empty value names none.
 pub fn commandLineNamesProfile(config: *const Config) bool {
-    const reference = config._default_profile_cli orelse return false;
+    const reference = config._launch.default_profile_cli orelse return false;
     return reference.len > 0;
 }
 
@@ -245,11 +522,11 @@ pub fn filesDefine(config: *const Config, key: []const u8) bool {
 /// no `default-profile` (`defaultProfile` is null, `outcome` is `.untried`),
 /// since the load looked up another value or none.
 pub fn asWritten(config: *Config) void {
-    if (config._command_defaulted) config.command = null;
-    config._command_defaulted = false;
+    if (config._launch.command_from != .layer) config.command = null;
+    config._launch.command_from = .layer;
     config.@"default-profile" = filesDefaultProfile(config);
-    config._default_profile = null;
-    config._default_profile_failure = .none;
+    config._launch.default_profile = null;
+    config._launch.default_profile_failure = .none;
 }
 
 /// Give `dst`, a config built again from the files (a palette theme
@@ -267,15 +544,15 @@ pub fn asWritten(config: *Config) void {
 pub fn keepSources(dst: *Config, src: *const Config) Allocator.Error!void {
     const alloc = dst._arena.?.allocator();
     dst.command = if (src.command) |command| try command.clone(alloc) else null;
-    dst._command_defaulted = src._command_defaulted;
-    dst._command_from_file = src._command_from_file;
-    dst.@"default-profile" = if (src.@"default-profile") |reference| try alloc.dupeZ(u8, reference) else null;
-    dst._default_profile = if (src._default_profile) |profile| try profile.clone(alloc) else null;
+    dst._launch.command_from = src._launch.command_from;
+    dst._launch.command_from_file = src._launch.command_from_file;
+    dst.@"default-profile" = try dupeOptional(alloc, src.@"default-profile");
+    dst._launch.default_profile = if (src._launch.default_profile) |profile| try profile.clone(alloc) else null;
     // And what Settings reads of it: whether the lookup found nothing, and
     // the files' value beside a command line's.
-    dst._default_profile_failure = src._default_profile_failure;
-    dst._default_profile_cli = if (src._default_profile_cli) |value| try alloc.dupeZ(u8, value) else null;
-    dst._default_profile_file = if (src._default_profile_file) |value| try alloc.dupeZ(u8, value) else null;
+    dst._launch.default_profile_failure = src._launch.default_profile_failure;
+    dst._launch.default_profile_cli = try dupeOptional(alloc, src._launch.default_profile_cli);
+    dst._launch.default_profile_file = try dupeOptional(alloc, src._launch.default_profile_file);
     dst.@"ssh-config-hosts" = src.@"ssh-config-hosts";
     dst.env = try src.env.clone(alloc);
     dst.@"visual-studio-profiles" = src.@"visual-studio-profiles";
@@ -287,7 +564,7 @@ pub fn keepSources(dst: *Config, src: *const Config) Allocator.Error!void {
     dst.@"profile-hidden" = try src.@"profile-hidden".clone(alloc);
     // Where those lines were read goes with them (New Elevated Window names
     // a profile whose line came from a file).
-    dst._profile_places = try cloneProfilePlaces(src, alloc);
+    dst._launch.profile_places = try cloneProfilePlaces(&src._launch, alloc);
 }
 
 /// Check what needs every layer read: a `profile-name`,
@@ -368,18 +645,18 @@ fn finalizeProfileField(
 
 /// Where a line that `finalize` may report was read: the last line that
 /// wrote a (key, id) of a `profile-*` key, or a reference value.
-pub const ProfilePlace = struct {
+const ProfilePlace = struct {
     key: []const u8,
     id: []const u8,
     location: cli.Location,
 };
 
-/// A copy of `_profile_places` in `alloc` (another config's arena): the ids
-/// and locations are copied, the keys are static.
-pub fn cloneProfilePlaces(config: *const Config, alloc: Allocator) Allocator.Error!std.ArrayListUnmanaged(ProfilePlace) {
+/// A copy of `ledger`'s profile places in `alloc` (another config's arena):
+/// the ids and locations are copied, the keys are static.
+fn cloneProfilePlaces(ledger: *const Ledger, alloc: Allocator) Allocator.Error!std.ArrayListUnmanaged(ProfilePlace) {
     var out: std.ArrayListUnmanaged(ProfilePlace) = .empty;
-    try out.ensureTotalCapacity(alloc, config._profile_places.items.len);
-    for (config._profile_places.items) |place| {
+    try out.ensureTotalCapacity(alloc, ledger.profile_places.items.len);
+    for (ledger.profile_places.items) |place| {
         out.appendAssumeCapacity(.{
             .key = place.key,
             .id = try alloc.dupe(u8, place.id),
@@ -392,10 +669,10 @@ pub fn cloneProfilePlaces(config: *const Config, alloc: Allocator) Allocator.Err
 /// The place of the last line that wrote `id` for `key`, or none (a value
 /// set by code, not by a line).
 fn profilePlace(config: *const Config, key: []const u8, id: []const u8) cli.Location {
-    var index = config._profile_places.items.len;
+    var index = config._launch.profile_places.items.len;
     while (index > 0) {
         index -= 1;
-        const place = config._profile_places.items[index];
+        const place = config._launch.profile_places.items[index];
         if (std.mem.eql(u8, place.key, key) and std.ascii.eqlIgnoreCase(place.id, id)) return place.location;
     }
     return .none;
@@ -405,7 +682,7 @@ fn profilePlace(config: *const Config, key: []const u8, id: []const u8) cli.Loca
 /// (`--profile-env=<id>: ...`), or cleared every id (`--profile-env=`), which
 /// a process that reads only the config files would not see.
 fn profileWrittenOnCommandLine(config: *const Config, key: []const u8, id: []const u8) bool {
-    for (config._profile_places.items) |place| {
+    for (config._launch.profile_places.items) |place| {
         if (place.location != .cli or !std.mem.eql(u8, place.key, key)) continue;
         if (place.id.len == 0 or std.ascii.eqlIgnoreCase(place.id, id)) return true;
     }
@@ -438,7 +715,7 @@ fn recordProfilePlace(config: *Config, alloc: Allocator, arg: []const u8, iter: 
         // sees a command-line reset (New Elevated Window would otherwise
         // name a file's profile, whose variables the elevated process reads
         // back from the files).
-        if (std.mem.eql(u8, key, "profile-env")) try config._profile_places.append(alloc, .{
+        if (std.mem.eql(u8, key, "profile-env")) try config._launch.profile_places.append(alloc, .{
             .key = "profile-env",
             .id = "",
             .location = try cli.Location.fromIter(iter, alloc),
@@ -447,7 +724,7 @@ fn recordProfilePlace(config: *Config, alloc: Allocator, arg: []const u8, iter: 
     }
     inline for (.{ "default-profile", "profile-order", "profile-hidden" }) |reference_key| {
         if (std.mem.eql(u8, key, reference_key)) {
-            try config._profile_places.append(alloc, .{
+            try config._launch.profile_places.append(alloc, .{
                 .key = reference_key,
                 .id = try alloc.dupe(u8, value),
                 .location = try cli.Location.fromIter(iter, alloc),
@@ -463,7 +740,7 @@ fn recordProfilePlace(config: *Config, alloc: Allocator, arg: []const u8, iter: 
     }) |field| {
         if (std.mem.eql(u8, key, field[0])) {
             const parsed = ProfileMap.check(field[1], value) catch return;
-            try config._profile_places.append(alloc, .{
+            try config._launch.profile_places.append(alloc, .{
                 .key = field[0],
                 .id = try alloc.dupe(u8, parsed.id),
                 .location = try cli.Location.fromIter(iter, alloc),
@@ -479,13 +756,13 @@ fn recordProfilePlace(config: *Config, alloc: Allocator, arg: []const u8, iter: 
 /// value the field parse took (`takenCliValue`), so a later one it refused
 /// does not replace it.
 fn finalizeCliLaunch(config: *Config) Allocator.Error!void {
-    if (config._command_cli) |value| {
+    if (config._launch.command_cli) |value| {
         if (try applyCliValue(config, "command", value)) {
-            config._command_defaulted = false;
-            config._command_from_file = false;
+            config._launch.command_from = .layer;
+            config._launch.command_from_file = false;
         }
     }
-    if (config._initial_command_cli) |value| _ = try applyCliValue(config, "initial-command", value);
+    if (config._launch.initial_command_cli) |value| _ = try applyCliValue(config, "initial-command", value);
     finalizeECommand(config);
 }
 
@@ -542,11 +819,11 @@ fn sameDiagnostic(a: cli.Diagnostic, b: cli.Diagnostic) bool {
 /// one that a `command` from a config file overrides is a config problem.
 /// Safe mode starts with a `command` noctty chose, so this stays quiet there.
 fn finalizeDefaultProfileSetting(config: *Config) Allocator.Error!void {
-    if (config._default_profile_cli) |value| {
+    if (config._launch.default_profile_cli) |value| {
         config.@"default-profile" = if (value.len == 0) null else value;
     }
-    if (config.@"default-profile" == null or config._default_profile != null) return;
-    if (config.command == null or config._command_defaulted or !config._command_from_file) return;
+    if (config.@"default-profile" == null or config._launch.default_profile != null) return;
+    if (config.command == null or config._launch.command_from != .layer or !config._launch.command_from_file) return;
     const alloc = config._arena.?.allocator();
     try appendFinalizeProblem(config, .{
         .key = "default-profile",
@@ -557,9 +834,9 @@ fn finalizeDefaultProfileSetting(config: *Config) Allocator.Error!void {
 
 /// Give a config with no `command` the profile `default-profile` names
 /// (`windows_shell.resolveProfileReference`, through `host`): its command,
-/// marked automatic as the default it replaces, and the profile itself in
-/// `_default_profile`. A value that names nothing that can start is a config
-/// problem, and `command` stays unset for the automatic default.
+/// with `command_from = .default_profile`, and the profile itself in
+/// `Ledger.default_profile`. A value that names nothing that can start is a
+/// config problem, and `command` stays unset for the automatic default.
 fn applyDefaultProfile(config: *Config, host: anytype) !void {
     if (config.command != null) return;
     const reference = config.@"default-profile" orelse return;
@@ -573,7 +850,7 @@ fn applyDefaultProfile(config: *Config, host: anytype) !void {
         if (err == error.VisualStudioUnavailable) {
             // The value may be right: reported apart from one that names
             // nothing, and the next load (a reload) asks again.
-            config._default_profile_failure = .unavailable;
+            config._launch.default_profile_failure = .unavailable;
             try appendFinalizeProblem(config, .{
                 .key = "default-profile",
                 .message = try std.fmt.allocPrintSentinel(
@@ -590,7 +867,7 @@ fn applyDefaultProfile(config: *Config, host: anytype) !void {
         break :found null;
     };
     const profile = resolved orelse {
-        config._default_profile_failure = .not_found;
+        config._launch.default_profile_failure = .not_found;
         try appendFinalizeProblem(config, .{
             .key = "default-profile",
             .message = try std.fmt.allocPrintSentinel(
@@ -605,11 +882,106 @@ fn applyDefaultProfile(config: *Config, host: anytype) !void {
     };
     log.info("default shell src=default-profile key={s}", .{profile.key});
     config.command = profile.command;
-    config._command_defaulted = true;
-    config._default_profile = profile;
+    config._launch.command_from = .default_profile;
+    config._launch.default_profile = profile;
 }
 
-pub const DefaultProfileFailure = enum {
+/// What a load decided of the launch, and what it keeps to decide it again
+/// (`Config._launch`). A pane's config is a shallow clone that shares the
+/// lists by value, so nothing appends to them there.
+pub const Ledger = struct {
+    /// Which layer set `command`: a config layer (or a launch a pane
+    /// started), or noctty: its automatic default, Safe Recovery's, or
+    /// `default-profile`'s.
+    command_from: CommandFrom = .layer,
+
+    /// The last `command` line came from a config file (not the command
+    /// line), for the `default-profile` problem in `finalize`.
+    command_from_file: bool = false,
+
+    /// The profile `default-profile` names, found by `finalize` when no layer
+    /// set `command`; `command` is then its command, from `.default_profile`.
+    /// A pane nothing chose a launch for gets the rest of it (`prepare`).
+    /// Lives in the config's arena.
+    default_profile: ?windows_shell.Profile = null,
+
+    /// Why `finalize` found no profile for `default-profile`, so the
+    /// automatic default runs instead. Settings shows a value that names
+    /// nothing here as not found, never by the label it would have, and one
+    /// Visual Studio could not answer for as written, apart from every listed
+    /// profile.
+    default_profile_failure: DefaultProfileFailure = .none,
+
+    /// `--default-profile` on the command line, applied in `finalize` over
+    /// every config file: `Config.load` reads included files after the
+    /// command line, and the jump list's profile links name their profile
+    /// this way.
+    default_profile_cli: ?[:0]const u8 = null,
+
+    /// The last `default-profile` a config file gave (null for none, or for
+    /// an empty value), whatever the command line says. Settings shows and
+    /// edits this one (`filesDefaultProfile`): in a window noctty started
+    /// with `--default-profile` (a jump-list link, New Elevated Window) the
+    /// setting holds the command line's value, which no file has.
+    default_profile_file: ?[:0]const u8 = null,
+
+    /// `--command=` and `--initial-command=` on the command line, as typed,
+    /// applied again in `finalize` over every config file for the same
+    /// reason: a jump-list profile link resets both with empty values, which
+    /// a `command` or `initial-command` line in an included file would
+    /// otherwise undo. The last value of each that the field parse took: a
+    /// later one it refused (`--command=direct:`) leaves the earlier one in
+    /// force. An `-e` with a command clears `initial_command_cli`
+    /// (`Config.parseManuallyHook`).
+    command_cli: ?[:0]const u8 = null,
+    initial_command_cli: ?[:0]const u8 = null,
+
+    /// `--elevated-profile-env=KEY=VALUE` on the command line, which
+    /// `new_window_elevated:user:<id>` passes for each of the profile's
+    /// variables. `finalize` puts them over `env` once every config file has
+    /// been read, so an `env` line in an included file cannot replace them,
+    /// as it would replace an `--env` argument. Not a field: a config file
+    /// line that names it is reported as an unknown field and ignored.
+    elevated_profile_env: std.ArrayListUnmanaged(windows_shell.EnvEntry) = .{},
+
+    /// Where each `profile-*` (key, id) was last written, for the problems
+    /// `finalize` reports (`profilePlace`). Recorded by `note`, so a config
+    /// rebuilt by replay records them again. `key` is a static field name;
+    /// `id` and the location live in the arena.
+    profile_places: std.ArrayListUnmanaged(ProfilePlace) = .empty,
+
+    pub const CommandFrom = enum { layer, automatic, recovery, default_profile };
+
+    /// A copy in `alloc` (another config's arena), as `Config.clone` keeps
+    /// it. Not the elevated profile's variables: `finalize` has put them over
+    /// `env`, which the copy has, and a config rebuilt by replay takes them
+    /// from the command line again.
+    pub fn clone(self: *const Ledger, alloc: Allocator) Allocator.Error!Ledger {
+        const default_profile = if (self.default_profile) |profile| try profile.clone(alloc) else null;
+        const default_profile_cli = try dupeOptional(alloc, self.default_profile_cli);
+        const default_profile_file = try dupeOptional(alloc, self.default_profile_file);
+        const command_cli = try dupeOptional(alloc, self.command_cli);
+        const initial_command_cli = try dupeOptional(alloc, self.initial_command_cli);
+        const profile_places = try cloneProfilePlaces(self, alloc);
+        return .{
+            .command_from = self.command_from,
+            .command_from_file = self.command_from_file,
+            .default_profile = default_profile,
+            .default_profile_failure = self.default_profile_failure,
+            .default_profile_cli = default_profile_cli,
+            .default_profile_file = default_profile_file,
+            .command_cli = command_cli,
+            .initial_command_cli = initial_command_cli,
+            .profile_places = profile_places,
+        };
+    }
+};
+
+fn dupeOptional(alloc: Allocator, value: ?[:0]const u8) Allocator.Error!?[:0]const u8 {
+    return if (value) |text| try alloc.dupeZ(u8, text) else null;
+}
+
+const DefaultProfileFailure = enum {
     /// Not looked up, or found.
     none,
     /// It names nothing that can start here.
@@ -619,8 +991,8 @@ pub const DefaultProfileFailure = enum {
     unavailable,
 };
 
-/// Test adapters: a machine with fixed answers, and a load as `Config.load`
-/// makes it.
+/// Test adapters: a machine with fixed answers, what the app knows of a new
+/// pane, and a load as `Config.load` makes it.
 pub const fixtures = struct {
     /// Fixed lookups for `default-profile` in tests: no PATH search, and
     /// one Visual Studio 18 instead of the machine's.
@@ -628,6 +1000,10 @@ pub const fixtures = struct {
         visual_studio: windows_shell.VisualStudioProfiles = .newest,
         /// False: Setup Configuration fails, and lists nothing.
         visual_studio_answers: bool = true,
+        /// True: OpenSSH is installed, so an `ssh:` reference resolves.
+        ssh: bool = false,
+        /// The automatic default shell; none leaves `command` unset.
+        default_shell: ?[:0]const u8 = null,
 
         pub fn visualStudio(self: Machine, alloc: Allocator, complete: *bool) ![]windows_shell.Profile {
             const vs = windows_shell.visual_studio;
@@ -670,12 +1046,55 @@ pub const fixtures = struct {
             return null;
         }
 
-        pub fn sshExecutable(_: Machine, _: Allocator) !?[]u8 {
-            return null;
+        pub fn sshExecutable(self: Machine, alloc: Allocator) !?[]u8 {
+            if (!self.ssh) return null;
+            return try alloc.dupe(u8, "C:\\Windows\\System32\\OpenSSH\\ssh.exe");
         }
 
         pub fn get(_: Machine, _: Allocator, _: []const u8) Allocator.Error!?[]u8 {
             return null;
+        }
+
+        pub fn defaultShell(self: Machine, alloc: Allocator) !?Command {
+            const path = self.default_shell orelse return null;
+            const argv = try alloc.alloc([:0]const u8, 1);
+            argv[0] = try alloc.dupeZ(u8, path);
+            return .{ .direct = argv };
+        }
+    };
+
+    /// What the app knows of a new pane (`prepare`'s `context`), and how
+    /// often `prepare` asked for a list.
+    pub const Context = struct {
+        first: bool = false,
+        /// The profiles the pane's window lists; null for no window.
+        window: ?[]const windows_shell.Profile = null,
+        /// What a discovery lists.
+        discovered: []const windows_shell.Profile = &.{},
+        listed_count: usize = 0,
+        discover_count: usize = 0,
+
+        pub const automatic_argv = [_][:0]const u8{"C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"};
+
+        pub fn windowed(self: *const Context) bool {
+            return self.window != null;
+        }
+
+        pub fn listed(self: *Context, key: []const u8) !?*const windows_shell.Profile {
+            self.listed_count += 1;
+            for (self.window orelse return null) |*profile| {
+                if (windows_shell.profileKeyEquals(profile.*, key)) return profile;
+            }
+            return null;
+        }
+
+        pub fn discover(self: *Context, alloc: Allocator) ![]windows_shell.Profile {
+            self.discover_count += 1;
+            return try windows_shell.cloneProfiles(alloc, self.discovered);
+        }
+
+        pub fn automatic(_: *const Context, _: Allocator) !Command {
+            return .{ .direct = &automatic_argv };
         }
     };
 
@@ -686,6 +1105,10 @@ pub const fixtures = struct {
         include: ?[]const u8 = null,
     };
 
+    /// Where the config file of a fixture load is read from, which its
+    /// problems name.
+    pub const config_path = "C:\\noctty-test\\config.ghostty";
+
     /// A load as `Config.load` makes it: the config file, the command line,
     /// then an included file (read after the command line), then `finalize`,
     /// which looks for the default profile.
@@ -693,7 +1116,7 @@ pub const fixtures = struct {
         var cfg = try Config.default(alloc);
         errdefer cfg.deinit();
         var reader: std.Io.Reader = .fixed(how.file);
-        try cfg.loadReader(alloc, &reader, "C:\\noctty-test\\config.ghostty");
+        try cfg.loadReader(alloc, &reader, config_path);
         var it: cli.args.ArgsIterator(cli.args.SliceIterator) = .{ .iterator = .{ .slice = how.argv } };
         try cfg.loadIter(alloc, &it);
         if (how.include) |include| {
@@ -701,6 +1124,17 @@ pub const fixtures = struct {
             try cfg.loadReader(alloc, &included, "C:\\noctty-test\\profiles.ghostty");
         }
         try cfg.finalize();
+        return cfg;
+    }
+
+    /// `text` as the one config file, with the launch finalized through
+    /// `machine`'s lookups (`finalizeWith`) in place of the test machine.
+    pub fn loadWith(alloc: Allocator, text: []const u8, machine: Machine) !Config {
+        var cfg = try Config.default(alloc);
+        errdefer cfg.deinit();
+        var reader: std.Io.Reader = .fixed(text);
+        try cfg.loadReader(alloc, &reader, config_path);
+        try finalizeWith(&cfg, machine);
         return cfg;
     }
 };
@@ -732,21 +1166,22 @@ test "default-profile gives way to a command from any layer, and says so only fo
         \\
     ;
 
-    // Alone, it is the command, still marked automatic, and the profile.
+    // Alone, it is the command (noctty's, from `.default_profile`) and the
+    // profile.
     {
         var cfg = try fixtures.load(alloc, .{ .file = profile ++ "default-profile = PY\n" });
         defer cfg.deinit();
         try testing.expect(cfg._diagnostics.empty());
-        try testing.expect(cfg._command_defaulted);
+        try testing.expect(nocttyCommand(&cfg) != null);
         try testing.expectEqualStrings("cmd.exe", cfg.command.?.direct[0]);
         try testing.expectEqualStrings("C:\\Python 3\\init.cmd", cfg.command.?.direct[2]);
-        try testing.expectEqualStrings("user:py", cfg._default_profile.?.key);
-        try testing.expectEqualStrings("profile", cfg._default_profile.?.user.?.env[0].value);
+        try testing.expectEqualStrings("user:py", cfg._launch.default_profile.?.key);
+        try testing.expectEqualStrings("profile", cfg._launch.default_profile.?.user.?.env[0].value);
         // A copy keeps it (a soft reload installs a copy).
         var copy = try cfg.clone(alloc);
         defer copy.deinit();
-        try testing.expectEqualStrings("user:py", copy._default_profile.?.key);
-        try testing.expect(copy._default_profile.?.key.ptr != cfg._default_profile.?.key.ptr);
+        try testing.expectEqualStrings("user:py", copy._launch.default_profile.?.key);
+        try testing.expect(copy._launch.default_profile.?.key.ptr != cfg._launch.default_profile.?.key.ptr);
     }
 
     // A config file's command wins, and the unused setting is a problem.
@@ -754,8 +1189,8 @@ test "default-profile gives way to a command from any layer, and says so only fo
         var cfg = try fixtures.load(alloc, .{ .file = profile ++ "default-profile = py\ncommand = vim.exe\n" });
         defer cfg.deinit();
         try testing.expectEqual(@as(usize, 1), testProblems(&cfg, "default-profile"));
-        try testing.expect(cfg._default_profile == null);
-        try testing.expect(!cfg._command_defaulted);
+        try testing.expect(cfg._launch.default_profile == null);
+        try testing.expect(nocttyCommand(&cfg) == null);
     }
 
     // The command line's command wins quietly.
@@ -763,7 +1198,7 @@ test "default-profile gives way to a command from any layer, and says so only fo
         var cfg = try fixtures.load(alloc, .{ .file = profile ++ "default-profile = py\n", .argv = &.{"--command=vim.exe"} });
         defer cfg.deinit();
         try testing.expectEqual(@as(usize, 0), testProblems(&cfg, "default-profile"));
-        try testing.expect(cfg._default_profile == null);
+        try testing.expect(cfg._launch.default_profile == null);
         try testing.expectEqualStrings("vim.exe", cfg.command.?.shell);
     }
 
@@ -773,7 +1208,7 @@ test "default-profile gives way to a command from any layer, and says so only fo
         var cfg = try fixtures.load(alloc, .{ .file = profile ++ "command = vim.exe\ndefault-profile = py\n", .argv = &.{"--command="} });
         defer cfg.deinit();
         try testing.expect(cfg._diagnostics.empty());
-        try testing.expectEqualStrings("user:py", cfg._default_profile.?.key);
+        try testing.expectEqualStrings("user:py", cfg._launch.default_profile.?.key);
     }
 
     // An included file is read after the command line, but the command
@@ -787,20 +1222,20 @@ test "default-profile gives way to a command from any layer, and says so only fo
         });
         defer cfg.deinit();
         try testing.expect(cfg._diagnostics.empty());
-        try testing.expectEqualStrings("user:py", cfg._default_profile.?.key);
-        try testing.expect(cfg._command_defaulted);
+        try testing.expectEqualStrings("user:py", cfg._launch.default_profile.?.key);
+        try testing.expect(nocttyCommand(&cfg) != null);
         try testing.expect(cfg.@"initial-command" == null);
         // And after a rebuild for a conditional state (a theme).
         cfg._conditional_set.insert(.theme);
         var replayed = (try cfg.changeConditionalState(.{ .theme = .dark })).?;
         defer replayed.deinit();
-        try testing.expectEqualStrings("user:py", replayed._default_profile.?.key);
+        try testing.expectEqualStrings("user:py", replayed._launch.default_profile.?.key);
         try testing.expect(replayed.@"initial-command" == null);
         // A copy keeps them.
         var copy = try cfg.clone(alloc);
         defer copy.deinit();
-        try testing.expectEqualStrings("", copy._command_cli.?);
-        try testing.expectEqualStrings("", copy._initial_command_cli.?);
+        try testing.expectEqualStrings("", copy._launch.command_cli.?);
+        try testing.expectEqualStrings("", copy._launch.initial_command_cli.?);
     }
     // A command on the command line wins over an included one too, quietly.
     {
@@ -808,7 +1243,7 @@ test "default-profile gives way to a command from any layer, and says so only fo
         defer cfg.deinit();
         try testing.expect(cfg._diagnostics.empty());
         try testing.expectEqualStrings("vim.exe", cfg.command.?.shell);
-        try testing.expect(cfg._default_profile == null);
+        try testing.expect(cfg._launch.default_profile == null);
     }
     // With nothing on the command line, an included file's command is a
     // file's command, which leaves the profile unused.
@@ -816,7 +1251,7 @@ test "default-profile gives way to a command from any layer, and says so only fo
         var cfg = try fixtures.load(alloc, .{ .file = profile ++ "default-profile = py\n", .include = "command = vim.exe\n" });
         defer cfg.deinit();
         try testing.expectEqual(@as(usize, 1), testProblems(&cfg, "default-profile"));
-        try testing.expect(cfg._default_profile == null);
+        try testing.expect(cfg._launch.default_profile == null);
     }
     // `-e` after `--initial-command=` still runs.
     {
@@ -835,7 +1270,7 @@ test "default-profile gives way to a command from any layer, and says so only fo
         });
         defer cfg.deinit();
         try testing.expect(cfg._diagnostics.empty());
-        try testing.expectEqualStrings("user:py", cfg._default_profile.?.key);
+        try testing.expectEqualStrings("user:py", cfg._launch.default_profile.?.key);
         try testing.expect(cfg.@"initial-command" == null);
         // What the files give is kept apart, for Settings: the last file
         // read (the include), not the command line's value.
@@ -856,7 +1291,7 @@ test "default-profile gives way to a command from any layer, and says so only fo
         var cfg = try fixtures.load(alloc, .{ .file = profile ++ "default-profile = py\n", .argv = &.{"--default-profile="} });
         defer cfg.deinit();
         try testing.expect(cfg.@"default-profile" == null);
-        try testing.expect(cfg._default_profile == null);
+        try testing.expect(cfg._launch.default_profile == null);
         try testing.expectEqualStrings("py", filesDefaultProfile(&cfg).?);
         var cleared = try fixtures.load(alloc, .{ .file = profile ++ "default-profile = py\n", .argv = &.{"--default-profile=pwsh"}, .include = "default-profile =\n" });
         defer cleared.deinit();
@@ -874,7 +1309,7 @@ test "default-profile gives way to a command from any layer, and says so only fo
         var cfg = try fixtures.load(alloc, .{ .file = text });
         defer cfg.deinit();
         try testing.expectEqual(@as(usize, 1), testProblems(&cfg, "default-profile"));
-        try testing.expect(cfg.command == null and cfg._default_profile == null);
+        try testing.expect(cfg.command == null and cfg._launch.default_profile == null);
     }
 
     // A refused profile is no profile.
@@ -882,7 +1317,7 @@ test "default-profile gives way to a command from any layer, and says so only fo
         var cfg = try fixtures.load(alloc, .{ .file = "profile-command = bad: direct:cmd.exe\ndefault-profile = bad\n" });
         defer cfg.deinit();
         try testing.expectEqual(@as(usize, 1), testProblems(&cfg, "default-profile"));
-        try testing.expect(cfg._default_profile == null);
+        try testing.expect(cfg._launch.default_profile == null);
     }
 
     // A detected key resolves without listing anything.
@@ -891,7 +1326,7 @@ test "default-profile gives way to a command from any layer, and says so only fo
         defer cfg.deinit();
         try testing.expect(cfg._diagnostics.empty());
         try testing.expectEqualStrings("-d", cfg.command.?.direct[1]);
-        try testing.expectEqualStrings("wsl:Ubuntu", cfg._default_profile.?.key);
+        try testing.expectEqualStrings("wsl:Ubuntu", cfg._launch.default_profile.?.key);
     }
 }
 
@@ -912,16 +1347,16 @@ test "a refused --command= does not replace an accepted one over an include" {
         });
         defer cfg.deinit();
         try testing.expectEqualStrings("vim.exe", cfg.command.?.shell);
-        try testing.expectEqualStrings("vim.exe", cfg._command_cli.?);
-        try testing.expect(!cfg._command_defaulted);
+        try testing.expectEqualStrings("vim.exe", cfg._launch.command_cli.?);
+        try testing.expect(nocttyCommand(&cfg) == null);
         try testing.expectEqual(@as(usize, 1), testProblems(&cfg, "command"));
         // The command line's command is quiet toward `default-profile`.
         try testing.expectEqual(@as(usize, 0), testProblems(&cfg, "default-profile"));
-        try testing.expect(cfg._default_profile == null);
+        try testing.expect(cfg._launch.default_profile == null);
         // A copy and a rebuild for a conditional state (a theme) keep it.
         var copy = try cfg.clone(alloc);
         defer copy.deinit();
-        try testing.expectEqualStrings("vim.exe", copy._command_cli.?);
+        try testing.expectEqualStrings("vim.exe", copy._launch.command_cli.?);
         cfg._conditional_set.insert(.theme);
         var replayed = (try cfg.changeConditionalState(.{ .theme = .dark })).?;
         defer replayed.deinit();
@@ -945,7 +1380,7 @@ test "a refused --initial-command= does not replace an accepted one over an incl
         });
         defer cfg.deinit();
         try testing.expectEqualStrings("vim.exe", cfg.@"initial-command".?.shell);
-        try testing.expectEqualStrings("vim.exe", cfg._initial_command_cli.?);
+        try testing.expectEqualStrings("vim.exe", cfg._launch.initial_command_cli.?);
         try testing.expectEqual(@as(usize, 1), testProblems(&cfg, "initial-command"));
     }
 }
@@ -983,9 +1418,9 @@ test "a refused command-line value after a reset leaves the reset" {
             .include = "command = other.exe\ninitial-command = other.exe\n",
         });
         defer cfg.deinit();
-        try testing.expectEqualStrings("", cfg._command_cli.?);
-        try testing.expectEqualStrings("user:py", cfg._default_profile.?.key);
-        try testing.expect(cfg._command_defaulted);
+        try testing.expectEqualStrings("", cfg._launch.command_cli.?);
+        try testing.expectEqualStrings("user:py", cfg._launch.default_profile.?.key);
+        try testing.expect(nocttyCommand(&cfg) != null);
         try testing.expect(cfg.@"initial-command" == null);
     }
 }
@@ -1004,11 +1439,11 @@ test "a refused --command= does not claim a config file's command as the command
             .argv = &.{"--command=direct:"},
         });
         defer cfg.deinit();
-        try testing.expect(cfg._command_cli == null);
+        try testing.expect(cfg._launch.command_cli == null);
         try testing.expectEqualStrings("vim.exe", cfg.command.?.shell);
         try testing.expectEqual(@as(usize, 1), testProblems(&cfg, "command"));
         try testing.expectEqual(@as(usize, 1), testProblems(&cfg, "default-profile"));
-        try testing.expect(cfg._default_profile == null);
+        try testing.expect(cfg._launch.default_profile == null);
     }
     {
         var cfg = try fixtures.load(alloc, .{
@@ -1017,7 +1452,7 @@ test "a refused --command= does not claim a config file's command as the command
             .include = "command = other.exe\n",
         });
         defer cfg.deinit();
-        try testing.expect(cfg._command_cli == null);
+        try testing.expect(cfg._launch.command_cli == null);
         try testing.expectEqualStrings("other.exe", cfg.command.?.shell);
         try testing.expectEqual(@as(usize, 1), testProblems(&cfg, "default-profile"));
     }
@@ -1102,7 +1537,7 @@ test "a refused -e leaves an accepted --initial-command= before it in force" {
     const alloc = testing.allocator;
     var cfg = try fixtures.load(alloc, .{ .argv = &.{ "--initial-command=cmd.exe", "-e" }, .include = "initial-command = pwsh.exe\n" });
     defer cfg.deinit();
-    try testing.expectEqualStrings("cmd.exe", cfg._initial_command_cli orelse return error.TestUnexpectedResult);
+    try testing.expectEqualStrings("cmd.exe", cfg._launch.initial_command_cli orelse return error.TestUnexpectedResult);
     try testing.expectEqualStrings("cmd.exe", try testShellCommand(cfg.@"initial-command"));
 }
 
@@ -1118,7 +1553,7 @@ test "a refused --initial-command= leaves -e its place" {
             .argv = &.{ "--initial-command=vim.exe", "--initial-command=direct:", "-e", "foo.exe" },
         });
         defer cfg.deinit();
-        try testing.expect(cfg._initial_command_cli == null);
+        try testing.expect(cfg._launch.initial_command_cli == null);
         try testing.expectEqualStrings("foo.exe", cfg.@"initial-command".?.direct[0]);
     }
 }
@@ -1161,7 +1596,7 @@ test "profile-order and profile-hidden report a value that can name no profile, 
     for (want, found) |w, got| {
         try testing.expectEqualStrings(w.key, got.key);
         try testing.expect(std.mem.startsWith(u8, got.message, w.message));
-        try testing.expectEqualStrings("C:\\noctty-test\\config.ghostty", got.location.file.path);
+        try testing.expectEqualStrings(fixtures.config_path, got.location.file.path);
         try testing.expectEqual(w.line, got.location.file.line);
     }
     // Only the value with a comment after it gets the hint.
@@ -1181,17 +1616,17 @@ test "default-profile problems carry the line that set it" {
         try testing.expectEqual(@as(usize, 2), diag.location.file.line);
         // Looked up and not found, which Settings shows; a clone (the
         // app's config is one) keeps that.
-        try testing.expectEqual(DefaultProfileFailure.not_found, cfg._default_profile_failure);
+        try testing.expectEqual(DefaultProfileFailure.not_found, cfg._launch.default_profile_failure);
         var copy = try cfg.clone(alloc);
         defer copy.deinit();
-        try testing.expectEqual(DefaultProfileFailure.not_found, copy._default_profile_failure);
+        try testing.expectEqual(DefaultProfileFailure.not_found, copy._launch.default_profile_failure);
     }
     {
         var cfg = try fixtures.load(alloc, .{ .file = "profile-command = py: cmd.exe\ndefault-profile = py\ncommand = vim.exe\n" });
         defer cfg.deinit();
         try testing.expectEqual(@as(usize, 1), cfg._diagnostics.items().len);
         // Not looked up at all: the command won.
-        try testing.expectEqual(DefaultProfileFailure.none, cfg._default_profile_failure);
+        try testing.expectEqual(DefaultProfileFailure.none, cfg._launch.default_profile_failure);
         const diag = cfg._diagnostics.items()[0];
         try testing.expect(std.mem.startsWith(u8, diag.message, "is not used, because a config file sets command"));
         try testing.expectEqual(@as(usize, 2), diag.location.file.line);
@@ -1214,10 +1649,10 @@ test "visual-studio-profiles loads, and default-profile can name a Visual Studio
         defer cfg.deinit();
         try testing.expect(cfg._diagnostics.empty());
         try testing.expectEqual(Config.VisualStudioProfiles.newest, cfg.@"visual-studio-profiles");
-        try testing.expectEqualStrings("vs:6bb7cfd9:cmd", cfg._default_profile.?.key);
+        try testing.expectEqualStrings("vs:6bb7cfd9:cmd", cfg._launch.default_profile.?.key);
         try testing.expectEqualStrings("cmd.exe", cfg.command.?.direct[0]);
         try testing.expectEqualStrings("/k", cfg.command.?.direct[1]);
-        try testing.expect(cfg._command_defaulted);
+        try testing.expect(nocttyCommand(&cfg) != null);
     }
     // `vs:newest:cmd` resolves to the concrete key, which the pane stores, so
     // a restore names the instance it ran; a value that names nothing yet is
@@ -1226,20 +1661,20 @@ test "visual-studio-profiles loads, and default-profile can name a Visual Studio
         var cfg = try fixtures.load(alloc, .{ .file = "default-profile = vs:newest:cmd\nprofile-hidden = vs:newest:pwsh\nprofile-order = vs:deadbeef:cmd\n" });
         defer cfg.deinit();
         try testing.expect(cfg._diagnostics.empty());
-        try testing.expectEqualStrings("vs:6bb7cfd9:cmd", cfg._default_profile.?.key);
+        try testing.expectEqualStrings("vs:6bb7cfd9:cmd", cfg._launch.default_profile.?.key);
     }
     {
         var cfg = try fixtures.load(alloc, .{ .file = "visual-studio-profiles = none\ndefault-profile = vs:newest:cmd\n" });
         defer cfg.deinit();
         try testing.expectEqual(@as(usize, 1), testProblems(&cfg, "default-profile"));
-        try testing.expect(cfg._default_profile == null);
+        try testing.expect(cfg._launch.default_profile == null);
     }
     // `none` asks nothing, so the key names nothing: a config problem.
     {
         var cfg = try fixtures.load(alloc, .{ .file = "visual-studio-profiles = none\ndefault-profile = vs:6bb7cfd9:cmd\n" });
         defer cfg.deinit();
         try testing.expectEqual(@as(usize, 1), testProblems(&cfg, "default-profile"));
-        try testing.expect(cfg._default_profile == null);
+        try testing.expect(cfg._launch.default_profile == null);
     }
     {
         var cfg = try fixtures.load(alloc, .{ .file = "visual-studio-profiles = all\n" });
@@ -1260,26 +1695,23 @@ test "visual-studio-profiles loads, and default-profile can name a Visual Studio
     // problem named as that, not as a key that names nothing, at the line
     // that set the value.
     {
-        var cfg = try Config.default(alloc);
+        var cfg = try fixtures.loadWith(alloc, "font-size = 12\ndefault-profile = vs:6bb7cfd9:cmd\n", .{ .visual_studio_answers = false });
         defer cfg.deinit();
-        var reader: std.Io.Reader = .fixed("font-size = 12\ndefault-profile = vs:6bb7cfd9:cmd\n");
-        try cfg.loadReader(alloc, &reader, "C:\\noctty-test\\config.ghostty");
-        try finalizeWith(&cfg, fixtures.Machine{ .visual_studio_answers = false });
-        try testing.expect(cfg.command == null and cfg._default_profile == null);
+        try testing.expect(cfg.command == null and cfg._launch.default_profile == null);
         try testing.expectEqual(@as(usize, 1), testProblems(&cfg, "default-profile"));
         // Not "names nothing": Settings keeps the value apart from every
         // listed instance, unmarked, and a clone (the app's config) keeps
         // that.
-        try testing.expectEqual(DefaultProfileFailure.unavailable, cfg._default_profile_failure);
+        try testing.expectEqual(DefaultProfileFailure.unavailable, cfg._launch.default_profile_failure);
         var copy = try cfg.clone(alloc);
         defer copy.deinit();
-        try testing.expectEqual(DefaultProfileFailure.unavailable, copy._default_profile_failure);
+        try testing.expectEqual(DefaultProfileFailure.unavailable, copy._launch.default_profile_failure);
         // Asked again (a finalize run again), still one problem.
         try finalizeWith(&cfg, fixtures.Machine{ .visual_studio_answers = false });
         try testing.expectEqual(@as(usize, 1), testProblems(&cfg, "default-profile"));
         const diag = cfg._diagnostics.items()[0];
         try testing.expect(std.mem.indexOf(u8, diag.message, "did not answer") != null);
-        try testing.expectEqualStrings("C:\\noctty-test\\config.ghostty", diag.location.file.path);
+        try testing.expectEqualStrings(fixtures.config_path, diag.location.file.path);
         try testing.expectEqual(@as(usize, 2), diag.location.file.line);
     }
 }
@@ -1293,7 +1725,7 @@ test "safe mode starts its recovery command over default-profile" {
     try useRecovery(&cfg);
     try cfg.finalize();
     try testing.expect(cfg._diagnostics.empty());
-    try testing.expect(cfg._default_profile == null);
+    try testing.expect(cfg._launch.default_profile == null);
     try testing.expectEqualStrings("/D", cfg.command.?.direct[1]);
 }
 
@@ -1370,7 +1802,7 @@ test "finalize-time profile problems are there once, at their lines, after a the
                     std.debug.print("{s}: {s}\n", .{ diag.key, diag.message });
                     return err;
                 };
-                try testing.expectEqualStrings("C:\\noctty-test\\config.ghostty", diag.location.file.path);
+                try testing.expectEqualStrings(fixtures.config_path, diag.location.file.path);
                 try testing.expectEqual(w.line, diag.location.file.line);
                 found += 1;
             }
@@ -1405,7 +1837,7 @@ test "profile keys: a field with no profile-command is reported at its last line
         try testing.expectEqualStrings(w.key, got.key);
         try testing.expect(std.mem.startsWith(u8, got.message, "\"ghost\" has no profile-command line") or
             std.mem.startsWith(u8, got.message, "\"GHOST\" has no profile-command line"));
-        try testing.expectEqualStrings("C:\\noctty-test\\config.ghostty", got.location.file.path);
+        try testing.expectEqualStrings(fixtures.config_path, got.location.file.path);
         try testing.expectEqual(w.line, got.location.file.line);
     }
     const formatted = try testFormatChanged(alloc, &cfg);
@@ -1458,7 +1890,7 @@ test "Windows safe mode swaps only the automatic command for cmd.exe" {
     const alloc = testing.allocator;
 
     // With no command, recovery gives `cmd.exe /D` (no profile, no AutoRun),
-    // marked automatic, before `finalize` has anything to look up.
+    // noctty's, before `finalize` has anything to look up.
     var automatic = try Config.default(alloc);
     defer automatic.deinit();
     try useRecovery(&automatic);
@@ -1469,9 +1901,7 @@ test "Windows safe mode swaps only the automatic command for cmd.exe" {
         "cmd.exe",
     ));
     try testing.expectEqualStrings("/D", automatic.command.?.direct[1]);
-    // The default lookup leaves a command that is already set alone.
-    try useAutomatic(&automatic);
-    try testing.expectEqualStrings("/D", automatic.command.?.direct[1]);
+    try testing.expectEqual(Ledger.CommandFrom.recovery, automatic._launch.command_from);
 
     // A command somebody set is not replaced.
     var explicit = try Config.default(alloc);
@@ -1530,11 +1960,8 @@ test "what a load decided of default-profile: the profile, noctty's command and 
     // Visual Studio did not answer: apart from not found, for its own value
     // only.
     {
-        var cfg = try Config.default(alloc);
+        var cfg = try fixtures.loadWith(alloc, "default-profile = vs:newest:cmd\n", .{ .visual_studio_answers = false });
         defer cfg.deinit();
-        var reader: std.Io.Reader = .fixed("default-profile = vs:newest:cmd\n");
-        try cfg.loadReader(alloc, &reader, "C:\\noctty-test\\config.ghostty");
-        try finalizeWith(&cfg, fixtures.Machine{ .visual_studio_answers = false });
         try testing.expect(outcome(&cfg, "vs:newest:cmd") == .unavailable);
         try testing.expect(outcome(&cfg, "vs:6bb7cfd9:cmd") == .untried);
     }
@@ -1719,4 +2146,668 @@ test "keepSources: a config built again from the files keeps the running launch"
     try testing.expectEqualStrings("nosuch", reread.@"default-profile".?);
     try testing.expect(outcome(&reread, "nosuch") == .not_found);
     try testing.expectEqualStrings("pwsh", filesDefaultProfile(&reread).?);
+}
+
+/// The user profiles `config` defines, built as discovery builds them.
+fn testUserProfiles(alloc: Allocator, config: *const Config) ![]windows_shell.Profile {
+    var user = try windows_shell.UserProfiles.init(alloc, config);
+    defer user.deinit();
+    return try windows_shell.appendUserProfiles(alloc, try alloc.alloc(windows_shell.Profile, 0), user.definitions, windows_shell.ProcessEnvironment{});
+}
+
+/// A new pane's config: a shallow clone of `config` in `C:\work`, as the
+/// ordinary rules left it.
+fn testPane(alloc: Allocator, config: *const Config) !Config {
+    var pane = config.shallowClone(alloc);
+    errdefer pane.deinit();
+    pane.@"working-directory" = .{ .path = try pane._arena.?.allocator().dupe(u8, "C:\\work") };
+    return pane;
+}
+
+/// Where `config` starts: its path, `~` for `.home`, or "" for neither.
+fn testDirectory(config: *const Config) []const u8 {
+    const directory = config.@"working-directory" orelse return "";
+    return switch (directory) {
+        .path => |path| path,
+        .home => "~",
+        .inherit => "",
+    };
+}
+
+/// That `pane` runs SSH as every launch path hardens it: no shell
+/// integration, in USERPROFILE. Skipped where there is no USERPROFILE.
+fn testExpectHardenedSsh(pane: *const Config) !void {
+    var home_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const home = (try windows_ssh_hosts.userProfileDir(&home_buf)) orelse return error.SkipZigTest;
+    try std.testing.expectEqual(Config.ShellIntegration.none, pane.@"shell-integration");
+    try std.testing.expectEqualStrings(home, testDirectory(pane));
+}
+
+test "prepare: a fresh pane runs default-profile's profile, except the first pane of -e" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    const files =
+        \\env = Path=C:\global
+        \\env = KEEP=1
+        \\profile-command = py: cmd.exe /k py
+        \\profile-env = py: PATH=C:\profile
+        \\profile-env = py: MODE=profile
+        \\profile-working-directory = py: D:\pinned
+        \\profile-command = ubuntu: wsl.exe -d Ubuntu
+        \\profile-working-directory = ubuntu: home
+        \\
+    ;
+    const Row = struct {
+        default: []const u8 = "",
+        argv: []const []const u8 = &.{},
+        first: bool = false,
+        named_directory: bool = false,
+        /// The key the pane records; null for no launch of the default.
+        key: ?[]const u8 = null,
+        line: bool = false,
+        directory: []const u8 = "C:\\work",
+    };
+    for ([_]Row{
+        // No default profile, nothing to start.
+        .{},
+        .{ .default = "py", .key = "user:py", .line = true, .directory = "D:\\pinned" },
+        // The first pane of a launch with `-e` runs that command; a later
+        // pane of it runs the profile.
+        .{ .default = "py", .argv = &.{ "-e", "vim.exe" }, .first = true },
+        .{ .default = "py", .argv = &.{ "-e", "vim.exe" }, .key = "user:py", .line = true, .directory = "D:\\pinned" },
+        // A directory the launch named wins over the pinned one.
+        .{ .default = "py", .named_directory = true, .key = "user:py", .line = true },
+        // A wsl.exe profile in home keeps `.home`, which gives `--cd ~`.
+        .{ .default = "ubuntu", .key = "user:ubuntu", .line = true, .directory = "~" },
+        .{ .default = "ubuntu", .named_directory = true, .key = "user:ubuntu", .line = true },
+        // A profile that pins nothing keeps the ordinary rules' directory.
+        .{ .default = "wsl:Ubuntu", .key = "wsl:Ubuntu" },
+        .{ .default = "vs:6bb7cfd9:cmd", .key = "vs:6bb7cfd9:cmd", .line = true },
+    }) |row| {
+        const text = try std.fmt.allocPrint(alloc, "{s}default-profile = {s}\n", .{ files, row.default });
+        defer alloc.free(text);
+        var cfg = try fixtures.load(alloc, .{ .file = text, .argv = row.argv });
+        defer cfg.deinit();
+        var pane = try testPane(alloc, &cfg);
+        defer pane.deinit();
+        var context: fixtures.Context = .{ .first = row.first };
+        const stamp = try prepare(&pane, .{ .fresh = .{ .named_directory = row.named_directory } }, &context);
+        testing.expectEqualStrings(row.key orelse "", stamp.key orelse "") catch |err| {
+            std.debug.print("default-profile = {s}, first={}\n", .{ row.default, row.first });
+            return err;
+        };
+        try testing.expect(!stamp.ssh and stamp.title == null);
+        try testing.expectEqual(row.line, stamp.user != null);
+        try testing.expectEqualStrings(row.directory, testDirectory(&pane));
+        // Started: no longer noctty's choice, so the default does not
+        // stack on it.
+        if (row.key != null) try testing.expect(!defaultApplies(&pane, false));
+    }
+
+    // The profile's variables go on a copy, and its command is the pane's.
+    {
+        var cfg = try fixtures.load(alloc, .{ .file = files ++ "default-profile = py\n" });
+        defer cfg.deinit();
+        var pane = try testPane(alloc, &cfg);
+        defer pane.deinit();
+        var context: fixtures.Context = .{};
+        const stamp = try prepare(&pane, .{ .fresh = .{} }, &context);
+        try testing.expectEqualStrings("cmd.exe /k py", (stamp.user orelse return error.TestUnexpectedResult).command_line);
+        // The profile's PATH replaces the global Path whatever the case.
+        try testing.expectEqualStrings("C:\\profile", pane.env.map.get("PATH") orelse "");
+        try testing.expect(pane.env.map.get("Path") == null);
+        try testing.expectEqualStrings("1", pane.env.map.get("KEEP") orelse "");
+        try testing.expectEqualStrings("profile", pane.env.map.get("MODE") orelse "");
+        // The app config's map and command, which the clone shared, stay.
+        try testing.expectEqualStrings("C:\\global", cfg.env.map.get("Path") orelse "");
+        try testing.expect(cfg.env.map.get("MODE") == null);
+        const words = try testDirectCommand(pane.command);
+        try testing.expectEqualStrings("cmd.exe", words[0]);
+        try testing.expect(words.ptr != (try testDirectCommand(cfg.command)).ptr);
+    }
+
+    // An SSH default is hardened and starts in USERPROFILE whatever the
+    // launch named, with its alias as the tab title.
+    {
+        var cfg = try fixtures.loadWith(alloc, "default-profile = ssh:prod\n", .{ .ssh = true });
+        defer cfg.deinit();
+        for ([_]bool{ false, true }) |named_directory| {
+            var pane = try testPane(alloc, &cfg);
+            defer pane.deinit();
+            var context: fixtures.Context = .{};
+            const stamp = try prepare(&pane, .{ .fresh = .{ .named_directory = named_directory } }, &context);
+            try testing.expectEqualStrings("ssh:prod", stamp.key orelse "");
+            try testing.expect(stamp.ssh);
+            try testing.expectEqualStrings("prod", stamp.title orelse "");
+            try testExpectHardenedSsh(&pane);
+            try testing.expectEqual(Config.ShellIntegration.detect, cfg.@"shell-integration");
+        }
+    }
+}
+
+test "prepare: a chosen profile starts in home unless it pins a directory or inherits" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    var cfg = try fixtures.load(alloc, .{ .file = 
+        \\env = Path=C:\global
+        \\env = KEEP=1
+        \\profile-command = plain: cmd.exe /k echo "a&b"
+        \\profile-env = plain: PATH=C:\profile
+        \\profile-env = plain: NEW=2
+        \\profile-command = home: tool.exe
+        \\profile-working-directory = home: home
+        \\profile-command = inh: tool.exe
+        \\profile-working-directory = inh: inherit
+        \\profile-command = pin: tool.exe
+        \\profile-working-directory = pin: D:\pinned dir
+        \\profile-command = ubuntu: wsl.exe -d Ubuntu
+        \\profile-command = wslhome: C:\Windows\System32\wsl.exe -d Ubuntu
+        \\profile-working-directory = wslhome: home
+        \\
+    });
+    defer cfg.deinit();
+    try testing.expect(cfg._diagnostics.empty());
+    // A command the app config has, which the pane's clone shares.
+    cfg.command = .{ .shell = "pwsh.exe" };
+    const profiles = try testUserProfiles(alloc, &cfg);
+    defer windows_shell.deinitProfiles(alloc, profiles);
+    var home_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const home = (try internal_os.home(&home_buf)) orelse return error.SkipZigTest;
+
+    // Home as a path: a bare `.home` on a pane's config would start in
+    // noctty's own folder. A wsl.exe launch keeps `.home`, which gives
+    // `--cd ~` (the Linux home), not `/mnt/c/Users/<name>`.
+    const pwsh = [_][:0]const u8{"C:\\Program Files\\PowerShell\\7\\pwsh.exe"};
+    const powershell = [_][:0]const u8{"C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"};
+    const cmd = [_][:0]const u8{"C:\\Windows\\System32\\cmd.exe"};
+    const git_bash = [_][:0]const u8{ "C:\\Program Files\\Git\\bin\\bash.exe", "--login", "-i" };
+    const wsl_default = [_][:0]const u8{"C:\\Windows\\System32\\wsl.exe"};
+    const wsl_distro = [_][:0]const u8{ "C:\\Windows\\System32\\wsl.exe", "-d", "Ubuntu" };
+    const detected = [_]windows_shell.Profile{
+        .{ .kind = .pwsh, .key = "pwsh.exe", .label = "PowerShell", .command = .{ .direct = &pwsh } },
+        .{ .kind = .powershell, .key = "powershell.exe", .label = "Windows PowerShell", .command = .{ .direct = &powershell } },
+        .{ .kind = .cmd, .key = "cmd.exe", .label = "Command Prompt", .command = .{ .direct = &cmd } },
+        .{ .kind = .git_bash, .key = "git-bash", .label = "Git Bash", .command = .{ .direct = &git_bash } },
+        .{ .kind = .wsl_default, .key = "wsl-default", .label = "WSL", .command = .{ .direct = &wsl_default } },
+        .{ .kind = .wsl_distro, .key = "wsl:Ubuntu", .label = "Ubuntu", .command = .{ .direct = &wsl_distro } },
+    };
+    for (&detected) |*profile| {
+        var pane = try testPane(alloc, &cfg);
+        defer pane.deinit();
+        var context: fixtures.Context = .{};
+        const stamp = try prepare(&pane, .{ .chosen = profile }, &context);
+        try testing.expectEqualStrings(profile.key, stamp.key orelse "");
+        try testing.expect(stamp.user == null and stamp.title == null);
+        const wsl = profile.kind == .wsl_default or profile.kind == .wsl_distro;
+        try testing.expectEqualStrings(if (wsl) "~" else home, testDirectory(&pane));
+    }
+    for ([_]struct { key: []const u8, directory: []const u8 }{
+        .{ .key = "user:plain", .directory = home },
+        .{ .key = "user:home", .directory = home },
+        // `inherit`: the directory the ordinary rules gave stays.
+        .{ .key = "user:inh", .directory = "C:\\work" },
+        .{ .key = "user:pin", .directory = "D:\\pinned dir" },
+        .{ .key = "user:ubuntu", .directory = "~" },
+        .{ .key = "user:wslhome", .directory = "~" },
+    }) |row| {
+        const profile = for (profiles) |*profile| {
+            if (std.mem.eql(u8, profile.key, row.key)) break profile;
+        } else return error.TestUnexpectedResult;
+        var pane = try testPane(alloc, &cfg);
+        defer pane.deinit();
+        var context: fixtures.Context = .{};
+        const stamp = try prepare(&pane, .{ .chosen = profile }, &context);
+        try testing.expectEqualStrings(row.key, stamp.key orelse "");
+        try testing.expectEqualStrings(row.directory, testDirectory(&pane));
+        if (std.mem.eql(u8, row.key, "user:ubuntu")) {
+            // What Exec then runs (`Surface` passes `wd == .home`).
+            const command = pane.command orelse return error.TestUnexpectedResult;
+            const prepared = try windows_shell.prepareCommand(alloc, command, null, true, false);
+            defer prepared.deinit(alloc);
+            const argv = prepared.direct;
+            const cd = for (argv, 0..) |arg, i| {
+                if (std.mem.eql(u8, arg, "--cd")) break i;
+            } else return error.TestExpectedCd;
+            try testing.expectEqualStrings("~", argv[cd + 1]);
+        }
+        if (!std.mem.eql(u8, row.key, "user:plain")) continue;
+        // The line the pane runs as written, and the profile's variables on
+        // a copy: its PATH replaces the global Path whatever the case.
+        try testing.expectEqualStrings("cmd.exe /k echo \"a&b\"", (stamp.user orelse return error.TestUnexpectedResult).command_line);
+        try testing.expectEqual(@as(usize, 4), (try testDirectCommand(pane.command)).len);
+        try testing.expectEqualStrings("C:\\profile", pane.env.map.get("PATH") orelse "");
+        try testing.expect(pane.env.map.get("Path") == null);
+        try testing.expectEqualStrings("1", pane.env.map.get("KEEP") orelse "");
+        try testing.expectEqualStrings("2", pane.env.map.get("NEW") orelse "");
+        try testing.expectEqual(@as(usize, 2), cfg.env.count());
+        try testing.expectEqualStrings("C:\\global", cfg.env.map.get("Path") orelse "");
+        // The app config's command is not freed or replaced.
+        try testing.expectEqualStrings("pwsh.exe", try testShellCommand(cfg.command));
+    }
+
+    // SSH: the two-word argv, hardened, in USERPROFILE (a path, so it
+    // outranks an inherited directory), the alias as its title.
+    {
+        const argv = [_][:0]const u8{ "C:\\Windows\\System32\\OpenSSH\\ssh.exe", "production" };
+        const profile: windows_shell.Profile = .{ .kind = .ssh, .key = "ssh:production", .label = "SSH: production", .command = .{ .direct = &argv } };
+        var pane = try testPane(alloc, &cfg);
+        defer pane.deinit();
+        pane.@"shell-integration" = .bash;
+        var context: fixtures.Context = .{};
+        const stamp = try prepare(&pane, .{ .chosen = &profile }, &context);
+        try testing.expectEqualStrings("ssh:production", stamp.key orelse "");
+        try testing.expect(stamp.ssh);
+        try testing.expectEqualStrings("production", stamp.title orelse "");
+        try testing.expectEqualStrings("production", (try testDirectCommand(pane.command))[1]);
+        try testExpectHardenedSsh(&pane);
+    }
+}
+
+/// User profiles for the inherit, split and restore rows, with
+/// `default-profile = py`.
+const test_source_profiles =
+    \\profile-command = py: cmd.exe /k py
+    \\profile-env = py: MODE=profile
+    \\profile-working-directory = py: D:\pinned
+    \\profile-command = tool: new.exe
+    \\profile-env = tool: MODE=new
+    \\profile-command = home: tool.exe
+    \\profile-working-directory = home: home
+    \\profile-command = inh: tool.exe
+    \\profile-working-directory = inh: inherit
+    \\profile-command = unset: tool.exe
+    \\profile-command = ubuntu: wsl.exe -d Ubuntu
+    \\profile-working-directory = ubuntu: home
+    \\default-profile = py
+    \\
+;
+
+test "prepare: an inherited launch repeats the source's as it started" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    var cfg = try fixtures.load(alloc, .{ .file = test_source_profiles });
+    defer cfg.deinit();
+    try testing.expect(cfg._diagnostics.empty());
+    const profiles = try testUserProfiles(alloc, &cfg);
+    defer windows_shell.deinitProfiles(alloc, profiles);
+
+    // What the source started, though a reload changed `tool` since: the
+    // snapshot runs, not the default profile, and no list is asked.
+    {
+        const started = [_][:0]const u8{ "old.exe", "/x" };
+        const started_env = [_]windows_shell.EnvEntry{.{ .key = "MODE", .value = "old" }};
+        var pane = try testPane(alloc, &cfg);
+        defer pane.deinit();
+        var context: fixtures.Context = .{ .window = profiles };
+        const stamp = try prepare(&pane, .{ .inherit = .{
+            .command = .{ .direct = &started },
+            .user = .{ .command_line = "old.exe /x", .env = &started_env },
+            .key = "user:tool",
+        } }, &context);
+        try testing.expectEqualStrings("user:tool", stamp.key orelse "");
+        try testing.expect(!stamp.ssh and stamp.title == null);
+        try testing.expectEqualStrings("old.exe /x", (stamp.user orelse return error.TestUnexpectedResult).command_line);
+        const words = try testDirectCommand(pane.command);
+        try testing.expectEqual(@as(usize, 2), words.len);
+        try testing.expectEqualStrings("old.exe", words[0]);
+        try testing.expectEqualStrings("/x", words[1]);
+        // The variables on a copy; the directory as the ordinary rules left it.
+        try testing.expectEqualStrings("old", pane.env.map.get("MODE") orelse "");
+        try testing.expect(cfg.env.map.get("MODE") == null);
+        try testing.expectEqualStrings("C:\\work", testDirectory(&pane));
+        try testing.expectEqual(@as(usize, 0), context.listed_count);
+        try testing.expect(!defaultApplies(&pane, false));
+    }
+    // An SSH source's command, hardened again; a pane that ran no profile
+    // (`-e`) has no key to repeat.
+    {
+        const ssh = [_][:0]const u8{ "C:\\Windows\\System32\\OpenSSH\\ssh.exe", "production" };
+        var pane = try testPane(alloc, &cfg);
+        defer pane.deinit();
+        pane.@"shell-integration" = .bash;
+        var context: fixtures.Context = .{};
+        const stamp = try prepare(&pane, .{ .inherit = .{ .command = .{ .direct = &ssh }, .key = "ssh:production", .ssh = true } }, &context);
+        try testing.expectEqualStrings("ssh:production", stamp.key orelse "");
+        try testing.expect(stamp.ssh and stamp.title == null and stamp.user == null);
+        try testing.expectEqualStrings("production", (try testDirectCommand(pane.command))[1]);
+        try testExpectHardenedSsh(&pane);
+
+        const one_shot = [_][:0]const u8{ "cmd.exe", "/c", "one-shot.cmd" };
+        var e_pane = try testPane(alloc, &cfg);
+        defer e_pane.deinit();
+        const e_stamp = try prepare(&e_pane, .{ .inherit = .{ .command = .{ .direct = &one_shot } } }, &context);
+        try testing.expect(e_stamp.key == null and e_stamp.user == null);
+        try testing.expectEqualStrings("one-shot.cmd", (try testDirectCommand(e_pane.command))[2]);
+    }
+    // A source with no command (headless fixtures) starts its key's
+    // profile as a split does; with none, the default profile.
+    for ([_]struct { key: ?[]const u8, started: []const u8, listed: usize }{
+        .{ .key = "user:tool", .started = "user:tool", .listed = 1 },
+        .{ .key = null, .started = "user:py", .listed = 0 },
+    }) |row| {
+        var pane = try testPane(alloc, &cfg);
+        defer pane.deinit();
+        var context: fixtures.Context = .{ .window = profiles };
+        const stamp = try prepare(&pane, .{ .inherit = .{ .key = row.key } }, &context);
+        try testing.expectEqualStrings(row.started, stamp.key orelse "");
+        try testing.expectEqual(row.listed, context.listed_count);
+    }
+}
+
+test "prepare: a split starts the source's profile as it is defined now" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    var cfg = try fixtures.load(alloc, .{ .file = test_source_profiles });
+    defer cfg.deinit();
+    const profiles = try testUserProfiles(alloc, &cfg);
+    defer windows_shell.deinitProfiles(alloc, profiles);
+    var home_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const home = (try internal_os.home(&home_buf)) orelse return error.SkipZigTest;
+
+    // The split's own directory inheritance comes after `prepare`; before
+    // it, a profile with no pinned directory keeps the ordinary rules' one
+    // (no home, unlike a chosen profile), and a wsl.exe one in home keeps
+    // `.home`.
+    for ([_]struct { key: []const u8, started: []const u8, directory: []const u8, line: []const u8, mode: []const u8 = "", listed: usize = 1 }{
+        // The default profile's own key needs no list (no WSL probe on the
+        // UI thread), in any case.
+        .{ .key = "USER:PY", .started = "user:py", .directory = "D:\\pinned", .line = "cmd.exe /k py", .mode = "profile", .listed = 0 },
+        // The definition now, from the window's list.
+        .{ .key = "user:tool", .started = "user:tool", .directory = "C:\\work", .line = "new.exe", .mode = "new" },
+        .{ .key = "user:home", .started = "user:home", .directory = home, .line = "tool.exe" },
+        .{ .key = "user:inh", .started = "user:inh", .directory = "C:\\work", .line = "tool.exe" },
+        .{ .key = "user:unset", .started = "user:unset", .directory = "C:\\work", .line = "tool.exe" },
+        .{ .key = "user:ubuntu", .started = "user:ubuntu", .directory = "~", .line = "wsl.exe -d Ubuntu" },
+        // A profile no longer there: the default one.
+        .{ .key = "user:gone", .started = "user:py", .directory = "D:\\pinned", .line = "cmd.exe /k py", .mode = "profile" },
+    }) |row| {
+        var pane = try testPane(alloc, &cfg);
+        defer pane.deinit();
+        var context: fixtures.Context = .{ .window = profiles };
+        const stamp = try prepare(&pane, .{ .split = row.key }, &context);
+        testing.expectEqualStrings(row.started, stamp.key orelse "") catch |err| {
+            std.debug.print("split of {s}\n", .{row.key});
+            return err;
+        };
+        try testing.expectEqualStrings(row.directory, testDirectory(&pane));
+        try testing.expectEqualStrings(row.line, (stamp.user orelse return error.TestUnexpectedResult).command_line);
+        try testing.expectEqualStrings(row.mode, pane.env.map.get("MODE") orelse "");
+        try testing.expectEqual(row.listed, context.listed_count);
+        try testing.expect(!stamp.ssh and stamp.title == null);
+    }
+
+    // An SSH profile is hardened on this path too.
+    {
+        const argv = [_][:0]const u8{ "C:\\Windows\\System32\\OpenSSH\\ssh.exe", "production" };
+        const ssh = [_]windows_shell.Profile{.{ .kind = .ssh, .key = "ssh:production", .label = "SSH: production", .command = .{ .direct = &argv } }};
+        var pane = try testPane(alloc, &cfg);
+        defer pane.deinit();
+        pane.@"shell-integration" = .bash;
+        var context: fixtures.Context = .{ .window = &ssh };
+        const stamp = try prepare(&pane, .{ .split = "ssh:production" }, &context);
+        try testing.expectEqualStrings("ssh:production", stamp.key orelse "");
+        try testing.expect(stamp.ssh and stamp.title == null);
+        try testExpectHardenedSsh(&pane);
+    }
+
+    // A source that ran no profile (a one-shot command among them): with no
+    // default profile nothing starts, and no list is asked.
+    {
+        var plain = try fixtures.load(alloc, .{});
+        defer plain.deinit();
+        var pane = try testPane(alloc, &plain);
+        defer pane.deinit();
+        var context: fixtures.Context = .{ .window = profiles };
+        const stamp = try prepare(&pane, .{ .split = null }, &context);
+        try testing.expect(stamp.key == null and pane.command == null);
+        try testing.expectEqual(@as(usize, 0), context.listed_count);
+    }
+}
+
+test "prepare: a restored pane runs its saved profile, and never connects over SSH" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    var home_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const home = (try internal_os.home(&home_buf)) orelse return error.SkipZigTest;
+    var cfg = try fixtures.load(alloc, .{ .file = test_source_profiles, .argv = &.{ "-e", "vim.exe" } });
+    defer cfg.deinit();
+    var plain = try fixtures.load(alloc, .{ .file = "profile-command = vs18-cmd: cmd.exe /k VsDevCmd.bat\n" });
+    defer plain.deinit();
+    const user = try testUserProfiles(alloc, &plain);
+    defer windows_shell.deinitProfiles(alloc, user);
+    var complete = true;
+    const vs = try (fixtures.Machine{}).visualStudio(alloc, &complete);
+    defer windows_shell.deinitProfiles(alloc, vs);
+    const pwsh_argv = [_][:0]const u8{"C:\\Program Files\\PowerShell\\7\\pwsh.exe"};
+    const ssh_argv = [_][:0]const u8{ "C:\\Windows\\System32\\OpenSSH\\ssh.exe", "prod" };
+    const window = [_]windows_shell.Profile{
+        .{ .kind = .pwsh, .key = "pwsh.exe", .label = "PowerShell", .command = .{ .direct = &pwsh_argv } },
+        .{ .kind = .ssh, .key = "ssh:prod", .label = "SSH: prod", .command = .{ .direct = &ssh_argv } },
+        // An SSH profile, whatever its key says.
+        .{ .kind = .ssh, .key = "user:tunnel", .label = "Tunnel", .command = .{ .direct = &ssh_argv } },
+        vs[0],
+        vs[1],
+    };
+    // Visual Studio's Developer Command Prompt runs its line as written.
+    const vs_cmd_line = for (vs) |profile| {
+        if (std.mem.eql(u8, profile.key, "vs:6bb7cfd9:cmd")) break (profile.user orelse return error.TestUnexpectedResult).command_line;
+    } else return error.TestUnexpectedResult;
+
+    const Row = struct {
+        config: *const Config,
+        saved: ?[]const u8,
+        window: ?[]const windows_shell.Profile,
+        discovered: []const windows_shell.Profile = &.{},
+        /// The key the pane keeps; null for none.
+        key: ?[]const u8,
+        /// What it starts in: "" for the directory it had.
+        directory: []const u8 = "",
+        line: ?[]const u8 = null,
+        listed: usize = 0,
+        discovered_count: usize = 0,
+    };
+    for ([_]Row{
+        // Its own profile, by the saved key, whose case it keeps; in home.
+        .{ .config = &cfg, .saved = "PWSH.EXE", .window = &window, .key = "PWSH.EXE", .directory = home, .listed = 1 },
+        // `default-profile`'s, from the config, with or without a window,
+        // and listing nothing.
+        .{ .config = &cfg, .saved = "USER:PY", .window = &window, .key = "USER:PY", .directory = "D:\\pinned", .line = "cmd.exe /k py" },
+        .{ .config = &cfg, .saved = "USER:PY", .window = null, .key = "USER:PY", .directory = "D:\\pinned", .line = "cmd.exe /k py" },
+        // With no window, from a discovery, in any case.
+        .{ .config = &plain, .saved = "USER:VS18-CMD", .window = null, .discovered = user, .key = "USER:VS18-CMD", .directory = home, .line = "cmd.exe /k VsDevCmd.bat", .discovered_count = 1 },
+        // With a window, from its list only: no discovery (WSL probes).
+        .{ .config = &plain, .saved = "user:vs18-cmd", .window = &window, .discovered = user, .key = null, .listed = 1 },
+        // Visual Studio's, hidden or not, with and without a window.
+        .{ .config = &plain, .saved = "vs:6bb7cfd9:pwsh", .window = &window, .key = "vs:6bb7cfd9:pwsh", .directory = home, .listed = 1 },
+        .{ .config = &plain, .saved = "VS:6BB7CFD9:CMD", .window = null, .discovered = vs, .key = "VS:6BB7CFD9:CMD", .directory = home, .line = vs_cmd_line, .discovered_count = 1 },
+        // SSH: refused by its prefix in any case before any lookup (an exact
+        // SSH lookup misses a case variant), and by its kind after one.
+        .{ .config = &plain, .saved = "ssh:prod", .window = &window, .key = null },
+        .{ .config = &plain, .saved = "SSH:prod", .window = null, .discovered = &window, .key = null },
+        .{ .config = &plain, .saved = "Ssh:PROD", .window = &window, .key = null },
+        .{ .config = &plain, .saved = "user:tunnel", .window = &window, .key = null, .listed = 1 },
+        // A profile that is gone, or none saved: the default profile.
+        .{ .config = &cfg, .saved = "user:gone", .window = &window, .key = "user:py", .directory = "D:\\pinned", .line = "cmd.exe /k py", .listed = 1 },
+        .{ .config = &cfg, .saved = null, .window = &window, .key = "user:py", .directory = "D:\\pinned", .line = "cmd.exe /k py" },
+        .{ .config = &plain, .saved = "user:gone", .window = null, .discovered = user, .key = null, .discovered_count = 1 },
+    }) |row| {
+        var pane = try testPane(alloc, row.config);
+        defer pane.deinit();
+        // The first pane: `-e`'s command does not run in a restored one.
+        var context: fixtures.Context = .{ .first = true, .window = row.window, .discovered = row.discovered };
+        const stamp = try prepare(&pane, .{ .restored = row.saved }, &context);
+        testing.expectEqualStrings(row.key orelse "", stamp.key orelse "") catch |err| {
+            std.debug.print("restore of {s}\n", .{row.saved orelse "(none)"});
+            return err;
+        };
+        try testing.expect(pane.@"initial-command" == null);
+        try testing.expect(!stamp.ssh and stamp.title == null);
+        try testing.expectEqualStrings(if (row.directory.len > 0) row.directory else "C:\\work", testDirectory(&pane));
+        if (row.line) |line| try testing.expectEqualStrings(line, (stamp.user orelse return error.TestUnexpectedResult).command_line);
+        try testing.expectEqual(row.listed, context.listed_count);
+        try testing.expectEqual(row.discovered_count, context.discover_count);
+        if (row.key == null) try testing.expect(pane.command == null);
+    }
+    // Visual Studio 2022's pair, hidden under `newest` behind 18's, still
+    // restores by its key, with a window and without one.
+    {
+        const vs_newest = try testVisualStudioPair(alloc);
+        defer windows_shell.deinitProfiles(alloc, vs_newest);
+        try testing.expectEqual(@as(usize, 4), vs_newest.len);
+        for (vs_newest) |profile| try testing.expectEqual(std.mem.startsWith(u8, profile.key, "vs:486bb794:"), profile.hidden);
+        for ([_]bool{ true, false }) |with_window| {
+            var pane = try testPane(alloc, &plain);
+            defer pane.deinit();
+            var context: fixtures.Context = if (with_window) .{ .window = vs_newest } else .{ .discovered = vs_newest };
+            const stamp = try prepare(&pane, .{ .restored = "vs:486bb794:cmd" }, &context);
+            try testing.expectEqualStrings("vs:486bb794:cmd", stamp.key orelse "");
+            try testing.expect(std.mem.indexOf(u8, (stamp.user orelse return error.TestUnexpectedResult).command_line, "\\2022\\Community\\") != null);
+            try testing.expectEqualStrings(home, testDirectory(&pane));
+        }
+        var pane = try testPane(alloc, &plain);
+        defer pane.deinit();
+        var context: fixtures.Context = .{ .window = vs_newest };
+        const stamp = try prepare(&pane, .{ .restored = "vs:486bb794:pwsh" }, &context);
+        try testing.expectEqualStrings("vs:486bb794:pwsh", stamp.key orelse "");
+        try testing.expectEqualStrings("-NoExit", (try testDirectCommand(pane.command))[1]);
+        try testing.expectEqualStrings(home, testDirectory(&pane));
+    }
+
+    // The pane's own profile alone: none of the default profile's variables.
+    {
+        var pane = try testPane(alloc, &cfg);
+        defer pane.deinit();
+        var context: fixtures.Context = .{ .window = &window };
+        _ = try prepare(&pane, .{ .restored = "pwsh.exe" }, &context);
+        try testing.expectEqualStrings(pwsh_argv[0], (try testDirectCommand(pane.command))[0]);
+        try testing.expect(pane.env.map.get("MODE") == null);
+    }
+
+    // An SSH default: the automatic shell instead, marked as noctty's.
+    {
+        var ssh = try fixtures.loadWith(alloc, "default-profile = ssh:prod\n", .{ .ssh = true });
+        defer ssh.deinit();
+        try testing.expect(defaultProfile(&ssh) != null);
+        for ([_]?[]const u8{ null, "ssh:prod", "user:gone" }) |saved| {
+            var pane = try testPane(alloc, &ssh);
+            defer pane.deinit();
+            var context: fixtures.Context = .{ .window = &window };
+            const stamp = try prepare(&pane, .{ .restored = saved }, &context);
+            try testing.expect(stamp.key == null and !stamp.ssh and stamp.title == null);
+            try testing.expectEqualStrings(fixtures.Context.automatic_argv[0], (try testDirectCommand(nocttyCommand(&pane)))[0]);
+            try testing.expectEqual(Config.ShellIntegration.detect, pane.@"shell-integration");
+            try testing.expectEqualStrings("C:\\work", testDirectory(&pane));
+        }
+    }
+}
+
+/// Visual Studio 18 and 2022 as `windows_shell.appendVisualStudioProfiles`
+/// lists them under `newest`, from fixed answers: 2022's pair is hidden.
+fn testVisualStudioPair(alloc: Allocator) ![]windows_shell.Profile {
+    const vs = windows_shell.visual_studio;
+    const Fixed = struct {
+        pub fn query(_: @This(), a: Allocator) !vs.Discovery {
+            const list = try a.alloc(vs.Instance, 2);
+            list[0] = .{ .id = "486bb794", .path = "C:\\Program Files\\Microsoft Visual Studio\\2022\\Community", .version_text = "17.14.37628.2", .version = vs.version(17, 14), .install_date = 1, .suffix = "2022" };
+            list[1] = .{ .id = "6bb7cfd9", .path = "C:\\Program Files\\Microsoft Visual Studio\\18\\Community", .version_text = "18.10.12201.205", .version = vs.version(18, 10), .install_date = 2, .suffix = "18" };
+            return .{ .instances = list };
+        }
+        pub fn installDirectory(_: @This(), _: []const u8) bool {
+            return true;
+        }
+        pub fn file(_: @This(), _: []const u8) bool {
+            return true;
+        }
+        pub fn lookup(_: @This(), a: Allocator, exe: []const u8) !?[]u8 {
+            if (std.mem.eql(u8, exe, "cmd.exe")) return try a.dupe(u8, "C:\\Windows\\System32\\cmd.exe");
+            if (std.mem.eql(u8, exe, "pwsh.exe")) return try a.dupe(u8, "C:\\Program Files\\PowerShell\\7\\pwsh.exe");
+            return null;
+        }
+    };
+    return try windows_shell.appendVisualStudioProfiles(alloc, try alloc.alloc(windows_shell.Profile, 0), .newest, .x64, Fixed{}, Fixed{}, null);
+}
+
+test "the automatic default is the shell the machine finds, where nothing else set command" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    const machine: fixtures.Machine = .{ .default_shell = "C:\\Program Files\\PowerShell\\7\\pwsh.exe" };
+    const profile = "profile-command = py: cmd.exe /k py\n";
+    const Row = struct {
+        text: []const u8,
+        recovery: bool = false,
+        from: Ledger.CommandFrom,
+        program: []const u8,
+        problems: usize = 0,
+    };
+    for ([_]Row{
+        // Nothing set `command`: the machine's shell, noctty's.
+        .{ .text = "", .from = .automatic, .program = "C:\\Program Files\\PowerShell\\7\\pwsh.exe" },
+        // `default-profile` stands in for it.
+        .{ .text = profile ++ "default-profile = py\n", .from = .default_profile, .program = "cmd.exe" },
+        // One that names nothing falls back to it, and is reported.
+        .{ .text = "default-profile = nosuch\n", .from = .automatic, .program = "C:\\Program Files\\PowerShell\\7\\pwsh.exe", .problems = 1 },
+        // Safe Recovery's command wins over both, quietly.
+        .{ .text = profile ++ "default-profile = py\n", .recovery = true, .from = .recovery, .program = "cmd.exe" },
+        // A file's command is the user's, and leaves `default-profile` unused.
+        .{ .text = profile ++ "default-profile = py\ncommand = vim.exe\n", .from = .layer, .program = "vim.exe", .problems = 1 },
+    }) |row| {
+        var cfg = try Config.default(alloc);
+        defer cfg.deinit();
+        var reader: std.Io.Reader = .fixed(row.text);
+        try cfg.loadReader(alloc, &reader, fixtures.config_path);
+        if (row.recovery) try useRecovery(&cfg);
+        try finalizeWith(&cfg, machine);
+        testing.expectEqual(row.from, cfg._launch.command_from) catch |err| {
+            std.debug.print("config: {s}\n", .{row.text});
+            return err;
+        };
+        const command = cfg.command orelse return error.TestUnexpectedResult;
+        const program = switch (command) {
+            .direct => |argv| argv[0],
+            .shell => |line| line,
+        };
+        if (row.recovery) {
+            try testing.expect(std.ascii.eqlIgnoreCase(std.fs.path.basename(program), row.program));
+        } else try testing.expectEqualStrings(row.program, program);
+        try testing.expectEqual(row.from != .layer, nocttyCommand(&cfg) != null);
+        try testing.expectEqual(row.problems, testProblems(&cfg, "default-profile"));
+        // Finalized again (a new window's clone), it stays as it was.
+        try finalizeWith(&cfg, machine);
+        try testing.expectEqual(row.from, cfg._launch.command_from);
+        try testing.expectEqual(row.problems, testProblems(&cfg, "default-profile"));
+    }
+    // A machine with no shell (the test one) leaves `command` unset.
+    var bare = try fixtures.loadWith(alloc, "", .{});
+    defer bare.deinit();
+    try testing.expect(bare.command == null and nocttyCommand(&bare) == null);
+}
+
+test "a clone keeps the launch ledger, but not the elevated profile's variables" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    var cfg = try fixtures.load(alloc, .{
+        .file = "profile-command = py: cmd.exe /k py\ndefault-profile = pwsh\n",
+        .argv = &.{ "--command=", "--initial-command=", "--default-profile=user:py", "--elevated-profile-env=MODE=elevated" },
+    });
+    defer cfg.deinit();
+    var copy = try cfg.clone(alloc);
+    defer copy.deinit();
+    try testing.expectEqual(Ledger.CommandFrom.default_profile, copy._launch.command_from);
+    try testing.expectEqualStrings("user:py", (defaultProfile(&copy) orelse return error.TestUnexpectedResult).key);
+    try testing.expect(defaultProfile(&copy).?.key.ptr != defaultProfile(&cfg).?.key.ptr);
+    try testing.expectEqualStrings("user:py", copy._launch.default_profile_cli orelse "");
+    try testing.expectEqualStrings("pwsh", filesDefaultProfile(&copy) orelse "");
+    try testing.expectEqualStrings("", copy._launch.command_cli orelse return error.TestUnexpectedResult);
+    try testing.expectEqualStrings("", copy._launch.initial_command_cli orelse return error.TestUnexpectedResult);
+    try testing.expectEqual(cfg._launch.profile_places.items.len, copy._launch.profile_places.items.len);
+    // The variables are in `env` already, which the copy has.
+    try testing.expectEqual(@as(usize, 0), copy._launch.elevated_profile_env.items.len);
+    try testing.expectEqualStrings("elevated", copy.env.map.get("MODE") orelse "");
 }

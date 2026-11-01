@@ -3647,7 +3647,8 @@ pub fn visibleProfiles(profiles: []Profile) []Profile {
 
 /// What `resolveProfileReference` needs from the system: the lookups
 /// discovery uses, noctty's environment for `%NAME%` in a user profile,
-/// and Visual Studio's instances (`visual-studio-profiles`) for a `vs:` key.
+/// and Visual Studio's instances (`visual-studio-profiles`) for a `vs:` key;
+/// and the automatic default shell, for a config load (`pane_launch`).
 pub const ReferenceHost = struct {
     visual_studio: VisualStudioProfiles = .newest,
 
@@ -3679,6 +3680,10 @@ pub const ReferenceHost = struct {
             VisualStudioHost{},
             complete,
         );
+    }
+
+    pub fn defaultShell(_: ReferenceHost, alloc: Allocator) !?Command {
+        return try defaultCommand(alloc);
     }
 };
 

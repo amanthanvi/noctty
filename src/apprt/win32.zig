@@ -483,8 +483,6 @@ pub const session_runtime = .{
     .WINDOWPLACEMENT = WINDOWPLACEMENT,
     .WindowStart = WindowStart,
     .WorkAreas = WorkAreas,
-    .applyDefaultProfileConfig = applyDefaultProfileConfig,
-    .applyProfileSurfaceConfig = applyProfileSurfaceConfig,
     .apprt = apprt,
     .builtin = builtin,
     .c = c,
@@ -493,11 +491,9 @@ pub const session_runtime = .{
     .default_title = default_title,
     .gl_startup = gl_startup,
     .internal_os = internal_os,
-    .listProfilesForConfig = listProfilesForConfig,
     .log = log,
     .makeParentDirAbsolute = makeParentDirAbsolute,
     .markRecoveryAttemptAtPath = markRecoveryAttemptAtPath,
-    .profileIndexByKey = profileIndexByKey,
     .recovery_set_aside_suffix = recovery_set_aside_suffix,
     .rectEqual = rectEqual,
     .restore_grab = restore_grab,
@@ -516,15 +512,9 @@ pub const session_runtime = .{
     .win32_session_state = win32_session_state,
     .win32_shell = win32_shell,
     .windows = windows,
-    .windows_shell = windows_shell,
     .workspaceRectToScreen = workspaceRectToScreen,
     .writePersistentFileAlloc = writePersistentFileAlloc,
 };
-
-pub const session_test_runtime = if (builtin.is_test) .{
-    .testUserProfileList = testUserProfileList,
-    .testVisualStudioList = testVisualStudioList,
-} else .{};
 
 pub const quick_terminal_host_runtime = .{
     .App = App,
@@ -1296,158 +1286,6 @@ pub fn setWindowIcon(hwnd: HWND, hinstance: HINSTANCE) void {
 
 pub fn shouldDispatchOcclusion(current: ?bool, visible: bool) bool {
     return current == null or current.? != visible;
-}
-
-/// A launch chosen from the picker, the palette, a quick slot or a restored
-/// session: it starts in home, unless a user profile pins its own directory
-/// (`profile-working-directory`) or asks for the ordinary rules (`inherit`).
-/// Restore then puts the pane's saved directory over this.
-pub fn applyProfileSurfaceConfig(
-    config: *configpkg.Config,
-    profile: *const windows_shell.Profile,
-) !void {
-    // A pinned `home`, `inherit` or path is `applyProfileLaunchConfig`'s.
-    if (profile.working_directory == null) {
-        config.@"working-directory" = try profileHomeWorkingDirectory(config, profile);
-    }
-    try applyProfileLaunchConfig(config, profile);
-}
-
-/// Home for a profile launch. A bare `.home` set on a launch clone after
-/// `Config.finalize` is not resolved again: Exec then starts the program in
-/// noctty's own current directory (measured: the directory noctty was
-/// started in), so a profile gets the path itself. For a Start menu launch
-/// that directory is the install folder, the start folder of the installer's
-/// shortcut (read from the installed `.lnk`, not measured by a launch). Only
-/// a profile that runs `wsl.exe` keeps `.home`, which gives it `--cd ~` (the
-/// Linux home) where a Windows path would give `--cd /mnt/c/Users/<name>`.
-fn profileHomeWorkingDirectory(
-    config: *configpkg.Config,
-    profile: *const windows_shell.Profile,
-) !configpkg.Config.WorkingDirectory {
-    if (windows_shell.isWslCommand(profile.command)) return .home;
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
-    const home = (internal_os.home(&buf) catch null) orelse return .home;
-    return .{ .path = try config._arena.?.allocator().dupe(u8, home) };
-}
-
-/// Applies a profile's command plus the kind-specific hardening that has to
-/// hold on EVERY launch path — new surface, split, and restore alike. Splits
-/// used to apply only the command, which silently dropped the SSH guarantees
-/// below, so both paths go through here. A user profile also brings its
-/// command line, its environment and a pinned directory, `home` or a path
-/// (which a split's own directory inheritance, applied after this, still
-/// replaces); `inherit` leaves the ordinary rules' directory.
-pub fn applyProfileLaunchConfig(
-    config: *configpkg.Config,
-    profile: *const windows_shell.Profile,
-) !void {
-    try applyProfileCommandConfig(config, profile);
-    if (profile.user) |launch| try applyUserLaunchConfig(config, launch);
-    if (profile.working_directory) |dir| switch (dir) {
-        .path => |path| config.@"working-directory" = .{
-            .path = try config._arena.?.allocator().dupe(u8, path),
-        },
-        .home => config.@"working-directory" = try profileHomeWorkingDirectory(config, profile),
-        .inherit => {},
-    };
-    if (profile.kind != .ssh) return;
-
-    try applySshLaunchHardening(config);
-}
-
-/// Give a surface's config clone a user profile's environment and command
-/// line. The env goes on a copy: `newConfig` shares the app config's map, so
-/// writing into it would change every later launch. A profile variable
-/// replaces a global `env` variable of the same name in any case, as Windows
-/// compares names (a profile `PATH` replaces a global `Path`).
-pub fn applyUserLaunchConfig(
-    config: *configpkg.Config,
-    launch: windows_shell.UserLaunch,
-) !void {
-    const alloc = config._arena.?.allocator();
-    var env = try config.env.clone(alloc);
-    try windows_shell.layerEnv(alloc, &env, launch.env);
-    config.env = env;
-    config._profile_launch = try launch.clone(alloc);
-}
-
-const SurfaceLaunch = struct {
-    command: ?configpkg.Command,
-    user: ?windows_shell.UserLaunch,
-};
-
-/// What a new surface records as the launch it runs, for the inheritance
-/// snapshot (`launch_command`, `launch_user`). The first surface of a
-/// process with `initial-command` (`-e`) runs that command, which is no
-/// profile's, so it records no profile line or env.
-pub fn surfaceLaunchSnapshot(first: bool, config: *const configpkg.Config) SurfaceLaunch {
-    if (first) if (config.@"initial-command") |command| return .{ .command = command, .user = null };
-    return .{ .command = config.command, .user = config._profile_launch };
-}
-
-pub fn applySshLaunchHardening(config: *configpkg.Config) !void {
-    // Shell integration injection rewrites the two-element ssh argv into a
-    // space-joined, unquoted `cmd.exe /C` string. A remote session cannot use
-    // it anyway: the integration scripts run locally.
-    config.@"shell-integration" = .none;
-
-    // `.home` alone loses to an inherited working directory, so resolve the
-    // path explicitly and let the drive-absolute branch of the cwd resolver
-    // take it. This is the same directory `ssh` itself expands `~` to.
-    var home_buf: [std.fs.max_path_bytes]u8 = undefined;
-    if (try windows_ssh_hosts.userProfileDir(&home_buf)) |home| {
-        const alloc = config._arena.?.allocator();
-        config.@"working-directory" = .{ .path = try alloc.dupe(u8, home) };
-    }
-}
-
-fn applyProfileCommandConfig(
-    config: *configpkg.Config,
-    profile: *const windows_shell.Profile,
-) !void {
-    const alloc = config._arena.?.allocator();
-
-    // newConfig() returns a shallow clone, so aliased fields such as
-    // command remain owned by the source config arena. Replacing command on
-    // the clone must not deinit the inherited value.
-    config.command = try profile.command.clone(alloc);
-    // A chosen profile: `default-profile` no longer applies to this launch.
-    config._command_defaulted = false;
-}
-
-/// `default-profile`'s launch, for a launch nothing else chose: the first
-/// window, a plain new tab or window, the quick terminal, a split of a pane
-/// that runs no profile, a restored pane whose profile is gone. `Config`
-/// has already made the profile's command the default `command`; this adds
-/// the rest of the profile, as a launch from the picker gets it, except that
-/// with no `profile-working-directory` the directory the ordinary rules gave
-/// stays, as for `command`. Nothing when `default-profile` is unset or a
-/// command was chosen already (`command`, a profile, an inherited launch).
-/// The profile is the config's own; the caller records its key on the
-/// surface (`App.noteProfileLaunch`).
-pub fn applyDefaultProfileConfig(config: *configpkg.Config) !?*const windows_shell.Profile {
-    if (!config._command_defaulted) return null;
-    if (config._default_profile == null) return null;
-    const profile = &config._default_profile.?;
-    try applyProfileLaunchConfig(config, profile);
-    return profile;
-}
-
-/// Put back `directory`, which the launch asked for explicitly (on the
-/// command line, or in a forwarded new window's arguments), over the
-/// directory `default-profile`'s profile pinned: the default replaces what
-/// runs, not where such a launch starts. An SSH profile keeps its hardening
-/// (`applySshLaunchHardening`), as a new tab from an SSH pane does: a local
-/// directory means nothing to the remote shell.
-pub fn keepExplicitWorkingDirectory(
-    config: *configpkg.Config,
-    profile: ?*const windows_shell.Profile,
-    directory: ?configpkg.Config.WorkingDirectory,
-) void {
-    const applied = profile orelse return;
-    if (applied.kind == .ssh) return;
-    config.@"working-directory" = directory;
 }
 
 /// The profile `new_window_elevated` hands the elevated process: the
@@ -4515,6 +4353,8 @@ pub const SurfaceInitOptions = struct {
     /// The argv a forwarded launch (a second `noctty`, or `noctty
     /// +new-window`) applied to `config`, for `WindowKeeps`.
     forwarded_arguments: ?[]const [:0]const u8 = null,
+    /// What the surface records of its launch (`pane_launch.prepare`).
+    launch: configpkg.pane_launch.Stamp = .{},
 };
 
 pub const WindowKeeps = window_state.WindowKeeps;
@@ -7278,7 +7118,7 @@ test "win32 settings automatic command is not masked by default resolution" {
     defer pending.deinit();
     var reloaded = try configpkg.Config.default(std.testing.allocator);
     defer reloaded.deinit();
-    try configpkg.pane_launch.useAutomatic(&reloaded);
+    try configpkg.pane_launch.finalizeWith(&reloaded, configpkg.pane_launch.fixtures.Machine{ .default_shell = "C:\\Program Files\\PowerShell\\7\\pwsh.exe" });
     try std.testing.expect(reloaded.command != null);
     try std.testing.expect(!settingsEditedValueMasked(&pending, &reloaded, .command));
     try settingsTestLoadText(&reloaded, "command = direct:cmd.exe\n");
@@ -7856,7 +7696,7 @@ test "win32 settings disk edit does not mistake the resolved default command for
 
     var resolved = try original.clone(alloc);
     defer resolved.deinit();
-    try configpkg.pane_launch.useAutomatic(&resolved);
+    try configpkg.pane_launch.finalizeWith(&resolved, configpkg.pane_launch.fixtures.Machine{ .default_shell = "C:\\Program Files\\PowerShell\\7\\pwsh.exe" });
     try std.testing.expect(configpkg.pane_launch.nocttyCommand(&resolved) != null);
     try std.testing.expect(!settingsDiskEditConflict(&original, &pending, &resolved, light, edited));
 
@@ -9287,8 +9127,6 @@ fn envEntriesEqual(a: anytype, b: anytype) bool {
     }
     return true;
 }
-
-const applyProfileConfigByKey = session_module.applyProfileConfigByKey;
 
 /// The profile list where no Host has one: a restore before the first window,
 /// an elevated window from no surface. `list` is `windows_shell.listProfiles`
@@ -20802,378 +20640,6 @@ test "win32 shouldDispatchOcclusion dispatches initial hidden state" {
     try std.testing.expect(shouldDispatchOcclusion(true, false));
 }
 
-test "win32 applyProfileSurfaceConfig replaces shallow-cloned command safely" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    var base = try configpkg.Config.default(std.testing.allocator);
-    defer base.deinit();
-    const base_alloc = base._arena.?.allocator();
-    base.command = .{ .shell = try base_alloc.dupeZ(u8, "pwsh.exe") };
-
-    var clone = base.shallowClone(std.testing.allocator);
-    defer clone.deinit();
-
-    var profile: windows_shell.Profile = .{
-        .kind = .cmd,
-        .key = try std.testing.allocator.dupe(u8, "cmd.exe"),
-        .label = try std.testing.allocator.dupe(u8, "Command Prompt"),
-        .command = .{ .shell = try std.testing.allocator.dupeZ(u8, "cmd.exe") },
-    };
-    defer profile.deinit(std.testing.allocator);
-
-    try applyProfileSurfaceConfig(&clone, &profile);
-
-    try std.testing.expect(clone.command != null);
-    try std.testing.expect(base.command != null);
-    try std.testing.expectEqualStrings("cmd.exe", clone.command.?.shell);
-    try std.testing.expectEqualStrings("pwsh.exe", base.command.?.shell);
-}
-
-test "win32 a detected profile chosen from the picker starts in home itself" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-    const alloc = std.testing.allocator;
-
-    var base = try configpkg.Config.default(alloc);
-    defer base.deinit();
-    var home_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const home = (try internal_os.home(&home_buf)).?;
-    const pwsh = [_][:0]const u8{"C:\\Program Files\\PowerShell\\7\\pwsh.exe"};
-    const powershell = [_][:0]const u8{"C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"};
-    const cmd = [_][:0]const u8{"C:\\Windows\\System32\\cmd.exe"};
-    const git_bash = [_][:0]const u8{ "C:\\Program Files\\Git\\bin\\bash.exe", "--login", "-i" };
-    const wsl_default = [_][:0]const u8{"C:\\Windows\\System32\\wsl.exe"};
-    const wsl_distro = [_][:0]const u8{ "C:\\Windows\\System32\\wsl.exe", "-d", "Ubuntu" };
-    for ([_]struct { kind: windows_shell.ProfileKind, argv: []const [:0]const u8 }{
-        .{ .kind = .pwsh, .argv = &pwsh },
-        .{ .kind = .powershell, .argv = &powershell },
-        .{ .kind = .cmd, .argv = &cmd },
-        .{ .kind = .git_bash, .argv = &git_bash },
-        .{ .kind = .wsl_default, .argv = &wsl_default },
-        .{ .kind = .wsl_distro, .argv = &wsl_distro },
-    }) |case| {
-        var clone = base.shallowClone(alloc);
-        defer clone.deinit();
-        clone.@"working-directory" = .{ .path = try clone._arena.?.allocator().dupe(u8, "C:\\work") };
-        const profile: windows_shell.Profile = .{
-            .kind = case.kind,
-            .key = "detected",
-            .label = "Detected",
-            .command = .{ .direct = case.argv },
-        };
-        try applyProfileSurfaceConfig(&clone, &profile);
-        const wd = clone.@"working-directory".?;
-        switch (case.kind) {
-            // `.home` gives WSL `--cd ~`, the Linux home.
-            .wsl_default, .wsl_distro => try std.testing.expect(wd == .home),
-            // The path, which Exec uses as given. A bare `.home` here would
-            // start the shell in noctty's own current directory.
-            else => switch (wd) {
-                .path => |path| try std.testing.expectEqualStrings(home, path),
-                else => return error.TestExpectedHomePath,
-            },
-        }
-    }
-}
-
-test "win32 applyProfileCommandConfig preserves inherited working directory" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    var base = try configpkg.Config.default(std.testing.allocator);
-    defer base.deinit();
-
-    var clone = base.shallowClone(std.testing.allocator);
-    defer clone.deinit();
-    const clone_alloc = clone._arena.?.allocator();
-    clone.@"working-directory" = .{ .path = try clone_alloc.dupe(u8, "C:\\work") };
-
-    var profile: windows_shell.Profile = .{
-        .kind = .wsl_distro,
-        .key = try std.testing.allocator.dupe(u8, "wsl:Ubuntu"),
-        .label = try std.testing.allocator.dupe(u8, "Ubuntu"),
-        .command = .{ .shell = try std.testing.allocator.dupeZ(u8, "wsl.exe") },
-    };
-    defer profile.deinit(std.testing.allocator);
-
-    try applyProfileCommandConfig(&clone, &profile);
-
-    try std.testing.expect(clone.command != null);
-    try std.testing.expectEqualStrings("wsl.exe", clone.command.?.shell);
-    try std.testing.expectEqualStrings("C:\\work", clone.@"working-directory".?.path);
-}
-
-test "win32 ssh profile surface config uses home working directory" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    var base = try configpkg.Config.default(std.testing.allocator);
-    defer base.deinit();
-    var clone = base.shallowClone(std.testing.allocator);
-    defer clone.deinit();
-    const clone_alloc = clone._arena.?.allocator();
-    clone.@"working-directory" = .{ .path = try clone_alloc.dupe(u8, "C:\\work") };
-
-    // Production builds SSH profiles as a two-element direct argv.
-    const argv = try std.testing.allocator.alloc([:0]const u8, 2);
-    argv[0] = try std.testing.allocator.dupeZ(u8, "C:\\Windows\\System32\\OpenSSH\\ssh.exe");
-    argv[1] = try std.testing.allocator.dupeZ(u8, "production");
-    var profile: windows_shell.Profile = .{
-        .kind = .ssh,
-        .key = try std.testing.allocator.dupe(u8, "ssh:production"),
-        .label = try std.testing.allocator.dupe(u8, "SSH: production"),
-        .palette_title = try std.testing.allocator.dupe(u8, "Connect to production"),
-        .command = .{ .direct = argv },
-    };
-    defer profile.deinit(std.testing.allocator);
-
-    try applyProfileSurfaceConfig(&clone, &profile);
-
-    try std.testing.expect(clone.command != null);
-    try std.testing.expectEqual(@as(usize, 2), clone.command.?.direct.len);
-    try std.testing.expectEqualStrings("production", clone.command.?.direct[1]);
-
-    // An explicit home path, not `.home`, so it outranks the inherited cwd.
-    try std.testing.expect(clone.@"working-directory".? == .path);
-    try std.testing.expect(!std.mem.eql(u8, "C:\\work", clone.@"working-directory".?.path));
-    try std.testing.expectEqual(configpkg.Config.ShellIntegration.none, clone.@"shell-integration");
-    try std.testing.expectEqualStrings("production", windows_shell.sshProfileAlias(&profile).?);
-}
-
-test "win32 ssh hardening also holds on the split launch path" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    // The split path used to apply only the command, which silently dropped
-    // shell-integration=none and let the ssh argv be flattened into cmd.exe /C.
-    var base = try configpkg.Config.default(std.testing.allocator);
-    defer base.deinit();
-    base.@"shell-integration" = .bash;
-    var clone = base.shallowClone(std.testing.allocator);
-    defer clone.deinit();
-    const clone_alloc = clone._arena.?.allocator();
-    clone.@"shell-integration" = .bash;
-    clone.@"working-directory" = .{ .path = try clone_alloc.dupe(u8, "C:\\work") };
-
-    const argv = try std.testing.allocator.alloc([:0]const u8, 2);
-    argv[0] = try std.testing.allocator.dupeZ(u8, "C:\\Windows\\System32\\OpenSSH\\ssh.exe");
-    argv[1] = try std.testing.allocator.dupeZ(u8, "production");
-    var profile: windows_shell.Profile = .{
-        .kind = .ssh,
-        .key = try std.testing.allocator.dupe(u8, "ssh:production"),
-        .label = try std.testing.allocator.dupe(u8, "SSH: production"),
-        .command = .{ .direct = argv },
-    };
-    defer profile.deinit(std.testing.allocator);
-
-    try applyProfileLaunchConfig(&clone, &profile);
-
-    try std.testing.expectEqual(configpkg.Config.ShellIntegration.none, clone.@"shell-integration");
-    try std.testing.expect(clone.@"working-directory".? == .path);
-    try std.testing.expect(!std.mem.eql(u8, "C:\\work", clone.@"working-directory".?.path));
-    try std.testing.expectEqual(@as(usize, 2), clone.command.?.direct.len);
-}
-
-/// The user profiles `config` defines, built as discovery builds them.
-fn testUserProfileList(alloc: Allocator, config: *const configpkg.Config) ![]windows_shell.Profile {
-    var user = try windows_shell.UserProfiles.init(alloc, config);
-    defer user.deinit();
-    return try windows_shell.appendUserProfiles(
-        alloc,
-        try alloc.alloc(windows_shell.Profile, 0),
-        user.definitions,
-        windows_shell.ProcessEnvironment{},
-    );
-}
-
-test "win32 a user profile launch sets its directory and layers its env on a copy" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-    const alloc = std.testing.allocator;
-
-    var base = try configpkg.Config.default(alloc);
-    defer base.deinit();
-    const base_alloc = base._arena.?.allocator();
-    try base.env.parseCLI(base_alloc, "Path=C:\\global");
-    try base.env.parseCLI(base_alloc, "KEEP=1");
-    for ([_][]const u8{
-        "plain: cmd.exe /k echo \"a&b\"",
-        "home: tool.exe",
-        "inh: tool.exe",
-        "pin: tool.exe",
-        "ubuntu: wsl.exe -d Ubuntu",
-        "wslhome: C:\\Windows\\System32\\wsl.exe -d Ubuntu",
-    }) |value| try base.@"profile-command".parseCLI(base_alloc, value);
-    try base.@"profile-working-directory".parseCLI(base_alloc, "home: home");
-    try base.@"profile-working-directory".parseCLI(base_alloc, "wslhome: home");
-    try base.@"profile-working-directory".parseCLI(base_alloc, "inh: inherit");
-    try base.@"profile-working-directory".parseCLI(base_alloc, "pin: D:\\pinned dir");
-    try base.@"profile-env".parseCLI(base_alloc, "plain: PATH=C:\\profile");
-    try base.@"profile-env".parseCLI(base_alloc, "plain: NEW=2");
-    try base.finalize();
-    try std.testing.expect(base._diagnostics.empty());
-
-    const profiles = try testUserProfileList(alloc, &base);
-    defer windows_shell.deinitProfiles(alloc, profiles);
-
-    var home_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const home = (try internal_os.home(&home_buf)).?;
-    const Want = union(enum) { home, wsl_home, kept, path: []const u8 };
-    for ([_]struct { key: []const u8, want: Want }{
-        // No directory of its own: home, as every profile launch, given as
-        // the path itself (a bare `.home` would start in noctty's cwd).
-        .{ .key = "user:plain", .want = .home },
-        .{ .key = "user:home", .want = .home },
-        // `inherit`: the directory the ordinary rules gave the clone stays.
-        .{ .key = "user:inh", .want = .kept },
-        .{ .key = "user:pin", .want = .{ .path = "D:\\pinned dir" } },
-        // A WSL launch keeps `.home`, which gives `--cd ~` (the Linux home,
-        // as a detected WSL profile gets), not `/mnt/c/Users/<name>`.
-        .{ .key = "user:ubuntu", .want = .wsl_home },
-        .{ .key = "user:wslhome", .want = .wsl_home },
-    }) |case| {
-        var clone = base.shallowClone(alloc);
-        defer clone.deinit();
-        clone.@"working-directory" = .{ .path = try clone._arena.?.allocator().dupe(u8, "C:\\work") };
-        try std.testing.expect(try applyProfileConfigByKey(&clone, profiles, case.key));
-        switch (case.want) {
-            .home => try std.testing.expectEqualStrings(home, clone.@"working-directory".?.path),
-            .wsl_home => {
-                const wd = clone.@"working-directory".?;
-                try std.testing.expect(wd == .home);
-                // What Exec then runs (`Surface` passes `wd == .home`).
-                const prepared = try windows_shell.prepareCommand(alloc, clone.command.?, wd.value(), true, false);
-                defer prepared.deinit(alloc);
-                const argv = prepared.direct;
-                const cd = for (argv, 0..) |arg, i| {
-                    if (std.mem.eql(u8, arg, "--cd")) break i;
-                } else return error.TestExpectedCd;
-                try std.testing.expectEqualStrings("~", argv[cd + 1]);
-            },
-            .kept => try std.testing.expectEqualStrings("C:\\work", clone.@"working-directory".?.path),
-            .path => |path| try std.testing.expectEqualStrings(path, clone.@"working-directory".?.path),
-        }
-    }
-
-    var clone = base.shallowClone(alloc);
-    defer clone.deinit();
-    try std.testing.expect(try applyProfileConfigByKey(&clone, profiles, "user:plain"));
-    // The profile's PATH replaces the global Path whatever the case.
-    try std.testing.expectEqualStrings("C:\\profile", clone.env.map.get("PATH").?);
-    try std.testing.expect(clone.env.map.get("Path") == null);
-    try std.testing.expectEqualStrings("1", clone.env.map.get("KEEP").?);
-    try std.testing.expectEqualStrings("2", clone.env.map.get("NEW").?);
-    // The app config's map, which the shallow clone shared, is untouched.
-    try std.testing.expectEqual(@as(usize, 2), base.env.count());
-    try std.testing.expectEqualStrings("C:\\global", base.env.map.get("Path").?);
-    try std.testing.expect(base.env.map.get("NEW") == null);
-    // The line the surface runs as written.
-    try std.testing.expectEqualStrings("cmd.exe /k echo \"a&b\"", clone._profile_launch.?.command_line);
-    try std.testing.expectEqual(@as(usize, 4), clone.command.?.direct.len);
-    try std.testing.expect(base._profile_launch == null);
-}
-
-test "win32 an automation tab keeps a user profile's snapshot while a split reads its definition" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-    const alloc = std.testing.allocator;
-
-    // What the source surface started with...
-    const started = [_][:0]const u8{ "old.exe", "/x" };
-    const started_env = [_]windows_shell.EnvEntry{.{ .key = "MODE", .value = "old" }};
-    // ...and the definition after a reload changed it.
-    const reloaded = [_][:0]const u8{"new.exe"};
-    var profiles = [_]windows_shell.Profile{.{
-        .kind = .user,
-        .key = "user:tool",
-        .label = "Tool",
-        .command = .{ .direct = &reloaded },
-        .user = .{ .command_line = "new.exe", .env = &.{.{ .key = "MODE", .value = "new" }} },
-    }};
-    var host: Host = undefined;
-    host.profiles = &profiles;
-    host.selected_profile = 0;
-    var source: Surface = undefined;
-    source.host = &host;
-    source.launch_profile_key = "user:tool";
-    source.launch_command = .{ .direct = &started };
-    source.launch_user = .{ .command_line = "old.exe /x", .env = &started_env };
-    source.launched_ssh = false;
-
-    var tab_config = try configpkg.Config.default(alloc);
-    defer tab_config.deinit();
-    try std.testing.expectEqualStrings("user:tool", (try App.applyLaunchConfigFromSource(&tab_config, &source)).?);
-    try std.testing.expectEqualStrings("old.exe", tab_config.command.?.direct[0]);
-    try std.testing.expectEqualStrings("old.exe /x", tab_config._profile_launch.?.command_line);
-    try std.testing.expectEqualStrings("old", tab_config.env.map.get("MODE").?);
-
-    var split_config = try configpkg.Config.default(alloc);
-    defer split_config.deinit();
-    try std.testing.expectEqualStrings("user:tool", (try App.applySplitProfileConfigFromSource(&split_config, &source)).?);
-    try std.testing.expectEqualStrings("new.exe", split_config.command.?.direct[0]);
-    try std.testing.expectEqualStrings("new.exe", split_config._profile_launch.?.command_line);
-    try std.testing.expectEqualStrings("new", split_config.env.map.get("MODE").?);
-}
-
-test "win32 an ordinary split of a user profile takes its pinned home" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-    const alloc = std.testing.allocator;
-    const argv = [_][:0]const u8{"tool.exe"};
-    const wsl_argv = [_][:0]const u8{ "wsl.exe", "-d", "Ubuntu" };
-    const launch: windows_shell.UserLaunch = .{ .command_line = "tool.exe" };
-    var profiles = [_]windows_shell.Profile{
-        .{ .kind = .user, .key = "user:home", .label = "home", .command = .{ .direct = &argv }, .working_directory = .home, .user = launch },
-        .{ .kind = .user, .key = "user:inh", .label = "inh", .command = .{ .direct = &argv }, .working_directory = .inherit, .user = launch },
-        .{ .kind = .user, .key = "user:unset", .label = "unset", .command = .{ .direct = &argv }, .user = launch },
-        .{ .kind = .user, .key = "user:ubuntu", .label = "ubuntu", .command = .{ .direct = &wsl_argv }, .working_directory = .home, .user = launch },
-    };
-    var host: Host = undefined;
-    host.profiles = &profiles;
-    host.selected_profile = 0;
-    var source: Surface = undefined;
-    source.host = &host;
-
-    var home_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const home = (try internal_os.home(&home_buf)).?;
-    // `createNewSplit` starts from the global directory, then applies the
-    // profile, then the split's own inheritance (off here).
-    for ([_]struct { key: [:0]const u8, want: ?[]const u8 }{
-        .{ .key = "user:home", .want = home },
-        .{ .key = "user:inh", .want = "C:\\global" },
-        .{ .key = "user:unset", .want = "C:\\global" },
-        .{ .key = "user:ubuntu", .want = null },
-    }) |case| {
-        var config = try configpkg.Config.default(alloc);
-        defer config.deinit();
-        config.@"working-directory" = .{ .path = try config._arena.?.allocator().dupe(u8, "C:\\global") };
-        source.launch_profile_key = case.key;
-        try std.testing.expectEqualStrings(case.key, (try App.applySplitProfileConfigFromSource(&config, &source)).?);
-        if (case.want) |want| {
-            try std.testing.expectEqualStrings(want, config.@"working-directory".?.path);
-        } else try std.testing.expect(config.@"working-directory".? == .home);
-    }
-}
-
-test "win32 a surface records a user profile's launch unless it runs initial-command" {
-    const alloc = std.testing.allocator;
-    var config = try configpkg.Config.default(alloc);
-    defer config.deinit();
-    const cmd_argv = [_][:0]const u8{ "cmd.exe", "/k", "x" };
-    const e_argv = [_][:0]const u8{"vim.exe"};
-    config.command = .{ .direct = &cmd_argv };
-    config._profile_launch = .{ .command_line = "cmd.exe /k x" };
-
-    // A profile launch, first surface or not, keeps the line with the command.
-    for ([_]bool{ true, false }) |first| {
-        const launch = surfaceLaunchSnapshot(first, &config);
-        try std.testing.expectEqualStrings("cmd.exe", launch.command.?.direct[0]);
-        try std.testing.expectEqualStrings("cmd.exe /k x", launch.user.?.command_line);
-    }
-
-    // `-e` runs on the first surface only, and is no profile's launch.
-    config.@"initial-command" = .{ .direct = &e_argv };
-    const first = surfaceLaunchSnapshot(true, &config);
-    try std.testing.expectEqualStrings("vim.exe", first.command.?.direct[0]);
-    try std.testing.expect(first.user == null);
-    const later = surfaceLaunchSnapshot(false, &config);
-    try std.testing.expectEqualStrings("cmd.exe", later.command.?.direct[0]);
-    try std.testing.expect(later.user != null);
-}
-
 /// Visual Studio 18 and 2022 as `windows_shell.appendVisualStudioProfiles`
 /// lists them, from fixed answers instead of the machine's.
 fn testVisualStudioList(alloc: Allocator, mode: windows_shell.VisualStudioProfiles) ![]windows_shell.Profile {
@@ -21200,6 +20666,59 @@ fn testVisualStudioList(alloc: Allocator, mode: windows_shell.VisualStudioProfil
     return try windows_shell.appendVisualStudioProfiles(alloc, try alloc.alloc(windows_shell.Profile, 0), mode, .x64, Fixed{}, Fixed{}, null);
 }
 
+test "win32 a profile list built from the app config gets its user profiles and Visual Studio mode" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const alloc = std.testing.allocator;
+    const line = "cmd.exe /k \"C:\\Program Files\\Microsoft Visual Studio\\18\\Community\\Common7\\Tools\\VsDevCmd.bat\" -startdir=none -arch=x64 -host_arch=x64";
+    var config = try configpkg.Config.default(alloc);
+    defer config.deinit();
+    const arena = config._arena.?.allocator();
+    try config.@"profile-command".parseCLI(arena, "vs18-cmd: " ++ line);
+    try config.@"profile-name".parseCLI(arena, "vs18-cmd: New label");
+    // `%NAME%` reads the `env` lines first, on every path that builds a list.
+    try config.env.parseCLI(arena, "NOCTTY_TEST_TEAM_DIR=C:\\team");
+    try config.@"profile-env".parseCLI(arena, "vs18-cmd: SEEN=%noctty_test_team_dir%\\bin");
+    try config.finalize();
+
+    // With no window (a restore before the first one, an elevated window
+    // from no surface), the list is built from the app config: its user
+    // profiles reach the lister, after the local shells, before SSH.
+    const user_lister = struct {
+        fn list(a: Allocator, _: bool, user: *const windows_shell.UserProfiles) ![]windows_shell.Profile {
+            const shell = try a.alloc(windows_shell.Profile, 1);
+            const cmd = try a.alloc([:0]const u8, 1);
+            cmd[0] = try a.dupeZ(u8, "C:\\Windows\\System32\\cmd.exe");
+            shell[0] = .{ .kind = .cmd, .key = try a.dupe(u8, "cmd.exe"), .label = try a.dupe(u8, "Command Prompt"), .command = .{ .direct = cmd } };
+            return try windows_shell.appendUserProfiles(a, shell, user.definitions, windows_shell.ProcessEnvironment{});
+        }
+    }.list;
+    const listed = try listProfilesForConfig(alloc, &config, user_lister);
+    defer windows_shell.deinitProfiles(alloc, listed);
+    try std.testing.expectEqual(@as(usize, 2), listed.len);
+    try std.testing.expectEqualStrings("cmd.exe", listed[0].key);
+    try std.testing.expectEqualStrings("user:vs18-cmd", listed[1].key);
+    try std.testing.expectEqualStrings("New label", listed[1].label);
+    try std.testing.expectEqualStrings(line, (listed[1].user orelse return error.TestUnexpectedResult).command_line);
+    const seen = listed[1].user.?.env;
+    try std.testing.expectEqualStrings("SEEN", seen[seen.len - 1].key);
+    try std.testing.expectEqualStrings("C:\\team\\bin", seen[seen.len - 1].value);
+
+    // Its `visual-studio-profiles` reaches the lister: `newest` lists both
+    // instances' pairs (the older one hidden), `none` lists nothing.
+    const vs_lister = struct {
+        fn list(a: Allocator, _: bool, user: *const windows_shell.UserProfiles) ![]windows_shell.Profile {
+            return try testVisualStudioList(a, user.visual_studio);
+        }
+    }.list;
+    const newest = try listProfilesForConfig(alloc, &config, vs_lister);
+    defer windows_shell.deinitProfiles(alloc, newest);
+    try std.testing.expectEqual(@as(usize, 4), newest.len);
+    config.@"visual-studio-profiles" = .none;
+    const none = try listProfilesForConfig(alloc, &config, vs_lister);
+    defer windows_shell.deinitProfiles(alloc, none);
+    try std.testing.expectEqual(@as(usize, 0), none.len);
+}
+
 test "win32 default-profile runs where nothing chose a launch, and only there" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
@@ -21207,7 +20726,7 @@ test "win32 default-profile runs where nothing chose a launch, and only there" {
     var app: App = undefined;
     var host: Host = undefined;
     var source: Surface = undefined;
-    var created: [11]Surface = undefined;
+    var created: [10]Surface = undefined;
     var session: TestSession = .{};
     var surfaces: [1 + created.len]TestSession.SurfaceOptions = undefined;
     surfaces[0] = .{ .storage = &source, .host = &host, .register = true, .free_launch_profile_key_on_deinit = true };
@@ -21237,7 +20756,7 @@ test "win32 default-profile runs where nothing chose a launch, and only there" {
     app.config.@"default-profile" = "py";
     app.config.@"split-inherit-working-directory" = false;
     try app.config.finalize();
-    try std.testing.expectEqualStrings("user:py", app.config._default_profile.?.key);
+    try std.testing.expectEqualStrings("user:py", (configpkg.pane_launch.defaultProfile(&app.config) orelse return error.TestUnexpectedResult).key);
 
     // A profile the picker shows, for the explicit choices below.
     const pwsh_argv = [_][:0]const u8{"C:\\Program Files\\PowerShell\\7\\pwsh.exe"};
@@ -21274,7 +20793,7 @@ test "win32 default-profile runs where nothing chose a launch, and only there" {
                     .shell => |line| line,
                 }),
                 .mode = if (config.env.map.get("MODE")) |value| try a.dupe(u8, value) else null,
-                .line = if (config._profile_launch) |launch| try a.dupe(u8, launch.command_line) else null,
+                .line = if (opts.launch.user) |launch| try a.dupe(u8, launch.command_line) else null,
                 .dir = if (config.@"working-directory") |dir| switch (dir) {
                     .path => |path| try a.dupe(u8, path),
                     else => null,
@@ -21342,7 +20861,6 @@ test "win32 default-profile runs where nothing chose a launch, and only there" {
     try Expect.profile(&created[1], "D:\\pinned");
     // The app config is left as it was.
     try std.testing.expect(app.config.env.map.get("MODE") == null);
-    try std.testing.expect(app.config._profile_launch == null);
 
     // A plain new tab, a new window, a split of a pane that runs no profile.
     try std.testing.expect(try app.performAction(.app, .new_tab, {}));
@@ -21369,11 +20887,14 @@ test "win32 default-profile runs where nothing chose a launch, and only there" {
     // Restore does not connect over SSH by itself, so with an SSH default a
     // pane it would reach gets the automatic shell (a session saves an SSH
     // pane without its profile).
-    const py_profile = app.config._default_profile.?;
-    const ssh_argv = [_][:0]const u8{ "C:\\Windows\\System32\\OpenSSH\\ssh.exe", "prod" };
-    app.config._default_profile = .{ .kind = .ssh, .key = "ssh:prod", .label = "prod", .command = .{ .direct = &ssh_argv } };
-    app.config.command = app.config._default_profile.?.command;
-    _ = try app.restoreSessionPane(.{}, &host, null, host.tabs.items.len, .right, &transaction);
+    var ssh_config = try configpkg.pane_launch.fixtures.loadWith(alloc, "default-profile = ssh:prod\n", .{ .ssh = true });
+    defer ssh_config.deinit();
+    {
+        const py_config = app.config;
+        app.config = ssh_config;
+        defer app.config = py_config;
+        _ = try app.restoreSessionPane(.{}, &host, null, host.tabs.items.len, .right, &transaction);
+    }
     try std.testing.expect(std.mem.indexOf(u8, Hook.seen.program, "ssh") == null);
     try std.testing.expect(Hook.seen.mode == null and Hook.seen.line == null);
     try std.testing.expect(created[8].launch_profile_key == null);
@@ -21381,23 +20902,12 @@ test "win32 default-profile runs where nothing chose a launch, and only there" {
 
     // A first window started with `--working-directory=` (Explorer's "Open
     // in noctty", a jump-list folder, with no instance running) starts
-    // there, not in the profile's pinned directory. An SSH default keeps
-    // its hardening and starts ssh.exe in the user's profile directory.
+    // there, not in the profile's pinned directory.
     app.explicit_startup_working_directory = true;
     defer app.explicit_startup_working_directory = false;
     app.config.@"working-directory" = .{ .path = "C:\\cli" };
     try app.createWindow(default_title);
-    try std.testing.expectEqualStrings("ssh:prod", created[9].launch_profile_key orelse "");
-    try appendOwnedString(alloc, &created[9].tab_title_override, null);
-    try std.testing.expect(!std.mem.eql(u8, "C:\\cli", Hook.seen.dir orelse ""));
-    var home_buf: [std.fs.max_path_bytes]u8 = undefined;
-    if (try windows_ssh_hosts.userProfileDir(&home_buf)) |home| {
-        try std.testing.expectEqualStrings(home, Hook.seen.dir orelse "");
-    }
-    app.config._default_profile = py_profile;
-    app.config.command = py_profile.command;
-    try app.createWindow(default_title);
-    try Expect.profile(&created[10], "C:\\cli");
+    try Expect.profile(&created[9], "C:\\cli");
     try std.testing.expectEqual(created.len, Hook.next);
 }
 
@@ -21440,20 +20950,20 @@ test "win32 a split of a local pane into an SSH default keeps the SSH directory"
     app.test_automation_pwd = &Hook.pwd;
 
     // A local pane that runs no profile (the first window's `-e cmd.exe`).
-    const argv = [_][:0]const u8{ "C:\\Windows\\System32\\OpenSSH\\ssh.exe", "prod" };
-    app.config._default_profile = .{ .kind = .ssh, .key = "ssh:prod", .label = "prod", .command = .{ .direct = &argv } };
-    app.config.command = app.config._default_profile.?.command;
-    app.config._command_defaulted = true;
+    app.config.@"default-profile" = "ssh:prod";
     app.config.@"split-inherit-working-directory" = true;
+    try configpkg.pane_launch.finalizeWith(&app.config, configpkg.pane_launch.fixtures.Machine{ .ssh = true });
     source.launched_ssh = false;
     source.launch_profile_key = null;
     try std.testing.expectError(error.LaunchCaptured, app.createNewSplit(&source, .right, null, false));
     try std.testing.expectEqualStrings(home, Hook.directory[0..Hook.directory_len]);
 
     // A local default still splits into the pane's own directory.
-    const local = [_][:0]const u8{"cmd.exe"};
-    app.config._default_profile = .{ .kind = .cmd, .key = "cmd.exe", .label = "Command Prompt", .command = .{ .direct = &local } };
-    app.config.command = app.config._default_profile.?.command;
+    var local = try configpkg.pane_launch.fixtures.load(std.testing.allocator, .{ .file = "default-profile = pwsh.exe\nsplit-inherit-working-directory = true\n" });
+    defer local.deinit();
+    const ssh_config = app.config;
+    defer app.config = ssh_config;
+    app.config = local;
     try std.testing.expectError(error.LaunchCaptured, app.createNewSplit(&source, .right, null, false));
     try std.testing.expectEqualStrings("C:\\local-project", Hook.directory[0..Hook.directory_len]);
 }
@@ -21482,7 +20992,7 @@ test "win32 a split or an elevated window of a default-profile pane needs no pro
     try app.config.@"profile-command".parseCLI(arena, "py: cmd.exe /k py");
     app.config.@"default-profile" = "py";
     try app.config.finalize();
-    try std.testing.expectEqualStrings("user:py", if (app.config._default_profile) |profile| profile.key else "");
+    try std.testing.expectEqualStrings("user:py", if (configpkg.pane_launch.defaultProfile(&app.config)) |profile| profile.key else "");
 
     // One window has a list without the default profile (as when discovery
     // misses an SSH alias or a WSL distribution); the other has none.
@@ -21491,12 +21001,10 @@ test "win32 a split or an elevated window of a default-profile pane needs no pro
 
     // A split from a window with no list borrows none (and discovers
     // nothing): the config has the profile.
-    var source: Surface = undefined;
-    source.launch_profile_key = "USER:PY";
-    source.host = &unlisted;
     var config = app.config.shallowClone(alloc);
     defer config.deinit();
-    try std.testing.expectEqualStrings("user:py", (try App.applySplitProfileConfigFromSource(&config, &source)) orelse "");
+    const split = try configpkg.pane_launch.prepare(&config, .{ .split = "USER:PY" }, app.launchContext(&unlisted));
+    try std.testing.expectEqualStrings("user:py", split.key orelse "");
     try std.testing.expectEqualStrings("cmd.exe", config.command.?.direct[0]);
     try std.testing.expect(unlisted.profiles == null);
 
@@ -21606,7 +21114,7 @@ test "win32 an elevated window names a file-defined user profile and passes a co
     try std.testing.expectEqualStrings("--working-directory=C:\\work --command=direct:two.exe --initial-command= --elevated-profile-env=MODE=cli", cli_only);
 }
 
-test "win32 a forwarded new window keeps the default-profile launch when a theme is set" {
+test "win32 a forwarded new window starts the default profile after its arguments, when a theme is set" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
     const alloc = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
@@ -21634,11 +21142,6 @@ test "win32 a forwarded new window keeps the default-profile launch when a theme
     try base.finalize();
     try std.testing.expectEqual(@as(u8, 0x10), base.background.r);
 
-    var core_app: CoreApp = undefined;
-    core_app.alloc = alloc;
-    var app: App = undefined;
-    app.core_app = &core_app;
-
     // A palette theme preview of files that edited the profile since (and
     // set a theme, so a window's config is built again): the app config
     // keeps the running profile, but its replay steps are the new files'.
@@ -21656,74 +21159,70 @@ test "win32 a forwarded new window keeps the default-profile launch when a theme
     try preview.loadIter(alloc, &preview_args);
     try Host.finishPaletteThemeConfig(&preview, &base, theme);
 
-    // A directory the arguments carry, which an SSH default does not take:
-    // ssh.exe starts in the user's profile directory on every path
-    // (`applySshLaunchHardening`).
-    var ssh_base = try configpkg.Config.default(alloc);
-    defer ssh_base.deinit();
-    try ssh_base.finalize();
-    app.config = ssh_base;
-    const ssh_argv = [_][:0]const u8{ "C:\\Windows\\System32\\OpenSSH\\ssh.exe", "prod" };
-    app.config._default_profile = .{ .kind = .ssh, .key = "ssh:prod", .label = "prod", .command = .{ .direct = &ssh_argv } };
-    app.config.command = app.config._default_profile.?.command;
-    app.config._command_defaulted = true;
-    var ssh_window = app.config.shallowClone(alloc);
-    defer ssh_window.deinit();
-    const ssh_profile = (try app.applyNewWindowLaunch(&ssh_window, &.{ "--font-size=14", "--working-directory=C:\\fwd" })).?;
-    try std.testing.expectEqualStrings("ssh:prod", ssh_profile.key);
-    const ssh_directory = switch (ssh_window.@"working-directory".?) {
-        .path => |path| path,
-        else => "",
+    var core_app: CoreApp = undefined;
+    var app: App = undefined;
+    var created: [6]Surface = undefined;
+    var surfaces: [created.len]TestSession.SurfaceOptions = undefined;
+    for (&created, &surfaces) |*storage, *options| options.* = .{ .storage = storage, .free_launch_profile_key_on_deinit = true };
+    var session: TestSession = .{};
+    try session.init(.{ .core_app = &core_app, .app = &app, .surfaces = &surfaces });
+    defer session.deinit();
+    const session_config = app.config;
+    defer app.config = session_config;
+
+    const Hook = struct {
+        var seen_arena: std.heap.ArenaAllocator = undefined;
+        var mode: ?[]const u8 = null;
+        var line: ?[]const u8 = null;
+        var dir: ?[]const u8 = null;
+        var font_size: f32 = 0;
+        var background: u8 = 0;
+        var storage: []Surface = undefined;
+        var next: usize = 0;
+
+        fn createSurface(_: *App, config: *const configpkg.Config, _: LPCWSTR, opts: SurfaceInitOptions) anyerror!*Surface {
+            const a = seen_arena.allocator();
+            mode = if (config.env.map.get("MODE")) |value| try a.dupe(u8, value) else null;
+            line = if (opts.launch.user) |launch| try a.dupe(u8, launch.command_line) else null;
+            dir = if (config.@"working-directory") |wd| switch (wd) {
+                .path => |path| try a.dupe(u8, path),
+                else => null,
+            } else null;
+            font_size = config.@"font-size";
+            background = config.background.r;
+            const surface = &storage[next];
+            next += 1;
+            return surface;
+        }
     };
-    try std.testing.expect(!std.mem.eql(u8, "C:\\fwd", ssh_directory));
-    var home_buf: [std.fs.max_path_bytes]u8 = undefined;
-    if (try windows_ssh_hosts.userProfileDir(&home_buf)) |home| {
-        try std.testing.expectEqualStrings(home, ssh_directory);
-    }
+    Hook.seen_arena = .init(alloc);
+    defer Hook.seen_arena.deinit();
+    Hook.storage = &created;
+    Hook.next = 0;
+    app.test_create_window_surface = &Hook.createSurface;
 
     for ([_]*const configpkg.Config{ &base, &preview }) |app_config| {
         app.config = app_config.*;
-        // A launch that names no directory forwards none when its own
-        // default-profile pins one (`forwardsLauncherDirectory`), so a second
-        // Start-menu launch opens where the first one did.
-        {
-            var file_default = app.config;
-            file_default._default_profile_cli = null;
-            try std.testing.expect(!ipc_server.forwardsLauncherDirectory(&file_default));
-            var config = app.config.shallowClone(alloc);
-            defer config.deinit();
-            const profile = (try app.applyNewWindowLaunch(&config, null)).?;
-            try std.testing.expectEqualStrings("user:py", profile.key);
-            try std.testing.expectEqualStrings("profile", config.env.map.get("MODE") orelse "");
-            try std.testing.expectEqualStrings("D:\\pinned", switch (config.@"working-directory".?) {
-                .path => |path| path,
-                else => "",
-            });
-        }
         inline for (.{
             .{ &[_][:0]const u8{"--font-size=14"}, "D:\\pinned" },
             // A directory the arguments carry wins over the profile's.
             .{ &[_][:0]const u8{ "--font-size=14", "--working-directory=C:\\fwd" }, "C:\\fwd" },
         }) |case| {
-            var config = app.config.shallowClone(alloc);
-            defer config.deinit();
-            const profile = (try app.applyNewWindowLaunch(&config, case[0])).?;
-            try std.testing.expectEqualStrings("user:py", profile.key);
-            try std.testing.expectEqual(@as(f32, 14), config.@"font-size");
-            try std.testing.expectEqual(@as(u8, 0x10), config.background.r);
-            try std.testing.expectEqualStrings("profile", config.env.map.get("MODE") orelse "");
-            try std.testing.expectEqualStrings("cmd.exe /k py", if (config._profile_launch) |launch| launch.command_line else "");
-            try std.testing.expectEqualStrings(case[1], switch (config.@"working-directory".?) {
-                .path => |path| path,
-                else => "",
-            });
-            // The same profile sources; the window's `env` holds the
-            // profile's variables, which a reload compares too.
-            var sources = config;
-            sources.env = base.env;
-            try std.testing.expect(!userProfileKeysChanged(&base, &sources));
+            try std.testing.expect(try app.performAction(.app, .new_window, .{ .arguments = case[0] }));
+            try std.testing.expectEqual(@as(f32, 14), Hook.font_size);
+            try std.testing.expectEqual(@as(u8, 0x10), Hook.background);
+            // The running profile, as the lists hold it, after the rebuild.
+            try std.testing.expectEqualStrings("profile", Hook.mode orelse "");
+            try std.testing.expectEqualStrings("cmd.exe /k py", Hook.line orelse "");
+            try std.testing.expectEqualStrings(case[1], Hook.dir orelse "");
+            try std.testing.expectEqualStrings("user:py", created[Hook.next - 1].launch_profile_key orelse "");
         }
+        // With no arguments nothing is built again.
+        try std.testing.expect(try app.performAction(.app, .new_window, .{}));
+        try std.testing.expectEqualStrings("D:\\pinned", Hook.dir orelse "");
+        try std.testing.expectEqualStrings("user:py", created[Hook.next - 1].launch_profile_key orelse "");
     }
+    try std.testing.expectEqual(created.len, Hook.next);
 }
 
 test "win32 the picker follows a changed default-profile until a profile is chosen in it" {
@@ -21740,14 +21239,18 @@ test "win32 the picker follows a changed default-profile until a profile is chos
     });
     defer session.deinit();
     defer testFreeHostProfiles(&app, &.{&first});
-    const keys = [_][]const u8{ "pwsh.exe", "cmd.exe", "git-bash" };
+    const keys = [_][]const u8{ "pwsh.exe", "wsl:Ubuntu", "wsl:Debian" };
 
     const Reload = struct {
-        const argv = [_][:0]const u8{"x.exe"};
-
         fn run(host: *Host, default_key: []const u8, list_keys: []const []const u8) !void {
-            // `config_change`: a new `default-profile`, every list dropped.
-            host.app.config._default_profile = .{ .kind = .cmd, .key = default_key, .label = default_key, .command = .{ .direct = &argv } };
+            // `config_change`: a config with another `default-profile`, every
+            // list dropped.
+            const alloc = host.app.core_app.alloc;
+            const text = try std.fmt.allocPrint(alloc, "default-profile = {s}\n", .{default_key});
+            defer alloc.free(text);
+            const config = try configpkg.pane_launch.fixtures.load(alloc, .{ .file = text });
+            host.app.config.deinit();
+            host.app.config = config;
             host.invalidateProfiles();
             _ = try host.applyProfiles(.{ .profiles = try testProfileList(host.app.core_app.alloc, list_keys), .complete = true });
         }
@@ -21756,24 +21259,24 @@ test "win32 the picker follows a changed default-profile until a profile is chos
         }
     };
 
-    try Reload.run(&first, "cmd.exe", &keys);
-    try std.testing.expectEqualStrings("cmd.exe", Reload.selected(&first));
+    try Reload.run(&first, "wsl:Ubuntu", &keys);
+    try std.testing.expectEqualStrings("wsl:Ubuntu", Reload.selected(&first));
     // The choice is the default's, not the user's: nothing is stored for a
     // new window to start on.
     try std.testing.expect(first.selected_profile_key == null and app.launcher_profile_key == null);
 
-    try Reload.run(&first, "git-bash", &keys);
-    try std.testing.expectEqualStrings("git-bash", Reload.selected(&first));
+    try Reload.run(&first, "wsl:Debian", &keys);
+    try std.testing.expectEqualStrings("wsl:Debian", Reload.selected(&first));
 
     // A profile chosen in the picker stays chosen across a reload.
     _ = try first.setSelectedProfileIndex(0);
-    try Reload.run(&first, "cmd.exe", &keys);
+    try Reload.run(&first, "wsl:Ubuntu", &keys);
     try std.testing.expectEqualStrings("pwsh.exe", Reload.selected(&first));
     try std.testing.expectEqualStrings("pwsh.exe", app.launcher_profile_key.?);
 
     // Once that profile is gone from the list, the default is picked again.
-    try Reload.run(&first, "cmd.exe", &.{ "cmd.exe", "git-bash" });
-    try std.testing.expectEqualStrings("cmd.exe", Reload.selected(&first));
+    try Reload.run(&first, "wsl:Ubuntu", &.{ "wsl:Ubuntu", "wsl:Debian" });
+    try std.testing.expectEqualStrings("wsl:Ubuntu", Reload.selected(&first));
 }
 
 test "win32 hidden profiles stay out of the picker and the quick slots and still resolve by key" {
@@ -21826,7 +21329,8 @@ test "win32 hidden profiles stay out of the picker and the quick slots and still
     try std.testing.expect(hidden.hidden);
     var clone = app.config.shallowClone(alloc);
     defer clone.deinit();
-    try std.testing.expect(try app.applyRestoredProfileConfig(&clone, &host, "git-bash"));
+    const restored = try configpkg.pane_launch.prepare(&clone, .{ .restored = "git-bash" }, app.launchContext(&host));
+    try std.testing.expectEqualStrings("git-bash", restored.key orelse "");
     try std.testing.expectEqual(@as(?usize, 3), profileIndexByKey(host.profiles.?, "git-bash"));
 }
 
@@ -21912,70 +21416,6 @@ test "win32 ssh title identity survives profile refresh" {
     try std.testing.expect(isAutomaticSshCommandTitle("C:\\Windows\\System32\\OpenSSH\\ssh.exe"));
     try std.testing.expect(isAutomaticSshCommandTitle("ssh"));
     try std.testing.expect(!isAutomaticSshCommandTitle("prod.example.com"));
-}
-
-test "win32 automation tab inheritance preserves the captured source command" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    const command = [_][:0]const u8{ "pwsh.exe", "-NoLogo" };
-    const reloaded_command = [_][:0]const u8{"cmd.exe"};
-    var profiles = [_]windows_shell.Profile{.{
-        .kind = .pwsh,
-        .key = "pwsh",
-        .label = "PowerShell",
-        .command = .{ .direct = &reloaded_command },
-    }};
-    var host: Host = undefined;
-    host.profiles = &profiles;
-    var source: Surface = undefined;
-    source.host = &host;
-    source.launch_profile_key = "pwsh";
-    source.launch_command = .{ .direct = &command };
-    source.launch_user = null;
-
-    var config = try configpkg.Config.default(std.testing.allocator);
-    defer config.deinit();
-    const inherited = try App.applyLaunchConfigFromSource(&config, &source);
-
-    try std.testing.expectEqualStrings("pwsh", inherited.?);
-    const direct = config.command.?.direct;
-    try std.testing.expectEqual(@as(usize, 2), direct.len);
-    try std.testing.expectEqualStrings("pwsh.exe", direct[0]);
-    try std.testing.expectEqualStrings("-NoLogo", direct[1]);
-}
-
-test "win32 automation ssh inheritance preserves command and hardening" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    const command = [_][:0]const u8{ "C:\\Windows\\System32\\OpenSSH\\ssh.exe", "production" };
-    var source: Surface = undefined;
-    source.launch_command = .{ .direct = &command };
-    source.launch_user = null;
-    source.launch_profile_key = "ssh:production";
-    source.launched_ssh = true;
-
-    var config = try configpkg.Config.default(std.testing.allocator);
-    defer config.deinit();
-    config.@"shell-integration" = .bash;
-    const inherited = try App.applyLaunchConfigFromSource(&config, &source);
-
-    try std.testing.expectEqualStrings("ssh:production", inherited.?);
-    try std.testing.expectEqual(configpkg.Config.ShellIntegration.none, config.@"shell-integration");
-    try std.testing.expectEqualStrings(command[0], config.command.?.direct[0]);
-    try std.testing.expectEqualStrings(command[1], config.command.?.direct[1]);
-}
-
-test "win32 ordinary split ignores a captured one-shot command" {
-    const one_shot = [_][:0]const u8{ "cmd.exe", "/c", "one-shot.cmd" };
-    var source: Surface = undefined;
-    source.launch_command = .{ .direct = &one_shot };
-    source.launch_profile_key = null;
-    source.host = null;
-
-    var config = try configpkg.Config.default(std.testing.allocator);
-    defer config.deinit();
-    try std.testing.expect((try App.applySplitProfileConfigFromSource(&config, &source)) == null);
-    try std.testing.expect(config.command == null);
 }
 
 test "win32 automation omitted target falls back to the active surface" {

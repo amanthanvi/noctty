@@ -84,14 +84,16 @@ foreach ($movedWin32TestModule in $movedWin32TestFloors.Keys) {
 # tests in R06b (#592). child_window.zig holds the 3 tests that moved out of
 # win32.zig with the child-control plumbing, and text.zig the 11 it declares
 # once the owned-string helpers (from win32.zig and labels.zig) and
-# utf8BoundedPrefix moved in. Lower one only for a deliberate consolidation.
+# utf8BoundedPrefix moved in. session.zig's floor is 28 since its five
+# restore-by-key tests became rows of pane_launch.zig's `prepare` table (pane
+# launch step 4b). Lower one only for a deliberate consolidation.
 # test_support.zig declares no tests, so it has no floor.
 $extractedWin32TestModules = [ordered]@{
     'registry.zig' = @{ Binding = 'registry_module'; Floor = 7 }
     'app.zig' = @{ Binding = 'app_module'; Floor = 59 }
     'host.zig' = @{ Binding = 'host_module'; Floor = 43 }
     'terminal_window.zig' = @{ Binding = 'terminal_window_module'; Floor = 23 }
-    'session.zig' = @{ Binding = 'session_module'; Floor = 33 }
+    'session.zig' = @{ Binding = 'session_module'; Floor = 28 }
     'quick_terminal_host.zig' = @{ Binding = 'quick_terminal_host'; Floor = 10 }
     'window_state.zig' = @{ Binding = 'window_state'; Floor = 41 }
     'surface_presentation.zig' = @{ Binding = 'surface_presentation'; Floor = 15 }

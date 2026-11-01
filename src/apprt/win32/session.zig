@@ -1,7 +1,6 @@
 //! Session persistence, restore, placement and scrollback snapshots.
 const win32 = @import("../win32.zig");
 const runtime = win32.session_runtime;
-const test_runtime = if (@import("builtin").is_test) win32.session_test_runtime else struct {};
 const killThreadTimer = runtime.killThreadTimer;
 const Allocator = runtime.Allocator;
 const App = runtime.App;
@@ -21,9 +20,6 @@ const WINDOWPLACEMENT = runtime.WINDOWPLACEMENT;
 const WindowStart = runtime.WindowStart;
 const WindowStartTestApp = win32.test_support.WindowStartTestApp;
 const WorkAreas = runtime.WorkAreas;
-const appendOwnedString = paint_text.appendOwnedString;
-const applyDefaultProfileConfig = runtime.applyDefaultProfileConfig;
-const applyProfileSurfaceConfig = runtime.applyProfileSurfaceConfig;
 const apprt = runtime.apprt;
 const builtin = runtime.builtin;
 const c = runtime.c;
@@ -35,14 +31,11 @@ const default_title = runtime.default_title;
 const gl_startup = runtime.gl_startup;
 const internal_os = runtime.internal_os;
 const lastError = child_window.lastError;
-const listProfilesForConfig = runtime.listProfilesForConfig;
 const log = runtime.log;
 const makeParentDirAbsolute = runtime.makeParentDirAbsolute;
 const markRecoveryAttemptAtPath = runtime.markRecoveryAttemptAtPath;
-const paint_text = @import("text.zig");
 const placementTestApp = win32.test_support.placementTestApp;
 const placementTestSurface = win32.test_support.placementTestSurface;
-const profileIndexByKey = runtime.profileIndexByKey;
 const recovery_set_aside_suffix = runtime.recovery_set_aside_suffix;
 const rectEqual = runtime.rectEqual;
 const restore_grab = runtime.restore_grab;
@@ -57,14 +50,11 @@ const std = runtime.std;
 const sys = runtime.sys;
 const terminal = runtime.terminal;
 const terminal_options = runtime.terminal_options;
-const testUserProfileList = test_runtime.testUserProfileList;
-const testVisualStudioList = test_runtime.testVisualStudioList;
 const unixMillis = runtime.unixMillis;
 const win32_session_persistence = runtime.win32_session_persistence;
 const win32_session_state = runtime.win32_session_state;
 const win32_shell = runtime.win32_shell;
 const windows = runtime.windows;
-const windows_shell = runtime.windows_shell;
 const workspaceRectToScreen = runtime.workspaceRectToScreen;
 const writePersistentFileAlloc = runtime.writePersistentFileAlloc;
 
@@ -689,22 +679,7 @@ pub fn restoreSessionPane(
         .split;
     var config = try apprt.surface.newConfig(self.core_app, &self.config, open_kind);
     defer config.deinit();
-
-    // `initial-command` (from `-e` or the config option) applies to the
-    // ordinary first window. A restored pane's command comes from its
-    // saved profile, so clear it: otherwise `Surface.init` prefers it
-    // while `app.first` is set and the first pane of a restored session
-    // or a launched layout runs the wrong command.
-    config.@"initial-command" = null;
-
-    // A refused profile (today: SSH) must not leave its key on the surface
-    // either, or a later split of the restored pane would re-resolve it and
-    // launch the connection this restore just declined.
-    const profile_applied = if (pane.profile) |key|
-        try self.applyRestoredProfileConfig(&config, host, key)
-    else
-        false;
-    const default_profile = if (profile_applied) null else try self.applyRestoredDefaultLaunch(&config);
+    const launch = try configpkg.pane_launch.prepare(&config, .{ .restored = pane.profile }, self.launchContext(host));
     if (pane.cwd) |cwd| {
         const alloc = config._arena.?.allocator();
         config.@"working-directory" = .{ .path = try alloc.dupe(u8, cwd) };
@@ -722,12 +697,10 @@ pub fn restoreSessionPane(
         .split_direction = split_direction,
         // `restoreSessionWindow` applies them once the window is placed.
         .config_window_start = false,
+        .launch = launch,
     });
     transaction.noteSurface(surface);
 
-    if (profile_applied) {
-        try appendOwnedString(self.core_app.alloc, &surface.launch_profile_key, pane.profile.?);
-    } else if (default_profile) |profile| try self.noteProfileLaunch(surface, profile);
     if (pane.title_override) |title| try surface.setTitleOverride(title);
     if (pane.tab_title_override) |title| try surface.setTabTitleOverride(title);
     if (pane.cwd) |cwd| try surface.setPwd(cwd);
@@ -744,33 +717,6 @@ pub fn restoreSessionPane(
         }
     }
     return surface;
-}
-
-pub fn applyRestoredProfileConfig(
-    self: *App,
-    config: *configpkg.Config,
-    host: ?*Host,
-    key: []const u8,
-) !bool {
-    // SSH stays refused below; any other pane of `default-profile`
-    // restores without a list.
-    if (!std.ascii.startsWithIgnoreCase(key, "ssh:")) {
-        if (configpkg.pane_launch.defaultProfileForKey(&self.config, key)) |profile| {
-            if (!isSessionRestorableProfile(profile)) return false;
-            try applyProfileSurfaceConfig(config, profile);
-            return true;
-        }
-    }
-    if (host) |existing| {
-        const profile = (try existing.profileForKey(key)) orelse return false;
-        if (!isSessionRestorableProfile(profile)) return false;
-        try applyProfileSurfaceConfig(config, profile);
-        return true;
-    }
-
-    const profiles = try listProfilesForConfig(self.core_app.alloc, &self.config, windows_shell.listProfiles);
-    defer windows_shell.deinitProfiles(self.core_app.alloc, profiles);
-    return try applyProfileConfigByKey(config, profiles, key);
 }
 
 pub fn applyRestoredWindowPlacement(
@@ -1346,19 +1292,6 @@ pub fn sessionFullscreenWindowPlacement(
     return .{ .rect = rect, .maximized = maximized, .fullscreen = true };
 }
 
-/// `applyDefaultProfileLaunch` for a restored pane whose own profile did
-/// not apply, except that restore never connects over SSH by itself: with
-/// an SSH `default-profile` the pane gets the automatic shell, in place
-/// of the SSH command `Config` made the default.
-pub fn applyRestoredDefaultLaunch(self: *const App, config: *configpkg.Config) !?*const windows_shell.Profile {
-    if (self.defaultProfileApplies(config) and config._default_profile.?.kind == .ssh) {
-        config.command = null;
-        try configpkg.pane_launch.useAutomatic(config);
-        return null;
-    }
-    return try self.applyDefaultProfileLaunch(config);
-}
-
 pub fn rollbackSessionRestoreHost(self: *App, host: *Host) void {
     const previous_quitting = self.quitting;
     self.quitting = true;
@@ -1650,29 +1583,6 @@ pub fn restoreTerminalScrollbackSnapshot(
     return restored_lines;
 }
 
-pub fn applyProfileConfigByKey(
-    config: *configpkg.Config,
-    profiles: []const windows_shell.Profile,
-    key: []const u8,
-) !bool {
-    if (std.ascii.startsWithIgnoreCase(key, "ssh:")) return false;
-    const index = profileIndexByKey(profiles, key) orelse return false;
-    const profile = &profiles[index];
-    if (!isSessionRestorableProfile(profile)) return false;
-    try applyProfileSurfaceConfig(config, profile);
-    return true;
-}
-
-/// Session restore relaunches a pane's profile unattended at startup. An SSH
-/// profile would dial out with no interaction, so it is refused here.
-///
-/// The key prefix is rejected before lookup so case variants in a persisted
-/// state file cannot bypass the guard. Live SSH profile lookup remains
-/// case-sensitive because OpenSSH host aliases are case-sensitive.
-pub fn isSessionRestorableProfile(profile: *const windows_shell.Profile) bool {
-    return profile.kind != .ssh;
-}
-
 pub fn captureSessionScrollback(
     self: *Surface,
     alloc: Allocator,
@@ -1826,211 +1736,6 @@ test "win32 a restored tab has the saved shape in the shell model, so closing a 
     try app.validateShellNativeMapping();
 }
 
-test "win32 user profiles restore by key, after a rename, with and without a host" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-    const alloc = std.testing.allocator;
-    const line = "cmd.exe /k \"C:\\Program Files\\Microsoft Visual Studio\\18\\Community\\Common7\\Tools\\VsDevCmd.bat\" -startdir=none -arch=x64 -host_arch=x64";
-
-    var base = try configpkg.Config.default(alloc);
-    defer base.deinit();
-    const base_alloc = base._arena.?.allocator();
-    try base.@"profile-command".parseCLI(base_alloc, "vs18-cmd: " ++ line);
-    try base.@"profile-name".parseCLI(base_alloc, "vs18-cmd: Old label");
-    try base.finalize();
-    const profiles = try testUserProfileList(alloc, &base);
-    defer windows_shell.deinitProfiles(alloc, profiles);
-
-    // The key a session saved, in any case.
-    for ([_][]const u8{ "user:vs18-cmd", "USER:VS18-CMD" }) |key| {
-        var clone = base.shallowClone(alloc);
-        defer clone.deinit();
-        try std.testing.expect(try applyProfileConfigByKey(&clone, profiles, key));
-        try std.testing.expectEqualStrings("cmd.exe", clone.command.?.direct[0]);
-        try std.testing.expectEqualStrings(line, clone._profile_launch.?.command_line);
-    }
-
-    // Renaming the label keeps the identity.
-    var renamed = try base.clone(alloc);
-    defer renamed.deinit();
-    try renamed.@"profile-name".parseCLI(renamed._arena.?.allocator(), "vs18-cmd: New label");
-    // `%NAME%` reads the `env` lines first, on every path that builds a list.
-    try renamed.env.parseCLI(renamed._arena.?.allocator(), "NOCTTY_TEST_TEAM_DIR=C:\\team");
-    try renamed.@"profile-env".parseCLI(renamed._arena.?.allocator(), "vs18-cmd: SEEN=%noctty_test_team_dir%\\bin");
-    const renamed_profiles = try testUserProfileList(alloc, &renamed);
-    defer windows_shell.deinitProfiles(alloc, renamed_profiles);
-    try std.testing.expectEqualStrings("New label", renamed_profiles[0].label);
-    {
-        var clone = renamed.shallowClone(alloc);
-        defer clone.deinit();
-        try std.testing.expect(try applyProfileConfigByKey(&clone, renamed_profiles, "user:vs18-cmd"));
-    }
-
-    // With a host, restore looks the key up in the host's list.
-    {
-        var host: Host = undefined;
-        host.profiles = profiles;
-        host.selected_profile = 0;
-        var app: App = undefined;
-        app.config._default_profile = null;
-        var clone = base.shallowClone(alloc);
-        defer clone.deinit();
-        try std.testing.expect(try app.applyRestoredProfileConfig(&clone, &host, "User:Vs18-Cmd"));
-        try std.testing.expectEqualStrings(line, clone._profile_launch.?.command_line);
-    }
-
-    // With no host (a restore before the first window, an elevated window
-    // from no surface), the list is built from the app config: its user
-    // profiles reach the lister, after the local shells, before SSH.
-    {
-        const lister = struct {
-            fn list(a: Allocator, _: bool, user: *const windows_shell.UserProfiles) ![]windows_shell.Profile {
-                const shell = try a.alloc(windows_shell.Profile, 1);
-                const cmd = try a.alloc([:0]const u8, 1);
-                cmd[0] = try a.dupeZ(u8, "C:\\Windows\\System32\\cmd.exe");
-                shell[0] = .{ .kind = .cmd, .key = try a.dupe(u8, "cmd.exe"), .label = try a.dupe(u8, "Command Prompt"), .command = .{ .direct = cmd } };
-                return try windows_shell.appendUserProfiles(a, shell, user.definitions, windows_shell.ProcessEnvironment{});
-            }
-        }.list;
-        const hostless = try listProfilesForConfig(alloc, &renamed, lister);
-        defer windows_shell.deinitProfiles(alloc, hostless);
-        try std.testing.expectEqual(@as(usize, 2), hostless.len);
-        try std.testing.expectEqualStrings("cmd.exe", hostless[0].key);
-        try std.testing.expectEqualStrings("user:vs18-cmd", hostless[1].key);
-        try std.testing.expectEqualStrings("New label", hostless[1].label);
-        const seen = hostless[1].user.?.env;
-        try std.testing.expectEqualStrings("SEEN", seen[seen.len - 1].key);
-        try std.testing.expectEqualStrings("C:\\team\\bin", seen[seen.len - 1].value);
-        var clone = base.shallowClone(alloc);
-        defer clone.deinit();
-        try std.testing.expect(try applyProfileConfigByKey(&clone, hostless, "USER:vs18-CMD"));
-        try std.testing.expectEqualStrings(line, clone._profile_launch.?.command_line);
-    }
-
-    // A removed id restores nothing, so the pane falls back to the default
-    // and keeps no launch key; SSH stays refused whatever the list holds.
-    var removed = try base.clone(alloc);
-    defer removed.deinit();
-    try removed.@"profile-command".parseCLI(removed._arena.?.allocator(), "vs18-cmd:");
-    try removed.@"profile-command".parseCLI(removed._arena.?.allocator(), "other: other.exe");
-    const removed_profiles = try testUserProfileList(alloc, &removed);
-    defer windows_shell.deinitProfiles(alloc, removed_profiles);
-    for ([_][]const u8{ "user:vs18-cmd", "ssh:prod", "SSH:prod" }) |key| {
-        var clone = removed.shallowClone(alloc);
-        defer clone.deinit();
-        try std.testing.expect(!(try applyProfileConfigByKey(&clone, removed_profiles, key)));
-        try std.testing.expect(clone.command == null);
-        try std.testing.expect(clone._profile_launch == null);
-    }
-}
-
-test "win32 Visual Studio profiles restore by key, hidden ones too, with and without a host" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-    const alloc = std.testing.allocator;
-    var base = try configpkg.Config.default(alloc);
-    defer base.deinit();
-    try base.finalize();
-
-    // With no host, the list is built from the app config, whose
-    // `visual-studio-profiles` reaches the lister.
-    const lister = struct {
-        fn list(a: Allocator, _: bool, user: *const windows_shell.UserProfiles) ![]windows_shell.Profile {
-            return try testVisualStudioList(a, user.visual_studio);
-        }
-    }.list;
-    const hostless = try listProfilesForConfig(alloc, &base, lister);
-    defer windows_shell.deinitProfiles(alloc, hostless);
-    try std.testing.expectEqual(@as(usize, 4), hostless.len);
-    // 2022's pair is hidden under `newest` and still restores; every pair
-    // starts in home.
-    for ([_][]const u8{ "vs:486bb794:cmd", "VS:6BB7CFD9:CMD" }) |key| {
-        var clone = base.shallowClone(alloc);
-        defer clone.deinit();
-        try std.testing.expect(try applyProfileConfigByKey(&clone, hostless, key));
-        try std.testing.expectEqualStrings("/k", clone.command.?.direct[1]);
-        try std.testing.expect(std.mem.startsWith(u8, clone._profile_launch.?.command_line, "C:\\Windows\\System32\\cmd.exe /k \"\"C:\\Program Files\\Microsoft Visual Studio\\"));
-        // Home as a path: a bare `.home` on a launch clone would start in
-        // noctty's own folder.
-        var buf: [std.fs.max_path_bytes]u8 = undefined;
-        if (try internal_os.home(&buf)) |home| try std.testing.expectEqualStrings(home, clone.@"working-directory".?.path);
-    }
-    {
-        var clone = base.shallowClone(alloc);
-        defer clone.deinit();
-        try std.testing.expect(try applyProfileConfigByKey(&clone, hostless, "vs:6bb7cfd9:pwsh"));
-        try std.testing.expectEqualStrings("-Command", clone.command.?.direct[2]);
-        try std.testing.expect(clone._profile_launch == null);
-    }
-
-    // With a host, from its list.
-    {
-        var host: Host = undefined;
-        host.profiles = hostless;
-        host.selected_profile = 0;
-        var app: App = undefined;
-        app.config._default_profile = null;
-        var clone = base.shallowClone(alloc);
-        defer clone.deinit();
-        try std.testing.expect(try app.applyRestoredProfileConfig(&clone, &host, "vs:486bb794:pwsh"));
-        try std.testing.expectEqualStrings("-NoExit", clone.command.?.direct[1]);
-    }
-
-    // Under `none` there is no such profile: the pane falls back to the
-    // default and keeps no launch key.
-    var none = try base.clone(alloc);
-    defer none.deinit();
-    none.@"visual-studio-profiles" = .none;
-    const empty = try listProfilesForConfig(alloc, &none, lister);
-    defer windows_shell.deinitProfiles(alloc, empty);
-    try std.testing.expectEqual(@as(usize, 0), empty.len);
-    var clone = none.shallowClone(alloc);
-    defer clone.deinit();
-    try std.testing.expect(!(try applyProfileConfigByKey(&clone, empty, "vs:6bb7cfd9:cmd")));
-    try std.testing.expect(clone.command == null);
-}
-
-test "win32 a restored pane keeps its own profile over default-profile" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-    const alloc = std.testing.allocator;
-    var base = try configpkg.Config.default(alloc);
-    defer base.deinit();
-    const arena = base._arena.?.allocator();
-    try base.@"profile-command".parseCLI(arena, "py: cmd.exe /k py");
-    try base.@"profile-env".parseCLI(arena, "py: MODE=profile");
-    base.@"default-profile" = "py";
-    try base.finalize();
-
-    const pwsh_argv = [_][:0]const u8{"pwsh.exe"};
-    var profiles = [_]windows_shell.Profile{.{ .kind = .pwsh, .key = "pwsh.exe", .label = "PowerShell", .command = .{ .direct = &pwsh_argv } }};
-    var host: Host = undefined;
-    host.profiles = &profiles;
-    host.selected_profile = 0;
-    var app: App = undefined;
-    // Only the field restore reads; `base` stays the owner.
-    app.config._default_profile = base._default_profile;
-    var clone = base.shallowClone(alloc);
-    defer clone.deinit();
-    try std.testing.expect(try app.applyRestoredProfileConfig(&clone, &host, "PWSH.EXE"));
-    try std.testing.expectEqualStrings("pwsh.exe", clone.command.?.direct[0]);
-    // Nothing of the default profile is left to apply.
-    try std.testing.expect((try applyDefaultProfileConfig(&clone)) == null);
-    try std.testing.expect(clone.env.map.get("MODE") == null);
-    try std.testing.expect(clone._profile_launch == null);
-
-    // A pane saved from the default profile restores from the profile the
-    // config resolved, though the window's list does not have it (and
-    // without a window, without listing the profiles at all).
-    var restored = base.shallowClone(alloc);
-    defer restored.deinit();
-    try std.testing.expect(try app.applyRestoredProfileConfig(&restored, &host, "USER:PY"));
-    try std.testing.expectEqualStrings("cmd.exe", restored.command.?.direct[0]);
-    try std.testing.expectEqualStrings("profile", restored.env.map.get("MODE") orelse "");
-    try std.testing.expectEqualStrings("cmd.exe /k py", if (restored._profile_launch) |launch| launch.command_line else "");
-    // SSH stays refused whatever the default profile is.
-    var ssh = base.shallowClone(alloc);
-    defer ssh.deinit();
-    try std.testing.expect(!(try app.applyRestoredProfileConfig(&ssh, &host, "ssh:py")));
-}
-
 test "win32 ssh split and session state drop remote cwd" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
@@ -2106,83 +1811,6 @@ test "win32 session and layout snapshots drop network and device cwds" {
             try std.testing.expect(layout.nodes[0].pane.cwd == null);
         }
     }
-}
-
-test "win32 session restore refuses ssh profiles regardless of key case" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    const alloc = std.testing.allocator;
-    var base = try configpkg.Config.default(alloc);
-    defer base.deinit();
-
-    const argv = try alloc.alloc([:0]const u8, 2);
-    argv[0] = try alloc.dupeZ(u8, "C:\\Windows\\System32\\OpenSSH\\ssh.exe");
-    argv[1] = try alloc.dupeZ(u8, "prod");
-    const cmd_argv = try alloc.alloc([:0]const u8, 1);
-    cmd_argv[0] = try alloc.dupeZ(u8, "cmd.exe");
-    var profiles = [_]windows_shell.Profile{
-        .{
-            .kind = .cmd,
-            .key = try alloc.dupe(u8, "cmd.exe"),
-            .label = try alloc.dupe(u8, "Command Prompt"),
-            .command = .{ .direct = cmd_argv },
-        },
-        .{
-            .kind = .ssh,
-            .key = try alloc.dupe(u8, "ssh:prod"),
-            .label = try alloc.dupe(u8, "SSH: prod"),
-            .command = .{ .direct = argv },
-        },
-    };
-    defer for (&profiles) |*profile| profile.deinit(alloc);
-
-    // Live SSH profile lookup is case-sensitive, so a state file naming
-    // "SSH:prod" does not resolve `ssh:prod`. The refusal must key on the
-    // prefix before lookup, or a case
-    // variant could bypass the guard and dial out at startup with no interaction.
-    for ([_][]const u8{ "ssh:prod", "SSH:prod", "Ssh:PROD" }) |key| {
-        var clone = base.shallowClone(alloc);
-        defer clone.deinit();
-        if (std.mem.eql(u8, key, "ssh:prod")) {
-            try std.testing.expect(profileIndexByKey(&profiles, key) != null);
-        } else {
-            try std.testing.expect(profileIndexByKey(&profiles, key) == null);
-        }
-        try std.testing.expect(!(try applyProfileConfigByKey(&clone, &profiles, key)));
-        try std.testing.expect(clone.command == null);
-    }
-
-    // A local profile still restores.
-    var clone = base.shallowClone(alloc);
-    defer clone.deinit();
-    try std.testing.expect(try applyProfileConfigByKey(&clone, &profiles, "CMD.EXE"));
-    try std.testing.expectEqualStrings("cmd.exe", clone.command.?.direct[0]);
-}
-
-test "win32 applyProfileConfigByKey applies saved first-pane profile before host exists" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    var base = try configpkg.Config.default(std.testing.allocator);
-    defer base.deinit();
-    const base_alloc = base._arena.?.allocator();
-    base.command = .{ .shell = try base_alloc.dupeZ(u8, "pwsh.exe") };
-
-    var clone = base.shallowClone(std.testing.allocator);
-    defer clone.deinit();
-
-    var profile: windows_shell.Profile = .{
-        .kind = .cmd,
-        .key = try std.testing.allocator.dupe(u8, "cmd.exe"),
-        .label = try std.testing.allocator.dupe(u8, "Command Prompt"),
-        .command = .{ .shell = try std.testing.allocator.dupeZ(u8, "cmd.exe") },
-    };
-    defer profile.deinit(std.testing.allocator);
-    const profiles = [_]windows_shell.Profile{profile};
-
-    try std.testing.expect(try applyProfileConfigByKey(&clone, &profiles, "cmd.exe"));
-
-    try std.testing.expect(clone.command != null);
-    try std.testing.expectEqualStrings("cmd.exe", clone.command.?.shell);
 }
 
 test "win32 session state scrollback capture enforces line cap budget and secure redaction" {
@@ -2952,10 +2580,9 @@ test "win32 session state is saved only by the process that owns it" {
     app.embedding_mode = false;
     app.startup_profile_picker = false;
     app.explicit_startup_working_directory = false;
+    app.config = .{};
     app.config.@"window-save-state" = .always;
     app.config.@"initial-window" = true;
-    app.config.@"initial-command" = null;
-    app.config._default_profile_cli = null;
 
     // A launch that forwarded to the primary, lost the IPC race or failed
     // before its first window never took the session, and must not save
@@ -3025,10 +2652,9 @@ test "win32 a structural change arms one session checkpoint, only in the session
     app.embedding_mode = false;
     app.startup_profile_picker = false;
     app.explicit_startup_working_directory = false;
+    app.config = .{};
     app.config.@"window-save-state" = .always;
     app.config.@"initial-window" = true;
-    app.config.@"initial-command" = null;
-    app.config._default_profile_cli = null;
     app.session_state_excluded_for_elevation = false;
     app.session_ending = false;
     app.session_state_saved_before_last_host_close = false;

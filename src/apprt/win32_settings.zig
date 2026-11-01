@@ -15540,9 +15540,9 @@ test "settings default profile dropdown offers the listed profiles and saves key
                 const fixture = try dialog_test.Fixture.prepare(false);
                 defer fixture.finish();
                 const arena = fixture.config._arena.?.allocator();
-                fixture.config._default_profile_cli = try arena.dupeZ(u8, "user:py312");
-                fixture.config.@"default-profile" = fixture.config._default_profile_cli;
-                fixture.config._default_profile_file = try arena.dupeZ(u8, "pwsh");
+                fixture.config._launch.default_profile_cli = try arena.dupeZ(u8, "user:py312");
+                fixture.config.@"default-profile" = fixture.config._launch.default_profile_cli;
+                fixture.config._launch.default_profile_file = try arena.dupeZ(u8, "pwsh");
                 const settings = &fixture.settings;
                 try settings.open();
                 settings.setActiveSection(.shell);
@@ -15553,13 +15553,13 @@ test "settings default profile dropdown offers the listed profiles and saves key
                 try std.testing.expect(draft(settings) == null);
                 try std.testing.expect(settings.hasPendingChanges());
                 // No file line: Automatic, with nothing to save.
-                fixture.config._default_profile_file = null;
+                fixture.config._launch.default_profile_file = null;
                 try settings.adoptCurrentConfig();
                 settings.refreshAllControls();
                 try std.testing.expectEqual(@as(LRESULT, 0), sys.SendMessageW(combo, CB_GETCURSEL, 0, 0));
                 try std.testing.expect(!settings.hasPendingChanges());
                 // A reload keeps showing the files' value.
-                fixture.config._default_profile_file = try arena.dupeZ(u8, "cmd.exe");
+                fixture.config._launch.default_profile_file = try arena.dupeZ(u8, "cmd.exe");
                 settings.externalConfigChanged(&fixture.config, 2);
                 try std.testing.expectEqualStrings("cmd.exe", settings.original.?.@"default-profile".?);
                 try std.testing.expectEqual(@as(LRESULT, 2), sys.SendMessageW(combo, CB_GETCURSEL, 0, 0));

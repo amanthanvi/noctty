@@ -1151,7 +1151,7 @@ fn allocForwardedWorkingDirectoryArg(
 /// directory: that instance's default launch puts it there, as this launch's
 /// own first window would. The launcher's directory (System32 from Win+R,
 /// whatever a shortcut names) is nothing the user asked for, and a forwarded
-/// directory wins over the pinned one (`App.applyNewWindowLaunch`).
+/// directory wins over the pinned one (`pane_launch.Origin.Fresh`).
 pub fn forwardsLauncherDirectory(config: *const configpkg.Config) bool {
     if (configpkg.pane_launch.commandLineNamesProfile(config)) return true;
     const profile = configpkg.pane_launch.defaultProfile(config) orelse return true;
