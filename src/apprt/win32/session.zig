@@ -31,7 +31,6 @@ const child_window = @import("child_window.zig");
 const cli_args = runtime.cli_args;
 const configpkg = runtime.configpkg;
 const createTestHostWindow = win32.test_support.createTestHostWindow;
-const defaultProfileForKey = runtime.defaultProfileForKey;
 const default_title = runtime.default_title;
 const gl_startup = runtime.gl_startup;
 const internal_os = runtime.internal_os;
@@ -756,7 +755,7 @@ pub fn applyRestoredProfileConfig(
     // SSH stays refused below; any other pane of `default-profile`
     // restores without a list.
     if (!std.ascii.startsWithIgnoreCase(key, "ssh:")) {
-        if (defaultProfileForKey(&self.config, key)) |profile| {
+        if (configpkg.pane_launch.defaultProfileForKey(&self.config, key)) |profile| {
             if (!isSessionRestorableProfile(profile)) return false;
             try applyProfileSurfaceConfig(config, profile);
             return true;

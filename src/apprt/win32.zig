@@ -490,7 +490,6 @@ pub const session_runtime = .{
     .c = c,
     .cli_args = cli_args,
     .configpkg = configpkg,
-    .defaultProfileForKey = defaultProfileForKey,
     .default_title = default_title,
     .gl_startup = gl_startup,
     .internal_os = internal_os,
@@ -1449,18 +1448,6 @@ pub fn keepExplicitWorkingDirectory(
     const applied = profile orelse return;
     if (applied.kind == .ssh) return;
     config.@"working-directory" = directory;
-}
-
-/// `default-profile`'s profile when `key` names it. A pane it started
-/// carries its key, and the config holds the profile resolved, so a split,
-/// an elevated window or a restore of that pane needs no list (no WSL probe
-/// on the UI thread) and finds the profile though discovery may list none
-/// such: an alias outside the SSH config, a distribution WSL did not list.
-pub fn defaultProfileForKey(config: *const configpkg.Config, key: []const u8) ?*const windows_shell.Profile {
-    if (config._default_profile) |*profile| {
-        if (profileKeyEquals(profile.*, key)) return profile;
-    }
-    return null;
 }
 
 /// The profile `new_window_elevated` hands the elevated process: the
@@ -9271,8 +9258,6 @@ const clearQuickSlotPinsRequested = labels.clearQuickSlotPinsRequested;
 pub const resolveProfileSelection = labels.resolveProfileSelection;
 
 pub const profileIndexByKey = labels.profileIndexByKey;
-const profileKeyEquals = labels.profileKeyEquals;
-pub const storedProfileKeyEquals = labels.storedProfileKeyEquals;
 
 /// Whether a reload changed a key the profile lists are built from: a
 /// `profile-*` key (a removal included), `visual-studio-profiles`, `env`
@@ -9450,12 +9435,6 @@ const buildInspectorPanelTitleText = labels.buildInspectorPanelTitleText;
 const buildInspectorPanelHintText = labels.buildInspectorPanelHintText;
 
 const buildProfileChromeBadgeText = labels.buildProfileChromeBadgeText;
-
-pub fn sshProfileAlias(profile: *const windows_shell.Profile) ?[]const u8 {
-    if (profile.kind != .ssh or !std.mem.startsWith(u8, profile.key, "ssh:")) return null;
-    const alias = profile.key["ssh:".len..];
-    return if (alias.len > 0) alias else null;
-}
 
 pub fn sshAliasFromLaunchKey(launched_ssh: bool, key: ?[]const u8) ?[]const u8 {
     if (!launched_ssh) return null;
@@ -12260,7 +12239,7 @@ pub fn applyQuickSlotPreferenceOrder(
         const key = key_opt orelse continue;
         var found: ?usize = null;
         for (profiles, 0..) |profile, index| {
-            if (profileKeyEquals(profile, key)) {
+            if (windows_shell.profileKeyEquals(profile, key)) {
                 found = index;
                 break;
             }
@@ -20955,7 +20934,7 @@ test "win32 ssh profile surface config uses home working directory" {
     try std.testing.expect(clone.@"working-directory".? == .path);
     try std.testing.expect(!std.mem.eql(u8, "C:\\work", clone.@"working-directory".?.path));
     try std.testing.expectEqual(configpkg.Config.ShellIntegration.none, clone.@"shell-integration");
-    try std.testing.expectEqualStrings("production", sshProfileAlias(&profile).?);
+    try std.testing.expectEqualStrings("production", windows_shell.sshProfileAlias(&profile).?);
 }
 
 test "win32 ssh hardening also holds on the split launch path" {

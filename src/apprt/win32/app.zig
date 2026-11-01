@@ -90,7 +90,6 @@ const configpkg = @import("../../config.zig");
 const configuredHostWindowPosition = win32.configuredHostWindowPosition;
 const currentInstallDir = win32.currentInstallDir;
 const darkTheme = win32.darkTheme;
-const defaultProfileForKey = win32.defaultProfileForKey;
 const default_title = win32.default_title;
 const deinitImeWindowFormsTracePath = win32.deinitImeWindowFormsTracePath;
 const desiredMoveIndex = win32.desiredMoveIndex;
@@ -226,10 +225,8 @@ const shouldResetNewTabWorkingDirectory = win32.shouldResetNewTabWorkingDirector
 const shouldUseIntegratedTitlebar = win32.shouldUseIntegratedTitlebar;
 const splitDirectionFromAction = win32.splitDirectionFromAction;
 const splitTreeEquivalent = win32.splitTreeEquivalent;
-const sshProfileAlias = win32.sshProfileAlias;
 const startupHostWindowStyle = win32.startupHostWindowStyle;
 const std = @import("std");
-const storedProfileKeyEquals = win32.storedProfileKeyEquals;
 const suppressStartupLoaderErrorDialogs = win32.suppressStartupLoaderErrorDialogs;
 const surfaceActivationNeedsHostSync = win32.surfaceActivationNeedsHostSync;
 const surfaceFocusStateChanged = win32.surfaceFocusStateChanged;
@@ -5218,7 +5215,7 @@ pub const App = struct {
     pub fn noteProfileLaunch(self: *App, surface: *Surface, profile: *const windows_shell.Profile) !void {
         try appendOwnedString(self.core_app.alloc, &surface.launch_profile_key, profile.key);
         surface.launched_ssh = profile.kind == .ssh;
-        if (sshProfileAlias(profile)) |alias| {
+        if (windows_shell.sshProfileAlias(profile)) |alias| {
             try appendOwnedString(self.core_app.alloc, &surface.tab_title_override, alias);
         }
     }
@@ -5374,7 +5371,7 @@ pub const App = struct {
         source: *Surface,
     ) !?[]const u8 {
         const key = source.launch_profile_key orelse return null;
-        const profile = defaultProfileForKey(config, key) orelse profile: {
+        const profile = configpkg.pane_launch.defaultProfileForKey(config, key) orelse profile: {
             const host = source.host orelse return null;
             break :profile (try host.profileForKey(key)) orelse return null;
         };
@@ -5392,7 +5389,7 @@ pub const App = struct {
         key: []const u8,
         temporary: *?[]windows_shell.Profile,
     ) !?*const windows_shell.Profile {
-        if (defaultProfileForKey(&self.config, key)) |profile| return profile;
+        if (configpkg.pane_launch.defaultProfileForKey(&self.config, key)) |profile| return profile;
         if (source_host) |host| return try host.profileForKey(key);
         const profiles = try listProfilesForConfig(self.core_app.alloc, &self.config, windows_shell.listProfiles);
         temporary.* = profiles;
@@ -5428,7 +5425,7 @@ pub const App = struct {
             else => null,
         };
 
-        const surface_title = sshProfileAlias(profile) orelse profile.label;
+        const surface_title = windows_shell.sshProfileAlias(profile) orelse profile.label;
         const title_w = try std.unicode.utf8ToUtf16LeAllocZ(self.core_app.alloc, surface_title);
         defer self.core_app.alloc.free(title_w);
         const surface = try self.createWindowSurface(&config, title_w.ptr, .{
@@ -5915,7 +5912,7 @@ pub const App = struct {
         var duplicate_slot: ?usize = null;
         for (self.launcher_quick_slot_keys, 0..) |existing, index| {
             if (existing) |value| {
-                if (storedProfileKeyEquals(value, key)) {
+                if (windows_shell.storedProfileKeyEquals(value, key)) {
                     duplicate_slot = index;
                     break;
                 }

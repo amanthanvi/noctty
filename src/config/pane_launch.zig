@@ -157,6 +157,18 @@ pub fn defaultProfile(config: *const Config) ?*const windows_shell.Profile {
     return if (config._default_profile) |*profile| profile else null;
 }
 
+/// `default-profile`'s profile when `key` names it. A pane it started
+/// carries its key, and the config holds the profile resolved, so a split,
+/// an elevated window or a restore of that pane needs no list (no WSL probe
+/// on the UI thread) and finds the profile though discovery may list none
+/// such: an alias outside the SSH config, a distribution WSL did not list.
+pub fn defaultProfileForKey(config: *const Config, key: []const u8) ?*const windows_shell.Profile {
+    if (config._default_profile) |*profile| {
+        if (windows_shell.profileKeyEquals(profile.*, key)) return profile;
+    }
+    return null;
+}
+
 /// The command noctty chose: the automatic default, Safe Recovery's or
 /// `default-profile`'s. Null when a config layer set `command`, or when none
 /// is set.
