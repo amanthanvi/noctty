@@ -13,7 +13,7 @@ const win32_compositor = @import("../win32_compositor.zig");
 const win32_shell = @import("../win32_shell.zig");
 const win32_palette = @import("../win32_palette.zig");
 const win32_undo = @import("../win32_undo.zig");
-const win32_search_bar = @import("../win32_search_bar.zig");
+const docked_search = @import("docked_search.zig");
 const win32_surface_drop_target = @import("../win32_surface_drop_target.zig");
 const types = @import("../win32_types.zig");
 const sys = @import("sys.zig");
@@ -341,7 +341,7 @@ pub fn Fixtures(comptime runtime: anytype) type {
                         // behavior while that guard remains false.
                         .core_surface = uninitializedInertStorage(CoreSurface),
                         .undo_stack = win32_undo.UndoStack.init(undo_allocator),
-                        .search_bar = win32_search_bar.SearchBar.init(self.allocator),
+                        .docked_search = docked_search.DockedSearch.init(self.allocator),
                         .drop_target = try win32_surface_drop_target.DropTarget.create(
                             self.allocator,
                             @ptrCast(surface),
@@ -386,7 +386,7 @@ pub fn Fixtures(comptime runtime: anytype) type {
                             record.surface.launch_profile_key = null;
                         }
                         if (record.undo_initialized) record.surface.undo_stack.deinit();
-                        record.surface.search_bar.deinit();
+                        record.surface.docked_search.deinit();
                         if (record.surface.drop_target) |target| target.deinit();
                         record.surface.drop_target = null;
                     }

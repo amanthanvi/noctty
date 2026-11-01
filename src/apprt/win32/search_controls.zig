@@ -1,60 +1,67 @@
-//! Per-pane docked search controls. Host and Surface retain coordination.
+//! Per-pane docked search controls: their HWNDs, layout, paint, UIA and
+//! Codicons, and the adapter (`SurfaceControls.dockedSearch`) that hands
+//! the controls' input to `docked_search.zig` and carries out what it
+//! returns.
+const std = @import("std");
+const builtin = @import("builtin");
 const win32 = @import("../win32.zig");
-const runtime = win32.search_controls_runtime;
-const Allocator = runtime.Allocator;
-const ButtonColors = runtime.ButtonColors;
+const child_window = @import("child_window.zig");
+const chrome_layout = @import("chrome_layout.zig");
+const docked_search = @import("docked_search.zig");
+const gdi = @import("gdi.zig");
+const labels = @import("labels.zig");
+const c = @import("consts.zig");
+const sys = @import("sys.zig");
+const win32_input = @import("input.zig");
+const font_embedded = @import("../../font/embedded.zig");
+const win32_icons = @import("../win32_icons.zig");
+const win32_theme = @import("../win32_theme.zig");
+const win32_types = @import("../win32_types.zig");
+const win32_uia = @import("../win32_uia/mod.zig");
+const Allocator = std.mem.Allocator;
+const App = win32.App;
+const ButtonColors = win32_theme.ButtonColors;
 const ChildPlacement = child_window.ChildPlacement;
-const DRAWITEMSTRUCT = runtime.DRAWITEMSTRUCT;
-const DWORD = runtime.DWORD;
-const HDC = runtime.HDC;
-const HWND = runtime.HWND;
-const Host = runtime.Host;
-const LONG_PTR = runtime.LONG_PTR;
-const LPARAM = runtime.LPARAM;
-const LRESULT = runtime.LRESULT;
-const RECT = runtime.RECT;
-const SearchBarButtonRole = runtime.SearchBarButtonRole;
-const Surface = runtime.Surface;
-const UINT = runtime.UINT;
-const WPARAM = runtime.WPARAM;
-const adjustColor = runtime.adjustColor;
-const advanceSearchSelectedRaw = runtime.advanceSearchSelectedRaw;
+const CoreApp = @import("../../App.zig");
+const DRAWITEMSTRUCT = sys.DRAWITEMSTRUCT;
+const DWORD = win32_types.DWORD;
+const HDC = win32_types.HDC;
+const HWND = win32_types.HWND;
+const Host = win32.Host;
+const LONG_PTR = win32_types.LONG_PTR;
+const LPARAM = win32_types.LPARAM;
+const LPCWSTR = win32_types.LPCWSTR;
+const LRESULT = win32_types.LRESULT;
+const RECT = sys.RECT;
+const Role = docked_search.Role;
+const Surface = win32.Surface;
+const TestSession = win32.test_support.TestSession;
+const ThemeColors = win32_theme.ThemeColors;
+const UINT = win32_types.UINT;
+const WPARAM = win32_types.WPARAM;
+const adjustColor = win32_theme.adjustColor;
 const applyChildRect = child_window.applyChildRect;
 const applyChildVisibility = child_window.applyChildVisibility;
-const blendColorRGB = runtime.blendColorRGB;
-const buildSearchBarResultsText = runtime.buildSearchBarResultsText;
-const buttonColorsFromTheme = runtime.buttonColorsFromTheme;
-const c = runtime.c;
+const blendColorRGB = gdi.blendColorRGB;
+const buttonColorsFromTheme = win32_theme.buttonColorsFromTheme;
 const childRect = chrome_layout.childRect;
-const child_window = @import("child_window.zig");
-const chromeKeyMods = runtime.chromeKeyMods;
-const chrome_layout = @import("chrome_layout.zig");
-const createIconFontForFace = runtime.createIconFontForFace;
-const decorativeUiaName = runtime.decorativeUiaName;
-const detachChromeControlProvider = runtime.detachChromeControlProvider;
-const dockedSearchArrowDirection = runtime.dockedSearchArrowDirection;
-const dockedSearchCoreDirectionFromKeyAction = runtime.dockedSearchCoreDirectionFromKeyAction;
-const dockedSearchEnterDirection = runtime.dockedSearchEnterDirection;
-const drawRoundedRect = runtime.drawRoundedRect;
+const chromeKeyMods = win32_input.chromeKeyMods;
+const createIconFontForFace = gdi.createIconFontForFace;
+const decorativeUiaName = Surface.decorativeUiaName;
+const detachChromeControlProvider = win32.detachChromeControlProvider;
+const drawRoundedRect = gdi.drawRoundedRect;
 const editSnapshot = child_window.editSnapshot;
-const fillSolidRect = runtime.fillSolidRect;
-const focusableHwnd = runtime.focusableHwnd;
-const fontGlyphCoverage = runtime.fontGlyphCoverage;
-const font_embedded = runtime.font_embedded;
-const getHost = runtime.getHost;
-const getSurface = runtime.getSurface;
-const hostButtonProc = runtime.hostButtonProc;
-const host_search_bar_height = runtime.host_search_bar_height;
-const input = runtime.input;
-const isHighContrastActive = runtime.isHighContrastActive;
-const keyPressed = runtime.keyPressed;
-const lParamBits = runtime.lParamBits;
-const labels = runtime.labels;
+const fillSolidRect = gdi.fillSolidRect;
+const focusableHwnd = win32.focusableHwnd;
+const fontGlyphCoverage = win32.fontGlyphCoverage;
+const hostButtonProc = win32.hostButtonProc;
+const isHighContrastActive = win32.isHighContrastActive;
+const lParamBits = win32_input.lParamBits;
 const lastError = child_window.lastError;
-const log = runtime.log;
-const logUiActionError = runtime.logUiActionError;
+const log = std.log.scoped(.win32);
+const logUiActionError = win32.logUiActionError;
 const nativeEditSelection = child_window.nativeEditSelection;
-const overlayAccentColor = runtime.overlayAccentColor;
+const overlayAccentColor = win32_theme.overlayAccentColor;
 const prompt_button_class = child_window.prompt_button_class;
 const prompt_edit_class = child_window.prompt_edit_class;
 const prompt_label_class = child_window.prompt_label_class;
@@ -63,37 +70,55 @@ const rectEquals = chrome_layout.rectEquals;
 const rectInset = chrome_layout.rectInset;
 const rectOffset = chrome_layout.rectOffset;
 const rectUnion = chrome_layout.rectUnion;
-const scheduleDeferredUiaDisconnect = runtime.scheduleDeferredUiaDisconnect;
-const searchBarBottomLine = runtime.searchBarBottomLine;
-const searchBarButtonCommandId = runtime.searchBarButtonCommandId;
-const searchBarButtonLabel = runtime.searchBarButtonLabel;
-const searchBarButtonParentBg = runtime.searchBarButtonParentBg;
-const searchBarButtonShowsLabel = runtime.searchBarButtonShowsLabel;
-const searchBarChromeLayout = runtime.searchBarChromeLayout;
-const searchBarFit = runtime.searchBarFit;
-const searchBarFrameBg = runtime.searchBarFrameBg;
-const searchBarFrameBorder = runtime.searchBarFrameBorder;
-const searchBarNeedsRelayoutForQueryChange = runtime.searchBarNeedsRelayoutForQueryChange;
-const searchBarShouldInvalidateCoreSearchOnEdit = runtime.searchBarShouldInvalidateCoreSearchOnEdit;
-const searchBarToolbarVisual = runtime.searchBarToolbarVisual;
-const searchButtonKeyAction = runtime.searchButtonKeyAction;
-const searchSelectedDisplayFromRaw = runtime.searchSelectedDisplayFromRaw;
+const rgb = win32_theme.rgb;
+const runUiActionOrLog = win32.runUiActionOrLog;
+const scheduleDeferredUiaDisconnect = win32.scheduleDeferredUiaDisconnect;
+const searchBarChromeLayout = chrome_layout.searchBarChromeLayout;
+const searchBarFit = chrome_layout.searchBarFit;
 const selectNativeEditRange = child_window.selectNativeEditRange;
 const setWindowData = child_window.setWindowData;
-const showSearchBarResults = runtime.showSearchBarResults;
-const std = runtime.std;
 const syncWindowTextUtf8Cached = child_window.syncWindowTextUtf8Cached;
-const sys = runtime.sys;
-const terminal = runtime.terminal;
-const terminalDisconnectThunk = runtime.terminalDisconnectThunk;
-const terminalReleaseThunk = runtime.terminalReleaseThunk;
-const win32_icons = runtime.win32_icons;
-const win32_uia = runtime.win32_uia;
-const test_runtime = if (@import("builtin").is_test) win32.search_controls_test_runtime else struct {};
-const App = test_runtime.App;
-const CoreApp = test_runtime.CoreApp;
-const TestSession = test_runtime.TestSession;
-const builtin = test_runtime.builtin;
+const terminalDisconnectThunk = win32.terminalDisconnectThunk;
+const terminalReleaseThunk = win32.terminalReleaseThunk;
+
+const host_search_bar_height: i32 = (win32_theme.ThemeMetrics{}).height_search_bar;
+
+fn getHost(hwnd: HWND) ?*Host {
+    return child_window.windowData(Host, hwnd);
+}
+
+fn getSurface(hwnd: HWND) ?*Surface {
+    return child_window.windowData(Surface, hwnd);
+}
+
+/// A key message for the docked search, as `apply` takes it.
+fn searchKey(event: docked_search.Input.Key.Event, at: docked_search.Input.Key.At, wParam: WPARAM, lParam: LPARAM) docked_search.Input {
+    const bits = lParamBits(lParam);
+    return .{ .key = .{
+        .event = event,
+        .at = at,
+        .vk = wParam,
+        .mods = chromeKeyMods(),
+        .scan = @truncate(bits >> 16),
+        .repeat = (bits & c.KF_REPEAT) != 0,
+    } };
+}
+
+/// Hands a key message to the pane's search: true when search took it (the
+/// procedure returns 0). A failure is logged and the key counts as taken.
+fn searchTookKey(surface: *Surface, in: docked_search.Input) bool {
+    return surface.dockedSearch(in) catch |err| {
+        logUiActionError("docked search key failed", err);
+        return true;
+    };
+}
+
+const search_prev_label = std.unicode.utf8ToUtf16LeStringLiteral("Prev match");
+const search_next_label = std.unicode.utf8ToUtf16LeStringLiteral("Next match");
+const search_regex_label = std.unicode.utf8ToUtf16LeStringLiteral("Regex");
+const search_case_label = std.unicode.utf8ToUtf16LeStringLiteral("Case sensitive");
+const search_word_label = std.unicode.utf8ToUtf16LeStringLiteral("Whole word");
+const search_close_label = std.unicode.utf8ToUtf16LeStringLiteral("Close search");
 
 /// The search bar's icons are VS Code's (Codicons), drawn from the Symbols
 /// Nerd Font that noctty already embeds for the terminal (Nerd Fonts bundles
@@ -156,7 +181,7 @@ pub fn fontHasSearchCodicons(font: *anyopaque) bool {
 }
 
 /// The Codicon for each search bar button, by its Nerd Fonts code point.
-fn searchButtonCodicon(role: SearchBarButtonRole) [:0]const u16 {
+fn searchButtonCodicon(role: Role) [:0]const u16 {
     return switch (role) {
         .prev => std.unicode.utf8ToUtf16LeStringLiteral("\u{EAA1}"), // arrow-up
         .next => std.unicode.utf8ToUtf16LeStringLiteral("\u{EA9A}"), // arrow-down
@@ -169,14 +194,148 @@ fn searchButtonCodicon(role: SearchBarButtonRole) [:0]const u16 {
 
 const search_edit_cue = std.unicode.utf8ToUtf16LeStringLiteral("Find in scrollback");
 
-const search_bar_button_roles = [_]SearchBarButtonRole{
-    .prev,
-    .next,
-    .regex,
-    .case_sensitive,
-    .whole_word,
-    .close,
+const search_bar_button_roles = std.enums.values(Role);
+
+/// The docked search bar's keyboard stops in Tab order: the query, then each
+/// button in the order the bar lays them out.
+pub const search_focus_stop_count = 1 + std.meta.fields(Role).len;
+
+pub fn searchFocusStopOfRole(role: Role) usize {
+    return 1 + @intFromEnum(role);
+}
+
+/// The button at a search stop; null for the query (stop 0) or past the end.
+fn searchFocusStopRole(stop: usize) ?Role {
+    if (stop == 0 or stop >= search_focus_stop_count) return null;
+    return @enumFromInt(stop - 1);
+}
+
+const SearchBarResultsVisual = struct {
+    bg: u32,
+    border: u32,
+    fg: u32,
 };
+
+const SearchBarToolbarVisual = struct {
+    bg: u32,
+    border: u32,
+    separator: u32,
+};
+
+fn searchBarButtonCommandId(role: Role) usize {
+    return switch (role) {
+        .prev => c.SEARCH_PREV_ID,
+        .next => c.SEARCH_NEXT_ID,
+        .regex => c.SEARCH_REGEX_ID,
+        .case_sensitive => c.SEARCH_CASE_ID,
+        .whole_word => c.SEARCH_WORD_ID,
+        .close => c.SEARCH_CLOSE_ID,
+    };
+}
+
+fn searchBarButtonLabel(role: Role) LPCWSTR {
+    return switch (role) {
+        .prev => search_prev_label,
+        .next => search_next_label,
+        .regex => search_regex_label,
+        .case_sensitive => search_case_label,
+        .whole_word => search_word_label,
+        .close => search_close_label,
+    };
+}
+
+/// What a search bar button does, in words: its UIA name, and the hover
+/// tooltip that spells out its icon, so those two always agree. The window
+/// text, which MSAA reports as its name, comes from `searchBarButtonLabel`
+/// instead.
+pub fn searchBarButtonName(role: Role) []const u8 {
+    return switch (role) {
+        .prev => "Previous match",
+        .next => "Next match",
+        .regex => "Regular expression",
+        .case_sensitive => "Case sensitive",
+        .whole_word => "Whole word",
+        .close => "Close search",
+    };
+}
+
+pub fn searchBarResultsVisual(
+    theme: *const ThemeColors,
+    tone: docked_search.Results.Tone,
+) SearchBarResultsVisual {
+    const accent = overlayAccentColor(.search, theme.is_dark);
+    return switch (tone) {
+        .pending => .{
+            .bg = if (theme.is_dark)
+                adjustColor(theme.overlay_bg, 8, 10, 10)
+            else
+                adjustColor(theme.overlay_bg, -6, -4, -2),
+            .border = accent,
+            .fg = theme.overlay_label_fg,
+        },
+        .no_match => .{
+            .bg = if (theme.is_dark)
+                rgb(48, 28, 30)
+            else
+                rgb(252, 236, 236),
+            .border = theme.error_fg,
+            .fg = theme.error_fg,
+        },
+        .found => .{
+            .bg = if (theme.is_dark)
+                adjustColor(theme.edit_frame_bg, 10, 14, 10)
+            else
+                adjustColor(theme.edit_frame_bg, -6, -2, -4),
+            .border = accent,
+            .fg = theme.overlay_label_fg,
+        },
+    };
+}
+
+pub fn searchBarToolbarVisual(theme: *const ThemeColors) SearchBarToolbarVisual {
+    return .{
+        .bg = if (theme.is_dark)
+            adjustColor(theme.edit_frame_bg, 6, 8, 10)
+        else
+            adjustColor(theme.edit_frame_bg, -4, -2, -2),
+        .border = if (theme.is_dark)
+            adjustColor(theme.overlay_border, 18, 18, 20)
+        else
+            adjustColor(theme.overlay_border, -18, -18, -18),
+        .separator = if (theme.is_dark)
+            adjustColor(theme.overlay_border, 30, 30, 34)
+        else
+            adjustColor(theme.overlay_border, -26, -26, -26),
+    };
+}
+
+fn searchBarFrameBg(theme: *const ThemeColors) u32 {
+    return if (theme.is_dark)
+        adjustColor(theme.overlay_bg, 3, 3, 5)
+    else
+        adjustColor(theme.overlay_bg, -2, -2, -1);
+}
+
+fn searchBarFrameBorder(theme: *const ThemeColors) u32 {
+    return if (theme.is_dark)
+        adjustColor(theme.overlay_border, 10, 10, 12)
+    else
+        adjustColor(theme.overlay_border, -14, -14, -14);
+}
+
+fn searchBarBottomLine(theme: *const ThemeColors) u32 {
+    return if (theme.is_dark)
+        adjustColor(theme.overlay_border, -10, -10, -8)
+    else
+        adjustColor(theme.overlay_border, 10, 10, 10);
+}
+
+fn searchBarButtonParentBg(theme: *const ThemeColors, role: Role) u32 {
+    return switch (role) {
+        .close => theme.overlay_bg,
+        else => searchBarToolbarVisual(theme).bg,
+    };
+}
 
 pub fn searchBarGroupRect(placements: []const ChildPlacement, expand_x: i32, expand_y: i32) ?RECT {
     var out: ?RECT = null;
@@ -200,30 +359,17 @@ pub fn searchBarSeparatorX(left: ChildPlacement, right: ChildPlacement) ?i32 {
     return left.rect.right + @divTrunc(gap, 2);
 }
 
-/// The control at a docked search bar stop (`labels.search_focus_stop_count`),
+/// The control at a docked search bar stop (`search_focus_stop_count`),
 /// or null while it is hidden: the toggles and arrows hide when the bar is
 /// too narrow, and a closed bar hides them all.
 pub fn searchFocusStopHwnd(surface: *const Surface, stop: usize) ?HWND {
     if (stop == 0) return focusableHwnd(surface.search_bar_edit_hwnd);
-    const role = labels.searchFocusStopRole(stop) orelse return null;
+    const role = searchFocusStopRole(stop) orelse return null;
     return focusableHwnd(surface.searchBarButtonHwnd(role));
 }
 
 pub fn searchFocusStopAvailable(surface: *const Surface, stop: usize) bool {
     return searchFocusStopHwnd(surface, stop) != null;
-}
-
-/// Alt+R, Alt+C and Alt+W from the docked search bar's query or buttons.
-/// True when the key is one of those chords, so the caller swallows it; a
-/// held key does not toggle again.
-fn searchToggleKey(surface: *Surface, vk: WPARAM, lParam: LPARAM) bool {
-    const role = surface.search_toggle_keys.keyDown(vk, chromeKeyMods(), lParamBits(lParam)) orelse return false;
-    if ((lParamBits(lParam) & c.KF_REPEAT) == 0) {
-        _ = surface.handleSearchToggleClick(labels.searchBarButtonCommandId(role)) catch |err| {
-            logUiActionError("docked search accelerator toggle failed", err);
-        };
-    }
-    return true;
 }
 
 fn searchLabelProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.winapi) LRESULT {
@@ -256,7 +402,7 @@ fn searchEditProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
                 surface.invalidateSearchBarChildPaint();
             },
             c.WM_KILLFOCUS => {
-                surface.search_toggle_keys = .{};
+                runUiActionOrLog("docked search blur failed", surface.dockedSearch(.blur));
                 surface.invalidateSearchBarChildPaint();
             },
             c.WM_LBUTTONDOWN => v.noteChromePointerInput(),
@@ -265,9 +411,9 @@ fn searchEditProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
             c.WM_CHAR => {
                 if (wParam == c.VK_RETURN or wParam == c.VK_ESCAPE or wParam == c.VK_TAB) return 0;
             },
-            // The WM_SYSCHAR of Alt+R / Alt+C / Alt+W; see below.
+            // The WM_SYSCHAR of Alt+R / Alt+C / Alt+W.
             c.WM_SYSCHAR => {
-                if (surface.search_toggle_keys.consumeChar(lParamBits(lParam))) return 0;
+                if (searchTookKey(surface, searchKey(.sys_char, .edit, wParam, lParam))) return 0;
             },
             c.WM_KEYDOWN, c.WM_SYSKEYDOWN => {
                 v.noteChromeKeyInput(wParam);
@@ -275,45 +421,16 @@ fn searchEditProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
                 // itself and returns focus to the terminal; only Ctrl+F6
                 // is taken for the focus-region cycle.
                 if (v.handleFocusRegionKey(hwnd, wParam, false)) return 0;
+                const key = searchKey(if (msg == c.WM_SYSKEYDOWN) .sys_down else .down, .edit, wParam, lParam);
                 // Tab walks the query and then the bar's visible buttons,
                 // wrapping; Escape and Ctrl+F6 still leave the bar.
-                if (labels.tabFocusStep(wParam, chromeKeyMods())) |step| {
+                if (labels.tabFocusStep(wParam, key.key.mods)) |step| {
                     _ = v.stepSearchFocus(surface, hwnd, step == .previous);
                     return 0;
                 }
-                // Alt+R / Alt+C / Alt+W flip regex, case and whole word. The
-                // press is a WM_SYSKEYDOWN, so it never types; the paired
-                // WM_SYSCHAR is swallowed above.
-                if (msg == c.WM_SYSKEYDOWN and searchToggleKey(surface, wParam, lParam)) return 0;
-                if (wParam == c.VK_RETURN) {
-                    _ = surface.navigateDockedSearch(dockedSearchEnterDirection(keyPressed(c.VK_SHIFT))) catch |err| {
-                        logUiActionError("docked search enter navigation failed", err);
-                    };
-                    return 0;
-                }
-                if (dockedSearchArrowDirection(wParam)) |dir| {
-                    _ = surface.navigateDockedSearch(dir) catch |err| {
-                        logUiActionError("docked search arrow navigation failed", err);
-                    };
-                    return 0;
-                }
-                if (searchButtonKeyAction(wParam, keyPressed(c.VK_SHIFT))) |action| {
-                    if (dockedSearchCoreDirectionFromKeyAction(action)) |dir| {
-                        _ = surface.navigateDockedSearch(dir) catch |err| {
-                            logUiActionError("docked search key navigation failed", err);
-                        };
-                        return 0;
-                    }
-                    switch (action) {
-                        .dismiss => {
-                            surface.closeDockedSearchBar(true, true) catch |err| {
-                                logUiActionError("docked search key close failed", err);
-                            };
-                            return 0;
-                        },
-                        else => {},
-                    }
-                }
+                // Enter, the arrows, F3 and Escape, and Alt+R / Alt+C /
+                // Alt+W, whose press is a WM_SYSKEYDOWN and never types.
+                if (searchTookKey(surface, key)) return 0;
             },
             else => {},
         };
@@ -405,7 +522,7 @@ pub const HostControls = struct {
         return surface.search_bar_results_hwnd != null and child == surface.search_bar_results_hwnd.?;
     }
 
-    pub fn searchBarButtonRole(self: *const Host, child: HWND) ?SearchBarButtonRole {
+    pub fn searchBarButtonRole(self: *const Host, child: HWND) ?Role {
         const surface = self.searchControlSurface(child) orelse return null;
         return surface.searchBarButtonRole(child);
     }
@@ -423,7 +540,7 @@ pub const HostControls = struct {
 
     pub fn searchBarButtonColors(
         self: *const Host,
-        role: SearchBarButtonRole,
+        role: Role,
         active: bool,
         hovered: bool,
         pressed: bool,
@@ -604,7 +721,7 @@ pub const HostControls = struct {
     pub fn drawSearchBarButton(
         self: *Host,
         draw: *const DRAWITEMSTRUCT,
-        role: SearchBarButtonRole,
+        role: Role,
         icon: win32_icons.Kind,
         disabled: bool,
         pressed: bool,
@@ -614,7 +731,6 @@ pub const HostControls = struct {
     ) void {
         const theme = &self.app.resolved_theme;
         const colors = self.searchBarButtonColors(role, active, hovered, pressed, disabled);
-        const show_label = searchBarButtonShowsLabel(role, draw.rcItem.right - draw.rcItem.left);
         const bg_rect = rectInset(draw.rcItem, self.scaled(2), self.scaled(2));
         const parent_bg = searchBarButtonParentBg(theme, role);
 
@@ -635,30 +751,6 @@ pub const HostControls = struct {
         _ = sys.SetBkMode(draw.hDC, c.TRANSPARENT);
         _ = sys.SetTextColor(draw.hDC, colors.fg);
 
-        if (show_label) {
-            var text_buf: [160]u16 = undefined;
-            const text_len = sys.GetWindowTextW(draw.hwndItem, &text_buf, text_buf.len);
-            const icon_box_w = @min(content_rect.bottom - content_rect.top, self.scaled(18));
-            const icon_rect = RECT{
-                .left = content_rect.left,
-                .top = content_rect.top,
-                .right = content_rect.left + icon_box_w,
-                .bottom = content_rect.bottom,
-            };
-            self.drawSearchButtonGlyph(draw.hDC, icon_rect, role, icon, colors.fg);
-
-            var label_rect = content_rect;
-            label_rect.left = icon_rect.right + self.scaled(5);
-            _ = sys.DrawTextW(
-                draw.hDC,
-                @ptrCast(&text_buf),
-                text_len,
-                &label_rect,
-                c.DT_LEFT | c.DT_VCENTER | c.DT_SINGLELINE | c.DT_NOPREFIX | c.DT_END_ELLIPSIS,
-            );
-            return;
-        }
-
         self.drawSearchButtonGlyph(draw.hDC, content_rect, role, icon, colors.fg);
 
         if (active and (role == .regex or role == .case_sensitive or role == .whole_word)) {
@@ -678,7 +770,7 @@ pub const HostControls = struct {
         self: *Host,
         hdc: HDC,
         rect: RECT,
-        role: SearchBarButtonRole,
+        role: Role,
         fallback: win32_icons.Kind,
         color: u32,
     ) void {
@@ -712,7 +804,7 @@ pub const HostControls = struct {
 };
 
 pub const SurfaceControls = struct {
-    pub fn searchBarButtonHwnd(self: *const Surface, role: SearchBarButtonRole) ?HWND {
+    pub fn searchBarButtonHwnd(self: *const Surface, role: Role) ?HWND {
         return switch (role) {
             .prev => self.search_bar_prev_hwnd,
             .next => self.search_bar_next_hwnd,
@@ -724,7 +816,7 @@ pub const SurfaceControls = struct {
     }
 
     fn searchControlUiaName(_: *anyopaque, tag: usize, _: []u8) []const u8 {
-        return labels.searchBarButtonName(@enumFromInt(tag));
+        return searchBarButtonName(@enumFromInt(tag));
     }
 
     fn searchToggleUiaState(ctx: *anyopaque, tag: usize) bool {
@@ -777,7 +869,7 @@ pub const SurfaceControls = struct {
         provider.raiseTextSelectionChanged();
     }
 
-    pub fn searchBarButtonPlacement(self: *Surface, role: SearchBarButtonRole) *ChildPlacement {
+    pub fn searchBarButtonPlacement(self: *Surface, role: Role) *ChildPlacement {
         return switch (role) {
             .prev => &self.search_bar_prev_placement,
             .next => &self.search_bar_next_placement,
@@ -788,7 +880,7 @@ pub const SurfaceControls = struct {
         };
     }
 
-    pub fn searchBarButtonRole(self: *const Surface, hwnd: HWND) ?SearchBarButtonRole {
+    pub fn searchBarButtonRole(self: *const Surface, hwnd: HWND) ?Role {
         for (search_bar_button_roles) |role| {
             if (self.searchBarButtonHwnd(role)) |button_hwnd| {
                 if (hwnd == button_hwnd) return role;
@@ -797,11 +889,12 @@ pub const SurfaceControls = struct {
         return null;
     }
 
-    pub fn searchBarButtonActive(self: *const Surface, role: SearchBarButtonRole) bool {
+    pub fn searchBarButtonActive(self: *const Surface, role: Role) bool {
+        const options = self.docked_search.view().options;
         return switch (role) {
-            .regex => self.search_bar.toggles.regex,
-            .case_sensitive => self.search_bar.toggles.case_sensitive,
-            .whole_word => self.search_bar.toggles.whole_word,
+            .regex => options.regex,
+            .case_sensitive => options.case_sensitive,
+            .whole_word => options.whole_word,
             else => false,
         };
     }
@@ -815,14 +908,6 @@ pub const SurfaceControls = struct {
     pub fn searchBarButtonPrevProc(self: *const Surface, hwnd: HWND) ?*const anyopaque {
         const role = self.searchBarButtonRole(hwnd) orelse return null;
         return self.search_bar_button_prev_procs[@intFromEnum(role)];
-    }
-
-    pub fn searchQueryOptions(self: *const Surface) terminal.search.QueryOptions {
-        return .{
-            .regex = self.search_bar.toggles.regex,
-            .case_sensitive = self.search_bar.toggles.case_sensitive,
-            .whole_word = self.search_bar.toggles.whole_word,
-        };
     }
 
     pub fn applySearchBarFont(self: *Surface, font: ?*anyopaque) void {
@@ -921,7 +1006,7 @@ pub const SurfaceControls = struct {
         return changed;
     }
 
-    pub fn createSearchBarButton(self: *Surface, host: *Host, parent: HWND, role: SearchBarButtonRole) !HWND {
+    pub fn createSearchBarButton(self: *Surface, host: *Host, parent: HWND, role: Role) !HWND {
         const hwnd = sys.CreateWindowExW(
             0,
             prompt_button_class,
@@ -1152,7 +1237,7 @@ pub const SurfaceControls = struct {
     /// Hides a search bar button the pane is too narrow for. The edit takes
     /// the focus the button had: hiding the window that has it leaves the
     /// keyboard with no window of ours.
-    pub fn hideSearchBarButton(self: *Surface, role: SearchBarButtonRole) bool {
+    pub fn hideSearchBarButton(self: *Surface, role: Role) bool {
         const hwnd = self.searchBarButtonHwnd(role) orelse return false;
         if (sys.GetFocus() == hwnd) {
             if (self.search_bar_edit_hwnd) |edit| _ = sys.SetFocus(edit);
@@ -1162,7 +1247,7 @@ pub const SurfaceControls = struct {
 
     /// Places a search bar button at `rect` and shows it. The controls
     /// exist once `ensureSearchBarControls` has run.
-    pub fn showSearchBarButton(self: *Surface, role: SearchBarButtonRole, rect: RECT) bool {
+    pub fn showSearchBarButton(self: *Surface, role: Role, rect: RECT) bool {
         const hwnd = self.searchBarButtonHwnd(role).?;
         const placement = self.searchBarButtonPlacement(role);
         // Both run: a move and a show are separate changes.
@@ -1172,7 +1257,8 @@ pub const SurfaceControls = struct {
     }
 
     pub fn layoutSearchBarControls(self: *Surface, frame_rect: RECT, visible: bool) !bool {
-        if (!visible or !self.search_bar.visible) return self.hideSearchBarControls();
+        const search = self.docked_search.view();
+        if (!visible or !search.open) return self.hideSearchBarControls();
 
         try self.ensureSearchBarControls();
         const host = self.host orelse return false;
@@ -1240,7 +1326,7 @@ pub const SurfaceControls = struct {
             changed = self.hideSearchBarButton(.prev) or changed;
         }
 
-        const show_results = showSearchBarResults(&self.search_bar) and
+        const show_results = search.chip and
             (right - layout.results_w - layout.section_gap - left) >= layout.min_edit_w;
         if (show_results) {
             changed = applyChildRect(
@@ -1285,7 +1371,7 @@ pub const SurfaceControls = struct {
         return changed;
     }
 
-    pub fn setSearchBarEditText(self: *Surface, value: []const u8) !bool {
+    fn setSearchBarEditText(self: *Surface, value: []const u8) !bool {
         const edit_hwnd = self.search_bar_edit_hwnd orelse return false;
         const host = self.host orelse return false;
         const current = try self.readSearchBarEditText();
@@ -1314,14 +1400,12 @@ pub const SurfaceControls = struct {
 
     pub fn syncSearchBarResultsText(self: *Surface) !bool {
         const hwnd = self.search_bar_results_hwnd orelse return false;
-        const alloc = self.app.core_app.alloc;
-        const text = try buildSearchBarResultsText(alloc, &self.search_bar);
-        defer alloc.free(text);
+        var buf: [48]u8 = undefined;
         const changed = try syncWindowTextUtf8Cached(
-            alloc,
+            self.app.core_app.alloc,
             hwnd,
             &self.search_bar_results_cache,
-            text,
+            self.docked_search.view().results.text(&buf),
         );
         if (changed) {
             if (self.search_bar_results_uia_provider) |provider| provider.raiseLiveRegionChanged();
@@ -1329,147 +1413,99 @@ pub const SurfaceControls = struct {
         return changed;
     }
 
-    pub fn issueSearchNow(self: *Surface, force: bool) !bool {
-        if (self.search_bar.query.len == 0) return false;
-        if (!force and !self.search_bar.forceSearch()) return false;
-        if (force) {
-            self.search_bar.searched = true;
-            self.search_bar.last_edit_ms = 0;
-        }
-        try self.setSearchActive(true, self.search_bar.query);
-        _ = try self.core_surface.setSearchQuery(self.search_bar.query, self.searchQueryOptions());
-        _ = try self.syncSearchBarResultsText();
-        if (self.host) |host| {
-            host.refreshSearchTimerState();
-        }
-        return true;
-    }
-
-    pub fn runPendingSearchNow(self: *Surface) !bool {
-        return try self.issueSearchNow(false);
-    }
-
-    pub fn rerunSearchNow(self: *Surface) !bool {
-        return try self.issueSearchNow(true);
-    }
-
     pub fn handleSearchBarEditChanged(self: *Surface) !bool {
-        const alloc = self.app.core_app.alloc;
         const text = try self.readSearchBarEditText();
-        defer alloc.free(text);
-
-        const previous_query_len = self.search_bar.query.len;
-        const needs_layout = searchBarNeedsRelayoutForQueryChange(
-            previous_query_len,
-            text.len,
-        );
-        const invalidate_core_search = searchBarShouldInvalidateCoreSearchOnEdit(
-            previous_query_len,
-            text.len,
-        );
-        try self.search_bar.setQuery(text, @intCast(sys.GetTickCount64()));
-        if (invalidate_core_search) {
-            if (text.len == 0) {
-                _ = try self.core_surface.setSearchQuery("", self.searchQueryOptions());
-            } else {
-                _ = try self.core_surface.invalidateSearchResults();
-            }
-        }
-        try self.setSearchActive(text.len > 0, text);
-        if (self.host) |host| {
-            if (needs_layout) try host.layout();
-            host.refreshSearchTimerState();
-        }
-        return true;
+        defer self.app.core_app.alloc.free(text);
+        return try self.dockedSearch(.{ .edit = text });
     }
 
-    pub fn navigateDockedSearch(self: *Surface, dir: input.Binding.Action.NavigateSearch) !bool {
-        if (self.search_bar.query.len == 0) return false;
-
-        const same_query = if (self.search_needle) |needle|
-            std.mem.eql(u8, needle, self.search_bar.query)
-        else
-            false;
-        if (!self.search_active or !same_query or !self.search_bar.searched) {
-            return try self.rerunSearchNow();
+    /// Hands `in` to this pane's search and carries out what it returns.
+    /// True when the input was search's (a window procedure returns 0).
+    /// The core calls back into this synchronously, so the error set is
+    /// explicit: dockedSearch, the core, App.performAction, dockedSearch.
+    pub fn dockedSearch(self: *Surface, in: docked_search.Input) anyerror!bool {
+        switch (in) {
+            .open => {
+                const host = self.host orelse return false;
+                if (host.overlay_mode != .none) host.hideOverlay();
+                try self.ensureSearchBarControls();
+            },
+            .core => |core| if (core == .ended and self.host == null) return false,
+            else => {},
         }
-
-        _ = try self.core_surface.performBindingAction(.{ .navigate_search = dir });
-        self.search_selected_raw = advanceSearchSelectedRaw(
-            self.search_selected_raw,
-            self.search_total,
-            dir,
-            self.search_bar.toggles.wrap,
-        );
-        try self.setSearchSelectedDisplay(searchSelectedDisplayFromRaw(self.search_selected_raw, self.search_total));
-        return true;
-    }
-
-    pub fn handleSearchToggleClick(self: *Surface, command_id: usize) !bool {
-        const now_ms: i64 = @intCast(sys.GetTickCount64());
-        const role: SearchBarButtonRole = switch (command_id) {
-            c.SEARCH_REGEX_ID => .regex,
-            c.SEARCH_CASE_ID => .case_sensitive,
-            c.SEARCH_WORD_ID => .whole_word,
-            else => return false,
-        };
-        const old = self.searchBarButtonActive(role);
-        switch (role) {
-            .regex => self.search_bar.toggleRegex(now_ms),
-            .case_sensitive => self.search_bar.toggleCase(now_ms),
-            .whole_word => self.search_bar.toggleWord(now_ms),
-            else => unreachable,
-        }
-        const new = self.searchBarButtonActive(role);
-        if (self.search_bar_button_uia_providers[@intFromEnum(role)]) |provider| {
-            provider.raiseToggleChanged(old, new);
-        }
-
-        self.invalidateSearchButtons();
-        if (self.search_bar.query.len > 0) {
-            _ = try self.rerunSearchNow();
-        } else {
-            _ = try self.syncSearchBarResultsText();
-        }
-        return true;
+        const out = try self.docked_search.apply(in, @intCast(sys.GetTickCount64()));
+        try applyDockedSearch(self, out);
+        return out.handled;
     }
 };
 
+/// Carries out an Outcome. Nothing after the core step may use a View taken
+/// before it: the core's synchronous reports can free what it borrows.
+fn applyDockedSearch(surface: *Surface, out: docked_search.Outcome) anyerror!void {
+    if (out.toggled) |role| {
+        const now = surface.searchBarButtonActive(role);
+        if (surface.search_bar_button_uia_providers[@intFromEnum(role)]) |provider| {
+            provider.raiseToggleChanged(!now, now);
+        }
+        surface.invalidateSearchButtons();
+    }
+    if (out.results_changed) _ = try surface.syncSearchBarResultsText();
+    if (out.markers_changed) {
+        surface.clearScrollbarMarkers();
+        try surface.refreshScrollbarWindow();
+    }
+    switch (out.frame) {
+        .same => {},
+        .relayout => if (surface.host) |host| try host.layout(),
+        .shown => if (surface.host) |host| {
+            _ = try SurfaceControls.setSearchBarEditText(surface, surface.docked_search.view().query);
+            // A closed bar's chip is not written, so it may be stale.
+            _ = try surface.syncSearchBarResultsText();
+            try host.layout();
+            host.forceHostCompositionPaint();
+            if (surface.search_bar_edit_hwnd) |edit_hwnd| {
+                _ = sys.SetFocus(edit_hwnd);
+                _ = sys.SendMessageW(edit_hwnd, c.EM_SETSEL, 0, -1);
+            }
+        },
+        .hidden => {
+            _ = surface.hideSearchBarControls();
+            if (surface.host) |host| {
+                try host.layout();
+                host.forceHostCompositionPaint();
+            }
+        },
+    }
+    if (out.timer_changed) {
+        if (surface.host) |host| host.refreshSearchTimerState();
+    }
+    if (out.core) |command| switch (command) {
+        .search => |search| _ = try surface.core_surface.setSearchQuery(search.text, search.options),
+        .stop => _ = try surface.core_surface.setSearchQuery("", .{}),
+        .invalidate => _ = try surface.core_surface.invalidateSearchResults(),
+        .navigate => |dir| _ = try surface.core_surface.performBindingAction(.{ .navigate_search = dir }),
+        .end => _ = try surface.core_surface.endSearch(),
+    };
+    if (out.focus_terminal) {
+        if (surface.hwnd) |hwnd| _ = sys.SetFocus(hwnd);
+    }
+}
+
 pub fn searchButtonKey(v: *Host, hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) ?LRESULT {
-    // Alt+R / Alt+C / Alt+W flip the search flags from a focused search
-    // button too. Alt is a system key, so the press is a WM_SYSKEYDOWN,
-    // and its WM_SYSCHAR is swallowed or `DefWindowProc` turns it into a
-    // menu request.
-    if ((msg == c.WM_SYSKEYDOWN or msg == c.WM_SYSCHAR) and v.isSearchBarButton(hwnd)) {
-        if (v.searchControlSurface(hwnd)) |surface| {
-            if (msg == c.WM_SYSKEYDOWN) {
-                v.noteChromeKeyInput(c.VK_TAB);
-                if (searchToggleKey(surface, wParam, lParam)) return 0;
-            } else if (surface.search_toggle_keys.consumeChar(lParamBits(lParam))) {
-                return 0;
-            }
-        }
-    }
-    if (msg == c.WM_KEYDOWN and v.isSearchBarButton(hwnd)) {
-        if (v.searchControlSurface(hwnd)) |surface| {
-            if (searchButtonKeyAction(wParam, keyPressed(c.VK_SHIFT))) |action| {
-                if (dockedSearchCoreDirectionFromKeyAction(action)) |dir| {
-                    _ = surface.navigateDockedSearch(dir) catch |err| {
-                        logUiActionError("docked search button navigation failed", err);
-                    };
-                    return 0;
-                }
-                switch (action) {
-                    .dismiss => {
-                        _ = v.dismissActiveSearch();
-                        return 0;
-                    },
-                    else => {},
-                }
-            }
-        }
-    }
-    return null;
+    if (!v.isSearchBarButton(hwnd)) return null;
+    const surface = v.searchControlSurface(hwnd) orelse return null;
+    const event: docked_search.Input.Key.Event = switch (msg) {
+        c.WM_KEYDOWN => .down,
+        // Alt+R / Alt+C / Alt+W flip the search flags from a focused button
+        // too. Alt is a system key, so the press is a WM_SYSKEYDOWN, and its
+        // WM_SYSCHAR is swallowed or `DefWindowProc` turns it into a menu
+        // request.
+        c.WM_SYSKEYDOWN => .sys_down,
+        c.WM_SYSCHAR => .sys_char,
+        else => return null,
+    };
+    if (msg == c.WM_SYSKEYDOWN) v.noteChromeKeyInput(c.VK_TAB);
+    return if (searchTookKey(surface, searchKey(event, .button, wParam, lParam))) 0 else null;
 }
 
 test "win32 searchBarGroupRect ignores hidden placements" {
@@ -1555,4 +1591,44 @@ test "win32 search bar icon font is created at first use and dropped on a DPI or
     host.recreateTitlebarIconFonts();
     try std.testing.expect(host.search_icon_font == null);
     try std.testing.expect(!host.search_icon_font_resolved);
+}
+
+test "win32 searchBarResultsVisual marks no-match state with error colors" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const theme = win32_theme.darkTheme();
+    const visual = searchBarResultsVisual(&theme, .no_match);
+    try std.testing.expectEqual(theme.error_fg, visual.border);
+    try std.testing.expectEqual(theme.error_fg, visual.fg);
+}
+
+test "win32 searchBarButtonName names every search button distinctly" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    // Each button's tooltip and UIA name come from here, so every role needs
+    // its own non-empty name; two icons sharing a name would defeat the
+    // tooltip that exists to tell them apart.
+    const roles = std.enums.values(Role);
+    for (roles, 0..) |role, i| {
+        const name = searchBarButtonName(role);
+        try std.testing.expect(name.len > 0);
+        for (roles[i + 1 ..]) |other| {
+            try std.testing.expect(!std.mem.eql(u8, name, searchBarButtonName(other)));
+        }
+    }
+    try std.testing.expectEqualStrings("Previous match", searchBarButtonName(.prev));
+    try std.testing.expectEqualStrings("Regular expression", searchBarButtonName(.regex));
+}
+
+test "win32 docked search stops run query, prev, next, regex, case, word, close" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    try std.testing.expectEqual(@as(usize, 7), search_focus_stop_count);
+    try std.testing.expectEqual(@as(?Role, null), searchFocusStopRole(0));
+    const order = [_]Role{ .prev, .next, .regex, .case_sensitive, .whole_word, .close };
+    for (order, 1..) |role, stop| {
+        try std.testing.expectEqual(@as(?Role, role), searchFocusStopRole(stop));
+        try std.testing.expectEqual(stop, searchFocusStopOfRole(role));
+    }
+    try std.testing.expectEqual(@as(?Role, null), searchFocusStopRole(search_focus_stop_count));
 }

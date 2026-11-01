@@ -190,8 +190,8 @@ const rootDisconnectThunk = win32.rootDisconnectThunk;
 const rootReleaseThunk = win32.rootReleaseThunk;
 const runUiActionOrLog = win32.runUiActionOrLog;
 const scheduleDeferredUiaDisconnect = win32.scheduleDeferredUiaDisconnect;
-const searchFocusStopAvailable = win32.searchFocusStopAvailable;
-const searchFocusStopHwnd = win32.searchFocusStopHwnd;
+const searchFocusStopAvailable = search_controls.searchFocusStopAvailable;
+const searchFocusStopHwnd = search_controls.searchFocusStopHwnd;
 const search_controls = @import("search_controls.zig");
 const selectedProfileSelectionNeedsChange = win32.selectedProfileSelectionNeedsChange;
 const setQuickTerminalRect = win32.setQuickTerminalRect;
@@ -2927,7 +2927,7 @@ pub const Host = struct {
         if (self.new_tab_hwnd == button) return labels.tabStripActionName(.new_tab);
         if (self.overflow_hwnd == button) return labels.tabStripActionName(.more_tabs);
         const role = self.searchBarButtonRole(button) orelse return null;
-        return labels.searchBarButtonName(role);
+        return search_controls.searchBarButtonName(role);
     }
 
     /// Name an icon-only chrome button in a tooltip under it. The icons
@@ -4458,13 +4458,6 @@ pub const Host = struct {
         // notch rather than once per precision-wheel message.
         const direction = tabDirectionFromWheelDelta(if (steps > 0) 120 else -120);
         for (0..@abs(steps)) |_| _ = self.activateTabByDirection(direction);
-    }
-
-    pub fn dismissActiveSearch(self: *Host) bool {
-        const surface = self.activeSurface() orelse return false;
-        if (!surface.search_active and !surface.search_bar.visible) return false;
-        surface.closeDockedSearchBar(true, true) catch return false;
-        return true;
     }
 
     fn toggleCommandPaletteFromButton(self: *Host) bool {
@@ -7276,9 +7269,7 @@ pub const Host = struct {
         var wants_timer = false;
         var it = tab.tree.iterator();
         while (it.next()) |entry| {
-            if (!entry.view.search_bar.visible) continue;
-            if (entry.view.search_bar.query.len == 0) continue;
-            if (!entry.view.search_bar.searched) {
+            if (entry.view.docked_search.view().wants_tick) {
                 wants_timer = true;
                 break;
             }
@@ -7288,13 +7279,10 @@ pub const Host = struct {
     }
 
     pub fn tickSearchBars(self: *Host) void {
-        const now_ms: i64 = @intCast(sys.GetTickCount64());
         if (self.activeTab()) |tab| {
             var it = tab.tree.iterator();
             while (it.next()) |entry| {
-                if (!entry.view.search_bar.visible) continue;
-                if (!entry.view.search_bar.shouldRunSearch(now_ms)) continue;
-                _ = entry.view.runPendingSearchNow() catch |err| {
+                _ = entry.view.dockedSearch(.tick) catch |err| {
                     log.warn("win32 search refresh failed err={}", .{err});
                     continue;
                 };
@@ -7400,7 +7388,7 @@ pub const Host = struct {
                 runUiActionOrLog("context menu select all failed", surface.core_surface.performBindingAction(.{ .select_all = {} }));
             },
             c.CTX_FIND => {
-                runUiActionOrLog("context menu find failed", surface.showSearchOverlay(""));
+                runUiActionOrLog("context menu find failed", surface.dockedSearch(.{ .open = "" }));
             },
             c.CTX_COMMAND_PALETTE => {
                 runUiActionOrLog("context menu command palette failed", surface.toggleCommandPalette());
@@ -7565,11 +7553,11 @@ pub const Host = struct {
         const current = if (surface.search_bar_edit_hwnd != null and surface.search_bar_edit_hwnd.? == from)
             0
         else if (surface.searchBarButtonRole(from)) |role|
-            labels.searchFocusStopOfRole(role)
+            search_controls.searchFocusStopOfRole(role)
         else
             return false;
         const next = labels.nextFocusStop(
-            labels.search_focus_stop_count,
+            search_controls.search_focus_stop_count,
             current,
             reverse,
             @as(*const Surface, surface),
@@ -7700,7 +7688,7 @@ pub const Host = struct {
                 runUiActionOrLog("overflow command palette failed", surface.toggleCommandPalette());
             },
             c.CTX_FIND => {
-                runUiActionOrLog("overflow find failed", surface.showSearchOverlay(""));
+                runUiActionOrLog("overflow find failed", surface.dockedSearch(.{ .open = "" }));
             },
             c.CTX_NEW_TAB => {
                 self.postDeferredNewTab();
@@ -10430,7 +10418,7 @@ pub const Host = struct {
                 entry.view.setVisible(true);
                 const placement = win32_layout.zoomedSurfacePlacement(
                     layout_content_rect,
-                    entry.view.search_bar.visible,
+                    entry.view.docked_search.view().open,
                     search_bar_height,
                 );
                 content_layout_changed = (try applySurfacePlacement(
@@ -10463,7 +10451,7 @@ pub const Host = struct {
                             spatial,
                             entry.handle,
                             has_multi_panes,
-                            entry.view.search_bar.visible,
+                            entry.view.docked_search.view().open,
                         );
                         content_layout_changed = (try applySurfacePlacement(
                             entry.view,

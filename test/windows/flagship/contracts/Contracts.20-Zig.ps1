@@ -25,6 +25,7 @@ $win32TestModuleRoots = @(
     '_ = @import("win32/input.zig");'
     '_ = @import("win32/chrome_layout.zig");'
     '_ = @import("win32/gdi.zig");'
+    '_ = @import("win32/docked_search.zig");'
 )
 foreach ($win32TestModuleRoot in $win32TestModuleRoots) {
     if (-not [regex]::IsMatch(
@@ -43,14 +44,21 @@ foreach ($win32TestModuleRoot in $win32TestModuleRoots) {
 # explicit root import above, fails. Lower a floor only for a deliberate
 # consolidation. facade_budget.zig did not move out of win32.zig: its floor is
 # the facade guard's two tests, and its root line is pinned below.
+# docked_search.zig holds the per-pane search tests that came from
+# win32_search_bar.zig and labels.zig, rewritten against its interface; its
+# floor is every one of them. labels.zig went from 113 to 104 when its
+# docked-search rules moved there and its search chrome (button words,
+# colours, focus stops) to search_controls.zig, and to 103 when the search
+# overlay's count label went with the search arguments no caller passed.
 $movedWin32TestFloors = [ordered]@{
-    'labels.zig' = 113
+    'labels.zig' = 103
     'input.zig' = 24
     'gl_startup.zig' = 4
     'render_trace.zig' = 3
     'chrome_layout.zig' = 2
     'gdi.zig' = 2
     'facade_budget.zig' = 2
+    'docked_search.zig' = 32
 }
 foreach ($movedWin32TestModule in $movedWin32TestFloors.Keys) {
     $movedWin32TestModulePath = @($win32RuntimeModuleFiles | Where-Object {

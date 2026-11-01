@@ -54,9 +54,10 @@ const profileChromeAccent = runtime.profileChromeAccent;
 const profileKindHintColor = runtime.profileKindHintColor;
 const profileKindLabelColor = runtime.profileKindLabelColor;
 const restoreFont = runtime.restoreFont;
-const searchBarGroupRect = runtime.searchBarGroupRect;
-const searchBarSeparatorX = runtime.searchBarSeparatorX;
-const searchBarToolbarVisual = runtime.searchBarToolbarVisual;
+const searchBarGroupRect = search_controls.searchBarGroupRect;
+const searchBarSeparatorX = search_controls.searchBarSeparatorX;
+const searchBarToolbarVisual = search_controls.searchBarToolbarVisual;
+const search_controls = @import("search_controls.zig");
 const std = runtime.std;
 const sys = runtime.sys;
 const textOutWz = runtime.textOutWz;
@@ -490,8 +491,6 @@ pub const HostScene = struct {
                         alloc,
                         self.overlay_mode,
                         overlay_text,
-                        if (surface) |value| value.search_total else null,
-                        if (surface) |value| value.search_selected else null,
                         overlay_status,
                         self.palettePresentation(),
                         self.confirmText(),
@@ -524,9 +523,6 @@ pub const HostScene = struct {
                         self.banner_text,
                         self.overlay_mode,
                         overlay_text,
-                        if (surface) |value| value.search_needle else null,
-                        if (surface) |value| value.search_total else null,
-                        if (surface) |value| value.search_selected else null,
                         overlay_status,
                         pane_count,
                         self.paletteSnapshot(),

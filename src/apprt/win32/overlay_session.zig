@@ -1189,7 +1189,6 @@ pub const HostControls = struct {
             return changed;
         }
         const text = std.mem.trim(u8, try overlayEditText(self), " \t\r\n");
-        const surface = self.activeSurface();
         if (self.overlay_mode == .profile) {
             const accept = try buildProfileAcceptLabel(
                 alloc,
@@ -1217,9 +1216,6 @@ pub const HostControls = struct {
             alloc,
             self.overlay_mode,
             text,
-            if (surface) |value| value.search_needle else null,
-            if (surface) |value| value.search_total else null,
-            if (surface) |value| value.search_selected else null,
             self.palettePresentation(),
         );
         defer alloc.free(accept);
@@ -1358,9 +1354,6 @@ pub const HostControls = struct {
             alloc,
             self.overlay_mode,
             text,
-            if (surface) |value| value.search_needle else null,
-            if (surface) |value| value.search_total else null,
-            if (surface) |value| value.search_selected else null,
             if (surface) |value| self.app.hostTabStatus(value) else .{},
             if (self.activeTab()) |tab| tab.leafCount() else 1,
             self.paletteSnapshot(),

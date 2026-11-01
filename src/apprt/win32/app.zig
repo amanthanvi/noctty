@@ -93,6 +93,7 @@ const detectDefaultProfileHint = win32.detectDefaultProfileHint;
 const detectDefaultProfileTarget = win32.detectDefaultProfileTarget;
 const detectExplicitStartupWorkingDirectory = win32.detectExplicitStartupWorkingDirectory;
 const detectStartupProfilePicker = win32.detectStartupProfilePicker;
+const docked_search = @import("docked_search.zig");
 const elevatedProfileKey = win32.elevatedProfileKey;
 const elevatesBySelector = win32.elevatesBySelector;
 const findLauncherQuickSlotOrdinal = win32.findLauncherQuickSlotOrdinal;
@@ -3728,6 +3729,14 @@ pub const App = struct {
         if (self.running and !self.hasLiveUiWindows()) self.startQuitTimer();
     }
 
+    /// A core search action for the pane `target` names. `anyerror`: the
+    /// pane's search calls the core, which reports back through here.
+    fn dockedSearchFor(self: *App, target: apprt.Target, in: docked_search.Input) anyerror!bool {
+        const surface = self.registry.findSurfaceForTarget(target) orelse return false;
+        _ = try surface.dockedSearch(in);
+        return true;
+    }
+
     fn ensureMessageQueue() void {
         var msg: MSG = undefined;
         _ = sys.PeekMessageW(&msg, null, 0, 0, c.PM_NOREMOVE);
@@ -4408,45 +4417,18 @@ pub const App = struct {
                 return true;
             },
 
-            .start_search => {
-                if (self.registry.findSurfaceForTarget(target)) |surface| {
-                    try surface.showSearchOverlay(value.needle);
-                    return true;
-                }
-                return false;
-            },
+            .start_search => return try self.dockedSearchFor(target, .{ .open = value.needle }),
 
-            .end_search => {
-                if (self.registry.findSurfaceForTarget(target)) |surface| {
-                    try surface.closeDockedSearchBar(false, false);
-                    return true;
-                }
-                return false;
-            },
+            .end_search => return try self.dockedSearchFor(target, .{ .core = .ended }),
 
-            .search_total => {
-                if (self.registry.findSurfaceForTarget(target)) |surface| {
-                    try surface.setSearchTotal(value.total, value.invalid);
-                    return true;
-                }
-                return false;
-            },
+            .search_total => return try self.dockedSearchFor(target, .{ .core = .{ .total = .{
+                .total = value.total,
+                .invalid = value.invalid,
+            } } }),
 
-            .search_selected => {
-                if (self.registry.findSurfaceForTarget(target)) |surface| {
-                    try surface.setSearchSelected(value.selected);
-                    return true;
-                }
-                return false;
-            },
+            .search_selected => return try self.dockedSearchFor(target, .{ .core = .{ .selected = value.selected } }),
 
-            .search_match_rows => {
-                if (self.registry.findSurfaceForTarget(target)) |surface| {
-                    try surface.setSearchMatchRows(value.rows);
-                    return true;
-                }
-                return false;
-            },
+            .search_match_rows => return try self.dockedSearchFor(target, .{ .core = .{ .rows = value.rows } }),
 
             .secure_input => {
                 if (self.registry.findSurfaceForTarget(target)) |surface| {

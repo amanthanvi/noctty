@@ -6,6 +6,7 @@ Corrected in other files:
 - 2026-10-15 "The UIA echo queue" (UIA-ECHO-01), item (5): a test of its own is not enough when that test itself unrolls `stream.nextSlice` in nested `inline for` loops, which still exceeds the comptime branch quota; rewrite them as runtime loops: the 2026-10-30 upstream VT port entry in terminal-core.md.
 
 See also:
+- When the docked search's results chip raises its live region (only while the bar is open: a close announces nothing, and the reopen writes the chip before the layout shows it): trap (a) of the 2026-11-01 "Docked search is one per-pane module" entry in search-scrollbar.md.
 - `PageList.page_serial_min` (read by UIA `RowNumbering` and the snapshot provenance) moves only on `PageList.reset`; prunes and a split of the first page (`PageList.split` renews its source's serial) change `first_page_serial`, and rows shifted in place otherwise keep their page serial: the 2026-10-30 "Page serials are generations" entry in terminal-core.md.
 - Settings rows' static UIA HelpText, derived from typed descriptors: the 2026-10-18 "Settings native form rows" entry (#458) in settings.md.
 - When a Settings combo shows a UIA Value change: `SettingsControlProvider.syncNativeState` raises Value only when the selected index changes, so a refill that rewrites the selected row text in place announces it itself (`valueTextChanged`): item (9) of the 2026-10-23 PROFILES-4 entry (#547) in settings.md.

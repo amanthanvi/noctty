@@ -2359,9 +2359,9 @@ fn searchCallback_(
 /// full mailbox would hang both threads. Once `stopping` is set, messages
 /// are dropped, with what they own, and a push already waiting for room
 /// gives up. Nothing is lost: ending a search clears the search state
-/// itself (`syncClearSearchState`) under a newer generation, which rejects
-/// any message from the ended search, and a closing surface has left the
-/// app.
+/// itself (`endSearch`, `syncClearSearchState`) under a newer generation,
+/// which rejects any message from the ended search, and a closing surface
+/// has left the app.
 fn pushSearchMessage(
     self: *Surface,
     stopping: *const std.atomic.Value(bool),
@@ -8181,14 +8181,19 @@ pub fn endSearch(self: *Surface) !bool {
         s.deinit();
         self.search = null;
         self.search_query_options = .{};
-        try self.syncClearSearchState(generation);
+        self.renderer_thread.send(.{ .search_clear = generation });
     }
 
+    // end_search goes before the cleared totals and rows, so a GUI hides
+    // its search UI first and does not show (or announce) the clear as it
+    // closes. Every way of ending a search comes here: the Win32 docked
+    // search's own controls and the end_search binding alike.
     _ = try self.rt_app.performAction(
         .{ .surface = self },
         .end_search,
         {},
     );
+    if (performed) try self.reportSearchCleared();
 
     return performed;
 }
@@ -8212,7 +8217,11 @@ pub fn invalidateSearchResults(self: *Surface) !bool {
 
 fn syncClearSearchState(self: *Surface, generation: u64) !void {
     self.renderer_thread.send(.{ .search_clear = generation });
+    try self.reportSearchCleared();
+}
 
+/// Tells the apprt that the search has no total, selection or match rows.
+fn reportSearchCleared(self: *Surface) !void {
     _ = try self.rt_app.performAction(
         .{ .surface = self },
         .search_total,

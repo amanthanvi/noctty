@@ -31,7 +31,6 @@ const terminal = @import("../terminal/main.zig");
 const rendererpkg = @import("../renderer.zig");
 const ptypkg = @import("../pty.zig");
 const updatepkg = @import("../update/github_releases.zig");
-const font_embedded = @import("../font/embedded.zig");
 const SplitTree = @import("../datastruct/split_tree.zig").SplitTree;
 
 const win32_theme = @import("win32_theme.zig");
@@ -63,7 +62,6 @@ const win32_toast_activation = @import("win32_toast_activation.zig");
 const win32_toast_activator = @import("win32_toast_activator.zig");
 const win32_tab_drop_zones = @import("win32_tab_drop_zones.zig");
 const win32_tab_tooltip = @import("win32_tab_tooltip.zig");
-const win32_search_bar = @import("win32_search_bar.zig");
 const win32_icons = @import("win32_icons.zig");
 const win32_paste_protection = @import("win32_paste_protection.zig");
 const win32_scrollbar_geometry = @import("win32_scrollbar_geometry.zig");
@@ -176,9 +174,6 @@ pub const chrome_scene_runtime = .{
     .profileKindHintColor = profileKindHintColor,
     .profileKindLabelColor = profileKindLabelColor,
     .restoreFont = Host.restoreFont,
-    .searchBarGroupRect = searchBarGroupRect,
-    .searchBarSeparatorX = searchBarSeparatorX,
-    .searchBarToolbarVisual = searchBarToolbarVisual,
     .std = std,
     .sys = sys,
     .textOutWz = textOutWz,
@@ -310,83 +305,6 @@ pub const palette_controller_test_runtime = if (builtin.is_test) .{
     .TestSession = TestSession,
     .builtin = builtin,
     .runOnPrivateDesktop = Host.runOnPrivateDesktop,
-} else .{};
-
-pub const search_controls_runtime = .{
-    .Allocator = Allocator,
-    .ButtonColors = ButtonColors,
-    .DRAWITEMSTRUCT = DRAWITEMSTRUCT,
-    .DWORD = DWORD,
-    .HDC = HDC,
-    .HWND = HWND,
-    .Host = Host,
-    .LONG_PTR = LONG_PTR,
-    .LPARAM = LPARAM,
-    .LRESULT = LRESULT,
-    .RECT = RECT,
-    .SearchBarButtonRole = SearchBarButtonRole,
-    .Surface = Surface,
-    .UINT = UINT,
-    .WPARAM = WPARAM,
-    .adjustColor = adjustColor,
-    .advanceSearchSelectedRaw = advanceSearchSelectedRaw,
-    .blendColorRGB = blendColorRGB,
-    .buildSearchBarResultsText = buildSearchBarResultsText,
-    .buttonColorsFromTheme = buttonColorsFromTheme,
-    .c = c,
-    .chromeKeyMods = chromeKeyMods,
-    .createIconFontForFace = createIconFontForFace,
-    .decorativeUiaName = Surface.decorativeUiaName,
-    .detachChromeControlProvider = detachChromeControlProvider,
-    .dockedSearchArrowDirection = dockedSearchArrowDirection,
-    .dockedSearchCoreDirectionFromKeyAction = dockedSearchCoreDirectionFromKeyAction,
-    .dockedSearchEnterDirection = dockedSearchEnterDirection,
-    .drawRoundedRect = drawRoundedRect,
-    .fillSolidRect = fillSolidRect,
-    .focusableHwnd = focusableHwnd,
-    .fontGlyphCoverage = fontGlyphCoverage,
-    .font_embedded = font_embedded,
-    .getHost = getHost,
-    .getSurface = getSurface,
-    .hostButtonProc = hostButtonProc,
-    .host_search_bar_height = host_search_bar_height,
-    .input = input,
-    .isHighContrastActive = isHighContrastActive,
-    .keyPressed = keyPressed,
-    .lParamBits = lParamBits,
-    .labels = labels,
-    .log = log,
-    .logUiActionError = logUiActionError,
-    .overlayAccentColor = overlayAccentColor,
-    .scheduleDeferredUiaDisconnect = scheduleDeferredUiaDisconnect,
-    .searchBarBottomLine = searchBarBottomLine,
-    .searchBarButtonCommandId = searchBarButtonCommandId,
-    .searchBarButtonLabel = searchBarButtonLabel,
-    .searchBarButtonParentBg = searchBarButtonParentBg,
-    .searchBarButtonShowsLabel = searchBarButtonShowsLabel,
-    .searchBarChromeLayout = searchBarChromeLayout,
-    .searchBarFit = searchBarFit,
-    .searchBarFrameBg = searchBarFrameBg,
-    .searchBarFrameBorder = searchBarFrameBorder,
-    .searchBarNeedsRelayoutForQueryChange = searchBarNeedsRelayoutForQueryChange,
-    .searchBarShouldInvalidateCoreSearchOnEdit = searchBarShouldInvalidateCoreSearchOnEdit,
-    .searchBarToolbarVisual = searchBarToolbarVisual,
-    .searchButtonKeyAction = searchButtonKeyAction,
-    .searchSelectedDisplayFromRaw = searchSelectedDisplayFromRaw,
-    .showSearchBarResults = showSearchBarResults,
-    .std = std,
-    .sys = sys,
-    .terminal = terminal,
-    .terminalDisconnectThunk = terminalDisconnectThunk,
-    .terminalReleaseThunk = terminalReleaseThunk,
-    .win32_icons = win32_icons,
-    .win32_uia = win32_uia,
-};
-pub const search_controls_test_runtime = if (builtin.is_test) .{
-    .App = App,
-    .CoreApp = CoreApp,
-    .TestSession = TestSession,
-    .builtin = builtin,
 } else .{};
 
 pub const window_state_runtime = .{
@@ -639,6 +557,7 @@ test {
     _ = @import("win32/focus_cue.zig");
     _ = @import("win32/first_frame.zig");
     _ = @import("win32/facade_budget.zig");
+    _ = @import("win32/docked_search.zig");
     _ = child_window;
     _ = paint_text;
     _ = clipboard_write;
@@ -649,7 +568,6 @@ test {
 }
 
 pub const ThemeColors = win32_theme.ThemeColors;
-const ButtonColors = win32_theme.ButtonColors;
 pub const HostOverlayMode = win32_theme.HostOverlayMode;
 
 pub const darkTheme = win32_theme.darkTheme;
@@ -3762,27 +3680,6 @@ fn titlebarFallbackIcon(kind: TitlebarGlyphKind) win32_icons.Kind {
     };
 }
 
-const search_icon_font_face = search_controls.search_icon_font_face;
-
-const search_icon_font_px = search_controls.search_icon_font_px;
-const search_icon_font_registration = &search_controls.search_icon_font_registration;
-
-/// An icon font of `face` with a `height_px` device-pixel em.
-fn createIconFontForFace(face: [*:0]const u16, height_px: i32) ?*anyopaque {
-    var lf: LOGFONTW = .{};
-    lf.lfHeight = -height_px;
-    lf.lfWeight = c.FW_NORMAL;
-    lf.lfQuality = c.CLEARTYPE_QUALITY;
-    const name = std.mem.span(face);
-    const copy_len = @min(name.len, c.LF_FACESIZE - 1);
-    @memcpy(lf.lfFaceName[0..copy_len], name[0..copy_len]);
-    return sys.CreateFontIndirectW(&lf);
-}
-
-const search_codicon_glyphs = search_controls.search_codicon_glyphs;
-
-const fontHasSearchCodicons = search_controls.fontHasSearchCodicons;
-
 /// What `fontGlyphCoverage` found.
 pub const GlyphCoverage = enum {
     all,
@@ -3861,7 +3758,7 @@ pub fn createIconFontWithGlyphs(
 ) IconFontChoice {
     var checked_every_face = true;
     for (faces) |face| {
-        const font = createIconFontForFace(face, height_px) orelse {
+        const font = gdi.createIconFontForFace(face, height_px) orelse {
             checked_every_face = false;
             continue;
         };
@@ -9029,39 +8926,7 @@ pub fn scrollbarProc(
 
 const tabButtonKeyAction = labels.tabButtonKeyAction;
 
-/// The modifiers held for the key message being handled. A test pins them
-/// with `TestingKeyboard`; AltGr reads as Ctrl plus Alt.
-fn chromeKeyMods() labels.KeyMods {
-    return .{
-        .shift = keyPressed(c.VK_SHIFT),
-        .ctrl = keyPressed(c.VK_CONTROL),
-        .alt = keyPressed(c.VK_MENU),
-    };
-}
-
 const moveTabAmountToEdge = labels.moveTabAmountToEdge;
-
-const searchButtonKeyAction = labels.searchButtonKeyAction;
-
-const dockedSearchCoreDirectionFromKeyAction = labels.dockedSearchCoreDirectionFromKeyAction;
-
-const dockedSearchButtonDirection = labels.dockedSearchButtonDirection;
-
-const dockedSearchEnterDirection = labels.dockedSearchEnterDirection;
-
-const dockedSearchArrowDirection = labels.dockedSearchArrowDirection;
-
-pub const searchSelectedRawFromCoreDisplay = labels.searchSelectedRawFromCoreDisplay;
-
-pub const searchSelectedDisplayFromRaw = labels.searchSelectedDisplayFromRaw;
-
-const advanceSearchSelectedRaw = labels.advanceSearchSelectedRaw;
-
-pub const searchBarSearchedStateForTotal = labels.searchBarSearchedStateForTotal;
-
-pub const searchBarSearchedStateForSelected = labels.searchBarSearchedStateForSelected;
-
-pub const searchBarDisplayStateChanged = labels.searchBarDisplayStateChanged;
 
 pub const profileChromeVisible = win32_chrome_state.profileVisible;
 
@@ -9214,41 +9079,6 @@ pub const shouldShowPaneCount = labels.shouldShowPaneCount;
 
 pub const visibleTabRange = labels.visibleTabRange;
 
-const buildSearchBarResultsText = labels.buildSearchBarResultsText;
-
-const SearchBarButtonRole = labels.SearchBarButtonRole;
-
-const searchBarButtonCommandId = labels.searchBarButtonCommandId;
-
-const searchBarButtonLabel = labels.searchBarButtonLabel;
-
-const showSearchBarResults = labels.showSearchBarResults;
-const searchBarNeedsRelayoutForQueryChange = labels.searchBarNeedsRelayoutForQueryChange;
-const searchBarShouldInvalidateCoreSearchOnEdit = labels.searchBarShouldInvalidateCoreSearchOnEdit;
-
-pub const shouldAcceptCoreSearchUpdates = labels.shouldAcceptCoreSearchUpdates;
-
-const searchBarChromeLayout = chrome_layout.searchBarChromeLayout;
-const searchBarFit = chrome_layout.searchBarFit;
-
-const searchBarButtonShowsLabel = labels.searchBarButtonShowsLabel;
-
-const searchBarGroupRect = search_controls.searchBarGroupRect;
-
-const searchBarResultsVisual = labels.searchBarResultsVisual;
-
-const searchBarToolbarVisual = labels.searchBarToolbarVisual;
-
-const searchBarFrameBg = labels.searchBarFrameBg;
-
-const searchBarFrameBorder = labels.searchBarFrameBorder;
-
-const searchBarBottomLine = labels.searchBarBottomLine;
-
-const searchBarButtonParentBg = labels.searchBarButtonParentBg;
-
-const searchBarSeparatorX = search_controls.searchBarSeparatorX;
-
 const buildTabOverviewOverlayLabel = labels.buildTabOverviewOverlayLabel;
 
 const OverlayConfirmText = labels.ConfirmText;
@@ -9365,10 +9195,6 @@ fn wmCommandChildHwnd(lParam: LPARAM) ?HWND {
     if (lParam == 0) return null;
     return @ptrFromInt(@as(usize, @intCast(lParam)));
 }
-
-pub const searchFocusStopHwnd = search_controls.searchFocusStopHwnd;
-
-pub const searchFocusStopAvailable = search_controls.searchFocusStopAvailable;
 
 fn expectedButtonClick(notify: u16, child: ?HWND, expected: ?HWND) bool {
     return notify == c.BN_CLICKED and child != null and expected != null and child.? == expected.?;
@@ -10714,7 +10540,7 @@ pub fn hostButtonProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) cal
         // Enter and Tab on [+], [v] and the docked search buttons. May
         // click, so touch nothing after it.
         if (msg == c.WM_KEYDOWN and !v.isOverlayButton(hwnd) and v.bannerButtonOf(hwnd) == null) {
-            if (v.handleChromeButtonKey(hwnd, wParam, chromeKeyMods(), lParam)) return 0;
+            if (v.handleChromeButtonKey(hwnd, wParam, win32_input.chromeKeyMods(), lParam)) return 0;
         }
         if (search_controls.searchButtonKey(v, hwnd, msg, wParam, lParam)) |result| return result;
         switch (msg) {
@@ -10735,7 +10561,9 @@ pub fn hostButtonProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) cal
                     v.banner_focused = false;
                     v.syncBannerExpiry();
                 }
-                if (v.searchControlSurface(hwnd)) |surface| surface.search_toggle_keys = .{};
+                if (v.searchControlSurface(hwnd)) |surface| {
+                    runUiActionOrLog("docked search blur failed", surface.dockedSearch(.blur));
+                }
             },
             c.WM_MOUSEMOVE => {
                 // The search bar's icon buttons and the tab strip's [+] and
@@ -10939,7 +10767,7 @@ pub fn tabButtonProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) call
                 c.WM_KEYDOWN => {
                     v.noteChromeKeyInput(wParam);
                     if (v.handleFocusRegionKey(hwnd, wParam, true)) return 0;
-                    if (tabButtonKeyAction(wParam, chromeKeyMods())) |action| {
+                    if (tabButtonKeyAction(wParam, win32_input.chromeKeyMods())) |action| {
                         switch (action) {
                             // The menu key opens the same menu a right click
                             // does, on this tab, and its release is swallowed
@@ -11039,7 +10867,7 @@ pub fn tabButtonProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) call
                 // Shift+F10 is a system key, so it arrives here and not as a
                 // WM_KEYDOWN. Plain F10 stays with the window.
                 c.WM_SYSKEYDOWN => {
-                    if (wParam == c.VK_F10 and tabButtonKeyAction(wParam, chromeKeyMods()) == .context_menu) {
+                    if (wParam == c.VK_F10 and tabButtonKeyAction(wParam, win32_input.chromeKeyMods()) == .context_menu) {
                         v.noteChromeKeyInput(c.VK_APPS);
                         if ((lParamBits(lParam) & c.KF_REPEAT) == 0 and
                             v.showTabContextMenu(hwnd, index, .keyboard)) return 0;
@@ -11048,7 +10876,7 @@ pub fn tabButtonProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) call
                 // Without these, `DefWindowProc` posts a second
                 // WM_CONTEXTMENU when the key comes back up.
                 c.WM_KEYUP, c.WM_SYSKEYUP => {
-                    if (labels.tabButtonSwallowsKeyUp(wParam, chromeKeyMods())) return 0;
+                    if (labels.tabButtonSwallowsKeyUp(wParam, win32_input.chromeKeyMods())) return 0;
                 },
                 // The keyboard form (-1, -1) was served on the key-down. A
                 // right click opens the menu from WM_RBUTTONUP and never
@@ -11526,7 +11354,7 @@ pub fn hostWindowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) cal
                         _ = sys.SetBkMode(hdc, c.TRANSPARENT);
                         _ = sys.SetTextColor(hdc, if (v.isSearchBarResultsLabel(child))
                             if (v.searchControlSurface(child)) |surface|
-                                searchBarResultsVisual(&v.app.resolved_theme, &surface.search_bar).fg
+                                search_controls.searchBarResultsVisual(&v.app.resolved_theme, surface.docked_search.view().results.tone()).fg
                             else
                                 v.app.resolved_theme.text_secondary
                         else if (v.overlay_hint_hwnd != null and child == v.overlay_hint_hwnd.?)
@@ -11643,53 +11471,13 @@ pub fn hostWindowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) cal
                         refocusActiveSurface(v);
                         return 0;
                     },
-                    c.SEARCH_PREV_ID => {
+                    c.SEARCH_PREV_ID, c.SEARCH_NEXT_ID, c.SEARCH_REGEX_ID, c.SEARCH_CASE_ID, c.SEARCH_WORD_ID, c.SEARCH_CLOSE_ID => {
                         if (notify_code == c.BN_CLICKED) {
                             if (child_hwnd) |child| {
                                 if (v.searchControlSurface(child)) |surface| {
-                                    if (dockedSearchButtonDirection(command_id)) |dir| {
-                                        _ = surface.navigateDockedSearch(dir) catch |err| {
-                                            logUiActionError("docked search previous failed", err);
-                                        };
+                                    if (surface.searchBarButtonRole(child)) |role| {
+                                        runUiActionOrLog("docked search button failed", surface.dockedSearch(.{ .click = role }));
                                     }
-                                    return 0;
-                                }
-                            }
-                        }
-                    },
-                    c.SEARCH_NEXT_ID => {
-                        if (notify_code == c.BN_CLICKED) {
-                            if (child_hwnd) |child| {
-                                if (v.searchControlSurface(child)) |surface| {
-                                    if (dockedSearchButtonDirection(command_id)) |dir| {
-                                        _ = surface.navigateDockedSearch(dir) catch |err| {
-                                            logUiActionError("docked search next failed", err);
-                                        };
-                                    }
-                                    return 0;
-                                }
-                            }
-                        }
-                    },
-                    c.SEARCH_REGEX_ID, c.SEARCH_CASE_ID, c.SEARCH_WORD_ID => {
-                        if (notify_code == c.BN_CLICKED) {
-                            if (child_hwnd) |child| {
-                                if (v.searchControlSurface(child)) |surface| {
-                                    _ = surface.handleSearchToggleClick(command_id) catch |err| {
-                                        logUiActionError("docked search toggle failed", err);
-                                    };
-                                    return 0;
-                                }
-                            }
-                        }
-                    },
-                    c.SEARCH_CLOSE_ID => {
-                        if (notify_code == c.BN_CLICKED) {
-                            if (child_hwnd) |child| {
-                                if (v.searchControlSurface(child)) |surface| {
-                                    surface.closeDockedSearchBar(true, true) catch |err| {
-                                        logUiActionError("docked search close failed", err);
-                                    };
                                     return 0;
                                 }
                             }
@@ -25170,7 +24958,7 @@ pub fn fontIsFaceForTest(font: *anyopaque, face: [*:0]const u16) !bool {
 /// titlebar icon fonts must come from; null when it has neither.
 pub fn installedTitlebarIconFaceForTest() !?[*:0]const u16 {
     for (titlebar_icon_faces) |face| {
-        const font = createIconFontForFace(face, 12) orelse return error.FontCreateFailed;
+        const font = gdi.createIconFontForFace(face, 12) orelse return error.FontCreateFailed;
         defer _ = sys.DeleteObject(font);
         if (try fontIsFaceForTest(font, face)) return face;
     }
@@ -25181,7 +24969,7 @@ test "win32 icon font choice passes over a substituted face by its glyphs" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
     // The trap: a face that is not installed still gets a font.
-    const substitute = createIconFontForFace(icon_font_test_missing_face, 12) orelse return error.FontCreateFailed;
+    const substitute = gdi.createIconFontForFace(icon_font_test_missing_face, 12) orelse return error.FontCreateFailed;
     defer _ = sys.DeleteObject(substitute);
     try std.testing.expectEqual(GlyphCoverage.missing, fontGlyphCoverage(substitute, &titlebar_icon_glyphs));
 
@@ -25194,34 +24982,34 @@ test "win32 icon font choice passes over a substituted face by its glyphs" {
     // A missing first face falls through to the next one. The embedded
     // Codicons font stands in for Segoe MDL2 Assets, which a machine need
     // not have.
-    search_icon_font_registration.call();
-    const faces = [_][*:0]const u16{ icon_font_test_missing_face, search_icon_font_face };
-    const next = createIconFontWithGlyphs(&faces, &search_codicon_glyphs, search_icon_font_px);
+    search_controls.search_icon_font_registration.call();
+    const faces = [_][*:0]const u16{ icon_font_test_missing_face, search_controls.search_icon_font_face };
+    const next = createIconFontWithGlyphs(&faces, &search_controls.search_codicon_glyphs, search_controls.search_icon_font_px);
     const font = next.font orelse return error.TestExpectedFont;
     defer _ = sys.DeleteObject(font);
     try std.testing.expect(!next.geometric);
-    try std.testing.expect(fontHasSearchCodicons(font));
+    try std.testing.expect(search_controls.fontHasSearchCodicons(font));
 
     // The face check the Host tests rely on tells the two fonts apart.
     try std.testing.expect(!try fontIsFaceForTest(substitute, icon_font_test_missing_face));
-    try std.testing.expect(try fontIsFaceForTest(font, search_icon_font_face));
+    try std.testing.expect(try fontIsFaceForTest(font, search_controls.search_icon_font_face));
 }
 
 test "win32 icon font choice does not take a failed glyph check for a missing glyph" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
     // A font handle GDI rejects fails the check itself.
-    const stale = createIconFontForFace(search_icon_font_face, search_icon_font_px) orelse return error.FontCreateFailed;
+    const stale = gdi.createIconFontForFace(search_controls.search_icon_font_face, search_controls.search_icon_font_px) orelse return error.FontCreateFailed;
     _ = sys.DeleteObject(stale);
-    try std.testing.expectEqual(GlyphCoverage.unknown, fontGlyphCoverage(stale, &search_codicon_glyphs));
+    try std.testing.expectEqual(GlyphCoverage.unknown, fontGlyphCoverage(stale, &search_controls.search_codicon_glyphs));
 
     // A check that fails for every face, even a missing one, leaves no font
     // and no geometric verdict, so the caller retries.
-    search_icon_font_registration.call();
+    search_controls.search_icon_font_registration.call();
     test_glyph_check_fails = true;
     defer test_glyph_check_fails = false;
-    const faces = [_][*:0]const u16{ icon_font_test_missing_face, search_icon_font_face };
-    const failed = createIconFontWithGlyphs(&faces, &search_codicon_glyphs, search_icon_font_px);
+    const faces = [_][*:0]const u16{ icon_font_test_missing_face, search_controls.search_icon_font_face };
+    const failed = createIconFontWithGlyphs(&faces, &search_controls.search_codicon_glyphs, search_controls.search_icon_font_px);
     try std.testing.expectEqual(@as(?*anyopaque, null), failed.font);
     try std.testing.expect(!failed.geometric);
 }

@@ -251,6 +251,18 @@ fn utf16GdiTextLen(text: [:0]const u16) i32 {
     return @intCast(@min(text.len, max_len));
 }
 
+/// An icon font of `face` with a `height_px` device-pixel em.
+pub fn createIconFontForFace(face: [*:0]const u16, height_px: i32) ?*anyopaque {
+    var lf: sys.LOGFONTW = .{};
+    lf.lfHeight = -height_px;
+    lf.lfWeight = c.FW_NORMAL;
+    lf.lfQuality = c.CLEARTYPE_QUALITY;
+    const name = std.mem.span(face);
+    const copy_len = @min(name.len, c.LF_FACESIZE - 1);
+    @memcpy(lf.lfFaceName[0..copy_len], name[0..copy_len]);
+    return sys.CreateFontIndirectW(&lf);
+}
+
 test "win32 rectIntersects only trips on positive overlap" {
     const testing = std.testing;
 
