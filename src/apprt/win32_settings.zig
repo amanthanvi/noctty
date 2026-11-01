@@ -2929,7 +2929,7 @@ pub const SettingsWindow = struct {
 
     pub fn hasPendingChanges(self: *const SettingsWindow) bool {
         for (self.raw_scalar_dirty) |dirty| if (dirty) return true;
-        if (self.profileDraftDiffers()) return true;
+        if (self.profileDraftDiffers() or self.profileEditTypedInto()) return true;
         for (self.owned_text_changed, self.owned_dirty, self.owned_conflict) |text_changed, dirty, conflict| {
             if (text_changed or dirty or conflict) return true;
         }
@@ -2946,7 +2946,7 @@ pub const SettingsWindow = struct {
         for (std.enums.values(RawScalarField)) |field| {
             if (self.raw_scalar_dirty[@intFromEnum(field)]) fields[@intFromEnum(field.setting())] = true;
         }
-        var count: usize = self.profileChangeCount();
+        var count: usize = self.profileChangeCount() + @intFromBool(self.profileEditTypedInto());
         for (fields) |changed| count += @intFromBool(changed);
         for (self.owned_text_changed, self.owned_dirty, self.owned_conflict) |text, dirty, conflict| {
             count += @intFromBool(text or dirty or conflict);
@@ -3846,6 +3846,9 @@ pub const SettingsWindow = struct {
     }
 
     fn trackOwnedEdit(self: *SettingsWindow, field: OwnedSettingField) void {
+        // The Profiles page marks the profile the draft's Default profile
+        // names.
+        if (field == .default_profile) self.profile_stale = true;
         const current = &(self.current orelse return);
         const original = &(self.original orelse return);
         const pending = &(self.pending orelse return);
@@ -7726,6 +7729,21 @@ pub const SettingsWindow = struct {
         const width = @max(1, metrics.width - left - metrics.pad_x);
         _ = SetWindowPos(hwnd, null, left, top, width, @max(1, metrics.field - metrics.gap), SWP_NOZORDER | SWP_NOACTIVATE);
         _ = ShowWindow(hwnd, SW_SHOWNA);
+    }
+
+    /// The text of the field being typed into changed (`EN_CHANGE`): Save is
+    /// enabled for it from the first key, as for a form field.
+    fn profileEditTyped(self: *SettingsWindow) void {
+        const field = if (self.profile_edit) |*edit| edit else return;
+        if (field.typed) return;
+        field.typed = true;
+        self.updateSaveEnabled();
+    }
+
+    /// Whether a field of the Profiles page is open with text typed into it.
+    fn profileEditTypedInto(self: *const SettingsWindow) bool {
+        const edit = self.profile_edit orelse return false;
+        return edit.typed;
     }
 
     /// The field being typed into lost the focus (posted, so the focus has
@@ -19792,6 +19810,9 @@ const ProfileEdit = struct {
     label_buf: [160]u8 = undefined,
     label_len: usize = 0,
     provider: ?*win32_uia.SettingsControlProvider = null,
+    /// Its text changed since it opened: an edit to save, which Save keeps
+    /// first (`commitProfileEdit`), so Save is enabled for it.
+    typed: bool = false,
 
     fn setId(self: *ProfileEdit, id_text: []const u8) void {
         const len = @min(id_text.len, self.id_buf.len);
@@ -21011,6 +21032,11 @@ fn referenceListProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) call
             owner.profileEditBlurred();
             return 0;
         },
+        // The Profiles page's field: typing into it is an edit Save can take.
+        WM_COMMAND => if (list.kind == .profiles and @as(u16, @truncate(wParam >> 16)) == EN_CHANGE) {
+            owner.profileEditTyped();
+            return 0;
+        },
         WM_GETDLGCODE => return DLGC_WANTARROWS | DLGC_WANTCHARS,
         WM_KEYDOWN => {
             noteSettingsInput(owner, msg, wParam);
@@ -21150,6 +21176,12 @@ test "settings the Profiles page lists the profiles and their fields, made with 
             try std.testing.expectEqualStrings("Starting folder of py, none", profileRowName(settings, 4, &buf));
             try std.testing.expectEqualStrings("MODE of py, 1", profileRowName(settings, 5, &buf));
             try std.testing.expectEqualStrings("Profiles", referenceUiaName(&settings.profile_list, &buf));
+            // A Default profile chosen on Shell marks its profile here.
+            settings.pending.?.@"default-profile" = try settings.pending.?._arena.?.allocator().dupeZ(u8, "user:py");
+            settings.trackOwnedEdit(.default_profile);
+            settings.setActiveSection(.shell);
+            settings.setActiveSection(.profiles);
+            try std.testing.expectEqualStrings("Python, profile user:py, default profile", profileRowName(settings, 1, &buf));
             // The open row says where the field is set.
             settings.profile_list.selectPosition(2);
             var help_buf: [2048]u8 = undefined;
@@ -21363,7 +21395,9 @@ test "settings a value the Profiles page refuses keeps its field, never repeats 
             try std.testing.expectEqual(edit, sys.GetFocus().?);
             const status = try statusTextOf(settings, &buf);
             try std.testing.expectEqualStrings("Error: A profile's command line cannot start with direct: or shell:.", status);
-            try std.testing.expect(!settings.hasPendingChanges());
+            // The draft is unchanged; the typed field is still an edit.
+            try std.testing.expect(!settings.profileDraftDiffers());
+            try std.testing.expect(settings.hasPendingChanges());
 
             // A click on Save with another change to save: the focus leaving
             // the field keeps it open, and the save stops at it.
@@ -21510,9 +21544,13 @@ test "settings a profile field a later file masks is saved, and the status names
             const settings = &fixture.settings;
             settings.profile_list.selectPosition(3);
             try std.testing.expect(fixture.pumpKey(VK_RETURN));
+            try std.testing.expect(!settings.canSave());
+            // Typing enables Save, and a click on it keeps the field first.
             typeInto((try openEdit(settings)).hwnd.?, "Mine");
-            try std.testing.expect(fixture.pumpKey(VK_RETURN));
-            settings.save();
+            try std.testing.expect(settings.canSave());
+            _ = sys.SendMessageW(settings.btn_save.?, BM_CLICK, 0, 0);
+            try std.testing.expect(settings.profile_edit == null);
+            try std.testing.expectEqual(@as(u32, 1), fixture.saved);
             const after = try tmp.dir.readFileAlloc(alloc, "noctty.conf", 1 << 20);
             defer alloc.free(after);
             try std.testing.expectEqualStrings("profile-command = team: t.exe\nprofile-name = team: Mine\nconfig-file = later.conf\n", after);
