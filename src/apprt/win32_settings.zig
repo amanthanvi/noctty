@@ -34,6 +34,9 @@ const config_problems = @import("win32/config_problems.zig");
 const field_model = @import("win32_settings_fields.zig");
 const settings_reference = @import("win32_settings_reference.zig");
 const settings_keybinds = @import("win32_settings_keybinds.zig");
+const settings_profiles = @import("win32_settings_profiles.zig");
+const profile_map = @import("../config/profile_map.zig");
+const LineIterator = @import("../cli/args.zig").LineIterator;
 const bench_trace = @import("win32/bench_trace.zig");
 const local_path = @import("../os/local_path.zig");
 const config_file_load = @import("../config/file_load.zig");
@@ -236,6 +239,15 @@ const WM_SETTINGS_PROFILES_CHANGED: UINT = WM_APP + 0x10C;
 /// How long, in microseconds, the last search pass took to find its rows and
 /// lay them out (lParam 0), and with the repaint it forces (lParam 1).
 const WM_SETTINGS_PROOF_SEARCH_US: UINT = WM_APP + 0x10D;
+/// Posted to the Profiles list when its field being typed into lost the
+/// focus (`profileEditBlurred`).
+const WM_SETTINGS_PROFILE_BLUR: UINT = WM_APP + 0x10E;
+const WM_CHAR: UINT = 0x0102;
+const WS_BORDER: u32 = 0x00800000;
+const VK_TAB: usize = 0x09;
+const VK_INSERT: usize = 0x2D;
+const DLGC_WANTTAB: LRESULT = 0x0002;
+const SW_SHOWNA: i32 = 8;
 const WS_CHILD: u32 = 0x40000000;
 const WS_VISIBLE: u32 = 0x10000000;
 const WS_TABSTOP: u32 = 0x00010000;
@@ -260,6 +272,7 @@ const BTN_SECTION_ADVANCED: usize = 205;
 const BTN_SECTION_PRIVACY: usize = 206;
 const BTN_SECTION_UPDATES: usize = 207;
 const BTN_SECTION_REFERENCE: usize = 208;
+const BTN_SECTION_PROFILES: usize = 209;
 const BTN_SAVE: usize = 301;
 const BTN_KEYBINDINGS_EDITOR: usize = displayFieldId("btn_keybindings_editor");
 const BTN_CONFLICT_KEEP: usize = 303;
@@ -385,6 +398,9 @@ pub const Section = enum(u32) {
     appearance,
     terminal,
     shell,
+    /// The user profiles, a row for each of their fields (`ReferenceList`,
+    /// `ListKind.profiles`): the profile editor.
+    profiles,
     privacy,
     updates,
     keybindings,
@@ -402,6 +418,7 @@ pub const Section = enum(u32) {
             BTN_SECTION_KEYBINDINGS => .keybindings,
             BTN_SECTION_ADVANCED => .advanced,
             BTN_SECTION_REFERENCE => .reference,
+            BTN_SECTION_PROFILES => .profiles,
             else => null,
         };
     }
@@ -411,6 +428,7 @@ pub const Section = enum(u32) {
             .appearance => std.unicode.utf8ToUtf16LeStringLiteral("Appearance"),
             .terminal => std.unicode.utf8ToUtf16LeStringLiteral("Terminal"),
             .shell => std.unicode.utf8ToUtf16LeStringLiteral("Shell"),
+            .profiles => std.unicode.utf8ToUtf16LeStringLiteral("Profiles"),
             .privacy => std.unicode.utf8ToUtf16LeStringLiteral("Privacy"),
             .updates => std.unicode.utf8ToUtf16LeStringLiteral("Updates"),
             .keybindings => std.unicode.utf8ToUtf16LeStringLiteral("Keybindings"),
@@ -424,6 +442,7 @@ pub const Section = enum(u32) {
             .appearance => "Appearance",
             .terminal => "Terminal",
             .shell => "Shell",
+            .profiles => "Profiles",
             .privacy => "Privacy",
             .updates => "Updates",
             .keybindings => "Keybindings",
@@ -437,6 +456,7 @@ pub const Section = enum(u32) {
             .appearance => "Fonts, theme, opacity, cursor, and window padding.",
             .terminal => "Scrollback, closing, copying, and clipboard trimming.",
             .shell => "The program a new tab starts, and how noctty works with your shell.",
+            .profiles => "Your own profiles: command lines a new tab can start, each with a name, a starting folder and environment variables. Enter edits the selected field, Insert adds a profile and Delete removes what is selected. Save writes the changes to the config file.",
             .privacy => "What programs may do with your clipboard, links, and notifications.",
             .updates => "Whether noctty checks for updates, and which releases it follows.",
             .keybindings => "Key bindings are set in the config file. Every binding in effect is listed below: Enter opens the config file, and Ctrl+C copies a binding's lines.",
@@ -916,6 +936,14 @@ const StatusNote = enum {
     key_copied,
     /// The clipboard would not take it. Names it.
     key_copy_failed,
+    /// What a key did on the Profiles page. Its words are `note_text`, which
+    /// names a profile or a field, never a value.
+    profile_said,
+    /// What to type into the Profiles page's field (`note_text`): read on
+    /// request, not announced, since the field's own name and help say it.
+    profile_hint,
+    /// A value the Profiles page refused, and why (`note_text`).
+    profile_refused,
 
     fn text(self: StatusNote) []const u8 {
         return switch (self) {
@@ -942,6 +970,8 @@ const StatusNote = enum {
             .reset_failed => "Could not reset the setting; it keeps its value.",
             .key_copied => "Copied the setting's name.",
             .key_copy_failed => "Could not copy the setting's name.",
+            .profile_said, .profile_hint => "",
+            .profile_refused => "Error: Settings did not take that value.",
         };
     }
 
@@ -952,6 +982,7 @@ const StatusNote = enum {
             .file_unopenable, .write_incomplete, .unsupported_encoding, .binary_config, .saved_overridden => true,
             .field_reset, .already_default, .reset_failed => true,
             .key_copied, .key_copy_failed => true,
+            .profile_said, .profile_hint, .profile_refused => true,
             else => false,
         };
     }
@@ -1340,7 +1371,6 @@ const settings_action_controls = [_]FormControl{
     .{ .role = .button, .name = "Save", .binding = "btn_save", .id = BTN_SAVE },
     .{ .role = .button, .name = "Keep mine", .binding = "btn_conflict_keep", .id = BTN_CONFLICT_KEEP },
     .{ .role = .button, .name = "Use disk", .binding = "btn_conflict_use_disk", .id = BTN_CONFLICT_USE_DISK },
-    .{ .role = .button, .name = "Save and close", .binding = "btn_close_save", .id = BTN_CLOSE_SAVE },
     .{ .role = .button, .name = "Keep editing", .binding = "btn_close_keep_editing", .id = BTN_CLOSE_KEEP_EDITING },
     .{ .role = .button, .name = "Discard changes", .binding = "btn_discard_changes", .id = BTN_DISCARD_CHANGES },
 };
@@ -1375,13 +1405,15 @@ comptime {
             if (spec.section != null and spec.section == other.section and spec.order == other.order)
                 @compileError("Duplicate Settings form row position");
         }
-        for (.{ BTN_SECTION_APPEARANCE, BTN_SECTION_TERMINAL, BTN_SECTION_SHELL, BTN_SECTION_KEYBINDINGS, BTN_SECTION_ADVANCED, BTN_SECTION_PRIVACY, BTN_SECTION_UPDATES, BTN_SECTION_REFERENCE }) |id| {
+        for (.{ BTN_SECTION_APPEARANCE, BTN_SECTION_TERMINAL, BTN_SECTION_SHELL, BTN_SECTION_PROFILES, BTN_SECTION_KEYBINDINGS, BTN_SECTION_ADVANCED, BTN_SECTION_PRIVACY, BTN_SECTION_UPDATES, BTN_SECTION_REFERENCE }) |id| {
             if (spec.id == id) @compileError("Settings form ID collides with section navigation");
         }
         if (spec.id >= BTN_RESET_FIRST and spec.id < BTN_RESET_FIRST + form_field_count)
             @compileError("Settings control ID collides with a Reset button");
         if (spec.id == BTN_CLOSE_DISCARD)
             @compileError("Settings control ID collides with the close prompt's Discard");
+        if (spec.id == BTN_CLOSE_SAVE)
+            @compileError("Settings control ID collides with the close prompt's Save and close");
     }
 }
 
@@ -2274,6 +2306,7 @@ pub const SettingsWindow = struct {
     btn_section_appearance: ?HWND = null,
     btn_section_terminal: ?HWND = null,
     btn_section_shell: ?HWND = null,
+    btn_section_profiles: ?HWND = null,
     btn_section_privacy: ?HWND = null,
     btn_section_updates: ?HWND = null,
     btn_section_keybindings: ?HWND = null,
@@ -2296,6 +2329,24 @@ pub const SettingsWindow = struct {
     keybind_stale: bool = true,
     keybind_generation: u64 = 0,
     keybind_list: ReferenceList = .{ .kind = .keybindings },
+    /// The Profiles page: the draft's user profiles (`settings_profiles.Model`),
+    /// built from `pending` when the page or a search needs them and again
+    /// after the draft changes, and the list that shows them.
+    profile_model: settings_profiles.Model = .{},
+    profile_stale: bool = true,
+    profile_generation: u64 = 0,
+    profile_list: ReferenceList = .{ .kind = .profiles },
+    /// Which of `profile_model`'s rows the search found, and how many.
+    profile_found: []bool = &.{},
+    profile_found_count: u16 = 0,
+    /// The field of the Profiles page being typed into, while one is
+    /// (`beginProfileEdit`).
+    profile_edit: ?ProfileEdit = null,
+    /// The profile row whose removal the first Delete asked to confirm
+    /// (`Row.identity`).
+    profile_remove_armed: ?u64 = null,
+    /// How many profile fields the draft changed (`refreshProfileChanges`).
+    profile_changes: usize = 0,
     /// One class for both lists, registered once per window object.
     reference_list_class_atom: ATOM = 0,
     /// How the user last reached a section button. The rail's owner-drawn
@@ -2312,13 +2363,14 @@ pub const SettingsWindow = struct {
     companions: [Companion.count]?HWND = @splat(null),
     section_uia_group: ?*win32_uia.SettingsSectionGroupProvider = null,
     section_uia_providers: [section_count]?*win32_uia.SettingsSectionProvider = [_]?*win32_uia.SettingsSectionProvider{null} ** section_count,
+    /// Writes the draft; while the close prompt is up, the prompt's "Save
+    /// and close" (`placeSaveButton`).
     btn_save: ?HWND = null,
     /// Throws the draft away and shows what is saved, without closing.
     btn_discard_changes: ?HWND = null,
     btn_keybindings_editor: ?HWND = null,
     btn_conflict_keep: ?HWND = null,
     btn_conflict_use_disk: ?HWND = null,
-    btn_close_save: ?HWND = null,
     btn_close_keep_editing: ?HWND = null,
     text_header: ?HWND = null,
     text_summary: ?HWND = null,
@@ -2624,6 +2676,19 @@ pub const SettingsWindow = struct {
         if (control != hwnd and IsChild(hwnd, control) == 0) return false;
         const repeat = (lParam & (1 << 30)) != 0;
         const in_search = self.edit_search != null and control == self.edit_search.?;
+        // The Profiles page's field: Enter keeps what it holds and Escape
+        // puts it back, before the dialog manager takes either.
+        if (self.profile_edit) |edit| if (edit.hwnd == control) switch (wParam) {
+            VK_RETURN => {
+                if (!repeat) _ = self.commitProfileEdit(.stay);
+                return true;
+            },
+            VK_ESCAPE => {
+                if (!repeat) self.cancelProfileEdit();
+                return true;
+            },
+            else => {},
+        };
         switch (wParam) {
             'S' => {
                 if (!isSaveShortcut(
@@ -2632,6 +2697,9 @@ pub const SettingsWindow = struct {
                     win32_input.keyPressed(VK_MENU),
                     win32_input.keyPressed(VK_SHIFT),
                 )) return false;
+                // A profile field being typed into is kept first, so Save
+                // has it to save.
+                if (!repeat and self.profile_edit != null and !self.commitProfileEdit(.stay)) return true;
                 self.saveIfAllowed();
                 return true;
             },
@@ -2651,7 +2719,7 @@ pub const SettingsWindow = struct {
             },
             VK_RETURN => {
                 // A page's list: the selected row's action.
-                for ([_]*ReferenceList{ &self.reference_list, &self.keybind_list }) |list| if (list.hwnd != null and control == list.hwnd) {
+                for ([_]*ReferenceList{ &self.reference_list, &self.keybind_list, &self.profile_list }) |list| if (list.hwnd != null and control == list.hwnd) {
                     if (!repeat) list.invokeSelected();
                     return true;
                 };
@@ -2709,6 +2777,7 @@ pub const SettingsWindow = struct {
         self.btn_section_appearance = null;
         self.btn_section_terminal = null;
         self.btn_section_shell = null;
+        self.btn_section_profiles = null;
         self.btn_section_privacy = null;
         self.btn_section_updates = null;
         self.btn_section_keybindings = null;
@@ -2727,7 +2796,6 @@ pub const SettingsWindow = struct {
         self.btn_discard_changes = null;
         self.btn_conflict_keep = null;
         self.btn_conflict_use_disk = null;
-        self.btn_close_save = null;
         self.btn_close_keep_editing = null;
         self.resetClosePromptState();
         self.quit_after_close = false;
@@ -2769,6 +2837,7 @@ pub const SettingsWindow = struct {
         self.pending = null;
         if (self.original) |*o| o.deinit();
         self.original = null;
+        self.profile_changes = 0;
         self.forgetTarget();
         if (self.current) |*c| c.deinit();
         self.current = null;
@@ -2860,6 +2929,7 @@ pub const SettingsWindow = struct {
 
     pub fn hasPendingChanges(self: *const SettingsWindow) bool {
         for (self.raw_scalar_dirty) |dirty| if (dirty) return true;
+        if (self.profileDraftDiffers()) return true;
         for (self.owned_text_changed, self.owned_dirty, self.owned_conflict) |text_changed, dirty, conflict| {
             if (text_changed or dirty or conflict) return true;
         }
@@ -2876,7 +2946,7 @@ pub const SettingsWindow = struct {
         for (std.enums.values(RawScalarField)) |field| {
             if (self.raw_scalar_dirty[@intFromEnum(field)]) fields[@intFromEnum(field.setting())] = true;
         }
-        var count: usize = 0;
+        var count: usize = self.profileChangeCount();
         for (fields) |changed| count += @intFromBool(changed);
         for (self.owned_text_changed, self.owned_dirty, self.owned_conflict) |text, dirty, conflict| {
             count += @intFromBool(text or dirty or conflict);
@@ -2884,12 +2954,22 @@ pub const SettingsWindow = struct {
         return count;
     }
 
-    fn updateSaveEnabled(self: *SettingsWindow) void {
-        const enabled = self.validation_control == null and
+    /// Whether the bar's Save may save: something to save, and nothing
+    /// invalid or in conflict.
+    fn canSave(self: *const SettingsWindow) bool {
+        return self.validation_control == null and
             !self.hasRawScalarEdits() and
             self.conflictCount() == 0 and
             self.hasPendingChanges();
-        if (self.btn_save) |button| _ = sys.EnableWindow(button, @intFromBool(enabled));
+    }
+
+    fn updateSaveEnabled(self: *SettingsWindow) void {
+        const enabled = self.canSave();
+        // While the prompt is up the button is its "Save and close", which
+        // `updateClosePromptActions` enables.
+        if (!self.close_prompt_visible) if (self.btn_save) |button| {
+            _ = sys.EnableWindow(button, @intFromBool(enabled));
+        };
         if (self.btn_discard_changes) |button| if (!self.close_prompt_visible) {
             const discardable = self.hasPendingChanges();
             // Disabling the focused button would strand the keyboard on it.
@@ -2944,6 +3024,7 @@ pub const SettingsWindow = struct {
             // A save's result stays up whatever the draft looks like now.
             .saved, .discarded, .editor_open_failed => return self.status_note.text(),
             .saved_overridden, .already_default, .reset_failed, .key_copied, .key_copy_failed => return self.noteText(),
+            .profile_said, .profile_hint, .profile_refused => return self.noteText(),
             // These are about edits that are still there to be saved.
             .field_reset,
             .save_failed,
@@ -3151,6 +3232,7 @@ pub const SettingsWindow = struct {
             if (self.raw_scalar_dirty[index]) Mark.at(&markers, field.section(), .unsaved);
             if (self.raw_scalar_error[index] != null and self.raw_scalar_shown[index]) Mark.at(&markers, field.section(), .invalid);
         }
+        if (self.profileDraftDiffers()) Mark.at(&markers, .profiles, .unsaved);
         for (std.enums.values(OwnedSettingField)) |field| {
             const index = @intFromEnum(field);
             if (self.owned_text_changed[index] or self.owned_dirty[index] or self.owned_conflict[index]) {
@@ -3885,6 +3967,20 @@ pub const SettingsWindow = struct {
             }
         }
 
+        // The profiles have no draft of their own until the page changes one:
+        // until then they follow the file, as an unedited field does.
+        settings_profiles.followFile(original, pending, &replacement) catch |err| {
+            std.log.warn("settings: failed to merge the profiles err={}", .{err});
+        };
+        // A field open on a profile the file no longer has goes with it.
+        if (self.profile_edit) |edit| switch (edit.kind) {
+            .new_id, .new_command => {},
+            else => if (pending.@"profile-command".get(edit.id()) == null) {
+                self.cancelProfileEdit();
+                self.setProfileNote(.said, "Profile {s} is no longer in the config file, so the change was not kept.", .{edit.id()});
+            },
+        };
+
         self.forgetTarget();
         if (self.current) |*old| old.deinit();
         self.current = replacement;
@@ -3971,6 +4067,16 @@ pub const SettingsWindow = struct {
             count += owned.lines;
             truncated = owned.truncated;
         };
+        // The profiles' changes, counted: their lines are on the Profiles page.
+        const profile_changes = self.profileChangeCount();
+        if (!truncated and profile_changes != 0) {
+            const line_start = writer.end;
+            writer.print("Profiles: {d} {s} changed\n", .{ profile_changes, if (profile_changes == 1) @as([]const u8, "field") else "fields" }) catch {
+                writer.end = line_start;
+                truncated = true;
+            };
+            if (!truncated) count += 1;
+        }
         if (count == 0 and !truncated) return no_pending_changes_text;
         if (truncated) {
             const end = writer.end;
@@ -4128,6 +4234,7 @@ pub const SettingsWindow = struct {
         self.btn_section_appearance = null;
         self.btn_section_terminal = null;
         self.btn_section_shell = null;
+        self.btn_section_profiles = null;
         self.btn_section_privacy = null;
         self.btn_section_updates = null;
         self.btn_section_keybindings = null;
@@ -4142,7 +4249,6 @@ pub const SettingsWindow = struct {
         self.btn_discard_changes = null;
         self.btn_conflict_keep = null;
         self.btn_conflict_use_disk = null;
-        self.btn_close_save = null;
         self.btn_close_keep_editing = null;
         self.fields = std.mem.zeroes(FieldWindows);
         self.resetClosePromptState();
@@ -4402,13 +4508,16 @@ pub const SettingsWindow = struct {
             }
         }
         // Each binding on the Keybindings page counts once more: it is a
-        // `keybind` line of its own.
+        // `keybind` line of its own. So does each row of the Profiles page,
+        // a profile or one of its fields.
         const bindings_found = self.findKeybindRows();
         self.search_counts[@intFromEnum(Section.keybindings)] += bindings_found;
+        const profiles_found = self.findProfileRows();
+        self.search_counts[@intFromEnum(Section.profiles)] += profiles_found;
         self.ensureReferenceModel();
         if (!self.reference_model.built()) {
             self.reference_found = @splat(false);
-            self.search_total = form_keys.count() + not_keys + bindings_found;
+            self.search_total = form_keys.count() + not_keys + bindings_found + profiles_found;
             return;
         }
         var keys_found: u16 = 0;
@@ -4417,7 +4526,7 @@ pub const SettingsWindow = struct {
             if (found.*) keys_found += 1;
         }
         self.search_counts[@intFromEnum(Section.reference)] = keys_found;
-        self.search_total = keys_found + not_keys + bindings_found;
+        self.search_total = keys_found + not_keys + bindings_found + profiles_found;
     }
 
     /// Which bindings the search finds on the Keybindings page
@@ -4459,6 +4568,7 @@ pub const SettingsWindow = struct {
     /// form, or in its list, keys or bindings.
     fn pageFoundRows(self: *const SettingsWindow) bool {
         if (self.active_section == .reference) return self.reference_list.shown_count != 0;
+        if (self.active_section == .profiles) return self.profile_list.shown_count != 0;
         if (self.active_section == .keybindings and self.keybind_list.shown_count != 0) return true;
         return self.search_item_count != 0;
     }
@@ -4569,6 +4679,8 @@ pub const SettingsWindow = struct {
             self.referenceListShows()
         else if (focused == self.keybind_list.hwnd)
             self.keybindListShows()
+        else if (focused == self.profile_list.hwnd)
+            self.profileListShows()
         else for (0..settings_clipped_control_count) |index| {
             if (focused == self.controlHwnd(index) or focused == self.companionOf(index) or
                 (index < form_field_count and focused == self.reset_buttons[index])) break active.controls[index];
@@ -4696,9 +4808,10 @@ pub const SettingsWindow = struct {
         }
         // Nothing found after all: the focus stays in the field.
         if (!self.pageFoundRows()) return;
-        if (self.active_section == .reference) {
-            const list = self.reference_list.hwnd orelse return;
-            self.reference_list.selectPosition(0);
+        if (self.active_section == .reference or self.active_section == .profiles) {
+            const state = self.sectionList(self.active_section).?;
+            const list = state.hwnd orelse return;
+            state.selectPosition(0);
             _ = SetFocus(list);
             return;
         }
@@ -4794,7 +4907,9 @@ pub const SettingsWindow = struct {
             std.heap.page_allocator,
             control,
             spec.role,
-            spec.name,
+            // Save's caption is its name, which the close prompt changes
+            // (`placeSaveButton`).
+            if (spec.id == BTN_SAVE) null else spec.name,
         ) catch |err| {
             std.log.warn("settings control UIA provider unavailable index={} err={}", .{ index, err });
             return;
@@ -4820,6 +4935,7 @@ pub const SettingsWindow = struct {
             .appearance => self.btn_section_appearance,
             .terminal => self.btn_section_terminal,
             .shell => self.btn_section_shell,
+            .profiles => self.btn_section_profiles,
             .privacy => self.btn_section_privacy,
             .updates => self.btn_section_updates,
             .keybindings => self.btn_section_keybindings,
@@ -4929,7 +5045,8 @@ pub const SettingsWindow = struct {
         // The page's Reset buttons, made hidden before the layout places
         // them; the last page's go.
         self.syncDefaultMarksShowing(false);
-        if (next == .reference) self.destroyResetSpares();
+        // Neither list page holds a Reset button.
+        if (next == .reference or next == .profiles) self.destroyResetSpares();
         if (self.section_uia_group) |group| group.setSelected(@intFromEnum(next));
         self.content_scroll_y = 0;
         self.refreshNativeSectionText();
@@ -5060,6 +5177,15 @@ pub const SettingsWindow = struct {
     /// A close request from the caption, Alt+F4 or Escape: close at once when
     /// clean, otherwise ask what to do with the unsaved changes.
     fn requestClose(self: *SettingsWindow, hwnd: HWND) void {
+        // What a profile field holds counts as an edit, as when it loses the
+        // focus. A value Settings refuses keeps the window open, with the
+        // field and its reason, as it stops a save: Escape puts it back.
+        if (self.profile_edit != null and !self.commitProfileEdit(.blur)) {
+            if (self.profile_edit) |edit| if (edit.hwnd) |field| {
+                _ = SetFocus(field);
+            };
+            return;
+        }
         switch (closeRequestAction(self.hasPendingChanges(), self.close_prompt_visible, self.close_posted)) {
             .close_now => self.closeNow(hwnd),
             .show_prompt, .focus_prompt => self.showClosePrompt(),
@@ -5233,7 +5359,7 @@ pub const SettingsWindow = struct {
     fn statusAnnounces(self: *const SettingsWindow) bool {
         return switch (self.nextStatus()) {
             .none => switch (self.status_note) {
-                .none, .previews_live, .applies_on_save => false,
+                .none, .previews_live, .applies_on_save, .profile_hint => false,
                 else => true,
             },
             else => true,
@@ -5604,6 +5730,7 @@ pub const SettingsWindow = struct {
         };
         if (self.reference_list.hwnd) |list| setChildShown(list, self.referenceListShows());
         if (self.keybind_list.hwnd) |list| setChildShown(list, self.keybindListShows());
+        if (self.profile_list.hwnd) |list| setChildShown(list, self.profileListShows());
     }
 
     /// Whether the All settings list is on screen: its page is shown, and a
@@ -5616,6 +5743,12 @@ pub const SettingsWindow = struct {
     /// list, for bindings.
     fn keybindListShows(self: *const SettingsWindow) bool {
         return self.active_section == .keybindings and !(self.search_query.active() and self.keybind_list.shown_count == 0);
+    }
+
+    /// Whether the Profiles page's list is on screen: as the All settings
+    /// list, for profiles.
+    fn profileListShows(self: *const SettingsWindow) bool {
+        return self.active_section == .profiles and !(self.search_query.active() and self.profile_list.shown_count == 0);
     }
 
     /// Parse a number field's text (scrollback, font size, opacity) into the
@@ -6135,6 +6268,9 @@ pub const SettingsWindow = struct {
     }
 
     fn save(self: *SettingsWindow) void {
+        // A profile field being typed into is kept first; one Settings
+        // refuses stops the save, and says why.
+        if (self.profile_edit != null and !self.commitProfileEdit(.stay)) return;
         // Scalar EN_CHANGE already validates and stages every typed value.
         // Only owned text waiting for EN_KILLFOCUS needs a save-time parse.
         for (std.enums.values(OwnedSettingField)) |field| {
@@ -6166,6 +6302,7 @@ pub const SettingsWindow = struct {
                 self.updateSaveEnabled();
                 return;
             };
+            self.refreshProfileChanges();
         };
         if (self.conflictCount() != 0) {
             self.surfaceNextValidation(false);
@@ -6231,13 +6368,15 @@ pub const SettingsWindow = struct {
             // A field can become clean while it is still being edited. Keep
             // typing there; restore focus only when the prompt owned it.
             const focused = sys.GetFocus();
-            const restore_focus = focused != null and (focused == self.btn_close_save or
+            const restore_focus = focused != null and (focused == self.btn_save or
                 focused == self.btn_discard_changes or focused == self.btn_close_keep_editing);
             self.dismissPrompt(false, restore_focus);
             return;
         }
         const actions = closePromptActions(self.close_prompt_visible, self.close_posted);
-        if (self.btn_close_save) |button| _ = sys.EnableWindow(button, @intFromBool(actions.save and !self.discard_prompt));
+        if (self.close_prompt_visible) if (self.btn_save) |button| {
+            _ = sys.EnableWindow(button, @intFromBool(actions.save and !self.discard_prompt));
+        };
         // The bar's Discard is the prompt's while the prompt is up; the rest of
         // the time `updateSaveEnabled` decides it.
         if (self.close_prompt_visible) if (self.btn_discard_changes) |button| {
@@ -6276,8 +6415,25 @@ pub const SettingsWindow = struct {
     fn placeDiscardButton(self: *SettingsWindow) void {
         const button = self.btn_discard_changes orelse return;
         _ = sys.SetWindowLongPtrW(button, -12, @intCast(if (self.close_prompt_visible) BTN_CLOSE_DISCARD else BTN_DISCARD_CHANGES)); // GWLP_ID
-        const after = (if (self.close_prompt_visible) self.btn_close_save else self.btn_conflict_use_disk) orelse return;
+        const after = (if (self.close_prompt_visible) self.btn_save else self.btn_conflict_use_disk) orelse return;
         _ = SetWindowPos(button, after, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+    }
+
+    /// The one Save button is the bar's "Save", or while the close prompt is
+    /// up the prompt's "Save and close": its caption, which is its name for
+    /// MSAA and UIA alike (`attachControlUiaProvider`), and its id, which UIA
+    /// Invoke posts with (as Discard's, `placeDiscardButton`). Two buttons
+    /// that are never shown together are one window, so the Profiles page's
+    /// rail button costs none.
+    fn placeSaveButton(self: *SettingsWindow) void {
+        const button = self.btn_save orelse return;
+        const prompt = self.close_prompt_visible;
+        _ = sys.SetWindowLongPtrW(button, -12, @intCast(if (prompt) BTN_CLOSE_SAVE else BTN_SAVE)); // GWLP_ID
+        const caption = if (prompt) std.unicode.utf8ToUtf16LeStringLiteral("Save and close") else std.unicode.utf8ToUtf16LeStringLiteral("Save");
+        _ = sys.SetWindowTextW(button, caption);
+        if (self.controlIndex(button)) |index| if (self.control_uia_providers[index]) |provider| {
+            win32_uia.events.raiseNameChanged(&provider.base);
+        };
     }
 
     fn showClosePrompt(self: *SettingsWindow) void {
@@ -6294,8 +6450,8 @@ pub const SettingsWindow = struct {
         self.discard_prompt = discard;
         if (self.btn_conflict_keep) |button| _ = sys.ShowWindow(button, SW_HIDE);
         if (self.btn_conflict_use_disk) |button| _ = sys.ShowWindow(button, SW_HIDE);
-        if (self.btn_save) |button| _ = sys.ShowWindow(button, SW_HIDE);
-        if (self.btn_close_save) |button| _ = sys.ShowWindow(button, if (discard) SW_HIDE else SW_SHOWNORMAL);
+        self.placeSaveButton();
+        if (self.btn_save) |button| _ = sys.ShowWindow(button, if (discard) SW_HIDE else SW_SHOWNORMAL);
         self.placeDiscardButton();
         if (self.btn_discard_changes) |button| _ = sys.ShowWindow(button, SW_SHOWNORMAL);
         if (self.btn_close_keep_editing) |button| _ = sys.ShowWindow(button, SW_SHOWNORMAL);
@@ -6314,6 +6470,9 @@ pub const SettingsWindow = struct {
     /// quit has to wait.
     pub fn holdQuitForUnsavedChanges(self: *SettingsWindow) bool {
         const hwnd = self.hwnd orelse return false;
+        // What a profile field holds counts as an edit (`requestClose`); a
+        // refused one goes with the app.
+        if (self.profile_edit != null) _ = self.commitProfileEdit(.closing);
         if (self.close_posted or !self.hasPendingChanges()) return false;
         if (sys.IsIconic(hwnd) != 0) _ = sys.ShowWindow(hwnd, SW_RESTORE);
         _ = SetForegroundWindow(hwnd);
@@ -6344,8 +6503,8 @@ pub const SettingsWindow = struct {
         self.discard_prompt = false;
         self.close_after_save = false;
         self.close_prior_focus = null;
-        if (self.btn_close_save) |button| _ = ShowWindow(button, SW_HIDE);
         if (self.btn_close_keep_editing) |button| _ = ShowWindow(button, SW_HIDE);
+        self.placeSaveButton();
         self.placeDiscardButton();
         self.restoreStatusLine();
         if (self.btn_save) |button| _ = ShowWindow(button, SW_SHOWNORMAL);
@@ -6549,14 +6708,23 @@ pub const SettingsWindow = struct {
         const current = if (self.current) |*config| config else return error.NoConfig;
         var out: std.Io.Writer.Allocating = .init(self.handle.alloc);
         errdefer out.deinit();
+        // A profile field is named "key id" or "profile-env id NAME"
+        // (`settings_patch.writeEditName`); its line comes from the index.
+        var profile_index: ?config_origin.Index = null;
+        defer if (profile_index) |*index| index.deinit(self.handle.alloc);
         var names = std.mem.splitSequence(u8, keys, ", ");
         var first = true;
         while (names.next()) |name| {
             if (!first) try out.writer.writeAll(", ");
             first = false;
             try out.writer.writeAll(name);
-            const key = std.meta.stringToEnum(Config.Key, name) orelse continue;
-            switch (config_origin.of(current, key, null)) {
+            var parts = std.mem.splitScalar(u8, name, ' ');
+            const key = std.meta.stringToEnum(Config.Key, parts.first()) orelse continue;
+            const winner = if (parts.next()) |id| profile: {
+                if (profile_index == null) profile_index = try config_origin.Index.init(self.handle.alloc, current);
+                break :profile profile_index.?.ofProfile(key, id, parts.next());
+            } else config_origin.of(current, key, null);
+            switch (winner) {
                 .file => |file| try out.writer.print(" (line {d} of {s})", .{ file.line, std.fs.path.basename(file.path) }),
                 .cli => try out.writer.writeAll(" (the command line)"),
                 .default, .derived, .unplaced => {},
@@ -6582,6 +6750,8 @@ pub const SettingsWindow = struct {
     /// they were. `current` may be this window's own snapshot, which is freed
     /// only after the copies exist.
     fn adoptConfig(self: *SettingsWindow, current: *const Config) !void {
+        // The draft starts over, and a profile field being typed into with it.
+        self.cancelProfileEdit();
         var original = try current.clone(self.handle.alloc);
         errdefer original.deinit();
         var current_snapshot = try current.clone(self.handle.alloc);
@@ -6860,6 +7030,7 @@ pub const SettingsWindow = struct {
         self.btn_section_appearance = self.finishChild(makeSectionButton(hwnd, hinstance, btn_class, .appearance, selected), self.ui_font, .control);
         self.btn_section_terminal = self.finishChild(makeSectionButton(hwnd, hinstance, btn_class, .terminal, selected), self.ui_font, .control);
         self.btn_section_shell = self.finishChild(makeSectionButton(hwnd, hinstance, btn_class, .shell, selected), self.ui_font, .control);
+        self.btn_section_profiles = self.finishChild(makeSectionButton(hwnd, hinstance, btn_class, .profiles, selected), self.ui_font, .control);
         self.btn_section_privacy = self.finishChild(makeSectionButton(hwnd, hinstance, btn_class, .privacy, selected), self.ui_font, .control);
         self.btn_section_updates = self.finishChild(makeSectionButton(hwnd, hinstance, btn_class, .updates, selected), self.ui_font, .control);
         self.btn_section_keybindings = self.finishChild(makeSectionButton(hwnd, hinstance, btn_class, .keybindings, selected), self.ui_font, .control);
@@ -6911,10 +7082,12 @@ pub const SettingsWindow = struct {
 
         // The action bar, in the order Tab reaches it: the conflict choices
         // and Discard sit left of Save (never together), and the close
-        // prompt's three replace them all. The first starts the bar's group
-        // and the header, the first child, ends its run at the wrap.
-        // All seven exist from the start: Escape reaches the close path only
-        // through the enabled "Keep editing" button, which owns IDCANCEL.
+        // prompt's three replace them all: Save becomes its "Save and close"
+        // and Discard its Discard (`placeSaveButton`, `placeDiscardButton`).
+        // The first starts the bar's group and the header, the first child,
+        // ends its run at the wrap. All five exist from the start: Escape
+        // reaches the close path only through the enabled "Keep editing"
+        // button, which owns IDCANCEL.
         // "Save" writes `pending` to disk and fires a hard reload; save
         // errors are logged and the draft remains in memory for retry.
         const discard_label = std.unicode.utf8ToUtf16LeStringLiteral("Discard changes");
@@ -6922,7 +7095,6 @@ pub const SettingsWindow = struct {
         self.btn_conflict_use_disk = self.finishChild(makePushButton(hwnd, hinstance, std.unicode.utf8ToUtf16LeStringLiteral("Use disk"), BTN_CONFLICT_USE_DISK, 112, 0), self.ui_font, .control);
         self.btn_discard_changes = self.finishChild(makePushButton(hwnd, hinstance, discard_label, BTN_DISCARD_CHANGES, 128, WS_VISIBLE), self.ui_font, .control);
         self.btn_save = self.finishChild(makePushButton(hwnd, hinstance, std.unicode.utf8ToUtf16LeStringLiteral("Save"), BTN_SAVE, 96, WS_VISIBLE), self.ui_font, .control);
-        self.btn_close_save = self.finishChild(makePushButton(hwnd, hinstance, std.unicode.utf8ToUtf16LeStringLiteral("Save and close"), BTN_CLOSE_SAVE, 120, 0), self.ui_font, .control);
         self.btn_close_keep_editing = self.finishChild(makePushButton(hwnd, hinstance, std.unicode.utf8ToUtf16LeStringLiteral("Keep editing"), BTN_CLOSE_KEEP_EDITING, 112, 0), self.ui_font, .control);
         stamps.mark(.create_actions);
 
@@ -6941,6 +7113,7 @@ pub const SettingsWindow = struct {
         layoutChildren(self);
         if (self.reference_list.hwnd) |list| setChildShown(list, self.referenceListShows());
         if (self.keybind_list.hwnd) |list| setChildShown(list, self.keybindListShows());
+        if (self.profile_list.hwnd) |list| setChildShown(list, self.profileListShows());
         stamps.mark(.create_layout);
         _ = sys.ShowWindow(hwnd, SW_SHOWNORMAL);
         stamps.mark(.create_show);
@@ -6959,6 +7132,7 @@ pub const SettingsWindow = struct {
         // the page (`createList`), from the model made here. The Keybindings
         // page's list is too, besides its row.
         if (section == .reference) return self.ensureReferenceModel();
+        if (section == .profiles) return self.ensureProfileModel();
         if (section == .keybindings) self.ensureKeybindModel();
         if (self.materialized.contains(section) or self.viewport == null) return;
         self.createSectionRows(section, false);
@@ -7171,11 +7345,593 @@ pub const SettingsWindow = struct {
         };
     }
 
+    /// Build the Profiles page's model when there is none, or the draft
+    /// changed since it was built: the draft's user profiles
+    /// (`settings_profiles.Model`), each field marked when the draft changed
+    /// it. The selection follows its row (`Row.identity`).
+    fn ensureProfileModel(self: *SettingsWindow) void {
+        if (!self.profile_stale) return;
+        const pending = if (self.pending) |*config| config else return;
+        const original: ?*const Config = if (self.original) |*config| config else null;
+        const alloc = self.handle.alloc;
+        const list = &self.profile_list;
+        const was_selected: ?u64 = if (list.selected) |id| (if (id < self.profile_model.rows.len) self.profile_model.rows[id].identity else null) else null;
+        list.selected = null;
+        list.forgetOpenText(alloc);
+        self.profile_generation +%= 1;
+        // Tried once per draft: a failure is not tried again on every key.
+        self.profile_stale = false;
+        self.profile_model.build(alloc, pending, original) catch |err| {
+            std.log.warn("settings: the profile list could not be built err={}", .{err});
+            self.profile_model.deinit();
+        };
+        alloc.free(self.profile_found);
+        self.profile_found = &.{};
+        if (!self.profile_model.built()) return;
+        self.profile_found = alloc.alloc(bool, self.profile_model.rows.len) catch &.{};
+        @memset(self.profile_found, false);
+        if (was_selected) |identity| list.selected = self.profile_model.find(identity);
+    }
+
+    /// Which profile rows the search finds (`profile_found`): by the profile's
+    /// label and id, the field's name and its value; with `@modified`, every
+    /// profile and field (a user profile is never a default). How many.
+    fn findProfileRows(self: *SettingsWindow) u16 {
+        self.ensureProfileModel();
+        var found_count: u16 = 0;
+        for (self.profile_found, 0..) |*found, id| {
+            const row = self.profile_model.rows[id];
+            found.* = self.search_query.matchesText(row.search) and (!self.search_query.modified or row.kind != .new_profile);
+            if (found.*) found_count +|= 1;
+        }
+        self.profile_found_count = found_count;
+        return found_count;
+    }
+
+    /// The rows the search found in a page's list, as last counted.
+    fn listFoundCount(self: *const SettingsWindow, kind: ListKind) u16 {
+        return switch (kind) {
+            .reference => 0,
+            .keybindings => self.keybind_found_count,
+            .profiles => self.profile_found_count,
+        };
+    }
+
+    /// Find a page's list's rows again (`findKeybindRows`, `findProfileRows`).
+    fn findListRows(self: *SettingsWindow, kind: ListKind) u16 {
+        return switch (kind) {
+            .reference => 0,
+            .keybindings => self.findKeybindRows(),
+            .profiles => self.findProfileRows(),
+        };
+    }
+
+    /// Whether the draft's profiles differ from the ones it started with.
+    fn profileDraftDiffers(self: *const SettingsWindow) bool {
+        return self.profile_changes != 0;
+    }
+
+    /// How many profile fields the draft changed (`profile_changes`).
+    fn profileChangeCount(self: *const SettingsWindow) usize {
+        return self.profile_changes;
+    }
+
+    /// Count the draft's profile changes again (`changedFieldCount`): after
+    /// the page changed the draft, and whenever the draft or its baseline
+    /// was replaced or merged (`referenceConfigChanged`, a save's disk
+    /// check). The count is read on every edit anywhere in the window
+    /// (`hasPendingChanges`), so it is not worked out there.
+    fn refreshProfileChanges(self: *SettingsWindow) void {
+        const original = if (self.original) |*config| config else {
+            self.profile_changes = 0;
+            return;
+        };
+        const pending = if (self.pending) |*config| config else {
+            self.profile_changes = 0;
+            return;
+        };
+        self.profile_changes = settings_profiles.changedFieldCount(original, pending);
+    }
+
+    /// Where the config in effect sets the field `row` shows
+    /// (`config_origin.Index.ofProfile`), in the words the form's rows use,
+    /// with the round-9 note when that line of the file Settings saves to
+    /// has changed since. Nothing for a field no line set, or that the draft
+    /// added.
+    fn writeProfileOrigin(self: *SettingsWindow, row: settings_profiles.Row, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+        const profile = self.profile_model.profileOf(row) orelse return;
+        const problems = self.originIndex() orelse return;
+        const key: Config.Key, const name: ?[]const u8 = switch (row.kind) {
+            .profile, .command => .{ .@"profile-command", null },
+            .name => .{ .@"profile-name", null },
+            .folder => .{ .@"profile-working-directory", null },
+            .variable => .{ .@"profile-env", profile.variables[row.variable].name },
+            .new_profile, .add_variable => return,
+        };
+        const found = problems.ofProfile(key, profile.id, name);
+        const changed = switch (found) {
+            .file => |file| self.originLineChanged(file),
+            else => false,
+        };
+        try writeOriginNote(writer, found, changed);
+    }
+
+    /// The labels of what Enter and Delete do on a row of the Profiles page,
+    /// which its open row shows and its menu offers. None for a profile from
+    /// noctty's command line, which Settings does not change.
+    pub const ProfileActions = struct { enter: ?[]const u8 = null, delete: ?[]const u8 = null };
+
+    fn profileActions(self: *const SettingsWindow, row: settings_profiles.Row) ProfileActions {
+        if (self.profile_model.profileOf(row)) |profile| if (profile.read_only) return .{};
+        return switch (row.kind) {
+            .new_profile => .{ .enter = "New profile (Enter)" },
+            .profile => .{
+                .enter = "Edit command line (Enter)",
+                .delete = if (self.profile_remove_armed == row.identity) "Remove: press Delete again" else "Remove profile (Delete)",
+            },
+            .command => .{ .enter = "Edit (Enter)" },
+            .name, .folder => .{ .enter = "Edit (Enter)", .delete = if (self.profile_model.emptyValue(row)) null else "Take out (Delete)" },
+            .variable => .{ .enter = "Edit value (Enter)", .delete = "Take out (Delete)" },
+            .add_variable => .{ .enter = "Add variable (Enter)" },
+        };
+    }
+
+    /// The Profiles page's selected row, if one is selected and shown.
+    fn selectedProfileRow(self: *const SettingsWindow) ?settings_profiles.Row {
+        const list = &self.profile_list;
+        if (list.selectedPosition() == null or !self.profile_model.built()) return null;
+        const id = list.selected.?;
+        if (id >= self.profile_model.rows.len) return null;
+        return self.profile_model.rows[id];
+    }
+
+    /// Say `text` on the status line about the Profiles page: what a key
+    /// did, or (`refused`) why Settings did not take a value. Never a value.
+    fn setProfileNote(self: *SettingsWindow, comptime kind: enum { said, hint, refused }, comptime format: []const u8, args: anytype) void {
+        self.freeNoteText();
+        self.status_note = switch (kind) {
+            .said => .profile_said,
+            .hint => .profile_hint,
+            .refused => .profile_refused,
+        };
+        self.note_text = std.fmt.allocPrint(self.handle.alloc, format, args) catch null;
+        self.setStatus(self.noteText());
+    }
+
+    /// Enter, F2, a double click or UIA's Invoke on the Profiles page's
+    /// selected row: type into its field, or start a profile or a variable.
+    fn profileInvoke(self: *SettingsWindow) void {
+        if (!self.profileEditDone()) return;
+        const row = self.selectedProfileRow() orelse return;
+        if (self.profile_model.profileOf(row)) |profile| if (profile.read_only) {
+            return self.setProfileNote(.said, "Profile {s} comes from noctty's command line, so Settings does not change it.", .{profile.id});
+        };
+        self.beginProfileEdit(switch (row.kind) {
+            .new_profile => .new_id,
+            .profile, .command => .command,
+            .name => .name,
+            .folder => .folder,
+            .variable => .variable,
+            .add_variable => .new_variable,
+        }, row, null);
+    }
+
+    /// Insert or Ctrl+N: a new profile, typed into the "New profile" row.
+    fn profileNew(self: *SettingsWindow) void {
+        if (!self.profileEditDone()) return;
+        if (self.search_query.active()) self.clearSearch();
+        const list = &self.profile_list;
+        if (list.shown_count == 0) return;
+        list.selectPosition(0);
+        self.profileInvoke();
+    }
+
+    /// Delete on the Profiles page's selected row: a label, a starting folder
+    /// or a variable goes at once (Discard brings it back); a profile goes on
+    /// a second Delete, after the status line has said what removing it does.
+    fn profileDelete(self: *SettingsWindow) void {
+        if (!self.profileEditDone()) return;
+        const row = self.selectedProfileRow() orelse return;
+        const profile = self.profile_model.profileOf(row) orelse return;
+        if (profile.read_only) {
+            return self.setProfileNote(.said, "Profile {s} comes from noctty's command line, so Settings does not change it.", .{profile.id});
+        }
+        const pending = if (self.pending) |*config| config else return;
+        var id_buf: [profile_map.max_id_len]u8 = undefined;
+        const id = id_buf[0..profile.id.len];
+        @memcpy(id, profile.id);
+        switch (row.kind) {
+            .new_profile, .add_variable => return,
+            .command => return self.setProfileNote(.said, "A profile needs a command line. Delete on the profile's row removes profile {s}.", .{id}),
+            .name, .folder => {
+                if (self.profile_model.emptyValue(row)) return;
+                settings_profiles.setField(pending, if (row.kind == .name) .name else .folder, id, "") catch return self.profileChangeFailed();
+                self.profileDraftChanged(row.identity);
+            },
+            .variable => {
+                const name = self.handle.alloc.dupe(u8, profile.variables[row.variable].name) catch return self.profileChangeFailed();
+                defer self.handle.alloc.free(name);
+                settings_profiles.removeVariable(pending, id, name) catch return self.profileChangeFailed();
+                // The selection goes to what took the variable's place.
+                self.profileDraftChanged(row.identity);
+                if (self.profile_list.selected == null) self.selectProfileRow(settings_profiles.identity(.add_variable, id, null));
+            },
+            .profile => {
+                if (self.profile_remove_armed != row.identity) {
+                    self.profile_remove_armed = row.identity;
+                    self.profile_list.metrics = null;
+                    if (self.profile_list.hwnd) |list| _ = InvalidateRect(list, null, 0);
+                    if (profile.default) return self.setProfileNote(
+                        .said,
+                        "Press Delete again to remove profile {s}. Default profile names it, so new tabs will open the automatic shell; Save writes the change.",
+                        .{id},
+                    );
+                    return self.setProfileNote(.said, "Press Delete again to remove profile {s}. Save writes the change.", .{id});
+                }
+                self.profile_remove_armed = null;
+                const original = if (self.original) |*config| config else return;
+                settings_profiles.removeProfile(original, pending, id) catch return self.profileChangeFailed();
+                // The rows after it move up: the selection takes the next
+                // profile, or the one before, or New profile.
+                const position = self.profile_list.selectedPosition() orelse 0;
+                self.profileDraftChanged(null);
+                const list = &self.profile_list;
+                if (list.shown_count != 0) {
+                    var at = @min(position, list.shown_count - 1);
+                    while (at > 0 and self.profile_model.rows[list.shown[at]].kind.isField()) at -= 1;
+                    list.selectPosition(at);
+                }
+                self.setProfileNote(.said, "Removed profile {s}. Save writes the change; Discard changes brings it back.", .{id});
+            },
+        }
+    }
+
+    /// Whether no field of the Profiles page is open, once an open one has
+    /// kept what it holds (`.blur`): a click or a key elsewhere on the page
+    /// acts only then, not on top of a value Settings refused, and never
+    /// throws typed text away.
+    fn profileEditDone(self: *SettingsWindow) bool {
+        if (self.profile_edit == null) return true;
+        return self.commitProfileEdit(.blur);
+    }
+
+    /// The first Delete on a profile asked for a second; anything else lets
+    /// go of that.
+    fn disarmProfileRemoval(self: *SettingsWindow) void {
+        if (self.profile_remove_armed == null) return;
+        self.profile_remove_armed = null;
+        self.profile_list.metrics = null;
+        if (self.profile_list.hwnd) |list| _ = InvalidateRect(list, null, 0);
+        self.forgetProfileNote();
+    }
+
+    fn profileChangeFailed(self: *SettingsWindow) void {
+        self.setProfileNote(.refused, "Error: the profile could not be changed. The draft keeps what it had.", .{});
+    }
+
+    fn selectProfileRow(self: *SettingsWindow, identity: u64) void {
+        const id = self.profile_model.find(identity) orelse return;
+        const list = &self.profile_list;
+        for (list.shown[0..list.shown_count], 0..) |shown, position| if (shown == id) return list.selectPosition(position);
+    }
+
+    /// The draft's profiles changed: the page shows them again, the
+    /// selection on `select` (a row's identity) or on the row it was on, and
+    /// Save, the rail's marker and the title follow.
+    fn profileDraftChanged(self: *SettingsWindow, select: ?u64) void {
+        self.refreshProfileChanges();
+        self.profile_stale = true;
+        self.ensureProfileModel();
+        if (select) |identity| self.profile_list.selected = self.profile_model.find(identity);
+        if (self.search_query.active()) {
+            const was = self.profile_found_count;
+            const now = self.findProfileRows();
+            const counts = &self.search_counts[@intFromEnum(Section.profiles)];
+            counts.* = counts.* - was + now;
+            self.search_total = self.search_total - was + now;
+            self.syncSearchCounts();
+        }
+        self.refreshListShown(&self.profile_list, false);
+        self.profile_list.revealSelected(.unless_shown);
+        self.freeNoteText();
+        self.status_note = .applies_on_save;
+        self.updateSaveEnabled();
+    }
+
+    /// Start typing into a field of the Profiles page: a text field over the
+    /// open row (`placeProfileEdit`), holding the field's value, named for
+    /// UIA after the field and its profile. `id` is the new profile's, for
+    /// `.new_command`.
+    fn beginProfileEdit(self: *SettingsWindow, kind: ProfileEdit.Kind, row: settings_profiles.Row, new_id: ?[]const u8) void {
+        self.disarmProfileRemoval();
+        self.cancelProfileEdit();
+        const list = self.profile_list.hwnd orelse return;
+        const alloc = self.handle.alloc;
+        var edit: ProfileEdit = .{ .kind = kind, .row = row.identity };
+        const profile = self.profile_model.profileOf(row);
+        if (new_id orelse if (profile) |p| p.id else null) |id| edit.setId(id);
+        if (kind == .variable) edit.name = alloc.dupe(u8, profile.?.variables[row.variable].name) catch return;
+        const initial: []const u8 = switch (kind) {
+            .new_id, .new_command, .new_variable => "",
+            .command => profile.?.command,
+            .name => profile.?.label orelse "",
+            .folder => profile.?.folder orelse "",
+            .variable => profile.?.variables[row.variable].value,
+        };
+        const wide = std.unicode.utf8ToUtf16LeAllocZ(alloc, initial) catch {
+            if (edit.name) |name| alloc.free(name);
+            return;
+        };
+        defer alloc.free(wide);
+        const hwnd = sys.CreateWindowExW(
+            0,
+            std.unicode.utf8ToUtf16LeStringLiteral("EDIT"),
+            wide.ptr,
+            WS_CHILD | WS_BORDER | ES_AUTOHSCROLL,
+            0,
+            0,
+            1,
+            1,
+            list,
+            @ptrFromInt(PROFILE_EDIT),
+            self.handle.hinstance,
+            null,
+        ) orelse {
+            if (edit.name) |name| alloc.free(name);
+            return;
+        };
+        _ = self.finishChild(hwnd, self.ui_font, .control);
+        // A line of the config file holds at most this much.
+        _ = sys.SendMessageW(hwnd, EM_LIMITTEXT, LineIterator.max_line_len, 0);
+        subclassKeepingPrevious(hwnd, &profileEditProc);
+        edit.hwnd = hwnd;
+        edit.writeLabel();
+        self.profile_edit = edit;
+        const stored = &self.profile_edit.?;
+        if (self.canInitializeCustomUiaProviders()) {
+            stored.provider = win32_uia.SettingsControlProvider.create(std.heap.page_allocator, hwnd, .edit, stored.label()) catch |err| blk: {
+                std.log.warn("settings: profile field UIA provider unavailable err={}", .{err});
+                break :blk null;
+            };
+            if (stored.provider) |provider| provider.help_text = profile_edit_help;
+        }
+        // The open row makes room for the field.
+        self.profile_list.metrics = null;
+        self.profile_list.revealSelected(.whole);
+        if (self.profile_list.hwnd) |list_hwnd| _ = InvalidateRect(list_hwnd, null, 0);
+        self.placeProfileEdit();
+        _ = sys.SendMessageW(hwnd, EM_SETSEL, 0, -1);
+        _ = SetFocus(hwnd);
+        switch (kind) {
+            .new_id => self.setProfileNote(.hint, "Type the new profile's id, then press Enter. Escape cancels.", .{}),
+            .new_command => self.setProfileNote(.hint, "Type the command line of profile {s}, then press Enter. Escape cancels.", .{stored.id()}),
+            .new_variable => self.setProfileNote(.hint, "Type the variable as NAME=VALUE, then press Enter. Escape cancels.", .{}),
+            else => self.setProfileNote(.hint, "Enter keeps the change and Escape cancels it.", .{}),
+        }
+    }
+
+    /// Put the field being typed into over its row, below the row's title, or
+    /// hide it while the row is not in the list's view.
+    fn placeProfileEdit(self: *SettingsWindow) void {
+        const edit = self.profile_edit orelse return;
+        const hwnd = edit.hwnd orelse return;
+        const list = &self.profile_list;
+        const metrics = list.ensureMetrics() orelse return;
+        const position = list.selectedPosition() orelse {
+            _ = ShowWindow(hwnd, SW_HIDE);
+            return;
+        };
+        const top = ReferenceList.rowTop(metrics, position, position) - list.scroll_y + 2 * metrics.pad_y + metrics.title + metrics.gap;
+        const left = metrics.pad_x + metrics.bar + list.indentOf(metrics, list.shown[position]);
+        const width = @max(1, metrics.width - left - metrics.pad_x);
+        _ = SetWindowPos(hwnd, null, left, top, width, @max(1, metrics.field - metrics.gap), SWP_NOZORDER | SWP_NOACTIVATE);
+        _ = ShowWindow(hwnd, SW_SHOWNA);
+    }
+
+    /// The field being typed into lost the focus (posted, so the focus has
+    /// landed): what it holds is kept, as a form field's is.
+    fn profileEditBlurred(self: *SettingsWindow) void {
+        const edit = self.profile_edit orelse return;
+        const focused = GetFocus() orelse return;
+        if (focused == edit.hwnd) return;
+        // Another window took the focus (Alt+Tab, Win+V): the field stays,
+        // and gets the focus back with the window (`rememberFocus`).
+        const window = self.hwnd orelse return;
+        if (focused != window and IsChild(window, focused) == 0) return;
+        _ = self.commitProfileEdit(.blur);
+    }
+
+    /// Keep what the field being typed into holds, trimmed, as its change to
+    /// the draft. A value Settings refuses keeps the field open, its reason on
+    /// the status line, whether the focus is in it (`.stay`: Enter, Tab,
+    /// Save) or went elsewhere in the window (`.blur`), so a save started
+    /// with the mouse stops at it too. When the field has to go (`.closing`:
+    /// its page goes, or the window or the app closes), a refused value is
+    /// dropped and the status line says so. A new profile or variable left
+    /// empty by a blur or a close is just let go. Returns whether no field is
+    /// open any more.
+    fn commitProfileEdit(self: *SettingsWindow, how: enum { stay, blur, closing }) bool {
+        const edit = &(self.profile_edit orelse return true);
+        const hwnd = edit.hwnd orelse return true;
+        const alloc = self.handle.alloc;
+        const pending = if (self.pending) |*config| config else {
+            self.cancelProfileEdit();
+            return true;
+        };
+        const text_w_len: usize = @intCast(@max(0, sys.GetWindowTextLengthW(hwnd)));
+        const text_w = alloc.allocSentinel(u16, text_w_len, 0) catch return false;
+        defer alloc.free(text_w);
+        const copied: usize = @intCast(@max(0, sys.GetWindowTextW(hwnd, text_w.ptr, @intCast(text_w_len + 1))));
+        const raw = std.unicode.utf16LeToUtf8Alloc(alloc, text_w[0..copied]) catch {
+            return self.refuseProfileEdit(how, "That text cannot be saved.");
+        };
+        defer alloc.free(raw);
+        const text = std.mem.trim(u8, raw, &std.ascii.whitespace);
+        var id_buf: [profile_map.max_id_len]u8 = undefined;
+        const id = id_buf[0..edit.id_len];
+        @memcpy(id, edit.id());
+        const new_kind = switch (edit.kind) {
+            .new_id, .new_command, .new_variable => true,
+            else => false,
+        };
+        if (how != .stay and new_kind and text.len == 0) {
+            self.cancelProfileEdit();
+            return true;
+        }
+        const select: u64 = switch (edit.kind) {
+            .new_id => {
+                if (settings_profiles.checkNewId(pending, text)) |message| return self.refuseProfileEdit(how, message);
+                // The id is taken; the command line comes next, in its own
+                // field, on the same row. A field that lost the focus keeps
+                // nothing: a profile needs both.
+                if (how != .stay) {
+                    self.cancelProfileEdit();
+                    self.setProfileNote(.said, "No profile was added: a profile needs an id and a command line.", .{});
+                    return true;
+                }
+                const row = self.selectedProfileRow() orelse return true;
+                self.beginProfileEdit(.new_command, row, text);
+                return false;
+            },
+            .new_command, .command => blk: {
+                if (settings_profiles.checkCommand(id, text)) |message| return self.refuseProfileEdit(how, message);
+                // The file may have defined the id since it was typed (an
+                // external reload).
+                if (edit.kind == .new_command) if (settings_profiles.checkNewId(pending, id)) |message| return self.refuseProfileEdit(how, message);
+                if (edit.kind == .command) if (self.profile_model.find(edit.row)) |row_id| {
+                    const profile = self.profile_model.profileOf(self.profile_model.rows[row_id]).?;
+                    if (std.mem.eql(u8, profile.command, text)) {
+                        self.cancelProfileEdit();
+                        return true;
+                    }
+                };
+                settings_profiles.setCommand(pending, id, text) catch return self.refuseProfileEdit(how, "The profile could not be changed.");
+                break :blk settings_profiles.identity(if (edit.kind == .new_command) .profile else .command, id, null);
+            },
+            .name, .folder => blk: {
+                const refused = if (edit.kind == .name) settings_profiles.checkText(.name, id, text) else settings_profiles.checkText(.text, id, text);
+                if (refused) |message| return self.refuseProfileEdit(how, message);
+                settings_profiles.setField(pending, if (edit.kind == .name) .name else .folder, id, text) catch
+                    return self.refuseProfileEdit(how, "The profile could not be changed.");
+                break :blk edit.row;
+            },
+            .variable => blk: {
+                const name = edit.name.?;
+                if (settings_profiles.checkVariableValue(id, name, text)) |message| return self.refuseProfileEdit(how, message);
+                settings_profiles.setVariable(pending, id, name, text) catch return self.refuseProfileEdit(how, "The profile could not be changed.");
+                break :blk edit.row;
+            },
+            .new_variable => blk: {
+                const variable = switch (settings_profiles.checkNewVariable(id, text)) {
+                    .refused => |message| return self.refuseProfileEdit(how, message),
+                    .ok => |value| value,
+                };
+                settings_profiles.setVariable(pending, id, variable.name, variable.value) catch return self.refuseProfileEdit(how, "The profile could not be changed.");
+                break :blk settings_profiles.identity(.variable, id, variable.name);
+            },
+        };
+        self.endProfileEdit();
+        self.profileDraftChanged(select);
+        return true;
+    }
+
+    /// A value Settings will not take (`message` names the field, never the
+    /// value). Returns whether the field went (`.blur`).
+    fn refuseProfileEdit(self: *SettingsWindow, how: anytype, message: []const u8) bool {
+        if (how == .closing) {
+            self.cancelProfileEdit();
+            self.setProfileNote(.refused, "Error: the change was not kept. {s}", .{message});
+            return true;
+        }
+        self.setProfileNote(.refused, "Error: {s}", .{message});
+        return false;
+    }
+
+    /// Escape, or a page or a draft that starts over: the field goes and the
+    /// draft keeps what it had.
+    fn cancelProfileEdit(self: *SettingsWindow) void {
+        if (self.profile_edit == null) return;
+        self.endProfileEdit();
+        self.forgetProfileNote();
+    }
+
+    /// What the status line said about the Profiles page's field, or about a
+    /// removal waiting for its second Delete, is over: the line says what it
+    /// says when idle. A save's or a reset's outcome stays.
+    fn forgetProfileNote(self: *SettingsWindow) void {
+        switch (self.status_note) {
+            .profile_said, .profile_hint, .profile_refused => {},
+            else => return,
+        }
+        self.freeNoteText();
+        self.status_note = .none;
+        self.syncIdleStatus();
+    }
+
+    /// The field being typed into goes: the focus back to its list first, so
+    /// the focus leaving it finds no field to keep (`profileEditBlurred`).
+    fn endProfileEdit(self: *SettingsWindow) void {
+        var edit = self.profile_edit orelse return;
+        self.profile_edit = null;
+        if (edit.hwnd) |hwnd| {
+            if (GetFocus() == hwnd) if (self.profile_list.hwnd) |list| {
+                _ = SetFocus(list);
+            };
+            self.releaseProfileEditProvider(&edit);
+            _ = sys.DestroyWindow(hwnd);
+        }
+        if (edit.name) |name| self.handle.alloc.free(name);
+        self.profile_list.metrics = null;
+        if (self.profile_list.hwnd) |list| _ = InvalidateRect(list, null, 0);
+    }
+
+    fn releaseProfileEditProvider(self: *SettingsWindow, edit: *ProfileEdit) void {
+        const provider = edit.provider orelse return;
+        edit.provider = null;
+        provider.detach();
+        self.deferProviderDisconnect(@ptrCast(provider), settingsControlDisconnect, settingsControlRelease);
+    }
+
+    /// The field's window is going without `endProfileEdit` (its list or the
+    /// window went first): let go of what it held.
+    fn profileEditDestroyed(self: *SettingsWindow, hwnd: HWND) void {
+        const edit = &(self.profile_edit orelse return);
+        if (edit.hwnd != hwnd) return;
+        self.releaseProfileEditProvider(edit);
+        if (edit.name) |name| self.handle.alloc.free(name);
+        self.profile_edit = null;
+    }
+
+    /// The Profiles list's menu (Shift+F10, the menu key, a right click): what
+    /// Enter and Delete do on the row, a new profile, and the config file.
+    fn showProfileMenu(self: *SettingsWindow, menu: HMENU, at: POINT, frame: HWND) void {
+        const row = self.selectedProfileRow() orelse return;
+        const actions = self.profileActions(row);
+        var item_w: [96]u16 = undefined;
+        var item_buf: [96]u8 = undefined;
+        if (actions.enter) |label| _ = sys.AppendMenuW(menu, MF_STRING, reference_menu_edit, utf8ToW(&item_w, profileMenuLabel(&item_buf, label)));
+        if (actions.delete) |label| _ = sys.AppendMenuW(menu, MF_STRING, reference_menu_copy, utf8ToW(&item_w, profileMenuLabel(&item_buf, label)));
+        if (row.kind != .new_profile) _ = sys.AppendMenuW(menu, MF_STRING, profile_menu_new, std.unicode.utf8ToUtf16LeStringLiteral("&New profile\tInsert"));
+        _ = sys.AppendMenuW(menu, MF_STRING, reference_menu_open, std.unicode.utf8ToUtf16LeStringLiteral("&Open config file"));
+        const picked: usize = if (self.context_menu_pick) |pick|
+            pick(menu)
+        else
+            @intCast(@max(0, sys.TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, at.x, at.y, 0, frame, null)));
+        switch (picked) {
+            reference_menu_edit => self.profileInvoke(),
+            reference_menu_copy => self.profileDelete(),
+            profile_menu_new => self.profileNew(),
+            reference_menu_open => self.handle.openInEditor(self.handle.ctx),
+            else => {},
+        }
+    }
+
     /// The list for `section`, if the page has one.
     fn sectionList(self: *SettingsWindow, section: Section) ?*ReferenceList {
         return switch (section) {
             .reference => &self.reference_list,
             .keybindings => &self.keybind_list,
+            .profiles => &self.profile_list,
             else => null,
         };
     }
@@ -7184,6 +7940,7 @@ pub const SettingsWindow = struct {
         switch (list.kind) {
             .reference => self.ensureReferenceModel(),
             .keybindings => self.ensureKeybindModel(),
+            .profiles => self.ensureProfileModel(),
         }
     }
 
@@ -7202,6 +7959,7 @@ pub const SettingsWindow = struct {
         const total: usize = if (!list.modelBuilt()) 0 else switch (list.kind) {
             .reference => settings_reference.key_count,
             .keybindings => self.keybind_model.rows.len,
+            .profiles => self.profile_model.rows.len,
         };
         if (list.shown.len < total) {
             alloc.free(list.shown);
@@ -7212,6 +7970,7 @@ pub const SettingsWindow = struct {
             const found = switch (list.kind) {
                 .reference => self.reference_found[id],
                 .keybindings => id < self.keybind_found.len and self.keybind_found[id],
+                .profiles => id < self.profile_found.len and self.profile_found[id],
             };
             if (filtering and !found) continue;
             list.shown[count] = @intCast(id);
@@ -7415,6 +8174,8 @@ pub const SettingsWindow = struct {
     fn referenceConfigChanged(self: *SettingsWindow) void {
         self.reference_stale = true;
         self.keybind_stale = true;
+        self.profile_stale = true;
+        self.refreshProfileChanges();
         self.forgetTarget();
         self.syncOriginNotes();
         if (self.hwnd == null) return;
@@ -7423,10 +8184,10 @@ pub const SettingsWindow = struct {
         // A rebuilt binding model has no rows found: its bindings are found
         // again, and the page's count, help and layout follow. The rest of the
         // search keeps what it found, as on any page.
-        if (list.kind == .keybindings and self.search_query.active()) {
-            const was = self.keybind_found_count;
-            const now = self.findKeybindRows();
-            const counts = &self.search_counts[@intFromEnum(Section.keybindings)];
+        if (list.kind != .reference and self.search_query.active()) {
+            const was = self.listFoundCount(list.kind);
+            const now = self.findListRows(list.kind);
+            const counts = &self.search_counts[@intFromEnum(self.active_section)];
             counts.* = counts.* - was + now;
             self.search_total = self.search_total - was + now;
             self.refreshListShown(list, false);
@@ -7475,8 +8236,10 @@ pub const SettingsWindow = struct {
             switch (list_state.kind) {
                 .reference => std.unicode.utf8ToUtf16LeStringLiteral("All settings"),
                 .keybindings => std.unicode.utf8ToUtf16LeStringLiteral("Key bindings"),
+                .profiles => std.unicode.utf8ToUtf16LeStringLiteral("Profiles"),
             },
-            WS_CHILD | WS_TABSTOP | WS_GROUP | WS_VSCROLL,
+            // The Profiles list holds the field being typed into.
+            WS_CHILD | WS_TABSTOP | WS_GROUP | WS_VSCROLL | if (list_state.kind == .profiles) WS_CLIPCHILDREN else 0,
             0,
             0,
             1,
@@ -7485,6 +8248,7 @@ pub const SettingsWindow = struct {
             @ptrFromInt(switch (list_state.kind) {
                 .reference => REFERENCE_LIST,
                 .keybindings => KEYBIND_LIST,
+                .profiles => PROFILE_LIST,
             }),
             self.handle.hinstance,
             list_state,
@@ -7514,6 +8278,9 @@ pub const SettingsWindow = struct {
     /// switch (`focusRailButtonAhead`), as the switch's own focus moves do.
     fn destroyList(self: *SettingsWindow, list_state: *ReferenceList, next: Section) void {
         const list = list_state.hwnd orelse return;
+        // A field being typed into goes with the page, kept as when it loses
+        // the focus.
+        if (list_state.kind == .profiles) _ = self.commitProfileEdit(.closing);
         if (GetFocus() == list) self.focusRailButtonAhead(next);
         if (list_state.provider) |provider| provider.raiseTeardown();
         _ = sys.DestroyWindow(list);
@@ -7537,10 +8304,16 @@ pub const SettingsWindow = struct {
     fn forgetReference(self: *SettingsWindow) void {
         const alloc = self.handle.alloc;
         self.forgetTarget();
-        for ([_]*ReferenceList{ &self.reference_list, &self.keybind_list }) |list| {
+        for ([_]*ReferenceList{ &self.reference_list, &self.keybind_list, &self.profile_list }) |list| {
             list.forgetOpenText(alloc);
             list.forgetRows(alloc);
         }
+        alloc.free(self.profile_found);
+        self.profile_found = &.{};
+        self.profile_found_count = 0;
+        self.profile_model.deinit();
+        self.profile_stale = true;
+        self.profile_remove_armed = null;
         self.reference_found = @splat(false);
         self.reference_model.deinit();
         self.reference_stale = true;
@@ -8093,6 +8866,7 @@ fn makeSectionButton(
         .appearance => BTN_SECTION_APPEARANCE,
         .terminal => BTN_SECTION_TERMINAL,
         .shell => BTN_SECTION_SHELL,
+        .profiles => BTN_SECTION_PROFILES,
         .privacy => BTN_SECTION_PRIVACY,
         .updates => BTN_SECTION_UPDATES,
         .keybindings => BTN_SECTION_KEYBINDINGS,
@@ -9894,7 +10668,8 @@ test "SET Discard asks before losing edits and supports keyboard cancellation" {
             try std.testing.expectEqual(@as(f64, 0.5), fixture.config.@"background-opacity");
             var text_buf: [128]u8 = undefined;
             try std.testing.expectEqualStrings("Discard unsaved changes to 1 field?", readEditUtf8(settings.text_status.?, &text_buf).?);
-            try std.testing.expect(sys.IsWindowVisible(settings.btn_close_save.?) == 0);
+            // The Discard prompt has no "Save and close".
+            try std.testing.expect(sys.IsWindowVisible(settings.btn_save.?) == 0);
             try std.testing.expectEqual(settings.btn_close_keep_editing.?, sys.GetFocus().?);
             try std.testing.expect(fixture.pumpKey(0x1B));
             try std.testing.expect(!settings.close_prompt_visible);
@@ -10014,7 +10789,9 @@ test "SET correcting shown invalid scalars preserves Discard for unsaved values"
                 try std.testing.expect(settings.hasPendingChanges());
                 try std.testing.expect(!settings.hasRawScalarEdits());
                 try std.testing.expect(settings.validation_control == null);
-                try std.testing.expect(sys.IsWindowEnabled(settings.btn_save.?) != 0);
+                // The bar's Save would save. While the Discard prompt is up
+                // its button is the prompt's "Save and close", hidden there.
+                try std.testing.expect(settings.canSave());
                 try std.testing.expect(settings.discard_prompt);
                 try std.testing.expectEqual(@as(usize, 1), settings.pendingFieldCount());
                 settings.discardAndClose();
@@ -10055,7 +10832,8 @@ test "SET close and quit switch the Discard prompt in place and preserve cancell
             try std.testing.expect(settings.close_prompt_visible);
             try std.testing.expectEqual(@as(usize, 1), events.testing_live_regions);
             try std.testing.expectEqualStrings(closePromptText(false), readEditUtf8(settings.text_status.?, &buffer).?);
-            try std.testing.expect(sys.IsWindowVisible(settings.btn_close_save.?) != 0);
+            try std.testing.expect(sys.IsWindowVisible(settings.btn_save.?) != 0);
+            try std.testing.expectEqualStrings("Save and close", readEditUtf8(settings.btn_save.?, &buffer).?);
             try std.testing.expect(fixture.pumpKey(0x1B));
             try std.testing.expectEqual(settings.btn_discard_changes.?, sys.GetFocus().?);
             settings.discardChanges();
@@ -10214,16 +10992,18 @@ test "settings Discard changes gives way to the conflict choices and to the clos
             try std.testing.expect(sys.IsWindowVisible(discard) != 0);
 
             // The close prompt keeps it as the prompt's own Discard, after
-            // "Save and close" where Tab reaches it, and gives it back to the
-            // bar, before Save, when it goes.
+            // "Save and close" (the bar's Save, `placeSaveButton`) where Tab
+            // reaches it, and gives it back to the bar, before Save, when it
+            // goes.
             const GW_HWNDNEXT: UINT = 2;
             settings.showClosePrompt();
             try std.testing.expect(sys.IsWindowVisible(discard) != 0);
-            try std.testing.expect(sys.IsWindowVisible(settings.btn_save.?) == 0);
-            try std.testing.expectEqual(discard, sys.GetWindow(settings.btn_close_save.?, GW_HWNDNEXT).?);
+            try std.testing.expect(sys.IsWindowVisible(settings.btn_save.?) != 0);
+            try std.testing.expectEqual(discard, sys.GetWindow(settings.btn_save.?, GW_HWNDNEXT).?);
             settings.cancelClosePrompt();
             try std.testing.expect(sys.IsWindowVisible(discard) != 0);
             try std.testing.expectEqual(discard, sys.GetWindow(settings.btn_conflict_use_disk.?, GW_HWNDNEXT).?);
+            try std.testing.expectEqual(settings.btn_save.?, sys.GetWindow(discard, GW_HWNDNEXT).?);
 
             // A disk change to the same setting is a conflict: Keep mine and
             // Use disk take the row, and Discard does not share it.
@@ -10303,7 +11083,9 @@ test "settings two-column breakpoint preserves readable lane width" {
 
 test "settings rail compacts before high DPI work areas clip sections" {
     for ([_]u32{ 96, 120, 144, 168, 192, 288 }) |dpi| {
-        const regular_height = scaleForDpi(320, dpi);
+        // Room for every section's button at full size (nine since the
+        // Profiles page).
+        const regular_height = scaleForDpi(400, dpi);
         const regular = sectionRailGeometry(regular_height, dpi);
         try std.testing.expectEqual(scaleForDpi(settings_rail_item_height, dpi), regular.button_height);
         const short_height = @max(@as(i32, section_count), scaleForDpi(190, dpi));
@@ -11019,9 +11801,9 @@ fn ChildPlacements(comptime capacity: usize) type {
     };
 }
 
-/// Rail buttons, header, search field, summary, viewport, status, six action
+/// Rail buttons, header, search field, summary, viewport, status, five action
 /// buttons.
-const settings_frame_child_count = section_count + 11;
+const settings_frame_child_count = section_count + 10;
 
 const SearchGeometry = struct {
     width: i32,
@@ -11216,12 +11998,15 @@ fn layoutChildren(self: *SettingsWindow) void {
     if (self.reference_list.hwnd) |list| if (self.referenceListShows()) {
         form.add(list, gutter, 0, column_width, viewport_height);
     };
+    if (self.profile_list.hwnd) |list| if (self.profileListShows()) {
+        form.add(list, gutter, 0, column_width, viewport_height);
+    };
     if (keybind_rect) |placed| form.add(self.keybind_list.hwnd.?, gutter + placed.left, placed.top - scroll_y, placed.right - placed.left, placed.bottom - placed.top);
 
     const row_top = action_bar_top + action_bar.actions_top;
     const action_gap = self.px(settings_action_gap);
     const normal_actions = action_bar.normal_actions;
-    frame.add(self.btn_save, pane_left + normal_actions.save_x, row_top + normal_actions.save_y, normal_actions.save_width, normal_actions.button_height);
+    if (!self.close_prompt_visible) frame.add(self.btn_save, pane_left + normal_actions.save_x, row_top + normal_actions.save_y, normal_actions.save_width, normal_actions.button_height);
     frame.add(self.btn_conflict_keep, pane_left + normal_actions.keep_mine_x, row_top + normal_actions.keep_mine_y, normal_actions.keep_mine_width, normal_actions.button_height);
     frame.add(self.btn_conflict_use_disk, pane_left + normal_actions.use_disk_x, row_top + normal_actions.use_disk_y, normal_actions.use_disk_width, normal_actions.button_height);
     const close_actions = action_bar.actions;
@@ -11241,7 +12026,7 @@ fn layoutChildren(self: *SettingsWindow) void {
     }
     self.status_row_separate = action_bar.status_separate;
     self.status_row_height = action_bar.status_height;
-    frame.add(self.btn_close_save, pane_left + close_actions.first_x, close_top, close_actions.first_width, close_actions.button_height);
+    if (self.close_prompt_visible) frame.add(self.btn_save, pane_left + close_actions.first_x, close_top, close_actions.first_width, close_actions.button_height);
     frame.add(self.btn_close_keep_editing, pane_left + close_actions.third_x, close_top + close_actions.third_y, close_actions.third_width, close_actions.button_height);
 
     const frame_batched = frame.apply();
@@ -11912,7 +12697,8 @@ const dialog_test = struct {
         /// The file `AppHandle.configSource` reads, as the App's does; none
         /// when null.
         source_path: ?[]const u8 = null,
-        masked: [@import("win32.zig").settings_masked_keys_capacity]u8 = undefined,
+        /// What the save's reload found masked: keys, then profile fields.
+        masked: [1024]u8 = undefined,
         masked_len: usize = 0,
         /// What the All settings page's "Copy name" handed the App last, and
         /// how many times: a recorder, so no test reaches the clipboard.
@@ -12078,8 +12864,14 @@ const dialog_test = struct {
             self.saved += 1;
             if (self.save_path) |path| {
                 const app = @import("win32.zig");
+                const settings_patch = @import("win32/settings_patch.zig");
                 const edited = app.settingsUserEditedKeys(original, pending);
-                try app.persistSettings(std.testing.allocator, path, pending, edited, null);
+                // The profile editor's changes, as the App works them out.
+                var profile_arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+                defer profile_arena.deinit();
+                const profile_edits = settings_patch.editsForSave(profile_arena.allocator(), std.testing.allocator, &self.config, original, pending, path, &settings_reference.samePath) catch
+                    return error.OutOfMemory;
+                try app.persistSettings(std.testing.allocator, path, pending, edited, profile_edits, null);
                 if (self.reload_from_disk) {
                     var reloaded = Config.default(std.testing.allocator) catch return error.ReloadFailed;
                     read: {
@@ -12088,7 +12880,11 @@ const dialog_test = struct {
                         var args: cli_args.ArgsIterator(cli_args.SliceIterator) = .{ .iterator = cli_args.sliceIterator(self.reload_args) };
                         reloaded.loadIter(std.testing.allocator, &args) catch break :read;
                         reloaded.loadRecursiveFiles(std.testing.allocator) catch break :read;
-                        self.masked_len = app.settingsMaskedKeyNames(&self.masked, edited, pending, &reloaded).len;
+                        var keys: [app.settings_masked_keys_capacity]u8 = undefined;
+                        var masked: std.Io.Writer = .fixed(&self.masked);
+                        masked.writeAll(app.settingsMaskedKeyNames(&keys, edited, pending, &reloaded)) catch {};
+                        _ = settings_patch.writeMasked(&masked, profile_edits, &reloaded, masked.end > 0) catch {};
+                        self.masked_len = masked.end;
                         self.config.deinit();
                         self.config = reloaded;
                         if (self.masked_len != 0) return error.SavedButMasked;
@@ -14171,7 +14967,7 @@ test "settings arrow-key groups stop at the rail and the action bar" {
 
             // The close prompt's three buttons are the same run.
             settings.showClosePrompt();
-            const prompt = [_]HWND{ settings.btn_close_save.?, settings.btn_discard_changes.?, settings.btn_close_keep_editing.? };
+            const prompt = [_]HWND{ settings.btn_save.?, settings.btn_discard_changes.?, settings.btn_close_keep_editing.? };
             for (prompt, 0..) |button, index| {
                 try std.testing.expect(sys.IsWindowVisible(button) != 0 and sys.IsWindowEnabled(button) != 0);
                 _ = sys.SetFocus(button);
@@ -14181,6 +14977,49 @@ test "settings arrow-key groups stop at the rail and the action bar" {
                 try std.testing.expect(fixture.pumpKey(VK_UP));
                 try std.testing.expectEqual(prompt[(index + prompt.len - 1) % prompt.len], sys.GetFocus().?);
             }
+        }
+    }.body);
+}
+
+test "settings one Save button is the bar's Save and the close prompt's Save and close" {
+    try dialog_test.onHiddenDesktop(struct {
+        fn body() !void {
+            const fixture = try dialog_test.Fixture.startWith(true);
+            defer fixture.finish();
+            const settings = &fixture.settings;
+            const save = settings.btn_save.?;
+            const provider = settings.control_uia_providers[settings.controlIndex(save).?].?;
+            var buf: [64]u8 = undefined;
+            try std.testing.expectEqual(@as(c_int, @intCast(BTN_SAVE)), sys.GetDlgCtrlID(save));
+            try std.testing.expectEqualStrings("Save", try uiaStringProperty(&provider.base, @import("win32_uia/constants.zig").UIA_NamePropertyId, &buf));
+            _ = sys.SendMessageW(settings.fields.combo_cursor_style.?, CB_SETCURSEL, 2, 0);
+            settings.syncCombo(.cursor_style);
+
+            // The prompt makes it "Save and close": its caption, its name
+            // and the id its click and UIA's Invoke post.
+            const names_before = win32_uia.events.testing_property_changes;
+            settings.showClosePrompt();
+            try std.testing.expect(sys.IsWindowVisible(save) != 0 and sys.IsWindowEnabled(save) != 0);
+            try std.testing.expectEqual(@as(c_int, @intCast(BTN_CLOSE_SAVE)), sys.GetDlgCtrlID(save));
+            try std.testing.expectEqualStrings("Save and close", readEditUtf8(save, &buf).?);
+            try std.testing.expectEqualStrings("Save and close", try uiaStringProperty(&provider.base, @import("win32_uia/constants.zig").UIA_NamePropertyId, &buf));
+            try std.testing.expect(win32_uia.events.testing_property_changes > names_before);
+            settings.cancelClosePrompt();
+            try std.testing.expectEqual(@as(c_int, @intCast(BTN_SAVE)), sys.GetDlgCtrlID(save));
+            try std.testing.expectEqualStrings("Save", try uiaStringProperty(&provider.base, @import("win32_uia/constants.zig").UIA_NamePropertyId, &buf));
+
+            // Clicked in the prompt, it saves and closes; in the bar, it
+            // saves and stays.
+            _ = sys.SendMessageW(save, BM_CLICK, 0, 0);
+            try std.testing.expectEqual(@as(u32, 1), fixture.saved);
+            try std.testing.expectEqual(@as(u32, 0), fixture.closed);
+            _ = sys.SendMessageW(settings.fields.combo_cursor_style.?, CB_SETCURSEL, 2, 0);
+            settings.syncCombo(.cursor_style);
+            settings.showClosePrompt();
+            _ = sys.SendMessageW(save, BM_CLICK, 0, 0);
+            dialog_test.pump();
+            try std.testing.expectEqual(@as(u32, 2), fixture.saved);
+            try std.testing.expectEqual(@as(u32, 1), fixture.closed);
         }
     }.body);
 }
@@ -14383,9 +15222,9 @@ test "settings fields, labels and help live in a viewport that clips them" {
             for (settings.field_labels) |label| try std.testing.expectEqual(viewport, sys.GetParent(label.?).?);
             try std.testing.expectEqual(viewport, sys.GetParent(settings.text_help.?).?);
             for ([_]?HWND{
-                settings.text_header,    settings.text_summary,        settings.text_status,
-                settings.btn_save,       settings.btn_conflict_keep,   settings.btn_conflict_use_disk,
-                settings.btn_close_save, settings.btn_discard_changes, settings.btn_close_keep_editing,
+                settings.text_header,         settings.text_summary,           settings.text_status,
+                settings.btn_save,            settings.btn_conflict_keep,      settings.btn_conflict_use_disk,
+                settings.btn_discard_changes, settings.btn_close_keep_editing,
             }) |child| try std.testing.expectEqual(hwnd, sys.GetParent(child.?).?);
             // The UIA subclasses find the window through the control's parent.
             for (0..settings_control_count) |index| {
@@ -16428,7 +17267,7 @@ test "settings a Reset button stays right after its control whatever order the s
                 // fields, so each was checked with its buttons in place.
                 switch (shown) {
                     .appearance, .terminal, .shell, .privacy, .updates => try std.testing.expect(buttons > 0),
-                    .keybindings, .advanced, .reference => try std.testing.expectEqual(@as(usize, 0), buttons),
+                    .profiles, .keybindings, .advanced, .reference => try std.testing.expectEqual(@as(usize, 0), buttons),
                 }
             }
         }
@@ -17159,12 +17998,13 @@ test "settings only the shown page's rows hold Reset buttons, handed on from pag
                 for (settings.reset_buttons) |button| held += @intFromBool(button != null);
                 // A page's rows take spares before any button is made, so the
                 // window holds exactly as many as the most one page has needed;
-                // the All settings page, which has no rows, none at all.
+                // the All settings and Profiles pages, which have no rows, none
+                // at all, and the pages after them start again.
                 most = @max(most, held);
-                if (section == .reference)
-                    try std.testing.expectEqual(@as(usize, 0), held + settings.reset_spare_count)
-                else
-                    try std.testing.expectEqual(most, held + settings.reset_spare_count);
+                if (section == .reference or section == .profiles) {
+                    try std.testing.expectEqual(@as(usize, 0), held + settings.reset_spare_count);
+                    most = 0;
+                } else try std.testing.expectEqual(most, held + settings.reset_spare_count);
                 for (settings.reset_spares[0..settings.reset_spare_count]) |spare| try std.testing.expect(sys.IsWindowVisible(spare) == 0);
                 for (0..form_field_count) |index| {
                     const on_page = if (settings.controlSection(index)) |page| page == section else false;
@@ -18877,6 +19717,10 @@ fn recoverOwner(hwnd: HWND) ?*SettingsWindow {
 /// (`ReferenceList`, one class for both).
 const REFERENCE_LIST: usize = 310;
 const KEYBIND_LIST: usize = 311;
+const PROFILE_LIST: usize = 312;
+/// The Profiles page's field being typed into (`ProfileEdit`), a child of its
+/// list.
+const PROFILE_EDIT: usize = 313;
 const reference_list_class_name = std.unicode.utf8ToUtf16LeStringLiteral("noctty.win32.settings.list");
 /// The commands of a list's context menu.
 const reference_menu_copy: usize = 1;
@@ -18894,19 +19738,151 @@ const reference_read_only_note = "Settings has no control for this setting: chan
 const keybind_default_note = "One of noctty's default bindings.";
 const keybind_set_note = "Not one of the default bindings: the config file sets it.";
 
-/// Which list a `ReferenceList` is: the All settings page's keys, or the
-/// Keybindings page's bindings.
+/// Which list a `ReferenceList` is: the All settings page's keys, the
+/// Keybindings page's bindings, or the Profiles page's profiles and fields.
 const ListKind = enum {
     reference,
     keybindings,
+    profiles,
 
     fn copyLabel(self: ListKind) []const u8 {
         return switch (self) {
             .reference => "Copy name (Ctrl+C)",
             .keybindings => "Copy binding (Ctrl+C)",
+            // The Profiles list has no Copy (`ensureMetrics`).
+            .profiles => "",
         };
     }
 };
+/// The Profiles page's menu item that starts a profile.
+const profile_menu_new: usize = 5;
+/// What the Profiles list's UIA help text says: the keys it takes.
+const profile_list_help = "Up and Down move through your profiles and their fields: command line, name, starting folder and variables. " ++
+    "Enter edits the selected field, Delete removes it (a profile asks twice), Insert or Ctrl+N adds a profile, and Shift+F10 offers these.";
+/// The help text of the field being typed into.
+const profile_edit_help = "Enter keeps the change and Escape cancels it. Save writes your changes to the config file.";
+
+/// The field of the Profiles page being typed into: one stock EDIT, made when
+/// typing starts and destroyed when it ends, a child of the list, over the
+/// open row (`SettingsWindow.beginProfileEdit`). It is the one window the page
+/// adds while it is shown.
+const ProfileEdit = struct {
+    pub const Kind = enum {
+        /// A new profile's id, then (`new_command`) its command line.
+        new_id,
+        new_command,
+        command,
+        name,
+        folder,
+        /// A variable's value.
+        variable,
+        /// A new variable, as `NAME=VALUE`.
+        new_variable,
+    };
+
+    hwnd: ?HWND = null,
+    kind: Kind,
+    /// The row typed into (`settings_profiles.Row.identity`).
+    row: u64,
+    id_buf: [profile_map.max_id_len]u8 = undefined,
+    id_len: usize = 0,
+    /// `.variable`: its name (the window's allocator's).
+    name: ?[]u8 = null,
+    /// Its UIA name (`writeLabel`), which its provider holds a view of.
+    label_buf: [160]u8 = undefined,
+    label_len: usize = 0,
+    provider: ?*win32_uia.SettingsControlProvider = null,
+
+    fn setId(self: *ProfileEdit, id_text: []const u8) void {
+        const len = @min(id_text.len, self.id_buf.len);
+        @memcpy(self.id_buf[0..len], id_text[0..len]);
+        self.id_len = len;
+    }
+
+    fn id(self: *const ProfileEdit) []const u8 {
+        return self.id_buf[0..self.id_len];
+    }
+
+    /// Its UIA name: the field and whose it is, never its value.
+    fn writeLabel(self: *ProfileEdit) void {
+        var writer: std.Io.Writer = .fixed(&self.label_buf);
+        switch (self.kind) {
+            .new_id => writer.writeAll("Id of the new profile") catch {},
+            .new_command, .command => writer.print("Command line of {s}", .{self.id()}) catch {},
+            .name => writer.print("Name of {s}", .{self.id()}) catch {},
+            .folder => writer.print("Starting folder of {s}", .{self.id()}) catch {},
+            .variable => writer.print("Value of {s} of {s}", .{ self.name orelse "", self.id() }) catch {},
+            .new_variable => writer.print("New variable of {s}, as NAME=VALUE", .{self.id()}) catch {},
+        }
+        self.label_len = utf8Prefix(writer.buffered()).len;
+    }
+
+    fn label(self: *const ProfileEdit) []const u8 {
+        return self.label_buf[0..self.label_len];
+    }
+};
+
+/// A Profiles page action's label ("Edit (Enter)") as a menu item
+/// ("&Edit\tEnter"), in `buf`.
+fn profileMenuLabel(buf: []u8, action: []const u8) []const u8 {
+    if (std.mem.startsWith(u8, action, "Remove")) return "&Remove profile\tDelete";
+    const open = std.mem.lastIndexOf(u8, action, " (") orelse return action;
+    if (!std.mem.endsWith(u8, action, ")")) return action;
+    return std.fmt.bufPrint(buf, "&{s}\t{s}", .{ action[0..open], action[open + 2 .. action.len - 1] }) catch action;
+}
+
+/// The settings window a list window (`referenceListProc`) belongs to.
+fn listOwner(list: HWND) ?*SettingsWindow {
+    const raw = sys.GetWindowLongPtrW(list, GWLP_USERDATA);
+    if (raw == 0) return null;
+    const state: *ReferenceList = @ptrFromInt(@as(usize, @intCast(raw)));
+    return state.owner();
+}
+
+/// The Profiles page's field (`ProfileEdit`). Tab keeps what it holds, as
+/// Enter does (`handleAccelerator` takes Enter and Escape before the dialog
+/// manager); the focus leaving it keeps it too, once the focus has landed
+/// (`WM_SETTINGS_PROFILE_BLUR`); UIA finds its provider here. The previous
+/// procedure lives in `GWLP_USERDATA` (`subclassKeepingPrevious`).
+fn profileEditProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.winapi) LRESULT {
+    const previous = sys.GetWindowLongPtrW(hwnd, GWLP_USERDATA);
+    if (previous == 0) return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
+    const proc: *const anyopaque = @ptrFromInt(@as(usize, @intCast(previous)));
+    const list_hwnd = sys.GetParent(hwnd);
+    const settings: ?*SettingsWindow = if (list_hwnd) |list| listOwner(list) else null;
+    const provider: ?*win32_uia.SettingsControlProvider = if (settings) |owner|
+        (if (owner.profile_edit) |edit| (if (edit.hwnd == hwnd) edit.provider else null) else null)
+    else
+        null;
+    switch (msg) {
+        WM_GETDLGCODE => return sys.CallWindowProcW(proc, hwnd, msg, wParam, lParam) | DLGC_WANTTAB,
+        WM_KEYDOWN => if (wParam == VK_TAB) {
+            if (settings) |owner| _ = owner.commitProfileEdit(.stay);
+            return 0;
+        },
+        // What Tab, Enter and Escape would type: they are keys here.
+        WM_CHAR => if (wParam == '\t' or wParam == '\r' or wParam == 0x1B) return 0,
+        WM_KILLFOCUS => if (list_hwnd) |list| {
+            _ = sys.PostMessageW(list, WM_SETTINGS_PROFILE_BLUR, 0, 0);
+        },
+        WM_SETFOCUS => {
+            const result = sys.CallWindowProcW(proc, hwnd, msg, wParam, lParam);
+            if (provider) |field| field.raiseFocusChanged();
+            return result;
+        },
+        WM_GETOBJECT => if (provider) |field| {
+            if (win32_uia.returnSettingsControlProvider(hwnd, wParam, lParam, field)) |result| return result;
+        },
+        WM_NCDESTROY => {
+            if (settings) |owner| owner.profileEditDestroyed(hwnd);
+            _ = sys.SetWindowLongPtrW(hwnd, GWLP_WNDPROC, previous);
+            _ = sys.SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+            return sys.CallWindowProcW(proc, hwnd, msg, wParam, lParam);
+        },
+        else => {},
+    }
+    return sys.CallWindowProcW(proc, hwnd, msg, wParam, lParam);
+}
 const CS_DBLCLKS: u32 = 0x0008;
 const WM_LBUTTONDBLCLK: UINT = 0x0203;
 const SIF_DISABLENOSCROLL: u32 = 0x0008;
@@ -18984,12 +19960,18 @@ const ReferenceList = struct {
         open_width: i32,
         edit_width: i32,
         action_gap: i32,
+        /// The Profiles page: whether a field is being typed into, and the
+        /// room its text field takes under the open row's title (zero
+        /// otherwise).
+        editing: bool = false,
+        field: i32 = 0,
     };
 
     fn owner(self: *ReferenceList) *SettingsWindow {
         return switch (self.kind) {
             .reference => @fieldParentPtr("reference_list", self),
             .keybindings => @fieldParentPtr("keybind_list", self),
+            .profiles => @fieldParentPtr("profile_list", self),
         };
     }
 
@@ -18997,7 +19979,17 @@ const ReferenceList = struct {
         return switch (self.kind) {
             .reference => @fieldParentPtr("reference_list", self),
             .keybindings => @fieldParentPtr("keybind_list", self),
+            .profiles => @fieldParentPtr("profile_list", self),
         };
+    }
+
+    /// How far right of the others row `id` starts: a profile's fields sit
+    /// under it.
+    fn indentOf(self: *const ReferenceList, metrics: Metrics, id: u16) i32 {
+        if (self.kind != .profiles) return 0;
+        const model = &self.ownerConst().profile_model;
+        if (id >= model.rows.len or !model.rows[id].kind.isField()) return 0;
+        return metrics.pad_x;
     }
 
     fn forgetOpenText(self: *ReferenceList, alloc: std.mem.Allocator) void {
@@ -19028,6 +20020,7 @@ const ReferenceList = struct {
         const rows: usize = switch (self.kind) {
             .reference => settings_reference.key_count,
             .keybindings => self.ownerConst().keybind_model.rows.len,
+            .profiles => self.ownerConst().profile_model.rows.len,
         };
         return if (id < rows) id else null;
     }
@@ -19038,6 +20031,7 @@ const ReferenceList = struct {
         return switch (self.kind) {
             .reference => settings.reference_model.built(),
             .keybindings => settings.keybind_model.built(),
+            .profiles => settings.profile_model.built(),
         };
     }
 
@@ -19047,6 +20041,7 @@ const ReferenceList = struct {
         return switch (self.kind) {
             .reference => settings.reference_generation,
             .keybindings => settings.keybind_generation,
+            .profiles => settings.profile_generation,
         };
     }
 
@@ -19077,6 +20072,11 @@ const ReferenceList = struct {
                 name.writeAll(row.trigger) catch {};
                 value.writeAll(row.action) catch {};
             },
+            .profiles => {
+                const model = &settings.profile_model;
+                name.writeAll(model.title(model.rows[id])) catch {};
+                model.writeValue(model.rows[id], value) catch {};
+            },
         }
     }
 
@@ -19087,11 +20087,16 @@ const ReferenceList = struct {
         return switch (self.kind) {
             .reference => settings_reference.notes[id] orelse settings.reference_model.rows[id].summary,
             .keybindings => settings.keybind_model.rows[id].summary,
+            .profiles => settings.profile_model.summary(settings.profile_model.rows[id]),
         };
     }
 
     /// Whether the row has no value to show (drawn in the secondary colour).
     fn emptyValue(self: *const ReferenceList, id: u16) bool {
+        if (self.kind == .profiles) {
+            const model = &self.ownerConst().profile_model;
+            return model.emptyValue(model.rows[id]);
+        }
         if (self.kind != .reference) return false;
         const row = &self.ownerConst().reference_model.rows[id];
         return row.value.len == 0 and row.more == 0;
@@ -19100,8 +20105,8 @@ const ReferenceList = struct {
     /// The open row's text: its description, and where it comes from (or,
     /// for a key Settings has no control for, that it is changed in the config
     /// file), in `body` and `location`.
-    fn writeOpenText(self: *const ReferenceList, id: u16, body: *std.Io.Writer, location: *std.Io.Writer) !void {
-        const settings = self.ownerConst();
+    fn writeOpenText(self: *ReferenceList, id: u16, body: *std.Io.Writer, location: *std.Io.Writer) !void {
+        const settings = self.owner();
         switch (self.kind) {
             .reference => {
                 const row = &settings.reference_model.rows[id];
@@ -19121,6 +20126,11 @@ const ReferenceList = struct {
                 // not known.
                 if (settings.keybind_model.compared) try location.writeAll(if (row.differs) keybind_set_note else keybind_default_note);
             },
+            .profiles => {
+                const row = settings.profile_model.rows[id];
+                try settings.profile_model.writeHelp(row, body);
+                try settings.writeProfileOrigin(row, location);
+            },
         }
     }
 
@@ -19137,6 +20147,7 @@ const ReferenceList = struct {
         self.metrics = null;
         self.syncScroll();
         if (self.hwnd) |hwnd| _ = InvalidateRect(hwnd, null, 0);
+        if (self.kind == .profiles) self.owner().placeProfileEdit();
     }
 
     fn clientHeight(self: *const ReferenceList) i32 {
@@ -19155,9 +20166,10 @@ const ReferenceList = struct {
         if (GetClientRect(hwnd, &client) == 0) return null;
         const position = self.selectedPosition();
         const open_key: ?u16 = if (position != null) self.selected else null;
+        const editing = self.kind == .profiles and settings.profile_edit != null;
         if (self.metrics) |metrics| {
             if (metrics.dpi == settings.dpi and metrics.width == client.right and metrics.font_builds == settings.font_builds and
-                metrics.generation == self.generation() and metrics.open_key == open_key) return metrics;
+                metrics.generation == self.generation() and metrics.open_key == open_key and metrics.editing == editing) return metrics;
         }
         var metrics: Metrics = .{
             .dpi = settings.dpi,
@@ -19179,19 +20191,28 @@ const ReferenceList = struct {
             .open_width = 0,
             .edit_width = 0,
             .action_gap = settings.px(settings_metrics.space_8),
+            .editing = editing,
         };
         metrics.row = 2 * metrics.pad_y + metrics.title + metrics.gap + metrics.line;
         metrics.open = metrics.row;
         if (open_key) |key| {
             self.ensureOpenText(key);
-            const width = textWidth(metrics);
+            const width = @max(1, textWidth(metrics) - self.indentOf(metrics, key));
             if (self.open_body) |text| metrics.body = measureWrapped(hwnd, settings.ui_font, text, width);
             if (self.open_location) |text| metrics.location = measureWrapped(hwnd, settings.secondary_font, text, width);
             var label_w: [64]u16 = undefined;
-            if (self.editLabel(key, &label_w)) |label| metrics.edit_width = measureLine(hwnd, settings.secondary_font, label);
-            if (settings.handle.copyText != null) metrics.copy_width = measureLine(hwnd, settings.secondary_font, utf8ToW(&label_w, self.kind.copyLabel()));
-            metrics.open_width = measureLine(hwnd, settings.secondary_font, std.unicode.utf8ToUtf16LeStringLiteral(reference_open_label));
-            metrics.open = 2 * metrics.pad_y + metrics.title + metrics.gap + metrics.body +
+            if (self.kind == .profiles) {
+                // Its actions: what Enter and Delete do, and no Copy or Open.
+                const actions = settings.profileActions(settings.profile_model.rows[key]);
+                if (actions.enter) |label| metrics.edit_width = measureLine(hwnd, settings.secondary_font, utf8ToW(&label_w, label));
+                if (actions.delete) |label| metrics.copy_width = measureLine(hwnd, settings.secondary_font, utf8ToW(&label_w, label));
+                if (editing) metrics.field = settings.px(settings_control_height) + metrics.gap;
+            } else {
+                if (self.editLabel(key, &label_w)) |label| metrics.edit_width = measureLine(hwnd, settings.secondary_font, label);
+                if (settings.handle.copyText != null) metrics.copy_width = measureLine(hwnd, settings.secondary_font, utf8ToW(&label_w, self.kind.copyLabel()));
+                metrics.open_width = measureLine(hwnd, settings.secondary_font, std.unicode.utf8ToUtf16LeStringLiteral(reference_open_label));
+            }
+            metrics.open = 2 * metrics.pad_y + metrics.title + metrics.gap + metrics.field + metrics.body +
                 (if (metrics.location > 0) metrics.gap + metrics.location else 0) +
                 metrics.gap + metrics.line + metrics.pad_y;
         }
@@ -19294,6 +20315,7 @@ const ReferenceList = struct {
         self.syncScroll();
         if (self.scroll_y == before) return;
         if (self.hwnd) |hwnd| _ = InvalidateRect(hwnd, null, 0);
+        if (self.kind == .profiles) self.owner().placeProfileEdit();
     }
 
     /// Scroll so the selected row is in view: all of it when it fits, else
@@ -19320,6 +20342,7 @@ const ReferenceList = struct {
         if (position >= self.shown_count) return;
         const key = self.shown[position];
         if (self.selected != null and self.selected.? == key) return self.revealSelected(.unless_shown);
+        if (self.kind == .profiles) self.owner().disarmProfileRemoval();
         self.selected = key;
         self.metrics = null;
         self.revealSelected(.whole);
@@ -19357,6 +20380,8 @@ const ReferenceList = struct {
     fn invokeSelected(self: *ReferenceList) void {
         if (self.selectedPosition() == null) return;
         const settings = self.owner();
+        // A profile's row edits its field, or starts a profile or a variable.
+        if (self.kind == .profiles) return settings.profileInvoke();
         settings.handle.openInEditor(settings.handle.ctx);
     }
 
@@ -19368,6 +20393,9 @@ const ReferenceList = struct {
         switch (self.kind) {
             .reference => settings.copyReferenceKey(self.selected.?),
             .keybindings => settings.copyKeybind(self.selected.?),
+            // Nothing to copy: its open row's second action is Remove
+            // (`press`, `profileActions`).
+            .profiles => {},
         }
     }
 
@@ -19375,6 +20403,10 @@ const ReferenceList = struct {
     /// Settings has a control for it. True when it did.
     fn editSelected(self: *ReferenceList) bool {
         if (self.selectedPosition() == null) return false;
+        if (self.kind == .profiles) {
+            self.owner().profileInvoke();
+            return true;
+        }
         const field = self.editField(self.selected.?) orelse return false;
         // The switch destroys this list, whose window may be the one handling
         // the key or click: nothing of it is used after.
@@ -19388,14 +20420,15 @@ const ReferenceList = struct {
     fn actionRects(self: *ReferenceList, metrics: Metrics) struct { edit: ?RECT, copy: ?RECT, open: ?RECT } {
         const position = self.selectedPosition() orelse return .{ .edit = null, .copy = null, .open = null };
         const top = rowTop(metrics, position, position) - self.scroll_y;
-        const y = top + 2 * metrics.pad_y + metrics.title + metrics.gap + metrics.body +
+        const y = top + 2 * metrics.pad_y + metrics.title + metrics.gap + metrics.field + metrics.body +
             (if (metrics.location > 0) metrics.gap + metrics.location else 0) + metrics.gap;
-        var x = metrics.pad_x + metrics.bar;
+        var x = metrics.pad_x + metrics.bar + self.indentOf(metrics, self.shown[position]);
         const edit: ?RECT = if (metrics.edit_width > 0) .{ .left = x, .top = y, .right = x + metrics.edit_width, .bottom = y + metrics.line } else null;
         if (edit) |rect| x = rect.right + metrics.action_gap;
         const copy: ?RECT = if (metrics.copy_width > 0) .{ .left = x, .top = y, .right = x + metrics.copy_width, .bottom = y + metrics.line } else null;
         if (copy) |rect| x = rect.right + metrics.action_gap;
-        return .{ .edit = edit, .copy = copy, .open = .{ .left = x, .top = y, .right = x + metrics.open_width, .bottom = y + metrics.line } };
+        const open: ?RECT = if (metrics.open_width > 0) .{ .left = x, .top = y, .right = x + metrics.open_width, .bottom = y + metrics.line } else null;
+        return .{ .edit = edit, .copy = copy, .open = open };
     }
 
     /// What is under a point of the list.
@@ -19424,7 +20457,18 @@ const ReferenceList = struct {
             self.pressed = .none;
             return;
         }
+        // What the press is on, as the user saw it.
         const hit = self.hitTest(point);
+        // The Profiles page's field keeps what it holds first. A value
+        // Settings refuses stops the click (`profileEditDone`), and so does a
+        // kept change, which may have moved the rows under it.
+        if (self.kind == .profiles and self.owner().profile_edit != null) {
+            const before = self.generation();
+            if (!self.owner().profileEditDone() or self.generation() != before) {
+                self.pressed = .none;
+                return;
+            }
+        }
         self.pressed = if (kind == .left) hit else .none;
         if (self.hwnd) |hwnd| if (GetFocus() != hwnd) {
             self.clicking = true;
@@ -19437,7 +20481,9 @@ const ReferenceList = struct {
                 self.pressed = .none;
                 _ = self.editSelected();
             },
-            .copy => if (kind == .left) self.copySelected(),
+            .copy => if (kind == .left) {
+                if (self.kind == .profiles) self.owner().profileDelete() else self.copySelected();
+            },
             .open => if (kind == .left) self.invokeSelected(),
             .row => |position| self.selectPosition(position),
         }
@@ -19467,6 +20513,7 @@ const ReferenceList = struct {
         }
         const menu = sys.CreatePopupMenu() orelse return;
         defer _ = sys.DestroyMenu(menu);
+        if (self.kind == .profiles) return settings.showProfileMenu(menu, at, frame);
         if (self.editField(self.selected.?)) |field| {
             var item: [64]u8 = undefined;
             var item_w: [64]u16 = undefined;
@@ -19476,6 +20523,7 @@ const ReferenceList = struct {
         if (settings.handle.copyText != null) _ = sys.AppendMenuW(menu, MF_STRING, reference_menu_copy, switch (self.kind) {
             .reference => std.unicode.utf8ToUtf16LeStringLiteral("&Copy name\tCtrl+C"),
             .keybindings => std.unicode.utf8ToUtf16LeStringLiteral("&Copy binding\tCtrl+C"),
+            .profiles => unreachable,
         });
         _ = sys.AppendMenuW(menu, MF_STRING, reference_menu_open, std.unicode.utf8ToUtf16LeStringLiteral("&Open config file\tEnter"));
         const picked: usize = if (settings.context_menu_pick) |pick|
@@ -19500,12 +20548,26 @@ const ReferenceList = struct {
             focus_cue.vk_prior => self.turnPage(false),
             focus_cue.vk_next => self.turnPage(true),
             'C' => {
-                if (!win32_input.keyPressed(VK_CONTROL) or win32_input.keyPressed(VK_MENU) or win32_input.keyPressed(VK_SHIFT)) return false;
+                if (self.kind == .profiles or !win32_input.keyPressed(VK_CONTROL) or win32_input.keyPressed(VK_MENU) or win32_input.keyPressed(VK_SHIFT)) return false;
                 self.copySelected();
             },
             VK_F2 => {
                 if (win32_input.keyPressed(VK_CONTROL) or win32_input.keyPressed(VK_MENU) or win32_input.keyPressed(VK_SHIFT)) return false;
                 return self.editSelected();
+            },
+            // The Profiles page: Delete removes what is selected, and Insert
+            // or Ctrl+N starts a profile.
+            VK_DELETE => {
+                if (self.kind != .profiles or win32_input.keyPressed(VK_CONTROL) or win32_input.keyPressed(VK_MENU) or win32_input.keyPressed(VK_SHIFT)) return false;
+                self.owner().profileDelete();
+            },
+            VK_INSERT => {
+                if (self.kind != .profiles or win32_input.keyPressed(VK_CONTROL) or win32_input.keyPressed(VK_MENU) or win32_input.keyPressed(VK_SHIFT)) return false;
+                self.owner().profileNew();
+            },
+            'N' => {
+                if (self.kind != .profiles or !win32_input.keyPressed(VK_CONTROL) or win32_input.keyPressed(VK_MENU) or win32_input.keyPressed(VK_SHIFT)) return false;
+                self.owner().profileNew();
             },
             else => return false,
         }
@@ -19591,7 +20653,7 @@ const ReferenceList = struct {
     /// and then its value or action, from `left`.
     fn paintTitle(self: *ReferenceList, hdc: HDC, metrics: Metrics, row: RECT, key: u16, text_color: COLORREF, value_color: COLORREF) void {
         const settings = self.owner();
-        const left = row.left + metrics.pad_x + metrics.bar;
+        const left = row.left + metrics.pad_x + metrics.bar + self.indentOf(metrics, key);
         const right = row.right - metrics.pad_x;
         const y = row.top + metrics.pad_y;
         var name_buf: [192]u8 = undefined;
@@ -19627,7 +20689,7 @@ const ReferenceList = struct {
         defer _ = SelectObject(hdc, previous);
         _ = SetTextColor(hdc, colors.secondary_text);
         const y = row.top + metrics.pad_y + metrics.title + metrics.gap;
-        var line_rect: RECT = .{ .left = row.left + metrics.pad_x + metrics.bar, .top = y, .right = row.right - metrics.pad_x, .bottom = y + metrics.line };
+        var line_rect: RECT = .{ .left = row.left + metrics.pad_x + metrics.bar + self.indentOf(metrics, key), .top = y, .right = row.right - metrics.pad_x, .bottom = y + metrics.line };
         _ = DrawTextW(hdc, utf8ToW(&line_w, utf8Prefix(line_text[0..@min(line_text.len, line_w.len - 1)])), -1, &line_rect, DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
         if (separator) {
             const stroke = @max(1, settings.px(settings_metrics.stroke_hairline));
@@ -19647,9 +20709,11 @@ const ReferenceList = struct {
         fillSolid(hdc, band, colors.selection_bg);
         fillSolid(hdc, .{ .left = band.left, .top = band.top, .right = band.left + metrics.bar, .bottom = row.bottom - ring_width }, colors.accent);
         self.paintTitle(hdc, metrics, row, key, colors.selection_text, colors.selection_text);
-        const left = row.left + metrics.pad_x + metrics.bar;
+        const left = row.left + metrics.pad_x + metrics.bar + self.indentOf(metrics, key);
         const right = row.right - metrics.pad_x;
-        var y = band.bottom + metrics.gap;
+        // The Profiles page's text field, while one is typed into, sits here
+        // (`placeProfileEdit`).
+        var y = band.bottom + metrics.gap + metrics.field;
         const previous = SelectObject(hdc, settings.ui_font);
         defer _ = SelectObject(hdc, previous);
         if (self.open_body) |text| {
@@ -19669,13 +20733,15 @@ const ReferenceList = struct {
         const actions = self.actionRects(metrics);
         _ = SetTextColor(hdc, referenceActionColor(colors));
         var label_w: [64]u16 = undefined;
-        if (actions.edit) |rect| if (self.editLabel(key, &label_w)) |label| {
+        const profile_actions: ?SettingsWindow.ProfileActions = if (self.kind == .profiles) settings.profileActions(settings.profile_model.rows[key]) else null;
+        if (actions.edit) |rect| if (if (profile_actions) |labels| (if (labels.enter) |text| utf8ToW(&label_w, text) else null) else self.editLabel(key, &label_w)) |label| {
             var edit_rect = rect;
             _ = DrawTextW(hdc, label, -1, &edit_rect, DT_SINGLELINE | DT_NOPREFIX);
         };
         if (actions.copy) |rect| {
             var copy_rect = rect;
-            _ = DrawTextW(hdc, utf8ToW(&label_w, self.kind.copyLabel()), -1, &copy_rect, DT_SINGLELINE | DT_NOPREFIX);
+            const label = if (profile_actions) |labels| labels.delete orelse "" else self.kind.copyLabel();
+            _ = DrawTextW(hdc, utf8ToW(&label_w, label), -1, &copy_rect, DT_SINGLELINE | DT_NOPREFIX);
         }
         if (actions.open) |rect| {
             var open_rect = rect;
@@ -19796,6 +20862,7 @@ fn referenceListUiaState(list: *ReferenceList) win32_uia.PaletteListState {
         .help_text = switch (list.kind) {
             .reference => reference_list_help,
             .keybindings => keybind_list_help,
+            .profiles => profile_list_help,
         },
         .row_help = &referenceUiaRowHelp,
         .focus_selected_row = true,
@@ -19812,6 +20879,7 @@ fn referenceUiaName(ctx: *anyopaque, buf: []u8) []const u8 {
     return switch (referenceOwner(ctx).kind) {
         .reference => "All settings",
         .keybindings => "Key bindings",
+        .profiles => "Profiles",
     };
 }
 
@@ -19834,6 +20902,11 @@ fn referenceUiaRowName(ctx: *anyopaque, index: usize, buf: []u8) []const u8 {
     const list = referenceOwner(ctx);
     const id = list.shownId(index) orelse return "";
     var writer: std.Io.Writer = .fixed(buf);
+    if (list.kind == .profiles) {
+        const model = &list.ownerConst().profile_model;
+        model.writeUiaName(model.rows[id], &writer) catch {};
+        return utf8Prefix(writer.buffered());
+    }
     var value_buf: [512]u8 = undefined;
     var value: std.Io.Writer = .fixed(&value_buf);
     list.writeTitle(id, &writer, &value);
@@ -19873,6 +20946,7 @@ fn referenceUiaRowId(ctx: *anyopaque, index: usize) u64 {
     return switch (list.kind) {
         .reference => @as(u64, id) + 1,
         .keybindings => list.ownerConst().keybind_model.rows[id].id,
+        .profiles => list.ownerConst().profile_model.rows[id].identity,
     };
 }
 
@@ -19927,11 +21001,24 @@ fn referenceListProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) call
         WM_SIZE => {
             list.syncScroll();
             _ = InvalidateRect(hwnd, null, 0);
+            if (list.kind == .profiles) owner.placeProfileEdit();
+            return 0;
+        },
+        // The Profiles page's text field takes the window's colours, as the
+        // form's do.
+        WM_CTLCOLOREDIT => if (owner.hwnd) |frame| return sys.SendMessageW(frame, msg, wParam, lParam),
+        WM_SETTINGS_PROFILE_BLUR => {
+            owner.profileEditBlurred();
             return 0;
         },
         WM_GETDLGCODE => return DLGC_WANTARROWS | DLGC_WANTCHARS,
         WM_KEYDOWN => {
             noteSettingsInput(owner, msg, wParam);
+            // A held Delete, Insert or Ctrl+N acts once on the Profiles page:
+            // repeats would run through its rows, the second Delete a
+            // removal asks for included.
+            if (list.kind == .profiles and (lParam & (1 << 30)) != 0 and
+                (wParam == VK_DELETE or wParam == VK_INSERT or wParam == 'N')) return 0;
             if (list.keyDown(wParam)) return 0;
         },
         WM_SETFOCUS => {
@@ -20004,6 +21091,466 @@ fn uiaStringProperty(element: *@import("win32_uia/com.zig").IRawElementProviderS
     try std.testing.expectEqual(@as(u16, com.VT_BSTR), value.vt);
     const bstr = value.value.bstr.?;
     return buf[0..try std.unicode.utf16LeToUtf8(buf, bstr[0..com.SysStringLen(bstr)])];
+}
+
+/// A Settings window on the config file `text` (`noctty.conf` in `tmp`),
+/// which its Save writes and reads back. `path` is the caller's to free once
+/// the fixture is finished.
+fn profileFixture(tmp: *std.testing.TmpDir, text: []const u8, path: *[]u8) !*dialog_test.Fixture {
+    const alloc = std.testing.allocator;
+    try tmp.dir.writeFile(.{ .sub_path = "noctty.conf", .data = text });
+    path.* = try tmp.dir.realpathAlloc(alloc, "noctty.conf");
+    errdefer alloc.free(path.*);
+    const fixture = try dialog_test.Fixture.prepare(true);
+    errdefer fixture.finish();
+    try fixture.config.loadFile(alloc, path.*);
+    try fixture.config.loadRecursiveFiles(alloc);
+    fixture.save_path = path.*;
+    fixture.reload_from_disk = true;
+    try fixture.settings.open();
+    fixture.settings.setActiveSection(.profiles);
+    _ = SetFocus(fixture.settings.profile_list.hwnd.?);
+    return fixture;
+}
+
+/// The Profiles page's field being typed into; a test that expects one fails,
+/// rather than panics, when there is none.
+fn openEdit(settings: *SettingsWindow) !*ProfileEdit {
+    return if (settings.profile_edit) |*edit| edit else error.TestExpectedProfileEdit;
+}
+
+fn profileRowName(settings: *SettingsWindow, position: usize, buf: []u8) []const u8 {
+    return referenceUiaRowName(&settings.profile_list, position, buf);
+}
+
+test "settings the Profiles page lists the profiles and their fields, made with its page and gone with it" {
+    try dialog_test.onHiddenDesktop(struct {
+        fn body() !void {
+            // Keys read as pressed alone, whatever the live keyboard holds.
+            const keyboard = win32_input.TestingKeyboard.pinNone();
+            defer keyboard.release();
+            const alloc = std.testing.allocator;
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var path: []u8 = &.{};
+            const fixture = try profileFixture(&tmp, "profile-command = py: python.exe\nprofile-name = py: Python\nprofile-env = py: MODE=1\n", &path);
+            defer alloc.free(path);
+            defer fixture.finish();
+            const settings = &fixture.settings;
+            const Tree = dialog_test.OpenWork.Tree;
+            const list = settings.profile_list.hwnd.?;
+            try std.testing.expect(sys.IsWindowVisible(list) != 0);
+            // New profile, the profile, its three fields, its variable and
+            // Add variable, each a ListItem a reader can name.
+            try std.testing.expectEqual(@as(usize, 7), settings.profile_list.shown_count);
+            var buf: [256]u8 = undefined;
+            try std.testing.expectEqualStrings("New profile", profileRowName(settings, 0, &buf));
+            try std.testing.expectEqualStrings("Python, profile user:py", profileRowName(settings, 1, &buf));
+            try std.testing.expectEqualStrings("Command line of py, python.exe", profileRowName(settings, 2, &buf));
+            try std.testing.expectEqualStrings("Starting folder of py, none", profileRowName(settings, 4, &buf));
+            try std.testing.expectEqualStrings("MODE of py, 1", profileRowName(settings, 5, &buf));
+            try std.testing.expectEqualStrings("Profiles", referenceUiaName(&settings.profile_list, &buf));
+            // The open row says where the field is set.
+            settings.profile_list.selectPosition(2);
+            var help_buf: [2048]u8 = undefined;
+            const help = referenceUiaRowHelp(&settings.profile_list, 2, &help_buf);
+            try std.testing.expect(std.mem.endsWith(u8, help, "Set in noctty.conf, line 1"));
+
+            // The page is one window, and another page takes it away.
+            settings.setActiveSection(.terminal);
+            try std.testing.expectEqual(@as(?HWND, null), settings.profile_list.hwnd);
+            try std.testing.expect(sys.IsWindow(list) == 0);
+            const without_list = Tree.of(fixture.hwnd()).len;
+            settings.setActiveSection(.profiles);
+            try std.testing.expectEqual(without_list + 1, Tree.of(fixture.hwnd()).len);
+            settings.setActiveSection(.terminal);
+            try std.testing.expectEqual(without_list, Tree.of(fixture.hwnd()).len);
+            try dialog_test.expectNothingStale(fixture.hwnd());
+        }
+    }.body);
+}
+
+test "settings a profile's field is typed into in place, and Save writes its line alone" {
+    try dialog_test.onHiddenDesktop(struct {
+        fn body() !void {
+            // Keys read as pressed alone, whatever the live keyboard holds.
+            const keyboard = win32_input.TestingKeyboard.pinNone();
+            defer keyboard.release();
+            const alloc = std.testing.allocator;
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var path: []u8 = &.{};
+            const text = "# mine\nprofile-command = py: python.exe\nprofile-name = py: Python\nprofile-command = other: o.exe\n";
+            const fixture = try profileFixture(&tmp, text, &path);
+            defer alloc.free(path);
+            defer fixture.finish();
+            const settings = &fixture.settings;
+            const Tree = dialog_test.OpenWork.Tree;
+            const list = &settings.profile_list;
+            list.selectPosition(2);
+            const windows_before = Tree.of(fixture.hwnd()).len;
+
+            // Enter opens a text field on the row: one window more, named
+            // after the field for UIA, holding the value.
+            try std.testing.expect(fixture.pumpKey(VK_RETURN));
+            const edit = (try openEdit(settings)).hwnd.?;
+            try std.testing.expectEqual(edit, sys.GetFocus().?);
+            try std.testing.expectEqual(windows_before + 1, Tree.of(fixture.hwnd()).len);
+            var buf: [256]u8 = undefined;
+            try std.testing.expectEqualStrings("python.exe", readEditUtf8(edit, &buf).?);
+            const provider = (try openEdit(settings)).provider.?;
+            const constants = @import("win32_uia/constants.zig");
+            try std.testing.expectEqualStrings("Command line of py", try uiaStringProperty(&provider.base, constants.UIA_NamePropertyId, &buf));
+            // It sits on its row, under the row's title.
+            const row_top = ReferenceList.rowTop(list.ensureMetrics().?, 2, 2) - list.scroll_y;
+            try std.testing.expect(dialog_test.rectIn(list.hwnd.?, edit).top > row_top);
+
+            // The focus leaving the window (Alt+Tab) keeps the field open.
+            typeInto(edit, "  python.exe -X utf8  ");
+            const other = sys.CreateWindowExW(0, std.unicode.utf8ToUtf16LeStringLiteral("STATIC"), std.unicode.utf8ToUtf16LeStringLiteral(""), 0x80000000 | 0x10000000, 0, 0, 1, 1, null, null, null, null).?; // WS_POPUP | WS_VISIBLE
+            defer _ = sys.DestroyWindow(other);
+            _ = SetFocus(other);
+            dialog_test.pump();
+            try std.testing.expectEqual(edit, (try openEdit(settings)).hwnd.?);
+            _ = SetFocus(edit);
+
+            // Enter keeps it, trimmed; the field goes and the focus is back on
+            // the list.
+            try std.testing.expect(fixture.pumpKey(VK_RETURN));
+            try std.testing.expect(settings.profile_edit == null);
+            try std.testing.expect(sys.IsWindow(edit) == 0);
+            try std.testing.expectEqual(list.hwnd.?, sys.GetFocus().?);
+            try std.testing.expectEqual(windows_before, Tree.of(fixture.hwnd()).len);
+            try std.testing.expect(settings.hasPendingChanges());
+            try std.testing.expect(settings.canSave());
+            try std.testing.expectEqual(@as(usize, 1), settings.pendingFieldCount());
+            try std.testing.expectEqualStrings("Command line of py, python.exe -X utf8, changed here, not saved yet", profileRowName(settings, 2, &buf));
+
+            settings.save();
+            try std.testing.expectEqual(@as(u32, 1), fixture.saved);
+            const after = try tmp.dir.readFileAlloc(alloc, "noctty.conf", 1 << 20);
+            defer alloc.free(after);
+            try std.testing.expectEqualStrings("# mine\nprofile-command = py: python.exe -X utf8\nprofile-name = py: Python\nprofile-command = other: o.exe\n", after);
+            try std.testing.expect(!settings.hasPendingChanges());
+            try std.testing.expectEqualStrings("Command line of py, python.exe -X utf8", profileRowName(settings, 2, &buf));
+        }
+    }.body);
+}
+
+test "settings a new profile asks for its id, then its command line, and Save appends it" {
+    try dialog_test.onHiddenDesktop(struct {
+        fn body() !void {
+            // Keys read as pressed alone, whatever the live keyboard holds.
+            const keyboard = win32_input.TestingKeyboard.pinNone();
+            defer keyboard.release();
+            const alloc = std.testing.allocator;
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var path: []u8 = &.{};
+            const fixture = try profileFixture(&tmp, "profile-command = py: python.exe\n", &path);
+            defer alloc.free(path);
+            defer fixture.finish();
+            const settings = &fixture.settings;
+            var buf: [256]u8 = undefined;
+            try std.testing.expect(fixture.pumpKey(VK_INSERT));
+            try std.testing.expectEqual(ProfileEdit.Kind.new_id, (try openEdit(settings)).kind);
+
+            // An id the draft has already is refused; the field stays.
+            typeInto((try openEdit(settings)).hwnd.?, "PY");
+            try std.testing.expect(fixture.pumpKey(VK_RETURN));
+            try std.testing.expectEqual(ProfileEdit.Kind.new_id, (try openEdit(settings)).kind);
+            try std.testing.expectEqualStrings("Error: A profile with that id exists already.", try statusTextOf(settings, &buf));
+
+            typeInto((try openEdit(settings)).hwnd.?, "dev");
+            try std.testing.expect(fixture.pumpKey(VK_RETURN));
+            try std.testing.expectEqual(ProfileEdit.Kind.new_command, (try openEdit(settings)).kind);
+            const command = (try openEdit(settings)).hwnd.?;
+            try std.testing.expectEqual(command, sys.GetFocus().?);
+            const provider = (try openEdit(settings)).provider.?;
+            try std.testing.expectEqualStrings("Command line of dev", try uiaStringProperty(&provider.base, @import("win32_uia/constants.zig").UIA_NamePropertyId, &buf));
+            // An empty command line is refused.
+            try std.testing.expect(fixture.pumpKey(VK_RETURN));
+            try std.testing.expect(settings.profile_edit != null);
+            typeInto(command, "cmd.exe /k");
+            try std.testing.expect(fixture.pumpKey(VK_RETURN));
+            try std.testing.expect(settings.profile_edit == null);
+            // The new profile is selected, marked new.
+            const selected = settings.profile_list.selectedPosition().?;
+            try std.testing.expectEqualStrings("dev, profile user:dev, new, not saved yet", profileRowName(settings, selected, &buf));
+
+            settings.save();
+            const after = try tmp.dir.readFileAlloc(alloc, "noctty.conf", 1 << 20);
+            defer alloc.free(after);
+            try std.testing.expectEqualStrings("profile-command = py: python.exe\n\nprofile-command = dev: cmd.exe /k\n", after);
+        }
+    }.body);
+}
+
+test "settings removing a profile takes a second Delete, says what it does, and never says the command" {
+    try dialog_test.onHiddenDesktop(struct {
+        fn body() !void {
+            // Keys read as pressed alone, whatever the live keyboard holds.
+            const keyboard = win32_input.TestingKeyboard.pinNone();
+            defer keyboard.release();
+            const alloc = std.testing.allocator;
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var path: []u8 = &.{};
+            const secret = "s3cr3t-token";
+            const fixture = try profileFixture(&tmp, "profile-command = py: python.exe --token=" ++ secret ++ "\ndefault-profile = py\nprofile-command = keep: k.exe\n", &path);
+            defer alloc.free(path);
+            defer fixture.finish();
+            const settings = &fixture.settings;
+            const list = &settings.profile_list;
+            var buf: [512]u8 = undefined;
+            list.selectPosition(1);
+            try std.testing.expect(fixture.pumpKey(VK_DELETE));
+            var status = try statusTextOf(settings, &buf);
+            try std.testing.expectEqualStrings("Press Delete again to remove profile py. Default profile names it, so new tabs will open the automatic shell; Save writes the change.", status);
+            try std.testing.expect(!settings.hasPendingChanges());
+
+            // A held Delete's repeats do nothing.
+            try std.testing.expect(fixture.pumpKeyRepeat(VK_DELETE, true));
+            try std.testing.expect(!settings.hasPendingChanges());
+
+            // Moving away lets go of it: the next Delete asks again.
+            try std.testing.expect(fixture.pumpKey(focus_cue.vk_down));
+            try std.testing.expect(fixture.pumpKey(focus_cue.vk_up));
+            try std.testing.expect(fixture.pumpKey(VK_DELETE));
+            try std.testing.expect(!settings.hasPendingChanges());
+            try std.testing.expect(fixture.pumpKey(VK_DELETE));
+            try std.testing.expect(settings.hasPendingChanges());
+            status = try statusTextOf(settings, &buf);
+            try std.testing.expect(std.mem.startsWith(u8, status, "Removed profile py."));
+            try std.testing.expect(std.mem.indexOf(u8, status, secret) == null);
+            // New profile and keep's five rows are left, keep's own selected.
+            try std.testing.expectEqual(@as(usize, 6), list.shown_count);
+            try std.testing.expectEqualStrings("keep, profile user:keep", profileRowName(settings, list.selectedPosition().?, &buf));
+
+            // Only this file defined it, but `default-profile` still names
+            // it: its line becomes the tombstone, which keeps the id known
+            // to the loader (`settings_patch.referencedElsewhere`).
+            settings.save();
+            const after = try tmp.dir.readFileAlloc(alloc, "noctty.conf", 1 << 20);
+            defer alloc.free(after);
+            try std.testing.expectEqualStrings("profile-command = py:\ndefault-profile = py\nprofile-command = keep: k.exe\n", after);
+        }
+    }.body);
+}
+
+test "settings a value the Profiles page refuses keeps its field, never repeats it, and Escape puts it back" {
+    try dialog_test.onHiddenDesktop(struct {
+        fn body() !void {
+            // Keys read as pressed alone, whatever the live keyboard holds.
+            const keyboard = win32_input.TestingKeyboard.pinNone();
+            defer keyboard.release();
+            const alloc = std.testing.allocator;
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var path: []u8 = &.{};
+            const fixture = try profileFixture(&tmp, "profile-command = py: python.exe\n", &path);
+            defer alloc.free(path);
+            defer fixture.finish();
+            const settings = &fixture.settings;
+            const secret = "s3cr3t-token";
+            var buf: [512]u8 = undefined;
+            settings.profile_list.selectPosition(2);
+            try std.testing.expect(fixture.pumpKey(VK_RETURN));
+            const edit = (try openEdit(settings)).hwnd.?;
+            typeInto(edit, "direct:" ++ secret);
+            try std.testing.expect(fixture.pumpKey(VK_RETURN));
+            try std.testing.expectEqual(edit, (try openEdit(settings)).hwnd.?);
+            try std.testing.expectEqual(edit, sys.GetFocus().?);
+            const status = try statusTextOf(settings, &buf);
+            try std.testing.expectEqualStrings("Error: A profile's command line cannot start with direct: or shell:.", status);
+            try std.testing.expect(!settings.hasPendingChanges());
+
+            // A click on Save with another change to save: the focus leaving
+            // the field keeps it open, and the save stops at it.
+            _ = sys.SendMessageW(settings.fields.combo_cursor_style.?, CB_SETCURSEL, 2, 0);
+            settings.syncCombo(.cursor_style);
+            _ = SetFocus(settings.btn_save.?);
+            dialog_test.pump();
+            try std.testing.expectEqual(edit, (try openEdit(settings)).hwnd.?);
+            _ = sys.SendMessageW(settings.btn_save.?, BM_CLICK, 0, 0);
+            try std.testing.expectEqual(@as(u32, 0), fixture.saved);
+            try std.testing.expectEqualStrings("Error: A profile's command line cannot start with direct: or shell:.", try statusTextOf(settings, &buf));
+            _ = SetFocus(edit);
+
+            try std.testing.expect(fixture.pumpKey(VK_ESCAPE));
+            try std.testing.expect(settings.profile_edit == null);
+            try std.testing.expect(!settings.close_prompt_visible);
+            try std.testing.expectEqualStrings("Command line of py, python.exe", profileRowName(settings, 2, &buf));
+        }
+    }.body);
+}
+
+test "settings variables are added, typed into and taken out, and Discard brings the draft back" {
+    try dialog_test.onHiddenDesktop(struct {
+        fn body() !void {
+            // Keys read as pressed alone, whatever the live keyboard holds.
+            const keyboard = win32_input.TestingKeyboard.pinNone();
+            defer keyboard.release();
+            const alloc = std.testing.allocator;
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var path: []u8 = &.{};
+            const text = "profile-command = py: python.exe\nprofile-env = py: MODE=1\n";
+            const fixture = try profileFixture(&tmp, text, &path);
+            defer alloc.free(path);
+            defer fixture.finish();
+            const settings = &fixture.settings;
+            const list = &settings.profile_list;
+            var buf: [256]u8 = undefined;
+            // Add variable is the profile's last row; Tab keeps what the field
+            // holds, as Enter does.
+            list.selectPosition(6);
+            try std.testing.expect(fixture.pumpKey(VK_RETURN));
+            try std.testing.expectEqual(ProfileEdit.Kind.new_variable, (try openEdit(settings)).kind);
+            typeInto((try openEdit(settings)).hwnd.?, "TOKEN=abc");
+            try std.testing.expect(fixture.pumpKey(VK_TAB));
+            try std.testing.expect(settings.profile_edit == null);
+            try std.testing.expectEqualStrings("TOKEN of py, abc, changed here, not saved yet", profileRowName(settings, list.selectedPosition().?, &buf));
+            // The other variable goes on one Delete, and only on Delete:
+            // Ctrl+C, a copy elsewhere, does nothing here.
+            list.selectPosition(5);
+            try std.testing.expectEqualStrings("MODE of py, 1", profileRowName(settings, 5, &buf));
+            {
+                var ctrl = [_]u8{0} ** 256;
+                ctrl[VK_CONTROL] = 0x80;
+                keyboard.set(&ctrl);
+                defer keyboard.set(&([_]u8{0} ** 256));
+                _ = fixture.pumpKey('C');
+            }
+            try std.testing.expectEqualStrings("MODE of py, 1", profileRowName(settings, 5, &buf));
+            try std.testing.expectEqual(@as(usize, 1), settings.pendingFieldCount());
+            try std.testing.expect(fixture.pumpKey(VK_DELETE));
+            try std.testing.expectEqual(@as(usize, 2), settings.pendingFieldCount());
+
+            settings.discardChangesNow();
+            try std.testing.expect(!settings.hasPendingChanges());
+            try std.testing.expectEqualStrings("MODE of py, 1", profileRowName(settings, 5, &buf));
+            try std.testing.expectEqualStrings("Add variable to py", profileRowName(settings, 6, &buf));
+        }
+    }.body);
+}
+
+test "settings the Profiles page follows the file's profiles until it changes one" {
+    try dialog_test.onHiddenDesktop(struct {
+        fn body() !void {
+            // Keys read as pressed alone, whatever the live keyboard holds.
+            const keyboard = win32_input.TestingKeyboard.pinNone();
+            defer keyboard.release();
+            const alloc = std.testing.allocator;
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var path: []u8 = &.{};
+            const fixture = try profileFixture(&tmp, "profile-command = py: python.exe\n", &path);
+            defer alloc.free(path);
+            defer fixture.finish();
+            const settings = &fixture.settings;
+            var buf: [256]u8 = undefined;
+            // The file gains a profile while Settings is open: the page lists
+            // it, and there is nothing to save.
+            var first = try fixture.config.clone(alloc);
+            defer first.deinit();
+            try first.@"profile-command".parseCLI(first._arena.?.allocator(), "dev: cmd.exe");
+            settings.externalConfigChanged(&first, 100);
+            try std.testing.expect(!settings.hasPendingChanges());
+            try std.testing.expectEqual(@as(usize, 11), settings.profile_list.shown_count);
+            try std.testing.expectEqualStrings("dev, profile user:dev", profileRowName(settings, 6, &buf));
+
+            // Once the page has changed one, the draft keeps the profiles it
+            // has, and the change is the only one to save.
+            settings.profile_list.selectPosition(3);
+            try std.testing.expect(fixture.pumpKey(VK_RETURN));
+            typeInto((try openEdit(settings)).hwnd.?, "Py");
+            try std.testing.expect(fixture.pumpKey(VK_RETURN));
+            var second = try first.clone(alloc);
+            defer second.deinit();
+            try second.@"profile-command".parseCLI(second._arena.?.allocator(), "ops: o.exe");
+            settings.externalConfigChanged(&second, 101);
+            try std.testing.expect(settings.hasPendingChanges());
+            try std.testing.expectEqual(@as(usize, 1), settings.pendingFieldCount());
+            try std.testing.expectEqual(@as(usize, 11), settings.profile_list.shown_count);
+            try std.testing.expectEqualStrings("Name of py, Py, changed here, not saved yet", profileRowName(settings, 3, &buf));
+
+            // A field open on a profile the file then removes goes with it,
+            // once nothing else is changed.
+            settings.discardChangesNow();
+            settings.profile_list.selectPosition(6);
+            try std.testing.expect(fixture.pumpKey(VK_RETURN));
+            try std.testing.expect(settings.profile_edit != null);
+            var third = try fixture.config.clone(alloc);
+            defer third.deinit();
+            settings.externalConfigChanged(&third, 102);
+            try std.testing.expect(settings.profile_edit == null);
+            try std.testing.expect(!settings.hasPendingChanges());
+            try std.testing.expectEqualStrings("Profile dev is no longer in the config file, so the change was not kept.", try statusTextOf(settings, &buf));
+        }
+    }.body);
+}
+
+test "settings a profile field a later file masks is saved, and the status names that file's line" {
+    try dialog_test.onHiddenDesktop(struct {
+        fn body() !void {
+            // Keys read as pressed alone, whatever the live keyboard holds.
+            const keyboard = win32_input.TestingKeyboard.pinNone();
+            defer keyboard.release();
+            const alloc = std.testing.allocator;
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            // The later file sets another profile's label after team's, so the
+            // line named is team's own, not the key's last.
+            try tmp.dir.writeFile(.{ .sub_path = "later.conf", .data = "profile-command = other: o.exe\nprofile-name = team: Team\nprofile-name = other: Other\n" });
+            var path: []u8 = &.{};
+            const fixture = try profileFixture(&tmp, "profile-command = team: t.exe\nconfig-file = later.conf\n", &path);
+            defer alloc.free(path);
+            defer fixture.finish();
+            const settings = &fixture.settings;
+            settings.profile_list.selectPosition(3);
+            try std.testing.expect(fixture.pumpKey(VK_RETURN));
+            typeInto((try openEdit(settings)).hwnd.?, "Mine");
+            try std.testing.expect(fixture.pumpKey(VK_RETURN));
+            settings.save();
+            const after = try tmp.dir.readFileAlloc(alloc, "noctty.conf", 1 << 20);
+            defer alloc.free(after);
+            try std.testing.expectEqualStrings("profile-command = team: t.exe\nprofile-name = team: Mine\nconfig-file = later.conf\n", after);
+            try std.testing.expectEqual(StatusNote.saved_overridden, settings.status_note);
+            try std.testing.expectEqualStrings(
+                "Saved, but a later config file or command-line option overrides profile-name team (line 2 of later.conf), so the saved value is not used.",
+                settings.noteText(),
+            );
+        }
+    }.body);
+}
+
+test "settings a profile from noctty's command line is shown and not changed" {
+    try dialog_test.onHiddenDesktop(struct {
+        fn body() !void {
+            // Keys read as pressed alone, whatever the live keyboard holds.
+            const keyboard = win32_input.TestingKeyboard.pinNone();
+            defer keyboard.release();
+            const alloc = std.testing.allocator;
+            const fixture = try dialog_test.Fixture.prepare(false);
+            defer fixture.finish();
+            const cli_args = @import("../cli/args.zig");
+            var args: cli_args.ArgsIterator(cli_args.SliceIterator) = .{ .iterator = cli_args.sliceIterator(&.{"--profile-command=cli: c.exe"}) };
+            try fixture.config.loadIter(alloc, &args);
+            const settings = &fixture.settings;
+            try settings.open();
+            settings.setActiveSection(.profiles);
+            _ = SetFocus(settings.profile_list.hwnd.?);
+            var buf: [256]u8 = undefined;
+            try std.testing.expectEqualStrings("cli, profile user:cli, from the command line, read-only", profileRowName(settings, 1, &buf));
+            settings.profile_list.selectPosition(2);
+            try std.testing.expect(fixture.pumpKey(VK_RETURN));
+            try std.testing.expect(settings.profile_edit == null);
+            try std.testing.expect(fixture.pumpKey(VK_DELETE));
+            try std.testing.expect(!settings.hasPendingChanges());
+            try std.testing.expectEqualStrings("Profile cli comes from noctty's command line, so Settings does not change it.", try statusTextOf(settings, &buf));
+        }
+    }.body);
 }
 
 test "settings the All settings page is one list of every key, made with its page and gone with it" {

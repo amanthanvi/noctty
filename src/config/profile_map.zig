@@ -204,6 +204,19 @@ fn writeLine(writer: *std.Io.Writer, key: []const u8, id: []const u8, parts: []c
     try writer.writeByte('\n');
 }
 
+/// Write one `profile-*` line for `id` as `formatEntry` writes its entries,
+/// ending in `\n`: `key = id: text`, or the same line without its optional
+/// spaces when that is longer than the config reader takes, and a label that
+/// loading would change given a pair of quotes. An empty `text` writes the
+/// removal `key = id:`. For `profile-env`, `text` is `NAME=VALUE`, or `NAME=`,
+/// which takes the variable back. Settings' profile editor writes its lines
+/// with this, so each reads back as the value it was given.
+pub fn writeProfileLine(writer: *std.Io.Writer, comptime kind: Kind, key: []const u8, id: []const u8, text: []const u8) !void {
+    if (text.len == 0) return writer.print("{s} = {s}:\n", .{ key, id });
+    if (kind == .name and nameNeedsQuotes(text)) return writeLine(writer, key, id, &.{ "\"", text, "\"" });
+    return writeLine(writer, key, id, &.{text});
+}
+
 /// Remove every variable of `map` whose name equals `name` in any case.
 fn removeEnvName(map: *RepeatableStringMap, name: []const u8) void {
     var index: usize = 0;
@@ -323,6 +336,22 @@ pub fn ProfileMap(comptime kind: Kind) type {
             const entry = self.entries.items[index];
             if (entry.removed) return null;
             return entry.value;
+        }
+
+        /// Give `id` the text `text` as it is, without the checks and the
+        /// unquoting a line goes through: for a value checked already
+        /// (Settings' profile editor, which runs `check` first). For
+        /// `.command`, a removed profile comes back in its slot. Not for
+        /// `.env`, whose values are `parseCLI`'s.
+        pub fn put(self: *Self, alloc: Allocator, id: []const u8, text: []const u8) Allocator.Error!void {
+            if (kind == .env) @compileError("profile-env values go through parseCLI");
+            const copy = try alloc.dupeZ(u8, text);
+            if (self.indexOf(id)) |index| {
+                self.entries.items[index].value = copy;
+                self.entries.items[index].removed = false;
+                return;
+            }
+            try self.entries.append(alloc, .{ .id = try alloc.dupeZ(u8, id), .value = copy });
         }
 
         /// Whether a line named `id`, defining or removing it.
@@ -632,4 +661,68 @@ test "profile map: ids" {
     try testing.expect(isReservedId("Cmd"));
     try testing.expect(isReservedId("USER"));
     try testing.expect(!isReservedId("cmd2"));
+}
+
+/// Read `line` (one line of a config file) as the loader does and apply it
+/// to `map`: what `writeProfileLine` wrote must read back as its value.
+fn testApplyLine(comptime kind: Kind, map: *ProfileMap(kind), alloc: Allocator, key: []const u8, line: []const u8) !void {
+    var reader: std.Io.Reader = .fixed(line);
+    var lines: LineIterator = .{ .r = &reader };
+    const arg = lines.next() orelse return error.TestUnexpectedResult;
+    if (!std.mem.startsWith(u8, arg, "--") or !std.mem.startsWith(u8, arg[2..], key) or arg[2 + key.len] != '=')
+        return error.TestUnexpectedResult;
+    try map.parseCLI(alloc, arg[2 + key.len + 1 ..]);
+}
+
+test "profile map: a line writeProfileLine writes reads back as its value" {
+    const testing = std.testing;
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+
+    // A command line, kept byte for byte, quotes and all; and its removal.
+    for ([_][]const u8{ "cmd.exe", "cmd.exe /k \"\"D:\\R&D\\x.bat\" -a\"", "pwsh.exe -NoExit -Command \"& { 1 }\"" }) |text| {
+        out.clearRetainingCapacity();
+        try writeProfileLine(&out.writer, .command, "profile-command", "py", text);
+        var map: Command = .{};
+        try testApplyLine(.command, &map, alloc, "profile-command", out.written());
+        try testing.expectEqualStrings(text, map.get("py").?);
+        out.clearRetainingCapacity();
+        try writeProfileLine(&out.writer, .command, "profile-command", "py", "");
+        try testing.expectEqualStrings("profile-command = py:\n", out.written());
+        try testApplyLine(.command, &map, alloc, "profile-command", out.written());
+        try testing.expect(map.get("py") == null);
+        try testing.expect(map.entries.items[0].removed);
+    }
+
+    // A label that loading would change keeps its quotes and spaces.
+    for ([_][]const u8{ "Python 3.12", "\"quoted\"", " padded ", "a \"b\" c" }) |text| {
+        out.clearRetainingCapacity();
+        try writeProfileLine(&out.writer, .name, "profile-name", "py", text);
+        var map: Name = .{};
+        try testApplyLine(.name, &map, alloc, "profile-name", out.written());
+        try testing.expectEqualStrings(text, map.get("py").?);
+    }
+
+    // A variable, and taking it back.
+    out.clearRetainingCapacity();
+    try writeProfileLine(&out.writer, .env, "profile-env", "py", "PATH=C:\\x;%PATH%");
+    var env: Env = .{};
+    try testApplyLine(.env, &env, alloc, "profile-env", out.written());
+    try testing.expectEqualStrings("C:\\x;%PATH%", env.get("py").?.map.get("PATH").?);
+    out.clearRetainingCapacity();
+    try writeProfileLine(&out.writer, .env, "profile-env", "py", "path=");
+    try testApplyLine(.env, &env, alloc, "profile-env", out.written());
+    try testing.expect(env.get("py") == null);
+
+    // A value as long as the reader takes: the compact form.
+    const long = "x" ** (LineIterator.max_line_len - "profile-working-directory=py:".len);
+    out.clearRetainingCapacity();
+    try writeProfileLine(&out.writer, .text, "profile-working-directory", "py", long);
+    try testing.expectEqual(LineIterator.max_line_len + 1, out.written().len);
+    var dir: Text = .{};
+    try testApplyLine(.text, &dir, alloc, "profile-working-directory", out.written());
+    try testing.expectEqualStrings(long, dir.get("py").?);
 }

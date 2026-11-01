@@ -1607,18 +1607,18 @@ foreach ($pin in $settingsSourcePins) {
     }
 }
 # The derivation above replaces a literal count; retain the independent header
-# set (the search field, then the action bar's six buttons, one of which, Discard
-# changes, also serves the close prompt) so accidentally dropping one cannot
-# silently shrink the header.
+# set (the search field, then the action bar's five buttons, two of which, Save
+# and Discard changes, also serve the close prompt) so accidentally dropping one
+# cannot silently shrink the header.
 $settingsActionSpec = [regex]::Match($win32SettingsText, '(?ms)^const settings_action_controls = \[_\]FormControl\{(?<Rows>.*?)^\};')
 $settingsActionIds = @([regex]::Matches($settingsActionSpec.Groups['Rows'].Value, '\.id = ((?:BTN|EDIT)_\w+)') | ForEach-Object { $_.Groups[1].Value })
-$expectedSettingsActionIds = @('EDIT_SEARCH', 'BTN_SAVE', 'BTN_CONFLICT_KEEP', 'BTN_CONFLICT_USE_DISK', 'BTN_CLOSE_SAVE', 'BTN_CLOSE_KEEP_EDITING', 'BTN_DISCARD_CHANGES')
+$expectedSettingsActionIds = @('EDIT_SEARCH', 'BTN_SAVE', 'BTN_CONFLICT_KEEP', 'BTN_CONFLICT_USE_DISK', 'BTN_CLOSE_KEEP_EDITING', 'BTN_DISCARD_CHANGES')
 if (-not $settingsActionSpec.Success -or
     ($settingsActionIds -join ',') -cne ($expectedSettingsActionIds -join ',') -or
     [regex]::Matches($settingsActionSpec.Groups['Rows'].Value, '\.role\s*=').Count -ne $expectedSettingsActionIds.Count -or
     [regex]::Matches($settingsActionSpec.Groups['Rows'].Value, '\.role = \.button').Count -ne $expectedSettingsActionIds.Count - 1 -or
     [regex]::Matches($settingsActionSpec.Groups['Rows'].Value, '\.role = \.edit').Count -ne 1) {
-    throw 'Settings unclipped header descriptors must retain the search field and all six independently expected button IDs.'
+    throw 'Settings unclipped header descriptors must retain the search field and all five independently expected button IDs.'
 }
 if ($win32SettingsText -match 'for\s*\(0\.\.27\)') {
     throw 'Settings clipped-control traversal must use settings_header_control_count, never the stale 0..27 magic number.'

@@ -265,6 +265,8 @@ const win32_recovery = @import("../win32_recovery.zig");
 const win32_session_persistence = @import("../win32_session_persistence.zig");
 const win32_session_state = @import("../win32_session_state.zig");
 const win32_settings = @import("../win32_settings.zig");
+const settings_reference = @import("../win32_settings_reference.zig");
+const settings_patch = @import("settings_patch.zig");
 const win32_shell = @import("../win32_shell.zig");
 const win32_structural_history = @import("../win32_structural_history.zig");
 const win32_taskbar_progress = @import("../win32_taskbar_progress.zig");
@@ -8661,6 +8663,12 @@ pub const App = struct {
         // default-drop would strip the reset line, and the include
         // would re-apply its non-default value on next reload.
         const user_edited = settingsUserEditedKeys(original, pending);
+        // The profile editor's changes, by field (`settings_patch`): what the
+        // file must hold for `pending`'s profiles, worked out against the
+        // layers `original` was read from.
+        var profile_arena: std.heap.ArenaAllocator = .init(alloc);
+        defer profile_arena.deinit();
+        const profile_edits = try settings_patch.editsForSave(profile_arena.allocator(), alloc, &self.config, original, pending, target_path, &settings_reference.samePath);
         // No-op short-circuit: if the user pressed Save without
         // changing anything, don't touch the filesystem. On a
         // first-run machine with no existing config file, the write
@@ -8668,10 +8676,10 @@ pub const App = struct {
         // `error.FileIsEmpty` warnings on every subsequent load.
         // On an existing file, skipping also avoids an unnecessary
         // mtime bump.
-        if (user_edited.count() == 0) return;
+        if (user_edited.count() == 0 and profile_edits.len == 0) return;
 
         self.settings_failure_detail.clear(alloc);
-        try persistSettings(alloc, target_path, pending, user_edited, &self.settings_failure_detail);
+        try persistSettings(alloc, target_path, pending, user_edited, profile_edits, &self.settings_failure_detail);
 
         // Saving can repair the config on disk, but recovery applies it only
         // after restart, as the safe-mode banner promises.
@@ -8694,7 +8702,13 @@ pub const App = struct {
         // generic write failure. The status line names the fields.
         self.settings_masked_keys.clear(alloc);
         var masked_buf: [settings_masked_keys_capacity]u8 = undefined;
-        const masked = settingsMaskedKeyNames(&masked_buf, user_edited, pending, &reloaded);
+        // The keys, then each profile field the reload does not hold, by
+        // name only (`settings_patch.writeEditName`).
+        var masked_text: std.Io.Writer.Allocating = .init(alloc);
+        defer masked_text.deinit();
+        masked_text.writer.writeAll(settingsMaskedKeyNames(&masked_buf, user_edited, pending, &reloaded)) catch return error.OutOfMemory;
+        _ = settings_patch.writeMasked(&masked_text.writer, profile_edits, &reloaded, masked_text.written().len > 0) catch return error.OutOfMemory;
+        const masked = masked_text.written();
         if (masked.len > 0) {
             std.log.warn("settings save: saved but masked by a later config-file layer: {s}", .{masked});
             self.settings_masked_keys.set(alloc, masked);

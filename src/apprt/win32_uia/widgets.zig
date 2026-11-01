@@ -1101,7 +1101,7 @@ const PaletteRowProvider = struct {
     }
 };
 
-pub const settings_section_count = 8;
+pub const settings_section_count = 9;
 
 /// Stable provider for native STATIC controls that this custom settings
 /// window otherwise exposes as generic Panes through the system bridge.

@@ -560,6 +560,7 @@ test {
     _ = @import("win32/docked_search.zig");
     _ = child_window;
     _ = paint_text;
+    _ = @import("win32/settings_patch.zig");
     _ = clipboard_write;
     _ = @import("win32_aumid.zig");
     _ = @import("win32_toast_activator.zig");
@@ -6809,12 +6810,14 @@ fn settingsTextProblem(raw: []const u8) ?win32_settings.SaveError {
 
 /// Write the settings the user edited into the config file behind
 /// `config_path`: read it, patch only the edited assignments, and put the
-/// result back where the file lives (see `save_target`).
+/// result back where the file lives (see `save_target`). `profile_edits` are
+/// the profile editor's, patched by identity (`settings_patch.zig`).
 pub fn persistSettings(
     alloc: Allocator,
     config_path: []const u8,
     pending: *const configpkg.Config,
     user_edited: SettingsEditedKeySet,
+    profile_edits: []const @import("win32/settings_patch.zig").Edit,
     detail: ?*win32_settings.FailureDetail,
 ) win32_settings.SaveError!void {
     // A config kept behind a link is edited where it lives, so the link
@@ -6866,6 +6869,15 @@ pub fn persistSettings(
         user_edited,
         &patched,
     ) catch return error.SerializeFailed;
+    // Profile definitions, by identity: `patchOrAppendEdits` never sees
+    // their keys.
+    var profiles_patched: std.ArrayListUnmanaged(u8) = .{};
+    defer profiles_patched.deinit(alloc);
+    const final: []const u8 = if (profile_edits.len == 0) patched.items else profiles: {
+        @import("win32/settings_patch.zig").patchProfileEdits(alloc, patched.items, profile_edits, &profiles_patched) catch
+            return error.SerializeFailed;
+        break :profiles profiles_patched.items;
+    };
 
     // Ensure target's parent directory exists. `config_edit.openPath`
     // creates `%APPDATA%\ghostty\` for the default path, but a user
@@ -6890,7 +6902,7 @@ pub fn persistSettings(
 
     var kept_copy: ?[]u8 = null;
     defer if (kept_copy) |path| alloc.free(path);
-    save_target.write(alloc, target, patched.items, &kept_copy) catch |err| {
+    save_target.write(alloc, target, final, &kept_copy) catch |err| {
         if (err == error.IncompleteWrite) if (detail) |d| {
             // The complete text is in the kept copy; the status line says where.
             if (kept_copy) |path| d.set(alloc, path);
@@ -7974,7 +7986,7 @@ test "win32 settings save follows a symbolic link and keeps it" {
     var draft = try settingsTestCopyOnSelectEdit(alloc);
     defer draft.pending.deinit();
 
-    try persistSettings(alloc, link, &draft.pending, draft.edited, null);
+    try persistSettings(alloc, link, &draft.pending, draft.edited, &.{}, null);
     // The edit landed in the file the link points at, the link is still a
     // link, and it reads the new bytes.
     try scratch.expectContent("dotfiles/config.ghostty", "# kept\ncopy-on-select = true\n");
@@ -7992,7 +8004,7 @@ test "win32 settings save refuses a dangling link and leaves it alone" {
     var draft = try settingsTestCopyOnSelectEdit(alloc);
     defer draft.pending.deinit();
 
-    try std.testing.expectError(error.DanglingLink, persistSettings(alloc, link, &draft.pending, draft.edited, null));
+    try std.testing.expectError(error.DanglingLink, persistSettings(alloc, link, &draft.pending, draft.edited, &.{}, null));
     try std.testing.expect(try scratch.isLink("config.ghostty"));
     try scratch.expectNames(&.{"config.ghostty"});
 }
@@ -8008,7 +8020,7 @@ test "win32 settings save keeps hard links together" {
     var draft = try settingsTestCopyOnSelectEdit(alloc);
     defer draft.pending.deinit();
 
-    try persistSettings(alloc, path, &draft.pending, draft.edited, null);
+    try persistSettings(alloc, path, &draft.pending, draft.edited, &.{}, null);
     try scratch.expectContent("config.ghostty", "copy-on-select = true\n");
     try scratch.expectContent("dotfile", "copy-on-select = true\n");
     try scratch.expectNames(&.{ "config.ghostty", "dotfile" });
@@ -8028,7 +8040,7 @@ test "win32 settings save writes a config only the extended path form reaches" {
     var draft = try settingsTestCopyOnSelectEdit(alloc);
     defer draft.pending.deinit();
 
-    try persistSettings(alloc, dotted, &draft.pending, draft.edited, null);
+    try persistSettings(alloc, dotted, &draft.pending, draft.edited, &.{}, null);
     const written = try std.fs.cwd().readFileAlloc(alloc, dotted, 1024);
     defer alloc.free(written);
     try std.testing.expectEqualStrings("# kept\ncopy-on-select = true\n", written);
@@ -8045,7 +8057,7 @@ test "win32 settings first save creates the file and its folder" {
     var draft = try settingsTestCopyOnSelectEdit(alloc);
     defer draft.pending.deinit();
 
-    try persistSettings(alloc, path, &draft.pending, draft.edited, null);
+    try persistSettings(alloc, path, &draft.pending, draft.edited, &.{}, null);
     try scratch.expectContent("new-dir/custom.conf", "copy-on-select = true\n");
 }
 
@@ -8078,7 +8090,7 @@ test "win32 settings save refuses UTF-16 text and leaves the file as it was" {
         const bytes = case.bytes;
         try scratch.tmp.dir.writeFile(.{ .sub_path = "config.ghostty", .data = bytes });
         detail.clear(alloc);
-        try std.testing.expectError(case.err, persistSettings(alloc, path, &draft.pending, draft.edited, &detail));
+        try std.testing.expectError(case.err, persistSettings(alloc, path, &draft.pending, draft.edited, &.{}, &detail));
         // The status line is told which file.
         try std.testing.expect(std.mem.startsWith(u8, detail.text.?, "the config file "));
         try scratch.expectContent("config.ghostty", bytes);
@@ -8089,7 +8101,7 @@ test "win32 settings save refuses UTF-16 text and leaves the file as it was" {
     // byte order mark and a legacy code page (byte 0xE9 is an accented "e")
     // survive the save.
     try scratch.tmp.dir.writeFile(.{ .sub_path = "config.ghostty", .data = "\xef\xbb\xbf# caf\xe9\ncopy-on-select = false\n" });
-    try persistSettings(alloc, path, &draft.pending, draft.edited, null);
+    try persistSettings(alloc, path, &draft.pending, draft.edited, &.{}, null);
     try scratch.expectContent("config.ghostty", "\xef\xbb\xbf# caf\xe9\ncopy-on-select = true\n");
 }
 
@@ -8463,7 +8475,7 @@ fn settingsTestSave(alloc: Allocator, text: []const u8, original: *const configp
     try tmp.dir.writeFile(.{ .sub_path = "config.ghostty", .data = text });
     const path = try tmp.dir.realpathAlloc(alloc, "config.ghostty");
     defer alloc.free(path);
-    try persistSettings(alloc, path, pending, settingsUserEditedKeys(original, pending), null);
+    try persistSettings(alloc, path, pending, settingsUserEditedKeys(original, pending), &.{}, null);
     return try tmp.dir.readFileAlloc(alloc, "config.ghostty", 1 << 20);
 }
 
