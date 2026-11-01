@@ -1441,7 +1441,10 @@ test "origin: a lookup compares the config-file names once, not once for each st
     test_included_comparisons = 0;
     for (std.enums.values(Key)) |key| _ = problems.of(key, &defaults);
     errdefer std.debug.print("origin: {d} config-file names compared\n", .{test_included_comparisons});
-    try std.testing.expect(test_included_comparisons <= 2 * n);
+    // Exactly that: not more (each step classified), and not fewer (no
+    // winning line classified at all, which the kind checks below cannot
+    // tell from a config-file line, since none of these names this file).
+    try std.testing.expectEqual(@as(usize, 2 * n), test_included_comparisons);
     try expectFile(problems.of(.@"font-size", &defaults), path, 2 * n, .config);
 }
 

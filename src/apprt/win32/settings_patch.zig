@@ -560,7 +560,12 @@ pub const Unread = struct {
     /// How the status line names it: "the theme file <path>" or "the
     /// included file <path>", no value.
     pub fn describe(self: Unread, alloc: Allocator) Allocator.Error![]u8 {
-        return std.fmt.allocPrint(alloc, "{s} {s}", .{ if (self.theme) "the theme file" else "the included file", self.path });
+        return std.fmt.allocPrint(alloc, "{s} {s}", .{ self.noun(), self.path });
+    }
+
+    /// The words `describe` puts before the path.
+    pub fn noun(self: Unread) []const u8 {
+        return if (self.theme) "the theme file" else "the included file";
     }
 };
 
@@ -578,7 +583,7 @@ pub fn reloadReport(masked: *std.Io.Writer, edits: []const Edit, reload: *const 
 }
 
 /// A file `config`'s load found and could not read whole, if any: a
-/// `config-file` that is there and would not open, or one or a theme whose
+/// `config-file` or theme that is there and would not open, or one whose
 /// read failed partway through (`LineIterator.read_failed`, which reads as
 /// the end of the file). The loader records each as a problem and goes on,
 /// so the layers miss what the file says, and a save that decided from them
@@ -589,6 +594,17 @@ pub fn reloadReport(masked: *std.Io.Writer, edits: []const Edit, reload: *const 
 pub fn unreadConfigFile(config: *const Config) ?Unread {
     for (config._diagnostics.items()) |diag| {
         const message: []const u8 = diag.message;
+        // A theme the load could not open (`themepkg.open`): the light/dark
+        // switch reads it again after the save's probe, and it may have
+        // become unopenable in between. The path is the last quoted name,
+        // just before the error.
+        if (std.mem.startsWith(u8, message, "failed to load theme ") or std.mem.startsWith(u8, message, "not reading theme from ")) {
+            const quote_end = std.mem.lastIndexOf(u8, message, "\": error.") orelse continue;
+            const theme_err = message[quote_end + 3 ..];
+            if (std.mem.eql(u8, theme_err, "error.FileNotFound") or std.mem.eql(u8, theme_err, "error.IsDir")) continue;
+            const quote_start = std.mem.lastIndexOfScalar(u8, message[0..quote_end], '"') orelse continue;
+            return .{ .theme = true, .path = message[quote_start + 1 .. quote_end] };
+        }
         const prefix_len, const theme = for ([_]struct { []const u8, bool }{
             .{ "error opening config-file ", false },
             .{ "error reading config-file ", false },
@@ -1171,6 +1187,114 @@ test "settings patch: FileEnd.restore matches only whole mark lines, and fails w
     try out.appendSlice(alloc, "a\nlast\n");
     try testing.expectError(error.MarksDisturbed, FileEnd.none.restore(&out));
     try testing.expectError(error.MarksDisturbed, FileEnd.bare_cr.restore(&out));
+}
+
+test "settings patch: a theme the light/dark switch could not open is named, a missing one is not" {
+    const alloc = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(.{ .sub_path = "none.conf", .data = "\n" });
+    try tmp.dir.writeFile(.{ .sub_path = "light", .data = "\n" });
+    try tmp.dir.writeFile(.{ .sub_path = "dark", .data = "profile-command = py: python.exe -X dark\n" });
+    const light = try tmp.dir.realpathAlloc(alloc, "light");
+    defer alloc.free(light);
+    const dark = try tmp.dir.realpathAlloc(alloc, "dark");
+    defer alloc.free(dark);
+    const text = try std.fmt.allocPrint(alloc, "theme = light:{s},dark:{s}\nprofile-command = py: python.exe\n", .{ light, dark });
+    defer alloc.free(text);
+    try tmp.dir.writeFile(.{ .sub_path = "config", .data = text });
+    const path = try tmp.dir.realpathAlloc(alloc, "config");
+    defer alloc.free(path);
+    const none = try tmp.dir.realpathAlloc(alloc, "none.conf");
+    defer alloc.free(none);
+    var fresh = try testLoad(alloc, none, path);
+    defer fresh.deinit();
+    try testing.expect(unreadConfigFile(&fresh) == null);
+    // Another program holds the dark theme with no sharing as the switch to
+    // dark reads it, after the save's probe: it does not open.
+    {
+        const wide = try std.os.windows.sliceToPrefixedFileW(null, dark);
+        const handle = std.os.windows.kernel32.CreateFileW(wide.span().ptr, std.os.windows.GENERIC_READ, 0, null, std.os.windows.OPEN_EXISTING, 0, null);
+        if (handle == std.os.windows.INVALID_HANDLE_VALUE) return error.CouldNotHoldFile;
+        defer std.os.windows.CloseHandle(handle);
+        var switched = (try fresh.changeConditionalState(.{ .theme = .dark })) orelse return error.TestExpectedSwitch;
+        defer switched.deinit();
+        const unread = unreadConfigFile(&switched) orelse return error.TestExpectedUnread;
+        try testing.expect(unread.theme);
+        try expectSameText(dark, unread.path);
+    }
+    // Every other case through the loader as well, so a change to its
+    // wording fails here: a dark theme by name, searched for in the user's
+    // theme directory (`XDG_CONFIG_HOME` points at this test's for its
+    // length, then back), and by path.
+    const os = @import("../../os/main.zig");
+    if (try os.xdg.portableRoot(alloc)) |portable| {
+        alloc.free(portable);
+        return error.SkipZigTest;
+    }
+    const saved: ?[:0]u8 = saved: {
+        const value = std.process.getEnvVarOwned(alloc, "XDG_CONFIG_HOME") catch |err| switch (err) {
+            error.EnvironmentVariableNotFound => break :saved null,
+            else => return err,
+        };
+        defer alloc.free(value);
+        break :saved try alloc.dupeZ(u8, value);
+    };
+    defer if (saved) |value| alloc.free(value);
+    defer _ = if (saved) |value| os.setenv("XDG_CONFIG_HOME", value) else os.unsetenv("XDG_CONFIG_HOME");
+    const themes_dir = try std.fs.path.join(alloc, &.{ "xdg", @import("../../build_config.zig").data_dir_name, "themes" });
+    defer alloc.free(themes_dir);
+    try tmp.dir.makePath(themes_dir);
+    var themes = try tmp.dir.openDir(themes_dir, .{});
+    defer themes.close();
+    try themes.writeFile(.{ .sub_path = "Mine", .data = "font-size = 14\n" });
+    try themes.makeDir("Dir");
+    try tmp.dir.makeDir("dir");
+    const xdg_path = try tmp.dir.realpathAlloc(alloc, "xdg");
+    defer alloc.free(xdg_path);
+    const xdg = try alloc.dupeZ(u8, xdg_path);
+    defer alloc.free(xdg);
+    try testing.expectEqual(@as(c_int, 0), os.setenv("XDG_CONFIG_HOME", xdg));
+    const mine = try themes.realpathAlloc(alloc, "Mine");
+    defer alloc.free(mine);
+    const gone = try std.fs.path.join(alloc, &.{ std.fs.path.dirname(dark) orelse return error.TestExpectedDir, "gone" });
+    defer alloc.free(gone);
+    const dir = try tmp.dir.realpathAlloc(alloc, "dir");
+    defer alloc.free(dir);
+    const check = struct {
+        /// The switch to dark, with `dark_theme` as the dark half, names
+        /// `expected` as the unread theme, or nothing when it is null.
+        fn darkTheme(a: Allocator, at: std.fs.Dir, earlier: []const u8, light_theme: []const u8, dark_theme: []const u8, expected: ?[]const u8) !void {
+            const config_text = try std.fmt.allocPrint(a, "theme = light:{s},dark:{s}\n", .{ light_theme, dark_theme });
+            defer a.free(config_text);
+            try at.writeFile(.{ .sub_path = "config", .data = config_text });
+            const config_path = try at.realpathAlloc(a, "config");
+            defer a.free(config_path);
+            var loaded = try testLoad(a, earlier, config_path);
+            defer loaded.deinit();
+            var switched = (try loaded.changeConditionalState(.{ .theme = .dark })) orelse return error.TestExpectedSwitch;
+            defer switched.deinit();
+            const unread = unreadConfigFile(&switched);
+            if (expected) |want| {
+                const got = unread orelse return error.TestExpectedUnread;
+                try testing.expect(got.theme);
+                try expectSameText(want, got.path);
+            } else if (unread != null) return error.TestUnexpectedUnread;
+        }
+    }.darkTheme;
+    // Not there, or a directory: the loader's to report, not named.
+    try check(alloc, tmp.dir, none, light, gone, null);
+    try check(alloc, tmp.dir, none, light, dir, null);
+    try check(alloc, tmp.dir, none, light, "Gone", null);
+    try check(alloc, tmp.dir, none, light, "Dir", null);
+    // Found by name and held with no sharing: named, by the path it was
+    // found at.
+    try check(alloc, tmp.dir, none, light, "Mine", null);
+    const wide = try std.os.windows.sliceToPrefixedFileW(null, mine);
+    const handle = std.os.windows.kernel32.CreateFileW(wide.span().ptr, std.os.windows.GENERIC_READ, 0, null, std.os.windows.OPEN_EXISTING, 0, null);
+    if (handle == std.os.windows.INVALID_HANDLE_VALUE) return error.CouldNotHoldFile;
+    defer std.os.windows.CloseHandle(handle);
+    try check(alloc, tmp.dir, none, light, "Mine", mine);
 }
 
 test "settings patch: a reload that could not read a file whole reports the file, not an override" {
