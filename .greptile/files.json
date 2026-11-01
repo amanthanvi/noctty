@@ -248,6 +248,7 @@
         "src/config/origin.zig",
         "src/os/local_path.zig",
         "test/windows/settings-uia-*.ps1",
+        "test/windows/settings-open-readiness.psm1",
         "src/apprt/win32.zig",
         "src/apprt/win32/app.zig",
         "src/apprt/win32/chrome_scene.zig",
