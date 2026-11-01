@@ -1039,7 +1039,8 @@ line, a line break, a value too long for one line of the file, and a variable
 without a name or a value. The status line says why, without repeating the
 value. A field Settings refuses stays open with what you typed: switching
 pages stops at it, and closing Settings or quitting noctty asks about it as
-about any unsaved change. Like any other setting, these changes are a draft
+about any unsaved change. So does a new profile whose id you typed, until you
+type its command line or press Escape to drop it. Like any other setting, these changes are a draft
 until you Save, and Discard changes or closing without saving drops them.
 
 Save writes only what changed, to the file Settings saves to. The line that

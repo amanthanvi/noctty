@@ -1865,6 +1865,45 @@ test "LineIterator skips a line longer than its buffer and reads on" {
     try testing.expectEqual(@as(?[]const u8, null), iter.next());
 }
 
+test "LineIterator reads a line at 4095 bytes only when it ends in a CR, skips one at 4096, and takes says so" {
+    const testing = std.testing;
+    const max = LineIterator.max_line_len;
+    const Case = struct { line: []const u8, read: bool };
+    // Each line as the reader holds it: its bytes before the LF, every CR
+    // included.
+    const cases = [_]Case{
+        .{ .line = "a=" ++ "x" ** (max - 2), .read = true },
+        .{ .line = "a=" ++ "x" ** (max - 1), .read = false },
+        .{ .line = "a=" ++ "x" ** (max - 2) ++ "\r", .read = true },
+        .{ .line = "a=" ++ "x" ** (max - 3) ++ "\r\r", .read = true },
+        .{ .line = "a=" ++ "x" ** (max - 2) ++ "\r\r", .read = false },
+        .{ .line = "a=" ++ "x" ** (max - 1) ++ "\r", .read = false },
+        .{ .line = "a=" ++ "x" ** max ++ "\r\r", .read = false },
+    };
+    for (cases) |case| {
+        try testing.expectEqual(case.read, LineIterator.takes(case.line));
+        // With an LF after it and a line after that, and as the last line.
+        for ([_]bool{ true, false }) |newline| {
+            var text_buf: [max + 16]u8 = undefined;
+            const text = if (newline)
+                try std.fmt.bufPrint(&text_buf, "{s}\nb=1\n", .{case.line})
+            else
+                try std.fmt.bufPrint(&text_buf, "{s}", .{case.line});
+            var f: std.Io.Reader = .fixed(text);
+            var buf: [2048]u8 = undefined;
+            var r = f.limited(.unlimited, &buf);
+            var iter: LineIterator = .{ .r = &r.interface, .filepath = "t" };
+            const arg = iter.next().?;
+            if (case.read) {
+                try testing.expect(arg.ptr != LineIterator.skipped_line.ptr);
+                try testing.expectEqualStrings(std.mem.trimEnd(u8, case.line, "\r"), arg[2..]);
+            } else try testing.expectEqual(LineIterator.skipped_line.ptr, arg.ptr);
+            if (newline) try testing.expectEqualStrings("--b=1", iter.next().?);
+            try testing.expectEqual(@as(?[]const u8, null), iter.next());
+        }
+    }
+}
+
 test "parse reports a skipped line with its place and keeps the rest" {
     const testing = std.testing;
     const Step = union(enum) { diagnostic: diags.Diagnostic };

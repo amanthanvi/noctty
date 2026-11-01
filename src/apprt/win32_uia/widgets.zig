@@ -907,7 +907,7 @@ const PaletteRowProvider = struct {
     }
     /// The row's Value (`PaletteListState.row_value`), as a fresh BSTR; null
     /// when the row has none, or for lack of memory (`missing` says which).
-    fn valueBstr(self: *PaletteRowProvider, missing: *bool) ?com.BSTR {
+    fn valueBstr(self: *PaletteRowProvider, missing: *bool) com.BSTR {
         missing.* = true;
         const callback = self.parent.state.row_value orelse return null;
         var buf: [row_help_capacity]u8 = undefined;
@@ -940,7 +940,7 @@ const PaletteRowProvider = struct {
 
     fn query(self: *PaletteRowProvider, iid: *const com.GUID, out: *?*anyopaque) com.HRESULT {
         out.* = null;
-        if (iidEqual(iid, &com.IID_IUnknown) or iidEqual(iid, &com.IID_IRawElementProviderSimple)) out.* = @ptrCast(&self.base) else if (iidEqual(iid, &com.IID_IRawElementProviderFragment)) out.* = @ptrCast(&self.fragment) else if (iidEqual(iid, &com.IID_ISelectionItemProvider)) out.* = @ptrCast(&self.selection_item) else if (self.parent.state.invoke_row != null and iidEqual(iid, &com.IID_IInvokeProvider)) out.* = @ptrCast(&self.invoke_item) else if (self.parent.state.row_value != null and iidEqual(iid, &com.IID_IValueProvider)) out.* = @ptrCast(&self.value_item) else return com.E_NOINTERFACE;
+        if (iidEqual(iid, &com.IID_IUnknown) or iidEqual(iid, &com.IID_IRawElementProviderSimple)) out.* = @ptrCast(&self.base) else if (iidEqual(iid, &com.IID_IRawElementProviderFragment)) out.* = @ptrCast(&self.fragment) else if (iidEqual(iid, &com.IID_ISelectionItemProvider)) out.* = @ptrCast(&self.selection_item) else if (self.parent.state.invoke_row != null and iidEqual(iid, &com.IID_IInvokeProvider)) out.* = @ptrCast(&self.invoke_item) else if (iidEqual(iid, &com.IID_IValueProvider) and self.hasValue()) out.* = @ptrCast(&self.value_item) else return com.E_NOINTERFACE;
         _ = self.refcount.fetchAdd(1, .monotonic);
         return com.S_OK;
     }
@@ -5702,11 +5702,43 @@ test "Palette row exposes a read-only Value only for a row that has one" {
     try std.testing.expectEqual(com.UIA_E_ELEMENTNOTENABLED, PaletteRowProvider.SetValue(&with.value_item, std.unicode.utf8ToUtf16LeStringLiteral("x")));
     var empty: com.BSTR = null;
     try std.testing.expectEqual(com.UIA_E_INVALIDOPERATION, PaletteRowProvider.GetValue(&without.value_item, &empty));
+    // A row with no Value gives no IValueProvider either.
+    var value_iface: ?*anyopaque = null;
+    try std.testing.expectEqual(com.E_NOINTERFACE, PaletteRowProvider.QueryInterface(&without.base, &com.IID_IValueProvider, &value_iface));
+    try std.testing.expect(value_iface == null);
+    try std.testing.expectEqual(com.S_OK, PaletteRowProvider.QueryInterface(&with.base, &com.IID_IValueProvider, &value_iface));
+    try std.testing.expectEqual(@as(u32, 1), PaletteRowProvider.ValueRelease(@ptrCast(@alignCast(value_iface.?))));
     // The Name stays the row's own.
     var name = com.VARIANT.empty();
     try std.testing.expectEqual(com.S_OK, PaletteRowProvider.GetPropertyValue(&with.base, constants.UIA_NamePropertyId, &name));
     defer _ = com.VariantClear(&name);
     try std.testing.expectEqual(@as(u16, com.VT_BSTR), name.vt);
+}
+
+test "Palette row reports a Value it has no memory for as E_OUTOFMEMORY, never as an empty one" {
+    const Values = struct {
+        fn value(_: *anyopaque, _: usize, buf: []u8) ?[]const u8 {
+            return std.fmt.bufPrint(buf, "shown text", .{}) catch null;
+        }
+    };
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    var state_data = TestPaletteState{ .count = 1 };
+    var state = state_data.state();
+    state.row_value = &Values.value;
+    var provider = try PaletteListProvider.create(failing.allocator(), @ptrFromInt(0x1), state);
+    defer _ = PaletteListProvider.Release(&provider.base);
+    const row = provider.createRow(0).?;
+    defer _ = PaletteRowProvider.Release(&row.base);
+    // The next allocation, the Value's text in UTF-16, fails.
+    failing.fail_index = failing.alloc_index;
+    var bstr: com.BSTR = null;
+    try std.testing.expectEqual(com.E_OUTOFMEMORY, PaletteRowProvider.GetValue(&row.value_item, &bstr));
+    try std.testing.expect(bstr == null);
+    failing.fail_index = failing.alloc_index;
+    var value = com.VARIANT.empty();
+    try std.testing.expectEqual(com.E_OUTOFMEMORY, PaletteRowProvider.GetPropertyValue(&row.base, constants.UIA_ValueValuePropertyId, &value));
+    try std.testing.expectEqual(@as(u16, com.VT_EMPTY), value.vt);
+    failing.fail_index = std.math.maxInt(usize);
 }
 
 test "Palette row retains its parent and balances QueryInterface refs" {

@@ -177,6 +177,16 @@ fn deletes(edit: Edit, info: Info) bool {
     return exact(edit, info);
 }
 
+/// A line goes after `line`, the file's last, which has no line ending: it
+/// gets the file's, except after a CR it ends in, which an LF makes a CRLF.
+/// Its bytes are kept either way, and it reads as before: `\r` and then
+/// `\r\n` would be a CR more, and at the reader's limit a line it skips
+/// (`LineIterator.takes`).
+fn endLastLine(line: *Line, dominant: Ending) void {
+    if (line.ending != .none) return;
+    line.ending = if (std.mem.endsWith(u8, line.text, "\r")) .lf else dominant;
+}
+
 /// The line `edit` writes, without its line ending, from `arena`.
 fn editLine(arena: Allocator, edit: Edit) ![]const u8 {
     var out: std.Io.Writer.Allocating = .init(arena);
@@ -278,7 +288,7 @@ pub fn patchProfileEdits(alloc: Allocator, raw: []const u8, edits: []const Edit,
             const after: ?usize = if (last_affecting) |a| (if (last_of_profile) |p| @max(a, p) else a) else last_of_profile;
             const new_line: Line = .{ .text = new_text, .ending = dominant, .info = readLine(new_text) };
             if (after) |index| {
-                if (lines.items[index].ending == .none) lines.items[index].ending = dominant;
+                endLastLine(&lines.items[index], dominant);
                 try lines.insert(arena, index + 1, new_line);
                 continue;
             }
@@ -289,7 +299,7 @@ pub fn patchProfileEdits(alloc: Allocator, raw: []const u8, edits: []const Edit,
                 if (!line.deleted) last_kept = line;
             }
             if (last_kept) |line| {
-                if (line.ending == .none) line.ending = dominant;
+                endLastLine(line, dominant);
                 if (std.mem.trim(u8, line.text, whitespace).len != 0)
                     try lines.append(arena, .{ .text = "", .ending = dominant, .info = null });
             }
@@ -895,6 +905,29 @@ test "settings patch: a line the loader skips for its two CRs is never matched o
     try testing.expectEqualStrings("profile-command = py: python.exe\r\nprofile-name = py: Python\r\n" ++ refused ++ "\n", out.items);
     const got = try TestMaps.read(alloc, out.items);
     try testing.expectEqualStrings("Python", got.name.get("py").?);
+}
+
+test "settings patch: a last line that ends in a bare CR gets an LF when a line goes after it, so the reader still takes it" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    // A label line at the reader's limit, its CR before no LF: 4,095 bytes,
+    // which the reader takes.
+    const label = "x" ** 4075;
+    const last = "profile-name = py: " ++ label ++ "\r";
+    try testing.expect(LineIterator.takes(last));
+    const raw = "profile-command = py: python.exe\r\n" ++ last;
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    defer out.deinit(testing.allocator);
+    try patchProfileEdits(testing.allocator, raw, &.{.{ .field = .folder, .id = "py", .op = .{ .set = "C:\\src" } }}, &out);
+    // The CR and an LF are a CRLF; the new last line has no line ending,
+    // as the file's had none.
+    try testing.expectEqualStrings(raw ++ "\nprofile-working-directory = py: C:\\src", out.items);
+    const got = try TestMaps.read(alloc, out.items);
+    try testing.expectEqualStrings(label, got.name.get("py").?);
+    try testing.expectEqualStrings("C:\\src", got.folder.get("py").?);
+    // So for a profile's block at the end of an LF file.
+    try testPatch("font-size = 12\r", &.{.{ .field = .command, .id = "dev", .op = .{ .set = "cmd.exe" } }}, "font-size = 12\r\n\nprofile-command = dev: cmd.exe");
 }
 
 test "settings patch: a removed profile keeps its tombstone while anything else names it" {

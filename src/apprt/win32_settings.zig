@@ -4748,6 +4748,7 @@ pub const SettingsWindow = struct {
     /// last pass: with `@modified` a row that was reset since still shows, and
     /// the page switch runs the search again.
     fn revealControl(self: *SettingsWindow, section: Section, control: HWND) void {
+        if (self.stopsLeavingProfiles(section)) return;
         if (self.search_query.active()) if (self.controlIndex(control)) |index| {
             if (index < settings_clipped_control_count and !self.searchFinds(index)) self.dropSearch();
         };
@@ -5021,24 +5022,38 @@ pub const SettingsWindow = struct {
         self.showSection(next, false);
     }
 
+    /// Whether showing `next` has to wait: the Profiles page is shown and its
+    /// open field holds what Settings will not keep yet (`commitProfileEdit`
+    /// with `.blur`: a refused value, a new profile's id with no command
+    /// line). The field keeps its text and gets the focus back, in view, its
+    /// reason on the status line, and the rail stays on Profiles. A caller
+    /// that gives the focus to the next page ahead of the switch
+    /// (`focusAhead`) asks first, so the focus does not go there and back.
+    fn stopsLeavingProfiles(self: *SettingsWindow, next: Section) bool {
+        if (self.active_section != .profiles or next == .profiles or self.profile_edit == null) return false;
+        if (self.commitProfileEdit(.blur)) return false;
+        self.applySectionVisibility();
+        self.focusProfileEdit();
+        return true;
+    }
+
+    /// Give the Profiles page's open field the focus, in view: a search that
+    /// hides its row gives way first, so the focus never goes to a field that
+    /// is not shown.
+    fn focusProfileEdit(self: *SettingsWindow) void {
+        const field = (self.profile_edit orelse return).hwnd orelse return;
+        if (self.profile_list.selectedPosition() == null and self.search_query.active()) self.clearSearch();
+        self.profile_list.revealSelected(.whole);
+        self.placeProfileEdit();
+        if (sys.IsWindowVisible(field) != 0) _ = SetFocus(field);
+    }
+
     /// `setActiveSection`. With `focus_follows` the caller has already given
     /// the focus to the page's control or rail button (`focusAhead`), so no
     /// row of the last page holds it and the search does not move it to the
     /// search field: one focus move, one announcement.
     fn showSection(self: *SettingsWindow, next: Section, focus_follows: bool) void {
-        // Leaving the Profiles page keeps its open field first. A value
-        // Settings refuses stops the switch: the field keeps its text and
-        // the focus, its reason on the status line, and the rail stays on
-        // Profiles.
-        if (self.active_section == .profiles and next != .profiles and self.profile_edit != null) {
-            if (!self.commitProfileEdit(.leaving)) {
-                self.applySectionVisibility();
-                if (self.profile_edit) |edit| if (edit.hwnd) |field| {
-                    _ = SetFocus(field);
-                };
-                return;
-            }
-        }
+        if (self.stopsLeavingProfiles(next)) return;
         const changed = self.active_section != next;
         self.materializeSection(next);
         // A page's list exists only while its page is shown: it goes before
@@ -5198,7 +5213,7 @@ pub const SettingsWindow = struct {
         // an edit like any other (`profileEditTypedInto`): the close prompt
         // asks about it. Its Save stops at the value, Discard drops it, and
         // Keep editing goes back to it.
-        if (self.profile_edit != null) _ = self.commitProfileEdit(.leaving);
+        if (self.profile_edit != null) _ = self.commitProfileEdit(.blur);
         switch (closeRequestAction(self.hasPendingChanges(), self.close_prompt_visible, self.close_posted)) {
             .close_now => self.closeNow(hwnd),
             .show_prompt, .focus_prompt => self.showClosePrompt(),
@@ -6485,7 +6500,7 @@ pub const SettingsWindow = struct {
         const hwnd = self.hwnd orelse return false;
         // What a profile field holds counts as an edit (`requestClose`): a
         // refused one stays, and holds the quit at the close prompt.
-        if (self.profile_edit != null) _ = self.commitProfileEdit(.leaving);
+        if (self.profile_edit != null) _ = self.commitProfileEdit(.blur);
         if (self.close_posted or !self.hasPendingChanges()) return false;
         if (sys.IsIconic(hwnd) != 0) _ = sys.ShowWindow(hwnd, SW_RESTORE);
         _ = SetForegroundWindow(hwnd);
@@ -6800,6 +6815,7 @@ pub const SettingsWindow = struct {
     /// which is inside the window already and so leaves its placement (a
     /// snapped window stays snapped) and a close prompt that is up alone.
     fn showField(self: *SettingsWindow, field: SettingField) void {
+        if (self.stopsLeavingProfiles(self.settingDestination(field).section)) return;
         // A search that hides the field gives way to it (asked live, as
         // `revealControl` does), with no pass of its own: the page switch
         // below lays out and paints once.
@@ -6828,6 +6844,7 @@ pub const SettingsWindow = struct {
     /// `keepFocusShown` to the search field.
     pub fn openSection(self: *SettingsWindow, section: Section) !void {
         try self.open();
+        if (self.stopsLeavingProfiles(section)) return;
         if (self.search_query.active()) self.dropSearch();
         self.focusRailButtonAhead(section);
         self.showSection(section, true);
@@ -7777,16 +7794,18 @@ pub const SettingsWindow = struct {
     /// the draft. A value Settings refuses keeps the field open, its reason on
     /// the status line, whether the focus is in it (`.stay`: Enter, Tab,
     /// Save) or went elsewhere in the window (`.blur`), so a save started
-    /// with the mouse stops at it too. Leaving the page or the window
-    /// (`.leaving`: a page switch, a close request, the app quitting) keeps
-    /// a refused value the same way, and also stops at a new profile with
-    /// its id typed and no command line yet, which a blur lets go: the
-    /// caller then stops, and the close prompt asks about the field
-    /// (`profileEditTypedInto`). When the field has to go (`.closing`: its
-    /// page goes), a refused value is dropped and the status line says so. A
-    /// new variable left empty is just let go. Returns whether no field is
-    /// open any more.
-    fn commitProfileEdit(self: *SettingsWindow, how: enum { stay, blur, leaving, closing }) bool {
+    /// with the mouse stops at it too. A new profile whose id was typed and
+    /// whose command line was not is held the same way: a profile needs
+    /// both, and Escape drops it. Leaving the page or the window asks with
+    /// `.blur` (a page switch, `stopsLeavingProfiles`; a close request; the
+    /// app quitting), and a field it holds stops that: the close prompt then
+    /// asks about it (`profileEditTypedInto`). The prompt taking the focus,
+    /// or a rail button taking it on the mouse press before its click, is a
+    /// blur too, and keeps the field likewise. When the field has to go
+    /// (`.closing`: its page goes), a refused value is dropped and the
+    /// status line says so. A new variable or id left empty is just let go.
+    /// Returns whether no field is open any more.
+    fn commitProfileEdit(self: *SettingsWindow, how: enum { stay, blur, closing }) bool {
         const edit = &(self.profile_edit orelse return true);
         const hwnd = edit.hwnd orelse return true;
         const alloc = self.handle.alloc;
@@ -7810,9 +7829,11 @@ pub const SettingsWindow = struct {
             .new_id, .new_command, .new_variable => true,
             else => false,
         };
+        // The id is typed: the field waits for the command line, whatever
+        // took the focus or asked for a save.
+        if (edit.kind == .new_command and text.len == 0)
+            return self.refuseProfileEdit(how, "A new profile needs a command line: type it, or press Escape to drop the profile.");
         if (how != .stay and new_kind and text.len == 0) {
-            if (how == .leaving and edit.kind == .new_command)
-                return self.refuseProfileEdit(how, "A new profile needs a command line: type it, or press Escape to drop the profile.");
             self.cancelProfileEdit();
             return true;
         }
@@ -7821,14 +7842,9 @@ pub const SettingsWindow = struct {
                 if (settings_profiles.checkNewId(pending, text)) |message| return self.refuseProfileEdit(how, message);
                 // The id is taken; the command line comes next, in its own
                 // field, on the same row. A field that lost the focus keeps
-                // nothing: a profile needs both. Leaving stops at it.
-                if (how == .leaving)
+                // the id: a profile needs both.
+                if (how != .stay)
                     return self.refuseProfileEdit(how, "A new profile needs a command line too: press Enter to type it, or Escape to drop the profile.");
-                if (how != .stay) {
-                    self.cancelProfileEdit();
-                    self.setProfileNote(.said, "No profile was added: a profile needs an id and a command line.", .{});
-                    return true;
-                }
                 const row = self.selectedProfileRow() orelse return true;
                 self.beginProfileEdit(.new_command, row, text);
                 return false;
@@ -21421,9 +21437,11 @@ test "settings a new profile asks for its id, then its command line, and Save ap
             try std.testing.expectEqual(command, sys.GetFocus().?);
             const provider = (try openEdit(settings)).provider.?;
             try std.testing.expectEqualStrings("Command line of dev", try uiaStringProperty(&provider.base, @import("win32_uia/constants.zig").UIA_NamePropertyId, &buf));
-            // An empty command line is refused.
+            // An empty command line is refused, saying what a new profile
+            // needs: it has no row to Delete yet.
             try std.testing.expect(fixture.pumpKey(VK_RETURN));
             try std.testing.expect(settings.profile_edit != null);
+            try std.testing.expectEqualStrings("Error: A new profile needs a command line: type it, or press Escape to drop the profile.", try statusTextOf(settings, &buf));
             typeInto(command, "cmd.exe /k");
             try std.testing.expect(fixture.pumpKey(VK_RETURN));
             try std.testing.expect(settings.profile_edit == null);
@@ -21714,6 +21732,116 @@ test "settings a new profile's id with no command line yet stops a page switch a
             try std.testing.expectEqual(Section.terminal, settings.active_section);
             try std.testing.expect(settings.profile_edit == null);
             try std.testing.expect(settings.pending.?.@"profile-command".get("dev") != null);
+        }
+    }.body);
+}
+
+test "settings a new profile's id outlasts the close prompt taking the focus and a rail button taking it on the press, in the message loop" {
+    try dialog_test.onHiddenDesktop(struct {
+        fn body() !void {
+            const keyboard = win32_input.TestingKeyboard.pinNone();
+            defer keyboard.release();
+            const alloc = std.testing.allocator;
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var path: []u8 = &.{};
+            const fixture = try profileFixture(&tmp, "profile-command = py: python.exe\n", &path);
+            defer alloc.free(path);
+            defer fixture.finish();
+            const settings = &fixture.settings;
+            var buf: [256]u8 = undefined;
+            try std.testing.expect(fixture.pumpKey(VK_INSERT));
+            const id_field = (try openEdit(settings)).hwnd.?;
+            typeInto(id_field, "dev");
+
+            // A mouse press on a rail button gives it the focus while it
+            // holds the mouse (so its focus is no click, as a radio button's
+            // would be: `SetFocus` alone clicks it), and the field's blur is
+            // handled before the release clicks it.
+            const rail = settings.sectionButton(.terminal).?;
+            const inside: isize = (4 << 16) | 4;
+            _ = sys.SendMessageW(rail, WM_LBUTTONDOWN, 1, inside); // MK_LBUTTON
+            dialog_test.pump();
+            try std.testing.expectEqual(rail, sys.GetFocus().?);
+            try std.testing.expectEqual(ProfileEdit.Kind.new_id, (try openEdit(settings)).kind);
+            try std.testing.expectEqualStrings("Error: A new profile needs a command line too: press Enter to type it, or Escape to drop the profile.", try statusTextOf(settings, &buf));
+            _ = sys.SendMessageW(rail, 0x0202, 0, inside); // WM_LBUTTONUP
+            dialog_test.pump();
+            try std.testing.expectEqual(Section.profiles, settings.active_section);
+            try std.testing.expectEqual(id_field, sys.GetFocus().?);
+            try std.testing.expectEqualStrings("dev", readEditUtf8(id_field, &buf).?);
+
+            // The command line field, empty: the close prompt takes the
+            // focus, and the field's blur keeps it.
+            try std.testing.expect(fixture.pumpKey(VK_RETURN));
+            const command = (try openEdit(settings)).hwnd.?;
+            try std.testing.expectEqual(ProfileEdit.Kind.new_command, (try openEdit(settings)).kind);
+            _ = sys.SendMessageW(fixture.hwnd(), WM_CLOSE, 0, 0);
+            dialog_test.pump();
+            try std.testing.expect(settings.close_prompt_visible);
+            try std.testing.expectEqual(command, (try openEdit(settings)).hwnd.?);
+            try std.testing.expect(settings.hasPendingChanges());
+            // Keep editing goes back to it.
+            try std.testing.expect(fixture.pumpKey(VK_ESCAPE));
+            dialog_test.pump();
+            try std.testing.expect(!settings.close_prompt_visible);
+            try std.testing.expectEqual(command, sys.GetFocus().?);
+            // Save and close stops at it, keeps the window and says what it
+            // needs.
+            _ = sys.SendMessageW(fixture.hwnd(), WM_CLOSE, 0, 0);
+            dialog_test.pump();
+            _ = sys.SendMessageW(settings.btn_save.?, BM_CLICK, 0, 0);
+            dialog_test.pump();
+            try std.testing.expectEqual(@as(u32, 0), fixture.saved);
+            try std.testing.expectEqual(@as(u32, 0), fixture.closed);
+            try std.testing.expectEqual(command, (try openEdit(settings)).hwnd.?);
+            try std.testing.expectEqualStrings("Error: A new profile needs a command line: type it, or press Escape to drop the profile.", try statusTextOf(settings, &buf));
+        }
+    }.body);
+}
+
+test "settings a stopped page switch gives the field back in view, and the focus never goes ahead to the next page" {
+    try dialog_test.onHiddenDesktop(struct {
+        fn body() !void {
+            const keyboard = win32_input.TestingKeyboard.pinNone();
+            defer keyboard.release();
+            const alloc = std.testing.allocator;
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var path: []u8 = &.{};
+            const open = try refusedProfileField(&tmp, &path);
+            defer alloc.free(path);
+            defer open.fixture.finish();
+            const settings = &open.fixture.settings;
+            const list = settings.profile_list.hwnd.?;
+            var buf: [512]u8 = undefined;
+            var msg: sys.MSG = undefined;
+
+            // Asked for another page ahead of the switch (the palette's jump,
+            // Open Settings on a page, a field Settings will not take): the
+            // field keeps the focus all along, so it never posts its blur.
+            dialog_test.pump();
+            try settings.openSection(.terminal);
+            try std.testing.expectEqual(Section.profiles, settings.active_section);
+            try std.testing.expectEqual(open.edit, sys.GetFocus().?);
+            try std.testing.expect(sys.PeekMessageW(&msg, list, WM_SETTINGS_PROFILE_BLUR, WM_SETTINGS_PROFILE_BLUR, 0) == 0); // PM_NOREMOVE
+            settings.showField(.font_size);
+            try std.testing.expectEqual(Section.profiles, settings.active_section);
+            try std.testing.expectEqual(open.edit, sys.GetFocus().?);
+            try std.testing.expect(sys.PeekMessageW(&msg, list, WM_SETTINGS_PROFILE_BLUR, WM_SETTINGS_PROFILE_BLUR, 0) == 0); // PM_NOREMOVE
+            try std.testing.expectEqual(@as(usize, BST_UNCHECKED), @as(usize, @bitCast(sys.SendMessageW(settings.sectionButton(.terminal).?, BM_GETCHECK, 0, 0))));
+
+            // A search that hides the field's row: the switch it starts
+            // stops, and the search gives way so the field is in view.
+            typeInto(settings.edit_search.?, "zzzz-no-row-has-this");
+            dialog_test.pump();
+            try std.testing.expect(sys.IsWindowVisible(open.edit) == 0);
+            settings.setActiveSection(.terminal);
+            try std.testing.expectEqual(Section.profiles, settings.active_section);
+            try std.testing.expect(!settings.search_query.active());
+            try std.testing.expect(sys.IsWindowVisible(open.edit) != 0);
+            try std.testing.expectEqual(open.edit, sys.GetFocus().?);
+            try std.testing.expectEqualStrings(refused_command, try statusTextOf(settings, &buf));
         }
     }.body);
 }
