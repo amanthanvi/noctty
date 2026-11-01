@@ -47,6 +47,12 @@ const leaves = .{
         .source = @embedFile("child_window.zig"),
         .pub_decls = 16,
     },
+    .{
+        .file = "docked_search.zig",
+        .module = @import("docked_search.zig"),
+        .source = @embedFile("docked_search.zig"),
+        .pub_decls = 6,
+    },
 };
 
 /// The facade, the files that own its App, Host and Surface, and

@@ -63,7 +63,6 @@ const win32_toast_activation = @import("win32_toast_activation.zig");
 const win32_toast_activator = @import("win32_toast_activator.zig");
 const win32_tab_drop_zones = @import("win32_tab_drop_zones.zig");
 const win32_tab_tooltip = @import("win32_tab_tooltip.zig");
-const win32_search_bar = @import("win32_search_bar.zig");
 const win32_icons = @import("win32_icons.zig");
 const win32_paste_protection = @import("win32_paste_protection.zig");
 const win32_scrollbar_geometry = @import("win32_scrollbar_geometry.zig");
@@ -639,6 +638,7 @@ test {
     _ = @import("win32/focus_cue.zig");
     _ = @import("win32/first_frame.zig");
     _ = @import("win32/facade_budget.zig");
+    _ = @import("win32/docked_search.zig");
     _ = child_window;
     _ = paint_text;
     _ = clipboard_write;
@@ -10735,7 +10735,7 @@ pub fn hostButtonProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) cal
                     v.banner_focused = false;
                     v.syncBannerExpiry();
                 }
-                if (v.searchControlSurface(hwnd)) |surface| surface.search_toggle_keys = .{};
+                if (v.searchControlSurface(hwnd)) |surface| surface.docked_search.toggle_keys = .{};
             },
             c.WM_MOUSEMOVE => {
                 // The search bar's icon buttons and the tab strip's [+] and
@@ -11526,7 +11526,7 @@ pub fn hostWindowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) cal
                         _ = sys.SetBkMode(hdc, c.TRANSPARENT);
                         _ = sys.SetTextColor(hdc, if (v.isSearchBarResultsLabel(child))
                             if (v.searchControlSurface(child)) |surface|
-                                searchBarResultsVisual(&v.app.resolved_theme, &surface.search_bar).fg
+                                searchBarResultsVisual(&v.app.resolved_theme, &surface.docked_search).fg
                             else
                                 v.app.resolved_theme.text_secondary
                         else if (v.overlay_hint_hwnd != null and child == v.overlay_hint_hwnd.?)

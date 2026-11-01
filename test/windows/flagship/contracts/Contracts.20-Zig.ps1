@@ -25,6 +25,7 @@ $win32TestModuleRoots = @(
     '_ = @import("win32/input.zig");'
     '_ = @import("win32/chrome_layout.zig");'
     '_ = @import("win32/gdi.zig");'
+    '_ = @import("win32/docked_search.zig");'
 )
 foreach ($win32TestModuleRoot in $win32TestModuleRoots) {
     if (-not [regex]::IsMatch(
@@ -43,6 +44,8 @@ foreach ($win32TestModuleRoot in $win32TestModuleRoots) {
 # explicit root import above, fails. Lower a floor only for a deliberate
 # consolidation. facade_budget.zig did not move out of win32.zig: its floor is
 # the facade guard's two tests, and its root line is pinned below.
+# docked_search.zig holds the per-pane search tests that came from
+# win32_search_bar.zig and labels.zig.
 $movedWin32TestFloors = [ordered]@{
     'labels.zig' = 113
     'input.zig' = 24
@@ -51,6 +54,7 @@ $movedWin32TestFloors = [ordered]@{
     'chrome_layout.zig' = 2
     'gdi.zig' = 2
     'facade_budget.zig' = 2
+    'docked_search.zig' = 15
 }
 foreach ($movedWin32TestModule in $movedWin32TestFloors.Keys) {
     $movedWin32TestModulePath = @($win32RuntimeModuleFiles | Where-Object {

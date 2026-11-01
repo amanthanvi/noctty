@@ -12,9 +12,9 @@ const win32_theme = @import("../win32_theme.zig");
 const win32_palette = @import("../win32_palette.zig");
 const win32_chrome_state = @import("../win32_chrome_state.zig");
 const win32_taskbar_progress = @import("../win32_taskbar_progress.zig");
-const win32_search_bar = @import("../win32_search_bar.zig");
 const win32_types = @import("../win32_types.zig");
 const c = @import("consts.zig");
+const docked_search = @import("docked_search.zig");
 const paint_text = @import("text.zig");
 
 const ThemeColors = win32_theme.ThemeColors;
@@ -108,14 +108,7 @@ const TabButtonKeyAction = enum {
     focus_previous,
 };
 
-/// The modifier keys of one key press, read once by the caller. Decisions
-/// take this instead of asking the keyboard, so a test states it. AltGr
-/// reports as Ctrl and Alt together, and no rule here counts that as Alt.
-pub const KeyMods = struct {
-    shift: bool = false,
-    ctrl: bool = false,
-    alt: bool = false,
-};
+pub const KeyMods = docked_search.Mods;
 
 /// What Enter and Tab do on a tab-strip action button ([+], [v]) or a docked
 /// search button. Space is not here: the BUTTON class clicks on its key-up.
@@ -175,14 +168,7 @@ pub const SearchBarToolbarVisual = struct {
     separator: u32,
 };
 
-pub const SearchBarButtonRole = enum {
-    prev,
-    next,
-    regex,
-    case_sensitive,
-    whole_word,
-    close,
-};
+pub const SearchBarButtonRole = docked_search.Role;
 
 pub fn tabButtonKeyAction(vk: WPARAM, mods: KeyMods) ?TabButtonKeyAction {
     // Alt chords belong to the window's menu, not to the tab.
@@ -271,39 +257,6 @@ pub fn searchFocusStopRole(stop: usize) ?SearchBarButtonRole {
     if (stop == 0 or stop >= search_focus_stop_count) return null;
     return @enumFromInt(stop - 1);
 }
-
-/// Alt+R, Alt+C and Alt+W flip the regex, case and whole-word flags from the
-/// docked search bar. Alt has to be held without Ctrl, since AltGr reports as
-/// Ctrl+Alt and types characters on many layouts, and without Shift.
-pub fn searchToggleAccelerator(vk: WPARAM, mods: KeyMods) ?SearchBarButtonRole {
-    if (!mods.alt or mods.ctrl or mods.shift) return null;
-    return switch (vk) {
-        'R' => .regex,
-        'C' => .case_sensitive,
-        'W' => .whole_word,
-        else => null,
-    };
-}
-
-/// Pair a handled virtual-key shortcut with TranslateMessage's WM_SYSCHAR
-/// by scan code, not character: the character can be non-Latin on another
-/// layout. Only a handled press can consume a character; AltGr stays out.
-pub const SearchToggleKeys = struct {
-    pending_scan: ?u16 = null,
-
-    pub fn keyDown(self: *SearchToggleKeys, vk: WPARAM, mods: KeyMods, bits: usize) ?SearchBarButtonRole {
-        const role = searchToggleAccelerator(vk, mods);
-        self.pending_scan = if (role != null) @intCast((bits >> 16) & 0x1FF) else null;
-        return role;
-    }
-
-    /// `bits` is the WM_SYSCHAR's lParam; its character does not matter.
-    pub fn consumeChar(self: *SearchToggleKeys, bits: usize) bool {
-        const pending = self.pending_scan;
-        self.pending_scan = null;
-        return if (pending) |scan| scan == ((bits >> 16) & 0x1FF) else false;
-    }
-};
 
 /// After a tab's context menu closes, keyboard focus goes back to the strip
 /// when the menu came from the keyboard, unless a command opened an overlay
@@ -458,7 +411,7 @@ pub fn searchBarSearchedStateForSelected(selected: ?usize, total: ?usize) bool {
 }
 
 pub fn searchBarDisplayStateChanged(
-    search_bar: *const win32_search_bar.SearchBar,
+    search_bar: *const docked_search.DockedSearch,
     searched: bool,
     total: ?usize,
     selected: ?usize,
@@ -1131,7 +1084,7 @@ pub fn buildSearchOverlayLabel(
 
 pub fn buildSearchBarResultsText(
     alloc: Allocator,
-    bar: *const win32_search_bar.SearchBar,
+    bar: *const docked_search.DockedSearch,
 ) ![]u8 {
     if (bar.query.len == 0) return try alloc.dupe(u8, search_results_idle);
     if (!bar.searched or bar.total == null) return try alloc.dupe(u8, search_results_pending);
@@ -1180,7 +1133,7 @@ pub fn searchBarButtonName(role: SearchBarButtonRole) []const u8 {
     };
 }
 
-pub fn showSearchBarResults(bar: *const win32_search_bar.SearchBar) bool {
+pub fn showSearchBarResults(bar: *const docked_search.DockedSearch) bool {
     return bar.query.len > 0;
 }
 
@@ -1198,7 +1151,7 @@ pub fn searchBarShouldInvalidateCoreSearchOnEdit(previous_query_len: usize, next
     return previous_query_len > 0;
 }
 
-pub fn shouldAcceptCoreSearchUpdates(bar: *const win32_search_bar.SearchBar) bool {
+pub fn shouldAcceptCoreSearchUpdates(bar: *const docked_search.DockedSearch) bool {
     return bar.query.len == 0 or bar.searched;
 }
 
@@ -1210,7 +1163,7 @@ pub fn searchBarButtonShowsLabel(role: SearchBarButtonRole, button_width: i32) b
 
 pub fn searchBarResultsVisual(
     theme: *const ThemeColors,
-    bar: *const win32_search_bar.SearchBar,
+    bar: *const docked_search.DockedSearch,
 ) SearchBarResultsVisual {
     const accent = overlayAccentColor(.search, theme.is_dark);
     if (!bar.searched or bar.total == null) {
@@ -3267,7 +3220,7 @@ test "win32 buildSearchOverlayLabel reflects match counts" {
 test "win32 buildSearchBarResultsText reflects docked search states" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
-    var bar = win32_search_bar.SearchBar.init(std.testing.allocator);
+    var bar = docked_search.DockedSearch.init(std.testing.allocator);
     defer bar.deinit();
 
     const idle = try buildSearchBarResultsText(std.testing.allocator, &bar);
@@ -3307,7 +3260,7 @@ test "win32 buildSearchBarResultsText reflects docked search states" {
 test "win32 showSearchBarResults only shows status chip for non-empty queries" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
-    var bar = win32_search_bar.SearchBar.init(std.testing.allocator);
+    var bar = docked_search.DockedSearch.init(std.testing.allocator);
     defer bar.deinit();
 
     try std.testing.expect(!showSearchBarResults(&bar));
@@ -3336,7 +3289,7 @@ test "win32 searchBarShouldInvalidateCoreSearchOnEdit invalidates active query e
 test "win32 shouldAcceptCoreSearchUpdates rejects pending docked search state" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
-    var bar = win32_search_bar.SearchBar.init(std.testing.allocator);
+    var bar = docked_search.DockedSearch.init(std.testing.allocator);
     defer bar.deinit();
 
     try std.testing.expect(shouldAcceptCoreSearchUpdates(&bar));
@@ -3351,7 +3304,7 @@ test "win32 shouldAcceptCoreSearchUpdates rejects pending docked search state" {
 test "win32 searchBarResultsVisual marks no-match state with error colors" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
-    var bar = win32_search_bar.SearchBar.init(std.testing.allocator);
+    var bar = docked_search.DockedSearch.init(std.testing.allocator);
     defer bar.deinit();
 
     try bar.setQuery("zzzzz", 10);
@@ -4069,7 +4022,7 @@ test "win32 searchBarSearchedState helpers preserve pending searches on null cal
 test "win32 searchBarDisplayStateChanged only trips on visible results changes" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
-    const same = win32_search_bar.SearchBar{
+    const same = docked_search.DockedSearch{
         .searched = true,
         .total = 12,
         .selected = 3,
@@ -4188,38 +4141,6 @@ test "win32 docked search stops run query, prev, next, regex, case, word, close"
         try std.testing.expectEqual(stop, searchFocusStopOfRole(role));
     }
     try std.testing.expectEqual(@as(?SearchBarButtonRole, null), searchFocusStopRole(search_focus_stop_count));
-}
-
-test "win32 search toggle accelerators need Alt without Ctrl, Shift or AltGr" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    const alt: KeyMods = .{ .alt = true };
-    try std.testing.expectEqual(@as(?SearchBarButtonRole, .regex), searchToggleAccelerator('R', alt));
-    try std.testing.expectEqual(@as(?SearchBarButtonRole, .case_sensitive), searchToggleAccelerator('C', alt));
-    try std.testing.expectEqual(@as(?SearchBarButtonRole, .whole_word), searchToggleAccelerator('W', alt));
-    try std.testing.expectEqual(@as(?SearchBarButtonRole, null), searchToggleAccelerator('X', alt));
-    // No Alt, or Alt with Ctrl (AltGr reports as both), or Shift: not ours.
-    try std.testing.expectEqual(@as(?SearchBarButtonRole, null), searchToggleAccelerator('R', .{}));
-    try std.testing.expectEqual(@as(?SearchBarButtonRole, null), searchToggleAccelerator('R', .{ .ctrl = true }));
-    try std.testing.expectEqual(@as(?SearchBarButtonRole, null), searchToggleAccelerator('R', .{ .alt = true, .ctrl = true }));
-    try std.testing.expectEqual(@as(?SearchBarButtonRole, null), searchToggleAccelerator('R', .{ .alt = true, .shift = true }));
-    var keys: SearchToggleKeys = .{};
-    const r_scan = 0x13 << 16;
-    const c_scan = 0x2E << 16;
-    try std.testing.expectEqual(@as(?SearchBarButtonRole, .regex), keys.keyDown('R', alt, r_scan));
-    // The character is never read, so Cyrillic K on the R key is consumed
-    // just like Latin r: only the one character the press typed, though.
-    try std.testing.expect(keys.consumeChar(r_scan));
-    try std.testing.expect(!keys.consumeChar(r_scan));
-    _ = keys.keyDown('C', alt, c_scan);
-    try std.testing.expect(keys.consumeChar(c_scan));
-    _ = keys.keyDown('R', alt, r_scan);
-    try std.testing.expect(!keys.consumeChar(c_scan));
-    _ = keys.keyDown('R', .{ .alt = true, .ctrl = true }, r_scan);
-    try std.testing.expect(!keys.consumeChar(r_scan));
-    _ = keys.keyDown('R', alt, r_scan);
-    _ = keys.keyDown('X', alt, r_scan);
-    try std.testing.expect(!keys.consumeChar(r_scan));
 }
 
 test "win32 a tab context menu hands focus back to the strip only from the keyboard and without an overlay" {

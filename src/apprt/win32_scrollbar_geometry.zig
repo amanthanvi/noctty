@@ -9,6 +9,7 @@
 //!   3. Hover-widen logic: the track expands from 8 dp to 10 dp when the
 //!      cursor is over it or a drag is in progress.
 //!   4. Drag-to-scroll mapping (cursor Y → target top_row).
+//!   5. Search match rows downsampled to the track's markers.
 //!
 //! **Auto-hide semantics.**  Any scroll activity (wheel, key, content
 //! delta) resets a 1500 ms countdown.  When the countdown expires the
@@ -28,6 +29,7 @@
 //! quads into the overlay vertex buffer.
 
 const std = @import("std");
+const Allocator = std.mem.Allocator;
 
 // ---------------------------------------------------------------------------
 // Configuration constants (dp = density-independent pixels at 96 DPI)
@@ -310,6 +312,73 @@ fn effectiveWidth(layout: Layout) f32 {
     return dp * layout.dpi_scale;
 }
 
+// ---------------------------------------------------------------------
+// Match-marker downsampling
+// ---------------------------------------------------------------------
+
+/// Downsample `matches` (sorted ascending, unique row indices) into at
+/// most `max_markers` normalized [0, 1] positions for the scrollbar
+/// overlay.
+///
+/// When `matches.len <= max_markers` every match is returned directly
+/// as `row / total_rows`.  Otherwise the scrollback is partitioned into
+/// `max_markers` equal-height bins and any bin containing at least one
+/// match emits a marker at the bin's midpoint.
+pub fn downsampleMarkers(
+    alloc: Allocator,
+    matches: []const usize,
+    total_rows: usize,
+    max_markers: usize,
+) Allocator.Error![]f32 {
+    if (matches.len == 0 or total_rows == 0 or max_markers == 0) {
+        return try alloc.alloc(f32, 0);
+    }
+
+    const rows_f: f64 = @floatFromInt(total_rows);
+
+    // Fast path: few enough matches to emit them all.
+    if (matches.len <= max_markers) {
+        const out = try alloc.alloc(f32, matches.len);
+        for (matches, 0..) |row, i| {
+            out[i] = @floatCast(@as(f64, @floatFromInt(row)) / rows_f);
+        }
+        return out;
+    }
+
+    // Bucket path: partition into `max_markers` equal bins.
+    const bin_height: f64 = rows_f / @as(f64, @floatFromInt(max_markers));
+
+    // Bit-set tracking which bins are occupied.  Use a dynamic array of
+    // bools — max_markers is typically small (scrollbar track pixels).
+    const occupied = try alloc.alloc(bool, max_markers);
+    defer alloc.free(occupied);
+    @memset(occupied, false);
+
+    for (matches) |row| {
+        var bin: usize = @intFromFloat(@as(f64, @floatFromInt(row)) / bin_height);
+        if (bin >= max_markers) bin = max_markers - 1;
+        occupied[bin] = true;
+    }
+
+    // Count occupied bins, allocate output.
+    var count: usize = 0;
+    for (occupied) |o| {
+        if (o) count += 1;
+    }
+    const out = try alloc.alloc(f32, count);
+
+    var idx: usize = 0;
+    for (occupied, 0..) |o, b| {
+        if (o) {
+            const mid: f64 = (@as(f64, @floatFromInt(b)) + 0.5) * bin_height / rows_f;
+            out[idx] = @floatCast(mid);
+            idx += 1;
+        }
+    }
+
+    return out;
+}
+
 // ===========================================================================
 // Tests
 // ===========================================================================
@@ -535,4 +604,51 @@ test "pointOverThumb narrower than pointOverTrack" {
     const y = th.bottom + 10.0;
     try std.testing.expect(pointOverTrack(l, x, y));
     try std.testing.expect(!pointOverThumb(l, x, y));
+}
+
+test "N <= max returns all matches normalized" {
+    const matches = [_]usize{ 10, 50, 90 };
+    const out = try downsampleMarkers(std.testing.allocator, &matches, 100, 10);
+    defer std.testing.allocator.free(out);
+
+    try std.testing.expectEqual(@as(usize, 3), out.len);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.10), out[0], 0.001);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.50), out[1], 0.001);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.90), out[2], 0.001);
+}
+
+test "N > max buckets" {
+    const matches = [_]usize{ 10, 20, 30, 40, 50 };
+    const out = try downsampleMarkers(std.testing.allocator, &matches, 100, 2);
+    defer std.testing.allocator.free(out);
+
+    // 2 bins: [0..50) and [50..100).  Matches 10,20,30,40 in bin 0;
+    // match 50 in bin 1.  Both occupied -> 2 markers.
+    try std.testing.expectEqual(@as(usize, 2), out.len);
+}
+
+test "empty matches returns empty" {
+    const matches = [_]usize{};
+    const out = try downsampleMarkers(std.testing.allocator, &matches, 100, 10);
+    defer std.testing.allocator.free(out);
+
+    try std.testing.expectEqual(@as(usize, 0), out.len);
+}
+
+test "total_rows=0 safe" {
+    const matches = [_]usize{};
+    const out = try downsampleMarkers(std.testing.allocator, &matches, 0, 10);
+    defer std.testing.allocator.free(out);
+
+    try std.testing.expectEqual(@as(usize, 0), out.len);
+}
+
+test "single bucket with multiple matches" {
+    const matches = [_]usize{ 5, 15, 25 };
+    const out = try downsampleMarkers(std.testing.allocator, &matches, 30, 1);
+    defer std.testing.allocator.free(out);
+
+    // Single bin covers entire range; midpoint = 0.5.
+    try std.testing.expectEqual(@as(usize, 1), out.len);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.5), out[0], 0.001);
 }

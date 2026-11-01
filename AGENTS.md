@@ -273,7 +273,7 @@ that govern each symbol you change, or that none does.
   (`setOverlayEditText`, and `syncWindowTextUtf8CachedAfterSet` in
   `win32/child_window.zig`).
 - [search-scrollbar.md](docs/agents/log/search-scrollbar.md): the docked
-  search bar (`win32_search_bar.zig`, `searchEditProc` in
+  search bar (`win32/docked_search.zig`, `searchEditProc` in
   `win32/search_controls.zig`, visible Up/Down versus
   core `.next`/`.previous`, debounce) and the layered overlay scrollbar
   (`win32_scrollbar_geometry.zig`, heartbeat, alpha, markers).

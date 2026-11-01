@@ -4462,7 +4462,7 @@ pub const Host = struct {
 
     pub fn dismissActiveSearch(self: *Host) bool {
         const surface = self.activeSurface() orelse return false;
-        if (!surface.search_active and !surface.search_bar.visible) return false;
+        if (!surface.docked_search.active and !surface.docked_search.visible) return false;
         surface.closeDockedSearchBar(true, true) catch return false;
         return true;
     }
@@ -7276,9 +7276,9 @@ pub const Host = struct {
         var wants_timer = false;
         var it = tab.tree.iterator();
         while (it.next()) |entry| {
-            if (!entry.view.search_bar.visible) continue;
-            if (entry.view.search_bar.query.len == 0) continue;
-            if (!entry.view.search_bar.searched) {
+            if (!entry.view.docked_search.visible) continue;
+            if (entry.view.docked_search.query.len == 0) continue;
+            if (!entry.view.docked_search.searched) {
                 wants_timer = true;
                 break;
             }
@@ -7292,8 +7292,8 @@ pub const Host = struct {
         if (self.activeTab()) |tab| {
             var it = tab.tree.iterator();
             while (it.next()) |entry| {
-                if (!entry.view.search_bar.visible) continue;
-                if (!entry.view.search_bar.shouldRunSearch(now_ms)) continue;
+                if (!entry.view.docked_search.visible) continue;
+                if (!entry.view.docked_search.shouldRunSearch(now_ms)) continue;
                 _ = entry.view.runPendingSearchNow() catch |err| {
                     log.warn("win32 search refresh failed err={}", .{err});
                     continue;
@@ -10430,7 +10430,7 @@ pub const Host = struct {
                 entry.view.setVisible(true);
                 const placement = win32_layout.zoomedSurfacePlacement(
                     layout_content_rect,
-                    entry.view.search_bar.visible,
+                    entry.view.docked_search.visible,
                     search_bar_height,
                 );
                 content_layout_changed = (try applySurfacePlacement(
@@ -10463,7 +10463,7 @@ pub const Host = struct {
                             spatial,
                             entry.handle,
                             has_multi_panes,
-                            entry.view.search_bar.visible,
+                            entry.view.docked_search.visible,
                         );
                         content_layout_changed = (try applySurfacePlacement(
                             entry.view,

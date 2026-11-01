@@ -1,9 +1,7 @@
-//! Per-pane docked search bar state machine.
-//!
-//! Owns query text, regex/case/word toggles, result display state, a 40 ms
-//! debounce policy, and match-marker downsampling for the scrollbar
-//! overlay.  No HWND creation, painting, or keybind dispatch — those
-//! belong to the Win32 surface layer.
+//! One pane's docked search state: the query, the regex/case/word toggles,
+//! what the core last reported, the 40 ms debounce and the Alt+R/C/W press
+//! pairing. No HWND creation, painting or keybind dispatch: those belong to
+//! the Win32 surface layer (`search_controls.zig`).
 //!
 //! **Debounce rationale.**  Scrollback search is O(lines * query_len).
 //! Re-running on every WM_COMMAND / EN_CHANGE would stall the UI on
@@ -23,6 +21,25 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
+/// The docked search bar's buttons, in the order the bar lays them out.
+pub const Role = enum {
+    prev,
+    next,
+    regex,
+    case_sensitive,
+    whole_word,
+    close,
+};
+
+/// The modifier keys of one key press, read once by the caller. Decisions
+/// take this instead of asking the keyboard, so a test states it. AltGr
+/// reports as Ctrl and Alt together, and no rule here counts that as Alt.
+pub const Mods = struct {
+    shift: bool = false,
+    ctrl: bool = false,
+    alt: bool = false,
+};
+
 pub const Toggles = packed struct {
     regex: bool = false,
     case_sensitive: bool = false,
@@ -31,7 +48,40 @@ pub const Toggles = packed struct {
     _padding: u4 = 0,
 };
 
-pub const SearchBar = struct {
+/// Alt+R, Alt+C and Alt+W flip the regex, case and whole-word flags from the
+/// docked search bar. Alt has to be held without Ctrl, since AltGr reports as
+/// Ctrl+Alt and types characters on many layouts, and without Shift.
+pub fn toggleAccelerator(vk: usize, mods: Mods) ?Role {
+    if (!mods.alt or mods.ctrl or mods.shift) return null;
+    return switch (vk) {
+        'R' => .regex,
+        'C' => .case_sensitive,
+        'W' => .whole_word,
+        else => null,
+    };
+}
+
+/// Pair a handled virtual-key shortcut with TranslateMessage's WM_SYSCHAR
+/// by scan code, not character: the character can be non-Latin on another
+/// layout. Only a handled press can consume a character; AltGr stays out.
+pub const ToggleKeys = struct {
+    pending_scan: ?u16 = null,
+
+    pub fn keyDown(self: *ToggleKeys, vk: usize, mods: Mods, bits: usize) ?Role {
+        const role = toggleAccelerator(vk, mods);
+        self.pending_scan = if (role != null) @intCast((bits >> 16) & 0x1FF) else null;
+        return role;
+    }
+
+    /// `bits` is the WM_SYSCHAR's lParam; its character does not matter.
+    pub fn consumeChar(self: *ToggleKeys, bits: usize) bool {
+        const pending = self.pending_scan;
+        self.pending_scan = null;
+        return if (pending) |scan| scan == ((bits >> 16) & 0x1FF) else false;
+    }
+};
+
+pub const DockedSearch = struct {
     visible: bool = false,
     query: []u8 = &.{},
     toggles: Toggles = .{},
@@ -46,16 +96,30 @@ pub const SearchBar = struct {
     /// `forceSearch`) and no new edit has arrived since.  Prevents
     /// `shouldRunSearch` from returning true twice for the same edit.
     searched: bool = true,
+    /// A query reached the core and has not been stopped since.
+    active: bool = false,
+    /// The query the core is searching for, owned.
+    needle: ?[:0]const u8 = null,
+    /// What the core last reported: the total, its newest-first index and
+    /// that index as the chip shows it.
+    core_total: ?usize = null,
+    selected_raw: ?usize = null,
+    core_selected: ?usize = null,
+    /// The rows of the matches, owned, for the scrollbar markers.
+    match_rows: []const u32 = &.{},
+    toggle_keys: ToggleKeys = .{},
     alloc: Allocator,
 
     pub const debounce_ms: i64 = 40;
 
-    pub fn init(alloc: Allocator) SearchBar {
+    pub fn init(alloc: Allocator) DockedSearch {
         return .{ .alloc = alloc };
     }
 
-    pub fn deinit(self: *SearchBar) void {
+    pub fn deinit(self: *DockedSearch) void {
         if (self.query.len > 0) self.alloc.free(self.query);
+        if (self.needle) |value| self.alloc.free(value);
+        if (self.match_rows.len > 0) self.alloc.free(self.match_rows);
         self.* = undefined;
     }
 
@@ -63,11 +127,11 @@ pub const SearchBar = struct {
     // Visibility
     // -----------------------------------------------------------------
 
-    pub fn open(self: *SearchBar) void {
+    pub fn open(self: *DockedSearch) void {
         self.visible = true;
     }
 
-    pub fn close(self: *SearchBar) void {
+    pub fn close(self: *DockedSearch) void {
         self.visible = false;
     }
 
@@ -75,7 +139,7 @@ pub const SearchBar = struct {
     // Query
     // -----------------------------------------------------------------
 
-    pub fn setQuery(self: *SearchBar, next: []const u8, now_ms: i64) Allocator.Error!void {
+    pub fn setQuery(self: *DockedSearch, next: []const u8, now_ms: i64) Allocator.Error!void {
         const next_owned: ?[]u8 = if (next.len > 0) try self.alloc.dupe(u8, next) else null;
         errdefer if (next_owned) |value| self.alloc.free(value);
 
@@ -103,7 +167,7 @@ pub const SearchBar = struct {
     // Debounce
     // -----------------------------------------------------------------
 
-    pub fn shouldRunSearch(self: *const SearchBar, now_ms: i64) bool {
+    pub fn shouldRunSearch(self: *const DockedSearch, now_ms: i64) bool {
         if (self.query.len == 0) return false;
         if (self.searched) return false;
         if (self.last_edit_ms == 0) return false;
@@ -112,7 +176,7 @@ pub const SearchBar = struct {
 
     /// Clear debounce and signal the caller to re-run immediately.
     /// Returns true when a non-empty query exists (caller should search).
-    pub fn forceSearch(self: *SearchBar) bool {
+    pub fn forceSearch(self: *DockedSearch) bool {
         if (self.query.len == 0) return false;
         self.searched = true;
         self.last_edit_ms = 0;
@@ -120,14 +184,10 @@ pub const SearchBar = struct {
     }
 
     // -----------------------------------------------------------------
-    // Results / navigation
-    // -----------------------------------------------------------------
-
-    // -----------------------------------------------------------------
     // Toggles
     // -----------------------------------------------------------------
 
-    fn invalidateResults(self: *SearchBar, now_ms: i64) void {
+    fn invalidateResults(self: *DockedSearch, now_ms: i64) void {
         self.total = null;
         self.selected = null;
         self.invalid = false;
@@ -140,95 +200,28 @@ pub const SearchBar = struct {
         }
     }
 
-    pub fn toggleRegex(self: *SearchBar, now_ms: i64) void {
+    pub fn toggleRegex(self: *DockedSearch, now_ms: i64) void {
         self.toggles.regex = !self.toggles.regex;
         self.invalidateResults(now_ms);
     }
 
-    pub fn toggleCase(self: *SearchBar, now_ms: i64) void {
+    pub fn toggleCase(self: *DockedSearch, now_ms: i64) void {
         self.toggles.case_sensitive = !self.toggles.case_sensitive;
         self.invalidateResults(now_ms);
     }
 
-    pub fn toggleWord(self: *SearchBar, now_ms: i64) void {
+    pub fn toggleWord(self: *DockedSearch, now_ms: i64) void {
         self.toggles.whole_word = !self.toggles.whole_word;
         self.invalidateResults(now_ms);
     }
 };
-
-// ---------------------------------------------------------------------
-// Match-marker downsampling
-// ---------------------------------------------------------------------
-
-/// Downsample `matches` (sorted ascending, unique row indices) into at
-/// most `max_markers` normalized [0, 1] positions for the scrollbar
-/// overlay.
-///
-/// When `matches.len <= max_markers` every match is returned directly
-/// as `row / total_rows`.  Otherwise the scrollback is partitioned into
-/// `max_markers` equal-height bins and any bin containing at least one
-/// match emits a marker at the bin's midpoint.
-pub fn downsampleMarkers(
-    alloc: Allocator,
-    matches: []const usize,
-    total_rows: usize,
-    max_markers: usize,
-) Allocator.Error![]f32 {
-    if (matches.len == 0 or total_rows == 0 or max_markers == 0) {
-        return try alloc.alloc(f32, 0);
-    }
-
-    const rows_f: f64 = @floatFromInt(total_rows);
-
-    // Fast path: few enough matches to emit them all.
-    if (matches.len <= max_markers) {
-        const out = try alloc.alloc(f32, matches.len);
-        for (matches, 0..) |row, i| {
-            out[i] = @floatCast(@as(f64, @floatFromInt(row)) / rows_f);
-        }
-        return out;
-    }
-
-    // Bucket path: partition into `max_markers` equal bins.
-    const bin_height: f64 = rows_f / @as(f64, @floatFromInt(max_markers));
-
-    // Bit-set tracking which bins are occupied.  Use a dynamic array of
-    // bools — max_markers is typically small (scrollbar track pixels).
-    const occupied = try alloc.alloc(bool, max_markers);
-    defer alloc.free(occupied);
-    @memset(occupied, false);
-
-    for (matches) |row| {
-        var bin: usize = @intFromFloat(@as(f64, @floatFromInt(row)) / bin_height);
-        if (bin >= max_markers) bin = max_markers - 1;
-        occupied[bin] = true;
-    }
-
-    // Count occupied bins, allocate output.
-    var count: usize = 0;
-    for (occupied) |o| {
-        if (o) count += 1;
-    }
-    const out = try alloc.alloc(f32, count);
-
-    var idx: usize = 0;
-    for (occupied, 0..) |o, b| {
-        if (o) {
-            const mid: f64 = (@as(f64, @floatFromInt(b)) + 0.5) * bin_height / rows_f;
-            out[idx] = @floatCast(mid);
-            idx += 1;
-        }
-    }
-
-    return out;
-}
 
 // =====================================================================
 // Tests
 // =====================================================================
 
 test "open shows; close hides" {
-    var bar = SearchBar.init(std.testing.allocator);
+    var bar = DockedSearch.init(std.testing.allocator);
     defer bar.deinit();
 
     try std.testing.expect(!bar.visible);
@@ -239,7 +232,7 @@ test "open shows; close hides" {
 }
 
 test "query survives close/open" {
-    var bar = SearchBar.init(std.testing.allocator);
+    var bar = DockedSearch.init(std.testing.allocator);
     defer bar.deinit();
 
     bar.open();
@@ -250,7 +243,7 @@ test "query survives close/open" {
 }
 
 test "setQuery accepts aliased source slice" {
-    var bar = SearchBar.init(std.testing.allocator);
+    var bar = DockedSearch.init(std.testing.allocator);
     defer bar.deinit();
 
     try bar.setQuery("foo", 1000);
@@ -260,7 +253,7 @@ test "setQuery accepts aliased source slice" {
 }
 
 test "setQuery clears stale results for a new search" {
-    var bar = SearchBar.init(std.testing.allocator);
+    var bar = DockedSearch.init(std.testing.allocator);
     defer bar.deinit();
 
     try bar.setQuery("foo", 1000);
@@ -276,7 +269,7 @@ test "setQuery clears stale results for a new search" {
 }
 
 test "empty query clears results" {
-    var bar = SearchBar.init(std.testing.allocator);
+    var bar = DockedSearch.init(std.testing.allocator);
     defer bar.deinit();
 
     bar.open();
@@ -291,7 +284,7 @@ test "empty query clears results" {
 }
 
 test "setQuery starts debounce" {
-    var bar = SearchBar.init(std.testing.allocator);
+    var bar = DockedSearch.init(std.testing.allocator);
     defer bar.deinit();
 
     try bar.setQuery("hi", 1000);
@@ -300,7 +293,7 @@ test "setQuery starts debounce" {
 }
 
 test "shouldRunSearch needs non-empty query" {
-    var bar = SearchBar.init(std.testing.allocator);
+    var bar = DockedSearch.init(std.testing.allocator);
     defer bar.deinit();
 
     try bar.setQuery("", 1000);
@@ -308,7 +301,7 @@ test "shouldRunSearch needs non-empty query" {
 }
 
 test "forceSearch bypasses debounce" {
-    var bar = SearchBar.init(std.testing.allocator);
+    var bar = DockedSearch.init(std.testing.allocator);
     defer bar.deinit();
 
     try bar.setQuery("q", 1000);
@@ -317,7 +310,7 @@ test "forceSearch bypasses debounce" {
 }
 
 test "toggleRegex flips bit" {
-    var bar = SearchBar.init(std.testing.allocator);
+    var bar = DockedSearch.init(std.testing.allocator);
     defer bar.deinit();
 
     try std.testing.expect(!bar.toggles.regex);
@@ -328,7 +321,7 @@ test "toggleRegex flips bit" {
 }
 
 test "toggle invalidates stale results for non-empty query" {
-    var bar = SearchBar.init(std.testing.allocator);
+    var bar = DockedSearch.init(std.testing.allocator);
     defer bar.deinit();
 
     try bar.setQuery("needle", 1000);
@@ -345,7 +338,7 @@ test "toggle invalidates stale results for non-empty query" {
 }
 
 test "toggleCase invalidates stale results for non-empty query" {
-    var bar = SearchBar.init(std.testing.allocator);
+    var bar = DockedSearch.init(std.testing.allocator);
     defer bar.deinit();
 
     try bar.setQuery("needle", 1000);
@@ -362,7 +355,7 @@ test "toggleCase invalidates stale results for non-empty query" {
 }
 
 test "toggleWord invalidates stale results for non-empty query" {
-    var bar = SearchBar.init(std.testing.allocator);
+    var bar = DockedSearch.init(std.testing.allocator);
     defer bar.deinit();
 
     try bar.setQuery("needle", 1000);
@@ -379,7 +372,7 @@ test "toggleWord invalidates stale results for non-empty query" {
 }
 
 test "an edit or a toggle clears the invalid-query mark" {
-    var bar = SearchBar.init(std.testing.allocator);
+    var bar = DockedSearch.init(std.testing.allocator);
     defer bar.deinit();
 
     try bar.setQuery("need(", 1000);
@@ -408,7 +401,7 @@ test "an edit or a toggle clears the invalid-query mark" {
 }
 
 test "toggles persist across open/close" {
-    var bar = SearchBar.init(std.testing.allocator);
+    var bar = DockedSearch.init(std.testing.allocator);
     defer bar.deinit();
 
     bar.open();
@@ -418,49 +411,32 @@ test "toggles persist across open/close" {
     try std.testing.expect(bar.toggles.case_sensitive);
 }
 
-test "N <= max returns all matches normalized" {
-    const matches = [_]usize{ 10, 50, 90 };
-    const out = try downsampleMarkers(std.testing.allocator, &matches, 100, 10);
-    defer std.testing.allocator.free(out);
-
-    try std.testing.expectEqual(@as(usize, 3), out.len);
-    try std.testing.expectApproxEqAbs(@as(f32, 0.10), out[0], 0.001);
-    try std.testing.expectApproxEqAbs(@as(f32, 0.50), out[1], 0.001);
-    try std.testing.expectApproxEqAbs(@as(f32, 0.90), out[2], 0.001);
-}
-
-test "N > max buckets" {
-    const matches = [_]usize{ 10, 20, 30, 40, 50 };
-    const out = try downsampleMarkers(std.testing.allocator, &matches, 100, 2);
-    defer std.testing.allocator.free(out);
-
-    // 2 bins: [0..50) and [50..100).  Matches 10,20,30,40 in bin 0;
-    // match 50 in bin 1.  Both occupied -> 2 markers.
-    try std.testing.expectEqual(@as(usize, 2), out.len);
-}
-
-test "empty matches returns empty" {
-    const matches = [_]usize{};
-    const out = try downsampleMarkers(std.testing.allocator, &matches, 100, 10);
-    defer std.testing.allocator.free(out);
-
-    try std.testing.expectEqual(@as(usize, 0), out.len);
-}
-
-test "total_rows=0 safe" {
-    const matches = [_]usize{};
-    const out = try downsampleMarkers(std.testing.allocator, &matches, 0, 10);
-    defer std.testing.allocator.free(out);
-
-    try std.testing.expectEqual(@as(usize, 0), out.len);
-}
-
-test "single bucket with multiple matches" {
-    const matches = [_]usize{ 5, 15, 25 };
-    const out = try downsampleMarkers(std.testing.allocator, &matches, 30, 1);
-    defer std.testing.allocator.free(out);
-
-    // Single bin covers entire range; midpoint = 0.5.
-    try std.testing.expectEqual(@as(usize, 1), out.len);
-    try std.testing.expectApproxEqAbs(@as(f32, 0.5), out[0], 0.001);
+test "win32 search toggle accelerators need Alt without Ctrl, Shift or AltGr" {
+    const alt: Mods = .{ .alt = true };
+    try std.testing.expectEqual(@as(?Role, .regex), toggleAccelerator('R', alt));
+    try std.testing.expectEqual(@as(?Role, .case_sensitive), toggleAccelerator('C', alt));
+    try std.testing.expectEqual(@as(?Role, .whole_word), toggleAccelerator('W', alt));
+    try std.testing.expectEqual(@as(?Role, null), toggleAccelerator('X', alt));
+    // No Alt, or Alt with Ctrl (AltGr reports as both), or Shift: not ours.
+    try std.testing.expectEqual(@as(?Role, null), toggleAccelerator('R', .{}));
+    try std.testing.expectEqual(@as(?Role, null), toggleAccelerator('R', .{ .ctrl = true }));
+    try std.testing.expectEqual(@as(?Role, null), toggleAccelerator('R', .{ .alt = true, .ctrl = true }));
+    try std.testing.expectEqual(@as(?Role, null), toggleAccelerator('R', .{ .alt = true, .shift = true }));
+    var keys: ToggleKeys = .{};
+    const r_scan = 0x13 << 16;
+    const c_scan = 0x2E << 16;
+    try std.testing.expectEqual(@as(?Role, .regex), keys.keyDown('R', alt, r_scan));
+    // The character is never read, so Cyrillic K on the R key is consumed
+    // just like Latin r: only the one character the press typed, though.
+    try std.testing.expect(keys.consumeChar(r_scan));
+    try std.testing.expect(!keys.consumeChar(r_scan));
+    _ = keys.keyDown('C', alt, c_scan);
+    try std.testing.expect(keys.consumeChar(c_scan));
+    _ = keys.keyDown('R', alt, r_scan);
+    try std.testing.expect(!keys.consumeChar(c_scan));
+    _ = keys.keyDown('R', .{ .alt = true, .ctrl = true }, r_scan);
+    try std.testing.expect(!keys.consumeChar(r_scan));
+    _ = keys.keyDown('R', alt, r_scan);
+    _ = keys.keyDown('X', alt, r_scan);
+    try std.testing.expect(!keys.consumeChar(r_scan));
 }

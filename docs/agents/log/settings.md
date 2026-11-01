@@ -4,6 +4,7 @@ Dates descend; entries that share a date are not always newest first. A newer-da
 
 Corrected in other files:
 - 2026-10-11 PKG-21, item (5) ("`App.loadConfigAtStartupCwd` holds the startup-cwd dance"), and 2026-04-17 "`settingsSaveAndReload` wraps the `startup_cwd` chdir in a `defer`": since #485, Settings saves and `.reload_config` share one startup-cwd scope (`App.StartupCwd`, from `enterStartupCwd`); `.reload_config` no longer keeps its own copy and no `did_chdir_to_startup` flag remains. See the 2026-10-18 "`App.startup_cwd` is never created again" entry and the corrected 2026-04-17 `.reload_config` entry in config.md.
+- 2026-04-17 "`AppHandle.notifySuccess(title, body)`": `Surface.search_bar` is now `Surface.docked_search` (`win32/docked_search.zig`), which also holds the search fields that were on Surface. See the 2026-11-01 "Docked search is one per-pane module" entry in search-scrollbar.md.
 - 2026-10-17 "A custom server-side UIA provider": its "UIA runner posts F9" describes the former functional-test route. Functional probes now use verified command-palette dispatch; raw posted F9 remains an optional reproduction mode (`-RawPostedF9`). See the 2026-10-18 "A hidden-desktop harness that posts plain F9" entry (#465) in test-harnesses.md.
 
 See also:
