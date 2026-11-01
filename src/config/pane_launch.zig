@@ -149,6 +149,137 @@ fn setAutomaticCommand(self: *Config, comptime src: []const u8, cmd: Command) vo
     self._command_defaulted = true;
 }
 
+/// The profile `default-profile` resolved to when the config was loaded. A
+/// launch that later replaces `command` (a chosen profile, an inherited
+/// one) leaves it set, so whether it is what a pane starts also needs
+/// `nocttyCommand`.
+pub fn defaultProfile(config: *const Config) ?*const windows_shell.Profile {
+    return if (config._default_profile) |*profile| profile else null;
+}
+
+/// The command noctty chose: the automatic default, Safe Recovery's or
+/// `default-profile`'s. Null when a config layer set `command`, or when none
+/// is set.
+pub fn nocttyCommand(config: *const Config) ?Command {
+    return if (config._command_defaulted) config.command else null;
+}
+
+/// What the loaded config made of `reference`, a `default-profile` value
+/// (Settings' Default profile row asks). It looked its own value up, `vs:`
+/// keys included. It did not look at a value the command line or a
+/// `command` line kept it from using, or at one that is not its value.
+pub fn outcome(config: *const Config, reference: ?[]const u8) Outcome {
+    const value = config.@"default-profile" orelse return .untried;
+    if (reference == null or !std.mem.eql(u8, value, reference.?)) return .untried;
+    if (config._default_profile) |*profile| return .{ .resolved = profile };
+    return switch (config._default_profile_failure) {
+        .none => .untried,
+        .not_found => .not_found,
+        .unavailable => .unavailable,
+    };
+}
+
+pub const Outcome = union(enum) {
+    /// Not looked up.
+    untried,
+    /// The profile new terminals start.
+    resolved: *const windows_shell.Profile,
+    /// It names nothing that can start here: new terminals start the
+    /// automatic default.
+    not_found,
+    /// Visual Studio did not answer the lookup in full: new terminals start
+    /// the automatic default until a reload asks again, and the value may
+    /// be right.
+    unavailable,
+};
+
+/// The `default-profile` the config files give: the setting itself, unless
+/// noctty's command line named one, which wins in this process only.
+pub fn filesDefaultProfile(config: *const Config) ?[:0]const u8 {
+    if (config._default_profile_cli == null) return config.@"default-profile";
+    return config._default_profile_file;
+}
+
+/// Whether noctty's command line names a profile
+/// (`--default-profile=<reference>`, which a jump-list link to a user
+/// profile carries). An empty value names none.
+pub fn commandLineNamesProfile(config: *const Config) bool {
+    const reference = config._default_profile_cli orelse return false;
+    return reference.len > 0;
+}
+
+/// Whether the config files alone give the profile `key`, so a process that
+/// reads only them finds it as this one does: a Visual Studio shell, which
+/// discovery finds as the picker does, or a user profile whose live
+/// `profile-command` line was read from a config file. Not a profile defined
+/// only by a `--profile-command` option, nor one given a variable on the
+/// command line (`--profile-env=<id>: ...`, or a `--profile-env=` that
+/// cleared them), nor any while an `--env=` argument is set, which `%NAME%`
+/// in a profile's lines may read.
+pub fn filesDefine(config: *const Config, key: []const u8) bool {
+    if (std.ascii.startsWithIgnoreCase(key, "vs:")) return true;
+    if (!std.ascii.startsWithIgnoreCase(key, "user:")) return false;
+    const id = key["user:".len..];
+    if (config.@"profile-command".get(id) == null) return false;
+    if (profilePlace(config, "profile-command", id) != .file) return false;
+    if (profileWrittenOnCommandLine(config, "profile-env", id)) return false;
+    return !commandLineSetsEnv(config);
+}
+
+/// Make a copy of the app's config hold what the config files say, which is
+/// what Settings shows and saves: no `command` when noctty chose it (the
+/// automatic default, `default-profile`'s), and the files' `default-profile`
+/// when noctty's command line named another one for this process (a
+/// jump-list link's, an elevated window's). The copy then holds no choice
+/// of noctty's: a `command` an edit gives it is the user's, and it resolved
+/// no `default-profile` (`defaultProfile` is null, `outcome` is `.untried`),
+/// since the load looked up another value or none.
+pub fn asWritten(config: *Config) void {
+    if (config._command_defaulted) config.command = null;
+    config._command_defaulted = false;
+    config.@"default-profile" = filesDefaultProfile(config);
+    config._default_profile = null;
+    config._default_profile_failure = .none;
+}
+
+/// Give `dst`, a config built again from the files (a palette theme
+/// preview's, a forwarded new window's), what `src`, the running config,
+/// launches from: the profile sources (the `profile-*` keys,
+/// `visual-studio-profiles`, `ssh-config-hosts`, `env`, which a profile's
+/// `%NAME%` reads, and where their lines were read) and the launch `src`
+/// resolved (`command`, the `default-profile` profile and what Settings
+/// reads of it). A profile line edited on disk since the last reload would
+/// otherwise reach new terminals while the hosts' lists, the jump list and
+/// a running discovery hold the old one; the lists are only dropped on a
+/// reload, which then sees the change. Call it after `dst`'s last
+/// `finalize`: with a `theme` set, `finalize` builds the config again from
+/// its replay steps and drops what was put on it.
+pub fn keepSources(dst: *Config, src: *const Config) Allocator.Error!void {
+    const alloc = dst._arena.?.allocator();
+    dst.command = if (src.command) |command| try command.clone(alloc) else null;
+    dst._command_defaulted = src._command_defaulted;
+    dst._command_from_file = src._command_from_file;
+    dst.@"default-profile" = if (src.@"default-profile") |reference| try alloc.dupeZ(u8, reference) else null;
+    dst._default_profile = if (src._default_profile) |profile| try profile.clone(alloc) else null;
+    // And what Settings reads of it: whether the lookup found nothing, and
+    // the files' value beside a command line's.
+    dst._default_profile_failure = src._default_profile_failure;
+    dst._default_profile_cli = if (src._default_profile_cli) |value| try alloc.dupeZ(u8, value) else null;
+    dst._default_profile_file = if (src._default_profile_file) |value| try alloc.dupeZ(u8, value) else null;
+    dst.@"ssh-config-hosts" = src.@"ssh-config-hosts";
+    dst.env = try src.env.clone(alloc);
+    dst.@"visual-studio-profiles" = src.@"visual-studio-profiles";
+    dst.@"profile-command" = try src.@"profile-command".clone(alloc);
+    dst.@"profile-name" = try src.@"profile-name".clone(alloc);
+    dst.@"profile-working-directory" = try src.@"profile-working-directory".clone(alloc);
+    dst.@"profile-env" = try src.@"profile-env".clone(alloc);
+    dst.@"profile-order" = try src.@"profile-order".clone(alloc);
+    dst.@"profile-hidden" = try src.@"profile-hidden".clone(alloc);
+    // Where those lines were read goes with them (New Elevated Window names
+    // a profile whose line came from a file).
+    dst._profile_places = try cloneProfilePlaces(src, alloc);
+}
+
 /// Check what needs every layer read: a `profile-name`,
 /// `profile-working-directory` or `profile-env` entry whose id no
 /// `profile-command` line names, live or removed, since a field may come
@@ -250,7 +381,7 @@ pub fn cloneProfilePlaces(self: *const Config, alloc: Allocator) Allocator.Error
 
 /// The place of the last line that wrote `id` for `key`, or none (a value
 /// set by code, not by a line).
-pub fn profilePlace(self: *const Config, key: []const u8, id: []const u8) cli.Location {
+fn profilePlace(self: *const Config, key: []const u8, id: []const u8) cli.Location {
     var index = self._profile_places.items.len;
     while (index > 0) {
         index -= 1;
@@ -263,7 +394,7 @@ pub fn profilePlace(self: *const Config, key: []const u8, id: []const u8) cli.Lo
 /// Whether any argument on noctty's command line wrote `id` for `key`
 /// (`--profile-env=<id>: ...`), or cleared every id (`--profile-env=`), which
 /// a process that reads only the config files would not see.
-pub fn profileWrittenOnCommandLine(self: *const Config, key: []const u8, id: []const u8) bool {
+fn profileWrittenOnCommandLine(self: *const Config, key: []const u8, id: []const u8) bool {
     for (self._profile_places.items) |place| {
         if (place.location != .cli or !std.mem.eql(u8, place.key, key)) continue;
         if (place.id.len == 0 or std.ascii.eqlIgnoreCase(place.id, id)) return true;
@@ -274,7 +405,7 @@ pub fn profileWrittenOnCommandLine(self: *const Config, key: []const u8, id: []c
 /// Whether noctty's command line has an `--env=` argument. A process that
 /// reads only the config files (an elevated window) would not get it, and a
 /// user profile's `%NAME%` reads `env` entries first.
-pub fn commandLineSetsEnv(self: *const Config) bool {
+fn commandLineSetsEnv(self: *const Config) bool {
     for (self._replay_steps.items) |step| switch (step) {
         .arg => |arg| if (arg.location == .cli and std.mem.startsWith(u8, arg.value, "--env=")) return true,
         else => {},
@@ -698,16 +829,16 @@ test "default-profile gives way to a command from any layer, and says so only fo
         try testing.expect(cfg.@"initial-command" == null);
         // What the files give is kept apart, for Settings: the last file
         // read (the include), not the command line's value.
-        try testing.expectEqualStrings("wsl:Ubuntu", cfg.defaultProfileFromFiles().?);
+        try testing.expectEqualStrings("wsl:Ubuntu", filesDefaultProfile(&cfg).?);
         // And it survives a rebuild for a conditional state (a theme).
         cfg._conditional_set.insert(.theme);
         var replayed = (try cfg.changeConditionalState(.{ .theme = .dark })).?;
         defer replayed.deinit();
         try testing.expectEqualStrings("user:py", replayed.@"default-profile".?);
-        try testing.expectEqualStrings("wsl:Ubuntu", replayed.defaultProfileFromFiles().?);
+        try testing.expectEqualStrings("wsl:Ubuntu", filesDefaultProfile(&replayed).?);
         var copy = try cfg.clone(alloc);
         defer copy.deinit();
-        try testing.expectEqualStrings("wsl:Ubuntu", copy.defaultProfileFromFiles().?);
+        try testing.expectEqualStrings("wsl:Ubuntu", filesDefaultProfile(&copy).?);
     }
     {
         // An empty one on the command line undoes the files', which still
@@ -716,14 +847,14 @@ test "default-profile gives way to a command from any layer, and says so only fo
         defer cfg.deinit();
         try testing.expect(cfg.@"default-profile" == null);
         try testing.expect(cfg._default_profile == null);
-        try testing.expectEqualStrings("py", cfg.defaultProfileFromFiles().?);
+        try testing.expectEqualStrings("py", filesDefaultProfile(&cfg).?);
         var cleared = try fixtures.load(alloc, .{ .file = profile ++ "default-profile = py\n", .argv = &.{"--default-profile=pwsh"}, .include = "default-profile =\n" });
         defer cleared.deinit();
-        try testing.expect(cleared.defaultProfileFromFiles() == null);
+        try testing.expect(filesDefaultProfile(&cleared) == null);
         // With nothing on the command line it is the setting itself.
         var plain = try fixtures.load(alloc, .{ .file = profile ++ "default-profile = py\n" });
         defer plain.deinit();
-        try testing.expectEqualStrings("py", plain.defaultProfileFromFiles().?);
+        try testing.expectEqualStrings("py", filesDefaultProfile(&plain).?);
     }
 
     // A name that starts nothing is a problem, and the automatic default runs.
@@ -1321,7 +1452,7 @@ test "Windows safe mode swaps only the automatic command for cmd.exe" {
     var automatic = try Config.default(alloc);
     defer automatic.deinit();
     try useRecovery(&automatic);
-    try testing.expect(automatic._command_defaulted);
+    try testing.expect(nocttyCommand(&automatic) != null);
     try testing.expect(automatic.command.? == .direct);
     try testing.expect(std.ascii.eqlIgnoreCase(
         std.fs.path.basename(automatic.command.?.direct[0]),
@@ -1338,4 +1469,244 @@ test "Windows safe mode swaps only the automatic command for cmd.exe" {
     explicit.command = .{ .shell = "pwsh.exe" };
     try useRecovery(&explicit);
     try testing.expectEqualStrings("pwsh.exe", explicit.command.?.shell);
+}
+
+test "what a load decided of default-profile: the profile, noctty's command and the outcome" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    const profile = "profile-command = py: cmd.exe /k init.cmd\n";
+
+    // Resolved: the profile, its command as noctty's, and the outcome of its
+    // own value only.
+    {
+        var cfg = try fixtures.load(alloc, .{ .file = profile ++ "default-profile = py\n" });
+        defer cfg.deinit();
+        try testing.expectEqualStrings("user:py", (defaultProfile(&cfg) orelse return error.TestUnexpectedResult).key);
+        try testing.expectEqualStrings("cmd.exe", (nocttyCommand(&cfg) orelse return error.TestUnexpectedResult).direct[0]);
+        try testing.expect(outcome(&cfg, "py") == .resolved);
+        try testing.expect(outcome(&cfg, "pwsh") == .untried);
+        try testing.expect(outcome(&cfg, null) == .untried);
+        try testing.expect(!commandLineNamesProfile(&cfg));
+    }
+    // Looked up and not found.
+    {
+        var cfg = try fixtures.load(alloc, .{ .file = "default-profile = nosuch\n" });
+        defer cfg.deinit();
+        try testing.expect(defaultProfile(&cfg) == null);
+        try testing.expect(nocttyCommand(&cfg) == null);
+        try testing.expect(outcome(&cfg, "nosuch") == .not_found);
+    }
+    // A config file's command won: not looked up, and not noctty's.
+    {
+        var cfg = try fixtures.load(alloc, .{ .file = profile ++ "default-profile = py\ncommand = vim.exe\n" });
+        defer cfg.deinit();
+        try testing.expect(nocttyCommand(&cfg) == null);
+        try testing.expect(outcome(&cfg, "py") == .untried);
+    }
+    // The command line named another: the files' value was not looked up.
+    {
+        var cfg = try fixtures.load(alloc, .{ .file = profile ++ "default-profile = nosuch\n", .argv = &.{"--default-profile=user:py"} });
+        defer cfg.deinit();
+        try testing.expect(commandLineNamesProfile(&cfg));
+        try testing.expect(outcome(&cfg, filesDefaultProfile(&cfg)) == .untried);
+        try testing.expect(outcome(&cfg, "user:py") == .resolved);
+        // An empty one names none, and undoes the files'.
+        var reset = try fixtures.load(alloc, .{ .file = profile ++ "default-profile = py\n", .argv = &.{"--default-profile="} });
+        defer reset.deinit();
+        try testing.expect(!commandLineNamesProfile(&reset));
+        try testing.expect(defaultProfile(&reset) == null);
+    }
+    // Visual Studio did not answer: apart from not found, for its own value
+    // only.
+    {
+        var cfg = try Config.default(alloc);
+        defer cfg.deinit();
+        var reader: std.Io.Reader = .fixed("default-profile = vs:newest:cmd\n");
+        try cfg.loadReader(alloc, &reader, "C:\\noctty-test\\config.ghostty");
+        try finalizeWith(&cfg, fixtures.Machine{ .visual_studio_answers = false });
+        try testing.expect(outcome(&cfg, "vs:newest:cmd") == .unavailable);
+        try testing.expect(outcome(&cfg, "vs:6bb7cfd9:cmd") == .untried);
+    }
+}
+
+test "filesDefine: a profile the config files alone give" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    const files =
+        \\profile-command = filed: cmd.exe /k "C:\a b\x.cmd"
+        \\profile-env = filed: TOKEN=secret
+        \\profile-command = both: one.exe
+        \\profile-command = gone: gone.exe
+        \\profile-command = gone:
+        \\profile-command = envcli: four.exe
+        \\profile-env = envcli: MODE=file
+        \\
+    ;
+    var cfg = try fixtures.load(alloc, .{
+        .file = files,
+        .argv = &.{ "--profile-command=clionly: two.exe", "--profile-command=both: three.exe", "--profile-env=envcli: OTHER=cli" },
+    });
+    defer cfg.deinit();
+    try testing.expect(cfg._diagnostics.empty());
+
+    // A profile the files define, by its key in any case; not one the
+    // command line defines or last changed.
+    try testing.expect(filesDefine(&cfg, "user:filed"));
+    try testing.expect(filesDefine(&cfg, "USER:FILED"));
+    try testing.expect(!filesDefine(&cfg, "user:clionly"));
+    try testing.expect(!filesDefine(&cfg, "user:both"));
+    // A file's profile with a variable from the command line, which a
+    // process reading only the files would not get.
+    try testing.expect(!filesDefine(&cfg, "user:envcli"));
+    // `--profile-env=` cleared every profile's variables, which the files
+    // would give back.
+    {
+        var cleared = try fixtures.load(alloc, .{ .file = files, .argv = &.{"--profile-env="} });
+        defer cleared.deinit();
+        try testing.expect(cleared.@"profile-env".count() == 0);
+        try testing.expect(!filesDefine(&cleared, "user:filed"));
+    }
+    // An `--env=` argument, which `%NAME%` may read, and a conditional
+    // rebuild, which replays it.
+    {
+        var with_env = try fixtures.load(alloc, .{ .file = files, .argv = &.{"--env=TOOLS=C:\\Tools"} });
+        defer with_env.deinit();
+        try testing.expect(!filesDefine(&with_env, "user:filed"));
+        with_env._conditional_set.insert(.theme);
+        var dark = (try with_env.changeConditionalState(.{ .theme = .dark })).?;
+        defer dark.deinit();
+        try testing.expect(!filesDefine(&dark, "user:filed"));
+    }
+    // Nothing on the command line.
+    {
+        var plain = try fixtures.load(alloc, .{ .file = files });
+        defer plain.deinit();
+        try testing.expect(filesDefine(&plain, "user:filed"));
+    }
+    // Nothing to name: a removed or unknown profile, a detected one, an id
+    // that is no key.
+    try testing.expect(!filesDefine(&cfg, "user:gone"));
+    try testing.expect(!filesDefine(&cfg, "user:nosuch"));
+    try testing.expect(!filesDefine(&cfg, "pwsh.exe"));
+    try testing.expect(!filesDefine(&cfg, "filed"));
+    // A Visual Studio shell, which discovery finds from the files.
+    try testing.expect(filesDefine(&cfg, "vs:6bb7cfd9:cmd"));
+    try testing.expect(filesDefine(&cfg, "VS:6BB7CFD9:PWSH"));
+
+    // A config rebuilt for a conditional state (a theme) records the places
+    // again, and a clone (a reload installs the app config as one) keeps
+    // them.
+    cfg._conditional_set.insert(.theme);
+    var replayed = (try cfg.changeConditionalState(.{ .theme = .dark })).?;
+    defer replayed.deinit();
+    try testing.expect(filesDefine(&replayed, "user:filed"));
+    try testing.expect(!filesDefine(&replayed, "user:clionly"));
+    var reloaded = try cfg.clone(alloc);
+    defer reloaded.deinit();
+    try testing.expect(filesDefine(&reloaded, "user:filed"));
+    try testing.expect(!filesDefine(&reloaded, "user:clionly"));
+}
+
+test "asWritten: a Settings copy holds what the files say, and no choice of noctty's" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    var cfg = try fixtures.load(alloc, .{
+        .file = "profile-command = py: cmd.exe /k init.cmd\ndefault-profile = pwsh\n",
+        .argv = &.{"--default-profile=user:py"},
+    });
+    defer cfg.deinit();
+    try testing.expect(nocttyCommand(&cfg) != null);
+    asWritten(&cfg);
+    try testing.expect(cfg.command == null);
+    try testing.expectEqualStrings("pwsh", cfg.@"default-profile" orelse return error.TestUnexpectedResult);
+    // The load resolved the command line's `user:py`, not the files'
+    // `pwsh`: the copy holds no answer for either.
+    try testing.expect(defaultProfile(&cfg) == null);
+    try testing.expect(outcome(&cfg, "pwsh") == .untried);
+    // A command the user then types into the copy is the user's.
+    cfg.command = .{ .shell = "pwsh.exe" };
+    try testing.expect(nocttyCommand(&cfg) == null);
+
+    // Nor one for a value the lookup found nothing for.
+    var missing = try fixtures.load(alloc, .{ .file = "default-profile = nosuch\n" });
+    defer missing.deinit();
+    asWritten(&missing);
+    try testing.expectEqualStrings("nosuch", missing.@"default-profile" orelse return error.TestUnexpectedResult);
+    try testing.expect(outcome(&missing, "nosuch") == .untried);
+
+    // A command a config layer set stays.
+    var set = try fixtures.load(alloc, .{ .file = "command = vim.exe\n" });
+    defer set.deinit();
+    asWritten(&set);
+    try testing.expectEqualStrings("vim.exe", set.command.?.shell);
+}
+
+test "keepSources: a config built again from the files keeps the running launch" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    // A theme file that exists, so the rebuilt config's `finalize` builds it
+    // again from its replay steps, as a palette theme preview's does.
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(.{ .sub_path = "preview-theme", .data = "background = #102030\n" });
+    const theme = try tmp.dir.realpathAlloc(alloc, "preview-theme");
+    defer alloc.free(theme);
+
+    // The running config: `default-profile = py`, resolved.
+    var running = try fixtures.load(alloc, .{ .argv = &.{ "--profile-command=py: old.exe", "--profile-env=py: MODE=old", "--default-profile=py" } });
+    defer running.deinit();
+
+    // The files read again: the same `default-profile` with its profile
+    // edited since, and one that names another profile.
+    inline for (.{
+        "profile-command = py: new.exe\nprofile-env = py: MODE=new\ndefault-profile = py\n",
+        "profile-command = py: old.exe\nprofile-env = py: MODE=old\nprofile-command = other: other.exe\ndefault-profile = other\n",
+    }) |edited| {
+        const text = try std.fmt.allocPrint(alloc, "theme = {s}\n{s}", .{ theme, edited });
+        defer alloc.free(text);
+        var preview = try fixtures.load(alloc, .{ .file = text });
+        defer preview.deinit();
+        try keepSources(&preview, &running);
+        try testing.expectEqual(@as(u8, 0x10), preview.background.r);
+        // A new tab runs the definition the lists hold: the running one.
+        try testing.expectEqualStrings("old.exe", preview.@"profile-command".get("py").?);
+        try testing.expectEqualStrings("py", preview.@"default-profile".?);
+        const kept = defaultProfile(&preview) orelse return error.TestUnexpectedResult;
+        try testing.expectEqualStrings("old.exe", (kept.user orelse return error.TestUnexpectedResult).command_line);
+        try testing.expectEqualStrings("old", kept.user.?.env[0].value);
+        try testing.expectEqualStrings("old.exe", (nocttyCommand(&preview) orelse return error.TestUnexpectedResult).direct[0]);
+    }
+
+    // With no `default-profile` running, files that add one start nothing
+    // new before the reload either.
+    var plain = try fixtures.load(alloc, .{});
+    defer plain.deinit();
+    const added_text = try std.fmt.allocPrint(alloc, "theme = {s}\nprofile-command = py: new.exe\ndefault-profile = py\n", .{theme});
+    defer alloc.free(added_text);
+    var added = try fixtures.load(alloc, .{ .file = added_text });
+    defer added.deinit();
+    try keepSources(&added, &plain);
+    try testing.expect(defaultProfile(&added) == null);
+    try testing.expect(added.command == null);
+    try testing.expect(nocttyCommand(&added) == null);
+
+    // What Settings reads of the running value stays too: a command-line
+    // value the lookup found nothing for, over the files' own, while the
+    // files read again say nothing about it.
+    var missing = try fixtures.load(alloc, .{ .file = "default-profile = pwsh\n", .argv = &.{"--default-profile=nosuch"} });
+    defer missing.deinit();
+    try testing.expect(outcome(&missing, "nosuch") == .not_found);
+    try testing.expectEqualStrings("pwsh", filesDefaultProfile(&missing).?);
+    const reread_text = try std.fmt.allocPrint(alloc, "theme = {s}\nfont-size = 13\n", .{theme});
+    defer alloc.free(reread_text);
+    var reread = try fixtures.load(alloc, .{ .file = reread_text });
+    defer reread.deinit();
+    try keepSources(&reread, &missing);
+    try testing.expectEqualStrings("nosuch", reread.@"default-profile".?);
+    try testing.expect(outcome(&reread, "nosuch") == .not_found);
+    try testing.expectEqualStrings("pwsh", filesDefaultProfile(&reread).?);
 }

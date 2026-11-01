@@ -298,7 +298,9 @@ that govern each symbol you change, or that none does.
   terminal starts and with what environment: the default `command` (what a
   config load decides of the launch, `src/config/pane_launch.zig`:
   `finalize`, `default-profile` resolution and its problems, the profile
-  places, `useAutomatic`, `useRecovery`), profile
+  places, `useAutomatic`, `useRecovery`, the queries `defaultProfile`,
+  `nocttyCommand`, `commandLineNamesProfile` and `filesDefine`, and
+  `keepSources`), profile
   discovery and user-defined profiles (`src/config/windows_shell.zig`: the
   `profile-*` keys, `default-profile`, `profile-order`, `profile-hidden`,
   `verbatimCommandLine`, `arrangeProfiles`; Visual Studio developer shells in
@@ -347,7 +349,9 @@ that govern each symbol you change, or that none does.
   `themeChanged`), its own UIA patterns, combo and open traces
   (`NOCTTY_SETTINGS_COMBO_TRACE`, `NOCTTY_SETTINGS_OPEN_TRACE`,
   `win32/bench_trace.zig`), the Default profile row
-  (`field_model.Kind.profile`, `AppHandle.profileChoices`), the
+  (`field_model.Kind.profile`, `AppHandle.profileChoices`, and what the
+  load made of the value: `pane_launch.outcome`, `filesDefaultProfile`,
+  `asWritten`), the
   changed-from-default marks, Reset buttons and row menu (`syncDefaultMarks`,
   `takeResetButton`, `releaseResetButton`, `resetDraftRow`, `showRowMenu`,
   `field_model.effectiveSettingValue`), Settings search (`formItems`,

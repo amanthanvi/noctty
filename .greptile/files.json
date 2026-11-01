@@ -251,6 +251,7 @@
         "src/apprt/win32/save_target.zig",
         "src/config/Config.zig",
         "src/config/origin.zig",
+        "src/config/pane_launch.zig",
         "src/os/local_path.zig",
         "test/windows/settings-uia-*.ps1",
         "test/windows/settings-open-readiness.psm1",

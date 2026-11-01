@@ -3769,7 +3769,7 @@ _default_profile_cli: ?[:0]const u8 = null,
 
 /// The last `default-profile` a config file gave (null for none, or for an
 /// empty value), whatever the command line says. Settings shows and edits
-/// this one (`defaultProfileFromFiles`): in a window noctty started with
+/// this one (`pane_launch.filesDefaultProfile`): in a window noctty started with
 /// `--default-profile` (a jump-list link, New Elevated Window) the setting
 /// holds the command line's value, which no file has.
 _default_profile_file: ?[:0]const u8 = null,
@@ -5438,12 +5438,9 @@ pub fn applyECommand(self: *Config, command: []const [:0]const u8) void {
     }
 }
 
-/// The `default-profile` the config files give: the setting itself, unless
-/// noctty's command line named one, which wins in this process only.
-pub fn defaultProfileFromFiles(self: *const Config) ?[:0]const u8 {
-    if (self._default_profile_cli == null) return self.@"default-profile";
-    return self._default_profile_file;
-}
+/// `pane_launch.filesDefaultProfile`, under the name
+/// win32_settings_reference.zig still calls until it moves to the query.
+pub const defaultProfileFromFiles = pane_launch.filesDefaultProfile;
 
 /// Load `text` as one config file and finalize it, as a real load does.
 fn testLoadProfileText(alloc: Allocator, text: []const u8) !Config {

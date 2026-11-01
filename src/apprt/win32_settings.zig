@@ -38,6 +38,7 @@ const bench_trace = @import("win32/bench_trace.zig");
 const local_path = @import("../os/local_path.zig");
 const config_file_load = @import("../config/file_load.zig");
 const windows_shell = @import("../config/windows_shell.zig");
+const pane_launch = @import("../config/pane_launch.zig");
 const SetFocus = sys.SetFocus;
 
 /// Minimal set of Win32 aliases + externs we need here. Shared ABI structs
@@ -3834,7 +3835,7 @@ pub const SettingsWindow = struct {
         };
         var replacement_owned = true;
         defer if (replacement_owned) replacement.deinit();
-        useSavedValues(&replacement);
+        pane_launch.asWritten(&replacement);
         var changes: [setting_field_count]SettingsTransaction.FieldValue = undefined;
         for (std.enums.values(SettingField), 0..) |field, i| {
             changes[i] = .{ .field = field, .value = settingValue(&replacement, field) };
@@ -5902,7 +5903,6 @@ pub const SettingsWindow = struct {
         var text_buf: [edit_text_max_utf8]u8 = undefined;
         const text = readEditUtf8(edit, &text_buf) orelse return;
         const trimmed = std.mem.trim(u8, text, " \t");
-        p.*._command_defaulted = false;
         if (trimmed.len == 0) {
             p.*.command = null;
             self.clearValidationError(edit);
@@ -6573,16 +6573,6 @@ pub const SettingsWindow = struct {
         self.finishSuccessfulSave(masked);
     }
 
-    /// Make a copy of the app's config hold what the config files say, which
-    /// is what Settings shows and saves: no `command` when noctty chose the
-    /// command itself (the automatic default), and the files'
-    /// `default-profile` when noctty's command line named another one for
-    /// this process (a jump-list link's, an elevated window's).
-    fn useSavedValues(config: *Config) void {
-        if (config._command_defaulted) config.command = null;
-        config.@"default-profile" = config.defaultProfileFromFiles();
-    }
-
     fn adoptCurrentConfig(self: *SettingsWindow) !void {
         return self.adoptConfig(self.handle.currentConfig(self.handle.ctx));
     }
@@ -6598,7 +6588,7 @@ pub const SettingsWindow = struct {
         errdefer current_snapshot.deinit();
         var pending = try current.clone(self.handle.alloc);
         errdefer pending.deinit();
-        for ([_]*Config{ &original, &current_snapshot, &pending }) |copy| useSavedValues(copy);
+        for ([_]*Config{ &original, &current_snapshot, &pending }) |copy| pane_launch.asWritten(copy);
 
         self.clearPending();
         self.original = original;
@@ -7821,8 +7811,6 @@ fn prepareOwnedReset(
 
 fn storeOwnedReset(pending: *Config, default: OwnedSettingValue) void {
     storeOwnedSetting(pending, default);
-    // As an emptied Default command field is (`syncCommandFromEdit`).
-    if (default == .command) pending._command_defaulted = false;
 }
 
 /// What a reset of `field` puts back: its default, unless the saved value

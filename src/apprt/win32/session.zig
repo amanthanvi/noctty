@@ -54,7 +54,6 @@ const setAsideCrashedSessionState = runtime.setAsideCrashedSessionState;
 const setMinimizedNormalRect = runtime.setMinimizedNormalRect;
 const shouldInheritSplitWorkingDirectory = runtime.shouldInheritSplitWorkingDirectory;
 const shouldResetNewTabWorkingDirectory = runtime.shouldResetNewTabWorkingDirectory;
-const startupNamesProfile = runtime.startupNamesProfile;
 const std = runtime.std;
 const sys = runtime.sys;
 const terminal = runtime.terminal;
@@ -330,7 +329,7 @@ pub fn sessionRestoreEligible(self: *const App) bool {
         self.config.@"initial-window",
         self.config.@"initial-command" != null,
         self.startup_profile_picker,
-        self.explicit_startup_working_directory or startupNamesProfile(&self.config),
+        self.explicit_startup_working_directory or configpkg.pane_launch.commandLineNamesProfile(&self.config),
     );
 }
 
