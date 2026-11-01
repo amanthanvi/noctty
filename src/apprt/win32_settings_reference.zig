@@ -723,7 +723,7 @@ pub const Model = struct {
 /// (`Config.defaultProfileFromFiles`), which that argument did not set: its
 /// origin is the last file line that set it (`config.origin.ofFiles`).
 pub fn savedOrigin(config: *const Config, key: Key, defaults: ?*const Config) origin.Origin {
-    if (key == .@"default-profile" and config._default_profile_cli != null) return origin.ofFiles(config, key);
+    if (key == .@"default-profile" and config._launch.default_profile_cli != null) return origin.ofFiles(config, key);
     return origin.of(config, key, defaults);
 }
 
@@ -731,7 +731,7 @@ pub fn savedOrigin(config: *const Config, key: Key, defaults: ?*const Config) or
 /// for a caller that asks about many keys.
 pub fn savedOriginIn(problems: *const origin.Index, key: Key, defaults: ?*const Config) origin.Origin {
     const config = problems.config;
-    if (key == .@"default-profile" and config._default_profile_cli != null) return problems.ofFiles(key);
+    if (key == .@"default-profile" and config._launch.default_profile_cli != null) return problems.ofFiles(key);
     return problems.of(key, defaults);
 }
 

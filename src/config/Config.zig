@@ -3735,46 +3735,8 @@ term: []const u8 = "xterm-ghostty",
 /// This is set by the CLI parser for deinit.
 _arena: ?ArenaAllocator = null,
 
-/// Command was filled by automatic Windows shell resolution, rather than
-/// supplied by a config layer. The executable stays available to runtime callers.
-_command_defaulted: bool = false,
-
-/// The profile `default-profile` names, found by `pane_launch.finalize` when no
-/// layer set `command`; `command` is then its command, still marked
-/// automatic. The app runtime gives a launch that nothing else chose the
-/// rest of it (variables, directory, line, key). Lives in this config's arena.
-_default_profile: ?windows_shell.Profile = null,
-
-/// Why `pane_launch.finalize` found no profile for `default-profile`, so the
-/// automatic default runs instead. Settings shows a value that names nothing
-/// here as not found, never by the label it would have, and one Visual
-/// Studio could not answer for as written, apart from every listed profile.
-_default_profile_failure: pane_launch.DefaultProfileFailure = .none,
-
-/// The last `command` line came from a config file (not the command line),
-/// for the `default-profile` problem in `finalize`.
-_command_from_file: bool = false,
-
-/// `--default-profile` on the command line, applied in `finalize` over
-/// every config file: `Config.load` reads included files after the command
-/// line, and the jump list's profile links name their profile this way.
-_default_profile_cli: ?[:0]const u8 = null,
-
-/// The last `default-profile` a config file gave (null for none, or for an
-/// empty value), whatever the command line says. Settings shows and edits
-/// this one (`pane_launch.filesDefaultProfile`): in a window noctty started with
-/// `--default-profile` (a jump-list link, New Elevated Window) the setting
-/// holds the command line's value, which no file has.
-_default_profile_file: ?[:0]const u8 = null,
-
-/// `--command=` and `--initial-command=` on the command line, as typed,
-/// applied again in `finalize` over every config file for the same reason:
-/// a jump-list profile link resets both with empty values, which a `command`
-/// or `initial-command` line in an included file would otherwise undo. The
-/// last value of each that the field parse took: a later one it refused
-/// (`--command=direct:`) leaves the earlier one in force.
-_command_cli: ?[:0]const u8 = null,
-_initial_command_cli: ?[:0]const u8 = null,
+/// What a load decided of the launch (`pane_launch.Ledger`).
+_launch: pane_launch.Ledger = .{},
 
 /// The command `-e` was given on the command line, word by word, when the
 /// parse took it: `finalize` applies it and the settings `-e` implies again
@@ -3782,21 +3744,6 @@ _initial_command_cli: ?[:0]const u8 = null,
 /// names (read after the command line) whether or not a theme replays the
 /// log. Null for no `-e`, and for an `-e` refused for want of a command.
 _e_command: ?[]const [:0]const u8 = null,
-
-/// `--elevated-profile-env=KEY=VALUE` on the command line, which
-/// `new_window_elevated:user:<id>` passes for each of the profile's
-/// variables. `finalize` puts them over `env` once every config file has
-/// been read, so an `env` line in an included file cannot replace them, as it
-/// would replace an `--env` argument. Not a field: a config file line that
-/// names it is reported as an unknown field and ignored.
-_elevated_profile_env: std.ArrayListUnmanaged(windows_shell.EnvEntry) = .{},
-
-/// Where each `profile-*` (key, id) was last written, for the problems
-/// `finalize` reports (`pane_launch.profilePlace`). Recorded by
-/// `pane_launch.note`, so a config rebuilt by replay records them again;
-/// `clone` copies it. `key` is a static field name; `id` and the location
-/// live in the arena.
-_profile_places: std.ArrayListUnmanaged(pane_launch.ProfilePlace) = .empty,
 
 /// The last config file that was skipped whole because it is UTF-16 text that
 /// does not decode (see `loadReader`); everything it set is missing from this
@@ -5261,7 +5208,8 @@ pub fn finalize(self: *Config) !void {
         self.term = "xterm-ghostty";
     }
 
-    // `default-profile` stands in for the automatic default below.
+    // `default-profile`, and on Windows the automatic default when neither
+    // it nor a layer set `command`.
     try pane_launch.finalize(self);
 
     // The default for the working directory depends on the system.
@@ -5278,9 +5226,11 @@ pub fn finalize(self: *Config) !void {
     {
         if (self.command == null or wd == .home) command: {
             // First look up the command using the SHELL env var if needed.
-            if (self.command) |cmd|
-                log.info("shell src=config value={f}", .{cmd.redacted()})
-            else shell_env: {
+            if (self.command) |cmd| {
+                // The automatic default logged its own line where it was
+                // chosen (`pane_launch.finalize`).
+                if (self._launch.command_from != .automatic) log.info("shell src=config value={f}", .{cmd.redacted()});
+            } else shell_env: {
                 // Windows shell resolution is handled explicitly below so that
                 // an unset `command` consistently follows pwsh, then Windows
                 // PowerShell, then cmd.exe (never WSL).
@@ -5304,8 +5254,6 @@ pub fn finalize(self: *Config) !void {
 
             switch (builtin.os.tag) {
                 .windows => {
-                    if (self.command == null) try pane_launch.useAutomatic(self);
-
                     if (wd == .home and !windows_shell.isWslCommand(self.command.?)) {
                         var buf: [std.fs.max_path_bytes]u8 = undefined;
                         if (try internal_os.home(&buf)) |home| {
@@ -6061,7 +6009,7 @@ test "every example in the Visual Studio docs loads with no problem" {
     try testExpectNoProblems(&cfg);
     try testing.expectEqual(VisualStudioProfiles.all, cfg.@"visual-studio-profiles");
     // `default-profile = vs:newest:cmd` found the (test) instance.
-    try testing.expectEqualStrings("vs:6bb7cfd9:cmd", cfg._default_profile.?.key);
+    try testing.expectEqualStrings("vs:6bb7cfd9:cmd", (pane_launch.defaultProfile(&cfg) orelse return error.TestUnexpectedResult).key);
 }
 
 test "a profile line without an id is a config problem that does not show the line" {
@@ -6150,7 +6098,7 @@ pub fn parseManuallyHook(
 
         // `-e` comes after any `--initial-command=` and wins over it, when it
         // has a command: a refused `-e` changes nothing.
-        self._initial_command_cli = null;
+        self._launch.initial_command_cli = null;
 
         // See "initial-command" docs for the implied configurations and why.
         self._e_command = command.items;
@@ -6350,23 +6298,16 @@ pub fn clone(
 
     // Copy our diagnostics
     result._diagnostics = try self._diagnostics.clone(alloc_arena);
-    result._command_defaulted = self._command_defaulted;
-    result._command_from_file = self._command_from_file;
-    if (self._default_profile_cli) |value| result._default_profile_cli = try alloc_arena.dupeZ(u8, value);
-    if (self._default_profile_file) |value| result._default_profile_file = try alloc_arena.dupeZ(u8, value);
-    if (self._command_cli) |value| result._command_cli = try alloc_arena.dupeZ(u8, value);
-    if (self._initial_command_cli) |value| result._initial_command_cli = try alloc_arena.dupeZ(u8, value);
+    // An app config is installed as a clone: keep what the load decided of
+    // the launch and where each profile line was read, which the problems,
+    // Settings and New Elevated Window read.
+    result._launch = try self._launch.clone(alloc_arena);
     if (self._e_command) |words| {
         const copy = try alloc_arena.alloc([:0]const u8, words.len);
         for (words, copy) |word, *slot| slot.* = try alloc_arena.dupeZ(u8, word);
         result._e_command = copy;
     }
-    if (self._default_profile) |profile| result._default_profile = try profile.clone(alloc_arena);
-    result._default_profile_failure = self._default_profile_failure;
     if (self._undecodable_file) |skipped| result._undecodable_file = try alloc_arena.dupeZ(u8, skipped);
-    // An app config is installed as a clone: keep where each profile line
-    // was read, which the problems and New Elevated Window read.
-    result._profile_places = try pane_launch.cloneProfilePlaces(self, alloc_arena);
 
     // Preserve our replay steps. We copy them exactly to also preserve
     // the exact conditionals required for some steps.

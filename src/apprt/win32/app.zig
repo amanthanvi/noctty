@@ -10018,11 +10018,8 @@ test "win32 Settings' profile choices follow what the loaded config made of the 
 
     // Visual Studio did not answer: apart from every row, and not missing.
     {
-        app.config = try configpkg.Config.default(alloc);
+        app.config = try fixtures.loadWith(alloc, "default-profile = vs:newest:cmd\n", .{ .visual_studio_answers = false });
         defer app.config.deinit();
-        var reader: std.Io.Reader = .fixed("default-profile = vs:newest:cmd\n");
-        try app.config.loadReader(alloc, &reader, "C:\\noctty-test\\config.ghostty");
-        try configpkg.pane_launch.finalizeWith(&app.config, fixtures.Machine{ .visual_studio_answers = false });
         var unavailable = try settingsProfileChoicesThunk(&app, alloc, "vs:newest:cmd", null, false);
         defer unavailable.deinit(alloc);
         try std.testing.expectEqual(@as(?usize, null), unavailable.selected);

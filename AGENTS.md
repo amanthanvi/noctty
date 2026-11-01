@@ -299,9 +299,11 @@ that govern each symbol you change, or that none does.
   (`src/config/pane_launch.zig` `prepare`, its `Origin` and `Stamp`,
   `defaultApplies`), the default `command` (what a config load decides of
   the launch, in the same file: `finalize`, `default-profile` resolution and
-  its problems, the profile places, `useAutomatic`, `useRecovery`, the
-  queries `defaultProfile`, `nocttyCommand`, `commandLineNamesProfile`,
-  `filesDefine` and `defaultProfileForKey`, and `keepSources`), profile
+  its problems, the automatic default, the `Ledger` a load keeps in
+  `Config._launch` (which layer set `command`, the profile places),
+  `useRecovery`, the queries `defaultProfile`, `nocttyCommand`,
+  `commandLineNamesProfile`, `filesDefine` and `defaultProfileForKey`, and
+  `keepSources`), profile
   discovery and user-defined profiles (`src/config/windows_shell.zig`: the
   `profile-*` keys, `default-profile`, `profile-order`, `profile-hidden`,
   `verbatimCommandLine`, `arrangeProfiles`, profile key equality

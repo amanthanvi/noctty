@@ -7118,7 +7118,7 @@ test "win32 settings automatic command is not masked by default resolution" {
     defer pending.deinit();
     var reloaded = try configpkg.Config.default(std.testing.allocator);
     defer reloaded.deinit();
-    try configpkg.pane_launch.useAutomatic(&reloaded);
+    try configpkg.pane_launch.finalizeWith(&reloaded, configpkg.pane_launch.fixtures.Machine{ .default_shell = "C:\\Program Files\\PowerShell\\7\\pwsh.exe" });
     try std.testing.expect(reloaded.command != null);
     try std.testing.expect(!settingsEditedValueMasked(&pending, &reloaded, .command));
     try settingsTestLoadText(&reloaded, "command = direct:cmd.exe\n");
@@ -7696,7 +7696,7 @@ test "win32 settings disk edit does not mistake the resolved default command for
 
     var resolved = try original.clone(alloc);
     defer resolved.deinit();
-    try configpkg.pane_launch.useAutomatic(&resolved);
+    try configpkg.pane_launch.finalizeWith(&resolved, configpkg.pane_launch.fixtures.Machine{ .default_shell = "C:\\Program Files\\PowerShell\\7\\pwsh.exe" });
     try std.testing.expect(configpkg.pane_launch.nocttyCommand(&resolved) != null);
     try std.testing.expect(!settingsDiskEditConflict(&original, &pending, &resolved, light, edited));
 
@@ -20887,10 +20887,8 @@ test "win32 default-profile runs where nothing chose a launch, and only there" {
     // Restore does not connect over SSH by itself, so with an SSH default a
     // pane it would reach gets the automatic shell (a session saves an SSH
     // pane without its profile).
-    var ssh_config = try configpkg.Config.default(alloc);
+    var ssh_config = try configpkg.pane_launch.fixtures.loadWith(alloc, "default-profile = ssh:prod\n", .{ .ssh = true });
     defer ssh_config.deinit();
-    ssh_config.@"default-profile" = "ssh:prod";
-    try configpkg.pane_launch.finalizeWith(&ssh_config, configpkg.pane_launch.fixtures.Machine{ .ssh = true });
     {
         const py_config = app.config;
         app.config = ssh_config;
