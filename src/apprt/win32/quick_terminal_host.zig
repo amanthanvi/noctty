@@ -109,7 +109,7 @@ pub fn toggleQuickTerminal(self: *App) !void {
                 .window,
             );
             defer config.deinit();
-            const launch = try configpkg.pane_launch.prepare(&config, .{ .fresh = .{} }, self.launchContext());
+            const launch = try configpkg.pane_launch.prepare(&config, .{ .fresh = .{} }, self.launchContext(null));
             const fresh = try self.createWindowSurface(&config, quick_terminal_title, .{
                 .host_id = host.id,
                 .launch = launch,
@@ -149,7 +149,7 @@ pub fn toggleQuickTerminal(self: *App) !void {
         .window,
     );
     defer config.deinit();
-    const launch = try configpkg.pane_launch.prepare(&config, .{ .fresh = .{} }, self.launchContext());
+    const launch = try configpkg.pane_launch.prepare(&config, .{ .fresh = .{} }, self.launchContext(null));
     const surface = try self.createWindowSurface(&config, quick_terminal_title, .{
         .quick_terminal = true,
         // Passive first-show: `Surface.init` uses `SW_SHOWNOACTIVATE`
@@ -573,7 +573,7 @@ test "win32 toggle_quick_terminal runs default-profile in a new window and a fre
             try fixture.app.config.@"profile-working-directory".parseCLI(arena, "py: D:\\pinned");
             fixture.app.config.@"default-profile" = "py";
             try fixture.app.config.finalize();
-            try std.testing.expectEqualStrings("user:py", if (fixture.app.config._default_profile) |profile| profile.key else "");
+            try std.testing.expectEqualStrings("user:py", if (configpkg.pane_launch.defaultProfile(&fixture.app.config)) |profile| profile.key else "");
             QuickTerminalDefaultProfile.arena = .init(std.testing.allocator);
             defer QuickTerminalDefaultProfile.arena.deinit();
 

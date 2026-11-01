@@ -3739,13 +3739,6 @@ _arena: ?ArenaAllocator = null,
 /// supplied by a config layer. The executable stays available to runtime callers.
 _command_defaulted: bool = false,
 
-/// Set only on a surface's shallow clone, when the surface is launched from a
-/// user profile (`profile-command`): the command line `command` was split
-/// from and the profile's environment entries, so the surface can keep them
-/// for the tabs and splits that inherit its launch. Never set by a config
-/// layer; `clone` does not copy it.
-_profile_launch: ?windows_shell.UserLaunch = null,
-
 /// The profile `default-profile` names, found by `pane_launch.finalize` when no
 /// layer set `command`; `command` is then its command, still marked
 /// automatic. The app runtime gives a launch that nothing else chose the

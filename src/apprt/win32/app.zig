@@ -54,14 +54,10 @@ const appMessageWindowProc = win32.appMessageWindowProc;
 const appQuitConfirmAccept = win32.appQuitConfirmAccept;
 const appendOwnedString = paint_text.appendOwnedString;
 const applyAutomationWorkingDirectory = win32.applyAutomationWorkingDirectory;
-const applyDefaultProfileConfig = win32.applyDefaultProfileConfig;
 const applyDwmThemeWithBuild = win32.applyDwmThemeWithBuild;
 const applyNewWindowArguments = win32.applyNewWindowArguments;
-const applyProfileLaunchConfig = win32.applyProfileLaunchConfig;
 const applyQuickSlotPreferenceOrder = win32.applyQuickSlotPreferenceOrder;
 const applySplitWorkingDirectoryFromSource = win32.applySplitWorkingDirectoryFromSource;
-const applySshLaunchHardening = win32.applySshLaunchHardening;
-const applyUserLaunchConfig = win32.applyUserLaunchConfig;
 const apprt = @import("../../apprt.zig");
 const automationHostFocused = win32.automationHostFocused;
 const automationTextAllowed = win32.automationTextAllowed;
@@ -2623,8 +2619,6 @@ pub const App = struct {
 
     pub const restoreSessionPane = session_module.restoreSessionPane;
 
-    pub const applyRestoredProfileConfig = session_module.applyRestoredProfileConfig;
-
     pub const applyRestoredWindowPlacement = session_module.applyRestoredWindowPlacement;
 
     pub const hasSessionWindows = session_module.hasSessionWindows;
@@ -3813,7 +3807,7 @@ pub const App = struct {
                 if (forwarded_arguments) |argv| if (argv.len > 0) try configpkg.pane_launch.keepSources(&config, &self.config);
                 const launch = try configpkg.pane_launch.prepare(&config, .{ .fresh = .{
                     .named_directory = if (forwarded_arguments) |argv| forwardedArgvSetsKey(argv, "working-directory") else false,
-                } }, self.launchContext());
+                } }, self.launchContext(null));
                 if (config.@"launch-layout") |name| {
                     const banner_host = if (self.registry.findSurfaceForTarget(target)) |source| source.host else null;
                     _ = self.launchNamedLayout(name, banner_host);
@@ -5261,33 +5255,43 @@ pub const App = struct {
 
     /// What `pane_launch.prepare` asks of the app about a new pane.
     pub const LaunchContext = struct {
+        app: *App,
+        /// The window the pane opens in; null for a new one.
+        host: ?*Host,
         /// The process's first pane, which runs `initial-command` (`-e`).
         first: bool,
+
+        pub fn windowed(self: LaunchContext) bool {
+            return self.host != null;
+        }
+
+        pub fn listed(self: LaunchContext, key: []const u8) !?*const windows_shell.Profile {
+            const host = self.host orelse return null;
+            return try host.profileForKey(key);
+        }
+
+        pub fn discover(self: LaunchContext, alloc: Allocator) ![]windows_shell.Profile {
+            return try listProfilesForConfig(alloc, &self.app.config, windows_shell.listProfiles);
+        }
+
+        pub fn automatic(_: LaunchContext, alloc: Allocator) !configpkg.Command {
+            return try windows_shell.defaultCommand(alloc);
+        }
     };
 
-    pub fn launchContext(self: *const App) LaunchContext {
-        return .{ .first = self.core_app.first };
+    pub fn launchContext(self: *App, host: ?*Host) LaunchContext {
+        return .{ .app = self, .host = host, .first = self.core_app.first };
     }
 
-    /// `applyDefaultProfileConfig`, unless this is the surface that runs
-    /// `initial-command` (`-e`): the first one of the process, whichever path
-    /// creates it. A restore clears `initial-command` first.
-    pub fn applyDefaultProfileLaunch(self: *const App, config: *configpkg.Config) !?*const windows_shell.Profile {
-        if (!configpkg.pane_launch.defaultApplies(config, self.core_app.first)) return null;
-        return try applyDefaultProfileConfig(config);
-    }
-
-    pub const applyRestoredDefaultLaunch = session_module.applyRestoredDefaultLaunch;
-
-    /// What a surface launched from `profile` keeps: the key that splits,
-    /// session restore and elevation look the profile up by, and for SSH
-    /// the alias as its tab title.
-    pub fn noteProfileLaunch(self: *App, surface: *Surface, profile: *const windows_shell.Profile) !void {
-        try appendOwnedString(self.core_app.alloc, &surface.launch_profile_key, profile.key);
-        surface.launched_ssh = profile.kind == .ssh;
-        if (windows_shell.sshProfileAlias(profile)) |alias| {
-            try appendOwnedString(self.core_app.alloc, &surface.tab_title_override, alias);
-        }
+    /// What `surface` launched, for a pane that repeats its launch or starts
+    /// its profile.
+    fn launchSource(surface: *const Surface) configpkg.pane_launch.Source {
+        return .{
+            .command = surface.launch_command,
+            .user = surface.launch_user,
+            .key = surface.launch_profile_key,
+            .ssh = surface.launched_ssh,
+        };
     }
 
     fn createNewTab(
@@ -5299,7 +5303,6 @@ pub const App = struct {
     ) !*Surface {
         var config = try apprt.surface.newConfig(self.core_app, &self.config, .tab);
         defer config.deinit();
-        var inherited_profile_key: ?[]const u8 = null;
 
         if (shouldResetNewTabWorkingDirectory(
             explicit_window_target,
@@ -5311,14 +5314,18 @@ pub const App = struct {
             // source also needs the reset because its live cwd is remote.
             config.@"working-directory" = self.config.@"working-directory";
         }
+        // newConfig inherits only the focused surface's working directory;
+        // Launch command selection is app-runtime state and must be
+        // inherited from the source snapshot rather than re-resolved from
+        // mutable global/profile configuration. It comes before the
+        // explicit target's directory, which reads the command for its WSL
+        // fallback.
+        const inherited: ?*Surface = if (inherit_launch_config) source else null;
+        var launch: configpkg.pane_launch.Stamp = if (inherited) |surface|
+            try configpkg.pane_launch.prepare(&config, .{ .inherit = launchSource(surface) }, self.launchContext(surface.host))
+        else
+            .{};
         if (source) |surface| {
-            // newConfig inherits only the focused surface's working directory;
-            // Launch command selection is app-runtime state and must be
-            // inherited from the source snapshot rather than re-resolved from
-            // mutable global/profile configuration.
-            if (inherit_launch_config) {
-                inherited_profile_key = try applyLaunchConfigFromSource(&config, surface);
-            }
             if (explicit_window_target and shouldInheritSplitWorkingDirectory(surface.launched_ssh)) {
                 const split_inherit = config.@"split-inherit-working-directory";
                 {
@@ -5328,9 +5335,8 @@ pub const App = struct {
                 }
             }
         }
-
         // A tab that inherits no launch runs the default profile, if any.
-        const default_profile = try self.applyDefaultProfileLaunch(&config);
+        if (inherited == null) launch = try configpkg.pane_launch.prepare(&config, .{ .fresh = .{} }, self.launchContext(null));
         if (working_directory) |cwd| try applyAutomationWorkingDirectory(&config, cwd);
         const surface = try self.createWindowSurface(&config, default_title, .{
             .host_id = if (source) |value| value.host_id else null,
@@ -5339,16 +5345,8 @@ pub const App = struct {
             else
                 null else null,
             .clone_state_from = source,
+            .launch = launch,
         });
-        if (inherited_profile_key) |key| try appendOwnedString(
-            self.core_app.alloc,
-            &surface.launch_profile_key,
-            key,
-        );
-        if (inherit_launch_config) {
-            if (source) |value| surface.launched_ssh = value.launched_ssh;
-        }
-        if (default_profile) |profile| try self.noteProfileLaunch(surface, profile);
         if (source) |value| value.invalidateRedoForUnsupportedTabStructuralAction();
         self.activateSurface(surface);
         return surface;
@@ -5365,16 +5363,14 @@ pub const App = struct {
         var config = try apprt.surface.newConfig(self.core_app, &self.config, .split);
         defer config.deinit();
         config.@"working-directory" = self.config.@"working-directory";
-        const inherited_profile_key = if (inherit_launch_config)
-            try applyLaunchConfigFromSource(&config, source)
+        const origin: configpkg.pane_launch.Origin = if (inherit_launch_config)
+            .{ .inherit = launchSource(source) }
         else
-            try applySplitProfileConfigFromSource(&config, source);
-        // A split of a pane that runs no profile runs the default one.
-        const default_profile = try self.applyDefaultProfileLaunch(&config);
-        // An SSH default keeps its hardened directory, as an SSH source's
-        // split does: a local pane's directory means nothing to ssh.exe.
-        const default_ssh = if (default_profile) |profile| profile.kind == .ssh else false;
-        if (shouldInheritSplitWorkingDirectory(source.launched_ssh or default_ssh)) {
+            .{ .split = launchSource(source) };
+        const launch = try configpkg.pane_launch.prepare(&config, origin, self.launchContext(source.host));
+        // An SSH launch keeps its hardened directory, an SSH default's too:
+        // a local pane's directory means nothing to ssh.exe.
+        if (shouldInheritSplitWorkingDirectory(source.launched_ssh or launch.ssh)) {
             _ = try applySplitWorkingDirectoryFromSource(self, &config, source, self.startup_cwd);
         }
         if (working_directory) |cwd| try applyAutomationWorkingDirectory(&config, cwd);
@@ -5383,16 +5379,8 @@ pub const App = struct {
             .tab_id = tab_info.tab.id,
             .clone_state_from = source,
             .split_direction = direction,
+            .launch = launch,
         });
-        if (inherited_profile_key) |key| try appendOwnedString(
-            self.core_app.alloc,
-            &surface.launch_profile_key,
-            key,
-        );
-        if (inherit_launch_config or inherited_profile_key != null) {
-            surface.launched_ssh = source.launched_ssh;
-        }
-        if (default_profile) |profile| try self.noteProfileLaunch(surface, profile);
         tab_info.tab.clearRedoHistory();
         if (tab_info.host.pushStructuralUndo(.{
             .kind = .split_create,
@@ -5413,40 +5401,165 @@ pub const App = struct {
         return surface;
     }
 
-    pub fn applyLaunchConfigFromSource(
-        config: *configpkg.Config,
-        source: *Surface,
-    ) !?[]const u8 {
-        if (source.launch_command) |command| {
-            config.command = try command.clone(config._arena.?.allocator());
-            config._command_defaulted = false;
-            // The snapshot, not the current definition: a reload since the
-            // source started does not change what an inherited launch runs.
-            if (source.launch_user) |launch| try applyUserLaunchConfig(config, launch);
-            if (source.launched_ssh) try applySshLaunchHardening(config);
-            return source.launch_profile_key;
-        }
+    test "an automation tab or split repeats the source pane's launch as it started, before its directory" {
+        if (builtin.os.tag != .windows) return error.SkipZigTest;
 
-        // Headless fixtures may not have a captured command. Preserve the
-        // previous profile fallback for those tests.
-        const key = source.launch_profile_key orelse return null;
-        const host = source.host orelse return null;
-        const profile = (try host.profileForKey(key)) orelse return null;
-        try applyProfileLaunchConfig(config, profile);
-        return profile.key;
-    }
-
-    pub fn applySplitProfileConfigFromSource(
-        config: *configpkg.Config,
-        source: *Surface,
-    ) !?[]const u8 {
-        const key = source.launch_profile_key orelse return null;
-        const profile = configpkg.pane_launch.defaultProfileForKey(config, key) orelse profile: {
-            const host = source.host orelse return null;
-            break :profile (try host.profileForKey(key)) orelse return null;
+        var core_app: CoreApp = undefined;
+        var app: App = undefined;
+        var host: Host = undefined;
+        var source: Surface = undefined;
+        var created: [4]Surface = undefined;
+        var surfaces: [1 + created.len]TestSession.SurfaceOptions = undefined;
+        surfaces[0] = .{ .storage = &source, .host = &host, .register = true };
+        for (&created, 1..) |*storage, index| surfaces[index] = .{
+            .storage = storage,
+            .host = &host,
+            .window_visible = false,
+            .host_active = false,
+            .free_launch_profile_key_on_deinit = true,
         };
-        try applyProfileLaunchConfig(config, profile);
-        return profile.key;
+        var session: TestSession = .{};
+        try session.init(.{
+            .core_app = &core_app,
+            .app = &app,
+            .hosts = &.{.{ .storage = &host, .register = true, .next_tab_id = 2 }},
+            .surfaces = &surfaces,
+            .tabs = &.{.{ .host = &host, .surface = &source, .id = 1 }},
+        });
+        defer session.deinit();
+        const alloc = app.core_app.alloc;
+
+        // The definition after a reload changed it, which a split of the
+        // source would start.
+        const arena = app.config._arena.?.allocator();
+        try app.config.@"profile-command".parseCLI(arena, "tool: new.exe");
+        try app.config.@"profile-env".parseCLI(arena, "tool: MODE=new");
+        app.config.@"tab-inherit-working-directory" = true;
+        try app.config.finalize();
+        // A live directory that is noctty's own start directory.
+        var startup = "C:\\startup".*;
+        app.startup_cwd = &startup;
+        defer app.startup_cwd = null;
+
+        const Seen = struct {
+            program: []const u8,
+            arg: []const u8,
+            mode: []const u8,
+            line: []const u8,
+            integration: configpkg.Config.ShellIntegration,
+            dir: []const u8,
+        };
+        const Hook = struct {
+            var seen_arena: std.heap.ArenaAllocator = undefined;
+            var seen: Seen = undefined;
+            var storage: []Surface = undefined;
+            var next: usize = 0;
+
+            fn pwd(a: Allocator, _: *Surface) anyerror!?[]const u8 {
+                return try a.dupe(u8, "C:\\startup");
+            }
+
+            fn createSurface(hook_app: *App, config: *const configpkg.Config, _: LPCWSTR, opts: SurfaceInitOptions) anyerror!*Surface {
+                const a = seen_arena.allocator();
+                const argv = switch (config.command orelse return error.TestUnexpectedResult) {
+                    .direct => |words| words,
+                    .shell => return error.TestUnexpectedResult,
+                };
+                seen = .{
+                    .program = try a.dupe(u8, argv[0]),
+                    .arg = if (argv.len > 1) try a.dupe(u8, argv[1]) else "",
+                    .mode = if (config.env.map.get("MODE")) |value| try a.dupe(u8, value) else "",
+                    .line = if (opts.launch.user) |launch| try a.dupe(u8, launch.command_line) else "",
+                    .integration = config.@"shell-integration",
+                    .dir = if (config.@"working-directory") |dir| switch (dir) {
+                        .path => |path| try a.dupe(u8, path),
+                        .home => "~",
+                        .inherit => "",
+                    } else "",
+                };
+                const surface = &storage[next];
+                next += 1;
+                const tab_host = hook_app.registry.findHostById(opts.host_id orelse return surface) orelse return surface;
+                try hook_app.registry.addWindow(hook_app.core_app.alloc, surface);
+                if (opts.tab_id != null) {
+                    const found = Host.findTabForSurface(@constCast(opts.clone_state_from orelse return error.TestUnexpectedResult)) orelse return error.TestUnexpectedResult;
+                    var inserted = try SplitTreeSurface.init(hook_app.core_app.alloc, surface);
+                    defer inserted.deinit();
+                    const tree = try found.tab.tree.split(hook_app.core_app.alloc, found.tab.focused, opts.split_direction, 0.5, &inserted);
+                    found.tab.tree.deinit();
+                    found.tab.tree = tree;
+                } else {
+                    try tab_host.tabs.insert(
+                        hook_app.core_app.alloc,
+                        opts.tab_insert_index orelse tab_host.tabs.items.len,
+                        try Tab.init(hook_app.core_app.alloc, tab_host.nextTabId(), surface),
+                    );
+                }
+                return surface;
+            }
+        };
+        Hook.seen_arena = .init(std.testing.allocator);
+        defer Hook.seen_arena.deinit();
+        Hook.storage = &created;
+        Hook.next = 0;
+        app.test_create_window_surface = &Hook.createSurface;
+        app.test_automation_pwd = &Hook.pwd;
+
+        // What a user profile's pane started, line and variables with it:
+        // `+new-tab --window-id` and `+new-split` run that, not `tool` as it
+        // is now.
+        const started = [_][:0]const u8{ "old.exe", "/x" };
+        const started_env = [_]windows_shell.EnvEntry{.{ .key = "MODE", .value = "old" }};
+        source.launch_command = .{ .direct = &started };
+        source.launch_user = .{ .command_line = "old.exe /x", .env = &started_env };
+        source.launch_profile_key = "user:tool";
+        defer {
+            source.launch_command = null;
+            source.launch_user = null;
+            source.launch_profile_key = null;
+        }
+        const Expect = struct {
+            fn snapshot(surface: *const Surface) !void {
+                try std.testing.expectEqualStrings("old.exe", Hook.seen.program);
+                try std.testing.expectEqualStrings("/x", Hook.seen.arg);
+                try std.testing.expectEqualStrings("old", Hook.seen.mode);
+                try std.testing.expectEqualStrings("old.exe /x", Hook.seen.line);
+                try std.testing.expectEqualStrings("user:tool", surface.launch_profile_key orelse "");
+                try std.testing.expect(!surface.launched_ssh);
+            }
+        };
+        _ = try app.createNewTab(&source, null, true, true);
+        try Expect.snapshot(&created[0]);
+        // The window's tab takes the pane's live directory.
+        try std.testing.expectEqualStrings("C:\\startup", Hook.seen.dir);
+        _ = try app.createNewSplit(&source, .right, null, true);
+        try Expect.snapshot(&created[1]);
+
+        // An SSH pane's: hardened again, and still SSH.
+        const ssh = [_][:0]const u8{ "C:\\Windows\\System32\\OpenSSH\\ssh.exe", "prod" };
+        source.launch_command = .{ .direct = &ssh };
+        source.launch_user = null;
+        source.launch_profile_key = "ssh:prod";
+        source.launched_ssh = true;
+        _ = try app.createNewTab(&source, null, true, true);
+        try std.testing.expectEqualStrings("prod", Hook.seen.arg);
+        try std.testing.expectEqual(configpkg.Config.ShellIntegration.none, Hook.seen.integration);
+        try std.testing.expectEqualStrings("ssh:prod", created[2].launch_profile_key orelse "");
+        try std.testing.expect(created[2].launched_ssh);
+
+        // A WSL pane whose live directory is noctty's start directory: the
+        // explicit target's directory step reads the inherited command, so
+        // the tab falls back to the pane's last reported folder.
+        const wsl = [_][:0]const u8{ "wsl.exe", "-d", "Ubuntu" };
+        source.launch_command = .{ .direct = &wsl };
+        source.launch_profile_key = "wsl:Ubuntu";
+        source.launched_ssh = false;
+        try appendOwnedString(alloc, &source.pwd, "C:\\cached");
+        defer appendOwnedString(alloc, &source.pwd, null) catch unreachable;
+        _ = try app.createNewTab(&source, null, true, true);
+        try std.testing.expectEqualStrings("wsl.exe", Hook.seen.program);
+        try std.testing.expectEqualStrings("C:\\cached", Hook.seen.dir);
+        try std.testing.expectEqual(created.len, Hook.next);
     }
 
     /// The profile `new_window_elevated` runs for `key`: `default-profile`'s
@@ -5484,7 +5597,7 @@ pub const App = struct {
             },
         );
         defer config.deinit();
-        const launch = try configpkg.pane_launch.prepare(&config, .{ .chosen = profile }, self.launchContext());
+        const launch = try configpkg.pane_launch.prepare(&config, .{ .chosen = profile }, self.launchContext(null));
 
         const tab_id = switch (open_target) {
             .split => blk: {
@@ -5523,7 +5636,7 @@ pub const App = struct {
         // window with `--working-directory=` when no instance runs.
         const launch = try configpkg.pane_launch.prepare(&config, .{ .fresh = .{
             .named_directory = self.explicit_startup_working_directory,
-        } }, self.launchContext());
+        } }, self.launchContext(null));
         _ = try self.createWindowSurface(&config, title, .{ .launch = launch });
     }
 

@@ -155,7 +155,6 @@ const surfaceConfirmPasteCancel = win32.surfaceConfirmPasteCancel;
 const surfaceConfirmWriteAccept = win32.surfaceConfirmWriteAccept;
 const surfaceConfirmWriteCancel = win32.surfaceConfirmWriteCancel;
 const surfaceDropPayloadCallback = win32.surfaceDropPayloadCallback;
-const surfaceLaunchSnapshot = win32.surfaceLaunchSnapshot;
 const surfaceWindowStyle = win32.surfaceWindowStyle;
 const surface_presentation = @import("surface_presentation.zig");
 const sys = @import("sys.zig");
@@ -397,7 +396,7 @@ pub const Surface = struct {
     launched_ssh: bool = false,
     launch_command: ?configpkg.Command = null,
     /// The user profile's command line and environment entries this surface
-    /// was launched with (`Config._profile_launch`), kept with
+    /// was launched with (`pane_launch.Stamp.user`), kept with
     /// `launch_command` so an inheriting tab or split runs the same launch.
     launch_user: ?windows_shell.UserLaunch = null,
     mouse_shape: terminal.MouseShape = .text,
@@ -699,9 +698,15 @@ pub const Surface = struct {
             _ = windows.CloseHandle(session.client_process);
             self.adopted_session = null;
         };
-        const launch = surfaceLaunchSnapshot(app.core_app.first, config);
-        if (launch.command) |command| self.launch_command = try command.clone(app.core_app.alloc);
-        if (launch.user) |user| self.launch_user = try user.clone(app.core_app.alloc);
+        // The launch it runs, for the tabs and splits that repeat it. The
+        // process's first surface with `initial-command` (`-e`) runs that
+        // command, which is no profile's, so it records no profile line or
+        // variables.
+        const e_command = if (app.core_app.first) config.@"initial-command" else null;
+        if (e_command orelse config.command) |command| self.launch_command = try command.clone(app.core_app.alloc);
+        if (e_command == null) {
+            if (opts.launch.user) |user| self.launch_user = try user.clone(app.core_app.alloc);
+        }
         self.drop_target = try win32_surface_drop_target.DropTarget.create(
             app.core_app.alloc,
             @ptrCast(self),
@@ -5620,6 +5625,42 @@ test "win32 a committed Restart Manager close keeps every window through WM_CLOS
             try std.testing.expectEqual(@as(usize, 0), app.registry.hosts.items.len);
             var msg: MSG = undefined;
             try std.testing.expect(sys.PeekMessageW(&msg, null, c.WM_QUIT, c.WM_QUIT, c.PM_REMOVE) != 0);
+        }
+    }.body);
+}
+
+test "win32 a surface keeps its launch's line unless it is the first one and runs initial-command" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    try runOnHiddenDesktop(struct {
+        fn body() !void {
+            var fixture: WindowStartTestApp = .{};
+            try fixture.init();
+            defer fixture.deinit();
+            const app = &fixture.app;
+            const cmd_argv = [_][:0]const u8{ "cmd.exe", "/k", "x" };
+            const e_argv = [_][:0]const u8{"vim.exe"};
+            app.config.command = .{ .direct = &cmd_argv };
+            const launch: configpkg.pane_launch.Stamp = .{ .user = .{ .command_line = "cmd.exe /k x" } };
+
+            // A profile launch keeps its line with the command, the first
+            // surface or a later one.
+            for ([_]bool{ true, false }) |first| {
+                fixture.core_app.first = first;
+                const surface = try app.createWindowSurface(&app.config, default_title, .{ .launch = launch });
+                try std.testing.expectEqualStrings("cmd.exe", (surface.launch_command orelse return error.TestUnexpectedResult).direct[0]);
+                try std.testing.expectEqualStrings("cmd.exe /k x", (surface.launch_user orelse return error.TestUnexpectedResult).command_line);
+            }
+
+            // `-e` runs on the first surface only, and is no profile's launch.
+            app.config.@"initial-command" = .{ .direct = &e_argv };
+            fixture.core_app.first = true;
+            const first = try app.createWindowSurface(&app.config, default_title, .{ .launch = launch });
+            try std.testing.expectEqualStrings("vim.exe", (first.launch_command orelse return error.TestUnexpectedResult).direct[0]);
+            try std.testing.expect(first.launch_user == null);
+            fixture.core_app.first = false;
+            const later = try app.createWindowSurface(&app.config, default_title, .{ .launch = launch });
+            try std.testing.expectEqualStrings("cmd.exe", (later.launch_command orelse return error.TestUnexpectedResult).direct[0]);
+            try std.testing.expect(later.launch_user != null);
         }
     }.body);
 }
