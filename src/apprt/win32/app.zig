@@ -2597,8 +2597,6 @@ pub const App = struct {
 
     pub const restoreSessionWindow = session_module.restoreSessionWindow;
 
-    pub const syncRestoredHostWindowState = session_module.syncRestoredHostWindowState;
-
     pub const restoreSessionTab = session_module.restoreSessionTab;
 
     pub const restoreSessionPane = session_module.restoreSessionPane;
@@ -4021,6 +4019,7 @@ pub const App = struct {
                         for (self.registry.windows.items) |surface| {
                             try surface.applyRuntimeConfig(&self.config);
                         }
+                        for (self.registry.hosts.items) |host| try window_state.applyConfig(host, &self.config);
                         // A reload that turns automatic checks on in a process
                         // that started with them off (or on another channel).
                         if (self.registry.windows.items.len > 0 and self.update_startup_ready) self.maybeScheduleAutomaticUpdateCheck();
@@ -4036,7 +4035,9 @@ pub const App = struct {
                         const surface = self.registry.findSurfaceByCore(core_surface) orelse return false;
                         try surface.applyRuntimeConfig(value.config);
                         surface.setTabBackground(value.config.background);
-                        try self.syncHostWindowState(surface);
+                        // The window takes a pane's config only from the pane
+                        // it shows.
+                        if (surface.host) |host| if (host.activeSurface() == surface) try window_state.applyConfig(host, value.config);
                     },
                 }
                 return true;
@@ -4134,16 +4135,6 @@ pub const App = struct {
                 return true;
             },
 
-            .toggle_background_opacity => {
-                if (self.registry.findSurfaceForTarget(target)) |surface| {
-                    const changed = try surface.toggleBackgroundOpacity();
-                    if (!changed) return false;
-                    try self.syncHostWindowState(surface);
-                    return true;
-                }
-                return false;
-            },
-
             .goto_window => {
                 return try self.gotoWindow(target, value);
             },
@@ -4189,73 +4180,23 @@ pub const App = struct {
                 return true;
             },
 
-            .toggle_maximize => {
-                if (self.registry.findSurfaceForTarget(target)) |surface| {
-                    surface.toggleMaximize();
-                    try self.syncHostWindowState(surface);
-                    return true;
-                }
-                return false;
-            },
-
-            .toggle_fullscreen => {
-                if (self.registry.findSurfaceForTarget(target)) |surface| {
-                    try surface.toggleFullscreen(value);
-                    try self.syncHostWindowState(surface);
-                    return true;
-                }
-                return false;
-            },
-
-            .toggle_window_decorations => {
-                if (self.registry.findSurfaceForTarget(target)) |surface| {
-                    try surface.toggleDecorations();
-                    try self.syncHostWindowState(surface);
-                    return true;
-                }
-                return false;
-            },
-
-            .float_window => {
-                if (self.registry.findSurfaceForTarget(target)) |surface| {
-                    try surface.setFloatWindow(value);
-                    try self.syncHostWindowState(surface);
-                    return true;
-                }
-                return false;
-            },
-
-            .initial_size => {
-                if (self.registry.findSurfaceForTarget(target)) |surface| {
-                    try surface.setInitialSize(value);
-                    try self.syncHostWindowState(surface);
-                    return true;
-                }
-                return false;
-            },
-
-            .reset_window_size => {
-                if (self.registry.findSurfaceForTarget(target)) |surface| {
-                    try surface.resetWindowSize();
-                    try self.syncHostWindowState(surface);
-                    return true;
-                }
-                return false;
-            },
-
-            .size_limit => {
-                if (self.registry.findSurfaceForTarget(target)) |surface| {
-                    surface.setSizeLimit(value);
-                    try self.syncHostWindowState(surface);
-                    return true;
-                }
-                return false;
+            .toggle_maximize,
+            .toggle_fullscreen,
+            .toggle_window_decorations,
+            .float_window,
+            .toggle_background_opacity,
+            .initial_size,
+            .reset_window_size,
+            .size_limit,
+            => {
+                const surface = self.registry.findSurfaceForTarget(target) orelse return false;
+                const host = surface.host orelse return false;
+                return window_state.perform(host, surface, action, value);
             },
 
             .cell_size => {
                 if (self.registry.findSurfaceForTarget(target)) |surface| {
                     surface.setCellSize(value);
-                    try self.syncHostWindowState(surface);
                     return true;
                 }
                 return false;
@@ -5980,10 +5921,17 @@ pub const App = struct {
         switch (effect) {
             .none => {},
             .theme => self.reconfigureTheme(),
-            .opacity => for (self.registry.windows.items) |surface| {
-                surface.applyRuntimeConfig(&self.config) catch |err| {
-                    log.warn("settings live preview apply failed err={}", .{err});
-                };
+            .opacity => {
+                for (self.registry.windows.items) |surface| {
+                    surface.applyRuntimeConfig(&self.config) catch |err| {
+                        log.warn("settings live preview apply failed err={}", .{err});
+                    };
+                }
+                for (self.registry.hosts.items) |host| {
+                    window_state.applyConfig(host, &self.config) catch |err| {
+                        log.warn("settings live preview apply failed err={}", .{err});
+                    };
+                }
             },
         }
     }
@@ -6264,10 +6212,21 @@ pub const App = struct {
         const host = try self.core_app.alloc.create(Host);
         var host_registered = false;
         errdefer if (!host_registered) self.core_app.alloc.destroy(host);
+        const startup_decorations_visible = Surface.initialDecorationsVisible(config, opts);
         host.* = .{
             .app = self,
             .id = self.allocateHostId(),
             .quick_terminal = quick_terminal,
+            .top_level = .{
+                .decorations_visible = startup_decorations_visible,
+                .opacity = std.math.clamp(config.@"background-opacity", 0.0, 1.0),
+            },
+        };
+        // A window opened from another one is shown at that window's
+        // opacity, before it takes the rest of its state.
+        if (clone_state_from) |source| if (!keeps.background_opacity) if (source.host) |existing| {
+            host.top_level.opacity = existing.top_level.opacity;
+            host.top_level.force_opaque = existing.top_level.force_opaque;
         };
         host.palette_catalog = try PaletteCatalog.init(
             &host.palette_catalog_items,
@@ -6279,11 +6238,12 @@ pub const App = struct {
         }
 
         const position = configuredHostWindowPosition(config);
-        const startup_decorations_visible = Surface.initialDecorationsVisible(config, opts);
-        host.cached_decorations_visible = startup_decorations_visible;
         // A window with a size of its own starts framed, so core init sizes
         // the window it leaves fullscreen to.
-        const startup_fullscreen = if (clone_state_from) |source| source.fullscreen and !keeps.size else false;
+        const startup_fullscreen = if (clone_state_from) |source|
+            (if (source.host) |existing| existing.top_level.isFullscreen() else false) and !keeps.size
+        else
+            false;
         const keeps_frame = startup_decorations_visible or undecoratedKeepsFrame(self.os_build, quick_terminal);
         const startup_style = startupHostWindowStyle(keeps_frame, startup_fullscreen);
 
@@ -6583,13 +6543,11 @@ pub const App = struct {
         _ = self;
         const host = surface.host orelse return;
         const tab_info = Host.findTabForSurface(surface) orelse return;
-        const previous_surface = host.activeSurface();
         const previous_tab_id = if (host.active_tab < host.tabs.items.len)
             host.tabs.items[host.active_tab].id
         else
             null;
         host.active_tab = tab_info.index;
-        surface.syncSharedHostWindowState(previous_surface);
         host.prepareActiveTabVisibility(tab_info.index);
         host.showTabPanes(tab_info.tab);
         // Same-host tab creation reaches this path before its first layout.
@@ -6860,8 +6818,6 @@ pub const App = struct {
         runUiActionOrLog("input mode focus sync failed", found.host.refreshModeIndicator());
         return changed;
     }
-
-    const syncHostWindowState = window_state.syncHostWindowState;
 
     pub fn removeHost(self: *App, host: *Host) void {
         if (!self.registry.detachHost(host)) return;

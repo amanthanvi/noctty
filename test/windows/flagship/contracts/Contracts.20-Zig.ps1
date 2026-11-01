@@ -48,10 +48,13 @@ foreach ($win32TestModuleRoot in $win32TestModuleRoots) {
 # win32_search_bar.zig and labels.zig, rewritten against its interface; its
 # floor is every one of them. labels.zig went from 113 to 104 when its
 # docked-search rules moved there and its search chrome (button words,
-# colours, focus stops) to search_controls.zig, and to 103 when the search
-# overlay's count label went with the search arguments no caller passed.
+# colours, focus stops) to search_controls.zig, to 103 when the search
+# overlay's count label went with the search arguments no caller passed, and
+# to 101 when its window opacity helpers became `TopLevel.alpha` in
+# window_start.zig and the unused resizeSplitFallbackDelta went with the dead
+# Surface.resizeSplitFallback (window state on the Window).
 $movedWin32TestFloors = [ordered]@{
-    'labels.zig' = 103
+    'labels.zig' = 101
     'input.zig' = 24
     'gl_startup.zig' = 4
     'render_trace.zig' = 3

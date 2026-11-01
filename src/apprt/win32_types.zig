@@ -40,6 +40,22 @@ pub const POINT = geometry.Point;
 pub const POINTL = geometry.PointL;
 pub const RECT = geometry.Rect;
 
+pub const WINDOWPLACEMENT = extern struct {
+    length: UINT,
+    flags: UINT,
+    showCmd: UINT,
+    ptMinPosition: POINT,
+    ptMaxPosition: POINT,
+    rcNormalPosition: RECT,
+};
+
+pub const MONITORINFO = extern struct {
+    cbSize: u32,
+    rcMonitor: RECT,
+    rcWork: RECT,
+    dwFlags: u32,
+};
+
 pub const WNDPROC = *const fn (HWND, UINT, WPARAM, LPARAM) callconv(.winapi) LRESULT;
 
 pub const PAINTSTRUCT = extern struct {

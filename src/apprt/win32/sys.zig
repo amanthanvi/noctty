@@ -113,14 +113,7 @@ pub const WINDOWPOS = extern struct {
     flags: UINT,
 };
 
-pub const WINDOWPLACEMENT = extern struct {
-    length: UINT,
-    flags: UINT,
-    showCmd: UINT,
-    ptMinPosition: POINT,
-    ptMaxPosition: POINT,
-    rcNormalPosition: RECT,
-};
+pub const WINDOWPLACEMENT = win32_types.WINDOWPLACEMENT;
 
 pub const NCCALCSIZE_PARAMS = extern struct {
     rgrc: [3]RECT,
@@ -130,12 +123,7 @@ pub const NCCALCSIZE_PARAMS = extern struct {
 pub const WNDCLASSEXW = win32_types.WNDCLASSEXW;
 pub const CREATESTRUCTW = win32_types.CREATESTRUCTW;
 
-pub const MONITORINFO = extern struct {
-    cbSize: u32,
-    rcMonitor: RECT,
-    rcWork: RECT,
-    dwFlags: u32,
-};
+pub const MONITORINFO = win32_types.MONITORINFO;
 
 pub const MINMAXINFO = extern struct {
     ptReserved: POINT,

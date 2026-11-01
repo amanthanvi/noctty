@@ -38,6 +38,7 @@ const std = runtime.std;
 const sys = runtime.sys;
 const win32_quick_terminal = runtime.win32_quick_terminal;
 const win32_theme = runtime.win32_theme;
+const window_state = @import("window_state.zig");
 const win32_tween = runtime.win32_tween;
 
 pub const quick_terminal_title = std.unicode.utf8ToUtf16LeStringLiteral("noctty quick terminal");
@@ -114,9 +115,8 @@ pub fn toggleQuickTerminal(self: *App) !void {
                 .host_id = host.id,
                 .launch = launch,
             });
-            // Floating is the surface's state: the window follows the
-            // active tab's.
-            try fresh.setFloatWindow(.on);
+            // The quick terminal floats over other windows.
+            _ = try window_state.perform(host, fresh, .float_window, .on);
             if (host.hwnd) |top_level| self.showQuickTerminalWindow(top_level, want_focus);
             self.showHostSurface(fresh, want_focus);
             self.auditCreationAfterActivation();
@@ -160,7 +160,7 @@ pub fn toggleQuickTerminal(self: *App) !void {
         .show = if (want_focus) .activate else .no_activate,
         .launch = launch,
     });
-    try surface.setFloatWindow(.on);
+    _ = try window_state.perform(surface.host.?, surface, .float_window, .on);
     if (surface.windowHwnd()) |top_level| {
         self.applyQuickTerminalGeometry(top_level, true) catch |err| {
             std.log.warn("QT geometry failed err={}", .{err});
@@ -525,7 +525,7 @@ test "win32 toggle_quick_terminal opens a fresh floating tab instead of showing 
             try fixture.app.validateShellNativeMapping();
             // The window floats with the tab it shows, so a tab switch or
             // undo does not drop it below other windows.
-            try std.testing.expect(fixture.fresh.topmost);
+            try std.testing.expect(fixture.host.top_level.topmost);
         }
     }.body);
 }

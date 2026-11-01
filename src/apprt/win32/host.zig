@@ -91,7 +91,6 @@ const confirmTitlePaintRect = win32.confirmTitlePaintRect;
 const confirm_prompt_text_format = win32.confirm_prompt_text_format;
 const createIconFontWithGlyphs = win32.createIconFontWithGlyphs;
 const cycleProfileOpenTarget = win32.cycleProfileOpenTarget;
-const decorationVisibilityForChromeValue = win32.decorationVisibilityForChromeValue;
 const default_title = win32.default_title;
 const desiredTabIndex = win32.desiredTabIndex;
 const destroyChildWindow = win32.destroyChildWindow;
@@ -248,6 +247,7 @@ const win32_theme = @import("../win32_theme.zig");
 const win32_tween = @import("../win32_tween.zig");
 const win32_uia = @import("../win32_uia/mod.zig");
 const win32_undo = @import("../win32_undo.zig");
+const window_state = @import("window_state.zig");
 const windowTitleSyncChanged = win32.windowTitleSyncChanged;
 const windows_shell = @import("../../config/windows_shell.zig");
 
@@ -377,7 +377,9 @@ pub const Host = struct {
     power_notifications: win32_power.Notifications = .{},
     surfaces_visible: bool = true,
     dwm_cloaked: bool = false,
-    cached_decorations_visible: bool = true,
+    /// The state of this top-level window, whichever of its panes acts on
+    /// it (`window_state.perform`, `window_state.applyConfig`).
+    top_level: window_state.TopLevel = .{},
     /// This host is the quick terminal. Its tabs and splits are all part of
     /// it, so this, not a flag on one surface, says what the window is.
     quick_terminal: bool = false,
@@ -2277,6 +2279,9 @@ pub const Host = struct {
             };
         }
         for (self.app.registry.hosts.items) |host| {
+            window_state.applyConfig(host, &self.app.config) catch |err| {
+                log.warn("palette theme runtime apply failed err={}", .{err});
+            };
             host.refreshChrome() catch |err| {
                 log.warn("palette theme chrome refresh failed err={}", .{err});
             };
@@ -8461,13 +8466,6 @@ pub const Host = struct {
         return tabBarVisibleForConfig(self.app.config.@"window-show-tab-bar");
     }
 
-    fn decorationVisibilityForChrome(self: *const Host) bool {
-        return decorationVisibilityForChromeValue(
-            if (self.activeSurface()) |surface| surface.decorations_visible else null,
-            self.cached_decorations_visible,
-        );
-    }
-
     /// Host-local view of the integrated-titlebar state. The app
     /// carries the build/config floor, but host-side non-client
     /// handling must also respect whether this host is actually
@@ -8476,7 +8474,7 @@ pub const Host = struct {
         return usesIntegratedTitlebar(
             self.app.use_integrated_titlebar,
             self.shouldShowTabBar(),
-            self.decorationVisibilityForChrome(),
+            self.top_level.decorations_visible,
         );
     }
 
@@ -8487,10 +8485,9 @@ pub const Host = struct {
     /// the hit test finds only resize edges and client.
     pub fn clientCaptionHeight(self: *const Host) ?i32 {
         if (self.usingIntegratedTitlebar()) return host_caption_button_h;
-        const fullscreen = if (self.activeSurface()) |surface| surface.fullscreen else false;
         if (undecoratedKeepsFrame(self.app.os_build, self.quick_terminal) and
-            !self.decorationVisibilityForChrome() and
-            !fullscreen) return 0;
+            !self.top_level.decorations_visible and
+            !self.top_level.isFullscreen()) return 0;
         return null;
     }
 
@@ -8535,10 +8532,9 @@ pub const Host = struct {
 
     pub fn tabsFlushWithTop(self: *const Host) bool {
         const hwnd = self.hwnd orelse return false;
-        const fullscreen = if (self.activeSurface()) |surface| surface.fullscreen else false;
         return self.app.os_build >= c.OS_BUILD_WIN11_21H2 and
             !self.quick_terminal and self.shouldShowTabBar() and
-            (fullscreen or ((self.usingIntegratedTitlebar() or self.clientCaptionHeight() == 0) and
+            (self.top_level.isFullscreen() or ((self.usingIntegratedTitlebar() or self.clientCaptionHeight() == 0) and
                 sys.IsZoomed(hwnd) != 0));
     }
 

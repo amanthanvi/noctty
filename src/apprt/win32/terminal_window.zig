@@ -10,7 +10,6 @@ const ClipboardSource = win32.ClipboardSource;
 const ConfirmPrompt = win32.ConfirmPrompt;
 const CoreSurface = @import("../../Surface.zig");
 const DeferredCharState = win32.DeferredCharState;
-const FullscreenMonitor = win32.FullscreenMonitor;
 const HDC = win32.HDC;
 const HGDIOBJ = win32.HGDIOBJ;
 const HGLRC = win32.HGLRC;
@@ -37,13 +36,11 @@ const SurfaceInitOptions = win32.SurfaceInitOptions;
 const TRACKMOUSEEVENT = win32.TRACKMOUSEEVENT;
 const Tab = win32.Tab;
 const UINT = win32.UINT;
-const WINDOWPLACEMENT = win32.WINDOWPLACEMENT;
 const WPARAM = win32.WPARAM;
 const WheelNormalizationContext = win32.WheelNormalizationContext;
 const WindowKeeps = win32.WindowKeeps;
 const WindowStart = win32.WindowStart;
 const adjustColor = win32.adjustColor;
-const alphaByteForOpacity = win32.alphaByteForOpacity;
 const anyVirtualKeyPressed = win32.anyVirtualKeyPressed;
 const appendOwnedString = paint_text.appendOwnedString;
 const appendSanitizedTitle = win32.appendSanitizedTitle;
@@ -64,7 +61,6 @@ const commitSplitSurfaceAttach = win32.commitSplitSurfaceAttach;
 const configpkg = @import("../../config.zig");
 const crlfLineEndings = win32.crlfLineEndings;
 const cursorPosFromLParam = win32.cursorPosFromLParam;
-const decorationsVisibleForConfig = win32.decorationsVisibleForConfig;
 const detachChromeControlProvider = win32.detachChromeControlProvider;
 const drawRoundedRect = win32.drawRoundedRect;
 const fillSolidRect = win32.fillSolidRect;
@@ -88,7 +84,6 @@ const log = win32.log;
 const mouseButtonFromMessage = win32.mouseButtonFromMessage;
 const mouseButtonStateFromMessage = win32.mouseButtonStateFromMessage;
 const mouseModsFromWParam = win32.mouseModsFromWParam;
-const normalizedBackgroundOpacity = win32.normalizedBackgroundOpacity;
 const openClipboard = win32.openClipboard;
 const optionalOwnedStringEquals = paint_text.optionalOwnedStringEquals;
 const ownedStringEquals = paint_text.ownedStringEquals;
@@ -117,7 +112,6 @@ const recordOpenGLStartupWin32Failure = win32.recordOpenGLStartupWin32Failure;
 const render_trace = @import("render_trace.zig");
 const rendererpkg = @import("../../renderer.zig");
 const requestedTabInsertIndex = win32.requestedTabInsertIndex;
-const resizeSplitFallbackDelta = win32.resizeSplitFallbackDelta;
 const resolveWindowBaseTitle = win32.resolveWindowBaseTitle;
 const restoreTerminalUndoState = win32.restoreTerminalUndoState;
 const rollbackFailedSurfaceAttach = win32.rollbackFailedSurfaceAttach;
@@ -134,8 +128,6 @@ const search_controls = @import("search_controls.zig");
 const selectClipboardContents = win32.selectClipboardContents;
 const session_module = @import("session.zig");
 const setWindowData = child_window.setWindowData;
-const sharesHostWindowState = win32.sharesHostWindowState;
-const shouldApplyConfigDecorations = win32.shouldApplyConfigDecorations;
 const shouldDispatchOcclusion = win32.shouldDispatchOcclusion;
 const shouldShowSurfaceImmediately = win32.shouldShowSurfaceImmediately;
 const signedHighWord = win32.signedHighWord;
@@ -404,20 +396,12 @@ pub const Surface = struct {
     /// The bell rang here while the user was not looking; the tab label and
     /// the window caption carry the glyph until `clearBell`.
     bell_ringing: bool = false,
-    decorations_visible: bool = true,
-    decorations_visible_overridden: bool = false,
-    fullscreen: bool = false,
-    topmost: bool = false,
-    /// What `leaveFullscreen` returns the window to, captured by
-    /// `enterFullscreen`: the window rect, and the placement for a window
-    /// that was maximized.
-    restore_rect: RECT = .{ .left = 0, .top = 0, .right = 0, .bottom = 0 },
-    restore_placement: WINDOWPLACEMENT = std.mem.zeroes(WINDOWPLACEMENT),
-    restore_monitor: ?FullscreenMonitor = null,
+    /// This pane's metrics, from its own font (core init's `cell_size`,
+    /// `size_limit` and `initial_size`); its window keeps the rest of the
+    /// window state (`Host.top_level`). `default_client_size` is the
+    /// client size `reset_window_size` returns to.
     default_client_size: ?apprt.SurfaceSize = null,
     cell_size_pixels: apprt.action.CellSize = .{ .width = 0, .height = 0 },
-    background_opacity_default: f64 = 1.0,
-    background_opacity_force_opaque: bool = false,
     /// The configured terminal background (`background`, which a `theme`
     /// sets), as a COLORREF. The active tab takes it so it reads as the top
     /// of this terminal (`Host.tabBackground`). Only this terminal's own
@@ -656,7 +640,6 @@ pub const Surface = struct {
             .host_id = host.id,
             .host_active = true,
             .window_visible = false,
-            .decorations_visible = initialDecorationsVisible(config, opts),
             .scrollbar_config = config.scrollbar,
             .render_trace = RenderTrace.init(app.core_app.alloc),
             // Unlike the render trace there is no single-claimant rule here:
@@ -698,7 +681,6 @@ pub const Surface = struct {
             self.drop_target.?.deinit();
             self.drop_target = null;
         }
-        self.background_opacity_default = normalizedBackgroundOpacity(config.@"background-opacity");
         self.tab_background = colorRefFromConfig(config.background);
         // First memory-stage sample. Every later stage's private-bytes delta
         // is measured against this one, so it has to be the first thing that
@@ -888,10 +870,10 @@ pub const Surface = struct {
             .y = @as(f32, @floatFromInt(host.current_dpi)) / 96.0,
         };
 
+        // A tab or split starts with the metrics of the pane it is opened
+        // from; its core init then sends its own cell size and limit.
         if (opts.clone_state_from) |source| {
-            if (sharesHostWindowState(self.host_id, source.host_id)) {
-                self.copySharedWindowStateFrom(source, .{});
-            }
+            if (source.host_id == self.host_id) window_state.copyPaneMetrics(self, source, .{});
         }
 
         if (app.test_surface_init_stage) |stage| try stage(self, .core_surface) else {
@@ -955,7 +937,7 @@ pub const Surface = struct {
             // opaque-then-fade flash. The window-start fixture reads the
             // style at the first show ("... layered at their opacity at the
             // first show" in window_state.zig).
-            self.applyInitialBackgroundOpacity(if (keeps.background_opacity) null else opts.clone_state_from);
+            window_state.applyInitialBackgroundOpacity(host);
             try host.refreshChrome();
             try host.layout();
             // `maximize` and `fullscreen` (#496), before the first show, so
@@ -963,7 +945,7 @@ pub const Surface = struct {
             // given it `window-width`/`window-height`, so that is the normal
             // rect it returns to. A clone takes them once it has the
             // source's state, below.
-            if (opts.clone_state_from == null) self.applyWindowStart(window_start);
+            if (opts.clone_state_from == null) window_state.applyWindowStart(host, window_start);
             // The top-level host was created hidden and stays hidden until GL
             // and core initialization have succeeded, so a startup failure
             // reaches the fatal dialog without first presenting a blank host
@@ -985,10 +967,11 @@ pub const Surface = struct {
         }
 
         if (opts.clone_state_from) |source| {
-            if (!sharesHostWindowState(self.host_id, source.host_id)) {
-                try self.inheritWindowStateFrom(source, keeps);
+            if (source.host_id != self.host_id) {
+                window_state.copyPaneMetrics(self, source, keeps);
+                if (source.host) |from| try window_state.inheritWindowStateFrom(host, from, keeps);
                 // After it: a normal source ends in SW_RESTORE.
-                self.applyWindowStart(window_start);
+                window_state.applyWindowStart(host, window_start);
             }
         }
         if (shell_prepared) |*prepared| {
@@ -3519,7 +3502,7 @@ pub const Surface = struct {
         }
 
         // Without animations the settled state is fully shown or hidden.
-        const alpha = alphaByteForOpacity(self.scrollbar_state.alpha(now_ms));
+        const alpha: BYTE = @intFromFloat(@round(std.math.clamp(@as(f64, self.scrollbar_state.alpha(now_ms)), 0.0, 1.0) * 255.0));
         const paint_key = self.scrollbarPaintKey(child_rect);
         const paint_changed = scrollbarPaintKeyChanged(self.scrollbar_paint_cache, paint_key);
         if (alpha != self.scrollbar_alpha_cache) {
@@ -3892,21 +3875,11 @@ pub const Surface = struct {
         if (caption_changed or tabs_changed) host.invalidateTopChromeText();
     }
 
-    pub const toggleMaximize = window_state.toggleMaximize;
-
+    /// The pane half of a config change; its window takes the rest
+    /// (`window_state.applyConfig`).
     pub fn applyRuntimeConfig(self: *Surface, config: *const configpkg.Config) !void {
         self.applyBellFeatures(config.@"bell-features");
-        if (shouldApplyConfigDecorations(self.decorations_visible_overridden)) {
-            self.setDecorationsVisible(decorationsVisibleForConfig(config.@"window-decoration")) catch |err| {
-                log.warn("win32 decoration update failed during config reload err={}", .{err});
-            };
-        }
-        self.background_opacity_default = normalizedBackgroundOpacity(self.app.shownBackgroundOpacity(config));
         self.scrollbar_config = config.scrollbar;
-        if (self.background_opacity_default >= 0.999) {
-            self.background_opacity_force_opaque = false;
-        }
-        try self.applyBackgroundOpacity();
         try self.refreshScrollbarWindow();
     }
 
@@ -3922,84 +3895,9 @@ pub const Surface = struct {
         if (self.host) |host| host.syncTabJoin();
     }
 
-    pub const toggleBackgroundOpacity = window_state.toggleBackgroundOpacity;
-
-    fn resizeSplitFallback(self: *Surface, value: apprt.action.ResizeSplit) !bool {
-        const hwnd = self.hwnd orelse return false;
-        var client_rect: RECT = undefined;
-        if (sys.GetClientRect(hwnd, &client_rect) == 0) {
-            return lastError();
-        }
-
-        const delta = resizeSplitFallbackDelta(value);
-        const current_width = client_rect.right - client_rect.left;
-        const current_height = client_rect.bottom - client_rect.top;
-        const next_width = @max(1, current_width + delta.width);
-        const next_height = @max(1, current_height + delta.height);
-
-        try self.resizeClientArea(@intCast(next_width), @intCast(next_height));
-        return true;
-    }
-
-    pub const toggleFullscreen = window_state.toggleFullscreen;
-
-    pub const toggleDecorations = window_state.toggleDecorations;
-
-    pub const setInitialSize = window_state.setInitialSize;
-
-    pub const hostSurfaceCount = window_state.hostSurfaceCount;
-
-    pub const resetWindowSize = window_state.resetWindowSize;
-
-    pub const setSizeLimit = window_state.setSizeLimit;
-
     pub fn setCellSize(self: *Surface, size: apprt.action.CellSize) void {
         self.cell_size_pixels = size;
     }
-
-    pub const setFloatWindow = window_state.setFloatWindow;
-
-    pub const applyWindowStart = window_state.applyWindowStart;
-
-    pub const enterFullscreen = window_state.enterFullscreen;
-
-    pub const FullscreenReturn = window_state.FullscreenReturn;
-
-    pub const fullscreenReturn = window_state.fullscreenReturn;
-
-    pub const leaveFullscreen = window_state.leaveFullscreen;
-
-    pub const windowMonitor = window_state.windowMonitor;
-
-    pub const screenRectToWorkspace = window_state.screenRectToWorkspace;
-
-    pub const setDecorationsVisible = window_state.setDecorationsVisible;
-
-    pub const rollbackDecorationsVisible = window_state.rollbackDecorationsVisible;
-
-    pub const resizeClientArea = window_state.resizeClientArea;
-
-    pub const copySharedWindowStateFrom = window_state.copySharedWindowStateFrom;
-
-    pub const activeSharedHostWindowHwnd = window_state.activeSharedHostWindowHwnd;
-
-    pub const syncSharedHostWindowState = window_state.syncSharedHostWindowState;
-
-    pub const refreshSharedWindowFrame = window_state.refreshSharedWindowFrame;
-
-    pub const inheritWindowStateFrom = window_state.inheritWindowStateFrom;
-
-    pub const updateMinMaxInfo = window_state.updateMinMaxInfo;
-
-    pub const keepsFrameUndecorated = window_state.keepsFrameUndecorated;
-
-    pub const applyWindowStyle = window_state.applyWindowStyle;
-
-    pub const applyInitialBackgroundOpacity = window_state.applyInitialBackgroundOpacity;
-
-    pub const applyBackgroundOpacity = window_state.applyBackgroundOpacity;
-
-    pub const applyTopmost = window_state.applyTopmost;
 
     pub const syncCoreSizeFromClientRect = surface_presentation.syncCoreSizeFromClientRect;
 

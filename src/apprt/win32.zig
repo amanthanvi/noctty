@@ -323,12 +323,10 @@ pub const window_state_runtime = .{
     .UINT = UINT,
     .WINDOWPLACEMENT = WINDOWPLACEMENT,
     .WS_OVERLAPPEDWINDOW = WS_OVERLAPPEDWINDOW,
-    .alphaByteForOpacity = alphaByteForOpacity,
     .apprt = apprt,
     .c = c,
     .configpkg = configpkg,
     .configuredHostWindowPosition = configuredHostWindowPosition,
-    .effectiveBackgroundOpacity = effectiveBackgroundOpacity,
     .forwardedArgvSetsKey = forwardedArgvSetsKey,
     .log = log,
     .scaleInitialClientSize = scaleInitialClientSize,
@@ -352,7 +350,7 @@ pub const window_state_test_runtime = if (builtin.is_test) .{
     .initTestHostWindowFixture = initTestHostWindowFixture,
     .monitorInfo = monitorInfo,
     .placementTestApp = placementTestApp,
-    .placementTestSurface = placementTestSurface,
+    .placementTestHost = placementTestHost,
     .runOnHiddenDesktop = runOnHiddenDesktop,
     .testHostIsLayered = testHostIsLayered,
     .testLayeredAlpha = testLayeredAlpha,
@@ -400,7 +398,6 @@ pub const session_runtime = .{
     .Tab = Tab,
     .UINT_PTR = UINT_PTR,
     .WINDOWPLACEMENT = WINDOWPLACEMENT,
-    .WindowStart = WindowStart,
     .WorkAreas = WorkAreas,
     .apprt = apprt,
     .builtin = builtin,
@@ -500,9 +497,7 @@ pub const test_support_runtime = if (builtin.is_test) .{
     .appDiscardDeferredOpens = App.discardDeferredOpens,
     .appInitComApartment = App.initComApartment,
     .appEnsureWindowClass = App.ensureWindowClass,
-    .surfaceSetInitialSize = Surface.setInitialSize,
-    .surfaceWindowMonitor = Surface.windowMonitor,
-    .surfaceActiveSharedHostWindowHwnd = Surface.activeSharedHostWindowHwnd,
+    .windowMonitor = window_state.windowMonitor,
     .settingsAppIconThunk = settingsAppIconThunk,
     .settingsChromeBgThunk = settingsChromeBgThunk,
     .settingsConfigProblemsThunk = settingsConfigProblemsThunk,
@@ -862,10 +857,6 @@ pub const decorationsVisibleForConfig = window_state.decorationsVisibleForConfig
 
 pub const initialDecorationsVisibleForSource = window_state.initialDecorationsVisibleForSource;
 
-pub fn decorationVisibilityForChromeValue(active_surface_visible: ?bool, cached_visible: bool) bool {
-    return active_surface_visible orelse cached_visible;
-}
-
 pub const startupHostWindowStyle = window_state.startupHostWindowStyle;
 
 pub const restoreRequestedHostWindowStyle = window_state.restoreRequestedHostWindowStyle;
@@ -1126,13 +1117,9 @@ pub fn surfaceWindowStyle() u32 {
 
 const effectiveHostWindowStyle = window_state.effectiveHostWindowStyle;
 
-pub const sharesHostWindowState = window_state.sharesHostWindowState;
-
 pub fn shouldShowSurfaceImmediately(host_id: ?u32) bool {
     return host_id == null;
 }
-
-pub const shouldApplyConfigDecorations = window_state.shouldApplyConfigDecorations;
 
 pub fn usesIntegratedTitlebar(
     enabled: bool,
@@ -6323,8 +6310,6 @@ pub const setQuickTerminalRect = quick_terminal_host.setQuickTerminalRect;
 
 pub const runOnHiddenDesktop = test_support.runOnHiddenDesktop;
 
-pub const FullscreenMonitor = window_state.FullscreenMonitor;
-
 const fitRectInWork = window_state.fitRectInWork;
 
 const workspaceRectToScreen = window_state.workspaceRectToScreen;
@@ -9493,12 +9478,6 @@ pub const preferredProfileIndex = labels.preferredProfileIndex;
 
 pub const resolveWindowBaseTitle = labels.resolveWindowBaseTitle;
 
-pub const normalizedBackgroundOpacity = labels.normalizedBackgroundOpacity;
-
-const effectiveBackgroundOpacity = labels.effectiveBackgroundOpacity;
-
-pub const alphaByteForOpacity = labels.alphaByteForOpacity;
-
 pub fn splitTreeEquivalent(a: *const SplitTreeSurface, b: *const SplitTreeSurface) bool {
     if (a.zoomed != b.zoomed) return false;
     if (a.nodes.len != b.nodes.len) return false;
@@ -9523,8 +9502,6 @@ pub fn splitTreeEquivalent(a: *const SplitTreeSurface, b: *const SplitTreeSurfac
 
     return true;
 }
-
-pub const resizeSplitFallbackDelta = labels.resizeSplitFallbackDelta;
 
 pub fn splitDirectionFromAction(value: apprt.action.SplitDirection) SplitTreeSurface.Split.Direction {
     return switch (value) {
@@ -12048,8 +12025,8 @@ pub fn hostWindowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) cal
 
         c.WM_GETMINMAXINFO => {
             if (host) |v| {
-                if (v.activeSurface()) |surface| {
-                    surface.updateMinMaxInfo(lParam);
+                if (v.activeSurface() != null) {
+                    window_state.updateMinMaxInfo(v, lParam);
                     return 0;
                 }
             }
@@ -12810,14 +12787,6 @@ pub fn windowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
                     lParam,
                     provider,
                 )) |lr| return lr;
-            }
-            return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
-        },
-
-        c.WM_GETMINMAXINFO => {
-            if (surface) |v| {
-                v.updateMinMaxInfo(lParam);
-                return 0;
             }
             return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
         },
@@ -19329,15 +19298,6 @@ test "win32 elevation authenticates a same-process pipe server token" {
 
 const testWindowStyle = test_support.testWindowStyle;
 
-test "win32 decorationVisibilityForChrome uses cached fallback until active surface" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    try std.testing.expect(!decorationVisibilityForChromeValue(null, false));
-    try std.testing.expect(decorationVisibilityForChromeValue(null, true));
-    try std.testing.expect(!decorationVisibilityForChromeValue(false, true));
-    try std.testing.expect(decorationVisibilityForChromeValue(true, false));
-}
-
 test "win32 usesIntegratedTitlebar requires visible decorations" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
@@ -19387,7 +19347,7 @@ test "win32 shouldUseIntegratedTitlebar gates on Win11 build floor" {
 
 const placementTestApp = test_support.placementTestApp;
 
-const placementTestSurface = test_support.placementTestSurface;
+const placementTestHost = test_support.placementTestHost;
 
 pub const SafeModeAppFixture = test_support.SafeModeAppFixture;
 
@@ -19485,7 +19445,6 @@ test "win32 host content rect keeps its size while the window is minimized" {
     app.use_integrated_titlebar = false;
 
     var surface: Surface = undefined;
-    surface.decorations_visible = true;
     surface.inspector_visible = false;
 
     var host: Host = .{ .app = &app, .id = 262 };
@@ -19560,8 +19519,7 @@ fn testTabGapHost(decorated: bool) !void {
     // binary cannot create the production layered Selection container.
     var surface: Surface = undefined;
     surface.host = null;
-    surface.decorations_visible = decorated;
-    surface.fullscreen = false;
+    host.top_level.decorations_visible = decorated;
     surface.inspector_visible = false;
     // The background the active tab takes.
     surface.tab_background = rgb(0x28, 0x2C, 0x34);
@@ -19705,7 +19663,7 @@ fn testTabGapHost(decorated: bool) !void {
     try std.testing.expect(!host.tabsFlushWithTop());
     host.quick_terminal = false;
     host.active_tab = 0;
-    surface.fullscreen = true;
+    host.top_level.fullscreen = .{ .rect = std.mem.zeroes(RECT), .placement = std.mem.zeroes(WINDOWPLACEMENT), .monitor = null };
     try std.testing.expect(host.tabsFlushWithTop());
     host.quick_terminal = true;
     try std.testing.expect(!host.tabsFlushWithTop());
@@ -19713,7 +19671,7 @@ fn testTabGapHost(decorated: bool) !void {
     app.os_build = 19045;
     try std.testing.expect(!host.tabsFlushWithTop());
     app.os_build = c.OS_BUILD_WIN11_21H2;
-    surface.fullscreen = false;
+    host.top_level.fullscreen = null;
     host.active_tab = 1;
 }
 
@@ -19772,13 +19730,11 @@ test "win32 createHost frames an undecorated host for its Windows build" {
     const app = &fixture.app;
     app.config.@"window-decoration" = .none;
 
-    // `createHost` as a `new_window` clone calls it: the decoration state
-    // comes from the source window rather than the config. The rest of the
-    // clone path (`inheritWindowStateFrom`) is not exercised here.
+    // `createHost` as a `new_window` clone calls it. A source with no
+    // window gives no state, so the decorations are the config's; the rest
+    // of the clone path (`inheritWindowStateFrom`) is not exercised here.
     var source: Surface = undefined;
     source.host = null;
-    source.decorations_visible = false;
-    source.fullscreen = false;
 
     // Both builds run against this machine's window manager; only the
     // build-gated choices differ.
@@ -19795,7 +19751,7 @@ test "win32 createHost frames an undecorated host for its Windows build" {
                 const keeps_frame = undecoratedKeepsFrame(os_build, host.quick_terminal);
                 try std.testing.expect(sys.IsWindowVisible(hwnd) == 0);
                 try std.testing.expect(!host.usingIntegratedTitlebar());
-                // What `Surface.applyWindowStyle` writes for an undecorated
+                // What `window_state.applyWindowStyle` writes for an undecorated
                 // window, the style every clone and runtime toggle ends with.
                 // Before #270 the first window came back with WS_CAPTION.
                 const applied = effectiveHostWindowStyle(keeps_frame, false, true) & ~@as(u32, c.WS_VISIBLE);
@@ -19990,7 +19946,6 @@ test "win32 layoutChromeForRect hides tab-strip chrome when the tab bar is off" 
     app.use_integrated_titlebar = false;
 
     var surface: Surface = undefined;
-    surface.decorations_visible = true;
     surface.inspector_visible = false;
 
     var host: Host = .{ .app = &app, .id = 244 };

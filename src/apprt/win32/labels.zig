@@ -129,11 +129,6 @@ pub const ProfileSelection = union(enum) {
 /// to scroll does not strand focus outside the cycle.
 pub const OverlayFocusSlot = enum { edit, preview, accept, cancel };
 
-const ResizeSplitFallbackDelta = struct {
-    width: i32 = 0,
-    height: i32 = 0,
-};
-
 pub fn tabButtonKeyAction(vk: WPARAM, mods: KeyMods) ?TabButtonKeyAction {
     // Alt chords belong to the window's menu, not to the tab.
     if (mods.alt) return null;
@@ -609,28 +604,6 @@ pub fn resolveWindowBaseTitle(
     tab_override: ?[:0]const u8,
 ) ?[:0]const u8 {
     return tab_override orelse surface_override orelse terminal_title;
-}
-
-pub fn normalizedBackgroundOpacity(value: f64) f64 {
-    return std.math.clamp(value, 0.0, 1.0);
-}
-
-pub fn effectiveBackgroundOpacity(configured: f64, force_opaque: bool) f64 {
-    return if (force_opaque) 1.0 else configured;
-}
-
-pub fn alphaByteForOpacity(value: f64) u8 {
-    return @intFromFloat(@round(normalizedBackgroundOpacity(value) * 255.0));
-}
-
-pub fn resizeSplitFallbackDelta(value: apprt.action.ResizeSplit) ResizeSplitFallbackDelta {
-    const amount: i32 = @intCast(value.amount);
-    return switch (value.direction) {
-        .left => .{ .width = -amount },
-        .right => .{ .width = amount },
-        .up => .{ .height = -amount },
-        .down => .{ .height = amount },
-    };
 }
 
 pub fn buildHostAwareBaseTitle(
@@ -2218,27 +2191,6 @@ test "win32 resolveWindowBaseTitle prefers tab then surface override" {
     try std.testing.expectEqualStrings(
         "terminal",
         resolveWindowBaseTitle("terminal", null, null).?,
-    );
-}
-
-test "win32 effectiveBackgroundOpacity respects opaque override" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    try std.testing.expectEqual(@as(f64, 0.4), effectiveBackgroundOpacity(0.4, false));
-    try std.testing.expectEqual(@as(f64, 1.0), effectiveBackgroundOpacity(0.4, true));
-    try std.testing.expectEqual(@as(u8, 128), alphaByteForOpacity(0.5));
-}
-
-test "win32 resizeSplitFallbackDelta maps directions to window deltas" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    try std.testing.expectEqualDeep(
-        ResizeSplitFallbackDelta{ .width = -24, .height = 0 },
-        resizeSplitFallbackDelta(.{ .amount = 24, .direction = .left }),
-    );
-    try std.testing.expectEqualDeep(
-        ResizeSplitFallbackDelta{ .width = 0, .height = 12 },
-        resizeSplitFallbackDelta(.{ .amount = 12, .direction = .down }),
     );
 }
 
