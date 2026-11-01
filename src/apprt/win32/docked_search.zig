@@ -204,11 +204,12 @@ pub const DockedSearch = struct {
     deadline: ?i64 = null,
     /// The core's answer says nothing of the query (a null total, or a null
     /// selection with no total), or the bar closed on a query: the chip
-    /// reads "Searching" and navigation searches again. Unlike the
-    /// debounce, it drops no report and keeps no timer running.
+    /// reads "Searching", and opening or navigating searches again. Unlike
+    /// the debounce, it drops no report and keeps no timer running.
     awaiting: bool = false,
     /// A query was edited or searched and not stopped since. The core
-    /// searches for `query` when this is set and no debounce waits.
+    /// searches for `query` when this is set and neither the debounce nor
+    /// `awaiting` holds (`live`).
     active: bool = false,
     /// The rows of the matches, owned, for the scrollbar markers.
     match_rows: []const u32 = &.{},
@@ -263,18 +264,18 @@ pub const DockedSearch = struct {
 
     fn show(self: *DockedSearch, needle: []const u8) Allocator.Error!Outcome {
         const initial = if (needle.len > 0) needle else self.query;
-        // While a search is active the core searches for the query.
-        const live = self.active and std.mem.eql(u8, self.query, initial);
-        if (!std.mem.eql(u8, self.query, initial)) try self.setQuery(initial, 0);
+        const same = std.mem.eql(u8, self.query, initial);
+        // The core already searches for this query, so its results stay.
+        const restore = initial.len > 0 and same and self.live();
+        if (!same) try self.setQuery(initial, 0);
         self.open = true;
-        const restore = initial.len > 0 and live;
         if (!restore) {
             self.total = null;
             self.selected_raw = null;
         }
         self.deadline = null;
         self.awaiting = false;
-        var out: Outcome = if (initial.len > 0 and !live) self.issue() else .{ .handled = true, .timer_changed = true };
+        var out: Outcome = if (initial.len > 0 and !restore) self.issue() else .{ .handled = true, .timer_changed = true };
         out.frame = .shown;
         return out;
     }
@@ -288,13 +289,18 @@ pub const DockedSearch = struct {
 
     fn navigate(self: *DockedSearch, dir: NavigateSearch) Outcome {
         if (self.query.len == 0) return .{ .handled = true };
-        // Not live: the core has no search for the query, or the debounce
-        // or the core's answer is still to come.
-        if (!self.active or self.deadline != null or self.awaiting) return self.issue();
+        if (!self.live()) return self.issue();
         // The selection moves at once; the core's report of it follows.
         self.selected_raw = self.advance(dir);
         self.awaiting = self.selected_raw == null and self.total == null;
         return .{ .handled = true, .core = .{ .navigate = dir } };
+    }
+
+    /// The core searches for the query: a search is active, no debounce
+    /// holds it back, and the core has not cleared it. Otherwise opening
+    /// and navigating search again.
+    fn live(self: *const DockedSearch) bool {
+        return self.active and self.deadline == null and !self.awaiting;
     }
 
     /// The raw index one step `dir` from the selection, wrapping; null
@@ -1095,4 +1101,18 @@ test "close: end_search, then the clears, on a bar showing results change no chi
         try std.testing.expect(rows.markers_changed);
         try std.testing.expect(!rows.results_changed);
     }
+}
+
+test "an open while the debounce waits, or after a core clear, searches at once" {
+    var search = DockedSearch.init(std.testing.allocator);
+    defer search.deinit();
+    _ = try search.apply(.{ .open = "" }, 0);
+    _ = try search.apply(.{ .edit = "abc" }, 1000);
+    // start_search within 40 ms of the edit: the core has not been asked.
+    const during = try search.apply(.{ .open = "" }, 1010);
+    try std.testing.expectEqualStrings("abc", (try testCommand(during, .search)).text);
+    try std.testing.expect(!search.view().wants_tick);
+    // The core cleared its search under the open bar.
+    _ = try search.apply(.{ .core = .{ .total = .{ .total = null } } }, 1020);
+    try std.testing.expectEqualStrings("abc", (try testCommand(try search.apply(.{ .open = "" }, 1030), .search)).text);
 }
