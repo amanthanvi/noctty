@@ -2,6 +2,9 @@
 
 Dates descend; entries that share a date are not always newest first. A newer-dated entry, or an item under "Corrected in other files", overrides an older one on the same subject; when same-date entries disagree, the code decides. [AGENTS.md](../../../AGENTS.md) indexes the area files and says how to add an entry.
 
+Corrected in other files:
+- 2026-10-11 PKG-32, item (4): the test that ties the default F3 and Shift+F3 to Enter and Shift+Enter ("PKG32 default F3 and Shift+F3 match the docked search F3 and Enter directions") is in `win32/docked_search.zig` and compares the bindings with what `DockedSearch.apply` asks the core for at the edit and at a button; `dockedSearchEnterDirection` and the other labels.zig direction helpers are gone. See the 2026-11-01 "Docked search is one per-pane module" entry in search-scrollbar.md.
+
 See also:
 - Input that reaches a running program calls `Surface.noteProgramInput`, which marks a restored session used; an input path without it lets a worked-in session be set aside as a failed restore: the 2026-10-19 #497 entry in app-lifecycle.md.
 - Drawing the IME composition caret and the preedit layout (`rebuildCells`'s `cursor:` block, `Preedit.layout`, `preedit_caret_clean_rebuilds`): the 2026-10-22 IMECARET-1 entry in renderer.md.

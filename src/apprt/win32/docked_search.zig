@@ -22,6 +22,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const c = @import("consts.zig");
 
 pub const debounce_ms: i64 = 40;
 
@@ -56,10 +57,25 @@ pub const Input = union(enum) {
     edit: []const u8,
     /// A button's BN_CLICKED.
     click: Role,
+    /// A key message at the edit or a button, once the procedure has taken
+    /// Ctrl+F6, Tab and the edit's WM_CHAR swallow.
+    key: Key,
     /// The host's search timer fired.
     tick,
     /// A core action for this pane.
     core: Core,
+
+    pub const Key = struct {
+        /// WM_KEYDOWN, WM_SYSKEYDOWN, WM_SYSCHAR, WM_KILLFOCUS.
+        event: enum { down, sys_down, sys_char, blur },
+        at: enum { edit, button },
+        vk: usize = 0,
+        mods: Mods = .{},
+        /// lParam bits 16..24.
+        scan: u9 = 0,
+        /// KF_REPEAT: an autorepeat of a held key.
+        repeat: bool = false,
+    };
 
     pub const Core = union(enum) {
         total: struct { total: ?usize, invalid: bool = false },
@@ -168,39 +184,6 @@ pub const View = struct {
     match_rows: []const u32,
 };
 
-/// Alt+R, Alt+C and Alt+W flip the regex, case and whole-word flags from the
-/// docked search bar. Alt has to be held without Ctrl, since AltGr reports as
-/// Ctrl+Alt and types characters on many layouts, and without Shift.
-pub fn toggleAccelerator(vk: usize, mods: Mods) ?Role {
-    if (!mods.alt or mods.ctrl or mods.shift) return null;
-    return switch (vk) {
-        'R' => .regex,
-        'C' => .case_sensitive,
-        'W' => .whole_word,
-        else => null,
-    };
-}
-
-/// Pair a handled virtual-key shortcut with TranslateMessage's WM_SYSCHAR
-/// by scan code, not character: the character can be non-Latin on another
-/// layout. Only a handled press can consume a character; AltGr stays out.
-pub const ToggleKeys = struct {
-    pending_scan: ?u16 = null,
-
-    pub fn keyDown(self: *ToggleKeys, vk: usize, mods: Mods, bits: usize) ?Role {
-        const role = toggleAccelerator(vk, mods);
-        self.pending_scan = if (role != null) @intCast((bits >> 16) & 0x1FF) else null;
-        return role;
-    }
-
-    /// `bits` is the WM_SYSCHAR's lParam; its character does not matter.
-    pub fn consumeChar(self: *ToggleKeys, bits: usize) bool {
-        const pending = self.pending_scan;
-        self.pending_scan = null;
-        return if (pending) |scan| scan == ((bits >> 16) & 0x1FF) else false;
-    }
-};
-
 pub const DockedSearch = struct {
     open: bool = false,
     query: []u8 = &.{},
@@ -224,7 +207,9 @@ pub const DockedSearch = struct {
     active: bool = false,
     /// The rows of the matches, owned, for the scrollbar markers.
     match_rows: []const u32 = &.{},
-    toggle_keys: ToggleKeys = .{},
+    /// The scan code of the Alt+R/C/W press whose WM_SYSCHAR is still to
+    /// come.
+    pending_scan: ?u9 = null,
     alloc: Allocator,
 
     pub fn init(alloc: Allocator) DockedSearch {
@@ -247,8 +232,9 @@ pub const DockedSearch = struct {
                 .prev => self.navigate(.next),
                 .next => self.navigate(.previous),
                 .regex, .case_sensitive, .whole_word => self.toggle(role),
-                .close => .{ .handled = true, .core = .end, .focus_terminal = true },
+                .close => dismiss,
             },
+            .key => |k| self.key(k),
             .tick => if (self.open and self.debounceDue(now_ms)) self.issue() else .{},
             .core => |core| try self.report(core),
         };
@@ -314,6 +300,59 @@ pub const DockedSearch = struct {
         return switch (dir) {
             .next => if (index >= last) 0 else index + 1,
             .previous => if (index == 0) last else index - 1,
+        };
+    }
+
+    const dismiss: Outcome = .{ .handled = true, .core = .end, .focus_terminal = true };
+
+    fn key(self: *DockedSearch, k: Input.Key) Outcome {
+        switch (k.event) {
+            .blur => {
+                self.pending_scan = null;
+                return .{};
+            },
+            // Swallowed when it is the character of the Alt+R/C/W just
+            // handled, found by scan code: on another layout the character
+            // need not be Latin.
+            .sys_char => {
+                const pending = self.pending_scan;
+                self.pending_scan = null;
+                return .{ .handled = if (pending) |scan| scan == k.scan else false };
+            },
+            .down => {},
+            // Alt+R, Alt+C and Alt+W flip regex, case and whole word: Alt
+            // without Ctrl (AltGr reports as Ctrl+Alt and types on many
+            // layouts) and without Shift. A held key does not flip again,
+            // and any other system key forgets the press.
+            .sys_down => {
+                const role: ?Role = if (!k.mods.alt or k.mods.ctrl or k.mods.shift) null else switch (k.vk) {
+                    'R' => .regex,
+                    'C' => .case_sensitive,
+                    'W' => .whole_word,
+                    else => null,
+                };
+                self.pending_scan = if (role != null) k.scan else null;
+                if (role) |flip| return if (k.repeat) .{ .handled = true } else self.toggle(flip);
+            },
+        }
+        // Enter, Down and F3 step down the bar (visible next); with Shift,
+        // and Up, they step up. The core numbers matches newest first, so
+        // down is core `.previous`. A held key keeps stepping.
+        const step: NavigateSearch = if (k.mods.shift) .next else .previous;
+        return switch (k.at) {
+            .edit => switch (k.vk) {
+                c.VK_RETURN, c.VK_F3 => self.navigate(step),
+                c.VK_UP => self.navigate(.next),
+                c.VK_DOWN => self.navigate(.previous),
+                c.VK_ESCAPE => dismiss,
+                else => .{},
+            },
+            // Enter on a button is its click, and Tab its focus step.
+            .button => if (k.event != .down) .{} else switch (k.vk) {
+                c.VK_F3 => self.navigate(step),
+                c.VK_ESCAPE => if (self.active or self.open) dismiss else .{ .handled = true },
+                else => .{},
+            },
         };
     }
 
@@ -460,36 +499,6 @@ pub const DockedSearch = struct {
 // =====================================================================
 // Tests
 // =====================================================================
-
-test "win32 search toggle accelerators need Alt without Ctrl, Shift or AltGr" {
-    const alt: Mods = .{ .alt = true };
-    try std.testing.expectEqual(@as(?Role, .regex), toggleAccelerator('R', alt));
-    try std.testing.expectEqual(@as(?Role, .case_sensitive), toggleAccelerator('C', alt));
-    try std.testing.expectEqual(@as(?Role, .whole_word), toggleAccelerator('W', alt));
-    try std.testing.expectEqual(@as(?Role, null), toggleAccelerator('X', alt));
-    // No Alt, or Alt with Ctrl (AltGr reports as both), or Shift: not ours.
-    try std.testing.expectEqual(@as(?Role, null), toggleAccelerator('R', .{}));
-    try std.testing.expectEqual(@as(?Role, null), toggleAccelerator('R', .{ .ctrl = true }));
-    try std.testing.expectEqual(@as(?Role, null), toggleAccelerator('R', .{ .alt = true, .ctrl = true }));
-    try std.testing.expectEqual(@as(?Role, null), toggleAccelerator('R', .{ .alt = true, .shift = true }));
-    var keys: ToggleKeys = .{};
-    const r_scan = 0x13 << 16;
-    const c_scan = 0x2E << 16;
-    try std.testing.expectEqual(@as(?Role, .regex), keys.keyDown('R', alt, r_scan));
-    // The character is never read, so Cyrillic K on the R key is consumed
-    // just like Latin r: only the one character the press typed, though.
-    try std.testing.expect(keys.consumeChar(r_scan));
-    try std.testing.expect(!keys.consumeChar(r_scan));
-    _ = keys.keyDown('C', alt, c_scan);
-    try std.testing.expect(keys.consumeChar(c_scan));
-    _ = keys.keyDown('R', alt, r_scan);
-    try std.testing.expect(!keys.consumeChar(c_scan));
-    _ = keys.keyDown('R', .{ .alt = true, .ctrl = true }, r_scan);
-    try std.testing.expect(!keys.consumeChar(r_scan));
-    _ = keys.keyDown('R', alt, r_scan);
-    _ = keys.keyDown('X', alt, r_scan);
-    try std.testing.expect(!keys.consumeChar(r_scan));
-}
 
 /// A pane whose query `text` has reached the core.
 fn testSearching(alloc: Allocator, text: []const u8) !DockedSearch {
@@ -837,4 +846,163 @@ test "a close click sends .end with focus_terminal; ended alone hides without mo
     try std.testing.expectEqual(.hidden, ended.frame);
     try std.testing.expect(ended.core == null);
     try std.testing.expect(!search.view().open);
+}
+
+/// A key press as the procedures forward it.
+fn testKey(event: @FieldType(Input.Key, "event"), at: @FieldType(Input.Key, "at"), vk: usize, mods: Mods) Input {
+    return .{ .key = .{ .event = event, .at = at, .vk = vk, .mods = mods } };
+}
+
+test "the direction table: Enter, Down and F3 step down (core .previous), with Shift and Up they step up" {
+    var search = try testSearching(std.testing.allocator, "needlex");
+    defer search.deinit();
+    _ = try search.apply(.{ .core = .{ .total = .{ .total = 60 } } }, 0);
+    const shift: Mods = .{ .shift = true };
+    const Row = struct { vk: usize, mods: Mods = .{}, dir: NavigateSearch };
+    const edit_rows = [_]Row{
+        .{ .vk = c.VK_RETURN, .dir = .previous },
+        .{ .vk = c.VK_RETURN, .mods = shift, .dir = .next },
+        .{ .vk = c.VK_DOWN, .dir = .previous },
+        .{ .vk = c.VK_UP, .dir = .next },
+        .{ .vk = c.VK_F3, .dir = .previous },
+        .{ .vk = c.VK_F3, .mods = shift, .dir = .next },
+    };
+    for (edit_rows) |row| {
+        for ([_]@FieldType(Input.Key, "event"){ .down, .sys_down }) |event| {
+            const out = try search.apply(testKey(event, .edit, row.vk, row.mods), 0);
+            try std.testing.expect(out.handled);
+            try std.testing.expectEqual(row.dir, try testCommand(out, .navigate));
+        }
+    }
+    const button_rows = [_]Row{
+        .{ .vk = c.VK_F3, .dir = .previous },
+        .{ .vk = c.VK_F3, .mods = shift, .dir = .next },
+    };
+    for (button_rows) |row| {
+        try std.testing.expectEqual(row.dir, try testCommand(try search.apply(testKey(.down, .button, row.vk, row.mods), 0), .navigate));
+        const sys = try search.apply(testKey(.sys_down, .button, row.vk, row.mods), 0);
+        try std.testing.expect(!sys.handled);
+        try std.testing.expect(sys.core == null);
+    }
+}
+
+test "the first Enter after results asks the core for .previous, and an autorepeat Enter navigates again" {
+    var search = try testSearching(std.testing.allocator, "needlex");
+    defer search.deinit();
+    _ = try search.apply(.{ .core = .{ .total = .{ .total = 60 } } }, 0);
+    const first = try search.apply(testKey(.down, .edit, c.VK_RETURN, .{}), 0);
+    try std.testing.expectEqual(NavigateSearch.previous, try testCommand(first, .navigate));
+    // The core selects the newest match, which it numbers 1.
+    _ = try search.apply(.{ .core = .{ .selected = 1 } }, 0);
+    var held = testKey(.down, .edit, c.VK_RETURN, .{});
+    held.key.repeat = true;
+    try std.testing.expectEqual(NavigateSearch.previous, try testCommand(try search.apply(held, 0), .navigate));
+    var buf: [48]u8 = undefined;
+    try std.testing.expectEqualStrings("60/60", search.view().results.text(&buf));
+}
+
+test "Alt+R/C/W toggle once per press and swallow their WM_SYSCHAR by scan code; AltGr and Alt+Shift do nothing" {
+    var search = DockedSearch.init(std.testing.allocator);
+    defer search.deinit();
+    _ = try search.apply(.{ .open = "" }, 0);
+    const alt: Mods = .{ .alt = true };
+    const r_scan: u9 = 0x13;
+    const c_scan: u9 = 0x2E;
+
+    // A press toggles; its autorepeat is swallowed without toggling.
+    const press = try search.apply(.{ .key = .{ .event = .sys_down, .at = .edit, .vk = 'R', .mods = alt, .scan = r_scan } }, 0);
+    try std.testing.expect(press.handled);
+    try std.testing.expectEqual(@as(?Role, .regex), press.toggled);
+    const held = try search.apply(.{ .key = .{ .event = .sys_down, .at = .edit, .vk = 'R', .mods = alt, .scan = r_scan, .repeat = true } }, 0);
+    try std.testing.expect(held.handled);
+    try std.testing.expect(held.toggled == null);
+    try std.testing.expect(search.view().options.regex);
+
+    // The character is never read, so Cyrillic K on the R key is consumed
+    // just like Latin r: only the one character the press typed, though.
+    const char: Input.Key = .{ .event = .sys_char, .at = .edit, .scan = r_scan };
+    try std.testing.expect((try search.apply(.{ .key = char }, 0)).handled);
+    try std.testing.expect(!(try search.apply(.{ .key = char }, 0)).handled);
+
+    // A button pairs the same way; another scan code is not the press's.
+    _ = try search.apply(.{ .key = .{ .event = .sys_down, .at = .button, .vk = 'C', .mods = alt, .scan = c_scan } }, 0);
+    try std.testing.expect(search.view().options.case_sensitive);
+    try std.testing.expect(!(try search.apply(.{ .key = char }, 0)).handled);
+
+    // Another system key or a blur forgets the press.
+    _ = try search.apply(.{ .key = .{ .event = .sys_down, .at = .edit, .vk = 'W', .mods = alt, .scan = r_scan } }, 0);
+    _ = try search.apply(.{ .key = .{ .event = .sys_down, .at = .edit, .vk = 'X', .mods = alt, .scan = r_scan } }, 0);
+    try std.testing.expect(!(try search.apply(.{ .key = char }, 0)).handled);
+    _ = try search.apply(.{ .key = .{ .event = .sys_down, .at = .edit, .vk = 'W', .mods = alt, .scan = r_scan } }, 0);
+    _ = try search.apply(.{ .key = .{ .event = .blur, .at = .edit } }, 0);
+    try std.testing.expect(!(try search.apply(.{ .key = char }, 0)).handled);
+    try std.testing.expect(!search.view().options.whole_word);
+
+    // No Alt, AltGr (Ctrl+Alt) and Alt+Shift are not the accelerator.
+    for ([_]Mods{ .{}, .{ .ctrl = true }, .{ .alt = true, .ctrl = true }, .{ .alt = true, .shift = true } }) |mods| {
+        const out = try search.apply(.{ .key = .{ .event = .sys_down, .at = .edit, .vk = 'R', .mods = mods, .scan = r_scan } }, 0);
+        try std.testing.expect(!out.handled);
+        try std.testing.expect(!(try search.apply(.{ .key = char }, 0)).handled);
+    }
+    try std.testing.expect(search.view().options.regex);
+}
+
+test "Escape at the edit sends .end with focus_terminal" {
+    var search = try testSearching(std.testing.allocator, "needlex");
+    defer search.deinit();
+    for ([_]@FieldType(Input.Key, "event"){ .down, .sys_down }) |event| {
+        const out = try search.apply(testKey(event, .edit, c.VK_ESCAPE, .{}), 0);
+        try std.testing.expect(out.handled);
+        try std.testing.expect(out.focus_terminal);
+        try testCommand(out, .end);
+    }
+}
+
+test "Escape at a button with nothing open asks nothing of the core" {
+    var search = try testSearching(std.testing.allocator, "needlex");
+    defer search.deinit();
+    try testCommand(try search.apply(testKey(.down, .button, c.VK_ESCAPE, .{}), 0), .end);
+    _ = try search.apply(.{ .core = .ended }, 0);
+    const closed = try search.apply(testKey(.down, .button, c.VK_ESCAPE, .{}), 0);
+    try std.testing.expect(closed.handled);
+    try std.testing.expect(closed.core == null);
+    try std.testing.expect(!closed.focus_terminal);
+}
+
+test "a key that is not search's is not handled" {
+    var search = try testSearching(std.testing.allocator, "needlex");
+    defer search.deinit();
+    for ([_]Input{
+        testKey(.down, .edit, 'A', .{}),
+        testKey(.down, .edit, c.VK_LEFT, .{}),
+        testKey(.down, .button, c.VK_UP, .{}),
+        testKey(.down, .button, c.VK_RETURN, .{}),
+        testKey(.sys_down, .edit, 'Q', .{ .alt = true }),
+    }) |in| {
+        const out = try search.apply(in, 0);
+        try std.testing.expect(!out.handled);
+        try std.testing.expect(out.core == null);
+    }
+}
+
+test "PKG32 default F3 and Shift+F3 match the docked search F3 and Enter directions" {
+    var cfg = try @import("../../config.zig").Config.default(std.testing.allocator);
+    defer cfg.deinit();
+    const set = &cfg.keybind.set;
+
+    const f3 = set.get(.{ .key = .{ .physical = .f3 } }) orelse return error.F3Unbound;
+    const shift_f3 = set.get(.{ .key = .{ .physical = .f3 }, .mods = .{ .shift = true } }) orelse
+        return error.ShiftF3Unbound;
+    var search = try testSearching(std.testing.allocator, "needlex");
+    defer search.deinit();
+    _ = try search.apply(.{ .core = .{ .total = .{ .total = 60 } } }, 0);
+    const bound = [_]struct { dir: NavigateSearch, mods: Mods }{
+        .{ .dir = f3.value_ptr.leaf.action.navigate_search, .mods = .{} },
+        .{ .dir = shift_f3.value_ptr.leaf.action.navigate_search, .mods = .{ .shift = true } },
+    };
+    for (bound) |binding| {
+        try std.testing.expectEqual(binding.dir, try testCommand(try search.apply(testKey(.down, .edit, c.VK_F3, binding.mods), 0), .navigate));
+        try std.testing.expectEqual(binding.dir, try testCommand(try search.apply(testKey(.down, .edit, c.VK_RETURN, binding.mods), 0), .navigate));
+        try std.testing.expectEqual(binding.dir, try testCommand(try search.apply(testKey(.down, .button, c.VK_F3, binding.mods), 0), .navigate));
+    }
 }

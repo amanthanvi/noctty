@@ -190,8 +190,8 @@ const rootDisconnectThunk = win32.rootDisconnectThunk;
 const rootReleaseThunk = win32.rootReleaseThunk;
 const runUiActionOrLog = win32.runUiActionOrLog;
 const scheduleDeferredUiaDisconnect = win32.scheduleDeferredUiaDisconnect;
-const searchFocusStopAvailable = win32.searchFocusStopAvailable;
-const searchFocusStopHwnd = win32.searchFocusStopHwnd;
+const searchFocusStopAvailable = search_controls.searchFocusStopAvailable;
+const searchFocusStopHwnd = search_controls.searchFocusStopHwnd;
 const search_controls = @import("search_controls.zig");
 const selectedProfileSelectionNeedsChange = win32.selectedProfileSelectionNeedsChange;
 const setQuickTerminalRect = win32.setQuickTerminalRect;
@@ -2927,7 +2927,7 @@ pub const Host = struct {
         if (self.new_tab_hwnd == button) return labels.tabStripActionName(.new_tab);
         if (self.overflow_hwnd == button) return labels.tabStripActionName(.more_tabs);
         const role = self.searchBarButtonRole(button) orelse return null;
-        return labels.searchBarButtonName(role);
+        return search_controls.searchBarButtonName(role);
     }
 
     /// Name an icon-only chrome button in a tooltip under it. The icons
@@ -4462,9 +4462,7 @@ pub const Host = struct {
 
     pub fn dismissActiveSearch(self: *Host) bool {
         const surface = self.activeSurface() orelse return false;
-        if (!surface.docked_search.active and !surface.docked_search.view().open) return false;
-        _ = surface.dockedSearch(.{ .click = .close }) catch return false;
-        return true;
+        return surface.dockedSearch(.{ .key = .{ .event = .down, .at = .button, .vk = c.VK_ESCAPE } }) catch false;
     }
 
     fn toggleCommandPaletteFromButton(self: *Host) bool {
@@ -7560,11 +7558,11 @@ pub const Host = struct {
         const current = if (surface.search_bar_edit_hwnd != null and surface.search_bar_edit_hwnd.? == from)
             0
         else if (surface.searchBarButtonRole(from)) |role|
-            labels.searchFocusStopOfRole(role)
+            search_controls.searchFocusStopOfRole(role)
         else
             return false;
         const next = labels.nextFocusStop(
-            labels.search_focus_stop_count,
+            search_controls.search_focus_stop_count,
             current,
             reverse,
             @as(*const Surface, surface),

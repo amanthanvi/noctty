@@ -17,11 +17,7 @@ const c = @import("consts.zig");
 const docked_search = @import("docked_search.zig");
 const paint_text = @import("text.zig");
 
-const ThemeColors = win32_theme.ThemeColors;
 const HostOverlayMode = win32_theme.HostOverlayMode;
-const darkTheme = win32_theme.darkTheme;
-const adjustColor = win32_theme.adjustColor;
-const overlayAccentColor = win32_theme.overlayAccentColor;
 const rgb = win32_theme.rgb;
 const PaletteSnapshot = win32_palette.Snapshot;
 const RankedIndex = win32_palette.RankedIndex;
@@ -33,7 +29,6 @@ const rankPaletteEntry = win32_palette.rankEntry;
 const rankedIndicesForQuery = win32_palette.rankedForQuery;
 const RECT = win32_types.RECT;
 const ownedStringEquals = paint_text.ownedStringEquals;
-const LPCWSTR = win32_types.LPCWSTR;
 const WPARAM = usize;
 
 const default_metrics: win32_theme.ThemeMetrics = .{};
@@ -53,13 +48,6 @@ pub const PaletteCompletion = struct {
 };
 
 pub const command_palette_unknown_action = "Unknown Noctty action. Example: new_tab or toggle_fullscreen";
-
-const search_prev_label = std.unicode.utf8ToUtf16LeStringLiteral("Prev match");
-const search_next_label = std.unicode.utf8ToUtf16LeStringLiteral("Next match");
-const search_regex_label = std.unicode.utf8ToUtf16LeStringLiteral("Regex");
-const search_case_label = std.unicode.utf8ToUtf16LeStringLiteral("Case sensitive");
-const search_word_label = std.unicode.utf8ToUtf16LeStringLiteral("Whole word");
-const search_close_label = std.unicode.utf8ToUtf16LeStringLiteral("Close search");
 
 pub const host_banner_inspector_inactive = "Inspector hidden. Terminal view is active.";
 
@@ -116,12 +104,6 @@ pub const ChromeButtonKeyAction = enum {
 
 pub const FocusStep = enum { next, previous };
 
-const SearchButtonKeyAction = enum {
-    next,
-    previous,
-    dismiss,
-};
-
 pub const LaunchTargetButtonKeyAction = enum {
     previous,
     next,
@@ -151,20 +133,6 @@ const ResizeSplitFallbackDelta = struct {
     width: i32 = 0,
     height: i32 = 0,
 };
-
-pub const SearchBarResultsVisual = struct {
-    bg: u32,
-    border: u32,
-    fg: u32,
-};
-
-pub const SearchBarToolbarVisual = struct {
-    bg: u32,
-    border: u32,
-    separator: u32,
-};
-
-pub const SearchBarButtonRole = docked_search.Role;
 
 pub fn tabButtonKeyAction(vk: WPARAM, mods: KeyMods) ?TabButtonKeyAction {
     // Alt chords belong to the window's menu, not to the tab.
@@ -240,20 +208,6 @@ pub fn nextFocusStop(
     return null;
 }
 
-/// The docked search bar's keyboard stops in Tab order: the query, then each
-/// button in the order the bar lays them out.
-pub const search_focus_stop_count = 1 + std.meta.fields(SearchBarButtonRole).len;
-
-pub fn searchFocusStopOfRole(role: SearchBarButtonRole) usize {
-    return 1 + @intFromEnum(role);
-}
-
-/// The button at a search stop; null for the query (stop 0) or past the end.
-pub fn searchFocusStopRole(stop: usize) ?SearchBarButtonRole {
-    if (stop == 0 or stop >= search_focus_stop_count) return null;
-    return @enumFromInt(stop - 1);
-}
-
 /// After a tab's context menu closes, keyboard focus goes back to the strip
 /// when the menu came from the keyboard, unless a command opened an overlay
 /// (rename, a close that asks first) that owns the keyboard now.
@@ -276,37 +230,6 @@ pub fn moveTabAmountToEdge(total: usize, current: usize, toward_start: bool) isi
     if (total <= 1 or current >= total) return 0;
     if (toward_start) return -@as(isize, @intCast(current));
     return @as(isize, @intCast((total - 1) - current));
-}
-
-pub fn searchButtonKeyAction(vk: WPARAM, shift_pressed: bool) ?SearchButtonKeyAction {
-    return switch (vk) {
-        c.VK_F3 => if (shift_pressed) .previous else .next,
-        c.VK_ESCAPE => .dismiss,
-        else => null,
-    };
-}
-
-// Core scrollback search indexes matches newest-first (`.previous` =>
-// newer/down, `.next` => older/up). The docked search bar is laid out as
-// visible up/down navigation, so visible previous/up is core `.next`.
-pub fn dockedSearchCoreDirectionFromKeyAction(action: SearchButtonKeyAction) ?input.Binding.Action.NavigateSearch {
-    return switch (action) {
-        .previous => .next,
-        .next => .previous,
-        .dismiss => null,
-    };
-}
-
-pub fn dockedSearchEnterDirection(shift_pressed: bool) input.Binding.Action.NavigateSearch {
-    return dockedSearchArrowDirection(if (shift_pressed) c.VK_UP else c.VK_DOWN).?;
-}
-
-pub fn dockedSearchArrowDirection(vk: WPARAM) ?input.Binding.Action.NavigateSearch {
-    return switch (vk) {
-        c.VK_UP => .next,
-        c.VK_DOWN => .previous,
-        else => null,
-    };
 }
 
 /// The banner for the last tab of a window being closed. It names the key bound
@@ -1019,127 +942,6 @@ pub fn buildSearchOverlayLabel(
     }
     if (total) |count| return try std.fmt.allocPrint(alloc, "Find {d}", .{count});
     return try alloc.dupe(u8, "Find");
-}
-
-pub fn searchBarButtonCommandId(role: SearchBarButtonRole) usize {
-    return switch (role) {
-        .prev => c.SEARCH_PREV_ID,
-        .next => c.SEARCH_NEXT_ID,
-        .regex => c.SEARCH_REGEX_ID,
-        .case_sensitive => c.SEARCH_CASE_ID,
-        .whole_word => c.SEARCH_WORD_ID,
-        .close => c.SEARCH_CLOSE_ID,
-    };
-}
-
-pub fn searchBarButtonLabel(role: SearchBarButtonRole) LPCWSTR {
-    return switch (role) {
-        .prev => search_prev_label,
-        .next => search_next_label,
-        .regex => search_regex_label,
-        .case_sensitive => search_case_label,
-        .whole_word => search_word_label,
-        .close => search_close_label,
-    };
-}
-
-/// What a search bar button does, in words: its UIA name, and the hover
-/// tooltip that spells out its icon, so those two always agree. The window
-/// text, which a wide button draws as its label and MSAA reports as its
-/// name, comes from `searchBarButtonLabel` instead.
-pub fn searchBarButtonName(role: SearchBarButtonRole) []const u8 {
-    return switch (role) {
-        .prev => "Previous match",
-        .next => "Next match",
-        .regex => "Regular expression",
-        .case_sensitive => "Case sensitive",
-        .whole_word => "Whole word",
-        .close => "Close search",
-    };
-}
-
-pub fn searchBarButtonShowsLabel(role: SearchBarButtonRole, button_width: i32) bool {
-    _ = role;
-    _ = button_width;
-    return false;
-}
-
-pub fn searchBarResultsVisual(
-    theme: *const ThemeColors,
-    tone: docked_search.Results.Tone,
-) SearchBarResultsVisual {
-    const accent = overlayAccentColor(.search, theme.is_dark);
-    return switch (tone) {
-        .pending => .{
-            .bg = if (theme.is_dark)
-                adjustColor(theme.overlay_bg, 8, 10, 10)
-            else
-                adjustColor(theme.overlay_bg, -6, -4, -2),
-            .border = accent,
-            .fg = theme.overlay_label_fg,
-        },
-        .no_match => .{
-            .bg = if (theme.is_dark)
-                rgb(48, 28, 30)
-            else
-                rgb(252, 236, 236),
-            .border = theme.error_fg,
-            .fg = theme.error_fg,
-        },
-        .found => .{
-            .bg = if (theme.is_dark)
-                adjustColor(theme.edit_frame_bg, 10, 14, 10)
-            else
-                adjustColor(theme.edit_frame_bg, -6, -2, -4),
-            .border = accent,
-            .fg = theme.overlay_label_fg,
-        },
-    };
-}
-
-pub fn searchBarToolbarVisual(theme: *const ThemeColors) SearchBarToolbarVisual {
-    return .{
-        .bg = if (theme.is_dark)
-            adjustColor(theme.edit_frame_bg, 6, 8, 10)
-        else
-            adjustColor(theme.edit_frame_bg, -4, -2, -2),
-        .border = if (theme.is_dark)
-            adjustColor(theme.overlay_border, 18, 18, 20)
-        else
-            adjustColor(theme.overlay_border, -18, -18, -18),
-        .separator = if (theme.is_dark)
-            adjustColor(theme.overlay_border, 30, 30, 34)
-        else
-            adjustColor(theme.overlay_border, -26, -26, -26),
-    };
-}
-
-pub fn searchBarFrameBg(theme: *const ThemeColors) u32 {
-    return if (theme.is_dark)
-        adjustColor(theme.overlay_bg, 3, 3, 5)
-    else
-        adjustColor(theme.overlay_bg, -2, -2, -1);
-}
-
-pub fn searchBarFrameBorder(theme: *const ThemeColors) u32 {
-    return if (theme.is_dark)
-        adjustColor(theme.overlay_border, 10, 10, 12)
-    else
-        adjustColor(theme.overlay_border, -14, -14, -14);
-}
-
-pub fn searchBarBottomLine(theme: *const ThemeColors) u32 {
-    return if (theme.is_dark)
-        adjustColor(theme.overlay_border, -10, -10, -8)
-    else
-        adjustColor(theme.overlay_border, 10, 10, 10);
-}
-
-pub fn searchBarButtonParentBg(theme: *const ThemeColors, role: SearchBarButtonRole) u32 {
-    return switch (role) {
-        .close => theme.overlay_bg,
-        else => searchBarToolbarVisual(theme).bg,
-    };
 }
 
 pub fn buildTabOverviewOverlayLabel(
@@ -3116,26 +2918,6 @@ test "win32 buildSearchOverlayLabel reflects match counts" {
     try std.testing.expectEqualStrings("Find", idle);
 }
 
-test "win32 searchBarResultsVisual marks no-match state with error colors" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    const theme = darkTheme();
-    const visual = searchBarResultsVisual(&theme, .no_match);
-    try std.testing.expectEqual(theme.error_fg, visual.border);
-    try std.testing.expectEqual(theme.error_fg, visual.fg);
-}
-
-test "win32 searchBarButtonShowsLabel keeps docked search buttons icon-only" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    try std.testing.expect(!searchBarButtonShowsLabel(.prev, 80));
-    try std.testing.expect(!searchBarButtonShowsLabel(.close, 80));
-    try std.testing.expect(!searchBarButtonShowsLabel(.regex, 40));
-    try std.testing.expect(!searchBarButtonShowsLabel(.regex, 64));
-    try std.testing.expect(!searchBarButtonShowsLabel(.case_sensitive, 72));
-    try std.testing.expect(!searchBarButtonShowsLabel(.whole_word, 80));
-}
-
 test "win32 buildTabOverviewOverlayLabel reflects current host tab" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
@@ -3327,24 +3109,6 @@ test "win32 confirm preview replaces bidirectional formatting characters" {
         defer one.deinit(std.testing.allocator);
         try std.testing.expectEqualStrings(buf[0..len], one.text);
     }
-}
-
-test "win32 searchBarButtonName names every search button distinctly" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    // Each button's tooltip and UIA name come from here, so every role needs
-    // its own non-empty name; two icons sharing a name would defeat the
-    // tooltip that exists to tell them apart.
-    const roles = std.enums.values(SearchBarButtonRole);
-    for (roles, 0..) |role, i| {
-        const name = searchBarButtonName(role);
-        try std.testing.expect(name.len > 0);
-        for (roles[i + 1 ..]) |other| {
-            try std.testing.expect(!std.mem.eql(u8, name, searchBarButtonName(other)));
-        }
-    }
-    try std.testing.expectEqualStrings("Previous match", searchBarButtonName(.prev));
-    try std.testing.expectEqualStrings("Regular expression", searchBarButtonName(.regex));
 }
 
 test "win32 overlayEmptySubmitDismisses spares prompts with no query field" {
@@ -3912,19 +3676,6 @@ test "win32 focus stops step in order, wrap, and skip hidden stops" {
     try std.testing.expectEqual(@as(?usize, null), nextFocusStop(4, 9, false, all, Stops.available));
 }
 
-test "win32 docked search stops run query, prev, next, regex, case, word, close" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    try std.testing.expectEqual(@as(usize, 7), search_focus_stop_count);
-    try std.testing.expectEqual(@as(?SearchBarButtonRole, null), searchFocusStopRole(0));
-    const order = [_]SearchBarButtonRole{ .prev, .next, .regex, .case_sensitive, .whole_word, .close };
-    for (order, 1..) |role, stop| {
-        try std.testing.expectEqual(@as(?SearchBarButtonRole, role), searchFocusStopRole(stop));
-        try std.testing.expectEqual(stop, searchFocusStopOfRole(role));
-    }
-    try std.testing.expectEqual(@as(?SearchBarButtonRole, null), searchFocusStopRole(search_focus_stop_count));
-}
-
 test "win32 a tab context menu hands focus back to the strip only from the keyboard and without an overlay" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
@@ -3947,56 +3698,6 @@ test "win32 moveTabAmountToEdge computes direct host reorder delta" {
     try std.testing.expectEqual(@as(isize, 1), moveTabAmountToEdge(4, 2, false));
     try std.testing.expectEqual(@as(isize, 0), moveTabAmountToEdge(4, 0, true));
     try std.testing.expectEqual(@as(isize, 0), moveTabAmountToEdge(4, 3, false));
-}
-
-test "win32 searchButtonKeyAction maps focused search button keys" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    try std.testing.expectEqual(SearchButtonKeyAction.next, searchButtonKeyAction(c.VK_F3, false).?);
-    try std.testing.expectEqual(SearchButtonKeyAction.previous, searchButtonKeyAction(c.VK_F3, true).?);
-    try std.testing.expectEqual(SearchButtonKeyAction.dismiss, searchButtonKeyAction(c.VK_ESCAPE, false).?);
-    try std.testing.expect(searchButtonKeyAction(c.VK_RETURN, false) == null);
-}
-
-test "win32 docked search key actions preserve semantic next and previous navigation" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    try std.testing.expectEqual(
-        input.Binding.Action.NavigateSearch.previous,
-        dockedSearchCoreDirectionFromKeyAction(.next).?,
-    );
-    try std.testing.expectEqual(
-        input.Binding.Action.NavigateSearch.next,
-        dockedSearchCoreDirectionFromKeyAction(.previous).?,
-    );
-    try std.testing.expect(dockedSearchCoreDirectionFromKeyAction(.dismiss) == null);
-}
-
-test "win32 docked search Enter and Shift+Enter follow the arrow-key contract" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    try std.testing.expectEqual(
-        dockedSearchArrowDirection(c.VK_DOWN).?,
-        dockedSearchEnterDirection(false),
-    );
-    try std.testing.expectEqual(
-        dockedSearchArrowDirection(c.VK_UP).?,
-        dockedSearchEnterDirection(true),
-    );
-}
-
-test "win32 docked search Up and Down keys follow the visible button contract" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    try std.testing.expectEqual(
-        input.Binding.Action.NavigateSearch.next,
-        dockedSearchArrowDirection(c.VK_UP).?,
-    );
-    try std.testing.expectEqual(
-        input.Binding.Action.NavigateSearch.previous,
-        dockedSearchArrowDirection(c.VK_DOWN).?,
-    );
-    try std.testing.expect(dockedSearchArrowDirection(c.VK_LEFT) == null);
 }
 
 test "win32 command palette toggle binding is recognized inside action chains" {
@@ -4509,26 +4210,4 @@ test "PKG32 tabClosedMessage falls back for layout-dependent physical and text o
     try set.put(alloc, .{ .key = .{ .unicode = 'İ' }, .mods = mods }, .ignore);
     try std.testing.expectEqual(input.Binding.Action.ignore, set.getEvent(event).?.value_ptr.leaf.action);
     try std.testing.expectEqualStrings(fallback, tabClosedMessage(&set, .{}, &buf));
-}
-
-test "PKG32 default F3 and Shift+F3 match the docked search F3 and Enter directions" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    var cfg = try @import("../../config.zig").Config.default(std.testing.allocator);
-    defer cfg.deinit();
-    const set = &cfg.keybind.set;
-
-    const f3 = set.get(.{ .key = .{ .physical = .f3 } }) orelse return error.F3Unbound;
-    const shift_f3 = set.get(.{ .key = .{ .physical = .f3 }, .mods = .{ .shift = true } }) orelse
-        return error.ShiftF3Unbound;
-    try std.testing.expectEqual(dockedSearchEnterDirection(false), f3.value_ptr.leaf.action.navigate_search);
-    try std.testing.expectEqual(dockedSearchEnterDirection(true), shift_f3.value_ptr.leaf.action.navigate_search);
-    try std.testing.expectEqual(
-        f3.value_ptr.leaf.action.navigate_search,
-        dockedSearchCoreDirectionFromKeyAction(searchButtonKeyAction(c.VK_F3, false).?).?,
-    );
-    try std.testing.expectEqual(
-        shift_f3.value_ptr.leaf.action.navigate_search,
-        dockedSearchCoreDirectionFromKeyAction(searchButtonKeyAction(c.VK_F3, true).?).?,
-    );
 }

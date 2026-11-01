@@ -12,14 +12,12 @@ const win32 = @import("../win32.zig");
 const budget = .{
     // Entries in each `pub const *_runtime` bag on the facade.
     .bags = .{
-        .chrome_scene_runtime = 65,
+        .chrome_scene_runtime = 62,
         .chrome_scene_test_runtime = 4,
         .overlay_session_runtime = 45,
         .overlay_session_test_runtime = 5,
         .palette_controller_runtime = 44,
         .palette_controller_test_runtime = 7,
-        .search_controls_runtime = 61,
-        .search_controls_test_runtime = 4,
         .window_state_runtime = 26,
         .window_state_test_runtime = 22,
         .host_test_runtime = 2,
@@ -30,9 +28,9 @@ const budget = .{
         .test_support_runtime = 52,
     },
     // The facade's pub declarations: what the files that import it can reach.
-    .facade_pub_decls = 539,
+    .facade_pub_decls = 535,
     // Root declarations of win32.zig whose value is a field access (`a.b`).
-    .facade_aliases = 303,
+    .facade_aliases = 278,
     // Fields of win32.App named `test_*`.
     .app_test_hooks = 10,
 };
@@ -51,7 +49,7 @@ const leaves = .{
         .file = "docked_search.zig",
         .module = @import("docked_search.zig"),
         .source = @embedFile("docked_search.zig"),
-        .pub_decls = 12,
+        .pub_decls = 10,
     },
 };
 
