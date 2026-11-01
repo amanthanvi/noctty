@@ -932,18 +932,6 @@ pub fn buildTabButtonLabel(
     );
 }
 
-pub fn buildSearchOverlayLabel(
-    alloc: Allocator,
-    total: ?usize,
-    selected: ?usize,
-) ![]u8 {
-    if (selected) |current| {
-        if (total) |count| return try std.fmt.allocPrint(alloc, "Find {d}/{d}", .{ current, count });
-    }
-    if (total) |count| return try std.fmt.allocPrint(alloc, "Find {d}", .{count});
-    return try alloc.dupe(u8, "Find");
-}
-
 pub fn buildTabOverviewOverlayLabel(
     alloc: Allocator,
     current_index: usize,
@@ -1400,8 +1388,6 @@ pub fn buildOverlayPaintLabelText(
     alloc: Allocator,
     mode: HostOverlayMode,
     input_text: []const u8,
-    search_total: ?usize,
-    search_selected: ?usize,
     host_status: HostTabStatus,
     palette_presentation: PalettePresentation,
     confirm: ?ConfirmText,
@@ -1416,7 +1402,7 @@ pub fn buildOverlayPaintLabelText(
             palette_presentation,
         ),
         .profile => try alloc.dupe(u8, "Profile"),
-        .search => try buildSearchOverlayLabel(alloc, search_total, search_selected),
+        .search => try alloc.dupe(u8, "Find"),
         .tab_overview => try buildTabOverviewOverlayLabel(alloc, host_status.index, host_status.total),
         // Confirm overlays take their prompt title from the payload.
         // The placeholder only appears when the payload has already
@@ -1434,9 +1420,6 @@ pub fn buildOverlayFeedbackText(
     banner_text: ?[]const u8,
     mode: HostOverlayMode,
     input_text: []const u8,
-    active_search_needle: ?[]const u8,
-    search_total: ?usize,
-    search_selected: ?usize,
     host_status: HostTabStatus,
     pane_count: usize,
     palette: PaletteSnapshot,
@@ -1464,9 +1447,6 @@ pub fn buildOverlayFeedbackText(
         alloc,
         mode,
         input_text,
-        active_search_needle,
-        search_total,
-        search_selected,
         host_status,
         pane_count,
         palette,
@@ -1494,9 +1474,6 @@ pub fn buildConfirmBodyText(
         alloc,
         .confirm,
         "",
-        null,
-        null,
-        null,
         .{},
         1,
         .{ .commands = &.{}, .cvals = &.{} },
@@ -1509,9 +1486,6 @@ pub fn buildOverlayAcceptLabel(
     alloc: Allocator,
     mode: HostOverlayMode,
     input_text: []const u8,
-    active_search_needle: ?[]const u8,
-    search_total: ?usize,
-    search_selected: ?usize,
     palette_presentation: PalettePresentation,
 ) ![]u8 {
     return switch (mode) {
@@ -1525,16 +1499,10 @@ pub fn buildOverlayAcceptLabel(
             break :blk try alloc.dupe(u8, "Check");
         },
         .profile => try alloc.dupe(u8, "Open"),
-        .search => blk: {
-            if (input_text.len == 0) break :blk try alloc.dupe(u8, "Close");
-            if (active_search_needle) |needle| {
-                if (std.mem.eql(u8, needle, input_text) and search_selected != null and search_total != null) {
-                    break :blk try alloc.dupe(u8, "Next");
-                }
-            }
-            if (search_total != null) break :blk try alloc.dupe(u8, "Find");
-            break :blk try alloc.dupe(u8, "Find");
-        },
+        .search => if (input_text.len == 0)
+            try alloc.dupe(u8, "Close")
+        else
+            try alloc.dupe(u8, "Find"),
         .surface_title, .tab_title => if (input_text.len == 0)
             try alloc.dupe(u8, "Close")
         else
@@ -1556,9 +1524,6 @@ pub fn buildOverlayHintText(
     alloc: Allocator,
     mode: HostOverlayMode,
     input_text: []const u8,
-    active_search_needle: ?[]const u8,
-    search_total: ?usize,
-    search_selected: ?usize,
     host_status: HostTabStatus,
     pane_count: usize,
     palette: PaletteSnapshot,
@@ -1572,35 +1537,10 @@ pub fn buildOverlayHintText(
             break :blk try alloc.dupe(u8, "No matching action. Try: new_tab, start_search, reload_config");
         },
         .profile => try alloc.dupe(u8, "Choose a profile by number or name. Enter opens a new tab."),
-        .search => blk: {
-            if (input_text.len == 0) break :blk try alloc.dupe(u8, "Type to search live. Enter repeats the current match. Escape closes.");
-            if (search_selected) |selected| {
-                if (search_total) |total| {
-                    if (active_search_needle) |needle| {
-                        if (std.mem.eql(u8, needle, input_text)) {
-                            break :blk try std.fmt.allocPrint(
-                                alloc,
-                                "Live matches {d}/{d}. Enter jumps to the next match. Escape closes.",
-                                .{ selected, total },
-                            );
-                        }
-                    }
-                    break :blk try std.fmt.allocPrint(
-                        alloc,
-                        "Live matches {d}/{d}. Enter keeps this needle active.",
-                        .{ selected, total },
-                    );
-                }
-            }
-            if (search_total) |total| {
-                break :blk try std.fmt.allocPrint(
-                    alloc,
-                    "Live matches {d}. Enter keeps this needle active.",
-                    .{total},
-                );
-            }
-            break :blk try alloc.dupe(u8, "No matches yet. Keep typing to search live.");
-        },
+        .search => if (input_text.len == 0)
+            try alloc.dupe(u8, "Type to search live. Enter repeats the current match. Escape closes.")
+        else
+            try alloc.dupe(u8, "No matches yet. Keep typing to search live."),
         .surface_title => try alloc.dupe(u8, "Apply a window title override for this host. Submit empty text to clear it."),
         .tab_title => blk: {
             if (pane_count > 1) {
@@ -2902,22 +2842,6 @@ test "win32 buildProfileChromeBadgeText adds profile glyph treatment" {
     try std.testing.expectEqualStrings("WSL <>", wsl);
 }
 
-test "win32 buildSearchOverlayLabel reflects match counts" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    const active = try buildSearchOverlayLabel(std.testing.allocator, 8, 2);
-    defer std.testing.allocator.free(active);
-    try std.testing.expectEqualStrings("Find 2/8", active);
-
-    const passive = try buildSearchOverlayLabel(std.testing.allocator, 5, null);
-    defer std.testing.allocator.free(passive);
-    try std.testing.expectEqualStrings("Find 5", passive);
-
-    const idle = try buildSearchOverlayLabel(std.testing.allocator, null, null);
-    defer std.testing.allocator.free(idle);
-    try std.testing.expectEqualStrings("Find", idle);
-}
-
 test "win32 buildTabOverviewOverlayLabel reflects current host tab" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
@@ -2937,8 +2861,6 @@ test "win32 buildOverlayPaintLabelText reflects live overlay mode" {
         std.testing.allocator,
         .command_palette,
         "toggle_",
-        null,
-        null,
         .{},
         .{ .match_count = 4, .title = "Toggle fullscreen", .subtitle = "Fullscreen", .available = true },
         null,
@@ -2950,21 +2872,17 @@ test "win32 buildOverlayPaintLabelText reflects live overlay mode" {
         std.testing.allocator,
         .search,
         "",
-        8,
-        2,
         .{},
         .{},
         null,
     );
     defer std.testing.allocator.free(search);
-    try std.testing.expectEqualStrings("Find 2/8", search);
+    try std.testing.expectEqualStrings("Find", search);
 
     const title = try buildOverlayPaintLabelText(
         std.testing.allocator,
         .surface_title,
         "",
-        null,
-        null,
         .{},
         .{},
         null,
@@ -3273,8 +3191,6 @@ test "win32 confirm overlay paints its payload title and body" {
         std.testing.allocator,
         .confirm,
         "",
-        null,
-        null,
         .{},
         .{},
         confirm,
@@ -3288,9 +3204,6 @@ test "win32 confirm overlay paints its payload title and body" {
         null,
         .confirm,
         "",
-        null,
-        null,
-        null,
         .{},
         1,
         snap,
@@ -3314,9 +3227,6 @@ test "win32 confirm overlay states the payload size next to the body" {
         null,
         .confirm,
         "",
-        null,
-        null,
-        null,
         .{},
         1,
         snap,
@@ -3350,8 +3260,6 @@ test "win32 confirm overlay distinguishes the three prompts" {
             std.testing.allocator,
             .confirm,
             "",
-            null,
-            null,
             .{},
             .{},
             prompt,
@@ -3374,8 +3282,6 @@ test "win32 confirm overlay falls back once its payload is dropped" {
         std.testing.allocator,
         .confirm,
         "",
-        null,
-        null,
         .{},
         .{},
         null,
@@ -3387,9 +3293,6 @@ test "win32 confirm overlay falls back once its payload is dropped" {
         std.testing.allocator,
         .confirm,
         "",
-        null,
-        null,
-        null,
         .{},
         1,
         snap,
@@ -3436,9 +3339,6 @@ test "win32 confirm body text is the one the overlay feedback lane draws" {
             case.text,
             .confirm,
             "",
-            null,
-            null,
-            null,
             .{},
             1,
             snap,
@@ -3483,9 +3383,6 @@ test "win32 confirm overlay keeps banner precedence over the payload body" {
         "Something went wrong",
         .confirm,
         "",
-        null,
-        null,
-        null,
         .{},
         1,
         snap,
@@ -3509,9 +3406,6 @@ test "win32 buildOverlayFeedbackText prefers inline banner state" {
         "Try: new_tab",
         .command_palette,
         "",
-        null,
-        null,
-        null,
         .{},
         1,
         snap,
@@ -3528,9 +3422,6 @@ test "win32 buildOverlayFeedbackText prefers inline banner state" {
         command_palette_unknown_action,
         .command_palette,
         "",
-        null,
-        null,
-        null,
         .{},
         1,
         snap,
@@ -3550,9 +3441,6 @@ test "win32 buildOverlayFeedbackText prefers inline banner state" {
         null,
         .search,
         "needle",
-        "needle",
-        8,
-        2,
         .{},
         1,
         snap,
@@ -3561,7 +3449,8 @@ test "win32 buildOverlayFeedbackText prefers inline banner state" {
         null,
     );
     defer std.testing.allocator.free(fallback);
-    try std.testing.expect(std.mem.indexOf(u8, fallback, "next match") != null);
+    // With no banner the line is the mode's own hint.
+    try std.testing.expectEqualStrings("No matches yet. Keep typing to search live.", fallback);
 }
 
 test "win32 nextTabOverviewSelection wraps and clamps" {
@@ -3858,7 +3747,7 @@ test "win32 buildInspectorPanelHintText reflects live inspector scope" {
 test "win32 buildOverlayAcceptLabel reflects overlay action state" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
-    const palette_idle = try buildOverlayAcceptLabel(std.testing.allocator, .command_palette, "", null, null, null, .{});
+    const palette_idle = try buildOverlayAcceptLabel(std.testing.allocator, .command_palette, "", .{});
     defer std.testing.allocator.free(palette_idle);
     try std.testing.expectEqualStrings("Close", palette_idle);
 
@@ -3866,9 +3755,6 @@ test "win32 buildOverlayAcceptLabel reflects overlay action state" {
         std.testing.allocator,
         .command_palette,
         "new_tab",
-        null,
-        null,
-        null,
         .{ .match_count = 1, .title = "New tab", .subtitle = "Action", .available = true },
     );
     defer std.testing.allocator.free(palette_run);
@@ -3878,9 +3764,6 @@ test "win32 buildOverlayAcceptLabel reflects overlay action state" {
         std.testing.allocator,
         .command_palette,
         "0x96f",
-        null,
-        null,
-        null,
         .{ .match_count = 1, .title = "0x96f", .subtitle = "Bundled theme", .available = true },
     );
     defer std.testing.allocator.free(palette_matches);
@@ -3890,27 +3773,20 @@ test "win32 buildOverlayAcceptLabel reflects overlay action state" {
         std.testing.allocator,
         .command_palette,
         "0x96f",
-        null,
-        null,
-        null,
         .{ .match_count = 1, .title = "0x96f", .subtitle = "Bundled theme" },
     );
     defer std.testing.allocator.free(palette_hidden);
     try std.testing.expectEqualStrings("Resize", palette_hidden);
 
-    const search_next = try buildOverlayAcceptLabel(std.testing.allocator, .search, "needle", "needle", 8, 2, .{});
-    defer std.testing.allocator.free(search_next);
-    try std.testing.expectEqualStrings("Next", search_next);
-
-    const search_find = try buildOverlayAcceptLabel(std.testing.allocator, .search, "other", "needle", 8, 2, .{});
+    const search_find = try buildOverlayAcceptLabel(std.testing.allocator, .search, "other", .{});
     defer std.testing.allocator.free(search_find);
     try std.testing.expectEqualStrings("Find", search_find);
 
-    const tab_go = try buildOverlayAcceptLabel(std.testing.allocator, .tab_overview, "2", null, null, null, .{});
+    const tab_go = try buildOverlayAcceptLabel(std.testing.allocator, .tab_overview, "2", .{});
     defer std.testing.allocator.free(tab_go);
     try std.testing.expectEqualStrings("Go", tab_go);
 
-    const title_apply = try buildOverlayAcceptLabel(std.testing.allocator, .surface_title, "logs", null, null, null, .{});
+    const title_apply = try buildOverlayAcceptLabel(std.testing.allocator, .surface_title, "logs", .{});
     defer std.testing.allocator.free(title_apply);
     try std.testing.expectEqualStrings("Apply", title_apply);
 }
@@ -3925,9 +3801,6 @@ test "win32 buildOverlayHintText reflects live overlay guidance" {
         std.testing.allocator,
         .command_palette,
         "reload_",
-        null,
-        null,
-        null,
         .{},
         1,
         snap,
@@ -3937,30 +3810,23 @@ test "win32 buildOverlayHintText reflects live overlay guidance" {
     defer std.testing.allocator.free(command_unique);
     try std.testing.expect(std.mem.indexOf(u8, command_unique, "reload_config") != null);
 
-    const search_next = try buildOverlayHintText(
+    const search_typed = try buildOverlayHintText(
         std.testing.allocator,
         .search,
         "needle",
-        "needle",
-        8,
-        2,
         .{},
         1,
         snap,
         empty_mru,
         null,
     );
-    defer std.testing.allocator.free(search_next);
-    try std.testing.expect(std.mem.indexOf(u8, search_next, "2/8") != null);
-    try std.testing.expect(std.mem.indexOf(u8, search_next, "next match") != null);
+    defer std.testing.allocator.free(search_typed);
+    try std.testing.expectEqualStrings("No matches yet. Keep typing to search live.", search_typed);
 
     const tab_invalid = try buildOverlayHintText(
         std.testing.allocator,
         .tab_overview,
         "8",
-        null,
-        null,
-        null,
         .{ .index = 1, .total = 4 },
         2,
         snap,
@@ -3974,9 +3840,6 @@ test "win32 buildOverlayHintText reflects live overlay guidance" {
         std.testing.allocator,
         .tab_title,
         "logs",
-        null,
-        null,
-        null,
         .{ .index = 0, .total = 3 },
         2,
         snap,

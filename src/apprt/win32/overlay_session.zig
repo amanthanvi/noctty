@@ -1216,9 +1216,6 @@ pub const HostControls = struct {
             alloc,
             self.overlay_mode,
             text,
-            null,
-            null,
-            null,
             self.palettePresentation(),
         );
         defer alloc.free(accept);
@@ -1357,9 +1354,6 @@ pub const HostControls = struct {
             alloc,
             self.overlay_mode,
             text,
-            null,
-            null,
-            null,
             if (surface) |value| self.app.hostTabStatus(value) else .{},
             if (self.activeTab()) |tab| tab.leafCount() else 1,
             self.paletteSnapshot(),

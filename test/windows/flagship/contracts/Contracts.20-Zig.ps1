@@ -48,9 +48,10 @@ foreach ($win32TestModuleRoot in $win32TestModuleRoots) {
 # win32_search_bar.zig and labels.zig, rewritten against its interface; its
 # floor is every one of them. labels.zig went from 113 to 104 when its
 # docked-search rules moved there and its search chrome (button words,
-# colours, focus stops) to search_controls.zig.
+# colours, focus stops) to search_controls.zig, and to 103 when the search
+# overlay's count label went with the search arguments no caller passed.
 $movedWin32TestFloors = [ordered]@{
-    'labels.zig' = 104
+    'labels.zig' = 103
     'input.zig' = 24
     'gl_startup.zig' = 4
     'render_trace.zig' = 3
