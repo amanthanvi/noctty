@@ -347,7 +347,9 @@ that govern each symbol you change, or that none does.
   `field_model.effectiveSettingValue`), Settings search (`formItems`,
   `runSearch`, `suspendViewportRedraw`, `keepFocusShown`, `searchFinds`,
   `revealControl`, `showKeyboardCues`, `placeDiscardButton`, `SearchQuery`),
-  and the save path (`settingsSaveAndReload`, `patchOrAppendEdits`, save
+  where each shown value comes from (`config.origin`,
+  `win32_settings_reference.savedOrigin`), the opacity trackbar and the number
+  up-downs, and the save path (`settingsSaveAndReload`, `patchOrAppendEdits`, save
   target, masked values).
 - [accessibility.md](docs/agents/log/accessibility.md): new widgets and UI
   events (adding a native widget, or changing its focus, children or

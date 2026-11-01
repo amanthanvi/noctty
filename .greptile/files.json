@@ -244,6 +244,8 @@
       "scope": [
         "src/apprt/win32_settings*.zig",
         "src/apprt/win32/save_target.zig",
+        "src/config/Config.zig",
+        "src/config/origin.zig",
         "src/os/local_path.zig",
         "test/windows/settings-uia-*.ps1",
         "src/apprt/win32.zig",
