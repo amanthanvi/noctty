@@ -3,7 +3,8 @@
 Portable, hidden-desktop integration regression for the docked search bar
 (PKG-41): which match the first Enter selects and how Enter, F3 and the arrow
 keys walk the matches, the "Invalid pattern" label for a regex that does not
-compile, and the narrow-pane collapse that drops the toggles and then
+compile, that Escape closes the bar and start_search reopens it on the same
+query, and the narrow-pane collapse that drops the toggles and then
 previous/next instead of overlapping them. Run with -Bin <source bin
 directory> -Run <new evidence directory>. The run directory must not already
 exist.
@@ -248,6 +249,28 @@ try {
         $literal=Wait-Label $h { param($t) $t -ne 'Invalid pattern' }
         Check 'a toggle clears the mark: the literal text is searched' ($literal -eq 'No matches') 'No matches' $literal
         $script:samples.Add(@{Name='invalid pattern labels'; Labels=@($invalid,$valid,$none,$again,$literal)})
+    } finally { Close-Case $case }
+
+    # Escape closes the bar; start_search opens it again on the same query
+    # and searches it again.
+    $case=Launch-Case 'reopen'
+    try {
+        $h=$case.Host
+        Start-Sleep -Milliseconds 4000
+        Open-Search $h
+        [Ds]::Chars([Ds]::Child($h,$Id.Edit),'needlex')
+        $typed=Wait-Label $h { param($t) $t -match '^\d+$' }
+        Press-Edit $h 0x1B
+        [void](Wait-Until { -not [Ds]::Visible([Ds]::Child($h,$Id.Edit)) } 4)
+        $closed=-not [Ds]::Visible([Ds]::Child($h,$Id.Edit))
+        Check 'Escape closes the bar' $closed $true $closed
+        Open-Search $h
+        $edit=[Ds]::Child($h,$Id.Edit); $results=[Ds]::Child($h,$Id.Results)
+        # WM_GETTEXT reads the chip hidden or not, so its visibility is asked.
+        [void](Wait-Until { [Ds]::Visible($results) -and (Label $h) -match '^\d+$' } 6)
+        $reopened=@{ Edit=[Ds]::Visible($edit); Query=[Ds]::Text($edit); Chip=[Ds]::Visible($results); Label=(Label $h) }
+        Check 'reopening shows the same query and searches it again' ($reopened.Edit -and $reopened.Query -eq 'needlex' -and $reopened.Chip -and $reopened.Label -eq '60') @{Edit=$true;Query='needlex';Chip=$true;Label='60'} $reopened
+        $script:samples.Add(@{Name='reopen'; Labels=@($typed,$reopened.Label)})
     } finally { Close-Case $case }
 
     # F079: the controls of the bar as the pane narrows.

@@ -3818,79 +3818,13 @@ pub const Surface = struct {
 
     pub const layoutSearchBarControls = search_controls.SurfaceControls.layoutSearchBarControls;
 
-    const setSearchBarEditText = search_controls.SurfaceControls.setSearchBarEditText;
-
     pub const readSearchBarEditText = search_controls.SurfaceControls.readSearchBarEditText;
 
     pub const syncSearchBarResultsText = search_controls.SurfaceControls.syncSearchBarResultsText;
 
-    pub const rerunSearchNow = search_controls.SurfaceControls.rerunSearchNow;
-
     pub const handleSearchBarEditChanged = search_controls.SurfaceControls.handleSearchBarEditChanged;
 
-    pub const navigateDockedSearch = search_controls.SurfaceControls.navigateDockedSearch;
-
     pub const dockedSearch = search_controls.SurfaceControls.dockedSearch;
-
-    pub fn closeDockedSearchBar(self: *Surface, stop_search: bool, refocus_terminal: bool) anyerror!void {
-        if (stop_search) {
-            _ = try self.core_surface.endSearch();
-            if (refocus_terminal) {
-                if (self.hwnd) |hwnd| _ = sys.SetFocus(hwnd);
-            }
-            return;
-        }
-
-        const host = self.host orelse return;
-        self.docked_search.close();
-        self.docked_search.total = null;
-        self.docked_search.selected_raw = null;
-        try self.setSearchActive(false);
-        _ = self.hideSearchBarControls();
-        host.refreshSearchTimerState();
-        try host.layout();
-        host.forceHostCompositionPaint();
-        if (refocus_terminal) {
-            if (self.hwnd) |hwnd| _ = sys.SetFocus(hwnd);
-        }
-    }
-
-    pub fn showSearchOverlay(self: *Surface, needle: []const u8) !void {
-        const host = self.host orelse return;
-        if (host.overlay_mode != .none) host.hideOverlay();
-
-        try self.ensureSearchBarControls();
-        self.docked_search.open();
-
-        // While a search is active the core searches for the query.
-        const initial = if (needle.len > 0) needle else self.docked_search.query;
-        const same_query = self.docked_search.active and std.mem.eql(u8, self.docked_search.query, initial);
-        const restore_live_results = initial.len > 0 and same_query;
-        if (!std.mem.eql(u8, self.docked_search.query, initial)) {
-            try self.docked_search.setQuery(initial, 0);
-        }
-        if (!restore_live_results) {
-            self.docked_search.total = null;
-            self.docked_search.selected_raw = null;
-        }
-        self.docked_search.searched = initial.len == 0 or restore_live_results;
-        self.docked_search.last_edit_ms = 0;
-
-        _ = try self.setSearchBarEditText(initial);
-        _ = try self.syncSearchBarResultsText();
-        try host.layout();
-        host.refreshSearchTimerState();
-        host.forceHostCompositionPaint();
-
-        if (self.search_bar_edit_hwnd) |edit_hwnd| {
-            _ = sys.SetFocus(edit_hwnd);
-            _ = sys.SendMessageW(edit_hwnd, c.EM_SETSEL, 0, -1);
-        }
-
-        if (initial.len > 0 and !same_query) {
-            _ = try self.rerunSearchNow();
-        }
-    }
 
     pub fn setInspectorVisible(self: *Surface, visible: bool) !bool {
         if (visible == self.inspector_visible) return false;
@@ -4887,24 +4821,6 @@ pub const Surface = struct {
         try std.testing.expectEqualStrings("COPY MODE", Host.bannerUiaName(@ptrCast(&host), 0, &buf));
         try surface.setKeyTable(.deactivate);
         try std.testing.expect(!host.bannerShown());
-    }
-
-    pub fn setSearchActive(self: *Surface, active: bool) !void {
-        self.docked_search.active = active;
-        self.docked_search.total = null;
-        self.docked_search.selected_raw = null;
-        self.docked_search.invalid = false;
-        if (!active) {
-            self.docked_search.searched = self.docked_search.query.len == 0;
-            self.docked_search.last_edit_ms = 0;
-        }
-        if (self.docked_search.match_rows.len > 0) {
-            self.docked_search.alloc.free(self.docked_search.match_rows);
-            self.docked_search.match_rows = &.{};
-        }
-        self.clearScrollbarMarkers();
-        _ = try self.syncSearchBarResultsText();
-        try self.refreshScrollbarWindow();
     }
 
     pub fn setScrollbar(self: *Surface, value: terminal.Scrollbar) !void {

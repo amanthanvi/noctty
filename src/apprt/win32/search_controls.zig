@@ -18,7 +18,6 @@ const Surface = runtime.Surface;
 const UINT = runtime.UINT;
 const WPARAM = runtime.WPARAM;
 const adjustColor = runtime.adjustColor;
-const advanceSearchSelectedRaw = runtime.advanceSearchSelectedRaw;
 const applyChildRect = child_window.applyChildRect;
 const applyChildVisibility = child_window.applyChildVisibility;
 const blendColorRGB = runtime.blendColorRGB;
@@ -75,7 +74,6 @@ const searchBarFrameBg = runtime.searchBarFrameBg;
 const searchBarFrameBorder = runtime.searchBarFrameBorder;
 const searchBarToolbarVisual = runtime.searchBarToolbarVisual;
 const searchButtonKeyAction = runtime.searchButtonKeyAction;
-const searchSelectedDisplayFromRaw = runtime.searchSelectedDisplayFromRaw;
 const selectNativeEditRange = child_window.selectNativeEditRange;
 const setWindowData = child_window.setWindowData;
 const std = runtime.std;
@@ -222,6 +220,16 @@ fn searchToggleKey(surface: *Surface, vk: WPARAM, lParam: LPARAM) bool {
     return true;
 }
 
+/// The button that asks the core for `dir`: matches are numbered newest
+/// first, so core `.next` is the visible previous (Up) button. Until the
+/// key procedures hand their keys to `.key`.
+fn navigateClick(dir: input.Binding.Action.NavigateSearch) SearchBarButtonRole {
+    return switch (dir) {
+        .next => .prev,
+        .previous => .next,
+    };
+}
+
 fn searchLabelProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.winapi) LRESULT {
     if (getSurface(hwnd)) |surface| {
         if (msg == c.WM_GETOBJECT) {
@@ -282,27 +290,27 @@ fn searchEditProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
                 // WM_SYSCHAR is swallowed above.
                 if (msg == c.WM_SYSKEYDOWN and searchToggleKey(surface, wParam, lParam)) return 0;
                 if (wParam == c.VK_RETURN) {
-                    _ = surface.navigateDockedSearch(dockedSearchEnterDirection(keyPressed(c.VK_SHIFT))) catch |err| {
+                    _ = surface.dockedSearch(.{ .click = navigateClick(dockedSearchEnterDirection(keyPressed(c.VK_SHIFT))) }) catch |err| {
                         logUiActionError("docked search enter navigation failed", err);
                     };
                     return 0;
                 }
                 if (dockedSearchArrowDirection(wParam)) |dir| {
-                    _ = surface.navigateDockedSearch(dir) catch |err| {
+                    _ = surface.dockedSearch(.{ .click = navigateClick(dir) }) catch |err| {
                         logUiActionError("docked search arrow navigation failed", err);
                     };
                     return 0;
                 }
                 if (searchButtonKeyAction(wParam, keyPressed(c.VK_SHIFT))) |action| {
                     if (dockedSearchCoreDirectionFromKeyAction(action)) |dir| {
-                        _ = surface.navigateDockedSearch(dir) catch |err| {
+                        _ = surface.dockedSearch(.{ .click = navigateClick(dir) }) catch |err| {
                             logUiActionError("docked search key navigation failed", err);
                         };
                         return 0;
                     }
                     switch (action) {
                         .dismiss => {
-                            surface.closeDockedSearchBar(true, true) catch |err| {
+                            _ = surface.dockedSearch(.{ .click = .close }) catch |err| {
                                 logUiActionError("docked search key close failed", err);
                             };
                             return 0;
@@ -1275,7 +1283,7 @@ pub const SurfaceControls = struct {
         return changed;
     }
 
-    pub fn setSearchBarEditText(self: *Surface, value: []const u8) !bool {
+    fn setSearchBarEditText(self: *Surface, value: []const u8) !bool {
         const edit_hwnd = self.search_bar_edit_hwnd orelse return false;
         const host = self.host orelse return false;
         const current = try self.readSearchBarEditText();
@@ -1317,38 +1325,10 @@ pub const SurfaceControls = struct {
         return changed;
     }
 
-    /// Searches for the query now, debounce or not.
-    pub fn rerunSearchNow(self: *Surface) !bool {
-        const out = self.docked_search.rerun();
-        try applyDockedSearch(self, out);
-        return out.core != null;
-    }
-
     pub fn handleSearchBarEditChanged(self: *Surface) !bool {
         const text = try self.readSearchBarEditText();
         defer self.app.core_app.alloc.free(text);
         return try self.dockedSearch(.{ .edit = text });
-    }
-
-    pub fn navigateDockedSearch(self: *Surface, dir: input.Binding.Action.NavigateSearch) !bool {
-        if (self.docked_search.query.len == 0) return false;
-
-        if (!self.docked_search.active or !self.docked_search.searched) {
-            return try self.rerunSearchNow();
-        }
-
-        _ = try self.core_surface.performBindingAction(.{ .navigate_search = dir });
-        const before = self.docked_search.view().results;
-        self.docked_search.selected_raw = advanceSearchSelectedRaw(
-            self.docked_search.selected_raw,
-            self.docked_search.total,
-            dir,
-            true,
-        );
-        self.docked_search.searched = searchSelectedDisplayFromRaw(self.docked_search.selected_raw, self.docked_search.total) != null or
-            self.docked_search.total != null;
-        if (!before.eql(self.docked_search.view().results)) _ = try self.syncSearchBarResultsText();
-        return true;
     }
 
     /// Hands `in` to this pane's search and carries out what it returns.
@@ -1356,6 +1336,15 @@ pub const SurfaceControls = struct {
     /// The core calls back into this synchronously, so the error set is
     /// explicit: dockedSearch, the core, App.performAction, dockedSearch.
     pub fn dockedSearch(self: *Surface, in: docked_search.Input) anyerror!bool {
+        switch (in) {
+            .open => {
+                const host = self.host orelse return false;
+                if (host.overlay_mode != .none) host.hideOverlay();
+                try self.ensureSearchBarControls();
+            },
+            .core => |core| if (core == .ended and self.host == null) return false,
+            else => {},
+        }
         const out = try self.docked_search.apply(in, @intCast(sys.GetTickCount64()));
         try applyDockedSearch(self, out);
         return out.handled;
@@ -1380,6 +1369,22 @@ fn applyDockedSearch(self: *Surface, out: docked_search.Outcome) anyerror!void {
     switch (out.frame) {
         .same => {},
         .relayout => if (self.host) |host| try host.layout(),
+        .shown => if (self.host) |host| {
+            _ = try SurfaceControls.setSearchBarEditText(self, self.docked_search.view().query);
+            try host.layout();
+            host.forceHostCompositionPaint();
+            if (self.search_bar_edit_hwnd) |edit_hwnd| {
+                _ = sys.SetFocus(edit_hwnd);
+                _ = sys.SendMessageW(edit_hwnd, c.EM_SETSEL, 0, -1);
+            }
+        },
+        .hidden => {
+            _ = self.hideSearchBarControls();
+            if (self.host) |host| {
+                try host.layout();
+                host.forceHostCompositionPaint();
+            }
+        },
     }
     if (out.timer_changed) {
         if (self.host) |host| host.refreshSearchTimerState();
@@ -1388,7 +1393,12 @@ fn applyDockedSearch(self: *Surface, out: docked_search.Outcome) anyerror!void {
         .search => |search| _ = try self.core_surface.setSearchQuery(search.text, search.options),
         .stop => _ = try self.core_surface.setSearchQuery("", .{}),
         .invalidate => _ = try self.core_surface.invalidateSearchResults(),
+        .navigate => |dir| _ = try self.core_surface.performBindingAction(.{ .navigate_search = dir }),
+        .end => _ = try self.core_surface.endSearch(),
     };
+    if (out.focus_terminal) {
+        if (self.hwnd) |hwnd| _ = sys.SetFocus(hwnd);
+    }
 }
 
 pub fn searchButtonKey(v: *Host, hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) ?LRESULT {
@@ -1410,7 +1420,7 @@ pub fn searchButtonKey(v: *Host, hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: 
         if (v.searchControlSurface(hwnd)) |surface| {
             if (searchButtonKeyAction(wParam, keyPressed(c.VK_SHIFT))) |action| {
                 if (dockedSearchCoreDirectionFromKeyAction(action)) |dir| {
-                    _ = surface.navigateDockedSearch(dir) catch |err| {
+                    _ = surface.dockedSearch(.{ .click = navigateClick(dir) }) catch |err| {
                         logUiActionError("docked search button navigation failed", err);
                     };
                     return 0;

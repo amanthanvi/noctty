@@ -4417,21 +4417,9 @@ pub const App = struct {
                 return true;
             },
 
-            .start_search => {
-                if (self.registry.findSurfaceForTarget(target)) |surface| {
-                    try surface.showSearchOverlay(value.needle);
-                    return true;
-                }
-                return false;
-            },
+            .start_search => return try self.dockedSearchFor(target, .{ .open = value.needle }),
 
-            .end_search => {
-                if (self.registry.findSurfaceForTarget(target)) |surface| {
-                    try surface.closeDockedSearchBar(false, false);
-                    return true;
-                }
-                return false;
-            },
+            .end_search => return try self.dockedSearchFor(target, .{ .core = .ended }),
 
             .search_total => return try self.dockedSearchFor(target, .{ .core = .{ .total = .{
                 .total = value.total,

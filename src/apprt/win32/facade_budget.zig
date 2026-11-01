@@ -18,7 +18,7 @@ const budget = .{
         .overlay_session_test_runtime = 5,
         .palette_controller_runtime = 44,
         .palette_controller_test_runtime = 7,
-        .search_controls_runtime = 63,
+        .search_controls_runtime = 61,
         .search_controls_test_runtime = 4,
         .window_state_runtime = 26,
         .window_state_test_runtime = 22,
@@ -32,7 +32,7 @@ const budget = .{
     // The facade's pub declarations: what the files that import it can reach.
     .facade_pub_decls = 539,
     // Root declarations of win32.zig whose value is a field access (`a.b`).
-    .facade_aliases = 306,
+    .facade_aliases = 303,
     // Fields of win32.App named `test_*`.
     .app_test_hooks = 10,
 };

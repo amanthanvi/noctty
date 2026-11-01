@@ -4462,8 +4462,8 @@ pub const Host = struct {
 
     pub fn dismissActiveSearch(self: *Host) bool {
         const surface = self.activeSurface() orelse return false;
-        if (!surface.docked_search.active and !surface.docked_search.visible) return false;
-        surface.closeDockedSearchBar(true, true) catch return false;
+        if (!surface.docked_search.active and !surface.docked_search.view().open) return false;
+        _ = surface.dockedSearch(.{ .click = .close }) catch return false;
         return true;
     }
 
@@ -7395,7 +7395,7 @@ pub const Host = struct {
                 runUiActionOrLog("context menu select all failed", surface.core_surface.performBindingAction(.{ .select_all = {} }));
             },
             c.CTX_FIND => {
-                runUiActionOrLog("context menu find failed", surface.showSearchOverlay(""));
+                runUiActionOrLog("context menu find failed", surface.dockedSearch(.{ .open = "" }));
             },
             c.CTX_COMMAND_PALETTE => {
                 runUiActionOrLog("context menu command palette failed", surface.toggleCommandPalette());
@@ -7695,7 +7695,7 @@ pub const Host = struct {
                 runUiActionOrLog("overflow command palette failed", surface.toggleCommandPalette());
             },
             c.CTX_FIND => {
-                runUiActionOrLog("overflow find failed", surface.showSearchOverlay(""));
+                runUiActionOrLog("overflow find failed", surface.dockedSearch(.{ .open = "" }));
             },
             c.CTX_NEW_TAB => {
                 self.postDeferredNewTab();
@@ -10425,7 +10425,7 @@ pub const Host = struct {
                 entry.view.setVisible(true);
                 const placement = win32_layout.zoomedSurfacePlacement(
                     layout_content_rect,
-                    entry.view.docked_search.visible,
+                    entry.view.docked_search.view().open,
                     search_bar_height,
                 );
                 content_layout_changed = (try applySurfacePlacement(
@@ -10458,7 +10458,7 @@ pub const Host = struct {
                             spatial,
                             entry.handle,
                             has_multi_panes,
-                            entry.view.docked_search.visible,
+                            entry.view.docked_search.view().open,
                         );
                         content_layout_changed = (try applySurfacePlacement(
                             entry.view,

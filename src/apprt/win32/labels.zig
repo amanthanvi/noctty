@@ -286,23 +286,14 @@ pub fn searchButtonKeyAction(vk: WPARAM, shift_pressed: bool) ?SearchButtonKeyAc
     };
 }
 
+// Core scrollback search indexes matches newest-first (`.previous` =>
+// newer/down, `.next` => older/up). The docked search bar is laid out as
+// visible up/down navigation, so visible previous/up is core `.next`.
 pub fn dockedSearchCoreDirectionFromKeyAction(action: SearchButtonKeyAction) ?input.Binding.Action.NavigateSearch {
     return switch (action) {
-        .previous => dockedSearchButtonDirection(c.SEARCH_PREV_ID),
-        .next => dockedSearchButtonDirection(c.SEARCH_NEXT_ID),
+        .previous => .next,
+        .next => .previous,
         .dismiss => null,
-    };
-}
-
-pub fn dockedSearchButtonDirection(command_id: usize) ?input.Binding.Action.NavigateSearch {
-    // Core scrollback search indexes matches newest-first
-    // (`.previous` => newer/down, `.next` => older/up). The docked
-    // search bar is laid out as visible up/down navigation, so the
-    // button IDs map to the opposite core enum.
-    return switch (command_id) {
-        c.SEARCH_PREV_ID => .next,
-        c.SEARCH_NEXT_ID => .previous,
-        else => null,
     };
 }
 
@@ -312,8 +303,8 @@ pub fn dockedSearchEnterDirection(shift_pressed: bool) input.Binding.Action.Navi
 
 pub fn dockedSearchArrowDirection(vk: WPARAM) ?input.Binding.Action.NavigateSearch {
     return switch (vk) {
-        c.VK_UP => dockedSearchButtonDirection(c.SEARCH_PREV_ID),
-        c.VK_DOWN => dockedSearchButtonDirection(c.SEARCH_NEXT_ID),
+        c.VK_UP => .next,
+        c.VK_DOWN => .previous,
         else => null,
     };
 }
@@ -367,29 +358,6 @@ pub fn tabClosedMessage(set: *const input.Binding.Set, options: struct { has_mod
     }
     writer.writeAll(" to undo.") catch return fallback;
     return writer.buffered();
-}
-
-pub fn searchSelectedDisplayFromRaw(raw: ?usize, total: ?usize) ?usize {
-    const idx = raw orelse return null;
-    const count = total orelse return null;
-    if (count == 0 or idx >= count) return null;
-    return idx + 1;
-}
-
-pub fn advanceSearchSelectedRaw(
-    raw: ?usize,
-    total: ?usize,
-    dir: input.Binding.Action.NavigateSearch,
-    wrap: bool,
-) ?usize {
-    const idx = raw orelse return null;
-    const count = total orelse return null;
-    if (count == 0 or idx >= count) return null;
-    const last = count - 1;
-    return switch (dir) {
-        .next => if (idx >= last) if (wrap) 0 else idx else idx + 1,
-        .previous => if (idx == 0) if (wrap) last else 0 else idx - 1,
-    };
 }
 
 pub fn inspectorPanelVisibleForState(overlay_mode: HostOverlayMode, active_tab_has_inspector: bool) bool {
@@ -4004,20 +3972,6 @@ test "win32 docked search key actions preserve semantic next and previous naviga
     try std.testing.expect(dockedSearchCoreDirectionFromKeyAction(.dismiss) == null);
 }
 
-test "win32 docked search arrow buttons follow visible up and down navigation" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    try std.testing.expectEqual(
-        input.Binding.Action.NavigateSearch.next,
-        dockedSearchButtonDirection(c.SEARCH_PREV_ID).?,
-    );
-    try std.testing.expectEqual(
-        input.Binding.Action.NavigateSearch.previous,
-        dockedSearchButtonDirection(c.SEARCH_NEXT_ID).?,
-    );
-    try std.testing.expect(dockedSearchButtonDirection(0) == null);
-}
-
 test "win32 docked search Enter and Shift+Enter follow the arrow-key contract" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
@@ -4043,21 +3997,6 @@ test "win32 docked search Up and Down keys follow the visible button contract" {
         dockedSearchArrowDirection(c.VK_DOWN).?,
     );
     try std.testing.expect(dockedSearchArrowDirection(c.VK_LEFT) == null);
-}
-
-test "win32 docked search preview advances visible numbering with navigation" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    try std.testing.expectEqual(@as(?usize, 6), advanceSearchSelectedRaw(7, 8, .previous, true));
-    try std.testing.expectEqual(@as(?usize, 0), advanceSearchSelectedRaw(7, 8, .next, true));
-    try std.testing.expectEqual(@as(?usize, 7), searchSelectedDisplayFromRaw(
-        advanceSearchSelectedRaw(7, 8, .previous, true),
-        8,
-    ));
-    try std.testing.expectEqual(@as(?usize, 1), searchSelectedDisplayFromRaw(
-        advanceSearchSelectedRaw(7, 8, .next, true),
-        8,
-    ));
 }
 
 test "win32 command palette toggle binding is recognized inside action chains" {

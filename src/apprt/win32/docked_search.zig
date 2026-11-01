@@ -28,6 +28,8 @@ pub const debounce_ms: i64 = 40;
 /// The regex, case and whole-word toggles, as the core takes them.
 pub const QueryOptions = @import("../../terminal/search/query_options.zig").QueryOptions;
 
+const NavigateSearch = @import("../../input.zig").Binding.Action.NavigateSearch;
+
 /// The docked search bar's buttons, in the order the bar lays them out.
 pub const Role = enum {
     prev,
@@ -48,9 +50,11 @@ pub const Mods = struct {
 };
 
 pub const Input = union(enum) {
+    /// start_search and the Find menus; "" opens on the last query.
+    open: []const u8,
     /// The edit's text after EN_CHANGE, borrowed for the call.
     edit: []const u8,
-    /// A toggle's BN_CLICKED (regex, case_sensitive, whole_word).
+    /// A button's BN_CLICKED.
     click: Role,
     /// The host's search timer fired.
     tick,
@@ -63,6 +67,8 @@ pub const Input = union(enum) {
         selected: ?usize,
         /// Copied: the caller may free its slice once `apply` returns.
         rows: []const u32,
+        /// end_search, which also arrives from inside `Command.end`.
+        ended,
     };
 };
 
@@ -74,6 +80,11 @@ pub const Command = union(enum) {
     stop,
     /// `invalidateSearchResults()`.
     invalidate,
+    /// `navigate_search`, in the core's terms: matches are numbered newest
+    /// first, so the visible Up (previous) button asks for `.next`.
+    navigate: NavigateSearch,
+    /// `endSearch()`, which reports `.core.ended` before it returns.
+    end,
 };
 
 /// What the window and the core must do after an `apply`. The adapter
@@ -91,11 +102,15 @@ pub const Outcome = struct {
     results_changed: bool = false,
     /// Clear the scrollbar markers and refresh the scrollbar window.
     markers_changed: bool = false,
-    /// The chip appeared or went: lay the host out again.
-    frame: enum { same, relayout } = .same,
+    /// `relayout`: the chip appeared or went, so lay the host out again.
+    /// `shown`: write `view().query` to the edit, lay out, repaint and
+    /// focus the edit. `hidden`: hide the controls, lay out and repaint.
+    frame: enum { same, relayout, shown, hidden } = .same,
     /// Refresh the host's search timer (`view().wants_tick`).
     timer_changed: bool = false,
     core: ?Command = null,
+    /// Give the terminal the keyboard focus.
+    focus_terminal: bool = false,
 };
 
 /// What the results chip says.
@@ -141,6 +156,7 @@ pub const Results = union(enum) {
 
 pub const View = struct {
     open: bool,
+    query: []const u8,
     /// The query is not empty, so the layout gives the chip a slot (it may
     /// still drop it for width).
     chip: bool,
@@ -186,7 +202,7 @@ pub const ToggleKeys = struct {
 };
 
 pub const DockedSearch = struct {
-    visible: bool = false,
+    open: bool = false,
     query: []u8 = &.{},
     options: QueryOptions = .{},
     /// What the core last reported: the total, and the selected match's
@@ -225,12 +241,15 @@ pub const DockedSearch = struct {
     pub fn apply(self: *DockedSearch, in: Input, now_ms: i64) Allocator.Error!Outcome {
         const before = self.results();
         var out: Outcome = switch (in) {
+            .open => |needle| try self.show(needle),
             .edit => |text| try self.edit(text, now_ms),
             .click => |role| switch (role) {
+                .prev => self.navigate(.next),
+                .next => self.navigate(.previous),
                 .regex, .case_sensitive, .whole_word => self.toggle(role),
-                .prev, .next, .close => .{},
+                .close => .{ .handled = true, .core = .end, .focus_terminal = true },
             },
-            .tick => if (self.visible and self.debounceDue(now_ms)) self.issue() else .{},
+            .tick => if (self.open and self.debounceDue(now_ms)) self.issue() else .{},
             .core => |core| try self.report(core),
         };
         out.results_changed = !before.eql(self.results());
@@ -239,23 +258,63 @@ pub const DockedSearch = struct {
 
     pub fn view(self: *const DockedSearch) View {
         return .{
-            .open = self.visible,
+            .open = self.open,
+            .query = self.query,
             .chip = self.query.len > 0,
             .results = self.results(),
             .options = self.options,
-            .wants_tick = self.visible and self.query.len > 0 and !self.searched,
+            .wants_tick = self.open and self.query.len > 0 and !self.searched,
             .match_rows = self.match_rows,
         };
     }
 
-    /// Searches for the query at once, debounce or not, as navigation and
-    /// the open do until they go through `apply`.
-    pub fn rerun(self: *DockedSearch) Outcome {
-        if (self.query.len == 0) return .{};
-        const before = self.results();
-        var out = self.issue();
-        out.results_changed = !before.eql(self.results());
+    fn show(self: *DockedSearch, needle: []const u8) Allocator.Error!Outcome {
+        const initial = if (needle.len > 0) needle else self.query;
+        // While a search is active the core searches for the query.
+        const live = self.active and std.mem.eql(u8, self.query, initial);
+        if (!std.mem.eql(u8, self.query, initial)) try self.setQuery(initial, 0);
+        self.open = true;
+        const restore = initial.len > 0 and live;
+        if (!restore) {
+            self.total = null;
+            self.selected_raw = null;
+        }
+        self.searched = initial.len == 0 or restore;
+        self.last_edit_ms = 0;
+        var out: Outcome = if (initial.len > 0 and !live) self.issue() else .{ .handled = true, .timer_changed = true };
+        out.frame = .shown;
         return out;
+    }
+
+    /// The bar hides; the query and the toggles stay for the next open.
+    fn close(self: *DockedSearch) Outcome {
+        self.open = false;
+        self.setActive(false);
+        return .{ .handled = true, .markers_changed = true, .frame = .hidden, .timer_changed = true };
+    }
+
+    fn navigate(self: *DockedSearch, dir: NavigateSearch) Outcome {
+        if (self.query.len == 0) return .{ .handled = true };
+        // Not live: the core has no search for the query, or the debounce
+        // or the core's answer is still to come.
+        if (!self.active or !self.searched) return self.issue();
+        // The selection moves at once; the core's report of it follows.
+        self.selected_raw = self.advance(dir);
+        self.searched = self.selected_raw != null or self.total != null;
+        return .{ .handled = true, .core = .{ .navigate = dir } };
+    }
+
+    /// The raw index one step `dir` from the selection, wrapping; null
+    /// when nothing is selected among the matches counted.
+    fn advance(self: *const DockedSearch, dir: NavigateSearch) ?usize {
+        const index = self.selected_raw orelse return null;
+        const count = self.total orelse return null;
+        if (count == 0 or index >= count) return null;
+        const last = count - 1;
+        return switch (dir) {
+            .next => if (index >= last) 0 else index + 1,
+            .previous => if (index == 0) last else index - 1,
+        };
     }
 
     fn edit(self: *DockedSearch, text: []const u8, now_ms: i64) Allocator.Error!Outcome {
@@ -327,6 +386,7 @@ pub const DockedSearch = struct {
     }
 
     fn report(self: *DockedSearch, core: Input.Core) Allocator.Error!Outcome {
+        if (core == .ended) return self.close();
         // While the debounce waits, a report belongs to the query before
         // the edit: it would overwrite "Searching" and the markers.
         if (self.query.len > 0 and !self.searched) return .{};
@@ -347,6 +407,7 @@ pub const DockedSearch = struct {
                 self.match_rows = copy;
                 return .{ .markers_changed = true };
             },
+            .ended => unreachable,
         }
         return .{};
     }
@@ -368,18 +429,10 @@ pub const DockedSearch = struct {
         return if (index < total) index + 1 else null;
     }
 
-    pub fn open(self: *DockedSearch) void {
-        self.visible = true;
-    }
-
-    pub fn close(self: *DockedSearch) void {
-        self.visible = false;
-    }
-
     /// A new query starts the debounce (`now_ms`) and drops what the core
     /// said of the old one; an empty one waits for nothing. Copies first, so
     /// on OutOfMemory nothing changed.
-    pub fn setQuery(self: *DockedSearch, next: []const u8, now_ms: i64) Allocator.Error!void {
+    fn setQuery(self: *DockedSearch, next: []const u8, now_ms: i64) Allocator.Error!void {
         const next_owned: ?[]u8 = if (next.len > 0) try self.alloc.dupe(u8, next) else null;
         errdefer if (next_owned) |value| self.alloc.free(value);
 
@@ -407,39 +460,6 @@ pub const DockedSearch = struct {
 // =====================================================================
 // Tests
 // =====================================================================
-
-test "open shows; close hides" {
-    var bar = DockedSearch.init(std.testing.allocator);
-    defer bar.deinit();
-
-    try std.testing.expect(!bar.visible);
-    bar.open();
-    try std.testing.expect(bar.visible);
-    bar.close();
-    try std.testing.expect(!bar.visible);
-}
-
-test "query survives close/open" {
-    var bar = DockedSearch.init(std.testing.allocator);
-    defer bar.deinit();
-
-    bar.open();
-    try bar.setQuery("foo", 1000);
-    bar.close();
-    bar.open();
-    try std.testing.expectEqualStrings("foo", bar.query);
-}
-
-test "toggles persist across open/close" {
-    var bar = DockedSearch.init(std.testing.allocator);
-    defer bar.deinit();
-
-    bar.open();
-    _ = try bar.apply(.{ .click = .case_sensitive }, 1000);
-    bar.close();
-    bar.open();
-    try std.testing.expect(bar.view().options.case_sensitive);
-}
 
 test "win32 search toggle accelerators need Alt without Ctrl, Shift or AltGr" {
     const alt: Mods = .{ .alt = true };
@@ -475,7 +495,7 @@ test "win32 search toggle accelerators need Alt without Ctrl, Shift or AltGr" {
 fn testSearching(alloc: Allocator, text: []const u8) !DockedSearch {
     var search = DockedSearch.init(alloc);
     errdefer search.deinit();
-    search.open();
+    _ = try search.apply(.{ .open = "" }, 0);
     _ = try search.apply(.{ .edit = text }, 1000);
     _ = try search.apply(.tick, 1000 + debounce_ms);
     return search;
@@ -559,7 +579,7 @@ test "OutOfMemory copying rows leaves the state unchanged" {
 test "an edit waits out 40 ms, then one tick searches once" {
     var search = DockedSearch.init(std.testing.allocator);
     defer search.deinit();
-    search.open();
+    _ = try search.apply(.{ .open = "" }, 0);
     const edited = try search.apply(.{ .edit = "needle" }, 1000);
     try std.testing.expect(edited.timer_changed);
     try std.testing.expect(edited.core == null);
@@ -598,7 +618,7 @@ test "a stale total, selection and rows for the previous query during the deboun
 test "editing a searched query invalidates, clearing it stops, and the first character from empty sends nothing" {
     var search = DockedSearch.init(std.testing.allocator);
     defer search.deinit();
-    search.open();
+    _ = try search.apply(.{ .open = "" }, 0);
     try std.testing.expect((try search.apply(.{ .edit = "n" }, 1000)).core == null);
     _ = try search.apply(.tick, 1000 + debounce_ms);
     const narrowed = (try search.apply(.{ .edit = "ne" }, 2000)).core orelse return error.NoCommand;
@@ -610,7 +630,7 @@ test "editing a searched query invalidates, clearing it stops, and the first cha
 test "the chip relayouts only when the query goes empty to non-empty or back" {
     var search = DockedSearch.init(std.testing.allocator);
     defer search.deinit();
-    search.open();
+    _ = try search.apply(.{ .open = "" }, 0);
     const Frame = @FieldType(Outcome, "frame");
     const steps = [_]struct { text: []const u8, frame: Frame, chip: bool }{
         .{ .text = "a", .frame = .relayout, .chip = true },
@@ -628,7 +648,7 @@ test "the chip relayouts only when the query goes empty to non-empty or back" {
 test "a toggle with a query reports which toggle flipped and searches at once with the new options" {
     var search = DockedSearch.init(std.testing.allocator);
     defer search.deinit();
-    search.open();
+    _ = try search.apply(.{ .open = "" }, 0);
     // Without a query only the toggle changes.
     const idle = try search.apply(.{ .click = .regex }, 1000);
     try std.testing.expectEqual(@as(?Role, .regex), idle.toggled);
@@ -688,6 +708,133 @@ test "OutOfMemory on an edit leaves the state unchanged" {
     const shown = search.view().results;
     try std.testing.expectError(error.OutOfMemory, search.apply(.{ .edit = "other" }, 2000));
     try std.testing.expect(shown.eql(search.view().results));
-    const command = (try search.apply(.{ .click = .regex }, 2001)).core orelse return error.NoSearch;
-    try std.testing.expectEqualStrings("needle", command.search.text);
+    const command = try testCommand(try search.apply(.{ .click = .regex }, 2001), .search);
+    try std.testing.expectEqualStrings("needle", command.text);
+}
+
+/// The command's payload when `out` asks the core for a `tag`, so a wrong
+/// command fails the test rather than panicking on the union.
+fn testCommand(out: Outcome, comptime tag: std.meta.Tag(Command)) !@FieldType(Command, @tagName(tag)) {
+    const command = out.core orelse return error.NoCommand;
+    if (std.meta.activeTag(command) != tag) return error.WrongCommand;
+    return @field(command, @tagName(tag));
+}
+
+test "open with no query reads Type to search, shows the bar and asks nothing of the core" {
+    var search = DockedSearch.init(std.testing.allocator);
+    defer search.deinit();
+    const out = try search.apply(.{ .open = "" }, 0);
+    try std.testing.expect(out.handled);
+    try std.testing.expectEqual(.shown, out.frame);
+    try std.testing.expect(out.timer_changed);
+    try std.testing.expect(out.core == null);
+    try std.testing.expect(search.view().open);
+    var buf: [48]u8 = undefined;
+    try std.testing.expectEqualStrings("Type to search", search.view().results.text(&buf));
+}
+
+test "open with the live needle restores its results without rerunning; another needle reruns" {
+    var search = try testSearching(std.testing.allocator, "needlex");
+    defer search.deinit();
+    _ = try search.apply(.{ .core = .{ .total = .{ .total = 60 } } }, 0);
+    _ = try search.apply(.{ .core = .{ .selected = 3 } }, 0);
+    var buf: [48]u8 = undefined;
+
+    const again = try search.apply(.{ .open = "needlex" }, 0);
+    try std.testing.expectEqual(.shown, again.frame);
+    try std.testing.expect(again.core == null);
+    try std.testing.expectEqualStrings("3/60", search.view().results.text(&buf));
+
+    // The frame is shown and the search starts in the same Outcome, the
+    // frame first, so the core searches the resized pane.
+    const other = try search.apply(.{ .open = "other" }, 0);
+    try std.testing.expectEqual(.shown, other.frame);
+    try std.testing.expectEqualStrings("other", (try testCommand(other, .search)).text);
+    try std.testing.expectEqualStrings("other", search.view().query);
+    try std.testing.expectEqualStrings("Searching", search.view().results.text(&buf));
+}
+
+test "close keeps the query and toggles, drops totals and rows; reopening reruns" {
+    var search = try testSearching(std.testing.allocator, "needlex");
+    defer search.deinit();
+    _ = try search.apply(.{ .click = .regex }, 0);
+    _ = try search.apply(.{ .core = .{ .total = .{ .total = 60 } } }, 0);
+    _ = try search.apply(.{ .core = .{ .rows = &.{ 1, 2 } } }, 0);
+
+    const closed = try search.apply(.{ .core = .ended }, 0);
+    try std.testing.expectEqual(.hidden, closed.frame);
+    try std.testing.expect(closed.markers_changed);
+    try std.testing.expect(closed.timer_changed);
+    const shown = search.view();
+    try std.testing.expect(!shown.open);
+    try std.testing.expectEqualStrings("needlex", shown.query);
+    try std.testing.expect(shown.options.regex);
+    try std.testing.expectEqual(@as(usize, 0), shown.match_rows.len);
+    try std.testing.expect(!shown.wants_tick);
+
+    const reopened = try testCommand(try search.apply(.{ .open = "" }, 0), .search);
+    try std.testing.expectEqualStrings("needlex", reopened.text);
+    try std.testing.expect(reopened.options.regex);
+}
+
+test "the previous button asks the core for .next and the next button for .previous" {
+    var search = try testSearching(std.testing.allocator, "needlex");
+    defer search.deinit();
+    _ = try search.apply(.{ .core = .{ .total = .{ .total = 60 } } }, 0);
+    try std.testing.expectEqual(NavigateSearch.next, try testCommand(try search.apply(.{ .click = .prev }, 0), .navigate));
+    try std.testing.expectEqual(NavigateSearch.previous, try testCommand(try search.apply(.{ .click = .next }, 0), .navigate));
+}
+
+test "navigate reruns when the search is not live (inactive or pending)" {
+    var search = try testSearching(std.testing.allocator, "needlex");
+    defer search.deinit();
+    _ = try search.apply(.{ .edit = "needlexy" }, 2000);
+    const pending = try testCommand(try search.apply(.{ .click = .next }, 2001), .search);
+    try std.testing.expectEqualStrings("needlexy", pending.text);
+
+    _ = try search.apply(.{ .core = .ended }, 0);
+    const inactive = try testCommand(try search.apply(.{ .click = .prev }, 3000), .search);
+    try std.testing.expectEqualStrings("needlexy", inactive.text);
+}
+
+test "navigation previews 1/60 to 2/60 and wraps; the core's echo of the same index reports no change" {
+    var search = try testSearching(std.testing.allocator, "needlex");
+    defer search.deinit();
+    var buf: [48]u8 = undefined;
+    _ = try search.apply(.{ .core = .{ .total = .{ .total = 60 } } }, 0);
+    _ = try search.apply(.{ .core = .{ .selected = 1 } }, 0);
+    try std.testing.expectEqualStrings("1/60", search.view().results.text(&buf));
+
+    try std.testing.expect((try search.apply(.{ .click = .prev }, 0)).results_changed);
+    try std.testing.expectEqualStrings("2/60", search.view().results.text(&buf));
+    try std.testing.expect(!(try search.apply(.{ .core = .{ .selected = 2 } }, 0)).results_changed);
+
+    _ = try search.apply(.{ .core = .{ .selected = 60 } }, 0);
+    _ = try search.apply(.{ .click = .prev }, 0);
+    try std.testing.expectEqualStrings("1/60", search.view().results.text(&buf));
+    _ = try search.apply(.{ .click = .next }, 0);
+    try std.testing.expectEqualStrings("60/60", search.view().results.text(&buf));
+}
+
+test "a close click sends .end with focus_terminal; ended alone hides without moving focus" {
+    var search = try testSearching(std.testing.allocator, "needlex");
+    defer search.deinit();
+    _ = try search.apply(.{ .core = .{ .total = .{ .total = 12 } } }, 0);
+    const click = try search.apply(.{ .click = .close }, 0);
+    try std.testing.expect(click.handled);
+    try std.testing.expect(click.focus_terminal);
+    try std.testing.expectEqual(.same, click.frame);
+    try testCommand(click, .end);
+    try std.testing.expect(search.view().open);
+
+    // What `endSearch` sends back before it returns: the clears, then
+    // end_search.
+    _ = try search.apply(.{ .core = .{ .total = .{ .total = null } } }, 0);
+    _ = try search.apply(.{ .core = .{ .selected = null } }, 0);
+    _ = try search.apply(.{ .core = .{ .rows = &.{} } }, 0);
+    const ended = try search.apply(.{ .core = .ended }, 0);
+    try std.testing.expect(!ended.focus_terminal);
+    try std.testing.expectEqual(.hidden, ended.frame);
+    try std.testing.expect(ended.core == null);
+    try std.testing.expect(!search.view().open);
 }

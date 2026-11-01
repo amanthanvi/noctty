@@ -328,7 +328,6 @@ pub const search_controls_runtime = .{
     .UINT = UINT,
     .WPARAM = WPARAM,
     .adjustColor = adjustColor,
-    .advanceSearchSelectedRaw = advanceSearchSelectedRaw,
     .blendColorRGB = blendColorRGB,
     .buttonColorsFromTheme = buttonColorsFromTheme,
     .c = c,
@@ -368,7 +367,6 @@ pub const search_controls_runtime = .{
     .searchBarFrameBorder = searchBarFrameBorder,
     .searchBarToolbarVisual = searchBarToolbarVisual,
     .searchButtonKeyAction = searchButtonKeyAction,
-    .searchSelectedDisplayFromRaw = searchSelectedDisplayFromRaw,
     .std = std,
     .sys = sys,
     .terminalDisconnectThunk = terminalDisconnectThunk,
@@ -9040,15 +9038,9 @@ const searchButtonKeyAction = labels.searchButtonKeyAction;
 
 const dockedSearchCoreDirectionFromKeyAction = labels.dockedSearchCoreDirectionFromKeyAction;
 
-const dockedSearchButtonDirection = labels.dockedSearchButtonDirection;
-
 const dockedSearchEnterDirection = labels.dockedSearchEnterDirection;
 
 const dockedSearchArrowDirection = labels.dockedSearchArrowDirection;
-
-const searchSelectedDisplayFromRaw = labels.searchSelectedDisplayFromRaw;
-
-const advanceSearchSelectedRaw = labels.advanceSearchSelectedRaw;
 
 pub const profileChromeVisible = win32_chrome_state.profileVisible;
 
@@ -11622,55 +11614,15 @@ pub fn hostWindowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) cal
                         refocusActiveSurface(v);
                         return 0;
                     },
-                    c.SEARCH_PREV_ID => {
-                        if (notify_code == c.BN_CLICKED) {
-                            if (child_hwnd) |child| {
-                                if (v.searchControlSurface(child)) |surface| {
-                                    if (dockedSearchButtonDirection(command_id)) |dir| {
-                                        _ = surface.navigateDockedSearch(dir) catch |err| {
-                                            logUiActionError("docked search previous failed", err);
-                                        };
-                                    }
-                                    return 0;
-                                }
-                            }
-                        }
-                    },
-                    c.SEARCH_NEXT_ID => {
-                        if (notify_code == c.BN_CLICKED) {
-                            if (child_hwnd) |child| {
-                                if (v.searchControlSurface(child)) |surface| {
-                                    if (dockedSearchButtonDirection(command_id)) |dir| {
-                                        _ = surface.navigateDockedSearch(dir) catch |err| {
-                                            logUiActionError("docked search next failed", err);
-                                        };
-                                    }
-                                    return 0;
-                                }
-                            }
-                        }
-                    },
-                    c.SEARCH_REGEX_ID, c.SEARCH_CASE_ID, c.SEARCH_WORD_ID => {
+                    c.SEARCH_PREV_ID, c.SEARCH_NEXT_ID, c.SEARCH_REGEX_ID, c.SEARCH_CASE_ID, c.SEARCH_WORD_ID, c.SEARCH_CLOSE_ID => {
                         if (notify_code == c.BN_CLICKED) {
                             if (child_hwnd) |child| {
                                 if (v.searchControlSurface(child)) |surface| {
                                     if (surface.searchBarButtonRole(child)) |role| {
                                         _ = surface.dockedSearch(.{ .click = role }) catch |err| {
-                                            logUiActionError("docked search toggle failed", err);
+                                            logUiActionError("docked search button failed", err);
                                         };
                                     }
-                                    return 0;
-                                }
-                            }
-                        }
-                    },
-                    c.SEARCH_CLOSE_ID => {
-                        if (notify_code == c.BN_CLICKED) {
-                            if (child_hwnd) |child| {
-                                if (v.searchControlSurface(child)) |surface| {
-                                    surface.closeDockedSearchBar(true, true) catch |err| {
-                                        logUiActionError("docked search close failed", err);
-                                    };
                                     return 0;
                                 }
                             }
