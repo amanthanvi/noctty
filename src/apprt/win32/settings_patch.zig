@@ -552,6 +552,31 @@ pub fn profileEdits(arena: Allocator, problems: []const origin.Index, original: 
     return edits.toOwnedSlice(arena);
 }
 
+/// A file a load found and could not read whole (`unreadConfigFile`).
+pub const Unread = struct {
+    theme: bool,
+    path: []const u8,
+
+    /// How the status line names it: "the theme file <path>" or "the
+    /// included file <path>", no value.
+    pub fn describe(self: Unread, alloc: Allocator) Allocator.Error![]u8 {
+        return std.fmt.allocPrint(alloc, "{s} {s}", .{ if (self.theme) "the theme file" else "the included file", self.path });
+    }
+};
+
+/// What a save that wrote `edits` says of them after its reload (`reload`,
+/// in the app's light/dark state). A file the reload could not read whole
+/// comes first: a field or a reset it missed is no override, so the save
+/// names that file (`.unread`) and nothing as overridden. Otherwise the
+/// fields another layer overrides go to `masked` (`writeMasked`, after a
+/// separator when `after`), and the report is `.masked`, or `.held` when
+/// there are none.
+pub fn reloadReport(masked: *std.Io.Writer, edits: []const Edit, reload: *const Config, after: bool) std.Io.Writer.Error!union(enum) { held, masked, unread: Unread } {
+    if (edits.len == 0) return .held;
+    if (unreadConfigFile(reload)) |unread| return .{ .unread = unread };
+    return if (try writeMasked(masked, edits, reload, after)) .masked else .held;
+}
+
 /// A file `config`'s load found and could not read whole, if any: a
 /// `config-file` that is there and would not open, or one or a theme whose
 /// read failed partway through (`LineIterator.read_failed`, which reads as
@@ -561,7 +586,7 @@ pub fn profileEdits(arena: Allocator, problems: []const origin.Index, original: 
 /// stops instead. A missing include (`FileNotFound`) or a directory (`IsDir`)
 /// is the loader's to report, as the disk check before a save lets them
 /// through (`settingsDiskVerdict`).
-pub fn unreadConfigFile(config: *const Config) ?struct { theme: bool, path: []const u8 } {
+pub fn unreadConfigFile(config: *const Config) ?Unread {
     for (config._diagnostics.items()) |diag| {
         const message: []const u8 = diag.message;
         const prefix_len, const theme = for ([_]struct { []const u8, bool }{
@@ -1146,6 +1171,37 @@ test "settings patch: FileEnd.restore matches only whole mark lines, and fails w
     try out.appendSlice(alloc, "a\nlast\n");
     try testing.expectError(error.MarksDisturbed, FileEnd.none.restore(&out));
     try testing.expectError(error.MarksDisturbed, FileEnd.bare_cr.restore(&out));
+}
+
+test "settings patch: a reload that could not read a file whole reports the file, not an override" {
+    const alloc = testing.allocator;
+    const edits = [_]Edit{.{ .field = .name, .id = "py", .op = .{ .set = "Python" } }};
+    // The reload's read of the included file failed partway, before the
+    // saved label: the label is missing, and that is no override.
+    var reload = try Config.default(alloc);
+    defer reload.deinit();
+    var buf: [16]u8 = undefined;
+    var failing = @import("../../cli/args.zig").TestFailingReader.init("profile-command = py: python.exe\nprofile-na", &buf);
+    try reload.loadReader(alloc, &failing.interface, "C:\\noctty-test\\more.conf");
+    var masked: std.Io.Writer.Allocating = .init(alloc);
+    defer masked.deinit();
+    switch (try reloadReport(&masked.writer, &edits, &reload, false)) {
+        .unread => |unread| {
+            const text = try unread.describe(alloc);
+            defer alloc.free(text);
+            try expectSameText("the included file C:\\noctty-test\\more.conf", text);
+        },
+        else => return error.TestExpectedUnread,
+    }
+    try testing.expectEqual(@as(usize, 0), masked.written().len);
+    // Read whole, the same missing label is an override, named.
+    var whole = try Config.default(alloc);
+    defer whole.deinit();
+    var reader: std.Io.Reader = .fixed("profile-command = py: python.exe\n");
+    try whole.loadReader(alloc, &reader, "C:\\noctty-test\\more.conf");
+    try testing.expect(try reloadReport(&masked.writer, &edits, &whole, false) == .masked);
+    try expectSameText("profile-name py", masked.written());
+    try testing.expect(try reloadReport(&masked.writer, &.{}, &reload, false) == .held);
 }
 
 test "settings patch: a removal is decided in the light/dark state the app applies, so a profile only the dark theme defines keeps its tombstone" {

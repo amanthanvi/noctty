@@ -8726,7 +8726,21 @@ pub const App = struct {
             break :applied null;
         };
         defer if (reloaded_applied) |*value| value.deinit();
-        _ = settings_patch.writeMasked(&masked_text.writer, profile_edits, if (reloaded_applied) |*value| value else &reloaded, masked_text.written().len > 0) catch return error.OutOfMemory;
+        // A file the reload could not read whole: what it missed is no
+        // override, and the save says that instead, naming the file.
+        const report = settings_patch.reloadReport(&masked_text.writer, profile_edits, if (reloaded_applied) |*value| value else &reloaded, masked_text.written().len > 0) catch return error.OutOfMemory;
+        switch (report) {
+            .unread => |unread| {
+                const text = unread.describe(alloc) catch return error.OutOfMemory;
+                defer alloc.free(text);
+                self.settings_failure_detail.set(alloc, text);
+                log.warn("settings save: saved, but the reload could not read a config file whole, so the saved values may not all be in effect", .{});
+                self.core_app.updateConfig(self, &reloaded) catch return error.ReloadFailed;
+                _ = self.reportRecordedConfigProblems();
+                return error.SavedButUnread;
+            },
+            .held, .masked => {},
+        }
         const masked = masked_text.written();
         if (masked.len > 0) {
             std.log.warn("settings save: saved but masked by a later config-file layer: {s}", .{masked});
@@ -8785,7 +8799,7 @@ pub const App = struct {
         // The fresh read, and the held config if it was read again here.
         for (readings[0..if (held_now != null) 2 else 1]) |reading| {
             if (settings_patch.unreadConfigFile(reading)) |unread| {
-                const text = std.fmt.allocPrint(alloc, "{s} {s}", .{ if (unread.theme) "the theme file" else "the included file", unread.path }) catch return error.OutOfMemory;
+                const text = unread.describe(alloc) catch return error.OutOfMemory;
                 defer alloc.free(text);
                 detail.set(alloc, text);
                 return error.FileUnopenable;

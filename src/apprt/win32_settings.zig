@@ -901,6 +901,9 @@ const StatusNote = enum {
     none,
     saved,
     saved_overridden,
+    /// Saved, but the reload could not read a config file whole, so what
+    /// was saved may not all be in effect (`SaveError.SavedButUnread`).
+    saved_unread,
     save_failed,
     /// The config file is UTF-16 or UTF-32 text that a save cannot patch.
     unsupported_encoding,
@@ -950,6 +953,7 @@ const StatusNote = enum {
             .none => "",
             .saved => "Settings saved.",
             .saved_overridden => "Saved, but a later config file or command-line option overrides some of these values, so they will not take effect.",
+            .saved_unread => "Saved, but a config file could not be read whole, so the saved values may not all be in effect until it can be read.",
             .save_failed => "Save failed. Your edits are kept. Check that the config file can be written and is not open in another program, then try again.",
             .unsupported_encoding => "Nothing was saved: the config file is not readable as UTF-8 text (Windows PowerShell 5.1 writes UTF-16). Save it as UTF-8 in an editor, then save again. Your edits are kept.",
             .dangling_link => "Nothing was saved: the config file is a link to a file that does not exist. Fix or remove the link, then save again. Your edits are kept.",
@@ -979,7 +983,7 @@ const StatusNote = enum {
     /// file, or for a save that a later layer overrides, the settings.
     fn takesDetail(self: StatusNote) bool {
         return switch (self) {
-            .file_unopenable, .write_incomplete, .unsupported_encoding, .binary_config, .saved_overridden => true,
+            .file_unopenable, .write_incomplete, .unsupported_encoding, .binary_config, .saved_overridden, .saved_unread => true,
             .field_reset, .already_default, .reset_failed => true,
             .key_copied, .key_copy_failed => true,
             .profile_said, .profile_hint, .profile_refused => true,
@@ -992,6 +996,7 @@ const StatusNote = enum {
     fn textWithDetail(self: StatusNote, alloc: std.mem.Allocator, detail: []const u8) std.mem.Allocator.Error![]u8 {
         return switch (self) {
             .saved_overridden => std.fmt.allocPrint(alloc, "Saved, but a later config file or command-line option overrides {s}, so the saved value is not used.", .{detail}),
+            .saved_unread => std.fmt.allocPrint(alloc, "Saved, but {s} could not be read whole, so the saved values may not all be in effect until it can be read.", .{detail}),
             .unsupported_encoding => std.fmt.allocPrint(alloc, "Nothing was saved: {s} is not readable as UTF-8 text (Windows PowerShell 5.1 writes UTF-16). Save it as UTF-8 in an editor, then save again. Your edits are kept.", .{detail}),
             .binary_config => std.fmt.allocPrint(alloc, "Nothing was saved: {s} contains NUL bytes, so it is a binary file or text in UTF-16 or UTF-32. Save it as UTF-8 in an editor, then save again. Your edits are kept.", .{detail}),
             .file_unopenable => std.fmt.allocPrint(alloc, "Nothing was saved: {s} cannot be opened. Close any program that has it open, or check its permissions, then save again. Your edits are kept.", .{detail}),
@@ -1716,11 +1721,16 @@ pub const SaveError = error{
     /// should surface this as a distinct warning, NOT as a
     /// generic write failure.
     SavedButMasked,
+    /// The file was written, and the reload after it could not read a config
+    /// file whole (`settings_patch.reloadReport`): what it missed is no
+    /// override, and `AppHandle.failureDetail` names the file.
+    SavedButUnread,
 };
 
 pub const SaveReloadOutcome = union(enum) {
     completed,
     completed_masked,
+    completed_unread,
     failed: SaveError,
 };
 
@@ -1778,6 +1788,7 @@ fn maskedNotificationBody(buf: []u8, detail: ?[]const u8, keys: ?[]const u8) []c
 pub fn saveReloadOutcome(result: SaveError!void) SaveReloadOutcome {
     result catch |err| return switch (err) {
         error.SavedButMasked => .completed_masked,
+        error.SavedButUnread => .completed_unread,
         else => .{ .failed = err },
     };
     return .completed;
@@ -3023,7 +3034,7 @@ pub const SettingsWindow = struct {
         switch (self.status_note) {
             // A save's result stays up whatever the draft looks like now.
             .saved, .discarded, .editor_open_failed => return self.status_note.text(),
-            .saved_overridden, .already_default, .reset_failed, .key_copied, .key_copy_failed => return self.noteText(),
+            .saved_overridden, .saved_unread, .already_default, .reset_failed, .key_copied, .key_copy_failed => return self.noteText(),
             .profile_said, .profile_hint, .profile_refused => return self.noteText(),
             // These are about edits that are still there to be saved.
             .field_reset,
@@ -6354,15 +6365,19 @@ pub const SettingsWindow = struct {
         }
 
         switch (saveReloadOutcome(self.handle.saveAndReload(self.handle.ctx, &p, &o))) {
-            .completed => self.completeSynchronousSave(apply_id, false),
+            .completed => self.completeSynchronousSave(apply_id, .clean),
             .completed_masked => {
                 // Persisted bytes are correct but a later config
                 // layer is masking one or more edits. Same baseline
                 // refresh as success since the file IS written.
                 // The toast copy tells the user the bytes made it
                 // to disk but the effective value differs.
-                self.completeSynchronousSave(apply_id, true);
+                self.completeSynchronousSave(apply_id, .masked);
             },
+            // Written, but a file the reload could not read whole may hide
+            // some of it: the same baseline refresh, and the status names
+            // the file.
+            .completed_unread => self.completeSynchronousSave(apply_id, .unread),
             .failed => |err| {
                 // Write failed. DO NOT discard `pending` — the user's
                 // edits are still in memory; losing them on every
@@ -6680,11 +6695,19 @@ pub const SettingsWindow = struct {
         return true;
     }
 
-    fn finishSuccessfulSave(self: *SettingsWindow, masked: bool) void {
+    /// How a save that wrote the file ended (`saveReloadOutcome`).
+    const SavedHow = enum { clean, masked, unread };
+
+    fn finishSuccessfulSave(self: *SettingsWindow, how: SavedHow) void {
+        const masked = how == .masked;
         const should_close = self.close_after_save;
         // Before anything repaints the status: the note outlives the reset.
         self.freeNoteText();
-        self.status_note = if (masked) .saved_overridden else .saved;
+        self.status_note = switch (how) {
+            .clean => .saved,
+            .masked => .saved_overridden,
+            .unread => .saved_unread,
+        };
         // The settings the save wrote that something later overrides, by the
         // names a config file knows them by, and where the value that wins
         // is set, read from the config the save reloaded.
@@ -6702,6 +6725,10 @@ pub const SettingsWindow = struct {
             masked_detail = if (adopted) self.maskedDetail(keys) catch null else null;
             self.note_text = StatusNote.saved_overridden.textWithDetail(self.handle.alloc, masked_detail orelse keys) catch null;
         }
+        // The file the reload could not read whole, as the App names it.
+        if (how == .unread) if (self.handle.failureDetail) |lend| if (lend(self.handle.ctx)) |file| {
+            self.note_text = StatusNote.saved_unread.textWithDetail(self.handle.alloc, file) catch null;
+        };
         if (!adopted) {
             if (should_close) self.cancelClosePrompt();
             return;
@@ -6715,6 +6742,12 @@ pub const SettingsWindow = struct {
                 self.handle.ctx,
                 "Settings saved, but some values are overridden",
                 body,
+            );
+        } else if (how == .unread) {
+            self.handle.notifySuccess(
+                self.handle.ctx,
+                "Settings saved, but a config file could not be read whole",
+                self.noteText(),
             );
         } else {
             self.handle.notifySuccess(self.handle.ctx, "Settings saved", "");
@@ -6761,12 +6794,12 @@ pub const SettingsWindow = struct {
         return out.toOwnedSlice();
     }
 
-    fn completeSynchronousSave(self: *SettingsWindow, apply_id: ?ApplyId, masked: bool) void {
+    fn completeSynchronousSave(self: *SettingsWindow, apply_id: ?ApplyId, how: SavedHow) void {
         const revision = self.nextSuccessfulRevision();
         if (apply_id) |id| {
             if (!self.succeedApply(id, revision)) return;
         }
-        self.finishSuccessfulSave(masked);
+        self.finishSuccessfulSave(how);
     }
 
     fn adoptCurrentConfig(self: *SettingsWindow) !void {
@@ -12768,6 +12801,10 @@ const dialog_test = struct {
         /// What the save's reload found masked: keys, then profile fields.
         masked: [1024]u8 = undefined,
         masked_len: usize = 0,
+        /// The file the last save's reload could not read whole
+        /// (`failureDetail`).
+        unread: [1024]u8 = undefined,
+        unread_len: usize = 0,
         /// What the All settings page's "Copy name" handed the App last, and
         /// how many times: a recorder, so no test reaches the clipboard.
         copied: [128]u8 = undefined,
@@ -12869,6 +12906,7 @@ const dialog_test = struct {
                 .highContrast = &highContrast,
                 .profileChoices = &profileChoices,
                 .maskedKeys = &maskedKeys,
+                .failureDetail = &failureDetail,
                 .onClosed = &onClosed,
                 .configSource = &configSource,
             });
@@ -12891,6 +12929,13 @@ const dialog_test = struct {
         fn maskedKeys(ctx: *anyopaque) ?[]const u8 {
             const self: *Fixture = @ptrCast(@alignCast(ctx));
             return if (self.masked_len == 0) null else self.masked[0..self.masked_len];
+        }
+
+        /// The file the last save's reload could not read whole, as the App
+        /// lends it (`AppHandle.failureDetail`).
+        fn failureDetail(ctx: *anyopaque) ?[]const u8 {
+            const self: *Fixture = @ptrCast(@alignCast(ctx));
+            return if (self.unread_len == 0) null else self.unread[0..self.unread_len];
         }
 
         fn configSource(ctx: *anyopaque, alloc: std.mem.Allocator) settings_reference.ConfigSource {
@@ -12951,10 +12996,18 @@ const dialog_test = struct {
                         var keys: [app.settings_masked_keys_capacity]u8 = undefined;
                         var masked: std.Io.Writer = .fixed(&self.masked);
                         masked.writeAll(app.settingsMaskedKeyNames(&keys, edited, pending, &reloaded)) catch {};
-                        _ = settings_patch.writeMasked(&masked, profile_edits, &reloaded, masked.end > 0) catch {};
+                        const report = settings_patch.reloadReport(&masked, profile_edits, &reloaded, masked.end > 0) catch .held;
                         self.masked_len = masked.end;
+                        self.unread_len = 0;
+                        if (report == .unread) {
+                            const text = report.unread.describe(std.testing.allocator) catch return error.OutOfMemory;
+                            defer std.testing.allocator.free(text);
+                            self.unread_len = @min(text.len, self.unread.len);
+                            @memcpy(self.unread[0..self.unread_len], text[0..self.unread_len]);
+                        }
                         self.config.deinit();
                         self.config = reloaded;
+                        if (report == .unread) return error.SavedButUnread;
                         if (self.masked_len != 0) return error.SavedButMasked;
                         return;
                     }
@@ -20413,7 +20466,19 @@ const ReferenceList = struct {
         if (position >= self.shown_count) return;
         const key = self.shown[position];
         if (self.selected != null and self.selected.? == key) return self.revealSelected(.unless_shown);
-        if (self.kind == .profiles) self.owner().disarmProfileRemoval();
+        if (self.kind == .profiles) {
+            // The Profiles page's open field belongs to its row, and saves to
+            // its profile: it is kept before the selection moves, as a click
+            // on the list keeps it (`profileEditDone`), so it is never drawn
+            // over another profile's row (a UIA client's `Select` comes here
+            // straight). A value Settings refuses holds the field and the
+            // selection where they are, its reason on the status line; so
+            // does a kept change that rebuilt the rows, which `position` no
+            // longer names.
+            const before = self.generation();
+            if (!self.owner().profileEditDone() or self.generation() != before) return;
+            self.owner().disarmProfileRemoval();
+        }
         self.selected = key;
         self.metrics = null;
         self.revealSelected(.whole);
@@ -21927,6 +21992,98 @@ test "settings a new profile's id kept says whether a field is open, whichever a
             } else return error.TestTooManyAllocations;
             // The run that failed nothing went on to the command line.
             try std.testing.expectEqual(ProfileEdit.Kind.new_command, (try openEdit(settings)).kind);
+        }
+    }.body);
+}
+
+test "settings a UIA client selecting another profile's row keeps the open field first, or holds it and the selection on its own row" {
+    try dialog_test.onHiddenDesktop(struct {
+        fn body() !void {
+            const keyboard = win32_input.TestingKeyboard.pinNone();
+            defer keyboard.release();
+            const alloc = std.testing.allocator;
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            // Enough profiles that the last one's rows are out of view, so
+            // selecting one scrolls the list.
+            var text: std.Io.Writer.Allocating = .init(alloc);
+            defer text.deinit();
+            for (0..30) |i| try text.writer.print("profile-command = p{d}: cmd{d}.exe\n", .{ i, i });
+            var path: []u8 = &.{};
+            const fixture = try profileFixture(&tmp, text.written(), &path);
+            defer alloc.free(path);
+            defer fixture.finish();
+            const settings = &fixture.settings;
+            const list = &settings.profile_list;
+            var buf: [128]u8 = undefined;
+            // p0's command line row, and the last profile's.
+            const own = 2;
+            const far = list.shown_count - 3;
+            try std.testing.expect(far > own + 20);
+
+            for ([_]struct { typed: []const u8, kept: bool }{ .{ .typed = "direct:x", .kept = false }, .{ .typed = "cmd0.exe /k", .kept = true } }) |case| {
+                list.selectPosition(own);
+                try std.testing.expect(fixture.pumpKey(VK_RETURN));
+                const field = (try openEdit(settings)).hwnd.?;
+                typeInto(field, case.typed);
+                const scrolled_before = list.scroll_y;
+                // What a UIA client's SelectionItem.Select calls.
+                referenceUiaSelectRow(list, far);
+                if (case.kept) {
+                    // Kept: the field closed, and its value went to p0.
+                    try std.testing.expect(settings.profile_edit == null);
+                    try expectSameText("cmd0.exe /k", settings.pending.?.@"profile-command".get("p0").?);
+                } else {
+                    // Refused: the field and the selection stay on p0's row,
+                    // the list did not scroll, and the reason is shown.
+                    try std.testing.expectEqual(field, (try openEdit(settings)).hwnd.?);
+                    try std.testing.expectEqual(@as(?usize, own), list.selectedPosition());
+                    try std.testing.expectEqual(scrolled_before, list.scroll_y);
+                    try expectSameText("Error: A profile's command line cannot start with direct: or shell:.", try statusTextOf(settings, &buf));
+                    try std.testing.expect(fixture.pumpKey(VK_ESCAPE));
+                }
+                // The far profile never got anything.
+                try expectSameText("cmd29.exe", settings.pending.?.@"profile-command".get("p29").?);
+            }
+        }
+    }.body);
+}
+
+test "settings a save whose reload could not read an included file whole says so, naming the file, instead of an override" {
+    try dialog_test.onHiddenDesktop(struct {
+        fn body() !void {
+            const keyboard = win32_input.TestingKeyboard.pinNone();
+            defer keyboard.release();
+            const alloc = std.testing.allocator;
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            try tmp.dir.writeFile(.{ .sub_path = "more.conf", .data = "font-size = 13\n" });
+            const more = try tmp.dir.realpathAlloc(alloc, "more.conf");
+            defer alloc.free(more);
+            const text = try std.fmt.allocPrint(alloc, "profile-command = py: python.exe\nconfig-file = {s}\n", .{more});
+            defer alloc.free(text);
+            var path: []u8 = &.{};
+            const fixture = try profileFixture(&tmp, text, &path);
+            defer alloc.free(path);
+            defer fixture.finish();
+            const settings = &fixture.settings;
+            var buf: [512]u8 = undefined;
+            // A label for py, typed and kept.
+            settings.profile_list.selectPosition(3);
+            try std.testing.expect(fixture.pumpKey(VK_RETURN));
+            typeInto((try openEdit(settings)).hwnd.?, "Python");
+            try std.testing.expect(fixture.pumpKey(VK_RETURN));
+            // Another program locks the include's bytes while the save
+            // reloads: it opens, and its read fails.
+            var lock = try tmp.dir.openFile("more.conf", .{ .mode = .read_write, .lock = .exclusive });
+            defer lock.close();
+            settings.save();
+            dialog_test.pump();
+            try std.testing.expectEqual(@as(u32, 1), fixture.saved);
+            try std.testing.expectEqual(StatusNote.saved_unread, settings.status_note);
+            const expected = try std.fmt.allocPrint(alloc, "Saved, but the included file {s} could not be read whole, so the saved values may not all be in effect until it can be read.", .{more});
+            defer alloc.free(expected);
+            try expectSameText(expected, try statusTextOf(settings, &buf));
         }
     }.body);
 }
