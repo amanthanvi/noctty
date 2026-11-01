@@ -41,7 +41,8 @@ foreach ($win32TestModuleRoot in $win32TestModuleRoots) {
 # number of pinned names that module held; the modules declare 112 more tests
 # today, so consolidating those is free, and emptying a module, or removing its
 # explicit root import above, fails. Lower a floor only for a deliberate
-# consolidation.
+# consolidation. facade_budget.zig did not move out of win32.zig: its floor is
+# the facade guard's two tests, and its root line is pinned below.
 $movedWin32TestFloors = [ordered]@{
     'labels.zig' = 113
     'input.zig' = 24
@@ -49,6 +50,7 @@ $movedWin32TestFloors = [ordered]@{
     'render_trace.zig' = 3
     'chrome_layout.zig' = 2
     'gdi.zig' = 2
+    'facade_budget.zig' = 2
 }
 foreach ($movedWin32TestModule in $movedWin32TestFloors.Keys) {
     $movedWin32TestModulePath = @($win32RuntimeModuleFiles | Where-Object {
@@ -129,6 +131,83 @@ foreach ($extractedWin32Module in $extractedWin32TestModules.Keys) {
     if ($extractedWin32Count -lt $extractedWin32Floor) {
         throw "$extractedWin32Module declares $extractedWin32Count named Zig tests; the floor is $extractedWin32Floor."
     }
+}
+
+# The facade budget guard (src/apprt/win32/facade_budget.zig) caps win32.zig's
+# dependency bags, aliases and pub surface. It runs only from the root
+# `test {}` block, and a test that drops out of the graph fails nothing, so its
+# root line (here) and its two tests (the floors above) are pinned. Comptime
+# cannot list files, so the rest of the rule is checked here: the src/apprt
+# files that reach win32.zig are exactly these, the guard and the 15 importers
+# it started with (a new one imports the module that owns the name instead; one
+# that stopped comes off the list), and only win32.zig declares a `*_runtime`
+# bag. A file reaches win32.zig by importing it, or through src/apprt.zig,
+# which re-exports it as `apprt.win32` and `apprt.runtime`.
+if (-not [regex]::IsMatch(
+        $win32RootTestBlock.Groups['body'].Value,
+        '(?m)^[ \t]+_ = @import\("win32/facade_budget\.zig"\);[ \t]*\r?$')) {
+    throw 'Win32 runtime root test block is missing: _ = @import("win32/facade_budget.zig");'
+}
+$facadeImporterAllowlist = @(
+    'win32/app.zig'
+    'win32/chrome_scene.zig'
+    'win32/clipboard_write.zig'
+    'win32/facade_budget.zig'
+    'win32/host.zig'
+    'win32/ipc_server.zig'
+    'win32/overlay_session.zig'
+    'win32/palette_controller.zig'
+    'win32/quick_terminal_host.zig'
+    'win32/registry.zig'
+    'win32/search_controls.zig'
+    'win32/session.zig'
+    'win32/surface_presentation.zig'
+    'win32/terminal_window.zig'
+    'win32/window_state.zig'
+    'win32_settings.zig'
+)
+$facadeApprtRoot = [IO.Path]::GetFullPath((Join-Path $repoRoot 'src\apprt'))
+$facadePath = [IO.Path]::GetFullPath($win32Runtime)
+$facadeReexportPath = [IO.Path]::GetFullPath((Join-Path $repoRoot 'src\apprt.zig'))
+$facadeImporters = [Collections.Generic.List[string]]::new()
+$facadeBagFiles = [Collections.Generic.List[string]]::new()
+foreach ($facadeSourceFile in @(Get-ChildItem -LiteralPath $facadeApprtRoot -Filter '*.zig' -File -Recurse)) {
+    if ($facadeSourceFile.FullName -eq $facadePath) { continue }
+    $facadeSourceText = Get-Content -LiteralPath $facadeSourceFile.FullName -Raw
+    $facadeSourceName = [IO.Path]::GetRelativePath($facadeApprtRoot, $facadeSourceFile.FullName).Replace('\', '/')
+    foreach ($facadeImport in [regex]::Matches(
+            $facadeSourceText,
+            '(?:\bconst[ \t]+(?<binding>\w+)(?:[ \t]*:[^=\r\n]*)?[ \t]*=[ \t]*)?@import\("(?<path>[^"\r\n]+)"\)(?<member>\.(?:win32|runtime)\b)?')) {
+        $facadeImportPath = [IO.Path]::GetFullPath(
+            (Join-Path $facadeSourceFile.DirectoryName $facadeImport.Groups['path'].Value))
+        $facadeReached = $facadeImportPath -eq $facadePath
+        if (-not $facadeReached -and $facadeImportPath -eq $facadeReexportPath) {
+            $facadeReached = $facadeImport.Groups['member'].Success -or (
+                $facadeImport.Groups['binding'].Success -and [regex]::IsMatch(
+                    $facadeSourceText,
+                    '(?<![\w.])' + [regex]::Escape($facadeImport.Groups['binding'].Value) + '\.(?:win32|runtime)\b'))
+        }
+        if ($facadeReached) {
+            $facadeImporters.Add($facadeSourceName)
+            break
+        }
+    }
+    if ([regex]::IsMatch(
+            $facadeSourceText,
+            '(?m)^[ \t]*(?:pub[ \t]+)?const[ \t]+\w+_runtime(?:[ \t]*:[^=\r\n]*)?[ \t]*=[ \t]*(?:if[ \t]*\(.*?\)[ \t]*)?\.\{')) {
+        $facadeBagFiles.Add($facadeSourceName)
+    }
+}
+$facadeNewImporters = @($facadeImporters | Where-Object { $_ -cnotin $facadeImporterAllowlist })
+if ($facadeNewImporters.Count -ne 0) {
+    throw "These files reach win32.zig (an import of it, or apprt.win32 or apprt.runtime) and are not on its importer list: $($facadeNewImporters -join ', '). Import each name from the module that owns it, not from the facade."
+}
+$facadeFormerImporters = @($facadeImporterAllowlist | Where-Object { $_ -cnotin $facadeImporters })
+if ($facadeFormerImporters.Count -ne 0) {
+    throw "These files no longer import win32.zig: $($facadeFormerImporters -join ', '). Take them off the importer list in Contracts.20-Zig.ps1."
+}
+if ($facadeBagFiles.Count -ne 0) {
+    throw "Only win32.zig may declare a *_runtime dependency bag; found one in $($facadeBagFiles -join ', '). Import each name from the module that owns it."
 }
 
 $nativeKeyFilters = @('VK_PACKET', 'deferred char')

@@ -413,13 +413,16 @@ that govern each symbol you change, or that none does.
   `src/terminal/search/Thread.zig`), the shared Win32 test fixtures
   (`win32/test_support.zig`, `TestSession`), PSReadLine history isolation
   (`scripts/windows-harness-history.ps1`, `--command=cmd.exe` pins), a bash
-  probe's `HISTFILE`, and a test count or result that contradicts the code.
+  probe's `HISTFILE`, a failing test's error name (the installed test
+  executable), and a test count or result that contradicts the code.
 - [tooling.md](docs/agents/log/tooling.md): declaring `extern` functions or
   structs, casting Win32 handles and `LPARAM`/`LRESULT` (`@intCast`,
   `@bitCast`, `@ptrFromInt`), passing `[:0]u16` to text APIs, renaming or moving
   Zig declarations (the `src/apprt/win32.zig` split into `win32/*.zig`),
-  `union(enum)` tests, PowerShell language traps, and `gh`,
-  git and codex commands.
+  adding a name to `src/apprt/win32.zig` or to one of its `*_runtime` bags
+  (the budget in `win32/facade_budget.zig`, and the facade importer list in
+  `Contracts.20-Zig.ps1`), `union(enum)` tests, PowerShell language traps, and
+  `gh`, git and codex commands.
 
 A comment that cites AGENTS.md (by date, issue number, symbol or an old line
 number such as `AGENTS.md:75`) means a log entry. Run

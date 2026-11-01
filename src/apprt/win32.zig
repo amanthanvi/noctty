@@ -607,9 +607,9 @@ pub const quick_terminal_host_runtime = .{
     .win32_tween = win32_tween,
 };
 
-// Test-only binding keeps the runtime's private operations private while
-// sharing one fixture implementation with tests extracted in later steps.
-pub const test_support = if (builtin.is_test) @import("win32/test_support.zig").Fixtures(.{
+// The private runtime operations the shared test fixtures need, in a bag of
+// their own so `win32/facade_budget.zig` can count it.
+pub const test_support_runtime = if (builtin.is_test) .{
     .App = App,
     .Host = Host,
     .Surface = Surface,
@@ -665,7 +665,11 @@ pub const test_support = if (builtin.is_test) @import("win32/test_support.zig").
     .settingsSaveTargetThunk = settingsSaveTargetThunk,
     .settingsTextPrimaryThunk = settingsTextPrimaryThunk,
     .settingsThemeColorsThunk = settingsThemeColorsThunk,
-}) else struct {};
+} else .{};
+
+// Test-only binding: one fixture implementation shared by the tests in this
+// file and in the modules under win32/.
+pub const test_support = if (builtin.is_test) @import("win32/test_support.zig").Fixtures(test_support_runtime) else struct {};
 
 test {
     _ = app_module;
@@ -693,6 +697,7 @@ test {
     _ = @import("win32/focus_region.zig");
     _ = @import("win32/focus_cue.zig");
     _ = @import("win32/first_frame.zig");
+    _ = @import("win32/facade_budget.zig");
     _ = clipboard_write;
     _ = @import("win32_aumid.zig");
     _ = @import("win32_toast_activator.zig");
