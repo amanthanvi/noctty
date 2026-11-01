@@ -3790,8 +3790,6 @@ pub const Surface = struct {
         drawRoundedRect(hdc, thumb, thumb_bg, thumb_border, radius);
     }
 
-    pub const searchQueryOptions = search_controls.SurfaceControls.searchQueryOptions;
-
     pub const applySearchBarFont = search_controls.SurfaceControls.applySearchBarFont;
 
     pub const invalidateSearchButtons = search_controls.SurfaceControls.invalidateSearchButtons;
@@ -3826,17 +3824,11 @@ pub const Surface = struct {
 
     pub const syncSearchBarResultsText = search_controls.SurfaceControls.syncSearchBarResultsText;
 
-    pub const issueSearchNow = search_controls.SurfaceControls.issueSearchNow;
-
-    pub const runPendingSearchNow = search_controls.SurfaceControls.runPendingSearchNow;
-
     pub const rerunSearchNow = search_controls.SurfaceControls.rerunSearchNow;
 
     pub const handleSearchBarEditChanged = search_controls.SurfaceControls.handleSearchBarEditChanged;
 
     pub const navigateDockedSearch = search_controls.SurfaceControls.navigateDockedSearch;
-
-    pub const handleSearchToggleClick = search_controls.SurfaceControls.handleSearchToggleClick;
 
     pub const dockedSearch = search_controls.SurfaceControls.dockedSearch;
 
@@ -3853,7 +3845,7 @@ pub const Surface = struct {
         self.docked_search.close();
         self.docked_search.total = null;
         self.docked_search.selected_raw = null;
-        try self.setSearchActive(false, "");
+        try self.setSearchActive(false);
         _ = self.hideSearchBarControls();
         host.refreshSearchTimerState();
         try host.layout();
@@ -3870,19 +3862,10 @@ pub const Surface = struct {
         try self.ensureSearchBarControls();
         self.docked_search.open();
 
-        const initial = if (needle.len > 0)
-            needle
-        else if (self.docked_search.query.len > 0)
-            self.docked_search.query
-        else if (self.docked_search.needle) |value|
-            value
-        else
-            "";
-        const same_query = if (self.docked_search.needle) |value|
-            std.mem.eql(u8, value, initial)
-        else
-            false;
-        const restore_live_results = initial.len > 0 and self.docked_search.active and same_query;
+        // While a search is active the core searches for the query.
+        const initial = if (needle.len > 0) needle else self.docked_search.query;
+        const same_query = self.docked_search.active and std.mem.eql(u8, self.docked_search.query, initial);
+        const restore_live_results = initial.len > 0 and same_query;
         if (!std.mem.eql(u8, self.docked_search.query, initial)) {
             try self.docked_search.setQuery(initial, 0);
         }
@@ -3904,7 +3887,7 @@ pub const Surface = struct {
             _ = sys.SendMessageW(edit_hwnd, c.EM_SETSEL, 0, -1);
         }
 
-        if (initial.len > 0 and (!self.docked_search.active or !same_query)) {
+        if (initial.len > 0 and !same_query) {
             _ = try self.rerunSearchNow();
         }
     }
@@ -4648,7 +4631,7 @@ pub const Surface = struct {
         self.program_status.deinit(self.app.core_app.alloc);
         self.destroyScrollbarWindow();
         self.destroySearchBarControls();
-        // Drain the search state's query, needle and match rows.
+        // Drain the search state's query and match rows.
         self.docked_search.deinit();
         // Tear down any confirm overlay whose userdata points at
         // this Surface BEFORE we drain our own pending state. If we
@@ -4906,8 +4889,7 @@ pub const Surface = struct {
         try std.testing.expect(!host.bannerShown());
     }
 
-    pub fn setSearchActive(self: *Surface, active: bool, needle: []const u8) !void {
-        const alloc = self.app.core_app.alloc;
+    pub fn setSearchActive(self: *Surface, active: bool) !void {
         self.docked_search.active = active;
         self.docked_search.total = null;
         self.docked_search.selected_raw = null;
@@ -4915,21 +4897,12 @@ pub const Surface = struct {
         if (!active) {
             self.docked_search.searched = self.docked_search.query.len == 0;
             self.docked_search.last_edit_ms = 0;
-        } else if (needle.len > 0 and !std.mem.eql(u8, self.docked_search.query, needle)) {
-            try self.docked_search.setQuery(needle, 0);
-            self.docked_search.searched = true;
-            self.docked_search.last_edit_ms = 0;
         }
         if (self.docked_search.match_rows.len > 0) {
-            alloc.free(self.docked_search.match_rows);
+            self.docked_search.alloc.free(self.docked_search.match_rows);
             self.docked_search.match_rows = &.{};
         }
         self.clearScrollbarMarkers();
-        if (active and needle.len > 0) {
-            try appendOwnedString(alloc, &self.docked_search.needle, needle);
-        } else if (!active) {
-            try appendOwnedString(alloc, &self.docked_search.needle, null);
-        }
         _ = try self.syncSearchBarResultsText();
         try self.refreshScrollbarWindow();
     }

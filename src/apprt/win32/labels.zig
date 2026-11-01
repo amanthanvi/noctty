@@ -1090,24 +1090,6 @@ pub fn searchBarButtonName(role: SearchBarButtonRole) []const u8 {
     };
 }
 
-pub fn showSearchBarResults(bar: *const docked_search.DockedSearch) bool {
-    return bar.query.len > 0;
-}
-
-/// Docked-search geometry only changes when the fixed-width results slot
-/// appears or disappears. Query text updates within the non-empty state
-/// repaint child HWNDs but do not move controls.
-pub fn searchBarNeedsRelayoutForQueryChange(previous_query_len: usize, next_query_len: usize) bool {
-    return (previous_query_len == 0) != (next_query_len == 0);
-}
-
-/// Once a query has reached core search, any edit must invalidate it until the
-/// debounced replacement query runs.
-pub fn searchBarShouldInvalidateCoreSearchOnEdit(previous_query_len: usize, next_query_len: usize) bool {
-    _ = next_query_len;
-    return previous_query_len > 0;
-}
-
 pub fn searchBarButtonShowsLabel(role: SearchBarButtonRole, button_width: i32) bool {
     _ = role;
     _ = button_width;
@@ -3164,35 +3146,6 @@ test "win32 buildSearchOverlayLabel reflects match counts" {
     const idle = try buildSearchOverlayLabel(std.testing.allocator, null, null);
     defer std.testing.allocator.free(idle);
     try std.testing.expectEqualStrings("Find", idle);
-}
-
-test "win32 showSearchBarResults only shows status chip for non-empty queries" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    var bar = docked_search.DockedSearch.init(std.testing.allocator);
-    defer bar.deinit();
-
-    try std.testing.expect(!showSearchBarResults(&bar));
-    try bar.setQuery("search-open", 10);
-    try std.testing.expect(showSearchBarResults(&bar));
-}
-
-test "win32 searchBarNeedsRelayoutForQueryChange only trips on empty-state transitions" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    try std.testing.expect(!searchBarNeedsRelayoutForQueryChange(0, 0));
-    try std.testing.expect(searchBarNeedsRelayoutForQueryChange(0, 1));
-    try std.testing.expect(!searchBarNeedsRelayoutForQueryChange(4, 9));
-    try std.testing.expect(searchBarNeedsRelayoutForQueryChange(3, 0));
-}
-
-test "win32 searchBarShouldInvalidateCoreSearchOnEdit invalidates active query edits" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    try std.testing.expect(!searchBarShouldInvalidateCoreSearchOnEdit(0, 0));
-    try std.testing.expect(!searchBarShouldInvalidateCoreSearchOnEdit(0, 1));
-    try std.testing.expect(searchBarShouldInvalidateCoreSearchOnEdit(5, 2));
-    try std.testing.expect(searchBarShouldInvalidateCoreSearchOnEdit(5, 0));
 }
 
 test "win32 searchBarResultsVisual marks no-match state with error colors" {

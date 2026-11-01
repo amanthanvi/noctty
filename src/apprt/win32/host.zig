@@ -7276,9 +7276,7 @@ pub const Host = struct {
         var wants_timer = false;
         var it = tab.tree.iterator();
         while (it.next()) |entry| {
-            if (!entry.view.docked_search.visible) continue;
-            if (entry.view.docked_search.query.len == 0) continue;
-            if (!entry.view.docked_search.searched) {
+            if (entry.view.docked_search.view().wants_tick) {
                 wants_timer = true;
                 break;
             }
@@ -7288,13 +7286,10 @@ pub const Host = struct {
     }
 
     pub fn tickSearchBars(self: *Host) void {
-        const now_ms: i64 = @intCast(sys.GetTickCount64());
         if (self.activeTab()) |tab| {
             var it = tab.tree.iterator();
             while (it.next()) |entry| {
-                if (!entry.view.docked_search.visible) continue;
-                if (!entry.view.docked_search.shouldRunSearch(now_ms)) continue;
-                _ = entry.view.runPendingSearchNow() catch |err| {
+                _ = entry.view.dockedSearch(.tick) catch |err| {
                     log.warn("win32 search refresh failed err={}", .{err});
                     continue;
                 };

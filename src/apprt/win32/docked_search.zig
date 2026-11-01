@@ -3,21 +3,17 @@
 //! pairing. No HWND creation, painting or keybind dispatch: those belong to
 //! the Win32 surface layer (`search_controls.zig`).
 //!
-//! `apply` takes an input and returns what the window must do (`Outcome`);
-//! `view` says what to draw. Nothing here calls the core, Win32 or the
-//! clock, and `apply` finishes its whole state change before it returns, so
-//! the core can call back into it while the caller carries out an Outcome.
-//! A View's slices are valid until the next `apply`.
+//! `apply` takes an input and returns what the window and the core must do
+//! (`Outcome`); `view` says what to draw. Nothing here calls the core, Win32
+//! or the clock, and `apply` finishes its whole state change before it
+//! returns, so the core can call back into it while the caller carries out
+//! an Outcome. A View's slices, and a `Command.search` text, are valid until
+//! the next `apply`, a re-entrant one included.
 //!
 //! **Debounce rationale.**  Scrollback search is O(lines * query_len).
 //! Re-running on every WM_COMMAND / EN_CHANGE would stall the UI on
 //! large histories.  A 40 ms window batches rapid keystrokes into a
 //! single search pass while feeling instantaneous to the user.
-//!
-//! **Wrap navigation.**  The helper keeps an internal `wrap` flag so
-//! callers can choose whether next/previous navigation wraps. The
-//! current Win32 UI does not surface a dedicated wrap toggle; it keeps
-//! the default wrapping behaviour unless a caller opts out.
 //!
 //! **Toggle persistence across close.**  Closing the bar (Esc) hides
 //! the visual but preserves query + toggles so that re-opening (Ctrl+F)
@@ -26,6 +22,11 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+
+pub const debounce_ms: i64 = 40;
+
+/// The regex, case and whole-word toggles, as the core takes them.
+pub const QueryOptions = @import("../../terminal/search/query_options.zig").QueryOptions;
 
 /// The docked search bar's buttons, in the order the bar lays them out.
 pub const Role = enum {
@@ -46,15 +47,13 @@ pub const Mods = struct {
     alt: bool = false,
 };
 
-pub const Toggles = packed struct {
-    regex: bool = false,
-    case_sensitive: bool = false,
-    whole_word: bool = false,
-    wrap: bool = true,
-    _padding: u4 = 0,
-};
-
 pub const Input = union(enum) {
+    /// The edit's text after EN_CHANGE, borrowed for the call.
+    edit: []const u8,
+    /// A toggle's BN_CLICKED (regex, case_sensitive, whole_word).
+    click: Role,
+    /// The host's search timer fired.
+    tick,
     /// A core action for this pane.
     core: Core,
 
@@ -67,12 +66,36 @@ pub const Input = union(enum) {
     };
 };
 
-/// What the window must do after an `apply`.
+/// What the core must do: at most one per `apply`.
+pub const Command = union(enum) {
+    /// `setSearchQuery(text, options)`.
+    search: struct { text: []const u8, options: QueryOptions },
+    /// `setSearchQuery("", .{})`.
+    stop,
+    /// `invalidateSearchResults()`.
+    invalidate,
+};
+
+/// What the window and the core must do after an `apply`. The adapter
+/// (`search_controls.applyDockedSearch`) carries the fields out in the
+/// order they are declared: `core` is next to last because the core
+/// reports back into `apply` while it runs, and `frame` comes before it so
+/// a search starts against the pane's new size.
 pub const Outcome = struct {
+    /// The input was search's: the window procedure returns 0.
+    handled: bool = false,
+    /// A toggle flipped: raise its UIA ToggleChanged and repaint the
+    /// buttons. First, so the toggle is announced before the results.
+    toggled: ?Role = null,
     /// Write `view().results` to the chip and raise its live region once.
     results_changed: bool = false,
     /// Clear the scrollbar markers and refresh the scrollbar window.
     markers_changed: bool = false,
+    /// The chip appeared or went: lay the host out again.
+    frame: enum { same, relayout } = .same,
+    /// Refresh the host's search timer (`view().wants_tick`).
+    timer_changed: bool = false,
+    core: ?Command = null,
 };
 
 /// What the results chip says.
@@ -117,7 +140,14 @@ pub const Results = union(enum) {
 };
 
 pub const View = struct {
+    open: bool,
+    /// The query is not empty, so the layout gives the chip a slot (it may
+    /// still drop it for width).
+    chip: bool,
     results: Results,
+    options: QueryOptions,
+    /// The host's search timer has a debounce to wait out here.
+    wants_tick: bool,
     /// Rows of the matches, for the scrollbar markers.
     match_rows: []const u32,
 };
@@ -158,7 +188,7 @@ pub const ToggleKeys = struct {
 pub const DockedSearch = struct {
     visible: bool = false,
     query: []u8 = &.{},
-    toggles: Toggles = .{},
+    options: QueryOptions = .{},
     /// What the core last reported: the total, and the selected match's
     /// newest-first index (the core's 1-based number minus one).
     total: ?usize = null,
@@ -167,21 +197,19 @@ pub const DockedSearch = struct {
     /// Every edit or toggle clears it, because the answer belongs to the
     /// query that was searched.
     invalid: bool = false,
+    /// When the debounce started; 0 when none is waiting.
     last_edit_ms: i64 = 0,
-    /// When true the debounce has already fired (or was bypassed via
-    /// `forceSearch`) and no new edit has arrived since.  Prevents
-    /// `shouldRunSearch` from returning true twice for the same edit.
+    /// False while an edit waits out the debounce, and when the core's
+    /// answer says nothing about the query (a null total, or a null
+    /// selection with no total).
     searched: bool = true,
-    /// A query reached the core and has not been stopped since.
+    /// A query was edited or searched and not stopped since. The core
+    /// searches for `query` when this is set and `searched` is too.
     active: bool = false,
-    /// The query the core is searching for, owned.
-    needle: ?[:0]const u8 = null,
     /// The rows of the matches, owned, for the scrollbar markers.
     match_rows: []const u32 = &.{},
     toggle_keys: ToggleKeys = .{},
     alloc: Allocator,
-
-    pub const debounce_ms: i64 = 40;
 
     pub fn init(alloc: Allocator) DockedSearch {
         return .{ .alloc = alloc };
@@ -189,16 +217,20 @@ pub const DockedSearch = struct {
 
     pub fn deinit(self: *DockedSearch) void {
         if (self.query.len > 0) self.alloc.free(self.query);
-        if (self.needle) |value| self.alloc.free(value);
         if (self.match_rows.len > 0) self.alloc.free(self.match_rows);
         self.* = undefined;
     }
 
     /// Fails only to copy what the input carries, and then changes nothing.
     pub fn apply(self: *DockedSearch, in: Input, now_ms: i64) Allocator.Error!Outcome {
-        _ = now_ms;
         const before = self.results();
         var out: Outcome = switch (in) {
+            .edit => |text| try self.edit(text, now_ms),
+            .click => |role| switch (role) {
+                .regex, .case_sensitive, .whole_word => self.toggle(role),
+                .prev, .next, .close => .{},
+            },
+            .tick => if (self.visible and self.debounceDue(now_ms)) self.issue() else .{},
             .core => |core| try self.report(core),
         };
         out.results_changed = !before.eql(self.results());
@@ -207,9 +239,91 @@ pub const DockedSearch = struct {
 
     pub fn view(self: *const DockedSearch) View {
         return .{
+            .open = self.visible,
+            .chip = self.query.len > 0,
             .results = self.results(),
+            .options = self.options,
+            .wants_tick = self.visible and self.query.len > 0 and !self.searched,
             .match_rows = self.match_rows,
         };
+    }
+
+    /// Searches for the query at once, debounce or not, as navigation and
+    /// the open do until they go through `apply`.
+    pub fn rerun(self: *DockedSearch) Outcome {
+        if (self.query.len == 0) return .{};
+        const before = self.results();
+        var out = self.issue();
+        out.results_changed = !before.eql(self.results());
+        return out;
+    }
+
+    fn edit(self: *DockedSearch, text: []const u8, now_ms: i64) Allocator.Error!Outcome {
+        const previous_len = self.query.len;
+        try self.setQuery(text, now_ms);
+        self.setActive(text.len > 0);
+        return .{
+            .handled = true,
+            .markers_changed = true,
+            // Only the chip's slot moves the controls, and it follows
+            // whether there is a query.
+            .frame = if ((previous_len == 0) != (text.len == 0)) .relayout else .same,
+            .timer_changed = true,
+            // Once a query has reached the core, an edit invalidates it
+            // until the debounced replacement runs.
+            .core = if (previous_len == 0) null else if (text.len == 0) .stop else .invalidate,
+        };
+    }
+
+    fn toggle(self: *DockedSearch, role: Role) Outcome {
+        switch (role) {
+            .regex => self.options.regex = !self.options.regex,
+            .case_sensitive => self.options.case_sensitive = !self.options.case_sensitive,
+            .whole_word => self.options.whole_word = !self.options.whole_word,
+            .prev, .next, .close => unreachable,
+        }
+        var out: Outcome = if (self.query.len > 0) self.issue() else .{ .handled = true };
+        // A search under the old options says nothing of the new ones.
+        self.total = null;
+        self.selected_raw = null;
+        self.invalid = false;
+        out.toggled = role;
+        return out;
+    }
+
+    /// The query, which is not empty, goes to the core now.
+    fn issue(self: *DockedSearch) Outcome {
+        self.searched = true;
+        self.last_edit_ms = 0;
+        self.setActive(true);
+        return .{
+            .handled = true,
+            .markers_changed = true,
+            .timer_changed = true,
+            .core = .{ .search = .{ .text = self.query, .options = self.options } },
+        };
+    }
+
+    /// What the core reported is dropped, and the markers with it.
+    fn setActive(self: *DockedSearch, active: bool) void {
+        self.active = active;
+        self.total = null;
+        self.selected_raw = null;
+        self.invalid = false;
+        if (!active) {
+            self.searched = self.query.len == 0;
+            self.last_edit_ms = 0;
+        }
+        if (self.match_rows.len > 0) self.alloc.free(self.match_rows);
+        self.match_rows = &.{};
+    }
+
+    /// The debounce fires once per edit, 40 ms after it.
+    fn debounceDue(self: *const DockedSearch, now_ms: i64) bool {
+        if (self.query.len == 0) return false;
+        if (self.searched) return false;
+        if (self.last_edit_ms == 0) return false;
+        return (now_ms - self.last_edit_ms) >= debounce_ms;
     }
 
     fn report(self: *DockedSearch, core: Input.Core) Allocator.Error!Outcome {
@@ -254,10 +368,6 @@ pub const DockedSearch = struct {
         return if (index < total) index + 1 else null;
     }
 
-    // -----------------------------------------------------------------
-    // Visibility
-    // -----------------------------------------------------------------
-
     pub fn open(self: *DockedSearch) void {
         self.visible = true;
     }
@@ -266,10 +376,9 @@ pub const DockedSearch = struct {
         self.visible = false;
     }
 
-    // -----------------------------------------------------------------
-    // Query
-    // -----------------------------------------------------------------
-
+    /// A new query starts the debounce (`now_ms`) and drops what the core
+    /// said of the old one; an empty one waits for nothing. Copies first, so
+    /// on OutOfMemory nothing changed.
     pub fn setQuery(self: *DockedSearch, next: []const u8, now_ms: i64) Allocator.Error!void {
         const next_owned: ?[]u8 = if (next.len > 0) try self.alloc.dupe(u8, next) else null;
         errdefer if (next_owned) |value| self.alloc.free(value);
@@ -292,58 +401,6 @@ pub const DockedSearch = struct {
         self.invalid = false;
         self.last_edit_ms = now_ms;
         self.searched = false;
-    }
-
-    // -----------------------------------------------------------------
-    // Debounce
-    // -----------------------------------------------------------------
-
-    pub fn shouldRunSearch(self: *const DockedSearch, now_ms: i64) bool {
-        if (self.query.len == 0) return false;
-        if (self.searched) return false;
-        if (self.last_edit_ms == 0) return false;
-        return (now_ms - self.last_edit_ms) >= debounce_ms;
-    }
-
-    /// Clear debounce and signal the caller to re-run immediately.
-    /// Returns true when a non-empty query exists (caller should search).
-    pub fn forceSearch(self: *DockedSearch) bool {
-        if (self.query.len == 0) return false;
-        self.searched = true;
-        self.last_edit_ms = 0;
-        return true;
-    }
-
-    // -----------------------------------------------------------------
-    // Toggles
-    // -----------------------------------------------------------------
-
-    fn invalidateResults(self: *DockedSearch, now_ms: i64) void {
-        self.total = null;
-        self.selected_raw = null;
-        self.invalid = false;
-        if (self.query.len == 0) {
-            self.searched = true;
-            self.last_edit_ms = 0;
-        } else {
-            self.searched = false;
-            self.last_edit_ms = now_ms;
-        }
-    }
-
-    pub fn toggleRegex(self: *DockedSearch, now_ms: i64) void {
-        self.toggles.regex = !self.toggles.regex;
-        self.invalidateResults(now_ms);
-    }
-
-    pub fn toggleCase(self: *DockedSearch, now_ms: i64) void {
-        self.toggles.case_sensitive = !self.toggles.case_sensitive;
-        self.invalidateResults(now_ms);
-    }
-
-    pub fn toggleWord(self: *DockedSearch, now_ms: i64) void {
-        self.toggles.whole_word = !self.toggles.whole_word;
-        self.invalidateResults(now_ms);
     }
 };
 
@@ -373,173 +430,15 @@ test "query survives close/open" {
     try std.testing.expectEqualStrings("foo", bar.query);
 }
 
-test "setQuery accepts aliased source slice" {
-    var bar = DockedSearch.init(std.testing.allocator);
-    defer bar.deinit();
-
-    try bar.setQuery("foo", 1000);
-    try bar.setQuery(bar.query, 2000);
-    try std.testing.expectEqualStrings("foo", bar.query);
-    try std.testing.expectEqual(@as(i64, 2000), bar.last_edit_ms);
-}
-
-test "setQuery clears stale results for a new search" {
-    var bar = DockedSearch.init(std.testing.allocator);
-    defer bar.deinit();
-
-    try bar.setQuery("foo", 1000);
-    bar.total = 8;
-    bar.searched = true;
-    bar.selected_raw = 4;
-
-    try bar.setQuery("bar", 1100);
-    try std.testing.expectEqual(@as(?usize, null), bar.total);
-    try std.testing.expectEqual(@as(?usize, null), bar.selected_raw);
-    try std.testing.expect(!bar.searched);
-    try std.testing.expectEqual(@as(i64, 1100), bar.last_edit_ms);
-}
-
-test "empty query clears results" {
-    var bar = DockedSearch.init(std.testing.allocator);
-    defer bar.deinit();
-
-    bar.open();
-    try bar.setQuery("x", 1000);
-    bar.total = 5;
-    bar.searched = true;
-    try std.testing.expectEqual(@as(?usize, 5), bar.total);
-
-    try bar.setQuery("", 2000);
-    try std.testing.expectEqual(@as(?usize, null), bar.total);
-    try std.testing.expectEqual(@as(?usize, null), bar.selected_raw);
-}
-
-test "setQuery starts debounce" {
-    var bar = DockedSearch.init(std.testing.allocator);
-    defer bar.deinit();
-
-    try bar.setQuery("hi", 1000);
-    try std.testing.expect(!bar.shouldRunSearch(1010)); // 10 ms < 40 ms
-    try std.testing.expect(bar.shouldRunSearch(1041)); // 41 ms >= 40 ms
-}
-
-test "shouldRunSearch needs non-empty query" {
-    var bar = DockedSearch.init(std.testing.allocator);
-    defer bar.deinit();
-
-    try bar.setQuery("", 1000);
-    try std.testing.expect(!bar.shouldRunSearch(2000));
-}
-
-test "forceSearch bypasses debounce" {
-    var bar = DockedSearch.init(std.testing.allocator);
-    defer bar.deinit();
-
-    try bar.setQuery("q", 1000);
-    try std.testing.expect(bar.forceSearch());
-    try std.testing.expect(!bar.shouldRunSearch(9999)); // already searched
-}
-
-test "toggleRegex flips bit" {
-    var bar = DockedSearch.init(std.testing.allocator);
-    defer bar.deinit();
-
-    try std.testing.expect(!bar.toggles.regex);
-    bar.toggleRegex(1000);
-    try std.testing.expect(bar.toggles.regex);
-    bar.toggleRegex(2000);
-    try std.testing.expect(!bar.toggles.regex);
-}
-
-test "toggle invalidates stale results for non-empty query" {
-    var bar = DockedSearch.init(std.testing.allocator);
-    defer bar.deinit();
-
-    try bar.setQuery("needle", 1000);
-    try std.testing.expect(bar.forceSearch());
-    bar.total = 10;
-    bar.selected_raw = 3;
-
-    bar.toggleRegex(2000);
-    try std.testing.expectEqual(@as(?usize, null), bar.total);
-    try std.testing.expectEqual(@as(?usize, null), bar.selected_raw);
-    try std.testing.expect(!bar.searched);
-    try std.testing.expectEqual(@as(i64, 2000), bar.last_edit_ms);
-    try std.testing.expect(bar.shouldRunSearch(2041));
-}
-
-test "toggleCase invalidates stale results for non-empty query" {
-    var bar = DockedSearch.init(std.testing.allocator);
-    defer bar.deinit();
-
-    try bar.setQuery("needle", 1000);
-    try std.testing.expect(bar.forceSearch());
-    bar.total = 10;
-    bar.selected_raw = 3;
-
-    bar.toggleCase(2000);
-    try std.testing.expectEqual(@as(?usize, null), bar.total);
-    try std.testing.expectEqual(@as(?usize, null), bar.selected_raw);
-    try std.testing.expect(!bar.searched);
-    try std.testing.expectEqual(@as(i64, 2000), bar.last_edit_ms);
-    try std.testing.expect(bar.shouldRunSearch(2041));
-}
-
-test "toggleWord invalidates stale results for non-empty query" {
-    var bar = DockedSearch.init(std.testing.allocator);
-    defer bar.deinit();
-
-    try bar.setQuery("needle", 1000);
-    try std.testing.expect(bar.forceSearch());
-    bar.total = 10;
-    bar.selected_raw = 3;
-
-    bar.toggleWord(2000);
-    try std.testing.expectEqual(@as(?usize, null), bar.total);
-    try std.testing.expectEqual(@as(?usize, null), bar.selected_raw);
-    try std.testing.expect(!bar.searched);
-    try std.testing.expectEqual(@as(i64, 2000), bar.last_edit_ms);
-    try std.testing.expect(bar.shouldRunSearch(2041));
-}
-
-test "an edit or a toggle clears the invalid-query mark" {
-    var bar = DockedSearch.init(std.testing.allocator);
-    defer bar.deinit();
-
-    try bar.setQuery("need(", 1000);
-    try std.testing.expect(bar.forceSearch());
-    bar.total = 0;
-    bar.invalid = true;
-
-    try bar.setQuery("need(e", 1100);
-    try std.testing.expect(!bar.invalid);
-
-    bar.invalid = true;
-    bar.toggleRegex(1200);
-    try std.testing.expect(!bar.invalid);
-
-    bar.invalid = true;
-    bar.toggleCase(1300);
-    try std.testing.expect(!bar.invalid);
-
-    bar.invalid = true;
-    bar.toggleWord(1400);
-    try std.testing.expect(!bar.invalid);
-
-    bar.invalid = true;
-    try bar.setQuery("", 1500);
-    try std.testing.expect(!bar.invalid);
-}
-
 test "toggles persist across open/close" {
     var bar = DockedSearch.init(std.testing.allocator);
     defer bar.deinit();
 
     bar.open();
-    bar.toggleCase(1000);
+    _ = try bar.apply(.{ .click = .case_sensitive }, 1000);
     bar.close();
     bar.open();
-    try std.testing.expect(bar.toggles.case_sensitive);
+    try std.testing.expect(bar.view().options.case_sensitive);
 }
 
 test "win32 search toggle accelerators need Alt without Ctrl, Shift or AltGr" {
@@ -576,8 +475,9 @@ test "win32 search toggle accelerators need Alt without Ctrl, Shift or AltGr" {
 fn testSearching(alloc: Allocator, text: []const u8) !DockedSearch {
     var search = DockedSearch.init(alloc);
     errdefer search.deinit();
-    try search.setQuery(text, 1000);
-    _ = search.forceSearch();
+    search.open();
+    _ = try search.apply(.{ .edit = text }, 1000);
+    _ = try search.apply(.tick, 1000 + debounce_ms);
     return search;
 }
 
@@ -654,4 +554,140 @@ test "OutOfMemory copying rows leaves the state unchanged" {
     _ = try search.apply(.{ .core = .{ .rows = &.{ 1, 2 } } }, 0);
     try std.testing.expectError(error.OutOfMemory, search.apply(.{ .core = .{ .rows = &.{ 5, 6, 7 } } }, 0));
     try std.testing.expectEqualSlices(u32, &.{ 1, 2 }, search.view().match_rows);
+}
+
+test "an edit waits out 40 ms, then one tick searches once" {
+    var search = DockedSearch.init(std.testing.allocator);
+    defer search.deinit();
+    search.open();
+    const edited = try search.apply(.{ .edit = "needle" }, 1000);
+    try std.testing.expect(edited.timer_changed);
+    try std.testing.expect(edited.core == null);
+    try std.testing.expect(search.view().wants_tick);
+    try std.testing.expect((try search.apply(.tick, 1000 + debounce_ms - 1)).core == null);
+    const fired = try search.apply(.tick, 1000 + debounce_ms);
+    const command = fired.core orelse return error.NoSearch;
+    try std.testing.expectEqual(std.meta.Tag(Command).search, std.meta.activeTag(command));
+    try std.testing.expectEqualStrings("needle", command.search.text);
+    try std.testing.expect(fired.timer_changed);
+    try std.testing.expect(!search.view().wants_tick);
+    try std.testing.expect((try search.apply(.tick, 1000 + debounce_ms + 1)).core == null);
+}
+
+test "a stale total, selection and rows for the previous query during the debounce are ignored" {
+    var search = try testSearching(std.testing.allocator, "needle");
+    defer search.deinit();
+    _ = try search.apply(.{ .core = .{ .total = .{ .total = 12 } } }, 0);
+    _ = try search.apply(.{ .core = .{ .rows = &.{ 4, 8 } } }, 0);
+    _ = try search.apply(.{ .edit = "needlex" }, 2000);
+    const stale = [_]Input{
+        .{ .core = .{ .total = .{ .total = 12 } } },
+        .{ .core = .{ .selected = 1 } },
+        .{ .core = .{ .rows = &.{ 4, 8 } } },
+    };
+    for (stale) |in| {
+        const out = try search.apply(in, 2010);
+        try std.testing.expect(!out.results_changed);
+        try std.testing.expect(!out.markers_changed);
+    }
+    var buf: [48]u8 = undefined;
+    try std.testing.expectEqualStrings("Searching", search.view().results.text(&buf));
+    try std.testing.expectEqual(@as(usize, 0), search.view().match_rows.len);
+}
+
+test "editing a searched query invalidates, clearing it stops, and the first character from empty sends nothing" {
+    var search = DockedSearch.init(std.testing.allocator);
+    defer search.deinit();
+    search.open();
+    try std.testing.expect((try search.apply(.{ .edit = "n" }, 1000)).core == null);
+    _ = try search.apply(.tick, 1000 + debounce_ms);
+    const narrowed = (try search.apply(.{ .edit = "ne" }, 2000)).core orelse return error.NoCommand;
+    try std.testing.expectEqual(std.meta.Tag(Command).invalidate, std.meta.activeTag(narrowed));
+    const cleared = (try search.apply(.{ .edit = "" }, 2010)).core orelse return error.NoCommand;
+    try std.testing.expectEqual(std.meta.Tag(Command).stop, std.meta.activeTag(cleared));
+}
+
+test "the chip relayouts only when the query goes empty to non-empty or back" {
+    var search = DockedSearch.init(std.testing.allocator);
+    defer search.deinit();
+    search.open();
+    const Frame = @FieldType(Outcome, "frame");
+    const steps = [_]struct { text: []const u8, frame: Frame, chip: bool }{
+        .{ .text = "a", .frame = .relayout, .chip = true },
+        .{ .text = "ab", .frame = .same, .chip = true },
+        .{ .text = "", .frame = .relayout, .chip = false },
+        .{ .text = "", .frame = .same, .chip = false },
+    };
+    for (steps, 0..) |step, i| {
+        const out = try search.apply(.{ .edit = step.text }, 1000 + @as(i64, @intCast(i)));
+        try std.testing.expectEqual(step.frame, out.frame);
+        try std.testing.expectEqual(step.chip, search.view().chip);
+    }
+}
+
+test "a toggle with a query reports which toggle flipped and searches at once with the new options" {
+    var search = DockedSearch.init(std.testing.allocator);
+    defer search.deinit();
+    search.open();
+    // Without a query only the toggle changes.
+    const idle = try search.apply(.{ .click = .regex }, 1000);
+    try std.testing.expectEqual(@as(?Role, .regex), idle.toggled);
+    try std.testing.expect(idle.core == null);
+    try std.testing.expect(search.view().options.regex);
+
+    // An invalid pattern: the toggle clears the mark and searches at once.
+    _ = try search.apply(.{ .edit = "need(" }, 1000);
+    _ = try search.apply(.tick, 1000 + debounce_ms);
+    _ = try search.apply(.{ .core = .{ .total = .{ .total = 0, .invalid = true } } }, 0);
+    const flipped = try search.apply(.{ .click = .case_sensitive }, 2000);
+    try std.testing.expectEqual(@as(?Role, .case_sensitive), flipped.toggled);
+    try std.testing.expect(flipped.results_changed);
+    const command = flipped.core orelse return error.NoSearch;
+    try std.testing.expectEqual(std.meta.Tag(Command).search, std.meta.activeTag(command));
+    try std.testing.expectEqualStrings("need(", command.search.text);
+    try std.testing.expect(command.search.options.regex and command.search.options.case_sensitive);
+    var buf: [48]u8 = undefined;
+    try std.testing.expectEqualStrings("Searching", search.view().results.text(&buf));
+
+    // So does an edit.
+    _ = try search.apply(.{ .core = .{ .total = .{ .total = 0, .invalid = true } } }, 0);
+    _ = try search.apply(.{ .edit = "need(e" }, 3000);
+    try std.testing.expectEqualStrings("Searching", search.view().results.text(&buf));
+}
+
+test "re-entrant null clears right after .stop and .invalidate change nothing visible" {
+    var search = try testSearching(std.testing.allocator, "needle");
+    defer search.deinit();
+    _ = try search.apply(.{ .core = .{ .total = .{ .total = 12 } } }, 0);
+    _ = try search.apply(.{ .core = .{ .selected = 1 } }, 0);
+    _ = try search.apply(.{ .core = .{ .rows = &.{3} } }, 0);
+    // What the core sends back from `invalidateSearchResults` and
+    // `setSearchQuery("")` while it has a search, before they return.
+    const clears = [_]Input{
+        .{ .core = .{ .total = .{ .total = null } } },
+        .{ .core = .{ .selected = null } },
+        .{ .core = .{ .rows = &.{} } },
+    };
+    for ([_][]const u8{ "needlex", "" }) |text| {
+        _ = try search.apply(.{ .edit = text }, 2000);
+        const shown = search.view().results;
+        for (clears) |in| {
+            const out = try search.apply(in, 2000);
+            try std.testing.expect(!out.results_changed);
+            try std.testing.expect(!out.markers_changed);
+        }
+        try std.testing.expect(shown.eql(search.view().results));
+    }
+}
+
+test "OutOfMemory on an edit leaves the state unchanged" {
+    // The query is allocation 0.
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 1 });
+    var search = try testSearching(failing.allocator(), "needle");
+    defer search.deinit();
+    const shown = search.view().results;
+    try std.testing.expectError(error.OutOfMemory, search.apply(.{ .edit = "other" }, 2000));
+    try std.testing.expect(shown.eql(search.view().results));
+    const command = (try search.apply(.{ .click = .regex }, 2001)).core orelse return error.NoSearch;
+    try std.testing.expectEqualStrings("needle", command.search.text);
 }

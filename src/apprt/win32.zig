@@ -366,15 +366,11 @@ pub const search_controls_runtime = .{
     .searchBarFit = searchBarFit,
     .searchBarFrameBg = searchBarFrameBg,
     .searchBarFrameBorder = searchBarFrameBorder,
-    .searchBarNeedsRelayoutForQueryChange = searchBarNeedsRelayoutForQueryChange,
-    .searchBarShouldInvalidateCoreSearchOnEdit = searchBarShouldInvalidateCoreSearchOnEdit,
     .searchBarToolbarVisual = searchBarToolbarVisual,
     .searchButtonKeyAction = searchButtonKeyAction,
     .searchSelectedDisplayFromRaw = searchSelectedDisplayFromRaw,
-    .showSearchBarResults = showSearchBarResults,
     .std = std,
     .sys = sys,
-    .terminal = terminal,
     .terminalDisconnectThunk = terminalDisconnectThunk,
     .terminalReleaseThunk = terminalReleaseThunk,
     .win32_icons = win32_icons,
@@ -9211,10 +9207,6 @@ const searchBarButtonCommandId = labels.searchBarButtonCommandId;
 
 const searchBarButtonLabel = labels.searchBarButtonLabel;
 
-const showSearchBarResults = labels.showSearchBarResults;
-const searchBarNeedsRelayoutForQueryChange = labels.searchBarNeedsRelayoutForQueryChange;
-const searchBarShouldInvalidateCoreSearchOnEdit = labels.searchBarShouldInvalidateCoreSearchOnEdit;
-
 const searchBarChromeLayout = chrome_layout.searchBarChromeLayout;
 const searchBarFit = chrome_layout.searchBarFit;
 
@@ -11662,9 +11654,11 @@ pub fn hostWindowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) cal
                         if (notify_code == c.BN_CLICKED) {
                             if (child_hwnd) |child| {
                                 if (v.searchControlSurface(child)) |surface| {
-                                    _ = surface.handleSearchToggleClick(command_id) catch |err| {
-                                        logUiActionError("docked search toggle failed", err);
-                                    };
+                                    if (surface.searchBarButtonRole(child)) |role| {
+                                        _ = surface.dockedSearch(.{ .click = role }) catch |err| {
+                                            logUiActionError("docked search toggle failed", err);
+                                        };
+                                    }
                                     return 0;
                                 }
                             }

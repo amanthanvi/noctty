@@ -73,18 +73,14 @@ const searchBarChromeLayout = runtime.searchBarChromeLayout;
 const searchBarFit = runtime.searchBarFit;
 const searchBarFrameBg = runtime.searchBarFrameBg;
 const searchBarFrameBorder = runtime.searchBarFrameBorder;
-const searchBarNeedsRelayoutForQueryChange = runtime.searchBarNeedsRelayoutForQueryChange;
-const searchBarShouldInvalidateCoreSearchOnEdit = runtime.searchBarShouldInvalidateCoreSearchOnEdit;
 const searchBarToolbarVisual = runtime.searchBarToolbarVisual;
 const searchButtonKeyAction = runtime.searchButtonKeyAction;
 const searchSelectedDisplayFromRaw = runtime.searchSelectedDisplayFromRaw;
 const selectNativeEditRange = child_window.selectNativeEditRange;
 const setWindowData = child_window.setWindowData;
-const showSearchBarResults = runtime.showSearchBarResults;
 const std = runtime.std;
 const syncWindowTextUtf8Cached = child_window.syncWindowTextUtf8Cached;
 const sys = runtime.sys;
-const terminal = runtime.terminal;
 const terminalDisconnectThunk = runtime.terminalDisconnectThunk;
 const terminalReleaseThunk = runtime.terminalReleaseThunk;
 const win32_icons = runtime.win32_icons;
@@ -219,7 +215,7 @@ pub fn searchFocusStopAvailable(surface: *const Surface, stop: usize) bool {
 fn searchToggleKey(surface: *Surface, vk: WPARAM, lParam: LPARAM) bool {
     const role = surface.docked_search.toggle_keys.keyDown(vk, chromeKeyMods(), lParamBits(lParam)) orelse return false;
     if ((lParamBits(lParam) & c.KF_REPEAT) == 0) {
-        _ = surface.handleSearchToggleClick(labels.searchBarButtonCommandId(role)) catch |err| {
+        _ = surface.dockedSearch(.{ .click = role }) catch |err| {
             logUiActionError("docked search accelerator toggle failed", err);
         };
     }
@@ -798,10 +794,11 @@ pub const SurfaceControls = struct {
     }
 
     pub fn searchBarButtonActive(self: *const Surface, role: SearchBarButtonRole) bool {
+        const options = self.docked_search.view().options;
         return switch (role) {
-            .regex => self.docked_search.toggles.regex,
-            .case_sensitive => self.docked_search.toggles.case_sensitive,
-            .whole_word => self.docked_search.toggles.whole_word,
+            .regex => options.regex,
+            .case_sensitive => options.case_sensitive,
+            .whole_word => options.whole_word,
             else => false,
         };
     }
@@ -815,14 +812,6 @@ pub const SurfaceControls = struct {
     pub fn searchBarButtonPrevProc(self: *const Surface, hwnd: HWND) ?*const anyopaque {
         const role = self.searchBarButtonRole(hwnd) orelse return null;
         return self.search_bar_button_prev_procs[@intFromEnum(role)];
-    }
-
-    pub fn searchQueryOptions(self: *const Surface) terminal.search.QueryOptions {
-        return .{
-            .regex = self.docked_search.toggles.regex,
-            .case_sensitive = self.docked_search.toggles.case_sensitive,
-            .whole_word = self.docked_search.toggles.whole_word,
-        };
     }
 
     pub fn applySearchBarFont(self: *Surface, font: ?*anyopaque) void {
@@ -1172,7 +1161,8 @@ pub const SurfaceControls = struct {
     }
 
     pub fn layoutSearchBarControls(self: *Surface, frame_rect: RECT, visible: bool) !bool {
-        if (!visible or !self.docked_search.visible) return self.hideSearchBarControls();
+        const search = self.docked_search.view();
+        if (!visible or !search.open) return self.hideSearchBarControls();
 
         try self.ensureSearchBarControls();
         const host = self.host orelse return false;
@@ -1240,7 +1230,7 @@ pub const SurfaceControls = struct {
             changed = self.hideSearchBarButton(.prev) or changed;
         }
 
-        const show_results = showSearchBarResults(&self.docked_search) and
+        const show_results = search.chip and
             (right - layout.results_w - layout.section_gap - left) >= layout.min_edit_w;
         if (show_results) {
             changed = applyChildRect(
@@ -1327,68 +1317,23 @@ pub const SurfaceControls = struct {
         return changed;
     }
 
-    pub fn issueSearchNow(self: *Surface, force: bool) !bool {
-        if (self.docked_search.query.len == 0) return false;
-        if (!force and !self.docked_search.forceSearch()) return false;
-        if (force) {
-            self.docked_search.searched = true;
-            self.docked_search.last_edit_ms = 0;
-        }
-        try self.setSearchActive(true, self.docked_search.query);
-        _ = try self.core_surface.setSearchQuery(self.docked_search.query, self.searchQueryOptions());
-        _ = try self.syncSearchBarResultsText();
-        if (self.host) |host| {
-            host.refreshSearchTimerState();
-        }
-        return true;
-    }
-
-    pub fn runPendingSearchNow(self: *Surface) !bool {
-        return try self.issueSearchNow(false);
-    }
-
+    /// Searches for the query now, debounce or not.
     pub fn rerunSearchNow(self: *Surface) !bool {
-        return try self.issueSearchNow(true);
+        const out = self.docked_search.rerun();
+        try applyDockedSearch(self, out);
+        return out.core != null;
     }
 
     pub fn handleSearchBarEditChanged(self: *Surface) !bool {
-        const alloc = self.app.core_app.alloc;
         const text = try self.readSearchBarEditText();
-        defer alloc.free(text);
-
-        const previous_query_len = self.docked_search.query.len;
-        const needs_layout = searchBarNeedsRelayoutForQueryChange(
-            previous_query_len,
-            text.len,
-        );
-        const invalidate_core_search = searchBarShouldInvalidateCoreSearchOnEdit(
-            previous_query_len,
-            text.len,
-        );
-        try self.docked_search.setQuery(text, @intCast(sys.GetTickCount64()));
-        if (invalidate_core_search) {
-            if (text.len == 0) {
-                _ = try self.core_surface.setSearchQuery("", self.searchQueryOptions());
-            } else {
-                _ = try self.core_surface.invalidateSearchResults();
-            }
-        }
-        try self.setSearchActive(text.len > 0, text);
-        if (self.host) |host| {
-            if (needs_layout) try host.layout();
-            host.refreshSearchTimerState();
-        }
-        return true;
+        defer self.app.core_app.alloc.free(text);
+        return try self.dockedSearch(.{ .edit = text });
     }
 
     pub fn navigateDockedSearch(self: *Surface, dir: input.Binding.Action.NavigateSearch) !bool {
         if (self.docked_search.query.len == 0) return false;
 
-        const same_query = if (self.docked_search.needle) |needle|
-            std.mem.eql(u8, needle, self.docked_search.query)
-        else
-            false;
-        if (!self.docked_search.active or !same_query or !self.docked_search.searched) {
+        if (!self.docked_search.active or !self.docked_search.searched) {
             return try self.rerunSearchNow();
         }
 
@@ -1398,7 +1343,7 @@ pub const SurfaceControls = struct {
             self.docked_search.selected_raw,
             self.docked_search.total,
             dir,
-            self.docked_search.toggles.wrap,
+            true,
         );
         self.docked_search.searched = searchSelectedDisplayFromRaw(self.docked_search.selected_raw, self.docked_search.total) != null or
             self.docked_search.total != null;
@@ -1413,47 +1358,37 @@ pub const SurfaceControls = struct {
     pub fn dockedSearch(self: *Surface, in: docked_search.Input) anyerror!bool {
         const out = try self.docked_search.apply(in, @intCast(sys.GetTickCount64()));
         try applyDockedSearch(self, out);
-        return true;
-    }
-
-    pub fn handleSearchToggleClick(self: *Surface, command_id: usize) !bool {
-        const now_ms: i64 = @intCast(sys.GetTickCount64());
-        const role: SearchBarButtonRole = switch (command_id) {
-            c.SEARCH_REGEX_ID => .regex,
-            c.SEARCH_CASE_ID => .case_sensitive,
-            c.SEARCH_WORD_ID => .whole_word,
-            else => return false,
-        };
-        const old = self.searchBarButtonActive(role);
-        switch (role) {
-            .regex => self.docked_search.toggleRegex(now_ms),
-            .case_sensitive => self.docked_search.toggleCase(now_ms),
-            .whole_word => self.docked_search.toggleWord(now_ms),
-            else => unreachable,
-        }
-        const new = self.searchBarButtonActive(role);
-        if (self.search_bar_button_uia_providers[@intFromEnum(role)]) |provider| {
-            provider.raiseToggleChanged(old, new);
-        }
-
-        self.invalidateSearchButtons();
-        if (self.docked_search.query.len > 0) {
-            _ = try self.rerunSearchNow();
-        } else {
-            _ = try self.syncSearchBarResultsText();
-        }
-        return true;
+        return out.handled;
     }
 };
 
 /// Carries out an Outcome. Nothing after the core step may use a View taken
 /// before it: the core's synchronous reports can free what it borrows.
 fn applyDockedSearch(self: *Surface, out: docked_search.Outcome) anyerror!void {
+    if (out.toggled) |role| {
+        const now = self.searchBarButtonActive(role);
+        if (self.search_bar_button_uia_providers[@intFromEnum(role)]) |provider| {
+            provider.raiseToggleChanged(!now, now);
+        }
+        self.invalidateSearchButtons();
+    }
     if (out.results_changed) _ = try self.syncSearchBarResultsText();
     if (out.markers_changed) {
         self.clearScrollbarMarkers();
         try self.refreshScrollbarWindow();
     }
+    switch (out.frame) {
+        .same => {},
+        .relayout => if (self.host) |host| try host.layout(),
+    }
+    if (out.timer_changed) {
+        if (self.host) |host| host.refreshSearchTimerState();
+    }
+    if (out.core) |command| switch (command) {
+        .search => |search| _ = try self.core_surface.setSearchQuery(search.text, search.options),
+        .stop => _ = try self.core_surface.setSearchQuery("", .{}),
+        .invalidate => _ = try self.core_surface.invalidateSearchResults(),
+    };
 }
 
 pub fn searchButtonKey(v: *Host, hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) ?LRESULT {
