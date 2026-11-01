@@ -1223,19 +1223,78 @@ test "settings patch: a theme the light/dark switch could not open is named, a m
         try testing.expect(unread.theme);
         try expectSameText(dark, unread.path);
     }
-    // A theme that is not there is the loader's to report: not named.
-    var missing = try Config.default(alloc);
-    defer missing.deinit();
-    const arena = missing._arena.?.allocator();
-    for ([_][]const u8{
-        "failed to load theme from the path \"C:\\noctty-test\\gone\"",
-        "failed to load theme \"Gone\" from the file \"C:\\noctty-test\\Gone\": error.FileNotFound",
-        "not reading theme from \"C:\\noctty-test\\dir\": it is a directory",
-    }) |message| try missing._diagnostics.append(arena, .{ .message = try arena.dupeZ(u8, message) });
-    try testing.expect(unreadConfigFile(&missing) == null);
-    // Opening a named theme that failed: named.
-    try missing._diagnostics.append(arena, .{ .message = try arena.dupeZ(u8, "failed to load theme \"Mine\" from the file \"C:\\noctty-test\\Mine\": error.AccessDenied") });
-    try expectSameText("C:\\noctty-test\\Mine", (unreadConfigFile(&missing) orelse return error.TestExpectedUnread).path);
+    // Every other case through the loader as well, so a change to its
+    // wording fails here: a dark theme by name, searched for in the user's
+    // theme directory (`XDG_CONFIG_HOME` points at this test's for its
+    // length, then back), and by path.
+    const os = @import("../../os/main.zig");
+    if (try os.xdg.portableRoot(alloc)) |portable| {
+        alloc.free(portable);
+        return error.SkipZigTest;
+    }
+    const saved: ?[:0]u8 = saved: {
+        const value = std.process.getEnvVarOwned(alloc, "XDG_CONFIG_HOME") catch |err| switch (err) {
+            error.EnvironmentVariableNotFound => break :saved null,
+            else => return err,
+        };
+        defer alloc.free(value);
+        break :saved try alloc.dupeZ(u8, value);
+    };
+    defer if (saved) |value| alloc.free(value);
+    defer _ = if (saved) |value| os.setenv("XDG_CONFIG_HOME", value) else os.unsetenv("XDG_CONFIG_HOME");
+    const themes_dir = try std.fs.path.join(alloc, &.{ "xdg", @import("../../build_config.zig").data_dir_name, "themes" });
+    defer alloc.free(themes_dir);
+    try tmp.dir.makePath(themes_dir);
+    var themes = try tmp.dir.openDir(themes_dir, .{});
+    defer themes.close();
+    try themes.writeFile(.{ .sub_path = "Mine", .data = "font-size = 14\n" });
+    try themes.makeDir("Dir");
+    try tmp.dir.makeDir("dir");
+    const xdg_path = try tmp.dir.realpathAlloc(alloc, "xdg");
+    defer alloc.free(xdg_path);
+    const xdg = try alloc.dupeZ(u8, xdg_path);
+    defer alloc.free(xdg);
+    try testing.expectEqual(@as(c_int, 0), os.setenv("XDG_CONFIG_HOME", xdg));
+    const mine = try themes.realpathAlloc(alloc, "Mine");
+    defer alloc.free(mine);
+    const gone = try std.fs.path.join(alloc, &.{ std.fs.path.dirname(dark) orelse return error.TestExpectedDir, "gone" });
+    defer alloc.free(gone);
+    const dir = try tmp.dir.realpathAlloc(alloc, "dir");
+    defer alloc.free(dir);
+    const check = struct {
+        /// The switch to dark, with `dark_theme` as the dark half, names
+        /// `expected` as the unread theme, or nothing when it is null.
+        fn darkTheme(a: Allocator, at: std.fs.Dir, earlier: []const u8, light_theme: []const u8, dark_theme: []const u8, expected: ?[]const u8) !void {
+            const config_text = try std.fmt.allocPrint(a, "theme = light:{s},dark:{s}\n", .{ light_theme, dark_theme });
+            defer a.free(config_text);
+            try at.writeFile(.{ .sub_path = "config", .data = config_text });
+            const config_path = try at.realpathAlloc(a, "config");
+            defer a.free(config_path);
+            var loaded = try testLoad(a, earlier, config_path);
+            defer loaded.deinit();
+            var switched = (try loaded.changeConditionalState(.{ .theme = .dark })) orelse return error.TestExpectedSwitch;
+            defer switched.deinit();
+            const unread = unreadConfigFile(&switched);
+            if (expected) |want| {
+                const got = unread orelse return error.TestExpectedUnread;
+                try testing.expect(got.theme);
+                try expectSameText(want, got.path);
+            } else if (unread != null) return error.TestUnexpectedUnread;
+        }
+    }.darkTheme;
+    // Not there, or a directory: the loader's to report, not named.
+    try check(alloc, tmp.dir, none, light, gone, null);
+    try check(alloc, tmp.dir, none, light, dir, null);
+    try check(alloc, tmp.dir, none, light, "Gone", null);
+    try check(alloc, tmp.dir, none, light, "Dir", null);
+    // Found by name and held with no sharing: named, by the path it was
+    // found at.
+    try check(alloc, tmp.dir, none, light, "Mine", null);
+    const wide = try std.os.windows.sliceToPrefixedFileW(null, mine);
+    const handle = std.os.windows.kernel32.CreateFileW(wide.span().ptr, std.os.windows.GENERIC_READ, 0, null, std.os.windows.OPEN_EXISTING, 0, null);
+    if (handle == std.os.windows.INVALID_HANDLE_VALUE) return error.CouldNotHoldFile;
+    defer std.os.windows.CloseHandle(handle);
+    try check(alloc, tmp.dir, none, light, "Mine", mine);
 }
 
 test "settings patch: a reload that could not read a file whole reports the file, not an override" {

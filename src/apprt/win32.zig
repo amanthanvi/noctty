@@ -1993,18 +1993,22 @@ fn settingsDiskEditConflict(
     disk: *const configpkg.Config,
     state: configpkg.ConditionalState,
     user_edited: SettingsEditedKeySet,
-) bool {
-    var applied = settingsDiskInState(disk, state);
+) win32_settings.SaveError!bool {
+    var applied = try settingsDiskInState(disk, state);
     defer if (applied) |*config| config.deinit();
     return settingsDiskEditConflictIn(original, pending, if (applied) |*config| config else disk, user_edited);
 }
 
 /// `disk` in the app's conditional state, or null when that is the state it
-/// was loaded in or the switch failed (logged): then `disk` is the reading.
-fn settingsDiskInState(disk: *const configpkg.Config, state: configpkg.ConditionalState) ?configpkg.Config {
+/// was loaded in. A switch that fails stops the save (`ReloadFailed`, logged,
+/// or `OutOfMemory`), with the draft kept: judged on `disk` alone instead,
+/// a theme only that state reads would go unchecked, and its keys compared
+/// in the wrong state. The profile save treats the same failure the same way.
+fn settingsDiskInState(disk: *const configpkg.Config, state: configpkg.ConditionalState) win32_settings.SaveError!?configpkg.Config {
     return disk.changeConditionalState(state) catch |err| {
+        if (err == error.OutOfMemory) return error.OutOfMemory;
         log.warn("settings save: could not apply the conditional state to the config file err={}", .{err});
-        return null;
+        return error.ReloadFailed;
     };
 }
 
@@ -2184,9 +2188,16 @@ pub fn settingsDiskVerdict(
     // the load and of the reading in the app's light/dark state, which reads
     // that state's theme again and is the one the reload applies; both theme
     // names are held to it, as to the probe.
-    var applied = settingsDiskInState(disk, state);
+    var applied = try settingsDiskInState(disk, state);
     defer if (applied) |*config| config.deinit();
     const effective: *const configpkg.Config = if (applied) |*config| config else disk;
+    // The switch reads no config file again, only the theme, which is not
+    // decoded, so it starts with no skipped file and records none; asked
+    // anyway, so that stays true if the switch changes.
+    if (effective._undecodable_file) |path| {
+        try setSettingsFailureDetail(alloc, detail, "the file {s}", .{path});
+        return error.UnsupportedEncoding;
+    }
     const readings = [_]*const configpkg.Config{ disk, effective };
     for (readings[0..if (applied != null) 2 else 1]) |reading| {
         if (@import("win32/settings_patch.zig").unreadConfigFile(reading)) |unread| {
@@ -7520,20 +7531,20 @@ test "win32 settings disk edit is a conflict only for an edited setting the file
     defer disk.deinit();
 
     // The file is as the session found it: only the user's edit is new.
-    try std.testing.expect(!settingsDiskEditConflict(&original, &pending, &disk, light, edited));
+    try std.testing.expect(!try settingsDiskEditConflict(&original, &pending, &disk, light, edited));
     // Someone set the same setting to something else.
     disk.@"font-size" = 16;
-    try std.testing.expect(settingsDiskEditConflict(&original, &pending, &disk, light, edited));
+    try std.testing.expect(try settingsDiskEditConflict(&original, &pending, &disk, light, edited));
     // ... unless it is the value the user is setting: nothing would be lost.
     disk.@"font-size" = 14;
-    try std.testing.expect(!settingsDiskEditConflict(&original, &pending, &disk, light, edited));
+    try std.testing.expect(!try settingsDiskEditConflict(&original, &pending, &disk, light, edited));
     // An edit to a setting the user is not changing is merged by the save and
     // applied by its reload, not a conflict.
     disk.@"font-size" = 12;
     disk.@"copy-on-select" = .true;
-    try std.testing.expect(!settingsDiskEditConflict(&original, &pending, &disk, light, edited));
+    try std.testing.expect(!try settingsDiskEditConflict(&original, &pending, &disk, light, edited));
     // Nothing edited, nothing to lose.
-    try std.testing.expect(!settingsDiskEditConflict(&original, &original, &disk, light, settingsUserEditedKeys(&original, &original)));
+    try std.testing.expect(!try settingsDiskEditConflict(&original, &original, &disk, light, settingsUserEditedKeys(&original, &original)));
 }
 
 test "win32 settings disk edit judges the file with the app's conditional state applied" {
@@ -7574,7 +7585,7 @@ test "win32 settings disk edit judges the file with the app's conditional state 
     const edited = settingsUserEditedKeys(&original, &pending);
     try std.testing.expect(edited.isSet(@intFromEnum(SettingsConfigKey.@"cursor-style")));
 
-    try std.testing.expect(!settingsDiskEditConflict(&original, &pending, &disk, dark, edited));
+    try std.testing.expect(!try settingsDiskEditConflict(&original, &pending, &disk, dark, edited));
 
     // A real edit under the same state is still found: the file now sets the
     // key itself, over the theme.
@@ -7585,7 +7596,7 @@ test "win32 settings disk edit judges the file with the app's conditional state 
     defer changed.deinit();
     try changed.loadFile(alloc, path);
     try changed.finalize();
-    try std.testing.expect(settingsDiskEditConflict(&original, &pending, &changed, dark, edited));
+    try std.testing.expect(try settingsDiskEditConflict(&original, &pending, &changed, dark, edited));
 }
 
 test "win32 settings disk check compares the files' default-profile in a window started with one" {
@@ -7608,20 +7619,20 @@ test "win32 settings disk check compares the files' default-profile in a window 
     try std.testing.expect(edited.isSet(@intFromEnum(SettingsConfigKey.@"default-profile")));
 
     // The file is as the window found it.
-    try std.testing.expect(!settingsDiskEditConflict(&original, &pending, &disk, light, edited));
+    try std.testing.expect(!try settingsDiskEditConflict(&original, &pending, &disk, light, edited));
     try std.testing.expect(!try settingsDiskVerdict(alloc, null, &original, &pending, &disk, light, edited));
     // Someone else changed it, even to the command line's value, or removed
     // it.
     for ([_][]const u8{ "default-profile = powershell.exe\n", "default-profile = user:py312\n", "" }) |file| {
         var changed = try load(alloc, .{ .file = file, .argv = window_argv });
         defer changed.deinit();
-        try std.testing.expect(settingsDiskEditConflict(&original, &pending, &changed, light, edited));
+        try std.testing.expect(try settingsDiskEditConflict(&original, &pending, &changed, light, edited));
     }
     // To the value the user is setting: nothing is lost.
     {
         var same = try load(alloc, .{ .file = "default-profile = cmd.exe\n", .argv = window_argv });
         defer same.deinit();
-        try std.testing.expect(!settingsDiskEditConflict(&original, &pending, &same, light, edited));
+        try std.testing.expect(!try settingsDiskEditConflict(&original, &pending, &same, light, edited));
     }
 
     // After the save, the command line's value still wins in this window,
@@ -7650,13 +7661,13 @@ test "win32 settings disk edit does not mistake the resolved default command for
     defer resolved.deinit();
     try configpkg.pane_launch.finalizeWith(&resolved, configpkg.pane_launch.fixtures.Machine{ .default_shell = "C:\\Program Files\\PowerShell\\7\\pwsh.exe" });
     try std.testing.expect(configpkg.pane_launch.nocttyCommand(&resolved) != null);
-    try std.testing.expect(!settingsDiskEditConflict(&original, &pending, &resolved, light, edited));
+    try std.testing.expect(!try settingsDiskEditConflict(&original, &pending, &resolved, light, edited));
 
     // A command written in the file is another matter.
     var written = try original.clone(alloc);
     defer written.deinit();
     written.command = .{ .shell = "cmd" };
-    try std.testing.expect(settingsDiskEditConflict(&original, &pending, &written, light, edited));
+    try std.testing.expect(try settingsDiskEditConflict(&original, &pending, &written, light, edited));
 }
 
 test "win32 settings disk check stops at a config file it cannot open, not at a missing one" {
@@ -8409,6 +8420,40 @@ test "win32 settings disk check stops an ordinary save on an included file whose
     try whole.loadReader(alloc, &reader, "C:\\noctty-test\\more.conf");
     detail.clear(alloc);
     try std.testing.expect(!try settingsDiskVerdict(alloc, &detail, &same, &same, &whole, .{}, .initEmpty()));
+}
+
+test "win32 settings disk check stops a save when the config cannot be put in the app's light/dark state" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(.{ .sub_path = "light", .data = "font-size = 13\n" });
+    try tmp.dir.writeFile(.{ .sub_path = "dark", .data = "font-size = 14\n" });
+    const light = try tmp.dir.realpathAlloc(alloc, "light");
+    defer alloc.free(light);
+    const dark = try tmp.dir.realpathAlloc(alloc, "dark");
+    defer alloc.free(dark);
+    const text = try std.fmt.allocPrint(alloc, "theme = light:{s},dark:{s}\n", .{ light, dark });
+    defer alloc.free(text);
+    try tmp.dir.writeFile(.{ .sub_path = "config", .data = text });
+    const path = try tmp.dir.realpathAlloc(alloc, "config");
+    defer alloc.free(path);
+    // Loaded in the light state, by an allocator that fails from the switch
+    // to dark on.
+    var failing = std.testing.FailingAllocator.init(alloc, .{});
+    var disk = try configpkg.Config.default(failing.allocator());
+    defer disk.deinit();
+    try disk.loadFile(failing.allocator(), path);
+    try disk.loadRecursiveFiles(failing.allocator());
+    try disk.finalize();
+    var same = try configpkg.Config.default(alloc);
+    defer same.deinit();
+    var detail: win32_settings.FailureDetail = .{};
+    defer detail.clear(alloc);
+    failing.fail_index = failing.alloc_index;
+    // Not judged on the light reading instead: the save stops.
+    try std.testing.expectError(error.OutOfMemory, settingsDiskVerdict(alloc, &detail, &same, &same, &disk, .{ .theme = .dark }, .initEmpty()));
+    // In the state it was loaded in there is no switch to fail.
+    try std.testing.expect(!try settingsDiskVerdict(alloc, &detail, &same, &same, &disk, .{}, .initEmpty()));
 }
 
 test "win32 settings disk check stops an ordinary save on the theme of the app's light/dark state whose read failed" {
