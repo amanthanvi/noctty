@@ -12199,8 +12199,10 @@ const dialog_test = struct {
     /// Make exactly these modifiers the ones the calling thread sees held, and
     /// no other key: in the test thread's pinned keyboard, which the code
     /// under test reads (`win32_input.keyPressed`), and in its key table,
-    /// which Windows reads. Read back through the readers, so a keyboard that
-    /// was not pinned fails here, not later in an unrelated assertion.
+    /// which Windows reads (the dialog manager, `TranslateMessage`). The
+    /// table is read back with `GetKeyState`: one the system refreshed from
+    /// the real keyboard in between fails here with the key that leaked, not
+    /// later in an unrelated assertion.
     fn holdKeys(held: struct { ctrl: bool = false, alt: bool = false, shift: bool = false }) !void {
         var keys: [256]u8 = @splat(0);
         const down: u8 = 0x80;
@@ -12209,9 +12211,10 @@ const dialog_test = struct {
         if (held.shift) keys[VK_SHIFT] = down;
         const pinned = keyboard orelse return error.TestKeyboardNotPinned;
         pinned.set(&keys);
-        try std.testing.expectEqual(held.ctrl, win32_input.keyPressed(VK_CONTROL));
-        try std.testing.expectEqual(held.alt, win32_input.keyPressed(VK_MENU));
-        try std.testing.expectEqual(held.shift, win32_input.keyPressed(VK_SHIFT));
+        for ([_]struct { i32, bool }{ .{ VK_CONTROL, held.ctrl }, .{ VK_MENU, held.alt }, .{ VK_SHIFT, held.shift } }) |key| {
+            try std.testing.expectEqual(key[1], sys.GetKeyState(key[0]) < 0);
+            try std.testing.expectEqual(key[1], win32_input.keyPressed(key[0]));
+        }
     }
     extern "user32" fn GetNextDlgGroupItem(dialog: HWND, control: ?HWND, previous: BOOL) callconv(.winapi) ?HWND;
     extern "gdi32" fn BitBlt(dst: HDC, x: i32, y: i32, width: i32, height: i32, src: HDC, src_x: i32, src_y: i32, rop: u32) callconv(.winapi) BOOL;
