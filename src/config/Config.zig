@@ -5437,10 +5437,6 @@ pub fn applyECommand(self: *Config, command: []const [:0]const u8) void {
     }
 }
 
-/// `pane_launch.filesDefaultProfile`, under the name
-/// win32_settings_reference.zig still calls until it moves to the query.
-pub const defaultProfileFromFiles = pane_launch.filesDefaultProfile;
-
 /// Load `text` as one config file and finalize it, as a real load does.
 fn testLoadProfileText(alloc: Allocator, text: []const u8) !Config {
     var cfg = try Config.default(alloc);
