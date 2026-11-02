@@ -279,10 +279,11 @@ pub const Notifications = struct {
         };
 
         const sink = self.sink orelse return self.fallBack(from, title, body, attribution);
-        const prior = self.beginShow(id) catch |err| prior: {
-            // Shown untracked, it still leaves with the group at exit.
-            log.warn("toast not tracked err={}", .{err});
-            break :prior null;
+        // A toast it cannot track could not leave when its tab is seen or its
+        // pane closes, so it is not shown.
+        const prior = self.beginShow(id) catch |err| {
+            log.warn("toast not shown: cannot track it err={}", .{err});
+            return;
         };
         const shown = toSink(sink, request);
         self.endShow(id, prior, shown);
@@ -1271,9 +1272,7 @@ test "exit removes this process's group once, after a tagged toast" {
     try t.recorder.expectRemovals(&.{own_group});
 }
 
-test "out of memory drops what it cannot build, and a toast it cannot track still leaves with the group" {
-    var group_buf: [32]u8 = undefined;
-    const own_group = try std.fmt.bufPrint(&group_buf, "group noctty-{d}", .{sys.GetCurrentProcessId()});
+test "out of memory drops what it cannot build or track" {
     const pane: From = .{ .pane = 0x2002 };
 
     // How many allocations a tracked show makes: the last is its entry.
@@ -1307,8 +1306,8 @@ test "out of memory drops what it cannot build, and a toast it cannot track stil
         try t.recorder.expectRemoved(&.{});
     }
 
-    // No memory for its entry: the toast is shown, untracked, and leaves
-    // with the group at exit.
+    // No memory for its entry: the toast is not shown, since it could not
+    // leave when its tab is seen or its pane closes, and no banner stands in.
     {
         var t: TestNotifications = .{};
         var failing: std.testing.FailingAllocator = .init(std.testing.allocator, .{ .fail_index = allocations - 1 });
@@ -1316,11 +1315,12 @@ test "out of memory drops what it cannot build, and a toast it cannot track stil
         defer t.deinit();
         t.panes.put(0x2002, testing.inTab(2, 1, "cargo build"));
         t.n.show(pane, "", "x");
-        try std.testing.expectEqual(@as(usize, 1), t.recorder.shown);
+        try std.testing.expectEqual(@as(usize, 0), t.recorder.shown);
+        try std.testing.expect(t.panes.banner_from == null);
         t.n.panesChanged();
         try std.testing.expectEqual(@as(usize, 0), t.panes.wakes);
         t.n.deinit();
-        try t.recorder.expectRemovals(&.{own_group});
+        try t.recorder.expectRemoved(&.{});
     }
 
     // No memory for a refused toast's banner text: no banner, a log line.
