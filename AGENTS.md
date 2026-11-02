@@ -239,13 +239,14 @@ that govern each symbol you change, or that none does.
   `WM_NCCALCSIZE`/`WM_NCHITTEST` (`win32_nc_layout.zig`), integrated titlebar
   and caption buttons, `window-decoration = none`, resize bands, maximize,
   fullscreen and restore placement (the `maximize`/`fullscreen` keys at
-  window start: `Surface.applyWindowStart` in `win32/window_state.zig`; what a
+  window start: `window_state.applyWindowStart`; what a
   session saves and restores of a fullscreen window: `WindowState.fullscreen`
   and `fullscreen_maximized` in `win32_session_state.zig`,
   `sessionWindowPlacementOn` and `restoreSessionWindow` in
   `win32/session.zig`), what a new window copies from its source and which
-  forwarded keys it keeps (`inheritWindowStateFrom`, `WindowKeeps`, both in
-  `win32/window_state.zig`), `WM_DPICHANGED` and mixed-DPI moves,
+  forwarded keys it keeps (`window_state.begin`, its `Origin` and
+  `inheritWindowStateFrom` in `win32/window_state.zig`; the pure `plan` and
+  `Keeps` in `win32/window_start.zig`), `WM_DPICHANGED` and mixed-DPI moves,
   `window-width`/`window-height`, `background-opacity` and DWM backdrop, the
   window menu, the quick terminal (`win32_quick_terminal.zig`,
   `win32/quick_terminal_host.zig`).

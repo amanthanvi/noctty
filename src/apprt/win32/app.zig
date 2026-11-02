@@ -43,7 +43,6 @@ const UpdateCheckCompletion = win32.UpdateCheckCompletion;
 const UpdateCheckRequest = win32.UpdateCheckRequest;
 const UpdateNotice = win32.UpdateNotice;
 const WNDCLASSEXW = win32.WNDCLASSEXW;
-const WindowKeeps = win32.WindowKeeps;
 const activeTabAfterRemoval = win32.activeTabAfterRemoval;
 const adoptedInitialShow = win32.adoptedInitialShow;
 const appLifecycleWindowProc = win32.appLifecycleWindowProc;
@@ -161,7 +160,6 @@ const requestedTabInsertIndex = win32.requestedTabInsertIndex;
 const resolveIpcPipeNameForTarget = win32.resolveIpcPipeNameForTarget;
 const resolveTheme = win32.resolveTheme;
 const restart_max_cmd_line = win32.restart_max_cmd_line;
-const restoreRequestedHostWindowStyle = win32.restoreRequestedHostWindowStyle;
 const retainToastDelivery = win32.retainToastDelivery;
 const runUiActionOrLog = win32.runUiActionOrLog;
 const scanForwardedToastActivation = win32.scanForwardedToastActivation;
@@ -217,7 +215,6 @@ const shouldResetNewTabWorkingDirectory = win32.shouldResetNewTabWorkingDirector
 const shouldUseIntegratedTitlebar = win32.shouldUseIntegratedTitlebar;
 const splitDirectionFromAction = win32.splitDirectionFromAction;
 const splitTreeEquivalent = win32.splitTreeEquivalent;
-const startupHostWindowStyle = win32.startupHostWindowStyle;
 const std = @import("std");
 const suppressStartupLoaderErrorDialogs = win32.suppressStartupLoaderErrorDialogs;
 const surfaceActivationNeedsHostSync = win32.surfaceActivationNeedsHostSync;
@@ -287,7 +284,7 @@ const prompt_label_class = child_window.prompt_label_class;
 const TestSession = win32.TestSession;
 const createTestChromeChild = win32.createTestChromeChild;
 const BOOL = win32.BOOL;
-const InitialShow = win32.InitialShow;
+const InitialShow = window_state.InitialShow;
 const POINT = win32.POINT;
 const ToastTestWindow = win32.ToastTestWindow;
 const toastTestSplit = win32.toastTestSplit;
@@ -3805,17 +3802,18 @@ pub const App = struct {
                 }
                 const source = self.registry.newWindowSource(target);
                 _ = self.createWindowSurface(&config, default_title, .{
-                    .clone_state_from = source,
-                    .forwarded_arguments = forwarded_arguments,
+                    .window = if (source) |host| .{ .copy = .{
+                        .source = host,
+                        .forwarded = forwarded_arguments orelse &.{},
+                    } } else .fresh,
                     .launch = launch,
                 }) catch |err| {
                     // A request forwarded by another process was acknowledged
                     // when it was queued, so say here that nothing opened.
                     // The first host still shows a banner while its last tab
                     // is detached for undo, when it has no surface.
-                    const banner_host: ?*Host = if (source) |surface|
-                        surface.host
-                    else if (self.registry.hosts.items.len > 0) self.registry.hosts.items[0] else null;
+                    const banner_host: ?*Host = source orelse
+                        if (self.registry.hosts.items.len > 0) self.registry.hosts.items[0] else null;
                     if (banner_host) |host| host.setBanner(.err, "New window could not be opened.") catch {};
                     return err;
                 };
@@ -5524,7 +5522,11 @@ pub const App = struct {
             else
                 null,
             .tab_id = tab_id,
-            .clone_state_from = if (open_target == .window) self.registry.newWindowSource(target) else source,
+            .window = if (open_target != .window) .fresh else if (self.registry.newWindowSource(target)) |host|
+                .{ .copy = .{ .source = host } }
+            else
+                .fresh,
+            .clone_state_from = if (open_target == .window) null else source,
             .launch = launch,
         });
     }
@@ -5560,7 +5562,7 @@ pub const App = struct {
         defer self.core_app.alloc.free(title_w);
         _ = try self.createWindowSurface(&config, title_w.ptr, .{
             .adopted_session = pending,
-            .show = adoptedInitialShow(pending.startup_flags, pending.show_window),
+            .window = .{ .adopted = adoptedInitialShow(pending.startup_flags, pending.show_window) },
         });
         win32_terminal_handoff.appendHandoffMilestone(self.core_app.alloc, "adopted_window_created");
     }
@@ -5594,7 +5596,7 @@ pub const App = struct {
                 opts: SurfaceInitOptions,
             ) anyerror!*Surface {
                 title_pinned = config.title != null;
-                show = opts.show;
+                show = opts.window.adopted;
                 return created_ref;
             }
         };
@@ -6198,13 +6200,11 @@ pub const App = struct {
     }
 
     /// A hidden top-level window for the window `Surface.init` creates with
-    /// `config` and `opts`: placed and decorated as that window's own config
-    /// says (a forwarded launch's keys included, see `WindowKeeps`), or as
-    /// the window it is opened from.
-    pub fn createHost(self: *App, title: LPCWSTR, config: *const configpkg.Config, opts: SurfaceInitOptions) !*Host {
-        const clone_state_from = opts.clone_state_from;
-        const quick_terminal = opts.quick_terminal;
-        const keeps = WindowKeeps.forNewSurface(config, opts);
+    /// `config`, started as `origin` says (`window_state.begin`): placed and
+    /// decorated as that window's own config says, a forwarded launch's keys
+    /// included, or as the window it is opened from.
+    pub fn createHost(self: *App, title: LPCWSTR, config: *const configpkg.Config, origin: window_state.Origin) !*Host {
+        const start = window_state.begin(self, config, origin);
         try self.ensureHostWindowClass();
         try self.ensurePaletteListClass();
         try self.ensureScrollbarClass();
@@ -6212,21 +6212,12 @@ pub const App = struct {
         const host = try self.core_app.alloc.create(Host);
         var host_registered = false;
         errdefer if (!host_registered) self.core_app.alloc.destroy(host);
-        const startup_decorations_visible = Surface.initialDecorationsVisible(config, opts);
         host.* = .{
             .app = self,
             .id = self.allocateHostId(),
-            .quick_terminal = quick_terminal,
-            .top_level = .{
-                .decorations_visible = startup_decorations_visible,
-                .opacity = std.math.clamp(config.@"background-opacity", 0.0, 1.0),
-            },
-        };
-        // A window opened from another one is shown at that window's
-        // opacity, before it takes the rest of its state.
-        if (clone_state_from) |source| if (!keeps.background_opacity) if (source.host) |existing| {
-            host.top_level.opacity = existing.top_level.opacity;
-            host.top_level.force_opaque = existing.top_level.force_opaque;
+            .quick_terminal = origin == .quick_terminal,
+            .top_level = start.top_level,
+            .pending_start = start.pending,
         };
         host.palette_catalog = try PaletteCatalog.init(
             &host.palette_catalog_items,
@@ -6237,23 +6228,13 @@ pub const App = struct {
             try appendOwnedString(self.core_app.alloc, &host.selected_profile_key, key);
         }
 
-        const position = configuredHostWindowPosition(config);
-        // A window with a size of its own starts framed, so core init sizes
-        // the window it leaves fullscreen to.
-        const startup_fullscreen = if (clone_state_from) |source|
-            (if (source.host) |existing| existing.top_level.isFullscreen() else false) and !keeps.size
-        else
-            false;
-        const keeps_frame = startup_decorations_visible or undecoratedKeepsFrame(self.os_build, quick_terminal);
-        const startup_style = startupHostWindowStyle(keeps_frame, startup_fullscreen);
-
         const hwnd = sys.CreateWindowExW(
             0,
             host_class_name,
             title,
-            startup_style,
-            if (position) |v| v.x else c.CW_USEDEFAULT,
-            if (position) |v| v.y else c.CW_USEDEFAULT,
+            start.style,
+            start.x,
+            start.y,
             1280,
             800,
             null,
@@ -6264,9 +6245,6 @@ pub const App = struct {
         host.hwnd = hwnd;
         setWindowIcon(hwnd, self.hinstance);
         applyDwmThemeWithBuild(hwnd, &self.resolved_theme, self.shownConfig(), self.os_build);
-        if (!startup_decorations_visible and keeps_frame) {
-            win32_theme.WindowThemeAdapter.setHostBorderVisible(hwnd, false);
-        }
         host.current_dpi = sys.GetDpiForWindow(hwnd);
         if (host.current_dpi == 0) host.current_dpi = 96;
         host.chrome_font = host.createChromeFont();
@@ -6277,13 +6255,6 @@ pub const App = struct {
         };
 
         self.attachShellCompositorWindow(hwnd);
-        // On Windows 10, an undecorated host comes back from
-        // `CreateWindowEx` with a caption it did not ask for. Take it off
-        // while the host is still hidden and has no tabs. This goes after the
-        // compositor attach because the frame change resizes the client area,
-        // and the host's WM_SIZE resizes its compositor target (when a
-        // compositor is running), which must exist by then.
-        restoreRequestedHostWindowStyle(hwnd, startup_style);
 
         try self.registry.addHost(self.core_app.alloc, host);
         host_registered = true;
@@ -6298,9 +6269,10 @@ pub const App = struct {
             self.removeHost(host);
         }
         if (self.jump_list) |*jump_list| jump_list.scheduleIfStartupPending();
-        if (clone_state_from) |source| {
-            if (source.host) |existing| try self.inheritHostWindowState(host, existing, keeps.position);
-        }
+        // After the compositor attach: the hidden window's style is put back
+        // over what `CreateWindowEx` gave it, and a copy is moved to where
+        // it will show.
+        try window_state.advance(host, .created);
 
         host.power_notifications = win32_power.Notifications.init(hwnd);
 
@@ -6424,8 +6396,6 @@ pub const App = struct {
         try std.testing.expect(!app.shell_compositor.status().compositionActive());
         try std.testing.expectEqual(@as(u32, 0), app.shell_compositor.status().active_target_count);
     }
-
-    pub const inheritHostWindowState = window_state.inheritHostWindowState;
 
     pub fn automationDefaultSurface(self: *App) ?*Surface {
         if (self.core_app.focusedSurface()) |core_surface| {
@@ -11214,7 +11184,7 @@ test "win32 a DPI change holds the terminal grid from WM_GETDPISCALEDSIZE to WM_
         _ = sys.UnregisterClassW(palette_list_class_name, hinstance);
         _ = sys.UnregisterClassW(scrollbar_class_name, hinstance);
     }
-    const host = try app.createHost(std.unicode.utf8ToUtf16LeStringLiteral(""), &app.config, .{ .quick_terminal = true });
+    const host = try app.createHost(std.unicode.utf8ToUtf16LeStringLiteral(""), &app.config, .{ .quick_terminal = .activate });
     const hwnd = host.hwnd.?;
     var size: extern struct { cx: i32, cy: i32 } = .{ .cx = 900, .cy = 600 };
     const size_param: LPARAM = @bitCast(@intFromPtr(&size));
@@ -11602,7 +11572,7 @@ test "win32 new host starts with the client area its first frame change keeps" {
     app.use_integrated_titlebar = true;
 
     // The host stays hidden, so the test never touches the foreground.
-    const host = try app.createHost(std.unicode.utf8ToUtf16LeStringLiteral(""), &app.config, .{});
+    const host = try app.createHost(std.unicode.utf8ToUtf16LeStringLiteral(""), &app.config, .fresh);
     const hwnd = host.hwnd.?;
     try std.testing.expect(host.usingIntegratedTitlebar());
     try std.testing.expect(sys.IsWindowVisible(hwnd) == 0);

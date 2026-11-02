@@ -380,6 +380,9 @@ pub const Host = struct {
     /// The state of this top-level window, whichever of its panes acts on
     /// it (`window_state.perform`, `window_state.applyConfig`).
     top_level: window_state.TopLevel = .{},
+    /// How this new window starts, from `window_state.begin` until its
+    /// first show is done.
+    pending_start: ?window_state.Pending = null,
     /// This host is the quick terminal. Its tabs and splits are all part of
     /// it, so this, not a flag on one surface, says what the window is.
     quick_terminal: bool = false,
@@ -553,7 +556,7 @@ pub const Host = struct {
     /// Native window activation, independent of the selected terminal tab.
     window_active: bool = false,
     /// `App.activations` when this window was last activated, 0 if never:
-    /// which window a forwarded launch copies (`App.newWindowSource`).
+    /// which window a forwarded launch copies (`Registry.newWindowSource`).
     activated: u64 = 0,
     /// Fade state for the tab the user is currently hovering. Paint
     /// reads `alphaAt(now)` + pre-composites the glyph colour against

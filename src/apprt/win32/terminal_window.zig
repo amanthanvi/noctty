@@ -38,8 +38,6 @@ const Tab = win32.Tab;
 const UINT = win32.UINT;
 const WPARAM = win32.WPARAM;
 const WheelNormalizationContext = win32.WheelNormalizationContext;
-const WindowKeeps = win32.WindowKeeps;
-const WindowStart = win32.WindowStart;
 const adjustColor = win32.adjustColor;
 const anyVirtualKeyPressed = win32.anyVirtualKeyPressed;
 const appendOwnedString = paint_text.appendOwnedString;
@@ -68,7 +66,6 @@ const first_frame = @import("first_frame.zig");
 const gl_startup = @import("gl_startup.zig");
 const hostChromeNeedsFocusRepaint = win32.hostChromeNeedsFocusRepaint;
 const imeWindowForms = win32.imeWindowForms;
-const initialDecorationsVisibleForSource = win32.initialDecorationsVisibleForSource;
 const input = @import("../../input.zig");
 const inspectorBannerStateChanged = win32.inspectorBannerStateChanged;
 const inspectorChromeVisible = win32.inspectorChromeVisible;
@@ -595,11 +592,6 @@ pub const Surface = struct {
 
     pub const searchBarButtonPrevProc = search_controls.SurfaceControls.searchBarButtonPrevProc;
 
-    pub fn initialDecorationsVisible(config: *const configpkg.Config, opts: SurfaceInitOptions) bool {
-        const keeps = WindowKeeps.forNewSurface(config, opts);
-        return initialDecorationsVisibleForSource(config, if (keeps.decoration) null else opts.clone_state_from);
-    }
-
     /// The `Surface.init` steps `App.test_surface_init_stage` stands in for.
     pub const InitStage = enum { gl_context, core_surface };
 
@@ -611,6 +603,8 @@ pub const Surface = struct {
         opts: SurfaceInitOptions,
     ) !void {
         log.debug("surface.init begin", .{});
+        // A tab or split opens in a window that has already started.
+        std.debug.assert(opts.host_id == null or opts.window == .fresh);
         const existing_host = if (opts.host_id) |host_id|
             app.registry.findHostById(host_id) orelse return error.InvalidHost
         else
@@ -618,7 +612,7 @@ pub const Surface = struct {
         var shell_prepared = try app.prepareShellSurfaceCreate(existing_host, opts);
         defer if (shell_prepared) |*prepared| prepared.deinit();
 
-        const host = existing_host orelse try app.createHost(title, config, opts);
+        const host = existing_host orelse try app.createHost(title, config, opts.window);
         const created_host = existing_host == null;
         errdefer if (created_host) {
             // Its shell window was never committed. Clear it, or the focus
@@ -873,7 +867,7 @@ pub const Surface = struct {
         // A tab or split starts with the metrics of the pane it is opened
         // from; its core init then sends its own cell size and limit.
         if (opts.clone_state_from) |source| {
-            if (source.host_id == self.host_id) window_state.copyPaneMetrics(self, source, .{});
+            if (source.host_id == self.host_id) window_state.copyPaneMetrics(self, window_state.paneMetrics(source), .{});
         }
 
         if (app.test_surface_init_stage) |stage| try stage(self, .core_surface) else {
@@ -917,8 +911,8 @@ pub const Surface = struct {
         // need an initial occlusion sync so hidden child GL surfaces stop
         // rendering before activation ordering runs.
         const activate_during_init = shouldShowSurfaceImmediately(opts.host_id);
-        const window_start = WindowStart.forNewSurface(config, opts);
-        const keeps = WindowKeeps.forNewSurface(config, opts);
+        // How the window this init created starts (`window_state.begin`).
+        const start: ?window_state.Pending = if (created_host) host.pending_start else null;
         self.setVisible(activate_during_init);
         sys.DragAcceptFiles(hwnd, 1);
 
@@ -945,18 +939,19 @@ pub const Surface = struct {
             // given it `window-width`/`window-height`, so that is the normal
             // rect it returns to. A clone takes them once it has the
             // source's state, below.
-            if (opts.clone_state_from == null) window_state.applyWindowStart(host, window_start);
+            if (start) |plan| if (plan.plan.kind != .copy) window_state.applyWindowStart(host, plan.plan.enter);
             // The top-level host was created hidden and stays hidden until GL
             // and core initialization have succeeded, so a startup failure
             // reaches the fatal dialog without first presenting a blank host
             // window. Same-host tabs and splits never take this path.
-            if (opts.show.showCommand()) |show_command| {
+            const show = if (start) |plan| plan.plan.show else .activate;
+            if (show.showCommand()) |show_command| {
                 if (host.hwnd) |host_hwnd| {
                     _ = sys.ShowWindow(host_hwnd, show_command);
                     _ = sys.UpdateWindow(host_hwnd);
                 }
             }
-            if (opts.show.takesFocus()) self.presentWindow();
+            if (show.takesFocus()) self.presentWindow();
             if (app.update_startup_ready) {
                 // The first window of a start that opened none (initial-window
                 // off) is where the failed-install banner can first show.
@@ -966,14 +961,13 @@ pub const Surface = struct {
             try self.requestRepaint();
         }
 
-        if (opts.clone_state_from) |source| {
-            if (source.host_id != self.host_id) {
-                window_state.copyPaneMetrics(self, source, keeps);
-                if (source.host) |from| try window_state.inheritWindowStateFrom(host, from, keeps);
-                // After it: a normal source ends in SW_RESTORE.
-                window_state.applyWindowStart(host, window_start);
-            }
-        }
+        if (start) |plan| if (plan.plan.source) |source| {
+            if (plan.source_pane) |metrics| window_state.copyPaneMetrics(self, metrics, plan.plan.keeps);
+            try window_state.inheritWindowStateFrom(host, source.state, plan.source_hwnd, plan.plan.keeps);
+            // After it: a normal source ends in SW_RESTORE.
+            window_state.applyWindowStart(host, plan.plan.enter);
+        };
+        if (created_host) host.pending_start = null;
         if (shell_prepared) |*prepared| {
             try prepared.commit(&app.shell_runtime);
             self.shell_committed = true;
@@ -5545,7 +5539,7 @@ test "win32 output starts the scrollbar's heartbeat, and a hidden bar hides its 
     // The dynamic policy whatever this machine's "Always show scrollbars".
     app.system_dynamic_scrollbars = true;
     // The host stays hidden, so the test never touches the foreground.
-    const host = try app.createHost(std.unicode.utf8ToUtf16LeStringLiteral(""), &app.config, .{});
+    const host = try app.createHost(std.unicode.utf8ToUtf16LeStringLiteral(""), &app.config, .fresh);
     var surface: Surface = .{
         .app = app,
         .host = host,

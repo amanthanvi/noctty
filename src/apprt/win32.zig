@@ -319,10 +319,8 @@ pub const window_state_runtime = .{
     .POINT = POINT,
     .RECT = RECT,
     .Surface = Surface,
-    .SurfaceInitOptions = SurfaceInitOptions,
     .UINT = UINT,
     .WINDOWPLACEMENT = WINDOWPLACEMENT,
-    .WS_OVERLAPPEDWINDOW = WS_OVERLAPPEDWINDOW,
     .apprt = apprt,
     .c = c,
     .configpkg = configpkg,
@@ -356,7 +354,6 @@ pub const window_state_test_runtime = if (builtin.is_test) .{
     .testLayeredAlpha = testLayeredAlpha,
     .testWindowStyle = testWindowStyle,
     .win32_quick_terminal = win32_quick_terminal,
-    .win32_terminal_handoff = win32_terminal_handoff,
 } else .{};
 pub const host_test_runtime = if (builtin.is_test) .{
     .WindowStartTestApp = WindowStartTestApp,
@@ -853,14 +850,6 @@ const titlebar_glyph_dropdown = std.unicode.utf8ToUtf16LeStringLiteral("\u{E70D}
 pub const GlobalHotkeySpec = win32_input.GlobalHotkeySpec;
 pub const RegisteredGlobalHotkey = win32_input.RegisteredGlobalHotkey;
 
-pub const decorationsVisibleForConfig = window_state.decorationsVisibleForConfig;
-
-pub const initialDecorationsVisibleForSource = window_state.initialDecorationsVisibleForSource;
-
-pub const startupHostWindowStyle = window_state.startupHostWindowStyle;
-
-pub const restoreRequestedHostWindowStyle = window_state.restoreRequestedHostWindowStyle;
-
 /// Windows clipboard text ends its lines with CRLF; the core, and whatever
 /// reads an OSC 52 reply, expect LF. A paste turns each LF into one CR, the
 /// shell's Enter, so a CRLF left in place arrived as two: an extra empty line
@@ -1115,7 +1104,7 @@ pub fn surfaceWindowStyle() u32 {
     return c.WS_CHILD | c.WS_CLIPSIBLINGS;
 }
 
-const effectiveHostWindowStyle = window_state.effectiveHostWindowStyle;
+const hostStyle = window_state.hostStyle;
 
 pub fn shouldShowSurfaceImmediately(host_id: ?u32) bool {
     return host_id == null;
@@ -4167,60 +4156,20 @@ pub fn destroySubclassedWindow(
 }
 
 pub const SurfaceInitOptions = struct {
-    quick_terminal: bool = false,
+    /// How the window it creates starts. A tab or split (`host_id` set)
+    /// creates none and leaves this `.fresh`.
+    window: window_state.Origin = .fresh,
     host_id: ?u32 = null,
     tab_id: ?u32 = null,
     tab_insert_index: ?usize = null,
+    /// The pane a tab or split is opened from: the pane a split divides,
+    /// and the metrics a new pane starts with. A new window's source is its
+    /// `window` origin.
     clone_state_from: ?*const Surface = null,
     split_direction: SplitTreeSurface.Split.Direction = .right,
-    /// How the newly-created host HWND first appears, once GL and core
-    /// initialization succeed. Used by the quick-terminal passive mode
-    /// (`quick-terminal-keyboard-interactivity = none`) on first toggle-on,
-    /// and by a handed-off console that asked not to take focus.
-    show: InitialShow = .activate,
     adopted_session: ?*win32_terminal_handoff.PendingSession = null,
-    /// Whether a new window takes `maximize` and `fullscreen` from `config`
-    /// while `Surface.init` shows it. Session restore turns this off: it
-    /// moves the window to its saved rect first and applies them afterwards
-    /// (`App.restoreSessionWindow`).
-    config_window_start: bool = true,
-    /// The argv a forwarded launch (a second `noctty`, or `noctty
-    /// +new-window`) applied to `config`, for `WindowKeeps`.
-    forwarded_arguments: ?[]const [:0]const u8 = null,
     /// What the surface records of its launch (`pane_launch.prepare`).
     launch: configpkg.pane_launch.Stamp = .{},
-};
-
-pub const WindowKeeps = window_state.WindowKeeps;
-
-pub const WindowStart = window_state.WindowStart;
-
-/// The first show of a new host window.
-pub const InitialShow = enum {
-    /// Shown and presented with focus.
-    activate,
-    /// Visible without stealing focus from the caller's foreground window.
-    no_activate,
-    /// Minimized, without activation: the window exists but stays out of the
-    /// way, and the taskbar button is all the user sees.
-    minimized,
-    /// Maximized, with focus.
-    maximized,
-
-    /// The `ShowWindow` command for the first show, if it is not left to
-    /// `presentWindow`. A maximize is followed by `presentWindow` for focus.
-    pub fn showCommand(self: InitialShow) ?i32 {
-        return switch (self) {
-            .activate => null,
-            .no_activate => c.SW_SHOWNOACTIVATE,
-            .minimized => c.SW_SHOWMINNOACTIVE,
-            .maximized => c.SW_MAXIMIZE,
-        };
-    }
-
-    pub fn takesFocus(self: InitialShow) bool {
-        return self == .activate or self == .maximized;
-    }
 };
 
 /// The first show a handed-off console asked for in its `STARTUPINFO`.
@@ -4230,7 +4179,7 @@ pub const InitialShow = enum {
 /// started with `SW_HIDE` too (only `CREATE_NO_WINDOW` keeps a console
 /// windowless), and a host with no way to be shown again is worse than a
 /// minimized one, so a hide becomes a minimize that takes no focus.
-pub fn adoptedInitialShow(startup_flags: u32, show_window: u16) InitialShow {
+pub fn adoptedInitialShow(startup_flags: u32, show_window: u16) window_state.InitialShow {
     if (startup_flags & win32_terminal_handoff.STARTF_USESHOWWINDOW == 0) return .activate;
     return switch (show_window) {
         c.SW_SHOWNOACTIVATE, c.SW_SHOWNA => .no_activate,
@@ -19510,7 +19459,7 @@ fn testTabGapHost(decorated: bool) !void {
     try std.testing.expect(sys.GetMonitorInfoW(monitor, &monitor_info) != 0);
     app.config.@"window-position-x" = @intCast(monitor_info.rcMonitor.left);
     app.config.@"window-position-y" = @intCast(monitor_info.rcMonitor.top);
-    const host = try app.createHost(std.unicode.utf8ToUtf16LeStringLiteral(""), &app.config, .{});
+    const host = try app.createHost(std.unicode.utf8ToUtf16LeStringLiteral(""), &app.config, .fresh);
     const hwnd = host.hwnd.?;
     try std.testing.expectEqual(decorated, host.usingIntegratedTitlebar());
     try std.testing.expect(sys.IsWindowVisible(hwnd) == 0);
@@ -19689,7 +19638,7 @@ test "TABGAP integrated caption has no invisible system menu icon" {
             app.use_integrated_titlebar = true;
             app.config.@"window-position-x" = 0;
             app.config.@"window-position-y" = 0;
-            const host = try app.createHost(std.unicode.utf8ToUtf16LeStringLiteral(""), &app.config, .{});
+            const host = try app.createHost(std.unicode.utf8ToUtf16LeStringLiteral(""), &app.config, .fresh);
             const hwnd = host.hwnd.?;
             const original_style = testWindowStyle(hwnd);
             for ([_]bool{ false, true }) |maximized| {
@@ -19730,11 +19679,11 @@ test "win32 createHost frames an undecorated host for its Windows build" {
     const app = &fixture.app;
     app.config.@"window-decoration" = .none;
 
-    // `createHost` as a `new_window` clone calls it. A source with no
-    // window gives no state, so the decorations are the config's; the rest
-    // of the clone path (`inheritWindowStateFrom`) is not exercised here.
-    var source: Surface = undefined;
-    source.host = null;
+    // `createHost` as a `new_window` clone calls it: the decoration state
+    // comes from the source window rather than the config. A source with no
+    // window is not cascaded from, and the rest of the clone path
+    // (`inheritWindowStateFrom`) is not exercised here.
+    const source: Host = .{ .app = app, .id = 99, .top_level = .{ .decorations_visible = false } };
 
     // Both builds run against this machine's window manager; only the
     // build-gated choices differ.
@@ -19743,9 +19692,9 @@ test "win32 createHost frames an undecorated host for its Windows build" {
         for ([_]bool{ true, false }) |integrated| {
             app.use_integrated_titlebar = integrated;
             // Hosts stay hidden, so the test never touches the foreground.
-            const first = try app.createHost(std.unicode.utf8ToUtf16LeStringLiteral(""), &app.config, .{});
-            const clone = try app.createHost(std.unicode.utf8ToUtf16LeStringLiteral(""), &app.config, .{ .clone_state_from = &source });
-            const quick = try app.createHost(std.unicode.utf8ToUtf16LeStringLiteral(""), &app.config, .{ .quick_terminal = true });
+            const first = try app.createHost(std.unicode.utf8ToUtf16LeStringLiteral(""), &app.config, .fresh);
+            const clone = try app.createHost(std.unicode.utf8ToUtf16LeStringLiteral(""), &app.config, .{ .copy = .{ .source = &source } });
+            const quick = try app.createHost(std.unicode.utf8ToUtf16LeStringLiteral(""), &app.config, .{ .quick_terminal = .activate });
             for ([_]*Host{ first, clone, quick }) |host| {
                 const hwnd = host.hwnd.?;
                 const keeps_frame = undecoratedKeepsFrame(os_build, host.quick_terminal);
@@ -19754,7 +19703,7 @@ test "win32 createHost frames an undecorated host for its Windows build" {
                 // What `window_state.applyWindowStyle` writes for an undecorated
                 // window, the style every clone and runtime toggle ends with.
                 // Before #270 the first window came back with WS_CAPTION.
-                const applied = effectiveHostWindowStyle(keeps_frame, false, true) & ~@as(u32, c.WS_VISIBLE);
+                const applied = hostStyle(keeps_frame, false);
                 try std.testing.expectEqual(applied, testWindowStyle(hwnd) & ~@as(u32, c.WS_CLIPSIBLINGS));
                 var window_rect: RECT = undefined;
                 try std.testing.expect(sys.GetWindowRect(hwnd, &window_rect) != 0);

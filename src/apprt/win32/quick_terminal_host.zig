@@ -151,13 +151,12 @@ pub fn toggleQuickTerminal(self: *App) !void {
     defer config.deinit();
     const launch = try configpkg.pane_launch.prepare(&config, .{ .fresh = .{} }, self.launchContext(null));
     const surface = try self.createWindowSurface(&config, quick_terminal_title, .{
-        .quick_terminal = true,
         // Passive first-show: `Surface.init` uses `SW_SHOWNOACTIVATE`
         // after GL and core initialization, so the new HWND appears
         // without taking focus. Without this, the very first toggle-on
         // with `keyboard-interactivity = none` would still activate the
         // window even though the later `present()` call is skipped.
-        .show = if (want_focus) .activate else .no_activate,
+        .window = .{ .quick_terminal = if (want_focus) .activate else .no_activate },
         .launch = launch,
     });
     _ = try window_state.perform(surface.host.?, surface, .float_window, .on);
@@ -370,7 +369,7 @@ test "win32 DPI suggestions preserve a quick terminal tween but resize ordinary 
         _ = sys.UnregisterClassW(palette_list_class_name, hinstance);
         _ = sys.UnregisterClassW(scrollbar_class_name, hinstance);
     }
-    const host = try app.createHost(std.unicode.utf8ToUtf16LeStringLiteral(""), &app.config, .{ .quick_terminal = true });
+    const host = try app.createHost(std.unicode.utf8ToUtf16LeStringLiteral(""), &app.config, .{ .quick_terminal = .activate });
     const hwnd = host.hwnd.?;
     var before: RECT = undefined;
     try std.testing.expect(sys.GetWindowRect(hwnd, &before) != 0);

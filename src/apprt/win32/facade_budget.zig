@@ -18,8 +18,8 @@ const budget = .{
         .overlay_session_test_runtime = 5,
         .palette_controller_runtime = 44,
         .palette_controller_test_runtime = 7,
-        .window_state_runtime = 24,
-        .window_state_test_runtime = 22,
+        .window_state_runtime = 22,
+        .window_state_test_runtime = 21,
         .host_test_runtime = 2,
         .surface_presentation_runtime = 12,
         .surface_presentation_test_runtime = 3,
@@ -28,9 +28,9 @@ const budget = .{
         .test_support_runtime = 50,
     },
     // The facade's pub declarations: what the files that import it can reach.
-    .facade_pub_decls = 518,
+    .facade_pub_decls = 511,
     // Root declarations of win32.zig whose value is a field access (`a.b`).
-    .facade_aliases = 270,
+    .facade_aliases = 264,
     // Fields of win32.App named `test_*`.
     .app_test_hooks = 10,
 };
@@ -61,7 +61,7 @@ const leaves = .{
         .file = "window_start.zig",
         .module = @import("window_start.zig"),
         .source = @embedFile("window_start.zig"),
-        .pub_decls = 2,
+        .pub_decls = 13,
     },
 };
 

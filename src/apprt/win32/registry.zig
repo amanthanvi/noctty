@@ -139,12 +139,11 @@ pub const Registry = struct {
     /// with no tab for undo, which has no pane to copy. With neither, an
     /// ordinary new window. `hosts` is no guide: `detachHostReference`
     /// reorders it.
-    pub fn newWindowSource(self: *Registry, target: apprt.Target) ?*Surface {
+    pub fn newWindowSource(self: *Registry, target: apprt.Target) ?*Host {
         switch (target) {
             .app => {},
             .surface => |core_surface| if (self.findSurfaceByCore(core_surface)) |surface| {
-                const host = surface.host orelse return surface;
-                if (!host.quick_terminal) return surface;
+                if (surface.host) |host| if (!host.quick_terminal) return host;
             },
         }
         var latest: ?*Host = null;
@@ -152,7 +151,7 @@ pub const Registry = struct {
             if (host.quick_terminal or host.activeSurface() == null) continue;
             if (latest == null or host.activated > latest.?.activated) latest = host;
         }
-        return if (latest) |host| host.activeSurface() else null;
+        return latest;
     }
 
     pub fn focusedSurfaceForUndoRedo(self: *Registry) ?*Surface {
@@ -452,12 +451,12 @@ test "Registry target focus and new window choices retain fallback and activatio
     try std.testing.expectEqual(&fixture.c, registry.focusedSurfaceForUndoRedo().?);
     fixture.a.window_focused = true;
     try std.testing.expectEqual(&fixture.a, registry.focusedSurfaceForUndoRedo().?);
-    try std.testing.expectEqual(&fixture.c, registry.newWindowSource(.app).?);
-    try std.testing.expectEqual(&fixture.b, registry.newWindowSource(.{ .surface = &fixture.b.core_surface }).?);
+    try std.testing.expectEqual(&fixture.second, registry.newWindowSource(.app).?);
+    try std.testing.expectEqual(&fixture.first, registry.newWindowSource(.{ .surface = &fixture.b.core_surface }).?);
     try std.testing.expect(registry.quickTerminalHost() == null);
     fixture.second.quick_terminal = true;
     try std.testing.expectEqual(&fixture.second, registry.quickTerminalHost().?);
-    try std.testing.expectEqual(&fixture.a, registry.newWindowSource(.{ .surface = &fixture.c.core_surface }).?);
+    try std.testing.expectEqual(&fixture.first, registry.newWindowSource(.{ .surface = &fixture.c.core_surface }).?);
     fixture.first.quick_terminal = true;
     try std.testing.expectEqual(&fixture.first, registry.quickTerminalHost().?);
     try std.testing.expect(registry.newWindowSource(.app) == null);
@@ -470,7 +469,6 @@ test "Registry target focus and new window choices retain fallback and activatio
     try std.testing.expect(registry.detachHost(&fixture.empty));
     try std.testing.expectEqual(&fixture.second, registry.quickTerminalHost().?);
     fixture.b.host = null;
-    try std.testing.expectEqual(&fixture.b, registry.newWindowSource(.{ .surface = &fixture.b.core_surface }).?);
     try std.testing.expect(Host.findTabForSurface(&fixture.b) == null);
 }
 

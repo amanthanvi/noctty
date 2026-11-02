@@ -454,7 +454,8 @@ pub fn restoreSessionWindow(
     // new window does. The window has its saved rect by now (as the rect
     // it returns to, if a minimized launch minimized it), so that is the
     // normal rect it returns to.
-    var start = window_state.WindowStart.fromConfig(&self.config);
+    const wants = window_state.wants(&self.config);
+    var start: window_state.Enter = .{ .maximize = wants.maximize, .fullscreen = wants.fullscreen };
     if (window.state == .fullscreen) {
         start.fullscreen = true;
         start.maximize = start.maximize or (window.fullscreen_maximized orelse false);
@@ -682,8 +683,9 @@ pub fn restoreSessionPane(
         .tab_insert_index = if (host != null and tab_surface == null) tab_index else null,
         .clone_state_from = tab_surface,
         .split_direction = split_direction,
-        // `restoreSessionWindow` applies them once the window is placed.
-        .config_window_start = false,
+        // `restoreSessionWindow` places it, and gives it `maximize` and
+        // `fullscreen`, once its tabs are there.
+        .window = if (host == null) .restore else .fresh,
         .launch = launch,
     });
     transaction.noteSurface(surface);
