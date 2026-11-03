@@ -8732,7 +8732,12 @@ pub const App = struct {
             self.settings_masked_keys.set(alloc, masked);
         }
 
-        self.core_app.updateConfig(self, &reloaded) catch return error.ReloadFailed;
+        // The reading checked above, already in the app's light/dark state:
+        // `updateConfig` installs it as it is. Handed the light reload, it
+        // would put it in that state again, reading the theme again,
+        // unchecked, and a theme that had become unreadable in between would
+        // be installed partly read.
+        self.core_app.updateConfig(self, applied) catch return error.ReloadFailed;
         // The reload read the file again, so what is wrong in it is news.
         _ = self.reportRecordedConfigProblems();
         if (masked.len > 0) return error.SavedButMasked;
