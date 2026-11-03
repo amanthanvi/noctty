@@ -8628,12 +8628,14 @@ pub const App = struct {
         // in the app's light/dark state: a theme can set a key, or define a
         // profile, in one state only (a dark theme's `default-profile` takes
         // over when Automatic deletes the file's line).
-        // One that cannot be put in that state (no memory) applies nothing,
-        // as a reload that fails does: the light reading is not what the app
-        // runs, and `updateConfig` would read the theme again, unchecked.
+        // One that cannot be put in that state (no memory) applies nothing:
+        // the light reading is not what the app runs, and `updateConfig`
+        // would read the theme again, unchecked. The file is written, so
+        // the save is done, and the window says to reload
+        // (`SavedNotApplied`).
         var reloaded_applied: ?configpkg.Config = reloaded.changeConditionalState(self.core_app.config_conditional_state) catch |err| {
             log.warn("settings save: saved, but the reload could not be put in the app's light/dark state; the running settings are kept err={}", .{err});
-            return error.ReloadFailed;
+            return error.SavedNotApplied;
         };
         defer if (reloaded_applied) |*value| value.deinit();
         const applied: *const configpkg.Config = if (reloaded_applied) |*value| value else &reloaded;
@@ -10139,9 +10141,15 @@ pub const App = struct {
         var pending = try app.config.clone(alloc);
         defer pending.deinit();
         pending.@"font-size" = 15;
+        // The window shows a preview of the opacity, as it does while a
+        // draft changes it.
+        settingsPreviewFieldThunk(&app, .background_opacity, .{ .background_opacity = 0.5 });
+        try std.testing.expect(app.settings_preview != null);
         // The file is written; the running settings are kept, rather than
         // the light reading, or one `updateConfig` would switch unchecked.
-        try std.testing.expectError(error.ReloadFailed, app.settingsSaveAndReload(&pending, &original));
+        // The save is done: it says so, and the preview ends with it.
+        try std.testing.expectError(error.SavedNotApplied, settingsSaveAndReloadThunk(&app, &pending, &original));
+        try std.testing.expect(app.settings_preview == null);
         try std.testing.expectEqual(@as(f32, 12), app.config.@"font-size");
         const after = try SaveTest.read(path);
         defer alloc.free(after);

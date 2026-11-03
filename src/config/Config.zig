@@ -4645,7 +4645,17 @@ test "a light/dark switch that cannot copy a recorded problem fails, rather than
         defer switched.deinit();
         try testing.expect(Has.recorded(&switched, problem));
         try testing.expectEqual(@as(f32, 14), switched.@"font-size");
-        if (!failing.has_induced_failure) break;
+        if (!failing.has_induced_failure) {
+            // A later switch rebuilds from the switched config's replay
+            // steps, where the problem lives on only as its `.diagnostic`
+            // step: switched back to light, it is still recorded.
+            failing.fail_index = std.math.maxInt(usize);
+            var back = (try switched.changeConditionalState(.{ .theme = .light })) orelse return error.TestExpectedSwitch;
+            defer back.deinit();
+            try testing.expect(Has.recorded(&back, problem));
+            try testing.expectEqual(@as(f32, 13), back.@"font-size");
+            break;
+        }
     } else return error.TestSwitchNeverSucceeded;
 }
 

@@ -2437,7 +2437,7 @@ pub const Host = struct {
             // save does not apply: the running config is the one the pick
             // installed, the theme with it. An open Settings window hears of
             // the theme, as it would of the reload.
-            .completed_unread => self.app.settings_window.externalConfigChanged(&self.app.config, self.app.config_revision),
+            .completed_unread, .completed_not_applied => self.app.settings_window.externalConfigChanged(&self.app.config, self.app.config_revision),
             .failed => |err| {
                 log.warn("palette theme save failed theme={s} err={}", .{ theme_name, err });
                 // Roll back without another allocation: `original` is already
@@ -2453,6 +2453,10 @@ pub const Host = struct {
         }
         const saved_but_masked = std.meta.activeTag(save_outcome) == .completed_masked;
         const saved_but_unread = std.meta.activeTag(save_outcome) == .completed_unread;
+        // Saved, with a reload that could not be applied (no memory to put it
+        // in the app's light/dark state): as for `completed_unread`, the
+        // running config is the one the pick installed.
+        const saved_not_applied = std.meta.activeTag(save_outcome) == .completed_not_applied;
 
         if (self.palette_list_uia_provider) |provider| {
             win32_uia.events.raiseNotification(
@@ -2462,6 +2466,8 @@ pub const Host = struct {
                     "Theme saved; a later config layer masks it"
                 else if (saved_but_unread)
                     "Theme saved; a config file could not be read whole"
+                else if (saved_not_applied)
+                    "Theme saved; the configuration could not be reloaded"
                 else if (self.app.safe_mode)
                     "Theme saved; restart noctty to apply it"
                 else
@@ -2487,6 +2493,13 @@ pub const Host = struct {
             runUiActionOrLog(
                 "palette unread theme banner failed",
                 self.setBanner(.err, "Theme saved, but a config file could not be read whole. Reload the configuration once it can be read."),
+            );
+        }
+        if (saved_not_applied) {
+            log.warn("palette theme saved, but the reload could not be applied theme={s}", .{theme_name});
+            runUiActionOrLog(
+                "palette unapplied theme banner failed",
+                self.setBanner(.err, "Theme saved, but the configuration could not be reloaded. Reload the configuration to use the saved file."),
             );
         }
         self.layout() catch |err| {

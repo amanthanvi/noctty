@@ -904,6 +904,9 @@ const StatusNote = enum {
     /// Saved, but the reload could not read a config file whole, so the
     /// running settings were kept as they were (`SaveError.SavedButUnread`).
     saved_unread,
+    /// Saved, but the reload could not be applied, so the running settings
+    /// were kept as they were (`SaveError.SavedNotApplied`).
+    saved_not_applied,
     save_failed,
     /// Another program edited the config file while it was being saved, and
     /// checked again it kept changing: nothing was saved.
@@ -960,6 +963,7 @@ const StatusNote = enum {
             .saved => "Settings saved.",
             .saved_overridden => "Saved, but a later config file or command-line option overrides some of these values, so they will not take effect.",
             .saved_unread => "Saved, but a config file could not be read whole, so the running settings are unchanged. Reload the configuration once it can be read to use the saved values.",
+            .saved_not_applied => "Saved, but the saved settings could not be applied, so the running settings are unchanged. Reload the configuration to use the saved values.",
             .disk_changed => "Nothing was saved: another program changed the config file while it was being saved. Save again. Your edits are kept.",
             .profile_changed => "Nothing was saved: another program changed a profile in the config file since Settings read it. Reload the configuration, then make the change again. Your edits are kept.",
             .save_failed => "Save failed. Your edits are kept. Check that the config file can be written and is not open in another program, then try again.",
@@ -1739,12 +1743,18 @@ pub const SaveError = error{
     /// file whole (`settings_patch.reloadReport`): what it missed is no
     /// override, and `AppHandle.failureDetail` names the file.
     SavedButUnread,
+    /// The file was written, and the reload after it could not be put in the
+    /// app's light/dark state (no memory): nothing of it is applied, and the
+    /// running settings stay as they were until the configuration is
+    /// reloaded. The save is done, so the draft and its previews end.
+    SavedNotApplied,
 };
 
 pub const SaveReloadOutcome = union(enum) {
     completed,
     completed_masked,
     completed_unread,
+    completed_not_applied,
     failed: SaveError,
 };
 
@@ -1805,6 +1815,7 @@ pub fn saveReloadOutcome(result: SaveError!void) SaveReloadOutcome {
     result catch |err| return switch (err) {
         error.SavedButMasked => .completed_masked,
         error.SavedButUnread => .completed_unread,
+        error.SavedNotApplied => .completed_not_applied,
         else => .{ .failed = err },
     };
     return .completed;
@@ -3049,7 +3060,7 @@ pub const SettingsWindow = struct {
     fn idleStatusText(self: *const SettingsWindow) []const u8 {
         switch (self.status_note) {
             // A save's result stays up whatever the draft looks like now.
-            .saved, .discarded, .editor_open_failed => return self.status_note.text(),
+            .saved, .saved_not_applied, .discarded, .editor_open_failed => return self.status_note.text(),
             .saved_overridden, .saved_unread, .already_default, .reset_failed, .key_copied, .key_copy_failed => return self.noteText(),
             .profile_said, .profile_hint, .profile_refused => return self.noteText(),
             // These are about edits that are still there to be saved.
@@ -6396,6 +6407,9 @@ pub const SettingsWindow = struct {
             // some of it: the same baseline refresh, and the status names
             // the file.
             .completed_unread => self.completeSynchronousSave(apply_id, .unread),
+            // Written, and nothing of it applied: the same baseline refresh,
+            // and the status says to reload.
+            .completed_not_applied => self.completeSynchronousSave(apply_id, .not_applied),
             .failed => |err| {
                 // Write failed. DO NOT discard `pending` — the user's
                 // edits are still in memory; losing them on every
@@ -6727,7 +6741,7 @@ pub const SettingsWindow = struct {
     }
 
     /// How a save that wrote the file ended (`saveReloadOutcome`).
-    const SavedHow = enum { clean, masked, unread };
+    const SavedHow = enum { clean, masked, unread, not_applied };
 
     fn finishSuccessfulSave(self: *SettingsWindow, how: SavedHow) void {
         const masked = how == .masked;
@@ -6738,6 +6752,7 @@ pub const SettingsWindow = struct {
             .clean => .saved,
             .masked => .saved_overridden,
             .unread => .saved_unread,
+            .not_applied => .saved_not_applied,
         };
         // The settings the save wrote that something later overrides, by the
         // names a config file knows them by, and where the value that wins
@@ -6778,6 +6793,12 @@ pub const SettingsWindow = struct {
             self.handle.notifySuccess(
                 self.handle.ctx,
                 "Settings saved, but a config file could not be read whole",
+                self.noteText(),
+            );
+        } else if (how == .not_applied) {
+            self.handle.notifySuccess(
+                self.handle.ctx,
+                "Settings saved, but not applied",
                 self.noteText(),
             );
         } else {
@@ -10859,6 +10880,35 @@ test "settings a save that fails after its reload keeps the draft previewed" {
     }.body);
 }
 
+test "settings a save whose reload is not applied says it saved, ends the previews and keeps the running settings" {
+    try dialog_test.onHiddenDesktop(struct {
+        fn body() !void {
+            const fixture = try dialog_test.Fixture.start();
+            defer fixture.finish();
+            const settings = &fixture.settings;
+            fixture.live_previews = true;
+            typeInto(settings.fields.edit_bg_opacity.?, "0.5");
+            try std.testing.expectEqual(@as(f64, 0.5), fixture.config.@"background-opacity");
+            const previews = fixture.previews;
+
+            // The file is written, and its reload is not applied.
+            fixture.not_applied = true;
+            settings.save();
+            try std.testing.expectEqual(@as(u32, 1), fixture.saved);
+            // The save is done: the draft starts over from the running
+            // settings, and no preview is shown over them again.
+            try std.testing.expect(!settings.hasPendingChanges());
+            try std.testing.expectEqual(previews, fixture.previews);
+            try std.testing.expectEqual(@as(f64, 1), fixture.config.@"background-opacity");
+            // The status says the file was saved and the settings were not
+            // applied, and to reload.
+            try std.testing.expectEqual(StatusNote.saved_not_applied, settings.status_note);
+            var buf: [512]u8 = undefined;
+            try std.testing.expectEqualStrings(StatusNote.saved_not_applied.text(), try statusTextOf(settings, &buf));
+        }
+    }.body);
+}
+
 test "SET Discard asks before losing edits and supports keyboard cancellation" {
     try dialog_test.onHiddenDesktop(struct {
         fn body() !void {
@@ -12907,6 +12957,9 @@ const dialog_test = struct {
         previews: u32 = 0,
         /// A save writes, its reload applies, and then it fails.
         reload_then_fail: bool = false,
+        /// The save writes, and its reload is not applied
+        /// (`SaveError.SavedNotApplied`).
+        not_applied: bool = false,
         /// What the window's High Contrast probe answers.
         high_contrast: bool = false,
         /// A save writes this config file the way the App's does
@@ -13146,6 +13199,12 @@ const dialog_test = struct {
                 // The App's reload during a save shows no preview.
                 self.config.@"background-opacity" = 1;
                 return error.ReloadFailed;
+            }
+            if (self.not_applied) {
+                // As the App: the previews end, and the running settings
+                // stay as they were.
+                self.config.@"background-opacity" = original.@"background-opacity";
+                return error.SavedNotApplied;
             }
         }
 
