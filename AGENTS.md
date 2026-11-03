@@ -239,7 +239,8 @@ that govern each symbol you change, or that none does.
   `WM_NCCALCSIZE`/`WM_NCHITTEST` (`win32_nc_layout.zig`), integrated titlebar
   and caption buttons, `window-decoration = none`, resize bands, maximize,
   fullscreen and restore placement (one copy per window, `TopLevel` on
-  `Host.top_level`, changed by `window_state.perform` and `applyConfig`;
+  `Host.top_level`, changed by `window_state.perform`, `applyConfig` and
+  `updateMinMaxInfo`; a pane's own metrics, `Surface.metrics`;
   the `maximize`/`fullscreen` keys at window start: `Enter` and
   `forRestore` in `win32/window_start.zig`; what a session saves and
   restores of a fullscreen window: `WindowState.fullscreen` and
@@ -247,9 +248,10 @@ that govern each symbol you change, or that none does.
   `window_state.sessionPlacement`, the restore stages of
   `window_state.advance`, and `restoreSessionWindow` in `win32/session.zig`),
   what a new window copies from its source and which forwarded keys it keeps
-  (`window_state.begin` and `advance`, with its `Origin`, in
-  `win32/window_state.zig`; the pure `plan`, `place` and `Keeps` in
-  `win32/window_start.zig`), `WM_DPICHANGED` and mixed-DPI moves,
+  (`window_state.begin` and `advance`, with its `Origin` and
+  `Host.pending_start`, in `win32/window_state.zig`; the pure `plan`,
+  `place`, `returnOn` and `Keeps` in `win32/window_start.zig`;
+  `Registry.newWindowSource`), `WM_DPICHANGED` and mixed-DPI moves,
   `window-width`/`window-height`, `background-opacity` and DWM backdrop, the
   window menu, the quick terminal (`win32_quick_terminal.zig`,
   `win32/quick_terminal_host.zig`).

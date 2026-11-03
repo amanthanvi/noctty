@@ -3,9 +3,11 @@
 Dates descend; entries that share a date are not always newest first. A newer-dated entry, or an item under "Corrected in other files", overrides an older one on the same subject; when same-date entries disagree, the code decides. [AGENTS.md](../../../AGENTS.md) indexes the area files and says how to add an entry.
 
 Corrected in other files:
+- 2026-04-29 "inactive same-host tabs created by `new_tab` must not propagate shared host-window state": structural now. A window's state is one copy on its Host (`Host.top_level`), changed only through `window_state.perform` and `applyConfig`, so no tab has a copy to propagate, and `inheritWindowStateFrom` is gone; its harness rule (fail on transient maximize drift, not only the final rect) stands: the 2026-11-02 WINDOW-STATE-01 entry in window-frame.md.
 - 2026-10-11 "Closing a window (WM_CLOSE: ...", its last sentence: a Restart Manager close no longer reaches these prompts; the 2026-10-23 RMCLOSE-1 entry in app-lifecycle.md says how it is answered.
 
 See also:
+- `inheritWindowStateFrom`, which the 2026-10-10 entry lists among the steps under `Surface.init`'s errdefers, is `window_state.advance(host, .after_show)` now, still before `destroy_on_wm_destroy`, and a new window's start is staged by `window_state.begin`/`advance` around core init: the 2026-11-02 WINDOW-STATE-01 entry in window-frame.md.
 - Background-tab close prompts and the undo-off banner are in the 2026-10-15 SMALL-04 A entry in accessibility.md.
 - The terminal snapshot an undo captures (`TerminalFormatter`/`ScreenFormatter`) is in the 2026-10-15 PKG-53 entry in terminal-core.md.
 - Saving the session as the last window, tab or pane goes (the quick terminal and a window kept empty for undo never count): the 2026-10-19 #497 entry in app-lifecycle.md.
