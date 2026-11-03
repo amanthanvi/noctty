@@ -502,6 +502,14 @@ pub extern "kernel32" fn ConnectNamedPipe(
 
 pub extern "kernel32" fn SetEvent(hEvent: windows.HANDLE) callconv(.winapi) BOOL;
 
+pub extern "kernel32" fn CreateMutexW(
+    lpMutexAttributes: ?*SECURITY_ATTRIBUTES,
+    bInitialOwner: BOOL,
+    lpName: ?LPCWSTR,
+) callconv(.winapi) ?windows.HANDLE;
+
+pub extern "kernel32" fn ReleaseMutex(hMutex: windows.HANDLE) callconv(.winapi) BOOL;
+
 pub extern "kernel32" fn SetNamedPipeHandleState(
     hNamedPipe: windows.HANDLE,
     lpMode: ?*DWORD,
