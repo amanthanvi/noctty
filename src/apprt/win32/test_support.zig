@@ -20,6 +20,7 @@ const sys = @import("sys.zig");
 const c = @import("consts.zig");
 const child_window = @import("child_window.zig");
 const paint_text = @import("text.zig");
+const window_state = @import("window_state.zig");
 const HWND = types.HWND;
 const BOOL = types.BOOL;
 const UINT = types.UINT;
@@ -58,7 +59,7 @@ pub fn Fixtures(comptime runtime: anytype) type {
         const lastError = child_window.lastError;
         const appendOwnedString = paint_text.appendOwnedString;
         const surfaceDropPayloadCallback = runtime.surfaceDropPayloadCallback;
-        const workspaceRectToScreen = runtime.workspaceRectToScreen;
+        const workspaceRectToScreen = window_state.workspaceRectToScreen;
         const monitorInfo = runtime.monitorInfo;
         const settingsAppIconThunk = runtime.settingsAppIconThunk;
         const settingsChromeBgThunk = runtime.settingsChromeBgThunk;
@@ -639,11 +640,11 @@ pub fn Fixtures(comptime runtime: anytype) type {
                 var placement: WINDOWPLACEMENT = std.mem.zeroes(WINDOWPLACEMENT);
                 placement.length = @sizeOf(WINDOWPLACEMENT);
                 if (sys.GetWindowPlacement(hwnd, &placement) == 0) return lastError();
-                return workspaceRectToScreen(placement.rcNormalPosition, (try runtime.windowMonitor(hwnd)).info);
+                return workspaceRectToScreen(placement.rcNormalPosition, (try window_state.windowMonitor(hwnd)).info);
             }
 
             pub fn monitorRect(hwnd: HWND) !RECT {
-                return (try runtime.windowMonitor(hwnd)).info.rcMonitor;
+                return (try window_state.windowMonitor(hwnd)).info.rcMonitor;
             }
 
             pub fn framed(hwnd: HWND) bool {
@@ -713,33 +714,6 @@ pub fn Fixtures(comptime runtime: anytype) type {
                 child = sys.GetWindow(child.?, c.GW_HWNDNEXT);
             }
             try std.testing.expectEqual(@as(?HWND, null), child);
-        }
-
-        /// Assemble the state `Surface.init` has built by the time it first
-        /// shows its window (`window_state.advance(.before_show)`): a freshly
-        /// created host window whose single tab already focuses this surface.
-        /// Caller owns `host.tabs`.
-        pub fn initTestHostWindowFixture(host: *Host, surface: *Surface, hwnd: HWND) !void {
-            host.id = 234;
-            host.hwnd = hwnd;
-            host.tabs = .empty;
-            host.active_tab = 0;
-            // The caller can only register its own teardown once this returns, so a
-            // precondition that fails below would otherwise leak the Tab and its
-            // split tree and report an allocator leak on top of the real failure.
-            errdefer deinitTestHostWindowFixture(host);
-
-            surface.host = host;
-            surface.host_id = host.id;
-            // Deliberately null: the layered alpha has to land on the top-level host
-            // window, never on the GL child.
-            surface.hwnd = null;
-            host.top_level = .{};
-
-            try host.tabs.append(std.testing.allocator, try runtime.tabInit(std.testing.allocator, 1, surface));
-
-            try std.testing.expectEqual(@as(?*Surface, surface), runtime.hostActiveSurface(host));
-            try std.testing.expect(!testHostIsLayered(hwnd));
         }
 
         pub fn deinitTestHostWindowFixture(host: *Host) void {

@@ -77,7 +77,6 @@ const closeThisTabConfirmAccept = win32.closeThisTabConfirmAccept;
 const config_edit = @import("../../config/edit.zig");
 const config_file_load = @import("../../config/file_load.zig");
 const configpkg = @import("../../config.zig");
-const configuredHostWindowPosition = win32.configuredHostWindowPosition;
 const currentInstallDir = win32.currentInstallDir;
 const darkTheme = win32.darkTheme;
 const default_title = win32.default_title;
@@ -231,7 +230,6 @@ const tab_tooltip_class_name = win32.tab_tooltip_class_name;
 const tabsCloseConfirmCount = win32.tabsCloseConfirmCount;
 const tabsCloseConfirmCountNoWait = win32.tabsCloseConfirmCountNoWait;
 const toastActivatorSink = win32.toastActivatorSink;
-const undecoratedKeepsFrame = win32.undecoratedKeepsFrame;
 const unixMillis = win32.unixMillis;
 const updateApplyConfirmAccept = win32.updateApplyConfirmAccept;
 const updateApplyFailureMessage = win32.updateApplyFailureMessage;
@@ -262,7 +260,6 @@ const win32_shell = @import("../win32_shell.zig");
 const win32_structural_history = @import("../win32_structural_history.zig");
 const win32_taskbar_progress = @import("../win32_taskbar_progress.zig");
 const win32_terminal_handoff = @import("../win32_terminal_handoff.zig");
-const win32_theme = @import("../win32_theme.zig");
 const win32_toast_activation = @import("../win32_toast_activation.zig");
 const win32_toast_activator = @import("../win32_toast_activator.zig");
 const win32_toast_winrt = @import("../win32_toast_winrt.zig");
@@ -3792,10 +3789,7 @@ pub const App = struct {
                 }
                 const source = self.registry.newWindowSource(target);
                 _ = self.createWindowSurface(&config, default_title, .{
-                    .window = if (source) |host| .{ .copy = .{
-                        .source = host,
-                        .forwarded = forwarded_arguments orelse &.{},
-                    } } else .fresh,
+                    .window = .from(source, forwarded_arguments orelse &.{}),
                     .launch = launch,
                 }) catch |err| {
                     // A request forwarded by another process was acknowledged
@@ -4184,7 +4178,7 @@ pub const App = struct {
 
             .cell_size => {
                 if (self.registry.findSurfaceForTarget(target)) |surface| {
-                    surface.setCellSize(value);
+                    surface.metrics.cell_size_pixels = value;
                     return true;
                 }
                 return false;
@@ -5512,10 +5506,7 @@ pub const App = struct {
             else
                 null,
             .tab_id = tab_id,
-            .window = if (open_target != .window) .fresh else if (self.registry.newWindowSource(target)) |host|
-                .{ .copy = .{ .source = host } }
-            else
-                .fresh,
+            .window = if (open_target == .window) .from(self.registry.newWindowSource(target), &.{}) else .fresh,
             .clone_state_from = if (open_target == .window) null else source,
             .launch = launch,
         });
@@ -5879,7 +5870,7 @@ pub const App = struct {
     }
 
     /// The opacity a window applies along with `config`
-    /// (`Surface.applyRuntimeConfig`): Settings' preview of it while one is
+    /// (`window_state.applyConfig`): Settings' preview of it while one is
     /// shown, whatever `config` is. A reload reaches each terminal's own
     /// config before the app's (`CoreApp.updateConfig`), so a window that
     /// took the saved value there would show it until the app's
@@ -6206,8 +6197,8 @@ pub const App = struct {
             .app = self,
             .id = self.allocateHostId(),
             .quick_terminal = origin == .quick_terminal,
-            .top_level = start.top_level,
-            .pending_start = start.pending,
+            .top_level = start.plan.top_level,
+            .pending_start = start,
         };
         host.palette_catalog = try PaletteCatalog.init(
             &host.palette_catalog_items,
@@ -6222,9 +6213,9 @@ pub const App = struct {
             0,
             host_class_name,
             title,
-            start.style,
-            start.x,
-            start.y,
+            start.plan.style,
+            if (start.plan.position) |at| at.x else c.CW_USEDEFAULT,
+            if (start.plan.position) |at| at.y else c.CW_USEDEFAULT,
             1280,
             800,
             null,

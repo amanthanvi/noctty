@@ -10,6 +10,7 @@ const apprt = @import("../../apprt.zig");
 const configpkg = @import("../../config.zig");
 const c = @import("consts.zig");
 const child_window = @import("child_window.zig");
+const chrome_layout = @import("chrome_layout.zig");
 const sys = @import("sys.zig");
 const win32_theme = @import("../win32_theme.zig");
 const win32_types = @import("../win32_types.zig");
@@ -35,7 +36,6 @@ const test_support = win32.test_support;
 const CoreApp = @import("../../App.zig");
 const LPCWSTR = win32_types.LPCWSTR;
 const SafeModeAppFixture = test_support.SafeModeAppFixture;
-const Tab = win32.Tab;
 const TestSession = test_support.TestSession;
 const WindowStartTestApp = test_support.WindowStartTestApp;
 const cascadeStep = window_start.cascadeStep;
@@ -44,6 +44,7 @@ const monitorInfo = @import("quick_terminal_host.zig").monitorInfo;
 const placementTestApp = test_support.placementTestApp;
 const placementTestHost = test_support.placementTestHost;
 const prompt_label_class = child_window.prompt_label_class;
+const rectEquals = chrome_layout.rectEquals;
 const runOnHiddenDesktop = test_support.runOnHiddenDesktop;
 const testHostIsLayered = test_support.testHostIsLayered;
 const testLayeredAlpha = test_support.testLayeredAlpha;
@@ -78,26 +79,30 @@ pub const Origin = union(window_start.Kind) {
     quick_terminal: InitialShow,
     /// A handed-off console's window, first shown as its client asked.
     adopted: InitialShow,
+
+    /// A copy of `source`, or a fresh window when there is none to copy
+    /// (`Registry.newWindowSource`).
+    pub fn from(source: ?*const Host, forwarded: []const [:0]const u8) Origin {
+        const host = source orelse return .fresh;
+        return .{ .copy = .{ .source = host, .forwarded = forwarded } };
+    }
 };
 
-/// A pane's metrics, from its own font: core init's `cell_size`,
-/// `size_limit` and `initial_size`.
-const PaneMetrics = struct {
-    cell_size_pixels: apprt.action.CellSize,
-    size_limit: apprt.action.SizeLimit,
-    default_client_size: ?apprt.SurfaceSize,
+/// A pane's metrics, from its own font: core init's `initial_size`,
+/// `cell_size` and `size_limit` (`Surface.metrics`). A tab or split starts
+/// with those of the pane it is opened from, and a copy's first pane with
+/// those of its source's active pane.
+pub const PaneMetrics = struct {
+    /// The client size `reset_window_size` returns to.
+    default_client_size: ?apprt.SurfaceSize = null,
+    cell_size_pixels: apprt.action.CellSize = .{ .width = 0, .height = 0 },
+    size_limit: apprt.action.SizeLimit = .{ .min_width = 0, .min_height = 0, .max_width = 0, .max_height = 0 },
 };
 
-pub fn paneMetrics(pane: *const Surface) PaneMetrics {
-    return .{
-        .cell_size_pixels = pane.cell_size_pixels,
-        .size_limit = pane.size_limit,
-        .default_client_size = pane.default_client_size,
-    };
-}
-
-/// A new window's start between `begin` and its last stage, kept on its
-/// Host (`Host.pending_start`).
+/// How a new window starts, decided by `begin` before it exists: it is
+/// created in `plan.top_level` with `plan.style`, at `plan.position` (else
+/// `CW_USEDEFAULT`), and its Host keeps the rest (`Host.pending_start`) for
+/// `advance` until its last stage.
 pub const Pending = struct {
     plan: window_start.Plan,
     /// The corners of the windows on screen when a copy begins, which its
@@ -116,16 +121,6 @@ pub const Pending = struct {
     fn corners(self: *const Pending) []const POINT {
         return self.occupied[0..self.occupied_len];
     }
-};
-
-/// What `begin` decides before the window exists: the state and style it is
-/// created with, and where (`CW_USEDEFAULT` unless `window-position-x/y`).
-pub const Start = struct {
-    top_level: TopLevel,
-    style: u32,
-    x: i32,
-    y: i32,
-    pending: Pending,
 };
 
 /// What `config` asks of how its window starts.
@@ -154,7 +149,7 @@ fn forwardedKeys(argv: []const [:0]const u8) window_start.Forwarded {
 /// Decides how a new window with `config` starts, before it exists. A copy
 /// reads its source here, once: the window's state and geometry, the corners
 /// of the windows on screen and its active pane's metrics.
-pub fn begin(app: *const App, config: *const configpkg.Config, origin: Origin) !Start {
+pub fn begin(app: *const App, config: *const configpkg.Config, origin: Origin) !Pending {
     var pending: Pending = .{ .plan = undefined };
     var snapshot: ?window_start.Snapshot = null;
     var argv: []const [:0]const u8 = &.{};
@@ -164,7 +159,7 @@ pub fn begin(app: *const App, config: *const configpkg.Config, origin: Origin) !
         .copy => |copy| {
             snapshot = try snapshotOf(copy.source);
             pending.occupied_len = app.registry.windowCorners(&pending.occupied).len;
-            if (copy.source.activeSurface()) |pane| pending.source_pane = paneMetrics(pane);
+            if (copy.source.activeSurface()) |pane| pending.source_pane = pane.metrics;
             argv = copy.forwarded;
         },
         .quick_terminal, .adopted => |first_show| show = first_show,
@@ -179,14 +174,7 @@ pub fn begin(app: *const App, config: *const configpkg.Config, origin: Origin) !
         show,
         app.os_build,
     );
-    const position = pending.plan.position;
-    return .{
-        .top_level = pending.plan.top_level,
-        .style = pending.plan.style,
-        .x = if (position) |at| at.x else c.CW_USEDEFAULT,
-        .y = if (position) |at| at.y else c.CW_USEDEFAULT,
-        .pending = pending,
-    };
+    return pending;
 }
 
 fn snapshotOf(source: *const Host) !window_start.Snapshot {
@@ -225,24 +213,27 @@ pub const Stage = enum {
     restore_complete,
 };
 
-/// Whether the pane that first showed its window presents it with focus.
-pub const Focus = enum { take, leave };
-
-/// Carries out the `at` stage of the start `begin` decided for `host`.
-pub fn advance(host: *Host, comptime at: Stage) !(if (at == .before_show) Focus else void) {
-    const pending = &host.pending_start.?;
+/// Carries out the `at` stage of the start `begin` decided for `host`, which
+/// `App.createHost` keeps in `Host.pending_start`. The last stage
+/// (`.after_show`, or `.restore_complete` for a restored window) clears it,
+/// and a host with no start pending fails with `error.NoWindowStart`.
+/// `.before_show` returns whether the pane that first shows the window
+/// presents it with focus.
+pub fn advance(host: *Host, comptime at: Stage) !(if (at == .before_show) bool else void) {
+    const pending = if (host.pending_start) |*start| start else return error.NoWindowStart;
     std.debug.assert(pending.reached == null or @intFromEnum(pending.reached.?) < @intFromEnum(at));
     std.debug.assert(@intFromEnum(at) < @intFromEnum(Stage.restore_placed) or pending.plan.kind == .restore);
+    const last: Stage = if (pending.plan.kind == .restore) .restore_complete else .after_show;
+    defer {
+        if (at == last) host.pending_start = null;
+    }
     pending.reached = at;
     return switch (at) {
         .created => onCreated(host, pending),
         .before_show => beforeShow(host, pending),
         .after_show => afterShow(host, pending),
         .restore_placed => placeRestored(host, pending.restore.?.saved),
-        .restore_complete => {
-            defer host.pending_start = null;
-            applyWindowStart(host, pending.restore.?.enter);
-        },
+        .restore_complete => applyWindowStart(host, pending.restore.?.enter),
     };
 }
 
@@ -272,7 +263,7 @@ fn onCreated(host: *Host, pending: *const Pending) !void {
 
 /// The window is shown only now, once GL and core init have succeeded, so a
 /// startup failure reaches the fatal dialog without a blank window first.
-fn beforeShow(host: *Host, pending: *const Pending) !Focus {
+fn beforeShow(host: *Host, pending: *const Pending) !bool {
     // Layered before any show: layering a window already on screen shows
     // it opaque and then fades it (#234). The layered alpha is the only
     // thing that makes `background-opacity` visible: DWM discards the GL
@@ -286,21 +277,24 @@ fn beforeShow(host: *Host, pending: *const Pending) !Focus {
     // window first appears in that state. Core init has already given it
     // `window-width`/`window-height`, so that is the normal rect it returns
     // to. A copy takes them after its source's state.
-    if (pending.plan.kind != .copy) applyWindowStart(host, pending.plan.enter);
+    if (pending.plan.source == null) applyWindowStart(host, pending.plan.enter);
     const show = pending.plan.show;
     if (show.showCommand()) |command| if (host.hwnd) |hwnd| {
         _ = sys.ShowWindow(hwnd, command);
         _ = sys.UpdateWindow(hwnd);
     };
-    return if (show.takesFocus()) .take else .leave;
+    return show.takesFocus();
 }
 
 fn afterShow(host: *Host, pending: *const Pending) !void {
-    defer if (pending.plan.kind != .restore) {
-        host.pending_start = null;
-    };
     if (pending.plan.source == null) return;
-    if (pending.source_pane) |metrics| if (host.activeSurface()) |pane| copyPaneMetrics(pane, metrics, pending.plan.keeps);
+    // Its first pane takes the metrics of its source's active pane, but
+    // for a client size of its own.
+    if (pending.source_pane) |metrics| if (host.activeSurface()) |pane| {
+        const own = pane.metrics.default_client_size;
+        pane.metrics = metrics;
+        if (pending.plan.keeps.size) pane.metrics.default_client_size = own;
+    };
     try takeSourceState(host, pending);
     // After it: a normal source ends in SW_RESTORE.
     applyWindowStart(host, pending.plan.enter);
@@ -359,8 +353,8 @@ fn sizeLimitEquals(a: apprt.action.SizeLimit, b: apprt.action.SizeLimit) bool {
 /// A window action from any pane of `host`'s window. The window's own
 /// actions change the Window, whichever of its panes asked. `size_limit` and
 /// `initial_size` come from one pane's font: they are kept on that pane, and
-/// the Window acts on them as before (the active pane's limit is the window's
-/// minimum track size; an initial size resizes a window of one pane).
+/// the Window acts on them (the active pane's limit is the window's minimum
+/// track size; an initial size resizes a window of one pane).
 /// Returns false only for `toggle_background_opacity` on an opaque window.
 pub fn perform(
     host: *Host,
@@ -384,7 +378,7 @@ pub fn perform(
             try applyTopmost(host);
         },
         .toggle_background_opacity => {
-            if (host.top_level.opacity >= 0.999) return false;
+            if (!host.top_level.translucent()) return false;
             host.top_level.force_opaque = !host.top_level.force_opaque;
             try applyBackgroundOpacity(host);
         },
@@ -407,25 +401,26 @@ pub fn applyConfig(host: *Host, config: *const configpkg.Config) !void {
         };
     }
     host.top_level.opacity = std.math.clamp(host.app.shownBackgroundOpacity(config), 0.0, 1.0);
-    if (host.top_level.opacity >= 0.999) host.top_level.force_opaque = false;
+    if (!host.top_level.translucent()) host.top_level.force_opaque = false;
     try applyBackgroundOpacity(host);
 }
 
 /// `WM_GETMINMAXINFO`: the active pane's `size_limit`, which is in client
-/// pixels, plus this window's frame.
-pub fn updateMinMaxInfo(host: *Host, lParam: LPARAM) void {
-    const limit = (host.activeSurface() orelse return).size_limit;
+/// pixels, plus this window's frame. Returns false for a window with no
+/// pane, whose limits are Windows' own (`DefWindowProc`).
+pub fn updateMinMaxInfo(host: *Host, lParam: LPARAM) bool {
+    const limit = (host.activeSurface() orelse return false).metrics.size_limit;
     if (limit.min_width == 0 and
         limit.min_height == 0 and
         limit.max_width == 0 and
-        limit.max_height == 0) return;
+        limit.max_height == 0) return true;
 
     const info: *MINMAXINFO = @ptrFromInt(@as(usize, @bitCast(lParam)));
-    const hwnd = host.hwnd orelse return;
+    const hwnd = host.hwnd orelse return true;
     var client_rect: RECT = undefined;
     var window_rect: RECT = undefined;
-    if (sys.GetClientRect(hwnd, &client_rect) == 0) return;
-    if (sys.GetWindowRect(hwnd, &window_rect) == 0) return;
+    if (sys.GetClientRect(hwnd, &client_rect) == 0) return true;
+    if (sys.GetWindowRect(hwnd, &window_rect) == 0) return true;
 
     const frame_width = (window_rect.right - window_rect.left) - (client_rect.right - client_rect.left);
     const frame_height = (window_rect.bottom - window_rect.top) - (client_rect.bottom - client_rect.top);
@@ -442,6 +437,7 @@ pub fn updateMinMaxInfo(host: *Host, lParam: LPARAM) void {
     if (limit.max_height > 0) {
         info.ptMaxTrackSize.y = @as(i32, @intCast(limit.max_height)) + frame_height;
     }
+    return true;
 }
 
 const HWND_TOPMOST: ?*anyopaque = @ptrFromInt(@as(usize, @bitCast(@as(isize, -1))));
@@ -460,9 +456,7 @@ fn setMinimizedNormalRect(hwnd: HWND, rect: RECT) !void {
         .y = @divTrunc(rect.top, 2) + @divTrunc(rect.bottom, 2),
     };
     const monitor = sys.MonitorFromPoint(center, c.MONITOR_DEFAULTTONEAREST) orelse return lastError();
-    var info: MONITORINFO = std.mem.zeroes(MONITORINFO);
-    info.cbSize = @sizeOf(MONITORINFO);
-    if (sys.GetMonitorInfoW(monitor, &info) == 0) return lastError();
+    const info = monitorInfoOf(monitor) orelse return lastError();
     placement.rcNormalPosition = screenRectToWorkspace(rect, info);
     placement.showCmd = c.SW_SHOWMINNOACTIVE;
     if (sys.SetWindowPlacement(hwnd, &placement) == 0) return lastError();
@@ -486,9 +480,7 @@ pub const WorkAreas = struct {
     fn enumProc(monitor: sys.HMONITOR, _: HDC, _: *RECT, data: LPARAM) callconv(.winapi) BOOL {
         const areas: *WorkAreas = @ptrFromInt(@as(usize, @bitCast(data)));
         if (areas.count == areas.rects.len) return 0;
-        var info: MONITORINFO = std.mem.zeroes(MONITORINFO);
-        info.cbSize = @sizeOf(MONITORINFO);
-        if (sys.GetMonitorInfoW(monitor, &info) == 0) return 1;
+        const info = monitorInfoOf(monitor) orelse return 1;
         areas.rects[areas.count] = info.rcWork;
         areas.count += 1;
         return 1;
@@ -534,7 +526,7 @@ fn placeRestored(host: *Host, saved: SavedPlacement) !void {
                 var actual: RECT = undefined;
                 if (sys.GetWindowRect(hwnd, &actual) == 0) return lastError();
                 const moved = window_start.restoredRectOnScreen(actual, works.slice(), window_start.restore_grab);
-                if (!std.meta.eql(moved, actual)) {
+                if (!rectEquals(moved, actual)) {
                     if (attempt == 2) {
                         log.warn("win32 session restore: window stayed off every monitor", .{});
                         break;
@@ -544,7 +536,7 @@ fn placeRestored(host: *Host, saved: SavedPlacement) !void {
                 }
                 // The layout that follows a DPI change can resize it once
                 // more: apply the same rect again once.
-                if (sys.GetDpiForWindow(hwnd) == dpi_before or std.meta.eql(actual, target)) break;
+                if (sys.GetDpiForWindow(hwnd) == dpi_before or rectEquals(actual, target)) break;
             }
         }
     }
@@ -552,8 +544,8 @@ fn placeRestored(host: *Host, saved: SavedPlacement) !void {
 }
 
 /// How the session saves `host`'s window, as a restored window starts
-/// (`Origin.restore`). `monitor` stands in for the window's monitor, so a
-/// test can give it the taskbar this machine lacks.
+/// (`Origin.restore`). `monitor` stands in for the monitor of a window that
+/// is not fullscreen, so a test can give it the taskbar this machine lacks.
 pub fn sessionPlacement(host: *Host, monitor: ?MONITORINFO) ?SavedPlacement {
     const hwnd = host.hwnd orelse return null;
     // Fullscreen is kept apart from the window it returns to: the popup's
@@ -563,7 +555,7 @@ pub fn sessionPlacement(host: *Host, monitor: ?MONITORINFO) ?SavedPlacement {
             log.warn("win32 session save: fullscreen window placement failed; using captured placement err={}", .{err});
             break :fallback saved;
         };
-        return window_start.savedFullscreen(back, monitor);
+        return window_start.savedFullscreen(back);
     }
     var maximized = sys.IsZoomed(hwnd) != 0;
     var rect: RECT = undefined;
@@ -578,11 +570,9 @@ pub fn sessionPlacement(host: *Host, monitor: ?MONITORINFO) ?SavedPlacement {
             rect = placement.rcNormalPosition;
             if (monitor) |info| {
                 rect = workspaceRectToScreen(rect, info);
-            } else if (sys.MonitorFromWindow(hwnd, c.MONITOR_DEFAULTTONEAREST)) |nearest| {
-                var info: MONITORINFO = std.mem.zeroes(MONITORINFO);
-                info.cbSize = @sizeOf(MONITORINFO);
-                if (sys.GetMonitorInfoW(nearest, &info) != 0) rect = workspaceRectToScreen(rect, info);
-            }
+            } else if (windowMonitor(hwnd)) |here| {
+                rect = workspaceRectToScreen(rect, here.info);
+            } else |_| {}
         } else if (sys.GetWindowRect(hwnd, &rect) == 0) {
             return .{ .rect = null, .maximized = maximized };
         }
@@ -626,18 +616,18 @@ fn scaleInitialClientAxis(value: u32, scale: f32) u32 {
 }
 
 fn setInitialSize(host: *Host, pane: *Surface, size: apprt.action.InitialSize) !void {
-    pane.default_client_size = .{
+    pane.metrics.default_client_size = .{
         .width = @intCast(size.width),
         .height = @intCast(size.height),
     };
     const hwnd = host.hwnd orelse return;
     if (host.top_level.isFullscreen() or sys.IsZoomed(hwnd) != 0 or paneCount(host) != 1) return;
-    const client_size = scaleInitialClientSize(pane.default_client_size.?, pane.content_scale);
+    const client_size = scaleInitialClientSize(pane.metrics.default_client_size.?, pane.content_scale);
     try resizeClientArea(host, client_size.width, client_size.height);
 }
 
 fn resetWindowSize(host: *Host, pane: *const Surface) !void {
-    const size = pane.default_client_size orelse return;
+    const size = pane.metrics.default_client_size orelse return;
     if (host.top_level.isFullscreen()) try leaveFullscreen(host);
     if (host.hwnd) |hwnd| _ = sys.ShowWindow(hwnd, c.SW_RESTORE);
     const client_size = scaleInitialClientSize(size, pane.content_scale);
@@ -649,8 +639,8 @@ fn resetWindowSize(host: *Host, pane: *const Surface) !void {
 /// init, and that frame refresh is what gives the window its integrated frame
 /// before the pty opens (2026-09-23, #262).
 fn setSizeLimit(host: *Host, pane: *Surface, limit: apprt.action.SizeLimit) void {
-    if (sizeLimitEquals(pane.size_limit, limit)) return;
-    pane.size_limit = limit;
+    if (sizeLimitEquals(pane.metrics.size_limit, limit)) return;
+    pane.metrics.size_limit = limit;
     if (host.activeSurface() == pane) refreshFrame(host);
 }
 
@@ -775,10 +765,16 @@ fn maximizeWithPlacement(hwnd: HWND, placement: *const WINDOWPLACEMENT) !void {
 /// The monitor nearest `hwnd`, its info and the window's DPI.
 pub fn windowMonitor(hwnd: HWND) !window_start.Monitor {
     const monitor = sys.MonitorFromWindow(hwnd, c.MONITOR_DEFAULTTONEAREST) orelse return lastError();
+    const info = monitorInfoOf(monitor) orelse return lastError();
+    return .{ .id = @intFromPtr(monitor), .info = info, .dpi = sys.GetDpiForWindow(hwnd) };
+}
+
+/// `monitor`'s rects, or null when Windows cannot give them.
+fn monitorInfoOf(monitor: sys.HMONITOR) ?MONITORINFO {
     var info: MONITORINFO = std.mem.zeroes(MONITORINFO);
     info.cbSize = @sizeOf(MONITORINFO);
-    if (sys.GetMonitorInfoW(monitor, &info) == 0) return lastError();
-    return .{ .id = @intFromPtr(monitor), .info = info, .dpi = sys.GetDpiForWindow(hwnd) };
+    if (sys.GetMonitorInfoW(monitor, &info) == 0) return null;
+    return info;
 }
 
 fn setDecorationsVisible(host: *Host, visible: bool) !void {
@@ -875,8 +871,9 @@ fn refreshFrame(host: *Host) void {
     );
 }
 
-/// Gives a copy the state of the window it is opened from, keeping what
-/// `keeps` names, and puts it where `window_start.place` says.
+/// Puts a copy where `window_start.place` says, fullscreen when its source
+/// is, and shows it in the rest of its source's state, which it was created
+/// with (`window_start.plan`).
 fn takeSourceState(host: *Host, pending: *const Pending) !void {
     const hwnd = host.hwnd orelse return;
     const keeps = pending.plan.keeps;
@@ -892,18 +889,8 @@ fn takeSourceState(host: *Host, pending: *const Pending) !void {
         };
     }
     const placed = window_start.place(&pending.plan, pending.corners(), own);
-    const from = pending.plan.source.?.state;
     const top_level = &host.top_level;
-    if (!keeps.decoration) {
-        top_level.decorations_visible = from.decorations_visible;
-        top_level.decorations_overridden = from.decorations_overridden;
-    }
     top_level.fullscreen = placed.fullscreen;
-    top_level.topmost = from.topmost;
-    if (!keeps.opacity) {
-        top_level.opacity = from.opacity;
-        top_level.force_opaque = from.force_opaque;
-    }
 
     try applyWindowStyle(host);
     try applyTopmost(host);
@@ -929,14 +916,6 @@ fn takeSourceState(host: *Host, pending: *const Pending) !void {
             _ = sys.ShowWindow(hwnd, c.SW_RESTORE);
         }
     }
-}
-
-/// Gives `pane` `source`, the metrics of a pane of the window it is opened
-/// from, keeping its own client size when `keeps.size` says so.
-pub fn copyPaneMetrics(pane: *Surface, source: PaneMetrics, keeps: window_start.Keeps) void {
-    if (!keeps.size) pane.default_client_size = source.default_client_size;
-    pane.cell_size_pixels = source.cell_size_pixels;
-    pane.size_limit = source.size_limit;
 }
 
 /// `undecoratedKeepsFrame` for `host`. The quick terminal flag is the
@@ -1170,7 +1149,8 @@ test "win32 leaveFullscreen and new_window keep the normal rect of a maximized w
             defer _ = sys.DestroyWindow(clone.hwnd.?);
             _ = sys.ShowWindow(hwnd, c.SW_MAXIMIZE);
             const start = try begin(&app, &app.config, .{ .copy = .{ .source = &window } });
-            try takeSourceState(&clone, &start.pending);
+            clone.top_level = start.plan.top_level;
+            try takeSourceState(&clone, &start);
             try std.testing.expect(sys.IsZoomed(clone.hwnd.?) != 0);
             try std.testing.expectEqualDeep(normal, try normalRect(clone.hwnd.?));
 
@@ -1676,7 +1656,7 @@ test "win32 a forwarded window size sizes a new window, also one opened from a m
                 try std.testing.expectEqual(t.cascaded.left, rect.left);
                 try std.testing.expectEqual(t.cascaded.top, rect.top);
                 // And what `reset_window_size` returns to.
-                try std.testing.expectEqualDeep(@as(?apprt.SurfaceSize, .{ .width = ForwardedKeysTest.own.width, .height = ForwardedKeysTest.own.height }), clone.default_client_size);
+                try std.testing.expectEqualDeep(@as(?apprt.SurfaceSize, .{ .width = ForwardedKeysTest.own.width, .height = ForwardedKeysTest.own.height }), clone.metrics.default_client_size);
                 t.fixture.closeWindow(clone);
             }
 
@@ -1909,7 +1889,7 @@ test "win32 a config reload of maximize and fullscreen leaves the windows alread
             defer both.deinit();
             both.maximize = true;
             both.fullscreen = .true;
-            try reload(app, &both);
+            try reloadConfig(app, &both);
             try std.testing.expect(app.config.maximize and app.config.fullscreen == .true);
             try std.testing.expect(sys.IsZoomed(plain_hwnd) == 0 and !plain.host.?.top_level.isFullscreen());
             try std.testing.expectEqualDeep(plain_rect, try Fixture.screenRect(plain_hwnd));
@@ -1927,7 +1907,7 @@ test "win32 a config reload of maximize and fullscreen leaves the windows alread
             defer neither.deinit();
             neither.maximize = false;
             neither.fullscreen = .false;
-            try reload(app, &neither);
+            try reloadConfig(app, &neither);
             try std.testing.expect(started.host.?.top_level.isFullscreen() and sys.IsZoomed(started_hwnd) == 0);
             try std.testing.expectEqualDeep(started_rect, try Fixture.screenRect(started_hwnd));
             try std.testing.expect(sys.IsZoomed(plain_hwnd) == 0 and !plain.host.?.top_level.isFullscreen());
@@ -1935,24 +1915,17 @@ test "win32 a config reload of maximize and fullscreen leaves the windows alread
             _ = try perform(started.host.?, started, .toggle_fullscreen, .native);
             try std.testing.expect(sys.IsZoomed(started_hwnd) != 0);
         }
-
-        /// What a reload does once the file is read (`CoreApp.updateConfig`):
-        /// each pane's config change, then the app's.
-        fn reload(app: *App, config: *const configpkg.Config) !void {
-            for (app.registry.windows.items) |surface| {
-                try std.testing.expect(try app.performAction(.{ .surface = surface.core() }, .config_change, .{ .config = config }));
-            }
-            try std.testing.expect(try app.performAction(.app, .config_change, .{ .config = config }));
-        }
     }.body);
 }
 
-// One copy of the window state, on the Window. Every pane used to keep its
-// own, and each window action, `.cell_size`, `.size_limit`, `.initial_size`
-// and a pane's `config_change` copied the acting pane's into every other pane
-// of its window, ending in `ShowWindow(SW_RESTORE)` or `maximizeWithPlacement`
-// on the same HWND; `goto_tab` re-applied the new pane's copy. The tests below
-// were measured on that code first; the ones that changed say what it did.
+/// What a reload does once the file is read (`CoreApp.updateConfig`): each
+/// pane's config change, then the app's.
+fn reloadConfig(app: *App, config: *const configpkg.Config) !void {
+    for (app.registry.windows.items) |pane| {
+        try std.testing.expect(try app.performAction(.{ .surface = pane.core() }, .config_change, .{ .config = config }));
+    }
+    try std.testing.expect(try app.performAction(.app, .config_change, .{ .config = config }));
+}
 
 test "win32 a first window and a window opened from it are layered at their opacity at the first show" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
@@ -2004,10 +1977,9 @@ test "win32 a first window and a window opened from it are layered at their opac
     }.body);
 }
 
-test "win32 a config change or size limit on the active pane of a minimized window leaves it minimized" {
-    // Measured before one copy: the copy into the other pane ended in
-    // SW_RESTORE on the same HWND and brought the two-pane window back,
-    // while the one-pane window, with no other pane, stayed minimized.
+test "win32 a size limit on the active pane of a minimized window leaves it minimized" {
+    // A pane's own action never restores its window, whatever other panes
+    // the window holds.
     if (builtin.os.tag != .windows) return error.SkipZigTest;
     try runOnHiddenDesktop(struct {
         fn body() !void {
@@ -2018,39 +1990,23 @@ test "win32 a config change or size limit on the active pane of a minimized wind
             const limit: apprt.action.SizeLimit = .{ .min_width = 120, .min_height = 60, .max_width = 0, .max_height = 0 };
 
             try app.createWindow(default_title);
-            const single = fixture.newest();
-            const single_hwnd = single.windowHwnd().?;
-            try app.createWindow(default_title);
             const pair = fixture.newest();
-            const pair_hwnd = pair.windowHwnd().?;
+            const hwnd = pair.windowHwnd().?;
             _ = try app.createWindowSurface(&app.config, default_title, .{ .host_id = pair.host_id });
             try std.testing.expectEqual(pair, pair.host.?.activeSurface().?);
 
-            for ([_]*Surface{ single, pair }) |pane| {
-                const hwnd = pane.windowHwnd().?;
-                _ = sys.ShowWindow(hwnd, c.SW_SHOWMINNOACTIVE);
-                try std.testing.expect(sys.IsIconic(hwnd) != 0);
-                try std.testing.expect(try app.performAction(.{ .surface = pane.core() }, .config_change, .{ .config = &app.config }));
-            }
-            try std.testing.expect(sys.IsIconic(single_hwnd) != 0);
-            try std.testing.expect(sys.IsIconic(pair_hwnd) != 0);
-
-            for ([_]*Surface{ single, pair }) |pane| {
-                const hwnd = pane.windowHwnd().?;
-                _ = sys.ShowWindow(hwnd, c.SW_SHOWMINNOACTIVE);
-                try std.testing.expect(sys.IsIconic(hwnd) != 0);
-                try std.testing.expect(try app.performAction(.{ .surface = pane.core() }, .size_limit, limit));
-            }
-            try std.testing.expect(sys.IsIconic(single_hwnd) != 0);
-            try std.testing.expect(sys.IsIconic(pair_hwnd) != 0);
+            _ = sys.ShowWindow(hwnd, c.SW_SHOWMINNOACTIVE);
+            try std.testing.expect(sys.IsIconic(hwnd) != 0);
+            try std.testing.expect(try app.performAction(.{ .surface = pair.core() }, .size_limit, limit));
+            try std.testing.expect(sys.IsIconic(hwnd) != 0);
         }
     }.body);
 }
 
 test "win32 a reload leaves the active window active and a minimized window minimized" {
-    // Measured before one copy: each two-pane window's copy ended in
-    // SW_RESTORE on its HWND. On a normal window that changed nothing; a
-    // minimized one was restored and activated, which also showed that this
+    // A reload sends every pane of a two-pane window a config change, the
+    // pane it shows included: none of them restores or activates a window.
+    // A minimized window that is restored becomes the active one, so this
     // probe sees an activation.
     if (builtin.os.tag != .windows) return error.SkipZigTest;
     try runOnHiddenDesktop(struct {
@@ -2070,23 +2026,15 @@ test "win32 a reload leaves the active window active and a minimized window mini
             const newer = firsts[1].windowHwnd().?;
             _ = sys.SetActiveWindow(older);
             try std.testing.expectEqual(@as(?HWND, older), sys.GetActiveWindow());
-            try reload(app);
+            try reloadConfig(app, &app.config);
             try std.testing.expectEqual(@as(?HWND, older), sys.GetActiveWindow());
 
             _ = sys.ShowWindow(newer, c.SW_SHOWMINNOACTIVE);
             _ = sys.SetActiveWindow(older);
             try std.testing.expectEqual(@as(?HWND, older), sys.GetActiveWindow());
-            try reload(app);
+            try reloadConfig(app, &app.config);
             try std.testing.expect(sys.IsIconic(newer) != 0);
             try std.testing.expectEqual(@as(?HWND, older), sys.GetActiveWindow());
-        }
-
-        /// A reload: each pane's config change, then the app's.
-        fn reload(app: *App) !void {
-            for (app.registry.windows.items) |pane| {
-                try std.testing.expect(try app.performAction(.{ .surface = pane.core() }, .config_change, .{ .config = &app.config }));
-            }
-            try std.testing.expect(try app.performAction(.app, .config_change, .{ .config = &app.config }));
         }
     }.body);
 }
@@ -2115,9 +2063,9 @@ test "win32 a new window takes the pane metrics of the pane it is opened from" {
             try std.testing.expect(try app.performAction(.app, .new_window, .{ .arguments = null }));
             const clone = fixture.newest();
             try std.testing.expect(clone != source);
-            try std.testing.expectEqual(source.cell_size_pixels, clone.cell_size_pixels);
-            try std.testing.expect(sizeLimitEquals(source.size_limit, clone.size_limit));
-            try std.testing.expectEqual(source.default_client_size, clone.default_client_size);
+            try std.testing.expectEqual(source.metrics.cell_size_pixels, clone.metrics.cell_size_pixels);
+            try std.testing.expect(sizeLimitEquals(source.metrics.size_limit, clone.metrics.size_limit));
+            try std.testing.expectEqual(source.metrics.default_client_size, clone.metrics.default_client_size);
         }
     }.body);
 }
@@ -2161,9 +2109,9 @@ test "win32 Windows sends WM_GETMINMAXINFO to a top-level window and never to a 
 }
 
 test "win32 a background tab's config change, goto_tab and a tab click leave the window's state alone" {
-    // Measured before one copy: the background tab's config change changed
-    // its own copy, and goto_tab, not a tab click, gave the window that
-    // copy's opacity (alpha 128).
+    // A window's state is the window's: a config change from a tab behind
+    // the front one does not reach it, and showing that tab gives the
+    // window nothing of it (alpha 128 would).
     if (builtin.os.tag != .windows) return error.SkipZigTest;
     try runOnHiddenDesktop(struct {
         fn body() !void {
@@ -2284,9 +2232,9 @@ test "win32 an initial size resizes a window of one pane that is neither zoomed 
                 if (case.panes == 2) _ = try app.createWindowSurface(&app.config, default_title, .{ .host_id = host.id });
                 const before = try ForwardedKeysTest.clientSize(hwnd);
                 try std.testing.expect(try perform(host, pane, .initial_size, case.size));
-                try std.testing.expectEqual(@as(?apprt.SurfaceSize, .{ .width = case.size.width, .height = case.size.height }), pane.default_client_size);
+                try std.testing.expectEqual(@as(?apprt.SurfaceSize, .{ .width = case.size.width, .height = case.size.height }), pane.metrics.default_client_size);
                 const resizes = !case.zoomed and !case.fullscreen and case.panes == 1;
-                const expected = if (resizes) scaleInitialClientSize(pane.default_client_size.?, pane.content_scale) else before;
+                const expected = if (resizes) scaleInitialClientSize(pane.metrics.default_client_size.?, pane.content_scale) else before;
                 try std.testing.expectEqual(expected, try ForwardedKeysTest.clientSize(hwnd));
                 if (case.zoomed) _ = sys.ShowWindow(hwnd, c.SW_RESTORE);
                 if (case.fullscreen) try std.testing.expect(try perform(host, pane, .toggle_fullscreen, .native));

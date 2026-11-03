@@ -38,8 +38,8 @@ const std = runtime.std;
 const sys = runtime.sys;
 const win32_quick_terminal = runtime.win32_quick_terminal;
 const win32_theme = runtime.win32_theme;
-const window_state = @import("window_state.zig");
 const win32_tween = runtime.win32_tween;
+const window_state = @import("window_state.zig");
 
 pub const quick_terminal_title = std.unicode.utf8ToUtf16LeStringLiteral("noctty quick terminal");
 

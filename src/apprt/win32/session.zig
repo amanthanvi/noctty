@@ -20,14 +20,12 @@ const WindowStartTestApp = win32.test_support.WindowStartTestApp;
 const apprt = runtime.apprt;
 const builtin = runtime.builtin;
 const c = runtime.c;
-const child_window = @import("child_window.zig");
 const cli_args = runtime.cli_args;
 const configpkg = runtime.configpkg;
 const createTestHostWindow = win32.test_support.createTestHostWindow;
 const default_title = runtime.default_title;
 const gl_startup = runtime.gl_startup;
 const internal_os = runtime.internal_os;
-const lastError = child_window.lastError;
 const log = runtime.log;
 const makeParentDirAbsolute = runtime.makeParentDirAbsolute;
 const markRecoveryAttemptAtPath = runtime.markRecoveryAttemptAtPath;
@@ -46,7 +44,6 @@ const unixMillis = runtime.unixMillis;
 const win32_session_persistence = runtime.win32_session_persistence;
 const win32_session_state = runtime.win32_session_state;
 const win32_shell = runtime.win32_shell;
-const window_start = @import("window_start.zig");
 const window_state = @import("window_state.zig");
 const windows = runtime.windows;
 const writePersistentFileAlloc = runtime.writePersistentFileAlloc;
@@ -2933,7 +2930,7 @@ test "win32 session restore keeps a window on a monitor and brings one back from
             window.height = 480;
             try placeAsSaved(&app, &host, window);
             try std.testing.expect(sys.GetWindowRect(hwnd, &rect) != 0);
-            try std.testing.expect(std.meta.eql(window_start.restoredRectOnScreen(rect, works.slice(), window_start.restore_grab), rect));
+            try std.testing.expect(insideAWorkArea(rect, works.slice()));
             try std.testing.expect(rect.right - rect.left <= work.right - work.left);
 
             // The rect a maximized window comes back to is on a monitor too.
@@ -2949,7 +2946,7 @@ test "win32 session restore keeps a window on a monitor and brings one back from
         /// What restore does with the first tab of a window saved as
         /// `window` (`.restore_placed`), on a stand-in for that window.
         fn placeAsSaved(app: *App, host: *Host, window: win32_session_state.Window) !void {
-            host.pending_start = (try window_state.begin(app, &app.config, .{ .restore = savedPlacement(window) })).pending;
+            host.pending_start = try window_state.begin(app, &app.config, .{ .restore = savedPlacement(window) });
             try window_state.advance(host, .restore_placed);
         }
 

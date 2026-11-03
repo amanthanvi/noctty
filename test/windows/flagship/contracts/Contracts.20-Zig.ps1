@@ -26,6 +26,7 @@ $win32TestModuleRoots = @(
     '_ = @import("win32/chrome_layout.zig");'
     '_ = @import("win32/gdi.zig");'
     '_ = @import("win32/docked_search.zig");'
+    '_ = @import("win32/window_start.zig");'
 )
 foreach ($win32TestModuleRoot in $win32TestModuleRoots) {
     if (-not [regex]::IsMatch(
@@ -53,6 +54,11 @@ foreach ($win32TestModuleRoot in $win32TestModuleRoots) {
 # to 101 when its window opacity helpers became `TopLevel.alpha` in
 # window_start.zig and the unused resizeSplitFallbackDelta went with the dead
 # Surface.resizeSplitFallback (window state on the Window).
+# window_start.zig is the pure half of window state, which received its
+# consolidated tests: the `plan`, `place`, `returnOn`, `forRestore` and
+# `savedFullscreen` tables (from window_state.zig's start and placement tests
+# and session.zig's lookup-failure test), `restoredRectOnScreen` (from
+# win32.zig) and `TopLevel.alpha` (from labels.zig); its floor is all 10.
 $movedWin32TestFloors = [ordered]@{
     'labels.zig' = 101
     'input.zig' = 24
@@ -62,6 +68,7 @@ $movedWin32TestFloors = [ordered]@{
     'gdi.zig' = 2
     'facade_budget.zig' = 2
     'docked_search.zig' = 32
+    'window_start.zig' = 10
 }
 foreach ($movedWin32TestModule in $movedWin32TestFloors.Keys) {
     $movedWin32TestModulePath = @($win32RuntimeModuleFiles | Where-Object {
@@ -104,13 +111,14 @@ foreach ($movedWin32TestModule in $movedWin32TestFloors.Keys) {
 # notifications.zig's 23 are the toast lifecycle's, the click's and the cold
 # toast wait's tests at its interface, which replaced App's, Host's,
 # Surface's and Registry's, and the two cold-wait tests that moved from
-# win32.zig. window_state.zig's floor is 25: six of its start tests
+# win32.zig. window_state.zig's floor went to 25 when six of its start tests
 # (the kept forwarded keys, maximize/fullscreen per kind, the decoration,
 # startup-style, initial-decoration and effective-style helpers) became rows
 # of the pure `plan` tests in window_start.zig, which window_state.zig
 # imports (window state, step 3), and its eight new-window placement tests,
 # the fullscreen-restore rect test and the two initial-opacity tests became
-# the pure `place` tables there and first-show assertions (step 4).
+# the pure `place` tables there and first-show assertions (step 4), and is
+# 26 since `scaleInitialClientSize`'s test moved in from win32.zig (step 7).
 # Lower one only for a deliberate consolidation.
 # test_support.zig declares no tests, so it has no floor.
 $extractedWin32TestModules = [ordered]@{
@@ -120,7 +128,7 @@ $extractedWin32TestModules = [ordered]@{
     'terminal_window.zig' = @{ Binding = 'terminal_window_module'; Floor = 23 }
     'session.zig' = @{ Binding = 'session_module'; Floor = 27 }
     'quick_terminal_host.zig' = @{ Binding = 'quick_terminal_host'; Floor = 10 }
-    'window_state.zig' = @{ Binding = 'window_state'; Floor = 25 }
+    'window_state.zig' = @{ Binding = 'window_state'; Floor = 26 }
     'surface_presentation.zig' = @{ Binding = 'surface_presentation'; Floor = 15 }
     'search_controls.zig' = @{ Binding = 'search_controls'; Floor = 4 }
     'overlay_session.zig' = @{ Binding = 'overlay_session'; Floor = 2 }

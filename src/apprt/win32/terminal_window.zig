@@ -393,12 +393,9 @@ pub const Surface = struct {
     /// The bell rang here while the user was not looking; the tab label and
     /// the window caption carry the glyph until `clearBell`.
     bell_ringing: bool = false,
-    /// This pane's metrics, from its own font (core init's `cell_size`,
-    /// `size_limit` and `initial_size`); its window keeps the rest of the
-    /// window state (`Host.top_level`). `default_client_size` is the
-    /// client size `reset_window_size` returns to.
-    default_client_size: ?apprt.SurfaceSize = null,
-    cell_size_pixels: apprt.action.CellSize = .{ .width = 0, .height = 0 },
+    /// This pane's metrics, from its own font; its window keeps the rest of
+    /// the window state (`Host.top_level`).
+    metrics: window_state.PaneMetrics = .{},
     /// The configured terminal background (`background`, which a `theme`
     /// sets), as a COLORREF. The active tab takes it so it reads as the top
     /// of this terminal (`Host.tabBackground`). Only this terminal's own
@@ -406,12 +403,6 @@ pub const Surface = struct {
     /// at run time (OSC 11) are not followed.
     tab_background: u32 = colorRefFromConfig(std.meta.fieldInfo(configpkg.Config, .background).defaultValue().?),
     scrollbar_config: configpkg.Config.Scrollbar = .system,
-    size_limit: apprt.action.SizeLimit = .{
-        .min_width = 0,
-        .min_height = 0,
-        .max_width = 0,
-        .max_height = 0,
-    },
     secure_input: bool = false,
     secure_input_ever_engaged: bool = false,
     key_sequence_active: bool = false,
@@ -867,7 +858,7 @@ pub const Surface = struct {
         // A tab or split starts with the metrics of the pane it is opened
         // from; its core init then sends its own cell size and limit.
         if (opts.clone_state_from) |source| {
-            if (source.host_id == self.host_id) window_state.copyPaneMetrics(self, window_state.paneMetrics(source), .{});
+            if (source.host_id == self.host_id) self.metrics = source.metrics;
         }
 
         if (app.test_surface_init_stage) |stage| try stage(self, .core_surface) else {
@@ -926,7 +917,7 @@ pub const Surface = struct {
             // The window this init created, hidden until now, is shown as
             // its start says (`window_state.begin`). Same-host tabs and
             // splits never take this path.
-            if (try window_state.advance(host, .before_show) == .take) self.presentWindow();
+            if (try window_state.advance(host, .before_show)) self.presentWindow();
             if (app.update_startup_ready) {
                 // The first window of a start that opened none (initial-window
                 // off) is where the failed-install banner can first show.
@@ -3464,7 +3455,7 @@ pub const Surface = struct {
         }
 
         // Without animations the settled state is fully shown or hidden.
-        const alpha: BYTE = @intFromFloat(@round(std.math.clamp(@as(f64, self.scrollbar_state.alpha(now_ms)), 0.0, 1.0) * 255.0));
+        const alpha: BYTE = @intFromFloat(@round(@as(f64, self.scrollbar_state.alpha(now_ms)) * 255.0));
         const paint_key = self.scrollbarPaintKey(child_rect);
         const paint_changed = scrollbarPaintKeyChanged(self.scrollbar_paint_cache, paint_key);
         if (alpha != self.scrollbar_alpha_cache) {
@@ -3855,10 +3846,6 @@ pub const Surface = struct {
         if (value == self.tab_background) return;
         self.tab_background = value;
         if (self.host) |host| host.syncTabJoin();
-    }
-
-    pub fn setCellSize(self: *Surface, size: apprt.action.CellSize) void {
-        self.cell_size_pixels = size;
     }
 
     pub const syncCoreSizeFromClientRect = surface_presentation.syncCoreSizeFromClientRect;
@@ -4359,7 +4346,7 @@ pub const Surface = struct {
     pub fn wheelNormalizationContext(self: *const Surface) WheelNormalizationContext {
         return .{
             .settings = self.app.wheel_settings,
-            .cell_size = self.cell_size_pixels,
+            .cell_size = self.metrics.cell_size_pixels,
             .viewport = self.size,
         };
     }

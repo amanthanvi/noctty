@@ -423,19 +423,16 @@ pub const test_support_runtime = if (builtin.is_test) .{
     .palette_list_class_name = palette_list_class_name,
     .scrollbar_class_name = scrollbar_class_name,
     .surfaceDropPayloadCallback = surfaceDropPayloadCallback,
-    .workspaceRectToScreen = workspaceRectToScreen,
     .monitorInfo = monitorInfo,
     .tabInit = Tab.init,
     .tabDeinit = Tab.deinit,
     .hostSetBanner = Host.setBanner,
     .hostClearStructuralHistory = Host.clearStructuralHistory,
     .hostKillTweenTimer = Host.killTweenTimer,
-    .hostActiveSurface = Host.activeSurface,
     .appDropSettingsPreview = App.dropSettingsPreview,
     .appDiscardDeferredOpens = App.discardDeferredOpens,
     .appInitComApartment = App.initComApartment,
     .appEnsureWindowClass = App.ensureWindowClass,
-    .windowMonitor = window_state.windowMonitor,
     .settingsAppIconThunk = settingsAppIconThunk,
     .settingsChromeBgThunk = settingsChromeBgThunk,
     .settingsConfigProblemsThunk = settingsConfigProblemsThunk,
@@ -493,6 +490,7 @@ test {
     _ = @import("win32/first_frame.zig");
     _ = @import("win32/facade_budget.zig");
     _ = @import("win32/docked_search.zig");
+    _ = @import("win32/window_start.zig");
     _ = child_window;
     _ = paint_text;
     _ = @import("win32/settings_patch.zig");
@@ -1043,8 +1041,6 @@ pub fn surfaceWindowStyle() u32 {
     // then show it explicitly from Surface.init.
     return c.WS_CHILD | c.WS_CLIPSIBLINGS;
 }
-
-const hostStyle = window_state.hostStyle;
 
 pub fn shouldShowSurfaceImmediately(host_id: ?u32) bool {
     return host_id == null;
@@ -6185,8 +6181,6 @@ fn rectEqual(a: RECT, b: RECT) bool {
 pub const setQuickTerminalRect = quick_terminal_host.setQuickTerminalRect;
 
 pub const runOnHiddenDesktop = test_support.runOnHiddenDesktop;
-
-const workspaceRectToScreen = window_state.workspaceRectToScreen;
 
 const monitorInfo = quick_terminal_host.monitorInfo;
 
@@ -11831,12 +11825,7 @@ pub fn hostWindowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) cal
         },
 
         c.WM_GETMINMAXINFO => {
-            if (host) |v| {
-                if (v.activeSurface() != null) {
-                    window_state.updateMinMaxInfo(v, lParam);
-                    return 0;
-                }
-            }
+            if (host) |v| if (window_state.updateMinMaxInfo(v, lParam)) return 0;
             return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
         },
 
@@ -19554,7 +19543,7 @@ test "win32 createHost frames an undecorated host for its Windows build" {
                 // What `window_state.applyWindowStyle` writes for an undecorated
                 // window, the style every clone and runtime toggle ends with.
                 // Before #270 the first window came back with WS_CAPTION.
-                const applied = hostStyle(keeps_frame, false);
+                const applied = window_state.hostStyle(keeps_frame, false);
                 try std.testing.expectEqual(applied, testWindowStyle(hwnd) & ~@as(u32, c.WS_CLIPSIBLINGS));
                 var window_rect: RECT = undefined;
                 try std.testing.expect(sys.GetWindowRect(hwnd, &window_rect) != 0);
@@ -19841,8 +19830,6 @@ test "win32 chrome is raised over the panes, and a pane's own child sits directl
     stackChildAbove(bar, pane);
     try expectTestChildOrder(parent, &.{ chrome, bar, pane });
 }
-
-const initTestHostWindowFixture = test_support.initTestHostWindowFixture;
 
 const deinitTestHostWindowFixture = test_support.deinitTestHostWindowFixture;
 

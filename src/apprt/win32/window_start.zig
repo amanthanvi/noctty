@@ -47,12 +47,18 @@ pub const TopLevel = struct {
         return self.fullscreen != null;
     }
 
+    /// Whether `opacity` shows at all: one that rounds to opaque does not,
+    /// and `toggle_background_opacity` has nothing to toggle.
+    pub fn translucent(self: *const TopLevel) bool {
+        return self.opacity < 0.999;
+    }
+
     /// The layered alpha the window shows, or null when it shows opaque and
     /// so is not layered at all (#234: layering is the only mechanism, and an
     /// opaque window must not pay for it).
     pub fn alpha(self: *const TopLevel) ?u8 {
-        if (self.force_opaque or self.opacity >= 0.999) return null;
-        return @intFromFloat(@round(std.math.clamp(self.opacity, 0.0, 1.0) * 255.0));
+        if (self.force_opaque or !self.translucent()) return null;
+        return @intFromFloat(@round(self.opacity * 255.0));
     }
 };
 
@@ -189,8 +195,9 @@ pub const Plan = struct {
     enter: Enter,
     show: InitialShow,
     /// The state it is created in, set before `CreateWindowEx` so the first
-    /// `WM_NCCALCSIZE` already sees its decorations (#266). A copy takes the
-    /// rest of its source's state after its first show.
+    /// `WM_NCCALCSIZE` already sees its decorations (#266). A copy's is its
+    /// source's, but for what it keeps of its own and for fullscreen, which
+    /// it takes with its place after its first show (`place`).
     top_level: TopLevel,
     /// The style it is created with, without `WS_VISIBLE`, and written back
     /// after `CreateWindowEx` (window-frame.md 2026-09-23). A copy of a
@@ -214,16 +221,21 @@ pub fn plan(kind: Kind, wants: Wants, forwarded: Forwarded, source: ?*const Snap
         .decoration = forwarded.decoration,
         .opacity = forwarded.opacity,
     };
-    const copied: ?Snapshot = if (kind == .copy) if (source) |from| from.* else null else null;
+    const copied: ?Snapshot = if (kind == .copy and source != null) source.?.* else null;
     var top_level: TopLevel = .{ .decorations_visible = wants.decorated, .opacity = wants.opacity };
     var popup = false;
     if (copied) |from| {
-        if (!keeps.decoration) top_level.decorations_visible = from.state.decorations_visible;
-        // Shown at its source's opacity before it takes the rest of its
-        // state: a copy of a window forced opaque never shows faded.
-        if (!keeps.opacity) {
-            top_level.opacity = from.state.opacity;
-            top_level.force_opaque = from.state.force_opaque;
+        // Shown at its source's opacity before it takes its place: a copy of
+        // a window forced opaque never shows faded.
+        top_level = from.state;
+        top_level.fullscreen = null;
+        if (keeps.decoration) {
+            top_level.decorations_visible = wants.decorated;
+            top_level.decorations_overridden = false;
+        }
+        if (keeps.opacity) {
+            top_level.opacity = wants.opacity;
+            top_level.force_opaque = false;
         }
         popup = from.state.isFullscreen() and !keeps.size;
     }
@@ -381,8 +393,8 @@ fn fullscreenRestoreRect(rect: RECT, old_work: RECT, new_work: RECT, old_dpi: u3
     return fitRectInWork(
         rect.left + new_work.left - old_work.left,
         rect.top + new_work.top - old_work.top,
-        if (scale) mulDiv(width, @intCast(new_dpi), @intCast(old_dpi)) else width,
-        if (scale) mulDiv(height, @intCast(new_dpi), @intCast(old_dpi)) else height,
+        if (scale) mulDiv(width, new_dpi, old_dpi) else width,
+        if (scale) mulDiv(height, new_dpi, old_dpi) else height,
         new_work,
     );
 }
@@ -407,7 +419,7 @@ pub fn fitRectInWork(left: i32, top: i32, width: i32, height: i32, work: RECT) R
 /// How far a new window sits below and right of the one it was opened from,
 /// about a caption height.
 pub fn cascadeStep(dpi: u32) i32 {
-    return mulDiv(32, @intCast(@max(dpi, 96)), 96);
+    return mulDiv(32, @max(dpi, 96), 96);
 }
 
 /// `rect` moved `step` down and right, kept inside `work`.
@@ -441,21 +453,16 @@ pub fn screenRectToWorkspace(rect: RECT, info: MONITORINFO) RECT {
     };
 }
 
-/// kernel32's `MulDiv`, which this file cannot call: the product in 64
-/// bits, rounded half away from zero, and -1 for a zero denominator or a
-/// result that does not fit.
-fn mulDiv(number: i32, numerator: i32, denominator: i32) i32 {
-    if (denominator == 0) return -1;
-    var a: i64 = number;
-    var d: i64 = denominator;
-    if (d < 0) {
-        a = -a;
-        d = -d;
-    }
-    const product = a * numerator;
-    const half = @divTrunc(d, 2);
-    const rounded = if ((a < 0) == (numerator < 0)) product + half else product - half;
-    return std.math.cast(i32, @divTrunc(rounded, d)) orelse -1;
+/// `value * numerator / denominator` as kernel32's `MulDiv` (which this
+/// file cannot call) gives it for a denominator above zero: the product in
+/// 64 bits, rounded half away from zero, and -1 for a result that does not
+/// fit. Every caller scales by DPIs, which are above zero.
+fn mulDiv(value: i32, numerator: u32, denominator: u32) i32 {
+    std.debug.assert(denominator > 0);
+    const product = @as(i64, value) * numerator;
+    const half: i64 = denominator / 2;
+    const rounded = if (product < 0) product - half else product + half;
+    return std.math.cast(i32, @divTrunc(rounded, @as(i64, denominator))) orelse -1;
 }
 
 test "win32 a new window keeps what its own config places and a forward sets, and copies the rest" {
@@ -470,12 +477,17 @@ test "win32 a new window keeps what its own config places and a forward sets, an
     try std.testing.expectEqual(Keeps{ .position = true }, plan(.copy, .{ .position = .{ .x = 10, .y = 20 } }, .{}, null, .activate, 0).keeps);
 
     // What it takes from its source before its first show, and what it keeps.
-    const source: Snapshot = .{ .state = .{ .decorations_visible = false, .opacity = 0.6, .force_opaque = true } };
+    // Fullscreen comes with its place, after its first show (`place`).
+    const back: TopLevel.Return = .{ .rect = std.mem.zeroes(RECT), .placement = std.mem.zeroes(WINDOWPLACEMENT), .monitor = null };
+    const source: Snapshot = .{ .state = .{ .decorations_visible = false, .decorations_overridden = true, .topmost = true, .opacity = 0.6, .force_opaque = true, .fullscreen = back } };
     var copy = plan(.copy, .{ .opacity = 0.8 }, .{}, &source, .activate, 0);
-    try std.testing.expectEqual(TopLevel{ .decorations_visible = false, .opacity = 0.6, .force_opaque = true }, copy.top_level);
-    try std.testing.expectEqual(source, copy.source.?);
+    try std.testing.expectEqual(TopLevel{ .decorations_visible = false, .decorations_overridden = true, .topmost = true, .opacity = 0.6, .force_opaque = true }, copy.top_level);
+    try std.testing.expectEqualDeep(source, copy.source.?);
+    // A forward's decorations and opacity are the copy's own, so a reload
+    // gives it the config's decorations again; it still floats as its
+    // source does.
     copy = plan(.copy, .{ .opacity = 0.8 }, .{ .decoration = true, .opacity = true }, &source, .activate, 0);
-    try std.testing.expectEqual(TopLevel{ .opacity = 0.8 }, copy.top_level);
+    try std.testing.expectEqual(TopLevel{ .topmost = true, .opacity = 0.8 }, copy.top_level);
     // Only a copy has a source.
     for ([_]Kind{ .fresh, .restore, .quick_terminal, .adopted }) |kind| {
         const p = plan(kind, .{ .decorated = false, .opacity = 0.8 }, .{}, &source, .no_activate, 0);
@@ -544,15 +556,14 @@ pub const SavedPlacement = struct {
 /// How a fullscreen window is saved: fullscreen, with the window it leaves
 /// fullscreen to, `back`, as its normal rect, never the popup's monitor rect
 /// (window-frame.md 2026-10-25 FULLSCREEN-SESSION-01). A maximized return's
-/// normal rect is in workspace coordinates, of `monitor` when given (a
-/// test's stand-in) or else of the monitor `back` is on. With no area there
-/// is no trustworthy rect, and nothing is saved.
-pub fn savedFullscreen(back: TopLevel.Return, monitor: ?MONITORINFO) ?SavedPlacement {
+/// normal rect is in the workspace coordinates of the monitor `back` is on.
+/// With no area there is no trustworthy rect, and nothing is saved.
+pub fn savedFullscreen(back: TopLevel.Return) ?SavedPlacement {
     const maximized = back.placement.showCmd == c.SW_MAXIMIZE;
     var rect = back.rect;
     if (maximized) {
         rect = back.placement.rcNormalPosition;
-        if (monitor orelse if (back.monitor) |here| here.info else null) |info| rect = workspaceRectToScreen(rect, info);
+        if (back.monitor) |here| rect = workspaceRectToScreen(rect, here.info);
     }
     if (rect.right <= rect.left or rect.bottom <= rect.top) return null;
     return .{ .rect = rect, .maximized = false, .fullscreen = true, .fullscreen_maximized = maximized };
@@ -887,20 +898,20 @@ test "win32 a fullscreen window is saved with the window it leaves fullscreen to
     const normal: RECT = .{ .left = 100, .top = 200, .right = 740, .bottom = 680 };
     // A taskbar on the left, so workspace and screen coordinates differ.
     var back: TopLevel.Return = .{ .rect = normal, .placement = testPlacement(std.mem.zeroes(RECT), 0, c.SW_RESTORE), .monitor = testMonitor(1, 96, testRect(0, 0, 1920, 1080), testRect(48, 0, 1920, 1080)) };
-    try std.testing.expectEqual(SavedPlacement{ .rect = normal, .maximized = false, .fullscreen = true }, savedFullscreen(back, null).?);
+    try std.testing.expectEqual(SavedPlacement{ .rect = normal, .maximized = false, .fullscreen = true }, savedFullscreen(back).?);
 
     // A maximized return's normal rect is in its monitor's workspace.
     back.placement.showCmd = c.SW_MAXIMIZE;
     back.placement.rcNormalPosition = testRect(52, 200, 692, 680);
-    try std.testing.expectEqual(SavedPlacement{ .rect = normal, .maximized = false, .fullscreen = true, .fullscreen_maximized = true }, savedFullscreen(back, null).?);
+    try std.testing.expectEqual(SavedPlacement{ .rect = normal, .maximized = false, .fullscreen = true, .fullscreen_maximized = true }, savedFullscreen(back).?);
 
     // No trustworthy return rect: no placement, rather than fullscreen with
     // an invented normal rect or the popup's bounds.
     back.placement.rcNormalPosition = std.mem.zeroes(RECT);
-    try std.testing.expect(savedFullscreen(back, null) == null);
+    try std.testing.expect(savedFullscreen(back) == null);
     back.placement.showCmd = c.SW_RESTORE;
     back.rect = std.mem.zeroes(RECT);
-    try std.testing.expect(savedFullscreen(back, null) == null);
+    try std.testing.expect(savedFullscreen(back) == null);
 }
 
 test "win32 a restored window enters its config's maximize and fullscreen, and a saved fullscreen" {
