@@ -22,6 +22,7 @@ const win32 = @import("../win32.zig");
 const BOOL = types.BOOL;
 const HWND = types.HWND;
 const UINT = types.UINT;
+const Win32Error = std.os.windows.Win32Error;
 
 /// The most formats one write carries (CF_HTML and CF_UNICODETEXT).
 const max_formats = 2;
@@ -36,6 +37,7 @@ pub const Ops = struct {
     empty: *const fn () callconv(.winapi) BOOL = sys.EmptyClipboard,
     setData: *const fn (UINT, ?*anyopaque) callconv(.winapi) ?*anyopaque = sys.SetClipboardData,
     close: *const fn () callconv(.winapi) BOOL = sys.CloseClipboard,
+    lastError: *const fn () callconv(.winapi) Win32Error = std.os.windows.kernel32.GetLastError,
 };
 
 /// One clipboard format and the bytes it carries.
@@ -72,6 +74,14 @@ pub const Error = error{
 /// avoids that, because only an emptied clipboard takes a new owner's data.
 /// Memory the clipboard did not take is freed.
 pub fn write(ops: Ops, owner: ?HWND, formats: []const Format) Error!void {
+    var native: Win32Error = .SUCCESS;
+    return writeCapturing(ops, owner, formats, &native);
+}
+
+/// `write`, and the failing call's own `GetLastError` in `native`. It is read
+/// at the failure, before the cleanup (`CloseClipboard`, `GlobalFree`) that
+/// can overwrite it, so a caller that reports the code reports the cause.
+pub fn writeCapturing(ops: Ops, owner: ?HWND, formats: []const Format, native: *Win32Error) Error!void {
     std.debug.assert(formats.len <= max_formats);
 
     // Ours, and freed, until `SetClipboardData` takes it.
@@ -80,29 +90,35 @@ pub fn write(ops: Ops, owner: ?HWND, formats: []const Format) Error!void {
         if (mem) |m| _ = ops.globalFree(m);
     };
 
-    for (formats, mems[0..formats.len]) |format, *mem| mem.* = try prepare(ops, format);
+    for (formats, mems[0..formats.len]) |format, *mem| mem.* = try prepare(ops, format, native);
 
-    if (!ops.open(owner)) return error.ClipboardUnavailable;
+    if (!ops.open(owner)) return failed(ops, native, error.ClipboardUnavailable);
     defer _ = ops.close();
-    if (ops.empty() == 0) return error.ClipboardUnavailable;
+    if (ops.empty() == 0) return failed(ops, native, error.ClipboardUnavailable);
     for (formats, mems[0..formats.len]) |format, *mem| {
-        if (ops.setData(format.id, mem.*) == null) return error.ClipboardUnavailable;
+        if (ops.setData(format.id, mem.*) == null) return failed(ops, native, error.ClipboardUnavailable);
         // The clipboard owns the memory now.
         mem.* = null;
     }
 }
 
+/// `err`, with the native error of the call that just failed recorded.
+fn failed(ops: Ops, native: *Win32Error, err: Error) Error {
+    native.* = ops.lastError();
+    return err;
+}
+
 /// `format`'s payload in movable global memory, unlocked. The caller frees it
 /// unless `SetClipboardData` takes it.
-fn prepare(ops: Ops, format: Format) Error!*anyopaque {
+fn prepare(ops: Ops, format: Format, native: *Win32Error) Error!*anyopaque {
     // GMEM_MOVEABLE is what `SetClipboardData` takes; GMEM_ZEROINIT is what
     // the terminal's writers always asked for.
     const mem = ops.globalAlloc(
         c.GMEM_MOVEABLE | c.GMEM_ZEROINIT,
         format.data.len + format.nul_bytes,
-    ) orelse return error.GlobalMemoryUnavailable;
+    ) orelse return failed(ops, native, error.GlobalMemoryUnavailable);
     errdefer _ = ops.globalFree(mem);
-    const locked: [*]u8 = @ptrCast(ops.globalLock(mem) orelse return error.GlobalMemoryUnavailable);
+    const locked: [*]u8 = @ptrCast(ops.globalLock(mem) orelse return failed(ops, native, error.GlobalMemoryUnavailable));
     @memcpy(locked[0..format.data.len], format.data);
     @memset(locked[format.data.len..][0..format.nul_bytes], 0);
     // Unlocked before the clipboard sees it: a locked block does not belong to
@@ -138,6 +154,28 @@ pub const Fake = struct {
     var opened = false;
     var emptied = false;
     var opened_for: ?HWND = null;
+    var last_error: Win32Error = .SUCCESS;
+
+    /// The native error each failing call leaves, one value per kind.
+    pub fn failureCode(how: Fail) Win32Error {
+        return @enumFromInt(@as(u16, switch (how) {
+            .none => 0,
+            .alloc => 8, // ERROR_NOT_ENOUGH_MEMORY
+            .lock => 6, // ERROR_INVALID_HANDLE
+            .open => 5, // ERROR_ACCESS_DENIED
+            .empty => 1418, // ERROR_CLIPBOARD_NOT_OPEN
+            .set_data => 1004, // ERROR_INVALID_FLAGS
+        }));
+    }
+
+    /// What the cleanup calls (`GlobalUnlock`, `GlobalFree`, `CloseClipboard`)
+    /// leave behind, as a real one can: a code unlike every failure's.
+    const cleanup_code: Win32Error = @enumFromInt(1);
+
+    /// The thread's last error as the code under test would read it now.
+    pub fn lastErrorNow() Win32Error {
+        return last_error;
+    }
 
     pub const ops: Ops = .{
         .globalAlloc = globalAlloc,
@@ -148,7 +186,12 @@ pub const Fake = struct {
         .empty = empty,
         .setData = setData,
         .close = close,
+        .lastError = lastError,
     };
+
+    fn lastError() callconv(.winapi) Win32Error {
+        return last_error;
+    }
 
     /// Start a fresh run in which the `nth` (0-based) call of the kind `how`
     /// names fails.
@@ -160,6 +203,7 @@ pub const Fake = struct {
         opened = false;
         emptied = false;
         opened_for = null;
+        last_error = .SUCCESS;
         for (&blocks) |*block| block.* = .{};
     }
 
@@ -218,7 +262,9 @@ pub const Fake = struct {
     /// Whether the call just noted is the one the run fails.
     fn failsNow(kind: Fail, step: Step) bool {
         if (fail != kind) return false;
-        return std.mem.count(Step, recorded(), &.{step}) == fail_on + 1;
+        if (std.mem.count(Step, recorded(), &.{step}) != fail_on + 1) return false;
+        last_error = failureCode(kind);
+        return true;
     }
 
     fn handleOf(index: usize) *anyopaque {
@@ -257,6 +303,7 @@ pub const Fake = struct {
     fn globalUnlock(mem: ?*anyopaque) callconv(.winapi) BOOL {
         note(.unlock);
         blockOf(mem).locked = false;
+        last_error = cleanup_code;
         return 0;
     }
 
@@ -266,6 +313,7 @@ pub const Fake = struct {
         // Freeing what the clipboard owns, or freeing twice, is the bug.
         std.debug.assert(block.owner == .caller);
         block.owner = .freed;
+        last_error = cleanup_code;
         return null;
     }
 
@@ -304,6 +352,7 @@ pub const Fake = struct {
         // Only a clipboard that was opened is closed, and once.
         std.debug.assert(opened);
         opened = false;
+        last_error = cleanup_code;
         return 1;
     }
 };
@@ -386,4 +435,33 @@ test "win32 clipboard write runs alloc lock unlock for each format, then open em
     // Each payload ends in its terminator, whatever the allocator left there.
     try std.testing.expectEqualSlices(u8, "<b>copy</b>\x00", Fake.payload(0));
     try std.testing.expectEqualSlices(u8, std.mem.sliceAsBytes(test_text[0 .. test_text.len + 1]), Fake.payload(1));
+}
+
+test "win32 clipboard write reports the native error of the call that failed, not of its cleanup" {
+    const Case = struct { how: Fake.Fail, nth: usize, cleaned_up: bool };
+    // `cleaned_up`: the failure is followed by cleanup (GlobalFree and, once
+    // the clipboard was opened, CloseClipboard) that overwrites the thread's
+    // last error, so a caller reading it after `write` returns reads that.
+    const cases = [_]Case{
+        .{ .how = .alloc, .nth = 0, .cleaned_up = false },
+        .{ .how = .alloc, .nth = 1, .cleaned_up = true },
+        .{ .how = .lock, .nth = 0, .cleaned_up = true },
+        .{ .how = .open, .nth = 0, .cleaned_up = true },
+        .{ .how = .empty, .nth = 0, .cleaned_up = true },
+        .{ .how = .set_data, .nth = 1, .cleaned_up = true },
+    };
+    for (cases) |case| {
+        Fake.reset(case.how, case.nth);
+        var native: Win32Error = .SUCCESS;
+        const expected: Error = if (case.how == .alloc or case.how == .lock) error.GlobalMemoryUnavailable else error.ClipboardUnavailable;
+        try std.testing.expectError(expected, writeCapturing(Fake.ops, null, &test_formats, &native));
+        try std.testing.expectEqual(Fake.failureCode(case.how), native);
+        if (case.cleaned_up) try std.testing.expect(Fake.lastErrorNow() != native);
+    }
+
+    // A write that works leaves `native` as the caller had it.
+    Fake.reset(.none, 0);
+    var native: Win32Error = .SUCCESS;
+    try writeCapturing(Fake.ops, null, &test_formats, &native);
+    try std.testing.expectEqual(Win32Error.SUCCESS, native);
 }
