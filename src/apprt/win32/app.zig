@@ -8649,13 +8649,16 @@ pub const App = struct {
                 // have no Keep mine / Use disk, so one another program
                 // changed since Settings read the config stops the save
                 // (before the save, or while it ran); an edit to anything
-                // else is saved on top of, as an ordinary one is.
-                if (fresh) |*reading| {
+                // else is saved on top of, as an ordinary one is. Not in
+                // recovery: its baseline is the recovery config, not the
+                // file, so a repair would read as a change (the file's
+                // digests are still compared).
+                if (!self.safe_mode) if (fresh) |*reading| {
                     self.settingsProfilesUnchanged(alloc, reading, state, original, pending, profile_edits) catch |err| {
                         reading.deinit();
                         return err;
                     };
-                } else |_| {}
+                } else |_| {};
                 profile_edits = try settingsProfileEditsFromDisk(profile_arena.allocator(), alloc, &self.settings_failure_detail, fresh, &self.config, state, original, pending, target_path);
             }
             // No-op short-circuit: if the user pressed Save without
@@ -8670,6 +8673,11 @@ pub const App = struct {
             self.settings_failure_detail.clear(alloc);
             persistSettings(alloc, target_path, pending, user_edited, profile_edits, &self.settings_failure_detail, check.read_as) catch |err| {
                 if (err != error.DiskChanged or checked_again) return err;
+                // In recovery there is no baseline from the file to check it
+                // against (`settingsCheckDisk` skips recovery), so a retry
+                // would write over the edit it just found. Nothing is
+                // written; the person saves again to write over it.
+                if (self.safe_mode) return err;
                 // Another program edited the file after the check read it, and
                 // nothing was written. It is checked again, as before the save:
                 // an edit under an edited setting goes to the window's choice
@@ -8786,9 +8794,14 @@ pub const App = struct {
         pending: *const configpkg.Config,
         edits: []const settings_patch.Edit,
     ) win32_settings.SaveError!void {
+        // A reading that could not read every file misses what that file
+        // gives, which would read as changed: the check that follows
+        // (`settingsProfileEditsFromDisk`) names the file instead.
+        if (settings_patch.unreadConfigFile(reading) != null) return;
         var applied = reading.changeConditionalState(state) catch |err| return settingsProfileEditsFailed(err);
         defer if (applied) |*value| value.deinit();
         const now: *const configpkg.Config = if (applied) |*value| value else reading;
+        if (settings_patch.unreadConfigFile(now) != null) return;
         const edit = settings_patch.changedUnder(edits, original, pending, now) orelse return;
         var name: std.Io.Writer.Allocating = .init(alloc);
         defer name.deinit();
@@ -9553,9 +9566,144 @@ pub const App = struct {
                     const after = try SaveTest.read(path);
                     defer alloc.free(after);
                     try std.testing.expect(std.mem.indexOf(u8, after, "python.exe") == null);
+                    // The lower layer names `py` now: a tombstone, not a
+                    // deletion, or `py` would come back from it.
+                    if (case == .lower_label) try std.testing.expect(std.mem.indexOf(u8, after, "profile-command = py:\n") != null);
                 },
             }
         }
+    }
+
+    test "win32 settings profile save names an include it could not read, not a change to the profile it defines" {
+        if (builtin.os.tag != .windows) return error.SkipZigTest;
+        const alloc = std.testing.allocator;
+        var core_app: CoreApp = undefined;
+        var app: App = undefined;
+        var session: TestSession = .{};
+        try session.init(.{ .core_app = &core_app, .app = &app });
+        defer session.deinit();
+        defer testFreeConfigProblems(&app, alloc);
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        try tmp.dir.writeFile(.{ .sub_path = "more.conf", .data = "profile-command = py: python.exe\n" });
+        const more = try tmp.dir.realpathAlloc(alloc, "more.conf");
+        defer alloc.free(more);
+        const text = try std.fmt.allocPrint(alloc, "font-size = 12\nconfig-file = {s}\n", .{more});
+        defer alloc.free(text);
+        try tmp.dir.writeFile(.{ .sub_path = "config", .data = text });
+        const path = try tmp.dir.realpathAlloc(alloc, "config");
+        defer alloc.free(path);
+        SaveTest.files = &.{path};
+        try SaveTest.begin(&app, path);
+        defer SaveTest.end(&app);
+        var original = try app.config.clone(alloc);
+        defer original.deinit();
+        var pending = try app.config.clone(alloc);
+        defer pending.deinit();
+        try pending.@"profile-command".parseCLI(pending._arena.?.allocator(), "py: python.exe -X");
+        // Another program locks the include's bytes as the save reads the
+        // layers again: `py` is missing from that reading, which is the
+        // file's doing, not another program's edit of `py`.
+        {
+            var lock = try tmp.dir.openFile("more.conf", .{ .mode = .read_write, .lock = .exclusive });
+            defer lock.close();
+            try std.testing.expectError(error.FileUnopenable, app.settingsSaveAndReload(&pending, &original));
+        }
+        const expected = try std.fmt.allocPrint(alloc, "the included file {s}", .{more});
+        defer alloc.free(expected);
+        try std.testing.expect(std.mem.eql(u8, expected, app.settings_failure_detail.text orelse return error.TestExpectedDetail));
+        const after = try SaveTest.read(path);
+        defer alloc.free(after);
+        try std.testing.expect(std.mem.eql(u8, text, after));
+    }
+
+    test "win32 settings profile save in recovery writes a repair, and does not apply it" {
+        if (builtin.os.tag != .windows) return error.SkipZigTest;
+        const alloc = std.testing.allocator;
+        var core_app: CoreApp = undefined;
+        var app: App = undefined;
+        var session: TestSession = .{};
+        try session.init(.{ .core_app = &core_app, .app = &app });
+        defer session.deinit();
+        defer testFreeConfigProblems(&app, alloc);
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        const raw = "profile-command = py: python.exe\n";
+        try tmp.dir.writeFile(.{ .sub_path = "config", .data = raw });
+        const path = try tmp.dir.realpathAlloc(alloc, "config");
+        defer alloc.free(path);
+        // Recovery: the running config is the recovery one, not the file.
+        app.safe_mode = true;
+        try configpkg.pane_launch.useRecovery(&app.config);
+        SaveTest.files = &.{path};
+        settings_patch.test_config_load = SaveTest.load;
+        app.cli_config_override_path = @constCast(path);
+        defer SaveTest.end(&app);
+        const revision = app.config_revision;
+        var original = try app.config.clone(alloc);
+        defer original.deinit();
+        var pending = try app.config.clone(alloc);
+        defer pending.deinit();
+        // The person repairs `py`, which the file already defines.
+        try pending.@"profile-command".parseCLI(pending._arena.?.allocator(), "py: python.exe -X");
+        try app.settingsReconcileDisk(&pending, &original, true);
+        try app.settingsSaveAndReload(&pending, &original);
+        // Written,
+        const after = try SaveTest.read(path);
+        defer alloc.free(after);
+        try std.testing.expect(std.mem.eql(u8, "profile-command = py: python.exe -X\n", after));
+        // and not applied: the running config is still the recovery one.
+        try std.testing.expectEqual(revision, app.config_revision);
+        try std.testing.expect(app.config.@"profile-command".get("py") == null);
+    }
+
+    test "win32 settings save in recovery does not write over a file another program changed while it saved" {
+        if (builtin.os.tag != .windows) return error.SkipZigTest;
+        const alloc = std.testing.allocator;
+        var core_app: CoreApp = undefined;
+        var app: App = undefined;
+        var session: TestSession = .{};
+        try session.init(.{ .core_app = &core_app, .app = &app });
+        defer session.deinit();
+        defer testFreeConfigProblems(&app, alloc);
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        try tmp.dir.writeFile(.{ .sub_path = "config", .data = "font-size = 12\n" });
+        const path = try tmp.dir.realpathAlloc(alloc, "config");
+        defer alloc.free(path);
+        // Recovery: the running config is the recovery one, not the file.
+        app.safe_mode = true;
+        try configpkg.pane_launch.useRecovery(&app.config);
+        SaveTest.files = &.{path};
+        settings_patch.test_config_load = SaveTest.load;
+        app.cli_config_override_path = @constCast(path);
+        defer SaveTest.end(&app);
+        const revision = app.config_revision;
+        var original = try app.config.clone(alloc);
+        defer original.deinit();
+        var pending = try app.config.clone(alloc);
+        defer pending.deinit();
+        pending.@"font-size" = 15;
+        try app.settingsReconcileDisk(&pending, &original, true);
+        // Another program sets the same setting as the save is about to put
+        // its bytes in place.
+        SaveTest.hook_path = path;
+        SaveTest.hook_text = "font-size = 20\n";
+        save_target.test_before_compare = SaveTest.hook;
+        // There is no baseline from the file to decide by: nothing is
+        // written, and nothing is applied.
+        try std.testing.expectError(error.DiskChanged, app.settingsSaveAndReload(&pending, &original));
+        const after = try SaveTest.read(path);
+        defer alloc.free(after);
+        try std.testing.expectEqualStrings("font-size = 20\n", after);
+        try std.testing.expectEqual(revision, app.config_revision);
+        try std.testing.expectEqual(@as(f32, 15), pending.@"font-size");
+        // Saved again, it writes over the edit, knowingly.
+        try app.settingsSaveAndReload(&pending, &original);
+        const again = try SaveTest.read(path);
+        defer alloc.free(again);
+        try std.testing.expectEqualStrings("font-size = 15\n", again);
+        try std.testing.expectEqual(revision, app.config_revision);
     }
 
     test "win32 settings save stops when its check cannot read the file it compares" {
