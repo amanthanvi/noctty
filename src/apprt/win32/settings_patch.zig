@@ -590,12 +590,18 @@ pub threadlocal var test_config_load: if (@import("builtin").is_test) ?*const fn
 /// comes first, for any save, one of ordinary settings alone too: a field
 /// or a reset it missed is no override, so the save names that file
 /// (`.unread`) and nothing as overridden, and keeps the running settings.
+/// `loaded`, when the app runs the other state, is asked only about the
+/// files every state reads (`unreadFiles`): its theme is not the one the
+/// app applies, and `reload` read the app's own again.
 /// Otherwise the fields another layer overrides go to `masked`
 /// (`writeMasked`, after a separator when `after`), and the report is
 /// `.masked`, or `.held` when there are none.
 pub fn reloadReport(masked: *std.Io.Writer, edits: []const Edit, reload: *const Config, loaded: *const Config, after: bool) std.Io.Writer.Error!union(enum) { held, masked, unread: Unread } {
-    for ([_]*const Config{ loaded, reload }) |reading| {
-        if (unreadConfigFile(reading)) |unread| return .{ .unread = unread };
+    if (loaded == reload) {
+        if (unreadConfigFile(reload)) |unread| return .{ .unread = unread };
+    } else {
+        if (unreadFiles(loaded)) |unread| return .{ .unread = unread };
+        if (unreadConfigFile(reload)) |unread| return .{ .unread = unread };
     }
     if (edits.len == 0) return .held;
     return if (try writeMasked(masked, edits, reload, after)) .masked else .held;

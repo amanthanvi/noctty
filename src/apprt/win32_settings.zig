@@ -7738,14 +7738,14 @@ pub const SettingsWindow = struct {
         self.updateSaveEnabled();
     }
 
-    /// Start typing into a field of the Profiles page: a text field over the
-    /// open row (`placeProfileEdit`), holding the field's value, named for
-    /// UIA after the field and its profile. `id` is the new profile's, for
-    /// `.new_command`.
     /// Tests only: `beginProfileEdit` cannot make its field's window, as when
     /// Windows has no resources for one.
     threadlocal var test_profile_edit_fails: bool = false;
 
+    /// Start typing into a field of the Profiles page: a text field over the
+    /// open row (`placeProfileEdit`), holding the field's value, named for
+    /// UIA after the field and its profile. `id` is the new profile's, for
+    /// `.new_command`.
     fn beginProfileEdit(self: *SettingsWindow, kind: ProfileEdit.Kind, row: settings_profiles.Row, new_id: ?[]const u8) void {
         self.disarmProfileRemoval();
         self.cancelProfileEdit();

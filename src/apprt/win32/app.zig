@@ -8628,9 +8628,12 @@ pub const App = struct {
         // in the app's light/dark state: a theme can set a key, or define a
         // profile, in one state only (a dark theme's `default-profile` takes
         // over when Automatic deletes the file's line).
-        var reloaded_applied: ?configpkg.Config = reloaded.changeConditionalState(self.core_app.config_conditional_state) catch |err| applied: {
-            log.warn("settings save: could not apply the light/dark state to the reload for its check err={}", .{err});
-            break :applied null;
+        // One that cannot be put in that state (no memory) applies nothing,
+        // as a reload that fails does: the light reading is not what the app
+        // runs, and `updateConfig` would read the theme again, unchecked.
+        var reloaded_applied: ?configpkg.Config = reloaded.changeConditionalState(self.core_app.config_conditional_state) catch |err| {
+            log.warn("settings save: saved, but the reload could not be put in the app's light/dark state; the running settings are kept err={}", .{err});
+            return error.ReloadFailed;
         };
         defer if (reloaded_applied) |*value| value.deinit();
         const applied: *const configpkg.Config = if (reloaded_applied) |*value| value else &reloaded;
@@ -8729,10 +8732,11 @@ pub const App = struct {
     /// With `compare` (the draft's edits; null in recovery, whose baseline is
     /// not the file), a profile field they change that another program
     /// changed too stops the save (`settingsProfilesUnchanged`), judged on
-    /// the same reading in `state`, once it is known to be whole: the theme
-    /// is read once, so a read that fails and then recovers cannot skip
-    /// that check. A read that fails stops the save. Nothing is written
-    /// then, and `detail` names the file or the field.
+    /// the reading in `state` this decides the edits from, once it is known
+    /// to be whole: no separate switch reads the theme for the check, so a
+    /// theme read that fails and then recovers cannot skip it. A read that
+    /// fails stops the save. Nothing is written then, and `detail` names the
+    /// file or the field.
     fn settingsProfileEditsFromDisk(
         arena: Allocator,
         alloc: Allocator,
@@ -10021,6 +10025,127 @@ pub const App = struct {
         const after = try SaveTest.read(path);
         defer alloc.free(after);
         try std.testing.expect(std.mem.eql(u8, fresh_text, after));
+    }
+
+    test "settings save while the app runs dark is applied whole when only the light theme cannot be read" {
+        if (builtin.os.tag != .windows) return error.SkipZigTest;
+        const alloc = std.testing.allocator;
+        var core_app: CoreApp = undefined;
+        var app: App = undefined;
+        var session: TestSession = .{};
+        try session.init(.{ .core_app = &core_app, .app = &app });
+        defer session.deinit();
+        defer testFreeConfigProblems(&app, alloc);
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        try tmp.dir.writeFile(.{ .sub_path = "dark", .data = "\n" });
+        const dark = try tmp.dir.realpathAlloc(alloc, "dark");
+        defer alloc.free(dark);
+        try tmp.dir.writeFile(.{ .sub_path = "light", .data = "\n" });
+        const light = try tmp.dir.realpathAlloc(alloc, "light");
+        defer alloc.free(light);
+        const text = try std.fmt.allocPrint(alloc, "theme = light:{s},dark:{s}\nfont-size = 12\n", .{ light, dark });
+        defer alloc.free(text);
+        try tmp.dir.writeFile(.{ .sub_path = "config", .data = text });
+        const path = try tmp.dir.realpathAlloc(alloc, "config");
+        defer alloc.free(path);
+        app.core_app.config_conditional_state = .{ .theme = .dark };
+        SaveTest.files = &.{path};
+        try SaveTest.begin(&app, path);
+        defer SaveTest.end(&app);
+        const Case = enum { undecodable, unopenable };
+        for ([_]Case{ .undecodable, .unopenable }, [_]f32{ 15, 16 }) |case, size| {
+            // The light theme, which the app does not apply, cannot be read:
+            // UTF-16 that does not decode, or held by another program with no
+            // sharing. The dark theme reads whole.
+            try tmp.dir.writeFile(.{ .sub_path = "light", .data = switch (case) {
+                .undecodable => "\xff\xfe\x00\xd8a\x00",
+                .unopenable => "\n",
+            } });
+            var held: ?std.os.windows.HANDLE = null;
+            defer if (held) |handle| std.os.windows.CloseHandle(handle);
+            if (case == .unopenable) {
+                const wide = try std.os.windows.sliceToPrefixedFileW(null, light);
+                const handle = std.os.windows.kernel32.CreateFileW(wide.span().ptr, std.os.windows.GENERIC_READ, 0, null, std.os.windows.OPEN_EXISTING, 0, null);
+                if (handle == std.os.windows.INVALID_HANDLE_VALUE) return error.CouldNotHoldFile;
+                held = handle;
+            }
+            var original = try app.config.clone(alloc);
+            defer original.deinit();
+            var pending = try app.config.clone(alloc);
+            defer pending.deinit();
+            pending.@"font-size" = size;
+            // The save, and its reload in the dark state, apply the edit.
+            try app.settingsSaveAndReload(&pending, &original);
+            try std.testing.expectEqual(size, app.config.@"font-size");
+            const after = try SaveTest.read(path);
+            defer alloc.free(after);
+            const line = try std.fmt.allocPrint(alloc, "font-size = {d}\n", .{size});
+            defer alloc.free(line);
+            try std.testing.expect(std.mem.indexOf(u8, after, line) != null);
+        }
+    }
+
+    test "settings save whose reload cannot be put in the app's light/dark state applies nothing" {
+        if (builtin.os.tag != .windows) return error.SkipZigTest;
+        const alloc = std.testing.allocator;
+        var core_app: CoreApp = undefined;
+        var app: App = undefined;
+        var session: TestSession = .{};
+        try session.init(.{ .core_app = &core_app, .app = &app });
+        defer session.deinit();
+        defer testFreeConfigProblems(&app, alloc);
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        try tmp.dir.writeFile(.{ .sub_path = "light", .data = "\n" });
+        try tmp.dir.writeFile(.{ .sub_path = "dark", .data = "\n" });
+        const light = try tmp.dir.realpathAlloc(alloc, "light");
+        defer alloc.free(light);
+        const dark = try tmp.dir.realpathAlloc(alloc, "dark");
+        defer alloc.free(dark);
+        const text = try std.fmt.allocPrint(alloc, "theme = light:{s},dark:{s}\nfont-size = 12\n", .{ light, dark });
+        defer alloc.free(text);
+        try tmp.dir.writeFile(.{ .sub_path = "config", .data = text });
+        const path = try tmp.dir.realpathAlloc(alloc, "config");
+        defer alloc.free(path);
+        app.core_app.config_conditional_state = .{ .theme = .dark };
+        SaveTest.files = &.{path};
+        try SaveTest.begin(&app, path);
+        defer SaveTest.end(&app);
+        // The reload after the write is read whole, and from then on its
+        // allocator has no memory: the switch to the dark state fails.
+        const Starve = struct {
+            threadlocal var armed: bool = false;
+            threadlocal var failing: std.testing.FailingAllocator = undefined;
+
+            fn arm() void {
+                save_target.test_before_compare = null;
+                armed = true;
+            }
+
+            fn load(a: Allocator) anyerror!configpkg.Config {
+                if (!armed) return SaveTest.load(a);
+                armed = false;
+                failing = .init(a, .{});
+                const cfg = try SaveTest.load(failing.allocator());
+                failing.fail_index = failing.alloc_index;
+                return cfg;
+            }
+        };
+        settings_patch.test_config_load = Starve.load;
+        save_target.test_before_compare = Starve.arm;
+        var original = try app.config.clone(alloc);
+        defer original.deinit();
+        var pending = try app.config.clone(alloc);
+        defer pending.deinit();
+        pending.@"font-size" = 15;
+        // The file is written; the running settings are kept, rather than
+        // the light reading, or one `updateConfig` would switch unchecked.
+        try std.testing.expectError(error.ReloadFailed, app.settingsSaveAndReload(&pending, &original));
+        try std.testing.expectEqual(@as(f32, 12), app.config.@"font-size");
+        const after = try SaveTest.read(path);
+        defer alloc.free(after);
+        try std.testing.expect(std.mem.indexOf(u8, after, "font-size = 15") != null);
     }
 
     test "settings profile removal keeps a tombstone when the config as last read, already in the app's state, skipped a theme" {
