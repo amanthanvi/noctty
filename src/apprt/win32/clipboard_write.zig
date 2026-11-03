@@ -453,7 +453,8 @@ test "win32 clipboard write reports the native error of the call that failed, no
     for (cases) |case| {
         Fake.reset(case.how, case.nth);
         var native: Win32Error = .SUCCESS;
-        try std.testing.expect(std.meta.isError(writeCapturing(Fake.ops, null, &test_formats, &native)));
+        const expected: Error = if (case.how == .alloc or case.how == .lock) error.GlobalMemoryUnavailable else error.ClipboardUnavailable;
+        try std.testing.expectError(expected, writeCapturing(Fake.ops, null, &test_formats, &native));
         try std.testing.expectEqual(Fake.failureCode(case.how), native);
         if (case.cleaned_up) try std.testing.expect(Fake.lastErrorNow() != native);
     }

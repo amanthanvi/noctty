@@ -5177,7 +5177,9 @@ test "win32 a terminal html copy prepares both formats before it empties the cli
     for ([_]Fake.Fail{ .alloc, .lock }) |how| {
         for (0..2) |nth| {
             Fake.reset(how, nth);
+            native = .SUCCESS;
             try std.testing.expectError(error.GlobalMemoryUnavailable, Surface.writeClipboardHtmlWith(Fake.ops, alloc, null, cf_html, html, null, &native));
+            try std.testing.expectEqual(Fake.failureCode(how), native);
             try std.testing.expect(!Fake.did(.open) and !Fake.did(.empty) and !Fake.did(.set_data) and !Fake.did(.close));
             try std.testing.expectEqual(@as(usize, 0), Fake.leaked());
             try std.testing.expectEqual(@as(usize, 0), Fake.taken());
@@ -5188,7 +5190,9 @@ test "win32 a terminal html copy prepares both formats before it empties the cli
     // freed, and nothing was taken.
     for ([_]Fake.Fail{ .open, .empty, .set_data }) |how| {
         Fake.reset(how, 0);
+        native = .SUCCESS;
         try std.testing.expectError(error.ClipboardUnavailable, Surface.writeClipboardHtmlWith(Fake.ops, alloc, null, cf_html, html, null, &native));
+        try std.testing.expectEqual(Fake.failureCode(how), native);
         try std.testing.expectEqual(how != .open, Fake.did(.close));
         try std.testing.expectEqual(@as(usize, 0), Fake.leaked());
         try std.testing.expectEqual(@as(usize, 0), Fake.taken());
@@ -5200,6 +5204,7 @@ test "win32 a terminal html copy prepares both formats before it empties the cli
     // order avoids that. The call fails, and the block the clipboard did not
     // take is freed.
     Fake.reset(.set_data, 1);
+    native = .SUCCESS;
     try std.testing.expectError(error.ClipboardUnavailable, Surface.writeClipboardHtmlWith(Fake.ops, alloc, null, cf_html, html, null, &native));
     try std.testing.expectEqual(Fake.failureCode(.set_data), native);
     try std.testing.expect(Fake.did(.empty) and Fake.did(.close));
