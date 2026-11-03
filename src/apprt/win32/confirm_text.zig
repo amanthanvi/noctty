@@ -111,7 +111,12 @@ pub const Words = struct {
             .terminal => |terminal| {
                 var prompt: Prompt = .{
                     .title = "Close this terminal?",
-                    .body = "A process is still running. Closing this surface will terminate it.",
+                    // Read-only mode is why a terminal whose program has
+                    // exited still asks, in front as behind.
+                    .body = if (terminal.program_exited)
+                        "The program has exited. Read-only mode makes closing this terminal ask first."
+                    else
+                        "A process is still running. Closing this surface will terminate it.",
                     .accept_label = "Close",
                 };
                 if (terminal.behind) |tab| self.nameTab(
@@ -556,6 +561,13 @@ test "win32 close prompts count the terminals they would end" {
             "Close",
             "A process is still running. Closing this surface will terminate it.",
         },
+        // A read-only terminal asks after its program exits, in front too.
+        .{
+            .{ .terminal = .{ .program_exited = true } },
+            "Close this terminal?",
+            "Close",
+            "The program has exited. Read-only mode makes closing this terminal ask first.",
+        },
     }) |case| {
         var words: Words = .{};
         defer words.deinit(std.testing.allocator);
@@ -633,7 +645,7 @@ test "a close prompt for a tab behind keeps its numbered title when its body can
     defer terminal_words.deinit(alloc);
     const terminal = terminal_words.close(alloc, .{ .terminal = .{ .program_exited = true, .behind = vim } });
     try std.testing.expectEqualStrings("Close terminal in tab 3?", terminal.title);
-    try std.testing.expectEqualStrings("A process is still running. Closing this surface will terminate it.", terminal.body);
+    try std.testing.expectEqualStrings("The program has exited. Read-only mode makes closing this terminal ask first.", terminal.body);
 
     try std.testing.expect(failing.has_induced_failure);
 }

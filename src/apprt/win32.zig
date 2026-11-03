@@ -15106,6 +15106,50 @@ test "win32 OSC 52 read Allow still replies with the approved contents" {
     try fixture.expectSilent();
 }
 
+test "win32 a confirm prompt puts its preview into the preview control" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var fixture: ClipboardReplyFixture = .{};
+    try fixture.init();
+    defer fixture.deinit();
+    const host = &fixture.host;
+    const alloc = fixture.core_app.alloc;
+
+    // `showOverlay` stops short without the edit and its two buttons, and
+    // the preview goes only into a control that exists: give it all four
+    // under a hidden parent. `host.hwnd` stays null.
+    const parent = try createTestHostWindow();
+    defer _ = sys.DestroyWindow(parent);
+    host.overlay_edit_hwnd = try createTestChromeChild(parent, child_window.prompt_edit_class);
+    host.overlay_accept_hwnd = try createTestChromeChild(parent, prompt_button_class);
+    host.overlay_cancel_hwnd = try createTestChromeChild(parent, prompt_button_class);
+    host.overlay_preview_hwnd = try createTestChromeChild(parent, child_window.prompt_edit_class);
+    defer {
+        // Close the prompt while its controls still exist, then let the
+        // fixture's own close find none. `Host.deinit` frees these caches,
+        // and the session never runs it.
+        host.hideOverlay();
+        host.overlay_edit_hwnd = null;
+        host.overlay_accept_hwnd = null;
+        host.overlay_cancel_hwnd = null;
+        host.overlay_preview_hwnd = null;
+        for ([_]*?[:0]const u8{
+            &host.cached_overlay_edit,
+            &host.cached_overlay_accept,
+            &host.cached_overlay_cancel,
+            &host.cached_overlay_preview,
+        }) |cached| {
+            if (cached.*) |value| alloc.free(value);
+            cached.* = null;
+        }
+    }
+
+    try fixture.surface.requestPasteConfirm(.{ .osc_52_read = .primary }, "hello\nworld");
+    const shown = try child_window.readWindowTextUtf8Alloc(std.testing.allocator, host.overlay_preview_hwnd.?);
+    defer std.testing.allocator.free(shown);
+    // The preview's text, not the raw payload: CRLF line ends for the EDIT.
+    try std.testing.expectEqualStrings("hello\r\nworld", shown);
+}
+
 /// Stands in for the system clipboard in the empty bracketed paste tests: the
 /// text it holds, or null for a clipboard with no text at all, and the files
 /// a CF_HDROP beside it names. No test opens the real clipboard, which a
