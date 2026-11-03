@@ -128,7 +128,8 @@
         "src/apprt/win32/child_window.zig",
         "src/apprt/win32/text.zig",
         "src/apprt/win32/labels.zig",
-        "src/apprt/win32/chrome_layout.zig"
+        "src/apprt/win32/chrome_layout.zig",
+        "src/apprt/win32/tab_label.zig"
       ]
     },
     {
@@ -284,7 +285,8 @@
         "src/apprt/win32/palette_controller.zig",
         "src/apprt/win32/search_controls.zig",
         "src/apprt/win32/terminal_window.zig",
-        "src/apprt/win32/confirm_text.zig"
+        "src/apprt/win32/confirm_text.zig",
+        "src/apprt/win32/tab_label.zig"
       ]
     },
     {
@@ -323,6 +325,7 @@
         "src/apprt/win32_ipc.zig",
         "src/apprt/win32/ipc_server.zig",
         "src/apprt/win32_bell.zig",
+        "src/apprt/win32/tab_label.zig",
         "src/apprt/win32_taskbar_progress.zig",
         "src/apprt/win32_terminal_handoff*",
         "src/crash/**",

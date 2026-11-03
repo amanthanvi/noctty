@@ -78,7 +78,7 @@ pub const Point = struct {
 ///
 /// `button_visible` is the strip's own record of the button (the placement
 /// `layoutChromeForRect` maintains), not a rect: a button that scrolled out
-/// of `visibleTabRange`, or a whole strip turned off by config, is hidden
+/// of `tab_label.visible`, or a whole strip turned off by config, is hidden
 /// with `ShowWindow` alone and keeps its last rect, so `GetWindowRect` would
 /// still describe a slot that some other tab now occupies -- or, with the
 /// bar off, a slot over the terminal. `cursor` is checked against the

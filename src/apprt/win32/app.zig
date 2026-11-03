@@ -17,7 +17,6 @@ const HWND = win32.HWND;
 const Host = win32.Host;
 const Registry = @import("registry.zig").Registry;
 const HostBannerKind = win32.HostBannerKind;
-const HostTabStatus = win32.HostTabStatus;
 const LPARAM = win32.LPARAM;
 const LPCWSTR = win32.LPCWSTR;
 const MSG = win32.MSG;
@@ -227,6 +226,7 @@ const tabSeenByUser = win32.tabSeenByUser;
 const tabSeenWithForeground = win32.tabSeenWithForeground;
 const tabStatusHeadline = win32.tabStatusHeadline;
 const tabTooltipProc = win32.tabTooltipProc;
+const tab_label = @import("tab_label.zig");
 const tab_tooltip_class_name = win32.tab_tooltip_class_name;
 const tabsCloseConfirmCount = win32.tabsCloseConfirmCount;
 const tabsCloseConfirmCountNoWait = win32.tabsCloseConfirmCountNoWait;
@@ -6484,7 +6484,7 @@ pub const App = struct {
         return try self.setInspectorActionForSurface(surface, .toggle);
     }
 
-    pub fn hostTabStatus(self: *App, surface: *const Surface) HostTabStatus {
+    pub fn hostTabStatus(self: *App, surface: *const Surface) tab_label.TabStatus {
         _ = self;
         const host = surface.host orelse return .{};
         const total = host.tabs.items.len;
