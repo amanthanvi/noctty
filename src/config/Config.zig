@@ -3755,13 +3755,16 @@ _launch: pane_launch.Ledger = .{},
 /// log. Null for no `-e`, and for an `-e` refused for want of a command.
 _e_command: ?[]const [:0]const u8 = null,
 
-/// The last config or theme file that was skipped whole because it is UTF-16
-/// text that does not decode (see `textReader`); everything it set is missing
-/// from this load. Lives in the arena of this load; `clone` and `loadTheme`
-/// (which rebuilds the config by replay) copy it, `changeConditionalState`
-/// does not, though its `finalize` sets it again for a theme that does not
-/// decode.
+/// The last config file that was skipped whole because it is UTF-16 text
+/// that does not decode (see `textReader`); everything it set is missing from
+/// this load. Lives in the arena of this load; `clone` and `loadTheme` (which
+/// rebuilds the config by replay) copy it, `changeConditionalState` does not.
 _undecodable_file: ?[:0]const u8 = null,
+/// The theme this config's last `finalize` skipped whole because it is UTF-16
+/// text that does not decode. Set afresh by every `finalize` (a theme
+/// repaired since, or another theme, leaves none), and set again by the
+/// `finalize` of `changeConditionalState` for the theme that state reads.
+_undecodable_theme: ?[:0]const u8 = null,
 
 /// List of diagnostics that were generated during the loading of
 /// the configuration.
@@ -3858,7 +3861,7 @@ pub fn loadFile(self: *Config, alloc: Allocator, path: []const u8) !void {
     };
     defer file.close();
 
-    try self.loadFsFile(alloc, &file, path);
+    try self.loadFsFile(alloc, &file, path, .config);
 }
 
 /// The read buffer for a config or theme file. Lines are read through it with
@@ -3866,13 +3869,27 @@ pub fn loadFile(self: *Config, alloc: Allocator, path: []const u8) !void {
 const file_read_buffer_len = 2048;
 
 /// Load config from the given File.
-fn loadFsFile(self: *Config, alloc: Allocator, file: *std.fs.File, path: []const u8) !void {
+fn loadFsFile(self: *Config, alloc: Allocator, file: *std.fs.File, path: []const u8, role: FileRole) !void {
     std.log.info("reading configuration file path={s}", .{path});
     var buf: [file_read_buffer_len]u8 = undefined;
     var file_reader = file.reader(&buf);
     const reader = &file_reader.interface;
-    try self.loadReader(alloc, reader, path);
+    try self.loadReaderAs(alloc, reader, path, role);
 }
+
+/// Which file a load reads, for its read-failure problem: a config file it
+/// was given (`loadFile`: the default one), or an included `config-file`.
+const FileRole = enum {
+    config,
+    include,
+
+    fn word(self: FileRole) []const u8 {
+        return switch (self) {
+            .config => "config file",
+            .include => "config-file",
+        };
+    }
+};
 
 /// Configuration files may not set the one-shot `launch-layout` option.
 /// Filter it before `loadIter` so neither the parsed value nor a replay step
@@ -3901,6 +3918,10 @@ const ConfigFileIterator = struct {
 
 /// Load config from the given Reader.
 pub fn loadReader(self: *Config, alloc: Allocator, reader: *std.Io.Reader, path: []const u8) !void {
+    return self.loadReaderAs(alloc, reader, path, .include);
+}
+
+fn loadReaderAs(self: *Config, alloc: Allocator, reader: *std.Io.Reader, path: []const u8, role: FileRole) !void {
     var decoded: ?[]u8 = null;
     defer if (decoded) |text| alloc.free(text);
     var decoded_reader: std.Io.Reader = undefined;
@@ -3915,7 +3936,7 @@ pub fn loadReader(self: *Config, alloc: Allocator, reader: *std.Io.Reader, path:
     // A read that failed partway through reads as the end of the file, and
     // what came after is missing: a problem, as a file that will not open
     // is (`loadRecursiveFiles`).
-    if (line_iter.read_failed) try self.noteReadFailure("config-file", path, true);
+    if (line_iter.read_failed) try self.noteReadFailure(role.word(), path, true);
 
     try self.expandPaths(std.fs.path.dirname(path).?);
 }
@@ -4050,7 +4071,11 @@ fn decodeUtf16(
 
 fn invalidUtf16(self: *Config, path: []const u8, what: TextFile, reason: []const u8) error{ OutOfMemory, InvalidUtf16 } {
     const arena_alloc = self._arena.?.allocator();
-    self._undecodable_file = arena_alloc.dupeZ(u8, path) catch return error.OutOfMemory;
+    const skipped = arena_alloc.dupeZ(u8, path) catch return error.OutOfMemory;
+    switch (what) {
+        .config => self._undecodable_file = skipped,
+        .theme => self._undecodable_theme = skipped,
+    }
     const diag: cli.Diagnostic = .{
         .message = std.fmt.allocPrintSentinel(
             arena_alloc,
@@ -4596,12 +4621,13 @@ test "a UTF-16 theme is decoded as a config file is, and one that does not decod
     // The light theme's line reads, and nothing is wrong.
     try testing.expectEqual(@as(f32, 14), cfg.@"font-size");
     try testing.expect(cfg._diagnostics.empty());
-    try testing.expect(cfg._undecodable_file == null);
+    try testing.expect(cfg._undecodable_theme == null);
     // The dark one is skipped whole, and named, never its text.
     var dark_cfg = (try cfg.changeConditionalState(.{ .theme = .dark })) orelse return error.TestExpectedSwitch;
     defer dark_cfg.deinit();
     try testing.expectEqual(@as(f32, 12), dark_cfg.@"font-size");
-    try testing.expect(std.mem.eql(u8, dark, dark_cfg._undecodable_file orelse return error.TestExpectedSkipped));
+    try testing.expect(std.mem.eql(u8, dark, dark_cfg._undecodable_theme orelse return error.TestExpectedSkipped));
+    try testing.expect(dark_cfg._undecodable_file == null);
     const expected = try std.fmt.allocPrint(alloc, "theme file {s} is not valid UTF-16; not reading it. Save it as UTF-8", .{dark});
     defer alloc.free(expected);
     var named: usize = 0;
@@ -4614,7 +4640,49 @@ test "a UTF-16 theme is decoded as a config file is, and one that does not decod
     defer back.deinit();
     try testing.expectEqual(@as(f32, 14), back.@"font-size");
     try testing.expect(back._diagnostics.empty());
-    try testing.expect(back._undecodable_file == null);
+    try testing.expect(back._undecodable_theme == null);
+}
+
+test "a theme repaired between two finalizes leaves no stale marker, and one that stays broken is named once" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(.{ .sub_path = "theme", .data = "\xff\xfe\x00\xd8a\x00" });
+    const theme = try tmp.dir.realpathAlloc(alloc, "theme");
+    defer alloc.free(theme);
+    const text = try std.fmt.allocPrint(alloc, "theme = {s}\n", .{theme});
+    defer alloc.free(text);
+    try tmp.dir.writeFile(.{ .sub_path = "config", .data = text });
+    const path = try tmp.dir.realpathAlloc(alloc, "config");
+    defer alloc.free(path);
+    var cfg = try Config.default(alloc);
+    defer cfg.deinit();
+    try cfg.loadFile(alloc, path);
+    // Finalized twice, as `+validate-config` does after `Config.load`: the
+    // broken theme is named once.
+    try cfg.finalize();
+    try cfg.finalize();
+    try testing.expect(std.mem.eql(u8, theme, cfg._undecodable_theme orelse return error.TestExpectedSkipped));
+    const expected = try std.fmt.allocPrint(alloc, "theme file {s} is not valid UTF-16; not reading it. Save it as UTF-8", .{theme});
+    defer alloc.free(expected);
+    var named: usize = 0;
+    for (cfg._diagnostics.items()) |diag| {
+        if (std.mem.eql(u8, expected, diag.message)) named += 1;
+    }
+    try testing.expectEqual(@as(usize, 1), named);
+    // Repaired and finalized again: read, with no marker and no problem left.
+    try tmp.dir.writeFile(.{ .sub_path = "theme", .data = "font-size = 14\n" });
+    try cfg.finalize();
+    try testing.expectEqual(@as(f32, 14), cfg.@"font-size");
+    try testing.expect(cfg._undecodable_theme == null);
+    try testing.expect(cfg._undecodable_file == null);
+    for (cfg._diagnostics.items()) |diag| try testing.expect(!std.mem.eql(u8, expected, diag.message));
+    // Broken again: the theme's values go with it.
+    try tmp.dir.writeFile(.{ .sub_path = "theme", .data = "\xff\xfe\x00\xd8a\x00" });
+    try cfg.finalize();
+    try testing.expectEqual(@as(f32, 12), cfg.@"font-size");
+    try testing.expect(cfg._undecodable_theme != null);
 }
 
 test "a default config file that is there and will not open is a problem, naming the file and not its text" {
@@ -5180,7 +5248,7 @@ pub fn loadRecursiveFiles(self: *Config, alloc_gpa: Allocator) !void {
             },
         }
 
-        try self.loadFsFile(arena_alloc, &file, path);
+        try self.loadFsFile(arena_alloc, &file, path, .include);
     }
 
     // If we have a suffix, add that back.
@@ -5309,26 +5377,6 @@ fn loadTheme(self: *Config, theme: Theme) !void {
     defer file.close();
     const alloc_gpa = self._arena.?.child_allocator;
 
-    // Decoded as a config file is (`textReader`). A theme that does not
-    // decode is skipped, as one that is not there is, and the problem is
-    // this config's: the theme's own config is never made.
-    var buf: [file_read_buffer_len]u8 = undefined;
-    var file_reader = file.reader(&buf);
-    var decoded: ?[]u8 = null;
-    defer if (decoded) |text| alloc_gpa.free(text);
-    var decoded_reader: std.Io.Reader = undefined;
-    const reader = self.textReader(alloc_gpa, &file_reader.interface, path, .theme, &decoded, &decoded_reader) catch |err| switch (err) {
-        error.InvalidUtf16 => return,
-        // UTF-16 is read whole before it is decoded, so a read that fails
-        // partway skips the theme: a problem, as a read that fails in a
-        // UTF-8 theme is, not the end of the whole load.
-        error.ReadFailed => {
-            try self.noteReadFailure("theme", path, false);
-            return;
-        },
-        else => |e| return e,
-    };
-
     // From this point onwards, we load the theme and do a bit of a dance
     // to achieve two separate goals:
     //
@@ -5346,13 +5394,36 @@ fn loadTheme(self: *Config, theme: Theme) !void {
     var new_config = try self.cloneEmpty(alloc_gpa);
     errdefer new_config.deinit();
 
+    // Decoded as a config file is (`textReader`). A theme that does not
+    // decode is skipped, as one that is not there is: the config is rebuilt
+    // without it, and the problem is the new config's alone, so neither an
+    // earlier theme's values nor an earlier problem stays behind. UTF-16 is
+    // read whole before it is decoded, so a read that fails partway skips
+    // the theme too: a problem, as one that fails in a UTF-8 theme is, not
+    // the end of the whole load.
+    var buf: [file_read_buffer_len]u8 = undefined;
+    var file_reader = file.reader(&buf);
+    var decoded: ?[]u8 = null;
+    defer if (decoded) |text| alloc_gpa.free(text);
+    var decoded_reader: std.Io.Reader = undefined;
+    const theme_reader: ?*std.Io.Reader = new_config.textReader(alloc_gpa, &file_reader.interface, path, .theme, &decoded, &decoded_reader) catch |err| switch (err) {
+        error.InvalidUtf16 => null,
+        error.ReadFailed => skipped: {
+            try new_config.noteReadFailure("theme", path, false);
+            break :skipped null;
+        },
+        else => |e| return e,
+    };
+
     // Load our theme
-    var line_iter: cli.args.LineIterator = .{ .r = reader, .filepath = path };
-    var iter: ConfigFileIterator = .{ .inner = &line_iter };
-    try new_config.loadIter(alloc_gpa, &iter);
-    // As for a config file (`loadReader`); kept out of the replay log, as
-    // the theme's other problems are (below).
-    if (line_iter.read_failed) try new_config.noteReadFailure("theme", path, false);
+    if (theme_reader) |reader| {
+        var line_iter: cli.args.LineIterator = .{ .r = reader, .filepath = path };
+        var iter: ConfigFileIterator = .{ .inner = &line_iter };
+        try new_config.loadIter(alloc_gpa, &iter);
+        // As for a config file (`loadReader`); kept out of the replay log, as
+        // the theme's other problems are (below).
+        if (line_iter.read_failed) try new_config.noteReadFailure("theme", path, false);
+    }
 
     // The theme file's own problems (an over-long line) stay in
     // `_diagnostics` but not in the replay log: every `finalize` reads the
@@ -5431,6 +5502,8 @@ fn loadTheme(self: *Config, theme: Theme) !void {
 /// Call this once after you are done setting configuration. This
 /// is idempotent but will waste memory if called multiple times.
 pub fn finalize(self: *Config) !void {
+    // The theme read below decides it; an earlier finalize's is stale.
+    self._undecodable_theme = null;
     // We always load the theme first because it may set other fields
     // in our config.
     if (self.theme) |theme| {
@@ -6577,6 +6650,7 @@ pub fn clone(
         result._e_command = copy;
     }
     if (self._undecodable_file) |skipped| result._undecodable_file = try alloc_arena.dupeZ(u8, skipped);
+    if (self._undecodable_theme) |skipped| result._undecodable_theme = try alloc_arena.dupeZ(u8, skipped);
 
     // Preserve our replay steps. We copy them exactly to also preserve
     // the exact conditionals required for some steps.

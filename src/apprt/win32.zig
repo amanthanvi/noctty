@@ -2187,16 +2187,17 @@ pub fn settingsDiskVerdict(
     var applied = try settingsDiskInState(disk, state);
     defer if (applied) |*config| config.deinit();
     const effective: *const configpkg.Config = if (applied) |*config| config else disk;
-    // The switch reads no config file again, only the state's theme, which is
-    // decoded as a config file is: a theme that does not decode is a file this
-    // reading skipped and the load may not have.
-    if (effective._undecodable_file) |path| {
-        try setSettingsFailureDetail(alloc, detail, "the file {s}", .{path});
-        return error.UnsupportedEncoding;
-    }
+    // One predicate for both readings (`settings_patch.unreadConfigFile`): the
+    // switch reads the state's theme again, which is decoded as a config file
+    // is, so a theme that does not decode is a file this reading skipped and
+    // the load may not have.
     const readings = [_]*const configpkg.Config{ disk, effective };
     for (readings[0..if (applied != null) 2 else 1]) |reading| {
         if (@import("win32/settings_patch.zig").unreadConfigFile(reading)) |unread| {
+            if (unread.undecodable) {
+                try setSettingsFailureDetail(alloc, detail, "the file {s}", .{unread.path});
+                return error.UnsupportedEncoding;
+            }
             try setSettingsFailureDetail(alloc, detail, "{s} {s}", .{ unread.noun(), unread.path });
             return error.FileUnopenable;
         }
@@ -8367,9 +8368,8 @@ test "win32 settings disk check stops a save on a default config file that will 
         try std.testing.expect(std.mem.eql(u8, expected, detail.text orelse return error.TestExpectedDetail));
     }
     {
-        // Byte-range locked: it opens, and its read fails, which the load
-        // recorded before (`LineIterator.read_failed`); pinned here beside
-        // the file that will not open.
+        // Byte-range locked: it opens, and its read fails. Named as the
+        // config file it is, not as an include.
         var lock = try tmp.dir.openFile("config.ghostty", .{ .mode = .read_write, .lock = .exclusive });
         defer lock.close();
         var disk = try configpkg.Config.default(alloc);
@@ -8377,6 +8377,9 @@ test "win32 settings disk check stops a save on a default config file that will 
         _ = disk.loadOptionalFile(alloc, path);
         detail.clear(alloc);
         try std.testing.expectError(error.FileUnopenable, settingsDiskVerdict(alloc, &detail, &same, &same, &disk, .{}, .initEmpty()));
+        const expected = try std.fmt.allocPrint(alloc, "the config file {s}", .{path});
+        defer alloc.free(expected);
+        try std.testing.expect(std.mem.eql(u8, expected, detail.text orelse return error.TestExpectedDetail));
     }
     // Readable: no problem.
     var disk = try configpkg.Config.default(alloc);

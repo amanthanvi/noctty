@@ -615,7 +615,8 @@ pub fn unreadConfigFile(config: *const Config) ?Unread {
     // check before a save and the report after it, so they cannot drift.
     // The light/dark switch does not carry the record over
     // (`changeConditionalState`), so ask it of the load as read too.
-    if (config._undecodable_file) |path| return .{ .theme = false, .path = path, .undecodable = true };
+    if (config._undecodable_file) |path| return .{ .kind = .include, .path = path, .undecodable = true };
+    if (config._undecodable_theme) |path| return .{ .kind = .theme, .path = path, .undecodable = true };
     for (config._diagnostics.items()) |diag| {
         const message: []const u8 = diag.message;
         // A theme the load could not open (`themepkg.open`): the light/dark
@@ -634,8 +635,9 @@ pub fn unreadConfigFile(config: *const Config) ?Unread {
             .{ "error reading config-file ", .include },
             .{ "error reading theme ", .theme },
             // A default config file that is there and will not open
-            // (`Config.loadOptionalFile`).
+            // (`Config.loadOptionalFile`), or whose read failed partway.
             .{ "error opening config file ", .config },
+            .{ "error reading config file ", .config },
         }) |prefix| {
             if (std.mem.startsWith(u8, message, prefix[0])) break .{ prefix[0].len, prefix[1] };
         } else continue;

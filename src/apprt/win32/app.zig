@@ -8858,10 +8858,16 @@ pub const App = struct {
         // The fresh read, and the held config if it was read again here.
         for (readings[0..if (held_now != null) 2 else 1]) |reading| {
             if (settings_patch.unreadConfigFile(reading)) |unread| {
-                const text = unread.describe(alloc) catch return error.OutOfMemory;
+                // A file the reading skipped as UTF-16 that does not decode
+                // (the held config's theme, read again in `state`, is one):
+                // named as the check before a save names one.
+                const text = (if (unread.undecodable)
+                    std.fmt.allocPrint(alloc, "the file {s}", .{unread.path})
+                else
+                    unread.describe(alloc)) catch return error.OutOfMemory;
                 defer alloc.free(text);
                 detail.set(alloc, text);
-                return error.FileUnopenable;
+                return if (unread.undecodable) error.UnsupportedEncoding else error.FileUnopenable;
             }
         }
         return settings_patch.editsForSave(arena, alloc, &readings, state, original, pending, target_path, &settings_reference.samePath) catch |err|
@@ -9983,6 +9989,66 @@ pub const App = struct {
         defer alloc.free(after);
         try std.testing.expect(std.mem.eql(u8, "font-size = 12\nprofile-command = py:\n", after));
         try std.testing.expect(app.config.@"profile-command".get("py") == null);
+    }
+
+    test "settings profile save stops when the held config's theme, read again in the app's state, no longer decodes" {
+        if (builtin.os.tag != .windows) return error.SkipZigTest;
+        const alloc = std.testing.allocator;
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        try tmp.dir.writeFile(.{ .sub_path = "light", .data = "\n" });
+        try tmp.dir.writeFile(.{ .sub_path = "old-dark", .data = "profile-command = py: python.exe -X dark\n" });
+        try tmp.dir.writeFile(.{ .sub_path = "new-dark", .data = "\n" });
+        const light = try tmp.dir.realpathAlloc(alloc, "light");
+        defer alloc.free(light);
+        const old_dark = try tmp.dir.realpathAlloc(alloc, "old-dark");
+        defer alloc.free(old_dark);
+        const new_dark = try tmp.dir.realpathAlloc(alloc, "new-dark");
+        defer alloc.free(new_dark);
+        const load = struct {
+            fn config(a: Allocator, file: []const u8) !configpkg.Config {
+                var cfg = try configpkg.Config.default(a);
+                errdefer cfg.deinit();
+                try cfg.loadFile(a, file);
+                try cfg.loadRecursiveFiles(a);
+                try cfg.finalize();
+                return cfg;
+            }
+        }.config;
+        // The config as last read (light), naming the old dark theme, which
+        // defines `py`; the draft removes `py`.
+        const held_text = try std.fmt.allocPrint(alloc, "theme = light:{s},dark:{s}\nprofile-command = py: python.exe\n", .{ light, old_dark });
+        defer alloc.free(held_text);
+        try tmp.dir.writeFile(.{ .sub_path = "config", .data = held_text });
+        const path = try tmp.dir.realpathAlloc(alloc, "config");
+        defer alloc.free(path);
+        var held = try load(alloc, path);
+        defer held.deinit();
+        var pending = try held.clone(alloc);
+        defer pending.deinit();
+        try pending.@"profile-command".parseCLI(pending._arena.?.allocator(), "py:");
+        // Since then the file names a new dark theme, and the old one is
+        // UTF-16 that does not decode. The app runs dark.
+        const fresh_text = try std.fmt.allocPrint(alloc, "theme = light:{s},dark:{s}\nprofile-command = py: python.exe\n", .{ light, new_dark });
+        defer alloc.free(fresh_text);
+        try tmp.dir.writeFile(.{ .sub_path = "config", .data = fresh_text });
+        try tmp.dir.writeFile(.{ .sub_path = "old-dark", .data = "\xff\xfe\x00\xd8a\x00" });
+        var detail: win32_settings.FailureDetail = .{};
+        defer detail.clear(alloc);
+        var arena: std.heap.ArenaAllocator = .init(alloc);
+        defer arena.deinit();
+        const fresh = try load(alloc, path);
+        // The fresh reading is whole; the held one, read again dark, skips
+        // its theme, and a removal decided from it could delete where the
+        // old theme still defines `py`: nothing is worked out.
+        try std.testing.expectError(error.UnsupportedEncoding, App.settingsProfileEditsFromDisk(arena.allocator(), alloc, &detail, fresh, &held, .{ .theme = .dark }, &held, &pending, path));
+        const expected = try std.fmt.allocPrint(alloc, "the file {s}", .{old_dark});
+        defer alloc.free(expected);
+        try std.testing.expect(std.mem.eql(u8, expected, detail.text orelse return error.TestExpectedDetail));
+        // The file is as it was.
+        const after = try tmp.dir.readFileAlloc(alloc, "config", 1 << 16);
+        defer alloc.free(after);
+        try std.testing.expect(std.mem.eql(u8, fresh_text, after));
     }
 
     test "SET editor request stays deferred, rechecks safety and reports host failure" {
