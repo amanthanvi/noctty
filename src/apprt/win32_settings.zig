@@ -1956,6 +1956,13 @@ pub const ProfileChoice = struct {
     /// Named by `profile-hidden`: offered only while it is the saved value
     /// or the draft's.
     hidden: bool = false,
+    /// The launcher's quick slot (1 to 3) that pins it to the front of the
+    /// picker, which the Profiles page keeps it at.
+    quick_slot: ?u8 = null,
+    /// Hidden by noctty itself, not by `profile-hidden` (an older Visual
+    /// Studio under `visual-studio-profiles = newest`): the Profiles page
+    /// cannot show it.
+    found_hidden: bool = false,
 };
 
 /// What `AppHandle.profileChoices` answers. Every string is owned by the
@@ -2313,6 +2320,14 @@ pub const AppHandle = struct {
     /// never ask (that refill, which must not start another discovery when
     /// one failed). Without it the dropdown offers only Automatic.
     profileChoices: ?*const fn (ctx: *anyopaque, alloc: std.mem.Allocator, reference: ?[]const u8, draft: ?[]const u8, ask: bool) std.mem.Allocator.Error!ProfileChoices = null,
+    /// The profiles the Profiles page lists, in the picker's order
+    /// (`profileChoices`' answer; the App gives the same one). Null: the
+    /// page lists the draft's user profiles alone and moves and hides none.
+    pageProfiles: ?*const fn (ctx: *anyopaque, alloc: std.mem.Allocator, reference: ?[]const u8, draft: ?[]const u8, ask: bool) std.mem.Allocator.Error!ProfileChoices = null,
+    /// The Profiles page needs the whole list (to move or hide a profile) and
+    /// has part of it: look for the profiles again. The list arrives through
+    /// `profilesChanged`, which may come before this returns.
+    findAllProfiles: ?*const fn (ctx: *anyopaque) void = null,
     /// Fire-and-forget success toast for the app-level in-app stack
     /// (e.g. "Settings saved"). Borrowed title + body — caller must
     /// keep them alive only for the duration of the call; the stack
@@ -2395,6 +2410,20 @@ pub const SettingsWindow = struct {
     /// after the draft changes, and the list that shows them.
     profile_model: settings_profiles.Model = .{},
     profile_stale: bool = true,
+    /// The open profile row's Move up, Move down and Hide/Show buttons,
+    /// children of the Profiles list over that row, made the first time a
+    /// profile's row opens (`syncProfileButtons`), and their UIA providers.
+    profile_buttons: [profile_button_count]?HWND = @splat(null),
+    profile_button_providers: [profile_button_count]?*win32_uia.SettingsControlProvider = @splat(null),
+    /// The page's list of profiles is being asked for (`ensureProfileModel`):
+    /// a `profilesChanged` meanwhile only marks the page stale.
+    profile_listing: bool = false,
+    /// The page's next list asks the app to look for profiles, which may
+    /// start a discovery (`AppHandle.pageProfiles`): once per window. Never
+    /// for the rebuild a finished discovery asks for (`profilesChanged`):
+    /// one that failed would start another at once, and another. A move or a
+    /// hide that needs the whole list asks for it (`findAllProfiles`).
+    profile_ask_next: bool = true,
     profile_generation: u64 = 0,
     profile_list: ReferenceList = .{ .kind = .profiles },
     /// Which of `profile_model`'s rows the search found, and how many.
@@ -6284,6 +6313,18 @@ pub const SettingsWindow = struct {
     /// while its list is open, once it closes. Never asks for a list itself.
     pub fn profilesChanged(self: *SettingsWindow) void {
         self.fillDefaultProfile(false);
+        // The Profiles page lists them too: built again, now or, when this
+        // came while its list was being asked for, at its next use. That
+        // rebuild reads what the windows have and asks for nothing
+        // (`profile_ask_next`).
+        self.profile_stale = true;
+        if (self.profile_listing or self.active_section != .profiles or self.profile_list.hwnd == null) return;
+        self.ensureProfileModel();
+        // A search finds its rows among the new ones.
+        self.refindProfileRows();
+        self.refreshListShown(&self.profile_list, false);
+        self.profile_list.metrics = null;
+        self.syncProfileButtons();
     }
 
     fn syncPaddingFromEdit(self: *SettingsWindow, comptime field: RawScalarField) void {
@@ -7700,7 +7741,32 @@ pub const SettingsWindow = struct {
         self.profile_generation +%= 1;
         // Tried once per draft: a failure is not tried again on every key.
         self.profile_stale = false;
-        self.profile_model.build(alloc, pending, original) catch |err| {
+        // The app's profiles, in the picker's order: asking may start the
+        // search for the ones noctty finds, which may say so at once
+        // (`profilesChanged`), while this list is being built.
+        // The draft's Default profile is asked about too: the item it starts
+        // (`selected`) is marked, an alias resolved as the app does.
+        const ask = self.profile_ask_next;
+        self.profile_ask_next = false;
+        const default_profile: ?[]const u8 = if (pending.@"default-profile") |value| value else null;
+        self.profile_listing = true;
+        var choices: ?ProfileChoices = if (self.handle.pageProfiles) |get| get(self.handle.ctx, alloc, default_profile, null, ask) catch null else null;
+        self.profile_listing = false;
+        defer if (choices) |*value| value.deinit(alloc);
+        var listed: std.ArrayListUnmanaged(settings_profiles.Listed) = .empty;
+        defer listed.deinit(alloc);
+        if (choices) |value| for (value.items, 0..) |item, index| {
+            listed.append(alloc, .{
+                .key = item.key,
+                .label = item.label,
+                .hidden = item.hidden,
+                .quick_slot = item.quick_slot,
+                .found_hidden = item.found_hidden,
+                .default = value.selected == index,
+            }) catch break;
+        };
+        const complete = if (choices) |value| value.complete and listed.items.len == value.items.len else false;
+        self.profile_model.buildListed(alloc, pending, original, listed.items, complete) catch |err| {
             std.log.warn("settings: the profile list could not be built err={}", .{err});
             self.profile_model.deinit();
         };
@@ -7801,7 +7867,7 @@ pub const SettingsWindow = struct {
     pub const ProfileActions = struct { enter: ?[]const u8 = null, delete: ?[]const u8 = null };
 
     fn profileActions(self: *const SettingsWindow, row: settings_profiles.Row) ProfileActions {
-        if (self.profile_model.profileOf(row)) |profile| if (profile.read_only) return .{};
+        if (self.profile_model.profileOf(row)) |profile| if (profile.read_only or profile.detected) return .{};
         return switch (row.kind) {
             .new_profile => .{ .enter = "New profile (Enter)" },
             .profile => .{
@@ -7847,6 +7913,11 @@ pub const SettingsWindow = struct {
         if (!self.draftTakesEdits()) return false;
         if (!self.profileEditDone()) return false;
         const row = self.selectedProfileRow() orelse return false;
+        if (self.profile_model.profileOf(row)) |profile| if (profile.detected) {
+            // Answered: the note says what can be done with it.
+            self.setProfileNote(.said, "noctty found {s} on this computer, so Settings does not change its command line. Alt+Up and Alt+Down move it; Ctrl+H hides it.", .{profile.key});
+            return true;
+        };
         if (self.profile_model.profileOf(row)) |profile| if (profile.read_only) {
             // Answered: the note says why nothing opens.
             self.setProfileNote(.said, "Profile {s} comes from noctty's command line, so Settings does not change it.", .{profile.id});
@@ -7881,6 +7952,9 @@ pub const SettingsWindow = struct {
         if (!self.profileEditDone()) return;
         const row = self.selectedProfileRow() orelse return;
         const profile = self.profile_model.profileOf(row) orelse return;
+        if (profile.detected) {
+            return self.setProfileNote(.said, "noctty finds {s} on this computer, so it cannot be removed; Ctrl+H hides it from the picker.", .{profile.key});
+        }
         if (profile.read_only) {
             return self.setProfileNote(.said, "Profile {s} comes from noctty's command line, so Settings does not change it.", .{profile.id});
         }
@@ -7971,19 +8045,27 @@ pub const SettingsWindow = struct {
         self.profile_stale = true;
         self.ensureProfileModel();
         if (select) |identity| self.profile_list.selected = self.profile_model.find(identity);
-        if (self.search_query.active()) {
-            const was = self.profile_found_count;
-            const now = self.findProfileRows();
-            const counts = &self.search_counts[@intFromEnum(Section.profiles)];
-            counts.* = counts.* - was + now;
-            self.search_total = self.search_total - was + now;
-            self.syncSearchCounts();
-        }
+        self.refindProfileRows();
         self.refreshListShown(&self.profile_list, false);
         self.profile_list.revealSelected(.unless_shown);
+        // The selected row may be another profile's now, or in another place.
+        self.profile_list.metrics = null;
+        self.syncProfileButtons();
         self.freeNoteText();
         self.status_note = .applies_on_save;
         self.updateSaveEnabled();
+    }
+
+    /// The Profiles page's rows were built again: a search finds its rows
+    /// among them, and the counts follow.
+    fn refindProfileRows(self: *SettingsWindow) void {
+        if (!self.search_query.active()) return;
+        const was = self.profile_found_count;
+        const now = self.findProfileRows();
+        const counts = &self.search_counts[@intFromEnum(Section.profiles)];
+        counts.* = counts.* - was + now;
+        self.search_total = self.search_total - was + now;
+        self.syncSearchCounts();
     }
 
     /// Tests only: `beginProfileEdit` cannot make its field's window, as when
@@ -8073,6 +8155,7 @@ pub const SettingsWindow = struct {
     /// Put the field being typed into over its row, below the row's title, or
     /// hide it while the row is not in the list's view.
     fn placeProfileEdit(self: *SettingsWindow) void {
+        self.syncProfileButtons();
         const edit = self.profile_edit orelse return;
         const hwnd = edit.hwnd orelse return;
         const list = &self.profile_list;
@@ -8086,6 +8169,139 @@ pub const SettingsWindow = struct {
         const width = @max(1, metrics.width - left - metrics.pad_x);
         _ = SetWindowPos(hwnd, null, left, top, width, @max(1, metrics.field - metrics.gap), SWP_NOZORDER | SWP_NOACTIVATE);
         _ = ShowWindow(hwnd, SW_SHOWNA);
+    }
+
+    /// The open profile row's buttons, over its row below its actions: Move
+    /// up, Move down and Hide or Show in the picker, each enabled as its key
+    /// would act (`Model.moveTarget`, `Model.complete`). Hidden on any other
+    /// row, and while the draft is owed. Made the first time they are
+    /// needed. A focused one that is disabled or hidden hands the focus to
+    /// the list, so the keyboard is not stranded.
+    fn syncProfileButtons(self: *SettingsWindow) void {
+        const list = &self.profile_list;
+        const list_hwnd = list.hwnd orelse return;
+        const row = self.selectedProfileRow() orelse return self.hideProfileButtons();
+        if (row.kind != .profile) return self.hideProfileButtons();
+        const metrics = list.ensureMetrics() orelse return self.hideProfileButtons();
+        const position = list.selectedPosition() orelse return self.hideProfileButtons();
+        const model = &self.profile_model;
+        const profile = &model.profiles[row.profile];
+        const enabled = [profile_button_count]bool{
+            model.moveTarget(row.profile, -1) != null,
+            model.moveTarget(row.profile, 1) != null,
+            model.complete and !profile.found_hidden,
+        };
+        const y = list.buttonsTop(metrics, position);
+        var x = metrics.pad_x + metrics.bar + list.indentOf(metrics, list.shown[position]);
+        const height = self.px(settings_control_height);
+        for (0..profile_button_count) |index| {
+            const button = self.ensureProfileButton(index, list_hwnd) orelse continue;
+            var label_w: [32]u16 = undefined;
+            const label = utf8ToW(&label_w, profileButtonLabel(index, profile.hidden));
+            // Hide becomes Show: a reader on the button hears its new name.
+            if (syncButtonText(button, label)) if (self.profile_button_providers[index]) |provider| provider.raiseNameChanged();
+            if (!enabled[index] and GetFocus() == button) _ = SetFocus(list_hwnd);
+            _ = sys.EnableWindow(button, @intFromBool(enabled[index]));
+            const width = measureLine(button, self.ui_font, label) + 2 * self.px(settings_metrics.space_4);
+            _ = SetWindowPos(button, null, x, y, width, height, SWP_NOZORDER | SWP_NOACTIVATE);
+            _ = ShowWindow(button, SW_SHOWNA);
+            x += width + self.px(settings_metrics.space_2);
+        }
+    }
+
+    fn hideProfileButtons(self: *SettingsWindow) void {
+        for (self.profile_buttons) |maybe| {
+            const button = maybe orelse continue;
+            if (GetFocus() == button) if (self.profile_list.hwnd) |list| {
+                _ = SetFocus(list);
+            };
+            _ = ShowWindow(button, SW_HIDE);
+        }
+    }
+
+    /// Whether the open profile row's buttons are shown: the list then hands
+    /// Tab to them (`profileButtonTab`).
+    fn profileButtonsShown(self: *const SettingsWindow) bool {
+        const button = self.profile_buttons[0] orelse return false;
+        return sys.IsWindowVisible(button) != 0;
+    }
+
+    /// Button `index` (`PROFILE_BUTTON_FIRST`), made in the list if it is not
+    /// there yet: its font, its subclass for Tab (`profileButtonProc`) and its
+    /// UIA provider, named by its text.
+    fn ensureProfileButton(self: *SettingsWindow, index: usize, list: HWND) ?HWND {
+        if (self.profile_buttons[index]) |button| return button;
+        const button = self.finishChild(
+            makePushButton(list, self.handle.hinstance, std.unicode.utf8ToUtf16LeStringLiteral(""), PROFILE_BUTTON_FIRST + index, 1, BS_NOTIFY),
+            self.ui_font,
+            .control,
+        ) orelse return null;
+        subclassKeepingPrevious(button, &profileButtonProc);
+        self.profile_buttons[index] = button;
+        if (self.canInitializeCustomUiaProviders()) {
+            const provider = win32_uia.SettingsControlProvider.create(std.heap.page_allocator, button, .button, null) catch |err| blk: {
+                std.log.warn("settings: profile button UIA provider unavailable index={} err={}", .{ index, err });
+                break :blk null;
+            };
+            if (provider) |made| made.help_text = profile_button_help[index];
+            self.profile_button_providers[index] = provider;
+        }
+        return button;
+    }
+
+    /// A profile button is going (its list is): it and its provider are
+    /// forgotten.
+    fn profileButtonDestroyed(self: *SettingsWindow, button: HWND) void {
+        for (&self.profile_buttons, &self.profile_button_providers) |*maybe, *provider| {
+            if (maybe.* != button) continue;
+            maybe.* = null;
+            if (provider.*) |made| {
+                made.detach();
+                self.deferProviderDisconnect(@ptrCast(made), settingsControlDisconnect, settingsControlRelease);
+            }
+            provider.* = null;
+        }
+    }
+
+    /// Tab from the list (`from` null) or from a button: to the next shown,
+    /// enabled button, and past the last (or Shift+Tab before the first) on
+    /// to what the dialog has next to the list.
+    fn profileButtonTab(self: *SettingsWindow, from: ?usize, back: bool) void {
+        const list = self.profile_list.hwnd orelse return;
+        var at: isize = if (from) |index| @intCast(index) else if (back) 0 else -1;
+        while (true) {
+            at += if (back) -1 else 1;
+            if (at < 0) {
+                // Before the first button: the list, from a button; from the
+                // list, what comes before it.
+                if (from != null) {
+                    _ = SetFocus(list);
+                } else if (self.hwnd) |frame| if (GetNextDlgTabItem(frame, list, 1)) |previous| {
+                    _ = SetFocus(previous);
+                };
+                return;
+            }
+            if (at >= profile_button_count) {
+                if (self.hwnd) |frame| if (GetNextDlgTabItem(frame, list, 0)) |next| {
+                    _ = SetFocus(next);
+                };
+                return;
+            }
+            const button = self.profile_buttons[@intCast(at)] orelse continue;
+            if (sys.IsWindowVisible(button) == 0 or sys.IsWindowEnabled(button) == 0) continue;
+            _ = SetFocus(button);
+            return;
+        }
+    }
+
+    /// A profile button pressed (`BN_CLICKED`): what its key does.
+    fn profileButtonPressed(self: *SettingsWindow, index: usize) void {
+        switch (index) {
+            0 => self.profileMove(-1),
+            1 => self.profileMove(1),
+            2 => self.profileToggleHidden(),
+            else => {},
+        }
     }
 
     /// The text of the field being typed into changed (`EN_CHANGE`): Save is
@@ -8305,6 +8521,22 @@ pub const SettingsWindow = struct {
         var item_buf: [96]u8 = undefined;
         if (actions.enter) |label| _ = sys.AppendMenuW(menu, MF_STRING, reference_menu_edit, utf8ToW(&item_w, profileMenuLabel(&item_buf, label)));
         if (actions.delete) |label| _ = sys.AppendMenuW(menu, MF_STRING, reference_menu_copy, utf8ToW(&item_w, profileMenuLabel(&item_buf, label)));
+        // A profile's place and visibility (`profileMove`,
+        // `profileToggleHidden`), greyed where it cannot change.
+        if (row.kind != .new_profile) if (self.profile_model.profileOf(row)) |profile| {
+            const model = &self.profile_model;
+            const flags = struct {
+                fn of(on: bool) UINT {
+                    return MF_STRING | if (on) 0 else MF_GRAYED;
+                }
+            }.of;
+            _ = sys.AppendMenuW(menu, flags(model.moveTarget(row.profile, -1) != null), profile_menu_up, std.unicode.utf8ToUtf16LeStringLiteral("Move &up\tAlt+Up"));
+            _ = sys.AppendMenuW(menu, flags(model.moveTarget(row.profile, 1) != null), profile_menu_down, std.unicode.utf8ToUtf16LeStringLiteral("Move &down\tAlt+Down"));
+            _ = sys.AppendMenuW(menu, flags(model.complete), profile_menu_hide, if (profile.hidden)
+                std.unicode.utf8ToUtf16LeStringLiteral("&Show in the picker\tCtrl+H")
+            else
+                std.unicode.utf8ToUtf16LeStringLiteral("&Hide in the picker\tCtrl+H"));
+        };
         if (row.kind != .new_profile) _ = sys.AppendMenuW(menu, MF_STRING, profile_menu_new, std.unicode.utf8ToUtf16LeStringLiteral("&New profile\tInsert"));
         _ = sys.AppendMenuW(menu, MF_STRING, reference_menu_open, std.unicode.utf8ToUtf16LeStringLiteral("&Open config file"));
         const picked: usize = if (self.context_menu_pick) |pick|
@@ -8315,9 +8547,119 @@ pub const SettingsWindow = struct {
             reference_menu_edit => _ = self.profileInvoke(),
             reference_menu_copy => self.profileDelete(),
             profile_menu_new => self.profileNew(),
+            profile_menu_up => self.profileMove(-1),
+            profile_menu_down => self.profileMove(1),
+            profile_menu_hide => self.profileToggleHidden(),
             reference_menu_open => self.handle.openInEditor(self.handle.ctx),
             else => {},
         }
+    }
+
+    /// Alt+Up or Alt+Down (`step` -1 or 1), or Move up or Move down: the
+    /// selected profile one place up or down in the picker's order. The
+    /// draft's `profile-order` and `profile-hidden` become the page's whole
+    /// order (`settings_profiles.Model.moved`), and the move is said: "Python
+    /// moved to 3 of 9".
+    fn profileMove(self: *SettingsWindow, step: i2) void {
+        if (!self.profileEditDone()) return;
+        const row = self.selectedProfileRow() orelse return;
+        if (row.kind == .new_profile) return;
+        if (!self.wholeProfileList(row.identity)) return self.setProfileNote(.said, "noctty is looking for the profiles on this computer: the order can be changed once it has them all.", .{});
+        const model = &self.profile_model;
+        const row_now = self.selectedProfileRow() orelse return;
+        const profile = &model.profiles[row_now.profile];
+        const pending = if (self.pending) |*config| config else return;
+        if (profile.found_hidden) return self.setProfileNote(.said, "{s}: " ++ settings_profiles.found_hidden_help, .{profile.label orelse profile.id});
+        const target = model.moveTarget(row_now.profile, step) orelse {
+            if (profile.quick_slot != null and !profile.hidden)
+                return self.setProfileNote(.said, "A quick slot pins {s}, so the picker shows it first: it does not move here.", .{profile.label orelse profile.id});
+            if (model.pinBlocking(row_now.profile, step)) |pin|
+                return self.setProfileNote(.said, "{s} cannot move above {s}: quick slot {d} pins it to the front of the picker.", .{ profile.label orelse profile.id, pin.label orelse pin.id, pin.quick_slot.? });
+            return self.setProfileNote(.said, "{s} is as far {s} as it goes{s}.", .{
+                profile.label orelse profile.id,
+                if (step < 0) "up" else "down",
+                if (profile.hidden) " among the hidden profiles" else "",
+            });
+        };
+        var arena_state: std.heap.ArenaAllocator = .init(self.handle.alloc);
+        defer arena_state.deinit();
+        const a = arena_state.allocator();
+        const lists = model.moved(a, row_now.profile, target) catch return self.profileListsFailed();
+        // Its name and key outlive the rebuild below.
+        const label = a.dupe(u8, profile.label orelse profile.id) catch return self.profileListsFailed();
+        const key = a.dupe(u8, profile.key) catch return self.profileListsFailed();
+        self.applyProfileLists(pending, lists, row_now.identity) catch return self.profileListsFailed();
+        const index = self.profile_model.profileByKey(key) orelse return;
+        const place = self.profile_model.place(index);
+        self.setProfileNote(.said, "{s} moved to {d} of {d}.", .{ label, place.at, place.of });
+    }
+
+    /// Ctrl+H, or Hide in the picker or Show in the picker: the selected
+    /// profile hidden from the picker, the palette and the jump list, or
+    /// shown again (`settings_profiles.Model.toggledHidden`). A hidden
+    /// Default profile still starts new tabs, as the app does, and the note
+    /// says so.
+    fn profileToggleHidden(self: *SettingsWindow) void {
+        if (!self.profileEditDone()) return;
+        const row = self.selectedProfileRow() orelse return;
+        if (row.kind == .new_profile) return;
+        if (!self.wholeProfileList(row.identity)) return self.setProfileNote(.said, "noctty is looking for the profiles on this computer: which are hidden can be changed once it has them all.", .{});
+        const model = &self.profile_model;
+        const row_now = self.selectedProfileRow() orelse return;
+        const profile = &model.profiles[row_now.profile];
+        const pending = if (self.pending) |*config| config else return;
+        if (profile.found_hidden) return self.setProfileNote(.said, "{s}: " ++ settings_profiles.found_hidden_help, .{profile.label orelse profile.id});
+        const hide = !profile.hidden;
+        const default = profile.default;
+        var arena_state: std.heap.ArenaAllocator = .init(self.handle.alloc);
+        defer arena_state.deinit();
+        const a = arena_state.allocator();
+        const lists = model.toggledHidden(a, row_now.profile, hide) catch return self.profileListsFailed();
+        const label = a.dupe(u8, profile.label orelse profile.id) catch return self.profileListsFailed();
+        const key = a.dupe(u8, profile.key) catch return self.profileListsFailed();
+        self.applyProfileLists(pending, lists, row_now.identity) catch return self.profileListsFailed();
+        if (hide) {
+            if (default)
+                return self.setProfileNote(.said, "{s} is hidden: the picker, the palette and the jump list leave it out. Default profile names it, so new tabs still start it.", .{label});
+            return self.setProfileNote(.said, "{s} is hidden: the picker, the palette and the jump list leave it out.", .{label});
+        }
+        const index = self.profile_model.profileByKey(key) orelse return;
+        const place = self.profile_model.place(index);
+        self.setProfileNote(.said, "{s} is shown in the picker again, {d} of {d}.", .{ label, place.at, place.of });
+    }
+
+    /// The draft's `profile-order` and `profile-hidden` made `lists`, and the
+    /// page built again around the row `select` names.
+    fn applyProfileLists(self: *SettingsWindow, pending: *Config, lists: settings_profiles.Lists, select: u64) std.mem.Allocator.Error!void {
+        // Back where the draft started (a move down, then up): its lists as
+        // they were, so nothing is written and nothing counts as changed.
+        const base = self.profile_model.base;
+        const original = if (self.original) |*config| config else null;
+        if (base != null and original != null and lists.eql(base.?)) {
+            try settings_profiles.setOrder(pending, original.?.@"profile-order".list.items);
+            try settings_profiles.setHidden(pending, original.?.@"profile-hidden".list.items);
+        } else {
+            try settings_profiles.setOrder(pending, lists.order);
+            try settings_profiles.setHidden(pending, lists.hidden);
+        }
+        self.profileDraftChanged(select);
+    }
+
+    /// Whether the page lists every profile, so one can be moved or hidden.
+    /// When it does not, the app is asked to look for them again (a
+    /// discovery may have ended without them all): the list comes through
+    /// `profilesChanged`, at once when a window has it, which keeps the
+    /// selection on its row (`selected`).
+    fn wholeProfileList(self: *SettingsWindow, selected: u64) bool {
+        if (self.profile_model.complete) return true;
+        if (self.handle.findAllProfiles) |find| find(self.handle.ctx);
+        if (!self.profile_model.complete) return false;
+        const row = self.selectedProfileRow() orelse return false;
+        return row.identity == selected;
+    }
+
+    fn profileListsFailed(self: *SettingsWindow) void {
+        self.setProfileNote(.refused, "There was not enough memory to change the order; nothing changed.", .{});
     }
 
     /// The list for `section`, if the page has one.
@@ -8707,6 +9049,7 @@ pub const SettingsWindow = struct {
         self.profile_found_count = 0;
         self.profile_model.deinit();
         self.profile_stale = true;
+        self.profile_ask_next = true;
         self.profile_remove_armed = null;
         self.reference_found = @splat(false);
         self.reference_model.deinit();
@@ -13482,6 +13825,20 @@ const dialog_test = struct {
         /// What the Default profile dropdown is offered: `test_profiles`,
         /// whole or not yet.
         profiles_complete: bool = true,
+        /// What the Profiles page lists (`pageProfiles`), for a test that
+        /// gives it a list, and whether that list is whole.
+        page_profiles: []const ProfileChoice = &.{},
+        page_profiles_complete: bool = true,
+        /// Which of `page_profiles` the asked-about value starts
+        /// (`ProfileChoices.selected`).
+        page_selected: ?usize = null,
+        /// How often the page asked for its list, and how often with `ask`.
+        page_calls: u32 = 0,
+        page_asks: u32 = 0,
+        /// How often the page asked the app to look for every profile
+        /// (`findAllProfiles`), and the list it then gives, whole.
+        find_all_calls: u32 = 0,
+        find_all_gives: ?[]const ProfileChoice = null,
         profile_lists: u32 = 0,
         /// The lists asked with `ask` false (refills that must not ask).
         profile_refills: u32 = 0,
@@ -13727,6 +14084,45 @@ const dialog_test = struct {
 
         /// The App resolves a reference by the picker's rules; here a key in
         /// any case, `pwsh`, or a bare user id.
+        /// `AppHandle.pageProfiles`: `page_profiles`, copied.
+        fn pageProfiles(ctx: *anyopaque, alloc: std.mem.Allocator, reference: ?[]const u8, draft: ?[]const u8, ask: bool) std.mem.Allocator.Error!ProfileChoices {
+            const self: *Fixture = @ptrCast(@alignCast(ctx));
+            _ = reference;
+            _ = draft;
+            self.page_calls += 1;
+            if (ask) self.page_asks += 1;
+            const items = try alloc.alloc(ProfileChoice, self.page_profiles.len);
+            var made: usize = 0;
+            errdefer {
+                for (items[0..made]) |item| {
+                    alloc.free(item.key);
+                    alloc.free(item.label);
+                }
+                alloc.free(items);
+            }
+            for (self.page_profiles, items) |source, *item| {
+                const key = try alloc.dupe(u8, source.key);
+                const label = alloc.dupe(u8, source.label) catch |err| {
+                    alloc.free(key);
+                    return err;
+                };
+                item.* = .{ .key = key, .label = label, .hidden = source.hidden, .quick_slot = source.quick_slot, .found_hidden = source.found_hidden };
+                made += 1;
+            }
+            return .{ .items = items, .complete = self.page_profiles_complete, .selected = self.page_selected };
+        }
+
+        /// `AppHandle.findAllProfiles`: counted; with `find_all_gives`, that
+        /// list arrives whole at once, as when a window has it.
+        fn findAllProfiles(ctx: *anyopaque) void {
+            const self: *Fixture = @ptrCast(@alignCast(ctx));
+            self.find_all_calls += 1;
+            const gives = self.find_all_gives orelse return;
+            self.page_profiles = gives;
+            self.page_profiles_complete = true;
+            self.settings.profilesChanged();
+        }
+
         fn profileChoices(ctx: *anyopaque, alloc: std.mem.Allocator, reference: ?[]const u8, draft: ?[]const u8, ask: bool) std.mem.Allocator.Error!ProfileChoices {
             const self: *Fixture = @ptrCast(@alignCast(ctx));
             // The fixture's drafts are its own keys, which no label stands
@@ -20533,6 +20929,18 @@ const PROFILE_LIST: usize = 312;
 /// The Profiles page's field being typed into (`ProfileEdit`), a child of its
 /// list.
 const PROFILE_EDIT: usize = 313;
+/// The open profile row's buttons: Move up, Move down, and Hide or Show in
+/// the picker (`SettingsWindow.profile_buttons`).
+const PROFILE_BUTTON_FIRST: usize = 314;
+const profile_button_count = 3;
+/// What each button says and is named for UIA (`profileButtonLabel`), and
+/// its help.
+const profile_button_help = [profile_button_count][]const u8{
+    "Moves the profile one place up in the picker's order. Alt+Up does the same.",
+    "Moves the profile one place down in the picker's order. Alt+Down does the same.",
+    "Hides the profile from the picker, the palette and the jump list, or shows it again. Ctrl+H does the same.",
+};
+extern "user32" fn GetNextDlgTabItem(dialog: HWND, control: ?HWND, previous: BOOL) callconv(.winapi) ?HWND;
 const reference_list_class_name = std.unicode.utf8ToUtf16LeStringLiteral("noctty.win32.settings.list");
 /// The commands of a list's context menu.
 const reference_menu_copy: usize = 1;
@@ -20568,9 +20976,13 @@ const ListKind = enum {
 };
 /// The Profiles page's menu item that starts a profile.
 const profile_menu_new: usize = 5;
+const profile_menu_up: usize = 6;
+const profile_menu_down: usize = 7;
+const profile_menu_hide: usize = 8;
 /// What the Profiles list's UIA help text says: the keys it takes.
-const profile_list_help = "Up and Down move through your profiles and their fields: command line, name, starting folder and variables. " ++
-    "Enter edits the selected field, Delete removes it (a profile asks twice), Insert or Ctrl+N adds a profile, and Shift+F10 offers these.";
+const profile_list_help = "Up and Down move through the profiles, in the picker's order, and your profiles' fields: command line, name, starting folder and variables. " ++
+    "Enter edits the selected field, Delete removes it (a profile asks twice), Insert or Ctrl+N adds a profile, Alt+Up and Alt+Down move a profile, Ctrl+H hides it or shows it, and Shift+F10 offers these. " ++
+    "A profile noctty found on this computer can be moved and hidden, not edited.";
 /// The help text of the field being typed into.
 const profile_edit_help = "Enter keeps the change and Escape cancels it. Save writes your changes to the config file.";
 
@@ -20652,6 +21064,83 @@ fn listOwner(list: HWND) ?*SettingsWindow {
     if (raw == 0) return null;
     const state: *ReferenceList = @ptrFromInt(@as(usize, @intCast(raw)));
     return state.owner();
+}
+
+/// What profile button `index` says: Move up, Move down, or Hide or Show in
+/// the picker as the profile is shown or hidden.
+fn profileButtonLabel(index: usize, hidden: bool) []const u8 {
+    return switch (index) {
+        0 => "Move up",
+        1 => "Move down",
+        else => if (hidden) "Show in the picker" else "Hide in the picker",
+    };
+}
+
+/// A button's text made `label`, when it is not that already (no repaint
+/// for nothing). True when it changed.
+fn syncButtonText(button: HWND, label: [*:0]const u16) bool {
+    var current: [32]u16 = undefined;
+    const length: usize = @intCast(@max(0, GetWindowTextW(button, &current, current.len)));
+    if (std.mem.eql(u16, current[0..length], std.mem.span(label))) return false;
+    _ = sys.SetWindowTextW(button, label);
+    return true;
+}
+
+/// Subclass of the open profile row's buttons: Tab and Shift+Tab go on
+/// through the buttons and past them (`profileButtonTab`), Alt+Up, Alt+Down
+/// and Ctrl+H do what they do on the list, and UIA gets the button's
+/// provider. Escape is the window's, as on its other buttons: the dialog
+/// manager makes it Close.
+fn profileButtonProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.winapi) LRESULT {
+    const previous = sys.GetWindowLongPtrW(hwnd, GWLP_USERDATA);
+    if (previous == 0) return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
+    const proc: *const anyopaque = @ptrFromInt(@as(usize, @intCast(previous)));
+    const list_hwnd = sys.GetParent(hwnd);
+    const settings: ?*SettingsWindow = if (list_hwnd) |list| listOwner(list) else null;
+    const index: ?usize = if (settings) |owner| for (owner.profile_buttons, 0..) |maybe, at| {
+        if (maybe == hwnd) break at;
+    } else null else null;
+    switch (msg) {
+        WM_GETDLGCODE => return sys.CallWindowProcW(proc, hwnd, msg, wParam, lParam) | DLGC_WANTTAB,
+        WM_KEYDOWN => if (settings) |owner| if (index) |at| {
+            if (wParam == VK_TAB) {
+                noteSettingsInput(owner, msg, wParam);
+                owner.profileButtonTab(at, win32_input.keyPressed(VK_SHIFT));
+                return 0;
+            }
+            if (wParam == 'H' and win32_input.keyPressed(VK_CONTROL) and !win32_input.keyPressed(VK_SHIFT) and (lParam & (1 << 30)) == 0) {
+                noteSettingsInput(owner, msg, wParam);
+                owner.profileToggleHidden();
+                return 0;
+            }
+        },
+        WM_SYSKEYDOWN => if (settings) |owner| if ((lParam & (1 << 29)) != 0 and
+            (wParam == focus_cue.vk_up or wParam == focus_cue.vk_down) and
+            !win32_input.keyPressed(VK_CONTROL) and !win32_input.keyPressed(VK_SHIFT))
+        {
+            noteSettingsInput(owner, msg, wParam);
+            owner.profileMove(if (wParam == focus_cue.vk_up) -1 else 1);
+            // As on the list: `DefWindowProc` sees the key, so Alt's release
+            // does not open the window menu.
+            _ = sys.DefWindowProcW(hwnd, msg, wParam, lParam);
+            return 0;
+        },
+        WM_CHAR => if (wParam == '\t' or wParam == 0x08 or wParam == 0x1B) return 0,
+        WM_SETFOCUS => if (settings) |owner| if (index) |at| {
+            if (owner.profile_button_providers[at]) |provider| provider.raiseFocusChanged();
+        },
+        WM_GETOBJECT => if (settings) |owner| if (index) |at| if (owner.profile_button_providers[at]) |provider| {
+            if (win32_uia.returnSettingsControlProvider(hwnd, wParam, lParam, provider)) |result| return result;
+        },
+        WM_NCDESTROY => {
+            if (settings) |owner| owner.profileButtonDestroyed(hwnd);
+            _ = sys.SetWindowLongPtrW(hwnd, GWLP_WNDPROC, previous);
+            _ = sys.SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+            return sys.CallWindowProcW(proc, hwnd, msg, wParam, lParam);
+        },
+        else => {},
+    }
+    return sys.CallWindowProcW(proc, hwnd, msg, wParam, lParam);
 }
 
 /// The Profiles page's field (`ProfileEdit`). Tab keeps what it holds, as
@@ -20769,6 +21258,9 @@ const ReferenceList = struct {
         /// The open row's description and location.
         body: i32,
         location: i32,
+        /// The line of the open profile row's buttons (`syncProfileButtons`),
+        /// none on any other row.
+        buttons: i32 = 0,
         /// The actions' widths (zero for one the row does not have), and the
         /// room between them.
         copy_width: i32,
@@ -21022,6 +21514,7 @@ const ReferenceList = struct {
                 if (actions.enter) |label| metrics.edit_width = measureLine(hwnd, settings.secondary_font, utf8ToW(&label_w, label));
                 if (actions.delete) |label| metrics.copy_width = measureLine(hwnd, settings.secondary_font, utf8ToW(&label_w, label));
                 if (editing) metrics.field = settings.px(settings_control_height) + metrics.gap;
+                if (settings.profile_model.rows[key].kind == .profile) metrics.buttons = settings.px(settings_control_height) + metrics.gap;
             } else {
                 if (self.editLabel(key, &label_w)) |label| metrics.edit_width = measureLine(hwnd, settings.secondary_font, label);
                 if (settings.handle.copyText != null) metrics.copy_width = measureLine(hwnd, settings.secondary_font, utf8ToW(&label_w, self.kind.copyLabel()));
@@ -21029,10 +21522,18 @@ const ReferenceList = struct {
             }
             metrics.open = 2 * metrics.pad_y + metrics.title + metrics.gap + metrics.field + metrics.body +
                 (if (metrics.location > 0) metrics.gap + metrics.location else 0) +
-                metrics.gap + metrics.line + metrics.pad_y;
+                metrics.gap + metrics.line + metrics.buttons + metrics.pad_y;
         }
         self.metrics = metrics;
         return metrics;
+    }
+
+    /// The top of the open row's buttons' line, in client coordinates: just
+    /// below its actions (`actionRects`).
+    fn buttonsTop(self: *const ReferenceList, metrics: Metrics, position: usize) i32 {
+        const top = rowTop(metrics, position, position) - self.scroll_y;
+        return top + 2 * metrics.pad_y + metrics.title + metrics.gap + metrics.field + metrics.body +
+            (if (metrics.location > 0) metrics.gap + metrics.location else 0) + metrics.gap + metrics.line + metrics.gap;
     }
 
     /// The width text wraps to in a row: inside its padding, right of the bar
@@ -21185,6 +21686,8 @@ const ReferenceList = struct {
         self.selected = key;
         self.metrics = null;
         self.revealSelected(.whole);
+        // The open profile row's buttons go with the row.
+        if (self.kind == .profiles) self.owner().syncProfileButtons();
         if (self.hwnd) |hwnd| _ = InvalidateRect(hwnd, null, 0);
         if (self.provider) |provider| provider.raiseSelectionChanged(position);
         return true;
@@ -21411,6 +21914,11 @@ const ReferenceList = struct {
             'N' => {
                 if (self.kind != .profiles or !win32_input.keyPressed(VK_CONTROL) or win32_input.keyPressed(VK_MENU) or win32_input.keyPressed(VK_SHIFT)) return false;
                 self.owner().profileNew();
+            },
+            // Ctrl+H hides the selected profile from the picker, or shows it.
+            'H' => {
+                if (self.kind != .profiles or !win32_input.keyPressed(VK_CONTROL) or win32_input.keyPressed(VK_MENU) or win32_input.keyPressed(VK_SHIFT)) return false;
+                self.owner().profileToggleHidden();
             },
             else => return false,
         }
@@ -21897,19 +22405,47 @@ fn referenceListProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) call
             return 0;
         },
         // The Profiles page's field: typing into it is an edit Save can take.
-        WM_COMMAND => if (list.kind == .profiles and @as(u16, @truncate(wParam >> 16)) == EN_CHANGE) {
-            owner.profileEditTyped();
-            return 0;
+        // And its open row's buttons, pressed.
+        WM_COMMAND => if (list.kind == .profiles) {
+            const code: u16 = @truncate(wParam >> 16);
+            const id = wParam & 0xFFFF;
+            if (code == EN_CHANGE) {
+                owner.profileEditTyped();
+                return 0;
+            }
+            if (code == BN_CLICKED and id >= PROFILE_BUTTON_FIRST and id < PROFILE_BUTTON_FIRST + profile_button_count) {
+                owner.profileButtonPressed(id - PROFILE_BUTTON_FIRST);
+                return 0;
+            }
         },
-        WM_GETDLGCODE => return DLGC_WANTARROWS | DLGC_WANTCHARS,
+        // Tab too while the open profile row has buttons, to reach them.
+        WM_GETDLGCODE => return DLGC_WANTARROWS | DLGC_WANTCHARS | if (list.kind == .profiles and list.owner().profileButtonsShown()) DLGC_WANTTAB else 0,
         WM_KEYDOWN => {
             noteSettingsInput(owner, msg, wParam);
             // A held Delete, Insert or Ctrl+N acts once on the Profiles page:
             // repeats would run through its rows, the second Delete a
             // removal asks for included.
             if (list.kind == .profiles and (lParam & (1 << 30)) != 0 and
-                (wParam == VK_DELETE or wParam == VK_INSERT or wParam == 'N')) return 0;
+                (wParam == VK_DELETE or wParam == VK_INSERT or wParam == 'N' or wParam == 'H')) return 0;
+            if (wParam == VK_TAB and list.kind == .profiles and list.owner().profileButtonsShown()) {
+                list.owner().profileButtonTab(null, win32_input.keyPressed(VK_SHIFT));
+                return 0;
+            }
             if (list.keyDown(wParam)) return 0;
+        },
+        // Alt+Up and Alt+Down move the Profiles page's selected profile. Alt
+        // chords come as system keys, which the accelerators never see.
+        WM_SYSKEYDOWN => if (list.kind == .profiles and (lParam & (1 << 29)) != 0 and
+            (wParam == focus_cue.vk_up or wParam == focus_cue.vk_down) and
+            !win32_input.keyPressed(VK_CONTROL) and !win32_input.keyPressed(VK_SHIFT))
+        {
+            noteSettingsInput(owner, msg, wParam);
+            list.owner().profileMove(if (wParam == focus_cue.vk_up) -1 else 1);
+            // `DefWindowProc` sees the key too, which ends Alt's press alone:
+            // swallowed, Alt's release opened the window menu, and the next
+            // Down dropped it open (measured with a CBT hook).
+            _ = sys.DefWindowProcW(hwnd, msg, wParam, lParam);
+            return 0;
         },
         WM_SETFOCUS => {
             list.focused();
@@ -23085,6 +23621,484 @@ test "settings a page held for an owed draft takes no UIA Invoke on its lists' r
             const provider = (try openEdit(settings)).provider orelse return error.TestExpectedProvider;
             try std.testing.expectEqual(com.S_OK, provider.value_iface.vtbl.SetValue(&provider.value_iface, std.unicode.utf8ToUtf16LeStringLiteral("python.exe -q")));
             try std.testing.expect(fixture.pumpKey(VK_ESCAPE));
+        }
+    }.body);
+}
+
+/// Select the Profiles page's row `id` (`profile_model.rows`), wherever the
+/// list shows it.
+fn selectProfileRow(list: *ReferenceList, id: u16) !void {
+    const position = for (list.shown[0..list.shown_count], 0..) |shown, at| {
+        if (shown == id) break at;
+    } else return error.TestExpectedRow;
+    list.selectPosition(position);
+}
+
+/// Give the Profiles page `listed` as the app's list of profiles, whole or
+/// not (`complete`), and build it again.
+fn giveProfilePage(fixture: *dialog_test.Fixture, listed: []const ProfileChoice, complete: bool) void {
+    fixture.page_profiles = listed;
+    fixture.page_profiles_complete = complete;
+    fixture.settings.handle.pageProfiles = &dialog_test.Fixture.pageProfiles;
+    fixture.settings.handle.findAllProfiles = &dialog_test.Fixture.findAllProfiles;
+    fixture.settings.profilesChanged();
+}
+
+/// The draft's `profile-order` or `profile-hidden`, one value a line.
+fn listText(alloc: std.mem.Allocator, values: []const [:0]const u8) ![]u8 {
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    errdefer out.deinit();
+    for (values) |value| try out.writer.print("{s}\n", .{value});
+    return out.toOwnedSlice();
+}
+
+test "settings the Profiles page lists every profile, and Alt+Up, Ctrl+H and the menu move and hide them, saying so" {
+    try dialog_test.onHiddenDesktop(struct {
+        threadlocal var answer: usize = 0;
+        extern "user32" fn GetMenuState(menu: win32_types.HMENU, item: UINT, flags: UINT) callconv(.winapi) UINT;
+
+        /// The item `answer` names, unless it is greyed (`MF_BYCOMMAND`, 0).
+        fn pick(menu: win32_types.HMENU) usize {
+            return if (GetMenuState(menu, @intCast(answer), 0) & MF_GRAYED != 0) 0 else answer;
+        }
+
+        fn body() !void {
+            const keyboard = win32_input.TestingKeyboard.pinNone();
+            defer keyboard.release();
+            const alloc = std.testing.allocator;
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var path: []u8 = &.{};
+            const fixture = try profileFixture(&tmp, "profile-command = py: python.exe\n", &path);
+            defer alloc.free(path);
+            defer fixture.finish();
+            const settings = &fixture.settings;
+            const list = &settings.profile_list;
+            const listed = [_]ProfileChoice{
+                .{ .key = "pwsh.exe", .label = "PowerShell" },
+                .{ .key = "user:py", .label = "py" },
+                .{ .key = "cmd.exe", .label = "Command Prompt", .hidden = true },
+            };
+            giveProfilePage(fixture, &listed, true);
+            // Every profile: PowerShell and Command Prompt have a row each.
+            try std.testing.expect(settings.profile_model.findField(.profile, "pwsh.exe", null) != null);
+            try std.testing.expect(settings.profile_model.findField(.profile, "cmd.exe", null) != null);
+            try selectProfileRow(list, settings.profile_model.findField(.profile, "py", null) orelse return error.TestExpectedRow);
+            const hwnd = list.hwnd orelse return error.TestExpectedList;
+            var buf: [512]u8 = undefined;
+
+            // Alt+Up: py first, said, and both lists whole in the draft.
+            _ = sys.SendMessageW(hwnd, WM_SYSKEYDOWN, focus_cue.vk_up, 1 << 29);
+            try expectSameText("py moved to 1 of 3.", try statusTextOf(settings, &buf));
+            {
+                const draft = settings.pending orelse return error.TestExpectedDraft;
+                const order = try listText(alloc, draft.@"profile-order".list.items);
+                defer alloc.free(order);
+                try expectSameText("user:py\npwsh.exe\ncmd.exe\n", order);
+                const hidden = try listText(alloc, draft.@"profile-hidden".list.items);
+                defer alloc.free(hidden);
+                try expectSameText("cmd.exe\n", hidden);
+            }
+            try std.testing.expect(settings.hasPendingChanges());
+
+            // Ctrl+H: py hidden, first among the hidden ones.
+            try dialog_test.holdKeys(.{ .ctrl = true });
+            _ = sys.SendMessageW(hwnd, WM_KEYDOWN, 'H', 0);
+            try dialog_test.holdKeys(.{});
+            try expectSameText("py is hidden: the picker, the palette and the jump list leave it out.", try statusTextOf(settings, &buf));
+            {
+                const draft = settings.pending orelse return error.TestExpectedDraft;
+                const order = try listText(alloc, draft.@"profile-order".list.items);
+                defer alloc.free(order);
+                try expectSameText("pwsh.exe\nuser:py\ncmd.exe\n", order);
+            }
+
+            // The menu: shown again, last among the shown ones.
+            answer = profile_menu_hide;
+            settings.context_menu_pick = &pick;
+            _ = sys.SendMessageW(hwnd, WM_CONTEXTMENU, @intFromPtr(hwnd), @bitCast(@as(isize, -1)));
+            try expectSameText("py is shown in the picker again, 2 of 3.", try statusTextOf(settings, &buf));
+            // That is where the page started: nothing to save.
+            try std.testing.expect(!settings.hasPendingChanges());
+            // Move up is greyed for the first profile, so the pick is none.
+            try selectProfileRow(list, settings.profile_model.findField(.profile, "pwsh.exe", null) orelse return error.TestExpectedRow);
+            answer = profile_menu_up;
+            _ = sys.SendMessageW(hwnd, WM_CONTEXTMENU, @intFromPtr(hwnd), @bitCast(@as(isize, -1)));
+            try expectSameText("py is shown in the picker again, 2 of 3.", try statusTextOf(settings, &buf));
+            // Move down is not: PowerShell goes below py.
+            answer = profile_menu_down;
+            _ = sys.SendMessageW(hwnd, WM_CONTEXTMENU, @intFromPtr(hwnd), @bitCast(@as(isize, -1)));
+            try expectSameText("PowerShell moved to 2 of 3.", try statusTextOf(settings, &buf));
+
+            // Saved: the file gets both lists whole, after its own lines.
+            settings.save();
+            const text = try tmp.dir.readFileAlloc(alloc, "noctty.conf", 1 << 16);
+            defer alloc.free(text);
+            try std.testing.expect(std.mem.indexOf(u8, text, "profile-order =\nprofile-order = user:py\nprofile-order = pwsh.exe\nprofile-order = cmd.exe\n") != null);
+            try std.testing.expect(std.mem.indexOf(u8, text, "profile-hidden =\nprofile-hidden = cmd.exe\n") != null);
+            try std.testing.expect(std.mem.startsWith(u8, text, "profile-command = py: python.exe\n"));
+        }
+    }.body);
+}
+
+test "settings the open profile row's Move and Hide buttons are reached by Tab, named for UIA, and do what their keys do" {
+    try dialog_test.onHiddenDesktop(struct {
+        fn body() !void {
+            const keyboard = win32_input.TestingKeyboard.pinNone();
+            defer keyboard.release();
+            const alloc = std.testing.allocator;
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var path: []u8 = &.{};
+            const fixture = try profileFixture(&tmp, "profile-command = py: python.exe\n", &path);
+            defer alloc.free(path);
+            defer fixture.finish();
+            const settings = &fixture.settings;
+            const list = &settings.profile_list;
+            const listed = [_]ProfileChoice{
+                .{ .key = "pwsh.exe", .label = "PowerShell" },
+                .{ .key = "user:py", .label = "py" },
+                .{ .key = "cmd.exe", .label = "Command Prompt", .hidden = true },
+            };
+            giveProfilePage(fixture, &listed, true);
+            const list_hwnd = list.hwnd orelse return error.TestExpectedList;
+            _ = SetFocus(list_hwnd);
+            try selectProfileRow(list, settings.profile_model.findField(.profile, "pwsh.exe", null) orelse return error.TestExpectedRow);
+            const up = settings.profile_buttons[0] orelse return error.TestExpectedButton;
+            const down = settings.profile_buttons[1] orelse return error.TestExpectedButton;
+            const hide = settings.profile_buttons[2] orelse return error.TestExpectedButton;
+            // Over the open row, the first profile's Move up disabled.
+            for ([_]HWND{ up, down, hide }) |button| try std.testing.expect(sys.IsWindowVisible(button) != 0);
+            try std.testing.expect(sys.IsWindowEnabled(up) == 0);
+            try std.testing.expect(sys.IsWindowEnabled(down) != 0);
+            try std.testing.expect(sys.IsWindowEnabled(hide) != 0);
+
+            // Tab from the list: Move down (Move up is disabled), Hide, and
+            // on past them; Shift+Tab from the first back to the list.
+            try std.testing.expect(fixture.pumpKey(VK_TAB));
+            try std.testing.expectEqual(down, GetFocus() orelse return error.TestExpectedFocus);
+            try std.testing.expect(fixture.pumpKey(VK_TAB));
+            try std.testing.expectEqual(hide, GetFocus() orelse return error.TestExpectedFocus);
+            try std.testing.expect(fixture.pumpKey(VK_TAB));
+            const past = GetFocus() orelse return error.TestExpectedFocus;
+            for ([_]HWND{ list_hwnd, up, down, hide }) |control| try std.testing.expect(past != control);
+            _ = SetFocus(down);
+            try dialog_test.holdKeys(.{ .shift = true });
+            try std.testing.expect(fixture.pumpKey(VK_TAB));
+            try dialog_test.holdKeys(.{});
+            try std.testing.expectEqual(list_hwnd, GetFocus() orelse return error.TestExpectedFocus);
+
+            // For UIA: named by what they say, and Invoke does what Alt+Down
+            // does.
+            const com = @import("win32_uia/com.zig");
+            const constants = @import("win32_uia/constants.zig");
+            var name_buf: [64]u8 = undefined;
+            const down_provider = settings.profile_button_providers[1] orelse return error.TestExpectedProvider;
+            try std.testing.expectEqualStrings("Move down", try uiaStringProperty(&down_provider.base, constants.UIA_NamePropertyId, &name_buf));
+            // Invoke posts the click to the button's parent, the list.
+            try std.testing.expectEqual(com.S_OK, down_provider.invoke_iface.vtbl.Invoke(&down_provider.invoke_iface));
+            dialog_test.pump();
+            var buf: [512]u8 = undefined;
+            try expectSameText("PowerShell moved to 2 of 3.", try statusTextOf(settings, &buf));
+            try std.testing.expect(sys.IsWindowEnabled(up) != 0);
+
+            // A click on Hide: hidden, and the button, and its name, say
+            // Show in the picker now.
+            _ = sys.SendMessageW(hide, BM_CLICK, 0, 0);
+            try expectSameText("PowerShell is hidden: the picker, the palette and the jump list leave it out.", try statusTextOf(settings, &buf));
+            const hide_provider = settings.profile_button_providers[2] orelse return error.TestExpectedProvider;
+            try std.testing.expectEqualStrings("Show in the picker", try uiaStringProperty(&hide_provider.base, constants.UIA_NamePropertyId, &name_buf));
+
+            // A field's row has none.
+            try selectProfileRow(list, settings.profile_model.findField(.command, "py", null) orelse return error.TestExpectedRow);
+            for ([_]HWND{ up, down, hide }) |button| try std.testing.expect(sys.IsWindowVisible(button) == 0);
+            try std.testing.expect(!settings.profileButtonsShown());
+        }
+    }.body);
+}
+
+test "settings the Profiles page asks for the profiles once, never when a discovery ends, and again when a move needs them all" {
+    try dialog_test.onHiddenDesktop(struct {
+        fn body() !void {
+            const keyboard = win32_input.TestingKeyboard.pinNone();
+            defer keyboard.release();
+            const alloc = std.testing.allocator;
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var path: []u8 = &.{};
+            const fixture = try profileFixture(&tmp, "profile-command = py: python.exe\n", &path);
+            defer alloc.free(path);
+            defer fixture.finish();
+            const settings = &fixture.settings;
+            const list = &settings.profile_list;
+            const part = [_]ProfileChoice{.{ .key = "user:py", .label = "py" }};
+            const whole = [_]ProfileChoice{
+                .{ .key = "pwsh.exe", .label = "PowerShell" },
+                .{ .key = "user:py", .label = "py" },
+            };
+            // A discovery ends without them all: the page is built again, and
+            // asks for nothing, so a failed one cannot start another.
+            giveProfilePage(fixture, &part, false);
+            try std.testing.expectEqual(@as(u32, 1), fixture.page_calls);
+            try std.testing.expectEqual(@as(u32, 0), fixture.page_asks);
+            settings.profilesChanged();
+            try std.testing.expectEqual(@as(u32, 0), fixture.page_asks);
+            // Alt+Up on py: the app is asked to look again, and the note says
+            // it is looking.
+            try selectProfileRow(list, settings.profile_model.findField(.profile, "py", null) orelse return error.TestExpectedRow);
+            const hwnd = list.hwnd orelse return error.TestExpectedList;
+            var buf: [512]u8 = undefined;
+            _ = sys.SendMessageW(hwnd, WM_SYSKEYDOWN, focus_cue.vk_up, 1 << 29);
+            try std.testing.expectEqual(@as(u32, 1), fixture.find_all_calls);
+            try expectSameText("noctty is looking for the profiles on this computer: the order can be changed once it has them all.", try statusTextOf(settings, &buf));
+            try std.testing.expect(!settings.hasPendingChanges());
+            // This time the whole list comes at once: py moves.
+            fixture.find_all_gives = &whole;
+            _ = sys.SendMessageW(hwnd, WM_SYSKEYDOWN, focus_cue.vk_up, 1 << 29);
+            try std.testing.expectEqual(@as(u32, 2), fixture.find_all_calls);
+            try expectSameText("py moved to 1 of 2.", try statusTextOf(settings, &buf));
+            try std.testing.expectEqual(@as(u32, 0), fixture.page_asks);
+        }
+    }.body);
+}
+
+test "settings a search on the Profiles page finds its rows among a list that arrives" {
+    try dialog_test.onHiddenDesktop(struct {
+        fn body() !void {
+            const keyboard = win32_input.TestingKeyboard.pinNone();
+            defer keyboard.release();
+            const alloc = std.testing.allocator;
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var path: []u8 = &.{};
+            const fixture = try profileFixture(&tmp, "profile-command = py: python.exe\n", &path);
+            defer alloc.free(path);
+            defer fixture.finish();
+            const settings = &fixture.settings;
+            const list = &settings.profile_list;
+            const part = [_]ProfileChoice{.{ .key = "user:py", .label = "py" }};
+            const whole = [_]ProfileChoice{
+                .{ .key = "pwsh.exe", .label = "PowerShell" },
+                .{ .key = "user:py", .label = "py" },
+            };
+            giveProfilePage(fixture, &part, false);
+            typeSearch(settings, "pwsh");
+            try std.testing.expectEqual(@as(usize, 0), list.shown_count);
+            // PowerShell arrives: the search finds its row.
+            giveProfilePage(fixture, &whole, true);
+            try std.testing.expectEqual(@as(usize, 1), list.shown_count);
+            try std.testing.expectEqual(settings.profile_model.findField(.profile, "pwsh.exe", null).?, list.shown[0]);
+            try std.testing.expectEqual(@as(u16, 1), settings.profile_found_count);
+        }
+    }.body);
+}
+
+test "settings a pinned profile is named when it stops a move, a hidden default says new tabs still start it, and noctty's own hidden ones stay hidden" {
+    try dialog_test.onHiddenDesktop(struct {
+        fn body() !void {
+            const keyboard = win32_input.TestingKeyboard.pinNone();
+            defer keyboard.release();
+            const alloc = std.testing.allocator;
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var path: []u8 = &.{};
+            // `pwsh` is an alias: the app answers which profile it starts.
+            const fixture = try profileFixture(&tmp, "profile-command = py: python.exe\ndefault-profile = pwsh\n", &path);
+            defer alloc.free(path);
+            defer fixture.finish();
+            const settings = &fixture.settings;
+            const list = &settings.profile_list;
+            const listed = [_]ProfileChoice{
+                .{ .key = "pwsh.exe", .label = "PowerShell", .quick_slot = 1 },
+                .{ .key = "user:py", .label = "py" },
+                .{ .key = "vs:old:cmd", .label = "Developer Command Prompt (2019)", .hidden = true, .found_hidden = true },
+            };
+            fixture.page_selected = 0;
+            giveProfilePage(fixture, &listed, true);
+            const hwnd = list.hwnd orelse return error.TestExpectedList;
+            var buf: [512]u8 = undefined;
+            // py stops below PowerShell, which its quick slot pins.
+            try selectProfileRow(list, settings.profile_model.findField(.profile, "py", null) orelse return error.TestExpectedRow);
+            _ = sys.SendMessageW(hwnd, WM_SYSKEYDOWN, focus_cue.vk_up, 1 << 29);
+            try expectSameText("py cannot move above PowerShell: quick slot 1 pins it to the front of the picker.", try statusTextOf(settings, &buf));
+            // PowerShell, the default, hidden: new tabs still start it.
+            try selectProfileRow(list, settings.profile_model.findField(.profile, "pwsh.exe", null) orelse return error.TestExpectedRow);
+            try dialog_test.holdKeys(.{ .ctrl = true });
+            _ = sys.SendMessageW(hwnd, WM_KEYDOWN, 'H', 0);
+            try dialog_test.holdKeys(.{});
+            try expectSameText("PowerShell is hidden: the picker, the palette and the jump list leave it out. Default profile names it, so new tabs still start it.", try statusTextOf(settings, &buf));
+            // The Visual Studio that noctty hides is not shown, and the Show
+            // button is disabled for it.
+            const old = settings.profile_model.findField(.profile, "vs:old:cmd", null) orelse return error.TestExpectedRow;
+            try selectProfileRow(list, old);
+            try dialog_test.holdKeys(.{ .ctrl = true });
+            _ = sys.SendMessageW(hwnd, WM_KEYDOWN, 'H', 0);
+            try dialog_test.holdKeys(.{});
+            try expectSameText("Developer Command Prompt (2019): " ++ settings_profiles.found_hidden_help, try statusTextOf(settings, &buf));
+            try std.testing.expect(settings.profile_model.profiles[settings.profile_model.rows[old].profile].hidden);
+            const show = settings.profile_buttons[2] orelse return error.TestExpectedButton;
+            try std.testing.expect(sys.IsWindowEnabled(show) == 0);
+            // Neither list the draft holds names it.
+            const draft = settings.pending orelse return error.TestExpectedDraft;
+            for (draft.@"profile-order".list.items) |value| try std.testing.expect(!std.mem.eql(u8, value, "vs:old:cmd"));
+            for (draft.@"profile-hidden".list.items) |value| try std.testing.expect(!std.mem.eql(u8, value, "vs:old:cmd"));
+        }
+    }.body);
+}
+
+test "settings a move and its way back are no change, and the open row's buttons take Alt+Up and Ctrl+H" {
+    try dialog_test.onHiddenDesktop(struct {
+        fn body() !void {
+            const keyboard = win32_input.TestingKeyboard.pinNone();
+            defer keyboard.release();
+            const alloc = std.testing.allocator;
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var path: []u8 = &.{};
+            const fixture = try profileFixture(&tmp, "profile-command = py: python.exe\n", &path);
+            defer alloc.free(path);
+            defer fixture.finish();
+            const settings = &fixture.settings;
+            const list = &settings.profile_list;
+            const listed = [_]ProfileChoice{
+                .{ .key = "pwsh.exe", .label = "PowerShell" },
+                .{ .key = "user:py", .label = "py" },
+                .{ .key = "cmd.exe", .label = "Command Prompt" },
+            };
+            giveProfilePage(fixture, &listed, true);
+            const hwnd = list.hwnd orelse return error.TestExpectedList;
+            var buf: [512]u8 = undefined;
+            try selectProfileRow(list, settings.profile_model.findField(.profile, "py", null) orelse return error.TestExpectedRow);
+            // Down and up again: nothing to save, and the lists as they were.
+            _ = sys.SendMessageW(hwnd, WM_SYSKEYDOWN, focus_cue.vk_down, 1 << 29);
+            try std.testing.expect(settings.hasPendingChanges());
+            _ = sys.SendMessageW(hwnd, WM_SYSKEYDOWN, focus_cue.vk_up, 1 << 29);
+            try expectSameText("py moved to 2 of 3.", try statusTextOf(settings, &buf));
+            try std.testing.expect(!settings.hasPendingChanges());
+            const draft = settings.pending orelse return error.TestExpectedDraft;
+            try std.testing.expectEqual(@as(usize, 0), draft.@"profile-order".list.items.len);
+            // From the Move down button: Alt+Up moves py, Ctrl+H hides it.
+            const down = settings.profile_buttons[1] orelse return error.TestExpectedButton;
+            _ = SetFocus(down);
+            _ = sys.SendMessageW(down, WM_SYSKEYDOWN, focus_cue.vk_up, 1 << 29);
+            try expectSameText("py moved to 1 of 3.", try statusTextOf(settings, &buf));
+            const hide = settings.profile_buttons[2] orelse return error.TestExpectedButton;
+            try dialog_test.holdKeys(.{ .ctrl = true });
+            _ = sys.SendMessageW(hide, WM_KEYDOWN, 'H', 0);
+            try dialog_test.holdKeys(.{});
+            try expectSameText("py is hidden: the picker, the palette and the jump list leave it out.", try statusTextOf(settings, &buf));
+        }
+    }.body);
+}
+
+test "settings Alt+Up on the Profiles page leaves no Alt press behind to open the window menu" {
+    try dialog_test.onHiddenDesktop(struct {
+        const WH_CBT: c_int = 5;
+        const HCBT_SYSCOMMAND: c_int = 8;
+        const SC_KEYMENU: usize = 0xF100;
+        const WM_SYSKEYUP: UINT = 0x0105;
+        const HookProc = *const fn (c_int, WPARAM, LPARAM) callconv(.winapi) LRESULT;
+        extern "user32" fn SetWindowsHookExW(id: c_int, proc: HookProc, module: ?HINSTANCE, thread: u32) callconv(.winapi) ?*anyopaque;
+        extern "user32" fn UnhookWindowsHookEx(hook: *anyopaque) callconv(.winapi) BOOL;
+        extern "user32" fn CallNextHookEx(hook: ?*anyopaque, code: c_int, wParam: WPARAM, lParam: LPARAM) callconv(.winapi) LRESULT;
+
+        /// The window menus Alt's release asked for.
+        threadlocal var menus: u32 = 0;
+
+        fn cbt(code: c_int, wParam: WPARAM, lParam: LPARAM) callconv(.winapi) LRESULT {
+            if (code == HCBT_SYSCOMMAND and (wParam & 0xFFF0) == SC_KEYMENU) {
+                menus += 1;
+                // Not carried out: its menu loop would wait for input.
+                return 1;
+            }
+            return CallNextHookEx(null, code, wParam, lParam);
+        }
+
+        /// Alt pressed and released on `hwnd`, `key` (an arrow) pressed in
+        /// between, as the keyboard sends them: the context bit on the
+        /// presses, not on Alt's release.
+        fn altChord(hwnd: HWND, key: ?u32) void {
+            _ = sys.SendMessageW(hwnd, WM_SYSKEYDOWN, @intCast(VK_MENU), 0x20380001);
+            if (key) |vk| _ = sys.SendMessageW(hwnd, WM_SYSKEYDOWN, vk, if (vk == focus_cue.vk_up) 0x21480001 else 0x21500001);
+            _ = sys.SendMessageW(hwnd, WM_SYSKEYUP, @intCast(VK_MENU), @bitCast(@as(usize, 0xC0380001)));
+        }
+
+        fn body() !void {
+            const keyboard = win32_input.TestingKeyboard.pinNone();
+            defer keyboard.release();
+            const alloc = std.testing.allocator;
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var path: []u8 = &.{};
+            const fixture = try profileFixture(&tmp, "profile-command = py: python.exe\n", &path);
+            defer alloc.free(path);
+            defer fixture.finish();
+            const settings = &fixture.settings;
+            const list = &settings.profile_list;
+            const listed = [_]ProfileChoice{
+                .{ .key = "pwsh.exe", .label = "PowerShell" },
+                .{ .key = "user:py", .label = "py" },
+            };
+            giveProfilePage(fixture, &listed, true);
+            const hwnd = list.hwnd orelse return error.TestExpectedList;
+            const hook = SetWindowsHookExW(WH_CBT, &cbt, null, sys.GetCurrentThreadId()) orelse return error.TestExpectedHook;
+            defer _ = UnhookWindowsHookEx(hook);
+            menus = 0;
+            // Alt alone: its release asks for the window menu, as anywhere.
+            altChord(hwnd, null);
+            try std.testing.expectEqual(@as(u32, 1), menus);
+            // Alt+Up and Alt+Down move py, and Alt's release asks for nothing.
+            try selectProfileRow(list, settings.profile_model.findField(.profile, "py", null) orelse return error.TestExpectedRow);
+            var buf: [512]u8 = undefined;
+            altChord(hwnd, focus_cue.vk_up);
+            try expectSameText("py moved to 1 of 2.", try statusTextOf(settings, &buf));
+            try std.testing.expectEqual(@as(u32, 1), menus);
+            altChord(hwnd, focus_cue.vk_down);
+            try expectSameText("py moved to 2 of 2.", try statusTextOf(settings, &buf));
+            try std.testing.expectEqual(@as(u32, 1), menus);
+        }
+    }.body);
+}
+
+test "settings a profile noctty found is moved and hidden, never edited or removed, and nothing moves before the list is whole" {
+    try dialog_test.onHiddenDesktop(struct {
+        fn body() !void {
+            const keyboard = win32_input.TestingKeyboard.pinNone();
+            defer keyboard.release();
+            const alloc = std.testing.allocator;
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var path: []u8 = &.{};
+            const fixture = try profileFixture(&tmp, "profile-command = py: python.exe\n", &path);
+            defer alloc.free(path);
+            defer fixture.finish();
+            const settings = &fixture.settings;
+            const list = &settings.profile_list;
+            const listed = [_]ProfileChoice{
+                .{ .key = "user:py", .label = "py" },
+                .{ .key = "pwsh.exe", .label = "PowerShell" },
+            };
+            // Still looking for profiles: nothing moves yet.
+            giveProfilePage(fixture, &listed, false);
+            try selectProfileRow(list, settings.profile_model.findField(.profile, "pwsh.exe", null) orelse return error.TestExpectedRow);
+            const hwnd = list.hwnd orelse return error.TestExpectedList;
+            var buf: [512]u8 = undefined;
+            _ = sys.SendMessageW(hwnd, WM_SYSKEYDOWN, focus_cue.vk_up, 1 << 29);
+            try expectSameText("noctty is looking for the profiles on this computer: the order can be changed once it has them all.", try statusTextOf(settings, &buf));
+            try std.testing.expect(!settings.hasPendingChanges());
+            // Whole: Enter and Delete say what can be done, and open and
+            // remove nothing.
+            giveProfilePage(fixture, &listed, true);
+            try selectProfileRow(list, settings.profile_model.findField(.profile, "pwsh.exe", null) orelse return error.TestExpectedRow);
+            try std.testing.expect(fixture.pumpKey(VK_RETURN));
+            try std.testing.expect(settings.profile_edit == null);
+            try expectSameText("noctty found pwsh.exe on this computer, so Settings does not change its command line. Alt+Up and Alt+Down move it; Ctrl+H hides it.", try statusTextOf(settings, &buf));
+            try std.testing.expect(fixture.pumpKey(VK_DELETE));
+            try expectSameText("noctty finds pwsh.exe on this computer, so it cannot be removed; Ctrl+H hides it from the picker.", try statusTextOf(settings, &buf));
+            try std.testing.expect(!settings.hasPendingChanges());
+            // It moves, though.
+            _ = sys.SendMessageW(hwnd, WM_SYSKEYDOWN, focus_cue.vk_up, 1 << 29);
+            try expectSameText("PowerShell moved to 1 of 2.", try statusTextOf(settings, &buf));
         }
     }.body);
 }

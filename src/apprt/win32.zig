@@ -2837,6 +2837,45 @@ test "win32 Settings' profile refill reads the windows' lists and asks for none"
     try std.testing.expect(!first.profiles_requested);
 }
 
+test "win32 Settings' Profiles page list marks the quick slots and the profiles noctty hides itself" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var core_app: CoreApp = undefined;
+    var app: App = undefined;
+    var first: Host = undefined;
+    var session: TestSession = .{};
+    try session.init(.{
+        .core_app = &core_app,
+        .app = &app,
+        .hosts = &.{.{ .storage = &first, .register = true, .id = 1 }},
+    });
+    defer session.deinit();
+    defer testFreeHostProfiles(&app, &.{&first});
+
+    // Command Prompt is hidden by `profile-hidden`; the old Visual Studio by
+    // noctty itself, which no value names.
+    first.profiles = try testProfileList(app.core_app.alloc, &.{ "pwsh.exe", "cmd.exe", "vs:old:cmd" });
+    first.profiles_complete = true;
+    first.profiles.?[1].hidden = true;
+    first.profiles.?[2].hidden = true;
+    try app.config.@"profile-hidden".list.append(app.config._arena.?.allocator(), "cmd.exe");
+    // PowerShell has the first quick slot.
+    app.launcher_quick_slot_keys[0] = try std.testing.allocator.dupeZ(u8, "pwsh.exe");
+    defer {
+        std.testing.allocator.free(app.launcher_quick_slot_keys[0].?);
+        app.launcher_quick_slot_keys[0] = null;
+    }
+
+    var choices = try settingsProfileChoicesThunk(&app, std.testing.allocator, null, null, false);
+    defer choices.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 3), choices.items.len);
+    try std.testing.expectEqual(@as(?u8, 1), choices.items[0].quick_slot);
+    try std.testing.expectEqual(@as(?u8, null), choices.items[1].quick_slot);
+    try std.testing.expect(!choices.items[0].found_hidden);
+    try std.testing.expect(choices.items[1].hidden and !choices.items[1].found_hidden);
+    try std.testing.expect(choices.items[2].hidden and choices.items[2].found_hidden);
+}
+
 test "win32 a finished discovery refills Settings' Default profile dropdown" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
     try runOnHiddenDesktop(struct {
@@ -5599,12 +5638,25 @@ pub fn settingsProfileChoicesThunk(
 ) Allocator.Error!win32_settings.ProfileChoices {
     const app: *App = @ptrCast(@alignCast(ctx));
     const outcome = configpkg.pane_launch.outcome(&app.config, reference);
-    var result = if (app.settingsProfileList(ask)) |list|
-        try settingsProfileChoices(alloc, list.profiles, list.complete, reference, outcome)
+    const list = app.settingsProfileList(ask);
+    var result = if (list) |found|
+        try settingsProfileChoices(alloc, found.profiles, found.complete, reference, outcome)
     else
         try settingsProfileChoices(alloc, &.{}, false, reference, outcome);
     errdefer result.deinit(alloc);
     result.draft_label = try settingsDraftProfileLabel(alloc, result.items, reference, draft);
+    // The launcher's quick slots, which the Profiles page keeps first.
+    for (result.items) |*item| if (app.launcherQuickSlotOrdinal(item.key)) |ordinal| {
+        item.quick_slot = @intCast(ordinal + 1);
+    };
+    // A hidden profile no `profile-hidden` value names, noctty hid itself
+    // (an older Visual Studio): the Profiles page cannot show it.
+    if (list) |found| for (result.items, found.profiles) |*item, profile| {
+        if (!profile.hidden) continue;
+        item.found_hidden = for (app.config.@"profile-hidden".list.items) |value| {
+            if (windows_shell.referenceNames(found.profiles, value, profile)) break false;
+        } else true;
+    };
     return result;
 }
 

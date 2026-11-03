@@ -1397,6 +1397,13 @@ pub const SettingsControlProvider = struct {
         events.raiseFocusChanged(&self.base);
     }
 
+    /// Announce a new Name: a button whose text changed (Hide in the picker
+    /// to Show in the picker).
+    pub fn raiseNameChanged(self: *SettingsControlProvider) void {
+        if (!self.available()) return;
+        events.raiseNameChanged(&self.base);
+    }
+
     /// Announce new text in a `live_text` element. Call it once the element is
     /// on screen: a reader drops a live region that reports `IsOffscreen`.
     pub fn raiseLiveRegionChanged(self: *SettingsControlProvider) void {

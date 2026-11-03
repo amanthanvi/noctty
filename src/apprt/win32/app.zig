@@ -1137,6 +1137,8 @@ pub const App = struct {
             .configSource = &settingsConfigSourceThunk,
             .configProblems = &settingsConfigProblemsThunk,
             .profileChoices = &settingsProfileChoicesThunk,
+            .pageProfiles = &settingsProfileChoicesThunk,
+            .findAllProfiles = &settingsFindAllProfiles,
             .notifySuccess = &settingsNotifySuccessThunk,
             .customUiaProvidersEnabled = &settingsCustomUiaProvidersEnabledThunk,
             .deferUiaDisconnect = &settingsDeferUiaDisconnectThunk,
@@ -3102,6 +3104,22 @@ pub const App = struct {
         _ = host.profilesForChrome();
         const profiles = host.profiles orelse return null;
         return .{ .profiles = profiles, .complete = host.profiles_complete };
+    }
+
+    /// `AppHandle.findAllProfiles`: the Profiles page needs the whole list to
+    /// move or hide a profile, and no window has it (a discovery ended
+    /// without it: a probe timed out, the SSH config was busy). The first
+    /// window asks the discovery worker again, unless it is waiting for one;
+    /// the list reaches the page through `profilesChanged`. A window that
+    /// has the whole list already is read at once.
+    fn settingsFindAllProfiles(ctx: *anyopaque) void {
+        const self: *App = @ptrCast(@alignCast(ctx));
+        for (self.registry.hosts.items) |host| if (host.profiles_complete and host.profiles != null) {
+            return self.settings_window.profilesChanged();
+        };
+        if (self.registry.hosts.items.len == 0) return;
+        const host = self.registry.hosts.items[0];
+        if (!host.profiles_requested) host.requestProfiles();
     }
 
     fn anyHostRequestedProfiles(self: *const App) bool {
@@ -6012,6 +6030,9 @@ pub const App = struct {
             runUiActionOrLog("quick slot profile refresh failed", host.reapplyLauncherProfilePreferences());
             host.refreshProfileChrome();
         }
+        // The Profiles page keeps the pinned profiles first, as the picker
+        // now shows them.
+        self.settings_window.profilesChanged();
     }
 
     test "setLauncherQuickSlotPreference keeps the other slot's key when the copy fails" {
@@ -10391,6 +10412,117 @@ pub const App = struct {
         light_pending.@"default-profile" = null;
         try app.settingsSaveAndReload(&light_pending, &light_original);
         try std.testing.expect(app.settings_masked_keys.text == null);
+    }
+
+    test "settings save of the profiles' order and visibility writes both lists whole, which the app then picks by" {
+        if (builtin.os.tag != .windows) return error.SkipZigTest;
+        const alloc = std.testing.allocator;
+        const settings_profiles = @import("../win32_settings_profiles.zig");
+        var core_app: CoreApp = undefined;
+        var app: App = undefined;
+        var session: TestSession = .{};
+        try session.init(.{ .core_app = &core_app, .app = &app });
+        defer session.deinit();
+        defer testFreeConfigProblems(&app, alloc);
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        // A file loaded first orders and hides profiles of its own.
+        try tmp.dir.writeFile(.{ .sub_path = "lower.conf", .data = "profile-order = cmd.exe\nprofile-hidden = pwsh.exe\n" });
+        try tmp.dir.writeFile(.{ .sub_path = "config", .data = "profile-command = py: python.exe\n" });
+        const lower = try tmp.dir.realpathAlloc(alloc, "lower.conf");
+        defer alloc.free(lower);
+        const path = try tmp.dir.realpathAlloc(alloc, "config");
+        defer alloc.free(path);
+        SaveTest.files = &.{ lower, path };
+        try SaveTest.begin(&app, path);
+        defer SaveTest.end(&app);
+        var original = try app.config.clone(alloc);
+        defer original.deinit();
+        var pending = try app.config.clone(alloc);
+        defer pending.deinit();
+        // The page's order: py, PowerShell, Command Prompt, with Command
+        // Prompt hidden.
+        try settings_profiles.setOrder(&pending, &.{ "user:py", "pwsh.exe", "cmd.exe" });
+        try settings_profiles.setHidden(&pending, &.{"cmd.exe"});
+        try app.settingsSaveAndReload(&pending, &original);
+        // The file: its own line, then both lists whole, each after its clear.
+        {
+            const after = try SaveTest.read(path);
+            defer alloc.free(after);
+            try std.testing.expectEqualStrings("profile-command = py: python.exe\n\nprofile-order =\nprofile-order = user:py\nprofile-order = pwsh.exe\nprofile-order = cmd.exe\n\nprofile-hidden =\nprofile-hidden = cmd.exe\n", after);
+        }
+        // The clears take what the lower file gave: the app's lists are the
+        // page's, and picking by them gives the page's order.
+        var profiles = [_]windows_shell.Profile{
+            .{ .kind = .cmd, .key = "cmd.exe", .label = "Command Prompt", .command = .{ .direct = &.{} } },
+            .{ .kind = .pwsh, .key = "pwsh.exe", .label = "PowerShell", .command = .{ .direct = &.{} } },
+            .{ .kind = .user, .key = "user:py", .label = "py", .command = .{ .direct = &.{} } },
+        };
+        var order: [8][]const u8 = undefined;
+        var hidden: [8][]const u8 = undefined;
+        for (app.config.@"profile-order".list.items, 0..) |value, at| order[at] = value;
+        for (app.config.@"profile-hidden".list.items, 0..) |value, at| hidden[at] = value;
+        windows_shell.arrangeProfiles(&profiles, order[0..app.config.@"profile-order".list.items.len], hidden[0..app.config.@"profile-hidden".list.items.len]);
+        for ([_][]const u8{ "user:py", "pwsh.exe", "cmd.exe" }, profiles) |key, profile| try std.testing.expectEqualStrings(key, profile.key);
+        try std.testing.expect(!profiles[0].hidden and !profiles[1].hidden and profiles[2].hidden);
+    }
+
+    test "settings save of the profiles' order that a later file clears says so, and one another program changed stops" {
+        if (builtin.os.tag != .windows) return error.SkipZigTest;
+        const alloc = std.testing.allocator;
+        const settings_profiles = @import("../win32_settings_profiles.zig");
+        var core_app: CoreApp = undefined;
+        var app: App = undefined;
+        var session: TestSession = .{};
+        try session.init(.{ .core_app = &core_app, .app = &app });
+        defer session.deinit();
+        defer testFreeConfigProblems(&app, alloc);
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        // An include, read after the file, clears the order and gives one of
+        // its own.
+        try tmp.dir.writeFile(.{ .sub_path = "more.conf", .data = "profile-order =\nprofile-order = cmd.exe\n" });
+        const more = try tmp.dir.realpathAlloc(alloc, "more.conf");
+        defer alloc.free(more);
+        const text = try std.fmt.allocPrint(alloc, "profile-command = py: python.exe\nconfig-file = {s}\n", .{more});
+        defer alloc.free(text);
+        try tmp.dir.writeFile(.{ .sub_path = "config", .data = text });
+        const path = try tmp.dir.realpathAlloc(alloc, "config");
+        defer alloc.free(path);
+        SaveTest.files = &.{path};
+        try SaveTest.begin(&app, path);
+        defer SaveTest.end(&app);
+        {
+            var original = try app.config.clone(alloc);
+            defer original.deinit();
+            var pending = try app.config.clone(alloc);
+            defer pending.deinit();
+            try settings_profiles.setOrder(&pending, &.{ "user:py", "cmd.exe" });
+            // Saved, and the order said to be overridden.
+            try std.testing.expectError(error.SavedButMasked, app.settingsSaveAndReload(&pending, &original));
+            try std.testing.expect(std.mem.indexOf(u8, app.settings_masked_keys.text orelse return error.TestExpectedMaskedKeys, "profile-order") != null);
+        }
+        // Another program hides a profile while Settings has the page's
+        // visibility changed: nothing is saved, and the status names the key.
+        try tmp.dir.writeFile(.{ .sub_path = "config", .data = text });
+        {
+            var loaded = try SaveTest.load(alloc);
+            defer loaded.deinit();
+            try app.core_app.updateConfig(&app, &loaded);
+        }
+        var original = try app.config.clone(alloc);
+        defer original.deinit();
+        var pending = try app.config.clone(alloc);
+        defer pending.deinit();
+        try settings_profiles.setHidden(&pending, &.{"pwsh.exe"});
+        const changed = try std.fmt.allocPrint(alloc, "{s}profile-hidden = wsl\n", .{text});
+        defer alloc.free(changed);
+        try tmp.dir.writeFile(.{ .sub_path = "config", .data = changed });
+        try std.testing.expectError(error.ProfileChanged, app.settingsSaveAndReload(&pending, &original));
+        try std.testing.expectEqualStrings("profile-hidden", app.settings_failure_detail.text orelse return error.TestExpectedDetail);
+        const after = try SaveTest.read(path);
+        defer alloc.free(after);
+        try std.testing.expectEqualStrings(changed, after);
     }
 
     test "win32 settings save of a profile removal reads the layers again: a lower file that gained the profile keeps a tombstone" {

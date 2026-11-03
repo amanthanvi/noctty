@@ -12,13 +12,19 @@
 //! variable's value is masked in the row and in that Value
 //! (`masked_value`), and shown only in the text field while it is typed
 //! into; the search does not find a variable by its value.
-//! `profile-order` and `profile-hidden` are shown, not edited.
+//! With the app's list of profiles (`Listed`, `Model.buildListed`) the page
+//! shows every profile, in the picker's order with the hidden ones last:
+//! user profiles with their fields, and the ones noctty finds (shells, WSL,
+//! Visual Studio, SSH hosts) as one row each. Moving a profile or hiding it
+//! writes `profile-order` and `profile-hidden` whole into the draft
+//! (`moveProfile`, `setProfileHidden`), which a save writes to the file.
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
 const configpkg = @import("../config.zig");
 const Config = configpkg.Config;
 const profile_map = @import("../config/profile_map.zig");
+const windows_shell = @import("../config/windows_shell.zig");
 const LineIterator = @import("../cli/args.zig").LineIterator;
 
 pub const RowKind = enum {
@@ -48,8 +54,38 @@ pub const Variable = struct {
     changed: bool,
 };
 
+/// A profile as the app lists it (`AppHandle.profileChoices`), in the
+/// picker's order: hidden ones last, and up to three quick-slot ones first.
+pub const Listed = struct {
+    /// The picker's key: `user:<id>` for a user profile (its id in lower
+    /// case), else what noctty found (`pwsh.exe`, `wsl:Ubuntu`, ...).
+    key: []const u8,
+    label: []const u8,
+    hidden: bool = false,
+    /// The launcher's quick slot that pins it to the front (1 to 3).
+    quick_slot: ?u8 = null,
+    /// Hidden by noctty itself, not by `profile-hidden`: an older Visual
+    /// Studio under `visual-studio-profiles = newest`. The page shows it
+    /// last among the hidden ones, and neither list it writes names it.
+    found_hidden: bool = false,
+    /// The one `default-profile` starts, an alias (`pwsh`, `wsl`,
+    /// `vs:newest:cmd`) resolved as the app resolves it.
+    default: bool = false,
+};
+
 pub const Profile = struct {
+    /// A user profile's id; for one noctty found, its key.
     id: []const u8,
+    /// The picker's key: `user:<id>`, or what noctty found.
+    key: []const u8 = "",
+    /// Found by noctty, not a user profile: no fields to edit, only its
+    /// place and whether it is hidden.
+    detected: bool = false,
+    /// The launcher's quick slot that pins it to the front of the picker.
+    quick_slot: ?u8 = null,
+    /// Hidden by noctty itself (`Listed.found_hidden`): it stays hidden and
+    /// does not move.
+    found_hidden: bool = false,
     command: []const u8,
     label: ?[]const u8,
     folder: ?[]const u8,
@@ -97,6 +133,14 @@ pub const Model = struct {
     arena: ?std.heap.ArenaAllocator = null,
     profiles: []const Profile = &.{},
     rows: []const Row = &.{},
+    /// Built from the app's whole list (`buildListed` with `complete`): a
+    /// profile can be moved or hidden. Not while the profiles noctty finds
+    /// are still being looked for, or with no list at all.
+    complete: bool = false,
+    /// The lists the page would write for the arrangement the draft started
+    /// from (`original`): a move or a hide that comes back to it puts the
+    /// draft's lists back as they were, so it is no change.
+    base: ?Lists = null,
 
     /// The most rows a model holds: the list knows a row by a `u16`.
     pub const max_rows: usize = std.math.maxInt(u16);
@@ -116,6 +160,17 @@ pub const Model = struct {
     /// config the draft started from) tells which fields changed. A config
     /// with more rows than `max_rows` lists the profiles that fit.
     pub fn build(self: *Model, alloc: Allocator, draft: *const Config, original: ?*const Config) Allocator.Error!void {
+        return self.buildListed(alloc, draft, original, &.{}, false);
+    }
+
+    /// `build`, with the app's list of profiles (`listed`, in the picker's
+    /// order; empty for none): every profile it lists, in that order, the
+    /// hidden ones last, with the user profiles the draft adds after the
+    /// last shown user profile and those it removes left out. Once the draft
+    /// has its own `profile-order` or `profile-hidden` (the page moved or hid
+    /// one), those decide, as they will once saved. `complete`: the list is
+    /// the app's whole list, so profiles can be moved and hidden.
+    pub fn buildListed(self: *Model, alloc: Allocator, draft: *const Config, original: ?*const Config, listed: []const Listed, complete: bool) Allocator.Error!void {
         self.deinit();
         var arena: std.heap.ArenaAllocator = .init(alloc);
         errdefer arena.deinit();
@@ -124,8 +179,33 @@ pub const Model = struct {
         var rows: std.ArrayListUnmanaged(Row) = .empty;
         try rows.append(a, .{ .kind = .new_profile, .identity = identity(.new_profile, "", null), .search = "new profile add create" });
         const cli = try commandLineIds(a, draft);
-        for (draft.@"profile-command".entries.items) |entry| {
-            if (entry.removed) continue;
+        const entries = try pageEntries(a, draft, original, listed);
+        for (entries) |page_entry| {
+            if (page_entry.user == null) {
+                // A profile noctty found: one row.
+                if (rows.items.len + 1 > max_rows) break;
+                const item = page_entry.listed.?;
+                const index: u32 = @intCast(profiles.items.len);
+                const key = try a.dupe(u8, item.key);
+                try profiles.append(a, .{
+                    .id = key,
+                    .key = key,
+                    .detected = true,
+                    .quick_slot = item.quick_slot,
+                    .command = "",
+                    .label = try a.dupe(u8, item.label),
+                    .folder = null,
+                    .variables = &.{},
+                    .default = item.default or if (draft.@"default-profile") |value| sameKey(std.mem.trim(u8, value, " \t"), key) else false,
+                    .found_hidden = item.found_hidden,
+                    .hidden = page_entry.hidden,
+                    .read_only = false,
+                    .changed = .{},
+                });
+                try rows.append(a, .{ .kind = .profile, .profile = index, .identity = identity(.profile, key, null), .search = try lower(a, &.{ item.label, "\n", key }) });
+                continue;
+            }
+            const entry = draft.@"profile-command".entries.items[page_entry.user.?];
             const env = draft.@"profile-env".get(entry.id);
             const variable_count = if (env) |map| map.count() else 0;
             // The profile's own row, its three fields, its variables and
@@ -169,12 +249,14 @@ pub const Model = struct {
             const index: u32 = @intCast(profiles.items.len);
             try profiles.append(a, .{
                 .id = id,
+                .key = try std.fmt.allocPrint(a, "user:{s}", .{id}),
+                .quick_slot = if (page_entry.listed) |item| item.quick_slot else null,
                 .command = command,
                 .label = label,
                 .folder = folder,
                 .variables = variables,
-                .default = namesProfile(draft.@"default-profile", entry.id),
-                .hidden = hiddenIn(draft, entry.id),
+                .default = namesProfile(draft.@"default-profile", entry.id) or (page_entry.listed != null and page_entry.listed.?.default),
+                .hidden = page_entry.hidden,
                 .read_only = containsId(cli, entry.id),
                 .changed = changed,
             });
@@ -195,7 +277,107 @@ pub const Model = struct {
             }
             try rows.append(a, .{ .kind = .add_variable, .profile = index, .identity = identity(.add_variable, id, null), .search = try lower(a, &.{ "add environment variable\n", shown, "\n", id }) });
         }
-        self.* = .{ .arena = arena, .profiles = profiles.items, .rows = rows.items };
+        // What the page would write for the arrangement the draft started
+        // from.
+        const base: ?Lists = if (original) |was| if (listed.len != 0) try listsOf(a, was, try pageEntries(a, was, null, listed)) else null else null;
+        // `profiles` is in page order: the shown ones, then the hidden ones.
+        self.* = .{
+            .arena = arena,
+            .profiles = profiles.items,
+            .rows = rows.items,
+            .complete = complete and listed.len != 0,
+            .base = base,
+        };
+    }
+
+    /// Where profile `index` is in the page's order, counted from 1, and how
+    /// many there are: "Python moved to 3 of 9".
+    pub fn place(self: *const Model, index: u32) struct { at: usize, of: usize } {
+        return .{ .at = index + 1, .of = self.profiles.len };
+    }
+
+    /// The profile whose key is `key` (without case, but an `ssh:` alias
+    /// exactly, as OpenSSH takes it), if the page has it.
+    pub fn profileByKey(self: *const Model, key: []const u8) ?u32 {
+        for (self.profiles, 0..) |profile, index| {
+            if (sameKey(profile.key, key)) return @intCast(index);
+        }
+        return null;
+    }
+
+    /// Where profile `index` may move by `step` (-1 up, +1 down), or null:
+    /// only within the shown profiles or within the hidden ones, and never
+    /// past a quick-slot profile, which the picker shows first whatever its
+    /// place (`applyQuickSlotPreferenceOrder`), nor a quick-slot one itself;
+    /// nor one noctty hides itself, which stays last (`found_hidden`). Not
+    /// before the list is complete.
+    pub fn moveTarget(self: *const Model, index: u32, step: i2) ?u32 {
+        if (!self.complete) return null;
+        const profile = &self.profiles[index];
+        if (pinnedFirst(profile) or profile.found_hidden) return null;
+        const next = @as(i64, index) + step;
+        if (next < 0 or next >= self.profiles.len) return null;
+        const other = &self.profiles[@intCast(next)];
+        if (other.hidden != profile.hidden or pinnedFirst(other) or other.found_hidden) return null;
+        return @intCast(next);
+    }
+
+    /// The pinned profile that stops profile `index` moving by `step`, if
+    /// that is what stops it: the note names it.
+    pub fn pinBlocking(self: *const Model, index: u32, step: i2) ?*const Profile {
+        const next = @as(i64, index) + step;
+        if (next < 0 or next >= self.profiles.len) return null;
+        const other = &self.profiles[@intCast(next)];
+        return if (pinnedFirst(other) and !self.profiles[index].hidden) other else null;
+    }
+
+    /// The keys of the page's profiles in its order with profile `index`
+    /// moved to `target` (`moveTarget`), and the hidden ones: what the draft's
+    /// `profile-order` and `profile-hidden` become. From `a`.
+    pub fn moved(self: *const Model, a: Allocator, index: u32, target: u32) Allocator.Error!Lists {
+        const places = try a.alloc(u32, self.profiles.len);
+        for (places, 0..) |*place_of, at| place_of.* = @intCast(at);
+        std.mem.swap(u32, &places[index], &places[target]);
+        var keys: std.ArrayListUnmanaged([]const u8) = .empty;
+        var hidden: std.ArrayListUnmanaged([]const u8) = .empty;
+        for (places) |at| {
+            const profile = &self.profiles[at];
+            // One noctty hides itself is not the page's to write.
+            if (profile.found_hidden) continue;
+            try keys.append(a, profile.key);
+            if (profile.hidden) try hidden.append(a, profile.key);
+        }
+        return .{ .order = keys.items, .hidden = hidden.items };
+    }
+
+    /// The lists with profile `index` hidden (`hide`) or shown: a profile
+    /// hidden goes first among the hidden ones, and one shown last among the
+    /// shown ones, or among the quick-slot ones in its slot's place, as the
+    /// picker shows it then.
+    pub fn toggledHidden(self: *const Model, a: Allocator, index: u32, hide: bool) Allocator.Error!Lists {
+        var shown: std.ArrayListUnmanaged([]const u8) = .empty;
+        var hidden: std.ArrayListUnmanaged([]const u8) = .empty;
+        const profile = &self.profiles[index];
+        if (hide) try hidden.append(a, profile.key);
+        for (self.profiles, 0..) |other, at| {
+            if (at == index or other.found_hidden) continue;
+            try (if (other.hidden) &hidden else &shown).append(a, other.key);
+        }
+        if (!hide) {
+            // Last among the shown, or in its quick slot's place among the
+            // quick-slot ones the picker shows first.
+            var at = shown.items.len;
+            if (profile.quick_slot) |slot| {
+                at = 0;
+                for (self.profiles, 0..) |other, position| {
+                    if (position == index or !pinnedFirst(&other)) continue;
+                    if (other.quick_slot.? < slot) at += 1;
+                }
+            }
+            try shown.insert(a, at, profile.key);
+        }
+        const order = try std.mem.concat(a, []const u8, &.{ shown.items, hidden.items });
+        return .{ .order = order, .hidden = hidden.items };
     }
 
     /// The row known as `wanted` (`Row.identity`), if the model has it.
@@ -236,7 +418,7 @@ pub const Model = struct {
             .new_profile, .add_variable => {},
             .profile => {
                 const profile = &self.profiles[row.profile];
-                try writer.print("user:{s}", .{profile.id});
+                if (profile.detected) try writer.writeAll(profile.key) else try writer.print("user:{s}", .{profile.id});
                 try writeMarks(profile, writer, " (", ")");
             },
             .command => {
@@ -275,7 +457,7 @@ pub const Model = struct {
     pub fn summary(self: *const Model, row: Row) []const u8 {
         return switch (row.kind) {
             .new_profile => "Add a profile: Enter asks for its id, then for its command line.",
-            .profile => self.profiles[row.profile].command,
+            .profile => if (self.profiles[row.profile].detected) "Found by noctty on this computer." else self.profiles[row.profile].command,
             .command => "The program and arguments the profile starts.",
             .name => if (self.profiles[row.profile].label == null) "None: the picker shows the profile's id." else "The profile's label in the picker and the palette.",
             .folder => if (self.profiles[row.profile].folder == null) "None: the profile starts in the home folder." else "Where the profile starts: home, inherit or a folder.",
@@ -292,16 +474,25 @@ pub const Model = struct {
                 "Enter asks for the new profile's id (1 to 64 letters, digits, dots, hyphens or underscores, which cannot be changed later), then for its command line.",
         );
         const profile = &self.profiles[row.profile];
-        if (profile.read_only) return writer.print(
+        if (profile.detected) {
+            try writer.print("Profile {s}, which noctty found on this computer: its command line, name and folder are noctty's, so Settings does not change them. ", .{profile.key});
+            return writeOrderHelp(profile, writer);
+        }
+        if (profile.read_only and row.kind != .profile) return writer.print(
             "Profile user:{s} comes from noctty's command line, so Settings does not change it: a change saved to the config file would not be used while that command line names it.",
             .{profile.id},
         );
         switch (row.kind) {
             .new_profile => unreachable,
             .profile => {
-                try writer.print("Profile user:{s}. Its id cannot be changed: sessions, layouts and the taskbar's jump list name the profile by it. Enter edits its command line; Delete removes the profile.", .{profile.id});
-                if (profile.default) try writer.writeAll(" Default profile names it: once it is removed, new tabs open the automatic shell.");
-                if (profile.hidden) try writer.writeAll(" profile-hidden leaves it out of the picker, the palette and the jump list; change that in the config file.");
+                if (profile.read_only)
+                    try writer.print("Profile user:{s} comes from noctty's command line, so Settings does not change its fields. ", .{profile.id})
+                else {
+                    try writer.print("Profile user:{s}. Its id cannot be changed: sessions, layouts and the taskbar's jump list name the profile by it. Enter edits its command line; Delete removes the profile.", .{profile.id});
+                    if (profile.default) try writer.writeAll(" Default profile names it: once it is removed, new tabs open the automatic shell.");
+                    try writer.writeAll(" ");
+                }
+                try writeOrderHelp(profile, writer);
             },
             .command => try writer.writeAll("A Windows command line, used exactly as written: nothing is unquoted or unescaped, and %NAME% is replaced by the variable's value. Enter edits it."),
             .name => try writer.writeAll("The profile's label in the picker and the palette; without one they show its id. Enter edits it; Delete takes it out."),
@@ -319,7 +510,10 @@ pub const Model = struct {
             .new_profile => try writer.writeAll("New profile"),
             .profile => {
                 const profile = &self.profiles[row.profile];
-                try writer.print("{s}, profile user:{s}", .{ profile.label orelse profile.id, profile.id });
+                if (profile.detected)
+                    try writer.print("{s}, profile {s}", .{ profile.label orelse profile.id, profile.key })
+                else
+                    try writer.print("{s}, profile user:{s}", .{ profile.label orelse profile.id, profile.id });
                 try writeMarks(profile, writer, ", ", "");
             },
             .add_variable => try writer.print("Add variable to {s}", .{self.profiles[row.profile].id}),
@@ -348,7 +542,10 @@ pub const Model = struct {
     pub fn writeRowValue(self: *const Model, row: Row, writer: *std.Io.Writer) std.Io.Writer.Error!bool {
         switch (row.kind) {
             .new_profile, .add_variable => return false,
-            .profile => try writer.writeAll(self.profiles[row.profile].command),
+            .profile => {
+                const profile = &self.profiles[row.profile];
+                try writer.writeAll(if (profile.detected) profile.key else profile.command);
+            },
             .variable => try writer.writeAll(value_hidden),
             .command, .name, .folder => if (self.emptyValue(row)) try writer.writeAll("none") else try self.writeValueText(row, writer),
         }
@@ -368,6 +565,175 @@ pub const Model = struct {
     }
 };
 
+/// What a move or a hide makes the draft's two lists (`Model.moved`,
+/// `Model.toggledHidden`).
+pub const Lists = struct {
+    order: []const []const u8,
+    hidden: []const []const u8,
+
+    pub fn eql(self: Lists, other: Lists) bool {
+        return keysEql(self.order, other.order) and keysEql(self.hidden, other.hidden);
+    }
+
+    fn keysEql(a: []const []const u8, b: []const []const u8) bool {
+        if (a.len != b.len) return false;
+        for (a, b) |x, y| if (!std.mem.eql(u8, x, y)) return false;
+        return true;
+    }
+};
+
+/// The lists the page writes for `entries` (`pageEntries` of `config`):
+/// every profile's key in page order and the hidden ones', none that noctty
+/// hides itself.
+fn listsOf(a: Allocator, config: *const Config, entries: []const PageEntry) Allocator.Error!Lists {
+    const commands = config.@"profile-command".entries.items;
+    var order: std.ArrayListUnmanaged([]const u8) = .empty;
+    var hidden: std.ArrayListUnmanaged([]const u8) = .empty;
+    for (entries) |entry| {
+        if (entry.listed) |item| if (item.found_hidden) continue;
+        // Copies: the app's list goes once the page is built.
+        const key = if (entry.user) |index| try std.fmt.allocPrint(a, "user:{s}", .{commands[index].id}) else try a.dupe(u8, entry.listed.?.key);
+        try order.append(a, key);
+        if (entry.hidden) try hidden.append(a, key);
+    }
+    return .{ .order = order.items, .hidden = hidden.items };
+}
+
+/// Whether the picker shows `profile` first, pinned by a quick slot: a shown
+/// one (a hidden one is not in the picker to pin).
+fn pinnedFirst(profile: *const Profile) bool {
+    return profile.quick_slot != null and !profile.hidden;
+}
+
+/// One profile in page order (`pageEntries`): the app's list item, if the
+/// app lists it, and the draft's `profile-command` entry, for a user profile.
+const PageEntry = struct {
+    listed: ?*const Listed = null,
+    user: ?usize = null,
+    hidden: bool,
+    rank: usize = std.math.maxInt(usize),
+
+    fn foundHidden(self: PageEntry) bool {
+        return if (self.listed) |item| item.found_hidden else false;
+    }
+
+    /// Shown, hidden, or hidden by noctty itself: the page's three blocks.
+    fn group(self: PageEntry) u2 {
+        if (self.foundHidden()) return 2;
+        return @intFromBool(self.hidden);
+    }
+
+    /// A shown profile's quick slot, which pulls it to the front.
+    fn slot(self: PageEntry) u8 {
+        if (self.hidden) return std.math.maxInt(u8);
+        const item = self.listed orelse return std.math.maxInt(u8);
+        return item.quick_slot orelse std.math.maxInt(u8);
+    }
+};
+
+/// The profiles of the page in its order (`Model.buildListed`).
+fn pageEntries(a: Allocator, draft: *const Config, original: ?*const Config, listed: []const Listed) Allocator.Error![]PageEntry {
+    var entries: std.ArrayListUnmanaged(PageEntry) = .empty;
+    const commands = draft.@"profile-command".entries.items;
+    if (listed.len == 0) {
+        // No list: the user profiles in definition order, as before.
+        for (commands, 0..) |entry, index| {
+            if (entry.removed) continue;
+            try entries.append(a, .{ .user = index, .hidden = hiddenIn(draft, entry.id) });
+        }
+        return entries.items;
+    }
+    const placed = try a.alloc(bool, commands.len);
+    @memset(placed, false);
+    for (listed) |*item| {
+        if (userId(item.key)) |id| {
+            const index = for (commands, 0..) |entry, at| {
+                if (!entry.removed and std.ascii.eqlIgnoreCase(entry.id, id)) break at;
+            } else continue;
+            placed[index] = true;
+            try entries.append(a, .{ .listed = item, .user = index, .hidden = item.hidden });
+            continue;
+        }
+        try entries.append(a, .{ .listed = item, .hidden = item.hidden });
+    }
+    // The draft's new profiles, after the last shown user profile (where the
+    // picker lists a profile no `profile-order` names), else before the
+    // first hidden one.
+    for (commands, 0..) |entry, index| {
+        if (entry.removed or placed[index]) continue;
+        var after_user: ?usize = null;
+        for (entries.items, 0..) |other, position| {
+            if (other.hidden) break;
+            if (other.user != null) after_user = position + 1;
+        }
+        const at = after_user orelse for (entries.items, 0..) |other, position| {
+            if (other.hidden) break position;
+        } else entries.items.len;
+        try entries.insert(a, at, .{ .user = index, .hidden = hiddenIn(draft, entry.id) });
+    }
+    // A draft list of its own (the page moved or hid one) decides, as the
+    // loader will once it is saved: it names every profile by its key. A
+    // list the page left as it was keeps the app's answer, which reads the
+    // file's aliases (`wsl`, `pwsh`) as the page cannot.
+    const order_edited = if (original) |was| !was.@"profile-order".equal(draft.@"profile-order") else false;
+    const hidden_edited = if (original) |was| !was.@"profile-hidden".equal(draft.@"profile-hidden") else false;
+    for (entries.items, 0..) |*entry, position| {
+        const key = entryKey(commands, entry.*);
+        const id = if (entry.user) |index| commands[index].id else null;
+        entry.rank = if (order_edited) for (draft.@"profile-order".list.items, 0..) |value, at| {
+            if (namesKey(value, key, id)) break at;
+        } else std.math.maxInt(usize) else position;
+        if (hidden_edited) entry.hidden = entry.foundHidden() or for (draft.@"profile-hidden".list.items) |value| {
+            if (namesKey(value, key, id)) break true;
+        } else false;
+    }
+    // The picker's order: the shown profiles, the quick-slot ones first in
+    // slot order, as the picker pulls them (`applyQuickSlotPreferenceOrder`);
+    // then the hidden ones, those noctty hides itself last. A new profile
+    // placed among the pinned ones goes after them.
+    std.sort.insertion(PageEntry, entries.items, {}, struct {
+        fn lessThan(_: void, x: PageEntry, y: PageEntry) bool {
+            if (x.group() != y.group()) return x.group() < y.group();
+            if (x.slot() != y.slot()) return x.slot() < y.slot();
+            return x.rank < y.rank;
+        }
+    }.lessThan);
+    return entries.items;
+}
+
+/// The picker's key of `entry`: the app's, or `user:<id>` for a new one.
+fn entryKey(commands: anytype, entry: PageEntry) []const u8 {
+    if (entry.listed) |item| return item.key;
+    return commands[entry.user.?].id;
+}
+
+/// A user profile key's id (`user:<id>`), or null for any other key.
+fn userId(key: []const u8) ?[]const u8 {
+    if (key.len <= "user:".len or !std.ascii.startsWithIgnoreCase(key, "user:")) return null;
+    return key["user:".len..];
+}
+
+/// Whether `a` and `b` are one profile's key: without case, but an `ssh:`
+/// key's alias exactly, as OpenSSH aliases are case-sensitive (the prefix in
+/// any case, as `windows_shell.referenceNames` takes it).
+fn sameKey(a: []const u8, b: []const u8) bool {
+    const prefix = "ssh:";
+    if (std.ascii.startsWithIgnoreCase(a, prefix) or std.ascii.startsWithIgnoreCase(b, prefix)) {
+        return a.len == b.len and std.ascii.startsWithIgnoreCase(a, prefix) and std.ascii.startsWithIgnoreCase(b, prefix) and
+            std.mem.eql(u8, a[prefix.len..], b[prefix.len..]);
+    }
+    return std.ascii.eqlIgnoreCase(a, b);
+}
+
+/// Whether a `profile-order` or `profile-hidden` value names the profile
+/// with `key` (for a user profile, `id` too: its bare id or `user:<id>`),
+/// without case, but an `ssh:` alias exactly.
+fn namesKey(value: []const u8, key: []const u8, id: ?[]const u8) bool {
+    const text = std.mem.trim(u8, value, &std.ascii.whitespace);
+    if (sameKey(text, key)) return true;
+    return if (id) |user| namesProfile(text, user) else false;
+}
+
 const changed_mark = " (changed here, not saved yet)";
 
 /// How a row shows a variable's value: masked, so a screenshot or someone
@@ -381,9 +747,12 @@ pub const value_hidden = "value hidden";
 /// "(default profile, hidden)".
 fn writeMarks(profile: *const Profile, writer: *std.Io.Writer, open: []const u8, close: []const u8) std.Io.Writer.Error!void {
     var first = true;
+    var slot_buf: [16]u8 = undefined;
+    const slot_text: []const u8 = if (profile.quick_slot) |slot| std.fmt.bufPrint(&slot_buf, "quick slot {d}", .{slot}) catch "quick slot" else "";
     const marks = [_]struct { on: bool, text: []const u8 }{
         .{ .on = profile.default, .text = "default profile" },
-        .{ .on = profile.hidden, .text = "hidden" },
+        .{ .on = profile.hidden, .text = if (profile.found_hidden) "hidden by noctty" else "hidden" },
+        .{ .on = profile.quick_slot != null and !profile.hidden, .text = slot_text },
         .{ .on = profile.read_only, .text = "from the command line, read-only" },
         .{ .on = profile.changed.any(), .text = if (profile.changed.new) "new, not saved yet" else "changed here, not saved yet" },
     };
@@ -396,12 +765,37 @@ fn writeMarks(profile: *const Profile, writer: *std.Io.Writer, open: []const u8,
     if (!first) try writer.writeAll(close);
 }
 
+/// The open row's words on a profile's place and visibility: what moves
+/// it and hides it, and what is true of it there.
+fn writeOrderHelp(profile: *const Profile, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+    if (profile.found_hidden) {
+        try writer.writeAll(found_hidden_help);
+        if (profile.default) try writer.writeAll(" Default profile names it, so new tabs still start it.");
+        return;
+    }
+    if (profile.quick_slot != null and !profile.hidden)
+        try writer.writeAll("A quick slot pins it, so the picker shows it first, and it does not move here. ")
+    else
+        try writer.writeAll("Alt+Up and Alt+Down move it in the picker's order. ");
+    try writer.writeAll(if (profile.hidden)
+        "It is hidden: the picker, the palette and the jump list leave it out. Ctrl+H shows it."
+    else
+        "Ctrl+H hides it from the picker, the palette and the jump list.");
+    if (profile.hidden and profile.default) try writer.writeAll(" Default profile names it, so new tabs still start it.");
+}
+
+/// Why a profile noctty hides itself stays hidden.
+pub const found_hidden_help = "noctty hides it: with visual-studio-profiles = newest it lists only the newest Visual Studio. Set visual-studio-profiles = all to list the others.";
+
 /// What UIA knows a row by: its kind, its profile's id and its variable's
-/// name, without case, which is how the loader tells them apart.
+/// name, without case, which is how the loader tells them apart; an `ssh:`
+/// alias with its case, as OpenSSH tells them apart.
 pub fn identity(kind: RowKind, id: []const u8, name: ?[]const u8) u64 {
     var hasher: std.hash.Wyhash = .init(0);
     hasher.update(&.{@intFromEnum(kind)});
-    for (id) |c| hasher.update(&.{std.ascii.toLower(c)});
+    const exact_from: usize = if (std.ascii.startsWithIgnoreCase(id, "ssh:")) "ssh:".len else id.len;
+    for (id[0..exact_from]) |c| hasher.update(&.{std.ascii.toLower(c)});
+    hasher.update(id[exact_from..]);
     if (name) |text| {
         hasher.update(&.{0});
         for (text) |c| hasher.update(&.{std.ascii.toLower(c)});
@@ -480,9 +874,19 @@ pub fn draftChanged(original: *const Config, draft: *const Config) bool {
 }
 
 /// How many profile fields `draft` changed: a command line (a profile added
-/// or removed counts as its command), a label, a starting folder, and each
-/// variable. What the close prompt and the Advanced page count.
+/// or removed counts as its command), a label, a starting folder, each
+/// variable, and the order and the hidden profiles, one each. What the close
+/// prompt and the Advanced page count.
 pub fn changedFieldCount(original: *const Config, draft: *const Config) usize {
+    var count = profileFieldChanges(original, draft);
+    if (!original.@"profile-order".equal(draft.@"profile-order")) count += 1;
+    if (!original.@"profile-hidden".equal(draft.@"profile-hidden")) count += 1;
+    return count;
+}
+
+/// `changedFieldCount` for the profiles' own fields: not the order or the
+/// hidden profiles.
+fn profileFieldChanges(original: *const Config, draft: *const Config) usize {
     var count: usize = textChanges(.command, &original.@"profile-command", &draft.@"profile-command");
     count += textChanges(.name, &original.@"profile-name", &draft.@"profile-name");
     count += textChanges(.text, &original.@"profile-working-directory", &draft.@"profile-working-directory");
@@ -539,15 +943,18 @@ fn liveText(comptime kind: profile_map.Kind, map: *const profile_map.ProfileMap(
 /// says now): when the draft changed no profile, `original` and `draft` take
 /// the file's profiles, as an unedited setting takes the file's value. A
 /// draft that changed one keeps every profile as it was, and a save writes
-/// only what the page changed (`settings_patch.profileEdits`). The marks the
-/// page shows (`default-profile` aside, which is a setting of its own) follow
-/// the file either way.
+/// only what the page changed (`settings_patch.profileEdits`). The order and
+/// the hidden profiles follow the file the same way, each on its own: one
+/// the draft changed stays as the draft has it (a save checks it against
+/// the file, `settings_patch.changedUnder`).
 pub fn followFile(original: *Config, draft: *Config, replacement: *const Config) Allocator.Error!void {
-    const follow_profiles = !draftChanged(original, draft);
+    const follow_profiles = profileFieldChanges(original, draft) == 0;
+    const follow_order = original.@"profile-order".equal(draft.@"profile-order");
+    const follow_hidden = original.@"profile-hidden".equal(draft.@"profile-hidden");
     for ([_]*Config{ original, draft }) |config| {
         const a = arenaOf(config);
-        config.@"profile-hidden" = try replacement.@"profile-hidden".clone(a);
-        config.@"profile-order" = try replacement.@"profile-order".clone(a);
+        if (follow_hidden) config.@"profile-hidden" = try replacement.@"profile-hidden".clone(a);
+        if (follow_order) config.@"profile-order" = try replacement.@"profile-order".clone(a);
         if (!follow_profiles) continue;
         config.@"profile-command" = try replacement.@"profile-command".clone(a);
         config.@"profile-name" = try replacement.@"profile-name".clone(a);
@@ -705,6 +1112,24 @@ fn arenaOf(draft: *Config) Allocator {
 
 /// Profile `id`'s command line is `text`; a profile the draft does not have,
 /// or removed, is defined (a removed one comes back with its fields).
+/// Make `draft`'s `profile-order` exactly `keys`, in that order: what the
+/// page's order is written as (`settings_patch` writes it whole).
+pub fn setOrder(draft: *Config, keys: []const []const u8) Allocator.Error!void {
+    try setList(draft, &draft.@"profile-order", keys);
+}
+
+/// Make `draft`'s `profile-hidden` exactly `keys`.
+pub fn setHidden(draft: *Config, keys: []const []const u8) Allocator.Error!void {
+    try setList(draft, &draft.@"profile-hidden", keys);
+}
+
+fn setList(draft: *Config, list: *Config.RepeatableString, keys: []const []const u8) Allocator.Error!void {
+    const a = arenaOf(draft);
+    var next: Config.RepeatableString = .{};
+    for (keys) |key| try next.list.append(a, try a.dupeZ(u8, key));
+    list.* = next;
+}
+
 pub fn setCommand(draft: *Config, id: []const u8, text: []const u8) Allocator.Error!void {
     try draft.@"profile-command".put(arenaOf(draft), id, text);
 }
@@ -746,10 +1171,26 @@ pub fn removeVariable(draft: *Config, id: []const u8, name: []const u8) (Allocat
 }
 
 /// Remove profile `id` whole, as `profile-command = <id>:` does: its other
-/// fields stay in the draft, dormant. One the draft brought in (`original`
+/// fields stay in the draft, dormant, and a list the page wrote no longer
+/// names it. One the draft brought in (`original`
 /// has no profile `id`, or only its tombstone) goes back to what `original`
 /// had for it, every field, as if it had never been added.
 pub fn removeProfile(original: *const Config, draft: *Config, id: []const u8) (Allocator.Error || profile_map.Error)!void {
+    // A list the page wrote names every profile: the removed one leaves it,
+    // or the saved list would name a profile that is gone.
+    for ([_]struct { was: *const Config.RepeatableString, now: *Config.RepeatableString }{
+        .{ .was = &original.@"profile-order", .now = &draft.@"profile-order" },
+        .{ .was = &original.@"profile-hidden", .now = &draft.@"profile-hidden" },
+    }) |pair| {
+        if (pair.was.equal(pair.now.*)) continue;
+        var kept: usize = 0;
+        for (pair.now.list.items) |value| {
+            if (namesProfile(std.mem.trim(u8, value, &std.ascii.whitespace), id)) continue;
+            pair.now.list.items[kept] = value;
+            kept += 1;
+        }
+        pair.now.list.shrinkRetainingCapacity(kept);
+    }
     if (original.@"profile-command".get(id) == null) {
         const a = arenaOf(draft);
         try restoreEntry(.command, a, &original.@"profile-command", &draft.@"profile-command", id);
@@ -799,6 +1240,20 @@ fn testConfig(alloc: Allocator, text: []const u8, args: []const []const u8) !Con
     try config.loadIter(alloc, &iter);
     try config.finalize();
     return config;
+}
+
+/// The keys of `model`'s profiles in page order, one per line, each with
+/// " (hidden)" when it is.
+fn testKeysText(alloc: Allocator, model: *const Model) ![]u8 {
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    errdefer out.deinit();
+    for (model.profiles) |profile| try out.writer.print("{s}{s}\n", .{ profile.key, if (profile.hidden) " (hidden)" else "" });
+    return out.toOwnedSlice();
+}
+
+fn testApply(draft: *Config, lists: Lists) !void {
+    try setOrder(draft, lists.order);
+    try setHidden(draft, lists.hidden);
 }
 
 fn testRowsText(alloc: Allocator, model: *const Model) ![]u8 {
@@ -1013,4 +1468,342 @@ test "settings profiles: a draft the page changed saves and reads back as the pa
     defer alloc.free(saved_text);
     try expectSameText(shown_text, saved_text);
     try expectSameText("\" Quoted \"", reloaded.@"profile-name".get("py").?);
+}
+
+test "settings profiles: with the app's list, every profile in the picker's order, the hidden ones last" {
+    const alloc = testing.allocator;
+    var draft = try testConfig(alloc, "profile-command = py: python.exe\nprofile-command = node: node.exe\n", &.{});
+    defer draft.deinit();
+    const listed = [_]Listed{
+        .{ .key = "pwsh.exe", .label = "PowerShell" },
+        .{ .key = "user:py", .label = "py" },
+        .{ .key = "ssh:prod", .label = "prod" },
+        .{ .key = "cmd.exe", .label = "Command Prompt", .hidden = true },
+    };
+    var model: Model = .{};
+    defer model.deinit();
+    try model.buildListed(alloc, &draft, &draft, &listed, true);
+    try testing.expect(model.complete);
+    // `node`, which the app does not list yet, goes after the last shown
+    // user profile.
+    const keys = try testKeysText(alloc, &model);
+    defer alloc.free(keys);
+    try testing.expectEqualStrings("pwsh.exe\nuser:py\nuser:node\nssh:prod\ncmd.exe (hidden)\n", keys);
+    // A profile noctty found is one row; a user profile keeps its fields.
+    const text = try testRowsText(alloc, &model);
+    defer alloc.free(text);
+    try testing.expectEqualStrings(
+        \\new_profile New profile =
+        \\profile PowerShell = pwsh.exe
+        \\profile py = user:py
+        \\command Command line = python.exe
+        \\name Name =
+        \\folder Starting folder =
+        \\add_variable Add variable =
+        \\profile node = user:node
+        \\command Command line = node.exe
+        \\name Name =
+        \\folder Starting folder =
+        \\add_variable Add variable =
+        \\profile prod = ssh:prod
+        \\profile Command Prompt = cmd.exe (hidden)
+        \\
+    , text);
+    // Without the whole list, nothing moves or hides.
+    try model.buildListed(alloc, &draft, &draft, &listed, false);
+    try testing.expect(model.moveTarget(1, -1) == null);
+}
+
+test "settings profiles: a move or a hide gives the draft both lists whole, and the page follows them" {
+    const alloc = testing.allocator;
+    var original = try testConfig(alloc, "profile-command = py: python.exe\nprofile-command = node: node.exe\nprofile-hidden = cmd.exe\n", &.{});
+    defer original.deinit();
+    var draft = try original.clone(alloc);
+    defer draft.deinit();
+    const listed = [_]Listed{
+        .{ .key = "pwsh.exe", .label = "PowerShell" },
+        .{ .key = "user:py", .label = "py" },
+        .{ .key = "user:node", .label = "node" },
+        .{ .key = "cmd.exe", .label = "Command Prompt", .hidden = true },
+    };
+    var model: Model = .{};
+    defer model.deinit();
+    var arena_state: std.heap.ArenaAllocator = .init(alloc);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    try model.buildListed(alloc, &draft, &original, &listed, true);
+    // The first goes no higher, and a shown one does not cross into the
+    // hidden ones.
+    try testing.expect(model.moveTarget(0, -1) == null);
+    try testing.expect(model.moveTarget(2, 1) == null);
+    try testing.expect(model.moveTarget(3, -1) == null);
+    // py up, above PowerShell.
+    try testing.expectEqual(@as(?u32, 0), model.moveTarget(1, -1));
+    try testApply(&draft, try model.moved(a, 1, 0));
+    try model.buildListed(alloc, &draft, &original, &listed, true);
+    {
+        const keys = try testKeysText(alloc, &model);
+        defer alloc.free(keys);
+        try testing.expectEqualStrings("user:py\npwsh.exe\nuser:node\ncmd.exe (hidden)\n", keys);
+    }
+    // Both lists name every profile, in that order.
+    try testing.expectEqual(@as(usize, 4), draft.@"profile-order".list.items.len);
+    try testing.expectEqualStrings("user:py", draft.@"profile-order".list.items[0]);
+    try testing.expectEqual(@as(usize, 1), draft.@"profile-hidden".list.items.len);
+    try testing.expectEqualStrings("cmd.exe", draft.@"profile-hidden".list.items[0]);
+    // PowerShell hidden: first among the hidden ones.
+    try testApply(&draft, try model.toggledHidden(a, 1, true));
+    try model.buildListed(alloc, &draft, &original, &listed, true);
+    {
+        const keys = try testKeysText(alloc, &model);
+        defer alloc.free(keys);
+        try testing.expectEqualStrings("user:py\nuser:node\npwsh.exe (hidden)\ncmd.exe (hidden)\n", keys);
+    }
+    // Command Prompt shown: last among the shown ones.
+    try testApply(&draft, try model.toggledHidden(a, 3, false));
+    try model.buildListed(alloc, &draft, &original, &listed, true);
+    {
+        const keys = try testKeysText(alloc, &model);
+        defer alloc.free(keys);
+        try testing.expectEqualStrings("user:py\nuser:node\ncmd.exe\npwsh.exe (hidden)\n", keys);
+    }
+    // The draft counts its two lists as two changes, and its profiles as
+    // none.
+    try testing.expectEqual(@as(usize, 2), changedFieldCount(&original, &draft));
+}
+
+test "settings profiles: a quick slot's profile stays first, does not move, and goes back first when shown" {
+    const alloc = testing.allocator;
+    var original = try testConfig(alloc, "profile-command = py: python.exe\n", &.{});
+    defer original.deinit();
+    var draft = try original.clone(alloc);
+    defer draft.deinit();
+    const listed = [_]Listed{
+        .{ .key = "user:py", .label = "py", .quick_slot = 1 },
+        .{ .key = "pwsh.exe", .label = "PowerShell" },
+        .{ .key = "cmd.exe", .label = "Command Prompt" },
+    };
+    var model: Model = .{};
+    defer model.deinit();
+    var arena_state: std.heap.ArenaAllocator = .init(alloc);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    try model.buildListed(alloc, &draft, &original, &listed, true);
+    try testing.expect(model.moveTarget(0, 1) == null);
+    try testing.expect(model.moveTarget(1, -1) == null);
+    try testing.expectEqual(@as(?u32, 2), model.moveTarget(1, 1));
+    // Hidden, it is in the picker no more, and no slot pins it.
+    try testApply(&draft, try model.toggledHidden(a, 0, true));
+    try model.buildListed(alloc, &draft, &original, &listed, true);
+    {
+        const keys = try testKeysText(alloc, &model);
+        defer alloc.free(keys);
+        try testing.expectEqualStrings("pwsh.exe\ncmd.exe\nuser:py (hidden)\n", keys);
+    }
+    // Shown again, its slot puts it first.
+    try testApply(&draft, try model.toggledHidden(a, 2, false));
+    try model.buildListed(alloc, &draft, &original, &listed, true);
+    {
+        const keys = try testKeysText(alloc, &model);
+        defer alloc.free(keys);
+        try testing.expectEqualStrings("user:py\npwsh.exe\ncmd.exe\n", keys);
+    }
+}
+
+test "settings profiles: the pinned profiles stay first whatever the draft's order, and a new profile goes after them" {
+    const alloc = testing.allocator;
+    var original = try testConfig(alloc, "profile-command = py: python.exe\n", &.{});
+    defer original.deinit();
+    var draft = try original.clone(alloc);
+    defer draft.deinit();
+    try setCommand(&draft, "dev", "dev.exe");
+    const listed = [_]Listed{
+        .{ .key = "user:py", .label = "py", .quick_slot = 1 },
+        .{ .key = "pwsh.exe", .label = "PowerShell", .quick_slot = 2 },
+        .{ .key = "cmd.exe", .label = "Command Prompt" },
+    };
+    var model: Model = .{};
+    defer model.deinit();
+    var arena_state: std.heap.ArenaAllocator = .init(alloc);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    // The new profile goes after py, its user profile, but not between the
+    // two the picker pulls first.
+    try model.buildListed(alloc, &draft, &original, &listed, true);
+    {
+        const keys = try testKeysText(alloc, &model);
+        defer alloc.free(keys);
+        try testing.expectEqualStrings("user:py\npwsh.exe\nuser:dev\ncmd.exe\n", keys);
+    }
+    // It does not move above them, and PowerShell is what stops it.
+    try testing.expect(model.moveTarget(2, -1) == null);
+    try testing.expectEqualStrings("pwsh.exe", (model.pinBlocking(2, -1) orelse return error.TestExpectedPin).key);
+    try testing.expect(model.pinBlocking(3, -1) == null);
+    // Command Prompt moves above it.
+    try testApply(&draft, try model.moved(a, 3, 2));
+    try model.buildListed(alloc, &draft, &original, &listed, true);
+    {
+        const keys = try testKeysText(alloc, &model);
+        defer alloc.free(keys);
+        try testing.expectEqualStrings("user:py\npwsh.exe\ncmd.exe\nuser:dev\n", keys);
+    }
+    // A draft order that names the pinned ones last still shows them first,
+    // as the picker does.
+    try setOrder(&draft, &.{ "cmd.exe", "user:dev", "pwsh.exe", "user:py" });
+    try model.buildListed(alloc, &draft, &original, &listed, true);
+    {
+        const keys = try testKeysText(alloc, &model);
+        defer alloc.free(keys);
+        try testing.expectEqualStrings("user:py\npwsh.exe\ncmd.exe\nuser:dev\n", keys);
+    }
+}
+
+test "settings profiles: a profile noctty hides itself stays hidden and last, and neither list names it" {
+    const alloc = testing.allocator;
+    var original = try testConfig(alloc, "profile-command = py: python.exe\nprofile-hidden = cmd.exe\n", &.{});
+    defer original.deinit();
+    var draft = try original.clone(alloc);
+    defer draft.deinit();
+    // As the app arranges them: the hidden ones after the shown ones, in
+    // its order.
+    const listed = [_]Listed{
+        .{ .key = "pwsh.exe", .label = "PowerShell" },
+        .{ .key = "user:py", .label = "py" },
+        .{ .key = "vs:old:cmd", .label = "Developer Command Prompt (2019)", .hidden = true, .found_hidden = true },
+        .{ .key = "cmd.exe", .label = "Command Prompt", .hidden = true },
+    };
+    var model: Model = .{};
+    defer model.deinit();
+    var arena_state: std.heap.ArenaAllocator = .init(alloc);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    try model.buildListed(alloc, &draft, &original, &listed, true);
+    {
+        const keys = try testKeysText(alloc, &model);
+        defer alloc.free(keys);
+        try testing.expectEqualStrings("pwsh.exe\nuser:py\ncmd.exe (hidden)\nvs:old:cmd (hidden)\n", keys);
+    }
+    // It does not move, nor does anything move past it.
+    try testing.expect(model.moveTarget(3, -1) == null);
+    try testing.expect(model.moveTarget(2, 1) == null);
+    // A move writes every other profile, and hides only Command Prompt.
+    const lists = try model.moved(a, 1, 0);
+    try testing.expectEqual(@as(usize, 3), lists.order.len);
+    for (lists.order) |key| try testing.expect(!std.mem.eql(u8, key, "vs:old:cmd"));
+    try testing.expectEqual(@as(usize, 1), lists.hidden.len);
+    try testing.expectEqualStrings("cmd.exe", lists.hidden[0]);
+    // Once the draft has its own lists, it is still hidden and last.
+    try testApply(&draft, lists);
+    try model.buildListed(alloc, &draft, &original, &listed, true);
+    {
+        const keys = try testKeysText(alloc, &model);
+        defer alloc.free(keys);
+        try testing.expectEqualStrings("user:py\npwsh.exe\ncmd.exe (hidden)\nvs:old:cmd (hidden)\n", keys);
+    }
+    try testing.expect(model.profiles[3].found_hidden);
+    // Command Prompt shown: neither list names the profile noctty hides.
+    const shown = try model.toggledHidden(a, 2, false);
+    for (shown.order) |key| try testing.expect(!std.mem.eql(u8, key, "vs:old:cmd"));
+    try testing.expectEqual(@as(usize, 0), shown.hidden.len);
+}
+
+test "settings profiles: a move that comes back is the start again, and a removed profile leaves the lists" {
+    const alloc = testing.allocator;
+    var original = try testConfig(alloc, "profile-command = py: python.exe\nprofile-command = node: node.exe\nprofile-hidden = cmd.exe\n", &.{});
+    defer original.deinit();
+    var draft = try original.clone(alloc);
+    defer draft.deinit();
+    const listed = [_]Listed{
+        .{ .key = "pwsh.exe", .label = "PowerShell" },
+        .{ .key = "user:py", .label = "py" },
+        .{ .key = "user:node", .label = "node" },
+        .{ .key = "cmd.exe", .label = "Command Prompt", .hidden = true },
+    };
+    var model: Model = .{};
+    defer model.deinit();
+    var arena_state: std.heap.ArenaAllocator = .init(alloc);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    try model.buildListed(alloc, &draft, &original, &listed, true);
+    // py up, then down again: the lists are the start's.
+    const up = try model.moved(a, 1, 0);
+    try testing.expect(!up.eql(model.base.?));
+    try testApply(&draft, up);
+    try model.buildListed(alloc, &draft, &original, &listed, true);
+    try testing.expect((try model.moved(a, 0, 1)).eql(model.base.?));
+    // node removed after the move: neither list names it any more.
+    try removeProfile(&original, &draft, "node");
+    for (draft.@"profile-order".list.items) |value| try testing.expect(!std.mem.eql(u8, value, "user:node"));
+    try testing.expectEqual(@as(usize, 3), draft.@"profile-order".list.items.len);
+    try testing.expectEqual(@as(usize, 1), draft.@"profile-hidden".list.items.len);
+    // A list the page left as the file has it is not touched.
+    var untouched = try original.clone(alloc);
+    defer untouched.deinit();
+    try removeProfile(&original, &untouched, "node");
+    try testing.expect(original.@"profile-hidden".equal(untouched.@"profile-hidden"));
+}
+
+test "settings profiles: a list the page left alone keeps the app's answer, aliases and all" {
+    const alloc = testing.allocator;
+    var original = try testConfig(alloc, "profile-command = py: python.exe\nprofile-hidden = wsl\n", &.{});
+    defer original.deinit();
+    var draft = try original.clone(alloc);
+    defer draft.deinit();
+    // `wsl` hides the default distribution: the app says so, the page
+    // cannot tell from the word.
+    const listed = [_]Listed{
+        .{ .key = "pwsh.exe", .label = "PowerShell" },
+        .{ .key = "user:py", .label = "py" },
+        .{ .key = "wsl:Ubuntu", .label = "Ubuntu", .hidden = true },
+    };
+    // The draft's order is its own; its hidden list is the file's, as when
+    // the file's changed and the draft followed it (`followFile`).
+    try setOrder(&draft, &.{ "user:py", "pwsh.exe", "wsl:Ubuntu" });
+    var model: Model = .{};
+    defer model.deinit();
+    try model.buildListed(alloc, &draft, &original, &listed, true);
+    const keys = try testKeysText(alloc, &model);
+    defer alloc.free(keys);
+    try testing.expectEqualStrings("user:py\npwsh.exe\nwsl:Ubuntu (hidden)\n", keys);
+}
+
+test "settings profiles: SSH aliases that differ only in case are two profiles, and a default alias marks its profile" {
+    const alloc = testing.allocator;
+    var original = try testConfig(alloc, "default-profile = pwsh\n", &.{});
+    defer original.deinit();
+    const listed = [_]Listed{
+        .{ .key = "pwsh.exe", .label = "PowerShell", .default = true },
+        .{ .key = "ssh:prod", .label = "prod" },
+        .{ .key = "ssh:Prod", .label = "Prod" },
+    };
+    var model: Model = .{};
+    defer model.deinit();
+    try model.buildListed(alloc, &original, &original, &listed, true);
+    try testing.expectEqual(@as(?u32, 1), model.profileByKey("ssh:prod"));
+    try testing.expectEqual(@as(?u32, 2), model.profileByKey("ssh:Prod"));
+    try testing.expectEqual(@as(?u32, 1), model.profileByKey("SSH:prod"));
+    try testing.expect(model.rows[2].identity != model.rows[3].identity);
+    // `default-profile = pwsh` starts PowerShell (the app's answer).
+    try testing.expect(model.profiles[0].default);
+    try testing.expect(!model.profiles[1].default);
+}
+
+test "settings profiles: a draft's own order outlives a change to the file, and an untouched list follows it" {
+    const alloc = testing.allocator;
+    var original = try testConfig(alloc, "profile-command = py: python.exe\nprofile-order = cmd.exe\nprofile-hidden = pwsh.exe\n", &.{});
+    defer original.deinit();
+    var draft = try original.clone(alloc);
+    defer draft.deinit();
+    // The page moved a profile: the draft's order is its own.
+    try setOrder(&draft, &.{ "user:py", "cmd.exe" });
+    // The file changes both lists meanwhile.
+    var replacement = try testConfig(alloc, "profile-command = py: python.exe\nprofile-order = wsl\nprofile-hidden = cmd.exe\n", &.{});
+    defer replacement.deinit();
+    try followFile(&original, &draft, &replacement);
+    // The order stays the draft's, over the baseline it started from (which
+    // a save checks against the file); the hidden list, untouched, follows.
+    try testing.expectEqualStrings("user:py", draft.@"profile-order".list.items[0]);
+    try testing.expectEqualStrings("cmd.exe", original.@"profile-order".list.items[0]);
+    try testing.expectEqualStrings("cmd.exe", draft.@"profile-hidden".list.items[0]);
+    try testing.expectEqualStrings("cmd.exe", original.@"profile-hidden".list.items[0]);
 }

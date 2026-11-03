@@ -13,6 +13,11 @@
 //!
 //! `patchOrAppendEdits` (win32.zig), which patches every other setting by key
 //! alone, never sees these keys: they are not among Settings' editable keys.
+//!
+//! `profile-order` and `profile-hidden` are lists, not fields of one profile:
+//! a save that changed either writes it whole (`Edit.Op.list`). The file's own
+//! lines for the key go, and `key =` (which clears what any earlier layer
+//! gave) then one line per value take the place of the first of them.
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
@@ -23,12 +28,17 @@ const profile_map = @import("../../config/profile_map.zig");
 const origin = @import("../../config/origin.zig");
 const LineIterator = @import("../../cli/args.zig").LineIterator;
 
-/// One of the four `profile-*` keys.
+/// One of the four `profile-*` keys that give each profile a value, or one
+/// of the two lists (`order`, `hidden`).
 pub const Field = enum {
     command,
     name,
     folder,
     env,
+    /// `profile-order`: written whole (`Edit.Op.list`).
+    order,
+    /// `profile-hidden`: written whole (`Edit.Op.list`).
+    hidden,
 
     pub fn key(self: Field) Key {
         return switch (self) {
@@ -36,7 +46,14 @@ pub const Field = enum {
             .name => .@"profile-name",
             .folder => .@"profile-working-directory",
             .env => .@"profile-env",
+            .order => .@"profile-order",
+            .hidden => .@"profile-hidden",
         };
+    }
+
+    /// Whether it is one of the lists, written whole.
+    pub fn isList(self: Field) bool {
+        return self == .order or self == .hidden;
     }
 
     fn kind(comptime self: Field) profile_map.Kind {
@@ -45,11 +62,14 @@ pub const Field = enum {
             .name => .name,
             .folder => .text,
             .env => .env,
+            .order, .hidden => @compileError("a list gives no profile a value"),
         };
     }
 
+    /// The per-profile field a line's key names: never a list, which is not
+    /// matched by identity.
     fn fromName(name: []const u8) ?Field {
-        inline for (comptime std.enums.values(Field)) |field| {
+        inline for (.{ Field.command, Field.name, Field.folder, Field.env }) |field| {
             if (std.mem.eql(u8, name, @tagName(comptime field.key()))) return field;
         }
         return null;
@@ -82,6 +102,10 @@ pub const Edit = struct {
         /// Take the file's own lines for the field out, where no other file
         /// gives it a value.
         delete,
+        /// `profile-order`, `profile-hidden` (`Field.isList`): the file's own
+        /// lines for the key go, and `key =`, then one line per value, take
+        /// the place of the first. `id` is empty.
+        list: []const []const u8,
     };
 };
 
@@ -132,6 +156,7 @@ fn readLine(segment: []const u8) ?Info {
     value = std.mem.trim(u8, value, &std.ascii.whitespace);
     if (value.len == 0) return .{ .field = field, .id = "", .scope = .key };
     const parsed = switch (field) {
+        .order, .hidden => unreachable,
         inline else => |f| profile_map.check(comptime f.kind(), value),
     } catch return null;
     if (field != .env) return .{ .field = field, .id = parsed.id, .scope = .exact };
@@ -175,6 +200,84 @@ fn deletes(edit: Edit, info: Info) bool {
     if (edit.field == .env and edit.name == null)
         return info.field == .env and info.scope != .key and std.ascii.eqlIgnoreCase(info.id, edit.id);
     return exact(edit, info);
+}
+
+/// Whether `text` (one line, without its line ending) is a line the loader
+/// reads as setting `name`: a value for it, or `name =`, which clears it.
+fn setsKey(text: []const u8, name: []const u8) bool {
+    if (!LineIterator.takes(text)) return false;
+    const trimmed = std.mem.trim(u8, text, whitespace ++ "\r");
+    if (trimmed.len == 0 or trimmed[0] == '#') return false;
+    const eq = std.mem.indexOfScalar(u8, trimmed, '=') orelse return false;
+    return std.mem.eql(u8, std.mem.trim(u8, trimmed[0..eq], whitespace), name);
+}
+
+/// Whether `value` can be written as one line of the list `field` and read
+/// back as it is: not empty (which would clear the list), no line ending or
+/// NUL, nothing the loader trims, no quotes it would take off, and a line no
+/// longer than it reads.
+fn listValueWritable(field: Field, value: []const u8) bool {
+    if (value.len == 0) return false;
+    if (std.mem.indexOfAny(u8, value, "\r\n\x00") != null) return false;
+    if (!std.mem.eql(u8, std.mem.trim(u8, value, &std.ascii.whitespace), value)) return false;
+    if (value.len >= 2 and value[0] == '"' and value[value.len - 1] == '"') return false;
+    return @tagName(field.key()).len + " = ".len + value.len <= LineIterator.max_line_len;
+}
+
+/// Whether two values of a list name the same thing, as the loader compares
+/// references: without case.
+fn listValueEql(a: []const u8, b: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(std.mem.trim(u8, a, &std.ascii.whitespace), std.mem.trim(u8, b, &std.ascii.whitespace));
+}
+
+/// The list `config` gives `field` (`order` or `hidden`).
+fn listOf(field: Field, config: *const Config) []const [:0]const u8 {
+    return switch (field) {
+        .order => config.@"profile-order".list.items,
+        .hidden => config.@"profile-hidden".list.items,
+        else => unreachable,
+    };
+}
+
+/// Whether `a` and `b` give the list `field` the same values, in order.
+fn listEql(field: Field, a: *const Config, b: *const Config) bool {
+    const left = listOf(field, a);
+    const right = listOf(field, b);
+    if (left.len != right.len) return false;
+    for (left, right) |x, y| if (!std.mem.eql(u8, x, y)) return false;
+    return true;
+}
+
+/// Whether `reloaded` holds the list a save wrote (`values`): a layer read
+/// after the file (an include, the command line) may add to it, but not
+/// clear it. The values come first, in their order, so what they name keeps
+/// its place; for `profile-hidden` anything added must name one of them, or
+/// it hides a profile the save shows.
+fn listHeld(field: Field, values: []const []const u8, reloaded: *const Config) bool {
+    const now = listOf(field, reloaded);
+    if (now.len < values.len) return false;
+    for (values, now[0..values.len]) |value, held| if (!listValueEql(value, held)) return false;
+    if (field == .order) return true;
+    for (now[values.len..]) |extra| {
+        for (values) |value| {
+            if (listValueEql(value, extra)) break;
+        } else return false;
+    }
+    return true;
+}
+
+/// The list edits a save of `pending` makes: each list it holds otherwise
+/// than `original`, written whole. From `arena`.
+fn listEdits(arena: Allocator, original: *const Config, pending: *const Config) ![]Edit {
+    var edits: std.ArrayListUnmanaged(Edit) = .empty;
+    for ([_]Field{ .order, .hidden }) |field| {
+        if (listEql(field, original, pending)) continue;
+        const items = listOf(field, pending);
+        const values = try arena.alloc([]const u8, items.len);
+        for (items, values) |item, *value| value.* = try arena.dupe(u8, item);
+        try edits.append(arena, .{ .field = field, .id = "", .op = .{ .list = values } });
+    }
+    return edits.toOwnedSlice(arena);
 }
 
 /// How a config file's text ends. A save that patches profile lines keeps
@@ -309,9 +412,10 @@ fn editLine(arena: Allocator, edit: Edit) ![]const u8 {
     const text: []const u8 = switch (edit.op) {
         .set => |value| if (edit.field == .env) try std.fmt.allocPrint(arena, "{s}={s}", .{ edit.name.?, value }) else value,
         .unset => if (edit.field == .env) try std.fmt.allocPrint(arena, "{s}=", .{edit.name.?}) else "",
-        .delete => unreachable,
+        .delete, .list => unreachable,
     };
     switch (edit.field) {
+        .order, .hidden => unreachable,
         inline else => |field| try profile_map.writeProfileLine(&out.writer, comptime field.kind(), @tagName(comptime field.key()), edit.id, text),
     }
     return std.mem.trimEnd(u8, out.written(), "\n");
@@ -352,6 +456,11 @@ pub fn patchProfileEdits(alloc: Allocator, raw: []const u8, edits: []const Edit,
         for ([_][]const u8{ e.id, e.name orelse "", set_value }) |part| {
             if (std.mem.indexOfScalar(u8, part, 0) != null) return error.NulByte;
         }
+        // A list value is one line: no line ending, nothing the loader
+        // would trim or unquote, and no longer than it reads.
+        if (e.op == .list) for (e.op.list) |value| {
+            if (!listValueWritable(e.field, value)) return error.UnwritableListValue;
+        };
     }
 
     var arena_state: std.heap.ArenaAllocator = .init(alloc);
@@ -385,6 +494,38 @@ pub fn patchProfileEdits(alloc: Allocator, raw: []const u8, edits: []const Edit,
     const dominant: Ending = if (crlf_count > lf_count) .crlf else .lf;
 
     for (edits) |edit| switch (edit.op) {
+        .list => |values| {
+            const name = @tagName(edit.field.key());
+            var block: std.ArrayListUnmanaged(Line) = .empty;
+            try block.append(arena, .{ .text = try std.fmt.allocPrint(arena, "{s} =", .{name}), .ending = dominant, .info = null });
+            for (values) |value| try block.append(arena, .{ .text = try std.fmt.allocPrint(arena, "{s} = {s}", .{ name, value }), .ending = dominant, .info = null });
+            // The file's own lines for the key go; the block takes the place
+            // of the first.
+            var first: ?usize = null;
+            for (lines.items, 0..) |*line, index| {
+                if (line.deleted or !setsKey(line.text, name)) continue;
+                if (first == null) first = index;
+                line.deleted = true;
+            }
+            if (first) |index| {
+                // Where the first was, which may be the file's marked last
+                // line: the block's last line then ends as the file did
+                // (`FileEnd.restore`).
+                try lines.insertSlice(arena, index, block.items);
+                continue;
+            }
+            // None: a block of its own at the end of the file.
+            var last_kept: ?*Line = null;
+            for (lines.items) |*line| {
+                if (!line.deleted and !FileEnd.isMark(line.text)) last_kept = line;
+            }
+            if (last_kept) |line| {
+                if (line.ending == .none) line.ending = dominant;
+                if (std.mem.trim(u8, line.text, whitespace).len != 0)
+                    try lines.append(arena, .{ .text = "", .ending = dominant, .info = null });
+            }
+            try lines.appendSlice(arena, block.items);
+        },
         .delete => for (lines.items) |*line| {
             if (line.deleted) continue;
             const info = line.info orelse continue;
@@ -769,10 +910,12 @@ fn namesProfile(value: []const u8, id: []const u8) bool {
 pub fn editHeld(edit: Edit, reloaded: *const Config) bool {
     if (edit.with_profile) return true;
     if (edit.field == .env and edit.name == null) return true;
+    if (edit.op == .list) return listHeld(edit.field, edit.op.list, reloaded);
     const now = editValue(edit, reloaded);
     return switch (edit.op) {
         .set => |value| now != null and std.mem.eql(u8, now.?, value),
         .unset, .delete => now == null,
+        .list => unreachable,
     };
 }
 
@@ -784,6 +927,7 @@ fn editValue(edit: Edit, config: *const Config) ?[]const u8 {
         .command => config.@"profile-command".get(edit.id),
         .name => config.@"profile-name".get(edit.id),
         .folder => config.@"profile-working-directory".get(edit.id),
+        .order, .hidden => unreachable,
         .env => env: {
             const name = edit.name orelse break :env null;
             const map = config.@"profile-env".get(edit.id) orelse break :env null;
@@ -838,6 +982,10 @@ pub fn changedUnder(edits: []const Edit, original: *const Config, pending: *cons
         // changes: the removal covers whatever another layer or program
         // gives it now. The removal's own command line is still checked.
         if (edit.with_profile) continue;
+        if (edit.field.isList()) {
+            if (!listEql(edit.field, disk, original) and !listEql(edit.field, disk, pending)) return edit;
+            continue;
+        }
         if (!editEql(edit, disk, original) and !editEql(edit, disk, pending)) return edit;
     }
     return null;
@@ -847,6 +995,8 @@ pub fn changedUnder(edits: []const Edit, original: *const Config, pending: *cons
 /// for `profile-env`, the variable's name. Never the value, which can hold a
 /// secret.
 pub fn writeEditName(writer: *std.Io.Writer, edit: Edit) !void {
+    // A list is the key alone.
+    if (edit.field.isList()) return writer.writeAll(@tagName(edit.field.key()));
     try writer.print("{s} {s}", .{ @tagName(edit.field.key()), edit.id });
     if (edit.name) |name| try writer.print(" {s}", .{name});
 }
@@ -866,10 +1016,13 @@ pub fn writeEditName(writer: *std.Io.Writer, edit: Edit) !void {
 /// define a profile in one state only, `Config.load` hands over the light
 /// one, and the state may have changed since Settings opened.
 pub fn editsForSave(arena: Allocator, alloc: Allocator, readings: []const *const Config, state: configpkg.ConditionalState, original: *const Config, pending: *const Config, path: []const u8, same: origin.SamePath) ![]Edit {
+    // `profile-order` and `profile-hidden` changed are written whole, after
+    // the profiles' own edits.
+    const lists = try listEdits(arena, original, pending);
     if (original.@"profile-command".equal(pending.@"profile-command") and
         original.@"profile-name".equal(pending.@"profile-name") and
         original.@"profile-working-directory".equal(pending.@"profile-working-directory") and
-        original.@"profile-env".equal(pending.@"profile-env")) return &.{};
+        original.@"profile-env".equal(pending.@"profile-env")) return lists;
     std.debug.assert(readings.len != 0 and readings.len <= max_readings);
     var conditioned: [max_readings]?Config = @splat(null);
     defer for (&conditioned) |*value| if (value.*) |*config| config.deinit();
@@ -881,7 +1034,9 @@ pub fn editsForSave(arena: Allocator, alloc: Allocator, readings: []const *const
         indexes[i] = try origin.Index.init(alloc, if (conditioned[i]) |*config| config else reading);
         made += 1;
     }
-    return profileEdits(arena, indexes[0..made], original, pending, path, same);
+    const edits = try profileEdits(arena, indexes[0..made], original, pending, path, same);
+    if (lists.len == 0) return edits;
+    return std.mem.concat(arena, Edit, &.{ edits, lists });
 }
 
 /// The most readings of the layers `editsForSave` takes.
@@ -943,6 +1098,127 @@ test "settings patch: a field's last line is replaced, and another profile's lin
         &.{.{ .field = .folder, .id = "py", .op = .{ .set = "home" } }},
         "  profile-working-directory = py: home\n",
     );
+}
+
+test "settings patch: a list is written whole, in place of the file's own lines for it" {
+    const order: Edit = .{ .field = .order, .id = "", .op = .{ .list = &.{ "user:py", "pwsh.exe", "wsl:Ubuntu" } } };
+    const hidden: Edit = .{ .field = .hidden, .id = "", .op = .{ .list = &.{"cmd.exe"} } };
+    // The file's lines for the key, a clear among them, go; the block takes
+    // the first one's place. Comments, other keys and a line for another key
+    // that only starts the same stay.
+    try testPatch(
+        "font-size = 12\nprofile-order = cmd.exe\n# keep\nprofile-order =\n  profile-order = user:old\nprofile-orders = x\n",
+        &.{order},
+        "font-size = 12\nprofile-order =\nprofile-order = user:py\nprofile-order = pwsh.exe\nprofile-order = wsl:Ubuntu\n# keep\nprofile-orders = x\n",
+    );
+    // A file without the key gets a block at its end, after a blank line, in
+    // the line ending most of its lines have.
+    try testPatch(
+        "font-size = 12\r\nprofile-command = py: python.exe\r\n",
+        &.{ order, hidden },
+        "font-size = 12\r\nprofile-command = py: python.exe\r\n\r\nprofile-order =\r\nprofile-order = user:py\r\nprofile-order = pwsh.exe\r\nprofile-order = wsl:Ubuntu\r\n\r\nprofile-hidden =\r\nprofile-hidden = cmd.exe\r\n",
+    );
+    // An empty list is the clear alone.
+    try testPatch("profile-hidden = cmd.exe\n", &.{.{ .field = .hidden, .id = "", .op = .{ .list = &.{} } }}, "profile-hidden =\n");
+    // A value that would not read back as written is refused, and nothing is
+    // patched.
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    defer out.deinit(testing.allocator);
+    for ([_][]const u8{ "", " pwsh.exe", "a\nprofile-order = b", "\"quoted\"" }) |bad| {
+        try testing.expectError(error.UnwritableListValue, patchProfileEdits(testing.allocator, "x = 1\n", &.{.{ .field = .order, .id = "", .op = .{ .list = &.{bad} } }}, &out));
+        try testing.expectEqual(@as(usize, 0), out.items.len);
+    }
+}
+
+test "settings patch: a save writes the lists it changed, whole, and only those" {
+    const alloc = testing.allocator;
+    var original = try Config.default(alloc);
+    defer original.deinit();
+    try original.@"profile-order".parseCLI(original._arena.?.allocator(), "pwsh.exe");
+    try original.@"profile-hidden".parseCLI(original._arena.?.allocator(), "cmd.exe");
+    var pending = try original.clone(alloc);
+    defer pending.deinit();
+    var arena_state: std.heap.ArenaAllocator = .init(alloc);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const path = "C:\\noctty-test\\config";
+    try testing.expectEqual(@as(usize, 0), (try editsForSave(arena, alloc, &.{&original}, .{}, &original, &pending, path, &testSamePath)).len);
+    // The order changes: it is written whole, and the hidden list is not.
+    try pending.@"profile-order".parseCLI(pending._arena.?.allocator(), "");
+    try pending.@"profile-order".parseCLI(pending._arena.?.allocator(), "user:py");
+    try pending.@"profile-order".parseCLI(pending._arena.?.allocator(), "pwsh.exe");
+    const edits = try editsForSave(arena, alloc, &.{&original}, .{}, &original, &pending, path, &testSamePath);
+    try testing.expectEqual(@as(usize, 1), edits.len);
+    try testing.expect(edits[0].field == .order);
+    try testing.expectEqual(@as(usize, 2), edits[0].op.list.len);
+    try expectSameText("user:py", edits[0].op.list[0]);
+    try expectSameText("pwsh.exe", edits[0].op.list[1]);
+    // With a profile's own edit, the lists come after it.
+    try pending.@"profile-name".parseCLI(pending._arena.?.allocator(), "py: Python");
+    try pending.@"profile-command".parseCLI(pending._arena.?.allocator(), "py: python.exe");
+    const both = try editsForSave(arena, alloc, &.{&original}, .{}, &original, &pending, path, &testSamePath);
+    try testing.expect(both.len >= 2);
+    try testing.expect(both[both.len - 1].field == .order);
+    for (both[0 .. both.len - 1]) |e| try testing.expect(!e.field.isList());
+}
+
+test "settings patch: a list another program changed stops the save; one a later layer only adds to is held" {
+    const alloc = testing.allocator;
+    var original = try Config.default(alloc);
+    defer original.deinit();
+    try original.@"profile-order".parseCLI(original._arena.?.allocator(), "pwsh.exe");
+    var pending = try original.clone(alloc);
+    defer pending.deinit();
+    try pending.@"profile-order".parseCLI(pending._arena.?.allocator(), "");
+    try pending.@"profile-order".parseCLI(pending._arena.?.allocator(), "user:py");
+    try pending.@"profile-order".parseCLI(pending._arena.?.allocator(), "pwsh.exe");
+    const order: Edit = .{ .field = .order, .id = "", .op = .{ .list = &.{ "user:py", "pwsh.exe" } } };
+    // Read again as Settings read it: no change under the edit.
+    var disk = try original.clone(alloc);
+    defer disk.deinit();
+    try testing.expect(changedUnder(&.{order}, &original, &pending, &disk) == null);
+    // Another program added to it since: the save stops, naming the key.
+    try disk.@"profile-order".parseCLI(disk._arena.?.allocator(), "cmd.exe");
+    const changed = changedUnder(&.{order}, &original, &pending, &disk) orelse return error.TestExpectedChange;
+    var name: std.Io.Writer.Allocating = .init(alloc);
+    defer name.deinit();
+    try writeEditName(&name.writer, changed);
+    try expectSameText("profile-order", name.written());
+
+    // After the save: a later layer that adds to the order keeps what the
+    // save named first, so it is held; one that cleared it or put another
+    // order first is not.
+    const Case = struct { values: []const []const u8, held: bool };
+    for ([_]Case{
+        .{ .values = &.{ "user:py", "pwsh.exe", "cmd.exe" }, .held = true },
+        .{ .values = &.{ "USER:PY", "pwsh.exe" }, .held = true },
+        .{ .values = &.{"cmd.exe"}, .held = false },
+        .{ .values = &.{ "pwsh.exe", "user:py" }, .held = false },
+    }) |case| {
+        var reloaded = try Config.default(alloc);
+        defer reloaded.deinit();
+        for (case.values) |value| try reloaded.@"profile-order".parseCLI(reloaded._arena.?.allocator(), value);
+        try testing.expectEqual(case.held, editHeld(order, &reloaded));
+    }
+    // For `profile-hidden`, an addition must name what the save hid: one
+    // that hides another profile masks it.
+    const hidden: Edit = .{ .field = .hidden, .id = "", .op = .{ .list = &.{"cmd.exe"} } };
+    for ([_]Case{
+        .{ .values = &.{ "cmd.exe", "CMD.EXE" }, .held = true },
+        .{ .values = &.{ "cmd.exe", "wsl" }, .held = false },
+        .{ .values = &.{}, .held = false },
+    }) |case| {
+        var reloaded = try Config.default(alloc);
+        defer reloaded.deinit();
+        for (case.values) |value| try reloaded.@"profile-hidden".parseCLI(reloaded._arena.?.allocator(), value);
+        try testing.expectEqual(case.held, editHeld(hidden, &reloaded));
+        if (!case.held) {
+            var masked: std.Io.Writer.Allocating = .init(alloc);
+            defer masked.deinit();
+            try testing.expect(try writeMasked(&masked.writer, &.{hidden}, &reloaded, false));
+            try expectSameText("profile-hidden", masked.written());
+        }
+    }
 }
 
 test "settings patch: a variable is matched without case, and never written twice" {
@@ -1046,6 +1322,8 @@ const TestMaps = struct {
                 .name => maps.name.parseCLI(alloc, value) catch {},
                 .folder => maps.folder.parseCLI(alloc, value) catch {},
                 .env => maps.env.parseCLI(alloc, value) catch {},
+                // `fromName` names a per-profile field only.
+                .order, .hidden => unreachable,
             }
         }
         return maps;
