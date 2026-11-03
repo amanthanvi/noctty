@@ -8645,16 +8645,17 @@ pub const App = struct {
             if (profile_edits.len != 0) {
                 if (check.read_as == null) check.read_as = try self.settingsDigest(alloc, target_path);
                 var fresh = self.loadConfigAtStartupCwd();
-                // Checked again after another program edited the file: the
-                // profile fields the draft changes have no Keep mine / Use
-                // disk, so one it changed too stops the save; an edit to
-                // anything else is saved on top of, as an ordinary one is.
-                if (checked_again) if (fresh) |*reading| {
+                // Every fresh read: the profile fields the draft changes
+                // have no Keep mine / Use disk, so one another program
+                // changed since Settings read the config stops the save
+                // (before the save, or while it ran); an edit to anything
+                // else is saved on top of, as an ordinary one is.
+                if (fresh) |*reading| {
                     self.settingsProfilesUnchanged(alloc, reading, state, original, pending, profile_edits) catch |err| {
                         reading.deinit();
                         return err;
                     };
-                } else |_| {};
+                } else |_| {}
                 profile_edits = try settingsProfileEditsFromDisk(profile_arena.allocator(), alloc, &self.settings_failure_detail, fresh, &self.config, state, original, pending, target_path);
             }
             // No-op short-circuit: if the user pressed Save without
@@ -9478,6 +9479,81 @@ pub const App = struct {
                 const after = try SaveTest.read(path);
                 defer alloc.free(after);
                 try std.testing.expect(std.mem.eql(u8, "font-size = 15\nprofile-command = py: python.exe -X\nprofile-command = node: node.exe --inspect\n", after));
+            }
+        }
+    }
+
+    test "win32 settings profile save stops on a field another program changed before the save, and not on what a removal covers" {
+        if (builtin.os.tag != .windows) return error.SkipZigTest;
+        const alloc = std.testing.allocator;
+        var core_app: CoreApp = undefined;
+        var app: App = undefined;
+        var session: TestSession = .{};
+        try session.init(.{ .core_app = &core_app, .app = &app });
+        defer session.deinit();
+        defer testFreeConfigProblems(&app, alloc);
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        try tmp.dir.writeFile(.{ .sub_path = "lower.conf", .data = "# a file loaded first\n" });
+        const lower = try tmp.dir.realpathAlloc(alloc, "lower.conf");
+        defer alloc.free(lower);
+        const raw = "font-size = 12\nprofile-command = py: python.exe\nprofile-env = py: Path=C:\\bin\n";
+        try tmp.dir.writeFile(.{ .sub_path = "config", .data = raw });
+        const path = try tmp.dir.realpathAlloc(alloc, "config");
+        defer alloc.free(path);
+        SaveTest.files = &.{ lower, path };
+        try SaveTest.begin(&app, path);
+        defer SaveTest.end(&app);
+        const Case = enum { same_field, lower_label, renamed_variable };
+        for ([_]Case{ .same_field, .lower_label, .renamed_variable }) |case| {
+            try tmp.dir.writeFile(.{ .sub_path = "lower.conf", .data = "# a file loaded first\n" });
+            try tmp.dir.writeFile(.{ .sub_path = "config", .data = raw });
+            {
+                var loaded = try SaveTest.load(alloc);
+                defer loaded.deinit();
+                try app.core_app.updateConfig(&app, &loaded);
+            }
+            var original = try app.config.clone(alloc);
+            defer original.deinit();
+            var pending = try app.config.clone(alloc);
+            defer pending.deinit();
+            switch (case) {
+                // The draft changes py's command line.
+                .same_field => try pending.@"profile-command".parseCLI(pending._arena.?.allocator(), "py: python.exe -X"),
+                // The draft removes py.
+                .lower_label, .renamed_variable => try pending.@"profile-command".parseCLI(pending._arena.?.allocator(), "py:"),
+            }
+            try app.settingsReconcileDisk(&pending, &original, true);
+            // Before Save, another program edits the files.
+            switch (case) {
+                .same_field => try tmp.dir.writeFile(.{ .sub_path = "config", .data = "font-size = 12\nprofile-command = py: python.exe -O\nprofile-env = py: Path=C:\\bin\n" }),
+                .lower_label => try tmp.dir.writeFile(.{ .sub_path = "lower.conf", .data = "profile-name = py: Python\nprofile-env = py: MODE=1\n" }),
+                .renamed_variable => try tmp.dir.writeFile(.{ .sub_path = "config", .data = "font-size = 12\nprofile-command = py: python.exe\nprofile-env = py: PATH=C:\\bin\n" }),
+            }
+            const before = try SaveTest.read(path);
+            defer alloc.free(before);
+            switch (case) {
+                // The field the draft changes: refused, the file as the other
+                // program left it.
+                .same_field => {
+                    try std.testing.expectError(error.ProfileChanged, app.settingsSaveAndReload(&pending, &original));
+                    const after = try SaveTest.read(path);
+                    defer alloc.free(after);
+                    try std.testing.expect(std.mem.eql(u8, before, after));
+                    try std.testing.expect(std.mem.eql(u8, "profile-command py", app.settings_failure_detail.text orelse return error.TestExpectedDetail));
+                },
+                // A lower layer gives the removed profile a label and a
+                // variable, and a variable's name changed case: none is a
+                // field the draft changes. The removal is saved.
+                .lower_label, .renamed_variable => {
+                    app.settingsSaveAndReload(&pending, &original) catch |err| switch (err) {
+                        error.SavedButMasked => {},
+                        else => return err,
+                    };
+                    const after = try SaveTest.read(path);
+                    defer alloc.free(after);
+                    try std.testing.expect(std.mem.indexOf(u8, after, "python.exe") == null);
+                },
             }
         }
     }

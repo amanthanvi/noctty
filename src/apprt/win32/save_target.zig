@@ -253,9 +253,10 @@ pub fn write(alloc: Allocator, target: Target, bytes: []const u8, kept_copy: ?*?
 
 /// `write`, when the file still holds what was read of it as `read_as`. That
 /// is compared once the new bytes are safely in the temporary file, just
-/// before they take the file's place, so an edit another program made since
-/// the read is not written over: then nothing is written (`Changed`). A file
-/// that cannot be read at that moment is not written either.
+/// before they take the file's place, so an edit another program made before
+/// that last read is not written over: then nothing is written (`Changed`).
+/// One made after it, before the replace, still is. A file that cannot be
+/// read at that moment is not written either.
 pub fn writeOver(alloc: Allocator, target: Target, bytes: []const u8, kept_copy: ?*?[]u8, read_as: ?Digest) WriteError!void {
     const tmp_path = try std.fmt.allocPrint(
         alloc,
@@ -429,6 +430,32 @@ pub const Scratch = struct {
         for (expected, names.items) |want, got| try testing.expectEqualStrings(want, got);
     }
 };
+
+test "a read during which the file grows is unstable" {
+    var scratch = try Scratch.init();
+    defer scratch.deinit();
+    try scratch.tmp.dir.writeFile(.{ .sub_path = "config.ghostty", .data = "font-size = 12\n" });
+    const path = try scratch.path("config.ghostty");
+    defer testing.allocator.free(path);
+    const Grow = struct {
+        threadlocal var target: []const u8 = "";
+        fn append() void {
+            test_during_read = null;
+            const file = std.fs.openFileAbsolute(target, .{ .mode = .read_write }) catch return;
+            defer file.close();
+            file.seekFromEnd(0) catch return;
+            file.writeAll("copy-on-select = true\n") catch return;
+        }
+    };
+    Grow.target = path;
+    test_during_read = Grow.append;
+    defer test_during_read = null;
+    try testing.expectError(error.Unstable, read(testing.allocator, path));
+    // Read again, still: the whole file.
+    const bytes = try read(testing.allocator, path);
+    defer testing.allocator.free(bytes);
+    try testing.expectEqualStrings("font-size = 12\ncopy-on-select = true\n", bytes);
+}
 
 test "save target of a missing file is the name itself, and the first save creates it" {
     var scratch = try Scratch.init();

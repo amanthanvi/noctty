@@ -709,10 +709,17 @@ fn editEql(edit: Edit, a: *const Config, b: *const Config) bool {
         const right = b.@"profile-env".get(edit.id);
         if (left == null or right == null) return left == null and right == null;
         if (left.?.map.count() != right.?.map.count()) return false;
+        // Names compare without case, as the loader takes them (`Path` and
+        // `PATH` are one variable).
         var it = left.?.map.iterator();
-        while (it.next()) |kv| {
-            const other = right.?.map.get(kv.key_ptr.*) orelse return false;
-            if (!std.mem.eql(u8, kv.value_ptr.*, other)) return false;
+        outer: while (it.next()) |kv| {
+            var other_it = right.?.map.iterator();
+            while (other_it.next()) |other| {
+                if (!std.ascii.eqlIgnoreCase(kv.key_ptr.*, other.key_ptr.*)) continue;
+                if (!std.mem.eql(u8, kv.value_ptr.*, other.value_ptr.*)) return false;
+                continue :outer;
+            }
+            return false;
         }
         return true;
     }
@@ -725,9 +732,16 @@ fn editEql(edit: Edit, a: *const Config, b: *const Config) bool {
 /// The first of `edits` whose field `disk` gives a value that neither the
 /// draft's baseline (`original`) nor the draft (`pending`) gives: another
 /// program changed what the draft changes. There is no Keep mine / Use disk
-/// for a profile field, so a save that finds one stops (SETTINGS-SAVE-TOCTOU).
+/// for a profile field, so a save that finds one stops (SETTINGS-SAVE-TOCTOU):
+/// asked of every fresh read of the layers, so an edit made after Settings
+/// read the config and before the save counts too.
 pub fn changedUnder(edits: []const Edit, original: *const Config, pending: *const Config, disk: *const Config) ?Edit {
     for (edits) |edit| {
+        // A field deleted only because its profile is removed (its label,
+        // folder and variables, `with_profile`) is not one the draft
+        // changes: the removal covers whatever another layer or program
+        // gives it now. The removal's own command line is still checked.
+        if (edit.with_profile) continue;
         if (!editEql(edit, disk, original) and !editEql(edit, disk, pending)) return edit;
     }
     return null;
@@ -1390,6 +1404,55 @@ test "settings patch: an include whose read failed is still named after the ligh
     defer switched.deinit();
     const unread = unreadConfigFile(&switched) orelse return error.TestExpectedUnread;
     try expectSameText(more, unread.path);
+}
+
+test "settings patch: a profile's variables compare without case, and a removal covers its other fields" {
+    const alloc = testing.allocator;
+    var original = try Config.default(alloc);
+    defer original.deinit();
+    try original.@"profile-command".parseCLI(original._arena.?.allocator(), "py: python.exe");
+    try original.@"profile-env".parseCLI(original._arena.?.allocator(), "py: Path=C:\\bin");
+    var pending = try original.clone(alloc);
+    defer pending.deinit();
+    var disk = try original.clone(alloc);
+    defer disk.deinit();
+    // Another program wrote the same variable with its name in capitals.
+    try disk.@"profile-env".parseCLI(disk._arena.?.allocator(), "py:");
+    try disk.@"profile-env".parseCLI(disk._arena.?.allocator(), "py: PATH=C:\\bin");
+    const whole: Edit = .{ .field = .env, .id = "py", .op = .delete };
+    try testing.expect(changedUnder(&.{whole}, &original, &pending, &disk) == null);
+    // A value that did change is one.
+    var changed = try original.clone(alloc);
+    defer changed.deinit();
+    try changed.@"profile-env".parseCLI(changed._arena.?.allocator(), "py:");
+    try changed.@"profile-env".parseCLI(changed._arena.?.allocator(), "py: PATH=D:\\bin");
+    try testing.expect(changedUnder(&.{whole}, &original, &pending, &changed) != null);
+    // The same field, deleted only because the profile is removed: covered.
+    const with_profile: Edit = .{ .field = .env, .id = "py", .op = .delete, .with_profile = true };
+    try testing.expect(changedUnder(&.{with_profile}, &original, &pending, &changed) == null);
+}
+
+test "settings patch: the report after a save names a file only the reload as read records as undecodable" {
+    const alloc = testing.allocator;
+    var masked: std.Io.Writer.Allocating = .init(alloc);
+    defer masked.deinit();
+    // The light/dark switch drops the record; the reload as read has it.
+    var loaded = try Config.default(alloc);
+    defer loaded.deinit();
+    loaded._undecodable_file = try loaded._arena.?.allocator().dupeZ(u8, "C:\\noctty-test\\more.conf");
+    var switched = try Config.default(alloc);
+    defer switched.deinit();
+    switch (try reloadReport(&masked.writer, &.{}, &switched, &loaded, false)) {
+        .unread => |unread| {
+            try testing.expect(unread.undecodable);
+            try expectSameText("C:\\noctty-test\\more.conf", unread.path);
+        },
+        else => return error.TestExpectedUnread,
+    }
+    // With neither reading recording one, nothing.
+    var clean = try Config.default(alloc);
+    defer clean.deinit();
+    try testing.expect(try reloadReport(&masked.writer, &.{}, &switched, &clean, false) == .held);
 }
 
 test "settings patch: a reload that could not read a file whole reports the file, not an override" {
