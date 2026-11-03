@@ -226,8 +226,17 @@ fn listValueWritable(field: Field, value: []const u8) bool {
 
 /// Whether two values of a list name the same thing, as the loader compares
 /// references: without case.
-fn listValueEql(a: []const u8, b: []const u8) bool {
-    return std.ascii.eqlIgnoreCase(std.mem.trim(u8, a, &std.ascii.whitespace), std.mem.trim(u8, b, &std.ascii.whitespace));
+fn listValueEql(a_raw: []const u8, b_raw: []const u8) bool {
+    const a = std.mem.trim(u8, a_raw, &std.ascii.whitespace);
+    const b = std.mem.trim(u8, b_raw, &std.ascii.whitespace);
+    // An `ssh:` alias exactly, as OpenSSH aliases are case-sensitive; its
+    // prefix in any case, as the loader takes it.
+    const prefix = "ssh:";
+    if (std.ascii.startsWithIgnoreCase(a, prefix) or std.ascii.startsWithIgnoreCase(b, prefix)) {
+        return a.len == b.len and std.ascii.startsWithIgnoreCase(a, prefix) and std.ascii.startsWithIgnoreCase(b, prefix) and
+            std.mem.eql(u8, a[prefix.len..], b[prefix.len..]);
+    }
+    return std.ascii.eqlIgnoreCase(a, b);
 }
 
 /// The list `config` gives `field` (`order` or `hidden`).
@@ -1218,6 +1227,19 @@ test "settings patch: a list another program changed stops the save; one a later
             try testing.expect(try writeMasked(&masked.writer, &.{hidden}, &reloaded, false));
             try expectSameText("profile-hidden", masked.written());
         }
+    }
+    // An SSH alias in another case is another profile; its prefix in another
+    // case is not.
+    const hidden_ssh: Edit = .{ .field = .hidden, .id = "", .op = .{ .list = &.{"ssh:prod"} } };
+    for ([_]Case{
+        .{ .values = &.{ "ssh:prod", "SSH:prod" }, .held = true },
+        .{ .values = &.{ "ssh:prod", "ssh:Prod" }, .held = false },
+        .{ .values = &.{"ssh:Prod"}, .held = false },
+    }) |case| {
+        var reloaded = try Config.default(alloc);
+        defer reloaded.deinit();
+        for (case.values) |value| try reloaded.@"profile-hidden".parseCLI(reloaded._arena.?.allocator(), value);
+        try testing.expectEqual(case.held, editHeld(hidden_ssh, &reloaded));
     }
 }
 

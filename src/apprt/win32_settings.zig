@@ -2424,6 +2424,10 @@ pub const SettingsWindow = struct {
     /// one that failed would start another at once, and another. A move or a
     /// hide that needs the whole list asks for it (`findAllProfiles`).
     profile_ask_next: bool = true,
+    /// The selected row a rebuild could not find (a profile noctty found,
+    /// while the list is being looked for again): selected again once a
+    /// rebuild has it.
+    profile_selection_wanted: ?u64 = null,
     profile_generation: u64 = 0,
     profile_list: ReferenceList = .{ .kind = .profiles },
     /// Which of `profile_model`'s rows the search found, and how many.
@@ -7045,6 +7049,9 @@ pub const SettingsWindow = struct {
         self.current = copies.current;
         self.pending = copies.pending;
         self.initTransaction();
+        // A save's reload can take the windows' profile lists away (its
+        // profiles changed): the page asks for them again, once.
+        self.profile_ask_next = true;
         self.referenceConfigChanged();
         // The open profile row's buttons, which the release enabled whole,
         // as the new draft has them.
@@ -7738,7 +7745,7 @@ pub const SettingsWindow = struct {
         const original: ?*const Config = if (self.original) |*config| config else null;
         const alloc = self.handle.alloc;
         const list = &self.profile_list;
-        const was_selected: ?u64 = if (list.selected) |id| (if (id < self.profile_model.rows.len) self.profile_model.rows[id].identity else null) else null;
+        const was_selected: ?u64 = (if (list.selected) |id| (if (id < self.profile_model.rows.len) self.profile_model.rows[id].identity else null) else null) orelse self.profile_selection_wanted;
         list.selected = null;
         list.forgetOpenText(alloc);
         self.profile_generation +%= 1;
@@ -7779,6 +7786,8 @@ pub const SettingsWindow = struct {
         self.profile_found = alloc.alloc(bool, self.profile_model.rows.len) catch &.{};
         @memset(self.profile_found, false);
         if (was_selected) |identity| list.selected = self.profile_model.find(identity);
+        // Not found (yet): kept for the rebuild that has it.
+        self.profile_selection_wanted = if (list.selected == null) was_selected else null;
     }
 
     /// Which profile rows the search finds (`profile_found`): by the profile's
@@ -8191,11 +8200,14 @@ pub const SettingsWindow = struct {
         const profile = &model.profiles[row.profile];
         // Disabled, all three, while the page is held for a draft it is owed
         // (`holdDraftControls`), also when a discovery ends meanwhile.
+        // With part of the list, they are enabled to ask for the rest
+        // (`wholeProfileList`), as Alt+Up and Ctrl+H do.
         const takes = self.draftTakesEdits();
+        const partial = !model.complete and !profile.found_hidden;
         const enabled = [profile_button_count]bool{
-            takes and model.moveTarget(row.profile, -1) != null,
-            takes and model.moveTarget(row.profile, 1) != null,
-            takes and model.complete and !profile.found_hidden,
+            takes and (partial or model.moveTarget(row.profile, -1) != null),
+            takes and (partial or model.moveTarget(row.profile, 1) != null),
+            takes and (partial or (model.complete and !profile.found_hidden)),
         };
         const y = list.buttonsTop(metrics, position);
         var x = metrics.pad_x + metrics.bar + list.indentOf(metrics, list.shown[position]);
@@ -8533,14 +8545,16 @@ pub const SettingsWindow = struct {
         if (row.kind != .new_profile) if (self.profile_model.profileOf(row)) |profile| {
             const model = &self.profile_model;
             const takes = self.draftTakesEdits();
+            // With part of the list, the items ask for the rest.
+            const partial = !model.complete and !profile.found_hidden;
             const flags = struct {
                 fn of(on: bool) UINT {
                     return MF_STRING | if (on) 0 else MF_GRAYED;
                 }
             }.of;
-            _ = sys.AppendMenuW(menu, flags(takes and model.moveTarget(row.profile, -1) != null), profile_menu_up, std.unicode.utf8ToUtf16LeStringLiteral("Move &up\tAlt+Up"));
-            _ = sys.AppendMenuW(menu, flags(takes and model.moveTarget(row.profile, 1) != null), profile_menu_down, std.unicode.utf8ToUtf16LeStringLiteral("Move &down\tAlt+Down"));
-            _ = sys.AppendMenuW(menu, flags(takes and model.complete and !profile.found_hidden), profile_menu_hide, if (profile.hidden)
+            _ = sys.AppendMenuW(menu, flags(takes and (partial or model.moveTarget(row.profile, -1) != null)), profile_menu_up, std.unicode.utf8ToUtf16LeStringLiteral("Move &up\tAlt+Up"));
+            _ = sys.AppendMenuW(menu, flags(takes and (partial or model.moveTarget(row.profile, 1) != null)), profile_menu_down, std.unicode.utf8ToUtf16LeStringLiteral("Move &down\tAlt+Down"));
+            _ = sys.AppendMenuW(menu, flags(takes and (partial or (model.complete and !profile.found_hidden))), profile_menu_hide, if (profile.hidden)
                 std.unicode.utf8ToUtf16LeStringLiteral("&Show in the picker\tCtrl+H")
             else
                 std.unicode.utf8ToUtf16LeStringLiteral("&Hide in the picker\tCtrl+H"));
@@ -22555,6 +22569,10 @@ fn profileFixture(tmp: *std.testing.TmpDir, text: []const u8, path: *[]u8) !*dia
     try fixture.config.loadRecursiveFiles(alloc);
     fixture.save_path = path.*;
     fixture.reload_from_disk = true;
+    // The page asks for the app's list from its first build, as in the app;
+    // until a test gives one (`giveProfilePage`) the list is empty.
+    fixture.settings.handle.pageProfiles = &dialog_test.Fixture.pageProfiles;
+    fixture.settings.handle.findAllProfiles = &dialog_test.Fixture.findAllProfiles;
     try fixture.settings.open();
     fixture.settings.setActiveSection(.profiles);
     _ = SetFocus(fixture.settings.profile_list.hwnd.?);
@@ -23850,13 +23868,16 @@ test "settings the Profiles page asks for the profiles once, never when a discov
                 .{ .key = "pwsh.exe", .label = "PowerShell" },
                 .{ .key = "user:py", .label = "py" },
             };
+            // The window's first build asked for the list.
+            try std.testing.expectEqual(@as(u32, 1), fixture.page_calls);
+            try std.testing.expectEqual(@as(u32, 1), fixture.page_asks);
             // A discovery ends without them all: the page is built again, and
             // asks for nothing, so a failed one cannot start another.
             giveProfilePage(fixture, &part, false);
-            try std.testing.expectEqual(@as(u32, 1), fixture.page_calls);
-            try std.testing.expectEqual(@as(u32, 0), fixture.page_asks);
+            try std.testing.expectEqual(@as(u32, 2), fixture.page_calls);
+            try std.testing.expectEqual(@as(u32, 1), fixture.page_asks);
             settings.profilesChanged();
-            try std.testing.expectEqual(@as(u32, 0), fixture.page_asks);
+            try std.testing.expectEqual(@as(u32, 1), fixture.page_asks);
             // Alt+Up on py: the app is asked to look again, and the note says
             // it is looking.
             try selectProfileRow(list, settings.profile_model.findField(.profile, "py", null) orelse return error.TestExpectedRow);
@@ -23866,12 +23887,18 @@ test "settings the Profiles page asks for the profiles once, never when a discov
             try std.testing.expectEqual(@as(u32, 1), fixture.find_all_calls);
             try expectSameText("noctty is looking for the profiles on this computer: the order can be changed once it has them all.", try statusTextOf(settings, &buf));
             try std.testing.expect(!settings.hasPendingChanges());
+            // The pointer asks too: the row's buttons are enabled for it.
+            const up = settings.profile_buttons[0] orelse return error.TestExpectedButton;
+            try std.testing.expect(sys.IsWindowEnabled(up) != 0);
+            _ = sys.SendMessageW(up, BM_CLICK, 0, 0);
+            try std.testing.expectEqual(@as(u32, 2), fixture.find_all_calls);
+            try expectSameText("noctty is looking for the profiles on this computer: the order can be changed once it has them all.", try statusTextOf(settings, &buf));
             // This time the whole list comes at once: py moves.
             fixture.find_all_gives = &whole;
             _ = sys.SendMessageW(hwnd, WM_SYSKEYDOWN, focus_cue.vk_up, 1 << 29);
-            try std.testing.expectEqual(@as(u32, 2), fixture.find_all_calls);
+            try std.testing.expectEqual(@as(u32, 3), fixture.find_all_calls);
             try expectSameText("py moved to 1 of 2.", try statusTextOf(settings, &buf));
-            try std.testing.expectEqual(@as(u32, 0), fixture.page_asks);
+            try std.testing.expectEqual(@as(u32, 1), fixture.page_asks);
         }
     }.body);
 }
@@ -24072,7 +24099,9 @@ test "settings a page held for an owed draft moves and hides no profile, by key,
                 try std.testing.expectEqual(com.UIA_E_ELEMENTNOTENABLED, uia.invoke_iface.vtbl.Invoke(&uia.invoke_iface));
             }
             // Keys sent to the held list, and a click queued before the hold,
-            // change nothing.
+            // change nothing: refused by `draftTakesEdits`, and again by there
+            // being no draft, so this part passes without the gate too. The
+            // buttons and the menu above and below are where the gate shows.
             _ = sys.SendMessageW(hwnd, WM_SYSKEYDOWN, focus_cue.vk_up, 1 << 29);
             try dialog_test.holdKeys(.{ .ctrl = true });
             _ = sys.SendMessageW(hwnd, WM_KEYDOWN, 'H', 0);
@@ -24100,6 +24129,53 @@ test "settings a page held for an owed draft moves and hides no profile, by key,
             try std.testing.expect(sys.IsWindowEnabled(settings.profile_buttons[2].?) != 0);
             _ = sys.SendMessageW(hwnd, WM_SYSKEYDOWN, focus_cue.vk_up, 1 << 29);
             try expectSameText("py moved to 1 of 3.", try statusTextOf(settings, &buf));
+        }
+    }.body);
+}
+
+test "settings a save that takes the windows' profile lists away asks for them again, and the profile it moved stays selected" {
+    try dialog_test.onHiddenDesktop(struct {
+        fn body() !void {
+            const keyboard = win32_input.TestingKeyboard.pinNone();
+            defer keyboard.release();
+            const alloc = std.testing.allocator;
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var path: []u8 = &.{};
+            const fixture = try profileFixture(&tmp, "profile-command = py: python.exe\n", &path);
+            defer alloc.free(path);
+            defer fixture.finish();
+            const settings = &fixture.settings;
+            const list = &settings.profile_list;
+            const listed = [_]ProfileChoice{
+                .{ .key = "pwsh.exe", .label = "PowerShell" },
+                .{ .key = "user:py", .label = "py" },
+                .{ .key = "cmd.exe", .label = "Command Prompt" },
+            };
+            giveProfilePage(fixture, &listed, true);
+            const hwnd = list.hwnd orelse return error.TestExpectedList;
+            const pwsh = settings_profiles.identity(.profile, "pwsh.exe", null);
+            try selectProfileRow(list, settings.profile_model.find(pwsh) orelse return error.TestExpectedRow);
+            _ = sys.SendMessageW(hwnd, WM_SYSKEYDOWN, focus_cue.vk_down, 1 << 29);
+            // The save's reload takes the windows' lists away (the app does
+            // so when the profiles change): the page asks for them again.
+            fixture.page_profiles = &.{};
+            fixture.page_profiles_complete = false;
+            const asks = fixture.page_asks;
+            settings.save();
+            try std.testing.expectEqual(@as(u32, 1), fixture.saved);
+            try std.testing.expectEqual(asks + 1, fixture.page_asks);
+            try std.testing.expect(settings.profile_model.find(pwsh) == null);
+            // The list arrives: PowerShell is selected again.
+            const arranged = [_]ProfileChoice{
+                .{ .key = "user:py", .label = "py" },
+                .{ .key = "pwsh.exe", .label = "PowerShell" },
+                .{ .key = "cmd.exe", .label = "Command Prompt" },
+            };
+            giveProfilePage(fixture, &arranged, true);
+            const row = settings.selectedProfileRow() orelse return error.TestExpectedSelection;
+            try std.testing.expectEqual(pwsh, row.identity);
+            try std.testing.expectEqual(asks + 1, fixture.page_asks);
         }
     }.body);
 }

@@ -10449,7 +10449,8 @@ pub const App = struct {
         {
             const after = try SaveTest.read(path);
             defer alloc.free(after);
-            try std.testing.expectEqualStrings("profile-command = py: python.exe\n\nprofile-order =\nprofile-order = user:py\nprofile-order = pwsh.exe\nprofile-order = cmd.exe\n\nprofile-hidden =\nprofile-hidden = cmd.exe\n", after);
+            // Compared without printing: the file holds a command line.
+            try std.testing.expect(std.mem.eql(u8, "profile-command = py: python.exe\n\nprofile-order =\nprofile-order = user:py\nprofile-order = pwsh.exe\nprofile-order = cmd.exe\n\nprofile-hidden =\nprofile-hidden = cmd.exe\n", after));
         }
         // The clears take what the lower file gave: the app's lists are the
         // page's, and picking by them gives the page's order.
@@ -10522,7 +10523,7 @@ pub const App = struct {
         try std.testing.expectEqualStrings("profile-hidden", app.settings_failure_detail.text orelse return error.TestExpectedDetail);
         const after = try SaveTest.read(path);
         defer alloc.free(after);
-        try std.testing.expectEqualStrings(changed, after);
+        try std.testing.expect(std.mem.eql(u8, changed, after));
     }
 
     test "win32 settings save of a profile removal reads the layers again: a lower file that gained the profile keeps a tombstone" {

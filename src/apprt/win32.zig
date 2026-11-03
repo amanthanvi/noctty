@@ -2858,7 +2858,12 @@ test "win32 Settings' Profiles page list marks the quick slots and the profiles 
     first.profiles_complete = true;
     first.profiles.?[1].hidden = true;
     first.profiles.?[2].hidden = true;
+    first.profiles.?[2].kind = .vs_dev_cmd;
+    first.profiles.?[2].newest_visual_studio = false;
     try app.config.@"profile-hidden".list.append(app.config._arena.?.allocator(), "cmd.exe");
+    // `profile-hidden` names the old Visual Studio too: discovery still
+    // hides it, so the page still cannot show it.
+    try app.config.@"profile-hidden".list.append(app.config._arena.?.allocator(), "vs:old:cmd");
     // PowerShell has the first quick slot.
     app.launcher_quick_slot_keys[0] = try std.testing.allocator.dupeZ(u8, "pwsh.exe");
     defer {
@@ -5649,11 +5654,16 @@ pub fn settingsProfileChoicesThunk(
     for (result.items) |*item| if (app.launcherQuickSlotOrdinal(item.key)) |ordinal| {
         item.quick_slot = @intCast(ordinal + 1);
     };
-    // A hidden profile no `profile-hidden` value names, noctty hid itself
-    // (an older Visual Studio): the Profiles page cannot show it.
+    // A hidden profile noctty hid itself, which the Profiles page cannot
+    // show: an older Visual Studio under `visual-studio-profiles = newest`
+    // (whatever `profile-hidden` says of it too), or one no `profile-hidden`
+    // value names.
+    const newest_only = app.config.@"visual-studio-profiles" == .newest;
     if (list) |found| for (result.items, found.profiles) |*item, profile| {
         if (!profile.hidden) continue;
-        item.found_hidden = for (app.config.@"profile-hidden".list.items) |value| {
+        const older_visual_studio = newest_only and !profile.newest_visual_studio and
+            (profile.kind == .vs_dev_cmd or profile.kind == .vs_dev_shell);
+        item.found_hidden = older_visual_studio or for (app.config.@"profile-hidden".list.items) |value| {
             if (windows_shell.referenceNames(found.profiles, value, profile)) break false;
         } else true;
     };

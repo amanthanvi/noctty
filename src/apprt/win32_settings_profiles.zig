@@ -180,10 +180,16 @@ pub const Model = struct {
         try rows.append(a, .{ .kind = .new_profile, .identity = identity(.new_profile, "", null), .search = "new profile add create" });
         const cli = try commandLineIds(a, draft);
         const entries = try pageEntries(a, draft, original, listed);
+        // Cut short at `max_rows`: the page does not list every profile, so
+        // none is moved or hidden (a written list would leave the rest out).
+        var truncated = false;
         for (entries) |page_entry| {
             if (page_entry.user == null) {
                 // A profile noctty found: one row.
-                if (rows.items.len + 1 > max_rows) break;
+                if (rows.items.len + 1 > max_rows) {
+                    truncated = true;
+                    break;
+                }
                 const item = page_entry.listed.?;
                 const index: u32 = @intCast(profiles.items.len);
                 const key = try a.dupe(u8, item.key);
@@ -210,7 +216,10 @@ pub const Model = struct {
             const variable_count = if (env) |map| map.count() else 0;
             // The profile's own row, its three fields, its variables and
             // "Add variable".
-            if (rows.items.len + 5 + variable_count > max_rows) break;
+            if (rows.items.len + 5 + variable_count > max_rows) {
+                truncated = true;
+                break;
+            }
             // Copies: the draft may be replaced while the page shows them.
             const id = try a.dupe(u8, entry.id);
             const command = try a.dupe(u8, entry.value);
@@ -285,7 +294,7 @@ pub const Model = struct {
             .arena = arena,
             .profiles = profiles.items,
             .rows = rows.items,
-            .complete = complete and listed.len != 0,
+            .complete = complete and listed.len != 0 and !truncated,
             .base = base,
         };
     }
@@ -1488,11 +1497,11 @@ test "settings profiles: with the app's list, every profile in the picker's orde
     // user profile.
     const keys = try testKeysText(alloc, &model);
     defer alloc.free(keys);
-    try testing.expectEqualStrings("pwsh.exe\nuser:py\nuser:node\nssh:prod\ncmd.exe (hidden)\n", keys);
+    try expectSameText("pwsh.exe\nuser:py\nuser:node\nssh:prod\ncmd.exe (hidden)\n", keys);
     // A profile noctty found is one row; a user profile keeps its fields.
     const text = try testRowsText(alloc, &model);
     defer alloc.free(text);
-    try testing.expectEqualStrings(
+    try expectSameText(
         \\new_profile New profile =
         \\profile PowerShell = pwsh.exe
         \\profile py = user:py
@@ -1544,20 +1553,20 @@ test "settings profiles: a move or a hide gives the draft both lists whole, and 
     {
         const keys = try testKeysText(alloc, &model);
         defer alloc.free(keys);
-        try testing.expectEqualStrings("user:py\npwsh.exe\nuser:node\ncmd.exe (hidden)\n", keys);
+        try expectSameText("user:py\npwsh.exe\nuser:node\ncmd.exe (hidden)\n", keys);
     }
     // Both lists name every profile, in that order.
     try testing.expectEqual(@as(usize, 4), draft.@"profile-order".list.items.len);
-    try testing.expectEqualStrings("user:py", draft.@"profile-order".list.items[0]);
+    try expectSameText("user:py", draft.@"profile-order".list.items[0]);
     try testing.expectEqual(@as(usize, 1), draft.@"profile-hidden".list.items.len);
-    try testing.expectEqualStrings("cmd.exe", draft.@"profile-hidden".list.items[0]);
+    try expectSameText("cmd.exe", draft.@"profile-hidden".list.items[0]);
     // PowerShell hidden: first among the hidden ones.
     try testApply(&draft, try model.toggledHidden(a, 1, true));
     try model.buildListed(alloc, &draft, &original, &listed, true);
     {
         const keys = try testKeysText(alloc, &model);
         defer alloc.free(keys);
-        try testing.expectEqualStrings("user:py\nuser:node\npwsh.exe (hidden)\ncmd.exe (hidden)\n", keys);
+        try expectSameText("user:py\nuser:node\npwsh.exe (hidden)\ncmd.exe (hidden)\n", keys);
     }
     // Command Prompt shown: last among the shown ones.
     try testApply(&draft, try model.toggledHidden(a, 3, false));
@@ -1565,7 +1574,7 @@ test "settings profiles: a move or a hide gives the draft both lists whole, and 
     {
         const keys = try testKeysText(alloc, &model);
         defer alloc.free(keys);
-        try testing.expectEqualStrings("user:py\nuser:node\ncmd.exe\npwsh.exe (hidden)\n", keys);
+        try expectSameText("user:py\nuser:node\ncmd.exe\npwsh.exe (hidden)\n", keys);
     }
     // The draft counts its two lists as two changes, and its profiles as
     // none.
@@ -1598,7 +1607,7 @@ test "settings profiles: a quick slot's profile stays first, does not move, and 
     {
         const keys = try testKeysText(alloc, &model);
         defer alloc.free(keys);
-        try testing.expectEqualStrings("pwsh.exe\ncmd.exe\nuser:py (hidden)\n", keys);
+        try expectSameText("pwsh.exe\ncmd.exe\nuser:py (hidden)\n", keys);
     }
     // Shown again, its slot puts it first.
     try testApply(&draft, try model.toggledHidden(a, 2, false));
@@ -1606,7 +1615,7 @@ test "settings profiles: a quick slot's profile stays first, does not move, and 
     {
         const keys = try testKeysText(alloc, &model);
         defer alloc.free(keys);
-        try testing.expectEqualStrings("user:py\npwsh.exe\ncmd.exe\n", keys);
+        try expectSameText("user:py\npwsh.exe\ncmd.exe\n", keys);
     }
 }
 
@@ -1633,11 +1642,11 @@ test "settings profiles: the pinned profiles stay first whatever the draft's ord
     {
         const keys = try testKeysText(alloc, &model);
         defer alloc.free(keys);
-        try testing.expectEqualStrings("user:py\npwsh.exe\nuser:dev\ncmd.exe\n", keys);
+        try expectSameText("user:py\npwsh.exe\nuser:dev\ncmd.exe\n", keys);
     }
     // It does not move above them, and PowerShell is what stops it.
     try testing.expect(model.moveTarget(2, -1) == null);
-    try testing.expectEqualStrings("pwsh.exe", (model.pinBlocking(2, -1) orelse return error.TestExpectedPin).key);
+    try expectSameText("pwsh.exe", (model.pinBlocking(2, -1) orelse return error.TestExpectedPin).key);
     try testing.expect(model.pinBlocking(3, -1) == null);
     // Command Prompt moves above it.
     try testApply(&draft, try model.moved(a, 3, 2));
@@ -1645,7 +1654,7 @@ test "settings profiles: the pinned profiles stay first whatever the draft's ord
     {
         const keys = try testKeysText(alloc, &model);
         defer alloc.free(keys);
-        try testing.expectEqualStrings("user:py\npwsh.exe\ncmd.exe\nuser:dev\n", keys);
+        try expectSameText("user:py\npwsh.exe\ncmd.exe\nuser:dev\n", keys);
     }
     // A draft order that names the pinned ones last still shows them first,
     // as the picker does.
@@ -1654,7 +1663,7 @@ test "settings profiles: the pinned profiles stay first whatever the draft's ord
     {
         const keys = try testKeysText(alloc, &model);
         defer alloc.free(keys);
-        try testing.expectEqualStrings("user:py\npwsh.exe\ncmd.exe\nuser:dev\n", keys);
+        try expectSameText("user:py\npwsh.exe\ncmd.exe\nuser:dev\n", keys);
     }
 }
 
@@ -1681,7 +1690,7 @@ test "settings profiles: a profile noctty hides itself stays hidden and last, an
     {
         const keys = try testKeysText(alloc, &model);
         defer alloc.free(keys);
-        try testing.expectEqualStrings("pwsh.exe\nuser:py\ncmd.exe (hidden)\nvs:old:cmd (hidden)\n", keys);
+        try expectSameText("pwsh.exe\nuser:py\ncmd.exe (hidden)\nvs:old:cmd (hidden)\n", keys);
     }
     // It does not move, nor does anything move past it.
     try testing.expect(model.moveTarget(3, -1) == null);
@@ -1691,14 +1700,14 @@ test "settings profiles: a profile noctty hides itself stays hidden and last, an
     try testing.expectEqual(@as(usize, 3), lists.order.len);
     for (lists.order) |key| try testing.expect(!std.mem.eql(u8, key, "vs:old:cmd"));
     try testing.expectEqual(@as(usize, 1), lists.hidden.len);
-    try testing.expectEqualStrings("cmd.exe", lists.hidden[0]);
+    try expectSameText("cmd.exe", lists.hidden[0]);
     // Once the draft has its own lists, it is still hidden and last.
     try testApply(&draft, lists);
     try model.buildListed(alloc, &draft, &original, &listed, true);
     {
         const keys = try testKeysText(alloc, &model);
         defer alloc.free(keys);
-        try testing.expectEqualStrings("user:py\npwsh.exe\ncmd.exe (hidden)\nvs:old:cmd (hidden)\n", keys);
+        try expectSameText("user:py\npwsh.exe\ncmd.exe (hidden)\nvs:old:cmd (hidden)\n", keys);
     }
     try testing.expect(model.profiles[3].found_hidden);
     // Command Prompt shown: neither list names the profile noctty hides.
@@ -1764,7 +1773,7 @@ test "settings profiles: a list the page left alone keeps the app's answer, alia
     try model.buildListed(alloc, &draft, &original, &listed, true);
     const keys = try testKeysText(alloc, &model);
     defer alloc.free(keys);
-    try testing.expectEqualStrings("user:py\npwsh.exe\nwsl:Ubuntu (hidden)\n", keys);
+    try expectSameText("user:py\npwsh.exe\nwsl:Ubuntu (hidden)\n", keys);
 }
 
 test "settings profiles: SSH aliases that differ only in case are two profiles, and a default alias marks its profile" {
@@ -1802,8 +1811,8 @@ test "settings profiles: a draft's own order outlives a change to the file, and 
     try followFile(&original, &draft, &replacement);
     // The order stays the draft's, over the baseline it started from (which
     // a save checks against the file); the hidden list, untouched, follows.
-    try testing.expectEqualStrings("user:py", draft.@"profile-order".list.items[0]);
-    try testing.expectEqualStrings("cmd.exe", original.@"profile-order".list.items[0]);
-    try testing.expectEqualStrings("cmd.exe", draft.@"profile-hidden".list.items[0]);
-    try testing.expectEqualStrings("cmd.exe", original.@"profile-hidden".list.items[0]);
+    try expectSameText("user:py", draft.@"profile-order".list.items[0]);
+    try expectSameText("cmd.exe", original.@"profile-order".list.items[0]);
+    try expectSameText("cmd.exe", draft.@"profile-hidden".list.items[0]);
+    try expectSameText("cmd.exe", original.@"profile-hidden".list.items[0]);
 }
