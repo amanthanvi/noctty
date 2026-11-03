@@ -7046,6 +7046,9 @@ pub const SettingsWindow = struct {
         self.pending = copies.pending;
         self.initTransaction();
         self.referenceConfigChanged();
+        // The open profile row's buttons, which the release enabled whole,
+        // as the new draft has them.
+        self.syncProfileButtons();
     }
 
     /// Start the draft over from `current`. Nothing is touched until every copy
@@ -8186,10 +8189,13 @@ pub const SettingsWindow = struct {
         const position = list.selectedPosition() orelse return self.hideProfileButtons();
         const model = &self.profile_model;
         const profile = &model.profiles[row.profile];
+        // Disabled, all three, while the page is held for a draft it is owed
+        // (`holdDraftControls`), also when a discovery ends meanwhile.
+        const takes = self.draftTakesEdits();
         const enabled = [profile_button_count]bool{
-            model.moveTarget(row.profile, -1) != null,
-            model.moveTarget(row.profile, 1) != null,
-            model.complete and !profile.found_hidden,
+            takes and model.moveTarget(row.profile, -1) != null,
+            takes and model.moveTarget(row.profile, 1) != null,
+            takes and model.complete and !profile.found_hidden,
         };
         const y = list.buttonsTop(metrics, position);
         var x = metrics.pad_x + metrics.bar + list.indentOf(metrics, list.shown[position]);
@@ -8522,17 +8528,19 @@ pub const SettingsWindow = struct {
         if (actions.enter) |label| _ = sys.AppendMenuW(menu, MF_STRING, reference_menu_edit, utf8ToW(&item_w, profileMenuLabel(&item_buf, label)));
         if (actions.delete) |label| _ = sys.AppendMenuW(menu, MF_STRING, reference_menu_copy, utf8ToW(&item_w, profileMenuLabel(&item_buf, label)));
         // A profile's place and visibility (`profileMove`,
-        // `profileToggleHidden`), greyed where it cannot change.
+        // `profileToggleHidden`), greyed where it cannot change, and while
+        // there is no draft to take a change.
         if (row.kind != .new_profile) if (self.profile_model.profileOf(row)) |profile| {
             const model = &self.profile_model;
+            const takes = self.draftTakesEdits();
             const flags = struct {
                 fn of(on: bool) UINT {
                     return MF_STRING | if (on) 0 else MF_GRAYED;
                 }
             }.of;
-            _ = sys.AppendMenuW(menu, flags(model.moveTarget(row.profile, -1) != null), profile_menu_up, std.unicode.utf8ToUtf16LeStringLiteral("Move &up\tAlt+Up"));
-            _ = sys.AppendMenuW(menu, flags(model.moveTarget(row.profile, 1) != null), profile_menu_down, std.unicode.utf8ToUtf16LeStringLiteral("Move &down\tAlt+Down"));
-            _ = sys.AppendMenuW(menu, flags(model.complete), profile_menu_hide, if (profile.hidden)
+            _ = sys.AppendMenuW(menu, flags(takes and model.moveTarget(row.profile, -1) != null), profile_menu_up, std.unicode.utf8ToUtf16LeStringLiteral("Move &up\tAlt+Up"));
+            _ = sys.AppendMenuW(menu, flags(takes and model.moveTarget(row.profile, 1) != null), profile_menu_down, std.unicode.utf8ToUtf16LeStringLiteral("Move &down\tAlt+Down"));
+            _ = sys.AppendMenuW(menu, flags(takes and model.complete and !profile.found_hidden), profile_menu_hide, if (profile.hidden)
                 std.unicode.utf8ToUtf16LeStringLiteral("&Show in the picker\tCtrl+H")
             else
                 std.unicode.utf8ToUtf16LeStringLiteral("&Hide in the picker\tCtrl+H"));
@@ -8561,6 +8569,10 @@ pub const SettingsWindow = struct {
     /// order (`settings_profiles.Model.moved`), and the move is said: "Python
     /// moved to 3 of 9".
     fn profileMove(self: *SettingsWindow, step: i2) void {
+        // Nothing moves while there is no draft to take it (`holdDraftControls`):
+        // a key, a button's click or a UIA Invoke queued before the hold, or
+        // sent to the held list, lands here.
+        if (!self.draftTakesEdits()) return;
         if (!self.profileEditDone()) return;
         const row = self.selectedProfileRow() orelse return;
         if (row.kind == .new_profile) return;
@@ -8600,6 +8612,8 @@ pub const SettingsWindow = struct {
     /// Default profile still starts new tabs, as the app does, and the note
     /// says so.
     fn profileToggleHidden(self: *SettingsWindow) void {
+        // As `profileMove`: nothing is hidden or shown without a draft.
+        if (!self.draftTakesEdits()) return;
         if (!self.profileEditDone()) return;
         const row = self.selectedProfileRow() orelse return;
         if (row.kind == .new_profile) return;
@@ -23987,6 +24001,105 @@ test "settings a move and its way back are no change, and the open row's buttons
             _ = sys.SendMessageW(hide, WM_KEYDOWN, 'H', 0);
             try dialog_test.holdKeys(.{});
             try expectSameText("py is hidden: the picker, the palette and the jump list leave it out.", try statusTextOf(settings, &buf));
+        }
+    }.body);
+}
+
+test "settings a page held for an owed draft moves and hides no profile, by key, button, menu or UIA" {
+    try dialog_test.onHiddenDesktop(struct {
+        threadlocal var answer: usize = 0;
+        threadlocal var greyed: u8 = 0;
+        extern "user32" fn GetMenuState(menu: win32_types.HMENU, item: UINT, flags: UINT) callconv(.winapi) UINT;
+
+        /// The item `answer` names, unless it is greyed; counts the greyed
+        /// ones of Move up, Move down and Hide.
+        fn pick(menu: win32_types.HMENU) usize {
+            greyed = 0;
+            for ([_]usize{ profile_menu_up, profile_menu_down, profile_menu_hide }) |item| {
+                if (GetMenuState(menu, @intCast(item), 0) & MF_GRAYED != 0) greyed += 1;
+            }
+            return if (GetMenuState(menu, @intCast(answer), 0) & MF_GRAYED != 0) 0 else answer;
+        }
+
+        fn body() !void {
+            const keyboard = win32_input.TestingKeyboard.pinNone();
+            defer keyboard.release();
+            const alloc = std.testing.allocator;
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var path: []u8 = &.{};
+            const fixture = try profileFixture(&tmp, "profile-command = py: python.exe\n", &path);
+            defer alloc.free(path);
+            defer fixture.finish();
+            const settings = &fixture.settings;
+            const list = &settings.profile_list;
+            const listed = [_]ProfileChoice{
+                .{ .key = "pwsh.exe", .label = "PowerShell" },
+                .{ .key = "user:py", .label = "py" },
+                .{ .key = "cmd.exe", .label = "Command Prompt" },
+            };
+            giveProfilePage(fixture, &listed, true);
+            const hwnd = list.hwnd orelse return error.TestExpectedList;
+            const window = settings.hwnd orelse return error.TestExpectedWindow;
+            try selectProfileRow(list, settings.profile_model.findField(.profile, "py", null) orelse return error.TestExpectedRow);
+            // py moved down, to be saved.
+            _ = sys.SendMessageW(hwnd, WM_SYSKEYDOWN, focus_cue.vk_down, 1 << 29);
+            try std.testing.expect(settings.hasPendingChanges());
+
+            // The save is done, and the window cannot copy the running
+            // settings: it holds the page until it can. Memory comes back,
+            // and the window has not yet tried again.
+            var failing = std.testing.FailingAllocator.init(settings.handle.alloc, .{});
+            const real = settings.handle.alloc;
+            settings.handle.alloc = failing.allocator();
+            defer settings.handle.alloc = real;
+            fixture.starve_after_save = &failing;
+            defer fixture.starve_after_save = null;
+            settings.save();
+            try std.testing.expect(settings.owes_draft);
+            try std.testing.expect(sys.KillTimer(window, refresh_timer_id) != 0);
+            failing.fail_index = std.math.maxInt(usize);
+            var buf: [512]u8 = undefined;
+            try selectProfileRow(list, settings.profile_model.findField(.profile, "py", null) orelse return error.TestExpectedRow);
+            settings.syncProfileButtons();
+
+            // The row's buttons are disabled, and their Invoke refused.
+            const com = @import("win32_uia/com.zig");
+            for (settings.profile_buttons, settings.profile_button_providers) |maybe, provider| {
+                const button = maybe orelse return error.TestExpectedButton;
+                try std.testing.expect(sys.IsWindowEnabled(button) == 0);
+                const uia = provider orelse return error.TestExpectedProvider;
+                try std.testing.expectEqual(com.UIA_E_ELEMENTNOTENABLED, uia.invoke_iface.vtbl.Invoke(&uia.invoke_iface));
+            }
+            // Keys sent to the held list, and a click queued before the hold,
+            // change nothing.
+            _ = sys.SendMessageW(hwnd, WM_SYSKEYDOWN, focus_cue.vk_up, 1 << 29);
+            try dialog_test.holdKeys(.{ .ctrl = true });
+            _ = sys.SendMessageW(hwnd, WM_KEYDOWN, 'H', 0);
+            try dialog_test.holdKeys(.{});
+            _ = sys.SendMessageW(hwnd, WM_COMMAND, PROFILE_BUTTON_FIRST + 1, @bitCast(@intFromPtr(settings.profile_buttons[1].?)));
+            dialog_test.pump();
+            // The menu greys Move up, Move down and Hide.
+            answer = profile_menu_hide;
+            settings.context_menu_pick = &pick;
+            _ = sys.SendMessageW(hwnd, WM_CONTEXTMENU, @intFromPtr(hwnd), @bitCast(@as(isize, -1)));
+            try std.testing.expectEqual(@as(u8, 3), greyed);
+            try std.testing.expect(!settings.hasPendingChanges());
+            try std.testing.expect(settings.pending == null);
+            try std.testing.expectEqualStrings(draft_owed_text, try statusTextOf(settings, &buf));
+            // A discovery that ends meanwhile enables none of them.
+            giveProfilePage(fixture, &listed, true);
+            for (settings.profile_buttons) |maybe| try std.testing.expect(sys.IsWindowEnabled(maybe.?) == 0);
+
+            // The draft comes: the buttons are as the page has them, and a
+            // move is taken again.
+            _ = sys.SendMessageW(window, WM_ACTIVATE, 1, 0);
+            try std.testing.expect(!settings.owes_draft);
+            try selectProfileRow(list, settings.profile_model.findField(.profile, "py", null) orelse return error.TestExpectedRow);
+            try std.testing.expect(sys.IsWindowEnabled(settings.profile_buttons[0].?) != 0);
+            try std.testing.expect(sys.IsWindowEnabled(settings.profile_buttons[2].?) != 0);
+            _ = sys.SendMessageW(hwnd, WM_SYSKEYDOWN, focus_cue.vk_up, 1 << 29);
+            try expectSameText("py moved to 1 of 3.", try statusTextOf(settings, &buf));
         }
     }.body);
 }
