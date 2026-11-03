@@ -8,6 +8,7 @@ Corrected in other files:
 - 2026-04-17 "`AppHandle.notifySuccess(title, body)`": `Surface.search_bar` is now `Surface.docked_search` (`win32/docked_search.zig`), which also holds the search fields that were on Surface. See the 2026-11-01 "Docked search is one per-pane module" entry in search-scrollbar.md.
 - 2026-10-23 PROFILES-4, trap (7): `settingsNotifySuccessThunk` now calls `Notifications.show(.app, ...)`, not `showToast`, and still raises the toast when a banner showed: the 2026-11-01 NOTIFY-MODULE entry in app-lifecycle.md.
 - 2026-10-17 "A custom server-side UIA provider": its "UIA runner posts F9" describes the former functional-test route. Functional probes now use verified command-palette dispatch; raw posted F9 remains an optional reproduction mode (`-RawPostedF9`). See the 2026-10-18 "A hidden-desktop harness that posts plain F9" entry (#465) in test-harnesses.md.
+- 2026-11-02 SETTINGS-F2-TEST-FLAKE, its item "`host.zig` `runOnPrivateDesktop` and `test_support.zig` `runOnHiddenDesktop` still start with the copied state": both now pin an empty keyboard for every body. See the 2026-11-03 TEST-HARNESS-KEYBOARD-PIN entry in test-harnesses.md.
 
 See also:
 - Counting Settings-open work in a trace per window-creation interval, not per PID (Windows reuses PIDs across cold launches): the 2026-10-19 "Windows reused PIDs within a SETSTALL cohort" entry in test-harnesses.md.

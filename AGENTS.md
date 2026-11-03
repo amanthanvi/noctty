@@ -449,7 +449,9 @@ that govern each symbol you change, or that none does.
   test runner's probe children and thread tests (`src/pty_transport_probe.zig`,
   `std.Progress.lockStdErr`, the search-thread tests in
   `src/terminal/search/Thread.zig`), the shared Win32 test fixtures
-  (`win32/test_support.zig`, `TestSession`), PSReadLine history isolation
+  (`win32/test_support.zig`, `TestSession`, the private-desktop runners
+  `runOnHiddenDesktop` and `host.zig` `runOnPrivateDesktop` and the empty
+  keyboard they pin), PSReadLine history isolation
   (`scripts/windows-harness-history.ps1`, `--command=cmd.exe` pins), a bash
   probe's `HISTFILE`, a failing test's error name (the installed test
   executable), and a test count or result that contradicts the code.
