@@ -1743,9 +1743,9 @@ pub const SaveError = error{
     /// file whole (`settings_patch.reloadReport`): what it missed is no
     /// override, and `AppHandle.failureDetail` names the file.
     SavedButUnread,
-    /// The file was written, and the reload after it could not be put in the
-    /// app's light/dark state (no memory): nothing of it is applied, and the
-    /// running settings stay as they were until the configuration is
+    /// The file was written, and the reload after it could not be read or put
+    /// in the app's light/dark state (no memory): nothing of it is applied,
+    /// and the running settings stay as they were until the configuration is
     /// reloaded. The save is done, so the draft and its previews end.
     SavedNotApplied,
 };
@@ -5088,10 +5088,12 @@ pub const SettingsWindow = struct {
         if (sys.IsWindowVisible(field) != 0) _ = SetFocus(field);
     }
 
-    /// `setActiveSection`. With `focus_follows` the caller has already given
-    /// the focus to the page's control or rail button (`focusAhead`), so no
-    /// row of the last page holds it and the search does not move it to the
-    /// search field: one focus move, one announcement.
+    /// `setActiveSection`. With `focus_follows` the focus is already where the
+    /// caller's one move takes it from or to: the page's control or rail
+    /// button, given it first (`focusAhead`), or the search field
+    /// (`goToFirstMatch`), which no page switch hides. So no row of the last
+    /// page holds it, and the search does not move it to the search field:
+    /// one focus move, one announcement.
     fn showSection(self: *SettingsWindow, next: Section, focus_follows: bool) void {
         if (self.stopsLeavingProfiles(next)) return;
         const changed = self.active_section != next;
@@ -6236,7 +6238,9 @@ pub const SettingsWindow = struct {
         const p = &(self.pending orelse return);
         const edit = self.rawScalarEdit(field) orelse return;
         self.markRawScalarEdit(field);
-        var text_buf: [64]u8 = undefined;
+        // All of what the field holds, as for the number fields: up to its
+        // limit, 4095 units, which a pasted or UIA-set value reaches.
+        var text_buf: [edit_text_max_utf8]u8 = undefined;
         const text = readEditUtf8(edit, &text_buf) orelse
             return self.setRawScalarValidationError(field, edit, comptime field_model.descriptor(setting).label ++ " could not be read.");
         const parsed = field_model.parseScalar(setting, text) catch |err|
@@ -9573,6 +9577,25 @@ test "settings a number field reads all it holds, so text past a valid start is 
     try std.testing.expectEqual(@as(f64, 0.25), settings.pending.?.@"background-opacity");
 }
 
+test "settings a padding field reads all it holds, however long, so a long text is checked whole" {
+    // More than the 64 bytes the field was once read into: 70 zeros, then a
+    // unit that does not parse.
+    const text = "0" ** 70 ++ "x";
+    const edit = sys.CreateWindowExW(0, std.unicode.utf8ToUtf16LeStringLiteral("EDIT"), std.unicode.utf8ToUtf16LeStringLiteral(text), 0, 0, 0, 1, 1, null, null, null, null) orelse return error.Unexpected;
+    defer _ = sys.DestroyWindow(edit);
+    var pending = try Config.default(std.testing.allocator);
+    defer pending.deinit();
+    var settings: SettingsWindow = .{ .handle = modelOnlyHandle(), .pending = pending, .fields = .{ .edit_pad_x = edit } };
+    settings.syncPaddingFromEdit(.window_padding_x);
+    try std.testing.expect(settings.raw_scalar_error[@intFromEnum(RawScalarField.window_padding_x)] != null);
+    // A long text that does parse is taken whole.
+    _ = sys.SetWindowTextW(edit, std.unicode.utf8ToUtf16LeStringLiteral("0" ** 70 ++ "7"));
+    settings.syncPaddingFromEdit(.window_padding_x);
+    try std.testing.expect(settings.raw_scalar_error[@intFromEnum(RawScalarField.window_padding_x)] == null);
+    const draft = settings.pending orelse return error.TestExpectedDraft;
+    try std.testing.expectEqual(@as(u32, 7), draft.@"window-padding-x".top_left);
+}
+
 test "settings opacity preview is floored while the draft keeps the typed value" {
     const Capture = struct {
         previews: [8]f64 = undefined,
@@ -10887,7 +10910,7 @@ test "settings a save whose reload is not applied says it saved, ends the previe
             defer fixture.finish();
             const settings = &fixture.settings;
             fixture.live_previews = true;
-            typeInto(settings.fields.edit_bg_opacity.?, "0.5");
+            typeInto(settings.fields.edit_bg_opacity orelse return error.TestExpectedField, "0.5");
             try std.testing.expectEqual(@as(f64, 0.5), fixture.config.@"background-opacity");
             const previews = fixture.previews;
 
@@ -24248,7 +24271,12 @@ fn comboSelectionHeight(window_height: i32, selection_height: i32, target: i32) 
 fn readEditUtf8(edit: HWND, buf: []u8) ?[]const u8 {
     var buf_w: [edit_text_max_code_units]u16 = undefined;
     const n = sys.GetWindowTextW(edit, &buf_w, @intCast(buf_w.len));
-    const written = std.unicode.utf16LeToUtf8(buf, buf_w[0..@intCast(n)]) catch return null;
+    const wide = buf_w[0..@intCast(@max(0, n))];
+    // `utf16LeToUtf8` does not check that the text fits `buf`: past its end
+    // it panics, or in a release build writes on. Text that does not fit
+    // reads as unreadable.
+    if (std.unicode.calcWtf8Len(wide) > buf.len) return null;
+    const written = std.unicode.utf16LeToUtf8(buf, wide) catch return null;
     return buf[0..written];
 }
 

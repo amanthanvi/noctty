@@ -2453,9 +2453,9 @@ pub const Host = struct {
         }
         const saved_but_masked = std.meta.activeTag(save_outcome) == .completed_masked;
         const saved_but_unread = std.meta.activeTag(save_outcome) == .completed_unread;
-        // Saved, with a reload that could not be applied (no memory to put it
-        // in the app's light/dark state): as for `completed_unread`, the
-        // running config is the one the pick installed.
+        // Saved, with a reload that could not be applied (no memory to read
+        // it or put it in the app's light/dark state): as for
+        // `completed_unread`, the running config stays as it is.
         const saved_not_applied = std.meta.activeTag(save_outcome) == .completed_not_applied;
 
         if (self.palette_list_uia_provider) |provider| {
@@ -2467,7 +2467,7 @@ pub const Host = struct {
                 else if (saved_but_unread)
                     "Theme saved; a config file could not be read whole"
                 else if (saved_not_applied)
-                    "Theme saved; the configuration could not be reloaded"
+                    "Theme saved; the saved settings could not be applied"
                 else if (self.app.safe_mode)
                     "Theme saved; restart noctty to apply it"
                 else
@@ -2499,7 +2499,7 @@ pub const Host = struct {
             log.warn("palette theme saved, but the reload could not be applied theme={s}", .{theme_name});
             runUiActionOrLog(
                 "palette unapplied theme banner failed",
-                self.setBanner(.err, "Theme saved, but the configuration could not be reloaded. Reload the configuration to use the saved file."),
+                self.setBanner(.err, "Theme saved, but the saved settings could not be applied. Reload the configuration to use them."),
             );
         }
         self.layout() catch |err| {

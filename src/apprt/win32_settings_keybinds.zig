@@ -407,8 +407,18 @@ test "keybinds a binding with a lock modifier is a binding of its own, though it
     try bare_model.build(alloc, &bare.keybind, null);
     try std.testing.expectEqual(@as(usize, 2), bare_model.rows.len);
     for (bare_model.rows) |row| try std.testing.expectEqualStrings("keybind = f12=reset", row.entry);
-    try std.testing.expect(bare_model.rows[0].id != bare_model.rows[1].id);
+    try std.testing.expect(!bare_model.rows[0].identity.eql(bare_model.rows[1].identity));
     try std.testing.expect(bare_model.rows[0].identity.keys[0].mods.caps_lock != bare_model.rows[1].identity.keys[0].mods.caps_lock);
+    // Two ids, and a rebuild gives each binding its own again: a first build
+    // hands out ids in turn, so only the rebuild tells them apart by what
+    // they are.
+    const first = [2]u64{ bare_model.rows[0].id, bare_model.rows[1].id };
+    const locked_first = bare_model.rows[0].identity.keys[0].mods.caps_lock;
+    try std.testing.expect(first[0] != first[1]);
+    try bare_model.build(alloc, &bare.keybind, null);
+    for (bare_model.rows) |row| {
+        try std.testing.expectEqual(if (row.identity.keys[0].mods.caps_lock == locked_first) first[0] else first[1], row.id);
+    }
 }
 
 test "keybinds a rebuild keeps a binding's id, and gives it to no other binding" {
