@@ -4517,8 +4517,11 @@ pub fn loadOptionalFile(
             // A default file that is there and will not open is a problem,
             // as an included one is (`loadRecursiveFiles`): its path and the
             // error, never its text. Without it the load reads as if the
-            // file set nothing, and a Settings save applies that.
-            self.noteUnopenableDefaultFile(path, err) catch |note_err| {
+            // file set nothing, and a Settings save applies that. An empty
+            // one sets nothing and is no problem: older builds left the
+            // template at zero bytes, and an empty file beside a legacy one
+            // is kept as it is.
+            if (err != error.FileIsEmpty) self.noteUnopenableDefaultFile(path, err) catch |note_err| {
                 std.log.warn("could not record the problem err={}", .{note_err});
             };
             return .@"error";
@@ -4649,6 +4652,58 @@ test "a default config file that is there and will not open is a problem, naming
     try testing.expectEqual(OptionalFileAction.loaded, after.loadOptionalFile(alloc, path));
     try testing.expectEqual(@as(f32, 13), after.@"font-size");
     try testing.expect(after._diagnostics.empty());
+    // An empty one sets nothing and is no problem either.
+    try tmp.dir.writeFile(.{ .sub_path = "config.ghostty", .data = "" });
+    var empty = try Config.default(alloc);
+    defer empty.deinit();
+    _ = empty.loadOptionalFile(alloc, path);
+    try testing.expect(empty._diagnostics.empty());
+}
+
+test "a UTF-16 theme whose read fails partway is a problem of the theme, not the end of the load" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    // Longer than the reader's first fill, so the mark is read and the
+    // decode's read of the rest is the one that fails.
+    var text: std.Io.Writer.Allocating = .init(alloc);
+    defer text.deinit();
+    try text.writer.writeAll("font-size = 14\n");
+    for (0..400) |_| try text.writer.writeAll("# padding\n");
+    const utf16 = try testUtf16Le(text.written());
+    defer alloc.free(utf16);
+    try testing.expect(utf16.len > 2 * file_read_buffer_len);
+    try tmp.dir.writeFile(.{ .sub_path = "theme", .data = utf16 });
+    const theme = try tmp.dir.realpathAlloc(alloc, "theme");
+    defer alloc.free(theme);
+    const config_text = try std.fmt.allocPrint(alloc, "theme = {s}\n", .{theme});
+    defer alloc.free(config_text);
+    try tmp.dir.writeFile(.{ .sub_path = "config", .data = config_text });
+    const path = try tmp.dir.realpathAlloc(alloc, "config");
+    defer alloc.free(path);
+    // Another program locks the bytes past the first fill.
+    var locker = try tmp.dir.openFile("theme", .{ .mode = .read_write });
+    defer locker.close();
+    var io: std.os.windows.IO_STATUS_BLOCK = undefined;
+    const offset: std.os.windows.LARGE_INTEGER = 2 * file_read_buffer_len;
+    const length: std.os.windows.LARGE_INTEGER = @intCast(utf16.len);
+    try std.os.windows.LockFile(locker.handle, null, null, null, &io, &offset, &length, null, std.os.windows.TRUE, std.os.windows.TRUE);
+    var cfg = try Config.default(alloc);
+    defer cfg.deinit();
+    try cfg.loadFile(alloc, path);
+    try cfg.finalize();
+    // The theme is skipped and named; the load goes on.
+    try testing.expectEqual(@as(f32, 12), cfg.@"font-size");
+    const expected = try std.fmt.allocPrint(alloc, "error reading theme {s}: error.ReadFailed", .{theme});
+    defer alloc.free(expected);
+    var named: usize = 0;
+    for (cfg._diagnostics.items()) |diag| {
+        try testing.expect(std.mem.indexOf(u8, diag.message, "font-size") == null);
+        if (std.mem.eql(u8, expected, diag.message)) named += 1;
+    }
+    try testing.expectEqual(@as(usize, 1), named);
 }
 
 test "writeConfigTemplate writes the template with its path" {
@@ -5264,6 +5319,13 @@ fn loadTheme(self: *Config, theme: Theme) !void {
     var decoded_reader: std.Io.Reader = undefined;
     const reader = self.textReader(alloc_gpa, &file_reader.interface, path, .theme, &decoded, &decoded_reader) catch |err| switch (err) {
         error.InvalidUtf16 => return,
+        // UTF-16 is read whole before it is decoded, so a read that fails
+        // partway skips the theme: a problem, as a read that fails in a
+        // UTF-8 theme is, not the end of the whole load.
+        error.ReadFailed => {
+            try self.noteReadFailure("theme", path, false);
+            return;
+        },
         else => |e| return e,
     };
 

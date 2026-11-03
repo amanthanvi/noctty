@@ -8367,7 +8367,9 @@ test "win32 settings disk check stops a save on a default config file that will 
         try std.testing.expect(std.mem.eql(u8, expected, detail.text orelse return error.TestExpectedDetail));
     }
     {
-        // Byte-range locked: it opens, and its read fails.
+        // Byte-range locked: it opens, and its read fails, which the load
+        // recorded before (`LineIterator.read_failed`); pinned here beside
+        // the file that will not open.
         var lock = try tmp.dir.openFile("config.ghostty", .{ .mode = .read_write, .lock = .exclusive });
         defer lock.close();
         var disk = try configpkg.Config.default(alloc);

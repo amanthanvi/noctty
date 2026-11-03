@@ -562,8 +562,8 @@ pub const Unread = struct {
 
     pub const Kind = enum { config, include, theme };
 
-    /// How the status line names it: "the theme file <path>" or "the
-    /// included file <path>", no value.
+    /// How the status line names it: "the config file <path>", "the
+    /// included file <path>" or "the theme file <path>", no value.
     pub fn describe(self: Unread, alloc: Allocator) Allocator.Error![]u8 {
         return std.fmt.allocPrint(alloc, "{s} {s}", .{ self.noun(), self.path });
     }
