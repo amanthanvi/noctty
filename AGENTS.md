@@ -372,8 +372,10 @@ that govern each symbol you change, or that none does.
   `win32_settings_reference.savedOrigin`), the opacity trackbar and the number
   up-downs, the Profiles page (`ReferenceList`, `ListKind.profiles`,
   `win32_settings_profiles.zig`) and the identity patcher that saves it
-  (`win32/settings_patch.zig`, `FileEnd`), the keyboard pin in Settings dialog
-  tests (`TestingKeyboard.pinNone`), and the save path (`settingsSaveAndReload`,
+  (`win32/settings_patch.zig`, `FileEnd`), the config line reader it shares
+  with the loader (`cli/args.zig` `LineIterator.takes`, `read_failed`,
+  `Config.loadReader`), the keyboard pin in Settings dialog tests
+  (`TestingKeyboard.pinNone`), and the save path (`settingsSaveAndReload`,
   `patchOrAppendEdits`, save target, masked values).
 - [accessibility.md](docs/agents/log/accessibility.md): new widgets and UI
   events (adding a native widget, or changing its focus, children or
