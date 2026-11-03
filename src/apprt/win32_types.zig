@@ -131,4 +131,19 @@ test "shared Win32 type layouts" {
     try testing.expectEqual(@as(usize, 48), @offsetOf(WNDCLASSEXW, "hbrBackground"));
     try testing.expectEqual(@as(usize, 56), @offsetOf(WNDCLASSEXW, "lpszMenuName"));
     try testing.expectEqual(@as(usize, 64), @offsetOf(WNDCLASSEXW, "lpszClassName"));
+
+    // winuser.h declares both outside its pshpack2 block: natural packing.
+    try testing.expectEqual(@as(usize, 44), @sizeOf(WINDOWPLACEMENT));
+    try testing.expectEqual(@as(usize, 0), @offsetOf(WINDOWPLACEMENT, "length"));
+    try testing.expectEqual(@as(usize, 4), @offsetOf(WINDOWPLACEMENT, "flags"));
+    try testing.expectEqual(@as(usize, 8), @offsetOf(WINDOWPLACEMENT, "showCmd"));
+    try testing.expectEqual(@as(usize, 12), @offsetOf(WINDOWPLACEMENT, "ptMinPosition"));
+    try testing.expectEqual(@as(usize, 20), @offsetOf(WINDOWPLACEMENT, "ptMaxPosition"));
+    try testing.expectEqual(@as(usize, 28), @offsetOf(WINDOWPLACEMENT, "rcNormalPosition"));
+
+    try testing.expectEqual(@as(usize, 40), @sizeOf(MONITORINFO));
+    try testing.expectEqual(@as(usize, 0), @offsetOf(MONITORINFO, "cbSize"));
+    try testing.expectEqual(@as(usize, 4), @offsetOf(MONITORINFO, "rcMonitor"));
+    try testing.expectEqual(@as(usize, 20), @offsetOf(MONITORINFO, "rcWork"));
+    try testing.expectEqual(@as(usize, 36), @offsetOf(MONITORINFO, "dwFlags"));
 }
