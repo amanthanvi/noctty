@@ -113,11 +113,14 @@ name Windows registers as `Legacy (Typographic)`, for example
 either name.
 
 A character your fonts lack is drawn from the font Windows picks for its
-script. For Arabic that is Segoe UI, a proportional UI font, so the letters sit
-unevenly in the cell grid. `noctty +show-face --string="مرحبا"` names the face
+script. For Arabic that is often Segoe UI, a proportional UI font, so the
+letters sit unevenly in the cell grid; which font Windows picks depends on the
+machine and its locale. `noctty +show-face --string="مرحبا"` names the face
 each character comes from. To draw a script from a monospace font that has it,
-map its Unicode blocks to that family; the Cascadia Code release on GitHub
-includes Arabic, but the older copy that ships with Windows does not:
+map its Unicode blocks to that family; the Cascadia Code release on
+[GitHub](https://github.com/microsoft/cascadia-code/releases) includes Arabic,
+but the older copy that ships with Windows does not. Install the NF variant
+(`Cascadia Code NF`), which the map below names:
 
 ```ini
 font-codepoint-map = U+0600-U+06FF,U+0750-U+077F,U+08A0-U+08FF,U+FB50-U+FDFF,U+FE70-U+FEFF=Cascadia Code NF
