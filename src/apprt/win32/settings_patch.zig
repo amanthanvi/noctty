@@ -611,14 +611,30 @@ pub fn reloadReport(masked: *std.Io.Writer, edits: []const Edit, reload: *const 
 /// is the loader's to report, as the disk check before a save lets them
 /// through (`settingsDiskVerdict`).
 pub fn unreadConfigFile(config: *const Config) ?Unread {
+    return unreadOf(config, false);
+}
+
+/// `unreadConfigFile`, for the theme alone: what a light/dark switch reads
+/// itself (`finalize` reads the state's theme again), as against a config
+/// file's problem, which a switch replays from the load it came from.
+pub fn unreadTheme(config: *const Config) ?Unread {
+    return unreadOf(config, true);
+}
+
+fn unreadOf(config: *const Config, theme_only: bool) ?Unread {
     // Skipped whole: UTF-16 that does not decode. One predicate for the
     // check before a save and the report after it, so they cannot drift.
-    // The light/dark switch does not carry the record over
-    // (`changeConditionalState`), so ask it of the load as read too.
-    if (config._undecodable_file) |path| return .{ .kind = .include, .path = path, .undecodable = true };
+    // The light/dark switch does not carry the config file's record over
+    // (`changeConditionalState`), so its replayed problem is read below too.
+    if (!theme_only) if (config._undecodable_file) |path| return .{ .kind = .include, .path = path, .undecodable = true };
     if (config._undecodable_theme) |path| return .{ .kind = .theme, .path = path, .undecodable = true };
     for (config._diagnostics.items()) |diag| {
         const message: []const u8 = diag.message;
+        // A config file skipped as UTF-16 that does not decode, as its
+        // problem says (`Config.invalidUtf16`): kept in the replay log, so a
+        // config switched to the other light/dark state, or the app's after
+        // a live switch, still shows it. A theme's stays out of that log.
+        if (!theme_only) if (undecodableConfigFile(message)) |path| return .{ .kind = .include, .path = path, .undecodable = true };
         // A theme the load could not open (`themepkg.open`): the light/dark
         // switch reads it again after the save's probe, and it may have
         // become unopenable in between. The path is the last quoted name,
@@ -630,6 +646,7 @@ pub fn unreadConfigFile(config: *const Config) ?Unread {
             const quote_start = std.mem.lastIndexOfScalar(u8, message[0..quote_end], '"') orelse continue;
             return .{ .kind = .theme, .path = message[quote_start + 1 .. quote_end] };
         }
+        if (theme_only and !std.mem.startsWith(u8, message, "error reading theme ")) continue;
         const prefix_len, const kind = for ([_]struct { []const u8, Unread.Kind }{
             .{ "error opening config-file ", .include },
             .{ "error reading config-file ", .include },
@@ -647,6 +664,19 @@ pub fn unreadConfigFile(config: *const Config) ?Unread {
         const err = message[end_at + 2 ..];
         if (std.mem.eql(u8, err, "error.FileNotFound") or std.mem.eql(u8, err, "error.IsDir")) continue;
         return .{ .kind = kind, .path = message[prefix_len..end_at] };
+    }
+    return null;
+}
+
+/// The path in `Config.invalidUtf16`'s problem for a config file, or null:
+/// "config file <path> <reason>; not reading it. Save it as UTF-8".
+fn undecodableConfigFile(message: []const u8) ?[]const u8 {
+    const prefix = "config file ";
+    const suffix = "; not reading it. Save it as UTF-8";
+    if (!std.mem.startsWith(u8, message, prefix) or !std.mem.endsWith(u8, message, suffix)) return null;
+    const body = message[prefix.len .. message.len - suffix.len];
+    for ([_][]const u8{ " is not valid UTF-16", " is too large" }) |reason| {
+        if (std.mem.endsWith(u8, body, reason)) return body[0 .. body.len - reason.len];
     }
     return null;
 }
@@ -1447,6 +1477,23 @@ test "settings patch: a profile's variables compare without case, and a removal 
     // The same field, deleted only because the profile is removed: covered.
     const with_profile: Edit = .{ .field = .env, .id = "py", .op = .delete, .with_profile = true };
     try testing.expect(changedUnder(&.{with_profile}, &original, &pending, &changed) == null);
+}
+
+test "settings patch: a config file that did not decode is still named after the light/dark switch, and a theme alone is asked of the switch" {
+    const alloc = testing.allocator;
+    var config = try Config.default(alloc);
+    defer config.deinit();
+    const arena = config._arena.?.allocator();
+    // What `Config.invalidUtf16` records for a config file, as a replay brings
+    // it back without the marker.
+    try config._diagnostics.append(arena, .{ .message = try arena.dupeZ(u8, "config file C:\\noctty-test\\more.conf is not valid UTF-16; not reading it. Save it as UTF-8") });
+    const unread = unreadConfigFile(&config) orelse return error.TestExpectedUnread;
+    try testing.expect(unread.undecodable and unread.kind == .include);
+    try expectSameText("C:\\noctty-test\\more.conf", unread.path);
+    // A config file's problem is not the theme's.
+    try testing.expect(unreadTheme(&config) == null);
+    try config._diagnostics.append(arena, .{ .message = try arena.dupeZ(u8, "error reading theme C:\\noctty-test\\dark: error.ReadFailed") });
+    try expectSameText("C:\\noctty-test\\dark", (unreadTheme(&config) orelse return error.TestExpectedUnread).path);
 }
 
 test "settings patch: the report after a save names a file only the reload as read records as undecodable" {

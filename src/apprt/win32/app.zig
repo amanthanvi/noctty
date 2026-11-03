@@ -8855,9 +8855,15 @@ pub const App = struct {
             if (disk_now) |*value| value else &disk,
             if (held_now) |*value| value else held,
         };
-        // The fresh read, and the held config if it was read again here.
-        for (readings[0..if (held_now != null) 2 else 1]) |reading| {
-            if (settings_patch.unreadConfigFile(reading)) |unread| {
+        // The fresh read, whole; and of the held config switched here, what
+        // the switch read itself: its theme. The held config's other
+        // problems are from its last read, and the files may have been
+        // repaired since: they do not stop the save, but count as naming a
+        // removed profile, which keeps its tombstone
+        // (`settings_patch.referencedElsewhere`).
+        for (readings[0..if (held_now != null) 2 else 1], 0..) |reading, i| {
+            const found = if (i == 0) settings_patch.unreadConfigFile(reading) else settings_patch.unreadTheme(reading);
+            if (found) |unread| {
                 // A file the reading skipped as UTF-16 that does not decode
                 // (the held config's theme, read again in `state`, is one):
                 // named as the check before a save names one.
@@ -10108,6 +10114,76 @@ pub const App = struct {
             command = e;
         };
         try std.testing.expect((command orelse return error.TestExpectedEdit).op == .unset);
+    }
+
+    test "settings profile removal keeps a tombstone when the config as last read skipped an include, across a light/dark switch" {
+        if (builtin.os.tag != .windows) return error.SkipZigTest;
+        const alloc = std.testing.allocator;
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        try tmp.dir.writeFile(.{ .sub_path = "light", .data = "\n" });
+        try tmp.dir.writeFile(.{ .sub_path = "dark", .data = "\n" });
+        // The include, as the app last read it: UTF-16 that does not decode,
+        // so whatever it defined is missing from that reading.
+        try tmp.dir.writeFile(.{ .sub_path = "more.conf", .data = "\xff\xfe\x00\xd8a\x00" });
+        const light = try tmp.dir.realpathAlloc(alloc, "light");
+        defer alloc.free(light);
+        const dark = try tmp.dir.realpathAlloc(alloc, "dark");
+        defer alloc.free(dark);
+        const more = try tmp.dir.realpathAlloc(alloc, "more.conf");
+        defer alloc.free(more);
+        const text = try std.fmt.allocPrint(alloc, "theme = light:{s},dark:{s}\nprofile-command = py: python.exe\nconfig-file = {s}\n", .{ light, dark, more });
+        defer alloc.free(text);
+        try tmp.dir.writeFile(.{ .sub_path = "config", .data = text });
+        const path = try tmp.dir.realpathAlloc(alloc, "config");
+        defer alloc.free(path);
+        const load = struct {
+            fn config(a: Allocator, file: []const u8) !configpkg.Config {
+                var cfg = try configpkg.Config.default(a);
+                errdefer cfg.deinit();
+                try cfg.loadFile(a, file);
+                try cfg.loadRecursiveFiles(a);
+                try cfg.finalize();
+                return cfg;
+            }
+        }.config;
+        var loaded = try load(alloc, path);
+        defer loaded.deinit();
+        try std.testing.expect(loaded._undecodable_file != null);
+        // The app config after a live switch to dark: that switch does not
+        // carry the record of the skipped include.
+        var live = (try loaded.changeConditionalState(.{ .theme = .dark })) orelse return error.TestExpectedSwitch;
+        defer live.deinit();
+        try std.testing.expect(live._undecodable_file == null);
+        // Since then the include decodes, and names nothing.
+        try tmp.dir.writeFile(.{ .sub_path = "more.conf", .data = "# repaired\n" });
+        const Case = enum { switched_here, switched_live };
+        for ([_]Case{ .switched_here, .switched_live }) |case| {
+            // The held config: the light reading, switched to dark here; or
+            // the app's, already switched live.
+            const held: *const configpkg.Config = switch (case) {
+                .switched_here => &loaded,
+                .switched_live => &live,
+            };
+            var pending = try held.clone(alloc);
+            defer pending.deinit();
+            try pending.@"profile-command".parseCLI(pending._arena.?.allocator(), "py:");
+            var detail: win32_settings.FailureDetail = .{};
+            defer detail.clear(alloc);
+            var arena: std.heap.ArenaAllocator = .init(alloc);
+            defer arena.deinit();
+            const fresh = try load(alloc, path);
+            // Nothing names `py` in the fresh reading, but the held one may
+            // have missed what the include named: the line becomes a
+            // tombstone, not a deletion. Not refused: that record is from the
+            // held config's last read, and the include decodes now.
+            const edits = try App.settingsProfileEditsFromDisk(arena.allocator(), alloc, &detail, fresh, held, .{ .theme = .dark }, held, &pending, path);
+            var command: ?settings_patch.Edit = null;
+            for (edits) |e| if (e.field == .command and std.mem.eql(u8, "py", e.id)) {
+                command = e;
+            };
+            try std.testing.expect((command orelse return error.TestExpectedEdit).op == .unset);
+        }
     }
 
     test "SET editor request stays deferred, rechecks safety and reports host failure" {
