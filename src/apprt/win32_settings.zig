@@ -907,6 +907,9 @@ const StatusNote = enum {
     /// Saved, but the reload could not be applied, so the running settings
     /// were kept as they were (`SaveError.SavedNotApplied`).
     saved_not_applied,
+    /// Saved, but applying the reload failed partway, so the running
+    /// settings may be partly the saved ones (`SaveError.SavedPartlyApplied`).
+    saved_partly_applied,
     save_failed,
     /// Another program edited the config file while it was being saved, and
     /// checked again it kept changing: nothing was saved.
@@ -964,6 +967,7 @@ const StatusNote = enum {
             .saved_overridden => "Saved, but a later config file or command-line option overrides some of these values, so they will not take effect.",
             .saved_unread => "Saved, but a config file could not be read whole, so the running settings are unchanged. Reload the configuration once it can be read to use the saved values.",
             .saved_not_applied => "Saved, but the saved settings could not be applied, so the running settings are unchanged. Reload the configuration to use the saved values.",
+            .saved_partly_applied => "Saved, but the saved settings may be only partly applied. Reload the configuration to apply all of them.",
             .disk_changed => "Nothing was saved: another program changed the config file while it was being saved. Save again. Your edits are kept.",
             .profile_changed => "Nothing was saved: another program changed a profile in the config file since Settings read it. Reload the configuration, then make the change again. Your edits are kept.",
             .save_failed => "Save failed. Your edits are kept. Check that the config file can be written and is not open in another program, then try again.",
@@ -1743,11 +1747,17 @@ pub const SaveError = error{
     /// file whole (`settings_patch.reloadReport`): what it missed is no
     /// override, and `AppHandle.failureDetail` names the file.
     SavedButUnread,
-    /// The file was written, and the reload after it could not be read or put
-    /// in the app's light/dark state (no memory): nothing of it is applied,
-    /// and the running settings stay as they were until the configuration is
-    /// reloaded. The save is done, so the draft and its previews end.
+    /// The file was written, and the reload after it could not be read, put
+    /// in the app's light/dark state or checked (no memory): nothing of it is
+    /// applied, and the running settings stay as they were until the
+    /// configuration is reloaded. The save is done, so the draft and its
+    /// previews end.
     SavedNotApplied,
+    /// The file was written, and applying its reload failed partway
+    /// (`CoreApp.updateConfig`, which may have updated some terminals): the
+    /// running settings may be partly the saved ones until the configuration
+    /// is reloaded. The save is done, so the draft and its previews end.
+    SavedPartlyApplied,
 };
 
 pub const SaveReloadOutcome = union(enum) {
@@ -1755,6 +1765,7 @@ pub const SaveReloadOutcome = union(enum) {
     completed_masked,
     completed_unread,
     completed_not_applied,
+    completed_partly_applied,
     failed: SaveError,
 };
 
@@ -1816,6 +1827,7 @@ pub fn saveReloadOutcome(result: SaveError!void) SaveReloadOutcome {
         error.SavedButMasked => .completed_masked,
         error.SavedButUnread => .completed_unread,
         error.SavedNotApplied => .completed_not_applied,
+        error.SavedPartlyApplied => .completed_partly_applied,
         else => .{ .failed = err },
     };
     return .completed;
@@ -3060,7 +3072,7 @@ pub const SettingsWindow = struct {
     fn idleStatusText(self: *const SettingsWindow) []const u8 {
         switch (self.status_note) {
             // A save's result stays up whatever the draft looks like now.
-            .saved, .saved_not_applied, .discarded, .editor_open_failed => return self.status_note.text(),
+            .saved, .saved_not_applied, .saved_partly_applied, .discarded, .editor_open_failed => return self.status_note.text(),
             .saved_overridden, .saved_unread, .already_default, .reset_failed, .key_copied, .key_copy_failed => return self.noteText(),
             .profile_said, .profile_hint, .profile_refused => return self.noteText(),
             // These are about edits that are still there to be saved.
@@ -6414,6 +6426,9 @@ pub const SettingsWindow = struct {
             // Written, and nothing of it applied: the same baseline refresh,
             // and the status says to reload.
             .completed_not_applied => self.completeSynchronousSave(apply_id, .not_applied),
+            // Written, and partly applied: the draft starts over from what
+            // runs now, and the status says to reload.
+            .completed_partly_applied => self.completeSynchronousSave(apply_id, .partly_applied),
             .failed => |err| {
                 // Write failed. DO NOT discard `pending` — the user's
                 // edits are still in memory; losing them on every
@@ -6745,7 +6760,7 @@ pub const SettingsWindow = struct {
     }
 
     /// How a save that wrote the file ended (`saveReloadOutcome`).
-    const SavedHow = enum { clean, masked, unread, not_applied };
+    const SavedHow = enum { clean, masked, unread, not_applied, partly_applied };
 
     fn finishSuccessfulSave(self: *SettingsWindow, how: SavedHow) void {
         const masked = how == .masked;
@@ -6757,6 +6772,7 @@ pub const SettingsWindow = struct {
             .masked => .saved_overridden,
             .unread => .saved_unread,
             .not_applied => .saved_not_applied,
+            .partly_applied => .saved_partly_applied,
         };
         // The settings the save wrote that something later overrides, by the
         // names a config file knows them by, and where the value that wins
@@ -6803,6 +6819,12 @@ pub const SettingsWindow = struct {
             self.handle.notifySuccess(
                 self.handle.ctx,
                 "Settings saved, but not applied",
+                self.noteText(),
+            );
+        } else if (how == .partly_applied) {
+            self.handle.notifySuccess(
+                self.handle.ctx,
+                "Settings saved, but maybe only partly applied",
                 self.noteText(),
             );
         } else {
@@ -9596,6 +9618,30 @@ test "settings a padding field reads all it holds, however long, so a long text 
     try std.testing.expectEqual(@as(u32, 7), draft.@"window-padding-x".top_left);
 }
 
+test "settings readEditUtf8 reads text that does not fit its buffer as unreadable, never past the buffer" {
+    const edit = sys.CreateWindowExW(0, std.unicode.utf8ToUtf16LeStringLiteral("EDIT"), std.unicode.utf8ToUtf16LeStringLiteral(""), 0, 0, 0, 1, 1, null, null, null, null) orelse return error.Unexpected;
+    defer _ = sys.DestroyWindow(edit);
+    const Case = struct { text: []const u8, fits: usize };
+    // Each text, and the fewest bytes its UTF-8 takes: one less does not fit.
+    for ([_]Case{
+        .{ .text = "abc", .fits = 3 },
+        .{ .text = "a\u{E9}", .fits = 3 },
+        .{ .text = "\u{20AC}\u{20AC}", .fits = 6 },
+        .{ .text = "x\u{1F600}", .fits = 5 },
+    }) |case| {
+        var wide: [16:0]u16 = undefined;
+        const units = try std.unicode.utf8ToUtf16Le(&wide, case.text);
+        wide[units] = 0;
+        _ = sys.SetWindowTextW(edit, &wide);
+        var buf: [8]u8 = @splat(0xAA);
+        try std.testing.expectEqualStrings(case.text, readEditUtf8(edit, buf[0..case.fits]) orelse return error.TestExpectedText);
+        buf = @splat(0xAA);
+        try std.testing.expect(readEditUtf8(edit, buf[0 .. case.fits - 1]) == null);
+        // Nothing was written past what it was given.
+        for (buf[case.fits - 1 ..]) |byte| try std.testing.expectEqual(@as(u8, 0xAA), byte);
+    }
+}
+
 test "settings opacity preview is floored while the draft keeps the typed value" {
     const Capture = struct {
         previews: [8]f64 = undefined,
@@ -10928,6 +10974,33 @@ test "settings a save whose reload is not applied says it saved, ends the previe
             try std.testing.expectEqual(StatusNote.saved_not_applied, settings.status_note);
             var buf: [512]u8 = undefined;
             try std.testing.expectEqualStrings(StatusNote.saved_not_applied.text(), try statusTextOf(settings, &buf));
+        }
+    }.body);
+}
+
+test "settings a save whose reload is applied only partly says it saved and may be partly applied" {
+    try dialog_test.onHiddenDesktop(struct {
+        fn body() !void {
+            const fixture = try dialog_test.Fixture.start();
+            defer fixture.finish();
+            const settings = &fixture.settings;
+            fixture.live_previews = true;
+            typeInto(settings.fields.edit_bg_opacity orelse return error.TestExpectedField, "0.5");
+            const previews = fixture.previews;
+
+            // The file is written, and applying its reload fails partway.
+            fixture.partly_applied = true;
+            settings.save();
+            try std.testing.expectEqual(@as(u32, 1), fixture.saved);
+            // The save is done: the draft starts over from what runs now, and
+            // no preview is shown over it again.
+            try std.testing.expect(!settings.hasPendingChanges());
+            try std.testing.expectEqual(previews, fixture.previews);
+            try std.testing.expectEqual(@as(f64, 1), fixture.config.@"background-opacity");
+            // The status does not say the running settings are unchanged.
+            try std.testing.expectEqual(StatusNote.saved_partly_applied, settings.status_note);
+            var buf: [512]u8 = undefined;
+            try std.testing.expectEqualStrings(StatusNote.saved_partly_applied.text(), try statusTextOf(settings, &buf));
         }
     }.body);
 }
@@ -12983,6 +13056,9 @@ const dialog_test = struct {
         /// The save writes, and its reload is not applied
         /// (`SaveError.SavedNotApplied`).
         not_applied: bool = false,
+        /// The save writes, and applying its reload fails partway
+        /// (`SaveError.SavedPartlyApplied`).
+        partly_applied: bool = false,
         /// What the window's High Contrast probe answers.
         high_contrast: bool = false,
         /// A save writes this config file the way the App's does
@@ -13228,6 +13304,12 @@ const dialog_test = struct {
                 // stay as they were.
                 self.config.@"background-opacity" = original.@"background-opacity";
                 return error.SavedNotApplied;
+            }
+            if (self.partly_applied) {
+                // As the App: the previews end, and part of the reload runs.
+                self.config.@"background-opacity" = original.@"background-opacity";
+                self.config.@"cursor-style" = pending.@"cursor-style";
+                return error.SavedPartlyApplied;
             }
         }
 

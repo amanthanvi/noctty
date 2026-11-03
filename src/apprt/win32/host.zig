@@ -2433,11 +2433,16 @@ pub const Host = struct {
         });
         switch (save_outcome) {
             .completed, .completed_masked => {},
-            // Saved, with a reload that read a file only partly, which the
-            // save does not apply: the running config is the one the pick
-            // installed, the theme with it. An open Settings window hears of
-            // the theme, as it would of the reload.
-            .completed_unread, .completed_not_applied => self.app.settings_window.externalConfigChanged(&self.app.config, self.app.config_revision),
+            // Saved, with a reload the save does not apply, or applied only
+            // partly: the running config stays as it is (the preview, when
+            // one ran; else the config from before the pick, or what part of
+            // the reload took). Nothing is rolled back: the file holds the
+            // pick. An open Settings window hears of the running config, as
+            // it would of a reload.
+            .completed_unread,
+            .completed_not_applied,
+            .completed_partly_applied,
+            => self.app.settings_window.externalConfigChanged(&self.app.config, self.app.config_revision),
             .failed => |err| {
                 log.warn("palette theme save failed theme={s} err={}", .{ theme_name, err });
                 // Roll back without another allocation: `original` is already
@@ -2453,10 +2458,10 @@ pub const Host = struct {
         }
         const saved_but_masked = std.meta.activeTag(save_outcome) == .completed_masked;
         const saved_but_unread = std.meta.activeTag(save_outcome) == .completed_unread;
-        // Saved, with a reload that could not be applied (no memory to read
-        // it or put it in the app's light/dark state): as for
-        // `completed_unread`, the running config stays as it is.
+        // Saved, with a reload that could not be applied (no memory), or was
+        // applied only partly.
         const saved_not_applied = std.meta.activeTag(save_outcome) == .completed_not_applied;
+        const saved_partly_applied = std.meta.activeTag(save_outcome) == .completed_partly_applied;
 
         if (self.palette_list_uia_provider) |provider| {
             win32_uia.events.raiseNotification(
@@ -2468,6 +2473,8 @@ pub const Host = struct {
                     "Theme saved; a config file could not be read whole"
                 else if (saved_not_applied)
                     "Theme saved; the saved settings could not be applied"
+                else if (saved_partly_applied)
+                    "Theme saved; the saved settings may be only partly applied"
                 else if (self.app.safe_mode)
                     "Theme saved; restart noctty to apply it"
                 else
@@ -2500,6 +2507,13 @@ pub const Host = struct {
             runUiActionOrLog(
                 "palette unapplied theme banner failed",
                 self.setBanner(.err, "Theme saved, but the saved settings could not be applied. Reload the configuration to use them."),
+            );
+        }
+        if (saved_partly_applied) {
+            log.warn("palette theme saved, but applying the reload failed partway theme={s}", .{theme_name});
+            runUiActionOrLog(
+                "palette partly applied theme banner failed",
+                self.setBanner(.err, "Theme saved, but the saved settings may be only partly applied. Reload the configuration to apply all of them."),
             );
         }
         self.layout() catch |err| {
