@@ -319,6 +319,12 @@ pub fn raiseStructureChanged(
 /// read the event, which outlives a test that frees it.
 pub threadlocal var testing_property_changes: usize = 0;
 
+/// Under test, the string the first property change published as its
+/// `newValue` once a test armed this (`testing_published = .{}`), cut to the
+/// buffer: what a reader would be told, not only that it was told.
+pub const PublishedString = struct { units: [64]u16 = undefined, len: ?usize = null };
+pub threadlocal var testing_published: ?PublishedString = null;
+
 /// VARIANTs are shallow; caller owns any BSTR storage.
 pub fn raisePropertyChanged(
     provider: *com.IRawElementProviderSimple,
@@ -328,6 +334,13 @@ pub fn raisePropertyChanged(
 ) void {
     if (builtin.is_test) {
         testing_property_changes += 1;
+        if (testing_published) |*published| if (published.len == null and new_value.vt == com.VT_BSTR) {
+            if (new_value.value.bstr) |bstr| {
+                const len = @min(com.SysStringLen(bstr), published.units.len);
+                @memcpy(published.units[0..len], bstr[0..len]);
+                published.len = len;
+            }
+        };
         return;
     }
     if (!clientsAreListening()) return;

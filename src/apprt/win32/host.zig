@@ -11055,6 +11055,19 @@ test "win32 a narrow tab's pane count moves its UIA name, and syncTabButtons ann
             try std.testing.expectEqualStrings(label, tab.cached_button_label.?);
             try std.testing.expectEqual(back + per_name_changed, win32_uia.events.testing_property_changes);
             try expectName(host, tab, "1: alpha (2)");
+
+            // A rename announces the new name: the tab's name is built from
+            // its cached title, so the cache is committed before NameChanged
+            // is raised (raising first announced the title being replaced).
+            try appendOwnedString(std.testing.allocator, &first.title, "gamma");
+            try appendOwnedString(std.testing.allocator, &second.title, "gamma");
+            win32_uia.events.testing_published = .{};
+            defer win32_uia.events.testing_published = null;
+            _ = try host.syncTabButtons();
+            const published = win32_uia.events.testing_published.?;
+            const published_len = published.len orelse return error.TestExpectedNameChanged;
+            try std.testing.expectEqualSlices(u16, std.unicode.utf8ToUtf16LeStringLiteral("1: gamma (2)"), published.units[0..published_len]);
+            try expectName(host, tab, "1: gamma (2)");
         }
     }.body);
 }
