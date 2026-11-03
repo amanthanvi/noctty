@@ -6173,7 +6173,17 @@ pub const Host = struct {
             extern "user32" fn SetThreadDesktop(desktop: *anyopaque) callconv(.winapi) BOOL;
             extern "user32" fn CloseDesktop(desktop: *anyopaque) callconv(.winapi) BOOL;
             fn run(desktop: *anyopaque, result: *anyerror!void) void {
-                result.* = if (SetThreadDesktop(desktop) == 0) lastError() else body();
+                if (SetThreadDesktop(desktop) == 0) {
+                    result.* = lastError();
+                    return;
+                }
+                // A new thread's key table starts as a copy of the real
+                // keyboard's (SETTINGS-F2-TEST-FLAKE), so the body runs with
+                // an empty keyboard instead of the keys the person running
+                // the suite holds.
+                const keyboard = win32_input.TestingKeyboard.pinNone();
+                defer keyboard.release();
+                result.* = body();
             }
         };
         var name_buf: [64]u8 = undefined;
