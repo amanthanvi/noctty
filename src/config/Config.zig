@@ -3755,10 +3755,12 @@ _launch: pane_launch.Ledger = .{},
 /// log. Null for no `-e`, and for an `-e` refused for want of a command.
 _e_command: ?[]const [:0]const u8 = null,
 
-/// The last config file that was skipped whole because it is UTF-16 text that
-/// does not decode (see `loadReader`); everything it set is missing from this
-/// load. Lives in the arena of this load; `clone` and `loadTheme` (which
-/// rebuilds the config by replay) copy it, `changeConditionalState` does not.
+/// The last config or theme file that was skipped whole because it is UTF-16
+/// text that does not decode (see `textReader`); everything it set is missing
+/// from this load. Lives in the arena of this load; `clone` and `loadTheme`
+/// (which rebuilds the config by replay) copy it, `changeConditionalState`
+/// does not, though its `finalize` sets it again for a theme that does not
+/// decode.
 _undecodable_file: ?[:0]const u8 = null,
 
 /// List of diagnostics that were generated during the loading of
@@ -3899,34 +3901,13 @@ const ConfigFileIterator = struct {
 
 /// Load config from the given Reader.
 pub fn loadReader(self: *Config, alloc: Allocator, reader: *std.Io.Reader, path: []const u8) !void {
-    bom: {
-        // If the file starts with a UTF-8 byte order mark, skip it.
-        // https://en.wikipedia.org/wiki/Byte_order_mark#UTF-8
-        const bom: []const u8 = &.{ 0xef, 0xbb, 0xbf };
-        const str = reader.peek(bom.len) catch break :bom;
-        if (std.mem.eql(u8, str, bom)) {
-            log.info("skipping UTF-8 byte order mark", .{});
-            reader.toss(bom.len);
-        }
-    }
-
-    // Windows PowerShell 5.1 writes UTF-16 with a byte order mark for `>` and
-    // Out-File. Read as bytes that is NUL-separated noise which sets nothing
-    // and says nothing, so decode it first.
     var decoded: ?[]u8 = null;
     defer if (decoded) |text| alloc.free(text);
     var decoded_reader: std.Io.Reader = undefined;
-    var source = reader;
-    if (utf16ByteOrder(reader)) |order| {
-        reader.toss(2);
-        decoded = self.decodeUtf16(alloc, reader, order, path) catch |err| switch (err) {
-            error.InvalidUtf16 => return,
-            else => |e| return e,
-        };
-        log.warn("{s}: UTF-16 text, read as such; save it as UTF-8 so the Settings window can edit it", .{path});
-        decoded_reader = .fixed(decoded.?);
-        source = &decoded_reader;
-    }
+    const source = self.textReader(alloc, reader, path, .config, &decoded, &decoded_reader) catch |err| switch (err) {
+        error.InvalidUtf16 => return,
+        else => |e| return e,
+    };
 
     var line_iter: cli.args.LineIterator = .{ .r = source, .filepath = path };
     var iter: ConfigFileIterator = .{ .inner = &line_iter };
@@ -3980,6 +3961,56 @@ fn noteReadFailure(self: *Config, what: []const u8, path: []const u8, replay: bo
     if (replay) try self._replay_steps.append(arena_alloc, .{ .diagnostic = diag });
 }
 
+/// What a file the load reads is, for the problem a file that does not decode
+/// records: a config file (kept in the replay log, as its other problems are)
+/// or a theme (kept out of it: every `finalize` reads the current theme
+/// again, so a replayed copy would carry one theme's problem into the other
+/// theme's config).
+const TextFile = enum {
+    config,
+    theme,
+
+    fn noun(self: TextFile) []const u8 {
+        return switch (self) {
+            .config => "config file",
+            .theme => "theme file",
+        };
+    }
+};
+
+/// The text of `reader` as `LineIterator` should read it: past a UTF-8 byte
+/// order mark, and UTF-16 with a byte order mark (what Windows PowerShell 5.1
+/// writes for `>` and Out-File, which read as bytes is NUL-separated noise that
+/// sets nothing and says nothing) decoded to UTF-8 into `decoded` (owned by the
+/// caller), read through `decoded_reader`. `error.InvalidUtf16` when it does
+/// not decode: the file is skipped, and `invalidUtf16` recorded why.
+fn textReader(
+    self: *Config,
+    alloc: Allocator,
+    reader: *std.Io.Reader,
+    path: []const u8,
+    what: TextFile,
+    decoded: *?[]u8,
+    decoded_reader: *std.Io.Reader,
+) !*std.Io.Reader {
+    bom: {
+        // If the file starts with a UTF-8 byte order mark, skip it.
+        // https://en.wikipedia.org/wiki/Byte_order_mark#UTF-8
+        const bom: []const u8 = &.{ 0xef, 0xbb, 0xbf };
+        const str = reader.peek(bom.len) catch break :bom;
+        if (std.mem.eql(u8, str, bom)) {
+            log.info("skipping UTF-8 byte order mark", .{});
+            reader.toss(bom.len);
+        }
+    }
+    const order = utf16ByteOrder(reader) orelse return reader;
+    reader.toss(2);
+    decoded.* = try self.decodeUtf16(alloc, reader, order, path, what);
+    log.warn("{s}: UTF-16 text, read as such; save it as UTF-8{s}", .{ path, if (what == .config) " so the Settings window can edit it" else "" });
+    decoded_reader.* = .fixed(decoded.*.?);
+    return decoded_reader;
+}
+
 /// The byte order of the UTF-16 text `reader` starts with, if its first two
 /// bytes are a byte order mark. Consumes nothing.
 fn utf16ByteOrder(reader: *std.Io.Reader) ?std.builtin.Endian {
@@ -3999,9 +4030,10 @@ fn decodeUtf16(
     reader: *std.Io.Reader,
     order: std.builtin.Endian,
     path: []const u8,
+    what: TextFile,
 ) ![]u8 {
     const bytes = reader.allocRemaining(alloc, .limited(16 * 1024 * 1024)) catch |err| switch (err) {
-        error.StreamTooLong => return self.invalidUtf16(path, "is too large"),
+        error.StreamTooLong => return self.invalidUtf16(path, what, "is too large"),
         else => |e| return e,
     };
     defer alloc.free(bytes);
@@ -4012,23 +4044,23 @@ fn decodeUtf16(
     }
     return std.unicode.utf16LeToUtf8Alloc(alloc, units) catch |err| switch (err) {
         error.OutOfMemory => error.OutOfMemory,
-        else => self.invalidUtf16(path, "is not valid UTF-16"),
+        else => self.invalidUtf16(path, what, "is not valid UTF-16"),
     };
 }
 
-fn invalidUtf16(self: *Config, path: []const u8, reason: []const u8) error{ OutOfMemory, InvalidUtf16 } {
+fn invalidUtf16(self: *Config, path: []const u8, what: TextFile, reason: []const u8) error{ OutOfMemory, InvalidUtf16 } {
     const arena_alloc = self._arena.?.allocator();
     self._undecodable_file = arena_alloc.dupeZ(u8, path) catch return error.OutOfMemory;
     const diag: cli.Diagnostic = .{
         .message = std.fmt.allocPrintSentinel(
             arena_alloc,
-            "config file {s} {s}; not reading it. Save it as UTF-8",
-            .{ path, reason },
+            "{s} {s} {s}; not reading it. Save it as UTF-8",
+            .{ what.noun(), path, reason },
             0,
         ) catch return error.OutOfMemory,
     };
     self._diagnostics.append(arena_alloc, diag) catch return error.OutOfMemory;
-    self._replay_steps.append(arena_alloc, .{ .diagnostic = diag }) catch return error.OutOfMemory;
+    if (what == .config) self._replay_steps.append(arena_alloc, .{ .diagnostic = diag }) catch return error.OutOfMemory;
     return error.InvalidUtf16;
 }
 
@@ -4482,10 +4514,25 @@ pub fn loadOptionalFile(
                 "error reading optional config file, not loading err={} path={s}",
                 .{ err, path },
             );
-
+            // A default file that is there and will not open is a problem,
+            // as an included one is (`loadRecursiveFiles`): its path and the
+            // error, never its text. Without it the load reads as if the
+            // file set nothing, and a Settings save applies that.
+            self.noteUnopenableDefaultFile(path, err) catch |note_err| {
+                std.log.warn("could not record the problem err={}", .{note_err});
+            };
             return .@"error";
         },
     }
+}
+
+fn noteUnopenableDefaultFile(self: *Config, path: []const u8, err: anyerror) Allocator.Error!void {
+    const arena_alloc = self._arena.?.allocator();
+    const diag: cli.Diagnostic = .{
+        .message = try std.fmt.allocPrintSentinel(arena_alloc, "error opening config file {s}: {}", .{ path, err }, 0),
+    };
+    try self._diagnostics.append(arena_alloc, diag);
+    try self._replay_steps.append(arena_alloc, .{ .diagnostic = diag });
 }
 
 fn writeConfigTemplate(path: []const u8) !void {
@@ -4506,6 +4553,102 @@ fn writeConfigTemplate(path: []const u8) !void {
         .{ .path = path },
     );
     try writer.flush();
+}
+
+/// `text` as UTF-16LE with a byte order mark, as Windows PowerShell 5.1's
+/// `Out-File` writes it. Owned by the testing allocator.
+fn testUtf16Le(text: []const u8) ![]u8 {
+    const units = try std.unicode.utf8ToUtf16LeAlloc(std.testing.allocator, text);
+    defer std.testing.allocator.free(units);
+    const out = try std.testing.allocator.alloc(u8, 2 + units.len * 2);
+    out[0] = 0xff;
+    out[1] = 0xfe;
+    for (units, 0..) |unit, i| std.mem.writeInt(u16, out[2 + i * 2 ..][0..2], unit, .little);
+    return out;
+}
+
+test "a UTF-16 theme is decoded as a config file is, and one that does not decode is skipped and named" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const good = try testUtf16Le("font-size = 14\n");
+    defer alloc.free(good);
+    try tmp.dir.writeFile(.{ .sub_path = "light", .data = good });
+    // A lone high surrogate: not UTF-16.
+    try tmp.dir.writeFile(.{ .sub_path = "dark", .data = "\xff\xfe\x00\xd8a\x00" });
+    const light = try tmp.dir.realpathAlloc(alloc, "light");
+    defer alloc.free(light);
+    const dark = try tmp.dir.realpathAlloc(alloc, "dark");
+    defer alloc.free(dark);
+    const text = try std.fmt.allocPrint(alloc, "theme = light:{s},dark:{s}\n", .{ light, dark });
+    defer alloc.free(text);
+    try tmp.dir.writeFile(.{ .sub_path = "config", .data = text });
+    const path = try tmp.dir.realpathAlloc(alloc, "config");
+    defer alloc.free(path);
+    var cfg = try Config.default(alloc);
+    defer cfg.deinit();
+    try cfg.loadFile(alloc, path);
+    try cfg.finalize();
+    // The light theme's line reads, and nothing is wrong.
+    try testing.expectEqual(@as(f32, 14), cfg.@"font-size");
+    try testing.expect(cfg._diagnostics.empty());
+    try testing.expect(cfg._undecodable_file == null);
+    // The dark one is skipped whole, and named, never its text.
+    var dark_cfg = (try cfg.changeConditionalState(.{ .theme = .dark })) orelse return error.TestExpectedSwitch;
+    defer dark_cfg.deinit();
+    try testing.expectEqual(@as(f32, 12), dark_cfg.@"font-size");
+    try testing.expect(std.mem.eql(u8, dark, dark_cfg._undecodable_file orelse return error.TestExpectedSkipped));
+    const expected = try std.fmt.allocPrint(alloc, "theme file {s} is not valid UTF-16; not reading it. Save it as UTF-8", .{dark});
+    defer alloc.free(expected);
+    var named: usize = 0;
+    for (dark_cfg._diagnostics.items()) |diag| {
+        if (std.mem.eql(u8, expected, diag.message)) named += 1;
+    }
+    try testing.expectEqual(@as(usize, 1), named);
+    // And it does not ride into the light config rebuilt from the dark one.
+    var back = (try dark_cfg.changeConditionalState(.{ .theme = .light })) orelse return error.TestExpectedSwitch;
+    defer back.deinit();
+    try testing.expectEqual(@as(f32, 14), back.@"font-size");
+    try testing.expect(back._diagnostics.empty());
+    try testing.expect(back._undecodable_file == null);
+}
+
+test "a default config file that is there and will not open is a problem, naming the file and not its text" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(.{ .sub_path = "config.ghostty", .data = "font-size = 13\n" });
+    const path = try tmp.dir.realpathAlloc(alloc, "config.ghostty");
+    defer alloc.free(path);
+    // Another program holds it with no sharing.
+    const wide = try std.os.windows.sliceToPrefixedFileW(null, path);
+    const handle = std.os.windows.kernel32.CreateFileW(wide.span().ptr, std.os.windows.GENERIC_READ, 0, null, std.os.windows.OPEN_EXISTING, 0, null);
+    if (handle == std.os.windows.INVALID_HANDLE_VALUE) return error.CouldNotHoldFile;
+    var held = true;
+    defer if (held) std.os.windows.CloseHandle(handle);
+    var cfg = try Config.default(alloc);
+    defer cfg.deinit();
+    try testing.expectEqual(OptionalFileAction.@"error", cfg.loadOptionalFile(alloc, path));
+    try testing.expectEqual(@as(f32, 12), cfg.@"font-size");
+    const prefix = try std.fmt.allocPrint(alloc, "error opening config file {s}: error.", .{path});
+    defer alloc.free(prefix);
+    var named: usize = 0;
+    for (cfg._diagnostics.items()) |diag| {
+        try testing.expect(std.mem.indexOf(u8, diag.message, "font-size") == null);
+        if (std.mem.startsWith(u8, diag.message, prefix)) named += 1;
+    }
+    try testing.expectEqual(@as(usize, 1), named);
+    // Once it opens, it loads, with no problem.
+    std.os.windows.CloseHandle(handle);
+    held = false;
+    var after = try Config.default(alloc);
+    defer after.deinit();
+    try testing.expectEqual(OptionalFileAction.loaded, after.loadOptionalFile(alloc, path));
+    try testing.expectEqual(@as(f32, 13), after.@"font-size");
+    try testing.expect(after._diagnostics.empty());
 }
 
 test "writeConfigTemplate writes the template with its path" {
@@ -5109,6 +5252,20 @@ fn loadTheme(self: *Config, theme: Theme) !void {
     const path = themefile.path;
     const file = themefile.file;
     defer file.close();
+    const alloc_gpa = self._arena.?.child_allocator;
+
+    // Decoded as a config file is (`textReader`). A theme that does not
+    // decode is skipped, as one that is not there is, and the problem is
+    // this config's: the theme's own config is never made.
+    var buf: [file_read_buffer_len]u8 = undefined;
+    var file_reader = file.reader(&buf);
+    var decoded: ?[]u8 = null;
+    defer if (decoded) |text| alloc_gpa.free(text);
+    var decoded_reader: std.Io.Reader = undefined;
+    const reader = self.textReader(alloc_gpa, &file_reader.interface, path, .theme, &decoded, &decoded_reader) catch |err| switch (err) {
+        error.InvalidUtf16 => return,
+        else => |e| return e,
+    };
 
     // From this point onwards, we load the theme and do a bit of a dance
     // to achieve two separate goals:
@@ -5124,14 +5281,10 @@ fn loadTheme(self: *Config, theme: Theme) !void {
     // a nice property to have to limit memory bloat as much as possible.
 
     // Load into a new configuration so that we can free the existing memory.
-    const alloc_gpa = self._arena.?.child_allocator;
     var new_config = try self.cloneEmpty(alloc_gpa);
     errdefer new_config.deinit();
 
     // Load our theme
-    var buf: [file_read_buffer_len]u8 = undefined;
-    var file_reader = file.reader(&buf);
-    const reader = &file_reader.interface;
     var line_iter: cli.args.LineIterator = .{ .r = reader, .filepath = path };
     var iter: ConfigFileIterator = .{ .inner = &line_iter };
     try new_config.loadIter(alloc_gpa, &iter);
