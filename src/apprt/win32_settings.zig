@@ -3002,8 +3002,9 @@ pub const SettingsWindow = struct {
     }
 
     pub fn hasPendingChanges(self: *const SettingsWindow) bool {
-        // Without a draft there is nothing to save (`owes_draft`).
-        if (self.pending == null) return false;
+        // While the draft is owed there is nothing to save: its edits went
+        // with it, and none can be made (`holdDraftControls`).
+        if (self.owes_draft) return false;
         for (self.raw_scalar_dirty) |dirty| if (dirty) return true;
         if (self.profileDraftDiffers() or self.profileEditTypedInto()) return true;
         for (self.owned_text_changed, self.owned_dirty, self.owned_conflict) |text_changed, dirty, conflict| {
@@ -3920,7 +3921,7 @@ pub const SettingsWindow = struct {
         if (self.suppress_edit_events) return;
         // No draft to stage it in (`owes_draft`): its controls are held, and
         // nothing is recorded.
-        if (self.pending == null) return;
+        if (self.owes_draft) return;
         self.owned_text_changed[@intFromEnum(field)] = true;
         self.clearValidationError(control);
         // Font family, theme and default command are only read at save.
