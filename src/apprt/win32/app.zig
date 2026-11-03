@@ -9223,6 +9223,11 @@ pub const App = struct {
         /// A lock taken while a read is under way (`lockDuringRead`), let go
         /// before the next load.
         threadlocal var brief_lock: ?std.fs.File = null;
+        /// The load after the write (`starveNext`, set as `hook` is) is read
+        /// whole, and from then on its allocator has no memory
+        /// (`starvedLoad`): a light/dark switch of it fails.
+        threadlocal var starve_armed: bool = false;
+        threadlocal var starving: std.testing.FailingAllocator = undefined;
 
         fn load(alloc: Allocator) anyerror!configpkg.Config {
             if (brief_lock) |file| file.close();
@@ -9244,6 +9249,20 @@ pub const App = struct {
                 file.writeAll(hook_text) catch return;
             }
             if (lock_path.len != 0) lock = std.fs.openFileAbsolute(lock_path, .{ .mode = .read_write, .lock = .exclusive }) catch null;
+        }
+
+        fn starveNext() void {
+            save_target.test_before_compare = null;
+            starve_armed = true;
+        }
+
+        fn starvedLoad(alloc: Allocator) anyerror!configpkg.Config {
+            if (!starve_armed) return load(alloc);
+            starve_armed = false;
+            starving = .init(alloc, .{});
+            const cfg = try load(starving.allocator());
+            starving.fail_index = starving.alloc_index;
+            return cfg;
         }
 
         fn lockDuringRead() void {
@@ -9269,6 +9288,7 @@ pub const App = struct {
             settings_patch.test_config_load = null;
             if (brief_lock) |file| file.close();
             brief_lock = null;
+            starve_armed = false;
             files = &.{};
             hook_path = "";
             hook_text = "";
@@ -9753,6 +9773,57 @@ pub const App = struct {
         try std.testing.expectEqualStrings("Theme saved, but a config file could not be read whole. Reload the configuration once it can be read.", host.banner_text orelse return error.TestExpectedBanner);
     }
 
+    test "win32 palette theme pick whose reload cannot be applied says it saved and keeps the running settings" {
+        if (builtin.os.tag != .windows) return error.SkipZigTest;
+        const alloc = std.testing.allocator;
+        var core_app: CoreApp = undefined;
+        var app: App = undefined;
+        var host: Host = undefined;
+        var session: TestSession = .{};
+        try session.init(.{ .core_app = &core_app, .app = &app, .hosts = &.{.{ .storage = &host }} });
+        defer session.deinit();
+        defer testFreeConfigProblems(&app, alloc);
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        try tmp.dir.writeFile(.{ .sub_path = "light", .data = "\n" });
+        try tmp.dir.writeFile(.{ .sub_path = "dark", .data = "\n" });
+        try tmp.dir.writeFile(.{ .sub_path = "picked", .data = "font-size = 20\n" });
+        const light = try tmp.dir.realpathAlloc(alloc, "light");
+        defer alloc.free(light);
+        const dark = try tmp.dir.realpathAlloc(alloc, "dark");
+        defer alloc.free(dark);
+        const picked = try tmp.dir.realpathAlloc(alloc, "picked");
+        defer alloc.free(picked);
+        // An include names a light/dark pair, so the reload after the pick has
+        // a switch to make; the app runs dark.
+        const more_text = try std.fmt.allocPrint(alloc, "theme = light:{s},dark:{s}\n", .{ light, dark });
+        defer alloc.free(more_text);
+        try tmp.dir.writeFile(.{ .sub_path = "more.conf", .data = more_text });
+        const more = try tmp.dir.realpathAlloc(alloc, "more.conf");
+        defer alloc.free(more);
+        const text = try std.fmt.allocPrint(alloc, "font-size = 12\nconfig-file = {s}\n", .{more});
+        defer alloc.free(text);
+        try tmp.dir.writeFile(.{ .sub_path = "config", .data = text });
+        const path = try tmp.dir.realpathAlloc(alloc, "config");
+        defer alloc.free(path);
+        app.core_app.config_conditional_state = .{ .theme = .dark };
+        SaveTest.files = &.{path};
+        try SaveTest.begin(&app, path);
+        defer SaveTest.end(&app);
+        // The reload after the write is read whole, and the switch to the
+        // dark state runs out of memory.
+        settings_patch.test_config_load = SaveTest.starvedLoad;
+        save_target.test_before_compare = SaveTest.starveNext;
+        try host.commitPaletteTheme(picked);
+        // Saved,
+        const after = try SaveTest.read(path);
+        defer alloc.free(after);
+        try std.testing.expect(std.mem.indexOf(u8, after, picked) != null);
+        // the running settings kept, and the window says to reload.
+        try std.testing.expectEqual(@as(f32, 12), app.config.@"font-size");
+        try std.testing.expectEqualStrings("Theme saved, but the configuration could not be reloaded. Reload the configuration to use the saved file.", host.banner_text orelse return error.TestExpectedBanner);
+    }
+
     test "win32 settings save whose reload reads a file only partly keeps the running settings and names the file" {
         if (builtin.os.tag != .windows) return error.SkipZigTest;
         const alloc = std.testing.allocator;
@@ -10116,26 +10187,8 @@ pub const App = struct {
         defer SaveTest.end(&app);
         // The reload after the write is read whole, and from then on its
         // allocator has no memory: the switch to the dark state fails.
-        const Starve = struct {
-            threadlocal var armed: bool = false;
-            threadlocal var failing: std.testing.FailingAllocator = undefined;
-
-            fn arm() void {
-                save_target.test_before_compare = null;
-                armed = true;
-            }
-
-            fn load(a: Allocator) anyerror!configpkg.Config {
-                if (!armed) return SaveTest.load(a);
-                armed = false;
-                failing = .init(a, .{});
-                const cfg = try SaveTest.load(failing.allocator());
-                failing.fail_index = failing.alloc_index;
-                return cfg;
-            }
-        };
-        settings_patch.test_config_load = Starve.load;
-        save_target.test_before_compare = Starve.arm;
+        settings_patch.test_config_load = SaveTest.starvedLoad;
+        save_target.test_before_compare = SaveTest.starveNext;
         var original = try app.config.clone(alloc);
         defer original.deinit();
         var pending = try app.config.clone(alloc);
