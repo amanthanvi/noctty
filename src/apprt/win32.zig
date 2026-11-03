@@ -5858,6 +5858,7 @@ pub fn settingsSaveAndReloadThunk(
     ctx: *anyopaque,
     pending: *const configpkg.Config,
     original: *const configpkg.Config,
+    baselines: *const @import("win32/settings_patch.zig").Baselines,
 ) win32_settings.SaveError!void {
     const app: *App = @ptrCast(@alignCast(ctx));
     // A completed save ends the window's previews (`endSettingsPreview`); a
@@ -5865,7 +5866,7 @@ pub fn settingsSaveAndReloadThunk(
     // read a file only partly, or could not be applied, or was applied only
     // partly, is completed too: the running settings stay as they are,
     // without the preview over them.
-    app.settingsSaveAndReload(pending, original) catch |err| {
+    app.settingsSaveAndReloadFrom(pending, original, baselines) catch |err| {
         switch (err) {
             error.SavedButMasked,
             error.SavedButUnread,

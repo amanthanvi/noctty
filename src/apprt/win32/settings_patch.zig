@@ -965,7 +965,7 @@ pub fn editCheck(edit: Edit, reloaded: *const Config) Check {
     if (edit.with_profile) return .held;
     if (edit.field == .env and edit.name == null) return .held;
     if (edit.op == .list) return listCheck(edit.field, edit.op.list, reloaded, edit.profiles, edit.profiles_complete);
-    const now = editValue(edit, reloaded);
+    const now = editValue(edit, &.of(reloaded));
     const held = switch (edit.op) {
         .set => |value| now != null and std.mem.eql(u8, now.?, value),
         .unset, .delete => now == null,
@@ -979,18 +979,18 @@ pub fn editHeld(edit: Edit, reloaded: *const Config) bool {
     return editCheck(edit, reloaded) == .held;
 }
 
-/// The value `config` gives the field `edit` writes: the profile's command
+/// The value `values` give the field `edit` writes: the profile's command
 /// line, label or folder, or for `profile-env` the variable's value. Null
-/// when it gives none.
-fn editValue(edit: Edit, config: *const Config) ?[]const u8 {
+/// when they give none.
+fn editValue(edit: Edit, values: *const ProfileValues) ?[]const u8 {
     return switch (edit.field) {
-        .command => config.@"profile-command".get(edit.id),
-        .name => config.@"profile-name".get(edit.id),
-        .folder => config.@"profile-working-directory".get(edit.id),
+        .command => values.command.get(edit.id),
+        .name => values.name.get(edit.id),
+        .folder => values.folder.get(edit.id),
         .order, .hidden => unreachable,
         .env => env: {
             const name = edit.name orelse break :env null;
-            const map = config.@"profile-env".get(edit.id) orelse break :env null;
+            const map = values.env.get(edit.id) orelse break :env null;
             var it = map.iterator();
             while (it.next()) |kv| {
                 if (std.ascii.eqlIgnoreCase(kv.key_ptr.*, name)) break :env kv.value_ptr.*;
@@ -1003,10 +1003,10 @@ fn editValue(edit: Edit, config: *const Config) ?[]const u8 {
 /// Whether `a` and `b` give the field `edit` writes the same value. For
 /// `profile-env` with no variable (every variable of the profile), all of
 /// them.
-fn editEql(edit: Edit, a: *const Config, b: *const Config) bool {
+fn editEql(edit: Edit, a: *const ProfileValues, b: *const ProfileValues) bool {
     if (edit.field == .env and edit.name == null) {
-        const left = a.@"profile-env".get(edit.id);
-        const right = b.@"profile-env".get(edit.id);
+        const left = a.env.get(edit.id);
+        const right = b.env.get(edit.id);
         if (left == null or right == null) return left == null and right == null;
         if (left.?.map.count() != right.?.map.count()) return false;
         // Names compare without case, as the loader takes them (`Path` and
@@ -1030,22 +1030,22 @@ fn editEql(edit: Edit, a: *const Config, b: *const Config) bool {
 }
 
 /// The first of `edits` whose field `disk` gives a value that neither the
-/// draft's baseline (`original`) nor the draft (`pending`) gives: another
-/// program changed what the draft changes. There is no Keep mine / Use disk
-/// for a profile field, so a save that finds one stops (SETTINGS-SAVE-TOCTOU):
-/// asked of every fresh read of the layers, so an edit made after Settings
-/// read the config and before the save counts too.
+/// draft's baseline for it (`baselines`) nor the draft (`pending`) gives:
+/// another program changed what the draft changes. There is no Keep mine /
+/// Use disk for a profile field, so a save that finds one stops
+/// (SETTINGS-SAVE-TOCTOU): asked of every fresh read of the layers, so an
+/// edit made after Settings read the config and before the save counts too.
 ///
-/// `disk` is read in the light/dark state the baseline was read in
-/// (`original._conditional_state`) before anything is compared: a dark
-/// theme's line, read only because the app's state changed since Settings
-/// read the config, is no change to any file. Switching it reads the theme
-/// again; a theme that read fails to give lines makes the check stricter
-/// (a value the baseline had is missing), never looser.
-pub fn changedUnder(edits: []const Edit, original: *const Config, pending: *const Config, disk: *const Config, path: []const u8, same: origin.SamePath) !?Edit {
-    var conditioned = try disk.changeConditionalState(original._conditional_state);
-    defer if (conditioned) |*config| config.deinit();
-    const now: *const Config = if (conditioned) |*config| config else disk;
+/// Each field is compared with its own record (`Baselines`), and `disk` is
+/// read in the light/dark state that record was read in: a dark theme's
+/// line, read only because the app's state changed since, is no change to
+/// any file. Switching it reads that state's theme again, and a theme that
+/// read could not read whole stops the save (`error.ThemeUnread`) rather
+/// than compare without its lines.
+pub fn changedUnder(edits: []const Edit, baselines: *const Baselines, pending: *const Config, disk: *const Config, path: []const u8, same: origin.SamePath) !?Edit {
+    var readings: StateReadings = .{ .disk = disk };
+    defer readings.deinit();
+    const drafted: ProfileValues = .of(pending);
     for (edits) |edit| {
         // A field deleted only because its profile is removed (its label,
         // folder and variables, `with_profile`) is not one the draft
@@ -1053,28 +1053,136 @@ pub fn changedUnder(edits: []const Edit, original: *const Config, pending: *cons
         // gives it now. The removal's own command line is still checked.
         if (edit.with_profile) continue;
         if (edit.field.isList()) {
+            const base = baselines.list(edit.field);
+            const now = try readings.in(base.state);
             // A list is written whole, both blocks or neither, after a clear
             // that drops what every earlier file gives it: a list the draft
             // left as it was is checked too, in every file that gives it
             // (an earlier file's line, written over by that clear, counts).
-            if (!listEql(edit.field, now, original) and !listEql(edit.field, now, pending)) return edit;
+            const values = listOf(edit.field, now);
+            if (!stringsEql(values, base.values) and !stringsEql(values, listOf(edit.field, pending))) return edit;
             // The file's own lines for the list, which the save replaces:
             // another program's edit to them is written over even when a
             // later layer masks the list, so it stops the save too.
-            if (!ownLinesEql(edit.field.key(), now, original, path, same)) return edit;
+            if (!ownLinesEql(edit.field.key(), now._launch.profile_places.items, base.places, path, same)) return edit;
             continue;
         }
-        if (!editEql(edit, now, original) and !editEql(edit, now, pending)) return edit;
+        const base = &baselines.profiles;
+        const now: ProfileValues = .of(try readings.in(base.state));
+        if (!editEql(edit, &now, &base.values) and !editEql(edit, &now, &drafted)) return edit;
     }
     return null;
 }
 
-/// Whether `a` and `b` read the same lines of the file `path` for `key`
-/// (`profile-order` or `profile-hidden`): its values, clears too, in order,
-/// as each config recorded where it read them (`_launch.profile_places`).
-fn ownLinesEql(key: Config.Key, a: *const Config, b: *const Config, path: []const u8, same: origin.SamePath) bool {
-    var it_a = OwnLines{ .config = a, .key = @tagName(key), .path = path, .same = same };
-    var it_b = OwnLines{ .config = b, .key = @tagName(key), .path = path, .same = same };
+/// The values of the four keys that give each user profile a value, as one
+/// config gives them: a profile field's baseline (`Baselines.profiles`).
+/// The maps are the config's own, not copies.
+pub const ProfileValues = struct {
+    command: @FieldType(Config, "profile-command"),
+    name: @FieldType(Config, "profile-name"),
+    folder: @FieldType(Config, "profile-working-directory"),
+    env: @FieldType(Config, "profile-env"),
+
+    pub fn of(config: *const Config) ProfileValues {
+        return .{
+            .command = config.@"profile-command",
+            .name = config.@"profile-name",
+            .folder = config.@"profile-working-directory",
+            .env = config.@"profile-env",
+        };
+    }
+};
+
+/// What a save checks one group of profile keys against for another
+/// program's change (`changedUnder`): the values the draft started from,
+/// where each profile line of that reading was read
+/// (`_launch.profile_places`; the check reads the group's own keys), and
+/// the light/dark state of that reading. A group follows the file on its own
+/// (`settings_profiles.followFile`), which replaces its record whole, never
+/// one part of it.
+pub fn Baseline(comptime Values: type) type {
+    return struct {
+        values: Values,
+        places: []const configpkg.pane_launch.ProfilePlace,
+        state: configpkg.ConditionalState,
+    };
+}
+
+/// The draft's baseline for each group of profile keys: the profiles' four
+/// keys, `profile-order` and `profile-hidden`. Each record is borrowed from
+/// the config it was read from (the window's baseline, whose arena outlives
+/// it).
+pub const Baselines = struct {
+    profiles: Baseline(ProfileValues),
+    order: Baseline([]const [:0]const u8),
+    hidden: Baseline([]const [:0]const u8),
+
+    /// Every group as `config` gives it, in its state: a config none of
+    /// whose groups has followed a file since it was read.
+    pub fn of(config: *const Config) Baselines {
+        const places = config._launch.profile_places.items;
+        const state = config._conditional_state;
+        return .{
+            .profiles = .{ .values = .of(config), .places = places, .state = state },
+            .order = .{ .values = config.@"profile-order".list.items, .places = places, .state = state },
+            .hidden = .{ .values = config.@"profile-hidden".list.items, .places = places, .state = state },
+        };
+    }
+
+    /// The record of the list `field`.
+    pub fn list(self: *const Baselines, field: Field) *const Baseline([]const [:0]const u8) {
+        return switch (field) {
+            .order => &self.order,
+            .hidden => &self.hidden,
+            else => unreachable,
+        };
+    }
+};
+
+/// `disk` in each light/dark state a record asks for, switched once per
+/// state (`Config.changeConditionalState`); `disk` itself when it is in that
+/// state already.
+const StateReadings = struct {
+    disk: *const Config,
+    made: [3]Made = undefined,
+    count: usize = 0,
+
+    const Made = struct { state: configpkg.ConditionalState, config: ?Config };
+
+    fn in(self: *StateReadings, state: configpkg.ConditionalState) !*const Config {
+        const reading = for (self.made[0..self.count]) |*known| {
+            if (std.meta.eql(known.state, state)) break known;
+        } else made: {
+            // One per record at most.
+            std.debug.assert(self.count < self.made.len);
+            self.made[self.count] = .{ .state = state, .config = try self.disk.changeConditionalState(state) };
+            self.count += 1;
+            const fresh = &self.made[self.count - 1];
+            if (fresh.config) |*config| if (unreadTheme(config) != null) return error.ThemeUnread;
+            break :made fresh;
+        };
+        return if (reading.config) |*config| config else self.disk;
+    }
+
+    fn deinit(self: *StateReadings) void {
+        for (self.made[0..self.count]) |*made| if (made.config) |*config| config.deinit();
+    }
+};
+
+/// Whether two lists hold the same values, in order.
+fn stringsEql(a: []const [:0]const u8, b: []const [:0]const u8) bool {
+    if (a.len != b.len) return false;
+    for (a, b) |x, y| if (!std.mem.eql(u8, x, y)) return false;
+    return true;
+}
+
+/// Whether `a` and `b`, where two readings recorded their profile lines
+/// (`_launch.profile_places`), read the same lines of the file `path` for
+/// `key` (`profile-order` or `profile-hidden`): its values, clears too, in
+/// order.
+fn ownLinesEql(key: Config.Key, a: []const configpkg.pane_launch.ProfilePlace, b: []const configpkg.pane_launch.ProfilePlace, path: []const u8, same: origin.SamePath) bool {
+    var it_a = OwnLines{ .places = a, .key = @tagName(key), .path = path, .same = same };
+    var it_b = OwnLines{ .places = b, .key = @tagName(key), .path = path, .same = same };
     while (true) {
         const x = it_a.next();
         const y = it_b.next();
@@ -1083,16 +1191,17 @@ fn ownLinesEql(key: Config.Key, a: *const Config, b: *const Config, path: []cons
     }
 }
 
-/// The values `config` read for `key` from the file `path`, a clear as "".
+/// The values a reading recorded (`places`) for `key` from the file `path`,
+/// a clear as "".
 const OwnLines = struct {
-    config: *const Config,
+    places: []const configpkg.pane_launch.ProfilePlace,
     key: []const u8,
     path: []const u8,
     same: origin.SamePath,
     at: usize = 0,
 
     fn next(self: *OwnLines) ?[]const u8 {
-        const places = self.config._launch.profile_places.items;
+        const places = self.places;
         while (self.at < places.len) {
             const place = places[self.at];
             self.at += 1;
@@ -1301,10 +1410,10 @@ test "settings patch: a list another program changed stops the save; one a later
     // Read again as Settings read it: no change under the edit.
     var disk = try original.clone(alloc);
     defer disk.deinit();
-    try testing.expect(try changedUnder(&.{order}, &original, &pending, &disk, "", &testSamePath) == null);
+    try testing.expect(try changedUnder(&.{order}, &.of(&original), &pending, &disk, "", &testSamePath) == null);
     // Another program added to it since: the save stops, naming the key.
     try disk.@"profile-order".parseCLI(disk._arena.?.allocator(), "cmd.exe");
-    const changed = try changedUnder(&.{order}, &original, &pending, &disk, "", &testSamePath) orelse return error.TestExpectedChange;
+    const changed = try changedUnder(&.{order}, &.of(&original), &pending, &disk, "", &testSamePath) orelse return error.TestExpectedChange;
     var name: std.Io.Writer.Allocating = .init(alloc);
     defer name.deinit();
     try writeEditName(&name.writer, changed);
@@ -1385,7 +1494,7 @@ test "settings patch: an edit to the file's own list lines that a later file mas
         // Nothing changed: the save goes on.
         var disk = try testLoad(alloc, earlier, path);
         defer disk.deinit();
-        try testing.expect(try changedUnder(&.{order}, &original, &pending, &disk, path, &testSamePath) == null);
+        try testing.expect(try changedUnder(&.{order}, &.of(&original), &pending, &disk, path, &testSamePath) == null);
     }
     // Another program edits the file's own line, which the later file masks:
     // the list in effect is the same, and the save would write over it.
@@ -1396,7 +1505,7 @@ test "settings patch: an edit to the file's own list lines that a later file mas
         var disk = try testLoad(alloc, earlier, path);
         defer disk.deinit();
         try testing.expect(listEql(.order, &disk, &original));
-        const stopped = try changedUnder(&.{order}, &original, &pending, &disk, path, &testSamePath) orelse return error.TestExpectedChange;
+        const stopped = try changedUnder(&.{order}, &.of(&original), &pending, &disk, path, &testSamePath) orelse return error.TestExpectedChange;
         try testing.expect(stopped.field == .order);
     }
 }
@@ -1437,7 +1546,7 @@ test "settings patch: a dark theme's hidden list, read only because the app went
     var switched = (try fresh.changeConditionalState(.{ .theme = .dark })) orelse return error.TestExpectedSwitch;
     defer switched.deinit();
     try testing.expect(!listEql(.hidden, &switched, &original));
-    try testing.expect(try changedUnder(edits, &original, &pending, &switched, path, &testSamePath) == null);
+    try testing.expect(try changedUnder(edits, &.of(&original), &pending, &switched, path, &testSamePath) == null);
     // A draft that changes the hidden list itself is not stopped by it
     // either: the reading is compared in the light state Settings read the
     // config in.
@@ -1447,7 +1556,7 @@ test "settings patch: a dark theme's hidden list, read only because the app went
         try hides.@"profile-hidden".parseCLI(hides._arena.?.allocator(), "wsl");
         const hide_edits = try editsForSave(arena_state.allocator(), alloc, &.{&original}, .{}, &original, &hides, path, &testSamePath);
         try testing.expectEqual(@as(usize, 2), hide_edits.len);
-        try testing.expect(try changedUnder(hide_edits, &original, &hides, &switched, path, &testSamePath) == null);
+        try testing.expect(try changedUnder(hide_edits, &.of(&original), &hides, &switched, path, &testSamePath) == null);
     }
     // Another program's edit to the file's lines still stops the save.
     const changed = try std.fmt.allocPrint(alloc, "theme = light:{s},dark:{s}\nprofile-command = py: python.exe\nprofile-hidden = wsl\n", .{ light, dark });
@@ -1457,7 +1566,7 @@ test "settings patch: a dark theme's hidden list, read only because the app went
     defer edited.deinit();
     var edited_dark = (try edited.changeConditionalState(.{ .theme = .dark })) orelse return error.TestExpectedSwitch;
     defer edited_dark.deinit();
-    const stopped = try changedUnder(edits, &original, &pending, &edited_dark, path, &testSamePath) orelse return error.TestExpectedChange;
+    const stopped = try changedUnder(edits, &.of(&original), &pending, &edited_dark, path, &testSamePath) orelse return error.TestExpectedChange;
     try testing.expect(stopped.field == .hidden);
 }
 
@@ -2062,16 +2171,16 @@ test "settings patch: a profile's variables compare without case, and a removal 
     try disk.@"profile-env".parseCLI(disk._arena.?.allocator(), "py:");
     try disk.@"profile-env".parseCLI(disk._arena.?.allocator(), "py: PATH=C:\\bin");
     const whole: Edit = .{ .field = .env, .id = "py", .op = .delete };
-    try testing.expect(try changedUnder(&.{whole}, &original, &pending, &disk, "", &testSamePath) == null);
+    try testing.expect(try changedUnder(&.{whole}, &.of(&original), &pending, &disk, "", &testSamePath) == null);
     // A value that did change is one.
     var changed = try original.clone(alloc);
     defer changed.deinit();
     try changed.@"profile-env".parseCLI(changed._arena.?.allocator(), "py:");
     try changed.@"profile-env".parseCLI(changed._arena.?.allocator(), "py: PATH=D:\\bin");
-    try testing.expect(try changedUnder(&.{whole}, &original, &pending, &changed, "", &testSamePath) != null);
+    try testing.expect(try changedUnder(&.{whole}, &.of(&original), &pending, &changed, "", &testSamePath) != null);
     // The same field, deleted only because the profile is removed: covered.
     const with_profile: Edit = .{ .field = .env, .id = "py", .op = .delete, .with_profile = true };
-    try testing.expect(try changedUnder(&.{with_profile}, &original, &pending, &changed, "", &testSamePath) == null);
+    try testing.expect(try changedUnder(&.{with_profile}, &.of(&original), &pending, &changed, "", &testSamePath) == null);
 }
 
 test "settings patch: a config file that did not decode is still named after the light/dark switch, and a theme alone is asked of the switch" {

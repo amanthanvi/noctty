@@ -23,9 +23,11 @@ const Allocator = std.mem.Allocator;
 
 const configpkg = @import("../config.zig");
 const Config = configpkg.Config;
+const pane_launch = configpkg.pane_launch;
 const profile_map = @import("../config/profile_map.zig");
 const windows_shell = @import("../config/windows_shell.zig");
 const LineIterator = @import("../cli/args.zig").LineIterator;
+const settings_patch = @import("win32/settings_patch.zig");
 
 pub const RowKind = enum {
     /// "New profile", the first row.
@@ -1197,6 +1199,10 @@ fn liveText(comptime kind: profile_map.Kind, map: *const profile_map.ProfileMap(
     return if (entry.removed) null else entry.value;
 }
 
+/// The draft's baseline for each group of profile keys, which a save checks
+/// another program's change against (`settings_patch.Baselines`).
+pub const Baselines = settings_patch.Baselines;
+
 /// The config file changed while Settings was open (`replacement` is what it
 /// says now): when the draft changed no profile, `original` and `draft` take
 /// the file's profiles, as an unedited setting takes the file's value. A
@@ -1206,20 +1212,29 @@ fn liveText(comptime kind: profile_map.Kind, map: *const profile_map.ProfileMap(
 /// the draft changed stays as the draft has it (a save checks it against
 /// the file, `settings_patch.changedUnder`).
 ///
-/// Where each line was read (`_launch.profile_places`) goes with what it
-/// wrote: a list's own lines with that list, the profiles' with the
-/// profiles. A save compares the file's own lines for a list with the
-/// baseline's (`settings_patch.ownLinesEql`), so a list that keeps its
-/// baseline keeps the lines it was read from, and one that follows the file
-/// takes the file's.
-pub fn followFile(original: *Config, draft: *Config, replacement: *const Config) Allocator.Error!void {
+/// A group that follows the file takes a new record in `baselines`, whole:
+/// the values `original` now holds, where `replacement` read each line, and
+/// the light/dark state `replacement` was read in. A group that does not
+/// keeps its record as it was, every part of it. The save's check reads
+/// only these records, so a group's values cannot move on without its
+/// lines and state. Where each line was read (`_launch.profile_places`) also
+/// goes with what it wrote in both configs: the page reads the draft's.
+/// Everything is made before anything is put in place.
+pub fn followFile(original: *Config, draft: *Config, replacement: *const Config, baselines: *Baselines) Allocator.Error!void {
     const follow_profiles = profileFieldChanges(original, draft) == 0;
     const follow_order = original.@"profile-order".equal(draft.@"profile-order");
     const follow_hidden = original.@"profile-hidden".equal(draft.@"profile-hidden");
     const follows: Follows = .{ .profiles = follow_profiles, .order = follow_order, .hidden = follow_hidden };
-    for ([_]*Config{ original, draft }) |config| {
+    const Next = struct {
+        fresh: []const pane_launch.ProfilePlace,
+        places: @FieldType(pane_launch.Ledger, "profile_places"),
+        hidden: @FieldType(Config, "profile-hidden"),
+        order: @FieldType(Config, "profile-order"),
+        profiles: ?settings_patch.ProfileValues,
+    };
+    var next: [2]Next = undefined;
+    for ([_]*Config{ original, draft }, &next) |config, *made| {
         const a = arenaOf(config);
-        // Made whole before anything is put in place.
         const fresh = (try replacement._launch.clone(a)).profile_places;
         var places: @TypeOf(config._launch.profile_places) = .empty;
         for (config._launch.profile_places.items) |place| {
@@ -1228,18 +1243,36 @@ pub fn followFile(original: *Config, draft: *Config, replacement: *const Config)
         for (fresh.items) |place| {
             if (follows.of(place.key)) try places.append(a, place);
         }
-        const hidden = if (follow_hidden) try replacement.@"profile-hidden".clone(a) else config.@"profile-hidden";
-        const order = if (follow_order) try replacement.@"profile-order".clone(a) else config.@"profile-order";
-        if (follow_profiles) {
-            config.@"profile-command" = try replacement.@"profile-command".clone(a);
-            config.@"profile-name" = try replacement.@"profile-name".clone(a);
-            config.@"profile-working-directory" = try replacement.@"profile-working-directory".clone(a);
-            config.@"profile-env" = try replacement.@"profile-env".clone(a);
-        }
-        config.@"profile-hidden" = hidden;
-        config.@"profile-order" = order;
-        config._launch.profile_places = places;
+        made.* = .{
+            .fresh = fresh.items,
+            .places = places,
+            .hidden = if (follow_hidden) try replacement.@"profile-hidden".clone(a) else config.@"profile-hidden",
+            .order = if (follow_order) try replacement.@"profile-order".clone(a) else config.@"profile-order",
+            .profiles = if (follow_profiles) .{
+                .command = try replacement.@"profile-command".clone(a),
+                .name = try replacement.@"profile-name".clone(a),
+                .folder = try replacement.@"profile-working-directory".clone(a),
+                .env = try replacement.@"profile-env".clone(a),
+            } else null,
+        };
     }
+    // Put in place: nothing from here on can fail.
+    for ([_]*Config{ original, draft }, next) |config, made| {
+        if (made.profiles) |values| {
+            config.@"profile-command" = values.command;
+            config.@"profile-name" = values.name;
+            config.@"profile-working-directory" = values.folder;
+            config.@"profile-env" = values.env;
+        }
+        config.@"profile-hidden" = made.hidden;
+        config.@"profile-order" = made.order;
+        config._launch.profile_places = made.places;
+    }
+    const state = replacement._conditional_state;
+    const fresh = next[0].fresh;
+    if (follow_profiles) baselines.profiles = .{ .values = .of(original), .places = fresh, .state = state };
+    if (follow_order) baselines.order = .{ .values = original.@"profile-order".list.items, .places = fresh, .state = state };
+    if (follow_hidden) baselines.hidden = .{ .values = original.@"profile-hidden".list.items, .places = fresh, .state = state };
 }
 
 /// Which of a config's profile keys follow the file (`followFile`).
@@ -1711,7 +1744,6 @@ test "settings profiles: the checks refuse what the loader would, and never repe
 }
 
 test "settings profiles: a draft the page changed saves and reads back as the page shows it" {
-    const settings_patch = @import("win32/settings_patch.zig");
     const alloc = testing.allocator;
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -2217,7 +2249,6 @@ test "settings profiles: a profile the draft adds that a saved name hides is hid
 
 test "settings profiles: a list's recorded lines follow the file with that list, so a masked outside edit stops the save and an untouched list raises no false conflict" {
     const alloc = testing.allocator;
-    const settings_patch = @import("win32/settings_patch.zig");
     const Load = struct {
         fn same(x: []const u8, y: []const u8) bool {
             return std.ascii.eqlIgnoreCase(x, y);
@@ -2265,11 +2296,12 @@ test "settings profiles: a list's recorded lines follow the file with that list,
         try tmp.dir.writeFile(.{ .sub_path = "config", .data = after });
         var replacement = try Load.config(alloc, earlier, path);
         defer replacement.deinit();
-        try followFile(&original, &draft, &replacement);
+        var baselines: Baselines = .of(&original);
+        try followFile(&original, &draft, &replacement, &baselines);
         var disk = try Load.config(alloc, earlier, path);
         defer disk.deinit();
         const order: settings_patch.Edit = .{ .field = .order, .id = "", .op = .{ .list = &.{ "user:py", "pwsh.exe" } } };
-        try testing.expect(try settings_patch.changedUnder(&.{order}, &original, &draft, &disk, path, &Load.same) != null);
+        try testing.expect(try settings_patch.changedUnder(&.{order}, &baselines, &draft, &disk, path, &Load.same) != null);
     }
     // 2. The page changed a profile's command line, not the order; the
     // outside edit comes, and the untouched order follows the file, its
@@ -2285,12 +2317,13 @@ test "settings profiles: a list's recorded lines follow the file with that list,
         try tmp.dir.writeFile(.{ .sub_path = "config", .data = after });
         var replacement = try Load.config(alloc, earlier, path);
         defer replacement.deinit();
-        try followFile(&original, &draft, &replacement);
+        var baselines: Baselines = .of(&original);
+        try followFile(&original, &draft, &replacement, &baselines);
         try setOrder(&draft, &.{"user:py"});
         var disk = try Load.config(alloc, earlier, path);
         defer disk.deinit();
         const order: settings_patch.Edit = .{ .field = .order, .id = "", .op = .{ .list = &.{"user:py"} } };
-        try testing.expect(try settings_patch.changedUnder(&.{order}, &original, &draft, &disk, path, &Load.same) == null);
+        try testing.expect(try settings_patch.changedUnder(&.{order}, &baselines, &draft, &disk, path, &Load.same) == null);
     }
 }
 
@@ -2369,7 +2402,8 @@ test "settings profiles: a draft's own order outlives a change to the file, and 
     // The file changes both lists meanwhile.
     var replacement = try testConfig(alloc, "profile-command = py: python.exe\nprofile-order = wsl\nprofile-hidden = cmd.exe\n", &.{});
     defer replacement.deinit();
-    try followFile(&original, &draft, &replacement);
+    var baselines: Baselines = .of(&original);
+    try followFile(&original, &draft, &replacement, &baselines);
     // The order stays the draft's, over the baseline it started from (which
     // a save checks against the file); the hidden list, untouched, follows.
     try expectSameText("user:py", draft.@"profile-order".list.items[0]);

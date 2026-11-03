@@ -8505,6 +8505,18 @@ pub const App = struct {
     /// surfacing the failure. `pending` is borrowed, not consumed —
     /// the caller still owns its arena.
     pub fn settingsSaveAndReload(self: *App, pending: *const configpkg.Config, original: *const configpkg.Config) win32_settings.SaveError!void {
+        // A baseline no group of which has followed the file since it was
+        // read: each record is as `original` gives it.
+        const baselines: settings_patch.Baselines = .of(original);
+        return self.settingsSaveAndReloadFrom(pending, original, &baselines);
+    }
+
+    /// `settingsSaveAndReload`, with the draft's baseline for each group of
+    /// profile keys (`baselines`, the Settings window's, which may have
+    /// followed the file since `original` was read): the check for another
+    /// program's change compares each with its own record
+    /// (`settings_patch.changedUnder`).
+    pub fn settingsSaveAndReloadFrom(self: *App, pending: *const configpkg.Config, original: *const configpkg.Config, baselines: *const settings_patch.Baselines) win32_settings.SaveError!void {
         const alloc = self.core_app.alloc;
 
         // Target file selection:
@@ -8570,7 +8582,7 @@ pub const App = struct {
                 // recovery: its baseline is the recovery config, not the
                 // file, so a repair would read as a change (the file's
                 // digests are still compared).
-                const compare: ?[]const settings_patch.Edit = if (self.safe_mode) null else profile_edits;
+                const compare: ?ProfileCompare = if (self.safe_mode) null else .{ .edits = profile_edits, .baselines = baselines };
                 profile_edits = try settingsProfileEditsFromDisk(profile_arena.allocator(), alloc, &self.settings_failure_detail, self.loadConfigAtStartupCwd(), &self.config, state, original, pending, target_path, compare);
             }
             // No-op short-circuit: if the user pressed Save without
@@ -8755,12 +8767,11 @@ pub const App = struct {
         alloc: Allocator,
         detail: *win32_settings.FailureDetail,
         now: *const configpkg.Config,
-        original: *const configpkg.Config,
         pending: *const configpkg.Config,
-        edits: []const settings_patch.Edit,
+        compare: ProfileCompare,
         target_path: []const u8,
     ) win32_settings.SaveError!void {
-        const found = settings_patch.changedUnder(edits, original, pending, now, target_path, &settings_reference.samePath) catch |err|
+        const found = settings_patch.changedUnder(compare.edits, compare.baselines, pending, now, target_path, &settings_reference.samePath) catch |err|
             return settingsProfileEditsFailed(err);
         const edit = found orelse return;
         var name: std.Io.Writer.Allocating = .init(alloc);
@@ -8770,6 +8781,14 @@ pub const App = struct {
         log.warn("settings save: another program changed a profile field the draft changes; nothing saved", .{});
         return error.ProfileChanged;
     }
+
+    /// What a save's check for another program's change compares
+    /// (`settingsProfilesUnchanged`): the draft's profile edits, and the
+    /// baseline of each group of keys they belong to.
+    const ProfileCompare = struct {
+        edits: []const settings_patch.Edit,
+        baselines: *const settings_patch.Baselines,
+    };
 
     /// The profile edits a save makes, worked out against the config layers
     /// read again from disk (`fresh`, the read's result, owned here) and
@@ -8786,14 +8805,15 @@ pub const App = struct {
     /// problems are from its last read, possibly repaired since, and keep a
     /// removed profile's tombstone instead (`referencedElsewhere`).
     ///
-    /// With `compare` (the draft's edits; null in recovery, whose baseline is
-    /// not the file), a profile field they change that another program
-    /// changed too stops the save (`settingsProfilesUnchanged`), judged on
-    /// the reading in `state` this decides the edits from, once it is known
-    /// to be whole: no separate switch reads the theme for the check, so a
-    /// theme read that fails and then recovers cannot skip it. A read that
-    /// fails stops the save. Nothing is written then, and `detail` names the
-    /// file or the field.
+    /// With `compare` (the draft's edits and the baseline of each group of
+    /// profile keys; null in recovery, whose baseline is not the file), a
+    /// profile field they change that another program changed too stops the
+    /// save (`settingsProfilesUnchanged`), judged on the reading in `state`
+    /// this decides the edits from, once it is known to be whole, put in the
+    /// state of the field's own baseline (`settings_patch.changedUnder`; a
+    /// theme that switch cannot read stops the save). A read that fails stops
+    /// the save. Nothing is written then, and `detail` names the file or the
+    /// field.
     fn settingsProfileEditsFromDisk(
         arena: Allocator,
         alloc: Allocator,
@@ -8804,7 +8824,7 @@ pub const App = struct {
         original: *const configpkg.Config,
         pending: *const configpkg.Config,
         target_path: []const u8,
-        compare: ?[]const settings_patch.Edit,
+        compare: ?ProfileCompare,
     ) win32_settings.SaveError![]settings_patch.Edit {
         var disk = fresh catch |err| {
             log.warn("settings save: could not read the config files again for the profile edits err={}", .{err});
@@ -8846,7 +8866,7 @@ pub const App = struct {
                 return if (unread.undecodable) error.UnsupportedEncoding else error.FileUnopenable;
             }
         }
-        if (compare) |edits| try settingsProfilesUnchanged(alloc, detail, readings[0], original, pending, edits, target_path);
+        if (compare) |what| try settingsProfilesUnchanged(alloc, detail, readings[0], pending, what, target_path);
         return settings_patch.editsForSave(arena, alloc, &readings, state, original, pending, target_path, &settings_reference.samePath) catch |err|
             settingsProfileEditsFailed(err);
     }
@@ -10003,7 +10023,7 @@ pub const App = struct {
             settingsPreviewFieldThunk(&app, .background_opacity, .{ .background_opacity = 0.5 });
             try std.testing.expect(app.settings_preview != null);
             // The save, as the window makes it: done, and said so.
-            const result = settingsSaveAndReloadThunk(&app, &pending, &original);
+            const result = settingsSaveAndReloadThunk(&app, &pending, &original, &.of(&original));
             try std.testing.expectError(switch (case) {
                 .masked_check => error.SavedNotApplied,
                 .apply => error.SavedPartlyApplied,
@@ -10224,7 +10244,7 @@ pub const App = struct {
                     pending.@"cursor-style" = .underline;
                 },
             }
-            const result = settingsSaveAndReloadThunk(&app, &pending, &original);
+            const result = settingsSaveAndReloadThunk(&app, &pending, &original, &.of(&original));
             if (SaveTest.lock) |file| file.close();
             SaveTest.lock = null;
             SaveTest.lock_path = "";
@@ -10356,7 +10376,7 @@ pub const App = struct {
             SaveTest.lock_path = more;
             save_target.test_before_compare = SaveTest.hook;
             // The save, as the window makes it.
-            try std.testing.expectError(error.SavedButUnread, settingsSaveAndReloadThunk(&app, &pending, &original));
+            try std.testing.expectError(error.SavedButUnread, settingsSaveAndReloadThunk(&app, &pending, &original, &.of(&original)));
             // The preview ends with it: the running settings are what show.
             try std.testing.expect(app.settings_preview == null);
             // Written,
@@ -10605,6 +10625,60 @@ pub const App = struct {
             }
             try std.testing.expect(app.settings_masked_keys.text == null);
         }
+    }
+
+    test "settings save checks each group of profile keys in the light/dark state of its own baseline, after the window followed a dark reload" {
+        if (builtin.os.tag != .windows) return error.SkipZigTest;
+        const alloc = std.testing.allocator;
+        const settings_profiles = @import("../win32_settings_profiles.zig");
+        var core_app: CoreApp = undefined;
+        var app: App = undefined;
+        var session: TestSession = .{};
+        try session.init(.{ .core_app = &core_app, .app = &app });
+        defer session.deinit();
+        defer testFreeConfigProblems(&app, alloc);
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        // The dark theme hides PowerShell; the light one gives nothing.
+        try tmp.dir.writeFile(.{ .sub_path = "light", .data = "# light\n" });
+        try tmp.dir.writeFile(.{ .sub_path = "dark", .data = "profile-hidden = pwsh.exe\n" });
+        const light = try tmp.dir.realpathAlloc(alloc, "light");
+        defer alloc.free(light);
+        const dark = try tmp.dir.realpathAlloc(alloc, "dark");
+        defer alloc.free(dark);
+        const text = try std.fmt.allocPrint(alloc, "theme = light:{s},dark:{s}\nprofile-command = py: python.exe\n", .{ light, dark });
+        defer alloc.free(text);
+        try tmp.dir.writeFile(.{ .sub_path = "config", .data = text });
+        const path = try tmp.dir.realpathAlloc(alloc, "config");
+        defer alloc.free(path);
+        SaveTest.files = &.{path};
+        try SaveTest.begin(&app, path);
+        defer SaveTest.end(&app);
+        // Settings reads the config while the app is light.
+        var original = try app.config.clone(alloc);
+        defer original.deinit();
+        var pending = try app.config.clone(alloc);
+        defer pending.deinit();
+        var baselines: settings_patch.Baselines = .of(&original);
+        // The app goes dark, and the window follows its reload: the hidden
+        // list, and its record, are the dark one now.
+        app.core_app.config_conditional_state = .{ .theme = .dark };
+        {
+            var loaded = try SaveTest.load(alloc);
+            defer loaded.deinit();
+            var switched = (try loaded.changeConditionalState(.{ .theme = .dark })) orelse return error.TestExpectedSwitch;
+            defer switched.deinit();
+            try app.core_app.updateConfig(&app, &switched);
+        }
+        try settings_profiles.followFile(&original, &pending, &app.config, &baselines);
+        try std.testing.expectEqual(@as(usize, 1), baselines.hidden.values.len);
+        try std.testing.expect(baselines.hidden.state.theme == .dark);
+        // A move: no file changed, so nothing stops the save.
+        try settings_profiles.setOrder(&pending, &.{ "user:py", "pwsh.exe" });
+        try app.settingsSaveAndReloadFrom(&pending, &original, &baselines);
+        const after = try SaveTest.read(path);
+        defer alloc.free(after);
+        try std.testing.expect(std.mem.indexOf(u8, after, "profile-order = user:py\n") != null);
     }
 
     test "settings save of the profiles' order stops when another program hid a profile in a file loaded first, which the save's clear would show again" {
@@ -10915,7 +10989,7 @@ pub const App = struct {
             // than the light reading, or one `updateConfig` would switch
             // unchecked. The save is done: it says so, and the preview ends
             // with it.
-            try std.testing.expectError(error.SavedNotApplied, settingsSaveAndReloadThunk(&app, &pending, &original));
+            try std.testing.expectError(error.SavedNotApplied, settingsSaveAndReloadThunk(&app, &pending, &original, &.of(&original)));
             try std.testing.expect(app.settings_preview == null);
             try std.testing.expectEqual(@as(f32, 12), app.config.@"font-size");
             const after = try SaveTest.read(path);

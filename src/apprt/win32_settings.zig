@@ -35,6 +35,7 @@ const field_model = @import("win32_settings_fields.zig");
 const settings_reference = @import("win32_settings_reference.zig");
 const settings_keybinds = @import("win32_settings_keybinds.zig");
 const settings_profiles = @import("win32_settings_profiles.zig");
+const settings_patch = @import("win32/settings_patch.zig");
 const profile_map = @import("../config/profile_map.zig");
 const LineIterator = @import("../cli/args.zig").LineIterator;
 const bench_trace = @import("win32/bench_trace.zig");
@@ -2296,11 +2297,15 @@ pub const AppHandle = struct {
     /// path diffs pending against it (NOT against `App.config`) so
     /// an external `reload_config` or file edit that fires while the
     /// window is open doesn't get silently reverted by our save.
-    /// Caller owns both.
+    /// `baselines` is the draft's baseline for each group of profile keys,
+    /// which may have followed the file since (`settings_profiles.followFile`):
+    /// the check for another program's change compares with it
+    /// (`settings_patch.changedUnder`). Caller owns all three.
     saveAndReload: *const fn (
         ctx: *anyopaque,
         pending: *const Config,
         original: *const Config,
+        baselines: *const settings_patch.Baselines,
     ) SaveError!void,
     /// Optional monotonic revision of the effective config. When absent, the
     /// settings window maintains a local revision for compatibility.
@@ -2667,6 +2672,11 @@ pub const SettingsWindow = struct {
     /// does not mutate our diff baseline. Only valid while
     /// `pending != null`.
     original: ?Config = null,
+    /// The baseline a save checks each group of profile keys against
+    /// (`settings_patch.Baselines`): borrowed from `original`, set and
+    /// cleared with it, and replaced a record at a time as a group follows
+    /// the file (`settings_profiles.followFile`).
+    profile_baselines: ?settings_patch.Baselines = null,
     /// Latest effective config snapshot used for preview rollback and
     /// three-way external-edit resolution.
     current: ?Config = null,
@@ -2971,6 +2981,7 @@ pub const SettingsWindow = struct {
         self.active_owned_conflict_field = null;
         if (self.pending) |*p| p.deinit();
         self.pending = null;
+        self.profile_baselines = null;
         if (self.original) |*o| o.deinit();
         self.original = null;
         self.profile_changes = 0;
@@ -4094,6 +4105,10 @@ pub const SettingsWindow = struct {
         const previous_current = &(self.current orelse return);
         const original = &(self.original orelse return);
         const pending = &(self.pending orelse return);
+        // Set with `original` (`adoptCopies`); a window given its configs
+        // some other way starts from the records `original` gives.
+        if (self.profile_baselines == null) self.profile_baselines = .of(original);
+        const baselines = &self.profile_baselines.?;
         for (std.enums.values(OwnedSettingField)) |field| {
             if (ownedSettingEql(previous_current, &replacement, field)) continue;
             const index = @intFromEnum(field);
@@ -4124,7 +4139,7 @@ pub const SettingsWindow = struct {
 
         // The profiles have no draft of their own until the page changes one:
         // until then they follow the file, as an unedited field does.
-        settings_profiles.followFile(original, pending, &replacement) catch |err| {
+        settings_profiles.followFile(original, pending, &replacement, baselines) catch |err| {
             std.log.warn("settings: failed to merge the profiles err={}", .{err});
         };
         // A field open on a profile the file no longer has goes with it.
@@ -6359,7 +6374,10 @@ pub const SettingsWindow = struct {
             if (self.search_query.active()) {
                 self.ensureProfileModel();
                 self.refindProfileRows();
+                // The help text that says what the search found can change
+                // its height.
                 self.refreshNativeSectionText();
+                layoutChildren(self);
             }
             return;
         }
@@ -6521,6 +6539,8 @@ pub const SettingsWindow = struct {
         }
         const p = self.pending orelse return;
         const o = self.original orelse return;
+        // Set with `original` (`adoptCopies`).
+        const baselines = self.profile_baselines orelse settings_patch.Baselines.of(&o);
 
         var apply_id: ?ApplyId = null;
         if (self.transaction) |*transaction| {
@@ -6536,7 +6556,7 @@ pub const SettingsWindow = struct {
             };
         }
 
-        switch (saveReloadOutcome(self.handle.saveAndReload(self.handle.ctx, &p, &o))) {
+        switch (saveReloadOutcome(self.handle.saveAndReload(self.handle.ctx, &p, &o, &baselines))) {
             .completed => self.completeSynchronousSave(apply_id, .clean),
             .completed_masked => {
                 // Persisted bytes are correct but a later config
@@ -7096,6 +7116,8 @@ pub const SettingsWindow = struct {
         self.clearPending();
         self.releaseDraftControls();
         self.original = copies.original;
+        // Every group as the new baseline gives it, in its state.
+        self.profile_baselines = .of(&self.original.?);
         self.current = copies.current;
         self.pending = copies.pending;
         self.initTransaction();
@@ -10257,7 +10279,7 @@ test "settings save preserves untouched scalar precision and legacy ranges" {
         saved: bool = false,
         font_size: f32 = 0,
         opacity: f64 = 0,
-        fn save(ctx: *anyopaque, pending: *const Config, _: *const Config) SaveError!void {
+        fn save(ctx: *anyopaque, pending: *const Config, _: *const Config, _: *const settings_patch.Baselines) SaveError!void {
             const self: *@This() = @ptrCast(@alignCast(ctx));
             self.saved = true;
             self.font_size = pending.@"font-size";
@@ -10492,7 +10514,7 @@ test "settings save checks the file for edits first, and a conflict stops it" {
         /// The file cannot be checked.
         fail: bool = false,
         settings: *SettingsWindow = undefined,
-        fn save(ctx: *anyopaque, _: *const Config, _: *const Config) SaveError!void {
+        fn save(ctx: *anyopaque, _: *const Config, _: *const Config, _: *const settings_patch.Baselines) SaveError!void {
             const self: *@This() = @ptrCast(@alignCast(ctx));
             self.saved += 1;
             // Keep the draft, as a failed write does, so the test need not
@@ -10582,7 +10604,7 @@ test "settings save whose file changed after the check shows the choice, and say
         /// nothing under the draft.
         disk_font_size: ?f32 = null,
         settings: *SettingsWindow = undefined,
-        fn save(ctx: *anyopaque, _: *const Config, _: *const Config) SaveError!void {
+        fn save(ctx: *anyopaque, _: *const Config, _: *const Config, _: *const settings_patch.Baselines) SaveError!void {
             const self: *@This() = @ptrCast(@alignCast(ctx));
             self.saved += 1;
             const size = self.disk_font_size orelse return error.DiskChanged;
@@ -14024,6 +14046,11 @@ const dialog_test = struct {
         /// A save writes this config file the way the App's does
         /// (`persistSettings`), patching only the keys edited.
         save_path: ?[]const u8 = null,
+        /// Before writing `save_path`, the save reads it again, themes too,
+        /// in `config`'s light/dark state, and stops on a profile field
+        /// another program changed (`ProfileChanged`), as the App does
+        /// (`settings_patch.changedUnder`, with the window's baselines).
+        check_profiles: bool = false,
         /// After writing `save_path`, the save reads it again, with the files
         /// it includes, into `config`, and reports the edited keys whose
         /// value something read later overrides, as the App does
@@ -14225,20 +14252,31 @@ const dialog_test = struct {
             return &self.config;
         }
 
-        fn saveAndReload(ctx: *anyopaque, pending: *const Config, original: *const Config) SaveError!void {
+        fn saveAndReload(ctx: *anyopaque, pending: *const Config, original: *const Config, baselines: *const settings_patch.Baselines) SaveError!void {
             const self: *Fixture = @ptrCast(@alignCast(ctx));
             self.saved += 1;
             // The window's allocator runs out once the save is done.
             if (self.starve_after_save) |failing| failing.fail_index = failing.alloc_index;
             if (self.save_path) |path| {
                 const app = @import("win32.zig");
-                const settings_patch = @import("win32/settings_patch.zig");
                 const edited = app.settingsUserEditedKeys(original, pending);
                 // The profile editor's changes, as the App works them out.
                 var profile_arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
                 defer profile_arena.deinit();
                 const profile_edits = settings_patch.editsForSave(profile_arena.allocator(), std.testing.allocator, &.{&self.config}, self.config._conditional_state, original, pending, path, &settings_reference.samePath) catch
                     return error.OutOfMemory;
+                if (self.check_profiles) {
+                    var disk = Config.default(std.testing.allocator) catch return error.OutOfMemory;
+                    defer disk.deinit();
+                    disk.loadFile(std.testing.allocator, path) catch return error.ReloadFailed;
+                    disk.loadRecursiveFiles(std.testing.allocator) catch return error.ReloadFailed;
+                    disk.finalize() catch return error.ReloadFailed;
+                    var now = disk.changeConditionalState(self.config._conditional_state) catch return error.ReloadFailed;
+                    defer if (now) |*config| config.deinit();
+                    const reading = if (now) |*config| config else &disk;
+                    const changed = settings_patch.changedUnder(profile_edits, baselines, pending, reading, path, &settings_reference.samePath) catch return error.ReloadFailed;
+                    if (changed != null) return error.ProfileChanged;
+                }
                 try app.persistSettings(std.testing.allocator, path, pending, edited, profile_edits, null, null);
                 if (self.reload_from_disk) {
                     var reloaded = Config.default(std.testing.allocator) catch return error.ReloadFailed;
@@ -22831,6 +22869,44 @@ fn profileFixture(tmp: *std.testing.TmpDir, text: []const u8, path: *[]u8) !*dia
     return fixture;
 }
 
+/// A Settings window over a config file with a theme for each light/dark
+/// state (`light` and `dark`, the themes' text) and `body` after it, opened
+/// while the app is light. Its saves write the file and check the profile
+/// fields first, as the App does (`Fixture.check_profiles`).
+fn themedProfileFixture(tmp: *std.testing.TmpDir, body: []const u8, light: []const u8, dark: []const u8, path: *[]u8) !*dialog_test.Fixture {
+    const alloc = std.testing.allocator;
+    try tmp.dir.writeFile(.{ .sub_path = "light-theme", .data = light });
+    try tmp.dir.writeFile(.{ .sub_path = "dark-theme", .data = dark });
+    const light_path = try tmp.dir.realpathAlloc(alloc, "light-theme");
+    defer alloc.free(light_path);
+    const dark_path = try tmp.dir.realpathAlloc(alloc, "dark-theme");
+    defer alloc.free(dark_path);
+    const text = try std.fmt.allocPrint(alloc, "theme = light:{s},dark:{s}\n{s}", .{ light_path, dark_path, body });
+    defer alloc.free(text);
+    try tmp.dir.writeFile(.{ .sub_path = "noctty.conf", .data = text });
+    path.* = try tmp.dir.realpathAlloc(alloc, "noctty.conf");
+    errdefer alloc.free(path.*);
+    const fixture = try dialog_test.Fixture.prepare(true);
+    errdefer fixture.finish();
+    try fixture.config.loadFile(alloc, path.*);
+    try fixture.config.loadRecursiveFiles(alloc);
+    try fixture.config.finalize();
+    fixture.save_path = path.*;
+    fixture.check_profiles = true;
+    try fixture.settings.open();
+    return fixture;
+}
+
+/// The system's light/dark state changes: the app's config is read again in
+/// `state`, and the window takes it in (`externalConfigChanged`), as the App
+/// hands it each config it installs.
+fn switchFixtureTheme(fixture: *dialog_test.Fixture, state: @TypeOf(fixture.config._conditional_state), revision: u64) !void {
+    const switched = (try fixture.config.changeConditionalState(state)) orelse return error.TestExpectedSwitch;
+    fixture.config.deinit();
+    fixture.config = switched;
+    fixture.settings.externalConfigChanged(&fixture.config, revision);
+}
+
 /// The Profiles page's field being typed into; a test that expects one fails,
 /// rather than panics, when there is none.
 fn openEdit(settings: *SettingsWindow) !*ProfileEdit {
@@ -22843,6 +22919,103 @@ fn profileRowName(settings: *SettingsWindow, position: usize, buf: []u8) []const
 
 fn profileRowValue(settings: *SettingsWindow, position: usize, buf: []u8) ?[]const u8 {
     return profileUiaRowValue(&settings.profile_list, position, buf);
+}
+
+test "settings a save after the app went dark is no conflict for the dark theme's hidden list the window followed, a move or a hide" {
+    try dialog_test.onHiddenDesktop(struct {
+        fn body() !void {
+            const alloc = std.testing.allocator;
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            const Edit = enum { move, hide };
+            for ([_]Edit{ .move, .hide }) |edit| {
+                // Settings opens while the app is light; the dark theme hides
+                // PowerShell.
+                var path: []u8 = &.{};
+                const fixture = try themedProfileFixture(&tmp, "profile-command = py: python.exe\n", "# light\n", "profile-hidden = pwsh.exe\n", &path);
+                defer alloc.free(path);
+                defer fixture.finish();
+                const settings = &fixture.settings;
+                // The app goes dark, and the window follows: the draft and
+                // its baseline hide PowerShell.
+                try switchFixtureTheme(fixture, .{ .theme = .dark }, 5);
+                const pending = &(settings.pending orelse return error.TestExpectedDraft);
+                try std.testing.expectEqual(@as(usize, 1), pending.@"profile-hidden".list.items.len);
+                switch (edit) {
+                    .move => try settings_profiles.setOrder(pending, &.{ "user:py", "pwsh.exe" }),
+                    .hide => try settings_profiles.setHidden(pending, &.{ "pwsh.exe", "cmd.exe" }),
+                }
+                // No file changed: the save is no conflict, and writes both
+                // lists.
+                settings.save();
+                try std.testing.expectEqual(@as(u32, 1), fixture.saved);
+                try std.testing.expect(settings.status_note != .profile_changed);
+                const after = try tmp.dir.readFileAlloc(alloc, "noctty.conf", 1 << 16);
+                defer alloc.free(after);
+                try std.testing.expect(std.mem.indexOf(u8, after, "profile-order =\n") != null);
+                try std.testing.expect(std.mem.indexOf(u8, after, "profile-hidden =\n") != null);
+            }
+        }
+    }.body);
+}
+
+test "settings a list that followed the file and one that kept its baseline are each checked in their own state" {
+    try dialog_test.onHiddenDesktop(struct {
+        fn body() !void {
+            const alloc = std.testing.allocator;
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            const Outside = enum { none, order, hidden };
+            for ([_]Outside{ .none, .order, .hidden }) |outside| {
+                // The dark theme orders and hides profiles of its own.
+                var path: []u8 = &.{};
+                const fixture = try themedProfileFixture(&tmp, "profile-command = py: python.exe\n", "# light\n", "profile-order = cmd.exe\nprofile-hidden = pwsh.exe\n", &path);
+                defer alloc.free(path);
+                defer fixture.finish();
+                const settings = &fixture.settings;
+                // While the app is light the page hides Command Prompt: the
+                // hidden list keeps its light baseline from here on.
+                {
+                    const pending = &(settings.pending orelse return error.TestExpectedDraft);
+                    try settings_profiles.setHidden(pending, &.{"cmd.exe"});
+                }
+                // The app goes dark: the order, which the draft left alone,
+                // follows the dark file; the hidden list does not.
+                try switchFixtureTheme(fixture, .{ .theme = .dark }, 5);
+                const pending = &(settings.pending orelse return error.TestExpectedDraft);
+                try std.testing.expectEqual(@as(usize, 1), pending.@"profile-order".list.items.len);
+                try std.testing.expectEqual(@as(usize, 1), pending.@"profile-hidden".list.items.len);
+                // Another program edits the file's own line for either list,
+                // or neither.
+                const before = try tmp.dir.readFileAlloc(alloc, "noctty.conf", 1 << 16);
+                defer alloc.free(before);
+                const added: []const u8 = switch (outside) {
+                    .none => "",
+                    .order => "profile-order = git-bash\n",
+                    .hidden => "profile-hidden = wsl\n",
+                };
+                const edited = try std.mem.concat(alloc, u8, &.{ before, added });
+                defer alloc.free(edited);
+                try tmp.dir.writeFile(.{ .sub_path = "noctty.conf", .data = edited });
+                settings.save();
+                try std.testing.expectEqual(@as(u32, 1), fixture.saved);
+                const after = try tmp.dir.readFileAlloc(alloc, "noctty.conf", 1 << 16);
+                defer alloc.free(after);
+                switch (outside) {
+                    // Each list in its own state: no false conflict.
+                    .none => {
+                        try std.testing.expect(settings.status_note != .profile_changed);
+                        try std.testing.expect(std.mem.indexOf(u8, after, "profile-hidden = cmd.exe\n") != null);
+                    },
+                    // Either edit is seen, in that list's state: nothing saved.
+                    .order, .hidden => {
+                        try std.testing.expectEqual(StatusNote.profile_changed, settings.status_note);
+                        try std.testing.expect(std.mem.eql(u8, edited, after));
+                    },
+                }
+            }
+        }
+    }.body);
 }
 
 test "settings the Profiles page lists the profiles and their fields, made with its page and gone with it" {

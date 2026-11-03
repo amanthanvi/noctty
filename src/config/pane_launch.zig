@@ -645,7 +645,7 @@ fn finalizeProfileField(
 
 /// Where a line that `finalize` may report was read: the last line that
 /// wrote a (key, id) of a `profile-*` key, or a reference value.
-const ProfilePlace = struct {
+pub const ProfilePlace = struct {
     key: []const u8,
     id: []const u8,
     location: cli.Location,
