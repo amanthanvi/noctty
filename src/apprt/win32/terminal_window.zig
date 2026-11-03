@@ -4976,9 +4976,11 @@ pub const Surface = struct {
     }
 
     pub fn writeClipboardText(self: *const Surface, text: []const u8) !void {
-        writeClipboardTextWith(.{}, self.app.core_app.alloc, self.hwnd, text) catch |err| switch (err) {
-            // A Win32 failure is reported as `lastError()`, as it always was.
-            error.GlobalMemoryUnavailable, error.ClipboardUnavailable => return lastError(),
+        var native: windows.Win32Error = .SUCCESS;
+        writeClipboardTextWith(.{}, self.app.core_app.alloc, self.hwnd, text, &native) catch |err| switch (err) {
+            // A Win32 failure is reported with the error its own call left,
+            // not whatever the cleanup after it left.
+            error.GlobalMemoryUnavailable, error.ClipboardUnavailable => return windows.unexpectedError(native),
             else => |other| return other,
         };
     }
@@ -4986,11 +4988,18 @@ pub const Surface = struct {
     /// `writeClipboardText` through `ops`, so a test can fail each native call
     /// without reaching the real clipboard. The text is made ready before the
     /// clipboard is opened and emptied (`clipboard_write.write`), so memory
-    /// that cannot be had no longer wipes what the clipboard held.
-    fn writeClipboardTextWith(ops: clipboard_write.Ops, alloc: std.mem.Allocator, owner: ?HWND, text: []const u8) !void {
+    /// that cannot be had no longer wipes what the clipboard held. `native`
+    /// receives the failing call's error.
+    fn writeClipboardTextWith(
+        ops: clipboard_write.Ops,
+        alloc: std.mem.Allocator,
+        owner: ?HWND,
+        text: []const u8,
+        native: *windows.Win32Error,
+    ) !void {
         const text_w = try clipboardTextUtf16(alloc, text);
         defer alloc.free(text_w);
-        try clipboard_write.write(ops, owner, &.{clipboard_write.unicodeText(text_w)});
+        try clipboard_write.writeCapturing(ops, owner, &.{clipboard_write.unicodeText(text_w)}, native);
     }
 
     /// Write both CF_HTML (styled fragment) and CF_UNICODETEXT
@@ -5008,8 +5017,9 @@ pub const Surface = struct {
     pub fn writeClipboardHtml(self: *const Surface, html: []const u8, plain: ?[]const u8) !void {
         const cf_html = win32_ole.htmlFormat();
         if (cf_html == 0) return lastError();
-        writeClipboardHtmlWith(.{}, self.app.core_app.alloc, self.hwnd, cf_html, html, plain) catch |err| switch (err) {
-            error.GlobalMemoryUnavailable, error.ClipboardUnavailable => return lastError(),
+        var native: windows.Win32Error = .SUCCESS;
+        writeClipboardHtmlWith(.{}, self.app.core_app.alloc, self.hwnd, cf_html, html, plain, &native) catch |err| switch (err) {
+            error.GlobalMemoryUnavailable, error.ClipboardUnavailable => return windows.unexpectedError(native),
             else => |other| return other,
         };
     }
@@ -5027,6 +5037,7 @@ pub const Surface = struct {
         cf_html: UINT,
         html: []const u8,
         plain: ?[]const u8,
+        native: *windows.Win32Error,
     ) !void {
         const wrapped = try win32_clipboard_html.wrapFragment(alloc, html);
         defer alloc.free(wrapped);
@@ -5049,10 +5060,10 @@ pub const Surface = struct {
         const plain_w = try clipboardTextUtf16(alloc, plain_src);
         defer alloc.free(plain_w);
 
-        try clipboard_write.write(ops, owner, &.{
+        try clipboard_write.writeCapturing(ops, owner, &.{
             .{ .id = cf_html, .data = wrapped, .nul_bytes = 1 },
             clipboard_write.unicodeText(plain_w),
-        });
+        }, native);
     }
 
     /// Release the surface's native GL resources. Also called when OpenGL
@@ -5111,12 +5122,16 @@ pub const Surface = struct {
 test "win32 a terminal text copy prepares its data before it empties the clipboard" {
     const Fake = clipboard_write.Fake;
     const alloc = std.testing.allocator;
+    var native: windows.Win32Error = .SUCCESS;
 
     // Memory that cannot be had or locked: the clipboard is never opened, let
     // alone emptied, and what was allocated is freed.
     for ([_]Fake.Fail{ .alloc, .lock }) |how| {
         Fake.reset(how, 0);
-        try std.testing.expectError(error.GlobalMemoryUnavailable, Surface.writeClipboardTextWith(Fake.ops, alloc, null, "a\nb"));
+        try std.testing.expectError(error.GlobalMemoryUnavailable, Surface.writeClipboardTextWith(Fake.ops, alloc, null, "a\nb", &native));
+        // The failing call's own code: the free after a failed lock has
+        // already overwritten what the thread would report.
+        try std.testing.expectEqual(Fake.failureCode(how), native);
         try std.testing.expect(!Fake.did(.open) and !Fake.did(.empty) and !Fake.did(.set_data) and !Fake.did(.close));
         try std.testing.expectEqual(@as(usize, 0), Fake.leaked());
         try std.testing.expectEqual(@as(usize, 0), Fake.taken());
@@ -5126,7 +5141,9 @@ test "win32 a terminal text copy prepares its data before it empties the clipboa
     // freed, and the clipboard closed only once it was opened.
     for ([_]Fake.Fail{ .open, .empty, .set_data }) |how| {
         Fake.reset(how, 0);
-        try std.testing.expectError(error.ClipboardUnavailable, Surface.writeClipboardTextWith(Fake.ops, alloc, null, "a\nb"));
+        try std.testing.expectError(error.ClipboardUnavailable, Surface.writeClipboardTextWith(Fake.ops, alloc, null, "a\nb", &native));
+        try std.testing.expectEqual(Fake.failureCode(how), native);
+        try std.testing.expect(Fake.lastErrorNow() != native);
         try std.testing.expectEqual(how != .open, Fake.did(.close));
         try std.testing.expectEqual(how == .set_data, Fake.did(.set_data));
         try std.testing.expectEqual(@as(usize, 0), Fake.leaked());
@@ -5138,7 +5155,7 @@ test "win32 a terminal text copy prepares its data before it empties the clipboa
     // with CRLF line endings, and the clipboard keeps the memory.
     const owner: HWND = @ptrFromInt(0x2000);
     Fake.reset(.none, 0);
-    try Surface.writeClipboardTextWith(Fake.ops, alloc, owner, "a\nb");
+    try Surface.writeClipboardTextWith(Fake.ops, alloc, owner, "a\nb", &native);
     try std.testing.expectEqual(@as(?HWND, owner), Fake.openedFor());
     try std.testing.expectEqualSlices(Fake.Step, &.{ .alloc, .lock, .unlock, .open, .empty, .set_data, .close }, Fake.recorded());
     try std.testing.expectEqual(@as(usize, 1), Fake.taken());
@@ -5151,6 +5168,7 @@ test "win32 a terminal text copy prepares its data before it empties the clipboa
 test "win32 a terminal html copy prepares both formats before it empties the clipboard" {
     const Fake = clipboard_write.Fake;
     const alloc = std.testing.allocator;
+    var native: windows.Win32Error = .SUCCESS;
     const html = "<b>a</b>\nb";
     const cf_html: UINT = 0xC0A0;
 
@@ -5159,7 +5177,7 @@ test "win32 a terminal html copy prepares both formats before it empties the cli
     for ([_]Fake.Fail{ .alloc, .lock }) |how| {
         for (0..2) |nth| {
             Fake.reset(how, nth);
-            try std.testing.expectError(error.GlobalMemoryUnavailable, Surface.writeClipboardHtmlWith(Fake.ops, alloc, null, cf_html, html, null));
+            try std.testing.expectError(error.GlobalMemoryUnavailable, Surface.writeClipboardHtmlWith(Fake.ops, alloc, null, cf_html, html, null, &native));
             try std.testing.expect(!Fake.did(.open) and !Fake.did(.empty) and !Fake.did(.set_data) and !Fake.did(.close));
             try std.testing.expectEqual(@as(usize, 0), Fake.leaked());
             try std.testing.expectEqual(@as(usize, 0), Fake.taken());
@@ -5170,7 +5188,7 @@ test "win32 a terminal html copy prepares both formats before it empties the cli
     // freed, and nothing was taken.
     for ([_]Fake.Fail{ .open, .empty, .set_data }) |how| {
         Fake.reset(how, 0);
-        try std.testing.expectError(error.ClipboardUnavailable, Surface.writeClipboardHtmlWith(Fake.ops, alloc, null, cf_html, html, null));
+        try std.testing.expectError(error.ClipboardUnavailable, Surface.writeClipboardHtmlWith(Fake.ops, alloc, null, cf_html, html, null, &native));
         try std.testing.expectEqual(how != .open, Fake.did(.close));
         try std.testing.expectEqual(@as(usize, 0), Fake.leaked());
         try std.testing.expectEqual(@as(usize, 0), Fake.taken());
@@ -5182,7 +5200,8 @@ test "win32 a terminal html copy prepares both formats before it empties the cli
     // order avoids that. The call fails, and the block the clipboard did not
     // take is freed.
     Fake.reset(.set_data, 1);
-    try std.testing.expectError(error.ClipboardUnavailable, Surface.writeClipboardHtmlWith(Fake.ops, alloc, null, cf_html, html, null));
+    try std.testing.expectError(error.ClipboardUnavailable, Surface.writeClipboardHtmlWith(Fake.ops, alloc, null, cf_html, html, null, &native));
+    try std.testing.expectEqual(Fake.failureCode(.set_data), native);
     try std.testing.expect(Fake.did(.empty) and Fake.did(.close));
     try std.testing.expectEqual(@as(usize, 0), Fake.leaked());
     try std.testing.expectEqual(@as(usize, 1), Fake.taken());
@@ -5201,7 +5220,7 @@ test "win32 a terminal html copy prepares both formats before it empties the cli
     };
     for (cases) |case| {
         Fake.reset(.none, 0);
-        try Surface.writeClipboardHtmlWith(Fake.ops, alloc, owner, cf_html, html, case.plain);
+        try Surface.writeClipboardHtmlWith(Fake.ops, alloc, owner, cf_html, html, case.plain, &native);
         try std.testing.expectEqual(@as(?HWND, owner), Fake.openedFor());
         try std.testing.expectEqualSlices(Fake.Step, &.{
             .alloc,    .lock,  .unlock,
