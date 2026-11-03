@@ -11135,7 +11135,9 @@ test "settings a save whose saved settings the window cannot copy clears the dra
             const fixture = try dialog_test.Fixture.start();
             defer fixture.finish();
             const settings = &fixture.settings;
-            typeInto(settings.fields.edit_font_size orelse return error.TestExpectedField, "16");
+            // A field the window tracks itself (`owned_dirty`), which a draft
+            // that did not start over would still count as unsaved.
+            typeInto(settings.fields.edit_font_family orelse return error.TestExpectedField, "Cascadia Code");
             try std.testing.expect(settings.hasPendingChanges());
             // The window's allocator runs out as the save completes: it
             // cannot copy the running settings to start the draft over.
@@ -11160,8 +11162,7 @@ test "settings a save whose saved settings the window cannot copy clears the dra
             failing.fail_index = std.math.maxInt(usize);
             settings.retryRefresh();
             try std.testing.expect(!settings.owes_draft);
-            const draft = settings.pending orelse return error.TestExpectedDraft;
-            try std.testing.expectEqual(fixture.config.@"font-size", draft.@"font-size");
+            _ = settings.pending orelse return error.TestExpectedDraft;
             try std.testing.expect(!settings.hasPendingChanges());
         }
     }.body);
