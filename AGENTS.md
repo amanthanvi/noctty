@@ -292,7 +292,8 @@ that govern each symbol you change, or that none does.
   a structure: `Surface.init` ordering, `activateSurface`, showing and hiding
   pane surfaces (occlusion, overlapping WGL children), `windowDestroyed`,
   close and close-confirm flows, quit teardown (`destroyAllWindows`,
-  `App.destroyPaneOf`), focus after a close, shell reducer effects,
+  `App.destroyPaneOf`, both in `win32/app.zig`; host and surface lookups in
+  `win32/registry.zig`), focus after a close, shell reducer effects,
   local and structural undo/redo (`win32_undo.zig`,
   `win32_structural_history.zig`, `undo-timeout`, split undo and redo through
   the shell model: `Host.applyCommittedSplitHistory`).
@@ -355,6 +356,7 @@ that govern each symbol you change, or that none does.
 - [clipboard.md](docs/agents/log/clipboard.md): clipboard reads and writes,
   CF_HTML (`win32_clipboard_html.zig`), open retries, what a copy puts on the
   clipboard (formats and owner, as Remote Desktop's redirection sees them),
+  the Win32 error a failed copy reports (`clipboard_write.writeCapturing`),
   the empty bracketed paste and the paste of copied files
   (`Surface.completeClipboardPasteWithoutText`, `selectClipboardContents`,
   `win32_ole.extractHdrop`), OSC 52 prompts and
