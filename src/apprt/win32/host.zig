@@ -271,7 +271,6 @@ const ToastTestWindow = win32.ToastTestWindow;
 const buttonTooltipAction = win32.buttonTooltipAction;
 const cli_args = @import("../../cli/args.zig");
 const detachHostReference = win32.detachHostReference;
-const expectedToastRemoval = win32.expectedToastRemoval;
 const highContrastThemeFromSysColors = win32.highContrastThemeFromSysColors;
 const patchOrAppendEdits = win32.patchOrAppendEdits;
 const rgb = win32.rgb;
@@ -1174,7 +1173,7 @@ pub const Host = struct {
         }
         // Its panes live on in undo history, where a click on their toasts
         // has nothing to show, and an undo does not bring the toasts back.
-        self.app.forgetTabToasts(&removed);
+        self.app.notifications.panesChanged();
 
         self.active_tab = activeTabAfterRemoval(self.active_tab, index, self.tabs.items.len);
         self.notifyActiveTabUiaSelectionChanged(previous_tab_id);
@@ -1302,7 +1301,7 @@ pub const Host = struct {
         };
         if (shell_prepared) |*prepared| self.app.applyShellEffects(prepared.effects(), .{});
         // As the close it redoes (`detachTabForUndo`).
-        if (value.tab) |*tab| self.app.forgetTabToasts(tab);
+        self.app.notifications.panesChanged();
         self.notifyActiveTabUiaSelectionChanged(previous_tab_id);
         self.notifyTabListUiaChanged();
         return true;
@@ -1342,7 +1341,7 @@ pub const Host = struct {
         }
         value.detached = true;
         // The pane waits in redo history now, like a closed tab's panes.
-        self.app.forgetSurfaceToast(value.created_surface);
+        self.app.notifications.panesChanged();
         // The neighbours take the removed pane's space now: activating a pane
         // that is already focused and shown takes a fast path with no layout.
         self.layout() catch |err| log.warn("split-create undo layout failed err={}", .{err});
@@ -10741,47 +10740,15 @@ test "win32 closing a pane removes its toast" {
         .direction = .right,
     };
     try std.testing.expect(try w.host.undoSplitCreateEntry(&split_create));
-    w.app.flushToastRemovals();
-    var q_buf: [64]u8 = undefined;
-    const q_removal = try expectedToastRemoval(&q_buf, 0x2003);
-    try w.recorder.expectRemovals(&.{q_removal});
+    w.app.notifications.flush();
+    try w.recorder.expectRemoved(&.{0x2003});
 
+    // The other tab's pane keeps its toast.
     try w.osc(&w.p, "", "x");
     try w.osc(&w.front, "", "x");
     w.app.windowDestroyed(&w.p);
-    w.app.flushToastRemovals();
-    var buf: [64]u8 = undefined;
-    try w.recorder.expectRemovals(&.{ q_removal, try expectedToastRemoval(&buf, 0x2002) });
-    try std.testing.expectEqual(@as(?u64, 0x1001), w.front.toast_outstanding);
-}
-
-test "win32 a toast shown while its tab is undo-closed is removed" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-    var w: ToastTestWindow = .{};
-    try w.init(false);
-    defer w.deinit();
-
-    // The show pumps the close of the pane's tab, which keeps the pane
-    // alive in undo history, where its toast must not stay.
-    const Close = struct {
-        w: *ToastTestWindow,
-        entry: ?Host.StructuralUndoEntry = null,
-        fn run(ctx: *anyopaque) anyerror!void {
-            const self: *@This() = @ptrCast(@alignCast(ctx));
-            self.entry = self.w.host.detachTabForUndo(1) orelse return error.TestExpectedTab;
-        }
-    };
-    var close: Close = .{ .w = &w };
-    defer if (close.entry) |*entry| {
-        entry.dispose(&w.host, .host_destroy) catch {}; // Best-effort test teardown.
-    };
-    w.recorder.during_show = .{ .ctx = &close, .run = Close.run };
-    try w.osc(&w.p, "", "newer");
-    try std.testing.expect(Host.findTabForSurface(&w.p) == null);
-    try std.testing.expectEqual(@as(?u64, null), w.p.toast_outstanding);
-    w.app.flushToastRemovals();
-    var buf: [64]u8 = undefined;
-    try w.recorder.expectRemovals(&.{try expectedToastRemoval(&buf, 0x2002)});
+    w.app.notifications.flush();
+    try w.recorder.expectRemoved(&.{ 0x2003, 0x2002 });
 }
 
 test "win32 palette theme preview can restore original config clone" {

@@ -402,12 +402,14 @@ that govern each symbol you change, or that none does.
   (capture, restore, owner lock and quarantine: `win32/session.zig`) and
   state-file schemas, IPC and single instance (`win32/ipc_server.zig`), AUMID
   and portable identity, the jump list, toasts and desktop notifications
-  (their tab attribution, tags and history removal, `App.showToast`, the COM
-  activator in `win32_toast_activator.zig`), an installer's Restart Manager
-  close and a session end (`App.onQueryEndSession`, `App.onEndSession`,
-  `registerInstallerRestart`, the lifecycle window), the bell, taskbar
-  progress and icon, crash minidumps and Sentry, the COM apartment,
-  default-terminal handoff, the CLI and the `noctty.com` wrapper.
+  (`win32/notifications.zig`: their tab attribution, tags and history
+  removal, `Notifications.show`, `seen`, `panesChanged` and `flush`, what a
+  click presents, `Notifications.click`, the App's `notificationPanes`
+  adapter; the COM activator in `win32_toast_activator.zig`), an installer's
+  Restart Manager close and a session end (`App.onQueryEndSession`,
+  `App.onEndSession`, `registerInstallerRestart`, the lifecycle window), the
+  bell, taskbar progress and icon, crash minidumps and Sentry, the COM
+  apartment, default-terminal handoff, the CLI and the `noctty.com` wrapper.
 - [build-release-ci.md](docs/agents/log/build-release-ci.md): `build.zig`
   (including the `bench:*` steps' `addBenchCoreImport`)
   and resources, the Windows target floor (`src/build/Config.zig`,

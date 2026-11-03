@@ -195,7 +195,6 @@ const WindowStartTestApp = win32.WindowStartTestApp;
 const builtin = @import("builtin");
 const createTestChromeChild = win32.createTestChromeChild;
 const default_title = win32.default_title;
-const expectedToastRemoval = win32.expectedToastRemoval;
 const host_class_name = win32.host_class_name;
 const palette_list_class_name = win32.palette_list_class_name;
 const prompt_button_class = child_window.prompt_button_class;
@@ -465,11 +464,6 @@ pub const Surface = struct {
     /// A notification the rate limit held back is waiting; see
     /// `App.flushProgramStatusNotifications`.
     program_status_notify_pending: bool = false,
-    /// The tag (this pane's core surface id) of a toast this pane showed
-    /// that may still be in Action Center; `null` once its removal is
-    /// queued. Kept as the id itself because `windowDestroyed` runs after
-    /// the core is gone. See `App.queueToastRemoval`.
-    toast_outstanding: ?u64 = null,
     inspector_visible: bool = false,
     paint_pending: bool = false,
     live_resize_repaint_deferred: bool = false,
@@ -5506,65 +5500,6 @@ test "win32 taskbar follows the program status root record once a program report
     try std.testing.expectEqual(@as(?u8, 30), surface.effectiveTaskbarProgress().?.progress);
 }
 
-test "win32 untitled OSC 9 toast is titled by its tab" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-    var w: ToastTestWindow = .{};
-    try w.init(false);
-    defer w.deinit();
-
-    try w.osc(&w.p, "", "tests passed");
-    try w.recorder.expect(.title, "cargo build");
-
-    // A title is shown without its bidi overrides and invisible
-    // characters, with controls as spaces, and cut to 64 bytes on a
-    // code point.
-    w.p.title = "a\u{202E}<b>&\u{200B}\x07c";
-    try w.osc(&w.p, "", "x");
-    try w.recorder.expect(.title, "a<b>& c");
-    try w.recorder.expect(.attribution, "Tab 2: a<b>& c");
-
-    // U+FFFE and U+FFFF, which XML 1.0 cannot carry, so Windows would
-    // refuse the toast.
-    w.p.title = "x\u{FFFE}y\u{FFFF}z";
-    try w.osc(&w.p, "", "x");
-    try w.recorder.expect(.title, "x y z");
-    try w.recorder.expect(.attribution, "Tab 2: x y z");
-
-    w.p.title = "安" ** 30;
-    try w.osc(&w.p, "", "x");
-    // Cut on a code point: 21 three-byte characters fit in 64 bytes.
-    try w.recorder.expect(.title, "安" ** 21 ++ "\u{2026}");
-    try w.recorder.expect(.attribution, "Tab 2: " ++ "安" ** 21 ++ "\u{2026}");
-
-    // A tab with no title at all.
-    w.p.title = null;
-    try w.osc(&w.p, "", "x");
-    try w.recorder.expect(.title, "noctty");
-    try w.recorder.expect(.attribution, "Tab 2: noctty");
-
-    // The tab is known by its focused pane's title, also when another of
-    // its panes sends the toast. That pane is still the one a click
-    // focuses.
-    w.p.title = "cargo build";
-    w.q.title = "vim";
-    const inserted = try SplitTreeSurface.init(std.testing.allocator, &w.q);
-    defer {
-        var cleanup = inserted;
-        cleanup.deinit();
-    }
-    const tab = &w.host.tabs.items[1];
-    var prev_tree = tab.tree;
-    tab.tree = try prev_tree.split(std.testing.allocator, tab.focused, .right, 0.5, &inserted);
-    prev_tree.deinit();
-    // The split moved `p` behind the new split node and `q`.
-    tab.focused = @enumFromInt(2);
-    try std.testing.expectEqual(@as(?*Surface, &w.p), tab.focusedSurface());
-    try w.osc(&w.q, "", "x");
-    try w.recorder.expect(.title, "cargo build");
-    try w.recorder.expect(.attribution, "Tab 2: cargo build");
-    try w.recorder.expectLaunchFor(&w.q, 2);
-}
-
 test "win32 seeing a tab removes its panes' toasts" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
     var w: ToastTestWindow = .{};
@@ -5585,27 +5520,20 @@ test "win32 seeing a tab removes its panes' toasts" {
     // The window is in front with the first tab active: the second tab is
     // not seen yet.
     w.app.acknowledgeTabWithForeground(&w.host, 1, hwnd);
-    try std.testing.expectEqual(@as(usize, 0), w.app.toast_removals.items.len);
+    w.app.notifications.flush();
+    try w.recorder.expectRemoved(&.{});
 
     w.host.active_tab = 1;
     // A window that is not in front is not seen either.
     w.app.acknowledgeTabWithForeground(&w.host, 1, null);
-    try std.testing.expectEqual(@as(usize, 0), w.app.toast_removals.items.len);
+    w.app.notifications.flush();
+    try w.recorder.expectRemoved(&.{});
 
+    // In the order the toasts were shown. The other tab's pane and the
+    // other window's keep theirs.
     w.app.acknowledgeTabWithForeground(&w.host, 1, hwnd);
-    w.app.flushToastRemovals();
-    var p_buf: [64]u8 = undefined;
-    var q_buf: [64]u8 = undefined;
-    // In the split tree's order.
-    try w.recorder.expectRemovals(&.{
-        try expectedToastRemoval(&q_buf, 0x2003),
-        try expectedToastRemoval(&p_buf, 0x2002),
-    });
-    try std.testing.expectEqual(@as(?u64, null), w.p.toast_outstanding);
-    try std.testing.expectEqual(@as(?u64, null), w.q.toast_outstanding);
-    // The other tab's pane and the other window's keep theirs.
-    try std.testing.expectEqual(@as(?u64, 0x1001), w.front.toast_outstanding);
-    try std.testing.expectEqual(@as(?u64, 0x3003), w.other.toast_outstanding);
+    w.app.notifications.flush();
+    try w.recorder.expectRemoved(&.{ 0x2002, 0x2003 });
 }
 
 test "win32 rollbackFailedSurfaceAttach removes failed tab and restores active index" {

@@ -11,7 +11,6 @@ const HWND = win32.HWND;
 const RECT = win32.RECT;
 const sys = @import("sys.zig");
 const win32_structural_history = @import("../win32_structural_history.zig");
-const win32_toast_activation = @import("../win32_toast_activation.zig");
 
 /// App owns this registry; only the UI thread reads or mutates it, including
 /// `message_hwnd`. App still orchestrates native creation and destruction.
@@ -241,36 +240,6 @@ pub const Registry = struct {
             }
         }
         return surfaces;
-    }
-
-    pub fn resolveToastActivationSurface(
-        self: *Registry,
-        activation: win32_toast_activation.ActivationTarget,
-    ) ?*Surface {
-        // Ids are this process's only when the toast is: a click on another
-        // noctty's toast (COM hands it to whichever process registered the
-        // activator, or to a new one after that process ended) must not
-        // pick a window or tab that happens to share a number here.
-        if (activation.pid != sys.GetCurrentProcessId()) return self.primarySurface();
-
-        if (activation.surface_id) |surface_id| {
-            if (self.findSurfaceById(surface_id)) |surface| {
-                return surface;
-            }
-        }
-
-        if (activation.window_id) |window_id| {
-            if (self.findHostById(window_id)) |host| {
-                if (activation.tab_id) |tab_id| {
-                    if (host.focusedSurfaceForTab(tab_id)) |surface| {
-                        return surface;
-                    }
-                }
-                if (host.activeSurface()) |surface| return surface;
-            }
-        }
-
-        return self.primarySurface();
     }
 
     pub fn removeWindow(self: *Registry, surface: *Surface) void {
@@ -536,20 +505,6 @@ test "Registry structural history choices keep sequence ties and empty hosts rea
     try std.testing.expectEqual(&fixture.first, registry.hostWithNewestStructuralRedo().?);
     fixture.empty.structural_redo_entries.items[0].sequence_id = 4;
     try std.testing.expectEqual(&fixture.empty, registry.hostWithNewestStructuralRedo().?);
-}
-
-test "Registry toast lookup keeps exact tab host and foreign process fallback precedence" {
-    var fixture: LookupFixture = .{};
-    try fixture.init();
-    defer fixture.deinit();
-    const registry = &fixture.app.registry;
-    const pid = sys.GetCurrentProcessId();
-    try std.testing.expectEqual(&fixture.split, registry.resolveToastActivationSurface(.{ .pid = pid, .surface_id = 202, .window_id = 1, .tab_id = 12 }).?);
-    try std.testing.expectEqual(&fixture.b, registry.resolveToastActivationSurface(.{ .pid = pid, .surface_id = 999, .window_id = 1, .tab_id = 12 }).?);
-    try std.testing.expectEqual(&fixture.c, registry.resolveToastActivationSurface(.{ .pid = pid, .window_id = 2, .tab_id = 99 }).?);
-    try std.testing.expectEqual(&fixture.a, registry.resolveToastActivationSurface(.{ .pid = pid, .window_id = 99 }).?);
-    try std.testing.expectEqual(&fixture.a, registry.resolveToastActivationSurface(.{ .pid = pid +% 4, .surface_id = 202 }).?);
-    try std.testing.expectEqual(&fixture.a, registry.resolveToastActivationSurface(.{ .surface_id = 202 }).?);
 }
 
 test "Registry shown target and window position lookups use current native visibility" {

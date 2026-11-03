@@ -80,6 +80,7 @@ const win32_compositor = @import("win32_compositor.zig");
 const win32_compositor_native = @import("win32_compositor_native.zig");
 const win32_shell = @import("win32_shell.zig");
 const ipc_server = @import("win32/ipc_server.zig");
+const notifications = @import("win32/notifications.zig");
 pub const applyAutomationWorkingDirectory = ipc_server.applyAutomationWorkingDirectory;
 pub const applyNewWindowArguments = ipc_server.applyNewWindowArguments;
 pub const automationTextAllowed = ipc_server.automationTextAllowed;
@@ -544,6 +545,7 @@ test {
     _ = session_module;
     _ = quick_terminal_host;
     _ = ipc_server;
+    _ = notifications;
     _ = @import("win32/config_problems.zig");
     _ = @import("win32/render_trace.zig");
     _ = @import("win32/gl_startup.zig");
@@ -3542,119 +3544,6 @@ pub fn toastActivatorSink(delivery: *AppDelivery) win32_toast_activator.Sink {
     };
 }
 
-/// Dispatch this thread's messages until `capture` has its call or
-/// `timeout_ms` has passed, and say whether the call came. COM hands an
-/// incoming call to this STA as a message, so the dispatch is what runs
-/// `Activate`. The deadline is the wait's own, with no timer that could fail
-/// to arm, and a quit met on the way is put back for the main loop.
-pub fn pumpUntilColdToastActivation(capture: *const ColdToastCapture, timeout_ms: u32) bool {
-    const deadline = sys.GetTickCount64() + timeout_ms;
-    var msg: MSG = undefined;
-    while (!capture.received) {
-        while (sys.PeekMessageW(&msg, null, 0, 0, c.PM_REMOVE) != 0) {
-            if (msg.message == c.WM_QUIT) {
-                sys.PostQuitMessage(@bitCast(@as(u32, @truncate(msg.wParam))));
-                return capture.received;
-            }
-            _ = sys.TranslateMessage(&msg);
-            _ = sys.DispatchMessageW(&msg);
-            if (capture.received) return true;
-        }
-        const now = sys.GetTickCount64();
-        if (now >= deadline) break;
-        const remaining: DWORD = @intCast(deadline - now);
-        if (sys.MsgWaitForMultipleObjectsEx(0, null, remaining, c.QS_ALLINPUT, c.MWMO_INPUTAVAILABLE) == c.WAIT_FAILED) break;
-    }
-    return capture.received;
-}
-
-const ColdToastWaitTest = struct {
-    const Timer = struct {
-        var capture: ColdToastCapture = .{};
-
-        fn fire(_: ?HWND, _: UINT, id: UINT_PTR, _: DWORD) callconv(.winapi) void {
-            _ = sys.KillTimer(null, id);
-            ColdToastCapture.deliver(&capture, "wgh://activate?surface=3&pid=8&action=focus");
-        }
-    };
-
-    fn body() !void {
-        // Nothing comes: the wait returns at its deadline, not later.
-        var none: ColdToastCapture = .{};
-        const start = sys.GetTickCount64();
-        try std.testing.expect(!pumpUntilColdToastActivation(&none, 60));
-        const waited = sys.GetTickCount64() - start;
-        try std.testing.expect(waited >= 40);
-        try std.testing.expect(waited < 2000);
-
-        // A call dispatched by the pump (here a timer procedure, as COM's call
-        // is a dispatched message) ends it well before the deadline.
-        Timer.capture = .{};
-        try std.testing.expect(sys.SetTimer(null, 0, 10, @ptrCast(&Timer.fire)) != 0);
-        const call_start = sys.GetTickCount64();
-        try std.testing.expect(pumpUntilColdToastActivation(&Timer.capture, 10_000));
-        try std.testing.expect(sys.GetTickCount64() - call_start < 5000);
-        try std.testing.expect(Timer.capture.target().eql(.{ .surface_id = 3, .pid = 8, .action = .focus }));
-
-        // A quit ends the wait and stays queued for the main loop.
-        var quit_capture: ColdToastCapture = .{};
-        sys.PostQuitMessage(7);
-        try std.testing.expect(!pumpUntilColdToastActivation(&quit_capture, 10_000));
-        var msg: MSG = undefined;
-        try std.testing.expect(sys.PeekMessageW(&msg, null, c.WM_QUIT, c.WM_QUIT, c.PM_REMOVE) != 0);
-        try std.testing.expectEqual(@as(WPARAM, 7), msg.wParam);
-    }
-};
-
-test "the cold toast activation wait ends on its call or at its deadline" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-    // A fresh thread, so the pump dispatches nothing another test queued.
-    try runOnHiddenDesktop(ColdToastWaitTest.body);
-}
-
-/// Receives the first `Activate` of a cold start, before the App channel
-/// exists. `Activate` runs on this thread, inside the wait's message pump.
-pub const ColdToastCapture = struct {
-    received: bool = false,
-    activation: win32_toast_activation.ActivationTarget = .{},
-
-    pub fn sink(self: *ColdToastCapture) win32_toast_activator.Sink {
-        return .{ .ctx = self, .deliver = deliver };
-    }
-
-    fn deliver(ctx: *anyopaque, launch: []const u8) void {
-        const self: *ColdToastCapture = @ptrCast(@alignCast(ctx));
-        if (self.received) return;
-        self.received = true;
-        self.activation = win32_toast_activation.parseLaunchArg(launch) catch .{};
-    }
-
-    pub fn target(self: *const ColdToastCapture) win32_toast_activation.ActivationTarget {
-        return self.activation;
-    }
-};
-
-test "a cold toast activation start keeps the first call and reads nothing else as a target" {
-    const callback = win32_toast_activator.testCallback();
-    const aumid = std.unicode.utf8ToUtf16LeStringLiteral("io.github.amanthanvi.noctty");
-
-    var capture: ColdToastCapture = .{};
-    win32_toast_activator.bind(capture.sink());
-    defer win32_toast_activator.bind(null);
-    _ = callback.vtbl.Activate(callback, aumid, std.unicode.utf8ToUtf16LeStringLiteral("wgh://activate?surface=3&pid=8&action=focus"), null, 0);
-    _ = callback.vtbl.Activate(callback, aumid, std.unicode.utf8ToUtf16LeStringLiteral("wgh://activate?surface=4&pid=8"), null, 0);
-    try std.testing.expect(capture.received);
-    try std.testing.expect(capture.target().eql(.{ .surface_id = 3, .pid = 8, .action = .focus }));
-
-    // A call that carried nothing readable still ends the wait, and its
-    // target is the empty one, which only presents the primary window.
-    var unreadable: ColdToastCapture = .{};
-    win32_toast_activator.bind(unreadable.sink());
-    _ = callback.vtbl.Activate(callback, aumid, std.unicode.utf8ToUtf16LeStringLiteral("--command=evil.exe"), null, 0);
-    try std.testing.expect(unreadable.received);
-    try std.testing.expect(unreadable.target().eql(.{}));
-}
-
 pub fn retainToastDelivery(ctx: *anyopaque) void {
     const delivery: *AppDelivery = @ptrCast(@alignCast(ctx));
     delivery.retain();
@@ -6057,76 +5946,7 @@ pub fn settingsNotifySuccessThunk(ctx: *anyopaque, title: []const u8, body: []co
     defer alloc.free(title_z);
     const body_z = alloc.dupeZ(u8, body) catch return;
     defer alloc.free(body_z);
-    app.showDesktopNotification(.app, title_z, body_z) catch |err| {
-        std.log.warn("settings: desktop notification failed err={}", .{err});
-    };
-}
-
-pub const ToastRequest = win32_toast_winrt.ToastRequest;
-
-/// Where `App.showToast` sends a toast: WinRT in the product
-/// (`ToastSink.winrt`), a recorder in tests, so no test can reach Action
-/// Center.
-pub const ToastSink = struct {
-    ctx: *anyopaque,
-    show: *const fn (ctx: *anyopaque, request: ToastRequest) anyerror!void,
-    /// Take the toast tagged `tag` in `group` out of Action Center.
-    remove_tag: *const fn (ctx: *anyopaque, tag: []const u8, group: []const u8) anyerror!void,
-    /// Take every toast in `group` out of Action Center.
-    remove_group: *const fn (ctx: *anyopaque, group: []const u8) anyerror!void,
-
-    pub fn winrt(toast: *win32_toast_winrt.WinrtToast) ToastSink {
-        return .{ .ctx = toast, .show = showWinrt, .remove_tag = removeTagWinrt, .remove_group = removeGroupWinrt };
-    }
-
-    fn showWinrt(ctx: *anyopaque, request: ToastRequest) anyerror!void {
-        const toast: *win32_toast_winrt.WinrtToast = @ptrCast(@alignCast(ctx));
-        try toast.show(request, .info);
-    }
-
-    fn removeTagWinrt(ctx: *anyopaque, tag: []const u8, group: []const u8) anyerror!void {
-        const toast: *win32_toast_winrt.WinrtToast = @ptrCast(@alignCast(ctx));
-        try toast.removeGroupedTag(tag, group);
-    }
-
-    fn removeGroupWinrt(ctx: *anyopaque, group: []const u8) anyerror!void {
-        const toast: *win32_toast_winrt.WinrtToast = @ptrCast(@alignCast(ctx));
-        try toast.removeGroup(group);
-    }
-};
-
-/// A pane's toast tag: its core surface id, 16 hex digits. One tag per pane,
-/// so a newer toast from the pane replaces its older one in Action Center.
-pub fn toastTag(buf: *[16]u8, surface_id: u64) []const u8 {
-    return std.fmt.bufPrint(buf, "{x:0>16}", .{surface_id}) catch unreachable;
-}
-
-/// This process's toast group, `noctty-<pid>`: other noctty processes share
-/// the AUMID, so everything this process removes at once is named by it.
-pub fn toastGroup(buf: *[toast_group_max]u8) []const u8 {
-    return std.fmt.bufPrint(buf, "noctty-{d}", .{sys.GetCurrentProcessId()}) catch unreachable;
-}
-
-pub const toast_group_max = "noctty-".len + std.fmt.count("{d}", .{std.math.maxInt(DWORD)});
-
-pub fn buildToastLaunchForSurface(
-    alloc: Allocator,
-    surface: *Surface,
-) Allocator.Error![]u8 {
-    const tab_id = if (surface.host) |host| blk: {
-        for (host.tabs.items) |*tab| {
-            if (tab.findHandle(surface) != null) break :blk tab.id;
-        }
-        break :blk null;
-    } else null;
-
-    return try win32_toast_activation.buildLaunchArg(alloc, .{
-        .surface_id = surface.core().id,
-        .tab_id = tab_id,
-        .window_id = surface.host_id,
-        .pid = sys.GetCurrentProcessId(),
-        .action = .focus,
-    });
+    app.notifications.show(.app, title_z, body_z);
 }
 
 /// The active tab's index once tab `removed` is gone and `remaining` tabs
@@ -9798,7 +9618,7 @@ pub fn appMessageWindowProc(hwnd: HWND, message: UINT, wparam: WPARAM, lparam: L
                 },
                 .toast => |activation| {
                     defer delivery.toast_pending.store(false, .release);
-                    app.receiveToastActivation(activation);
+                    if (app.notifications.click(.{ .target = activation }) == .needs_window) app.openWindowForToastClick();
                 },
                 .uia_disconnect => |pending| processDeferredUiaDisconnect(delivery, pending),
             }
@@ -9806,9 +9626,9 @@ pub fn appMessageWindowProc(hwnd: HWND, message: UINT, wparam: WPARAM, lparam: L
             return 0;
         },
         c.WM_WINHOSTTY_TOAST_REMOVALS => {
-            // Posted by `queueToastRemoval`. Only ids are queued, so a pane
+            // Posted by `Notifications`, which tracks only ids, so a pane
             // freed meanwhile is never touched.
-            app.flushToastRemovals();
+            app.notifications.flush();
             return 0;
         },
         c.WM_WINHOSTTY_TERMINAL_HANDOFF => {
@@ -10125,22 +9945,27 @@ const Pkg19NativeDeliveryTest = struct {
         _ = sys.SendMessageW(a, update.message, 0, update.lParam);
         try std.testing.expect(app_a.delivery.?.update_running.load(.acquire));
 
+        var panes_a: notifications.testing.FakePanes = .{};
+        var panes_b: notifications.testing.FakePanes = .{};
+        app_a.notifications = .init(std.testing.allocator, null, panes_a.panes());
+        app_b.notifications = .init(std.testing.allocator, null, panes_b.panes());
+        // No pid: another process's click, which looks only for the primary
+        // window.
         const activation: win32_toast_activation.ActivationTarget = .{ .window_id = 19, .tab_id = 7 };
         app_a.delivery.?.toast_pending.store(true, .release);
         try std.testing.expect(app_a.delivery.?.post(c.WM_WINHOSTTY_TOAST_ACTIVATION, .{ .toast = activation }));
         const toast = try queued(a, c.WM_WINHOSTTY_TOAST_ACTIVATION);
         _ = sys.SendMessageW(a, toast.message, 0, 0);
         _ = sys.SendMessageW(b, toast.message, 0, toast.lParam);
-        try std.testing.expect(app_a.pending_toast_activation == null);
-        try std.testing.expect(app_b.pending_toast_activation == null);
+        try panes_a.expectPresented(&.{});
+        try panes_b.expectPresented(&.{});
         try std.testing.expect(app_a.delivery.?.toast_pending.load(.acquire));
         _ = sys.SendMessageW(a, toast.message, 0, toast.lParam);
-        try std.testing.expect(activation.eql(app_a.pending_toast_activation.?));
+        try panes_a.expectPresented(&.{.primary});
         try std.testing.expect(!app_a.delivery.?.toast_pending.load(.acquire));
-        app_a.pending_toast_activation = null;
         app_a.delivery.?.toast_pending.store(true, .release);
         _ = sys.SendMessageW(a, toast.message, 0, toast.lParam);
-        try std.testing.expect(app_a.pending_toast_activation == null);
+        try panes_a.expectPresented(&.{.primary});
         try std.testing.expect(app_a.delivery.?.toast_pending.load(.acquire));
     }
 };
@@ -10182,6 +10007,8 @@ const ToastActivatorDeliveryTest = struct {
         defer session.deinit();
         try app.createMessageWindow();
         defer Pkg19NativeDeliveryTest.closeAppWindow(&app);
+        var panes: notifications.testing.FakePanes = .{};
+        app.notifications = .init(alloc, null, panes.panes());
         win32_toast_activator.bind(toastActivatorSink(app.delivery.?));
         defer win32_toast_activator.bind(null);
         const callback = win32_toast_activator.testCallback();
@@ -10191,20 +10018,20 @@ const ToastActivatorDeliveryTest = struct {
         defer alloc.free(launch);
         try std.testing.expectEqual(win32_uia.S_OK, callback.vtbl.Activate(callback, aumid, launch, null, 0));
         // Activate only posted: the App has not seen it yet.
-        try std.testing.expect(app.pending_toast_activation == null);
+        try panes.expectPresented(&.{});
         try dispatch(&app);
-        // With no surface the activation waits for one, exactly as a click
-        // through the popup's handler does.
-        try std.testing.expect(target.eql(app.pending_toast_activation.?));
+        // The click looks for its tab, its window and the primary window,
+        // exactly as a click through the popup's handler does.
+        const looked: []const notifications.Present = &.{ .{ .tab = .{ .window = 19, .tab = 7 } }, .{ .window = 19 }, .primary };
+        try panes.expectPresented(looked);
         try std.testing.expect(!app.delivery.?.toast_pending.load(.acquire));
 
         // What noctty cannot read posts nothing and changes nothing.
-        app.pending_toast_activation = null;
         const malformed = std.unicode.utf8ToUtf16LeStringLiteral("wgh://activate?surface=x");
         try std.testing.expectEqual(win32_uia.S_OK, callback.vtbl.Activate(callback, aumid, malformed, null, 0));
         try std.testing.expectEqual(win32_uia.S_OK, callback.vtbl.Activate(callback, aumid, null, null, 0));
         try std.testing.expectError(error.TestMissingDeliveryMessage, dispatch(&app));
-        try std.testing.expect(app.pending_toast_activation == null);
+        try panes.expectPresented(looked);
     }
 
     fn onceBody() !void {
@@ -10216,6 +10043,8 @@ const ToastActivatorDeliveryTest = struct {
         defer session.deinit();
         try app.createMessageWindow();
         defer Pkg19NativeDeliveryTest.closeAppWindow(&app);
+        var panes: notifications.testing.FakePanes = .{};
+        app.notifications = .init(alloc, null, panes.panes());
         win32_toast_activator.bind(toastActivatorSink(app.delivery.?));
         defer win32_toast_activator.bind(null);
         const callback = win32_toast_activator.testCallback();
@@ -10229,20 +10058,20 @@ const ToastActivatorDeliveryTest = struct {
         // The popup's own handler delivers the click first.
         winrtToastActivationCallback(app.delivery.?, launch);
         try dispatch(&app);
-        try std.testing.expect(target.eql(app.pending_toast_activation.?));
-        app.pending_toast_activation = null;
+        const looked: []const notifications.Present = &.{ .{ .pane = 41 }, .primary };
+        try panes.expectPresented(looked);
 
         // Then COM delivers the same click: it is dropped.
         try std.testing.expectEqual(win32_uia.S_OK, callback.vtbl.Activate(callback, aumid, launch_w, null, 0));
         try dispatch(&app);
-        try std.testing.expect(app.pending_toast_activation == null);
+        try panes.expectPresented(looked);
 
         // So is the same click forwarded by a cold start, which would
         // otherwise open a window here.
         const launch_z = try alloc.dupeZ(u8, launch);
         defer alloc.free(launch_z);
         try std.testing.expect(try app.performAction(.app, .new_window, .{ .arguments = &.{launch_z} }));
-        try std.testing.expect(app.pending_toast_activation == null);
+        try panes.expectPresented(looked);
         try std.testing.expectEqual(@as(usize, 0), app.registry.hosts.items.len);
 
         // Another toast is another click.
@@ -10251,7 +10080,7 @@ const ToastActivatorDeliveryTest = struct {
         defer alloc.free(other_w);
         try std.testing.expectEqual(win32_uia.S_OK, callback.vtbl.Activate(callback, aumid, other_w, null, 0));
         try dispatch(&app);
-        try std.testing.expect(other.eql(app.pending_toast_activation.?));
+        try panes.expectPresented(&.{ .{ .pane = 41 }, .primary, .{ .pane = 42 }, .primary });
     }
 
     fn windowBody() !void {
@@ -10263,6 +10092,8 @@ const ToastActivatorDeliveryTest = struct {
         defer session.deinit();
         try app.createMessageWindow();
         defer Pkg19NativeDeliveryTest.closeAppWindow(&app);
+        var panes: notifications.testing.FakePanes = .{};
+        app.notifications = .init(alloc, null, panes.panes());
         win32_toast_activator.bind(toastActivatorSink(app.delivery.?));
         defer win32_toast_activator.bind(null);
         const callback = win32_toast_activator.testCallback();
@@ -10287,7 +10118,6 @@ const ToastActivatorDeliveryTest = struct {
         defer alloc.free(launch);
         try std.testing.expectEqual(win32_uia.S_OK, callback.vtbl.Activate(callback, aumid, launch, null, 0));
         try dispatch(&app);
-        try std.testing.expect(target.eql(app.pending_toast_activation.?));
         try core.tick(&app);
         try std.testing.expectEqual(@as(usize, 1), Hook.windows_made);
 
@@ -10300,15 +10130,17 @@ const ToastActivatorDeliveryTest = struct {
         // Before the startup windows exist, the first of them takes the
         // click instead.
         app.startup_windows_opened = false;
-        app.pending_toast_activation = null;
         const early: win32_toast_activation.ActivationTarget = .{ .surface_id = 6, .pid = sys.GetCurrentProcessId(), .action = .focus };
         const early_w = try launchFor(alloc, early);
         defer alloc.free(early_w);
         try std.testing.expectEqual(win32_uia.S_OK, callback.vtbl.Activate(callback, aumid, early_w, null, 0));
         try dispatch(&app);
         try core.tick(&app);
-        try std.testing.expect(early.eql(app.pending_toast_activation.?));
         try std.testing.expectEqual(@as(usize, 1), Hook.windows_made);
+        panes.presents = 0;
+        panes.put(6, notifications.testing.inTab(1, 0, ""));
+        _ = app.notifications.click(.window_opened);
+        try panes.expectPresented(&.{.{ .pane = 6 }});
     }
 };
 
@@ -23375,347 +23207,6 @@ test "win32 activeSurfaceForHost isolates taskbar progress by host and tab" {
     try std.testing.expectEqual(@as(?u8, 80), host_b_after_tab_switch.progress);
 }
 
-test "win32 resolveToastActivationSurface prefers exact surface id" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    var app: App = undefined;
-    app.registry.windows = .empty;
-    app.registry.hosts = .empty;
-    defer app.registry.deinit(std.testing.allocator);
-
-    var primary: Surface = undefined;
-    primary.core_surface = undefined;
-    primary.core_surface.id = 101;
-
-    var exact: Surface = undefined;
-    exact.core_surface = undefined;
-    exact.core_surface.id = 202;
-
-    try app.registry.addWindow(std.testing.allocator, &primary);
-    try app.registry.addWindow(std.testing.allocator, &exact);
-
-    const resolved = app.registry.resolveToastActivationSurface(.{
-        .pid = sys.GetCurrentProcessId(),
-        .surface_id = 202,
-        .window_id = 999,
-        .action = .focus,
-    });
-    try std.testing.expectEqual(@as(?*Surface, &exact), resolved);
-}
-
-test "win32 resolveToastActivationSurface finds split pane by exact surface id" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    var app: App = undefined;
-    app.registry.windows = .empty;
-    app.registry.hosts = .empty;
-    defer app.registry.deinit(std.testing.allocator);
-
-    var host: Host = undefined;
-    host.id = 66;
-    host.tabs = .empty;
-    host.active_tab = 0;
-    defer {
-        for (host.tabs.items) |*tab| tab.deinit();
-        host.tabs.deinit(std.testing.allocator);
-    }
-
-    var primary: Surface = undefined;
-    primary.core_surface = undefined;
-    primary.core_surface.id = 501;
-    primary.host = &host;
-    primary.host_id = host.id;
-
-    var split: Surface = undefined;
-    split.core_surface = undefined;
-    split.core_surface.id = 502;
-    split.host = &host;
-    split.host_id = host.id;
-
-    try host.tabs.append(std.testing.allocator, try Tab.init(std.testing.allocator, 1, &primary));
-    const inserted = try SplitTreeSurface.init(std.testing.allocator, &split);
-    defer {
-        var cleanup = inserted;
-        cleanup.deinit();
-    }
-    var prev_tree = host.tabs.items[0].tree;
-    const next_tree = try prev_tree.split(
-        std.testing.allocator,
-        host.tabs.items[0].focused,
-        .right,
-        0.5,
-        &inserted,
-    );
-    host.tabs.items[0].tree = next_tree;
-    prev_tree.deinit();
-
-    try app.registry.addHost(std.testing.allocator, &host);
-    try app.registry.addWindow(std.testing.allocator, &primary);
-
-    const resolved = app.registry.resolveToastActivationSurface(.{
-        .pid = sys.GetCurrentProcessId(),
-        .surface_id = 502,
-        .action = .focus,
-    });
-    try std.testing.expectEqual(@as(?*Surface, &split), resolved);
-}
-
-test "win32 resolveToastActivationSurface falls back to primary surface" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    var app: App = undefined;
-    app.registry.windows = .empty;
-    app.registry.hosts = .empty;
-    defer app.registry.deinit(std.testing.allocator);
-
-    var host: Host = undefined;
-    host.id = 77;
-    host.tabs = .empty;
-    host.active_tab = 0;
-    defer {
-        for (host.tabs.items) |*tab| tab.deinit();
-        host.tabs.deinit(std.testing.allocator);
-    }
-
-    var primary: Surface = undefined;
-    primary.core_surface = undefined;
-    primary.core_surface.id = 303;
-    primary.host = &host;
-    primary.host_id = host.id;
-
-    try host.tabs.append(std.testing.allocator, try Tab.init(std.testing.allocator, 1, &primary));
-    try app.registry.addHost(std.testing.allocator, &host);
-    try app.registry.addWindow(std.testing.allocator, &primary);
-
-    const resolved = app.registry.resolveToastActivationSurface(.{
-        .pid = sys.GetCurrentProcessId(),
-        .surface_id = 999,
-        .window_id = 999,
-        .action = .focus,
-    });
-    try std.testing.expectEqual(@as(?*Surface, &primary), resolved);
-}
-
-test "win32 resolveToastActivationSurface prefers requested host tab when surface is stale" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    var app: App = undefined;
-    app.registry.windows = .empty;
-    app.registry.hosts = .empty;
-    defer app.registry.deinit(std.testing.allocator);
-
-    var host: Host = undefined;
-    host.id = 88;
-    host.tabs = .empty;
-    host.active_tab = 0;
-    defer {
-        for (host.tabs.items) |*tab| tab.deinit();
-        host.tabs.deinit(std.testing.allocator);
-    }
-
-    var tab0_surface: Surface = undefined;
-    tab0_surface.core_surface = undefined;
-    tab0_surface.core_surface.id = 401;
-    tab0_surface.host = &host;
-    tab0_surface.host_id = host.id;
-
-    var tab1_surface: Surface = undefined;
-    tab1_surface.core_surface = undefined;
-    tab1_surface.core_surface.id = 402;
-    tab1_surface.host = &host;
-    tab1_surface.host_id = host.id;
-
-    try host.tabs.append(std.testing.allocator, try Tab.init(std.testing.allocator, 1, &tab0_surface));
-    try host.tabs.append(std.testing.allocator, try Tab.init(std.testing.allocator, 2, &tab1_surface));
-    try app.registry.addHost(std.testing.allocator, &host);
-    try app.registry.addWindow(std.testing.allocator, &tab0_surface);
-    try app.registry.addWindow(std.testing.allocator, &tab1_surface);
-
-    const resolved = app.registry.resolveToastActivationSurface(.{
-        .pid = sys.GetCurrentProcessId(),
-        .surface_id = 999,
-        .tab_id = 2,
-        .window_id = host.id,
-        .action = .focus,
-    });
-    try std.testing.expectEqual(@as(?*Surface, &tab1_surface), resolved);
-}
-
-test "win32 buildToastLaunchForSurface includes host tab id" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    var host: Host = undefined;
-    host.id = 91;
-    host.tabs = .empty;
-    host.active_tab = 0;
-    defer {
-        for (host.tabs.items) |*tab| tab.deinit();
-        host.tabs.deinit(std.testing.allocator);
-    }
-
-    var surface: Surface = undefined;
-    surface.core_surface = undefined;
-    surface.core_surface.id = 555;
-    surface.host = &host;
-    surface.host_id = host.id;
-
-    try host.tabs.append(std.testing.allocator, try Tab.init(std.testing.allocator, 44, &surface));
-
-    const launch = try buildToastLaunchForSurface(std.testing.allocator, &surface);
-    defer std.testing.allocator.free(launch);
-
-    const parsed = try win32_toast_activation.parseLaunchArg(launch);
-    try std.testing.expectEqual(@as(?u64, 555), parsed.surface_id);
-    try std.testing.expectEqual(@as(?u32, 44), parsed.tab_id);
-    try std.testing.expectEqual(@as(?u32, host.id), parsed.window_id);
-    try std.testing.expectEqual(@as(?win32_toast_activation.Action, .focus), parsed.action);
-}
-
-test "launch string round-trips pid; a foreign pid only presents" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    var app: App = undefined;
-    app.registry.windows = .empty;
-    app.registry.hosts = .empty;
-    defer app.registry.deinit(std.testing.allocator);
-
-    var host: Host = undefined;
-    host.id = 93;
-    host.tabs = .empty;
-    host.active_tab = 0;
-    defer {
-        for (host.tabs.items) |*tab| tab.deinit();
-        host.tabs.deinit(std.testing.allocator);
-    }
-
-    var first: Surface = undefined;
-    first.core_surface = undefined;
-    first.core_surface.id = 601;
-    first.host = &host;
-    first.host_id = host.id;
-
-    var second: Surface = undefined;
-    second.core_surface = undefined;
-    second.core_surface.id = 602;
-    second.host = &host;
-    second.host_id = host.id;
-
-    try host.tabs.append(std.testing.allocator, try Tab.init(std.testing.allocator, 1, &first));
-    try host.tabs.append(std.testing.allocator, try Tab.init(std.testing.allocator, 2, &second));
-    try app.registry.addHost(std.testing.allocator, &host);
-    try app.registry.addWindow(std.testing.allocator, &first);
-    try app.registry.addWindow(std.testing.allocator, &second);
-
-    // The pane's own launch string names this process and routes to it.
-    const launch = try buildToastLaunchForSurface(std.testing.allocator, &second);
-    defer std.testing.allocator.free(launch);
-    const own = try win32_toast_activation.parseLaunchArg(launch);
-    try std.testing.expectEqual(@as(?u32, sys.GetCurrentProcessId()), own.pid);
-    try std.testing.expectEqual(@as(?*Surface, &second), app.registry.resolveToastActivationSurface(own));
-
-    // The same ids from another process, or from a launch with no pid, are
-    // not this process's: only the primary surface is presented.
-    var foreign = own;
-    foreign.pid = sys.GetCurrentProcessId() +% 4;
-    try std.testing.expectEqual(@as(?*Surface, &first), app.registry.resolveToastActivationSurface(foreign));
-    var unnamed = own;
-    unnamed.pid = null;
-    try std.testing.expectEqual(@as(?*Surface, &first), app.registry.resolveToastActivationSurface(unnamed));
-}
-
-/// Records what `App.showToast` hands its sink, in place of WinRT.
-pub const TestToastRecorder = struct {
-    alloc: Allocator = std.testing.allocator,
-    shown: usize = 0,
-    /// Refuse every toast with this error, as Windows does when
-    /// notifications are turned off for noctty; the request is still
-    /// recorded.
-    refuse: ?anyerror = null,
-    /// Runs inside the show, after the request is recorded, as the
-    /// messages a show can pump would.
-    during_show: ?struct { ctx: *anyopaque, run: *const fn (*anyopaque) anyerror!void } = null,
-    title: ?[]u8 = null,
-    body: ?[]u8 = null,
-    attribution: ?[]u8 = null,
-    launch: ?[]u8 = null,
-    tag: ?[]u8 = null,
-    group: ?[]u8 = null,
-    /// Every history call, in order: `tag <tag> <group>` for one pane's
-    /// toast, `group <group>` for a whole group.
-    removals: std.ArrayListUnmanaged([]u8) = .empty,
-
-    pub fn sink(self: *TestToastRecorder) ToastSink {
-        return .{ .ctx = self, .show = record, .remove_tag = recordRemoveTag, .remove_group = recordRemoveGroup };
-    }
-
-    fn record(ctx: *anyopaque, request: ToastRequest) anyerror!void {
-        const self: *TestToastRecorder = @ptrCast(@alignCast(ctx));
-        self.clear();
-        self.shown += 1;
-        self.title = try self.alloc.dupe(u8, request.title);
-        self.body = try self.alloc.dupe(u8, request.body);
-        if (request.attribution) |value| self.attribution = try self.alloc.dupe(u8, value);
-        if (request.launch) |value| self.launch = try self.alloc.dupe(u8, value);
-        if (request.tag) |value| self.tag = try self.alloc.dupe(u8, value);
-        if (request.group) |value| self.group = try self.alloc.dupe(u8, value);
-        if (self.during_show) |hook| try hook.run(hook.ctx);
-        if (self.refuse) |err| return err;
-    }
-
-    fn recordRemoveTag(ctx: *anyopaque, tag: []const u8, group: []const u8) anyerror!void {
-        const self: *TestToastRecorder = @ptrCast(@alignCast(ctx));
-        const line = try std.fmt.allocPrint(self.alloc, "tag {s} {s}", .{ tag, group });
-        errdefer self.alloc.free(line);
-        try self.removals.append(self.alloc, line);
-    }
-
-    fn recordRemoveGroup(ctx: *anyopaque, group: []const u8) anyerror!void {
-        const self: *TestToastRecorder = @ptrCast(@alignCast(ctx));
-        const line = try std.fmt.allocPrint(self.alloc, "group {s}", .{group});
-        errdefer self.alloc.free(line);
-        try self.removals.append(self.alloc, line);
-    }
-
-    /// Forget the last toast's fields.
-    fn clear(self: *TestToastRecorder) void {
-        inline for (.{ "title", "body", "attribution", "launch", "tag", "group" }) |name| {
-            if (@field(self, name)) |value| self.alloc.free(value);
-            @field(self, name) = null;
-        }
-    }
-
-    pub fn deinit(self: *TestToastRecorder) void {
-        self.clear();
-        for (self.removals.items) |line| self.alloc.free(line);
-        self.removals.deinit(self.alloc);
-    }
-
-    /// The history calls so far are exactly `expected`, in order.
-    pub fn expectRemovals(self: *const TestToastRecorder, expected: []const []const u8) !void {
-        try std.testing.expectEqual(expected.len, self.removals.items.len);
-        for (expected, self.removals.items) |want, got| try std.testing.expectEqualStrings(want, got);
-    }
-
-    /// Fails with an error, never a panic, when the field is missing: a
-    /// panic would end the test process and hide every later failure.
-    pub fn expect(
-        self: *const TestToastRecorder,
-        comptime field: enum { title, body, attribution, tag, group },
-        expected: []const u8,
-    ) !void {
-        const actual = @field(self, @tagName(field)) orelse return error.TestExpectedText;
-        try std.testing.expectEqualStrings(expected, actual);
-    }
-
-    pub fn expectLaunchFor(self: *const TestToastRecorder, surface: *Surface, tab_id: u32) !void {
-        const parsed = try win32_toast_activation.parseLaunchArg(self.launch orelse return error.TestExpectedLaunch);
-        try std.testing.expectEqual(@as(?u64, surface.core().id), parsed.surface_id);
-        try std.testing.expectEqual(@as(?u32, tab_id), parsed.tab_id);
-        try std.testing.expectEqual(@as(?u32, surface.host_id), parsed.window_id);
-        try std.testing.expectEqual(@as(?win32_toast_activation.Action, .focus), parsed.action);
-    }
-};
-
 /// One window whose second tab holds the background pane `p`, which a
 /// toast is about, while the first tab is active.
 pub const ToastTestWindow = struct {
@@ -23729,7 +23220,7 @@ pub const ToastTestWindow = struct {
     q: Surface = undefined,
     other: Surface = undefined,
     session: TestSession = .{},
-    recorder: TestToastRecorder = .{},
+    recorder: notifications.testing.Recorder = .{},
 
     pub fn init(self: *ToastTestWindow, two_windows: bool) !void {
         self.* = .{};
@@ -23758,13 +23249,14 @@ pub const ToastTestWindow = struct {
         self.other.core_surface.id = 0x3003;
         self.front.title = "pwsh";
         self.p.title = "cargo build";
-        self.app.toast_sink = self.recorder.sink();
+        self.app.notifications = .init(std.testing.allocator, self.recorder.sink(), self.app.notificationPanes());
     }
 
+    /// The session first: its exit removal calls the recorder.
     pub fn deinit(self: *ToastTestWindow) void {
-        self.recorder.deinit();
         self.p.program_status.deinit(std.testing.allocator);
         self.session.deinit();
+        self.recorder.deinit();
     }
 
     pub fn osc(self: *ToastTestWindow, surface: *Surface, title: [:0]const u8, body: [:0]const u8) !void {
@@ -23775,44 +23267,6 @@ pub const ToastTestWindow = struct {
         ));
     }
 };
-
-test "win32 OSC 9 toast carries its pane's launch target" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-    var w: ToastTestWindow = .{};
-    try w.init(false);
-    defer w.deinit();
-
-    try w.osc(&w.p, "", "tests passed");
-    try std.testing.expectEqual(@as(usize, 1), w.recorder.shown);
-    try w.recorder.expectLaunchFor(&w.p, 2);
-    try w.recorder.expect(.body, "tests passed");
-    try w.recorder.expect(.attribution, "Tab 2: cargo build");
-
-    // An app notification, such as a config reload, has no pane to focus
-    // and no tab to name.
-    try std.testing.expect(try w.app.performAction(.app, .desktop_notification, .{
-        .title = "",
-        .body = "Configuration reloaded",
-    }));
-    try std.testing.expectEqual(@as(usize, 2), w.recorder.shown);
-    try w.recorder.expect(.title, "noctty");
-    try std.testing.expect(w.recorder.launch == null);
-    try std.testing.expect(w.recorder.attribution == null);
-}
-
-test "win32 OSC 777 toast keeps its title and gains tab context" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-    var w: ToastTestWindow = .{};
-    try w.init(false);
-    defer w.deinit();
-
-    try w.osc(&w.p, "deploy", "rolled out");
-    try std.testing.expectEqual(@as(usize, 1), w.recorder.shown);
-    try w.recorder.expect(.title, "deploy");
-    try w.recorder.expect(.body, "rolled out");
-    try w.recorder.expect(.attribution, "Tab 2: cargo build");
-    try w.recorder.expectLaunchFor(&w.p, 2);
-}
 
 test "win32 command-finished toast names its tab" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
@@ -23833,7 +23287,7 @@ test "win32 command-finished toast names its tab" {
     try w.recorder.expect(.title, "Command finished");
     try w.recorder.expect(.body, "Command finished with exit code 0 | Runtime: 2.00s");
     try w.recorder.expect(.attribution, "Tab 2: cargo build");
-    try w.recorder.expectLaunchFor(&w.p, 2);
+    try w.recorder.expectLaunch(w.p.core().id, 2, w.p.host_id);
 
     // `desktop-notifications = false` still shows nothing.
     config.desktop_notifications = false;
@@ -23842,34 +23296,6 @@ test "win32 command-finished toast names its tab" {
         .duration = .{ .duration = 2 * std.time.ns_per_s },
     }));
     try std.testing.expectEqual(@as(usize, 1), w.recorder.shown);
-}
-
-test "win32 toast context names the window only when several are open" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-    var w: ToastTestWindow = .{};
-    try w.init(true);
-    defer w.deinit();
-
-    w.other.title = "ssh";
-    try w.osc(&w.p, "", "x");
-    try w.recorder.expect(.attribution, "Tab 2 of window 1: cargo build");
-    try w.osc(&w.other, "", "x");
-    try w.recorder.expect(.attribution, "Tab 1 of window 2: ssh");
-    try w.recorder.expectLaunchFor(&w.other, 1);
-
-    // The quick terminal is not a numbered window: it is named, and beside
-    // it the one window needs no number.
-    w.other_host.quick_terminal = true;
-    try w.osc(&w.other, "", "x");
-    try w.recorder.expect(.attribution, "Tab 1 of the quick terminal: ssh");
-    try w.osc(&w.p, "", "x");
-    try w.recorder.expect(.attribution, "Tab 2: cargo build");
-    w.other_host.quick_terminal = false;
-
-    // Once the other window is gone, one window needs no number.
-    _ = w.app.registry.hosts.orderedRemove(1);
-    try w.osc(&w.p, "", "x");
-    try w.recorder.expect(.attribution, "Tab 2: cargo build");
 }
 
 test "win32 program status toast says which tab it is from in its attribution line" {
@@ -23888,7 +23314,7 @@ test "win32 program status toast says which tab it is from in its attribution li
     try w.recorder.expect(.title, "claude needs permission");
     try w.recorder.expect(.body, "Allow edit?");
     try w.recorder.expect(.attribution, "Tab 2 of window 1: cargo build");
-    try w.recorder.expectLaunchFor(&w.p, 2);
+    try w.recorder.expectLaunch(w.p.core().id, 2, w.p.host_id);
 
     // Without a message the toast is its title and its tab.
     parser.reset();
@@ -23898,12 +23324,6 @@ test "win32 program status toast says which tab it is from in its attribution li
     try w.recorder.expect(.title, "claude is done");
     try w.recorder.expect(.body, "");
     try w.recorder.expect(.attribution, "Tab 2 of window 1: cargo build");
-}
-
-/// What a removal of `surface_id`'s toast reads in the recorder.
-pub fn expectedToastRemoval(buf: []u8, surface_id: u64) ![]const u8 {
-    var group_buf: [toast_group_max]u8 = undefined;
-    return std.fmt.bufPrint(buf, "tag {x:0>16} {s}", .{ surface_id, toastGroup(&group_buf) });
 }
 
 /// Put `q` beside `p` in the second tab, the tab's focused pane staying
@@ -23920,94 +23340,6 @@ pub fn toastTestSplit(w: *ToastTestWindow) !SplitTreeSurface {
     prev_tree.deinit();
     tab.focused = @enumFromInt(2);
     return inserted;
-}
-
-test "win32 toasts are tagged by pane and grouped by process" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-    var w: ToastTestWindow = .{};
-    try w.init(false);
-    defer w.deinit();
-
-    var group_buf: [toast_group_max]u8 = undefined;
-    var expected_group_buf: [32]u8 = undefined;
-    const group = toastGroup(&group_buf);
-    try std.testing.expectEqualStrings(
-        try std.fmt.bufPrint(&expected_group_buf, "noctty-{d}", .{sys.GetCurrentProcessId()}),
-        group,
-    );
-
-    try w.osc(&w.p, "", "tests passed");
-    try w.recorder.expect(.tag, "0000000000002002");
-    try w.recorder.expect(.group, group);
-    try std.testing.expectEqual(@as(?u64, 0x2002), w.p.toast_outstanding);
-    try std.testing.expect(w.app.toast_group_used);
-
-    // Every later toast from the pane, of any kind, has the same tag and
-    // group, so Windows replaces the older one.
-    try w.osc(&w.p, "deploy", "rolled out");
-    try w.recorder.expect(.tag, "0000000000002002");
-    try w.recorder.expect(.group, group);
-    const config = &w.p.core().config;
-    config.desktop_notifications = true;
-    config.notify_on_command_finish = .always;
-    config.notify_on_command_finish_action = .{ .bell = false, .notify = true };
-    config.notify_on_command_finish_after = .{ .duration = 0 };
-    try std.testing.expect(try w.app.performAction(.{ .surface = w.p.core() }, .command_finished, .{
-        .exit_code = 0,
-        .duration = .{ .duration = 2 * std.time.ns_per_s },
-    }));
-    try w.recorder.expect(.tag, "0000000000002002");
-    try std.testing.expectEqual(@as(usize, 3), w.recorder.shown);
-
-    // Another pane has its own tag.
-    try w.osc(&w.front, "", "x");
-    try w.recorder.expect(.tag, "0000000000001001");
-    try w.recorder.expect(.group, group);
-
-    // An app notification belongs to no pane.
-    try std.testing.expect(try w.app.performAction(.app, .desktop_notification, .{
-        .title = "",
-        .body = "Configuration reloaded",
-    }));
-    try std.testing.expect(w.recorder.tag == null);
-    try std.testing.expect(w.recorder.group == null);
-
-    // A toast Windows refused is not outstanding.
-    w.recorder.refuse = error.NotifierDisabled;
-    try w.osc(&w.q, "", "x");
-    try std.testing.expectEqual(@as(?u64, null), w.q.toast_outstanding);
-    try std.testing.expectEqual(@as(usize, 0), w.recorder.removals.items.len);
-}
-
-test "win32 focus without an outstanding toast makes no history call" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-    var w: ToastTestWindow = .{};
-    try w.init(false);
-    defer w.deinit();
-    const hwnd = try createTestHostWindow();
-    defer _ = sys.DestroyWindow(hwnd);
-    w.host.hwnd = hwnd;
-    defer w.host.hwnd = null;
-    w.app.registry.message_hwnd = hwnd;
-    defer w.app.registry.message_hwnd = null;
-
-    // No toast at all.
-    w.app.acknowledgeTabWithForeground(&w.host, 0, hwnd);
-    try std.testing.expectEqual(@as(usize, 0), w.app.toast_removals.items.len);
-    try std.testing.expect(!w.app.toast_removals_posted);
-
-    // A toast whose removal has already been made.
-    try w.osc(&w.front, "", "x");
-    w.app.acknowledgeTabWithForeground(&w.host, 0, hwnd);
-    w.app.flushToastRemovals();
-    try std.testing.expectEqual(@as(usize, 1), w.recorder.removals.items.len);
-    w.app.acknowledgeTabWithForeground(&w.host, 0, hwnd);
-    w.app.acknowledgeTabWithForeground(&w.host, 0, hwnd);
-    try std.testing.expect(!w.app.toast_removals_posted);
-    w.app.flushToastRemovals();
-    try std.testing.expectEqual(@as(usize, 1), w.recorder.removals.items.len);
-    var msg: sys.MSG = undefined;
-    while (sys.PeekMessageW(&msg, hwnd, c.WM_WINHOSTTY_TOAST_REMOVALS, c.WM_WINHOSTTY_TOAST_REMOVALS, c.PM_REMOVE) != 0) {}
 }
 
 test "win32 undo-closing a tab removes its toasts and undo does not restore them" {
@@ -24029,118 +23361,29 @@ test "win32 undo-closing a tab removes its toasts and undo does not restore them
     // The tab goes into undo history with its panes alive.
     var entry = w.host.detachTabForUndo(1).?;
     defer entry.dispose(&w.host, .host_destroy) catch {}; // Best-effort test teardown.
-    w.app.flushToastRemovals();
-    var p_buf: [64]u8 = undefined;
-    var q_buf: [64]u8 = undefined;
-    const p_removal = try expectedToastRemoval(&p_buf, 0x2002);
-    const q_removal = try expectedToastRemoval(&q_buf, 0x2003);
-    try w.recorder.expectRemovals(&.{ q_removal, p_removal });
-    try std.testing.expectEqual(@as(?u64, 0x1001), w.front.toast_outstanding);
+    w.app.notifications.flush();
+    try w.recorder.expectRemoved(&.{ 0x2002, 0x2003 });
 
     // Undo brings the tab back without its toasts: nothing is shown again,
     // and seeing the tab or closing its panes has nothing left to remove.
     try std.testing.expect(try w.host.restoreClosedTabEntry(&entry.payload.close_tab));
     try std.testing.expectEqual(shown, w.recorder.shown);
-    try std.testing.expectEqual(@as(?u64, null), w.p.toast_outstanding);
-    try std.testing.expectEqual(@as(?u64, null), w.q.toast_outstanding);
     const hwnd = try createTestHostWindow();
     defer _ = sys.DestroyWindow(hwnd);
     w.host.hwnd = hwnd;
     defer w.host.hwnd = null;
     w.host.active_tab = 1;
     w.app.acknowledgeTabWithForeground(&w.host, 1, hwnd);
-    w.app.flushToastRemovals();
-    try w.recorder.expectRemovals(&.{ q_removal, p_removal });
+    w.app.notifications.flush();
+    try w.recorder.expectRemoved(&.{ 0x2002, 0x2003 });
 
     // A toast from the restored tab, then the close redone: the tab goes
-    // back into undo history and takes that toast with it.
+    // back into undo history and takes that toast with it. The other tab's
+    // pane keeps its own.
     try w.osc(&w.p, "", "after undo");
     try std.testing.expect(try w.host.redoClosedTabEntry(&entry.payload.close_tab));
-    w.app.flushToastRemovals();
-    try w.recorder.expectRemovals(&.{ q_removal, p_removal, p_removal });
-    try std.testing.expectEqual(@as(?u64, null), w.p.toast_outstanding);
-}
-
-test "win32 a new toast cancels a queued removal for its pane" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-    var w: ToastTestWindow = .{};
-    try w.init(false);
-    defer w.deinit();
-    const hwnd = try createTestHostWindow();
-    defer _ = sys.DestroyWindow(hwnd);
-    w.host.hwnd = hwnd;
-    defer w.host.hwnd = null;
-
-    try w.osc(&w.p, "", "x");
-    try w.osc(&w.front, "", "x");
-    w.app.acknowledgeTabWithForeground(&w.host, 0, hwnd);
-    w.host.active_tab = 1;
-    w.app.acknowledgeTabWithForeground(&w.host, 1, hwnd);
-    try std.testing.expectEqual(@as(usize, 2), w.app.toast_removals.items.len);
-
-    // The pane's newer toast replaces the one whose removal is queued, so
-    // the flush must not take it away; the other pane's removal stands.
-    try w.osc(&w.p, "", "again");
-    w.app.flushToastRemovals();
-    var buf: [64]u8 = undefined;
-    try w.recorder.expectRemovals(&.{try expectedToastRemoval(&buf, 0x1001)});
-    try std.testing.expectEqual(@as(?u64, 0x2002), w.p.toast_outstanding);
-}
-
-test "win32 a refused toast keeps the queued removal of its pane's older toast" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-    var w: ToastTestWindow = .{};
-    try w.init(false);
-    defer w.deinit();
-    const hwnd = try createTestHostWindow();
-    defer _ = sys.DestroyWindow(hwnd);
-    w.host.hwnd = hwnd;
-    defer w.host.hwnd = null;
-
-    try w.osc(&w.front, "", "x");
-    w.app.acknowledgeTabWithForeground(&w.host, 0, hwnd);
-    try std.testing.expectEqual(@as(usize, 1), w.app.toast_removals.items.len);
-
-    // Windows refuses the newer toast (notifications turned off meanwhile),
-    // so the older one is still in Action Center and its removal stands.
-    w.recorder.refuse = error.NotifierDisabled;
-    try w.osc(&w.front, "", "again");
-    try std.testing.expectEqual(@as(usize, 1), w.app.toast_removals.items.len);
-    w.app.flushToastRemovals();
-    var buf: [64]u8 = undefined;
-    try w.recorder.expectRemovals(&.{try expectedToastRemoval(&buf, 0x1001)});
-    try std.testing.expectEqual(@as(?u64, null), w.front.toast_outstanding);
-}
-
-test "win32 a toast shown while its tab is seen survives the flush" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-    var w: ToastTestWindow = .{};
-    try w.init(false);
-    defer w.deinit();
-    const hwnd = try createTestHostWindow();
-    defer _ = sys.DestroyWindow(hwnd);
-    w.host.hwnd = hwnd;
-    defer w.host.hwnd = null;
-    try w.osc(&w.front, "", "older");
-
-    // The show pumps the activation of the pane's tab, which queues the
-    // older toast's removal; the newer toast replaces that one, so the
-    // removal must not take it away.
-    const Seen = struct {
-        w: *ToastTestWindow,
-        hwnd: HWND,
-        fn run(ctx: *anyopaque) anyerror!void {
-            const self: *@This() = @ptrCast(@alignCast(ctx));
-            self.w.app.acknowledgeTabWithForeground(&self.w.host, 0, self.hwnd);
-            try std.testing.expectEqual(@as(usize, 1), self.w.app.toast_removals.items.len);
-        }
-    };
-    var seen: Seen = .{ .w = &w, .hwnd = hwnd };
-    w.recorder.during_show = .{ .ctx = &seen, .run = Seen.run };
-    try w.osc(&w.front, "", "newer");
-    w.app.flushToastRemovals();
-    try w.recorder.expectRemovals(&.{});
-    try std.testing.expectEqual(@as(?u64, 0x1001), w.front.toast_outstanding);
+    w.app.notifications.flush();
+    try w.recorder.expectRemoved(&.{ 0x2002, 0x2003, 0x2002 });
 }
 
 test "win32 removal runs from the posted message, not inside acknowledgeTab" {
@@ -24167,16 +23410,15 @@ test "win32 removal runs from the posted message, not inside acknowledgeTab" {
     w.app.acknowledgeTabWithForeground(&w.host, 1, hwnd);
     // Nothing reached Windows inside the acknowledgement; one message is
     // posted for it.
-    try std.testing.expectEqual(@as(usize, 0), w.recorder.removals.items.len);
-    try std.testing.expect(w.app.toast_removals_posted);
+    try w.recorder.expectRemoved(&.{});
 
     // The pane closes before the message is handled: its toast is not
     // removed twice, and nothing reads the freed pane, since only its id
-    // is queued. A second removal does not post a second message.
+    // is tracked. A second removal does not post a second message.
     w.app.windowDestroyed(&w.p);
     w.host.active_tab = 0;
     w.app.acknowledgeTabWithForeground(&w.host, 0, hwnd);
-    try std.testing.expectEqual(@as(usize, 0), w.recorder.removals.items.len);
+    try w.recorder.expectRemoved(&.{});
 
     var msg: sys.MSG = undefined;
     try std.testing.expect(sys.PeekMessageW(&msg, message_hwnd, c.WM_WINHOSTTY_TOAST_REMOVALS, c.WM_WINHOSTTY_TOAST_REMOVALS, c.PM_REMOVE) != 0);
@@ -24184,13 +23426,63 @@ test "win32 removal runs from the posted message, not inside acknowledgeTab" {
     try std.testing.expectEqual(@as(BOOL, 0), sys.PeekMessageW(&extra, message_hwnd, c.WM_WINHOSTTY_TOAST_REMOVALS, c.WM_WINHOSTTY_TOAST_REMOVALS, c.PM_REMOVE));
     // The App's message window makes the removals when it handles it.
     _ = sys.DispatchMessageW(&msg);
-    var p_buf: [64]u8 = undefined;
-    var front_buf: [64]u8 = undefined;
-    try w.recorder.expectRemovals(&.{
-        try expectedToastRemoval(&p_buf, 0x2002),
-        try expectedToastRemoval(&front_buf, 0x1001),
+    try w.recorder.expectRemoved(&.{ 0x2002, 0x1001 });
+
+    // Handled, the message is posted again for the next removal.
+    try w.osc(&w.front, "", "again");
+    w.app.acknowledgeTabWithForeground(&w.host, 0, hwnd);
+    try std.testing.expect(sys.PeekMessageW(&msg, message_hwnd, c.WM_WINHOSTTY_TOAST_REMOVALS, c.WM_WINHOSTTY_TOAST_REMOVALS, c.PM_REMOVE) != 0);
+}
+
+test "win32 dropping a tab into another as a split keeps its panes' toasts" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var core_app: CoreApp = undefined;
+    var app: App = undefined;
+    var host: Host = undefined;
+    var surface_a: Surface = undefined;
+    var surface_d: Surface = undefined;
+    // Outlives the session, whose exit removal calls it.
+    var recorder: notifications.testing.Recorder = .{};
+    defer recorder.deinit();
+    var session: TestSession = .{};
+    try session.init(.{
+        .core_app = &core_app,
+        .app = &app,
+        .hosts = &.{.{ .storage = &host, .register = true }},
+        .surfaces = &.{
+            .{ .storage = &surface_a, .host = &host, .register = true },
+            .{ .storage = &surface_d, .host = &host, .register = true },
+        },
+        .shell_runtime_initialized = true,
     });
-    try std.testing.expect(!w.app.toast_removals_posted);
+    defer session.deinit();
+    const Step = ShellProjectionSteps;
+    var window = try Step.openWindow(&app, &host, &.{ &surface_a, &surface_d });
+    defer window.deinit();
+    surface_a.core_surface.id = 0xA;
+    surface_d.core_surface.id = 0xD;
+    app.notifications = .init(std.testing.allocator, recorder.sink(), app.notificationPanes());
+    for ([_]*Surface{ &surface_a, &surface_d }) |surface| {
+        try std.testing.expect(try app.performAction(.{ .surface = surface.core() }, .desktop_notification, .{ .title = "", .body = "x" }));
+    }
+
+    // D's tab dropped to the right of A becomes a split of A's tab, and a
+    // flush after it takes nothing. This checks the end state only: that D
+    // is in no tab at no moment (the combined tree goes in before the
+    // source tab comes out) is read from commitTabDropSplit, and would
+    // matter only to a flush a message pumped in between could run.
+    Step.focus(&app, &surface_a);
+    host.tab_drop_operation = .split_right;
+    host.tab_drop_target_surface = &surface_a;
+    try std.testing.expect(host.commitTabDropSplit(1));
+    try std.testing.expect(host.tabs.items[0].findHandle(&surface_d) != null);
+    app.notifications.flush();
+    try recorder.expectRemoved(&.{});
+    app.notifications.seen(0xD);
+    app.notifications.seen(0xA);
+    app.notifications.flush();
+    try recorder.expectRemoved(&.{ 0xA, 0xD });
 }
 
 test "win32 profileOpenTargetFromModifiers prefers split then window" {
