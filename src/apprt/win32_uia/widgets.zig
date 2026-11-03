@@ -168,6 +168,9 @@ pub const PaletteListState = struct {
     selected_index: ?*const fn (ctx: *anyopaque) ?usize = null,
     row_name: ?*const fn (ctx: *anyopaque, index: usize, buf: []u8) []const u8 = null,
     row_enabled: ?*const fn (ctx: *anyopaque, index: usize) bool = null,
+    /// Whether the list itself is enabled (`UIA_IsEnabledPropertyId`); none
+    /// is always. Its rows answer for their own patterns (`row_enabled`).
+    enabled: ?*const fn (ctx: *anyopaque) bool = null,
     row_id: ?*const fn (ctx: *anyopaque, index: usize) u64 = null,
     select_row: ?*const fn (ctx: *anyopaque, index: usize) void = null,
     /// Invoke row `index`: false when the owner did not act on it (its rows
@@ -647,8 +650,11 @@ pub const PaletteListProvider = struct {
             constants.UIA_FrameworkIdPropertyId => return object.frameworkId(out),
             constants.UIA_IsControlElementPropertyId,
             constants.UIA_IsContentElementPropertyId,
-            constants.UIA_IsEnabledPropertyId,
             => out.* = com.VARIANT.fromBool(true),
+            constants.UIA_IsEnabledPropertyId => {
+                const enabled = if (self.state.enabled) |callback| callback(self.state.ctx) else true;
+                out.* = com.VARIANT.fromBool(enabled);
+            },
             constants.UIA_IsKeyboardFocusablePropertyId => {
                 out.* = com.VARIANT.fromBool(self.state.keyboard_focusable);
             },

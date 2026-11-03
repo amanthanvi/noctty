@@ -6954,6 +6954,13 @@ pub const SettingsWindow = struct {
     /// any more (`owes_draft`, `owes_external`). An adoption from anything
     /// else (Discard's, from the window's own snapshot) leaves what is owed
     /// owed.
+    /// Whether the draft can take an edit now: not while the window waits
+    /// to start one over from the running settings (`owes_draft`), and not
+    /// with no draft at all.
+    fn draftTakesEdits(self: *const SettingsWindow) bool {
+        return !self.owes_draft and self.pending != null;
+    }
+
     fn paidRefresh(self: *SettingsWindow) void {
         self.owes_draft = false;
         self.owes_external = null;
@@ -7044,6 +7051,7 @@ pub const SettingsWindow = struct {
     /// stranded.
     fn holdDraftControls(self: *SettingsWindow) void {
         const viewport = self.viewport orelse return;
+        self.forgetGoneControls();
         if (GetFocus()) |focused| if (sys.IsChild(viewport, focused) != 0) {
             if (self.sectionButton(self.active_section)) |button| _ = SetFocus(button);
         };
@@ -7064,9 +7072,24 @@ pub const SettingsWindow = struct {
         return 1;
     }
 
+    /// Drop from the record the controls that went with their page, a list
+    /// on each page switch (`destroyList`), so a long hold over many switches
+    /// does not fill it with handles and leave a new page's controls enabled.
+    fn forgetGoneControls(self: *SettingsWindow) void {
+        var kept: usize = 0;
+        for (self.held_controls[0..self.held_control_count]) |hwnd| {
+            if (sys.IsWindow(hwnd) == 0) continue;
+            self.held_controls[kept] = hwnd;
+            kept += 1;
+        }
+        self.held_control_count = kept;
+    }
+
     /// Enable what `holdDraftControls` disabled, and only that: a control
-    /// disabled for its own reason stays so.
+    /// disabled for its own reason stays so, and one gone with its page is
+    /// not touched.
     fn releaseDraftControls(self: *SettingsWindow) void {
+        self.forgetGoneControls();
         for (self.held_controls[0..self.held_control_count]) |hwnd| _ = sys.EnableWindow(hwnd, 1);
         self.held_control_count = 0;
         if (self.held_viewport) if (self.viewport) |viewport| {
@@ -7819,6 +7842,9 @@ pub const SettingsWindow = struct {
     /// False when it did nothing: the open field could not be kept, or the
     /// row's could not be made.
     fn profileInvoke(self: *SettingsWindow) bool {
+        // Nothing opens while there is no draft to take what is typed: UIA's
+        // Invoke reaches here past the held list (`holdDraftControls`).
+        if (!self.draftTakesEdits()) return false;
         if (!self.profileEditDone()) return false;
         const row = self.selectedProfileRow() orelse return false;
         if (self.profile_model.profileOf(row)) |profile| if (profile.read_only) {
@@ -7969,6 +7995,9 @@ pub const SettingsWindow = struct {
     /// UIA after the field and its profile. `id` is the new profile's, for
     /// `.new_command`.
     fn beginProfileEdit(self: *SettingsWindow, kind: ProfileEdit.Kind, row: settings_profiles.Row, new_id: ?[]const u8) void {
+        // A field made with no draft to take it would be typed into and then
+        // destroyed when the draft comes (`adoptCopies`), what was typed lost.
+        if (!self.draftTakesEdits()) return;
         self.disarmProfileRemoval();
         self.cancelProfileEdit();
         const list = self.profile_list.hwnd orelse return;
@@ -21669,6 +21698,8 @@ fn referenceListUiaState(list: *ReferenceList) win32_uia.PaletteListState {
         .row_count = &referenceUiaRowCount,
         .selected_index = &referenceUiaSelectedIndex,
         .row_name = &referenceUiaRowName,
+        .row_enabled = &referenceUiaRowEnabled,
+        .enabled = &referenceUiaEnabled,
         .row_id = &referenceUiaRowId,
         .select_row = &referenceUiaSelectRow,
         .invoke_row = &referenceUiaInvokeRow,
@@ -21777,6 +21808,23 @@ fn referenceUiaRowId(ctx: *anyopaque, index: usize) u64 {
         .keybindings => list.ownerConst().keybind_model.rows[id].id,
         .profiles => list.ownerConst().profile_model.rows[id].identity,
     };
+}
+
+/// Whether the list takes UIA's Select, Invoke and focus on its rows: not
+/// while the window holds the page for a draft it is owed
+/// (`holdDraftControls`), nor while its window is disabled, so UIA reaches
+/// no more of the page than the keyboard and the pointer do. Its rows still
+/// read.
+fn referenceUiaEnabled(ctx: *anyopaque) bool {
+    const list = referenceOwner(ctx);
+    if (list.ownerConst().owes_draft) return false;
+    const hwnd = list.hwnd orelse return false;
+    return sys.IsWindowEnabled(hwnd) != 0;
+}
+
+fn referenceUiaRowEnabled(ctx: *anyopaque, index: usize) bool {
+    _ = index;
+    return referenceUiaEnabled(ctx);
 }
 
 fn referenceUiaSelectRow(ctx: *anyopaque, index: usize) void {
@@ -22890,6 +22938,152 @@ test "settings a UIA Invoke on a profile's row whose field cannot be made says i
             SettingsWindow.test_profile_edit_fails = false;
             try std.testing.expectEqual(com.S_OK, invoke.vtbl.Invoke(invoke));
             try std.testing.expectEqual(ProfileEdit.Kind.command, (try openEdit(settings)).kind);
+            try std.testing.expect(fixture.pumpKey(VK_ESCAPE));
+        }
+    }.body);
+}
+
+test "settings a page held for an owed draft takes no UIA Invoke on its lists' rows, and the Profiles page opens no field" {
+    try dialog_test.onHiddenDesktop(struct {
+        const com = @import("win32_uia/com.zig");
+        const constants = @import("win32_uia/constants.zig");
+        const GW_CHILD: UINT = 5;
+
+        /// The list's row at `position`, as a UIA client reaches it: through
+        /// the list, not the focus, which a held page does not have.
+        fn rowAt(list: *ReferenceList, position: usize) !*com.IRawElementProviderSimple {
+            const provider = list.provider orelse return error.TestExpectedProvider;
+            var child: ?*com.IRawElementProviderFragment = null;
+            try std.testing.expectEqual(com.S_OK, provider.fragment.vtbl.Navigate(&provider.fragment, com.NavigateDirection_FirstChild, &child));
+            for (0..position) |_| {
+                const here = child orelse return error.TestExpectedRow;
+                defer _ = here.vtbl.Release(here);
+                child = null;
+                try std.testing.expectEqual(com.S_OK, here.vtbl.Navigate(here, com.NavigateDirection_NextSibling, &child));
+            }
+            const fragment = child orelse return error.TestExpectedRow;
+            defer _ = fragment.vtbl.Release(fragment);
+            var simple: ?*anyopaque = null;
+            try std.testing.expectEqual(com.S_OK, fragment.vtbl.QueryInterface(fragment, &com.IID_IRawElementProviderSimple, &simple));
+            return @ptrCast(@alignCast(simple orelse return error.TestExpectedRow));
+        }
+
+        fn enabled(element: *com.IRawElementProviderSimple) !bool {
+            var value = com.VARIANT.empty();
+            try std.testing.expectEqual(com.S_OK, element.vtbl.GetPropertyValue(element, constants.UIA_IsEnabledPropertyId, &value));
+            return value.value.bool_val == com.VARIANT_TRUE;
+        }
+
+        /// Invoke the list's row at `position` through UIA.
+        fn invokeRow(list: *ReferenceList, position: usize) !com.HRESULT {
+            const row = try rowAt(list, position);
+            defer _ = row.vtbl.Release(row);
+            var pattern: ?*com.IUnknown = null;
+            try std.testing.expectEqual(com.S_OK, row.vtbl.GetPatternProvider(row, constants.UIA_InvokePatternId, &pattern));
+            const invoke: *com.IInvokeProvider = @ptrCast(@alignCast(pattern orelse return error.TestExpectedInvoke));
+            defer _ = invoke.vtbl.Release(invoke);
+            return invoke.vtbl.Invoke(invoke);
+        }
+
+        /// The list, and its row at `position`, say they are disabled, and
+        /// the row's Invoke is refused.
+        fn expectHeld(list: *ReferenceList, position: usize) !void {
+            const provider = list.provider orelse return error.TestExpectedProvider;
+            try std.testing.expect(!try enabled(&provider.base));
+            const row = try rowAt(list, position);
+            defer _ = row.vtbl.Release(row);
+            try std.testing.expect(!try enabled(row));
+            try std.testing.expectEqual(com.UIA_E_ELEMENTNOTENABLED, try invokeRow(list, position));
+        }
+
+        fn positionOf(list: *const ReferenceList, id: u16) !usize {
+            return for (list.shown[0..list.shown_count], 0..) |shown, at| {
+                if (shown == id) break at;
+            } else error.TestExpectedRow;
+        }
+
+        fn body() !void {
+            const keyboard = win32_input.TestingKeyboard.pinNone();
+            defer keyboard.release();
+            const alloc = std.testing.allocator;
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var path: []u8 = &.{};
+            const fixture = try profileFixture(&tmp, "profile-command = py: python.exe\n", &path);
+            defer alloc.free(path);
+            defer fixture.finish();
+            const settings = &fixture.settings;
+            const list = &settings.profile_list;
+            const list_hwnd = list.hwnd orelse return error.TestExpectedList;
+
+            // py's command line, changed, to be saved.
+            list.selectPosition(try positionOf(list, settings.profile_model.findField(.command, "py", null) orelse return error.TestExpectedRow));
+            try std.testing.expect(fixture.pumpKey(VK_RETURN));
+            typeInto((try openEdit(settings)).hwnd.?, "python.exe -i");
+            try std.testing.expect(fixture.pumpKey(VK_RETURN));
+            try std.testing.expect(settings.profile_edit == null);
+            // Key bindings and All settings are read once, so their lists
+            // have rows to show while the page is held.
+            for ([_]Section{ .keybindings, .reference, .profiles }) |section| settings.setActiveSection(section);
+
+            // The save is done, and the window cannot copy the running
+            // settings: it holds the page until it can.
+            var failing = std.testing.FailingAllocator.init(settings.handle.alloc, .{});
+            const real = settings.handle.alloc;
+            settings.handle.alloc = failing.allocator();
+            defer settings.handle.alloc = real;
+            fixture.starve_after_save = &failing;
+            defer fixture.starve_after_save = null;
+            settings.save();
+            try std.testing.expectEqual(@as(u32, 1), fixture.saved);
+            try std.testing.expect(settings.owes_draft);
+            // Memory is back, and the window has not yet tried again: the
+            // draft is still owed.
+            const hwnd = settings.hwnd orelse return error.TestExpectedWindow;
+            try std.testing.expect(sys.KillTimer(hwnd, refresh_timer_id) != 0);
+            failing.fail_index = std.math.maxInt(usize);
+            try std.testing.expect(sys.IsWindowEnabled(list_hwnd) == 0);
+
+            // A UIA client invokes py's command line row: refused, and no
+            // field is made, so nothing takes a SetValue the draft would
+            // lose.
+            const py = try positionOf(list, settings.profile_model.findField(.command, "py", null) orelse return error.TestExpectedRow);
+            try expectHeld(list, py);
+            try std.testing.expect(settings.profile_edit == null);
+            try std.testing.expect(sys.GetWindow(list_hwnd, GW_CHILD) == null);
+            // The list's own Invoke refuses too, should a row be reached
+            // past it: the client hears that the call did not act.
+            try std.testing.expect(!referenceUiaInvokeRow(list, py));
+            try std.testing.expect(!settings.profileInvoke());
+            try std.testing.expect(settings.profile_edit == null);
+            try std.testing.expect(sys.GetWindow(list_hwnd, GW_CHILD) == null);
+
+            // Key bindings and All settings, shown while held: their rows
+            // open no config file.
+            const pages = [_]Section{ .keybindings, .reference, .profiles };
+            for (pages) |section| {
+                settings.setActiveSection(section);
+                const shown = settings.sectionList(section) orelse return error.TestExpectedList;
+                try std.testing.expect(shown.shown_count > 0);
+                try expectHeld(shown, 0);
+            }
+            try std.testing.expectEqual(@as(u32, 0), fixture.editor_opened);
+            try std.testing.expect(settings.profile_edit == null);
+            // The record of what was held keeps no list that went with its
+            // page: another round of the same pages leaves it as it was.
+            const held = settings.held_control_count;
+            for (pages) |section| settings.setActiveSection(section);
+            try std.testing.expectEqual(held, settings.held_control_count);
+
+            // The window tries again: the draft starts over, and the rows
+            // take an Invoke, whose field takes a value.
+            _ = sys.SendMessageW(hwnd, WM_ACTIVATE, 1, 0);
+            try std.testing.expect(!settings.owes_draft);
+            const again = try positionOf(list, settings.profile_model.findField(.command, "py", null) orelse return error.TestExpectedRow);
+            try std.testing.expect(try enabled(&(list.provider orelse return error.TestExpectedProvider).base));
+            try std.testing.expectEqual(com.S_OK, try invokeRow(list, again));
+            const provider = (try openEdit(settings)).provider orelse return error.TestExpectedProvider;
+            try std.testing.expectEqual(com.S_OK, provider.value_iface.vtbl.SetValue(&provider.value_iface, std.unicode.utf8ToUtf16LeStringLiteral("python.exe -q")));
             try std.testing.expect(fixture.pumpKey(VK_ESCAPE));
         }
     }.body);
