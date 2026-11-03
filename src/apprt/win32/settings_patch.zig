@@ -569,16 +569,23 @@ pub const Unread = struct {
     }
 };
 
+/// Tests only: how the App loads the config for a Settings save (its check,
+/// its fresh profile layers and its reload), instead of the real config
+/// files, so a test of the save never reaches the real profile.
+pub threadlocal var test_config_load: if (@import("builtin").is_test) ?*const fn (Allocator) anyerror!Config else void =
+    if (@import("builtin").is_test) null else {};
+
 /// What a save that wrote `edits` says of them after its reload (`reload`,
 /// in the app's light/dark state). A file the reload could not read whole
-/// comes first: a field or a reset it missed is no override, so the save
-/// names that file (`.unread`) and nothing as overridden. Otherwise the
-/// fields another layer overrides go to `masked` (`writeMasked`, after a
-/// separator when `after`), and the report is `.masked`, or `.held` when
-/// there are none.
+/// comes first, for any save, one of ordinary settings alone too: a field
+/// or a reset it missed is no override, so the save names that file
+/// (`.unread`) and nothing as overridden, and keeps the running settings.
+/// Otherwise the fields another layer overrides go to `masked`
+/// (`writeMasked`, after a separator when `after`), and the report is
+/// `.masked`, or `.held` when there are none.
 pub fn reloadReport(masked: *std.Io.Writer, edits: []const Edit, reload: *const Config, after: bool) std.Io.Writer.Error!union(enum) { held, masked, unread: Unread } {
-    if (edits.len == 0) return .held;
     if (unreadConfigFile(reload)) |unread| return .{ .unread = unread };
+    if (edits.len == 0) return .held;
     return if (try writeMasked(masked, edits, reload, after)) .masked else .held;
 }
 
@@ -1325,7 +1332,10 @@ test "settings patch: a reload that could not read a file whole reports the file
     try whole.loadReader(alloc, &reader, "C:\\noctty-test\\more.conf");
     try testing.expect(try reloadReport(&masked.writer, &edits, &whole, false) == .masked);
     try expectSameText("profile-name py", masked.written());
-    try testing.expect(try reloadReport(&masked.writer, &.{}, &reload, false) == .held);
+    // A save of ordinary settings alone is told the same: it used to be
+    // `.held`, and the partial reload was applied.
+    try testing.expect(try reloadReport(&masked.writer, &.{}, &reload, false) == .unread);
+    try testing.expect(try reloadReport(&masked.writer, &.{}, &whole, false) == .held);
 }
 
 test "settings patch: a removal is decided in the light/dark state the app applies, so a profile only the dark theme defines keeps its tombstone" {

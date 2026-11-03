@@ -901,10 +901,13 @@ const StatusNote = enum {
     none,
     saved,
     saved_overridden,
-    /// Saved, but the reload could not read a config file whole, so what
-    /// was saved may not all be in effect (`SaveError.SavedButUnread`).
+    /// Saved, but the reload could not read a config file whole, so the
+    /// running settings were kept as they were (`SaveError.SavedButUnread`).
     saved_unread,
     save_failed,
+    /// Another program edited the config file while it was being saved, and
+    /// checked again it kept changing: nothing was saved.
+    disk_changed,
     /// The config file is UTF-16 or UTF-32 text that a save cannot patch.
     unsupported_encoding,
     /// The config path is a link whose target is missing.
@@ -953,7 +956,8 @@ const StatusNote = enum {
             .none => "",
             .saved => "Settings saved.",
             .saved_overridden => "Saved, but a later config file or command-line option overrides some of these values, so they will not take effect.",
-            .saved_unread => "Saved, but a config file could not be read whole, so the saved values may not all be in effect until it can be read.",
+            .saved_unread => "Saved, but a config file could not be read whole, so the running settings are unchanged. Reload the configuration once it can be read to use the saved values.",
+            .disk_changed => "Nothing was saved: another program changed the config file while it was being saved. Save again. Your edits are kept.",
             .save_failed => "Save failed. Your edits are kept. Check that the config file can be written and is not open in another program, then try again.",
             .unsupported_encoding => "Nothing was saved: the config file is not readable as UTF-8 text (Windows PowerShell 5.1 writes UTF-16). Save it as UTF-8 in an editor, then save again. Your edits are kept.",
             .dangling_link => "Nothing was saved: the config file is a link to a file that does not exist. Fix or remove the link, then save again. Your edits are kept.",
@@ -996,7 +1000,7 @@ const StatusNote = enum {
     fn textWithDetail(self: StatusNote, alloc: std.mem.Allocator, detail: []const u8) std.mem.Allocator.Error![]u8 {
         return switch (self) {
             .saved_overridden => std.fmt.allocPrint(alloc, "Saved, but a later config file or command-line option overrides {s}, so the saved value is not used.", .{detail}),
-            .saved_unread => std.fmt.allocPrint(alloc, "Saved, but {s} could not be read whole, so the saved values may not all be in effect until it can be read.", .{detail}),
+            .saved_unread => std.fmt.allocPrint(alloc, "Saved, but {s} could not be read whole, so the running settings are unchanged. Reload the configuration once it can be read to use the saved values.", .{detail}),
             .unsupported_encoding => std.fmt.allocPrint(alloc, "Nothing was saved: {s} is not readable as UTF-8 text (Windows PowerShell 5.1 writes UTF-16). Save it as UTF-8 in an editor, then save again. Your edits are kept.", .{detail}),
             .binary_config => std.fmt.allocPrint(alloc, "Nothing was saved: {s} contains NUL bytes, so it is a binary file or text in UTF-16 or UTF-32. Save it as UTF-8 in an editor, then save again. Your edits are kept.", .{detail}),
             .file_unopenable => std.fmt.allocPrint(alloc, "Nothing was saved: {s} cannot be opened. Close any program that has it open, or check its permissions, then save again. Your edits are kept.", .{detail}),
@@ -1761,6 +1765,7 @@ fn saveFailureNote(err: SaveError) StatusNote {
         error.DanglingLink => .dangling_link,
         error.FileUnopenable => .file_unopenable,
         error.IncompleteWrite => .write_incomplete,
+        error.DiskChanged => .disk_changed,
         else => .save_failed,
     };
 }
@@ -3039,6 +3044,7 @@ pub const SettingsWindow = struct {
             // These are about edits that are still there to be saved.
             .field_reset,
             .save_failed,
+            .disk_changed,
             .unsupported_encoding,
             .binary_config,
             .dangling_link,
@@ -6391,6 +6397,19 @@ pub const SettingsWindow = struct {
                 // preview (`livePreviews` is empty while a save is in
                 // flight); the draft stays, and so does its preview.
                 self.previewDrafts();
+                // Another program changed the file after the check read it.
+                // When that was under an edited setting the App applied the
+                // file, while this save was in flight, when the window takes
+                // no external change (`ApplyAlreadyPending`): it is merged
+                // now, and the choice shown, as for a change the check finds.
+                if (err == error.DiskChanged) {
+                    self.externalConfigChanged(self.handle.currentConfig(self.handle.ctx), self.currentRevision());
+                    if (self.conflictCount() != 0) {
+                        std.log.info("settings: the config file changed while saving; offering the choice; draft preserved", .{});
+                        self.surfaceNextValidation(false);
+                        return;
+                    }
+                }
                 std.log.warn("settings: save failed err={}; draft preserved", .{err});
                 self.setSaveFailureNote(err);
                 self.updateSaveEnabled();
@@ -9693,6 +9712,69 @@ test "settings save checks the file for edits first, and a conflict stops it" {
     try std.testing.expectEqual(@as(u32, 4), capture.asked);
     try std.testing.expectEqual(@as(u32, 2), capture.saved);
     try std.testing.expectEqual(StatusNote.save_failed, settings.status_note);
+    try std.testing.expectEqual(@as(f32, 14), settings.pending.?.@"font-size");
+}
+
+test "settings save whose file changed after the check shows the choice, and says so when it kept changing" {
+    const Capture = struct {
+        saved: u32 = 0,
+        /// The App's config, which a file another program changed under an
+        /// edited setting after the check replaces during the save.
+        app_config: Config = undefined,
+        /// What that program writes for the font size; null when it changed
+        /// nothing under the draft.
+        disk_font_size: ?f32 = null,
+        settings: *SettingsWindow = undefined,
+        fn save(ctx: *anyopaque, _: *const Config, _: *const Config) SaveError!void {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            self.saved += 1;
+            const size = self.disk_font_size orelse return error.DiskChanged;
+            // What the App does: apply the file as a reload, which reaches
+            // the window while its save is in flight.
+            self.app_config.@"font-size" = size;
+            self.settings.externalConfigChanged(&self.app_config, 100);
+            return error.DiskChanged;
+        }
+        fn current(ctx: *anyopaque) *const Config {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            return &self.app_config;
+        }
+        fn reconcile(_: *anyopaque, _: *const Config, _: *const Config) SaveError!void {}
+    };
+    const edit = sys.CreateWindowExW(0, std.unicode.utf8ToUtf16LeStringLiteral("EDIT"), std.unicode.utf8ToUtf16LeStringLiteral(""), 0, 0, 0, 1, 1, null, null, null, null) orelse return error.Unexpected;
+    defer _ = sys.DestroyWindow(edit);
+    const current = try Config.default(std.testing.allocator);
+    var capture: Capture = .{ .disk_font_size = 16, .app_config = try Config.default(std.testing.allocator) };
+    defer capture.app_config.deinit();
+    var settings: SettingsWindow = .{
+        .handle = .{ .ctx = &capture, .alloc = std.testing.allocator, .hinstance = undefined, .chromeBg = undefined, .textPrimary = undefined, .openInEditor = undefined, .currentConfig = Capture.current, .saveAndReload = Capture.save, .notifySuccess = undefined, .onClosed = undefined, .reconcileDisk = Capture.reconcile },
+        .current = current,
+        .original = try current.clone(std.testing.allocator),
+        .pending = try current.clone(std.testing.allocator),
+        .fields = .{ .edit_font_size = edit },
+    };
+    capture.settings = &settings;
+    settings.initTransaction();
+    defer settings.clearPending();
+    _ = sys.SetWindowTextW(edit, std.unicode.utf8ToUtf16LeStringLiteral("14"));
+    settings.syncNumberFromEdit(.font_size);
+
+    // The file now says 16 for the setting being edited: the conflict is
+    // shown as one the check finds, not as a failed save, and the draft kept.
+    settings.status_note = .none;
+    settings.save();
+    try std.testing.expectEqual(@as(u32, 1), capture.saved);
+    try std.testing.expect(settings.hasConflict(.font_size));
+    try std.testing.expectEqual(StatusNote.none, settings.status_note);
+    try std.testing.expectEqual(@as(f32, 14), settings.pending.?.@"font-size");
+
+    // A file that kept changing with nothing under the draft: nothing saved,
+    // and the status says why.
+    settings.resolveConflict(.font_size, .keep_mine);
+    capture.disk_font_size = null;
+    settings.save();
+    try std.testing.expectEqual(@as(u32, 2), capture.saved);
+    try std.testing.expectEqual(StatusNote.disk_changed, settings.status_note);
     try std.testing.expectEqual(@as(f32, 14), settings.pending.?.@"font-size");
 }
 
@@ -13004,7 +13086,7 @@ const dialog_test = struct {
                 defer profile_arena.deinit();
                 const profile_edits = settings_patch.editsForSave(profile_arena.allocator(), std.testing.allocator, &.{&self.config}, self.config._conditional_state, original, pending, path, &settings_reference.samePath) catch
                     return error.OutOfMemory;
-                try app.persistSettings(std.testing.allocator, path, pending, edited, profile_edits, null);
+                try app.persistSettings(std.testing.allocator, path, pending, edited, profile_edits, null, null);
                 if (self.reload_from_disk) {
                     var reloaded = Config.default(std.testing.allocator) catch return error.ReloadFailed;
                     read: {
@@ -13024,10 +13106,12 @@ const dialog_test = struct {
                             defer std.testing.allocator.free(text);
                             self.unread_len = @min(text.len, self.unread.len);
                             @memcpy(self.unread[0..self.unread_len], text[0..self.unread_len]);
+                            // As the App: the partial reload is not applied.
+                            reloaded.deinit();
+                            return error.SavedButUnread;
                         }
                         self.config.deinit();
                         self.config = reloaded;
-                        if (report == .unread) return error.SavedButUnread;
                         if (self.masked_len != 0) return error.SavedButMasked;
                         return;
                     }
@@ -21138,14 +21222,15 @@ fn referenceUiaSelectRow(ctx: *anyopaque, index: usize) void {
     referenceOwner(ctx).selectPosition(index);
 }
 
-fn referenceUiaInvokeRow(ctx: *anyopaque, index: usize) void {
+fn referenceUiaInvokeRow(ctx: *anyopaque, index: usize) bool {
     const list = referenceOwner(ctx);
     // An Invoke acts on the row it names. When the selection could not move
     // there (the Profiles page kept an open field first and rebuilt its
     // rows, or held a field it could not keep), it is dropped, rather than
     // run on the row still selected; the client invokes again.
-    if (!list.selectRequested(index)) return;
+    if (!list.selectRequested(index)) return false;
     list.invokeSelected();
+    return true;
 }
 
 fn referenceUiaRowBounds(ctx: *anyopaque, index: usize) ?win32_uia.PaletteListRowBounds {
@@ -22118,9 +22203,13 @@ test "settings a save whose reload could not read an included file whole says so
             dialog_test.pump();
             try std.testing.expectEqual(@as(u32, 1), fixture.saved);
             try std.testing.expectEqual(StatusNote.saved_unread, settings.status_note);
-            const expected = try std.fmt.allocPrint(alloc, "Saved, but the included file {s} could not be read whole, so the saved values may not all be in effect until it can be read.", .{more});
+            const expected = try std.fmt.allocPrint(alloc, "Saved, but the included file {s} could not be read whole, so the running settings are unchanged. Reload the configuration once it can be read to use the saved values.", .{more});
             defer alloc.free(expected);
             try expectSameText(expected, try statusTextOf(settings, &buf));
+            // The window shows what runs, which the partial reload did not
+            // change: no label yet, and nothing left to save.
+            try std.testing.expect(settings.original.?.@"profile-name".get("py") == null);
+            try std.testing.expect(!settings.hasPendingChanges());
         }
     }.body);
 }
@@ -22147,19 +22236,42 @@ test "settings a UIA Invoke on another profile's row while a change is open keep
             const far = for (list.shown[0..list.shown_count], 0..) |id, position| {
                 if (id == p29) break position;
             } else return error.TestExpectedRow;
+            // A UIA client holds p29's command line row: the focus is on it
+            // when the client takes it.
+            const com = @import("win32_uia/com.zig");
+            const constants = @import("win32_uia/constants.zig");
+            const provider = list.provider orelse return error.TestExpectedProvider;
+            _ = SetFocus(list.hwnd orelse return error.TestExpectedList);
+            list.selectPosition(far);
+            var focus: ?*com.IRawElementProviderFragment = null;
+            try std.testing.expectEqual(com.S_OK, provider.fragment_root.vtbl.GetFocus(&provider.fragment_root, &focus));
+            const row_fragment = focus orelse return error.TestExpectedRow;
+            defer _ = row_fragment.vtbl.Release(row_fragment);
+            var simple_ptr: ?*anyopaque = null;
+            try std.testing.expectEqual(com.S_OK, row_fragment.vtbl.QueryInterface(row_fragment, &com.IID_IRawElementProviderSimple, &simple_ptr));
+            const row: *com.IRawElementProviderSimple = @ptrCast(@alignCast(simple_ptr orelse return error.TestExpectedRow));
+            defer _ = row.vtbl.Release(row);
+            var pattern: ?*com.IUnknown = null;
+            try std.testing.expectEqual(com.S_OK, row.vtbl.GetPatternProvider(row, constants.UIA_InvokePatternId, &pattern));
+            const invoke: *com.IInvokeProvider = @ptrCast(@alignCast(pattern orelse return error.TestExpectedInvoke));
+            defer _ = invoke.vtbl.Release(invoke);
             // p0's command line field, typed into.
             list.selectPosition(2);
             try std.testing.expect(fixture.pumpKey(VK_RETURN));
             typeInto((try openEdit(settings)).hwnd.?, "cmd0.exe /k");
-            // What a UIA client's Invoke on p29's command line row calls.
-            referenceUiaInvokeRow(list, far);
-            // The change was kept for p0, and no field was opened again: the
-            // rows were rebuilt, so the Invoke no longer named a row.
+            // The client invokes p29's row: the change is kept for p0, and the
+            // rows are rebuilt, so the Invoke no longer names a row. Nothing
+            // is opened, and the client hears that the call did not act.
+            try std.testing.expectEqual(com.UIA_E_INVALIDOPERATION, invoke.vtbl.Invoke(invoke));
             try std.testing.expect(settings.profile_edit == null);
             try expectSameText("cmd0.exe /k", settings.pending.?.@"profile-command".get("p0") orelse return error.TestExpectedCommand);
             // Invoked again, it opens the row it names.
-            const target = list.shown[far];
-            referenceUiaInvokeRow(list, far);
+            try std.testing.expectEqual(com.S_OK, invoke.vtbl.Invoke(invoke));
+            const target = list.shown[
+                for (list.shown[0..list.shown_count], 0..) |id, position| {
+                    if (id == p29) break position;
+                } else return error.TestExpectedRow
+            ];
             try std.testing.expectEqual(@as(?u16, target), list.selected);
             try std.testing.expectEqual(ProfileEdit.Kind.command, (try openEdit(settings)).kind);
             try expectSameText("p29", (try openEdit(settings)).id());

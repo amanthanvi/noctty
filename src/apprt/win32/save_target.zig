@@ -46,7 +46,66 @@ pub const WriteError = error{
     /// The in-place rewrite failed after its first byte: the file may hold new
     /// bytes followed by old ones, and the complete text is in the kept copy.
     IncompleteWrite,
+    /// The file no longer holds what the caller read (`writeOver`), so another
+    /// program edited it since: nothing was written.
+    Changed,
 } || Allocator.Error;
+
+pub const ReadError = error{
+    ReadFailed,
+    /// Larger than any config file a save reads (`max_bytes`).
+    TooLarge,
+} || Allocator.Error;
+
+/// The most bytes a save reads of a config file.
+pub const max_bytes = 16 * 1024 * 1024;
+
+/// What a save read of a file, to tell whether it still holds that: the
+/// SHA-256 of its bytes.
+pub const Digest = [std.crypto.hash.sha2.Sha256.digest_length]u8;
+
+pub fn digestOf(bytes: []const u8) Digest {
+    var out: Digest = undefined;
+    std.crypto.hash.sha2.Sha256.hash(bytes, &out, .{});
+    return out;
+}
+
+/// The bytes of the file at `path` (a `Target.path`) as a save reads them: a
+/// file that is not there reads as empty. Owned.
+pub fn read(alloc: Allocator, path: []const u8) ReadError![]u8 {
+    const file = std.fs.cwd().openFile(path, .{}) catch |err| switch (err) {
+        error.FileNotFound => return alloc.dupe(u8, ""),
+        else => return error.ReadFailed,
+    };
+    defer file.close();
+    const stat = file.stat() catch return error.ReadFailed;
+    if (stat.size > max_bytes) return error.TooLarge;
+    const slice = try alloc.alloc(u8, @intCast(stat.size));
+    errdefer alloc.free(slice);
+    const n = file.readAll(slice) catch return error.ReadFailed;
+    return alloc.realloc(slice, n);
+}
+
+/// The digest of what the file the configured `path` reaches holds now, as a
+/// save would read it; null when that cannot be read (the save reports why).
+pub fn digestNow(alloc: Allocator, path: []const u8) Allocator.Error!?Digest {
+    const target = resolve(alloc, path) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.DanglingLink => return null,
+    };
+    defer target.deinit(alloc);
+    const bytes = read(alloc, target.path) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return null,
+    };
+    defer alloc.free(bytes);
+    return digestOf(bytes);
+}
+
+/// A test's stand-in for another program: run by `writeOver` just before it
+/// compares the file with what was read (SETTINGS-SAVE-TOCTOU).
+pub threadlocal var test_before_compare: if (@import("builtin").is_test) ?*const fn () void else void =
+    if (@import("builtin").is_test) null else {};
 
 /// Follow `path` to the file it names. A name with no file behind it is the
 /// first save and resolves to itself. What cannot be learned (a volume that
@@ -179,6 +238,15 @@ fn isDeviceName(component: []const u8) bool {
 /// the temporary file stays if it fails, as the only complete copy, and
 /// `kept_copy` (when given) receives its path: owned by the caller.
 pub fn write(alloc: Allocator, target: Target, bytes: []const u8, kept_copy: ?*?[]u8) WriteError!void {
+    return writeOver(alloc, target, bytes, kept_copy, null);
+}
+
+/// `write`, when the file still holds what was read of it as `read_as`. That
+/// is compared once the new bytes are safely in the temporary file, just
+/// before they take the file's place, so an edit another program made since
+/// the read is not written over: then nothing is written (`Changed`). A file
+/// that cannot be read at that moment is not written either.
+pub fn writeOver(alloc: Allocator, target: Target, bytes: []const u8, kept_copy: ?*?[]u8, read_as: ?Digest) WriteError!void {
     const tmp_path = try std.fmt.allocPrint(
         alloc,
         "{s}.tmp-{x}-{x}",
@@ -198,6 +266,16 @@ pub fn write(alloc: Allocator, target: Target, bytes: []const u8, kept_copy: ?*?
         fw.interface.writeAll(bytes) catch return error.SerializeFailed;
         fw.interface.flush() catch return error.SerializeFailed;
         tmp.sync() catch return error.SerializeFailed;
+    }
+
+    if (read_as) |digest| {
+        if (@import("builtin").is_test) if (test_before_compare) |hook| hook();
+        const now = read(alloc, target.path) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return error.ReplaceFailed,
+        };
+        defer alloc.free(now);
+        if (!std.mem.eql(u8, &digestOf(now), &digest)) return error.Changed;
     }
 
     if (target.hard_linked) {

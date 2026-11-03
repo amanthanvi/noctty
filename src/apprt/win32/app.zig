@@ -260,6 +260,7 @@ const win32_session_state = @import("../win32_session_state.zig");
 const win32_settings = @import("../win32_settings.zig");
 const settings_reference = @import("../win32_settings_reference.zig");
 const settings_patch = @import("settings_patch.zig");
+const save_target = @import("save_target.zig");
 const win32_shell = @import("../win32_shell.zig");
 const win32_structural_history = @import("../win32_structural_history.zig");
 const win32_taskbar_progress = @import("../win32_taskbar_progress.zig");
@@ -837,6 +838,12 @@ pub const App = struct {
     /// The config keys the last Settings save wrote that a later layer
     /// overrides, comma separated, for its status line and notification.
     settings_masked_keys: win32_settings.FailureDetail = .{},
+    /// What the check before a Settings save (`settingsReconcileDisk`) read of
+    /// the file the save writes, and whether that check may apply a changed
+    /// file (the window's, which offers the choice) or only refuse (the
+    /// palette's theme pick). The save takes it: an edit another program made
+    /// in between is not written over (SETTINGS-SAVE-TOCTOU).
+    settings_check: ?SettingsCheck = null,
     /// What the config last loaded (startup, reload, Settings save) found
     /// wrong, and the fonts it names that no installed font matches. Copies:
     /// the config that held the diagnostics is gone after a reload.
@@ -8617,27 +8624,54 @@ pub const App = struct {
         // In the light/dark state the app applies now, which may have
         // changed since Settings opened (`settings_patch.editsForSave`).
         const state = self.core_app.config_conditional_state;
-        var profile_edits = settings_patch.editsForSave(profile_arena.allocator(), alloc, &.{&self.config}, state, original, pending, target_path, &settings_reference.samePath) catch |err|
-            return settingsProfileEditsFailed(err);
-        // Whether another file still names a removed profile decides a
-        // tombstone or a deletion, and `self.config` is as of the last reload:
-        // a file that gained the profile since, with no reload, would be
-        // missed and the profile come back. With profile edits to make, the
-        // layers are read from disk again (`settingsProfileEditsFromDisk`).
-        if (profile_edits.len != 0) {
-            profile_edits = try settingsProfileEditsFromDisk(profile_arena.allocator(), alloc, &self.settings_failure_detail, self.loadConfigAtStartupCwd(), &self.config, state, original, pending, target_path);
-        }
-        // No-op short-circuit: if the user pressed Save without
-        // changing anything, don't touch the filesystem. On a
-        // first-run machine with no existing config file, the write
-        // would otherwise create a zero-byte file that then fires
-        // `error.FileIsEmpty` warnings on every subsequent load.
-        // On an existing file, skipping also avoids an unnecessary
-        // mtime bump.
-        if (user_edited.count() == 0 and profile_edits.len == 0) return;
+        // What the check before this save read of the file, taken here so a
+        // later save without one compares nothing stale.
+        var check: SettingsCheck = self.settings_check orelse .{ .read_as = null, .apply = true };
+        self.settings_check = null;
+        var checked_again = false;
+        var profile_edits: []settings_patch.Edit = undefined;
+        while (true) {
+            _ = profile_arena.reset(.retain_capacity);
+            profile_edits = settings_patch.editsForSave(profile_arena.allocator(), alloc, &.{&self.config}, state, original, pending, target_path, &settings_reference.samePath) catch |err|
+                return settingsProfileEditsFailed(err);
+            // Whether another file still names a removed profile decides a
+            // tombstone or a deletion, and `self.config` is as of the last
+            // reload: a file that gained the profile since, with no reload,
+            // would be missed and the profile come back. With profile edits to
+            // make, the layers are read from disk again
+            // (`settingsProfileEditsFromDisk`), a check of their own: the file
+            // is compared with what it held as they were read, unless the
+            // check before the save read it first.
+            if (profile_edits.len != 0) {
+                if (check.read_as == null) check.read_as = try save_target.digestNow(alloc, target_path);
+                profile_edits = try settingsProfileEditsFromDisk(profile_arena.allocator(), alloc, &self.settings_failure_detail, self.loadConfigAtStartupCwd(), &self.config, state, original, pending, target_path);
+            }
+            // No-op short-circuit: if the user pressed Save without
+            // changing anything, don't touch the filesystem. On a
+            // first-run machine with no existing config file, the write
+            // would otherwise create a zero-byte file that then fires
+            // `error.FileIsEmpty` warnings on every subsequent load.
+            // On an existing file, skipping also avoids an unnecessary
+            // mtime bump.
+            if (user_edited.count() == 0 and profile_edits.len == 0) return;
 
-        self.settings_failure_detail.clear(alloc);
-        try persistSettings(alloc, target_path, pending, user_edited, profile_edits, &self.settings_failure_detail);
+            self.settings_failure_detail.clear(alloc);
+            persistSettings(alloc, target_path, pending, user_edited, profile_edits, &self.settings_failure_detail, check.read_as) catch |err| {
+                if (err != error.DiskChanged or checked_again) return err;
+                // Another program edited the file after the check read it, and
+                // nothing was written. It is checked again, as before the save:
+                // an edit under an edited setting goes to the window's choice
+                // (Keep mine or Use disk), or refuses the palette's pick, and
+                // any other edit is kept by saving once more on top of it.
+                log.info("settings save: the config file changed after the check; checking it again", .{});
+                checked_again = true;
+                if (try self.settingsCheckDisk(pending, original, check.apply)) return error.DiskChanged;
+                check = self.settings_check orelse .{ .read_as = null, .apply = check.apply };
+                self.settings_check = null;
+                continue;
+            };
+            break;
+        }
 
         // Saving can repair the config on disk, but recovery applies it only
         // after restart, as the safe-mode banner promises.
@@ -8664,25 +8698,30 @@ pub const App = struct {
         // name only (`settings_patch.writeEditName`).
         var masked_text: std.Io.Writer.Allocating = .init(alloc);
         defer masked_text.deinit();
-        masked_text.writer.writeAll(settingsMaskedKeyNames(&masked_buf, user_edited, pending, &reloaded)) catch return error.OutOfMemory;
-        // The profile fields as `updateConfig` will apply them: a theme can
-        // define a profile in one light/dark state only.
-        var reloaded_applied: ?configpkg.Config = if (profile_edits.len == 0) null else reloaded.changeConditionalState(self.core_app.config_conditional_state) catch |err| applied: {
+        // The settings and profile fields as `updateConfig` will apply them,
+        // in the app's light/dark state: a theme can set a key, or define a
+        // profile, in one state only (a dark theme's `default-profile` takes
+        // over when Automatic deletes the file's line).
+        var reloaded_applied: ?configpkg.Config = reloaded.changeConditionalState(self.core_app.config_conditional_state) catch |err| applied: {
             log.warn("settings save: could not apply the light/dark state to the reload for its check err={}", .{err});
             break :applied null;
         };
         defer if (reloaded_applied) |*value| value.deinit();
+        const applied: *const configpkg.Config = if (reloaded_applied) |*value| value else &reloaded;
+        masked_text.writer.writeAll(settingsMaskedKeyNames(&masked_buf, user_edited, pending, applied)) catch return error.OutOfMemory;
         // A file the reload could not read whole: what it missed is no
         // override, and the save says that instead, naming the file.
-        const report = settings_patch.reloadReport(&masked_text.writer, profile_edits, if (reloaded_applied) |*value| value else &reloaded, masked_text.written().len > 0) catch return error.OutOfMemory;
+        const report = settings_patch.reloadReport(&masked_text.writer, profile_edits, applied, masked_text.written().len > 0) catch return error.OutOfMemory;
         switch (report) {
             .unread => |unread| {
                 const text = unread.describe(alloc) catch return error.OutOfMemory;
                 defer alloc.free(text);
                 self.settings_failure_detail.set(alloc, text);
-                log.warn("settings save: saved, but the reload could not read a config file whole, so the saved values may not all be in effect", .{});
-                self.core_app.updateConfig(self, &reloaded) catch return error.ReloadFailed;
-                _ = self.reportRecordedConfigProblems();
+                // The file is written, but the reload is partial: applied, it
+                // would run the app without what it missed (keybinds, colors)
+                // until the next reload. The running config stays, and the
+                // status says to reload once the file can be read whole.
+                log.warn("settings save: saved, but the reload could not read a config file whole; the running settings are kept", .{});
                 return error.SavedButUnread;
             },
             .held, .masked => {},
@@ -8802,6 +8841,7 @@ pub const App = struct {
     /// return short-circuited the restore, leaving the process pinned to
     /// `startup_cwd` whenever a reload hit a broken config file.
     fn loadConfigAtStartupCwd(self: *App) !configpkg.Config {
+        if (builtin.is_test) if (settings_patch.test_config_load) |load| return load(self.core_app.alloc);
         var startup_cwd = self.enterStartupCwd();
         defer startup_cwd.restore();
         return configpkg.Config.load(self.core_app.alloc);
@@ -8973,28 +9013,51 @@ pub const App = struct {
         original: *const configpkg.Config,
         apply: bool,
     ) win32_settings.SaveError!void {
+        _ = try self.settingsCheckDisk(pending, original, apply);
+    }
+
+    /// What a check before a Settings save leaves for the save
+    /// (`settings_check`).
+    const SettingsCheck = struct { read_as: ?save_target.Digest, apply: bool };
+
+    /// `settingsReconcileDisk`, saying whether the file changed under an
+    /// edited setting (then applied, when `apply`). It leaves for the save
+    /// that follows what it read of the file (`settings_check`), taken before
+    /// the load it judges: an edit after that is a difference the save sees.
+    fn settingsCheckDisk(
+        self: *App,
+        pending: *const configpkg.Config,
+        original: *const configpkg.Config,
+        apply: bool,
+    ) win32_settings.SaveError!bool {
+        self.settings_check = .{ .read_as = null, .apply = apply };
         // Recovery may repair the file, but must never apply its settings live,
         // including through conflict reconciliation before the save.
-        if (self.safe_mode) return;
+        if (self.safe_mode) return false;
         const alloc = self.core_app.alloc;
         self.settings_failure_detail.clear(alloc);
         const user_edited = settingsUserEditedKeys(original, pending);
-        if (user_edited.count() == 0) return;
+        if (user_edited.count() == 0) return false;
         const target_path = try self.settingsTargetPath(alloc);
         defer alloc.free(target_path);
         try settingsFileOpenable(alloc, &self.settings_failure_detail, "the config file", target_path);
+        const read_as = try save_target.digestNow(alloc, target_path);
         var disk = self.loadConfigAtStartupCwd() catch |err| {
             log.warn("settings save: could not read the config file to check it for edits err={}", .{err});
             return error.ReloadFailed;
         };
         defer disk.deinit();
-        if (!try settingsDiskVerdict(alloc, &self.settings_failure_detail, original, pending, &disk, self.core_app.config_conditional_state, user_edited)) return;
+        if (!try settingsDiskVerdict(alloc, &self.settings_failure_detail, original, pending, &disk, self.core_app.config_conditional_state, user_edited)) {
+            self.settings_check = .{ .read_as = read_as, .apply = apply };
+            return false;
+        }
         if (!apply) return error.DiskChanged;
         log.info("settings save: the config file changed on disk under an edited setting; offering the choice", .{});
         self.core_app.updateConfig(self, &disk) catch |err| {
             log.warn("settings save: applying the changed config file failed err={}", .{err});
             return error.ReloadFailed;
         };
+        return true;
     }
 
     /// Open the configuration as text. Kept alive for Advanced pane
@@ -9140,6 +9203,312 @@ pub const App = struct {
         const fresh = try load(alloc, path);
         const edits = try App.settingsProfileEditsFromDisk(arena.allocator(), alloc, &detail, fresh, &held, dark_state, &held, &pending, path);
         for (edits) |e| if (e.field == .command) try std.testing.expect(e.op == .unset);
+    }
+
+    /// The App's Settings save over files in a scratch directory: the config
+    /// loads from `files` in that order (`test_config_load`), the save writes
+    /// `files`' last (`cli_config_override_path`), and nothing reaches the real
+    /// profile. `hook` stands in for another program (`save_target`).
+    const SaveTest = struct {
+        threadlocal var files: []const []const u8 = &.{};
+        /// What the other program writes into `hook_path`, appended or in
+        /// place of what is there, just before the save compares the file.
+        threadlocal var hook_path: []const u8 = "";
+        threadlocal var hook_text: []const u8 = "";
+        threadlocal var hook_append: bool = false;
+        /// A file the other program holds locked from then on.
+        threadlocal var lock_path: []const u8 = "";
+        threadlocal var lock: ?std.fs.File = null;
+
+        fn load(alloc: Allocator) anyerror!configpkg.Config {
+            var cfg = try configpkg.Config.default(alloc);
+            errdefer cfg.deinit();
+            for (files) |file| try cfg.loadFile(alloc, file);
+            try cfg.loadRecursiveFiles(alloc);
+            try cfg.finalize();
+            return cfg;
+        }
+
+        fn hook() void {
+            save_target.test_before_compare = null;
+            if (hook_path.len != 0) {
+                const file = (if (hook_append) std.fs.openFileAbsolute(hook_path, .{ .mode = .read_write }) else std.fs.createFileAbsolute(hook_path, .{})) catch return;
+                defer file.close();
+                if (hook_append) file.seekFromEnd(0) catch return;
+                file.writeAll(hook_text) catch return;
+            }
+            if (lock_path.len != 0) lock = std.fs.openFileAbsolute(lock_path, .{ .mode = .read_write, .lock = .exclusive }) catch null;
+        }
+
+        fn begin(app: *App, target: []const u8) !void {
+            errdefer end(app);
+            settings_patch.test_config_load = load;
+            app.cli_config_override_path = @constCast(target);
+            var loaded = try load(std.testing.allocator);
+            defer loaded.deinit();
+            try app.core_app.updateConfig(app, &loaded);
+        }
+
+        fn end(app: *App) void {
+            app.cli_config_override_path = null;
+            app.settings_failure_detail.clear(std.testing.allocator);
+            app.settings_masked_keys.clear(std.testing.allocator);
+            save_target.test_before_compare = null;
+            settings_patch.test_config_load = null;
+            files = &.{};
+            hook_path = "";
+            hook_text = "";
+            hook_append = false;
+            lock_path = "";
+            if (lock) |file| file.close();
+            lock = null;
+        }
+
+        fn read(path: []const u8) ![]u8 {
+            const file = try std.fs.openFileAbsolute(path, .{});
+            defer file.close();
+            return file.readToEndAlloc(std.testing.allocator, 1 << 20);
+        }
+    };
+
+    test "win32 settings save does not write over an edit another program made after the check, and offers the choice" {
+        if (builtin.os.tag != .windows) return error.SkipZigTest;
+        const alloc = std.testing.allocator;
+        var core_app: CoreApp = undefined;
+        var app: App = undefined;
+        var session: TestSession = .{};
+        try session.init(.{ .core_app = &core_app, .app = &app });
+        defer session.deinit();
+        defer testFreeConfigProblems(&app, alloc);
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        const path = blk: {
+            try tmp.dir.writeFile(.{ .sub_path = "config", .data = "font-size = 12\n" });
+            break :blk try tmp.dir.realpathAlloc(alloc, "config");
+        };
+        defer alloc.free(path);
+        SaveTest.files = &.{path};
+        try SaveTest.begin(&app, path);
+        defer SaveTest.end(&app);
+
+        const Case = enum { between, before_write };
+        for ([_]Case{ .between, .before_write }) |case| {
+            try tmp.dir.writeFile(.{ .sub_path = "config", .data = "font-size = 12\n" });
+            {
+                var loaded = try SaveTest.load(alloc);
+                defer loaded.deinit();
+                try app.core_app.updateConfig(&app, &loaded);
+            }
+            var original = try app.config.clone(alloc);
+            defer original.deinit();
+            var pending = try app.config.clone(alloc);
+            defer pending.deinit();
+            pending.@"font-size" = 15;
+            // The check finds the file as the window last read it.
+            try app.settingsReconcileDisk(&pending, &original, true);
+            // Another program sets the same setting: between the check and
+            // the save, or as the save is about to put its bytes in place.
+            switch (case) {
+                .between => try tmp.dir.writeFile(.{ .sub_path = "config", .data = "font-size = 20\n" }),
+                .before_write => {
+                    SaveTest.hook_path = path;
+                    SaveTest.hook_text = "font-size = 20\n";
+                    save_target.test_before_compare = SaveTest.hook;
+                },
+            }
+            // Nothing is written over it: the save stops, and the file is
+            // applied as a reload, which hands the window its choice.
+            try std.testing.expectError(error.DiskChanged, app.settingsSaveAndReload(&pending, &original));
+            const after = try SaveTest.read(path);
+            defer alloc.free(after);
+            try std.testing.expectEqualStrings("font-size = 20\n", after);
+            try std.testing.expectEqual(@as(f32, 20), app.config.@"font-size");
+        }
+
+        // An edit to another setting is kept: the file is checked again, and
+        // the save goes on top of it.
+        try tmp.dir.writeFile(.{ .sub_path = "config", .data = "font-size = 12\n" });
+        {
+            var loaded = try SaveTest.load(alloc);
+            defer loaded.deinit();
+            try app.core_app.updateConfig(&app, &loaded);
+        }
+        var original = try app.config.clone(alloc);
+        defer original.deinit();
+        var pending = try app.config.clone(alloc);
+        defer pending.deinit();
+        pending.@"font-size" = 15;
+        try app.settingsReconcileDisk(&pending, &original, true);
+        SaveTest.hook_path = path;
+        SaveTest.hook_text = "copy-on-select = true\n";
+        SaveTest.hook_append = true;
+        save_target.test_before_compare = SaveTest.hook;
+        try app.settingsSaveAndReload(&pending, &original);
+        const after = try SaveTest.read(path);
+        defer alloc.free(after);
+        try std.testing.expectEqualStrings("font-size = 15\ncopy-on-select = true\n", after);
+        try std.testing.expectEqual(@as(f32, 15), app.config.@"font-size");
+        try std.testing.expect(app.config.@"copy-on-select" == .true);
+    }
+
+    test "win32 settings save whose reload reads a file only partly keeps the running settings and names the file" {
+        if (builtin.os.tag != .windows) return error.SkipZigTest;
+        const alloc = std.testing.allocator;
+        var core_app: CoreApp = undefined;
+        var app: App = undefined;
+        var session: TestSession = .{};
+        try session.init(.{ .core_app = &core_app, .app = &app });
+        defer session.deinit();
+        defer testFreeConfigProblems(&app, alloc);
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        try tmp.dir.writeFile(.{ .sub_path = "more.conf", .data = "copy-on-select = true\n" });
+        const more = try tmp.dir.realpathAlloc(alloc, "more.conf");
+        defer alloc.free(more);
+        const Case = enum { ordinary, profile };
+        for ([_]Case{ .ordinary, .profile }) |case| {
+            const text = try std.fmt.allocPrint(alloc, "font-size = 12\nprofile-command = py: python.exe\nconfig-file = {s}\n", .{more});
+            defer alloc.free(text);
+            try tmp.dir.writeFile(.{ .sub_path = "config", .data = text });
+            const path = try tmp.dir.realpathAlloc(alloc, "config");
+            defer alloc.free(path);
+            SaveTest.files = &.{path};
+            try SaveTest.begin(&app, path);
+            defer SaveTest.end(&app);
+            var original = try app.config.clone(alloc);
+            defer original.deinit();
+            var pending = try app.config.clone(alloc);
+            defer pending.deinit();
+            switch (case) {
+                .ordinary => pending.@"font-size" = 15,
+                .profile => try pending.@"profile-name".parseCLI(pending._arena.?.allocator(), "py: Python"),
+            }
+            // The window shows a preview of the opacity, as it does while a
+            // draft changes it.
+            if (case == .ordinary) {
+                settingsPreviewFieldThunk(&app, .background_opacity, .{ .background_opacity = 0.5 });
+                try std.testing.expect(app.settings_preview != null);
+            }
+            try app.settingsReconcileDisk(&pending, &original, true);
+            // Another program locks the include's bytes once the check is
+            // done: the save's reload opens it and reads part of it.
+            SaveTest.lock_path = more;
+            save_target.test_before_compare = SaveTest.hook;
+            // The save, as the window makes it.
+            try std.testing.expectError(error.SavedButUnread, settingsSaveAndReloadThunk(&app, &pending, &original));
+            // The preview ends with it: the running settings are what show.
+            try std.testing.expect(app.settings_preview == null);
+            // Written,
+            const after = try SaveTest.read(path);
+            defer alloc.free(after);
+            switch (case) {
+                .ordinary => try std.testing.expect(std.mem.indexOf(u8, after, "font-size = 15\n") != null),
+                .profile => try std.testing.expect(std.mem.indexOf(u8, after, "profile-name = py: Python\n") != null),
+            }
+            // but the partial reload is not applied: the running settings,
+            // the include's among them, stay as they were.
+            try std.testing.expectEqual(@as(f32, 12), app.config.@"font-size");
+            try std.testing.expect(app.config.@"copy-on-select" == .true);
+            try std.testing.expect(app.config.@"profile-name".get("py") == null);
+            // And the status names the file.
+            const expected = try std.fmt.allocPrint(alloc, "the included file {s}", .{more});
+            defer alloc.free(expected);
+            try std.testing.expect(std.mem.eql(u8, expected, app.settings_failure_detail.text orelse return error.TestExpectedDetail));
+        }
+    }
+
+    test "win32 settings save judges what overrides an ordinary setting in the app's light/dark state" {
+        if (builtin.os.tag != .windows) return error.SkipZigTest;
+        const alloc = std.testing.allocator;
+        var core_app: CoreApp = undefined;
+        var app: App = undefined;
+        var session: TestSession = .{};
+        try session.init(.{ .core_app = &core_app, .app = &app });
+        defer session.deinit();
+        defer testFreeConfigProblems(&app, alloc);
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        try tmp.dir.writeFile(.{ .sub_path = "light", .data = "# light\n" });
+        try tmp.dir.writeFile(.{ .sub_path = "dark", .data = "default-profile = pwsh.exe\n" });
+        const light = try tmp.dir.realpathAlloc(alloc, "light");
+        defer alloc.free(light);
+        const dark = try tmp.dir.realpathAlloc(alloc, "dark");
+        defer alloc.free(dark);
+        const text = try std.fmt.allocPrint(alloc, "theme = light:{s},dark:{s}\ndefault-profile = cmd.exe\n", .{ light, dark });
+        defer alloc.free(text);
+        try tmp.dir.writeFile(.{ .sub_path = "config", .data = text });
+        const path = try tmp.dir.realpathAlloc(alloc, "config");
+        defer alloc.free(path);
+        // The app runs dark.
+        core_app.config_conditional_state = .{ .theme = .dark };
+        SaveTest.files = &.{path};
+        try SaveTest.begin(&app, path);
+        defer SaveTest.end(&app);
+        try std.testing.expectEqualStrings("cmd.exe", app.config.@"default-profile" orelse return error.TestExpectedProfile);
+        var original = try app.config.clone(alloc);
+        defer original.deinit();
+        var pending = try app.config.clone(alloc);
+        defer pending.deinit();
+        // Automatic: the file's line goes, and in the dark state the dark
+        // theme's value takes over, which the light reading does not see.
+        pending.@"default-profile" = null;
+        try std.testing.expectError(error.SavedButMasked, app.settingsSaveAndReload(&pending, &original));
+        try std.testing.expectEqualStrings("default-profile", app.settings_masked_keys.text orelse return error.TestExpectedMasked);
+        // In the light state nothing overrides it.
+        app.settings_masked_keys.clear(alloc);
+        core_app.config_conditional_state = .{};
+        try tmp.dir.writeFile(.{ .sub_path = "config", .data = text });
+        {
+            var loaded = try SaveTest.load(alloc);
+            defer loaded.deinit();
+            try app.core_app.updateConfig(&app, &loaded);
+        }
+        var light_original = try app.config.clone(alloc);
+        defer light_original.deinit();
+        var light_pending = try app.config.clone(alloc);
+        defer light_pending.deinit();
+        light_pending.@"default-profile" = null;
+        try app.settingsSaveAndReload(&light_pending, &light_original);
+        try std.testing.expect(app.settings_masked_keys.text == null);
+    }
+
+    test "win32 settings save of a profile removal reads the layers again: a lower file that gained the profile keeps a tombstone" {
+        if (builtin.os.tag != .windows) return error.SkipZigTest;
+        const alloc = std.testing.allocator;
+        var core_app: CoreApp = undefined;
+        var app: App = undefined;
+        var session: TestSession = .{};
+        try session.init(.{ .core_app = &core_app, .app = &app });
+        defer session.deinit();
+        defer testFreeConfigProblems(&app, alloc);
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        try tmp.dir.writeFile(.{ .sub_path = "lower.conf", .data = "# a file loaded first\n" });
+        try tmp.dir.writeFile(.{ .sub_path = "config", .data = "font-size = 12\nprofile-command = py: python.exe\n" });
+        const lower = try tmp.dir.realpathAlloc(alloc, "lower.conf");
+        defer alloc.free(lower);
+        const path = try tmp.dir.realpathAlloc(alloc, "config");
+        defer alloc.free(path);
+        SaveTest.files = &.{ lower, path };
+        try SaveTest.begin(&app, path);
+        defer SaveTest.end(&app);
+        var original = try app.config.clone(alloc);
+        defer original.deinit();
+        var pending = try app.config.clone(alloc);
+        defer pending.deinit();
+        // The draft removes `py`, which only the target file defines as the
+        // app last read the files.
+        try pending.@"profile-command".parseCLI(pending._arena.?.allocator(), "py:");
+        // While Settings is open, the file loaded first gains `py`, with no
+        // reload.
+        try tmp.dir.writeFile(.{ .sub_path = "lower.conf", .data = "profile-command = py: other.exe\n" });
+        try app.settingsSaveAndReload(&pending, &original);
+        // Deleting the line would bring `py` back from the lower file: the
+        // save read the layers again and wrote a tombstone.
+        const after = try SaveTest.read(path);
+        defer alloc.free(after);
+        try std.testing.expect(std.mem.eql(u8, "font-size = 12\nprofile-command = py:\n", after));
+        try std.testing.expect(app.config.@"profile-command".get("py") == null);
     }
 
     test "SET editor request stays deferred, rechecks safety and reports host failure" {
