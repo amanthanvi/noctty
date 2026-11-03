@@ -10884,9 +10884,9 @@ test "win32 titlebar hover fade decays linearly and snaps at zero duration" {
 
 test "win32 moveTab immediately lays out focused tabs and updates numbered labels and UIA names" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
-    try win32.host_test_runtime.runOnHiddenDesktop(struct {
+    try win32.runOnHiddenDesktop(struct {
         fn body() !void {
-            var fixture: win32.host_test_runtime.WindowStartTestApp = .{};
+            var fixture: win32.WindowStartTestApp = .{};
             try fixture.init();
             defer fixture.deinit();
             const app = &fixture.app;
@@ -10959,11 +10959,11 @@ test "win32 moveTab immediately lays out focused tabs and updates numbered label
 
 test "win32 moveTab label sync retries every allocation failure after placements are committed" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
-    try win32.host_test_runtime.runOnHiddenDesktop(struct {
+    try win32.runOnHiddenDesktop(struct {
         fn body() !void {
             var fail_index: usize = 0;
             while (true) : (fail_index += 1) {
-                var fixture: win32.host_test_runtime.WindowStartTestApp = .{};
+                var fixture: win32.WindowStartTestApp = .{};
                 try fixture.init();
                 defer fixture.deinit();
                 const app = &fixture.app;

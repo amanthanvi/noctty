@@ -238,16 +238,18 @@ that govern each symbol you change, or that none does.
 - [window-frame.md](docs/agents/log/window-frame.md): the top-level window:
   `WM_NCCALCSIZE`/`WM_NCHITTEST` (`win32_nc_layout.zig`), integrated titlebar
   and caption buttons, `window-decoration = none`, resize bands, maximize,
-  fullscreen and restore placement (the `maximize`/`fullscreen` keys at
-  window start: `window_state.applyWindowStart`; what a
-  session saves and restores of a fullscreen window: `WindowState.fullscreen`
-  and `fullscreen_maximized` in `win32_session_state.zig`,
+  fullscreen and restore placement (one copy per window, `TopLevel` on
+  `Host.top_level`, changed by `window_state.perform` and `applyConfig`;
+  the `maximize`/`fullscreen` keys at window start: `Enter` and
+  `forRestore` in `win32/window_start.zig`; what a session saves and
+  restores of a fullscreen window: `WindowState.fullscreen` and
+  `fullscreen_maximized` in `win32_session_state.zig`,
   `window_state.sessionPlacement`, the restore stages of
   `window_state.advance`, and `restoreSessionWindow` in `win32/session.zig`),
-  what a new window copies from its source and which
-  forwarded keys it keeps (`window_state.begin` and `advance`, with its
-  `Origin`, in `win32/window_state.zig`; the pure `plan`, `place` and `Keeps`
-  in `win32/window_start.zig`), `WM_DPICHANGED` and mixed-DPI moves,
+  what a new window copies from its source and which forwarded keys it keeps
+  (`window_state.begin` and `advance`, with its `Origin`, in
+  `win32/window_state.zig`; the pure `plan`, `place` and `Keeps` in
+  `win32/window_start.zig`), `WM_DPICHANGED` and mixed-DPI moves,
   `window-width`/`window-height`, `background-opacity` and DWM backdrop, the
   window menu, the quick terminal (`win32_quick_terminal.zig`,
   `win32/quick_terminal_host.zig`).

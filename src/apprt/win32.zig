@@ -308,52 +308,6 @@ pub const palette_controller_test_runtime = if (builtin.is_test) .{
     .runOnPrivateDesktop = Host.runOnPrivateDesktop,
 } else .{};
 
-pub const window_state_runtime = .{
-    .App = App,
-    .HWND = HWND,
-    .HWND_TOPMOST = HWND_TOPMOST,
-    .Host = Host,
-    .LPARAM = LPARAM,
-    .MINMAXINFO = MINMAXINFO,
-    .MONITORINFO = MONITORINFO,
-    .POINT = POINT,
-    .RECT = RECT,
-    .Surface = Surface,
-    .UINT = UINT,
-    .WINDOWPLACEMENT = WINDOWPLACEMENT,
-    .apprt = apprt,
-    .c = c,
-    .configpkg = configpkg,
-    .configuredHostWindowPosition = configuredHostWindowPosition,
-    .forwardedArgvSetsKey = forwardedArgvSetsKey,
-    .log = log,
-    .scaleInitialClientSize = scaleInitialClientSize,
-    .std = std,
-    .sys = sys,
-    .win32_theme = win32_theme,
-};
-pub const window_state_test_runtime = if (builtin.is_test) .{
-    .CoreApp = CoreApp,
-    .LPCWSTR = LPCWSTR,
-    .SafeModeAppFixture = SafeModeAppFixture,
-    .Tab = Tab,
-    .TestSession = TestSession,
-    .WindowStartTestApp = WindowStartTestApp,
-    .builtin = builtin,
-    .default_title = default_title,
-    .monitorInfo = monitorInfo,
-    .placementTestApp = placementTestApp,
-    .placementTestHost = placementTestHost,
-    .runOnHiddenDesktop = runOnHiddenDesktop,
-    .testHostIsLayered = testHostIsLayered,
-    .testLayeredAlpha = testLayeredAlpha,
-    .testWindowStyle = testWindowStyle,
-    .win32_quick_terminal = win32_quick_terminal,
-} else .{};
-pub const host_test_runtime = if (builtin.is_test) .{
-    .WindowStartTestApp = WindowStartTestApp,
-    .runOnHiddenDesktop = runOnHiddenDesktop,
-} else .{};
 pub const surface_presentation_runtime = .{
     .App = App,
     .Host = Host,
@@ -747,7 +701,6 @@ pub const NCCALCSIZE_PARAMS = sys.NCCALCSIZE_PARAMS;
 pub const WNDCLASSEXW = sys.WNDCLASSEXW;
 const CREATESTRUCTW = sys.CREATESTRUCTW;
 const MONITORINFO = sys.MONITORINFO;
-const MINMAXINFO = sys.MINMAXINFO;
 pub const LOGFONTW = sys.LOGFONTW;
 pub const NONCLIENTMETRICSW = sys.NONCLIENTMETRICSW;
 
@@ -4723,19 +4676,6 @@ pub fn surfaceLayoutRuntimeSync(visibility_changed: bool, pane_rect_changed: boo
         .scrollbar_refresh = visibility_changed or pane_rect_changed,
         .core_size_sync = pane_rect_changed,
     };
-}
-
-fn scaleInitialClientSize(size: apprt.SurfaceSize, scale: apprt.ContentScale) apprt.SurfaceSize {
-    return .{
-        .width = scaleInitialClientAxis(size.width, scale.x),
-        .height = scaleInitialClientAxis(size.height, scale.y),
-    };
-}
-
-fn scaleInitialClientAxis(value: u32, scale: f32) u32 {
-    const scaled = @ceil(@as(f64, @floatFromInt(value)) * @as(f64, @floatCast(scale)));
-    const max_u32: f64 = @floatFromInt(std.math.maxInt(u32));
-    return @intFromFloat(@min(max_u32, @max(1, scaled)));
 }
 
 pub fn surfaceActivationNeedsHostSync(
@@ -19212,10 +19152,6 @@ test "win32 shouldUseIntegratedTitlebar gates on Win11 build floor" {
     try std.testing.expect(!shouldUseIntegratedTitlebar(c.OS_BUILD_WIN11_22H2, .never));
 }
 
-const placementTestApp = test_support.placementTestApp;
-
-const placementTestHost = test_support.placementTestHost;
-
 pub const SafeModeAppFixture = test_support.SafeModeAppFixture;
 
 pub const WindowStartTestApp = test_support.WindowStartTestApp;
@@ -19276,10 +19212,6 @@ test "win32 shouldShowSurfaceImmediately only for new hosts" {
     try std.testing.expect(!shouldShowSurfaceImmediately(1));
     try std.testing.expect(!shouldShowSurfaceImmediately(99));
 }
-
-const testHostIsLayered = test_support.testHostIsLayered;
-
-const testLayeredAlpha = test_support.testLayeredAlpha;
 
 test "win32 host content rect keeps its size while the window is minimized" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
@@ -23801,35 +23733,6 @@ test "win32 an in-app install relaunches noctty one way, through /RELAUNCH=1" {
         args,
     );
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, args, "RELAUNCH"));
-}
-
-test "win32 scaleInitialClientSize converts logical initial size to physical pixels" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    try std.testing.expectEqualDeep(
-        apprt.SurfaceSize{ .width = 1680, .height = 810 },
-        scaleInitialClientSize(
-            .{ .width = 1120, .height = 540 },
-            .{ .x = 1.5, .y = 1.5 },
-        ),
-    );
-    try std.testing.expectEqualDeep(
-        apprt.SurfaceSize{ .width = 701, .height = 300 },
-        scaleInitialClientSize(
-            .{ .width = 467, .height = 200 },
-            .{ .x = 1.5, .y = 1.5 },
-        ),
-    );
-    try std.testing.expectEqualDeep(
-        apprt.SurfaceSize{
-            .width = std.math.maxInt(u32),
-            .height = std.math.maxInt(u32),
-        },
-        scaleInitialClientSize(
-            .{ .width = std.math.maxInt(u32), .height = std.math.maxInt(u32) },
-            .{ .x = 2.0, .y = 2.0 },
-        ),
-    );
 }
 
 test "win32 surfaceActivationNeedsHostSync only trips on activation-visible deltas" {

@@ -1,7 +1,10 @@
-//! The decisions a Window's state is made of, from values. The Win32 calls
-//! that carry them out are window_state.zig's, the one file that imports this
-//! one (it re-exports `TopLevel`). This file imports no `sys`, so the compiler
-//! keeps it free of them, and its tests need no window.
+//! The decisions a Window's state is made of, from values: how a new window
+//! starts (`plan`), where a copy goes (`place`), what leaving fullscreen
+//! returns to (`returnOn`) and how the session saves and restores a window
+//! (`SavedPlacement`, `forRestore`). The Win32 calls that carry them out are
+//! window_state.zig's, which re-exports what the runtime uses. This file
+//! imports no `sys`, so the compiler keeps it free of them, and its tests
+//! need no window.
 const std = @import("std");
 const c = @import("consts.zig");
 const types = @import("../win32_types.zig");

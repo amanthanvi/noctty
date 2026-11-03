@@ -1,62 +1,63 @@
-//! Win32 window state, extracted without changing transition order.
+//! The state of each top-level window, kept once on its Host
+//! (`Host.top_level`), the actions that change it (`perform`, `applyConfig`,
+//! `updateMinMaxInfo`), how a new window starts (`begin`, `advance`) and how
+//! the session saves one (`sessionPlacement`). The decisions are
+//! window_start.zig's, from values; this file carries them out through Win32.
+const std = @import("std");
+const builtin = @import("builtin");
 const win32 = @import("../win32.zig");
-const runtime = win32.window_state_runtime;
-const App = runtime.App;
-const HWND = runtime.HWND;
-const HWND_TOPMOST = runtime.HWND_TOPMOST;
-const Host = runtime.Host;
-const LPARAM = runtime.LPARAM;
-const MINMAXINFO = runtime.MINMAXINFO;
-const MONITORINFO = runtime.MONITORINFO;
-const POINT = runtime.POINT;
-const RECT = runtime.RECT;
-const Surface = runtime.Surface;
-const UINT = runtime.UINT;
-const WINDOWPLACEMENT = runtime.WINDOWPLACEMENT;
-const apprt = runtime.apprt;
-const c = runtime.c;
+const apprt = @import("../../apprt.zig");
+const configpkg = @import("../../config.zig");
+const c = @import("consts.zig");
 const child_window = @import("child_window.zig");
-const configpkg = runtime.configpkg;
-const configuredHostWindowPosition = runtime.configuredHostWindowPosition;
-const forwardedArgvSetsKey = runtime.forwardedArgvSetsKey;
-const lastError = child_window.lastError;
-const log = runtime.log;
-const scaleInitialClientSize = runtime.scaleInitialClientSize;
-const std = runtime.std;
-const sys = runtime.sys;
-const win32_theme = runtime.win32_theme;
-const window_start = @import("window_start.zig");
+const sys = @import("sys.zig");
+const win32_theme = @import("../win32_theme.zig");
 const win32_types = @import("../win32_types.zig");
-const test_runtime = if (@import("builtin").is_test) win32.window_state_test_runtime else struct {};
+const window_start = @import("window_start.zig");
+const App = win32.App;
 const BOOL = win32_types.BOOL;
-const CoreApp = test_runtime.CoreApp;
 const HDC = win32_types.HDC;
-const LPCWSTR = test_runtime.LPCWSTR;
-const SafeModeAppFixture = test_runtime.SafeModeAppFixture;
-const Tab = test_runtime.Tab;
-const TestSession = test_runtime.TestSession;
-const WindowStartTestApp = test_runtime.WindowStartTestApp;
-const builtin = test_runtime.builtin;
+const HWND = win32_types.HWND;
+const Host = win32.Host;
+const LPARAM = win32_types.LPARAM;
+const MINMAXINFO = sys.MINMAXINFO;
+const MONITORINFO = sys.MONITORINFO;
+const POINT = sys.POINT;
+const RECT = sys.RECT;
+const Surface = win32.Surface;
+const UINT = win32_types.UINT;
+const WINDOWPLACEMENT = sys.WINDOWPLACEMENT;
+const configuredHostWindowPosition = win32.configuredHostWindowPosition;
+const forwardedArgvSetsKey = @import("ipc_server.zig").forwardedArgvSetsKey;
+const lastError = child_window.lastError;
+const log = win32.log;
+const test_support = win32.test_support;
+const CoreApp = @import("../../App.zig");
+const LPCWSTR = win32_types.LPCWSTR;
+const SafeModeAppFixture = test_support.SafeModeAppFixture;
+const Tab = win32.Tab;
+const TestSession = test_support.TestSession;
+const WindowStartTestApp = test_support.WindowStartTestApp;
 const cascadeStep = window_start.cascadeStep;
-const default_title = test_runtime.default_title;
-const monitorInfo = test_runtime.monitorInfo;
-const placementTestApp = test_runtime.placementTestApp;
-const placementTestHost = test_runtime.placementTestHost;
+const default_title = win32.default_title;
+const monitorInfo = @import("quick_terminal_host.zig").monitorInfo;
+const placementTestApp = test_support.placementTestApp;
+const placementTestHost = test_support.placementTestHost;
 const prompt_label_class = child_window.prompt_label_class;
-const runOnHiddenDesktop = test_runtime.runOnHiddenDesktop;
-const testHostIsLayered = test_runtime.testHostIsLayered;
-const testLayeredAlpha = test_runtime.testLayeredAlpha;
-const testWindowStyle = test_runtime.testWindowStyle;
-const win32_quick_terminal = test_runtime.win32_quick_terminal;
+const runOnHiddenDesktop = test_support.runOnHiddenDesktop;
+const testHostIsLayered = test_support.testHostIsLayered;
+const testLayeredAlpha = test_support.testLayeredAlpha;
+const testWindowStyle = test_support.testWindowStyle;
+const win32_quick_terminal = @import("../win32_quick_terminal.zig");
 
 pub const TopLevel = window_start.TopLevel;
 pub const InitialShow = window_start.InitialShow;
-pub const Enter = window_start.Enter;
+const Enter = window_start.Enter;
 pub const undecoratedKeepsFrame = window_start.undecoratedKeepsFrame;
 pub const hostStyle = window_start.hostStyle;
-pub const fitRectInWork = window_start.fitRectInWork;
+const fitRectInWork = window_start.fitRectInWork;
 pub const workspaceRectToScreen = window_start.workspaceRectToScreen;
-pub const screenRectToWorkspace = window_start.screenRectToWorkspace;
+const screenRectToWorkspace = window_start.screenRectToWorkspace;
 pub const SavedPlacement = window_start.SavedPlacement;
 
 /// Where a new window comes from, which decides how it starts (`begin`).
@@ -81,7 +82,7 @@ pub const Origin = union(window_start.Kind) {
 
 /// A pane's metrics, from its own font: core init's `cell_size`,
 /// `size_limit` and `initial_size`.
-pub const PaneMetrics = struct {
+const PaneMetrics = struct {
     cell_size_pixels: apprt.action.CellSize,
     size_limit: apprt.action.SizeLimit,
     default_client_size: ?apprt.SurfaceSize,
@@ -128,7 +129,7 @@ pub const Start = struct {
 };
 
 /// What `config` asks of how its window starts.
-pub fn wants(config: *const configpkg.Config) window_start.Wants {
+fn wants(config: *const configpkg.Config) window_start.Wants {
     return .{
         .position = if (configuredHostWindowPosition(config)) |position| .{ .x = position.x, .y = position.y } else null,
         .decorated = config.@"window-decoration" != .none,
@@ -142,7 +143,7 @@ pub fn wants(config: *const configpkg.Config) window_start.Wants {
 /// The window keys `argv`, a forwarded launch's, names. Read from the argv,
 /// not from a config that differs from the app's: a forwarded value equal to
 /// the app config's would be lost (window-frame.md 2026-10-20, trap 1).
-pub fn forwardedKeys(argv: []const [:0]const u8) window_start.Forwarded {
+fn forwardedKeys(argv: []const [:0]const u8) window_start.Forwarded {
     return .{
         .size = forwardedArgvSetsKey(argv, "window-width") or forwardedArgvSetsKey(argv, "window-height"),
         .decoration = forwardedArgvSetsKey(argv, "window-decoration"),
@@ -321,7 +322,7 @@ fn afterShow(host: *Host, pending: *const Pending) !void {
 /// rather than at the next default position, so the first window would
 /// move. Windows also forces `WS_CLIPSIBLINGS` on every top-level window,
 /// through either API, so that bit is ignored here.
-pub fn createdHostWindowStyleCorrection(requested: u32, created: u32) ?u32 {
+fn createdHostWindowStyleCorrection(requested: u32, created: u32) ?u32 {
     const forced: u32 = c.WS_CLIPSIBLINGS;
     if ((requested & ~forced) == (created & ~forced)) return null;
     return requested;
@@ -331,7 +332,7 @@ pub fn createdHostWindowStyleCorrection(requested: u32, created: u32) ?u32 {
 /// `createdHostWindowStyleCorrection`). The `.created` stage calls this
 /// while the host is still hidden and has no tabs, so no terminal is sized
 /// against, or shown with, the frame Windows added.
-pub fn restoreRequestedHostWindowStyle(hwnd: HWND, requested: u32) void {
+fn restoreRequestedHostWindowStyle(hwnd: HWND, requested: u32) void {
     const created: u32 = @truncate(@as(usize, @bitCast(sys.GetWindowLongPtrW(hwnd, c.GWL_STYLE))));
     const style = createdHostWindowStyleCorrection(requested, created) orelse return;
     _ = sys.SetWindowLongPtrW(hwnd, c.GWL_STYLE, @bitCast(@as(usize, style)));
@@ -348,7 +349,7 @@ pub fn restoreRequestedHostWindowStyle(hwnd: HWND, requested: u32) void {
     }
 }
 
-pub fn sizeLimitEquals(a: apprt.action.SizeLimit, b: apprt.action.SizeLimit) bool {
+fn sizeLimitEquals(a: apprt.action.SizeLimit, b: apprt.action.SizeLimit) bool {
     return a.min_width == b.min_width and
         a.min_height == b.min_height and
         a.max_width == b.max_width and
@@ -443,11 +444,12 @@ pub fn updateMinMaxInfo(host: *Host, lParam: LPARAM) void {
     }
 }
 
+const HWND_TOPMOST: ?*anyopaque = @ptrFromInt(@as(usize, @bitCast(@as(isize, -1))));
 const HWND_NOTOPMOST: ?*anyopaque = @ptrFromInt(@as(usize, @bitCast(@as(isize, -2))));
 
 /// Makes `rect` (screen coordinates) the rect the minimized `hwnd` returns
 /// to, and leaves it minimized.
-pub fn setMinimizedNormalRect(hwnd: HWND, rect: RECT) !void {
+fn setMinimizedNormalRect(hwnd: HWND, rect: RECT) !void {
     var placement: WINDOWPLACEMENT = std.mem.zeroes(WINDOWPLACEMENT);
     placement.length = @sizeOf(WINDOWPLACEMENT);
     if (sys.GetWindowPlacement(hwnd, &placement) == 0) return lastError();
@@ -593,7 +595,7 @@ pub fn sessionPlacement(host: *Host, monitor: ?MONITORINFO) ?SavedPlacement {
 }
 
 /// `window_start.restoresMaximized` for the window `hwnd`.
-pub fn restoresMaximized(hwnd: HWND, placement: *const WINDOWPLACEMENT) bool {
+fn restoresMaximized(hwnd: HWND, placement: *const WINDOWPLACEMENT) bool {
     return window_start.restoresMaximized(sys.IsZoomed(hwnd) != 0, sys.IsIconic(hwnd) != 0, placement);
 }
 
@@ -608,6 +610,19 @@ fn paneCount(host: *const Host) usize {
     var count: usize = 0;
     for (host.tabs.items) |*tab| count += tab.leafCount();
     return count;
+}
+
+fn scaleInitialClientSize(size: apprt.SurfaceSize, scale: apprt.ContentScale) apprt.SurfaceSize {
+    return .{
+        .width = scaleInitialClientAxis(size.width, scale.x),
+        .height = scaleInitialClientAxis(size.height, scale.y),
+    };
+}
+
+fn scaleInitialClientAxis(value: u32, scale: f32) u32 {
+    const scaled = @ceil(@as(f64, @floatFromInt(value)) * @as(f64, @floatCast(scale)));
+    const max_u32: f64 = @floatFromInt(std.math.maxInt(u32));
+    return @intFromFloat(@min(max_u32, @max(1, scaled)));
 }
 
 fn setInitialSize(host: *Host, pane: *Surface, size: apprt.action.InitialSize) !void {
@@ -653,7 +668,7 @@ fn setSizeLimit(host: *Host, pane: *Surface, limit: apprt.action.SizeLimit) void
 ///
 /// A failure is logged: how a window starts is a preference, and a
 /// window in its ordinary state is still a usable window.
-pub fn applyWindowStart(host: *Host, start: Enter) void {
+fn applyWindowStart(host: *Host, start: Enter) void {
     const hwnd = host.hwnd orelse return;
     if (start.fullscreen and !host.top_level.isFullscreen()) {
         // A launcher's show command (`start /min`, a shortcut set to Run:
@@ -714,7 +729,7 @@ fn enterFullscreen(host: *Host) !void {
 
 /// What `hwnd`, fullscreen since `saved`, returns to when it leaves
 /// fullscreen on the monitor it is on now (`window_start.returnOn`).
-pub fn fullscreenReturn(saved: TopLevel.Return, hwnd: HWND) !TopLevel.Return {
+fn fullscreenReturn(saved: TopLevel.Return, hwnd: HWND) !TopLevel.Return {
     if (saved.monitor == null) return saved;
     return window_start.returnOn(saved, try windowMonitor(hwnd));
 }
@@ -809,7 +824,7 @@ fn rollbackDecorationsVisible(host: *Host, previous_visible: bool, integrated_ti
     host.scheduleCaptionUiaSync();
 }
 
-pub fn resizeClientArea(host: *Host, client_width: u32, client_height: u32) !void {
+fn resizeClientArea(host: *Host, client_width: u32, client_height: u32) !void {
     const hwnd = host.hwnd orelse return;
     var client_rect: RECT = undefined;
     if (sys.GetClientRect(hwnd, &client_rect) == 0) {
@@ -927,7 +942,7 @@ pub fn copyPaneMetrics(pane: *Surface, source: PaneMetrics, keeps: window_start.
 /// `undecoratedKeepsFrame` for `host`. The quick terminal flag is the
 /// host's: a split or tab opened inside the quick terminal is an ordinary
 /// surface in the quick terminal's window.
-pub fn keepsFrameUndecorated(host: *const Host) bool {
+fn keepsFrameUndecorated(host: *const Host) bool {
     return undecoratedKeepsFrame(host.app.os_build, host.quick_terminal);
 }
 
@@ -2212,6 +2227,35 @@ test "win32 a config reload decorates a window unless a toggle chose its decorat
             }
         }
     }.body);
+}
+
+test "win32 scaleInitialClientSize converts logical initial size to physical pixels" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    try std.testing.expectEqualDeep(
+        apprt.SurfaceSize{ .width = 1680, .height = 810 },
+        scaleInitialClientSize(
+            .{ .width = 1120, .height = 540 },
+            .{ .x = 1.5, .y = 1.5 },
+        ),
+    );
+    try std.testing.expectEqualDeep(
+        apprt.SurfaceSize{ .width = 701, .height = 300 },
+        scaleInitialClientSize(
+            .{ .width = 467, .height = 200 },
+            .{ .x = 1.5, .y = 1.5 },
+        ),
+    );
+    try std.testing.expectEqualDeep(
+        apprt.SurfaceSize{
+            .width = std.math.maxInt(u32),
+            .height = std.math.maxInt(u32),
+        },
+        scaleInitialClientSize(
+            .{ .width = std.math.maxInt(u32), .height = std.math.maxInt(u32) },
+            .{ .x = 2.0, .y = 2.0 },
+        ),
+    );
 }
 
 test "win32 an initial size resizes a window of one pane that is neither zoomed nor fullscreen" {
