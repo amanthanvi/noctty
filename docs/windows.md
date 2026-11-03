@@ -2706,6 +2706,17 @@ Global hotkey fails: another application or Windows itself owns the same
 hotkey. Pick a different trigger or close the conflicting app, then reload
 config.
 
+A whole family of chords does nothing (for example every Ctrl+Shift letter,
+so Ctrl+Shift+C neither copies nor works in another terminal): another
+program has probably registered them as system-wide hotkeys. Windows hands a
+registered hotkey to the program that registered it before any window sees
+the key. Driver control panels (AMD Radeon Software, NVIDIA, Intel), screen
+recorders and clipboard tools are common owners. noctty registers a
+system-wide hotkey only for `global:` keybinds, so unless you bound one to
+that chord, noctty is not the owner.
+[Hotkey Detective](https://github.com/ITachiLab/hotkey-detective) is one tool
+that can find the owner.
+
 WSL fails to launch: set `command = wsl.exe` explicitly. If it still fails,
 verify the distribution starts in a normal PowerShell session first.
 
