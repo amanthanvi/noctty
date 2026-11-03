@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 import {
   DEMO_KEYS,
   PALETTE_KEYS,
+  PALETTE_MATCH_COUNT,
   PALETTE_PICK,
   PALETTE_RESULTS,
   observeElementVisibility,
@@ -173,8 +174,8 @@ test('the demo palette status line uses the app format', () => {
   );
   const pick = PALETTE_RESULTS.find((entry) => entry.title === PALETTE_PICK);
   assert.equal(
-    paletteStatus(48, pick),
-    '48 matches. Selected: Split Right — Split the terminal to the right. Up/Down selects; Enter activates.',
+    paletteStatus(PALETTE_MATCH_COUNT, pick),
+    `${PALETTE_MATCH_COUNT} matches. Selected: Split Right — Split the terminal to the right. Up/Down selects; Enter activates.`,
   );
 });
 
@@ -228,8 +229,8 @@ test('each demo key chip shows the key its step presses', () => {
 test('the demo status line adds a full stop only where the app does', () => {
   const tab = PALETTE_RESULTS.find((entry) => entry.tab);
   assert.equal(
-    paletteStatus(48, tab),
-    '48 matches. Selected: api — api. Up/Down selects; Enter activates.',
+    paletteStatus(PALETTE_MATCH_COUNT, tab),
+    `${PALETTE_MATCH_COUNT} matches. Selected: api — api. Up/Down selects; Enter activates.`,
   );
   assert.match(win32Labels, /fn sentenceStop\(text: \[\]const u8\) \[\]const u8 \{[\s\S]*?'\.', '!', '\?' => "",/);
 });

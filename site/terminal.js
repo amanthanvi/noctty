@@ -48,7 +48,7 @@ export const PALETTE_KEYS = ['Enter'];
 // description, and the default shortcut where one exists. "api" is the
 // current tab, which the palette also matches.
 export const PALETTE_QUERY = 'split';
-export const PALETTE_MATCH_COUNT = 48;
+export const PALETTE_MATCH_COUNT = 46;
 export const PALETTE_RESULTS = [
   { title: 'Split Up', description: 'Split the terminal up.', keys: '', action: 'new_split:up' },
   { title: 'Split Down', description: 'Split the terminal down.', keys: 'ctrl+shift+e', action: 'new_split:down' },
