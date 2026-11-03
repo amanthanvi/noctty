@@ -28,6 +28,7 @@ const LPCWSTR = win32.LPCWSTR;
 const LRESULT = win32.LRESULT;
 const NCCALCSIZE_PARAMS = win32.NCCALCSIZE_PARAMS;
 const NONCLIENTMETRICSW = win32.NONCLIENTMETRICSW;
+const OpenTarget = profile_pick.OpenTarget;
 const PAINTSTRUCT = win32.PAINTSTRUCT;
 const POINT = win32.POINT;
 const PaletteCatalog = win32.PaletteCatalog;
@@ -35,7 +36,6 @@ const PaletteItem = win32.PaletteItem;
 const PalettePayload = win32.PalettePayload;
 const PaletteRanked = win32.PaletteRanked;
 const PaletteStableId = win32.PaletteStableId;
-const ProfileOpenTarget = win32.ProfileOpenTarget;
 const QuickTerminalAnimation = win32.QuickTerminalAnimation;
 const RECT = win32.RECT;
 const SplitTreeSurface = win32.SplitTreeSurface;
@@ -88,7 +88,6 @@ const confirmTitlePaintRect = win32.confirmTitlePaintRect;
 const confirm_prompt_text_format = win32.confirm_prompt_text_format;
 const confirm_text = @import("confirm_text.zig");
 const createIconFontWithGlyphs = win32.createIconFontWithGlyphs;
-const cycleProfileOpenTarget = win32.cycleProfileOpenTarget;
 const default_title = win32.default_title;
 const desiredTabIndex = win32.desiredTabIndex;
 const destroyChildWindow = win32.destroyChildWindow;
@@ -165,14 +164,13 @@ const palette_catalog_label_bytes = win32.palette_catalog_label_bytes;
 const palette_controller = @import("palette_controller.zig");
 const palette_row_height = win32.palette_row_height;
 const pinnedSlotBadgeDigit = win32.pinnedSlotBadgeDigit;
-const preferredProfileIndex = win32.preferredProfileIndex;
 const profileChromeStripeColor = win32.profileChromeStripeColor;
 const profileChromeVisible = win32.profileChromeVisible;
-const profileIndexByKey = win32.profileIndexByKey;
 const profileKindFocusRingColor = win32.profileKindFocusRingColor;
 const profileKindLabelColor = win32.profileKindLabelColor;
 const profileOpenTargetBadgeGlyph = win32.profileOpenTargetBadgeGlyph;
 const profileOpenTargetMarkerColor = win32.profileOpenTargetMarkerColor;
+const profile_pick = @import("profile_pick.zig");
 const prompt_button_class = child_window.prompt_button_class;
 const prompt_label_class = child_window.prompt_label_class;
 const quick_terminal_host = @import("quick_terminal_host.zig");
@@ -181,7 +179,6 @@ const rectInset = chrome_layout.rectInset;
 const refocusActiveSurface = win32.refocusActiveSurface;
 const refocusHostAfterActivation = win32.refocusHostAfterActivation;
 const remapWin32KeyEvent = win32.remapWin32KeyEvent;
-const resolveProfileSelection = win32.resolveProfileSelection;
 const rootDisconnectThunk = win32.rootDisconnectThunk;
 const rootReleaseThunk = win32.rootReleaseThunk;
 const runUiActionOrLog = win32.runUiActionOrLog;
@@ -4605,32 +4602,25 @@ pub const Host = struct {
         try self.selectPreferredProfile(profiles);
     }
 
-    /// Select the profile `preferredProfileIndex` picks, else the default
+    /// Select the profile `profile_pick.preferred` picks, else the default
     /// shell's, else the one at the current index (the first when that is
     /// past the end). `profiles` is not empty. Only a profile chosen in the
     /// picker, the palette or a quick slot is stored as the selection: one
     /// picked here is picked again for each new list, so after a reload that
     /// changes `default-profile` the picker starts on the new one.
     fn selectPreferredProfile(self: *Host, profiles: []const windows_shell.Profile) !void {
-        if (preferredProfileIndex(
-            profiles,
-            self.selected_profile_key,
-            self.app.launcher_profile_key,
-            null,
-            null,
-            self.selected_profile,
-        )) |chosen| {
+        if (profile_pick.preferred(profiles, .{
+            .window_key = self.selected_profile_key,
+            .app_key = self.app.launcher_profile_key,
+        })) |chosen| {
             _ = try self.setSelectedProfileIndex(chosen);
             return;
         }
-        self.selected_profile = preferredProfileIndex(
-            profiles,
-            null,
-            null,
-            if (configpkg.pane_launch.defaultProfile(&self.app.config)) |profile| profile.key else null,
-            self.app.launcher_profile_hint,
-            self.selected_profile,
-        ) orelse self.app.defaultShellProfileIndex(profiles) orelse
+        self.selected_profile = profile_pick.preferred(profiles, .{
+            .default_key = if (configpkg.pane_launch.defaultProfile(&self.app.config)) |profile| profile.key else null,
+            .hint = self.app.launcher_profile_hint,
+            .fallback = self.selected_profile,
+        }) orelse self.app.defaultShellProfileIndex(profiles) orelse
             if (self.selected_profile < profiles.len) self.selected_profile else 0;
     }
 
@@ -4739,7 +4729,7 @@ pub const Host = struct {
         // False when no profile is shown; a hidden one can still match.
         _ = try self.ensureProfiles();
         const profiles = self.profiles orelse return null;
-        const index = profileIndexByKey(profiles, key) orelse return null;
+        const index = profile_pick.byKey(profiles, key) orelse return null;
         return &profiles[index];
     }
 
@@ -4761,7 +4751,7 @@ pub const Host = struct {
         return true;
     }
 
-    fn setLauncherProfileTarget(self: *Host, target: ProfileOpenTarget) void {
+    fn setLauncherProfileTarget(self: *Host, target: OpenTarget) void {
         if (self.app.launcher_profile_target == target) return;
         self.app.launcher_profile_target = target;
         self.refreshProfileChrome();
@@ -4778,7 +4768,7 @@ pub const Host = struct {
     }
 
     fn cycleLauncherProfileTarget(self: *Host, reverse: bool) bool {
-        self.setLauncherProfileTarget(cycleProfileOpenTarget(self.app.launcher_profile_target, reverse));
+        self.setLauncherProfileTarget(self.app.launcher_profile_target.cycle(reverse));
         return true;
     }
 
@@ -4810,7 +4800,7 @@ pub const Host = struct {
         const edit_hwnd = self.overlay_edit_hwnd orelse return false;
         const text = std.mem.trim(u8, try overlayEditText(self), " \t\r\n");
         const fallback = self.selectedProfileIndex() orelse 0;
-        const current_index = switch (resolveProfileSelection(profiles, text, fallback)) {
+        const current_index = switch (profile_pick.byTyped(profiles, text, fallback)) {
             .exact => |index| index,
             .ambiguous, .invalid => fallback,
         };
@@ -4822,7 +4812,7 @@ pub const Host = struct {
         return true;
     }
 
-    pub fn openSelectedProfile(self: *Host, open_target: ProfileOpenTarget) bool {
+    pub fn openSelectedProfile(self: *Host, open_target: OpenTarget) bool {
         const profiles_ready = self.ensureProfiles() catch |err| {
             logUiActionError("selected profile load failed", err);
             return false;
@@ -4840,7 +4830,7 @@ pub const Host = struct {
         return true;
     }
 
-    pub fn quickOpenProfileIndex(self: *Host, index: usize, open_target: ProfileOpenTarget) bool {
+    pub fn quickOpenProfileIndex(self: *Host, index: usize, open_target: OpenTarget) bool {
         const profiles_ready = self.ensureProfiles() catch |err| {
             logUiActionError("quick profile load failed", err);
             return false;
@@ -4854,7 +4844,7 @@ pub const Host = struct {
         return self.openSelectedProfile(open_target);
     }
 
-    pub fn openSelectedProfileOrFallback(self: *Host, open_target: ProfileOpenTarget) bool {
+    pub fn openSelectedProfileOrFallback(self: *Host, open_target: OpenTarget) bool {
         if (self.openSelectedProfile(open_target)) return true;
         const surface = self.activeSurface() orelse return false;
         switch (open_target) {
@@ -4865,7 +4855,7 @@ pub const Host = struct {
         return true;
     }
 
-    pub fn submitProfileOverlay(self: *Host, open_target: ProfileOpenTarget) !bool {
+    pub fn submitProfileOverlay(self: *Host, open_target: OpenTarget) !bool {
         if (!self.profilesForChrome()) {
             if (self.profiles_requested) return false;
             try self.setBanner(.err, "No supported Windows profiles detected.");
@@ -4873,7 +4863,7 @@ pub const Host = struct {
         }
         _ = self.overlay_edit_hwnd orelse return false;
         const text = std.mem.trim(u8, try overlayEditText(self), " \t\r\n");
-        const selection = resolveProfileSelection(self.shownProfiles().?, text, self.selectedProfileIndex() orelse 0);
+        const selection = profile_pick.byTyped(self.shownProfiles().?, text, self.selectedProfileIndex() orelse 0);
         switch (selection) {
             .exact => |index| {
                 _ = try self.setSelectedProfileIndex(index);
@@ -8382,7 +8372,7 @@ pub const Host = struct {
         return null;
     }
 
-    fn buttonLauncherTarget(self: *Host, hwnd: HWND) ?ProfileOpenTarget {
+    fn buttonLauncherTarget(self: *Host, hwnd: HWND) ?OpenTarget {
         if (self.overlay_mode == .profile and self.overlay_accept_hwnd != null and hwnd == self.overlay_accept_hwnd.?) {
             return self.app.launcher_profile_target;
         }

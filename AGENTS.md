@@ -327,8 +327,10 @@ that govern each symbol you change, or that none does.
   discovery and user-defined profiles (`src/config/windows_shell.zig`: the
   `profile-*` keys, `default-profile`, `profile-order`, `profile-hidden`,
   `verbatimCommandLine`, `arrangeProfiles`, profile key equality
-  `profileKeyEquals`, `storedProfileKeyEquals`, `sshProfileAlias`; Visual
-  Studio developer shells in `src/config/windows_visual_studio.zig`;
+  `profileKeyEquals`, `storedProfileKeyEquals`, `sshProfileAlias`, and
+  which profile the app picks by it, `src/apprt/win32/profile_pick.zig`:
+  `byKey`, `pinByKey`, `byTyped`, `preferred`, `quickSlot`; Visual Studio
+  developer shells in `src/config/windows_visual_studio.zig`;
   `win32_elevation.RelaunchProfile`), safe mode's
   `cmd.exe /D`, `CreateProcessW` name resolution, Git Bash discovery, WSL
   (`wsl_env.zig`, the terminfo probe and its cache, `TERM`), the terminfo

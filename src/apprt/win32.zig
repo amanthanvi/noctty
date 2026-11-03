@@ -109,6 +109,7 @@ const pixel_format = @import("win32/pixel_format.zig");
 const bench_trace = @import("win32/bench_trace.zig");
 const labels = @import("win32/labels.zig");
 const paint_text = @import("win32/text.zig");
+const profile_pick = @import("win32/profile_pick.zig");
 const tab_label = @import("win32/tab_label.zig");
 const win32_input = @import("win32/input.zig");
 const child_window = @import("win32/child_window.zig");
@@ -279,7 +280,6 @@ pub const palette_controller_runtime = .{
     .palette_list_class_name = palette_list_class_name,
     .palette_max_visible_rows = palette_max_visible_rows,
     .palette_row_height = palette_row_height,
-    .profileIndexByKey = profileIndexByKey,
     .runUiActionOrLog = runUiActionOrLog,
     .signedHighWord = signedHighWord,
     .std = std,
@@ -489,6 +489,7 @@ test {
     _ = @import("win32/window_start.zig");
     _ = @import("win32/confirm_text.zig");
     _ = @import("win32/tab_label.zig");
+    _ = @import("win32/profile_pick.zig");
     _ = child_window;
     _ = paint_text;
     _ = @import("win32/settings_patch.zig");
@@ -4455,28 +4456,6 @@ pub const HostBannerKind = labels.HostBannerKind;
 pub const BannerButton = enum(u1) { primary, dismiss };
 
 const LaunchTargetButtonKeyAction = labels.LaunchTargetButtonKeyAction;
-pub const ProfileOpenTarget = labels.ProfileOpenTarget;
-
-fn parseProfileOpenTarget(raw: []const u8) ?ProfileOpenTarget {
-    if (std.ascii.eqlIgnoreCase(raw, "tab")) return .tab;
-    if (std.ascii.eqlIgnoreCase(raw, "window") or std.ascii.eqlIgnoreCase(raw, "win")) return .window;
-    if (std.ascii.eqlIgnoreCase(raw, "split") or std.ascii.eqlIgnoreCase(raw, "pane")) return .split;
-    return null;
-}
-
-fn resolveProfileOpenTarget(default_target: ProfileOpenTarget, shift: bool, control: bool) ProfileOpenTarget {
-    if (control) return .split;
-    if (shift) return .window;
-    return default_target;
-}
-
-pub fn cycleProfileOpenTarget(current: ProfileOpenTarget, reverse: bool) ProfileOpenTarget {
-    return switch (current) {
-        .tab => if (reverse) .split else .window,
-        .window => if (reverse) .tab else .split,
-        .split => if (reverse) .window else .tab,
-    };
-}
 
 fn launchTargetButtonKeyAction(vk: WPARAM) ?LaunchTargetButtonKeyAction {
     return switch (vk) {
@@ -5689,7 +5668,7 @@ fn settingsProfileChoices(
         // By key alone: an alias such as `vs:newest:cmd` may name another
         // row in a list found before the instances changed.
         .resolved => |profile| {
-            result.selected = profileIndexByKey(profiles, profile.key);
+            result.selected = profile_pick.byKey(profiles, profile.key);
             if (result.selected == null) result.saved_label = try alloc.dupe(u8, profile.label);
         },
         .not_found => result.saved_not_found = true,
@@ -9272,10 +9251,6 @@ const quickSlotPinOrdinalFromKey = labels.quickSlotPinOrdinalFromKey;
 
 const clearQuickSlotPinsRequested = labels.clearQuickSlotPinsRequested;
 
-pub const resolveProfileSelection = labels.resolveProfileSelection;
-
-pub const profileIndexByKey = labels.profileIndexByKey;
-
 /// Whether a reload changed a key the profile lists are built from: a
 /// `profile-*` key (a removal included), `visual-studio-profiles`, `env`
 /// while a profile is defined
@@ -9318,8 +9293,6 @@ pub fn listProfilesForConfig(
     defer user.deinit();
     return try list(alloc, config.@"ssh-config-hosts", &user);
 }
-
-pub const preferredProfileIndex = labels.preferredProfileIndex;
 
 pub fn splitTreeEquivalent(a: *const SplitTreeSurface, b: *const SplitTreeSurface) bool {
     if (a.zoomed != b.zoomed) return false;
@@ -11298,8 +11271,7 @@ fn overlayEditProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callco
                 if (wParam == c.VK_RETURN) {
                     runUiActionOrLog(
                         "profile overlay submit failed",
-                        v.submitProfileOverlay(resolveProfileOpenTarget(
-                            v.app.launcher_profile_target,
+                        v.submitProfileOverlay(v.app.launcher_profile_target.withModifiers(
                             keyPressed(c.VK_SHIFT),
                             keyPressed(c.VK_CONTROL),
                         )),
@@ -11751,8 +11723,7 @@ pub fn hostWindowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) cal
                             return 0;
                         }
                         if (v.overlay_mode == .profile) {
-                            runUiActionOrLog("profile overlay submit failed", v.submitProfileOverlay(resolveProfileOpenTarget(
-                                v.app.launcher_profile_target,
+                            runUiActionOrLog("profile overlay submit failed", v.submitProfileOverlay(v.app.launcher_profile_target.withModifiers(
                                 keyPressed(c.VK_SHIFT),
                                 keyPressed(c.VK_CONTROL),
                             )));
@@ -12156,19 +12127,12 @@ pub fn movedIndexAfterReorder(active: usize, from: usize, to: usize) usize {
 
 pub fn applyQuickSlotPreferenceOrder(
     profiles: []windows_shell.Profile,
-    slot_keys: [3]?[]const u8,
+    slot_keys: [profile_pick.quick_slots]?[]const u8,
 ) void {
     var insert_at: usize = 0;
     for (slot_keys) |key_opt| {
         const key = key_opt orelse continue;
-        var found: ?usize = null;
-        for (profiles, 0..) |profile, index| {
-            if (windows_shell.profileKeyEquals(profile, key)) {
-                found = index;
-                break;
-            }
-        }
-        const found_index = found orelse continue;
+        const found_index = profile_pick.byKey(profiles, key) orelse continue;
         if (found_index == insert_at) {
             insert_at += 1;
             continue;
@@ -12183,18 +12147,16 @@ pub fn applyQuickSlotPreferenceOrder(
     }
 }
 
-pub const findLauncherQuickSlotOrdinal = labels.findLauncherQuickSlotOrdinal;
-
 pub fn launcherQuickSlotAssignmentNeedsChange(
-    slot_keys: [3]?[:0]const u8,
+    slot_keys: [profile_pick.quick_slots]?[:0]const u8,
     slot_ordinal: usize,
     key: []const u8,
 ) bool {
     if (slot_ordinal >= slot_keys.len) return false;
-    return findLauncherQuickSlotOrdinal(slot_keys, key) != slot_ordinal;
+    return profile_pick.pinByKey(&slot_keys, key) != slot_ordinal;
 }
 
-pub fn launcherQuickSlotPinsAlreadyClear(slot_keys: [3]?[:0]const u8) bool {
+pub fn launcherQuickSlotPinsAlreadyClear(slot_keys: [profile_pick.quick_slots]?[:0]const u8) bool {
     for (slot_keys) |slot_key| {
         if (slot_key != null) return false;
     }
@@ -12242,11 +12204,11 @@ pub fn detectDefaultProfileHint(alloc: Allocator) ?[:0]const u8 {
     return value;
 }
 
-pub fn detectDefaultProfileTarget(alloc: Allocator) ProfileOpenTarget {
+pub fn detectDefaultProfileTarget(alloc: Allocator) profile_pick.OpenTarget {
     const raw = std.process.getEnvVarOwned(alloc, "NOCTTY_WIN32_DEFAULT_PROFILE_TARGET") catch
         return .tab;
     defer alloc.free(raw);
-    return parseProfileOpenTarget(raw) orelse .tab;
+    return profile_pick.OpenTarget.parse(raw) orelse .tab;
 }
 
 pub fn isSafeStartupCwd(path: []const u8) bool {
@@ -21383,13 +21345,13 @@ test "win32 hidden profiles stay out of the picker and the quick slots and still
     try std.testing.expectEqualStrings("cmd.exe", shown[1].key);
     try std.testing.expectEqual(@as(usize, 4), host.profiles.?.len);
     try std.testing.expectEqualStrings("wsl:docker-desktop", app.launcher_quick_slot_keys[0].?);
-    try std.testing.expectEqual(@as(?usize, 1), labels.quickSlotProfileIndex(shown.len, host.selectedProfileIndex(), 0, 3));
-    try std.testing.expectEqual(@as(?usize, null), labels.quickSlotProfileIndex(shown.len, host.selectedProfileIndex(), 1, 3));
+    try std.testing.expectEqual(@as(?usize, 1), profile_pick.quickSlot(shown.len, host.selectedProfileIndex(), 0));
+    try std.testing.expectEqual(@as(?usize, null), profile_pick.quickSlot(shown.len, host.selectedProfileIndex(), 1));
     try std.testing.expectEqual(@as(?usize, null), quickSlotShortcutProfileIndex(shown.len, null, '3', true));
     _ = try host.setSelectedProfileIndex(3);
     try std.testing.expectEqual(@as(?usize, 1), host.selectedProfileIndex());
-    try std.testing.expect(resolveProfileSelection(shown, "git-bash", 0) == .invalid);
-    try std.testing.expect(resolveProfileSelection(shown, "3", 0) == .invalid);
+    try std.testing.expect(profile_pick.byTyped(shown, "git-bash", 0) == .invalid);
+    try std.testing.expect(profile_pick.byTyped(shown, "3", 0) == .invalid);
 
     // By key, a hidden profile is still there: for a restore, a split, an
     // elevated window, `default-profile`.
@@ -21399,7 +21361,7 @@ test "win32 hidden profiles stay out of the picker and the quick slots and still
     defer clone.deinit();
     const restored = try configpkg.pane_launch.prepare(&clone, .{ .restored = "git-bash" }, app.launchContext(&host));
     try std.testing.expectEqualStrings("git-bash", restored.key orelse "");
-    try std.testing.expectEqual(@as(?usize, 3), profileIndexByKey(host.profiles.?, "git-bash"));
+    try std.testing.expectEqual(@as(?usize, 3), profile_pick.byKey(host.profiles.?, "git-bash"));
 }
 
 test "win32 a reload that changes any profile key drops the profile lists" {
@@ -23376,24 +23338,6 @@ test "win32 dropping a tab into another as a split keeps its panes' toasts" {
     try recorder.expectRemoved(&.{ 0xA, 0xD });
 }
 
-test "win32 profileOpenTargetFromModifiers prefers split then window" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    try std.testing.expectEqual(ProfileOpenTarget.tab, resolveProfileOpenTarget(.tab, false, false));
-    try std.testing.expectEqual(ProfileOpenTarget.window, resolveProfileOpenTarget(.tab, true, false));
-    try std.testing.expectEqual(ProfileOpenTarget.split, resolveProfileOpenTarget(.tab, false, true));
-    try std.testing.expectEqual(ProfileOpenTarget.split, resolveProfileOpenTarget(.window, true, true));
-}
-
-test "win32 cycleProfileOpenTarget wraps launcher target order" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    try std.testing.expectEqual(ProfileOpenTarget.window, cycleProfileOpenTarget(.tab, false));
-    try std.testing.expectEqual(ProfileOpenTarget.split, cycleProfileOpenTarget(.window, false));
-    try std.testing.expectEqual(ProfileOpenTarget.tab, cycleProfileOpenTarget(.split, false));
-    try std.testing.expectEqual(ProfileOpenTarget.split, cycleProfileOpenTarget(.tab, true));
-}
-
 test "win32 launchTargetButtonKeyAction maps focused target keys" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
@@ -23403,17 +23347,6 @@ test "win32 launchTargetButtonKeyAction maps focused target keys" {
     try std.testing.expectEqual(LaunchTargetButtonKeyAction.next, launchTargetButtonKeyAction(c.VK_SPACE).?);
     try std.testing.expectEqual(LaunchTargetButtonKeyAction.first, launchTargetButtonKeyAction(c.VK_HOME).?);
     try std.testing.expectEqual(LaunchTargetButtonKeyAction.last, launchTargetButtonKeyAction(c.VK_END).?);
-}
-
-test "win32 parseProfileOpenTarget accepts terminal-style launch target names" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    try std.testing.expectEqual(ProfileOpenTarget.tab, parseProfileOpenTarget("tab").?);
-    try std.testing.expectEqual(ProfileOpenTarget.window, parseProfileOpenTarget("window").?);
-    try std.testing.expectEqual(ProfileOpenTarget.window, parseProfileOpenTarget("win").?);
-    try std.testing.expectEqual(ProfileOpenTarget.split, parseProfileOpenTarget("split").?);
-    try std.testing.expectEqual(ProfileOpenTarget.split, parseProfileOpenTarget("pane").?);
-    try std.testing.expect(parseProfileOpenTarget("definitely_not_real") == null);
 }
 
 test "win32 windowNewTabInsertIndex respects current and end positions" {

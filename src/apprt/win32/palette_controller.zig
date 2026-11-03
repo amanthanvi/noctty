@@ -36,7 +36,7 @@ const palette_catalog_label_bytes = runtime.palette_catalog_label_bytes;
 const palette_list_class_name = runtime.palette_list_class_name;
 const palette_max_visible_rows = runtime.palette_max_visible_rows;
 const palette_row_height = runtime.palette_row_height;
-const profileIndexByKey = runtime.profileIndexByKey;
+const profile_pick = @import("profile_pick.zig");
 const runUiActionOrLog = runtime.runUiActionOrLog;
 const signedHighWord = runtime.signedHighWord;
 const std = runtime.std;
@@ -1339,7 +1339,7 @@ pub const HostControls = struct {
                     self.abortPaletteAction("Profile is no longer available; reopen the palette.");
                     return;
                 };
-                const index = profileIndexByKey(profiles, key) orelse {
+                const index = profile_pick.byKey(profiles, key) orelse {
                     self.abortPaletteAction("Profile is no longer available; reopen the palette.");
                     return;
                 };

@@ -22,9 +22,9 @@ const LPCWSTR = win32.LPCWSTR;
 const MSG = win32.MSG;
 const NONCLIENTMETRICSW = win32.NONCLIENTMETRICSW;
 const OpenGLStartupStep = win32.OpenGLStartupStep;
+const OpenTarget = profile_pick.OpenTarget;
 const PaletteCatalog = win32.PaletteCatalog;
 const ProfileDiscoveryCompletion = win32.ProfileDiscoveryCompletion;
-const ProfileOpenTarget = win32.ProfileOpenTarget;
 const RECT = win32.RECT;
 const RecoveryLedgerLock = win32.RecoveryLedgerLock;
 const RecoveryStartup = win32.RecoveryStartup;
@@ -90,7 +90,6 @@ const detectStartupProfilePicker = win32.detectStartupProfilePicker;
 const docked_search = @import("docked_search.zig");
 const elevatedProfileKey = win32.elevatedProfileKey;
 const elevatesBySelector = win32.elevatesBySelector;
-const findLauncherQuickSlotOrdinal = win32.findLauncherQuickSlotOrdinal;
 const forwardedActivationExtraArgCount = win32.forwardedActivationExtraArgCount;
 const forwardedArgvRejection = win32.forwardedArgvRejection;
 const forwardedArgvSetsKey = win32.forwardedArgvSetsKey;
@@ -135,7 +134,7 @@ const pixel_format = @import("pixel_format.zig");
 const probeWindowsBuild = win32.probeWindowsBuild;
 const processDeferredUiaDisconnect = win32.processDeferredUiaDisconnect;
 const profileDiscoveryThreadMain = win32.profileDiscoveryThreadMain;
-const profileIndexByKey = win32.profileIndexByKey;
+const profile_pick = @import("profile_pick.zig");
 const ptypkg = @import("../../pty.zig");
 const queueTerminalHandoff = win32.queueTerminalHandoff;
 const quickSelectProc = win32.quickSelectProc;
@@ -581,8 +580,8 @@ pub const App = struct {
     activations: u64 = 0,
     launcher_profile_key: ?[:0]const u8 = null,
     launcher_profile_hint: ?[:0]const u8 = null,
-    launcher_quick_slot_keys: [3]?[:0]const u8 = .{ null, null, null },
-    launcher_profile_target: ProfileOpenTarget = .tab,
+    launcher_quick_slot_keys: [profile_pick.quick_slots]?[:0]const u8 = @splat(null),
+    launcher_profile_target: OpenTarget = .tab,
     startup_profile_picker: bool = false,
     /// True when argv explicitly selects a working directory. Such cold-start
     /// flows must create their requested window rather than restore a saved
@@ -5470,7 +5469,7 @@ pub const App = struct {
         if (source_host) |host| return try host.profileForKey(key);
         const profiles = try listProfilesForConfig(self.core_app.alloc, &self.config, windows_shell.listProfiles);
         temporary.* = profiles;
-        const index = profileIndexByKey(profiles, key) orelse return null;
+        const index = profile_pick.byKey(profiles, key) orelse return null;
         return &profiles[index];
     }
 
@@ -5478,7 +5477,7 @@ pub const App = struct {
         self: *App,
         target: apprt.Target,
         profile: *const windows_shell.Profile,
-        open_target: ProfileOpenTarget,
+        open_target: OpenTarget,
     ) !*Surface {
         const source = self.registry.findSurfaceForTarget(target);
         var config = try apprt.surface.newConfig(
@@ -5988,32 +5987,22 @@ pub const App = struct {
     }
 
     pub fn launcherQuickSlotOrdinal(self: *const App, key: []const u8) ?usize {
-        return findLauncherQuickSlotOrdinal(self.launcher_quick_slot_keys, key);
+        return profile_pick.pinByKey(&self.launcher_quick_slot_keys, key);
     }
 
     pub fn setLauncherQuickSlotPreference(self: *App, slot_ordinal: usize, key: []const u8) !void {
         if (slot_ordinal >= self.launcher_quick_slot_keys.len) return;
         if (!launcherQuickSlotAssignmentNeedsChange(self.launcher_quick_slot_keys, slot_ordinal, key)) return;
-        var duplicate_slot: ?usize = null;
-        for (self.launcher_quick_slot_keys, 0..) |existing, index| {
-            if (existing) |value| {
-                if (windows_shell.storedProfileKeyEquals(value, key)) {
-                    duplicate_slot = index;
-                    break;
-                }
-            }
-        }
-
-        if (duplicate_slot) |index| {
-            if (index != slot_ordinal) {
-                if (self.launcher_quick_slot_keys[slot_ordinal]) |current| {
-                    try appendOwnedString(self.core_app.alloc, &self.launcher_quick_slot_keys[index], current);
-                } else {
-                    runUiActionOrLog(
-                        "quick slot deduplication failed",
-                        appendOwnedString(self.core_app.alloc, &self.launcher_quick_slot_keys[index], null),
-                    );
-                }
+        // The key is pinned in another slot, never this one (the guard above):
+        // that slot takes this slot's key.
+        if (profile_pick.pinByKey(&self.launcher_quick_slot_keys, key)) |index| {
+            if (self.launcher_quick_slot_keys[slot_ordinal]) |current| {
+                try appendOwnedString(self.core_app.alloc, &self.launcher_quick_slot_keys[index], current);
+            } else {
+                runUiActionOrLog(
+                    "quick slot deduplication failed",
+                    appendOwnedString(self.core_app.alloc, &self.launcher_quick_slot_keys[index], null),
+                );
             }
         }
 
