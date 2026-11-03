@@ -87,6 +87,12 @@ pub const Profile = struct {
     /// (newest instance first): what `vs:newest:cmd` or `vs:newest:pwsh`
     /// names, wherever `profile-order` later moves it (`NewestVisualStudio`).
     newest_visual_studio: bool = false,
+    /// Hidden by discovery itself, whatever `profile-hidden` says of it: an
+    /// instance older than the newest under `visual-studio-profiles =
+    /// newest`. Not the same as not being `newest_visual_studio`, which is
+    /// per shell: an older instance can hold the newest prompt when the
+    /// newer one has no `VsDevCmd.bat`. Settings cannot show such a profile.
+    hidden_by_discovery: bool = false,
 
     /// Deep copy into `alloc`.
     pub fn clone(self: Profile, alloc: Allocator) Allocator.Error!Profile {
@@ -116,6 +122,7 @@ pub const Profile = struct {
             .user = if (self.user) |user| try user.clone(alloc) else null,
             .hidden = self.hidden,
             .newest_visual_studio = self.newest_visual_studio,
+            .hidden_by_discovery = self.hidden_by_discovery,
         };
     }
 
@@ -1326,6 +1333,7 @@ pub fn appendVisualStudioProfiles(
         if (profiles.items.len == first) continue;
         for (profiles.items[first..]) |*profile| {
             profile.hidden = mode == .newest and shown;
+            profile.hidden_by_discovery = profile.hidden;
             const newest = switch (profile.kind) {
                 .vs_dev_cmd => &newest_cmd,
                 .vs_dev_shell => &newest_pwsh,
@@ -2062,6 +2070,25 @@ test "vs:newest skips an instance without that shell's script" {
     }
     // No Visual Studio shell at all: they name nothing.
     try testing.expectEqualStrings("", (NewestVisualStudio{}).resolve("vs:newest:cmd").?);
+    // Under `newest`, 2022 is the older instance: discovery hides both its
+    // shells, its prompt too, though that is the newest prompt there is. A
+    // `profile-hidden` that names it keeps it hidden by discovery as well.
+    const profiles = try testVsProfiles(alloc, .newest, .x64, .{ .instances = &.{ test_vs18, test_vs2022 }, .queries = &queries }, .{ .paths = &paths, .queries = &queries }, null);
+    defer deinitProfiles(alloc, profiles);
+    arrangeProfiles(profiles, &.{}, &.{"vs:486bb794:cmd"});
+    for (profiles) |profile| {
+        if (!std.mem.eql(u8, profile.key, "vs:486bb794:cmd")) continue;
+        try testing.expect(profile.newest_visual_studio);
+        try testing.expect(profile.hidden and profile.hidden_by_discovery);
+        // A copy keeps it.
+        var copy = try profile.clone(alloc);
+        defer copy.deinit(alloc);
+        try testing.expect(copy.hidden_by_discovery);
+        break;
+    } else return error.TestExpectedProfile;
+    for (profiles) |profile| {
+        if (std.mem.eql(u8, profile.key, "vs:6bb7cfd9:pwsh")) try testing.expect(!profile.hidden and !profile.hidden_by_discovery);
+    }
 }
 
 /// The profile that is the shell `defaultCommand` chose, so the picker's

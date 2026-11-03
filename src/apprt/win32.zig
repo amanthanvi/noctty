@@ -2857,13 +2857,19 @@ test "win32 Settings' Profiles page list marks the quick slots and the profiles 
     first.profiles = try testProfileList(app.core_app.alloc, &.{ "pwsh.exe", "cmd.exe", "vs:old:cmd" });
     first.profiles_complete = true;
     first.profiles.?[1].hidden = true;
+    first.profiles.?[1].kind = .cmd;
     first.profiles.?[2].hidden = true;
+    // Discovery hid the old Visual Studio, though its prompt is the newest
+    // there is (the newer instance has none): its own flag says so, not
+    // `newest_visual_studio`.
     first.profiles.?[2].kind = .vs_dev_cmd;
-    first.profiles.?[2].newest_visual_studio = false;
+    first.profiles.?[2].newest_visual_studio = true;
+    first.profiles.?[2].hidden_by_discovery = true;
     try app.config.@"profile-hidden".list.append(app.config._arena.?.allocator(), "cmd.exe");
     // `profile-hidden` names the old Visual Studio too: discovery still
     // hides it, so the page still cannot show it.
     try app.config.@"profile-hidden".list.append(app.config._arena.?.allocator(), "vs:old:cmd");
+    try app.config.@"profile-order".list.append(app.config._arena.?.allocator(), "pwsh");
     // PowerShell has the first quick slot.
     app.launcher_quick_slot_keys[0] = try std.testing.allocator.dupeZ(u8, "pwsh.exe");
     defer {
@@ -2879,6 +2885,15 @@ test "win32 Settings' Profiles page list marks the quick slots and the profiles 
     try std.testing.expect(!choices.items[0].found_hidden);
     try std.testing.expect(choices.items[1].hidden and !choices.items[1].found_hidden);
     try std.testing.expect(choices.items[2].hidden and choices.items[2].found_hidden);
+    // What each list value names, as the app reads it: `pwsh` is an alias
+    // the page reads and keeps by this.
+    try std.testing.expectEqual(@as(usize, 1), choices.order_refs.len);
+    try std.testing.expectEqualStrings("pwsh", choices.order_refs[0].value);
+    try std.testing.expectEqual(@as(usize, 1), choices.order_refs[0].keys.len);
+    try std.testing.expectEqualStrings("pwsh.exe", choices.order_refs[0].keys[0]);
+    try std.testing.expectEqual(@as(usize, 2), choices.hidden_refs.len);
+    try std.testing.expectEqualStrings("cmd.exe", choices.hidden_refs[0].keys[0]);
+    try std.testing.expectEqualStrings("vs:old:cmd", choices.hidden_refs[1].keys[0]);
 }
 
 test "win32 a finished discovery refills Settings' Default profile dropdown" {
@@ -5654,20 +5669,55 @@ pub fn settingsProfileChoicesThunk(
     for (result.items) |*item| if (app.launcherQuickSlotOrdinal(item.key)) |ordinal| {
         item.quick_slot = @intCast(ordinal + 1);
     };
-    // A hidden profile noctty hid itself, which the Profiles page cannot
-    // show: an older Visual Studio under `visual-studio-profiles = newest`
-    // (whatever `profile-hidden` says of it too), or one no `profile-hidden`
-    // value names.
-    const newest_only = app.config.@"visual-studio-profiles" == .newest;
-    if (list) |found| for (result.items, found.profiles) |*item, profile| {
-        if (!profile.hidden) continue;
-        const older_visual_studio = newest_only and !profile.newest_visual_studio and
-            (profile.kind == .vs_dev_cmd or profile.kind == .vs_dev_shell);
-        item.found_hidden = older_visual_studio or for (app.config.@"profile-hidden".list.items) |value| {
-            if (windows_shell.referenceNames(found.profiles, value, profile)) break false;
-        } else true;
-    };
+    if (list) |found| {
+        // A profile discovery hid itself (an older Visual Studio under
+        // `visual-studio-profiles = newest`), whatever `profile-hidden` says
+        // of it too: the Profiles page cannot show it.
+        for (result.items, found.profiles) |*item, profile| item.found_hidden = profile.hidden_by_discovery;
+        // What each value of both lists names, as the app reads it: the page
+        // reads and keeps an alias (`wsl`, `pwsh`, `vs:newest:cmd`) by it.
+        result.order_refs = try settingsListReferences(alloc, found.profiles, app.config.@"profile-order".list.items);
+        result.hidden_refs = try settingsListReferences(alloc, found.profiles, app.config.@"profile-hidden".list.items);
+    }
     return result;
+}
+
+/// What each of `values` (a `profile-order` or `profile-hidden`) names among
+/// `profiles`, by `windows_shell.referenceNames`: their keys. Owned.
+fn settingsListReferences(
+    alloc: Allocator,
+    profiles: []const windows_shell.Profile,
+    values: []const [:0]const u8,
+) Allocator.Error![]win32_settings.ProfileReference {
+    const refs = try alloc.alloc(win32_settings.ProfileReference, values.len);
+    var made: usize = 0;
+    errdefer {
+        for (refs[0..made]) |ref| ref.deinit(alloc);
+        alloc.free(refs);
+    }
+    for (values, refs) |value, *ref| {
+        var keys: std.ArrayListUnmanaged([]const u8) = .empty;
+        errdefer {
+            for (keys.items) |key| alloc.free(key);
+            keys.deinit(alloc);
+        }
+        for (profiles) |profile| {
+            if (!windows_shell.referenceNames(profiles, value, profile)) continue;
+            const key = try alloc.dupe(u8, profile.key);
+            keys.append(alloc, key) catch |err| {
+                alloc.free(key);
+                return err;
+            };
+        }
+        const owned = try alloc.dupe(u8, value);
+        const named = keys.toOwnedSlice(alloc) catch |err| {
+            alloc.free(owned);
+            return err;
+        };
+        ref.* = .{ .value = owned, .keys = named };
+        made += 1;
+    }
+    return refs;
 }
 
 /// The label the draft's `default-profile` value starts under when it is

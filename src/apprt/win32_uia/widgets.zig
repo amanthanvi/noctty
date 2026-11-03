@@ -1266,6 +1266,10 @@ pub const SettingsControlProvider = struct {
     name: ?[]const u8,
     /// Static descriptor text; assigned before publishing the provider.
     help_text: []const u8 = "",
+    /// A button's Invoke, when set, instead of posting its `BN_CLICKED`:
+    /// called on the client's thread, so it may only read the window and
+    /// post (the Profiles page's buttons post the row they act on).
+    invoke_hook: ?*const fn (hwnd: com.HWND) com.HRESULT = null,
     /// The element that names this one (`UIA_LabeledByPropertyId`). Holds
     /// a reference, released with this provider.
     labeled_by: ?*com.IRawElementProviderSimple = null,
@@ -1646,6 +1650,7 @@ pub const SettingsControlProvider = struct {
         // window, which is exactly when assistive technology may invoke a
         // surviving Settings window after its terminal owner closes. Marshal
         // the native BN_CLICKED command directly to the parent instead.
+        if (self.invoke_hook) |hook| return hook(self.hwnd);
         return postButtonClicked(self.hwnd);
     }
 

@@ -714,12 +714,17 @@ fn recordProfilePlace(config: *Config, alloc: Allocator, arg: []const u8, iter: 
         // the empty id, which no profile has, so `profileWrittenOnCommandLine`
         // sees a command-line reset (New Elevated Window would otherwise
         // name a file's profile, whose variables the elevated process reads
-        // back from the files).
-        if (std.mem.eql(u8, key, "profile-env")) try config._launch.profile_places.append(alloc, .{
-            .key = "profile-env",
-            .id = "",
-            .location = try cli.Location.fromIter(iter, alloc),
-        });
+        // back from the files). A clear of `profile-order` or
+        // `profile-hidden` is recorded the same way: Settings compares a
+        // file's own lines for them (`settings_patch.changedUnder`), clears
+        // included. No reference is empty, so no lookup finds these.
+        inline for (.{ "profile-env", "profile-order", "profile-hidden" }) |cleared| {
+            if (std.mem.eql(u8, key, cleared)) try config._launch.profile_places.append(alloc, .{
+                .key = cleared,
+                .id = "",
+                .location = try cli.Location.fromIter(iter, alloc),
+            });
+        }
         return;
     }
     inline for (.{ "default-profile", "profile-order", "profile-hidden" }) |reference_key| {

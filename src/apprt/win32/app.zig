@@ -8653,6 +8653,11 @@ pub const App = struct {
         // A file the reload could not read whole: what it missed is no
         // override, and the save says that instead, naming the file.
         postWriteStep(.report);
+        // A later layer's alias for a profile the save hid hides nothing
+        // more: the windows' profiles tell (`settings_patch.listHeld`).
+        if (self.settingsProfileList(false)) |listed| for (profile_edits) |*edit| {
+            if (edit.field.isList()) edit.profiles = listed.profiles;
+        };
         const report = settings_patch.reloadReport(&masked_text.writer, profile_edits, applied, &reloaded, masked_text.written().len > 0) catch |err|
             return savedNotApplied("checked for overridden settings", err);
         switch (report) {
@@ -8742,8 +8747,9 @@ pub const App = struct {
         original: *const configpkg.Config,
         pending: *const configpkg.Config,
         edits: []const settings_patch.Edit,
+        target_path: []const u8,
     ) win32_settings.SaveError!void {
-        const edit = settings_patch.changedUnder(edits, original, pending, now) orelse return;
+        const edit = settings_patch.changedUnder(edits, original, pending, now, target_path, &settings_reference.samePath) orelse return;
         var name: std.Io.Writer.Allocating = .init(alloc);
         defer name.deinit();
         settings_patch.writeEditName(&name.writer, edit) catch return error.OutOfMemory;
@@ -8827,7 +8833,7 @@ pub const App = struct {
                 return if (unread.undecodable) error.UnsupportedEncoding else error.FileUnopenable;
             }
         }
-        if (compare) |edits| try settingsProfilesUnchanged(alloc, detail, readings[0], original, pending, edits);
+        if (compare) |edits| try settingsProfilesUnchanged(alloc, detail, readings[0], original, pending, edits, target_path);
         return settings_patch.editsForSave(arena, alloc, &readings, state, original, pending, target_path, &settings_reference.samePath) catch |err|
             settingsProfileEditsFailed(err);
     }
