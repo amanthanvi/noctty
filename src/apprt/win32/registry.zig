@@ -523,23 +523,56 @@ test "Registry shown target and window position lookups use current native visib
             fixture.second.hwnd = second;
             defer fixture.first.hwnd = null;
             defer fixture.second.hwnd = null;
+            const c = @import("consts.zig");
             try std.testing.expect(registry.shownSurfaceForTarget(.app) == null);
-            var rect: RECT = undefined;
-            try std.testing.expect(sys.GetWindowRect(second, &rect) != 0);
-            const corner: POINT = .{ .x = rect.left, .y = rect.top };
-            try std.testing.expect(!registry.windowStartsAt(corner, null));
-            _ = sys.ShowWindow(second, @import("consts.zig").SW_SHOWNOACTIVATE);
+            // Each window at a top-left of its own, so an answer can come
+            // from only one of them.
+            const at_first: POINT = .{ .x = 100, .y = 120 };
+            const at_second: POINT = .{ .x = 340, .y = 360 };
+            const move = c.SWP_NOSIZE | c.SWP_NOZORDER | c.SWP_NOACTIVATE;
+            try std.testing.expect(sys.SetWindowPos(first, null, at_first.x, at_first.y, 0, 0, move) != 0);
+            try std.testing.expect(sys.SetWindowPos(second, null, at_second.x, at_second.y, 0, 0, move) != 0);
+            // A hidden window does not count, though it is there.
+            try std.testing.expect(!registry.windowStartsAt(at_first, null));
+            try std.testing.expect(!registry.windowStartsAt(at_second, null));
+            _ = sys.ShowWindow(second, c.SW_SHOWNOACTIVATE);
             try std.testing.expectEqual(&fixture.c, registry.shownSurfaceForTarget(.app).?);
-            try std.testing.expect(registry.windowStartsAt(corner, null));
-            try std.testing.expect(!registry.windowStartsAt(corner, second));
-            _ = sys.ShowWindow(first, @import("consts.zig").SW_SHOWNOACTIVATE);
+            try std.testing.expect(registry.windowStartsAt(at_second, null));
+            try std.testing.expect(!registry.windowStartsAt(at_first, null));
+            _ = sys.ShowWindow(first, c.SW_SHOWNOACTIVATE);
             try std.testing.expectEqual(&fixture.a, registry.shownSurfaceForTarget(.app).?);
             try std.testing.expectEqual(&fixture.c, registry.shownSurfaceForTarget(.{ .surface = &fixture.c.core_surface }).?);
-            _ = sys.ShowWindow(second, @import("consts.zig").SW_MINIMIZE);
-            // Hide the other window to distinguish iconic exclusion from
-            // matching its coincident default position.
-            _ = sys.ShowWindow(first, @import("consts.zig").SW_HIDE);
-            try std.testing.expect(!registry.windowStartsAt(corner, null));
+            // Both shown: true at each one's top-left and false elsewhere,
+            // inside a window, off both, or with one's x and the other's y.
+            try std.testing.expect(registry.windowStartsAt(at_first, null));
+            try std.testing.expect(registry.windowStartsAt(at_second, null));
+            for ([_]POINT{
+                .{ .x = at_first.x + 1, .y = at_first.y },
+                .{ .x = at_second.x, .y = at_second.y + 1 },
+                .{ .x = 700, .y = 700 },
+                .{ .x = at_first.x, .y = at_second.y },
+                .{ .x = at_second.x, .y = at_first.y },
+            }) |elsewhere| {
+                try std.testing.expect(!registry.windowStartsAt(elsewhere, null));
+            }
+            // The window being placed is not one it steps past; the other
+            // still is.
+            try std.testing.expect(!registry.windowStartsAt(at_second, second));
+            try std.testing.expect(registry.windowStartsAt(at_first, second));
+            try std.testing.expect(!registry.windowStartsAt(at_first, first));
+            try std.testing.expect(registry.windowStartsAt(at_second, first));
+            // A minimized window does not count at the rect it has now, nor
+            // where it was; the other window still does.
+            _ = sys.ShowWindow(second, c.SW_MINIMIZE);
+            try std.testing.expect(sys.IsIconic(second) != 0);
+            var iconic: RECT = undefined;
+            try std.testing.expect(sys.GetWindowRect(second, &iconic) != 0);
+            try std.testing.expect(!registry.windowStartsAt(.{ .x = iconic.left, .y = iconic.top }, null));
+            try std.testing.expect(!registry.windowStartsAt(at_second, null));
+            try std.testing.expect(registry.windowStartsAt(at_first, null));
+            // Hidden again, the other window no longer counts either.
+            _ = sys.ShowWindow(first, c.SW_HIDE);
+            try std.testing.expect(!registry.windowStartsAt(at_first, null));
         }
     }.run);
 }
