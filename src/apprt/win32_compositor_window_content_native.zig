@@ -134,7 +134,6 @@ pub const RenderText = struct {
     background: Color = .{ .r = 0.055, .g = 0.063, .b = 0.078 },
     foreground: Color = .{ .r = 0.91, .g = 0.93, .b = 0.96 },
     padding_dip: f32 = 12.0,
-    layout_dip: ?RectF = null,
 };
 
 pub const WindowContent = struct {
@@ -203,7 +202,6 @@ pub const WindowContent = struct {
         if (self.state != .ready) return error.DeviceLost;
         if (args.text.len > std.math.maxInt(u32) or
             !std.math.isFinite(args.padding_dip) or args.padding_dip < 0 or
-            (args.layout_dip != null and !validRect(args.layout_dip.?)) or
             !validColor(args.background) or !validColor(args.foreground))
             return error.DrawFailed;
 
@@ -394,7 +392,7 @@ pub const WindowContent = struct {
         if (args.text.len > 0) {
             const width_dip = @as(f32, @floatFromInt(self.width_px)) * px_to_dip;
             const height_dip = @as(f32, @floatFromInt(self.height_px)) * px_to_dip;
-            const layout: RectF = args.layout_dip orelse .{
+            const layout: RectF = .{
                 .left = args.padding_dip,
                 .top = args.padding_dip,
                 .right = @max(args.padding_dip, width_dip - args.padding_dip),
@@ -467,12 +465,6 @@ fn validColor(color: Color) bool {
         std.math.isFinite(color.g) and
         std.math.isFinite(color.b) and
         std.math.isFinite(color.a);
-}
-
-fn validRect(rect: RectF) bool {
-    return std.math.isFinite(rect.left) and std.math.isFinite(rect.top) and
-        std.math.isFinite(rect.right) and std.math.isFinite(rect.bottom) and
-        rect.right >= rect.left and rect.bottom >= rect.top;
 }
 
 fn call(comptime T: type, object: *anyopaque, comptime index: usize) T {

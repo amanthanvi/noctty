@@ -187,15 +187,6 @@ const Target = struct {
     }
 };
 
-pub const ChromeText = struct {
-    text: []const u16,
-    left_px: i32,
-    top_px: i32,
-    right_px: i32,
-    bottom_px: i32,
-    color_ref: u32,
-};
-
 /// Stable-address native driver. Keep this value at a fixed address for as
 /// long as its `boundary.Driver` interface can be called.
 pub const NativeDriver = struct {
@@ -262,36 +253,6 @@ pub const NativeDriver = struct {
         ) catch |err| return mapContentError(err, error.AttachFailed);
         if (changed) try renderNeutralContent(content);
         return changed;
-    }
-
-    /// Replaces the shell composition layer with one transparent DWrite text
-    /// zone. This is intentionally narrow: callers migrate isolated chrome
-    /// zones while child HWND controls and terminal WGL content stay owned by
-    /// their established paths. An empty string clears the migrated zone.
-    pub fn renderWindowChromeText(
-        self: *NativeDriver,
-        window: boundary.WindowHandle,
-        args: ChromeText,
-    ) boundary.DriverError!void {
-        if (!self.started) return error.InitializationFailed;
-        const index = self.findTarget(window) orelse return error.AttachFailed;
-        const content = if (self.targets.items[index].shell_content) |*value|
-            value
-        else
-            return error.AttachFailed;
-        const px_to_dip = 96.0 / content.dpi;
-        content.renderText(.{
-            .text = args.text,
-            .background = .{ .r = 0, .g = 0, .b = 0, .a = 0 },
-            .foreground = colorRefToD2d(args.color_ref),
-            .padding_dip = 0,
-            .layout_dip = .{
-                .left = @as(f32, @floatFromInt(args.left_px)) * px_to_dip,
-                .top = @as(f32, @floatFromInt(args.top_px)) * px_to_dip,
-                .right = @as(f32, @floatFromInt(@max(args.left_px, args.right_px))) * px_to_dip,
-                .bottom = @as(f32, @floatFromInt(@max(args.top_px, args.bottom_px))) * px_to_dip,
-            },
-        }) catch |err| return mapContentError(err, error.AttachFailed);
     }
 
     fn fromContext(context: *anyopaque) *NativeDriver {
@@ -579,16 +540,6 @@ fn renderNeutralContent(content: *window_content_native.WindowContent) boundary.
     }) catch |err| return mapContentError(err, error.AttachFailed);
 }
 
-fn colorRefToD2d(color: u32) window_content_native.Color {
-    const scale: f32 = 1.0 / 255.0;
-    return .{
-        .r = @as(f32, @floatFromInt(color & 0xff)) * scale,
-        .g = @as(f32, @floatFromInt((color >> 8) & 0xff)) * scale,
-        .b = @as(f32, @floatFromInt((color >> 16) & 0xff)) * scale,
-        .a = 1,
-    };
-}
-
 fn queryInterface(value: *anyopaque, iid: *const GUID, out: *?*anyopaque) HRESULT {
     const unknown: *IUnknown = @ptrCast(@alignCast(value));
     return unknown.vtbl.QueryInterface(value, iid, out);
@@ -693,14 +644,6 @@ test "native driver attaches commits and detaches a real top-level HWND" {
     try std.testing.expect(driver.shellContentContext() != null);
     const original_text_format = driver.shellTextFormat();
     try std.testing.expect(original_text_format != null);
-    try driver.renderWindowChromeText(@intFromPtr(hwnd), .{
-        .text = std.unicode.utf8ToUtf16LeStringLiteral("composed banner"),
-        .left_px = 2,
-        .top_px = 2,
-        .right_px = 30,
-        .bottom_px = 20,
-        .color_ref = 0x00ff8040,
-    });
     try backend.commit();
 
     // Exercise the same reconstruction path used after a real DXGI loss.
@@ -712,14 +655,6 @@ test "native driver attaches commits and detaches a real top-level HWND" {
     try std.testing.expect(driver.shellContentReady());
     try std.testing.expect(driver.shellContentContext() != null);
     try std.testing.expectEqual(original_text_format, driver.shellTextFormat());
-    try driver.renderWindowChromeText(@intFromPtr(hwnd), .{
-        .text = &.{},
-        .left_px = 0,
-        .top_px = 0,
-        .right_px = 0,
-        .bottom_px = 0,
-        .color_ref = 0,
-    });
     try backend.commit();
 
     try backend.detachWindow(@intFromPtr(hwnd));
