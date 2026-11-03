@@ -7,7 +7,6 @@ const BenchmarkMemoryStage = win32.BenchmarkMemoryStage;
 const ChildPlacement = child_window.ChildPlacement;
 const ClipboardContents = win32.ClipboardContents;
 const ClipboardSource = win32.ClipboardSource;
-const ConfirmPrompt = win32.ConfirmPrompt;
 const CoreSurface = @import("../../Surface.zig");
 const DeferredCharState = win32.DeferredCharState;
 const HDC = win32.HDC;
@@ -57,6 +56,7 @@ const clipboardTextToUtf8 = win32.clipboardTextToUtf8;
 const clipboard_write = @import("clipboard_write.zig");
 const commitSplitSurfaceAttach = win32.commitSplitSurfaceAttach;
 const configpkg = @import("../../config.zig");
+const confirm_text = @import("confirm_text.zig");
 const crlfLineEndings = win32.crlfLineEndings;
 const cursorPosFromLParam = win32.cursorPosFromLParam;
 const detachChromeControlProvider = win32.detachChromeControlProvider;
@@ -1213,17 +1213,13 @@ pub const Surface = struct {
             // Not always the key that closed a terminal in front: a read-only
             // terminal whose program exits closes itself and asks, in
             // whichever tab it is.
-            var title_buf: [32]u8 = undefined;
-            var prompt: ConfirmPrompt = .{
-                .title = "Close this terminal?",
-                .body = "A process is still running. Closing this surface will terminate it.",
-                .accept_label = "Close",
-                .cancel_label = "Cancel",
-                // Nothing to preview: this prompt is about a running
-                // process, not about a payload.
-            };
-            const named_body = host.nameBackgroundTerminal(&prompt, mutable, &title_buf);
-            defer if (named_body) |text| mutable.app.core_app.alloc.free(text);
+            const alloc = mutable.app.core_app.alloc;
+            var words: confirm_text.Words = .{};
+            defer words.deinit(alloc);
+            const prompt = words.close(alloc, .{ .terminal = .{
+                .program_exited = mutable.core_initialized and mutable.core_surface.child_exited,
+                .behind = host.backgroundTabRef(mutable),
+            } });
             host.showConfirm(
                 prompt,
                 &surfaceConfirmCloseAccept,
@@ -4779,24 +4775,17 @@ pub const Surface = struct {
         // committed successfully and a later setup step failed.
         errdefer alloc.free(data_copy);
 
-        const program_body = if (program_request) try self.programClipboardPromptBody(.read) else null;
-        defer if (program_body) |body| alloc.free(body);
-        try host.showConfirm(
-            .{
-                .title = if (program_request) labels.programClipboardPromptTitle(.read) else "Allow clipboard paste?",
-                .body = program_body orelse "noctty needs confirmation before completing this clipboard paste.",
-                .accept_label = "Allow",
-                .cancel_label = "Cancel",
-                // Preview the exact bytes the gate stopped. `data_copy`
-                // is what Accept delivers; the preview is built from the
-                // same bytes and capped for display only.
-                .contents = data,
-                .program_request = program_request,
-            },
-            surfaceConfirmPasteAccept,
-            surfaceConfirmPasteCancel,
-            self,
-        );
+        var words: confirm_text.Words = .{};
+        defer words.deinit(alloc);
+        // Preview the exact bytes the gate stopped. `data_copy` is what
+        // Accept delivers; the preview is built from the same bytes and
+        // capped for display only.
+        const asked: confirm_text.Clipboard = if (program_request)
+            .{ .program = .{ .request = .read, .contents = data, .asked_by = self.tabRef() } }
+        else
+            .{ .user_paste = data };
+        const prompt = try words.clipboard(alloc, asked);
+        try host.showConfirm(prompt, surfaceConfirmPasteAccept, surfaceConfirmPasteCancel, self);
 
         // showConfirm succeeded — the callback is registered and
         // fires async on user action (Enter / Esc / click), never
@@ -4869,21 +4858,10 @@ pub const Surface = struct {
             break :preview contents[0].data;
         };
 
-        const body = try self.programClipboardPromptBody(.write);
-        defer alloc.free(body);
-        try host.showConfirm(
-            .{
-                .title = labels.programClipboardPromptTitle(.write),
-                .body = body,
-                .accept_label = "Allow",
-                .cancel_label = "Cancel",
-                .contents = preview_contents,
-                .program_request = true,
-            },
-            surfaceConfirmWriteAccept,
-            surfaceConfirmWriteCancel,
-            self,
-        );
+        var words: confirm_text.Words = .{};
+        defer words.deinit(alloc);
+        const prompt = try words.clipboard(alloc, .{ .program = .{ .request = .write, .contents = preview_contents, .asked_by = self.tabRef() } });
+        try host.showConfirm(prompt, surfaceConfirmWriteAccept, surfaceConfirmWriteCancel, self);
 
         // showConfirm succeeded — commit the pending op. The async
         // accept callback picks it up; same race-free rationale as
@@ -4910,13 +4888,10 @@ pub const Surface = struct {
         if (Host.findTabForSurface(self) == null) return error.NotInATab;
     }
 
-    fn programClipboardPromptBody(self: *Surface, request: labels.ProgramClipboardRequest) ![]u8 {
-        return labels.buildProgramClipboardPromptBody(
-            self.app.core_app.alloc,
-            request,
-            self.app.hostTabStatus(self).index + 1,
-            self.effectiveTitle(),
-        );
+    /// This pane's tab as a program's prompt names it: its number and
+    /// title as the tab strip shows them.
+    fn tabRef(self: *Surface) confirm_text.TabRef {
+        return .{ .number = self.app.hostTabStatus(self).index + 1, .title = self.effectiveTitle() };
     }
 
     /// Keeps `link` (owned on the App allocator) for this pane's link

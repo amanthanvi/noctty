@@ -147,6 +147,7 @@
         "src/apprt/win32/child_window.zig",
         "src/apprt/win32/text.zig",
         "src/apprt/win32/labels.zig",
+        "src/apprt/win32/confirm_text.zig",
         "build.zig.zon"
       ]
     },
@@ -181,7 +182,8 @@
         "src/apprt/win32_undo.zig",
         "src/apprt/win32_structural_history.zig",
         "src/apprt/win32_shell.zig",
-        "src/apprt/win32_shell/**"
+        "src/apprt/win32_shell/**",
+        "src/apprt/win32/confirm_text.zig"
       ]
     },
     {
@@ -226,7 +228,8 @@
         "src/apprt/win32_elevation.zig",
         "src/cli/list_profiles.zig",
         "src/config/command.zig",
-        "src/apprt/win32/labels.zig"
+        "src/apprt/win32/labels.zig",
+        "src/apprt/win32/confirm_text.zig"
       ]
     },
     {
@@ -242,7 +245,8 @@
         "src/apprt/win32_paste_protection.zig",
         "src/apprt/win32_surface_drop*.zig",
         "src/Surface.zig",
-        "src/apprt/win32_ole.zig"
+        "src/apprt/win32_ole.zig",
+        "src/apprt/win32/confirm_text.zig"
       ]
     },
     {
@@ -279,7 +283,8 @@
         "src/apprt/win32/overlay_session.zig",
         "src/apprt/win32/palette_controller.zig",
         "src/apprt/win32/search_controls.zig",
-        "src/apprt/win32/terminal_window.zig"
+        "src/apprt/win32/terminal_window.zig",
+        "src/apprt/win32/confirm_text.zig"
       ]
     },
     {

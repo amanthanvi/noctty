@@ -1,5 +1,4 @@
 //! Overlay and confirmation lifecycle. Host and Surface retain coordination.
-const labels = @import("labels.zig");
 const win32 = @import("../win32.zig");
 const runtime = win32.overlay_session_runtime;
 const Allocator = runtime.Allocator;
@@ -8,7 +7,6 @@ const Host = runtime.Host;
 const HostOverlayMode = runtime.HostOverlayMode;
 const HostTabStatus = runtime.HostTabStatus;
 const LONG_PTR = runtime.LONG_PTR;
-const OverlayConfirmPreview = runtime.OverlayConfirmPreview;
 const OverlayConfirmText = runtime.OverlayConfirmText;
 const OverlayFocusSlot = runtime.OverlayFocusSlot;
 const WPARAM = runtime.WPARAM;
@@ -17,8 +15,6 @@ const applyChildVisibility = child_window.applyChildVisibility;
 const buildCommandPaletteFeedbackText = runtime.buildCommandPaletteFeedbackText;
 const buildCommandPaletteOverlayLabel = runtime.buildCommandPaletteOverlayLabel;
 const buildConfirmBodyText = runtime.buildConfirmBodyText;
-const buildConfirmPreview = runtime.buildConfirmPreview;
-const buildConfirmPreviewCaption = runtime.buildConfirmPreviewCaption;
 const buildOverlayAcceptLabel = runtime.buildOverlayAcceptLabel;
 const buildOverlayHintText = runtime.buildOverlayHintText;
 const buildProfileAcceptLabel = runtime.buildProfileAcceptLabel;
@@ -28,6 +24,7 @@ const buildTabOverviewOverlayLabel = runtime.buildTabOverviewOverlayLabel;
 const c = runtime.c;
 const child_window = @import("child_window.zig");
 const chromeSyncOrLog = runtime.chromeSyncOrLog;
+const confirm_text = @import("confirm_text.zig");
 const confirmPromptUiaName = runtime.confirmPromptUiaName;
 const destroySubclassedWindow = runtime.destroySubclassedWindow;
 const detachChromeControlProvider = runtime.detachChromeControlProvider;
@@ -94,31 +91,6 @@ const host_overlay_tab_title_label_utf8 = "Tab title:";
 
 const host_overlay_command_palette_label = std.unicode.utf8ToUtf16LeStringLiteral("Command:");
 
-const confirm_preview_limit = labels.confirm_preview_limit;
-
-/// What a caller is asking the user to approve. A struct rather than
-/// positional arguments because every string field has the same type:
-/// swapping `title` and `accept_label` used to compile cleanly. Borrows
-/// the caller's strings; `showConfirm` copies what it keeps.
-pub const ConfirmPrompt = struct {
-    title: []const u8,
-    body: []const u8,
-    accept_label: []const u8,
-    cancel_label: []const u8,
-    /// The payload this prompt is about, rendered verbatim in the
-    /// preview pane. Null for prompts with nothing to show, such as
-    /// the close-surface prompt.
-    contents: ?[]const u8 = null,
-    /// A program in the terminal asked (an OSC 52 clipboard read or
-    /// write), not the user. It can send the request right after a key it
-    /// read, so the user's next key lands on the prompt: such a prompt
-    /// opens on Cancel, ignores Allow for its first
-    /// `program_confirm_arming_ms`, and never replaces an open prompt.
-    /// A link prompt (`App.askBeforeOpeningLink`) sets it too, but the
-    /// user's click raises it, so it replaces an open prompt.
-    program_request: bool = false,
-};
-
 pub const ConfirmCancelReason = enum { explicit, dismissed };
 
 /// Payload for a non-modal confirm overlay. The callbacks receive the
@@ -133,13 +105,9 @@ pub const ConfirmPayload = struct {
     body: []u8,
     accept_label: []u8,
     cancel_label: []u8,
-    /// Display-capped rendering of `ConfirmPrompt.contents`, built once
-    /// when the prompt opens. This is for the eyes only — Accept
+    /// Rendered once when the prompt opens, for the eyes only: Accept
     /// delivers the Surface's pending clipboard op, never these bytes.
-    preview: ?OverlayConfirmPreview = null,
-    /// How much is being approved, stated next to the body because the
-    /// pane may only show the head of a large payload.
-    preview_caption: ?[]u8 = null,
+    preview: ?confirm_text.Preview = null,
     program_request: bool = false,
     /// `GetTickCount64` before which Allow does nothing; 0 for prompts
     /// the user's own action raised.
@@ -154,7 +122,6 @@ pub const ConfirmPayload = struct {
         alloc.free(self.accept_label);
         alloc.free(self.cancel_label);
         if (self.preview) |*preview| preview.deinit(alloc);
-        if (self.preview_caption) |caption| alloc.free(caption);
     }
 };
 
@@ -920,7 +887,7 @@ pub const HostControls = struct {
     /// profile).
     pub fn showConfirm(
         self: *Host,
-        prompt: ConfirmPrompt,
+        prompt: confirm_text.Prompt,
         on_accept: *const fn (userdata: ?*anyopaque) void,
         on_cancel: ?*const fn (userdata: ?*anyopaque, reason: ConfirmCancelReason) void,
         userdata: ?*anyopaque,
@@ -939,14 +906,9 @@ pub const HostControls = struct {
 
         // Render the preview once, here, so a megabyte paste costs one
         // capped copy rather than a rebuild on every chrome repaint.
-        var preview: ?OverlayConfirmPreview = null;
+        var preview: ?confirm_text.Preview = null;
         errdefer if (preview) |*value| value.deinit(alloc);
-        var caption: ?[]u8 = null;
-        errdefer if (caption) |value| alloc.free(value);
-        if (prompt.contents) |contents| {
-            preview = try buildConfirmPreview(alloc, contents, confirm_preview_limit);
-            caption = try buildConfirmPreviewCaption(alloc, preview.?);
-        }
+        if (prompt.contents) |contents| preview = try confirm_text.preview(alloc, contents);
 
         // Close any previous overlay so we don't stack. `hideOverlay`
         // frees an existing `confirm_payload` via its own deinit
@@ -962,7 +924,6 @@ pub const HostControls = struct {
             .accept_label = accept_owned,
             .cancel_label = cancel_owned,
             .preview = preview,
-            .preview_caption = caption,
             .program_request = prompt.program_request,
             .armed_at_ms = if (prompt.program_request) sys.GetTickCount64() + program_confirm_arming_ms else 0,
             .on_accept = on_accept,
@@ -1242,7 +1203,7 @@ pub const HostControls = struct {
         return .{
             .title = payload.title,
             .body = payload.body,
-            .preview_caption = payload.preview_caption orelse "",
+            .preview_caption = if (payload.preview) |preview| preview.caption else "",
         };
     }
 

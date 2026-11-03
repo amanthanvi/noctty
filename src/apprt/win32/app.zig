@@ -4,7 +4,7 @@ const ATOM = win32.ATOM;
 const Allocator = win32.Allocator;
 const AppDelivery = win32.AppDelivery;
 const ClipboardSource = win32.ClipboardSource;
-const CloseScope = win32.CloseScope;
+const CloseScope = confirm_text.CloseScope;
 const ConfirmCancelReason = @import("overlay_session.zig").ConfirmCancelReason;
 const CoreApp = @import("../../App.zig");
 const CoreSurface = @import("../../Surface.zig");
@@ -77,6 +77,7 @@ const closeThisTabConfirmAccept = win32.closeThisTabConfirmAccept;
 const config_edit = @import("../../config/edit.zig");
 const config_file_load = @import("../../config/file_load.zig");
 const configpkg = @import("../../config.zig");
+const confirm_text = @import("confirm_text.zig");
 const currentInstallDir = win32.currentInstallDir;
 const darkTheme = win32.darkTheme;
 const default_title = win32.default_title;
@@ -7644,16 +7645,10 @@ pub const App = struct {
         errdefer alloc.free(owned);
         const handler = linkHandlerName(alloc, scheme, internal_os.windows.AssocQueryStringW);
         defer if (handler == .app) alloc.free(handler.app);
-        const body = try labels.linkPromptBody(alloc, handler, scheme);
-        defer alloc.free(body);
-        try host.showConfirm(.{
-            .title = labels.link_prompt_title,
-            .body = body,
-            .accept_label = labels.link_prompt_accept_label,
-            .cancel_label = "Cancel",
-            .contents = link,
-            .program_request = true,
-        }, &linkConfirmAccept, &linkConfirmCancel, surface);
+        var words: confirm_text.Words = .{};
+        defer words.deinit(alloc);
+        const prompt = try words.link(alloc, .{ .url = link, .scheme = scheme, .handler = handler });
+        try host.showConfirm(prompt, &linkConfirmAccept, &linkConfirmCancel, surface);
         // After showConfirm: replacing this pane's earlier prompt released
         // the link that one held.
         surface.setPendingLinkOpen(owned);
@@ -7686,7 +7681,7 @@ pub const App = struct {
     /// `.none` when no app is set. Unlike ShellExecuteW it delivers no
     /// window messages (measured with posted and sent ones), so the
     /// click's window procedure may call it.
-    fn linkHandlerName(alloc: Allocator, scheme: []const u8, comptime query: anytype) labels.LinkHandler {
+    fn linkHandlerName(alloc: Allocator, scheme: []const u8, comptime query: anytype) confirm_text.LinkHandler {
         var scheme_w: [16:0]u16 = @splat(0);
         if (scheme.len > scheme_w.len) return .unnamed;
         for (scheme, 0..) |byte, i| scheme_w[i] = byte;
@@ -8055,9 +8050,10 @@ pub const App = struct {
             // opens it now: a machine's handler is no fixed answer.
             const handler = linkHandlerName(alloc, scheme, internal_os.windows.AssocQueryStringW);
             defer if (handler == .app) alloc.free(handler.app);
-            const body = try labels.linkPromptBody(alloc, handler, scheme);
-            defer alloc.free(body);
-            try std.testing.expectEqualStrings(body, payload.body);
+            var words: confirm_text.Words = .{};
+            defer words.deinit(alloc);
+            const asked = try words.link(alloc, .{ .url = link, .scheme = scheme, .handler = handler });
+            try std.testing.expectEqualStrings(asked.body, payload.body);
             // As upstream's alert, it opens on Cancel.
             try std.testing.expect(payload.program_request);
             try std.testing.expect(!app.runDeferredOpens());
@@ -8160,7 +8156,7 @@ pub const App = struct {
         };
         const alloc = std.testing.allocator;
         const W = std.unicode.utf8ToUtf16LeStringLiteral;
-        for ([_]struct { []const u16, u32, windows.HRESULT, labels.LinkHandler }{
+        for ([_]struct { []const u16, u32, windows.HRESULT, confirm_text.LinkHandler }{
             .{ W("PuTTY\x00"), 6, 0, .{ .app = "PuTTY" } },
             // No app is set (ERROR_NO_ASSOCIATION); S_FALSE names none.
             .{ W("PuTTY\x00"), 6, c.HRESULT_NO_ASSOCIATION, .none },

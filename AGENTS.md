@@ -275,8 +275,9 @@ that govern each symbol you change, or that none does.
   `palette_catalog_capacity`, `appendInstalledThemesToPalette`, and the
   bundled iTerm2 theme pin in `build.zig.zon` that sets their count), the confirm
   overlay (`win32/overlay_session.zig`: `showConfirm`,
-  `invokeConfirmAccept`/`Cancel` lifetime; its paint text in
-  `labels.buildOverlayPaintLabelText`), the profile
+  `invokeConfirmAccept`/`Cancel` lifetime; what each prompt says and its
+  preview pane's text: `win32/confirm_text.zig`, `Words`, `preview`; its
+  paint text in `labels.buildOverlayPaintLabelText`), the profile
   overlay, host banners and the update notice, overlay EDIT writes
   (`setOverlayEditText`, and `syncWindowTextUtf8CachedAfterSet` in
   `win32/child_window.zig`).
@@ -351,7 +352,7 @@ that govern each symbol you change, or that none does.
   `local_path.Found.storedName`, and its hidden-desktop probe
   `test/windows/link-opener-pathext-probe.ps1`; the link prompt:
   `App.openLink`, `askBeforeOpeningLink`, `confirmedLinkScheme`,
-  `linkHandlerName`, `labels.linkPromptBody`,
+  `linkHandlerName`, `Words.link` in `win32/confirm_text.zig`,
   `Surface.setPendingLinkOpen`/`takePendingLinkOpen`).
 - [clipboard.md](docs/agents/log/clipboard.md): clipboard reads and writes,
   CF_HTML (`win32_clipboard_html.zig`), open retries, what a copy puts on the

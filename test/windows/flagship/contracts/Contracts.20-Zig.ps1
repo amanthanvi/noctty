@@ -27,6 +27,7 @@ $win32TestModuleRoots = @(
     '_ = @import("win32/gdi.zig");'
     '_ = @import("win32/docked_search.zig");'
     '_ = @import("win32/window_start.zig");'
+    '_ = @import("win32/confirm_text.zig");'
 )
 foreach ($win32TestModuleRoot in $win32TestModuleRoots) {
     if (-not [regex]::IsMatch(
@@ -53,14 +54,19 @@ foreach ($win32TestModuleRoot in $win32TestModuleRoots) {
 # overlay's count label went with the search arguments no caller passed, and
 # to 101 when its window opacity helpers became `TopLevel.alpha` in
 # window_start.zig and the unused resizeSplitFallbackDelta went with the dead
-# Surface.resizeSplitFallback (window state on the Window).
+# Surface.resizeSplitFallback (window state on the Window), and to 87 when its
+# confirm prompt words (the program clipboard, background close and link
+# prompts) and its 11 preview pane tests moved to confirm_text.zig.
 # window_start.zig is the pure half of window state, which received its
 # consolidated tests: the `plan`, `place`, `returnOn`, `forRestore` and
 # `savedFullscreen` tables (from window_state.zig's start and placement tests
 # and session.zig's lookup-failure test), `restoredRectOnScreen` (from
 # win32.zig) and `TopLevel.alpha` (from labels.zig); its floor is all 10.
+# confirm_text.zig says what each confirm prompt says: its floor is the 14
+# tests from labels.zig, the close-scope table from win32.zig and the
+# out-of-memory test of a background tab's close prompt, 16.
 $movedWin32TestFloors = [ordered]@{
-    'labels.zig' = 101
+    'labels.zig' = 87
     'input.zig' = 24
     'gl_startup.zig' = 4
     'render_trace.zig' = 3
@@ -69,6 +75,7 @@ $movedWin32TestFloors = [ordered]@{
     'facade_budget.zig' = 2
     'docked_search.zig' = 32
     'window_start.zig' = 10
+    'confirm_text.zig' = 16
 }
 foreach ($movedWin32TestModule in $movedWin32TestFloors.Keys) {
     $movedWin32TestModulePath = @($win32RuntimeModuleFiles | Where-Object {

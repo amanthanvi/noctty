@@ -202,15 +202,12 @@ pub const overlay_session_runtime = .{
     .HostOverlayMode = HostOverlayMode,
     .HostTabStatus = HostTabStatus,
     .LONG_PTR = LONG_PTR,
-    .OverlayConfirmPreview = OverlayConfirmPreview,
     .OverlayConfirmText = OverlayConfirmText,
     .OverlayFocusSlot = OverlayFocusSlot,
     .WPARAM = WPARAM,
     .buildCommandPaletteFeedbackText = buildCommandPaletteFeedbackText,
     .buildCommandPaletteOverlayLabel = buildCommandPaletteOverlayLabel,
     .buildConfirmBodyText = buildConfirmBodyText,
-    .buildConfirmPreview = buildConfirmPreview,
-    .buildConfirmPreviewCaption = buildConfirmPreviewCaption,
     .buildOverlayAcceptLabel = buildOverlayAcceptLabel,
     .buildOverlayHintText = buildOverlayHintText,
     .buildProfileAcceptLabel = buildProfileAcceptLabel,
@@ -491,6 +488,7 @@ test {
     _ = @import("win32/facade_budget.zig");
     _ = @import("win32/docked_search.zig");
     _ = @import("win32/window_start.zig");
+    _ = @import("win32/confirm_text.zig");
     _ = child_window;
     _ = paint_text;
     _ = @import("win32/settings_patch.zig");
@@ -3853,69 +3851,9 @@ pub fn titlebarButtonVisual(
 
 pub const HostTabStatus = labels.HostTabStatus;
 
-pub const ConfirmPrompt = overlay_session.ConfirmPrompt;
-
 /// How long a program's prompt ignores Allow after it opens: longer than
 /// the gap between two keys of someone typing, shorter than reading it.
 const program_confirm_arming_ms = 500;
-
-/// What a close that ends several terminals at once is closing. One pane
-/// keeps its own prompt in `Surface.close`. The userdata of a `.this_tab`
-/// prompt is the Surface of the tab, which names the tab when it is behind.
-pub const CloseScope = enum { window, this_tab, other_tabs, right_tabs, app, update };
-
-/// The prompt for a close that would end `count` (at least 1) terminals
-/// that `confirm-close-surface` asks about. The body may live in `body_buf`.
-pub fn closeScopePrompt(scope: CloseScope, count: usize, body_buf: *[256]u8) ConfirmPrompt {
-    switch (scope) {
-        inline else => |comptime_scope| {
-            const text: struct { title: []const u8, accept: []const u8, one: []const u8, many: []const u8 } = comptime switch (comptime_scope) {
-                .window => .{
-                    .title = "Close this window?",
-                    .accept = "Close",
-                    .one = "A process is still running in this window. Closing the window will terminate it.",
-                    .many = "Processes are still running in {d} terminals in this window. Closing the window will terminate them.",
-                },
-                .this_tab => .{
-                    .title = "Close this tab?",
-                    .accept = "Close tab",
-                    .one = "A process is still running in this tab. Closing the tab will terminate it, and undo is off.",
-                    .many = "Processes are still running in {d} terminals in this tab. Closing the tab will terminate them, and undo is off.",
-                },
-                .other_tabs => .{
-                    .title = "Close the other tabs?",
-                    .accept = "Close tabs",
-                    .one = "A process is still running in another tab. Closing the other tabs will terminate it.",
-                    .many = "Processes are still running in {d} terminals in the other tabs. Closing those tabs will terminate them.",
-                },
-                .right_tabs => .{
-                    .title = "Close the tabs to the right?",
-                    .accept = "Close tabs",
-                    .one = "A process is still running in a tab to the right. Closing those tabs will terminate it.",
-                    .many = "Processes are still running in {d} terminals in the tabs to the right. Closing those tabs will terminate them.",
-                },
-                .app => .{
-                    .title = "Quit noctty?",
-                    .accept = "Quit",
-                    .one = "A process is still running. Quitting noctty will terminate it.",
-                    .many = "Processes are still running in {d} terminals. Quitting noctty will terminate them.",
-                },
-                .update => .{
-                    .title = "Install the update?",
-                    .accept = "Install",
-                    .one = "A process is still running. Installing the update closes noctty and will terminate it.",
-                    .many = "Processes are still running in {d} terminals. Installing the update closes noctty and will terminate them.",
-                },
-            };
-            return .{
-                .title = text.title,
-                .body = if (count <= 1) text.one else std.fmt.bufPrint(body_buf, text.many, .{count}) catch text.one,
-                .accept_label = text.accept,
-                .cancel_label = "Cancel",
-            };
-        },
-    }
-}
 
 /// How many panes in `tabs` `confirm-close-surface` asks about.
 pub fn tabsCloseConfirmCount(tabs: []Tab) usize {
@@ -9421,9 +9359,6 @@ pub const visibleTabRange = labels.visibleTabRange;
 const buildTabOverviewOverlayLabel = labels.buildTabOverviewOverlayLabel;
 
 const OverlayConfirmText = labels.ConfirmText;
-const OverlayConfirmPreview = labels.ConfirmPreview;
-const buildConfirmPreview = labels.buildConfirmPreview;
-const buildConfirmPreviewCaption = labels.buildConfirmPreviewCaption;
 const buildOverlayPaintLabelText = labels.buildOverlayPaintLabelText;
 
 const buildOverlayFeedbackText = labels.buildOverlayFeedbackText;
@@ -15622,37 +15557,6 @@ test "win32 a program's clipboard request asks in its own words and cannot be an
     // prompt could name.
     try std.testing.expectError(error.NotInATab, surface_held.requestPasteConfirm(.{ .osc_52_read = .standard }, "secret"));
     try std.testing.expectEqual(HostOverlayMode.none, host.overlay_mode);
-}
-
-test "win32 close prompts count the terminals they would end" {
-    var buf: [256]u8 = undefined;
-    const one = closeScopePrompt(.right_tabs, 1, &buf);
-    try std.testing.expectEqualStrings("Close the tabs to the right?", one.title);
-    try std.testing.expectEqualStrings("Close tabs", one.accept_label);
-    try std.testing.expectEqualStrings(
-        "A process is still running in a tab to the right. Closing those tabs will terminate it.",
-        one.body,
-    );
-    const tab = closeScopePrompt(.this_tab, 2, &buf);
-    try std.testing.expectEqualStrings("Close this tab?", tab.title);
-    try std.testing.expectEqualStrings("Close tab", tab.accept_label);
-    try std.testing.expectEqualStrings(
-        "Processes are still running in 2 terminals in this tab. Closing the tab will terminate them, and undo is off.",
-        tab.body,
-    );
-    const many = closeScopePrompt(.app, 3, &buf);
-    try std.testing.expectEqualStrings("Quit", many.accept_label);
-    try std.testing.expectEqualStrings(
-        "Processes are still running in 3 terminals. Quitting noctty will terminate them.",
-        many.body,
-    );
-    const update = closeScopePrompt(.update, 2, &buf);
-    try std.testing.expectEqualStrings("Install the update?", update.title);
-    try std.testing.expectEqualStrings("Install", update.accept_label);
-    try std.testing.expectEqualStrings(
-        "Processes are still running in 2 terminals. Installing the update closes noctty and will terminate them.",
-        update.body,
-    );
 }
 
 test "win32 closeTab this on last tab detaches tab for undo" {
