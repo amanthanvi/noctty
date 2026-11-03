@@ -168,6 +168,14 @@ const validation_quiet_ms: UINT = 400;
 /// letter typed would queue up behind the letters a reader echoes.
 const search_announce_timer_id: usize = 2;
 const search_announce_quiet_ms: UINT = 500;
+/// What the window could not take in for want of memory (`owes_draft`,
+/// `owes_external`) is tried again this often, until it is.
+const refresh_timer_id: usize = 3;
+const refresh_retry_ms: u32 = 500;
+/// The most page controls `holdDraftControls` records to enable again.
+const held_controls_max = 512;
+/// The status line while the window has no draft (`owes_draft`).
+const draft_owed_text = "Saved. Settings is waiting for memory to show the saved settings, and its settings cannot be changed until then.";
 const WM_SETICON: UINT = 0x0080;
 /// `WM_ACTIVATE` low word: the window is being deactivated.
 const WA_INACTIVE: usize = 0;
@@ -999,7 +1007,7 @@ const StatusNote = enum {
     /// file, or for a save that a later layer overrides, the settings.
     fn takesDetail(self: StatusNote) bool {
         return switch (self) {
-            .file_unopenable, .write_incomplete, .unsupported_encoding, .binary_config, .saved_overridden, .saved_unread, .profile_changed => true,
+            .file_unopenable, .write_incomplete, .unsupported_encoding, .binary_config, .saved_overridden, .saved_unread, .saved_partly_applied, .profile_changed => true,
             .field_reset, .already_default, .reset_failed => true,
             .key_copied, .key_copy_failed => true,
             .profile_said, .profile_hint, .profile_refused => true,
@@ -1013,6 +1021,9 @@ const StatusNote = enum {
         return switch (self) {
             .saved_overridden => std.fmt.allocPrint(alloc, "Saved, but a later config file or command-line option overrides {s}, so the saved value is not used.", .{detail}),
             .saved_unread => std.fmt.allocPrint(alloc, "Saved, but {s} could not be read whole, so the running settings are unchanged. Reload the configuration once it can be read to use the saved values.", .{detail}),
+            // What a reload cannot apply either: the settings a later layer
+            // overrides.
+            .saved_partly_applied => std.fmt.allocPrint(alloc, "Saved, but the saved settings may be only partly applied. Reload the configuration to apply the rest; a later config file or command-line option overrides {s}, so the saved value is not used.", .{detail}),
             .unsupported_encoding => std.fmt.allocPrint(alloc, "Nothing was saved: {s} is not readable as UTF-8 text (Windows PowerShell 5.1 writes UTF-16). Save it as UTF-8 in an editor, then save again. Your edits are kept.", .{detail}),
             .binary_config => std.fmt.allocPrint(alloc, "Nothing was saved: {s} contains NUL bytes, so it is a binary file or text in UTF-16 or UTF-32. Save it as UTF-8 in an editor, then save again. Your edits are kept.", .{detail}),
             .file_unopenable => std.fmt.allocPrint(alloc, "Nothing was saved: {s} cannot be opened. Close any program that has it open, or check its permissions, then save again. Your edits are kept.", .{detail}),
@@ -2392,6 +2403,19 @@ pub const SettingsWindow = struct {
     /// The field of the Profiles page being typed into, while one is
     /// (`beginProfileEdit`).
     profile_edit: ?ProfileEdit = null,
+    /// A save completed and the window could not copy the running settings
+    /// to start its draft over (no memory): the draft went, so nothing looks
+    /// unsaved, and `retryRefresh` starts it over once it can.
+    owes_draft: bool = false,
+    /// The running settings changed (`externalConfigChanged`, this revision)
+    /// and the window could not copy them (no memory): `retryRefresh` takes
+    /// them in once it can.
+    owes_external: ?u64 = null,
+    /// The page controls disabled while no draft is there to stage an edit
+    /// (`holdDraftControls`), to enable again once one is.
+    held_controls: [held_controls_max]HWND = undefined,
+    held_control_count: usize = 0,
+    held_viewport: bool = false,
     /// The profile row whose removal the first Delete asked to confirm
     /// (`Row.identity`).
     profile_remove_armed: ?u64 = null,
@@ -2978,6 +3002,9 @@ pub const SettingsWindow = struct {
     }
 
     pub fn hasPendingChanges(self: *const SettingsWindow) bool {
+        // While the draft is owed there is nothing to save: its edits went
+        // with it, and none can be made (`holdDraftControls`).
+        if (self.owes_draft) return false;
         for (self.raw_scalar_dirty) |dirty| if (dirty) return true;
         if (self.profileDraftDiffers() or self.profileEditTypedInto()) return true;
         for (self.owned_text_changed, self.owned_dirty, self.owned_conflict) |text_changed, dirty, conflict| {
@@ -3070,10 +3097,12 @@ pub const SettingsWindow = struct {
 
     /// What the status line says when no validation error or conflict holds it.
     fn idleStatusText(self: *const SettingsWindow) []const u8 {
+        // What the save said comes back once the draft does.
+        if (self.owes_draft) return draft_owed_text;
         switch (self.status_note) {
             // A save's result stays up whatever the draft looks like now.
-            .saved, .saved_not_applied, .saved_partly_applied, .discarded, .editor_open_failed => return self.status_note.text(),
-            .saved_overridden, .saved_unread, .already_default, .reset_failed, .key_copied, .key_copy_failed => return self.noteText(),
+            .saved, .saved_not_applied, .discarded, .editor_open_failed => return self.status_note.text(),
+            .saved_overridden, .saved_unread, .saved_partly_applied, .already_default, .reset_failed, .key_copied, .key_copy_failed => return self.noteText(),
             .profile_said, .profile_hint, .profile_refused => return self.noteText(),
             // These are about edits that are still there to be saved.
             .field_reset,
@@ -3890,6 +3919,9 @@ pub const SettingsWindow = struct {
 
     fn markOwnedTextChanged(self: *SettingsWindow, field: OwnedSettingField, control: HWND) void {
         if (self.suppress_edit_events) return;
+        // No draft to stage it in (`owes_draft`): its controls are held, and
+        // nothing is recorded.
+        if (self.owes_draft) return;
         self.owned_text_changed[@intFromEnum(field)] = true;
         self.clearValidationError(control);
         // Font family, theme and default command are only read at save.
@@ -3967,7 +3999,11 @@ pub const SettingsWindow = struct {
             if (self.owned_text_changed[@intFromEnum(field)]) self.syncOwnedControl(field);
         }
         var replacement = config.clone(self.handle.alloc) catch |err| {
-            std.log.warn("settings: external config snapshot failed revision={d} err={}", .{ revision, err });
+            // Taken in once it can be (`retryRefresh`), rather than never.
+            // Said once, not on every retry.
+            if (self.owes_external == null) std.log.warn("settings: external config snapshot failed revision={d} err={}", .{ revision, err });
+            self.owes_external = @max(revision, self.owes_external orelse 0);
+            self.armRefreshTimer();
             return;
         };
         var replacement_owned = true;
@@ -3982,10 +4018,12 @@ pub const SettingsWindow = struct {
             .revision = revision,
             .changes = &changes,
         } }, &effects) catch |err| {
+            // An owed change stays owed until it is taken in.
             if (err == error.ApplyAlreadyPending) return;
             std.log.warn("settings: external update rejected revision={d} err={}", .{ revision, err });
             return;
         };
+        self.owes_external = null;
         self.dispatchEffects(emitted);
         if (self.handle.configRevision == null) {
             self.local_revision = @max(self.local_revision, revision);
@@ -4444,6 +4482,8 @@ pub const SettingsWindow = struct {
     /// The viewport and the state the layout and the field frames keep about
     /// it, for a window that is gone.
     fn forgetFormWindows(self: *SettingsWindow) void {
+        self.held_control_count = 0;
+        self.held_viewport = false;
         self.fields = .{};
         self.materialized = .initEmpty();
         self.viewport = null;
@@ -5124,6 +5164,8 @@ pub const SettingsWindow = struct {
         if (self.sectionList(next)) |list| {
             self.refreshListShown(list, false);
             self.createList(list);
+            // Held as the rest of the page is, while no draft is there.
+            if (self.owes_draft) self.holdDraftControls();
         }
         // A row of this page the search no longer finds may hold the focus.
         if (self.search_query.active() and !focus_follows) self.keepFocusShown();
@@ -6762,7 +6804,7 @@ pub const SettingsWindow = struct {
     /// How a save that wrote the file ended (`saveReloadOutcome`).
     const SavedHow = enum { clean, masked, unread, not_applied, partly_applied };
 
-    fn finishSuccessfulSave(self: *SettingsWindow, how: SavedHow) void {
+    fn finishSuccessfulSave(self: *SettingsWindow, how: SavedHow, copies: ?Adoption) void {
         const masked = how == .masked;
         const should_close = self.close_after_save;
         // Before anything repaints the status: the note outlives the reset.
@@ -6776,30 +6818,45 @@ pub const SettingsWindow = struct {
         };
         // The settings the save wrote that something later overrides, by the
         // names a config file knows them by, and where the value that wins
-        // is set, read from the config the save reloaded.
-        const masked_keys: ?[]const u8 = if (masked)
+        // is set, read from the config the save reloaded. A partly applied
+        // save names them too: a reload does not apply them either.
+        const masked_keys: ?[]const u8 = if (masked or how == .partly_applied)
             if (self.handle.maskedKeys) |lend| lend(self.handle.ctx) else null
         else
             null;
-        const adopted = if (self.adoptCurrentConfig()) |_| true else |err| failed: {
-            std.log.err("settings: failed to refresh saved config snapshot err={}", .{err});
-            break :failed false;
+        // The draft starts over from the running settings (`copies`, taken
+        // before the save was marked done). Without them (no memory) it goes,
+        // so nothing looks unsaved, and the window takes the running settings
+        // in once it can (`owes_draft`). The fields keep showing what was
+        // just saved until then.
+        const adopted = if (copies) |taken| adopted: {
+            self.adoptCopies(taken);
+            self.paidRefresh();
+            break :adopted true;
+        } else owed: {
+            std.log.warn("settings: the saved settings could not be copied for the window; it tries again", .{});
+            self.cancelProfileEdit();
+            self.clearPending();
+            self.owes_draft = true;
+            self.holdDraftControls();
+            self.armRefreshTimer();
+            break :owed false;
         };
         var masked_detail: ?[]u8 = null;
         defer if (masked_detail) |detail| self.handle.alloc.free(detail);
         if (masked_keys) |keys| {
-            masked_detail = if (adopted) self.maskedDetail(keys) catch null else null;
-            self.note_text = StatusNote.saved_overridden.textWithDetail(self.handle.alloc, masked_detail orelse keys) catch null;
+            // Where each is set is read from what runs now: after a partly
+            // applied save that may be the config from before it, so only
+            // the names are given then.
+            masked_detail = if (adopted and masked) self.maskedDetail(keys) catch null else null;
+            const note: StatusNote = if (masked) .saved_overridden else .saved_partly_applied;
+            self.note_text = note.textWithDetail(self.handle.alloc, masked_detail orelse keys) catch null;
         }
         // The file the reload could not read whole, as the App names it.
         if (how == .unread) if (self.handle.failureDetail) |lend| if (lend(self.handle.ctx)) |file| {
             self.note_text = StatusNote.saved_unread.textWithDetail(self.handle.alloc, file) catch null;
         };
-        if (!adopted) {
-            if (should_close) self.cancelClosePrompt();
-            return;
-        }
-        self.refreshAllControls();
+        if (adopted) self.refreshAllControls();
         self.updateSaveEnabled();
         if (masked) {
             var body_buf: [1024]u8 = undefined;
@@ -6874,23 +6931,59 @@ pub const SettingsWindow = struct {
 
     fn completeSynchronousSave(self: *SettingsWindow, apply_id: ?ApplyId, how: SavedHow) void {
         const revision = self.nextSuccessfulRevision();
+        // The copies the draft starts over from, taken first, before
+        // anything of the window changes. Without them the save is still
+        // done, and `finishSuccessfulSave` lets the draft go rather than keep
+        // one that looks unsaved.
+        var copies: ?Adoption = self.copiesOf(self.handle.currentConfig(self.handle.ctx)) catch null;
         if (apply_id) |id| {
-            if (!self.succeedApply(id, revision)) return;
+            if (!self.succeedApply(id, revision)) {
+                if (copies) |*taken| taken.deinit();
+                return;
+            }
         }
-        self.finishSuccessfulSave(how);
+        self.finishSuccessfulSave(how, copies);
     }
 
     fn adoptCurrentConfig(self: *SettingsWindow) !void {
-        return self.adoptConfig(self.handle.currentConfig(self.handle.ctx));
+        try self.adoptConfig(self.handle.currentConfig(self.handle.ctx));
+        self.paidRefresh();
     }
 
-    /// Start the draft over from `current`. Nothing is touched until every copy
-    /// is made, so a failure leaves the draft, its tracking and its previews as
-    /// they were. `current` may be this window's own snapshot, which is freed
-    /// only after the copies exist.
-    fn adoptConfig(self: *SettingsWindow, current: *const Config) !void {
-        // The draft starts over, and a profile field being typed into with it.
-        self.cancelProfileEdit();
+    /// The draft started over from the running settings: nothing is owed
+    /// any more (`owes_draft`, `owes_external`). An adoption from anything
+    /// else (Discard's, from the window's own snapshot) leaves what is owed
+    /// owed.
+    /// Whether the draft can take an edit now: not while the window waits
+    /// to start one over from the running settings (`owes_draft`), and not
+    /// with no draft at all.
+    fn draftTakesEdits(self: *const SettingsWindow) bool {
+        return !self.owes_draft and self.pending != null;
+    }
+
+    fn paidRefresh(self: *SettingsWindow) void {
+        self.owes_draft = false;
+        self.owes_external = null;
+        self.killRefreshTimer();
+    }
+
+    /// The three copies a draft starts over from (`adoptCopies`).
+    const Adoption = struct {
+        original: Config,
+        current: Config,
+        pending: Config,
+
+        fn deinit(self: *Adoption) void {
+            self.original.deinit();
+            self.current.deinit();
+            self.pending.deinit();
+        }
+    };
+
+    /// `current`, copied for a draft to start over from. Nothing of the
+    /// window is touched, so a failure (no memory) leaves the draft, its
+    /// tracking and its previews as they were.
+    fn copiesOf(self: *const SettingsWindow, current: *const Config) !Adoption {
         var original = try current.clone(self.handle.alloc);
         errdefer original.deinit();
         var current_snapshot = try current.clone(self.handle.alloc);
@@ -6898,13 +6991,116 @@ pub const SettingsWindow = struct {
         var pending = try current.clone(self.handle.alloc);
         errdefer pending.deinit();
         for ([_]*Config{ &original, &current_snapshot, &pending }) |copy| pane_launch.asWritten(copy);
+        return .{ .original = original, .current = current_snapshot, .pending = pending };
+    }
 
+    /// Start the draft over from `copies`, which it takes: the draft, and a
+    /// profile field being typed into with it, go.
+    fn adoptCopies(self: *SettingsWindow, copies: Adoption) void {
+        self.cancelProfileEdit();
         self.clearPending();
-        self.original = original;
-        self.current = current_snapshot;
-        self.pending = pending;
+        self.releaseDraftControls();
+        self.original = copies.original;
+        self.current = copies.current;
+        self.pending = copies.pending;
         self.initTransaction();
         self.referenceConfigChanged();
+    }
+
+    /// Start the draft over from `current`. Nothing is touched until every copy
+    /// is made, so a failure leaves the draft, its tracking and its previews as
+    /// they were. `current` may be this window's own snapshot, which is freed
+    /// only after the copies exist.
+    fn adoptConfig(self: *SettingsWindow, current: *const Config) !void {
+        self.adoptCopies(try self.copiesOf(current));
+    }
+
+    /// Take in what the window owes (`owes_draft`, `owes_external`), now
+    /// that it may have the memory: the timer's tick (`refresh_timer_id`).
+    /// Whatever it still cannot take keeps the timer going.
+    fn retryRefresh(self: *SettingsWindow) void {
+        if (self.owes_draft) {
+            const copies = self.copiesOf(self.handle.currentConfig(self.handle.ctx)) catch return;
+            self.adoptCopies(copies);
+            self.paidRefresh();
+            self.refreshAllControls();
+            self.updateSaveEnabled();
+            return;
+        }
+        if (self.owes_external) |revision| {
+            const latest = if (self.handle.configRevision) |get| @max(revision, get(self.handle.ctx)) else revision;
+            self.externalConfigChanged(self.handle.currentConfig(self.handle.ctx), latest);
+        }
+        if (!self.owes_draft and self.owes_external == null) self.killRefreshTimer();
+    }
+
+    fn armRefreshTimer(self: *SettingsWindow) void {
+        const hwnd = self.hwnd orelse return;
+        // Without a timer the window's next activation tries (`WM_ACTIVATE`).
+        if (sys.SetTimer(hwnd, refresh_timer_id, refresh_retry_ms, null) == 0)
+            std.log.warn("settings: no timer for the refresh; it is tried when the window is next activated", .{});
+    }
+
+    /// While no draft is there to stage an edit (`owes_draft`), the page's
+    /// controls are disabled, for the keyboard, the pointer and UIA alike: an
+    /// edit would have nowhere to go, and the draft that comes is the running
+    /// settings. The viewport and each control in it that was enabled are
+    /// disabled and recorded (a fixed record: memory is short); a page made
+    /// meanwhile is held as it is made (`materializeSection`). A focused
+    /// control's focus goes to its page's rail button, so the keyboard is not
+    /// stranded.
+    fn holdDraftControls(self: *SettingsWindow) void {
+        const viewport = self.viewport orelse return;
+        self.forgetGoneControls();
+        if (GetFocus()) |focused| if (sys.IsChild(viewport, focused) != 0) {
+            if (self.sectionButton(self.active_section)) |button| _ = SetFocus(button);
+        };
+        _ = sys.EnumChildWindows(viewport, &holdControl, @bitCast(@intFromPtr(self)));
+        if (!self.held_viewport and sys.IsWindowEnabled(viewport) != 0) {
+            _ = sys.EnableWindow(viewport, 0);
+            self.held_viewport = true;
+        }
+    }
+
+    fn holdControl(hwnd: HWND, lparam: LPARAM) callconv(.winapi) BOOL {
+        const self: *SettingsWindow = @ptrFromInt(@as(usize, @bitCast(lparam)));
+        if (self.held_control_count == self.held_controls.len) return 0;
+        if (sys.IsWindowEnabled(hwnd) == 0) return 1;
+        _ = sys.EnableWindow(hwnd, 0);
+        self.held_controls[self.held_control_count] = hwnd;
+        self.held_control_count += 1;
+        return 1;
+    }
+
+    /// Drop from the record the controls that went with their page, a list
+    /// on each page switch (`destroyList`), so a long hold over many switches
+    /// does not fill it with handles and leave a new page's controls enabled.
+    fn forgetGoneControls(self: *SettingsWindow) void {
+        var kept: usize = 0;
+        for (self.held_controls[0..self.held_control_count]) |hwnd| {
+            if (sys.IsWindow(hwnd) == 0) continue;
+            self.held_controls[kept] = hwnd;
+            kept += 1;
+        }
+        self.held_control_count = kept;
+    }
+
+    /// Enable what `holdDraftControls` disabled, and only that: a control
+    /// disabled for its own reason stays so, and one gone with its page is
+    /// not touched.
+    fn releaseDraftControls(self: *SettingsWindow) void {
+        self.forgetGoneControls();
+        for (self.held_controls[0..self.held_control_count]) |hwnd| _ = sys.EnableWindow(hwnd, 1);
+        self.held_control_count = 0;
+        if (self.held_viewport) if (self.viewport) |viewport| {
+            _ = sys.EnableWindow(viewport, 1);
+        };
+        self.held_viewport = false;
+    }
+
+    fn killRefreshTimer(self: *SettingsWindow) void {
+        const hwnd = self.hwnd orelse return;
+        _ = sys.KillTimer(hwnd, refresh_timer_id);
     }
 
     /// The section and the native control that own `field`.
@@ -7287,6 +7483,8 @@ pub const SettingsWindow = struct {
         self.displaySectionRows(section);
         self.syncDefaultMarks();
         if (providers) for (formItemsForSection(section)) |item| self.attachControlUiaProvider(item.control_index);
+        // A page made while no draft is there is held as the rest is.
+        if (self.owes_draft) self.holdDraftControls();
     }
 
     /// Make `section`'s labels and controls in the viewport, each in its final
@@ -7644,6 +7842,9 @@ pub const SettingsWindow = struct {
     /// False when it did nothing: the open field could not be kept, or the
     /// row's could not be made.
     fn profileInvoke(self: *SettingsWindow) bool {
+        // Nothing opens while there is no draft to take what is typed: UIA's
+        // Invoke reaches here past the held list (`holdDraftControls`).
+        if (!self.draftTakesEdits()) return false;
         if (!self.profileEditDone()) return false;
         const row = self.selectedProfileRow() orelse return false;
         if (self.profile_model.profileOf(row)) |profile| if (profile.read_only) {
@@ -7794,6 +7995,9 @@ pub const SettingsWindow = struct {
     /// UIA after the field and its profile. `id` is the new profile's, for
     /// `.new_command`.
     fn beginProfileEdit(self: *SettingsWindow, kind: ProfileEdit.Kind, row: settings_profiles.Row, new_id: ?[]const u8) void {
+        // A field made with no draft to take it would be typed into and then
+        // destroyed when the draft comes (`adoptCopies`), what was typed lost.
+        if (!self.draftTakesEdits()) return;
         self.disarmProfileRemoval();
         self.cancelProfileEdit();
         const list = self.profile_list.hwnd orelse return;
@@ -10986,6 +11190,12 @@ test "settings a save whose reload is applied only partly says it saved and may 
             const settings = &fixture.settings;
             fixture.live_previews = true;
             typeInto(settings.fields.edit_bg_opacity orelse return error.TestExpectedField, "0.5");
+            // A value the save changes, and the part of the reload that takes.
+            _ = sys.SendMessageW(settings.fields.combo_cursor_style orelse return error.TestExpectedField, CB_SETCURSEL, 2, 0);
+            settings.syncCombo(.cursor_style);
+            const chosen = (settings.pending orelse return error.TestExpectedDraft).@"cursor-style";
+            const before = (settings.original orelse return error.TestExpectedDraft).@"cursor-style";
+            try std.testing.expect(chosen != before);
             const previews = fixture.previews;
 
             // The file is written, and applying its reload fails partway.
@@ -10997,10 +11207,184 @@ test "settings a save whose reload is applied only partly says it saved and may 
             try std.testing.expect(!settings.hasPendingChanges());
             try std.testing.expectEqual(previews, fixture.previews);
             try std.testing.expectEqual(@as(f64, 1), fixture.config.@"background-opacity");
+            // What runs now, the cursor style the reload applied among it, is
+            // the draft's baseline and the draft.
+            try std.testing.expect(fixture.config.@"cursor-style" == chosen);
+            try std.testing.expect((settings.original orelse return error.TestExpectedDraft).@"cursor-style" == chosen);
+            try std.testing.expect((settings.pending orelse return error.TestExpectedDraft).@"cursor-style" == chosen);
             // The status does not say the running settings are unchanged.
             try std.testing.expectEqual(StatusNote.saved_partly_applied, settings.status_note);
             var buf: [512]u8 = undefined;
             try std.testing.expectEqualStrings(StatusNote.saved_partly_applied.text(), try statusTextOf(settings, &buf));
+        }
+    }.body);
+}
+
+test "settings a partly applied save names the settings a later layer overrides, which a reload does not apply" {
+    try dialog_test.onHiddenDesktop(struct {
+        fn body() !void {
+            const fixture = try dialog_test.Fixture.start();
+            defer fixture.finish();
+            const settings = &fixture.settings;
+            typeInto(settings.fields.edit_font_size orelse return error.TestExpectedField, "16");
+            // Applying the reload fails partway, and a later layer overrides
+            // the saved font size (the App's masked keys).
+            fixture.partly_applied = true;
+            const keys = "font-size";
+            @memcpy(fixture.masked[0..keys.len], keys);
+            fixture.masked_len = keys.len;
+            settings.save();
+            try std.testing.expectEqual(StatusNote.saved_partly_applied, settings.status_note);
+            var buf: [512]u8 = undefined;
+            try std.testing.expectEqualStrings("Saved, but the saved settings may be only partly applied. Reload the configuration to apply the rest; a later config file or command-line option overrides font-size, so the saved value is not used.", try statusTextOf(settings, &buf));
+        }
+    }.body);
+}
+
+test "settings a save whose saved settings the window cannot copy clears the draft, and takes them in once it can" {
+    try dialog_test.onHiddenDesktop(struct {
+        fn body() !void {
+            const fixture = try dialog_test.Fixture.startWith(true);
+            defer fixture.finish();
+            const settings = &fixture.settings;
+            // A field the window tracks itself (`owned_dirty`), which a draft
+            // that did not start over would still count as unsaved.
+            typeInto(settings.fields.edit_font_family orelse return error.TestExpectedField, "Cascadia Code");
+            try std.testing.expect(settings.hasPendingChanges());
+            // The window's allocator runs out as the save completes: it
+            // cannot copy the running settings to start the draft over.
+            var failing = std.testing.FailingAllocator.init(settings.handle.alloc, .{});
+            const real = settings.handle.alloc;
+            settings.handle.alloc = failing.allocator();
+            defer settings.handle.alloc = real;
+            fixture.starve_after_save = &failing;
+            defer fixture.starve_after_save = null;
+            settings.save();
+            try std.testing.expectEqual(@as(u32, 1), fixture.saved);
+            // The save is done; the draft went with the copies, so nothing
+            // looks unsaved, and the status says why nothing can change.
+            try std.testing.expectEqual(StatusNote.saved, settings.status_note);
+            try std.testing.expect(!settings.hasPendingChanges());
+            try std.testing.expect(settings.owes_draft);
+            var buf: [512]u8 = undefined;
+            try std.testing.expectEqualStrings(draft_owed_text, try statusTextOf(settings, &buf));
+            const save_button = settings.btn_save orelse return error.TestExpectedButton;
+            try std.testing.expect(sys.IsWindowEnabled(save_button) == 0);
+            // An edit has nowhere to go: the field is disabled, so the
+            // keyboard, the pointer and UIA cannot change it, and text put in
+            // it anyway records nothing.
+            const family = settings.fields.edit_font_family orelse return error.TestExpectedField;
+            try std.testing.expect(sys.IsWindowEnabled(family) == 0);
+            const viewport = settings.viewport orelse return error.TestExpectedViewport;
+            try std.testing.expect(sys.IsWindowEnabled(viewport) == 0);
+            const com = @import("win32_uia/com.zig");
+            const index = settings.controlIndex(family) orelse return error.TestExpectedControl;
+            const provider = settings.control_uia_providers[index] orelse return error.TestExpectedProvider;
+            const value = &provider.value_iface;
+            try std.testing.expectEqual(com.UIA_E_ELEMENTNOTENABLED, value.vtbl.SetValue(value, std.unicode.utf8ToUtf16LeStringLiteral("Other")));
+            typeInto(family, "Other");
+            try std.testing.expect(!settings.hasPendingChanges());
+            try std.testing.expect(sys.IsWindowEnabled(save_button) == 0);
+            try std.testing.expectEqualStrings(draft_owed_text, try statusTextOf(settings, &buf));
+            // It tries again on a timer; should that fail, when the window is
+            // next activated.
+            const hwnd = settings.hwnd orelse return error.TestExpectedWindow;
+            try std.testing.expect(sys.KillTimer(hwnd, refresh_timer_id) != 0);
+            failing.fail_index = std.math.maxInt(usize);
+            _ = sys.SendMessageW(hwnd, WM_ACTIVATE, 1, 0);
+            // The draft starts over from the running settings, and the page
+            // can be changed again.
+            try std.testing.expect(!settings.owes_draft);
+            _ = settings.pending orelse return error.TestExpectedDraft;
+            try std.testing.expect(!settings.hasPendingChanges());
+            try std.testing.expect(sys.IsWindowEnabled(family) != 0);
+            try std.testing.expect(sys.IsWindowEnabled(viewport) != 0);
+            try std.testing.expect(!std.mem.eql(u8, draft_owed_text, try statusTextOf(settings, &buf)));
+        }
+    }.body);
+}
+
+test "settings a running settings change the window cannot copy is taken in once it can" {
+    try dialog_test.onHiddenDesktop(struct {
+        fn body() !void {
+            const fixture = try dialog_test.Fixture.start();
+            defer fixture.finish();
+            const settings = &fixture.settings;
+            const before = (settings.current orelse return error.TestExpectedSnapshot).@"font-size";
+            // An edit, which Discard takes back below.
+            typeInto(settings.fields.edit_font_family orelse return error.TestExpectedField, "Cascadia Code");
+            // The running settings change, and the window's allocator has no
+            // memory for its copy of them.
+            fixture.config.@"font-size" = before + 8;
+            var failing = std.testing.FailingAllocator.init(settings.handle.alloc, .{ .fail_index = 0 });
+            const real = settings.handle.alloc;
+            settings.handle.alloc = failing.allocator();
+            defer settings.handle.alloc = real;
+            settings.externalConfigChanged(&fixture.config, 5);
+            // Not taken in yet, and owed.
+            try std.testing.expectEqual(@as(?u64, 5), settings.owes_external);
+            try std.testing.expectEqual(before, (settings.current orelse return error.TestExpectedSnapshot).@"font-size");
+            // Memory again, and the edit discarded before the timer ticks:
+            // Discard starts the draft over from the window's own copy, which
+            // is the old one, so the change stays owed, and the timer runs.
+            failing.fail_index = std.math.maxInt(usize);
+            settings.discardChangesNow();
+            try std.testing.expect(!settings.hasPendingChanges());
+            try std.testing.expectEqual(@as(?u64, 5), settings.owes_external);
+            const hwnd = settings.hwnd orelse return error.TestExpectedWindow;
+            try std.testing.expect(sys.KillTimer(hwnd, refresh_timer_id) != 0);
+            // The retry takes it in, and shows it.
+            settings.retryRefresh();
+            try std.testing.expectEqual(@as(?u64, null), settings.owes_external);
+            try std.testing.expectEqual(before + 8, (settings.current orelse return error.TestExpectedSnapshot).@"font-size");
+            var text_buf: [32]u8 = undefined;
+            const shown = readEditUtf8(settings.fields.edit_font_size orelse return error.TestExpectedField, &text_buf) orelse return error.TestExpectedText;
+            var expected_buf: [32]u8 = undefined;
+            try std.testing.expectEqualStrings(try std.fmt.bufPrint(&expected_buf, "{d}", .{before + 8}), shown);
+        }
+    }.body);
+}
+
+test "settings a save whose reload read a file only partly, which the App could not name, says so without a name" {
+    try dialog_test.onHiddenDesktop(struct {
+        fn body() !void {
+            const fixture = try dialog_test.Fixture.start();
+            defer fixture.finish();
+            const settings = &fixture.settings;
+            typeInto(settings.fields.edit_font_size orelse return error.TestExpectedField, "16");
+            fixture.unread_unnamed = true;
+            settings.save();
+            try std.testing.expectEqual(StatusNote.saved_unread, settings.status_note);
+            var buf: [512]u8 = undefined;
+            try std.testing.expectEqualStrings(StatusNote.saved_unread.text(), try statusTextOf(settings, &buf));
+        }
+    }.body);
+}
+
+test "settings an owed running settings change stays owed while a save is in flight" {
+    try dialog_test.onHiddenDesktop(struct {
+        fn body() !void {
+            const fixture = try dialog_test.Fixture.start();
+            defer fixture.finish();
+            const settings = &fixture.settings;
+            // A save is in flight: the transaction takes no external change.
+            typeInto(settings.fields.edit_font_size orelse return error.TestExpectedField, "16");
+            const transaction = if (settings.transaction) |*value| value else return error.TestExpectedTransaction;
+            var effects: [setting_field_count]SettingsTransaction.Effect = undefined;
+            _ = try transaction.dispatch(.apply, &effects);
+            // The running settings change, and the window's copy of them fails.
+            fixture.config.@"cursor-style" = .underline;
+            var failing = std.testing.FailingAllocator.init(settings.handle.alloc, .{ .fail_index = 0 });
+            const real = settings.handle.alloc;
+            settings.handle.alloc = failing.allocator();
+            defer settings.handle.alloc = real;
+            settings.externalConfigChanged(&fixture.config, 7);
+            try std.testing.expectEqual(@as(?u64, 7), settings.owes_external);
+            // Memory again, and the save still in flight: the change is
+            // turned away, and stays owed for the next try.
+            failing.fail_index = std.math.maxInt(usize);
+            settings.retryRefresh();
+            try std.testing.expectEqual(@as(?u64, 7), settings.owes_external);
         }
     }.body);
 }
@@ -13059,6 +13443,12 @@ const dialog_test = struct {
         /// The save writes, and applying its reload fails partway
         /// (`SaveError.SavedPartlyApplied`).
         partly_applied: bool = false,
+        /// The window's allocator (`handle.alloc`), which runs out of memory
+        /// as the save completes (`saveAndReload`).
+        starve_after_save: ?*std.testing.FailingAllocator = null,
+        /// The save writes, and its reload reads a file only partly, which
+        /// the App could not name (`SaveError.SavedButUnread`, no detail).
+        unread_unnamed: bool = false,
         /// What the window's High Contrast probe answers.
         high_contrast: bool = false,
         /// A save writes this config file the way the App's does
@@ -13252,6 +13642,8 @@ const dialog_test = struct {
         fn saveAndReload(ctx: *anyopaque, pending: *const Config, original: *const Config) SaveError!void {
             const self: *Fixture = @ptrCast(@alignCast(ctx));
             self.saved += 1;
+            // The window's allocator runs out once the save is done.
+            if (self.starve_after_save) |failing| failing.fail_index = failing.alloc_index;
             if (self.save_path) |path| {
                 const app = @import("win32.zig");
                 const settings_patch = @import("win32/settings_patch.zig");
@@ -13304,6 +13696,10 @@ const dialog_test = struct {
                 // stay as they were.
                 self.config.@"background-opacity" = original.@"background-opacity";
                 return error.SavedNotApplied;
+            }
+            if (self.unread_unnamed) {
+                self.unread_len = 0;
+                return error.SavedButUnread;
             }
             if (self.partly_applied) {
                 // As the App: the previews end, and part of the reload runs.
@@ -19917,6 +20313,9 @@ fn wndProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.wina
             // child. Activation needs nothing here: DefWindowProc focuses the
             // frame, and WM_SETFOCUS below hands that on.
             if (owner) |o| if ((wParam & 0xFFFF) == WA_INACTIVE) o.rememberFocus();
+            // Activation tries what the window owes, should its timer have
+            // failed (`armRefreshTimer`).
+            if (owner) |o| if ((wParam & 0xFFFF) != WA_INACTIVE and (o.owes_draft or o.owes_external != null)) o.retryRefresh();
             return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
         },
         WM_SETFOCUS => {
@@ -20073,6 +20472,7 @@ fn wndProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.wina
             switch (wParam) {
                 validation_timer_id => if (owner) |o| o.validationQuietElapsed(),
                 search_announce_timer_id => if (owner) |o| o.searchAnnounceElapsed(),
+                refresh_timer_id => if (owner) |o| o.retryRefresh(),
                 else => return sys.DefWindowProcW(hwnd, msg, wParam, lParam),
             }
             return 0;
@@ -21298,6 +21698,8 @@ fn referenceListUiaState(list: *ReferenceList) win32_uia.PaletteListState {
         .row_count = &referenceUiaRowCount,
         .selected_index = &referenceUiaSelectedIndex,
         .row_name = &referenceUiaRowName,
+        .row_enabled = &referenceUiaRowEnabled,
+        .enabled = &referenceUiaEnabled,
         .row_id = &referenceUiaRowId,
         .select_row = &referenceUiaSelectRow,
         .invoke_row = &referenceUiaInvokeRow,
@@ -21406,6 +21808,23 @@ fn referenceUiaRowId(ctx: *anyopaque, index: usize) u64 {
         .keybindings => list.ownerConst().keybind_model.rows[id].id,
         .profiles => list.ownerConst().profile_model.rows[id].identity,
     };
+}
+
+/// Whether the list takes UIA's Select, Invoke and focus on its rows: not
+/// while the window holds the page for a draft it is owed
+/// (`holdDraftControls`), nor while its window is disabled, so UIA reaches
+/// no more of the page than the keyboard and the pointer do. Its rows still
+/// read.
+fn referenceUiaEnabled(ctx: *anyopaque) bool {
+    const list = referenceOwner(ctx);
+    if (list.ownerConst().owes_draft) return false;
+    const hwnd = list.hwnd orelse return false;
+    return sys.IsWindowEnabled(hwnd) != 0;
+}
+
+fn referenceUiaRowEnabled(ctx: *anyopaque, index: usize) bool {
+    _ = index;
+    return referenceUiaEnabled(ctx);
 }
 
 fn referenceUiaSelectRow(ctx: *anyopaque, index: usize) void {
@@ -22519,6 +22938,152 @@ test "settings a UIA Invoke on a profile's row whose field cannot be made says i
             SettingsWindow.test_profile_edit_fails = false;
             try std.testing.expectEqual(com.S_OK, invoke.vtbl.Invoke(invoke));
             try std.testing.expectEqual(ProfileEdit.Kind.command, (try openEdit(settings)).kind);
+            try std.testing.expect(fixture.pumpKey(VK_ESCAPE));
+        }
+    }.body);
+}
+
+test "settings a page held for an owed draft takes no UIA Invoke on its lists' rows, and the Profiles page opens no field" {
+    try dialog_test.onHiddenDesktop(struct {
+        const com = @import("win32_uia/com.zig");
+        const constants = @import("win32_uia/constants.zig");
+        const GW_CHILD: UINT = 5;
+
+        /// The list's row at `position`, as a UIA client reaches it: through
+        /// the list, not the focus, which a held page does not have.
+        fn rowAt(list: *ReferenceList, position: usize) !*com.IRawElementProviderSimple {
+            const provider = list.provider orelse return error.TestExpectedProvider;
+            var child: ?*com.IRawElementProviderFragment = null;
+            try std.testing.expectEqual(com.S_OK, provider.fragment.vtbl.Navigate(&provider.fragment, com.NavigateDirection_FirstChild, &child));
+            for (0..position) |_| {
+                const here = child orelse return error.TestExpectedRow;
+                defer _ = here.vtbl.Release(here);
+                child = null;
+                try std.testing.expectEqual(com.S_OK, here.vtbl.Navigate(here, com.NavigateDirection_NextSibling, &child));
+            }
+            const fragment = child orelse return error.TestExpectedRow;
+            defer _ = fragment.vtbl.Release(fragment);
+            var simple: ?*anyopaque = null;
+            try std.testing.expectEqual(com.S_OK, fragment.vtbl.QueryInterface(fragment, &com.IID_IRawElementProviderSimple, &simple));
+            return @ptrCast(@alignCast(simple orelse return error.TestExpectedRow));
+        }
+
+        fn enabled(element: *com.IRawElementProviderSimple) !bool {
+            var value = com.VARIANT.empty();
+            try std.testing.expectEqual(com.S_OK, element.vtbl.GetPropertyValue(element, constants.UIA_IsEnabledPropertyId, &value));
+            return value.value.bool_val == com.VARIANT_TRUE;
+        }
+
+        /// Invoke the list's row at `position` through UIA.
+        fn invokeRow(list: *ReferenceList, position: usize) !com.HRESULT {
+            const row = try rowAt(list, position);
+            defer _ = row.vtbl.Release(row);
+            var pattern: ?*com.IUnknown = null;
+            try std.testing.expectEqual(com.S_OK, row.vtbl.GetPatternProvider(row, constants.UIA_InvokePatternId, &pattern));
+            const invoke: *com.IInvokeProvider = @ptrCast(@alignCast(pattern orelse return error.TestExpectedInvoke));
+            defer _ = invoke.vtbl.Release(invoke);
+            return invoke.vtbl.Invoke(invoke);
+        }
+
+        /// The list, and its row at `position`, say they are disabled, and
+        /// the row's Invoke is refused.
+        fn expectHeld(list: *ReferenceList, position: usize) !void {
+            const provider = list.provider orelse return error.TestExpectedProvider;
+            try std.testing.expect(!try enabled(&provider.base));
+            const row = try rowAt(list, position);
+            defer _ = row.vtbl.Release(row);
+            try std.testing.expect(!try enabled(row));
+            try std.testing.expectEqual(com.UIA_E_ELEMENTNOTENABLED, try invokeRow(list, position));
+        }
+
+        fn positionOf(list: *const ReferenceList, id: u16) !usize {
+            return for (list.shown[0..list.shown_count], 0..) |shown, at| {
+                if (shown == id) break at;
+            } else error.TestExpectedRow;
+        }
+
+        fn body() !void {
+            const keyboard = win32_input.TestingKeyboard.pinNone();
+            defer keyboard.release();
+            const alloc = std.testing.allocator;
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var path: []u8 = &.{};
+            const fixture = try profileFixture(&tmp, "profile-command = py: python.exe\n", &path);
+            defer alloc.free(path);
+            defer fixture.finish();
+            const settings = &fixture.settings;
+            const list = &settings.profile_list;
+            const list_hwnd = list.hwnd orelse return error.TestExpectedList;
+
+            // py's command line, changed, to be saved.
+            list.selectPosition(try positionOf(list, settings.profile_model.findField(.command, "py", null) orelse return error.TestExpectedRow));
+            try std.testing.expect(fixture.pumpKey(VK_RETURN));
+            typeInto((try openEdit(settings)).hwnd.?, "python.exe -i");
+            try std.testing.expect(fixture.pumpKey(VK_RETURN));
+            try std.testing.expect(settings.profile_edit == null);
+            // Key bindings and All settings are read once, so their lists
+            // have rows to show while the page is held.
+            for ([_]Section{ .keybindings, .reference, .profiles }) |section| settings.setActiveSection(section);
+
+            // The save is done, and the window cannot copy the running
+            // settings: it holds the page until it can.
+            var failing = std.testing.FailingAllocator.init(settings.handle.alloc, .{});
+            const real = settings.handle.alloc;
+            settings.handle.alloc = failing.allocator();
+            defer settings.handle.alloc = real;
+            fixture.starve_after_save = &failing;
+            defer fixture.starve_after_save = null;
+            settings.save();
+            try std.testing.expectEqual(@as(u32, 1), fixture.saved);
+            try std.testing.expect(settings.owes_draft);
+            // Memory is back, and the window has not yet tried again: the
+            // draft is still owed.
+            const hwnd = settings.hwnd orelse return error.TestExpectedWindow;
+            try std.testing.expect(sys.KillTimer(hwnd, refresh_timer_id) != 0);
+            failing.fail_index = std.math.maxInt(usize);
+            try std.testing.expect(sys.IsWindowEnabled(list_hwnd) == 0);
+
+            // A UIA client invokes py's command line row: refused, and no
+            // field is made, so nothing takes a SetValue the draft would
+            // lose.
+            const py = try positionOf(list, settings.profile_model.findField(.command, "py", null) orelse return error.TestExpectedRow);
+            try expectHeld(list, py);
+            try std.testing.expect(settings.profile_edit == null);
+            try std.testing.expect(sys.GetWindow(list_hwnd, GW_CHILD) == null);
+            // The list's own Invoke refuses too, should a row be reached
+            // past it: the client hears that the call did not act.
+            try std.testing.expect(!referenceUiaInvokeRow(list, py));
+            try std.testing.expect(!settings.profileInvoke());
+            try std.testing.expect(settings.profile_edit == null);
+            try std.testing.expect(sys.GetWindow(list_hwnd, GW_CHILD) == null);
+
+            // Key bindings and All settings, shown while held: their rows
+            // open no config file.
+            const pages = [_]Section{ .keybindings, .reference, .profiles };
+            for (pages) |section| {
+                settings.setActiveSection(section);
+                const shown = settings.sectionList(section) orelse return error.TestExpectedList;
+                try std.testing.expect(shown.shown_count > 0);
+                try expectHeld(shown, 0);
+            }
+            try std.testing.expectEqual(@as(u32, 0), fixture.editor_opened);
+            try std.testing.expect(settings.profile_edit == null);
+            // The record of what was held keeps no list that went with its
+            // page: another round of the same pages leaves it as it was.
+            const held = settings.held_control_count;
+            for (pages) |section| settings.setActiveSection(section);
+            try std.testing.expectEqual(held, settings.held_control_count);
+
+            // The window tries again: the draft starts over, and the rows
+            // take an Invoke, whose field takes a value.
+            _ = sys.SendMessageW(hwnd, WM_ACTIVATE, 1, 0);
+            try std.testing.expect(!settings.owes_draft);
+            const again = try positionOf(list, settings.profile_model.findField(.command, "py", null) orelse return error.TestExpectedRow);
+            try std.testing.expect(try enabled(&(list.provider orelse return error.TestExpectedProvider).base));
+            try std.testing.expectEqual(com.S_OK, try invokeRow(list, again));
+            const provider = (try openEdit(settings)).provider orelse return error.TestExpectedProvider;
+            try std.testing.expectEqual(com.S_OK, provider.value_iface.vtbl.SetValue(&provider.value_iface, std.unicode.utf8ToUtf16LeStringLiteral("python.exe -q")));
             try std.testing.expect(fixture.pumpKey(VK_ESCAPE));
         }
     }.body);

@@ -8637,16 +8637,19 @@ pub const App = struct {
         const applied: *const configpkg.Config = if (reloaded_applied) |*value| value else &reloaded;
         // From here on as well, a failure is the save's outcome, never a
         // failed save: the file is written. Nothing is applied yet.
+        postWriteStep(.masked_check);
         masked_text.writer.writeAll(settingsMaskedKeyNames(&masked_buf, user_edited, pending, applied)) catch |err|
             return savedNotApplied("checked for overridden settings", err);
         // A file the reload could not read whole: what it missed is no
         // override, and the save says that instead, naming the file.
+        postWriteStep(.report);
         const report = settings_patch.reloadReport(&masked_text.writer, profile_edits, applied, &reloaded, masked_text.written().len > 0) catch |err|
             return savedNotApplied("checked for overridden settings", err);
         switch (report) {
             .unread => |unread| {
                 // Without the memory to name the file, the status says it
                 // without the name.
+                postWriteStep(.describe);
                 if (unread.describe(alloc)) |text| {
                     defer alloc.free(text);
                     self.settings_failure_detail.set(alloc, text);
@@ -8673,6 +8676,7 @@ pub const App = struct {
         // be installed partly read. It updates each terminal and then the
         // app, so one that fails may have applied part of the reload
         // (`SavedPartlyApplied`).
+        postWriteStep(.apply);
         self.core_app.updateConfig(self, applied) catch |err| {
             log.warn("settings save: saved, but applying the reload failed partway; the running settings may be partly updated err={}", .{err});
             return error.SavedPartlyApplied;
@@ -8680,6 +8684,12 @@ pub const App = struct {
         // The reload read the file again, so what is wrong in it is news.
         _ = self.reportRecordedConfigProblems();
         if (masked.len > 0) return error.SavedButMasked;
+    }
+
+    /// Tests only: the hook before a step after the write
+    /// (`settings_patch.test_post_write`).
+    fn postWriteStep(step: settings_patch.PostWriteStep) void {
+        if (builtin.is_test) if (settings_patch.test_post_write) |hook| hook(step);
     }
 
     /// A failure after the save wrote the file and before anything of its
@@ -9247,6 +9257,15 @@ pub const App = struct {
         threadlocal var starving: std.testing.FailingAllocator = undefined;
         /// The App's allocator in a test of what follows the write (`.app_after_read`).
         threadlocal var fail_next: ?*FailNext = null;
+        /// The step after the write whose first allocation fails
+        /// (`failAt`, `settings_patch.test_post_write`).
+        threadlocal var fail_step: ?settings_patch.PostWriteStep = null;
+
+        fn failAt(step: settings_patch.PostWriteStep) void {
+            if (fail_step != step) return;
+            fail_step = null;
+            if (fail_next) |failing| failing.armed = true;
+        }
 
         /// An allocator that fails its next allocation once armed, and only
         /// that one; everything else goes to `parent`, so what it allocates
@@ -9366,6 +9385,8 @@ pub const App = struct {
             brief_lock = null;
             starve = .none;
             fail_next = null;
+            fail_step = null;
+            settings_patch.test_post_write = null;
             files = &.{};
             hook_path = "";
             hook_text = "";
@@ -10021,6 +10042,61 @@ pub const App = struct {
         try std.testing.expectEqualStrings("Theme saved, but the saved settings could not be applied. Reload the configuration to use them.", host.banner_text orelse return error.TestExpectedBanner);
     }
 
+    test "win32 palette theme pick whose write fails rolls back, and holds the config the palette lists from until the palette closes" {
+        if (builtin.os.tag != .windows) return error.SkipZigTest;
+        const alloc = std.testing.allocator;
+        var core_app: CoreApp = undefined;
+        var app: App = undefined;
+        var host: Host = undefined;
+        var session: TestSession = .{};
+        try session.init(.{ .core_app = &core_app, .app = &app, .hosts = &.{.{ .storage = &host }} });
+        defer session.deinit();
+        defer testFreeConfigProblems(&app, alloc);
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        try tmp.dir.writeFile(.{ .sub_path = "picked", .data = "font-size = 20\n" });
+        const picked = try tmp.dir.realpathAlloc(alloc, "picked");
+        defer alloc.free(picked);
+        const text = "font-size = 12\n";
+        try tmp.dir.writeFile(.{ .sub_path = "config", .data = text });
+        const path = try tmp.dir.realpathAlloc(alloc, "config");
+        defer alloc.free(path);
+        SaveTest.files = &.{path};
+        try SaveTest.begin(&app, path);
+        defer SaveTest.end(&app);
+        const Case = enum { no_preview, preview };
+        for ([_]Case{ .no_preview, .preview }) |case| {
+            if (case == .preview) {
+                try host.previewPaletteTheme(picked);
+                try std.testing.expectEqual(@as(f32, 20), app.config.@"font-size");
+            }
+            // Another program locks the file's bytes as the save is about to
+            // put its own in place: the save's last read of it fails, and
+            // nothing is written.
+            SaveTest.lock_path = path;
+            save_target.test_before_compare = SaveTest.hook;
+            try host.commitPaletteTheme(picked);
+            if (SaveTest.lock) |file| file.close();
+            SaveTest.lock = null;
+            SaveTest.lock_path = "";
+            // Rolled back: the config from before the pick (and its preview)
+            // runs, and the file is as it was.
+            try std.testing.expectEqual(@as(f32, 12), app.config.@"font-size");
+            try std.testing.expectEqualStrings("Theme save failed; reverted preview.", host.banner_text orelse return error.TestExpectedBanner);
+            const after = try SaveTest.read(path);
+            defer alloc.free(after);
+            try std.testing.expectEqualStrings(text, after);
+            // The palette stays open with the banner, and so keeps the config
+            // its list was built from (`palette_catalog_retained_config`):
+            // what a test that leaves it open reports as leaked. Closing the
+            // palette releases it, as `Host.deinit` does for a window that
+            // goes with the palette open.
+            try std.testing.expect(host.palette_catalog_retained_config != null);
+            host.hideOverlay();
+            try std.testing.expect(host.palette_catalog_retained_config == null);
+        }
+    }
+
     test "win32 palette theme pick with a preview whose reload cannot be read keeps the preview running" {
         if (builtin.os.tag != .windows) return error.SkipZigTest;
         const alloc = std.testing.allocator;
@@ -10056,6 +10132,155 @@ pub const App = struct {
         // to the config from before the preview.
         try std.testing.expectEqual(@as(f32, 20), app.config.@"font-size");
         try std.testing.expectEqualStrings("Theme saved, but the saved settings could not be applied. Reload the configuration to use them.", host.banner_text orelse return error.TestExpectedBanner);
+    }
+
+    test "settings save whose report, file naming or apply fails after the write says it saved" {
+        if (builtin.os.tag != .windows) return error.SkipZigTest;
+        const alloc = std.testing.allocator;
+        var core_app: CoreApp = undefined;
+        var app: App = undefined;
+        var session: TestSession = .{};
+        try session.init(.{ .core_app = &core_app, .app = &app });
+        defer session.deinit();
+        defer testFreeConfigProblems(&app, alloc);
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        // The include overrides `font-size` and py's label.
+        try tmp.dir.writeFile(.{ .sub_path = "more.conf", .data = "font-size = 20\nprofile-name = py: Other\n" });
+        const more = try tmp.dir.realpathAlloc(alloc, "more.conf");
+        defer alloc.free(more);
+        const text = try std.fmt.allocPrint(alloc, "font-size = 12\nprofile-command = py: python.exe\nconfig-file = {s}\n", .{more});
+        defer alloc.free(text);
+        try tmp.dir.writeFile(.{ .sub_path = "config", .data = text });
+        const path = try tmp.dir.realpathAlloc(alloc, "config");
+        defer alloc.free(path);
+        SaveTest.files = &.{path};
+        try SaveTest.begin(&app, path);
+        defer SaveTest.end(&app);
+        // The App's allocator, which fails the first allocation of the step
+        // a case names.
+        var fail_next: SaveTest.FailNext = .{ .parent = app.core_app.alloc };
+        const real = app.core_app.alloc;
+        app.core_app.alloc = fail_next.allocator();
+        defer app.core_app.alloc = real;
+        const Case = enum { report, describe, apply };
+        for ([_]Case{ .report, .describe, .apply }) |case| {
+            try tmp.dir.writeFile(.{ .sub_path = "config", .data = text });
+            SaveTest.fail_next = &fail_next;
+            SaveTest.fail_step = switch (case) {
+                .report => .report,
+                .describe => .describe,
+                .apply => .apply,
+            };
+            settings_patch.test_post_write = SaveTest.failAt;
+            var original = try app.config.clone(alloc);
+            defer original.deinit();
+            var pending = try app.config.clone(alloc);
+            defer pending.deinit();
+            switch (case) {
+                // A profile label the include overrides: the report names
+                // it, and that is the step's first allocation.
+                .report => try pending.@"profile-name".parseCLI(pending._arena.?.allocator(), "py: Python"),
+                // The include is locked as the save is about to put its
+                // bytes in place: the reload reads it only partly, and the
+                // file's name is the step's first allocation.
+                .describe => {
+                    pending.@"cursor-style" = .underline;
+                    SaveTest.lock_path = more;
+                    save_target.test_before_compare = SaveTest.hook;
+                },
+                // An overridden setting, and one that is not.
+                .apply => {
+                    pending.@"font-size" = 15;
+                    pending.@"cursor-style" = .underline;
+                },
+            }
+            const result = settingsSaveAndReloadThunk(&app, &pending, &original);
+            if (SaveTest.lock) |file| file.close();
+            SaveTest.lock = null;
+            SaveTest.lock_path = "";
+            try std.testing.expect(!fail_next.armed);
+            try std.testing.expect(SaveTest.fail_step == null);
+            switch (case) {
+                .report => try std.testing.expectError(error.SavedNotApplied, result),
+                // Saved, and the status says the reload read a file only
+                // partly, without its name.
+                .describe => {
+                    try std.testing.expectError(error.SavedButUnread, result);
+                    try std.testing.expect(app.settings_failure_detail.text == null);
+                },
+                // Saved, maybe partly applied; the overridden setting is
+                // named for the status, since a reload does not apply it.
+                .apply => {
+                    try std.testing.expectError(error.SavedPartlyApplied, result);
+                    try std.testing.expectEqualStrings("font-size", app.settings_masked_keys.text orelse return error.TestExpectedMaskedKeys);
+                },
+            }
+        }
+    }
+
+    test "win32 palette theme pick whose apply fails after the write says it may be only partly applied, and names a mask" {
+        if (builtin.os.tag != .windows) return error.SkipZigTest;
+        const alloc = std.testing.allocator;
+        var core_app: CoreApp = undefined;
+        var app: App = undefined;
+        var host: Host = undefined;
+        var session: TestSession = .{};
+        try session.init(.{ .core_app = &core_app, .app = &app, .hosts = &.{.{ .storage = &host }} });
+        defer session.deinit();
+        defer testFreeConfigProblems(&app, alloc);
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        try tmp.dir.writeFile(.{ .sub_path = "picked", .data = "font-size = 20\n" });
+        try tmp.dir.writeFile(.{ .sub_path = "other", .data = "font-size = 14\n" });
+        const picked = try tmp.dir.realpathAlloc(alloc, "picked");
+        defer alloc.free(picked);
+        const other = try tmp.dir.realpathAlloc(alloc, "other");
+        defer alloc.free(other);
+        const more_text = try std.fmt.allocPrint(alloc, "theme = {s}\n", .{other});
+        defer alloc.free(more_text);
+        try tmp.dir.writeFile(.{ .sub_path = "more.conf", .data = "\n" });
+        const more = try tmp.dir.realpathAlloc(alloc, "more.conf");
+        defer alloc.free(more);
+        const text = try std.fmt.allocPrint(alloc, "font-size = 12\nconfig-file = {s}\n", .{more});
+        defer alloc.free(text);
+        const path = blk: {
+            try tmp.dir.writeFile(.{ .sub_path = "config", .data = text });
+            break :blk try tmp.dir.realpathAlloc(alloc, "config");
+        };
+        defer alloc.free(path);
+        SaveTest.files = &.{path};
+        try SaveTest.begin(&app, path);
+        defer SaveTest.end(&app);
+        var fail_next: SaveTest.FailNext = .{ .parent = app.core_app.alloc };
+        const real = app.core_app.alloc;
+        app.core_app.alloc = fail_next.allocator();
+        defer app.core_app.alloc = real;
+        const Case = enum { plain, masked };
+        for ([_]Case{ .plain, .masked }) |case| {
+            try tmp.dir.writeFile(.{ .sub_path = "config", .data = text });
+            // The include names another theme, so it masks the pick.
+            try tmp.dir.writeFile(.{ .sub_path = "more.conf", .data = if (case == .masked) more_text else "\n" });
+            // The app runs the files as they are now, so the pick's check
+            // finds no change on disk.
+            {
+                var loaded = try SaveTest.load(alloc);
+                defer loaded.deinit();
+                try app.core_app.updateConfig(&app, &loaded);
+            }
+            SaveTest.fail_next = &fail_next;
+            SaveTest.fail_step = .apply;
+            settings_patch.test_post_write = SaveTest.failAt;
+            try host.commitPaletteTheme(picked);
+            try std.testing.expect(SaveTest.fail_step == null);
+            const after = try SaveTest.read(path);
+            defer alloc.free(after);
+            try std.testing.expect(std.mem.indexOf(u8, after, picked) != null);
+            try std.testing.expectEqualStrings(switch (case) {
+                .plain => "Theme saved, but the saved settings may be only partly applied. Reload the configuration to apply all of them.",
+                .masked => "Theme saved, but the saved settings may be only partly applied, and a later config layer masks the theme, so a reload does not apply it.",
+            }, host.banner_text orelse return error.TestExpectedBanner);
+        }
     }
 
     test "win32 settings save whose reload reads a file only partly keeps the running settings and names the file" {

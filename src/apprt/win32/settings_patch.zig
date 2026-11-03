@@ -578,6 +578,17 @@ pub const Unread = struct {
     }
 };
 
+/// The steps of a Settings save after it wrote the file
+/// (`App.settingsSaveAndReload`): naming the settings a later layer overrides,
+/// the reload report, naming a file it could not read whole, and applying
+/// the reload.
+pub const PostWriteStep = enum { masked_check, report, describe, apply };
+
+/// Tests only: called just before each `PostWriteStep`, so a test can make
+/// that step, and only it, fail.
+pub threadlocal var test_post_write: if (@import("builtin").is_test) ?*const fn (PostWriteStep) void else void =
+    if (@import("builtin").is_test) null else {};
+
 /// Tests only: how the App loads the config for a Settings save (its check,
 /// its fresh profile layers and its reload), instead of the real config
 /// files, so a test of the save never reaches the real profile.
