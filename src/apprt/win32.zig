@@ -5750,10 +5750,18 @@ pub fn settingsSaveAndReloadThunk(
     const app: *App = @ptrCast(@alignCast(ctx));
     // A completed save ends the window's previews (`endSettingsPreview`); a
     // failed one keeps the draft, and its preview with it. One whose reload
-    // read a file only partly is completed too: the running settings stay
-    // as they were, without the preview over them.
+    // read a file only partly, or could not be applied, or was applied only
+    // partly, is completed too: the running settings stay as they are,
+    // without the preview over them.
     app.settingsSaveAndReload(pending, original) catch |err| {
-        if (err == error.SavedButMasked or err == error.SavedButUnread) app.endSettingsPreview();
+        switch (err) {
+            error.SavedButMasked,
+            error.SavedButUnread,
+            error.SavedNotApplied,
+            error.SavedPartlyApplied,
+            => app.endSettingsPreview(),
+            else => {},
+        }
         return err;
     };
     app.endSettingsPreview();
