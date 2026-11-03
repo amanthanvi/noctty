@@ -554,21 +554,27 @@ pub fn profileEdits(arena: Allocator, problems: []const origin.Index, original: 
 
 /// A file a load found and could not read whole (`unreadConfigFile`).
 pub const Unread = struct {
-    theme: bool,
+    kind: Kind,
     path: []const u8,
     /// UTF-16 text that does not decode (`Config._undecodable_file`): the
     /// file was skipped whole.
     undecodable: bool = false,
 
-    /// How the status line names it: "the theme file <path>" or "the
-    /// included file <path>", no value.
+    pub const Kind = enum { config, include, theme };
+
+    /// How the status line names it: "the config file <path>", "the
+    /// included file <path>" or "the theme file <path>", no value.
     pub fn describe(self: Unread, alloc: Allocator) Allocator.Error![]u8 {
         return std.fmt.allocPrint(alloc, "{s} {s}", .{ self.noun(), self.path });
     }
 
     /// The words `describe` puts before the path.
     pub fn noun(self: Unread) []const u8 {
-        return if (self.theme) "the theme file" else "the included file";
+        return switch (self.kind) {
+            .config => "the config file",
+            .include => "the included file",
+            .theme => "the theme file",
+        };
     }
 };
 
@@ -595,23 +601,40 @@ pub fn reloadReport(masked: *std.Io.Writer, edits: []const Edit, reload: *const 
     return if (try writeMasked(masked, edits, reload, after)) .masked else .held;
 }
 
-/// A file `config`'s load found and could not read whole, if any: a
-/// `config-file` or theme that is there and would not open, or one whose
-/// read failed partway through (`LineIterator.read_failed`, which reads as
-/// the end of the file). The loader records each as a problem and goes on,
+/// A file `config`'s load found and could not read whole, if any: a default
+/// config file, `config-file` or theme that is there and would not open, or
+/// one whose read failed partway through (`LineIterator.read_failed`, which
+/// reads as the end of the file). The loader records each as a problem and goes on,
 /// so the layers miss what the file says, and a save that decided from them
 /// whether another file still names a removed profile would decide blind: it
 /// stops instead. A missing include (`FileNotFound`) or a directory (`IsDir`)
 /// is the loader's to report, as the disk check before a save lets them
 /// through (`settingsDiskVerdict`).
 pub fn unreadConfigFile(config: *const Config) ?Unread {
+    return unreadOf(config, false);
+}
+
+/// `unreadConfigFile`, for the theme alone: what a light/dark switch reads
+/// itself (`finalize` reads the state's theme again), as against a config
+/// file's problem, which a switch replays from the load it came from.
+pub fn unreadTheme(config: *const Config) ?Unread {
+    return unreadOf(config, true);
+}
+
+fn unreadOf(config: *const Config, theme_only: bool) ?Unread {
     // Skipped whole: UTF-16 that does not decode. One predicate for the
     // check before a save and the report after it, so they cannot drift.
-    // The light/dark switch does not carry the record over
-    // (`changeConditionalState`), so ask it of the load as read too.
-    if (config._undecodable_file) |path| return .{ .theme = false, .path = path, .undecodable = true };
+    // The light/dark switch does not carry the config file's record over
+    // (`changeConditionalState`), so its replayed problem is read below too.
+    if (!theme_only) if (config._undecodable_file) |path| return .{ .kind = .include, .path = path, .undecodable = true };
+    if (config._undecodable_theme) |path| return .{ .kind = .theme, .path = path, .undecodable = true };
     for (config._diagnostics.items()) |diag| {
         const message: []const u8 = diag.message;
+        // A config file skipped as UTF-16 that does not decode, as its
+        // problem says (`Config.invalidUtf16`): kept in the replay log, so a
+        // config switched to the other light/dark state, or the app's after
+        // a live switch, still shows it. A theme's stays out of that log.
+        if (!theme_only) if (undecodableConfigFile(message)) |path| return .{ .kind = .include, .path = path, .undecodable = true };
         // A theme the load could not open (`themepkg.open`): the light/dark
         // switch reads it again after the save's probe, and it may have
         // become unopenable in between. The path is the last quoted name,
@@ -621,12 +644,17 @@ pub fn unreadConfigFile(config: *const Config) ?Unread {
             const theme_err = message[quote_end + 3 ..];
             if (std.mem.eql(u8, theme_err, "error.FileNotFound") or std.mem.eql(u8, theme_err, "error.IsDir")) continue;
             const quote_start = std.mem.lastIndexOfScalar(u8, message[0..quote_end], '"') orelse continue;
-            return .{ .theme = true, .path = message[quote_start + 1 .. quote_end] };
+            return .{ .kind = .theme, .path = message[quote_start + 1 .. quote_end] };
         }
-        const prefix_len, const theme = for ([_]struct { []const u8, bool }{
-            .{ "error opening config-file ", false },
-            .{ "error reading config-file ", false },
-            .{ "error reading theme ", true },
+        if (theme_only and !std.mem.startsWith(u8, message, "error reading theme ")) continue;
+        const prefix_len, const kind = for ([_]struct { []const u8, Unread.Kind }{
+            .{ "error opening config-file ", .include },
+            .{ "error reading config-file ", .include },
+            .{ "error reading theme ", .theme },
+            // A default config file that is there and will not open
+            // (`Config.loadOptionalFile`), or whose read failed partway.
+            .{ "error opening config file ", .config },
+            .{ "error reading config file ", .config },
         }) |prefix| {
             if (std.mem.startsWith(u8, message, prefix[0])) break .{ prefix[0].len, prefix[1] };
         } else continue;
@@ -635,7 +663,20 @@ pub fn unreadConfigFile(config: *const Config) ?Unread {
         // Missing, or a directory: what the disk check lets through too.
         const err = message[end_at + 2 ..];
         if (std.mem.eql(u8, err, "error.FileNotFound") or std.mem.eql(u8, err, "error.IsDir")) continue;
-        return .{ .theme = theme, .path = message[prefix_len..end_at] };
+        return .{ .kind = kind, .path = message[prefix_len..end_at] };
+    }
+    return null;
+}
+
+/// The path in `Config.invalidUtf16`'s problem for a config file, or null:
+/// "config file <path> <reason>; not reading it. Save it as UTF-8".
+fn undecodableConfigFile(message: []const u8) ?[]const u8 {
+    const prefix = "config file ";
+    const suffix = "; not reading it. Save it as UTF-8";
+    if (!std.mem.startsWith(u8, message, prefix) or !std.mem.endsWith(u8, message, suffix)) return null;
+    const body = message[prefix.len .. message.len - suffix.len];
+    for ([_][]const u8{ " is not valid UTF-16", " is too large" }) |reason| {
+        if (std.mem.endsWith(u8, body, reason)) return body[0 .. body.len - reason.len];
     }
     return null;
 }
@@ -645,9 +686,15 @@ pub fn unreadConfigFile(config: *const Config) ?Unread {
 /// or a reference names it (`profile-order`, `profile-hidden`,
 /// `default-profile`, as the config the index was made from holds them).
 /// Deleting its last `profile-command` line would then leave the loader
-/// something that names no profile.
+/// something that names no profile. A reading that could not read every
+/// file (`unreadConfigFile`) may have missed what names it, so it counts as
+/// naming it: the line becomes a tombstone, one line more at worst. The
+/// config as last read is one, since its markers are from that read and
+/// the files may have been repaired since; a fresh reading with one never
+/// gets here (the save stops on it).
 fn referencedElsewhere(readings: []const origin.Index, id: []const u8, path: []const u8, same: origin.SamePath) bool {
     for (readings) |*problems| {
+        if (unreadConfigFile(problems.config) != null) return true;
         for ([_]Field{ .command, .name, .folder, .env }) |field| {
             if (problems.givesElsewhere(field.key(), id, null, path, same)) return true;
         }
@@ -1293,7 +1340,7 @@ test "settings patch: a theme the light/dark switch could not open is named, a m
         var switched = (try fresh.changeConditionalState(.{ .theme = .dark })) orelse return error.TestExpectedSwitch;
         defer switched.deinit();
         const unread = unreadConfigFile(&switched) orelse return error.TestExpectedUnread;
-        try testing.expect(unread.theme);
+        try testing.expect(unread.kind == .theme);
         try expectSameText(dark, unread.path);
     }
     // Every other case through the loader as well, so a change to its
@@ -1350,7 +1397,7 @@ test "settings patch: a theme the light/dark switch could not open is named, a m
             const unread = unreadConfigFile(&switched);
             if (expected) |want| {
                 const got = unread orelse return error.TestExpectedUnread;
-                try testing.expect(got.theme);
+                try testing.expect(got.kind == .theme);
                 try expectSameText(want, got.path);
             } else if (unread != null) return error.TestUnexpectedUnread;
         }
@@ -1430,6 +1477,23 @@ test "settings patch: a profile's variables compare without case, and a removal 
     // The same field, deleted only because the profile is removed: covered.
     const with_profile: Edit = .{ .field = .env, .id = "py", .op = .delete, .with_profile = true };
     try testing.expect(changedUnder(&.{with_profile}, &original, &pending, &changed) == null);
+}
+
+test "settings patch: a config file that did not decode is still named after the light/dark switch, and a theme alone is asked of the switch" {
+    const alloc = testing.allocator;
+    var config = try Config.default(alloc);
+    defer config.deinit();
+    const arena = config._arena.?.allocator();
+    // What `Config.invalidUtf16` records for a config file, as a replay brings
+    // it back without the marker.
+    try config._diagnostics.append(arena, .{ .message = try arena.dupeZ(u8, "config file C:\\noctty-test\\more.conf is not valid UTF-16; not reading it. Save it as UTF-8") });
+    const unread = unreadConfigFile(&config) orelse return error.TestExpectedUnread;
+    try testing.expect(unread.undecodable and unread.kind == .include);
+    try expectSameText("C:\\noctty-test\\more.conf", unread.path);
+    // A config file's problem is not the theme's.
+    try testing.expect(unreadTheme(&config) == null);
+    try config._diagnostics.append(arena, .{ .message = try arena.dupeZ(u8, "error reading theme C:\\noctty-test\\dark: error.ReadFailed") });
+    try expectSameText("C:\\noctty-test\\dark", (unreadTheme(&config) orelse return error.TestExpectedUnread).path);
 }
 
 test "settings patch: the report after a save names a file only the reload as read records as undecodable" {
@@ -1655,7 +1719,7 @@ test "settings patch: a config-file the load could not open or read whole, or a 
         try testing.expect(config.@"profile-command".get("py") == null);
         const unread = unreadConfigFile(&config) orelse return error.TestExpectedUnreadFile;
         try expectSameText(held, unread.path);
-        try testing.expect(!unread.theme);
+        try testing.expect(unread.kind == .include);
     }
     // One whose read fails partway through: named, though it opened; and a
     // theme the same.
@@ -1667,7 +1731,7 @@ test "settings patch: a config-file the load could not open or read whole, or a 
         try config.loadReader(alloc, &failing.interface, held);
         const unread = unreadConfigFile(&config) orelse return error.TestExpectedUnreadFile;
         try expectSameText(held, unread.path);
-        try testing.expect(!unread.theme);
+        try testing.expect(unread.kind == .include);
 
         var themed = try Config.default(alloc);
         defer themed.deinit();
@@ -1676,7 +1740,7 @@ test "settings patch: a config-file the load could not open or read whole, or a 
         try themed._diagnostics.append(arena, .{ .message = message });
         const theme = unreadConfigFile(&themed) orelse return error.TestExpectedUnreadFile;
         try expectSameText(held, theme.path);
-        try testing.expect(theme.theme);
+        try testing.expect(theme.kind == .theme);
     }
 }
 

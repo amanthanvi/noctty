@@ -2187,16 +2187,17 @@ pub fn settingsDiskVerdict(
     var applied = try settingsDiskInState(disk, state);
     defer if (applied) |*config| config.deinit();
     const effective: *const configpkg.Config = if (applied) |*config| config else disk;
-    // The switch reads no config file again, only the theme, which is not
-    // decoded, so it starts with no skipped file and records none; asked
-    // anyway, so that stays true if the switch changes.
-    if (effective._undecodable_file) |path| {
-        try setSettingsFailureDetail(alloc, detail, "the file {s}", .{path});
-        return error.UnsupportedEncoding;
-    }
+    // One predicate for both readings (`settings_patch.unreadConfigFile`): the
+    // switch reads the state's theme again, which is decoded as a config file
+    // is, so a theme that does not decode is a file this reading skipped and
+    // the load may not have.
     const readings = [_]*const configpkg.Config{ disk, effective };
     for (readings[0..if (applied != null) 2 else 1]) |reading| {
         if (@import("win32/settings_patch.zig").unreadConfigFile(reading)) |unread| {
+            if (unread.undecodable) {
+                try setSettingsFailureDetail(alloc, detail, "the file {s}", .{unread.path});
+                return error.UnsupportedEncoding;
+            }
             try setSettingsFailureDetail(alloc, detail, "{s} {s}", .{ unread.noun(), unread.path });
             return error.FileUnopenable;
         }
@@ -8304,6 +8305,87 @@ test "win32 settings disk check stops a save when the config cannot be put in th
     // Not judged on the light reading instead: the save stops.
     try std.testing.expectError(error.OutOfMemory, settingsDiskVerdict(alloc, &detail, &same, &same, &disk, .{ .theme = .dark }, .initEmpty()));
     // In the state it was loaded in there is no switch to fail.
+    try std.testing.expect(!try settingsDiskVerdict(alloc, &detail, &same, &same, &disk, .{}, .initEmpty()));
+}
+
+test "win32 settings disk check stops a save on a theme that does not decode, in the state that reads it" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(.{ .sub_path = "light", .data = "font-size = 13\n" });
+    try tmp.dir.writeFile(.{ .sub_path = "dark", .data = "\xff\xfe\x00\xd8a\x00" });
+    const light = try tmp.dir.realpathAlloc(alloc, "light");
+    defer alloc.free(light);
+    const dark = try tmp.dir.realpathAlloc(alloc, "dark");
+    defer alloc.free(dark);
+    const text = try std.fmt.allocPrint(alloc, "theme = light:{s},dark:{s}\n", .{ light, dark });
+    defer alloc.free(text);
+    try tmp.dir.writeFile(.{ .sub_path = "config", .data = text });
+    const path = try tmp.dir.realpathAlloc(alloc, "config");
+    defer alloc.free(path);
+    var disk = try configpkg.Config.default(alloc);
+    defer disk.deinit();
+    try disk.loadFile(alloc, path);
+    try disk.loadRecursiveFiles(alloc);
+    try disk.finalize();
+    var same = try configpkg.Config.default(alloc);
+    defer same.deinit();
+    var detail: win32_settings.FailureDetail = .{};
+    defer detail.clear(alloc);
+    // The app runs dark: the save's reload would skip the dark theme whole.
+    try std.testing.expectError(error.UnsupportedEncoding, settingsDiskVerdict(alloc, &detail, &same, &same, &disk, .{ .theme = .dark }, .initEmpty()));
+    const expected = try std.fmt.allocPrint(alloc, "the file {s}", .{dark});
+    defer alloc.free(expected);
+    try std.testing.expect(std.mem.eql(u8, expected, detail.text orelse return error.TestExpectedDetail));
+    // Light reads the light theme alone.
+    detail.clear(alloc);
+    try std.testing.expect(!try settingsDiskVerdict(alloc, &detail, &same, &same, &disk, .{}, .initEmpty()));
+}
+
+test "win32 settings disk check stops a save on a default config file that will not open, naming it" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(.{ .sub_path = "config.ghostty", .data = "font-size = 13\n" });
+    const path = try tmp.dir.realpathAlloc(alloc, "config.ghostty");
+    defer alloc.free(path);
+    var same = try configpkg.Config.default(alloc);
+    defer same.deinit();
+    var detail: win32_settings.FailureDetail = .{};
+    defer detail.clear(alloc);
+    {
+        // Held with no sharing: it does not open.
+        const wide = try std.os.windows.sliceToPrefixedFileW(null, path);
+        const handle = std.os.windows.kernel32.CreateFileW(wide.span().ptr, std.os.windows.GENERIC_READ, 0, null, std.os.windows.OPEN_EXISTING, 0, null);
+        if (handle == std.os.windows.INVALID_HANDLE_VALUE) return error.CouldNotHoldFile;
+        defer std.os.windows.CloseHandle(handle);
+        var disk = try configpkg.Config.default(alloc);
+        defer disk.deinit();
+        _ = disk.loadOptionalFile(alloc, path);
+        try std.testing.expectError(error.FileUnopenable, settingsDiskVerdict(alloc, &detail, &same, &same, &disk, .{}, .initEmpty()));
+        const expected = try std.fmt.allocPrint(alloc, "the config file {s}", .{path});
+        defer alloc.free(expected);
+        try std.testing.expect(std.mem.eql(u8, expected, detail.text orelse return error.TestExpectedDetail));
+    }
+    {
+        // Byte-range locked: it opens, and its read fails. Named as the
+        // config file it is, not as an include.
+        var lock = try tmp.dir.openFile("config.ghostty", .{ .mode = .read_write, .lock = .exclusive });
+        defer lock.close();
+        var disk = try configpkg.Config.default(alloc);
+        defer disk.deinit();
+        _ = disk.loadOptionalFile(alloc, path);
+        detail.clear(alloc);
+        try std.testing.expectError(error.FileUnopenable, settingsDiskVerdict(alloc, &detail, &same, &same, &disk, .{}, .initEmpty()));
+        const expected = try std.fmt.allocPrint(alloc, "the config file {s}", .{path});
+        defer alloc.free(expected);
+        try std.testing.expect(std.mem.eql(u8, expected, detail.text orelse return error.TestExpectedDetail));
+    }
+    // Readable: no problem.
+    var disk = try configpkg.Config.default(alloc);
+    defer disk.deinit();
+    try std.testing.expectEqual(configpkg.Config.OptionalFileAction.loaded, disk.loadOptionalFile(alloc, path));
+    detail.clear(alloc);
     try std.testing.expect(!try settingsDiskVerdict(alloc, &detail, &same, &same, &disk, .{}, .initEmpty()));
 }
 
