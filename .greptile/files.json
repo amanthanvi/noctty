@@ -250,6 +250,8 @@
       "scope": [
         "src/apprt/win32_settings*.zig",
         "src/apprt/win32/save_target.zig",
+        "src/apprt/win32/settings_patch.zig",
+        "src/cli/args.zig",
         "src/config/Config.zig",
         "src/config/origin.zig",
         "src/config/pane_launch.zig",
