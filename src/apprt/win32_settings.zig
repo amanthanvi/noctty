@@ -908,6 +908,9 @@ const StatusNote = enum {
     /// Another program edited the config file while it was being saved, and
     /// checked again it kept changing: nothing was saved.
     disk_changed,
+    /// Another program changed a profile field the draft changes while it
+    /// was being saved. Names it.
+    profile_changed,
     /// The config file is UTF-16 or UTF-32 text that a save cannot patch.
     unsupported_encoding,
     /// The config path is a link whose target is missing.
@@ -958,6 +961,7 @@ const StatusNote = enum {
             .saved_overridden => "Saved, but a later config file or command-line option overrides some of these values, so they will not take effect.",
             .saved_unread => "Saved, but a config file could not be read whole, so the running settings are unchanged. Reload the configuration once it can be read to use the saved values.",
             .disk_changed => "Nothing was saved: another program changed the config file while it was being saved. Save again. Your edits are kept.",
+            .profile_changed => "Nothing was saved: another program changed a profile in the config file since Settings read it. Reload the configuration, then make the change again. Your edits are kept.",
             .save_failed => "Save failed. Your edits are kept. Check that the config file can be written and is not open in another program, then try again.",
             .unsupported_encoding => "Nothing was saved: the config file is not readable as UTF-8 text (Windows PowerShell 5.1 writes UTF-16). Save it as UTF-8 in an editor, then save again. Your edits are kept.",
             .dangling_link => "Nothing was saved: the config file is a link to a file that does not exist. Fix or remove the link, then save again. Your edits are kept.",
@@ -987,7 +991,7 @@ const StatusNote = enum {
     /// file, or for a save that a later layer overrides, the settings.
     fn takesDetail(self: StatusNote) bool {
         return switch (self) {
-            .file_unopenable, .write_incomplete, .unsupported_encoding, .binary_config, .saved_overridden, .saved_unread => true,
+            .file_unopenable, .write_incomplete, .unsupported_encoding, .binary_config, .saved_overridden, .saved_unread, .profile_changed => true,
             .field_reset, .already_default, .reset_failed => true,
             .key_copied, .key_copy_failed => true,
             .profile_said, .profile_hint, .profile_refused => true,
@@ -1005,6 +1009,7 @@ const StatusNote = enum {
             .binary_config => std.fmt.allocPrint(alloc, "Nothing was saved: {s} contains NUL bytes, so it is a binary file or text in UTF-16 or UTF-32. Save it as UTF-8 in an editor, then save again. Your edits are kept.", .{detail}),
             .file_unopenable => std.fmt.allocPrint(alloc, "Nothing was saved: {s} cannot be opened. Close any program that has it open, or check its permissions, then save again. Your edits are kept.", .{detail}),
             .write_incomplete => std.fmt.allocPrint(alloc, "Saving stopped part way through the config file, which may now be incomplete. The complete new text is kept in {s}. Copy that over the config file, then save again. Your edits are kept.", .{detail}),
+            .profile_changed => std.fmt.allocPrint(alloc, "Nothing was saved: another program changed {s} in the config file since Settings read it. Reload the configuration, then make the change again. Your edits are kept.", .{detail}),
             .key_copied => std.fmt.allocPrint(alloc, "Copied {s}.", .{detail}),
             .key_copy_failed => std.fmt.allocPrint(alloc, "Could not copy {s}: the clipboard is busy or unavailable.", .{detail}),
             else => alloc.dupe(u8, self.text()),
@@ -1715,8 +1720,13 @@ pub const SaveError = error{
     /// byte: the file may hold new bytes followed by old ones.
     IncompleteWrite,
     /// The palette's theme pick found the theme changed in the config file.
-    /// There is no conflict prompt there, so the pick is refused.
+    /// There is no conflict prompt there, so the pick is refused. For the
+    /// window: another program changed the file while it was being saved.
     DiskChanged,
+    /// Another program changed a profile field the draft changes while it
+    /// was being saved; `AppHandle.failureDetail` names the field. There is
+    /// no Keep mine / Use disk for a profile field, so nothing is saved.
+    ProfileChanged,
     /// Write + reload both succeeded, but at least one GUI-edited
     /// field is masked by a later layer (included `config-file`,
     /// subsequent `--config-file`, `--config-default-files=false`
@@ -1766,6 +1776,7 @@ fn saveFailureNote(err: SaveError) StatusNote {
         error.FileUnopenable => .file_unopenable,
         error.IncompleteWrite => .write_incomplete,
         error.DiskChanged => .disk_changed,
+        error.ProfileChanged => .profile_changed,
         else => .save_failed,
     };
 }
@@ -3045,6 +3056,7 @@ pub const SettingsWindow = struct {
             .field_reset,
             .save_failed,
             .disk_changed,
+            .profile_changed,
             .unsupported_encoding,
             .binary_config,
             .dangling_link,
@@ -13098,7 +13110,7 @@ const dialog_test = struct {
                         var keys: [app.settings_masked_keys_capacity]u8 = undefined;
                         var masked: std.Io.Writer = .fixed(&self.masked);
                         masked.writeAll(app.settingsMaskedKeyNames(&keys, edited, pending, &reloaded)) catch {};
-                        const report = settings_patch.reloadReport(&masked, profile_edits, &reloaded, masked.end > 0) catch .held;
+                        const report = settings_patch.reloadReport(&masked, profile_edits, &reloaded, &reloaded, masked.end > 0) catch .held;
                         self.masked_len = masked.end;
                         self.unread_len = 0;
                         if (report == .unread) {

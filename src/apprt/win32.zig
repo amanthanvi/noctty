@@ -6734,6 +6734,8 @@ pub fn persistSettings(
     // unedited source lines remain byte-for-byte intact.
     const raw_before = save_target.read(alloc, target.path) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
+        // Another program is writing it: the file is checked again.
+        error.Unstable => return error.DiskChanged,
         error.ReadFailed, error.TooLarge => return error.SerializeFailed,
     };
     defer alloc.free(raw_before);
@@ -6773,6 +6775,11 @@ pub fn persistSettings(
     // No config file holds a NUL (`settingsTextProblem` refuses one), so a
     // NUL here is the save's own, whatever wrote it: nothing is written.
     if (std.mem.indexOfScalar(u8, final, 0) != null) return error.SerializeFailed;
+    // Nor a file the next save could not read (`save_target.max_bytes`).
+    if (final.len > save_target.max_bytes) {
+        std.log.warn("settings save: the saved file would be larger than a save reads; nothing written len={d}", .{final.len});
+        return error.SerializeFailed;
+    }
 
     // Ensure target's parent directory exists. `config_edit.openPath`
     // creates `%APPDATA%\ghostty\` for the default path, but a user
@@ -8343,6 +8350,68 @@ test "win32 settings disk check stops an ordinary save on the theme of the app's
     // Read whole: no problem.
     detail.clear(alloc);
     try std.testing.expect(!try settingsDiskVerdict(alloc, &detail, &same, &same, &disk, dark_state, .initEmpty()));
+}
+
+test "win32 settings save does not write over bytes another program appends while the save reads the file last" {
+    const alloc = std.testing.allocator;
+    var scratch = try save_target.Scratch.init();
+    defer scratch.deinit();
+    try scratch.tmp.dir.writeFile(.{ .sub_path = "config.ghostty", .data = "font-size = 12\n" });
+    const path = try scratch.path("config.ghostty");
+    defer alloc.free(path);
+    const Append = struct {
+        threadlocal var target: []const u8 = "";
+        fn arm() void {
+            save_target.test_before_compare = null;
+            save_target.test_during_read = append;
+        }
+        fn append() void {
+            save_target.test_during_read = null;
+            const file = std.fs.openFileAbsolute(target, .{ .mode = .read_write }) catch return;
+            defer file.close();
+            file.seekFromEnd(0) catch return;
+            file.writeAll("font-family = Other\n") catch return;
+        }
+    };
+    Append.target = path;
+    // During the read just before the replace: after its stat, before its
+    // read of the bytes.
+    save_target.test_before_compare = Append.arm;
+    defer save_target.test_before_compare = null;
+    defer save_target.test_during_read = null;
+    var draft = try settingsTestCopyOnSelectEdit(alloc);
+    defer draft.pending.deinit();
+    try std.testing.expectError(error.DiskChanged, persistSettings(alloc, path, &draft.pending, draft.edited, &.{}, null, null));
+    const after = try scratch.tmp.dir.readFileAlloc(alloc, "config.ghostty", 1 << 16);
+    defer alloc.free(after);
+    try std.testing.expectEqualStrings("font-size = 12\nfont-family = Other\n", after);
+}
+
+test "win32 settings save writes no file larger than the next save could read" {
+    const alloc = std.testing.allocator;
+    var scratch = try save_target.Scratch.init();
+    defer scratch.deinit();
+    const path = try scratch.path("config.ghostty");
+    defer alloc.free(path);
+    // Comment lines up to a few bytes under the cap, which a save reads.
+    {
+        const file = try scratch.tmp.dir.createFile("config.ghostty", .{});
+        defer file.close();
+        var buf: [4096]u8 = undefined;
+        var writer = file.writer(&buf);
+        const line = "#" ++ "x" ** 4094 ++ "\n";
+        var left: usize = save_target.max_bytes - 8;
+        while (left >= line.len) : (left -= line.len) try writer.interface.writeAll(line);
+        try writer.interface.splatByteAll('#', left - 1);
+        try writer.interface.writeAll("\n");
+        try writer.interface.flush();
+    }
+    try std.testing.expectEqual(@as(u64, save_target.max_bytes - 8), (try scratch.tmp.dir.statFile("config.ghostty")).size);
+    // A setting added at its end would take it past the cap: not written.
+    var draft = try settingsTestCopyOnSelectEdit(alloc);
+    defer draft.pending.deinit();
+    try std.testing.expectError(error.SerializeFailed, persistSettings(alloc, path, &draft.pending, draft.edited, &.{}, null, null));
+    try std.testing.expectEqual(@as(u64, save_target.max_bytes - 8), (try scratch.tmp.dir.statFile("config.ghostty")).size);
 }
 
 test "win32 settings save writes a config only the extended path form reaches" {

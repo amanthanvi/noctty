@@ -55,6 +55,9 @@ pub const ReadError = error{
     ReadFailed,
     /// Larger than any config file a save reads (`max_bytes`).
     TooLarge,
+    /// The file's size changed while it was read: another program is
+    /// writing it, and what was read is not what it holds.
+    Unstable,
 } || Allocator.Error;
 
 /// The most bytes a save reads of a config file.
@@ -71,33 +74,36 @@ pub fn digestOf(bytes: []const u8) Digest {
 }
 
 /// The bytes of the file at `path` (a `Target.path`) as a save reads them: a
-/// file that is not there reads as empty. Owned.
+/// file that is not there reads as empty. Owned. Read to its end (within
+/// `max_bytes`), not to the size a stat gave: bytes another program appends
+/// meanwhile are read too. A size that differs before, during and after the
+/// read is `Unstable`.
 pub fn read(alloc: Allocator, path: []const u8) ReadError![]u8 {
     const file = std.fs.cwd().openFile(path, .{}) catch |err| switch (err) {
         error.FileNotFound => return alloc.dupe(u8, ""),
         else => return error.ReadFailed,
     };
     defer file.close();
-    const stat = file.stat() catch return error.ReadFailed;
-    if (stat.size > max_bytes) return error.TooLarge;
-    const slice = try alloc.alloc(u8, @intCast(stat.size));
-    errdefer alloc.free(slice);
-    const n = file.readAll(slice) catch return error.ReadFailed;
-    return alloc.realloc(slice, n);
+    const before = file.stat() catch return error.ReadFailed;
+    if (before.size > max_bytes) return error.TooLarge;
+    if (@import("builtin").is_test) if (test_during_read) |hook| hook();
+    const bytes = file.readToEndAlloc(alloc, max_bytes) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.FileTooBig => return error.TooLarge,
+        else => return error.ReadFailed,
+    };
+    errdefer alloc.free(bytes);
+    const after = file.stat() catch return error.ReadFailed;
+    if (before.size != bytes.len or after.size != bytes.len) return error.Unstable;
+    return bytes;
 }
 
 /// The digest of what the file the configured `path` reaches holds now, as a
-/// save would read it; null when that cannot be read (the save reports why).
-pub fn digestNow(alloc: Allocator, path: []const u8) Allocator.Error!?Digest {
-    const target = resolve(alloc, path) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        error.DanglingLink => return null,
-    };
+/// save would read it.
+pub fn digestNow(alloc: Allocator, path: []const u8) (ReadError || ResolveError)!Digest {
+    const target = try resolve(alloc, path);
     defer target.deinit(alloc);
-    const bytes = read(alloc, target.path) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        else => return null,
-    };
+    const bytes = try read(alloc, target.path);
     defer alloc.free(bytes);
     return digestOf(bytes);
 }
@@ -105,6 +111,10 @@ pub fn digestNow(alloc: Allocator, path: []const u8) Allocator.Error!?Digest {
 /// A test's stand-in for another program: run by `writeOver` just before it
 /// compares the file with what was read (SETTINGS-SAVE-TOCTOU).
 pub threadlocal var test_before_compare: if (@import("builtin").is_test) ?*const fn () void else void =
+    if (@import("builtin").is_test) null else {};
+
+/// The same, run by `read` between its first stat and the read.
+pub threadlocal var test_during_read: if (@import("builtin").is_test) ?*const fn () void else void =
     if (@import("builtin").is_test) null else {};
 
 /// Follow `path` to the file it names. A name with no file behind it is the
@@ -272,6 +282,8 @@ pub fn writeOver(alloc: Allocator, target: Target, bytes: []const u8, kept_copy:
         if (@import("builtin").is_test) if (test_before_compare) |hook| hook();
         const now = read(alloc, target.path) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
+            // Being written as it was read: changed.
+            error.Unstable => return error.Changed,
             else => return error.ReplaceFailed,
         };
         defer alloc.free(now);

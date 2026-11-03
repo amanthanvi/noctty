@@ -556,6 +556,9 @@ pub fn profileEdits(arena: Allocator, problems: []const origin.Index, original: 
 pub const Unread = struct {
     theme: bool,
     path: []const u8,
+    /// UTF-16 text that does not decode (`Config._undecodable_file`): the
+    /// file was skipped whole.
+    undecodable: bool = false,
 
     /// How the status line names it: "the theme file <path>" or "the
     /// included file <path>", no value.
@@ -576,15 +579,18 @@ pub threadlocal var test_config_load: if (@import("builtin").is_test) ?*const fn
     if (@import("builtin").is_test) null else {};
 
 /// What a save that wrote `edits` says of them after its reload (`reload`,
-/// in the app's light/dark state). A file the reload could not read whole
+/// in the app's light/dark state, and `loaded`, the reload as it was read:
+/// the switch drops the record of a file that did not decode). A file the reload could not read whole
 /// comes first, for any save, one of ordinary settings alone too: a field
 /// or a reset it missed is no override, so the save names that file
 /// (`.unread`) and nothing as overridden, and keeps the running settings.
 /// Otherwise the fields another layer overrides go to `masked`
 /// (`writeMasked`, after a separator when `after`), and the report is
 /// `.masked`, or `.held` when there are none.
-pub fn reloadReport(masked: *std.Io.Writer, edits: []const Edit, reload: *const Config, after: bool) std.Io.Writer.Error!union(enum) { held, masked, unread: Unread } {
-    if (unreadConfigFile(reload)) |unread| return .{ .unread = unread };
+pub fn reloadReport(masked: *std.Io.Writer, edits: []const Edit, reload: *const Config, loaded: *const Config, after: bool) std.Io.Writer.Error!union(enum) { held, masked, unread: Unread } {
+    for ([_]*const Config{ loaded, reload }) |reading| {
+        if (unreadConfigFile(reading)) |unread| return .{ .unread = unread };
+    }
     if (edits.len == 0) return .held;
     return if (try writeMasked(masked, edits, reload, after)) .masked else .held;
 }
@@ -599,6 +605,11 @@ pub fn reloadReport(masked: *std.Io.Writer, edits: []const Edit, reload: *const 
 /// is the loader's to report, as the disk check before a save lets them
 /// through (`settingsDiskVerdict`).
 pub fn unreadConfigFile(config: *const Config) ?Unread {
+    // Skipped whole: UTF-16 that does not decode. One predicate for the
+    // check before a save and the report after it, so they cannot drift.
+    // The light/dark switch does not carry the record over
+    // (`changeConditionalState`), so ask it of the load as read too.
+    if (config._undecodable_file) |path| return .{ .theme = false, .path = path, .undecodable = true };
     for (config._diagnostics.items()) |diag| {
         const message: []const u8 = diag.message;
         // A theme the load could not open (`themepkg.open`): the light/dark
@@ -661,13 +672,25 @@ fn namesProfile(value: []const u8, id: []const u8) bool {
 /// the one saved to, or the command line, sets it again.
 pub fn editHeld(edit: Edit, reloaded: *const Config) bool {
     if (edit.with_profile) return true;
-    const now: ?[]const u8 = switch (edit.field) {
-        .command => reloaded.@"profile-command".get(edit.id),
-        .name => reloaded.@"profile-name".get(edit.id),
-        .folder => reloaded.@"profile-working-directory".get(edit.id),
+    if (edit.field == .env and edit.name == null) return true;
+    const now = editValue(edit, reloaded);
+    return switch (edit.op) {
+        .set => |value| now != null and std.mem.eql(u8, now.?, value),
+        .unset, .delete => now == null,
+    };
+}
+
+/// The value `config` gives the field `edit` writes: the profile's command
+/// line, label or folder, or for `profile-env` the variable's value. Null
+/// when it gives none.
+fn editValue(edit: Edit, config: *const Config) ?[]const u8 {
+    return switch (edit.field) {
+        .command => config.@"profile-command".get(edit.id),
+        .name => config.@"profile-name".get(edit.id),
+        .folder => config.@"profile-working-directory".get(edit.id),
         .env => env: {
-            const name = edit.name orelse return true;
-            const map = reloaded.@"profile-env".get(edit.id) orelse break :env null;
+            const name = edit.name orelse break :env null;
+            const map = config.@"profile-env".get(edit.id) orelse break :env null;
             var it = map.iterator();
             while (it.next()) |kv| {
                 if (std.ascii.eqlIgnoreCase(kv.key_ptr.*, name)) break :env kv.value_ptr.*;
@@ -675,10 +698,39 @@ pub fn editHeld(edit: Edit, reloaded: *const Config) bool {
             break :env null;
         },
     };
-    return switch (edit.op) {
-        .set => |value| now != null and std.mem.eql(u8, now.?, value),
-        .unset, .delete => now == null,
-    };
+}
+
+/// Whether `a` and `b` give the field `edit` writes the same value. For
+/// `profile-env` with no variable (every variable of the profile), all of
+/// them.
+fn editEql(edit: Edit, a: *const Config, b: *const Config) bool {
+    if (edit.field == .env and edit.name == null) {
+        const left = a.@"profile-env".get(edit.id);
+        const right = b.@"profile-env".get(edit.id);
+        if (left == null or right == null) return left == null and right == null;
+        if (left.?.map.count() != right.?.map.count()) return false;
+        var it = left.?.map.iterator();
+        while (it.next()) |kv| {
+            const other = right.?.map.get(kv.key_ptr.*) orelse return false;
+            if (!std.mem.eql(u8, kv.value_ptr.*, other)) return false;
+        }
+        return true;
+    }
+    const left = editValue(edit, a);
+    const right = editValue(edit, b);
+    if (left == null or right == null) return left == null and right == null;
+    return std.mem.eql(u8, left.?, right.?);
+}
+
+/// The first of `edits` whose field `disk` gives a value that neither the
+/// draft's baseline (`original`) nor the draft (`pending`) gives: another
+/// program changed what the draft changes. There is no Keep mine / Use disk
+/// for a profile field, so a save that finds one stops (SETTINGS-SAVE-TOCTOU).
+pub fn changedUnder(edits: []const Edit, original: *const Config, pending: *const Config, disk: *const Config) ?Edit {
+    for (edits) |edit| {
+        if (!editEql(edit, disk, original) and !editEql(edit, disk, pending)) return edit;
+    }
+    return null;
 }
 
 /// How the save's status names an edit's field: its key, the profile id and,
@@ -1304,6 +1356,42 @@ test "settings patch: a theme the light/dark switch could not open is named, a m
     try check(alloc, tmp.dir, none, light, "Mine", mine);
 }
 
+test "settings patch: an include whose read failed is still named after the light/dark switch" {
+    const alloc = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(.{ .sub_path = "light", .data = "font-size = 13\n" });
+    try tmp.dir.writeFile(.{ .sub_path = "dark", .data = "font-size = 14\n" });
+    try tmp.dir.writeFile(.{ .sub_path = "more.conf", .data = "copy-on-select = true\n" });
+    try tmp.dir.writeFile(.{ .sub_path = "none.conf", .data = "\n" });
+    const light = try tmp.dir.realpathAlloc(alloc, "light");
+    defer alloc.free(light);
+    const dark = try tmp.dir.realpathAlloc(alloc, "dark");
+    defer alloc.free(dark);
+    const more = try tmp.dir.realpathAlloc(alloc, "more.conf");
+    defer alloc.free(more);
+    const none = try tmp.dir.realpathAlloc(alloc, "none.conf");
+    defer alloc.free(none);
+    const text = try std.fmt.allocPrint(alloc, "theme = light:{s},dark:{s}\nconfig-file = {s}\n", .{ light, dark, more });
+    defer alloc.free(text);
+    try tmp.dir.writeFile(.{ .sub_path = "config", .data = text });
+    const path = try tmp.dir.realpathAlloc(alloc, "config");
+    defer alloc.free(path);
+    // The include's bytes are locked while the layers are read.
+    var lock = try tmp.dir.openFile("more.conf", .{ .mode = .read_write, .lock = .exclusive });
+    var loaded = blk: {
+        defer lock.close();
+        break :blk try testLoad(alloc, none, path);
+    };
+    defer loaded.deinit();
+    try testing.expect(unreadConfigFile(&loaded) != null);
+    // The switch to dark replays the layers; the include is still named.
+    var switched = (try loaded.changeConditionalState(.{ .theme = .dark })) orelse return error.TestExpectedSwitch;
+    defer switched.deinit();
+    const unread = unreadConfigFile(&switched) orelse return error.TestExpectedUnread;
+    try expectSameText(more, unread.path);
+}
+
 test "settings patch: a reload that could not read a file whole reports the file, not an override" {
     const alloc = testing.allocator;
     const edits = [_]Edit{.{ .field = .name, .id = "py", .op = .{ .set = "Python" } }};
@@ -1316,7 +1404,7 @@ test "settings patch: a reload that could not read a file whole reports the file
     try reload.loadReader(alloc, &failing.interface, "C:\\noctty-test\\more.conf");
     var masked: std.Io.Writer.Allocating = .init(alloc);
     defer masked.deinit();
-    switch (try reloadReport(&masked.writer, &edits, &reload, false)) {
+    switch (try reloadReport(&masked.writer, &edits, &reload, &reload, false)) {
         .unread => |unread| {
             const text = try unread.describe(alloc);
             defer alloc.free(text);
@@ -1330,12 +1418,12 @@ test "settings patch: a reload that could not read a file whole reports the file
     defer whole.deinit();
     var reader: std.Io.Reader = .fixed("profile-command = py: python.exe\n");
     try whole.loadReader(alloc, &reader, "C:\\noctty-test\\more.conf");
-    try testing.expect(try reloadReport(&masked.writer, &edits, &whole, false) == .masked);
+    try testing.expect(try reloadReport(&masked.writer, &edits, &whole, &whole, false) == .masked);
     try expectSameText("profile-name py", masked.written());
     // A save of ordinary settings alone is told the same: it used to be
     // `.held`, and the partial reload was applied.
-    try testing.expect(try reloadReport(&masked.writer, &.{}, &reload, false) == .unread);
-    try testing.expect(try reloadReport(&masked.writer, &.{}, &whole, false) == .held);
+    try testing.expect(try reloadReport(&masked.writer, &.{}, &reload, &reload, false) == .unread);
+    try testing.expect(try reloadReport(&masked.writer, &.{}, &whole, &whole, false) == .held);
 }
 
 test "settings patch: a removal is decided in the light/dark state the app applies, so a profile only the dark theme defines keeps its tombstone" {

@@ -8643,8 +8643,19 @@ pub const App = struct {
             // is compared with what it held as they were read, unless the
             // check before the save read it first.
             if (profile_edits.len != 0) {
-                if (check.read_as == null) check.read_as = try save_target.digestNow(alloc, target_path);
-                profile_edits = try settingsProfileEditsFromDisk(profile_arena.allocator(), alloc, &self.settings_failure_detail, self.loadConfigAtStartupCwd(), &self.config, state, original, pending, target_path);
+                if (check.read_as == null) check.read_as = try self.settingsDigest(alloc, target_path);
+                var fresh = self.loadConfigAtStartupCwd();
+                // Checked again after another program edited the file: the
+                // profile fields the draft changes have no Keep mine / Use
+                // disk, so one it changed too stops the save; an edit to
+                // anything else is saved on top of, as an ordinary one is.
+                if (checked_again) if (fresh) |*reading| {
+                    self.settingsProfilesUnchanged(alloc, reading, state, original, pending, profile_edits) catch |err| {
+                        reading.deinit();
+                        return err;
+                    };
+                } else |_| {};
+                profile_edits = try settingsProfileEditsFromDisk(profile_arena.allocator(), alloc, &self.settings_failure_detail, fresh, &self.config, state, original, pending, target_path);
             }
             // No-op short-circuit: if the user pressed Save without
             // changing anything, don't touch the filesystem. On a
@@ -8711,7 +8722,7 @@ pub const App = struct {
         masked_text.writer.writeAll(settingsMaskedKeyNames(&masked_buf, user_edited, pending, applied)) catch return error.OutOfMemory;
         // A file the reload could not read whole: what it missed is no
         // override, and the save says that instead, naming the file.
-        const report = settings_patch.reloadReport(&masked_text.writer, profile_edits, applied, masked_text.written().len > 0) catch return error.OutOfMemory;
+        const report = settings_patch.reloadReport(&masked_text.writer, profile_edits, applied, &reloaded, masked_text.written().len > 0) catch return error.OutOfMemory;
         switch (report) {
             .unread => |unread| {
                 const text = unread.describe(alloc) catch return error.OutOfMemory;
@@ -8741,6 +8752,49 @@ pub const App = struct {
         // The reload read the file again, so what is wrong in it is news.
         _ = self.reportRecordedConfigProblems();
         if (masked.len > 0) return error.SavedButMasked;
+    }
+
+    /// What the file the save writes holds now (`save_target.digestNow`), for
+    /// the comparisons before the write. A read that fails stops the save:
+    /// without it, an edit another program made later would be written over
+    /// with nothing to compare (SETTINGS-SAVE-TOCTOU).
+    fn settingsDigest(self: *App, alloc: Allocator, target_path: []const u8) win32_settings.SaveError!save_target.Digest {
+        return save_target.digestNow(alloc, target_path) catch |err| switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+            error.DanglingLink => error.DanglingLink,
+            error.ReadFailed, error.TooLarge, error.Unstable => {
+                log.warn("settings save: could not read the config file to check it for edits err={}", .{err});
+                const text = std.fmt.allocPrint(alloc, "the config file {s}", .{target_path}) catch return error.OutOfMemory;
+                defer alloc.free(text);
+                self.settings_failure_detail.set(alloc, text);
+                return error.FileUnopenable;
+            },
+        };
+    }
+
+    /// `settingsSaveAndReload` checking the file again: whether another
+    /// program changed a profile field the draft changes (`edits`), read in
+    /// the app's light/dark state. One it did stops the save, naming the
+    /// field (its key, profile and variable; never a value).
+    fn settingsProfilesUnchanged(
+        self: *App,
+        alloc: Allocator,
+        reading: *const configpkg.Config,
+        state: configpkg.ConditionalState,
+        original: *const configpkg.Config,
+        pending: *const configpkg.Config,
+        edits: []const settings_patch.Edit,
+    ) win32_settings.SaveError!void {
+        var applied = reading.changeConditionalState(state) catch |err| return settingsProfileEditsFailed(err);
+        defer if (applied) |*value| value.deinit();
+        const now: *const configpkg.Config = if (applied) |*value| value else reading;
+        const edit = settings_patch.changedUnder(edits, original, pending, now) orelse return;
+        var name: std.Io.Writer.Allocating = .init(alloc);
+        defer name.deinit();
+        settings_patch.writeEditName(&name.writer, edit) catch return error.OutOfMemory;
+        self.settings_failure_detail.set(alloc, name.written());
+        log.warn("settings save: another program changed a profile field the draft changes; nothing saved", .{});
+        return error.ProfileChanged;
     }
 
     /// The profile edits a save makes, worked out against the config layers
@@ -9046,7 +9100,7 @@ pub const App = struct {
         const target_path = try self.settingsTargetPath(alloc);
         defer alloc.free(target_path);
         try settingsFileOpenable(alloc, &self.settings_failure_detail, "the config file", target_path);
-        const read_as = try save_target.digestNow(alloc, target_path);
+        const read_as = try self.settingsDigest(alloc, target_path);
         var disk = self.loadConfigAtStartupCwd() catch |err| {
             log.warn("settings save: could not read the config file to check it for edits err={}", .{err});
             return error.ReloadFailed;
@@ -9224,8 +9278,13 @@ pub const App = struct {
         /// A file the other program holds locked from then on.
         threadlocal var lock_path: []const u8 = "";
         threadlocal var lock: ?std.fs.File = null;
+        /// A lock taken while a read is under way (`lockDuringRead`), let go
+        /// before the next load.
+        threadlocal var brief_lock: ?std.fs.File = null;
 
         fn load(alloc: Allocator) anyerror!configpkg.Config {
+            if (brief_lock) |file| file.close();
+            brief_lock = null;
             var cfg = try configpkg.Config.default(alloc);
             errdefer cfg.deinit();
             for (files) |file| try cfg.loadFile(alloc, file);
@@ -9245,6 +9304,11 @@ pub const App = struct {
             if (lock_path.len != 0) lock = std.fs.openFileAbsolute(lock_path, .{ .mode = .read_write, .lock = .exclusive }) catch null;
         }
 
+        fn lockDuringRead() void {
+            save_target.test_during_read = null;
+            brief_lock = std.fs.openFileAbsolute(lock_path, .{ .mode = .read_write, .lock = .exclusive }) catch null;
+        }
+
         fn begin(app: *App, target: []const u8) !void {
             errdefer end(app);
             settings_patch.test_config_load = load;
@@ -9259,7 +9323,10 @@ pub const App = struct {
             app.settings_failure_detail.clear(std.testing.allocator);
             app.settings_masked_keys.clear(std.testing.allocator);
             save_target.test_before_compare = null;
+            save_target.test_during_read = null;
             settings_patch.test_config_load = null;
+            if (brief_lock) |file| file.close();
+            brief_lock = null;
             files = &.{};
             hook_path = "";
             hook_text = "";
@@ -9354,6 +9421,184 @@ pub const App = struct {
         try std.testing.expectEqualStrings("font-size = 15\ncopy-on-select = true\n", after);
         try std.testing.expectEqual(@as(f32, 15), app.config.@"font-size");
         try std.testing.expect(app.config.@"copy-on-select" == .true);
+    }
+
+    test "win32 settings save checking the file again stops on a profile field another program changed, and saves over one it did not" {
+        if (builtin.os.tag != .windows) return error.SkipZigTest;
+        const alloc = std.testing.allocator;
+        var core_app: CoreApp = undefined;
+        var app: App = undefined;
+        var session: TestSession = .{};
+        try session.init(.{ .core_app = &core_app, .app = &app });
+        defer session.deinit();
+        defer testFreeConfigProblems(&app, alloc);
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        const raw = "font-size = 12\nprofile-command = py: python.exe\nprofile-command = node: node.exe\n";
+        try tmp.dir.writeFile(.{ .sub_path = "config", .data = raw });
+        const path = try tmp.dir.realpathAlloc(alloc, "config");
+        defer alloc.free(path);
+        SaveTest.files = &.{path};
+        try SaveTest.begin(&app, path);
+        defer SaveTest.end(&app);
+        const Case = struct { other: []const u8, refused: bool };
+        for ([_]Case{
+            // The same profile's command: refused.
+            .{ .other = "font-size = 12\nprofile-command = py: python.exe -O\nprofile-command = node: node.exe\n", .refused = true },
+            // Another profile's: saved over, the other edit kept.
+            .{ .other = "font-size = 12\nprofile-command = py: python.exe\nprofile-command = node: node.exe --inspect\n", .refused = false },
+        }) |case| {
+            try tmp.dir.writeFile(.{ .sub_path = "config", .data = raw });
+            {
+                var loaded = try SaveTest.load(alloc);
+                defer loaded.deinit();
+                try app.core_app.updateConfig(&app, &loaded);
+            }
+            var original = try app.config.clone(alloc);
+            defer original.deinit();
+            var pending = try app.config.clone(alloc);
+            defer pending.deinit();
+            pending.@"font-size" = 15;
+            try pending.@"profile-command".parseCLI(pending._arena.?.allocator(), "py: python.exe -X");
+            try app.settingsReconcileDisk(&pending, &original, true);
+            // Another program writes the file as the save is about to put
+            // its bytes in place.
+            SaveTest.hook_path = path;
+            SaveTest.hook_text = case.other;
+            SaveTest.hook_append = false;
+            save_target.test_before_compare = SaveTest.hook;
+            if (case.refused) {
+                try std.testing.expectError(error.ProfileChanged, app.settingsSaveAndReload(&pending, &original));
+                const after = try SaveTest.read(path);
+                defer alloc.free(after);
+                try std.testing.expect(std.mem.eql(u8, case.other, after));
+                try std.testing.expect(std.mem.eql(u8, "profile-command py", app.settings_failure_detail.text orelse return error.TestExpectedDetail));
+            } else {
+                try app.settingsSaveAndReload(&pending, &original);
+                const after = try SaveTest.read(path);
+                defer alloc.free(after);
+                try std.testing.expect(std.mem.eql(u8, "font-size = 15\nprofile-command = py: python.exe -X\nprofile-command = node: node.exe --inspect\n", after));
+            }
+        }
+    }
+
+    test "win32 settings save stops when its check cannot read the file it compares" {
+        if (builtin.os.tag != .windows) return error.SkipZigTest;
+        const alloc = std.testing.allocator;
+        var core_app: CoreApp = undefined;
+        var app: App = undefined;
+        var session: TestSession = .{};
+        try session.init(.{ .core_app = &core_app, .app = &app });
+        defer session.deinit();
+        defer testFreeConfigProblems(&app, alloc);
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        try tmp.dir.writeFile(.{ .sub_path = "config", .data = "font-size = 12\n" });
+        const path = try tmp.dir.realpathAlloc(alloc, "config");
+        defer alloc.free(path);
+        SaveTest.files = &.{path};
+        try SaveTest.begin(&app, path);
+        defer SaveTest.end(&app);
+        var original = try app.config.clone(alloc);
+        defer original.deinit();
+        var pending = try app.config.clone(alloc);
+        defer pending.deinit();
+        pending.@"font-size" = 15;
+        // Another program locks the file's bytes while the check reads it,
+        // and lets go before the check's load: nothing to compare later.
+        SaveTest.lock_path = path;
+        save_target.test_during_read = SaveTest.lockDuringRead;
+        try std.testing.expectError(error.FileUnopenable, app.settingsReconcileDisk(&pending, &original, true));
+        const expected = try std.fmt.allocPrint(alloc, "the config file {s}", .{path});
+        defer alloc.free(expected);
+        try std.testing.expect(std.mem.eql(u8, expected, app.settings_failure_detail.text orelse return error.TestExpectedDetail));
+        // The check stopped before its load, which would have let go.
+        if (SaveTest.brief_lock) |file| file.close();
+        SaveTest.brief_lock = null;
+        const after = try SaveTest.read(path);
+        defer alloc.free(after);
+        try std.testing.expectEqualStrings("font-size = 12\n", after);
+    }
+
+    test "win32 settings save whose reload skips an include that no longer decodes keeps the running settings" {
+        if (builtin.os.tag != .windows) return error.SkipZigTest;
+        const alloc = std.testing.allocator;
+        var core_app: CoreApp = undefined;
+        var app: App = undefined;
+        var session: TestSession = .{};
+        try session.init(.{ .core_app = &core_app, .app = &app });
+        defer session.deinit();
+        defer testFreeConfigProblems(&app, alloc);
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        try tmp.dir.writeFile(.{ .sub_path = "more.conf", .data = "copy-on-select = true\n" });
+        const more = try tmp.dir.realpathAlloc(alloc, "more.conf");
+        defer alloc.free(more);
+        const text = try std.fmt.allocPrint(alloc, "font-size = 12\nconfig-file = {s}\n", .{more});
+        defer alloc.free(text);
+        try tmp.dir.writeFile(.{ .sub_path = "config", .data = text });
+        const path = try tmp.dir.realpathAlloc(alloc, "config");
+        defer alloc.free(path);
+        SaveTest.files = &.{path};
+        try SaveTest.begin(&app, path);
+        defer SaveTest.end(&app);
+        var original = try app.config.clone(alloc);
+        defer original.deinit();
+        var pending = try app.config.clone(alloc);
+        defer pending.deinit();
+        pending.@"font-size" = 15;
+        try app.settingsReconcileDisk(&pending, &original, true);
+        // Another program rewrites the include as UTF-16 that does not
+        // decode, after the check: the reload skips it whole.
+        SaveTest.hook_path = more;
+        SaveTest.hook_text = "\xff\xfe\x00\xd8a\x00";
+        save_target.test_before_compare = SaveTest.hook;
+        try std.testing.expectError(error.SavedButUnread, app.settingsSaveAndReload(&pending, &original));
+        try std.testing.expectEqual(@as(f32, 12), app.config.@"font-size");
+        try std.testing.expect(app.config.@"copy-on-select" == .true);
+        const expected = try std.fmt.allocPrint(alloc, "the included file {s}", .{more});
+        defer alloc.free(expected);
+        try std.testing.expect(std.mem.eql(u8, expected, app.settings_failure_detail.text orelse return error.TestExpectedDetail));
+    }
+
+    test "win32 palette theme pick whose reload reads a file only partly says so and keeps the running settings" {
+        if (builtin.os.tag != .windows) return error.SkipZigTest;
+        const alloc = std.testing.allocator;
+        var core_app: CoreApp = undefined;
+        var app: App = undefined;
+        var host: Host = undefined;
+        var session: TestSession = .{};
+        try session.init(.{ .core_app = &core_app, .app = &app, .hosts = &.{.{ .storage = &host }} });
+        defer session.deinit();
+        defer testFreeConfigProblems(&app, alloc);
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        try tmp.dir.writeFile(.{ .sub_path = "more.conf", .data = "copy-on-select = true\n" });
+        try tmp.dir.writeFile(.{ .sub_path = "picked", .data = "font-size = 20\n" });
+        const more = try tmp.dir.realpathAlloc(alloc, "more.conf");
+        defer alloc.free(more);
+        const picked = try tmp.dir.realpathAlloc(alloc, "picked");
+        defer alloc.free(picked);
+        const text = try std.fmt.allocPrint(alloc, "font-size = 12\nconfig-file = {s}\n", .{more});
+        defer alloc.free(text);
+        try tmp.dir.writeFile(.{ .sub_path = "config", .data = text });
+        const path = try tmp.dir.realpathAlloc(alloc, "config");
+        defer alloc.free(path);
+        SaveTest.files = &.{path};
+        try SaveTest.begin(&app, path);
+        defer SaveTest.end(&app);
+        // Another program locks the include's bytes once the pick's check is
+        // done: the save's reload reads part of it.
+        SaveTest.lock_path = more;
+        save_target.test_before_compare = SaveTest.hook;
+        try host.commitPaletteTheme(picked);
+        // Saved,
+        const after = try SaveTest.read(path);
+        defer alloc.free(after);
+        try std.testing.expect(std.mem.indexOf(u8, after, picked) != null);
+        // the running settings kept, and the window says why.
+        try std.testing.expect(app.config.@"copy-on-select" == .true);
+        try std.testing.expectEqualStrings("Theme saved, but a config file could not be read whole. Reload the configuration once it can be read.", host.banner_text orelse return error.TestExpectedBanner);
     }
 
     test "win32 settings save whose reload reads a file only partly keeps the running settings and names the file" {
