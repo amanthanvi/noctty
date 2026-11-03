@@ -6,7 +6,6 @@ const CoreSurface = @import("../../Surface.zig");
 const Allocator = std.mem.Allocator;
 const Host = win32.Host;
 const Surface = win32.Surface;
-const Tab = win32.Tab;
 const HWND = win32.HWND;
 const POINT = win32.POINT;
 const RECT = win32.RECT;
