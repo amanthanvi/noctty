@@ -2461,6 +2461,9 @@ pub const Host = struct {
         // applied only partly.
         const saved_not_applied = std.meta.activeTag(save_outcome) == .completed_not_applied;
         const saved_partly_applied = std.meta.activeTag(save_outcome) == .completed_partly_applied;
+        // A later layer masks the pick as well: a reload does not apply it
+        // either (the App's masked keys, set before it applied the reload).
+        const partly_masked = saved_partly_applied and self.app.settings_masked_keys.text != null;
 
         if (self.palette_list_uia_provider) |provider| {
             win32_uia.events.raiseNotification(
@@ -2472,6 +2475,8 @@ pub const Host = struct {
                     "Theme saved; a config file could not be read whole"
                 else if (saved_not_applied)
                     "Theme saved; the saved settings could not be applied"
+                else if (saved_partly_applied and partly_masked)
+                    "Theme saved; the saved settings may be only partly applied, and a later config layer masks the theme"
                 else if (saved_partly_applied)
                     "Theme saved; the saved settings may be only partly applied"
                 else if (self.app.safe_mode)
@@ -2512,7 +2517,10 @@ pub const Host = struct {
             log.warn("palette theme saved, but applying the reload failed partway theme={s}", .{theme_name});
             runUiActionOrLog(
                 "palette partly applied theme banner failed",
-                self.setBanner(.err, "Theme saved, but the saved settings may be only partly applied. Reload the configuration to apply all of them."),
+                self.setBanner(.err, if (partly_masked)
+                    "Theme saved, but the saved settings may be only partly applied, and a later config layer masks the theme, so a reload does not apply it."
+                else
+                    "Theme saved, but the saved settings may be only partly applied. Reload the configuration to apply all of them."),
             );
         }
         self.layout() catch |err| {

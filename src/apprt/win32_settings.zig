@@ -167,6 +167,10 @@ const validation_quiet_ms: UINT = 400;
 /// count is announced (`SettingsWindow.armSearchAnnounce`): a count for every
 /// letter typed would queue up behind the letters a reader echoes.
 const search_announce_timer_id: usize = 2;
+/// What the window could not take in for want of memory (`owes_draft`,
+/// `owes_external`) is tried again this often, until it is.
+const refresh_timer_id: usize = 3;
+const refresh_retry_ms: u32 = 500;
 const search_announce_quiet_ms: UINT = 500;
 const WM_SETICON: UINT = 0x0080;
 /// `WM_ACTIVATE` low word: the window is being deactivated.
@@ -999,7 +1003,7 @@ const StatusNote = enum {
     /// file, or for a save that a later layer overrides, the settings.
     fn takesDetail(self: StatusNote) bool {
         return switch (self) {
-            .file_unopenable, .write_incomplete, .unsupported_encoding, .binary_config, .saved_overridden, .saved_unread, .profile_changed => true,
+            .file_unopenable, .write_incomplete, .unsupported_encoding, .binary_config, .saved_overridden, .saved_unread, .saved_partly_applied, .profile_changed => true,
             .field_reset, .already_default, .reset_failed => true,
             .key_copied, .key_copy_failed => true,
             .profile_said, .profile_hint, .profile_refused => true,
@@ -1013,6 +1017,9 @@ const StatusNote = enum {
         return switch (self) {
             .saved_overridden => std.fmt.allocPrint(alloc, "Saved, but a later config file or command-line option overrides {s}, so the saved value is not used.", .{detail}),
             .saved_unread => std.fmt.allocPrint(alloc, "Saved, but {s} could not be read whole, so the running settings are unchanged. Reload the configuration once it can be read to use the saved values.", .{detail}),
+            // What a reload cannot apply either: the settings a later layer
+            // overrides.
+            .saved_partly_applied => std.fmt.allocPrint(alloc, "Saved, but the saved settings may be only partly applied. Reload the configuration to apply them; a later config file or command-line option overrides {s}, so the saved value is not used.", .{detail}),
             .unsupported_encoding => std.fmt.allocPrint(alloc, "Nothing was saved: {s} is not readable as UTF-8 text (Windows PowerShell 5.1 writes UTF-16). Save it as UTF-8 in an editor, then save again. Your edits are kept.", .{detail}),
             .binary_config => std.fmt.allocPrint(alloc, "Nothing was saved: {s} contains NUL bytes, so it is a binary file or text in UTF-16 or UTF-32. Save it as UTF-8 in an editor, then save again. Your edits are kept.", .{detail}),
             .file_unopenable => std.fmt.allocPrint(alloc, "Nothing was saved: {s} cannot be opened. Close any program that has it open, or check its permissions, then save again. Your edits are kept.", .{detail}),
@@ -2392,6 +2399,14 @@ pub const SettingsWindow = struct {
     /// The field of the Profiles page being typed into, while one is
     /// (`beginProfileEdit`).
     profile_edit: ?ProfileEdit = null,
+    /// A save completed and the window could not copy the running settings
+    /// to start its draft over (no memory): the draft went, so nothing looks
+    /// unsaved, and `retryRefresh` starts it over once it can.
+    owes_draft: bool = false,
+    /// The running settings changed (`externalConfigChanged`, this revision)
+    /// and the window could not copy them (no memory): `retryRefresh` takes
+    /// them in once it can.
+    owes_external: ?u64 = null,
     /// The profile row whose removal the first Delete asked to confirm
     /// (`Row.identity`).
     profile_remove_armed: ?u64 = null,
@@ -2869,6 +2884,9 @@ pub const SettingsWindow = struct {
     /// reloaded) app config.
     fn clearPending(self: *SettingsWindow) void {
         self.rollbackPreviews();
+        self.owes_draft = false;
+        self.owes_external = null;
+        self.killRefreshTimer();
         self.transaction = null;
         self.validation_control = null;
         self.owned_validation_control = null;
@@ -3072,8 +3090,8 @@ pub const SettingsWindow = struct {
     fn idleStatusText(self: *const SettingsWindow) []const u8 {
         switch (self.status_note) {
             // A save's result stays up whatever the draft looks like now.
-            .saved, .saved_not_applied, .saved_partly_applied, .discarded, .editor_open_failed => return self.status_note.text(),
-            .saved_overridden, .saved_unread, .already_default, .reset_failed, .key_copied, .key_copy_failed => return self.noteText(),
+            .saved, .saved_not_applied, .discarded, .editor_open_failed => return self.status_note.text(),
+            .saved_overridden, .saved_unread, .saved_partly_applied, .already_default, .reset_failed, .key_copied, .key_copy_failed => return self.noteText(),
             .profile_said, .profile_hint, .profile_refused => return self.noteText(),
             // These are about edits that are still there to be saved.
             .field_reset,
@@ -3967,9 +3985,13 @@ pub const SettingsWindow = struct {
             if (self.owned_text_changed[@intFromEnum(field)]) self.syncOwnedControl(field);
         }
         var replacement = config.clone(self.handle.alloc) catch |err| {
+            // Taken in once it can be (`retryRefresh`), rather than never.
             std.log.warn("settings: external config snapshot failed revision={d} err={}", .{ revision, err });
+            self.owes_external = @max(revision, self.owes_external orelse 0);
+            self.armRefreshTimer();
             return;
         };
+        self.owes_external = null;
         var replacement_owned = true;
         defer if (replacement_owned) replacement.deinit();
         pane_launch.asWritten(&replacement);
@@ -6762,7 +6784,7 @@ pub const SettingsWindow = struct {
     /// How a save that wrote the file ended (`saveReloadOutcome`).
     const SavedHow = enum { clean, masked, unread, not_applied, partly_applied };
 
-    fn finishSuccessfulSave(self: *SettingsWindow, how: SavedHow) void {
+    fn finishSuccessfulSave(self: *SettingsWindow, how: SavedHow, copies: ?Adoption) void {
         const masked = how == .masked;
         const should_close = self.close_after_save;
         // Before anything repaints the status: the note outlives the reset.
@@ -6776,30 +6798,40 @@ pub const SettingsWindow = struct {
         };
         // The settings the save wrote that something later overrides, by the
         // names a config file knows them by, and where the value that wins
-        // is set, read from the config the save reloaded.
-        const masked_keys: ?[]const u8 = if (masked)
+        // is set, read from the config the save reloaded. A partly applied
+        // save names them too: a reload does not apply them either.
+        const masked_keys: ?[]const u8 = if (masked or how == .partly_applied)
             if (self.handle.maskedKeys) |lend| lend(self.handle.ctx) else null
         else
             null;
-        const adopted = if (self.adoptCurrentConfig()) |_| true else |err| failed: {
-            std.log.err("settings: failed to refresh saved config snapshot err={}", .{err});
-            break :failed false;
+        // The draft starts over from the running settings (`copies`, taken
+        // before the save was marked done). Without them (no memory) it goes,
+        // so nothing looks unsaved, and the window takes the running settings
+        // in once it can (`owes_draft`). The fields keep showing what was
+        // just saved until then.
+        const adopted = if (copies) |taken| adopted: {
+            self.adoptCopies(taken);
+            break :adopted true;
+        } else owed: {
+            std.log.warn("settings: the saved settings could not be copied for the window; it tries again", .{});
+            self.cancelProfileEdit();
+            self.clearPending();
+            self.owes_draft = true;
+            self.armRefreshTimer();
+            break :owed false;
         };
         var masked_detail: ?[]u8 = null;
         defer if (masked_detail) |detail| self.handle.alloc.free(detail);
         if (masked_keys) |keys| {
             masked_detail = if (adopted) self.maskedDetail(keys) catch null else null;
-            self.note_text = StatusNote.saved_overridden.textWithDetail(self.handle.alloc, masked_detail orelse keys) catch null;
+            const note: StatusNote = if (masked) .saved_overridden else .saved_partly_applied;
+            self.note_text = note.textWithDetail(self.handle.alloc, masked_detail orelse keys) catch null;
         }
         // The file the reload could not read whole, as the App names it.
         if (how == .unread) if (self.handle.failureDetail) |lend| if (lend(self.handle.ctx)) |file| {
             self.note_text = StatusNote.saved_unread.textWithDetail(self.handle.alloc, file) catch null;
         };
-        if (!adopted) {
-            if (should_close) self.cancelClosePrompt();
-            return;
-        }
-        self.refreshAllControls();
+        if (adopted) self.refreshAllControls();
         self.updateSaveEnabled();
         if (masked) {
             var body_buf: [1024]u8 = undefined;
@@ -6874,23 +6906,40 @@ pub const SettingsWindow = struct {
 
     fn completeSynchronousSave(self: *SettingsWindow, apply_id: ?ApplyId, how: SavedHow) void {
         const revision = self.nextSuccessfulRevision();
+        // The copies the draft starts over from, taken before the save is
+        // marked done: a window that cannot take them must not keep a draft
+        // that looks unsaved once it is (`finishSuccessfulSave`).
+        var copies: ?Adoption = self.copiesOf(self.handle.currentConfig(self.handle.ctx)) catch null;
         if (apply_id) |id| {
-            if (!self.succeedApply(id, revision)) return;
+            if (!self.succeedApply(id, revision)) {
+                if (copies) |*taken| taken.deinit();
+                return;
+            }
         }
-        self.finishSuccessfulSave(how);
+        self.finishSuccessfulSave(how, copies);
     }
 
     fn adoptCurrentConfig(self: *SettingsWindow) !void {
         return self.adoptConfig(self.handle.currentConfig(self.handle.ctx));
     }
 
-    /// Start the draft over from `current`. Nothing is touched until every copy
-    /// is made, so a failure leaves the draft, its tracking and its previews as
-    /// they were. `current` may be this window's own snapshot, which is freed
-    /// only after the copies exist.
-    fn adoptConfig(self: *SettingsWindow, current: *const Config) !void {
-        // The draft starts over, and a profile field being typed into with it.
-        self.cancelProfileEdit();
+    /// The three copies a draft starts over from (`adoptCopies`).
+    const Adoption = struct {
+        original: Config,
+        current: Config,
+        pending: Config,
+
+        fn deinit(self: *Adoption) void {
+            self.original.deinit();
+            self.current.deinit();
+            self.pending.deinit();
+        }
+    };
+
+    /// `current`, copied for a draft to start over from. Nothing of the
+    /// window is touched, so a failure (no memory) leaves the draft, its
+    /// tracking and its previews as they were.
+    fn copiesOf(self: *const SettingsWindow, current: *const Config) !Adoption {
         var original = try current.clone(self.handle.alloc);
         errdefer original.deinit();
         var current_snapshot = try current.clone(self.handle.alloc);
@@ -6898,13 +6947,56 @@ pub const SettingsWindow = struct {
         var pending = try current.clone(self.handle.alloc);
         errdefer pending.deinit();
         for ([_]*Config{ &original, &current_snapshot, &pending }) |copy| pane_launch.asWritten(copy);
+        return .{ .original = original, .current = current_snapshot, .pending = pending };
+    }
 
+    /// Start the draft over from `copies`, which it takes: the draft, and a
+    /// profile field being typed into with it, go.
+    fn adoptCopies(self: *SettingsWindow, copies: Adoption) void {
+        self.cancelProfileEdit();
         self.clearPending();
-        self.original = original;
-        self.current = current_snapshot;
-        self.pending = pending;
+        self.original = copies.original;
+        self.current = copies.current;
+        self.pending = copies.pending;
         self.initTransaction();
         self.referenceConfigChanged();
+    }
+
+    /// Start the draft over from `current`. Nothing is touched until every copy
+    /// is made, so a failure leaves the draft, its tracking and its previews as
+    /// they were. `current` may be this window's own snapshot, which is freed
+    /// only after the copies exist.
+    fn adoptConfig(self: *SettingsWindow, current: *const Config) !void {
+        self.adoptCopies(try self.copiesOf(current));
+    }
+
+    /// Take in what the window owes (`owes_draft`, `owes_external`), now
+    /// that it may have the memory: the timer's tick (`refresh_timer_id`).
+    /// Whatever it still cannot take keeps the timer going.
+    fn retryRefresh(self: *SettingsWindow) void {
+        if (self.owes_draft) {
+            const copies = self.copiesOf(self.handle.currentConfig(self.handle.ctx)) catch return;
+            // `adoptCopies` clears what was owed, and the timer.
+            self.adoptCopies(copies);
+            self.refreshAllControls();
+            self.updateSaveEnabled();
+            return;
+        }
+        if (self.owes_external) |revision| {
+            const latest = if (self.handle.configRevision) |get| @max(revision, get(self.handle.ctx)) else revision;
+            self.externalConfigChanged(self.handle.currentConfig(self.handle.ctx), latest);
+        }
+        if (!self.owes_draft and self.owes_external == null) self.killRefreshTimer();
+    }
+
+    fn armRefreshTimer(self: *SettingsWindow) void {
+        const hwnd = self.hwnd orelse return;
+        _ = sys.SetTimer(hwnd, refresh_timer_id, refresh_retry_ms, null);
+    }
+
+    fn killRefreshTimer(self: *SettingsWindow) void {
+        const hwnd = self.hwnd orelse return;
+        _ = sys.KillTimer(hwnd, refresh_timer_id);
     }
 
     /// The section and the native control that own `field`.
@@ -10986,6 +11078,12 @@ test "settings a save whose reload is applied only partly says it saved and may 
             const settings = &fixture.settings;
             fixture.live_previews = true;
             typeInto(settings.fields.edit_bg_opacity orelse return error.TestExpectedField, "0.5");
+            // A value the save changes, and the part of the reload that takes.
+            _ = sys.SendMessageW(settings.fields.combo_cursor_style orelse return error.TestExpectedField, CB_SETCURSEL, 2, 0);
+            settings.syncCombo(.cursor_style);
+            const chosen = (settings.pending orelse return error.TestExpectedDraft).@"cursor-style";
+            const before = (settings.original orelse return error.TestExpectedDraft).@"cursor-style";
+            try std.testing.expect(chosen != before);
             const previews = fixture.previews;
 
             // The file is written, and applying its reload fails partway.
@@ -10997,10 +11095,107 @@ test "settings a save whose reload is applied only partly says it saved and may 
             try std.testing.expect(!settings.hasPendingChanges());
             try std.testing.expectEqual(previews, fixture.previews);
             try std.testing.expectEqual(@as(f64, 1), fixture.config.@"background-opacity");
+            // What runs now, the cursor style the reload applied among it, is
+            // the draft's baseline and the draft.
+            try std.testing.expect(fixture.config.@"cursor-style" == chosen);
+            try std.testing.expect((settings.original orelse return error.TestExpectedDraft).@"cursor-style" == chosen);
+            try std.testing.expect((settings.pending orelse return error.TestExpectedDraft).@"cursor-style" == chosen);
             // The status does not say the running settings are unchanged.
             try std.testing.expectEqual(StatusNote.saved_partly_applied, settings.status_note);
             var buf: [512]u8 = undefined;
             try std.testing.expectEqualStrings(StatusNote.saved_partly_applied.text(), try statusTextOf(settings, &buf));
+        }
+    }.body);
+}
+
+test "settings a partly applied save names the settings a later layer overrides, which a reload does not apply" {
+    try dialog_test.onHiddenDesktop(struct {
+        fn body() !void {
+            const fixture = try dialog_test.Fixture.start();
+            defer fixture.finish();
+            const settings = &fixture.settings;
+            typeInto(settings.fields.edit_font_size orelse return error.TestExpectedField, "16");
+            // Applying the reload fails partway, and a later layer overrides
+            // the saved font size (the App's masked keys).
+            fixture.partly_applied = true;
+            const keys = "font-size";
+            @memcpy(fixture.masked[0..keys.len], keys);
+            fixture.masked_len = keys.len;
+            settings.save();
+            try std.testing.expectEqual(StatusNote.saved_partly_applied, settings.status_note);
+            var buf: [512]u8 = undefined;
+            try std.testing.expectEqualStrings("Saved, but the saved settings may be only partly applied. Reload the configuration to apply them; a later config file or command-line option overrides font-size, so the saved value is not used.", try statusTextOf(settings, &buf));
+        }
+    }.body);
+}
+
+test "settings a save whose saved settings the window cannot copy clears the draft, and takes them in once it can" {
+    try dialog_test.onHiddenDesktop(struct {
+        fn body() !void {
+            const fixture = try dialog_test.Fixture.start();
+            defer fixture.finish();
+            const settings = &fixture.settings;
+            typeInto(settings.fields.edit_font_size orelse return error.TestExpectedField, "16");
+            try std.testing.expect(settings.hasPendingChanges());
+            // The window's allocator runs out as the save completes: it
+            // cannot copy the running settings to start the draft over.
+            var failing = std.testing.FailingAllocator.init(settings.handle.alloc, .{});
+            const real = settings.handle.alloc;
+            settings.handle.alloc = failing.allocator();
+            defer settings.handle.alloc = real;
+            fixture.starve_after_save = &failing;
+            defer fixture.starve_after_save = null;
+            settings.save();
+            try std.testing.expectEqual(@as(u32, 1), fixture.saved);
+            // The save is done, and says so; the draft went with the copies,
+            // so nothing looks unsaved.
+            try std.testing.expectEqual(StatusNote.saved, settings.status_note);
+            try std.testing.expect(!settings.hasPendingChanges());
+            try std.testing.expect(settings.owes_draft);
+            // It tries again.
+            const hwnd = settings.hwnd orelse return error.TestExpectedWindow;
+            try std.testing.expect(sys.KillTimer(hwnd, refresh_timer_id) != 0);
+            // Once it has the memory, the draft starts over from the running
+            // settings.
+            failing.fail_index = std.math.maxInt(usize);
+            settings.retryRefresh();
+            try std.testing.expect(!settings.owes_draft);
+            const draft = settings.pending orelse return error.TestExpectedDraft;
+            try std.testing.expectEqual(fixture.config.@"font-size", draft.@"font-size");
+            try std.testing.expect(!settings.hasPendingChanges());
+        }
+    }.body);
+}
+
+test "settings a running settings change the window cannot copy is taken in once it can" {
+    try dialog_test.onHiddenDesktop(struct {
+        fn body() !void {
+            const fixture = try dialog_test.Fixture.start();
+            defer fixture.finish();
+            const settings = &fixture.settings;
+            const before = (settings.current orelse return error.TestExpectedSnapshot).@"font-size";
+            // The running settings change, and the window's allocator has no
+            // memory for its copy of them.
+            fixture.config.@"font-size" = before + 8;
+            var failing = std.testing.FailingAllocator.init(settings.handle.alloc, .{ .fail_index = 0 });
+            const real = settings.handle.alloc;
+            settings.handle.alloc = failing.allocator();
+            defer settings.handle.alloc = real;
+            settings.externalConfigChanged(&fixture.config, 5);
+            // Not taken in yet, and owed.
+            try std.testing.expectEqual(@as(?u64, 5), settings.owes_external);
+            try std.testing.expectEqual(before, (settings.current orelse return error.TestExpectedSnapshot).@"font-size");
+            const hwnd = settings.hwnd orelse return error.TestExpectedWindow;
+            try std.testing.expect(sys.KillTimer(hwnd, refresh_timer_id) != 0);
+            // Once it has the memory, taken in, and shown.
+            failing.fail_index = std.math.maxInt(usize);
+            settings.retryRefresh();
+            try std.testing.expectEqual(@as(?u64, null), settings.owes_external);
+            try std.testing.expectEqual(before + 8, (settings.current orelse return error.TestExpectedSnapshot).@"font-size");
+            var text_buf: [32]u8 = undefined;
+            const shown = readEditUtf8(settings.fields.edit_font_size orelse return error.TestExpectedField, &text_buf) orelse return error.TestExpectedText;
+            var expected_buf: [32]u8 = undefined;
+            try std.testing.expectEqualStrings(try std.fmt.bufPrint(&expected_buf, "{d}", .{before + 8}), shown);
         }
     }.body);
 }
@@ -13059,6 +13254,9 @@ const dialog_test = struct {
         /// The save writes, and applying its reload fails partway
         /// (`SaveError.SavedPartlyApplied`).
         partly_applied: bool = false,
+        /// The window's allocator (`handle.alloc`), which runs out of memory
+        /// as the save completes (`saveAndReload`).
+        starve_after_save: ?*std.testing.FailingAllocator = null,
         /// What the window's High Contrast probe answers.
         high_contrast: bool = false,
         /// A save writes this config file the way the App's does
@@ -13252,6 +13450,8 @@ const dialog_test = struct {
         fn saveAndReload(ctx: *anyopaque, pending: *const Config, original: *const Config) SaveError!void {
             const self: *Fixture = @ptrCast(@alignCast(ctx));
             self.saved += 1;
+            // The window's allocator runs out once the save is done.
+            if (self.starve_after_save) |failing| failing.fail_index = failing.alloc_index;
             if (self.save_path) |path| {
                 const app = @import("win32.zig");
                 const settings_patch = @import("win32/settings_patch.zig");
@@ -20073,6 +20273,7 @@ fn wndProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.wina
             switch (wParam) {
                 validation_timer_id => if (owner) |o| o.validationQuietElapsed(),
                 search_announce_timer_id => if (owner) |o| o.searchAnnounceElapsed(),
+                refresh_timer_id => if (owner) |o| o.retryRefresh(),
                 else => return sys.DefWindowProcW(hwnd, msg, wParam, lParam),
             }
             return 0;
