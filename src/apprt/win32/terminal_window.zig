@@ -3829,11 +3829,17 @@ pub const Surface = struct {
     }
 
     /// The pane half of a config change; its window takes the rest
-    /// (`window_state.applyConfig`).
+    /// (`window_state.applyConfig`). `takeRuntimeConfig` stores it, which
+    /// cannot fail, and `refreshScrollbarWindow` carries it out, which can, so
+    /// a config change stores every value before the first fallible step.
     pub fn applyRuntimeConfig(self: *Surface, config: *const configpkg.Config) !void {
+        self.takeRuntimeConfig(config);
+        try self.refreshScrollbarWindow();
+    }
+
+    pub fn takeRuntimeConfig(self: *Surface, config: *const configpkg.Config) void {
         self.applyBellFeatures(config.@"bell-features");
         self.scrollbar_config = config.scrollbar;
-        try self.refreshScrollbarWindow();
     }
 
     /// Take `color`, from this terminal's own config (its `config_change`),

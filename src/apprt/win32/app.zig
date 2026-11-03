@@ -3998,13 +3998,13 @@ pub const App = struct {
                         }
                         self.scheduleGlobalHotkeySync();
                         self.reconfigureTheme();
-                        // The windows first, as each pane's config change put
-                        // its window's decorations and opacity before its own
-                        // fallible scrollbar refresh.
+                        // Every value is stored before the first step that
+                        // can fail, and the windows' decorations and opacity
+                        // go before the panes' scrollbar refresh, as each
+                        // pane's config change once ordered them.
+                        for (self.registry.windows.items) |surface| surface.takeRuntimeConfig(&self.config);
                         for (self.registry.hosts.items) |host| try window_state.applyConfig(host, &self.config);
-                        for (self.registry.windows.items) |surface| {
-                            try surface.applyRuntimeConfig(&self.config);
-                        }
+                        for (self.registry.windows.items) |surface| try surface.refreshScrollbarWindow();
                         // A reload that turns automatic checks on in a process
                         // that started with them off (or on another channel).
                         if (self.registry.windows.items.len > 0 and self.update_startup_ready) self.maybeScheduleAutomaticUpdateCheck();
@@ -4018,12 +4018,13 @@ pub const App = struct {
                     },
                     .surface => |core_surface| {
                         const surface = self.registry.findSurfaceByCore(core_surface) orelse return false;
-                        // The window takes a pane's config only from the pane
-                        // it shows, before the pane's fallible scrollbar
-                        // refresh.
-                        if (surface.host) |host| if (host.activeSurface() == surface) try window_state.applyConfig(host, value.config);
-                        try surface.applyRuntimeConfig(value.config);
+                        // The pane stores its config first; the window takes
+                        // a pane's config only from the pane it shows, before
+                        // the pane's fallible scrollbar refresh.
+                        surface.takeRuntimeConfig(value.config);
                         surface.setTabBackground(value.config.background);
+                        if (surface.host) |host| if (host.activeSurface() == surface) try window_state.applyConfig(host, value.config);
+                        try surface.refreshScrollbarWindow();
                     },
                 }
                 return true;
