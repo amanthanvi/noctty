@@ -2864,20 +2864,47 @@ pub const TestingKeyboard = struct {
 /// keeps it out of the shell's input switcher, a layout the session did not
 /// already have is unloaded again, and the thread's previous layout and key
 /// state are restored.
+///
+/// Windows keeps a latched dead key per layout, shared by every thread and
+/// process that translates with it, not per thread. Measured on one desktop:
+/// another process translating a key on US-International between a dead key
+/// and `e` takes the accent, and `e` comes out bare; one on US or German, or
+/// passing `TO_UNICODE_NO_STATE_CHANGE`, does not. Two test suites running at
+/// once took each other's accents, so every test process loads, uses and
+/// unloads a layout while holding one mutex for the session.
 const TestingLayout = struct {
     hkl: usize,
     previous: usize,
     loaded_here: bool,
     key_state: [256]u8,
+    lock: windows.HANDLE,
 
-    fn activate(comptime klid: []const u8) ?TestingLayout {
+    const lock_name = std.unicode.utf8ToUtf16LeStringLiteral("Local\\noctty-tests-keyboard-layouts");
+    /// Each holder keeps the lock for a few milliseconds; a wait this long
+    /// means a holder is stuck.
+    const lock_timeout_ms = 60_000;
+
+    fn activate(comptime klid: []const u8) error{TestingLayoutLock}!?TestingLayout {
+        const lock = sys.CreateMutexW(null, 0, lock_name) orelse return error.TestingLayoutLock;
+        switch (windows.kernel32.WaitForSingleObject(lock, lock_timeout_ms)) {
+            // An abandoned lock is owned now; its holder exited mid-test.
+            windows.WAIT_OBJECT_0, windows.WAIT_ABANDONED => {},
+            else => {
+                windows.CloseHandle(lock);
+                return error.TestingLayoutLock;
+            },
+        }
+
         var before: [64]usize = undefined;
         const count = sys.GetKeyboardLayoutList(before.len, &before);
         const hkl = sys.LoadKeyboardLayoutW(
             std.unicode.utf8ToUtf16LeStringLiteral(klid),
             c.KLF_NOTELLSHELL,
         );
-        if (hkl == 0) return null;
+        if (hkl == 0) {
+            unlock(lock);
+            return null;
+        }
         const loaded_here = for (before[0..@intCast(@max(count, 0))]) |existing| {
             if (existing == hkl) break false;
         } else true;
@@ -2887,6 +2914,7 @@ const TestingLayout = struct {
             .previous = sys.GetKeyboardLayout(0),
             .loaded_here = loaded_here,
             .key_state = undefined,
+            .lock = lock,
         };
         if (sys.GetKeyboardState(&layout.key_state) == 0) layout.key_state = [_]u8{0} ** 256;
         if (sys.ActivateKeyboardLayout(hkl, 0) == 0 or sys.GetKeyboardLayout(0) != hkl) {
@@ -2900,6 +2928,12 @@ const TestingLayout = struct {
         _ = sys.SetKeyboardState(&self.key_state);
         _ = sys.ActivateKeyboardLayout(self.previous, 0);
         if (self.loaded_here) _ = sys.UnloadKeyboardLayout(self.hkl);
+        unlock(self.lock);
+    }
+
+    fn unlock(lock: windows.HANDLE) void {
+        _ = sys.ReleaseMutex(lock);
+        windows.CloseHandle(lock);
     }
 };
 
@@ -3254,7 +3288,7 @@ test "win32 input records on real layouts match the console host's records" {
     };
     var ran: usize = 0;
     inline for (layouts) |layout| {
-        if (TestingLayout.activate(layout.klid)) |active| {
+        if (try TestingLayout.activate(layout.klid)) |active| {
             defer active.deinit();
             ran += 1;
             for (layout.cases) |case| {
@@ -3310,7 +3344,7 @@ test "win32 dead keys on real layouts deliver every key exactly once" {
     };
     var ran: usize = 0;
     inline for (layouts) |layout| {
-        if (TestingLayout.activate(layout.klid)) |active| {
+        if (try TestingLayout.activate(layout.klid)) |active| {
             defer active.deinit();
             ran += 1;
 
@@ -3355,7 +3389,7 @@ test "win32 kitty report_all dead keys carry the composed text on the next key" 
     const hwnd = testingKeyWindow() orelse return error.SkipZigTest;
     defer _ = sys.DestroyWindow(hwnd);
 
-    const active = TestingLayout.activate("00020409") orelse return error.SkipZigTest;
+    const active = (try TestingLayout.activate("00020409")) orelse return error.SkipZigTest;
     defer active.deinit();
 
     const flags: @import("../../terminal/kitty/key.zig").Flags = .{
