@@ -5695,14 +5695,20 @@ fn settingsListReferences(
         for (refs[0..made]) |ref| ref.deinit(alloc);
         alloc.free(refs);
     }
+    // Each value is read once against the list.
+    const newest: windows_shell.NewestVisualStudio = .of(profiles);
+    var indexes: std.ArrayListUnmanaged(usize) = .empty;
+    defer indexes.deinit(alloc);
     for (values, refs) |value, *ref| {
         var keys: std.ArrayListUnmanaged([]const u8) = .empty;
         errdefer {
             for (keys.items) |key| alloc.free(key);
             keys.deinit(alloc);
         }
-        for (profiles) |profile| {
-            if (!windows_shell.referenceNames(profiles, value, profile)) continue;
+        indexes.clearRetainingCapacity();
+        try windows_shell.referenceNamedIndexes(alloc, profiles, value, newest, &indexes);
+        for (indexes.items) |index| {
+            const profile = profiles[index];
             const key = try alloc.dupe(u8, profile.key);
             keys.append(alloc, key) catch |err| {
                 alloc.free(key);

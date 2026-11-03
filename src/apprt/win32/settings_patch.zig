@@ -1015,7 +1015,12 @@ pub fn changedUnder(edits: []const Edit, original: *const Config, pending: *cons
         // gives it now. The removal's own command line is still checked.
         if (edit.with_profile) continue;
         if (edit.field.isList()) {
-            if (!listEql(edit.field, disk, original) and !listEql(edit.field, disk, pending)) return edit;
+            // A list the draft left as it was is written only because the
+            // other changed (both blocks or neither): what another layer
+            // gives it now, a dark theme's line in the app's state, is not
+            // the draft's to answer for. Its file's own lines are, below.
+            const touched = !listEql(edit.field, original, pending);
+            if (touched and !listEql(edit.field, disk, original) and !listEql(edit.field, disk, pending)) return edit;
             // The file's own lines for the list, which the save replaces:
             // another program's edit to them is written over even when a
             // later layer masks the list, so it stops the save too.
@@ -1351,6 +1356,56 @@ test "settings patch: an edit to the file's own list lines that a later file mas
         const stopped = changedUnder(&.{order}, &original, &pending, &disk, path, &testSamePath) orelse return error.TestExpectedChange;
         try testing.expect(stopped.field == .order);
     }
+}
+
+test "settings patch: an order-only save is not stopped by a dark theme's hidden list it leaves as it is" {
+    const alloc = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(.{ .sub_path = "none.conf", .data = "\n" });
+    try tmp.dir.writeFile(.{ .sub_path = "light", .data = "\n" });
+    // The dark theme hides another profile.
+    try tmp.dir.writeFile(.{ .sub_path = "dark", .data = "profile-hidden = pwsh.exe\n" });
+    const light = try tmp.dir.realpathAlloc(alloc, "light");
+    defer alloc.free(light);
+    const dark = try tmp.dir.realpathAlloc(alloc, "dark");
+    defer alloc.free(dark);
+    const text = try std.fmt.allocPrint(alloc, "theme = light:{s},dark:{s}\nprofile-command = py: python.exe\nprofile-hidden = cmd.exe\n", .{ light, dark });
+    defer alloc.free(text);
+    try tmp.dir.writeFile(.{ .sub_path = "config", .data = text });
+    const path = try tmp.dir.realpathAlloc(alloc, "config");
+    defer alloc.free(path);
+    const none = try tmp.dir.realpathAlloc(alloc, "none.conf");
+    defer alloc.free(none);
+    var original = try testLoad(alloc, none, path);
+    defer original.deinit();
+    var pending = try original.clone(alloc);
+    defer pending.deinit();
+    // Only the order changes; both blocks are written.
+    try pending.@"profile-order".parseCLI(pending._arena.?.allocator(), "user:py");
+    var arena_state: std.heap.ArenaAllocator = .init(alloc);
+    defer arena_state.deinit();
+    const edits = try editsForSave(arena_state.allocator(), alloc, &.{&original}, .{}, &original, &pending, path, &testSamePath);
+    try testing.expectEqual(@as(usize, 2), edits.len);
+    // The app runs dark: the fresh reading in its state hides PowerShell
+    // too. The hidden list the draft left alone raises no conflict.
+    var fresh = try testLoad(alloc, none, path);
+    defer fresh.deinit();
+    var switched = (try fresh.changeConditionalState(.{ .theme = .dark })) orelse return error.TestExpectedSwitch;
+    defer switched.deinit();
+    try testing.expect(!listEql(.hidden, &switched, &original));
+    try testing.expect(changedUnder(edits, &original, &pending, &switched, path, &testSamePath) == null);
+    // Its file's own lines are still checked: another program's edit to
+    // them stops the save.
+    const changed = try std.fmt.allocPrint(alloc, "theme = light:{s},dark:{s}\nprofile-command = py: python.exe\nprofile-hidden = wsl\n", .{ light, dark });
+    defer alloc.free(changed);
+    try tmp.dir.writeFile(.{ .sub_path = "config", .data = changed });
+    var edited = try testLoad(alloc, none, path);
+    defer edited.deinit();
+    var edited_dark = (try edited.changeConditionalState(.{ .theme = .dark })) orelse return error.TestExpectedSwitch;
+    defer edited_dark.deinit();
+    const stopped = changedUnder(edits, &original, &pending, &edited_dark, path, &testSamePath) orelse return error.TestExpectedChange;
+    try testing.expect(stopped.field == .hidden);
 }
 
 test "settings patch: an alias a later layer adds for a profile the save hid hides nothing more" {

@@ -6339,7 +6339,17 @@ pub const SettingsWindow = struct {
         // rebuild reads what the windows have and asks for nothing
         // (`profile_ask_next`).
         self.profile_stale = true;
-        if (self.profile_listing or self.active_section != .profiles or self.profile_list.hwnd == null) return;
+        if (self.profile_listing) return;
+        if (self.active_section != .profiles or self.profile_list.hwnd == null) {
+            // Another page is shown: the search's count for the Profiles
+            // page follows the new rows, and that page, its list and the
+            // focus stay as they are.
+            if (self.search_query.active()) {
+                self.ensureProfileModel();
+                self.refindProfileRows();
+            }
+            return;
+        }
         self.ensureProfileModel();
         // A search finds its rows among the new ones, and the page (its
         // count, the list shown or not, the focus) follows.
@@ -8281,7 +8291,11 @@ pub const SettingsWindow = struct {
             // Hide becomes Show: a reader on the button hears its new name.
             if (syncButtonText(button, label)) if (self.profile_button_providers[index]) |provider| provider.raiseNameChanged();
             // The row its Invoke acts on (`postProfileButtonInvoke`).
-            _ = SetPropW(button, profile_button_row_prop, @ptrFromInt(@as(usize, @truncate(row.identity))));
+            // One that cannot be recorded leaves none: the button's Invoke
+            // then refuses rather than act on the row it was over before.
+            const recorded = !(@import("builtin").is_test and test_profile_row_unrecorded) and
+                SetPropW(button, profile_button_row_prop, @ptrFromInt(@as(usize, @truncate(row.identity)))) != 0;
+            if (!recorded) _ = RemovePropW(button, profile_button_row_prop);
             if (!enabled[index] and GetFocus() == button) _ = SetFocus(list_hwnd);
             _ = sys.EnableWindow(button, @intFromBool(enabled[index]));
             const width = measureLine(button, self.ui_font, label) + 2 * self.px(settings_metrics.space_4);
@@ -8388,6 +8402,8 @@ pub const SettingsWindow = struct {
 
     /// Tests only: a profile button's procedure cannot be installed.
     threadlocal var test_profile_subclass_fails: bool = false;
+    /// Tests only: the row a profile button is over cannot be recorded.
+    threadlocal var test_profile_row_unrecorded: bool = false;
 
     /// A UIA Invoke of profile button `index`, posted for the row it was
     /// over (`row`, `postProfileButtonInvoke`): it acts on that profile,
@@ -21251,7 +21267,11 @@ fn postProfileButtonInvoke(hwnd: HWND) win32_uia.HRESULT {
     if (raw_id <= 0) return com.E_INVALIDARG;
     const id: usize = @intCast(raw_id);
     if (id < PROFILE_BUTTON_FIRST or id >= PROFILE_BUTTON_FIRST + profile_button_count) return com.E_INVALIDARG;
-    const row = @intFromPtr(GetPropW(hwnd, profile_button_row_prop));
+    // A button over no row (hidden: a field's row is open, or none) acts on
+    // nothing; nor does a disabled one, nor one whose row was not recorded.
+    if (sys.IsWindowVisible(hwnd) == 0) return com.UIA_E_ELEMENTNOTAVAILABLE;
+    if (sys.IsWindowEnabled(hwnd) == 0) return com.UIA_E_ELEMENTNOTENABLED;
+    const row = @intFromPtr(GetPropW(hwnd, profile_button_row_prop) orelse return com.UIA_E_ELEMENTNOTAVAILABLE);
     if (sys.PostMessageW(list, WM_SETTINGS_PROFILE_BUTTON, @intCast(id - PROFILE_BUTTON_FIRST), @bitCast(row)) == 0) return com.UIA_E_ELEMENTNOTAVAILABLE;
     return com.S_OK;
 }
@@ -24438,6 +24458,83 @@ test "settings a profile button's UIA Invoke acts on its row, though the selecti
             const order = try listText(alloc, draft.@"profile-order".list.items);
             defer alloc.free(order);
             try expectSameText("user:py\npwsh.exe\ncmd.exe\n", order);
+        }
+    }.body);
+}
+
+test "settings a profile button refuses an Invoke while hidden, or when its row could not be recorded" {
+    try dialog_test.onHiddenDesktop(struct {
+        fn body() !void {
+            const keyboard = win32_input.TestingKeyboard.pinNone();
+            defer keyboard.release();
+            const alloc = std.testing.allocator;
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var path: []u8 = &.{};
+            const fixture = try profileFixture(&tmp, "profile-command = py: python.exe\n", &path);
+            defer alloc.free(path);
+            defer fixture.finish();
+            const settings = &fixture.settings;
+            const list = &settings.profile_list;
+            const listed = [_]ProfileChoice{
+                .{ .key = "pwsh.exe", .label = "PowerShell" },
+                .{ .key = "user:py", .label = "py" },
+                .{ .key = "cmd.exe", .label = "Command Prompt" },
+            };
+            giveProfilePage(fixture, &listed, true);
+            const com = @import("win32_uia/com.zig");
+            try selectProfileRow(list, settings.profile_model.findField(.profile, "pwsh.exe", null) orelse return error.TestExpectedRow);
+            const down = settings.profile_button_providers[1] orelse return error.TestExpectedProvider;
+            // A field's row is open: the buttons are hidden, and the one a
+            // client still holds acts on nothing.
+            try selectProfileRow(list, settings.profile_model.findField(.command, "py", null) orelse return error.TestExpectedRow);
+            try std.testing.expect(sys.IsWindowVisible(settings.profile_buttons[1].?) == 0);
+            try std.testing.expectEqual(com.UIA_E_ELEMENTNOTAVAILABLE, down.invoke_iface.vtbl.Invoke(&down.invoke_iface));
+            dialog_test.pump();
+            try std.testing.expect(!settings.hasPendingChanges());
+            // Command Prompt's row opens, and its row cannot be recorded on
+            // the buttons: an Invoke refuses, rather than act on PowerShell,
+            // the row they were over before.
+            SettingsWindow.test_profile_row_unrecorded = true;
+            defer SettingsWindow.test_profile_row_unrecorded = false;
+            try selectProfileRow(list, settings.profile_model.findField(.profile, "cmd.exe", null) orelse return error.TestExpectedRow);
+            try std.testing.expect(sys.IsWindowVisible(settings.profile_buttons[0].?) != 0);
+            const up = settings.profile_button_providers[0] orelse return error.TestExpectedProvider;
+            try std.testing.expectEqual(com.UIA_E_ELEMENTNOTAVAILABLE, up.invoke_iface.vtbl.Invoke(&up.invoke_iface));
+            dialog_test.pump();
+            try std.testing.expect(!settings.hasPendingChanges());
+        }
+    }.body);
+}
+
+test "settings a list that arrives while another page is shown counts the Profiles search again" {
+    try dialog_test.onHiddenDesktop(struct {
+        fn body() !void {
+            const keyboard = win32_input.TestingKeyboard.pinNone();
+            defer keyboard.release();
+            const alloc = std.testing.allocator;
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var path: []u8 = &.{};
+            const fixture = try profileFixture(&tmp, "profile-command = py: python.exe\n", &path);
+            defer alloc.free(path);
+            defer fixture.finish();
+            const settings = &fixture.settings;
+            const part = [_]ProfileChoice{.{ .key = "user:py", .label = "py" }};
+            const whole = [_]ProfileChoice{
+                .{ .key = "pwsh.exe", .label = "PowerShell" },
+                .{ .key = "user:py", .label = "py" },
+            };
+            giveProfilePage(fixture, &part, false);
+            typeSearch(settings, "pwsh");
+            const counts = &settings.search_counts[@intFromEnum(Section.profiles)];
+            try std.testing.expectEqual(@as(@TypeOf(counts.*), 0), counts.*);
+            // On another page, PowerShell arrives: the Profiles count follows,
+            // and the page shown stays.
+            settings.setActiveSection(.appearance);
+            giveProfilePage(fixture, &whole, true);
+            try std.testing.expectEqual(@as(@TypeOf(counts.*), 1), counts.*);
+            try std.testing.expect(settings.active_section == .appearance);
         }
     }.body);
 }

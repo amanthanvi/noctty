@@ -3444,10 +3444,46 @@ fn referenceNamesWithNewest(
     profile: Profile,
     newest: NewestVisualStudio,
 ) bool {
+    const ref = resolvedReference(reference, newest) orelse return false;
+    if (userProfileWithId(profiles, ref)) |named| return named == profile.key.ptr;
+    return referenceNamesNotUser(ref, profile);
+}
+
+/// `reference` trimmed, `vs:newest:*` resolved to its key; null when it
+/// names nothing (empty, or no such Visual Studio shell).
+fn resolvedReference(reference: []const u8, newest: NewestVisualStudio) ?[]const u8 {
     var ref = std.mem.trim(u8, reference, &std.ascii.whitespace);
     if (newest.resolve(ref)) |key| ref = key;
-    if (ref.len == 0) return false;
-    if (userProfileWithId(profiles, ref)) |named| return named == profile.key.ptr;
+    return if (ref.len == 0) null else ref;
+}
+
+/// The indexes of the profiles of `profiles` that `reference` names, as
+/// `referenceNames` reads it for each, into `out`: the reference is read
+/// once (`newest` is `NewestVisualStudio.of(profiles)`), so a list of values
+/// costs a pass over the profiles per value, not one per value and profile.
+pub fn referenceNamedIndexes(
+    alloc: Allocator,
+    profiles: []const Profile,
+    reference: []const u8,
+    newest: NewestVisualStudio,
+    out: *std.ArrayListUnmanaged(usize),
+) Allocator.Error!void {
+    const ref = resolvedReference(reference, newest) orelse return;
+    if (userProfileWithId(profiles, ref)) |named| {
+        for (profiles, 0..) |profile, index| {
+            if (profile.key.ptr == named) return out.append(alloc, index);
+        }
+        return;
+    }
+    for (profiles, 0..) |profile, index| {
+        if (referenceNamesNotUser(ref, profile)) try out.append(alloc, index);
+    }
+}
+
+/// Whether `ref` (resolved, `resolvedReference`), which names no user
+/// profile by id, names `profile`: its key (an `ssh:` alias exactly), or a
+/// fixed word that names it.
+fn referenceNamesNotUser(ref: []const u8, profile: Profile) bool {
     if (profile.kind == .ssh) {
         const prefix = "ssh:";
         return ref.len == profile.key.len and

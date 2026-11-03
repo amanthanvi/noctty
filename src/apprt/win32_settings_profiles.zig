@@ -94,6 +94,20 @@ pub const References = struct {
     hidden: []const Reference = &.{},
 };
 
+/// A list's `Reference`s by value, the first for each, trimmed: one lookup
+/// per value read, not a pass over the list.
+const RefMap = std.StringHashMapUnmanaged(*const Reference);
+const RefMaps = struct { order: RefMap = .empty, hidden: RefMap = .empty };
+
+fn refMap(a: Allocator, refs: []const Reference) Allocator.Error!RefMap {
+    var map: RefMap = .empty;
+    for (refs) |*ref| {
+        const entry = try map.getOrPut(a, std.mem.trim(u8, ref.value, &std.ascii.whitespace));
+        if (!entry.found_existing) entry.value_ptr.* = ref;
+    }
+    return map;
+}
+
 pub const Profile = struct {
     /// A user profile's id; for one noctty found, its key.
     id: []const u8,
@@ -163,8 +177,8 @@ pub const Model = struct {
     /// to it puts the draft's lists back as they were, so it is no change.
     base: ?Lists = null,
     /// The app's reading of the values of both lists, which the page reads
-    /// and writes aliases by (`References`).
-    refs: References = .{},
+    /// and writes aliases by (`References`), by value.
+    maps: RefMaps = .{},
 
     /// The most rows a model holds: the list knows a row by a `u16`.
     pub const max_rows: usize = std.math.maxInt(u16);
@@ -206,11 +220,12 @@ pub const Model = struct {
         errdefer arena.deinit();
         const a = arena.allocator();
         const refs: References = .{ .order = try copyReferences(a, refs_in.order), .hidden = try copyReferences(a, refs_in.hidden) };
+        const maps: RefMaps = .{ .order = try refMap(a, refs.order), .hidden = try refMap(a, refs.hidden) };
         var profiles: std.ArrayListUnmanaged(Profile) = .empty;
         var rows: std.ArrayListUnmanaged(Row) = .empty;
         try rows.append(a, .{ .kind = .new_profile, .identity = identity(.new_profile, "", null), .search = "new profile add create" });
         const cli = try commandLineIds(a, draft);
-        const entries = try pageEntries(a, draft, original, listed, refs);
+        const entries = try pageEntries(a, draft, original, listed, &maps);
         // Cut short at `max_rows`: the page does not list every profile, so
         // none is moved or hidden (a written list would leave the rest out).
         var truncated = false;
@@ -318,7 +333,7 @@ pub const Model = struct {
             try rows.append(a, .{ .kind = .add_variable, .profile = index, .identity = identity(.add_variable, id, null), .search = try lower(a, &.{ "add environment variable\n", shown, "\n", id }) });
         }
         // The page's state for the arrangement the draft started from.
-        const base: ?Lists = if (original) |was| if (listed.len != 0) try stateOf(a, was, try pageEntries(a, was, null, listed, refs)) else null else null;
+        const base: ?Lists = if (original) |was| if (listed.len != 0) try stateOf(a, was, try pageEntries(a, was, null, listed, &maps)) else null else null;
         // `profiles` is in page order: the shown ones, then the hidden ones.
         self.* = .{
             .arena = arena,
@@ -326,7 +341,7 @@ pub const Model = struct {
             .rows = rows.items,
             .complete = complete and listed.len != 0 and !truncated,
             .base = base,
-            .refs = refs,
+            .maps = maps,
         };
     }
 
@@ -360,6 +375,13 @@ pub const Model = struct {
     /// - A value that names a user profile the draft removed goes, from both.
     /// From `a`.
     pub fn writtenLists(self: *const Model, a: Allocator, original: *const Config, draft: *const Config, page: Lists) Allocator.Error!Lists {
+        // Lookups by key, so a long list costs a pass, not a pass per value.
+        var order_at: std.StringHashMapUnmanaged(usize) = .empty;
+        for (page.order, 0..) |key, at| try order_at.put(a, try keyId(a, key), at);
+        var page_hidden: std.StringHashMapUnmanaged(void) = .empty;
+        for (page.hidden) |key| try page_hidden.put(a, try keyId(a, key), {});
+        var profile_at: std.StringHashMapUnmanaged(usize) = .empty;
+        for (self.profiles, 0..) |profile, at| try profile_at.put(a, try keyId(a, profile.key), at);
         // `profile-order`.
         var front: std.ArrayListUnmanaged([]const u8) = .empty;
         const after = try a.alloc(std.ArrayListUnmanaged([]const u8), page.order.len);
@@ -368,10 +390,10 @@ pub const Model = struct {
         for (original.@"profile-order".list.items) |raw| {
             const value = std.mem.trim(u8, raw, &std.ascii.whitespace);
             if (value.len == 0 or namesRemovedProfile(original, draft, value)) continue;
-            const names = try self.namedKeys(a, self.refs.order, value);
+            const names = try self.namedKeys(a, &self.maps.order, value);
             var last: ?usize = null;
             for (names) |key| {
-                const at = keyIndex(page.order, key) orelse continue;
+                const at = order_at.get(try keyId(a, key)) orelse continue;
                 if (last == null or at > last.?) last = at;
             }
             if (last) |at| {
@@ -392,42 +414,48 @@ pub const Model = struct {
             try order.append(a, key);
             try order.appendSlice(a, kept.items);
         }
-        // `profile-hidden`.
+        // `profile-hidden`, and the keys its values so far name.
         var hidden: std.ArrayListUnmanaged([]const u8) = .empty;
+        var named: std.StringHashMapUnmanaged(void) = .empty;
         for (original.@"profile-hidden".list.items) |raw| {
             const value = std.mem.trim(u8, raw, &std.ascii.whitespace);
             if (value.len == 0 or namesRemovedProfile(original, draft, value)) continue;
-            const names = try self.namedKeys(a, self.refs.hidden, value);
+            const names = try self.namedKeys(a, &self.maps.hidden, value);
             const shows_one = for (names) |key| {
-                const index = self.profileByKey(key) orelse continue;
+                const id = try keyId(a, key);
+                const index = profile_at.get(id) orelse continue;
                 if (self.profiles[index].found_hidden) continue;
-                if (keyIndex(page.hidden, key) == null) break true;
+                if (!page_hidden.contains(id)) break true;
             } else false;
             if (!shows_one) {
                 try hidden.append(a, value);
+                for (names) |key| try named.put(a, try keyId(a, key), {});
                 continue;
             }
             for (names) |key| {
-                const index = self.profileByKey(key) orelse continue;
-                const still = self.profiles[index].found_hidden or keyIndex(page.hidden, key) != null;
-                if (still and !try self.listNames(a, hidden.items, key)) try hidden.append(a, key);
+                const id = try keyId(a, key);
+                const index = profile_at.get(id) orelse continue;
+                const still = self.profiles[index].found_hidden or page_hidden.contains(id);
+                if (!still or named.contains(id)) continue;
+                try hidden.append(a, key);
+                try named.put(a, id, {});
             }
         }
         for (page.hidden) |key| {
-            if (!try self.listNames(a, hidden.items, key)) try hidden.append(a, key);
+            const id = try keyId(a, key);
+            if (named.contains(id)) continue;
+            try hidden.append(a, key);
+            try named.put(a, id, {});
         }
         return .{ .order = order.items, .hidden = hidden.items };
     }
 
     /// The keys of the page's profiles `value` names: as the app read it
     /// (`refs`), else by key, id or `user:` id.
-    fn namedKeys(self: *const Model, a: Allocator, refs: []const Reference, value: []const u8) Allocator.Error![]const []const u8 {
-        for (refs) |ref| {
-            if (std.mem.eql(u8, std.mem.trim(u8, ref.value, &std.ascii.whitespace), value)) return ref.keys;
-        }
+    fn namedKeys(self: *const Model, a: Allocator, map: *const RefMap, value: []const u8) Allocator.Error![]const []const u8 {
         var keys: std.ArrayListUnmanaged([]const u8) = .empty;
         for (self.profiles) |profile| {
-            if (namesKey(value, profile.key, if (profile.detected) null else profile.id)) try keys.append(a, profile.key);
+            if (refNames(map, value, profile.key, if (profile.detected) null else profile.id)) try keys.append(a, profile.key);
         }
         return keys.items;
     }
@@ -439,17 +467,6 @@ pub const Model = struct {
         const index = self.profileByKey(key) orelse return false;
         const profile = &self.profiles[index];
         return !profile.detected and namesProfile(value, profile.id);
-    }
-
-    /// Whether a value of `values` (the hidden list being written) names the
-    /// profile with `key`.
-    fn listNames(self: *const Model, a: Allocator, values: []const []const u8, key: []const u8) Allocator.Error!bool {
-        for (values) |value| {
-            for (try self.namedKeys(a, self.refs.hidden, value)) |named| {
-                if (sameKey(named, key)) return true;
-            }
-        }
-        return false;
     }
 
     /// Where profile `index` is in the page's order, counted from 1, and how
@@ -795,7 +812,7 @@ const PageEntry = struct {
 };
 
 /// The profiles of the page in its order (`Model.buildListed`).
-fn pageEntries(a: Allocator, draft: *const Config, original: ?*const Config, listed: []const Listed, refs: References) Allocator.Error![]PageEntry {
+fn pageEntries(a: Allocator, draft: *const Config, original: ?*const Config, listed: []const Listed, maps: *const RefMaps) Allocator.Error![]PageEntry {
     var entries: std.ArrayListUnmanaged(PageEntry) = .empty;
     const commands = draft.@"profile-command".entries.items;
     if (listed.len == 0) {
@@ -844,10 +861,10 @@ fn pageEntries(a: Allocator, draft: *const Config, original: ?*const Config, lis
         const key = entryKey(commands, entry.*);
         const id = if (entry.user) |index| commands[index].id else null;
         entry.rank = if (order_edited) for (draft.@"profile-order".list.items, 0..) |value, at| {
-            if (refNames(refs.order, value, key, id)) break at;
+            if (refNames(&maps.order, value, key, id)) break at;
         } else std.math.maxInt(usize) else position;
         if (hidden_edited) entry.hidden = entry.foundHidden() or for (draft.@"profile-hidden".list.items) |value| {
-            if (refNames(refs.hidden, value, key, id)) break true;
+            if (refNames(&maps.hidden, value, key, id)) break true;
         } else false;
     }
     // The picker's order: the shown profiles, the quick-slot ones first in
@@ -864,18 +881,27 @@ fn pageEntries(a: Allocator, draft: *const Config, original: ?*const Config, lis
     return entries.items;
 }
 
-/// Whether `value` names the profile with `key` (and user `id`): as the app
-/// read it (`refs`, an alias included), else by key or id (`namesKey`).
-fn refNames(refs: []const Reference, value_raw: []const u8, key: []const u8, id: ?[]const u8) bool {
+/// Whether `value` names the profile with `key` (and user `id`): by its own
+/// key or id (`namesKey`) first, which also finds a profile the draft added
+/// since the app read the value; else as the app read it (`refs`), which is
+/// how an alias names its profiles.
+fn refNames(map: *const RefMap, value_raw: []const u8, key: []const u8, id: ?[]const u8) bool {
     const value = std.mem.trim(u8, value_raw, &std.ascii.whitespace);
-    for (refs) |ref| {
-        if (!std.mem.eql(u8, std.mem.trim(u8, ref.value, &std.ascii.whitespace), value)) continue;
-        for (ref.keys) |named| {
-            if (sameKey(named, key)) return true;
-        }
-        return false;
+    if (namesKey(value, key, id)) return true;
+    const ref = map.get(value) orelse return false;
+    for (ref.keys) |named| {
+        if (sameKey(named, key)) return true;
     }
-    return namesKey(value, key, id);
+    return false;
+}
+
+/// `key` as `sameKey` compares it: an `ssh:` key's alias as written after a
+/// lower-case prefix, any other key in lower case. From `a`.
+fn keyId(a: Allocator, key: []const u8) Allocator.Error![]const u8 {
+    const out = try a.dupe(u8, key);
+    const lower_to = if (std.ascii.startsWithIgnoreCase(key, "ssh:")) "ssh:".len else out.len;
+    for (out[0..lower_to]) |*c| c.* = std.ascii.toLower(c.*);
+    return out;
 }
 
 /// `refs` copied into `a`.
@@ -887,14 +913,6 @@ fn copyReferences(a: Allocator, refs: []const Reference) Allocator.Error![]const
         copy.* = .{ .value = try a.dupe(u8, ref.value), .keys = keys };
     }
     return out;
-}
-
-/// Where `key` is in `keys`, if it is.
-fn keyIndex(keys: []const []const u8, key: []const u8) ?usize {
-    for (keys, 0..) |other, at| {
-        if (sameKey(other, key)) return at;
-    }
-    return null;
 }
 
 /// Whether `value` names a user profile `original` has and `draft` removed:
@@ -1153,25 +1171,56 @@ fn liveText(comptime kind: profile_map.Kind, map: *const profile_map.ProfileMap(
 /// the hidden profiles follow the file the same way, each on its own: one
 /// the draft changed stays as the draft has it (a save checks it against
 /// the file, `settings_patch.changedUnder`).
+///
+/// Where each line was read (`_launch.profile_places`) goes with what it
+/// wrote: a list's own lines with that list, the profiles' with the
+/// profiles. A save compares the file's own lines for a list with the
+/// baseline's (`settings_patch.ownLinesEql`), so a list that keeps its
+/// baseline keeps the lines it was read from, and one that follows the file
+/// takes the file's.
 pub fn followFile(original: *Config, draft: *Config, replacement: *const Config) Allocator.Error!void {
     const follow_profiles = profileFieldChanges(original, draft) == 0;
     const follow_order = original.@"profile-order".equal(draft.@"profile-order");
     const follow_hidden = original.@"profile-hidden".equal(draft.@"profile-hidden");
+    const follows: Follows = .{ .profiles = follow_profiles, .order = follow_order, .hidden = follow_hidden };
     for ([_]*Config{ original, draft }) |config| {
         const a = arenaOf(config);
-        if (follow_hidden) config.@"profile-hidden" = try replacement.@"profile-hidden".clone(a);
-        if (follow_order) config.@"profile-order" = try replacement.@"profile-order".clone(a);
-        if (!follow_profiles) continue;
-        config.@"profile-command" = try replacement.@"profile-command".clone(a);
-        config.@"profile-name" = try replacement.@"profile-name".clone(a);
-        config.@"profile-working-directory" = try replacement.@"profile-working-directory".clone(a);
-        config.@"profile-env" = try replacement.@"profile-env".clone(a);
-        // Where those lines were read goes with them; the ledger's copy
-        // is the public way to take it (`pane_launch.Ledger.clone`), and the
-        // rest of that copy stays in the draft's arena unused.
-        config._launch.profile_places = (try replacement._launch.clone(a)).profile_places;
+        // Made whole before anything is put in place.
+        const fresh = (try replacement._launch.clone(a)).profile_places;
+        var places: @TypeOf(config._launch.profile_places) = .empty;
+        for (config._launch.profile_places.items) |place| {
+            if (!follows.of(place.key)) try places.append(a, place);
+        }
+        for (fresh.items) |place| {
+            if (follows.of(place.key)) try places.append(a, place);
+        }
+        const hidden = if (follow_hidden) try replacement.@"profile-hidden".clone(a) else config.@"profile-hidden";
+        const order = if (follow_order) try replacement.@"profile-order".clone(a) else config.@"profile-order";
+        if (follow_profiles) {
+            config.@"profile-command" = try replacement.@"profile-command".clone(a);
+            config.@"profile-name" = try replacement.@"profile-name".clone(a);
+            config.@"profile-working-directory" = try replacement.@"profile-working-directory".clone(a);
+            config.@"profile-env" = try replacement.@"profile-env".clone(a);
+        }
+        config.@"profile-hidden" = hidden;
+        config.@"profile-order" = order;
+        config._launch.profile_places = places;
     }
 }
+
+/// Which of a config's profile keys follow the file (`followFile`).
+const Follows = struct {
+    profiles: bool,
+    order: bool,
+    hidden: bool,
+
+    /// Whether the lines read for `key` follow the file.
+    fn of(self: Follows, key: []const u8) bool {
+        if (std.mem.eql(u8, key, "profile-order")) return self.order;
+        if (std.mem.eql(u8, key, "profile-hidden")) return self.hidden;
+        return self.profiles;
+    }
+};
 
 // Checks. Each returns the message the status line shows for a value Settings
 // refuses, which names the field and never holds the value.
@@ -2081,6 +2130,134 @@ test "settings profiles: an alias stays as written, is read as the app reads it,
     const hidden = try testJoin(alloc, shown.hidden);
     defer alloc.free(hidden);
     try expectSameText("wsl:Debian\npwsh.exe\n", hidden);
+}
+
+test "settings profiles: a profile the draft adds that a saved name hides is hidden on the page, in the saved list, and in the app's picker" {
+    const alloc = testing.allocator;
+    // `profile-hidden = user:dev` names no profile yet: the app read it as
+    // naming none.
+    var original = try testConfig(alloc, "profile-command = py: python.exe\nprofile-hidden = user:dev\n", &.{});
+    defer original.deinit();
+    var draft = try original.clone(alloc);
+    defer draft.deinit();
+    const listed = [_]Listed{
+        .{ .key = "pwsh.exe", .label = "PowerShell" },
+        .{ .key = "user:py", .label = "py" },
+        .{ .key = "cmd.exe", .label = "Command Prompt" },
+    };
+    const refs: References = .{ .hidden = &.{.{ .value = "user:dev", .keys = &.{} }} };
+    var model: Model = .{};
+    defer model.deinit();
+    var arena_state: std.heap.ArenaAllocator = .init(alloc);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    // The draft adds `dev`: the saved name hides it.
+    try setCommand(&draft, "dev", "dev.exe");
+    try model.buildReferenced(alloc, &draft, &original, &listed, refs, true);
+    try testing.expect(model.profiles[model.profileByKey("user:dev").?].hidden);
+    // Command Prompt hidden: the draft's lists are the page's now, and the
+    // page still reads `user:dev` as hiding `dev`.
+    const lists = try model.writtenLists(a, &original, &draft, try model.toggledHidden(a, model.profileByKey("cmd.exe").?, true));
+    {
+        const hidden = try testJoin(alloc, lists.hidden);
+        defer alloc.free(hidden);
+        try expectSameText("user:dev\ncmd.exe\n", hidden);
+    }
+    try setLists(&draft, lists.order, lists.hidden);
+    try model.buildReferenced(alloc, &draft, &original, &listed, refs, true);
+    // The page, the saved lists and the app's picker after the reload agree
+    // on every profile.
+    var profiles = [_]windows_shell.Profile{
+        .{ .kind = .pwsh, .key = "pwsh.exe", .label = "PowerShell", .command = .{ .direct = &.{} } },
+        .{ .kind = .user, .key = "user:py", .label = "py", .command = .{ .direct = &.{} } },
+        .{ .kind = .user, .key = "user:dev", .label = "dev", .command = .{ .direct = &.{} } },
+        .{ .kind = .cmd, .key = "cmd.exe", .label = "Command Prompt", .command = .{ .direct = &.{} } },
+    };
+    windows_shell.arrangeProfiles(&profiles, lists.order, lists.hidden);
+    for (profiles) |profile| {
+        const page = model.profiles[model.profileByKey(profile.key) orelse return error.TestExpectedProfile];
+        try testing.expectEqual(profile.hidden, page.hidden);
+    }
+    try testing.expect(model.profiles[model.profileByKey("user:dev").?].hidden);
+}
+
+test "settings profiles: a list's recorded lines follow the file with that list, so a masked outside edit stops the save and an untouched list raises no false conflict" {
+    const alloc = testing.allocator;
+    const settings_patch = @import("win32/settings_patch.zig");
+    const Load = struct {
+        fn same(x: []const u8, y: []const u8) bool {
+            return std.ascii.eqlIgnoreCase(x, y);
+        }
+
+        fn config(a: Allocator, earlier: []const u8, path: []const u8) !Config {
+            var cfg = try Config.default(a);
+            errdefer cfg.deinit();
+            try cfg.loadFile(a, earlier);
+            try cfg.loadFile(a, path);
+            try cfg.loadRecursiveFiles(a);
+            try cfg.finalize();
+            return cfg;
+        }
+    };
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(.{ .sub_path = "earlier", .data = "# read first\n" });
+    // A later file clears the order and gives its own: the config file's
+    // own order line is masked.
+    try tmp.dir.writeFile(.{ .sub_path = "later.conf", .data = "profile-order =\nprofile-order = pwsh.exe\n" });
+    const later = try tmp.dir.realpathAlloc(alloc, "later.conf");
+    defer alloc.free(later);
+    const before = try std.fmt.allocPrint(alloc, "profile-command = py: python.exe\nprofile-order = cmd.exe\nconfig-file = {s}\n", .{later});
+    defer alloc.free(before);
+    const after = try std.fmt.allocPrint(alloc, "profile-command = py: python.exe\nprofile-order = git-bash\nconfig-file = {s}\n", .{later});
+    defer alloc.free(after);
+    try tmp.dir.writeFile(.{ .sub_path = "config", .data = before });
+    const earlier = try tmp.dir.realpathAlloc(alloc, "earlier");
+    defer alloc.free(earlier);
+    const path = try tmp.dir.realpathAlloc(alloc, "config");
+    defer alloc.free(path);
+
+    // 1. The page moved a profile; another program changes the file's own
+    // order line, under the mask; the window takes the reload in. The order
+    // keeps its baseline, and the lines it was read from with it: the save
+    // sees the outside edit and stops.
+    {
+        try tmp.dir.writeFile(.{ .sub_path = "config", .data = before });
+        var original = try Load.config(alloc, earlier, path);
+        defer original.deinit();
+        var draft = try original.clone(alloc);
+        defer draft.deinit();
+        try setOrder(&draft, &.{ "user:py", "pwsh.exe" });
+        try tmp.dir.writeFile(.{ .sub_path = "config", .data = after });
+        var replacement = try Load.config(alloc, earlier, path);
+        defer replacement.deinit();
+        try followFile(&original, &draft, &replacement);
+        var disk = try Load.config(alloc, earlier, path);
+        defer disk.deinit();
+        const order: settings_patch.Edit = .{ .field = .order, .id = "", .op = .{ .list = &.{ "user:py", "pwsh.exe" } } };
+        try testing.expect(settings_patch.changedUnder(&.{order}, &original, &draft, &disk, path, &Load.same) != null);
+    }
+    // 2. The page changed a profile's command line, not the order; the
+    // outside edit comes, and the untouched order follows the file, its
+    // lines too. A move after that is checked against the file as it is
+    // now: no conflict.
+    {
+        try tmp.dir.writeFile(.{ .sub_path = "config", .data = before });
+        var original = try Load.config(alloc, earlier, path);
+        defer original.deinit();
+        var draft = try original.clone(alloc);
+        defer draft.deinit();
+        try setCommand(&draft, "py", "python3.exe");
+        try tmp.dir.writeFile(.{ .sub_path = "config", .data = after });
+        var replacement = try Load.config(alloc, earlier, path);
+        defer replacement.deinit();
+        try followFile(&original, &draft, &replacement);
+        try setOrder(&draft, &.{"user:py"});
+        var disk = try Load.config(alloc, earlier, path);
+        defer disk.deinit();
+        const order: settings_patch.Edit = .{ .field = .order, .id = "", .op = .{ .list = &.{"user:py"} } };
+        try testing.expect(settings_patch.changedUnder(&.{order}, &original, &draft, &disk, path, &Load.same) == null);
+    }
 }
 
 test "settings profiles: both lists are set together, or neither when memory runs out" {
