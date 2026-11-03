@@ -21,6 +21,7 @@ const c = @import("consts.zig");
 const child_window = @import("child_window.zig");
 const paint_text = @import("text.zig");
 const window_state = @import("window_state.zig");
+const win32_input = @import("input.zig");
 const HWND = types.HWND;
 const BOOL = types.BOOL;
 const UINT = types.UINT;
@@ -99,6 +100,12 @@ pub fn Fixtures(comptime runtime: anytype) type {
                         result.* = lastError();
                         return;
                     }
+                    // A new thread's key table starts as a copy of the real
+                    // keyboard's (SETTINGS-F2-TEST-FLAKE), so the body runs
+                    // with an empty keyboard instead of the keys the person
+                    // running the suite holds.
+                    const keyboard = win32_input.TestingKeyboard.pinNone();
+                    defer keyboard.release();
                     body() catch |err| {
                         // The test fails at `return result` on the runner's thread;
                         // this trace shows which check failed.
