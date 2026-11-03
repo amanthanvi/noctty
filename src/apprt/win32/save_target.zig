@@ -46,7 +46,76 @@ pub const WriteError = error{
     /// The in-place rewrite failed after its first byte: the file may hold new
     /// bytes followed by old ones, and the complete text is in the kept copy.
     IncompleteWrite,
+    /// The file no longer holds what the caller read (`writeOver`), so another
+    /// program edited it since: nothing was written.
+    Changed,
 } || Allocator.Error;
+
+pub const ReadError = error{
+    ReadFailed,
+    /// Larger than any config file a save reads (`max_bytes`).
+    TooLarge,
+    /// The file's size changed while it was read: another program is
+    /// writing it, and what was read is not what it holds.
+    Unstable,
+} || Allocator.Error;
+
+/// The most bytes a save reads of a config file.
+pub const max_bytes = 16 * 1024 * 1024;
+
+/// What a save read of a file, to tell whether it still holds that: the
+/// SHA-256 of its bytes.
+pub const Digest = [std.crypto.hash.sha2.Sha256.digest_length]u8;
+
+pub fn digestOf(bytes: []const u8) Digest {
+    var out: Digest = undefined;
+    std.crypto.hash.sha2.Sha256.hash(bytes, &out, .{});
+    return out;
+}
+
+/// The bytes of the file at `path` (a `Target.path`) as a save reads them: a
+/// file that is not there reads as empty. Owned. Read to its end (within
+/// `max_bytes`), not to the size a stat gave: bytes another program appends
+/// meanwhile are read too. A size that differs before, during and after the
+/// read is `Unstable`.
+pub fn read(alloc: Allocator, path: []const u8) ReadError![]u8 {
+    const file = std.fs.cwd().openFile(path, .{}) catch |err| switch (err) {
+        error.FileNotFound => return alloc.dupe(u8, ""),
+        else => return error.ReadFailed,
+    };
+    defer file.close();
+    const before = file.stat() catch return error.ReadFailed;
+    if (before.size > max_bytes) return error.TooLarge;
+    if (@import("builtin").is_test) if (test_during_read) |hook| hook();
+    const bytes = file.readToEndAlloc(alloc, max_bytes) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.FileTooBig => return error.TooLarge,
+        else => return error.ReadFailed,
+    };
+    errdefer alloc.free(bytes);
+    const after = file.stat() catch return error.ReadFailed;
+    if (before.size != bytes.len or after.size != bytes.len) return error.Unstable;
+    return bytes;
+}
+
+/// The digest of what the file the configured `path` reaches holds now, as a
+/// save would read it.
+pub fn digestNow(alloc: Allocator, path: []const u8) (ReadError || ResolveError)!Digest {
+    const target = try resolve(alloc, path);
+    defer target.deinit(alloc);
+    const bytes = try read(alloc, target.path);
+    defer alloc.free(bytes);
+    return digestOf(bytes);
+}
+
+/// A test's stand-in for another program: run by `writeOver` just before it
+/// compares the file with what was read (SETTINGS-SAVE-TOCTOU).
+pub threadlocal var test_before_compare: if (@import("builtin").is_test) ?*const fn () void else void =
+    if (@import("builtin").is_test) null else {};
+
+/// The same, run by `read` between its first stat and the read.
+pub threadlocal var test_during_read: if (@import("builtin").is_test) ?*const fn () void else void =
+    if (@import("builtin").is_test) null else {};
 
 /// Follow `path` to the file it names. A name with no file behind it is the
 /// first save and resolves to itself. What cannot be learned (a volume that
@@ -179,6 +248,16 @@ fn isDeviceName(component: []const u8) bool {
 /// the temporary file stays if it fails, as the only complete copy, and
 /// `kept_copy` (when given) receives its path: owned by the caller.
 pub fn write(alloc: Allocator, target: Target, bytes: []const u8, kept_copy: ?*?[]u8) WriteError!void {
+    return writeOver(alloc, target, bytes, kept_copy, null);
+}
+
+/// `write`, when the file still holds what was read of it as `read_as`. That
+/// is compared once the new bytes are safely in the temporary file, just
+/// before they take the file's place, so an edit another program made before
+/// that last read is not written over: then nothing is written (`Changed`).
+/// One made after it, before the replace, still is. A file that cannot be
+/// read at that moment is not written either.
+pub fn writeOver(alloc: Allocator, target: Target, bytes: []const u8, kept_copy: ?*?[]u8, read_as: ?Digest) WriteError!void {
     const tmp_path = try std.fmt.allocPrint(
         alloc,
         "{s}.tmp-{x}-{x}",
@@ -198,6 +277,18 @@ pub fn write(alloc: Allocator, target: Target, bytes: []const u8, kept_copy: ?*?
         fw.interface.writeAll(bytes) catch return error.SerializeFailed;
         fw.interface.flush() catch return error.SerializeFailed;
         tmp.sync() catch return error.SerializeFailed;
+    }
+
+    if (read_as) |digest| {
+        if (@import("builtin").is_test) if (test_before_compare) |hook| hook();
+        const now = read(alloc, target.path) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            // Being written as it was read: changed.
+            error.Unstable => return error.Changed,
+            else => return error.ReplaceFailed,
+        };
+        defer alloc.free(now);
+        if (!std.mem.eql(u8, &digestOf(now), &digest)) return error.Changed;
     }
 
     if (target.hard_linked) {
@@ -339,6 +430,32 @@ pub const Scratch = struct {
         for (expected, names.items) |want, got| try testing.expectEqualStrings(want, got);
     }
 };
+
+test "a read during which the file grows is unstable" {
+    var scratch = try Scratch.init();
+    defer scratch.deinit();
+    try scratch.tmp.dir.writeFile(.{ .sub_path = "config.ghostty", .data = "font-size = 12\n" });
+    const path = try scratch.path("config.ghostty");
+    defer testing.allocator.free(path);
+    const Grow = struct {
+        threadlocal var target: []const u8 = "";
+        fn append() void {
+            test_during_read = null;
+            const file = std.fs.openFileAbsolute(target, .{ .mode = .read_write }) catch return;
+            defer file.close();
+            file.seekFromEnd(0) catch return;
+            file.writeAll("copy-on-select = true\n") catch return;
+        }
+    };
+    Grow.target = path;
+    test_during_read = Grow.append;
+    defer test_during_read = null;
+    try testing.expectError(error.Unstable, read(testing.allocator, path));
+    // Read again, still: the whole file.
+    const bytes = try read(testing.allocator, path);
+    defer testing.allocator.free(bytes);
+    try testing.expectEqualStrings("font-size = 12\ncopy-on-select = true\n", bytes);
+}
 
 test "save target of a missing file is the name itself, and the first save creates it" {
     var scratch = try Scratch.init();

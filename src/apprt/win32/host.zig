@@ -2424,9 +2424,12 @@ pub const Host = struct {
             break :blk self.app.settingsSaveAndReload(&pending, &original);
         });
         switch (save_outcome) {
-            // A theme pick makes no profile edit, so its save is never
-            // `completed_unread`; were it, the theme was saved as well.
-            .completed, .completed_masked, .completed_unread => {},
+            .completed, .completed_masked => {},
+            // Saved, with a reload that read a file only partly, which the
+            // save does not apply: the running config is the one the pick
+            // installed, the theme with it. An open Settings window hears of
+            // the theme, as it would of the reload.
+            .completed_unread => self.app.settings_window.externalConfigChanged(&self.app.config, self.app.config_revision),
             .failed => |err| {
                 log.warn("palette theme save failed theme={s} err={}", .{ theme_name, err });
                 // Roll back without another allocation: `original` is already
@@ -2441,6 +2444,7 @@ pub const Host = struct {
             },
         }
         const saved_but_masked = std.meta.activeTag(save_outcome) == .completed_masked;
+        const saved_but_unread = std.meta.activeTag(save_outcome) == .completed_unread;
 
         if (self.palette_list_uia_provider) |provider| {
             win32_uia.events.raiseNotification(
@@ -2448,6 +2452,8 @@ pub const Host = struct {
                 .action_completed,
                 if (saved_but_masked)
                     "Theme saved; a later config layer masks it"
+                else if (saved_but_unread)
+                    "Theme saved; a config file could not be read whole"
                 else if (self.app.safe_mode)
                     "Theme saved; restart noctty to apply it"
                 else
@@ -2466,6 +2472,13 @@ pub const Host = struct {
             runUiActionOrLog(
                 "palette masked theme banner failed",
                 self.setBanner(.err, "Theme saved, but a later config layer masks it."),
+            );
+        }
+        if (saved_but_unread) {
+            log.warn("palette theme saved, but the reload could not read a config file whole theme={s}", .{theme_name});
+            runUiActionOrLog(
+                "palette unread theme banner failed",
+                self.setBanner(.err, "Theme saved, but a config file could not be read whole. Reload the configuration once it can be read."),
             );
         }
         self.layout() catch |err| {

@@ -170,7 +170,10 @@ pub const PaletteListState = struct {
     row_enabled: ?*const fn (ctx: *anyopaque, index: usize) bool = null,
     row_id: ?*const fn (ctx: *anyopaque, index: usize) u64 = null,
     select_row: ?*const fn (ctx: *anyopaque, index: usize) void = null,
-    invoke_row: ?*const fn (ctx: *anyopaque, index: usize) void = null,
+    /// Invoke row `index`: false when the owner did not act on it (its rows
+    /// changed under the call), which the client hears as
+    /// `UIA_E_INVALIDOPERATION`, so it can invoke again.
+    invoke_row: ?*const fn (ctx: *anyopaque, index: usize) bool = null,
     geometry: ?*const fn (ctx: *anyopaque) ?PaletteListGeometry = null,
     /// Optional screen-space bounds for widgets whose rows are not arranged
     /// as one contiguous vertical list (for example, terminal hint chips).
@@ -1178,7 +1181,7 @@ const PaletteRowProvider = struct {
         if (!self.available()) return com.UIA_E_ELEMENTNOTAVAILABLE;
         if (!self.parent.rowEnabled(self.index)) return com.UIA_E_ELEMENTNOTENABLED;
         const callback = self.parent.state.invoke_row orelse return com.UIA_E_INVALIDOPERATION;
-        callback(self.parent.state.ctx, self.index);
+        if (!callback(self.parent.state.ctx, self.index)) return com.UIA_E_INVALIDOPERATION;
         return com.S_OK;
     }
 };
@@ -5431,9 +5434,10 @@ const TestPaletteState = struct {
         }
     }
 
-    fn invokeRow(ctx: *anyopaque, index: usize) void {
+    fn invokeRow(ctx: *anyopaque, index: usize) bool {
         const self: *TestPaletteState = @ptrCast(@alignCast(ctx));
         self.invoked_by_provider = index;
+        return true;
     }
 
     fn geometry(ctx: *anyopaque) ?PaletteListGeometry {
@@ -5806,8 +5810,9 @@ test "Palette row a client holds after its list detached never calls back into t
         fn selectRow(ctx: *anyopaque, _: usize) void {
             touch(ctx);
         }
-        fn invokeRow(ctx: *anyopaque, _: usize) void {
+        fn invokeRow(ctx: *anyopaque, _: usize) bool {
             touch(ctx);
+            return true;
         }
         fn rowHelp(ctx: *anyopaque, _: usize, buf: []u8) []const u8 {
             touch(ctx);
