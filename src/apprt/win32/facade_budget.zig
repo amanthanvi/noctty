@@ -14,7 +14,7 @@ const budget = .{
     .bags = .{
         .chrome_scene_runtime = 62,
         .chrome_scene_test_runtime = 4,
-        .overlay_session_runtime = 45,
+        .overlay_session_runtime = 42,
         .overlay_session_test_runtime = 5,
         .palette_controller_runtime = 44,
         .palette_controller_test_runtime = 7,
@@ -25,9 +25,9 @@ const budget = .{
         .test_support_runtime = 47,
     },
     // The facade's pub declarations: what the files that import it can reach.
-    .facade_pub_decls = 508,
+    .facade_pub_decls = 505,
     // Root declarations of win32.zig whose value is a field access (`a.b`).
-    .facade_aliases = 253,
+    .facade_aliases = 249,
     // Fields of win32.App named `test_*`.
     .app_test_hooks = 10,
 };
@@ -41,6 +41,12 @@ const leaves = .{
         .module = @import("child_window.zig"),
         .source = @embedFile("child_window.zig"),
         .pub_decls = 16,
+    },
+    .{
+        .file = "confirm_text.zig",
+        .module = @import("confirm_text.zig"),
+        .source = @embedFile("confirm_text.zig"),
+        .pub_decls = 9,
     },
     .{
         .file = "docked_search.zig",

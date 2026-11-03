@@ -9,9 +9,8 @@ const CaptionButton = win32.CaptionButton;
 const ChildPlacement = child_window.ChildPlacement;
 const ChromeRepaintMask = win32.ChromeRepaintMask;
 const ChromeTextDirty = win32.ChromeTextDirty;
-const CloseScope = win32.CloseScope;
+const CloseScope = confirm_text.CloseScope;
 const ConfirmPayload = win32.ConfirmPayload;
-const ConfirmPrompt = win32.ConfirmPrompt;
 const ConfirmTextPlacement = win32.ConfirmTextPlacement;
 const DRAWITEMSTRUCT = win32.DRAWITEMSTRUCT;
 const DWORD = win32.DWORD;
@@ -80,7 +79,6 @@ const chrome_scene = @import("chrome_scene.zig");
 const clampPaletteViewport = win32.clampPaletteViewport;
 const clampTabInsertIndex = win32.clampTabInsertIndex;
 const clientTitlebarTheme = win32.clientTitlebarTheme;
-const closeScopePrompt = win32.closeScopePrompt;
 const configpkg = @import("../../config.zig");
 const confirmBodyPaintRect = win32.confirmBodyPaintRect;
 const confirmPreviewRect = win32.confirmPreviewRect;
@@ -89,6 +87,7 @@ const confirmPromptLineOwnedByChild = win32.confirmPromptLineOwnedByChild;
 const confirmTextPlacement = win32.confirmTextPlacement;
 const confirmTitlePaintRect = win32.confirmTitlePaintRect;
 const confirm_prompt_text_format = win32.confirm_prompt_text_format;
+const confirm_text = @import("confirm_text.zig");
 const createIconFontWithGlyphs = win32.createIconFontWithGlyphs;
 const cycleProfileOpenTarget = win32.cycleProfileOpenTarget;
 const default_title = win32.default_title;
@@ -8763,7 +8762,9 @@ pub const Host = struct {
     /// close from the taskbar or a quit never waits on a prompt nobody can
     /// see, and asking again keeps the prompt already open. If the prompt
     /// cannot open, nothing closes, as in `Surface.close`: closing anyway
-    /// would defeat the setting, and the user can retry.
+    /// would defeat the setting, and the user can retry. The userdata of a
+    /// `.this_tab` prompt is the Surface of the tab, which names the tab
+    /// when it is behind.
     pub fn askBeforeClosing(
         self: *Host,
         scope: CloseScope,
@@ -8779,61 +8780,24 @@ pub const Host = struct {
             };
             return;
         }
-        var body: [256]u8 = undefined;
-        var title: [32]u8 = undefined;
-        var prompt = closeScopePrompt(scope, count, &body);
-        // A tab closed from its button need not be the one in front, and
-        // "this tab" would then name the wrong one.
-        const named_body = if (scope == .this_tab)
-            self.nameBackgroundTab(&prompt, count, @ptrCast(@alignCast(userdata)), &title)
-        else
-            null;
-        defer if (named_body) |text| self.app.core_app.alloc.free(text);
+        const alloc = self.app.core_app.alloc;
+        var words: confirm_text.Words = .{};
+        defer words.deinit(alloc);
+        const behind = if (scope == .this_tab) self.backgroundTabRef(@ptrCast(@alignCast(userdata))) else null;
+        const prompt = words.close(alloc, .{ .scope = .{ .scope = scope, .terminals = count, .behind = behind } });
         self.showConfirm(prompt, on_accept, null, userdata) catch |err| {
             log.warn("close confirm unavailable err={}; declining close to honour confirm-close-surface", .{err});
         };
     }
 
-    /// Words the `.this_tab` prompt for the tab holding `surface` as the
-    /// tab's number and title when another tab is in front, as the OSC 52
-    /// prompt names the tab that asked. Returns the body it allocated, which
-    /// `prompt` borrows; null leaves the prompt as it was (the tab in front,
-    /// or no memory for the words).
-    fn nameBackgroundTab(self: *Host, prompt: *ConfirmPrompt, count: usize, surface: *Surface, title_buf: *[32]u8) ?[]u8 {
-        const index = self.backgroundTabIndex(surface) orelse return null;
-        // The title needs no memory, so it names the tab even if the body cannot.
-        prompt.title = labels.backgroundTabClosePromptTitle(title_buf, index + 1);
-        const body = labels.buildBackgroundTabClosePromptBody(
-            self.app.core_app.alloc,
-            count,
-            index + 1,
-            surface.effectiveTitle(),
-        ) catch return null;
-        prompt.body = body;
-        return body;
-    }
-
-    /// The same for the prompt of a terminal that closes by itself, which
-    /// `Surface.close` raises whatever tab the terminal is in.
-    pub fn nameBackgroundTerminal(self: *Host, prompt: *ConfirmPrompt, surface: *Surface, title_buf: *[32]u8) ?[]u8 {
-        const index = self.backgroundTabIndex(surface) orelse return null;
-        prompt.title = labels.backgroundTerminalClosePromptTitle(title_buf, index + 1);
-        const body = labels.buildBackgroundTerminalClosePromptBody(
-            self.app.core_app.alloc,
-            index + 1,
-            surface.effectiveTitle(),
-            surface.core_initialized and surface.core_surface.child_exited,
-        ) catch return null;
-        prompt.body = body;
-        return body;
-    }
-
-    /// The index of the tab of this window that holds `surface`, unless
-    /// that tab is the one in front.
-    fn backgroundTabIndex(self: *Host, surface: *Surface) ?usize {
+    /// The tab of this window that holds `surface`, as a prompt names it,
+    /// unless that tab is the one in front: a tab closed from its button,
+    /// or a terminal that closes by itself (`Surface.close`) whatever tab
+    /// it is in.
+    pub fn backgroundTabRef(self: *Host, surface: *Surface) ?confirm_text.TabRef {
         const found = Host.findTabForSurface(surface) orelse return null;
         if (found.host != self or found.index == self.active_tab) return null;
-        return found.index;
+        return .{ .number = found.index + 1, .title = surface.effectiveTitle() };
     }
 
     /// Shown on screen, minimized included; a hidden quick terminal is not.

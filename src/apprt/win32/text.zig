@@ -1,5 +1,6 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const unicode = @import("../../unicode/main.zig");
 
 /// Write a terminated prefix without allocating or splitting surrogate pairs.
 /// Invalid UTF-8 anywhere in src produces empty output, including past the cap.
@@ -83,7 +84,7 @@ pub fn optionalOwnedStringEquals(current: ?[:0]const u8, value: ?[]const u8) boo
 /// buffer has to come back shortened, never empty, because the caller is
 /// usually a live region that is about to be announced.
 ///
-/// Deliberately simpler than the back-off in `buildConfirmPreview`, which
+/// Deliberately simpler than the back-off in `confirm_text.preview`, which
 /// must not drag its cut through orphan continuation bytes because it is
 /// showing arbitrary payload bytes and reports how many it showed. Names
 /// come from strings this process built, so a plain walk is enough.
@@ -98,6 +99,25 @@ pub fn utf8BoundedPrefix(text: []const u8, limit: usize) []const u8 {
         end -= 1;
     }
     return text[0..end];
+}
+
+pub const DecodedCodepoint = struct {
+    cp: u21,
+    len: usize,
+};
+
+pub fn decodeCodepoint(value: []const u8, index: usize) ?DecodedCodepoint {
+    const len = std.unicode.utf8ByteSequenceLength(value[index]) catch return null;
+    if (index + len > value.len) return null;
+    const cp = std.unicode.utf8Decode(value[index..][0..len]) catch return null;
+    return .{ .cp = cp, .len = len };
+}
+
+/// Cells one codepoint occupies, read from the same table the terminal grid
+/// uses so the chrome and the grid agree on what "wide" means.
+pub fn codepointWidth(cp: u21) usize {
+    if (cp <= 0xFF) return 1;
+    return @intCast(unicode.table.get(cp).width);
 }
 
 test "bounded UTF-16 long ASCII and BMP text preserve buffer guards" {
