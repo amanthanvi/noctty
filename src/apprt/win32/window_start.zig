@@ -276,10 +276,36 @@ pub const Placement = struct {
     fullscreen: ?TopLevel.Return = null,
 };
 
+/// The windows a copy's cascade steps past, asked when the copy is placed:
+/// whether one of them has its top-left corner at `corner`. window_state.zig
+/// asks the Registry about every window then on screen but the copy; `of`
+/// answers from a list, for a test.
+pub const Occupied = struct {
+    ctx: *const anyopaque,
+    startsAt: *const fn (ctx: *const anyopaque, corner: POINT) bool,
+
+    /// No window to step past.
+    pub const none: Occupied = .of(&no_corners);
+    const no_corners: []const POINT = &.{};
+
+    /// The windows whose top-left corners are `corners.*`.
+    pub fn of(corners: *const []const POINT) Occupied {
+        return .{ .ctx = @ptrCast(corners), .startsAt = listStartsAt };
+    }
+
+    fn listStartsAt(ctx: *const anyopaque, corner: POINT) bool {
+        const corners: *const []const POINT = @ptrCast(@alignCast(ctx));
+        for (corners.*) |at| {
+            if (at.x == corner.x and at.y == corner.y) return true;
+        }
+        return false;
+    }
+};
+
 /// Where the copy `p` plans goes. A normal source gives its size, one
 /// cascade step down and right so the copy does not sit on it, on past any
-/// window whose top-left corner is in `occupied` (one window can be the
-/// source of several), inside the source's work area. A minimized source
+/// window `occupied` says starts there (one window can be the source of
+/// several), inside the source's work area. A minimized source
 /// gives the rect it restores to; a source that is, or restores to,
 /// maximized gives its placement. A fullscreen source gives its monitor's
 /// rect, and the copy is fullscreen there too.
@@ -291,7 +317,7 @@ pub const Placement = struct {
 /// the one whose work area the cascade fits to (window-frame.md 2026-10-20
 /// FWDGEOM2). A fullscreen copy covers the monitor wherever its config
 /// would put it.
-pub fn place(p: *const Plan, occupied: []const POINT, own: ?Own) Placement {
+pub fn place(p: *const Plan, occupied: Occupied, own: ?Own) Placement {
     const source = p.source.?;
     const info = source.monitor.info;
     if (source.state.fullscreen) |back| return .{
@@ -320,7 +346,7 @@ pub fn place(p: *const Plan, occupied: []const POINT, own: ?Own) Placement {
         const step = cascadeStep(source.monitor.dpi);
         placed.rect = cascadedRect(rect, step, info.rcWork);
         var steps: u8 = 0;
-        while (steps < 8 and startsAt(occupied, placed.rect)) : (steps += 1) {
+        while (steps < 8 and occupied.startsAt(occupied.ctx, .{ .x = placed.rect.left, .y = placed.rect.top })) : (steps += 1) {
             placed.rect = cascadedRect(placed.rect, step, info.rcWork);
         }
     }
@@ -329,13 +355,6 @@ pub fn place(p: *const Plan, occupied: []const POINT, own: ?Own) Placement {
         if (own != null) placed.flags |= c.SWP_NOSIZE;
     }
     return placed;
-}
-
-fn startsAt(occupied: []const POINT, rect: RECT) bool {
-    for (occupied) |corner| {
-        if (corner.x == rect.left and corner.y == rect.top) return true;
-    }
-    return false;
 }
 
 /// Whether a window is, or when restored becomes, maximized. A window
@@ -706,7 +725,7 @@ test "win32 a copy goes one cascade step off its source, inside its work area, p
         },
     }) |case| {
         const p = plan(.copy, case.wants, case.forwarded, &case.source, .activate, c.OS_BUILD_WIN11_21H2);
-        const placed = place(&p, case.occupied, case.own);
+        const placed = place(&p, .of(&case.occupied), case.own);
         try std.testing.expectEqualDeep(case.rect, placed.rect);
         try std.testing.expectEqual(case.flags, placed.flags);
         try std.testing.expect(placed.maximize == null and placed.fullscreen == null);
@@ -728,13 +747,13 @@ test "win32 a copy of a maximized or fullscreen window starts in that state, and
         .{ .state = .{}, .placement = testPlacement(normal, c.WPF_RESTORETOMAXIMIZED, c.SW_SHOWMINIMIZED), .iconic = true, .monitor = portrait },
     }) |source| {
         const copy = plan(.copy, .{}, .{}, &source, .activate, c.OS_BUILD_WIN11_21H2);
-        var placed = place(&copy, &.{}, null);
+        var placed = place(&copy, .none, null);
         try std.testing.expectEqualDeep(testRect(-980, 100, -340, 580), placed.rect);
         try std.testing.expectEqual(@as(u32, c.SW_MAXIMIZE), placed.maximize.?.showCmd);
         try std.testing.expectEqualDeep(normal, placed.maximize.?.rcNormalPosition);
         // Its own size, at the source's normal top-left.
         const own_copy = plan(.copy, sized, forwarded, &source, .activate, c.OS_BUILD_WIN11_21H2);
-        placed = place(&own_copy, &.{}, .{ .size = .{ .width = 600, .height = 400 }, .here = portrait });
+        placed = place(&own_copy, .none, .{ .size = .{ .width = 600, .height = 400 }, .here = portrait });
         try std.testing.expectEqualDeep(testRect(-980, 100, -380, 500), placed.rect);
         try std.testing.expectEqualDeep(testRect(-980, 52, -380, 452), placed.maximize.?.rcNormalPosition);
     }
@@ -754,7 +773,7 @@ test "win32 a copy of a maximized or fullscreen window starts in that state, and
             .monitor = side,
         };
         const copy = plan(.copy, .{ .position = .{ .x = 10, .y = 20 } }, .{}, &source, .activate, c.OS_BUILD_WIN11_21H2);
-        const placed = place(&copy, &.{}, null);
+        const placed = place(&copy, .none, null);
         try std.testing.expectEqualDeep(side.info.rcMonitor, placed.rect);
         try std.testing.expectEqual(@as(u32, c.SWP_NOACTIVATE), placed.flags);
         try std.testing.expectEqualDeep(back, placed.fullscreen.?);
@@ -774,7 +793,7 @@ test "win32 a copy of a maximized or fullscreen window starts in that state, and
         const here, const expected = case;
         const source: Snapshot = .{ .state = .{ .fullscreen = back }, .rect = here.info.rcMonitor, .monitor = here };
         const copy = plan(.copy, sized, forwarded, &source, .activate, c.OS_BUILD_WIN11_21H2);
-        const placed = place(&copy, &.{}, .{ .size = .{ .width = 600, .height = 450 }, .here = here });
+        const placed = place(&copy, .none, .{ .size = .{ .width = 600, .height = 450 }, .here = here });
         try std.testing.expectEqualDeep(here.info.rcMonitor, placed.rect);
         const sized_back = placed.fullscreen.?;
         try std.testing.expectEqualDeep(expected, sized_back.rect);

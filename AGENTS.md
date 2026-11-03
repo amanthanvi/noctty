@@ -250,8 +250,9 @@ that govern each symbol you change, or that none does.
   what a new window copies from its source and which forwarded keys it keeps
   (`window_state.begin` and `advance`, with its `Origin` and
   `Host.pending_start`, in `win32/window_state.zig`; the pure `plan`,
-  `place`, `returnOn` and `Keeps` in `win32/window_start.zig`;
-  `Registry.newWindowSource`), `WM_DPICHANGED` and mixed-DPI moves,
+  `place` with its `Occupied`, `returnOn` and `Keeps` in
+  `win32/window_start.zig`; `Registry.newWindowSource` and
+  `windowStartsAt`), `WM_DPICHANGED` and mixed-DPI moves,
   `window-width`/`window-height`, `background-opacity` and DWM backdrop, the
   window menu, the quick terminal (`win32_quick_terminal.zig`,
   `win32/quick_terminal_host.zig`).

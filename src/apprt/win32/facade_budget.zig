@@ -58,7 +58,9 @@ const leaves = .{
         .file = "window_start.zig",
         .module = @import("window_start.zig"),
         .source = @embedFile("window_start.zig"),
-        .pub_decls = 28,
+        // why: `Occupied`, the port `place` asks for the windows on screen
+        // as it places a copy, so window_start.zig stays free of `sys`.
+        .pub_decls = 29,
     },
 };
 

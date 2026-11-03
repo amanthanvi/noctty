@@ -105,10 +105,6 @@ pub const PaneMetrics = struct {
 /// `advance` until its last stage.
 pub const Pending = struct {
     plan: window_start.Plan,
-    /// The corners of the windows on screen when a copy begins, which its
-    /// cascade steps past (`Registry.windowCorners`).
-    occupied: [32]POINT = undefined,
-    occupied_len: usize = 0,
     /// The metrics of the source's active pane, which a copy's first pane
     /// takes.
     source_pane: ?PaneMetrics = null,
@@ -117,10 +113,6 @@ pub const Pending = struct {
     restore: ?struct { saved: SavedPlacement, enter: Enter } = null,
     /// The last stage carried out.
     reached: ?Stage = null,
-
-    fn corners(self: *const Pending) []const POINT {
-        return self.occupied[0..self.occupied_len];
-    }
 };
 
 /// What `config` asks of how its window starts.
@@ -147,8 +139,9 @@ fn forwardedKeys(argv: []const [:0]const u8) window_start.Forwarded {
 }
 
 /// Decides how a new window with `config` starts, before it exists. A copy
-/// reads its source here, once: the window's state and geometry, the corners
-/// of the windows on screen and its active pane's metrics.
+/// reads its source here, once: the window's state and geometry and its
+/// active pane's metrics. The windows its cascade steps past are asked when
+/// it is placed (`occupiedAround`).
 pub fn begin(app: *const App, config: *const configpkg.Config, origin: Origin) !Pending {
     var pending: Pending = .{ .plan = undefined };
     var snapshot: ?window_start.Snapshot = null;
@@ -158,7 +151,6 @@ pub fn begin(app: *const App, config: *const configpkg.Config, origin: Origin) !
     switch (origin) {
         .copy => |copy| {
             snapshot = try snapshotOf(copy.source);
-            pending.occupied_len = app.registry.windowCorners(&pending.occupied).len;
             if (copy.source.activeSurface()) |pane| pending.source_pane = pane.metrics;
             argv = copy.forwarded;
         },
@@ -191,6 +183,17 @@ fn snapshotOf(source: *const Host) !window_start.Snapshot {
     if (sys.GetWindowPlacement(hwnd, &snapshot.placement) == 0 or
         sys.GetWindowRect(hwnd, &snapshot.rect) == 0) return lastError();
     return snapshot;
+}
+
+/// The windows the copy `host` steps past, asked as it is placed: every
+/// window on screen but the copy itself (`Registry.windowStartsAt`).
+fn occupiedAround(host: *const Host) window_start.Occupied {
+    return .{ .ctx = host, .startsAt = struct {
+        fn startsAt(ctx: *const anyopaque, corner: POINT) bool {
+            const copy: *const Host = @ptrCast(@alignCast(ctx));
+            return copy.app.registry.windowStartsAt(corner, copy.hwnd);
+        }
+    }.startsAt };
 }
 
 /// The steps of a new window's start that need the window, in this order,
@@ -247,7 +250,7 @@ fn onCreated(host: *Host, pending: *const Pending) !void {
     // A copy starts hidden where it will show, on its source's monitor, so
     // core init runs at that monitor's DPI.
     if (pending.plan.source == null) return;
-    const placed = window_start.place(&pending.plan, pending.corners(), null);
+    const placed = window_start.place(&pending.plan, occupiedAround(host), null);
     if (sys.SetWindowPos(
         hwnd,
         null,
@@ -888,7 +891,7 @@ fn takeSourceState(host: *Host, pending: *const Pending) !void {
             .here = try windowMonitor(hwnd),
         };
     }
-    const placed = window_start.place(&pending.plan, pending.corners(), own);
+    const placed = window_start.place(&pending.plan, occupiedAround(host), own);
     const top_level = &host.top_level;
     top_level.fullscreen = placed.fullscreen;
 
