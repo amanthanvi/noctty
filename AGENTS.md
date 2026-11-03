@@ -376,7 +376,8 @@ that govern each symbol you change, or that none does.
   with the loader (`cli/args.zig` `LineIterator.takes`, `read_failed`,
   `Config.loadReader`), the keyboard pin in Settings dialog tests
   (`TestingKeyboard.pinNone`), and the save path (`settingsSaveAndReload`,
-  `patchOrAppendEdits`, save target, masked values).
+  `patchOrAppendEdits`, save target, masked values, and the digest re-check
+  before the write: `App.settings_check`, `save_target.writeOver`).
 - [accessibility.md](docs/agents/log/accessibility.md): new widgets and UI
   events (adding a native widget, or changing its focus, children or
   notifiable properties); UIA providers under `src/apprt/win32_uia/` (COM
@@ -394,7 +395,8 @@ that govern each symbol you change, or that none does.
   back over `config-file` includes (`Config.parseManuallyHook`, and `note`
   and `finalizeCliLaunch` in `src/config/pane_launch.zig`), `newConfig` shallow
   clones, what `Surface.DerivedConfig` must own, `RepeatableCommand.clone`
-  and its C mirror (`value_c`, `Command.cval`), `+edit-config` and opening
+  and its C mirror (`value_c`, `Command.cval`), UTF-16 themes
+  (`Config.textReader`, `_undecodable_theme`), `+edit-config` and opening
   the config file, adding config keys.
 - [app-lifecycle.md](docs/agents/log/app-lifecycle.md): `App.init` and
   startup stalls, a cold `--launch-layout` (`App.startup_launch_layout`,
