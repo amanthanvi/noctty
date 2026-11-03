@@ -10051,6 +10051,65 @@ pub const App = struct {
         try std.testing.expect(std.mem.eql(u8, fresh_text, after));
     }
 
+    test "settings profile removal keeps a tombstone when the config as last read, already in the app's state, skipped a theme" {
+        if (builtin.os.tag != .windows) return error.SkipZigTest;
+        const alloc = std.testing.allocator;
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        try tmp.dir.writeFile(.{ .sub_path = "old-light", .data = "\xff\xfe\x00\xd8a\x00" });
+        try tmp.dir.writeFile(.{ .sub_path = "new-light", .data = "\n" });
+        try tmp.dir.writeFile(.{ .sub_path = "dark", .data = "\n" });
+        const old_light = try tmp.dir.realpathAlloc(alloc, "old-light");
+        defer alloc.free(old_light);
+        const new_light = try tmp.dir.realpathAlloc(alloc, "new-light");
+        defer alloc.free(new_light);
+        const dark = try tmp.dir.realpathAlloc(alloc, "dark");
+        defer alloc.free(dark);
+        const load = struct {
+            fn config(a: Allocator, file: []const u8) !configpkg.Config {
+                var cfg = try configpkg.Config.default(a);
+                errdefer cfg.deinit();
+                try cfg.loadFile(a, file);
+                try cfg.loadRecursiveFiles(a);
+                try cfg.finalize();
+                return cfg;
+            }
+        }.config;
+        // The config as last read, in the light state the app runs in: its
+        // light theme did not decode, so whatever that theme defined is
+        // missing from it. The draft removes `py`.
+        const held_text = try std.fmt.allocPrint(alloc, "theme = light:{s},dark:{s}\nprofile-command = py: python.exe\n", .{ old_light, dark });
+        defer alloc.free(held_text);
+        try tmp.dir.writeFile(.{ .sub_path = "config", .data = held_text });
+        const path = try tmp.dir.realpathAlloc(alloc, "config");
+        defer alloc.free(path);
+        var held = try load(alloc, path);
+        defer held.deinit();
+        try std.testing.expect(held._undecodable_theme != null);
+        var pending = try held.clone(alloc);
+        defer pending.deinit();
+        try pending.@"profile-command".parseCLI(pending._arena.?.allocator(), "py:");
+        // Since then the file names a readable light theme.
+        const fresh_text = try std.fmt.allocPrint(alloc, "theme = light:{s},dark:{s}\nprofile-command = py: python.exe\n", .{ new_light, dark });
+        defer alloc.free(fresh_text);
+        try tmp.dir.writeFile(.{ .sub_path = "config", .data = fresh_text });
+        var detail: win32_settings.FailureDetail = .{};
+        defer detail.clear(alloc);
+        var arena: std.heap.ArenaAllocator = .init(alloc);
+        defer arena.deinit();
+        const fresh = try load(alloc, path);
+        // Nothing names `py` in the fresh reading, but the held one could
+        // not read everything, so it may have missed what does: the line
+        // becomes a tombstone, not a deletion. The save is not refused for a
+        // marker that may be stale.
+        const edits = try App.settingsProfileEditsFromDisk(arena.allocator(), alloc, &detail, fresh, &held, .{}, &held, &pending, path);
+        var command: ?settings_patch.Edit = null;
+        for (edits) |e| if (e.field == .command and std.mem.eql(u8, "py", e.id)) {
+            command = e;
+        };
+        try std.testing.expect((command orelse return error.TestExpectedEdit).op == .unset);
+    }
+
     test "SET editor request stays deferred, rechecks safety and reports host failure" {
         if (builtin.os.tag != .windows) return error.SkipZigTest;
         var core_app: CoreApp = undefined;

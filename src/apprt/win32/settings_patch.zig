@@ -656,9 +656,15 @@ pub fn unreadConfigFile(config: *const Config) ?Unread {
 /// or a reference names it (`profile-order`, `profile-hidden`,
 /// `default-profile`, as the config the index was made from holds them).
 /// Deleting its last `profile-command` line would then leave the loader
-/// something that names no profile.
+/// something that names no profile. A reading that could not read every
+/// file (`unreadConfigFile`) may have missed what names it, so it counts as
+/// naming it: the line becomes a tombstone, one line more at worst. The
+/// config as last read is one, since its markers are from that read and
+/// the files may have been repaired since; a fresh reading with one never
+/// gets here (the save stops on it).
 fn referencedElsewhere(readings: []const origin.Index, id: []const u8, path: []const u8, same: origin.SamePath) bool {
     for (readings) |*problems| {
+        if (unreadConfigFile(problems.config) != null) return true;
         for ([_]Field{ .command, .name, .folder, .env }) |field| {
             if (problems.givesElsewhere(field.key(), id, null, path, same)) return true;
         }
