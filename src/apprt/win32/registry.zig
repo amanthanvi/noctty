@@ -8,6 +8,7 @@ const Host = win32.Host;
 const Surface = win32.Surface;
 const Tab = win32.Tab;
 const HWND = win32.HWND;
+const POINT = win32.POINT;
 const RECT = win32.RECT;
 const sys = @import("sys.zig");
 const win32_structural_history = @import("../win32_structural_history.zig");
@@ -95,17 +96,21 @@ pub const Registry = struct {
         return surface;
     }
 
-    /// Whether a window on screen has its top-left corner where `rect` does,
-    /// other than `except`.
-    pub fn windowStartsAt(self: *Registry, rect: RECT, except: ?HWND) bool {
+    /// The top-left corners of the windows on screen (shown and not
+    /// minimized), the first `buf.len` of them: where a new window opened
+    /// from one of them does not start (`window_start.place`).
+    pub fn windowCorners(self: *const Registry, buf: []POINT) []POINT {
+        var count: usize = 0;
         for (self.hosts.items) |host| {
+            if (count == buf.len) break;
             const hwnd = host.hwnd orelse continue;
-            if (hwnd == except or sys.IsWindowVisible(hwnd) == 0 or sys.IsIconic(hwnd) != 0) continue;
-            var other: RECT = undefined;
-            if (sys.GetWindowRect(hwnd, &other) == 0) continue;
-            if (other.left == rect.left and other.top == rect.top) return true;
+            if (sys.IsWindowVisible(hwnd) == 0 or sys.IsIconic(hwnd) != 0) continue;
+            var rect: RECT = undefined;
+            if (sys.GetWindowRect(hwnd, &rect) == 0) continue;
+            buf[count] = .{ .x = rect.left, .y = rect.top };
+            count += 1;
         }
-        return false;
+        return buf[0..count];
     }
 
     pub fn findSurfaceForTarget(self: *Registry, target: apprt.Target) ?*Surface {
@@ -522,21 +527,25 @@ test "Registry shown target and window position lookups use current native visib
             defer fixture.first.hwnd = null;
             defer fixture.second.hwnd = null;
             try std.testing.expect(registry.shownSurfaceForTarget(.app) == null);
+            var corners: [4]POINT = undefined;
             var rect: RECT = undefined;
             try std.testing.expect(sys.GetWindowRect(second, &rect) != 0);
-            try std.testing.expect(!registry.windowStartsAt(rect, null));
+            try std.testing.expectEqual(@as(usize, 0), registry.windowCorners(&corners).len);
             _ = sys.ShowWindow(second, @import("consts.zig").SW_SHOWNOACTIVATE);
             try std.testing.expectEqual(&fixture.c, registry.shownSurfaceForTarget(.app).?);
-            try std.testing.expect(registry.windowStartsAt(rect, null));
-            try std.testing.expect(!registry.windowStartsAt(rect, second));
+            const shown = registry.windowCorners(&corners);
+            try std.testing.expectEqual(@as(usize, 1), shown.len);
+            try std.testing.expectEqual(rect.left, shown[0].x);
+            try std.testing.expectEqual(rect.top, shown[0].y);
             _ = sys.ShowWindow(first, @import("consts.zig").SW_SHOWNOACTIVATE);
             try std.testing.expectEqual(&fixture.a, registry.shownSurfaceForTarget(.app).?);
             try std.testing.expectEqual(&fixture.c, registry.shownSurfaceForTarget(.{ .surface = &fixture.c.core_surface }).?);
+            try std.testing.expectEqual(@as(usize, 2), registry.windowCorners(&corners).len);
+            // No more than the buffer holds.
+            try std.testing.expectEqual(@as(usize, 1), registry.windowCorners(corners[0..1]).len);
             _ = sys.ShowWindow(second, @import("consts.zig").SW_MINIMIZE);
-            // Hide the other window to distinguish iconic exclusion from
-            // matching its coincident default position.
             _ = sys.ShowWindow(first, @import("consts.zig").SW_HIDE);
-            try std.testing.expect(!registry.windowStartsAt(rect, null));
+            try std.testing.expectEqual(@as(usize, 0), registry.windowCorners(&corners).len);
         }
     }.run);
 }

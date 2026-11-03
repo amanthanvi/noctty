@@ -19,7 +19,7 @@ const budget = .{
         .palette_controller_runtime = 44,
         .palette_controller_test_runtime = 7,
         .window_state_runtime = 22,
-        .window_state_test_runtime = 21,
+        .window_state_test_runtime = 18,
         .host_test_runtime = 2,
         .surface_presentation_runtime = 12,
         .surface_presentation_test_runtime = 3,
@@ -61,7 +61,7 @@ const leaves = .{
         .file = "window_start.zig",
         .module = @import("window_start.zig"),
         .source = @embedFile("window_start.zig"),
-        .pub_decls = 13,
+        .pub_decls = 23,
     },
 };
 

@@ -102,11 +102,13 @@ foreach ($movedWin32TestModule in $movedWin32TestFloors.Keys) {
 # launch step 4b). notifications.zig's 23 are the toast lifecycle's, the
 # click's and the cold toast wait's tests at its interface, which replaced
 # App's, Host's, Surface's and Registry's, and the two cold-wait tests that
-# moved from win32.zig. window_state.zig's floor is 36 since six of its start
-# tests (the kept forwarded keys, maximize/fullscreen per kind, the
-# decoration, startup-style, initial-decoration and effective-style
-# helpers) became rows of the pure `plan` tests in window_start.zig, which
-# window_state.zig imports (window state, step 3).
+# moved from win32.zig. window_state.zig's floor is 25: six of its start tests
+# (the kept forwarded keys, maximize/fullscreen per kind, the decoration,
+# startup-style, initial-decoration and effective-style helpers) became rows
+# of the pure `plan` tests in window_start.zig, which window_state.zig
+# imports (window state, step 3), and its eight new-window placement tests,
+# the fullscreen-restore rect test and the two initial-opacity tests became
+# the pure `place` tables there and first-show assertions (step 4).
 # Lower one only for a deliberate consolidation.
 # test_support.zig declares no tests, so it has no floor.
 $extractedWin32TestModules = [ordered]@{
@@ -116,7 +118,7 @@ $extractedWin32TestModules = [ordered]@{
     'terminal_window.zig' = @{ Binding = 'terminal_window_module'; Floor = 23 }
     'session.zig' = @{ Binding = 'session_module'; Floor = 28 }
     'quick_terminal_host.zig' = @{ Binding = 'quick_terminal_host'; Floor = 10 }
-    'window_state.zig' = @{ Binding = 'window_state'; Floor = 36 }
+    'window_state.zig' = @{ Binding = 'window_state'; Floor = 25 }
     'surface_presentation.zig' = @{ Binding = 'surface_presentation'; Floor = 15 }
     'search_controls.zig' = @{ Binding = 'search_controls'; Floor = 4 }
     'overlay_session.zig' = @{ Binding = 'overlay_session'; Floor = 2 }

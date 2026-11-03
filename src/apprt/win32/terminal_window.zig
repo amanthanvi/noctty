@@ -911,8 +911,6 @@ pub const Surface = struct {
         // need an initial occlusion sync so hidden child GL surfaces stop
         // rendering before activation ordering runs.
         const activate_during_init = shouldShowSurfaceImmediately(opts.host_id);
-        // How the window this init created starts (`window_state.begin`).
-        const start: ?window_state.Pending = if (created_host) host.pending_start else null;
         self.setVisible(activate_during_init);
         sys.DragAcceptFiles(hwnd, 1);
 
@@ -925,33 +923,10 @@ pub const Surface = struct {
         // unchanged for a surface that started unfocused.
         self.focusChanged(self.window_focused);
         if (activate_during_init) {
-            // Must stay ahead of every path below that can show the host
-            // window (`SW_SHOWNOACTIVATE` / `presentWindow`): applying the
-            // layered style to an already-visible window is what produces an
-            // opaque-then-fade flash. The window-start fixture reads the
-            // style at the first show ("... layered at their opacity at the
-            // first show" in window_state.zig).
-            window_state.applyInitialBackgroundOpacity(host);
-            try host.refreshChrome();
-            try host.layout();
-            // `maximize` and `fullscreen` (#496), before the first show, so
-            // the window first appears in that state. Core init has already
-            // given it `window-width`/`window-height`, so that is the normal
-            // rect it returns to. A clone takes them once it has the
-            // source's state, below.
-            if (start) |plan| if (plan.plan.kind != .copy) window_state.applyWindowStart(host, plan.plan.enter);
-            // The top-level host was created hidden and stays hidden until GL
-            // and core initialization have succeeded, so a startup failure
-            // reaches the fatal dialog without first presenting a blank host
-            // window. Same-host tabs and splits never take this path.
-            const show = if (start) |plan| plan.plan.show else .activate;
-            if (show.showCommand()) |show_command| {
-                if (host.hwnd) |host_hwnd| {
-                    _ = sys.ShowWindow(host_hwnd, show_command);
-                    _ = sys.UpdateWindow(host_hwnd);
-                }
-            }
-            if (show.takesFocus()) self.presentWindow();
+            // The window this init created, hidden until now, is shown as
+            // its start says (`window_state.begin`). Same-host tabs and
+            // splits never take this path.
+            if (try window_state.advance(host, .before_show) == .take) self.presentWindow();
             if (app.update_startup_ready) {
                 // The first window of a start that opened none (initial-window
                 // off) is where the failed-install banner can first show.
@@ -959,15 +934,8 @@ pub const Surface = struct {
                 app.maybeScheduleAutomaticUpdateCheck();
             }
             try self.requestRepaint();
+            try window_state.advance(host, .after_show);
         }
-
-        if (start) |plan| if (plan.plan.source) |source| {
-            if (plan.source_pane) |metrics| window_state.copyPaneMetrics(self, metrics, plan.plan.keeps);
-            try window_state.inheritWindowStateFrom(host, source.state, plan.source_hwnd, plan.plan.keeps);
-            // After it: a normal source ends in SW_RESTORE.
-            window_state.applyWindowStart(host, plan.plan.enter);
-        };
-        if (created_host) host.pending_start = null;
         if (shell_prepared) |*prepared| {
             try prepared.commit(&app.shell_runtime);
             self.shell_committed = true;

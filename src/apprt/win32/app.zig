@@ -6204,7 +6204,7 @@ pub const App = struct {
     /// decorated as that window's own config says, a forwarded launch's keys
     /// included, or as the window it is opened from.
     pub fn createHost(self: *App, title: LPCWSTR, config: *const configpkg.Config, origin: window_state.Origin) !*Host {
-        const start = window_state.begin(self, config, origin);
+        const start = try window_state.begin(self, config, origin);
         try self.ensureHostWindowClass();
         try self.ensurePaletteListClass();
         try self.ensureScrollbarClass();

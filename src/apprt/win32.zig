@@ -342,10 +342,7 @@ pub const window_state_test_runtime = if (builtin.is_test) .{
     .TestSession = TestSession,
     .WindowStartTestApp = WindowStartTestApp,
     .builtin = builtin,
-    .createTestHostWindow = createTestHostWindow,
     .default_title = default_title,
-    .deinitTestHostWindowFixture = deinitTestHostWindowFixture,
-    .initTestHostWindowFixture = initTestHostWindowFixture,
     .monitorInfo = monitorInfo,
     .placementTestApp = placementTestApp,
     .placementTestHost = placementTestHost,
@@ -19680,10 +19677,11 @@ test "win32 createHost frames an undecorated host for its Windows build" {
     app.config.@"window-decoration" = .none;
 
     // `createHost` as a `new_window` clone calls it: the decoration state
-    // comes from the source window rather than the config. A source with no
-    // window is not cascaded from, and the rest of the clone path
-    // (`inheritWindowStateFrom`) is not exercised here.
-    const source: Host = .{ .app = app, .id = 99, .top_level = .{ .decorations_visible = false } };
+    // comes from the source window rather than the config. The rest of the
+    // clone path (`window_state.advance(.after_show)`) is not exercised here.
+    const source_hwnd = try createTestHostWindow();
+    defer _ = sys.DestroyWindow(source_hwnd);
+    const source: Host = .{ .app = app, .id = 99, .hwnd = source_hwnd, .top_level = .{ .decorations_visible = false } };
 
     // Both builds run against this machine's window manager; only the
     // build-gated choices differ.

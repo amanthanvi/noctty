@@ -715,9 +715,10 @@ pub fn Fixtures(comptime runtime: anytype) type {
             try std.testing.expectEqual(@as(?HWND, null), child);
         }
 
-        /// Assemble the state `Surface.init` has built by the time it calls
-        /// `applyInitialBackgroundOpacity`: a freshly created host window whose
-        /// single tab already focuses this surface. Caller owns `host.tabs`.
+        /// Assemble the state `Surface.init` has built by the time it first
+        /// shows its window (`window_state.advance(.before_show)`): a freshly
+        /// created host window whose single tab already focuses this surface.
+        /// Caller owns `host.tabs`.
         pub fn initTestHostWindowFixture(host: *Host, surface: *Surface, hwnd: HWND) !void {
             host.id = 234;
             host.hwnd = hwnd;

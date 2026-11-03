@@ -1260,22 +1260,18 @@ pub fn sessionWindowPlacementOn(host: *Host, monitor: ?MONITORINFO) ?SessionWind
 /// Never substitute the fullscreen popup's bounds for its normal rect.
 pub fn sessionFullscreenWindowPlacement(
     saved: window_state.TopLevel.Return,
-    result: anyerror!window_state.FullscreenReturn,
+    result: anyerror!window_state.TopLevel.Return,
     monitor: ?MONITORINFO,
 ) ?SessionWindowPlacement {
     const back = result catch |err| fallback: {
         log.warn("win32 session save: fullscreen window placement failed; using captured placement err={}", .{err});
-        break :fallback window_state.FullscreenReturn{
-            .rect = saved.rect,
-            .placement = saved.placement,
-            .monitor = if (saved.monitor) |source| source.info else null,
-        };
+        break :fallback saved;
     };
     const maximized = back.placement.showCmd == c.SW_MAXIMIZE;
     var rect = back.rect;
     if (maximized) {
         rect = back.placement.rcNormalPosition;
-        if (monitor orelse back.monitor) |info| rect = workspaceRectToScreen(rect, info);
+        if (monitor orelse if (back.monitor) |here| here.info else null) |info| rect = workspaceRectToScreen(rect, info);
     }
     if (rect.right <= rect.left or rect.bottom <= rect.top) return null;
     return .{ .rect = rect, .maximized = maximized, .fullscreen = true };

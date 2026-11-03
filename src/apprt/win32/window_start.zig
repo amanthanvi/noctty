@@ -137,7 +137,19 @@ pub const Forwarded = packed struct(u3) {
 };
 
 /// The window a copy is opened from, read once when the copy begins.
-pub const Snapshot = struct { state: TopLevel };
+pub const Snapshot = struct {
+    state: TopLevel,
+    /// Its rect, in screen coordinates. Once it is minimized this is a sliver
+    /// under the taskbar, not its place (window-frame.md 2026-10-15).
+    rect: RECT = std.mem.zeroes(RECT),
+    /// Its placement. `rcNormalPosition` is in the workspace coordinates of
+    /// `monitor`.
+    placement: WINDOWPLACEMENT = std.mem.zeroes(WINDOWPLACEMENT),
+    iconic: bool = false,
+    zoomed: bool = false,
+    /// The monitor it is on (minimized, the one it was on), at its DPI.
+    monitor: Monitor = .{ .id = 0, .info = std.mem.zeroes(MONITORINFO), .dpi = 96 },
+};
 
 /// What a new window keeps of its own config over the state it copies
 /// from the window it is opened from. By default it copies that window's
@@ -229,6 +241,220 @@ pub fn plan(kind: Kind, wants: Wants, forwarded: Forwarded, source: ?*const Snap
     };
 }
 
+/// A window's outer size, in physical pixels.
+pub const WindowSize = struct { width: i32, height: i32 };
+
+/// A copy's own size (`Keeps.size`), measured where core init sized it,
+/// before it takes its source's state, and the monitor it is on there.
+pub const Own = struct { size: WindowSize, here: Monitor };
+
+/// Where a copy goes, and what it leaves fullscreen to (`place`).
+pub const Placement = struct {
+    /// In screen coordinates.
+    rect: RECT,
+    /// `SetWindowPos` flags.
+    flags: u32,
+    /// Set when the source is, or restores to, maximized: its placement,
+    /// which the copy is maximized with, so its normal rect is the source's.
+    maximize: ?WINDOWPLACEMENT = null,
+    /// The source's fullscreen return, when the source is fullscreen.
+    fullscreen: ?TopLevel.Return = null,
+};
+
+/// Where the copy `p` plans goes. A normal source gives its size, one
+/// cascade step down and right so the copy does not sit on it, on past any
+/// window whose top-left corner is in `occupied` (one window can be the
+/// source of several), inside the source's work area. A minimized source
+/// gives the rect it restores to; a source that is, or restores to,
+/// maximized gives its placement. A fullscreen source gives its monitor's
+/// rect, and the copy is fullscreen there too.
+///
+/// `window-position-x/y` say where every new window goes, so with them
+/// (`Keeps.position`) the copy keeps the place it was created at and takes
+/// only the size; with a size of its own as well (`own`) it takes neither,
+/// because core init sized it where it is, which can be another monitor than
+/// the one whose work area the cascade fits to (window-frame.md 2026-10-20
+/// FWDGEOM2). A fullscreen copy covers the monitor wherever its config
+/// would put it.
+pub fn place(p: *const Plan, occupied: []const POINT, own: ?Own) Placement {
+    const source = p.source.?;
+    const info = source.monitor.info;
+    if (source.state.fullscreen) |back| return .{
+        .rect = info.rcMonitor,
+        .flags = c.SWP_NOACTIVATE,
+        .fullscreen = if (own) |mine| sizedReturn(back, mine) else back,
+    };
+
+    var placed: Placement = .{ .rect = undefined, .flags = c.SWP_NOACTIVATE };
+    if (restoresMaximized(source.zoomed, source.iconic, &source.placement)) {
+        // It is maximized again, never minimized with it.
+        var placement = source.placement;
+        placement.showCmd = c.SW_MAXIMIZE;
+        placed.rect = workspaceRectToScreen(placement.rcNormalPosition, info);
+        if (own) |mine| {
+            placed.rect = fitRectInWork(placed.rect.left, placed.rect.top, mine.size.width, mine.size.height, info.rcWork);
+            placement.rcNormalPosition = screenRectToWorkspace(placed.rect, info);
+        }
+        placed.maximize = placement;
+    } else {
+        var rect = if (source.iconic) workspaceRectToScreen(source.placement.rcNormalPosition, info) else source.rect;
+        if (own) |mine| {
+            rect.right = rect.left + mine.size.width;
+            rect.bottom = rect.top + mine.size.height;
+        }
+        const step = cascadeStep(source.monitor.dpi);
+        placed.rect = cascadedRect(rect, step, info.rcWork);
+        var steps: u8 = 0;
+        while (steps < 8 and startsAt(occupied, placed.rect)) : (steps += 1) {
+            placed.rect = cascadedRect(placed.rect, step, info.rcWork);
+        }
+    }
+    if (p.keeps.position) {
+        placed.flags |= c.SWP_NOMOVE;
+        if (own != null) placed.flags |= c.SWP_NOSIZE;
+    }
+    return placed;
+}
+
+fn startsAt(occupied: []const POINT, rect: RECT) bool {
+    for (occupied) |corner| {
+        if (corner.x == rect.left and corner.y == rect.top) return true;
+    }
+    return false;
+}
+
+/// Whether a window is, or when restored becomes, maximized. A window
+/// minimized from maximized restores to maximized. The flag alone says
+/// nothing about a window that was restored since: Windows keeps it set on a
+/// normal window.
+pub fn restoresMaximized(zoomed: bool, iconic: bool, placement: *const WINDOWPLACEMENT) bool {
+    return zoomed or (iconic and placement.flags & c.WPF_RESTORETOMAXIMIZED != 0);
+}
+
+/// What a window that entered fullscreen as `back` returns to when it
+/// leaves fullscreen on `here`: on another monitor or DPI, moved by the
+/// work areas' offset, scaled by the DPIs and fitted to `here`'s work area
+/// (window-frame.md 2026-10-11). `rcNormalPosition` goes from the workspace
+/// coordinates of the monitor it entered on to `here`'s.
+pub fn returnOn(back: TopLevel.Return, here: Monitor) TopLevel.Return {
+    const from = back.monitor orelse return back;
+    var moved = back;
+    moved.monitor = here;
+    if (here.id != from.id or here.dpi != from.dpi) {
+        moved.rect = fullscreenRestoreRect(back.rect, from.info.rcWork, here.info.rcWork, from.dpi, here.dpi);
+        const normal = workspaceRectToScreen(back.placement.rcNormalPosition, from.info);
+        moved.placement.rcNormalPosition = screenRectToWorkspace(
+            fullscreenRestoreRect(normal, from.info.rcWork, here.info.rcWork, from.dpi, here.dpi),
+            here.info,
+        );
+    }
+    return moved;
+}
+
+/// The return a copy with a size of its own takes from a fullscreen source:
+/// the source's, as leaving fullscreen where the copy is gives it, then at
+/// the copy's size and inside the work area there. The source's return is in
+/// the pixels of the monitor it entered fullscreen on, which leaving scales
+/// from, and the size is in the copy's, so leaving must not scale it again
+/// (window-frame.md 2026-10-20 FWDGEOM2).
+fn sizedReturn(back: TopLevel.Return, own: Own) TopLevel.Return {
+    var sized = returnOn(back, own.here);
+    const info = own.here.info;
+    const size = own.size;
+    sized.monitor = own.here;
+    sized.rect = fitRectInWork(sized.rect.left, sized.rect.top, size.width, size.height, info.rcWork);
+    const normal = workspaceRectToScreen(sized.placement.rcNormalPosition, info);
+    sized.placement.rcNormalPosition = screenRectToWorkspace(
+        fitRectInWork(normal.left, normal.top, size.width, size.height, info.rcWork),
+        info,
+    );
+    return sized;
+}
+
+fn fullscreenRestoreRect(rect: RECT, old_work: RECT, new_work: RECT, old_dpi: u32, new_dpi: u32) RECT {
+    const width = rect.right - rect.left;
+    const height = rect.bottom - rect.top;
+    const scale = old_dpi > 0 and new_dpi > 0;
+    return fitRectInWork(
+        rect.left + new_work.left - old_work.left,
+        rect.top + new_work.top - old_work.top,
+        if (scale) mulDiv(width, @intCast(new_dpi), @intCast(old_dpi)) else width,
+        if (scale) mulDiv(height, @intCast(new_dpi), @intCast(old_dpi)) else height,
+        new_work,
+    );
+}
+
+/// The rect at (`left`, `top`) of the given size, moved to the nearest place
+/// inside `work`. Keep the logical size when it fits. An oversized rectangle
+/// can overlap a neighbour more than this monitor, causing Windows to select
+/// that neighbour's DPI again; cap it to the work area.
+pub fn fitRectInWork(left: i32, top: i32, width: i32, height: i32, work: RECT) RECT {
+    const fitted_width = @min(width, work.right - work.left);
+    const fitted_height = @min(height, work.bottom - work.top);
+    const fitted_left = @max(work.left, @min(left, work.right - fitted_width));
+    const fitted_top = @max(work.top, @min(top, work.bottom - fitted_height));
+    return .{
+        .left = fitted_left,
+        .top = fitted_top,
+        .right = fitted_left + fitted_width,
+        .bottom = fitted_top + fitted_height,
+    };
+}
+
+/// How far a new window sits below and right of the one it was opened from,
+/// about a caption height.
+pub fn cascadeStep(dpi: u32) i32 {
+    return mulDiv(32, @intCast(@max(dpi, 96)), 96);
+}
+
+/// `rect` moved `step` down and right, kept inside `work`.
+fn cascadedRect(rect: RECT, step: i32, work: RECT) RECT {
+    return fitRectInWork(rect.left + step, rect.top + step, rect.right - rect.left, rect.bottom - rect.top, work);
+}
+
+/// A rect in workspace coordinates (what `GetWindowPlacement` reports for a
+/// window without `WS_EX_TOOLWINDOW`) as screen coordinates, for the monitor
+/// the window is on. This is the convention leaving fullscreen uses.
+pub fn workspaceRectToScreen(rect: RECT, monitor: MONITORINFO) RECT {
+    const dx = monitor.rcWork.left - monitor.rcMonitor.left;
+    const dy = monitor.rcWork.top - monitor.rcMonitor.top;
+    return .{
+        .left = rect.left + dx,
+        .top = rect.top + dy,
+        .right = rect.right + dx,
+        .bottom = rect.bottom + dy,
+    };
+}
+
+/// The inverse of `workspaceRectToScreen`.
+pub fn screenRectToWorkspace(rect: RECT, info: MONITORINFO) RECT {
+    const dx = info.rcWork.left - info.rcMonitor.left;
+    const dy = info.rcWork.top - info.rcMonitor.top;
+    return .{
+        .left = rect.left - dx,
+        .top = rect.top - dy,
+        .right = rect.right - dx,
+        .bottom = rect.bottom - dy,
+    };
+}
+
+/// kernel32's `MulDiv`, which this file cannot call: the product in 64
+/// bits, rounded half away from zero, and -1 for a zero denominator or a
+/// result that does not fit.
+fn mulDiv(number: i32, numerator: i32, denominator: i32) i32 {
+    if (denominator == 0) return -1;
+    var a: i64 = number;
+    var d: i64 = denominator;
+    if (d < 0) {
+        a = -a;
+        d = -d;
+    }
+    const product = a * numerator;
+    const half = @divTrunc(d, 2);
+    const rounded = if ((a < 0) == (numerator < 0)) product + half else product - half;
+    return std.math.cast(i32, @divTrunc(rounded, d)) orelse -1;
+}
+
 test "win32 a new window keeps what its own config places and a forward sets, and copies the rest" {
     const sized: Wants = .{ .sized = true };
     try std.testing.expectEqual(Keeps{}, plan(.copy, .{}, .{}, null, .activate, 0).keeps);
@@ -297,6 +523,214 @@ test "win32 a new window is created framed, bare or a popup as its state and Win
         try std.testing.expectEqual(case.hide_border, p.hide_border);
         try std.testing.expect(p.style & c.WS_VISIBLE == 0);
     }
+}
+
+fn testRect(left: i32, top: i32, right: i32, bottom: i32) RECT {
+    return .{ .left = left, .top = top, .right = right, .bottom = bottom };
+}
+
+fn testMonitor(id: usize, dpi: u32, monitor: RECT, work: RECT) Monitor {
+    return .{ .id = id, .dpi = dpi, .info = .{ .cbSize = @sizeOf(MONITORINFO), .rcMonitor = monitor, .rcWork = work, .dwFlags = 0 } };
+}
+
+fn testPlacement(normal: RECT, flags: u32, show_cmd: u32) WINDOWPLACEMENT {
+    var placement = std.mem.zeroes(WINDOWPLACEMENT);
+    placement.length = @sizeOf(WINDOWPLACEMENT);
+    placement.flags = flags;
+    placement.showCmd = show_cmd;
+    placement.rcNormalPosition = normal;
+    return placement;
+}
+
+/// The three monitors window-frame.md 2026-10-20 (FWDGEOM2) measured on: a
+/// 3840x2160 at 144 DPI, a 1920x1080 at 96 DPI right of it, and a portrait
+/// 1080x1920 at 96 DPI left of it whose taskbar is at the top, so that
+/// workspace and screen coordinates differ there. As values they run on a
+/// runner with one monitor.
+const test_monitors = struct {
+    const big = testMonitor(1, 144, testRect(0, 0, 3840, 2160), testRect(0, 0, 3840, 2088));
+    const side = testMonitor(2, 96, testRect(3840, 0, 5760, 1080), testRect(3840, 0, 5760, 1032));
+    const portrait = testMonitor(3, 96, testRect(-1080, 0, 0, 1920), testRect(-1080, 48, 0, 1920));
+};
+
+test "win32 a copy goes one cascade step off its source, inside its work area, past the windows already there" {
+    const big = test_monitors.big;
+    const own: Own = .{ .size = .{ .width = 900, .height = 700 }, .here = big };
+    const normal: Snapshot = .{ .state = .{}, .rect = testRect(100, 100, 1380, 900), .monitor = big };
+    const Case = struct {
+        source: Snapshot,
+        wants: Wants = .{},
+        forwarded: Forwarded = .{},
+        occupied: []const POINT = &.{},
+        own: ?Own = null,
+        rect: RECT,
+        flags: u32 = c.SWP_NOACTIVATE,
+    };
+    for ([_]Case{
+        // One step, 48 px at 144 DPI, at the source's size.
+        .{ .source = normal, .rect = testRect(148, 148, 1428, 948) },
+        // On past the windows already there, so the third copy of one
+        // window goes where the first two are not.
+        .{ .source = normal, .occupied = &.{ .{ .x = 148, .y = 148 }, .{ .x = 196, .y = 196 } }, .rect = testRect(244, 244, 1524, 1044) },
+        // At the corner of its work area there is no room to step: it stays
+        // on the monitor, at the same size, over the source.
+        .{
+            .source = .{ .state = .{}, .rect = testRect(3200, 1608, 3840, 2088), .monitor = big },
+            .occupied = &.{.{ .x = 3200, .y = 1608 }},
+            .rect = testRect(3200, 1608, 3840, 2088),
+        },
+        // Minimized: the rect it restores to, from workspace to screen
+        // coordinates under the portrait's top taskbar, not the sliver it
+        // has under the taskbar.
+        .{
+            .source = .{
+                .state = .{},
+                .rect = testRect(-1080, 1880, -843, 1919),
+                .placement = testPlacement(testRect(-980, 52, -340, 532), 0, c.SW_SHOWMINIMIZED),
+                .iconic = true,
+                .monitor = test_monitors.portrait,
+            },
+            .rect = testRect(-948, 132, -308, 612),
+        },
+        // Maximized, minimized and restored twice, a normal window keeps
+        // WPF_RESTORETOMAXIMIZED in its placement: its copy is normal too.
+        .{
+            .source = .{ .state = .{}, .rect = testRect(100, 100, 1380, 900), .placement = testPlacement(testRect(100, 100, 1380, 900), c.WPF_RESTORETOMAXIMIZED, c.SW_RESTORE), .monitor = big },
+            .rect = testRect(148, 148, 1428, 948),
+        },
+        // `window-position-x/y` keep the place it was created at; the size
+        // is the source's.
+        .{ .source = normal, .wants = .{ .position = .{ .x = 300, .y = 310 } }, .rect = testRect(148, 148, 1428, 948), .flags = c.SWP_NOACTIVATE | c.SWP_NOMOVE },
+        // A size of its own replaces the source's, one step off it.
+        .{ .source = normal, .wants = .{ .sized = true }, .forwarded = .{ .size = true }, .own = own, .rect = testRect(148, 148, 1048, 848) },
+        // Placed and sized by its own config it takes neither: core init
+        // sized it where it is, which can be past this work area.
+        .{
+            .source = normal,
+            .wants = .{ .position = .{ .x = 300, .y = 310 }, .sized = true },
+            .forwarded = .{ .size = true },
+            .own = own,
+            .rect = testRect(148, 148, 1048, 848),
+            .flags = c.SWP_NOACTIVATE | c.SWP_NOMOVE | c.SWP_NOSIZE,
+        },
+    }) |case| {
+        const p = plan(.copy, case.wants, case.forwarded, &case.source, .activate, c.OS_BUILD_WIN11_21H2);
+        const placed = place(&p, case.occupied, case.own);
+        try std.testing.expectEqualDeep(case.rect, placed.rect);
+        try std.testing.expectEqual(case.flags, placed.flags);
+        try std.testing.expect(placed.maximize == null and placed.fullscreen == null);
+    }
+}
+
+test "win32 a copy of a maximized or fullscreen window starts in that state, and its own size stays its own" {
+    const sized: Wants = .{ .sized = true };
+    const forwarded: Forwarded = .{ .size = true };
+
+    // Maximized, or minimized from maximized: maximized again, never
+    // minimized with it, over the source's normal rect, which the window
+    // is placed at first (in screen coordinates) and keeps (in workspace
+    // ones).
+    const portrait = test_monitors.portrait;
+    const normal = testRect(-980, 52, -340, 532);
+    for ([_]Snapshot{
+        .{ .state = .{}, .placement = testPlacement(normal, 0, c.SW_MAXIMIZE), .zoomed = true, .monitor = portrait },
+        .{ .state = .{}, .placement = testPlacement(normal, c.WPF_RESTORETOMAXIMIZED, c.SW_SHOWMINIMIZED), .iconic = true, .monitor = portrait },
+    }) |source| {
+        const copy = plan(.copy, .{}, .{}, &source, .activate, c.OS_BUILD_WIN11_21H2);
+        var placed = place(&copy, &.{}, null);
+        try std.testing.expectEqualDeep(testRect(-980, 100, -340, 580), placed.rect);
+        try std.testing.expectEqual(@as(u32, c.SW_MAXIMIZE), placed.maximize.?.showCmd);
+        try std.testing.expectEqualDeep(normal, placed.maximize.?.rcNormalPosition);
+        // Its own size, at the source's normal top-left.
+        const own_copy = plan(.copy, sized, forwarded, &source, .activate, c.OS_BUILD_WIN11_21H2);
+        placed = place(&own_copy, &.{}, .{ .size = .{ .width = 600, .height = 400 }, .here = portrait });
+        try std.testing.expectEqualDeep(testRect(-980, 100, -380, 500), placed.rect);
+        try std.testing.expectEqualDeep(testRect(-980, 52, -380, 452), placed.maximize.?.rcNormalPosition);
+    }
+
+    // Fullscreen: its monitor's rect, wherever `window-position-x/y` would
+    // put it and also once the source is minimized (its own rect is then a
+    // sliver), and it leaves fullscreen to the source's return.
+    const big = test_monitors.big;
+    const side = test_monitors.side;
+    const corner = testRect(3540, 1888, 3820, 2068);
+    const back: TopLevel.Return = .{ .rect = corner, .placement = testPlacement(corner, 0, c.SW_RESTORE), .monitor = big };
+    for ([_]bool{ false, true }) |iconic| {
+        const source: Snapshot = .{
+            .state = .{ .fullscreen = back },
+            .rect = if (iconic) testRect(3840, 1040, 4077, 1079) else side.info.rcMonitor,
+            .iconic = iconic,
+            .monitor = side,
+        };
+        const copy = plan(.copy, .{ .position = .{ .x = 10, .y = 20 } }, .{}, &source, .activate, c.OS_BUILD_WIN11_21H2);
+        const placed = place(&copy, &.{}, null);
+        try std.testing.expectEqualDeep(side.info.rcMonitor, placed.rect);
+        try std.testing.expectEqual(@as(u32, c.SWP_NOACTIVATE), placed.flags);
+        try std.testing.expectEqualDeep(back, placed.fullscreen.?);
+    }
+
+    // With a size of its own it leaves fullscreen to that size where the
+    // source's return lands on the monitor it is on, inside the work area
+    // there, and that return is no longer scaled from the monitor the source
+    // entered fullscreen on (FWDGEOM2: a 400x300 client came back 261x187
+    // at 96 DPI). The source entered at 144 DPI near the far corner. Moved
+    // to the 96 DPI monitor, the return is moved and scaled there; on its
+    // own monitor it is only fitted.
+    for ([_]struct { Monitor, RECT }{
+        .{ side, testRect(5160, 582, 5760, 1032) },
+        .{ big, testRect(3240, 1638, 3840, 2088) },
+    }) |case| {
+        const here, const expected = case;
+        const source: Snapshot = .{ .state = .{ .fullscreen = back }, .rect = here.info.rcMonitor, .monitor = here };
+        const copy = plan(.copy, sized, forwarded, &source, .activate, c.OS_BUILD_WIN11_21H2);
+        const placed = place(&copy, &.{}, .{ .size = .{ .width = 600, .height = 450 }, .here = here });
+        try std.testing.expectEqualDeep(here.info.rcMonitor, placed.rect);
+        const sized_back = placed.fullscreen.?;
+        try std.testing.expectEqualDeep(expected, sized_back.rect);
+        // Neither monitor offsets its workspace coordinates.
+        try std.testing.expectEqualDeep(expected, sized_back.placement.rcNormalPosition);
+        try std.testing.expectEqual(here.id, sized_back.monitor.?.id);
+    }
+}
+
+test "win32 fullscreen restore translates work areas and scales size to fit" {
+    const old_work: RECT = .{ .left = 0, .top = 40, .right = 3840, .bottom = 2160 };
+    const new_work: RECT = .{ .left = -1920, .top = -1080, .right = 0, .bottom = 0 };
+    const rect: RECT = .{ .left = 100, .top = 140, .right = 1500, .bottom = 1040 };
+    try std.testing.expectEqualDeep(rect, fullscreenRestoreRect(rect, old_work, old_work, 144, 144));
+    const moved = fullscreenRestoreRect(rect, old_work, new_work, 144, 96);
+    try std.testing.expectEqualDeep(RECT{ .left = -1820, .top = -980, .right = -887, .bottom = -380 }, moved);
+    // MulDiv rounds the fractional width. Returning to the old scale is
+    // within one physical pixel and never scales absolute desktop origins.
+    const back = fullscreenRestoreRect(moved, new_work, old_work, 96, 144);
+    try std.testing.expectEqualDeep(rect, back);
+    const portrait: RECT = .{ .left = -1080, .top = 0, .right = 0, .bottom = 1872 };
+    const edge: RECT = .{ .left = 3000, .top = 1700, .right = 3800, .bottom = 2100 };
+    const clamped = fullscreenRestoreRect(edge, old_work, portrait, 144, 96);
+    try std.testing.expectEqualDeep(RECT{ .left = -533, .top = 1605, .right = 0, .bottom = 1872 }, clamped);
+    const oversized: RECT = .{ .left = 150, .top = 190, .right = 3950, .bottom = 1390 };
+    try std.testing.expectEqualDeep(RECT{ .left = -1080, .top = 150, .right = 0, .bottom = 950 }, fullscreenRestoreRect(oversized, old_work, portrait, 144, 96));
+
+    // `returnOn`: the monitor and DPI it entered on give the return back as
+    // it was, and so does a window that recorded no monitor.
+    const left = test_monitors.portrait;
+    const entered: TopLevel.Return = .{
+        .rect = testRect(-980, 100, -340, 580),
+        .placement = testPlacement(testRect(-980, 52, -340, 532), 0, c.SW_MAXIMIZE),
+        .monitor = left,
+    };
+    try std.testing.expectEqualDeep(entered, returnOn(entered, left));
+    var unrecorded = entered;
+    unrecorded.monitor = null;
+    try std.testing.expectEqualDeep(unrecorded, returnOn(unrecorded, test_monitors.side));
+    // On another monitor the normal rect goes from the workspace coordinates
+    // under the portrait's top taskbar to screen ones before it moves, and to
+    // the other monitor's after, so the taskbar's offset is not added twice
+    // (2026-10-11).
+    const moved_back = returnOn(entered, test_monitors.side);
+    try std.testing.expectEqualDeep(testRect(3940, 52, 4580, 532), moved_back.rect);
+    try std.testing.expectEqualDeep(testRect(3940, 52, 4580, 532), moved_back.placement.rcNormalPosition);
+    try std.testing.expectEqual(@as(usize, 2), moved_back.monitor.?.id);
 }
 
 test "win32 a window shows its opacity as a layered alpha, and opaque unlayered" {
