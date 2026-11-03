@@ -8,7 +8,6 @@ const ChromeRepaintMask = runtime.ChromeRepaintMask;
 const HDC = runtime.HDC;
 const HWND = runtime.HWND;
 const Host = runtime.Host;
-const HostTabStatus = runtime.HostTabStatus;
 const PAINTSTRUCT = runtime.PAINTSTRUCT;
 const POINT = runtime.POINT;
 const RECT = runtime.RECT;
@@ -60,6 +59,7 @@ const searchBarToolbarVisual = search_controls.searchBarToolbarVisual;
 const search_controls = @import("search_controls.zig");
 const std = runtime.std;
 const sys = runtime.sys;
+const tab_label = @import("tab_label.zig");
 const textOutWz = runtime.textOutWz;
 const themeSurface = runtime.themeSurface;
 const titlebarButtonVisual = runtime.titlebarButtonVisual;
@@ -477,7 +477,7 @@ pub const HostScene = struct {
             );
             if (overlay_paint_dirty) {
                 const overlay_text = std.mem.trim(u8, overlayEditText(self) catch "", " \t\r\n");
-                const overlay_status = if (surface) |value| self.app.hostTabStatus(value) else HostTabStatus{};
+                const overlay_status = if (surface) |value| self.app.hostTabStatus(value) else tab_label.TabStatus{};
                 const pane_count = if (self.activeTab()) |tab| tab.leafCount() else 1;
                 const overlay_label = if (self.overlay_mode == .profile)
                     buildProfileOverlayLabel(

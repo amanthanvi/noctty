@@ -109,6 +109,7 @@ const pixel_format = @import("win32/pixel_format.zig");
 const bench_trace = @import("win32/bench_trace.zig");
 const labels = @import("win32/labels.zig");
 const paint_text = @import("win32/text.zig");
+const tab_label = @import("win32/tab_label.zig");
 const win32_input = @import("win32/input.zig");
 const child_window = @import("win32/child_window.zig");
 const chrome_layout = @import("win32/chrome_layout.zig");
@@ -130,7 +131,6 @@ pub const chrome_scene_runtime = .{
     .HDC = HDC,
     .HWND = HWND,
     .Host = Host,
-    .HostTabStatus = HostTabStatus,
     .PAINTSTRUCT = PAINTSTRUCT,
     .POINT = POINT,
     .RECT = RECT,
@@ -200,7 +200,6 @@ pub const overlay_session_runtime = .{
     .HWND = HWND,
     .Host = Host,
     .HostOverlayMode = HostOverlayMode,
-    .HostTabStatus = HostTabStatus,
     .LONG_PTR = LONG_PTR,
     .OverlayConfirmText = OverlayConfirmText,
     .OverlayFocusSlot = OverlayFocusSlot,
@@ -489,6 +488,7 @@ test {
     _ = @import("win32/docked_search.zig");
     _ = @import("win32/window_start.zig");
     _ = @import("win32/confirm_text.zig");
+    _ = @import("win32/tab_label.zig");
     _ = child_window;
     _ = paint_text;
     _ = @import("win32/settings_patch.zig");
@@ -3849,8 +3849,6 @@ pub fn titlebarButtonVisual(
     };
 }
 
-pub const HostTabStatus = labels.HostTabStatus;
-
 /// How long a program's prompt ignores Allow after it opens: longer than
 /// the gap between two keys of someone typing, shorter than reading it.
 const program_confirm_arming_ms = 500;
@@ -3932,6 +3930,37 @@ pub const Tab = struct {
         destroySubclassedWindow(&self.button_hwnd, &self.button_prev_proc);
         self.tree.deinit();
         self.* = undefined;
+    }
+
+    /// What the tab's button was last drawn with (`Host.syncTabButtons`).
+    /// Its `title` borrows `cached_button_title`, which the next
+    /// `setCachedKey` or `deinit` frees: use the Key before either.
+    pub fn cachedKey(self: *const Tab) tab_label.Key {
+        return .{
+            .title = self.cached_button_title,
+            .index = self.cached_button_index,
+            .active = self.cached_button_active,
+            .bell = self.cached_button_bell,
+            .pane_count = self.cached_button_pane_count,
+            .max_width = self.cached_button_label_max_width,
+            .show_pane_count = self.cached_button_show_pane_count,
+        };
+    }
+
+    /// Record `label_key` as what the button now shows. The title is copied
+    /// first, the one step that can fail, so a failure keeps the old inputs;
+    /// a new title frees the one an earlier `cachedKey` borrowed.
+    /// `syncTabButtons` calls this before it raises NameChanged, because the
+    /// event reads the name back from these inputs.
+    pub fn setCachedKey(self: *Tab, alloc: Allocator, label_key: tab_label.Key) !void {
+        try appendOwnedString(alloc, &self.cached_button_title, label_key.title);
+        self.cached_button_bell = label_key.bell;
+        self.cached_button_index = label_key.index;
+        self.cached_button_active = label_key.active;
+        self.cached_button_pane_count = label_key.pane_count;
+        self.cached_button_label_max_width = label_key.max_width;
+        self.cached_button_show_pane_count = label_key.show_pane_count;
+        self.button_label_cache_valid = true;
     }
 
     pub fn focusedSurface(self: *const Tab) ?*Surface {
@@ -9232,8 +9261,6 @@ pub const inspectorChromeVisible = win32_chrome_state.inspectorVisible;
 
 pub const inspectorBannerStateChanged = labels.inspectorBannerStateChanged;
 
-pub const windowTitleSyncChanged = labels.windowTitleSyncChanged;
-
 pub const remapWin32KeyEvent = labels.remapWin32KeyEvent;
 pub const keyEventTogglesCommandPalette = labels.keyEventTogglesCommandPalette;
 
@@ -9294,8 +9321,6 @@ pub fn listProfilesForConfig(
 
 pub const preferredProfileIndex = labels.preferredProfileIndex;
 
-pub const resolveWindowBaseTitle = labels.resolveWindowBaseTitle;
-
 pub fn splitTreeEquivalent(a: *const SplitTreeSurface, b: *const SplitTreeSurface) bool {
     if (a.zoomed != b.zoomed) return false;
     if (a.nodes.len != b.nodes.len) return false;
@@ -9347,14 +9372,6 @@ pub fn nativeSplitDirection(value: win32_shell.model.Direction) SplitTreeSurface
         .down => .down,
     };
 }
-
-pub const buildHostAwareBaseTitle = labels.buildHostAwareBaseTitle;
-
-pub const hostTabLabelMaxWidth = labels.hostTabLabelMaxWidth;
-
-pub const shouldShowPaneCount = labels.shouldShowPaneCount;
-
-pub const visibleTabRange = labels.visibleTabRange;
 
 const buildTabOverviewOverlayLabel = labels.buildTabOverviewOverlayLabel;
 

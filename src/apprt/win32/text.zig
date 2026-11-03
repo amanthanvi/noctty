@@ -69,9 +69,9 @@ pub fn ownedBytesEquals(current: ?[]const u8, value: []const u8) bool {
         false;
 }
 
-pub fn optionalOwnedStringEquals(current: ?[:0]const u8, value: ?[]const u8) bool {
+pub fn optionalOwnedStringEquals(current: ?[]const u8, value: ?[]const u8) bool {
     return if (value) |existing|
-        ownedStringEquals(current, existing)
+        ownedBytesEquals(current, existing)
     else
         current == null;
 }
@@ -118,6 +118,69 @@ pub fn decodeCodepoint(value: []const u8, index: usize) ?DecodedCodepoint {
 pub fn codepointWidth(cp: u21) usize {
     if (cp <= 0xFF) return 1;
     return @intCast(unicode.table.get(cp).width);
+}
+
+/// Compact `value` to `max_width` display cells, ending in an ellipsis when it
+/// had to cut. The budget is cells, not bytes or codepoints: a pixel budget
+/// buys cells. Counting bytes would hand a CJK title a third of the room it
+/// can use -- 24 bytes is 8 kana -- while counting codepoints would let the
+/// same title overrun the space reserved for it.
+pub fn compactHostLabel(
+    alloc: Allocator,
+    value: []const u8,
+    max_width: usize,
+) ![]u8 {
+    if (displayWidth(value) <= max_width) return try alloc.dupe(u8, value);
+    if (max_width <= 3) return try alloc.dupe(u8, "...");
+    const cut = displayWidthFloor(value, max_width - 3);
+    return try std.fmt.allocPrint(alloc, "{s}...", .{value[0..cut]});
+}
+
+/// Display width of `value` in cells.
+///
+/// Bytes that do not decode count as one cell each: a title that arrived
+/// mangled still gets compacted against a sane budget instead of failing the
+/// caller.
+pub fn displayWidth(value: []const u8) usize {
+    var width: usize = 0;
+    var i: usize = 0;
+    while (i < value.len) {
+        if (decodeCodepoint(value, i)) |decoded| {
+            width += codepointWidth(decoded.cp);
+            i += decoded.len;
+        } else {
+            width += 1;
+            i += 1;
+        }
+    }
+    return width;
+}
+
+/// Byte index of the longest prefix of `value` that fits in `max_width` cells.
+///
+/// The cut always lands on a UTF-8 sequence boundary. Labels are later
+/// converted with `utf8ToUtf16LeAllocZ`, which rejects the result with
+/// `error.InvalidUtf8` when the cut landed inside a multi-byte codepoint. Any
+/// non-ASCII title -- CJK, an emoji, an accented path -- hits that on the tab
+/// strip as soon as a tab is narrow enough to truncate. A double-width
+/// codepoint that would straddle the budget is left out rather than allowed to
+/// spill one cell past it.
+fn displayWidthFloor(value: []const u8, max_width: usize) usize {
+    var width: usize = 0;
+    var i: usize = 0;
+    while (i < value.len) {
+        const decoded = decodeCodepoint(value, i) orelse {
+            if (width + 1 > max_width) return i;
+            width += 1;
+            i += 1;
+            continue;
+        };
+        const cell_width = codepointWidth(decoded.cp);
+        if (width + cell_width > max_width) return i;
+        width += cell_width;
+        i += decoded.len;
+    }
+    return value.len;
 }
 
 test "bounded UTF-16 long ASCII and BMP text preserve buffer guards" {
@@ -279,8 +342,49 @@ test "win32 optionalOwnedStringEquals handles present and null values" {
     try std.testing.expect(!optionalOwnedStringEquals("pwsh", null));
 }
 
+test "win32 ownedStringEquals is false for nothing stored and for a different value" {
+    try std.testing.expect(!ownedStringEquals(null, "noctty"));
+    try std.testing.expect(ownedStringEquals("noctty", "noctty"));
+    try std.testing.expect(!ownedStringEquals("noctty", "noctty - 2"));
+}
+
 test "win32 ownedBytesEquals handles present and missing values" {
     try std.testing.expect(!ownedBytesEquals(null, "v1.2.3"));
     try std.testing.expect(ownedBytesEquals("v1.2.3", "v1.2.3"));
     try std.testing.expect(!ownedBytesEquals("v1.2.3", "v1.2.4"));
+}
+
+test "win32 compactHostLabel keeps the cut on a codepoint boundary" {
+    // Three-byte codepoints: a byte-wise cut inside the budget would land on
+    // a continuation byte and fail the later UTF-16 conversion.
+    const label = try compactHostLabel(std.testing.allocator, "\u{3042}\u{3044}\u{3046}\u{3048}\u{304a}", 6);
+    defer std.testing.allocator.free(label);
+    try std.testing.expect(std.unicode.utf8ValidateSlice(label));
+    try std.testing.expectEqualStrings("\u{3042}...", label);
+}
+
+test "win32 compactHostLabel spends the budget in cells, not bytes" {
+    // Twelve kana are 36 bytes but 24 cells, so the whole title fits the
+    // widest tab budget. The byte budget this replaced cut it at the eighth.
+    const value = "\u{3042}\u{3044}\u{3046}\u{3048}\u{304a}\u{304b}\u{304d}\u{304f}\u{3051}\u{3053}\u{3055}\u{3057}";
+    const label = try compactHostLabel(std.testing.allocator, value, 24);
+    defer std.testing.allocator.free(label);
+    try std.testing.expectEqualStrings(value, label);
+}
+
+test "win32 compactHostLabel drops a wide codepoint that straddles the budget" {
+    // A budget of 8 leaves 5 cells ahead of the ellipsis. The third kana would
+    // end on cell 6, so it is dropped instead of spilling past the button.
+    const label = try compactHostLabel(std.testing.allocator, "\u{3042}\u{3044}\u{3046}\u{3048}\u{304a}", 8);
+    defer std.testing.allocator.free(label);
+    try std.testing.expectEqualStrings("\u{3042}\u{3044}...", label);
+    try std.testing.expectEqual(@as(usize, 7), displayWidth(label));
+}
+
+test "win32 displayWidth counts wide codepoints and mangled bytes" {
+    try std.testing.expectEqual(@as(usize, 2), displayWidth("ab"));
+    try std.testing.expectEqual(@as(usize, 4), displayWidth("\u{3042}\u{3044}"));
+    // A truncated three-byte sequence. Each stray byte still costs a cell, so
+    // a mangled title cannot escape the budget.
+    try std.testing.expectEqual(@as(usize, 2), displayWidth("\xe3\x81"));
 }

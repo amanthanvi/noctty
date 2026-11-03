@@ -61,7 +61,6 @@ const bannerButtonKey = win32.bannerButtonKey;
 const bannerMessageDurationMs = win32.bannerMessageDurationMs;
 const blendColorRGB = win32.blendColorRGB;
 const buildDropdownProfileLabel = win32.buildDropdownProfileLabel;
-const buildHostAwareBaseTitle = win32.buildHostAwareBaseTitle;
 const buildHostBannerText = win32.buildHostBannerText;
 const builtin = @import("builtin");
 const buttonColorsFromTheme = win32.buttonColorsFromTheme;
@@ -109,7 +108,6 @@ const hostCloseConfirmAccept = win32.hostCloseConfirmAccept;
 const hostCompositionRedrawFlags = win32.hostCompositionRedrawFlags;
 const hostLayoutClientRect = win32.hostLayoutClientRect;
 const hostPresentShowCommand = win32.hostPresentShowCommand;
-const hostTabLabelMaxWidth = win32.hostTabLabelMaxWidth;
 const host_caption_button_h = win32.host_caption_button_h;
 const host_inspector_panel_height = win32.host_inspector_panel_height;
 const host_overlay_accept_width = win32.host_overlay_accept_width;
@@ -195,7 +193,6 @@ const selectedProfileSelectionNeedsChange = win32.selectedProfileSelectionNeedsC
 const setQuickTerminalRect = win32.setQuickTerminalRect;
 const setWindowData = child_window.setWindowData;
 const shellSplitDirection = win32.shellSplitDirection;
-const shouldShowPaneCount = win32.shouldShowPaneCount;
 const std = @import("std");
 const surfaceLayoutRuntimeSync = win32.surfaceLayoutRuntimeSync;
 const surface_presentation = @import("surface_presentation.zig");
@@ -209,6 +206,7 @@ const tabStatusBadgeColor = win32.tabStatusBadgeColor;
 const tabStatusHeadline = win32.tabStatusHeadline;
 const tabStatusKey = win32.tabStatusKey;
 const tabStripChildVisible = win32.tabStripChildVisible;
+const tab_label = @import("tab_label.zig");
 const tab_tooltip_class_name = win32.tab_tooltip_class_name;
 const tabsCloseConfirmCount = win32.tabsCloseConfirmCount;
 const takeOverlayButtonUiaProviders = win32.takeOverlayButtonUiaProviders;
@@ -224,10 +222,10 @@ const titlebar_icon_glyphs = win32.titlebar_icon_glyphs;
 const undecoratedKeepsFrame = win32.undecoratedKeepsFrame;
 const usesIntegratedTitlebar = win32.usesIntegratedTitlebar;
 const utf8BoundedPrefix = paint_text.utf8BoundedPrefix;
-const visibleTabRange = win32.visibleTabRange;
 const win32RectToNc = win32.win32RectToNc;
 const win32_bell = @import("../win32_bell.zig");
 const win32_chrome_state = @import("../win32_chrome_state.zig");
+const win32_elevation = @import("../win32_elevation.zig");
 const win32_icons = @import("../win32_icons.zig");
 const win32_input = @import("input.zig");
 const win32_layout = @import("../win32_layout.zig");
@@ -247,7 +245,6 @@ const win32_tween = @import("../win32_tween.zig");
 const win32_uia = @import("../win32_uia/mod.zig");
 const win32_undo = @import("../win32_undo.zig");
 const window_state = @import("window_state.zig");
-const windowTitleSyncChanged = win32.windowTitleSyncChanged;
 const windows_shell = @import("../../config/windows_shell.zig");
 
 // Test dependencies.
@@ -294,17 +291,12 @@ pub const palette_catalog_capacity: usize = 768;
 
 const palette_catalog_label_capacity: usize = 768;
 
-/// The program status badge a tab draws before its label, and the room it
-/// takes from the label with the gap after it, in DIPs and in label cells
-/// (about 7 DIPs each in the chrome font).
+/// The program status badge a tab draws before its label, and the slot it
+/// takes with the gap after it, in DIPs. `tab_label.key` charges the slot to
+/// the label in cells.
 const tab_status_badge_size: i32 = 10;
 
 const tab_status_badge_slot: i32 = tab_status_badge_size + 5;
-
-const tab_status_badge_cells: usize = 2;
-
-/// The fewest cells `hostTabLabelMaxWidth` gives a label.
-const tab_label_min_cells: usize = 6;
 
 const host_tab_new_button_label = std.unicode.utf8ToUtf16LeStringLiteral("+");
 
@@ -367,6 +359,31 @@ const CaptionButtonRects = struct {
         };
     }
 };
+
+fn buildHostAwareBaseTitle(
+    alloc: Allocator,
+    base_title: ?[]const u8,
+    host: tab_label.TabStatus,
+    elevated: bool,
+) ![]u8 {
+    const normalized_title = if (base_title) |value|
+        if (elevated and std.mem.startsWith(u8, value, win32_elevation.title_prefix))
+            value[win32_elevation.title_prefix.len..]
+        else
+            value
+    else
+        null;
+    const composed = if (host.total <= 1)
+        try alloc.dupe(u8, normalized_title orelse "noctty")
+    else
+        try std.fmt.allocPrint(
+            alloc,
+            "[{d}/{d}] {s}",
+            .{ host.index + 1, host.total, normalized_title orelse "noctty" },
+        );
+    defer alloc.free(composed);
+    return try win32_elevation.allocPrefixedTitle(alloc, composed, elevated);
+}
 
 pub const Host = struct {
     app: *App,
@@ -3037,32 +3054,15 @@ pub const Host = struct {
         if (self.hwnd == null) return;
         const tab = &self.tabs.items[index];
         const button = tab.button_hwnd orelse return self.hideTabTooltip();
-        const title = tab.cached_button_title orelse return self.hideTabTooltip();
-        // Measure the title against the budget the title was actually
-        // compacted to, not the drawn label against the button's own budget.
-        // The label also carries the tab index, the active marker and the pane
-        // count; `buildTabButtonLabel` charges those to the button budget
-        // first, so comparing the whole label against that budget asked
-        // whether a label that is built to fit fits. It also answered
-        // differently for an active tab than for its inactive neighbour
-        // showing the same title.
-        const budget = labels.tabButtonTitleBudget(
-            tab.cached_button_index,
-            tab.cached_button_active,
-            tab.cached_button_pane_count,
-            win32_bell.tabTextWidth(tab.cached_button_label_max_width, tab.cached_button_bell),
-            tab.cached_button_show_pane_count,
-        );
-        if (!labels.hostLabelIsCompacted(title, budget)) {
-            return self.hideTabTooltip();
-        }
-
         const alloc = self.app.core_app.alloc;
-        const text = labels.buildTabTooltipText(alloc, title) catch return;
+        // From the inputs the label was drawn with, so the tooltip and the
+        // label agree on whether the title had to be cut.
+        const text = (tab_label.tooltip(alloc, tab.cachedKey()) catch return) orelse
+            return self.hideTabTooltip();
         defer alloc.free(text);
 
         // The strip's own visibility record is consulted, not the rect: a
-        // button that scrolled out of `visibleTabRange` (or a strip turned
+        // button that scrolled out of `tab_label.visible` (or a strip turned
         // off by config) is hidden with `ShowWindow` alone and keeps its last
         // rect, which now describes some other tab's slot.
         const button_visible = self.shouldShowTabBar() and
@@ -3185,7 +3185,7 @@ pub const Host = struct {
         // does not repaint; it is still re-placed below, since the button's
         // rect may have moved. That is a paint decision only: the UIA name
         // is the FULL title (`tabTooltipUiaName`), while `text` is bounded
-        // by `tab_tooltip_max_width`, so a title that changed past that
+        // by `tab_label.tooltip_max_width`, so a title that changed past that
         // bound renders identically and must still announce -- `name_changed`
         // is computed on the full title by the caller for exactly that
         // reason.
@@ -3272,7 +3272,7 @@ pub const Host = struct {
         );
 
         if (self.chrome_font) |font| _ = sys.SelectObject(hdc, font);
-        var text_buf: [labels.tab_tooltip_max_width * 2 + 1]u16 = undefined;
+        var text_buf: [tab_label.tooltip_max_width * 2 + 1]u16 = undefined;
         const text_len = sys.GetWindowTextW(hwnd, &text_buf, text_buf.len);
         _ = sys.SetBkMode(hdc, c.TRANSPARENT);
         _ = sys.SetTextColor(hdc, theme.overlay_label_fg);
@@ -3847,7 +3847,7 @@ pub const Host = struct {
         defer if (host.cached_window_title) |value| std.testing.allocator.free(value);
         try host.refreshChrome();
 
-        const glyph = win32_bell.title_glyph;
+        const glyph = tab_label.title_glyph;
         var status_buf: [64]u8 = undefined;
         var caption: [128]u16 = undefined;
         var utf8: [256]u8 = undefined;
@@ -6421,8 +6421,9 @@ pub const Host = struct {
         for (self.tabs.items, 0..) |*tab, index| {
             if (tab.id != tab_id) continue;
             const fallback: []const u8 = if (tab.cached_button_label) |label| label else "Tab";
-            const title = tab.cached_button_title orelse return fallback;
-            return labels.buildTabItemUiaName(buf, index, title, tab.leafCount()) orelse fallback;
+            // The title the label was drawn with, at the tab's place and
+            // pane count now.
+            return tab_label.uiaName(buf, tab.cached_button_title, index, tab.leafCount()) orelse fallback;
         }
         return "Tab";
     }
@@ -9599,9 +9600,9 @@ pub const Host = struct {
         // The bell glyph is display only: `cached_window_title` stays the
         // title without it, which is what automation reports.
         const bell = if (self.activeTab()) |tab| tab.bellRinging() else false;
-        if (!windowTitleSyncChanged(self.cached_window_title, host_base_title) and
+        if (ownedStringEquals(self.cached_window_title, host_base_title) and
             bell == self.caption_bell) return false;
-        const caption = if (bell) try win32_bell.withTitleGlyph(alloc, host_base_title) else null;
+        const caption = if (bell) try tab_label.withTitleGlyph(alloc, host_base_title) else null;
         defer if (caption) |value| alloc.free(value);
         const title_w = try std.unicode.utf8ToUtf16LeAllocZ(alloc, caption orelse host_base_title);
         defer alloc.free(title_w);
@@ -9626,7 +9627,6 @@ pub const Host = struct {
         // cut every label down to a 0 px strip that survives the restore.
         const rect = (try self.layoutClientRect()) orelse return false;
         const button_width = self.tabStripGeometry(@max(0, rect.right - rect.left)).button_width;
-        const label_max_width = hostTabLabelMaxWidth(button_width, self.current_dpi);
         var tooltip_title_changed = false;
         var button_created = false;
         // A pass that fails after making a button has still changed the list,
@@ -9635,67 +9635,41 @@ pub const Host = struct {
         for (self.tabs.items, 0..) |*tab, i| {
             const surface = tab.focusedSurface() orelse continue;
             const title = if (surface.effectiveTitle()) |value| value else null;
-            const active = i == self.active_tab;
-            const bell = tab.bellRinging();
-            const pane_count = tab.leafCount();
-            const show_pane_count = shouldShowPaneCount(button_width, pane_count, self.current_dpi);
-            // A program status badge takes its slot out of the label's room,
-            // charged in cells after `hostTabLabelMaxWidth` has capped the
-            // budget the way the layout caps the button.
-            const tab_label_max_width = if (tab.status_indicator == .none)
-                label_max_width
-            else
-                @max(tab_label_min_cells, label_max_width -| tab_status_badge_cells);
-            const title_unchanged = if (title) |value|
-                ownedStringEquals(tab.cached_button_title, value)
-            else
-                tab.cached_button_title == null;
+            const label_key = tab_label.key(.{
+                .title = title,
+                .index = i,
+                .active = i == self.active_tab,
+                .bell = tab.bellRinging(),
+                .pane_count = tab.leafCount(),
+                .status_badge = tab.status_indicator != .none,
+                .button_width = button_width,
+                .dpi = self.current_dpi,
+            });
+            const cached_key = tab.cachedKey();
             const label_inputs_unchanged = tab.button_hwnd != null and
                 tab.button_label_cache_valid and
-                title_unchanged and
-                tab.cached_button_bell == bell and
-                tab.cached_button_index == i and
-                tab.cached_button_active == active and
-                tab.cached_button_pane_count == pane_count and
-                tab.cached_button_label_max_width == tab_label_max_width and
-                tab.cached_button_show_pane_count == show_pane_count;
+                cached_key.eql(label_key);
             if (label_inputs_unchanged) continue;
             // The UIA name is not the drawn label: it carries the tab's FULL
-            // title and its pane count, and `shouldShowPaneCount` keeps the
-            // count out of the label on a narrow tab. Splitting such a tab
-            // moves the name from "1: pwsh" to "1: pwsh (2)" while the label
-            // stays byte-identical, so the label comparison below cannot be
-            // the only trigger for NameChanged or an event-driven reader keeps
+            // title and its pane count, and a narrow tab keeps the count out
+            // of its label. Splitting such a tab moves the name from
+            // "1: pwsh" to "1: pwsh (2)" while the label stays
+            // byte-identical, so the label comparison below cannot be the
+            // only trigger for NameChanged or an event-driven reader keeps
             // announcing the stale name.
             const uia_name_changed = tab.button_label_cache_valid and
-                labels.tabItemUiaNameChanged(
-                    tab.cached_button_title,
-                    tab.cached_button_index,
-                    tab.cached_button_pane_count,
-                    title,
-                    i,
-                    pane_count,
-                );
+                !cached_key.sameUiaName(label_key);
             if (self.tab_tooltip_tab_id) |shown| {
                 // The title or the width budget moved under the tooltip. It is
                 // refreshed in place once the buttons are laid out below, since
                 // the popup hangs off the button's final rect. Hiding it here
                 // made an animated title flicker the popup: `refreshTabTooltip`.
-                if (shown == tab.id) tooltip_title_changed = !title_unchanged;
+                if (shown == tab.id) tooltip_title_changed = !optionalOwnedStringEquals(tab.cached_button_title, title);
             }
             // The glyph is in front of the drawn label, and its width comes out
             // of the label's budget; the cached title (tooltip, UIA name,
             // palette) and the pane's own title stay without it.
-            const label = try win32_bell.tabLabel(
-                self.app.core_app.alloc,
-                title,
-                bell,
-                i,
-                active,
-                pane_count,
-                tab_label_max_width,
-                show_pane_count,
-            );
+            const label = try tab_label.text(self.app.core_app.alloc, label_key);
             defer self.app.core_app.alloc.free(label);
             const is_new_button = tab.button_hwnd == null;
             const label_changed = is_new_button or
@@ -9733,14 +9707,7 @@ pub const Host = struct {
             // event's `newValue`, and `tabItemUiaName` builds it from
             // `cached_button_title`, so raising first announced the PREVIOUS
             // title -- the one the rename was replacing.
-            try appendOwnedString(self.app.core_app.alloc, &tab.cached_button_title, title);
-            tab.cached_button_bell = bell;
-            tab.cached_button_index = i;
-            tab.cached_button_active = active;
-            tab.cached_button_pane_count = pane_count;
-            tab.cached_button_label_max_width = tab_label_max_width;
-            tab.cached_button_show_pane_count = show_pane_count;
-            tab.button_label_cache_valid = true;
+            try tab.setCachedKey(self.app.core_app.alloc, label_key);
             // A provider created above already reports the current name; only
             // an existing one needs the event. A hidden strip needs none of
             // them: its buttons are out of the UIA tree, and a reader that
@@ -9762,7 +9729,7 @@ pub const Host = struct {
         // layout, so the reader finds each button where it is.
         if (button_created) self.notifyTabListUiaChanged();
         // Refresh whenever a tooltip is up, not only when its own tab's label
-        // was rebuilt: a tab that scrolls out of `visibleTabRange` because
+        // was rebuilt: a tab that scrolls out of `tab_label.visible` because
         // ANOTHER tab was activated keeps every label input and is never
         // rebuilt, yet its button is now hidden and its slot belongs to a
         // different tab. `presentTabTooltip` re-checks the button and the
@@ -9778,7 +9745,7 @@ pub const Host = struct {
     }
 
     const TabStripGeometry = struct {
-        /// The tabs shown, as `visibleTabRange` picks them.
+        /// The tabs shown, as `tab_label.visible` picks them.
         start: usize,
         count: usize,
         button_width: i32,
@@ -9792,7 +9759,7 @@ pub const Host = struct {
         // 3 × caption_button_w pixels for min/max/close so the
         // [+][▾] cluster and tab strip don't collide with them.
         const tab_area_width = @max(1, width - self.rightButtonsWidth() - self.captionButtonsWidth());
-        const range = visibleTabRange(self.tabs.items.len, self.active_tab, tab_area_width, self.current_dpi);
+        const range = tab_label.visible(self.tabs.items.len, self.active_tab, tab_area_width, self.current_dpi);
         const visible_count = @max(@as(i32, 1), @as(i32, @intCast(range.count)));
         return .{
             .start = range.start,
@@ -10525,6 +10492,49 @@ pub const Host = struct {
     pub const paintChrome = chrome_scene.HostScene.paintChrome;
 };
 
+test "win32 buildHostAwareBaseTitle prefixes host tab position" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const titled = try buildHostAwareBaseTitle(std.testing.allocator, "pwsh", .{
+        .index = 1,
+        .total = 3,
+    }, false);
+    defer std.testing.allocator.free(titled);
+    try std.testing.expectEqualStrings("[2/3] pwsh", titled);
+
+    const single = try buildHostAwareBaseTitle(std.testing.allocator, "pwsh", .{
+        .index = 0,
+        .total = 1,
+    }, false);
+    defer std.testing.allocator.free(single);
+    try std.testing.expectEqualStrings("pwsh", single);
+}
+
+test "win32 elevated host title prefixes surface and default title once" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const surface = try buildHostAwareBaseTitle(std.testing.allocator, "pwsh", .{
+        .index = 1,
+        .total = 3,
+    }, true);
+    defer std.testing.allocator.free(surface);
+    try std.testing.expectEqualStrings("Administrator: [2/3] pwsh", surface);
+
+    const default = try buildHostAwareBaseTitle(std.testing.allocator, null, .{
+        .index = 0,
+        .total = 1,
+    }, true);
+    defer std.testing.allocator.free(default);
+    try std.testing.expectEqualStrings("Administrator: noctty", default);
+
+    const idempotent = try buildHostAwareBaseTitle(std.testing.allocator, "Administrator: pwsh", .{
+        .index = 1,
+        .total = 3,
+    }, true);
+    defer std.testing.allocator.free(idempotent);
+    try std.testing.expectEqualStrings("Administrator: [2/3] pwsh", idempotent);
+}
+
 test "win32 only a close in the window in front takes focus" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
     var host: Host = undefined;
@@ -10962,6 +10972,110 @@ test "win32 moveTab immediately lays out focused tabs and updates numbered label
                     }
                 }
             }
+        }
+    }.body);
+}
+
+test "win32 a narrow tab's pane count moves its UIA name, and syncTabButtons announces it" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    try win32.runOnHiddenDesktop(struct {
+        /// Split `focused` with `pane` again, as a new split does.
+        fn putBack(tab: *Tab, alloc: Allocator, focused: *Surface, pane: *Surface) !void {
+            var inserted = try SplitTreeSurface.init(alloc, pane);
+            defer inserted.deinit();
+            const next_tree = try tab.tree.split(alloc, tab.findHandle(focused).?, .right, 0.5, &inserted);
+            tab.tree.deinit();
+            tab.tree = next_tree;
+            tab.focused = tab.findHandle(focused).?;
+        }
+
+        fn expectName(host: *Host, tab: *const Tab, expected: []const u8) !void {
+            var buf: [64]u8 = undefined;
+            try std.testing.expectEqualStrings(expected, Host.tabItemUiaName(host, tab.id, &buf));
+        }
+
+        fn body() !void {
+            var fixture: win32.WindowStartTestApp = .{};
+            try fixture.init();
+            defer fixture.deinit();
+            const app = &fixture.app;
+            const alloc = app.core_app.alloc;
+            app.use_integrated_titlebar = true;
+            try app.createWindow(default_title);
+            const first = fixture.newest();
+            const host = first.host.?;
+            const tab_id = host.tabs.items[0].id;
+            const second = try app.createWindowSurface(&app.config, default_title, .{
+                .host_id = first.host_id,
+                .tab_id = tab_id,
+                .clone_state_from = first,
+                .split_direction = .right,
+            });
+            // Whichever pane has the focus, the tab's title is the same.
+            try appendOwnedString(std.testing.allocator, &first.title, "alpha");
+            try appendOwnedString(std.testing.allocator, &second.title, "alpha");
+            // One tab, too narrow for its button to show a pane count.
+            try std.testing.expect(sys.SetWindowPos(host.hwnd.?, null, 0, 0, host.scaled(320), host.scaled(480), c.SWP_NOMOVE | c.SWP_NOZORDER | c.SWP_NOACTIVATE) != 0);
+            try host.layout();
+            _ = try host.syncTabButtons();
+            const tab = &host.tabs.items[0];
+            try std.testing.expectEqual(tab_id, tab.id);
+            try std.testing.expectEqual(@as(usize, 2), tab.leafCount());
+            try std.testing.expect(tab.button_label_cache_valid);
+            try std.testing.expect(!tab.cached_button_show_pane_count);
+            try std.testing.expect(host.shouldShowTabBar());
+            try std.testing.expect(tab.uia_provider != null);
+            try expectName(host, tab, "1: alpha (2)");
+            const label = try std.testing.allocator.dupe(u8, tab.cached_button_label.?);
+            defer std.testing.allocator.free(label);
+            // What one NameChanged counts: the tab's, and its close button's.
+            const one_event = win32_uia.events.testing_property_changes;
+            tab.uia_provider.?.raiseNameChanged();
+            const per_name_changed = win32_uia.events.testing_property_changes - one_event;
+            try std.testing.expect(per_name_changed > 0);
+
+            // Nothing moved: no event.
+            const quiet = win32_uia.events.testing_property_changes;
+            _ = try host.syncTabButtons();
+            try std.testing.expectEqual(quiet, win32_uia.events.testing_property_changes);
+
+            // The second pane leaves: the drawn label is byte-identical, the
+            // name loses its count, and the one NameChanged says so.
+            const alone = try tab.tree.remove(alloc, tab.findHandle(second).?);
+            tab.tree.deinit();
+            tab.tree = alone;
+            tab.focused = tab.findHandle(first).?;
+            var split = false;
+            // The fixture closes the window through its tabs' panes, so a
+            // failed check below still puts the second one back.
+            defer if (!split) putBack(tab, alloc, first, second) catch {};
+            const left = win32_uia.events.testing_property_changes;
+            _ = try host.syncTabButtons();
+            try std.testing.expectEqualStrings(label, tab.cached_button_label.?);
+            try std.testing.expectEqual(left + per_name_changed, win32_uia.events.testing_property_changes);
+            try expectName(host, tab, "1: alpha");
+
+            // And comes back: the count is in the name again, not the label.
+            try putBack(tab, alloc, first, second);
+            split = true;
+            const back = win32_uia.events.testing_property_changes;
+            _ = try host.syncTabButtons();
+            try std.testing.expectEqualStrings(label, tab.cached_button_label.?);
+            try std.testing.expectEqual(back + per_name_changed, win32_uia.events.testing_property_changes);
+            try expectName(host, tab, "1: alpha (2)");
+
+            // A rename announces the new name: the tab's name is built from
+            // its cached title, so the cache is committed before NameChanged
+            // is raised (raising first announced the title being replaced).
+            try appendOwnedString(std.testing.allocator, &first.title, "gamma");
+            try appendOwnedString(std.testing.allocator, &second.title, "gamma");
+            win32_uia.events.testing_published = .{};
+            defer win32_uia.events.testing_published = null;
+            _ = try host.syncTabButtons();
+            const published = win32_uia.events.testing_published.?;
+            const published_len = published.len orelse return error.TestExpectedNameChanged;
+            try std.testing.expectEqualSlices(u16, std.unicode.utf8ToUtf16LeStringLiteral("1: gamma (2)"), published.units[0..published_len]);
+            try expectName(host, tab, "1: gamma (2)");
         }
     }.body);
 }

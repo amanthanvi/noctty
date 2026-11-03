@@ -28,6 +28,7 @@ $win32TestModuleRoots = @(
     '_ = @import("win32/docked_search.zig");'
     '_ = @import("win32/window_start.zig");'
     '_ = @import("win32/confirm_text.zig");'
+    '_ = @import("win32/tab_label.zig");'
 )
 foreach ($win32TestModuleRoot in $win32TestModuleRoots) {
     if (-not [regex]::IsMatch(
@@ -54,9 +55,13 @@ foreach ($win32TestModuleRoot in $win32TestModuleRoots) {
 # overlay's count label went with the search arguments no caller passed, and
 # to 101 when its window opacity helpers became `TopLevel.alpha` in
 # window_start.zig and the unused resizeSplitFallbackDelta went with the dead
-# Surface.resizeSplitFallback (window state on the Window), and to 87 when its
+# Surface.resizeSplitFallback (window state on the Window), to 87 when its
 # confirm prompt words (the program clipboard, background close and link
-# prompts) and its 11 preview pane tests moved to confirm_text.zig.
+# prompts) and its 11 preview pane tests moved to confirm_text.zig, and to 65
+# when its tab label, tooltip and UIA name tests moved to tab_label.zig (14),
+# its cell-width compaction tests to text.zig (4), the window caption's title
+# tests to host.zig (2) and text.zig (1) and the base title's to
+# terminal_window.zig (1).
 # window_start.zig is the pure half of window state, which received its
 # consolidated tests: the `plan`, `place`, `returnOn`, `forRestore` and
 # `savedFullscreen` tables (from window_state.zig's start and placement tests
@@ -65,8 +70,11 @@ foreach ($win32TestModuleRoot in $win32TestModuleRoots) {
 # confirm_text.zig says what each confirm prompt says: its floor is the 14
 # tests from labels.zig, the close-scope table from win32.zig and the
 # out-of-memory test of a background tab's close prompt, 16.
+# tab_label.zig says what a tab's label, tooltip and UIA name are: its floor
+# is the 14 tests from labels.zig, the 2 tab-label tests from win32_bell.zig
+# and its Key equality and status-badge tests, 18.
 $movedWin32TestFloors = [ordered]@{
-    'labels.zig' = 87
+    'labels.zig' = 65
     'input.zig' = 24
     'gl_startup.zig' = 4
     'render_trace.zig' = 3
@@ -76,6 +84,7 @@ $movedWin32TestFloors = [ordered]@{
     'docked_search.zig' = 32
     'window_start.zig' = 10
     'confirm_text.zig' = 16
+    'tab_label.zig' = 18
 }
 foreach ($movedWin32TestModule in $movedWin32TestFloors.Keys) {
     $movedWin32TestModulePath = @($win32RuntimeModuleFiles | Where-Object {
@@ -109,11 +118,17 @@ foreach ($movedWin32TestModule in $movedWin32TestFloors.Keys) {
 # tests in R06b (#592); its floor is 6 since its toast lookup test became
 # notifications.zig's click tests, with `resolveToastActivationSurface`
 # (notifications PR 3). child_window.zig holds the 3 tests that moved out of
-# win32.zig with the child-control plumbing, and text.zig the 11 it declares
+# win32.zig with the child-control plumbing, and text.zig the 11 it declared
 # once the owned-string helpers (from win32.zig and labels.zig) and
-# utf8BoundedPrefix moved in. session.zig's floor is 27: its five
-# restore-by-key tests became rows of pane_launch.zig's `prepare` table (pane
-# launch step 4b), and its fullscreen-placement lookup-failure test became
+# utf8BoundedPrefix moved in, 16 since labels.zig's cell-width compaction
+# tests followed `compactHostLabel` there and `windowTitleSyncChanged`'s
+# test became its `ownedStringEquals` test (tab labels). For the same move,
+# host.zig's floor is 46 and terminal_window.zig's 24: the window caption's
+# title tests came from labels.zig with `buildHostAwareBaseTitle` and
+# `resolveWindowBaseTitle`, and host.zig gained the NameChanged test of a
+# narrow tab's split. session.zig's floor is 27: its five restore-by-key
+# tests became rows of pane_launch.zig's `prepare` table (pane launch step
+# 4b), and its fullscreen-placement lookup-failure test became
 # window_start.zig's pure `savedFullscreen` test (window state, step 6).
 # notifications.zig's 23 are the toast lifecycle's, the click's and the cold
 # toast wait's tests at its interface, which replaced App's, Host's,
@@ -131,8 +146,8 @@ foreach ($movedWin32TestModule in $movedWin32TestFloors.Keys) {
 $extractedWin32TestModules = [ordered]@{
     'registry.zig' = @{ Binding = 'registry_module'; Floor = 6 }
     'app.zig' = @{ Binding = 'app_module'; Floor = 59 }
-    'host.zig' = @{ Binding = 'host_module'; Floor = 43 }
-    'terminal_window.zig' = @{ Binding = 'terminal_window_module'; Floor = 23 }
+    'host.zig' = @{ Binding = 'host_module'; Floor = 46 }
+    'terminal_window.zig' = @{ Binding = 'terminal_window_module'; Floor = 24 }
     'session.zig' = @{ Binding = 'session_module'; Floor = 27 }
     'quick_terminal_host.zig' = @{ Binding = 'quick_terminal_host'; Floor = 10 }
     'window_state.zig' = @{ Binding = 'window_state'; Floor = 26 }
@@ -142,7 +157,7 @@ $extractedWin32TestModules = [ordered]@{
     'palette_controller.zig' = @{ Binding = 'palette_controller'; Floor = 7 }
     'chrome_scene.zig' = @{ Binding = 'chrome_scene'; Floor = 1 }
     'child_window.zig' = @{ Binding = 'child_window'; Floor = 3 }
-    'text.zig' = @{ Binding = 'paint_text'; Floor = 11 }
+    'text.zig' = @{ Binding = 'paint_text'; Floor = 16 }
     'notifications.zig' = @{ Binding = 'notifications'; Floor = 23 }
 }
 $win32RootTestBlock = [regex]::Match(

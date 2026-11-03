@@ -259,15 +259,18 @@ that govern each symbol you change, or that none does.
   `win32/quick_terminal_host.zig`).
 - [chrome-tabs-paint.md](docs/agents/log/chrome-tabs-paint.md): tab buttons
   (`tabButtonProc`, `drawButton`, labels, tooltips, close X, the active tab's
-  join to its terminal, `win32_tab_visual.zig`), `window-show-tab-bar`,
-  chrome theme and system accent (`win32_theme.zig`), focus cues
-  (`win32/focus_cue.zig`), `win32_icons.zig`, titlebar and tab-row icon fonts
-  (`recreateTitlebarIconFonts`, `createIconFontWithGlyphs`,
-  `fontGlyphCoverage`, `drawTitlebarGlyph`), chrome child z-order, host paint
-  and invalidation scopes and text caches (`win32/chrome_scene.zig`:
-  `paintChrome`, `invalidateChrome*`, `repaintTopChrome`; `appendOwnedString`
-  in `win32/text.zig`), the child placement cache (`ChildPlacement`,
-  `applyChromeChildRect` in `win32/child_window.zig`), tweens.
+  join to its terminal, `win32_tab_visual.zig`; what a tab's label, tooltip
+  and UIA name say and which tabs the strip shows: `win32/tab_label.zig`,
+  `key`, `text`, `tooltip`, `uiaName`, `visible`, and `Tab.cachedKey` and
+  `Tab.setCachedKey`), `window-show-tab-bar`, chrome theme and system accent
+  (`win32_theme.zig`), focus cues (`win32/focus_cue.zig`), `win32_icons.zig`,
+  titlebar and tab-row icon fonts (`recreateTitlebarIconFonts`,
+  `createIconFontWithGlyphs`, `fontGlyphCoverage`, `drawTitlebarGlyph`),
+  chrome child z-order, host paint and invalidation scopes and text caches
+  (`win32/chrome_scene.zig`: `paintChrome`, `invalidateChrome*`,
+  `repaintTopChrome`; `appendOwnedString` in `win32/text.zig`), the child
+  placement cache (`ChildPlacement`, `applyChromeChildRect` in
+  `win32/child_window.zig`), tweens.
 - [chrome-overlays.md](docs/agents/log/chrome-overlays.md): the command
   palette (`win32_palette.zig`, `win32/palette_controller.zig`, ranking, MRU
   and its `palette-mru.txt` lines: `writePaletteMruLine`, palette list, the
@@ -394,7 +397,8 @@ that govern each symbol you change, or that none does.
   notifiable properties); UIA providers under `src/apprt/win32_uia/` (COM
   identity and refcounts, BSTR and VARIANT ownership, `events.zig`); terminal
   text (`win32_terminal_accessibility.zig`, TextPattern, ScrollIntoView, the
-  echo queue), palette and tab-list UIA.
+  echo queue), palette and tab-list UIA (a tab's name: `uiaName` and
+  `Key.sameUiaName` in `win32/tab_label.zig`).
 - [config.md](docs/agents/log/config.md): config loading and reload outside
   the Settings window: the config file reader (`cli/args.zig` `LineIterator`,
   `streamDelimiterEnding`, `parseIntoField`, `ProfileMap`,
@@ -421,8 +425,10 @@ that govern each symbol you change, or that none does.
   adapter; the COM activator in `win32_toast_activator.zig`), an installer's
   Restart Manager close and a session end (`App.onQueryEndSession`,
   `App.onEndSession`, `registerInstallerRestart`, the lifecycle window), the
-  bell, taskbar progress and icon, crash minidumps and Sentry, the COM
-  apartment, default-terminal handoff, the CLI and the `noctty.com` wrapper.
+  bell (its title glyph: `title_glyph`, `withTitleGlyph` in
+  `win32/tab_label.zig`), taskbar progress and icon, crash minidumps and
+  Sentry, the COM apartment, default-terminal handoff, the CLI and the
+  `noctty.com` wrapper.
 - [build-release-ci.md](docs/agents/log/build-release-ci.md): `build.zig`
   (including the `bench:*` steps' `addBenchCoreImport`)
   and resources, the Windows target floor (`src/build/Config.zig`,

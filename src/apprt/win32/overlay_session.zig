@@ -5,7 +5,6 @@ const Allocator = runtime.Allocator;
 const HWND = runtime.HWND;
 const Host = runtime.Host;
 const HostOverlayMode = runtime.HostOverlayMode;
-const HostTabStatus = runtime.HostTabStatus;
 const LONG_PTR = runtime.LONG_PTR;
 const OverlayConfirmText = runtime.OverlayConfirmText;
 const OverlayFocusSlot = runtime.OverlayFocusSlot;
@@ -58,6 +57,7 @@ const std = runtime.std;
 const syncWindowTextUtf8Cached = child_window.syncWindowTextUtf8Cached;
 const syncWindowTextUtf8CachedAfterSet = child_window.syncWindowTextUtf8CachedAfterSet;
 const sys = runtime.sys;
+const tab_label = @import("tab_label.zig");
 const win32_uia = runtime.win32_uia;
 const App = test_runtime.App;
 const Surface = test_runtime.Surface;
@@ -1094,7 +1094,7 @@ pub const HostControls = struct {
             .search => return false,
             .tab_overview => {
                 const surface = self.activeSurface();
-                const status = if (surface) |value| self.app.hostTabStatus(value) else HostTabStatus{};
+                const status = if (surface) |value| self.app.hostTabStatus(value) else tab_label.TabStatus{};
                 const label = try buildTabOverviewOverlayLabel(alloc, status.index, status.total);
                 defer alloc.free(label);
                 return try syncWindowTextUtf8Cached(

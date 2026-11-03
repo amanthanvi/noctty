@@ -109,7 +109,6 @@ const recordOpenGLStartupWin32Failure = win32.recordOpenGLStartupWin32Failure;
 const render_trace = @import("render_trace.zig");
 const rendererpkg = @import("../../renderer.zig");
 const requestedTabInsertIndex = win32.requestedTabInsertIndex;
-const resolveWindowBaseTitle = win32.resolveWindowBaseTitle;
 const restoreTerminalUndoState = win32.restoreTerminalUndoState;
 const rollbackFailedSurfaceAttach = win32.rollbackFailedSurfaceAttach;
 const runUiActionOrLog = win32.runUiActionOrLog;
@@ -332,6 +331,31 @@ test "quick select label placement stops at its comparison budget" {
         &occupied,
         &comparisons_remaining,
     ) == null);
+}
+
+fn resolveWindowBaseTitle(
+    terminal_title: ?[:0]const u8,
+    surface_override: ?[:0]const u8,
+    tab_override: ?[:0]const u8,
+) ?[:0]const u8 {
+    return tab_override orelse surface_override orelse terminal_title;
+}
+
+test "win32 resolveWindowBaseTitle prefers tab then surface override" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    try std.testing.expectEqualStrings(
+        "tab",
+        resolveWindowBaseTitle("terminal", "surface", "tab").?,
+    );
+    try std.testing.expectEqualStrings(
+        "surface",
+        resolveWindowBaseTitle("terminal", "surface", null).?,
+    );
+    try std.testing.expectEqualStrings(
+        "terminal",
+        resolveWindowBaseTitle("terminal", null, null).?,
+    );
 }
 
 /// A config color as a GDI COLORREF.
