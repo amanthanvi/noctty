@@ -7594,11 +7594,15 @@ pub const SettingsWindow = struct {
 
     /// Enter, F2, a double click or UIA's Invoke on the Profiles page's
     /// selected row: type into its field, or start a profile or a variable.
-    fn profileInvoke(self: *SettingsWindow) void {
-        if (!self.profileEditDone()) return;
-        const row = self.selectedProfileRow() orelse return;
+    /// False when it did nothing: the open field could not be kept, or the
+    /// row's could not be made.
+    fn profileInvoke(self: *SettingsWindow) bool {
+        if (!self.profileEditDone()) return false;
+        const row = self.selectedProfileRow() orelse return false;
         if (self.profile_model.profileOf(row)) |profile| if (profile.read_only) {
-            return self.setProfileNote(.said, "Profile {s} comes from noctty's command line, so Settings does not change it.", .{profile.id});
+            // Answered: the note says why nothing opens.
+            self.setProfileNote(.said, "Profile {s} comes from noctty's command line, so Settings does not change it.", .{profile.id});
+            return true;
         };
         self.beginProfileEdit(switch (row.kind) {
             .new_profile => .new_id,
@@ -7608,6 +7612,8 @@ pub const SettingsWindow = struct {
             .variable => .variable,
             .add_variable => .new_variable,
         }, row, null);
+        // Should the field not be made (no memory, no window), none is open.
+        return self.profile_edit != null;
     }
 
     /// Insert or Ctrl+N: a new profile, typed into the "New profile" row.
@@ -7617,7 +7623,7 @@ pub const SettingsWindow = struct {
         const list = &self.profile_list;
         if (list.shown_count == 0) return;
         list.selectPosition(0);
-        self.profileInvoke();
+        _ = self.profileInvoke();
     }
 
     /// Delete on the Profiles page's selected row: a label, a starting folder
@@ -7736,6 +7742,10 @@ pub const SettingsWindow = struct {
     /// open row (`placeProfileEdit`), holding the field's value, named for
     /// UIA after the field and its profile. `id` is the new profile's, for
     /// `.new_command`.
+    /// Tests only: `beginProfileEdit` cannot make its field's window, as when
+    /// Windows has no resources for one.
+    threadlocal var test_profile_edit_fails: bool = false;
+
     fn beginProfileEdit(self: *SettingsWindow, kind: ProfileEdit.Kind, row: settings_profiles.Row, new_id: ?[]const u8) void {
         self.disarmProfileRemoval();
         self.cancelProfileEdit();
@@ -7757,7 +7767,7 @@ pub const SettingsWindow = struct {
             return;
         };
         defer alloc.free(wide);
-        const hwnd = sys.CreateWindowExW(
+        const made = if (@import("builtin").is_test and test_profile_edit_fails) null else sys.CreateWindowExW(
             0,
             std.unicode.utf8ToUtf16LeStringLiteral("EDIT"),
             wide.ptr,
@@ -7770,7 +7780,8 @@ pub const SettingsWindow = struct {
             @ptrFromInt(PROFILE_EDIT),
             self.handle.hinstance,
             null,
-        ) orelse {
+        );
+        const hwnd = made orelse {
             if (edit.name) |name| alloc.free(name);
             return;
         };
@@ -8050,7 +8061,7 @@ pub const SettingsWindow = struct {
         else
             @intCast(@max(0, sys.TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, at.x, at.y, 0, frame, null)));
         switch (picked) {
-            reference_menu_edit => self.profileInvoke(),
+            reference_menu_edit => _ = self.profileInvoke(),
             reference_menu_copy => self.profileDelete(),
             profile_menu_new => self.profileNew(),
             reference_menu_open => self.handle.openInEditor(self.handle.ctx),
@@ -20646,7 +20657,10 @@ const ReferenceList = struct {
         if (self.selectedPosition() == null) return;
         const settings = self.owner();
         // A profile's row edits its field, or starts a profile or a variable.
-        if (self.kind == .profiles) return settings.profileInvoke();
+        if (self.kind == .profiles) {
+            _ = settings.profileInvoke();
+            return;
+        }
         settings.handle.openInEditor(settings.handle.ctx);
     }
 
@@ -20669,7 +20683,7 @@ const ReferenceList = struct {
     fn editSelected(self: *ReferenceList) bool {
         if (self.selectedPosition() == null) return false;
         if (self.kind == .profiles) {
-            self.owner().profileInvoke();
+            _ = self.owner().profileInvoke();
             return true;
         }
         const field = self.editField(self.selected.?) orelse return false;
@@ -21241,6 +21255,9 @@ fn referenceUiaInvokeRow(ctx: *anyopaque, index: usize) bool {
     // rows, or held a field it could not keep), it is dropped, rather than
     // run on the row still selected; the client invokes again.
     if (!list.selectRequested(index)) return false;
+    // On the Profiles page it opens the row's field (`profileInvoke`); one
+    // that could not be made did nothing, and the client hears so.
+    if (list.kind == .profiles) return list.owner().profileInvoke();
     list.invokeSelected();
     return true;
 }
@@ -22287,6 +22304,57 @@ test "settings a UIA Invoke on another profile's row while a change is open keep
             try std.testing.expectEqual(@as(?u16, target), list.selected);
             try std.testing.expectEqual(ProfileEdit.Kind.command, (try openEdit(settings)).kind);
             try expectSameText("p29", (try openEdit(settings)).id());
+            try std.testing.expect(fixture.pumpKey(VK_ESCAPE));
+        }
+    }.body);
+}
+
+test "settings a UIA Invoke on a profile's row whose field cannot be made says it did not act" {
+    try dialog_test.onHiddenDesktop(struct {
+        fn body() !void {
+            const keyboard = win32_input.TestingKeyboard.pinNone();
+            defer keyboard.release();
+            const alloc = std.testing.allocator;
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var path: []u8 = &.{};
+            const fixture = try profileFixture(&tmp, "profile-command = py: python.exe\n", &path);
+            defer alloc.free(path);
+            defer fixture.finish();
+            const settings = &fixture.settings;
+            const list = &settings.profile_list;
+            const py = settings.profile_model.findField(.command, "py", null) orelse return error.TestExpectedRow;
+            const position = for (list.shown[0..list.shown_count], 0..) |id, at| {
+                if (id == py) break at;
+            } else return error.TestExpectedRow;
+            // A UIA client holds py's command line row.
+            const com = @import("win32_uia/com.zig");
+            const constants = @import("win32_uia/constants.zig");
+            const provider = list.provider orelse return error.TestExpectedProvider;
+            _ = SetFocus(list.hwnd orelse return error.TestExpectedList);
+            list.selectPosition(position);
+            var focus: ?*com.IRawElementProviderFragment = null;
+            try std.testing.expectEqual(com.S_OK, provider.fragment_root.vtbl.GetFocus(&provider.fragment_root, &focus));
+            const row_fragment = focus orelse return error.TestExpectedRow;
+            defer _ = row_fragment.vtbl.Release(row_fragment);
+            var simple_ptr: ?*anyopaque = null;
+            try std.testing.expectEqual(com.S_OK, row_fragment.vtbl.QueryInterface(row_fragment, &com.IID_IRawElementProviderSimple, &simple_ptr));
+            const row: *com.IRawElementProviderSimple = @ptrCast(@alignCast(simple_ptr orelse return error.TestExpectedRow));
+            defer _ = row.vtbl.Release(row);
+            var pattern: ?*com.IUnknown = null;
+            try std.testing.expectEqual(com.S_OK, row.vtbl.GetPatternProvider(row, constants.UIA_InvokePatternId, &pattern));
+            const invoke: *com.IInvokeProvider = @ptrCast(@alignCast(pattern orelse return error.TestExpectedInvoke));
+            defer _ = invoke.vtbl.Release(invoke);
+            // Windows cannot make the field's window: nothing opens, and the
+            // client hears that the call did not act.
+            SettingsWindow.test_profile_edit_fails = true;
+            defer SettingsWindow.test_profile_edit_fails = false;
+            try std.testing.expectEqual(com.UIA_E_INVALIDOPERATION, invoke.vtbl.Invoke(invoke));
+            try std.testing.expect(settings.profile_edit == null);
+            // Once it can, the same Invoke opens the field.
+            SettingsWindow.test_profile_edit_fails = false;
+            try std.testing.expectEqual(com.S_OK, invoke.vtbl.Invoke(invoke));
+            try std.testing.expectEqual(ProfileEdit.Kind.command, (try openEdit(settings)).kind);
             try std.testing.expect(fixture.pumpKey(VK_ESCAPE));
         }
     }.body);

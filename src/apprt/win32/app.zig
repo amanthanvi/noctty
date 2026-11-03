@@ -8556,7 +8556,6 @@ pub const App = struct {
             // check before the save read it first.
             if (profile_edits.len != 0) {
                 if (check.read_as == null) check.read_as = try self.settingsDigest(alloc, target_path);
-                var fresh = self.loadConfigAtStartupCwd();
                 // Every fresh read: the profile fields the draft changes
                 // have no Keep mine / Use disk, so one another program
                 // changed since Settings read the config stops the save
@@ -8565,13 +8564,8 @@ pub const App = struct {
                 // recovery: its baseline is the recovery config, not the
                 // file, so a repair would read as a change (the file's
                 // digests are still compared).
-                if (!self.safe_mode) if (fresh) |*reading| {
-                    self.settingsProfilesUnchanged(alloc, reading, state, original, pending, profile_edits) catch |err| {
-                        reading.deinit();
-                        return err;
-                    };
-                } else |_| {};
-                profile_edits = try settingsProfileEditsFromDisk(profile_arena.allocator(), alloc, &self.settings_failure_detail, fresh, &self.config, state, original, pending, target_path);
+                const compare: ?[]const settings_patch.Edit = if (self.safe_mode) null else profile_edits;
+                profile_edits = try settingsProfileEditsFromDisk(profile_arena.allocator(), alloc, &self.settings_failure_detail, self.loadConfigAtStartupCwd(), &self.config, state, original, pending, target_path, compare);
             }
             // No-op short-circuit: if the user pressed Save without
             // changing anything, don't touch the filesystem. On a
@@ -8695,30 +8689,24 @@ pub const App = struct {
 
     /// `settingsSaveAndReload` checking the file again: whether another
     /// program changed a profile field the draft changes (`edits`), read in
-    /// the app's light/dark state. One it did stops the save, naming the
-    /// field (its key, profile and variable; never a value).
+    /// the app's light/dark state (`now`: the fresh reading in that state,
+    /// already known to be whole, `settingsProfileEditsFromDisk`; one that
+    /// missed a file would read what that file gives as changed). One it did
+    /// stops the save, naming the field (its key, profile and variable; never
+    /// a value).
     fn settingsProfilesUnchanged(
-        self: *App,
         alloc: Allocator,
-        reading: *const configpkg.Config,
-        state: configpkg.ConditionalState,
+        detail: *win32_settings.FailureDetail,
+        now: *const configpkg.Config,
         original: *const configpkg.Config,
         pending: *const configpkg.Config,
         edits: []const settings_patch.Edit,
     ) win32_settings.SaveError!void {
-        // A reading that could not read every file misses what that file
-        // gives, which would read as changed: the check that follows
-        // (`settingsProfileEditsFromDisk`) names the file instead.
-        if (settings_patch.unreadConfigFile(reading) != null) return;
-        var applied = reading.changeConditionalState(state) catch |err| return settingsProfileEditsFailed(err);
-        defer if (applied) |*value| value.deinit();
-        const now: *const configpkg.Config = if (applied) |*value| value else reading;
-        if (settings_patch.unreadConfigFile(now) != null) return;
         const edit = settings_patch.changedUnder(edits, original, pending, now) orelse return;
         var name: std.Io.Writer.Allocating = .init(alloc);
         defer name.deinit();
         settings_patch.writeEditName(&name.writer, edit) catch return error.OutOfMemory;
-        self.settings_failure_detail.set(alloc, name.written());
+        detail.set(alloc, name.written());
         log.warn("settings save: another program changed a profile field the draft changes; nothing saved", .{});
         return error.ProfileChanged;
     }
@@ -8727,16 +8715,24 @@ pub const App = struct {
     /// read again from disk (`fresh`, the read's result, owned here) and
     /// against `held`, the config as last read, in `state`
     /// (`settings_patch.editsForSave`): a removal keeps its line when either
-    /// shows another layer naming it. The fresh read is held to the rule the
-    /// disk check before an ordinary save holds it to (`settingsDiskVerdict`):
-    /// an included or theme file that is there and will not open, or does not
-    /// decode, stops the save, and so does a file the load or its reading in
-    /// `state` could not open or read whole (`settings_patch.unreadConfigFile`:
-    /// an include that would not open, or one or a theme whose read failed
-    /// partway through). Each reading this decides from is held to the last
-    /// rule again, since switching to `state` reads the theme again; and a
-    /// read that fails stops it. Nothing is written then, and `detail` names
-    /// the file.
+    /// shows another layer naming it, or could have missed one.
+    ///
+    /// The fresh read is held to the rule the disk check before an ordinary
+    /// save holds it to (`settingsDiskVerdict`), and its reading in `state`
+    /// to `settings_patch.unreadConfigFile`: a file it could not open, read
+    /// whole or decode stops the save. Of the held config switched to `state`
+    /// here, only what that switch read itself, its theme
+    /// (`settings_patch.unreadTheme`), stops it; its config-file and include
+    /// problems are from its last read, possibly repaired since, and keep a
+    /// removed profile's tombstone instead (`referencedElsewhere`).
+    ///
+    /// With `compare` (the draft's edits; null in recovery, whose baseline is
+    /// not the file), a profile field they change that another program
+    /// changed too stops the save (`settingsProfilesUnchanged`), judged on
+    /// the same reading in `state`, once it is known to be whole: the theme
+    /// is read once, so a read that fails and then recovers cannot skip
+    /// that check. A read that fails stops the save. Nothing is written
+    /// then, and `detail` names the file or the field.
     fn settingsProfileEditsFromDisk(
         arena: Allocator,
         alloc: Allocator,
@@ -8747,6 +8743,7 @@ pub const App = struct {
         original: *const configpkg.Config,
         pending: *const configpkg.Config,
         target_path: []const u8,
+        compare: ?[]const settings_patch.Edit,
     ) win32_settings.SaveError![]settings_patch.Edit {
         var disk = fresh catch |err| {
             log.warn("settings save: could not read the config files again for the profile edits err={}", .{err});
@@ -8788,6 +8785,7 @@ pub const App = struct {
                 return if (unread.undecodable) error.UnsupportedEncoding else error.FileUnopenable;
             }
         }
+        if (compare) |edits| try settingsProfilesUnchanged(alloc, detail, readings[0], original, pending, edits);
         return settings_patch.editsForSave(arena, alloc, &readings, state, original, pending, target_path, &settings_reference.samePath) catch |err|
             settingsProfileEditsFailed(err);
     }
@@ -9116,19 +9114,19 @@ pub const App = struct {
             var buf: [16]u8 = undefined;
             var failing = @import("../../cli/args.zig").TestFailingReader.init("profile-command = py: python.exe\nprofile-na", &buf);
             try fresh.loadReader(alloc, &failing.interface, path);
-            try std.testing.expectError(error.FileUnopenable, App.settingsProfileEditsFromDisk(arena.allocator(), alloc, &detail, fresh, &held, .{}, &held, &pending, path));
+            try std.testing.expectError(error.FileUnopenable, App.settingsProfileEditsFromDisk(arena.allocator(), alloc, &detail, fresh, &held, .{}, &held, &pending, path, null));
             const expected = try std.fmt.allocPrint(alloc, "the included file {s}", .{path});
             defer alloc.free(expected);
             try std.testing.expect(std.mem.eql(u8, expected, detail.text.?));
         }
         // A read that fails: the save stops.
-        try std.testing.expectError(error.ReloadFailed, App.settingsProfileEditsFromDisk(arena.allocator(), alloc, &detail, error.AccessDenied, &held, .{}, &held, &pending, path));
+        try std.testing.expectError(error.ReloadFailed, App.settingsProfileEditsFromDisk(arena.allocator(), alloc, &detail, error.AccessDenied, &held, .{}, &held, &pending, path, null));
         // A whole read: the edits, and nothing else names `py`, so its line goes.
         {
             var fresh = try configpkg.Config.default(alloc);
             errdefer fresh.deinit();
             try fresh.loadFile(alloc, path);
-            const edits = try App.settingsProfileEditsFromDisk(arena.allocator(), alloc, &detail, fresh, &held, .{}, &held, &pending, path);
+            const edits = try App.settingsProfileEditsFromDisk(arena.allocator(), alloc, &detail, fresh, &held, .{}, &held, &pending, path, null);
             try std.testing.expectEqual(@as(usize, 4), edits.len);
             try std.testing.expect(edits[0].field == .command and edits[0].op == .delete);
         }
@@ -9187,7 +9185,7 @@ pub const App = struct {
             var lock = try tmp.dir.openFile("dark", .{ .mode = .read_write, .lock = .exclusive });
             defer lock.close();
             const fresh = try load(alloc, path);
-            try std.testing.expectError(error.FileUnopenable, App.settingsProfileEditsFromDisk(arena.allocator(), alloc, &detail, fresh, &held, dark_state, &held, &pending, path));
+            try std.testing.expectError(error.FileUnopenable, App.settingsProfileEditsFromDisk(arena.allocator(), alloc, &detail, fresh, &held, dark_state, &held, &pending, path, null));
             const expected = try std.fmt.allocPrint(alloc, "the theme file {s}", .{dark});
             defer alloc.free(expected);
             try std.testing.expect(std.mem.eql(u8, expected, detail.text.?));
@@ -9198,7 +9196,7 @@ pub const App = struct {
         try std.testing.expect(std.mem.eql(u8, before, after));
         // Read whole: the dark theme's `py` keeps the tombstone.
         const fresh = try load(alloc, path);
-        const edits = try App.settingsProfileEditsFromDisk(arena.allocator(), alloc, &detail, fresh, &held, dark_state, &held, &pending, path);
+        const edits = try App.settingsProfileEditsFromDisk(arena.allocator(), alloc, &detail, fresh, &held, dark_state, &held, &pending, path, null);
         for (edits) |e| if (e.field == .command) try std.testing.expect(e.op == .unset);
     }
 
@@ -9959,12 +9957,68 @@ pub const App = struct {
         // The fresh reading is whole; the held one, read again dark, skips
         // its theme, and a removal decided from it could delete where the
         // old theme still defines `py`: nothing is worked out.
-        try std.testing.expectError(error.UnsupportedEncoding, App.settingsProfileEditsFromDisk(arena.allocator(), alloc, &detail, fresh, &held, .{ .theme = .dark }, &held, &pending, path));
+        try std.testing.expectError(error.UnsupportedEncoding, App.settingsProfileEditsFromDisk(arena.allocator(), alloc, &detail, fresh, &held, .{ .theme = .dark }, &held, &pending, path, null));
         const expected = try std.fmt.allocPrint(alloc, "the file {s}", .{old_dark});
         defer alloc.free(expected);
         try std.testing.expect(std.mem.eql(u8, expected, detail.text orelse return error.TestExpectedDetail));
         // The file is as it was.
         const after = try tmp.dir.readFileAlloc(alloc, "config", 1 << 16);
+        defer alloc.free(after);
+        try std.testing.expect(std.mem.eql(u8, fresh_text, after));
+    }
+
+    test "settings save stops when the held config's theme, read again in the app's state, no longer decodes, and writes nothing" {
+        if (builtin.os.tag != .windows) return error.SkipZigTest;
+        const alloc = std.testing.allocator;
+        var core_app: CoreApp = undefined;
+        var app: App = undefined;
+        var session: TestSession = .{};
+        try session.init(.{ .core_app = &core_app, .app = &app });
+        defer session.deinit();
+        defer testFreeConfigProblems(&app, alloc);
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        try tmp.dir.writeFile(.{ .sub_path = "light", .data = "\n" });
+        try tmp.dir.writeFile(.{ .sub_path = "old-dark", .data = "profile-command = py: python.exe -X dark\n" });
+        try tmp.dir.writeFile(.{ .sub_path = "new-dark", .data = "\n" });
+        const light = try tmp.dir.realpathAlloc(alloc, "light");
+        defer alloc.free(light);
+        const old_dark = try tmp.dir.realpathAlloc(alloc, "old-dark");
+        defer alloc.free(old_dark);
+        const new_dark = try tmp.dir.realpathAlloc(alloc, "new-dark");
+        defer alloc.free(new_dark);
+        // The config as the app last read it (light), naming the old dark
+        // theme, which defines `py`; the draft removes `py`.
+        const held_text = try std.fmt.allocPrint(alloc, "theme = light:{s},dark:{s}\nprofile-command = py: python.exe\n", .{ light, old_dark });
+        defer alloc.free(held_text);
+        try tmp.dir.writeFile(.{ .sub_path = "config", .data = held_text });
+        const path = try tmp.dir.realpathAlloc(alloc, "config");
+        defer alloc.free(path);
+        SaveTest.files = &.{path};
+        try SaveTest.begin(&app, path);
+        defer SaveTest.end(&app);
+        var original = try app.config.clone(alloc);
+        defer original.deinit();
+        var pending = try app.config.clone(alloc);
+        defer pending.deinit();
+        try pending.@"profile-command".parseCLI(pending._arena.?.allocator(), "py:");
+        // The app runs dark now, with the config as last read (a switch that
+        // failed keeps it). Since then the file names a new dark theme, which
+        // decodes, and the old one is UTF-16 that does not.
+        app.core_app.config_conditional_state = .{ .theme = .dark };
+        const fresh_text = try std.fmt.allocPrint(alloc, "theme = light:{s},dark:{s}\nprofile-command = py: python.exe\n", .{ light, new_dark });
+        defer alloc.free(fresh_text);
+        try tmp.dir.writeFile(.{ .sub_path = "config", .data = fresh_text });
+        try tmp.dir.writeFile(.{ .sub_path = "old-dark", .data = "\xff\xfe\x00\xd8a\x00" });
+        // A removal decided from the held config read dark could delete the
+        // line where the old theme still defines `py`: the save stops and
+        // names that theme.
+        try std.testing.expectError(error.UnsupportedEncoding, app.settingsSaveAndReload(&pending, &original));
+        const expected = try std.fmt.allocPrint(alloc, "the file {s}", .{old_dark});
+        defer alloc.free(expected);
+        try std.testing.expect(std.mem.eql(u8, expected, app.settings_failure_detail.text orelse return error.TestExpectedDetail));
+        // The file is as it was.
+        const after = try SaveTest.read(path);
         defer alloc.free(after);
         try std.testing.expect(std.mem.eql(u8, fresh_text, after));
     }
@@ -10020,7 +10074,7 @@ pub const App = struct {
         // not read everything, so it may have missed what does: the line
         // becomes a tombstone, not a deletion. The save is not refused for a
         // marker that may be stale.
-        const edits = try App.settingsProfileEditsFromDisk(arena.allocator(), alloc, &detail, fresh, &held, .{}, &held, &pending, path);
+        const edits = try App.settingsProfileEditsFromDisk(arena.allocator(), alloc, &detail, fresh, &held, .{}, &held, &pending, path, null);
         var command: ?settings_patch.Edit = null;
         for (edits) |e| if (e.field == .command and std.mem.eql(u8, "py", e.id)) {
             command = e;
@@ -10089,7 +10143,7 @@ pub const App = struct {
             // have missed what the include named: the line becomes a
             // tombstone, not a deletion. Not refused: that record is from the
             // held config's last read, and the include decodes now.
-            const edits = try App.settingsProfileEditsFromDisk(arena.allocator(), alloc, &detail, fresh, held, .{ .theme = .dark }, held, &pending, path);
+            const edits = try App.settingsProfileEditsFromDisk(arena.allocator(), alloc, &detail, fresh, held, .{ .theme = .dark }, held, &pending, path, null);
             var command: ?settings_patch.Edit = null;
             for (edits) |e| if (e.field == .command and std.mem.eql(u8, "py", e.id)) {
                 command = e;

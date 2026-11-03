@@ -611,30 +611,45 @@ pub fn reloadReport(masked: *std.Io.Writer, edits: []const Edit, reload: *const 
 /// is the loader's to report, as the disk check before a save lets them
 /// through (`settingsDiskVerdict`).
 pub fn unreadConfigFile(config: *const Config) ?Unread {
-    return unreadOf(config, false);
+    return unreadOf(config, .any);
 }
 
 /// `unreadConfigFile`, for the theme alone: what a light/dark switch reads
 /// itself (`finalize` reads the state's theme again), as against a config
 /// file's problem, which a switch replays from the load it came from.
 pub fn unreadTheme(config: *const Config) ?Unread {
-    return unreadOf(config, true);
+    return unreadOf(config, .theme);
 }
 
-fn unreadOf(config: *const Config, theme_only: bool) ?Unread {
+/// `unreadConfigFile`, for the files every light/dark state reads (the
+/// config files and their includes) and not the theme: what a reading in
+/// one state says of a save the app applies in another.
+pub fn unreadFiles(config: *const Config) ?Unread {
+    return unreadOf(config, .files);
+}
+
+const UnreadScope = enum { any, theme, files };
+
+fn unreadOf(config: *const Config, scope: UnreadScope) ?Unread {
+    const files = scope != .theme;
+    const themes = scope != .files;
     // Skipped whole: UTF-16 that does not decode. One predicate for the
     // check before a save and the report after it, so they cannot drift.
     // The light/dark switch does not carry the config file's record over
-    // (`changeConditionalState`), so its replayed problem is read below too.
-    if (!theme_only) if (config._undecodable_file) |path| return .{ .kind = .include, .path = path, .undecodable = true };
-    if (config._undecodable_theme) |path| return .{ .kind = .theme, .path = path, .undecodable = true };
+    // (`changeConditionalState`), so its replayed problem is read below too;
+    // that problem also says which file it was (`undecodableConfigFile`).
+    if (files) if (config._undecodable_file) |path| return .{ .kind = undecodableKind(config, path), .path = path, .undecodable = true };
+    if (themes) if (config._undecodable_theme) |path| return .{ .kind = .theme, .path = path, .undecodable = true };
     for (config._diagnostics.items()) |diag| {
         const message: []const u8 = diag.message;
         // A config file skipped as UTF-16 that does not decode, as its
         // problem says (`Config.invalidUtf16`): kept in the replay log, so a
         // config switched to the other light/dark state, or the app's after
         // a live switch, still shows it. A theme's stays out of that log.
-        if (!theme_only) if (undecodableConfigFile(message)) |path| return .{ .kind = .include, .path = path, .undecodable = true };
+        if (files) if (undecodableConfigFile(message)) |found| return .{ .kind = found.kind, .path = found.path, .undecodable = true };
+        if (!themes and (std.mem.startsWith(u8, message, "failed to load theme ") or
+            std.mem.startsWith(u8, message, "not reading theme from ") or
+            std.mem.startsWith(u8, message, "error reading theme "))) continue;
         // A theme the load could not open (`themepkg.open`): the light/dark
         // switch reads it again after the save's probe, and it may have
         // become unopenable in between. The path is the last quoted name,
@@ -646,7 +661,7 @@ fn unreadOf(config: *const Config, theme_only: bool) ?Unread {
             const quote_start = std.mem.lastIndexOfScalar(u8, message[0..quote_end], '"') orelse continue;
             return .{ .kind = .theme, .path = message[quote_start + 1 .. quote_end] };
         }
-        if (theme_only and !std.mem.startsWith(u8, message, "error reading theme ")) continue;
+        if (scope == .theme and !std.mem.startsWith(u8, message, "error reading theme ")) continue;
         const prefix_len, const kind = for ([_]struct { []const u8, Unread.Kind }{
             .{ "error opening config-file ", .include },
             .{ "error reading config-file ", .include },
@@ -668,17 +683,34 @@ fn unreadOf(config: *const Config, theme_only: bool) ?Unread {
     return null;
 }
 
-/// The path in `Config.invalidUtf16`'s problem for a config file, or null:
-/// "config file <path> <reason>; not reading it. Save it as UTF-8".
-fn undecodableConfigFile(message: []const u8) ?[]const u8 {
-    const prefix = "config file ";
+/// The file in `Config.invalidUtf16`'s problem for a config file, and which
+/// file it is, or null: "config file <path> <reason>; not reading it. Save it
+/// as UTF-8" for a config file the load was given (the default one),
+/// "config-file <path> ..." for an include.
+fn undecodableConfigFile(message: []const u8) ?struct { path: []const u8, kind: Unread.Kind } {
     const suffix = "; not reading it. Save it as UTF-8";
-    if (!std.mem.startsWith(u8, message, prefix) or !std.mem.endsWith(u8, message, suffix)) return null;
+    if (!std.mem.endsWith(u8, message, suffix)) return null;
+    const prefix: []const u8, const kind: Unread.Kind = if (std.mem.startsWith(u8, message, "config file "))
+        .{ "config file ", .config }
+    else if (std.mem.startsWith(u8, message, "config-file "))
+        .{ "config-file ", .include }
+    else
+        return null;
     const body = message[prefix.len .. message.len - suffix.len];
     for ([_][]const u8{ " is not valid UTF-16", " is too large" }) |reason| {
-        if (std.mem.endsWith(u8, body, reason)) return body[0 .. body.len - reason.len];
+        if (std.mem.endsWith(u8, body, reason)) return .{ .path = body[0 .. body.len - reason.len], .kind = kind };
     }
     return null;
+}
+
+/// Which file `path`, the config's record of a file that did not decode, is:
+/// as its problem says, or an include when no problem says.
+fn undecodableKind(config: *const Config, path: []const u8) Unread.Kind {
+    for (config._diagnostics.items()) |diag| {
+        const found = undecodableConfigFile(diag.message) orelse continue;
+        if (std.mem.eql(u8, found.path, path)) return found.kind;
+    }
+    return .include;
 }
 
 /// Whether anything but this file's lines names profile `id`, in any of
@@ -1486,7 +1518,7 @@ test "settings patch: a config file that did not decode is still named after the
     const arena = config._arena.?.allocator();
     // What `Config.invalidUtf16` records for a config file, as a replay brings
     // it back without the marker.
-    try config._diagnostics.append(arena, .{ .message = try arena.dupeZ(u8, "config file C:\\noctty-test\\more.conf is not valid UTF-16; not reading it. Save it as UTF-8") });
+    try config._diagnostics.append(arena, .{ .message = try arena.dupeZ(u8, "config-file C:\\noctty-test\\more.conf is not valid UTF-16; not reading it. Save it as UTF-8") });
     const unread = unreadConfigFile(&config) orelse return error.TestExpectedUnread;
     try testing.expect(unread.undecodable and unread.kind == .include);
     try expectSameText("C:\\noctty-test\\more.conf", unread.path);
@@ -1517,6 +1549,53 @@ test "settings patch: the report after a save names a file only the reload as re
     var clean = try Config.default(alloc);
     defer clean.deinit();
     try testing.expect(try reloadReport(&masked.writer, &.{}, &switched, &clean, false) == .held);
+}
+
+test "settings patch: a default config file that did not decode is named as the config file, before and after the light/dark switch" {
+    const alloc = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(.{ .sub_path = "config", .data = "\xff\xfe\x00\xd8a\x00" });
+    try tmp.dir.writeFile(.{ .sub_path = "light", .data = "font-size = 13\n" });
+    try tmp.dir.writeFile(.{ .sub_path = "dark", .data = "font-size = 14\n" });
+    const path = try tmp.dir.realpathAlloc(alloc, "config");
+    defer alloc.free(path);
+    const light = try tmp.dir.realpathAlloc(alloc, "light");
+    defer alloc.free(light);
+    const dark = try tmp.dir.realpathAlloc(alloc, "dark");
+    defer alloc.free(dark);
+    const themes_text = try std.fmt.allocPrint(alloc, "theme = light:{s},dark:{s}\n", .{ light, dark });
+    defer alloc.free(themes_text);
+    try tmp.dir.writeFile(.{ .sub_path = "themes", .data = themes_text });
+    const themes = try tmp.dir.realpathAlloc(alloc, "themes");
+    defer alloc.free(themes);
+    // The default config file is skipped whole; a later file names the
+    // themes, so the config has a light/dark switch to make.
+    var loaded = try Config.default(alloc);
+    defer loaded.deinit();
+    _ = loaded.loadOptionalFile(alloc, path);
+    try loaded.loadFile(alloc, themes);
+    try loaded.finalize();
+    var switched = (try loaded.changeConditionalState(.{ .theme = .dark })) orelse return error.TestExpectedSwitch;
+    defer switched.deinit();
+    const expected = try std.fmt.allocPrint(alloc, "the config file {s}", .{path});
+    defer alloc.free(expected);
+    var masked: std.Io.Writer.Allocating = .init(alloc);
+    defer masked.deinit();
+    // As the status after a save names it: from the load, which records the
+    // file, and from the reading in the other state, which has only the
+    // problem the switch replays.
+    for ([_]*const Config{ &loaded, &switched }) |reading| {
+        switch (try reloadReport(&masked.writer, &.{}, reading, reading, false)) {
+            .unread => |unread| {
+                try testing.expect(unread.undecodable);
+                const text = try unread.describe(alloc);
+                defer alloc.free(text);
+                try expectSameText(expected, text);
+            },
+            else => return error.TestExpectedUnread,
+        }
+    }
 }
 
 test "settings patch: a reload that could not read a file whole reports the file, not an override" {

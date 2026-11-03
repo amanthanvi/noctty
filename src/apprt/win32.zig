@@ -2028,15 +2028,20 @@ fn settingsIncludesOpenable(
 /// held to the same rule as an include. A theme that is not there is the
 /// loader's to report, and the running config lacks it too; one that is there
 /// and will not open is skipped by the load, and the settings it supplies
-/// come back as defaults. Both the light and the dark name are checked, since
-/// which one the load used depends on the system state.
+/// come back as defaults. Only the name the app's light/dark state reads
+/// (`state`): the save's reload applies that theme and no other, so one the
+/// other state names is not this save's to stop.
 fn settingsThemeOpenable(
     alloc: Allocator,
     detail: ?*win32_settings.FailureDetail,
     disk: *const configpkg.Config,
+    state: configpkg.ConditionalState,
 ) win32_settings.SaveError!void {
     const theme = disk.theme orelse return;
-    for ([_][]const u8{ theme.light, theme.dark }) |name| {
+    for ([_][]const u8{switch (state.theme) {
+        .light => theme.light,
+        .dark => theme.dark,
+    }}) |name| {
         if (std.fs.path.isAbsolute(name)) {
             try settingsFileOpenable(alloc, detail, "the theme file", name);
             continue;
@@ -2083,7 +2088,7 @@ pub fn settingsDiskVerdict(
     user_edited: SettingsEditedKeySet,
 ) win32_settings.SaveError!bool {
     try settingsIncludesOpenable(alloc, detail, disk);
-    try settingsThemeOpenable(alloc, detail, disk);
+    try settingsThemeOpenable(alloc, detail, disk, state);
     // A UTF-16 file that does not decode is skipped whole, with a diagnostic
     // and everything it set missing: as incomplete as one that will not open.
     if (disk._undecodable_file) |path| {
@@ -2093,19 +2098,23 @@ pub fn settingsDiskVerdict(
     // A file the load opened and could not read whole (an include or theme
     // whose read failed partway through), or could not open since the probe
     // above: the save's reload would apply the same partial load. Asked of
-    // the load and of the reading in the app's light/dark state, which reads
-    // that state's theme again and is the one the reload applies; both theme
-    // names are held to it, as to the probe.
+    // the reading in the app's light/dark state, which reads that state's
+    // theme again and is the one the reload applies.
     var applied = try settingsDiskInState(disk, state);
     defer if (applied) |*config| config.deinit();
     const effective: *const configpkg.Config = if (applied) |*config| config else disk;
-    // One predicate for both readings (`settings_patch.unreadConfigFile`): the
-    // switch reads the state's theme again, which is decoded as a config file
-    // is, so a theme that does not decode is a file this reading skipped and
-    // the load may not have.
+    // One predicate (`settings_patch.unreadConfigFile`) for the reading in the
+    // app's state: the switch reads that state's theme again, which is
+    // decoded as a config file is, so a theme that does not decode is a file
+    // this reading skipped and the load may not have. The load as read, when
+    // it is not in the app's state, is asked only about the files every state
+    // reads (the config files and includes, `unreadFiles`): its theme is the
+    // other state's, which this save's reload does not apply.
+    const settings_patch = @import("win32/settings_patch.zig");
     const readings = [_]*const configpkg.Config{ disk, effective };
-    for (readings[0..if (applied != null) 2 else 1]) |reading| {
-        if (@import("win32/settings_patch.zig").unreadConfigFile(reading)) |unread| {
+    for (readings[0..if (applied != null) 2 else 1], 0..) |reading, i| {
+        const found = if (i == 0 and applied != null) settings_patch.unreadFiles(reading) else settings_patch.unreadConfigFile(reading);
+        if (found) |unread| {
             if (unread.undecodable) {
                 try setSettingsFailureDetail(alloc, detail, "the file {s}", .{unread.path});
                 return error.UnsupportedEncoding;
@@ -8126,6 +8135,68 @@ test "win32 settings disk check stops a save on a theme that does not decode, in
     // Light reads the light theme alone.
     detail.clear(alloc);
     try std.testing.expect(!try settingsDiskVerdict(alloc, &detail, &same, &same, &disk, .{}, .initEmpty()));
+}
+
+test "win32 settings disk check does not stop a save on a theme only the other light/dark state reads" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(.{ .sub_path = "light", .data = "font-size = 13\n" });
+    try tmp.dir.writeFile(.{ .sub_path = "dark", .data = "font-size = 14\n" });
+    const light = try tmp.dir.realpathAlloc(alloc, "light");
+    defer alloc.free(light);
+    const dark = try tmp.dir.realpathAlloc(alloc, "dark");
+    defer alloc.free(dark);
+    const text = try std.fmt.allocPrint(alloc, "theme = light:{s},dark:{s}\n", .{ light, dark });
+    defer alloc.free(text);
+    try tmp.dir.writeFile(.{ .sub_path = "config", .data = text });
+    const path = try tmp.dir.realpathAlloc(alloc, "config");
+    defer alloc.free(path);
+    var same = try configpkg.Config.default(alloc);
+    defer same.deinit();
+    var detail: win32_settings.FailureDetail = .{};
+    defer detail.clear(alloc);
+    const dark_state: configpkg.ConditionalState = .{ .theme = .dark };
+    {
+        // The light theme is UTF-16 that does not decode; the load reads it,
+        // in the light state `Config.load` loads in.
+        try tmp.dir.writeFile(.{ .sub_path = "light", .data = "\xff\xfe\x00\xd8a\x00" });
+        var disk = try configpkg.Config.default(alloc);
+        defer disk.deinit();
+        try disk.loadFile(alloc, path);
+        try disk.loadRecursiveFiles(alloc);
+        try disk.finalize();
+        // The app runs dark: the save's reload reads the dark theme alone,
+        // which decodes.
+        try std.testing.expect(!try settingsDiskVerdict(alloc, &detail, &same, &same, &disk, dark_state, .initEmpty()));
+        try std.testing.expect(detail.text == null);
+        // In the light state the reload would skip the light theme whole.
+        try std.testing.expectError(error.UnsupportedEncoding, settingsDiskVerdict(alloc, &detail, &same, &same, &disk, .{}, .initEmpty()));
+        const expected = try std.fmt.allocPrint(alloc, "the file {s}", .{light});
+        defer alloc.free(expected);
+        try std.testing.expect(std.mem.eql(u8, expected, detail.text orelse return error.TestExpectedDetail));
+    }
+    {
+        // The light theme decodes, and another program holds it with no
+        // sharing: it does not open, for the load or the probe.
+        try tmp.dir.writeFile(.{ .sub_path = "light", .data = "font-size = 13\n" });
+        const wide = try std.os.windows.sliceToPrefixedFileW(null, light);
+        const handle = std.os.windows.kernel32.CreateFileW(wide.span().ptr, std.os.windows.GENERIC_READ, 0, null, std.os.windows.OPEN_EXISTING, 0, null);
+        if (handle == std.os.windows.INVALID_HANDLE_VALUE) return error.CouldNotHoldFile;
+        defer std.os.windows.CloseHandle(handle);
+        var disk = try configpkg.Config.default(alloc);
+        defer disk.deinit();
+        try disk.loadFile(alloc, path);
+        try disk.loadRecursiveFiles(alloc);
+        try disk.finalize();
+        detail.clear(alloc);
+        try std.testing.expect(!try settingsDiskVerdict(alloc, &detail, &same, &same, &disk, dark_state, .initEmpty()));
+        try std.testing.expect(detail.text == null);
+        try std.testing.expectError(error.FileUnopenable, settingsDiskVerdict(alloc, &detail, &same, &same, &disk, .{}, .initEmpty()));
+        const expected = try std.fmt.allocPrint(alloc, "the theme file {s}", .{light});
+        defer alloc.free(expected);
+        try std.testing.expect(std.mem.eql(u8, expected, detail.text orelse return error.TestExpectedDetail));
+    }
 }
 
 test "win32 settings disk check stops a save on a default config file that will not open, naming it" {

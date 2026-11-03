@@ -3843,6 +3843,15 @@ pub fn loadIter(
     try cli.args.parse(Config, alloc, self, iter);
 }
 
+/// `loadIter` over a replay, failing when the replay could not copy a
+/// recorded problem (`Replay.Iterator.failed`): the config being rebuilt is
+/// then not whole, and its caller drops it (a failed switch keeps the
+/// config it had).
+fn loadReplay(self: *Config, alloc: Allocator, it: *Replay.Iterator) !void {
+    try self.loadIter(alloc, it);
+    if (it.failed) |err| return err;
+}
+
 /// Load configuration from the target config file at `path`.
 ///
 /// `path` must be resolved and absolute.
@@ -3925,7 +3934,10 @@ fn loadReaderAs(self: *Config, alloc: Allocator, reader: *std.Io.Reader, path: [
     var decoded: ?[]u8 = null;
     defer if (decoded) |text| alloc.free(text);
     var decoded_reader: std.Io.Reader = undefined;
-    const source = self.textReader(alloc, reader, path, .config, &decoded, &decoded_reader) catch |err| switch (err) {
+    const source = self.textReader(alloc, reader, path, switch (role) {
+        .config => .config,
+        .include => .include,
+    }, &decoded, &decoded_reader) catch |err| switch (err) {
         error.InvalidUtf16 => return,
         else => |e| return e,
     };
@@ -3988,12 +4000,16 @@ fn noteReadFailure(self: *Config, what: []const u8, path: []const u8, replay: bo
 /// again, so a replayed copy would carry one theme's problem into the other
 /// theme's config).
 const TextFile = enum {
+    /// A config file the load was given (`loadFile`: the default one).
     config,
+    /// An included `config-file`.
+    include,
     theme,
 
     fn noun(self: TextFile) []const u8 {
         return switch (self) {
             .config => "config file",
+            .include => "config-file",
             .theme => "theme file",
         };
     }
@@ -4027,7 +4043,7 @@ fn textReader(
     const order = utf16ByteOrder(reader) orelse return reader;
     reader.toss(2);
     decoded.* = try self.decodeUtf16(alloc, reader, order, path, what);
-    log.warn("{s}: UTF-16 text, read as such; save it as UTF-8{s}", .{ path, if (what == .config) " so the Settings window can edit it" else "" });
+    log.warn("{s}: UTF-16 text, read as such; save it as UTF-8{s}", .{ path, if (what != .theme) " so the Settings window can edit it" else "" });
     decoded_reader.* = .fixed(decoded.*.?);
     return decoded_reader;
 }
@@ -4073,7 +4089,7 @@ fn invalidUtf16(self: *Config, path: []const u8, what: TextFile, reason: []const
     const arena_alloc = self._arena.?.allocator();
     const skipped = arena_alloc.dupeZ(u8, path) catch return error.OutOfMemory;
     switch (what) {
-        .config => self._undecodable_file = skipped,
+        .config, .include => self._undecodable_file = skipped,
         .theme => self._undecodable_theme = skipped,
     }
     const diag: cli.Diagnostic = .{
@@ -4085,7 +4101,7 @@ fn invalidUtf16(self: *Config, path: []const u8, what: TextFile, reason: []const
         ) catch return error.OutOfMemory,
     };
     self._diagnostics.append(arena_alloc, diag) catch return error.OutOfMemory;
-    if (what == .config) self._replay_steps.append(arena_alloc, .{ .diagnostic = diag }) catch return error.OutOfMemory;
+    if (what != .theme) self._replay_steps.append(arena_alloc, .{ .diagnostic = diag }) catch return error.OutOfMemory;
     return error.InvalidUtf16;
 }
 
@@ -4581,6 +4597,56 @@ fn writeConfigTemplate(path: []const u8) !void {
         .{ .path = path },
     );
     try writer.flush();
+}
+
+test "a light/dark switch that cannot copy a recorded problem fails, rather than rebuild a config without it" {
+    const testing = std.testing;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(.{ .sub_path = "light", .data = "font-size = 13\n" });
+    try tmp.dir.writeFile(.{ .sub_path = "dark", .data = "font-size = 14\n" });
+    const light = try tmp.dir.realpathAlloc(testing.allocator, "light");
+    defer testing.allocator.free(light);
+    const dark = try tmp.dir.realpathAlloc(testing.allocator, "dark");
+    defer testing.allocator.free(dark);
+    const missing = try std.fs.path.join(testing.allocator, &.{ std.fs.path.dirname(light) orelse return error.TestExpectedDir, "missing.conf" });
+    defer testing.allocator.free(missing);
+    // A problem the load records and replays: an include that is not there.
+    const text = try std.fmt.allocPrint(testing.allocator, "theme = light:{s},dark:{s}\nconfig-file = {s}\n", .{ light, dark, missing });
+    defer testing.allocator.free(text);
+    try tmp.dir.writeFile(.{ .sub_path = "config", .data = text });
+    const path = try tmp.dir.realpathAlloc(testing.allocator, "config");
+    defer testing.allocator.free(path);
+    const problem = try std.fmt.allocPrint(testing.allocator, "error opening config-file {s}: error.FileNotFound", .{missing});
+    defer testing.allocator.free(problem);
+    const Has = struct {
+        fn recorded(cfg: *const Config, message: []const u8) bool {
+            for (cfg._diagnostics.items()) |diag| if (std.mem.eql(u8, message, diag.message)) return true;
+            return false;
+        }
+    };
+    var failing = testing.FailingAllocator.init(testing.allocator, .{});
+    var cfg = try Config.default(failing.allocator());
+    defer cfg.deinit();
+    try cfg.loadFile(failing.allocator(), path);
+    try cfg.loadRecursiveFiles(failing.allocator());
+    try cfg.finalize();
+    try testing.expect(Has.recorded(&cfg, problem));
+    // Each allocation of the switch to dark fails in turn: the switch fails,
+    // or the problem is in what it built. Never a config without it.
+    var index: usize = 0;
+    while (index < 10_000) : (index += 1) {
+        failing.fail_index = failing.alloc_index + index;
+        failing.has_induced_failure = false;
+        var switched = (cfg.changeConditionalState(.{ .theme = .dark }) catch |err| {
+            try testing.expectEqual(error.OutOfMemory, err);
+            continue;
+        }) orelse return error.TestExpectedSwitch;
+        defer switched.deinit();
+        try testing.expect(Has.recorded(&switched, problem));
+        try testing.expectEqual(@as(f32, 14), switched.@"font-size");
+        if (!failing.has_induced_failure) break;
+    } else return error.TestSwitchNeverSucceeded;
 }
 
 /// `text` as UTF-16LE with a byte order mark, as Windows PowerShell 5.1's
@@ -5140,7 +5206,7 @@ pub fn loadCliArgs(self: *Config, alloc_gpa: Allocator) !void {
             self._replay_steps.items[replay_len_start..replay_len_end],
             &new_config,
         );
-        try new_config.loadIter(alloc_gpa, &it);
+        try new_config.loadReplay(alloc_gpa, &it);
         self.deinit();
         self.* = new_config;
     }
@@ -5316,7 +5382,7 @@ pub fn changeConditionalState(
 
     // Replay all of our steps to rebuild the configuration
     var it = Replay.iterator(self._replay_steps.items, &new_config);
-    try new_config.loadIter(alloc_gpa, &it);
+    try new_config.loadReplay(alloc_gpa, &it);
     try new_config.finalize();
 
     return new_config;
@@ -5486,7 +5552,7 @@ fn loadTheme(self: *Config, theme: Theme) !void {
     // log (a config finalized again) are not: the theme was just read.
     var slice_it = Replay.iterator(self._replay_steps.items, &new_config);
     slice_it.skip_theme_lines = true;
-    try new_config.loadIter(alloc_gpa, &slice_it);
+    try new_config.loadReplay(alloc_gpa, &slice_it);
 
     // The replay re-applies values, not the loader's record of a file it
     // skipped; carry that over before the old arena goes.
@@ -6884,10 +6950,24 @@ const Replay = struct {
         /// those, from the theme file's lines, so they are a theme read by
         /// an earlier `loadTheme`; set when the theme has just been read.
         skip_theme_lines: bool = false,
+        /// A problem the replay could not copy into the config it rebuilds,
+        /// for want of memory. The replay stops there, and `loadReplay`
+        /// fails: a rebuilt config without a problem the load recorded would
+        /// look whole (Settings' save checks read those problems), so it is
+        /// not made at all (CONFIG-REPLAY-DIAG-FAIL-CLOSED).
+        failed: ?Allocator.Error = null,
 
         pub fn location(self: *const Self, alloc: Allocator) Allocator.Error!?cli.Location {
             // The replay source may be freed as soon as this load completes.
             return try self.current_location.clone(alloc);
+        }
+
+        /// End the replay here, recording why (`failed`).
+        fn stop(self: *Self, err: Allocator.Error) ?[]const u8 {
+            log.warn("replay stopped: a recorded problem could not be copied err={}", .{err});
+            self.failed = err;
+            self.idx = self.slice.len;
+            return null;
         }
 
         pub fn next(self: *Self) ?[]const u8 {
@@ -6904,24 +6984,15 @@ const Replay = struct {
                         log.warn("error expanding paths err={}", .{err});
                     },
 
-                    .diagnostic => |diag| diag: {
-                        // Best effort to clone and append the diagnostic.
-                        // If it fails we log a warning and continue.
+                    .diagnostic => |diag| {
+                        // Copied whole, or the replay stops (`failed`).
                         const arena_alloc = self.config._arena.?.allocator();
-                        const cloned = diag.clone(arena_alloc) catch |err| {
-                            log.warn("error cloning diagnostic err={}", .{err});
-                            break :diag;
-                        };
-                        self.config._diagnostics.append(arena_alloc, cloned) catch |err| {
-                            log.warn("error appending diagnostic err={}", .{err});
-                            break :diag;
-                        };
+                        const cloned = diag.clone(arena_alloc) catch |err| return self.stop(err);
+                        self.config._diagnostics.append(arena_alloc, cloned) catch |err| return self.stop(err);
                         // Keep it as a step too, as `.expand` does: a config
                         // rebuilt by replay (the one `loadTheme` swaps in)
                         // is replayed again by `changeConditionalState`.
-                        self.config._replay_steps.append(arena_alloc, .{ .diagnostic = cloned }) catch |err| {
-                            log.warn("error appending diagnostic replay step err={}", .{err});
-                        };
+                        self.config._replay_steps.append(arena_alloc, .{ .diagnostic = cloned }) catch |err| return self.stop(err);
                     },
 
                     .conditional_arg => |v| conditional: {
