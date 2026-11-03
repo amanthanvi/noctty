@@ -1,8 +1,9 @@
 //! The state of each top-level window, kept once on its Host
-//! (`Host.top_level`), the actions that change it (`perform`, `applyConfig`,
-//! `updateMinMaxInfo`), how a new window starts (`begin`, `advance`) and how
-//! the session saves one (`sessionPlacement`). The decisions are
-//! window_start.zig's, from values; this file carries them out through Win32.
+//! (`Host.top_level`), the actions that change it (`perform`, `applyConfig`),
+//! the window's `WM_GETMINMAXINFO` answer (`updateMinMaxInfo`), how a new
+//! window starts (`begin`, `advance`) and how the session saves one
+//! (`sessionPlacement`). The decisions are window_start.zig's, from values;
+//! this file carries them out through Win32.
 const std = @import("std");
 const builtin = @import("builtin");
 const win32 = @import("../win32.zig");

@@ -239,8 +239,9 @@ that govern each symbol you change, or that none does.
   `WM_NCCALCSIZE`/`WM_NCHITTEST` (`win32_nc_layout.zig`), integrated titlebar
   and caption buttons, `window-decoration = none`, resize bands, maximize,
   fullscreen and restore placement (one copy per window, `TopLevel` on
-  `Host.top_level`, changed by `window_state.perform`, `applyConfig` and
-  `updateMinMaxInfo`; a pane's own metrics, `Surface.metrics`;
+  `Host.top_level`, changed by `window_state.perform` and `applyConfig`;
+  the `WM_GETMINMAXINFO` reader, `updateMinMaxInfo`; a pane's own metrics,
+  `Surface.metrics`;
   the `maximize`/`fullscreen` keys at window start: `Enter` and
   `forRestore` in `win32/window_start.zig`; what a session saves and
   restores of a fullscreen window: `WindowState.fullscreen` and
