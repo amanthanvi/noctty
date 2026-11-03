@@ -167,11 +167,11 @@ const validation_quiet_ms: UINT = 400;
 /// count is announced (`SettingsWindow.armSearchAnnounce`): a count for every
 /// letter typed would queue up behind the letters a reader echoes.
 const search_announce_timer_id: usize = 2;
+const search_announce_quiet_ms: UINT = 500;
 /// What the window could not take in for want of memory (`owes_draft`,
 /// `owes_external`) is tried again this often, until it is.
 const refresh_timer_id: usize = 3;
 const refresh_retry_ms: u32 = 500;
-const search_announce_quiet_ms: UINT = 500;
 const WM_SETICON: UINT = 0x0080;
 /// `WM_ACTIVATE` low word: the window is being deactivated.
 const WA_INACTIVE: usize = 0;
@@ -1019,7 +1019,7 @@ const StatusNote = enum {
             .saved_unread => std.fmt.allocPrint(alloc, "Saved, but {s} could not be read whole, so the running settings are unchanged. Reload the configuration once it can be read to use the saved values.", .{detail}),
             // What a reload cannot apply either: the settings a later layer
             // overrides.
-            .saved_partly_applied => std.fmt.allocPrint(alloc, "Saved, but the saved settings may be only partly applied. Reload the configuration to apply them; a later config file or command-line option overrides {s}, so the saved value is not used.", .{detail}),
+            .saved_partly_applied => std.fmt.allocPrint(alloc, "Saved, but the saved settings may be only partly applied. Reload the configuration to apply the rest; a later config file or command-line option overrides {s}, so the saved value is not used.", .{detail}),
             .unsupported_encoding => std.fmt.allocPrint(alloc, "Nothing was saved: {s} is not readable as UTF-8 text (Windows PowerShell 5.1 writes UTF-16). Save it as UTF-8 in an editor, then save again. Your edits are kept.", .{detail}),
             .binary_config => std.fmt.allocPrint(alloc, "Nothing was saved: {s} contains NUL bytes, so it is a binary file or text in UTF-16 or UTF-32. Save it as UTF-8 in an editor, then save again. Your edits are kept.", .{detail}),
             .file_unopenable => std.fmt.allocPrint(alloc, "Nothing was saved: {s} cannot be opened. Close any program that has it open, or check its permissions, then save again. Your edits are kept.", .{detail}),
@@ -2884,9 +2884,6 @@ pub const SettingsWindow = struct {
     /// reloaded) app config.
     fn clearPending(self: *SettingsWindow) void {
         self.rollbackPreviews();
-        self.owes_draft = false;
-        self.owes_external = null;
-        self.killRefreshTimer();
         self.transaction = null;
         self.validation_control = null;
         self.owned_validation_control = null;
@@ -3986,7 +3983,8 @@ pub const SettingsWindow = struct {
         }
         var replacement = config.clone(self.handle.alloc) catch |err| {
             // Taken in once it can be (`retryRefresh`), rather than never.
-            std.log.warn("settings: external config snapshot failed revision={d} err={}", .{ revision, err });
+            // Said once, not on every retry.
+            if (self.owes_external == null) std.log.warn("settings: external config snapshot failed revision={d} err={}", .{ revision, err });
             self.owes_external = @max(revision, self.owes_external orelse 0);
             self.armRefreshTimer();
             return;
@@ -6811,6 +6809,7 @@ pub const SettingsWindow = struct {
         // just saved until then.
         const adopted = if (copies) |taken| adopted: {
             self.adoptCopies(taken);
+            self.paidRefresh();
             break :adopted true;
         } else owed: {
             std.log.warn("settings: the saved settings could not be copied for the window; it tries again", .{});
@@ -6823,7 +6822,10 @@ pub const SettingsWindow = struct {
         var masked_detail: ?[]u8 = null;
         defer if (masked_detail) |detail| self.handle.alloc.free(detail);
         if (masked_keys) |keys| {
-            masked_detail = if (adopted) self.maskedDetail(keys) catch null else null;
+            // Where each is set is read from what runs now: after a partly
+            // applied save that may be the config from before it, so only
+            // the names are given then.
+            masked_detail = if (adopted and masked) self.maskedDetail(keys) catch null else null;
             const note: StatusNote = if (masked) .saved_overridden else .saved_partly_applied;
             self.note_text = note.textWithDetail(self.handle.alloc, masked_detail orelse keys) catch null;
         }
@@ -6906,9 +6908,10 @@ pub const SettingsWindow = struct {
 
     fn completeSynchronousSave(self: *SettingsWindow, apply_id: ?ApplyId, how: SavedHow) void {
         const revision = self.nextSuccessfulRevision();
-        // The copies the draft starts over from, taken before the save is
-        // marked done: a window that cannot take them must not keep a draft
-        // that looks unsaved once it is (`finishSuccessfulSave`).
+        // The copies the draft starts over from, taken first, before
+        // anything of the window changes. Without them the save is still
+        // done, and `finishSuccessfulSave` lets the draft go rather than keep
+        // one that looks unsaved.
         var copies: ?Adoption = self.copiesOf(self.handle.currentConfig(self.handle.ctx)) catch null;
         if (apply_id) |id| {
             if (!self.succeedApply(id, revision)) {
@@ -6920,7 +6923,18 @@ pub const SettingsWindow = struct {
     }
 
     fn adoptCurrentConfig(self: *SettingsWindow) !void {
-        return self.adoptConfig(self.handle.currentConfig(self.handle.ctx));
+        try self.adoptConfig(self.handle.currentConfig(self.handle.ctx));
+        self.paidRefresh();
+    }
+
+    /// The draft started over from the running settings: nothing is owed
+    /// any more (`owes_draft`, `owes_external`). An adoption from anything
+    /// else (Discard's, from the window's own snapshot) leaves what is owed
+    /// owed.
+    fn paidRefresh(self: *SettingsWindow) void {
+        self.owes_draft = false;
+        self.owes_external = null;
+        self.killRefreshTimer();
     }
 
     /// The three copies a draft starts over from (`adoptCopies`).
@@ -6976,8 +6990,8 @@ pub const SettingsWindow = struct {
     fn retryRefresh(self: *SettingsWindow) void {
         if (self.owes_draft) {
             const copies = self.copiesOf(self.handle.currentConfig(self.handle.ctx)) catch return;
-            // `adoptCopies` clears what was owed, and the timer.
             self.adoptCopies(copies);
+            self.paidRefresh();
             self.refreshAllControls();
             self.updateSaveEnabled();
             return;
@@ -11124,7 +11138,7 @@ test "settings a partly applied save names the settings a later layer overrides,
             settings.save();
             try std.testing.expectEqual(StatusNote.saved_partly_applied, settings.status_note);
             var buf: [512]u8 = undefined;
-            try std.testing.expectEqualStrings("Saved, but the saved settings may be only partly applied. Reload the configuration to apply them; a later config file or command-line option overrides font-size, so the saved value is not used.", try statusTextOf(settings, &buf));
+            try std.testing.expectEqualStrings("Saved, but the saved settings may be only partly applied. Reload the configuration to apply the rest; a later config file or command-line option overrides font-size, so the saved value is not used.", try statusTextOf(settings, &buf));
         }
     }.body);
 }
@@ -11175,6 +11189,8 @@ test "settings a running settings change the window cannot copy is taken in once
             defer fixture.finish();
             const settings = &fixture.settings;
             const before = (settings.current orelse return error.TestExpectedSnapshot).@"font-size";
+            // An edit, which Discard takes back below.
+            typeInto(settings.fields.edit_font_family orelse return error.TestExpectedField, "Cascadia Code");
             // The running settings change, and the window's allocator has no
             // memory for its copy of them.
             fixture.config.@"font-size" = before + 8;
@@ -11186,10 +11202,16 @@ test "settings a running settings change the window cannot copy is taken in once
             // Not taken in yet, and owed.
             try std.testing.expectEqual(@as(?u64, 5), settings.owes_external);
             try std.testing.expectEqual(before, (settings.current orelse return error.TestExpectedSnapshot).@"font-size");
+            // Memory again, and the edit discarded before the timer ticks:
+            // Discard starts the draft over from the window's own copy, which
+            // is the old one, so the change stays owed, and the timer runs.
+            failing.fail_index = std.math.maxInt(usize);
+            settings.discardChangesNow();
+            try std.testing.expect(!settings.hasPendingChanges());
+            try std.testing.expectEqual(@as(?u64, 5), settings.owes_external);
             const hwnd = settings.hwnd orelse return error.TestExpectedWindow;
             try std.testing.expect(sys.KillTimer(hwnd, refresh_timer_id) != 0);
-            // Once it has the memory, taken in, and shown.
-            failing.fail_index = std.math.maxInt(usize);
+            // The retry takes it in, and shows it.
             settings.retryRefresh();
             try std.testing.expectEqual(@as(?u64, null), settings.owes_external);
             try std.testing.expectEqual(before + 8, (settings.current orelse return error.TestExpectedSnapshot).@"font-size");
@@ -11197,6 +11219,22 @@ test "settings a running settings change the window cannot copy is taken in once
             const shown = readEditUtf8(settings.fields.edit_font_size orelse return error.TestExpectedField, &text_buf) orelse return error.TestExpectedText;
             var expected_buf: [32]u8 = undefined;
             try std.testing.expectEqualStrings(try std.fmt.bufPrint(&expected_buf, "{d}", .{before + 8}), shown);
+        }
+    }.body);
+}
+
+test "settings a save whose reload read a file only partly, which the App could not name, says so without a name" {
+    try dialog_test.onHiddenDesktop(struct {
+        fn body() !void {
+            const fixture = try dialog_test.Fixture.start();
+            defer fixture.finish();
+            const settings = &fixture.settings;
+            typeInto(settings.fields.edit_font_size orelse return error.TestExpectedField, "16");
+            fixture.unread_unnamed = true;
+            settings.save();
+            try std.testing.expectEqual(StatusNote.saved_unread, settings.status_note);
+            var buf: [512]u8 = undefined;
+            try std.testing.expectEqualStrings(StatusNote.saved_unread.text(), try statusTextOf(settings, &buf));
         }
     }.body);
 }
@@ -13258,6 +13296,9 @@ const dialog_test = struct {
         /// The window's allocator (`handle.alloc`), which runs out of memory
         /// as the save completes (`saveAndReload`).
         starve_after_save: ?*std.testing.FailingAllocator = null,
+        /// The save writes, and its reload reads a file only partly, which
+        /// the App could not name (`SaveError.SavedButUnread`, no detail).
+        unread_unnamed: bool = false,
         /// What the window's High Contrast probe answers.
         high_contrast: bool = false,
         /// A save writes this config file the way the App's does
@@ -13505,6 +13546,10 @@ const dialog_test = struct {
                 // stay as they were.
                 self.config.@"background-opacity" = original.@"background-opacity";
                 return error.SavedNotApplied;
+            }
+            if (self.unread_unnamed) {
+                self.unread_len = 0;
+                return error.SavedButUnread;
             }
             if (self.partly_applied) {
                 // As the App: the previews end, and part of the reload runs.
