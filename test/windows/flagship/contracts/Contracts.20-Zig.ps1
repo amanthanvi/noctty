@@ -97,12 +97,14 @@ foreach ($movedWin32TestModule in $movedWin32TestFloors.Keys) {
 # (notifications PR 3). child_window.zig holds the 3 tests that moved out of
 # win32.zig with the child-control plumbing, and text.zig the 11 it declares
 # once the owned-string helpers (from win32.zig and labels.zig) and
-# utf8BoundedPrefix moved in. session.zig's floor is 28 since its five
+# utf8BoundedPrefix moved in. session.zig's floor is 27: its five
 # restore-by-key tests became rows of pane_launch.zig's `prepare` table (pane
-# launch step 4b). notifications.zig's 23 are the toast lifecycle's, the
-# click's and the cold toast wait's tests at its interface, which replaced
-# App's, Host's, Surface's and Registry's, and the two cold-wait tests that
-# moved from win32.zig. window_state.zig's floor is 25: six of its start tests
+# launch step 4b), and its fullscreen-placement lookup-failure test became
+# window_start.zig's pure `savedFullscreen` test (window state, step 6).
+# notifications.zig's 23 are the toast lifecycle's, the click's and the cold
+# toast wait's tests at its interface, which replaced App's, Host's,
+# Surface's and Registry's, and the two cold-wait tests that moved from
+# win32.zig. window_state.zig's floor is 25: six of its start tests
 # (the kept forwarded keys, maximize/fullscreen per kind, the decoration,
 # startup-style, initial-decoration and effective-style helpers) became rows
 # of the pure `plan` tests in window_start.zig, which window_state.zig
@@ -116,7 +118,7 @@ $extractedWin32TestModules = [ordered]@{
     'app.zig' = @{ Binding = 'app_module'; Floor = 59 }
     'host.zig' = @{ Binding = 'host_module'; Floor = 43 }
     'terminal_window.zig' = @{ Binding = 'terminal_window_module'; Floor = 23 }
-    'session.zig' = @{ Binding = 'session_module'; Floor = 28 }
+    'session.zig' = @{ Binding = 'session_module'; Floor = 27 }
     'quick_terminal_host.zig' = @{ Binding = 'quick_terminal_host'; Floor = 10 }
     'window_state.zig' = @{ Binding = 'window_state'; Floor = 25 }
     'surface_presentation.zig' = @{ Binding = 'surface_presentation'; Floor = 15 }

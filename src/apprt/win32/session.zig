@@ -16,9 +16,7 @@ const SurfaceInitOptions = runtime.SurfaceInitOptions;
 const Tab = runtime.Tab;
 const TestSession = win32.test_support.TestSession;
 const UINT_PTR = runtime.UINT_PTR;
-const WINDOWPLACEMENT = runtime.WINDOWPLACEMENT;
 const WindowStartTestApp = win32.test_support.WindowStartTestApp;
-const WorkAreas = runtime.WorkAreas;
 const apprt = runtime.apprt;
 const builtin = runtime.builtin;
 const c = runtime.c;
@@ -36,13 +34,8 @@ const markRecoveryAttemptAtPath = runtime.markRecoveryAttemptAtPath;
 const placementTestApp = win32.test_support.placementTestApp;
 const placementTestHost = win32.test_support.placementTestHost;
 const recovery_set_aside_suffix = runtime.recovery_set_aside_suffix;
-const rectEqual = runtime.rectEqual;
-const restore_grab = runtime.restore_grab;
-const restoredRectOnScreen = runtime.restoredRectOnScreen;
-const restoresMaximized = runtime.restoresMaximized;
 const runOnHiddenDesktop = win32.test_support.runOnHiddenDesktop;
 const setAsideCrashedSessionState = runtime.setAsideCrashedSessionState;
-const setMinimizedNormalRect = runtime.setMinimizedNormalRect;
 const shouldInheritSplitWorkingDirectory = runtime.shouldInheritSplitWorkingDirectory;
 const shouldResetNewTabWorkingDirectory = runtime.shouldResetNewTabWorkingDirectory;
 const std = runtime.std;
@@ -53,9 +46,9 @@ const unixMillis = runtime.unixMillis;
 const win32_session_persistence = runtime.win32_session_persistence;
 const win32_session_state = runtime.win32_session_state;
 const win32_shell = runtime.win32_shell;
+const window_start = @import("window_start.zig");
 const window_state = @import("window_state.zig");
 const windows = runtime.windows;
-const workspaceRectToScreen = runtime.workspaceRectToScreen;
 const writePersistentFileAlloc = runtime.writePersistentFileAlloc;
 
 /// Suffix for a saved session that was restored and then ended by itself
@@ -421,20 +414,21 @@ pub fn restoreSessionWindow(
 ) !*Surface {
     var transaction = SessionRestoreTransaction.init(self);
     defer transaction.rollback();
+    const saved = savedPlacement(window);
     var host: ?*Host = null;
     var window_surface: ?*Surface = null;
 
     for (window.tabs, 0..) |saved_tab, tab_index| {
         const tab_surface = try self.restoreSessionTab(
             saved_tab,
-            host,
+            if (host) |existing| .{ .host = existing } else .{ .window = saved },
             tab_index,
             &transaction,
         );
         if (host == null) {
             host = tab_surface.host;
             if (host) |created_host| {
-                applyRestoredWindowPlacement(created_host, window) catch |err| {
+                window_state.advance(created_host, .restore_placed) catch |err| {
                     log.warn("win32 session restore: window placement failed err={}", .{err});
                 };
             }
@@ -449,26 +443,41 @@ pub fn restoreSessionWindow(
     restored_host.active_tab = @min(window.selected_tab, restored_host.tabs.items.len - 1);
     const active_tab = &restored_host.tabs.items[restored_host.active_tab];
     const selected = active_tab.focusedSurface() orelse window_surface orelse return error.EmptyTabs;
-    // `maximize` and `fullscreen` apply to a restored window too (#496),
-    // and a launched layout, which has no saved state, takes them as any
-    // new window does. The window has its saved rect by now (as the rect
-    // it returns to, if a minimized launch minimized it), so that is the
-    // normal rect it returns to.
-    const wants = window_state.wants(&self.config);
-    var start: window_state.Enter = .{ .maximize = wants.maximize, .fullscreen = wants.fullscreen };
-    if (window.state == .fullscreen) {
-        start.fullscreen = true;
-        start.maximize = start.maximize or (window.fullscreen_maximized orelse false);
-    }
-    window_state.applyWindowStart(restored_host, start);
+    try window_state.advance(restored_host, .restore_complete);
     transaction.commit();
     return selected;
+}
+
+/// Where a restored tab goes: a new window, which starts as it was saved, or
+/// a window restored already.
+pub const RestoreInto = union(enum) {
+    window: window_state.SavedPlacement,
+    host: *Host,
+};
+
+/// How `window` was saved, as a restored window starts (`Origin.restore`). A
+/// rect the file cannot give leaves the window where it is created, and not
+/// maximized; a saved fullscreen still comes back.
+fn savedPlacement(window: win32_session_state.Window) window_state.SavedPlacement {
+    const state = window.state orelse .normal;
+    var saved: window_state.SavedPlacement = .{
+        .rect = null,
+        .maximized = false,
+        .fullscreen = state == .fullscreen,
+        .fullscreen_maximized = window.fullscreen_maximized orelse false,
+    };
+    saved.rect = sessionStateWindowRect(window) catch |err| {
+        log.warn("win32 session restore: window placement failed err={}", .{err});
+        return saved;
+    };
+    saved.maximized = state == .maximized;
+    return saved;
 }
 
 pub fn restoreSessionTab(
     self: *App,
     saved_tab: win32_session_state.Tab,
-    existing_host: ?*Host,
+    into: RestoreInto,
     tab_index: usize,
     transaction: *SessionRestoreTransaction,
 ) !*Surface {
@@ -490,7 +499,7 @@ pub fn restoreSessionTab(
     const first_index = firstSessionLayoutPane(layout, layout.root) orelse return error.EmptyLayout;
     const first = try self.restoreSessionPane(
         layout.nodes[first_index].pane,
-        existing_host,
+        into,
         null,
         tab_index,
         .right,
@@ -507,7 +516,7 @@ pub fn restoreSessionTab(
                 const second_index = firstSessionLayoutPane(layout, split.second) orelse return error.EmptyLayout;
                 const second = try self.restoreSessionPane(
                     layout.nodes[second_index].pane,
-                    existing_host,
+                    into,
                     item.leaf,
                     tab_index,
                     switch (split.axis) {
@@ -638,7 +647,7 @@ test "restoreSessionTab leaves the restored tree to the tab when layout fails" {
     // while the tab kept it, and the session teardown freed it again.
     try std.testing.expectError(error.OutOfMemory, app.restoreSessionTab(
         .{ .selected_leaf = 1, .layout = layout },
-        &host,
+        .{ .host = &host },
         0,
         &transaction,
     ));
@@ -652,13 +661,16 @@ test "restoreSessionTab leaves the restored tree to the tab when layout fails" {
 pub fn restoreSessionPane(
     self: *App,
     pane: win32_session_state.Pane,
-    existing_host: ?*Host,
+    into: RestoreInto,
     tab_surface: ?*Surface,
     tab_index: usize,
     split_direction: SplitTreeSurface.Split.Direction,
     transaction: *SessionRestoreTransaction,
 ) !*Surface {
-    const host = existing_host orelse if (tab_surface) |source| source.host else null;
+    const host = switch (into) {
+        .host => |existing| existing,
+        .window => if (tab_surface) |source| source.host else null,
+    };
     const open_kind: apprt.surface.NewSurfaceContext = if (host == null)
         .window
     else if (tab_surface == null)
@@ -683,9 +695,7 @@ pub fn restoreSessionPane(
         .tab_insert_index = if (host != null and tab_surface == null) tab_index else null,
         .clone_state_from = tab_surface,
         .split_direction = split_direction,
-        // `restoreSessionWindow` places it, and gives it `maximize` and
-        // `fullscreen`, once its tabs are there.
-        .window = if (host == null) .restore else .fresh,
+        .window = if (host == null) .{ .restore = into.window } else .fresh,
         .launch = launch,
     });
     transaction.noteSurface(surface);
@@ -706,65 +716,6 @@ pub fn restoreSessionPane(
         }
     }
     return surface;
-}
-
-pub fn applyRestoredWindowPlacement(
-    host: *Host,
-    window: win32_session_state.Window,
-) !void {
-    const hwnd = host.hwnd orelse return;
-    if (try sessionStateWindowRect(window)) |saved| {
-        // The saved rect is where the window was, not where there is room
-        // for it now: its monitor may be gone.
-        const works = WorkAreas.collect();
-        const dpi_before = sys.GetDpiForWindow(hwnd);
-        var target = restoredRectOnScreen(saved, works.slice(), restore_grab);
-        if (sys.IsIconic(hwnd) != 0) {
-            // A launch that asked for a minimized window (`start /min`,
-            // a shortcut set to Run: Minimized) has Windows minimize the
-            // first window's first show. SetWindowPos on a minimized
-            // window moves its icon, and it would come back from the
-            // taskbar where it was created: give it the rect to return to.
-            try setMinimizedNormalRect(hwnd, target);
-        } else {
-            // The rect is in the pixels of the monitor it was saved on, and is
-            // where the window goes: a crossing from the monitor the host was
-            // created on must not swap in the DPI suggestion's rescaled size.
-            host.restore_placing = true;
-            defer host.restore_placing = false;
-            for (0..3) |attempt| {
-                if (sys.SetWindowPos(
-                    hwnd,
-                    null,
-                    target.left,
-                    target.top,
-                    target.right - target.left,
-                    target.bottom - target.top,
-                    c.SWP_NOZORDER | c.SWP_NOACTIVATE,
-                ) == 0) return lastError();
-                // Windows caps what it is given (a left edge to 16 bits, a
-                // width to the largest window), so whether the title bar can
-                // be reached is judged on the rect the window ended up with.
-                var actual: RECT = undefined;
-                if (sys.GetWindowRect(hwnd, &actual) == 0) return lastError();
-                const moved = restoredRectOnScreen(actual, works.slice(), restore_grab);
-                if (!rectEqual(moved, actual)) {
-                    if (attempt == 2) {
-                        log.warn("win32 session restore: window stayed off every monitor", .{});
-                        break;
-                    }
-                    target = moved;
-                    continue;
-                }
-                // The layout that follows a DPI change can resize it once
-                // more: apply the same rect again once.
-                if (sys.GetDpiForWindow(hwnd) == dpi_before or rectEqual(actual, target)) break;
-            }
-        }
-    }
-    if ((window.state orelse .normal) == .maximized) {
-        _ = sys.ShowWindow(hwnd, c.SW_MAXIMIZE);
-    }
 }
 
 /// Whether a window holds tabs the session records (`hostSessionTabs`).
@@ -950,7 +901,7 @@ pub fn buildSessionWindow(
     };
     // Geometry is restore state, not layout shape.
     if (scope == .layout) return window;
-    if (sessionWindowPlacement(host)) |placed| {
+    if (window_state.sessionPlacement(host, null)) |placed| {
         if (placed.rect) |rect| {
             window.x = rect.left;
             window.y = rect.top;
@@ -958,7 +909,7 @@ pub fn buildSessionWindow(
             window.height = rect.bottom - rect.top;
         }
         window.state = if (placed.fullscreen) .fullscreen else if (placed.maximized) .maximized else .normal;
-        window.fullscreen_maximized = if (placed.fullscreen) placed.maximized else null;
+        window.fullscreen_maximized = if (placed.fullscreen) placed.fullscreen_maximized else null;
     }
     return window;
 }
@@ -1204,77 +1155,6 @@ pub fn sessionStateWindowRect(window: win32_session_state.Window) !?RECT {
         .right = right,
         .bottom = bottom,
     };
-}
-
-pub const SessionWindowPlacement = struct {
-    /// The window's normal rect in screen coordinates.
-    rect: ?RECT,
-    /// It is, or restores to, maximized.
-    maximized: bool,
-    fullscreen: bool = false,
-};
-
-pub fn sessionWindowPlacement(host: *Host) ?SessionWindowPlacement {
-    return sessionWindowPlacementOn(host, null);
-}
-
-/// `monitor` stands in for the window's monitor, so a test can give it
-/// the taskbar this machine lacks.
-pub fn sessionWindowPlacementOn(host: *Host, monitor: ?MONITORINFO) ?SessionWindowPlacement {
-    const hwnd = host.hwnd orelse return null;
-    // Keep fullscreen separately from the return placement. The popup's
-    // current rect covers its monitor and is not its normal rect.
-    if (host.top_level.fullscreen) |saved| {
-        return sessionFullscreenWindowPlacement(saved, window_state.fullscreenReturn(saved, hwnd), monitor);
-    }
-    var maximized = sys.IsZoomed(hwnd) != 0;
-    var rect: RECT = undefined;
-    if (maximized or sys.IsIconic(hwnd) != 0) {
-        var placement: WINDOWPLACEMENT = std.mem.zeroes(WINDOWPLACEMENT);
-        placement.length = @sizeOf(WINDOWPLACEMENT);
-        if (sys.GetWindowPlacement(hwnd, &placement) != 0) {
-            maximized = restoresMaximized(hwnd, &placement);
-            // Workspace coordinates, offset from the screen's by a taskbar
-            // on the top or left. Every other state saves screen
-            // coordinates, and restore applies them as such.
-            rect = placement.rcNormalPosition;
-            if (monitor) |info| {
-                rect = workspaceRectToScreen(rect, info);
-            } else if (sys.MonitorFromWindow(hwnd, c.MONITOR_DEFAULTTONEAREST)) |nearest| {
-                var info: MONITORINFO = std.mem.zeroes(MONITORINFO);
-                info.cbSize = @sizeOf(MONITORINFO);
-                if (sys.GetMonitorInfoW(nearest, &info) != 0) rect = workspaceRectToScreen(rect, info);
-            }
-        } else if (sys.GetWindowRect(hwnd, &rect) == 0) {
-            return .{ .rect = null, .maximized = maximized };
-        }
-    } else if (sys.GetWindowRect(hwnd, &rect) == 0) {
-        return .{ .rect = null, .maximized = maximized };
-    }
-
-    if (rect.right <= rect.left or rect.bottom <= rect.top) return .{ .rect = null, .maximized = maximized };
-    return .{ .rect = rect, .maximized = maximized };
-}
-
-/// A failed current-monitor lookup still has the enter-time placement.
-/// Never substitute the fullscreen popup's bounds for its normal rect.
-pub fn sessionFullscreenWindowPlacement(
-    saved: window_state.TopLevel.Return,
-    result: anyerror!window_state.TopLevel.Return,
-    monitor: ?MONITORINFO,
-) ?SessionWindowPlacement {
-    const back = result catch |err| fallback: {
-        log.warn("win32 session save: fullscreen window placement failed; using captured placement err={}", .{err});
-        break :fallback saved;
-    };
-    const maximized = back.placement.showCmd == c.SW_MAXIMIZE;
-    var rect = back.rect;
-    if (maximized) {
-        rect = back.placement.rcNormalPosition;
-        if (monitor orelse if (back.monitor) |here| here.info else null) |info| rect = workspaceRectToScreen(rect, info);
-    }
-    if (rect.right <= rect.left or rect.bottom <= rect.top) return null;
-    return .{ .rect = rect, .maximized = maximized, .fullscreen = true };
 }
 
 pub fn rollbackSessionRestoreHost(self: *App, host: *Host) void {
@@ -1702,7 +1582,7 @@ test "win32 a restored tab has the saved shape in the shell model, so closing a 
     var transaction = SessionRestoreTransaction.init(&app);
     const selected = try app.restoreSessionTab(
         .{ .selected_leaf = 2, .layout = .{ .root = 0, .nodes = &nodes } },
-        &host,
+        .{ .host = &host },
         1,
         &transaction,
     );
@@ -2845,40 +2725,6 @@ test "win32 session state window rect requires complete geometry" {
     try std.testing.expectEqual(@as(i32, 220), rect.bottom);
 }
 
-test "win32 fullscreen session placement retains captured geometry after lookup failure" {
-    const normal: RECT = .{ .left = 100, .top = 200, .right = 740, .bottom = 680 };
-    var saved: window_state.TopLevel.Return = .{ .rect = normal, .placement = std.mem.zeroes(WINDOWPLACEMENT), .monitor = null };
-    saved.placement.showCmd = 1; // SW_SHOWNORMAL
-    saved.monitor = .{
-        .id = 1,
-        .dpi = 96,
-        .info = .{
-            .cbSize = @sizeOf(MONITORINFO),
-            .rcMonitor = .{ .left = 0, .top = 0, .right = 1920, .bottom = 1080 },
-            .rcWork = .{ .left = 48, .top = 0, .right = 1920, .bottom = 1080 },
-            .dwFlags = 0,
-        },
-    };
-    var placed = App.sessionFullscreenWindowPlacement(saved, error.Unexpected, null).?;
-    try std.testing.expect(placed.fullscreen and !placed.maximized);
-    try std.testing.expectEqualDeep(normal, placed.rect.?);
-
-    // A captured maximized normal rect is in the source's workspace.
-    saved.placement.showCmd = c.SW_MAXIMIZE;
-    saved.placement.rcNormalPosition = .{ .left = 52, .top = 200, .right = 692, .bottom = 680 };
-    placed = App.sessionFullscreenWindowPlacement(saved, error.Unexpected, null).?;
-    try std.testing.expect(placed.fullscreen and placed.maximized);
-    try std.testing.expectEqualDeep(normal, placed.rect.?);
-
-    // No trustworthy return rect: omit placement instead of persisting
-    // fullscreen with an invented normal rect or saving popup bounds.
-    saved.placement.rcNormalPosition = std.mem.zeroes(RECT);
-    try std.testing.expect(App.sessionFullscreenWindowPlacement(saved, error.Unexpected, null) == null);
-    saved.placement.showCmd = 1; // SW_SHOWNORMAL
-    saved.rect = std.mem.zeroes(RECT);
-    try std.testing.expect(App.sessionFullscreenWindowPlacement(saved, error.Unexpected, null) == null);
-}
-
 test "win32 session placement saves the normal rect in screen coordinates for every window state" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
     try runOnHiddenDesktop(struct {
@@ -2892,13 +2738,13 @@ test "win32 session placement saves the normal rect in screen coordinates for ev
             var normal: RECT = undefined;
             try std.testing.expect(sys.GetWindowRect(hwnd, &normal) != 0);
 
-            var placed = App.sessionWindowPlacement(&host).?;
+            var placed = window_state.sessionPlacement(&host, null).?;
             try std.testing.expectEqualDeep(normal, placed.rect.?);
             try std.testing.expect(!placed.maximized);
 
             // Maximized, the rect is still the one to un-maximize to.
             _ = sys.ShowWindow(hwnd, c.SW_MAXIMIZE);
-            placed = App.sessionWindowPlacement(&host).?;
+            placed = window_state.sessionPlacement(&host, null).?;
             try std.testing.expectEqualDeep(normal, placed.rect.?);
             try std.testing.expect(placed.maximized);
 
@@ -2911,7 +2757,7 @@ test "win32 session placement saves the normal rect in screen coordinates for ev
                 .rcWork = .{ .left = 48, .top = 0, .right = 1920, .bottom = 1080 },
                 .dwFlags = 0,
             };
-            placed = App.sessionWindowPlacementOn(&host, left_taskbar).?;
+            placed = window_state.sessionPlacement(&host, left_taskbar).?;
             try std.testing.expectEqual(normal.left + 48, placed.rect.?.left);
             try std.testing.expectEqual(normal.top, placed.rect.?.top);
             try std.testing.expectEqual(normal.right - normal.left, placed.rect.?.right - placed.rect.?.left);
@@ -2920,7 +2766,7 @@ test "win32 session placement saves the normal rect in screen coordinates for ev
             // what the session has to say. `IsZoomed` alone said normal.
             _ = sys.ShowWindow(hwnd, c.SW_SHOWMINNOACTIVE);
             try std.testing.expect(sys.IsIconic(hwnd) != 0);
-            placed = App.sessionWindowPlacement(&host).?;
+            placed = window_state.sessionPlacement(&host, null).?;
             try std.testing.expectEqualDeep(normal, placed.rect.?);
             try std.testing.expect(placed.maximized);
 
@@ -2930,14 +2776,14 @@ test "win32 session placement saves the normal rect in screen coordinates for ev
             _ = sys.ShowWindow(hwnd, c.SW_RESTORE);
             try std.testing.expect(sys.IsZoomed(hwnd) == 0 and sys.IsIconic(hwnd) == 0);
             _ = sys.ShowWindow(hwnd, c.SW_SHOWMINNOACTIVE);
-            placed = App.sessionWindowPlacement(&host).?;
+            placed = window_state.sessionPlacement(&host, null).?;
             try std.testing.expectEqualDeep(normal, placed.rect.?);
             try std.testing.expect(!placed.maximized);
         }
     }.body);
 }
 
-test "win32 session placement roundtrips fullscreen and the window it leaves fullscreen to" {
+test "win32 session placement roundtrips every window state, fullscreen with the window it leaves fullscreen to" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
     try runOnHiddenDesktop(struct {
         fn body() !void {
@@ -2951,12 +2797,26 @@ test "win32 session placement roundtrips fullscreen and the window it leaves ful
             const Case = struct {
                 maximize: bool = false,
                 fullscreen: bool = false,
-                /// Maximized by the user before it enters fullscreen.
+                /// Maximized by the user.
                 zoomed: bool = false,
+                /// Made fullscreen by the user.
+                enter: bool = false,
+                /// Minimized when the session is saved.
+                minimized: bool = false,
             };
-            // Entered from a normal window and from a maximized one, and
-            // started fullscreen by the settings, alone and with `maximize`.
-            for ([_]Case{ .{}, .{ .zoomed = true }, .{ .fullscreen = true }, .{ .maximize = true, .fullscreen = true } }) |case| {
+            // Normal, maximized and minimized from each; fullscreen entered
+            // from a normal window and from a maximized one, and started
+            // fullscreen by the settings, alone and with `maximize`.
+            for ([_]Case{
+                .{},
+                .{ .zoomed = true },
+                .{ .minimized = true },
+                .{ .zoomed = true, .minimized = true },
+                .{ .enter = true },
+                .{ .zoomed = true, .enter = true },
+                .{ .fullscreen = true },
+                .{ .maximize = true, .fullscreen = true },
+            }) |case| {
                 app.config.maximize = case.maximize;
                 app.config.fullscreen = if (case.fullscreen) .true else .false;
                 try app.createWindow(default_title);
@@ -2965,47 +2825,56 @@ test "win32 session placement roundtrips fullscreen and the window it leaves ful
                 const host = surface.host.?;
                 const created = Fixture.hidden_rect;
                 const maximized = case.zoomed or case.maximize;
+                const fullscreen = case.enter or case.fullscreen;
                 if (case.zoomed) _ = sys.ShowWindow(hwnd, c.SW_MAXIMIZE);
-                if (!case.fullscreen) try std.testing.expect(try window_state.perform(host, surface, .toggle_fullscreen, .native));
-                try std.testing.expect(host.top_level.isFullscreen());
-                try std.testing.expectEqualDeep(try Fixture.monitorRect(hwnd), try Fixture.screenRect(hwnd));
+                if (case.enter) try std.testing.expect(try window_state.perform(host, surface, .toggle_fullscreen, .native));
+                try std.testing.expectEqual(fullscreen, host.top_level.isFullscreen());
 
-                // Not a normal window over the whole monitor, which it was
-                // saved as before, and came back as.
-                var placed = App.sessionWindowPlacement(host).?;
+                // A fullscreen window is not saved as a normal window over
+                // the whole monitor, which it was before, and came back as.
+                if (fullscreen) try std.testing.expectEqualDeep(try Fixture.monitorRect(hwnd), try Fixture.screenRect(hwnd));
+                var placed = window_state.sessionPlacement(host, null).?;
                 try std.testing.expectEqualDeep(created, placed.rect.?);
-                try std.testing.expectEqual(maximized, placed.maximized);
-                try std.testing.expect(placed.fullscreen);
-                // Minimized while fullscreen, the same.
-                _ = sys.ShowWindow(hwnd, c.SW_SHOWMINNOACTIVE);
-                placed = App.sessionWindowPlacement(host).?;
-                try std.testing.expectEqualDeep(created, placed.rect.?);
-                try std.testing.expectEqual(maximized, placed.maximized);
-                try std.testing.expect(placed.fullscreen);
+                try std.testing.expectEqual(fullscreen, placed.fullscreen);
+                try std.testing.expectEqual(maximized, if (fullscreen) placed.fullscreen_maximized else placed.maximized);
+                // Minimized, the same.
+                if (case.minimized or fullscreen) {
+                    _ = sys.ShowWindow(hwnd, c.SW_SHOWMINNOACTIVE);
+                    try std.testing.expectEqual(placed, window_state.sessionPlacement(host, null).?);
+                }
 
                 // Exercise the real snapshot, JSON codec and restore path,
-                // with fullscreen disabled in config on the next launch.
+                // with maximize and fullscreen off in the config of the next
+                // launch.
                 var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
                 defer arena.deinit();
                 const state = try app.buildSessionState(arena.allocator(), 0);
                 const encoded = try win32_session_state.encodeAlloc(arena.allocator(), state);
                 var parsed = try win32_session_state.parseAlloc(std.testing.allocator, encoded);
                 defer parsed.deinit();
-                try std.testing.expectEqualStrings("fullscreen", @tagName(parsed.value.windows[0].state.?));
-                try std.testing.expectEqual(@as(?bool, maximized), parsed.value.windows[0].fullscreen_maximized);
+                const saved = parsed.value.windows[0];
+                try std.testing.expectEqualStrings(if (fullscreen) "fullscreen" else if (maximized) "maximized" else "normal", @tagName(saved.state.?));
+                try std.testing.expectEqual(if (fullscreen) @as(?bool, maximized) else null, saved.fullscreen_maximized);
                 fixture.closeWindows();
                 app.config.maximize = false;
                 app.config.fullscreen = .false;
-                // Create at a different size so skipping saved placement
-                // cannot accidentally return to the right rectangle.
+                // Created at another size, so a restore that skipped the
+                // saved placement cannot land on the right rect by chance.
                 Fixture.initial_size = .{ .width = 400, .height = 300 };
                 defer Fixture.initial_size = null;
-                const restored = try app.restoreSessionWindow(parsed.value.windows[0]);
+                const restored = try app.restoreSessionWindow(saved);
                 try std.testing.expect(!std.meta.eql(created, Fixture.hidden_rect));
                 const restored_hwnd = restored.windowHwnd().?;
-                try std.testing.expect(restored.host.?.top_level.isFullscreen());
-                try std.testing.expectEqualDeep(try Fixture.monitorRect(restored_hwnd), try Fixture.screenRect(restored_hwnd));
-                try std.testing.expect(try window_state.perform(restored.host.?, restored, .toggle_fullscreen, .native));
+                // What it saves is what it was saved as.
+                placed = window_state.sessionPlacement(restored.host.?, null).?;
+                try std.testing.expectEqualDeep(created, placed.rect.?);
+                try std.testing.expectEqual(fullscreen, placed.fullscreen);
+                try std.testing.expectEqual(maximized, if (fullscreen) placed.fullscreen_maximized else placed.maximized);
+                try std.testing.expectEqual(fullscreen, restored.host.?.top_level.isFullscreen());
+                if (fullscreen) {
+                    try std.testing.expectEqualDeep(try Fixture.monitorRect(restored_hwnd), try Fixture.screenRect(restored_hwnd));
+                    try std.testing.expect(try window_state.perform(restored.host.?, restored, .toggle_fullscreen, .native));
+                }
                 try std.testing.expectEqual(maximized, sys.IsZoomed(restored_hwnd) != 0);
                 try std.testing.expectEqualDeep(created, try Fixture.normalRect(restored_hwnd));
                 if (maximized) _ = sys.ShowWindow(restored_hwnd, c.SW_RESTORE);
@@ -3026,7 +2895,7 @@ test "win32 session restore keeps a window on a monitor and brings one back from
             const hwnd = host.hwnd.?;
             defer _ = sys.DestroyWindow(hwnd);
             _ = sys.ShowWindow(hwnd, c.SW_SHOWNOACTIVATE);
-            const works = WorkAreas.collect();
+            const works = window_state.WorkAreas.collect();
             try std.testing.expect(works.count > 0);
             const work = works.slice()[0];
 
@@ -3040,7 +2909,7 @@ test "win32 session restore keeps a window on a monitor and brings one back from
                 .selected_tab = 0,
                 .tabs = &.{},
             };
-            try App.applyRestoredWindowPlacement(&host, window);
+            try placeAsSaved(&app, &host, window);
             var rect: RECT = undefined;
             try std.testing.expect(sys.GetWindowRect(hwnd, &rect) != 0);
             try std.testing.expectEqualDeep(RECT{ .left = work.left + 40, .top = work.top + 50, .right = work.left + 680, .bottom = work.top + 530 }, rect);
@@ -3048,7 +2917,7 @@ test "win32 session restore keeps a window on a monitor and brings one back from
             // Saved where no monitor is: on one, at the size it had.
             window.x = 30_000;
             window.y = 30_000;
-            try App.applyRestoredWindowPlacement(&host, window);
+            try placeAsSaved(&app, &host, window);
             try std.testing.expect(sys.GetWindowRect(hwnd, &rect) != 0);
             try std.testing.expect(insideAWorkArea(rect, works.slice()));
             try std.testing.expectEqual(@as(i32, 640), rect.right - rect.left);
@@ -3062,19 +2931,26 @@ test "win32 session restore keeps a window on a monitor and brings one back from
             window.y = work.top + 50;
             window.width = 2_100_000_000;
             window.height = 480;
-            try App.applyRestoredWindowPlacement(&host, window);
+            try placeAsSaved(&app, &host, window);
             try std.testing.expect(sys.GetWindowRect(hwnd, &rect) != 0);
-            try std.testing.expect(rectEqual(restoredRectOnScreen(rect, works.slice(), restore_grab), rect));
+            try std.testing.expect(std.meta.eql(window_start.restoredRectOnScreen(rect, works.slice(), window_start.restore_grab), rect));
             try std.testing.expect(rect.right - rect.left <= work.right - work.left);
 
             // The rect a maximized window comes back to is on a monitor too.
             window.x = -30_000;
             window.y = -30_000;
             window.state = .maximized;
-            try App.applyRestoredWindowPlacement(&host, window);
+            try placeAsSaved(&app, &host, window);
             try std.testing.expect(sys.IsZoomed(hwnd) != 0);
-            const normal = App.sessionWindowPlacement(&host).?.rect.?;
+            const normal = window_state.sessionPlacement(&host, null).?.rect.?;
             try std.testing.expect(insideAWorkArea(normal, works.slice()));
+        }
+
+        /// What restore does with the first tab of a window saved as
+        /// `window` (`.restore_placed`), on a stand-in for that window.
+        fn placeAsSaved(app: *App, host: *Host, window: win32_session_state.Window) !void {
+            host.pending_start = (try window_state.begin(app, &app.config, .{ .restore = savedPlacement(window) })).pending;
+            try window_state.advance(host, .restore_placed);
         }
 
         fn insideAWorkArea(rect: RECT, works: []const RECT) bool {
@@ -3097,7 +2973,7 @@ test "win32 a restored window and a launched layout take maximize and fullscreen
             defer fixture.deinit();
             const app = &fixture.app;
             const Fixture = WindowStartTestApp;
-            const works = WorkAreas.collect();
+            const works = window_state.WorkAreas.collect();
             try std.testing.expect(works.count > 0);
             const work = works.slice()[0];
             const saved: RECT = .{ .left = work.left + 60, .top = work.top + 70, .right = work.left + 760, .bottom = work.top + 570 };

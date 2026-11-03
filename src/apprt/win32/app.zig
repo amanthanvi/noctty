@@ -2598,8 +2598,6 @@ pub const App = struct {
 
     pub const restoreSessionPane = session_module.restoreSessionPane;
 
-    pub const applyRestoredWindowPlacement = session_module.applyRestoredWindowPlacement;
-
     pub const hasSessionWindows = session_module.hasSessionWindows;
 
     pub const closingEndsSession = session_module.closingEndsSession;
@@ -2633,14 +2631,6 @@ pub const App = struct {
     pub const buildRestoredSessionSplitTree = session_module.buildRestoredSessionSplitTree;
 
     pub const sessionStateWindowRect = session_module.sessionStateWindowRect;
-
-    pub const SessionWindowPlacement = session_module.SessionWindowPlacement;
-
-    pub const sessionWindowPlacement = session_module.sessionWindowPlacement;
-
-    pub const sessionWindowPlacementOn = session_module.sessionWindowPlacementOn;
-
-    pub const sessionFullscreenWindowPlacement = session_module.sessionFullscreenWindowPlacement;
 
     pub const pushPaletteMru = palette_controller.AppControls.pushPaletteMru;
 

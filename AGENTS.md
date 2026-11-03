@@ -242,8 +242,9 @@ that govern each symbol you change, or that none does.
   window start: `window_state.applyWindowStart`; what a
   session saves and restores of a fullscreen window: `WindowState.fullscreen`
   and `fullscreen_maximized` in `win32_session_state.zig`,
-  `sessionWindowPlacementOn` and `restoreSessionWindow` in
-  `win32/session.zig`), what a new window copies from its source and which
+  `window_state.sessionPlacement`, the restore stages of
+  `window_state.advance`, and `restoreSessionWindow` in `win32/session.zig`),
+  what a new window copies from its source and which
   forwarded keys it keeps (`window_state.begin` and `advance`, with its
   `Origin`, in `win32/window_state.zig`; the pure `plan`, `place` and `Keeps`
   in `win32/window_start.zig`), `WM_DPICHANGED` and mixed-DPI moves,

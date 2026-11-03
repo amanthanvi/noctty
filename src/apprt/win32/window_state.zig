@@ -26,10 +26,11 @@ const std = runtime.std;
 const sys = runtime.sys;
 const win32_theme = runtime.win32_theme;
 const window_start = @import("window_start.zig");
+const win32_types = @import("../win32_types.zig");
 const test_runtime = if (@import("builtin").is_test) win32.window_state_test_runtime else struct {};
-const BOOL = test_runtime.BOOL;
+const BOOL = win32_types.BOOL;
 const CoreApp = test_runtime.CoreApp;
-const HDC = test_runtime.HDC;
+const HDC = win32_types.HDC;
 const LPCWSTR = test_runtime.LPCWSTR;
 const SafeModeAppFixture = test_runtime.SafeModeAppFixture;
 const Tab = test_runtime.Tab;
@@ -56,6 +57,7 @@ pub const hostStyle = window_start.hostStyle;
 pub const fitRectInWork = window_start.fitRectInWork;
 pub const workspaceRectToScreen = window_start.workspaceRectToScreen;
 pub const screenRectToWorkspace = window_start.screenRectToWorkspace;
+pub const SavedPlacement = window_start.SavedPlacement;
 
 /// Where a new window comes from, which decides how it starts (`begin`).
 pub const Origin = union(window_start.Kind) {
@@ -66,10 +68,11 @@ pub const Origin = union(window_start.Kind) {
     /// a new window. `forwarded` is the argv a forwarded launch applied to
     /// the new window's config.
     copy: struct { source: *const Host, forwarded: []const [:0]const u8 = &.{} },
-    /// A restored session's or launched layout's window. Session restore
-    /// places it, and gives it `maximize` and `fullscreen`, once its tabs are
-    /// there.
-    restore,
+    /// A restored session's or launched layout's window, as it was saved.
+    /// Session restore places it once its first tab is there
+    /// (`.restore_placed`) and gives it `maximize` and `fullscreen` once all
+    /// are (`.restore_complete`).
+    restore: SavedPlacement,
     /// The quick terminal, first shown as asked.
     quick_terminal: InitialShow,
     /// A handed-off console's window, first shown as its client asked.
@@ -103,6 +106,9 @@ pub const Pending = struct {
     /// The metrics of the source's active pane, which a copy's first pane
     /// takes.
     source_pane: ?PaneMetrics = null,
+    /// A restored window's saved placement, and what it enters once its tabs
+    /// are there (`window_start.forRestore`).
+    restore: ?struct { saved: SavedPlacement, enter: Enter } = null,
     /// The last stage carried out.
     reached: ?Stage = null,
 
@@ -152,6 +158,7 @@ pub fn begin(app: *const App, config: *const configpkg.Config, origin: Origin) !
     var snapshot: ?window_start.Snapshot = null;
     var argv: []const [:0]const u8 = &.{};
     var show: InitialShow = .activate;
+    const wanted = wants(config);
     switch (origin) {
         .copy => |copy| {
             snapshot = try snapshotOf(copy.source);
@@ -160,11 +167,12 @@ pub fn begin(app: *const App, config: *const configpkg.Config, origin: Origin) !
             argv = copy.forwarded;
         },
         .quick_terminal, .adopted => |first_show| show = first_show,
-        .fresh, .restore => {},
+        .restore => |saved| pending.restore = .{ .saved = saved, .enter = window_start.forRestore(wanted, saved) },
+        .fresh => {},
     }
     pending.plan = window_start.plan(
         std.meta.activeTag(origin),
-        wants(config),
+        wanted,
         forwardedKeys(argv),
         if (snapshot) |*source| source else null,
         show,
@@ -207,6 +215,13 @@ pub const Stage = enum {
     before_show,
     /// Right after it: a copy takes its source's state.
     after_show,
+    /// A restored window, once its first tab is there: its saved rect and
+    /// maximize (as the rect it returns to if a minimized launch minimized
+    /// it).
+    restore_placed,
+    /// A restored window, once all its tabs are there: `maximize` and
+    /// `fullscreen`.
+    restore_complete,
 };
 
 /// Whether the pane that first showed its window presents it with focus.
@@ -216,11 +231,17 @@ pub const Focus = enum { take, leave };
 pub fn advance(host: *Host, comptime at: Stage) !(if (at == .before_show) Focus else void) {
     const pending = &host.pending_start.?;
     std.debug.assert(pending.reached == null or @intFromEnum(pending.reached.?) < @intFromEnum(at));
+    std.debug.assert(@intFromEnum(at) < @intFromEnum(Stage.restore_placed) or pending.plan.kind == .restore);
     pending.reached = at;
     return switch (at) {
         .created => onCreated(host, pending),
         .before_show => beforeShow(host, pending),
         .after_show => afterShow(host, pending),
+        .restore_placed => placeRestored(host, pending.restore.?.saved),
+        .restore_complete => {
+            defer host.pending_start = null;
+            applyWindowStart(host, pending.restore.?.enter);
+        },
     };
 }
 
@@ -274,7 +295,9 @@ fn beforeShow(host: *Host, pending: *const Pending) !Focus {
 }
 
 fn afterShow(host: *Host, pending: *const Pending) !void {
-    defer host.pending_start = null;
+    defer if (pending.plan.kind != .restore) {
+        host.pending_start = null;
+    };
     if (pending.plan.source == null) return;
     if (pending.source_pane) |metrics| if (host.activeSurface()) |pane| copyPaneMetrics(pane, metrics, pending.plan.keeps);
     try takeSourceState(host, pending);
@@ -429,7 +452,7 @@ pub fn setMinimizedNormalRect(hwnd: HWND, rect: RECT) !void {
     placement.length = @sizeOf(WINDOWPLACEMENT);
     if (sys.GetWindowPlacement(hwnd, &placement) == 0) return lastError();
     // Workspace coordinates of the monitor the rect is on, as
-    // `sessionWindowPlacementOn` reads them.
+    // `sessionPlacement` reads them.
     const center: POINT = .{
         .x = @divTrunc(rect.left, 2) + @divTrunc(rect.right, 2),
         .y = @divTrunc(rect.top, 2) + @divTrunc(rect.bottom, 2),
@@ -441,6 +464,132 @@ pub fn setMinimizedNormalRect(hwnd: HWND, rect: RECT) !void {
     placement.rcNormalPosition = screenRectToWorkspace(rect, info);
     placement.showCmd = c.SW_SHOWMINNOACTIVE;
     if (sys.SetWindowPlacement(hwnd, &placement) == 0) return lastError();
+}
+
+/// The work areas of the monitors there are now, in screen coordinates.
+pub const WorkAreas = struct {
+    rects: [16]RECT = undefined,
+    count: usize = 0,
+
+    pub fn collect() WorkAreas {
+        var areas: WorkAreas = .{};
+        _ = sys.EnumDisplayMonitors(null, null, enumProc, @as(LPARAM, @bitCast(@intFromPtr(&areas))));
+        return areas;
+    }
+
+    pub fn slice(self: *const WorkAreas) []const RECT {
+        return self.rects[0..self.count];
+    }
+
+    fn enumProc(monitor: sys.HMONITOR, _: HDC, _: *RECT, data: LPARAM) callconv(.winapi) BOOL {
+        const areas: *WorkAreas = @ptrFromInt(@as(usize, @bitCast(data)));
+        if (areas.count == areas.rects.len) return 0;
+        var info: MONITORINFO = std.mem.zeroes(MONITORINFO);
+        info.cbSize = @sizeOf(MONITORINFO);
+        if (sys.GetMonitorInfoW(monitor, &info) == 0) return 1;
+        areas.rects[areas.count] = info.rcWork;
+        areas.count += 1;
+        return 1;
+    }
+};
+
+/// Puts a restored window at the rect it was saved at, moved onto a monitor
+/// if its own is gone, and maximizes it if it was.
+fn placeRestored(host: *Host, saved: SavedPlacement) !void {
+    const hwnd = host.hwnd orelse return;
+    if (saved.rect) |rect| {
+        // The saved rect is where the window was, not where there is room
+        // for it now: its monitor may be gone.
+        const works = WorkAreas.collect();
+        const dpi_before = sys.GetDpiForWindow(hwnd);
+        var target = window_start.restoredRectOnScreen(rect, works.slice(), window_start.restore_grab);
+        if (sys.IsIconic(hwnd) != 0) {
+            // A launch that asked for a minimized window (`start /min`,
+            // a shortcut set to Run: Minimized) has Windows minimize the
+            // first window's first show. SetWindowPos on a minimized
+            // window moves its icon, and it would come back from the
+            // taskbar where it was created: give it the rect to return to.
+            try setMinimizedNormalRect(hwnd, target);
+        } else {
+            // The rect is in the pixels of the monitor it was saved on, and is
+            // where the window goes: a crossing from the monitor the host was
+            // created on must not swap in the DPI suggestion's rescaled size.
+            host.restore_placing = true;
+            defer host.restore_placing = false;
+            for (0..3) |attempt| {
+                if (sys.SetWindowPos(
+                    hwnd,
+                    null,
+                    target.left,
+                    target.top,
+                    target.right - target.left,
+                    target.bottom - target.top,
+                    c.SWP_NOZORDER | c.SWP_NOACTIVATE,
+                ) == 0) return lastError();
+                // Windows caps what it is given (a left edge to 16 bits, a
+                // width to the largest window), so whether the title bar can
+                // be reached is judged on the rect the window ended up with.
+                var actual: RECT = undefined;
+                if (sys.GetWindowRect(hwnd, &actual) == 0) return lastError();
+                const moved = window_start.restoredRectOnScreen(actual, works.slice(), window_start.restore_grab);
+                if (!std.meta.eql(moved, actual)) {
+                    if (attempt == 2) {
+                        log.warn("win32 session restore: window stayed off every monitor", .{});
+                        break;
+                    }
+                    target = moved;
+                    continue;
+                }
+                // The layout that follows a DPI change can resize it once
+                // more: apply the same rect again once.
+                if (sys.GetDpiForWindow(hwnd) == dpi_before or std.meta.eql(actual, target)) break;
+            }
+        }
+    }
+    if (saved.maximized) _ = sys.ShowWindow(hwnd, c.SW_MAXIMIZE);
+}
+
+/// How the session saves `host`'s window, as a restored window starts
+/// (`Origin.restore`). `monitor` stands in for the window's monitor, so a
+/// test can give it the taskbar this machine lacks.
+pub fn sessionPlacement(host: *Host, monitor: ?MONITORINFO) ?SavedPlacement {
+    const hwnd = host.hwnd orelse return null;
+    // Fullscreen is kept apart from the window it returns to: the popup's
+    // rect covers its monitor and is not its normal rect.
+    if (host.top_level.fullscreen) |saved| {
+        const back = fullscreenReturn(saved, hwnd) catch |err| fallback: {
+            log.warn("win32 session save: fullscreen window placement failed; using captured placement err={}", .{err});
+            break :fallback saved;
+        };
+        return window_start.savedFullscreen(back, monitor);
+    }
+    var maximized = sys.IsZoomed(hwnd) != 0;
+    var rect: RECT = undefined;
+    if (maximized or sys.IsIconic(hwnd) != 0) {
+        var placement: WINDOWPLACEMENT = std.mem.zeroes(WINDOWPLACEMENT);
+        placement.length = @sizeOf(WINDOWPLACEMENT);
+        if (sys.GetWindowPlacement(hwnd, &placement) != 0) {
+            maximized = restoresMaximized(hwnd, &placement);
+            // Workspace coordinates, offset from the screen's by a taskbar
+            // on the top or left. Every other state saves screen
+            // coordinates, and restore applies them as such.
+            rect = placement.rcNormalPosition;
+            if (monitor) |info| {
+                rect = workspaceRectToScreen(rect, info);
+            } else if (sys.MonitorFromWindow(hwnd, c.MONITOR_DEFAULTTONEAREST)) |nearest| {
+                var info: MONITORINFO = std.mem.zeroes(MONITORINFO);
+                info.cbSize = @sizeOf(MONITORINFO);
+                if (sys.GetMonitorInfoW(nearest, &info) != 0) rect = workspaceRectToScreen(rect, info);
+            }
+        } else if (sys.GetWindowRect(hwnd, &rect) == 0) {
+            return .{ .rect = null, .maximized = maximized };
+        }
+    } else if (sys.GetWindowRect(hwnd, &rect) == 0) {
+        return .{ .rect = null, .maximized = maximized };
+    }
+
+    if (rect.right <= rect.left or rect.bottom <= rect.top) return .{ .rect = null, .maximized = maximized };
+    return .{ .rect = rect, .maximized = maximized };
 }
 
 /// `window_start.restoresMaximized` for the window `hwnd`.
@@ -535,7 +684,7 @@ fn enterFullscreen(host: *Host) !void {
     // A minimized window comes back first. SetWindowPos would move only
     // its icon, and it would return from the taskbar as a popup at its
     // normal rect. A restored session's first window is minimized here
-    // under a minimized launch (`applyRestoredWindowPlacement`).
+    // under a minimized launch (`placeRestored`).
     if (sys.IsIconic(hwnd) != 0) _ = sys.ShowWindow(hwnd, c.SW_SHOWNOACTIVATE);
     // Captured before the style write below, which drops WS_MAXIMIZE:
     // the monitor-sized SetWindowPos after it would otherwise land on a

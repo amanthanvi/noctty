@@ -333,9 +333,7 @@ pub const window_state_runtime = .{
     .win32_theme = win32_theme,
 };
 pub const window_state_test_runtime = if (builtin.is_test) .{
-    .BOOL = BOOL,
     .CoreApp = CoreApp,
-    .HDC = HDC,
     .LPCWSTR = LPCWSTR,
     .SafeModeAppFixture = SafeModeAppFixture,
     .Tab = Tab,
@@ -391,8 +389,6 @@ pub const session_runtime = .{
     .SurfaceInitOptions = SurfaceInitOptions,
     .Tab = Tab,
     .UINT_PTR = UINT_PTR,
-    .WINDOWPLACEMENT = WINDOWPLACEMENT,
-    .WorkAreas = WorkAreas,
     .apprt = apprt,
     .builtin = builtin,
     .c = c,
@@ -405,12 +401,7 @@ pub const session_runtime = .{
     .makeParentDirAbsolute = makeParentDirAbsolute,
     .markRecoveryAttemptAtPath = markRecoveryAttemptAtPath,
     .recovery_set_aside_suffix = recovery_set_aside_suffix,
-    .rectEqual = rectEqual,
-    .restore_grab = restore_grab,
-    .restoredRectOnScreen = restoredRectOnScreen,
-    .restoresMaximized = restoresMaximized,
     .setAsideCrashedSessionState = setAsideCrashedSessionState,
-    .setMinimizedNormalRect = setMinimizedNormalRect,
     .shouldInheritSplitWorkingDirectory = shouldInheritSplitWorkingDirectory,
     .shouldResetNewTabWorkingDirectory = shouldResetNewTabWorkingDirectory,
     .std = std,
@@ -422,7 +413,6 @@ pub const session_runtime = .{
     .win32_session_state = win32_session_state,
     .win32_shell = win32_shell,
     .windows = windows,
-    .workspaceRectToScreen = workspaceRectToScreen,
     .writePersistentFileAlloc = writePersistentFileAlloc,
 };
 
@@ -6256,78 +6246,9 @@ pub const setQuickTerminalRect = quick_terminal_host.setQuickTerminalRect;
 
 pub const runOnHiddenDesktop = test_support.runOnHiddenDesktop;
 
-const fitRectInWork = window_state.fitRectInWork;
-
 const workspaceRectToScreen = window_state.workspaceRectToScreen;
 
-const setMinimizedNormalRect = window_state.setMinimizedNormalRect;
-
 const monitorInfo = quick_terminal_host.monitorInfo;
-
-const restoresMaximized = window_state.restoresMaximized;
-
-/// The work areas of the monitors there are now, in screen coordinates.
-const WorkAreas = struct {
-    rects: [16]RECT = undefined,
-    count: usize = 0,
-
-    pub fn collect() WorkAreas {
-        var areas: WorkAreas = .{};
-        _ = sys.EnumDisplayMonitors(null, null, enumProc, @as(LPARAM, @bitCast(@intFromPtr(&areas))));
-        return areas;
-    }
-
-    pub fn slice(self: *const WorkAreas) []const RECT {
-        return self.rects[0..self.count];
-    }
-
-    fn enumProc(monitor: sys.HMONITOR, _: HDC, _: *RECT, data: LPARAM) callconv(.winapi) BOOL {
-        const areas: *WorkAreas = @ptrFromInt(@as(usize, @bitCast(data)));
-        if (areas.count == areas.rects.len) return 0;
-        var info: MONITORINFO = std.mem.zeroes(MONITORINFO);
-        info.cbSize = @sizeOf(MONITORINFO);
-        if (sys.GetMonitorInfoW(monitor, &info) == 0) return 1;
-        areas.rects[areas.count] = info.rcWork;
-        areas.count += 1;
-        return 1;
-    }
-};
-
-/// How much of a restored window's title bar must be on a monitor for the
-/// user to be able to grab it: this wide and half as tall, in physical
-/// pixels. The saved rect is in the pixels of a monitor this process may not
-/// have seen yet, and the host being placed is on another, so no DPI is
-/// right to scale by; a caption at 100%, still a target at 300%.
-const restore_grab: i32 = 48;
-
-/// Where a window saved at `rect` (screen coordinates) goes now that the
-/// monitors' work areas are `works`. One whose title bar can still be grabbed
-/// stays exactly where it was, whatever its other edges do: a snapped window
-/// overhangs its monitor by its invisible frame. One that cannot (its monitor
-/// was unplugged, or the layout changed) moves to the nearest work area, its
-/// size capped to it.
-fn restoredRectOnScreen(rect: RECT, works: []const RECT, grab: i32) RECT {
-    if (works.len == 0) return rect;
-    // The rect comes from a file on disk: any i32 is possible, so differences
-    // of coordinates are taken in 64 bits.
-    const grab_width = @min(grab, rect.right - rect.left);
-    var nearest = works[0];
-    var nearest_gap: i64 = std.math.maxInt(i64);
-    for (works) |work| {
-        const visible_width = @as(i64, @min(rect.right, work.right)) - @max(rect.left, work.left);
-        const visible_height = @as(i64, @min(rect.top, work.bottom - grab) + grab) - @max(rect.top, work.top);
-        if (visible_width >= grab_width and visible_height >= @divTrunc(grab, 2)) return rect;
-
-        const gap_x: i64 = @max(0, @max(@as(i64, work.left) - rect.right, @as(i64, rect.left) - work.right));
-        const gap_y: i64 = @max(0, @max(@as(i64, work.top) - rect.bottom, @as(i64, rect.top) - work.bottom));
-        const gap = gap_x + gap_y;
-        if (gap < nearest_gap) {
-            nearest = work;
-            nearest_gap = gap;
-        }
-    }
-    return fitRectInWork(rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top, nearest);
-}
 
 // Keep helper modules reachable from the exe's module graph. Zig prunes
 // unreferenced module-level decls, so this block also keeps their tests
@@ -21061,10 +20982,10 @@ test "win32 default-profile runs where nothing chose a launch, and only there" {
     // A restored pane runs its own profile; one whose profile is gone runs
     // the default, in the directory the pane was saved in.
     var transaction = SessionRestoreTransaction.init(&app);
-    _ = try app.restoreSessionPane(.{ .profile = "user:gone", .cwd = "C:\\saved" }, &host, null, host.tabs.items.len, .right, &transaction);
+    _ = try app.restoreSessionPane(.{ .profile = "user:gone", .cwd = "C:\\saved" }, .{ .host = &host }, null, host.tabs.items.len, .right, &transaction);
     try Expect.profile(&created[6], "C:\\saved");
     // So does an SSH pane, which restore never reopens.
-    _ = try app.restoreSessionPane(.{ .profile = "ssh:prod", .cwd = "C:\\saved" }, &host, null, host.tabs.items.len, .right, &transaction);
+    _ = try app.restoreSessionPane(.{ .profile = "ssh:prod", .cwd = "C:\\saved" }, .{ .host = &host }, null, host.tabs.items.len, .right, &transaction);
     try Expect.profile(&created[7], "C:\\saved");
     try std.testing.expect(!created[7].launched_ssh);
 
@@ -21077,7 +20998,7 @@ test "win32 default-profile runs where nothing chose a launch, and only there" {
         const py_config = app.config;
         app.config = ssh_config;
         defer app.config = py_config;
-        _ = try app.restoreSessionPane(.{}, &host, null, host.tabs.items.len, .right, &transaction);
+        _ = try app.restoreSessionPane(.{}, .{ .host = &host }, null, host.tabs.items.len, .right, &transaction);
     }
     try std.testing.expect(std.mem.indexOf(u8, Hook.seen.program, "ssh") == null);
     try std.testing.expect(Hook.seen.mode == null and Hook.seen.line == null);
@@ -23068,76 +22989,6 @@ test "win32 agreeing to a Restart Manager close registers the session owner for 
     _ = hostWindowProc(hwnd, c.WM_ENDSESSION, 1, 0);
     try std.testing.expectEqual(@as(u32, 10), Fake.unregisters);
     try std.testing.expect(!app.restart_registered);
-}
-
-test "win32 a saved window rect on a monitor that is gone moves to the nearest work area" {
-    const grab = restore_grab;
-    // A laptop's screen with a second monitor to its left, taskbar at the bottom.
-    const left: RECT = .{ .left = -1920, .top = 0, .right = 0, .bottom = 1040 };
-    const main_work: RECT = .{ .left = 0, .top = 0, .right = 1920, .bottom = 1040 };
-    const works = [_]RECT{ main_work, left };
-    const wide: RECT = .{ .left = 100, .top = 100, .right = 900, .bottom = 700 };
-
-    // Where there is a monitor, the rect is kept as saved.
-    try std.testing.expectEqualDeep(wide, restoredRectOnScreen(wide, &works, grab));
-    const straddling: RECT = .{ .left = -400, .top = 50, .right = 400, .bottom = 650 };
-    try std.testing.expectEqualDeep(straddling, restoredRectOnScreen(straddling, &works, grab));
-    // A snapped window overhangs its monitor by its invisible frame.
-    const snapped: RECT = .{ .left = -7, .top = 0, .right = 967, .bottom = 1047 };
-    try std.testing.expectEqualDeep(snapped, restoredRectOnScreen(snapped, &works, grab));
-    // The caption on a monitor and the body hanging off the bottom stays too.
-    const hanging: RECT = .{ .left = 100, .top = 900, .right = 900, .bottom = 1500 };
-    try std.testing.expectEqualDeep(hanging, restoredRectOnScreen(hanging, &works, grab));
-
-    // Saved on a monitor to the right that was unplugged.
-    const unplugged: RECT = .{ .left = 2100, .top = 200, .right = 2900, .bottom = 800 };
-    try std.testing.expectEqualDeep(
-        RECT{ .left = 1120, .top = 200, .right = 1920, .bottom = 800 },
-        restoredRectOnScreen(unplugged, &works, grab),
-    );
-    // Below every monitor, and above them.
-    try std.testing.expectEqualDeep(
-        RECT{ .left = 100, .top = 440, .right = 900, .bottom = 1040 },
-        restoredRectOnScreen(.{ .left = 100, .top = 3000, .right = 900, .bottom = 3600 }, &works, grab),
-    );
-    try std.testing.expectEqualDeep(
-        RECT{ .left = 100, .top = 0, .right = 900, .bottom = 600 },
-        restoredRectOnScreen(.{ .left = 100, .top = -900, .right = 900, .bottom = -300 }, &works, grab),
-    );
-    // Only a sliver of the title bar on a monitor is not enough to grab.
-    try std.testing.expectEqualDeep(
-        RECT{ .left = 1120, .top = 100, .right = 1920, .bottom = 700 },
-        restoredRectOnScreen(.{ .left = 1900, .top = 100, .right = 2700, .bottom = 700 }, &works, grab),
-    );
-    // The nearest is the monitor to the left when that is where it was.
-    try std.testing.expectEqualDeep(
-        RECT{ .left = -1920, .top = 100, .right = -1120, .bottom = 700 },
-        restoredRectOnScreen(.{ .left = -4000, .top = 100, .right = -3200, .bottom = 700 }, &works, grab),
-    );
-    // Larger than the monitor it lands on: capped to it.
-    try std.testing.expectEqualDeep(
-        left,
-        restoredRectOnScreen(.{ .left = -9000, .top = -50, .right = -4000, .bottom = 3000 }, &works, grab),
-    );
-    // No monitor list, no opinion.
-    try std.testing.expectEqualDeep(unplugged, restoredRectOnScreen(unplugged, &.{}, grab));
-
-    // The file can say anything an i32 holds, and a window cannot be that far
-    // away: no differences of these overflow.
-    const min: i32 = std.math.minInt(i32);
-    const max: i32 = std.math.maxInt(i32);
-    try std.testing.expectEqualDeep(
-        RECT{ .left = -1920, .top = 100, .right = -1120, .bottom = 700 },
-        restoredRectOnScreen(.{ .left = min, .top = 100, .right = min + 800, .bottom = 700 }, &works, grab),
-    );
-    try std.testing.expectEqualDeep(
-        RECT{ .left = 1120, .top = 440, .right = 1920, .bottom = 1040 },
-        restoredRectOnScreen(.{ .left = max - 800, .top = max - 600, .right = max, .bottom = max }, &works, grab),
-    );
-    try std.testing.expectEqualDeep(
-        main_work,
-        restoredRectOnScreen(.{ .left = min, .top = min, .right = -1, .bottom = -1 }, &.{main_work}, grab),
-    );
 }
 
 test "win32 session state file write replaces through temp file" {

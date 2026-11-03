@@ -525,6 +525,83 @@ test "win32 a new window is created framed, bare or a popup as its state and Win
     }
 }
 
+/// How the session saves a window and how a restored one starts: its normal
+/// rect in screen coordinates, whether it is (or restores to) maximized, and
+/// whether it is fullscreen and leaves fullscreen maximized, as the file's
+/// `state` and `fullscreen_maximized` say. What capture gives
+/// (`window_state.sessionPlacement`) is what restore takes
+/// (`window_state.Origin.restore`).
+pub const SavedPlacement = struct {
+    rect: ?RECT,
+    maximized: bool,
+    fullscreen: bool = false,
+    fullscreen_maximized: bool = false,
+};
+
+/// How a fullscreen window is saved: fullscreen, with the window it leaves
+/// fullscreen to, `back`, as its normal rect, never the popup's monitor rect
+/// (window-frame.md 2026-10-25 FULLSCREEN-SESSION-01). A maximized return's
+/// normal rect is in workspace coordinates, of `monitor` when given (a
+/// test's stand-in) or else of the monitor `back` is on. With no area there
+/// is no trustworthy rect, and nothing is saved.
+pub fn savedFullscreen(back: TopLevel.Return, monitor: ?MONITORINFO) ?SavedPlacement {
+    const maximized = back.placement.showCmd == c.SW_MAXIMIZE;
+    var rect = back.rect;
+    if (maximized) {
+        rect = back.placement.rcNormalPosition;
+        if (monitor orelse if (back.monitor) |here| here.info else null) |info| rect = workspaceRectToScreen(rect, info);
+    }
+    if (rect.right <= rect.left or rect.bottom <= rect.top) return null;
+    return .{ .rect = rect, .maximized = false, .fullscreen = true, .fullscreen_maximized = maximized };
+}
+
+/// What a restored window, or a launched layout's, enters once all its tabs
+/// are there: `maximize` and `fullscreen` from its config, as any new window
+/// (#496), and a saved fullscreen, maximized when it left fullscreen so. Its
+/// saved rect is in place by then, so that is the normal rect it returns to.
+pub fn forRestore(wants: Wants, saved: SavedPlacement) Enter {
+    return .{
+        .maximize = wants.maximize or (saved.fullscreen and saved.fullscreen_maximized),
+        .fullscreen = wants.fullscreen or saved.fullscreen,
+    };
+}
+
+/// How much of a restored window's title bar must be on a monitor for the
+/// user to be able to grab it: this wide and half as tall, in physical
+/// pixels. The saved rect is in the pixels of a monitor this process may not
+/// have seen yet, and the host being placed is on another, so no DPI is
+/// right to scale by; a caption at 100%, still a target at 300%.
+pub const restore_grab: i32 = 48;
+
+/// Where a window saved at `rect` (screen coordinates) goes now that the
+/// monitors' work areas are `works`. One whose title bar can still be grabbed
+/// stays exactly where it was, whatever its other edges do: a snapped window
+/// overhangs its monitor by its invisible frame. One that cannot (its monitor
+/// was unplugged, or the layout changed) moves to the nearest work area, its
+/// size capped to it.
+pub fn restoredRectOnScreen(rect: RECT, works: []const RECT, grab: i32) RECT {
+    if (works.len == 0) return rect;
+    // The rect comes from a file on disk: any i32 is possible, so differences
+    // of coordinates are taken in 64 bits.
+    const grab_width = @min(grab, rect.right - rect.left);
+    var nearest = works[0];
+    var nearest_gap: i64 = std.math.maxInt(i64);
+    for (works) |work| {
+        const visible_width = @as(i64, @min(rect.right, work.right)) - @max(rect.left, work.left);
+        const visible_height = @as(i64, @min(rect.top, work.bottom - grab) + grab) - @max(rect.top, work.top);
+        if (visible_width >= grab_width and visible_height >= @divTrunc(grab, 2)) return rect;
+
+        const gap_x: i64 = @max(0, @max(@as(i64, work.left) - rect.right, @as(i64, rect.left) - work.right));
+        const gap_y: i64 = @max(0, @max(@as(i64, work.top) - rect.bottom, @as(i64, rect.top) - work.bottom));
+        const gap = gap_x + gap_y;
+        if (gap < nearest_gap) {
+            nearest = work;
+            nearest_gap = gap;
+        }
+    }
+    return fitRectInWork(rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top, nearest);
+}
+
 fn testRect(left: i32, top: i32, right: i32, bottom: i32) RECT {
     return .{ .left = left, .top = top, .right = right, .bottom = bottom };
 }
@@ -731,6 +808,118 @@ test "win32 fullscreen restore translates work areas and scales size to fit" {
     try std.testing.expectEqualDeep(testRect(3940, 52, 4580, 532), moved_back.rect);
     try std.testing.expectEqualDeep(testRect(3940, 52, 4580, 532), moved_back.placement.rcNormalPosition);
     try std.testing.expectEqual(@as(usize, 2), moved_back.monitor.?.id);
+}
+
+test "win32 a saved window rect on a monitor that is gone moves to the nearest work area" {
+    const grab = restore_grab;
+    // A laptop's screen with a second monitor to its left, taskbar at the bottom.
+    const left: RECT = .{ .left = -1920, .top = 0, .right = 0, .bottom = 1040 };
+    const main_work: RECT = .{ .left = 0, .top = 0, .right = 1920, .bottom = 1040 };
+    const works = [_]RECT{ main_work, left };
+    const wide: RECT = .{ .left = 100, .top = 100, .right = 900, .bottom = 700 };
+
+    // Where there is a monitor, the rect is kept as saved.
+    try std.testing.expectEqualDeep(wide, restoredRectOnScreen(wide, &works, grab));
+    const straddling: RECT = .{ .left = -400, .top = 50, .right = 400, .bottom = 650 };
+    try std.testing.expectEqualDeep(straddling, restoredRectOnScreen(straddling, &works, grab));
+    // A snapped window overhangs its monitor by its invisible frame.
+    const snapped: RECT = .{ .left = -7, .top = 0, .right = 967, .bottom = 1047 };
+    try std.testing.expectEqualDeep(snapped, restoredRectOnScreen(snapped, &works, grab));
+    // The caption on a monitor and the body hanging off the bottom stays too.
+    const hanging: RECT = .{ .left = 100, .top = 900, .right = 900, .bottom = 1500 };
+    try std.testing.expectEqualDeep(hanging, restoredRectOnScreen(hanging, &works, grab));
+
+    // Saved on a monitor to the right that was unplugged.
+    const unplugged: RECT = .{ .left = 2100, .top = 200, .right = 2900, .bottom = 800 };
+    try std.testing.expectEqualDeep(
+        RECT{ .left = 1120, .top = 200, .right = 1920, .bottom = 800 },
+        restoredRectOnScreen(unplugged, &works, grab),
+    );
+    // Below every monitor, and above them.
+    try std.testing.expectEqualDeep(
+        RECT{ .left = 100, .top = 440, .right = 900, .bottom = 1040 },
+        restoredRectOnScreen(.{ .left = 100, .top = 3000, .right = 900, .bottom = 3600 }, &works, grab),
+    );
+    try std.testing.expectEqualDeep(
+        RECT{ .left = 100, .top = 0, .right = 900, .bottom = 600 },
+        restoredRectOnScreen(.{ .left = 100, .top = -900, .right = 900, .bottom = -300 }, &works, grab),
+    );
+    // Only a sliver of the title bar on a monitor is not enough to grab.
+    try std.testing.expectEqualDeep(
+        RECT{ .left = 1120, .top = 100, .right = 1920, .bottom = 700 },
+        restoredRectOnScreen(.{ .left = 1900, .top = 100, .right = 2700, .bottom = 700 }, &works, grab),
+    );
+    // The nearest is the monitor to the left when that is where it was.
+    try std.testing.expectEqualDeep(
+        RECT{ .left = -1920, .top = 100, .right = -1120, .bottom = 700 },
+        restoredRectOnScreen(.{ .left = -4000, .top = 100, .right = -3200, .bottom = 700 }, &works, grab),
+    );
+    // Larger than the monitor it lands on: capped to it.
+    try std.testing.expectEqualDeep(
+        left,
+        restoredRectOnScreen(.{ .left = -9000, .top = -50, .right = -4000, .bottom = 3000 }, &works, grab),
+    );
+    // No monitor list, no opinion.
+    try std.testing.expectEqualDeep(unplugged, restoredRectOnScreen(unplugged, &.{}, grab));
+
+    // The file can say anything an i32 holds, and a window cannot be that far
+    // away: no differences of these overflow.
+    const min: i32 = std.math.minInt(i32);
+    const max: i32 = std.math.maxInt(i32);
+    try std.testing.expectEqualDeep(
+        RECT{ .left = -1920, .top = 100, .right = -1120, .bottom = 700 },
+        restoredRectOnScreen(.{ .left = min, .top = 100, .right = min + 800, .bottom = 700 }, &works, grab),
+    );
+    try std.testing.expectEqualDeep(
+        RECT{ .left = 1120, .top = 440, .right = 1920, .bottom = 1040 },
+        restoredRectOnScreen(.{ .left = max - 800, .top = max - 600, .right = max, .bottom = max }, &works, grab),
+    );
+    try std.testing.expectEqualDeep(
+        main_work,
+        restoredRectOnScreen(.{ .left = min, .top = min, .right = -1, .bottom = -1 }, &.{main_work}, grab),
+    );
+}
+
+test "win32 a fullscreen window is saved with the window it leaves fullscreen to, never its popup rect" {
+    const normal: RECT = .{ .left = 100, .top = 200, .right = 740, .bottom = 680 };
+    // A taskbar on the left, so workspace and screen coordinates differ.
+    var back: TopLevel.Return = .{ .rect = normal, .placement = testPlacement(std.mem.zeroes(RECT), 0, c.SW_RESTORE), .monitor = testMonitor(1, 96, testRect(0, 0, 1920, 1080), testRect(48, 0, 1920, 1080)) };
+    try std.testing.expectEqual(SavedPlacement{ .rect = normal, .maximized = false, .fullscreen = true }, savedFullscreen(back, null).?);
+
+    // A maximized return's normal rect is in its monitor's workspace.
+    back.placement.showCmd = c.SW_MAXIMIZE;
+    back.placement.rcNormalPosition = testRect(52, 200, 692, 680);
+    try std.testing.expectEqual(SavedPlacement{ .rect = normal, .maximized = false, .fullscreen = true, .fullscreen_maximized = true }, savedFullscreen(back, null).?);
+
+    // No trustworthy return rect: no placement, rather than fullscreen with
+    // an invented normal rect or the popup's bounds.
+    back.placement.rcNormalPosition = std.mem.zeroes(RECT);
+    try std.testing.expect(savedFullscreen(back, null) == null);
+    back.placement.showCmd = c.SW_RESTORE;
+    back.rect = std.mem.zeroes(RECT);
+    try std.testing.expect(savedFullscreen(back, null) == null);
+}
+
+test "win32 a restored window enters its config's maximize and fullscreen, and a saved fullscreen" {
+    const normal: SavedPlacement = .{ .rect = null, .maximized = false };
+    const fullscreen: SavedPlacement = .{ .rect = null, .maximized = false, .fullscreen = true };
+    const fullscreen_maximized: SavedPlacement = .{ .rect = null, .maximized = false, .fullscreen = true, .fullscreen_maximized = true };
+    const Case = struct { wants: Wants = .{}, saved: SavedPlacement, enter: Enter };
+    for ([_]Case{
+        .{ .saved = normal, .enter = .{} },
+        // A saved maximize is the placement's, applied with the saved rect,
+        // not a start.
+        .{ .saved = .{ .rect = null, .maximized = true }, .enter = .{} },
+        .{ .wants = .{ .maximize = true }, .saved = normal, .enter = .{ .maximize = true } },
+        .{ .wants = .{ .fullscreen = true }, .saved = normal, .enter = .{ .fullscreen = true } },
+        // A saved fullscreen comes back with `fullscreen = false` in the
+        // config, leaving fullscreen maximized when it was.
+        .{ .saved = fullscreen, .enter = .{ .fullscreen = true } },
+        .{ .saved = fullscreen_maximized, .enter = .{ .maximize = true, .fullscreen = true } },
+        .{ .wants = .{ .maximize = true }, .saved = fullscreen, .enter = .{ .maximize = true, .fullscreen = true } },
+    }) |case| {
+        try std.testing.expectEqual(case.enter, forRestore(case.wants, case.saved));
+    }
 }
 
 test "win32 a window shows its opacity as a layered alpha, and opaque unlayered" {
