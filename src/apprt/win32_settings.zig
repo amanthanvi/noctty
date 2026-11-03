@@ -923,6 +923,10 @@ const StatusNote = enum {
     /// Saved, but applying the reload failed partway, so the running
     /// settings may be partly the saved ones (`SaveError.SavedPartlyApplied`).
     saved_partly_applied,
+    /// Saved, and a later layer adds to the hidden profiles a value whose
+    /// profiles noctty has not all found: whether it hides more than the save
+    /// could not be checked (`SaveError.SavedListsUnchecked`).
+    saved_lists_unchecked,
     save_failed,
     /// Another program edited the config file while it was being saved, and
     /// checked again it kept changing: nothing was saved.
@@ -981,6 +985,7 @@ const StatusNote = enum {
             .saved_unread => "Saved, but a config file could not be read whole, so the running settings are unchanged. Reload the configuration once it can be read to use the saved values.",
             .saved_not_applied => "Saved, but the saved settings could not be applied, so the running settings are unchanged. Reload the configuration to use the saved values.",
             .saved_partly_applied => "Saved, but the saved settings may be only partly applied. Reload the configuration to apply all of them.",
+            .saved_lists_unchecked => "Saved. A later config file or command-line option adds to the hidden profiles, and noctty has not found every profile yet, so it could not check whether that hides more of them.",
             .disk_changed => "Nothing was saved: another program changed the config file while it was being saved. Save again. Your edits are kept.",
             .profile_changed => "Nothing was saved: another program changed a profile in the config file since Settings read it. Reload the configuration, then make the change again. Your edits are kept.",
             .save_failed => "Save failed. Your edits are kept. Check that the config file can be written and is not open in another program, then try again.",
@@ -1774,6 +1779,11 @@ pub const SaveError = error{
     /// running settings may be partly the saved ones until the configuration
     /// is reloaded. The save is done, so the draft and its previews end.
     SavedPartlyApplied,
+    /// The file was written and its reload applied, and the check for what
+    /// overrides it was unavailable for the hidden profiles: a later layer
+    /// adds a value to them, and without every profile found it cannot be
+    /// told what that value names (`settings_patch.Check.unchecked`).
+    SavedListsUnchecked,
 };
 
 pub const SaveReloadOutcome = union(enum) {
@@ -1782,6 +1792,7 @@ pub const SaveReloadOutcome = union(enum) {
     completed_unread,
     completed_not_applied,
     completed_partly_applied,
+    completed_lists_unchecked,
     failed: SaveError,
 };
 
@@ -1844,6 +1855,7 @@ pub fn saveReloadOutcome(result: SaveError!void) SaveReloadOutcome {
         error.SavedButUnread => .completed_unread,
         error.SavedNotApplied => .completed_not_applied,
         error.SavedPartlyApplied => .completed_partly_applied,
+        error.SavedListsUnchecked => .completed_lists_unchecked,
         else => .{ .failed = err },
     };
     return .completed;
@@ -3151,7 +3163,7 @@ pub const SettingsWindow = struct {
         if (self.owes_draft) return draft_owed_text;
         switch (self.status_note) {
             // A save's result stays up whatever the draft looks like now.
-            .saved, .saved_not_applied, .discarded, .editor_open_failed => return self.status_note.text(),
+            .saved, .saved_not_applied, .saved_lists_unchecked, .discarded, .editor_open_failed => return self.status_note.text(),
             .saved_overridden, .saved_unread, .saved_partly_applied, .already_default, .reset_failed, .key_copied, .key_copy_failed => return self.noteText(),
             .profile_said, .profile_hint, .profile_refused => return self.noteText(),
             // These are about edits that are still there to be saved.
@@ -6342,11 +6354,12 @@ pub const SettingsWindow = struct {
         if (self.profile_listing) return;
         if (self.active_section != .profiles or self.profile_list.hwnd == null) {
             // Another page is shown: the search's count for the Profiles
-            // page follows the new rows, and that page, its list and the
-            // focus stay as they are.
+            // page follows the new rows, and so does the line that says what
+            // it found; that page, its list and the focus stay as they are.
             if (self.search_query.active()) {
                 self.ensureProfileModel();
                 self.refindProfileRows();
+                self.refreshNativeSectionText();
             }
             return;
         }
@@ -6543,6 +6556,9 @@ pub const SettingsWindow = struct {
             // Written, and partly applied: the draft starts over from what
             // runs now, and the status says to reload.
             .completed_partly_applied => self.completeSynchronousSave(apply_id, .partly_applied),
+            // Written and applied, with the hidden profiles' check
+            // unavailable: the same baseline refresh, and the status says so.
+            .completed_lists_unchecked => self.completeSynchronousSave(apply_id, .lists_unchecked),
             .failed => |err| {
                 // Write failed. DO NOT discard `pending` — the user's
                 // edits are still in memory; losing them on every
@@ -6874,7 +6890,7 @@ pub const SettingsWindow = struct {
     }
 
     /// How a save that wrote the file ended (`saveReloadOutcome`).
-    const SavedHow = enum { clean, masked, unread, not_applied, partly_applied };
+    const SavedHow = enum { clean, masked, unread, not_applied, partly_applied, lists_unchecked };
 
     fn finishSuccessfulSave(self: *SettingsWindow, how: SavedHow, copies: ?Adoption) void {
         const masked = how == .masked;
@@ -6887,6 +6903,7 @@ pub const SettingsWindow = struct {
             .unread => .saved_unread,
             .not_applied => .saved_not_applied,
             .partly_applied => .saved_partly_applied,
+            .lists_unchecked => .saved_lists_unchecked,
         };
         // The settings the save wrote that something later overrides, by the
         // names a config file knows them by, and where the value that wins
@@ -6954,6 +6971,12 @@ pub const SettingsWindow = struct {
             self.handle.notifySuccess(
                 self.handle.ctx,
                 "Settings saved, but maybe only partly applied",
+                self.noteText(),
+            );
+        } else if (how == .lists_unchecked) {
+            self.handle.notifySuccess(
+                self.handle.ctx,
+                "Settings saved, but the hidden profiles could not be checked",
                 self.noteText(),
             );
         } else {
@@ -7822,7 +7845,12 @@ pub const SettingsWindow = struct {
         alloc.free(self.profile_found);
         self.profile_found = &.{};
         if (!self.profile_model.built()) return;
-        self.profile_found = alloc.alloc(bool, self.profile_model.rows.len) catch &.{};
+        // Without it a search finds no row: listed again shortly too.
+        const found = if (@import("builtin").is_test and test_profile_found_fails) error.OutOfMemory else alloc.alloc(bool, self.profile_model.rows.len);
+        self.profile_found = found catch empty: {
+            self.armProfileRetry();
+            break :empty &.{};
+        };
         @memset(self.profile_found, false);
         if (was_selected) |identity| list.selected = self.profile_model.find(identity);
         // Not found (yet): kept for the rebuild that has it.
@@ -8155,6 +8183,10 @@ pub const SettingsWindow = struct {
     /// Tests only: `beginProfileEdit` cannot make its field's window, as when
     /// Windows has no resources for one.
     threadlocal var test_profile_edit_fails: bool = false;
+
+    /// Tests only: `ensureProfileModel` has no memory for the search's
+    /// record of the rows it finds (`profile_found`).
+    threadlocal var test_profile_found_fails: bool = false;
 
     /// Start typing into a field of the Profiles page: a text field over the
     /// open row (`placeProfileEdit`), holding the field's value, named for
@@ -11690,6 +11722,32 @@ test "settings a save whose reload is not applied says it saved, ends the previe
     }.body);
 }
 
+test "settings a save whose hidden profiles could not be checked says it saved, and what it could not check" {
+    try dialog_test.onHiddenDesktop(struct {
+        fn body() !void {
+            const fixture = try dialog_test.Fixture.start();
+            defer fixture.finish();
+            const settings = &fixture.settings;
+            fixture.live_previews = true;
+            typeInto(settings.fields.edit_bg_opacity orelse return error.TestExpectedField, "0.5");
+            try std.testing.expect(std.meta.activeTag(saveReloadOutcome(error.SavedListsUnchecked)) == .completed_lists_unchecked);
+
+            // The file is written and its reload applied; what overrides the
+            // hidden profiles could not be checked.
+            fixture.lists_unchecked = true;
+            settings.save();
+            try std.testing.expectEqual(@as(u32, 1), fixture.saved);
+            // The save is done: the draft starts over from what runs now.
+            try std.testing.expect(!settings.hasPendingChanges());
+            try std.testing.expectEqual(@as(f64, 0.5), fixture.config.@"background-opacity");
+            // The status says it saved, and what it could not check.
+            try std.testing.expectEqual(StatusNote.saved_lists_unchecked, settings.status_note);
+            var buf: [512]u8 = undefined;
+            try std.testing.expectEqualStrings(StatusNote.saved_lists_unchecked.text(), try statusTextOf(settings, &buf));
+        }
+    }.body);
+}
+
 test "settings a save whose reload is applied only partly says it saved and may be partly applied" {
     try dialog_test.onHiddenDesktop(struct {
         fn body() !void {
@@ -13951,6 +14009,10 @@ const dialog_test = struct {
         /// The save writes, and applying its reload fails partway
         /// (`SaveError.SavedPartlyApplied`).
         partly_applied: bool = false,
+        /// The save writes and its reload applies, and the check of what
+        /// overrides the hidden profiles was unavailable
+        /// (`SaveError.SavedListsUnchecked`).
+        lists_unchecked: bool = false,
         /// The window's allocator (`handle.alloc`), which runs out of memory
         /// as the save completes (`saveAndReload`).
         starve_after_save: ?*std.testing.FailingAllocator = null,
@@ -14231,6 +14293,7 @@ const dialog_test = struct {
                 self.config.@"cursor-style" = pending.@"cursor-style";
                 return error.SavedPartlyApplied;
             }
+            if (self.lists_unchecked) return error.SavedListsUnchecked;
         }
 
         fn previewField(ctx: *anyopaque, _: SettingField, value: SettingValue) void {
@@ -24532,9 +24595,15 @@ test "settings a list that arrives while another page is shown counts the Profil
             // On another page, PowerShell arrives: the Profiles count follows,
             // and the page shown stays.
             settings.setActiveSection(.appearance);
+            const before = settings.search_total;
             giveProfilePage(fixture, &whole, true);
             try std.testing.expectEqual(@as(@TypeOf(counts.*), 1), counts.*);
+            try std.testing.expectEqual(before + 1, settings.search_total);
             try std.testing.expect(settings.active_section == .appearance);
+            // The line under the title says so: its count is the new one.
+            var text_buf: [SettingsWindow.help_text_bytes]u8 = undefined;
+            var want_buf: [96]u8 = undefined;
+            try std.testing.expectEqualStrings(settings.summaryText(&want_buf), readEditUtf8(settings.text_summary.?, &text_buf).?);
         }
     }.body);
 }
@@ -24568,6 +24637,15 @@ test "settings a Profiles listing that runs out of memory is tried again, and a 
             settings.retryProfileListing();
             try std.testing.expect(settings.profile_model.findField(.profile, "pwsh.exe", null) != null);
             try std.testing.expect(settings.profile_model.complete);
+            // The rows are built, and the search's record of them is not:
+            // a retry is armed for that too, and its tick makes it.
+            SettingsWindow.test_profile_found_fails = true;
+            settings.retryProfileListing();
+            SettingsWindow.test_profile_found_fails = false;
+            try std.testing.expectEqual(@as(usize, 0), settings.profile_found.len);
+            try std.testing.expect(sys.KillTimer(window, profile_retry_timer_id) != 0);
+            settings.retryProfileListing();
+            try std.testing.expectEqual(settings.profile_model.rows.len, settings.profile_found.len);
 
             // A button whose procedure cannot be installed is not kept: the
             // row has no buttons, rather than a handle that outlives them.

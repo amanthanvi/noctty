@@ -8654,9 +8654,16 @@ pub const App = struct {
         // override, and the save says that instead, naming the file.
         postWriteStep(.report);
         // A later layer's alias for a profile the save hid hides nothing
-        // more: the windows' profiles tell (`settings_patch.listHeld`).
-        if (self.settingsProfileList(false)) |listed| for (profile_edits) |*edit| {
-            if (edit.field.isList()) edit.profiles = listed.profiles;
+        // more: the windows' profiles tell (`settings_patch.listCheck`), when
+        // a window has them all. A list that missed some cannot tell what an
+        // alias names, so without the whole list that check is unavailable.
+        const listed = self.settingsProfileList(false);
+        for (profile_edits) |*edit| if (edit.field.isList()) {
+            if (listed) |found| if (found.complete) {
+                edit.profiles = found.profiles;
+                continue;
+            };
+            edit.profiles_complete = false;
         };
         const report = settings_patch.reloadReport(&masked_text.writer, profile_edits, applied, &reloaded, masked_text.written().len > 0) catch |err|
             return savedNotApplied("checked for overridden settings", err);
@@ -8676,7 +8683,7 @@ pub const App = struct {
                 log.warn("settings save: saved, but the reload could not read a config file whole; the running settings are kept", .{});
                 return error.SavedButUnread;
             },
-            .held, .masked => {},
+            .held, .masked, .unchecked => {},
         }
         const masked = masked_text.written();
         if (masked.len > 0) {
@@ -8699,6 +8706,8 @@ pub const App = struct {
         // The reload read the file again, so what is wrong in it is news.
         _ = self.reportRecordedConfigProblems();
         if (masked.len > 0) return error.SavedButMasked;
+        // Nothing found masked, and a hidden list could not be checked.
+        if (report == .unchecked) return error.SavedListsUnchecked;
     }
 
     /// Tests only: the hook before a step after the write
@@ -8734,12 +8743,14 @@ pub const App = struct {
     }
 
     /// `settingsSaveAndReload` checking the file again: whether another
-    /// program changed a profile field the draft changes (`edits`), read in
-    /// the app's light/dark state (`now`: the fresh reading in that state,
-    /// already known to be whole, `settingsProfileEditsFromDisk`; one that
-    /// missed a file would read what that file gives as changed). One it did
-    /// stops the save, naming the field (its key, profile and variable; never
-    /// a value).
+    /// program changed a profile field the draft changes (`edits`, and both
+    /// lists when either is written), from `now`: the fresh reading in the
+    /// app's light/dark state, already known to be whole,
+    /// `settingsProfileEditsFromDisk` (one that missed a file would read what
+    /// that file gives as changed). `settings_patch.changedUnder` compares it
+    /// in the state the baseline was read in. One it did stops the save,
+    /// naming the field (its key, profile and variable; never a value); a
+    /// reading it could not put in that state stops it too.
     fn settingsProfilesUnchanged(
         alloc: Allocator,
         detail: *win32_settings.FailureDetail,
@@ -8749,7 +8760,9 @@ pub const App = struct {
         edits: []const settings_patch.Edit,
         target_path: []const u8,
     ) win32_settings.SaveError!void {
-        const edit = settings_patch.changedUnder(edits, original, pending, now, target_path, &settings_reference.samePath) orelse return;
+        const found = settings_patch.changedUnder(edits, original, pending, now, target_path, &settings_reference.samePath) catch |err|
+            return settingsProfileEditsFailed(err);
+        const edit = found orelse return;
         var name: std.Io.Writer.Allocating = .init(alloc);
         defer name.deinit();
         settings_patch.writeEditName(&name.writer, edit) catch return error.OutOfMemory;
@@ -10530,6 +10543,112 @@ pub const App = struct {
         const after = try SaveTest.read(path);
         defer alloc.free(after);
         try std.testing.expect(std.mem.eql(u8, changed, after));
+    }
+
+    test "settings save of the hidden profiles checks a later file's alias only against a whole list of profiles, and says when it could not" {
+        if (builtin.os.tag != .windows) return error.SkipZigTest;
+        const alloc = std.testing.allocator;
+        const settings_profiles = @import("../win32_settings_profiles.zig");
+        var core_app: CoreApp = undefined;
+        var app: App = undefined;
+        var host: Host = undefined;
+        var session: TestSession = .{};
+        try session.init(.{ .core_app = &core_app, .app = &app, .hosts = &.{.{ .storage = &host }} });
+        defer session.deinit();
+        defer testFreeConfigProblems(&app, alloc);
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        // An include, read after the file, hides PowerShell by its alias.
+        try tmp.dir.writeFile(.{ .sub_path = "more.conf", .data = "profile-hidden = pwsh\n" });
+        const more = try tmp.dir.realpathAlloc(alloc, "more.conf");
+        defer alloc.free(more);
+        const text = try std.fmt.allocPrint(alloc, "profile-command = py: python.exe\nconfig-file = {s}\n", .{more});
+        defer alloc.free(text);
+        const path = try tmp.dir.realpathAlloc(alloc, ".");
+        defer alloc.free(path);
+        const config_path = try std.fs.path.join(alloc, &.{ path, "config" });
+        defer alloc.free(config_path);
+        // The save hides PowerShell by its key, so the alias hides nothing
+        // more, as a list with every profile tells; a list that missed some,
+        // or none, cannot tell what `pwsh` names.
+        const profiles = [_]windows_shell.Profile{
+            .{ .kind = .pwsh, .key = "pwsh.exe", .label = "PowerShell", .command = .{ .direct = &.{} } },
+            .{ .kind = .cmd, .key = "cmd.exe", .label = "Command Prompt", .command = .{ .direct = &.{} } },
+        };
+        try app.registry.addHost(alloc, &host);
+        defer _ = app.registry.detachHost(&host);
+        const Case = enum { whole, partial, none };
+        for ([_]Case{ .whole, .partial, .none }) |case| {
+            try tmp.dir.writeFile(.{ .sub_path = "config", .data = text });
+            SaveTest.files = &.{config_path};
+            try SaveTest.begin(&app, config_path);
+            defer SaveTest.end(&app);
+            // The window's list, as discovery leaves it: a changed profile
+            // setting drops it (`Host.invalidateProfiles`), the save's reload
+            // too, after the check.
+            host.profiles = try windows_shell.cloneProfiles(app.core_app.alloc, &profiles);
+            defer if (host.profiles) |owned| {
+                windows_shell.deinitProfiles(app.core_app.alloc, owned);
+                host.profiles = null;
+            };
+            host.profiles_complete = case == .whole;
+            if (case == .none) _ = app.registry.detachHost(&host);
+            var original = try app.config.clone(alloc);
+            defer original.deinit();
+            var pending = try app.config.clone(alloc);
+            defer pending.deinit();
+            try settings_profiles.setHidden(&pending, &.{"pwsh.exe"});
+            const result = app.settingsSaveAndReload(&pending, &original);
+            switch (case) {
+                .whole => try result,
+                .partial, .none => try std.testing.expectError(error.SavedListsUnchecked, result),
+            }
+            try std.testing.expect(app.settings_masked_keys.text == null);
+        }
+    }
+
+    test "settings save of the profiles' order stops when another program hid a profile in a file loaded first, which the save's clear would show again" {
+        if (builtin.os.tag != .windows) return error.SkipZigTest;
+        const alloc = std.testing.allocator;
+        const settings_profiles = @import("../win32_settings_profiles.zig");
+        var core_app: CoreApp = undefined;
+        var app: App = undefined;
+        var session: TestSession = .{};
+        try session.init(.{ .core_app = &core_app, .app = &app });
+        defer session.deinit();
+        defer testFreeConfigProblems(&app, alloc);
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        try tmp.dir.writeFile(.{ .sub_path = "lower.conf", .data = "# a file loaded first\n" });
+        const text = "profile-command = py: python.exe\n";
+        try tmp.dir.writeFile(.{ .sub_path = "config", .data = text });
+        const lower = try tmp.dir.realpathAlloc(alloc, "lower.conf");
+        defer alloc.free(lower);
+        const path = try tmp.dir.realpathAlloc(alloc, "config");
+        defer alloc.free(path);
+        SaveTest.files = &.{ lower, path };
+        try SaveTest.begin(&app, path);
+        defer SaveTest.end(&app);
+        var original = try app.config.clone(alloc);
+        defer original.deinit();
+        var pending = try app.config.clone(alloc);
+        defer pending.deinit();
+        // Only the order changes. Both lists are written, the hidden one
+        // after a clear that drops what the lower file gives it.
+        try settings_profiles.setOrder(&pending, &.{ "user:py", "pwsh.exe", "cmd.exe" });
+        try std.testing.expect(pending.@"profile-hidden".equal(original.@"profile-hidden"));
+        // Before Save, another program hides PowerShell in the lower file.
+        const hides = "profile-hidden = pwsh.exe\n";
+        try tmp.dir.writeFile(.{ .sub_path = "lower.conf", .data = hides });
+        try std.testing.expectError(error.ProfileChanged, app.settingsSaveAndReload(&pending, &original));
+        try std.testing.expectEqualStrings("profile-hidden", app.settings_failure_detail.text orelse return error.TestExpectedDetail);
+        // Nothing is written: both files are as they were left.
+        const after = try SaveTest.read(path);
+        defer alloc.free(after);
+        try std.testing.expect(std.mem.eql(u8, text, after));
+        const lower_after = try SaveTest.read(lower);
+        defer alloc.free(lower_after);
+        try std.testing.expect(std.mem.eql(u8, hides, lower_after));
     }
 
     test "win32 settings save of a profile removal reads the layers again: a lower file that gained the profile keeps a tombstone" {

@@ -380,8 +380,8 @@ pub const Model = struct {
         for (page.order, 0..) |key, at| try order_at.put(a, try keyId(a, key), at);
         var page_hidden: std.StringHashMapUnmanaged(void) = .empty;
         for (page.hidden) |key| try page_hidden.put(a, try keyId(a, key), {});
-        var profile_at: std.StringHashMapUnmanaged(usize) = .empty;
-        for (self.profiles, 0..) |profile, at| try profile_at.put(a, try keyId(a, profile.key), at);
+        const names_index: NameIndex = try .of(a, self.profiles);
+        const profile_at = &names_index.by_key;
         // `profile-order`.
         var front: std.ArrayListUnmanaged([]const u8) = .empty;
         const after = try a.alloc(std.ArrayListUnmanaged([]const u8), page.order.len);
@@ -390,7 +390,7 @@ pub const Model = struct {
         for (original.@"profile-order".list.items) |raw| {
             const value = std.mem.trim(u8, raw, &std.ascii.whitespace);
             if (value.len == 0 or namesRemovedProfile(original, draft, value)) continue;
-            const names = try self.namedKeys(a, &self.maps.order, value);
+            const names = try self.namedKeys(a, &names_index, &self.maps.order, value);
             var last: ?usize = null;
             for (names) |key| {
                 const at = order_at.get(try keyId(a, key)) orelse continue;
@@ -420,7 +420,7 @@ pub const Model = struct {
         for (original.@"profile-hidden".list.items) |raw| {
             const value = std.mem.trim(u8, raw, &std.ascii.whitespace);
             if (value.len == 0 or namesRemovedProfile(original, draft, value)) continue;
-            const names = try self.namedKeys(a, &self.maps.hidden, value);
+            const names = try self.namedKeys(a, &names_index, &self.maps.hidden, value);
             const shows_one = for (names) |key| {
                 const id = try keyId(a, key);
                 const index = profile_at.get(id) orelse continue;
@@ -450,12 +450,25 @@ pub const Model = struct {
         return .{ .order = order.items, .hidden = hidden.items };
     }
 
-    /// The keys of the page's profiles `value` names: as the app read it
-    /// (`refs`), else by key, id or `user:` id.
-    fn namedKeys(self: *const Model, a: Allocator, map: *const RefMap, value: []const u8) Allocator.Error![]const []const u8 {
+    /// The keys of the page's profiles `value` (trimmed) names, in the
+    /// page's order, as `refNames` reads it for each: by its own key, id or
+    /// `user:` id, else as the app read it (`refs`). Looked up in `index`,
+    /// the page's profiles by key and id, not by a pass over them.
+    fn namedKeys(self: *const Model, a: Allocator, index: *const NameIndex, map: *const RefMap, value: []const u8) Allocator.Error![]const []const u8 {
+        var found: std.ArrayListUnmanaged(usize) = .empty;
+        if (index.by_key.get(try keyId(a, value))) |at| try found.append(a, at);
+        if (index.by_id.get(try std.ascii.allocLowerString(a, value))) |at| try found.append(a, at);
+        if (std.ascii.startsWithIgnoreCase(value, "user:")) {
+            if (index.by_id.get(try std.ascii.allocLowerString(a, value["user:".len..]))) |at| try found.append(a, at);
+        }
+        if (map.get(value)) |ref| for (ref.keys) |named| {
+            if (index.by_key.get(try keyId(a, named))) |at| try found.append(a, at);
+        };
+        std.mem.sort(usize, found.items, {}, std.sort.asc(usize));
         var keys: std.ArrayListUnmanaged([]const u8) = .empty;
-        for (self.profiles) |profile| {
-            if (refNames(map, value, profile.key, if (profile.detected) null else profile.id)) try keys.append(a, profile.key);
+        for (found.items, 0..) |at, i| {
+            if (i != 0 and found.items[i - 1] == at) continue;
+            try keys.append(a, self.profiles[at].key);
         }
         return keys.items;
     }
@@ -880,6 +893,27 @@ fn pageEntries(a: Allocator, draft: *const Config, original: ?*const Config, lis
     }.lessThan);
     return entries.items;
 }
+
+/// The page's profiles by what a list value names one by itself, for
+/// `Model.namedKeys`: its key as `sameKey` compares it (`keyId`), and a user
+/// profile's id in lower case (`namesProfile`). Profile ids are unique
+/// without case, as the config keeps them. From `a`.
+const NameIndex = struct {
+    by_key: std.StringHashMapUnmanaged(usize) = .empty,
+    by_id: std.StringHashMapUnmanaged(usize) = .empty,
+
+    fn of(a: Allocator, profiles: []const Profile) Allocator.Error!NameIndex {
+        var index: NameIndex = .{};
+        for (profiles, 0..) |profile, at| {
+            const key = try index.by_key.getOrPut(a, try keyId(a, profile.key));
+            if (!key.found_existing) key.value_ptr.* = at;
+            if (profile.detected) continue;
+            const id = try index.by_id.getOrPut(a, try std.ascii.allocLowerString(a, profile.id));
+            if (!id.found_existing) id.value_ptr.* = at;
+        }
+        return index;
+    }
+};
 
 /// Whether `value` names the profile with `key` (and user `id`): by its own
 /// key or id (`namesKey`) first, which also finds a profile the draft added
@@ -2235,7 +2269,7 @@ test "settings profiles: a list's recorded lines follow the file with that list,
         var disk = try Load.config(alloc, earlier, path);
         defer disk.deinit();
         const order: settings_patch.Edit = .{ .field = .order, .id = "", .op = .{ .list = &.{ "user:py", "pwsh.exe" } } };
-        try testing.expect(settings_patch.changedUnder(&.{order}, &original, &draft, &disk, path, &Load.same) != null);
+        try testing.expect(try settings_patch.changedUnder(&.{order}, &original, &draft, &disk, path, &Load.same) != null);
     }
     // 2. The page changed a profile's command line, not the order; the
     // outside edit comes, and the untouched order follows the file, its
@@ -2256,7 +2290,7 @@ test "settings profiles: a list's recorded lines follow the file with that list,
         var disk = try Load.config(alloc, earlier, path);
         defer disk.deinit();
         const order: settings_patch.Edit = .{ .field = .order, .id = "", .op = .{ .list = &.{"user:py"} } };
-        try testing.expect(settings_patch.changedUnder(&.{order}, &original, &draft, &disk, path, &Load.same) == null);
+        try testing.expect(try settings_patch.changedUnder(&.{order}, &original, &draft, &disk, path, &Load.same) == null);
     }
 }
 

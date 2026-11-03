@@ -2678,7 +2678,7 @@ pub fn jumpListRebuildThreadMain(delivery: *AppDelivery, job: *win32_jump_list.R
 }
 
 fn testProfileList(alloc: Allocator, keys: []const []const u8) ![]windows_shell.Profile {
-    var source: [4]windows_shell.Profile = undefined;
+    var source: [8]windows_shell.Profile = undefined;
     for (keys, 0..) |key, index| source[index] = .{
         .kind = .pwsh,
         .key = key,
@@ -2853,9 +2853,13 @@ test "win32 Settings' Profiles page list marks the quick slots and the profiles 
     defer testFreeHostProfiles(&app, &.{&first});
 
     // Command Prompt is hidden by `profile-hidden`; the old Visual Studio by
-    // noctty itself, which no value names.
-    first.profiles = try testProfileList(app.core_app.alloc, &.{ "pwsh.exe", "cmd.exe", "vs:old:cmd" });
+    // noctty itself, which no value names; both WSL distributions by `wsl`.
+    first.profiles = try testProfileList(app.core_app.alloc, &.{ "pwsh.exe", "cmd.exe", "vs:old:cmd", "wsl:Ubuntu", "wsl:Debian" });
     first.profiles_complete = true;
+    for (first.profiles.?[3..5]) |*distro| {
+        distro.kind = .wsl_distro;
+        distro.hidden = true;
+    }
     first.profiles.?[1].hidden = true;
     first.profiles.?[1].kind = .cmd;
     first.profiles.?[2].hidden = true;
@@ -2869,6 +2873,7 @@ test "win32 Settings' Profiles page list marks the quick slots and the profiles 
     // `profile-hidden` names the old Visual Studio too: discovery still
     // hides it, so the page still cannot show it.
     try app.config.@"profile-hidden".list.append(app.config._arena.?.allocator(), "vs:old:cmd");
+    try app.config.@"profile-hidden".list.append(app.config._arena.?.allocator(), "wsl");
     try app.config.@"profile-order".list.append(app.config._arena.?.allocator(), "pwsh");
     // PowerShell has the first quick slot.
     app.launcher_quick_slot_keys[0] = try std.testing.allocator.dupeZ(u8, "pwsh.exe");
@@ -2879,21 +2884,39 @@ test "win32 Settings' Profiles page list marks the quick slots and the profiles 
 
     var choices = try settingsProfileChoicesThunk(&app, std.testing.allocator, null, null, false);
     defer choices.deinit(std.testing.allocator);
-    try std.testing.expectEqual(@as(usize, 3), choices.items.len);
+    try std.testing.expectEqual(@as(usize, 5), choices.items.len);
     try std.testing.expectEqual(@as(?u8, 1), choices.items[0].quick_slot);
     try std.testing.expectEqual(@as(?u8, null), choices.items[1].quick_slot);
     try std.testing.expect(!choices.items[0].found_hidden);
     try std.testing.expect(choices.items[1].hidden and !choices.items[1].found_hidden);
     try std.testing.expect(choices.items[2].hidden and choices.items[2].found_hidden);
-    // What each list value names, as the app reads it: `pwsh` is an alias
-    // the page reads and keeps by this.
-    try std.testing.expectEqual(@as(usize, 1), choices.order_refs.len);
+    // What each list value names, as the app reads it, the list's own first
+    // and in its order: `pwsh` is an alias the page reads and keeps by this,
+    // and `wsl` names every distribution.
+    const Refs = struct {
+        fn expectNames(refs: []const win32_settings.ProfileReference, value: []const u8, keys: []const []const u8) !void {
+            var found: ?win32_settings.ProfileReference = null;
+            for (refs) |ref| if (std.mem.eql(u8, ref.value, value)) {
+                // Each value once.
+                try std.testing.expect(found == null);
+                found = ref;
+            };
+            const ref = found orelse return error.TestExpectedReference;
+            try std.testing.expectEqual(keys.len, ref.keys.len);
+            for (keys, ref.keys) |want, key| try std.testing.expectEqualStrings(want, key);
+        }
+    };
     try std.testing.expectEqualStrings("pwsh", choices.order_refs[0].value);
-    try std.testing.expectEqual(@as(usize, 1), choices.order_refs[0].keys.len);
-    try std.testing.expectEqualStrings("pwsh.exe", choices.order_refs[0].keys[0]);
-    try std.testing.expectEqual(@as(usize, 2), choices.hidden_refs.len);
-    try std.testing.expectEqualStrings("cmd.exe", choices.hidden_refs[0].keys[0]);
-    try std.testing.expectEqualStrings("vs:old:cmd", choices.hidden_refs[1].keys[0]);
+    try Refs.expectNames(choices.order_refs, "pwsh", &.{"pwsh.exe"});
+    for ([_][]const u8{ "cmd.exe", "vs:old:cmd", "wsl" }, choices.hidden_refs[0..3]) |value, ref| try std.testing.expectEqualStrings(value, ref.value);
+    try Refs.expectNames(choices.hidden_refs, "cmd.exe", &.{"cmd.exe"});
+    try Refs.expectNames(choices.hidden_refs, "vs:old:cmd", &.{"vs:old:cmd"});
+    try Refs.expectNames(choices.hidden_refs, "wsl", &.{ "wsl:Ubuntu", "wsl:Debian" });
+    // A fixed word neither list holds is read too: a draft that keeps one a
+    // reload took out of the app's lists still names its profiles.
+    try Refs.expectNames(choices.order_refs, "wsl", &.{ "wsl:Ubuntu", "wsl:Debian" });
+    try Refs.expectNames(choices.order_refs, "cmd", &.{"cmd.exe"});
+    try Refs.expectNames(choices.hidden_refs, "pwsh", &.{"pwsh.exe"});
 }
 
 test "win32 a finished discovery refills Settings' Default profile dropdown" {
@@ -5674,56 +5697,81 @@ pub fn settingsProfileChoicesThunk(
         // `visual-studio-profiles = newest`), whatever `profile-hidden` says
         // of it too: the Profiles page cannot show it.
         for (result.items, found.profiles) |*item, profile| item.found_hidden = profile.hidden_by_discovery;
-        // What each value of both lists names, as the app reads it: the page
-        // reads and keeps an alias (`wsl`, `pwsh`, `vs:newest:cmd`) by it.
+        // What each value of both lists names, as the app reads it, and what
+        // each fixed word names: the page reads and keeps an alias (`wsl`,
+        // `pwsh`, `vs:newest:cmd`) by it, the draft's own too, which a reload
+        // may have taken out of the app's lists.
         result.order_refs = try settingsListReferences(alloc, found.profiles, app.config.@"profile-order".list.items);
         result.hidden_refs = try settingsListReferences(alloc, found.profiles, app.config.@"profile-hidden".list.items);
     }
     return result;
 }
 
+/// The fixed words a list value names profiles by (`pwsh`, `wsl`,
+/// `vs:newest:cmd`), as `windows_shell` reads them: each is resolved for the
+/// page whether or not the app's lists hold it (`settingsListReferences`).
+const settings_list_words = words: {
+    var out: [windows_shell.profile_alias_words.len + 2][]const u8 = undefined;
+    for (windows_shell.profile_alias_words, 0..) |alias, at| out[at] = alias.word;
+    out[out.len - 2] = "vs:newest:cmd";
+    out[out.len - 1] = "vs:newest:pwsh";
+    break :words out;
+};
+
 /// What each of `values` (a `profile-order` or `profile-hidden`) names among
-/// `profiles`, by `windows_shell.referenceNames`: their keys. Owned.
+/// `profiles`, by `windows_shell.referenceNames`: their keys, and after them
+/// what each fixed word the values do not hold names (`settings_list_words`).
+/// A draft keeps an alias a reload took out of the app's lists, and the
+/// page reads it by these. Owned.
 fn settingsListReferences(
     alloc: Allocator,
     profiles: []const windows_shell.Profile,
     values: []const [:0]const u8,
 ) Allocator.Error![]win32_settings.ProfileReference {
-    const refs = try alloc.alloc(win32_settings.ProfileReference, values.len);
-    var made: usize = 0;
+    var refs: std.ArrayListUnmanaged(win32_settings.ProfileReference) = .empty;
     errdefer {
-        for (refs[0..made]) |ref| ref.deinit(alloc);
-        alloc.free(refs);
+        for (refs.items) |ref| ref.deinit(alloc);
+        refs.deinit(alloc);
     }
+    try refs.ensureTotalCapacityPrecise(alloc, values.len + settings_list_words.len);
     // Each value is read once against the list.
     const newest: windows_shell.NewestVisualStudio = .of(profiles);
     var indexes: std.ArrayListUnmanaged(usize) = .empty;
     defer indexes.deinit(alloc);
-    for (values, refs) |value, *ref| {
-        var keys: std.ArrayListUnmanaged([]const u8) = .empty;
-        errdefer {
-            for (keys.items) |key| alloc.free(key);
-            keys.deinit(alloc);
-        }
-        indexes.clearRetainingCapacity();
-        try windows_shell.referenceNamedIndexes(alloc, profiles, value, newest, &indexes);
-        for (indexes.items) |index| {
-            const profile = profiles[index];
-            const key = try alloc.dupe(u8, profile.key);
-            keys.append(alloc, key) catch |err| {
-                alloc.free(key);
-                return err;
-            };
-        }
-        const owned = try alloc.dupe(u8, value);
-        const named = keys.toOwnedSlice(alloc) catch |err| {
-            alloc.free(owned);
+    for (values) |value| refs.appendAssumeCapacity(try settingsListReference(alloc, profiles, value, newest, &indexes));
+    words: for (settings_list_words) |word| {
+        for (refs.items) |ref| if (std.mem.eql(u8, std.mem.trim(u8, ref.value, &std.ascii.whitespace), word)) continue :words;
+        refs.appendAssumeCapacity(try settingsListReference(alloc, profiles, word, newest, &indexes));
+    }
+    return refs.toOwnedSlice(alloc);
+}
+
+/// What `value` names among `profiles`: its keys (`settingsListReferences`).
+/// Owned.
+fn settingsListReference(
+    alloc: Allocator,
+    profiles: []const windows_shell.Profile,
+    value: []const u8,
+    newest: windows_shell.NewestVisualStudio,
+    indexes: *std.ArrayListUnmanaged(usize),
+) Allocator.Error!win32_settings.ProfileReference {
+    var keys: std.ArrayListUnmanaged([]const u8) = .empty;
+    errdefer {
+        for (keys.items) |key| alloc.free(key);
+        keys.deinit(alloc);
+    }
+    indexes.clearRetainingCapacity();
+    try windows_shell.referenceNamedIndexes(alloc, profiles, value, newest, indexes);
+    for (indexes.items) |index| {
+        const key = try alloc.dupe(u8, profiles[index].key);
+        keys.append(alloc, key) catch |err| {
+            alloc.free(key);
             return err;
         };
-        ref.* = .{ .value = owned, .keys = named };
-        made += 1;
     }
-    return refs;
+    const owned = try alloc.dupe(u8, value);
+    errdefer alloc.free(owned);
+    return .{ .value = owned, .keys = try keys.toOwnedSlice(alloc) };
 }
 
 /// The label the draft's `default-profile` value starts under when it is
@@ -5823,6 +5871,7 @@ pub fn settingsSaveAndReloadThunk(
             error.SavedButUnread,
             error.SavedNotApplied,
             error.SavedPartlyApplied,
+            error.SavedListsUnchecked,
             => app.endSettingsPreview(),
             else => {},
         }

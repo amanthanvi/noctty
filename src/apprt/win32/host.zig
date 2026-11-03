@@ -2445,7 +2445,7 @@ pub const Host = struct {
             break :blk self.app.settingsSaveAndReload(&pending, &original);
         });
         switch (save_outcome) {
-            .completed, .completed_masked => {},
+            .completed, .completed_masked, .completed_lists_unchecked => {},
             // Saved, with a reload the save does not apply, or applied only
             // partly: the running config stays as it is (the preview, when
             // one ran; else the config from before the pick, or what part of

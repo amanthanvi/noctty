@@ -90,9 +90,14 @@ pub const Edit = struct {
     /// checked (`editHeld`).
     with_profile: bool = false,
     /// A list edit: the app's profiles, which tell what a value a later
-    /// layer adds names (`listHeld`): `pwsh` hides `pwsh.exe` as the save's
+    /// layer adds names (`listCheck`): `pwsh` hides `pwsh.exe` as the save's
     /// own `pwsh.exe` does. Empty: values are compared as written.
     profiles: []const windows_shell.Profile = &.{},
+    /// Whether `profiles` is the app's whole list. Without it (a discovery
+    /// ended without some profiles, or no window has a list), what a value a
+    /// later layer adds to the hidden list names is not known, so the check
+    /// is unavailable for it (`Check.unchecked`), neither held nor masked.
+    profiles_complete: bool = true,
 
     pub const Op = union(enum) {
         /// Give the field this value (for `profile-env`, the variable's
@@ -262,22 +267,33 @@ fn listEql(field: Field, a: *const Config, b: *const Config) bool {
     return true;
 }
 
+/// What the check after a save found of an edit (`editCheck`): its value
+/// holds, a later layer masks it, or, for a hidden list, a later layer adds a
+/// value whose profiles the app has not all found, so whether it hides more
+/// than the save cannot be told.
+pub const Check = enum { held, masked, unchecked };
+
 /// Whether `reloaded` holds the list a save wrote (`values`): a layer read
 /// after the file (an include, the command line) may add to it, but not
 /// clear it. The values come first, in their order, so what they name keeps
 /// its place; for `profile-hidden` anything added must name one of them, or
-/// it hides a profile the save shows.
-fn listHeld(field: Field, values: []const []const u8, reloaded: *const Config, profiles: []const windows_shell.Profile) bool {
+/// it hides a profile the save shows. That is told from `profiles` when they
+/// are the app's whole list (`complete`); otherwise an added value the save's
+/// list does not hold as written leaves the check unavailable.
+fn listCheck(field: Field, values: []const []const u8, reloaded: *const Config, profiles: []const windows_shell.Profile, complete: bool) Check {
     const now = listOf(field, reloaded);
-    if (now.len < values.len) return false;
-    for (values, now[0..values.len]) |value, held| if (!listValueEql(value, held)) return false;
-    if (field == .order) return true;
+    if (now.len < values.len) return .masked;
+    for (values, now[0..values.len]) |value, held| if (!listValueEql(value, held)) return .masked;
+    if (field == .order) return .held;
+    var check: Check = .held;
     for (now[values.len..]) |extra| {
         for (values) |value| {
             if (listValueEql(value, extra)) break;
-        } else if (!namesOnlyNamed(extra, values, profiles)) return false;
+        } else if (!complete) {
+            check = .unchecked;
+        } else if (!namesOnlyNamed(extra, values, profiles)) return .masked;
     }
-    return true;
+    return check;
 }
 
 /// Whether `extra`, a hidden value a later layer adds, names profiles, and
@@ -779,8 +795,9 @@ pub threadlocal var test_config_load: if (@import("builtin").is_test) ?*const fn
 /// app applies, and `reload` read the app's own again.
 /// Otherwise the fields another layer overrides go to `masked`
 /// (`writeMasked`, after a separator when `after`), and the report is
-/// `.masked`, or `.held` when there are none.
-pub fn reloadReport(masked: *std.Io.Writer, edits: []const Edit, reload: *const Config, loaded: *const Config, after: bool) std.Io.Writer.Error!union(enum) { held, masked, unread: Unread } {
+/// `.masked`, or `.held` when there are none; `.unchecked` when none is
+/// masked and the check was unavailable for a hidden list (`listCheck`).
+pub fn reloadReport(masked: *std.Io.Writer, edits: []const Edit, reload: *const Config, loaded: *const Config, after: bool) std.Io.Writer.Error!union(enum) { held, masked, unchecked, unread: Unread } {
     if (loaded == reload) {
         if (unreadConfigFile(reload)) |unread| return .{ .unread = unread };
     } else {
@@ -788,7 +805,11 @@ pub fn reloadReport(masked: *std.Io.Writer, edits: []const Edit, reload: *const 
         if (unreadConfigFile(reload)) |unread| return .{ .unread = unread };
     }
     if (edits.len == 0) return .held;
-    return if (try writeMasked(masked, edits, reload, after)) .masked else .held;
+    return switch (try writeMasked(masked, edits, reload, after)) {
+        .held => .held,
+        .masked => .masked,
+        .unchecked => .unchecked,
+    };
 }
 
 /// A file `config`'s load found and could not read whole, if any: a default
@@ -938,17 +959,24 @@ fn namesProfile(value: []const u8, id: []const u8) bool {
 
 /// Whether `reloaded`, the config read again after the save, holds the
 /// field as `edit` left it. One that does not was masked: a file read after
-/// the one saved to, or the command line, sets it again.
-pub fn editHeld(edit: Edit, reloaded: *const Config) bool {
-    if (edit.with_profile) return true;
-    if (edit.field == .env and edit.name == null) return true;
-    if (edit.op == .list) return listHeld(edit.field, edit.op.list, reloaded, edit.profiles);
+/// the one saved to, or the command line, sets it again. A hidden list can be
+/// unchecked instead (`listCheck`).
+pub fn editCheck(edit: Edit, reloaded: *const Config) Check {
+    if (edit.with_profile) return .held;
+    if (edit.field == .env and edit.name == null) return .held;
+    if (edit.op == .list) return listCheck(edit.field, edit.op.list, reloaded, edit.profiles, edit.profiles_complete);
     const now = editValue(edit, reloaded);
-    return switch (edit.op) {
+    const held = switch (edit.op) {
         .set => |value| now != null and std.mem.eql(u8, now.?, value),
         .unset, .delete => now == null,
         .list => unreachable,
     };
+    return if (held) .held else .masked;
+}
+
+/// Whether `editCheck` found `edit` held.
+pub fn editHeld(edit: Edit, reloaded: *const Config) bool {
+    return editCheck(edit, reloaded) == .held;
 }
 
 /// The value `config` gives the field `edit` writes: the profile's command
@@ -1007,7 +1035,17 @@ fn editEql(edit: Edit, a: *const Config, b: *const Config) bool {
 /// for a profile field, so a save that finds one stops (SETTINGS-SAVE-TOCTOU):
 /// asked of every fresh read of the layers, so an edit made after Settings
 /// read the config and before the save counts too.
-pub fn changedUnder(edits: []const Edit, original: *const Config, pending: *const Config, disk: *const Config, path: []const u8, same: origin.SamePath) ?Edit {
+///
+/// `disk` is read in the light/dark state the baseline was read in
+/// (`original._conditional_state`) before anything is compared: a dark
+/// theme's line, read only because the app's state changed since Settings
+/// read the config, is no change to any file. Switching it reads the theme
+/// again; a theme that read fails to give lines makes the check stricter
+/// (a value the baseline had is missing), never looser.
+pub fn changedUnder(edits: []const Edit, original: *const Config, pending: *const Config, disk: *const Config, path: []const u8, same: origin.SamePath) !?Edit {
+    var conditioned = try disk.changeConditionalState(original._conditional_state);
+    defer if (conditioned) |*config| config.deinit();
+    const now: *const Config = if (conditioned) |*config| config else disk;
     for (edits) |edit| {
         // A field deleted only because its profile is removed (its label,
         // folder and variables, `with_profile`) is not one the draft
@@ -1015,19 +1053,18 @@ pub fn changedUnder(edits: []const Edit, original: *const Config, pending: *cons
         // gives it now. The removal's own command line is still checked.
         if (edit.with_profile) continue;
         if (edit.field.isList()) {
-            // A list the draft left as it was is written only because the
-            // other changed (both blocks or neither): what another layer
-            // gives it now, a dark theme's line in the app's state, is not
-            // the draft's to answer for. Its file's own lines are, below.
-            const touched = !listEql(edit.field, original, pending);
-            if (touched and !listEql(edit.field, disk, original) and !listEql(edit.field, disk, pending)) return edit;
+            // A list is written whole, both blocks or neither, after a clear
+            // that drops what every earlier file gives it: a list the draft
+            // left as it was is checked too, in every file that gives it
+            // (an earlier file's line, written over by that clear, counts).
+            if (!listEql(edit.field, now, original) and !listEql(edit.field, now, pending)) return edit;
             // The file's own lines for the list, which the save replaces:
             // another program's edit to them is written over even when a
             // later layer masks the list, so it stops the save too.
-            if (!ownLinesEql(edit.field.key(), disk, original, path, same)) return edit;
+            if (!ownLinesEql(edit.field.key(), now, original, path, same)) return edit;
             continue;
         }
-        if (!editEql(edit, disk, original) and !editEql(edit, disk, pending)) return edit;
+        if (!editEql(edit, now, original) and !editEql(edit, now, pending)) return edit;
     }
     return null;
 }
@@ -1120,20 +1157,26 @@ pub fn editsForSave(arena: Allocator, alloc: Allocator, readings: []const *const
 /// The most readings of the layers `editsForSave` takes.
 const max_readings = 2;
 
-/// Name each field of `edits` that `reloaded` does not hold (`editHeld`),
-/// comma separated, after a separator when `after`. Returns whether it
-/// named one.
-pub fn writeMasked(writer: *std.Io.Writer, edits: []const Edit, reloaded: *const Config, after: bool) !bool {
+/// Name each field of `edits` that `reloaded` masks (`editCheck`), comma
+/// separated, after a separator when `after`. Returns `.masked` when it
+/// named one, else `.unchecked` when the check was unavailable for one, else
+/// `.held`.
+pub fn writeMasked(writer: *std.Io.Writer, edits: []const Edit, reloaded: *const Config, after: bool) !Check {
     var separate = after;
-    var named = false;
-    for (edits) |edit| {
-        if (editHeld(edit, reloaded)) continue;
-        if (separate) try writer.writeAll(", ");
-        separate = true;
-        named = true;
-        try writeEditName(writer, edit);
-    }
-    return named;
+    var found: Check = .held;
+    for (edits) |edit| switch (editCheck(edit, reloaded)) {
+        .held => {},
+        .unchecked => if (found == .held) {
+            found = .unchecked;
+        },
+        .masked => {
+            if (separate) try writer.writeAll(", ");
+            separate = true;
+            found = .masked;
+            try writeEditName(writer, edit);
+        },
+    };
+    return found;
 }
 
 // Tests.
@@ -1258,10 +1301,10 @@ test "settings patch: a list another program changed stops the save; one a later
     // Read again as Settings read it: no change under the edit.
     var disk = try original.clone(alloc);
     defer disk.deinit();
-    try testing.expect(changedUnder(&.{order}, &original, &pending, &disk, "", &testSamePath) == null);
+    try testing.expect(try changedUnder(&.{order}, &original, &pending, &disk, "", &testSamePath) == null);
     // Another program added to it since: the save stops, naming the key.
     try disk.@"profile-order".parseCLI(disk._arena.?.allocator(), "cmd.exe");
-    const changed = changedUnder(&.{order}, &original, &pending, &disk, "", &testSamePath) orelse return error.TestExpectedChange;
+    const changed = try changedUnder(&.{order}, &original, &pending, &disk, "", &testSamePath) orelse return error.TestExpectedChange;
     var name: std.Io.Writer.Allocating = .init(alloc);
     defer name.deinit();
     try writeEditName(&name.writer, changed);
@@ -1297,7 +1340,7 @@ test "settings patch: a list another program changed stops the save; one a later
         if (!case.held) {
             var masked: std.Io.Writer.Allocating = .init(alloc);
             defer masked.deinit();
-            try testing.expect(try writeMasked(&masked.writer, &.{hidden}, &reloaded, false));
+            try testing.expect(try writeMasked(&masked.writer, &.{hidden}, &reloaded, false) == .masked);
             try expectSameText("profile-hidden", masked.written());
         }
     }
@@ -1342,7 +1385,7 @@ test "settings patch: an edit to the file's own list lines that a later file mas
         // Nothing changed: the save goes on.
         var disk = try testLoad(alloc, earlier, path);
         defer disk.deinit();
-        try testing.expect(changedUnder(&.{order}, &original, &pending, &disk, path, &testSamePath) == null);
+        try testing.expect(try changedUnder(&.{order}, &original, &pending, &disk, path, &testSamePath) == null);
     }
     // Another program edits the file's own line, which the later file masks:
     // the list in effect is the same, and the save would write over it.
@@ -1353,12 +1396,12 @@ test "settings patch: an edit to the file's own list lines that a later file mas
         var disk = try testLoad(alloc, earlier, path);
         defer disk.deinit();
         try testing.expect(listEql(.order, &disk, &original));
-        const stopped = changedUnder(&.{order}, &original, &pending, &disk, path, &testSamePath) orelse return error.TestExpectedChange;
+        const stopped = try changedUnder(&.{order}, &original, &pending, &disk, path, &testSamePath) orelse return error.TestExpectedChange;
         try testing.expect(stopped.field == .order);
     }
 }
 
-test "settings patch: an order-only save is not stopped by a dark theme's hidden list it leaves as it is" {
+test "settings patch: a dark theme's hidden list, read only because the app went dark, stops no save of the lists, changed or not" {
     const alloc = testing.allocator;
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -1394,9 +1437,19 @@ test "settings patch: an order-only save is not stopped by a dark theme's hidden
     var switched = (try fresh.changeConditionalState(.{ .theme = .dark })) orelse return error.TestExpectedSwitch;
     defer switched.deinit();
     try testing.expect(!listEql(.hidden, &switched, &original));
-    try testing.expect(changedUnder(edits, &original, &pending, &switched, path, &testSamePath) == null);
-    // Its file's own lines are still checked: another program's edit to
-    // them stops the save.
+    try testing.expect(try changedUnder(edits, &original, &pending, &switched, path, &testSamePath) == null);
+    // A draft that changes the hidden list itself is not stopped by it
+    // either: the reading is compared in the light state Settings read the
+    // config in.
+    {
+        var hides = try original.clone(alloc);
+        defer hides.deinit();
+        try hides.@"profile-hidden".parseCLI(hides._arena.?.allocator(), "wsl");
+        const hide_edits = try editsForSave(arena_state.allocator(), alloc, &.{&original}, .{}, &original, &hides, path, &testSamePath);
+        try testing.expectEqual(@as(usize, 2), hide_edits.len);
+        try testing.expect(try changedUnder(hide_edits, &original, &hides, &switched, path, &testSamePath) == null);
+    }
+    // Another program's edit to the file's lines still stops the save.
     const changed = try std.fmt.allocPrint(alloc, "theme = light:{s},dark:{s}\nprofile-command = py: python.exe\nprofile-hidden = wsl\n", .{ light, dark });
     defer alloc.free(changed);
     try tmp.dir.writeFile(.{ .sub_path = "config", .data = changed });
@@ -1404,7 +1457,7 @@ test "settings patch: an order-only save is not stopped by a dark theme's hidden
     defer edited.deinit();
     var edited_dark = (try edited.changeConditionalState(.{ .theme = .dark })) orelse return error.TestExpectedSwitch;
     defer edited_dark.deinit();
-    const stopped = changedUnder(edits, &original, &pending, &edited_dark, path, &testSamePath) orelse return error.TestExpectedChange;
+    const stopped = try changedUnder(edits, &original, &pending, &edited_dark, path, &testSamePath) orelse return error.TestExpectedChange;
     try testing.expect(stopped.field == .hidden);
 }
 
@@ -1673,7 +1726,7 @@ test "settings patch: profileEdits writes what the editor staged, and the loader
     try expectSameText("Team", reloaded.@"profile-name".get("team").?);
     var masked: std.Io.Writer.Allocating = .init(alloc);
     defer masked.deinit();
-    try testing.expect(try writeMasked(&masked.writer, edits, &reloaded, false));
+    try testing.expect(try writeMasked(&masked.writer, edits, &reloaded, false) == .masked);
     try expectSameText("profile-name team", masked.written());
 
     // A save works out the same edits, and none when nothing changed.
@@ -2009,16 +2062,16 @@ test "settings patch: a profile's variables compare without case, and a removal 
     try disk.@"profile-env".parseCLI(disk._arena.?.allocator(), "py:");
     try disk.@"profile-env".parseCLI(disk._arena.?.allocator(), "py: PATH=C:\\bin");
     const whole: Edit = .{ .field = .env, .id = "py", .op = .delete };
-    try testing.expect(changedUnder(&.{whole}, &original, &pending, &disk, "", &testSamePath) == null);
+    try testing.expect(try changedUnder(&.{whole}, &original, &pending, &disk, "", &testSamePath) == null);
     // A value that did change is one.
     var changed = try original.clone(alloc);
     defer changed.deinit();
     try changed.@"profile-env".parseCLI(changed._arena.?.allocator(), "py:");
     try changed.@"profile-env".parseCLI(changed._arena.?.allocator(), "py: PATH=D:\\bin");
-    try testing.expect(changedUnder(&.{whole}, &original, &pending, &changed, "", &testSamePath) != null);
+    try testing.expect(try changedUnder(&.{whole}, &original, &pending, &changed, "", &testSamePath) != null);
     // The same field, deleted only because the profile is removed: covered.
     const with_profile: Edit = .{ .field = .env, .id = "py", .op = .delete, .with_profile = true };
-    try testing.expect(changedUnder(&.{with_profile}, &original, &pending, &changed, "", &testSamePath) == null);
+    try testing.expect(try changedUnder(&.{with_profile}, &original, &pending, &changed, "", &testSamePath) == null);
 }
 
 test "settings patch: a config file that did not decode is still named after the light/dark switch, and a theme alone is asked of the switch" {
@@ -2166,7 +2219,7 @@ test "settings patch: a removal is decided in the light/dark state the app appli
     var masked: std.Io.Writer.Allocating = .init(alloc);
     defer masked.deinit();
     const deletion = [_]Edit{.{ .field = .command, .id = "py", .op = .delete }};
-    try testing.expect(try writeMasked(&masked.writer, &deletion, &dark, false));
+    try testing.expect(try writeMasked(&masked.writer, &deletion, &dark, false) == .masked);
     try expectSameText("profile-command py", masked.written());
 }
 
@@ -2412,12 +2465,12 @@ test "settings patch: a masked field is named by key, id and variable, never by 
     var masked: std.Io.Writer.Allocating = .init(alloc);
     defer masked.deinit();
     try masked.writer.writeAll("font-size");
-    try testing.expect(try writeMasked(&masked.writer, &edits, &reloaded, true));
+    try testing.expect(try writeMasked(&masked.writer, &edits, &reloaded, true) == .masked);
     try testing.expect(std.mem.indexOf(u8, masked.written(), "secret") == null);
     try expectSameText("font-size, profile-env team x, profile-command gone", masked.written());
 
     var none: std.Io.Writer.Allocating = .init(alloc);
     defer none.deinit();
-    try testing.expect(!try writeMasked(&none.writer, edits[1..2], &reloaded, false));
+    try testing.expect(try writeMasked(&none.writer, edits[1..2], &reloaded, false) == .held);
     try expectSameText("", none.written());
 }

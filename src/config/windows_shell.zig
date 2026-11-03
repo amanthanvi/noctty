@@ -2089,6 +2089,19 @@ test "vs:newest skips an instance without that shell's script" {
     for (profiles) |profile| {
         if (std.mem.eql(u8, profile.key, "vs:6bb7cfd9:pwsh")) try testing.expect(!profile.hidden and !profile.hidden_by_discovery);
     }
+    // Under `all`, discovery hides none: one `profile-hidden` names is
+    // hidden by that alone, which the Profiles page can show again.
+    const every = try testVsProfiles(alloc, .all, .x64, .{ .instances = &.{ test_vs18, test_vs2022 }, .queries = &queries }, .{ .paths = &paths, .queries = &queries }, null);
+    defer deinitProfiles(alloc, every);
+    arrangeProfiles(every, &.{}, &.{"vs:486bb794:cmd"});
+    var named = false;
+    for (every) |profile| {
+        try testing.expect(!profile.hidden_by_discovery);
+        const hidden = std.mem.eql(u8, profile.key, "vs:486bb794:cmd");
+        named = named or hidden;
+        try testing.expectEqual(hidden, profile.hidden);
+    }
+    try testing.expect(named);
 }
 
 /// The profile that is the shell `defaultCommand` chose, so the picker's
