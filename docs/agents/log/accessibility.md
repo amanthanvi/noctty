@@ -4,6 +4,7 @@ Dates descend; entries that share a date are not always newest first. A newer-da
 
 Corrected in other files:
 - 2026-10-15 "The UIA echo queue" (UIA-ECHO-01), item (5): a test of its own is not enough when that test itself unrolls `stream.nextSlice` in nested `inline for` loops, which still exceeds the comptime branch quota; rewrite them as runtime loops: the 2026-10-30 upstream VT port entry in terminal-core.md.
+- 2026-10-15 SMALL-04 A, item (2): its "the plain prompt for the front terminal still says 'A process is still running' in the same read-only case (left)" no longer holds; the terminal in front says its program has exited too. See the 2026-11-03 CONFIRM-EXITED-FRONT entry in chrome-overlays.md.
 
 See also:
 - When the docked search's results chip raises its live region (only while the bar is open: a close announces nothing, and the reopen writes the chip before the layout shows it): trap (a) of the 2026-11-01 "Docked search is one per-pane module" entry in search-scrollbar.md.
