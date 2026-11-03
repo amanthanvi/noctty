@@ -20,6 +20,7 @@ const sys = @import("sys.zig");
 const c = @import("consts.zig");
 const child_window = @import("child_window.zig");
 const paint_text = @import("text.zig");
+const window_state = @import("window_state.zig");
 const HWND = types.HWND;
 const BOOL = types.BOOL;
 const UINT = types.UINT;
@@ -58,7 +59,7 @@ pub fn Fixtures(comptime runtime: anytype) type {
         const lastError = child_window.lastError;
         const appendOwnedString = paint_text.appendOwnedString;
         const surfaceDropPayloadCallback = runtime.surfaceDropPayloadCallback;
-        const workspaceRectToScreen = runtime.workspaceRectToScreen;
+        const workspaceRectToScreen = window_state.workspaceRectToScreen;
         const monitorInfo = runtime.monitorInfo;
         const settingsAppIconThunk = runtime.settingsAppIconThunk;
         const settingsChromeBgThunk = runtime.settingsChromeBgThunk;
@@ -440,13 +441,10 @@ pub fn Fixtures(comptime runtime: anytype) type {
             return app;
         }
 
-        /// A hostless surface whose top-level window sits at (`left`, `top`) and is
-        /// 640x480, with every field `inheritWindowStateFrom` copies set.
-        pub fn placementTestSurface(app: *App, left: i32, top: i32) !Surface {
-            var surface: Surface = undefined;
-            surface.app = app;
-            surface.host = null;
-            surface.hwnd = sys.CreateWindowExW(
+        /// A host whose top-level window sits at (`left`, `top`) and is 640x480,
+        /// in the window state a new window starts in. It has no tabs.
+        pub fn placementTestHost(app: *App, left: i32, top: i32) !Host {
+            const hwnd = sys.CreateWindowExW(
                 0,
                 prompt_label_class,
                 std.unicode.utf8ToUtf16LeStringLiteral(""),
@@ -460,19 +458,7 @@ pub fn Fixtures(comptime runtime: anytype) type {
                 sys.GetModuleHandleW(null),
                 null,
             ) orelse return lastError();
-            surface.decorations_visible = true;
-            surface.decorations_visible_overridden = false;
-            surface.fullscreen = false;
-            surface.topmost = false;
-            surface.restore_rect = std.mem.zeroes(RECT);
-            surface.restore_placement = std.mem.zeroes(WINDOWPLACEMENT);
-            surface.restore_monitor = null;
-            surface.default_client_size = null;
-            surface.cell_size_pixels = .{ .width = 0, .height = 0 };
-            surface.background_opacity_default = 1.0;
-            surface.background_opacity_force_opaque = false;
-            surface.size_limit = .{ .min_width = 0, .min_height = 0, .max_width = 0, .max_height = 0 };
-            return surface;
+            return .{ .app = app, .id = 0, .hwnd = hwnd };
         }
 
         /// A started app for tests that create real hosts with `createHost`. Safe
@@ -527,7 +513,9 @@ pub fn Fixtures(comptime runtime: anytype) type {
             /// `createHost` put it and a first window at the fixed rect below.
             pub var initial_size: ?apprt.action.InitialSize = null;
 
-            pub const FirstShow = struct { rect: RECT, zoomed: bool, style: u32 };
+            /// `ex_style` and `alpha` are the layered style and alpha the
+            /// window first appeared with (#234: before any show).
+            pub const FirstShow = struct { rect: RECT, zoomed: bool, style: u32, ex_style: u32, alpha: ?u8 };
             pub const swp_showwindow: UINT = 0x0040;
 
             pub fn init(self: *WindowStartTestApp) !void {
@@ -600,7 +588,7 @@ pub fn Fixtures(comptime runtime: anytype) type {
                         // screen cannot cap it. A clone is otherwise where
                         // `createHost` cascaded it.
                         if (initial_size) |size| {
-                            try runtime.surfaceSetInitialSize(surface, size);
+                            _ = try surface.app.performAction(.{ .surface = surface.core() }, .initial_size, size);
                         } else if (surface.app.registry.hosts.items.len == 1) {
                             const monitor = sys.MonitorFromWindow(hwnd, c.MONITOR_DEFAULTTONEAREST) orelse return lastError();
                             const work = (monitorInfo(monitor) orelse return lastError()).work_area;
@@ -629,6 +617,8 @@ pub fn Fixtures(comptime runtime: anytype) type {
                             .rect = rect,
                             .zoomed = sys.IsZoomed(hwnd) != 0,
                             .style = @truncate(@as(usize, @bitCast(sys.GetWindowLongPtrW(hwnd, c.GWL_STYLE)))),
+                            .ex_style = testHostExStyle(hwnd),
+                            .alpha = if (testHostIsLayered(hwnd)) testLayeredAlpha(hwnd) else null,
                         };
                         shown = true;
                     }
@@ -650,11 +640,11 @@ pub fn Fixtures(comptime runtime: anytype) type {
                 var placement: WINDOWPLACEMENT = std.mem.zeroes(WINDOWPLACEMENT);
                 placement.length = @sizeOf(WINDOWPLACEMENT);
                 if (sys.GetWindowPlacement(hwnd, &placement) == 0) return lastError();
-                return workspaceRectToScreen(placement.rcNormalPosition, (try runtime.surfaceWindowMonitor(hwnd)).info);
+                return workspaceRectToScreen(placement.rcNormalPosition, (try window_state.windowMonitor(hwnd)).info);
             }
 
             pub fn monitorRect(hwnd: HWND) !RECT {
-                return (try runtime.surfaceWindowMonitor(hwnd)).info.rcMonitor;
+                return (try window_state.windowMonitor(hwnd)).info.rcMonitor;
             }
 
             pub fn framed(hwnd: HWND) bool {
@@ -724,36 +714,6 @@ pub fn Fixtures(comptime runtime: anytype) type {
                 child = sys.GetWindow(child.?, c.GW_HWNDNEXT);
             }
             try std.testing.expectEqual(@as(?HWND, null), child);
-        }
-
-        /// Assemble the state `Surface.init` has built by the time it calls
-        /// `applyInitialBackgroundOpacity`: a freshly created host window whose
-        /// single tab already focuses this surface. That last part is the gate the
-        /// fix depends on — without it `activeSharedHostWindowHwnd` returns null
-        /// and the call is a silent no-op. Caller owns `host.tabs`.
-        pub fn initTestHostWindowFixture(host: *Host, surface: *Surface, hwnd: HWND) !void {
-            host.id = 234;
-            host.hwnd = hwnd;
-            host.tabs = .empty;
-            host.active_tab = 0;
-            // The caller can only register its own teardown once this returns, so a
-            // precondition that fails below would otherwise leak the Tab and its
-            // split tree and report an allocator leak on top of the real failure.
-            errdefer deinitTestHostWindowFixture(host);
-
-            surface.host = host;
-            surface.host_id = host.id;
-            // Deliberately null: the layered alpha has to land on the top-level host
-            // window, never on the GL child.
-            surface.hwnd = null;
-            surface.background_opacity_default = 1.0;
-            surface.background_opacity_force_opaque = false;
-
-            try host.tabs.append(std.testing.allocator, try runtime.tabInit(std.testing.allocator, 1, surface));
-
-            try std.testing.expectEqual(@as(?*Surface, surface), runtime.hostActiveSurface(host));
-            try std.testing.expectEqual(@as(?HWND, hwnd), runtime.surfaceActiveSharedHostWindowHwnd(surface));
-            try std.testing.expect(!testHostIsLayered(hwnd));
         }
 
         pub fn deinitTestHostWindowFixture(host: *Host) void {

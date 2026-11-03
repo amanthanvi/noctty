@@ -308,62 +308,6 @@ pub const palette_controller_test_runtime = if (builtin.is_test) .{
     .runOnPrivateDesktop = Host.runOnPrivateDesktop,
 } else .{};
 
-pub const window_state_runtime = .{
-    .App = App,
-    .HWND = HWND,
-    .HWND_TOPMOST = HWND_TOPMOST,
-    .Host = Host,
-    .LPARAM = LPARAM,
-    .MINMAXINFO = MINMAXINFO,
-    .MONITORINFO = MONITORINFO,
-    .POINT = POINT,
-    .RECT = RECT,
-    .Surface = Surface,
-    .SurfaceInitOptions = SurfaceInitOptions,
-    .UINT = UINT,
-    .WINDOWPLACEMENT = WINDOWPLACEMENT,
-    .WS_OVERLAPPEDWINDOW = WS_OVERLAPPEDWINDOW,
-    .alphaByteForOpacity = alphaByteForOpacity,
-    .apprt = apprt,
-    .c = c,
-    .configpkg = configpkg,
-    .configuredHostWindowPosition = configuredHostWindowPosition,
-    .effectiveBackgroundOpacity = effectiveBackgroundOpacity,
-    .forwardedArgvSetsKey = forwardedArgvSetsKey,
-    .log = log,
-    .scaleInitialClientSize = scaleInitialClientSize,
-    .std = std,
-    .sys = sys,
-    .win32_theme = win32_theme,
-};
-pub const window_state_test_runtime = if (builtin.is_test) .{
-    .BOOL = BOOL,
-    .CoreApp = CoreApp,
-    .HDC = HDC,
-    .LPCWSTR = LPCWSTR,
-    .SafeModeAppFixture = SafeModeAppFixture,
-    .Tab = Tab,
-    .TestSession = TestSession,
-    .WindowStartTestApp = WindowStartTestApp,
-    .builtin = builtin,
-    .createTestHostWindow = createTestHostWindow,
-    .default_title = default_title,
-    .deinitTestHostWindowFixture = deinitTestHostWindowFixture,
-    .initTestHostWindowFixture = initTestHostWindowFixture,
-    .monitorInfo = monitorInfo,
-    .placementTestApp = placementTestApp,
-    .placementTestSurface = placementTestSurface,
-    .runOnHiddenDesktop = runOnHiddenDesktop,
-    .testHostIsLayered = testHostIsLayered,
-    .testLayeredAlpha = testLayeredAlpha,
-    .testWindowStyle = testWindowStyle,
-    .win32_quick_terminal = win32_quick_terminal,
-    .win32_terminal_handoff = win32_terminal_handoff,
-} else .{};
-pub const host_test_runtime = if (builtin.is_test) .{
-    .WindowStartTestApp = WindowStartTestApp,
-    .runOnHiddenDesktop = runOnHiddenDesktop,
-} else .{};
 pub const surface_presentation_runtime = .{
     .App = App,
     .Host = Host,
@@ -399,9 +343,6 @@ pub const session_runtime = .{
     .SurfaceInitOptions = SurfaceInitOptions,
     .Tab = Tab,
     .UINT_PTR = UINT_PTR,
-    .WINDOWPLACEMENT = WINDOWPLACEMENT,
-    .WindowStart = WindowStart,
-    .WorkAreas = WorkAreas,
     .apprt = apprt,
     .builtin = builtin,
     .c = c,
@@ -414,12 +355,7 @@ pub const session_runtime = .{
     .makeParentDirAbsolute = makeParentDirAbsolute,
     .markRecoveryAttemptAtPath = markRecoveryAttemptAtPath,
     .recovery_set_aside_suffix = recovery_set_aside_suffix,
-    .rectEqual = rectEqual,
-    .restore_grab = restore_grab,
-    .restoredRectOnScreen = restoredRectOnScreen,
-    .restoresMaximized = restoresMaximized,
     .setAsideCrashedSessionState = setAsideCrashedSessionState,
-    .setMinimizedNormalRect = setMinimizedNormalRect,
     .shouldInheritSplitWorkingDirectory = shouldInheritSplitWorkingDirectory,
     .shouldResetNewTabWorkingDirectory = shouldResetNewTabWorkingDirectory,
     .std = std,
@@ -431,7 +367,6 @@ pub const session_runtime = .{
     .win32_session_state = win32_session_state,
     .win32_shell = win32_shell,
     .windows = windows,
-    .workspaceRectToScreen = workspaceRectToScreen,
     .writePersistentFileAlloc = writePersistentFileAlloc,
 };
 
@@ -488,21 +423,16 @@ pub const test_support_runtime = if (builtin.is_test) .{
     .palette_list_class_name = palette_list_class_name,
     .scrollbar_class_name = scrollbar_class_name,
     .surfaceDropPayloadCallback = surfaceDropPayloadCallback,
-    .workspaceRectToScreen = workspaceRectToScreen,
     .monitorInfo = monitorInfo,
     .tabInit = Tab.init,
     .tabDeinit = Tab.deinit,
     .hostSetBanner = Host.setBanner,
     .hostClearStructuralHistory = Host.clearStructuralHistory,
     .hostKillTweenTimer = Host.killTweenTimer,
-    .hostActiveSurface = Host.activeSurface,
     .appDropSettingsPreview = App.dropSettingsPreview,
     .appDiscardDeferredOpens = App.discardDeferredOpens,
     .appInitComApartment = App.initComApartment,
     .appEnsureWindowClass = App.ensureWindowClass,
-    .surfaceSetInitialSize = Surface.setInitialSize,
-    .surfaceWindowMonitor = Surface.windowMonitor,
-    .surfaceActiveSharedHostWindowHwnd = Surface.activeSharedHostWindowHwnd,
     .settingsAppIconThunk = settingsAppIconThunk,
     .settingsChromeBgThunk = settingsChromeBgThunk,
     .settingsConfigProblemsThunk = settingsConfigProblemsThunk,
@@ -560,6 +490,7 @@ test {
     _ = @import("win32/first_frame.zig");
     _ = @import("win32/facade_budget.zig");
     _ = @import("win32/docked_search.zig");
+    _ = @import("win32/window_start.zig");
     _ = child_window;
     _ = paint_text;
     _ = @import("win32/settings_patch.zig");
@@ -768,7 +699,6 @@ pub const NCCALCSIZE_PARAMS = sys.NCCALCSIZE_PARAMS;
 pub const WNDCLASSEXW = sys.WNDCLASSEXW;
 const CREATESTRUCTW = sys.CREATESTRUCTW;
 const MONITORINFO = sys.MONITORINFO;
-const MINMAXINFO = sys.MINMAXINFO;
 pub const LOGFONTW = sys.LOGFONTW;
 pub const NONCLIENTMETRICSW = sys.NONCLIENTMETRICSW;
 
@@ -857,18 +787,6 @@ const titlebar_glyph_dropdown = std.unicode.utf8ToUtf16LeStringLiteral("\u{E70D}
 
 pub const GlobalHotkeySpec = win32_input.GlobalHotkeySpec;
 pub const RegisteredGlobalHotkey = win32_input.RegisteredGlobalHotkey;
-
-pub const decorationsVisibleForConfig = window_state.decorationsVisibleForConfig;
-
-pub const initialDecorationsVisibleForSource = window_state.initialDecorationsVisibleForSource;
-
-pub fn decorationVisibilityForChromeValue(active_surface_visible: ?bool, cached_visible: bool) bool {
-    return active_surface_visible orelse cached_visible;
-}
-
-pub const startupHostWindowStyle = window_state.startupHostWindowStyle;
-
-pub const restoreRequestedHostWindowStyle = window_state.restoreRequestedHostWindowStyle;
 
 /// Windows clipboard text ends its lines with CRLF; the core, and whatever
 /// reads an OSC 52 reply, expect LF. A paste turns each LF into one CR, the
@@ -1124,15 +1042,9 @@ pub fn surfaceWindowStyle() u32 {
     return c.WS_CHILD | c.WS_CLIPSIBLINGS;
 }
 
-const effectiveHostWindowStyle = window_state.effectiveHostWindowStyle;
-
-pub const sharesHostWindowState = window_state.sharesHostWindowState;
-
 pub fn shouldShowSurfaceImmediately(host_id: ?u32) bool {
     return host_id == null;
 }
-
-pub const shouldApplyConfigDecorations = window_state.shouldApplyConfigDecorations;
 
 pub fn usesIntegratedTitlebar(
     enabled: bool,
@@ -4180,60 +4092,20 @@ pub fn destroySubclassedWindow(
 }
 
 pub const SurfaceInitOptions = struct {
-    quick_terminal: bool = false,
+    /// How the window it creates starts. A tab or split (`host_id` set)
+    /// creates none and leaves this `.fresh`.
+    window: window_state.Origin = .fresh,
     host_id: ?u32 = null,
     tab_id: ?u32 = null,
     tab_insert_index: ?usize = null,
+    /// The pane a tab or split is opened from: the pane a split divides,
+    /// and the metrics a new pane starts with. A new window's source is its
+    /// `window` origin.
     clone_state_from: ?*const Surface = null,
     split_direction: SplitTreeSurface.Split.Direction = .right,
-    /// How the newly-created host HWND first appears, once GL and core
-    /// initialization succeed. Used by the quick-terminal passive mode
-    /// (`quick-terminal-keyboard-interactivity = none`) on first toggle-on,
-    /// and by a handed-off console that asked not to take focus.
-    show: InitialShow = .activate,
     adopted_session: ?*win32_terminal_handoff.PendingSession = null,
-    /// Whether a new window takes `maximize` and `fullscreen` from `config`
-    /// while `Surface.init` shows it. Session restore turns this off: it
-    /// moves the window to its saved rect first and applies them afterwards
-    /// (`App.restoreSessionWindow`).
-    config_window_start: bool = true,
-    /// The argv a forwarded launch (a second `noctty`, or `noctty
-    /// +new-window`) applied to `config`, for `WindowKeeps`.
-    forwarded_arguments: ?[]const [:0]const u8 = null,
     /// What the surface records of its launch (`pane_launch.prepare`).
     launch: configpkg.pane_launch.Stamp = .{},
-};
-
-pub const WindowKeeps = window_state.WindowKeeps;
-
-pub const WindowStart = window_state.WindowStart;
-
-/// The first show of a new host window.
-pub const InitialShow = enum {
-    /// Shown and presented with focus.
-    activate,
-    /// Visible without stealing focus from the caller's foreground window.
-    no_activate,
-    /// Minimized, without activation: the window exists but stays out of the
-    /// way, and the taskbar button is all the user sees.
-    minimized,
-    /// Maximized, with focus.
-    maximized,
-
-    /// The `ShowWindow` command for the first show, if it is not left to
-    /// `presentWindow`. A maximize is followed by `presentWindow` for focus.
-    pub fn showCommand(self: InitialShow) ?i32 {
-        return switch (self) {
-            .activate => null,
-            .no_activate => c.SW_SHOWNOACTIVATE,
-            .minimized => c.SW_SHOWMINNOACTIVE,
-            .maximized => c.SW_MAXIMIZE,
-        };
-    }
-
-    pub fn takesFocus(self: InitialShow) bool {
-        return self == .activate or self == .maximized;
-    }
 };
 
 /// The first show a handed-off console asked for in its `STARTUPINFO`.
@@ -4243,7 +4115,7 @@ pub const InitialShow = enum {
 /// started with `SW_HIDE` too (only `CREATE_NO_WINDOW` keeps a console
 /// windowless), and a host with no way to be shown again is worse than a
 /// minimized one, so a hide becomes a minimize that takes no focus.
-pub fn adoptedInitialShow(startup_flags: u32, show_window: u16) InitialShow {
+pub fn adoptedInitialShow(startup_flags: u32, show_window: u16) window_state.InitialShow {
     if (startup_flags & win32_terminal_handoff.STARTF_USESHOWWINDOW == 0) return .activate;
     return switch (show_window) {
         c.SW_SHOWNOACTIVATE, c.SW_SHOWNA => .no_activate,
@@ -4800,19 +4672,6 @@ pub fn surfaceLayoutRuntimeSync(visibility_changed: bool, pane_rect_changed: boo
         .scrollbar_refresh = visibility_changed or pane_rect_changed,
         .core_size_sync = pane_rect_changed,
     };
-}
-
-fn scaleInitialClientSize(size: apprt.SurfaceSize, scale: apprt.ContentScale) apprt.SurfaceSize {
-    return .{
-        .width = scaleInitialClientAxis(size.width, scale.x),
-        .height = scaleInitialClientAxis(size.height, scale.y),
-    };
-}
-
-fn scaleInitialClientAxis(value: u32, scale: f32) u32 {
-    const scaled = @ceil(@as(f64, @floatFromInt(value)) * @as(f64, @floatCast(scale)));
-    const max_u32: f64 = @floatFromInt(std.math.maxInt(u32));
-    return @intFromFloat(@min(max_u32, @max(1, scaled)));
 }
 
 pub fn surfaceActivationNeedsHostSync(
@@ -6323,80 +6182,7 @@ pub const setQuickTerminalRect = quick_terminal_host.setQuickTerminalRect;
 
 pub const runOnHiddenDesktop = test_support.runOnHiddenDesktop;
 
-pub const FullscreenMonitor = window_state.FullscreenMonitor;
-
-const fitRectInWork = window_state.fitRectInWork;
-
-const workspaceRectToScreen = window_state.workspaceRectToScreen;
-
-const setMinimizedNormalRect = window_state.setMinimizedNormalRect;
-
 const monitorInfo = quick_terminal_host.monitorInfo;
-
-const restoresMaximized = window_state.restoresMaximized;
-
-/// The work areas of the monitors there are now, in screen coordinates.
-const WorkAreas = struct {
-    rects: [16]RECT = undefined,
-    count: usize = 0,
-
-    pub fn collect() WorkAreas {
-        var areas: WorkAreas = .{};
-        _ = sys.EnumDisplayMonitors(null, null, enumProc, @as(LPARAM, @bitCast(@intFromPtr(&areas))));
-        return areas;
-    }
-
-    pub fn slice(self: *const WorkAreas) []const RECT {
-        return self.rects[0..self.count];
-    }
-
-    fn enumProc(monitor: sys.HMONITOR, _: HDC, _: *RECT, data: LPARAM) callconv(.winapi) BOOL {
-        const areas: *WorkAreas = @ptrFromInt(@as(usize, @bitCast(data)));
-        if (areas.count == areas.rects.len) return 0;
-        var info: MONITORINFO = std.mem.zeroes(MONITORINFO);
-        info.cbSize = @sizeOf(MONITORINFO);
-        if (sys.GetMonitorInfoW(monitor, &info) == 0) return 1;
-        areas.rects[areas.count] = info.rcWork;
-        areas.count += 1;
-        return 1;
-    }
-};
-
-/// How much of a restored window's title bar must be on a monitor for the
-/// user to be able to grab it: this wide and half as tall, in physical
-/// pixels. The saved rect is in the pixels of a monitor this process may not
-/// have seen yet, and the host being placed is on another, so no DPI is
-/// right to scale by; a caption at 100%, still a target at 300%.
-const restore_grab: i32 = 48;
-
-/// Where a window saved at `rect` (screen coordinates) goes now that the
-/// monitors' work areas are `works`. One whose title bar can still be grabbed
-/// stays exactly where it was, whatever its other edges do: a snapped window
-/// overhangs its monitor by its invisible frame. One that cannot (its monitor
-/// was unplugged, or the layout changed) moves to the nearest work area, its
-/// size capped to it.
-fn restoredRectOnScreen(rect: RECT, works: []const RECT, grab: i32) RECT {
-    if (works.len == 0) return rect;
-    // The rect comes from a file on disk: any i32 is possible, so differences
-    // of coordinates are taken in 64 bits.
-    const grab_width = @min(grab, rect.right - rect.left);
-    var nearest = works[0];
-    var nearest_gap: i64 = std.math.maxInt(i64);
-    for (works) |work| {
-        const visible_width = @as(i64, @min(rect.right, work.right)) - @max(rect.left, work.left);
-        const visible_height = @as(i64, @min(rect.top, work.bottom - grab) + grab) - @max(rect.top, work.top);
-        if (visible_width >= grab_width and visible_height >= @divTrunc(grab, 2)) return rect;
-
-        const gap_x: i64 = @max(0, @max(@as(i64, work.left) - rect.right, @as(i64, rect.left) - work.right));
-        const gap_y: i64 = @max(0, @max(@as(i64, work.top) - rect.bottom, @as(i64, rect.top) - work.bottom));
-        const gap = gap_x + gap_y;
-        if (gap < nearest_gap) {
-            nearest = work;
-            nearest_gap = gap;
-        }
-    }
-    return fitRectInWork(rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top, nearest);
-}
 
 // Keep helper modules reachable from the exe's module graph. Zig prunes
 // unreferenced module-level decls, so this block also keeps their tests
@@ -9493,12 +9279,6 @@ pub const preferredProfileIndex = labels.preferredProfileIndex;
 
 pub const resolveWindowBaseTitle = labels.resolveWindowBaseTitle;
 
-pub const normalizedBackgroundOpacity = labels.normalizedBackgroundOpacity;
-
-const effectiveBackgroundOpacity = labels.effectiveBackgroundOpacity;
-
-pub const alphaByteForOpacity = labels.alphaByteForOpacity;
-
 pub fn splitTreeEquivalent(a: *const SplitTreeSurface, b: *const SplitTreeSurface) bool {
     if (a.zoomed != b.zoomed) return false;
     if (a.nodes.len != b.nodes.len) return false;
@@ -9523,8 +9303,6 @@ pub fn splitTreeEquivalent(a: *const SplitTreeSurface, b: *const SplitTreeSurfac
 
     return true;
 }
-
-pub const resizeSplitFallbackDelta = labels.resizeSplitFallbackDelta;
 
 pub fn splitDirectionFromAction(value: apprt.action.SplitDirection) SplitTreeSurface.Split.Direction {
     return switch (value) {
@@ -12047,12 +11825,7 @@ pub fn hostWindowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) cal
         },
 
         c.WM_GETMINMAXINFO => {
-            if (host) |v| {
-                if (v.activeSurface()) |surface| {
-                    surface.updateMinMaxInfo(lParam);
-                    return 0;
-                }
-            }
+            if (host) |v| if (window_state.updateMinMaxInfo(v, lParam)) return 0;
             return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
         },
 
@@ -12810,14 +12583,6 @@ pub fn windowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
                     lParam,
                     provider,
                 )) |lr| return lr;
-            }
-            return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
-        },
-
-        c.WM_GETMINMAXINFO => {
-            if (surface) |v| {
-                v.updateMinMaxInfo(lParam);
-                return 0;
             }
             return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
         },
@@ -19329,15 +19094,6 @@ test "win32 elevation authenticates a same-process pipe server token" {
 
 const testWindowStyle = test_support.testWindowStyle;
 
-test "win32 decorationVisibilityForChrome uses cached fallback until active surface" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    try std.testing.expect(!decorationVisibilityForChromeValue(null, false));
-    try std.testing.expect(decorationVisibilityForChromeValue(null, true));
-    try std.testing.expect(!decorationVisibilityForChromeValue(false, true));
-    try std.testing.expect(decorationVisibilityForChromeValue(true, false));
-}
-
 test "win32 usesIntegratedTitlebar requires visible decorations" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
@@ -19384,10 +19140,6 @@ test "win32 shouldUseIntegratedTitlebar gates on Win11 build floor" {
     try std.testing.expect(shouldUseIntegratedTitlebar(c.OS_BUILD_WIN11_22H2, .always));
     try std.testing.expect(!shouldUseIntegratedTitlebar(c.OS_BUILD_WIN11_22H2, .never));
 }
-
-const placementTestApp = test_support.placementTestApp;
-
-const placementTestSurface = test_support.placementTestSurface;
 
 pub const SafeModeAppFixture = test_support.SafeModeAppFixture;
 
@@ -19450,10 +19202,6 @@ test "win32 shouldShowSurfaceImmediately only for new hosts" {
     try std.testing.expect(!shouldShowSurfaceImmediately(99));
 }
 
-const testHostIsLayered = test_support.testHostIsLayered;
-
-const testLayeredAlpha = test_support.testLayeredAlpha;
-
 test "win32 host content rect keeps its size while the window is minimized" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
@@ -19485,7 +19233,6 @@ test "win32 host content rect keeps its size while the window is minimized" {
     app.use_integrated_titlebar = false;
 
     var surface: Surface = undefined;
-    surface.decorations_visible = true;
     surface.inspector_visible = false;
 
     var host: Host = .{ .app = &app, .id = 262 };
@@ -19551,7 +19298,7 @@ fn testTabGapHost(decorated: bool) !void {
     try std.testing.expect(sys.GetMonitorInfoW(monitor, &monitor_info) != 0);
     app.config.@"window-position-x" = @intCast(monitor_info.rcMonitor.left);
     app.config.@"window-position-y" = @intCast(monitor_info.rcMonitor.top);
-    const host = try app.createHost(std.unicode.utf8ToUtf16LeStringLiteral(""), &app.config, .{});
+    const host = try app.createHost(std.unicode.utf8ToUtf16LeStringLiteral(""), &app.config, .fresh);
     const hwnd = host.hwnd.?;
     try std.testing.expectEqual(decorated, host.usingIntegratedTitlebar());
     try std.testing.expect(sys.IsWindowVisible(hwnd) == 0);
@@ -19560,8 +19307,7 @@ fn testTabGapHost(decorated: bool) !void {
     // binary cannot create the production layered Selection container.
     var surface: Surface = undefined;
     surface.host = null;
-    surface.decorations_visible = decorated;
-    surface.fullscreen = false;
+    host.top_level.decorations_visible = decorated;
     surface.inspector_visible = false;
     // The background the active tab takes.
     surface.tab_background = rgb(0x28, 0x2C, 0x34);
@@ -19705,7 +19451,7 @@ fn testTabGapHost(decorated: bool) !void {
     try std.testing.expect(!host.tabsFlushWithTop());
     host.quick_terminal = false;
     host.active_tab = 0;
-    surface.fullscreen = true;
+    host.top_level.fullscreen = .{ .rect = std.mem.zeroes(RECT), .placement = std.mem.zeroes(WINDOWPLACEMENT), .monitor = null };
     try std.testing.expect(host.tabsFlushWithTop());
     host.quick_terminal = true;
     try std.testing.expect(!host.tabsFlushWithTop());
@@ -19713,7 +19459,7 @@ fn testTabGapHost(decorated: bool) !void {
     app.os_build = 19045;
     try std.testing.expect(!host.tabsFlushWithTop());
     app.os_build = c.OS_BUILD_WIN11_21H2;
-    surface.fullscreen = false;
+    host.top_level.fullscreen = null;
     host.active_tab = 1;
 }
 
@@ -19731,7 +19477,7 @@ test "TABGAP integrated caption has no invisible system menu icon" {
             app.use_integrated_titlebar = true;
             app.config.@"window-position-x" = 0;
             app.config.@"window-position-y" = 0;
-            const host = try app.createHost(std.unicode.utf8ToUtf16LeStringLiteral(""), &app.config, .{});
+            const host = try app.createHost(std.unicode.utf8ToUtf16LeStringLiteral(""), &app.config, .fresh);
             const hwnd = host.hwnd.?;
             const original_style = testWindowStyle(hwnd);
             for ([_]bool{ false, true }) |maximized| {
@@ -19774,11 +19520,10 @@ test "win32 createHost frames an undecorated host for its Windows build" {
 
     // `createHost` as a `new_window` clone calls it: the decoration state
     // comes from the source window rather than the config. The rest of the
-    // clone path (`inheritWindowStateFrom`) is not exercised here.
-    var source: Surface = undefined;
-    source.host = null;
-    source.decorations_visible = false;
-    source.fullscreen = false;
+    // clone path (`window_state.advance(.after_show)`) is not exercised here.
+    const source_hwnd = try createTestHostWindow();
+    defer _ = sys.DestroyWindow(source_hwnd);
+    const source: Host = .{ .app = app, .id = 99, .hwnd = source_hwnd, .top_level = .{ .decorations_visible = false } };
 
     // Both builds run against this machine's window manager; only the
     // build-gated choices differ.
@@ -19787,18 +19532,18 @@ test "win32 createHost frames an undecorated host for its Windows build" {
         for ([_]bool{ true, false }) |integrated| {
             app.use_integrated_titlebar = integrated;
             // Hosts stay hidden, so the test never touches the foreground.
-            const first = try app.createHost(std.unicode.utf8ToUtf16LeStringLiteral(""), &app.config, .{});
-            const clone = try app.createHost(std.unicode.utf8ToUtf16LeStringLiteral(""), &app.config, .{ .clone_state_from = &source });
-            const quick = try app.createHost(std.unicode.utf8ToUtf16LeStringLiteral(""), &app.config, .{ .quick_terminal = true });
+            const first = try app.createHost(std.unicode.utf8ToUtf16LeStringLiteral(""), &app.config, .fresh);
+            const clone = try app.createHost(std.unicode.utf8ToUtf16LeStringLiteral(""), &app.config, .{ .copy = .{ .source = &source } });
+            const quick = try app.createHost(std.unicode.utf8ToUtf16LeStringLiteral(""), &app.config, .{ .quick_terminal = .activate });
             for ([_]*Host{ first, clone, quick }) |host| {
                 const hwnd = host.hwnd.?;
                 const keeps_frame = undecoratedKeepsFrame(os_build, host.quick_terminal);
                 try std.testing.expect(sys.IsWindowVisible(hwnd) == 0);
                 try std.testing.expect(!host.usingIntegratedTitlebar());
-                // What `Surface.applyWindowStyle` writes for an undecorated
+                // What `window_state.applyWindowStyle` writes for an undecorated
                 // window, the style every clone and runtime toggle ends with.
                 // Before #270 the first window came back with WS_CAPTION.
-                const applied = effectiveHostWindowStyle(keeps_frame, false, true) & ~@as(u32, c.WS_VISIBLE);
+                const applied = window_state.hostStyle(keeps_frame, false);
                 try std.testing.expectEqual(applied, testWindowStyle(hwnd) & ~@as(u32, c.WS_CLIPSIBLINGS));
                 var window_rect: RECT = undefined;
                 try std.testing.expect(sys.GetWindowRect(hwnd, &window_rect) != 0);
@@ -19990,7 +19735,6 @@ test "win32 layoutChromeForRect hides tab-strip chrome when the tab bar is off" 
     app.use_integrated_titlebar = false;
 
     var surface: Surface = undefined;
-    surface.decorations_visible = true;
     surface.inspector_visible = false;
 
     var host: Host = .{ .app = &app, .id = 244 };
@@ -20086,8 +19830,6 @@ test "win32 chrome is raised over the panes, and a pane's own child sits directl
     stackChildAbove(bar, pane);
     try expectTestChildOrder(parent, &.{ chrome, bar, pane });
 }
-
-const initTestHostWindowFixture = test_support.initTestHostWindowFixture;
 
 const deinitTestHostWindowFixture = test_support.deinitTestHostWindowFixture;
 
@@ -21159,10 +20901,10 @@ test "win32 default-profile runs where nothing chose a launch, and only there" {
     // A restored pane runs its own profile; one whose profile is gone runs
     // the default, in the directory the pane was saved in.
     var transaction = SessionRestoreTransaction.init(&app);
-    _ = try app.restoreSessionPane(.{ .profile = "user:gone", .cwd = "C:\\saved" }, &host, null, host.tabs.items.len, .right, &transaction);
+    _ = try app.restoreSessionPane(.{ .profile = "user:gone", .cwd = "C:\\saved" }, .{ .host = &host }, null, host.tabs.items.len, .right, &transaction);
     try Expect.profile(&created[6], "C:\\saved");
     // So does an SSH pane, which restore never reopens.
-    _ = try app.restoreSessionPane(.{ .profile = "ssh:prod", .cwd = "C:\\saved" }, &host, null, host.tabs.items.len, .right, &transaction);
+    _ = try app.restoreSessionPane(.{ .profile = "ssh:prod", .cwd = "C:\\saved" }, .{ .host = &host }, null, host.tabs.items.len, .right, &transaction);
     try Expect.profile(&created[7], "C:\\saved");
     try std.testing.expect(!created[7].launched_ssh);
 
@@ -21175,7 +20917,7 @@ test "win32 default-profile runs where nothing chose a launch, and only there" {
         const py_config = app.config;
         app.config = ssh_config;
         defer app.config = py_config;
-        _ = try app.restoreSessionPane(.{}, &host, null, host.tabs.items.len, .right, &transaction);
+        _ = try app.restoreSessionPane(.{}, .{ .host = &host }, null, host.tabs.items.len, .right, &transaction);
     }
     try std.testing.expect(std.mem.indexOf(u8, Hook.seen.program, "ssh") == null);
     try std.testing.expect(Hook.seen.mode == null and Hook.seen.line == null);
@@ -23168,76 +22910,6 @@ test "win32 agreeing to a Restart Manager close registers the session owner for 
     try std.testing.expect(!app.restart_registered);
 }
 
-test "win32 a saved window rect on a monitor that is gone moves to the nearest work area" {
-    const grab = restore_grab;
-    // A laptop's screen with a second monitor to its left, taskbar at the bottom.
-    const left: RECT = .{ .left = -1920, .top = 0, .right = 0, .bottom = 1040 };
-    const main_work: RECT = .{ .left = 0, .top = 0, .right = 1920, .bottom = 1040 };
-    const works = [_]RECT{ main_work, left };
-    const wide: RECT = .{ .left = 100, .top = 100, .right = 900, .bottom = 700 };
-
-    // Where there is a monitor, the rect is kept as saved.
-    try std.testing.expectEqualDeep(wide, restoredRectOnScreen(wide, &works, grab));
-    const straddling: RECT = .{ .left = -400, .top = 50, .right = 400, .bottom = 650 };
-    try std.testing.expectEqualDeep(straddling, restoredRectOnScreen(straddling, &works, grab));
-    // A snapped window overhangs its monitor by its invisible frame.
-    const snapped: RECT = .{ .left = -7, .top = 0, .right = 967, .bottom = 1047 };
-    try std.testing.expectEqualDeep(snapped, restoredRectOnScreen(snapped, &works, grab));
-    // The caption on a monitor and the body hanging off the bottom stays too.
-    const hanging: RECT = .{ .left = 100, .top = 900, .right = 900, .bottom = 1500 };
-    try std.testing.expectEqualDeep(hanging, restoredRectOnScreen(hanging, &works, grab));
-
-    // Saved on a monitor to the right that was unplugged.
-    const unplugged: RECT = .{ .left = 2100, .top = 200, .right = 2900, .bottom = 800 };
-    try std.testing.expectEqualDeep(
-        RECT{ .left = 1120, .top = 200, .right = 1920, .bottom = 800 },
-        restoredRectOnScreen(unplugged, &works, grab),
-    );
-    // Below every monitor, and above them.
-    try std.testing.expectEqualDeep(
-        RECT{ .left = 100, .top = 440, .right = 900, .bottom = 1040 },
-        restoredRectOnScreen(.{ .left = 100, .top = 3000, .right = 900, .bottom = 3600 }, &works, grab),
-    );
-    try std.testing.expectEqualDeep(
-        RECT{ .left = 100, .top = 0, .right = 900, .bottom = 600 },
-        restoredRectOnScreen(.{ .left = 100, .top = -900, .right = 900, .bottom = -300 }, &works, grab),
-    );
-    // Only a sliver of the title bar on a monitor is not enough to grab.
-    try std.testing.expectEqualDeep(
-        RECT{ .left = 1120, .top = 100, .right = 1920, .bottom = 700 },
-        restoredRectOnScreen(.{ .left = 1900, .top = 100, .right = 2700, .bottom = 700 }, &works, grab),
-    );
-    // The nearest is the monitor to the left when that is where it was.
-    try std.testing.expectEqualDeep(
-        RECT{ .left = -1920, .top = 100, .right = -1120, .bottom = 700 },
-        restoredRectOnScreen(.{ .left = -4000, .top = 100, .right = -3200, .bottom = 700 }, &works, grab),
-    );
-    // Larger than the monitor it lands on: capped to it.
-    try std.testing.expectEqualDeep(
-        left,
-        restoredRectOnScreen(.{ .left = -9000, .top = -50, .right = -4000, .bottom = 3000 }, &works, grab),
-    );
-    // No monitor list, no opinion.
-    try std.testing.expectEqualDeep(unplugged, restoredRectOnScreen(unplugged, &.{}, grab));
-
-    // The file can say anything an i32 holds, and a window cannot be that far
-    // away: no differences of these overflow.
-    const min: i32 = std.math.minInt(i32);
-    const max: i32 = std.math.maxInt(i32);
-    try std.testing.expectEqualDeep(
-        RECT{ .left = -1920, .top = 100, .right = -1120, .bottom = 700 },
-        restoredRectOnScreen(.{ .left = min, .top = 100, .right = min + 800, .bottom = 700 }, &works, grab),
-    );
-    try std.testing.expectEqualDeep(
-        RECT{ .left = 1120, .top = 440, .right = 1920, .bottom = 1040 },
-        restoredRectOnScreen(.{ .left = max - 800, .top = max - 600, .right = max, .bottom = max }, &works, grab),
-    );
-    try std.testing.expectEqualDeep(
-        main_work,
-        restoredRectOnScreen(.{ .left = min, .top = min, .right = -1, .bottom = -1 }, &.{main_work}, grab),
-    );
-}
-
 test "win32 session state file write replaces through temp file" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
@@ -24048,35 +23720,6 @@ test "win32 an in-app install relaunches noctty one way, through /RELAUNCH=1" {
         args,
     );
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, args, "RELAUNCH"));
-}
-
-test "win32 scaleInitialClientSize converts logical initial size to physical pixels" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    try std.testing.expectEqualDeep(
-        apprt.SurfaceSize{ .width = 1680, .height = 810 },
-        scaleInitialClientSize(
-            .{ .width = 1120, .height = 540 },
-            .{ .x = 1.5, .y = 1.5 },
-        ),
-    );
-    try std.testing.expectEqualDeep(
-        apprt.SurfaceSize{ .width = 701, .height = 300 },
-        scaleInitialClientSize(
-            .{ .width = 467, .height = 200 },
-            .{ .x = 1.5, .y = 1.5 },
-        ),
-    );
-    try std.testing.expectEqualDeep(
-        apprt.SurfaceSize{
-            .width = std.math.maxInt(u32),
-            .height = std.math.maxInt(u32),
-        },
-        scaleInitialClientSize(
-            .{ .width = std.math.maxInt(u32), .height = std.math.maxInt(u32) },
-            .{ .x = 2.0, .y = 2.0 },
-        ),
-    );
 }
 
 test "win32 surfaceActivationNeedsHostSync only trips on activation-visible deltas" {

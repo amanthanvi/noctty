@@ -99,6 +99,7 @@
         "src/apprt/win32/surface_presentation.zig",
         "src/apprt/win32/terminal_window.zig",
         "src/apprt/win32/window_state.zig",
+        "src/apprt/win32/window_start.zig",
         "src/apprt/win32_nc_layout.zig",
         "src/apprt/win32_quick_terminal.zig",
         "src/apprt/win32/chrome_layout.zig",

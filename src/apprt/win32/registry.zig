@@ -8,6 +8,7 @@ const Host = win32.Host;
 const Surface = win32.Surface;
 const Tab = win32.Tab;
 const HWND = win32.HWND;
+const POINT = win32.POINT;
 const RECT = win32.RECT;
 const sys = @import("sys.zig");
 const win32_structural_history = @import("../win32_structural_history.zig");
@@ -95,15 +96,16 @@ pub const Registry = struct {
         return surface;
     }
 
-    /// Whether a window on screen has its top-left corner where `rect` does,
-    /// other than `except`.
-    pub fn windowStartsAt(self: *Registry, rect: RECT, except: ?HWND) bool {
+    /// Whether a window on screen (shown and not minimized), other than
+    /// `except`, has its top-left corner at `corner`: where a new window
+    /// opened from one of them does not start (`window_start.Occupied`).
+    pub fn windowStartsAt(self: *const Registry, corner: POINT, except: ?HWND) bool {
         for (self.hosts.items) |host| {
             const hwnd = host.hwnd orelse continue;
             if (hwnd == except or sys.IsWindowVisible(hwnd) == 0 or sys.IsIconic(hwnd) != 0) continue;
-            var other: RECT = undefined;
-            if (sys.GetWindowRect(hwnd, &other) == 0) continue;
-            if (other.left == rect.left and other.top == rect.top) return true;
+            var rect: RECT = undefined;
+            if (sys.GetWindowRect(hwnd, &rect) == 0) continue;
+            if (rect.left == corner.x and rect.top == corner.y) return true;
         }
         return false;
     }
@@ -139,12 +141,11 @@ pub const Registry = struct {
     /// with no tab for undo, which has no pane to copy. With neither, an
     /// ordinary new window. `hosts` is no guide: `detachHostReference`
     /// reorders it.
-    pub fn newWindowSource(self: *Registry, target: apprt.Target) ?*Surface {
+    pub fn newWindowSource(self: *Registry, target: apprt.Target) ?*Host {
         switch (target) {
             .app => {},
             .surface => |core_surface| if (self.findSurfaceByCore(core_surface)) |surface| {
-                const host = surface.host orelse return surface;
-                if (!host.quick_terminal) return surface;
+                if (surface.host) |host| if (!host.quick_terminal) return host;
             },
         }
         var latest: ?*Host = null;
@@ -152,7 +153,7 @@ pub const Registry = struct {
             if (host.quick_terminal or host.activeSurface() == null) continue;
             if (latest == null or host.activated > latest.?.activated) latest = host;
         }
-        return if (latest) |host| host.activeSurface() else null;
+        return latest;
     }
 
     pub fn focusedSurfaceForUndoRedo(self: *Registry) ?*Surface {
@@ -452,12 +453,12 @@ test "Registry target focus and new window choices retain fallback and activatio
     try std.testing.expectEqual(&fixture.c, registry.focusedSurfaceForUndoRedo().?);
     fixture.a.window_focused = true;
     try std.testing.expectEqual(&fixture.a, registry.focusedSurfaceForUndoRedo().?);
-    try std.testing.expectEqual(&fixture.c, registry.newWindowSource(.app).?);
-    try std.testing.expectEqual(&fixture.b, registry.newWindowSource(.{ .surface = &fixture.b.core_surface }).?);
+    try std.testing.expectEqual(&fixture.second, registry.newWindowSource(.app).?);
+    try std.testing.expectEqual(&fixture.first, registry.newWindowSource(.{ .surface = &fixture.b.core_surface }).?);
     try std.testing.expect(registry.quickTerminalHost() == null);
     fixture.second.quick_terminal = true;
     try std.testing.expectEqual(&fixture.second, registry.quickTerminalHost().?);
-    try std.testing.expectEqual(&fixture.a, registry.newWindowSource(.{ .surface = &fixture.c.core_surface }).?);
+    try std.testing.expectEqual(&fixture.first, registry.newWindowSource(.{ .surface = &fixture.c.core_surface }).?);
     fixture.first.quick_terminal = true;
     try std.testing.expectEqual(&fixture.first, registry.quickTerminalHost().?);
     try std.testing.expect(registry.newWindowSource(.app) == null);
@@ -470,7 +471,6 @@ test "Registry target focus and new window choices retain fallback and activatio
     try std.testing.expect(registry.detachHost(&fixture.empty));
     try std.testing.expectEqual(&fixture.second, registry.quickTerminalHost().?);
     fixture.b.host = null;
-    try std.testing.expectEqual(&fixture.b, registry.newWindowSource(.{ .surface = &fixture.b.core_surface }).?);
     try std.testing.expect(Host.findTabForSurface(&fixture.b) == null);
 }
 
@@ -523,22 +523,56 @@ test "Registry shown target and window position lookups use current native visib
             fixture.second.hwnd = second;
             defer fixture.first.hwnd = null;
             defer fixture.second.hwnd = null;
+            const c = @import("consts.zig");
             try std.testing.expect(registry.shownSurfaceForTarget(.app) == null);
-            var rect: RECT = undefined;
-            try std.testing.expect(sys.GetWindowRect(second, &rect) != 0);
-            try std.testing.expect(!registry.windowStartsAt(rect, null));
-            _ = sys.ShowWindow(second, @import("consts.zig").SW_SHOWNOACTIVATE);
+            // Each window at a top-left of its own, so an answer can come
+            // from only one of them.
+            const at_first: POINT = .{ .x = 100, .y = 120 };
+            const at_second: POINT = .{ .x = 340, .y = 360 };
+            const move = c.SWP_NOSIZE | c.SWP_NOZORDER | c.SWP_NOACTIVATE;
+            try std.testing.expect(sys.SetWindowPos(first, null, at_first.x, at_first.y, 0, 0, move) != 0);
+            try std.testing.expect(sys.SetWindowPos(second, null, at_second.x, at_second.y, 0, 0, move) != 0);
+            // A hidden window does not count, though it is there.
+            try std.testing.expect(!registry.windowStartsAt(at_first, null));
+            try std.testing.expect(!registry.windowStartsAt(at_second, null));
+            _ = sys.ShowWindow(second, c.SW_SHOWNOACTIVATE);
             try std.testing.expectEqual(&fixture.c, registry.shownSurfaceForTarget(.app).?);
-            try std.testing.expect(registry.windowStartsAt(rect, null));
-            try std.testing.expect(!registry.windowStartsAt(rect, second));
-            _ = sys.ShowWindow(first, @import("consts.zig").SW_SHOWNOACTIVATE);
+            try std.testing.expect(registry.windowStartsAt(at_second, null));
+            try std.testing.expect(!registry.windowStartsAt(at_first, null));
+            _ = sys.ShowWindow(first, c.SW_SHOWNOACTIVATE);
             try std.testing.expectEqual(&fixture.a, registry.shownSurfaceForTarget(.app).?);
             try std.testing.expectEqual(&fixture.c, registry.shownSurfaceForTarget(.{ .surface = &fixture.c.core_surface }).?);
-            _ = sys.ShowWindow(second, @import("consts.zig").SW_MINIMIZE);
-            // Hide the other window to distinguish iconic exclusion from
-            // matching its coincident default position.
-            _ = sys.ShowWindow(first, @import("consts.zig").SW_HIDE);
-            try std.testing.expect(!registry.windowStartsAt(rect, null));
+            // Both shown: true at each one's top-left and false elsewhere,
+            // inside a window, off both, or with one's x and the other's y.
+            try std.testing.expect(registry.windowStartsAt(at_first, null));
+            try std.testing.expect(registry.windowStartsAt(at_second, null));
+            for ([_]POINT{
+                .{ .x = at_first.x + 1, .y = at_first.y },
+                .{ .x = at_second.x, .y = at_second.y + 1 },
+                .{ .x = 700, .y = 700 },
+                .{ .x = at_first.x, .y = at_second.y },
+                .{ .x = at_second.x, .y = at_first.y },
+            }) |elsewhere| {
+                try std.testing.expect(!registry.windowStartsAt(elsewhere, null));
+            }
+            // The window being placed is not one it steps past; the other
+            // still is.
+            try std.testing.expect(!registry.windowStartsAt(at_second, second));
+            try std.testing.expect(registry.windowStartsAt(at_first, second));
+            try std.testing.expect(!registry.windowStartsAt(at_first, first));
+            try std.testing.expect(registry.windowStartsAt(at_second, first));
+            // A minimized window does not count at the rect it has now, nor
+            // where it was; the other window still does.
+            _ = sys.ShowWindow(second, c.SW_MINIMIZE);
+            try std.testing.expect(sys.IsIconic(second) != 0);
+            var iconic: RECT = undefined;
+            try std.testing.expect(sys.GetWindowRect(second, &iconic) != 0);
+            try std.testing.expect(!registry.windowStartsAt(.{ .x = iconic.left, .y = iconic.top }, null));
+            try std.testing.expect(!registry.windowStartsAt(at_second, null));
+            try std.testing.expect(registry.windowStartsAt(at_first, null));
+            // Hidden again, the other window no longer counts either.
+            _ = sys.ShowWindow(first, c.SW_HIDE);
+            try std.testing.expect(!registry.windowStartsAt(at_first, null));
         }
     }.run);
 }

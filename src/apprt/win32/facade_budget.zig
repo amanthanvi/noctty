@@ -18,19 +18,16 @@ const budget = .{
         .overlay_session_test_runtime = 5,
         .palette_controller_runtime = 44,
         .palette_controller_test_runtime = 7,
-        .window_state_runtime = 26,
-        .window_state_test_runtime = 22,
-        .host_test_runtime = 2,
         .surface_presentation_runtime = 12,
         .surface_presentation_test_runtime = 3,
-        .session_runtime = 48,
+        .session_runtime = 39,
         .quick_terminal_host_runtime = 32,
-        .test_support_runtime = 52,
+        .test_support_runtime = 47,
     },
     // The facade's pub declarations: what the files that import it can reach.
-    .facade_pub_decls = 525,
+    .facade_pub_decls = 508,
     // Root declarations of win32.zig whose value is a field access (`a.b`).
-    .facade_aliases = 277,
+    .facade_aliases = 253,
     // Fields of win32.App named `test_*`.
     .app_test_hooks = 10,
 };
@@ -56,6 +53,14 @@ const leaves = .{
         .module = @import("notifications.zig"),
         .source = @embedFile("notifications.zig"),
         .pub_decls = 12,
+    },
+    .{
+        .file = "window_start.zig",
+        .module = @import("window_start.zig"),
+        .source = @embedFile("window_start.zig"),
+        // why: `Occupied`, the port `place` asks for the windows on screen
+        // as it places a copy, so window_start.zig stays free of `sys`.
+        .pub_decls = 29,
     },
 };
 

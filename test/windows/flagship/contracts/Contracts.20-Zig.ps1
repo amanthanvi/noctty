@@ -26,6 +26,7 @@ $win32TestModuleRoots = @(
     '_ = @import("win32/chrome_layout.zig");'
     '_ = @import("win32/gdi.zig");'
     '_ = @import("win32/docked_search.zig");'
+    '_ = @import("win32/window_start.zig");'
 )
 foreach ($win32TestModuleRoot in $win32TestModuleRoots) {
     if (-not [regex]::IsMatch(
@@ -48,10 +49,18 @@ foreach ($win32TestModuleRoot in $win32TestModuleRoots) {
 # win32_search_bar.zig and labels.zig, rewritten against its interface; its
 # floor is every one of them. labels.zig went from 113 to 104 when its
 # docked-search rules moved there and its search chrome (button words,
-# colours, focus stops) to search_controls.zig, and to 103 when the search
-# overlay's count label went with the search arguments no caller passed.
+# colours, focus stops) to search_controls.zig, to 103 when the search
+# overlay's count label went with the search arguments no caller passed, and
+# to 101 when its window opacity helpers became `TopLevel.alpha` in
+# window_start.zig and the unused resizeSplitFallbackDelta went with the dead
+# Surface.resizeSplitFallback (window state on the Window).
+# window_start.zig is the pure half of window state, which received its
+# consolidated tests: the `plan`, `place`, `returnOn`, `forRestore` and
+# `savedFullscreen` tables (from window_state.zig's start and placement tests
+# and session.zig's lookup-failure test), `restoredRectOnScreen` (from
+# win32.zig) and `TopLevel.alpha` (from labels.zig); its floor is all 10.
 $movedWin32TestFloors = [ordered]@{
-    'labels.zig' = 103
+    'labels.zig' = 101
     'input.zig' = 24
     'gl_startup.zig' = 4
     'render_trace.zig' = 3
@@ -59,6 +68,7 @@ $movedWin32TestFloors = [ordered]@{
     'gdi.zig' = 2
     'facade_budget.zig' = 2
     'docked_search.zig' = 32
+    'window_start.zig' = 10
 }
 foreach ($movedWin32TestModule in $movedWin32TestFloors.Keys) {
     $movedWin32TestModulePath = @($win32RuntimeModuleFiles | Where-Object {
@@ -94,12 +104,21 @@ foreach ($movedWin32TestModule in $movedWin32TestFloors.Keys) {
 # (notifications PR 3). child_window.zig holds the 3 tests that moved out of
 # win32.zig with the child-control plumbing, and text.zig the 11 it declares
 # once the owned-string helpers (from win32.zig and labels.zig) and
-# utf8BoundedPrefix moved in. session.zig's floor is 28 since its five
+# utf8BoundedPrefix moved in. session.zig's floor is 27: its five
 # restore-by-key tests became rows of pane_launch.zig's `prepare` table (pane
-# launch step 4b). notifications.zig's 23 are the toast lifecycle's, the
-# click's and the cold toast wait's tests at its interface, which replaced
-# App's, Host's, Surface's and Registry's, and the two cold-wait tests that
-# moved from win32.zig.
+# launch step 4b), and its fullscreen-placement lookup-failure test became
+# window_start.zig's pure `savedFullscreen` test (window state, step 6).
+# notifications.zig's 23 are the toast lifecycle's, the click's and the cold
+# toast wait's tests at its interface, which replaced App's, Host's,
+# Surface's and Registry's, and the two cold-wait tests that moved from
+# win32.zig. window_state.zig's floor went to 25 when six of its start tests
+# (the kept forwarded keys, maximize/fullscreen per kind, the decoration,
+# startup-style, initial-decoration and effective-style helpers) became rows
+# of the pure `plan` tests in window_start.zig, which window_state.zig
+# imports (window state, step 3), and its eight new-window placement tests,
+# the fullscreen-restore rect test and the two initial-opacity tests became
+# the pure `place` tables there and first-show assertions (step 4), and is
+# 26 since `scaleInitialClientSize`'s test moved in from win32.zig (step 7).
 # Lower one only for a deliberate consolidation.
 # test_support.zig declares no tests, so it has no floor.
 $extractedWin32TestModules = [ordered]@{
@@ -107,9 +126,9 @@ $extractedWin32TestModules = [ordered]@{
     'app.zig' = @{ Binding = 'app_module'; Floor = 59 }
     'host.zig' = @{ Binding = 'host_module'; Floor = 43 }
     'terminal_window.zig' = @{ Binding = 'terminal_window_module'; Floor = 23 }
-    'session.zig' = @{ Binding = 'session_module'; Floor = 28 }
+    'session.zig' = @{ Binding = 'session_module'; Floor = 27 }
     'quick_terminal_host.zig' = @{ Binding = 'quick_terminal_host'; Floor = 10 }
-    'window_state.zig' = @{ Binding = 'window_state'; Floor = 41 }
+    'window_state.zig' = @{ Binding = 'window_state'; Floor = 26 }
     'surface_presentation.zig' = @{ Binding = 'surface_presentation'; Floor = 15 }
     'search_controls.zig' = @{ Binding = 'search_controls'; Floor = 4 }
     'overlay_session.zig' = @{ Binding = 'overlay_session'; Floor = 2 }
