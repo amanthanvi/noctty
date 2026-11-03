@@ -433,13 +433,24 @@ pub const Notifications = struct {
     /// The show is back from the sink, which can have pumped messages that
     /// closed the pane or took it out of its tab, so the pane is found
     /// again. A show for the same pane inside this one decided the entry,
-    /// unless Windows refused it, which put this show's state back, and a
-    /// flush meanwhile can have taken what it decided. A shown toast with
-    /// no entry (none could be made) still counts for the group.
+    /// unless Windows refused it, which put this show's state back. A flush
+    /// meanwhile can have taken what the inner show decided; this show's
+    /// toast, which Windows may have filed after that removal, is then the
+    /// pane's again, so it is tracked anew (removing a toast that is already
+    /// gone is harmless).
     fn endShow(self: *Notifications, pane: u64, prior: ?State, shown: bool) void {
         if (shown) self.group_used = true;
         const reach = self.reachable(pane);
-        const i = self.indexOf(pane) orelse return;
+        const i = self.indexOf(pane) orelse {
+            if (!shown) return;
+            const state: State = if (reach) .shown else .seen;
+            self.tracked.append(self.alloc, .{ .pane = pane, .state = state }) catch |err| {
+                log.warn("toast not tracked after a nested show err={}", .{err});
+                return;
+            };
+            if (state == .seen) self.wake();
+            return;
+        };
         const showing = switch (self.tracked.items[i].state) {
             .showing => |showing| showing,
             .shown, .seen => return,
@@ -1219,6 +1230,33 @@ test "a toast shown for a pane inside another show for it is the one tracked" {
     t.n.seen(0x1001);
     t.n.flush();
     try t.recorder.expectRemoved(&.{0x1001});
+}
+
+test "a toast whose nested show was seen and removed during it is tracked again" {
+    var t: TestNotifications = .{};
+    t.init();
+    defer t.deinit();
+    t.panes.put(0x1001, testing.inTab(1, 0, "pwsh"));
+
+    // The outer show pumps a newer toast for the same pane, which Windows
+    // takes; the tab is seen and a flush removes that one, all before the
+    // outer show returns. Windows then takes the outer toast too: it is the
+    // pane's, and the next seen tab removes it.
+    var nested = struct {
+        t: *TestNotifications,
+        fn body(self: *@This()) void {
+            self.t.n.show(.{ .pane = 0x1001 }, "", "nested");
+            self.t.n.seen(0x1001);
+            self.t.n.flush();
+        }
+    }{ .t = &t };
+    t.once("during_show", &nested);
+    t.n.show(.{ .pane = 0x1001 }, "", "outer");
+    try std.testing.expectEqual(@as(usize, 2), t.recorder.shown);
+    try t.recorder.expectRemoved(&.{0x1001});
+    t.n.seen(0x1001);
+    t.n.flush();
+    try t.recorder.expectRemoved(&.{ 0x1001, 0x1001 });
 }
 
 test "a removal takes its entry off before its call, and a toast shown meanwhile stays" {
