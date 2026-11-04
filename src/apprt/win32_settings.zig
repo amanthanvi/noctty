@@ -8251,6 +8251,17 @@ pub const SettingsWindow = struct {
         return false;
     }
 
+    /// A check that could not read the lists (`.unread`: a theme locked,
+    /// unreadable or out of memory) is asked again when the user moves or
+    /// hides a profile, or opens a row's menu; not on a repaint, since each
+    /// check reads the theme.
+    fn recheckUnreadLists(self: *SettingsWindow) void {
+        if (!self.profile_lists_checked) return;
+        if (self.profile_lists_foreign) |why| if (why == .unread) {
+            self.profile_lists_checked = false;
+        };
+    }
+
     /// Why the Profiles page cannot move or hide a profile now, asked of the
     /// App once per running config (`profile_lists_foreign`).
     fn profileListsRefused(self: *SettingsWindow) ?settings_patch.ListsForeign {
@@ -8461,6 +8472,25 @@ pub const SettingsWindow = struct {
             };
             _ = ShowWindow(button, SW_HIDE);
         }
+    }
+
+    /// Scroll the Profiles list so the open row's buttons' line is in view,
+    /// and the buttons with it: one taking the focus (Tab) may sit below the
+    /// list's shown part when the open row is taller than the list.
+    fn revealProfileButtons(self: *SettingsWindow) void {
+        const list = &self.profile_list;
+        const metrics = list.ensureMetrics() orelse return;
+        const position = list.selectedPosition() orelse return;
+        const top = list.buttonsTop(metrics, position) + list.scroll_y;
+        const height = self.px(settings_control_height);
+        const view = list.clientHeight();
+        const before = list.scroll_y;
+        if (top < list.scroll_y) {
+            list.scrollTo(top);
+        } else if (top + height > list.scroll_y + view) {
+            list.scrollTo(top + height - view);
+        }
+        if (list.scroll_y != before) self.syncProfileButtons();
     }
 
     /// Whether the open profile row's buttons are shown (the first, Move up).
@@ -8814,6 +8844,7 @@ pub const SettingsWindow = struct {
         // there is no draft to take a change.
         if (row.kind != .new_profile) if (self.profile_model.profileOf(row)) |profile| {
             const model = &self.profile_model;
+            self.recheckUnreadLists();
             const takes = self.draftTakesEdits() and self.profileListsRefused() == null;
             // With part of the list, the items ask for the rest.
             const partial = !model.complete and !profile.found_hidden;
@@ -8858,6 +8889,7 @@ pub const SettingsWindow = struct {
         // sent to the held list, lands here.
         if (!self.draftTakesEdits()) return;
         // Not while another layer sets the lists (`listsForeign`).
+        self.recheckUnreadLists();
         if (self.profileListsRefused()) |why| return self.setProfileNote(.refused, "{s}", .{why.text()});
         if (!self.profileEditDone()) return;
         const row = self.selectedProfileRow() orelse return;
@@ -8901,6 +8933,7 @@ pub const SettingsWindow = struct {
         // As `profileMove`: nothing is hidden or shown without a draft, or
         // while another layer sets the lists.
         if (!self.draftTakesEdits()) return;
+        self.recheckUnreadLists();
         if (self.profileListsRefused()) |why| return self.setProfileNote(.refused, "{s}", .{why.text()});
         if (!self.profileEditDone()) return;
         const row = self.selectedProfileRow() orelse return;
@@ -14162,6 +14195,9 @@ const dialog_test = struct {
         /// another program changed (`ProfileChanged`), as the App does
         /// (`settings_patch.changedUnder`, with the window's baselines).
         check_profiles: bool = false,
+        /// What `scriptedListsForeign` answers, and how often it was asked.
+        lists_answer: ?settings_patch.ListsForeign = null,
+        lists_asked: usize = 0,
         /// After writing `save_path`, the save reads it again, with the files
         /// it includes, into `config`, and reports the edited keys whose
         /// value something read later overrides, as the App does
@@ -14463,6 +14499,14 @@ const dialog_test = struct {
 
         /// The App resolves a reference by the picker's rules; here a key in
         /// any case, `pwsh`, or a bare user id.
+        /// `AppHandle.profileListsForeign` answering `lists_answer`, each ask
+        /// counted in `lists_asked`.
+        fn scriptedListsForeign(ctx: *anyopaque) ?settings_patch.ListsForeign {
+            const self: *Fixture = @ptrCast(@alignCast(ctx));
+            self.lists_asked += 1;
+            return self.lists_answer;
+        }
+
         /// `AppHandle.profileListsForeign`, as the App answers it, over
         /// `config` and `save_path`.
         fn profileListsForeign(ctx: *anyopaque) ?settings_patch.ListsForeign {
@@ -21558,6 +21602,9 @@ fn profileButtonProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) call
         },
         WM_CHAR => if (wParam == '\t' or wParam == 0x08 or wParam == 0x1B) return 0,
         WM_SETFOCUS => if (settings) |owner| if (index) |at| {
+            // An open row taller than the list can leave its buttons below
+            // the part shown: the one with the focus is scrolled to.
+            owner.revealProfileButtons();
             if (owner.profile_button_providers[at]) |provider| provider.raiseFocusChanged();
         },
         WM_GETOBJECT => if (settings) |owner| if (index) |at| if (owner.profile_button_providers[at]) |provider| {
@@ -22369,6 +22416,8 @@ const ReferenceList = struct {
             if (self.selectedPosition() == null) {
                 self.selected = self.shown[0];
                 self.metrics = null;
+                // A profile's row opens with its buttons, which Tab reaches.
+                if (self.kind == .profiles) self.owner().syncProfileButtons();
             }
             // A window opened again keeps the key, not where it scrolled to.
             self.revealSelected(.unless_shown);
@@ -25002,6 +25051,132 @@ test "settings a profile change on a page with part of the profiles leaves its l
                 defer alloc.free(after);
                 try std.testing.expect(std.mem.indexOf(u8, after, "profile-order = user:dev\n") != null);
             }
+        }
+    }.body);
+}
+
+test "settings a list check that could not read the theme is asked again on the next move, not on a repaint" {
+    try dialog_test.onHiddenDesktop(struct {
+        fn body() !void {
+            const keyboard = win32_input.TestingKeyboard.pinNone();
+            defer keyboard.release();
+            const alloc = std.testing.allocator;
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var path: []u8 = &.{};
+            const fixture = try profileFixture(&tmp, "profile-command = py: python.exe\n", &path);
+            defer alloc.free(path);
+            defer fixture.finish();
+            const settings = &fixture.settings;
+            const list = &settings.profile_list;
+            // The theme cannot be read.
+            fixture.lists_answer = .unread;
+            settings.handle.profileListsForeign = &dialog_test.Fixture.scriptedListsForeign;
+            const listed = [_]ProfileChoice{
+                .{ .key = "pwsh.exe", .label = "PowerShell" },
+                .{ .key = "user:py", .label = "py" },
+            };
+            giveProfilePage(fixture, &listed, true);
+            try selectProfileRow(list, settings.profile_model.findField(.profile, "py", null) orelse return error.TestExpectedRow);
+            // Refused, and said.
+            settings.profileMove(-1);
+            const asked = fixture.lists_asked;
+            try std.testing.expect(asked != 0);
+            try std.testing.expect(!settings.hasPendingChanges());
+            var buf: [512]u8 = undefined;
+            try expectSameText(settings_patch.ListsForeign.unread.text(), try statusTextOf(settings, &buf));
+            // A repaint does not ask again.
+            settings.syncProfileButtons();
+            try std.testing.expectEqual(asked, fixture.lists_asked);
+            // Now it can: the next move asks again, and is taken.
+            fixture.lists_answer = null;
+            settings.profileMove(-1);
+            try std.testing.expect(fixture.lists_asked > asked);
+            try std.testing.expect(settings.hasPendingChanges());
+            const draft = settings.pending orelse return error.TestExpectedDraft;
+            const order = try listText(alloc, draft.@"profile-order".list.items);
+            defer alloc.free(order);
+            try expectSameText("user:py\npwsh.exe\n", order);
+        }
+    }.body);
+}
+
+test "settings the Profiles list that takes the focus with no row selected opens the first and shows its buttons" {
+    try dialog_test.onHiddenDesktop(struct {
+        fn body() !void {
+            const keyboard = win32_input.TestingKeyboard.pinNone();
+            defer keyboard.release();
+            const alloc = std.testing.allocator;
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var path: []u8 = &.{};
+            const fixture = try profileFixture(&tmp, "profile-command = py: python.exe\n", &path);
+            defer alloc.free(path);
+            defer fixture.finish();
+            const settings = &fixture.settings;
+            const list = &settings.profile_list;
+            const listed = [_]ProfileChoice{
+                .{ .key = "pwsh.exe", .label = "PowerShell" },
+                .{ .key = "user:py", .label = "py" },
+            };
+            giveProfilePage(fixture, &listed, true);
+            // A search finds PowerShell alone, so it is the first row shown;
+            // nothing is selected and no button shows.
+            typeSearch(settings, "PowerShell");
+            const hwnd = list.hwnd orelse return error.TestExpectedList;
+            _ = SetFocus(settings.edit_search.?);
+            list.selected = null;
+            settings.hideProfileButtons();
+            _ = SetFocus(hwnd);
+            const row = settings.selectedProfileRow() orelse return error.TestExpectedRow;
+            try std.testing.expectEqualStrings("pwsh.exe", settings.profile_model.profiles[row.profile].key);
+            try std.testing.expect(settings.profileButtonsShown());
+        }
+    }.body);
+}
+
+test "settings a profile button that takes the focus below a short list's shown part is scrolled into view" {
+    try dialog_test.onHiddenDesktop(struct {
+        fn body() !void {
+            const keyboard = win32_input.TestingKeyboard.pinNone();
+            defer keyboard.release();
+            const alloc = std.testing.allocator;
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var path: []u8 = &.{};
+            const fixture = try profileFixture(&tmp, "profile-command = py: python.exe\n", &path);
+            defer alloc.free(path);
+            defer fixture.finish();
+            const settings = &fixture.settings;
+            const list = &settings.profile_list;
+            const listed = [_]ProfileChoice{
+                .{ .key = "pwsh.exe", .label = "PowerShell" },
+                .{ .key = "user:py", .label = "py" },
+            };
+            giveProfilePage(fixture, &listed, true);
+            try selectProfileRow(list, settings.profile_model.findField(.profile, "pwsh.exe", null) orelse return error.TestExpectedRow);
+            settings.syncProfileButtons();
+            const hwnd = list.hwnd orelse return error.TestExpectedList;
+            // The list made shorter than the open row, scrolled to its top:
+            // the buttons' line is below the shown part.
+            var rect: RECT = undefined;
+            _ = sys.GetClientRect(hwnd, &rect);
+            const metrics = list.ensureMetrics() orelse return error.TestExpectedMetrics;
+            const position = list.selectedPosition() orelse return error.TestExpectedRow;
+            const short = @max(1, list.buttonsTop(metrics, position) + list.scroll_y - ReferenceList.rowTop(metrics, position, position) - 8);
+            _ = SetWindowPos(hwnd, null, 0, 0, rect.right - rect.left, short, SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOMOVE);
+            list.metrics = null;
+            list.scrollTo(ReferenceList.rowTop(list.ensureMetrics() orelse return error.TestExpectedMetrics, position, position));
+            try std.testing.expect(list.buttonsTop(list.ensureMetrics().?, position) >= list.clientHeight());
+            // Tab from the list: Move down (Move up is off for the first) has
+            // the focus, and its line is in view.
+            _ = SetFocus(hwnd);
+            _ = sys.SendMessageW(hwnd, WM_KEYDOWN, VK_TAB, 0);
+            const focused = GetFocus() orelse return error.TestExpectedFocus;
+            try std.testing.expect(focused == settings.profile_buttons[1] orelse return error.TestExpectedButton);
+            const top = list.buttonsTop(list.ensureMetrics().?, position);
+            try std.testing.expect(top >= 0);
+            try std.testing.expect(top + settings.px(settings_control_height) <= list.clientHeight());
         }
     }.body);
 }

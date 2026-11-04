@@ -2389,6 +2389,19 @@ test "settings profiles: SSH aliases that differ only in case are two profiles, 
     // `default-profile = pwsh` starts PowerShell (the app's answer).
     try testing.expect(model.profiles[0].default);
     try testing.expect(!model.profiles[1].default);
+    // A draft that names another profile marks that one, though the list
+    // (no answer for it here) marks none.
+    var draft = try testConfig(alloc, "default-profile = ssh:Prod\n", &.{});
+    defer draft.deinit();
+    const unmarked = [_]Listed{
+        .{ .key = "pwsh.exe", .label = "PowerShell" },
+        .{ .key = "ssh:prod", .label = "prod" },
+        .{ .key = "ssh:Prod", .label = "Prod" },
+    };
+    try model.buildListed(alloc, &draft, &original, &unmarked, true);
+    try testing.expect(!model.profiles[0].default);
+    try testing.expect(!model.profiles[1].default);
+    try testing.expect(model.profiles[2].default);
 }
 
 test "settings profiles: a draft's own order outlives a change to the file, and an untouched list follows it" {
