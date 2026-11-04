@@ -1,6 +1,7 @@
 //! The decisions a Window's state is made of, from values: how a new window
-//! starts (`plan`), where a copy goes (`place`), what leaving fullscreen
-//! returns to (`returnOn`) and how the session saves and restores a window
+//! starts (`plan`), where a copy goes (`place`), the rect a fullscreen window
+//! covers (`composedFullscreenRect`), what leaving fullscreen returns to
+//! (`returnOn`) and how the session saves and restores a window
 //! (`SavedPlacement`, `forRestore`). The Win32 calls that carry them out are
 //! window_state.zig's, which re-exports what the runtime uses. This file
 //! imports no `sys`, so the compiler keeps it free of them, and its tests
@@ -403,6 +404,56 @@ fn sizedReturn(back: TopLevel.Return, own: Own) TopLevel.Return {
         info,
     );
     return sized;
+}
+
+/// The rect a fullscreen window takes on the monitor whose rect is `monitor`
+/// so that it does not cover that monitor exactly, or null to keep `monitor`
+/// (#598). Windows can take a window whose OpenGL surface covers a monitor
+/// exactly out of desktop composition (PresentMon: "Hardware: Legacy Flip"),
+/// and every switch back into it (Alt+Tab, an IME candidate window) shows
+/// black. One physical pixel past an edge kept every present composed on the
+/// reporter's machine. The edge is the first of bottom, right, top and left
+/// that has no neighbour, so the extra pixel lands on no monitor.
+///
+/// A neighbour on an edge is another monitor in `others` that intersects the
+/// one-pixel row or column just past that edge, along the edge's whole length:
+/// it overlaps the edge's span by at least one pixel and covers the first
+/// pixel past it. A monitor that touches only at a corner, or that lies past a
+/// gap, is no neighbour. `others` may hold `monitor` itself, which never
+/// reaches past its own edges. An edge at the i32 limit cannot grow and the
+/// next is tried. Null when no edge is free.
+pub fn composedFullscreenRect(monitor: RECT, others: []const RECT) ?RECT {
+    for ([_]enum { bottom, right, top, left }{ .bottom, .right, .top, .left }) |edge| {
+        var strip = monitor;
+        switch (edge) {
+            .bottom => {
+                strip.top = monitor.bottom;
+                strip.bottom = std.math.add(i32, monitor.bottom, 1) catch continue;
+            },
+            .right => {
+                strip.left = monitor.right;
+                strip.right = std.math.add(i32, monitor.right, 1) catch continue;
+            },
+            .top => {
+                strip.bottom = monitor.top;
+                strip.top = std.math.sub(i32, monitor.top, 1) catch continue;
+            },
+            .left => {
+                strip.right = monitor.left;
+                strip.left = std.math.sub(i32, monitor.left, 1) catch continue;
+            },
+        }
+        for (others) |other| {
+            if (strip.left < other.right and other.left < strip.right and
+                strip.top < other.bottom and other.top < strip.bottom) break;
+        } else return .{
+            .left = @min(monitor.left, strip.left),
+            .top = @min(monitor.top, strip.top),
+            .right = @max(monitor.right, strip.right),
+            .bottom = @max(monitor.bottom, strip.bottom),
+        };
+    }
+    return null;
 }
 
 fn fullscreenRestoreRect(rect: RECT, old_work: RECT, new_work: RECT, old_dpi: u32, new_dpi: u32) RECT {
@@ -841,6 +892,68 @@ test "win32 fullscreen restore translates work areas and scales size to fit" {
     try std.testing.expectEqualDeep(testRect(3940, 52, 4580, 532), moved_back.rect);
     try std.testing.expectEqualDeep(testRect(3940, 52, 4580, 532), moved_back.placement.rcNormalPosition);
     try std.testing.expectEqual(@as(usize, 2), moved_back.monitor.?.id);
+}
+
+test "win32 a composed fullscreen window grows 1 px past its first free edge: bottom, right, top, then left" {
+    const m = testRect(0, 0, 1920, 1080);
+    const Case = struct { others: []const RECT, grown: RECT };
+    for ([_]Case{
+        // Alone, or listed among the monitors: the bottom.
+        .{ .others = &.{}, .grown = testRect(0, 0, 1920, 1081) },
+        .{ .others = &.{m}, .grown = testRect(0, 0, 1920, 1081) },
+        // Each neighbour moves it to the next edge in order.
+        .{ .others = &.{ m, testRect(0, 1080, 1920, 2160) }, .grown = testRect(0, 0, 1921, 1080) },
+        .{ .others = &.{ testRect(0, 1080, 1920, 2160), testRect(1920, 0, 3840, 1080) }, .grown = testRect(0, -1, 1920, 1080) },
+        .{ .others = &.{ testRect(0, 1080, 1920, 2160), testRect(1920, 0, 3840, 1080), testRect(0, -1080, 1920, 0) }, .grown = testRect(-1, 0, 1920, 1080) },
+        // A neighbour along part of the edge is enough: one row of it.
+        .{ .others = &.{testRect(1919, 1080, 2560, 1081)}, .grown = testRect(0, 0, 1921, 1080) },
+        // A neighbour on one edge leaves the others: only the left one.
+        .{ .others = &.{testRect(-2560, 0, 0, 1440)}, .grown = testRect(0, 0, 1920, 1081) },
+        // A monitor that touches only at a corner, or past a gap of one
+        // pixel, is no neighbour: the pixel past the edge is on no monitor.
+        .{ .others = &.{ testRect(1920, 1080, 3840, 2160), testRect(-1920, 1080, 0, 2160) }, .grown = testRect(0, 0, 1920, 1081) },
+        .{ .others = &.{testRect(0, 1081, 1920, 2161)}, .grown = testRect(0, 0, 1920, 1081) },
+        // A monitor that overlaps the edge, not only one that abuts it.
+        .{ .others = &.{testRect(100, 1000, 900, 1600)}, .grown = testRect(0, 0, 1921, 1080) },
+    }) |case| {
+        try std.testing.expectEqualDeep(@as(?RECT, case.grown), composedFullscreenRect(m, case.others));
+    }
+
+    // A monitor that is not the primary, at negative coordinates: the
+    // portrait one left of the 3840x2160 one. That one is beside the row
+    // below it, not in it, so it grows at the bottom.
+    const portrait = test_monitors.portrait.info.rcMonitor;
+    const all = [_]RECT{ test_monitors.big.info.rcMonitor, test_monitors.side.info.rcMonitor, portrait };
+    try std.testing.expectEqualDeep(@as(?RECT, testRect(-1080, 0, 0, 1921)), composedFullscreenRect(portrait, &all));
+    // So for the 1920x1080 one right of it, though the big one reaches
+    // below its bottom.
+    try std.testing.expectEqualDeep(@as(?RECT, testRect(3840, 0, 5760, 1081)), composedFullscreenRect(test_monitors.side.info.rcMonitor, &all));
+    // Stacked on top of the big one, at negative y: it grows at the right,
+    // and with a monitor there too, at the top, further into negative y.
+    const above = testRect(0, -1080, 1920, 0);
+    try std.testing.expectEqualDeep(@as(?RECT, testRect(0, -1080, 1921, 0)), composedFullscreenRect(above, &.{ test_monitors.big.info.rcMonitor, above }));
+    try std.testing.expectEqualDeep(@as(?RECT, testRect(0, -1081, 1920, 0)), composedFullscreenRect(above, &.{ test_monitors.big.info.rcMonitor, testRect(1920, -1080, 3840, 0) }));
+}
+
+test "win32 a composed fullscreen window with no free edge gets null and keeps today's exact monitor rect" {
+    const m = testRect(0, 0, 1920, 1080);
+    // A monitor past every edge: a 3x3 wall, this one in the middle.
+    const wall = [_]RECT{
+        testRect(-1920, -1080, 0, 0),   testRect(0, -1080, 1920, 0),   testRect(1920, -1080, 3840, 0),
+        testRect(-1920, 0, 0, 1080),    m,                             testRect(1920, 0, 3840, 1080),
+        testRect(-1920, 1080, 0, 2160), testRect(0, 1080, 1920, 2160), testRect(1920, 1080, 3840, 2160),
+    };
+    try std.testing.expectEqual(@as(?RECT, null), composedFullscreenRect(m, &wall));
+    // Just the four edge neighbours, without the corners.
+    try std.testing.expectEqual(@as(?RECT, null), composedFullscreenRect(m, &.{ wall[1], wall[3], wall[5], wall[7] }));
+
+    // Integer overflow: an edge at the i32 limit cannot grow, so the next
+    // free edge does, and with all four there, none does.
+    const max = std.math.maxInt(i32);
+    const min = std.math.minInt(i32);
+    try std.testing.expectEqualDeep(@as(?RECT, testRect(0, 0, 1921, max)), composedFullscreenRect(testRect(0, 0, 1920, max), &.{}));
+    try std.testing.expectEqualDeep(@as(?RECT, testRect(min, -1, max, max)), composedFullscreenRect(testRect(min, 0, max, max), &.{}));
+    try std.testing.expectEqual(@as(?RECT, null), composedFullscreenRect(testRect(min, min, max, max), &.{}));
 }
 
 test "win32 a saved window rect on a monitor that is gone moves to the nearest work area" {

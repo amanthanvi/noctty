@@ -80,8 +80,11 @@ const leaves = .{
         .module = @import("window_start.zig"),
         .source = @embedFile("window_start.zig"),
         // why: `Occupied`, the port `place` asks for the windows on screen
-        // as it places a copy, so window_start.zig stays free of `sys`.
-        .pub_decls = 29,
+        // as it places a copy, so window_start.zig stays free of `sys`; and
+        // `composedFullscreenRect`, the rect a fullscreen OpenGL window
+        // covers (#598), which window_state.zig asks with the monitors it
+        // lists.
+        .pub_decls = 30,
     },
 };
 

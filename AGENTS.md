@@ -241,7 +241,12 @@ that govern each symbol you change, or that none does.
   fullscreen and restore placement (one copy per window, `TopLevel` on
   `Host.top_level`, changed by `window_state.perform` and `applyConfig`;
   the `WM_GETMINMAXINFO` reader, `updateMinMaxInfo`; a pane's own metrics,
-  `Surface.metrics`;
+  `Surface.metrics`; the rect a fullscreen window covers, one pixel past a
+  free monitor edge for OpenGL with the tab bar hidden (#598):
+  `composedFullscreenRect` in `win32/window_start.zig`,
+  `keepsFullscreenComposed` (its decision, `composesFullscreen` over
+  `PaneRenderer`), `fullscreenRect` and `MonitorRects` in
+  `win32/window_state.zig`;
   the `maximize`/`fullscreen` keys at window start: `Enter` and
   `forRestore` in `win32/window_start.zig`; what a session saves and
   restores of a fullscreen window: `WindowState.fullscreen` and
