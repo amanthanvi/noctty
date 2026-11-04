@@ -4577,27 +4577,108 @@ pub fn isWslBashLauncherPath(alloc: Allocator, path: []const u8) !bool {
 }
 
 const WslOutputDrain = struct {
-    stdout: std.fs.File,
+    /// The read end of a pipe opened for overlapped I/O, as
+    /// `std.process.Child` makes a child's stdout and stderr.
+    pipe: std.fs.File,
+    /// Set when a read completes (manual reset; `ReadFile` resets it).
+    io_event: windows.HANDLE,
+    /// Set by `stop` (manual reset), and left set: the read in progress ends,
+    /// and none starts after.
+    stop_event: windows.HANDLE,
+    stopping: std.atomic.Value(bool) = .init(false),
     bytes: ?[]u8 = null,
+    /// Why it read no whole output: a read that failed, or that `stop`
+    /// ended (`error.WslListCancelled`). Null when the pipe ended.
     err: ?anyerror = null,
 
+    fn init(pipe: std.fs.File) !WslOutputDrain {
+        const io_event = try windows.CreateEventExW(null, null, windows.CREATE_EVENT_MANUAL_RESET, windows.EVENT_ALL_ACCESS);
+        errdefer windows.CloseHandle(io_event);
+        const stop_event = try windows.CreateEventExW(null, null, windows.CREATE_EVENT_MANUAL_RESET, windows.EVENT_ALL_ACCESS);
+        return .{ .pipe = pipe, .io_event = io_event, .stop_event = stop_event };
+    }
+
+    /// Ends the reader at once: the flag first, then the event its wait
+    /// watches. A reader between reads sees the flag before its next one;
+    /// one that started a read after its last look at the flag finds the
+    /// event already set, cancels that read and waits for it to be done.
+    /// Nothing needs to be tried again, so the join after it is bounded.
+    fn stop(self: *WslOutputDrain) void {
+        self.stopping.store(true, .release);
+        _ = SetEvent(self.stop_event);
+    }
+
+    /// Reads the pipe to its end, at most 64 KiB, on its own thread, one
+    /// overlapped read at a time (`readOnce`).
     fn run(self: *WslOutputDrain) void {
-        self.bytes = self.stdout.readToEndAlloc(std.heap.page_allocator, 64 * 1024) catch |err| {
-            self.err = err;
-            return;
+        const alloc = std.heap.page_allocator;
+        var list: std.ArrayListUnmanaged(u8) = .empty;
+        self.bytes = read: {
+            var buf: [4096]u8 = undefined;
+            while (true) {
+                if (builtin.is_test) if (test_wsl_before_read) |hook| hook();
+                if (self.stopping.load(.acquire)) break :read self.fail(&list, error.WslListCancelled);
+                const read = self.readOnce(&buf) catch |err| break :read self.fail(&list, err);
+                // The pipe's end.
+                if (read == 0) break;
+                if (list.items.len + read > wsl_output_max) break :read self.fail(&list, error.StreamTooLong);
+                list.appendSlice(alloc, buf[0..read]) catch |err| break :read self.fail(&list, err);
+            }
+            break :read list.toOwnedSlice(alloc) catch |err| self.fail(&list, err);
         };
+    }
+
+    /// One overlapped read into `buf`, with an `OVERLAPPED` that lives until
+    /// the kernel is done with it: its byte count, 0 at the pipe's end. A
+    /// `stop` cancels the read and waits for it to complete before this
+    /// returns, so `buf` is never written after.
+    fn readOnce(self: *WslOutputDrain, buf: []u8) !windows.DWORD {
+        var overlapped = std.mem.zeroes(windows.OVERLAPPED);
+        overlapped.hEvent = self.io_event;
+        if (windows.kernel32.ReadFile(self.pipe.handle, buf.ptr, @intCast(buf.len), null, &overlapped) == 0) switch (windows.GetLastError()) {
+            .IO_PENDING => {},
+            .BROKEN_PIPE, .HANDLE_EOF => return 0,
+            else => |code| return windows.unexpectedError(code),
+        };
+        const events = [2]windows.HANDLE{ self.io_event, self.stop_event };
+        const waited = windows.kernel32.WaitForMultipleObjects(events.len, &events, windows.FALSE, windows.INFINITE);
+        if (waited != windows.WAIT_OBJECT_0) _ = windows.kernel32.CancelIoEx(self.pipe.handle, &overlapped);
+        var transferred: windows.DWORD = 0;
+        if (windows.kernel32.GetOverlappedResult(self.pipe.handle, &overlapped, &transferred, windows.TRUE) == 0) return switch (windows.GetLastError()) {
+            .OPERATION_ABORTED => error.WslListCancelled,
+            .BROKEN_PIPE, .HANDLE_EOF => 0,
+            else => |code| windows.unexpectedError(code),
+        };
+        return transferred;
+    }
+
+    fn fail(self: *WslOutputDrain, list: *std.ArrayListUnmanaged(u8), err: anyerror) ?[]u8 {
+        list.deinit(std.heap.page_allocator);
+        self.err = err;
+        return null;
     }
 
     fn deinit(self: *WslOutputDrain) void {
         if (self.bytes) |bytes| std.heap.page_allocator.free(bytes);
+        windows.CloseHandle(self.io_event);
+        windows.CloseHandle(self.stop_event);
     }
 };
+
+extern "kernel32" fn SetEvent(event: windows.HANDLE) callconv(.winapi) windows.BOOL;
+
+/// Tests only: called by a drain before each read, on its own thread
+/// (`WslOutputDrain.run`), so a test can hold it there.
+var test_wsl_before_read: if (builtin.is_test) ?*const fn () void else void = if (builtin.is_test) null else {};
 
 fn listWslDistros(alloc: Allocator, exe_path: []const u8) ![][]u8 {
     var child = std.process.Child.init(&.{ exe_path, "-l", "-q" }, alloc);
     child.stdin_behavior = .Ignore;
     child.stdout_behavior = .Pipe;
-    child.stderr_behavior = .Ignore;
+    // Its errors are read on a failure, wherever wsl.exe writes them: the
+    // Store WSL writes them to stdout, and the inbox stub's stream is not
+    // known. A success's warnings on stderr are not distribution names.
+    child.stderr_behavior = .Pipe;
     child.create_no_window = true;
 
     try win32.spawnChildHoldingInheritLock(&child);
@@ -4610,94 +4691,376 @@ fn listWslDistros(alloc: Allocator, exe_path: []const u8) ![][]u8 {
         _ = child.kill() catch {};
         return error.Unexpected;
     };
-
-    // Drain concurrently so a large distro list cannot fill the anonymous
-    // pipe and prevent wsl.exe from reaching the signaled state below.
-    var drain: WslOutputDrain = .{ .stdout = stdout };
-    const drain_thread = try std.Thread.spawn(.{}, WslOutputDrain.run, .{&drain});
-    var drain_joined = false;
-    defer {
-        if (!drain_joined) drain_thread.join();
-        drain.deinit();
-    }
-
-    windows.WaitForSingleObjectEx(child.id, wsl_list_timeout_ms, false) catch |err| switch (err) {
-        error.WaitTimeOut => {
-            log.warn("WSL distro enumeration timed out exe={s} timeout_ms={}", .{
-                exe_path,
-                wsl_list_timeout_ms,
-            });
-            _ = child.kill() catch {};
-            _ = child.wait() catch {};
-            child_running = false;
-            drain_thread.join();
-            drain_joined = true;
-            return error.WslListTimeout;
-        },
-        else => {
-            _ = child.kill() catch {};
-            _ = child.wait() catch {};
-            child_running = false;
-            drain_thread.join();
-            drain_joined = true;
-            return err;
-        },
+    const stderr = child.stderr orelse {
+        _ = child.kill() catch {};
+        return error.Unexpected;
     };
 
-    drain_thread.join();
-    drain_joined = true;
-    const term = try child.wait();
+    // Drain concurrently so a large distro list cannot fill an anonymous
+    // pipe and prevent wsl.exe from reaching the signaled state below. Every
+    // path joins the threads before `child.wait()` closes the pipes
+    // (`joinWslDrains`).
+    var drain: WslOutputDrain = try .init(stdout);
+    defer drain.deinit();
+    var errors: WslOutputDrain = try .init(stderr);
+    defer errors.deinit();
+    // No thread reads the pipes yet: the errdefer may kill.
+    const drain_thread = try std.Thread.spawn(.{}, WslOutputDrain.run, .{&drain});
+    const errors_thread = std.Thread.spawn(.{}, WslOutputDrain.run, .{&errors}) catch |err| {
+        windows.TerminateProcess(child.id, 1) catch {};
+        joinWslDrains(&.{&drain}, &.{drain_thread});
+        _ = child.wait() catch {};
+        child_running = false;
+        return err;
+    };
+    const drains = [_]*WslOutputDrain{ &drain, &errors };
+    const threads = [_]std.Thread{ drain_thread, errors_thread };
+
+    windows.WaitForSingleObjectEx(child.id, wsl_list_timeout_ms, false) catch |err| {
+        if (err == error.WaitTimeOut) log.warn("WSL distro enumeration timed out exe={s} timeout_ms={}", .{
+            exe_path,
+            wsl_list_timeout_ms,
+        });
+        windows.TerminateProcess(child.id, 1) catch {};
+        joinWslDrains(&drains, &threads);
+        _ = child.wait() catch {};
+        child_running = false;
+        return if (err == error.WaitTimeOut) error.WslListTimeout else err;
+    };
+
+    joinWslDrains(&drains, &threads);
+    // The whole exit code, before `child.wait()` keeps only its low byte: a
+    // crash whose code ends in a zero byte is no success.
+    var code: windows.DWORD = undefined;
+    const exit_code: ?u32 = if (windows.kernel32.GetExitCodeProcess(child.id, &code) != 0) code else null;
+    _ = try child.wait();
     child_running = false;
+    // Stdout read whole to the pipe's end, or the list is not complete: a
+    // read that failed or was stopped may have cut it short.
     if (drain.err) |err| {
         return err;
     }
-    if (!childTermSucceeded(term)) {
-        log.warn("WSL distro enumeration exited unsuccessfully exe={s}", .{exe_path});
-        return error.WslListFailed;
+    return wslDistrosFrom(alloc, .{
+        .exit_code = exit_code,
+        .output = drain.bytes orelse "",
+        // Stderr is read only to tell an absence from a failure, when
+        // wsl.exe failed. One that could not be read whole is left out, its
+        // error with it: without it an absence reads as a failure at worst,
+        // which stays incomplete and is tried again.
+        .errors = if (errors.err == null) errors.bytes orelse "" else "",
+    }, &wslDistroRegistered);
+}
+
+/// The most `WslOutputDrain` reads from one pipe.
+const wsl_output_max = 64 * 1024;
+
+/// How long a drain is given to end on its own once `wsl.exe` has ended.
+const wsl_drain_grace_ms = 500;
+
+/// Joins the drain threads of a `wsl -l -q` that has ended, or been
+/// terminated, while its pipes are still open. `child.wait()` and `kill()`
+/// close them, and a thread still reading a handle closed under it could
+/// read another object's data once Windows reuses the value. A drain still
+/// reading after `wsl_drain_grace_ms` (a process `wsl.exe` started may still
+/// hold the pipe's write end; inferred, not seen) is stopped
+/// (`WslOutputDrain.stop`), which ends it without a retry, and counts as
+/// failed.
+fn joinWslDrains(drains: []const *WslOutputDrain, threads: []const std.Thread) void {
+    for (drains, threads) |drain, thread| {
+        windows.WaitForSingleObjectEx(thread.getHandle(), wsl_drain_grace_ms, false) catch drain.stop();
+        thread.join();
     }
-    const raw_bytes = drain.bytes orelse return error.Unexpected;
+}
 
-    // wsl.exe outputs UTF-16LE. Convert to UTF-8 before parsing.
-    // bytesAsSlice returns align(1) u16, but utf16LeToUtf8Alloc needs align(2).
-    // Copy into a properly-aligned buffer first.
-    const output = if (raw_bytes.len >= 2 and raw_bytes.len % 2 == 0) blk: {
-        const unaligned = std.mem.bytesAsSlice(u16, raw_bytes);
-        const aligned = try alloc.alloc(u16, unaligned.len);
-        defer alloc.free(aligned);
-        @memcpy(aligned, unaligned);
-        // Skip BOM if present
-        const data: []const u16 = if (aligned.len > 0 and aligned[0] == 0xFEFF) aligned[1..] else aligned;
-        break :blk std.unicode.utf16LeToUtf8Alloc(alloc, data) catch {
-            // Fallback: treat as raw UTF-8 if conversion fails
-            break :blk try alloc.dupe(u8, raw_bytes);
+/// How `wsl -l -q` ended (`listWslDistros`): its whole exit code (null
+/// when it could not be read; WSL's own errors exit -1, 0xFFFFFFFF) and
+/// what it wrote to stdout, where wsl.exe also writes its errors. The seam a
+/// test fills to stand for any WSL there is.
+const WslListRun = struct {
+    exit_code: ?u32,
+    output: []const u8,
+    /// What it wrote to stderr, read only on a failure.
+    errors: []const u8 = "",
+};
+
+/// Why WSL lists no distribution and never will until the user changes
+/// something (`classifyWslList`): a complete answer, not a failure.
+const WslAbsence = enum {
+    /// The inbox `wsl.exe` of Windows 11 24H2 with WSL not installed.
+    not_installed,
+    /// WSL's optional component is not enabled.
+    not_enabled,
+    /// WSL is there with no distribution, as versions before 2025 reported
+    /// it as an error for `wsl -l` (whether also with `-q` is not known).
+    no_distributions,
+};
+
+const WslListOutcome = union(enum) {
+    /// The distributions listed (none, too, is a complete answer), WSL's
+    /// own service distributions left out.
+    distros: [][]u8,
+    /// WSL is absent: complete, with no distribution.
+    absent: WslAbsence,
+    /// Anything else (the service failed, an unknown error): incomplete,
+    /// so discovery is tried again.
+    failed,
+};
+
+/// What `wsl -l -q` answered, read without running it. From WSL's own source
+/// (`ListDistributionsHelper`, `WslClient::Main` and `wslutil::ErrorToString`,
+/// microsoft/WSL, open since 2025) and reported output, not from a machine
+/// without WSL:
+/// - exit 0: its distributions, one a line, from stdout. With `-q` the WSL
+///   of the open source never fails for having none: it writes nothing.
+/// - a failure (exit -1 from that WSL) names its error after "Error code:"
+///   as `Wsl/<context>/<NAME>` (or the HRESULT in hex), untranslated, on
+///   stdout. `WSL_E_WSL_OPTIONAL_COMPONENT_REQUIRED`, or `0x8007019e`
+///   (`ERROR_LINUX_SUBSYSTEM_NOT_PRESENT`) from older versions, is the
+///   optional component not enabled. `WSL_E_DEFAULT_DISTRO_NOT_FOUND` is no
+///   distribution, as versions before 2025 reported `wsl -l` (microsoft/WSL
+///   #9338); whether they failed so with `-q` is not known, and today's WSL
+///   prints no code for it at all, so this reads only such an older output.
+/// - exit 1 with "wsl.exe --install": the inbox stub of Windows 11 24H2 with
+///   WSL not installed ("…is not installed. You can install by running
+///   'wsl.exe --install'."), which aborts its "Press any key to install"
+///   prompt with no console input. That is a third party's report of a
+///   console launch (rancher-desktop#7975); that the stub answers so when
+///   discovery starts it, with no window and no stdin, is inferred. A stub
+///   that waits for a key instead times the list out, which stays a failure
+///   as before. The stub is not open source, so its stream is not known
+///   either: a failure's stdout and stderr are both read. The Store WSL's
+///   own errors exit -1, so its messages that suggest
+///   `wsl.exe --install --no-distribution` are not taken for the stub.
+/// Anything else is a failure. The returned names are `alloc`'s.
+fn classifyWslList(alloc: Allocator, run: WslListRun) Allocator.Error!WslListOutcome {
+    const out = try decodeWslOutput(alloc, run.output);
+    defer alloc.free(out);
+    const exit_code = run.exit_code orelse return .failed;
+    if (exit_code == 0) {
+        // Cut short, it is no complete list: `wsl -l -q` ends every name,
+        // the last too, with a line end (`wprintf(L"%s\n", ...)`), and
+        // writes UTF-16 in whole units.
+        if (wslOutputCut(run.output, out)) return .failed;
+        return .{ .distros = try parseWslDistros(alloc, out) };
+    }
+    const err = try decodeWslOutput(alloc, run.errors);
+    defer alloc.free(err);
+    const text = try std.mem.concat(alloc, u8, &.{ out, "\n", err });
+    defer alloc.free(text);
+    if (std.ascii.indexOfIgnoreCase(text, "WSL_E_DEFAULT_DISTRO_NOT_FOUND") != null) return .{ .absent = .no_distributions };
+    if (std.ascii.indexOfIgnoreCase(text, "WSL_E_WSL_OPTIONAL_COMPONENT_REQUIRED") != null or
+        std.ascii.indexOfIgnoreCase(text, "0x8007019e") != null) return .{ .absent = .not_enabled };
+    if (exit_code == 1 and std.ascii.indexOfIgnoreCase(text, "wsl.exe --install") != null) return .{ .absent = .not_installed };
+    return .failed;
+}
+
+/// `classifyWslList` as discovery takes it: the distributions, none when WSL
+/// is absent (a complete list), or `error.WslListFailed` (incomplete). WSL's
+/// own answer of none (an empty list, or "no distribution") is checked
+/// against the distributions Windows has registered (`registered`,
+/// `wslDistroRegistered`): a list that came back empty (microsoft/WSL#41937)
+/// or a wrong "no distribution" (stale binaries) is not taken as complete.
+/// WSL not installed or not enabled is: a distribution still registered then
+/// is a leftover that cannot run.
+fn wslDistrosFrom(alloc: Allocator, run: WslListRun, registered: *const fn () bool) ![][]u8 {
+    return switch (try classifyWslList(alloc, run)) {
+        .distros => |names| distros: {
+            if (names.len != 0 or !registered()) break :distros names;
+            alloc.free(names);
+            log.warn("WSL listed no distribution though one is registered; the profile list is incomplete", .{});
+            break :distros error.WslListFailed;
+        },
+        .absent => |why| absent: {
+            if (why == .no_distributions and registered()) {
+                log.warn("WSL answered it has no distribution ({t}) though one is registered; the profile list is incomplete", .{why});
+                break :absent error.WslListFailed;
+            }
+            log.info("WSL has no distribution to list ({t}); the profile list is complete without one", .{why});
+            break :absent try alloc.alloc([]u8, 0);
+        },
+        .failed => failed: {
+            log.warn("WSL distro enumeration exited unsuccessfully exit_code={?d}", .{run.exit_code});
+            break :failed error.WslListFailed;
+        },
+    };
+}
+
+/// Whether Windows has a WSL distribution registered for this user, one not
+/// of the service distributions (`isWslServiceDistro`): the subkeys of
+/// `HKCU\Software\Microsoft\Windows\CurrentVersion\Lxss` and their
+/// `DistributionName`, the key Windows Terminal's `WslDistroGenerator` reads.
+fn wslDistroRegistered() bool {
+    if (builtin.os.tag != .windows) return false;
+    var registry: LxssRegistry = .{};
+    return lxssRecordsDistribution(&registry);
+}
+
+/// A step of reading Windows' record of the WSL distributions: what it
+/// found, that there is nothing there, or that it could not be read.
+fn LxssRead(comptime T: type) type {
+    return union(enum) { found: T, missing, failed };
+}
+
+/// The most subkeys `lxssRecordsDistribution` reads.
+const lxss_subkeys_max = 256;
+
+/// Whether `reader` (`LxssRegistry`, or a test's) records a WSL distribution
+/// other than WSL's service ones: false only when it records none for sure.
+/// No key, or none past the last subkey, is none; a subkey without a
+/// `DistributionName` is no distribution, as Windows Terminal skips it.
+/// Anything it cannot read (the key, a subkey, a name) counts as one
+/// registered, and so does a subkey past the most it reads: an answer of
+/// none from WSL is then not taken as complete, which errs toward trying
+/// again. Windows Terminal also skips some subkeys this counts (`Modern`
+/// ones, and names not 38 characters long), which errs the same way.
+fn lxssRecordsDistribution(reader: anytype) bool {
+    switch (reader.open()) {
+        .found => {},
+        .missing => return false,
+        .failed => return true,
+    }
+    defer reader.close();
+    var index: u32 = 0;
+    while (true) : (index += 1) {
+        var name_buf: [256:0]u16 = undefined;
+        const name = switch (reader.subkey(index, &name_buf)) {
+            .found => |name| name,
+            .missing => return false,
+            .failed => return true,
         };
-    } else try alloc.dupe(u8, raw_bytes);
-    defer alloc.free(output);
+        if (index == lxss_subkeys_max) return true;
+        var text_buf: [1024]u8 = undefined;
+        const distro = switch (reader.distributionName(name, &text_buf)) {
+            .found => |distro| distro,
+            .missing => continue,
+            .failed => return true,
+        };
+        if (!isWslServiceDistro(distro)) return true;
+    }
+}
 
+/// `lxssRecordsDistribution`'s reader of the registry, the current user's.
+const LxssRegistry = struct {
+    key: windows.HKEY = undefined,
+
+    // The Win32 errors these tell apart.
+    const error_file_not_found = 2;
+    const error_no_more_items = 259;
+
+    fn open(self: *LxssRegistry) LxssRead(void) {
+        const path = std.unicode.utf8ToUtf16LeStringLiteral("Software\\Microsoft\\Windows\\CurrentVersion\\Lxss");
+        return switch (windows.advapi32.RegOpenKeyExW(windows.HKEY_CURRENT_USER, path, 0, windows.KEY_READ, &self.key)) {
+            0 => .{ .found = {} },
+            error_file_not_found => .missing,
+            else => .failed,
+        };
+    }
+
+    fn close(self: *LxssRegistry) void {
+        _ = windows.advapi32.RegCloseKey(self.key);
+    }
+
+    fn subkey(self: *LxssRegistry, index: u32, buf: *[256:0]u16) LxssRead([:0]const u16) {
+        var len: u32 = buf.len;
+        return switch (RegEnumKeyExW(self.key, index, buf, &len, null, null, null, null)) {
+            0 => found: {
+                buf[len] = 0;
+                break :found .{ .found = buf[0..len :0] };
+            },
+            error_no_more_items => .missing,
+            else => .failed,
+        };
+    }
+
+    /// The subkey's `DistributionName`, as WTF-8 in `out`. An empty one is
+    /// none; one of another type, or too long for `out`, cannot be read.
+    fn distributionName(self: *LxssRegistry, name: [:0]const u16, out: []u8) LxssRead([]const u8) {
+        var buf: [windows.PATH_MAX_WIDE:0]u16 = undefined;
+        var bytes: windows.DWORD = @sizeOf(@TypeOf(buf));
+        switch (windows.advapi32.RegGetValueW(
+            self.key,
+            name,
+            std.unicode.utf8ToUtf16LeStringLiteral("DistributionName"),
+            windows.advapi32.RRF.RT_REG_SZ,
+            null,
+            @ptrCast(&buf),
+            &bytes,
+        )) {
+            0 => {},
+            error_file_not_found => return .missing,
+            else => return .failed,
+        }
+        // The size counts the terminator.
+        if (bytes < @sizeOf(u16) or bytes % @sizeOf(u16) != 0) return .failed;
+        const len = bytes / @sizeOf(u16) - 1;
+        if (len == 0) return .missing;
+        var fixed: std.heap.FixedBufferAllocator = .init(out);
+        const text = std.unicode.wtf16LeToWtf8Alloc(fixed.allocator(), buf[0..len]) catch return .failed;
+        return .{ .found = text };
+    }
+};
+
+extern "advapi32" fn RegEnumKeyExW(
+    key: windows.HKEY,
+    index: u32,
+    name: [*]u16,
+    name_len: *u32,
+    reserved: ?*u32,
+    class: ?[*]u16,
+    class_len: ?*u32,
+    last_write: ?*windows.FILETIME,
+) callconv(.winapi) i32;
+
+/// wsl.exe's output as UTF-8. It writes UTF-16LE unless `WSL_UTF8` is set;
+/// UTF-16 is told by its byte order mark, or by a zero byte in an odd place
+/// (every ASCII character has one, the line ends included), so an
+/// even-length UTF-8 answer is not read as UTF-16. A last odd byte (a read
+/// cut short) is left out. An unpaired surrogate is kept as WTF-8.
+fn decodeWslOutput(alloc: Allocator, raw: []const u8) Allocator.Error![]u8 {
+    if (!wslOutputUtf16(raw)) return try alloc.dupe(u8, raw);
+    // `bytesAsSlice` gives align(1) units, and the decoder wants align(2).
+    const unaligned = std.mem.bytesAsSlice(u16, raw[0 .. raw.len - raw.len % 2]);
+    const aligned = try alloc.alloc(u16, unaligned.len);
+    defer alloc.free(aligned);
+    @memcpy(aligned, unaligned);
+    const data: []const u16 = if (aligned.len > 0 and aligned[0] == 0xFEFF) aligned[1..] else aligned;
+    return std.unicode.wtf16LeToWtf8Alloc(alloc, data);
+}
+
+/// Whether wsl.exe wrote `raw` as UTF-16: a byte order mark, or a zero byte
+/// in an odd place (`decodeWslOutput`).
+fn wslOutputUtf16(raw: []const u8) bool {
+    const bom = raw.len >= 2 and raw[0] == 0xFF and raw[1] == 0xFE;
+    return raw.len >= 2 and (bom or for (raw, 0..) |byte, at| {
+        if (at % 2 == 1 and byte == 0) break true;
+    } else false);
+}
+
+/// Whether `wsl -l -q`'s output (`raw`, decoded as `text`) was cut short:
+/// UTF-16 of an odd byte count, or a last line with no line end. A cut that
+/// falls just after a line end cannot be told from a whole list.
+fn wslOutputCut(raw: []const u8, text: []const u8) bool {
+    if (wslOutputUtf16(raw) and raw.len % 2 != 0) return true;
+    return text.len != 0 and text[text.len - 1] != '\n';
+}
+
+/// The distribution names in `wsl -l -q`'s output, one a line, the service
+/// distributions of Docker Desktop and Rancher Desktop left out (as Windows
+/// Terminal does).
+fn parseWslDistros(alloc: Allocator, text: []const u8) Allocator.Error![][]u8 {
     var result: std.ArrayList([]u8) = .empty;
     errdefer {
         deinitOwnedStringList(alloc, result.items);
         result.deinit(alloc);
     }
-
-    var it = std.mem.splitAny(u8, output, "\r\n");
+    var it = std.mem.splitAny(u8, text, "\r\n");
     while (it.next()) |line_raw| {
         const line = std.mem.trim(u8, line_raw, " \t\r\n\x00");
         if (line.len == 0) continue;
-        // Filter out Docker Desktop and Rancher Desktop service distros
-        // (matches Windows Terminal behavior)
         if (isWslServiceDistro(line)) continue;
         try result.append(alloc, try alloc.dupe(u8, line));
     }
-
     return try result.toOwnedSlice(alloc);
-}
-
-fn childTermSucceeded(term: std.process.Child.Term) bool {
-    return switch (term) {
-        .Exited => |code| code == 0,
-        else => false,
-    };
 }
 
 /// Returns true for WSL distros that are internal service distributions
@@ -5586,6 +5949,439 @@ test "profile discovery reports a retryable WSL probe failure" {
     try testing.expectEqual(ProfileKind.wsl_default, recovered[0].kind);
 }
 
+/// `text` as wsl.exe writes it by default: UTF-16LE, from `alloc`.
+fn testWslUtf16(alloc: Allocator, text: []const u8) ![]u8 {
+    const units = try std.unicode.utf8ToUtf16LeAlloc(alloc, text);
+    defer alloc.free(units);
+    return try alloc.dupe(u8, std.mem.sliceAsBytes(units));
+}
+
+/// A case's stdout as wsl.exe would write it: UTF-16LE unless the case says
+/// UTF-8, after a byte order mark or one byte short when it says so.
+fn testWslOutput(alloc: Allocator, case: TestWslCase) ![]u8 {
+    if (!case.utf16) return try alloc.dupe(u8, case.text);
+    const units = try testWslUtf16(alloc, case.text);
+    defer alloc.free(units);
+    const body = if (case.cut) units[0 .. units.len - 1] else units;
+    return try std.mem.concat(alloc, u8, &.{ if (case.bom) "\xFF\xFE" else "", body });
+}
+
+/// What a `wsl -l -q` stands for in a discovery test (`testWslList`).
+threadlocal var test_wsl_run: WslListRun = .{ .exit_code = 0, .output = "" };
+
+/// A `list_wsl` for discovery that answers `test_wsl_run`, read as a real
+/// run is, with no distribution registered: no wsl.exe runs.
+fn testWslList(alloc: Allocator, _: []const u8) ![][]u8 {
+    return wslDistrosFrom(alloc, test_wsl_run, &testNoneRegistered);
+}
+
+fn testNoneRegistered() bool {
+    return false;
+}
+
+fn testOneRegistered() bool {
+    return true;
+}
+
+const TestWslCase = struct {
+    name: []const u8,
+    exit_code: ?u32,
+    text: []const u8,
+    /// What it wrote to stderr, as UTF-16LE when `utf16`.
+    errors: []const u8 = "",
+    /// The output starts with a byte order mark, or ends one byte short.
+    bom: bool = false,
+    cut: bool = false,
+    /// The output is UTF-16LE, as wsl.exe writes it unless `WSL_UTF8` is set.
+    utf16: bool = true,
+    complete: bool,
+    /// The distributions discovery lists, one a line.
+    distros: []const u8 = "",
+};
+
+const test_wsl_cases = [_]TestWslCase{
+    // WSL with distributions; its service distributions are left out.
+    .{ .name = "distributions", .exit_code = 0, .text = "Ubuntu\r\ndocker-desktop\r\nDebian\r\n", .complete = true, .distros = "Ubuntu\nDebian\n" },
+    // `WSL_UTF8=1`, an even number of bytes: still UTF-8.
+    .{ .name = "UTF-8", .exit_code = 0, .text = "Ubuntu\r\n", .utf16 = false, .complete = true, .distros = "Ubuntu\n" },
+    // A byte order mark; a read one byte short; a name with no ASCII.
+    .{ .name = "BOM", .exit_code = 0, .text = "Ubuntu\r\n", .bom = true, .complete = true, .distros = "Ubuntu\n" },
+    // Cut short: a byte missing from the last line end, within a name, or
+    // between a name and its line end. None is a complete list.
+    .{ .name = "cut short", .exit_code = 0, .text = "Ubuntu\r\nDebian\r\n", .cut = true, .complete = false },
+    .{ .name = "cut within a name", .exit_code = 0, .text = "Ubuntu\r\nDeb", .complete = false },
+    .{ .name = "cut between distributions", .exit_code = 0, .text = "Ubuntu\r\nDebian", .complete = false },
+    .{ .name = "cut in a line end", .exit_code = 0, .text = "Ubuntu\r", .complete = false },
+    .{ .name = "no ASCII", .exit_code = 0, .text = "\u{65e5}\u{672c}\r\n", .complete = true, .distros = "\u{65e5}\u{672c}\n" },
+    // A success's warning on stderr is no distribution.
+    .{ .name = "warning", .exit_code = 0, .text = "Ubuntu\r\n", .errors = "wsl: A localhost proxy configuration was detected but not mirrored into WSL.\r\n", .complete = true, .distros = "Ubuntu\n" },
+    // The Store WSL with none: `-q` lists nothing, and succeeds.
+    .{ .name = "none listed", .exit_code = 0, .text = "", .complete = true },
+    // An older WSL with none: `-l` failed so (exit -1); whether also with
+    // `-q` is not known.
+    .{
+        .name = "no distribution",
+        .exit_code = 0xFFFF_FFFF,
+        .text = "Windows Subsystem for Linux has no installed distributions.\r\nDistributions can be installed by visiting the Microsoft Store:\r\nhttps://aka.ms/wslstore\r\nError code: Wsl/WSL_E_DEFAULT_DISTRO_NOT_FOUND\r\n",
+        .complete = true,
+    },
+    // The optional component is not enabled, in another language: the code
+    // is what is read.
+    .{
+        .name = "component not enabled",
+        .exit_code = 0xFFFF_FFFF,
+        .text = "Diese Anwendung erfordert die optionale Komponente Windows-Subsystem f\u{fc}r Linux.\r\nFehlercode: Wsl/WSL_E_WSL_OPTIONAL_COMPONENT_REQUIRED\r\n",
+        .complete = true,
+    },
+    .{ .name = "subsystem not present", .exit_code = 0xFFFF_FFFF, .text = "The Windows Subsystem for Linux has not been enabled.\r\nError code: Wsl/0x8007019e\r\n", .complete = true },
+    // Windows 11 24H2's inbox wsl.exe with WSL not installed, on stdout
+    // or on stderr (its stream is not known).
+    .{
+        .name = "not installed, stderr",
+        .exit_code = 1,
+        .text = "",
+        .errors = "The Windows Subsystem for Linux is not installed. You can install by running 'wsl.exe --install'.\r\nOperation aborted\r\n",
+        .complete = true,
+    },
+    .{
+        .name = "not installed",
+        .exit_code = 1,
+        .text = "The Windows Subsystem for Linux is not installed. You can install by running 'wsl.exe --install'.\r\nFor more information please visit https://aka.ms/wslinstall\r\nPress any key to install Windows Subsystem for Linux.\r\nOperation aborted\r\n",
+        .complete = true,
+    },
+    // WSL is there and the list failed: tried again.
+    .{ .name = "service failure", .exit_code = 0xFFFF_FFFF, .text = "Catastrophic failure\r\nError code: Wsl/Service/E_UNEXPECTED\r\n", .complete = false },
+    .{ .name = "service missing", .exit_code = 0xFFFF_FFFF, .text = "Error code: Wsl/Service/ERROR_SERVICE_DOES_NOT_EXIST\r\n", .complete = false },
+    // The Store WSL's own message that suggests an install fails with -1:
+    // not the stub.
+    .{
+        .name = "install suggested",
+        .exit_code = 0xFFFF_FFFF,
+        .text = "Failed to start virtual networking - please install the optional component Virtual Machine Platform by running: wsl.exe --install --no-distribution\r\nError code: Wsl/Service/0x80070422\r\n",
+        .complete = false,
+    },
+    .{ .name = "exit 1 otherwise", .exit_code = 1, .text = "The system cannot find the file specified.\r\n", .complete = false },
+    .{ .name = "no exit", .exit_code = null, .text = "", .complete = false },
+    // A crash whose code ends in a zero byte is no success.
+    .{ .name = "crash", .exit_code = 0xC000_0100, .text = "", .complete = false },
+};
+
+test "wsl -l -q is read as distributions, as WSL absent (complete), or as a failure (tried again)" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    for (test_wsl_cases) |case| {
+        const output = try testWslOutput(alloc, case);
+        defer alloc.free(output);
+        const errors = if (case.utf16) try testWslUtf16(alloc, case.errors) else try alloc.dupe(u8, case.errors);
+        defer alloc.free(errors);
+        const outcome = try classifyWslList(alloc, .{ .exit_code = case.exit_code, .output = output, .errors = errors });
+        switch (outcome) {
+            .distros => |names| {
+                defer deinitOwnedStringList(alloc, names);
+                var joined: std.Io.Writer.Allocating = .init(alloc);
+                defer joined.deinit();
+                for (names) |name| try joined.writer.print("{s}\n", .{name});
+                testing.expectEqualStrings(case.distros, joined.written()) catch |err| {
+                    std.debug.print("case {s}\n", .{case.name});
+                    return err;
+                };
+                try testing.expect(case.complete);
+            },
+            .absent => {
+                if (!case.complete or case.distros.len != 0) std.debug.print("case {s}\n", .{case.name});
+                try testing.expect(case.complete and case.distros.len == 0);
+            },
+            .failed => {
+                if (case.complete) std.debug.print("case {s}\n", .{case.name});
+                try testing.expect(!case.complete);
+            },
+        }
+    }
+    // Each absence says which it is.
+    for ([_]struct { name: []const u8, why: WslAbsence }{
+        .{ .name = "no distribution", .why = .no_distributions },
+        .{ .name = "component not enabled", .why = .not_enabled },
+        .{ .name = "subsystem not present", .why = .not_enabled },
+        .{ .name = "not installed", .why = .not_installed },
+        .{ .name = "not installed, stderr", .why = .not_installed },
+    }) |want| {
+        const case = for (test_wsl_cases) |case| {
+            if (std.mem.eql(u8, case.name, want.name)) break case;
+        } else return error.TestExpectedCase;
+        const output = try testWslUtf16(alloc, case.text);
+        defer alloc.free(output);
+        const errors = try testWslUtf16(alloc, case.errors);
+        defer alloc.free(errors);
+        const outcome = try classifyWslList(alloc, .{ .exit_code = case.exit_code, .output = output, .errors = errors });
+        try testing.expectEqual(WslListOutcome{ .absent = want.why }, outcome);
+    }
+}
+
+test "wsl -l -q answering none is not complete while Windows has a distribution registered" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    for (test_wsl_cases) |case| {
+        const output = try testWslOutput(alloc, case);
+        defer alloc.free(output);
+        const errors = if (case.utf16) try testWslUtf16(alloc, case.errors) else try alloc.dupe(u8, case.errors);
+        defer alloc.free(errors);
+        const run: WslListRun = .{ .exit_code = case.exit_code, .output = output, .errors = errors };
+        // With none registered, each case is as `classifyWslList` reads it.
+        if (wslDistrosFrom(alloc, run, &testNoneRegistered)) |names| {
+            deinitOwnedStringList(alloc, names);
+            try testing.expect(case.complete);
+        } else |err| {
+            try testing.expectEqual(error.WslListFailed, err);
+            try testing.expect(!case.complete);
+        }
+        // With one registered, WSL's own answer of none (an empty list, "no
+        // distribution") is a failure. WSL not installed or not enabled is
+        // still complete: a distribution registered then cannot run. A list
+        // of distributions is still read.
+        const outcome = try classifyWslList(alloc, run);
+        const checked = switch (outcome) {
+            .distros => |names| names.len == 0,
+            .absent => |why| why == .no_distributions,
+            .failed => false,
+        };
+        if (outcome == .distros) deinitOwnedStringList(alloc, outcome.distros);
+        if (wslDistrosFrom(alloc, run, &testOneRegistered)) |names| {
+            defer deinitOwnedStringList(alloc, names);
+            try testing.expect(case.complete and !checked);
+        } else |err| {
+            try testing.expectEqual(error.WslListFailed, err);
+            try testing.expect(checked or !case.complete);
+        }
+    }
+}
+
+/// A pipe for a drain test: overlapped for reading, as `std.process.Child`
+/// makes a child's stdout and stderr, or not.
+fn testWslPipe(read_end: *windows.HANDLE, write_end: *windows.HANDLE) !void {
+    const Count = struct {
+        var next: u32 = 0;
+    };
+    Count.next += 1;
+    var name_buf: [96]u8 = undefined;
+    const name = try std.fmt.bufPrint(&name_buf, "\\\\.\\pipe\\noctty-test-wsl-drain-{d}-{d}", .{ windows.GetCurrentProcessId(), Count.next });
+    var wide: [96:0]u16 = undefined;
+    const len = try std.unicode.utf8ToUtf16Le(&wide, name);
+    wide[len] = 0;
+    const rd = windows.kernel32.CreateNamedPipeW(wide[0..len :0], windows.PIPE_ACCESS_INBOUND | windows.FILE_FLAG_OVERLAPPED, windows.PIPE_TYPE_BYTE, 1, 4096, 4096, 0, null);
+    if (rd == windows.INVALID_HANDLE_VALUE) return error.Unexpected;
+    errdefer windows.CloseHandle(rd);
+    const wr = windows.kernel32.CreateFileW(wide[0..len :0], windows.GENERIC_WRITE, 0, null, windows.OPEN_EXISTING, windows.FILE_ATTRIBUTE_NORMAL, null);
+    if (wr == windows.INVALID_HANDLE_VALUE) return error.Unexpected;
+    read_end.* = rd;
+    write_end.* = wr;
+}
+
+/// `joinWslDrains` over one drain, on a thread of its own, which the test
+/// waits for at most `limit_ms`. A join still running then is unblocked by
+/// closing the pipe's write end (`write_end`, which the caller hands over),
+/// and the test fails rather than hangs.
+fn testJoinWithin(drain: *WslOutputDrain, thread: std.Thread, write_end: windows.HANDLE, limit_ms: u32) !void {
+    const Joiner = struct {
+        fn run(d: *WslOutputDrain, t: std.Thread) void {
+            joinWslDrains(&.{d}, &.{t});
+        }
+    };
+    const joiner = try std.Thread.spawn(.{}, Joiner.run, .{ drain, thread });
+    const ended = if (windows.WaitForSingleObjectEx(joiner.getHandle(), limit_ms, false)) |_| true else |_| false;
+    windows.CloseHandle(write_end);
+    joiner.join();
+    if (!ended) return error.TestJoinHung;
+}
+
+test "a WSL drain ends with what came when its pipe ends, and is stopped, then joined, when a held write end keeps it open" {
+    const testing = std.testing;
+    // The write end closes: the drain ends with what came.
+    {
+        var read_end: windows.HANDLE = undefined;
+        var write_end: windows.HANDLE = undefined;
+        try testWslPipe(&read_end, &write_end);
+        defer windows.CloseHandle(read_end);
+        var drain: WslOutputDrain = try .init(.{ .handle = read_end });
+        defer drain.deinit();
+        _ = try windows.WriteFile(write_end, "Ubuntu\r\n", null);
+        windows.CloseHandle(write_end);
+        const thread = try std.Thread.spawn(.{}, WslOutputDrain.run, .{&drain});
+        joinWslDrains(&.{&drain}, &.{thread});
+        try testing.expect(drain.err == null);
+        try testing.expectEqualStrings("Ubuntu\r\n", drain.bytes orelse return error.TestExpectedBytes);
+    }
+    // The write end stays open, as a process `wsl.exe` started may hold it:
+    // the drain is stopped, fails, and is joined while its pipe is open.
+    {
+        var read_end: windows.HANDLE = undefined;
+        var write_end: windows.HANDLE = undefined;
+        try testWslPipe(&read_end, &write_end);
+        var drain: WslOutputDrain = try .init(.{ .handle = read_end });
+        defer drain.deinit();
+        _ = try windows.WriteFile(write_end, "Ubuntu\r\n", null);
+        const thread = try std.Thread.spawn(.{}, WslOutputDrain.run, .{&drain});
+        try testJoinWithin(&drain, thread, write_end, 3000);
+        try testing.expectEqual(@as(?anyerror, error.WslListCancelled), drain.err);
+        try testing.expect(drain.bytes == null);
+        // Closed only once the drain is joined.
+        windows.CloseHandle(read_end);
+    }
+}
+
+test "a WSL drain held outside its read until long after it was stopped still ends, and the join with it" {
+    const testing = std.testing;
+    const Hold = struct {
+        var at_hook: ?windows.HANDLE = null;
+        var release: ?windows.HANDLE = null;
+        var held = false;
+
+        /// The first read waits until the test releases it.
+        fn before() void {
+            if (held) return;
+            held = true;
+            _ = SetEvent(at_hook.?);
+            windows.WaitForSingleObjectEx(release.?, windows.INFINITE, false) catch {};
+        }
+    };
+    Hold.at_hook = try windows.CreateEventExW(null, null, windows.CREATE_EVENT_MANUAL_RESET, windows.EVENT_ALL_ACCESS);
+    defer windows.CloseHandle(Hold.at_hook.?);
+    Hold.release = try windows.CreateEventExW(null, null, windows.CREATE_EVENT_MANUAL_RESET, windows.EVENT_ALL_ACCESS);
+    defer windows.CloseHandle(Hold.release.?);
+    Hold.held = false;
+    test_wsl_before_read = &Hold.before;
+    defer test_wsl_before_read = null;
+
+    var read_end: windows.HANDLE = undefined;
+    var write_end: windows.HANDLE = undefined;
+    try testWslPipe(&read_end, &write_end);
+    var drain: WslOutputDrain = try .init(.{ .handle = read_end });
+    defer drain.deinit();
+    // The write end stays open, and the reader is held before its first
+    // read while the join gives it its grace and stops it.
+    const thread = try std.Thread.spawn(.{}, WslOutputDrain.run, .{&drain});
+    try windows.WaitForSingleObjectEx(Hold.at_hook.?, 3000, false);
+    const Release = struct {
+        fn run() void {
+            // Past the grace and the 1 s of cancels the old join tried.
+            std.Thread.sleep(2 * std.time.ns_per_s);
+            _ = SetEvent(Hold.release.?);
+        }
+    };
+    const releaser = try std.Thread.spawn(.{}, Release.run, .{});
+    defer releaser.join();
+    // Released, the reader sees it was stopped and ends; the join returns
+    // well within the limit.
+    try testJoinWithin(&drain, thread, write_end, 6000);
+    try testing.expectEqual(@as(?anyerror, error.WslListCancelled), drain.err);
+    windows.CloseHandle(read_end);
+}
+
+/// A stand-in for Windows' record of the WSL distributions
+/// (`lxssRecordsDistribution`).
+const TestLxss = struct {
+    opened: enum { found, missing, failed } = .found,
+    /// Each subkey's `DistributionName`; null for none.
+    names: []const ?[]const u8 = &.{},
+    /// Service distributions' subkeys after `names`, as many as this.
+    services: u32 = 0,
+    /// The subkey whose name, or whose `DistributionName`, cannot be read.
+    subkey_fails: ?u32 = null,
+    name_fails: ?u32 = null,
+    closed: bool = false,
+
+    fn open(self: *TestLxss) LxssRead(void) {
+        return switch (self.opened) {
+            .found => .{ .found = {} },
+            .missing => .missing,
+            .failed => .failed,
+        };
+    }
+
+    fn close(self: *TestLxss) void {
+        self.closed = true;
+    }
+
+    fn subkey(self: *TestLxss, index: u32, buf: *[256:0]u16) LxssRead([:0]const u16) {
+        if (self.subkey_fails == index) return .failed;
+        if (index >= self.names.len + self.services) return .missing;
+        // The index, for `distributionName`.
+        buf[0] = @intCast(index + 1);
+        buf[1] = 0;
+        return .{ .found = buf[0..1 :0] };
+    }
+
+    fn distributionName(self: *TestLxss, name: [:0]const u16, _: []u8) LxssRead([]const u8) {
+        const index = name[0] - 1;
+        if (self.name_fails == index) return .failed;
+        if (index >= self.names.len) return .{ .found = "docker-desktop" };
+        return if (self.names[index]) |distro| .{ .found = distro } else .missing;
+    }
+};
+
+test "Windows' record of the WSL distributions counts one registered unless it records none for sure" {
+    const testing = std.testing;
+    const Case = struct { lxss: TestLxss, registered: bool };
+    for ([_]Case{
+        // No key, no subkey, or only WSL's service distributions and a
+        // subkey with no name: none.
+        .{ .lxss = .{ .opened = .missing }, .registered = false },
+        .{ .lxss = .{}, .registered = false },
+        .{ .lxss = .{ .names = &.{ "docker-desktop", null }, .services = 2 }, .registered = false },
+        // A distribution.
+        .{ .lxss = .{ .names = &.{ null, "Ubuntu" } }, .registered = true },
+        // The key cannot be opened (not because it is missing).
+        .{ .lxss = .{ .opened = .failed }, .registered = true },
+        // A subkey's `DistributionName` cannot be read.
+        .{ .lxss = .{ .names = &.{ "docker-desktop", "rancher-desktop" }, .name_fails = 1 }, .registered = true },
+        // A subkey cannot be listed.
+        .{ .lxss = .{ .names = &.{"docker-desktop"}, .subkey_fails = 1 }, .registered = true },
+        // As many subkeys as it reads: all read, none. One more: not read.
+        .{ .lxss = .{ .services = lxss_subkeys_max }, .registered = false },
+        .{ .lxss = .{ .services = lxss_subkeys_max + 1 }, .registered = true },
+    }) |case| {
+        var lxss = case.lxss;
+        try testing.expectEqual(case.registered, lxssRecordsDistribution(&lxss));
+        // A key it opened is closed.
+        try testing.expectEqual(case.lxss.opened == .found, lxss.closed);
+    }
+}
+
+test "profile discovery is complete when WSL is absent, and incomplete when its list failed" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    const Stages = struct {
+        fn lookup(a: Allocator, exe: []const u8) !?[]u8 {
+            if (std.mem.eql(u8, exe, "wsl.exe")) return try a.dupe(u8, "C:\\Windows\\System32\\wsl.exe");
+            if (std.mem.eql(u8, exe, "cmd.exe")) return try a.dupe(u8, "C:\\Windows\\System32\\cmd.exe");
+            return null;
+        }
+        // `wsl --status` exits whatever WSL's state: the stub counts as there.
+        fn probe(_: Allocator, _: []const u8) !bool {
+            return true;
+        }
+    };
+    for (test_wsl_cases) |case| {
+        const output = try testWslOutput(alloc, case);
+        defer alloc.free(output);
+        const errors = if (case.utf16) try testWslUtf16(alloc, case.errors) else try alloc.dupe(u8, case.errors);
+        defer alloc.free(errors);
+        test_wsl_run = .{ .exit_code = case.exit_code, .output = output, .errors = errors };
+        var complete = true;
+        const profiles = try listProfilesWithLookupAndProbeAndWslListAndOrder(alloc, Stages.lookup, Stages.probe, testWslList, null, &complete);
+        defer deinitProfiles(alloc, profiles);
+        if (complete != case.complete) std.debug.print("case {s}\n", .{case.name});
+        try testing.expectEqual(case.complete, complete);
+        // The other profiles are there either way, and a distribution only
+        // when one was listed.
+        var distros: usize = 0;
+        for (profiles) |profile| {
+            if (profile.kind == .wsl_distro) distros += 1;
+        }
+        try testing.expectEqual(std.mem.count(u8, case.distros, "\n"), distros);
+        try testing.expectEqualStrings("cmd.exe", profiles[profiles.len - 1].key);
+    }
+}
+
 test "profile discovery keeps the other profiles when the WSL list fails" {
     const testing = std.testing;
     const alloc = testing.allocator;
@@ -5635,12 +6431,6 @@ test "profile discovery keeps the other profiles when the WSL list fails" {
         null,
         &complete,
     ));
-}
-
-test "WSL enumeration requires a successful child exit" {
-    try std.testing.expect(childTermSucceeded(.{ .Exited = 0 }));
-    try std.testing.expect(!childTermSucceeded(.{ .Exited = 1 }));
-    try std.testing.expect(!childTermSucceeded(.{ .Unknown = 1 }));
 }
 
 test "ssh profiles append after shells with alias-only argv" {
