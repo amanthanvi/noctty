@@ -8184,8 +8184,9 @@ pub const SettingsWindow = struct {
         // The page's lists follow every change once a move or a hide wrote
         // them: a profile added since takes its place in them, one removed
         // leaves them (`settleProfileLists`).
-        // One that cannot be worked out (no memory) is marked, and Save
-        // works it out first (`settleBeforeSave`).
+        // One that cannot be worked out (no memory, or a page with part of
+        // the profiles) is marked, and Save works it out first
+        // (`settleBeforeSave`).
         self.profile_lists_unsettled = false;
         if (self.profileListsEdited()) self.profile_lists_unsettled = !(self.settleDraftLists() catch false);
         self.refreshProfileChanges();
@@ -8203,13 +8204,14 @@ pub const SettingsWindow = struct {
 
     /// The draft's lists worked out again from the page (`settleProfileLists`)
     /// and the page built again when they changed. False when the page has
-    /// no model to work them out from (it could not be built); true when
-    /// there is nothing to work out (part of the list: they stay as the last
-    /// move or hide left them). An allocation that fails is an error.
+    /// no whole list to work them out from: no model (it could not be
+    /// built), or one with part of the profiles (a listing that ran out of
+    /// memory leaves the user profiles alone; a discovery may end without
+    /// them all). Lists written from it would leave the rest out. An
+    /// allocation that fails is an error.
     fn settleDraftLists(self: *SettingsWindow) std.mem.Allocator.Error!bool {
         const pending = if (self.pending) |*config| config else return true;
-        if (!self.profile_model.built()) return false;
-        if (!self.profile_model.complete) return true;
+        if (!self.profile_model.built() or !self.profile_model.complete) return false;
         var arena_state: std.heap.ArenaAllocator = .init(self.handle.alloc);
         defer arena_state.deinit();
         if (@import("builtin").is_test and test_profile_state_fails) return error.OutOfMemory;
@@ -8230,13 +8232,22 @@ pub const SettingsWindow = struct {
         if (!self.profile_lists_unsettled) return true;
         self.profile_stale = true;
         self.ensureProfileModel();
+        // Part of the list: the app is asked for the rest, which may come at
+        // once (`profilesChanged`), or later, for the next Save.
+        if (self.profile_model.built() and !self.profile_model.complete) {
+            if (self.handle.findAllProfiles) |find| find(self.handle.ctx);
+            self.ensureProfileModel();
+        }
         const settled = self.settleDraftLists() catch false;
         if (settled) {
             self.profile_lists_unsettled = false;
             self.refreshProfileChanges();
             return true;
         }
-        self.setProfileNote(.refused, "Nothing was saved: there was not enough memory to update the profile order for the last change. Your edits are kept; save again.", .{});
+        if (self.profile_model.built() and !self.profile_model.complete)
+            self.setProfileNote(.refused, "Nothing was saved: noctty is looking for the profiles on this computer, and the profile order can be saved once it has them all. Your edits are kept; save again.", .{})
+        else
+            self.setProfileNote(.refused, "Nothing was saved: there was not enough memory to update the profile order for the last change. Your edits are kept; save again.", .{});
         return false;
     }
 
@@ -24915,6 +24926,76 @@ test "settings a profile change whose lists could not be worked out is worked ou
                 // order names the new profile.
                 SettingsWindow.test_profile_state_fails = false;
                 SettingsWindow.test_profile_settle_fails = false;
+                settings.save();
+                try std.testing.expect(!settings.profile_lists_unsettled);
+                const after = try tmp.dir.readFileAlloc(alloc, "noctty.conf", 1 << 16);
+                defer alloc.free(after);
+                try std.testing.expect(std.mem.indexOf(u8, after, "profile-order = user:dev\n") != null);
+            }
+        }
+    }.body);
+}
+
+test "settings a profile change on a page with part of the profiles leaves its lists unsettled, and Save saves nothing until the whole list works them out" {
+    try dialog_test.onHiddenDesktop(struct {
+        fn body() !void {
+            const keyboard = win32_input.TestingKeyboard.pinNone();
+            defer keyboard.release();
+            const alloc = std.testing.allocator;
+            const listed = [_]ProfileChoice{
+                .{ .key = "pwsh.exe", .label = "PowerShell" },
+                .{ .key = "user:py", .label = "py" },
+            };
+            // The listing runs out of memory, which leaves the page the user
+            // profiles alone; or a discovery ends without every profile.
+            const Part = enum { listing_failed, discovery_partial };
+            for ([_]Part{ .listing_failed, .discovery_partial }) |part| {
+                var tmp = std.testing.tmpDir(.{});
+                defer tmp.cleanup();
+                var path: []u8 = &.{};
+                const fixture = try profileFixture(&tmp, "profile-command = py: python.exe\n", &path);
+                defer alloc.free(path);
+                defer fixture.finish();
+                const settings = &fixture.settings;
+                const list = &settings.profile_list;
+                giveProfilePage(fixture, &listed, true);
+                const hwnd = list.hwnd orelse return error.TestExpectedList;
+                try selectProfileRow(list, settings.profile_model.findField(.profile, "py", null) orelse return error.TestExpectedRow);
+                _ = SetFocus(hwnd);
+                _ = sys.SendMessageW(hwnd, WM_SYSKEYDOWN, focus_cue.vk_up, 1 << 29);
+                switch (part) {
+                    .listing_failed => fixture.page_fail_next = true,
+                    .discovery_partial => giveProfilePage(fixture, &listed, false),
+                }
+                // A profile made after the move, on the page with part of the
+                // profiles: its lists cannot be worked out from it.
+                try std.testing.expect(fixture.pumpKey(VK_INSERT));
+                typeInto((try openEdit(settings)).hwnd.?, "dev");
+                try std.testing.expect(fixture.pumpKey(VK_RETURN));
+                typeInto((try openEdit(settings)).hwnd.?, "dev.exe");
+                try std.testing.expect(fixture.pumpKey(VK_RETURN));
+                try std.testing.expect(settings.profile_lists_unsettled);
+                try std.testing.expect(!settings.profile_model.complete);
+                const before = try tmp.dir.readFileAlloc(alloc, "noctty.conf", 1 << 16);
+                defer alloc.free(before);
+                if (part == .discovery_partial) {
+                    // Save asks for the rest; none comes yet: nothing is
+                    // written, the draft is kept, and the status says why.
+                    const asked = fixture.find_all_calls;
+                    const saves = fixture.saved;
+                    settings.save();
+                    try std.testing.expect(fixture.find_all_calls > asked);
+                    try std.testing.expectEqual(saves, fixture.saved);
+                    const unchanged = try tmp.dir.readFileAlloc(alloc, "noctty.conf", 1 << 16);
+                    defer alloc.free(unchanged);
+                    try expectSameText(before, unchanged);
+                    try std.testing.expectEqual(StatusNote.profile_refused, settings.status_note);
+                    try std.testing.expect(settings.profile_lists_unsettled);
+                    // The whole list comes when it is asked for again.
+                    fixture.find_all_gives = &listed;
+                }
+                // Save lists the profiles again, whole now, works the lists
+                // out, and the saved order names the new profile.
                 settings.save();
                 try std.testing.expect(!settings.profile_lists_unsettled);
                 const after = try tmp.dir.readFileAlloc(alloc, "noctty.conf", 1 << 16);

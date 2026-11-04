@@ -353,13 +353,16 @@ pub const ListsForeign = enum {
 /// and dark states: null when they are, and a save may write both lists into
 /// `path`; otherwise why not.
 ///
-/// The layers are told apart by the order the loader read them in
-/// (`Config._replay_steps`): a line that sets either list and was read after
-/// the file's first line, from the command line or another file, is a later
-/// layer's. A theme's lines come first (`loadTheme` replays the config over
-/// them), so they are earlier, and the light/dark comparison judges them.
-/// A file with no line yet (empty, or not there) cannot be placed: then any
-/// other layer that sets a list counts as later.
+/// The command line's value for either list is this launch's choice alone,
+/// whatever the load order: a save that wrote it into the file would keep it
+/// for every later launch, also when the file is a `--config-file` the
+/// loader reads after the command line. Other layers are told apart by the
+/// order the loader read them in (`Config._replay_steps`): a line of another
+/// file that sets either list and was read after the file's first line is a
+/// later layer's. A theme's lines come first (`loadTheme` replays the config
+/// over them), so they are earlier, and the light/dark comparison judges
+/// them. A file with no line yet (empty, or not there) cannot be placed:
+/// then any other file that sets a list counts as later.
 pub fn listsForeign(config: *const Config, path: []const u8, same: origin.SamePath) Allocator.Error!?ListsForeign {
     const steps = config._replay_steps.items;
     const first: ?usize = for (steps, 0..) |step, at| {
@@ -372,12 +375,14 @@ pub fn listsForeign(config: *const Config, path: []const u8, same: origin.SamePa
         if (step == .@"-e") break;
         const arg = appliedArg(config, step) orelse continue;
         if (!setsList(arg.text)) continue;
-        if (locatedIn(arg.location, path, same)) continue;
-        if (first) |start| if (at < start) continue;
         switch (arg.location) {
-            .file => foreign = foreign orelse .later_file,
             // A line with no place counts as the command line's.
             .cli, .none => return .command_line,
+            .file => {
+                if (locatedIn(arg.location, path, same)) continue;
+                if (first) |start| if (at < start) continue;
+                foreign = foreign orelse .later_file;
+            },
         }
     }
     if (foreign) |why| return why;
@@ -1952,6 +1957,30 @@ test "settings patch: the lists are another layer's when the command line, a lat
         try cfg.loadFile(alloc, names[0]);
         try cfg.loadFile(alloc, path);
         var args: cli_args.ArgsIterator(cli_args.SliceIterator) = .{ .iterator = cli_args.sliceIterator(case.cli) };
+        try cfg.loadIter(alloc, &args);
+        try cfg.loadRecursiveFiles(alloc);
+        try cfg.finalize();
+        try testing.expectEqual(case.want, try listsForeign(&cfg, path, &testSamePath));
+    }
+    // The file a `--config-file` names, which the loader reads after the
+    // command line: a command-line list is still this launch's alone, and
+    // the file does not set the order itself.
+    try tmp.dir.writeFile(.{ .sub_path = "config", .data = "profile-command = py: python.exe\nprofile-hidden = cmd.exe\n" });
+    const path = try tmp.dir.realpathAlloc(alloc, "config");
+    defer alloc.free(path);
+    const config_arg = try std.fmt.allocPrint(alloc, "--config-file={s}", .{path});
+    defer alloc.free(config_arg);
+    const Cli = struct { args: []const []const u8, want: ?ListsForeign };
+    for ([_]Cli{
+        .{ .args = &.{ "--profile-order=cmd.exe", config_arg }, .want = .command_line },
+        .{ .args = &.{ config_arg, "--profile-hidden=" }, .want = .command_line },
+        // `--config-file` itself sets no list.
+        .{ .args = &.{config_arg}, .want = null },
+    }) |case| {
+        var cfg = try Config.default(alloc);
+        defer cfg.deinit();
+        try cfg.loadFile(alloc, names[0]);
+        var args: cli_args.ArgsIterator(cli_args.SliceIterator) = .{ .iterator = cli_args.sliceIterator(case.args) };
         try cfg.loadIter(alloc, &args);
         try cfg.loadRecursiveFiles(alloc);
         try cfg.finalize();
