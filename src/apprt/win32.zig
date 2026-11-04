@@ -108,6 +108,7 @@ const gl_startup = @import("win32/gl_startup.zig");
 const pixel_format = @import("win32/pixel_format.zig");
 const bench_trace = @import("win32/bench_trace.zig");
 const labels = @import("win32/labels.zig");
+const overlay_view = @import("win32/overlay_view.zig");
 const paint_text = @import("win32/text.zig");
 const profile_pick = @import("win32/profile_pick.zig");
 const tab_label = @import("win32/tab_label.zig");
@@ -140,11 +141,6 @@ pub const chrome_scene_runtime = .{
     .TitlebarGlyphKind = TitlebarGlyphKind,
     .buildInspectorPanelHintText = buildInspectorPanelHintText,
     .buildInspectorPanelTitleText = buildInspectorPanelTitleText,
-    .buildOverlayFeedbackText = buildOverlayFeedbackText,
-    .buildOverlayPaintLabelText = buildOverlayPaintLabelText,
-    .buildProfileChromeBadgeText = buildProfileChromeBadgeText,
-    .buildProfileHintText = buildProfileHintText,
-    .buildProfileOverlayLabel = buildProfileOverlayLabel,
     .c = c,
     .centeredRect = centeredRect,
     .clientTitlebarTheme = clientTitlebarTheme,
@@ -166,7 +162,6 @@ pub const chrome_scene_runtime = .{
     .overlayActionLayoutForWidth = overlayActionLayoutForWidth,
     .overlayEditBorderColor = overlayEditBorderColor,
     .overlayEditFrameRect = overlayEditFrameRect,
-    .overlayEditFrameVisible = overlayEditFrameVisible,
     .overlayEditText = overlayEditText,
     .overlayFeedbackLineRect = overlayFeedbackLineRect,
     .overlayLabelReservation = overlayLabelReservation,
@@ -202,18 +197,7 @@ pub const overlay_session_runtime = .{
     .Host = Host,
     .HostOverlayMode = HostOverlayMode,
     .LONG_PTR = LONG_PTR,
-    .OverlayConfirmText = OverlayConfirmText,
-    .OverlayFocusSlot = OverlayFocusSlot,
     .WPARAM = WPARAM,
-    .buildCommandPaletteFeedbackText = buildCommandPaletteFeedbackText,
-    .buildCommandPaletteOverlayLabel = buildCommandPaletteOverlayLabel,
-    .buildConfirmBodyText = buildConfirmBodyText,
-    .buildOverlayAcceptLabel = buildOverlayAcceptLabel,
-    .buildOverlayHintText = buildOverlayHintText,
-    .buildProfileAcceptLabel = buildProfileAcceptLabel,
-    .buildProfileHintText = buildProfileHintText,
-    .buildProfileOverlayLabel = buildProfileOverlayLabel,
-    .buildTabOverviewOverlayLabel = buildTabOverviewOverlayLabel,
     .c = c,
     .chromeSyncOrLog = chromeSyncOrLog,
     .confirmPromptUiaName = confirmPromptUiaName,
@@ -222,12 +206,8 @@ pub const overlay_session_runtime = .{
     .hostButtonProc = hostButtonProc,
     .host_overlay_height = host_overlay_height,
     .log = log,
-    .nextVisibleOverlayFocusSlot = nextVisibleOverlayFocusSlot,
-    .overlayAcceptButtonVisible = overlayAcceptButtonVisible,
-    .overlayCancelLabel = overlayCancelLabel,
     .overlayEditProc = overlayEditProc,
     .overlayPromptTextProc = overlayPromptTextProc,
-    .overlayTextFollowsActiveSurface = overlayTextFollowsActiveSurface,
     .palette_list_class_name = palette_list_class_name,
     .palette_max_visible_rows = palette_max_visible_rows,
     .palette_row_height = palette_row_height,
@@ -259,7 +239,6 @@ pub const palette_controller_runtime = .{
     .PAINTSTRUCT = PAINTSTRUCT,
     .PaletteCatalog = PaletteCatalog,
     .PaletteCompletion = PaletteCompletion,
-    .PalettePresentation = PalettePresentation,
     .PaletteRanked = PaletteRanked,
     .PaletteSnapshot = PaletteSnapshot,
     .PaletteStableId = PaletteStableId,
@@ -490,6 +469,7 @@ test {
     _ = @import("win32/confirm_text.zig");
     _ = @import("win32/tab_label.zig");
     _ = @import("win32/profile_pick.zig");
+    _ = @import("win32/overlay_view.zig");
     _ = child_window;
     _ = paint_text;
     _ = @import("win32/settings_patch.zig");
@@ -676,7 +656,6 @@ pub const PalettePayload = win32_palette.catalog.Payload;
 pub const PaletteRanked = win32_palette.catalog.Ranked;
 pub const PaletteStableId = @TypeOf((@as(PaletteItem, undefined)).id);
 pub const palette_catalog_label_bytes: usize = 128;
-const PalettePresentation = labels.PalettePresentation;
 const PaletteCompletion = labels.PaletteCompletion;
 pub const host_tab_max_button_width: i32 = default_metrics.tab_max_width;
 pub const host_tab_close_zone_width: i32 = default_metrics.tab_close_zone; // per-tab close button hit zone width
@@ -4531,7 +4510,7 @@ pub fn restoreTerminalUndoState(
     };
 }
 
-pub const HostBannerKind = labels.HostBannerKind;
+pub const HostBannerKind = overlay_view.BannerKind;
 
 /// A button of the host banner: `primary` is Open Release or Install on the
 /// update notice; `dismiss` is Dismiss there and the close button otherwise.
@@ -9393,17 +9372,6 @@ pub const profileChromeVisible = win32_chrome_state.profileVisible;
 
 pub const inspectorPanelVisibleForState = labels.inspectorPanelVisibleForState;
 
-const overlayAcceptButtonVisible = labels.overlayAcceptButtonVisible;
-
-const overlayEditFrameVisible = labels.overlayEditFrameVisible;
-pub const overlayEmptySubmitDismisses = labels.overlayEmptySubmitDismisses;
-const overlayTextFollowsActiveSurface = labels.overlayTextFollowsActiveSurface;
-pub const overlayTextNeedsRefill = labels.overlayTextNeedsRefill;
-
-const OverlayFocusSlot = labels.OverlayFocusSlot;
-
-const nextVisibleOverlayFocusSlot = labels.nextVisibleOverlayFocusSlot;
-
 pub const inspectorChromeVisible = win32_chrome_state.inspectorVisible;
 
 pub const inspectorBannerStateChanged = labels.inspectorBannerStateChanged;
@@ -9514,27 +9482,9 @@ pub fn nativeSplitDirection(value: win32_shell.model.Direction) SplitTreeSurface
     };
 }
 
-const buildTabOverviewOverlayLabel = labels.buildTabOverviewOverlayLabel;
-
-const OverlayConfirmText = labels.ConfirmText;
-const buildOverlayPaintLabelText = labels.buildOverlayPaintLabelText;
-
-const buildOverlayFeedbackText = labels.buildOverlayFeedbackText;
-
-const buildOverlayAcceptLabel = labels.buildOverlayAcceptLabel;
-
-const buildOverlayHintText = labels.buildOverlayHintText;
-const buildConfirmBodyText = labels.buildConfirmBodyText;
-
-const overlayCancelLabel = labels.overlayCancelLabel;
-
-pub const buildHostBannerText = labels.buildHostBannerText;
-
 const buildInspectorPanelTitleText = labels.buildInspectorPanelTitleText;
 
 const buildInspectorPanelHintText = labels.buildInspectorPanelHintText;
-
-const buildProfileChromeBadgeText = labels.buildProfileChromeBadgeText;
 
 pub fn sshAliasFromLaunchKey(launched_ssh: bool, key: ?[]const u8) ?[]const u8 {
     if (!launched_ssh) return null;
@@ -9605,21 +9555,11 @@ pub fn paintTargetButtonBadge(hdc: HDC, rect: RECT, glyph: u8, border: u32, bg: 
     );
 }
 
-const buildProfileOverlayLabel = labels.buildProfileOverlayLabel;
-
-const buildProfileAcceptLabel = labels.buildProfileAcceptLabel;
-
-const buildProfileHintText = labels.buildProfileHintText;
-
 /// Returns the top-ranked match used for Enter-to-run, or null if no entry
 /// matches.
 pub const nextTabOverviewSelection = labels.nextTabOverviewSelection;
 
 pub const tabDirectionFromWheelDelta = labels.tabDirectionFromWheelDelta;
-
-const buildCommandPaletteOverlayLabel = labels.buildCommandPaletteOverlayLabel;
-
-const buildCommandPaletteFeedbackText = labels.buildCommandPaletteFeedbackText;
 
 const paletteCompletionText = labels.paletteCompletionText;
 
@@ -15259,7 +15199,6 @@ test "win32 a confirm prompt puts its preview into the preview control" {
     try fixture.init();
     defer fixture.deinit();
     const host = &fixture.host;
-    const alloc = fixture.core_app.alloc;
 
     // `showOverlay` stops short without the edit and its two buttons, and
     // the preview goes only into a control that exists: give it all four
@@ -15272,29 +15211,18 @@ test "win32 a confirm prompt puts its preview into the preview control" {
     host.overlay_preview_hwnd = try createTestChromeChild(parent, child_window.prompt_edit_class);
     defer {
         // Close the prompt while its controls still exist, then let the
-        // fixture's own close find none. `Host.deinit` frees these caches,
-        // and the session never runs it.
+        // fixture's own close find none.
         host.hideOverlay();
         host.overlay_edit_hwnd = null;
         host.overlay_accept_hwnd = null;
         host.overlay_cancel_hwnd = null;
         host.overlay_preview_hwnd = null;
-        for ([_]*?[:0]const u8{
-            &host.cached_overlay_edit,
-            &host.cached_overlay_accept,
-            &host.cached_overlay_cancel,
-            &host.cached_overlay_preview,
-        }) |cached| {
-            if (cached.*) |value| alloc.free(value);
-            cached.* = null;
-        }
+        freeOverlayTestCaches(host);
     }
 
     try fixture.surface.requestPasteConfirm(.{ .osc_52_read = .primary }, "hello\nworld");
-    const shown = try child_window.readWindowTextUtf8Alloc(std.testing.allocator, host.overlay_preview_hwnd.?);
-    defer std.testing.allocator.free(shown);
     // The preview's text, not the raw payload: CRLF line ends for the EDIT.
-    try std.testing.expectEqualStrings("hello\r\nworld", shown);
+    try expectControlText(host.overlay_preview_hwnd.?, "hello\r\nworld");
 }
 
 /// Stands in for the system clipboard in the empty bracketed paste tests: the
@@ -23953,10 +23881,30 @@ test "win32 overlay dismissal restores focus only from owned controls" {
     try std.testing.expect(!shouldRefocusAfterOverlayHide(null, edit, accept, cancel, list));
 }
 
-fn expectOverlayEditText(host: *Host, expected: []const u8) !void {
-    const text = try child_window.readWindowTextUtf8Alloc(std.testing.allocator, host.overlay_edit_hwnd.?);
+fn expectControlText(hwnd: HWND, expected: []const u8) !void {
+    const text = try child_window.readWindowTextUtf8Alloc(std.testing.allocator, hwnd);
     defer std.testing.allocator.free(text);
     try std.testing.expectEqualStrings(expected, text);
+}
+
+fn expectOverlayEditText(host: *Host, expected: []const u8) !void {
+    try expectControlText(host.overlay_edit_hwnd.?, expected);
+}
+
+/// Frees the text a test's overlay controls cached: `Host.deinit` frees it,
+/// and a test session never runs that.
+fn freeOverlayTestCaches(host: *Host) void {
+    for ([_]*?[:0]const u8{
+        &host.cached_overlay_edit,
+        &host.cached_overlay_label,
+        &host.cached_overlay_hint,
+        &host.cached_overlay_accept,
+        &host.cached_overlay_cancel,
+        &host.cached_overlay_preview,
+    }) |cached| {
+        if (cached.*) |value| host.app.core_app.alloc.free(value);
+        cached.* = null;
+    }
 }
 
 test "win32 title prompt refills its text when the active surface changes" {
@@ -23993,15 +23941,7 @@ test "win32 title prompt refills its text when the active surface changes" {
     host.overlay_edit_hwnd = try createTestChromeChild(parent, child_window.prompt_edit_class);
     host.overlay_accept_hwnd = try createTestChromeChild(parent, prompt_button_class);
     host.overlay_cancel_hwnd = try createTestChromeChild(parent, prompt_button_class);
-    // `Host.deinit` frees these caches, and the session never runs it.
-    defer for ([_]*?[:0]const u8{
-        &host.cached_overlay_edit,
-        &host.cached_overlay_accept,
-        &host.cached_overlay_cancel,
-    }) |cached| {
-        if (cached.*) |value| app.core_app.alloc.free(value);
-        cached.* = null;
-    };
+    defer freeOverlayTestCaches(&host);
 
     try host.showOverlay(.tab_title, "one");
     try std.testing.expectEqual(@as(?*const Surface, &surface_a), host.overlay_text_surface);
@@ -24027,6 +23967,112 @@ test "win32 title prompt refills its text when the active surface changes" {
     host.active_tab = 0;
     try host.refreshChrome();
     try expectOverlayEditText(&host, "needle");
+    host.hideOverlay();
+}
+
+test "win32 the overlay controls show what overlay_view composes from the host" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var core_app: CoreApp = undefined;
+    var app: App = undefined;
+    var host: Host = undefined;
+    var surface_a: Surface = undefined;
+    var surface_b: Surface = undefined;
+    var session: TestSession = .{};
+    try session.init(.{
+        .core_app = &core_app,
+        .app = &app,
+        .hosts = &.{.{ .storage = &host }},
+        .surfaces = &.{
+            .{ .storage = &surface_a, .host = &host },
+            .{ .storage = &surface_b, .host = &host },
+        },
+        .tabs = &.{
+            .{ .host = &host, .surface = &surface_a, .id = 1 },
+            .{ .host = &host, .surface = &surface_b, .id = 2 },
+        },
+    });
+    defer session.deinit();
+
+    // The controls a sync writes, under a hidden parent; `host.hwnd` stays
+    // null, so the layout passes have nothing to do.
+    const parent = try createTestHostWindow();
+    defer _ = sys.DestroyWindow(parent);
+    host.overlay_label_hwnd = try createTestChromeChild(parent, child_window.prompt_label_class);
+    host.overlay_hint_hwnd = try createTestChromeChild(parent, child_window.prompt_label_class);
+    host.overlay_edit_hwnd = try createTestChromeChild(parent, child_window.prompt_edit_class);
+    host.overlay_accept_hwnd = try createTestChromeChild(parent, prompt_button_class);
+    host.overlay_cancel_hwnd = try createTestChromeChild(parent, prompt_button_class);
+    defer freeOverlayTestCaches(&host);
+
+    // The tab overview numbers the active tab, and its words follow the
+    // query.
+    try host.showOverlay(.tab_overview, null);
+    try expectControlText(host.overlay_label_hwnd.?, "Tab 1/2");
+    try expectControlText(host.overlay_hint_hwnd.?, "Jump directly to a tab number. Current tab: 1/2.");
+    try expectControlText(host.overlay_accept_hwnd.?, "Close");
+    try expectControlText(host.overlay_cancel_hwnd.?, "Close");
+    _ = try host.setOverlayEditText("2");
+    _ = try host.syncOverlayHint();
+    _ = try host.syncOverlayButtons();
+    try expectControlText(host.overlay_hint_hwnd.?, "Jump to tab 2 of 2.");
+    try expectControlText(host.overlay_accept_hwnd.?, "Go");
+    host.hideOverlay();
+
+    // The palette's hint names the newest recent action while the query is
+    // empty. The mode is set here, not opened, so no catalog is built.
+    host.overlay_mode = .command_palette;
+    app.palette_mru[0] = "new_tab";
+    defer app.palette_mru[0] = null;
+    _ = try host.setOverlayEditText("");
+    _ = try host.syncOverlayHint();
+    try expectControlText(
+        host.overlay_hint_hwnd.?,
+        "Recent: new_tab. Type to search actions, themes, tabs, panes, settings, and help.",
+    );
+
+    // The picker while discovery runs: no list yet, and one was asked for.
+    // The mode is set here, not opened: opening the picker or syncing its
+    // label asks for a real discovery.
+    host.overlay_mode = .profile;
+    host.profiles_requested = true;
+    _ = try host.setOverlayEditText("");
+    _ = try host.syncOverlayHint();
+    _ = try host.syncOverlayButtons();
+    try expectControlText(host.overlay_hint_hwnd.?, "Detecting Windows profiles...");
+    try expectControlText(host.overlay_accept_hwnd.?, "Check");
+    try expectControlText(host.overlay_cancel_hwnd.?, "Close");
+
+    // An empty list is no list, not a discovery still running. With a list
+    // loaded, syncing the label starts no discovery.
+    var none = [_]windows_shell.Profile{};
+    host.profiles = &none;
+    defer host.profiles = null;
+    _ = try host.syncOverlayLabel();
+    _ = try host.syncOverlayHint();
+    try expectControlText(host.overlay_label_hwnd.?, "Profile:");
+    try expectControlText(host.overlay_hint_hwnd.?, "No supported Windows profiles detected.");
+
+    // Once the list lands, the label, hint and Accept name the profile the
+    // query picks, not the selected one.
+    var list = [_]windows_shell.Profile{
+        .{ .kind = .pwsh, .key = "pwsh.exe", .label = "PowerShell", .command = .{ .direct = &.{"pwsh.exe"} } },
+        .{ .kind = .cmd, .key = "cmd.exe", .label = "Command Prompt", .command = .{ .direct = &.{"cmd.exe"} } },
+    };
+    host.profiles = &list;
+    _ = try host.setOverlayEditText(" cmd ");
+    _ = try host.syncOverlayLabel();
+    _ = try host.syncOverlayHint();
+    _ = try host.syncOverlayButtons();
+    try expectControlText(host.overlay_label_hwnd.?, "Profile 2/2 CMD C>");
+    try expectControlText(
+        host.overlay_hint_hwnd.?,
+        "CMD C> Command Prompt | key cmd.exe | run cmd.exe. Enter opens a new tab. Ctrl+Enter splits here. " ++
+            "Shift+Enter opens a new window. Ctrl+1-9 launches directly. Alt+1-3 launches visible slots. " ++
+            "Alt+Shift+1-3 pins the current profile. Alt+Shift+0 clears pinning. " ++
+            "Quick picks: 1 PWSH >> PowerShell | 2 CMD C> Command....",
+    );
+    try expectControlText(host.overlay_accept_hwnd.?, "Open Tab");
     host.hideOverlay();
 }
 
@@ -24353,16 +24399,13 @@ test "win32 confirm overlay keeps a bounded visible action at narrow widths" {
         try std.testing.expect(actions.cancel_width > 0);
         try std.testing.expect(actions.cancel_x + actions.cancel_width <= width);
         try std.testing.expectEqual(
-            OverlayFocusSlot.cancel,
-            nextVisibleOverlayFocusSlot(
-                .confirm,
-                .edit,
-                false,
-                false,
-                false,
-                actions.accept_visible,
-                actions.cancel_visible,
-            ),
+            overlay_view.Slot.cancel,
+            overlay_view.nextFocus(.confirm, .edit, false, .{
+                .edit = false,
+                .preview = false,
+                .accept = actions.accept_visible,
+                .cancel = actions.cancel_visible,
+            }),
         );
         if (width < 140) {
             const expected_inset = @min(@as(i32, 10), @divTrunc(width - 1, 2));

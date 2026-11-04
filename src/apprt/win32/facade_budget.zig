@@ -12,11 +12,11 @@ const win32 = @import("../win32.zig");
 const budget = .{
     // Entries in each `pub const *_runtime` bag on the facade.
     .bags = .{
-        .chrome_scene_runtime = 61,
+        .chrome_scene_runtime = 55,
         .chrome_scene_test_runtime = 4,
-        .overlay_session_runtime = 41,
+        .overlay_session_runtime = 26,
         .overlay_session_test_runtime = 5,
-        .palette_controller_runtime = 43,
+        .palette_controller_runtime = 42,
         .palette_controller_test_runtime = 7,
         .surface_presentation_runtime = 12,
         .surface_presentation_test_runtime = 3,
@@ -25,9 +25,9 @@ const budget = .{
         .test_support_runtime = 47,
     },
     // The facade's pub declarations: what the files that import it can reach.
-    .facade_pub_decls = 492,
+    .facade_pub_decls = 489,
     // Root declarations of win32.zig whose value is a field access (`a.b`).
-    .facade_aliases = 237,
+    .facade_aliases = 214,
     // Fields of win32.App named `test_*`.
     .app_test_hooks = 10,
 };
@@ -59,6 +59,12 @@ const leaves = .{
         .module = @import("notifications.zig"),
         .source = @embedFile("notifications.zig"),
         .pub_decls = 12,
+    },
+    .{
+        .file = "overlay_view.zig",
+        .module = @import("overlay_view.zig"),
+        .source = @embedFile("overlay_view.zig"),
+        .pub_decls = 9,
     },
     .{
         .file = "profile_pick.zig",

@@ -69,7 +69,7 @@ showed for "split" in the captures. `tests/terminal.test.mjs` checks each
 row's title, description, action and shown shortcut, the status format, and
 every key chip on the landing page against `src/input/command.zig`,
 `src/cli/testdata/default_keybinds_windows.txt` and
-`src/apprt/win32/labels.zig`; `tests/demo.test.mjs` runs the demo itself
+`src/apprt/win32/overlay_view.zig`; `tests/demo.test.mjs` runs the demo itself
 against a fake DOM and a hand-advanced clock (pause, resume, step switches,
 a hidden page, reduced motion); `tests/install.test.mjs` checks that each copy
 button copies the command shown beside it.

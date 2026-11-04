@@ -10,7 +10,7 @@ const builtin = @import("builtin");
 const win32_layout = @import("../win32_layout.zig");
 const win32_chrome_state = @import("../win32_chrome_state.zig");
 const win32_theme = @import("../win32_theme.zig");
-const labels = @import("labels.zig");
+const overlay_view = @import("overlay_view.zig");
 const sys = @import("sys.zig");
 
 const HostOverlayMode = win32_theme.HostOverlayMode;
@@ -436,7 +436,7 @@ pub fn overlayActionLayoutForWidth(
         bounded_padding,
         cancel_button_w,
         accept_button_w,
-        labels.overlayAcceptButtonVisible(mode),
+        overlay_view.shape(mode).accept_visible,
         dpi,
     );
     const compact_cancel = mode == .confirm and !visibility.cancel and width > 0;

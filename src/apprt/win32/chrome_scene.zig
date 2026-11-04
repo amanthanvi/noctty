@@ -16,11 +16,6 @@ const TitlebarButtonRole = runtime.TitlebarButtonRole;
 const TitlebarGlyphKind = runtime.TitlebarGlyphKind;
 const buildInspectorPanelHintText = runtime.buildInspectorPanelHintText;
 const buildInspectorPanelTitleText = runtime.buildInspectorPanelTitleText;
-const buildOverlayFeedbackText = runtime.buildOverlayFeedbackText;
-const buildOverlayPaintLabelText = runtime.buildOverlayPaintLabelText;
-const buildProfileChromeBadgeText = runtime.buildProfileChromeBadgeText;
-const buildProfileHintText = runtime.buildProfileHintText;
-const buildProfileOverlayLabel = runtime.buildProfileOverlayLabel;
 const c = runtime.c;
 const centeredRect = runtime.centeredRect;
 const child_window = @import("child_window.zig");
@@ -43,10 +38,10 @@ const overlayAccentColor = runtime.overlayAccentColor;
 const overlayActionLayoutForWidth = runtime.overlayActionLayoutForWidth;
 const overlayEditBorderColor = runtime.overlayEditBorderColor;
 const overlayEditFrameRect = runtime.overlayEditFrameRect;
-const overlayEditFrameVisible = runtime.overlayEditFrameVisible;
 const overlayEditText = runtime.overlayEditText;
 const overlayFeedbackLineRect = runtime.overlayFeedbackLineRect;
 const overlayLabelReservation = runtime.overlayLabelReservation;
+const overlay_view = @import("overlay_view.zig");
 const paintRectVisible = runtime.paintRectVisible;
 const paint_text = runtime.paint_text;
 const profileChromeAccent = runtime.profileChromeAccent;
@@ -59,7 +54,6 @@ const searchBarToolbarVisual = search_controls.searchBarToolbarVisual;
 const search_controls = @import("search_controls.zig");
 const std = runtime.std;
 const sys = runtime.sys;
-const tab_label = @import("tab_label.zig");
 const textOutWz = runtime.textOutWz;
 const themeSurface = runtime.themeSurface;
 const titlebarButtonVisual = runtime.titlebarButtonVisual;
@@ -467,7 +461,6 @@ pub const HostScene = struct {
                 theme.chrome_border,
             );
 
-            const surface = self.activeSurface();
             const overlay_paint_dirty = win32_chrome_state.overlayPaintCacheDirty(
                 self.chrome_text_dirty.overlay,
                 self.overlay_mode,
@@ -476,73 +469,15 @@ pub const HostScene = struct {
                 self.cached_overlay_paint_badge_w != null,
             );
             if (overlay_paint_dirty) {
-                const overlay_text = std.mem.trim(u8, overlayEditText(self) catch "", " \t\r\n");
-                const overlay_status = if (surface) |value| self.app.hostTabStatus(value) else tab_label.TabStatus{};
-                const pane_count = if (self.activeTab()) |tab| tab.leafCount() else 1;
-                const overlay_label = if (self.overlay_mode == .profile)
-                    buildProfileOverlayLabel(
-                        alloc,
-                        self.shownProfiles() orelse &.{},
-                        overlay_text,
-                        self.selectedProfileIndex() orelse 0,
-                    ) catch return false
-                else
-                    buildOverlayPaintLabelText(
-                        alloc,
-                        self.overlay_mode,
-                        overlay_text,
-                        overlay_status,
-                        self.palettePresentation(),
-                        self.confirmText(),
-                    ) catch return false;
-                defer alloc.free(overlay_label);
-                paint_text.replaceCachedUtf16(alloc, &self.cached_overlay_paint_label_w, overlay_label) catch return false;
-
-                const overlay_feedback = if (self.overlay_mode == .profile)
-                    if (self.banner_text) |value|
-                        switch (self.banner_kind) {
-                            .err => std.fmt.allocPrint(alloc, "Error: {s}", .{value}) catch return false,
-                            .info => std.fmt.allocPrint(alloc, "Info: {s}", .{value}) catch return false,
-                            .none => alloc.dupe(u8, value) catch return false,
-                        }
-                    else
-                        buildProfileHintText(
-                            alloc,
-                            self.shownProfiles(),
-                            overlay_text,
-                            self.selectedProfileIndex() orelse 0,
-                            self.app.launcher_profile_target,
-                            self.app.launcher_quick_slot_keys,
-                        ) catch return false
-                else feedback: {
-                    var mru_buf: [5][]const u8 = undefined;
-                    const mru = self.app.paletteMruSlice(&mru_buf);
-                    break :feedback buildOverlayFeedbackText(
-                        alloc,
-                        self.banner_kind,
-                        self.banner_text,
-                        self.overlay_mode,
-                        overlay_text,
-                        overlay_status,
-                        pane_count,
-                        self.paletteSnapshot(),
-                        mru,
-                        self.palettePresentation(),
-                        self.confirmText(),
-                    ) catch return false;
-                };
-                defer alloc.free(overlay_feedback);
-                paint_text.replaceCachedUtf16(alloc, &self.cached_overlay_paint_feedback_w, overlay_feedback) catch return false;
-
-                if (self.overlay_mode == .profile) {
-                    if (self.selectedProfile()) |profile| {
-                        const badge = buildProfileChromeBadgeText(alloc, profile.kind) catch return false;
-                        defer alloc.free(badge);
-                        paint_text.replaceCachedUtf16(alloc, &self.cached_overlay_paint_badge_w, badge) catch return false;
-                    } else {
-                        if (self.cached_overlay_paint_badge_w) |old| alloc.free(old);
-                        self.cached_overlay_paint_badge_w = null;
-                    }
+                var arena = std.heap.ArenaAllocator.init(alloc);
+                defer arena.deinit();
+                // A query EDIT that cannot be read paints as an empty query.
+                const facts = self.overlayFacts(overlayEditText(self) catch "");
+                const text = overlay_view.compose(arena.allocator(), facts) catch return false;
+                paint_text.replaceCachedUtf16(alloc, &self.cached_overlay_paint_label_w, text.paint_label) catch return false;
+                paint_text.replaceCachedUtf16(alloc, &self.cached_overlay_paint_feedback_w, text.feedback) catch return false;
+                if (text.badge) |badge| {
+                    paint_text.replaceCachedUtf16(alloc, &self.cached_overlay_paint_badge_w, badge) catch return false;
                 } else {
                     if (self.cached_overlay_paint_badge_w) |old| alloc.free(old);
                     self.cached_overlay_paint_badge_w = null;
@@ -639,7 +574,7 @@ pub const HostScene = struct {
                 }
             }
 
-            if (overlayEditFrameVisible(self.overlay_mode)) {
+            if (overlay_view.shape(self.overlay_mode).edit_visible) {
                 const edit_frame = overlayEditFrameRect(
                     client_rect.right,
                     tab_h,

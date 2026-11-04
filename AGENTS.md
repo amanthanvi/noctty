@@ -284,9 +284,14 @@ that govern each symbol you change, or that none does.
   bundled iTerm2 theme pin in `build.zig.zon` that sets their count), the confirm
   overlay (`win32/overlay_session.zig`: `showConfirm`,
   `invokeConfirmAccept`/`Cancel` lifetime; what each prompt says and its
-  preview pane's text: `win32/confirm_text.zig`, `Words`, `preview`; its
-  paint text in `labels.buildOverlayPaintLabelText`), the profile
-  overlay, host banners and the update notice, overlay EDIT writes
+  preview pane's text: `win32/confirm_text.zig`, `Words`, `preview`), the
+  profile overlay, host banners and the update notice, what the overlay
+  says and shows in each mode (`win32/overlay_view.zig`: `compose`, its
+  hint lane against chrome paint's feedback lane, `shape`, `nextFocus`,
+  `bannerLine`; the one reader of Host state for it, `Host.overlayFacts`,
+  and the syncs that write its controls, `syncOverlayLabel`,
+  `syncOverlayHint` and `syncOverlayButtons`, in
+  `win32/overlay_session.zig`), overlay EDIT writes
   (`setOverlayEditText`, and `syncWindowTextUtf8CachedAfterSet` in
   `win32/child_window.zig`).
 - [search-scrollbar.md](docs/agents/log/search-scrollbar.md): the docked
