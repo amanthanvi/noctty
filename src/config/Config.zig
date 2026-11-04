@@ -1065,8 +1065,9 @@ palette: Palette = .{},
 /// This can be changed in the Windows-only fork without restarting Ghostty.
 ///
 /// On Windows the whole window fades, not just the background: a value below
-/// 1 makes the window a layered window shown at that overall alpha, so text,
-/// the tab strip and the title bar fade with it. There is no per-pixel
+/// 0.999 makes the window a layered window shown at that overall alpha, so
+/// text, the tab strip and the title bar fade with it (a value from 0.999 up
+/// counts as opaque, and the window is not layered). There is no per-pixel
 /// opacity, and `background-blur` has no effect (see below).
 @"background-opacity": f64 = 1.0,
 
