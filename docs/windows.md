@@ -1737,7 +1737,8 @@ then every switch back into it (Alt+Tab, an IME candidate window) flashes the
 screen black ([#598](https://github.com/amanthanvi/noctty/issues/598)). The
 extra pixel goes past the first of the bottom, right, top and left edges that
 has no other monitor next to it, so it lands on no screen. A monitor that
-touches only at a corner does not count. With a monitor on every side, the
+touches only at a corner does not count. With a monitor on every side, or
+when Windows does not report every monitor (or there are more than 16), the
 window covers its monitor exactly, as before. With the Direct3D 11 renderer
 or the tab bar shown, nothing changes. The extra pixel is part of the
 terminal's area: the default padding takes it, but with `window-padding-y`
