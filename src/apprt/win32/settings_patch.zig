@@ -312,6 +312,139 @@ fn namesOnlyNamed(extra: []const u8, values: []const []const u8, profiles: []con
     return names_any;
 }
 
+/// Whether a save of `pending` writes the lists (`listEdits`): it holds
+/// either otherwise than `original`.
+pub fn listsChanged(original: *const Config, pending: *const Config) bool {
+    return !listEql(.order, original, pending) or !listEql(.hidden, original, pending);
+}
+
+/// Why Settings cannot change the profiles' order and visibility
+/// (`listsForeign`). A save writes both lists into the file it saves to,
+/// whole, after a clear (the maintainer's decision 2), so a value another
+/// layer gives either list would become the file's own, and apply where that
+/// layer does not.
+pub const ListsForeign = enum {
+    /// The command line sets one (`--profile-order`, `--profile-hidden`).
+    command_line,
+    /// A config file read after the one Settings saves to sets one: a later
+    /// `--config-file`, or a file `config-file` includes.
+    later_file,
+    /// They differ between the light and the dark state: a theme sets one
+    /// for one state only.
+    theme,
+    /// They could not be read in both states: a theme that could not be
+    /// read whole, or no memory to read it.
+    unread,
+
+    /// The reason, as the status line says it.
+    pub fn text(self: ListsForeign) []const u8 {
+        return switch (self) {
+            .command_line => "The command line sets the profile order or the hidden profiles, so Settings can't change them: a save would copy its values into the config file.",
+            .later_file => "A config file read after the one Settings saves to sets the profile order or the hidden profiles, so Settings can't change them: a save would copy its values into the config file.",
+            .theme => "The light and dark themes give different profile orders or hidden profiles, so Settings can't change them: a save would make one theme's choice apply in both.",
+            .unread => "The profile order and the hidden profiles could not be read in both the light and dark states, so Settings can't change them.",
+        };
+    }
+};
+
+/// Whether the profiles' order and visibility, as `config` (the running
+/// config, or a fresh read of the layers) gives them, are what the file
+/// `path` and the layers read before it give, alone and the same in the light
+/// and dark states: null when they are, and a save may write both lists into
+/// `path`; otherwise why not.
+///
+/// The layers are told apart by the order the loader read them in
+/// (`Config._replay_steps`): a line that sets either list and was read after
+/// the file's first line, from the command line or another file, is a later
+/// layer's. A theme's lines come first (`loadTheme` replays the config over
+/// them), so they are earlier, and the light/dark comparison judges them.
+/// A file with no line yet (empty, or not there) cannot be placed: then any
+/// other layer that sets a list counts as later.
+pub fn listsForeign(config: *const Config, path: []const u8, same: origin.SamePath) Allocator.Error!?ListsForeign {
+    const steps = config._replay_steps.items;
+    const first: ?usize = for (steps, 0..) |step, at| {
+        if (step == .@"-e") break null;
+        const arg = appliedArg(config, step) orelse continue;
+        if (locatedIn(arg.location, path, same)) break at;
+    } else null;
+    var foreign: ?ListsForeign = null;
+    for (steps, 0..) |step, at| {
+        if (step == .@"-e") break;
+        const arg = appliedArg(config, step) orelse continue;
+        if (!setsList(arg.text)) continue;
+        if (locatedIn(arg.location, path, same)) continue;
+        if (first) |start| if (at < start) continue;
+        switch (arg.location) {
+            .file => foreign = foreign orelse .later_file,
+            // A line with no place counts as the command line's.
+            .cli, .none => return .command_line,
+        }
+    }
+    if (foreign) |why| return why;
+    // The same in both states.
+    var switched: [2]?Config = .{ null, null };
+    defer for (&switched) |*value| if (value.*) |*reading| reading.deinit();
+    var readings: [2]*const Config = undefined;
+    for ([_]@FieldType(configpkg.ConditionalState, "theme"){ .light, .dark }, 0..) |theme, i| {
+        var state = config._conditional_state;
+        state.theme = theme;
+        switched[i] = config.changeConditionalState(state) catch |err| {
+            if (err == error.OutOfMemory) return error.OutOfMemory;
+            return .unread;
+        };
+        readings[i] = if (switched[i]) |*reading| reading else config;
+        if (unreadTheme(readings[i]) != null) return .unread;
+    }
+    if (!listEql(.order, readings[0], readings[1]) or !listEql(.hidden, readings[0], readings[1])) return .theme;
+    return null;
+}
+
+/// A step's argument and place, when it applies now: an argument, or a
+/// conditional one whose conditions match `config`'s state.
+fn appliedArg(config: *const Config, step: anytype) ?struct { text: []const u8, location: @import("../../cli/diagnostics.zig").Location } {
+    return switch (step) {
+        .arg => |arg| .{ .text = arg.value, .location = arg.location },
+        .conditional_arg => |arg| for (arg.conditions) |cond| {
+            if (!config._conditional_state.match(cond)) break null;
+        } else .{ .text = arg.arg, .location = arg.location },
+        else => null,
+    };
+}
+
+fn locatedIn(location: @import("../../cli/diagnostics.zig").Location, path: []const u8, same: origin.SamePath) bool {
+    return switch (location) {
+        .file => |file| same(file.path, path),
+        .cli, .none => false,
+    };
+}
+
+/// Whether a step's argument (`--key=value`) sets `profile-order` or
+/// `profile-hidden`.
+fn setsList(text: []const u8) bool {
+    for ([_][]const u8{ "--profile-order", "--profile-hidden" }) |key| {
+        if (std.mem.startsWith(u8, text, key) and (text.len == key.len or text[key.len] == '=')) return true;
+    }
+    return false;
+}
+
+/// `profiles` (a window's whole list) with a user profile for each the
+/// draft (`pending`) has and the list does not: a profile the save adds is
+/// no window's yet, and the overridden check (`listCheck`) must know what
+/// names it. From `arena`.
+pub fn withDraftProfiles(arena: Allocator, profiles: []const windows_shell.Profile, pending: *const Config) Allocator.Error![]const windows_shell.Profile {
+    var out: std.ArrayListUnmanaged(windows_shell.Profile) = .empty;
+    try out.appendSlice(arena, profiles);
+    for (pending.@"profile-command".entries.items) |entry| {
+        if (entry.removed) continue;
+        const key = try std.fmt.allocPrint(arena, "user:{s}", .{entry.id});
+        const known = for (profiles) |profile| {
+            if (profile.kind == .user and std.ascii.eqlIgnoreCase(profile.key, key)) break true;
+        } else false;
+        if (!known) try out.append(arena, .{ .kind = .user, .key = key, .label = entry.id, .command = .{ .direct = &.{} } });
+    }
+    return out.items;
+}
+
 /// The list edits a save of `pending` makes: each list it holds otherwise
 /// than `original`, written whole. From `arena`.
 fn listEdits(arena: Allocator, original: *const Config, pending: *const Config) ![]Edit {
@@ -1770,6 +1903,60 @@ fn testLoad(alloc: Allocator, earlier: []const u8, path: []const u8) !Config {
     try cfg.loadRecursiveFiles(alloc);
     try cfg.finalize();
     return cfg;
+}
+
+test "settings patch: the lists are another layer's when the command line, a later config file or one theme sets them" {
+    const alloc = testing.allocator;
+    const cli_args = @import("../../cli/args.zig");
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    // A file read first orders the profiles: the save's own to write over.
+    try tmp.dir.writeFile(.{ .sub_path = "earlier", .data = "profile-order = cmd.exe\n" });
+    try tmp.dir.writeFile(.{ .sub_path = "later.conf", .data = "profile-order = git-bash\n" });
+    try tmp.dir.writeFile(.{ .sub_path = "light", .data = "# light\n" });
+    try tmp.dir.writeFile(.{ .sub_path = "dark", .data = "profile-hidden = pwsh.exe\n" });
+    try tmp.dir.writeFile(.{ .sub_path = "both", .data = "profile-hidden = pwsh.exe\n" });
+    var names: [5][]u8 = undefined;
+    for ([_][]const u8{ "earlier", "later.conf", "light", "dark", "both" }, &names) |name, *full| full.* = try tmp.dir.realpathAlloc(alloc, name);
+    defer for (names) |full| alloc.free(full);
+    const later_line = try std.fmt.allocPrint(alloc, "config-file = {s}\n", .{names[1]});
+    defer alloc.free(later_line);
+    const dark_line = try std.fmt.allocPrint(alloc, "theme = light:{s},dark:{s}\n", .{ names[2], names[3] });
+    defer alloc.free(dark_line);
+    const both_line = try std.fmt.allocPrint(alloc, "theme = light:{s},dark:{s}\n", .{ names[4], names[4] });
+    defer alloc.free(both_line);
+    const Case = struct { lines: []const u8, cli: []const []const u8 = &.{}, want: ?ListsForeign };
+    for ([_]Case{
+        // The file and the layers before it alone.
+        .{ .lines = "", .want = null },
+        // The command line clears the hidden list.
+        .{ .lines = "", .cli = &.{"--profile-hidden="}, .want = .command_line },
+        // The command line sets something else: no matter.
+        .{ .lines = "", .cli = &.{"--font-size=13"}, .want = null },
+        // A file the config file includes orders the profiles.
+        .{ .lines = later_line, .want = .later_file },
+        // The dark theme hides a profile the light one does not.
+        .{ .lines = dark_line, .want = .theme },
+        // Both themes hide it: the same in both states, an earlier layer.
+        .{ .lines = both_line, .want = null },
+    }) |case| {
+        const text = try std.mem.concat(alloc, u8, &.{ "profile-command = py: python.exe\nprofile-hidden = cmd.exe\n", case.lines });
+        defer alloc.free(text);
+        try tmp.dir.writeFile(.{ .sub_path = "config", .data = text });
+        const path = try tmp.dir.realpathAlloc(alloc, "config");
+        defer alloc.free(path);
+        // As the app loads them: the default files, the command line, the
+        // files they include, then the theme.
+        var cfg = try Config.default(alloc);
+        defer cfg.deinit();
+        try cfg.loadFile(alloc, names[0]);
+        try cfg.loadFile(alloc, path);
+        var args: cli_args.ArgsIterator(cli_args.SliceIterator) = .{ .iterator = cli_args.sliceIterator(case.cli) };
+        try cfg.loadIter(alloc, &args);
+        try cfg.loadRecursiveFiles(alloc);
+        try cfg.finalize();
+        try testing.expectEqual(case.want, try listsForeign(&cfg, path, &testSamePath));
+    }
 }
 
 fn testSamePath(a: []const u8, b: []const u8) bool {
