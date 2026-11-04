@@ -10726,6 +10726,70 @@ pub const App = struct {
         try std.testing.expect(std.mem.indexOf(u8, after, "profile-name = py: Python 3\n") != null);
     }
 
+    test "settings save of a move writes an earlier file's lists whole into a file that is empty, comments only or not there" {
+        if (builtin.os.tag != .windows) return error.SkipZigTest;
+        const alloc = std.testing.allocator;
+        const settings_profiles = @import("../win32_settings_profiles.zig");
+        var core_app: CoreApp = undefined;
+        var app: App = undefined;
+        var session: TestSession = .{};
+        try session.init(.{ .core_app = &core_app, .app = &app });
+        defer session.deinit();
+        defer testFreeConfigProblems(&app, alloc);
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        // A file read first defines py and orders the profiles.
+        try tmp.dir.writeFile(.{ .sub_path = "lower.conf", .data = "profile-command = py: python.exe\nprofile-order = cmd.exe\n" });
+        const lower = try tmp.dir.realpathAlloc(alloc, "lower.conf");
+        defer alloc.free(lower);
+        const dir = try tmp.dir.realpathAlloc(alloc, ".");
+        defer alloc.free(dir);
+        const path = try std.fs.path.join(alloc, &.{ dir, "config" });
+        defer alloc.free(path);
+        // The layers as the app reads its default files: the file Settings
+        // saves to gives nothing while it is empty or not there.
+        const Layers = struct {
+            threadlocal var lower_path: []const u8 = "";
+            threadlocal var target_path: []const u8 = "";
+
+            fn load(a: Allocator) anyerror!configpkg.Config {
+                var cfg = try configpkg.Config.default(a);
+                errdefer cfg.deinit();
+                try cfg.loadFile(a, lower_path);
+                cfg.loadFile(a, target_path) catch |err| {
+                    if (err != error.FileNotFound and err != error.FileIsEmpty) return err;
+                };
+                try cfg.loadRecursiveFiles(a);
+                try cfg.finalize();
+                return cfg;
+            }
+        };
+        Layers.lower_path = lower;
+        Layers.target_path = path;
+        const Target = enum { empty, comments, missing };
+        for ([_]Target{ .empty, .comments, .missing }) |target| {
+            tmp.dir.deleteFile("config") catch {};
+            switch (target) {
+                .empty => try tmp.dir.writeFile(.{ .sub_path = "config", .data = "" }),
+                .comments => try tmp.dir.writeFile(.{ .sub_path = "config", .data = "# Settings saves here\n" }),
+                .missing => {},
+            }
+            SaveTest.files = if (target == .comments) &.{ lower, path } else &.{lower};
+            try SaveTest.begin(&app, path);
+            defer SaveTest.end(&app);
+            settings_patch.test_config_load = &Layers.load;
+            var original = try app.config.clone(alloc);
+            defer original.deinit();
+            var pending = try app.config.clone(alloc);
+            defer pending.deinit();
+            try settings_profiles.setOrder(&pending, &.{ "user:py", "cmd.exe" });
+            try app.settingsSaveAndReload(&pending, &original);
+            const after = try SaveTest.read(path);
+            defer alloc.free(after);
+            try std.testing.expect(std.mem.indexOf(u8, after, "profile-order =\nprofile-order = user:py\nprofile-order = cmd.exe\n") != null);
+        }
+    }
+
     test "settings save of a move stops when a later config file sets the profile order, and says so" {
         if (builtin.os.tag != .windows) return error.SkipZigTest;
         const alloc = std.testing.allocator;

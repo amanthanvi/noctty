@@ -356,32 +356,30 @@ pub const ListsForeign = enum {
 /// The command line's value for either list is this launch's choice alone,
 /// whatever the load order: a save that wrote it into the file would keep it
 /// for every later launch, also when the file is a `--config-file` the
-/// loader reads after the command line. Other layers are told apart by the
-/// order the loader read them in (`Config._replay_steps`): a line of another
-/// file that sets either list and was read after the file's first line is a
-/// later layer's. A theme's lines come first (`loadTheme` replays the config
-/// over them), so they are earlier, and the light/dark comparison judges
-/// them. A file with no line yet (empty, or not there) cannot be placed:
-/// then any other file that sets a list counts as later.
+/// loader reads after the command line.
+///
+/// Other files are placed in the loader's order by what they are, not by
+/// their lines, so a file Settings saves to that gives no line (empty,
+/// comments only, or not there yet) is placed too (`loadOrder`). The default
+/// config files come first (Settings saves to the last of them), then the
+/// command line, then each file `config-file` names, in that list's order.
+/// A line of another file that sets either list is a later layer's when that
+/// file loads after `path`. A theme's lines come first (`loadTheme` replays
+/// the config over them); the light/dark comparison judges them.
 pub fn listsForeign(config: *const Config, path: []const u8, same: origin.SamePath) Allocator.Error!?ListsForeign {
     const steps = config._replay_steps.items;
-    const first: ?usize = for (steps, 0..) |step, at| {
-        if (step == .@"-e") break null;
-        const arg = appliedArg(config, step) orelse continue;
-        if (locatedIn(arg.location, path, same)) break at;
-    } else null;
+    const target = loadOrder(config, path, same);
     var foreign: ?ListsForeign = null;
-    for (steps, 0..) |step, at| {
+    for (steps) |step| {
         if (step == .@"-e") break;
         const arg = appliedArg(config, step) orelse continue;
         if (!setsList(arg.text)) continue;
         switch (arg.location) {
             // A line with no place counts as the command line's.
             .cli, .none => return .command_line,
-            .file => {
-                if (locatedIn(arg.location, path, same)) continue;
-                if (first) |start| if (at < start) continue;
-                foreign = foreign orelse .later_file;
+            .file => |file| {
+                if (same(file.path, path)) continue;
+                if (loadOrder(config, file.path, same).after(target)) foreign = foreign orelse .later_file;
             },
         }
     }
@@ -404,6 +402,39 @@ pub fn listsForeign(config: *const Config, path: []const u8, same: origin.SamePa
     return null;
 }
 
+/// Where a file loads among `config`'s layers (`listsForeign`): a default
+/// config file (or a theme, which loads before them all), read before the
+/// command line and every file `config-file` names; or the `index`th of
+/// those, which load in that list's order (`Config.loadRecursiveFiles`
+/// appends what each names, and reads them in turn).
+const LoadOrder = union(enum) {
+    default,
+    included: usize,
+
+    /// Whether a file in this place loads after one in `other`. Of two
+    /// default files, none: Settings saves to the last of them
+    /// (`file_load.preferredDefaultFilePath`, read after the legacy one).
+    fn after(self: LoadOrder, other: LoadOrder) bool {
+        return switch (self) {
+            .default => false,
+            .included => |at| switch (other) {
+                .default => true,
+                .included => |target| at > target,
+            },
+        };
+    }
+};
+
+fn loadOrder(config: *const Config, path: []const u8, same: origin.SamePath) LoadOrder {
+    for (config.@"config-file".value.items, 0..) |entry, at| {
+        const named = switch (entry) {
+            .optional, .required => |named| named,
+        };
+        if (same(named, path)) return .{ .included = at };
+    }
+    return .default;
+}
+
 /// A step's argument and place, when it applies now: an argument, or a
 /// conditional one whose conditions match `config`'s state.
 fn appliedArg(config: *const Config, step: anytype) ?struct { text: []const u8, location: @import("../../cli/diagnostics.zig").Location } {
@@ -413,13 +444,6 @@ fn appliedArg(config: *const Config, step: anytype) ?struct { text: []const u8, 
             if (!config._conditional_state.match(cond)) break null;
         } else .{ .text = arg.arg, .location = arg.location },
         else => null,
-    };
-}
-
-fn locatedIn(location: @import("../../cli/diagnostics.zig").Location, path: []const u8, same: origin.SamePath) bool {
-    return switch (location) {
-        .file => |file| same(file.path, path),
-        .cli, .none => false,
     };
 }
 
@@ -1908,6 +1932,79 @@ fn testLoad(alloc: Allocator, earlier: []const u8, path: []const u8) !Config {
     try cfg.loadRecursiveFiles(alloc);
     try cfg.finalize();
     return cfg;
+}
+
+test "settings patch: an earlier file's lists are the save's to write, though the file it saves to is empty, comments only or not there" {
+    const alloc = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    // A default file read first orders and hides profiles.
+    try tmp.dir.writeFile(.{ .sub_path = "earlier", .data = "profile-order = cmd.exe\nprofile-hidden = pwsh.exe\n" });
+    try tmp.dir.writeFile(.{ .sub_path = "later.conf", .data = "profile-order = git-bash\n" });
+    const earlier = try tmp.dir.realpathAlloc(alloc, "earlier");
+    defer alloc.free(earlier);
+    const later = try tmp.dir.realpathAlloc(alloc, "later.conf");
+    defer alloc.free(later);
+    const dir = try tmp.dir.realpathAlloc(alloc, ".");
+    defer alloc.free(dir);
+    const path = try std.fs.path.join(alloc, &.{ dir, "target" });
+    defer alloc.free(path);
+    const Target = enum { empty, comments, missing };
+    for ([_]Target{ .empty, .comments, .missing }) |target| {
+        tmp.dir.deleteFile("target") catch {};
+        switch (target) {
+            .empty => try tmp.dir.writeFile(.{ .sub_path = "target", .data = "" }),
+            .comments => try tmp.dir.writeFile(.{ .sub_path = "target", .data = "# Settings saves here\n" }),
+            .missing => {},
+        }
+        // As the app reads its default files: an empty or missing one is
+        // skipped, and gives the loader no line.
+        var cfg = try Config.default(alloc);
+        defer cfg.deinit();
+        try cfg.loadFile(alloc, earlier);
+        if (target == .comments) try cfg.loadFile(alloc, path);
+        try cfg.finalize();
+        try testing.expect(cfg.@"profile-order".list.items.len == 1);
+        try testing.expectEqual(@as(?ListsForeign, null), try listsForeign(&cfg, path, &testSamePath));
+        // A file that includes one setting the order still is a later one.
+        var with_later = try Config.default(alloc);
+        defer with_later.deinit();
+        try with_later.loadFile(alloc, earlier);
+        if (target == .comments) try with_later.loadFile(alloc, path);
+        try with_later.@"config-file".parseCLI(with_later._arena.?.allocator(), later);
+        try with_later.loadRecursiveFiles(alloc);
+        try with_later.finalize();
+        try testing.expectEqual(@as(?ListsForeign, .later_file), try listsForeign(&with_later, path, &testSamePath));
+    }
+    // A file `config-file` names: one it names before is earlier, one after
+    // is later, the file Settings saves to empty or not there.
+    try tmp.dir.writeFile(.{ .sub_path = "first.conf", .data = "profile-hidden = pwsh.exe\n" });
+    const first = try tmp.dir.realpathAlloc(alloc, "first.conf");
+    defer alloc.free(first);
+    for ([_]Target{ .empty, .missing }) |target| {
+        tmp.dir.deleteFile("target") catch {};
+        if (target == .empty) try tmp.dir.writeFile(.{ .sub_path = "target", .data = "" });
+        for ([_]struct { after: bool, want: ?ListsForeign }{
+            .{ .after = false, .want = null },
+            .{ .after = true, .want = .later_file },
+        }) |case| {
+            var cfg = try Config.default(alloc);
+            defer cfg.deinit();
+            const a = cfg._arena.?.allocator();
+            const optional_target = try std.fmt.allocPrint(alloc, "?{s}", .{path});
+            defer alloc.free(optional_target);
+            if (case.after) {
+                try cfg.@"config-file".parseCLI(a, optional_target);
+                try cfg.@"config-file".parseCLI(a, first);
+            } else {
+                try cfg.@"config-file".parseCLI(a, first);
+                try cfg.@"config-file".parseCLI(a, optional_target);
+            }
+            try cfg.loadRecursiveFiles(alloc);
+            try cfg.finalize();
+            try testing.expectEqual(case.want, try listsForeign(&cfg, path, &testSamePath));
+        }
+    }
 }
 
 test "settings patch: the lists are another layer's when the command line, a later config file or one theme sets them" {
