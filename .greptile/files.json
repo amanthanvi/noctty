@@ -230,7 +230,8 @@
         "src/cli/list_profiles.zig",
         "src/config/command.zig",
         "src/apprt/win32/labels.zig",
-        "src/apprt/win32/confirm_text.zig"
+        "src/apprt/win32/confirm_text.zig",
+        "src/apprt/win32/profile_pick.zig"
       ]
     },
     {

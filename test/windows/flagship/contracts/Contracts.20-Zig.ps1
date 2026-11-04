@@ -29,6 +29,7 @@ $win32TestModuleRoots = @(
     '_ = @import("win32/window_start.zig");'
     '_ = @import("win32/confirm_text.zig");'
     '_ = @import("win32/tab_label.zig");'
+    '_ = @import("win32/profile_pick.zig");'
 )
 foreach ($win32TestModuleRoot in $win32TestModuleRoots) {
     if (-not [regex]::IsMatch(
@@ -57,11 +58,13 @@ foreach ($win32TestModuleRoot in $win32TestModuleRoots) {
 # window_start.zig and the unused resizeSplitFallbackDelta went with the dead
 # Surface.resizeSplitFallback (window state on the Window), to 87 when its
 # confirm prompt words (the program clipboard, background close and link
-# prompts) and its 11 preview pane tests moved to confirm_text.zig, and to 65
+# prompts) and its 11 preview pane tests moved to confirm_text.zig, to 65
 # when its tab label, tooltip and UIA name tests moved to tab_label.zig (14),
 # its cell-width compaction tests to text.zig (4), the window caption's title
 # tests to host.zig (2) and text.zig (1) and the base title's to
-# terminal_window.zig (1).
+# terminal_window.zig (1), and to 59 when its profile picking tests (by key,
+# typed text, where the picker starts, quick slots and pins) moved to
+# profile_pick.zig (6).
 # window_start.zig is the pure half of window state, which received its
 # consolidated tests: the `plan`, `place`, `returnOn`, `forRestore` and
 # `savedFullscreen` tables (from window_state.zig's start and placement tests
@@ -73,8 +76,11 @@ foreach ($win32TestModuleRoot in $win32TestModuleRoots) {
 # tab_label.zig says what a tab's label, tooltip and UIA name are: its floor
 # is the 14 tests from labels.zig, the 2 tab-label tests from win32_bell.zig
 # and its Key equality and status-badge tests, 18.
+# profile_pick.zig says which profile a key, typed text, the picker's start
+# and a quick slot pick, and where a pick opens: its floor is the 6 tests from
+# labels.zig and the 3 open-target tests from win32.zig, 9.
 $movedWin32TestFloors = [ordered]@{
-    'labels.zig' = 65
+    'labels.zig' = 59
     'input.zig' = 24
     'gl_startup.zig' = 4
     'render_trace.zig' = 3
@@ -85,6 +91,7 @@ $movedWin32TestFloors = [ordered]@{
     'window_start.zig' = 10
     'confirm_text.zig' = 16
     'tab_label.zig' = 18
+    'profile_pick.zig' = 9
 }
 foreach ($movedWin32TestModule in $movedWin32TestFloors.Keys) {
     $movedWin32TestModulePath = @($win32RuntimeModuleFiles | Where-Object {

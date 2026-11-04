@@ -13,9 +13,11 @@ const win32_types = @import("../win32_types.zig");
 const c = @import("consts.zig");
 const docked_search = @import("docked_search.zig");
 const paint_text = @import("text.zig");
+const profile_pick = @import("profile_pick.zig");
 const tab_label = @import("tab_label.zig");
 
 const HostOverlayMode = win32_theme.HostOverlayMode;
+const OpenTarget = profile_pick.OpenTarget;
 const rgb = win32_theme.rgb;
 const PaletteSnapshot = win32_palette.Snapshot;
 const RankedIndex = win32_palette.RankedIndex;
@@ -94,18 +96,6 @@ pub const LaunchTargetButtonKeyAction = enum {
     next,
     first,
     last,
-};
-
-pub const ProfileOpenTarget = enum {
-    tab,
-    window,
-    split,
-};
-
-pub const ProfileSelection = union(enum) {
-    exact: usize,
-    ambiguous: usize,
-    invalid,
 };
 
 /// Keyboard focus stops inside the overlay row, in tab order.
@@ -459,124 +449,19 @@ pub fn quickSlotShortcutProfileIndex(
 ) ?usize {
     if (!alt_pressed) return null;
     const slot_ordinal = profileShortcutIndexFromKey(vk) orelse return null;
-    if (slot_ordinal >= 3) return null;
-    return quickSlotProfileIndex(profiles_len, selected_index, slot_ordinal, 3);
+    return profile_pick.quickSlot(profiles_len, selected_index, slot_ordinal);
 }
 
 pub fn quickSlotPinOrdinalFromKey(vk: WPARAM, alt_pressed: bool, shift_pressed: bool) ?usize {
     if (!alt_pressed or !shift_pressed) return null;
     const slot_ordinal = profileShortcutIndexFromKey(vk) orelse return null;
-    if (slot_ordinal >= 3) return null;
+    if (slot_ordinal >= profile_pick.quick_slots) return null;
     return slot_ordinal;
 }
 
 pub fn clearQuickSlotPinsRequested(vk: WPARAM, alt_pressed: bool, shift_pressed: bool) bool {
     if (!alt_pressed or !shift_pressed) return false;
     return vk == c.VK_0 or vk == c.VK_NUMPAD0;
-}
-
-pub fn resolveProfileSelection(
-    profiles: []const windows_shell.Profile,
-    input_text: []const u8,
-    fallback_index: usize,
-) ProfileSelection {
-    if (profiles.len == 0) return .invalid;
-    const fallback = @min(fallback_index, profiles.len - 1);
-    if (input_text.len == 0) return .{ .exact = fallback };
-
-    const requested = std.fmt.parseUnsigned(usize, input_text, 10) catch null;
-    if (requested) |value| {
-        if (value == 0 or value > profiles.len) return .invalid;
-        return .{ .exact = value - 1 };
-    }
-
-    var exact_match: ?usize = null;
-    var unique_match: ?usize = null;
-    var match_count: usize = 0;
-    for (profiles, 0..) |profile, index| {
-        const label_matches = if (profile.kind == .ssh)
-            std.mem.eql(u8, profile.label, input_text)
-        else
-            std.ascii.eqlIgnoreCase(profile.label, input_text);
-        if (windows_shell.profileKeyEquals(profile, input_text) or label_matches) {
-            exact_match = index;
-            break;
-        }
-        if (std.ascii.startsWithIgnoreCase(profile.key, input_text) or
-            std.ascii.startsWithIgnoreCase(profile.label, input_text))
-        {
-            unique_match = index;
-            match_count += 1;
-        }
-    }
-    if (exact_match) |index| return .{ .exact = index };
-    if (match_count == 1) return .{ .exact = unique_match.? };
-    if (match_count > 1) return .{ .ambiguous = match_count };
-    return .invalid;
-}
-
-pub fn profileIndexByKey(profiles: []const windows_shell.Profile, key: []const u8) ?usize {
-    for (profiles, 0..) |profile, index| {
-        if (windows_shell.profileKeyEquals(profile, key)) return index;
-    }
-    return null;
-}
-
-/// Where the picker starts: the profile chosen last (in this window, else in
-/// any), then the one `default-profile` names (`default_key`), then the
-/// `NOCTTY_WIN32_DEFAULT_PROFILE` hint. Null when none of them is in
-/// `profiles` (the shown ones); the caller then tries the automatic default.
-pub fn preferredProfileIndex(
-    profiles: []const windows_shell.Profile,
-    selected_key: ?[]const u8,
-    app_key: ?[]const u8,
-    default_key: ?[]const u8,
-    hint: ?[]const u8,
-    fallback_index: usize,
-) ?usize {
-    if (profiles.len == 0) return null;
-
-    const preferred_key = if (selected_key) |key|
-        key
-    else if (app_key) |key|
-        key
-    else
-        null;
-    if (preferred_key) |key| {
-        for (profiles, 0..) |profile, index| {
-            if (windows_shell.profileKeyEquals(profile, key)) return index;
-        }
-    }
-    if (default_key) |key| {
-        if (profileIndexByKey(profiles, key)) |index| return index;
-    }
-
-    if (hint) |value| {
-        return switch (resolveProfileSelection(profiles, value, fallback_index)) {
-            .exact => |index| index,
-            .ambiguous, .invalid => null,
-        };
-    }
-
-    return null;
-}
-
-pub fn quickSlotProfileIndex(
-    profiles_len: usize,
-    selected_index: ?usize,
-    slot_ordinal: usize,
-    max_slots: usize,
-) ?usize {
-    if (profiles_len == 0 or slot_ordinal >= max_slots) return null;
-    var drawn: usize = 0;
-    var index: usize = 0;
-    while (index < profiles_len) : (index += 1) {
-        if (selected_index != null and index == selected_index.?) continue;
-        if (drawn == slot_ordinal) return index;
-        drawn += 1;
-        if (drawn >= max_slots) break;
-    }
-    return null;
 }
 
 pub fn buildTabOverviewOverlayLabel(
@@ -1141,7 +1026,7 @@ pub fn buildProfileChromeBadgeText(alloc: Allocator, kind: windows_shell.Profile
     });
 }
 
-fn profileOpenTargetActionText(target: ProfileOpenTarget) []const u8 {
+fn profileOpenTargetActionText(target: OpenTarget) []const u8 {
     return switch (target) {
         .tab => "new tab",
         .window => "new window",
@@ -1185,11 +1070,11 @@ test "win32 a profile's menu item keeps an ampersand and a tab in its label" {
     try std.testing.expectEqualStrings("Q&&A shell", tenth);
 }
 
-fn targetButtonLabelRightInset(target: ?ProfileOpenTarget) i32 {
+fn targetButtonLabelRightInset(target: ?OpenTarget) i32 {
     return if (target != null) 12 else 0;
 }
 
-pub fn buttonLabelRightInset(pinned_slot_ordinal: ?usize, target: ?ProfileOpenTarget) i32 {
+pub fn buttonLabelRightInset(pinned_slot_ordinal: ?usize, target: ?OpenTarget) i32 {
     const slot_inset: i32 = if (pinnedSlotBadgeDigit(pinned_slot_ordinal) != null) 16 else 0;
     return @max(targetButtonLabelRightInset(target), slot_inset);
 }
@@ -1200,7 +1085,7 @@ pub fn pinnedSlotBadgeDigit(pinned_slot_ordinal: ?usize) ?u8 {
     return @as(u8, @intCast('1' + ordinal));
 }
 
-pub fn profileOpenTargetMarkerColor(target: ProfileOpenTarget) u32 {
+pub fn profileOpenTargetMarkerColor(target: OpenTarget) u32 {
     return switch (target) {
         .tab => rgb(132, 172, 238),
         .window => rgb(236, 182, 118),
@@ -1208,7 +1093,7 @@ pub fn profileOpenTargetMarkerColor(target: ProfileOpenTarget) u32 {
     };
 }
 
-pub fn profileOpenTargetBadgeGlyph(target: ProfileOpenTarget) u8 {
+pub fn profileOpenTargetBadgeGlyph(target: OpenTarget) u8 {
     return switch (target) {
         .tab => 'T',
         .window => 'W',
@@ -1266,7 +1151,7 @@ pub fn buildProfileOverlayLabel(
     selected_index: usize,
 ) ![]u8 {
     if (profiles.len == 0) return try alloc.dupe(u8, "Profile");
-    return switch (resolveProfileSelection(profiles, input_text, selected_index)) {
+    return switch (profile_pick.byTyped(profiles, input_text, selected_index)) {
         .exact => |index| blk: {
             const badge = try buildProfileChromeBadgeText(alloc, profiles[index].kind);
             defer alloc.free(badge);
@@ -1286,11 +1171,11 @@ pub fn buildProfileAcceptLabel(
     profiles_opt: ?[]const windows_shell.Profile,
     input_text: []const u8,
     selected_index: usize,
-    default_target: ProfileOpenTarget,
+    default_target: OpenTarget,
 ) ![]u8 {
     const profiles = profiles_opt orelse return try alloc.dupe(u8, "Check");
     if (profiles.len == 0) return try alloc.dupe(u8, "Check");
-    return switch (resolveProfileSelection(profiles, input_text, selected_index)) {
+    return switch (profile_pick.byTyped(profiles, input_text, selected_index)) {
         .exact => switch (default_target) {
             .tab => try alloc.dupe(u8, "Open Tab"),
             .window => try alloc.dupe(u8, "Open Win"),
@@ -1306,8 +1191,8 @@ pub fn buildProfileHintText(
     profiles_opt: ?[]const windows_shell.Profile,
     input_text: []const u8,
     selected_index: usize,
-    default_target: ProfileOpenTarget,
-    pinned_slot_keys: [3]?[:0]const u8,
+    default_target: OpenTarget,
+    pinned_slot_keys: [profile_pick.quick_slots]?[:0]const u8,
 ) ![]u8 {
     const profiles = profiles_opt orelse return try alloc.dupe(u8, "No supported Windows profiles detected.");
     if (profiles.len == 0) return try alloc.dupe(u8, "No supported Windows profiles detected.");
@@ -1318,7 +1203,7 @@ pub fn buildProfileHintText(
     else
         try alloc.dupe(u8, "");
     defer alloc.free(quick_suffix);
-    return switch (resolveProfileSelection(profiles, input_text, selected_index)) {
+    return switch (profile_pick.byTyped(profiles, input_text, selected_index)) {
         .exact => |index| blk: {
             const preview = try buildProfileCommandPreviewText(alloc, &profiles[index], 36);
             defer alloc.free(preview);
@@ -1326,7 +1211,7 @@ pub fn buildProfileHintText(
             defer alloc.free(badge);
             const pinned_slot = try buildPinnedProfileSlotText(
                 alloc,
-                findLauncherQuickSlotOrdinal(pinned_slot_keys, profiles[index].key),
+                profile_pick.pinByKey(&pinned_slot_keys, profiles[index].key),
             );
             defer alloc.free(pinned_slot);
             break :blk try std.fmt.allocPrint(
@@ -1363,15 +1248,6 @@ fn buildPinnedProfileSlotText(alloc: Allocator, pinned_slot_ordinal: ?usize) ![]
     return try alloc.dupe(u8, "");
 }
 
-pub fn findLauncherQuickSlotOrdinal(slot_keys: [3]?[:0]const u8, key: []const u8) ?usize {
-    for (slot_keys, 0..) |slot_key, index| {
-        if (slot_key) |value| {
-            if (windows_shell.storedProfileKeyEquals(value, key)) return index;
-        }
-    }
-    return null;
-}
-
 pub fn nextTabOverviewSelection(current: usize, total: usize, reverse: bool) usize {
     if (total == 0) return 0;
     const clamped = std.math.clamp(current, @as(usize, 1), total);
@@ -1383,44 +1259,6 @@ pub fn nextTabOverviewSelection(current: usize, total: usize, reverse: bool) usi
 
 pub fn tabDirectionFromWheelDelta(delta: i16) apprt.action.GotoTab {
     return if (delta > 0) .previous else .next;
-}
-
-test "win32 profileIndexByKey finds launch profile key" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    var profiles = [_]windows_shell.Profile{
-        .{
-            .kind = .cmd,
-            .key = "cmd.exe",
-            .label = "Command Prompt",
-            .command = .{ .shell = "cmd.exe" },
-        },
-        .{
-            .kind = .wsl_distro,
-            .key = "wsl:Ubuntu",
-            .label = "Ubuntu",
-            .command = .{ .shell = "wsl.exe" },
-        },
-        .{
-            .kind = .ssh,
-            .key = "ssh:PROD",
-            .label = "SSH: PROD",
-            .command = .{ .shell = "ssh.exe PROD" },
-        },
-        .{
-            .kind = .ssh,
-            .key = "ssh:prod",
-            .label = "SSH: prod",
-            .command = .{ .shell = "ssh.exe prod" },
-        },
-    };
-
-    try std.testing.expectEqual(@as(?usize, 1), profileIndexByKey(&profiles, "wsl:Ubuntu"));
-    try std.testing.expectEqual(@as(?usize, 1), profileIndexByKey(&profiles, "WSL:UBUNTU"));
-    try std.testing.expectEqual(@as(?usize, 2), profileIndexByKey(&profiles, "ssh:PROD"));
-    try std.testing.expectEqual(@as(?usize, 3), profileIndexByKey(&profiles, "ssh:prod"));
-    try std.testing.expectEqual(@as(?usize, null), profileIndexByKey(&profiles, "SSH:prod"));
-    try std.testing.expectEqual(@as(?usize, null), profileIndexByKey(&profiles, "missing"));
 }
 
 test "win32 profileShortcutIndexFromKey supports top row and numpad digits" {
@@ -1478,84 +1316,6 @@ test "win32 taskbar mapping clamps percent to shell range" {
     const mapped = win32_taskbar_progress.mapProgressReport(report);
     try std.testing.expectEqual(@as(u64, 100), mapped.value.?.completed);
     try std.testing.expectEqual(@as(u64, 100), mapped.value.?.total);
-}
-
-test "win32 preferredProfileIndex respects host key then app key then hint" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    const profiles = [_]windows_shell.Profile{
-        .{
-            .kind = .pwsh,
-            .key = "pwsh.exe",
-            .label = "PowerShell",
-            .command = .{ .direct = &.{"pwsh.exe"} },
-        },
-        .{
-            .kind = .git_bash,
-            .key = "git-bash",
-            .label = "Git Bash",
-            .command = .{ .direct = &.{"bash.exe"} },
-        },
-        .{
-            .kind = .cmd,
-            .key = "cmd.exe",
-            .label = "Command Prompt",
-            .command = .{ .direct = &.{"cmd.exe"} },
-        },
-    };
-
-    try std.testing.expectEqual(@as(?usize, 1), preferredProfileIndex(&profiles, "git-bash", null, null, "cmd", 0));
-    try std.testing.expectEqual(@as(?usize, 2), preferredProfileIndex(&profiles, null, "cmd.exe", null, "pwsh", 0));
-    try std.testing.expectEqual(@as(?usize, 0), preferredProfileIndex(&profiles, null, null, null, "power", 2));
-    try std.testing.expectEqual(@as(?usize, null), preferredProfileIndex(&profiles, null, null, null, "definitely_not_real", 1));
-}
-
-test "win32 preferredProfileIndex puts default-profile after a choice and before the hint" {
-    const profiles = [_]windows_shell.Profile{
-        .{ .kind = .pwsh, .key = "pwsh.exe", .label = "PowerShell", .command = .{ .direct = &.{"pwsh.exe"} } },
-        .{ .kind = .git_bash, .key = "git-bash", .label = "Git Bash", .command = .{ .direct = &.{"bash.exe"} } },
-        .{ .kind = .cmd, .key = "cmd.exe", .label = "Command Prompt", .command = .{ .direct = &.{"cmd.exe"} } },
-    };
-
-    // `default-profile` comes after a choice the user made and before the
-    // `NOCTTY_WIN32_DEFAULT_PROFILE` hint, in any case of its key.
-    try std.testing.expectEqual(@as(?usize, 1), preferredProfileIndex(&profiles, null, null, "GIT-BASH", "cmd", 0));
-    try std.testing.expectEqual(@as(?usize, 2), preferredProfileIndex(&profiles, "cmd.exe", null, "git-bash", "pwsh", 0));
-    try std.testing.expectEqual(@as(?usize, 0), preferredProfileIndex(&profiles, null, "pwsh.exe", "git-bash", null, 1));
-    // One the list does not show (hidden, or gone) leaves the hint.
-    try std.testing.expectEqual(@as(?usize, 2), preferredProfileIndex(&profiles, null, null, "user:gone", "cmd", 0));
-    try std.testing.expectEqual(@as(?usize, null), preferredProfileIndex(&profiles, null, null, "user:gone", null, 0));
-}
-
-test "win32 resolveProfileSelection supports index and prefix matching" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    const profiles = [_]windows_shell.Profile{
-        .{
-            .kind = .pwsh,
-            .key = "pwsh.exe",
-            .label = "PowerShell",
-            .command = .{ .direct = &.{"pwsh.exe"} },
-        },
-        .{
-            .kind = .wsl_distro,
-            .key = "Ubuntu",
-            .label = "WSL: Ubuntu",
-            .command = .{ .direct = &.{ "wsl.exe", "-d", "Ubuntu", "~" } },
-        },
-        .{
-            .kind = .wsl_distro,
-            .key = "Ubuntu-Preview",
-            .label = "WSL: Ubuntu Preview",
-            .command = .{ .direct = &.{ "wsl.exe", "-d", "Ubuntu-Preview", "~" } },
-        },
-    };
-
-    try std.testing.expectEqualDeep(ProfileSelection{ .exact = 0 }, resolveProfileSelection(&profiles, "", 0));
-    try std.testing.expectEqualDeep(ProfileSelection{ .exact = 1 }, resolveProfileSelection(&profiles, "2", 0));
-    try std.testing.expectEqualDeep(ProfileSelection{ .exact = 0 }, resolveProfileSelection(&profiles, "powers", 1));
-    try std.testing.expectEqualDeep(ProfileSelection{ .ambiguous = 2 }, resolveProfileSelection(&profiles, "ubu", 0));
-    try std.testing.expectEqualDeep(ProfileSelection.invalid, resolveProfileSelection(&profiles, "9", 0));
 }
 
 test "win32 buildProfileOverlayLabel and hint reflect selected profile" {
@@ -1695,26 +1455,6 @@ test "win32 pinnedSlotBadgeDigit reflects visible quick slot ordinals" {
     try std.testing.expectEqual(@as(?u8, '3'), pinnedSlotBadgeDigit(2));
     try std.testing.expectEqual(@as(?u8, null), pinnedSlotBadgeDigit(null));
     try std.testing.expectEqual(@as(?u8, null), pinnedSlotBadgeDigit(9));
-}
-
-test "win32 quickSlotProfileIndex skips the selected profile and preserves order" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    try std.testing.expectEqual(@as(?usize, 1), quickSlotProfileIndex(5, 0, 0, 3));
-    try std.testing.expectEqual(@as(?usize, 2), quickSlotProfileIndex(5, 0, 1, 3));
-    try std.testing.expectEqual(@as(?usize, 3), quickSlotProfileIndex(5, 0, 2, 3));
-    try std.testing.expectEqual(@as(?usize, 0), quickSlotProfileIndex(5, 3, 0, 3));
-    try std.testing.expectEqual(@as(?usize, 1), quickSlotProfileIndex(5, 3, 1, 3));
-    try std.testing.expectEqual(@as(?usize, 2), quickSlotProfileIndex(5, 3, 2, 3));
-    try std.testing.expectEqual(@as(?usize, null), quickSlotProfileIndex(1, 0, 0, 3));
-}
-
-test "win32 findLauncherQuickSlotOrdinal finds runtime-pinned slots" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    try std.testing.expectEqual(@as(?usize, 0), findLauncherQuickSlotOrdinal(.{ "git-bash", "cmd.exe", null }, "git-bash"));
-    try std.testing.expectEqual(@as(?usize, 1), findLauncherQuickSlotOrdinal(.{ "git-bash", "cmd.exe", null }, "CMD.EXE"));
-    try std.testing.expectEqual(@as(?usize, null), findLauncherQuickSlotOrdinal(.{ "git-bash", "cmd.exe", null }, "pwsh.exe"));
 }
 
 test "win32 buildProfileChromeBadgeText adds profile glyph treatment" {
