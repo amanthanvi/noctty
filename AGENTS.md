@@ -244,7 +244,8 @@ that govern each symbol you change, or that none does.
   `Surface.metrics`; the rect a fullscreen window covers, one pixel past a
   free monitor edge for OpenGL with the tab bar hidden (#598):
   `composedFullscreenRect` in `win32/window_start.zig`,
-  `keepsFullscreenComposed`, `fullscreenRect` and `MonitorRects` in
+  `keepsFullscreenComposed` (its decision, `composesFullscreen` over
+  `PaneRenderer`), `fullscreenRect` and `MonitorRects` in
   `win32/window_state.zig`;
   the `maximize`/`fullscreen` keys at window start: `Enter` and
   `forRestore` in `win32/window_start.zig`; what a session saves and

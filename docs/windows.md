@@ -1742,10 +1742,13 @@ window covers its monitor exactly, as before. With the Direct3D 11 renderer
 or the tab bar shown, nothing changes. The extra pixel is part of the
 terminal's area: the default padding takes it, but with `window-padding-y`
 (or, at a left or right edge, `window-padding-x`) set to 0 on that edge, the
-terminal's last pixel row or column can be off-screen. Leaving fullscreen
-returns the window exactly where it was, and the session saves that place,
-never the larger rect. The choice is made when the window enters fullscreen, or when a window
-is opened from a fullscreen one. These do not redo it while the window stays
+terminal's last pixel row or column can be off-screen. The larger rect is
+never what leaving fullscreen returns to, and never what the session saves:
+both start from the window as it was before fullscreen. As before this
+change, when the window's monitor or scaling changed while it was
+fullscreen, that place is moved and scaled to fit where the window is now.
+The choice is made when the window enters fullscreen, or when a window is
+opened from a fullscreen one. These do not redo it while the window stays
 fullscreen: a config reload (`renderer`, `window-show-tab-bar`), a switch
 from Direct3D 11 to OpenGL after a renderer failure, a scaling change, or a
 monitor added, removed or moved. A monitor attached at the extended edge then

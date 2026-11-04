@@ -279,7 +279,14 @@ fn beforeShow(host: *Host, pending: *const Pending) !bool {
     // A copy of a fullscreen window is a popup over its monitor from
     // `.created`, and shows there first: at the rect it covers fullscreen on
     // the monitor it is on, as its own pane decides (`takeSourceState` keeps
-    // it there).
+    // it there). `WS_POPUP` is exactly that copy today: `window_start.plan`
+    // gives it only to a copy of a fullscreen source without a size of its
+    // own; `window-decoration = none` is a bare `WS_OVERLAPPED` (framed on
+    // Windows 11), and a config's `fullscreen` starts framed until
+    // `enterFullscreen`. The table test "win32
+    // a new window is created framed, bare or a popup as its state and Windows
+    // build say" pins that; a change there that makes another window a popup
+    // widens this gate.
     if (pending.plan.style & c.WS_POPUP != 0) {
         placeFullscreenCopy(host) catch |err| {
             log.warn("win32 fullscreen copy placement failed err={}", .{err});
@@ -776,14 +783,34 @@ fn enterFullscreen(host: *Host) !void {
 /// monitor change keep the rect it has.
 fn keepsFullscreenComposed(host: *const Host) bool {
     if (builtin.is_test and test_keeps_fullscreen_composed) return true;
-    if (host.shouldShowTabBar()) return false;
-    const pane = host.activeSurface() orelse return false;
-    if (!pane.core_initialized) return false;
-    // The backend that runs, which a fallback can have changed from the
-    // configured one. Once OpenGL runs, it stays.
-    if (comptime !build_config.d3d11) return true;
-    return pane.core_surface.renderer.opengl.load(.acquire) != null;
+    return composesFullscreen(host.shouldShowTabBar(), .of(host.activeSurface()));
 }
+
+/// `keepsFullscreenComposed`'s decision: the tab bar hidden, and the active
+/// pane running OpenGL.
+fn composesFullscreen(tab_bar_shown: bool, renderer: PaneRenderer) bool {
+    return !tab_bar_shown and renderer == .opengl;
+}
+
+/// What a window's active pane renders with.
+const PaneRenderer = enum {
+    /// No pane: a window kept empty for undo.
+    none,
+    /// Its core init has not finished, so no renderer runs yet.
+    starting,
+    opengl,
+    d3d11,
+
+    /// The backend that runs, which a fallback can have changed from the
+    /// configured one. Once OpenGL runs, it stays: a fallback goes only from
+    /// D3D11 to OpenGL.
+    fn of(pane: ?*const Surface) PaneRenderer {
+        const surface = pane orelse return .none;
+        if (!surface.core_initialized) return .starting;
+        if (comptime !build_config.d3d11) return .opengl;
+        return if (surface.core_surface.renderer.opengl.load(.acquire) != null) .opengl else .d3d11;
+    }
+};
 
 /// Turns `keepsFullscreenComposed` on in a test, whose panes have no renderer
 /// to ask. Off by default, so every other test keeps the exact monitor rect.
@@ -1416,6 +1443,52 @@ test "win32 a copy of a composed fullscreen window first shows, and stays, 1 px 
             }
         }
     }.body);
+}
+
+test "win32 a fullscreen window grows only with its tab bar hidden and its active pane on OpenGL" {
+    // The decision the window tests above force on.
+    const Case = struct { tab_bar_shown: bool, renderer: PaneRenderer, grows: bool };
+    for ([_]Case{
+        .{ .tab_bar_shown = false, .renderer = .opengl, .grows = true },
+        // With the tab bar shown the pane is smaller than the monitor.
+        .{ .tab_bar_shown = true, .renderer = .opengl, .grows = false },
+        // D3D11 presents through composition anyway.
+        .{ .tab_bar_shown = false, .renderer = .d3d11, .grows = false },
+        .{ .tab_bar_shown = true, .renderer = .d3d11, .grows = false },
+        // No pane, or one whose renderer does not run yet.
+        .{ .tab_bar_shown = false, .renderer = .none, .grows = false },
+        .{ .tab_bar_shown = false, .renderer = .starting, .grows = false },
+    }) |case| {
+        try std.testing.expectEqual(case.grows, composesFullscreen(case.tab_bar_shown, case.renderer));
+    }
+
+    // Through a window: `window-show-tab-bar` is what hides the tab bar, and
+    // a window with no pane never grows.
+    var app = placementTestApp();
+    var host: Host = .{ .app = &app, .id = 1 };
+    for ([_]configpkg.Config.WindowShowTabBar{ .always, .auto, .never }) |tabs| {
+        app.config.@"window-show-tab-bar" = tabs;
+        try std.testing.expectEqual(tabs != .never, host.shouldShowTabBar());
+        try std.testing.expect(!keepsFullscreenComposed(&host));
+    }
+}
+
+test "win32 a window's active pane reads as no renderer, one starting, OpenGL or D3D11" {
+    try std.testing.expectEqual(PaneRenderer.none, PaneRenderer.of(null));
+    var pane: Surface = .{ .app = undefined };
+    try std.testing.expectEqual(PaneRenderer.starting, PaneRenderer.of(&pane));
+    pane.core_initialized = true;
+    if (comptime !build_config.d3d11) {
+        try std.testing.expectEqual(PaneRenderer.opengl, PaneRenderer.of(&pane));
+        return;
+    }
+    // Only the renderer's `opengl` pointer is read, never what it points at:
+    // null while D3D11 runs, set once OpenGL does.
+    const opengl = &pane.core_surface.renderer.opengl;
+    opengl.* = .init(null);
+    try std.testing.expectEqual(PaneRenderer.d3d11, PaneRenderer.of(&pane));
+    opengl.store(@ptrFromInt(0x1000), .release);
+    try std.testing.expectEqual(PaneRenderer.opengl, PaneRenderer.of(&pane));
 }
 
 test "win32 a host opened from a minimized host starts on screen" {

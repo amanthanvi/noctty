@@ -150,7 +150,9 @@ foreach ($movedWin32TestModule in $movedWin32TestFloors.Keys) {
 # imports (window state, step 3), and its eight new-window placement tests,
 # the fullscreen-restore rect test and the two initial-opacity tests became
 # the pure `place` tables there and first-show assertions (step 4), and is
-# 26 since `scaleInitialClientSize`'s test moved in from win32.zig (step 7).
+# 26 since `scaleInitialClientSize`'s test moved in from win32.zig (step 7),
+# and is 30 since #608 added its two composed-fullscreen window tests and the
+# two table tests of their gate (`composesFullscreen`, `PaneRenderer.of`).
 # Lower one only for a deliberate consolidation.
 # test_support.zig declares no tests, so it has no floor.
 $extractedWin32TestModules = [ordered]@{
@@ -160,7 +162,7 @@ $extractedWin32TestModules = [ordered]@{
     'terminal_window.zig' = @{ Binding = 'terminal_window_module'; Floor = 24 }
     'session.zig' = @{ Binding = 'session_module'; Floor = 27 }
     'quick_terminal_host.zig' = @{ Binding = 'quick_terminal_host'; Floor = 10 }
-    'window_state.zig' = @{ Binding = 'window_state'; Floor = 26 }
+    'window_state.zig' = @{ Binding = 'window_state'; Floor = 30 }
     'surface_presentation.zig' = @{ Binding = 'surface_presentation'; Floor = 15 }
     'search_controls.zig' = @{ Binding = 'search_controls'; Floor = 4 }
     'overlay_session.zig' = @{ Binding = 'overlay_session'; Floor = 2 }
