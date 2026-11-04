@@ -69,7 +69,10 @@ foreach ($win32TestModuleRoot in $win32TestModuleRoots) {
 # consolidated tests: the `plan`, `place`, `returnOn`, `forRestore` and
 # `savedFullscreen` tables (from window_state.zig's start and placement tests
 # and session.zig's lookup-failure test), `restoredRectOnScreen` (from
-# win32.zig) and `TopLevel.alpha` (from labels.zig); its floor is all 10.
+# win32.zig) and `TopLevel.alpha` (from labels.zig); its floor was all 10,
+# and is 12 since the two `composedFullscreenRect` tables (#598: the free
+# edge a fullscreen OpenGL window grows past, and the null that keeps the
+# exact monitor rect) joined them.
 # confirm_text.zig says what each confirm prompt says: its floor is the 14
 # tests from labels.zig, the close-scope table from win32.zig and the
 # out-of-memory test of a background tab's close prompt, 16.
@@ -88,7 +91,7 @@ $movedWin32TestFloors = [ordered]@{
     'gdi.zig' = 2
     'facade_budget.zig' = 2
     'docked_search.zig' = 32
-    'window_start.zig' = 10
+    'window_start.zig' = 12
     'confirm_text.zig' = 16
     'tab_label.zig' = 18
     'profile_pick.zig' = 9

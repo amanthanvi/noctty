@@ -8,6 +8,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const win32 = @import("../win32.zig");
 const apprt = @import("../../apprt.zig");
+const build_config = @import("../../build_config.zig");
 const configpkg = @import("../../config.zig");
 const c = @import("consts.zig");
 const child_window = @import("child_window.zig");
@@ -275,6 +276,15 @@ fn beforeShow(host: *Host, pending: *const Pending) !bool {
     applyBackgroundOpacity(host) catch |err| {
         log.warn("win32 initial background opacity failed err={}", .{err});
     };
+    // A copy of a fullscreen window is a popup over its monitor from
+    // `.created`, and shows there first: at the rect it covers fullscreen on
+    // the monitor it is on, as its own pane decides (`takeSourceState` keeps
+    // it there).
+    if (pending.plan.style & c.WS_POPUP != 0) {
+        placeFullscreenCopy(host) catch |err| {
+            log.warn("win32 fullscreen copy placement failed err={}", .{err});
+        };
+    }
     try host.refreshChrome();
     try host.layout();
     // `maximize` and `fullscreen` (#496), before the first show, so the
@@ -288,6 +298,24 @@ fn beforeShow(host: *Host, pending: *const Pending) !bool {
         _ = sys.UpdateWindow(hwnd);
     };
     return show.takesFocus();
+}
+
+fn placeFullscreenCopy(host: *Host) !void {
+    const hwnd = host.hwnd orelse return;
+    const screen = (try windowMonitor(hwnd)).info.rcMonitor;
+    const rect = fullscreenRect(host, screen);
+    if (rectEquals(rect, screen)) return;
+    if (sys.SetWindowPos(
+        hwnd,
+        null,
+        rect.left,
+        rect.top,
+        rect.right - rect.left,
+        rect.bottom - rect.top,
+        c.SWP_NOZORDER | c.SWP_NOACTIVATE,
+    ) == 0) {
+        return lastError();
+    }
 }
 
 fn afterShow(host: *Host, pending: *const Pending) !void {
@@ -467,29 +495,46 @@ fn setMinimizedNormalRect(hwnd: HWND, rect: RECT) !void {
 }
 
 /// The work areas of the monitors there are now, in screen coordinates.
-pub const WorkAreas = struct {
-    rects: [16]RECT = undefined,
-    count: usize = 0,
+pub const WorkAreas = MonitorRectList("rcWork");
+/// The whole rects of the monitors there are now, in screen coordinates: what
+/// a fullscreen window's edges are checked against (`fullscreenRect`).
+const MonitorRects = MonitorRectList("rcMonitor");
 
-    pub fn collect() WorkAreas {
-        var areas: WorkAreas = .{};
-        _ = sys.EnumDisplayMonitors(null, null, enumProc, @as(LPARAM, @bitCast(@intFromPtr(&areas))));
-        return areas;
-    }
+/// One rect of each monitor there is now, `MONITORINFO.<field>`. `complete`
+/// is false when Windows did not give every monitor's.
+fn MonitorRectList(comptime field: []const u8) type {
+    return struct {
+        const List = @This();
+        rects: [16]RECT = undefined,
+        count: usize = 0,
+        complete: bool = true,
 
-    pub fn slice(self: *const WorkAreas) []const RECT {
-        return self.rects[0..self.count];
-    }
+        pub fn collect() List {
+            var list: List = .{};
+            if (sys.EnumDisplayMonitors(null, null, enumProc, @as(LPARAM, @bitCast(@intFromPtr(&list)))) == 0) list.complete = false;
+            return list;
+        }
 
-    fn enumProc(monitor: sys.HMONITOR, _: HDC, _: *RECT, data: LPARAM) callconv(.winapi) BOOL {
-        const areas: *WorkAreas = @ptrFromInt(@as(usize, @bitCast(data)));
-        if (areas.count == areas.rects.len) return 0;
-        const info = monitorInfoOf(monitor) orelse return 1;
-        areas.rects[areas.count] = info.rcWork;
-        areas.count += 1;
-        return 1;
-    }
-};
+        pub fn slice(self: *const List) []const RECT {
+            return self.rects[0..self.count];
+        }
+
+        fn enumProc(monitor: sys.HMONITOR, _: HDC, _: *RECT, data: LPARAM) callconv(.winapi) BOOL {
+            const list: *List = @ptrFromInt(@as(usize, @bitCast(data)));
+            if (list.count == list.rects.len) {
+                list.complete = false;
+                return 0;
+            }
+            const info = monitorInfoOf(monitor) orelse {
+                list.complete = false;
+                return 1;
+            };
+            list.rects[list.count] = @field(info, field);
+            list.count += 1;
+            return 1;
+        }
+    };
+}
 
 /// Puts a restored window at the rect it was saved at, moved onto a monitor
 /// if its own is gone, and maximizes it if it was.
@@ -707,7 +752,7 @@ fn enterFullscreen(host: *Host) !void {
     host.top_level.fullscreen = back;
     try applyWindowStyle(host);
 
-    const screen = monitor.info.rcMonitor;
+    const screen = fullscreenRect(host, monitor.info.rcMonitor);
     if (sys.SetWindowPos(
         hwnd,
         if (host.top_level.topmost) HWND_TOPMOST else null,
@@ -719,6 +764,40 @@ fn enterFullscreen(host: *Host) !void {
     ) == 0) {
         return lastError();
     }
+}
+
+/// Whether `host`'s window, fullscreen, covers 1 px more than its monitor
+/// (`window_start.composedFullscreenRect`, #598): its tab bar is hidden
+/// (`window-show-tab-bar = never`), so its active pane fills the window, and
+/// that pane renders with OpenGL, whose presents Windows can take out of
+/// composition when they cover a monitor exactly. It is read as the window
+/// enters fullscreen and as a copy of a fullscreen window opens, never again
+/// while it stays fullscreen: a config reload, a renderer fallback, a DPI or
+/// monitor change keep the rect it has.
+fn keepsFullscreenComposed(host: *const Host) bool {
+    if (builtin.is_test and test_keeps_fullscreen_composed) return true;
+    if (host.shouldShowTabBar()) return false;
+    const pane = host.activeSurface() orelse return false;
+    if (!pane.core_initialized) return false;
+    // The backend that runs, which a fallback can have changed from the
+    // configured one. Once OpenGL runs, it stays.
+    if (comptime !build_config.d3d11) return true;
+    return pane.core_surface.renderer.opengl.load(.acquire) != null;
+}
+
+/// Turns `keepsFullscreenComposed` on in a test, whose panes have no renderer
+/// to ask. Off by default, so every other test keeps the exact monitor rect.
+var test_keeps_fullscreen_composed = false;
+
+/// The rect `host`'s window covers fullscreen on the monitor whose rect is
+/// `screen`: `screen`, or with `keepsFullscreenComposed` 1 px more past the
+/// first edge no other monitor is past. With a monitor missing from the list,
+/// `screen`: the pixel could land on it.
+fn fullscreenRect(host: *const Host, screen: RECT) RECT {
+    if (!keepsFullscreenComposed(host)) return screen;
+    const monitors = MonitorRects.collect();
+    if (!monitors.complete) return screen;
+    return window_start.composedFullscreenRect(screen, monitors.slice()) orelse screen;
 }
 
 /// What `hwnd`, fullscreen since `saved`, returns to when it leaves
@@ -892,7 +971,10 @@ fn takeSourceState(host: *Host, pending: *const Pending) !void {
             .here = try windowMonitor(hwnd),
         };
     }
-    const placed = window_start.place(&pending.plan, occupiedAround(host), own);
+    var placed = window_start.place(&pending.plan, occupiedAround(host), own);
+    // Fullscreen on the monitor `place` gives, as this window's own pane
+    // decides, not its source's.
+    if (placed.fullscreen != null) placed.rect = fullscreenRect(host, placed.rect);
     const top_level = &host.top_level;
     top_level.fullscreen = placed.fullscreen;
 
@@ -1203,6 +1285,134 @@ test "win32 leaveFullscreen and new_window keep the normal rect of a maximized w
                         }
                     }
                 }
+            }
+        }
+    }.body);
+}
+
+test "win32 a composed fullscreen window covers 1 px past its monitor, and saves and leaves fullscreen to exactly the window it was" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    try runOnHiddenDesktop(struct {
+        fn placementOf(hwnd: HWND) !WINDOWPLACEMENT {
+            var placement: WINDOWPLACEMENT = std.mem.zeroes(WINDOWPLACEMENT);
+            placement.length = @sizeOf(WINDOWPLACEMENT);
+            if (sys.GetWindowPlacement(hwnd, &placement) == 0) return lastError();
+            return placement;
+        }
+
+        fn rectOf(hwnd: HWND) !RECT {
+            var rect: RECT = undefined;
+            if (sys.GetWindowRect(hwnd, &rect) == 0) return lastError();
+            return rect;
+        }
+
+        fn body() !void {
+            _ = sys.SetThreadDpiAwarenessContext(-4);
+            var app = placementTestApp();
+            app.config.@"window-show-tab-bar" = .never;
+            var window = try placementTestHost(&app, 100, 100);
+            const hwnd = window.hwnd.?;
+            defer _ = sys.DestroyWindow(hwnd);
+            _ = sys.ShowWindow(hwnd, c.SW_SHOW);
+            const screen = (try windowMonitor(hwnd)).info.rcMonitor;
+
+            // Off unless a test turns it on, even with the tab bar hidden:
+            // no test window has a pane whose renderer runs, so every other
+            // test sees the monitor's exact rect.
+            try std.testing.expect(!keepsFullscreenComposed(&window));
+            try enterFullscreen(&window);
+            try std.testing.expectEqualDeep(screen, try rectOf(hwnd));
+            try leaveFullscreen(&window);
+
+            test_keeps_fullscreen_composed = true;
+            defer test_keeps_fullscreen_composed = false;
+            const monitors = MonitorRects.collect();
+            try std.testing.expect(monitors.complete and monitors.count > 0);
+            // With a monitor past every edge it would keep the exact rect.
+            const grown = window_start.composedFullscreenRect(screen, monitors.slice()) orelse screen;
+            for ([_]bool{ false, true }) |maximized| {
+                if (maximized) _ = sys.ShowWindow(hwnd, c.SW_MAXIMIZE);
+                try std.testing.expectEqual(maximized, sys.IsZoomed(hwnd) != 0);
+                const before = try placementOf(hwnd);
+                const before_rect = try rectOf(hwnd);
+                try enterFullscreen(&window);
+                try std.testing.expectEqualDeep(grown, try rectOf(hwnd));
+                // A popup has no frame: the client a single pane fills has
+                // the extra pixel too.
+                var client: RECT = undefined;
+                try std.testing.expect(sys.GetClientRect(hwnd, &client) != 0);
+                try std.testing.expectEqual(grown.right - grown.left, client.right - client.left);
+                try std.testing.expectEqual(grown.bottom - grown.top, client.bottom - client.top);
+
+                // What it returns to, and what the session saves, is the
+                // window it was, never the grown rect.
+                const back = window.top_level.fullscreen.?;
+                try std.testing.expectEqualDeep(before_rect, back.rect);
+                try std.testing.expectEqualDeep(before, back.placement);
+                const saved = sessionPlacement(&window, null).?;
+                try std.testing.expect(saved.fullscreen and !saved.maximized);
+                try std.testing.expectEqual(maximized, saved.fullscreen_maximized);
+                const normal = if (maximized) workspaceRectToScreen(before.rcNormalPosition, back.monitor.?.info) else before_rect;
+                try std.testing.expectEqualDeep(normal, saved.rect.?);
+
+                try leaveFullscreen(&window);
+                try std.testing.expectEqualDeep(before, try placementOf(hwnd));
+                try std.testing.expectEqualDeep(before_rect, try rectOf(hwnd));
+                if (maximized) _ = sys.ShowWindow(hwnd, c.SW_RESTORE);
+            }
+        }
+    }.body);
+}
+
+test "win32 a copy of a composed fullscreen window first shows, and stays, 1 px past a free edge of the monitor it is on" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    try runOnHiddenDesktop(struct {
+        fn body() !void {
+            _ = sys.SetThreadDpiAwarenessContext(-4);
+            var fixture: WindowStartTestApp = .{};
+            try fixture.init();
+            defer fixture.deinit();
+            const app = &fixture.app;
+            const Fixture = WindowStartTestApp;
+            test_keeps_fullscreen_composed = true;
+            defer test_keeps_fullscreen_composed = false;
+
+            try app.createWindow(default_title);
+            const source = fixture.newest();
+            const source_hwnd = source.windowHwnd().?;
+            const monitors = MonitorRects.collect();
+            const works = WorkAreas.collect();
+            try std.testing.expect(monitors.complete and works.count > 0);
+            // On each monitor in turn: a copy is created where Windows puts
+            // it and moved, hidden, to its source's monitor, and grows from
+            // that one's edges.
+            for (works.slice()) |work| {
+                try std.testing.expect(sys.SetWindowPos(source_hwnd, null, work.left + 48, work.top + 40, 640, 480, c.SWP_NOZORDER | c.SWP_NOACTIVATE) != 0);
+                const source_rect = try Fixture.screenRect(source_hwnd);
+                try std.testing.expect(try perform(source.host.?, source, .toggle_fullscreen, .native));
+                const screen = try Fixture.monitorRect(source_hwnd);
+                const grown = window_start.composedFullscreenRect(screen, monitors.slice()) orelse screen;
+                try std.testing.expectEqualDeep(grown, try Fixture.screenRect(source_hwnd));
+
+                try std.testing.expect(try app.performAction(.app, .new_window, .{ .arguments = null }));
+                const clone = fixture.newest();
+                try std.testing.expect(clone != source);
+                const hwnd = clone.windowHwnd().?;
+                // Never shown at the monitor's exact rect first.
+                const shown = Fixture.first_show orelse return error.TestWindowNeverShown;
+                try std.testing.expect(shown.style & c.WS_POPUP != 0);
+                try std.testing.expectEqualDeep(grown, shown.rect);
+                try std.testing.expect(clone.host.?.top_level.isFullscreen());
+                try std.testing.expectEqualDeep(grown, try Fixture.screenRect(hwnd));
+                // It leaves fullscreen to its source's window, never to the
+                // grown rect.
+                try std.testing.expectEqualDeep(source.host.?.top_level.fullscreen.?, clone.host.?.top_level.fullscreen.?);
+                try std.testing.expect(try perform(clone.host.?, clone, .toggle_fullscreen, .native));
+                try std.testing.expectEqualDeep(source_rect, try Fixture.screenRect(hwnd));
+                fixture.closeWindow(clone);
+
+                try std.testing.expect(try perform(source.host.?, source, .toggle_fullscreen, .native));
+                try std.testing.expectEqualDeep(source_rect, try Fixture.screenRect(source_hwnd));
             }
         }
     }.body);

@@ -1730,6 +1730,28 @@ minimized launch (`start /min`, a shortcut set to Run: Minimized): such a
 window starts maximized or fullscreen, not minimized, and the windows opened
 after it (Settings, a new window) are not minimized either.
 
+With `window-show-tab-bar = never` and the OpenGL renderer, a fullscreen
+window covers its monitor plus one physical pixel. Windows can take a window
+whose OpenGL surface covers a monitor exactly out of desktop composition, and
+then every switch back into it (Alt+Tab, an IME candidate window) flashes the
+screen black ([#598](https://github.com/amanthanvi/noctty/issues/598)). The
+extra pixel goes past the first of the bottom, right, top and left edges that
+has no other monitor next to it, so it lands on no screen. A monitor that
+touches only at a corner does not count. With a monitor on every side, the
+window covers its monitor exactly, as before. With the Direct3D 11 renderer
+or the tab bar shown, nothing changes. The extra pixel is part of the
+terminal's area: the default padding takes it, but with `window-padding-y`
+(or, at a left or right edge, `window-padding-x`) set to 0 on that edge, the
+terminal's last pixel row or column can be off-screen. Leaving fullscreen
+returns the window exactly where it was, and the session saves that place,
+never the larger rect. The choice is made when the window enters fullscreen, or when a window
+is opened from a fullscreen one. These do not redo it while the window stays
+fullscreen: a config reload (`renderer`, `window-show-tab-bar`), a switch
+from Direct3D 11 to OpenGL after a renderer failure, a scaling change, or a
+monitor added, removed or moved. A monitor attached at the extended edge then
+shows a one-pixel line of the window along its edge until you leave
+fullscreen (F11).
+
 The universal palette puts actions, live tabs, panes, Windows profiles,
 named layouts, and native settings in one fuzzy-ranked, keyboard-driven
 list. Type a prefix to filter one category: `>` actions, `@` tabs, `/`
