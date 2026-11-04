@@ -347,7 +347,7 @@ pub const ListsForeign = enum {
             .later_file => "A config file read after the one Settings saves to sets the profile order or the hidden profiles, so Settings can't change them: a save would copy its values into the config file.",
             .theme => "The light and dark themes give different profile orders or hidden profiles, so Settings can't change them: a save would make one theme's choice apply in both.",
             .unread => "The profile order and the hidden profiles could not be read in both the light and dark states, so Settings can't change them.",
-            .unordered => "A config file clears config-file, so the order the config files load in couldn't be worked out: a later one may set the profile order or the hidden profiles, so Settings can't change them.",
+            .unordered => "A config file or the command line clears config-file, so the order the config files load in couldn't be worked out: a later one may set the profile order or the hidden profiles, so Settings can't change them.",
         };
     }
 };
