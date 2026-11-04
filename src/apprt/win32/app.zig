@@ -10790,6 +10790,44 @@ pub const App = struct {
         }
     }
 
+    test "settings save of a move stops when an included file orders the profiles and then clears config-file, and says why" {
+        if (builtin.os.tag != .windows) return error.SkipZigTest;
+        const alloc = std.testing.allocator;
+        const settings_profiles = @import("../win32_settings_profiles.zig");
+        var core_app: CoreApp = undefined;
+        var app: App = undefined;
+        var session: TestSession = .{};
+        try session.init(.{ .core_app = &core_app, .app = &app });
+        defer session.deinit();
+        defer testFreeConfigProblems(&app, alloc);
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        // The file Settings saves to includes one that orders the profiles
+        // and then clears `config-file` (Terra's case): it still loads after
+        // the file, and would override a saved order on every launch.
+        try tmp.dir.writeFile(.{ .sub_path = "later.conf", .data = "profile-order =\nprofile-order = cmd.exe\nconfig-file =\n" });
+        const later = try tmp.dir.realpathAlloc(alloc, "later.conf");
+        defer alloc.free(later);
+        const text = try std.fmt.allocPrint(alloc, "profile-command = py: python.exe\nconfig-file = {s}\n", .{later});
+        defer alloc.free(text);
+        try tmp.dir.writeFile(.{ .sub_path = "config", .data = text });
+        const path = try tmp.dir.realpathAlloc(alloc, "config");
+        defer alloc.free(path);
+        SaveTest.files = &.{path};
+        try SaveTest.begin(&app, path);
+        defer SaveTest.end(&app);
+        var original = try app.config.clone(alloc);
+        defer original.deinit();
+        var pending = try app.config.clone(alloc);
+        defer pending.deinit();
+        try settings_profiles.setOrder(&pending, &.{ "user:py", "cmd.exe" });
+        try std.testing.expectError(error.ProfileListsForeign, app.settingsSaveAndReload(&pending, &original));
+        try std.testing.expectEqualStrings(settings_patch.ListsForeign.unordered.text(), app.settings_failure_detail.text orelse return error.TestExpectedDetail);
+        const after = try SaveTest.read(path);
+        defer alloc.free(after);
+        try std.testing.expect(std.mem.eql(u8, text, after));
+    }
+
     test "settings save of a move stops when a later config file sets the profile order, and says so" {
         if (builtin.os.tag != .windows) return error.SkipZigTest;
         const alloc = std.testing.allocator;

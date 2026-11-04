@@ -335,6 +335,10 @@ pub const ListsForeign = enum {
     /// They could not be read in both states: a theme that could not be
     /// read whole, or no memory to read it.
     unread,
+    /// The order the config files loaded in cannot be worked out: a file (or
+    /// the command line) cleared `config-file` while they loaded, so a file
+    /// it named before is no longer in the list that places it.
+    unordered,
 
     /// The reason, as the status line says it.
     pub fn text(self: ListsForeign) []const u8 {
@@ -343,6 +347,7 @@ pub const ListsForeign = enum {
             .later_file => "A config file read after the one Settings saves to sets the profile order or the hidden profiles, so Settings can't change them: a save would copy its values into the config file.",
             .theme => "The light and dark themes give different profile orders or hidden profiles, so Settings can't change them: a save would make one theme's choice apply in both.",
             .unread => "The profile order and the hidden profiles could not be read in both the light and dark states, so Settings can't change them.",
+            .unordered => "A config file clears config-file, so the order the config files load in couldn't be worked out: a later one may set the profile order or the hidden profiles, so Settings can't change them.",
         };
     }
 };
@@ -366,23 +371,36 @@ pub const ListsForeign = enum {
 /// A line of another file that sets either list is a later layer's when that
 /// file loads after `path`. A theme's lines come first (`loadTheme` replays
 /// the config over them); the light/dark comparison judges them.
+///
+/// That order is rebuilt from the `config-file` list as loading left it. A
+/// step that cleared the list (`config-file =`, in a file or on the command
+/// line) can have dropped a file that loaded after `path` from it, which
+/// would then pass for a default file read before: so while any other file
+/// sets a list and the list was cleared, the order counts as unknown, and
+/// the lists as foreign (`.unordered`). The config is not changed to record
+/// the order (it is shared with upstream).
 pub fn listsForeign(config: *const Config, path: []const u8, same: origin.SamePath) Allocator.Error!?ListsForeign {
     const steps = config._replay_steps.items;
     const target = loadOrder(config, path, same);
     var foreign: ?ListsForeign = null;
+    var cleared = false;
+    var set_elsewhere = false;
     for (steps) |step| {
         if (step == .@"-e") break;
         const arg = appliedArg(config, step) orelse continue;
+        if (clearsIncludes(arg.text)) cleared = true;
         if (!setsList(arg.text)) continue;
         switch (arg.location) {
             // A line with no place counts as the command line's.
             .cli, .none => return .command_line,
             .file => |file| {
                 if (same(file.path, path)) continue;
+                set_elsewhere = true;
                 if (loadOrder(config, file.path, same).after(target)) foreign = foreign orelse .later_file;
             },
         }
     }
+    if (cleared and set_elsewhere) return .unordered;
     if (foreign) |why| return why;
     // The same in both states.
     var switched: [2]?Config = .{ null, null };
@@ -445,6 +463,15 @@ fn appliedArg(config: *const Config, step: anytype) ?struct { text: []const u8, 
         } else .{ .text = arg.arg, .location = arg.location },
         else => null,
     };
+}
+
+/// Whether a step's argument clears `config-file` (an empty value), which
+/// drops every file it named so far from the list.
+fn clearsIncludes(text: []const u8) bool {
+    const key = "--config-file";
+    if (!std.mem.startsWith(u8, text, key)) return false;
+    const rest = text[key.len..];
+    return rest.len > 0 and rest[0] == '=' and std.mem.trim(u8, rest[1..], &std.ascii.whitespace).len == 0;
 }
 
 /// Whether a step's argument (`--key=value`) sets `profile-order` or
@@ -2004,6 +2031,65 @@ test "settings patch: an earlier file's lists are the save's to write, though th
             try cfg.finalize();
             try testing.expectEqual(case.want, try listsForeign(&cfg, path, &testSamePath));
         }
+    }
+}
+
+test "settings patch: the load order is unknown, and the lists another layer's, when a file clears config-file" {
+    const alloc = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try tmp.dir.realpathAlloc(alloc, ".");
+    defer alloc.free(dir);
+    const path = try std.fs.path.join(alloc, &.{ dir, "target" });
+    defer alloc.free(path);
+    // (Terra) The file Settings saves to includes one that orders the
+    // profiles and then clears `config-file`. That file still loads after
+    // the target, but it is gone from the list that places it, and would
+    // pass for a default file read before. The order is unknown: refused.
+    try tmp.dir.writeFile(.{ .sub_path = "later.conf", .data = "profile-order =\nprofile-order = cmd.exe\nconfig-file =\n" });
+    const later = try tmp.dir.realpathAlloc(alloc, "later.conf");
+    defer alloc.free(later);
+    const text = try std.fmt.allocPrint(alloc, "profile-command = py: python.exe\nconfig-file = {s}\n", .{later});
+    defer alloc.free(text);
+    try tmp.dir.writeFile(.{ .sub_path = "target", .data = text });
+    {
+        var cfg = try Config.default(alloc);
+        defer cfg.deinit();
+        try cfg.loadFile(alloc, path);
+        try cfg.loadRecursiveFiles(alloc);
+        try cfg.finalize();
+        // Its lines are in the replay; its path is not in the list.
+        try testing.expectEqual(@as(usize, 0), cfg.@"config-file".value.items.len);
+        try testing.expectEqual(@as(usize, 1), cfg.@"profile-order".list.items.len);
+        try testing.expectEqual(@as(?ListsForeign, .unordered), try listsForeign(&cfg, path, &testSamePath));
+    }
+    // A clear while no other file sets either list leaves the order moot.
+    try tmp.dir.writeFile(.{ .sub_path = "later.conf", .data = "font-size = 13\nconfig-file =\n" });
+    {
+        var cfg = try Config.default(alloc);
+        defer cfg.deinit();
+        try cfg.loadFile(alloc, path);
+        try cfg.loadRecursiveFiles(alloc);
+        try cfg.finalize();
+        try testing.expectEqual(@as(?ListsForeign, null), try listsForeign(&cfg, path, &testSamePath));
+    }
+    // A file's quotes come off before the value is parsed: `config-file =
+    // ""` clears the list too. `?""` (an optional path, empty once its quotes
+    // are off) names no file and clears nothing, so the file stays placed.
+    for ([_]struct { line: []const u8, kept: usize, want: ListsForeign }{
+        .{ .line = "config-file = \"\"\n", .kept = 0, .want = .unordered },
+        .{ .line = "config-file = ?\"\"\n", .kept = 1, .want = .later_file },
+    }) |case| {
+        const data = try std.fmt.allocPrint(alloc, "profile-order = cmd.exe\n{s}", .{case.line});
+        defer alloc.free(data);
+        try tmp.dir.writeFile(.{ .sub_path = "later.conf", .data = data });
+        var cfg = try Config.default(alloc);
+        defer cfg.deinit();
+        try cfg.loadFile(alloc, path);
+        try cfg.loadRecursiveFiles(alloc);
+        try cfg.finalize();
+        try testing.expectEqual(case.kept, cfg.@"config-file".value.items.len);
+        try testing.expectEqual(@as(?ListsForeign, case.want), try listsForeign(&cfg, path, &testSamePath));
     }
 }
 
