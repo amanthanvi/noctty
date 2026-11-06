@@ -274,8 +274,11 @@ above:
   elevated window, with a UAC prompt; use it only when you want that. See
   [Taskbar jump list](#taskbar-jump-list) and
   [Running elevated](#running-elevated).
-- From a shell, `noctty +new-window -e wsl.exe -d Ubuntu` opens a new window
-  that runs that command. The installer, WinGet and Chocolatey do not put
+- From a shell, `noctty -e wsl.exe -d Ubuntu` starts a noctty process that runs
+  that command in its first window. Do not use `noctty +new-window -e ...`
+  while noctty is already running: the running instance refuses a forwarded
+  command and the call exits with an error (it only works when no instance is
+  running, where it starts one). The installer, WinGet and Chocolatey do not put
   `noctty` on `PATH` (Scoop does): run it from the install folder as
   `.\noctty.com`, or by its full path.
 

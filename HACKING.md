@@ -60,7 +60,10 @@ rerun without `--seed` or `--watch` when you need the count.
 
 `zig build` installs into `zig-out\bin\` (`noctty.exe`, `noctty.com`,
 `noctty.ico`, debug symbols, and the bundled ConPTY pair unless its download
-failed or you passed `-Dbundled-conpty=false`) and `zig-out\share\`.
+failed) and `zig-out\share\`. `-Dbundled-conpty=false` only skips that step: a
+pair an earlier build left in `bin` is neither verified nor removed, and the
+exe loads a `conpty.dll` found beside it (`src/pty.zig`), so delete the pair to
+run on the in-box conhost.
 Keep `bin` and `share` together: the exe needs `share` beside it. A plain
 `zig build` is a Debug build, which is slow. Releases use
 `-Doptimize=ReleaseFast -Dcustom-shaders=true` (`scripts/package-windows.ps1`);
