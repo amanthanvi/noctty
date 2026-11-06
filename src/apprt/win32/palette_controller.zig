@@ -631,19 +631,22 @@ test "win32 rich palette completion fills a tab transfer row's title, not its em
     var host: Host = undefined;
     host.palette_catalog = catalog;
     // Completing onto the transfer row writes its title, which still ranks it,
-    // and the next completion moves on from it rather than starting over.
+    // and the next completion moves on from it rather than starting over:
+    // two completions reach both rows, in whichever order they rank.
     var completion = host.richPaletteCompletionCandidate("move", "move", null, false).?;
     var seen_transfer = false;
+    var seen_action = false;
     for (0..2) |_| {
         if (std.mem.startsWith(u8, completion.text, "Move tab to pane")) {
             seen_transfer = true;
             try std.testing.expectEqualStrings("Move tab to pane \u{2014} left", completion.text);
         } else {
+            seen_action = true;
             try std.testing.expectEqualStrings("new_tab", completion.text);
         }
         completion = host.richPaletteCompletionCandidate("move", completion.text, completion.id, false).?;
     }
-    try std.testing.expect(seen_transfer);
+    try std.testing.expect(seen_transfer and seen_action);
 }
 
 /// palette-mru.txt holds one key per line, escaped as the contents of a Zig
