@@ -500,6 +500,10 @@ that govern each symbol you change, or that none does.
   structs, casting Win32 handles and `LPARAM`/`LRESULT` (`@intCast`,
   `@bitCast`, `@ptrFromInt`), passing `[:0]u16` to text APIs, renaming or moving
   Zig declarations (the `src/apprt/win32.zig` split into `win32/*.zig`),
+  dropping `pub` from a declaration another file probes by name
+  (`@hasDecl(apprt.Surface, ...)` in `src/Surface.zig` and
+  `src/renderer/Thread.zig`, the runtime hooks such as
+  `noteRendererFollowupCallback`),
   adding a name to `src/apprt/win32.zig` or to one of its `*_runtime` bags
   (the budget in `win32/facade_budget.zig`, and the facade importer list in
   `Contracts.20-Zig.ps1`), `union(enum)` tests, PowerShell language traps, and
