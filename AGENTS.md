@@ -265,9 +265,13 @@ that govern each symbol you change, or that none does.
   a window shows it: `TopLevel.shows` in `win32/window_start.zig`; blur-behind,
   the layered fade, the solid child controls and the panes' renderer opacity:
   `applyBackgroundOpacity`, `refreshBackgroundOpacity`,
-  `releaseBackgroundOpacity`, `childCreated` and `solidifies` in
-  `win32/window_state.zig`, with `Host.chrome_alpha` and
-  `Host.blur_behind_failed`; `Surface.setBackgroundOpacity`,
+  `retryBackgroundOpacity`, `releaseBackgroundOpacity`, `childCreated` and
+  `solidifies` in `win32/window_state.zig`, with `Host.chrome_alpha` and
+  `Host.blur_behind_failed`; when a window shows it again: the `opacity`
+  argument of `App.reconfigureTheme`, `reconfigureSystemTheme`,
+  `App.endSettingsPreview`, and `Host.closing` in `Host.closeConfirmed`
+  and `App.windowDestroyed`;
+  `Surface.setBackgroundOpacity`,
   `rendererSwitchedToOpenGL` and `WM_WINHOSTTY_RENDERER_SWITCHED`; the
   renderer's `background_opacity_override`; how a pane's frame reaches a
   window that composes its alpha: `composesAlpha` and `splitDimPass` in
@@ -325,7 +329,8 @@ that govern each symbol you change, or that none does.
 - [tabs-panes.md](docs/agents/log/tabs-panes.md): tabs, splits and windows as
   a structure: `Surface.init` ordering, `activateSurface`, showing and hiding
   pane surfaces (occlusion, overlapping WGL children), `windowDestroyed`,
-  close and close-confirm flows, quit teardown (`destroyAllWindows`,
+  close and close-confirm flows (`Host.closeConfirmed` and its
+  `Host.closing`), quit teardown (`destroyAllWindows`,
   `App.destroyPaneOf`, both in `win32/app.zig`; host and surface lookups in
   `win32/registry.zig`), focus after a close, shell reducer effects,
   local and structural undo/redo (`win32_undo.zig`,
