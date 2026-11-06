@@ -406,6 +406,8 @@ test "win32 palette UIA state exposes rows and can select a row" {
     host.palette_list_uia_provider = null;
     host.palette_catalog = null;
     host.palette_theme_preview_original = null;
+    // A pick reads which row a completion wrote; none did here.
+    host.overlay_completion_result_id = null;
 
     const state = host.paletteListUiaStateWithThreading(true);
     try std.testing.expect(state.use_com_threading);
