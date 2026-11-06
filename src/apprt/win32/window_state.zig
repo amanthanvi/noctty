@@ -841,6 +841,10 @@ var test_background_opacity_applied: f64 = 1.0;
 var test_background_opacity_log: ?*std.ArrayListUnmanaged(TestOpacityApply) = null;
 const TestOpacityApply = struct { host: *const Host, opacity: f64 };
 
+/// The window whose layered alpha fails to apply in a test, as
+/// `SetLayeredWindowAttributes` can.
+var test_layered_fails: ?HWND = null;
+
 fn paneRenderer(pane: ?*const Surface) PaneRenderer {
     if (builtin.is_test) {
         if (test_d3d11_pane != null and pane == test_d3d11_pane) return .d3d11;
@@ -1265,6 +1269,7 @@ fn setLayered(hwnd: HWND, alpha: ?u8) !void {
     if ((ex_style & c.WS_EX_LAYERED) == 0) {
         _ = sys.SetWindowLongPtrW(hwnd, c.GWL_EXSTYLE, @bitCast(@as(isize, @intCast(ex_style | c.WS_EX_LAYERED))));
     }
+    if (builtin.is_test and test_layered_fails == hwnd) return error.TestLayeredFailed;
     if (sys.SetLayeredWindowAttributes(hwnd, 0, layered, c.LWA_ALPHA) == 0) {
         return lastError();
     }
@@ -3001,6 +3006,58 @@ test "win32 a reload and the palette's theme apply each window's opacity once, a
             try std.testing.expect(try app.performAction(.{ .surface = single.core() }, .config_change, .{ .config = &app.config }));
             try std.testing.expectEqual(@as(usize, 1), applied.items.len);
             try expectAppliedOnce(applied.items, single.host.?, 0.5);
+        }
+    }.body);
+}
+
+test "win32 a reload in which a window fails to apply its opacity still applies every window after it, and returns the failure" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    try runOnHiddenDesktop(struct {
+        fn body() !void {
+            var fixture: WindowStartTestApp = .{};
+            try fixture.init();
+            defer fixture.deinit();
+            const app = &fixture.app;
+            defer test_pane_renderer = null;
+            defer test_d3d11_pane = null;
+
+            // First a window that fades whole (its pane runs D3D11), then a
+            // translucent OpenGL window and a window kept empty for undo.
+            app.config.@"background-opacity" = 0.5;
+            test_pane_renderer = .d3d11;
+            try app.createWindow(default_title);
+            const faded = fixture.newest().host.?;
+            test_d3d11_pane = fixture.newest();
+            test_pane_renderer = .opengl;
+            try app.createWindow(default_title);
+            const translucent = fixture.newest().host.?;
+            try app.createWindow(default_title);
+            const emptied = fixture.newest().host.?;
+            var entry = emptied.detachTabForUndo(0).?;
+            defer _ = emptied.restoreClosedTabEntryNative(&entry.payload.close_tab) catch false;
+            try std.testing.expectEqual(@as(?u8, 128), testLayeredAlpha(faded.hwnd.?));
+            try std.testing.expectEqual(@as(?u8, 128), testBackgroundAlpha(translucent.hwnd.?));
+
+            var applied: std.ArrayListUnmanaged(TestOpacityApply) = .empty;
+            defer applied.deinit(std.testing.allocator);
+            test_background_opacity_log = &applied;
+            defer test_background_opacity_log = null;
+
+            // A reload to 0.6 in which the first window's layered alpha
+            // fails: each window after it still applies its opacity, the
+            // window kept empty for undo too, and the reload returns the
+            // failure.
+            var config = try app.config.clone(std.testing.allocator);
+            defer config.deinit();
+            config.@"background-opacity" = 0.6;
+            test_layered_fails = faded.hwnd.?;
+            defer test_layered_fails = null;
+            try std.testing.expectError(error.TestLayeredFailed, reloadConfig(app, &config));
+            try std.testing.expectEqual(@as(usize, 3), applied.items.len);
+            for ([_]*Host{ faded, translucent, emptied }) |host| try expectAppliedOnce(applied.items, host, 0.6);
+            try std.testing.expectEqual(@as(?u8, 153), testBackgroundAlpha(translucent.hwnd.?));
+            try std.testing.expectEqual(@as(f64, 0.6), emptied.top_level.opacity);
+            try std.testing.expectEqual(@as(?u8, 153), testBackgroundAlpha(emptied.hwnd.?));
         }
     }.body);
 }

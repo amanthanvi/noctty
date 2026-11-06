@@ -4209,7 +4209,20 @@ pub const App = struct {
                         // `.surface` arms leave it here), a window kept empty
                         // for undo included, after the theme's frame write.
                         for (self.registry.windows.items) |surface| surface.takeRuntimeConfig(&self.config);
-                        for (self.registry.hosts.items) |host| try window_state.applyConfig(host, &self.config);
+                        // Every window has its apply, past one that fails:
+                        // the theme left the opacity to this loop, so a
+                        // window it skipped would show none of the reload.
+                        // The first failure is returned after it, so the
+                        // scrollbar refresh is still skipped.
+                        var windows_applied: @TypeOf(window_state.applyConfig(undefined, undefined)) = {};
+                        for (self.registry.hosts.items) |host| {
+                            window_state.applyConfig(host, &self.config) catch |err| {
+                                if (windows_applied) |_| {
+                                    windows_applied = err;
+                                } else |_| log.warn("win32 window config apply failed err={}", .{err});
+                            };
+                        }
+                        try windows_applied;
                         for (self.registry.windows.items) |surface| try surface.refreshScrollbarWindow();
                         // A reload that turns automatic checks on in a process
                         // that started with them off (or on another channel).
