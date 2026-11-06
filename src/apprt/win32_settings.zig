@@ -20395,11 +20395,12 @@ fn settingsSliderProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) cal
 }
 
 /// Whether Settings paints its own up-downs on Windows build `os_build`.
-/// `SetWindowTheme(.., "DarkMode_Explorer")` makes an up-down dark only
-/// where the theme has a `DarkMode_Explorer::Spin` class. Windows 11's
-/// aero.msstyles has one; Windows 10's has not, and the up-down falls back
-/// to the light `Spin` without a word (`OpenThemeData` of a made-up
-/// `DarkMode_Bogus::Spin` succeeds too, so the class cannot be asked for).
+/// `DarkMode_Explorer` as the window theme (`WindowThemeAdapter`) makes an
+/// up-down dark only where the theme has a `DarkMode_Explorer::Spin`
+/// class. Windows 11's aero.msstyles has one; Windows 10's has not, and the
+/// up-down falls back to the light `Spin` without a word (`OpenThemeData` of
+/// a made-up `DarkMode_Bogus::Spin` succeeds too, so the class cannot be
+/// asked for).
 /// win32-darkmodelib draws the themed spin from Windows 11 (22000) on and
 /// its own below; so does Settings, through `settingsSpinProc`.
 fn paintsOwnSpins(os_build: u32) bool {
@@ -20479,7 +20480,8 @@ fn spinLookOf(enabled: bool, over: ?SpinButton, held: ?SpinButton) SpinLook {
 /// Read back at paint time, as the stock control invalidates itself whenever
 /// any of it changes. Disabled with its buddy, as the stock control is.
 /// Where the pointer cannot be read (a desktop that is not the input one),
-/// nothing is under it.
+/// nothing is under it. A step from the field's arrow keys
+/// (`UDS_ARROWKEYS`) shows no press here.
 fn spinLook(settings: *const SettingsWindow, hwnd: HWND, rect: RECT) SpinLook {
     const buddy: ?HWND = @ptrFromInt(@as(usize, @bitCast(SendMessageW(hwnd, UDM_GETBUDDY, 0, 0))));
     const enabled = sys.IsWindowEnabled(hwnd) != 0 and if (buddy) |field| sys.IsWindowEnabled(field) != 0 else true;
@@ -28815,7 +28817,12 @@ test "settings paints its own up-downs below Windows 11, in the dark theme only,
             defer controls.deactivate();
             // Windows 10 22H2, then the first Windows 11 build: set, so this
             // machine takes both branches, whichever it runs.
-            for ([_]u32{ consts.OS_BUILD_WIN10_22H2, consts.OS_BUILD_WIN11_21H2 }) |build| {
+            for ([_]struct { build: u32, ours: bool }{
+                .{ .build = consts.OS_BUILD_WIN10_22H2, .ours = true },
+                .{ .build = consts.OS_BUILD_WIN11_21H2, .ours = false },
+            }) |case| {
+                const build = case.build;
+                const ours = case.ours;
                 const fixture = try dialog_test.Fixture.prepare(false);
                 defer fixture.finish();
                 const settings = &fixture.settings;
@@ -28826,7 +28833,6 @@ test "settings paints its own up-downs below Windows 11, in the dark theme only,
                 high_contrast = false;
                 try settings.open();
                 const hwnd = fixture.hwnd();
-                const ours = build < consts.OS_BUILD_WIN11_21H2;
                 dialog_test.makeAllSections(settings);
                 inline for (.{ Companion.font_size_spin, Companion.scrollback_spin }) |kind| {
                     const spin = settings.companions[@intFromEnum(kind)].?;
@@ -28939,6 +28945,17 @@ test "settings an up-down it paints repaints through its own paint, never the st
         fn darkColors(_: *anyopaque) win32_theme.ThemeColors {
             return win32_theme.darkTheme();
         }
+
+        /// What the up-down shows now, read through its window DC with no
+        /// repaint first, is mostly `fill` (a COLORREF): nothing but this
+        /// paint has drawn there.
+        fn expectShows(spin: HWND, fill: COLORREF) !void {
+            const capture = try dialog_test.Capture.take(spin);
+            defer capture.deinit();
+            const shown = dialog_test.dominantColor(capture, .{ .left = 0, .top = 0, .right = @intCast(capture.width), .bottom = @intCast(capture.height) }).?;
+            try std.testing.expectEqual(fill, ((shown & 0xFF) << 16) | (shown & 0xFF00) | ((shown >> 16) & 0xFF));
+        }
+
         fn body() !void {
             const controls = try dialog_test.CommonControls6.activate();
             defer controls.deactivate();
@@ -28954,6 +28971,20 @@ test "settings an up-down it paints repaints through its own paint, never the st
             settings.ensureControlVisible(settings.rawScalarEdit(.font_size).?);
             dialog_test.flushPaint(hwnd);
             const edit_bg = settings.theme_adapter.colors.edit_bg;
+            // A read through the window DC gives this up-down's own pixels on
+            // this desktop (a hidden desktop has handed a large window
+            // another desktop's): the same as `PrintWindow` shows of it.
+            {
+                const direct = try dialog_test.Capture.take(spin);
+                defer direct.deinit();
+                const printed = try dialog_test.printClient(hwnd);
+                defer printed.deinit();
+                const at = dialog_test.rectIn(hwnd, spin);
+                for (0..direct.height) |y| for (0..direct.width) |x| {
+                    const theirs = printed.pixels[(@as(usize, @intCast(at.top)) + y) * printed.width + @as(usize, @intCast(at.left)) + x];
+                    try std.testing.expectEqual(theirs & 0xFFFFFF, direct.pixels[y * direct.width + x] & 0xFFFFFF);
+                };
+            }
             var client: RECT = undefined;
             _ = GetClientRect(spin, &client);
             const x: usize = @intCast(@divTrunc(client.right, 2));
@@ -28976,19 +29007,38 @@ test "settings an up-down it paints repaints through its own paint, never the st
                     try std.testing.expectEqual(spin, settings.spin_press.?.spin);
                     try std.testing.expectEqual(SpinButton.down, settings.spin_press.?.button);
                 }
-                // The stock control asked for a repaint, or made one at once.
+                // The stock control asked for a repaint, or made one at once,
+                // and drew nothing itself meanwhile.
                 try std.testing.expect(sys.GetUpdateRect(spin, null, 0) != 0 or settings.proof_spin_paint_count != painted);
-                // And drew nothing itself meanwhile: what the up-down shows
-                // before the repaint is still this paint's.
-                {
-                    const capture = try dialog_test.Capture.take(spin);
-                    defer capture.deinit();
-                    const shown = dialog_test.dominantColor(capture, client).?;
-                    try std.testing.expectEqual(edit_bg, ((shown & 0xFF) << 16) | (shown & 0xFF00) | ((shown >> 16) & 0xFF));
-                }
+                try expectShows(spin, edit_bg);
                 dialog_test.flushPaint(hwnd);
                 try std.testing.expect(settings.proof_spin_paint_count != painted);
             }
+            // Held, it steps again on its repeat timer, and draws nothing
+            // itself then either, nor on the release after it. (On this
+            // desktop the stock control cannot read the pointer, so what it
+            // repaints for once the timer runs is not asked here.)
+            _ = SendMessageW(spin, WM_LBUTTONDOWN, MK_LBUTTON, upper);
+            dialog_test.flushPaint(hwnd);
+            var ticks: usize = 0;
+            var waited: u32 = 0;
+            var msg: sys.MSG = undefined;
+            while (ticks == 0 and waited < 2000) : (waited += 20) {
+                std.Thread.sleep(20 * std.time.ns_per_ms);
+                while (sys.PeekMessageW(&msg, spin, WM_TIMER, WM_TIMER, 1) != 0) {
+                    _ = sys.DispatchMessageW(&msg);
+                    ticks += 1;
+                }
+            }
+            try std.testing.expect(ticks > 0);
+            try std.testing.expect(sys.GetCapture() == spin);
+            try expectShows(spin, edit_bg);
+            dialog_test.flushPaint(hwnd);
+            _ = SendMessageW(spin, 0x0202, 0, upper); // WM_LBUTTONUP
+            try std.testing.expect(sys.GetCapture() != spin);
+            try expectShows(spin, edit_bg);
+            dialog_test.flushPaint(hwnd);
+            try expectShows(spin, edit_bg);
         }
     }.body);
 }
