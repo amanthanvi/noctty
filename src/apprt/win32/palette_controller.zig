@@ -85,7 +85,9 @@ const PaletteCompletion = struct {
 
 fn paletteCompletionText(descriptor: win32_palette.catalog.Descriptor) []const u8 {
     return switch (descriptor.payload) {
-        .action => |payload| payload.action,
+        // A tab transfer has no binding-action text: its title is what the
+        // row says and what the query has to match.
+        .action => |payload| if (payload.tab_transfer != null) descriptor.item.title else payload.action,
         .recent_command => |payload| payload.action,
         .profile => |key| key,
         .theme => |name| name,
@@ -94,6 +96,17 @@ fn paletteCompletionText(descriptor: win32_palette.catalog.Descriptor) []const u
         // says and what the query has to match.
         .tab, .pane, .help, .setting => descriptor.item.title,
     };
+}
+
+/// The row a rebuilt palette list starts on: the one a completion just wrote
+/// into the query, found by its stable id, since rows can share a title (each
+/// tab's "Move tab to pane" rows do); else the first. Typing clears the
+/// completion before the list is rebuilt (`syncOverlayCompletionState`), so
+/// only a completion keeps its row.
+fn paletteSelectionAfterRebuild(ranked: []const PaletteRanked, completed: ?PaletteStableId) usize {
+    const id = completed orelse return 0;
+    for (ranked, 0..) |row, index| if (row.id.eql(id)) return index;
+    return 0;
 }
 
 pub fn paletteVisibleRowCapacity(available_height: i32, row_height: i32) usize {
@@ -393,6 +406,8 @@ test "win32 palette UIA state exposes rows and can select a row" {
     host.palette_list_uia_provider = null;
     host.palette_catalog = null;
     host.palette_theme_preview_original = null;
+    // A pick reads which row a completion wrote; none did here.
+    host.overlay_completion_result_id = null;
 
     const state = host.paletteListUiaStateWithThreading(true);
     try std.testing.expect(state.use_com_threading);
@@ -602,6 +617,87 @@ test "win32 rich palette completion cycles duplicate display text by stable id" 
     try std.testing.expectEqualStrings("Same title", first.text);
     try std.testing.expectEqualStrings("Same title", second.text);
     try std.testing.expect(!first.id.eql(second.id));
+}
+
+test "win32 rich palette completion fills a tab transfer row's title, not its empty action" {
+    var items: [2]PaletteItem = undefined;
+    var payloads: [2]PalettePayload = undefined;
+    var catalog = try PaletteCatalog.init(&items, &payloads);
+    try catalog.append(.{
+        .item = .{
+            .id = win32_palette.catalog.stableStringId(.action, "move-left"),
+            .title = "Move tab to pane \u{2014} left",
+            .subtitle = "vim",
+            .keywords = "move tab split pane left",
+        },
+        .payload = .{ .action = .{ .tab_transfer = .{ .source_tab = 2, .target_pane = 7, .direction = .left } } },
+    });
+    try catalog.append(.{
+        .item = .{
+            .id = win32_palette.catalog.stableStringId(.action, "new-tab"),
+            .title = "New tab",
+            .keywords = "move new tab",
+        },
+        .payload = .{ .action = .{ .action = "new_tab" } },
+    });
+
+    var host: Host = undefined;
+    host.palette_catalog = catalog;
+    // Completing onto the transfer row writes its title, which still ranks it,
+    // and the next completion moves on from it rather than starting over:
+    // two completions reach both rows, in whichever order they rank.
+    var completion = host.richPaletteCompletionCandidate("move", "move", null, false).?;
+    var seen_transfer = false;
+    var seen_action = false;
+    for (0..2) |_| {
+        if (std.mem.startsWith(u8, completion.text, "Move tab to pane")) {
+            seen_transfer = true;
+            try std.testing.expectEqualStrings("Move tab to pane \u{2014} left", completion.text);
+        } else {
+            seen_action = true;
+            try std.testing.expectEqualStrings("new_tab", completion.text);
+        }
+        completion = host.richPaletteCompletionCandidate("move", completion.text, completion.id, false).?;
+    }
+    try std.testing.expect(seen_transfer and seen_action);
+}
+
+test "win32 a rebuilt palette list keeps the row a completion wrote, among rows that share its title" {
+    var items: [3]PaletteItem = undefined;
+    var payloads: [3]PalettePayload = undefined;
+    var catalog = try PaletteCatalog.init(&items, &payloads);
+    // Each other tab has its own "Move tab to pane" row; the titles match.
+    for ([_]struct { []const u8, u64, []const u8 }{
+        .{ "move-left-2", 2, "logs" },
+        .{ "move-left-3", 3, "vim" },
+        .{ "move-left-4", 4, "build" },
+    }) |row| {
+        try catalog.append(.{
+            .item = .{
+                .id = win32_palette.catalog.stableStringId(.action, row[0]),
+                .title = "Move tab to pane \u{2014} left",
+                .subtitle = row[2],
+                .keywords = "move tab split pane left",
+            },
+            .payload = .{ .action = .{ .tab_transfer = .{ .source_tab = row[1], .target_pane = 7, .direction = .left } } },
+        });
+    }
+    var host: Host = undefined;
+    host.palette_catalog = catalog;
+    // Complete twice: the second completion is a row after the first.
+    const first = host.richPaletteCompletionCandidate("move", "move", null, false).?;
+    const second = host.richPaletteCompletionCandidate("move", first.text, first.id, false).?;
+    try std.testing.expect(!first.id.eql(second.id));
+    // The list rebuilt for the completed title ranks all three rows; it
+    // starts on the completed one, not on whichever ranks first.
+    var ranked_buf: [win32_palette.max_ranked]PaletteRanked = undefined;
+    const ranked = host.palette_catalog.?.rank(second.text, .{ .max_results = ranked_buf.len }, &ranked_buf);
+    try std.testing.expectEqual(@as(usize, 3), ranked.len);
+    const selected = paletteSelectionAfterRebuild(ranked, second.id);
+    try std.testing.expect(ranked[selected].id.eql(second.id));
+    // No completion, or one whose row is gone: the first row.
+    try std.testing.expectEqual(@as(usize, 0), paletteSelectionAfterRebuild(ranked, null));
+    try std.testing.expectEqual(@as(usize, 0), paletteSelectionAfterRebuild(ranked[0..0], second.id));
 }
 
 /// palette-mru.txt holds one key per line, escaped as the contents of a Zig
@@ -1078,9 +1174,16 @@ pub const HostControls = struct {
         // stack array. Clamp here instead of relying on the library
         // invariant alone.
         self.palette_list_ranked_count = @min(ranked.len, self.palette_list_ranked.len);
-        self.palette_list_scroll = 0;
         self.palette_wheel_steps = .{};
-        self.palette_list_selected = 0;
+        self.palette_list_selected = paletteSelectionAfterRebuild(
+            self.palette_list_ranked[0..self.palette_list_ranked_count],
+            self.overlay_completion_result_id,
+        );
+        const rows = self.paletteListRowCapacity();
+        self.palette_list_scroll = if (rows > 0 and self.palette_list_selected >= rows)
+            self.palette_list_selected - rows + 1
+        else
+            0;
 
         const transition = paletteListTransition(
             previous_result_count,
@@ -1137,6 +1240,17 @@ pub const HostControls = struct {
         self.previewSelectedPaletteTheme();
     }
 
+    /// A row picked or scrolled to in the list replaces the row a completion
+    /// wrote (`overlay_completion_result_id`), so a later rebuild that is not
+    /// a completion (profiles arriving) does not go back to it. Picking the
+    /// completed row itself keeps it.
+    fn keepCompletedRowOnlyIfSelected(self: *Host) void {
+        const id = self.overlay_completion_result_id orelse return;
+        const selected = self.palette_list_selected;
+        if (selected < self.palette_list_ranked_count and self.palette_list_ranked[selected].id.eql(id)) return;
+        self.overlay_completion_result_id = null;
+    }
+
     pub fn setPaletteListSelection(self: *Host, next: usize) bool {
         if (self.overlay_mode != .command_palette) return false;
         if (next >= self.palette_list_ranked_count) return false;
@@ -1149,6 +1263,7 @@ pub const HostControls = struct {
 
         const changed = self.palette_list_selected != next;
         self.palette_list_selected = next;
+        keepCompletedRowOnlyIfSelected(self);
         if (next < self.palette_list_scroll) {
             self.palette_list_scroll = next;
         } else if (next >= self.palette_list_scroll + visible_rows) {
@@ -1661,6 +1776,7 @@ pub const HostControls = struct {
         }
         if (self.palette_list_hwnd) |h| _ = sys.InvalidateRect(h, null, 0);
         if (self.palette_list_selected != previous_selection) {
+            keepCompletedRowOnlyIfSelected(self);
             self.announcePaletteSelection();
             self.previewSelectedPaletteTheme();
             self.refreshPalettePresentation();
@@ -1723,6 +1839,43 @@ pub const HostControls = struct {
         host.palette_wheel_steps.remainder = -90;
         try std.testing.expect(host.setPaletteListSelection(3));
         try std.testing.expectEqual(@as(i32, 0), host.palette_wheel_steps.remainder);
+    }
+
+    test "a row picked from the palette list replaces the row a completion wrote" {
+        var core_app: CoreApp = undefined;
+        var app: App = undefined;
+        var host: Host = undefined;
+        var session: TestSession = .{};
+        try session.init(.{
+            .core_app = &core_app,
+            .app = &app,
+            .hosts = &.{.{ .storage = &host }},
+        });
+        defer session.deinit();
+        host.overlay_mode = .command_palette;
+        // Three rows that share a title; completion wrote the second.
+        for (0..3) |index| host.palette_list_ranked[index] = .{
+            .index = index,
+            .id = win32_palette.catalog.stableStringId(.action, &.{@as(u8, 'a') + @as(u8, @intCast(index))}),
+            .score = 0,
+            .enabled = true,
+        };
+        host.palette_list_ranked_count = 3;
+        host.palette_list_visible_rows = 3;
+        host.palette_list_selected = 1;
+        host.palette_list_scroll = 0;
+        const completed = host.palette_list_ranked[1].id;
+        host.overlay_completion_result_id = completed;
+        defer host.overlay_completion_result_id = null;
+
+        // Picking the completed row keeps it for a rebuild.
+        _ = host.setPaletteListSelection(1);
+        try std.testing.expect(host.overlay_completion_result_id.?.eql(completed));
+        // Picking another row forgets it: a rebuild with profiles arriving
+        // does not go back to the completed row.
+        try std.testing.expect(host.setPaletteListSelection(0));
+        try std.testing.expectEqual(@as(?PaletteStableId, null), host.overlay_completion_result_id);
+        try std.testing.expectEqual(@as(usize, 0), paletteSelectionAfterRebuild(host.palette_list_ranked[0..3], host.overlay_completion_result_id));
     }
 
     test "chrome pointer gesture resets when palette layout hides the list" {
