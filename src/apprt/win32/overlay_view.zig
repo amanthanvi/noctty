@@ -1113,6 +1113,15 @@ test "win32 transient overlay focus ring includes every visible control" {
     try std.testing.expectEqual(Slot.edit, nextFocus(.command_palette, .cancel, true, all));
     try std.testing.expectEqual(Slot.cancel, nextFocus(.confirm, .accept, false, all));
     try std.testing.expectEqual(Slot.accept, nextFocus(.confirm, .cancel, true, all));
+    // A confirm's preview is a stop of its own, so the keyboard reaches the
+    // payload, both ways; hidden, it is skipped both ways.
+    try std.testing.expectEqual(Slot.preview, nextFocus(.confirm, .cancel, false, all));
+    try std.testing.expectEqual(Slot.accept, nextFocus(.confirm, .preview, false, all));
+    try std.testing.expectEqual(Slot.preview, nextFocus(.confirm, .accept, true, all));
+    try std.testing.expectEqual(Slot.cancel, nextFocus(.confirm, .preview, true, all));
+    const no_preview: Visible = .{ .edit = false, .preview = false, .accept = true, .cancel = true };
+    try std.testing.expectEqual(Slot.accept, nextFocus(.confirm, .cancel, false, no_preview));
+    try std.testing.expectEqual(Slot.cancel, nextFocus(.confirm, .accept, true, no_preview));
 
     try std.testing.expectEqual(Slot.cancel, nextFocus(.profile, .edit, false, .{ .edit = true, .preview = false, .accept = false, .cancel = true }));
     try std.testing.expectEqual(Slot.cancel, nextFocus(.confirm, .accept, false, .{ .edit = false, .preview = false, .accept = false, .cancel = true }));

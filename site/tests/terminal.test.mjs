@@ -232,5 +232,5 @@ test('the demo status line adds a full stop only where the app does', () => {
     paletteStatus(PALETTE_MATCH_COUNT, tab),
     `${PALETTE_MATCH_COUNT} matches. Selected: api — api. Up/Down selects; Enter activates.`,
   );
-  assert.match(win32OverlayView, /fn sentenceStop\(text: \[\]const u8\) \[\]const u8 \{[\s\S]*?'\.', '!', '\?' => "",/);
+  assert.match(win32OverlayView, /fn sentenceStop\(text: \[\]const u8\) \[\]const u8 \{[\s\S]*?'\.', '!', '\?' => "",\s*else => "\.",/);
 });
