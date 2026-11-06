@@ -537,6 +537,10 @@ pub const Host = struct {
     /// How this new window starts, from `window_state.begin` until its
     /// first show is done.
     pending_start: ?window_state.Pending = null,
+    /// `closeConfirmed` is closing every pane of this window, which goes
+    /// with its last one: the panes' teardown leaves its opacity as it is
+    /// (`App.windowDestroyed`).
+    closing: bool = false,
     /// This host is the quick terminal. Its tabs and splits are all part of
     /// it, so this, not a flag on one surface, says what the window is.
     quick_terminal: bool = false,
@@ -9010,7 +9014,16 @@ pub const Host = struct {
         // The session's last window, whatever else is open: a quick terminal
         // or a window kept empty for undo is not part of the session.
         if (self.app.closingEndsSession(self)) self.app.saveSessionAsItEnds();
+        // The last pane's teardown destroys and frees the window, so it is
+        // looked up by id after the loop. A pane that does not close keeps
+        // it, which then shows its opacity once, for the panes it has.
+        const app = self.app;
+        const id = self.id;
+        self.closing = true;
         for (surfaces.items) |surface| surface.close(false);
+        if (app.registry.findHostById(id) == null) return;
+        self.closing = false;
+        window_state.refreshBackgroundOpacity(self);
     }
 
     /// The tab and window title prompts are filled from the active surface

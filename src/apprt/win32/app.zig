@@ -7099,8 +7099,10 @@ pub const App = struct {
                     self.removeHost(host);
                 }
             } else {
-                // The last D3D11 pane may have closed.
-                if (!self.quitting) window_state.refreshBackgroundOpacity(host);
+                // The last D3D11 pane may have closed. Not in a window that
+                // closes whole (`Host.closing`), which would show a mode for
+                // the moment before it goes.
+                if (!self.quitting and !host.closing) window_state.refreshBackgroundOpacity(host);
                 if (self.running) {
                     // A close never restores, raises or takes focus from a
                     // window the user is not looking at, and moves focus only

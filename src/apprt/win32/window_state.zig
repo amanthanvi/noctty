@@ -2723,6 +2723,97 @@ test "win32 a window with a D3D11 pane fades whole and leaves its panes at their
     }.body);
 }
 
+test "win32 a window closing whole shows no opacity as its panes go, and a pane closing in a window that stays shows it once" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    try runOnHiddenDesktop(struct {
+        /// A window whose first tab runs D3D11 and its `others` OpenGL: it
+        /// fades whole.
+        fn window(fixture: *WindowStartTestApp, others: []*Surface) !*Surface {
+            const app = &fixture.app;
+            test_pane_renderer = .d3d11;
+            try app.createWindow(default_title);
+            const d3d11 = fixture.newest();
+            test_d3d11_pane = d3d11;
+            test_pane_renderer = .opengl;
+            for (others) |*other| other.* = try app.createWindowSurface(&app.config, default_title, .{ .host_id = d3d11.host_id });
+            try std.testing.expectEqual(@as(?u8, 128), testLayeredAlpha(d3d11.host.?.hwnd.?));
+            return d3d11;
+        }
+
+        /// One pane's window is destroyed, as at the end of any pane close
+        /// (`App.windowDestroyed`).
+        fn closePane(fixture: *WindowStartTestApp, pane: *Surface, applies: usize) !void {
+            const before = test_background_opacity_applies;
+            fixture.core_app.deleteSurface(pane);
+            _ = sys.DestroyWindow(pane.hwnd.?);
+            try std.testing.expectEqual(before + applies, test_background_opacity_applies);
+        }
+
+        fn body() !void {
+            var fixture: WindowStartTestApp = .{};
+            try fixture.init();
+            defer fixture.deinit();
+            const app = &fixture.app;
+            defer test_pane_renderer = null;
+            defer test_d3d11_pane = null;
+            app.config.@"background-opacity" = 0.5;
+
+            var tabs: [4]*Surface = undefined;
+            const d3d11 = try window(&fixture, &tabs);
+            const host = d3d11.host.?;
+
+            // A pane of a window that stays: the window shows its opacity
+            // again, once.
+            try closePane(&fixture, tabs[3], 1);
+
+            // A window close that asks and is cancelled closes nothing, and a
+            // pane closing after it still shows the opacity again.
+            host.askBeforeClosing(.window, 1, &win32.hostCloseConfirmAccept, host);
+            try std.testing.expect(host.confirm_payload != null);
+            host.invokeConfirmCancel();
+            try std.testing.expectEqual(@as(usize, 4), host.tabs.items.len);
+            try closePane(&fixture, tabs[2], 1);
+
+            // The window closes whole, its D3D11 pane first: nothing shows
+            // its opacity on the way, so it never turns per-pixel for the
+            // moment before it goes.
+            const id = host.id;
+            for ([_]*Surface{ d3d11, tabs[0], tabs[1] }) |pane| fixture.core_app.deleteSurface(pane);
+            var applies = test_background_opacity_applies;
+            var asserts = test_blur_behind_asserts;
+            host.closeConfirmed();
+            try std.testing.expect(app.registry.findHostById(id) == null);
+            try std.testing.expectEqual(applies, test_background_opacity_applies);
+            try std.testing.expectEqual(asserts, test_blur_behind_asserts);
+
+            // A pane whose close is refused (`requestClose` refuses one with
+            // no window, among others) keeps its window, which shows its
+            // opacity once, for the panes it has: with the D3D11 pane gone,
+            // the background alone is translucent.
+            var kept: [1]*Surface = undefined;
+            const faded = try window(&fixture, &kept);
+            const stays = faded.host.?;
+            const refused = kept[0].hwnd.?;
+            kept[0].hwnd = null;
+            fixture.core_app.deleteSurface(faded);
+            applies = test_background_opacity_applies;
+            asserts = test_blur_behind_asserts;
+            stays.closeConfirmed();
+            kept[0].hwnd = refused;
+            try std.testing.expectEqual(@as(usize, 1), stays.tabs.items.len);
+            try std.testing.expectEqual(applies + 1, test_background_opacity_applies);
+            try std.testing.expectEqual(asserts + 1, test_blur_behind_asserts);
+            try std.testing.expect(!testHostIsLayered(stays.hwnd.?));
+            try std.testing.expectEqual(@as(?u8, 128), testBackgroundAlpha(stays.hwnd.?));
+
+            // And it is an ordinary window again: a pane of it closing later
+            // shows its opacity again.
+            const later = try app.createWindowSurface(&app.config, default_title, .{ .host_id = stays.id });
+            try closePane(&fixture, later, 1);
+        }
+    }.body);
+}
+
 test "win32 a config change that toggles decorations and changes opacity applies the opacity once, at its new value" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
     try runOnHiddenDesktop(struct {
