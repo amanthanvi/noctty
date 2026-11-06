@@ -13,6 +13,11 @@
 //!
 //! `patchOrAppendEdits` (win32.zig), which patches every other setting by key
 //! alone, never sees these keys: they are not among Settings' editable keys.
+//!
+//! `profile-order` and `profile-hidden` are lists, not fields of one profile:
+//! a save that changed either writes it whole (`Edit.Op.list`). The file's own
+//! lines for the key go, and `key =` (which clears what any earlier layer
+//! gave) then one line per value take the place of the first of them.
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
@@ -21,14 +26,20 @@ const Config = configpkg.Config;
 const Key = Config.Key;
 const profile_map = @import("../../config/profile_map.zig");
 const origin = @import("../../config/origin.zig");
+const windows_shell = @import("../../config/windows_shell.zig");
 const LineIterator = @import("../../cli/args.zig").LineIterator;
 
-/// One of the four `profile-*` keys.
+/// One of the four `profile-*` keys that give each profile a value, or one
+/// of the two lists (`order`, `hidden`).
 pub const Field = enum {
     command,
     name,
     folder,
     env,
+    /// `profile-order`: written whole (`Edit.Op.list`).
+    order,
+    /// `profile-hidden`: written whole (`Edit.Op.list`).
+    hidden,
 
     pub fn key(self: Field) Key {
         return switch (self) {
@@ -36,7 +47,14 @@ pub const Field = enum {
             .name => .@"profile-name",
             .folder => .@"profile-working-directory",
             .env => .@"profile-env",
+            .order => .@"profile-order",
+            .hidden => .@"profile-hidden",
         };
+    }
+
+    /// Whether it is one of the lists, written whole.
+    pub fn isList(self: Field) bool {
+        return self == .order or self == .hidden;
     }
 
     fn kind(comptime self: Field) profile_map.Kind {
@@ -45,11 +63,14 @@ pub const Field = enum {
             .name => .name,
             .folder => .text,
             .env => .env,
+            .order, .hidden => @compileError("a list gives no profile a value"),
         };
     }
 
+    /// The per-profile field a line's key names: never a list, which is not
+    /// matched by identity.
     fn fromName(name: []const u8) ?Field {
-        inline for (comptime std.enums.values(Field)) |field| {
+        inline for (.{ Field.command, Field.name, Field.folder, Field.env }) |field| {
             if (std.mem.eql(u8, name, @tagName(comptime field.key()))) return field;
         }
         return null;
@@ -68,6 +89,15 @@ pub const Edit = struct {
     /// fields stay dormant in other files, so after the save it is not
     /// checked (`editHeld`).
     with_profile: bool = false,
+    /// A list edit: the app's profiles, which tell what a value a later
+    /// layer adds names (`listCheck`): `pwsh` hides `pwsh.exe` as the save's
+    /// own `pwsh.exe` does. Empty: values are compared as written.
+    profiles: []const windows_shell.Profile = &.{},
+    /// Whether `profiles` is the app's whole list. Without it (a discovery
+    /// ended without some profiles, or no window has a list), what a value a
+    /// later layer adds to the hidden list names is not known, so the check
+    /// is unavailable for it (`Check.unchecked`), neither held nor masked.
+    profiles_complete: bool = true,
 
     pub const Op = union(enum) {
         /// Give the field this value (for `profile-env`, the variable's
@@ -82,6 +112,10 @@ pub const Edit = struct {
         /// Take the file's own lines for the field out, where no other file
         /// gives it a value.
         delete,
+        /// `profile-order`, `profile-hidden` (`Field.isList`): the file's own
+        /// lines for the key go, and `key =`, then one line per value, take
+        /// the place of the first. `id` is empty.
+        list: []const []const u8,
     };
 };
 
@@ -132,6 +166,7 @@ fn readLine(segment: []const u8) ?Info {
     value = std.mem.trim(u8, value, &std.ascii.whitespace);
     if (value.len == 0) return .{ .field = field, .id = "", .scope = .key };
     const parsed = switch (field) {
+        .order, .hidden => unreachable,
         inline else => |f| profile_map.check(comptime f.kind(), value),
     } catch return null;
     if (field != .env) return .{ .field = field, .id = parsed.id, .scope = .exact };
@@ -175,6 +210,311 @@ fn deletes(edit: Edit, info: Info) bool {
     if (edit.field == .env and edit.name == null)
         return info.field == .env and info.scope != .key and std.ascii.eqlIgnoreCase(info.id, edit.id);
     return exact(edit, info);
+}
+
+/// Whether `text` (one line, without its line ending) is a line the loader
+/// reads as setting `name`: a value for it, or `name =`, which clears it.
+fn setsKey(text: []const u8, name: []const u8) bool {
+    if (!LineIterator.takes(text)) return false;
+    const trimmed = std.mem.trim(u8, text, whitespace ++ "\r");
+    if (trimmed.len == 0 or trimmed[0] == '#') return false;
+    const eq = std.mem.indexOfScalar(u8, trimmed, '=') orelse return false;
+    return std.mem.eql(u8, std.mem.trim(u8, trimmed[0..eq], whitespace), name);
+}
+
+/// Whether `value` can be written as one line of the list `field` and read
+/// back as it is: not empty (which would clear the list), no line ending or
+/// NUL, nothing the loader trims, no quotes it would take off, and a line no
+/// longer than it reads.
+fn listValueWritable(field: Field, value: []const u8) bool {
+    if (value.len == 0) return false;
+    if (std.mem.indexOfAny(u8, value, "\r\n\x00") != null) return false;
+    if (!std.mem.eql(u8, std.mem.trim(u8, value, &std.ascii.whitespace), value)) return false;
+    if (value.len >= 2 and value[0] == '"' and value[value.len - 1] == '"') return false;
+    return @tagName(field.key()).len + " = ".len + value.len <= LineIterator.max_line_len;
+}
+
+/// Whether two values of a list name the same thing, as the loader compares
+/// references: without case.
+fn listValueEql(a_raw: []const u8, b_raw: []const u8) bool {
+    const a = std.mem.trim(u8, a_raw, &std.ascii.whitespace);
+    const b = std.mem.trim(u8, b_raw, &std.ascii.whitespace);
+    // An `ssh:` alias exactly, as OpenSSH aliases are case-sensitive; its
+    // prefix in any case, as the loader takes it.
+    const prefix = "ssh:";
+    if (std.ascii.startsWithIgnoreCase(a, prefix) or std.ascii.startsWithIgnoreCase(b, prefix)) {
+        return a.len == b.len and std.ascii.startsWithIgnoreCase(a, prefix) and std.ascii.startsWithIgnoreCase(b, prefix) and
+            std.mem.eql(u8, a[prefix.len..], b[prefix.len..]);
+    }
+    return std.ascii.eqlIgnoreCase(a, b);
+}
+
+/// The list `config` gives `field` (`order` or `hidden`).
+fn listOf(field: Field, config: *const Config) []const [:0]const u8 {
+    return switch (field) {
+        .order => config.@"profile-order".list.items,
+        .hidden => config.@"profile-hidden".list.items,
+        else => unreachable,
+    };
+}
+
+/// Whether `a` and `b` give the list `field` the same values, in order.
+fn listEql(field: Field, a: *const Config, b: *const Config) bool {
+    const left = listOf(field, a);
+    const right = listOf(field, b);
+    if (left.len != right.len) return false;
+    for (left, right) |x, y| if (!std.mem.eql(u8, x, y)) return false;
+    return true;
+}
+
+/// What the check after a save found of an edit (`editCheck`): its value
+/// holds, a later layer masks it, or, for a hidden list, a later layer adds a
+/// value whose profiles the app has not all found, so whether it hides more
+/// than the save cannot be told.
+pub const Check = enum { held, masked, unchecked };
+
+/// Whether `reloaded` holds the list a save wrote (`values`): a layer read
+/// after the file (an include, the command line) may add to it, but not
+/// clear it. The values come first, in their order, so what they name keeps
+/// its place; for `profile-hidden` anything added must name one of them, or
+/// it hides a profile the save shows. That is told from `profiles` when they
+/// are the app's whole list (`complete`); otherwise an added value the save's
+/// list does not hold as written leaves the check unavailable.
+fn listCheck(field: Field, values: []const []const u8, reloaded: *const Config, profiles: []const windows_shell.Profile, complete: bool) Check {
+    const now = listOf(field, reloaded);
+    if (now.len < values.len) return .masked;
+    for (values, now[0..values.len]) |value, held| if (!listValueEql(value, held)) return .masked;
+    if (field == .order) return .held;
+    var check: Check = .held;
+    for (now[values.len..]) |extra| {
+        for (values) |value| {
+            if (listValueEql(value, extra)) break;
+        } else if (!complete) {
+            check = .unchecked;
+        } else if (!namesOnlyNamed(extra, values, profiles)) return .masked;
+    }
+    return check;
+}
+
+/// Whether `extra`, a hidden value a later layer adds, names profiles, and
+/// only ones `values` (the save's hidden list) names too, as the app reads
+/// them (`windows_shell.referenceNames`): `pwsh` after a saved `pwsh.exe`
+/// hides nothing more. One that names none of `profiles` is not known to be.
+fn namesOnlyNamed(extra: []const u8, values: []const []const u8, profiles: []const windows_shell.Profile) bool {
+    var names_any = false;
+    for (profiles) |profile| {
+        if (!windows_shell.referenceNames(profiles, extra, profile)) continue;
+        names_any = true;
+        for (values) |value| {
+            if (windows_shell.referenceNames(profiles, value, profile)) break;
+        } else return false;
+    }
+    return names_any;
+}
+
+/// Whether a save of `pending` writes the lists (`listEdits`): it holds
+/// either otherwise than `original`.
+pub fn listsChanged(original: *const Config, pending: *const Config) bool {
+    return !listEql(.order, original, pending) or !listEql(.hidden, original, pending);
+}
+
+/// Why Settings cannot change the profiles' order and visibility
+/// (`listsForeign`). A save writes both lists into the file it saves to,
+/// whole, after a clear (the maintainer's decision 2), so a value another
+/// layer gives either list would become the file's own, and apply where that
+/// layer does not.
+pub const ListsForeign = enum {
+    /// The command line sets one (`--profile-order`, `--profile-hidden`).
+    command_line,
+    /// A config file read after the one Settings saves to sets one: a later
+    /// `--config-file`, or a file `config-file` includes.
+    later_file,
+    /// They differ between the light and the dark state: a theme sets one
+    /// for one state only.
+    theme,
+    /// They could not be read in both states: a theme that could not be
+    /// read whole, or no memory to read it.
+    unread,
+    /// The order the config files loaded in cannot be worked out: a file (or
+    /// the command line) cleared `config-file` while they loaded, so a file
+    /// it named before is no longer in the list that places it.
+    unordered,
+
+    /// The reason, as the status line says it.
+    pub fn text(self: ListsForeign) []const u8 {
+        return switch (self) {
+            .command_line => "The command line sets the profile order or the hidden profiles, so Settings can't change them: a save would copy its values into the config file.",
+            .later_file => "A config file read after the one Settings saves to sets the profile order or the hidden profiles, so Settings can't change them: a save would copy its values into the config file.",
+            .theme => "The light and dark themes give different profile orders or hidden profiles, so Settings can't change them: a save would make one theme's choice apply in both.",
+            .unread => "The profile order and the hidden profiles could not be read in both the light and dark states, so Settings can't change them.",
+            .unordered => "A config file or the command line clears config-file, so the order the config files load in couldn't be worked out: a later one may set the profile order or the hidden profiles, so Settings can't change them.",
+        };
+    }
+};
+
+/// Whether the profiles' order and visibility, as `config` (the running
+/// config, or a fresh read of the layers) gives them, are what the file
+/// `path` and the layers read before it give, alone and the same in the light
+/// and dark states: null when they are, and a save may write both lists into
+/// `path`; otherwise why not.
+///
+/// The command line's value for either list is this launch's choice alone,
+/// whatever the load order: a save that wrote it into the file would keep it
+/// for every later launch, also when the file is a `--config-file` the
+/// loader reads after the command line.
+///
+/// Other files are placed in the loader's order by what they are, not by
+/// their lines, so a file Settings saves to that gives no line (empty,
+/// comments only, or not there yet) is placed too (`loadOrder`). The default
+/// config files come first (Settings saves to the last of them), then the
+/// command line, then each file `config-file` names, in that list's order.
+/// A line of another file that sets either list is a later layer's when that
+/// file loads after `path`. A theme's lines come first (`loadTheme` replays
+/// the config over them); the light/dark comparison judges them.
+///
+/// That order is rebuilt from the `config-file` list as loading left it. A
+/// step that cleared the list (`config-file =`, in a file or on the command
+/// line) can have dropped a file that loaded after `path` from it, which
+/// would then pass for a default file read before: so while any other file
+/// sets a list and the list was cleared, the order counts as unknown, and
+/// the lists as foreign (`.unordered`). The config is not changed to record
+/// the order (it is shared with upstream).
+pub fn listsForeign(config: *const Config, path: []const u8, same: origin.SamePath) Allocator.Error!?ListsForeign {
+    const steps = config._replay_steps.items;
+    const target = loadOrder(config, path, same);
+    var foreign: ?ListsForeign = null;
+    var cleared = false;
+    var set_elsewhere = false;
+    for (steps) |step| {
+        if (step == .@"-e") break;
+        const arg = appliedArg(config, step) orelse continue;
+        if (clearsIncludes(arg.text)) cleared = true;
+        if (!setsList(arg.text)) continue;
+        switch (arg.location) {
+            // A line with no place counts as the command line's.
+            .cli, .none => return .command_line,
+            .file => |file| {
+                if (same(file.path, path)) continue;
+                set_elsewhere = true;
+                if (loadOrder(config, file.path, same).after(target)) foreign = foreign orelse .later_file;
+            },
+        }
+    }
+    if (cleared and set_elsewhere) return .unordered;
+    if (foreign) |why| return why;
+    // The same in both states.
+    var switched: [2]?Config = .{ null, null };
+    defer for (&switched) |*value| if (value.*) |*reading| reading.deinit();
+    var readings: [2]*const Config = undefined;
+    for ([_]@FieldType(configpkg.ConditionalState, "theme"){ .light, .dark }, 0..) |theme, i| {
+        var state = config._conditional_state;
+        state.theme = theme;
+        switched[i] = config.changeConditionalState(state) catch |err| {
+            if (err == error.OutOfMemory) return error.OutOfMemory;
+            return .unread;
+        };
+        readings[i] = if (switched[i]) |*reading| reading else config;
+        if (unreadTheme(readings[i]) != null) return .unread;
+    }
+    if (!listEql(.order, readings[0], readings[1]) or !listEql(.hidden, readings[0], readings[1])) return .theme;
+    return null;
+}
+
+/// Where a file loads among `config`'s layers (`listsForeign`): a default
+/// config file (or a theme, which loads before them all), read before the
+/// command line and every file `config-file` names; or the `index`th of
+/// those, which load in that list's order (`Config.loadRecursiveFiles`
+/// appends what each names, and reads them in turn).
+const LoadOrder = union(enum) {
+    default,
+    included: usize,
+
+    /// Whether a file in this place loads after one in `other`. Of two
+    /// default files, none: Settings saves to the last of them
+    /// (`file_load.preferredDefaultFilePath`, read after the legacy one).
+    fn after(self: LoadOrder, other: LoadOrder) bool {
+        return switch (self) {
+            .default => false,
+            .included => |at| switch (other) {
+                .default => true,
+                .included => |target| at > target,
+            },
+        };
+    }
+};
+
+fn loadOrder(config: *const Config, path: []const u8, same: origin.SamePath) LoadOrder {
+    for (config.@"config-file".value.items, 0..) |entry, at| {
+        const named = switch (entry) {
+            .optional, .required => |named| named,
+        };
+        if (same(named, path)) return .{ .included = at };
+    }
+    return .default;
+}
+
+/// A step's argument and place, when it applies now: an argument, or a
+/// conditional one whose conditions match `config`'s state.
+fn appliedArg(config: *const Config, step: anytype) ?struct { text: []const u8, location: @import("../../cli/diagnostics.zig").Location } {
+    return switch (step) {
+        .arg => |arg| .{ .text = arg.value, .location = arg.location },
+        .conditional_arg => |arg| for (arg.conditions) |cond| {
+            if (!config._conditional_state.match(cond)) break null;
+        } else .{ .text = arg.arg, .location = arg.location },
+        else => null,
+    };
+}
+
+/// Whether a step's argument clears `config-file` (an empty value), which
+/// drops every file it named so far from the list.
+fn clearsIncludes(text: []const u8) bool {
+    const key = "--config-file";
+    if (!std.mem.startsWith(u8, text, key)) return false;
+    const rest = text[key.len..];
+    return rest.len > 0 and rest[0] == '=' and std.mem.trim(u8, rest[1..], &std.ascii.whitespace).len == 0;
+}
+
+/// Whether a step's argument (`--key=value`) sets `profile-order` or
+/// `profile-hidden`.
+fn setsList(text: []const u8) bool {
+    for ([_][]const u8{ "--profile-order", "--profile-hidden" }) |key| {
+        if (std.mem.startsWith(u8, text, key) and (text.len == key.len or text[key.len] == '=')) return true;
+    }
+    return false;
+}
+
+/// `profiles` (a window's whole list) with a user profile for each the
+/// draft (`pending`) has and the list does not: a profile the save adds is
+/// no window's yet, and the overridden check (`listCheck`) must know what
+/// names it. From `arena`.
+pub fn withDraftProfiles(arena: Allocator, profiles: []const windows_shell.Profile, pending: *const Config) Allocator.Error![]const windows_shell.Profile {
+    var out: std.ArrayListUnmanaged(windows_shell.Profile) = .empty;
+    try out.appendSlice(arena, profiles);
+    for (pending.@"profile-command".entries.items) |entry| {
+        if (entry.removed) continue;
+        const key = try std.fmt.allocPrint(arena, "user:{s}", .{entry.id});
+        const known = for (profiles) |profile| {
+            if (profile.kind == .user and std.ascii.eqlIgnoreCase(profile.key, key)) break true;
+        } else false;
+        if (!known) try out.append(arena, .{ .kind = .user, .key = key, .label = entry.id, .command = .{ .direct = &.{} } });
+    }
+    return out.items;
+}
+
+/// The list edits a save of `pending` makes: each list it holds otherwise
+/// than `original`, written whole. From `arena`.
+fn listEdits(arena: Allocator, original: *const Config, pending: *const Config) ![]Edit {
+    var edits: std.ArrayListUnmanaged(Edit) = .empty;
+    // Both blocks or neither: a move or a hide gives the page's order and
+    // visibility whole, and each block is conflict-checked (`changedUnder`).
+    if (listEql(.order, original, pending) and listEql(.hidden, original, pending)) return edits.toOwnedSlice(arena);
+    for ([_]Field{ .order, .hidden }) |field| {
+        const items = listOf(field, pending);
+        const values = try arena.alloc([]const u8, items.len);
+        for (items, values) |item, *value| value.* = try arena.dupe(u8, item);
+        try edits.append(arena, .{ .field = field, .id = "", .op = .{ .list = values } });
+    }
+    return edits.toOwnedSlice(arena);
 }
 
 /// How a config file's text ends. A save that patches profile lines keeps
@@ -309,9 +649,10 @@ fn editLine(arena: Allocator, edit: Edit) ![]const u8 {
     const text: []const u8 = switch (edit.op) {
         .set => |value| if (edit.field == .env) try std.fmt.allocPrint(arena, "{s}={s}", .{ edit.name.?, value }) else value,
         .unset => if (edit.field == .env) try std.fmt.allocPrint(arena, "{s}=", .{edit.name.?}) else "",
-        .delete => unreachable,
+        .delete, .list => unreachable,
     };
     switch (edit.field) {
+        .order, .hidden => unreachable,
         inline else => |field| try profile_map.writeProfileLine(&out.writer, comptime field.kind(), @tagName(comptime field.key()), edit.id, text),
     }
     return std.mem.trimEnd(u8, out.written(), "\n");
@@ -352,6 +693,11 @@ pub fn patchProfileEdits(alloc: Allocator, raw: []const u8, edits: []const Edit,
         for ([_][]const u8{ e.id, e.name orelse "", set_value }) |part| {
             if (std.mem.indexOfScalar(u8, part, 0) != null) return error.NulByte;
         }
+        // A list value is one line: no line ending, nothing the loader
+        // would trim or unquote, and no longer than it reads.
+        if (e.op == .list) for (e.op.list) |value| {
+            if (!listValueWritable(e.field, value)) return error.UnwritableListValue;
+        };
     }
 
     var arena_state: std.heap.ArenaAllocator = .init(alloc);
@@ -385,6 +731,38 @@ pub fn patchProfileEdits(alloc: Allocator, raw: []const u8, edits: []const Edit,
     const dominant: Ending = if (crlf_count > lf_count) .crlf else .lf;
 
     for (edits) |edit| switch (edit.op) {
+        .list => |values| {
+            const name = @tagName(edit.field.key());
+            var block: std.ArrayListUnmanaged(Line) = .empty;
+            try block.append(arena, .{ .text = try std.fmt.allocPrint(arena, "{s} =", .{name}), .ending = dominant, .info = null });
+            for (values) |value| try block.append(arena, .{ .text = try std.fmt.allocPrint(arena, "{s} = {s}", .{ name, value }), .ending = dominant, .info = null });
+            // The file's own lines for the key go; the block takes the place
+            // of the first.
+            var first: ?usize = null;
+            for (lines.items, 0..) |*line, index| {
+                if (line.deleted or !setsKey(line.text, name)) continue;
+                if (first == null) first = index;
+                line.deleted = true;
+            }
+            if (first) |index| {
+                // Where the first was, which may be the file's marked last
+                // line: the block's last line then ends as the file did
+                // (`FileEnd.restore`).
+                try lines.insertSlice(arena, index, block.items);
+                continue;
+            }
+            // None: a block of its own at the end of the file.
+            var last_kept: ?*Line = null;
+            for (lines.items) |*line| {
+                if (!line.deleted and !FileEnd.isMark(line.text)) last_kept = line;
+            }
+            if (last_kept) |line| {
+                if (line.ending == .none) line.ending = dominant;
+                if (std.mem.trim(u8, line.text, whitespace).len != 0)
+                    try lines.append(arena, .{ .text = "", .ending = dominant, .info = null });
+            }
+            try lines.appendSlice(arena, block.items);
+        },
         .delete => for (lines.items) |*line| {
             if (line.deleted) continue;
             const info = line.info orelse continue;
@@ -606,8 +984,9 @@ pub threadlocal var test_config_load: if (@import("builtin").is_test) ?*const fn
 /// app applies, and `reload` read the app's own again.
 /// Otherwise the fields another layer overrides go to `masked`
 /// (`writeMasked`, after a separator when `after`), and the report is
-/// `.masked`, or `.held` when there are none.
-pub fn reloadReport(masked: *std.Io.Writer, edits: []const Edit, reload: *const Config, loaded: *const Config, after: bool) std.Io.Writer.Error!union(enum) { held, masked, unread: Unread } {
+/// `.masked`, or `.held` when there are none; `.unchecked` when none is
+/// masked and the check was unavailable for a hidden list (`listCheck`).
+pub fn reloadReport(masked: *std.Io.Writer, edits: []const Edit, reload: *const Config, loaded: *const Config, after: bool) std.Io.Writer.Error!union(enum) { held, masked, unchecked, unread: Unread } {
     if (loaded == reload) {
         if (unreadConfigFile(reload)) |unread| return .{ .unread = unread };
     } else {
@@ -615,7 +994,11 @@ pub fn reloadReport(masked: *std.Io.Writer, edits: []const Edit, reload: *const 
         if (unreadConfigFile(reload)) |unread| return .{ .unread = unread };
     }
     if (edits.len == 0) return .held;
-    return if (try writeMasked(masked, edits, reload, after)) .masked else .held;
+    return switch (try writeMasked(masked, edits, reload, after)) {
+        .held => .held,
+        .masked => .masked,
+        .unchecked => .unchecked,
+    };
 }
 
 /// A file `config`'s load found and could not read whole, if any: a default
@@ -765,28 +1148,38 @@ fn namesProfile(value: []const u8, id: []const u8) bool {
 
 /// Whether `reloaded`, the config read again after the save, holds the
 /// field as `edit` left it. One that does not was masked: a file read after
-/// the one saved to, or the command line, sets it again.
-pub fn editHeld(edit: Edit, reloaded: *const Config) bool {
-    if (edit.with_profile) return true;
-    if (edit.field == .env and edit.name == null) return true;
-    const now = editValue(edit, reloaded);
-    return switch (edit.op) {
+/// the one saved to, or the command line, sets it again. A hidden list can be
+/// unchecked instead (`listCheck`).
+pub fn editCheck(edit: Edit, reloaded: *const Config) Check {
+    if (edit.with_profile) return .held;
+    if (edit.field == .env and edit.name == null) return .held;
+    if (edit.op == .list) return listCheck(edit.field, edit.op.list, reloaded, edit.profiles, edit.profiles_complete);
+    const now = editValue(edit, &.of(reloaded));
+    const held = switch (edit.op) {
         .set => |value| now != null and std.mem.eql(u8, now.?, value),
         .unset, .delete => now == null,
+        .list => unreachable,
     };
+    return if (held) .held else .masked;
 }
 
-/// The value `config` gives the field `edit` writes: the profile's command
+/// Whether `editCheck` found `edit` held.
+pub fn editHeld(edit: Edit, reloaded: *const Config) bool {
+    return editCheck(edit, reloaded) == .held;
+}
+
+/// The value `values` give the field `edit` writes: the profile's command
 /// line, label or folder, or for `profile-env` the variable's value. Null
-/// when it gives none.
-fn editValue(edit: Edit, config: *const Config) ?[]const u8 {
+/// when they give none.
+fn editValue(edit: Edit, values: *const ProfileValues) ?[]const u8 {
     return switch (edit.field) {
-        .command => config.@"profile-command".get(edit.id),
-        .name => config.@"profile-name".get(edit.id),
-        .folder => config.@"profile-working-directory".get(edit.id),
+        .command => values.command.get(edit.id),
+        .name => values.name.get(edit.id),
+        .folder => values.folder.get(edit.id),
+        .order, .hidden => unreachable,
         .env => env: {
             const name = edit.name orelse break :env null;
-            const map = config.@"profile-env".get(edit.id) orelse break :env null;
+            const map = values.env.get(edit.id) orelse break :env null;
             var it = map.iterator();
             while (it.next()) |kv| {
                 if (std.ascii.eqlIgnoreCase(kv.key_ptr.*, name)) break :env kv.value_ptr.*;
@@ -799,10 +1192,10 @@ fn editValue(edit: Edit, config: *const Config) ?[]const u8 {
 /// Whether `a` and `b` give the field `edit` writes the same value. For
 /// `profile-env` with no variable (every variable of the profile), all of
 /// them.
-fn editEql(edit: Edit, a: *const Config, b: *const Config) bool {
+fn editEql(edit: Edit, a: *const ProfileValues, b: *const ProfileValues) bool {
     if (edit.field == .env and edit.name == null) {
-        const left = a.@"profile-env".get(edit.id);
-        const right = b.@"profile-env".get(edit.id);
+        const left = a.env.get(edit.id);
+        const right = b.env.get(edit.id);
         if (left == null or right == null) return left == null and right == null;
         if (left.?.map.count() != right.?.map.count()) return false;
         // Names compare without case, as the loader takes them (`Path` and
@@ -826,27 +1219,197 @@ fn editEql(edit: Edit, a: *const Config, b: *const Config) bool {
 }
 
 /// The first of `edits` whose field `disk` gives a value that neither the
-/// draft's baseline (`original`) nor the draft (`pending`) gives: another
-/// program changed what the draft changes. There is no Keep mine / Use disk
-/// for a profile field, so a save that finds one stops (SETTINGS-SAVE-TOCTOU):
-/// asked of every fresh read of the layers, so an edit made after Settings
-/// read the config and before the save counts too.
-pub fn changedUnder(edits: []const Edit, original: *const Config, pending: *const Config, disk: *const Config) ?Edit {
+/// draft's baseline for it (`baselines`) nor the draft (`pending`) gives:
+/// another program changed what the draft changes. There is no Keep mine /
+/// Use disk for a profile field, so a save that finds one stops
+/// (SETTINGS-SAVE-TOCTOU): asked of every fresh read of the layers, so an
+/// edit made after Settings read the config and before the save counts too.
+///
+/// Each field is compared with its own record (`Baselines`), and `disk` is
+/// read in the light/dark state that record was read in: a dark theme's
+/// line, read only because the app's state changed since, is no change to
+/// any file. Switching it reads that state's theme again, and a theme that
+/// read could not read whole stops the save (`error.ThemeUnread`) rather
+/// than compare without its lines.
+pub fn changedUnder(edits: []const Edit, baselines: *const Baselines, pending: *const Config, disk: *const Config, path: []const u8, same: origin.SamePath) !?Edit {
+    var readings: StateReadings = .{ .disk = disk };
+    defer readings.deinit();
+    const drafted: ProfileValues = .of(pending);
     for (edits) |edit| {
         // A field deleted only because its profile is removed (its label,
         // folder and variables, `with_profile`) is not one the draft
         // changes: the removal covers whatever another layer or program
         // gives it now. The removal's own command line is still checked.
         if (edit.with_profile) continue;
-        if (!editEql(edit, disk, original) and !editEql(edit, disk, pending)) return edit;
+        if (edit.field.isList()) {
+            const base = baselines.list(edit.field);
+            const now = try readings.in(base.state);
+            // A list is written whole, both blocks or neither, after a clear
+            // that drops what every earlier file gives it: a list the draft
+            // left as it was is checked too, in every file that gives it
+            // (an earlier file's line, written over by that clear, counts).
+            const values = listOf(edit.field, now);
+            if (!stringsEql(values, base.values) and !stringsEql(values, listOf(edit.field, pending))) return edit;
+            // The file's own lines for the list, which the save replaces:
+            // another program's edit to them is written over even when a
+            // later layer masks the list, so it stops the save too.
+            if (!ownLinesEql(edit.field.key(), now._launch.profile_places.items, base.places, path, same)) return edit;
+            continue;
+        }
+        const base = &baselines.profiles;
+        const now: ProfileValues = .of(try readings.in(base.state));
+        if (!editEql(edit, &now, &base.values) and !editEql(edit, &now, &drafted)) return edit;
     }
     return null;
 }
+
+/// The values of the four keys that give each user profile a value, as one
+/// config gives them: a profile field's baseline (`Baselines.profiles`).
+/// The maps are the config's own, not copies.
+pub const ProfileValues = struct {
+    command: @FieldType(Config, "profile-command"),
+    name: @FieldType(Config, "profile-name"),
+    folder: @FieldType(Config, "profile-working-directory"),
+    env: @FieldType(Config, "profile-env"),
+
+    pub fn of(config: *const Config) ProfileValues {
+        return .{
+            .command = config.@"profile-command",
+            .name = config.@"profile-name",
+            .folder = config.@"profile-working-directory",
+            .env = config.@"profile-env",
+        };
+    }
+};
+
+/// What a save checks one group of profile keys against for another
+/// program's change (`changedUnder`): the values the draft started from,
+/// where each profile line of that reading was read
+/// (`_launch.profile_places`; the check reads the group's own keys), and
+/// the light/dark state of that reading. A group follows the file on its own
+/// (`settings_profiles.followFile`), which replaces its record whole, never
+/// one part of it.
+pub fn Baseline(comptime Values: type) type {
+    return struct {
+        values: Values,
+        places: []const configpkg.pane_launch.ProfilePlace,
+        state: configpkg.ConditionalState,
+    };
+}
+
+/// The draft's baseline for each group of profile keys: the profiles' four
+/// keys, `profile-order` and `profile-hidden`. Each record is borrowed from
+/// the config it was read from (the window's baseline, whose arena outlives
+/// it).
+pub const Baselines = struct {
+    profiles: Baseline(ProfileValues),
+    order: Baseline([]const [:0]const u8),
+    hidden: Baseline([]const [:0]const u8),
+
+    /// Every group as `config` gives it, in its state: a config none of
+    /// whose groups has followed a file since it was read.
+    pub fn of(config: *const Config) Baselines {
+        const places = config._launch.profile_places.items;
+        const state = config._conditional_state;
+        return .{
+            .profiles = .{ .values = .of(config), .places = places, .state = state },
+            .order = .{ .values = config.@"profile-order".list.items, .places = places, .state = state },
+            .hidden = .{ .values = config.@"profile-hidden".list.items, .places = places, .state = state },
+        };
+    }
+
+    /// The record of the list `field`.
+    pub fn list(self: *const Baselines, field: Field) *const Baseline([]const [:0]const u8) {
+        return switch (field) {
+            .order => &self.order,
+            .hidden => &self.hidden,
+            else => unreachable,
+        };
+    }
+};
+
+/// `disk` in each light/dark state a record asks for, switched once per
+/// state (`Config.changeConditionalState`); `disk` itself when it is in that
+/// state already.
+const StateReadings = struct {
+    disk: *const Config,
+    made: [3]Made = undefined,
+    count: usize = 0,
+
+    const Made = struct { state: configpkg.ConditionalState, config: ?Config };
+
+    fn in(self: *StateReadings, state: configpkg.ConditionalState) !*const Config {
+        const reading = for (self.made[0..self.count]) |*known| {
+            if (std.meta.eql(known.state, state)) break known;
+        } else made: {
+            // One per record at most.
+            std.debug.assert(self.count < self.made.len);
+            self.made[self.count] = .{ .state = state, .config = try self.disk.changeConditionalState(state) };
+            self.count += 1;
+            const fresh = &self.made[self.count - 1];
+            if (fresh.config) |*config| if (unreadTheme(config) != null) return error.ThemeUnread;
+            break :made fresh;
+        };
+        return if (reading.config) |*config| config else self.disk;
+    }
+
+    fn deinit(self: *StateReadings) void {
+        for (self.made[0..self.count]) |*made| if (made.config) |*config| config.deinit();
+    }
+};
+
+/// Whether two lists hold the same values, in order.
+fn stringsEql(a: []const [:0]const u8, b: []const [:0]const u8) bool {
+    if (a.len != b.len) return false;
+    for (a, b) |x, y| if (!std.mem.eql(u8, x, y)) return false;
+    return true;
+}
+
+/// Whether `a` and `b`, where two readings recorded their profile lines
+/// (`_launch.profile_places`), read the same lines of the file `path` for
+/// `key` (`profile-order` or `profile-hidden`): its values, clears too, in
+/// order.
+fn ownLinesEql(key: Config.Key, a: []const configpkg.pane_launch.ProfilePlace, b: []const configpkg.pane_launch.ProfilePlace, path: []const u8, same: origin.SamePath) bool {
+    var it_a = OwnLines{ .places = a, .key = @tagName(key), .path = path, .same = same };
+    var it_b = OwnLines{ .places = b, .key = @tagName(key), .path = path, .same = same };
+    while (true) {
+        const x = it_a.next();
+        const y = it_b.next();
+        if (x == null or y == null) return x == null and y == null;
+        if (!std.mem.eql(u8, x.?, y.?)) return false;
+    }
+}
+
+/// The values a reading recorded (`places`) for `key` from the file `path`,
+/// a clear as "".
+const OwnLines = struct {
+    places: []const configpkg.pane_launch.ProfilePlace,
+    key: []const u8,
+    path: []const u8,
+    same: origin.SamePath,
+    at: usize = 0,
+
+    fn next(self: *OwnLines) ?[]const u8 {
+        const places = self.places;
+        while (self.at < places.len) {
+            const place = places[self.at];
+            self.at += 1;
+            if (!std.mem.eql(u8, place.key, self.key)) continue;
+            switch (place.location) {
+                .file => |file| if (self.same(file.path, self.path)) return place.id,
+                else => {},
+            }
+        }
+        return null;
+    }
+};
 
 /// How the save's status names an edit's field: its key, the profile id and,
 /// for `profile-env`, the variable's name. Never the value, which can hold a
 /// secret.
 pub fn writeEditName(writer: *std.Io.Writer, edit: Edit) !void {
+    // A list is the key alone.
+    if (edit.field.isList()) return writer.writeAll(@tagName(edit.field.key()));
     try writer.print("{s} {s}", .{ @tagName(edit.field.key()), edit.id });
     if (edit.name) |name| try writer.print(" {s}", .{name});
 }
@@ -866,10 +1429,13 @@ pub fn writeEditName(writer: *std.Io.Writer, edit: Edit) !void {
 /// define a profile in one state only, `Config.load` hands over the light
 /// one, and the state may have changed since Settings opened.
 pub fn editsForSave(arena: Allocator, alloc: Allocator, readings: []const *const Config, state: configpkg.ConditionalState, original: *const Config, pending: *const Config, path: []const u8, same: origin.SamePath) ![]Edit {
+    // `profile-order` and `profile-hidden` changed are written whole, after
+    // the profiles' own edits.
+    const lists = try listEdits(arena, original, pending);
     if (original.@"profile-command".equal(pending.@"profile-command") and
         original.@"profile-name".equal(pending.@"profile-name") and
         original.@"profile-working-directory".equal(pending.@"profile-working-directory") and
-        original.@"profile-env".equal(pending.@"profile-env")) return &.{};
+        original.@"profile-env".equal(pending.@"profile-env")) return lists;
     std.debug.assert(readings.len != 0 and readings.len <= max_readings);
     var conditioned: [max_readings]?Config = @splat(null);
     defer for (&conditioned) |*value| if (value.*) |*config| config.deinit();
@@ -881,26 +1447,34 @@ pub fn editsForSave(arena: Allocator, alloc: Allocator, readings: []const *const
         indexes[i] = try origin.Index.init(alloc, if (conditioned[i]) |*config| config else reading);
         made += 1;
     }
-    return profileEdits(arena, indexes[0..made], original, pending, path, same);
+    const edits = try profileEdits(arena, indexes[0..made], original, pending, path, same);
+    if (lists.len == 0) return edits;
+    return std.mem.concat(arena, Edit, &.{ edits, lists });
 }
 
 /// The most readings of the layers `editsForSave` takes.
 const max_readings = 2;
 
-/// Name each field of `edits` that `reloaded` does not hold (`editHeld`),
-/// comma separated, after a separator when `after`. Returns whether it
-/// named one.
-pub fn writeMasked(writer: *std.Io.Writer, edits: []const Edit, reloaded: *const Config, after: bool) !bool {
+/// Name each field of `edits` that `reloaded` masks (`editCheck`), comma
+/// separated, after a separator when `after`. Returns `.masked` when it
+/// named one, else `.unchecked` when the check was unavailable for one, else
+/// `.held`.
+pub fn writeMasked(writer: *std.Io.Writer, edits: []const Edit, reloaded: *const Config, after: bool) !Check {
     var separate = after;
-    var named = false;
-    for (edits) |edit| {
-        if (editHeld(edit, reloaded)) continue;
-        if (separate) try writer.writeAll(", ");
-        separate = true;
-        named = true;
-        try writeEditName(writer, edit);
-    }
-    return named;
+    var found: Check = .held;
+    for (edits) |edit| switch (editCheck(edit, reloaded)) {
+        .held => {},
+        .unchecked => if (found == .held) {
+            found = .unchecked;
+        },
+        .masked => {
+            if (separate) try writer.writeAll(", ");
+            separate = true;
+            found = .masked;
+            try writeEditName(writer, edit);
+        },
+    };
+    return found;
 }
 
 // Tests.
@@ -943,6 +1517,274 @@ test "settings patch: a field's last line is replaced, and another profile's lin
         &.{.{ .field = .folder, .id = "py", .op = .{ .set = "home" } }},
         "  profile-working-directory = py: home\n",
     );
+}
+
+test "settings patch: a list is written whole, in place of the file's own lines for it" {
+    const order: Edit = .{ .field = .order, .id = "", .op = .{ .list = &.{ "user:py", "pwsh.exe", "wsl:Ubuntu" } } };
+    const hidden: Edit = .{ .field = .hidden, .id = "", .op = .{ .list = &.{"cmd.exe"} } };
+    // The file's lines for the key, a clear among them, go; the block takes
+    // the first one's place. Comments, other keys and a line for another key
+    // that only starts the same stay.
+    try testPatch(
+        "font-size = 12\nprofile-order = cmd.exe\n# keep\nprofile-order =\n  profile-order = user:old\nprofile-orders = x\n",
+        &.{order},
+        "font-size = 12\nprofile-order =\nprofile-order = user:py\nprofile-order = pwsh.exe\nprofile-order = wsl:Ubuntu\n# keep\nprofile-orders = x\n",
+    );
+    // A file without the key gets a block at its end, after a blank line, in
+    // the line ending most of its lines have.
+    try testPatch(
+        "font-size = 12\r\nprofile-command = py: python.exe\r\n",
+        &.{ order, hidden },
+        "font-size = 12\r\nprofile-command = py: python.exe\r\n\r\nprofile-order =\r\nprofile-order = user:py\r\nprofile-order = pwsh.exe\r\nprofile-order = wsl:Ubuntu\r\n\r\nprofile-hidden =\r\nprofile-hidden = cmd.exe\r\n",
+    );
+    // An empty list is the clear alone.
+    try testPatch("profile-hidden = cmd.exe\n", &.{.{ .field = .hidden, .id = "", .op = .{ .list = &.{} } }}, "profile-hidden =\n");
+    // A value that would not read back as written is refused, and nothing is
+    // patched.
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    defer out.deinit(testing.allocator);
+    for ([_][]const u8{ "", " pwsh.exe", "a\nprofile-order = b", "\"quoted\"" }) |bad| {
+        try testing.expectError(error.UnwritableListValue, patchProfileEdits(testing.allocator, "x = 1\n", &.{.{ .field = .order, .id = "", .op = .{ .list = &.{bad} } }}, &out));
+        try testing.expectEqual(@as(usize, 0), out.items.len);
+    }
+}
+
+test "settings patch: a save that changed either list writes both, whole, and one that changed neither writes none" {
+    const alloc = testing.allocator;
+    var original = try Config.default(alloc);
+    defer original.deinit();
+    try original.@"profile-order".parseCLI(original._arena.?.allocator(), "pwsh.exe");
+    try original.@"profile-hidden".parseCLI(original._arena.?.allocator(), "cmd.exe");
+    var pending = try original.clone(alloc);
+    defer pending.deinit();
+    var arena_state: std.heap.ArenaAllocator = .init(alloc);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const path = "C:\\noctty-test\\config";
+    try testing.expectEqual(@as(usize, 0), (try editsForSave(arena, alloc, &.{&original}, .{}, &original, &pending, path, &testSamePath)).len);
+    // The order changes: both lists are written whole, the hidden one as
+    // the draft has it, so each is checked for another program's edit.
+    try pending.@"profile-order".parseCLI(pending._arena.?.allocator(), "");
+    try pending.@"profile-order".parseCLI(pending._arena.?.allocator(), "user:py");
+    try pending.@"profile-order".parseCLI(pending._arena.?.allocator(), "pwsh.exe");
+    const edits = try editsForSave(arena, alloc, &.{&original}, .{}, &original, &pending, path, &testSamePath);
+    try testing.expectEqual(@as(usize, 2), edits.len);
+    try testing.expect(edits[0].field == .order);
+    try testing.expectEqual(@as(usize, 2), edits[0].op.list.len);
+    try expectSameText("user:py", edits[0].op.list[0]);
+    try expectSameText("pwsh.exe", edits[0].op.list[1]);
+    try testing.expect(edits[1].field == .hidden);
+    try testing.expectEqual(@as(usize, 1), edits[1].op.list.len);
+    try expectSameText("cmd.exe", edits[1].op.list[0]);
+    // With a profile's own edit, the lists come after it.
+    try pending.@"profile-name".parseCLI(pending._arena.?.allocator(), "py: Python");
+    try pending.@"profile-command".parseCLI(pending._arena.?.allocator(), "py: python.exe");
+    const both = try editsForSave(arena, alloc, &.{&original}, .{}, &original, &pending, path, &testSamePath);
+    try testing.expect(both.len >= 3);
+    try testing.expect(both[both.len - 2].field == .order and both[both.len - 1].field == .hidden);
+    for (both[0 .. both.len - 2]) |e| try testing.expect(!e.field.isList());
+}
+
+test "settings patch: a list another program changed stops the save; one a later layer only adds to is held" {
+    const alloc = testing.allocator;
+    var original = try Config.default(alloc);
+    defer original.deinit();
+    try original.@"profile-order".parseCLI(original._arena.?.allocator(), "pwsh.exe");
+    var pending = try original.clone(alloc);
+    defer pending.deinit();
+    try pending.@"profile-order".parseCLI(pending._arena.?.allocator(), "");
+    try pending.@"profile-order".parseCLI(pending._arena.?.allocator(), "user:py");
+    try pending.@"profile-order".parseCLI(pending._arena.?.allocator(), "pwsh.exe");
+    const order: Edit = .{ .field = .order, .id = "", .op = .{ .list = &.{ "user:py", "pwsh.exe" } } };
+    // Read again as Settings read it: no change under the edit.
+    var disk = try original.clone(alloc);
+    defer disk.deinit();
+    try testing.expect(try changedUnder(&.{order}, &.of(&original), &pending, &disk, "", &testSamePath) == null);
+    // Another program added to it since: the save stops, naming the key.
+    try disk.@"profile-order".parseCLI(disk._arena.?.allocator(), "cmd.exe");
+    const changed = try changedUnder(&.{order}, &.of(&original), &pending, &disk, "", &testSamePath) orelse return error.TestExpectedChange;
+    var name: std.Io.Writer.Allocating = .init(alloc);
+    defer name.deinit();
+    try writeEditName(&name.writer, changed);
+    try expectSameText("profile-order", name.written());
+
+    // After the save: a later layer that adds to the order keeps what the
+    // save named first, so it is held; one that cleared it or put another
+    // order first is not.
+    const Case = struct { values: []const []const u8, held: bool };
+    for ([_]Case{
+        .{ .values = &.{ "user:py", "pwsh.exe", "cmd.exe" }, .held = true },
+        .{ .values = &.{ "USER:PY", "pwsh.exe" }, .held = true },
+        .{ .values = &.{"cmd.exe"}, .held = false },
+        .{ .values = &.{ "pwsh.exe", "user:py" }, .held = false },
+    }) |case| {
+        var reloaded = try Config.default(alloc);
+        defer reloaded.deinit();
+        for (case.values) |value| try reloaded.@"profile-order".parseCLI(reloaded._arena.?.allocator(), value);
+        try testing.expectEqual(case.held, editHeld(order, &reloaded));
+    }
+    // For `profile-hidden`, an addition must name what the save hid: one
+    // that hides another profile masks it.
+    const hidden: Edit = .{ .field = .hidden, .id = "", .op = .{ .list = &.{"cmd.exe"} } };
+    for ([_]Case{
+        .{ .values = &.{ "cmd.exe", "CMD.EXE" }, .held = true },
+        .{ .values = &.{ "cmd.exe", "wsl" }, .held = false },
+        .{ .values = &.{}, .held = false },
+    }) |case| {
+        var reloaded = try Config.default(alloc);
+        defer reloaded.deinit();
+        for (case.values) |value| try reloaded.@"profile-hidden".parseCLI(reloaded._arena.?.allocator(), value);
+        try testing.expectEqual(case.held, editHeld(hidden, &reloaded));
+        if (!case.held) {
+            var masked: std.Io.Writer.Allocating = .init(alloc);
+            defer masked.deinit();
+            try testing.expect(try writeMasked(&masked.writer, &.{hidden}, &reloaded, false) == .masked);
+            try expectSameText("profile-hidden", masked.written());
+        }
+    }
+    // An SSH alias in another case is another profile; its prefix in another
+    // case is not.
+    const hidden_ssh: Edit = .{ .field = .hidden, .id = "", .op = .{ .list = &.{"ssh:prod"} } };
+    for ([_]Case{
+        .{ .values = &.{ "ssh:prod", "SSH:prod" }, .held = true },
+        .{ .values = &.{ "ssh:prod", "ssh:Prod" }, .held = false },
+        .{ .values = &.{"ssh:Prod"}, .held = false },
+    }) |case| {
+        var reloaded = try Config.default(alloc);
+        defer reloaded.deinit();
+        for (case.values) |value| try reloaded.@"profile-hidden".parseCLI(reloaded._arena.?.allocator(), value);
+        try testing.expectEqual(case.held, editHeld(hidden_ssh, &reloaded));
+    }
+}
+
+test "settings patch: an edit to the file's own list lines that a later file masks stops the save" {
+    const alloc = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(.{ .sub_path = "earlier", .data = "# read first\n" });
+    try tmp.dir.writeFile(.{ .sub_path = "later.conf", .data = "profile-order =\nprofile-order = pwsh.exe\n" });
+    const later = try tmp.dir.realpathAlloc(alloc, "later.conf");
+    defer alloc.free(later);
+    const text = try std.fmt.allocPrint(alloc, "profile-order = cmd.exe\nconfig-file = {s}\n", .{later});
+    defer alloc.free(text);
+    try tmp.dir.writeFile(.{ .sub_path = "config", .data = text });
+    const earlier = try tmp.dir.realpathAlloc(alloc, "earlier");
+    defer alloc.free(earlier);
+    const path = try tmp.dir.realpathAlloc(alloc, "config");
+    defer alloc.free(path);
+    var original = try testLoad(alloc, earlier, path);
+    defer original.deinit();
+    var pending = try original.clone(alloc);
+    defer pending.deinit();
+    try pending.@"profile-order".parseCLI(pending._arena.?.allocator(), "");
+    try pending.@"profile-order".parseCLI(pending._arena.?.allocator(), "user:py");
+    const order: Edit = .{ .field = .order, .id = "", .op = .{ .list = &.{"user:py"} } };
+    {
+        // Nothing changed: the save goes on.
+        var disk = try testLoad(alloc, earlier, path);
+        defer disk.deinit();
+        try testing.expect(try changedUnder(&.{order}, &.of(&original), &pending, &disk, path, &testSamePath) == null);
+    }
+    // Another program edits the file's own line, which the later file masks:
+    // the list in effect is the same, and the save would write over it.
+    for ([_][]const u8{ "profile-order = git-bash\n", "profile-order =\nprofile-order = cmd.exe\n" }) |own| {
+        const changed = try std.fmt.allocPrint(alloc, "{s}config-file = {s}\n", .{ own, later });
+        defer alloc.free(changed);
+        try tmp.dir.writeFile(.{ .sub_path = "config", .data = changed });
+        var disk = try testLoad(alloc, earlier, path);
+        defer disk.deinit();
+        try testing.expect(listEql(.order, &disk, &original));
+        const stopped = try changedUnder(&.{order}, &.of(&original), &pending, &disk, path, &testSamePath) orelse return error.TestExpectedChange;
+        try testing.expect(stopped.field == .order);
+    }
+}
+
+test "settings patch: a dark theme's hidden list, read only because the app went dark, stops no save of the lists, changed or not" {
+    const alloc = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(.{ .sub_path = "none.conf", .data = "\n" });
+    try tmp.dir.writeFile(.{ .sub_path = "light", .data = "\n" });
+    // The dark theme hides another profile.
+    try tmp.dir.writeFile(.{ .sub_path = "dark", .data = "profile-hidden = pwsh.exe\n" });
+    const light = try tmp.dir.realpathAlloc(alloc, "light");
+    defer alloc.free(light);
+    const dark = try tmp.dir.realpathAlloc(alloc, "dark");
+    defer alloc.free(dark);
+    const text = try std.fmt.allocPrint(alloc, "theme = light:{s},dark:{s}\nprofile-command = py: python.exe\nprofile-hidden = cmd.exe\n", .{ light, dark });
+    defer alloc.free(text);
+    try tmp.dir.writeFile(.{ .sub_path = "config", .data = text });
+    const path = try tmp.dir.realpathAlloc(alloc, "config");
+    defer alloc.free(path);
+    const none = try tmp.dir.realpathAlloc(alloc, "none.conf");
+    defer alloc.free(none);
+    var original = try testLoad(alloc, none, path);
+    defer original.deinit();
+    var pending = try original.clone(alloc);
+    defer pending.deinit();
+    // Only the order changes; both blocks are written.
+    try pending.@"profile-order".parseCLI(pending._arena.?.allocator(), "user:py");
+    var arena_state: std.heap.ArenaAllocator = .init(alloc);
+    defer arena_state.deinit();
+    const edits = try editsForSave(arena_state.allocator(), alloc, &.{&original}, .{}, &original, &pending, path, &testSamePath);
+    try testing.expectEqual(@as(usize, 2), edits.len);
+    // The app runs dark: the fresh reading in its state hides PowerShell
+    // too. The hidden list the draft left alone raises no conflict.
+    var fresh = try testLoad(alloc, none, path);
+    defer fresh.deinit();
+    var switched = (try fresh.changeConditionalState(.{ .theme = .dark })) orelse return error.TestExpectedSwitch;
+    defer switched.deinit();
+    try testing.expect(!listEql(.hidden, &switched, &original));
+    try testing.expect(try changedUnder(edits, &.of(&original), &pending, &switched, path, &testSamePath) == null);
+    // A draft that changes the hidden list itself is not stopped by it
+    // either: the reading is compared in the light state Settings read the
+    // config in.
+    {
+        var hides = try original.clone(alloc);
+        defer hides.deinit();
+        try hides.@"profile-hidden".parseCLI(hides._arena.?.allocator(), "wsl");
+        const hide_edits = try editsForSave(arena_state.allocator(), alloc, &.{&original}, .{}, &original, &hides, path, &testSamePath);
+        try testing.expectEqual(@as(usize, 2), hide_edits.len);
+        try testing.expect(try changedUnder(hide_edits, &.of(&original), &hides, &switched, path, &testSamePath) == null);
+    }
+    // Another program's edit to the file's lines still stops the save.
+    const changed = try std.fmt.allocPrint(alloc, "theme = light:{s},dark:{s}\nprofile-command = py: python.exe\nprofile-hidden = wsl\n", .{ light, dark });
+    defer alloc.free(changed);
+    try tmp.dir.writeFile(.{ .sub_path = "config", .data = changed });
+    var edited = try testLoad(alloc, none, path);
+    defer edited.deinit();
+    var edited_dark = (try edited.changeConditionalState(.{ .theme = .dark })) orelse return error.TestExpectedSwitch;
+    defer edited_dark.deinit();
+    const stopped = try changedUnder(edits, &.of(&original), &pending, &edited_dark, path, &testSamePath) orelse return error.TestExpectedChange;
+    try testing.expect(stopped.field == .hidden);
+}
+
+test "settings patch: an alias a later layer adds for a profile the save hid hides nothing more" {
+    const alloc = testing.allocator;
+    const profiles = [_]windows_shell.Profile{
+        .{ .kind = .pwsh, .key = "pwsh.exe", .label = "PowerShell", .command = .{ .direct = &.{} } },
+        .{ .kind = .cmd, .key = "cmd.exe", .label = "Command Prompt", .command = .{ .direct = &.{} } },
+    };
+    var hidden: Edit = .{ .field = .hidden, .id = "", .op = .{ .list = &.{"pwsh.exe"} } };
+    const Case = struct { added: []const u8, held_with_profiles: bool };
+    for ([_]Case{
+        // `pwsh` is PowerShell, which the save hid.
+        .{ .added = "pwsh", .held_with_profiles = true },
+        // `cmd` hides another profile: masked.
+        .{ .added = "cmd", .held_with_profiles = false },
+        // A value that names no profile listed is not known to hide nothing.
+        .{ .added = "ssh:elsewhere", .held_with_profiles = false },
+    }) |case| {
+        var reloaded = try Config.default(alloc);
+        defer reloaded.deinit();
+        try reloaded.@"profile-hidden".parseCLI(reloaded._arena.?.allocator(), "pwsh.exe");
+        try reloaded.@"profile-hidden".parseCLI(reloaded._arena.?.allocator(), case.added);
+        // Without the profiles, the spelling decides.
+        hidden.profiles = &.{};
+        try testing.expect(!editHeld(hidden, &reloaded));
+        hidden.profiles = &profiles;
+        try testing.expectEqual(case.held_with_profiles, editHeld(hidden, &reloaded));
+    }
 }
 
 test "settings patch: a variable is matched without case, and never written twice" {
@@ -1046,6 +1888,8 @@ const TestMaps = struct {
                 .name => maps.name.parseCLI(alloc, value) catch {},
                 .folder => maps.folder.parseCLI(alloc, value) catch {},
                 .env => maps.env.parseCLI(alloc, value) catch {},
+                // `fromName` names a per-profile field only.
+                .order, .hidden => unreachable,
             }
         }
         return maps;
@@ -1117,6 +1961,216 @@ fn testLoad(alloc: Allocator, earlier: []const u8, path: []const u8) !Config {
     return cfg;
 }
 
+test "settings patch: an earlier file's lists are the save's to write, though the file it saves to is empty, comments only or not there" {
+    const alloc = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    // A default file read first orders and hides profiles.
+    try tmp.dir.writeFile(.{ .sub_path = "earlier", .data = "profile-order = cmd.exe\nprofile-hidden = pwsh.exe\n" });
+    try tmp.dir.writeFile(.{ .sub_path = "later.conf", .data = "profile-order = git-bash\n" });
+    const earlier = try tmp.dir.realpathAlloc(alloc, "earlier");
+    defer alloc.free(earlier);
+    const later = try tmp.dir.realpathAlloc(alloc, "later.conf");
+    defer alloc.free(later);
+    const dir = try tmp.dir.realpathAlloc(alloc, ".");
+    defer alloc.free(dir);
+    const path = try std.fs.path.join(alloc, &.{ dir, "target" });
+    defer alloc.free(path);
+    const Target = enum { empty, comments, missing };
+    for ([_]Target{ .empty, .comments, .missing }) |target| {
+        tmp.dir.deleteFile("target") catch {};
+        switch (target) {
+            .empty => try tmp.dir.writeFile(.{ .sub_path = "target", .data = "" }),
+            .comments => try tmp.dir.writeFile(.{ .sub_path = "target", .data = "# Settings saves here\n" }),
+            .missing => {},
+        }
+        // As the app reads its default files: an empty or missing one is
+        // skipped, and gives the loader no line.
+        var cfg = try Config.default(alloc);
+        defer cfg.deinit();
+        try cfg.loadFile(alloc, earlier);
+        if (target == .comments) try cfg.loadFile(alloc, path);
+        try cfg.finalize();
+        try testing.expect(cfg.@"profile-order".list.items.len == 1);
+        try testing.expectEqual(@as(?ListsForeign, null), try listsForeign(&cfg, path, &testSamePath));
+        // A file that includes one setting the order still is a later one.
+        var with_later = try Config.default(alloc);
+        defer with_later.deinit();
+        try with_later.loadFile(alloc, earlier);
+        if (target == .comments) try with_later.loadFile(alloc, path);
+        try with_later.@"config-file".parseCLI(with_later._arena.?.allocator(), later);
+        try with_later.loadRecursiveFiles(alloc);
+        try with_later.finalize();
+        try testing.expectEqual(@as(?ListsForeign, .later_file), try listsForeign(&with_later, path, &testSamePath));
+    }
+    // A file `config-file` names: one it names before is earlier, one after
+    // is later, the file Settings saves to empty or not there.
+    try tmp.dir.writeFile(.{ .sub_path = "first.conf", .data = "profile-hidden = pwsh.exe\n" });
+    const first = try tmp.dir.realpathAlloc(alloc, "first.conf");
+    defer alloc.free(first);
+    for ([_]Target{ .empty, .missing }) |target| {
+        tmp.dir.deleteFile("target") catch {};
+        if (target == .empty) try tmp.dir.writeFile(.{ .sub_path = "target", .data = "" });
+        for ([_]struct { after: bool, want: ?ListsForeign }{
+            .{ .after = false, .want = null },
+            .{ .after = true, .want = .later_file },
+        }) |case| {
+            var cfg = try Config.default(alloc);
+            defer cfg.deinit();
+            const a = cfg._arena.?.allocator();
+            const optional_target = try std.fmt.allocPrint(alloc, "?{s}", .{path});
+            defer alloc.free(optional_target);
+            if (case.after) {
+                try cfg.@"config-file".parseCLI(a, optional_target);
+                try cfg.@"config-file".parseCLI(a, first);
+            } else {
+                try cfg.@"config-file".parseCLI(a, first);
+                try cfg.@"config-file".parseCLI(a, optional_target);
+            }
+            try cfg.loadRecursiveFiles(alloc);
+            try cfg.finalize();
+            try testing.expectEqual(case.want, try listsForeign(&cfg, path, &testSamePath));
+        }
+    }
+}
+
+test "settings patch: the load order is unknown, and the lists another layer's, when a file clears config-file" {
+    const alloc = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try tmp.dir.realpathAlloc(alloc, ".");
+    defer alloc.free(dir);
+    const path = try std.fs.path.join(alloc, &.{ dir, "target" });
+    defer alloc.free(path);
+    // (Terra) The file Settings saves to includes one that orders the
+    // profiles and then clears `config-file`. That file still loads after
+    // the target, but it is gone from the list that places it, and would
+    // pass for a default file read before. The order is unknown: refused.
+    try tmp.dir.writeFile(.{ .sub_path = "later.conf", .data = "profile-order =\nprofile-order = cmd.exe\nconfig-file =\n" });
+    const later = try tmp.dir.realpathAlloc(alloc, "later.conf");
+    defer alloc.free(later);
+    const text = try std.fmt.allocPrint(alloc, "profile-command = py: python.exe\nconfig-file = {s}\n", .{later});
+    defer alloc.free(text);
+    try tmp.dir.writeFile(.{ .sub_path = "target", .data = text });
+    {
+        var cfg = try Config.default(alloc);
+        defer cfg.deinit();
+        try cfg.loadFile(alloc, path);
+        try cfg.loadRecursiveFiles(alloc);
+        try cfg.finalize();
+        // Its lines are in the replay; its path is not in the list.
+        try testing.expectEqual(@as(usize, 0), cfg.@"config-file".value.items.len);
+        try testing.expectEqual(@as(usize, 1), cfg.@"profile-order".list.items.len);
+        try testing.expectEqual(@as(?ListsForeign, .unordered), try listsForeign(&cfg, path, &testSamePath));
+    }
+    // A clear while no other file sets either list leaves the order moot.
+    try tmp.dir.writeFile(.{ .sub_path = "later.conf", .data = "font-size = 13\nconfig-file =\n" });
+    {
+        var cfg = try Config.default(alloc);
+        defer cfg.deinit();
+        try cfg.loadFile(alloc, path);
+        try cfg.loadRecursiveFiles(alloc);
+        try cfg.finalize();
+        try testing.expectEqual(@as(?ListsForeign, null), try listsForeign(&cfg, path, &testSamePath));
+    }
+    // A file's quotes come off before the value is parsed: `config-file =
+    // ""` clears the list too. `?""` (an optional path, empty once its quotes
+    // are off) names no file and clears nothing, so the file stays placed.
+    for ([_]struct { line: []const u8, kept: usize, want: ListsForeign }{
+        .{ .line = "config-file = \"\"\n", .kept = 0, .want = .unordered },
+        .{ .line = "config-file = ?\"\"\n", .kept = 1, .want = .later_file },
+    }) |case| {
+        const data = try std.fmt.allocPrint(alloc, "profile-order = cmd.exe\n{s}", .{case.line});
+        defer alloc.free(data);
+        try tmp.dir.writeFile(.{ .sub_path = "later.conf", .data = data });
+        var cfg = try Config.default(alloc);
+        defer cfg.deinit();
+        try cfg.loadFile(alloc, path);
+        try cfg.loadRecursiveFiles(alloc);
+        try cfg.finalize();
+        try testing.expectEqual(case.kept, cfg.@"config-file".value.items.len);
+        try testing.expectEqual(@as(?ListsForeign, case.want), try listsForeign(&cfg, path, &testSamePath));
+    }
+}
+
+test "settings patch: the lists are another layer's when the command line, a later config file or one theme sets them" {
+    const alloc = testing.allocator;
+    const cli_args = @import("../../cli/args.zig");
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    // A file read first orders the profiles: the save's own to write over.
+    try tmp.dir.writeFile(.{ .sub_path = "earlier", .data = "profile-order = cmd.exe\n" });
+    try tmp.dir.writeFile(.{ .sub_path = "later.conf", .data = "profile-order = git-bash\n" });
+    try tmp.dir.writeFile(.{ .sub_path = "light", .data = "# light\n" });
+    try tmp.dir.writeFile(.{ .sub_path = "dark", .data = "profile-hidden = pwsh.exe\n" });
+    try tmp.dir.writeFile(.{ .sub_path = "both", .data = "profile-hidden = pwsh.exe\n" });
+    var names: [5][]u8 = undefined;
+    for ([_][]const u8{ "earlier", "later.conf", "light", "dark", "both" }, &names) |name, *full| full.* = try tmp.dir.realpathAlloc(alloc, name);
+    defer for (names) |full| alloc.free(full);
+    const later_line = try std.fmt.allocPrint(alloc, "config-file = {s}\n", .{names[1]});
+    defer alloc.free(later_line);
+    const dark_line = try std.fmt.allocPrint(alloc, "theme = light:{s},dark:{s}\n", .{ names[2], names[3] });
+    defer alloc.free(dark_line);
+    const both_line = try std.fmt.allocPrint(alloc, "theme = light:{s},dark:{s}\n", .{ names[4], names[4] });
+    defer alloc.free(both_line);
+    const Case = struct { lines: []const u8, cli: []const []const u8 = &.{}, want: ?ListsForeign };
+    for ([_]Case{
+        // The file and the layers before it alone.
+        .{ .lines = "", .want = null },
+        // The command line clears the hidden list.
+        .{ .lines = "", .cli = &.{"--profile-hidden="}, .want = .command_line },
+        // The command line sets something else: no matter.
+        .{ .lines = "", .cli = &.{"--font-size=13"}, .want = null },
+        // A file the config file includes orders the profiles.
+        .{ .lines = later_line, .want = .later_file },
+        // The dark theme hides a profile the light one does not.
+        .{ .lines = dark_line, .want = .theme },
+        // Both themes hide it: the same in both states, an earlier layer.
+        .{ .lines = both_line, .want = null },
+    }) |case| {
+        const text = try std.mem.concat(alloc, u8, &.{ "profile-command = py: python.exe\nprofile-hidden = cmd.exe\n", case.lines });
+        defer alloc.free(text);
+        try tmp.dir.writeFile(.{ .sub_path = "config", .data = text });
+        const path = try tmp.dir.realpathAlloc(alloc, "config");
+        defer alloc.free(path);
+        // As the app loads them: the default files, the command line, the
+        // files they include, then the theme.
+        var cfg = try Config.default(alloc);
+        defer cfg.deinit();
+        try cfg.loadFile(alloc, names[0]);
+        try cfg.loadFile(alloc, path);
+        var args: cli_args.ArgsIterator(cli_args.SliceIterator) = .{ .iterator = cli_args.sliceIterator(case.cli) };
+        try cfg.loadIter(alloc, &args);
+        try cfg.loadRecursiveFiles(alloc);
+        try cfg.finalize();
+        try testing.expectEqual(case.want, try listsForeign(&cfg, path, &testSamePath));
+    }
+    // The file a `--config-file` names, which the loader reads after the
+    // command line: a command-line list is still this launch's alone, and
+    // the file does not set the order itself.
+    try tmp.dir.writeFile(.{ .sub_path = "config", .data = "profile-command = py: python.exe\nprofile-hidden = cmd.exe\n" });
+    const path = try tmp.dir.realpathAlloc(alloc, "config");
+    defer alloc.free(path);
+    const config_arg = try std.fmt.allocPrint(alloc, "--config-file={s}", .{path});
+    defer alloc.free(config_arg);
+    const Cli = struct { args: []const []const u8, want: ?ListsForeign };
+    for ([_]Cli{
+        .{ .args = &.{ "--profile-order=cmd.exe", config_arg }, .want = .command_line },
+        .{ .args = &.{ config_arg, "--profile-hidden=" }, .want = .command_line },
+        // `--config-file` itself sets no list.
+        .{ .args = &.{config_arg}, .want = null },
+    }) |case| {
+        var cfg = try Config.default(alloc);
+        defer cfg.deinit();
+        try cfg.loadFile(alloc, names[0]);
+        var args: cli_args.ArgsIterator(cli_args.SliceIterator) = .{ .iterator = cli_args.sliceIterator(case.args) };
+        try cfg.loadIter(alloc, &args);
+        try cfg.loadRecursiveFiles(alloc);
+        try cfg.finalize();
+        try testing.expectEqual(case.want, try listsForeign(&cfg, path, &testSamePath));
+    }
+}
+
 fn testSamePath(a: []const u8, b: []const u8) bool {
     return std.ascii.eqlIgnoreCase(a, b);
 }
@@ -1180,7 +2234,7 @@ test "settings patch: profileEdits writes what the editor staged, and the loader
     try expectSameText("Team", reloaded.@"profile-name".get("team").?);
     var masked: std.Io.Writer.Allocating = .init(alloc);
     defer masked.deinit();
-    try testing.expect(try writeMasked(&masked.writer, edits, &reloaded, false));
+    try testing.expect(try writeMasked(&masked.writer, edits, &reloaded, false) == .masked);
     try expectSameText("profile-name team", masked.written());
 
     // A save works out the same edits, and none when nothing changed.
@@ -1516,16 +2570,16 @@ test "settings patch: a profile's variables compare without case, and a removal 
     try disk.@"profile-env".parseCLI(disk._arena.?.allocator(), "py:");
     try disk.@"profile-env".parseCLI(disk._arena.?.allocator(), "py: PATH=C:\\bin");
     const whole: Edit = .{ .field = .env, .id = "py", .op = .delete };
-    try testing.expect(changedUnder(&.{whole}, &original, &pending, &disk) == null);
+    try testing.expect(try changedUnder(&.{whole}, &.of(&original), &pending, &disk, "", &testSamePath) == null);
     // A value that did change is one.
     var changed = try original.clone(alloc);
     defer changed.deinit();
     try changed.@"profile-env".parseCLI(changed._arena.?.allocator(), "py:");
     try changed.@"profile-env".parseCLI(changed._arena.?.allocator(), "py: PATH=D:\\bin");
-    try testing.expect(changedUnder(&.{whole}, &original, &pending, &changed) != null);
+    try testing.expect(try changedUnder(&.{whole}, &.of(&original), &pending, &changed, "", &testSamePath) != null);
     // The same field, deleted only because the profile is removed: covered.
     const with_profile: Edit = .{ .field = .env, .id = "py", .op = .delete, .with_profile = true };
-    try testing.expect(changedUnder(&.{with_profile}, &original, &pending, &changed) == null);
+    try testing.expect(try changedUnder(&.{with_profile}, &.of(&original), &pending, &changed, "", &testSamePath) == null);
 }
 
 test "settings patch: a config file that did not decode is still named after the light/dark switch, and a theme alone is asked of the switch" {
@@ -1673,7 +2727,7 @@ test "settings patch: a removal is decided in the light/dark state the app appli
     var masked: std.Io.Writer.Allocating = .init(alloc);
     defer masked.deinit();
     const deletion = [_]Edit{.{ .field = .command, .id = "py", .op = .delete }};
-    try testing.expect(try writeMasked(&masked.writer, &deletion, &dark, false));
+    try testing.expect(try writeMasked(&masked.writer, &deletion, &dark, false) == .masked);
     try expectSameText("profile-command py", masked.written());
 }
 
@@ -1919,12 +2973,12 @@ test "settings patch: a masked field is named by key, id and variable, never by 
     var masked: std.Io.Writer.Allocating = .init(alloc);
     defer masked.deinit();
     try masked.writer.writeAll("font-size");
-    try testing.expect(try writeMasked(&masked.writer, &edits, &reloaded, true));
+    try testing.expect(try writeMasked(&masked.writer, &edits, &reloaded, true) == .masked);
     try testing.expect(std.mem.indexOf(u8, masked.written(), "secret") == null);
     try expectSameText("font-size, profile-env team x, profile-command gone", masked.written());
 
     var none: std.Io.Writer.Allocating = .init(alloc);
     defer none.deinit();
-    try testing.expect(!try writeMasked(&none.writer, edits[1..2], &reloaded, false));
+    try testing.expect(try writeMasked(&none.writer, edits[1..2], &reloaded, false) == .held);
     try expectSameText("", none.written());
 }
