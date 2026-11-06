@@ -196,7 +196,8 @@ keybind = ctrl+shift+r=reload_config
 ## Shell
 
 noctty detects PowerShell, cmd, Git Bash, and WSL distributions and lists them
-in the profile picker. Without a `command`, a new tab runs `pwsh.exe` (PowerShell
+in the command palette (`Ctrl+Shift+P`, then `~` and a name opens one in a new
+tab) and in the [▾] menu next to the new-tab button. Without a `command`, a new tab runs `pwsh.exe` (PowerShell
 7) when it is on `PATH`, otherwise Windows PowerShell, otherwise Command Prompt.
 `noctty --safe-mode` always starts `cmd.exe /D`, which loads no PowerShell
 profile and skips cmd's `AutoRun` command. To pin a shell as the default:
