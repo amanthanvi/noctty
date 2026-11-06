@@ -488,6 +488,9 @@ that govern each symbol you change, or that none does.
   `test/windows/renderer/Invoke-RendererParity.ps1`, `bench-windows.ps1`'s
   `ForceForeground` and render-trace snapshots, transient captures (a banner,
   the overlay scrollbar) in the visible check `Invoke-VisibleD3D11Check.ps1`,
+  the measure-AUMID builds an A/B compares
+  (`Invoke-InteractiveWin11MeasureBuild` in
+  `scripts/interactive-win11-measure-lib.ps1`),
   the PKG-37, LAT-01 and LAT-02 measurement harnesses on the
   `origin/*-measurement-harness` branches), CI test steps (the raw
   `zig test src/apprt/win32_compositor_native.zig` step, which confines
