@@ -259,12 +259,16 @@ above:
   window; middle-click opens it in a split. The choice is the last profile you
   picked, else `default-profile`, else the automatic shell.
 - Bind `launch_layout:<name>` to a key to open a saved
-  [named layout](#named-layouts) in a new window. A layout records each pane's
-  profile, so a layout saved from a window with one tab running that profile
-  (`save_layout:<name>`) opens it on one key press, without elevation. This
-  works for profiles that restore, such as a shell or a WSL distribution. A
-  layout never reconnects a detected `ssh:` profile: it is saved without its
-  profile, and the pane comes back as your default shell.
+  [named layout](#named-layouts) in a new window. A layout records the profile
+  each pane was opened with, not the command running in it (typing `wsl` in a
+  PowerShell tab saves PowerShell). Open the tab from the profile (palette `~`
+  or the [▾] menu), then `save_layout:<name>` from a window with that one tab;
+  the layout then opens it on one key press, without elevation. This works for
+  profiles that restore, such as a shell or a WSL distribution. A layout never
+  reconnects a detected `ssh:` profile: it is saved without its profile, and
+  the pane comes back as whatever a new tab opens (your `command`, else
+  `default-profile` unless that is SSH, else the automatic shell). A profile
+  you define that runs `ssh.exe` is restored like any other.
 - A profile entry in the taskbar jump list launches noctty with that profile.
   `new_window_elevated:<profile-key>` bound to a key opens the profile in an
   elevated window, with a UAC prompt; use it only when you want that. See

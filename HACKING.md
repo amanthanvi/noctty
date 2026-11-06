@@ -112,15 +112,20 @@ only its own statement.
 Differences from an installed copy:
 
 - A source build is not portable, so it behaves like an installed copy for
-  per-user state. It shares `%LOCALAPPDATA%\noctty` (config, session state;
-  `XDG_CONFIG_HOME`, `XDG_STATE_HOME` and `XDG_CACHE_HOME` override it when
-  set) with an installed noctty, rewrites the
+  per-user state. It shares `%LOCALAPPDATA%\noctty` with an installed noctty.
+  Only some of that follows an XDG variable: `config.ghostty` follows
+  `XDG_CONFIG_HOME`, and crash dumps and `update-state.json` follow
+  `XDG_STATE_HOME`. `session-state.json`, `layouts\`, `palette-mru.txt`,
+  `startup-attempts.json`, `jump-list-recents.json` and `shell-integration\`
+  stay under `%LOCALAPPDATA%\noctty` whatever the XDG variables say, so they
+  cannot be separated that way. It also rewrites the
   `AppUserModelId\io.github.amanthanvi.noctty` registration at every start so
   that toasts take their icon from its `noctty.ico`, and replaces the taskbar
   jump list with entries that start its own exe. If you also run an installed
   copy, add an empty `noctty.portable` file beside the exe (`portable.txt` or
-  a `config.ghostty` there also count): state then lives beside the exe and the
-  installed copy's registration and jump list stay alone. See
+  a `config.ghostty` there also count). Portable mode is what separates all of
+  it: state then lives beside the exe, and the installed copy's registration
+  and jump list stay alone. See
   [App identity](docs/windows.md#app-identity).
 - This shortcut has no AppUserModelID. The installer sets
   `io.github.amanthanvi.noctty` on its shortcuts, and `WScript.Shell` has no

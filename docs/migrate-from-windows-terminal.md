@@ -137,10 +137,13 @@ that will trip you up, and opening a profile by number is the one with no
 equivalent. The closest ones: set `default-profile` so `Ctrl+Shift+T` opens
 your most-used shell (leave `command` unset, because it outranks
 `default-profile`), or save a
-window that runs one shell as a layout and bind `launch_layout:<name>` to a
-key, which opens it in a new window (this works for a shell or a WSL
-distribution; a layout does not reconnect an SSH profile). Right-clicking the new-tab button opens
-the current profile choice in a new window. A
+window whose one tab was opened from that profile (palette `~` or the [▾]
+menu; a layout stores the profile, not a command you typed, so `wsl` typed in a
+PowerShell tab saves PowerShell) with `save_layout:<name>` and bind
+`launch_layout:<name>` to a key, which opens it in a new window. That works
+for a shell or a WSL distribution; a layout does not reconnect a detected SSH
+profile (a profile you define that runs `ssh.exe` restores). Right-clicking
+the new-tab button opens the current profile choice in a new window. A
 `keybind = ...=text:wsl.exe -d Ubuntu\r` line types the command into the
 program that has focus: at a shell prompt it runs a nested shell inside the
 current tab instead of opening a new one, and in an editor or other program it
