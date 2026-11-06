@@ -86,6 +86,7 @@ gate function named in the source is missing from this page.
 | DWM attributes 20 and 19, 34 to 36 (`win32_theme.zig`)                     | Dark caption tries 20, then 19; border, caption and text colour need build 22000                                                                             | W10-11, W10-12           |
 | Titlebar icon font chain (`createTitlebarIconFont`, `win32/host.zig`)      | Segoe Fluent Icons, then Segoe MDL2 Assets, by glyph table; else `win32_icons`                                                                               | W10-16                   |
 | Chrome and Settings fonts (`createChromeFont`, `recreateUiFont`)           | Segoe UI Variable Text where present, else Segoe UI                                                                                                          | W10-15                   |
+| `paintsOwnSpins` (`win32_settings.zig`)                                    | Below build 22000 Settings paints its own up-downs in the dark theme: the theme has no dark `Spin` class                                                     | W10-29                   |
 | `GUID_ENERGY_SAVER_STATUS` (`win32_power.zig`)                             | Windows 11 Energy Saver; the registration may fail elsewhere and is not a warning                                                                            | W10-26                   |
 | ConPTY source (`pty.zig`)                                                  | Bundled `conpty.dll` and `OpenConsole.exe`, else the in-box conhost                                                                                          | W10-19, W10-02           |
 | Default-terminal delegation (`win32_terminal_handoff.zig`)                 | Needs the console-delegation setting the OS provides                                                                                                         | W10-22                   |
@@ -412,6 +413,21 @@ nothing opens. Nothing opening for the existing file is a finding: the opener
 checks the file with `OBJ_DONT_REPARSE`, and refuses the link if that open
 fails.
 
+### Settings
+
+**W10-29 Settings up-downs in the dark theme.** Gate: `paintsOwnSpins`
+(`win32_settings.zig`). Set `window-theme = dark`, open Settings (`Ctrl+,`) and
+look at the up-down beside Font size (Appearance) and beside the scrollback
+limit (Terminal), at 100% and 150%. Expected: two dark buttons framed like the
+field beside them, with light arrows; the button under the pointer lightens,
+a pressed one takes the selection colour, and a click steps the field. Then
+`window-theme = light`: the stock light up-down. A light up-down in the dark
+theme is a finding. `SetWindowTheme` with `DarkMode_Explorer` darkens the
+up-down only where the theme has a dark `Spin` class, which Windows 11 has and
+Windows 10 lacks (inferred from the Windows 10 branches job, where the stock
+up-down came out `#E9E9E9`), so below build 22000 Settings paints it itself.
+That job checks the pixels on Server 2022 only.
+
 ## Results
 
 Copy this table into the release notes' validation section or the release PR.
@@ -446,6 +462,7 @@ Copy this table into the release notes' validation section or the release PR.
 | W10-26            |                          |       |                                              |
 | W10-27            |                          |       |                                              |
 | W10-28            |                          |       |                                              |
+| W10-29            |                          |       |                                              |
 | Machine and image |                          |       | `winver`, VM type, display scaling           |
 | Artifact          |                          |       | source SHA, version, SHA-256 of ZIP or setup |
 | Date and tester   |                          |       |                                              |
