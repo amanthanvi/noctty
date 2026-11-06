@@ -2758,7 +2758,7 @@ test "win32 a config change that toggles decorations and changes opacity applies
     }.body);
 }
 
-test "win32 a theme change that flips the frame mode asserts blur-behind after the frame write" {
+test "win32 a theme change or a reload that flips the frame mode asserts blur-behind after the frame write" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
     try runOnHiddenDesktop(struct {
         /// `test_blur_behind_asserts` when the window's frame last changed.
@@ -2788,20 +2788,122 @@ test "win32 a theme change that flips the frame mode asserts blur-behind after t
             previous = @ptrFromInt(@as(usize, @bitCast(sys.SetWindowLongPtrW(hwnd, c.GWLP_WNDPROC, @bitCast(@intFromPtr(&proc))))));
 
             // On Windows 11 the tab strip shown is the integrated titlebar and
-            // hidden the stock frame: each way, the frame changes, and
-            // blur-behind is asserted after it.
+            // hidden the stock frame: each way, the frame changes, and the
+            // window applies its opacity once, after it. A theme rebuild that
+            // refreshes it does so itself; a reload's leaves it to the
+            // `applyConfig` that follows.
             app.os_build = c.OS_BUILD_WIN11_21H2;
-            for ([_]configpkg.Config.WindowShowTabBar{ .auto, .never }) |tabs| {
-                app.config.@"window-show-tab-bar" = tabs;
-                const integrated = app.use_integrated_titlebar;
-                asserts_at_frame = null;
-                app.reconfigureTheme();
-                try std.testing.expect(app.use_integrated_titlebar != integrated);
-                const at_frame = asserts_at_frame orelse return error.TestFrameNeverChanged;
-                try std.testing.expect(test_blur_behind_asserts > at_frame);
-                try std.testing.expect(!testHostIsLayered(hwnd));
-                try std.testing.expectEqual(@as(?u8, 128), testBackgroundAlpha(hwnd));
+            for ([_]bool{ false, true }) |reload| {
+                for ([_]configpkg.Config.WindowShowTabBar{ .auto, .never }) |tabs| {
+                    const integrated = app.use_integrated_titlebar;
+                    const applies = test_background_opacity_applies;
+                    asserts_at_frame = null;
+                    if (reload) {
+                        var config = try app.config.clone(std.testing.allocator);
+                        defer config.deinit();
+                        config.@"window-show-tab-bar" = tabs;
+                        try std.testing.expect(try app.performAction(.app, .config_change, .{ .config = &config }));
+                    } else {
+                        app.config.@"window-show-tab-bar" = tabs;
+                        app.reconfigureTheme(.refresh);
+                    }
+                    try std.testing.expect(app.use_integrated_titlebar != integrated);
+                    const at_frame = asserts_at_frame orelse return error.TestFrameNeverChanged;
+                    try std.testing.expect(test_blur_behind_asserts > at_frame);
+                    try std.testing.expectEqual(applies + 1, test_background_opacity_applies);
+                    try std.testing.expect(!testHostIsLayered(hwnd));
+                    try std.testing.expectEqual(@as(?u8, 128), testBackgroundAlpha(hwnd));
+                }
             }
+        }
+    }.body);
+}
+
+test "win32 the app's config change applies each window's opacity once, at its new value, and a system theme change shows it again" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    try runOnHiddenDesktop(struct {
+        fn body() !void {
+            var fixture: WindowStartTestApp = .{};
+            try fixture.init();
+            defer fixture.deinit();
+            const app = &fixture.app;
+            test_pane_renderer = .opengl;
+            defer test_pane_renderer = null;
+
+            app.config.@"background-opacity" = 0.5;
+            try app.createWindow(default_title);
+            const hwnd = fixture.newest().host.?.hwnd.?;
+            try std.testing.expectEqual(@as(?u8, 128), testBackgroundAlpha(hwnd));
+
+            // The app's half of a reload (each pane's own config change
+            // applies the opacity too, at the new value): its theme rebuild
+            // leaves the opacity to `applyConfig`, which applies it once, so
+            // blur-behind is asserted only where the window ends translucent,
+            // never at the opacity it leaves.
+            for ([_]struct { opacity: f64, shown: ?u8 }{
+                .{ .opacity = 1.0, .shown = null },
+                .{ .opacity = 0.5, .shown = 128 },
+            }) |step| {
+                var config = try app.config.clone(std.testing.allocator);
+                defer config.deinit();
+                config.@"background-opacity" = step.opacity;
+                const applies = test_background_opacity_applies;
+                const asserts = test_blur_behind_asserts;
+                try std.testing.expect(try app.performAction(.app, .config_change, .{ .config = &config }));
+                try std.testing.expectEqual(applies + 1, test_background_opacity_applies);
+                try std.testing.expectEqual(step.opacity, test_background_opacity_applied);
+                try std.testing.expectEqual(asserts + @intFromBool(step.shown != null), test_blur_behind_asserts);
+                try std.testing.expectEqual(step.shown, testBackgroundAlpha(hwnd));
+            }
+
+            // A system theme change, where High Contrast arrives, applies
+            // nothing after it: it shows the opacity again itself, once.
+            app.system_theme_refresh = .{};
+            const applies = test_background_opacity_applies;
+            const asserts = test_blur_behind_asserts;
+            app.reconfigureSystemTheme();
+            try std.testing.expectEqual(applies + 1, test_background_opacity_applies);
+            try std.testing.expectEqual(asserts + 1, test_blur_behind_asserts);
+            try std.testing.expectEqual(@as(?u8, 128), testBackgroundAlpha(hwnd));
+        }
+    }.body);
+}
+
+test "win32 a Settings preview of a theme and an opacity that ends applies the opacity once, at the saved value" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    try runOnHiddenDesktop(struct {
+        fn body() !void {
+            var fixture: WindowStartTestApp = .{};
+            try fixture.init();
+            defer fixture.deinit();
+            const app = &fixture.app;
+            test_pane_renderer = .opengl;
+            defer test_pane_renderer = null;
+
+            app.config.@"window-theme" = .dark;
+            try app.createWindow(default_title);
+            const hwnd = fixture.newest().host.?.hwnd.?;
+            try std.testing.expectEqual(@as(?u8, null), testBackgroundAlpha(hwnd));
+
+            // Settings previews a translucent opacity and another theme.
+            try std.testing.expect(app.previewSetting(.{ .background_opacity = 0.5 }));
+            app.refreshSettingsPreview(.opacity);
+            try std.testing.expect(app.previewSetting(.{ .window_theme = .light }));
+            app.refreshSettingsPreview(.theme);
+            try std.testing.expectEqual(@as(?u8, 128), testBackgroundAlpha(hwnd));
+
+            // A save without a reload (safe mode) ends both together, at the
+            // saved, opaque config: the window applies its opacity once, and
+            // never asserts blur-behind at the previewed one on the way.
+            const applies = test_background_opacity_applies;
+            const asserts = test_blur_behind_asserts;
+            app.endSettingsPreview();
+            try std.testing.expect(app.settings_preview == null);
+            try std.testing.expectEqual(applies + 1, test_background_opacity_applies);
+            try std.testing.expectEqual(@as(f64, 1.0), test_background_opacity_applied);
+            try std.testing.expectEqual(asserts, test_blur_behind_asserts);
+            try std.testing.expect(!testHostIsLayered(hwnd));
+            try std.testing.expectEqual(@as(?u8, null), testBackgroundAlpha(hwnd));
         }
     }.body);
 }

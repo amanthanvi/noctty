@@ -2446,7 +2446,7 @@ pub const Host = struct {
         self.app.restoreSettingsPreview();
         self.app.config_revision +%= 1;
         if (self.app.config_revision == 0) self.app.config_revision = 1;
-        self.app.reconfigureTheme();
+        self.app.reconfigureTheme(.caller_applies);
         for (self.app.registry.windows.items) |surface| {
             surface.core().updateConfig(&self.app.config) catch |err| {
                 log.warn("palette theme core apply failed err={}", .{err});

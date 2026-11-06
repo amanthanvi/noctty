@@ -4190,7 +4190,7 @@ pub const App = struct {
                             self.jump_list.?.requestProfileDiscovery();
                         }
                         self.scheduleGlobalHotkeySync();
-                        self.reconfigureTheme();
+                        self.reconfigureTheme(.caller_applies);
                         // Every value is stored before the first step that
                         // can fail, and the windows' decorations and opacity
                         // go before the panes' scrollbar refresh, as each
@@ -5991,10 +5991,15 @@ pub const App = struct {
             } else false;
             if (!missing_resources) return;
         }
-        self.reconfigureTheme();
+        self.reconfigureTheme(.refresh);
     }
 
-    pub fn reconfigureTheme(self: *App) void {
+    /// Rebuilds every window's chrome, frame and DWM attributes for the
+    /// theme and `window-show-tab-bar`; then, after the frame write, `opacity`:
+    /// - `refresh`: each window shows its opacity again;
+    /// - `caller_applies`: none does; the caller's `window_state.applyConfig`
+    ///   applies it next, at the value it will show.
+    pub fn reconfigureTheme(self: *App, opacity: enum { refresh, caller_applies }) void {
         const previous_integrated_titlebar = self.use_integrated_titlebar;
         self.use_integrated_titlebar = shouldUseIntegratedTitlebar(
             self.os_build,
@@ -6041,12 +6046,8 @@ pub const App = struct {
                 // High Contrast shows every window opaque, and a window that
                 // had blur-behind asserts it again across the theme change,
                 // after the frame write above, as after every style write
-                // that changes the frame. On a reload this runs before
-                // `window_state.applyConfig` stores the new opacity, so the
-                // window applies its old one first and the new one right
-                // after: harmless, the first changes nothing it had not
-                // already.
-                window_state.refreshBackgroundOpacity(host);
+                // that changes the frame.
+                if (opacity == .refresh) window_state.refreshBackgroundOpacity(host);
                 if (chrome_layout_changed) {
                     runUiActionOrLog("theme update layout failed", host.layout());
                 }
@@ -6110,7 +6111,7 @@ pub const App = struct {
     pub fn refreshSettingsPreview(self: *App, effect: win32_settings.PreviewEffect) void {
         switch (effect) {
             .none => {},
-            .theme => self.reconfigureTheme(),
+            .theme => self.reconfigureTheme(.refresh),
             .opacity => {
                 for (self.registry.windows.items) |surface| {
                     surface.applyRuntimeConfig(&self.config) catch |err| {
@@ -6166,8 +6167,16 @@ pub const App = struct {
             if (effect == .none) continue;
             if (!std.meta.eql(win32_settings.settingValue(&previous, field), win32_settings.settingValue(&self.config, field))) changed.insert(effect);
         }
+        // In declaration order, the theme before the opacity. An opacity
+        // that ends with the theme is applied by the opacity's own
+        // `applyConfig`, for every window, so the theme does not show the
+        // previewed opacity first.
         var effects = changed.iterator();
-        while (effects.next()) |effect| self.refreshSettingsPreview(effect);
+        while (effects.next()) |effect| {
+            if (effect == .theme and changed.contains(.opacity)) {
+                self.reconfigureTheme(.caller_applies);
+            } else self.refreshSettingsPreview(effect);
+        }
     }
 
     /// Where the picker starts when nothing was chosen or hinted: the profile
