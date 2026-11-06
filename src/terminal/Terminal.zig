@@ -14723,9 +14723,10 @@ test "Terminal: resize through the zoom-out grids of a 4K client and back" {
 
     // Styled scrollback: true-colour and 256-colour SGR, bold underline, a
     // hyperlink, a wide character, a combining mark, and every seventh line
-    // wider than the pane so that it wraps.
+    // wider than the pane so that it wraps. Sixty lines fill 78 rows, so the
+    // first 34 are history before the alternate screen starts.
     var line_buf: [512]u8 = undefined;
-    for (0..12) |i| {
+    for (0..60) |i| {
         const tail = if (i % 7 == 0) "x" ** 300 else "";
         const line = try std.fmt.bufPrint(
             &line_buf,
@@ -14735,6 +14736,11 @@ test "Terminal: resize through the zoom-out grids of a 4K client and back" {
         );
         s.nextSlice(line);
     }
+
+    // The first line, styled and wrapped, is the top of the history.
+    const primary = t.screens.get(.primary).?;
+    try testing.expect(primary.pages.total_rows > primary.pages.rows);
+    try testZoomExpectFirstLineInHistory(primary);
 
     s.nextSlice("\x1b[?1049h\x1b[H\x1b[2J");
     try testZoomTmuxFrame(&t, &s);
@@ -14757,6 +14763,19 @@ test "Terminal: resize through the zoom-out grids of a 4K client and back" {
     s.nextSlice("\x1b[r\x1b[?1049l");
     testZoomIntegrity(&t);
     try testing.expect(t.screens.active_key == .primary);
+}
+
+/// The top row of `screen`'s history is the first scrollback line: `0000`
+/// in its colours, soft-wrapped onto the next row.
+fn testZoomExpectFirstLineInHistory(screen: *Screen) !void {
+    const top = screen.pages.pin(.{ .history = .{} }) orelse return error.NoHistory;
+    const rc = top.rowAndCell();
+    try testing.expectEqual(@as(u21, '0'), rc.cell.codepoint());
+    try testing.expect(rc.cell.hasStyling());
+    try testing.expect(rc.row.wrap);
+    const text = try screen.dumpStringAlloc(testing.allocator, .{ .history = .{} });
+    defer testing.allocator.free(text);
+    try testing.expect(std.mem.startsWith(u8, text, "0000 \u{4E16}\u{754C} e\u{301} link xxx"));
 }
 
 fn testZoomResize(t: *Terminal, s: *Stream, grid: [2]size.CellCountInt) !void {
