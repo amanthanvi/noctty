@@ -14,8 +14,6 @@ const RECT = runtime.RECT;
 const ThemeColors = runtime.ThemeColors;
 const TitlebarButtonRole = runtime.TitlebarButtonRole;
 const TitlebarGlyphKind = runtime.TitlebarGlyphKind;
-const buildInspectorPanelHintText = runtime.buildInspectorPanelHintText;
-const buildInspectorPanelTitleText = runtime.buildInspectorPanelTitleText;
 const c = runtime.c;
 const centeredRect = runtime.centeredRect;
 const child_window = @import("child_window.zig");
@@ -54,6 +52,7 @@ const searchBarToolbarVisual = search_controls.searchBarToolbarVisual;
 const search_controls = @import("search_controls.zig");
 const std = runtime.std;
 const sys = runtime.sys;
+const tab_label = @import("tab_label.zig");
 const textOutWz = runtime.textOutWz;
 const themeSurface = runtime.themeSurface;
 const titlebarButtonVisual = runtime.titlebarButtonVisual;
@@ -921,3 +920,88 @@ pub const HostScene = struct {
         self.chrome_repaint_dirty = false;
     }
 };
+
+fn buildInspectorPanelTitleText(
+    alloc: Allocator,
+    host: tab_label.TabStatus,
+    pane_count: usize,
+    zoomed: bool,
+) ![]u8 {
+    if (zoomed and pane_count > 1) {
+        return try std.fmt.allocPrint(
+            alloc,
+            "Inspector  •  tab {d}/{d}  •  {d} panes  •  zoomed",
+            .{ host.index + 1, host.total, pane_count },
+        );
+    }
+    if (pane_count > 1) {
+        return try std.fmt.allocPrint(
+            alloc,
+            "Inspector  •  tab {d}/{d}  •  {d} panes",
+            .{ host.index + 1, host.total, pane_count },
+        );
+    }
+    if (zoomed) {
+        return try std.fmt.allocPrint(
+            alloc,
+            "Inspector  •  tab {d}/{d}  •  zoomed",
+            .{ host.index + 1, host.total },
+        );
+    }
+    return try std.fmt.allocPrint(
+        alloc,
+        "Inspector  •  tab {d}/{d}",
+        .{ host.index + 1, host.total },
+    );
+}
+
+fn buildInspectorPanelHintText(
+    alloc: Allocator,
+    pane_count: usize,
+    zoomed: bool,
+) ![]u8 {
+    if (zoomed) {
+        return try alloc.dupe(
+            u8,
+            "Core inspector is live for the zoomed pane. Toggle Inspect to return to terminal-only view.",
+        );
+    }
+    if (pane_count > 1) {
+        return try std.fmt.allocPrint(
+            alloc,
+            "Core inspector is live across {d} panes in this tab. Toggle Inspect to return to terminal-only view.",
+            .{pane_count},
+        );
+    }
+    return try alloc.dupe(u8, "Core inspector is live for this tab. Toggle Inspect to return to terminal-only view.");
+}
+
+test "win32 buildInspectorPanelTitleText reflects host inspector context" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const multi = try buildInspectorPanelTitleText(std.testing.allocator, .{ .index = 1, .total = 4 }, 3, false);
+    defer std.testing.allocator.free(multi);
+    try std.testing.expect(std.mem.indexOf(u8, multi, "Inspector") != null);
+    try std.testing.expect(std.mem.indexOf(u8, multi, "tab 2/4") != null);
+    try std.testing.expect(std.mem.indexOf(u8, multi, "3 panes") != null);
+
+    const zoomed = try buildInspectorPanelTitleText(std.testing.allocator, .{ .index = 0, .total = 2 }, 2, true);
+    defer std.testing.allocator.free(zoomed);
+    try std.testing.expect(std.mem.indexOf(u8, zoomed, "zoomed") != null);
+}
+
+test "win32 buildInspectorPanelHintText reflects live inspector scope" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const single = try buildInspectorPanelHintText(std.testing.allocator, 1, false);
+    defer std.testing.allocator.free(single);
+    try std.testing.expect(std.mem.indexOf(u8, single, "this tab") != null);
+
+    const multi = try buildInspectorPanelHintText(std.testing.allocator, 3, false);
+    defer std.testing.allocator.free(multi);
+    try std.testing.expect(std.mem.indexOf(u8, multi, "3 panes") != null);
+
+    const zoomed = try buildInspectorPanelHintText(std.testing.allocator, 2, true);
+    defer std.testing.allocator.free(zoomed);
+    try std.testing.expect(std.mem.indexOf(u8, zoomed, "zoomed pane") != null);
+}

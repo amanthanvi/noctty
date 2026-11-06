@@ -107,7 +107,6 @@ const render_trace = @import("win32/render_trace.zig");
 const gl_startup = @import("win32/gl_startup.zig");
 const pixel_format = @import("win32/pixel_format.zig");
 const bench_trace = @import("win32/bench_trace.zig");
-const labels = @import("win32/labels.zig");
 const overlay_view = @import("win32/overlay_view.zig");
 const paint_text = @import("win32/text.zig");
 const profile_pick = @import("win32/profile_pick.zig");
@@ -139,8 +138,6 @@ pub const chrome_scene_runtime = .{
     .ThemeColors = ThemeColors,
     .TitlebarButtonRole = TitlebarButtonRole,
     .TitlebarGlyphKind = TitlebarGlyphKind,
-    .buildInspectorPanelHintText = buildInspectorPanelHintText,
-    .buildInspectorPanelTitleText = buildInspectorPanelTitleText,
     .c = c,
     .centeredRect = centeredRect,
     .clientTitlebarTheme = clientTitlebarTheme,
@@ -238,7 +235,6 @@ pub const palette_controller_runtime = .{
     .LRESULT = LRESULT,
     .PAINTSTRUCT = PAINTSTRUCT,
     .PaletteCatalog = PaletteCatalog,
-    .PaletteCompletion = PaletteCompletion,
     .PaletteRanked = PaletteRanked,
     .PaletteSnapshot = PaletteSnapshot,
     .PaletteStableId = PaletteStableId,
@@ -254,7 +250,6 @@ pub const palette_controller_runtime = .{
     .log = log,
     .overlayEditText = overlayEditText,
     .paint_text = paint_text,
-    .paletteCompletionText = paletteCompletionText,
     .palette_catalog_label_bytes = palette_catalog_label_bytes,
     .palette_list_class_name = palette_list_class_name,
     .palette_max_visible_rows = palette_max_visible_rows,
@@ -456,7 +451,6 @@ test {
     _ = @import("win32/gl_startup.zig");
     _ = @import("win32/pixel_format.zig");
     _ = @import("win32/bench_trace.zig");
-    _ = @import("win32/labels.zig");
     _ = @import("win32/input.zig");
     _ = @import("win32/chrome_layout.zig");
     _ = @import("win32/gdi.zig");
@@ -656,7 +650,6 @@ pub const PalettePayload = win32_palette.catalog.Payload;
 pub const PaletteRanked = win32_palette.catalog.Ranked;
 pub const PaletteStableId = @TypeOf((@as(PaletteItem, undefined)).id);
 pub const palette_catalog_label_bytes: usize = 128;
-const PaletteCompletion = labels.PaletteCompletion;
 pub const host_tab_max_button_width: i32 = default_metrics.tab_max_width;
 pub const host_tab_close_zone_width: i32 = default_metrics.tab_close_zone; // per-tab close button hit zone width
 
@@ -4569,7 +4562,12 @@ pub const HostBannerKind = overlay_view.BannerKind;
 /// update notice; `dismiss` is Dismiss there and the close button otherwise.
 pub const BannerButton = enum(u1) { primary, dismiss };
 
-const LaunchTargetButtonKeyAction = labels.LaunchTargetButtonKeyAction;
+const LaunchTargetButtonKeyAction = enum {
+    previous,
+    next,
+    first,
+    last,
+};
 
 fn launchTargetButtonKeyAction(vk: WPARAM) ?LaunchTargetButtonKeyAction {
     return switch (vk) {
@@ -9417,28 +9415,9 @@ pub fn scrollbarProc(
     }
 }
 
-const tabButtonKeyAction = labels.tabButtonKeyAction;
-
-const moveTabAmountToEdge = labels.moveTabAmountToEdge;
-
 pub const profileChromeVisible = win32_chrome_state.profileVisible;
 
-pub const inspectorPanelVisibleForState = labels.inspectorPanelVisibleForState;
-
 pub const inspectorChromeVisible = win32_chrome_state.inspectorVisible;
-
-pub const inspectorBannerStateChanged = labels.inspectorBannerStateChanged;
-
-pub const remapWin32KeyEvent = labels.remapWin32KeyEvent;
-pub const keyEventTogglesCommandPalette = labels.keyEventTogglesCommandPalette;
-
-const profileShortcutIndexFromKey = labels.profileShortcutIndexFromKey;
-
-const quickSlotShortcutProfileIndex = labels.quickSlotShortcutProfileIndex;
-
-const quickSlotPinOrdinalFromKey = labels.quickSlotPinOrdinalFromKey;
-
-const clearQuickSlotPinsRequested = labels.clearQuickSlotPinsRequested;
 
 /// Whether a reload changed a key the profile lists are built from: a
 /// `profile-*` key (a removal included), `visual-studio-profiles`, `env`
@@ -9535,10 +9514,6 @@ pub fn nativeSplitDirection(value: win32_shell.model.Direction) SplitTreeSurface
     };
 }
 
-const buildInspectorPanelTitleText = labels.buildInspectorPanelTitleText;
-
-const buildInspectorPanelHintText = labels.buildInspectorPanelHintText;
-
 pub fn sshAliasFromLaunchKey(launched_ssh: bool, key: ?[]const u8) ?[]const u8 {
     if (!launched_ssh) return null;
     const value = key orelse return null;
@@ -9552,13 +9527,6 @@ pub fn isAutomaticSshCommandTitle(title: []const u8) bool {
     return std.ascii.eqlIgnoreCase(base, "ssh.exe") or
         std.ascii.eqlIgnoreCase(base, "ssh");
 }
-
-/// Build a label for the profile dropdown menu: "Profile Name\tCtrl+Shift+N"
-pub const buildDropdownProfileLabel = labels.buildDropdownProfileLabel;
-
-pub const buttonLabelRightInset = labels.buttonLabelRightInset;
-
-pub const pinnedSlotBadgeDigit = labels.pinnedSlotBadgeDigit;
 
 pub fn paintPinnedSlotBadge(hdc: HDC, rect: RECT, digit: u8, border: u32, bg: u32, fg: u32, dpi: u32) void {
     const s = Host.scaledBy;
@@ -9582,10 +9550,6 @@ pub fn paintPinnedSlotBadge(hdc: HDC, rect: RECT, digit: u8, border: u32, bg: u3
     );
 }
 
-pub const profileOpenTargetMarkerColor = labels.profileOpenTargetMarkerColor;
-
-pub const profileOpenTargetBadgeGlyph = labels.profileOpenTargetBadgeGlyph;
-
 pub fn paintTargetButtonBadge(hdc: HDC, rect: RECT, glyph: u8, border: u32, bg: u32, fg: u32, dpi: u32) void {
     const s = Host.scaledBy;
     const badge_rect = RECT{
@@ -9607,14 +9571,6 @@ pub fn paintTargetButtonBadge(hdc: HDC, rect: RECT, glyph: u8, border: u32, bg: 
         c.DT_CENTER | c.DT_VCENTER | c.DT_SINGLELINE | c.DT_NOPREFIX,
     );
 }
-
-/// Returns the top-ranked match used for Enter-to-run, or null if no entry
-/// matches.
-pub const nextTabOverviewSelection = labels.nextTabOverviewSelection;
-
-pub const tabDirectionFromWheelDelta = labels.tabDirectionFromWheelDelta;
-
-const paletteCompletionText = labels.paletteCompletionText;
 
 fn wmCommandChildHwnd(lParam: LPARAM) ?HWND {
     if (lParam == 0) return null;
@@ -11045,6 +11001,70 @@ pub fn hostButtonProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) cal
     return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
 }
 
+const TabButtonKeyAction = enum {
+    activate,
+    previous,
+    next,
+    first,
+    last,
+    move_previous,
+    move_next,
+    move_first,
+    move_last,
+    rename,
+    close,
+    /// Apps and Shift+F10: the menu a right click on the tab opens.
+    context_menu,
+    /// Tab and Shift+Tab walk the strip's stops without activating a tab.
+    focus_next,
+    focus_previous,
+};
+
+fn tabButtonKeyAction(vk: WPARAM, mods: win32_input.KeyMods) ?TabButtonKeyAction {
+    // Alt chords belong to the window's menu, not to the tab.
+    if (mods.alt) return null;
+    return switch (vk) {
+        // Enter and Space activate the focused tab, matching every other
+        // Win32 tab control. Ctrl is ignored here: Ctrl+Enter and
+        // Ctrl+Space have no tab meaning and must not silently activate.
+        c.VK_RETURN, c.VK_SPACE => if (mods.ctrl) null else .activate,
+        c.VK_LEFT => if (mods.ctrl) .move_previous else .previous,
+        c.VK_RIGHT => if (mods.ctrl) .move_next else .next,
+        c.VK_HOME => if (mods.ctrl) .move_first else .first,
+        c.VK_END => if (mods.ctrl) .move_last else .last,
+        c.VK_F2 => .rename,
+        c.VK_DELETE => .close,
+        // The overview is a palette action; the menu key opens the tab's
+        // context menu, as it does on every other Windows control.
+        // Shift+F10 is the same request. F10 is a system key, so it arrives
+        // as WM_SYSKEYDOWN, and plain F10 stays with the window.
+        c.VK_APPS, c.VK_F10 => if (tabContextMenuKey(vk, mods)) .context_menu else null,
+        c.VK_TAB => switch (win32_input.tabFocusStep(vk, mods) orelse return null) {
+            .next => .focus_next,
+            .previous => .focus_previous,
+        },
+        else => null,
+    };
+}
+
+/// The key-ups that must not reach `DefWindowProc` on a tab button: it turns
+/// the menu key's release (and Shift+F10's) into a second WM_CONTEXTMENU after
+/// the key-down already opened the menu.
+fn tabButtonSwallowsKeyUp(vk: WPARAM, mods: win32_input.KeyMods) bool {
+    return tabContextMenuKey(vk, mods);
+}
+
+/// The menu key, or Shift+F10 without Ctrl or Alt.
+fn tabContextMenuKey(vk: WPARAM, mods: win32_input.KeyMods) bool {
+    return vk == c.VK_APPS or (vk == c.VK_F10 and mods.shift and !mods.ctrl and !mods.alt);
+}
+
+fn moveTabAmountToEdge(total: usize, current: usize, toward_start: bool) isize {
+    if (total <= 1 or current >= total) return 0;
+    if (toward_start) return -@as(isize, @intCast(current));
+    return @as(isize, @intCast((total - 1) - current));
+}
+
 pub fn tabButtonProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.winapi) LRESULT {
     const host = getHost(hwnd);
     if (host) |v| {
@@ -11313,7 +11333,7 @@ pub fn tabButtonProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) call
                 // Without these, `DefWindowProc` posts a second
                 // WM_CONTEXTMENU when the key comes back up.
                 c.WM_KEYUP, c.WM_SYSKEYUP => {
-                    if (labels.tabButtonSwallowsKeyUp(wParam, win32_input.chromeKeyMods())) return 0;
+                    if (tabButtonSwallowsKeyUp(wParam, win32_input.chromeKeyMods())) return 0;
                 },
                 // The keyboard form (-1, -1) was served on the key-down. A
                 // right click opens the menu from WM_RBUTTONUP and never
@@ -11344,6 +11364,39 @@ pub fn tabButtonProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) call
         }
     }
     return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
+}
+
+fn profileShortcutIndexFromKey(vk: WPARAM) ?usize {
+    if (vk >= @as(WPARAM, '1') and vk <= @as(WPARAM, '9')) {
+        return @as(usize, @intCast(vk - @as(WPARAM, '1')));
+    }
+    if (vk >= 0x61 and vk <= 0x69) {
+        return @as(usize, @intCast(vk - 0x61));
+    }
+    return null;
+}
+
+fn quickSlotShortcutProfileIndex(
+    profiles_len: usize,
+    selected_index: ?usize,
+    vk: WPARAM,
+    alt_pressed: bool,
+) ?usize {
+    if (!alt_pressed) return null;
+    const slot_ordinal = profileShortcutIndexFromKey(vk) orelse return null;
+    return profile_pick.quickSlot(profiles_len, selected_index, slot_ordinal);
+}
+
+fn quickSlotPinOrdinalFromKey(vk: WPARAM, alt_pressed: bool, shift_pressed: bool) ?usize {
+    if (!alt_pressed or !shift_pressed) return null;
+    const slot_ordinal = profileShortcutIndexFromKey(vk) orelse return null;
+    if (slot_ordinal >= profile_pick.quick_slots) return null;
+    return slot_ordinal;
+}
+
+fn clearQuickSlotPinsRequested(vk: WPARAM, alt_pressed: bool, shift_pressed: bool) bool {
+    if (!alt_pressed or !shift_pressed) return false;
+    return vk == c.VK_0 or vk == c.VK_NUMPAD0;
 }
 
 fn overlayEditProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.winapi) LRESULT {
@@ -23496,6 +23549,114 @@ test "win32 launchTargetButtonKeyAction maps focused target keys" {
     try std.testing.expectEqual(LaunchTargetButtonKeyAction.next, launchTargetButtonKeyAction(c.VK_SPACE).?);
     try std.testing.expectEqual(LaunchTargetButtonKeyAction.first, launchTargetButtonKeyAction(c.VK_HOME).?);
     try std.testing.expectEqual(LaunchTargetButtonKeyAction.last, launchTargetButtonKeyAction(c.VK_END).?);
+}
+
+test "win32 profileShortcutIndexFromKey supports top row and numpad digits" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    try std.testing.expectEqual(@as(?usize, 0), profileShortcutIndexFromKey('1'));
+    try std.testing.expectEqual(@as(?usize, 4), profileShortcutIndexFromKey('5'));
+    try std.testing.expectEqual(@as(?usize, 8), profileShortcutIndexFromKey('9'));
+    try std.testing.expectEqual(@as(?usize, 0), profileShortcutIndexFromKey(0x61));
+    try std.testing.expectEqual(@as(?usize, 8), profileShortcutIndexFromKey(0x69));
+    try std.testing.expectEqual(@as(?usize, null), profileShortcutIndexFromKey('0'));
+    try std.testing.expectEqual(@as(?usize, null), profileShortcutIndexFromKey('A'));
+}
+
+test "win32 quickSlotShortcutProfileIndex maps visible launcher slots" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    try std.testing.expectEqual(@as(?usize, 1), quickSlotShortcutProfileIndex(5, 0, '1', true));
+    try std.testing.expectEqual(@as(?usize, 2), quickSlotShortcutProfileIndex(5, 0, '2', true));
+    try std.testing.expectEqual(@as(?usize, 3), quickSlotShortcutProfileIndex(5, 0, '3', true));
+    try std.testing.expectEqual(@as(?usize, 0), quickSlotShortcutProfileIndex(5, 3, '1', true));
+    try std.testing.expectEqual(@as(?usize, 1), quickSlotShortcutProfileIndex(5, 3, '2', true));
+    try std.testing.expectEqual(@as(?usize, null), quickSlotShortcutProfileIndex(5, 0, '4', true));
+    try std.testing.expectEqual(@as(?usize, null), quickSlotShortcutProfileIndex(5, 0, '1', false));
+}
+
+test "win32 quickSlotPinOrdinalFromKey maps visible pin slots" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    try std.testing.expectEqual(@as(?usize, 0), quickSlotPinOrdinalFromKey('1', true, true));
+    try std.testing.expectEqual(@as(?usize, 2), quickSlotPinOrdinalFromKey('3', true, true));
+    try std.testing.expectEqual(@as(?usize, null), quickSlotPinOrdinalFromKey('4', true, true));
+    try std.testing.expectEqual(@as(?usize, null), quickSlotPinOrdinalFromKey('1', true, false));
+    try std.testing.expectEqual(@as(?usize, null), quickSlotPinOrdinalFromKey('1', false, true));
+}
+
+test "win32 clearQuickSlotPinsRequested detects clear shortcut" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    try std.testing.expect(clearQuickSlotPinsRequested(c.VK_0, true, true));
+    try std.testing.expect(clearQuickSlotPinsRequested(c.VK_NUMPAD0, true, true));
+    try std.testing.expect(!clearQuickSlotPinsRequested('1', true, true));
+    try std.testing.expect(!clearQuickSlotPinsRequested(c.VK_0, true, false));
+    try std.testing.expect(!clearQuickSlotPinsRequested(c.VK_0, false, true));
+}
+
+test "win32 tabButtonKeyAction maps focused-tab keys" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const none: win32_input.KeyMods = .{};
+    const ctrl: win32_input.KeyMods = .{ .ctrl = true };
+    try std.testing.expectEqual(TabButtonKeyAction.activate, tabButtonKeyAction(c.VK_RETURN, none).?);
+    try std.testing.expectEqual(TabButtonKeyAction.activate, tabButtonKeyAction(c.VK_SPACE, none).?);
+    try std.testing.expectEqual(@as(?TabButtonKeyAction, null), tabButtonKeyAction(c.VK_RETURN, ctrl));
+    try std.testing.expectEqual(@as(?TabButtonKeyAction, null), tabButtonKeyAction(c.VK_SPACE, ctrl));
+    try std.testing.expectEqual(@as(?TabButtonKeyAction, null), tabButtonKeyAction(c.VK_F6, none));
+    try std.testing.expectEqual(TabButtonKeyAction.previous, tabButtonKeyAction(c.VK_LEFT, none).?);
+    try std.testing.expectEqual(TabButtonKeyAction.move_previous, tabButtonKeyAction(c.VK_LEFT, ctrl).?);
+    try std.testing.expectEqual(TabButtonKeyAction.next, tabButtonKeyAction(c.VK_RIGHT, none).?);
+    try std.testing.expectEqual(TabButtonKeyAction.move_next, tabButtonKeyAction(c.VK_RIGHT, ctrl).?);
+    try std.testing.expectEqual(TabButtonKeyAction.first, tabButtonKeyAction(c.VK_HOME, none).?);
+    try std.testing.expectEqual(TabButtonKeyAction.move_first, tabButtonKeyAction(c.VK_HOME, ctrl).?);
+    try std.testing.expectEqual(TabButtonKeyAction.last, tabButtonKeyAction(c.VK_END, none).?);
+    try std.testing.expectEqual(TabButtonKeyAction.move_last, tabButtonKeyAction(c.VK_END, ctrl).?);
+    try std.testing.expectEqual(TabButtonKeyAction.rename, tabButtonKeyAction(c.VK_F2, none).?);
+    try std.testing.expectEqual(TabButtonKeyAction.close, tabButtonKeyAction(c.VK_DELETE, none).?);
+}
+
+test "win32 tab button keys: the menu key and Shift+F10 open the context menu, Tab walks the strip" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const none: win32_input.KeyMods = .{};
+    const shift: win32_input.KeyMods = .{ .shift = true };
+    const ctrl: win32_input.KeyMods = .{ .ctrl = true };
+    const alt: win32_input.KeyMods = .{ .alt = true };
+    // Apps is the context menu now; the overview is only a palette action.
+    try std.testing.expectEqual(TabButtonKeyAction.context_menu, tabButtonKeyAction(c.VK_APPS, none).?);
+    try std.testing.expectEqual(TabButtonKeyAction.context_menu, tabButtonKeyAction(c.VK_APPS, shift).?);
+    try std.testing.expectEqual(TabButtonKeyAction.context_menu, tabButtonKeyAction(c.VK_F10, shift).?);
+    // Plain F10 and Ctrl+Shift+F10 are not the request.
+    try std.testing.expectEqual(@as(?TabButtonKeyAction, null), tabButtonKeyAction(c.VK_F10, none));
+    try std.testing.expectEqual(@as(?TabButtonKeyAction, null), tabButtonKeyAction(c.VK_F10, .{ .shift = true, .ctrl = true }));
+    try std.testing.expectEqual(TabButtonKeyAction.focus_next, tabButtonKeyAction(c.VK_TAB, none).?);
+    try std.testing.expectEqual(TabButtonKeyAction.focus_previous, tabButtonKeyAction(c.VK_TAB, shift).?);
+    try std.testing.expectEqual(@as(?TabButtonKeyAction, null), tabButtonKeyAction(c.VK_TAB, ctrl));
+    // Alt keeps every tab key out: those chords are the window's.
+    try std.testing.expectEqual(@as(?TabButtonKeyAction, null), tabButtonKeyAction(c.VK_TAB, alt));
+    try std.testing.expectEqual(@as(?TabButtonKeyAction, null), tabButtonKeyAction(c.VK_LEFT, alt));
+    // Left and Right still wrap through the tabs and Enter activates.
+    try std.testing.expectEqual(TabButtonKeyAction.previous, tabButtonKeyAction(c.VK_LEFT, shift).?);
+    try std.testing.expectEqual(TabButtonKeyAction.activate, tabButtonKeyAction(c.VK_RETURN, shift).?);
+
+    // DefWindowProc turns the release of the menu key and of F10 into a
+    // second WM_CONTEXTMENU once the key-down already opened the menu.
+    try std.testing.expect(tabButtonSwallowsKeyUp(c.VK_APPS, none));
+    try std.testing.expect(!tabButtonSwallowsKeyUp(c.VK_F10, none));
+    try std.testing.expect(tabButtonSwallowsKeyUp(c.VK_F10, shift));
+    try std.testing.expect(!tabButtonSwallowsKeyUp(c.VK_F10, .{ .shift = true, .ctrl = true }));
+    try std.testing.expect(!tabButtonSwallowsKeyUp(c.VK_RETURN, none));
+}
+
+test "win32 moveTabAmountToEdge computes direct host reorder delta" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    try std.testing.expectEqual(@as(isize, -2), moveTabAmountToEdge(4, 2, true));
+    try std.testing.expectEqual(@as(isize, 1), moveTabAmountToEdge(4, 2, false));
+    try std.testing.expectEqual(@as(isize, 0), moveTabAmountToEdge(4, 0, true));
+    try std.testing.expectEqual(@as(isize, 0), moveTabAmountToEdge(4, 3, false));
 }
 
 test "win32 windowNewTabInsertIndex respects current and end positions" {

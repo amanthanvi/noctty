@@ -7,7 +7,6 @@ $win32ModuleImports = @(
     'const sys = @import("win32/sys.zig");'
     'const render_trace = @import("win32/render_trace.zig");'
     'const gl_startup = @import("win32/gl_startup.zig");'
-    'const labels = @import("win32/labels.zig");'
     'const win32_input = @import("win32/input.zig");'
     'const chrome_layout = @import("win32/chrome_layout.zig");'
     'const gdi = @import("win32/gdi.zig");'
@@ -21,7 +20,6 @@ foreach ($win32ModuleImport in $win32ModuleImports) {
 $win32TestModuleRoots = @(
     '_ = @import("win32/render_trace.zig");'
     '_ = @import("win32/gl_startup.zig");'
-    '_ = @import("win32/labels.zig");'
     '_ = @import("win32/input.zig");'
     '_ = @import("win32/chrome_layout.zig");'
     '_ = @import("win32/gdi.zig");'
@@ -69,6 +67,10 @@ foreach ($win32TestModuleRoot in $win32TestModuleRoots) {
 # tests moved to overlay_view.zig (24), the title prompt's refill test to
 # host.zig (1), and commandPaletteBannerText, which no overlay lane reached
 # once overlay_view replaced buildOverlayHintText, went with its 5 tests.
+# labels.zig is gone (facade S7): 28 of its last 29 tests went with what they
+# test, 15 to host.zig, 7 to win32.zig, 3 to app.zig, 2 to chrome_scene.zig
+# and 1 to terminal_window.zig, and its taskbar mapping test was deleted,
+# since win32_taskbar_progress.zig's overflow test asserts the same mapping.
 # window_start.zig is the pure half of window state, which received its
 # consolidated tests: the `plan`, `place`, `returnOn`, `forRestore` and
 # `savedFullscreen` tables (from window_state.zig's start and placement tests
@@ -94,7 +96,6 @@ foreach ($win32TestModuleRoot in $win32TestModuleRoots) {
 # come from one `compose` (19), and its test of the profile overlay's
 # detecting state, 20.
 $movedWin32TestFloors = [ordered]@{
-    'labels.zig' = 29
     'input.zig' = 24
     'gl_startup.zig' = 4
     'render_trace.zig' = 3
@@ -151,7 +152,14 @@ foreach ($movedWin32TestModule in $movedWin32TestFloors.Keys) {
 # narrow tab's split. host.zig's is 48 since the title prompt's refill test
 # came from labels.zig with `overlayTextNeedsRefill` (overlay view): its 48
 # named tests, so deleting that one fails the floor (it was one under the
-# count before).
+# count before). host.zig's is 63, its named tests, since labels.zig's last
+# tests came with what they test (facade S7): the chrome button keys, focus
+# stops, the strip's action names and context-menu focus, the profile
+# overlay's badges, insets and menu labels, the overview and wheel steps, the
+# palette toggle lookup and the inspector panel's visibility (15). For the
+# same move app.zig's is 62 (`tabClosedMessage`'s 3), terminal_window.zig's
+# 25 (`inspectorBannerStateChanged`) and chrome_scene.zig's 3, its named
+# tests (the inspector panel's title and hint).
 # session.zig's floor is 27: its five restore-by-key tests became rows of
 # pane_launch.zig's `prepare` table (pane launch step 4b), and its
 # fullscreen-placement lookup-failure test became window_start.zig's pure
@@ -173,9 +181,9 @@ foreach ($movedWin32TestModule in $movedWin32TestFloors.Keys) {
 # test_support.zig declares no tests, so it has no floor.
 $extractedWin32TestModules = [ordered]@{
     'registry.zig' = @{ Binding = 'registry_module'; Floor = 6 }
-    'app.zig' = @{ Binding = 'app_module'; Floor = 59 }
-    'host.zig' = @{ Binding = 'host_module'; Floor = 48 }
-    'terminal_window.zig' = @{ Binding = 'terminal_window_module'; Floor = 24 }
+    'app.zig' = @{ Binding = 'app_module'; Floor = 62 }
+    'host.zig' = @{ Binding = 'host_module'; Floor = 63 }
+    'terminal_window.zig' = @{ Binding = 'terminal_window_module'; Floor = 25 }
     'session.zig' = @{ Binding = 'session_module'; Floor = 27 }
     'quick_terminal_host.zig' = @{ Binding = 'quick_terminal_host'; Floor = 10 }
     'window_state.zig' = @{ Binding = 'window_state'; Floor = 30 }
@@ -183,7 +191,7 @@ $extractedWin32TestModules = [ordered]@{
     'search_controls.zig' = @{ Binding = 'search_controls'; Floor = 4 }
     'overlay_session.zig' = @{ Binding = 'overlay_session'; Floor = 2 }
     'palette_controller.zig' = @{ Binding = 'palette_controller'; Floor = 7 }
-    'chrome_scene.zig' = @{ Binding = 'chrome_scene'; Floor = 1 }
+    'chrome_scene.zig' = @{ Binding = 'chrome_scene'; Floor = 3 }
     'child_window.zig' = @{ Binding = 'child_window'; Floor = 3 }
     'text.zig' = @{ Binding = 'paint_text'; Floor = 16 }
     'notifications.zig' = @{ Binding = 'notifications'; Floor = 23 }
@@ -567,7 +575,7 @@ $judgeCases = @(
     }
     @{
         Name = 'an unfiltered executable'
-        Lines = $judgeBase + 'apprt.win32.labels.test.win32 unrelated label...OK'
+        Lines = $judgeBase + 'apprt.win32.tab_label.test.win32 unrelated label...OK'
         Exit = 0; Expect = 'matches none of the fixture filters'
     }
 )

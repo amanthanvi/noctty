@@ -67,13 +67,11 @@ const gl_startup = @import("gl_startup.zig");
 const hostChromeNeedsFocusRepaint = win32.hostChromeNeedsFocusRepaint;
 const imeWindowForms = win32.imeWindowForms;
 const input = @import("../../input.zig");
-const inspectorBannerStateChanged = win32.inspectorBannerStateChanged;
 const inspectorChromeVisible = win32.inspectorChromeVisible;
 const internal_os = @import("../../os/main.zig");
 const isAutomaticSshCommandTitle = win32.isAutomaticSshCommandTitle;
 const isHighContrastActive = win32.isHighContrastActive;
 const lParamBits = win32.lParamBits;
-const labels = @import("labels.zig");
 const lastError = child_window.lastError;
 const layoutRectToWin32 = win32.layoutRectToWin32;
 const lfLineEndings = win32.lfLineEndings;
@@ -83,6 +81,7 @@ const mouseButtonStateFromMessage = win32.mouseButtonStateFromMessage;
 const mouseModsFromWParam = win32.mouseModsFromWParam;
 const openClipboard = win32.openClipboard;
 const optionalOwnedStringEquals = paint_text.optionalOwnedStringEquals;
+const overlay_view = @import("overlay_view.zig");
 const ownedStringEquals = paint_text.ownedStringEquals;
 const paint_text = @import("text.zig");
 const paletteDisconnectThunk = win32.paletteDisconnectThunk;
@@ -193,7 +192,7 @@ const uninitializedInertStorage = win32.uninitializedInertStorage;
 
 const scrollbar_transparent_key = win32_theme.rgb(0xFF, 0x00, 0xFF);
 
-const host_banner_inspector_inactive = labels.host_banner_inspector_inactive;
+const host_banner_inspector_inactive = "Inspector hidden. Terminal view is active.";
 
 /// Deep-copy of one `apprt.ClipboardContent` entry so it can survive an
 /// async confirm-overlay roundtrip. Freed via `PendingClipboardOp.deinit`.
@@ -356,6 +355,27 @@ test "win32 resolveWindowBaseTitle prefers tab then surface override" {
         "terminal",
         resolveWindowBaseTitle("terminal", null, null).?,
     );
+}
+
+fn inspectorBannerStateChanged(
+    overlay_mode: HostOverlayMode,
+    banner_kind: overlay_view.BannerKind,
+    banner_text: ?[:0]const u8,
+    visible: bool,
+) bool {
+    if (overlay_mode != .none) return false;
+    if (visible) return banner_kind != .none or banner_text != null;
+    return banner_kind != .info or !ownedStringEquals(banner_text, host_banner_inspector_inactive);
+}
+
+test "win32 inspectorBannerStateChanged only trips on actual banner deltas" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    try std.testing.expect(!inspectorBannerStateChanged(.none, .none, null, true));
+    try std.testing.expect(inspectorBannerStateChanged(.none, .none, null, false));
+    try std.testing.expect(!inspectorBannerStateChanged(.none, .info, host_banner_inspector_inactive, false));
+    try std.testing.expect(inspectorBannerStateChanged(.none, .err, "error", false));
+    try std.testing.expect(!inspectorBannerStateChanged(.search, .none, null, true));
 }
 
 /// A config color as a GDI COLORREF.
@@ -2845,7 +2865,7 @@ pub const Surface = struct {
         errdefer scan.deinit(alloc);
         if (scan.matches.len == 0) {
             scan.deinit(alloc);
-            self.showQuickSelectNotice(labels.quick_select_no_targets_banner);
+            self.showQuickSelectNotice(quick_select_no_targets_banner);
             return true;
         }
 
@@ -2894,7 +2914,7 @@ pub const Surface = struct {
         if (!self.ensureQuickSelectLabelRects(client, metrics, host.current_dpi)) {
             log.warn("quick select has more visible labels than fit without overlap", .{});
             self.closeQuickSelect(false);
-            self.showQuickSelectNotice(labels.quick_select_too_many_banner);
+            self.showQuickSelectNotice(quick_select_too_many_banner);
             return true;
         }
 
@@ -2911,6 +2931,9 @@ pub const Surface = struct {
         _ = sys.InvalidateRect(hwnd, null, 0);
         return true;
     }
+
+    pub const quick_select_no_targets_banner = "No quick-select targets in view.";
+    pub const quick_select_too_many_banner = "Too many quick-select targets in view to label. Clear or narrow the screen.";
 
     /// Say why the key press did nothing. Call with no session open: the
     /// banner does not touch focus, and a closed overlay has nothing to free.

@@ -60,10 +60,8 @@ const apprt = @import("../../apprt.zig");
 const bannerButtonKey = win32.bannerButtonKey;
 const bannerMessageDurationMs = win32.bannerMessageDurationMs;
 const blendColorRGB = win32.blendColorRGB;
-const buildDropdownProfileLabel = win32.buildDropdownProfileLabel;
 const builtin = @import("builtin");
 const buttonColorsFromTheme = win32.buttonColorsFromTheme;
-const buttonLabelRightInset = win32.buttonLabelRightInset;
 const c = @import("consts.zig");
 const captionButtonBoundsThunk = win32.captionButtonBoundsThunk;
 const captionButtonInvokeThunk = win32.captionButtonInvokeThunk;
@@ -121,14 +119,11 @@ const host_tab_max_button_width = win32.host_tab_max_button_width;
 const host_titlebar_action_button_size = win32.host_titlebar_action_button_size;
 const infoBannersExpire = win32.infoBannersExpire;
 const input = @import("../../input.zig");
-const inspectorPanelVisibleForState = win32.inspectorPanelVisibleForState;
 const internal_os = @import("../../os/main.zig");
 const isHighContrastActive = win32.isHighContrastActive;
 const keyEventFromWin32Message = win32.keyEventFromWin32Message;
-const keyEventTogglesCommandPalette = win32.keyEventTogglesCommandPalette;
 const keyPressed = win32.keyPressed;
 const lParamBits = win32.lParamBits;
-const labels = @import("labels.zig");
 const lastError = child_window.lastError;
 const layoutRectToWin32 = win32.layoutRectToWin32;
 const log = win32.log;
@@ -136,7 +131,6 @@ const logUiActionError = win32.logUiActionError;
 const movedIndexAfterReorder = win32.movedIndexAfterReorder;
 const nativeSplitDirection = win32.nativeSplitDirection;
 const ncRectToWin32 = win32.ncRectToWin32;
-const nextTabOverviewSelection = win32.nextTabOverviewSelection;
 const optionalOwnedStringEquals = paint_text.optionalOwnedStringEquals;
 const overlayActionLayoutForWidth = win32.overlayActionLayoutForWidth;
 const overlayButtonDisconnectThunk = win32.overlayButtonDisconnectThunk;
@@ -161,13 +155,10 @@ const paletteVisibleRowCapacity = win32.paletteVisibleRowCapacity;
 const palette_catalog_label_bytes = win32.palette_catalog_label_bytes;
 const palette_controller = @import("palette_controller.zig");
 const palette_row_height = win32.palette_row_height;
-const pinnedSlotBadgeDigit = win32.pinnedSlotBadgeDigit;
 const profileChromeStripeColor = win32.profileChromeStripeColor;
 const profileChromeVisible = win32.profileChromeVisible;
 const profileKindFocusRingColor = win32.profileKindFocusRingColor;
 const profileKindLabelColor = win32.profileKindLabelColor;
-const profileOpenTargetBadgeGlyph = win32.profileOpenTargetBadgeGlyph;
-const profileOpenTargetMarkerColor = win32.profileOpenTargetMarkerColor;
 const profile_pick = @import("profile_pick.zig");
 const prompt_button_class = child_window.prompt_button_class;
 const prompt_label_class = child_window.prompt_label_class;
@@ -176,7 +167,7 @@ const raiseChildToTop = win32.raiseChildToTop;
 const rectInset = chrome_layout.rectInset;
 const refocusActiveSurface = win32.refocusActiveSurface;
 const refocusHostAfterActivation = win32.refocusHostAfterActivation;
-const remapWin32KeyEvent = win32.remapWin32KeyEvent;
+const rgb = win32_theme.rgb;
 const rootDisconnectThunk = win32.rootDisconnectThunk;
 const rootReleaseThunk = win32.rootReleaseThunk;
 const runUiActionOrLog = win32.runUiActionOrLog;
@@ -196,7 +187,6 @@ const tabBarVisibleForConfig = win32.tabBarVisibleForConfig;
 const tabButtonProc = win32.tabButtonProc;
 const tabCloseAction = win32.tabCloseAction;
 const tabContainerProc = win32.tabContainerProc;
-const tabDirectionFromWheelDelta = win32.tabDirectionFromWheelDelta;
 const tabStatusBadgeColor = win32.tabStatusBadgeColor;
 const tabStatusHeadline = win32.tabStatusHeadline;
 const tabStatusKey = win32.tabStatusKey;
@@ -264,7 +254,6 @@ const cli_args = @import("../../cli/args.zig");
 const detachHostReference = win32.detachHostReference;
 const highContrastThemeFromSysColors = win32.highContrastThemeFromSysColors;
 const patchOrAppendEdits = win32.patchOrAppendEdits;
-const rgb = win32.rgb;
 const tabSeenWithForeground = win32.tabSeenWithForeground;
 const testExpectNoLaunchLayout = win32.testExpectNoLaunchLayout;
 const toastTestSplit = win32.toastTestSplit;
@@ -301,6 +290,8 @@ const titlebar_hover_fade_ms: u16 = 150;
 
 /// An even status key cannot collide with a program status's odd hash.
 const tab_bell_status_key: u64 = 2;
+
+const command_palette_unknown_action = "Unknown Noctty action. Example: new_tab or toggle_fullscreen";
 
 const PaletteCatalogConfigSource = enum {
     /// Catalog strings borrow the current `app.config`.
@@ -390,6 +381,166 @@ fn overlayTextNeedsRefill(
     if (!overlay_view.shape(mode).follows_active_surface) return false;
     const surface = active orelse return false;
     return filled_from != surface;
+}
+
+/// What Enter and Tab do on a tab-strip action button ([+], [v]) or a docked
+/// search button. Space is not here: the BUTTON class clicks on its key-up.
+const ChromeButtonKeyAction = enum {
+    click,
+    focus_next,
+    focus_previous,
+};
+
+fn chromeButtonKeyAction(vk: WPARAM, mods: win32_input.KeyMods) ?ChromeButtonKeyAction {
+    if (mods.ctrl or mods.alt) return null;
+    if (win32_input.tabFocusStep(vk, mods)) |step| return switch (step) {
+        .next => .focus_next,
+        .previous => .focus_previous,
+    };
+    return if (vk == c.VK_RETURN) .click else null;
+}
+
+/// The first stop after `current` that `available` accepts, in the direction
+/// of `reverse` and wrapping, or null when no other stop is available. A stop
+/// is any focusable thing in one region; the caller owns what they are.
+fn nextFocusStop(
+    count: usize,
+    current: usize,
+    reverse: bool,
+    ctx: anytype,
+    comptime available: fn (@TypeOf(ctx), usize) bool,
+) ?usize {
+    if (count < 2 or current >= count) return null;
+    var step: usize = 1;
+    while (step < count) : (step += 1) {
+        const candidate = if (reverse) (current + count - step) % count else (current + step) % count;
+        if (available(ctx, candidate)) return candidate;
+    }
+    return null;
+}
+
+/// After a tab's context menu closes, keyboard focus goes back to the strip
+/// when the menu came from the keyboard, unless a command opened an overlay
+/// (rename, a close that asks first) that owns the keyboard now.
+fn tabContextMenuRestoresStripFocus(from_keyboard: bool, overlay_open: bool) bool {
+    return from_keyboard and !overlay_open;
+}
+
+/// What the tab strip's two action buttons are called to UIA and in their
+/// hover tooltips, so the two always agree.
+const TabStripAction = enum { new_tab, more_tabs };
+
+fn tabStripActionName(action: TabStripAction) []const u8 {
+    return switch (action) {
+        .new_tab => "New tab",
+        .more_tabs => "More tabs",
+    };
+}
+
+fn inspectorPanelVisibleForState(overlay_mode: HostOverlayMode, active_tab_has_inspector: bool) bool {
+    return overlay_mode == .none and active_tab_has_inspector;
+}
+
+fn bindingActionsToggleCommandPalette(actions: []const input.Binding.Action) bool {
+    for (actions) |action| switch (action) {
+        .toggle_command_palette => return true,
+        else => {},
+    };
+    return false;
+}
+
+/// Apply `key-remap` to a key event the same way `Surface.keyCallback` does.
+/// Two Win32 paths hand events to the core without going through a surface:
+/// the empty-host app-input path and the command-palette toggle lookup. Both
+/// must see remapped modifiers or a remapped chord silently misses there.
+fn remapWin32KeyEvent(
+    event_orig: input.KeyEvent,
+    remaps: *const input.KeyRemapSet,
+) input.KeyEvent {
+    var event = event_orig;
+    event.mods = remaps.apply(event_orig.mods);
+    if (event_orig.binding_mods) |binding_mods| {
+        event.binding_mods = remaps.apply(binding_mods);
+    }
+    return event;
+}
+
+fn keyEventTogglesCommandPalette(
+    event_orig: input.KeyEvent,
+    keybinds: *const input.Binding.Set,
+    remaps: *const input.KeyRemapSet,
+) bool {
+    const event = remapWin32KeyEvent(event_orig, remaps);
+    const entry = keybinds.getEvent(event) orelse return false;
+    const actions: []const input.Binding.Action = switch (entry.value_ptr.*) {
+        .leader => return false,
+        inline .leaf, .leaf_chained => |leaf| leaf.generic().actionsSlice(),
+    };
+    return bindingActionsToggleCommandPalette(actions);
+}
+
+/// A menu item's text: the label, then the shortcut after a tab. In a menu
+/// `&` marks the next character as the mnemonic and a tab starts the
+/// shortcut column, and a `profile-name` may contain either, so the label
+/// doubles `&` and turns a tab into a space.
+fn buildDropdownProfileLabel(
+    alloc: Allocator,
+    profile: *const windows_shell.Profile,
+    index: usize,
+) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(alloc);
+    for (profile.label) |byte| switch (byte) {
+        '&' => try out.appendSlice(alloc, "&&"),
+        '\t' => try out.append(alloc, ' '),
+        else => try out.append(alloc, byte),
+    };
+    if (index < 9) try out.print(alloc, "\tCtrl+Shift+{d}", .{index + 1});
+    return try out.toOwnedSlice(alloc);
+}
+
+fn targetButtonLabelRightInset(target: ?OpenTarget) i32 {
+    return if (target != null) 12 else 0;
+}
+
+fn buttonLabelRightInset(pinned_slot_ordinal: ?usize, target: ?OpenTarget) i32 {
+    const slot_inset: i32 = if (pinnedSlotBadgeDigit(pinned_slot_ordinal) != null) 16 else 0;
+    return @max(targetButtonLabelRightInset(target), slot_inset);
+}
+
+fn pinnedSlotBadgeDigit(pinned_slot_ordinal: ?usize) ?u8 {
+    const ordinal = pinned_slot_ordinal orelse return null;
+    if (ordinal >= 9) return null;
+    return @as(u8, @intCast('1' + ordinal));
+}
+
+fn profileOpenTargetMarkerColor(target: OpenTarget) u32 {
+    return switch (target) {
+        .tab => rgb(132, 172, 238),
+        .window => rgb(236, 182, 118),
+        .split => rgb(126, 204, 148),
+    };
+}
+
+fn profileOpenTargetBadgeGlyph(target: OpenTarget) u8 {
+    return switch (target) {
+        .tab => 'T',
+        .window => 'W',
+        .split => 'S',
+    };
+}
+
+fn nextTabOverviewSelection(current: usize, total: usize, reverse: bool) usize {
+    if (total == 0) return 0;
+    const clamped = std.math.clamp(current, @as(usize, 1), total);
+    if (reverse) {
+        return if (clamped <= 1) total else clamped - 1;
+    }
+    return if (clamped >= total) 1 else clamped + 1;
+}
+
+fn tabDirectionFromWheelDelta(delta: i16) apprt.action.GotoTab {
+    return if (delta > 0) .previous else .next;
 }
 
 pub const Host = struct {
@@ -3004,8 +3155,8 @@ pub const Host = struct {
     /// search bar's six buttons and the tab strip's [+] and [v]. It is the
     /// button's UIA name, from the same tables, so the two always agree.
     pub fn chromeButtonTooltipName(self: *const Host, button: HWND) ?[]const u8 {
-        if (self.new_tab_hwnd == button) return labels.tabStripActionName(.new_tab);
-        if (self.overflow_hwnd == button) return labels.tabStripActionName(.more_tabs);
+        if (self.new_tab_hwnd == button) return tabStripActionName(.new_tab);
+        if (self.overflow_hwnd == button) return tabStripActionName(.more_tabs);
         const role = self.searchBarButtonRole(button) orelse return null;
         return search_controls.searchBarButtonName(role);
     }
@@ -6822,7 +6973,7 @@ pub const Host = struct {
     }
 
     fn hostActionUiaName(_: *anyopaque, tag: usize, _: []u8) []const u8 {
-        return labels.tabStripActionName(if (tag == 0) .new_tab else .more_tabs);
+        return tabStripActionName(if (tag == 0) .new_tab else .more_tabs);
     }
 
     pub fn bannerUiaName(ctx: *anyopaque, _: usize, buf: []u8) []const u8 {
@@ -7487,7 +7638,7 @@ pub const Host = struct {
     /// Open the context menu of the tab at `tab_index`. The tab is activated
     /// first, so every command acts on it and not on whichever tab was in
     /// front. A menu opened from the keyboard hands focus back to the strip
-    /// when it closes (`labels.tabContextMenuRestoresStripFocus`), on the
+    /// when it closes (`tabContextMenuRestoresStripFocus`), on the
     /// tab the menu was for. Returns false, with the menu not shown, when the
     /// tab could not be activated. `self` may be gone when it returns true:
     /// closing a window's only tab closes the window.
@@ -7563,7 +7714,7 @@ pub const Host = struct {
         // PTY. Rename and a close that asks first opened an overlay, which
         // owns the keyboard now.
         live = app.registry.findHostById(host_id) orelse return true;
-        if (live.hwnd != null and labels.tabContextMenuRestoresStripFocus(origin == .keyboard, live.overlay_mode != .none)) {
+        if (live.hwnd != null and tabContextMenuRestoresStripFocus(origin == .keyboard, live.overlay_mode != .none)) {
             live.restoreTabStripFocus();
         }
         return true;
@@ -7600,7 +7751,7 @@ pub const Host = struct {
     /// focus event from `WM_SETFOCUS`.
     pub fn stepTabStripFocus(self: *Host, from: HWND, reverse: bool) bool {
         const current = self.tabStripStopOf(from) orelse return false;
-        const next = labels.nextFocusStop(
+        const next = nextFocusStop(
             self.tabs.items.len + 2,
             current,
             reverse,
@@ -7623,7 +7774,7 @@ pub const Host = struct {
             search_controls.searchFocusStopOfRole(role)
         else
             return false;
-        const next = labels.nextFocusStop(
+        const next = nextFocusStop(
             search_controls.search_focus_stop_count,
             current,
             reverse,
@@ -7640,14 +7791,14 @@ pub const Host = struct {
     /// made a click here: it reaches a button only through a dialog manager,
     /// and the host has none. Touch nothing after a click: it can open a
     /// menu, or close the search bar.
-    pub fn handleChromeButtonKey(self: *Host, button: HWND, vk: WPARAM, mods: labels.KeyMods, lParam: LPARAM) bool {
+    pub fn handleChromeButtonKey(self: *Host, button: HWND, vk: WPARAM, mods: win32_input.KeyMods, lParam: LPARAM) bool {
         const search_surface = if (self.searchControlSurface(button)) |surface|
             if (surface.searchBarButtonRole(button) != null) surface else null
         else
             null;
         const in_strip = self.isTabStripActionButton(button);
         if (!in_strip and search_surface == null) return false;
-        const action = labels.chromeButtonKeyAction(vk, mods) orelse return false;
+        const action = chromeButtonKeyAction(vk, mods) orelse return false;
         switch (action) {
             .click => {
                 if ((lParamBits(lParam) & c.KF_REPEAT) != 0) return true;
@@ -8454,7 +8605,7 @@ pub const Host = struct {
                 }
                 const action = input.Binding.Action.parse(text) catch |err| {
                     log.warn("win32 command palette invalid action action={s} err={}", .{ text, err });
-                    try self.setBanner(.err, labels.command_palette_unknown_action);
+                    try self.setBanner(.err, command_palette_unknown_action);
                     if (self.palette_list_uia_provider) |provider| {
                         win32_uia.events.raiseNotification(&provider.base, .action_aborted, "Unknown command");
                     }
@@ -10562,6 +10713,179 @@ test "win32 elevated host title prefixes surface and default title once" {
     try std.testing.expectEqualStrings("Administrator: [2/3] pwsh", idempotent);
 }
 
+test "win32 a profile's menu item keeps an ampersand and a tab in its label" {
+    const alloc = std.testing.allocator;
+    const profile: windows_shell.Profile = .{
+        .kind = .user,
+        .key = "user:qa",
+        .label = "Q&A\tshell",
+        .command = .{ .shell = "cmd.exe" },
+    };
+    const first = try buildDropdownProfileLabel(alloc, &profile, 0);
+    defer alloc.free(first);
+    try std.testing.expectEqualStrings("Q&&A shell\tCtrl+Shift+1", first);
+    const tenth = try buildDropdownProfileLabel(alloc, &profile, 9);
+    defer alloc.free(tenth);
+    try std.testing.expectEqualStrings("Q&&A shell", tenth);
+}
+
+test "win32 targetButtonLabelRightInset reserves target badge space" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    try std.testing.expectEqual(@as(i32, 0), targetButtonLabelRightInset(null));
+    try std.testing.expectEqual(@as(i32, 12), targetButtonLabelRightInset(.tab));
+    try std.testing.expectEqual(@as(i32, 12), targetButtonLabelRightInset(.window));
+    try std.testing.expectEqual(@as(i32, 12), targetButtonLabelRightInset(.split));
+}
+
+test "win32 buttonLabelRightInset reserves slot and target badge space" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    try std.testing.expectEqual(@as(i32, 0), buttonLabelRightInset(null, null));
+    try std.testing.expectEqual(@as(i32, 12), buttonLabelRightInset(null, .tab));
+    try std.testing.expectEqual(@as(i32, 16), buttonLabelRightInset(0, null));
+    try std.testing.expectEqual(@as(i32, 16), buttonLabelRightInset(0, .split));
+    try std.testing.expectEqual(@as(i32, 12), buttonLabelRightInset(9, .window));
+}
+
+test "win32 profileOpenTargetMarkerColor reflects launcher target" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    try std.testing.expectEqual(rgb(132, 172, 238), profileOpenTargetMarkerColor(.tab));
+    try std.testing.expectEqual(rgb(236, 182, 118), profileOpenTargetMarkerColor(.window));
+    try std.testing.expectEqual(rgb(126, 204, 148), profileOpenTargetMarkerColor(.split));
+}
+
+test "win32 profileOpenTargetBadgeGlyph reflects launcher target" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    try std.testing.expectEqual(@as(u8, 'T'), profileOpenTargetBadgeGlyph(.tab));
+    try std.testing.expectEqual(@as(u8, 'W'), profileOpenTargetBadgeGlyph(.window));
+    try std.testing.expectEqual(@as(u8, 'S'), profileOpenTargetBadgeGlyph(.split));
+}
+
+test "win32 pinnedSlotBadgeDigit reflects visible quick slot ordinals" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    try std.testing.expectEqual(@as(?u8, '1'), pinnedSlotBadgeDigit(0));
+    try std.testing.expectEqual(@as(?u8, '3'), pinnedSlotBadgeDigit(2));
+    try std.testing.expectEqual(@as(?u8, null), pinnedSlotBadgeDigit(null));
+    try std.testing.expectEqual(@as(?u8, null), pinnedSlotBadgeDigit(9));
+}
+
+test "win32 nextTabOverviewSelection wraps and clamps" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    try std.testing.expectEqual(@as(usize, 2), nextTabOverviewSelection(1, 4, false));
+    try std.testing.expectEqual(@as(usize, 4), nextTabOverviewSelection(1, 4, true));
+    try std.testing.expectEqual(@as(usize, 1), nextTabOverviewSelection(4, 4, false));
+    try std.testing.expectEqual(@as(usize, 1), nextTabOverviewSelection(9, 4, false));
+}
+
+test "win32 tabDirectionFromWheelDelta maps wheel direction to tab navigation" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    try std.testing.expectEqual(apprt.action.GotoTab.previous, tabDirectionFromWheelDelta(120));
+    try std.testing.expectEqual(apprt.action.GotoTab.next, tabDirectionFromWheelDelta(-120));
+}
+
+test "win32 chrome button keys: Enter clicks and Tab moves, Ctrl and Alt do neither" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const none: win32_input.KeyMods = .{};
+    try std.testing.expectEqual(ChromeButtonKeyAction.click, chromeButtonKeyAction(c.VK_RETURN, none).?);
+    try std.testing.expectEqual(ChromeButtonKeyAction.focus_next, chromeButtonKeyAction(c.VK_TAB, none).?);
+    try std.testing.expectEqual(ChromeButtonKeyAction.focus_previous, chromeButtonKeyAction(c.VK_TAB, .{ .shift = true }).?);
+    try std.testing.expectEqual(@as(?ChromeButtonKeyAction, null), chromeButtonKeyAction(c.VK_RETURN, .{ .ctrl = true }));
+    try std.testing.expectEqual(@as(?ChromeButtonKeyAction, null), chromeButtonKeyAction(c.VK_TAB, .{ .ctrl = true }));
+    try std.testing.expectEqual(@as(?ChromeButtonKeyAction, null), chromeButtonKeyAction(c.VK_TAB, .{ .alt = true }));
+    // Space is the BUTTON class's own (it clicks on the key-up).
+    try std.testing.expectEqual(@as(?ChromeButtonKeyAction, null), chromeButtonKeyAction(c.VK_SPACE, none));
+    try std.testing.expectEqual(@as(?win32_input.FocusStep, win32_input.FocusStep.previous), win32_input.tabFocusStep(c.VK_TAB, .{ .shift = true }));
+    try std.testing.expectEqual(@as(?win32_input.FocusStep, null), win32_input.tabFocusStep(c.VK_RETURN, none));
+}
+
+test "win32 focus stops step in order, wrap, and skip hidden stops" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const Stops = struct {
+        visible: []const bool,
+        fn available(self: @This(), stop: usize) bool {
+            return self.visible[stop];
+        }
+    };
+    const all: Stops = .{ .visible = &.{ true, true, true, true } };
+    try std.testing.expectEqual(@as(?usize, 1), nextFocusStop(4, 0, false, all, Stops.available));
+    try std.testing.expectEqual(@as(?usize, 0), nextFocusStop(4, 3, false, all, Stops.available));
+    try std.testing.expectEqual(@as(?usize, 3), nextFocusStop(4, 0, true, all, Stops.available));
+    try std.testing.expectEqual(@as(?usize, 1), nextFocusStop(4, 2, true, all, Stops.available));
+    const gaps: Stops = .{ .visible = &.{ true, false, false, true } };
+    try std.testing.expectEqual(@as(?usize, 3), nextFocusStop(4, 0, false, gaps, Stops.available));
+    try std.testing.expectEqual(@as(?usize, 0), nextFocusStop(4, 3, false, gaps, Stops.available));
+    try std.testing.expectEqual(@as(?usize, 0), nextFocusStop(4, 3, true, gaps, Stops.available));
+    // Nothing else to land on: stay.
+    const alone: Stops = .{ .visible = &.{ true, false, false, false } };
+    try std.testing.expectEqual(@as(?usize, null), nextFocusStop(4, 0, false, alone, Stops.available));
+    try std.testing.expectEqual(@as(?usize, null), nextFocusStop(1, 0, false, all, Stops.available));
+    try std.testing.expectEqual(@as(?usize, null), nextFocusStop(4, 9, false, all, Stops.available));
+}
+
+test "win32 a tab context menu hands focus back to the strip only from the keyboard and without an overlay" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    try std.testing.expect(tabContextMenuRestoresStripFocus(true, false));
+    try std.testing.expect(!tabContextMenuRestoresStripFocus(true, true));
+    try std.testing.expect(!tabContextMenuRestoresStripFocus(false, false));
+}
+
+test "win32 tab strip action names are the UIA names the tooltips show" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    try std.testing.expectEqualStrings("New tab", tabStripActionName(.new_tab));
+    try std.testing.expectEqualStrings("More tabs", tabStripActionName(.more_tabs));
+}
+
+test "win32 command palette toggle binding is recognized inside action chains" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const absent = [_]input.Binding.Action{ .{ .copy_to_clipboard = .mixed }, .paste_from_clipboard };
+    const present = [_]input.Binding.Action{ .{ .copy_to_clipboard = .mixed }, .toggle_command_palette };
+    try std.testing.expect(!bindingActionsToggleCommandPalette(&absent));
+    try std.testing.expect(bindingActionsToggleCommandPalette(&present));
+}
+
+// Differential, not tautological: the same event misses the default
+// ctrl+shift+p binding with an empty remap set and matches it with alt=ctrl.
+test "win32 key-remap applies to command palette toggle lookup" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var cfg = try configpkg.Config.default(std.testing.allocator);
+    defer cfg.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var remaps: input.KeyRemapSet = .empty;
+    try remaps.parseCLI(arena.allocator(), "alt=ctrl");
+    remaps.finalize();
+
+    const event: input.KeyEvent = .{
+        .key = .key_p,
+        .mods = .{ .shift = true, .alt = true },
+        .unshifted_codepoint = 'p',
+    };
+    const no_remaps: input.KeyRemapSet = .empty;
+    try std.testing.expect(!keyEventTogglesCommandPalette(event, &cfg.keybind.set, &no_remaps));
+    try std.testing.expect(keyEventTogglesCommandPalette(event, &cfg.keybind.set, &remaps));
+}
+
+test "win32 inspector panel visibility is tab scoped" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    try std.testing.expect(inspectorPanelVisibleForState(.none, true));
+    try std.testing.expect(!inspectorPanelVisibleForState(.none, false));
+    try std.testing.expect(!inspectorPanelVisibleForState(.command_palette, true));
+}
+
 test "win32 only a close in the window in front takes focus" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
     var host: Host = undefined;
@@ -10897,8 +11221,8 @@ test "win32 the [+] and [v] tooltips and UIA names are one table, and the hover 
 
     var buf: [32]u8 = undefined;
     const ctx: *anyopaque = @ptrFromInt(0x10);
-    try std.testing.expectEqualStrings(labels.tabStripActionName(.new_tab), Host.hostActionUiaName(ctx, 0, &buf));
-    try std.testing.expectEqualStrings(labels.tabStripActionName(.more_tabs), Host.hostActionUiaName(ctx, 1, &buf));
+    try std.testing.expectEqualStrings(tabStripActionName(.new_tab), Host.hostActionUiaName(ctx, 0, &buf));
+    try std.testing.expectEqualStrings(tabStripActionName(.more_tabs), Host.hostActionUiaName(ctx, 1, &buf));
 
     // The same hover, click and leave rules govern [+] and [v]: a dwell
     // presents, a click keeps it down, leaving ends the dismissal.

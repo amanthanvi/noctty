@@ -474,6 +474,17 @@ pub fn chromeKeyMods() docked_search.Mods {
     };
 }
 
+pub const KeyMods = docked_search.Mods;
+
+pub const FocusStep = enum { next, previous };
+
+/// Tab and Shift+Tab, which move through a chrome region's stops. Ctrl+Tab
+/// and Alt+Tab are other chords.
+pub fn tabFocusStep(vk: WPARAM, mods: KeyMods) ?FocusStep {
+    if (vk != c.VK_TAB or mods.ctrl or mods.alt) return null;
+    return if (mods.shift) .previous else .next;
+}
+
 pub fn keyPressed(vk: i32) bool {
     if (pinnedKey(vk)) |key| return (key & 0x80) != 0;
     return sys.GetKeyState(vk) < 0;

@@ -2,8 +2,8 @@
 //! win32/: window user data, the last Win32 error, the placement cache, cached
 //! window text and EDIT selections in UTF-8 offsets. A leaf by its own imports:
 //! none of them is the facade or a file that owns its objects. What they import
-//! in turn is not a leaf (chrome_layout imports labels, which imports
-//! ../../apprt.zig and so the facade).
+//! in turn is not a leaf (chrome_layout imports overlay_view, whose
+//! config/windows_shell.zig reaches ../../apprt.zig and so the facade).
 const std = @import("std");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;

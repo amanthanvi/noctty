@@ -121,9 +121,11 @@ reading step under [Self-Correction Log](#self-correction-log).
   `src/apprt/win32/` own session capture and restore, the quick terminal host,
   window state, surface presentation, the docked search controls, overlay and
   palette orchestration, the chrome scene, child-control plumbing
-  (`child_window.zig`), Win32 constants/externs, labels/input, owned and
-  bounded text (`text.zig`), startup/render tracing, chrome rectangle math,
-  and GDI paint primitives.
+  (`child_window.zig`), Win32 constants/externs, input (`input.zig`), what a
+  confirm prompt, a tab label and the host overlay say (`confirm_text.zig`,
+  `tab_label.zig`, `overlay_view.zig`) and which profile a pick names
+  (`profile_pick.zig`), owned and bounded text (`text.zig`), startup/render
+  tracing, chrome rectangle math, and GDI paint primitives.
 - Windows packaging: `dist/windows/` + `scripts/package-windows.ps1`
 - libghostty-vt headers: `include/ghostty/`
 
