@@ -1091,6 +1091,11 @@ palette: Palette = .{},
 /// Setting this to `true` will apply the `background-opacity` to all cells
 /// regardless of whether they have an explicit background color set or not.
 ///
+/// On Windows, in a window whose background alone is translucent, an explicit
+/// cell background is drawn at `background-opacity` over the translucent
+/// window background, so it ends more opaque than the window's (0.75 at 0.5),
+/// as it does upstream where the compositor keeps the window's alpha.
+///
 /// Available since: 1.2.0
 @"background-opacity-cells": bool = false,
 

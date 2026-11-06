@@ -238,6 +238,23 @@ test "CommonDerivedConfig split fill defaults to the configured background" {
     try std.testing.expectEqual(terminal.color.RGB{ .r = 0xff, .g = 0xff, .b = 0xff }, derived.unfocused_split_fill);
 }
 
+/// Whether the window composes a renderer's alpha (noctty divergence, #640):
+/// it set an opacity below 1, which only a window whose background alone is
+/// translucent does (an opaque one sets 1, a layered one none).
+fn composesAlpha(override: ?f64) bool {
+    const opacity = override orelse return false;
+    return opacity < 1.0;
+}
+
+test "a renderer's frame is converted for the window only while the window composes a translucent alpha" {
+    try std.testing.expect(composesAlpha(0.5));
+    try std.testing.expect(composesAlpha(0.0));
+    // Opaque per-pixel, layered or D3D11 windows, and the config's opacity
+    // alone: upstream's targets and present, unchanged.
+    try std.testing.expect(!composesAlpha(1.0));
+    try std.testing.expect(!composesAlpha(null));
+}
+
 /// The opacity a renderer draws its background at: the window's while it
 /// composes the terminal's alpha and set one (`background_opacity_override`),
 /// else the config's.
@@ -1887,6 +1904,18 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     "drawFrame size_changed width={} height={}",
                     .{ self.size.screen.width, self.size.screen.height },
                 );
+            }
+
+            // noctty divergence (#640): a window that composes this pane's
+            // alpha has its frames converted as they are presented, from
+            // targets made for it (`GraphicsAPI.composed_alpha`). Any other
+            // window keeps upstream's targets and present.
+            if (comptime @hasField(GraphicsAPI, "composed_alpha")) {
+                const composed = composesAlpha(self.background_opacity_override);
+                if (self.api.composed_alpha != composed) {
+                    self.api.composed_alpha = composed;
+                    self.target_config_modified +%= 1;
+                }
             }
 
             // If this frame's target isn't the correct size, or the target
