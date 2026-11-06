@@ -268,9 +268,13 @@ that govern each symbol you change, or that none does.
   `retryBackgroundOpacity`, `releaseBackgroundOpacity`, `childCreated` and
   `solidifies` in `win32/window_state.zig`, with `Host.chrome_alpha` and
   `Host.blur_behind_failed`; when a window shows it again: the `opacity`
-  argument of `App.reconfigureTheme`, `reconfigureSystemTheme`,
-  `App.endSettingsPreview`, and `Host.closing` in `Host.closeConfirmed`
-  and `App.windowDestroyed`;
+  argument of `App.reconfigureTheme`, `reconfigureSystemTheme` and its
+  baseline (`App.system_theme_refresh`, `SystemThemeSnapshot`, which
+  `reconfigureTheme` and `App.init` set), `App.endSettingsPreview`, the
+  window half of a config change (the `.surface` and `.app`
+  `config_change` arms, `App.app_wide_config_change`,
+  `App.updateCoreConfig`, `App.updatePaneCoreConfig`), and `Host.closing`
+  in `Host.closeConfirmed` and `App.windowDestroyed`;
   `Surface.setBackgroundOpacity`,
   `rendererSwitchedToOpenGL` and `WM_WINHOSTTY_RENDERER_SWITCHED`; the
   renderer's `background_opacity_override`; how a pane's frame reaches a
