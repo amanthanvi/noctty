@@ -6179,8 +6179,9 @@ pub const App = struct {
                 }
                 // High Contrast shows every window opaque, and a window that
                 // had blur-behind asserts it again across the theme change,
-                // after the frame write above, as after every style write
-                // that changes the frame.
+                // after the frame write above, as fullscreen and the
+                // decorations toggle do (not every frame write does: open
+                // item (d) of the OPACITY-640-FOLLOWUPS log entry).
                 switch (opacity) {
                     .retry => window_state.retryBackgroundOpacity(host),
                     .refresh => window_state.refreshBackgroundOpacity(host),

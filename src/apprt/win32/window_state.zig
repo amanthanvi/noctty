@@ -3181,9 +3181,11 @@ test "win32 a Settings preview of a theme and an opacity that ends applies the o
             try std.testing.expect(!testHostIsLayered(hwnd));
             try std.testing.expectEqual(@as(?u8, null), testBackgroundAlpha(hwnd));
 
-            // Closing Settings without saving ends the same way, back at the
-            // config's own translucent opacity and theme: one apply, at that
-            // value, and blur-behind asserted once for it.
+            // A cancel-shaped end (`endSettingsPreview` directly; closing
+            // Settings for real reverts each preview first, open item (c) of
+            // the OPACITY-640-FOLLOWUPS log entry) ends the same way, back at
+            // the config's own translucent opacity and theme: one apply, at
+            // that value, and blur-behind asserted once for it.
             app.config.@"background-opacity" = 0.8;
             try applyConfig(fixture.newest().host.?, &app.config);
             try std.testing.expectEqual(@as(?u8, 204), testBackgroundAlpha(hwnd));
