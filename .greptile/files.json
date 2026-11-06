@@ -127,7 +127,7 @@
         "src/apprt/win32/gdi.zig",
         "src/apprt/win32/child_window.zig",
         "src/apprt/win32/text.zig",
-        "src/apprt/win32/labels.zig",
+        "src/apprt/win32/input.zig",
         "src/apprt/win32/chrome_layout.zig",
         "src/apprt/win32/tab_label.zig"
       ]
@@ -147,7 +147,6 @@
         "src/apprt/win32_universal_palette.zig",
         "src/apprt/win32/child_window.zig",
         "src/apprt/win32/text.zig",
-        "src/apprt/win32/labels.zig",
         "src/apprt/win32/confirm_text.zig",
         "src/apprt/win32/overlay_view.zig",
         "build.zig.zon"
@@ -230,7 +229,6 @@
         "src/apprt/win32_elevation.zig",
         "src/cli/list_profiles.zig",
         "src/config/command.zig",
-        "src/apprt/win32/labels.zig",
         "src/apprt/win32/confirm_text.zig",
         "src/apprt/win32/profile_pick.zig"
       ]

@@ -326,7 +326,6 @@ $win32RuntimeBaselineModuleNames = @(
     'gdi.zig'
     'gl_startup.zig'
     'input.zig'
-    'labels.zig'
     'render_trace.zig'
     'sys.zig'
 )

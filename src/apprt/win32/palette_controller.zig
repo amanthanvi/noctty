@@ -10,7 +10,6 @@ const LPARAM = runtime.LPARAM;
 const LRESULT = runtime.LRESULT;
 const PAINTSTRUCT = runtime.PAINTSTRUCT;
 const PaletteCatalog = runtime.PaletteCatalog;
-const PaletteCompletion = runtime.PaletteCompletion;
 const PaletteRanked = runtime.PaletteRanked;
 const PaletteSnapshot = runtime.PaletteSnapshot;
 const PaletteStableId = runtime.PaletteStableId;
@@ -31,7 +30,6 @@ const overlayEditText = runtime.overlayEditText;
 const overlay_view = @import("overlay_view.zig");
 const ownedStringEquals = paint_text.ownedStringEquals;
 const paint_text = runtime.paint_text;
-const paletteCompletionText = runtime.paletteCompletionText;
 const palette_catalog_label_bytes = runtime.palette_catalog_label_bytes;
 const palette_list_class_name = runtime.palette_list_class_name;
 const palette_max_visible_rows = runtime.palette_max_visible_rows;
@@ -79,6 +77,24 @@ const PaletteRowColumns = struct {
     subtitle: RECT,
     shortcut: RECT,
 };
+
+const PaletteCompletion = struct {
+    text: []const u8,
+    id: PaletteStableId,
+};
+
+fn paletteCompletionText(descriptor: win32_palette.catalog.Descriptor) []const u8 {
+    return switch (descriptor.payload) {
+        .action => |payload| payload.action,
+        .recent_command => |payload| payload.action,
+        .profile => |key| key,
+        .theme => |name| name,
+        .layout => |name| name,
+        // A setting's payload is its internal tag; the title is what the row
+        // says and what the query has to match.
+        .tab, .pane, .help, .setting => descriptor.item.title,
+    };
+}
 
 pub fn paletteVisibleRowCapacity(available_height: i32, row_height: i32) usize {
     if (row_height <= 0 or available_height < row_height) return 0;

@@ -459,6 +459,7 @@ pub const VK_LWIN = 0x5B;
 pub const VK_RWIN = 0x5C;
 pub const VK_APPS = 0x5D;
 pub const VK_NUMPAD0 = 0x60;
+pub const VK_NUMPAD1 = 0x61;
 pub const VK_NUMPAD9 = 0x69;
 pub const VK_MULTIPLY = 0x6A;
 pub const VK_ADD = 0x6B;

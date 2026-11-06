@@ -9,7 +9,6 @@ const child_window = @import("child_window.zig");
 const chrome_layout = @import("chrome_layout.zig");
 const docked_search = @import("docked_search.zig");
 const gdi = @import("gdi.zig");
-const labels = @import("labels.zig");
 const c = @import("consts.zig");
 const sys = @import("sys.zig");
 const win32_input = @import("input.zig");
@@ -424,7 +423,7 @@ fn searchEditProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
                 const key = searchKey(if (msg == c.WM_SYSKEYDOWN) .sys_down else .down, .edit, wParam, lParam);
                 // Tab walks the query and then the bar's visible buttons,
                 // wrapping; Escape and Ctrl+F6 still leave the bar.
-                if (labels.tabFocusStep(wParam, key.key.mods)) |step| {
+                if (win32_input.tabFocusStep(wParam, key.key.mods)) |step| {
                     _ = v.stepSearchFocus(surface, hwnd, step == .previous);
                     return 0;
                 }

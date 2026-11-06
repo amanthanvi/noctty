@@ -463,15 +463,35 @@ fn pinnedKey(vk: i32) ?u8 {
     return state[std.math.cast(u8, vk) orelse return 0];
 }
 
+pub const KeyMods = docked_search.Mods;
+
 /// The modifiers held for the key message being handled, as the chrome's
 /// key rules and the docked search take them. A test pins them with
 /// `TestingKeyboard`; AltGr reads as Ctrl plus Alt.
-pub fn chromeKeyMods() docked_search.Mods {
+pub fn chromeKeyMods() KeyMods {
     return .{
         .shift = keyPressed(c.VK_SHIFT),
         .ctrl = keyPressed(c.VK_CONTROL),
         .alt = keyPressed(c.VK_MENU),
     };
+}
+
+pub const FocusStep = enum { next, previous };
+
+/// Tab and Shift+Tab, which move through a chrome region's stops. Ctrl+Tab
+/// and Alt+Tab are other chords.
+pub fn tabFocusStep(vk: WPARAM, mods: KeyMods) ?FocusStep {
+    if (vk != c.VK_TAB or mods.ctrl or mods.alt) return null;
+    return if (mods.shift) .previous else .next;
+}
+
+test "win32 Tab and Shift+Tab step through chrome stops; Ctrl, Alt and other keys do not" {
+    try std.testing.expectEqual(@as(?FocusStep, .next), tabFocusStep(c.VK_TAB, .{}));
+    try std.testing.expectEqual(@as(?FocusStep, .previous), tabFocusStep(c.VK_TAB, .{ .shift = true }));
+    try std.testing.expectEqual(@as(?FocusStep, null), tabFocusStep(c.VK_TAB, .{ .ctrl = true }));
+    try std.testing.expectEqual(@as(?FocusStep, null), tabFocusStep(c.VK_TAB, .{ .alt = true }));
+    try std.testing.expectEqual(@as(?FocusStep, null), tabFocusStep(c.VK_TAB, .{ .shift = true, .ctrl = true }));
+    try std.testing.expectEqual(@as(?FocusStep, null), tabFocusStep(c.VK_RETURN, .{}));
 }
 
 pub fn keyPressed(vk: i32) bool {
