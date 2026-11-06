@@ -8,6 +8,7 @@ Corrected in other files:
 - 2026-10-15 PKG-37 ("Renderer pacing"), item (1): its "127-141 presents inside the holds on main" pools the held program under the emulated 60 Hz present (127-128) with the expose runs on real swaps (139-141), and its "every 50 ms" invalidation is a 50 ms `Start-Sleep` that ran about 62.5 ms apart: the 2026-10-31 MEASUREMENT-HARNESS-RERUN-01 entry in test-harnesses.md.
 
 See also:
+- The opacity a Win32 window has its panes' renderers draw the background at (`background_opacity_override`, the `.background_opacity` message, kept apart from `config`, which `changeConfig` replaces, and transferred on a D3D11 fallback, which posts that its window may show its opacity per pixel now): the 2026-11-05 OPACITY-640 entry in window-frame.md.
 - `font-thicken` (FreeType embolden strength) is in the 2026-10-17 PKG-66 entry in app-lifecycle.md.
 - Kitty placements whose rows were pruned, and why `kittyUpdate`'s unwrapped `pointFromPin` is safe: the 2026-10-19 KITTYPIN entry (#482) in terminal-core.md.
 - The source rectangle and cell offsets `prepKittyPlacement` draws a Kitty placement with (`Placement.sourceRect`, `Placement.cellOffset`): the 2026-10-30 Kitty graphics conformance entry in terminal-core.md.
