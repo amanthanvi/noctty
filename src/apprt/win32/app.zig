@@ -678,6 +678,13 @@ pub const App = struct {
     /// persistence.
     session_state_excluded_for_elevation: bool = false,
     config_revision: u64 = 1,
+    /// Set while a config change goes to every pane and then to the app
+    /// (`updateCoreConfig`; the palette's theme swap,
+    /// `Host.swapRuntimeConfigFromPalette`). A pane's `.surface`
+    /// `config_change` then leaves the window half to the app-wide step,
+    /// which applies it for every window once, after the theme's frame write
+    /// (`window_state.applyConfig`).
+    app_wide_config_change: bool = false,
     resolved_theme: ThemeColors = darkTheme(),
     /// Completed `reconfigureTheme` passes; a test reads it to prove that a
     /// settings preview which cannot change the theme does not run one.
@@ -706,7 +713,10 @@ pub const App = struct {
     ) anyerror!*Surface = null,
     /// Test-only seam that stands in for the GL context and the core surface
     /// in `Surface.init`, neither of which a unit test can create. The window,
-    /// tab, shell and unwind steps around them run for real.
+    /// tab, shell and unwind steps around them run for real. A pane it made
+    /// has no core to update a config of, so while it is set a config update
+    /// (`updatePaneCoreConfig`, `updateCoreConfig`) gives each pane what
+    /// core's update ends in for it: its `.surface` `config_change`.
     test_surface_init_stage: ?*const fn (surface: *Surface, stage: Surface.InitStage) anyerror!void = null,
     /// Test-only seam for automation snapshots built without a live core
     /// surface. Returned strings are owned by the caller.
@@ -4194,7 +4204,10 @@ pub const App = struct {
                         // Every value is stored before the first step that
                         // can fail, and the windows' decorations and opacity
                         // go before the panes' scrollbar refresh, as each
-                        // pane's config change once ordered them.
+                        // pane's config change once ordered them. This is
+                        // each window's one apply in a reload (the panes'
+                        // `.surface` arms leave it here), a window kept empty
+                        // for undo included, after the theme's frame write.
                         for (self.registry.windows.items) |surface| surface.takeRuntimeConfig(&self.config);
                         for (self.registry.hosts.items) |host| try window_state.applyConfig(host, &self.config);
                         for (self.registry.windows.items) |surface| try surface.refreshScrollbarWindow();
@@ -4211,12 +4224,15 @@ pub const App = struct {
                     },
                     .surface => |core_surface| {
                         const surface = self.registry.findSurfaceByCore(core_surface) orelse return false;
-                        // The pane stores its config first; the window takes
-                        // a pane's config only from the pane it shows, before
-                        // the pane's fallible scrollbar refresh.
+                        // The pane stores its config first. A pane's own
+                        // config change gives its window the config only from
+                        // the pane the window shows, before the pane's
+                        // fallible scrollbar refresh. One that is part of an
+                        // app-wide change leaves the window to the app's
+                        // step, which applies it for every window once.
                         surface.takeRuntimeConfig(value.config);
                         surface.setTabBackground(value.config.background);
-                        if (surface.host) |host| if (host.activeSurface() == surface) try window_state.applyConfig(host, value.config);
+                        if (!self.app_wide_config_change) if (surface.host) |host| if (host.activeSurface() == surface) try window_state.applyConfig(host, value.config);
                         try surface.refreshScrollbarWindow();
                     },
                 }
@@ -4230,7 +4246,7 @@ pub const App = struct {
                 if (self.safe_mode) return true;
                 if (value.soft) {
                     switch (target) {
-                        .app => try self.core_app.updateConfig(self, &self.config),
+                        .app => try self.updateCoreConfig(&self.config),
                         .surface => |core_surface| try core_surface.updateConfig(&self.config),
                     }
                     return true;
@@ -4262,7 +4278,7 @@ pub const App = struct {
 
                 var config = try configpkg.Config.load(self.core_app.alloc);
                 defer config.deinit();
-                try self.core_app.updateConfig(self, &config);
+                try self.updateCoreConfig(&config);
                 // A reload that found problems says so, whatever
                 // `app-notifications` allows: "reloaded" would be false.
                 // The config in effect, not the one just read: the app
@@ -5975,6 +5991,36 @@ pub const App = struct {
         try self.core_app.colorSchemeEvent(self, scheme);
     }
 
+    /// Every update of the app's config from here: core `App.updateConfig`,
+    /// which updates each pane (its `.surface` `config_change`) and then the
+    /// app (the `.app` one), as one app-wide change
+    /// (`app_wide_config_change`), so each window applies its half once, in
+    /// the app's step.
+    pub fn updateCoreConfig(self: *App, config: *const configpkg.Config) !void {
+        const outer = self.app_wide_config_change;
+        self.app_wide_config_change = true;
+        defer self.app_wide_config_change = outer;
+        if (builtin.is_test and self.test_surface_init_stage != null) {
+            // Core's order, for panes with no core: each pane, then the app
+            // (without the app's light/dark state, which core puts the
+            // config in first).
+            for (self.core_app.surfaces.items) |pane| try self.updatePaneCoreConfig(pane, config);
+            _ = try self.performAction(.app, .config_change, .{ .config = config });
+            return;
+        }
+        try self.core_app.updateConfig(self, config);
+    }
+
+    /// Core's config update of `pane` alone (`Surface.updateConfig`), which
+    /// ends in its `.surface` `config_change`.
+    pub fn updatePaneCoreConfig(self: *App, pane: *Surface, config: *const configpkg.Config) !void {
+        if (builtin.is_test and self.test_surface_init_stage != null) {
+            _ = try self.performAction(.{ .surface = pane.core() }, .config_change, .{ .config = config });
+            return;
+        }
+        try pane.core().updateConfig(config);
+    }
+
     pub fn reconfigureSystemTheme(self: *App) void {
         const snapshot = SystemThemeSnapshot.capture(self.shownConfig());
         const changed = self.system_theme_refresh.accept(snapshot) or !std.meta.eql(snapshot.theme, self.resolved_theme);
@@ -6087,10 +6133,10 @@ pub const App = struct {
 
     /// The opacity a window applies along with `config`
     /// (`window_state.applyConfig`): Settings' preview of it while one is
-    /// shown, whatever `config` is. A reload reaches each terminal's own
-    /// config before the app's (`CoreApp.updateConfig`), so a window that
-    /// took the saved value there would show it until the app's
-    /// `config_change` put the preview back, a theme rebuild later.
+    /// shown, whatever `config` is, so neither a pane's own config change
+    /// (its `.surface` `config_change` outside an app-wide change) nor a
+    /// reload's app-wide step shows a window the saved value under a
+    /// preview.
     pub fn shownBackgroundOpacity(self: *const App, config: *const configpkg.Config) f64 {
         if (self.settings_preview) |*preview| {
             if (preview.@"background-opacity" != self.config.@"background-opacity") return preview.@"background-opacity";
@@ -8920,7 +8966,7 @@ pub const App = struct {
         // app, so one that fails may have applied part of the reload
         // (`SavedPartlyApplied`).
         postWriteStep(.apply);
-        self.core_app.updateConfig(self, applied) catch |err| {
+        self.updateCoreConfig(applied) catch |err| {
             log.warn("settings save: saved, but applying the reload failed partway; the running settings may be partly updated err={}", .{err});
             return error.SavedPartlyApplied;
         };
@@ -9349,7 +9395,7 @@ pub const App = struct {
         }
         if (!apply) return error.DiskChanged;
         log.info("settings save: the config file changed on disk under an edited setting; offering the choice", .{});
-        self.core_app.updateConfig(self, &disk) catch |err| {
+        self.updateCoreConfig(&disk) catch |err| {
             log.warn("settings save: applying the changed config file failed err={}", .{err});
             return error.ReloadFailed;
         };
@@ -9640,7 +9686,7 @@ pub const App = struct {
             app.cli_config_override_path = @constCast(target);
             var loaded = try load(std.testing.allocator);
             defer loaded.deinit();
-            try app.core_app.updateConfig(app, &loaded);
+            try app.updateCoreConfig(&loaded);
         }
 
         fn end(app: *App) void {
@@ -9698,7 +9744,7 @@ pub const App = struct {
             {
                 var loaded = try SaveTest.load(alloc);
                 defer loaded.deinit();
-                try app.core_app.updateConfig(&app, &loaded);
+                try app.updateCoreConfig(&loaded);
             }
             var original = try app.config.clone(alloc);
             defer original.deinit();
@@ -9732,7 +9778,7 @@ pub const App = struct {
         {
             var loaded = try SaveTest.load(alloc);
             defer loaded.deinit();
-            try app.core_app.updateConfig(&app, &loaded);
+            try app.updateCoreConfig(&loaded);
         }
         var original = try app.config.clone(alloc);
         defer original.deinit();
@@ -9781,7 +9827,7 @@ pub const App = struct {
             {
                 var loaded = try SaveTest.load(alloc);
                 defer loaded.deinit();
-                try app.core_app.updateConfig(&app, &loaded);
+                try app.updateCoreConfig(&loaded);
             }
             var original = try app.config.clone(alloc);
             defer original.deinit();
@@ -9839,7 +9885,7 @@ pub const App = struct {
             {
                 var loaded = try SaveTest.load(alloc);
                 defer loaded.deinit();
-                try app.core_app.updateConfig(&app, &loaded);
+                try app.updateCoreConfig(&loaded);
             }
             var original = try app.config.clone(alloc);
             defer original.deinit();
@@ -10535,7 +10581,7 @@ pub const App = struct {
             {
                 var loaded = try SaveTest.load(alloc);
                 defer loaded.deinit();
-                try app.core_app.updateConfig(&app, &loaded);
+                try app.updateCoreConfig(&loaded);
             }
             SaveTest.fail_next = &fail_next;
             SaveTest.fail_step = .apply;
@@ -10662,7 +10708,7 @@ pub const App = struct {
         {
             var loaded = try SaveTest.load(alloc);
             defer loaded.deinit();
-            try app.core_app.updateConfig(&app, &loaded);
+            try app.updateCoreConfig(&loaded);
         }
         var light_original = try app.config.clone(alloc);
         defer light_original.deinit();
@@ -10776,7 +10822,7 @@ pub const App = struct {
         {
             var loaded = try SaveTest.load(alloc);
             defer loaded.deinit();
-            try app.core_app.updateConfig(&app, &loaded);
+            try app.updateCoreConfig(&loaded);
         }
         var original = try app.config.clone(alloc);
         defer original.deinit();
@@ -10906,7 +10952,7 @@ pub const App = struct {
             defer loaded.deinit();
             var switched = (try loaded.changeConditionalState(.{ .theme = .dark })) orelse return error.TestExpectedSwitch;
             defer switched.deinit();
-            try app.core_app.updateConfig(&app, &switched);
+            try app.updateCoreConfig(&switched);
         }
         try settings_profiles.followFile(&original, &pending, &app.config, &baselines);
         try std.testing.expect(baselines.profiles.values.name.get("py") != null);

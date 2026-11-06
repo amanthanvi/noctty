@@ -834,9 +834,12 @@ var test_blur_behind_asserts: usize = 0;
 var test_blur_behind_fails = false;
 
 /// Every `applyBackgroundOpacity` on a window, in a test, and the opacity it
-/// applied last.
+/// applied last; and, while a test points `test_background_opacity_log` at a
+/// list, each window it applied to, with that opacity.
 var test_background_opacity_applies: usize = 0;
 var test_background_opacity_applied: f64 = 1.0;
+var test_background_opacity_log: ?*std.ArrayListUnmanaged(TestOpacityApply) = null;
+const TestOpacityApply = struct { host: *const Host, opacity: f64 };
 
 fn paneRenderer(pane: ?*const Surface) PaneRenderer {
     if (builtin.is_test) {
@@ -1116,6 +1119,10 @@ fn applyBackgroundOpacity(host: *Host) !void {
     if (builtin.is_test) {
         test_background_opacity_applies += 1;
         test_background_opacity_applied = host.top_level.opacity;
+        if (test_background_opacity_log) |applied| applied.append(std.testing.allocator, .{
+            .host = host,
+            .opacity = host.top_level.opacity,
+        }) catch {};
     }
     var shown = shownOpacity(host);
     if (shown.background != null) {
@@ -2481,13 +2488,22 @@ test "win32 a config reload of maximize and fullscreen leaves the windows alread
     }.body);
 }
 
-/// What a reload does once the file is read (`CoreApp.updateConfig`): each
-/// pane's config change, then the app's.
+/// What a reload does once the file is read (`App.updateCoreConfig`): each
+/// pane's config change, then the app's, as core orders them (a test pane
+/// has no core: `App.test_surface_init_stage`).
 fn reloadConfig(app: *App, config: *const configpkg.Config) !void {
-    for (app.registry.windows.items) |pane| {
-        try std.testing.expect(try app.performAction(.{ .surface = pane.core() }, .config_change, .{ .config = config }));
-    }
-    try std.testing.expect(try app.performAction(.app, .config_change, .{ .config = config }));
+    try app.updateCoreConfig(config);
+}
+
+/// That `applied` has `host`'s window applying its opacity once, at
+/// `opacity`.
+fn expectAppliedOnce(applied: []const TestOpacityApply, host: *const Host, opacity: f64) !void {
+    var applies: usize = 0;
+    for (applied) |apply| if (apply.host == host) {
+        applies += 1;
+        try std.testing.expectEqual(opacity, apply.opacity);
+    };
+    try std.testing.expectEqual(@as(usize, 1), applies);
 }
 
 /// The alpha `hwnd`'s window shows at, either way: layered whole, or its
@@ -2918,7 +2934,7 @@ test "win32 a theme change or a reload that flips the frame mode asserts blur-be
     }.body);
 }
 
-test "win32 the app's config change applies each window's opacity once, at its new value" {
+test "win32 a reload and the palette's theme apply each window's opacity once, at its new value, a window kept empty for undo included" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
     try runOnHiddenDesktop(struct {
         fn body() !void {
@@ -2929,31 +2945,62 @@ test "win32 the app's config change applies each window's opacity once, at its n
             test_pane_renderer = .opengl;
             defer test_pane_renderer = null;
 
+            // A window of two tabs, a window of one, and a window whose only
+            // tab is in undo history, which no pane's config change reaches.
             app.config.@"background-opacity" = 0.5;
             try app.createWindow(default_title);
-            const hwnd = fixture.newest().host.?.hwnd.?;
-            try std.testing.expectEqual(@as(?u8, 128), testBackgroundAlpha(hwnd));
+            const shown = fixture.newest();
+            _ = try app.createWindowSurface(&app.config, default_title, .{ .host_id = shown.host_id });
+            try app.createWindow(default_title);
+            const single = fixture.newest();
+            try app.createWindow(default_title);
+            const emptied = fixture.newest().host.?;
+            var entry = emptied.detachTabForUndo(0).?;
+            defer _ = emptied.restoreClosedTabEntryNative(&entry.payload.close_tab) catch false;
+            const hosts = [_]*Host{ shown.host.?, single.host.?, emptied };
+            for (hosts) |host| try std.testing.expectEqual(@as(?u8, 128), testBackgroundAlpha(host.hwnd.?));
 
-            // The app's half of a reload (each pane's own config change
-            // applies the opacity too, at the new value): its theme rebuild
-            // leaves the opacity to `applyConfig`, which applies it once, so
-            // blur-behind is asserted only where the window ends translucent,
-            // never at the opacity it leaves.
-            for ([_]struct { opacity: f64, shown: ?u8 }{
-                .{ .opacity = 1.0, .shown = null },
-                .{ .opacity = 0.5, .shown = 128 },
-            }) |step| {
-                var config = try app.config.clone(std.testing.allocator);
-                defer config.deinit();
-                config.@"background-opacity" = step.opacity;
-                const applies = test_background_opacity_applies;
-                const asserts = test_blur_behind_asserts;
-                try std.testing.expect(try app.performAction(.app, .config_change, .{ .config = &config }));
-                try std.testing.expectEqual(applies + 1, test_background_opacity_applies);
-                try std.testing.expectEqual(step.opacity, test_background_opacity_applied);
-                try std.testing.expectEqual(asserts + @intFromBool(step.shown != null), test_blur_behind_asserts);
-                try std.testing.expectEqual(step.shown, testBackgroundAlpha(hwnd));
+            var applied: std.ArrayListUnmanaged(TestOpacityApply) = .empty;
+            defer applied.deinit(std.testing.allocator);
+            test_background_opacity_log = &applied;
+            defer test_background_opacity_log = null;
+
+            // A reload (every pane's config change, then the app's) and the
+            // palette's theme (every pane's, then its window loop): each
+            // window applies its opacity once, in the app-wide step after the
+            // theme rebuild, at the new value, so blur-behind is asserted
+            // only where a window ends translucent, once.
+            for ([_]bool{ false, true }) |palette| {
+                for ([_]struct { opacity: f64, shown: ?u8 }{
+                    .{ .opacity = 1.0, .shown = null },
+                    .{ .opacity = 0.5, .shown = 128 },
+                }) |step| {
+                    var config = try app.config.clone(std.testing.allocator);
+                    config.@"background-opacity" = step.opacity;
+                    applied.clearRetainingCapacity();
+                    const asserts = test_blur_behind_asserts;
+                    if (palette) {
+                        var left = shown.host.?.swapRuntimeConfigFromPalette(config);
+                        left.deinit();
+                    } else {
+                        defer config.deinit();
+                        try reloadConfig(app, &config);
+                    }
+                    try std.testing.expectEqual(hosts.len, applied.items.len);
+                    for (hosts) |host| {
+                        try expectAppliedOnce(applied.items, host, step.opacity);
+                        try std.testing.expectEqual(step.shown, testBackgroundAlpha(host.hwnd.?));
+                    }
+                    try std.testing.expectEqual(asserts + if (step.shown != null) hosts.len else 0, test_blur_behind_asserts);
+                }
             }
+
+            // A pane's own config change, outside an app-wide one, still
+            // gives its window the config, from the pane the window shows.
+            applied.clearRetainingCapacity();
+            try std.testing.expect(try app.performAction(.{ .surface = single.core() }, .config_change, .{ .config = &app.config }));
+            try std.testing.expectEqual(@as(usize, 1), applied.items.len);
+            try expectAppliedOnce(applied.items, single.host.?, 0.5);
         }
     }.body);
 }

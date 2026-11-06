@@ -2451,13 +2451,21 @@ pub const Host = struct {
         self.app.config_revision +%= 1;
         if (self.app.config_revision == 0) self.app.config_revision = 1;
         self.app.reconfigureTheme(.caller_applies);
-        for (self.app.registry.windows.items) |surface| {
-            surface.core().updateConfig(&self.app.config) catch |err| {
-                log.warn("palette theme core apply failed err={}", .{err});
-            };
-            surface.applyRuntimeConfig(&self.app.config) catch |err| {
-                log.warn("palette theme runtime apply failed err={}", .{err});
-            };
+        {
+            // Every pane, then every window: an app-wide change, whose
+            // panes leave the window half to the host loop below, so each
+            // window applies it once.
+            const outer = self.app.app_wide_config_change;
+            self.app.app_wide_config_change = true;
+            defer self.app.app_wide_config_change = outer;
+            for (self.app.registry.windows.items) |surface| {
+                self.app.updatePaneCoreConfig(surface, &self.app.config) catch |err| {
+                    log.warn("palette theme core apply failed err={}", .{err});
+                };
+                surface.applyRuntimeConfig(&self.app.config) catch |err| {
+                    log.warn("palette theme runtime apply failed err={}", .{err});
+                };
+            }
         }
         for (self.app.registry.hosts.items) |host| {
             window_state.applyConfig(host, &self.app.config) catch |err| {
