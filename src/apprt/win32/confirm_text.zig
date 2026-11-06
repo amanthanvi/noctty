@@ -378,17 +378,7 @@ pub fn preview(alloc: Allocator, contents: []const u8) Allocator.Error!Preview {
 /// trustworthy about order rather than pretty, and the substitution is
 /// documented in `docs/windows-capability-matrix.md` so the behaviour is
 /// not a surprise.
-fn isBidiFormatting(cp: u21) bool {
-    return switch (cp) {
-        0x061C, // ARABIC LETTER MARK
-        0x200E, // LEFT-TO-RIGHT MARK
-        0x200F, // RIGHT-TO-LEFT MARK
-        0x202A...0x202E, // LRE, RLE, PDF, LRO, RLO
-        0x2066...0x2069, // LRI, RLI, FSI, PDI
-        => true,
-        else => false,
-    };
-}
+const isBidiFormatting = paint_text.isBidiFormatting;
 
 fn appendCodepoint(alloc: Allocator, out: *std.ArrayListUnmanaged(u8), cp: u21) !void {
     var buf: [4]u8 = undefined;
