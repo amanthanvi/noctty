@@ -23,6 +23,7 @@ const object = @import("object.zig");
 const constants = @import("constants.zig");
 const events = @import("events.zig");
 const terminal_text = @import("text.zig");
+const win32_consts = @import("../win32/consts.zig");
 
 /// Private tab-button message. It carries a stable tab ID, never a pointer.
 pub const tab_close_message: u32 = 0x8000 + 16;
@@ -111,7 +112,7 @@ fn hwndHasKeyboardFocus(hwnd: com.HWND) bool {
     return focused == hwnd or IsChild(hwnd, focused) != 0;
 }
 
-const WM_COMMAND: u32 = 0x0111;
+const WM_COMMAND: u32 = win32_consts.WM_COMMAND;
 const SMTO_BLOCK: u32 = 0x0001;
 const SMTO_ABORTIFHUNG: u32 = 0x0002;
 const settings_selection_timeout_ms: u32 = 2000;
@@ -1345,7 +1346,7 @@ pub const SettingsControlProvider = struct {
     const CB_SHOWDROPDOWN: u32 = 0x014F;
     const CB_GETDROPPEDSTATE: u32 = 0x0157;
     const CB_FINDSTRINGEXACT: u32 = 0x0158;
-    const BN_CLICKED: u16 = 0;
+    const BN_CLICKED: u16 = win32_consts.BN_CLICKED;
     const CBN_SELCHANGE: u16 = 1;
 
     pub fn create(
@@ -8902,7 +8903,7 @@ test "settings provider behavior selection dispatch is bounded for a hung owner 
         const WAIT_OBJECT_0: u32 = 0;
         const WAIT_TIMEOUT: u32 = 258;
         const INFINITE: u32 = 0xFFFFFFFF;
-        const PM_REMOVE: u32 = 0x0001;
+        const PM_REMOVE: u32 = win32_consts.PM_REMOVE;
 
         extern "kernel32" fn CreateEventW(
             lpEventAttributes: ?*anyopaque,

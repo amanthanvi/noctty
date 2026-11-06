@@ -14,6 +14,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const sys = @import("win32/sys.zig");
+const consts = @import("win32/consts.zig");
 const drop = @import("win32_surface_drop.zig");
 const ole_types = @import("win32_ole.zig");
 const win32_types = @import("win32_types.zig");
@@ -44,12 +45,12 @@ const DROPEFFECT_NONE: DWORD = 0;
 const DROPEFFECT_COPY: DWORD = 1;
 
 // Clipboard formats (well-known constants).
-const CF_HDROP: WORD = 15;
-const CF_UNICODETEXT: WORD = 13;
+const CF_HDROP: WORD = consts.CF_HDROP;
+const CF_UNICODETEXT: WORD = consts.CF_UNICODETEXT;
 
 // MK_ key-state flags present in `grfKeyState`.
-const MK_SHIFT: DWORD = 0x0004;
-const MK_CONTROL: DWORD = 0x0008;
+const MK_SHIFT: DWORD = consts.MK_SHIFT;
+const MK_CONTROL: DWORD = consts.MK_CONTROL;
 const MK_ALT: DWORD = 0x0020;
 
 // TYMED flags.

@@ -53,7 +53,7 @@ extern "shell32" fn SHChangeNotify(
 const HKEY_CURRENT_USER: HKEY = @ptrFromInt(consts.HKEY_CURRENT_USER);
 const HKEY_LOCAL_MACHINE: HKEY = @ptrFromInt(consts.HKEY_LOCAL_MACHINE);
 const KEY_WRITE: REGSAM = 0x20006;
-const KEY_READ: REGSAM = 0x20019;
+const KEY_READ: REGSAM = consts.KEY_READ;
 const REG_OPTION_NON_VOLATILE: DWORD = 0;
 const REG_SZ: DWORD = 1;
 const ERROR_SUCCESS: i32 = consts.ERROR_SUCCESS;

@@ -17,6 +17,7 @@ const Command = @import("../config/command.zig").Command;
 const win32_aumid = @import("win32_aumid.zig");
 const persistence = @import("win32_session_persistence.zig");
 const sys = @import("win32/sys.zig");
+const consts = @import("win32/consts.zig");
 
 const Allocator = std.mem.Allocator;
 const DWORD = u32;
@@ -45,7 +46,7 @@ const max_shell_link_chars: usize = 32_768;
 const profile_description_prefix = "noctty-profile:";
 
 const CLSCTX_INPROC_SERVER: DWORD = 0x1;
-const COINIT_APARTMENTTHREADED: DWORD = 0x2;
+const COINIT_APARTMENTTHREADED: DWORD = consts.COINIT_APARTMENTTHREADED;
 const CO_E_NOTINITIALIZED: HRESULT = @bitCast(@as(u32, 0x800401F0));
 const E_NOINTERFACE: HRESULT = @bitCast(@as(u32, 0x80004002));
 const VT_LPWSTR: u16 = 31;
