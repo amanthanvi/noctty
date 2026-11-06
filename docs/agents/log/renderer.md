@@ -9,6 +9,7 @@ Corrected in other files:
 
 See also:
 - The opacity a Win32 window has its panes' renderers draw the background at (`background_opacity_override`, the `.background_opacity` message, kept apart from `config`, which `changeConfig` replaces, and transferred on a D3D11 fallback, which posts that its window may show its opacity per pixel now): the 2026-11-05 OPACITY-640 entry in window-frame.md.
+- An unfocused split in a window that composes a pane's alpha is dimmed after the present's conversion, not by the `split_dim` pass (`splitDimPass`, `Target.composed_dim`, the `dim` uniform of `present_composed.f.glsl`), which qualifies the 2026-10-19 #408 entry's "one pass after the custom shaders": the 2026-11-05 OPACITY-640 entry in window-frame.md.
 - `font-thicken` (FreeType embolden strength) is in the 2026-10-17 PKG-66 entry in app-lifecycle.md.
 - Kitty placements whose rows were pruned, and why `kittyUpdate`'s unwrapped `pointFromPin` is safe: the 2026-10-19 KITTYPIN entry (#482) in terminal-core.md.
 - The source rectangle and cell offsets `prepKittyPlacement` draws a Kitty placement with (`Placement.sourceRect`, `Placement.cellOffset`): the 2026-10-30 Kitty graphics conformance entry in terminal-core.md.

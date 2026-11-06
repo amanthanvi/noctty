@@ -103,7 +103,12 @@
         "src/apprt/win32_nc_layout.zig",
         "src/apprt/win32_quick_terminal.zig",
         "src/apprt/win32/chrome_layout.zig",
-        "src/apprt/win32_session_state.zig"
+        "src/apprt/win32_session_state.zig",
+        "src/renderer/generic.zig",
+        "src/renderer/OpenGL.zig",
+        "src/renderer/opengl/Target.zig",
+        "src/renderer/opengl/shaders.zig",
+        "src/renderer/shaders/glsl/present_composed.f.glsl"
       ]
     },
     {

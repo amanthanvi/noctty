@@ -269,7 +269,15 @@ that govern each symbol you change, or that none does.
   `win32/window_state.zig`, with `Host.chrome_alpha` and
   `Host.blur_behind_failed`; `Surface.setBackgroundOpacity`,
   `rendererSwitchedToOpenGL` and `WM_WINHOSTTY_RENDERER_SWITCHED`; the
-  renderer's `background_opacity_override`), the
+  renderer's `background_opacity_override`; how a pane's frame reaches a
+  window that composes its alpha: `composesAlpha` and `splitDimPass` in
+  `src/renderer/generic.zig`, `OpenGL.composed_alpha`, `presentsComposed`,
+  `OpenGL.present`, `presentComposed`, `drawComposed` and
+  `composedDimUniform` in `src/renderer/OpenGL.zig`, `Target.Options.sampled`,
+  `initSampled` and `Target.composed_dim` in `src/renderer/opengl/Target.zig`,
+  `initPresentComposedPipeline` and the `split_dim` pipeline's flags in
+  `src/renderer/opengl/shaders.zig`, and
+  `src/renderer/shaders/glsl/present_composed.f.glsl`), the
   window menu, the quick terminal (`win32_quick_terminal.zig`,
   `win32/quick_terminal_host.zig`).
 - [chrome-tabs-paint.md](docs/agents/log/chrome-tabs-paint.md): tab buttons
