@@ -7,9 +7,16 @@
 // srgb(c) * a. Sampling the sRGB texture decodes to c * a: divide a out,
 // encode, and premultiply again. Written with GL_FRAMEBUFFER_SRGB off, so the
 // bytes land as they are. An opaque pixel (a = 1) comes out unchanged.
+//
+// An unfocused split's dim (`dim`: the fill and its alpha, 0-1, straight) is
+// laid over the converted pixel, premultiplied-over in gamma space as the
+// split_dim pass blends the stored bytes of any other frame. Drawn into the
+// target before this conversion, it would be read as linear light. A zero
+// alpha leaves the pixel as converted.
 
 layout(binding = 0) uniform sampler2D frame;
 uniform vec2 dst_size;
+uniform vec4 dim;
 
 layout(location = 0) out vec4 out_FragColor;
 
@@ -22,10 +29,10 @@ vec3 unlinearize(vec3 linear) {
 
 void main() {
     vec4 p = texture(frame, gl_FragCoord.xy / dst_size);
-    if (p.a <= 0.0) {
-        out_FragColor = vec4(0.0);
-        return;
+    vec4 converted = vec4(0.0);
+    if (p.a > 0.0) {
+        vec3 c = clamp(p.rgb / p.a, vec3(0.0), vec3(1.0));
+        converted = vec4(unlinearize(c) * p.a, p.a);
     }
-    vec3 c = clamp(p.rgb / p.a, vec3(0.0), vec3(1.0));
-    out_FragColor = vec4(unlinearize(c) * p.a, p.a);
+    out_FragColor = vec4(dim.rgb * dim.a, dim.a) + converted * (1.0 - dim.a);
 }

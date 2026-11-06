@@ -46,6 +46,14 @@ renderbuffer: ?gl.Renderbuffer,
 /// The texture a sampled target renders into, in place of the renderbuffer.
 texture: ?gl.Texture = null,
 
+/// The dim of an unfocused split that presenting lays over this sampled
+/// target after converting it (noctty, #640): the bytes of the fill and its
+/// alpha, as `splitDimUniforms` gives them. The dim blends in gamma space on
+/// the window's sRGB-premultiplied pixels, so drawn into the target first
+/// the conversion would read it as linear light. Set for each frame by the
+/// generic renderer (`splitDimPass`); null for no dim.
+composed_dim: ?[4]u8 = null,
+
 /// Current width of this target.
 width: usize,
 /// Current height of this target.
