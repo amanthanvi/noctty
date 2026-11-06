@@ -1064,11 +1064,16 @@ palette: Palette = .{},
 ///
 /// This can be changed in the Windows-only fork without restarting Ghostty.
 ///
-/// On Windows the whole window fades, not just the background: a value below
-/// 0.999 makes the window a layered window shown at that overall alpha, so
-/// text, the tab strip and the title bar fade with it (a value from 0.999 up
-/// counts as opaque, and the window is not layered). There is no per-pixel
-/// opacity, and `background-blur` has no effect (see below).
+/// On Windows, a value below 0.999 shows in one of two ways (a value from
+/// 0.999 up counts as opaque). With the default OpenGL renderer only the
+/// terminal background is translucent: text, the tab strip, the title bar
+/// and the other window chrome stay solid, and what is behind the window
+/// shows through unblurred. A window with a pane on the Direct3D 11 beta
+/// (`renderer = d3d11`), which presents with its alpha ignored, fades as a
+/// whole instead, text and chrome included, as a layered window; once every
+/// pane of it runs OpenGL (a D3D11 pane can fall back), only its background
+/// is translucent. High Contrast shows every window opaque, and
+/// `background-blur` has no effect (see below).
 @"background-opacity": f64 = 1.0,
 
 /// Applies background opacity to cells with an explicit background color
@@ -1098,13 +1103,11 @@ palette: Palette = .{},
 ///     cause strange rendering and performance issues.
 ///
 /// In the Windows-only fork this setting is accepted but has no effect on
-/// any Windows build, and enabling it logs a warning. Nothing in the Win32
-/// runtime can show a DWM backdrop material such as Mica or Acrylic: the
-/// window chrome is painted opaquely, the terminal is an opaque OpenGL child
-/// whose framebuffer alpha DWM discards, and nothing opts into per-pixel
-/// window alpha. `background-opacity` is a flat window-wide tint (layered
-/// window alpha), not a blur, and blur intensities are ignored along with the
-/// rest of the setting.
+/// any Windows build, and enabling it logs a warning. noctty asks DWM for no
+/// backdrop material such as Mica or Acrylic, so the background
+/// `background-opacity` makes translucent shows what is behind the window
+/// unblurred (and a window with a Direct3D 11 pane fades as a whole), and
+/// blur intensities are ignored along with the rest of the setting.
 @"background-blur": BackgroundBlur = .false,
 
 /// The opacity level (opposite of transparency) of an unfocused split.

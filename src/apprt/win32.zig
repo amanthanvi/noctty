@@ -4978,10 +4978,9 @@ test "split-divider-color recolors the pane gap" {
 /// value parses and other platforms honour it.
 pub fn logBackgroundBlurUnsupported() void {
     log.warn(
-        "background-blur has no effect on Windows in this build: noctty paints its " ++
-            "window opaquely and opts into no DWM transparency mechanism, so no backdrop " ++
-            "material can reach a visible pixel. background-opacity is a flat " ++
-            "window-wide tint, not a blur",
+        "background-blur has no effect on Windows in this build: noctty asks DWM for " ++
+            "no backdrop material, so the background background-opacity makes translucent " ++
+            "shows what is behind the window unblurred",
         .{},
     );
 }
@@ -5218,8 +5217,11 @@ pub fn applyDwmThemeWithBuild(hwnd: HWND, theme: *const ThemeColors, config: *co
         isHighContrastActive(),
         caption_color,
         text_color,
-        // No backdrop material: Windows' acrylic adds a light layer over the
-        // theme's background, so `background-blur` stays unsupported.
+        // No backdrop material, so `background-blur` has no effect
+        // (window-frame.md, 2026-09-14). Since #640 a translucent OpenGL
+        // window has blur-behind with an empty region, under which
+        // `DWMSBT_TRANSIENTWINDOW` would show acrylic, but Windows lays a light
+        // layer over the theme's background with it: a change of its own.
         c.DWMSBT_NONE,
         supportsDwmSystemBackdropAttribute(os_build),
     );
