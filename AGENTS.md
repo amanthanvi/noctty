@@ -264,8 +264,12 @@ that govern each symbol you change, or that none does.
   `window-width`/`window-height`, `background-opacity` and DWM backdrop (how
   a window shows it: `TopLevel.shows` in `win32/window_start.zig`; blur-behind,
   the layered fade, the solid child controls and the panes' renderer opacity:
-  `applyBackgroundOpacity`, `refreshBackgroundOpacity` and `solidifies` in
-  `win32/window_state.zig`, with `Host.chrome_alpha`), the
+  `applyBackgroundOpacity`, `refreshBackgroundOpacity`,
+  `releaseBackgroundOpacity`, `childCreated` and `solidifies` in
+  `win32/window_state.zig`, with `Host.chrome_alpha` and
+  `Host.blur_behind_failed`; `Surface.setBackgroundOpacity`,
+  `rendererSwitchedToOpenGL` and `WM_WINHOSTTY_RENDERER_SWITCHED`; the
+  renderer's `background_opacity_override`), the
   window menu, the quick terminal (`win32_quick_terminal.zig`,
   `win32/quick_terminal_host.zig`).
 - [chrome-tabs-paint.md](docs/agents/log/chrome-tabs-paint.md): tab buttons
@@ -280,7 +284,8 @@ that govern each symbol you change, or that none does.
   chrome child z-order, host paint and invalidation scopes and text caches
   (`win32/chrome_scene.zig`: `paintChrome`, `invalidateChrome*`,
   `repaintTopChrome`, the alpha a translucent window's GDI paint takes:
-  `AlphaPaint`, `fixAlpha`; `appendOwnedString` in `win32/text.zig`), the child
+  `AlphaPaint`, `fillLaneBackground`, `fixAlpha`; `appendOwnedString` in
+  `win32/text.zig`), the child
   placement cache (`ChildPlacement`, `applyChromeChildRect` in
   `win32/child_window.zig`), tweens.
 - [chrome-overlays.md](docs/agents/log/chrome-overlays.md): the command

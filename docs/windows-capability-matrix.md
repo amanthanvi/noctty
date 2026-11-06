@@ -333,7 +333,8 @@ renderer draws but blurs nothing, and paints its GDI chrome with an alpha
 window that fades as a whole, because DirectComposition presents that pane with
 its alpha ignored. With blur-behind in place, `DWMSBT_TRANSIENTWINDOW` would
 show acrylic, but Windows lays a light frosted layer over the theme's background
-with it, so that is left for a change of its own.
+with it (the #640 contributor's observation, not measured here), so that is left
+for a change of its own.
 
 Before #640, when every translucent window was layered, this was measured on
 Windows 11 build 26200 over a finely striped desktop, which a real
