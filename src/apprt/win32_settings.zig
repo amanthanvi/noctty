@@ -30,6 +30,7 @@ const focus_cue = @import("win32/focus_cue.zig");
 const win32_input = @import("win32/input.zig");
 const settings_transaction = @import("win32_settings_transaction.zig");
 const sys = @import("win32/sys.zig");
+const consts = @import("win32/consts.zig");
 const config_problems = @import("win32/config_problems.zig");
 const field_model = @import("win32_settings_fields.zig");
 const settings_reference = @import("win32_settings_reference.zig");
@@ -2288,6 +2289,10 @@ pub const AppHandle = struct {
     /// theming. Optional defaults retain compatibility with model-only tests.
     themeColors: ?*const fn (ctx: *anyopaque) win32_theme.ThemeColors = null,
     highContrast: ?*const fn (ctx: *anyopaque) bool = null,
+    /// The Windows build, `App.os_build` (`RtlGetVersion`; 0 when that
+    /// failed, which counts as Windows 10). Below 22000 the theme has no dark
+    /// up-down, so Settings paints its own there (`settingsSpinProc`).
+    os_build: u32 = 0,
     /// Fire-and-forget shell-out to the OS default text editor with
     /// the resolved `ghostty.conf` path. Used by the Advanced-pane
     /// escape hatch.
@@ -6042,6 +6047,7 @@ pub const SettingsWindow = struct {
         const control = self.finishChild(window, null, .control) orelse return;
         self.companions[@intFromEnum(kind)] = control;
         if (kind == .opacity_slider) subclassKeepingPrevious(control, &settingsSliderProc);
+        if (kind != .opacity_slider and paintsOwnSpins(self.handle.os_build)) subclassKeepingPrevious(control, &settingsSpinProc);
         switch (kind) {
             .opacity_slider => {
                 _ = SendMessageW(control, TBM_SETRANGEMIN, 0, 0);
@@ -14128,6 +14134,15 @@ const dialog_test = struct {
         };
     }
 
+    /// This machine's Windows build, as the App reads it for
+    /// `AppHandle.os_build` (`probeWindowsBuild`): a fixture takes the
+    /// branch the app would here.
+    fn windowsBuild() u32 {
+        var info = std.mem.zeroes(sys.RTL_OSVERSIONINFOW);
+        info.dwOSVersionInfoSize = @sizeOf(sys.RTL_OSVERSIONINFOW);
+        return if (sys.RtlGetVersion(&info) < 0) 0 else info.dwBuildNumber;
+    }
+
     fn onHiddenDesktop(body: *const fn () anyerror!void) !void {
         // One desktop per test process. Two test runs at once (parallel
         // worktrees) shared one named desktop, and the Ctrl+S test failed in a
@@ -14331,6 +14346,7 @@ const dialog_test = struct {
                 .customUiaProvidersEnabled = &customUia,
                 .previewField = &previewField,
                 .highContrast = &highContrast,
+                .os_build = windowsBuild(),
                 .profileChoices = &profileChoices,
                 .maskedKeys = &maskedKeys,
                 .failureDetail = &failureDetail,
@@ -20370,6 +20386,135 @@ fn settingsSliderProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) cal
         if (!settings.restoring_focus) settings.ensureControlVisible(hwnd);
     };
     return result;
+}
+
+/// Whether Settings paints its own up-downs on Windows build `os_build`.
+/// `SetWindowTheme(.., "DarkMode_Explorer")` makes an up-down dark only
+/// where the theme has a `DarkMode_Explorer::Spin` class. Windows 11's
+/// aero.msstyles has one; Windows 10's has not, and the up-down falls back
+/// to the light `Spin` without a word (`OpenThemeData` of a made-up
+/// `DarkMode_Bogus::Spin` succeeds too, so the class cannot be asked for).
+/// win32-darkmodelib draws the themed spin from Windows 11 (22000) on and
+/// its own below; so does Settings, through `settingsSpinProc`.
+fn paintsOwnSpins(os_build: u32) bool {
+    return os_build < consts.OS_BUILD_WIN11_21H2;
+}
+
+/// Subclass for an up-down where the theme has no dark one
+/// (`paintsOwnSpins`). In the dark theme it paints the two buttons itself
+/// (`paintSpin`); everything else is still the stock control's: the hit
+/// test, the capture and auto-repeat of a press, `UDN_DELTAPOS`, and the
+/// invalidation that hot tracking and a press make, after which `spinLook`
+/// reads the state back. The light theme and High Contrast keep the stock
+/// up-down. The previous procedure lives in `GWLP_USERDATA`.
+fn settingsSpinProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.winapi) LRESULT {
+    const previous = sys.GetWindowLongPtrW(hwnd, GWLP_USERDATA);
+    if (previous == 0) return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
+    const proc: *const anyopaque = @ptrFromInt(@as(usize, @intCast(previous)));
+    if (msg == WM_NCDESTROY) {
+        _ = sys.SetWindowLongPtrW(hwnd, GWLP_WNDPROC, previous);
+        _ = sys.SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+        return sys.CallWindowProcW(proc, hwnd, msg, wParam, lParam);
+    }
+    const settings = (if (sys.GetParent(hwnd)) |parent| recoverOwner(parent) else null) orelse
+        return sys.CallWindowProcW(proc, hwnd, msg, wParam, lParam);
+    const colors = settings.theme_adapter.colors;
+    if (!colors.is_dark or colors.high_contrast) return sys.CallWindowProcW(proc, hwnd, msg, wParam, lParam);
+    switch (msg) {
+        WM_ERASEBKGND => return 1,
+        WM_PAINT => {
+            var ps: PAINTSTRUCT = undefined;
+            const hdc = BeginPaint(hwnd, &ps);
+            defer _ = EndPaint(hwnd, &ps);
+            paintSpinWindow(settings, hwnd, hdc);
+            return 0;
+        },
+        WM_PRINTCLIENT => {
+            if (wParam != 0) paintSpinWindow(settings, hwnd, @ptrFromInt(wParam));
+            return 0;
+        },
+        else => return sys.CallWindowProcW(proc, hwnd, msg, wParam, lParam),
+    }
+}
+
+const SpinButton = enum { up, down };
+
+/// What an up-down shows: the button under the pointer, pressed while the
+/// up-down holds the capture (it does from a press to the release, stepping
+/// meanwhile), and whether it is enabled.
+const SpinLook = struct {
+    hot: ?SpinButton = null,
+    pressed: bool = false,
+    enabled: bool = true,
+};
+
+/// Read from the pointer, as the stock control invalidates itself whenever
+/// any of it changes. Where the pointer cannot be read (a desktop that is
+/// not the input one), nothing is under it.
+fn spinLook(hwnd: HWND, rect: RECT) SpinLook {
+    if (sys.IsWindowEnabled(hwnd) == 0) return .{ .enabled = false };
+    var cursor: POINT = undefined;
+    if (sys.GetCursorPos(&cursor) == 0 or sys.ScreenToClient(hwnd, &cursor) == 0) return .{};
+    if (cursor.x < rect.left or cursor.x >= rect.right or cursor.y < rect.top or cursor.y >= rect.bottom) return .{};
+    return .{
+        .hot = if (cursor.y < spinButtonRect(rect, .up).bottom) .up else .down,
+        .pressed = sys.GetCapture() == hwnd,
+    };
+}
+
+/// The up-down's two buttons, stacked: the upper half steps up.
+fn spinButtonRect(rect: RECT, button: SpinButton) RECT {
+    const middle = rect.top + @divTrunc(rect.bottom - rect.top, 2);
+    return switch (button) {
+        .up => .{ .left = rect.left, .top = rect.top, .right = rect.right, .bottom = middle },
+        .down => .{ .left = rect.left, .top = middle, .right = rect.right, .bottom = rect.bottom },
+    };
+}
+
+fn paintSpinWindow(settings: *const SettingsWindow, hwnd: HWND, hdc: HDC) void {
+    var rect: RECT = undefined;
+    if (GetClientRect(hwnd, &rect) == 0) return;
+    paintSpin(settings.theme_adapter.colors, hdc, rect, spinLook(hwnd, rect), @max(1, settings.px(settings_metrics.stroke_hairline)));
+}
+
+/// An up-down's two buttons in `rect`, each framed as a text field at rest
+/// and filled as one, its arrow in the secondary text colour. Under the
+/// pointer a button takes a rail button's hover fill, pressed the
+/// selection's; disabled, the pane's fill and the disabled colour, as a
+/// disabled field. Every pair is in `win32_theme.settings_contrast_pairs`.
+fn paintSpin(colors: win32_theme.SettingsColors, hdc: HDC, rect: RECT, look: SpinLook, hairline: i32) void {
+    for ([_]SpinButton{ .up, .down }) |button| {
+        const part = spinButtonRect(rect, button);
+        const hot = look.enabled and look.hot == button;
+        const shade: struct { fill: COLORREF, frame: COLORREF, arrow: COLORREF } = if (!look.enabled)
+            .{ .fill = colors.window_bg, .frame = colors.disabled_text, .arrow = colors.disabled_text }
+        else if (hot and look.pressed)
+            .{ .fill = colors.selection_bg, .frame = colors.field_border, .arrow = colors.selection_text }
+        else if (hot)
+            .{ .fill = colors.button_bg, .frame = colors.field_border, .arrow = colors.text }
+        else
+            .{ .fill = colors.edit_bg, .frame = colors.field_border, .arrow = colors.secondary_text };
+        fillSolid(hdc, part, shade.fill);
+        strokeRect(hdc, part, shade.frame, hairline);
+        paintSpinArrow(hdc, part, button, shade.arrow);
+    }
+}
+
+/// A solid triangle pointing `button`'s way, centred in `rect`: an odd width
+/// near a quarter of the button's, so the tip is one pixel, and half as tall.
+/// That is 5 x 3 in a 20 px wide up-down at 96 DPI, as Windows 11 draws its
+/// own. Drawn a row at a time, so it is the same shape at every scale.
+fn paintSpinArrow(hdc: HDC, rect: RECT, button: SpinButton, color: COLORREF) void {
+    const width = rect.right - rect.left;
+    const height = rect.bottom - rect.top;
+    const rows = @max(1, @divTrunc(@min(width, 2 * height), 8)) + 1;
+    const center = rect.left + @divTrunc(width, 2);
+    const top = rect.top + @divTrunc(height - rows, 2);
+    var row: i32 = 0;
+    while (row < rows) : (row += 1) {
+        const reach = if (button == .up) row else rows - 1 - row;
+        fillSolid(hdc, .{ .left = center - reach, .top = top + row, .right = center + reach + 1, .bottom = top + row + 1 }, color);
+    }
 }
 
 fn settingsToggleProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.winapi) LRESULT {
@@ -27925,11 +28070,21 @@ test "settings shows no light control in dark mode, and no dark one in light mod
                 if (sys.IsWindowVisible(child) == 0) return 1;
                 var r = dialog_test.rectIn(root, child);
                 if (sys.GetParent(child) != root) {
+                    const whole = r;
                     r.left = @max(r.left, viewport.left);
                     r.top = @max(r.top, viewport.top);
                     r.right = @min(r.right, viewport.right);
                     r.bottom = @min(r.bottom, viewport.bottom);
                     if (r.right <= r.left or r.bottom <= r.top) return 1;
+                    // A thin piece of a control the viewport cuts can be all
+                    // border, which has to stand out from the pane: on
+                    // Windows 10 at 200%, 2 px of a dropdown's top edge,
+                    // #9B9B9B in the dark theme and #ADADAD in the light.
+                    // A control is judged where at least half of its height
+                    // shows. Read a viewport at a time, the page shows every
+                    // control no taller than the viewport that much somewhere.
+                    const height = whole.bottom - whole.top;
+                    if (2 * (r.bottom - r.top) < height and height <= viewport.bottom - viewport.top) return 1;
                 }
                 // Only what the window shows: a page scrolled past its rows
                 // keeps them, out of the viewport's sight.
@@ -28602,6 +28757,167 @@ test "settings the opacity trackbar draws its channel and thumb in the theme's c
         }
     };
     try dialog_test.onHiddenDesktop(Body.body);
+}
+
+test "settings paints its own up-downs below Windows 11, in the dark theme only, and leaves Windows 11's to the theme" {
+    const Body = struct {
+        var dark = true;
+        var high_contrast = false;
+        fn themeColors(_: *anyopaque) win32_theme.ThemeColors {
+            return if (dark) win32_theme.darkTheme() else win32_theme.lightTheme();
+        }
+        fn highContrast(_: *anyopaque) bool {
+            return high_contrast;
+        }
+        /// 0x00RRGGBB and a COLORREF (0x00BBGGRR) into each other.
+        fn swapped(color: u32) u32 {
+            return ((color & 0xFF) << 16) | (color & 0xFF00) | ((color >> 16) & 0xFF);
+        }
+
+        fn body() !void {
+            const controls = try dialog_test.CommonControls6.activate();
+            defer controls.deactivate();
+            // Windows 10 22H2, then the first Windows 11 build: set, so this
+            // machine takes both branches, whichever it runs.
+            for ([_]u32{ consts.OS_BUILD_WIN10_22H2, consts.OS_BUILD_WIN11_21H2 }) |build| {
+                const fixture = try dialog_test.Fixture.prepare(false);
+                defer fixture.finish();
+                const settings = &fixture.settings;
+                settings.handle.os_build = build;
+                settings.handle.themeColors = &themeColors;
+                settings.handle.highContrast = &highContrast;
+                dark = true;
+                high_contrast = false;
+                try settings.open();
+                const hwnd = fixture.hwnd();
+                const ours = build < consts.OS_BUILD_WIN11_21H2;
+                dialog_test.makeAllSections(settings);
+                inline for (.{ Companion.font_size_spin, Companion.scrollback_spin }) |kind| {
+                    const spin = settings.companions[@intFromEnum(kind)].?;
+                    try std.testing.expectEqual(ours, sys.GetWindowLongPtrW(spin, GWLP_WNDPROC) == @as(LONG_PTR, @intCast(@intFromPtr(&settingsSpinProc))));
+                    for ([_]enum { dark, light, high_contrast }{ .dark, .light, .high_contrast }) |mode| {
+                        dark = mode != .light;
+                        high_contrast = mode == .high_contrast;
+                        settings.themeChanged();
+                        for ([_]u32{ 96, 288 }) |dpi| {
+                            errdefer std.debug.print("settings up-down {s} on build {d}, {s}, {d} DPI\n", .{ @tagName(kind), build, @tagName(mode), dpi });
+                            dialog_test.simulateDpi(hwnd, dpi);
+                            settings.showSection(comptime kind.field().section(), false);
+                            settings.ensureControlVisible(spin);
+                            _ = RedrawWindow(hwnd, null, null, RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_ALLCHILDREN | RDW_UPDATENOW);
+                            const capture = try dialog_test.printClient(hwnd);
+                            defer capture.deinit();
+                            const colors = settings.theme_adapter.colors;
+                            const shown = swapped(dialog_test.dominantColor(capture, dialog_test.rectIn(hwnd, spin)).?);
+                            errdefer std.debug.print("mostly 0x{x:0>6} (COLORREF)\n", .{shown});
+                            // Painted here only in the dark theme and only
+                            // below Windows 11: its fill is the field's.
+                            try std.testing.expectEqual(ours and mode == .dark, shown == colors.edit_bg);
+                            if (mode == .light) try std.testing.expect(dialog_test.luminanceOf(swapped(shown)) > 0.5);
+                        }
+                    }
+                }
+            }
+        }
+    };
+    try dialog_test.onHiddenDesktop(Body.body);
+}
+
+test "settings an up-down it paints shows the button under the pointer, a press, and a disabled control" {
+    const colors = win32_theme.settingsColors(win32_theme.darkTheme(), std.mem.zeroes(win32_theme.SettingsSystemColors), false);
+    const Paint = struct {
+        colors: win32_theme.SettingsColors,
+        look: SpinLook,
+        fn draw(self: @This(), hdc: HDC, client: RECT) void {
+            paintSpin(self.colors, hdc, client, self.look, 1);
+        }
+        fn colorAt(capture: dialog_test.Capture, x: i32, y: i32) COLORREF {
+            const pixel = capture.pixels[@as(usize, @intCast(y)) * capture.width + @as(usize, @intCast(x))];
+            return ((pixel & 0xFF) << 16) | (pixel & 0xFF00) | ((pixel >> 16) & 0xFF);
+        }
+    };
+    const Shade = struct { fill: COLORREF, arrow: COLORREF };
+    const rest: Shade = .{ .fill = colors.edit_bg, .arrow = colors.secondary_text };
+    const hot: Shade = .{ .fill = colors.button_bg, .arrow = colors.text };
+    const pressed: Shade = .{ .fill = colors.selection_bg, .arrow = colors.selection_text };
+    const disabled: Shade = .{ .fill = colors.window_bg, .arrow = colors.disabled_text };
+    // An up-down at 96 DPI and at 288.
+    for ([_]RECT{
+        .{ .left = 0, .top = 0, .right = 20, .bottom = 32 },
+        .{ .left = 0, .top = 0, .right = 60, .bottom = 96 },
+    }) |client| {
+        for ([_]struct { look: SpinLook, up: Shade, down: Shade }{
+            .{ .look = .{}, .up = rest, .down = rest },
+            .{ .look = .{ .hot = .up }, .up = hot, .down = rest },
+            .{ .look = .{ .hot = .down }, .up = rest, .down = hot },
+            .{ .look = .{ .hot = .up, .pressed = true }, .up = pressed, .down = rest },
+            .{ .look = .{ .hot = .down, .pressed = true }, .up = rest, .down = pressed },
+            .{ .look = .{ .hot = .up, .pressed = true, .enabled = false }, .up = disabled, .down = disabled },
+        }) |case| {
+            errdefer std.debug.print("settings up-down {d}x{d} {any}\n", .{ client.right, client.bottom, case.look });
+            const capture = try dialog_test.paintInto(client, Paint{ .colors = colors, .look = case.look }, Paint.draw);
+            defer capture.deinit();
+            for ([_]SpinButton{ .up, .down }, [_]Shade{ case.up, case.down }) |button, shade| {
+                const part = spinButtonRect(client, button);
+                try std.testing.expectEqual(if (case.look.enabled) colors.field_border else colors.disabled_text, Paint.colorAt(capture, part.left, part.top));
+                try std.testing.expectEqual(shade.fill, Paint.colorAt(capture, part.left + 1, part.top + 1));
+                // The arrow: its tip one pixel at the centre column, pointing
+                // the button's way, its base wider.
+                const width = part.right - part.left;
+                const rows = @max(1, @divTrunc(@min(width, 2 * (part.bottom - part.top)), 8)) + 1;
+                const center = part.left + @divTrunc(width, 2);
+                const top = part.top + @divTrunc(part.bottom - part.top - rows, 2);
+                const tip = if (button == .up) top else top + rows - 1;
+                const base = if (button == .up) top + rows - 1 else top;
+                try std.testing.expectEqual(shade.arrow, Paint.colorAt(capture, center, tip));
+                try std.testing.expectEqual(shade.fill, Paint.colorAt(capture, center - 1, tip));
+                try std.testing.expectEqual(shade.arrow, Paint.colorAt(capture, center - (rows - 1), base));
+                try std.testing.expectEqual(shade.fill, Paint.colorAt(capture, center - rows, base));
+            }
+        }
+    }
+}
+
+test "settings an up-down invalidates itself when the button under the pointer or a press changes, which its own paint reads" {
+    try dialog_test.onHiddenDesktop(struct {
+        fn darkColors(_: *anyopaque) win32_theme.ThemeColors {
+            return win32_theme.darkTheme();
+        }
+        fn body() !void {
+            const controls = try dialog_test.CommonControls6.activate();
+            defer controls.deactivate();
+            const fixture = try dialog_test.Fixture.prepare(false);
+            defer fixture.finish();
+            const settings = &fixture.settings;
+            settings.handle.os_build = consts.OS_BUILD_WIN10_22H2;
+            settings.handle.themeColors = &darkColors;
+            try settings.open();
+            const hwnd = fixture.hwnd();
+            settings.showSection(.appearance, false);
+            const spin = settings.companions[@intFromEnum(Companion.font_size_spin)].?;
+            settings.ensureControlVisible(spin);
+            dialog_test.flushPaint(hwnd);
+            var client: RECT = undefined;
+            _ = GetClientRect(spin, &client);
+            const x: usize = @intCast(@divTrunc(client.right, 2));
+            const upper: LPARAM = @bitCast((@as(usize, @intCast(@divTrunc(client.bottom, 4))) << 16) | x);
+            const lower: LPARAM = @bitCast((@as(usize, @intCast(@divTrunc(3 * client.bottom, 4))) << 16) | x);
+            const MK_LBUTTON: WPARAM = 0x0001;
+            for ([_]struct { name: []const u8, msg: UINT, wParam: WPARAM, lParam: LPARAM, captured: bool }{
+                .{ .name = "pointer onto the upper button", .msg = WM_MOUSEMOVE, .wParam = 0, .lParam = upper, .captured = false },
+                .{ .name = "pointer onto the lower button", .msg = WM_MOUSEMOVE, .wParam = 0, .lParam = lower, .captured = false },
+                .{ .name = "press", .msg = WM_LBUTTONDOWN, .wParam = MK_LBUTTON, .lParam = lower, .captured = true },
+                .{ .name = "release", .msg = 0x0202, .wParam = 0, .lParam = lower, .captured = false }, // WM_LBUTTONUP
+                .{ .name = "pointer away", .msg = WM_MOUSELEAVE, .wParam = 0, .lParam = 0, .captured = false },
+            }) |step| {
+                errdefer std.debug.print("settings up-down after: {s}\n", .{step.name});
+                _ = sys.ValidateRect(spin, null);
+                _ = SendMessageW(spin, step.msg, step.wParam, step.lParam);
+                try std.testing.expectEqual(step.captured, sys.GetCapture() == spin);
+                try std.testing.expect(sys.GetUpdateRect(spin, null, 0) != 0);
+            }
+        }
+    }.body);
 }
 
 test "settings the trackbar and up-downs are named for their fields, and the trackbar's focus rectangle follows the keyboard cue" {
