@@ -92,19 +92,21 @@ $bin = "$HOME\.local\noctty\bin"
 $lnk = Join-Path ([Environment]::GetFolderPath('Programs')) 'noctty (source build).lnk'
 if (Test-Path -LiteralPath $lnk) {
     Write-Error "$lnk already exists; remove it or pick another name."
-    return
+} else {
+    $s = (New-Object -ComObject WScript.Shell).CreateShortcut($lnk)
+    $s.TargetPath = "$bin\noctty.exe"
+    $s.IconLocation = "$bin\noctty.ico"
+    $s.WorkingDirectory = $HOME
+    $s.Save()
 }
-$s = (New-Object -ComObject WScript.Shell).CreateShortcut($lnk)
-$s.TargetPath = "$bin\noctty.exe"
-$s.IconLocation = "$bin\noctty.ico"
-$s.WorkingDirectory = $HOME
-$s.Save()
 ```
 
 Create the shortcut once; later rebuilds only need the `zig build` line. The
 check stops rather than overwrite a shortcut that is already there, because
 `CreateShortcut` on an existing path loads that shortcut and `Save()` rewrites
-it.
+it. The shortcut is made in the `else` branch, not after a `return`, because a
+pasted block can run one statement at a time, and a `return` would then end
+only its own statement.
 
 Differences from an installed copy:
 
