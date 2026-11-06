@@ -85,7 +85,9 @@ const PaletteCompletion = struct {
 
 fn paletteCompletionText(descriptor: win32_palette.catalog.Descriptor) []const u8 {
     return switch (descriptor.payload) {
-        .action => |payload| payload.action,
+        // A tab transfer has no binding-action text: its title is what the
+        // row says and what the query has to match.
+        .action => |payload| if (payload.tab_transfer != null) descriptor.item.title else payload.action,
         .recent_command => |payload| payload.action,
         .profile => |key| key,
         .theme => |name| name,
@@ -602,6 +604,46 @@ test "win32 rich palette completion cycles duplicate display text by stable id" 
     try std.testing.expectEqualStrings("Same title", first.text);
     try std.testing.expectEqualStrings("Same title", second.text);
     try std.testing.expect(!first.id.eql(second.id));
+}
+
+test "win32 rich palette completion fills a tab transfer row's title, not its empty action" {
+    var items: [2]PaletteItem = undefined;
+    var payloads: [2]PalettePayload = undefined;
+    var catalog = try PaletteCatalog.init(&items, &payloads);
+    try catalog.append(.{
+        .item = .{
+            .id = win32_palette.catalog.stableStringId(.action, "move-left"),
+            .title = "Move tab to pane \u{2014} left",
+            .subtitle = "vim",
+            .keywords = "move tab split pane left",
+        },
+        .payload = .{ .action = .{ .tab_transfer = .{ .source_tab = 2, .target_pane = 7, .direction = .left } } },
+    });
+    try catalog.append(.{
+        .item = .{
+            .id = win32_palette.catalog.stableStringId(.action, "new-tab"),
+            .title = "New tab",
+            .keywords = "move new tab",
+        },
+        .payload = .{ .action = .{ .action = "new_tab" } },
+    });
+
+    var host: Host = undefined;
+    host.palette_catalog = catalog;
+    // Completing onto the transfer row writes its title, which still ranks it,
+    // and the next completion moves on from it rather than starting over.
+    var completion = host.richPaletteCompletionCandidate("move", "move", null, false).?;
+    var seen_transfer = false;
+    for (0..2) |_| {
+        if (std.mem.startsWith(u8, completion.text, "Move tab to pane")) {
+            seen_transfer = true;
+            try std.testing.expectEqualStrings("Move tab to pane \u{2014} left", completion.text);
+        } else {
+            try std.testing.expectEqualStrings("new_tab", completion.text);
+        }
+        completion = host.richPaletteCompletionCandidate("move", completion.text, completion.id, false).?;
+    }
+    try std.testing.expect(seen_transfer);
 }
 
 /// palette-mru.txt holds one key per line, escaped as the contents of a Zig
