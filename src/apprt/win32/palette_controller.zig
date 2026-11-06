@@ -11,7 +11,6 @@ const LRESULT = runtime.LRESULT;
 const PAINTSTRUCT = runtime.PAINTSTRUCT;
 const PaletteCatalog = runtime.PaletteCatalog;
 const PaletteCompletion = runtime.PaletteCompletion;
-const PalettePresentation = runtime.PalettePresentation;
 const PaletteRanked = runtime.PaletteRanked;
 const PaletteSnapshot = runtime.PaletteSnapshot;
 const PaletteStableId = runtime.PaletteStableId;
@@ -29,6 +28,7 @@ const lParamBits = runtime.lParamBits;
 const lastError = child_window.lastError;
 const log = runtime.log;
 const overlayEditText = runtime.overlayEditText;
+const overlay_view = @import("overlay_view.zig");
 const ownedStringEquals = paint_text.ownedStringEquals;
 const paint_text = runtime.paint_text;
 const paletteCompletionText = runtime.paletteCompletionText;
@@ -855,7 +855,7 @@ pub const HostControls = struct {
         );
     }
 
-    pub fn palettePresentation(self: *const Host) PalettePresentation {
+    pub fn palettePresentation(self: *const Host) overlay_view.Facts.Presentation {
         if (self.palette_list_ranked_count == 0) return .{};
         const row = @min(self.palette_list_selected, self.palette_list_ranked_count - 1);
         const catalog = if (self.palette_catalog) |*value| value else return .{

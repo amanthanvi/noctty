@@ -30,6 +30,7 @@ $win32TestModuleRoots = @(
     '_ = @import("win32/confirm_text.zig");'
     '_ = @import("win32/tab_label.zig");'
     '_ = @import("win32/profile_pick.zig");'
+    '_ = @import("win32/overlay_view.zig");'
 )
 foreach ($win32TestModuleRoot in $win32TestModuleRoots) {
     if (-not [regex]::IsMatch(
@@ -62,9 +63,12 @@ foreach ($win32TestModuleRoot in $win32TestModuleRoots) {
 # when its tab label, tooltip and UIA name tests moved to tab_label.zig (14),
 # its cell-width compaction tests to text.zig (4), the window caption's title
 # tests to host.zig (2) and text.zig (1) and the base title's to
-# terminal_window.zig (1), and to 59 when its profile picking tests (by key,
+# terminal_window.zig (1), to 59 when its profile picking tests (by key,
 # typed text, where the picker starts, quick slots and pins) moved to
-# profile_pick.zig (6).
+# profile_pick.zig (6), and to 29 when its overlay text, mode and focus ring
+# tests moved to overlay_view.zig (24), the title prompt's refill test to
+# host.zig (1), and commandPaletteBannerText, which no overlay lane reached
+# once overlay_view replaced buildOverlayHintText, went with its 5 tests.
 # window_start.zig is the pure half of window state, which received its
 # consolidated tests: the `plan`, `place`, `returnOn`, `forRestore` and
 # `savedFullscreen` tables (from window_state.zig's start and placement tests
@@ -82,8 +86,15 @@ foreach ($win32TestModuleRoot in $win32TestModuleRoots) {
 # profile_pick.zig says which profile a key, typed text, the picker's start
 # and a quick slot pick, and where a pick opens: its floor is the 6 tests from
 # labels.zig and the 3 open-target tests from win32.zig, 9.
+# overlay_view.zig says what the host overlay says and shows in each mode: its
+# floor is the 24 tests from labels.zig, rewritten against `compose`, `shape`,
+# `nextFocus` and `bannerLine` with the three mode tables as one `shape` table
+# (22), less the three confirm tests (payload size, three titles, banner
+# precedence) that the confirm hint and title tests cover once both lanes
+# come from one `compose` (19), and its test of the profile overlay's
+# detecting state, 20.
 $movedWin32TestFloors = [ordered]@{
-    'labels.zig' = 59
+    'labels.zig' = 29
     'input.zig' = 24
     'gl_startup.zig' = 4
     'render_trace.zig' = 3
@@ -95,6 +106,7 @@ $movedWin32TestFloors = [ordered]@{
     'confirm_text.zig' = 16
     'tab_label.zig' = 18
     'profile_pick.zig' = 9
+    'overlay_view.zig' = 20
 }
 foreach ($movedWin32TestModule in $movedWin32TestFloors.Keys) {
     $movedWin32TestModulePath = @($win32RuntimeModuleFiles | Where-Object {
@@ -133,13 +145,17 @@ foreach ($movedWin32TestModule in $movedWin32TestFloors.Keys) {
 # utf8BoundedPrefix moved in, 16 since labels.zig's cell-width compaction
 # tests followed `compactHostLabel` there and `windowTitleSyncChanged`'s
 # test became its `ownedStringEquals` test (tab labels). For the same move,
-# host.zig's floor is 46 and terminal_window.zig's 24: the window caption's
-# title tests came from labels.zig with `buildHostAwareBaseTitle` and
-# `resolveWindowBaseTitle`, and host.zig gained the NameChanged test of a
-# narrow tab's split. session.zig's floor is 27: its five restore-by-key
-# tests became rows of pane_launch.zig's `prepare` table (pane launch step
-# 4b), and its fullscreen-placement lookup-failure test became
-# window_start.zig's pure `savedFullscreen` test (window state, step 6).
+# host.zig's floor was 46 and terminal_window.zig's is 24: the window
+# caption's title tests came from labels.zig with `buildHostAwareBaseTitle`
+# and `resolveWindowBaseTitle`, and host.zig gained the NameChanged test of a
+# narrow tab's split. host.zig's is 48 since the title prompt's refill test
+# came from labels.zig with `overlayTextNeedsRefill` (overlay view): its 48
+# named tests, so deleting that one fails the floor (it was one under the
+# count before).
+# session.zig's floor is 27: its five restore-by-key tests became rows of
+# pane_launch.zig's `prepare` table (pane launch step 4b), and its
+# fullscreen-placement lookup-failure test became window_start.zig's pure
+# `savedFullscreen` test (window state, step 6).
 # notifications.zig's 23 are the toast lifecycle's, the click's and the cold
 # toast wait's tests at its interface, which replaced App's, Host's,
 # Surface's and Registry's, and the two cold-wait tests that moved from
@@ -158,7 +174,7 @@ foreach ($movedWin32TestModule in $movedWin32TestFloors.Keys) {
 $extractedWin32TestModules = [ordered]@{
     'registry.zig' = @{ Binding = 'registry_module'; Floor = 6 }
     'app.zig' = @{ Binding = 'app_module'; Floor = 59 }
-    'host.zig' = @{ Binding = 'host_module'; Floor = 46 }
+    'host.zig' = @{ Binding = 'host_module'; Floor = 48 }
     'terminal_window.zig' = @{ Binding = 'terminal_window_module'; Floor = 24 }
     'session.zig' = @{ Binding = 'session_module'; Floor = 27 }
     'quick_terminal_host.zig' = @{ Binding = 'quick_terminal_host'; Floor = 10 }

@@ -744,9 +744,9 @@ pub const App = struct {
     update_apply_queued: bool = false,
     update_startup_ready: bool = false,
     /// Most-recently-used command palette actions; newest first. Strings
-    /// are owned by `core_app.alloc` and freed in `App.deinit`. Surfaced
-    /// by `commandPaletteBannerText` when the query is empty so users
-    /// see their own recent picks instead of the static onboarding hint.
+    /// are owned by `core_app.alloc` and freed in `App.deinit`. The
+    /// palette's hint names the newest when the query is empty
+    /// (`overlay_view.compose`, through `Host.overlayFacts`).
     palette_mru: [5]?[:0]const u8 = .{null} ** 5,
     /// Singleton settings window. Lazily created by the `open_config`
     /// action; `App.terminate` destroys the HWND if still alive.

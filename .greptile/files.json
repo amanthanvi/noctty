@@ -149,6 +149,7 @@
         "src/apprt/win32/text.zig",
         "src/apprt/win32/labels.zig",
         "src/apprt/win32/confirm_text.zig",
+        "src/apprt/win32/overlay_view.zig",
         "build.zig.zon"
       ]
     },

@@ -61,7 +61,6 @@ const bannerButtonKey = win32.bannerButtonKey;
 const bannerMessageDurationMs = win32.bannerMessageDurationMs;
 const blendColorRGB = win32.blendColorRGB;
 const buildDropdownProfileLabel = win32.buildDropdownProfileLabel;
-const buildHostBannerText = win32.buildHostBannerText;
 const builtin = @import("builtin");
 const buttonColorsFromTheme = win32.buttonColorsFromTheme;
 const buttonLabelRightInset = win32.buttonLabelRightInset;
@@ -145,11 +144,10 @@ const overlayButtonReleaseThunk = win32.overlayButtonReleaseThunk;
 const overlayEditChildRectFromFrame = win32.overlayEditChildRectFromFrame;
 const overlayEditFrameRect = win32.overlayEditFrameRect;
 const overlayEditText = win32.overlayEditText;
-const overlayEmptySubmitDismisses = win32.overlayEmptySubmitDismisses;
 const overlayLabelReservation = win32.overlayLabelReservation;
 const overlayPanelInterior = win32.overlayPanelInterior;
-const overlayTextNeedsRefill = win32.overlayTextNeedsRefill;
 const overlay_session = @import("overlay_session.zig");
+const overlay_view = @import("overlay_view.zig");
 const ownedStringEquals = paint_text.ownedStringEquals;
 const paintPinnedSlotBadge = win32.paintPinnedSlotBadge;
 const paintTargetButtonBadge = win32.paintTargetButtonBadge;
@@ -382,6 +380,18 @@ fn buildHostAwareBaseTitle(
     return try win32_elevation.allocPrefixedTitle(alloc, composed, elevated);
 }
 
+/// Whether a prompt that `follows_active_surface` has to refill: there is an
+/// active surface and its text was not filled from it. Identity only.
+fn overlayTextNeedsRefill(
+    mode: HostOverlayMode,
+    filled_from: ?*const anyopaque,
+    active: ?*const anyopaque,
+) bool {
+    if (!overlay_view.shape(mode).follows_active_surface) return false;
+    const surface = active orelse return false;
+    return filled_from != surface;
+}
+
 pub const Host = struct {
     app: *App,
     id: u32,
@@ -424,10 +434,10 @@ pub const Host = struct {
     defer_surface_repaints_until_flush: bool = false,
     overlay_mode: HostOverlayMode = .none,
     /// Surface a title prompt's text was last filled from, while
-    /// `overlayTextFollowsActiveSurface(overlay_mode)`, so the text refills
-    /// when the active surface changes (a tab switch or focus moving to
-    /// another split pane). Only compared with `activeSurface()`, never
-    /// dereferenced.
+    /// `overlay_view.shape(overlay_mode).follows_active_surface`, so the
+    /// text refills when the active surface changes (a tab switch or focus
+    /// moving to another split pane). Only compared with `activeSurface()`,
+    /// never dereferenced.
     overlay_text_surface: ?*const Surface = null,
     /// Active confirm overlay payload when `overlay_mode == .confirm`.
     /// Owned byte slices (`title`, `body`, `accept_label`,
@@ -5731,7 +5741,7 @@ pub const Host = struct {
         var bytes: [1024]u8 = undefined;
         var fixed = std.heap.FixedBufferAllocator.init(&bytes);
         const text: []const u8 = if (self.banner_text) |message|
-            buildHostBannerText(fixed.allocator(), self.banner_kind, message) catch message
+            overlay_view.bannerLine(fixed.allocator(), self.banner_kind, message) catch message
         else if (self.mode_indicator_text) |mode|
             mode
         else if (self.app.update_notice) |notice|
@@ -7170,7 +7180,7 @@ pub const Host = struct {
 
     pub const syncOverlayButtons = overlay_session.HostControls.syncOverlayButtons;
 
-    pub const confirmText = overlay_session.HostControls.confirmText;
+    pub const overlayFacts = overlay_session.HostControls.overlayFacts;
 
     const confirmHasPreview = overlay_session.HostControls.confirmHasPreview;
 
@@ -8415,7 +8425,7 @@ pub const Host = struct {
         // the prompt without dispatching accept or cancel. Reachable
         // since the preview pane joined the focus cycle and routes Enter
         // through `submitOverlay`.
-        if (text.len == 0 and overlayEmptySubmitDismisses(self.overlay_mode)) {
+        if (text.len == 0 and overlay_view.shape(self.overlay_mode).empty_submit_dismisses) {
             self.hideOverlay();
             try self.layout();
             return false;
@@ -10481,6 +10491,33 @@ pub const Host = struct {
 
     pub const paintChrome = chrome_scene.HostScene.paintChrome;
 };
+
+test "win32 overlayTextNeedsRefill refills on a tab switch and keeps typing otherwise" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var tab_one: u8 = 0;
+    var tab_two: u8 = 0;
+    const one: *const anyopaque = &tab_one;
+    const two: *const anyopaque = &tab_two;
+
+    // The prompt was filled from tab one and tab two became active: refill.
+    try std.testing.expect(overlayTextNeedsRefill(.tab_title, one, two));
+    try std.testing.expect(overlayTextNeedsRefill(.surface_title, one, two));
+
+    // Still on tab one: a chrome refresh must not replace what was typed.
+    try std.testing.expect(!overlayTextNeedsRefill(.tab_title, one, one));
+
+    // Nothing recorded yet (or a failed refill left it unrecorded): fill.
+    try std.testing.expect(overlayTextNeedsRefill(.tab_title, null, one));
+
+    // No active surface: nothing to fill from.
+    try std.testing.expect(!overlayTextNeedsRefill(.tab_title, one, null));
+
+    // Prompts whose text is the user's own query never refill.
+    try std.testing.expect(!overlayTextNeedsRefill(.search, one, two));
+    try std.testing.expect(!overlayTextNeedsRefill(.command_palette, one, two));
+    try std.testing.expect(!overlayTextNeedsRefill(.tab_overview, one, two));
+}
 
 test "win32 buildHostAwareBaseTitle prefixes host tab position" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
