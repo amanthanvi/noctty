@@ -285,21 +285,13 @@ pub const session_runtime = .{
     .killThreadTimer = App.killThreadTimer,
     .Allocator = Allocator,
     .App = App,
-    .CoreApp = CoreApp,
     .Host = Host,
-    .LPCWSTR = LPCWSTR,
-    .MONITORINFO = MONITORINFO,
     .RECT = RECT,
-    .ShellProjectionSteps = ShellProjectionSteps,
     .SplitTreeSurface = SplitTreeSurface,
     .Surface = Surface,
-    .SurfaceInitOptions = SurfaceInitOptions,
     .Tab = Tab,
-    .UINT_PTR = UINT_PTR,
     .apprt = apprt,
     .builtin = builtin,
-    .c = c,
-    .cli_args = cli_args,
     .configpkg = configpkg,
     .default_title = default_title,
     .gl_startup = gl_startup,
@@ -307,10 +299,6 @@ pub const session_runtime = .{
     .log = log,
     .makeParentDirAbsolute = makeParentDirAbsolute,
     .markRecoveryAttemptAtPath = markRecoveryAttemptAtPath,
-    .recovery_set_aside_suffix = recovery_set_aside_suffix,
-    .setAsideCrashedSessionState = setAsideCrashedSessionState,
-    .shouldInheritSplitWorkingDirectory = shouldInheritSplitWorkingDirectory,
-    .shouldResetNewTabWorkingDirectory = shouldResetNewTabWorkingDirectory,
     .std = std,
     .sys = sys,
     .terminal = terminal,
@@ -318,7 +306,6 @@ pub const session_runtime = .{
     .unixMillis = unixMillis,
     .win32_session_persistence = win32_session_persistence,
     .win32_session_state = win32_session_state,
-    .win32_shell = win32_shell,
     .windows = windows,
     .writePersistentFileAlloc = writePersistentFileAlloc,
 };
@@ -326,31 +313,20 @@ pub const session_runtime = .{
 pub const quick_terminal_host_runtime = .{
     .App = App,
     .BOOL = BOOL,
-    .CoreApp = CoreApp,
     .HDC = HDC,
     .HWND = HWND,
     .HWND_TOPMOST = HWND_TOPMOST,
     .Host = Host,
     .LPARAM = LPARAM,
-    .LPCWSTR = LPCWSTR,
     .MONITORINFO = MONITORINFO,
     .POINT = POINT,
     .RECT = RECT,
-    .SplitTreeSurface = SplitTreeSurface,
-    .Surface = Surface,
-    .SurfaceInitOptions = SurfaceInitOptions,
-    .Tab = Tab,
     .apprt = apprt,
-    .builtin = builtin,
     .c = c,
     .configpkg = configpkg,
     .getHost = getHost,
-    .hostWindowProc = hostWindowProc,
-    .host_class_name = host_class_name,
     .log = log,
-    .palette_list_class_name = palette_list_class_name,
     .rectEqual = rectEqual,
-    .scrollbar_class_name = scrollbar_class_name,
     .std = std,
     .sys = sys,
     .win32_quick_terminal = win32_quick_terminal,
@@ -364,7 +340,6 @@ pub const test_support_runtime = if (builtin.is_test) .{
     .App = App,
     .Host = Host,
     .Surface = Surface,
-    .Tab = Tab,
     .SurfaceInitStage = Surface.InitStage,
     .PaletteItem = PaletteItem,
     .PalettePayload = PalettePayload,
@@ -1392,13 +1367,11 @@ const recovery_safe_mode_banner_w = blk: {
 };
 const recovery_session_set_aside_banner =
     "Safe mode: noctty stopped repeatedly while restoring your saved session. Built-in defaults are active and your config was not loaded. The saved session was moved aside with a " ++
-    recovery_set_aside_suffix ++ " suffix in noctty's data folder, so the next start opens a fresh window. Restart noctty to retry normal startup.";
+    session_module.recovery_set_aside_suffix ++ " suffix in noctty's data folder, so the next start opens a fresh window. Restart noctty to retry normal startup.";
 const recovery_session_set_aside_banner_w = blk: {
     @setEvalBranchQuota(4_000);
     break :blk std.unicode.utf8ToUtf16LeStringLiteral(recovery_session_set_aside_banner);
 };
-/// Suffix for a saved session that the last launches died restoring.
-const recovery_set_aside_suffix = ".restore-failed";
 const recovery_safe_mode_caption_w = std.unicode.utf8ToUtf16LeStringLiteral("noctty safe mode");
 
 /// Filename infix for a startup-ledger record whose write already failed and
@@ -1699,49 +1672,6 @@ pub fn markRecoveryAttemptAtPath(
     // Memory keeps this process's own attempt last: the ready marker targets
     // it, so the merged record is not adopted here.
     win32_recovery.applyMark(&memory_attempts[memory_attempts.len - 1], mark);
-}
-
-/// Move a saved session aside that the last launches all ended restoring, so
-/// the next normal launch starts fresh instead of ending again. A rename into
-/// a free slot, never a delete or a replace; skipped while another live process
-/// owns the session, and for any file this build would not restore (a newer
-/// build's, an oversized or unreadable one, or one the restore path quarantines
-/// as `.corrupt` anyway). Returns whether the session was moved.
-fn setAsideCrashedSessionState(alloc: Allocator, state_path: []const u8) bool {
-    const owner = SessionOwnerLock.acquire(alloc, state_path) catch |err| {
-        log.warn("win32 recovery: session not set aside, ownership lock unavailable err={}", .{err});
-        return false;
-    } orelse {
-        log.warn("win32 recovery: session not set aside, another instance owns it", .{});
-        return false;
-    };
-    defer owner.release();
-    {
-        var current = win32_session_persistence.loadAlloc(
-            alloc,
-            state_path,
-            win32_session_persistence.default_max_state_bytes,
-        );
-        defer current.deinit();
-        if (current != .loaded) {
-            if (current != .missing) log.warn("win32 recovery: session not set aside, not one this build restores ({s})", .{@tagName(current)});
-            return false;
-        }
-    }
-    const destination = win32_session_persistence.quarantineFileAlloc(
-        alloc,
-        state_path,
-        recovery_set_aside_suffix,
-        .keep_source,
-    ) catch |err| {
-        if (err != error.FileNotFound) {
-            log.warn("win32 recovery: session not set aside path={s} err={}", .{ state_path, err });
-        }
-        return false;
-    };
-    defer alloc.free(destination);
-    log.warn("win32 recovery: repeated failures while restoring the saved session; moved it to {s}", .{destination});
-    return true;
 }
 
 /// Create the directory `path` sits in when it is missing. Only that one
@@ -2398,7 +2328,7 @@ fn beginRecoveryStartupAtPath(
     // Acted on inside the transaction that decided it, so no launch can
     // record a restore or a ready marker in between.
     if (result.decision == .quarantine_session) if (session_path) |value| {
-        result.session_set_aside = setAsideCrashedSessionState(alloc, value);
+        result.session_set_aside = session_module.setAsideCrashedSessionState(alloc, value);
     };
 
     // Attempts are told apart by their start; two launches in one
@@ -17580,7 +17510,7 @@ test "win32 closing a split keeps focus, or gives it to the closed pane's siblin
 
 /// Native and shell-model halves of the structural steps the projection
 /// tests drive: each mirrors what the runtime does on both sides.
-const ShellProjectionSteps = struct {
+pub const ShellProjectionSteps = struct {
     /// A window holding one tab per view, in order, with tab ids 1, 2, ...:
     /// the first view's tab is the one the window is created with. The caller
     /// deinits the returned committed window transaction.
@@ -21936,7 +21866,7 @@ test "win32 recovery sets the session aside after failures that all began restor
     const restoring = beginRecoveryStartupAtPath(std.testing.allocator, target, session, 400, recovery_ledger_lock_wait_ms);
     try std.testing.expectEqual(win32_recovery.Decision.quarantine_session, restoring.decision);
     try std.testing.expect(restoring.session_set_aside);
-    const moved = try tmp.dir.readFileAlloc(std.testing.allocator, "session-state.json" ++ recovery_set_aside_suffix, 64);
+    const moved = try tmp.dir.readFileAlloc(std.testing.allocator, "session-state.json" ++ session_module.recovery_set_aside_suffix, 64);
     defer std.testing.allocator.free(moved);
     try std.testing.expectEqualStrings(saved, moved);
 
@@ -22034,16 +21964,16 @@ test "win32 recovery sets a crashed session aside without deleting it" {
     defer std.testing.allocator.free(state_path);
 
     // Nothing to move.
-    try std.testing.expect(!setAsideCrashedSessionState(std.testing.allocator, state_path));
+    try std.testing.expect(!session_module.setAsideCrashedSessionState(std.testing.allocator, state_path));
 
     // A newer build's session is not this build's to move.
     const newer = "{\"schema_version\":2,\"windows\":[]}";
     try tmp.dir.writeFile(.{ .sub_path = "session-state.json", .data = newer });
-    try std.testing.expect(!setAsideCrashedSessionState(std.testing.allocator, state_path));
+    try std.testing.expect(!session_module.setAsideCrashedSessionState(std.testing.allocator, state_path));
     try tmp.dir.access("session-state.json", .{});
     // Nor is one this build would quarantine as `.corrupt` when restoring it.
     try tmp.dir.writeFile(.{ .sub_path = "session-state.json", .data = "not json" });
-    try std.testing.expect(!setAsideCrashedSessionState(std.testing.allocator, state_path));
+    try std.testing.expect(!session_module.setAsideCrashedSessionState(std.testing.allocator, state_path));
     try tmp.dir.access("session-state.json", .{});
 
     const saved = "{\"schema_version\":1,\"windows\":[]}";
@@ -22052,13 +21982,13 @@ test "win32 recovery sets a crashed session aside without deleting it" {
     {
         const owner = (try SessionOwnerLock.acquire(std.testing.allocator, state_path)).?;
         defer owner.release();
-        try std.testing.expect(!setAsideCrashedSessionState(std.testing.allocator, state_path));
+        try std.testing.expect(!session_module.setAsideCrashedSessionState(std.testing.allocator, state_path));
         try tmp.dir.access("session-state.json", .{});
     }
 
-    try std.testing.expect(setAsideCrashedSessionState(std.testing.allocator, state_path));
+    try std.testing.expect(session_module.setAsideCrashedSessionState(std.testing.allocator, state_path));
     try std.testing.expectError(error.FileNotFound, tmp.dir.access("session-state.json", .{}));
-    const moved = try tmp.dir.readFileAlloc(std.testing.allocator, "session-state.json" ++ recovery_set_aside_suffix, 64);
+    const moved = try tmp.dir.readFileAlloc(std.testing.allocator, "session-state.json" ++ session_module.recovery_set_aside_suffix, 64);
     defer std.testing.allocator.free(moved);
     try std.testing.expectEqualStrings(saved, moved);
     // The lock is free again for the next normal launch.

@@ -20,12 +20,14 @@ const budget = .{
         .palette_controller_test_runtime = 7,
         .surface_presentation_runtime = 12,
         .surface_presentation_test_runtime = 3,
-        .session_runtime = 39,
-        .quick_terminal_host_runtime = 32,
-        .test_support_runtime = 47,
+        .session_runtime = 26,
+        .quick_terminal_host_runtime = 21,
+        .test_support_runtime = 46,
     },
     // The facade's pub declarations: what the files that import it can reach.
-    .facade_pub_decls = 477,
+    // why: +1 for `ShellProjectionSteps`, the projection tests' fixture,
+    // which session.zig's tests take as `win32.ShellProjectionSteps`.
+    .facade_pub_decls = 478,
     // Root declarations of win32.zig whose value is a field access (`a.b`).
     .facade_aliases = 190,
     // Fields of win32.App named `test_*`.

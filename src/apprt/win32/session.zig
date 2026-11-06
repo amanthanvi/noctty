@@ -4,38 +4,20 @@ const runtime = win32.session_runtime;
 const killThreadTimer = runtime.killThreadTimer;
 const Allocator = runtime.Allocator;
 const App = runtime.App;
-const CoreApp = runtime.CoreApp;
 const Host = runtime.Host;
-const LPCWSTR = runtime.LPCWSTR;
-const MONITORINFO = runtime.MONITORINFO;
 const RECT = runtime.RECT;
-const ShellProjectionSteps = runtime.ShellProjectionSteps;
 const SplitTreeSurface = runtime.SplitTreeSurface;
 const Surface = runtime.Surface;
-const SurfaceInitOptions = runtime.SurfaceInitOptions;
 const Tab = runtime.Tab;
-const TestSession = win32.test_support.TestSession;
-const UINT_PTR = runtime.UINT_PTR;
-const WindowStartTestApp = win32.test_support.WindowStartTestApp;
 const apprt = runtime.apprt;
 const builtin = runtime.builtin;
-const c = runtime.c;
-const cli_args = runtime.cli_args;
 const configpkg = runtime.configpkg;
-const createTestHostWindow = win32.test_support.createTestHostWindow;
 const default_title = runtime.default_title;
 const gl_startup = runtime.gl_startup;
 const internal_os = runtime.internal_os;
 const log = runtime.log;
 const makeParentDirAbsolute = runtime.makeParentDirAbsolute;
 const markRecoveryAttemptAtPath = runtime.markRecoveryAttemptAtPath;
-const placementTestApp = win32.test_support.placementTestApp;
-const placementTestHost = win32.test_support.placementTestHost;
-const recovery_set_aside_suffix = runtime.recovery_set_aside_suffix;
-const runOnHiddenDesktop = win32.test_support.runOnHiddenDesktop;
-const setAsideCrashedSessionState = runtime.setAsideCrashedSessionState;
-const shouldInheritSplitWorkingDirectory = runtime.shouldInheritSplitWorkingDirectory;
-const shouldResetNewTabWorkingDirectory = runtime.shouldResetNewTabWorkingDirectory;
 const std = runtime.std;
 const sys = runtime.sys;
 const terminal = runtime.terminal;
@@ -43,10 +25,29 @@ const terminal_options = runtime.terminal_options;
 const unixMillis = runtime.unixMillis;
 const win32_session_persistence = runtime.win32_session_persistence;
 const win32_session_state = runtime.win32_session_state;
-const win32_shell = runtime.win32_shell;
 const window_state = @import("window_state.zig");
 const windows = runtime.windows;
 const writePersistentFileAlloc = runtime.writePersistentFileAlloc;
+
+// Test dependencies.
+const CoreApp = @import("../../App.zig");
+const LPCWSTR = win32_types.LPCWSTR;
+const MONITORINFO = sys.MONITORINFO;
+const ShellProjectionSteps = win32.ShellProjectionSteps;
+const SurfaceInitOptions = win32.SurfaceInitOptions;
+const TestSession = win32.test_support.TestSession;
+const UINT_PTR = win32_types.UINT_PTR;
+const WindowStartTestApp = win32.test_support.WindowStartTestApp;
+const c = @import("consts.zig");
+const cli_args = @import("../../cli/args.zig");
+const createTestHostWindow = win32.test_support.createTestHostWindow;
+const placementTestApp = win32.test_support.placementTestApp;
+const placementTestHost = win32.test_support.placementTestHost;
+const runOnHiddenDesktop = win32.test_support.runOnHiddenDesktop;
+const shouldInheritSplitWorkingDirectory = win32.shouldInheritSplitWorkingDirectory;
+const shouldResetNewTabWorkingDirectory = win32.shouldResetNewTabWorkingDirectory;
+const win32_shell = @import("../win32_shell.zig");
+const win32_types = @import("../win32_types.zig");
 
 /// Suffix for a saved session that was restored and then ended by itself
 /// before it was used (`App.setAsideFailedRestore`). Its own slots: these
@@ -74,6 +75,52 @@ pub fn setAsideSessionStateAt(alloc: Allocator, path: []const u8) bool {
     };
     defer alloc.free(destination);
     log.warn("win32 session: the restored session ended by itself before any input; moved it to {s}", .{destination});
+    return true;
+}
+
+/// Suffix for a saved session that the last launches died restoring.
+pub const recovery_set_aside_suffix = ".restore-failed";
+
+/// Move a saved session aside that the last launches all ended restoring, so
+/// the next normal launch starts fresh instead of ending again. A rename into
+/// a free slot, never a delete or a replace; skipped while another live process
+/// owns the session, and for any file this build would not restore (a newer
+/// build's, an oversized or unreadable one, or one the restore path quarantines
+/// as `.corrupt` anyway). Returns whether the session was moved.
+pub fn setAsideCrashedSessionState(alloc: Allocator, state_path: []const u8) bool {
+    const owner = SessionOwnerLock.acquire(alloc, state_path) catch |err| {
+        log.warn("win32 recovery: session not set aside, ownership lock unavailable err={}", .{err});
+        return false;
+    } orelse {
+        log.warn("win32 recovery: session not set aside, another instance owns it", .{});
+        return false;
+    };
+    defer owner.release();
+    {
+        var current = win32_session_persistence.loadAlloc(
+            alloc,
+            state_path,
+            win32_session_persistence.default_max_state_bytes,
+        );
+        defer current.deinit();
+        if (current != .loaded) {
+            if (current != .missing) log.warn("win32 recovery: session not set aside, not one this build restores ({s})", .{@tagName(current)});
+            return false;
+        }
+    }
+    const destination = win32_session_persistence.quarantineFileAlloc(
+        alloc,
+        state_path,
+        recovery_set_aside_suffix,
+        .keep_source,
+    ) catch |err| {
+        if (err != error.FileNotFound) {
+            log.warn("win32 recovery: session not set aside path={s} err={}", .{ state_path, err });
+        }
+        return false;
+    };
+    defer alloc.free(destination);
+    log.warn("win32 recovery: repeated failures while restoring the saved session; moved it to {s}", .{destination});
     return true;
 }
 

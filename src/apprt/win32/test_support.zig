@@ -45,7 +45,6 @@ pub fn Fixtures(comptime runtime: anytype) type {
         const App = runtime.App;
         const Host = runtime.Host;
         const Surface = runtime.Surface;
-        const Tab = runtime.Tab;
         const SurfaceInitStage = runtime.SurfaceInitStage;
         const PaletteItem = runtime.PaletteItem;
         const PalettePayload = runtime.PalettePayload;
