@@ -101,9 +101,14 @@ if (Test-Path -LiteralPath $lnk) {
     $s.TargetPath = "$bin\noctty.exe"
     $s.IconLocation = "$bin\noctty.ico"
     $s.WorkingDirectory = $HOME
+    $s.Arguments = "--class=noctty-source"
     $s.Save()
 }
 ```
+
+`--class=noctty-source` gives this build its own single-instance namespace.
+Without it a launch from the shortcut would find a running installed noctty on
+the same pipe and hand its window to that process.
 
 Create the shortcut once; later rebuilds only need the `zig build` line. The
 check stops rather than overwrite a shortcut that is already there, because
@@ -130,6 +135,17 @@ Differences from an installed copy:
   it: state then lives beside the exe, and the installed copy's registration
   and jump list stay alone. See
   [App identity](docs/windows.md#app-identity).
+- Portable mode does not separate the running instance. The single-instance
+  pipe is named from the `class` setting (default `io.github.amanthanvi.noctty`
+  in every build but Debug) and the process's elevation, not from the install
+  or the portable root (`src/apprt/win32/ipc_server.zig`, `allocIpcPipeName`),
+  so any build with the default class forwards a launch to a running noctty
+  that has it. `--class=noctty-source` in the shortcut is what separates them.
+  It also means `noctty +new-window` and the other `+` commands reach the source
+  build only with the same `--class=noctty-source`, and the jump-list entries
+  of a source build carry no `--class`. `class` does not feed the
+  AppUserModelID (a fixed string) or the window class names, so taskbar
+  grouping and the jump list are unaffected.
 - This shortcut has no AppUserModelID. The installer sets
   `io.github.amanthanvi.noctty` on its shortcuts, and `WScript.Shell` has no
   property for one (inferred). The running exe still sets the ID for its own

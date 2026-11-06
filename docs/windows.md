@@ -263,7 +263,8 @@ above:
   each pane was opened with, not the command running in it (typing `wsl` in a
   PowerShell tab saves PowerShell). Open the tab from the profile (palette `~`
   or the [▾] menu), then `save_layout:<name>` from a window with that one tab;
-  the layout then opens it on one key press, without elevation. This works for
+  the layout then opens it on one key press, with no UAC prompt, in the noctty
+  that runs the binding (so at that noctty's own level). This works for
   profiles that restore, such as a shell or a WSL distribution. A layout never
   reconnects a detected `ssh:` profile: it is saved without its profile, and
   the pane comes back as whatever a new tab opens (your `command`, else
