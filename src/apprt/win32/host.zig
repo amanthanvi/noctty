@@ -677,10 +677,10 @@ pub const Host = struct {
     /// once blur-behind and `BufferedPaintInit` succeeded; `deinit` ends the
     /// buffered paint.
     chrome_alpha: ?u8 = null,
-    /// `DwmEnableBlurBehindWindow` failed on this window once: it fades whole
-    /// from then on (`TopLevel.shows`) and never tries again, so a machine
-    /// where it keeps failing does not flicker opaque and faded, and warn, on
-    /// every apply.
+    /// `DwmEnableBlurBehindWindow` failed on this window: it fades whole
+    /// (`TopLevel.shows`) and tries again only at a system theme change
+    /// (`window_state.retryBackgroundOpacity`), so a machine where it keeps
+    /// failing does not flicker opaque and faded, and warn, on every apply.
     blur_behind_failed: bool = false,
     chrome_paint_pending: bool = false,
     chrome_paint_mask: ChromeRepaintMask = .{},

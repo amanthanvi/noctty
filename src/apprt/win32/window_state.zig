@@ -1128,7 +1128,7 @@ fn applyBackgroundOpacity(host: *Host) !void {
         const kept = if (host.chrome_alpha != null) setBlurBehind(hwnd, true) else beginBackgroundAlpha(hwnd);
         if (!kept) {
             host.blur_behind_failed = true;
-            log.warn("win32 blur-behind failed; this window's background-opacity fades it whole from now on", .{});
+            log.warn("win32 blur-behind failed; this window's background-opacity fades it whole until the system theme changes", .{});
             shown = shownOpacity(host);
         }
     }
@@ -1166,6 +1166,14 @@ pub fn refreshBackgroundOpacity(host: *Host) void {
     applyBackgroundOpacity(host) catch |err| {
         log.warn("win32 background opacity refresh failed err={}", .{err});
     };
+}
+
+/// `refreshBackgroundOpacity`, where a failed blur-behind
+/// (`Host.blur_behind_failed`) tries once more; failing again latches it
+/// again, with one warning.
+pub fn retryBackgroundOpacity(host: *Host) void {
+    host.blur_behind_failed = false;
+    refreshBackgroundOpacity(host);
 }
 
 /// A child control `host`'s window made: made solid while the window's
@@ -2819,7 +2827,7 @@ test "win32 a theme change or a reload that flips the frame mode asserts blur-be
     }.body);
 }
 
-test "win32 the app's config change applies each window's opacity once, at its new value, and a system theme change shows it again" {
+test "win32 the app's config change applies each window's opacity once, at its new value" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
     try runOnHiddenDesktop(struct {
         fn body() !void {
@@ -2855,16 +2863,6 @@ test "win32 the app's config change applies each window's opacity once, at its n
                 try std.testing.expectEqual(asserts + @intFromBool(step.shown != null), test_blur_behind_asserts);
                 try std.testing.expectEqual(step.shown, testBackgroundAlpha(hwnd));
             }
-
-            // A system theme change, where High Contrast arrives, applies
-            // nothing after it: it shows the opacity again itself, once.
-            app.system_theme_refresh = .{};
-            const applies = test_background_opacity_applies;
-            const asserts = test_blur_behind_asserts;
-            app.reconfigureSystemTheme();
-            try std.testing.expectEqual(applies + 1, test_background_opacity_applies);
-            try std.testing.expectEqual(asserts + 1, test_blur_behind_asserts);
-            try std.testing.expectEqual(@as(?u8, 128), testBackgroundAlpha(hwnd));
         }
     }.body);
 }
@@ -2908,9 +2906,25 @@ test "win32 a Settings preview of a theme and an opacity that ends applies the o
     }.body);
 }
 
-test "win32 a window whose blur-behind failed fades whole and does not try it again" {
+test "win32 a window whose blur-behind failed fades whole, and tries it again only at a system theme change" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
     try runOnHiddenDesktop(struct {
+        /// A system theme message, `changed` or only finding a resource
+        /// missing, with blur-behind failing or not: it applies the opacity
+        /// once and tries blur-behind `tries` times.
+        fn themeMessage(app: *App, host: *Host, changed: bool, fails: bool, tries: usize) !void {
+            test_blur_behind_fails = fails;
+            if (changed) app.system_theme_refresh = .{} else {
+                _ = sys.DeleteObject(host.chrome_brush.?);
+                host.chrome_brush = null;
+            }
+            const applies = test_background_opacity_applies;
+            const asserts = test_blur_behind_asserts;
+            app.reconfigureSystemTheme();
+            try std.testing.expectEqual(applies + 1, test_background_opacity_applies);
+            try std.testing.expectEqual(asserts + tries, test_blur_behind_asserts);
+        }
+
         fn body() !void {
             var fixture: WindowStartTestApp = .{};
             try fixture.init();
@@ -2941,6 +2955,28 @@ test "win32 a window whose blur-behind failed fades whole and does not try it ag
             try std.testing.expectEqual(asserts, test_blur_behind_asserts);
             try std.testing.expectEqual(@as(?u8, 128), testLayeredAlpha(hwnd));
             try std.testing.expectEqual(@as(?u8, null), testBackgroundAlpha(hwnd));
+
+            // A system theme change tries it again. Where it fails again, the
+            // window latches again after one try, so one warning, and still
+            // fades whole.
+            try themeMessage(app, host, true, true, 1);
+            try std.testing.expect(host.blur_behind_failed);
+            try std.testing.expectEqual(@as(?u8, 128), testLayeredAlpha(hwnd));
+            try std.testing.expectEqual(@as(?u8, null), testBackgroundAlpha(hwnd));
+
+            // A theme message that changed nothing but finds a resource
+            // missing rebuilds the theme without trying.
+            try themeMessage(app, host, false, false, 0);
+            try std.testing.expect(host.blur_behind_failed);
+            try std.testing.expectEqual(@as(?u8, 128), testLayeredAlpha(hwnd));
+
+            // Where DWM works again, the next theme change shows the
+            // background alone translucent.
+            try themeMessage(app, host, true, false, 1);
+            try std.testing.expect(!host.blur_behind_failed);
+            try std.testing.expect(!testHostIsLayered(hwnd));
+            try std.testing.expectEqual(@as(?u8, 128), testBackgroundAlpha(hwnd));
+            try std.testing.expectEqual(@as(?f64, 0.5), pane.background_opacity);
         }
     }.body);
 }

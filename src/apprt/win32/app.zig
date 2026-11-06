@@ -5991,15 +5991,19 @@ pub const App = struct {
             } else false;
             if (!missing_resources) return;
         }
-        self.reconfigureTheme(.refresh);
+        // Only a theme that changed lets a failed blur-behind try again:
+        // resources a theme message found missing are GDI's, not DWM's.
+        self.reconfigureTheme(if (changed) .retry else .refresh);
     }
 
     /// Rebuilds every window's chrome, frame and DWM attributes for the
     /// theme and `window-show-tab-bar`; then, after the frame write, `opacity`:
+    /// - `retry`: each window shows its opacity again, and one whose
+    ///   blur-behind failed tries it once more;
     /// - `refresh`: each window shows its opacity again;
     /// - `caller_applies`: none does; the caller's `window_state.applyConfig`
     ///   applies it next, at the value it will show.
-    pub fn reconfigureTheme(self: *App, opacity: enum { refresh, caller_applies }) void {
+    pub fn reconfigureTheme(self: *App, opacity: enum { retry, refresh, caller_applies }) void {
         const previous_integrated_titlebar = self.use_integrated_titlebar;
         self.use_integrated_titlebar = shouldUseIntegratedTitlebar(
             self.os_build,
@@ -6047,7 +6051,11 @@ pub const App = struct {
                 // had blur-behind asserts it again across the theme change,
                 // after the frame write above, as after every style write
                 // that changes the frame.
-                if (opacity == .refresh) window_state.refreshBackgroundOpacity(host);
+                switch (opacity) {
+                    .retry => window_state.retryBackgroundOpacity(host),
+                    .refresh => window_state.refreshBackgroundOpacity(host),
+                    .caller_applies => {},
+                }
                 if (chrome_layout_changed) {
                     runUiActionOrLog("theme update layout failed", host.layout());
                 }
