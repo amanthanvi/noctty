@@ -612,6 +612,81 @@ test "sprite face centres a cursor that is shorter or taller than the cell" {
     }
 }
 
+test "sprite face renders every sprite into an atlas at the zoom-out floor cell sizes" {
+    // #674: zoom-out stops at 1 pt, where the default font's cell is 1x1 px
+    // at 96 DPI, 1x3 at 120 and 144, and 2x4 at 192 (1x2 and 3x6 cover other
+    // fonts), while "sprite face render all sprites" starts at 9x17. Every
+    // sprite, in both cell widths, goes through `renderGlyph` into a real
+    // atlas, whose writes assert that they stay inside it. Nothing here
+    // compares pixels: a pass means no panic and no write out of range.
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    const cells = [_]struct { width: u32, height: u32 }{
+        .{ .width = 1, .height = 1 },
+        .{ .width = 1, .height = 2 },
+        .{ .width = 1, .height = 3 },
+        .{ .width = 2, .height = 4 },
+        .{ .width = 3, .height = 6 },
+    };
+    for (cells) |cell| {
+        const height: f64 = @floatFromInt(cell.height);
+        // JetBrains Mono's proportions: ascent 1020, descent 300 per 1320.
+        const metrics: font.Metrics = .calc(.{
+            .px_per_em = height / 1.32,
+            .cell_width = @floatFromInt(cell.width),
+            .ascent = height * 1020 / 1320,
+            .descent = -height * 300 / 1320,
+            .line_gap = 0.0,
+            .underline_thickness = 1,
+            .strikethrough_thickness = 1,
+        });
+        try testing.expectEqual(cell.width, metrics.cell_width);
+        try testing.expectEqual(cell.height, metrics.cell_height);
+        try testing.expectEqual(@as(u32, 1), metrics.underline_thickness);
+        try testing.expectEqual(@as(u32, 1), metrics.box_thickness);
+
+        const face: Face = .{ .metrics = metrics };
+        var atlas = try font.Atlas.init(alloc, 512, .grayscale);
+        defer atlas.deinit(alloc);
+
+        inline for (ranges) |range| {
+            for (range.min..range.max + 1) |cp| {
+                try testRenderTiny(face, &atlas, @intCast(cp), cell.width, cell.height);
+            }
+        }
+        for (std.enums.values(Sprite)) |sprite| {
+            try testRenderTiny(face, &atlas, @intFromEnum(sprite), cell.width, cell.height);
+        }
+    }
+}
+
+/// Renders `cp` one and two cells wide and checks the glyph lies inside
+/// the atlas. Grows a full atlas as `SharedGrid.renderGlyph` does.
+fn testRenderTiny(face: Face, atlas: *font.Atlas, cp: u32, width: u32, height: u32) !void {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    for ([_]u2{ 1, 2 }) |cell_width| {
+        errdefer std.debug.print(
+            "sprite U+{X} cell {d}x{d} cell_width {d}\n",
+            .{ cp, width, height, cell_width },
+        );
+        const opts: font.face.RenderOptions = .{
+            .grid_metrics = face.metrics,
+            .cell_width = cell_width,
+        };
+        const glyph = face.renderGlyph(alloc, atlas, cp, opts) catch |err| switch (err) {
+            error.AtlasFull => glyph: {
+                try atlas.grow(alloc, atlas.size * 2);
+                break :glyph try face.renderGlyph(alloc, atlas, cp, opts);
+            },
+            else => return err,
+        };
+        try testing.expect(glyph.atlas_x + glyph.width <= atlas.size);
+        try testing.expect(glyph.atlas_y + glyph.height <= atlas.size);
+    }
+}
+
 // test "sprite face print all sprites" {
 //     std.debug.print("\n\n", .{});
 //     inline for (ranges) |range| {

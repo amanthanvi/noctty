@@ -105,10 +105,13 @@ pub const Contents = struct {
         // We have size.rows + 2 lists because indexes 0 and size.rows - 1 are
         // used for special lists containing the cursor cell which need to
         // be first and last in the buffer, respectively.
+        //
+        // Both counts are widened first: three entries per column overflow
+        // the 16-bit column count past 21845 columns.
         var fg_rows: ArrayListCollection(shaderpkg.CellText) = try .init(
             alloc,
-            size.rows + 2,
-            size.columns * 3,
+            @as(usize, size.rows) + 2,
+            @as(usize, size.columns) * 3,
         );
         errdefer fg_rows.deinit(alloc);
 
@@ -522,6 +525,43 @@ test "Contents clear last added content" {
     try testing.expectEqual(bg_cell_1, c.bgCell(1, 4).*);
     // Fg row index is +1 because of cursor list at start
     try testing.expectEqual(fg_cell_1, c.fg_rows.lists[2].items[0]);
+}
+
+test "Contents resizes to the 1 pt grid of a 4K client" {
+    // #674: at the zoom-out floor a 3840x2088 client holds 3840x1044 cells
+    // when the cell is 1x2 px. Each foreground row list starts with room for
+    // three entries per column, here 1046 lists of 11,520 entries.
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    const size: renderer.GridSize = .{ .columns = 3840, .rows = 1044 };
+    var c: Contents = .{};
+    defer c.deinit(alloc);
+    try c.resize(alloc, size);
+
+    try testing.expectEqual(@as(usize, 3840 * 1044), c.bg_cells.len);
+    try testing.expectEqual(@as(usize, 1044 + 2), c.fg_rows.lists.len);
+    try testing.expect(c.fg_rows.lists[1].capacity >= 3840 * 3);
+    c.bgCell(1043, 3839).* = .{ 0, 0, 0, 1 };
+    try c.add(alloc, .text, .{
+        .atlas = .grayscale,
+        .grid_pos = .{ 3839, 1043 },
+        .color = .{ 0, 0, 0, 1 },
+    });
+    try testing.expectEqual(@as(usize, 1), c.fg_rows.lists[1044].items.len);
+}
+
+test "Contents resizes past 21845 columns" {
+    // Three foreground entries per column no longer fit a 16-bit column
+    // count past 21845 columns (a window that spans six 4K monitors at the
+    // 1 pt floor), so the capacity is computed in usize.
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var c: Contents = .{};
+    defer c.deinit(alloc);
+    try c.resize(alloc, .{ .columns = 21846, .rows = 1 });
+    try testing.expect(c.fg_rows.lists[1].capacity >= 21846 * 3);
 }
 
 test "Contents with zero-sized screen" {

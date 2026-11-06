@@ -933,10 +933,7 @@ const WindowsPty = struct {
                 conpty: *const WindowsConPty.Functions,
             ) bool {
                 return conpty.create(
-                    .{
-                        .X = @intCast(self.size.ws_col),
-                        .Y = @intCast(self.size.ws_row),
-                    },
+                    consoleSize(self.size),
                     self.pty.in_pipe_pty.?,
                     self.pty.out_pipe_pty.?,
                     conpty.createFlags(self.text_measurement),
@@ -1166,6 +1163,13 @@ const WindowsPty = struct {
 
     pub const SetSizeError = error{ResizeFailed};
 
+    /// The console size of a pseudo console for `size`. A COORD holds signed
+    /// 16-bit counts, so a count past 32767 saturates there.
+    pub fn consoleSize(size: winsize) windows.COORD {
+        const max = std.math.maxInt(i16);
+        return .{ .X = @intCast(@min(size.ws_col, max)), .Y = @intCast(@min(size.ws_row, max)) };
+    }
+
     pub fn encodeHandoffResize(columns: u16, rows: u16) [6]u8 {
         var packet: [6]u8 = undefined;
         std.mem.writeInt(u16, packet[0..2], 8, .little);
@@ -1178,10 +1182,7 @@ const WindowsPty = struct {
     pub fn setSize(self: *Pty, size: winsize) SetSizeError!void {
         switch (self.control) {
             .pseudo_console => |pc| {
-                const result = pc.conpty.resize(
-                    pc.handle,
-                    .{ .X = @intCast(size.ws_col), .Y = @intCast(size.ws_row) },
-                );
+                const result = pc.conpty.resize(pc.handle, consoleSize(size));
                 if (result != windows.S_OK) return error.ResizeFailed;
             },
             .handoff => |*handoff| {
@@ -1264,6 +1265,18 @@ test "handoff release drops the marshaled pipe ends without closing them" {
     try std.testing.expectEqual(
         std.os.windows.NTSTATUS.SUCCESS,
         std.os.windows.ntdll.NtClose(handles.output),
+    );
+}
+
+test "pseudo console size saturates at the largest COORD" {
+    // A COORD holds signed 16-bit counts and a winsize unsigned ones.
+    try std.testing.expectEqual(
+        windows.COORD{ .X = 80, .Y = 24 },
+        WindowsPty.consoleSize(.{ .ws_col = 80, .ws_row = 24 }),
+    );
+    try std.testing.expectEqual(
+        windows.COORD{ .X = 32767, .Y = 32767 },
+        WindowsPty.consoleSize(.{ .ws_col = 40000, .ws_row = 65535 }),
     );
 }
 
