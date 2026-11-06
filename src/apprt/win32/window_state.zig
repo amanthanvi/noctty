@@ -2758,6 +2758,54 @@ test "win32 a config change that toggles decorations and changes opacity applies
     }.body);
 }
 
+test "win32 a theme change that flips the frame mode asserts blur-behind after the frame write" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    try runOnHiddenDesktop(struct {
+        /// `test_blur_behind_asserts` when the window's frame last changed.
+        var asserts_at_frame: ?usize = null;
+        var previous: ?*const anyopaque = null;
+
+        fn proc(hwnd: HWND, msg: UINT, wp: usize, lp: LPARAM) callconv(.winapi) isize {
+            if (msg == c.WM_WINDOWPOSCHANGED) {
+                const pos: *const sys.WINDOWPOS = @ptrFromInt(@as(usize, @bitCast(lp)));
+                if (pos.flags & c.SWP_FRAMECHANGED != 0) asserts_at_frame = test_blur_behind_asserts;
+            }
+            return sys.CallWindowProcW(previous, hwnd, msg, wp, lp);
+        }
+
+        fn body() !void {
+            var fixture: WindowStartTestApp = .{};
+            try fixture.init();
+            defer fixture.deinit();
+            const app = &fixture.app;
+            test_pane_renderer = .opengl;
+            defer test_pane_renderer = null;
+
+            app.config.@"background-opacity" = 0.5;
+            try app.createWindow(default_title);
+            const hwnd = fixture.newest().host.?.hwnd.?;
+            try std.testing.expectEqual(@as(?u8, 128), testBackgroundAlpha(hwnd));
+            previous = @ptrFromInt(@as(usize, @bitCast(sys.SetWindowLongPtrW(hwnd, c.GWLP_WNDPROC, @bitCast(@intFromPtr(&proc))))));
+
+            // On Windows 11 the tab strip shown is the integrated titlebar and
+            // hidden the stock frame: each way, the frame changes, and
+            // blur-behind is asserted after it.
+            app.os_build = c.OS_BUILD_WIN11_21H2;
+            for ([_]configpkg.Config.WindowShowTabBar{ .auto, .never }) |tabs| {
+                app.config.@"window-show-tab-bar" = tabs;
+                const integrated = app.use_integrated_titlebar;
+                asserts_at_frame = null;
+                app.reconfigureTheme();
+                try std.testing.expect(app.use_integrated_titlebar != integrated);
+                const at_frame = asserts_at_frame orelse return error.TestFrameNeverChanged;
+                try std.testing.expect(test_blur_behind_asserts > at_frame);
+                try std.testing.expect(!testHostIsLayered(hwnd));
+                try std.testing.expectEqual(@as(?u8, 128), testBackgroundAlpha(hwnd));
+            }
+        }
+    }.body);
+}
+
 test "win32 a window whose blur-behind failed fades whole and does not try it again" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
     try runOnHiddenDesktop(struct {
