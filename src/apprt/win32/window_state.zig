@@ -816,11 +816,16 @@ const PaneRenderer = enum {
 var test_keeps_fullscreen_composed = false;
 
 /// What every pane renders with in a test, whose panes have no renderer to
-/// ask (`PaneRenderer.of` reads them as starting). Null by default.
+/// ask (`PaneRenderer.of` reads them as starting), but `test_d3d11_pane`,
+/// which runs D3D11. Both null by default.
 var test_pane_renderer: ?PaneRenderer = null;
+var test_d3d11_pane: ?*const Surface = null;
 
 fn paneRenderer(pane: ?*const Surface) PaneRenderer {
-    if (builtin.is_test) if (test_pane_renderer) |renderer| return renderer;
+    if (builtin.is_test) {
+        if (test_d3d11_pane != null and pane == test_d3d11_pane) return .d3d11;
+        if (test_pane_renderer) |renderer| return renderer;
+    }
     return .of(pane);
 }
 
@@ -1089,11 +1094,14 @@ fn applyBackgroundOpacity(host: *Host) !void {
     const hwnd = host.hwnd orelse return;
     var shown = host.top_level.shows(panesDrawAlpha(host), win32.isHighContrastActive());
     if (shown.background) |alpha| {
-        if (host.chrome_alpha != null) {
-            // Asserted again, which costs a DWM call per change while
-            // translucent; nothing is known to reset it.
-            _ = setBlurBehind(hwnd, true);
-        } else if (!beginBackgroundAlpha(hwnd)) {
+        // Not layered before blur-behind starts, so the ex-style change
+        // cannot drop it.
+        unlayer(hwnd);
+        // Asserted again while it is on, a DWM call per apply while
+        // translucent: nothing is known to reset it, but a window that
+        // lost it would draw its panes' alpha dark.
+        const kept = if (host.chrome_alpha != null) setBlurBehind(hwnd, true) else beginBackgroundAlpha(hwnd);
+        if (!kept) {
             // Without blur-behind DWM drops the panes' alpha: the window
             // fades whole instead, as before #640.
             log.warn("win32 blur-behind failed; background-opacity fades the whole window", .{});
@@ -1179,24 +1187,25 @@ fn setBlurBehind(hwnd: HWND, on: bool) bool {
     return sys.DwmEnableBlurBehindWindow(hwnd, &blur) >= 0;
 }
 
+fn unlayer(hwnd: HWND) void {
+    const ex_style: u32 = @intCast(@as(usize, @bitCast(sys.GetWindowLongPtrW(hwnd, c.GWL_EXSTYLE))));
+    if ((ex_style & c.WS_EX_LAYERED) == 0) return;
+    _ = sys.SetWindowLongPtrW(hwnd, c.GWL_EXSTYLE, @bitCast(@as(isize, @intCast(ex_style & ~@as(u32, c.WS_EX_LAYERED)))));
+    _ = sys.SetWindowPos(
+        hwnd,
+        null,
+        0,
+        0,
+        0,
+        0,
+        c.SWP_NOMOVE | c.SWP_NOSIZE | c.SWP_NOZORDER | c.SWP_NOACTIVATE | c.SWP_FRAMECHANGED,
+    );
+}
+
 /// The whole window layered at `alpha`, or not layered at all.
 fn setLayered(hwnd: HWND, alpha: ?u8) !void {
+    const layered = alpha orelse return unlayer(hwnd);
     const ex_style: u32 = @intCast(@as(usize, @bitCast(sys.GetWindowLongPtrW(hwnd, c.GWL_EXSTYLE))));
-    const layered = alpha orelse {
-        if ((ex_style & c.WS_EX_LAYERED) != 0) {
-            _ = sys.SetWindowLongPtrW(hwnd, c.GWL_EXSTYLE, @bitCast(@as(isize, @intCast(ex_style & ~@as(u32, c.WS_EX_LAYERED)))));
-            _ = sys.SetWindowPos(
-                hwnd,
-                null,
-                0,
-                0,
-                0,
-                0,
-                c.SWP_NOMOVE | c.SWP_NOSIZE | c.SWP_NOZORDER | c.SWP_NOACTIVATE | c.SWP_FRAMECHANGED,
-            );
-        }
-        return;
-    };
     if ((ex_style & c.WS_EX_LAYERED) == 0) {
         _ = sys.SetWindowLongPtrW(hwnd, c.GWL_EXSTYLE, @bitCast(@as(isize, @intCast(ex_style | c.WS_EX_LAYERED))));
     }
@@ -2581,12 +2590,25 @@ test "win32 an OpenGL window's background alone shows its opacity, in every pane
 test "win32 a window with a D3D11 pane fades whole and leaves its panes at their config's opacity" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
     try runOnHiddenDesktop(struct {
+        fn perPixel(hwnd: HWND, pane: *const Surface) !void {
+            try std.testing.expect(!testHostIsLayered(hwnd));
+            try std.testing.expectEqual(@as(?u8, 128), testBackgroundAlpha(hwnd));
+            try std.testing.expectEqual(@as(?f64, 0.5), pane.background_opacity);
+        }
+
+        fn faded(hwnd: HWND, pane: *const Surface) !void {
+            try std.testing.expectEqual(@as(?u8, 128), testLayeredAlpha(hwnd));
+            try std.testing.expectEqual(@as(?u8, null), testBackgroundAlpha(hwnd));
+            try std.testing.expectEqual(@as(?f64, null), pane.background_opacity);
+        }
+
         fn body() !void {
             var fixture: WindowStartTestApp = .{};
             try fixture.init();
             defer fixture.deinit();
             const app = &fixture.app;
             defer test_pane_renderer = null;
+            defer test_d3d11_pane = null;
 
             test_pane_renderer = .d3d11;
             app.config.@"background-opacity" = 0.5;
@@ -2594,25 +2616,32 @@ test "win32 a window with a D3D11 pane fades whole and leaves its panes at their
             const pane = fixture.newest();
             const host = pane.host.?;
             const hwnd = host.hwnd.?;
-            try std.testing.expectEqual(@as(?u8, 128), testLayeredAlpha(hwnd));
-            try std.testing.expectEqual(@as(?u8, null), testBackgroundAlpha(hwnd));
-            try std.testing.expectEqual(@as(?f64, null), pane.background_opacity);
+            try faded(hwnd, pane);
 
-            // Its panes switch to OpenGL (a D3D11 fallback posts that it
-            // did): the window's background alone is translucent now.
+            // Its pane falls back to OpenGL. The fallback posts that it did,
+            // and the window, from its message loop, shows the background
+            // alone translucent now.
             test_pane_renderer = .opengl;
-            refreshBackgroundOpacity(host);
-            try std.testing.expect(!testHostIsLayered(hwnd));
-            try std.testing.expectEqual(@as(?u8, 128), testBackgroundAlpha(hwnd));
-            try std.testing.expectEqual(@as(?f64, 0.5), pane.background_opacity);
+            pane.rendererSwitchedToOpenGL();
+            var msg: sys.MSG = undefined;
+            try std.testing.expect(sys.PeekMessageW(&msg, hwnd, c.WM_WINHOSTTY_RENDERER_SWITCHED, c.WM_WINHOSTTY_RENDERER_SWITCHED, c.PM_REMOVE) != 0);
+            _ = sys.DispatchMessageW(&msg);
+            try perPixel(hwnd, pane);
 
-            // A D3D11 pane joins it again: the whole window fades, and the
-            // OpenGL panes go back to their config's opacity.
+            // A tab on D3D11 joins it: the whole window fades as the tab's
+            // renderer starts, and the OpenGL pane goes back to its config's
+            // opacity.
             test_pane_renderer = .d3d11;
-            refreshBackgroundOpacity(host);
-            try std.testing.expectEqual(@as(?u8, 128), testLayeredAlpha(hwnd));
-            try std.testing.expectEqual(@as(?u8, null), testBackgroundAlpha(hwnd));
-            try std.testing.expectEqual(@as(?f64, null), pane.background_opacity);
+            const tab = try app.createWindowSurface(&app.config, default_title, .{ .host_id = pane.host_id });
+            test_d3d11_pane = tab;
+            test_pane_renderer = .opengl;
+            try faded(hwnd, pane);
+
+            // That tab closes: every pane left draws with OpenGL again.
+            fixture.core_app.deleteSurface(tab);
+            _ = sys.DestroyWindow(tab.hwnd.?);
+            test_d3d11_pane = null;
+            try perPixel(hwnd, pane);
         }
     }.body);
 }

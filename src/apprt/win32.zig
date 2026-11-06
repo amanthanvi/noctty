@@ -11612,7 +11612,7 @@ pub fn hostWindowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) cal
                 const item: *const DRAWITEMSTRUCT = @ptrFromInt(@as(usize, @bitCast(lParam)));
                 // Under blur-behind GDI's zero alpha shows through.
                 var buffered = item.*;
-                var alpha_paint = chrome_scene.AlphaPaint.begin(v, item.hDC, item.rcItem);
+                var alpha_paint = chrome_scene.AlphaPaint.beginItem(v, item);
                 defer alpha_paint.end();
                 buffered.hDC = alpha_paint.hdc;
                 const draw = &buffered;

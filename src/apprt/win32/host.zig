@@ -1341,6 +1341,7 @@ pub const Host = struct {
         // Its panes live on in undo history, where a click on their toasts
         // has nothing to show, and an undo does not bring the toasts back.
         self.app.notifications.panesChanged();
+        window_state.refreshBackgroundOpacity(self);
 
         self.active_tab = activeTabAfterRemoval(self.active_tab, index, self.tabs.items.len);
         self.notifyActiveTabUiaSelectionChanged(previous_tab_id);
@@ -1408,6 +1409,8 @@ pub const Host = struct {
         // restored button before raising the selected-item notification so
         // assistive clients receive the event from a live provider.
         self.prepareActiveTabVisibility(self.active_tab);
+        // A D3D11 pane coming back fades the window whole again.
+        window_state.refreshBackgroundOpacity(self);
         self.layout() catch |err| log.warn("tab restore layout sync failed err={}", .{err});
         self.refreshChrome() catch |err| log.warn("tab restore chrome sync failed err={}", .{err});
         self.notifyActiveTabUiaSelectionChanged(previous_tab_id);
@@ -1469,6 +1472,7 @@ pub const Host = struct {
         if (shell_prepared) |*prepared| self.app.applyShellEffects(prepared.effects(), .{});
         // As the close it redoes (`detachTabForUndo`).
         self.app.notifications.panesChanged();
+        window_state.refreshBackgroundOpacity(self);
         self.notifyActiveTabUiaSelectionChanged(previous_tab_id);
         self.notifyTabListUiaChanged();
         return true;
@@ -1742,6 +1746,8 @@ pub const Host = struct {
             .attach => tab.findHandle(surface).?,
             .detach => (if (focused) |kept| tab.findHandle(kept) else null) orelse first.next().?.handle,
         };
+        // The window's panes changed, so may how it shows its opacity.
+        window_state.refreshBackgroundOpacity(self);
     }
 
     /// A pane taken out of its tab waits hidden in redo history. It keeps

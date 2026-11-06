@@ -889,10 +889,8 @@ pub const HostScene = struct {
         var client_rect: RECT = undefined;
         if (sys.GetClientRect(hwnd, &client_rect) == 0) return;
         const tab_h = self.tabBarHeight();
-        const overlay_offset: i32 = if (self.overlay_mode != .none) self.scaled(host_overlay_height) else 0;
         const inspector_panel_visible = self.inspectorPanelVisible();
-        const inspector_offset: i32 = if (inspector_panel_visible) self.scaled(host_inspector_panel_height) else 0;
-        const bands = self.contentBands(tab_h, overlay_offset, inspector_offset);
+        const bands = contentBandsOf(self);
         alpha_paint.see_through_top = bands.content_top;
         const content_rect = RECT{
             .left = 0,
@@ -1012,6 +1010,14 @@ test "win32 buildInspectorPanelHintText reflects live inspector scope" {
     try std.testing.expect(std.mem.indexOf(u8, zoomed, "zoomed pane") != null);
 }
 
+/// The bands `paintChrome` lays out: the tab strip, the overlay band, the
+/// inspector panel, then the terminal lane from `content_top`.
+fn contentBandsOf(host: *Host) win32_nc_layout.ContentBands {
+    const overlay_offset: i32 = if (host.overlay_mode != .none) host.scaled(host_overlay_height) else 0;
+    const inspector_offset: i32 = if (host.inspectorPanelVisible()) host.scaled(host_inspector_panel_height) else 0;
+    return host.contentBands(host.tabBarHeight(), overlay_offset, inspector_offset);
+}
+
 /// GDI painting with the alpha DWM reads while a window's background alone
 /// is translucent (`Host.chrome_alpha`: blur-behind, under which the alpha 0
 /// GDI writes shows through). The painter draws into a buffer that starts as
@@ -1031,24 +1037,53 @@ pub const AlphaPaint = struct {
     /// stays solid.
     see_through_top: i32 = std.math.maxInt(i32),
 
+    /// `saved` is the buffer DC's state before the painter selects into it:
+    /// uxtheme keeps that DC for the next paint, and an object left selected
+    /// there could not be deleted.
+    saved: c_int = 0,
+
     pub fn begin(host: *const Host, target: HDC, rect: RECT) AlphaPaint {
         const alpha = host.chrome_alpha orelse return .{ .hdc = target };
         return beginBuffered(target, rect, host.app.resolved_theme.chrome_bg, alpha);
     }
 
+    /// For a host's owner-drawn control: the terminal lane starts at the
+    /// same window row in its coordinates, so a control there (the docked
+    /// search bar's background) keys the chrome background as `paintChrome`
+    /// does around it.
+    pub fn beginItem(host: *Host, item: *const sys.DRAWITEMSTRUCT) AlphaPaint {
+        var paint = begin(host, item.hDC, item.rcItem);
+        if (paint.buffer == null) return paint;
+        const hwnd = host.hwnd orelse return paint;
+        const control = item.hwndItem;
+        var lane: POINT = .{ .x = 0, .y = contentBandsOf(host).content_top };
+        if (sys.ClientToScreen(hwnd, &lane) != 0 and sys.ScreenToClient(control, &lane) != 0) {
+            paint.see_through_top = lane.y;
+        }
+        return paint;
+    }
+
     fn beginBuffered(target: HDC, rect: RECT, bg: u32, alpha: u8) AlphaPaint {
         var buffer_hdc: HDC = null;
-        const buffer = sys.BeginBufferedPaint(target, &rect, sys.BPBF_TOPDOWNDIB, null, &buffer_hdc) orelse
+        const buffer = sys.BeginBufferedPaint(target, &rect, sys.BPBF_TOPDOWNDIB, null, &buffer_hdc) orelse {
+            if (!buffer_failure_logged) {
+                buffer_failure_logged = true;
+                win32.log.warn("win32 buffered chrome paint failed; translucent chrome paints with GDI's alpha", .{});
+            }
             return .{ .hdc = target };
+        };
         // A pixel the painter leaves keeps what the target shows: a cached
         // buffer holds the last paint's pixels, from anywhere.
         _ = sys.BitBlt(buffer_hdc, rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top, target, rect.left, rect.top, sys.SRCCOPY);
-        return .{ .hdc = buffer_hdc, .buffer = buffer, .bg = bg, .alpha = alpha };
+        return .{ .hdc = buffer_hdc, .buffer = buffer, .bg = bg, .alpha = alpha, .saved = sys.SaveDC(buffer_hdc) };
     }
+
+    var buffer_failure_logged = false;
 
     pub fn end(self: *AlphaPaint) void {
         const buffer = self.buffer orelse return;
         self.buffer = null;
+        if (self.saved != 0) _ = sys.RestoreDC(self.hdc, self.saved);
         var bits: ?[*]u32 = null;
         var row: i32 = 0;
         var rect: RECT = undefined;
