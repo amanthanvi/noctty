@@ -6109,8 +6109,10 @@ pub const App = struct {
         if (rebuild) {
             self.reconfigureTheme(if (system_changed) .retry else .refresh);
         } else if (system_changed) {
-            // An app rebuild already took the change in, and every window
-            // whose blur-behind had not failed showed its opacity there.
+            // Nothing to rebuild: an app rebuild already took the change in,
+            // or the change needs none (light/dark under a fixed
+            // `window-theme`). Either way every window whose blur-behind had
+            // not failed shows its opacity; only a failed one tries again.
             for (self.registry.hosts.items) |host| {
                 if (host.blur_behind_failed) window_state.retryBackgroundOpacity(host);
             }
