@@ -677,6 +677,11 @@ pub const Host = struct {
     /// once blur-behind and `BufferedPaintInit` succeeded; `deinit` ends the
     /// buffered paint.
     chrome_alpha: ?u8 = null,
+    /// `DwmEnableBlurBehindWindow` failed on this window once: it fades whole
+    /// from then on (`TopLevel.shows`) and never tries again, so a machine
+    /// where it keeps failing does not flicker opaque and faded, and warn, on
+    /// every apply.
+    blur_behind_failed: bool = false,
     chrome_paint_pending: bool = false,
     chrome_paint_mask: ChromeRepaintMask = .{},
     chrome_text_dirty: ChromeTextDirty = .{},
@@ -1341,9 +1346,9 @@ pub const Host = struct {
         // Its panes live on in undo history, where a click on their toasts
         // has nothing to show, and an undo does not bring the toasts back.
         self.app.notifications.panesChanged();
-        window_state.refreshBackgroundOpacity(self);
 
         self.active_tab = activeTabAfterRemoval(self.active_tab, index, self.tabs.items.len);
+        window_state.refreshBackgroundOpacity(self);
         self.notifyActiveTabUiaSelectionChanged(previous_tab_id);
 
         return .{
@@ -1375,6 +1380,8 @@ pub const Host = struct {
         }
         // Its programs may have ended while the tab waited in undo history.
         self.refreshTabStatus(insert_index);
+        // A D3D11 pane coming back fades the window whole again.
+        window_state.refreshBackgroundOpacity(self);
         return self.activeSurface() != null;
     }
 
@@ -1399,6 +1406,7 @@ pub const Host = struct {
         if (shell_prepared) |*prepared| prepared.commit(&self.app.shell_runtime) catch |err| {
             value.tab = self.tabs.orderedRemove(insert_index);
             self.active_tab = previous_active;
+            window_state.refreshBackgroundOpacity(self);
             return err;
         };
         if (shell_prepared) |*prepared| self.app.applyShellEffects(prepared.effects(), .{});
@@ -1409,8 +1417,6 @@ pub const Host = struct {
         // restored button before raising the selected-item notification so
         // assistive clients receive the event from a live provider.
         self.prepareActiveTabVisibility(self.active_tab);
-        // A D3D11 pane coming back fades the window whole again.
-        window_state.refreshBackgroundOpacity(self);
         self.layout() catch |err| log.warn("tab restore layout sync failed err={}", .{err});
         self.refreshChrome() catch |err| log.warn("tab restore chrome sync failed err={}", .{err});
         self.notifyActiveTabUiaSelectionChanged(previous_tab_id);
@@ -2762,9 +2768,7 @@ pub const Host = struct {
             self.mode_timer_active = false;
         }
         self.tween_sched.deinit();
-        // `window_state.beginBackgroundAlpha`'s, which a translucent window
-        // keeps until it is opaque again.
-        if (self.chrome_alpha != null) _ = sys.BufferedPaintUnInit();
+        window_state.releaseBackgroundOpacity(self);
 
         self.revertPaletteThemePreview();
         if (self.palette_catalog) |*catalog| catalog.reset();

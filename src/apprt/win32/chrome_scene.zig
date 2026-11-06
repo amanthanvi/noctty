@@ -62,6 +62,7 @@ const win32_chrome_state = runtime.win32_chrome_state;
 const win32_icons = runtime.win32_icons;
 const win32_nc_layout = runtime.win32_nc_layout;
 const win32_theme = runtime.win32_theme;
+const log = std.log.scoped(.win32);
 const test_runtime = if (@import("builtin").is_test) win32.chrome_scene_test_runtime else struct {};
 const App = test_runtime.App;
 const CoreApp = test_runtime.CoreApp;
@@ -631,11 +632,12 @@ pub const HostScene = struct {
 
     pub fn paintChromeContentLane(
         self: *Host,
-        hdc: HDC,
+        lane: *const AlphaPaint,
         content_rect: RECT,
         paint_content: bool,
         theme: *const ThemeColors,
     ) void {
+        const hdc = lane.hdc;
         if (paint_content) {
             // Content-lane paints can arrive after search-frame or pane
             // geometry shrinks/moves. Clear the exposed parent-painted
@@ -644,7 +646,7 @@ pub const HostScene = struct {
             //
             // This still respects the host clip region from BeginPaint, so
             // child GL surfaces are not brute-force repainted here.
-            fillSolidRect(hdc, content_rect, theme.chrome_bg);
+            lane.fillLaneBackground(content_rect);
 
             if (self.activeTab()) |tab| {
                 var it = tab.tree.iterator();
@@ -889,9 +891,10 @@ pub const HostScene = struct {
         var client_rect: RECT = undefined;
         if (sys.GetClientRect(hwnd, &client_rect) == 0) return;
         const tab_h = self.tabBarHeight();
+        const overlay_offset: i32 = if (self.overlay_mode != .none) self.scaled(host_overlay_height) else 0;
         const inspector_panel_visible = self.inspectorPanelVisible();
-        const bands = contentBandsOf(self);
-        alpha_paint.see_through_top = bands.content_top;
+        const inspector_offset: i32 = if (inspector_panel_visible) self.scaled(host_inspector_panel_height) else 0;
+        const bands = self.contentBands(tab_h, overlay_offset, inspector_offset);
         const content_rect = RECT{
             .left = 0,
             .top = bands.content_top,
@@ -910,7 +913,7 @@ pub const HostScene = struct {
 
         self.paintChromeTabBar(hdc, client_rect, tab_h, bands.overlay_top, paint_top, theme);
         if (!self.paintChromeOverlay(hdc, alloc, client_rect, tab_h, bands, paint_top, theme)) return;
-        self.paintChromeContentLane(hdc, content_rect, paint_content, theme);
+        self.paintChromeContentLane(&alpha_paint, content_rect, paint_content, theme);
         self.paintChromeInspectorPanel(
             hdc,
             alloc,
@@ -1010,67 +1013,45 @@ test "win32 buildInspectorPanelHintText reflects live inspector scope" {
     try std.testing.expect(std.mem.indexOf(u8, zoomed, "zoomed pane") != null);
 }
 
-/// The bands `paintChrome` lays out: the tab strip, the overlay band, the
-/// inspector panel, then the terminal lane from `content_top`.
-fn contentBandsOf(host: *Host) win32_nc_layout.ContentBands {
-    const overlay_offset: i32 = if (host.overlay_mode != .none) host.scaled(host_overlay_height) else 0;
-    const inspector_offset: i32 = if (host.inspectorPanelVisible()) host.scaled(host_inspector_panel_height) else 0;
-    return host.contentBands(host.tabBarHeight(), overlay_offset, inspector_offset);
-}
-
 /// GDI painting with the alpha DWM reads while a window's background alone
 /// is translucent (`Host.chrome_alpha`: blur-behind, under which the alpha 0
 /// GDI writes shows through). The painter draws into a buffer that starts as
-/// what the target shows, and `end` gives every pixel its alpha before the
-/// buffer lands (`fixAlpha`): the chrome's background color from client row
-/// `see_through_top` down, the terminal lane, takes `Host.chrome_alpha`, and
-/// everything else is opaque. For an opaque window `hdc` is the target, at no
-/// cost; so it is when no buffer can be had, and the paint still shows, with
-/// GDI's alpha.
+/// what the target shows. What is see-through is decided by what was
+/// painted, never by its color: `fillLaneBackground` writes the terminal
+/// lane's background straight into the buffer at the window's alpha, the one
+/// value nothing else writes (GDI writes alpha 0), and `end` keeps exactly
+/// that value and makes every other pixel opaque (`fixAlpha`), so a divider or
+/// a border in the chrome background's color stays solid. For an opaque
+/// window `hdc` is the target, at no cost; so it is when no buffer can be
+/// had, and the paint still shows, with GDI's alpha.
 pub const AlphaPaint = struct {
     hdc: HDC,
     buffer: ?*anyopaque = null,
-    bg: u32 = 0,
+    /// The chrome background, a COLORREF.
+    bg: u32,
     alpha: u8 = 255,
-    /// The client row where the terminal lane starts. Chrome background
-    /// below it is see-through; everything above it, like the title bar,
-    /// stays solid.
-    see_through_top: i32 = std.math.maxInt(i32),
-
-    /// `saved` is the buffer DC's state before the painter selects into it:
-    /// uxtheme keeps that DC for the next paint, and an object left selected
-    /// there could not be deleted.
+    /// The buffer DC's state before the painter selects into it: uxtheme
+    /// keeps that DC for the next paint, and an object left selected there
+    /// could not be deleted.
     saved: c_int = 0,
 
     pub fn begin(host: *const Host, target: HDC, rect: RECT) AlphaPaint {
-        const alpha = host.chrome_alpha orelse return .{ .hdc = target };
-        return beginBuffered(target, rect, host.app.resolved_theme.chrome_bg, alpha);
-    }
-
-    /// For a host's owner-drawn control: the terminal lane starts at the
-    /// same window row in its coordinates, so a control there (the docked
-    /// search bar's background) keys the chrome background as `paintChrome`
-    /// does around it.
-    pub fn beginItem(host: *Host, item: *const sys.DRAWITEMSTRUCT) AlphaPaint {
-        var paint = begin(host, item.hDC, item.rcItem);
-        if (paint.buffer == null) return paint;
-        const hwnd = host.hwnd orelse return paint;
-        const control = item.hwndItem;
-        var lane: POINT = .{ .x = 0, .y = contentBandsOf(host).content_top };
-        if (sys.ClientToScreen(hwnd, &lane) != 0 and sys.ScreenToClient(control, &lane) != 0) {
-            paint.see_through_top = lane.y;
-        }
-        return paint;
+        const bg = host.app.resolved_theme.chrome_bg;
+        const alpha = host.chrome_alpha orelse return .{ .hdc = target, .bg = bg };
+        return beginBuffered(target, rect, bg, alpha);
     }
 
     fn beginBuffered(target: HDC, rect: RECT, bg: u32, alpha: u8) AlphaPaint {
+        // Nothing to paint; and an empty rect would fail, and spend the
+        // warning below.
+        if (rect.right <= rect.left or rect.bottom <= rect.top) return .{ .hdc = target, .bg = bg };
         var buffer_hdc: HDC = null;
         const buffer = sys.BeginBufferedPaint(target, &rect, sys.BPBF_TOPDOWNDIB, null, &buffer_hdc) orelse {
             if (!buffer_failure_logged) {
                 buffer_failure_logged = true;
-                win32.log.warn("win32 buffered chrome paint failed; translucent chrome paints with GDI's alpha", .{});
+                log.warn("win32 buffered chrome paint failed; translucent chrome paints with GDI's alpha", .{});
             }
-            return .{ .hdc = target };
+            return .{ .hdc = target, .bg = bg };
         };
         // A pixel the painter leaves keeps what the target shows: a cached
         // buffer holds the last paint's pixels, from anywhere.
@@ -1080,61 +1061,82 @@ pub const AlphaPaint = struct {
 
     var buffer_failure_logged = false;
 
-    pub fn end(self: *AlphaPaint) void {
-        const buffer = self.buffer orelse return;
-        self.buffer = null;
-        if (self.saved != 0) _ = sys.RestoreDC(self.hdc, self.saved);
+    /// Fills `rect` (in `hdc`'s coordinates) with the chrome background as
+    /// the terminal lane shows it: the gaps around the panes and what a
+    /// control in the lane paints as the lane behind it. See-through while
+    /// the window is translucent; everything painted over it afterwards is
+    /// opaque.
+    pub fn fillLaneBackground(self: *const AlphaPaint, rect: RECT) void {
+        fillSolidRect(self.hdc, rect, self.bg);
+        const area = self.pixels() orelse return;
+        // GDI batches its calls: the fill must land before the bits change.
+        _ = sys.GdiFlush();
+        const value = seeThrough(self.bg, self.alpha);
+        const left = @max(rect.left, area.rect.left);
+        const right = @min(rect.right, area.rect.right);
+        var y = @max(rect.top, area.rect.top);
+        while (y < @min(rect.bottom, area.rect.bottom)) : (y += 1) {
+            if (left >= right) break;
+            const row = area.bits[@as(usize, @intCast(y - area.rect.top)) * area.stride ..];
+            @memset(row[@intCast(left - area.rect.left)..@intCast(right - area.rect.left)], value);
+        }
+    }
+
+    const Pixels = struct { bits: [*]u32, stride: usize, rect: RECT };
+
+    /// The buffer's 0xAARRGGBB pixels, top-down, `stride` apart, and the
+    /// target rect they cover.
+    fn pixels(self: *const AlphaPaint) ?Pixels {
+        const buffer = self.buffer orelse return null;
         var bits: ?[*]u32 = null;
         var row: i32 = 0;
         var rect: RECT = undefined;
-        if (sys.GetBufferedPaintBits(buffer, &bits, &row) >= 0 and
-            sys.GetBufferedPaintTargetRect(buffer, &rect) >= 0)
-        {
-            if (bits) |pixels| fixAlpha(
-                pixels,
-                @intCast(@max(0, row)),
-                .{ .width = @intCast(@max(0, rect.right - rect.left)), .height = @intCast(@max(0, rect.bottom - rect.top)), .top = rect.top },
-                self.bg,
-                self.alpha,
-                self.see_through_top,
-            );
-        }
+        if (sys.GetBufferedPaintBits(buffer, &bits, &row) < 0) return null;
+        if (sys.GetBufferedPaintTargetRect(buffer, &rect) < 0) return null;
+        return .{ .bits = bits orelse return null, .stride = @intCast(@max(0, row)), .rect = rect };
+    }
+
+    pub fn end(self: *AlphaPaint) void {
+        const buffer = self.buffer orelse return;
+        if (self.saved != 0) _ = sys.RestoreDC(self.hdc, self.saved);
+        _ = sys.GdiFlush();
+        if (self.pixels()) |area| fixAlpha(
+            area.bits,
+            area.stride,
+            @intCast(@max(0, area.rect.right - area.rect.left)),
+            @intCast(@max(0, area.rect.bottom - area.rect.top)),
+            seeThrough(self.bg, self.alpha),
+        );
+        self.buffer = null;
         _ = sys.EndBufferedPaint(buffer, 1);
     }
 };
 
-/// `AlphaPaint.end`'s pass over the buffer's 0xAARRGGBB pixels, rows
-/// `stride` pixels apart, whose first row is client row `area.top`. `bg` is a
-/// COLORREF (0x00BBGGRR). A see-through pixel holds the background
-/// premultiplied by `alpha`, which DWM composes over what is behind; one
-/// that already does (the buffer started from the target) keeps it.
-fn fixAlpha(
-    pixels: [*]u32,
-    stride: usize,
-    area: struct { width: usize, height: usize, top: i32 },
-    bg: u32,
-    alpha: u8,
-    see_through_top: i32,
-) void {
-    const bg_rgb: u32 = ((bg & 0xff) << 16) | (bg & 0xff00) | ((bg >> 16) & 0xff);
-    const a: u32 = alpha;
-    const see_through: u32 = (a << 24) |
-        ((((bg_rgb >> 16) & 0xff) * a / 255) << 16) |
-        ((((bg_rgb >> 8) & 0xff) * a / 255) << 8) |
-        ((bg_rgb & 0xff) * a / 255);
-    for (0..area.height) |y| {
-        const line = pixels[y * stride ..][0..area.width];
-        if (area.top + @as(i32, @intCast(y)) < see_through_top) {
-            for (line) |*px| px.* |= 0xff000000;
-            continue;
-        }
-        for (line) |*px| {
-            px.* = if (px.* & 0x00ffffff == bg_rgb or px.* == see_through) see_through else px.* | 0xff000000;
+/// The lane background as DWM composes it under blur-behind: the COLORREF
+/// `bg` premultiplied by `alpha`, as a 0xAARRGGBB pixel. Its alpha is at
+/// least 1, so it never equals a pixel GDI drew, which has alpha 0, even at
+/// opacity 0 (1/255 of the background is not visible).
+fn seeThrough(bg: u32, alpha: u8) u32 {
+    const a: u32 = @max(alpha, 1);
+    const r = bg & 0xff;
+    const g = (bg >> 8) & 0xff;
+    const b = (bg >> 16) & 0xff;
+    return (a << 24) | ((r * a / 255) << 16) | ((g * a / 255) << 8) | (b * a / 255);
+}
+
+/// `AlphaPaint.end`'s pass over `height` rows of `width` pixels, `stride`
+/// apart: a pixel that still holds `see_through`, which only
+/// `fillLaneBackground` writes (now, or in an earlier paint the buffer
+/// started from), keeps it, and every other pixel is opaque.
+fn fixAlpha(pixels: [*]u32, stride: usize, width: usize, height: usize, see_through: u32) void {
+    for (0..height) |y| {
+        for (pixels[y * stride ..][0..width]) |*px| {
+            if (px.* != see_through) px.* |= 0xff000000;
         }
     }
 }
 
-test "win32 AlphaPaint leaves the chrome opaque and the terminal lane's background at the window's alpha" {
+test "win32 AlphaPaint leaves only the lane background it filled see-through, whatever shares its color" {
     const Canvas = Host.BannerTestCanvas;
     const bg: u32 = 0x00302010; // COLORREF: red 0x10, green 0x20, blue 0x30
     const ink: u32 = 0x000000C0; // red
@@ -1144,51 +1146,80 @@ test "win32 AlphaPaint leaves the chrome opaque and the terminal lane's backgrou
     if (sys.BufferedPaintInit() < 0) return error.SkipZigTest;
     defer _ = sys.BufferedPaintUnInit();
 
-    const full: RECT = .{ .left = 0, .top = 0, .right = width, .bottom = 40 };
-    var paint = AlphaPaint.beginBuffered(canvas.dc, full, bg, 128);
-    try std.testing.expect(paint.buffer != null);
-    // The terminal lane starts at row 20, as `paintChrome` sets it.
-    paint.see_through_top = 20;
-    fillSolidRect(paint.hdc, full, bg);
-    fillSolidRect(paint.hdc, .{ .left = 4, .top = 4, .right = 12, .bottom = 12 }, ink);
-    fillSolidRect(paint.hdc, .{ .left = 4, .top = 24, .right = 12, .bottom = 32 }, ink);
-    paint.end();
-    _ = Canvas.raw.GdiFlush();
-
     const at = struct {
         fn px(c_: Canvas, x: usize, y: usize) u32 {
             return c_.bits[y * width + x];
         }
     }.px;
+    const full: RECT = .{ .left = 0, .top = 0, .right = width, .bottom = 40 };
+    var paint = AlphaPaint.beginBuffered(canvas.dc, full, bg, 128);
+    try std.testing.expect(paint.buffer != null);
+    // `paintChrome`: the chrome above, in the chrome background's color too,
+    // then the lane from row 20, a pane divider and a focus border drawn on
+    // it in the very same color, and ink.
+    fillSolidRect(paint.hdc, full, bg);
+    fillSolidRect(paint.hdc, .{ .left = 4, .top = 4, .right = 12, .bottom = 12 }, ink);
+    paint.fillLaneBackground(.{ .left = 0, .top = 20, .right = width, .bottom = 40 });
+    fillSolidRect(paint.hdc, .{ .left = 20, .top = 20, .right = 22, .bottom = 40 }, bg);
+    fillSolidRect(paint.hdc, .{ .left = 24, .top = 30, .right = 36, .bottom = 31 }, bg);
+    fillSolidRect(paint.hdc, .{ .left = 4, .top = 24, .right = 12, .bottom = 32 }, ink);
+    paint.end();
+    _ = sys.GdiFlush();
+
     // Above the lane: the chrome's background and what is drawn on it,
     // opaque.
     try std.testing.expectEqual(@as(u32, 0xff102030), at(canvas, 30, 2));
     try std.testing.expectEqual(@as(u32, 0xffc00000), at(canvas, 6, 6));
-    // In the lane: the background at alpha 128, premultiplied, and what is
-    // drawn on it opaque.
-    try std.testing.expectEqual(@as(u32, 0x80081018), at(canvas, 30, 30));
+    // The lane's own background at alpha 128, premultiplied; the divider
+    // and the border in the same color, and the ink, opaque.
+    try std.testing.expectEqual(@as(u32, 0x80081018), at(canvas, 30, 26));
+    try std.testing.expectEqual(@as(u32, 0xff102030), at(canvas, 21, 35));
+    try std.testing.expectEqual(@as(u32, 0xff102030), at(canvas, 30, 30));
     try std.testing.expectEqual(@as(u32, 0xffc00000), at(canvas, 6, 26));
 
     // A second paint that touches only the top keeps the lane as it was:
-    // the buffer starts from the target, whose background is already
-    // premultiplied.
+    // the buffer starts from the target, which holds the see-through value.
     var again = AlphaPaint.beginBuffered(canvas.dc, full, bg, 128);
-    again.see_through_top = 20;
     fillSolidRect(again.hdc, .{ .left = 0, .top = 0, .right = width, .bottom = 20 }, bg);
     again.end();
-    _ = Canvas.raw.GdiFlush();
-    try std.testing.expectEqual(@as(u32, 0x80081018), at(canvas, 30, 30));
+    _ = sys.GdiFlush();
+    try std.testing.expectEqual(@as(u32, 0x80081018), at(canvas, 30, 26));
+    try std.testing.expectEqual(@as(u32, 0xff102030), at(canvas, 21, 35));
     try std.testing.expectEqual(@as(u32, 0xffc00000), at(canvas, 6, 26));
-    try std.testing.expectEqual(@as(u32, 0xff102030), at(canvas, 6, 6));
+    try std.testing.expectEqual(@as(u32, 0xff102030), at(canvas, 6, 2));
+
+    // A buffer whose rect starts below row 0, across chrome and lane rows:
+    // what it paints in the lane is opaque, what it does not paint keeps the
+    // target's alpha, and a fill clipped to it is see-through.
+    var part = AlphaPaint.beginBuffered(canvas.dc, .{ .left = 0, .top = 10, .right = 20, .bottom = 40 }, bg, 128);
+    fillSolidRect(part.hdc, .{ .left = 14, .top = 22, .right = 18, .bottom = 26 }, bg);
+    part.fillLaneBackground(.{ .left = -5, .top = 30, .right = 60, .bottom = 60 });
+    part.end();
+    _ = sys.GdiFlush();
+    try std.testing.expectEqual(@as(u32, 0xffc00000), at(canvas, 6, 26));
+    try std.testing.expectEqual(@as(u32, 0xff102030), at(canvas, 15, 23));
+    try std.testing.expectEqual(@as(u32, 0x80081018), at(canvas, 16, 21));
+    try std.testing.expectEqual(@as(u32, 0xff102030), at(canvas, 15, 12));
+    try std.testing.expectEqual(@as(u32, 0x80081018), at(canvas, 6, 31));
+    try std.testing.expectEqual(@as(u32, 0xff102030), at(canvas, 21, 35));
+}
+
+test "win32 AlphaPaint's see-through value is the background premultiplied, never alpha 0" {
+    try std.testing.expectEqual(@as(u32, 0x80081018), seeThrough(0x00302010, 128));
+    try std.testing.expectEqual(@as(u32, 0xff102030), seeThrough(0x00302010, 255));
+    // At opacity 0 it still differs from black GDI drew (0x00000000).
+    try std.testing.expectEqual(@as(u32, 0x01000000), seeThrough(0x00302010, 0));
 }
 
 test "win32 AlphaPaint paints straight to the target for an opaque window" {
     // `begin` reads nothing else of an opaque window.
-    var app: win32.App = undefined;
+    var app: App = undefined;
+    app.resolved_theme.chrome_bg = 0x00302010;
     const host: Host = .{ .app = &app, .id = 1 };
     const target: HDC = @ptrFromInt(0x1000);
     var paint = AlphaPaint.begin(&host, target, .{ .left = 0, .top = 0, .right = 1, .bottom = 1 });
     try std.testing.expectEqual(target, paint.hdc);
     try std.testing.expectEqual(@as(?*anyopaque, null), paint.buffer);
+    try std.testing.expectEqual(@as(u32, 0x00302010), paint.bg);
     paint.end();
 }

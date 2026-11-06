@@ -1228,7 +1228,13 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             defer self.draw_mutex.unlock();
             const before = self.backgroundOpacity();
             self.background_opacity_override = opacity;
-            if (self.backgroundOpacity() != before) self.markDirty();
+            const now = self.backgroundOpacity();
+            if (now == before) return;
+            // A frame synchronized output holds is presented again without
+            // an update (`.repaint`): its background takes the new opacity
+            // now, and the cells at the next update.
+            self.uniforms.bg_color[3] = @intFromFloat(@round(now * 255.0));
+            self.markDirty();
         }
 
         /// The opacity the background is drawn at.

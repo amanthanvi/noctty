@@ -741,6 +741,9 @@ fn applyWindowStart(host: *Host, start: Enter) void {
 
 fn enterFullscreen(host: *Host) !void {
     const hwnd = host.hwnd orelse return;
+    // The style writes below change the frame; blur-behind is asserted
+    // again after them, whatever they end in.
+    defer refreshBackgroundOpacity(host);
     // A minimized window comes back first. SetWindowPos would move only
     // its icon, and it would return from the taskbar as a popup at its
     // normal rect. A restored session's first window is minimized here
@@ -821,6 +824,12 @@ var test_keeps_fullscreen_composed = false;
 var test_pane_renderer: ?PaneRenderer = null;
 var test_d3d11_pane: ?*const Surface = null;
 
+/// Every `DwmEnableBlurBehindWindow` that turns it on, in a test: counted,
+/// and failed while `test_blur_behind_fails`. DWM has no call that reads
+/// blur-behind back.
+var test_blur_behind_asserts: usize = 0;
+var test_blur_behind_fails = false;
+
 fn paneRenderer(pane: ?*const Surface) PaneRenderer {
     if (builtin.is_test) {
         if (test_d3d11_pane != null and pane == test_d3d11_pane) return .d3d11;
@@ -849,6 +858,7 @@ fn fullscreenReturn(saved: TopLevel.Return, hwnd: HWND) !TopLevel.Return {
 
 fn leaveFullscreen(host: *Host) !void {
     const hwnd = host.hwnd orelse return;
+    defer refreshBackgroundOpacity(host);
     const back = try fullscreenReturn(host.top_level.fullscreen.?, hwnd);
     host.top_level.fullscreen = null;
     try applyWindowStyle(host);
@@ -902,6 +912,7 @@ fn monitorInfoOf(monitor: sys.HMONITOR) ?MONITORINFO {
 
 fn setDecorationsVisible(host: *Host, visible: bool) !void {
     if (host.top_level.decorations_visible == visible) return;
+    defer refreshBackgroundOpacity(host);
 
     const previous_visible = host.top_level.decorations_visible;
     const used_integrated_titlebar_before = host.usingIntegratedTitlebar();
@@ -1092,8 +1103,8 @@ fn applyWindowStyle(host: *Host) !void {
 /// fail, and it is applied last, after everything the window shows is set.
 fn applyBackgroundOpacity(host: *Host) !void {
     const hwnd = host.hwnd orelse return;
-    var shown = host.top_level.shows(panesDrawAlpha(host), win32.isHighContrastActive());
-    if (shown.background) |alpha| {
+    var shown = shownOpacity(host);
+    if (shown.background != null) {
         // Not layered before blur-behind starts, so the ex-style change
         // cannot drop it.
         unlayer(hwnd);
@@ -1102,10 +1113,9 @@ fn applyBackgroundOpacity(host: *Host) !void {
         // lost it would draw its panes' alpha dark.
         const kept = if (host.chrome_alpha != null) setBlurBehind(hwnd, true) else beginBackgroundAlpha(hwnd);
         if (!kept) {
-            // Without blur-behind DWM drops the panes' alpha: the window
-            // fades whole instead, as before #640.
-            log.warn("win32 blur-behind failed; background-opacity fades the whole window", .{});
-            shown = .{ .layered = alpha };
+            host.blur_behind_failed = true;
+            log.warn("win32 blur-behind failed; this window's background-opacity fades it whole from now on", .{});
+            shown = shownOpacity(host);
         }
     }
     if (shown.background == null and host.chrome_alpha != null) endBackgroundAlpha(hwnd);
@@ -1120,6 +1130,19 @@ fn applyBackgroundOpacity(host: *Host) !void {
         while (it.next()) |entry| entry.view.setBackgroundOpacity(shown.pane_opacity);
     }
     try setLayered(hwnd, shown.layered);
+}
+
+/// `TopLevel.shows` for `host` as it stands.
+fn shownOpacity(host: *Host) TopLevel.Shows {
+    return host.top_level.shows(panesDrawAlpha(host), win32.isHighContrastActive(), host.blur_behind_failed);
+}
+
+/// `Host.deinit`: ends the buffered paint a translucent window still holds
+/// (`beginBackgroundAlpha`).
+pub fn releaseBackgroundOpacity(host: *Host) void {
+    if (host.chrome_alpha == null) return;
+    host.chrome_alpha = null;
+    _ = sys.BufferedPaintUnInit();
 }
 
 /// Shows `host`'s opacity again after something `TopLevel.shows` reads
@@ -1173,6 +1196,10 @@ fn endBackgroundAlpha(hwnd: HWND) void {
 }
 
 fn setBlurBehind(hwnd: HWND, on: bool) bool {
+    if (builtin.is_test and on) {
+        test_blur_behind_asserts += 1;
+        if (test_blur_behind_fails) return false;
+    }
     // An empty region: what is behind shows through unblurred.
     const region = if (on) (sys.CreateRectRgn(0, 0, -1, -1) orelse return false) else null;
     defer if (region) |r| {
@@ -1232,7 +1259,11 @@ fn solidChild(child: HWND, solid: LPARAM) callconv(.winapi) BOOL {
         // A child layered for its own sake keeps its own alpha.
         if (layered) return 1;
         _ = sys.SetWindowLongPtrW(child, c.GWL_EXSTYLE, @bitCast(@as(isize, @intCast(ex | c.WS_EX_LAYERED))));
-        _ = sys.SetLayeredWindowAttributes(child, 0, 255, c.LWA_ALPHA);
+        // A layered window with no attributes shows nothing: one that cannot
+        // take them stays unlayered, readable if not solid.
+        if (sys.SetLayeredWindowAttributes(child, 0, 255, c.LWA_ALPHA) == 0) {
+            _ = sys.SetWindowLongPtrW(child, c.GWL_EXSTYLE, @bitCast(@as(isize, @intCast(ex))));
+        }
         return 1;
     }
     if (!layered) return 1;
@@ -1635,7 +1666,11 @@ test "win32 a translucent OpenGL window fullscreen with its tab bar hidden is un
             const host = pane.host.?;
             const hwnd = host.hwnd.?;
             try std.testing.expect(keepsFullscreenComposed(host));
+            // The fullscreen style write changes the frame: blur-behind is
+            // asserted again after it.
+            const asserts = test_blur_behind_asserts;
             try std.testing.expect(try perform(host, pane, .toggle_fullscreen, .native));
+            try std.testing.expect(test_blur_behind_asserts > asserts);
             const screen = try Fixture.monitorRect(hwnd);
             const monitors = MonitorRects.collect();
             try std.testing.expect(monitors.complete);
@@ -1645,7 +1680,19 @@ test "win32 a translucent OpenGL window fullscreen with its tab bar hidden is un
             try std.testing.expect(!testHostIsLayered(hwnd));
             try std.testing.expectEqual(@as(?u8, 128), testBackgroundAlpha(hwnd));
             try std.testing.expectEqual(@as(?f64, 0.5), pane.background_opacity);
-            try std.testing.expect(try perform(host, pane, .toggle_fullscreen, .native));
+            // So it is after leaving fullscreen, and after a decorations
+            // toggle.
+            for ([_]apprt.Action.Key{ .toggle_fullscreen, .toggle_window_decorations, .toggle_window_decorations }) |key| {
+                const before = test_blur_behind_asserts;
+                switch (key) {
+                    .toggle_fullscreen => try std.testing.expect(try perform(host, pane, .toggle_fullscreen, .native)),
+                    .toggle_window_decorations => try std.testing.expect(try perform(host, pane, .toggle_window_decorations, {})),
+                    else => unreachable,
+                }
+                try std.testing.expect(test_blur_behind_asserts > before);
+                try std.testing.expect(!testHostIsLayered(hwnd));
+                try std.testing.expectEqual(@as(?u8, 128), testBackgroundAlpha(hwnd));
+            }
         }
     }.body);
 }
@@ -2637,11 +2684,56 @@ test "win32 a window with a D3D11 pane fades whole and leaves its panes at their
             test_pane_renderer = .opengl;
             try faded(hwnd, pane);
 
+            // It goes into undo history, as a closed tab does, and comes
+            // back, as an undo or a close that rolled back puts it.
+            var entry = host.detachTabForUndo(1).?;
+            errdefer _ = host.restoreClosedTabEntryNative(&entry.payload.close_tab) catch false;
+            try perPixel(hwnd, pane);
+            try std.testing.expect(try host.restoreClosedTabEntryNative(&entry.payload.close_tab));
+            try faded(hwnd, pane);
+
             // That tab closes: every pane left draws with OpenGL again.
             fixture.core_app.deleteSurface(tab);
             _ = sys.DestroyWindow(tab.hwnd.?);
             test_d3d11_pane = null;
             try perPixel(hwnd, pane);
+        }
+    }.body);
+}
+
+test "win32 a window whose blur-behind failed fades whole and does not try it again" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    try runOnHiddenDesktop(struct {
+        fn body() !void {
+            var fixture: WindowStartTestApp = .{};
+            try fixture.init();
+            defer fixture.deinit();
+            const app = &fixture.app;
+            test_pane_renderer = .opengl;
+            defer test_pane_renderer = null;
+            test_blur_behind_fails = true;
+            defer test_blur_behind_fails = false;
+
+            app.config.@"background-opacity" = 0.5;
+            try app.createWindow(default_title);
+            const pane = fixture.newest();
+            const host = pane.host.?;
+            const hwnd = host.hwnd.?;
+            try std.testing.expect(host.blur_behind_failed);
+            try std.testing.expectEqual(@as(?u8, 128), testLayeredAlpha(hwnd));
+            try std.testing.expectEqual(@as(?u8, null), testBackgroundAlpha(hwnd));
+            try std.testing.expectEqual(@as(?f64, null), pane.background_opacity);
+
+            // Latched: with blur-behind working again, a reload neither
+            // tries it nor changes how the window shows its opacity.
+            test_blur_behind_fails = false;
+            const asserts = test_blur_behind_asserts;
+            var reloaded = try app.config.clone(std.testing.allocator);
+            defer reloaded.deinit();
+            try reloadConfig(app, &reloaded);
+            try std.testing.expectEqual(asserts, test_blur_behind_asserts);
+            try std.testing.expectEqual(@as(?u8, 128), testLayeredAlpha(hwnd));
+            try std.testing.expectEqual(@as(?u8, null), testBackgroundAlpha(hwnd));
         }
     }.body);
 }

@@ -50,6 +50,7 @@ const decorativeUiaName = Surface.decorativeUiaName;
 const detachChromeControlProvider = win32.detachChromeControlProvider;
 const drawRoundedRect = gdi.drawRoundedRect;
 const editSnapshot = child_window.editSnapshot;
+const AlphaPaint = @import("chrome_scene.zig").AlphaPaint;
 const fillSolidRect = gdi.fillSolidRect;
 const focusableHwnd = win32.focusableHwnd;
 const fontGlyphCoverage = win32.fontGlyphCoverage;
@@ -602,13 +603,16 @@ pub const HostControls = struct {
         return colors;
     }
 
-    pub fn drawSearchBarBackground(self: *Host, draw: *const DRAWITEMSTRUCT) bool {
+    /// `lane` is the paint `draw.hDC` belongs to: the bar sits in the
+    /// terminal lane, and the lane behind its rounded frame is the lane's
+    /// background.
+    pub fn drawSearchBarBackground(self: *Host, draw: *const DRAWITEMSTRUCT, lane: *const AlphaPaint) bool {
         if (draw.CtlType != c.ODT_STATIC) return false;
         const surface = self.searchBarBackgroundSurface(draw.hwndItem) orelse return false;
 
         const theme = &self.app.resolved_theme;
         const frame_rect = draw.rcItem;
-        fillSolidRect(draw.hDC, frame_rect, theme.chrome_bg);
+        lane.fillLaneBackground(frame_rect);
         drawRoundedRect(
             draw.hDC,
             frame_rect,

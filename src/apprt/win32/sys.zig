@@ -686,6 +686,8 @@ pub extern "uxtheme" fn BufferedPaintInit() callconv(.winapi) i32;
 
 pub extern "gdi32" fn SaveDC(hdc: HDC) callconv(.winapi) c_int;
 
+pub extern "gdi32" fn GdiFlush() callconv(.winapi) BOOL;
+
 pub extern "gdi32" fn RestoreDC(hdc: HDC, saved: c_int) callconv(.winapi) BOOL;
 
 pub extern "uxtheme" fn BufferedPaintUnInit() callconv(.winapi) i32;

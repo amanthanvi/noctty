@@ -874,6 +874,8 @@ pub const Surface = struct {
             // A layout during init may have dimmed the pane this split
             // came from, which is alone in its tab again.
             if (!created_host) host.syncSplitDim();
+            // Its renderer's start may have made the window fade whole.
+            if (!created_host) window_state.refreshBackgroundOpacity(host);
         }
 
         // The core opens the pty at the size read below. Give a new split its

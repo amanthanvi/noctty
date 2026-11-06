@@ -5220,8 +5220,9 @@ pub fn applyDwmThemeWithBuild(hwnd: HWND, theme: *const ThemeColors, config: *co
         // No backdrop material, so `background-blur` has no effect
         // (window-frame.md, 2026-09-14). Since #640 a translucent OpenGL
         // window has blur-behind with an empty region, under which
-        // `DWMSBT_TRANSIENTWINDOW` would show acrylic, but Windows lays a light
-        // layer over the theme's background with it: a change of its own.
+        // `DWMSBT_TRANSIENTWINDOW` would show acrylic; with it Windows lays a
+        // light layer over the theme's background (the #640 contributor's
+        // observation, not measured here): a change of its own.
         c.DWMSBT_NONE,
         supportsDwmSystemBackdropAttribute(os_build),
     );
@@ -11612,12 +11613,12 @@ pub fn hostWindowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) cal
                 const item: *const DRAWITEMSTRUCT = @ptrFromInt(@as(usize, @bitCast(lParam)));
                 // Under blur-behind GDI's zero alpha shows through.
                 var buffered = item.*;
-                var alpha_paint = chrome_scene.AlphaPaint.beginItem(v, item);
+                var alpha_paint = chrome_scene.AlphaPaint.begin(v, item.hDC, item.rcItem);
                 defer alpha_paint.end();
                 buffered.hDC = alpha_paint.hdc;
                 const draw = &buffered;
                 if (v.drawConfirmPromptText(draw)) return 1;
-                if (v.drawSearchBarBackground(draw)) return 1;
+                if (v.drawSearchBarBackground(draw, &alpha_paint)) return 1;
                 v.drawButton(draw);
                 return 1;
             }
