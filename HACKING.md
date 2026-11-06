@@ -56,6 +56,50 @@ identical run. A plain `zig build` picks a new seed and reruns the tests. A
 cached result repeats the earlier run's outcome without running anything, so
 rerun without `--seed` or `--watch` when you need the count.
 
+### Running a source build day to day
+
+`zig build` installs into `zig-out\bin\` (`noctty.exe`, `noctty.com`,
+`noctty.ico`, and the bundled ConPTY pair) and `zig-out\share\`. Keep `bin` and
+`share` together: the exe needs `share` beside it. A plain `zig build` is a
+Debug build, which is slow. Releases use `-Doptimize=ReleaseFast`
+(`scripts/package-windows.ps1`). `-Doptimize=ReleaseSafe` keeps Zig's runtime
+safety checks, so an out-of-bounds index or an overflow stops with a panic
+instead of corrupting memory, at some cost in speed. Crash dumps are verified
+on ReleaseFast only: per the Zig 0.15 standard library source, Debug and
+ReleaseSafe builds install Zig's own segfault handler, which ends the process
+before noctty's crash-dump filter runs for an access violation.
+
+The installer, WinGet and Chocolatey (which run the same installer) create the
+Start menu entry; the Scoop package unpacks the portable ZIP and its manifest
+declares no shortcut. A source build gets none. `-p` (`--prefix`) moves the
+install root, so a build for daily use can live outside the repository.
+This installs to `$HOME\.local\bin` and adds a shortcut for the current user;
+close noctty before you rebuild, because a running `noctty.exe` locks the
+file:
+
+```powershell
+zig build -Doptimize=ReleaseSafe -p "$HOME\.local"
+$bin = "$HOME\.local\bin"
+$lnk = Join-Path ([Environment]::GetFolderPath('Programs')) 'noctty (source build).lnk'
+$s = (New-Object -ComObject WScript.Shell).CreateShortcut($lnk)
+$s.TargetPath = "$bin\noctty.exe"
+$s.IconLocation = "$bin\noctty.ico"
+$s.WorkingDirectory = $HOME
+$s.Save()
+```
+
+Two differences from an installed copy. A source build is not portable unless
+you add a `noctty.portable` file beside the exe, so it shares
+`%LOCALAPPDATA%\noctty` (config, session state, jump list) with an installed
+noctty. And this shortcut has no AppUserModelID: the installer sets
+`io.github.amanthanvi.noctty` on its shortcuts, and `WScript.Shell` has no
+property for one (inferred). The running exe still sets the ID for its own
+process and registers it for the user. By the comments in
+`src/apprt/win32_aumid.zig`, that keeps toasts from a running noctty attributed
+to it, while a click on a toast after a cold start needs the shortcut's ID.
+Taskbar grouping of a pinned shortcut with the running window may differ as
+well. Neither was measured.
+
 ## Toolchain
 
 This fork requires a Zig 0.15.x release with patch ≥ 2. The check is

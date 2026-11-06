@@ -244,6 +244,35 @@ instead; nothing is migrated.
 
 ## Shells
 
+To open a specific shell, such as a WSL distribution, in a new tab: press
+`Ctrl+Shift+P`, type `~` and part of its name (`~ubuntu`), and press Enter. The
+▾ menu next to the new-tab button lists the same profiles and opens the one you
+click in a new tab.
+
+No keybinding opens a named profile in a new tab yet. Besides the two ways
+above:
+
+- Set [`default-profile`](#default-profile-order-and-hidden-profiles), and
+  `Ctrl+Shift+T` opens that profile.
+- Right-click the new-tab button to open the current profile choice (your
+  `default-profile`, or the last profile you picked) in a new window;
+  middle-click opens it in a split.
+- A profile entry in the taskbar jump list launches noctty with that profile,
+  and `new_window_elevated:<profile-key>` bound to a key opens an elevated
+  window (with a UAC prompt). See [Taskbar jump list](#taskbar-jump-list) and
+  [Running elevated](#running-elevated).
+- From a shell, `noctty +new-window -e wsl.exe -d Ubuntu` opens a new window
+  that runs that command.
+
+The ▾ menu prints `Ctrl+Shift+1` to `Ctrl+Shift+9` beside the first nine
+profiles. No default keybinding uses those chords, and nothing outside the
+profile picker overlay acts on them. That overlay, with its quick slots
+(`Alt+1` to `Alt+3`), has no keybinding or menu entry: it opens on the first
+window of a launch that restores no session, when the environment variable
+`NOCTTY_WIN32_STARTUP_PROFILE_PICKER` is `1`. Where this page says "profile
+picker", it means that overlay; the palette and the ▾ menu list the same
+profiles.
+
 For commands launched through `cmd.exe /C`, noctty sets
 `NoDefaultCurrentDirectoryInExePath` in that wrapper's environment when it is
 absent. This disables cmd's implicit executable search in the pane's current
