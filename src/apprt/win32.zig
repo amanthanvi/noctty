@@ -10639,8 +10639,8 @@ pub fn hostBannerProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) cal
                     var ps: PAINTSTRUCT = undefined;
                     const hdc = sys.BeginPaint(hwnd, &ps) orelse return 0;
                     defer _ = sys.EndPaint(hwnd, &ps);
-                    var alpha_paint = chrome_scene.AlphaPaint.begin(host, hdc, ps.rcPaint, false);
-                    defer alpha_paint.end(host);
+                    var alpha_paint = chrome_scene.AlphaPaint.begin(host, hdc, ps.rcPaint);
+                    defer alpha_paint.end();
                     paintBannerClient(host, hwnd, alpha_paint.hdc);
                 }
                 host.bannerPainted();
@@ -10664,8 +10664,8 @@ pub fn hostBannerProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) cal
             c.WM_DRAWITEM => {
                 const item: *const DRAWITEMSTRUCT = @ptrFromInt(@as(usize, @bitCast(lParam)));
                 var draw = item.*;
-                var alpha_paint = chrome_scene.AlphaPaint.begin(host, item.hDC, item.rcItem, true);
-                defer alpha_paint.end(host);
+                var alpha_paint = chrome_scene.AlphaPaint.begin(host, item.hDC, item.rcItem);
+                defer alpha_paint.end();
                 draw.hDC = alpha_paint.hdc;
                 if (host.drawBannerButton(&draw)) return 1;
             },
@@ -11525,6 +11525,18 @@ pub fn hostWindowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) cal
             if (host) |v| v.dispatchDeferredNewTab(if (wParam == 0) null else @as(u64, @intCast(wParam)));
             return 0;
         },
+        c.WM_WINHOSTTY_RENDERER_SWITCHED => {
+            if (host) |v| window_state.refreshBackgroundOpacity(v);
+            return 0;
+        },
+        c.WM_PARENTNOTIFY => {
+            // A control made while the window's background alone is
+            // translucent is made solid as it is made.
+            if (host) |v| if ((wParam & 0xFFFF) == c.WM_CREATE) {
+                if (@as(?HWND, @ptrFromInt(@as(usize, @bitCast(lParam))))) |child| window_state.childCreated(v, child);
+            };
+            return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
+        },
         c.WM_NCACTIVATE => {
             if (host) |v| {
                 v.setWindowActive(wParam != 0);
@@ -11598,8 +11610,8 @@ pub fn hostWindowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) cal
                 const item: *const DRAWITEMSTRUCT = @ptrFromInt(@as(usize, @bitCast(lParam)));
                 // Under blur-behind GDI's zero alpha shows through.
                 var buffered = item.*;
-                var alpha_paint = chrome_scene.AlphaPaint.begin(v, item.hDC, item.rcItem, true);
-                defer alpha_paint.end(v);
+                var alpha_paint = chrome_scene.AlphaPaint.begin(v, item.hDC, item.rcItem);
+                defer alpha_paint.end();
                 buffered.hDC = alpha_paint.hdc;
                 const draw = &buffered;
                 if (v.drawConfirmPromptText(draw)) return 1;

@@ -54,11 +54,45 @@ pub const TopLevel = struct {
         return self.opacity < 0.999;
     }
 
-    /// The background alpha the window shows, or null when it shows opaque
-    /// and so keeps a plain frame.
+    /// The alpha `opacity` shows at, or null when the window shows opaque.
+    /// `shows` says how the window shows it.
     pub fn alpha(self: *const TopLevel) ?u8 {
         if (self.force_opaque or !self.translucent()) return null;
         return @intFromFloat(@round(self.opacity * 255.0));
+    }
+
+    /// How a window shows `alpha()` (#640). At most one of `background` and
+    /// `layered` is set; an opaque window has neither and pays for neither.
+    pub const Shows = struct {
+        /// Only the terminal background is translucent: each pane's renderer
+        /// draws it at `pane_opacity`, blur-behind with an empty region makes
+        /// DWM keep that alpha for the client area, and the chrome is painted
+        /// solid except its own background in the terminal lane, which takes
+        /// this alpha (`Host.chrome_alpha`).
+        background: ?u8 = null,
+        /// The whole window fades, text and chrome included, as a layered
+        /// window at this alpha: a D3D11 pane presents through
+        /// DirectComposition with its alpha ignored (`DXGI_ALPHA_MODE_IGNORE`),
+        /// so it can show no per-pixel alpha.
+        layered: ?u8 = null,
+        /// What each pane's renderer draws its background at, or null for its
+        /// own config's `background-opacity`, as before #640.
+        pane_opacity: ?f64 = null,
+    };
+
+    /// `panes_draw_alpha`: every pane of the window whose renderer runs
+    /// draws with OpenGL, whose alpha reaches DWM. High Contrast shows the
+    /// window opaque.
+    pub fn shows(self: *const TopLevel, panes_draw_alpha: bool, high_contrast: bool) Shows {
+        // A D3D11 window keeps its config's opacity in its panes, as before.
+        if (!panes_draw_alpha) {
+            if (high_contrast) return .{};
+            return .{ .layered = self.alpha() };
+        }
+        const shown = if (high_contrast) null else self.alpha();
+        // Opaque panes draw at 1: without blur-behind DWM drops their alpha,
+        // and a background drawn at the config's opacity would show darker.
+        return .{ .background = shown, .pane_opacity = if (shown != null) self.opacity else 1.0 };
     }
 };
 
@@ -1078,4 +1112,27 @@ test "win32 a window shows its opacity as an alpha, and opaque none" {
     top_level = .{ .opacity = 0.9995 };
     try std.testing.expectEqual(@as(?u8, null), top_level.alpha());
     try std.testing.expectEqual(@as(?u8, 0), (TopLevel{ .opacity = 0 }).alpha());
+}
+
+test "win32 an OpenGL window shows its opacity in the background only, a D3D11 window fades whole, High Contrast neither" {
+    const Shows = TopLevel.Shows;
+    const Case = struct { top_level: TopLevel, opengl: bool, high_contrast: bool = false, shows: Shows };
+    for ([_]Case{
+        // OpenGL panes draw the background at the window's opacity, and the
+        // window is never layered.
+        .{ .top_level = .{ .opacity = 0.5 }, .opengl = true, .shows = .{ .background = 128, .pane_opacity = 0.5 } },
+        // Opaque, toggled opaque or High Contrast: no blur-behind, and the
+        // panes draw at 1 whatever their config says.
+        .{ .top_level = .{}, .opengl = true, .shows = .{ .pane_opacity = 1.0 } },
+        .{ .top_level = .{ .opacity = 0.5, .force_opaque = true }, .opengl = true, .shows = .{ .pane_opacity = 1.0 } },
+        .{ .top_level = .{ .opacity = 0.5 }, .opengl = true, .high_contrast = true, .shows = .{ .pane_opacity = 1.0 } },
+        // A pane on D3D11: the whole window fades, as before #640, and its
+        // panes keep their config's opacity.
+        .{ .top_level = .{ .opacity = 0.5 }, .opengl = false, .shows = .{ .layered = 128 } },
+        .{ .top_level = .{}, .opengl = false, .shows = .{} },
+        .{ .top_level = .{ .opacity = 0.5, .force_opaque = true }, .opengl = false, .shows = .{} },
+        .{ .top_level = .{ .opacity = 0.5 }, .opengl = false, .high_contrast = true, .shows = .{} },
+    }) |case| {
+        try std.testing.expectEqualDeep(case.shows, case.top_level.shows(case.opengl, case.high_contrast));
+    }
 }

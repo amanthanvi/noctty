@@ -6027,6 +6027,9 @@ pub const App = struct {
             }
             if (host.hwnd) |hwnd| {
                 applyDwmThemeWithBuild(hwnd, &self.resolved_theme, shown, self.os_build);
+                // High Contrast shows every window opaque, and a window that
+                // had blur-behind asserts it again across the theme change.
+                window_state.refreshBackgroundOpacity(host);
                 if (frame_mode_changed) {
                     _ = sys.SetWindowPos(
                         hwnd,

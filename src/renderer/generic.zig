@@ -238,6 +238,31 @@ test "CommonDerivedConfig split fill defaults to the configured background" {
     try std.testing.expectEqual(terminal.color.RGB{ .r = 0xff, .g = 0xff, .b = 0xff }, derived.unfocused_split_fill);
 }
 
+/// The opacity a renderer draws its background at: the window's while it
+/// composes the terminal's alpha and set one (`background_opacity_override`),
+/// else the config's.
+fn effectiveBackgroundOpacity(override: ?f64, config: *const CommonDerivedConfig) f64 {
+    return override orelse config.background_opacity;
+}
+
+test "a renderer draws the window's background opacity over every config it is given" {
+    const alloc = std.testing.allocator;
+    var config = try configpkg.Config.default(alloc);
+    defer config.deinit();
+    config.@"background-opacity" = 0.8;
+    var loaded = try CommonDerivedConfig.init(alloc, &config);
+    defer loaded.deinit();
+    try std.testing.expectEqual(@as(f64, 0.8), effectiveBackgroundOpacity(null, &loaded));
+    try std.testing.expectEqual(@as(f64, 0.5), effectiveBackgroundOpacity(0.5, &loaded));
+    // A reload hands the renderer a whole new config; the window's opacity
+    // is not in it, so it still wins.
+    config.@"background-opacity" = 1;
+    var reloaded = try CommonDerivedConfig.init(alloc, &config);
+    defer reloaded.deinit();
+    try std.testing.expectEqual(@as(f64, 0.5), effectiveBackgroundOpacity(0.5, &reloaded));
+    try std.testing.expect(!@hasField(CommonDerivedConfig, "background_opacity_override"));
+}
+
 /// The uniforms of the pass that dims an unfocused split
 /// (`unfocused-split-opacity`): the frame's own, with the fill drawn at
 /// `1 - opacity` over the finished frame. Upstream lays a rectangle of the
@@ -377,6 +402,13 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
         /// split its tab has focused, not from keyboard focus, so it is
         /// separate from `focused`.
         split_dimmed: bool = false,
+
+        /// The opacity the window composes this terminal's background at,
+        /// over `config.background_opacity` while set: on Win32 the window
+        /// sets it while DWM keeps the terminal's alpha (#640), so a toggle
+        /// or a Settings preview reaches the pixels. Kept apart from
+        /// `config`, which every `changeConfig` replaces whole.
+        background_opacity_override: ?f64 = null,
 
         /// The most recent scrollbar state. We use this as a cache to
         /// determine if we need to notify the apprt that there was a
@@ -1190,12 +1222,18 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             self.terminal_state.dirty = .full;
         }
 
-        pub fn setBackgroundOpacity(self: *Self, opacity: f64) void {
+        /// What the window composes this terminal at (`background_opacity_override`).
+        pub fn setBackgroundOpacity(self: *Self, opacity: ?f64) void {
             self.draw_mutex.lock();
             defer self.draw_mutex.unlock();
-            if (self.config.background_opacity == opacity) return;
-            self.config.background_opacity = opacity;
-            self.markDirty();
+            const before = self.backgroundOpacity();
+            self.background_opacity_override = opacity;
+            if (self.backgroundOpacity() != before) self.markDirty();
+        }
+
+        /// The opacity the background is drawn at.
+        fn backgroundOpacity(self: *const Self) f64 {
+            return effectiveBackgroundOpacity(self.background_opacity_override, &self.config);
         }
 
         /// Called when we get an updated display ID for our display link.
@@ -1645,7 +1683,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     self.terminal_state.colors.background.r,
                     self.terminal_state.colors.background.g,
                     self.terminal_state.colors.background.b,
-                    @intFromFloat(@round(self.config.background_opacity * 255.0)),
+                    @intFromFloat(@round(self.backgroundOpacity() * 255.0)),
                 };
 
                 // Prepare our overlay image for upload (or unload). This
@@ -2350,7 +2388,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
         /// Move CPU frame preparation to another graphics API. GPU resources
         /// are freshly initialized; font, terminal and search state survive.
         pub fn transferCpuState(self: *Self, target: anytype) void {
-            const transferred = .{ "grid_metrics", "size", "focused", "split_dimmed", "scrollbar", "scrollbar_dirty", "last_bottom_node", "last_bottom_y", "search_matches", "search_selected_match", "search_matches_dirty", "cells", "bg_cells_dirty", "fg_cells_dirty_from", "fg_cell_count", "uniforms", "custom_shader_uniforms", "first_frame_time", "last_frame_time", "font_shaper", "font_shaper_cache", "terminal_state", "terminal_state_frame_count", "preedit_caret_clean_rebuilds", "overlay" };
+            const transferred = .{ "grid_metrics", "size", "focused", "split_dimmed", "background_opacity_override", "scrollbar", "scrollbar_dirty", "last_bottom_node", "last_bottom_y", "search_matches", "search_selected_match", "search_matches_dirty", "cells", "bg_cells_dirty", "fg_cells_dirty_from", "fg_cell_count", "uniforms", "custom_shader_uniforms", "first_frame_time", "last_frame_time", "font_shaper", "font_shaper_cache", "terminal_state", "terminal_state_frame_count", "preedit_caret_clean_rebuilds", "overlay" };
             // These fields own API-specific resources, shared ownership, or
             // fresh-renderer synchronization state. A backport must classify
             // every new field explicitly instead of silently dropping state.
@@ -3433,7 +3471,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                         // If the user requested to have opacity on all cells, apply it.
                         if (self.config.background_opacity_cells and bg_style != null) {
                             var opacity: f64 = @floatFromInt(default);
-                            opacity *= self.config.background_opacity;
+                            opacity *= self.backgroundOpacity();
                             break :bg_alpha @intFromFloat(opacity);
                         }
 

@@ -669,9 +669,13 @@ pub const Host = struct {
     // Cached chrome paint strings — rebuilt only when their per-zone
     // dirty bits are set, so WM_PAINT can skip unrelated UTF-16 churn.
     chrome_repaint_dirty: bool = true,
-    /// The background alpha while the frame extends over the client area.
-    /// GDI leaves alpha at 0, so chrome painting fixes it up: the chrome
-    /// background gets this alpha and everything drawn on it stays solid.
+    /// While the window's background alone is translucent (blur-behind on:
+    /// `window_state`, `TopLevel.Shows.background`), the alpha it shows at;
+    /// null otherwise. GDI leaves alpha 0, which DWM shows through, so the
+    /// chrome paints through `chrome_scene.AlphaPaint`: its background in the
+    /// terminal lane takes this alpha and everything else is solid. Set only
+    /// once blur-behind and `BufferedPaintInit` succeeded; `deinit` ends the
+    /// buffered paint.
     chrome_alpha: ?u8 = null,
     chrome_paint_pending: bool = false,
     chrome_paint_mask: ChromeRepaintMask = .{},
@@ -2752,6 +2756,9 @@ pub const Host = struct {
             self.mode_timer_active = false;
         }
         self.tween_sched.deinit();
+        // `window_state.beginBackgroundAlpha`'s, which a translucent window
+        // keeps until it is opaque again.
+        if (self.chrome_alpha != null) _ = sys.BufferedPaintUnInit();
 
         self.revertPaletteThemePreview();
         if (self.palette_catalog) |*catalog| catalog.reset();

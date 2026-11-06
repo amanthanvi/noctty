@@ -680,6 +680,11 @@ pub const wglGetProcAddress = wgl.wglGetProcAddress;
 pub const wglMakeCurrent = wgl.wglMakeCurrent;
 
 pub const BPBF_TOPDOWNDIB: u32 = 2;
+pub const SRCCOPY: u32 = 0x00CC0020;
+
+pub extern "uxtheme" fn BufferedPaintInit() callconv(.winapi) i32;
+
+pub extern "uxtheme" fn BufferedPaintUnInit() callconv(.winapi) i32;
 
 pub extern "gdi32" fn BitBlt(dst: HDC, x: i32, y: i32, width: i32, height: i32, src: HDC, src_x: i32, src_y: i32, rop: u32) callconv(.winapi) BOOL;
 
@@ -691,7 +696,16 @@ pub extern "uxtheme" fn GetBufferedPaintBits(hBufferedPaint: *anyopaque, ppbBuff
 
 pub extern "uxtheme" fn GetBufferedPaintTargetRect(hBufferedPaint: *anyopaque, prc: *RECT) callconv(.winapi) i32;
 
-pub const DWM_BLURBEHIND = extern struct { dwFlags: u32, fEnable: BOOL, hRgnBlur: ?HRGN, fTransitionOnMaximized: BOOL };
+pub const DWM_BB_ENABLE: u32 = 0x1;
+pub const DWM_BB_BLURREGION: u32 = 0x2;
+
+/// dwmapi.h declares it under `pshpack1.h`: 20 bytes, no tail padding.
+pub const DWM_BLURBEHIND = extern struct {
+    dwFlags: u32 align(1),
+    fEnable: BOOL align(1),
+    hRgnBlur: ?HRGN align(1),
+    fTransitionOnMaximized: BOOL align(1),
+};
 
 pub extern "dwmapi" fn DwmEnableBlurBehindWindow(hwnd: HWND, pBlurBehind: *const DWM_BLURBEHIND) callconv(.winapi) i32;
 

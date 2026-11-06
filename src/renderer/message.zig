@@ -49,8 +49,10 @@ pub const Message = union(enum) {
     /// Changes the size. The screen size might change, padding, grid, etc.
     resize: renderer.Size,
 
-    /// Update background alpha without changing text or window chrome.
-    background_opacity: f64,
+    /// The opacity to draw the background at, overriding the config's
+    /// `background-opacity` until a null clears it: the Win32 window sets it
+    /// when DWM composes this terminal's alpha (#640).
+    background_opacity: ?f64,
 
     /// The derived configuration to update the renderer with.
     change_config: struct {

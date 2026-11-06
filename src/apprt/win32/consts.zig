@@ -77,9 +77,11 @@ pub const WA_INACTIVE = 0;
 pub const WM_COMMAND = 0x0111;
 pub const WM_CAPTURECHANGED = 0x0215;
 pub const WM_CLOSE = 0x0010;
+pub const WM_CREATE = 0x0001;
 pub const WM_DESTROY = 0x0002;
 pub const WM_NCDESTROY = 0x0082;
 pub const WM_DRAWITEM = 0x002B;
+pub const WM_PARENTNOTIFY = 0x0210;
 pub const WM_ERASEBKGND = 0x0014;
 pub const WM_GETMINMAXINFO = 0x0024;
 pub const WM_CHAR = 0x0102;
@@ -204,6 +206,10 @@ pub const WM_WINHOSTTY_PROFILES = WM_APP + 14;
 pub const WM_WINHOSTTY_JUMP_LIST = WM_APP + 15;
 /// Take seen or out-of-reach panes' toasts out of Action Center (`Notifications.flush`).
 pub const WM_WINHOSTTY_TOAST_REMOVALS = WM_APP + 16;
+/// A pane's renderer switched from D3D11 to OpenGL, so its window may show
+/// its opacity another way (`window_state.refreshBackgroundOpacity`). Posted:
+/// the switch runs inside the pane's paint, holding the renderer's lock.
+pub const WM_WINHOSTTY_RENDERER_SWITCHED = WM_APP + 17;
 
 pub const PM_NOREMOVE: UINT = 0x0000;
 pub const PM_REMOVE: UINT = 0x0001;
