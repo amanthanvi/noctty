@@ -25,9 +25,9 @@ const budget = .{
         .test_support_runtime = 47,
     },
     // The facade's pub declarations: what the files that import it can reach.
-    .facade_pub_decls = 478,
+    .facade_pub_decls = 477,
     // Root declarations of win32.zig whose value is a field access (`a.b`).
-    .facade_aliases = 192,
+    .facade_aliases = 190,
     // Fields of win32.App named `test_*`.
     .app_test_hooks = 10,
 };

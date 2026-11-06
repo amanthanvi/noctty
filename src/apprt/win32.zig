@@ -19,8 +19,6 @@ const CoreApp = @import("../App.zig");
 const CoreSurface = @import("../Surface.zig");
 const cli_args = @import("../cli/args.zig");
 const configpkg = @import("../config.zig");
-const config_edit = @import("../config/edit.zig");
-const config_file_load = @import("../config/file_load.zig");
 const cli_diagnostics = @import("../cli/diagnostics.zig");
 const themepkg = @import("../config/theme.zig");
 const windows_shell = @import("../config/windows_shell.zig");
@@ -29,7 +27,6 @@ const input = @import("../input.zig");
 const internal_os = @import("../os/main.zig");
 const terminal = @import("../terminal/main.zig");
 const rendererpkg = @import("../renderer.zig");
-const ptypkg = @import("../pty.zig");
 const updatepkg = @import("../update/github_releases.zig");
 const SplitTree = @import("../datastruct/split_tree.zig").SplitTree;
 
@@ -39,35 +36,25 @@ const win32_tween = @import("win32_tween.zig");
 const win32_uia = @import("win32_uia/mod.zig");
 const win32_terminal_accessibility = @import("win32_terminal_accessibility.zig");
 const win32_palette = @import("win32_palette.zig");
-const win32_layout = @import("win32_layout.zig");
 const win32_settings = @import("win32_settings.zig");
-const win32_aumid = @import("win32_aumid.zig");
 const win32_chrome_state = @import("win32_chrome_state.zig");
 const win32_clipboard_html = @import("win32_clipboard_html.zig");
 const win32_undo = @import("win32_undo.zig");
-const win32_toast_winrt = @import("win32_toast_winrt.zig");
 const win32_taskbar_progress = @import("win32_taskbar_progress.zig");
 const win32_program_status = @import("win32_program_status.zig");
-const win32_bell = @import("win32_bell.zig");
 const win32_jump_list = @import("win32_jump_list.zig");
-const win32_powershell_install = @import("win32_powershell_install.zig");
 const win32_terminfo = @import("win32_terminfo.zig");
 const terminfo = @import("../terminfo/main.zig");
-const win32_link_preview = @import("win32_link_preview.zig");
 const win32_quick_terminal = @import("win32_quick_terminal.zig");
 const win32_surface_drop = @import("win32_surface_drop.zig");
-const win32_surface_drop_target = @import("win32_surface_drop_target.zig");
 const win32_ole = @import("win32_ole.zig");
 const win32_toast_activation = @import("win32_toast_activation.zig");
 const win32_toast_activator = @import("win32_toast_activator.zig");
-const win32_tab_drop_zones = @import("win32_tab_drop_zones.zig");
-const win32_tab_tooltip = @import("win32_tab_tooltip.zig");
 const win32_icons = @import("win32_icons.zig");
 const win32_paste_protection = @import("win32_paste_protection.zig");
 const win32_scrollbar_geometry = @import("win32_scrollbar_geometry.zig");
 const win32_nc_layout = @import("win32_nc_layout.zig");
 const win32_tab_visual = @import("win32_tab_visual.zig");
-const focus_cue = @import("win32/focus_cue.zig");
 const win32_types = @import("win32_types.zig");
 const win32_layouts = @import("win32_layouts.zig");
 const session_module = @import("win32/session.zig");
@@ -76,8 +63,6 @@ const win32_session_state = @import("win32_session_state.zig");
 const win32_session_persistence = @import("win32_session_persistence.zig");
 const win32_structural_history = @import("win32_structural_history.zig");
 const win32_recovery = @import("win32_recovery.zig");
-const win32_compositor = @import("win32_compositor.zig");
-const win32_compositor_native = @import("win32_compositor_native.zig");
 const win32_shell = @import("win32_shell.zig");
 const ipc_server = @import("win32/ipc_server.zig");
 const notifications = @import("win32/notifications.zig");
@@ -105,7 +90,6 @@ const win32_hints = @import("win32_hints.zig");
 const win32_elevation = @import("win32_elevation.zig");
 const render_trace = @import("win32/render_trace.zig");
 const gl_startup = @import("win32/gl_startup.zig");
-const pixel_format = @import("win32/pixel_format.zig");
 const bench_trace = @import("win32/bench_trace.zig");
 const overlay_view = @import("win32/overlay_view.zig");
 const paint_text = @import("win32/text.zig");
@@ -119,7 +103,6 @@ const c = @import("win32/consts.zig");
 const sys = @import("win32/sys.zig");
 const app_delivery = @import("win32/app_delivery.zig");
 const save_target = @import("win32/save_target.zig");
-const focus_region = @import("win32/focus_region.zig");
 const first_frame = @import("win32/first_frame.zig");
 const clipboard_write = @import("win32/clipboard_write.zig");
 const win32_config_problems = @import("win32/config_problems.zig");
@@ -576,7 +559,6 @@ pub const MemoryStageTrace = bench_trace.MemoryStageTrace;
 pub const BenchmarkMemoryStage = bench_trace.BenchmarkMemoryStage;
 pub const captureProcessOrigin = bench_trace.captureProcessOrigin;
 
-pub const StartupLoaderErrorDialogSuppression = gl_startup.StartupLoaderErrorDialogSuppression;
 pub const suppressStartupLoaderErrorDialogs = gl_startup.suppressStartupLoaderErrorDialogs;
 pub const setDefaultDllDirectories = gl_startup.setDefaultDllDirectories;
 pub const OpenGLStartupStep = gl_startup.OpenGLStartupStep;
@@ -653,10 +635,7 @@ pub const palette_catalog_label_bytes: usize = 128;
 pub const host_tab_max_button_width: i32 = default_metrics.tab_max_width;
 pub const host_tab_close_zone_width: i32 = default_metrics.tab_close_zone; // per-tab close button hit zone width
 
-// Context menu constants
-
 pub const WNDPROC = win32_types.WNDPROC;
-const SHORT = i16;
 
 pub const POINT = sys.POINT;
 pub const RECT = sys.RECT;
@@ -1764,8 +1743,6 @@ fn setAsideCrashedSessionState(alloc: Allocator, state_path: []const u8) bool {
     log.warn("win32 recovery: repeated failures while restoring the saved session; moved it to {s}", .{destination});
     return true;
 }
-
-const setAsideSessionStateAt = session_module.setAsideSessionStateAt;
 
 /// Create the directory `path` sits in when it is missing. Only that one
 /// level: its own parent must already exist.
