@@ -3097,6 +3097,27 @@ test "win32 a Settings preview of a theme and an opacity that ends applies the o
             try std.testing.expectEqual(asserts, test_blur_behind_asserts);
             try std.testing.expect(!testHostIsLayered(hwnd));
             try std.testing.expectEqual(@as(?u8, null), testBackgroundAlpha(hwnd));
+
+            // Closing Settings without saving ends the same way, back at the
+            // config's own translucent opacity and theme: one apply, at that
+            // value, and blur-behind asserted once for it.
+            app.config.@"background-opacity" = 0.8;
+            try applyConfig(fixture.newest().host.?, &app.config);
+            try std.testing.expectEqual(@as(?u8, 204), testBackgroundAlpha(hwnd));
+            try std.testing.expect(app.previewSetting(.{ .background_opacity = 0.5 }));
+            app.refreshSettingsPreview(.opacity);
+            try std.testing.expect(app.previewSetting(.{ .window_theme = .light }));
+            app.refreshSettingsPreview(.theme);
+            try std.testing.expectEqual(@as(?u8, 128), testBackgroundAlpha(hwnd));
+            const cancel_applies = test_background_opacity_applies;
+            const cancel_asserts = test_blur_behind_asserts;
+            app.endSettingsPreview();
+            try std.testing.expectEqual(cancel_applies + 1, test_background_opacity_applies);
+            try std.testing.expectEqual(@as(f64, 0.8), test_background_opacity_applied);
+            try std.testing.expectEqual(cancel_asserts + 1, test_blur_behind_asserts);
+            try std.testing.expect(!testHostIsLayered(hwnd));
+            try std.testing.expectEqual(@as(?u8, 204), testBackgroundAlpha(hwnd));
+            try std.testing.expect(std.meta.eql(win32.resolveTheme(&app.config), app.resolved_theme));
         }
     }.body);
 }

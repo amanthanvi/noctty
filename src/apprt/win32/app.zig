@@ -6245,10 +6245,16 @@ pub const App = struct {
             if (effect == .none) continue;
             if (!std.meta.eql(win32_settings.settingValue(&previous, field), win32_settings.settingValue(&self.config, field))) changed.insert(effect);
         }
-        // In declaration order, the theme before the opacity. An opacity
-        // that ends with the theme is applied by the opacity's own
-        // `applyConfig`, for every window, so the theme does not show the
-        // previewed opacity first.
+        // The theme before the opacity: `EnumSet` iterates in tag order,
+        // which is `PreviewEffect`'s declaration order. An opacity that ends
+        // with the theme is applied by the opacity's own `applyConfig`, for
+        // every window, so the theme does not show the previewed opacity
+        // first.
+        comptime {
+            if (@intFromEnum(win32_settings.PreviewEffect.theme) > @intFromEnum(win32_settings.PreviewEffect.opacity)) {
+                @compileError("endSettingsPreview ends the theme before the opacity: PreviewEffect must declare .theme before .opacity");
+            }
+        }
         var effects = changed.iterator();
         while (effects.next()) |effect| {
             if (effect == .theme and changed.contains(.opacity)) {
