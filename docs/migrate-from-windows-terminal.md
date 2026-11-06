@@ -138,7 +138,8 @@ equivalent. The closest ones: set `default-profile` so `Ctrl+Shift+T` opens
 your most-used shell (leave `command` unset, because it outranks
 `default-profile`), or save a
 window that runs one shell as a layout and bind `launch_layout:<name>` to a
-key, which opens it in a new window. Right-clicking the new-tab button opens
+key, which opens it in a new window (this works for a shell or a WSL
+distribution; a layout does not reconnect an SSH profile). Right-clicking the new-tab button opens
 the current profile choice in a new window. A
 `keybind = ...=text:wsl.exe -d Ubuntu\r` line types the command into the
 program that has focus, so it runs a nested shell inside the current tab

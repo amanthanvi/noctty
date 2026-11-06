@@ -77,19 +77,34 @@ declares no shortcut. A source build gets none. `-p` (`--prefix`) moves the
 install root, so a build for daily use can live outside the repository. This
 installs to `$HOME\.local\noctty\bin` and adds a shortcut for the current user.
 Close noctty before you rebuild, because a running `noctty.exe` locks the file.
-Build from a shell that has the toolchain, such as the one
-`scripts\dev-windows.cmd` opens:
+Build from a shell that has the toolchain. `scripts\dev-windows.cmd` opens
+Command Prompt by default, and the snippet is PowerShell, so start PowerShell
+through it from the repository root (the script runs the command it is given
+inside the toolchain environment), then paste:
+
+```cmd
+scripts\dev-windows.cmd powershell -NoExit
+```
 
 ```powershell
 zig build -Doptimize=ReleaseSafe -p "$HOME\.local\noctty"
 $bin = "$HOME\.local\noctty\bin"
 $lnk = Join-Path ([Environment]::GetFolderPath('Programs')) 'noctty (source build).lnk'
+if (Test-Path -LiteralPath $lnk) {
+    Write-Error "$lnk already exists; remove it or pick another name."
+    return
+}
 $s = (New-Object -ComObject WScript.Shell).CreateShortcut($lnk)
 $s.TargetPath = "$bin\noctty.exe"
 $s.IconLocation = "$bin\noctty.ico"
 $s.WorkingDirectory = $HOME
 $s.Save()
 ```
+
+Create the shortcut once; later rebuilds only need the `zig build` line. The
+check stops rather than overwrite a shortcut that is already there, because
+`CreateShortcut` on an existing path loads that shortcut and `Save()` rewrites
+it.
 
 Differences from an installed copy:
 

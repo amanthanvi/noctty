@@ -37,8 +37,11 @@ test('every fragment link on a page resolves to an id on its target page', () =>
 });
 
 test('the landing page palette feature has a stable id of its own', () => {
-  assert.match(
-    pages.get('index.html'),
-    /<article class="nc-feature" id="universal-palette" aria-labelledby="palette-title">/,
-  );
+  // The element that the "Universal palette" heading labels, whatever its
+  // other attributes or their order.
+  const opening = pages
+    .get('index.html')
+    .match(/<[a-z][a-z0-9-]*\s[^>]*\baria-labelledby="palette-title"[^>]*>/i);
+  assert.ok(opening, 'no element is labelled by palette-title');
+  assert.match(opening[0], /\sid="universal-palette"/);
 });

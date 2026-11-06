@@ -261,7 +261,10 @@ above:
 - Bind `launch_layout:<name>` to a key to open a saved
   [named layout](#named-layouts) in a new window. A layout records each pane's
   profile, so a layout saved from a window with one tab running that profile
-  (`save_layout:<name>`) opens it on one key press, without elevation.
+  (`save_layout:<name>`) opens it on one key press, without elevation. This
+  works for profiles that restore, such as a shell or a WSL distribution. A
+  layout never reconnects a detected `ssh:` profile: it is saved without its
+  profile, and the pane comes back as your default shell.
 - A profile entry in the taskbar jump list launches noctty with that profile.
   `new_window_elevated:<profile-key>` bound to a key opens the profile in an
   elevated window, with a UAC prompt; use it only when you want that. See
