@@ -2802,6 +2802,59 @@ test "win32 a finished discovery reaches only the windows that asked for it" {
     try std.testing.expectEqualStrings("pwsh", first.profiles.?[0].key);
 }
 
+test "win32 a complete discovery ends the jump list's wait and gives Settings the whole list; an incomplete one is tried again" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var core_app: CoreApp = undefined;
+    var app: App = undefined;
+    var first: Host = undefined;
+    var session: TestSession = .{};
+    try session.init(.{
+        .core_app = &core_app,
+        .app = &app,
+        .hosts = &.{.{ .storage = &first, .register = true, .id = 1 }},
+    });
+    defer session.deinit();
+    defer testFreeHostProfiles(&app, &.{&first});
+    // The jump list waits for the first window's startup discovery.
+    app.jump_list = .{
+        .alloc = std.testing.allocator,
+        .state_path = try std.testing.allocator.dupe(u8, "unused"),
+        .exe_path = null,
+        .recents = .{},
+        .removed_recents = .{},
+        .hidden_profiles = .{},
+        .startup_profile_discovery_pending = true,
+    };
+    defer {
+        app.jump_list.?.persist_dirty = false;
+        app.jump_list.?.deinit();
+        app.jump_list = null;
+    }
+
+    // Discovery's list as it is when WSL's list failed: incomplete. The jump
+    // list tries again, and Settings has part of the list.
+    for ([_]bool{ false, true }) |complete| {
+        first.profiles_requested = true;
+        var completion: ProfileDiscoveryCompletion = .{
+            .arena = .init(std.testing.allocator),
+            .generation = app.profiles_generation,
+        };
+        defer completion.deinit();
+        completion.result = .{
+            .profiles = try testProfileList(completion.arena.allocator(), &.{ "wsl-default", "cmd.exe" }),
+            .complete = complete,
+        };
+        app.handleProfileDiscovery(&completion);
+        const listed = app.settingsProfileList(false) orelse return error.TestExpectedList;
+        try std.testing.expectEqual(complete, listed.complete);
+        // Incomplete: still waiting, once more. Complete (WSL absent is a
+        // complete answer): the wait is over, and Settings' Profiles page
+        // has the whole list it moves and hides by.
+        try std.testing.expectEqual(!complete, app.jump_list.?.startupProfileDiscoveryPending());
+    }
+}
+
 test "win32 Settings' profile refill reads the windows' lists and asks for none" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
