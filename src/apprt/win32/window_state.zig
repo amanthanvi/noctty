@@ -3043,6 +3043,56 @@ test "win32 a reload and the palette's theme apply each window's opacity once, a
     }.body);
 }
 
+test "win32 a reload in which a pane's step fails still applies every window, and returns the failure" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    try runOnHiddenDesktop(struct {
+        fn body() !void {
+            var fixture: WindowStartTestApp = .{};
+            try fixture.init();
+            defer fixture.deinit();
+            const app = &fixture.app;
+            test_pane_renderer = .opengl;
+            defer test_pane_renderer = null;
+
+            // A window of two tabs, a window of one, and a window whose only
+            // tab is in undo history.
+            app.config.@"background-opacity" = 0.5;
+            try app.createWindow(default_title);
+            const first = fixture.newest();
+            _ = try app.createWindowSurface(&app.config, default_title, .{ .host_id = first.host_id });
+            try app.createWindow(default_title);
+            const single = fixture.newest().host.?;
+            try app.createWindow(default_title);
+            const emptied = fixture.newest().host.?;
+            var entry = emptied.detachTabForUndo(0).?;
+            defer _ = emptied.restoreClosedTabEntryNative(&entry.payload.close_tab) catch false;
+
+            var applied: std.ArrayListUnmanaged(TestOpacityApply) = .empty;
+            defer applied.deinit(std.testing.allocator);
+            test_background_opacity_log = &applied;
+            defer test_background_opacity_log = null;
+
+            // A reload to 0.6 whose first pane's step fails (its scrollbar
+            // refresh), which ends core's update before the app's step: the
+            // panes left the windows to that step, and each window still
+            // applies its opacity once, at the new value; the reload returns
+            // the pane's failure.
+            var config = try app.config.clone(std.testing.allocator);
+            defer config.deinit();
+            config.@"background-opacity" = 0.6;
+            try std.testing.expect(app.core_app.surfaces.items[0] == first);
+            Surface.test_scrollbar_refresh_fails = first;
+            defer Surface.test_scrollbar_refresh_fails = null;
+            try std.testing.expectError(error.TestScrollbarRefreshFailed, reloadConfig(app, &config));
+            try std.testing.expectEqual(@as(usize, 3), applied.items.len);
+            for ([_]*Host{ first.host.?, single, emptied }) |host| {
+                try expectAppliedOnce(applied.items, host, 0.6);
+                try std.testing.expectEqual(@as(?u8, 153), testBackgroundAlpha(host.hwnd.?));
+            }
+        }
+    }.body);
+}
+
 test "win32 a reload in which a window fails to apply its opacity still applies every window after it, and returns the failure" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
     try runOnHiddenDesktop(struct {

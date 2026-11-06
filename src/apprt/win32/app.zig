@@ -685,6 +685,10 @@ pub const App = struct {
     /// which applies it for every window once, after the theme's frame write
     /// (`window_state.applyConfig`).
     app_wide_config_change: bool = false,
+    /// Set once an app-wide change reaches the `.app` arm's window pass, so
+    /// `updateCoreConfig` knows whether an update that failed before it
+    /// still owes the windows their half.
+    app_wide_windows_applied: bool = false,
     resolved_theme: ThemeColors = darkTheme(),
     /// Completed `reconfigureTheme` passes; a test reads it to prove that a
     /// settings preview which cannot change the theme does not run one.
@@ -4224,15 +4228,8 @@ pub const App = struct {
                         // window it skipped would show none of the reload.
                         // The first failure is returned after it, so the
                         // scrollbar refresh is still skipped.
-                        var windows_applied: @TypeOf(window_state.applyConfig(undefined, undefined)) = {};
-                        for (self.registry.hosts.items) |host| {
-                            window_state.applyConfig(host, &self.config) catch |err| {
-                                if (windows_applied) |_| {
-                                    windows_applied = err;
-                                } else |_| log.warn("win32 window config apply failed err={}", .{err});
-                            };
-                        }
-                        try windows_applied;
+                        self.app_wide_windows_applied = true;
+                        try self.applyWindowsConfig(&self.config);
                         for (self.registry.windows.items) |surface| try surface.refreshScrollbarWindow();
                         // A reload that turns automatic checks on in a process
                         // that started with them off (or on another channel).
@@ -6019,10 +6016,36 @@ pub const App = struct {
     /// app (the `.app` one), as one app-wide change
     /// (`app_wide_config_change`), so each window applies its half once, in
     /// the app's step.
+    ///
+    /// A pane's step that fails ends core's update before the app's, and the
+    /// panes left the windows to it: then every window still takes its half
+    /// of `config`, as the app's step would have had it, and the pane's
+    /// error is returned.
     pub fn updateCoreConfig(self: *App, config: *const configpkg.Config) !void {
         const outer = self.app_wide_config_change;
+        const outer_applied = self.app_wide_windows_applied;
         self.app_wide_config_change = true;
-        defer self.app_wide_config_change = outer;
+        self.app_wide_windows_applied = false;
+        defer {
+            self.app_wide_config_change = outer;
+            self.app_wide_windows_applied = outer_applied;
+        }
+        self.coreConfigUpdate(config) catch |err| {
+            if (!self.app_wide_windows_applied) {
+                // In the app's light/dark state, as core gives the app its
+                // config, or as it is if that fails, as core goes on then.
+                var shown_ = config.changeConditionalState(self.core_app.config_conditional_state) catch null;
+                defer if (shown_) |*shown| shown.deinit();
+                self.applyWindowsConfig(if (shown_) |*shown| shown else config) catch |window_err| {
+                    log.warn("win32 window config apply after a failed update failed err={}", .{window_err});
+                };
+            }
+            return err;
+        };
+    }
+
+    /// `updateCoreConfig` without its window pass after a failure.
+    fn coreConfigUpdate(self: *App, config: *const configpkg.Config) !void {
         if (builtin.is_test and self.test_surface_init_stage != null) {
             // Core's order, for panes with no core: each pane, then the app
             // (without the app's light/dark state, which core puts the
@@ -6032,6 +6055,21 @@ pub const App = struct {
             return;
         }
         try self.core_app.updateConfig(self, config);
+    }
+
+    /// The window half of an app-wide change (`window_state.applyConfig`)
+    /// for every window, past one that fails: a later failure is logged, the
+    /// first is returned once every window had its turn.
+    fn applyWindowsConfig(self: *App, config: *const configpkg.Config) @TypeOf(window_state.applyConfig(undefined, undefined)) {
+        var applied: @TypeOf(window_state.applyConfig(undefined, undefined)) = {};
+        for (self.registry.hosts.items) |host| {
+            window_state.applyConfig(host, config) catch |err| {
+                if (applied) |_| {
+                    applied = err;
+                } else |_| log.warn("win32 window config apply failed err={}", .{err});
+            };
+        }
+        return applied;
     }
 
     /// Core's config update of `pane` alone (`Surface.updateConfig`), which

@@ -275,8 +275,9 @@ that govern each symbol you change, or that none does.
   `reconfigureSystemTheme` and `App.init` set), `App.endSettingsPreview`, the
   window half of a config change (the `.surface` and `.app`
   `config_change` arms, `App.app_wide_config_change`,
-  `App.updateCoreConfig`, `App.updatePaneCoreConfig`), and `Host.closing`
-  in `Host.closeConfirmed` and `App.windowDestroyed`;
+  `App.updateCoreConfig`, `App.updatePaneCoreConfig`, and after a failed
+  update `App.app_wide_windows_applied` and `App.applyWindowsConfig`), and
+  `Host.closing` in `Host.closeConfirmed` and `App.windowDestroyed`;
   `Surface.setBackgroundOpacity`,
   `rendererSwitchedToOpenGL` and `WM_WINHOSTTY_RENDERER_SWITCHED`; the
   renderer's `background_opacity_override`; how a pane's frame reaches a
