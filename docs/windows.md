@@ -271,7 +271,9 @@ above:
   [Taskbar jump list](#taskbar-jump-list) and
   [Running elevated](#running-elevated).
 - From a shell, `noctty +new-window -e wsl.exe -d Ubuntu` opens a new window
-  that runs that command.
+  that runs that command. The installer, WinGet and Chocolatey do not put
+  `noctty` on `PATH` (Scoop does): run it from the install folder as
+  `.\noctty.com`, or by its full path.
 
 The [▾] menu prints `Ctrl+Shift+1` to `Ctrl+Shift+9` beside the first nine
 profiles. No default keybinding uses those chords, and nothing outside the

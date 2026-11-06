@@ -59,7 +59,8 @@ rerun without `--seed` or `--watch` when you need the count.
 ### Running a source build day to day
 
 `zig build` installs into `zig-out\bin\` (`noctty.exe`, `noctty.com`,
-`noctty.ico`, the bundled ConPTY pair and debug symbols) and `zig-out\share\`.
+`noctty.ico`, debug symbols, and the bundled ConPTY pair unless its download
+failed or you passed `-Dbundled-conpty=false`) and `zig-out\share\`.
 Keep `bin` and `share` together: the exe needs `share` beside it. A plain
 `zig build` is a Debug build, which is slow. Releases use
 `-Doptimize=ReleaseFast -Dcustom-shaders=true` (`scripts/package-windows.ps1`);
@@ -111,8 +112,9 @@ only its own statement.
 Differences from an installed copy:
 
 - A source build is not portable, so it behaves like an installed copy for
-  per-user state. It shares `%LOCALAPPDATA%\noctty` (config, session state)
-  with an installed noctty, rewrites the
+  per-user state. It shares `%LOCALAPPDATA%\noctty` (config, session state;
+  `XDG_CONFIG_HOME`, `XDG_STATE_HOME` and `XDG_CACHE_HOME` override it when
+  set) with an installed noctty, rewrites the
   `AppUserModelId\io.github.amanthanvi.noctty` registration at every start so
   that toasts take their icon from its `noctty.ico`, and replaces the taskbar
   jump list with entries that start its own exe. If you also run an installed

@@ -142,8 +142,9 @@ key, which opens it in a new window (this works for a shell or a WSL
 distribution; a layout does not reconnect an SSH profile). Right-clicking the new-tab button opens
 the current profile choice in a new window. A
 `keybind = ...=text:wsl.exe -d Ubuntu\r` line types the command into the
-program that has focus, so it runs a nested shell inside the current tab
-instead of opening a new one. The [▾] menu prints `Ctrl+Shift+1` to
+program that has focus: at a shell prompt it runs a nested shell inside the
+current tab instead of opening a new one, and in an editor or other program it
+inserts the text. The [▾] menu prints `Ctrl+Shift+1` to
 `Ctrl+Shift+9` beside the first nine profiles, but nothing acts on those
 chords. See
 [Windows shell behavior](windows.md#shells) for the details. Rebind anything
@@ -188,8 +189,9 @@ a new tab). Try each one there before changing your default.
 
 To pin one shell for every new terminal, set a single command. (To keep
 `command` unset and let `Ctrl+Shift+T` open a profile instead, use
-`default-profile`; a `command` outranks it, and setting both reports the
-`default-profile` line as a config problem.)
+`default-profile`; a `command` outranks it, and a `command` set in a config
+file together with `default-profile` reports the `default-profile` line as a
+config problem. A `--command` on the command line wins quietly.)
 
 ```ini
 # PowerShell 7
