@@ -35,7 +35,6 @@ const WORD = ole_types.WORD;
 const S_OK: HRESULT = 0;
 const E_NOINTERFACE: HRESULT = @bitCast(@as(u32, 0x80004002));
 const E_FAIL: HRESULT = @bitCast(@as(u32, 0x80004005));
-const E_UNEXPECTED: HRESULT = @bitCast(@as(u32, 0x8000FFFF));
 
 const DRAGDROP_E_NOTREGISTERED: HRESULT = @bitCast(@as(u32, 0x80040100));
 const CO_E_NOTINITIALIZED: HRESULT = @bitCast(@as(u32, 0x800401F0));

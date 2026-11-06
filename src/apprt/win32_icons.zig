@@ -63,7 +63,6 @@ const HGDIOBJ = win32_types.HGDIOBJ;
 const HPEN = win32_types.HPEN;
 
 const PS_SOLID: i32 = consts.PS_SOLID;
-const PS_NULL: i32 = 5;
 const TRANSPARENT: i32 = consts.TRANSPARENT;
 const NULL_BRUSH_INDEX: i32 = 5;
 
