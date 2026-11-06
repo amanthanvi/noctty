@@ -1238,6 +1238,17 @@ pub const HostControls = struct {
         self.previewSelectedPaletteTheme();
     }
 
+    /// A row picked or scrolled to in the list replaces the row a completion
+    /// wrote (`overlay_completion_result_id`), so a later rebuild that is not
+    /// a completion (profiles arriving) does not go back to it. Picking the
+    /// completed row itself keeps it.
+    fn keepCompletedRowOnlyIfSelected(self: *Host) void {
+        const id = self.overlay_completion_result_id orelse return;
+        const selected = self.palette_list_selected;
+        if (selected < self.palette_list_ranked_count and self.palette_list_ranked[selected].id.eql(id)) return;
+        self.overlay_completion_result_id = null;
+    }
+
     pub fn setPaletteListSelection(self: *Host, next: usize) bool {
         if (self.overlay_mode != .command_palette) return false;
         if (next >= self.palette_list_ranked_count) return false;
@@ -1250,6 +1261,7 @@ pub const HostControls = struct {
 
         const changed = self.palette_list_selected != next;
         self.palette_list_selected = next;
+        keepCompletedRowOnlyIfSelected(self);
         if (next < self.palette_list_scroll) {
             self.palette_list_scroll = next;
         } else if (next >= self.palette_list_scroll + visible_rows) {
@@ -1762,6 +1774,7 @@ pub const HostControls = struct {
         }
         if (self.palette_list_hwnd) |h| _ = sys.InvalidateRect(h, null, 0);
         if (self.palette_list_selected != previous_selection) {
+            keepCompletedRowOnlyIfSelected(self);
             self.announcePaletteSelection();
             self.previewSelectedPaletteTheme();
             self.refreshPalettePresentation();
@@ -1824,6 +1837,43 @@ pub const HostControls = struct {
         host.palette_wheel_steps.remainder = -90;
         try std.testing.expect(host.setPaletteListSelection(3));
         try std.testing.expectEqual(@as(i32, 0), host.palette_wheel_steps.remainder);
+    }
+
+    test "a row picked from the palette list replaces the row a completion wrote" {
+        var core_app: CoreApp = undefined;
+        var app: App = undefined;
+        var host: Host = undefined;
+        var session: TestSession = .{};
+        try session.init(.{
+            .core_app = &core_app,
+            .app = &app,
+            .hosts = &.{.{ .storage = &host }},
+        });
+        defer session.deinit();
+        host.overlay_mode = .command_palette;
+        // Three rows that share a title; completion wrote the second.
+        for (0..3) |index| host.palette_list_ranked[index] = .{
+            .index = index,
+            .id = win32_palette.catalog.stableStringId(.action, &.{@as(u8, 'a') + @as(u8, @intCast(index))}),
+            .score = 0,
+            .enabled = true,
+        };
+        host.palette_list_ranked_count = 3;
+        host.palette_list_visible_rows = 3;
+        host.palette_list_selected = 1;
+        host.palette_list_scroll = 0;
+        const completed = host.palette_list_ranked[1].id;
+        host.overlay_completion_result_id = completed;
+        defer host.overlay_completion_result_id = null;
+
+        // Picking the completed row keeps it for a rebuild.
+        _ = host.setPaletteListSelection(1);
+        try std.testing.expect(host.overlay_completion_result_id.?.eql(completed));
+        // Picking another row forgets it: a rebuild with profiles arriving
+        // does not go back to the completed row.
+        try std.testing.expect(host.setPaletteListSelection(0));
+        try std.testing.expectEqual(@as(?PaletteStableId, null), host.overlay_completion_result_id);
+        try std.testing.expectEqual(@as(usize, 0), paletteSelectionAfterRebuild(host.palette_list_ranked[0..3], host.overlay_completion_result_id));
     }
 
     test "chrome pointer gesture resets when palette layout hides the list" {
