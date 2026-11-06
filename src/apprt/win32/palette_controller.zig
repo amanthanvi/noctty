@@ -98,6 +98,17 @@ fn paletteCompletionText(descriptor: win32_palette.catalog.Descriptor) []const u
     };
 }
 
+/// The row a rebuilt palette list starts on: the one a completion just wrote
+/// into the query, found by its stable id, since rows can share a title (each
+/// tab's "Move tab to pane" rows do); else the first. Typing clears the
+/// completion before the list is rebuilt (`syncOverlayCompletionState`), so
+/// only a completion keeps its row.
+fn paletteSelectionAfterRebuild(ranked: []const PaletteRanked, completed: ?PaletteStableId) usize {
+    const id = completed orelse return 0;
+    for (ranked, 0..) |row, index| if (row.id.eql(id)) return index;
+    return 0;
+}
+
 pub fn paletteVisibleRowCapacity(available_height: i32, row_height: i32) usize {
     if (row_height <= 0 or available_height < row_height) return 0;
     const raw: usize = @intCast(@divTrunc(available_height, row_height));
@@ -649,6 +660,44 @@ test "win32 rich palette completion fills a tab transfer row's title, not its em
     try std.testing.expect(seen_transfer and seen_action);
 }
 
+test "win32 a rebuilt palette list keeps the row a completion wrote, among rows that share its title" {
+    var items: [3]PaletteItem = undefined;
+    var payloads: [3]PalettePayload = undefined;
+    var catalog = try PaletteCatalog.init(&items, &payloads);
+    // Each other tab has its own "Move tab to pane" row; the titles match.
+    for ([_]struct { []const u8, u64, []const u8 }{
+        .{ "move-left-2", 2, "logs" },
+        .{ "move-left-3", 3, "vim" },
+        .{ "move-left-4", 4, "build" },
+    }) |row| {
+        try catalog.append(.{
+            .item = .{
+                .id = win32_palette.catalog.stableStringId(.action, row[0]),
+                .title = "Move tab to pane \u{2014} left",
+                .subtitle = row[2],
+                .keywords = "move tab split pane left",
+            },
+            .payload = .{ .action = .{ .tab_transfer = .{ .source_tab = row[1], .target_pane = 7, .direction = .left } } },
+        });
+    }
+    var host: Host = undefined;
+    host.palette_catalog = catalog;
+    // Complete twice: the second completion is a row after the first.
+    const first = host.richPaletteCompletionCandidate("move", "move", null, false).?;
+    const second = host.richPaletteCompletionCandidate("move", first.text, first.id, false).?;
+    try std.testing.expect(!first.id.eql(second.id));
+    // The list rebuilt for the completed title ranks all three rows; it
+    // starts on the completed one, not on whichever ranks first.
+    var ranked_buf: [win32_palette.max_ranked]PaletteRanked = undefined;
+    const ranked = host.palette_catalog.?.rank(second.text, .{ .max_results = ranked_buf.len }, &ranked_buf);
+    try std.testing.expectEqual(@as(usize, 3), ranked.len);
+    const selected = paletteSelectionAfterRebuild(ranked, second.id);
+    try std.testing.expect(ranked[selected].id.eql(second.id));
+    // No completion, or one whose row is gone: the first row.
+    try std.testing.expectEqual(@as(usize, 0), paletteSelectionAfterRebuild(ranked, null));
+    try std.testing.expectEqual(@as(usize, 0), paletteSelectionAfterRebuild(ranked[0..0], second.id));
+}
+
 /// palette-mru.txt holds one key per line, escaped as the contents of a Zig
 /// string (`std.zig.fmtString`). A key is the formatted action
 /// (`Command.cval`), which since upstream #13609 writes a string parameter
@@ -1123,9 +1172,16 @@ pub const HostControls = struct {
         // stack array. Clamp here instead of relying on the library
         // invariant alone.
         self.palette_list_ranked_count = @min(ranked.len, self.palette_list_ranked.len);
-        self.palette_list_scroll = 0;
         self.palette_wheel_steps = .{};
-        self.palette_list_selected = 0;
+        self.palette_list_selected = paletteSelectionAfterRebuild(
+            self.palette_list_ranked[0..self.palette_list_ranked_count],
+            self.overlay_completion_result_id,
+        );
+        const rows = self.paletteListRowCapacity();
+        self.palette_list_scroll = if (rows > 0 and self.palette_list_selected >= rows)
+            self.palette_list_selected - rows + 1
+        else
+            0;
 
         const transition = paletteListTransition(
             previous_result_count,
