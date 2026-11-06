@@ -19,8 +19,6 @@ const CoreApp = @import("../App.zig");
 const CoreSurface = @import("../Surface.zig");
 const cli_args = @import("../cli/args.zig");
 const configpkg = @import("../config.zig");
-const config_edit = @import("../config/edit.zig");
-const config_file_load = @import("../config/file_load.zig");
 const cli_diagnostics = @import("../cli/diagnostics.zig");
 const themepkg = @import("../config/theme.zig");
 const windows_shell = @import("../config/windows_shell.zig");
@@ -29,7 +27,6 @@ const input = @import("../input.zig");
 const internal_os = @import("../os/main.zig");
 const terminal = @import("../terminal/main.zig");
 const rendererpkg = @import("../renderer.zig");
-const ptypkg = @import("../pty.zig");
 const updatepkg = @import("../update/github_releases.zig");
 const SplitTree = @import("../datastruct/split_tree.zig").SplitTree;
 
@@ -39,35 +36,25 @@ const win32_tween = @import("win32_tween.zig");
 const win32_uia = @import("win32_uia/mod.zig");
 const win32_terminal_accessibility = @import("win32_terminal_accessibility.zig");
 const win32_palette = @import("win32_palette.zig");
-const win32_layout = @import("win32_layout.zig");
 const win32_settings = @import("win32_settings.zig");
-const win32_aumid = @import("win32_aumid.zig");
 const win32_chrome_state = @import("win32_chrome_state.zig");
 const win32_clipboard_html = @import("win32_clipboard_html.zig");
 const win32_undo = @import("win32_undo.zig");
-const win32_toast_winrt = @import("win32_toast_winrt.zig");
 const win32_taskbar_progress = @import("win32_taskbar_progress.zig");
 const win32_program_status = @import("win32_program_status.zig");
-const win32_bell = @import("win32_bell.zig");
 const win32_jump_list = @import("win32_jump_list.zig");
-const win32_powershell_install = @import("win32_powershell_install.zig");
 const win32_terminfo = @import("win32_terminfo.zig");
 const terminfo = @import("../terminfo/main.zig");
-const win32_link_preview = @import("win32_link_preview.zig");
 const win32_quick_terminal = @import("win32_quick_terminal.zig");
 const win32_surface_drop = @import("win32_surface_drop.zig");
-const win32_surface_drop_target = @import("win32_surface_drop_target.zig");
 const win32_ole = @import("win32_ole.zig");
 const win32_toast_activation = @import("win32_toast_activation.zig");
 const win32_toast_activator = @import("win32_toast_activator.zig");
-const win32_tab_drop_zones = @import("win32_tab_drop_zones.zig");
-const win32_tab_tooltip = @import("win32_tab_tooltip.zig");
 const win32_icons = @import("win32_icons.zig");
 const win32_paste_protection = @import("win32_paste_protection.zig");
 const win32_scrollbar_geometry = @import("win32_scrollbar_geometry.zig");
 const win32_nc_layout = @import("win32_nc_layout.zig");
 const win32_tab_visual = @import("win32_tab_visual.zig");
-const focus_cue = @import("win32/focus_cue.zig");
 const win32_types = @import("win32_types.zig");
 const win32_layouts = @import("win32_layouts.zig");
 const session_module = @import("win32/session.zig");
@@ -76,8 +63,6 @@ const win32_session_state = @import("win32_session_state.zig");
 const win32_session_persistence = @import("win32_session_persistence.zig");
 const win32_structural_history = @import("win32_structural_history.zig");
 const win32_recovery = @import("win32_recovery.zig");
-const win32_compositor = @import("win32_compositor.zig");
-const win32_compositor_native = @import("win32_compositor_native.zig");
 const win32_shell = @import("win32_shell.zig");
 const ipc_server = @import("win32/ipc_server.zig");
 const notifications = @import("win32/notifications.zig");
@@ -105,7 +90,6 @@ const win32_hints = @import("win32_hints.zig");
 const win32_elevation = @import("win32_elevation.zig");
 const render_trace = @import("win32/render_trace.zig");
 const gl_startup = @import("win32/gl_startup.zig");
-const pixel_format = @import("win32/pixel_format.zig");
 const bench_trace = @import("win32/bench_trace.zig");
 const overlay_view = @import("win32/overlay_view.zig");
 const paint_text = @import("win32/text.zig");
@@ -119,7 +103,6 @@ const c = @import("win32/consts.zig");
 const sys = @import("win32/sys.zig");
 const app_delivery = @import("win32/app_delivery.zig");
 const save_target = @import("win32/save_target.zig");
-const focus_region = @import("win32/focus_region.zig");
 const first_frame = @import("win32/first_frame.zig");
 const clipboard_write = @import("win32/clipboard_write.zig");
 const win32_config_problems = @import("win32/config_problems.zig");
@@ -302,21 +285,13 @@ pub const session_runtime = .{
     .killThreadTimer = App.killThreadTimer,
     .Allocator = Allocator,
     .App = App,
-    .CoreApp = CoreApp,
     .Host = Host,
-    .LPCWSTR = LPCWSTR,
-    .MONITORINFO = MONITORINFO,
     .RECT = RECT,
-    .ShellProjectionSteps = ShellProjectionSteps,
     .SplitTreeSurface = SplitTreeSurface,
     .Surface = Surface,
-    .SurfaceInitOptions = SurfaceInitOptions,
     .Tab = Tab,
-    .UINT_PTR = UINT_PTR,
     .apprt = apprt,
     .builtin = builtin,
-    .c = c,
-    .cli_args = cli_args,
     .configpkg = configpkg,
     .default_title = default_title,
     .gl_startup = gl_startup,
@@ -324,10 +299,6 @@ pub const session_runtime = .{
     .log = log,
     .makeParentDirAbsolute = makeParentDirAbsolute,
     .markRecoveryAttemptAtPath = markRecoveryAttemptAtPath,
-    .recovery_set_aside_suffix = recovery_set_aside_suffix,
-    .setAsideCrashedSessionState = setAsideCrashedSessionState,
-    .shouldInheritSplitWorkingDirectory = shouldInheritSplitWorkingDirectory,
-    .shouldResetNewTabWorkingDirectory = shouldResetNewTabWorkingDirectory,
     .std = std,
     .sys = sys,
     .terminal = terminal,
@@ -335,7 +306,6 @@ pub const session_runtime = .{
     .unixMillis = unixMillis,
     .win32_session_persistence = win32_session_persistence,
     .win32_session_state = win32_session_state,
-    .win32_shell = win32_shell,
     .windows = windows,
     .writePersistentFileAlloc = writePersistentFileAlloc,
 };
@@ -343,31 +313,20 @@ pub const session_runtime = .{
 pub const quick_terminal_host_runtime = .{
     .App = App,
     .BOOL = BOOL,
-    .CoreApp = CoreApp,
     .HDC = HDC,
     .HWND = HWND,
     .HWND_TOPMOST = HWND_TOPMOST,
     .Host = Host,
     .LPARAM = LPARAM,
-    .LPCWSTR = LPCWSTR,
     .MONITORINFO = MONITORINFO,
     .POINT = POINT,
     .RECT = RECT,
-    .SplitTreeSurface = SplitTreeSurface,
-    .Surface = Surface,
-    .SurfaceInitOptions = SurfaceInitOptions,
-    .Tab = Tab,
     .apprt = apprt,
-    .builtin = builtin,
     .c = c,
     .configpkg = configpkg,
     .getHost = getHost,
-    .hostWindowProc = hostWindowProc,
-    .host_class_name = host_class_name,
     .log = log,
-    .palette_list_class_name = palette_list_class_name,
     .rectEqual = rectEqual,
-    .scrollbar_class_name = scrollbar_class_name,
     .std = std,
     .sys = sys,
     .win32_quick_terminal = win32_quick_terminal,
@@ -381,7 +340,6 @@ pub const test_support_runtime = if (builtin.is_test) .{
     .App = App,
     .Host = Host,
     .Surface = Surface,
-    .Tab = Tab,
     .SurfaceInitStage = Surface.InitStage,
     .PaletteItem = PaletteItem,
     .PalettePayload = PalettePayload,
@@ -576,7 +534,6 @@ pub const MemoryStageTrace = bench_trace.MemoryStageTrace;
 pub const BenchmarkMemoryStage = bench_trace.BenchmarkMemoryStage;
 pub const captureProcessOrigin = bench_trace.captureProcessOrigin;
 
-pub const StartupLoaderErrorDialogSuppression = gl_startup.StartupLoaderErrorDialogSuppression;
 pub const suppressStartupLoaderErrorDialogs = gl_startup.suppressStartupLoaderErrorDialogs;
 pub const setDefaultDllDirectories = gl_startup.setDefaultDllDirectories;
 pub const OpenGLStartupStep = gl_startup.OpenGLStartupStep;
@@ -653,10 +610,7 @@ pub const palette_catalog_label_bytes: usize = 128;
 pub const host_tab_max_button_width: i32 = default_metrics.tab_max_width;
 pub const host_tab_close_zone_width: i32 = default_metrics.tab_close_zone; // per-tab close button hit zone width
 
-// Context menu constants
-
 pub const WNDPROC = win32_types.WNDPROC;
-const SHORT = i16;
 
 pub const POINT = sys.POINT;
 pub const RECT = sys.RECT;
@@ -665,7 +619,6 @@ pub const PAINTSTRUCT = sys.PAINTSTRUCT;
 pub const DRAWITEMSTRUCT = sys.DRAWITEMSTRUCT;
 pub const TRACKMOUSEEVENT = sys.TRACKMOUSEEVENT;
 const WINDOWPOS = sys.WINDOWPOS;
-pub const WINDOWPLACEMENT = sys.WINDOWPLACEMENT;
 pub const NCCALCSIZE_PARAMS = sys.NCCALCSIZE_PARAMS;
 pub const WNDCLASSEXW = sys.WNDCLASSEXW;
 const CREATESTRUCTW = sys.CREATESTRUCTW;
@@ -1413,13 +1366,11 @@ const recovery_safe_mode_banner_w = blk: {
 };
 const recovery_session_set_aside_banner =
     "Safe mode: noctty stopped repeatedly while restoring your saved session. Built-in defaults are active and your config was not loaded. The saved session was moved aside with a " ++
-    recovery_set_aside_suffix ++ " suffix in noctty's data folder, so the next start opens a fresh window. Restart noctty to retry normal startup.";
+    session_module.recovery_set_aside_suffix ++ " suffix in noctty's data folder, so the next start opens a fresh window. Restart noctty to retry normal startup.";
 const recovery_session_set_aside_banner_w = blk: {
     @setEvalBranchQuota(4_000);
     break :blk std.unicode.utf8ToUtf16LeStringLiteral(recovery_session_set_aside_banner);
 };
-/// Suffix for a saved session that the last launches died restoring.
-const recovery_set_aside_suffix = ".restore-failed";
 const recovery_safe_mode_caption_w = std.unicode.utf8ToUtf16LeStringLiteral("noctty safe mode");
 
 /// Filename infix for a startup-ledger record whose write already failed and
@@ -1721,51 +1672,6 @@ pub fn markRecoveryAttemptAtPath(
     // it, so the merged record is not adopted here.
     win32_recovery.applyMark(&memory_attempts[memory_attempts.len - 1], mark);
 }
-
-/// Move a saved session aside that the last launches all ended restoring, so
-/// the next normal launch starts fresh instead of ending again. A rename into
-/// a free slot, never a delete or a replace; skipped while another live process
-/// owns the session, and for any file this build would not restore (a newer
-/// build's, an oversized or unreadable one, or one the restore path quarantines
-/// as `.corrupt` anyway). Returns whether the session was moved.
-fn setAsideCrashedSessionState(alloc: Allocator, state_path: []const u8) bool {
-    const owner = SessionOwnerLock.acquire(alloc, state_path) catch |err| {
-        log.warn("win32 recovery: session not set aside, ownership lock unavailable err={}", .{err});
-        return false;
-    } orelse {
-        log.warn("win32 recovery: session not set aside, another instance owns it", .{});
-        return false;
-    };
-    defer owner.release();
-    {
-        var current = win32_session_persistence.loadAlloc(
-            alloc,
-            state_path,
-            win32_session_persistence.default_max_state_bytes,
-        );
-        defer current.deinit();
-        if (current != .loaded) {
-            if (current != .missing) log.warn("win32 recovery: session not set aside, not one this build restores ({s})", .{@tagName(current)});
-            return false;
-        }
-    }
-    const destination = win32_session_persistence.quarantineFileAlloc(
-        alloc,
-        state_path,
-        recovery_set_aside_suffix,
-        .keep_source,
-    ) catch |err| {
-        if (err != error.FileNotFound) {
-            log.warn("win32 recovery: session not set aside path={s} err={}", .{ state_path, err });
-        }
-        return false;
-    };
-    defer alloc.free(destination);
-    log.warn("win32 recovery: repeated failures while restoring the saved session; moved it to {s}", .{destination});
-    return true;
-}
-
-const setAsideSessionStateAt = session_module.setAsideSessionStateAt;
 
 /// Create the directory `path` sits in when it is missing. Only that one
 /// level: its own parent must already exist.
@@ -2421,7 +2327,7 @@ fn beginRecoveryStartupAtPath(
     // Acted on inside the transaction that decided it, so no launch can
     // record a restore or a ready marker in between.
     if (result.decision == .quarantine_session) if (session_path) |value| {
-        result.session_set_aside = setAsideCrashedSessionState(alloc, value);
+        result.session_set_aside = session_module.setAsideCrashedSessionState(alloc, value);
     };
 
     // Attempts are told apart by their start; two launches in one
@@ -11857,7 +11763,7 @@ pub fn hostWindowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) cal
         c.WM_COMMAND => {
             if (host) |v| {
                 const command_id = lowWord(wParam);
-                const notify_code = highWord(wParam);
+                const notify_code = win32_input.highWord(wParam);
                 const child_hwnd = wmCommandChildHwnd(lParam);
                 switch (command_id) {
                     2002 => {
@@ -12430,14 +12336,12 @@ fn lowWord(value: usize) u16 {
     return @truncate(value & 0xFFFF);
 }
 
-pub const highWord = win32_input.highWord;
-
 pub fn signedLowWord(value: usize) i16 {
     return @bitCast(lowWord(value));
 }
 
 pub fn signedHighWord(value: usize) i16 {
-    return @bitCast(highWord(value));
+    return @bitCast(win32_input.highWord(value));
 }
 
 pub fn cursorPosFromLParam(lParam: LPARAM) apprt.CursorPos {
@@ -17603,7 +17507,7 @@ test "win32 closing a split keeps focus, or gives it to the closed pane's siblin
 
 /// Native and shell-model halves of the structural steps the projection
 /// tests drive: each mirrors what the runtime does on both sides.
-const ShellProjectionSteps = struct {
+pub const ShellProjectionSteps = struct {
     /// A window holding one tab per view, in order, with tab ids 1, 2, ...:
     /// the first view's tab is the one the window is created with. The caller
     /// deinits the returned committed window transaction.
@@ -19642,7 +19546,7 @@ fn testTabGapHost(decorated: bool) !void {
     try std.testing.expect(!host.tabsFlushWithTop());
     host.quick_terminal = false;
     host.active_tab = 0;
-    host.top_level.fullscreen = .{ .rect = std.mem.zeroes(RECT), .placement = std.mem.zeroes(WINDOWPLACEMENT), .monitor = null };
+    host.top_level.fullscreen = .{ .rect = std.mem.zeroes(RECT), .placement = std.mem.zeroes(sys.WINDOWPLACEMENT), .monitor = null };
     try std.testing.expect(host.tabsFlushWithTop());
     host.quick_terminal = true;
     try std.testing.expect(!host.tabsFlushWithTop());
@@ -21959,7 +21863,7 @@ test "win32 recovery sets the session aside after failures that all began restor
     const restoring = beginRecoveryStartupAtPath(std.testing.allocator, target, session, 400, recovery_ledger_lock_wait_ms);
     try std.testing.expectEqual(win32_recovery.Decision.quarantine_session, restoring.decision);
     try std.testing.expect(restoring.session_set_aside);
-    const moved = try tmp.dir.readFileAlloc(std.testing.allocator, "session-state.json" ++ recovery_set_aside_suffix, 64);
+    const moved = try tmp.dir.readFileAlloc(std.testing.allocator, "session-state.json" ++ session_module.recovery_set_aside_suffix, 64);
     defer std.testing.allocator.free(moved);
     try std.testing.expectEqualStrings(saved, moved);
 
@@ -22057,16 +21961,16 @@ test "win32 recovery sets a crashed session aside without deleting it" {
     defer std.testing.allocator.free(state_path);
 
     // Nothing to move.
-    try std.testing.expect(!setAsideCrashedSessionState(std.testing.allocator, state_path));
+    try std.testing.expect(!session_module.setAsideCrashedSessionState(std.testing.allocator, state_path));
 
     // A newer build's session is not this build's to move.
     const newer = "{\"schema_version\":2,\"windows\":[]}";
     try tmp.dir.writeFile(.{ .sub_path = "session-state.json", .data = newer });
-    try std.testing.expect(!setAsideCrashedSessionState(std.testing.allocator, state_path));
+    try std.testing.expect(!session_module.setAsideCrashedSessionState(std.testing.allocator, state_path));
     try tmp.dir.access("session-state.json", .{});
     // Nor is one this build would quarantine as `.corrupt` when restoring it.
     try tmp.dir.writeFile(.{ .sub_path = "session-state.json", .data = "not json" });
-    try std.testing.expect(!setAsideCrashedSessionState(std.testing.allocator, state_path));
+    try std.testing.expect(!session_module.setAsideCrashedSessionState(std.testing.allocator, state_path));
     try tmp.dir.access("session-state.json", .{});
 
     const saved = "{\"schema_version\":1,\"windows\":[]}";
@@ -22075,13 +21979,13 @@ test "win32 recovery sets a crashed session aside without deleting it" {
     {
         const owner = (try SessionOwnerLock.acquire(std.testing.allocator, state_path)).?;
         defer owner.release();
-        try std.testing.expect(!setAsideCrashedSessionState(std.testing.allocator, state_path));
+        try std.testing.expect(!session_module.setAsideCrashedSessionState(std.testing.allocator, state_path));
         try tmp.dir.access("session-state.json", .{});
     }
 
-    try std.testing.expect(setAsideCrashedSessionState(std.testing.allocator, state_path));
+    try std.testing.expect(session_module.setAsideCrashedSessionState(std.testing.allocator, state_path));
     try std.testing.expectError(error.FileNotFound, tmp.dir.access("session-state.json", .{}));
-    const moved = try tmp.dir.readFileAlloc(std.testing.allocator, "session-state.json" ++ recovery_set_aside_suffix, 64);
+    const moved = try tmp.dir.readFileAlloc(std.testing.allocator, "session-state.json" ++ session_module.recovery_set_aside_suffix, 64);
     defer std.testing.allocator.free(moved);
     try std.testing.expectEqualStrings(saved, moved);
     // The lock is free again for the next normal launch.

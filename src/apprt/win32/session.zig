@@ -4,38 +4,20 @@ const runtime = win32.session_runtime;
 const killThreadTimer = runtime.killThreadTimer;
 const Allocator = runtime.Allocator;
 const App = runtime.App;
-const CoreApp = runtime.CoreApp;
 const Host = runtime.Host;
-const LPCWSTR = runtime.LPCWSTR;
-const MONITORINFO = runtime.MONITORINFO;
 const RECT = runtime.RECT;
-const ShellProjectionSteps = runtime.ShellProjectionSteps;
 const SplitTreeSurface = runtime.SplitTreeSurface;
 const Surface = runtime.Surface;
-const SurfaceInitOptions = runtime.SurfaceInitOptions;
 const Tab = runtime.Tab;
-const TestSession = win32.test_support.TestSession;
-const UINT_PTR = runtime.UINT_PTR;
-const WindowStartTestApp = win32.test_support.WindowStartTestApp;
 const apprt = runtime.apprt;
 const builtin = runtime.builtin;
-const c = runtime.c;
-const cli_args = runtime.cli_args;
 const configpkg = runtime.configpkg;
-const createTestHostWindow = win32.test_support.createTestHostWindow;
 const default_title = runtime.default_title;
 const gl_startup = runtime.gl_startup;
 const internal_os = runtime.internal_os;
 const log = runtime.log;
 const makeParentDirAbsolute = runtime.makeParentDirAbsolute;
 const markRecoveryAttemptAtPath = runtime.markRecoveryAttemptAtPath;
-const placementTestApp = win32.test_support.placementTestApp;
-const placementTestHost = win32.test_support.placementTestHost;
-const recovery_set_aside_suffix = runtime.recovery_set_aside_suffix;
-const runOnHiddenDesktop = win32.test_support.runOnHiddenDesktop;
-const setAsideCrashedSessionState = runtime.setAsideCrashedSessionState;
-const shouldInheritSplitWorkingDirectory = runtime.shouldInheritSplitWorkingDirectory;
-const shouldResetNewTabWorkingDirectory = runtime.shouldResetNewTabWorkingDirectory;
 const std = runtime.std;
 const sys = runtime.sys;
 const terminal = runtime.terminal;
@@ -43,15 +25,34 @@ const terminal_options = runtime.terminal_options;
 const unixMillis = runtime.unixMillis;
 const win32_session_persistence = runtime.win32_session_persistence;
 const win32_session_state = runtime.win32_session_state;
-const win32_shell = runtime.win32_shell;
 const window_state = @import("window_state.zig");
 const windows = runtime.windows;
 const writePersistentFileAlloc = runtime.writePersistentFileAlloc;
 
+// Test dependencies.
+const CoreApp = @import("../../App.zig");
+const LPCWSTR = win32_types.LPCWSTR;
+const MONITORINFO = sys.MONITORINFO;
+const ShellProjectionSteps = win32.ShellProjectionSteps;
+const SurfaceInitOptions = win32.SurfaceInitOptions;
+const TestSession = win32.test_support.TestSession;
+const UINT_PTR = win32_types.UINT_PTR;
+const WindowStartTestApp = win32.test_support.WindowStartTestApp;
+const c = @import("consts.zig");
+const cli_args = @import("../../cli/args.zig");
+const createTestHostWindow = win32.test_support.createTestHostWindow;
+const placementTestApp = win32.test_support.placementTestApp;
+const placementTestHost = win32.test_support.placementTestHost;
+const runOnHiddenDesktop = win32.test_support.runOnHiddenDesktop;
+const shouldInheritSplitWorkingDirectory = win32.shouldInheritSplitWorkingDirectory;
+const shouldResetNewTabWorkingDirectory = win32.shouldResetNewTabWorkingDirectory;
+const win32_shell = @import("../win32_shell.zig");
+const win32_types = @import("../win32_types.zig");
+
 /// Suffix for a saved session that was restored and then ended by itself
 /// before it was used (`App.setAsideFailedRestore`). Its own slots: these
 /// copies must never take the ones the crash-loop breaker needs.
-pub const restore_ended_suffix = ".restore-ended";
+const restore_ended_suffix = ".restore-ended";
 
 /// Move the saved session at `path` aside, as a restore that ended by itself
 /// before it was used: renamed into a free `.restore-ended` slot, never
@@ -74,6 +75,52 @@ pub fn setAsideSessionStateAt(alloc: Allocator, path: []const u8) bool {
     };
     defer alloc.free(destination);
     log.warn("win32 session: the restored session ended by itself before any input; moved it to {s}", .{destination});
+    return true;
+}
+
+/// Suffix for a saved session that the last launches died restoring.
+pub const recovery_set_aside_suffix = ".restore-failed";
+
+/// Move a saved session aside that the last launches all ended restoring, so
+/// the next normal launch starts fresh instead of ending again. A rename into
+/// a free slot, never a delete or a replace; skipped while another live process
+/// owns the session, and for any file this build would not restore (a newer
+/// build's, an oversized or unreadable one, or one the restore path quarantines
+/// as `.corrupt` anyway). Returns whether the session was moved.
+pub fn setAsideCrashedSessionState(alloc: Allocator, state_path: []const u8) bool {
+    const owner = SessionOwnerLock.acquire(alloc, state_path) catch |err| {
+        log.warn("win32 recovery: session not set aside, ownership lock unavailable err={}", .{err});
+        return false;
+    } orelse {
+        log.warn("win32 recovery: session not set aside, another instance owns it", .{});
+        return false;
+    };
+    defer owner.release();
+    {
+        var current = win32_session_persistence.loadAlloc(
+            alloc,
+            state_path,
+            win32_session_persistence.default_max_state_bytes,
+        );
+        defer current.deinit();
+        if (current != .loaded) {
+            if (current != .missing) log.warn("win32 recovery: session not set aside, not one this build restores ({s})", .{@tagName(current)});
+            return false;
+        }
+    }
+    const destination = win32_session_persistence.quarantineFileAlloc(
+        alloc,
+        state_path,
+        recovery_set_aside_suffix,
+        .keep_source,
+    ) catch |err| {
+        if (err != error.FileNotFound) {
+            log.warn("win32 recovery: session not set aside path={s} err={}", .{ state_path, err });
+        }
+        return false;
+    };
+    defer alloc.free(destination);
+    log.warn("win32 recovery: repeated failures while restoring the saved session; moved it to {s}", .{destination});
     return true;
 }
 
@@ -125,7 +172,7 @@ test "win32 a restore that ended by itself is moved aside, never deleted or repl
     try std.testing.expectEqualStrings(latest, crashed);
 }
 
-pub fn sessionStatePolicyAllows(safe_mode: bool, policy: configpkg.Config.WindowSaveState) bool {
+fn sessionStatePolicyAllows(safe_mode: bool, policy: configpkg.Config.WindowSaveState) bool {
     return !safe_mode and policy != .never;
 }
 
@@ -150,11 +197,11 @@ pub const SessionRestoreTransaction = struct {
         }
     }
 
-    pub fn commit(self: *SessionRestoreTransaction) void {
+    fn commit(self: *SessionRestoreTransaction) void {
         self.committed = true;
     }
 
-    pub fn rollback(self: *SessionRestoreTransaction) void {
+    fn rollback(self: *SessionRestoreTransaction) void {
         if (self.committed) return;
         if (self.app) |app| if (self.host) |host| {
             app.rollbackSessionRestoreHost(host);
@@ -166,7 +213,7 @@ pub const SessionRestoreTransaction = struct {
     }
 };
 
-pub fn sessionRestorePolicyAllows(
+fn sessionRestorePolicyAllows(
     safe_mode: bool,
     policy: configpkg.Config.WindowSaveState,
     initial_window: bool,
@@ -186,7 +233,7 @@ pub const SessionSaveKind = enum { final, checkpoint };
 
 /// How long the session must stay unchanged before a structural change is
 /// saved (`App.scheduleSessionCheckpoint`).
-pub const session_checkpoint_delay_ms: u32 = 1000;
+const session_checkpoint_delay_ms: u32 = 1000;
 
 /// Held for the life of the one process that owns `session-state.json`.
 /// An exclusive byte-range lock on the `.lock` sibling, so the kernel drops
@@ -1178,7 +1225,7 @@ pub fn rollbackSessionRestoreHost(self: *App, host: *Host) void {
     self.removeHost(host);
 }
 
-pub fn sessionScrollbackLineAllowed(line: []const u8) bool {
+fn sessionScrollbackLineAllowed(line: []const u8) bool {
     const view = std.unicode.Utf8View.init(line) catch return false;
     var it = view.iterator();
     while (it.nextCodepoint()) |codepoint| {
@@ -1190,7 +1237,7 @@ pub fn sessionScrollbackLineAllowed(line: []const u8) bool {
     return true;
 }
 
-pub fn captureTerminalScrollbackSnapshotAlloc(
+fn captureTerminalScrollbackSnapshotAlloc(
     alloc: Allocator,
     scratch_alloc: Allocator,
     terminal_state: *terminal.Terminal,
@@ -1285,7 +1332,7 @@ pub fn captureTerminalScrollbackSnapshotAlloc(
     };
 }
 
-pub fn printSessionSnapshotLine(terminal_state: *terminal.Terminal, line: []const u8) !void {
+fn printSessionSnapshotLine(terminal_state: *terminal.Terminal, line: []const u8) !void {
     var remaining = line;
     while (std.mem.indexOfScalar(u8, remaining, '\t')) |tab_index| {
         try terminal_state.printString(remaining[0..tab_index]);
@@ -1297,7 +1344,7 @@ pub fn printSessionSnapshotLine(terminal_state: *terminal.Terminal, line: []cons
     try terminal_state.linefeed();
 }
 
-pub fn formatSessionSnapshotMarker(
+fn formatSessionSnapshotMarker(
     buf: []u8,
     captured_at_unix_ms: u64,
 ) std.fmt.BufPrintError![]const u8 {
@@ -1335,7 +1382,7 @@ pub fn formatSessionSnapshotMarker(
 /// Used to decide whether a restored snapshot would land on top of a child's
 /// startup output. A shell can return the cursor to the origin after printing
 /// (`ESC[H`), so cursor position is not on its own a usable test.
-pub fn terminalScreenIsUnpainted(screen: *terminal.Screen) bool {
+fn terminalScreenIsUnpainted(screen: *terminal.Screen) bool {
     // A child that only moved the cursor (`ESC[2;2H`) has painted nothing, but
     // restoring would still `scrollClear()` the cursor out from under it while
     // it believes it is at (2,2). Require the origin as well as empty cells.
@@ -1359,7 +1406,7 @@ pub fn terminalScreenIsUnpainted(screen: *terminal.Screen) bool {
     return true;
 }
 
-pub fn restoreTerminalScrollbackSnapshot(
+fn restoreTerminalScrollbackSnapshot(
     terminal_state: *terminal.Terminal,
     snapshot: win32_session_state.ScrollbackSnapshot,
     max_lines_requested: usize,

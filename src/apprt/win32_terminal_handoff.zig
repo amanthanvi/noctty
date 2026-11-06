@@ -7,6 +7,7 @@ const builtin = @import("builtin");
 const windows = std.os.windows;
 const ptypkg = @import("../pty.zig");
 const com = @import("win32_uia/com.zig");
+const consts = @import("win32/consts.zig");
 
 const log = std.log.scoped(.win32_terminal_handoff);
 const Allocator = std.mem.Allocator;
@@ -38,18 +39,18 @@ const CLASS_E_NOAGGREGATION: HRESULT = @bitCast(@as(u32, 0x80040110));
 const E_FAIL: HRESULT = @bitCast(@as(u32, 0x80004005));
 const E_ACCESSDENIED: HRESULT = @bitCast(@as(u32, 0x80070005));
 
-const HKEY_CURRENT_USER: HKEY = @ptrFromInt(0x80000001);
+const HKEY_CURRENT_USER: HKEY = @ptrFromInt(consts.HKEY_CURRENT_USER);
 const KEY_QUERY_VALUE: DWORD = 0x0001;
 const KEY_SET_VALUE: DWORD = 0x0002;
 const KEY_CREATE_SUB_KEY: DWORD = 0x0004;
-const KEY_READ: DWORD = 0x20019;
+const KEY_READ: DWORD = consts.KEY_READ;
 const KEY_WRITE: DWORD = 0x20006;
 const REG_OPTION_NON_VOLATILE: DWORD = 0;
 const REG_SZ: DWORD = 1;
 const REG_BINARY: DWORD = 3;
-const REG_DWORD: DWORD = 4;
-const ERROR_SUCCESS: LSTATUS = 0;
-const ERROR_FILE_NOT_FOUND: LSTATUS = 2;
+const REG_DWORD: DWORD = consts.REG_DWORD;
+const ERROR_SUCCESS: LSTATUS = consts.ERROR_SUCCESS;
+const ERROR_FILE_NOT_FOUND: LSTATUS = consts.ERROR_FILE_NOT_FOUND;
 const ERROR_PATH_NOT_FOUND: LSTATUS = 3;
 const ERROR_MORE_DATA: LSTATUS = 234;
 
@@ -786,7 +787,7 @@ fn startupTitleAlloc(alloc: Allocator, units: []const u16) Allocator.Error![]u8 
     return std.fmt.allocPrint(alloc, "{f}", .{std.unicode.fmtUtf16Le(units)});
 }
 
-const TOKEN_QUERY: DWORD = 0x0008;
+const TOKEN_QUERY: DWORD = consts.TOKEN_QUERY;
 const TOKEN_INTEGRITY_LEVEL: i32 = 25;
 const SID_AND_ATTRIBUTES = extern struct {
     Sid: ?*anyopaque,

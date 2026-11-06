@@ -24,6 +24,7 @@ const std = @import("std");
 const geometry = @import("win32_geometry.zig");
 const win32_types = @import("win32_types.zig");
 const sys = @import("win32/sys.zig");
+const consts = @import("win32/consts.zig");
 
 // -- Public types -----------------------------------------------------------
 
@@ -61,9 +62,8 @@ const HDC = win32_types.HDC;
 const HGDIOBJ = win32_types.HGDIOBJ;
 const HPEN = win32_types.HPEN;
 
-const PS_SOLID: i32 = 0;
-const PS_NULL: i32 = 5;
-const TRANSPARENT: i32 = 1;
+const PS_SOLID: i32 = consts.PS_SOLID;
+const TRANSPARENT: i32 = consts.TRANSPARENT;
 const NULL_BRUSH_INDEX: i32 = 5;
 
 // -- Geometry helpers (pure -- no GDI) --------------------------------------

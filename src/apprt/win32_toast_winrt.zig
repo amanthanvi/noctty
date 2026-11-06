@@ -7,6 +7,7 @@
 //! S_OK or S_FALSE.
 
 const std = @import("std");
+const consts = @import("win32/consts.zig");
 const Allocator = std.mem.Allocator;
 const windows = std.os.windows;
 
@@ -17,7 +18,7 @@ const HSTRING = *opaque {};
 const S_OK: HRESULT = 0;
 const S_FALSE: HRESULT = 1;
 const E_NOINTERFACE: HRESULT = hresultFromU32(0x80004002);
-const RPC_E_CHANGED_MODE: HRESULT = hresultFromU32(0x80010106);
+const RPC_E_CHANGED_MODE: HRESULT = consts.RPC_E_CHANGED_MODE;
 
 fn hresultFromU32(value: u32) HRESULT {
     return @bitCast(value);

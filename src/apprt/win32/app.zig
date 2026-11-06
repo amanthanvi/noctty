@@ -7,7 +7,6 @@ const ClipboardSource = win32.ClipboardSource;
 const CloseScope = confirm_text.CloseScope;
 const ConfirmCancelReason = @import("overlay_session.zig").ConfirmCancelReason;
 const CoreApp = @import("../../App.zig");
-const CoreSurface = @import("../../Surface.zig");
 const DWORD = win32.DWORD;
 const GlobalHotkeySpec = win32.GlobalHotkeySpec;
 const HDC = win32.HDC;

@@ -113,6 +113,21 @@ pub fn decodeCodepoint(value: []const u8, index: usize) ?DecodedCodepoint {
     return .{ .cp = cp, .len = len };
 }
 
+/// Unicode bidirectional formatting characters. They are invisible and
+/// reorder the text around them (CVE-2021-42574, "Trojan Source"), so text
+/// that has to read in the order it was written replaces or drops them.
+pub fn isBidiFormatting(cp: u21) bool {
+    return switch (cp) {
+        0x061C, // ARABIC LETTER MARK
+        0x200E, // LEFT-TO-RIGHT MARK
+        0x200F, // RIGHT-TO-LEFT MARK
+        0x202A...0x202E, // LRE, RLE, PDF, LRO, RLO
+        0x2066...0x2069, // LRI, RLI, FSI, PDI
+        => true,
+        else => false,
+    };
+}
+
 /// Cells one codepoint occupies, read from the same table the terminal grid
 /// uses so the chrome and the grid agree on what "wide" means.
 pub fn codepointWidth(cp: u21) usize {

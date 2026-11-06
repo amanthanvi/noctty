@@ -60,7 +60,6 @@ const apprt = @import("../../apprt.zig");
 const bannerButtonKey = win32.bannerButtonKey;
 const bannerMessageDurationMs = win32.bannerMessageDurationMs;
 const blendColorRGB = win32.blendColorRGB;
-const builtin = @import("builtin");
 const buttonColorsFromTheme = win32.buttonColorsFromTheme;
 const c = @import("consts.zig");
 const captionButtonBoundsThunk = win32.captionButtonBoundsThunk;
@@ -85,7 +84,6 @@ const confirmTitlePaintRect = win32.confirmTitlePaintRect;
 const confirm_prompt_text_format = win32.confirm_prompt_text_format;
 const confirm_text = @import("confirm_text.zig");
 const createIconFontWithGlyphs = win32.createIconFontWithGlyphs;
-const default_title = win32.default_title;
 const desiredTabIndex = win32.desiredTabIndex;
 const destroyChildWindow = win32.destroyChildWindow;
 const destroySubclassedWindow = win32.destroySubclassedWindow;
@@ -233,6 +231,8 @@ const window_state = @import("window_state.zig");
 const windows_shell = @import("../../config/windows_shell.zig");
 
 // Test dependencies.
+const builtin = @import("builtin");
+const default_title = win32.default_title;
 const windows = win32.windows;
 const GlyphCoverage = win32.GlyphCoverage;
 const fontGlyphCoverage = win32.fontGlyphCoverage;

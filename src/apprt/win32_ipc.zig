@@ -2,13 +2,14 @@ const std = @import("std");
 const builtin = @import("builtin");
 const apprt = @import("../apprt.zig");
 const sys = @import("win32/sys.zig");
+const consts = @import("win32/consts.zig");
 const win32_layouts = @import("win32_layouts.zig");
 
 const Allocator = std.mem.Allocator;
 const windows = std.os.windows;
 
 const BOOL = std.os.windows.BOOL;
-const PIPE_READMODE_BYTE = 0x00000000;
+const PIPE_READMODE_BYTE = consts.PIPE_READMODE_BYTE;
 const security_sqos_present: windows.DWORD = 0x00100000;
 const security_identification: windows.DWORD = 0x00010000;
 pub const pipe_nowait = 0x00000001;

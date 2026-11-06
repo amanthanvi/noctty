@@ -42,11 +42,13 @@ foreach ($win32TestModuleRoot in $win32TestModuleRoots) {
 # module that dropped out of the test graph just stops running), so the tests
 # moved out of win32.zig keep a floor per module instead of a pin on 148 names,
 # which made every rename or consolidation edit the list. Each floor is the
-# number of pinned names that module held; the modules declare 112 more tests
-# today, so consolidating those is free, and emptying a module, or removing its
-# explicit root import above, fails. Lower a floor only for a deliberate
-# consolidation. facade_budget.zig did not move out of win32.zig: its floor is
-# the facade guard's two tests, and its root line is pinned below.
+# number of pinned names that module held; most modules declare more tests
+# than their floor, so consolidating those is free, and emptying a module, or
+# removing its explicit root import above, fails. Lower a floor only for a
+# deliberate consolidation. facade_budget.zig did not move out of win32.zig:
+# its floor is the facade guard's three tests (the budget, the leaves, and the
+# leaf check's spellings of an owner's path), and its root line is pinned
+# below.
 # docked_search.zig holds the per-pane search tests that came from
 # win32_search_bar.zig and labels.zig, rewritten against its interface; its
 # floor is every one of them. labels.zig went from 113 to 104 when its
@@ -79,9 +81,10 @@ foreach ($win32TestModuleRoot in $win32TestModuleRoots) {
 # `savedFullscreen` tables (from window_state.zig's start and placement tests
 # and session.zig's lookup-failure test), `restoredRectOnScreen` (from
 # win32.zig) and `TopLevel.alpha` (from labels.zig); its floor was all 10,
-# and is 12 since the two `composedFullscreenRect` tables (#598: the free
+# went to 12 when the two `composedFullscreenRect` tables (#598: the free
 # edge a fullscreen OpenGL window grows past, and the null that keeps the
-# exact monitor rect) joined them.
+# exact monitor rect) joined them, and is 13, all of them, since #678's
+# `TopLevel.shows` table (what each renderer shows of a window's opacity).
 # confirm_text.zig says what each confirm prompt says: its floor is the 14
 # tests from labels.zig, the close-scope table from win32.zig and the
 # out-of-memory test of a background tab's close prompt, 16.
@@ -104,9 +107,9 @@ $movedWin32TestFloors = [ordered]@{
     'render_trace.zig' = 3
     'chrome_layout.zig' = 2
     'gdi.zig' = 2
-    'facade_budget.zig' = 2
+    'facade_budget.zig' = 3
     'docked_search.zig' = 32
-    'window_start.zig' = 12
+    'window_start.zig' = 13
     'confirm_text.zig' = 16
     'tab_label.zig' = 18
     'profile_pick.zig' = 9
@@ -137,37 +140,42 @@ foreach ($movedWin32TestModule in $movedWin32TestFloors.Keys) {
 # `HostScene`), which the top-level-only count above does not see. So each
 # module needs its import binding at the start of a line, its root line inside
 # the root `test {}` block (a comment, or `_ = x;` in another function, does not
-# count), and a floor over the named tests at any indent. A floor is the number
-# of named tests the module declared when it was cut out: 59, 43, 23, 33, 10, 41,
-# 15, 4, 2, 7 and 1 below, the numbers the #584 to #590 reviews measured as the
-# tests a module filter runs above the no-match control. Registry adds 7
-# tests in R06b (#592); its floor is 6 since its toast lookup test became
-# notifications.zig's click tests, with `resolveToastActivationSurface`
+# count), and a floor over the named tests at any indent. A floor started as
+# the number of named tests the module declared when it was cut out (app.zig
+# 59, host.zig 43, terminal_window.zig 23, session.zig 33,
+# quick_terminal_host.zig 10, window_state.zig 41, surface_presentation.zig 15,
+# search_controls.zig 4, overlay_session.zig 2, palette_controller.zig 7 and
+# chrome_scene.zig 1), the numbers the #584 to #590 reviews measured as the
+# tests a module filter runs above the no-match control; the rest says why a
+# floor moved since. Registry adds 7 tests in R06b (#592); its floor is 6
+# since its toast lookup test became notifications.zig's click tests
 # (notifications PR 3). child_window.zig holds the 3 tests that moved out of
 # win32.zig with the child-control plumbing, and text.zig the 11 it declared
 # once the owned-string helpers (from win32.zig and labels.zig) and
 # utf8BoundedPrefix moved in, 16 since labels.zig's cell-width compaction
-# tests followed `compactHostLabel` there and `windowTitleSyncChanged`'s
-# test became its `ownedStringEquals` test (tab labels). For the same move,
-# host.zig's floor was 46 and terminal_window.zig's is 24: the window
+# tests followed `compactHostLabel` there and the window title sync's test
+# became its `ownedStringEquals` test (tab labels). For the same move,
+# host.zig's floor went to 46 and terminal_window.zig's to 24: the window
 # caption's title tests came from labels.zig with `buildHostAwareBaseTitle`
 # and `resolveWindowBaseTitle`, and host.zig gained the NameChanged test of a
-# narrow tab's split. host.zig's is 48 since the title prompt's refill test
-# came from labels.zig with `overlayTextNeedsRefill` (overlay view): its 48
-# named tests, so deleting that one fails the floor (it was one under the
-# count before). host.zig's is 63, its named tests, since labels.zig's last
+# narrow tab's split. host.zig's went to 48 when the title prompt's refill
+# test came from labels.zig with `overlayTextNeedsRefill` (overlay view): its
+# 48 named tests then, so deleting that one failed the floor (it was one under
+# the count before), and to 63, its named tests then, when labels.zig's last
 # tests came with what they test (facade S7): the chrome button keys, focus
 # stops, the strip's action names and context-menu focus, the profile
 # overlay's badges, insets and menu labels, the overview and wheel steps, the
 # palette toggle lookup and the inspector panel's visibility (15). For the
-# same move app.zig's is 62 (`tabClosedMessage`'s 3), terminal_window.zig's
-# 25 (`inspectorBannerStateChanged`) and chrome_scene.zig's 3, its named
-# tests (the inspector panel's title and hint). host.zig's is 59, its named
-# tests, since the S7 review folded four one-line helpers into their single
-# callers and deleted their tests: the wheel step's direction, the target
-# badge's inset (the label inset test covers it), the context menu's focus
-# rule and the inspector panel's visibility (win32_chrome_state.zig's
-# `inspectorVisible` test covers its overlay half).
+# same move app.zig's went to 62 (`tabClosedMessage`'s 3), terminal_window.zig's
+# to 25 (`inspectorBannerStateChanged`) and chrome_scene.zig's to 3 (the
+# inspector panel's title and hint). host.zig's is 59, its named tests, since
+# the S7 review folded four one-line helpers into their single callers and
+# deleted their tests: the wheel step's direction, the target badge's inset
+# (the label inset test covers it), the context menu's focus rule and the
+# inspector panel's visibility (win32_chrome_state.zig's `inspectorVisible`
+# test covers its overlay half). chrome_scene.zig's is 6, its named tests,
+# since #678 added the three `AlphaPaint` tests (what a translucent window's
+# chrome paint leaves see-through).
 # session.zig's floor is 27: its five restore-by-key tests became rows of
 # pane_launch.zig's `prepare` table (pane launch step 4b), and its
 # fullscreen-placement lookup-failure test became window_start.zig's pure
@@ -181,8 +189,8 @@ foreach ($movedWin32TestModule in $movedWin32TestFloors.Keys) {
 # of the pure `plan` tests in window_start.zig, which window_state.zig
 # imports (window state, step 3), and its eight new-window placement tests,
 # the fullscreen-restore rect test and the two initial-opacity tests became
-# the pure `place` tables there and first-show assertions (step 4), and is
-# 26 since `scaleInitialClientSize`'s test moved in from win32.zig (step 7),
+# the pure `place` tables there and first-show assertions (step 4), went to
+# 26 when `scaleInitialClientSize`'s test moved in from win32.zig (step 7),
 # and is 30 since #608 added its two composed-fullscreen window tests and the
 # two table tests of their gate (`composesFullscreen`, `PaneRenderer.of`).
 # Lower one only for a deliberate consolidation.
@@ -199,7 +207,7 @@ $extractedWin32TestModules = [ordered]@{
     'search_controls.zig' = @{ Binding = 'search_controls'; Floor = 4 }
     'overlay_session.zig' = @{ Binding = 'overlay_session'; Floor = 2 }
     'palette_controller.zig' = @{ Binding = 'palette_controller'; Floor = 7 }
-    'chrome_scene.zig' = @{ Binding = 'chrome_scene'; Floor = 3 }
+    'chrome_scene.zig' = @{ Binding = 'chrome_scene'; Floor = 6 }
     'child_window.zig' = @{ Binding = 'child_window'; Floor = 3 }
     'text.zig' = @{ Binding = 'paint_text'; Floor = 16 }
     'notifications.zig' = @{ Binding = 'notifications'; Floor = 23 }
@@ -239,10 +247,25 @@ foreach ($extractedWin32Module in $extractedWin32TestModules.Keys) {
     }
 }
 
+# win32.zig itself keeps the tests that combine owners, those of its native
+# window procedures and those of the helpers it still defines. It had no floor
+# while the facade series moved tests out of it, so the 7 tests labels.zig
+# handed it in facade S7 lost theirs when labels.zig's row went. With the
+# series done (S8) its floor is its named tests at any indent, 391: a change
+# that moves tests out to the module they test lowers it and says why here.
+$win32RuntimeTestFloor = 391
+$win32RuntimeTestCount = [regex]::Matches(
+    $win32RuntimeText,
+    '(?m)^[ \t]*test "[^"\r\n]+" \{\r?$'
+).Count
+if ($win32RuntimeTestCount -lt $win32RuntimeTestFloor) {
+    throw "win32.zig declares $win32RuntimeTestCount named Zig tests; the floor is $win32RuntimeTestFloor."
+}
+
 # The facade budget guard (src/apprt/win32/facade_budget.zig) caps win32.zig's
 # dependency bags, aliases and pub surface. It runs only from the root
 # `test {}` block, and a test that drops out of the graph fails nothing, so its
-# root line (here) and its two tests (the floors above) are pinned. Comptime
+# root line (here) and its three tests (the floors above) are pinned. Comptime
 # cannot list files, so the rest of the rule is checked here: the src/apprt
 # files that reach win32.zig are exactly these, the guard and the 15 importers
 # it started with (a new one imports the module that owns the name instead; one

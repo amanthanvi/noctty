@@ -2,6 +2,7 @@
 
 const std = @import("std");
 const sys = @import("win32/sys.zig");
+const consts = @import("win32/consts.zig");
 const schema = @import("win32_session_state.zig");
 const Allocator = std.mem.Allocator;
 
@@ -247,7 +248,7 @@ const FILE_SHARE_WRITE: u32 = 0x00000002;
 const OPEN_EXISTING: u32 = 3;
 const FILE_ATTRIBUTE_NORMAL: u32 = 0x00000080;
 const ERROR_SHARING_VIOLATION: u32 = 32;
-const MOVEFILE_REPLACE_EXISTING: u32 = 0x00000001;
+const MOVEFILE_REPLACE_EXISTING: u32 = consts.MOVEFILE_REPLACE_EXISTING;
 test "win32 session persistence load distinguishes missing corrupt oversized and transient reads" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();

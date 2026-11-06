@@ -51,6 +51,7 @@ const builtin = @import("builtin");
 const windows = std.os.windows;
 const win32_types = @import("win32_types.zig");
 const sys = @import("win32/sys.zig");
+const consts = @import("win32/consts.zig");
 const win32_elevation = @import("win32_elevation.zig");
 const win32_toast_activator = @import("win32_toast_activator.zig");
 const os_windows = @import("../os/windows.zig");
@@ -61,13 +62,13 @@ const HKEY = sys.HKEY;
 const REGSAM = u32;
 const DWORD = win32_types.DWORD;
 
-const HKEY_CURRENT_USER: HKEY = @ptrFromInt(0x80000001);
+const HKEY_CURRENT_USER: HKEY = @ptrFromInt(consts.HKEY_CURRENT_USER);
 const KEY_WRITE: REGSAM = 0x20006;
 const KEY_QUERY_VALUE: REGSAM = 0x0001;
 const REG_OPTION_NON_VOLATILE: DWORD = 0;
 const REG_SZ: DWORD = 1;
-const REG_DWORD: DWORD = 4;
-const ERROR_SUCCESS: i32 = 0;
+const REG_DWORD: DWORD = consts.REG_DWORD;
+const ERROR_SUCCESS: i32 = consts.ERROR_SUCCESS;
 
 const aumid_wide: [*:0]const u16 = std.unicode.utf8ToUtf16LeStringLiteral("io.github.amanthanvi.noctty");
 pub const aumid_utf8 = "io.github.amanthanvi.noctty";
