@@ -3120,6 +3120,17 @@ test "win32 a window whose blur-behind failed fades whole, and tries it again on
             try std.testing.expectEqual(asserts + tries, test_blur_behind_asserts);
         }
 
+        /// A system theme message that changed nothing, after a theme change
+        /// of the app's own: it rebuilds nothing and does not try.
+        fn unchangedMessage(app: *App, host: *const Host) !void {
+            const rebuilds = app.theme_rebuilds;
+            const asserts = test_blur_behind_asserts;
+            app.reconfigureSystemTheme();
+            try std.testing.expectEqual(rebuilds, app.theme_rebuilds);
+            try std.testing.expectEqual(asserts, test_blur_behind_asserts);
+            try std.testing.expect(host.blur_behind_failed);
+        }
+
         fn body() !void {
             var fixture: WindowStartTestApp = .{};
             try fixture.init();
@@ -3131,6 +3142,7 @@ test "win32 a window whose blur-behind failed fades whole, and tries it again on
             defer test_blur_behind_fails = false;
 
             app.config.@"background-opacity" = 0.5;
+            app.config.@"window-theme" = .dark;
             try app.createWindow(default_title);
             const pane = fixture.newest();
             const host = pane.host.?;
@@ -3158,6 +3170,27 @@ test "win32 a window whose blur-behind failed fades whole, and tries it again on
             try std.testing.expect(host.blur_behind_failed);
             try std.testing.expectEqual(@as(?u8, 128), testLayeredAlpha(hwnd));
             try std.testing.expectEqual(@as(?u8, null), testBackgroundAlpha(hwnd));
+
+            // The app's own theme changes are none of the system's: with
+            // blur-behind working again, after Settings previews another
+            // theme, after that preview ends, after a reload and after the
+            // palette's theme, each of another theme, a theme message that
+            // changed nothing rebuilds nothing and does not try.
+            test_blur_behind_fails = false;
+            try std.testing.expect(app.previewSetting(.{ .window_theme = .light }));
+            app.refreshSettingsPreview(.theme);
+            try unchangedMessage(app, host);
+            app.endSettingsPreview();
+            try unchangedMessage(app, host);
+            reloaded.@"window-theme" = .light;
+            try reloadConfig(app, &reloaded);
+            try unchangedMessage(app, host);
+            var palette = try app.config.clone(std.testing.allocator);
+            palette.@"window-theme" = .dark;
+            var left = host.swapRuntimeConfigFromPalette(palette);
+            left.deinit();
+            try unchangedMessage(app, host);
+            try std.testing.expectEqual(@as(?u8, 128), testLayeredAlpha(hwnd));
 
             // A theme message that changed nothing but finds a resource
             // missing rebuilds the theme without trying.

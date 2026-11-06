@@ -1282,7 +1282,11 @@ pub const App = struct {
         };
         self.refreshSystemWheelSettings();
         self.refreshSystemScrollbarPreference();
-        self.resolved_theme = resolveTheme(&self.config);
+        // The first system theme message compares with the theme the app
+        // starts in, as later ones do with the last rebuild.
+        const start_theme = SystemThemeSnapshot.capture(&self.config);
+        self.system_theme_refresh.previous = start_theme;
+        self.resolved_theme = start_theme.theme;
         self.loadPaletteMru();
         self.settings_window = win32_settings.SettingsWindow.init(.{
             .ctx = @ptrCast(self),
@@ -6050,7 +6054,8 @@ pub const App = struct {
             } else false;
             if (!missing_resources) return;
         }
-        // Only a theme that changed lets a failed blur-behind try again:
+        // Only a change the system made since the last rebuild (each one
+        // takes the snapshot again) lets a failed blur-behind try again:
         // resources a theme message found missing are GDI's, not DWM's.
         self.reconfigureTheme(if (changed) .retry else .refresh);
     }
@@ -6078,7 +6083,13 @@ pub const App = struct {
             previous_tab_bar_visible != self.tab_bar_visible;
         // The theme as Settings previews it.
         const shown = self.shownConfig();
-        self.resolved_theme = resolveTheme(shown);
+        // What the next system theme message compares with is this rebuild,
+        // whatever asked for it (Settings' preview, a reload, the palette's
+        // theme): only what the system changed since counts as a change
+        // there, and lets a failed blur-behind try again.
+        const snapshot = SystemThemeSnapshot.capture(shown);
+        self.system_theme_refresh.previous = snapshot;
+        self.resolved_theme = snapshot.theme;
         for (self.registry.hosts.items) |host| {
             host.rebuildThemeBrushes();
             host.recreateChromeFont();
@@ -12571,6 +12582,22 @@ test "CHROME57 system broadcasts rebuild once and retain font and accessibility 
     inline for (.{ "Environment", "intl", "Policy" }) |name| {
         try std.testing.expect(!settingChangeAffectsTheme(@bitCast(@intFromPtr(std.unicode.utf8ToUtf16LeStringLiteral(name)))));
     }
+}
+
+test "CHROME57 a system theme message that changed nothing since startup rebuilds nothing" {
+    // Without a baseline, the first message after startup counted as a
+    // change: a theme rebuild, and a retry of a failed blur-behind.
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    try runOnHiddenDesktop(struct {
+        fn body() !void {
+            var fixture: win32.test_support.SafeModeAppFixture = .{};
+            try fixture.init();
+            defer fixture.deinit();
+            const rebuilds = fixture.app.theme_rebuilds;
+            fixture.app.reconfigureSystemTheme();
+            try std.testing.expectEqual(rebuilds, fixture.app.theme_rebuilds);
+        }
+    }.body);
 }
 
 test "CHROME57 repeated host system messages apply the app theme only once" {
