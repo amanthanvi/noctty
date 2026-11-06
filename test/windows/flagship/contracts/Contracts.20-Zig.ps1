@@ -71,6 +71,9 @@ foreach ($win32TestModuleRoot in $win32TestModuleRoots) {
 # test, 15 to host.zig, 7 to win32.zig, 3 to app.zig, 2 to chrome_scene.zig
 # and 1 to terminal_window.zig, and its taskbar mapping test was deleted,
 # since win32_taskbar_progress.zig's overflow test asserts the same mapping.
+# input.zig's floor is 25 since tabFocusStep, which came from labels.zig in
+# the same move, has its own test there (the S7 review moved its asserts out
+# of host.zig's chrome button test).
 # window_start.zig is the pure half of window state, which received its
 # consolidated tests: the `plan`, `place`, `returnOn`, `forRestore` and
 # `savedFullscreen` tables (from window_state.zig's start and placement tests
@@ -96,7 +99,7 @@ foreach ($win32TestModuleRoot in $win32TestModuleRoots) {
 # come from one `compose` (19), and its test of the profile overlay's
 # detecting state, 20.
 $movedWin32TestFloors = [ordered]@{
-    'input.zig' = 24
+    'input.zig' = 25
     'gl_startup.zig' = 4
     'render_trace.zig' = 3
     'chrome_layout.zig' = 2
@@ -159,7 +162,12 @@ foreach ($movedWin32TestModule in $movedWin32TestFloors.Keys) {
 # palette toggle lookup and the inspector panel's visibility (15). For the
 # same move app.zig's is 62 (`tabClosedMessage`'s 3), terminal_window.zig's
 # 25 (`inspectorBannerStateChanged`) and chrome_scene.zig's 3, its named
-# tests (the inspector panel's title and hint).
+# tests (the inspector panel's title and hint). host.zig's is 59, its named
+# tests, since the S7 review folded four one-line helpers into their single
+# callers and deleted their tests: the wheel step's direction, the target
+# badge's inset (the label inset test covers it), the context menu's focus
+# rule and the inspector panel's visibility (win32_chrome_state.zig's
+# `inspectorVisible` test covers its overlay half).
 # session.zig's floor is 27: its five restore-by-key tests became rows of
 # pane_launch.zig's `prepare` table (pane launch step 4b), and its
 # fullscreen-placement lookup-failure test became window_start.zig's pure
@@ -182,7 +190,7 @@ foreach ($movedWin32TestModule in $movedWin32TestFloors.Keys) {
 $extractedWin32TestModules = [ordered]@{
     'registry.zig' = @{ Binding = 'registry_module'; Floor = 6 }
     'app.zig' = @{ Binding = 'app_module'; Floor = 62 }
-    'host.zig' = @{ Binding = 'host_module'; Floor = 63 }
+    'host.zig' = @{ Binding = 'host_module'; Floor = 59 }
     'terminal_window.zig' = @{ Binding = 'terminal_window_module'; Floor = 25 }
     'session.zig' = @{ Binding = 'session_module'; Floor = 27 }
     'quick_terminal_host.zig' = @{ Binding = 'quick_terminal_host'; Floor = 10 }

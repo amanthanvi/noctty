@@ -291,8 +291,6 @@ const titlebar_hover_fade_ms: u16 = 150;
 /// An even status key cannot collide with a program status's odd hash.
 const tab_bell_status_key: u64 = 2;
 
-const command_palette_unknown_action = "Unknown Noctty action. Example: new_tab or toggle_fullscreen";
-
 const PaletteCatalogConfigSource = enum {
     /// Catalog strings borrow the current `app.config`.
     live,
@@ -419,13 +417,6 @@ fn nextFocusStop(
     return null;
 }
 
-/// After a tab's context menu closes, keyboard focus goes back to the strip
-/// when the menu came from the keyboard, unless a command opened an overlay
-/// (rename, a close that asks first) that owns the keyboard now.
-fn tabContextMenuRestoresStripFocus(from_keyboard: bool, overlay_open: bool) bool {
-    return from_keyboard and !overlay_open;
-}
-
 /// What the tab strip's two action buttons are called to UIA and in their
 /// hover tooltips, so the two always agree.
 const TabStripAction = enum { new_tab, more_tabs };
@@ -435,10 +426,6 @@ fn tabStripActionName(action: TabStripAction) []const u8 {
         .new_tab => "New tab",
         .more_tabs => "More tabs",
     };
-}
-
-fn inspectorPanelVisibleForState(overlay_mode: HostOverlayMode, active_tab_has_inspector: bool) bool {
-    return overlay_mode == .none and active_tab_has_inspector;
 }
 
 fn bindingActionsToggleCommandPalette(actions: []const input.Binding.Action) bool {
@@ -499,13 +486,10 @@ fn buildDropdownProfileLabel(
     return try out.toOwnedSlice(alloc);
 }
 
-fn targetButtonLabelRightInset(target: ?OpenTarget) i32 {
-    return if (target != null) 12 else 0;
-}
-
 fn buttonLabelRightInset(pinned_slot_ordinal: ?usize, target: ?OpenTarget) i32 {
+    const target_inset: i32 = if (target != null) 12 else 0;
     const slot_inset: i32 = if (pinnedSlotBadgeDigit(pinned_slot_ordinal) != null) 16 else 0;
-    return @max(targetButtonLabelRightInset(target), slot_inset);
+    return @max(target_inset, slot_inset);
 }
 
 fn pinnedSlotBadgeDigit(pinned_slot_ordinal: ?usize) ?u8 {
@@ -537,10 +521,6 @@ fn nextTabOverviewSelection(current: usize, total: usize, reverse: bool) usize {
         return if (clamped <= 1) total else clamped - 1;
     }
     return if (clamped >= total) 1 else clamped + 1;
-}
-
-fn tabDirectionFromWheelDelta(delta: i16) apprt.action.GotoTab {
-    return if (delta > 0) .previous else .next;
 }
 
 pub const Host = struct {
@@ -4670,7 +4650,7 @@ pub const Host = struct {
         const steps = self.tab_wheel_steps.add(normalized, sys.GetTickCount64());
         // Keep the existing next/previous wrap convention, once per complete
         // notch rather than once per precision-wheel message.
-        const direction = tabDirectionFromWheelDelta(if (steps > 0) 120 else -120);
+        const direction: apprt.action.GotoTab = if (steps > 0) .previous else .next;
         for (0..@abs(steps)) |_| _ = self.activateTabByDirection(direction);
     }
 
@@ -5049,7 +5029,7 @@ pub const Host = struct {
     }
 
     pub fn inspectorPanelVisible(self: *Host) bool {
-        return inspectorPanelVisibleForState(self.overlay_mode, self.activeTabHasInspector());
+        return win32_chrome_state.inspectorVisible(self.overlay_mode) and self.activeTabHasInspector();
     }
 
     fn activeTabHasInspector(self: *Host) bool {
@@ -7638,8 +7618,8 @@ pub const Host = struct {
     /// Open the context menu of the tab at `tab_index`. The tab is activated
     /// first, so every command acts on it and not on whichever tab was in
     /// front. A menu opened from the keyboard hands focus back to the strip
-    /// when it closes (`tabContextMenuRestoresStripFocus`), on the
-    /// tab the menu was for. Returns false, with the menu not shown, when the
+    /// when it closes, on the tab the menu was for, unless a command opened
+    /// an overlay. Returns false, with the menu not shown, when the
     /// tab could not be activated. `self` may be gone when it returns true:
     /// closing a window's only tab closes the window.
     pub fn showTabContextMenu(self: *Host, button_hwnd: HWND, tab_index: usize, origin: TabMenuOrigin) bool {
@@ -7714,7 +7694,7 @@ pub const Host = struct {
         // PTY. Rename and a close that asks first opened an overlay, which
         // owns the keyboard now.
         live = app.registry.findHostById(host_id) orelse return true;
-        if (live.hwnd != null and tabContextMenuRestoresStripFocus(origin == .keyboard, live.overlay_mode != .none)) {
+        if (live.hwnd != null and origin == .keyboard and live.overlay_mode == .none) {
             live.restoreTabStripFocus();
         }
         return true;
@@ -8605,7 +8585,7 @@ pub const Host = struct {
                 }
                 const action = input.Binding.Action.parse(text) catch |err| {
                     log.warn("win32 command palette invalid action action={s} err={}", .{ text, err });
-                    try self.setBanner(.err, command_palette_unknown_action);
+                    try self.setBanner(.err, "Unknown Noctty action. Example: new_tab or toggle_fullscreen");
                     if (self.palette_list_uia_provider) |provider| {
                         win32_uia.events.raiseNotification(&provider.base, .action_aborted, "Unknown command");
                     }
@@ -10729,15 +10709,6 @@ test "win32 a profile's menu item keeps an ampersand and a tab in its label" {
     try std.testing.expectEqualStrings("Q&&A shell", tenth);
 }
 
-test "win32 targetButtonLabelRightInset reserves target badge space" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    try std.testing.expectEqual(@as(i32, 0), targetButtonLabelRightInset(null));
-    try std.testing.expectEqual(@as(i32, 12), targetButtonLabelRightInset(.tab));
-    try std.testing.expectEqual(@as(i32, 12), targetButtonLabelRightInset(.window));
-    try std.testing.expectEqual(@as(i32, 12), targetButtonLabelRightInset(.split));
-}
-
 test "win32 buttonLabelRightInset reserves slot and target badge space" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
@@ -10782,13 +10753,6 @@ test "win32 nextTabOverviewSelection wraps and clamps" {
     try std.testing.expectEqual(@as(usize, 1), nextTabOverviewSelection(9, 4, false));
 }
 
-test "win32 tabDirectionFromWheelDelta maps wheel direction to tab navigation" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    try std.testing.expectEqual(apprt.action.GotoTab.previous, tabDirectionFromWheelDelta(120));
-    try std.testing.expectEqual(apprt.action.GotoTab.next, tabDirectionFromWheelDelta(-120));
-}
-
 test "win32 chrome button keys: Enter clicks and Tab moves, Ctrl and Alt do neither" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
@@ -10801,8 +10765,6 @@ test "win32 chrome button keys: Enter clicks and Tab moves, Ctrl and Alt do neit
     try std.testing.expectEqual(@as(?ChromeButtonKeyAction, null), chromeButtonKeyAction(c.VK_TAB, .{ .alt = true }));
     // Space is the BUTTON class's own (it clicks on the key-up).
     try std.testing.expectEqual(@as(?ChromeButtonKeyAction, null), chromeButtonKeyAction(c.VK_SPACE, none));
-    try std.testing.expectEqual(@as(?win32_input.FocusStep, win32_input.FocusStep.previous), win32_input.tabFocusStep(c.VK_TAB, .{ .shift = true }));
-    try std.testing.expectEqual(@as(?win32_input.FocusStep, null), win32_input.tabFocusStep(c.VK_RETURN, none));
 }
 
 test "win32 focus stops step in order, wrap, and skip hidden stops" {
@@ -10828,14 +10790,6 @@ test "win32 focus stops step in order, wrap, and skip hidden stops" {
     try std.testing.expectEqual(@as(?usize, null), nextFocusStop(4, 0, false, alone, Stops.available));
     try std.testing.expectEqual(@as(?usize, null), nextFocusStop(1, 0, false, all, Stops.available));
     try std.testing.expectEqual(@as(?usize, null), nextFocusStop(4, 9, false, all, Stops.available));
-}
-
-test "win32 a tab context menu hands focus back to the strip only from the keyboard and without an overlay" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    try std.testing.expect(tabContextMenuRestoresStripFocus(true, false));
-    try std.testing.expect(!tabContextMenuRestoresStripFocus(true, true));
-    try std.testing.expect(!tabContextMenuRestoresStripFocus(false, false));
 }
 
 test "win32 tab strip action names are the UIA names the tooltips show" {
@@ -10876,14 +10830,6 @@ test "win32 key-remap applies to command palette toggle lookup" {
     const no_remaps: input.KeyRemapSet = .empty;
     try std.testing.expect(!keyEventTogglesCommandPalette(event, &cfg.keybind.set, &no_remaps));
     try std.testing.expect(keyEventTogglesCommandPalette(event, &cfg.keybind.set, &remaps));
-}
-
-test "win32 inspector panel visibility is tab scoped" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    try std.testing.expect(inspectorPanelVisibleForState(.none, true));
-    try std.testing.expect(!inspectorPanelVisibleForState(.none, false));
-    try std.testing.expect(!inspectorPanelVisibleForState(.command_palette, true));
 }
 
 test "win32 only a close in the window in front takes focus" {

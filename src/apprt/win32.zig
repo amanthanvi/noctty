@@ -4562,23 +4562,6 @@ pub const HostBannerKind = overlay_view.BannerKind;
 /// update notice; `dismiss` is Dismiss there and the close button otherwise.
 pub const BannerButton = enum(u1) { primary, dismiss };
 
-const LaunchTargetButtonKeyAction = enum {
-    previous,
-    next,
-    first,
-    last,
-};
-
-fn launchTargetButtonKeyAction(vk: WPARAM) ?LaunchTargetButtonKeyAction {
-    return switch (vk) {
-        c.VK_LEFT, c.VK_UP => .previous,
-        c.VK_RIGHT, c.VK_DOWN, c.VK_RETURN, c.VK_SPACE => .next,
-        c.VK_HOME => .first,
-        c.VK_END => .last,
-        else => null,
-    };
-}
-
 /// True when `title` contains a byte that must not survive into a stored
 /// window/tab title. See `sanitizeTitleAlloc` for why.
 /// Control code points that must never survive into a stored title.
@@ -11047,13 +11030,6 @@ fn tabButtonKeyAction(vk: WPARAM, mods: win32_input.KeyMods) ?TabButtonKeyAction
     };
 }
 
-/// The key-ups that must not reach `DefWindowProc` on a tab button: it turns
-/// the menu key's release (and Shift+F10's) into a second WM_CONTEXTMENU after
-/// the key-down already opened the menu.
-fn tabButtonSwallowsKeyUp(vk: WPARAM, mods: win32_input.KeyMods) bool {
-    return tabContextMenuKey(vk, mods);
-}
-
 /// The menu key, or Shift+F10 without Ctrl or Alt.
 fn tabContextMenuKey(vk: WPARAM, mods: win32_input.KeyMods) bool {
     return vk == c.VK_APPS or (vk == c.VK_F10 and mods.shift and !mods.ctrl and !mods.alt);
@@ -11330,10 +11306,11 @@ pub fn tabButtonProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) call
                             v.showTabContextMenu(hwnd, index, .keyboard)) return 0;
                     }
                 },
-                // Without these, `DefWindowProc` posts a second
-                // WM_CONTEXTMENU when the key comes back up.
+                // The menu key's release and Shift+F10's must not reach
+                // `DefWindowProc`: it posts a second WM_CONTEXTMENU when the
+                // key comes back up, after the key-down opened the menu.
                 c.WM_KEYUP, c.WM_SYSKEYUP => {
-                    if (tabButtonSwallowsKeyUp(wParam, win32_input.chromeKeyMods())) return 0;
+                    if (tabContextMenuKey(wParam, win32_input.chromeKeyMods())) return 0;
                 },
                 // The keyboard form (-1, -1) was served on the key-down. A
                 // right click opens the menu from WM_RBUTTONUP and never
@@ -11367,12 +11344,8 @@ pub fn tabButtonProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) call
 }
 
 fn profileShortcutIndexFromKey(vk: WPARAM) ?usize {
-    if (vk >= @as(WPARAM, '1') and vk <= @as(WPARAM, '9')) {
-        return @as(usize, @intCast(vk - @as(WPARAM, '1')));
-    }
-    if (vk >= 0x61 and vk <= 0x69) {
-        return @as(usize, @intCast(vk - 0x61));
-    }
+    if (vk >= '1' and vk <= '9') return vk - '1';
+    if (vk >= c.VK_NUMPAD1 and vk <= c.VK_NUMPAD9) return vk - c.VK_NUMPAD1;
     return null;
 }
 
@@ -23540,25 +23513,15 @@ test "win32 dropping a tab into another as a split keeps its panes' toasts" {
     try recorder.expectRemoved(&.{ 0xA, 0xD });
 }
 
-test "win32 launchTargetButtonKeyAction maps focused target keys" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    try std.testing.expectEqual(LaunchTargetButtonKeyAction.previous, launchTargetButtonKeyAction(c.VK_LEFT).?);
-    try std.testing.expectEqual(LaunchTargetButtonKeyAction.previous, launchTargetButtonKeyAction(c.VK_UP).?);
-    try std.testing.expectEqual(LaunchTargetButtonKeyAction.next, launchTargetButtonKeyAction(c.VK_RIGHT).?);
-    try std.testing.expectEqual(LaunchTargetButtonKeyAction.next, launchTargetButtonKeyAction(c.VK_SPACE).?);
-    try std.testing.expectEqual(LaunchTargetButtonKeyAction.first, launchTargetButtonKeyAction(c.VK_HOME).?);
-    try std.testing.expectEqual(LaunchTargetButtonKeyAction.last, launchTargetButtonKeyAction(c.VK_END).?);
-}
-
 test "win32 profileShortcutIndexFromKey supports top row and numpad digits" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
     try std.testing.expectEqual(@as(?usize, 0), profileShortcutIndexFromKey('1'));
     try std.testing.expectEqual(@as(?usize, 4), profileShortcutIndexFromKey('5'));
     try std.testing.expectEqual(@as(?usize, 8), profileShortcutIndexFromKey('9'));
-    try std.testing.expectEqual(@as(?usize, 0), profileShortcutIndexFromKey(0x61));
-    try std.testing.expectEqual(@as(?usize, 8), profileShortcutIndexFromKey(0x69));
+    try std.testing.expectEqual(@as(?usize, 0), profileShortcutIndexFromKey(c.VK_NUMPAD1));
+    try std.testing.expectEqual(@as(?usize, 8), profileShortcutIndexFromKey(c.VK_NUMPAD9));
+    try std.testing.expectEqual(@as(?usize, null), profileShortcutIndexFromKey(c.VK_NUMPAD0));
     try std.testing.expectEqual(@as(?usize, null), profileShortcutIndexFromKey('0'));
     try std.testing.expectEqual(@as(?usize, null), profileShortcutIndexFromKey('A'));
 }
@@ -23643,11 +23606,11 @@ test "win32 tab button keys: the menu key and Shift+F10 open the context menu, T
 
     // DefWindowProc turns the release of the menu key and of F10 into a
     // second WM_CONTEXTMENU once the key-down already opened the menu.
-    try std.testing.expect(tabButtonSwallowsKeyUp(c.VK_APPS, none));
-    try std.testing.expect(!tabButtonSwallowsKeyUp(c.VK_F10, none));
-    try std.testing.expect(tabButtonSwallowsKeyUp(c.VK_F10, shift));
-    try std.testing.expect(!tabButtonSwallowsKeyUp(c.VK_F10, .{ .shift = true, .ctrl = true }));
-    try std.testing.expect(!tabButtonSwallowsKeyUp(c.VK_RETURN, none));
+    try std.testing.expect(tabContextMenuKey(c.VK_APPS, none));
+    try std.testing.expect(!tabContextMenuKey(c.VK_F10, none));
+    try std.testing.expect(tabContextMenuKey(c.VK_F10, shift));
+    try std.testing.expect(!tabContextMenuKey(c.VK_F10, .{ .shift = true, .ctrl = true }));
+    try std.testing.expect(!tabContextMenuKey(c.VK_RETURN, none));
 }
 
 test "win32 moveTabAmountToEdge computes direct host reorder delta" {
