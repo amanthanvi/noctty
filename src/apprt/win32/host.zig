@@ -669,6 +669,10 @@ pub const Host = struct {
     // Cached chrome paint strings — rebuilt only when their per-zone
     // dirty bits are set, so WM_PAINT can skip unrelated UTF-16 churn.
     chrome_repaint_dirty: bool = true,
+    /// The background alpha while the frame extends over the client area.
+    /// GDI leaves alpha at 0, so chrome painting fixes it up: the chrome
+    /// background gets this alpha and everything drawn on it stays solid.
+    chrome_alpha: ?u8 = null,
     chrome_paint_pending: bool = false,
     chrome_paint_mask: ChromeRepaintMask = .{},
     chrome_text_dirty: ChromeTextDirty = .{},

@@ -54,9 +54,8 @@ pub const TopLevel = struct {
         return self.opacity < 0.999;
     }
 
-    /// The layered alpha the window shows, or null when it shows opaque and
-    /// so is not layered at all (#234: layering is the only mechanism, and an
-    /// opaque window must not pay for it).
+    /// The background alpha the window shows, or null when it shows opaque
+    /// and so keeps a plain frame.
     pub fn alpha(self: *const TopLevel) ?u8 {
         if (self.force_opaque or !self.translucent()) return null;
         return @intFromFloat(@round(self.opacity * 255.0));
@@ -1068,7 +1067,7 @@ test "win32 a restored window enters its config's maximize and fullscreen, and a
     }
 }
 
-test "win32 a window shows its opacity as a layered alpha, and opaque unlayered" {
+test "win32 a window shows its opacity as an alpha, and opaque none" {
     var top_level: TopLevel = .{ .opacity = 0.5 };
     try std.testing.expectEqual(@as(?u8, 128), top_level.alpha());
     top_level.opacity = 0.75;

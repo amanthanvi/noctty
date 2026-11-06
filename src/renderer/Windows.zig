@@ -334,6 +334,12 @@ pub fn changeConfig(self: *Windows, config: *DerivedConfig) !void {
     }
 }
 
+pub fn setBackgroundOpacity(self: *Windows, opacity: f64) void {
+    switch (self.active) {
+        inline else => |v| v.setBackgroundOpacity(opacity),
+    }
+}
+
 pub fn deinit(self: *Windows) void {
     switch (self.active) {
         inline else => |v| {

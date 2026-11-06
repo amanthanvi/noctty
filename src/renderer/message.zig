@@ -49,6 +49,9 @@ pub const Message = union(enum) {
     /// Changes the size. The screen size might change, padding, grid, etc.
     resize: renderer.Size,
 
+    /// Update background alpha without changing text or window chrome.
+    background_opacity: f64,
+
     /// The derived configuration to update the renderer with.
     change_config: struct {
         alloc: Allocator,

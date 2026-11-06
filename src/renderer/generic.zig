@@ -1190,6 +1190,14 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             self.terminal_state.dirty = .full;
         }
 
+        pub fn setBackgroundOpacity(self: *Self, opacity: f64) void {
+            self.draw_mutex.lock();
+            defer self.draw_mutex.unlock();
+            if (self.config.background_opacity == opacity) return;
+            self.config.background_opacity = opacity;
+            self.markDirty();
+        }
+
         /// Called when we get an updated display ID for our display link.
         pub fn setMacOSDisplayID(self: *Self, id: u32) !void {
             _ = self;

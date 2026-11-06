@@ -434,6 +434,10 @@ pub const Surface = struct {
     /// renderer starts undimmed.
     split_dimmed: bool = false,
     split_dimmed_sent: bool = false,
+    /// The background opacity the host window shows, and what the renderer
+    /// was last told; null until the host sets it.
+    background_opacity: ?f64 = null,
+    background_opacity_sent: ?f64 = null,
     /// The bell rang here while the user was not looking; the tab label and
     /// the window caption carry the glyph until `clearBell`.
     bell_ringing: bool = false,
@@ -918,6 +922,7 @@ pub const Surface = struct {
             // A pane made behind its tab's focus (a restored layout) was
             // marked dimmed before it had a renderer to tell.
             self.flushSplitDimmed();
+            self.flushBackgroundOpacity();
             // The core read the child's size when its init began, and the
             // core's own init-time actions can lay the host out again before
             // it ends. `syncCoreSizeFromClientRect` recorded any such move in
@@ -3920,6 +3925,18 @@ pub const Surface = struct {
         if (!self.core_initialized or self.split_dimmed_sent == self.split_dimmed) return;
         self.split_dimmed_sent = self.split_dimmed;
         self.core_surface.renderer_thread.send(.{ .split_dimmed = self.split_dimmed });
+    }
+
+    pub fn setBackgroundOpacity(self: *Surface, opacity: f64) void {
+        self.background_opacity = opacity;
+        self.flushBackgroundOpacity();
+    }
+
+    fn flushBackgroundOpacity(self: *Surface) void {
+        const opacity = self.background_opacity orelse return;
+        if (!self.core_initialized or self.background_opacity_sent == opacity) return;
+        self.background_opacity_sent = opacity;
+        self.core_surface.renderer_thread.send(.{ .background_opacity = opacity });
     }
 
     pub fn focusChanged(self: *Surface, focused: bool) void {

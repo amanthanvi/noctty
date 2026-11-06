@@ -625,7 +625,7 @@ pub fn Fixtures(comptime runtime: anytype) type {
                             .zoomed = sys.IsZoomed(hwnd) != 0,
                             .style = @truncate(@as(usize, @bitCast(sys.GetWindowLongPtrW(hwnd, c.GWL_STYLE)))),
                             .ex_style = testHostExStyle(hwnd),
-                            .alpha = if (testHostIsLayered(hwnd)) testLayeredAlpha(hwnd) else null,
+                            .alpha = testHostAlpha(hwnd),
                         };
                         shown = true;
                     }
@@ -671,12 +671,10 @@ pub fn Fixtures(comptime runtime: anytype) type {
             return (testHostExStyle(hwnd) & c.WS_EX_LAYERED) != 0;
         }
 
-        pub fn testLayeredAlpha(hwnd: HWND) ?u8 {
-            var alpha: u8 = 0;
-            var flags: u32 = 0;
-            if (sys.GetLayeredWindowAttributes(hwnd, null, &alpha, &flags) == 0) return null;
-            if ((flags & c.LWA_ALPHA) == 0) return null;
-            return alpha;
+        /// The background alpha the host window shows, or null when opaque.
+        pub fn testHostAlpha(hwnd: HWND) ?u8 {
+            const host = child_window.windowData(Host, hwnd) orelse return null;
+            return host.chrome_alpha;
         }
 
         pub fn createTestChromeChild(parent: HWND, class: [*:0]const u16) !HWND {

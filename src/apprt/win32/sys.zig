@@ -679,6 +679,22 @@ pub const wglGetCurrentDC = wgl.wglGetCurrentDC;
 pub const wglGetProcAddress = wgl.wglGetProcAddress;
 pub const wglMakeCurrent = wgl.wglMakeCurrent;
 
+pub const BPBF_TOPDOWNDIB: u32 = 2;
+
+pub extern "gdi32" fn BitBlt(dst: HDC, x: i32, y: i32, width: i32, height: i32, src: HDC, src_x: i32, src_y: i32, rop: u32) callconv(.winapi) BOOL;
+
+pub extern "uxtheme" fn BeginBufferedPaint(hdcTarget: HDC, prcTarget: *const RECT, dwFormat: u32, pPaintParams: ?*const anyopaque, phdc: *HDC) callconv(.winapi) ?*anyopaque;
+
+pub extern "uxtheme" fn EndBufferedPaint(hBufferedPaint: *anyopaque, fUpdateTarget: BOOL) callconv(.winapi) i32;
+
+pub extern "uxtheme" fn GetBufferedPaintBits(hBufferedPaint: *anyopaque, ppbBuffer: *?[*]u32, pcxRow: *i32) callconv(.winapi) i32;
+
+pub extern "uxtheme" fn GetBufferedPaintTargetRect(hBufferedPaint: *anyopaque, prc: *RECT) callconv(.winapi) i32;
+
+pub const DWM_BLURBEHIND = extern struct { dwFlags: u32, fEnable: BOOL, hRgnBlur: ?HRGN, fTransitionOnMaximized: BOOL };
+
+pub extern "dwmapi" fn DwmEnableBlurBehindWindow(hwnd: HWND, pBlurBehind: *const DWM_BLURBEHIND) callconv(.winapi) i32;
+
 pub extern "dwmapi" fn DwmDefWindowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM, plResult: *LRESULT) callconv(.winapi) BOOL;
 
 pub extern "imm32" fn ImmGetContext(hWnd: HWND) callconv(.winapi) ?*anyopaque;
@@ -729,6 +745,8 @@ pub extern "user32" fn ShowScrollBar(hWnd: HWND, wBar: c_int, bShow: BOOL) callc
 pub extern "user32" fn SetWindowRgn(hWnd: HWND, hRgn: ?HRGN, bRedraw: BOOL) callconv(.winapi) c_int;
 
 pub extern "user32" fn NotifyWinEvent(event: u32, hwnd: HWND, idObject: i32, idChild: i32) callconv(.winapi) void;
+
+pub extern "user32" fn GetClassNameW(hwnd: HWND, name: [*]u16, count: c_int) callconv(.winapi) c_int;
 
 pub extern "user32" fn EnumChildWindows(hWndParent: HWND, lpEnumFunc: *const fn (HWND, LPARAM) callconv(.winapi) BOOL, lParam: LPARAM) callconv(.winapi) BOOL;
 

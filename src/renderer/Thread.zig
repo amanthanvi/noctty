@@ -422,6 +422,8 @@ fn drainMailbox(self: *Thread, changes: *std.EnumSet(Pacer.Change)) !void {
 
             .resize => |v| self.renderer.setScreenSize(v),
 
+            .background_opacity => |v| self.renderer.setBackgroundOpacity(v),
+
             .change_config => |config| {
                 defer config.alloc.destroy(config.thread);
                 defer config.alloc.destroy(config.impl);

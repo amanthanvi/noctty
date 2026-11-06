@@ -49,7 +49,7 @@ const prompt_label_class = child_window.prompt_label_class;
 const rectEquals = chrome_layout.rectEquals;
 const runOnHiddenDesktop = test_support.runOnHiddenDesktop;
 const testHostIsLayered = test_support.testHostIsLayered;
-const testLayeredAlpha = test_support.testLayeredAlpha;
+const testHostAlpha = test_support.testHostAlpha;
 const testWindowStyle = test_support.testWindowStyle;
 const win32_quick_terminal = @import("../win32_quick_terminal.zig");
 
@@ -269,10 +269,8 @@ fn onCreated(host: *Host, pending: *const Pending) !void {
 /// The window is shown only now, once GL and core init have succeeded, so a
 /// startup failure reaches the fatal dialog without a blank window first.
 fn beforeShow(host: *Host, pending: *const Pending) !bool {
-    // Layered before any show: layering a window already on screen shows
-    // it opaque and then fades it (#234). The layered alpha is the only
-    // thing that makes `background-opacity` visible: DWM discards the GL
-    // child's alpha. A window that could not be layered is still usable.
+    // Translucent before any show, so the window never shows opaque and
+    // then fades (#234).
     applyBackgroundOpacity(host) catch |err| {
         log.warn("win32 initial background opacity failed err={}", .{err});
     };
@@ -1075,31 +1073,69 @@ fn applyBackgroundOpacity(host: *Host) !void {
     const ex_style_raw = sys.GetWindowLongPtrW(hwnd, c.GWL_EXSTYLE);
     var ex_style: u32 = @intCast(@as(usize, @bitCast(ex_style_raw)));
 
-    const alpha = host.top_level.alpha() orelse {
-        if ((ex_style & c.WS_EX_LAYERED) != 0) {
-            ex_style &= ~@as(u32, c.WS_EX_LAYERED);
-            _ = sys.SetWindowLongPtrW(hwnd, c.GWL_EXSTYLE, @bitCast(@as(isize, @intCast(ex_style))));
-            _ = sys.SetWindowPos(
-                hwnd,
-                null,
-                0,
-                0,
-                0,
-                0,
-                c.SWP_NOMOVE | c.SWP_NOSIZE | c.SWP_NOZORDER | c.SWP_NOACTIVATE | c.SWP_FRAMECHANGED,
-            );
-        }
-        return;
-    };
-
-    if ((ex_style & c.WS_EX_LAYERED) == 0) {
-        ex_style |= c.WS_EX_LAYERED;
+    // The renderer draws the background with alpha, so the window itself is
+    // never layered: layering fades text and chrome too, and blocks blur.
+    if ((ex_style & c.WS_EX_LAYERED) != 0) {
+        ex_style &= ~@as(u32, c.WS_EX_LAYERED);
         _ = sys.SetWindowLongPtrW(hwnd, c.GWL_EXSTYLE, @bitCast(@as(isize, @intCast(ex_style))));
+        _ = sys.SetWindowPos(
+            hwnd,
+            null,
+            0,
+            0,
+            0,
+            0,
+            c.SWP_NOMOVE | c.SWP_NOSIZE | c.SWP_NOZORDER | c.SWP_NOACTIVATE | c.SWP_FRAMECHANGED,
+        );
     }
 
-    if (sys.SetLayeredWindowAttributes(hwnd, 0, alpha, c.LWA_ALPHA) == 0) {
-        return lastError();
+    // DWM drops the client area's alpha unless blur-behind is on. An empty
+    // blur region shows what is behind, unblurred. Extending the frame
+    // instead would make the title bar see-through too.
+    host.chrome_alpha = host.top_level.alpha();
+    const translucent = host.chrome_alpha != null;
+    const region = if (translucent) sys.CreateRectRgn(0, 0, -1, -1) else null;
+    defer if (region) |r| {
+        _ = sys.DeleteObject(r);
+    };
+    const blur: sys.DWM_BLURBEHIND = .{ .dwFlags = 0x1 | 0x2, .fEnable = @intFromBool(translucent), .hRgnBlur = region, .fTransitionOnMaximized = 0 };
+    _ = sys.DwmEnableBlurBehindWindow(hwnd, &blur);
+    if (translucent) _ = sys.EnumChildWindows(hwnd, solidifyGdiChild, 0);
+
+    const opacity: f64 = if (translucent) host.top_level.opacity else 1.0;
+    for (host.tabs.items) |*tab| {
+        var it = tab.tree.iterator();
+        while (it.next()) |entry| entry.view.setBackgroundOpacity(opacity);
     }
+    _ = sys.InvalidateRect(hwnd, null, 0);
+}
+
+/// GDI leaves alpha at 0, which blur-behind shows as see-through. A
+/// layered child gets its own surface, which DWM composes opaque, above its
+/// unlayered siblings. Owner-drawn controls stay unlayered, since some sit
+/// on top of others, and `WM_DRAWITEM` fixes their alpha instead. The
+/// terminal panes draw their own alpha.
+pub fn solidifyGdiChild(child: HWND, _: LPARAM) callconv(.winapi) BOOL {
+    var name: [64]u16 = undefined;
+    const len = sys.GetClassNameW(child, &name, name.len);
+    const class = name[0..@intCast(@max(0, len))];
+    if (std.mem.eql(u16, class, win32.class_name)) return 1;
+    const style: u32 = @truncate(@as(usize, @bitCast(sys.GetWindowLongPtrW(child, c.GWL_STYLE))));
+    if (std.ascii.eqlIgnoreCase(asciiName(class), "BUTTON") and style & 0xF == c.BS_OWNERDRAW) return 1;
+    if (std.ascii.eqlIgnoreCase(asciiName(class), "STATIC") and style & 0x1F == c.SS_OWNERDRAW) return 1;
+    const ex: u32 = @intCast(@as(usize, @bitCast(sys.GetWindowLongPtrW(child, c.GWL_EXSTYLE))));
+    if ((ex & c.WS_EX_LAYERED) != 0) return 1;
+    _ = sys.SetWindowLongPtrW(child, c.GWL_EXSTYLE, @bitCast(@as(isize, @intCast(ex | c.WS_EX_LAYERED))));
+    _ = sys.SetLayeredWindowAttributes(child, 0, 255, c.LWA_ALPHA);
+    return 1;
+}
+
+fn asciiName(class: []const u16) []const u8 {
+    const S = struct {
+        threadlocal var buf: [64]u8 = undefined;
+    };
+    for (class, 0..) |unit, i| S.buf[i] = if (unit < 128) @intCast(unit) else '?';
+    return S.buf[0..class.len];
 }
 
 fn applyTopmost(host: *Host) !void {
@@ -2046,7 +2082,7 @@ test "win32 a forwarded window background opacity wins over the one a new window
             // The control: an opaque source, an opaque copy.
             {
                 const clone = try t.forward(null, null);
-                try std.testing.expect(!testHostIsLayered(clone.windowHwnd().?));
+                try std.testing.expectEqual(@as(?u8, null), testHostAlpha(clone.windowHwnd().?));
                 t.fixture.closeWindow(clone);
             }
             // Before the fix the copy stayed opaque.
@@ -2054,8 +2090,8 @@ test "win32 a forwarded window background opacity wins over the one a new window
                 const clone = try t.forward(&.{"--background-opacity=0.5"}, null);
                 const hwnd = clone.windowHwnd().?;
                 try std.testing.expectEqual(@as(f64, 0.5), clone.host.?.top_level.opacity);
-                try std.testing.expect(testHostIsLayered(hwnd));
-                try std.testing.expect((testLayeredAlpha(hwnd) orelse 255) < 255);
+                try std.testing.expect(!testHostIsLayered(hwnd));
+                try std.testing.expect((testHostAlpha(hwnd) orelse 255) < 255);
                 t.fixture.closeWindow(clone);
             }
         }
@@ -2214,7 +2250,7 @@ fn reloadConfig(app: *App, config: *const configpkg.Config) !void {
     try std.testing.expect(try app.performAction(.app, .config_change, .{ .config = config }));
 }
 
-test "win32 a first window and a window opened from it are layered at their opacity at the first show" {
+test "win32 a first window and a window opened from it show their opacity at the first show" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
     try runOnHiddenDesktop(struct {
         fn body() !void {
@@ -2232,19 +2268,19 @@ test "win32 a first window and a window opened from it are layered at their opac
             try std.testing.expectEqual(@as(?u8, null), shown.alpha);
             fixture.closeWindow(fixture.newest());
 
-            // Layered before any show (#234): no opaque frame, then a fade.
+            // Translucent before any show (#234): no opaque frame, then a fade.
             app.config.@"background-opacity" = 0.5;
             try app.createWindow(default_title);
             const source = fixture.newest();
             shown = Fixture.first_show orelse return error.TestWindowNeverShown;
-            try std.testing.expect(shown.ex_style & c.WS_EX_LAYERED != 0);
+            try std.testing.expect(shown.ex_style & c.WS_EX_LAYERED == 0);
             try std.testing.expectEqual(@as(?u8, 128), shown.alpha);
 
             // A copy shows at its source's opacity before it takes the
             // source's state.
             try std.testing.expect(try app.performAction(.app, .new_window, .{ .arguments = null }));
             shown = Fixture.first_show orelse return error.TestWindowNeverShown;
-            try std.testing.expect(shown.ex_style & c.WS_EX_LAYERED != 0);
+            try std.testing.expect(shown.ex_style & c.WS_EX_LAYERED == 0);
             try std.testing.expectEqual(@as(?u8, 128), shown.alpha);
             fixture.closeWindow(fixture.newest());
 
@@ -2252,14 +2288,14 @@ test "win32 a first window and a window opened from it are layered at their opac
             // Forced opaque, a window drops the layered style, not just its
             // alpha to 255, and takes both back with the toggle.
             try std.testing.expect(try app.performAction(.{ .surface = source.core() }, .toggle_background_opacity, {}));
-            try std.testing.expect(!testHostIsLayered(source.windowHwnd().?));
+            try std.testing.expectEqual(@as(?u8, null), testHostAlpha(source.windowHwnd().?));
             try std.testing.expect(try app.performAction(.app, .new_window, .{ .arguments = null }));
             shown = Fixture.first_show orelse return error.TestWindowNeverShown;
             try std.testing.expect(shown.ex_style & c.WS_EX_LAYERED == 0);
             try std.testing.expectEqual(@as(?u8, null), shown.alpha);
             try std.testing.expect(try app.performAction(.{ .surface = source.core() }, .toggle_background_opacity, {}));
-            try std.testing.expect(testHostIsLayered(source.windowHwnd().?));
-            try std.testing.expectEqual(@as(?u8, 128), testLayeredAlpha(source.windowHwnd().?));
+            try std.testing.expect(!testHostIsLayered(source.windowHwnd().?));
+            try std.testing.expectEqual(@as(?u8, 128), testHostAlpha(source.windowHwnd().?));
         }
     }.body);
 }
@@ -2420,17 +2456,17 @@ test "win32 a background tab's config change, goto_tab and a tab click leave the
             defer faded.deinit();
             faded.@"background-opacity" = 0.5;
             try std.testing.expect(try app.performAction(.{ .surface = second.core() }, .config_change, .{ .config = &faded }));
-            try std.testing.expect(!testHostIsLayered(hwnd));
+            try std.testing.expectEqual(@as(?u8, null), testHostAlpha(hwnd));
 
             // Nor does showing that tab.
             try std.testing.expect(host.activateTabIndex(1));
-            try std.testing.expect(!testHostIsLayered(hwnd));
+            try std.testing.expectEqual(@as(?u8, null), testHostAlpha(hwnd));
             try std.testing.expect(host.activateTabIndex(0));
-            try std.testing.expect(!testHostIsLayered(hwnd));
+            try std.testing.expectEqual(@as(?u8, null), testHostAlpha(hwnd));
 
             try std.testing.expect(try app.performAction(.{ .surface = first.core() }, .goto_tab, .next));
             try std.testing.expectEqual(second, host.activeSurface().?);
-            try std.testing.expect(!testHostIsLayered(hwnd));
+            try std.testing.expectEqual(@as(?u8, null), testHostAlpha(hwnd));
         }
     }.body);
 }
