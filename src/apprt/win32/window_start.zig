@@ -54,12 +54,47 @@ pub const TopLevel = struct {
         return self.opacity < 0.999;
     }
 
-    /// The layered alpha the window shows, or null when it shows opaque and
-    /// so is not layered at all (#234: layering is the only mechanism, and an
-    /// opaque window must not pay for it).
+    /// The alpha `opacity` shows at, or null when the window shows opaque.
+    /// `shows` says how the window shows it.
     pub fn alpha(self: *const TopLevel) ?u8 {
         if (self.force_opaque or !self.translucent()) return null;
         return @intFromFloat(@round(self.opacity * 255.0));
+    }
+
+    /// How a window shows `alpha()` (#640). At most one of `background` and
+    /// `layered` is set; an opaque window has neither and pays for neither.
+    pub const Shows = struct {
+        /// Only the terminal background is translucent: each pane's renderer
+        /// draws it at `pane_opacity`, blur-behind with an empty region makes
+        /// DWM keep that alpha for the client area, and the chrome is painted
+        /// solid except its own background in the terminal lane, which takes
+        /// this alpha (`Host.chrome_alpha`).
+        background: ?u8 = null,
+        /// The whole window fades, text and chrome included, as a layered
+        /// window at this alpha: a D3D11 pane presents through
+        /// DirectComposition with its alpha ignored (`DXGI_ALPHA_MODE_IGNORE`),
+        /// so it can show no per-pixel alpha.
+        layered: ?u8 = null,
+        /// What each pane's renderer draws its background at, or null for its
+        /// own config's `background-opacity`, as before #640.
+        pane_opacity: ?f64 = null,
+    };
+
+    /// `panes_draw_alpha`: every pane of the window whose renderer runs
+    /// draws with OpenGL, whose alpha reaches DWM. `blur_behind_failed`: the
+    /// window could not turn blur-behind on, without which DWM drops that
+    /// alpha (`Host.blur_behind_failed`, latched). High Contrast shows the
+    /// window opaque, deliberately: its system colors are for legibility,
+    /// and before #640 a translucent window faded under it too.
+    pub fn shows(self: *const TopLevel, panes_draw_alpha: bool, high_contrast: bool, blur_behind_failed: bool) Shows {
+        // An opaque window's panes draw at 1, on either backend: no alpha
+        // reaches DWM, and a background drawn at the config's opacity would
+        // show darker.
+        const alpha_shown = (if (high_contrast) null else self.alpha()) orelse return .{ .pane_opacity = 1.0 };
+        // A D3D11 window, or one without blur-behind, fades whole, its panes
+        // at their config's opacity, as before.
+        if (!panes_draw_alpha or blur_behind_failed) return .{ .layered = alpha_shown };
+        return .{ .background = alpha_shown, .pane_opacity = self.opacity };
     }
 };
 
@@ -1068,7 +1103,7 @@ test "win32 a restored window enters its config's maximize and fullscreen, and a
     }
 }
 
-test "win32 a window shows its opacity as a layered alpha, and opaque unlayered" {
+test "win32 a window shows its opacity as an alpha, and opaque none" {
     var top_level: TopLevel = .{ .opacity = 0.5 };
     try std.testing.expectEqual(@as(?u8, 128), top_level.alpha());
     top_level.opacity = 0.75;
@@ -1079,4 +1114,32 @@ test "win32 a window shows its opacity as a layered alpha, and opaque unlayered"
     top_level = .{ .opacity = 0.9995 };
     try std.testing.expectEqual(@as(?u8, null), top_level.alpha());
     try std.testing.expectEqual(@as(?u8, 0), (TopLevel{ .opacity = 0 }).alpha());
+}
+
+test "win32 an OpenGL window shows its opacity in the background only, a D3D11 window fades whole, High Contrast neither" {
+    const Shows = TopLevel.Shows;
+    const Case = struct { top_level: TopLevel, opengl: bool, high_contrast: bool = false, blur_behind_failed: bool = false, shows: Shows };
+    for ([_]Case{
+        // OpenGL panes draw the background at the window's opacity, and the
+        // window is never layered.
+        .{ .top_level = .{ .opacity = 0.5 }, .opengl = true, .shows = .{ .background = 128, .pane_opacity = 0.5 } },
+        // Opaque, toggled opaque or High Contrast: no blur-behind, and the
+        // panes draw at 1 whatever their config says.
+        .{ .top_level = .{}, .opengl = true, .shows = .{ .pane_opacity = 1.0 } },
+        .{ .top_level = .{ .opacity = 0.5, .force_opaque = true }, .opengl = true, .shows = .{ .pane_opacity = 1.0 } },
+        .{ .top_level = .{ .opacity = 0.5 }, .opengl = true, .high_contrast = true, .shows = .{ .pane_opacity = 1.0 } },
+        // A pane on D3D11: the whole window fades, as before #640, and its
+        // panes keep their config's opacity; opaque, they draw at 1 too.
+        .{ .top_level = .{ .opacity = 0.5 }, .opengl = false, .shows = .{ .layered = 128 } },
+        .{ .top_level = .{}, .opengl = false, .shows = .{ .pane_opacity = 1.0 } },
+        .{ .top_level = .{ .opacity = 0.5, .force_opaque = true }, .opengl = false, .shows = .{ .pane_opacity = 1.0 } },
+        .{ .top_level = .{ .opacity = 0.5 }, .opengl = false, .high_contrast = true, .shows = .{ .pane_opacity = 1.0 } },
+        // Blur-behind failed on this window: OpenGL panes fade whole too,
+        // and opaque is still opaque.
+        .{ .top_level = .{ .opacity = 0.5 }, .opengl = true, .blur_behind_failed = true, .shows = .{ .layered = 128 } },
+        .{ .top_level = .{}, .opengl = true, .blur_behind_failed = true, .shows = .{ .pane_opacity = 1.0 } },
+        .{ .top_level = .{ .opacity = 0.5 }, .opengl = true, .high_contrast = true, .blur_behind_failed = true, .shows = .{ .pane_opacity = 1.0 } },
+    }) |case| {
+        try std.testing.expectEqualDeep(case.shows, case.top_level.shows(case.opengl, case.high_contrast, case.blur_behind_failed));
+    }
 }

@@ -80,8 +80,10 @@ Its blend quantization can differ from hardware/OpenGL at glyph edges by up
 to four channel levels in the default corrected-linear mode. D3D11 does not
 add per-pixel translucency or custom HLSL effects. Its flip-model swap chain is
 composed through DirectComposition beneath the terminal HWND's children, with
-the existing host/sibling clipping. Framebuffer alpha remains ignored; the host
-still owns whole-window opacity. While the notice banner is on screen (about
+the existing host/sibling clipping. Framebuffer alpha remains ignored, so under
+`background-opacity` a window with a D3D11 pane fades as a whole (a layered
+window), where a window whose panes all draw with OpenGL shows only its
+background translucent. While the notice banner is on screen (about
 5 s by default, Windows' notification time), PresentMon on one machine
 (RTX 5070 Ti) showed the pane presented as `Composed: Flip`; the banner is a
 non-layered child over the pane, which the measurement points to as the
@@ -1734,6 +1736,21 @@ front stays undimmed, and a zoomed pane is never dimmed. The dim covers the
 terminal content, after any custom shader, but not the overlay scrollbar or a
 docked search bar; High Contrast turns it off and keeps the system colors for
 the gap.
+
+`background-opacity` below 0.999 makes only the terminal background
+translucent while every pane of the window draws with OpenGL, the default
+renderer. The window is not layered: `DwmEnableBlurBehindWindow` with an empty
+region lets DWM keep the alpha the renderer draws, and the tab strip, the title
+bar, dividers, the search bar, overlays and controls stay solid (the chrome's
+own background in the terminal lane takes the opacity too). What is behind the
+window shows through unblurred; `background-blur` has no effect. A window with
+a pane on the D3D11 beta fades as a whole instead, as a layered window, because
+DirectComposition presents that pane with its alpha ignored; once every pane
+runs OpenGL (after a fallback), only the background is translucent again.
+`toggle_background_opacity` and the Settings opacity preview change it live,
+and High Contrast shows every window opaque. The visible result was checked on
+one NVIDIA GPU with OpenGL; other GPUs, drivers and HDR displays have not been
+checked.
 
 The dark caption is chosen at runtime, not by build number:
 `DWMWA_USE_IMMERSIVE_DARK_MODE` (20) is tried first and the legacy attribute

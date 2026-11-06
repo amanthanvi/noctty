@@ -13,7 +13,8 @@ before and after. Never switches desktops, injects real input or registers a
 global hotkey: the only keys are posted F11 (`toggle_fullscreen`), F12
 (`toggle_quick_terminal`), F8 (`open_config`, which opens Settings and saves
 nothing) and F9 (`close_tab:this`) messages, the last three bound in the
-case's config, and nothing it does can copy. The clipboard sequence number is logged before and after and a
+case's config, besides a posted WM_COMMAND 1901 that toggles the command
+palette, and nothing it does can copy. The clipboard sequence number is logged before and after and a
 change fails the run. Every launch uses `--single-instance=false` and a class
 of its own, except the three forwarding cases, each a pair of copies sharing a
 class no other process uses. Results contain only window geometry, window
@@ -78,6 +79,24 @@ public static class Ws {
         uint key,flags; byte alpha;
         if(!GetLayeredWindowAttributes(h,out key,out alpha,out flags) || (flags & 0x2)==0) return -1;
         return alpha;
+    }
+    delegate bool ChildProc(IntPtr h,IntPtr p);
+    [DllImport("user32.dll")] static extern bool EnumChildWindows(IntPtr h,ChildProc f,IntPtr p);
+    // How a host's first EDIT child (the palette's field, once the palette
+    // opened) is composed: -2 with none, else its `Alpha`. A window whose
+    // background alone is translucent (#640) layers it at 255, alpha alone.
+    public static int EditAlpha(IntPtr host) {
+        int result=-2;
+        EnumChildWindows(host,(c,p)=> {
+            var name=new StringBuilder(64); GetClassNameW(c,name,64);
+            if(!string.Equals(name.ToString(),"Edit",StringComparison.OrdinalIgnoreCase)) return true;
+            uint key,flags; byte alpha;
+            if((GetWindowLongPtr(c,-20).ToInt64() & 0x00080000L)==0) result=-1;
+            else if(!GetLayeredWindowAttributes(c,out key,out alpha,out flags) || flags!=0x2) result=-1;
+            else result=alpha;
+            return false;
+        },IntPtr.Zero);
+        return result;
     }
     [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h,int show);
     [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] static extern bool CreateProcessW(string app,StringBuilder cmd,IntPtr pa,IntPtr ta,bool inherit,uint flags,IntPtr env,string cwd,ref Startup si,out ProcessInfo pi);
@@ -350,10 +369,21 @@ try {
             Check 'forwarded --window-decoration=none: no caption buttons, the tab strip is there' ($hit -eq 2) 'HTCAPTION' $hit
             Close-Window $h
         }
+        # #640: a window whose panes draw with OpenGL is never layered. Its
+        # blur-behind cannot be read from outside, but the controls it makes
+        # once blur-behind is on are layered solid at 255, so the palette's
+        # field tells. The control: the opaque running window's is not.
+        [void][Ws]::PostMessageW($first,0x111,[IntPtr]1901,[IntPtr]::Zero)
+        [void](Wait-Until { [Ws]::EditAlpha($first) -ne -2 } 5)
+        $edit=[Ws]::EditAlpha($first)
+        Check 'control: the opaque running window leaves its palette field unlayered' ($edit -eq -1) 'not layered' $edit
+        [void][Ws]::PostMessageW($first,0x111,[IntPtr]1901,[IntPtr]::Zero)
         $h=Forward 'keys-opacity' '--background-opacity=0.6'
         if($h) {
-            $alpha=[Ws]::Alpha($h)
-            Check 'forwarded --background-opacity: the window is translucent' ($alpha -gt 0 -and $alpha -lt 255) '0 < alpha < 255' $alpha
+            [void][Ws]::PostMessageW($h,0x111,[IntPtr]1901,[IntPtr]::Zero)
+            [void](Wait-Until { [Ws]::EditAlpha($h) -ne -2 } 5)
+            $alpha=[Ws]::Alpha($h); $edit=[Ws]::EditAlpha($h)
+            Check 'forwarded --background-opacity: the background alone is translucent (not layered, the palette field layered solid)' ($alpha -eq -1 -and $edit -eq 255) @{Alpha=-1; Edit=255} @{Alpha=$alpha; Edit=$edit}
             Close-Window $h
         }
         # With no window open there is nothing to copy.

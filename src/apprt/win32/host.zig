@@ -669,6 +669,19 @@ pub const Host = struct {
     // Cached chrome paint strings — rebuilt only when their per-zone
     // dirty bits are set, so WM_PAINT can skip unrelated UTF-16 churn.
     chrome_repaint_dirty: bool = true,
+    /// While the window's background alone is translucent (blur-behind on:
+    /// `window_state`, `TopLevel.Shows.background`), the alpha it shows at;
+    /// null otherwise. GDI leaves alpha 0, which DWM shows through, so the
+    /// chrome paints through `chrome_scene.AlphaPaint`: its background in the
+    /// terminal lane takes this alpha and everything else is solid. Set only
+    /// once blur-behind and `BufferedPaintInit` succeeded; `deinit` ends the
+    /// buffered paint.
+    chrome_alpha: ?u8 = null,
+    /// `DwmEnableBlurBehindWindow` failed on this window once: it fades whole
+    /// from then on (`TopLevel.shows`) and never tries again, so a machine
+    /// where it keeps failing does not flicker opaque and faded, and warn, on
+    /// every apply.
+    blur_behind_failed: bool = false,
     chrome_paint_pending: bool = false,
     chrome_paint_mask: ChromeRepaintMask = .{},
     chrome_text_dirty: ChromeTextDirty = .{},
@@ -1335,6 +1348,7 @@ pub const Host = struct {
         self.app.notifications.panesChanged();
 
         self.active_tab = activeTabAfterRemoval(self.active_tab, index, self.tabs.items.len);
+        window_state.refreshBackgroundOpacity(self);
         self.notifyActiveTabUiaSelectionChanged(previous_tab_id);
 
         return .{
@@ -1366,6 +1380,8 @@ pub const Host = struct {
         }
         // Its programs may have ended while the tab waited in undo history.
         self.refreshTabStatus(insert_index);
+        // A D3D11 pane coming back fades the window whole again.
+        window_state.refreshBackgroundOpacity(self);
         return self.activeSurface() != null;
     }
 
@@ -1390,6 +1406,7 @@ pub const Host = struct {
         if (shell_prepared) |*prepared| prepared.commit(&self.app.shell_runtime) catch |err| {
             value.tab = self.tabs.orderedRemove(insert_index);
             self.active_tab = previous_active;
+            window_state.refreshBackgroundOpacity(self);
             return err;
         };
         if (shell_prepared) |*prepared| self.app.applyShellEffects(prepared.effects(), .{});
@@ -1461,6 +1478,7 @@ pub const Host = struct {
         if (shell_prepared) |*prepared| self.app.applyShellEffects(prepared.effects(), .{});
         // As the close it redoes (`detachTabForUndo`).
         self.app.notifications.panesChanged();
+        window_state.refreshBackgroundOpacity(self);
         self.notifyActiveTabUiaSelectionChanged(previous_tab_id);
         self.notifyTabListUiaChanged();
         return true;
@@ -1734,6 +1752,8 @@ pub const Host = struct {
             .attach => tab.findHandle(surface).?,
             .detach => (if (focused) |kept| tab.findHandle(kept) else null) orelse first.next().?.handle,
         };
+        // The window's panes changed, so may how it shows its opacity.
+        window_state.refreshBackgroundOpacity(self);
     }
 
     /// A pane taken out of its tab waits hidden in redo history. It keeps
@@ -2748,6 +2768,7 @@ pub const Host = struct {
             self.mode_timer_active = false;
         }
         self.tween_sched.deinit();
+        window_state.releaseBackgroundOpacity(self);
 
         self.revertPaletteThemePreview();
         if (self.palette_catalog) |*catalog| catalog.reset();

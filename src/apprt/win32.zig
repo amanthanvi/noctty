@@ -4978,10 +4978,9 @@ test "split-divider-color recolors the pane gap" {
 /// value parses and other platforms honour it.
 pub fn logBackgroundBlurUnsupported() void {
     log.warn(
-        "background-blur has no effect on Windows in this build: noctty paints its " ++
-            "window opaquely and opts into no DWM transparency mechanism, so no backdrop " ++
-            "material can reach a visible pixel. background-opacity is a flat " ++
-            "window-wide tint, not a blur",
+        "background-blur has no effect on Windows in this build: noctty asks DWM for " ++
+            "no backdrop material, so a translucent background-opacity shows what is " ++
+            "behind the window without blur",
         .{},
     );
 }
@@ -5218,23 +5217,12 @@ pub fn applyDwmThemeWithBuild(hwnd: HWND, theme: *const ThemeColors, config: *co
         isHighContrastActive(),
         caption_color,
         text_color,
-        // Host windows never carry a DWM backdrop material, because nothing
-        // in this runtime can show one: the chrome is painted opaquely with
-        // GDI, the terminal is an opaque OpenGL child whose framebuffer alpha
-        // DWM discards, and nothing opts into `DwmExtendFrameIntoClientArea`,
-        // `DwmEnableBlurBehindWindow` or `WS_EX_NOREDIRECTIONBITMAP`. The
-        // attribute used to be set to `DWMSBT_TABBEDWINDOW` whenever
-        // `background-opacity < 1` and `background-blur` were both set, which
-        // only ever cost a DWM call and made the docs promise a material the
-        // window could not show. Measured on Windows 11 build 26200 over a
-        // striped desktop: `--background-opacity=0.8 --background-blur=true`
-        // (backdrop 4) and `--background-blur=false` (backdrop 1) produced
-        // byte-identical screenshots, and flipping the attribute from outside
-        // the process on the same window with `WS_EX_LAYERED` stripped by
-        // hand changed nothing either. The layered alpha that implements
-        // `background-opacity` is NOT the obstacle: a synthetic window that
-        // does extend its frame shows a different material per backdrop type
-        // whether or not it is layered.
+        // No backdrop material, so `background-blur` has no effect
+        // (window-frame.md, 2026-09-14). Since #640 a translucent OpenGL
+        // window has blur-behind with an empty region, under which
+        // `DWMSBT_TRANSIENTWINDOW` would show acrylic; with it Windows lays a
+        // light layer over the theme's background (the #640 contributor's
+        // observation, not measured here): a change of its own.
         c.DWMSBT_NONE,
         supportsDwmSystemBackdropAttribute(os_build),
     );
@@ -10654,7 +10642,9 @@ pub fn hostBannerProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) cal
                     var ps: PAINTSTRUCT = undefined;
                     const hdc = sys.BeginPaint(hwnd, &ps) orelse return 0;
                     defer _ = sys.EndPaint(hwnd, &ps);
-                    paintBannerClient(host, hwnd, hdc);
+                    var alpha_paint = chrome_scene.AlphaPaint.begin(host, hdc, ps.rcPaint);
+                    defer alpha_paint.end();
+                    paintBannerClient(host, hwnd, alpha_paint.hdc);
                 }
                 host.bannerPainted();
                 return 0;
@@ -10675,8 +10665,12 @@ pub fn hostBannerProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) cal
             // draw and their clicks (and UIA Invoke, which posts the same
             // command) come here.
             c.WM_DRAWITEM => {
-                const draw: *const DRAWITEMSTRUCT = @ptrFromInt(@as(usize, @bitCast(lParam)));
-                if (host.drawBannerButton(draw)) return 1;
+                const item: *const DRAWITEMSTRUCT = @ptrFromInt(@as(usize, @bitCast(lParam)));
+                var draw = item.*;
+                var alpha_paint = chrome_scene.AlphaPaint.begin(host, item.hDC, item.rcItem);
+                defer alpha_paint.end();
+                draw.hDC = alpha_paint.hdc;
+                if (host.drawBannerButton(&draw)) return 1;
             },
             c.WM_COMMAND => {
                 const child: ?HWND = @ptrFromInt(@as(usize, @bitCast(lParam)));
@@ -11534,6 +11528,18 @@ pub fn hostWindowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) cal
             if (host) |v| v.dispatchDeferredNewTab(if (wParam == 0) null else @as(u64, @intCast(wParam)));
             return 0;
         },
+        c.WM_WINHOSTTY_RENDERER_SWITCHED => {
+            if (host) |v| window_state.refreshBackgroundOpacity(v);
+            return 0;
+        },
+        c.WM_PARENTNOTIFY => {
+            // A control made while the window's background alone is
+            // translucent is made solid as it is made.
+            if (host) |v| if ((wParam & 0xFFFF) == c.WM_CREATE) {
+                if (@as(?HWND, @ptrFromInt(@as(usize, @bitCast(lParam))))) |child| window_state.childCreated(v, child);
+            };
+            return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
+        },
         c.WM_NCACTIVATE => {
             if (host) |v| {
                 v.setWindowActive(wParam != 0);
@@ -11604,9 +11610,15 @@ pub fn hostWindowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) cal
         },
         c.WM_DRAWITEM => {
             if (host) |v| {
-                const draw: *const DRAWITEMSTRUCT = @ptrFromInt(@as(usize, @bitCast(lParam)));
+                const item: *const DRAWITEMSTRUCT = @ptrFromInt(@as(usize, @bitCast(lParam)));
+                // Under blur-behind GDI's zero alpha shows through.
+                var buffered = item.*;
+                var alpha_paint = chrome_scene.AlphaPaint.begin(v, item.hDC, item.rcItem);
+                defer alpha_paint.end();
+                buffered.hDC = alpha_paint.hdc;
+                const draw = &buffered;
                 if (v.drawConfirmPromptText(draw)) return 1;
-                if (v.drawSearchBarBackground(draw)) return 1;
+                if (v.drawSearchBarBackground(draw, &alpha_paint)) return 1;
                 v.drawButton(draw);
                 return 1;
             }
@@ -18882,9 +18894,7 @@ test "win32 host backdrop stays DWMSBT_NONE with background blur configured" {
     ) != 0) return error.SkipZigTest;
     try std.testing.expectEqual(c.DWMSBT_TABBEDWINDOW, backdrop);
 
-    // The configuration that used to request `DWMSBT_TABBEDWINDOW`. It is
-    // also the configuration that layers the host window, which is why the
-    // backdrop can never render for it.
+    // The configuration that used to request `DWMSBT_TABBEDWINDOW`.
     var config: configpkg.Config = .{};
     config.@"background-opacity" = 0.85;
     config.@"background-blur" = .true;

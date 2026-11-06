@@ -434,6 +434,12 @@ pub const Surface = struct {
     /// renderer starts undimmed.
     split_dimmed: bool = false,
     split_dimmed_sent: bool = false,
+    /// What this pane's renderer draws its background at, set by its
+    /// window (`window_state`, `TopLevel.Shows.pane_opacity`); null for its
+    /// config's `background-opacity`. `_sent` is what the renderer was last
+    /// told, which starts at its config's too.
+    background_opacity: ?f64 = null,
+    background_opacity_sent: ?f64 = null,
     /// The bell rang here while the user was not looking; the tab label and
     /// the window caption carry the glyph until `clearBell`.
     bell_ringing: bool = false,
@@ -868,6 +874,8 @@ pub const Surface = struct {
             // A layout during init may have dimmed the pane this split
             // came from, which is alone in its tab again.
             if (!created_host) host.syncSplitDim();
+            // Its renderer's start may have made the window fade whole.
+            if (!created_host) window_state.refreshBackgroundOpacity(host);
         }
 
         // The core opens the pty at the size read below. Give a new split its
@@ -928,6 +936,10 @@ pub const Surface = struct {
                 log.err("win32 size callback failed err={}", .{err});
             };
         }
+        // Its renderer runs now: its window shows its opacity as the
+        // renderers of its panes can (a D3D11 pane fades it whole) and tells
+        // this one what to draw its background at.
+        window_state.refreshBackgroundOpacity(host);
         // Stop the core if a later step fails. This runs first, while the GL
         // context and the window its threads draw to are still alive.
         errdefer self.deinitCore();
@@ -3920,6 +3932,24 @@ pub const Surface = struct {
         if (!self.core_initialized or self.split_dimmed_sent == self.split_dimmed) return;
         self.split_dimmed_sent = self.split_dimmed;
         self.core_surface.renderer_thread.send(.{ .split_dimmed = self.split_dimmed });
+    }
+
+    pub fn setBackgroundOpacity(self: *Surface, opacity: ?f64) void {
+        self.background_opacity = opacity;
+        // A surface whose core has not started has no renderer yet; `init`
+        // asks its window again once it has.
+        if (!self.core_initialized or std.meta.eql(self.background_opacity_sent, opacity)) return;
+        self.background_opacity_sent = opacity;
+        self.core_surface.renderer_thread.send(.{ .background_opacity = opacity });
+    }
+
+    /// The renderer replaced its D3D11 backend with OpenGL, inside this
+    /// pane's paint and holding its own lock: the window asks again from its
+    /// message loop.
+    pub fn rendererSwitchedToOpenGL(self: *Surface) void {
+        const host = self.host orelse return;
+        const hwnd = host.hwnd orelse return;
+        _ = sys.PostMessageW(hwnd, c.WM_WINHOSTTY_RENDERER_SWITCHED, 0, 0);
     }
 
     pub fn focusChanged(self: *Surface, focused: bool) void {

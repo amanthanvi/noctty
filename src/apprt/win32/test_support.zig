@@ -522,7 +522,7 @@ pub fn Fixtures(comptime runtime: anytype) type {
 
             /// `ex_style` and `alpha` are the layered style and alpha the
             /// window first appeared with (#234: before any show).
-            pub const FirstShow = struct { rect: RECT, zoomed: bool, style: u32, ex_style: u32, alpha: ?u8 };
+            pub const FirstShow = struct { rect: RECT, zoomed: bool, style: u32, ex_style: u32, alpha: ?u8, background_alpha: ?u8 };
             pub const swp_showwindow: UINT = 0x0040;
 
             pub fn init(self: *WindowStartTestApp) !void {
@@ -626,6 +626,7 @@ pub fn Fixtures(comptime runtime: anytype) type {
                             .style = @truncate(@as(usize, @bitCast(sys.GetWindowLongPtrW(hwnd, c.GWL_STYLE)))),
                             .ex_style = testHostExStyle(hwnd),
                             .alpha = if (testHostIsLayered(hwnd)) testLayeredAlpha(hwnd) else null,
+                            .background_alpha = testBackgroundAlpha(hwnd),
                         };
                         shown = true;
                     }
@@ -677,6 +678,15 @@ pub fn Fixtures(comptime runtime: anytype) type {
             if (sys.GetLayeredWindowAttributes(hwnd, null, &alpha, &flags) == 0) return null;
             if ((flags & c.LWA_ALPHA) == 0) return null;
             return alpha;
+        }
+
+        /// The alpha a host's translucent background shows at under
+        /// blur-behind (`Host.chrome_alpha`, set only once
+        /// `DwmEnableBlurBehindWindow` succeeded: DWM has no call that reads
+        /// blur-behind back), or null without it.
+        pub fn testBackgroundAlpha(hwnd: HWND) ?u8 {
+            const host = child_window.windowData(Host, hwnd) orelse return null;
+            return host.chrome_alpha;
         }
 
         pub fn createTestChromeChild(parent: HWND, class: [*:0]const u16) !HWND {

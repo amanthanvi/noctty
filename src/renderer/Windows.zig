@@ -221,6 +221,8 @@ fn fallBack(self: *Windows) !void {
     self.setNotice("OpenGL: switched from D3D11 beta ({s}).", .{if (self.fallback_blocked) "repeated draw failure" else "unsupported feature or device recovery"});
     self.showNotice();
     self.opengl.store(replacement, .release);
+    // Its window can show its opacity per pixel now.
+    self.rt_surface.rendererSwitchedToOpenGL();
 }
 
 fn tryFallback(self: *Windows) bool {
@@ -331,6 +333,15 @@ pub fn changeConfig(self: *Windows, config: *DerivedConfig) !void {
     }
     switch (self.active) {
         inline else => |v| try v.changeConfig(config),
+    }
+}
+
+pub fn setBackgroundOpacity(self: *Windows, opacity: ?f64) void {
+    if (self.opengl.load(.acquire)) |v| return v.setBackgroundOpacity(opacity);
+    self.mutex.lock();
+    defer self.mutex.unlock();
+    switch (self.active) {
+        inline else => |v| v.setBackgroundOpacity(opacity),
     }
 }
 

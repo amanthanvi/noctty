@@ -341,6 +341,17 @@ fn initPostPipelines(
     return pipelines;
 }
 
+/// noctty divergence (#640): presents a frame whose alpha the window manager
+/// composes, from a sampled offscreen target (`OpenGL.present`).
+pub fn initPresentComposedPipeline() !Pipeline {
+    return try Pipeline.init(null, .{
+        .vertex_fn = loadShaderCode("../shaders/glsl/full_screen.v.glsl"),
+        .fragment_fn = loadShaderCode("../shaders/glsl/present_composed.f.glsl"),
+        .blending_enabled = false,
+        .framebuffer_srgb = false,
+    });
+}
+
 /// Initialize a single custom shader pipeline from shader source.
 fn initPostPipeline(data: [:0]const u8) !Pipeline {
     return try Pipeline.init(null, .{

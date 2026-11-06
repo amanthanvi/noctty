@@ -238,6 +238,126 @@ test "CommonDerivedConfig split fill defaults to the configured background" {
     try std.testing.expectEqual(terminal.color.RGB{ .r = 0xff, .g = 0xff, .b = 0xff }, derived.unfocused_split_fill);
 }
 
+/// Whether the window composes a renderer's alpha (noctty divergence, #640):
+/// it set an opacity below 1, which only a window whose background alone is
+/// translucent does (an opaque one sets 1, a layered one none).
+fn composesAlpha(override: ?f64) bool {
+    const opacity = override orelse return false;
+    return opacity < 1.0;
+}
+
+test "a renderer's frame is converted for the window only while the window composes a translucent alpha" {
+    try std.testing.expect(composesAlpha(0.5));
+    try std.testing.expect(composesAlpha(0.0));
+    // Opaque per-pixel, layered or D3D11 windows, and the config's opacity
+    // alone: upstream's targets and present, unchanged.
+    try std.testing.expect(!composesAlpha(1.0));
+    try std.testing.expect(!composesAlpha(null));
+}
+
+/// The opacity a renderer draws its background at: the window's while it
+/// composes the terminal's alpha and set one (`background_opacity_override`),
+/// else the config's.
+fn effectiveBackgroundOpacity(override: ?f64, config: *const CommonDerivedConfig) f64 {
+    return override orelse config.background_opacity;
+}
+
+test "a renderer held by synchronized output shows its old opacity whole until an update applies the new one" {
+    // Only the fields `setBackgroundOpacity` touches are set: a renderer
+    // needs a GPU to build, and nothing else is read.
+    const Gl = Renderer(@import("OpenGL.zig"));
+    const r = try std.testing.allocator.create(Gl);
+    defer std.testing.allocator.destroy(r);
+    r.draw_mutex = .{};
+    r.background_opacity_override = null;
+    r.config.background_opacity = 1.0;
+    r.uniforms.bg_color = .{ 0x10, 0x20, 0x30, 0xff };
+    r.terminal_state.dirty = .false;
+
+    // To translucent and back: the presented frame's background alpha (and
+    // with it the cells, built from the same opacity in the same update) is
+    // left as it is, and the update that next runs unheld owes a full
+    // rebuild at the new opacity.
+    for ([_]struct { set: ?f64, shown: u8, next: f64 }{
+        .{ .set = 0.5, .shown = 0xff, .next = 0.5 },
+        .{ .set = 1.0, .shown = 0xff, .next = 1.0 },
+        .{ .set = 0.5, .shown = 0xff, .next = 0.5 },
+        .{ .set = null, .shown = 0xff, .next = 1.0 },
+    }) |step| {
+        r.terminal_state.dirty = .false;
+        r.setBackgroundOpacity(step.set);
+        try std.testing.expectEqual(step.shown, r.uniforms.bg_color[3]);
+        try std.testing.expectEqual(step.next, r.backgroundOpacity());
+        try std.testing.expect(r.terminal_state.dirty == .full);
+    }
+
+    // The same opacity again owes nothing.
+    r.terminal_state.dirty = .false;
+    r.setBackgroundOpacity(null);
+    try std.testing.expect(r.terminal_state.dirty == .false);
+}
+
+test "an unfocused split is dimmed after the conversion of a composed frame, and in any other frame" {
+    // Only the fields `splitDimPass` reads are set: a renderer needs a GPU
+    // to build, and nothing else is read.
+    const Gl = Renderer(@import("OpenGL.zig"));
+    const Target = @import("OpenGL.zig").Target;
+    const r = try std.testing.allocator.create(Gl);
+    defer std.testing.allocator.destroy(r);
+    r.uniforms = std.mem.zeroes(@TypeOf(r.uniforms));
+    r.uniforms.bg_color = .{ 0xff, 0xff, 0xff, 0x80 };
+    r.uniforms.bools.use_linear_blending = true;
+    r.config.unfocused_split_fill = .{ .r = 0xff, .g = 0xff, .b = 0xff };
+    r.config.unfocused_split_opacity = 0.7;
+    r.api.present_composed_failed = false;
+    r.api.present_composed_draw_failed = false;
+    r.split_dimmed = true;
+
+    // A target the present converts: no pass, the dim travels with it.
+    var sampled = Target.initDefault(.{ .id = 0 }, 1, 1);
+    sampled.storage = .offscreen;
+    sampled.texture = .{ .id = 1 };
+    try std.testing.expect(r.splitDimPass(&sampled) == null);
+    try std.testing.expectEqual(@as(?[4]u8, .{ 0xff, 0xff, 0xff, 77 }), sampled.composed_dim);
+
+    // Any other target, and a sampled one whose conversion failed to build:
+    // the pass, as upstream's, and nothing for the present.
+    var plain = Target.initDefault(.{ .id = 0 }, 1, 1);
+    plain.composed_dim = .{ 1, 2, 3, 4 };
+    const dim = r.splitDimPass(&plain).?;
+    try std.testing.expectEqual([4]u8{ 0xff, 0xff, 0xff, 77 }, dim.bg_color);
+    try std.testing.expect(!dim.bools.use_linear_blending);
+    try std.testing.expect(plain.composed_dim == null);
+    r.api.present_composed_failed = true;
+    try std.testing.expect(r.splitDimPass(&sampled) != null);
+    try std.testing.expect(sampled.composed_dim == null);
+
+    // Focused again: no dim anywhere, not even one an earlier frame left.
+    r.api.present_composed_failed = false;
+    _ = r.splitDimPass(&sampled);
+    r.split_dimmed = false;
+    try std.testing.expect(r.splitDimPass(&sampled) == null);
+    try std.testing.expect(sampled.composed_dim == null);
+}
+
+test "a renderer draws the window's background opacity over every config it is given" {
+    const alloc = std.testing.allocator;
+    var config = try configpkg.Config.default(alloc);
+    defer config.deinit();
+    config.@"background-opacity" = 0.8;
+    var loaded = try CommonDerivedConfig.init(alloc, &config);
+    defer loaded.deinit();
+    try std.testing.expectEqual(@as(f64, 0.8), effectiveBackgroundOpacity(null, &loaded));
+    try std.testing.expectEqual(@as(f64, 0.5), effectiveBackgroundOpacity(0.5, &loaded));
+    // A reload hands the renderer a whole new config; the window's opacity
+    // is not in it, so it still wins.
+    config.@"background-opacity" = 1;
+    var reloaded = try CommonDerivedConfig.init(alloc, &config);
+    defer reloaded.deinit();
+    try std.testing.expectEqual(@as(f64, 0.5), effectiveBackgroundOpacity(0.5, &reloaded));
+    try std.testing.expect(!@hasField(CommonDerivedConfig, "background_opacity_override"));
+}
+
 /// The uniforms of the pass that dims an unfocused split
 /// (`unfocused-split-opacity`): the frame's own, with the fill drawn at
 /// `1 - opacity` over the finished frame. Upstream lays a rectangle of the
@@ -377,6 +497,13 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
         /// split its tab has focused, not from keyboard focus, so it is
         /// separate from `focused`.
         split_dimmed: bool = false,
+
+        /// The opacity the window composes this terminal's background at,
+        /// over `config.background_opacity` while set: on Win32 the window
+        /// sets it while DWM keeps the terminal's alpha (#640), so a toggle
+        /// or a Settings preview reaches the pixels. Kept apart from
+        /// `config`, which every `changeConfig` replaces whole.
+        background_opacity_override: ?f64 = null,
 
         /// The most recent scrollbar state. We use this as a cache to
         /// determine if we need to notify the apprt that there was a
@@ -1190,6 +1317,55 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             self.terminal_state.dirty = .full;
         }
 
+        /// What the window composes this terminal at (`background_opacity_override`).
+        ///
+        /// noctty divergence (#640): upstream has no such override. The
+        /// frame's data is left alone. `updateFrame` applies the opacity to
+        /// the background uniform and to every explicit-background cell
+        /// together, in the full rebuild this asks for, so a frame that
+        /// synchronized output holds keeps both at the old opacity until the
+        /// hold ends, rather than showing one at each.
+        pub fn setBackgroundOpacity(self: *Self, opacity: ?f64) void {
+            self.draw_mutex.lock();
+            defer self.draw_mutex.unlock();
+            const before = self.backgroundOpacity();
+            self.background_opacity_override = opacity;
+            if (self.backgroundOpacity() != before) self.markDirty();
+        }
+
+        /// The opacity the background is drawn at.
+        fn backgroundOpacity(self: *const Self) f64 {
+            return effectiveBackgroundOpacity(self.background_opacity_override, &self.config);
+        }
+
+        /// The uniforms of the pass that dims this frame as an unfocused
+        /// split (`splitDimUniforms`), drawn last into `target`; null when
+        /// nothing is to be drawn there.
+        ///
+        /// noctty divergence (#640): a target that presenting converts for a
+        /// window composing its alpha (OpenGL's `presentsComposed`) takes the
+        /// dim as `Target.composed_dim` instead, to be laid over it after the
+        /// conversion. The dim blends in gamma space, so drawn into the target
+        /// first the conversion would read it as linear light. Every other
+        /// target is dimmed in the frame, in upstream's order. Called for each
+        /// frame before any pass, so a frame that stops early cannot keep an
+        /// older dim.
+        fn splitDimPass(self: *const Self, target: *Target) ?@TypeOf(self.uniforms) {
+            const composes = comptime @hasField(Target, "composed_dim");
+            if (composes) target.composed_dim = null;
+            if (!self.split_dimmed) return null;
+            const dim = splitDimUniforms(
+                self.uniforms,
+                self.config.unfocused_split_fill,
+                self.config.unfocused_split_opacity,
+            ) orelse return null;
+            if (composes) if (self.api.presentsComposed(target.*)) {
+                target.composed_dim = dim.bg_color;
+                return null;
+            };
+            return dim;
+        }
+
         /// Called when we get an updated display ID for our display link.
         pub fn setMacOSDisplayID(self: *Self, id: u32) !void {
             _ = self;
@@ -1637,7 +1813,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     self.terminal_state.colors.background.r,
                     self.terminal_state.colors.background.g,
                     self.terminal_state.colors.background.b,
-                    @intFromFloat(@round(self.config.background_opacity * 255.0)),
+                    @intFromFloat(@round(self.backgroundOpacity() * 255.0)),
                 };
 
                 // Prepare our overlay image for upload (or unload). This
@@ -1801,6 +1977,18 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 );
             }
 
+            // noctty divergence (#640): a window that composes this pane's
+            // alpha has its frames converted as they are presented, from
+            // targets made for it (`GraphicsAPI.composed_alpha`). Any other
+            // window keeps upstream's targets and present.
+            if (comptime @hasField(GraphicsAPI, "composed_alpha")) {
+                const composed = composesAlpha(self.background_opacity_override);
+                if (self.api.composed_alpha != composed) {
+                    self.api.composed_alpha = composed;
+                    self.target_config_modified +%= 1;
+                }
+            }
+
             // If this frame's target isn't the correct size, or the target
             // config has changed (such as when the blending mode changes),
             // remove it and replace it with a new one with the right values.
@@ -1819,6 +2007,10 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     .{ frame.target.width, frame.target.height },
                 );
             }
+
+            // Where an unfocused split's dim goes, decided for this target
+            // before any pass (`splitDimPass`).
+            const split_dim = self.splitDimPass(&frame.target);
 
             // Upload images to the GPU as necessary.
             if (comptime supportsImages()) _ = self.images.upload(self.alloc, &self.api);
@@ -2088,12 +2280,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
 
             // An unfocused split is dimmed last, over whatever the custom
             // shaders drew, as upstream's overlay covers the whole view.
-            if (self.split_dimmed) dim: {
-                const dim = splitDimUniforms(
-                    self.uniforms,
-                    self.config.unfocused_split_fill,
-                    self.config.unfocused_split_opacity,
-                ) orelse break :dim;
+            if (split_dim) |dim| {
                 try frame.split_dim_uniforms.sync(&.{dim});
                 var pass = frame_ctx.renderPass(&.{.{ .target = .{ .target = frame.target } }});
                 defer pass.complete();
@@ -2342,7 +2529,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
         /// Move CPU frame preparation to another graphics API. GPU resources
         /// are freshly initialized; font, terminal and search state survive.
         pub fn transferCpuState(self: *Self, target: anytype) void {
-            const transferred = .{ "grid_metrics", "size", "focused", "split_dimmed", "scrollbar", "scrollbar_dirty", "last_bottom_node", "last_bottom_y", "search_matches", "search_selected_match", "search_matches_dirty", "cells", "bg_cells_dirty", "fg_cells_dirty_from", "fg_cell_count", "uniforms", "custom_shader_uniforms", "first_frame_time", "last_frame_time", "font_shaper", "font_shaper_cache", "terminal_state", "terminal_state_frame_count", "preedit_caret_clean_rebuilds", "overlay" };
+            const transferred = .{ "grid_metrics", "size", "focused", "split_dimmed", "background_opacity_override", "scrollbar", "scrollbar_dirty", "last_bottom_node", "last_bottom_y", "search_matches", "search_selected_match", "search_matches_dirty", "cells", "bg_cells_dirty", "fg_cells_dirty_from", "fg_cell_count", "uniforms", "custom_shader_uniforms", "first_frame_time", "last_frame_time", "font_shaper", "font_shaper_cache", "terminal_state", "terminal_state_frame_count", "preedit_caret_clean_rebuilds", "overlay" };
             // These fields own API-specific resources, shared ownership, or
             // fresh-renderer synchronization state. A backport must classify
             // every new field explicitly instead of silently dropping state.
@@ -3425,7 +3612,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                         // If the user requested to have opacity on all cells, apply it.
                         if (self.config.background_opacity_cells and bg_style != null) {
                             var opacity: f64 = @floatFromInt(default);
-                            opacity *= self.config.background_opacity;
+                            opacity *= self.backgroundOpacity();
                             break :bg_alpha @intFromFloat(opacity);
                         }
 

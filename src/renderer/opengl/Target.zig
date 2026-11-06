@@ -20,6 +20,10 @@ pub const Options = struct {
 
     /// Internal format for the renderbuffer.
     internal_format: gl.Texture.InternalFormat,
+
+    /// Back the target with a texture instead of a renderbuffer, so that
+    /// presenting can sample it (noctty, #640: a composed frame).
+    sampled: bool = false,
 };
 
 pub const Storage = enum {
@@ -39,12 +43,24 @@ framebuffer: gl.Framebuffer,
 /// The underlying `gl.Renderbuffer` instance.
 renderbuffer: ?gl.Renderbuffer,
 
+/// The texture a sampled target renders into, in place of the renderbuffer.
+texture: ?gl.Texture = null,
+
+/// The dim of an unfocused split that presenting lays over this sampled
+/// target after converting it (noctty, #640): the bytes of the fill and its
+/// alpha, as `splitDimUniforms` gives them. The dim blends in gamma space on
+/// the window's sRGB-premultiplied pixels, so drawn into the target first
+/// the conversion would read it as linear light. Set for each frame by the
+/// generic renderer (`splitDimPass`); null for no dim.
+composed_dim: ?[4]u8 = null,
+
 /// Current width of this target.
 width: usize,
 /// Current height of this target.
 height: usize,
 
 pub fn init(opts: Options) !Self {
+    if (opts.sampled) return initSampled(opts);
     const rbo = try gl.Renderbuffer.create();
     const bound_rbo = try rbo.bind();
     defer bound_rbo.unbind();
@@ -68,6 +84,43 @@ pub fn init(opts: Options) !Self {
     };
 }
 
+fn initSampled(opts: Options) !Self {
+    const tex = try gl.Texture.create();
+    errdefer tex.destroy();
+    {
+        const texbind = try tex.bind(.@"2D");
+        defer texbind.unbind();
+        try texbind.parameter(.MinFilter, @as(gl.c.GLint, gl.c.GL_NEAREST));
+        try texbind.parameter(.MagFilter, @as(gl.c.GLint, gl.c.GL_NEAREST));
+        try texbind.parameter(.WrapS, @as(gl.c.GLint, gl.c.GL_CLAMP_TO_EDGE));
+        try texbind.parameter(.WrapT, @as(gl.c.GLint, gl.c.GL_CLAMP_TO_EDGE));
+        try texbind.image2D(
+            0,
+            opts.internal_format,
+            @intCast(opts.width),
+            @intCast(opts.height),
+            .rgba,
+            .UnsignedByte,
+            null,
+        );
+    }
+
+    const fbo = try gl.Framebuffer.create();
+    errdefer fbo.destroy();
+    const bound_fbo = try fbo.bind(.framebuffer);
+    defer bound_fbo.unbind();
+    try bound_fbo.texture2D(.color0, .@"2D", tex, 0);
+
+    return .{
+        .storage = .offscreen,
+        .framebuffer = fbo,
+        .renderbuffer = null,
+        .texture = tex,
+        .width = opts.width,
+        .height = opts.height,
+    };
+}
+
 pub fn initDefault(
     framebuffer: gl.Framebuffer,
     width: usize,
@@ -86,7 +139,8 @@ pub fn initDefault(
 pub fn deinit(self: *Self) void {
     if (!self.storage.ownsResources()) return;
     self.framebuffer.destroy();
-    self.renderbuffer.?.destroy();
+    if (self.renderbuffer) |rbo| rbo.destroy();
+    if (self.texture) |tex| tex.destroy();
 }
 
 test "OpenGL target storage owns only offscreen resources" {

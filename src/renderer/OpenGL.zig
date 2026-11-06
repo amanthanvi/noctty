@@ -62,9 +62,13 @@ pub const TargetStrategyOptions = struct {
     custom_shaders: bool,
     default_framebuffer_srgb: bool,
     linear_blending: bool,
+    /// The window composes the frame's alpha (`OpenGL.composed_alpha`):
+    /// presenting converts it from a sampled offscreen target.
+    composed_alpha: bool = false,
 };
 
 pub fn targetStrategy(opts: TargetStrategyOptions) TargetStrategy {
+    if (opts.composed_alpha) return .offscreen;
     if (opts.win32 and
         !opts.custom_shaders and
         opts.default_framebuffer_srgb and
@@ -99,6 +103,21 @@ swap_interval_configured: bool = false,
 swap_interval_supported: bool = false,
 default_framebuffer: gl.Framebuffer,
 default_framebuffer_srgb: bool,
+
+/// noctty divergence (#640): the window composes this renderer's alpha
+/// (Win32 blur-behind), so the frame must reach it as sRGB-premultiplied
+/// pixels. With linear blending the target holds linear premultiplied color
+/// that the framebuffer sRGB-encodes, `srgb(c * a)`, which DWM would show too
+/// bright; presenting then converts it (`present_composed.f.glsl`). Set by the
+/// generic renderer from the window's opacity (`syncComposedAlpha`). False
+/// leaves the targets and the present exactly as upstream's.
+composed_alpha: bool = false,
+present_composed: ?Pipeline = null,
+present_composed_failed: bool = false,
+/// The last conversion failed to draw: until one draws, the next frame's
+/// split dim is drawn into it (`presentsComposed`), where the blit keeps it.
+present_composed_draw_failed: bool = false,
+present_composed_draw_logged: bool = false,
 
 /// NOTE: This is fallible to satisfy the renderer init interface, even though
 ///       OpenGL setup here cannot currently fail.
@@ -161,7 +180,28 @@ pub fn defaultFramebufferBindingIsUsable(framebuffer: gl.c.GLint) bool {
 }
 
 pub fn deinit(self: *OpenGL) void {
+    if (self.present_composed) |pipeline| pipeline.deinit();
     self.* = undefined;
+}
+
+/// Whether presenting converts the frame for a window that composes its
+/// alpha: only when blending is linear. Native blending already writes
+/// sRGB-premultiplied pixels.
+fn convertsComposed(self: *const OpenGL) bool {
+    return self.composed_alpha and self.blending.isLinear();
+}
+
+/// Whether presenting `target` converts it for a window that composes its
+/// alpha, so that an unfocused split's dim is laid over it there, after the
+/// conversion (`Target.composed_dim`), rather than drawn into it. Only a
+/// sampled target is converted, and not once the conversion pipeline has
+/// failed to build, nor while the last conversion failed to draw: the dim is
+/// then drawn into the frame, as upstream's, so the blit that stands in for
+/// the conversion still shows it.
+pub fn presentsComposed(self: *const OpenGL, target: Target) bool {
+    return target.texture != null and
+        !self.present_composed_failed and
+        !self.present_composed_draw_failed;
 }
 
 /// 32-bit windows cross-compilation breaks with `.c` for some reason, so...
@@ -570,6 +610,7 @@ pub fn initTarget(
             .internal_format = if (self.blending.isLinear()) .srgba else .rgba,
             .width = width,
             .height = height,
+            .sampled = self.convertsComposed(),
         }),
     };
 }
@@ -583,6 +624,7 @@ pub fn selectTargetStrategy(
         .custom_shaders = custom_shaders,
         .default_framebuffer_srgb = self.default_framebuffer_srgb,
         .linear_blending = self.blending.isLinear(),
+        .composed_alpha = self.convertsComposed(),
     });
 }
 
@@ -618,6 +660,12 @@ pub fn present(self: *OpenGL, target: Target) !void {
 
         if (dst_width <= 0 or dst_height <= 0) return;
 
+        if (target.texture) |texture| if (self.presentComposed(texture, target.composed_dim, dst_width, dst_height)) {
+            self.last_target = target;
+            if (apprt.runtime == apprt.win32) try self.rt_surface.swapGLBuffers();
+            return;
+        };
+
         gl.glad.context.BlitFramebuffer.?(
             0,
             0,
@@ -638,6 +686,62 @@ pub fn present(self: *OpenGL, target: Target) !void {
     if (apprt.runtime == apprt.win32) {
         try self.rt_surface.swapGLBuffers();
     }
+}
+
+/// Draws a sampled target into the window's framebuffer as
+/// sRGB-premultiplied pixels (`composed_alpha`), with an unfocused split's
+/// `dim` laid over them. Returns false, having drawn nothing, when the
+/// conversion cannot be drawn: the caller blits as upstream does, too bright
+/// and, for that frame, undimmed but shown. Either failure is logged once:
+/// a pipeline that cannot be built is not tried again, a draw that fails is,
+/// and until one draws the split dim goes into the frame
+/// (`present_composed_draw_failed`), so it is not lost on every frame.
+fn presentComposed(self: *OpenGL, texture: gl.Texture, dim: ?[4]u8, width: i32, height: i32) bool {
+    if (self.present_composed == null) {
+        if (self.present_composed_failed) return false;
+        self.present_composed = shaders.initPresentComposedPipeline() catch |err| {
+            self.present_composed_failed = true;
+            log.warn("composed-alpha present pipeline unavailable err={}; presenting unconverted", .{err});
+            return false;
+        };
+    }
+    const pipeline = self.present_composed.?;
+    self.drawComposed(pipeline, texture, dim, width, height) catch |err| {
+        self.present_composed_draw_failed = true;
+        if (!self.present_composed_draw_logged) {
+            self.present_composed_draw_logged = true;
+            log.warn("composed-alpha present failed err={}; presenting unconverted (logged once)", .{err});
+        }
+        return false;
+    };
+    self.present_composed_draw_failed = false;
+    return true;
+}
+
+fn drawComposed(self: *const OpenGL, pipeline: Pipeline, texture: gl.Texture, dim: ?[4]u8, width: i32, height: i32) !void {
+    const fbobind = try self.default_framebuffer.bind(.draw);
+    defer fbobind.unbind();
+    try gl.viewport(0, 0, width, height);
+    try gl.disable(gl.c.GL_BLEND);
+    const pbind = try pipeline.program.use();
+    defer pbind.unbind();
+    try pipeline.program.setUniform("dst_size", @Vector(2, f32){ @floatFromInt(width), @floatFromInt(height) });
+    try pipeline.program.setUniform("dim", composedDimUniform(dim));
+    try gl.Texture.active(0);
+    const texbind = try texture.bind(.@"2D");
+    defer texbind.unbind();
+    const vaobind = try pipeline.vao.bind();
+    defer vaobind.unbind();
+    try gl.drawArrays(gl.c.GL_TRIANGLES, 0, 3);
+}
+
+/// The conversion's `dim` uniform: the fill and its alpha, 0-1; zero for no
+/// dim, which leaves every pixel as converted.
+fn composedDimUniform(dim: ?[4]u8) @Vector(4, f32) {
+    const bytes = dim orelse return @splat(0);
+    var result: @Vector(4, f32) = undefined;
+    inline for (0..4) |i| result[i] = @as(f32, @floatFromInt(bytes[i])) / 255.0;
+    return result;
 }
 
 /// Present the last presented target again.
@@ -883,6 +987,145 @@ test "OpenGL direct default target policy preserves unsupported paths" {
             .linear_blending = false,
         }),
     );
+}
+
+test "OpenGL a composed frame always renders offscreen, to be converted as it is presented" {
+    for ([_]bool{ false, true }) |win32| for ([_]bool{ false, true }) |custom| for ([_]bool{ false, true }) |srgb| {
+        try std.testing.expectEqual(TargetStrategy.offscreen, targetStrategy(.{
+            .win32 = win32,
+            .custom_shaders = custom,
+            .default_framebuffer_srgb = srgb,
+            .linear_blending = true,
+            .composed_alpha = true,
+        }));
+    };
+}
+
+/// `present_composed.f.glsl`, on one 8-bit RGBA pixel, for its tests: the
+/// shader runs on the GPU only. The dim goes through the uniform `present`
+/// sets.
+fn composedPixel(stored: [4]u8, dim: ?[4]u8) [4]u8 {
+    const d: [4]f32 = composedDimUniform(dim);
+    const a = unitOf(stored[3]);
+    var out: [4]u8 = undefined;
+    for (0..3) |i| {
+        // Sampling the sRGB texture decodes the channel.
+        const converted = if (a <= 0)
+            0
+        else
+            srgbEncode(std.math.clamp(srgbDecode(unitOf(stored[i])) / a, 0.0, 1.0)) * a;
+        out[i] = byteOf(d[i] * d[3] + converted * (1 - d[3]));
+    }
+    out[3] = byteOf(d[3] + a * (1 - d[3]));
+    return out;
+}
+
+/// The `split_dim` pass on one stored pixel: the fill, premultiplied by its
+/// alpha in `bg_color.f.glsl`, blended over the stored bytes with
+/// `GL_ONE, GL_ONE_MINUS_SRC_ALPHA` and `GL_FRAMEBUFFER_SRGB` off.
+fn dimmedInTarget(stored: [4]u8, dim: [4]u8) [4]u8 {
+    const d: [4]f32 = composedDimUniform(dim);
+    var out: [4]u8 = undefined;
+    for (0..3) |i| out[i] = byteOf(d[i] * d[3] + unitOf(stored[i]) * (1 - d[3]));
+    out[3] = byteOf(d[3] + unitOf(stored[3]) * (1 - d[3]));
+    return out;
+}
+
+fn unitOf(byte: u8) f64 {
+    return @as(f64, @floatFromInt(byte)) / 255.0;
+}
+
+fn byteOf(unit: f64) u8 {
+    return @intFromFloat(@round(std.math.clamp(unit, 0.0, 1.0) * 255.0));
+}
+
+/// What the passes leave in the target for the sRGB color `c` (0-255) at
+/// alpha `a`: linear premultiplied, sRGB-encoded by the framebuffer.
+fn storedPixel(c: u8, a: u8) u8 {
+    const alpha: f64 = @as(f64, @floatFromInt(a)) / 255.0;
+    const linear = srgbDecode(@as(f64, @floatFromInt(c)) / 255.0) * alpha;
+    return @intFromFloat(@round(srgbEncode(linear) * 255.0));
+}
+
+fn srgbDecode(v: f64) f64 {
+    return if (v <= 0.04045) v / 12.92 else std.math.pow(f64, (v + 0.055) / 1.055, 2.4);
+}
+
+fn srgbEncode(v: f64) f64 {
+    return if (v <= 0.0031308) v * 12.92 else std.math.pow(f64, v, 1.0 / 2.4) * 1.055 - 0.055;
+}
+
+test "OpenGL a composed frame reaches the window as sRGB-premultiplied pixels" {
+    // White and mid-grey at 0.5: what the target holds, and what DWM is
+    // given. White unconverted is 188 over alpha 128, not even premultiplied.
+    try std.testing.expectEqual(@as(u8, 188), storedPixel(255, 128));
+    try std.testing.expectEqual([4]u8{ 128, 128, 128, 128 }, composedPixel(.{ 188, 188, 188, 128 }, null));
+    // Mid-grey: 128 * 128 / 255 is 64.3, and the target's 8 bits leave 65.
+    try std.testing.expectEqual(@as(u8, 93), storedPixel(128, 128));
+    try std.testing.expectEqual([4]u8{ 65, 65, 65, 128 }, composedPixel(.{ 93, 93, 93, 128 }, null));
+    // A dark theme's background moves only a little.
+    try std.testing.expectEqual(@as(u8, 27), storedPixel(40, 128));
+    try std.testing.expectEqual([4]u8{ 20, 20, 20, 128 }, composedPixel(.{ 27, 27, 27, 128 }, null));
+    // Opaque pixels, text and opaque cells, come out as they were, and a
+    // pixel with no alpha stays empty.
+    for (0..256) |v| {
+        const c: u8 = @intCast(v);
+        try std.testing.expectEqual([4]u8{ c, c, c, 255 }, composedPixel(.{ c, c, c, 255 }, null));
+    }
+    try std.testing.expectEqual([4]u8{ 0, 0, 0, 0 }, composedPixel(.{ 0, 0, 0, 0 }, null));
+    // Every color at a few opacities ends within a level of `c * a`, which
+    // is what the chrome around the pane paints (`AlphaPaint`).
+    for ([_]u8{ 26, 128, 191, 230 }) |a| for (0..256) |v| {
+        const c: u8 = @intCast(v);
+        const want: i32 = @intFromFloat(@round(@as(f64, @floatFromInt(c)) * @as(f64, @floatFromInt(a)) / 255.0));
+        const got: i32 = composedPixel(.{ storedPixel(c, a), 0, 0, a }, null)[0];
+        try std.testing.expect(@abs(got - want) <= 1);
+    };
+}
+
+test "OpenGL an unfocused split in a composed frame is dimmed after the conversion" {
+    // #678, Sol's case: a white background at opacity 0, dimmed by its
+    // default fill (the background) at `unfocused-split-opacity = 0.7`. The
+    // pane holds nothing, so the dim alone shows: 0.3 of white.
+    const clear = [4]u8{ storedPixel(255, 0), storedPixel(255, 0), storedPixel(255, 0), 0 };
+    const white_dim = [4]u8{ 255, 255, 255, 77 };
+    try std.testing.expectEqual([4]u8{ 77, 77, 77, 77 }, composedPixel(clear, white_dim));
+    // Greptile's case: white at 0.5 under a black dim at 0.3, 128 * 0.7.
+    const half_white = [4]u8{ 188, 188, 188, 128 };
+    const black_dim = [4]u8{ 0, 0, 0, 77 };
+    try std.testing.expectEqual([4]u8{ 89, 89, 89, 166 }, composedPixel(half_white, black_dim));
+    // The old order, the dim drawn into the target and converted with it,
+    // read the dim's gamma bytes as linear light: 41 for 77, 104 for 89.
+    try std.testing.expectEqual([4]u8{ 41, 41, 41, 77 }, composedPixel(dimmedInTarget(clear, white_dim), null));
+    try std.testing.expectEqual([4]u8{ 104, 104, 104, 166 }, composedPixel(dimmedInTarget(half_white, black_dim), null));
+    // An opaque pixel, text or an opaque cell, is dimmed exactly as the
+    // `split_dim` pass dims any other frame: upstream's gamma-space dim.
+    for (0..256) |v| for ([_]u8{ 0, 12, 128, 255 }) |f| for ([_]u8{ 26, 77, 128, 217 }) |alpha| {
+        const c: u8 = @intCast(v);
+        const pixel = [4]u8{ c, c, c, 255 };
+        const dim = [4]u8{ f, f, f, alpha };
+        try std.testing.expectEqual(dimmedInTarget(pixel, dim), composedPixel(pixel, dim));
+    };
+}
+
+test "OpenGL a composed target takes the split dim at present only while its conversion can be drawn" {
+    var gl_api: OpenGL = undefined;
+    gl_api.present_composed_failed = false;
+    gl_api.present_composed_draw_failed = false;
+    var sampled = Target.initDefault(.{ .id = 0 }, 1, 1);
+    sampled.storage = .offscreen;
+    sampled.texture = .{ .id = 1 };
+    const unsampled = Target.initDefault(.{ .id = 0 }, 1, 1);
+    try std.testing.expect(gl_api.presentsComposed(sampled));
+    try std.testing.expect(!gl_api.presentsComposed(unsampled));
+    // A conversion that last failed to draw, or a pipeline that failed to
+    // build, leaves the frame to the blit, so the dim is drawn into it, as
+    // upstream's.
+    gl_api.present_composed_draw_failed = true;
+    try std.testing.expect(!gl_api.presentsComposed(sampled));
+    gl_api.present_composed_draw_failed = false;
+    gl_api.present_composed_failed = true;
+    try std.testing.expect(!gl_api.presentsComposed(sampled));
 }
 
 test "OpenGL direct default target presents without an offscreen blit" {

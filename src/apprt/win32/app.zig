@@ -6027,6 +6027,13 @@ pub const App = struct {
             }
             if (host.hwnd) |hwnd| {
                 applyDwmThemeWithBuild(hwnd, &self.resolved_theme, shown, self.os_build);
+                // High Contrast shows every window opaque, and a window that
+                // had blur-behind asserts it again across the theme change.
+                // On a reload this runs before `window_state.applyConfig`
+                // stores the new opacity, so the window applies its old one
+                // first and the new one right after: harmless, the first
+                // changes nothing it had not already.
+                window_state.refreshBackgroundOpacity(host);
                 if (frame_mode_changed) {
                     _ = sys.SetWindowPos(
                         hwnd,
@@ -7073,21 +7080,25 @@ pub const App = struct {
                     if (host.hwnd) |hwnd| _ = sys.DestroyWindow(hwnd);
                     self.removeHost(host);
                 }
-            } else if (self.running) {
-                // A close never restores, raises or takes focus from a
-                // window the user is not looking at, and moves focus only
-                // when the pane that had it closed.
-                if (host.activeTab()) |tab| if (tab.focusedSurface()) |replacement| {
-                    if (was_active_surface and tabSeenByUser(host, host.active_tab))
-                        self.activateSurface(replacement)
-                    else
-                        self.activateSurfaceNoFocus(replacement);
-                };
-                // Relayout after tab removal because the chrome
-                // reservation may have changed. In this fork,
-                // `.auto` still shows the row since it carries the
-                // essential host controls (+, overflow).
-                runUiActionOrLog("surface close layout failed", host.layout());
+            } else {
+                // The last D3D11 pane may have closed.
+                if (!self.quitting) window_state.refreshBackgroundOpacity(host);
+                if (self.running) {
+                    // A close never restores, raises or takes focus from a
+                    // window the user is not looking at, and moves focus only
+                    // when the pane that had it closed.
+                    if (host.activeTab()) |tab| if (tab.focusedSurface()) |replacement| {
+                        if (was_active_surface and tabSeenByUser(host, host.active_tab))
+                            self.activateSurface(replacement)
+                        else
+                            self.activateSurfaceNoFocus(replacement);
+                    };
+                    // Relayout after tab removal because the chrome
+                    // reservation may have changed. In this fork,
+                    // `.auto` still shows the row since it carries the
+                    // essential host controls (+, overflow).
+                    runUiActionOrLog("surface close layout failed", host.layout());
+                }
             }
             if (shell_mapping_changed and shell_mapping_stable) {
                 self.auditShellNativeMapping("surface-close");

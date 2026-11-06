@@ -57,7 +57,7 @@ profile inheritance. Copy only the lines you need.
 | `font.size`                  | `font-size`                            |                                                                                     |
 | `colorScheme`                | `theme`                                | Bundled names come from `noctty +list-themes`. A WT scheme is not imported.         |
 | `opacity`                    | `background-opacity`                   | Divide the Windows Terminal percentage by 100: `50` becomes `0.5`; `1.0` is opaque. |
-| `useAcrylic`                 | `background-blur`                      | Accepted but inert on Windows; the whole window fades, never blurred.               |
+| `useAcrylic`                 | `background-blur`                      | Accepted but inert on Windows; a translucent background is never blurred.           |
 | `padding`                    | `window-padding-x`, `window-padding-y` | Noctty splits horizontal and vertical padding.                                      |
 | `copyOnSelect`               | `copy-on-select`                       |                                                                                     |
 | `cursorShape`                | `cursor-style`                         |                                                                                     |
@@ -235,9 +235,10 @@ workflows above hold up.
 - `settings.json` itself: profile GUIDs, fragments, and JSON inheritance
 - Windows Terminal actions and command-palette entries, which have their own
   vocabulary
-- Acrylic and Mica materials; Noctty accepts `background-blur` but opts into
-  no DWM transparency mechanism, so a translucent window fades as a whole,
-  text and chrome included, rather than showing a blurred background
+- Acrylic and Mica materials; Noctty accepts `background-blur` but asks DWM
+  for no backdrop material, so a translucent background shows what is behind
+  the window unblurred (with the D3D11 renderer beta the whole window fades,
+  text and chrome included)
 - The retro terminal effect and other WT-specific rendering experiments
 - Live tab contents and running child processes
 

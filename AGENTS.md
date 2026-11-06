@@ -261,7 +261,23 @@ that govern each symbol you change, or that none does.
   `place` with its `Occupied`, `returnOn` and `Keeps` in
   `win32/window_start.zig`; `Registry.newWindowSource` and
   `windowStartsAt`), `WM_DPICHANGED` and mixed-DPI moves,
-  `window-width`/`window-height`, `background-opacity` and DWM backdrop, the
+  `window-width`/`window-height`, `background-opacity` and DWM backdrop (how
+  a window shows it: `TopLevel.shows` in `win32/window_start.zig`; blur-behind,
+  the layered fade, the solid child controls and the panes' renderer opacity:
+  `applyBackgroundOpacity`, `refreshBackgroundOpacity`,
+  `releaseBackgroundOpacity`, `childCreated` and `solidifies` in
+  `win32/window_state.zig`, with `Host.chrome_alpha` and
+  `Host.blur_behind_failed`; `Surface.setBackgroundOpacity`,
+  `rendererSwitchedToOpenGL` and `WM_WINHOSTTY_RENDERER_SWITCHED`; the
+  renderer's `background_opacity_override`; how a pane's frame reaches a
+  window that composes its alpha: `composesAlpha` and `splitDimPass` in
+  `src/renderer/generic.zig`, `OpenGL.composed_alpha`, `presentsComposed`,
+  `OpenGL.present`, `presentComposed`, `drawComposed` and
+  `composedDimUniform` in `src/renderer/OpenGL.zig`, `Target.Options.sampled`,
+  `initSampled` and `Target.composed_dim` in `src/renderer/opengl/Target.zig`,
+  `initPresentComposedPipeline` and the `split_dim` pipeline's flags in
+  `src/renderer/opengl/shaders.zig`, and
+  `src/renderer/shaders/glsl/present_composed.f.glsl`), the
   window menu, the quick terminal (`win32_quick_terminal.zig`,
   `win32/quick_terminal_host.zig`).
 - [chrome-tabs-paint.md](docs/agents/log/chrome-tabs-paint.md): tab buttons
@@ -275,7 +291,9 @@ that govern each symbol you change, or that none does.
   `createIconFontWithGlyphs`, `fontGlyphCoverage`, `drawTitlebarGlyph`),
   chrome child z-order, host paint and invalidation scopes and text caches
   (`win32/chrome_scene.zig`: `paintChrome`, `invalidateChrome*`,
-  `repaintTopChrome`; `appendOwnedString` in `win32/text.zig`), the child
+  `repaintTopChrome`, the alpha a translucent window's GDI paint takes:
+  `AlphaPaint`, `fillLaneBackground`, `fixAlpha`; `appendOwnedString` in
+  `win32/text.zig`), the child
   placement cache (`ChildPlacement`, `applyChromeChildRect` in
   `win32/child_window.zig`), tweens.
 - [chrome-overlays.md](docs/agents/log/chrome-overlays.md): the command

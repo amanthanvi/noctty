@@ -209,9 +209,9 @@ caption follows the setting live. Also check the settings window's caption.
 lists from build 22000 (backdrop type from 22621). Set `window-theme = ghostty` and
 `window-titlebar-background = #204060`. Expected: the stock caption does not take
 the colour, nothing is logged as an error, and the separate tab row keeps the
-theme's own colours. `background-opacity = 0.8` fades the whole window (layered
-alpha, independent of the build); `background-blur = true` changes nothing, as on
-Windows 11.
+theme's own colours. `background-opacity = 0.8` makes the terminal background
+translucent and leaves the tab row and text solid (blur-behind, independent of the
+build); `background-blur = true` changes nothing, as on Windows 11.
 
 **W10-13 Active tab (Core).** Open three tabs. Expected: the active tab takes
 the terminal's background and runs on into the terminal below it, with no border,
