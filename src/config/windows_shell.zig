@@ -4672,7 +4672,33 @@ extern "kernel32" fn SetEvent(event: windows.HANDLE) callconv(.winapi) windows.B
 var test_wsl_before_read: if (builtin.is_test) ?*const fn () void else void = if (builtin.is_test) null else {};
 
 fn listWslDistros(alloc: Allocator, exe_path: []const u8) ![][]u8 {
+    var env = try std.process.getEnvMap(alloc);
+    defer env.deinit();
+    return listWslDistrosIn(alloc, exe_path, &env);
+}
+
+/// Pins the encoding `wsl -l -q` writes in, so `decodeWslList` reads it
+/// without a guess: UTF-16LE, by leaving `WSL_UTF8` out of its environment.
+/// The WSL of the open source (`WslClient::Main`, microsoft/WSL) writes
+/// UTF-8 only when `WSL_UTF8` is exactly "1", and UTF-16 otherwise. WSL
+/// 0.64.0 (July 2022) added it as an opt-in to force UTF-8, so the versions
+/// before it, and the inbox WSL of Windows 10, write UTF-16 whatever it is
+/// (inferred from that opt-in, not run). An inherited `WSL_UTF8`, in any
+/// case (the map compares names as Windows does), would otherwise decide it.
+fn pinWslOutputEncoding(env: *std.process.EnvMap) void {
+    env.remove("WSL_UTF8");
+}
+
+/// Tests only: called with the `wsl -l -q` child just before it would be
+/// spawned (`listWslDistrosIn`); an error it returns ends the list there.
+var test_wsl_list_spawn: if (builtin.is_test) ?*const fn (*const std.process.Child) anyerror!void else void = if (builtin.is_test) null else {};
+
+/// `listWslDistros` with `env` (this process's) for `wsl.exe`'s
+/// environment, which it pins first (`pinWslOutputEncoding`).
+fn listWslDistrosIn(alloc: Allocator, exe_path: []const u8, env: *std.process.EnvMap) ![][]u8 {
+    pinWslOutputEncoding(env);
     var child = std.process.Child.init(&.{ exe_path, "-l", "-q" }, alloc);
+    child.env_map = env;
     child.stdin_behavior = .Ignore;
     child.stdout_behavior = .Pipe;
     // Its errors are read on a failure, wherever wsl.exe writes them: the
@@ -4681,6 +4707,7 @@ fn listWslDistros(alloc: Allocator, exe_path: []const u8) ![][]u8 {
     child.stderr_behavior = .Pipe;
     child.create_no_window = true;
 
+    if (builtin.is_test) if (test_wsl_list_spawn) |hook| try hook(&child);
     try win32.spawnChildHoldingInheritLock(&child);
     var child_running = true;
     errdefer {
@@ -4810,8 +4837,9 @@ const WslListOutcome = union(enum) {
 /// (`ListDistributionsHelper`, `WslClient::Main` and `wslutil::ErrorToString`,
 /// microsoft/WSL, open since 2025) and reported output, not from a machine
 /// without WSL:
-/// - exit 0: its distributions, one a line, from stdout. With `-q` the WSL
-///   of the open source never fails for having none: it writes nothing.
+/// - exit 0: its distributions, one a line, from stdout, in the UTF-16LE
+///   `listWslDistros` pins (`decodeWslList`). With `-q` the WSL of the open
+///   source never fails for having none: it writes nothing.
 /// - a failure (exit -1 from that WSL) names its error after "Error code:"
 ///   as `Wsl/<context>/<NAME>` (or the HRESULT in hex), untranslated, on
 ///   stdout. `WSL_E_WSL_OPTIONAL_COMPONENT_REQUIRED`, or `0x8007019e`
@@ -4833,16 +4861,18 @@ const WslListOutcome = union(enum) {
 ///   `wsl.exe --install --no-distribution` are not taken for the stub.
 /// Anything else is a failure. The returned names are `alloc`'s.
 fn classifyWslList(alloc: Allocator, run: WslListRun) Allocator.Error!WslListOutcome {
-    const out = try decodeWslOutput(alloc, run.output);
-    defer alloc.free(out);
     const exit_code = run.exit_code orelse return .failed;
     if (exit_code == 0) {
-        // Cut short, it is no complete list: `wsl -l -q` ends every name,
-        // the last too, with a line end (`wprintf(L"%s\n", ...)`), and
-        // writes UTF-16 in whole units.
-        if (wslOutputCut(run.output, out)) return .failed;
-        return .{ .distros = try parseWslDistros(alloc, out) };
+        // Not a whole list (cut short, or not the pinned encoding): no
+        // complete list.
+        const list = try decodeWslList(alloc, run.output) orelse return .failed;
+        defer alloc.free(list);
+        return .{ .distros = try parseWslDistros(alloc, list) };
     }
+    // A failure's message, its encoding guessed: it is only searched for
+    // an error's code, which a guess finds only where the output has it.
+    const out = try decodeWslOutput(alloc, run.output);
+    defer alloc.free(out);
     const err = try decodeWslOutput(alloc, run.errors);
     defer alloc.free(err);
     const text = try std.mem.concat(alloc, u8, &.{ out, "\n", err });
@@ -5011,20 +5041,57 @@ extern "advapi32" fn RegEnumKeyExW(
     last_write: ?*windows.FILETIME,
 ) callconv(.winapi) i32;
 
-/// wsl.exe's output as UTF-8. It writes UTF-16LE unless `WSL_UTF8` is set;
-/// UTF-16 is told by its byte order mark, or by a zero byte in an odd place
-/// (every ASCII character has one, the line ends included), so an
-/// even-length UTF-8 answer is not read as UTF-16. A last odd byte (a read
-/// cut short) is left out. An unpaired surrogate is kept as WTF-8.
+/// A failure's message from wsl.exe as UTF-8, its encoding guessed: the
+/// Windows 11 24H2 inbox stub's is not known, and may not follow
+/// `pinWslOutputEncoding`. UTF-16 is told by its byte order mark, or by a
+/// zero byte in an odd place (every ASCII character has one, the line ends
+/// included), so an even-length UTF-8 answer is not read as UTF-16. A last
+/// odd byte is left out. Only searched for an error's code
+/// (`classifyWslList`); a list is never read so (`decodeWslList`).
 fn decodeWslOutput(alloc: Allocator, raw: []const u8) Allocator.Error![]u8 {
     if (!wslOutputUtf16(raw)) return try alloc.dupe(u8, raw);
+    return wslUtf16ToUtf8(alloc, raw[0 .. raw.len - raw.len % 2]);
+}
+
+/// UTF-16LE bytes (an even count) as UTF-8, a byte order mark left out. An
+/// unpaired surrogate is kept as WTF-8.
+fn wslUtf16ToUtf8(alloc: Allocator, raw: []const u8) Allocator.Error![]u8 {
     // `bytesAsSlice` gives align(1) units, and the decoder wants align(2).
-    const unaligned = std.mem.bytesAsSlice(u16, raw[0 .. raw.len - raw.len % 2]);
+    const unaligned = std.mem.bytesAsSlice(u16, raw);
     const aligned = try alloc.alloc(u16, unaligned.len);
     defer alloc.free(aligned);
     @memcpy(aligned, unaligned);
     const data: []const u16 = if (aligned.len > 0 and aligned[0] == 0xFEFF) aligned[1..] else aligned;
     return std.unicode.wtf16LeToWtf8Alloc(alloc, data);
+}
+
+/// `wsl -l -q`'s list as UTF-8, read as the UTF-16LE `listWslDistros` pins
+/// (`pinWslOutputEncoding`) and as nothing else, or null when it is no whole
+/// list:
+/// - an odd byte count: UTF-16 is written in whole units;
+/// - a last line with no line end: `wsl -l -q` ends every name, the last
+///   too, with one (`wprintf(L"%s\n", ...)`). NULs after it are allowed
+///   (`parseWslDistros` drops them);
+/// - a list whose only zero high bytes are its last line end's and the NULs
+///   after it. Every WSL ends its lines with CR LF, whose CR has one, and so
+///   does every ASCII character; 8-bit text ending in a line end and a NUL
+///   reads the same, so its encoding is not known.
+/// Output in another encoding (from a WSL that ignored the pin, or UTF-16
+/// cut short so that it looks like UTF-8) is thereby no whole list either.
+/// A cut that falls just after a line end cannot be told from a whole list.
+fn decodeWslList(alloc: Allocator, raw: []const u8) Allocator.Error!?[]u8 {
+    if (raw.len % 2 != 0) return null;
+    const start: usize = if (raw.len >= 2 and raw[0] == 0xFF and raw[1] == 0xFE) 2 else 0;
+    // The units before the NULs at the end.
+    var end = raw.len;
+    while (end >= start + 2 and raw[end - 2] == 0 and raw[end - 1] == 0) end -= 2;
+    if (end == start) return try alloc.dupe(u8, "");
+    if (raw[end - 2] != '\n' or raw[end - 1] != 0) return null;
+    const known = for (raw[start .. end - 2], 0..) |byte, at| {
+        if (at % 2 == 1 and byte == 0) break true;
+    } else false;
+    if (!known) return null;
+    return try wslUtf16ToUtf8(alloc, raw[start..end]);
 }
 
 /// Whether wsl.exe wrote `raw` as UTF-16: a byte order mark, or a zero byte
@@ -5034,14 +5101,6 @@ fn wslOutputUtf16(raw: []const u8) bool {
     return raw.len >= 2 and (bom or for (raw, 0..) |byte, at| {
         if (at % 2 == 1 and byte == 0) break true;
     } else false);
-}
-
-/// Whether `wsl -l -q`'s output (`raw`, decoded as `text`) was cut short:
-/// UTF-16 of an odd byte count, or a last line with no line end. A cut that
-/// falls just after a line end cannot be told from a whole list.
-fn wslOutputCut(raw: []const u8, text: []const u8) bool {
-    if (wslOutputUtf16(raw) and raw.len % 2 != 0) return true;
-    return text.len != 0 and text[text.len - 1] != '\n';
 }
 
 /// The distribution names in `wsl -l -q`'s output, one a line, the service
@@ -5959,11 +6018,14 @@ fn testWslUtf16(alloc: Allocator, text: []const u8) ![]u8 {
 /// A case's stdout as wsl.exe would write it: UTF-16LE unless the case says
 /// UTF-8, after a byte order mark or one byte short when it says so.
 fn testWslOutput(alloc: Allocator, case: TestWslCase) ![]u8 {
-    if (!case.utf16) return try alloc.dupe(u8, case.text);
-    const units = try testWslUtf16(alloc, case.text);
+    if (case.raw) |raw| return try alloc.dupe(u8, raw);
+    const units = if (case.utf16) try testWslUtf16(alloc, case.text) else try alloc.dupe(u8, case.text);
     defer alloc.free(units);
     const body = if (case.cut) units[0 .. units.len - 1] else units;
-    return try std.mem.concat(alloc, u8, &.{ if (case.bom) "\xFF\xFE" else "", body });
+    const nuls = try alloc.alloc(u8, case.nuls * @as(usize, if (case.utf16) 2 else 1));
+    defer alloc.free(nuls);
+    @memset(nuls, 0);
+    return try std.mem.concat(alloc, u8, &.{ if (case.bom) "\xFF\xFE" else "", body, nuls });
 }
 
 /// What a `wsl -l -q` stands for in a discovery test (`testWslList`).
@@ -5986,14 +6048,20 @@ fn testOneRegistered() bool {
 const TestWslCase = struct {
     name: []const u8,
     exit_code: ?u32,
-    text: []const u8,
+    text: []const u8 = "",
     /// What it wrote to stderr, as UTF-16LE when `utf16`.
     errors: []const u8 = "",
     /// The output starts with a byte order mark, or ends one byte short.
     bom: bool = false,
     cut: bool = false,
-    /// The output is UTF-16LE, as wsl.exe writes it unless `WSL_UTF8` is set.
+    /// NULs after the text, in its encoding.
+    nuls: usize = 0,
+    /// The output is UTF-16LE, as the pinned wsl.exe writes it
+    /// (`pinWslOutputEncoding`), or UTF-8, as only a WSL that ignored the
+    /// pin would.
     utf16: bool = true,
+    /// The output's exact bytes, in place of `text` (and the above).
+    raw: ?[]const u8 = null,
     complete: bool,
     /// The distributions discovery lists, one a line.
     distros: []const u8 = "",
@@ -6002,9 +6070,27 @@ const TestWslCase = struct {
 const test_wsl_cases = [_]TestWslCase{
     // WSL with distributions; its service distributions are left out.
     .{ .name = "distributions", .exit_code = 0, .text = "Ubuntu\r\ndocker-desktop\r\nDebian\r\n", .complete = true, .distros = "Ubuntu\nDebian\n" },
-    // `WSL_UTF8=1`, an even number of bytes: still UTF-8.
-    .{ .name = "UTF-8", .exit_code = 0, .text = "Ubuntu\r\n", .utf16 = false, .complete = true, .distros = "Ubuntu\n" },
-    // A byte order mark; a read one byte short; a name with no ASCII.
+    // (Sol) UTF-16LE for U+4141 U+010A cut after the first byte of the
+    // second: `41 41 0A`, which as UTF-8 is "AA\n". No whole list.
+    .{ .name = "UTF-16 cut to look like UTF-8", .exit_code = 0, .raw = "\x41\x41\x0A", .complete = false },
+    // NULs after the last line end (as `parseWslDistros` drops them): a
+    // whole list. Before it, or as half a unit, they are no line end.
+    .{ .name = "a NUL after", .exit_code = 0, .text = "Ubuntu\r\n", .nuls = 1, .complete = true, .distros = "Ubuntu\n" },
+    .{ .name = "NULs after", .exit_code = 0, .text = "Ubuntu\r\nDebian\r\n", .nuls = 2, .complete = true, .distros = "Ubuntu\nDebian\n" },
+    .{ .name = "NULs after a BOM", .exit_code = 0, .text = "Ubuntu\r\n", .bom = true, .nuls = 1, .complete = true, .distros = "Ubuntu\n" },
+    .{ .name = "nothing but NULs", .exit_code = 0, .text = "", .nuls = 1, .complete = true },
+    .{ .name = "a NUL after a cut", .exit_code = 0, .text = "Ubuntu\r\nDeb", .nuls = 1, .complete = false },
+    .{ .name = "half a NUL after", .exit_code = 0, .raw = "U\x00\r\x00\n\x00\x00", .complete = false },
+    // UTF-8 (`WSL_UTF8=1`, were the pin ignored) is not the pinned
+    // encoding: no whole list, with NULs after it or not.
+    .{ .name = "UTF-8", .exit_code = 0, .text = "Ubuntu\r\n", .utf16 = false, .complete = false },
+    .{ .name = "UTF-8, a NUL after", .exit_code = 0, .text = "Ubuntu\r\n", .utf16 = false, .nuls = 1, .complete = false },
+    .{ .name = "UTF-8, a line feed and a NUL", .exit_code = 0, .text = "Ubuntu\n", .utf16 = false, .nuls = 1, .complete = false },
+    // Line feeds alone: whole when another zero high byte shows UTF-16;
+    // with none, 8-bit text ending in "\n\x00" reads the same.
+    .{ .name = "line feeds", .exit_code = 0, .text = "Ubuntu\nDebian\n", .complete = true, .distros = "Ubuntu\nDebian\n" },
+    .{ .name = "line feed, no ASCII", .exit_code = 0, .text = "\u{65e5}\u{672c}\n", .complete = false },
+    // A byte order mark; a name with no ASCII.
     .{ .name = "BOM", .exit_code = 0, .text = "Ubuntu\r\n", .bom = true, .complete = true, .distros = "Ubuntu\n" },
     // Cut short: a byte missing from the last line end, within a name, or
     // between a name and its line end. None is a complete list.
@@ -6047,6 +6133,15 @@ const test_wsl_cases = [_]TestWslCase{
         .name = "not installed",
         .exit_code = 1,
         .text = "The Windows Subsystem for Linux is not installed. You can install by running 'wsl.exe --install'.\r\nFor more information please visit https://aka.ms/wslinstall\r\nPress any key to install Windows Subsystem for Linux.\r\nOperation aborted\r\n",
+        .complete = true,
+    },
+    // The stub's encoding is not known, and may not follow the pin: a
+    // failure's message is still read in either.
+    .{
+        .name = "not installed, UTF-8",
+        .exit_code = 1,
+        .text = "The Windows Subsystem for Linux is not installed. You can install by running 'wsl.exe --install'.\r\n",
+        .utf16 = false,
         .complete = true,
     },
     // WSL is there and the list failed: tried again.
@@ -6177,23 +6272,39 @@ fn testWslPipe(read_end: *windows.HANDLE, write_end: *windows.HANDLE) !void {
 }
 
 /// `joinWslDrains` over one drain, on a thread of its own, which the test
-/// waits for at most `limit_ms`. A join still running then is unblocked by
-/// closing the pipe's write end (`write_end`, which the caller hands over),
-/// and the test fails rather than hangs.
+/// waits for at most `limit_ms`. Takes the reader (`thread`) and the pipe's
+/// write end (`write_end`) from the caller: however it returns, the reader
+/// has been joined and the write end closed, so the caller may then free
+/// the drain and the read end. A join still running at the limit is
+/// unblocked by closing the write end, and the test fails rather than
+/// hangs.
 fn testJoinWithin(drain: *WslOutputDrain, thread: std.Thread, write_end: windows.HANDLE, limit_ms: u32) !void {
     const Joiner = struct {
         fn run(d: *WslOutputDrain, t: std.Thread) void {
             joinWslDrains(&.{d}, &.{t});
         }
     };
-    const joiner = try std.Thread.spawn(.{}, Joiner.run, .{ drain, thread });
+    const joiner = std.Thread.spawn(.{}, Joiner.run, .{ drain, thread }) catch |err| {
+        // No joiner: the reader is stopped, its pipe closed, and joined here.
+        drain.stop();
+        windows.CloseHandle(write_end);
+        thread.join();
+        return err;
+    };
     const ended = if (windows.WaitForSingleObjectEx(joiner.getHandle(), limit_ms, false)) |_| true else |_| false;
     windows.CloseHandle(write_end);
+    // Bounded too. With the write end closed, a read ends at the pipe's
+    // end, and a reader held in a test hook is released by its test within
+    // seconds. A join still running after this would leave the drain freed
+    // under live threads if the test returned, so it ends the run instead.
+    windows.WaitForSingleObjectEx(joiner.getHandle(), 10_000, false) catch
+        @panic("a WSL drain's join did not end after its pipe closed");
     joiner.join();
     if (!ended) return error.TestJoinHung;
 }
 
 test "a WSL drain ends with what came when its pipe ends, and is stopped, then joined, when a held write end keeps it open" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
     const testing = std.testing;
     // The write end closes: the drain ends with what came.
     {
@@ -6216,24 +6327,30 @@ test "a WSL drain ends with what came when its pipe ends, and is stopped, then j
         var read_end: windows.HANDLE = undefined;
         var write_end: windows.HANDLE = undefined;
         try testWslPipe(&read_end, &write_end);
+        // Closed only once the drain is joined (`testJoinWithin` joins it).
+        defer windows.CloseHandle(read_end);
+        var write_open: ?windows.HANDLE = write_end;
+        defer if (write_open) |handle| windows.CloseHandle(handle);
         var drain: WslOutputDrain = try .init(.{ .handle = read_end });
         defer drain.deinit();
         _ = try windows.WriteFile(write_end, "Ubuntu\r\n", null);
         const thread = try std.Thread.spawn(.{}, WslOutputDrain.run, .{&drain});
+        // The reader and the write end are `testJoinWithin`'s from here.
+        write_open = null;
         try testJoinWithin(&drain, thread, write_end, 3000);
         try testing.expectEqual(@as(?anyerror, error.WslListCancelled), drain.err);
         try testing.expect(drain.bytes == null);
-        // Closed only once the drain is joined.
-        windows.CloseHandle(read_end);
     }
 }
 
 test "a WSL drain held outside its read until long after it was stopped still ends, and the join with it" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
     const testing = std.testing;
     const Hold = struct {
         var at_hook: ?windows.HANDLE = null;
         var release: ?windows.HANDLE = null;
         var held = false;
+        var drain: ?*WslOutputDrain = null;
 
         /// The first read waits until the test releases it.
         fn before() void {
@@ -6241,6 +6358,21 @@ test "a WSL drain held outside its read until long after it was stopped still en
             held = true;
             _ = SetEvent(at_hook.?);
             windows.WaitForSingleObjectEx(release.?, windows.INFINITE, false) catch {};
+        }
+
+        /// Releases the reader once the join has stopped it (the drain's
+        /// flag, observed) and 1.5 s more: the old join cancelled for 1 s
+        /// after its 500 ms grace, so it would be done. That is not
+        /// observed: under scheduler delay its cancels could still run
+        /// when the reader is released. A late release only lets the old
+        /// shape pass; the drain as it is passes whenever it comes.
+        fn releaseAfterStop() void {
+            var waited: u32 = 0;
+            while (!drain.?.stopping.load(.acquire) and waited < 5000) : (waited += 10) {
+                std.Thread.sleep(10 * std.time.ns_per_ms);
+            }
+            std.Thread.sleep(1500 * std.time.ns_per_ms);
+            _ = SetEvent(release.?);
         }
     };
     Hold.at_hook = try windows.CreateEventExW(null, null, windows.CREATE_EVENT_MANUAL_RESET, windows.EVENT_ALL_ACCESS);
@@ -6254,26 +6386,66 @@ test "a WSL drain held outside its read until long after it was stopped still en
     var read_end: windows.HANDLE = undefined;
     var write_end: windows.HANDLE = undefined;
     try testWslPipe(&read_end, &write_end);
+    // Closed only once the reader is joined (the defers below run first).
+    defer windows.CloseHandle(read_end);
+    var write_open: ?windows.HANDLE = write_end;
+    defer if (write_open) |handle| windows.CloseHandle(handle);
     var drain: WslOutputDrain = try .init(.{ .handle = read_end });
     defer drain.deinit();
+    Hold.drain = &drain;
+    defer Hold.drain = null;
     // The write end stays open, and the reader is held before its first
     // read while the join gives it its grace and stops it.
-    const thread = try std.Thread.spawn(.{}, WslOutputDrain.run, .{&drain});
-    try windows.WaitForSingleObjectEx(Hold.at_hook.?, 3000, false);
-    const Release = struct {
-        fn run() void {
-            // Past the grace and the 1 s of cancels the old join tried.
-            std.Thread.sleep(2 * std.time.ns_per_s);
-            _ = SetEvent(Hold.release.?);
-        }
+    var reader: ?std.Thread = try std.Thread.spawn(.{}, WslOutputDrain.run, .{&drain});
+    // Until `testJoinWithin` takes it, the reader is this test's: if the
+    // test fails first, the reader is released, stopped and joined before
+    // the drain it reads into, the hook and the pipe go.
+    defer if (reader) |thread| {
+        _ = SetEvent(Hold.release.?);
+        drain.stop();
+        thread.join();
     };
-    const releaser = try std.Thread.spawn(.{}, Release.run, .{});
+    try windows.WaitForSingleObjectEx(Hold.at_hook.?, 3000, false);
+    const releaser = try std.Thread.spawn(.{}, Hold.releaseAfterStop, .{});
     defer releaser.join();
-    // Released, the reader sees it was stopped and ends; the join returns
-    // well within the limit.
+    // The reader and the write end are `testJoinWithin`'s from here: it
+    // joins the one and closes the other however it returns. Released, the
+    // reader sees it was stopped and ends; the join returns well within
+    // the limit.
+    const thread = reader.?;
+    reader = null;
+    write_open = null;
     try testJoinWithin(&drain, thread, write_end, 6000);
     try testing.expectEqual(@as(?anyerror, error.WslListCancelled), drain.err);
-    windows.CloseHandle(read_end);
+}
+
+test "wsl -l -q runs without an inherited WSL_UTF8, so it writes the UTF-16LE its list is read in" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    const Spawn = struct {
+        var pinned: ?bool = null;
+
+        /// Reads the child's environment and stops before it runs: no
+        /// wsl.exe runs.
+        fn check(child: *const std.process.Child) anyerror!void {
+            const env = child.env_map orelse return error.TestExpectedEnv;
+            pinned = env.get("WSL_UTF8") == null and env.get("Path") != null;
+            return error.TestNotSpawned;
+        }
+    };
+    test_wsl_list_spawn = &Spawn.check;
+    defer test_wsl_list_spawn = null;
+    // Windows compares the names without case, and so does the map.
+    for ([_][]const u8{ "WSL_UTF8", "wsl_utf8" }) |name| {
+        var env = std.process.EnvMap.init(alloc);
+        defer env.deinit();
+        try env.put("Path", "C:\\Windows\\System32");
+        try env.put(name, "1");
+        Spawn.pinned = null;
+        try testing.expectError(error.TestNotSpawned, listWslDistrosIn(alloc, "C:\\noctty-test\\wsl.exe", &env));
+        try testing.expectEqual(@as(?bool, true), Spawn.pinned);
+    }
 }
 
 /// A stand-in for Windows' record of the WSL distributions
