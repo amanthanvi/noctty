@@ -556,6 +556,10 @@ const WindowsConPty = struct {
             return error.BundledConptyInconsistent;
         }
 
+        // Demote only once the in-box conhost has created this one: a
+        // creation both reject (a size neither accepts) says nothing against
+        // the bundled pair, and demotion lasts for the process.
+        if (!context.attempt(&inbox_functions)) return error.CreatePseudoConsoleFailed;
         if (selected.cmpxchgStrong(
             initial,
             &demoted_functions,
@@ -565,7 +569,6 @@ const WindowsConPty = struct {
             log.warn("{s}; {s}", .{ describeConPtyFallback(error.CreateFailed), inbox_consequences });
             signalFallbackBanner();
         }
-        if (!context.attempt(&inbox_functions)) return error.CreatePseudoConsoleFailed;
         return &inbox_functions;
     }
 
@@ -933,10 +936,7 @@ const WindowsPty = struct {
                 conpty: *const WindowsConPty.Functions,
             ) bool {
                 return conpty.create(
-                    .{
-                        .X = @intCast(self.size.ws_col),
-                        .Y = @intCast(self.size.ws_row),
-                    },
+                    consoleSize(self.size),
                     self.pty.in_pipe_pty.?,
                     self.pty.out_pipe_pty.?,
                     conpty.createFlags(self.text_measurement),
@@ -1166,6 +1166,16 @@ const WindowsPty = struct {
 
     pub const SetSizeError = error{ResizeFailed};
 
+    /// The console size of a pseudo console for `size`. A COORD holds signed
+    /// 16-bit counts, so a count past 32767 saturates there. Nothing reaches
+    /// that today (it takes a client over 32767 px at a 1 px cell); if
+    /// something does, the console is narrower than the grid, which `setSize`
+    /// still records at the requested size.
+    pub fn consoleSize(size: winsize) windows.COORD {
+        const max = std.math.maxInt(i16);
+        return .{ .X = @intCast(@min(size.ws_col, max)), .Y = @intCast(@min(size.ws_row, max)) };
+    }
+
     pub fn encodeHandoffResize(columns: u16, rows: u16) [6]u8 {
         var packet: [6]u8 = undefined;
         std.mem.writeInt(u16, packet[0..2], 8, .little);
@@ -1178,10 +1188,7 @@ const WindowsPty = struct {
     pub fn setSize(self: *Pty, size: winsize) SetSizeError!void {
         switch (self.control) {
             .pseudo_console => |pc| {
-                const result = pc.conpty.resize(
-                    pc.handle,
-                    .{ .X = @intCast(size.ws_col), .Y = @intCast(size.ws_row) },
-                );
+                const result = pc.conpty.resize(pc.handle, consoleSize(size));
                 if (result != windows.S_OK) return error.ResizeFailed;
             },
             .handoff => |*handoff| {
@@ -1264,6 +1271,18 @@ test "handoff release drops the marshaled pipe ends without closing them" {
     try std.testing.expectEqual(
         std.os.windows.NTSTATUS.SUCCESS,
         std.os.windows.ntdll.NtClose(handles.output),
+    );
+}
+
+test "pseudo console size saturates at the largest COORD" {
+    // A COORD holds signed 16-bit counts and a winsize unsigned ones.
+    try std.testing.expectEqual(
+        windows.COORD{ .X = 80, .Y = 24 },
+        WindowsPty.consoleSize(.{ .ws_col = 80, .ws_row = 24 }),
+    );
+    try std.testing.expectEqual(
+        windows.COORD{ .X = 32767, .Y = 32767 },
+        WindowsPty.consoleSize(.{ .ws_col = 40000, .ws_row = 65535 }),
     );
 }
 
@@ -1452,6 +1471,37 @@ fn installFakeBundledBackendForTest() void {
         .close = WindowsConPty.inbox_functions.close,
     };
     WindowsConPty.selected.store(&WindowsConPty.bundled_functions, .release);
+}
+
+test "Windows ConPTY keeps the bundled backend when the in-box retry fails too" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const testing = std.testing;
+    const original = try saveConPtyEnvForTest(testing.allocator);
+    defer if (original) |value| testing.allocator.free(value);
+    defer restoreConPtyEnvForTest(original);
+
+    // A creation both backends reject, as one for a size neither accepts
+    // would be, says nothing against the bundled pair: it must neither demote
+    // the process nor show the fallback banner, so the next terminal still
+    // gets the bundled backend.
+    const Creation = struct {
+        succeeds: bool,
+
+        fn attempt(self: *const @This(), _: *const WindowsConPty.Functions) bool {
+            return self.succeeds;
+        }
+    };
+    WindowsConPty.resetForTest();
+    installFakeBundledBackendForTest();
+    const rejected: Creation = .{ .succeeds = false };
+    try testing.expectError(error.CreatePseudoConsoleFailed, WindowsConPty.selectBackend(&rejected));
+    try testing.expectEqual(ConPtySource.bundled, WindowsConPty.selected.load(.acquire).source);
+    try testing.expect(!WindowsConPty.fallback_banner_pending.load(.acquire));
+
+    const accepted: Creation = .{ .succeeds = true };
+    try testing.expectEqual(ConPtySource.bundled, (try WindowsConPty.selectBackend(&accepted)).source);
+    WindowsConPty.releaseBundledHpcon();
 }
 
 test "Windows ConPTY demotion never outruns a live bundled pseudo console" {

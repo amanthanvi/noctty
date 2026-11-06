@@ -1014,6 +1014,156 @@ test "SharedGridSet builds a grid that names no font without a font scan" {
     } else return error.SkipZigTest;
 }
 
+test "SharedGridSet renders the default faces at the 1 pt zoom-out floor" {
+    // #674: `decrease_font_size` stops at 1 pt, and `Surface.setFontSize`
+    // asks this set for the grid at that size. The default config's grid
+    // (JetBrains Mono, the Nerd Font symbols, Noto Color Emoji and Noto
+    // Emoji) renders a sample of ASCII, box drawing, Powerline, Nerd Font
+    // and emoji the way the renderer's `addGlyph` does, at each DPI.
+    if (comptime builtin.target.os.tag == .windows) {
+        const testing = std.testing;
+        const alloc = testing.allocator;
+
+        var set = try SharedGridSet.init(alloc);
+        defer set.deinit();
+        var cfg = try Config.default(alloc);
+        defer cfg.deinit();
+        var keycfg = try DerivedConfig.init(alloc, &cfg);
+        defer keycfg.deinit();
+
+        for ([_]u16{ 96, 120, 144, 192 }) |dpi| {
+            const key, const grid = try set.ref(&keycfg, .{
+                .points = 1,
+                .xdpi = dpi,
+                .ydpi = dpi,
+            });
+            defer set.deref(key);
+            // A sample codepoint no built-in face has would otherwise start
+            // a scan of the installed fonts for a fallback.
+            grid.resolver.discover = null;
+            errdefer std.debug.print("dpi {d} metrics {any}\n", .{ dpi, grid.metrics });
+            try testRenderTinySample(alloc, grid);
+
+            // The static JetBrains Mono, whose outlines carry TrueType
+            // hinting, as the primary of the same fallback chain.
+            var c = Collection.init();
+            var c_owned = true;
+            defer if (c_owned) c.deinit(alloc);
+            c.load_options = .{ .library = set.font_lib, .size = .{
+                .points = 1,
+                .xdpi = dpi,
+                .ydpi = dpi,
+            } };
+            const faces = [_][:0]const u8{
+                font.embedded.regular,
+                font.embedded.symbols_nerd_font,
+                font.embedded.emoji,
+                font.embedded.emoji_text,
+            };
+            for (faces, 0..) |data, i| {
+                _ = try c.add(alloc, try .init(set.font_lib, data, c.load_options.?.faceOptions()), .{
+                    .style = .regular,
+                    .fallback = i > 0,
+                    .size_adjustment = .none,
+                });
+            }
+            var regular = try SharedGrid.init(alloc, .{ .collection = c });
+            c_owned = false;
+            defer regular.deinit(alloc);
+            errdefer std.debug.print("regular dpi {d} metrics {any}\n", .{ dpi, regular.metrics });
+            try testRenderTinySample(alloc, &regular);
+        }
+        try testing.expect(set.font_discover.?.state == null);
+    } else return error.SkipZigTest;
+}
+
+/// Renders the sample of `testRenderTinyCodepoints` through `grid` with the
+/// options `addGlyph` passes (`renderer/generic.zig`): the Nerd Font
+/// constraint, or `.fit` for a symbol, one and two cells wide and
+/// constrained to one and two cells, and checks every glyph lies inside its
+/// atlas. Also renders every sprite the renderer draws for decorations and
+/// the cursor.
+fn testRenderTinySample(alloc: Allocator, grid: *SharedGrid) !void {
+    const testing = std.testing;
+    const isSymbol = @import("../renderer/cell.zig").isSymbol;
+    const getConstraint = @import("nerd_font_attributes.zig").getConstraint;
+
+    try testing.expect(grid.metrics.cell_width >= 1);
+    try testing.expect(grid.metrics.cell_height >= 1);
+
+    var sample: std.ArrayList(u21) = .empty;
+    defer sample.deinit(alloc);
+    try testRenderTinyCodepoints(alloc, &sample);
+
+    for (sample.items) |cp| {
+        const emoji = cp >= 0x1F000 or cp == 0x2764 or cp == 0x2705;
+        const presentations: []const ?font.Presentation =
+            if (emoji) &.{ null, .emoji, .text } else &.{null};
+        for (presentations) |p| {
+            const idx = try grid.getIndex(alloc, cp, .regular, p) orelse continue;
+            const glyph_index = if (idx.special() != null) cp else glyph_index: {
+                grid.lock.lockShared();
+                defer grid.lock.unlockShared();
+                const face = try grid.resolver.collection.getFace(idx);
+                break :glyph_index face.glyphIndex(cp) orelse continue;
+            };
+            for ([_]u2{ 1, 2 }) |cell_width| {
+                for ([_]u2{ 1, 2 }) |constraint_width| {
+                    errdefer std.debug.print(
+                        "U+{X} presentation {s} cell_width {d} constraint_width {d}\n",
+                        .{ cp, if (p) |v| @tagName(v) else "any", cell_width, constraint_width },
+                    );
+                    const render = try grid.renderGlyph(alloc, idx, glyph_index, .{
+                        .grid_metrics = grid.metrics,
+                        .cell_width = cell_width,
+                        .constraint = getConstraint(cp) orelse
+                            if (isSymbol(cp)) .{ .size = .fit } else .none,
+                        .constraint_width = constraint_width,
+                    });
+                    try testExpectGlyphInAtlas(grid, render);
+                }
+            }
+        }
+    }
+
+    for (std.enums.values(font.sprite.Sprite)) |sprite| {
+        errdefer std.debug.print("sprite {s}\n", .{@tagName(sprite)});
+        const render = try grid.renderGlyph(alloc, font.sprite_index, @intFromEnum(sprite), .{
+            .grid_metrics = grid.metrics,
+            .cell_width = 1,
+        });
+        try testExpectGlyphInAtlas(grid, render);
+    }
+}
+
+fn testExpectGlyphInAtlas(grid: *SharedGrid, render: SharedGrid.Render) !void {
+    const atlas = switch (render.presentation) {
+        .text => &grid.atlas_grayscale,
+        .emoji => &grid.atlas_color,
+    };
+    try std.testing.expect(render.glyph.atlas_x + render.glyph.width <= atlas.size);
+    try std.testing.expect(render.glyph.atlas_y + render.glyph.height <= atlas.size);
+}
+
+/// ASCII, box drawing and block elements, Powerline, about 450 Nerd Font
+/// icons spread over the Private Use Areas, and a few emoji.
+fn testRenderTinyCodepoints(alloc: Allocator, sample: *std.ArrayList(u21)) !void {
+    var cp: u21 = 0x20;
+    while (cp < 0x7F) : (cp += 1) try sample.append(alloc, cp);
+    cp = 0x2500; // box drawing, block elements
+    while (cp < 0x25A0) : (cp += 1) try sample.append(alloc, cp);
+    cp = 0xE0A0; // Powerline and Powerline Extra
+    while (cp < 0xE0D8) : (cp += 1) try sample.append(alloc, cp);
+    cp = 0xE000; // Nerd Font icons in the BMP Private Use Area
+    while (cp < 0xF900) : (cp += 17) try sample.append(alloc, cp);
+    cp = 0xF0001; // Material Design icons in Supplementary PUA-A
+    while (cp < 0xF1AF0) : (cp += 97) try sample.append(alloc, cp);
+    try sample.appendSlice(alloc, &.{
+        0x2630, 0x23FB, 0x2B58, 0xEA61, 0xE0C0, // constrained symbols
+        0x2764, 0x2705, 0x1F600, 0x1F44D, 0x1F978, 0x1F1FA, 0x1F1F8, 0x1FAE0, // emoji
+    });
+}
+
 test "SharedGridSet deinit stops the startup font scan at its next file" {
     // FLAKY-CLIFWD-CLOSE-01: closing the last window soon after launch
     // joined a scan that opens every installed font, so the windowless

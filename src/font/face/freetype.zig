@@ -875,8 +875,13 @@ pub const Face = struct {
 
                 // Round our target width and height
                 // as the size for our scaled bitmap.
-                const w: u32 = @intFromFloat(@round(width));
-                const h: u32 = @intFromFloat(@round(height));
+                const w: u32 = @intFromFloat(@max(0, @round(width)));
+                const h: u32 = @intFromFloat(@max(0, @round(height)));
+
+                // A glyph constrained into a cell of a pixel or two (the
+                // 1 pt zoom-out floor) can round to no pixels at all, and
+                // stb's resize does not reject a zero-sized output.
+                if (w == 0 or h == 0) return std.mem.zeroes(Glyph);
                 const pitch = w * atlas.format.depth();
 
                 // Allocate a buffer for our scaled bitmap.
@@ -961,6 +966,10 @@ pub const Face = struct {
             },
         }
 
+        // An outline constrained below FreeType's 1/64 px renders to an
+        // empty bitmap, and everything below needs a non-empty one.
+        if (bitmap.width == 0 or bitmap.rows == 0) return std.mem.zeroes(Glyph);
+
         // Our whole-pixel bearings for the final glyph.
         // The fractional portion will be included in the rasterized position.
         //
@@ -996,10 +1005,6 @@ pub const Face = struct {
             }
             bitmap.num_grays = 256;
         }
-
-        // Must have non-empty bitmap because we return earlier if zero.
-        // We assume the rest of this that it is non-zero so this is important.
-        assert(px_width > 0 and px_height > 0);
 
         // If this doesn't match then something is wrong.
         assert(px_width * atlas.format.depth() == bitmap.pitch);
@@ -1799,5 +1804,60 @@ test "bitmap glyph OTB" {
                 atlas.data[(glyph.atlas_y + y) * atlas.size + (glyph.atlas_x + x)],
             );
         }
+    }
+}
+
+test "a glyph constrained below a pixel renders as an empty glyph" {
+    // #674 hardening. Zoom-out stops at 1 pt, where the cell is a pixel or
+    // two, and a constraint can shrink a glyph below what rounds to a pixel.
+    // A bitmap glyph is then resized to a zero-sized bitmap, which stb's
+    // resize does not reject, and an outline renders to an empty bitmap.
+    // The default faces never got there (the 1 pt test in SharedGridSet.zig,
+    // and Noto Color Emoji from 1 to 12 pt at 96 to 288 DPI), so both inputs
+    // here are made for it; either must come back as an empty glyph.
+    const alloc = testing.allocator;
+
+    var lib = try Library.init(alloc);
+    defer lib.deinit();
+
+    // A 1x1 px cell whose face is 0.8 px tall.
+    const metrics: font.Metrics = .calc(.{
+        .px_per_em = 1,
+        .cell_width = 1,
+        .ascent = 0.6,
+        .descent = -0.2,
+        .line_gap = 0,
+    });
+    try testing.expectEqual(@as(u32, 1), metrics.cell_width);
+    try testing.expectEqual(@as(u32, 1), metrics.cell_height);
+
+    const cases = [_]struct {
+        font: [:0]const u8,
+        format: font.Atlas.Format,
+        constraint: font.face.RenderOptions.Constraint,
+    }{
+        // Spleen's 8x16 bitmap 'A' fit into the cell: 0.4x0.8 px, 0 px wide
+        // once rounded.
+        .{ .font = font.embedded.spleen_bdf, .format = .grayscale, .constraint = .{ .size = .fit } },
+        // JetBrains Mono's outline 'A' stretched to a sliver at the cell's
+        // left edge, narrower than FreeType's 1/64 px.
+        .{ .font = font.embedded.regular, .format = .grayscale, .constraint = .{
+            .size = .stretch,
+            .align_horizontal = .start,
+            .pad_right = 0.9999,
+        } },
+    };
+    for (cases) |case| {
+        var atlas = try font.Atlas.init(alloc, 512, case.format);
+        defer atlas.deinit(alloc);
+        var face = try Face.init(lib, case.font, .{ .size = .{ .points = 12, .xdpi = 96, .ydpi = 96 } });
+        defer face.deinit();
+
+        const glyph = try face.renderGlyph(alloc, &atlas, face.glyphIndex('A').?, .{
+            .grid_metrics = metrics,
+            .constraint = case.constraint,
+        });
+        try testing.expectEqual(@as(u32, 0), glyph.width);
+        try testing.expectEqual(@as(u32, 0), glyph.height);
     }
 }

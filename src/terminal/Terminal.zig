@@ -14702,6 +14702,121 @@ test "Terminal: resize with high unique style per cell with wrapping" {
     try t.resize(alloc, 60, 30);
 }
 
+test "Terminal: resize through the zoom-out grids of a 4K client and back" {
+    // #674: zoom-out stops at 1 pt. A 3840x2088 client (4K less the
+    // taskbar) with the default font, whose cells `SharedGridSet` measures,
+    // holds 3840x2088 cells at 1 pt and 96 DPI (a 1x1 px cell) and 3840x696
+    // at 144 DPI (1x3); 3840x1044 is a font whose 1 pt cell is 1x2. The steps
+    // run from 12 pt to the floor and back at each DPI through 2 pt. The terminal starts as a 160x45 pane with styled,
+    // wrapped scrollback, keeps termio's Windows flag, and runs a tmux-like
+    // alternate screen that scrolls inside DECSTBM margins and redraws after
+    // every resize. Every step checks both screens' page lists, cursors and
+    // pages. A reflow at the floor costs seconds under Debug's page checks,
+    // so the steps are a sample of the point sizes, not all twelve.
+    const alloc = testing.allocator;
+    var t = try init(alloc, .{ .cols = 160, .rows = 45, .max_scrollback = 10_000_000 });
+    defer t.deinit(alloc);
+    t.flags.resize_pull_scrollback = false; // as `Exec.initTerminal` on Windows
+
+    var s = t.vtStream();
+    defer s.deinit();
+
+    // Styled scrollback: true-colour and 256-colour SGR, bold underline, a
+    // hyperlink, a wide character, a combining mark, and every seventh line
+    // wider than the pane so that it wraps. Sixty lines fill 78 rows, so the
+    // first 34 are history before the alternate screen starts.
+    var line_buf: [512]u8 = undefined;
+    for (0..60) |i| {
+        const tail = if (i % 7 == 0) "x" ** 300 else "";
+        const line = try std.fmt.bufPrint(
+            &line_buf,
+            "\x1b[38;2;{d};90;200m\x1b[48;5;{d}m{d:0>4} \x1b[1;4m\u{4E16}\u{754C} e\u{301}\x1b[22;24m " ++
+                "\x1b]8;;https://example.com/{d}\x1b\\link\x1b]8;;\x1b\\ {s}\x1b[0m\r\n",
+            .{ (i % 6) * 40, i % 4, i, i % 4, tail },
+        );
+        s.nextSlice(line);
+    }
+
+    // The first line, styled and wrapped, is the top of the history.
+    const primary = t.screens.get(.primary).?;
+    try testing.expect(primary.pages.total_rows > primary.pages.rows);
+    try testZoomExpectFirstLineInHistory(primary);
+
+    s.nextSlice("\x1b[?1049h\x1b[H\x1b[2J");
+    try testZoomTmuxFrame(&t, &s);
+    testZoomIntegrity(&t);
+
+    // 12, 2 and 1 pt at 96 DPI; 12, 2 and 1 pt at 144 DPI, then 1x2.
+    const dpi_96 = [_][2]size.CellCountInt{ .{ 384, 99 }, .{ 1920, 522 }, .{ 3840, 2088 } };
+    const dpi_144 = [_][2]size.CellCountInt{ .{ 274, 65 }, .{ 1920, 417 }, .{ 3840, 696 }, .{ 3840, 1044 } };
+    for ([_][]const [2]size.CellCountInt{ &dpi_96, &dpi_144 }) |steps| {
+        for (steps) |grid| try testZoomResize(&t, &s, grid);
+        var i = steps.len - 1;
+        while (i > 0) {
+            i -= 1;
+            try testZoomResize(&t, &s, steps[i]);
+        }
+    }
+    try testZoomResize(&t, &s, .{ 160, 45 });
+
+    // tmux exits: back on the primary screen with its scrollback.
+    s.nextSlice("\x1b[r\x1b[?1049l");
+    testZoomIntegrity(&t);
+    try testing.expect(t.screens.active_key == .primary);
+}
+
+/// The top row of `screen`'s history is the first scrollback line: `0000`
+/// in its colours, soft-wrapped onto the next row.
+fn testZoomExpectFirstLineInHistory(screen: *Screen) !void {
+    const top = screen.pages.pin(.{ .history = .{} }) orelse return error.NoHistory;
+    const rc = top.rowAndCell();
+    try testing.expectEqual(@as(u21, '0'), rc.cell.codepoint());
+    try testing.expect(rc.cell.hasStyling());
+    try testing.expect(rc.row.wrap);
+    const text = try screen.dumpStringAlloc(testing.allocator, .{ .history = .{} });
+    defer testing.allocator.free(text);
+    try testing.expect(std.mem.startsWith(u8, text, "0000 \u{4E16}\u{754C} e\u{301} link xxx"));
+}
+
+fn testZoomResize(t: *Terminal, s: *Stream, grid: [2]size.CellCountInt) !void {
+    errdefer std.debug.print("resize to {d}x{d}\n", .{ grid[0], grid[1] });
+    try t.resize(testing.allocator, grid[0], grid[1]);
+    try testing.expectEqual(grid[0], t.cols);
+    try testing.expectEqual(grid[1], t.rows);
+    testZoomIntegrity(t);
+    try testZoomTmuxFrame(t, s);
+    testZoomIntegrity(t);
+}
+
+/// What tmux writes after a resize, cut down: a pane region above a status
+/// line, a few lines scrolled at its bottom margin, then a region with a top
+/// margin scrolled the same way, the status line in reverse video, and the
+/// cursor parked mid-pane.
+fn testZoomTmuxFrame(t: *Terminal, s: *Stream) !void {
+    var buf: [256]u8 = undefined;
+    const rows = t.rows;
+    const cols = t.cols;
+    s.nextSlice(try std.fmt.bufPrint(&buf, "\x1b[1;{d}r\x1b[{d};1H", .{ rows - 1, rows - 1 }));
+    for (0..3) |i| s.nextSlice(try std.fmt.bufPrint(&buf, "\x1b[32mpane line {d}\x1b[0m\n", .{i}));
+    s.nextSlice(try std.fmt.bufPrint(&buf, "\x1b[2;{d}r\x1b[{d};1H", .{ rows - 1, rows - 1 }));
+    for (0..2) |i| s.nextSlice(try std.fmt.bufPrint(&buf, "\x1b[44mnvim {d}\x1b[K\x1b[0m\n", .{i}));
+    s.nextSlice(try std.fmt.bufPrint(
+        &buf,
+        "\x1b[{d};1H\x1b[7m[0] 0:nvim*\x1b[K\x1b[0m\x1b[{d};{d}H",
+        .{ rows, rows / 2, cols / 2 },
+    ));
+}
+
+fn testZoomIntegrity(t: *Terminal) void {
+    for ([_]ScreenSet.Key{ .primary, .alternate }) |key| {
+        const screen = t.screens.get(key) orelse continue;
+        screen.pages.assertIntegrity();
+        screen.assertIntegrity();
+        var node_ = screen.pages.pages.first;
+        while (node_) |node| : (node_ = node.next) node.page().assertIntegrity();
+    }
+}
+
 test "Terminal: resize with reflow and saved cursor" {
     const alloc = testing.allocator;
     var t = try init(alloc, .{ .cols = 2, .rows = 3 });

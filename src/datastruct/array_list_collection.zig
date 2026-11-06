@@ -19,8 +19,11 @@ pub fn ArrayListCollection(comptime T: type) type {
             const self: Self = .{
                 .lists = try alloc.alloc(ArrayListT, list_count),
             };
+            errdefer alloc.free(self.lists);
 
-            for (self.lists) |*list| {
+            for (self.lists, 0..) |*list, i| {
+                // A failure frees the lists already allocated.
+                errdefer for (self.lists[0..i]) |*done| done.deinit(alloc);
                 list.* = try .initCapacity(alloc, initial_capacity);
             }
 
@@ -41,4 +44,13 @@ pub fn ArrayListCollection(comptime T: type) type {
             }
         }
     };
+}
+
+test "ArrayListCollection init frees what it allocated when an allocation fails" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, struct {
+        fn run(alloc: Allocator) !void {
+            var lists: ArrayListCollection(u32) = try .init(alloc, 4, 8);
+            lists.deinit(alloc);
+        }
+    }.run, .{});
 }
