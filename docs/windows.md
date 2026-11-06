@@ -244,6 +244,55 @@ instead; nothing is migrated.
 
 ## Shells
 
+To open a specific shell, such as a WSL distribution, in a new tab: press
+`Ctrl+Shift+P`, type `~` and part of its name (`~ubuntu`), and press Enter. The
+[▾] menu next to the new-tab button lists the same profiles and opens the one
+you click in a new tab.
+
+No keybinding opens a named profile in a new tab yet. Besides the two ways
+above:
+
+- Set [`default-profile`](#default-profile-order-and-hidden-profiles), and
+  `Ctrl+Shift+T` opens that profile. A `command` line outranks it (see the
+  table below).
+- Right-click the new-tab button to open the current profile choice in a new
+  window; middle-click opens it in a split. The choice is the last profile you
+  picked, else `default-profile`, else the automatic shell.
+- Bind `launch_layout:<name>` to a key to open a saved
+  [named layout](#named-layouts) in a new window. A layout records the profile
+  each pane was opened with, not the command running in it (typing `wsl` in a
+  PowerShell tab saves PowerShell). Open the tab from the profile (palette `~`
+  or the [▾] menu), then `save_layout:<name>` from a window with that one tab;
+  the layout then opens it on one key press, with no UAC prompt, in the noctty
+  that runs the binding (so at that noctty's own level). This works for
+  profiles that restore, such as a shell or a WSL distribution. A layout never
+  reconnects a detected `ssh:` profile: it is saved without its profile, and
+  the pane comes back as whatever a new tab opens (your `command`, else
+  `default-profile` unless that is SSH, else the automatic shell). A profile
+  you define that runs `ssh.exe` is restored like any other.
+- A profile entry in the taskbar jump list launches noctty with that profile.
+  `new_window_elevated:<profile-key>` bound to a key opens the profile in an
+  elevated window, with a UAC prompt; use it only when you want that. See
+  [Taskbar jump list](#taskbar-jump-list) and
+  [Running elevated](#running-elevated).
+- From a shell, `noctty -e wsl.exe -d Ubuntu` starts a noctty process that runs
+  that command in its first window. Do not use `noctty +new-window -e ...`
+  while noctty is already running: the running instance refuses a forwarded
+  command and the call exits with an error (it only works when no instance is
+  running, where it starts one). The installer, WinGet and Chocolatey do not put
+  `noctty` on `PATH` (Scoop does): run it from the install folder as
+  `.\noctty.com`, or by its full path.
+
+The [▾] menu prints `Ctrl+Shift+1` to `Ctrl+Shift+9` beside the first nine
+profiles. No default keybinding uses those chords, and nothing outside the
+profile picker overlay acts on them. That overlay, with its quick slots
+(`Alt+1` to `Alt+3`), has no keybinding or menu entry: it opens on the first
+window of a launch that restores no session, when the environment variable
+`NOCTTY_WIN32_STARTUP_PROFILE_PICKER` is `1`. Where this page says "profile
+picker", it means that overlay; the palette and the [▾] menu list the same
+profiles. The menu lists the profiles noctty has loaded, so its first opening
+in a new window may show none.
+
 For commands launched through `cmd.exe /C`, noctty sets
 `NoDefaultCurrentDirectoryInExePath` in that wrapper's environment when it is
 absent. This disables cmd's implicit executable search in the pane's current

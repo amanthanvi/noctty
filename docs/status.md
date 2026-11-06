@@ -43,7 +43,7 @@ noctty is based on post-`v1.3.1` upstream main (`1.3.2-dev`, `ba398dfff`,
   forcing that code path on Windows 11.
 - No macOS, Linux, or cross-platform app runtime ships from this repo.
   `libghostty-vt` stays buildable for non-Windows targets as a library.
-- WSL sessions work from the profile picker. Making WSL the default shell
+- WSL sessions work from the command palette and the [▾] menu. Making WSL the default shell
   requires an explicit `command = wsl.exe`; [windows.md](windows.md#shells)
   explains why.
 
@@ -97,8 +97,9 @@ Win32-validated VT protocol coverage is tracked in
   window has no caption buttons). The X of a window's only tab closes the
   window, as its own close button does, asking first when a process would
   be lost. `close_tab:this` (Ctrl+Shift+W) still keeps the tab for undo.
-- In-app profile picker for detected shells: PowerShell 7, Windows
-  PowerShell, `cmd`, Git Bash, and WSL distributions when WSL responds.
+- In-app profile list (command palette and [▾] menu) for detected shells:
+  PowerShell 7, Windows PowerShell, `cmd`, Git Bash, and WSL distributions
+  when WSL responds.
 - Concrete aliases from `%USERPROFILE%\.ssh\config` appear in the profile
   picker and universal palette and launch through the system `ssh.exe`.
 - Native taskbar jump list with recent working directories and detected

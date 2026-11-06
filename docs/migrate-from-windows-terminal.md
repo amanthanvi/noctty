@@ -10,6 +10,14 @@ programs use different profile and configuration models, so this guide
 translates the settings that affect a normal session and names the ones that
 have no equivalent.
 
+**Open a specific shell.** Windows Terminal's `Ctrl+Shift+1` to `Ctrl+Shift+9`
+open a new tab with profile 1 to 9. Noctty has no keybinding yet that opens a
+named profile in a new tab. Press `Ctrl+Shift+P`, type `~` and part of the
+name (`~ubuntu`, `~pwsh`), and press Enter, or pick the profile from the [▾]
+menu next to the new-tab button. To make one shell what `Ctrl+Shift+T` opens,
+set `default-profile` (not together with `command`, which outranks it).
+[Windows shell behavior](windows.md#shells) lists every way to open a profile.
+
 ## 1. Record the settings you use
 
 In Windows Terminal, open Settings and note your default profile, its command
@@ -108,22 +116,42 @@ trust. The full option reference is `noctty +show-config --default --docs`.
 Windows Terminal has changed its defaults across versions, so check yours under
 Settings, Actions rather than trusting memory. Against current Noctty defaults:
 
-| Action              | Windows Terminal default      | Noctty default                            |
-| ------------------- | ----------------------------- | ----------------------------------------- |
-| Copy                | `Ctrl+C` with selection       | `Ctrl+Shift+C`                            |
-| Paste               | `Ctrl+V`                      | `Ctrl+Shift+V`                            |
-| New tab             | `Ctrl+Shift+T`                | `Ctrl+Shift+T`                            |
-| Close tab           | `Ctrl+Shift+W`                | `Ctrl+Shift+W`                            |
-| Next / previous tab | `Ctrl+Tab` / `Ctrl+Shift+Tab` | `Ctrl+Tab` / `Ctrl+Shift+Tab`             |
-| Split pane          | `Alt+Shift+D` duplicates      | `Ctrl+Shift+\` right, `Ctrl+Shift+E` down |
-| Move between panes  | `Alt+Arrow`                   | `Alt+Arrow`                               |
-| Command palette     | `Ctrl+Shift+P`                | `Ctrl+Shift+P`                            |
-| Find                | `Ctrl+Shift+F`                | `Ctrl+Shift+F`                            |
-| Full screen         | `F11` or `Alt+Enter`          | `F11` (`Alt+Enter` goes to the program)   |
-| Font size           | `Ctrl+=` / `Ctrl+-`           | `Ctrl+=` / `Ctrl+-`                       |
+| Action                 | Windows Terminal default         | Noctty default                                                                                                 |
+| ---------------------- | -------------------------------- | -------------------------------------------------------------------------------------------------------------- |
+| Copy                   | `Ctrl+C` with selection          | `Ctrl+Shift+C`                                                                                                 |
+| Paste                  | `Ctrl+V`                         | `Ctrl+Shift+V`                                                                                                 |
+| New tab                | `Ctrl+Shift+T`                   | `Ctrl+Shift+T`                                                                                                 |
+| New tab with profile N | `Ctrl+Shift+1` to `Ctrl+Shift+9` | None yet. `Ctrl+Shift+P`, then `~` and a name, opens the profile in a new tab                                  |
+| New tab dropdown       | `Ctrl+Shift+Space`               | The [▾] button next to the new-tab button, or `Ctrl+Shift+P` then `~`. `Ctrl+Shift+Space` is quick select here |
+| Close tab              | `Ctrl+Shift+W`                   | `Ctrl+Shift+W`                                                                                                 |
+| Next / previous tab    | `Ctrl+Tab` / `Ctrl+Shift+Tab`    | `Ctrl+Tab` / `Ctrl+Shift+Tab`                                                                                  |
+| Split pane             | `Alt+Shift+D` duplicates         | `Ctrl+Shift+\` right, `Ctrl+Shift+E` down                                                                      |
+| Move between panes     | `Alt+Arrow`                      | `Alt+Arrow`                                                                                                    |
+| Command palette        | `Ctrl+Shift+P`                   | `Ctrl+Shift+P`                                                                                                 |
+| Find                   | `Ctrl+Shift+F`                   | `Ctrl+Shift+F`                                                                                                 |
+| Full screen            | `F11` or `Alt+Enter`             | `F11` (`Alt+Enter` goes to the program)                                                                        |
+| Font size              | `Ctrl+=` / `Ctrl+-`              | `Ctrl+=` / `Ctrl+-`                                                                                            |
 
 Most of the daily set already matches. Copy, paste, and splitting are the three
-that will trip you up. Rebind anything you would rather keep:
+that will trip you up, and opening a profile by number is the one with no
+equivalent. The closest ones: set `default-profile` so `Ctrl+Shift+T` opens
+your most-used shell (leave `command` unset, because it outranks
+`default-profile`), or save a
+window whose one tab was opened from that profile (palette `~` or the [▾]
+menu; a layout stores the profile, not a command you typed, so `wsl` typed in a
+PowerShell tab saves PowerShell) with `save_layout:<name>` and bind
+`launch_layout:<name>` to a key, which opens it in a new window. That works
+for a shell or a WSL distribution; a layout does not reconnect a detected SSH
+profile (a profile you define that runs `ssh.exe` restores). Right-clicking
+the new-tab button opens the current profile choice in a new window. A
+`keybind = ...=text:wsl.exe -d Ubuntu\r` line types the command into the
+program that has focus: at a shell prompt it runs a nested shell inside the
+current tab instead of opening a new one, and in an editor or other program it
+inserts the text. The [▾] menu prints `Ctrl+Shift+1` to
+`Ctrl+Shift+9` beside the first nine profiles, but nothing acts on those
+chords. See
+[Windows shell behavior](windows.md#shells) for the details. Rebind anything
+you would rather keep:
 
 ```ini
 keybind = ctrl+t=new_tab
@@ -158,10 +186,15 @@ above.
 ## 5. Start the same shell
 
 Noctty detects PowerShell 7, Windows PowerShell, Command Prompt, Git Bash, and
-installed WSL distributions, and offers them in the profile picker at
-`Ctrl+Shift+P`. Try each one there before changing your default.
+installed WSL distributions, and lists them in the command palette at
+`Ctrl+Shift+P` (type `~` to show only profiles; Enter opens the one you pick in
+a new tab). Try each one there before changing your default.
 
-To pin one shell for every new terminal, set a single command:
+To pin one shell for every new terminal, set a single command. (To keep
+`command` unset and let `Ctrl+Shift+T` open a profile instead, use
+`default-profile`; a `command` outranks it, and a `command` set in a config
+file together with `default-profile` reports the `default-profile` line as a
+config problem. A `--command` on the command line wins quietly.)
 
 ```ini
 # PowerShell 7

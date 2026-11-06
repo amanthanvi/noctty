@@ -56,6 +56,105 @@ identical run. A plain `zig build` picks a new seed and reruns the tests. A
 cached result repeats the earlier run's outcome without running anything, so
 rerun without `--seed` or `--watch` when you need the count.
 
+### Running a source build day to day
+
+`zig build` installs into `zig-out\bin\` (`noctty.exe`, `noctty.com`,
+`noctty.ico`, debug symbols, and the bundled ConPTY pair unless its download
+failed) and `zig-out\share\`. `-Dbundled-conpty=false` only skips that step: a
+pair an earlier build left in `bin` is neither verified nor removed, and the
+exe loads a `conpty.dll` found beside it (`src/pty.zig`), so delete the pair to
+run on the in-box conhost.
+Keep `bin` and `share` together: the exe needs `share` beside it. A plain
+`zig build` is a Debug build, which is slow. Releases use
+`-Doptimize=ReleaseFast -Dcustom-shaders=true` (`scripts/package-windows.ps1`);
+custom shaders are off unless you pass the second flag.
+`-Doptimize=ReleaseSafe` keeps Zig's runtime safety checks, so an
+out-of-bounds index or an overflow stops with a panic instead of corrupting
+memory, at some cost in speed. It also loses crash dumps: per the Zig 0.15
+standard library source, Debug and ReleaseSafe builds install Zig's own
+segfault handler, which ends the process before noctty's crash-dump filter
+runs for an access violation. Crash capture is verified on ReleaseFast only.
+
+The installer, WinGet and Chocolatey (which run the same installer) create the
+Start menu entry; the Scoop package unpacks the portable ZIP and its manifest
+declares no shortcut. A source build gets none. `-p` (`--prefix`) moves the
+install root, so a build for daily use can live outside the repository. This
+installs to `$HOME\.local\noctty\bin` and adds a shortcut for the current user.
+Close noctty before you rebuild, because a running `noctty.exe` locks the file.
+Build from a shell that has the toolchain. `scripts\dev-windows.cmd` opens
+Command Prompt by default, and the snippet is PowerShell, so start PowerShell
+through it from the repository root (the script runs the command it is given
+inside the toolchain environment), then paste:
+
+```cmd
+scripts\dev-windows.cmd powershell -NoExit
+```
+
+```powershell
+zig build -Doptimize=ReleaseSafe -p "$HOME\.local\noctty"
+$bin = "$HOME\.local\noctty\bin"
+$lnk = Join-Path ([Environment]::GetFolderPath('Programs')) 'noctty (source build).lnk'
+if (Test-Path -LiteralPath $lnk) {
+    Write-Error "$lnk already exists; remove it or pick another name."
+} else {
+    $s = (New-Object -ComObject WScript.Shell).CreateShortcut($lnk)
+    $s.TargetPath = "$bin\noctty.exe"
+    $s.IconLocation = "$bin\noctty.ico"
+    $s.WorkingDirectory = $HOME
+    $s.Arguments = "--class=noctty-source"
+    $s.Save()
+}
+```
+
+`--class=noctty-source` gives this build its own single-instance namespace.
+Without it a launch from the shortcut would find a running installed noctty on
+the same pipe and hand its window to that process.
+
+Create the shortcut once; later rebuilds only need the `zig build` line. The
+check stops rather than overwrite a shortcut that is already there, because
+`CreateShortcut` on an existing path loads that shortcut and `Save()` rewrites
+it. The shortcut is made in the `else` branch, not after a `return`, because a
+pasted block can run one statement at a time, and a `return` would then end
+only its own statement.
+
+Differences from an installed copy:
+
+- A source build is not portable, so it behaves like an installed copy for
+  per-user state. It shares `%LOCALAPPDATA%\noctty` with an installed noctty.
+  Only some of that follows an XDG variable: `config.ghostty` follows
+  `XDG_CONFIG_HOME`, and crash dumps and `update-state.json` follow
+  `XDG_STATE_HOME`. `session-state.json`, `layouts\`, `palette-mru.txt`,
+  `startup-attempts.json`, `jump-list-recents.json` and `shell-integration\`
+  stay under `%LOCALAPPDATA%\noctty` whatever the XDG variables say, so they
+  cannot be separated that way. It also rewrites the
+  `AppUserModelId\io.github.amanthanvi.noctty` registration at every start so
+  that toasts take their icon from its `noctty.ico`, and replaces the taskbar
+  jump list with entries that start its own exe. If you also run an installed
+  copy, add an empty `noctty.portable` file beside the exe (`portable.txt` or
+  a `config.ghostty` there also count). Portable mode is what separates all of
+  it: state then lives beside the exe, and the installed copy's registration
+  and jump list stay alone. See
+  [App identity](docs/windows.md#app-identity).
+- Portable mode does not separate the running instance. The single-instance
+  pipe is named from the `class` setting (default `io.github.amanthanvi.noctty`
+  in every build but Debug) and the process's elevation, not from the install
+  or the portable root (`src/apprt/win32/ipc_server.zig`, `allocIpcPipeName`),
+  so any build with the default class forwards a launch to a running noctty
+  that has it. `--class=noctty-source` in the shortcut is what separates them.
+  It also means `noctty +new-window` and the other `+` commands reach the source
+  build only with the same `--class=noctty-source`, and the jump-list entries
+  of a source build carry no `--class`. `class` does not feed the
+  AppUserModelID (a fixed string) or the window class names, so taskbar
+  grouping and the jump list are unaffected.
+- This shortcut has no AppUserModelID. The installer sets
+  `io.github.amanthanvi.noctty` on its shortcuts, and `WScript.Shell` has no
+  property for one (inferred). The running exe still sets the ID for its own
+  process, so a pinned shortcut may not group with the running window
+  (inferred, not measured). A click on a toast in Action Center is delivered
+  through a COM activator that only an installed, non-elevated copy registers
+  (`src/apprt/win32_toast_activator.zig`), so a source build gets popup clicks
+  only, whatever the shortcut says.
+
 ## Toolchain
 
 This fork requires a Zig 0.15.x release with patch ≥ 2. The check is
