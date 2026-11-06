@@ -4979,8 +4979,8 @@ test "split-divider-color recolors the pane gap" {
 pub fn logBackgroundBlurUnsupported() void {
     log.warn(
         "background-blur has no effect on Windows in this build: noctty asks DWM for " ++
-            "no backdrop material, so the background background-opacity makes translucent " ++
-            "shows what is behind the window unblurred",
+            "no backdrop material, so a translucent background-opacity shows what is " ++
+            "behind the window without blur",
         .{},
     );
 }
