@@ -1072,7 +1072,9 @@ palette: Palette = .{},
 /// (`renderer = d3d11`), which presents with its alpha ignored, fades as a
 /// whole instead, text and chrome included, as a layered window; once every
 /// pane of it runs OpenGL (a D3D11 pane can fall back), only its background
-/// is translucent. High Contrast shows every window opaque, and
+/// is translucent. At 0 the window chrome's own background between and
+/// around the panes keeps 1/255 of its color: effectively, not exactly,
+/// transparent. High Contrast shows every window opaque, and
 /// `background-blur` has no effect (see below).
 @"background-opacity": f64 = 1.0,
 

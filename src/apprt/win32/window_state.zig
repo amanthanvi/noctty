@@ -404,6 +404,9 @@ pub fn perform(
         .toggle_maximize => toggleMaximize(host),
         .toggle_fullscreen => if (host.top_level.isFullscreen()) try leaveFullscreen(host) else try enterFullscreen(host),
         .toggle_window_decorations => {
+            // The style write changes the frame: blur-behind is asserted
+            // again after it, whatever it ends in.
+            defer refreshBackgroundOpacity(host);
             try setDecorationsVisible(host, !host.top_level.decorations_visible);
             host.top_level.decorations_overridden = true;
         },
@@ -830,6 +833,11 @@ var test_d3d11_pane: ?*const Surface = null;
 var test_blur_behind_asserts: usize = 0;
 var test_blur_behind_fails = false;
 
+/// Every `applyBackgroundOpacity` on a window, in a test, and the opacity it
+/// applied last.
+var test_background_opacity_applies: usize = 0;
+var test_background_opacity_applied: f64 = 1.0;
+
 fn paneRenderer(pane: ?*const Surface) PaneRenderer {
     if (builtin.is_test) {
         if (test_d3d11_pane != null and pane == test_d3d11_pane) return .d3d11;
@@ -910,9 +918,11 @@ fn monitorInfoOf(monitor: sys.HMONITOR) ?MONITORINFO {
     return info;
 }
 
+/// Its callers show the window's opacity again after it, since its style
+/// write changes the frame: the toggle through a defer, `applyConfig` through
+/// its own apply, once and at the new opacity.
 fn setDecorationsVisible(host: *Host, visible: bool) !void {
     if (host.top_level.decorations_visible == visible) return;
-    defer refreshBackgroundOpacity(host);
 
     const previous_visible = host.top_level.decorations_visible;
     const used_integrated_titlebar_before = host.usingIntegratedTitlebar();
@@ -1103,6 +1113,10 @@ fn applyWindowStyle(host: *Host) !void {
 /// fail, and it is applied last, after everything the window shows is set.
 fn applyBackgroundOpacity(host: *Host) !void {
     const hwnd = host.hwnd orelse return;
+    if (builtin.is_test) {
+        test_background_opacity_applies += 1;
+        test_background_opacity_applied = host.top_level.opacity;
+    }
     var shown = shownOpacity(host);
     if (shown.background != null) {
         // Not layered before blur-behind starts, so the ex-style change
@@ -2697,6 +2711,49 @@ test "win32 a window with a D3D11 pane fades whole and leaves its panes at their
             _ = sys.DestroyWindow(tab.hwnd.?);
             test_d3d11_pane = null;
             try perPixel(hwnd, pane);
+        }
+    }.body);
+}
+
+test "win32 a config change that toggles decorations and changes opacity applies the opacity once, at its new value" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    try runOnHiddenDesktop(struct {
+        fn body() !void {
+            var fixture: WindowStartTestApp = .{};
+            try fixture.init();
+            defer fixture.deinit();
+            const app = &fixture.app;
+            test_pane_renderer = .opengl;
+            defer test_pane_renderer = null;
+
+            app.config.@"background-opacity" = 0.5;
+            try app.createWindow(default_title);
+            const pane = fixture.newest();
+            const host = pane.host.?;
+            const hwnd = host.hwnd.?;
+            try std.testing.expectEqual(@as(?u8, 128), testBackgroundAlpha(hwnd));
+
+            // Both ways: undecorated and opaque, then decorated and
+            // translucent again. Each applies once, at the config's opacity,
+            // and blur-behind is never asserted at the old one on the way.
+            for ([_]struct { decoration: configpkg.Config.WindowDecoration, opacity: f64, shown: ?u8 }{
+                .{ .decoration = .none, .opacity = 1.0, .shown = null },
+                .{ .decoration = .auto, .opacity = 0.5, .shown = 128 },
+            }) |step| {
+                var config = try app.config.clone(std.testing.allocator);
+                defer config.deinit();
+                config.@"window-decoration" = step.decoration;
+                config.@"background-opacity" = step.opacity;
+                const applies = test_background_opacity_applies;
+                const asserts = test_blur_behind_asserts;
+                try applyConfig(host, &config);
+                try std.testing.expectEqual(step.decoration != .none, host.top_level.decorations_visible);
+                try std.testing.expectEqual(applies + 1, test_background_opacity_applies);
+                try std.testing.expectEqual(step.opacity, test_background_opacity_applied);
+                try std.testing.expectEqual(asserts + @intFromBool(step.shown != null), test_blur_behind_asserts);
+                try std.testing.expect(!testHostIsLayered(hwnd));
+                try std.testing.expectEqual(step.shown, testBackgroundAlpha(hwnd));
+            }
         }
     }.body);
 }

@@ -245,6 +245,41 @@ fn effectiveBackgroundOpacity(override: ?f64, config: *const CommonDerivedConfig
     return override orelse config.background_opacity;
 }
 
+test "a renderer held by synchronized output shows its old opacity whole until an update applies the new one" {
+    // Only the fields `setBackgroundOpacity` touches are set: a renderer
+    // needs a GPU to build, and nothing else is read.
+    const Gl = Renderer(@import("OpenGL.zig"));
+    const r = try std.testing.allocator.create(Gl);
+    defer std.testing.allocator.destroy(r);
+    r.draw_mutex = .{};
+    r.background_opacity_override = null;
+    r.config.background_opacity = 1.0;
+    r.uniforms.bg_color = .{ 0x10, 0x20, 0x30, 0xff };
+    r.terminal_state.dirty = .false;
+
+    // To translucent and back: the presented frame's background alpha (and
+    // with it the cells, built from the same opacity in the same update) is
+    // left as it is, and the update that next runs unheld owes a full
+    // rebuild at the new opacity.
+    for ([_]struct { set: ?f64, shown: u8, next: f64 }{
+        .{ .set = 0.5, .shown = 0xff, .next = 0.5 },
+        .{ .set = 1.0, .shown = 0xff, .next = 1.0 },
+        .{ .set = 0.5, .shown = 0xff, .next = 0.5 },
+        .{ .set = null, .shown = 0xff, .next = 1.0 },
+    }) |step| {
+        r.terminal_state.dirty = .false;
+        r.setBackgroundOpacity(step.set);
+        try std.testing.expectEqual(step.shown, r.uniforms.bg_color[3]);
+        try std.testing.expectEqual(step.next, r.backgroundOpacity());
+        try std.testing.expect(r.terminal_state.dirty == .full);
+    }
+
+    // The same opacity again owes nothing.
+    r.terminal_state.dirty = .false;
+    r.setBackgroundOpacity(null);
+    try std.testing.expect(r.terminal_state.dirty == .false);
+}
+
 test "a renderer draws the window's background opacity over every config it is given" {
     const alloc = std.testing.allocator;
     var config = try configpkg.Config.default(alloc);
@@ -1223,18 +1258,19 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
         }
 
         /// What the window composes this terminal at (`background_opacity_override`).
+        ///
+        /// noctty divergence (#640): upstream has no such override. The
+        /// frame's data is left alone. `updateFrame` applies the opacity to
+        /// the background uniform and to every explicit-background cell
+        /// together, in the full rebuild this asks for, so a frame that
+        /// synchronized output holds keeps both at the old opacity until the
+        /// hold ends, rather than showing one at each.
         pub fn setBackgroundOpacity(self: *Self, opacity: ?f64) void {
             self.draw_mutex.lock();
             defer self.draw_mutex.unlock();
             const before = self.backgroundOpacity();
             self.background_opacity_override = opacity;
-            const now = self.backgroundOpacity();
-            if (now == before) return;
-            // A frame synchronized output holds is presented again without
-            // an update (`.repaint`): its background takes the new opacity
-            // now, and the cells at the next update.
-            self.uniforms.bg_color[3] = @intFromFloat(@round(now * 255.0));
-            self.markDirty();
+            if (self.backgroundOpacity() != before) self.markDirty();
         }
 
         /// The opacity the background is drawn at.
