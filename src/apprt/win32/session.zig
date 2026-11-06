@@ -52,7 +52,7 @@ const win32_types = @import("../win32_types.zig");
 /// Suffix for a saved session that was restored and then ended by itself
 /// before it was used (`App.setAsideFailedRestore`). Its own slots: these
 /// copies must never take the ones the crash-loop breaker needs.
-pub const restore_ended_suffix = ".restore-ended";
+const restore_ended_suffix = ".restore-ended";
 
 /// Move the saved session at `path` aside, as a restore that ended by itself
 /// before it was used: renamed into a free `.restore-ended` slot, never
@@ -172,7 +172,7 @@ test "win32 a restore that ended by itself is moved aside, never deleted or repl
     try std.testing.expectEqualStrings(latest, crashed);
 }
 
-pub fn sessionStatePolicyAllows(safe_mode: bool, policy: configpkg.Config.WindowSaveState) bool {
+fn sessionStatePolicyAllows(safe_mode: bool, policy: configpkg.Config.WindowSaveState) bool {
     return !safe_mode and policy != .never;
 }
 
@@ -197,11 +197,11 @@ pub const SessionRestoreTransaction = struct {
         }
     }
 
-    pub fn commit(self: *SessionRestoreTransaction) void {
+    fn commit(self: *SessionRestoreTransaction) void {
         self.committed = true;
     }
 
-    pub fn rollback(self: *SessionRestoreTransaction) void {
+    fn rollback(self: *SessionRestoreTransaction) void {
         if (self.committed) return;
         if (self.app) |app| if (self.host) |host| {
             app.rollbackSessionRestoreHost(host);
@@ -213,7 +213,7 @@ pub const SessionRestoreTransaction = struct {
     }
 };
 
-pub fn sessionRestorePolicyAllows(
+fn sessionRestorePolicyAllows(
     safe_mode: bool,
     policy: configpkg.Config.WindowSaveState,
     initial_window: bool,
@@ -233,7 +233,7 @@ pub const SessionSaveKind = enum { final, checkpoint };
 
 /// How long the session must stay unchanged before a structural change is
 /// saved (`App.scheduleSessionCheckpoint`).
-pub const session_checkpoint_delay_ms: u32 = 1000;
+const session_checkpoint_delay_ms: u32 = 1000;
 
 /// Held for the life of the one process that owns `session-state.json`.
 /// An exclusive byte-range lock on the `.lock` sibling, so the kernel drops
@@ -1225,7 +1225,7 @@ pub fn rollbackSessionRestoreHost(self: *App, host: *Host) void {
     self.removeHost(host);
 }
 
-pub fn sessionScrollbackLineAllowed(line: []const u8) bool {
+fn sessionScrollbackLineAllowed(line: []const u8) bool {
     const view = std.unicode.Utf8View.init(line) catch return false;
     var it = view.iterator();
     while (it.nextCodepoint()) |codepoint| {
@@ -1237,7 +1237,7 @@ pub fn sessionScrollbackLineAllowed(line: []const u8) bool {
     return true;
 }
 
-pub fn captureTerminalScrollbackSnapshotAlloc(
+fn captureTerminalScrollbackSnapshotAlloc(
     alloc: Allocator,
     scratch_alloc: Allocator,
     terminal_state: *terminal.Terminal,
@@ -1332,7 +1332,7 @@ pub fn captureTerminalScrollbackSnapshotAlloc(
     };
 }
 
-pub fn printSessionSnapshotLine(terminal_state: *terminal.Terminal, line: []const u8) !void {
+fn printSessionSnapshotLine(terminal_state: *terminal.Terminal, line: []const u8) !void {
     var remaining = line;
     while (std.mem.indexOfScalar(u8, remaining, '\t')) |tab_index| {
         try terminal_state.printString(remaining[0..tab_index]);
@@ -1344,7 +1344,7 @@ pub fn printSessionSnapshotLine(terminal_state: *terminal.Terminal, line: []cons
     try terminal_state.linefeed();
 }
 
-pub fn formatSessionSnapshotMarker(
+fn formatSessionSnapshotMarker(
     buf: []u8,
     captured_at_unix_ms: u64,
 ) std.fmt.BufPrintError![]const u8 {
@@ -1382,7 +1382,7 @@ pub fn formatSessionSnapshotMarker(
 /// Used to decide whether a restored snapshot would land on top of a child's
 /// startup output. A shell can return the cursor to the origin after printing
 /// (`ESC[H`), so cursor position is not on its own a usable test.
-pub fn terminalScreenIsUnpainted(screen: *terminal.Screen) bool {
+fn terminalScreenIsUnpainted(screen: *terminal.Screen) bool {
     // A child that only moved the cursor (`ESC[2;2H`) has painted nothing, but
     // restoring would still `scrollClear()` the cursor out from under it while
     // it believes it is at (2,2). Require the origin as well as empty cells.
@@ -1406,7 +1406,7 @@ pub fn terminalScreenIsUnpainted(screen: *terminal.Screen) bool {
     return true;
 }
 
-pub fn restoreTerminalScrollbackSnapshot(
+fn restoreTerminalScrollbackSnapshot(
     terminal_state: *terminal.Terminal,
     snapshot: win32_session_state.ScrollbackSnapshot,
     max_lines_requested: usize,

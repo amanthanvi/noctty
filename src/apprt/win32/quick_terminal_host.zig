@@ -43,7 +43,7 @@ const runOnHiddenDesktop = win32.test_support.runOnHiddenDesktop;
 const scrollbar_class_name = win32.scrollbar_class_name;
 const setWindowData = child_window.setWindowData;
 
-pub const quick_terminal_title = std.unicode.utf8ToUtf16LeStringLiteral("noctty quick terminal");
+const quick_terminal_title = std.unicode.utf8ToUtf16LeStringLiteral("noctty quick terminal");
 
 pub fn hideQuickTerminalHost(host: *Host) void {
     host.cancelQuickTerminalAnimation();
@@ -301,12 +301,12 @@ pub fn cancelQuickTerminalAnimation(self: *Host) void {
     }
 }
 
-pub const QuickTerminalGeometrySize = struct {
+const QuickTerminalGeometrySize = struct {
     primary: win32_quick_terminal.SizePercent,
     secondary: ?win32_quick_terminal.SizePercent,
 };
 
-pub fn quickTerminalSizeForGeometry(
+fn quickTerminalSizeForGeometry(
     qts: configpkg.Config.QuickTerminalSize,
     position: configpkg.Config.QuickTerminalPosition,
     dims: configpkg.Config.QuickTerminalSize.Dimensions,
@@ -332,7 +332,7 @@ pub fn quickTerminalSizeForGeometry(
     };
 }
 
-pub fn sizeToGeometry(sz: configpkg.Config.QuickTerminalSize.Size) win32_quick_terminal.SizePercent {
+fn sizeToGeometry(sz: configpkg.Config.QuickTerminalSize.Size) win32_quick_terminal.SizePercent {
     return switch (sz) {
         .percentage => |v| .{ .percent = v },
         .pixels => |v| .{ .pixels = v },
@@ -781,11 +781,11 @@ pub fn monitorInfo(monitor: sys.HMONITOR) ?win32_quick_terminal.MonitorInfo {
     };
 }
 
-pub const PrimaryMonitorSearch = struct {
+const PrimaryMonitorSearch = struct {
     found: ?sys.HMONITOR = null,
 };
 
-pub fn primaryMonitorEnumProc(
+fn primaryMonitorEnumProc(
     monitor: sys.HMONITOR,
     _: HDC,
     _: *RECT,
@@ -804,7 +804,7 @@ pub fn primaryMonitorEnumProc(
     return 0;
 }
 
-pub fn primaryMonitor() ?sys.HMONITOR {
+fn primaryMonitor() ?sys.HMONITOR {
     var search: PrimaryMonitorSearch = .{};
     _ = sys.EnumDisplayMonitors(
         null,
@@ -815,18 +815,18 @@ pub fn primaryMonitor() ?sys.HMONITOR {
     return search.found orelse sys.MonitorFromPoint(.{ .x = 0, .y = 0 }, c.MONITOR_DEFAULTTOPRIMARY);
 }
 
-pub const AllMonitorsSearch = struct {
+const AllMonitorsSearch = struct {
     found: bool = false,
     failed: bool = false,
     info: win32_quick_terminal.MonitorInfo = undefined,
 };
 
-pub fn isVisibleMonitorInfo(info: win32_quick_terminal.MonitorInfo) bool {
+fn isVisibleMonitorInfo(info: win32_quick_terminal.MonitorInfo) bool {
     return info.full_rect.width() > 0 and info.full_rect.height() > 0 and
         info.work_area.width() > 0 and info.work_area.height() > 0;
 }
 
-pub fn allMonitorsEnumProc(
+fn allMonitorsEnumProc(
     monitor: sys.HMONITOR,
     _: HDC,
     _: *RECT,
@@ -849,7 +849,7 @@ pub fn allMonitorsEnumProc(
     return 1;
 }
 
-pub fn allMonitorsInfo() ?win32_quick_terminal.MonitorInfo {
+fn allMonitorsInfo() ?win32_quick_terminal.MonitorInfo {
     var search: AllMonitorsSearch = .{};
     if (sys.EnumDisplayMonitors(
         null,

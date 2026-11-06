@@ -2104,7 +2104,7 @@ pub const Surface = struct {
     ///
     /// The native actions taken are identical to the unchecked wrapper; only
     /// the outcome is reported.
-    pub fn clearGLContextCurrentChecked(self: *Surface) bool {
+    fn clearGLContextCurrentChecked(self: *Surface) bool {
         // Without a context of our own, nothing of ours can be current.
         const hglrc = self.hglrc orelse return true;
         if (sys.wglGetCurrentContext() != hglrc) return true;

@@ -619,7 +619,6 @@ pub const PAINTSTRUCT = sys.PAINTSTRUCT;
 pub const DRAWITEMSTRUCT = sys.DRAWITEMSTRUCT;
 pub const TRACKMOUSEEVENT = sys.TRACKMOUSEEVENT;
 const WINDOWPOS = sys.WINDOWPOS;
-pub const WINDOWPLACEMENT = sys.WINDOWPLACEMENT;
 pub const NCCALCSIZE_PARAMS = sys.NCCALCSIZE_PARAMS;
 pub const WNDCLASSEXW = sys.WNDCLASSEXW;
 const CREATESTRUCTW = sys.CREATESTRUCTW;
@@ -11764,7 +11763,7 @@ pub fn hostWindowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) cal
         c.WM_COMMAND => {
             if (host) |v| {
                 const command_id = lowWord(wParam);
-                const notify_code = highWord(wParam);
+                const notify_code = win32_input.highWord(wParam);
                 const child_hwnd = wmCommandChildHwnd(lParam);
                 switch (command_id) {
                     2002 => {
@@ -12337,14 +12336,12 @@ fn lowWord(value: usize) u16 {
     return @truncate(value & 0xFFFF);
 }
 
-pub const highWord = win32_input.highWord;
-
 pub fn signedLowWord(value: usize) i16 {
     return @bitCast(lowWord(value));
 }
 
 pub fn signedHighWord(value: usize) i16 {
-    return @bitCast(highWord(value));
+    return @bitCast(win32_input.highWord(value));
 }
 
 pub fn cursorPosFromLParam(lParam: LPARAM) apprt.CursorPos {
@@ -19549,7 +19546,7 @@ fn testTabGapHost(decorated: bool) !void {
     try std.testing.expect(!host.tabsFlushWithTop());
     host.quick_terminal = false;
     host.active_tab = 0;
-    host.top_level.fullscreen = .{ .rect = std.mem.zeroes(RECT), .placement = std.mem.zeroes(WINDOWPLACEMENT), .monitor = null };
+    host.top_level.fullscreen = .{ .rect = std.mem.zeroes(RECT), .placement = std.mem.zeroes(sys.WINDOWPLACEMENT), .monitor = null };
     try std.testing.expect(host.tabsFlushWithTop());
     host.quick_terminal = true;
     try std.testing.expect(!host.tabsFlushWithTop());

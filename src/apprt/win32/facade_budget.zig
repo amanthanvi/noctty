@@ -25,11 +25,9 @@ const budget = .{
         .test_support_runtime = 46,
     },
     // The facade's pub declarations: what the files that import it can reach.
-    // why: +1 for `ShellProjectionSteps`, the projection tests' fixture,
-    // which session.zig's tests take as `win32.ShellProjectionSteps`.
-    .facade_pub_decls = 478,
+    .facade_pub_decls = 476,
     // Root declarations of win32.zig whose value is a field access (`a.b`).
-    .facade_aliases = 190,
+    .facade_aliases = 188,
     // Fields of win32.App named `test_*`.
     .app_test_hooks = 10,
 };
