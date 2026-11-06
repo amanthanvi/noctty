@@ -690,6 +690,11 @@ pub const App = struct {
     /// settings preview which cannot change the theme does not run one.
     theme_rebuilds: u32 = 0,
     system_theme_refresh: SystemThemeRefresh = .{},
+    /// The system's own theme inputs at the last system theme message (or
+    /// at `init`): a failed blur-behind tries again only when they changed
+    /// (`reconfigureSystemTheme`). Unlike `system_theme_refresh`, no rebuild
+    /// of the app's own (a reload, a Settings preview) moves it.
+    system_inputs: ?window_state.SystemInputs = null,
     hinstance: HINSTANCE,
     class_atom: ATOM = 0,
     host_class_atom: ATOM = 0,
@@ -1287,6 +1292,7 @@ pub const App = struct {
         const start_theme = SystemThemeSnapshot.capture(&self.config);
         self.system_theme_refresh.previous = start_theme;
         self.resolved_theme = start_theme.theme;
+        self.system_inputs = window_state.SystemInputs.capture();
         self.loadPaletteMru();
         self.settings_window = win32_settings.SettingsWindow.init(.{
             .ctx = @ptrCast(self),
@@ -6039,25 +6045,38 @@ pub const App = struct {
     }
 
     pub fn reconfigureSystemTheme(self: *App) void {
+        // A rebuild when the snapshot differs from the last rebuild's,
+        // whatever made that one (each takes it again), or a resource is
+        // missing.
         const snapshot = SystemThemeSnapshot.capture(self.shownConfig());
         const changed = self.system_theme_refresh.accept(snapshot) or !std.meta.eql(snapshot.theme, self.resolved_theme);
-        if (!changed) {
-            const missing_resources = for (self.registry.hosts.items) |host| {
-                if (host.hwnd != null and (host.chrome_brush == null or
-                    host.overlay_brush == null or host.edit_brush == null or
-                    host.chrome_font == null or host.preview_font == null or
-                    (!host.titlebar_icons_geometric and
-                        (host.titlebar_caption_icon_font == null or host.titlebar_action_icon_font == null)) or
-                    // The search font stays lazy. Only a failed attempt, not
-                    // its intentionally unused state, needs another chance.
-                    (host.search_icon_font_resolved and host.search_icon_font == null))) break true;
-            } else false;
-            if (!missing_resources) return;
+        const rebuild = changed or for (self.registry.hosts.items) |host| {
+            if (host.hwnd != null and (host.chrome_brush == null or
+                host.overlay_brush == null or host.edit_brush == null or
+                host.chrome_font == null or host.preview_font == null or
+                (!host.titlebar_icons_geometric and
+                    (host.titlebar_caption_icon_font == null or host.titlebar_action_icon_font == null)) or
+                // The search font stays lazy. Only a failed attempt, not
+                // its intentionally unused state, needs another chance.
+                (host.search_icon_font_resolved and host.search_icon_font == null))) break true;
+        } else false;
+        // A retry when the system's own inputs differ from the last system
+        // theme message's. Not from the snapshot: a reload or a Settings
+        // preview between a system change and its message rebuilds with the
+        // change, and the message then finds the snapshot as it left it.
+        // Resources a message finds missing are GDI's, not DWM's.
+        const inputs = window_state.SystemInputs.capture();
+        const system_changed = if (self.system_inputs) |last| !std.meta.eql(last, inputs) else true;
+        self.system_inputs = inputs;
+        if (rebuild) {
+            self.reconfigureTheme(if (system_changed) .retry else .refresh);
+        } else if (system_changed) {
+            // An app rebuild already took the change in, and every window
+            // whose blur-behind had not failed showed its opacity there.
+            for (self.registry.hosts.items) |host| {
+                if (host.blur_behind_failed) window_state.retryBackgroundOpacity(host);
+            }
         }
-        // Only a change the system made since the last rebuild (each one
-        // takes the snapshot again) lets a failed blur-behind try again:
-        // resources a theme message found missing are GDI's, not DWM's.
-        self.reconfigureTheme(if (changed) .retry else .refresh);
     }
 
     /// Rebuilds every window's chrome, frame and DWM attributes for the
@@ -6083,10 +6102,10 @@ pub const App = struct {
             previous_tab_bar_visible != self.tab_bar_visible;
         // The theme as Settings previews it.
         const shown = self.shownConfig();
-        // What the next system theme message compares with is this rebuild,
-        // whatever asked for it (Settings' preview, a reload, the palette's
-        // theme): only what the system changed since counts as a change
-        // there, and lets a failed blur-behind try again.
+        // What the next system theme message compares with to decide on a
+        // rebuild is this rebuild, whatever asked for it (Settings' preview,
+        // a reload, the palette's theme). Whether a failed blur-behind tries
+        // again it decides from `system_inputs`, which this leaves alone.
         const snapshot = SystemThemeSnapshot.capture(shown);
         self.system_theme_refresh.previous = snapshot;
         self.resolved_theme = snapshot.theme;

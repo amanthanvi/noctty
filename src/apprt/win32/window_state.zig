@@ -1187,6 +1187,39 @@ pub fn retryBackgroundOpacity(host: *Host) void {
     refreshBackgroundOpacity(host);
 }
 
+/// What a system theme message can change and no rebuild of the app's own
+/// does: the light/dark mode, High Contrast and its colors, the non-client
+/// metrics and client animations; not the config's `window-theme` or
+/// `split-divider-color`. A failed blur-behind tries again only when these
+/// changed since the last system theme message
+/// (`App.reconfigureSystemTheme`).
+pub const SystemInputs = struct {
+    dark: bool,
+    high_contrast: bool,
+    /// High Contrast's system colors, while it is on.
+    high_contrast_colors: ?win32.ThemeColors,
+    metrics: ?sys.NONCLIENTMETRICSW,
+    animations: bool,
+
+    pub fn capture() SystemInputs {
+        if (builtin.is_test) if (test_system_inputs) |inputs| return inputs;
+        const high_contrast = win32.isHighContrastActive();
+        var metrics = std.mem.zeroes(sys.NONCLIENTMETRICSW);
+        metrics.cbSize = @sizeOf(sys.NONCLIENTMETRICSW);
+        return .{
+            .dark = win32.isSystemDarkMode(),
+            .high_contrast = high_contrast,
+            .high_contrast_colors = if (high_contrast) win32.highContrastThemeFromSysColors() else null,
+            .metrics = if (sys.SystemParametersInfoW(c.SPI_GETNONCLIENTMETRICS, @sizeOf(sys.NONCLIENTMETRICSW), @ptrCast(&metrics), 0) != 0) metrics else null,
+            .animations = Host.clientAnimationsEnabled(),
+        };
+    }
+};
+
+/// What `SystemInputs.capture` returns in a test that sets it, so a test can
+/// change a system input without changing the system.
+var test_system_inputs: ?SystemInputs = null;
+
 /// A child control `host`'s window made: made solid while the window's
 /// background alone is translucent (`solidChild`).
 pub fn childCreated(host: *const Host, child: HWND) void {
@@ -3125,12 +3158,16 @@ test "win32 a Settings preview of a theme and an opacity that ends applies the o
 test "win32 a window whose blur-behind failed fades whole, and tries it again only at a system theme change" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
     try runOnHiddenDesktop(struct {
-        /// A system theme message, `changed` or only finding a resource
-        /// missing, with blur-behind failing or not: it applies the opacity
-        /// once and tries blur-behind `tries` times.
+        /// A system theme message, after a system change (light/dark,
+        /// through `test_system_inputs`, with the theme rebuilt) or only
+        /// finding a resource missing, with blur-behind failing or not: it
+        /// applies the opacity once and tries blur-behind `tries` times.
         fn themeMessage(app: *App, host: *Host, changed: bool, fails: bool, tries: usize) !void {
             test_blur_behind_fails = fails;
-            if (changed) app.system_theme_refresh = .{} else {
+            if (changed) {
+                test_system_inputs.?.dark = !test_system_inputs.?.dark;
+                app.system_theme_refresh = .{};
+            } else {
                 _ = sys.DeleteObject(host.chrome_brush.?);
                 host.chrome_brush = null;
             }
@@ -3161,6 +3198,8 @@ test "win32 a window whose blur-behind failed fades whole, and tries it again on
             defer test_pane_renderer = null;
             test_blur_behind_fails = true;
             defer test_blur_behind_fails = false;
+            test_system_inputs = SystemInputs.capture();
+            defer test_system_inputs = null;
 
             app.config.@"background-opacity" = 0.5;
             app.config.@"window-theme" = .dark;
@@ -3212,6 +3251,33 @@ test "win32 a window whose blur-behind failed fades whole, and tries it again on
             left.deinit();
             try unchangedMessage(app, host);
             try std.testing.expectEqual(@as(?u8, 128), testLayeredAlpha(hwnd));
+
+            // A system change a rebuild of the app's own takes in before its
+            // message arrives: the system turns light or dark, a reload
+            // rebuilds the theme (and leaves the latch, as a reload does),
+            // then the message finds the theme as the reload left it, so
+            // nothing to rebuild, but the change is still the system's: the
+            // window tries once, and where it fails again latches again.
+            test_system_inputs.?.dark = !test_system_inputs.?.dark;
+            reloaded.@"window-theme" = .light;
+            var asserts_before = test_blur_behind_asserts;
+            try reloadConfig(app, &reloaded);
+            try std.testing.expectEqual(asserts_before, test_blur_behind_asserts);
+            try std.testing.expect(host.blur_behind_failed);
+            test_blur_behind_fails = true;
+            const rebuilds = app.theme_rebuilds;
+            const applies = test_background_opacity_applies;
+            asserts_before = test_blur_behind_asserts;
+            app.reconfigureSystemTheme();
+            try std.testing.expectEqual(rebuilds, app.theme_rebuilds);
+            try std.testing.expectEqual(applies + 1, test_background_opacity_applies);
+            try std.testing.expectEqual(asserts_before + 1, test_blur_behind_asserts);
+            try std.testing.expect(host.blur_behind_failed);
+            try std.testing.expectEqual(@as(?u8, 128), testLayeredAlpha(hwnd));
+            // That message was the change's: the next one, with nothing
+            // changed, does not try again.
+            test_blur_behind_fails = false;
+            try unchangedMessage(app, host);
 
             // A theme message that changed nothing but finds a resource
             // missing rebuilds the theme without trying.

@@ -268,9 +268,11 @@ that govern each symbol you change, or that none does.
   `retryBackgroundOpacity`, `releaseBackgroundOpacity`, `childCreated` and
   `solidifies` in `win32/window_state.zig`, with `Host.chrome_alpha` and
   `Host.blur_behind_failed`; when a window shows it again: the `opacity`
-  argument of `App.reconfigureTheme`, `reconfigureSystemTheme` and its
-  baseline (`App.system_theme_refresh`, `SystemThemeSnapshot`, which
-  `reconfigureTheme` and `App.init` set), `App.endSettingsPreview`, the
+  argument of `App.reconfigureTheme`, `reconfigureSystemTheme` and its two
+  baselines (the rebuild's, `App.system_theme_refresh` and
+  `SystemThemeSnapshot`, which `reconfigureTheme` and `App.init` set; the
+  retry's, `App.system_inputs` and `window_state.SystemInputs`, which only
+  `reconfigureSystemTheme` and `App.init` set), `App.endSettingsPreview`, the
   window half of a config change (the `.surface` and `.app`
   `config_change` arms, `App.app_wide_config_change`,
   `App.updateCoreConfig`, `App.updatePaneCoreConfig`), and `Host.closing`
