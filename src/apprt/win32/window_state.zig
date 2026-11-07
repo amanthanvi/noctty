@@ -3432,6 +3432,97 @@ test "win32 a window whose blur-behind failed fades whole, and tries it again on
     }.body);
 }
 
+test "win32 a light/dark change and its reload apply each window's opacity once, and retry a failed blur-behind once" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    try runOnHiddenDesktop(struct {
+        /// An "ImmersiveColorSet" message after the system turned light or
+        /// dark (through `test_system_inputs`), with the theme to rebuild,
+        /// where the core's light/dark state is still the other one, so it
+        /// reloads, or already the system's.
+        fn message(app: *App, reloads: bool) !void {
+            test_system_inputs.?.dark = !test_system_inputs.?.dark;
+            app.system_theme_refresh = .{};
+            const system: configpkg.ConditionalState.Theme = if (win32.isSystemDarkMode()) .dark else .light;
+            app.core_app.config_conditional_state.theme = if (!reloads) system else if (system == .dark) .light else .dark;
+            app.systemColorSetChanged();
+            try std.testing.expectEqual(system, app.core_app.config_conditional_state.theme);
+        }
+
+        fn body() !void {
+            var fixture: WindowStartTestApp = .{};
+            try fixture.init();
+            defer fixture.deinit();
+            const app = &fixture.app;
+            test_pane_renderer = .opengl;
+            defer test_pane_renderer = null;
+            defer test_blur_behind_fails = false;
+            test_system_inputs = SystemInputs.capture();
+            defer test_system_inputs = null;
+
+            // A window whose blur-behind failed and one whose did not, both
+            // translucent, under a `window-theme` that follows the system.
+            app.config.@"background-opacity" = 0.5;
+            app.config.@"window-theme" = .system;
+            test_blur_behind_fails = true;
+            try app.createWindow(default_title);
+            const failed = fixture.newest().host.?;
+            test_blur_behind_fails = false;
+            try app.createWindow(default_title);
+            const working = fixture.newest().host.?;
+            try std.testing.expect(failed.blur_behind_failed);
+            try std.testing.expect(!working.blur_behind_failed);
+            const hosts = [_]*Host{ failed, working };
+
+            var applied: std.ArrayListUnmanaged(TestOpacityApply) = .empty;
+            defer applied.deinit(std.testing.allocator);
+            test_background_opacity_log = &applied;
+            defer test_background_opacity_log = null;
+
+            // With a reload: one apply per window, in the reload, and the
+            // failed window tries blur-behind once there and keeps it.
+            // Before, the message's rebuild applied every window, at the
+            // opacity the reload then replaced, and the reload again.
+            var asserts = test_blur_behind_asserts;
+            try message(app, true);
+            try std.testing.expectEqual(hosts.len, applied.items.len);
+            for (hosts) |host| try expectAppliedOnce(applied.items, host, 0.5);
+            try std.testing.expectEqual(asserts + hosts.len, test_blur_behind_asserts);
+            try std.testing.expect(!failed.blur_behind_failed);
+            try std.testing.expectEqual(@as(?u8, 128), testBackgroundAlpha(failed.hwnd.?));
+
+            // Failing again, it latches again after that one try.
+            fixture.closeWindow(fixture.newest());
+            test_blur_behind_fails = true;
+            applied.clearRetainingCapacity();
+            asserts = test_blur_behind_asserts;
+            try message(app, true);
+            try std.testing.expectEqual(@as(usize, 1), applied.items.len);
+            try expectAppliedOnce(applied.items, failed, 0.5);
+            try std.testing.expectEqual(asserts + 1, test_blur_behind_asserts);
+            try std.testing.expect(failed.blur_behind_failed);
+            try std.testing.expectEqual(@as(?u8, 128), testLayeredAlpha(failed.hwnd.?));
+
+            // Without a reload the message alone rebuilds, and retries once,
+            // as before.
+            applied.clearRetainingCapacity();
+            asserts = test_blur_behind_asserts;
+            try message(app, false);
+            try std.testing.expectEqual(@as(usize, 1), applied.items.len);
+            try std.testing.expectEqual(asserts + 1, test_blur_behind_asserts);
+            try std.testing.expect(failed.blur_behind_failed);
+
+            // A message that changed nothing after either tries nothing.
+            applied.clearRetainingCapacity();
+            asserts = test_blur_behind_asserts;
+            const rebuilds = app.theme_rebuilds;
+            app.reconfigureSystemTheme();
+            try std.testing.expectEqual(rebuilds, app.theme_rebuilds);
+            try std.testing.expectEqual(@as(usize, 0), applied.items.len);
+            try std.testing.expectEqual(asserts, test_blur_behind_asserts);
+        }
+    }.body);
+}
+
 test "win32 DWM_BLURBEHIND matches dwmapi.h, which packs it to 1" {
     try std.testing.expectEqual(@as(usize, 20), @sizeOf(sys.DWM_BLURBEHIND));
     try std.testing.expectEqual(@as(usize, 4), @offsetOf(sys.DWM_BLURBEHIND, "fEnable"));

@@ -6005,15 +6005,44 @@ pub const App = struct {
         }
     }
 
+    /// A `WM_SETTINGCHANGE` for "ImmersiveColorSet": the system theme
+    /// message (`reconfigureSystemTheme`) and the light/dark reload
+    /// (`syncSystemColorScheme`) as one change, so each window applies its
+    /// opacity once, at the value it ends at. Where a reload follows, it
+    /// rebuilds the theme and applies every window, so the message's part
+    /// goes into it: the system's inputs are taken first, and where they
+    /// changed every failed blur-behind is unlatched, so the reload's apply
+    /// is its one try. The message after the reload then finds both
+    /// baselines current (it still rebuilds a missing resource). Without a
+    /// reload (the light/dark state did not change, safe mode) the message
+    /// runs as before.
+    pub fn systemColorSetChanged(self: *App) void {
+        const scheme: configpkg.ConditionalState.Theme = if (isSystemDarkMode()) .dark else .light;
+        const reloads = !self.safe_mode and self.core_app.config_conditional_state.theme != scheme;
+        if (reloads) {
+            const inputs = window_state.SystemInputs.capture();
+            const system_changed = if (self.system_inputs) |last| !std.meta.eql(last, inputs) else true;
+            self.system_inputs = inputs;
+            if (system_changed) for (self.registry.hosts.items) |host| {
+                host.blur_behind_failed = false;
+            };
+        } else self.reconfigureSystemTheme();
+        self.syncSystemColorScheme() catch |err| {
+            log.warn("win32 color scheme sync failed err={}", .{err});
+        };
+        if (reloads) self.reconfigureSystemTheme();
+    }
+
     pub fn syncSystemColorScheme(self: *App) !void {
         const scheme: apprt.ColorScheme = if (isSystemDarkMode()) .dark else .light;
 
         // Surface state must change before the app-wide reload because
         // App.updateConfig applies each surface's own conditional state and
         // Termio reports mode 2031 only after installing that derived config.
-        for (self.registry.windows.items) |surface| {
+        // (A test pane with no core has no state to change.)
+        if (!(builtin.is_test and self.test_surface_init_stage != null)) for (self.registry.windows.items) |surface| {
             surface.core().colorSchemeCallback(scheme);
-        }
+        };
         try self.core_app.colorSchemeEvent(self, scheme);
     }
 
