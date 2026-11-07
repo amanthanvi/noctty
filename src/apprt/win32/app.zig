@@ -6017,10 +6017,12 @@ pub const App = struct {
         }
     }
 
-    /// A `WM_SETTINGCHANGE` for "ImmersiveColorSet": the system theme
-    /// message (`reconfigureSystemTheme`) and the light/dark reload
-    /// (`syncSystemColorScheme`) as one change, so each window applies its
-    /// opacity once, at the value it ends at. Where a reload follows, it
+    /// A system theme message (`WM_THEMECHANGED`, `WM_SYSCOLORCHANGE`, a
+    /// `WM_SETTINGCHANGE` that can change the theme, "ImmersiveColorSet"
+    /// among them): the message's part (`reconfigureSystemTheme`) and the
+    /// light/dark reload (`syncSystemColorScheme`) as one change, whichever
+    /// message of a light/dark change arrives first, so each window applies
+    /// its opacity once, at the value it ends at. Where a reload follows, it
     /// rebuilds the theme and applies every window, so the message's part
     /// goes into it: the system's inputs are taken first, and where they
     /// changed every failed blur-behind is unlatched, so the reload's apply
@@ -6028,10 +6030,9 @@ pub const App = struct {
     /// baselines current (it still rebuilds a missing resource), after a
     /// reload that failed at a pane's step too (`updateCoreConfig` rebuilds
     /// the theme then). Without a reload (the light/dark state did not
-    /// change, safe mode) the message runs as before. Assumed, not measured:
-    /// that this is the first system theme message of a light/dark change;
-    /// a `WM_THEMECHANGED` or `WM_SYSCOLORCHANGE` handled before it rebuilds
-    /// and applies every window at the opacity the reload then replaces.
+    /// change, safe mode) the message runs as before: the sync then changes
+    /// nothing (a pane's `colorSchemeCallback` and core's `colorSchemeEvent`
+    /// return at once on an unchanged scheme).
     pub fn systemColorSetChanged(self: *App) void {
         const scheme: configpkg.ConditionalState.Theme = if (isSystemDarkMode()) .dark else .light;
         const reloads = !self.safe_mode and self.core_app.config_conditional_state.theme != scheme;
@@ -6123,10 +6124,11 @@ pub const App = struct {
     fn coreConfigUpdate(self: *App, config: *const configpkg.Config) !void {
         if (builtin.is_test and self.test_surface_init_stage != null) {
             // Core's order, for panes with no core: each pane, then the app
-            // (without the app's light/dark state, which core puts the
-            // config in first).
+            // in the app's light/dark state, as core puts it.
             for (self.core_app.surfaces.items) |pane| try self.updatePaneCoreConfig(pane, config);
-            _ = try self.performAction(.app, .config_change, .{ .config = config });
+            var applied_ = config.changeConditionalState(self.core_app.config_conditional_state) catch null;
+            defer if (applied_) |*applied| applied.deinit();
+            _ = try self.performAction(.app, .config_change, .{ .config = if (applied_) |*applied| applied else config });
             return;
         }
         try self.core_app.updateConfig(self, config);
@@ -6151,7 +6153,11 @@ pub const App = struct {
     /// ends in its `.surface` `config_change`.
     pub fn updatePaneCoreConfig(self: *App, pane: *Surface, config: *const configpkg.Config) !void {
         if (builtin.is_test and self.test_surface_init_stage != null) {
-            _ = try self.performAction(.{ .surface = pane.core() }, .config_change, .{ .config = config });
+            // In the pane's light/dark state, as core's `Surface.updateConfig`
+            // puts it; `syncSystemColorScheme` makes that the app's.
+            var applied_ = config.changeConditionalState(self.core_app.config_conditional_state) catch null;
+            defer if (applied_) |*applied| applied.deinit();
+            _ = try self.performAction(.{ .surface = pane.core() }, .config_change, .{ .config = if (applied_) |*applied| applied else config });
             return;
         }
         try pane.core().updateConfig(config);

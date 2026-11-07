@@ -3764,20 +3764,73 @@ test "win32 a window whose blur-behind failed fades whole, and tries it again on
     }.body);
 }
 
-test "win32 a light/dark change and its reload apply each window's opacity once, a failed reload's too, and retry a failed blur-behind once" {
+test "win32 a light/dark change and its reload apply each window's opacity once, at the new theme's, whichever system message comes first, a failed reload's too, and retry a failed blur-behind once" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
     try runOnHiddenDesktop(struct {
-        /// An "ImmersiveColorSet" message after the system turned light or
-        /// dark (through `test_system_inputs`), with the theme to rebuild,
-        /// where the core's light/dark state is still the other one, so it
-        /// reloads, or already the system's.
-        fn message(app: *App, reloads: bool) !void {
+        /// The light theme's opacity, and the dark one's.
+        fn opacity(theme: configpkg.ConditionalState.Theme) f64 {
+            return switch (theme) {
+                .light => 0.6,
+                .dark => 0.8,
+            };
+        }
+
+        fn alpha(theme: configpkg.ConditionalState.Theme) u8 {
+            return switch (theme) {
+                .light => 153,
+                .dark => 204,
+            };
+        }
+
+        fn system() configpkg.ConditionalState.Theme {
+            return if (win32.isSystemDarkMode()) .dark else .light;
+        }
+
+        fn other() configpkg.ConditionalState.Theme {
+            return if (system() == .dark) .light else .dark;
+        }
+
+        /// The app as it was before the system turned light or dark: core's
+        /// light/dark state and the app's config the other one's than the
+        /// system's, every window at its opacity.
+        fn before(app: *App) !void {
+            app.core_app.config_conditional_state.theme = other();
+            try app.updateCoreConfig(&app.config);
+            try std.testing.expectEqual(opacity(other()), app.config.@"background-opacity");
+        }
+
+        /// The config at `path`, in the other light/dark state than the
+        /// system's.
+        fn load(alloc: std.mem.Allocator, path: []const u8) !configpkg.Config {
+            var loaded = try configpkg.Config.default(alloc);
+            errdefer loaded.deinit();
+            try loaded.loadFile(alloc, path);
+            try loaded.loadRecursiveFiles(alloc);
+            try loaded.finalize();
+            const in_state = (try loaded.changeConditionalState(.{ .theme = other() })) orelse return loaded;
+            loaded.deinit();
+            return in_state;
+        }
+
+        const Order = enum { immersive_first, theme_changed_first };
+
+        /// The system turned light or dark (`test_system_inputs`), with the
+        /// theme to rebuild: every window gets the system's messages, in
+        /// `order`, through its window procedure. Where `before` ran, core's
+        /// light/dark state is the other one, so the first message reloads.
+        fn messages(app: *App, order: Order) void {
             test_system_inputs.?.dark = !test_system_inputs.?.dark;
             app.system_theme_refresh = .{};
-            const system: configpkg.ConditionalState.Theme = if (win32.isSystemDarkMode()) .dark else .light;
-            app.core_app.config_conditional_state.theme = if (!reloads) system else if (system == .dark) .light else .dark;
-            app.systemColorSetChanged();
-            try std.testing.expectEqual(system, app.core_app.config_conditional_state.theme);
+            const immersive = std.unicode.utf8ToUtf16LeStringLiteral("ImmersiveColorSet");
+            for (0..2) |step| {
+                const theme_changed = (step == 0) == (order == .theme_changed_first);
+                for (app.registry.hosts.items) |host| {
+                    if (theme_changed)
+                        _ = sys.SendMessageW(host.hwnd.?, c.WM_THEMECHANGED, 0, 0)
+                    else
+                        _ = sys.SendMessageW(host.hwnd.?, c.WM_SETTINGCHANGE, 0, @bitCast(@intFromPtr(immersive)));
+                }
+            }
         }
 
         fn body() !void {
@@ -3791,10 +3844,31 @@ test "win32 a light/dark change and its reload apply each window's opacity once,
             test_system_inputs = SystemInputs.capture();
             defer test_system_inputs = null;
 
+            // A config whose light and dark themes differ in opacity, read
+            // from files so core's light/dark state replays it, under a
+            // `window-theme` that follows the system.
+            const alloc = std.testing.allocator;
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            try tmp.dir.writeFile(.{ .sub_path = "light", .data = "background-opacity = 0.6\n" });
+            try tmp.dir.writeFile(.{ .sub_path = "dark", .data = "background-opacity = 0.8\n" });
+            const light = try tmp.dir.realpathAlloc(alloc, "light");
+            defer alloc.free(light);
+            const dark = try tmp.dir.realpathAlloc(alloc, "dark");
+            defer alloc.free(dark);
+            const text = try std.fmt.allocPrint(alloc, "theme = light:{s},dark:{s}\nwindow-theme = system\n", .{ light, dark });
+            defer alloc.free(text);
+            try tmp.dir.writeFile(.{ .sub_path = "config", .data = text });
+            const path = try tmp.dir.realpathAlloc(alloc, "config");
+            defer alloc.free(path);
+            const loaded = try load(alloc, path);
+            app.config.deinit();
+            app.config = loaded;
+            app.core_app.config_conditional_state.theme = other();
+            try std.testing.expectEqual(opacity(other()), app.config.@"background-opacity");
+
             // A window whose blur-behind failed and one whose did not, both
-            // translucent, under a `window-theme` that follows the system.
-            app.config.@"background-opacity" = 0.5;
-            app.config.@"window-theme" = .system;
+            // translucent.
             test_blur_behind_fails = true;
             try app.createWindow(default_title);
             const failed = fixture.newest().host.?;
@@ -3810,57 +3884,73 @@ test "win32 a light/dark change and its reload apply each window's opacity once,
             test_background_opacity_log = &applied;
             defer test_background_opacity_log = null;
 
-            // With a reload: one apply per window, in the reload, and the
-            // failed window tries blur-behind once there and keeps it.
-            // Before, the message's rebuild applied every window, at the
-            // opacity the reload then replaced, and the reload again.
-            var asserts = test_blur_behind_asserts;
-            try message(app, true);
-            try std.testing.expectEqual(hosts.len, applied.items.len);
-            for (hosts) |host| try expectAppliedOnce(applied.items, host, 0.5);
-            try std.testing.expectEqual(asserts + hosts.len, test_blur_behind_asserts);
-            try std.testing.expect(!failed.blur_behind_failed);
-            try std.testing.expectEqual(@as(?u8, 128), testBackgroundAlpha(failed.hwnd.?));
+            // With a reload, in either order of the system's messages: one
+            // apply per window, in the reload, at the opacity of the theme
+            // the system turned to, and the failed window tries blur-behind
+            // once there and keeps it. Before, a `WM_THEMECHANGED` first
+            // rebuilt the theme and applied every window at the opacity the
+            // reload then replaced, and the reload applied every window again.
+            for ([_]Order{ .immersive_first, .theme_changed_first }) |order| {
+                try before(app);
+                applied.clearRetainingCapacity();
+                const asserts = test_blur_behind_asserts;
+                messages(app, order);
+                try std.testing.expectEqual(hosts.len, applied.items.len);
+                for (hosts) |host| try expectAppliedOnce(applied.items, host, opacity(system()));
+                try std.testing.expectEqual(system(), app.core_app.config_conditional_state.theme);
+                try std.testing.expectEqual(asserts + hosts.len, test_blur_behind_asserts);
+                try std.testing.expect(!failed.blur_behind_failed);
+                try std.testing.expectEqual(@as(?u8, alpha(system())), testBackgroundAlpha(failed.hwnd.?));
+            }
 
             // With a reload whose first pane's step fails: the update's own
             // window pass is each window's one apply, after its theme
             // rebuild, and the message after it finds the theme current.
             // Before, the message rebuilt the theme the failed update never
             // had, and applied every window again (4 where 2).
-            applied.clearRetainingCapacity();
-            asserts = test_blur_behind_asserts;
-            Surface.test_scrollbar_refresh_fails = app.core_app.surfaces.items[0];
-            defer Surface.test_scrollbar_refresh_fails = null;
-            try message(app, true);
-            Surface.test_scrollbar_refresh_fails = null;
-            try std.testing.expectEqual(hosts.len, applied.items.len);
-            for (hosts) |host| try expectAppliedOnce(applied.items, host, 0.5);
-            try std.testing.expectEqual(asserts + hosts.len, test_blur_behind_asserts);
+            {
+                try before(app);
+                applied.clearRetainingCapacity();
+                const asserts = test_blur_behind_asserts;
+                Surface.test_scrollbar_refresh_fails = app.core_app.surfaces.items[0];
+                defer Surface.test_scrollbar_refresh_fails = null;
+                messages(app, .immersive_first);
+                Surface.test_scrollbar_refresh_fails = null;
+                try std.testing.expectEqual(hosts.len, applied.items.len);
+                for (hosts) |host| try expectAppliedOnce(applied.items, host, opacity(system()));
+                try std.testing.expectEqual(asserts + hosts.len, test_blur_behind_asserts);
+            }
 
             // Failing again, it latches again after that one try.
             fixture.closeWindow(fixture.newest());
             test_blur_behind_fails = true;
-            applied.clearRetainingCapacity();
-            asserts = test_blur_behind_asserts;
-            try message(app, true);
-            try std.testing.expectEqual(@as(usize, 1), applied.items.len);
-            try expectAppliedOnce(applied.items, failed, 0.5);
-            try std.testing.expectEqual(asserts + 1, test_blur_behind_asserts);
-            try std.testing.expect(failed.blur_behind_failed);
-            try std.testing.expectEqual(@as(?u8, 128), testLayeredAlpha(failed.hwnd.?));
+            {
+                try before(app);
+                applied.clearRetainingCapacity();
+                const asserts = test_blur_behind_asserts;
+                messages(app, .immersive_first);
+                try std.testing.expectEqual(@as(usize, 1), applied.items.len);
+                try expectAppliedOnce(applied.items, failed, opacity(system()));
+                try std.testing.expectEqual(asserts + 1, test_blur_behind_asserts);
+                try std.testing.expect(failed.blur_behind_failed);
+                try std.testing.expectEqual(@as(?u8, alpha(system())), testLayeredAlpha(failed.hwnd.?));
+            }
 
-            // Without a reload the message alone rebuilds, and retries once,
-            // as before.
-            applied.clearRetainingCapacity();
-            asserts = test_blur_behind_asserts;
-            try message(app, false);
-            try std.testing.expectEqual(@as(usize, 1), applied.items.len);
-            try std.testing.expectEqual(asserts + 1, test_blur_behind_asserts);
-            try std.testing.expect(failed.blur_behind_failed);
+            // Without a reload (core already in the system's state) the
+            // message alone rebuilds, and retries once, as before.
+            {
+                applied.clearRetainingCapacity();
+                const asserts = test_blur_behind_asserts;
+                messages(app, .theme_changed_first);
+                try std.testing.expectEqual(@as(usize, 1), applied.items.len);
+                try expectAppliedOnce(applied.items, failed, opacity(system()));
+                try std.testing.expectEqual(asserts + 1, test_blur_behind_asserts);
+                try std.testing.expect(failed.blur_behind_failed);
+            }
 
             // A message that changed nothing after either tries nothing.
             applied.clearRetainingCapacity();
-            asserts = test_blur_behind_asserts;
+            const asserts = test_blur_behind_asserts;
             const rebuilds = app.theme_rebuilds;
             app.reconfigureSystemTheme();
             try std.testing.expectEqual(rebuilds, app.theme_rebuilds);

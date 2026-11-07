@@ -11655,16 +11655,16 @@ pub fn hostWindowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) cal
             if (host) |v| {
                 v.app.refreshSystemWheelSettings();
                 v.app.refreshSystemScrollbarPreference();
-                // A light/dark change and its reload are one change.
-                if (settingChangeIsImmersiveColorSet(lParam)) {
-                    v.app.systemColorSetChanged();
-                } else if (settingChangeAffectsTheme(lParam)) v.app.reconfigureSystemTheme();
+                // A light/dark change and its reload are one change, whichever
+                // system theme message arrives first ("ImmersiveColorSet" is
+                // one of the names `settingChangeAffectsTheme` lets through).
+                if (settingChangeAffectsTheme(lParam)) v.app.systemColorSetChanged();
             }
             return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
         },
         c.WM_THEMECHANGED, c.WM_SYSCOLORCHANGE => {
             if (host) |v| {
-                v.app.reconfigureSystemTheme();
+                v.app.systemColorSetChanged();
             }
             return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
         },
