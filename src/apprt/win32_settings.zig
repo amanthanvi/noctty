@@ -2335,9 +2335,13 @@ pub const AppHandle = struct {
     /// window closed, or Discard dropped the draft (`rollbackPreviews`). One
     /// call, so the app can end a theme and an opacity in its own order and
     /// show each window once; the reverts one at a time could not tell it
-    /// where the rollback ends. Without it the rollback sends `previewField`
-    /// the saved value of each previewed field. A Reset or an edit of one row
-    /// still goes through `previewField`.
+    /// where the rollback ends. The windows end at the app's config, not at
+    /// this window's `current` snapshot, which the per-field reverts carried:
+    /// the two differ only while a palette theme preview has swapped the
+    /// app's config without telling Settings, and there the app's config, the
+    /// palette's preview, is what the windows should show. Without it the
+    /// rollback sends `previewField` the saved value of each previewed field.
+    /// A Reset or an edit of one row still goes through `previewField`.
     endPreviews: ?*const fn (ctx: *anyopaque) void = null,
     /// Optional conflict notification. The UI model retains the draft until
     /// `resolveConflict` is called with keep-mine or use-disk.
@@ -3005,8 +3009,12 @@ pub const SettingsWindow = struct {
             std.log.warn("settings: preview rollback failed err={}", .{err});
             return;
         };
-        // `.revert` emits only `set_preview`, one per previewed field.
         if (emitted.len == 0) return;
+        // `.revert` emits only `set_preview`, one per previewed field
+        // (`SettingsTransaction.revert`, pinned by "settings transaction
+        // revert emits only set_preview, one per previewed field"), so the
+        // one end drops no other effect.
+        for (emitted) |effect| std.debug.assert(effect == .set_preview);
         if (self.handle.endPreviews) |end| return end(self.handle.ctx);
         self.dispatchEffects(emitted);
     }
