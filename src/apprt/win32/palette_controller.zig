@@ -35,6 +35,7 @@ const palette_list_class_name = runtime.palette_list_class_name;
 const palette_max_visible_rows = runtime.palette_max_visible_rows;
 const palette_row_height = runtime.palette_row_height;
 const profile_pick = @import("profile_pick.zig");
+const redact = @import("../../os/redact.zig");
 const runUiActionOrLog = runtime.runUiActionOrLog;
 const signedHighWord = runtime.signedHighWord;
 const std = runtime.std;
@@ -811,14 +812,14 @@ pub const AppControls = struct {
             std.fs.makeDirAbsolute(dir) catch |err| switch (err) {
                 error.PathAlreadyExists => {},
                 else => {
-                    std.log.warn("palette MRU: mkdir failed path={s} err={}", .{ dir, err });
+                    std.log.warn("palette MRU: mkdir failed path={f} err={}", .{ redact.bytes(dir), err });
                     return;
                 },
             };
         }
 
         const file = std.fs.createFileAbsolute(path, .{ .truncate = true }) catch |err| {
-            std.log.warn("palette MRU: create failed path={s} err={}", .{ path, err });
+            std.log.warn("palette MRU: create failed path={f} err={}", .{ redact.bytes(path), err });
             return;
         };
         defer file.close();
@@ -1475,7 +1476,7 @@ pub const HostControls = struct {
                     return;
                 };
                 _ = self.setSelectedProfileIndex(index) catch |err| {
-                    log.warn("palette profile selection failed key={s} err={}", .{ key, err });
+                    log.warn("palette profile selection failed key={f} err={}", .{ redact.bytes(key), err });
                     self.abortPaletteAction("Profile selection failed; no profile was opened.");
                     return;
                 };
@@ -1486,7 +1487,7 @@ pub const HostControls = struct {
             },
             .layout => |name| {
                 const owned_name = self.app.core_app.alloc.dupe(u8, name) catch |err| {
-                    log.warn("palette layout name copy failed name={s} err={}", .{ name, err });
+                    log.warn("palette layout name copy failed name={f} err={}", .{ redact.bytes(name), err });
                     self.abortPaletteAction("Layout could not be prepared.");
                     return;
                 };
@@ -1510,7 +1511,7 @@ pub const HostControls = struct {
             },
             .theme => |name| {
                 self.commitPaletteTheme(name) catch |err| {
-                    log.warn("palette theme preflight failed theme={s} err={}", .{ name, err });
+                    log.warn("palette theme preflight failed theme={f} err={}", .{ redact.bytes(name), err });
                     self.abortPaletteAction("Theme could not be prepared; no setting was changed.");
                     return;
                 };
@@ -1598,7 +1599,7 @@ pub const HostControls = struct {
         if (limit == 0) return;
 
         const names = win32_layouts.listNamesAlloc(alloc, directory, limit) catch |err| {
-            log.warn("palette layout enumeration failed path={s} err={}", .{ directory, err });
+            log.warn("palette layout enumeration failed path={f} err={}", .{ redact.bytes(directory), err });
             return;
         };
         self.palette_layout_names = names;

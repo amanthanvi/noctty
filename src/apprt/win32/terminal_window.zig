@@ -2498,6 +2498,10 @@ pub const Surface = struct {
         }
         const initial = host.overlayInitialText(.tab_overview);
         defer if (initial) |value| self.app.core_app.alloc.free(value);
+        // What is open ends first, as every other overlay's open ends it: a
+        // palette reverts its theme preview and lets go of its catalog's
+        // config, a confirm prompt releases its pending operation.
+        host.hideOverlay();
         try host.showOverlay(.tab_overview, initial);
         return true;
     }
@@ -3542,10 +3546,15 @@ pub const Surface = struct {
     pub fn refreshScrollbarWindow(self: *Surface) !void {
         if (builtin.is_test and test_scrollbar_refresh_fails == self) return error.TestScrollbarRefreshFailed;
         try self.syncScrollbarWindowNow(sys.GetTickCount64());
+        if (builtin.is_test and test_scrollbar_refreshes_of == self) test_scrollbar_refreshes += 1;
     }
 
     /// The pane whose `refreshScrollbarWindow` fails in a test.
     pub var test_scrollbar_refresh_fails: ?*const Surface = null;
+    /// The pane whose `refreshScrollbarWindow` calls that succeed a test
+    /// counts, in `test_scrollbar_refreshes`.
+    pub var test_scrollbar_refreshes_of: ?*const Surface = null;
+    pub var test_scrollbar_refreshes: usize = 0;
 
     pub fn scrollbarNeedsHeartbeat(self: *const Surface) bool {
         return scrollbarNeedsHeartbeatForState(

@@ -268,15 +268,23 @@ that govern each symbol you change, or that none does.
   `retryBackgroundOpacity`, `releaseBackgroundOpacity`, `childCreated` and
   `solidifies` in `win32/window_state.zig`, with `Host.chrome_alpha` and
   `Host.blur_behind_failed`; when a window shows it again: the `opacity`
-  argument of `App.reconfigureTheme`, `reconfigureSystemTheme` and its two
+  argument of `App.reconfigureTheme`, `App.systemColorSetChanged` (every
+  system theme message, `WM_THEMECHANGED`, `WM_SYSCOLORCHANGE` and a
+  theme-affecting `WM_SETTINGCHANGE`, with a light/dark change's reload),
+  `reconfigureSystemTheme` and its two
   baselines (the rebuild's, `App.system_theme_refresh` and
   `SystemThemeSnapshot`, which `reconfigureTheme` and `App.init` set; the
   retry's, `App.system_inputs` and `window_state.SystemInputs`, which only
-  `reconfigureSystemTheme` and `App.init` set), `App.endSettingsPreview`, the
+  `App.takeSystemInputs`, from `reconfigureSystemTheme` and
+  `systemColorSetChanged`, and `App.init` set), `App.endSettingsPreview`
+  (and the Settings rollback that ends both previews through it:
+  `rollbackPreviews`, the handle's `endPreviews`, App's private
+  `settingsEndPreviewsThunk`), the
   window half of a config change (the `.surface` and `.app`
   `config_change` arms, `App.app_wide_config_change`,
   `App.updateCoreConfig`, `App.updatePaneCoreConfig`, and after a failed
-  update `App.app_wide_windows_applied` and `App.applyWindowsConfig`), and
+  update `App.app_wide_windows_applied`, `App.applyWindowsConfig` and
+  `App.reloadKeptConfig`), and
   `Host.closing` in `Host.closeConfirmed` and `App.windowDestroyed`;
   `Surface.setBackgroundOpacity`,
   `rendererSwitchedToOpenGL` and `WM_WINHOSTTY_RENDERER_SWITCHED`; the
@@ -308,7 +316,18 @@ that govern each symbol you change, or that none does.
   placement cache (`ChildPlacement`, `applyChromeChildRect` in
   `win32/child_window.zig`), tweens.
 - [chrome-overlays.md](docs/agents/log/chrome-overlays.md): the command
-  palette (`win32_palette.zig`, `win32/palette_controller.zig`, ranking, MRU
+  palette (`win32_palette.zig`, `win32/palette_controller.zig`, its live
+  theme preview, one window's at a time (`Host.showOverlay`, which closes
+  every other window's palette; `Surface.toggleTabOverview`, which closes
+  what is open first like every overlay's open; the error
+  `showPaletteThemePreview` logs over another window's live preview),
+  and how a reload ends it
+  (`Host.swapRuntimeConfigFromPalette`, `installRuntimeConfigFromPalette`,
+  `showPaletteThemePreview`, `supersedePaletteThemePreview`,
+  `detachLivePaletteCatalogConfig`, and
+  `App.updateCoreConfig`'s fallback after a failed reload,
+  `App.reloadKeptConfig`, which reloads `app.config` in core's light/dark
+  state), ranking, MRU
   and its `palette-mru.txt` lines: `writePaletteMruLine`, palette list, the
   catalog's capacity and the installed themes that fit it:
   `palette_catalog_capacity`, `appendInstalledThemesToPalette`, and the
@@ -331,7 +350,11 @@ that govern each symbol you change, or that none does.
   `searchEditProc` and the bar's paint and UIA in
   `win32/search_controls.zig`; the order of `Surface.endSearch`'s
   end_search and clears in `src/Surface.zig`; visible Up/Down versus
-  core `.next`/`.previous`, debounce) and the layered overlay scrollbar
+  core `.next`/`.previous`, debounce and the host's search timer over
+  every tab: `Host.refreshSearchTimerState`, `tickSearchBars`, the
+  restart after `restoreClosedTabEntryNative` and `redoSplitCreateEntry`,
+  the `test_core_steps` seam of `applyDockedSearch`) and the
+  layered overlay scrollbar
   (`win32_scrollbar_geometry.zig`, heartbeat, alpha, markers).
 - [tabs-panes.md](docs/agents/log/tabs-panes.md): tabs, splits and windows as
   a structure: `Surface.init` ordering, `activateSurface`, showing and hiding
@@ -414,7 +437,8 @@ that govern each symbol you change, or that none does.
   (`win32_settings.zig`, `win32_settings_fields.zig`): its controls and when
   they are made (`SettingsWindow.open`, `materializeSection`), dialog
   manager, viewport, live preview (`App.settings_preview`, `App.shownConfig`,
-  `App.shownBackgroundOpacity`), theming (`SettingsThemeAdapter`,
+  `App.shownBackgroundOpacity`, and its rollback at a close or Discard:
+  `rollbackPreviews` and the handle's `endPreviews`), theming (`SettingsThemeAdapter`,
   `themeChanged`), its own UIA patterns, combo and open traces
   (`NOCTTY_SETTINGS_COMBO_TRACE`, `NOCTTY_SETTINGS_OPEN_TRACE`,
   `win32/bench_trace.zig`), the Default profile row

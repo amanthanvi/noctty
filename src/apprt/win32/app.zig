@@ -695,9 +695,11 @@ pub const App = struct {
     theme_rebuilds: u32 = 0,
     system_theme_refresh: SystemThemeRefresh = .{},
     /// The system's own theme inputs at the last system theme message (or
-    /// at `init`): a failed blur-behind tries again only when they changed
-    /// (`reconfigureSystemTheme`). Unlike `system_theme_refresh`, no rebuild
-    /// of the app's own (a reload, a Settings preview) moves it.
+    /// at `init`): a failed blur-behind tries again only when they changed.
+    /// Set by `init` and `takeSystemInputs`, which a system theme message
+    /// runs (`reconfigureSystemTheme`, and `systemColorSetChanged` before a
+    /// light/dark reload). Unlike `system_theme_refresh`, no rebuild of the
+    /// app's own (a reload, a Settings preview) moves it.
     system_inputs: ?window_state.SystemInputs = null,
     hinstance: HINSTANCE,
     class_atom: ATOM = 0,
@@ -1315,6 +1317,7 @@ pub const App = struct {
             .saveAndReload = &settingsSaveAndReloadThunk,
             .configRevision = &settingsConfigRevisionThunk,
             .previewField = &settingsPreviewFieldThunk,
+            .endPreviews = &settingsEndPreviewsThunk,
             .notifyConflict = &settingsNotifyConflictThunk,
             .reconcileDisk = &settingsReconcileDiskThunk,
             .failureDetail = &settingsFailureDetailThunk,
@@ -1857,6 +1860,7 @@ pub const App = struct {
         // The window rolls its previews back as it goes, and the hosts and
         // windows a redraw walks are gone by now: nothing to show it to.
         self.settings_window.handle.previewField = null;
+        self.settings_window.handle.endPreviews = null;
         self.settings_window.deinit();
         self.dropSettingsPreview();
         const uia_disconnect_hr = win32_uia.disconnectAllProviders();
@@ -4155,6 +4159,7 @@ pub const App = struct {
             .config_change => {
                 switch (target) {
                     .app => {
+                        if (builtin.is_test and test_app_config_clone_fails) return error.OutOfMemory;
                         var config = try value.config.clone(self.core_app.alloc);
                         // Profile lists are built from these keys, so a change to
                         // any of them drops every list the hosts and the jump
@@ -4178,11 +4183,16 @@ pub const App = struct {
                         forgetLaunchLayout(&config);
                         // Palette theme preview owns a reversible baseline
                         // around the app-global config. An external/settings
-                        // config change supersedes that transaction: dismiss
-                        // the palette first so it reverts and resets every
-                        // borrowed catalog before the incoming config replaces
-                        // the baseline. A later Escape can never resurrect the
+                        // config change supersedes that transaction: it ends
+                        // (`updateCoreConfig` ended it already, before core
+                        // gave the panes this config) with nothing shown of
+                        // the baseline, which every pane and window would
+                        // otherwise take after or before this config, and the
+                        // palette is dismissed so it resets every borrowed
+                        // catalog before the incoming config replaces the
+                        // baseline. A later Escape can never resurrect the
                         // stale pre-reload config.
+                        self.supersedePaletteThemePreviews();
                         for (self.registry.hosts.items) |host| {
                             if (host.overlay_mode == .command_palette) host.hideOverlay();
                         }
@@ -4227,11 +4237,21 @@ pub const App = struct {
                         // Every window has its apply, past one that fails:
                         // the theme left the opacity to this loop, so a
                         // window it skipped would show none of the reload.
-                        // The first failure is returned after it, so the
-                        // scrollbar refresh is still skipped.
+                        // Then every pane's scrollbar, past one that fails,
+                        // after a window's failure too: the scrollbar reads
+                        // nothing a window's apply sets. The config is
+                        // installed either way, so the steps after them run
+                        // (Settings hears of it), and the first failure, a
+                        // window's before a pane's, is returned last.
                         self.app_wide_windows_applied = true;
-                        try self.applyWindowsConfig(&self.config);
-                        for (self.registry.windows.items) |surface| try surface.refreshScrollbarWindow();
+                        const windows_applied = self.applyWindowsConfig(&self.config);
+                        var scrollbars: @TypeOf(Surface.refreshScrollbarWindow(undefined)) = {};
+                        for (self.registry.windows.items) |surface| {
+                            surface.refreshScrollbarWindow() catch |err| {
+                                log.warn("win32 scrollbar refresh after a config change failed err={}", .{err});
+                                if (scrollbars) |_| scrollbars = err else |_| {}
+                            };
+                        }
                         // A reload that turns automatic checks on in a process
                         // that started with them off (or on another channel).
                         if (self.registry.windows.items.len > 0 and self.update_startup_ready) self.maybeScheduleAutomaticUpdateCheck();
@@ -4242,6 +4262,8 @@ pub const App = struct {
                         } else {
                             self.stopQuitTimer();
                         }
+                        try windows_applied;
+                        try scrollbars;
                     },
                     .surface => |core_surface| {
                         const surface = self.registry.findSurfaceByCore(core_surface) orelse return false;
@@ -5984,6 +6006,14 @@ pub const App = struct {
         try std.testing.expectEqual(@as(?i32, c.SW_SHOWMINNOACTIVE), InitialShow.minimized.showCommand());
     }
 
+    /// Settings ends every preview at once (a close, Discard): one end, the
+    /// theme before the opacity, so each window shows its opacity once, at
+    /// the saved value (`endSettingsPreview`).
+    fn settingsEndPreviewsThunk(ctx: *anyopaque) void {
+        const app: *App = @ptrCast(@alignCast(ctx));
+        app.endSettingsPreview();
+    }
+
     pub fn refreshSystemWheelSettings(self: *App) void {
         self.wheel_settings = .{
             .lines = readSystemWheelSetting(c.SPI_GETWHEELSCROLLLINES, self.wheel_settings.lines),
@@ -6000,15 +6030,49 @@ pub const App = struct {
         }
     }
 
+    /// A system theme message (`WM_THEMECHANGED`, `WM_SYSCOLORCHANGE`, a
+    /// `WM_SETTINGCHANGE` that can change the theme, "ImmersiveColorSet"
+    /// among them): the message's part (`reconfigureSystemTheme`) and the
+    /// light/dark reload (`syncSystemColorScheme`) as one change, whichever
+    /// message of a light/dark change arrives first, so each window applies
+    /// its opacity once, at the value it ends at. Where a reload follows, it
+    /// rebuilds the theme and applies every window, so the message's part
+    /// goes into it: the system's inputs are taken first, and where they
+    /// changed every failed blur-behind is unlatched, so the reload's apply
+    /// is its one try. The message after the reload then finds both
+    /// baselines current (it still rebuilds a missing resource), after a
+    /// reload that failed at a pane's step too (`updateCoreConfig` rebuilds
+    /// the theme then). Without a reload the message runs as before, then
+    /// the sync: where the light/dark state did not change, it changes
+    /// nothing (a pane's `colorSchemeCallback` and core's `colorSchemeEvent`
+    /// return at once on an unchanged scheme); in safe mode with a changed
+    /// one, they still move each pane's and core's light/dark state, and
+    /// only the reload core asks for does nothing (the `.reload_config` arm
+    /// returns in safe mode), as on the "ImmersiveColorSet" path before.
+    pub fn systemColorSetChanged(self: *App) void {
+        const scheme: configpkg.ConditionalState.Theme = if (isSystemDarkMode()) .dark else .light;
+        const reloads = !self.safe_mode and self.core_app.config_conditional_state.theme != scheme;
+        if (reloads) {
+            if (self.takeSystemInputs()) for (self.registry.hosts.items) |host| {
+                host.blur_behind_failed = false;
+            };
+        } else self.reconfigureSystemTheme();
+        self.syncSystemColorScheme() catch |err| {
+            log.warn("win32 color scheme sync failed err={}", .{err});
+        };
+        if (reloads) self.reconfigureSystemTheme();
+    }
+
     pub fn syncSystemColorScheme(self: *App) !void {
         const scheme: apprt.ColorScheme = if (isSystemDarkMode()) .dark else .light;
 
         // Surface state must change before the app-wide reload because
         // App.updateConfig applies each surface's own conditional state and
         // Termio reports mode 2031 only after installing that derived config.
-        for (self.registry.windows.items) |surface| {
+        // (A test pane with no core has no state to change.)
+        if (!(builtin.is_test and self.test_surface_init_stage != null)) for (self.registry.windows.items) |surface| {
             surface.core().colorSchemeCallback(scheme);
-        }
+        };
         try self.core_app.colorSchemeEvent(self, scheme);
     }
 
@@ -6018,11 +6082,31 @@ pub const App = struct {
     /// (`app_wide_config_change`), so each window applies its half once, in
     /// the app's step.
     ///
-    /// A pane's step that fails ends core's update before the app's, and the
-    /// panes left the windows to it: then every window still takes its half
-    /// of `config`, as the app's step would have had it, and the pane's
-    /// error is returned.
+    /// A pane's step that fails ends core's update before the app's, which
+    /// never installs `config`: the panes before the failing one took it,
+    /// the others kept what they had (a palette preview the update ended,
+    /// among them), and the panes left the windows to the app's step. And
+    /// core's light/dark state may have moved already (a light/dark reload
+    /// sets it first), while `app.config` is still in the state it was
+    /// installed in. Then the update ends as a soft reload of the config
+    /// the app keeps, in core's order, past a pane that fails: every pane
+    /// takes `app.config` in its own light/dark state, and the app's step
+    /// installs `app.config` replayed in the app's (its own config files
+    /// as last read, nothing of the failed update), so the panes, the
+    /// theme, Settings and every window, each once, agree on it, the arm
+    /// telling Settings past a window or pane that fails; any open palette
+    /// closes, as in every reload. A pane whose step fails again keeps what
+    /// that step did not reach (its scrollbar refresh, say). Where the arm
+    /// cannot take the config at all (its clone runs out of memory), every
+    /// palette still closes and the theme and every window show `app.config`
+    /// as it is, needing no other clone. The pane's error is returned.
+    /// The system theme message a light/dark reload runs after it
+    /// (`systemColorSetChanged`) finds the theme current and applies no
+    /// window again.
     pub fn updateCoreConfig(self: *App, config: *const configpkg.Config) !void {
+        // Before core reads `config`, which is the app config itself in a
+        // soft reload: the reload starts from the config a preview replaced.
+        self.supersedePaletteThemePreviews();
         const outer = self.app_wide_config_change;
         const outer_applied = self.app_wide_windows_applied;
         self.app_wide_config_change = true;
@@ -6032,27 +6116,70 @@ pub const App = struct {
             self.app_wide_windows_applied = outer_applied;
         }
         self.coreConfigUpdate(config) catch |err| {
-            if (!self.app_wide_windows_applied) {
-                // In the app's light/dark state, as core gives the app its
-                // config, or as it is if that fails, as core goes on then.
-                var shown_ = config.changeConditionalState(self.core_app.config_conditional_state) catch null;
-                defer if (shown_) |*shown| shown.deinit();
-                self.applyWindowsConfig(if (shown_) |*shown| shown else config) catch |window_err| {
-                    log.warn("win32 window config apply after a failed update failed err={}", .{window_err});
-                };
-            }
+            if (!self.app_wide_windows_applied) self.reloadKeptConfig();
             return err;
         };
+    }
+
+    /// The `.app` `config_change` arm's clone of the config fails in a test,
+    /// as it can when memory runs out.
+    pub var test_app_config_clone_fails = false;
+
+    /// `updateCoreConfig`'s end after an update that failed before the app's
+    /// step: core's order with `app.config`, logging a step that fails and
+    /// going on. Still inside the app-wide change, so each pane leaves its
+    /// window to the app's step.
+    fn reloadKeptConfig(self: *App) void {
+        for (self.registry.windows.items) |pane| {
+            self.updatePaneCoreConfig(pane, &self.config) catch |err| {
+                log.warn("win32 pane config restore after a failed update failed err={}", .{err});
+            };
+        }
+        // In the app's light/dark state, as core gives the app its config,
+        // or as it is if that fails, as core goes on then. The arm clones
+        // what it is given before it frees `app.config`.
+        var kept_ = self.config.changeConditionalState(self.core_app.config_conditional_state) catch null;
+        defer if (kept_) |*kept| kept.deinit();
+        _ = self.performAction(.app, .config_change, .{ .config = if (kept_) |*kept| kept else &self.config }) catch |err| {
+            log.warn("win32 app config restore after a failed update failed err={}", .{err});
+        };
+        // The arm ends before its window pass only where it could not take
+        // the config (its clone ran out of memory), and then nothing shows
+        // `app.config`: a palette preview the update ended stays on screen,
+        // with no preview left for its palette to revert. Then every
+        // palette still closes, and the theme and every window show
+        // `app.config` as it is, once. None of it needs another clone or an
+        // allocation to succeed: a palette's mode, catalog and preview are
+        // reset first, and its layout and text, and a theme resource
+        // rebuild, are best effort (each logs a failure and goes on).
+        if (!self.app_wide_windows_applied) {
+            for (self.registry.hosts.items) |host| {
+                if (host.overlay_mode == .command_palette) host.hideOverlay();
+            }
+            self.reconfigureTheme(.caller_applies);
+            self.applyWindowsConfig(&self.config) catch |err| {
+                log.warn("win32 window config apply after a failed update failed err={}", .{err});
+            };
+        }
+    }
+
+    /// A reload replaces the app config: a palette's live theme preview
+    /// ends without being reverted on screen
+    /// (`Host.supersedePaletteThemePreview`), and the palette closes in the
+    /// `.app` `config_change` arm.
+    fn supersedePaletteThemePreviews(self: *App) void {
+        for (self.registry.hosts.items) |host| host.supersedePaletteThemePreview();
     }
 
     /// `updateCoreConfig` without its window pass after a failure.
     fn coreConfigUpdate(self: *App, config: *const configpkg.Config) !void {
         if (builtin.is_test and self.test_surface_init_stage != null) {
             // Core's order, for panes with no core: each pane, then the app
-            // (without the app's light/dark state, which core puts the
-            // config in first).
+            // in the app's light/dark state, as core puts it.
             for (self.core_app.surfaces.items) |pane| try self.updatePaneCoreConfig(pane, config);
-            _ = try self.performAction(.app, .config_change, .{ .config = config });
+            var applied_ = config.changeConditionalState(self.core_app.config_conditional_state) catch null;
+            defer if (applied_) |*applied| applied.deinit();
+            _ = try self.performAction(.app, .config_change, .{ .config = if (applied_) |*applied| applied else config });
             return;
         }
         try self.core_app.updateConfig(self, config);
@@ -6075,12 +6202,26 @@ pub const App = struct {
 
     /// Core's config update of `pane` alone (`Surface.updateConfig`), which
     /// ends in its `.surface` `config_change`.
-    pub fn updatePaneCoreConfig(self: *App, pane: *Surface, config: *const configpkg.Config) !void {
+    pub fn updatePaneCoreConfig(self: *App, pane: *Surface, config: *const configpkg.Config) anyerror!void {
         if (builtin.is_test and self.test_surface_init_stage != null) {
-            _ = try self.performAction(.{ .surface = pane.core() }, .config_change, .{ .config = config });
+            // In the pane's light/dark state, as core's `Surface.updateConfig`
+            // puts it; `syncSystemColorScheme` makes that the app's.
+            var applied_ = config.changeConditionalState(self.core_app.config_conditional_state) catch null;
+            defer if (applied_) |*applied| applied.deinit();
+            _ = try self.performAction(.{ .surface = pane.core() }, .config_change, .{ .config = if (applied_) |*applied| applied else config });
             return;
         }
         try pane.core().updateConfig(config);
+    }
+
+    /// Takes the system's own theme inputs as the baseline a system theme
+    /// message compares with (`system_inputs`), and returns whether they
+    /// changed since the last message took them.
+    fn takeSystemInputs(self: *App) bool {
+        const inputs = window_state.SystemInputs.capture();
+        defer self.system_inputs = inputs;
+        const last = self.system_inputs orelse return true;
+        return !std.meta.eql(last, inputs);
     }
 
     pub fn reconfigureSystemTheme(self: *App) void {
@@ -6104,9 +6245,7 @@ pub const App = struct {
         // preview between a system change and its message rebuilds with the
         // change, and the message then finds the snapshot as it left it.
         // Resources a message finds missing are GDI's, not DWM's.
-        const inputs = window_state.SystemInputs.capture();
-        const system_changed = if (self.system_inputs) |last| !std.meta.eql(last, inputs) else true;
-        self.system_inputs = inputs;
+        const system_changed = self.takeSystemInputs();
         if (rebuild) {
             self.reconfigureTheme(if (system_changed) .retry else .refresh);
         } else if (system_changed) {
@@ -6179,8 +6318,9 @@ pub const App = struct {
                 }
                 // High Contrast shows every window opaque, and a window that
                 // had blur-behind asserts it again across the theme change,
-                // after the frame write above, as after every style write
-                // that changes the frame.
+                // after the frame write above, as fullscreen and the
+                // decorations toggle do (not every frame write does: open
+                // item (d) of the OPACITY-640-FOLLOWUPS log entry).
                 switch (opacity) {
                     .retry => window_state.retryBackgroundOpacity(host),
                     .refresh => window_state.refreshBackgroundOpacity(host),
@@ -6290,9 +6430,11 @@ pub const App = struct {
     }
 
     /// Settings previews nothing any more: a save wrote every draft, or the
-    /// window closed. Normally nothing is left to end: a save's reload shows
-    /// no preview (`livePreviews` is empty while a save is in flight) and a
-    /// close rolls its previews back. A save without a reload (safe mode)
+    /// window rolled its previews back (a close, Discard: its `endPreviews`
+    /// hook, `settingsEndPreviewsThunk`, so a theme and an opacity reverted
+    /// together show each window once). A save's reload shows no preview
+    /// (`livePreviews` is empty while a save is in flight), so normally a
+    /// save leaves nothing to end; a save without a reload (safe mode)
     /// leaves the overlay, and the transaction ends its previews at a save
     /// without a rollback effect, so the windows go to the saved config here.
     pub fn endSettingsPreview(self: *App) void {
@@ -9053,11 +9195,13 @@ pub const App = struct {
         // would put it in that state again, reading the theme again,
         // unchecked, and a theme that had become unreadable in between would
         // be installed partly read. It updates each terminal and then the
-        // app, so one that fails may have applied part of the reload
-        // (`SavedPartlyApplied`).
+        // app (`SavedPartlyApplied` either way): a terminal's step that
+        // fails leaves the running settings as they were (`updateCoreConfig`
+        // reloads the app config in place), and a step of the app's that
+        // fails after the install leaves the rest of it undone.
         postWriteStep(.apply);
         self.updateCoreConfig(applied) catch |err| {
-            log.warn("settings save: saved, but applying the reload failed partway; the running settings may be partly updated err={}", .{err});
+            log.warn("settings save: saved, but applying the reload failed; the running settings are the previous ones, or partly updated after a late failure err={}", .{err});
             return error.SavedPartlyApplied;
         };
         // The reload read the file again, so what is wrong in it is news.
@@ -12770,6 +12914,79 @@ test "PKG-39 a Settings preview is shown without reaching the config terminals a
     if (!isHighContrastActive()) try std.testing.expect(app.resolved_theme.is_dark);
     app.endSettingsPreview();
     try std.testing.expectEqual(rebuilds + 1, app.theme_rebuilds);
+}
+
+test "PKG-39 App.terminate takes both Settings preview hooks away before the window rolls its previews back, with both previews live" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    try runOnHiddenDesktop(struct {
+        fn body() !void {
+            const core = try CoreApp.create(std.testing.allocator);
+            defer core.destroy();
+            var app: App = undefined;
+            try app.init(core, .{ .safe_mode = true });
+            const hinstance = app.hinstance;
+            defer {
+                _ = sys.UnregisterClassW(host_class_name, hinstance);
+                _ = sys.UnregisterClassW(palette_list_class_name, hinstance);
+                _ = sys.UnregisterClassW(scrollbar_class_name, hinstance);
+            }
+            const settings_class = std.unicode.utf8ToUtf16LeStringLiteral("noctty.win32.settings");
+            const viewport_class = std.unicode.utf8ToUtf16LeStringLiteral("noctty.win32.settings.viewport");
+            defer {
+                _ = sys.UnregisterClassW(settings_class, hinstance);
+                _ = sys.UnregisterClassW(viewport_class, hinstance);
+            }
+            // A step below that fails, the skip included, still tears the
+            // app down, before its window classes go; the end of the test
+            // terminates it once.
+            var terminated = false;
+            errdefer if (!terminated) app.terminate();
+            if (!app.com_initialized) return error.SkipZigTest;
+            try std.testing.expect(app.settings_window.handle.previewField != null);
+            try std.testing.expect(app.settings_window.handle.endPreviews != null);
+
+            // Settings open with an opacity and a theme preview, made through
+            // its own controls, so its rollback has both to end.
+            app.settings_window.handle.deferUiaDisconnect = null;
+            try app.settings_window.open();
+            _ = sys.SetWindowTextW(app.settings_window.fields.edit_bg_opacity.?, std.unicode.utf8ToUtf16LeStringLiteral("0.5"));
+            const combo = app.settings_window.fields.combo_window_theme.?;
+            const field_model = @import("../win32_settings_fields.zig");
+            const cb_setcursel = 0x014E;
+            const cbn_selchange = 1;
+            _ = sys.SendMessageW(combo, cb_setcursel, field_model.Combo(.window_theme).toIndex(.light), 0);
+            const id: usize = @intCast(sys.GetDlgCtrlID(combo));
+            _ = sys.SendMessageW(app.settings_window.hwnd.?, c.WM_COMMAND, id | (@as(usize, cbn_selchange) << 16), @bitCast(@intFromPtr(combo)));
+            try std.testing.expectEqual(@as(f64, 0.5), app.shownConfig().@"background-opacity");
+            try std.testing.expect(app.shownConfig().@"window-theme" == .light);
+
+            // `settings_window.deinit` rolls the previews back after the
+            // hosts and windows a redraw walks are freed: neither a field's
+            // revert nor the end of them all may reach the app. The hooks
+            // count instead of reaching it, so a hook left in place shows as
+            // a call, not as a redraw over freed hosts.
+            const Calls = struct {
+                var preview_field: usize = 0;
+                var end_previews: usize = 0;
+                fn previewField(_: *anyopaque, _: win32_settings.SettingField, _: win32_settings.SettingValue) void {
+                    preview_field += 1;
+                }
+                fn endPreviews(_: *anyopaque) void {
+                    end_previews += 1;
+                }
+            };
+            Calls.preview_field = 0;
+            Calls.end_previews = 0;
+            app.settings_window.handle.previewField = &Calls.previewField;
+            app.settings_window.handle.endPreviews = &Calls.endPreviews;
+            terminated = true;
+            app.terminate();
+            try std.testing.expectEqual(@as(usize, 0), Calls.preview_field);
+            try std.testing.expectEqual(@as(usize, 0), Calls.end_previews);
+            try std.testing.expect(app.settings_window.handle.previewField == null);
+            try std.testing.expect(app.settings_window.handle.endPreviews == null);
+        }
+    }.body);
 }
 
 test "win32 a DPI change holds the terminal grid from WM_GETDPISCALEDSIZE to WM_DPICHANGED" {
