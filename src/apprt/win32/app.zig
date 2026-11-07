@@ -4191,7 +4191,7 @@ pub const App = struct {
                         // catalog before the incoming config replaces the
                         // baseline. A later Escape can never resurrect the
                         // stale pre-reload config.
-                        _ = self.supersedePaletteThemePreviews();
+                        self.supersedePaletteThemePreviews();
                         for (self.registry.hosts.items) |host| {
                             if (host.overlay_mode == .command_palette) host.hideOverlay();
                         }
@@ -6069,19 +6069,23 @@ pub const App = struct {
     /// A pane's step that fails ends core's update before the app's, which
     /// never installs `config`: the panes before the failing one took it,
     /// the others kept what they had (a palette preview the update ended,
-    /// among them), and the panes left the windows to the app's step. Then
-    /// everything goes back on the config the app keeps, `app.config`, in
-    /// the app's light/dark state, as core gives each pane its config: every
-    /// pane, the theme (rebuilt, as the app's step rebuilds it first) and
-    /// every window, and the pane's error is returned. Where the update
-    /// ended a preview its palette, open with no preview left for Escape to
-    /// revert, is dismissed. The system theme message a light/dark reload
-    /// runs after it (`systemColorSetChanged`) finds the theme current and
-    /// applies no window again.
+    /// among them), and the panes left the windows to the app's step. And
+    /// core's light/dark state may have moved already (a light/dark reload
+    /// sets it first), while `app.config` is still in the state it was
+    /// installed in. Then the update ends as a soft reload of the config
+    /// the app keeps, in core's order, past a pane that fails: every pane
+    /// takes `app.config` in its own light/dark state, and the app's step
+    /// installs `app.config` replayed in the app's (its own config files
+    /// as last read, nothing of the failed update), so the panes, the
+    /// theme, Settings and every window, each once, agree on it; any open
+    /// palette closes, as in every reload. The pane's error is returned.
+    /// The system theme message a light/dark reload runs after it
+    /// (`systemColorSetChanged`) finds the theme current and applies no
+    /// window again.
     pub fn updateCoreConfig(self: *App, config: *const configpkg.Config) !void {
         // Before core reads `config`, which is the app config itself in a
         // soft reload: the reload starts from the config a preview replaced.
-        const superseded = self.supersedePaletteThemePreviews();
+        self.supersedePaletteThemePreviews();
         const outer = self.app_wide_config_change;
         const outer_applied = self.app_wide_windows_applied;
         self.app_wide_config_change = true;
@@ -6091,27 +6095,28 @@ pub const App = struct {
             self.app_wide_windows_applied = outer_applied;
         }
         self.coreConfigUpdate(config) catch |err| {
-            if (!self.app_wide_windows_applied) {
-                if (superseded) for (self.registry.hosts.items) |host| {
-                    if (host.overlay_mode == .command_palette) host.hideOverlay();
-                };
-                // Still inside the app-wide change: each pane leaves its
-                // window to the pass below.
-                for (self.registry.windows.items) |pane| {
-                    self.updatePaneCoreConfig(pane, &self.config) catch |pane_err| {
-                        log.warn("win32 pane config restore after a failed update failed err={}", .{pane_err});
-                    };
-                }
-                self.reconfigureTheme(.caller_applies);
-                // In the app's light/dark state, as core gives its config,
-                // or as it is if that fails, as core goes on then.
-                var shown_ = self.config.changeConditionalState(self.core_app.config_conditional_state) catch null;
-                defer if (shown_) |*shown| shown.deinit();
-                self.applyWindowsConfig(if (shown_) |*shown| shown else &self.config) catch |window_err| {
-                    log.warn("win32 window config apply after a failed update failed err={}", .{window_err});
-                };
-            }
+            if (!self.app_wide_windows_applied) self.reloadKeptConfig();
             return err;
+        };
+    }
+
+    /// `updateCoreConfig`'s end after an update that failed before the app's
+    /// step: core's order with `app.config`, logging a step that fails and
+    /// going on. Still inside the app-wide change, so each pane leaves its
+    /// window to the app's step.
+    fn reloadKeptConfig(self: *App) void {
+        for (self.registry.windows.items) |pane| {
+            self.updatePaneCoreConfig(pane, &self.config) catch |err| {
+                log.warn("win32 pane config restore after a failed update failed err={}", .{err});
+            };
+        }
+        // In the app's light/dark state, as core gives the app its config,
+        // or as it is if that fails, as core goes on then. The arm clones
+        // what it is given before it frees `app.config`.
+        var kept_ = self.config.changeConditionalState(self.core_app.config_conditional_state) catch null;
+        defer if (kept_) |*kept| kept.deinit();
+        _ = self.performAction(.app, .config_change, .{ .config = if (kept_) |*kept| kept else &self.config }) catch |err| {
+            log.warn("win32 app config restore after a failed update failed err={}", .{err});
         };
     }
 
@@ -6119,13 +6124,8 @@ pub const App = struct {
     /// ends without being reverted on screen
     /// (`Host.supersedePaletteThemePreview`), and the palette closes in the
     /// `.app` `config_change` arm.
-    /// Returns whether one was live.
-    fn supersedePaletteThemePreviews(self: *App) bool {
-        var superseded = false;
-        for (self.registry.hosts.items) |host| {
-            if (host.supersedePaletteThemePreview()) superseded = true;
-        }
-        return superseded;
+    fn supersedePaletteThemePreviews(self: *App) void {
+        for (self.registry.hosts.items) |host| _ = host.supersedePaletteThemePreview();
     }
 
     /// `updateCoreConfig` without its window pass after a failure.

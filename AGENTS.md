@@ -323,8 +323,9 @@ that govern each symbol you change, or that none does.
   and how a reload ends it
   (`Host.swapRuntimeConfigFromPalette`, `showPaletteThemePreview`,
   `supersedePaletteThemePreview`, `detachLivePaletteCatalogConfig`, and
-  `App.updateCoreConfig`'s fallback after a failed reload, which puts
-  every pane and window back on `app.config`), ranking, MRU
+  `App.updateCoreConfig`'s fallback after a failed reload,
+  `App.reloadKeptConfig`, which reloads `app.config` in core's light/dark
+  state), ranking, MRU
   and its `palette-mru.txt` lines: `writePaletteMruLine`, palette list, the
   catalog's capacity and the installed themes that fit it:
   `palette_catalog_capacity`, `appendInstalledThemesToPalette`, and the

@@ -3805,6 +3805,24 @@ test "win32 a light/dark change and its reload apply each window's opacity once,
             };
         }
 
+        /// Each theme's `split-divider-color`, which the chrome draws
+        /// (`App.resolved_theme.pane_divider`).
+        fn divider(theme: configpkg.ConditionalState.Theme) u32 {
+            return switch (theme) {
+                .light => win32_theme.rgb(0x10, 0x20, 0x30),
+                .dark => win32_theme.rgb(0x40, 0x50, 0x60),
+            };
+        }
+
+        /// The app config, the chrome and Settings (which reads the app
+        /// config) in `theme`.
+        fn expectAppIn(app: *App, theme: configpkg.ConditionalState.Theme) !void {
+            try std.testing.expectEqual(opacity(theme), app.config.@"background-opacity");
+            try std.testing.expectEqual(divider(theme), app.resolved_theme.pane_divider);
+            const color = app.config.@"split-divider-color".?;
+            try std.testing.expectEqual(divider(theme), win32_theme.rgb(color.r, color.g, color.b));
+        }
+
         fn alpha(theme: configpkg.ConditionalState.Theme) u8 {
             return switch (theme) {
                 .light => 153,
@@ -3880,8 +3898,8 @@ test "win32 a light/dark change and its reload apply each window's opacity once,
             const alloc = std.testing.allocator;
             var tmp = std.testing.tmpDir(.{});
             defer tmp.cleanup();
-            try tmp.dir.writeFile(.{ .sub_path = "light", .data = "background-opacity = 0.6\n" });
-            try tmp.dir.writeFile(.{ .sub_path = "dark", .data = "background-opacity = 0.8\n" });
+            try tmp.dir.writeFile(.{ .sub_path = "light", .data = "background-opacity = 0.6\nsplit-divider-color = #102030\n" });
+            try tmp.dir.writeFile(.{ .sub_path = "dark", .data = "background-opacity = 0.8\nsplit-divider-color = #405060\n" });
             const light = try tmp.dir.realpathAlloc(alloc, "light");
             defer alloc.free(light);
             const dark = try tmp.dir.realpathAlloc(alloc, "dark");
@@ -3928,16 +3946,21 @@ test "win32 a light/dark change and its reload apply each window's opacity once,
                 try std.testing.expectEqual(hosts.len, applied.items.len);
                 for (hosts) |host| try expectAppliedOnce(applied.items, host, opacity(system()));
                 try std.testing.expectEqual(system(), app.core_app.config_conditional_state.theme);
+                try expectAppIn(app, system());
                 try std.testing.expectEqual(asserts + hosts.len, test_blur_behind_asserts);
                 try std.testing.expect(!failed.blur_behind_failed);
                 try std.testing.expectEqual(@as(?u8, alpha(system())), testBackgroundAlpha(failed.hwnd.?));
             }
 
-            // With a reload whose first pane's step fails: the update's own
-            // window pass is each window's one apply, after its theme
-            // rebuild, and the message after it finds the theme current.
-            // Before, the message rebuilt the theme the failed update never
-            // had, and applied every window again (4 where 2).
+            // With a reload whose first pane's step fails: core's light/dark
+            // state moved, and the update ends as a reload of the app's own
+            // config in it, so the app config, the chrome (its divider) and
+            // every window, once, are in the system's state with the panes,
+            // and the message after it finds the theme current. Before G2's
+            // fallback, the message rebuilt the theme the failed update never
+            // had and applied every window again (4 where 2); with it, the
+            // windows took the new state while the app config and the
+            // chrome stayed in the old one.
             {
                 try before(app);
                 applied.clearRetainingCapacity();
@@ -3949,6 +3972,7 @@ test "win32 a light/dark change and its reload apply each window's opacity once,
                 try std.testing.expectEqual(hosts.len, applied.items.len);
                 for (hosts) |host| try expectAppliedOnce(applied.items, host, opacity(system()));
                 try std.testing.expectEqual(asserts + hosts.len, test_blur_behind_asserts);
+                try expectAppIn(app, system());
             }
 
             // Failing again, it latches again after that one try.
