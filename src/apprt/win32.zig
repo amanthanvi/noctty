@@ -368,7 +368,6 @@ pub const test_support_runtime = if (builtin.is_test) .{
     .settingsCurrentConfigThunk = settingsCurrentConfigThunk,
     .settingsCustomUiaProvidersEnabledThunk = settingsCustomUiaProvidersEnabledThunk,
     .settingsDeferUiaDisconnectThunk = settingsDeferUiaDisconnectThunk,
-    .settingsEndPreviewsThunk = settingsEndPreviewsThunk,
     .settingsFailureDetailThunk = settingsFailureDetailThunk,
     .settingsHighContrastThunk = settingsHighContrastThunk,
     .settingsMaskedKeysThunk = settingsMaskedKeysThunk,
@@ -5392,13 +5391,6 @@ pub fn settingsPreviewFieldThunk(
     const effect = win32_settings.previewEffect(field);
     if (effect == .none) return;
     if (app.previewSetting(value)) app.refreshSettingsPreview(effect);
-}
-/// Settings ends every preview at once (a close, Discard): one end, the
-/// theme before the opacity, so each window shows its opacity once, at the
-/// saved value (`App.endSettingsPreview`).
-pub fn settingsEndPreviewsThunk(ctx: *anyopaque) void {
-    const app: *App = @ptrCast(@alignCast(ctx));
-    app.endSettingsPreview();
 }
 
 /// Whether a Settings preview shows nothing that `config` does not: equal in

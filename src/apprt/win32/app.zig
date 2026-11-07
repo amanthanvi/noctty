@@ -183,7 +183,6 @@ const settingsCustomUiaProvidersEnabledThunk = win32.settingsCustomUiaProvidersE
 const settingsDeferUiaDisconnectThunk = win32.settingsDeferUiaDisconnectThunk;
 const settingsDiskVerdict = win32.settingsDiskVerdict;
 const settingsEndSessionThunk = win32.settingsEndSessionThunk;
-const settingsEndPreviewsThunk = win32.settingsEndPreviewsThunk;
 const settingsFailureDetailThunk = win32.settingsFailureDetailThunk;
 const settingsFileOpenable = win32.settingsFileOpenable;
 const settingsHighContrastThunk = win32.settingsHighContrastThunk;
@@ -696,9 +695,11 @@ pub const App = struct {
     theme_rebuilds: u32 = 0,
     system_theme_refresh: SystemThemeRefresh = .{},
     /// The system's own theme inputs at the last system theme message (or
-    /// at `init`): a failed blur-behind tries again only when they changed
-    /// (`reconfigureSystemTheme`). Unlike `system_theme_refresh`, no rebuild
-    /// of the app's own (a reload, a Settings preview) moves it.
+    /// at `init`): a failed blur-behind tries again only when they changed.
+    /// Set by `init` and `takeSystemInputs`, which a system theme message
+    /// runs (`reconfigureSystemTheme`, and `systemColorSetChanged` before a
+    /// light/dark reload). Unlike `system_theme_refresh`, no rebuild of the
+    /// app's own (a reload, a Settings preview) moves it.
     system_inputs: ?window_state.SystemInputs = null,
     hinstance: HINSTANCE,
     class_atom: ATOM = 0,
@@ -5992,6 +5993,14 @@ pub const App = struct {
         try std.testing.expectEqual(@as(?i32, c.SW_SHOWMINNOACTIVE), InitialShow.minimized.showCommand());
     }
 
+    /// Settings ends every preview at once (a close, Discard): one end, the
+    /// theme before the opacity, so each window shows its opacity once, at
+    /// the saved value (`endSettingsPreview`).
+    fn settingsEndPreviewsThunk(ctx: *anyopaque) void {
+        const app: *App = @ptrCast(@alignCast(ctx));
+        app.endSettingsPreview();
+    }
+
     pub fn refreshSystemWheelSettings(self: *App) void {
         self.wheel_settings = .{
             .lines = readSystemWheelSetting(c.SPI_GETWHEELSCROLLLINES, self.wheel_settings.lines),
@@ -6016,17 +6025,18 @@ pub const App = struct {
     /// goes into it: the system's inputs are taken first, and where they
     /// changed every failed blur-behind is unlatched, so the reload's apply
     /// is its one try. The message after the reload then finds both
-    /// baselines current (it still rebuilds a missing resource). Without a
-    /// reload (the light/dark state did not change, safe mode) the message
-    /// runs as before.
+    /// baselines current (it still rebuilds a missing resource), after a
+    /// reload that failed at a pane's step too (`updateCoreConfig` rebuilds
+    /// the theme then). Without a reload (the light/dark state did not
+    /// change, safe mode) the message runs as before. Assumed, not measured:
+    /// that this is the first system theme message of a light/dark change;
+    /// a `WM_THEMECHANGED` or `WM_SYSCOLORCHANGE` handled before it rebuilds
+    /// and applies every window at the opacity the reload then replaces.
     pub fn systemColorSetChanged(self: *App) void {
         const scheme: configpkg.ConditionalState.Theme = if (isSystemDarkMode()) .dark else .light;
         const reloads = !self.safe_mode and self.core_app.config_conditional_state.theme != scheme;
         if (reloads) {
-            const inputs = window_state.SystemInputs.capture();
-            const system_changed = if (self.system_inputs) |last| !std.meta.eql(last, inputs) else true;
-            self.system_inputs = inputs;
-            if (system_changed) for (self.registry.hosts.items) |host| {
+            if (self.takeSystemInputs()) for (self.registry.hosts.items) |host| {
                 host.blur_behind_failed = false;
             };
         } else self.reconfigureSystemTheme();
@@ -6147,6 +6157,16 @@ pub const App = struct {
         try pane.core().updateConfig(config);
     }
 
+    /// Takes the system's own theme inputs as the baseline a system theme
+    /// message compares with (`system_inputs`), and returns whether they
+    /// changed since the last message took them.
+    fn takeSystemInputs(self: *App) bool {
+        const inputs = window_state.SystemInputs.capture();
+        defer self.system_inputs = inputs;
+        const last = self.system_inputs orelse return true;
+        return !std.meta.eql(last, inputs);
+    }
+
     pub fn reconfigureSystemTheme(self: *App) void {
         // A rebuild when the snapshot differs from the last rebuild's,
         // whatever made that one (each takes it again), or a resource is
@@ -6168,9 +6188,7 @@ pub const App = struct {
         // preview between a system change and its message rebuilds with the
         // change, and the message then finds the snapshot as it left it.
         // Resources a message finds missing are GDI's, not DWM's.
-        const inputs = window_state.SystemInputs.capture();
-        const system_changed = if (self.system_inputs) |last| !std.meta.eql(last, inputs) else true;
-        self.system_inputs = inputs;
+        const system_changed = self.takeSystemInputs();
         if (rebuild) {
             self.reconfigureTheme(if (system_changed) .retry else .refresh);
         } else if (system_changed) {

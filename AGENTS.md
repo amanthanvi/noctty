@@ -273,9 +273,10 @@ that govern each symbol you change, or that none does.
   baselines (the rebuild's, `App.system_theme_refresh` and
   `SystemThemeSnapshot`, which `reconfigureTheme` and `App.init` set; the
   retry's, `App.system_inputs` and `window_state.SystemInputs`, which only
-  `reconfigureSystemTheme` and `App.init` set), `App.endSettingsPreview`
+  `App.takeSystemInputs`, from `reconfigureSystemTheme` and
+  `systemColorSetChanged`, and `App.init` set), `App.endSettingsPreview`
   (and the Settings rollback that ends both previews through it:
-  `rollbackPreviews`, the handle's `endPreviews`,
+  `rollbackPreviews`, the handle's `endPreviews`, App's private
   `settingsEndPreviewsThunk`), the
   window half of a config change (the `.surface` and `.app`
   `config_change` arms, `App.app_wide_config_change`,
@@ -313,8 +314,10 @@ that govern each symbol you change, or that none does.
   `win32/child_window.zig`), tweens.
 - [chrome-overlays.md](docs/agents/log/chrome-overlays.md): the command
   palette (`win32_palette.zig`, `win32/palette_controller.zig`, its live
-  theme preview and how a reload ends it (`Host.swapRuntimeConfigFromPalette`,
-  `supersedePaletteThemePreview`, `detachLivePaletteCatalogConfig`), ranking, MRU
+  theme preview, one window's at a time, and how a reload ends it
+  (`Host.swapRuntimeConfigFromPalette`, `showPaletteThemePreview`,
+  `supersedePaletteThemePreview`, `detachLivePaletteCatalogConfig`, and
+  `App.updateCoreConfig`'s fallback after a failed reload), ranking, MRU
   and its `palette-mru.txt` lines: `writePaletteMruLine`, palette list, the
   catalog's capacity and the installed themes that fit it:
   `palette_catalog_capacity`, `appendInstalledThemesToPalette`, and the
@@ -338,7 +341,8 @@ that govern each symbol you change, or that none does.
   `win32/search_controls.zig`; the order of `Surface.endSearch`'s
   end_search and clears in `src/Surface.zig`; visible Up/Down versus
   core `.next`/`.previous`, debounce and the host's search timer over
-  every tab: `Host.refreshSearchTimerState`, `tickSearchBars`) and the
+  every tab: `Host.refreshSearchTimerState`, `tickSearchBars`, the
+  `test_core_steps` seam of `applyDockedSearch`) and the
   layered overlay scrollbar
   (`win32_scrollbar_geometry.zig`, heartbeat, alpha, markers).
 - [tabs-panes.md](docs/agents/log/tabs-panes.md): tabs, splits and windows as

@@ -2505,7 +2505,7 @@ pub const Host = struct {
         self.preserveOrDeinitPaletteCatalogConfig(old);
     }
 
-    pub fn detachLivePaletteCatalogConfig(self: *Host) !void {
+    fn detachLivePaletteCatalogConfig(self: *Host) !void {
         if (self.palette_catalog_config_source != .live) return;
         var clone = try self.app.config.clone(self.app.core_app.alloc);
         errdefer clone.deinit();
@@ -11190,6 +11190,33 @@ test "win32 palette theme commit mutates pending without losing rollback source"
 
     try std.testing.expectEqualStrings("Original Theme", original.theme.?.light);
     try std.testing.expectEqualStrings("Committed Theme", pending.theme.?.light);
+}
+
+test "win32 a palette pick with no live preview keeps the catalog's config alive with a clone it does not show" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    try win32.runOnHiddenDesktop(struct {
+        fn body() !void {
+            var fixture: win32.WindowStartTestApp = .{};
+            try fixture.init();
+            defer fixture.deinit();
+            const app = &fixture.app;
+            try app.createWindow(default_title);
+            const host = fixture.newest().host.?;
+
+            // Before a pick's save reloads, the catalog's config is kept and
+            // the app takes a clone of the config shown, which shows nothing
+            // new: no theme rebuild, so no window applies it. Shown, it
+            // rebuilt the theme and applied every window once.
+            try std.testing.expect(host.palette_catalog_config_source == .live);
+            const rebuilds = app.theme_rebuilds;
+            const revision = app.config_revision;
+            try host.detachLivePaletteCatalogConfig();
+            try std.testing.expectEqual(rebuilds, app.theme_rebuilds);
+            try std.testing.expect(app.config_revision != revision);
+            try std.testing.expect(host.palette_catalog_config_source == .retained);
+            host.resetPaletteCatalogConfigOwner();
+        }
+    }.body);
 }
 
 test "win32 a palette theme preview started while another window's is live ends that one first, so a reload starts from the saved config" {

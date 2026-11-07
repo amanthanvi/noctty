@@ -3132,16 +3132,6 @@ test "win32 a reload during the palette's live theme preview supersedes it: ever
             applied.clearRetainingCapacity();
             try std.testing.expect(try app.performAction(.app, .reload_config, .{ .soft = true }));
             try expect(app, applied.items, &hosts, 0.6, .system, reload_background);
-
-            // A pick with no live preview keeps the catalog's config alive
-            // across the save's reload with a clone of the config shown,
-            // which shows nothing new: no window applies it.
-            palette.palette_catalog_config_source = .live;
-            applied.clearRetainingCapacity();
-            try palette.detachLivePaletteCatalogConfig();
-            try std.testing.expectEqual(@as(usize, 0), applied.items.len);
-            try std.testing.expect(palette.palette_catalog_config_source == .retained);
-            palette.resetPaletteCatalogConfigOwner();
         }
     }.body);
 }
@@ -3400,7 +3390,7 @@ const SettingsPreviewWindow = struct {
         try settings.open();
         _ = sys.SetWindowTextW(settings.fields.edit_bg_opacity.?, std.unicode.utf8ToUtf16LeStringLiteral("0.5"));
         const combo = settings.fields.combo_window_theme.?;
-        _ = sys.SendMessageW(combo, cb_setcursel, 2, 0);
+        _ = sys.SendMessageW(combo, cb_setcursel, field_model.Combo(.window_theme).toIndex(.light), 0);
         const id: usize = @intCast(sys.GetDlgCtrlID(combo));
         _ = sys.SendMessageW(settings.hwnd.?, c.WM_COMMAND, id | (@as(usize, cbn_selchange) << 16), @bitCast(@intFromPtr(combo)));
         try std.testing.expect(settings.hasPendingChanges());

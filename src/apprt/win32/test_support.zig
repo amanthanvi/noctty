@@ -42,6 +42,12 @@ const WINDOWPLACEMENT = sys.WINDOWPLACEMENT;
 /// that state.
 pub fn Fixtures(comptime runtime: anytype) type {
     return struct {
+        /// The App's own `endPreviews` is private to it (app.zig).
+        fn endSettingsPreviewsThunk(ctx: *anyopaque) void {
+            const app: *App = @ptrCast(@alignCast(ctx));
+            app.endSettingsPreview();
+        }
+
         const App = runtime.App;
         const Host = runtime.Host;
         const Surface = runtime.Surface;
@@ -68,7 +74,6 @@ pub fn Fixtures(comptime runtime: anytype) type {
         const settingsCurrentConfigThunk = runtime.settingsCurrentConfigThunk;
         const settingsCustomUiaProvidersEnabledThunk = runtime.settingsCustomUiaProvidersEnabledThunk;
         const settingsDeferUiaDisconnectThunk = runtime.settingsDeferUiaDisconnectThunk;
-        const settingsEndPreviewsThunk = runtime.settingsEndPreviewsThunk;
         const settingsFailureDetailThunk = runtime.settingsFailureDetailThunk;
         const settingsHighContrastThunk = runtime.settingsHighContrastThunk;
         const settingsMaskedKeysThunk = runtime.settingsMaskedKeysThunk;
@@ -290,7 +295,7 @@ pub fn Fixtures(comptime runtime: anytype) type {
                         .saveAndReload = &settingsSaveAndReloadThunk,
                         .configRevision = &settingsConfigRevisionThunk,
                         .previewField = &settingsPreviewFieldThunk,
-                        .endPreviews = &settingsEndPreviewsThunk,
+                        .endPreviews = &endSettingsPreviewsThunk,
                         .notifyConflict = &settingsNotifyConflictThunk,
                         .reconcileDisk = &settingsReconcileDiskThunk,
                         .failureDetail = &settingsFailureDetailThunk,
