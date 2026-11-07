@@ -4237,24 +4237,21 @@ pub const App = struct {
                         // Every window has its apply, past one that fails:
                         // the theme left the opacity to this loop, so a
                         // window it skipped would show none of the reload.
-                        // A window's failure still skips the scrollbar
-                        // refresh; a pane's skips no other pane's. Either
-                        // way the config is installed, so the steps after
-                        // them run (Settings hears of it), and the first
-                        // failure, a window's before a pane's, is returned
-                        // last.
+                        // Then every pane's scrollbar, past one that fails,
+                        // after a window's failure too: the scrollbar reads
+                        // nothing a window's apply sets. The config is
+                        // installed either way, so the steps after them run
+                        // (Settings hears of it), and the first failure, a
+                        // window's before a pane's, is returned last.
                         self.app_wide_windows_applied = true;
                         const windows_applied = self.applyWindowsConfig(&self.config);
                         var scrollbars: @TypeOf(Surface.refreshScrollbarWindow(undefined)) = {};
-                        if (windows_applied) |_| {
-                            for (self.registry.windows.items) |surface| {
-                                surface.refreshScrollbarWindow() catch |err| {
-                                    if (scrollbars) |_| {
-                                        scrollbars = err;
-                                    } else |_| log.warn("win32 scrollbar refresh after a config change failed err={}", .{err});
-                                };
-                            }
-                        } else |_| {}
+                        for (self.registry.windows.items) |surface| {
+                            surface.refreshScrollbarWindow() catch |err| {
+                                log.warn("win32 scrollbar refresh after a config change failed err={}", .{err});
+                                if (scrollbars) |_| scrollbars = err else |_| {}
+                            };
+                        }
                         // A reload that turns automatic checks on in a process
                         // that started with them off (or on another channel).
                         if (self.registry.windows.items.len > 0 and self.update_startup_ready) self.maybeScheduleAutomaticUpdateCheck();

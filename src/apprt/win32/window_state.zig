@@ -3336,7 +3336,25 @@ test "win32 a reload in which a pane's step fails puts every pane and window bac
             try std.testing.expect(app.core_app.surfaces.items[0] == first);
             Surface.test_scrollbar_refresh_fails = first;
             defer Surface.test_scrollbar_refresh_fails = null;
+            // The failing pane comes first in the app's step too; a pane
+            // after it is counted. And a quit timer runs, as after the last
+            // window closed, for the app's step to stop.
+            try std.testing.expect(app.registry.windows.items[0] == first);
+            const later = app.registry.windows.items[app.registry.windows.items.len - 1];
+            Surface.test_scrollbar_refreshes_of = later;
+            Surface.test_scrollbar_refreshes = 0;
+            defer Surface.test_scrollbar_refreshes_of = null;
+            app.quit_timer_id = sys.SetTimer(null, 0, 60_000, null);
+            defer App.killThreadTimer(&app.quit_timer_id);
+            try std.testing.expect(app.quit_timer_id != null);
             try std.testing.expectError(error.TestScrollbarRefreshFailed, reloadConfig(app, &config));
+            // Core's update stopped at the first pane; the restore gave the
+            // later pane its own step (one refresh), and the app's step went
+            // on past the failing pane to it (another), then ran its tail:
+            // the quit timer is stopped. Breaking at the failing pane leaves
+            // one refresh; the tail after the failure, a running timer.
+            try std.testing.expectEqual(@as(usize, 2), Surface.test_scrollbar_refreshes);
+            try std.testing.expect(app.quit_timer_id == null);
             try std.testing.expectEqual(@as(usize, 3), applied.items.len);
             for ([_]*Host{ first.host.?, single, emptied }) |host| {
                 try expectAppliedOnce(applied.items, host, 0.5);
@@ -3399,7 +3417,14 @@ test "win32 a reload in which a window fails to apply its opacity still applies 
             config.@"background-opacity" = 0.6;
             test_layered_fails = faded.hwnd.?;
             defer test_layered_fails = null;
+            // The translucent window's pane: its own step refreshes its
+            // scrollbar, and the app's step again after the window pass,
+            // the failed window's apply notwithstanding (it skipped them).
+            Surface.test_scrollbar_refreshes_of = translucent.activeSurface().?;
+            Surface.test_scrollbar_refreshes = 0;
+            defer Surface.test_scrollbar_refreshes_of = null;
             try std.testing.expectError(error.TestLayeredFailed, reloadConfig(app, &config));
+            try std.testing.expectEqual(@as(usize, 2), Surface.test_scrollbar_refreshes);
             try std.testing.expectEqual(@as(usize, 3), applied.items.len);
             for ([_]*Host{ faded, translucent, emptied }) |host| try expectAppliedOnce(applied.items, host, 0.6);
             try std.testing.expectEqual(@as(?u8, 153), testBackgroundAlpha(translucent.hwnd.?));
