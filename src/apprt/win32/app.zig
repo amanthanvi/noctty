@@ -4178,11 +4178,16 @@ pub const App = struct {
                         forgetLaunchLayout(&config);
                         // Palette theme preview owns a reversible baseline
                         // around the app-global config. An external/settings
-                        // config change supersedes that transaction: dismiss
-                        // the palette first so it reverts and resets every
-                        // borrowed catalog before the incoming config replaces
-                        // the baseline. A later Escape can never resurrect the
+                        // config change supersedes that transaction: it ends
+                        // (`updateCoreConfig` ended it already, before core
+                        // gave the panes this config) with nothing shown of
+                        // the baseline, which every pane and window would
+                        // otherwise take after or before this config, and the
+                        // palette is dismissed so it resets every borrowed
+                        // catalog before the incoming config replaces the
+                        // baseline. A later Escape can never resurrect the
                         // stale pre-reload config.
+                        self.supersedePaletteThemePreviews();
                         for (self.registry.hosts.items) |host| {
                             if (host.overlay_mode == .command_palette) host.hideOverlay();
                         }
@@ -6023,6 +6028,9 @@ pub const App = struct {
     /// of `config`, as the app's step would have had it, and the pane's
     /// error is returned.
     pub fn updateCoreConfig(self: *App, config: *const configpkg.Config) !void {
+        // Before core reads `config`, which is the app config itself in a
+        // soft reload: the reload starts from the config a preview replaced.
+        self.supersedePaletteThemePreviews();
         const outer = self.app_wide_config_change;
         const outer_applied = self.app_wide_windows_applied;
         self.app_wide_config_change = true;
@@ -6043,6 +6051,14 @@ pub const App = struct {
             }
             return err;
         };
+    }
+
+    /// A reload replaces the app config: a palette's live theme preview
+    /// ends without being reverted on screen
+    /// (`Host.supersedePaletteThemePreview`), and the palette closes in the
+    /// `.app` `config_change` arm.
+    fn supersedePaletteThemePreviews(self: *App) void {
+        for (self.registry.hosts.items) |host| host.supersedePaletteThemePreview();
     }
 
     /// `updateCoreConfig` without its window pass after a failure.

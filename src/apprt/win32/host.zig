@@ -2444,12 +2444,7 @@ pub const Host = struct {
     }
 
     pub fn swapRuntimeConfigFromPalette(self: *Host, new_config: configpkg.Config) configpkg.Config {
-        const old = self.app.config;
-        self.app.config = new_config;
-        // A Settings preview stays shown over the palette's theme.
-        self.app.restoreSettingsPreview();
-        self.app.config_revision +%= 1;
-        if (self.app.config_revision == 0) self.app.config_revision = 1;
+        const old = self.installRuntimeConfigFromPalette(new_config);
         self.app.reconfigureTheme(.caller_applies);
         {
             // Every pane, then every window: an app-wide change, whose
@@ -2478,6 +2473,19 @@ pub const Host = struct {
         return old;
     }
 
+    /// `swapRuntimeConfigFromPalette` without showing `new_config`: no
+    /// theme, pane or window takes it. Only for a config equal to the one it
+    /// replaces, or one a reload replaces before it shows anything.
+    fn installRuntimeConfigFromPalette(self: *Host, new_config: configpkg.Config) configpkg.Config {
+        const old = self.app.config;
+        self.app.config = new_config;
+        // A Settings preview stays shown over the palette's theme.
+        self.app.restoreSettingsPreview();
+        self.app.config_revision +%= 1;
+        if (self.app.config_revision == 0) self.app.config_revision = 1;
+        return old;
+    }
+
     fn preserveOrDeinitPaletteCatalogConfig(
         self: *Host,
         old: configpkg.Config,
@@ -2497,11 +2505,13 @@ pub const Host = struct {
         self.preserveOrDeinitPaletteCatalogConfig(old);
     }
 
-    fn detachLivePaletteCatalogConfig(self: *Host) !void {
+    pub fn detachLivePaletteCatalogConfig(self: *Host) !void {
         if (self.palette_catalog_config_source != .live) return;
         var clone = try self.app.config.clone(self.app.core_app.alloc);
         errdefer clone.deinit();
-        const old = self.swapRuntimeConfigFromPalette(clone);
+        // The clone shows what is shown already, and the save's reload
+        // replaces it: nothing applies it.
+        const old = self.installRuntimeConfigFromPalette(clone);
         std.debug.assert(self.palette_catalog_retained_config == null);
         self.palette_catalog_retained_config = old;
         self.palette_catalog_config_source = .retained;
@@ -2549,9 +2559,27 @@ pub const Host = struct {
     }
 
     pub fn revertPaletteThemePreview(self: *Host) void {
+        self.endPaletteThemePreview(.revert);
+    }
+
+    /// A reload supersedes a live theme preview. The config the preview
+    /// replaced goes back as the app config without being shown, so a
+    /// reload of the app config (a light/dark change) starts from it, and
+    /// the reload alone shows its config, once, in every pane and window.
+    /// Restored and shown, it would put every window at the pre-preview
+    /// opacity first and give every pane the pre-preview config after the
+    /// reload's.
+    pub fn supersedePaletteThemePreview(self: *Host) void {
+        self.endPaletteThemePreview(.superseded);
+    }
+
+    fn endPaletteThemePreview(self: *Host, how: enum { revert, superseded }) void {
         const original = self.palette_theme_preview_original orelse return;
         self.palette_theme_preview_original = null;
-        const old = self.swapRuntimeConfigFromPalette(original);
+        const old = switch (how) {
+            .revert => self.swapRuntimeConfigFromPalette(original),
+            .superseded => self.installRuntimeConfigFromPalette(original),
+        };
         switch (self.palette_catalog_config_source) {
             .live => {
                 std.debug.assert(self.palette_catalog_retained_config == null);

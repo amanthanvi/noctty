@@ -308,7 +308,9 @@ that govern each symbol you change, or that none does.
   placement cache (`ChildPlacement`, `applyChromeChildRect` in
   `win32/child_window.zig`), tweens.
 - [chrome-overlays.md](docs/agents/log/chrome-overlays.md): the command
-  palette (`win32_palette.zig`, `win32/palette_controller.zig`, ranking, MRU
+  palette (`win32_palette.zig`, `win32/palette_controller.zig`, its live
+  theme preview and how a reload ends it (`Host.swapRuntimeConfigFromPalette`,
+  `supersedePaletteThemePreview`, `detachLivePaletteCatalogConfig`), ranking, MRU
   and its `palette-mru.txt` lines: `writePaletteMruLine`, palette list, the
   catalog's capacity and the installed themes that fit it:
   `palette_catalog_capacity`, `appendInstalledThemesToPalette`, and the
