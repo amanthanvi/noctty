@@ -6099,7 +6099,7 @@ pub const App = struct {
     /// that step did not reach (its scrollbar refresh, say). Where the arm
     /// cannot take the config at all (its clone runs out of memory), every
     /// palette still closes and the theme and every window show `app.config`
-    /// as it is, with nothing allocated. The pane's error is returned.
+    /// as it is, needing no other clone. The pane's error is returned.
     /// The system theme message a light/dark reload runs after it
     /// (`systemColorSetChanged`) finds the theme current and applies no
     /// window again.
@@ -6146,9 +6146,12 @@ pub const App = struct {
         // The arm ends before its window pass only where it could not take
         // the config (its clone ran out of memory), and then nothing shows
         // `app.config`: a palette preview the update ended stays on screen,
-        // with no preview left for its palette to revert. With nothing
-        // allocated, every palette still closes, and the theme and every
-        // window show `app.config` as it is, once.
+        // with no preview left for its palette to revert. Then every
+        // palette still closes, and the theme and every window show
+        // `app.config` as it is, once. None of it needs another clone or an
+        // allocation to succeed: a palette's mode, catalog and preview are
+        // reset first, and its layout and text, and a theme resource
+        // rebuild, are best effort (each logs a failure and goes on).
         if (!self.app_wide_windows_applied) {
             for (self.registry.hosts.items) |host| {
                 if (host.overlay_mode == .command_palette) host.hideOverlay();

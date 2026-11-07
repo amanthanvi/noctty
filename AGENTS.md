@@ -283,7 +283,8 @@ that govern each symbol you change, or that none does.
   window half of a config change (the `.surface` and `.app`
   `config_change` arms, `App.app_wide_config_change`,
   `App.updateCoreConfig`, `App.updatePaneCoreConfig`, and after a failed
-  update `App.app_wide_windows_applied` and `App.applyWindowsConfig`), and
+  update `App.app_wide_windows_applied`, `App.applyWindowsConfig` and
+  `App.reloadKeptConfig`), and
   `Host.closing` in `Host.closeConfirmed` and `App.windowDestroyed`;
   `Surface.setBackgroundOpacity`,
   `rendererSwitchedToOpenGL` and `WM_WINHOSTTY_RENDERER_SWITCHED`; the
@@ -321,8 +322,9 @@ that govern each symbol you change, or that none does.
   what is open first like every overlay's open; the error
   `showPaletteThemePreview` logs over another window's live preview),
   and how a reload ends it
-  (`Host.swapRuntimeConfigFromPalette`, `showPaletteThemePreview`,
-  `supersedePaletteThemePreview`, `detachLivePaletteCatalogConfig`, and
+  (`Host.swapRuntimeConfigFromPalette`, `installRuntimeConfigFromPalette`,
+  `showPaletteThemePreview`, `supersedePaletteThemePreview`,
+  `detachLivePaletteCatalogConfig`, and
   `App.updateCoreConfig`'s fallback after a failed reload,
   `App.reloadKeptConfig`, which reloads `app.config` in core's light/dark
   state), ranking, MRU
