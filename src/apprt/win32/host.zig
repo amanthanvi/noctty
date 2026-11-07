@@ -2550,20 +2550,26 @@ pub const Host = struct {
     }
 
     /// Shows `preview` as this palette's live theme preview, taking it over.
-    /// One window's preview at a time. `showOverlay` keeps that already: a
-    /// palette opening closes every other window's, and a palette left for
-    /// another overlay closes too, each reverting its preview. Another
-    /// window's preview still live here would end first, unshown, as a
-    /// reload ends it (`supersedePaletteThemePreview`), and this preview's
-    /// own swap then shows it once. Started over another's, its original
-    /// would be that unsaved preview, and ending both would free the config
-    /// the other palette's catalog borrows.
+    /// One window's preview at a time. The overlay code keeps that already:
+    /// a palette opening closes every other window's (`showOverlay`), and
+    /// every other overlay's open closes the window's own first, each
+    /// reverting its preview. Another window's preview still live here is a
+    /// regression there: it is logged as an error, and ends first, unshown,
+    /// as a reload ends it (`supersedePaletteThemePreview`), so this
+    /// preview's own swap shows it once. Started over another's, its
+    /// original would be that unsaved preview, and ending both would free
+    /// the config the other palette's catalog borrows.
     /// Tests start a preview here: `previewPaletteTheme` reads the user's
     /// config files.
     pub fn showPaletteThemePreview(self: *Host, preview: configpkg.Config) void {
         if (self.palette_theme_preview_original == null) {
             for (self.app.registry.hosts.items) |other| {
-                if (other != self) _ = other.supersedePaletteThemePreview();
+                if (other == self or other.palette_theme_preview_original == null) continue;
+                // An error log, not an assert: it fails any test that gets
+                // here (Zig's test runner fails a test that logs an error)
+                // and costs a release build nothing it could turn into UB.
+                log.err("palette theme preview started while another window's is live; ending that one", .{});
+                _ = other.supersedePaletteThemePreview();
             }
             const original = self.swapRuntimeConfigFromPalette(preview);
             self.palette_theme_preview_original = original;
@@ -11222,9 +11228,18 @@ test "win32 a palette pick with no live preview keeps the catalog's config alive
     }.body);
 }
 
-test "win32 a palette left for the tab overview ends its theme preview, so another window's palette never opens over a live one" {
+test "win32 the tab overview's toggle ends what is open first: a palette's theme preview and catalog, a confirm prompt's pending operation" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
     try win32.runOnHiddenDesktop(struct {
+        var cancels: usize = 0;
+
+        fn accept(_: ?*anyopaque) void {}
+
+        fn cancel(_: ?*anyopaque, reason: overlay_session.ConfirmCancelReason) void {
+            std.debug.assert(reason == .dismissed);
+            cancels += 1;
+        }
+
         fn body() !void {
             var fixture: win32.WindowStartTestApp = .{};
             try fixture.init();
@@ -11236,25 +11251,37 @@ test "win32 a palette left for the tab overview ends its theme preview, so anoth
             const first = first_pane.host.?;
             try app.createWindow(default_title);
             const second = fixture.newest().host.?;
-            // No catalog to build: building one lists the user's theme and
-            // layout folders. `hideOverlay` resets the catalog's owner
-            // either way.
-            for ([_]*Host{ first, second }) |host| host.palette_catalog = null;
 
-            // The first window's palette previews a theme, and the tab
-            // overview's toggle then replaces it. The palette ends as Escape
-            // ends it: the preview reverts and the catalog lets go of the
-            // config. Before, both stayed with the window in `.tab_overview`,
-            // which the next palette's open, looking for `.command_palette`,
-            // left alone: two live previews, and a catalog borrowing a
-            // config the other palette's swaps replace and free.
+            // The first window's palette, with one row in its catalog (the
+            // palette opens with no catalog: building one lists the user's
+            // theme and layout folders) and a theme preview. The tab
+            // overview's toggle then replaces it: the palette ends as Escape
+            // ends it, the preview reverted and the catalog empty, letting
+            // go of the config. Before, both stayed with the window in
+            // `.tab_overview`, which the next palette's open, looking for
+            // `.command_palette`, left alone: two live previews, and a
+            // catalog borrowing a config the other palette's swaps free.
+            const catalog = first.palette_catalog;
+            first.palette_catalog = null;
             try first.showOverlay(.command_palette, null);
+            first.palette_catalog = catalog;
+            try std.testing.expect(first.appendPaletteDescriptor(.{
+                .item = .{
+                    .id = win32_palette.catalog.actionStableId("Row", "text:row"),
+                    .title = "Row",
+                    .subtitle = "",
+                    .keywords = "text:row",
+                },
+                .payload = .{ .action = .{ .snapshot_index = 0, .action = "text:row" } },
+            }));
+            try std.testing.expectEqual(@as(usize, 1), first.palette_catalog.?.items().len);
             var previewed = try app.config.clone(std.testing.allocator);
             previewed.@"background-opacity" = 0.7;
             first.showPaletteThemePreview(previewed);
             try std.testing.expect(first.palette_catalog_config_source == .preview_original);
             try std.testing.expect(try first_pane.toggleTabOverview());
             try std.testing.expect(first.overlay_mode == .tab_overview);
+            try std.testing.expectEqual(@as(usize, 0), first.palette_catalog.?.items().len);
             try std.testing.expect(first.palette_theme_preview_original == null);
             try std.testing.expect(first.palette_catalog_config_source == .live);
             try std.testing.expect(first.palette_catalog_retained_config == null);
@@ -11262,6 +11289,7 @@ test "win32 a palette left for the tab overview ends its theme preview, so anoth
 
             // Another window's palette opens and previews: its original is
             // the saved config, and it is the one palette open.
+            second.palette_catalog = null;
             try second.showOverlay(.command_palette, null);
             var other = try app.config.clone(std.testing.allocator);
             other.@"background-opacity" = 0.8;
@@ -11275,64 +11303,18 @@ test "win32 a palette left for the tab overview ends its theme preview, so anoth
             second.hideOverlay();
             first.hideOverlay();
             try std.testing.expectEqual(@as(f64, 0.5), app.config.@"background-opacity");
-        }
-    }.body);
-}
 
-test "win32 a palette theme preview started while another window's is live ends that one first, so a reload starts from the saved config" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-    try win32.runOnHiddenDesktop(struct {
-        /// `host`'s palette previews a theme at `opacity`. A test cannot load
-        /// one by name (`previewPaletteTheme` reads the user's config files).
-        fn preview(app: *App, host: *Host, opacity: f64) !void {
-            var previewed = try app.config.clone(std.testing.allocator);
-            previewed.@"background-opacity" = opacity;
-            host.showPaletteThemePreview(previewed);
-            host.overlay_mode = .command_palette;
-            try std.testing.expectEqual(opacity, app.config.@"background-opacity");
-        }
-
-        fn body() !void {
-            var fixture: win32.WindowStartTestApp = .{};
-            try fixture.init();
-            defer fixture.deinit();
-            const app = &fixture.app;
-            app.config.@"background-opacity" = 0.5;
-            try app.createWindow(default_title);
-            const first = fixture.newest().host.?;
-            try app.createWindow(default_title);
-            const second = fixture.newest().host.?;
-
-            // Two windows' palettes preview in turn, the first one's still
-            // open in the background, and a light/dark change then reloads
-            // the app config: it starts from the saved config. With both
-            // previews live, the second's original was the first's preview,
-            // which the reload's ends put back last and reloaded (0.7).
-            // `showOverlay` never leaves two palettes open (the test above);
-            // this sets `overlay_mode` itself, for the fallback in
-            // `showPaletteThemePreview`.
-            try preview(app, first, 0.7);
-            const rebuilds = app.theme_rebuilds;
-            try preview(app, second, 0.8);
-            try std.testing.expectEqual(rebuilds + 1, app.theme_rebuilds);
-            try std.testing.expect(try app.performAction(.app, .reload_config, .{ .soft = true }));
-            try std.testing.expectEqual(@as(f64, 0.5), app.config.@"background-opacity");
-            for ([_]*Host{ first, second }) |host| {
-                try std.testing.expect(host.palette_theme_preview_original == null);
-                try std.testing.expect(host.overlay_mode != .command_palette);
-            }
-
-            // The second preview takes over the first: the first's ended,
-            // unshown, and the second's original is the saved config, which
-            // the first palette's catalog borrows again as the app config.
-            try preview(app, first, 0.7);
-            try preview(app, second, 0.8);
-            try std.testing.expect(first.palette_theme_preview_original == null);
-            try std.testing.expect(first.palette_catalog_config_source == .live);
-            try std.testing.expectEqual(@as(f64, 0.5), second.palette_theme_preview_original.?.@"background-opacity");
-            second.revertPaletteThemePreview();
-            try std.testing.expectEqual(@as(f64, 0.5), app.config.@"background-opacity");
-            for ([_]*Host{ first, second }) |host| host.overlay_mode = .none;
+            // A confirm prompt the toggle replaces releases its pending
+            // operation, as any other overlay's open does (`.dismissed`).
+            // Before, the payload stayed under `.tab_overview`.
+            cancels = 0;
+            try first.showConfirm(.{ .title = "Close?", .body = "Body", .accept_label = "Close" }, &accept, &cancel, null);
+            try std.testing.expect(first.overlay_mode == .confirm);
+            try std.testing.expect(try first_pane.toggleTabOverview());
+            try std.testing.expect(first.overlay_mode == .tab_overview);
+            try std.testing.expect(first.confirm_payload == null);
+            try std.testing.expectEqual(@as(usize, 1), cancels);
+            first.hideOverlay();
         }
     }.body);
 }

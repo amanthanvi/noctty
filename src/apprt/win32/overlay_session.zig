@@ -692,13 +692,6 @@ pub const HostControls = struct {
     }
 
     pub fn showOverlay(self: *Host, mode: HostOverlayMode, initial: ?[]const u8) !void {
-        // A palette ends through `hideOverlay` whatever replaces it: its
-        // theme preview reverts and its catalog lets go of the config it
-        // borrows. Switched straight to another overlay (the tab overview's
-        // toggle does), both outlived it under a mode the loop below does
-        // not look for, so another window's palette could open and preview
-        // over them.
-        if (self.overlay_mode == .command_palette and mode != .command_palette) self.hideOverlay();
         if (mode == .command_palette) {
             // Theme previews replace the app-global config while palette
             // catalogs borrow config strings. Keep exactly one palette live

@@ -2498,6 +2498,10 @@ pub const Surface = struct {
         }
         const initial = host.overlayInitialText(.tab_overview);
         defer if (initial) |value| self.app.core_app.alloc.free(value);
+        // What is open ends first, as every other overlay's open ends it: a
+        // palette reverts its theme preview and lets go of its catalog's
+        // config, a confirm prompt releases its pending operation.
+        host.hideOverlay();
         try host.showOverlay(.tab_overview, initial);
         return true;
     }
