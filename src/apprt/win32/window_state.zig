@@ -3064,7 +3064,8 @@ test "win32 a reload during the palette's live theme preview supersedes it: ever
             previewed.@"background-opacity" = 0.7;
             previewed.scrollbar = .never;
             previewed.background = preview_background;
-            host.palette_theme_preview_original = host.swapRuntimeConfigFromPalette(previewed);
+            host.showPaletteThemePreview(previewed);
+            try std.testing.expect(host.palette_catalog_config_source == .preview_original);
             host.overlay_mode = .command_palette;
             try std.testing.expectEqual(@as(?u8, 179), testBackgroundAlpha(host.hwnd.?));
         }
@@ -3136,9 +3137,13 @@ test "win32 a reload during the palette's live theme preview supersedes it: ever
     }.body);
 }
 
-test "win32 a reload that fails at a pane's step after it ended the palette's live theme preview shows the app config's theme and closes the palette" {
+test "win32 a reload that fails at a pane's step after it ended the palette's live theme preview puts every pane, the chrome and every window back on the app config, and closes the palette" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
     try runOnHiddenDesktop(struct {
+        fn colorRef(color: configpkg.Config.Color) u32 {
+            return win32_theme.rgb(color.r, color.g, color.b);
+        }
+
         fn body() !void {
             var fixture: WindowStartTestApp = .{};
             try fixture.init();
@@ -3147,10 +3152,15 @@ test "win32 a reload that fails at a pane's step after it ended the palette's li
             test_pane_renderer = .opengl;
             defer test_pane_renderer = null;
 
-            // A window of two tabs, whose palette previews the Light theme at
-            // 0.7 over the Dark one at 0.5, and a window of one.
+            // Three panes: a window of two tabs, whose palette previews the
+            // Light theme at 0.7 over the Dark one at 0.5, each with its own
+            // background, and a window of one.
+            const original: configpkg.Config.Color = .{ .r = 0x10, .g = 0x20, .b = 0x30 };
+            const previewed_background: configpkg.Config.Color = .{ .r = 0x40, .g = 0x50, .b = 0x60 };
+            const reload_background: configpkg.Config.Color = .{ .r = 0x70, .g = 0x80, .b = 0x90 };
             app.config.@"background-opacity" = 0.5;
             app.config.@"window-theme" = .dark;
+            app.config.background = original;
             app.reconfigureTheme(.refresh);
             const dark = app.resolved_theme;
             try app.createWindow(default_title);
@@ -3159,12 +3169,15 @@ test "win32 a reload that fails at a pane's step after it ended the palette's li
             _ = try app.createWindowSurface(&app.config, default_title, .{ .host_id = first.host_id });
             try app.createWindow(default_title);
             const hosts = [_]*Host{ palette, fixture.newest().host.? };
+            try std.testing.expectEqual(@as(usize, 3), app.registry.windows.items.len);
             var previewed = try app.config.clone(std.testing.allocator);
             previewed.@"background-opacity" = 0.7;
             previewed.@"window-theme" = .light;
-            palette.palette_theme_preview_original = palette.swapRuntimeConfigFromPalette(previewed);
+            previewed.background = previewed_background;
+            palette.showPaletteThemePreview(previewed);
             palette.overlay_mode = .command_palette;
             try std.testing.expect(!std.meta.eql(dark, app.resolved_theme));
+            for (app.registry.windows.items) |pane| try std.testing.expectEqual(colorRef(previewed_background), pane.tab_background);
 
             var applied: std.ArrayListUnmanaged(TestOpacityApply) = .empty;
             defer applied.deinit(std.testing.allocator);
@@ -3172,15 +3185,18 @@ test "win32 a reload that fails at a pane's step after it ended the palette's li
             defer test_background_opacity_log = null;
 
             // A reload to 0.6 whose first pane's step fails, before the app's
-            // step: the reload ended the preview, unshown, and the app's step
-            // never showed anything. The chrome then shows the app config put
-            // back (Dark), after which each window applies once, and the
-            // palette, whose Escape has nothing left to revert, closes. Left
-            // to the app's step, the chrome kept the preview's theme and the
-            // palette stayed open.
+            // step: the reload ended the preview, unshown, the first pane
+            // took the reload and the other two kept the preview. Then every
+            // pane, the chrome (Dark) and every window, once, after the
+            // rebuild, go back on the app config the preview replaced, and
+            // the palette, whose Escape has nothing left to revert, closes.
+            // Before, the panes after the failing one kept the unsaved
+            // preview with no way back to it, and the windows took the
+            // reload's opacity under the app config's chrome.
             var reloaded = try palette.palette_theme_preview_original.?.clone(std.testing.allocator);
             defer reloaded.deinit();
             reloaded.@"background-opacity" = 0.6;
+            reloaded.background = reload_background;
             try std.testing.expect(app.core_app.surfaces.items[0] == first);
             const rebuilds = app.theme_rebuilds;
             Surface.test_scrollbar_refresh_fails = first;
@@ -3189,23 +3205,29 @@ test "win32 a reload that fails at a pane's step after it ended the palette's li
             Surface.test_scrollbar_refresh_fails = null;
             try std.testing.expect(palette.palette_theme_preview_original == null);
             try std.testing.expectEqual(@as(f64, 0.5), app.config.@"background-opacity");
+            for (app.registry.windows.items) |pane| try std.testing.expectEqual(colorRef(original), pane.tab_background);
             try std.testing.expect(std.meta.eql(dark, app.resolved_theme));
             try std.testing.expectEqual(rebuilds + 1, app.theme_rebuilds);
             try std.testing.expect(palette.overlay_mode != .command_palette);
             try std.testing.expectEqual(hosts.len, applied.items.len);
-            for (hosts) |host| try expectAppliedOnce(applied.items, host, 0.6);
+            for (hosts) |host| {
+                try expectAppliedOnce(applied.items, host, 0.5);
+                try std.testing.expectEqual(@as(?u8, 128), testBackgroundAlpha(host.hwnd.?));
+            }
             for (applied.items) |apply| try std.testing.expectEqual(rebuilds + 1, apply.theme_rebuilds);
 
-            // The next reload that succeeds gives every window the reload.
+            // The next reload that succeeds gives every pane and window the
+            // reload.
             applied.clearRetainingCapacity();
             try reloadConfig(app, &reloaded);
             try std.testing.expectEqual(@as(f64, 0.6), app.config.@"background-opacity");
+            for (app.registry.windows.items) |pane| try std.testing.expectEqual(colorRef(reload_background), pane.tab_background);
             for (hosts) |host| try expectAppliedOnce(applied.items, host, 0.6);
         }
     }.body);
 }
 
-test "win32 a reload in which a pane's step fails still applies every window, and returns the failure" {
+test "win32 a reload in which a pane's step fails puts every pane and window back on the app config, each window once, and returns the failure" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
     try runOnHiddenDesktop(struct {
         fn body() !void {
@@ -3234,22 +3256,30 @@ test "win32 a reload in which a pane's step fails still applies every window, an
             test_background_opacity_log = &applied;
             defer test_background_opacity_log = null;
 
-            // A reload to 0.6 whose first pane's step fails (its scrollbar
-            // refresh), which ends core's update before the app's step: the
-            // panes left the windows to that step, and each window still
-            // applies its opacity once, at the new value; the reload returns
-            // the pane's failure.
+            // A reload to 0.6 and another background whose first pane's step
+            // fails (its scrollbar refresh), which ends core's update before
+            // the app's step, so the app keeps its config: the first pane
+            // took the reload's, and the panes left the windows to that
+            // step. Every pane goes back on the app config, each window
+            // applies it once (0.5), and the reload returns the pane's
+            // failure. Before, the windows took the reload's opacity (0.6)
+            // and the first pane kept its background.
+            const background = app.config.background;
             var config = try app.config.clone(std.testing.allocator);
             defer config.deinit();
             config.@"background-opacity" = 0.6;
+            config.background = .{ .r = 0x70, .g = 0x80, .b = 0x90 };
             try std.testing.expect(app.core_app.surfaces.items[0] == first);
             Surface.test_scrollbar_refresh_fails = first;
             defer Surface.test_scrollbar_refresh_fails = null;
             try std.testing.expectError(error.TestScrollbarRefreshFailed, reloadConfig(app, &config));
             try std.testing.expectEqual(@as(usize, 3), applied.items.len);
             for ([_]*Host{ first.host.?, single, emptied }) |host| {
-                try expectAppliedOnce(applied.items, host, 0.6);
-                try std.testing.expectEqual(@as(?u8, 153), testBackgroundAlpha(host.hwnd.?));
+                try expectAppliedOnce(applied.items, host, 0.5);
+                try std.testing.expectEqual(@as(?u8, 128), testBackgroundAlpha(host.hwnd.?));
+            }
+            for (app.registry.windows.items) |pane| {
+                try std.testing.expectEqual(win32_theme.rgb(background.r, background.g, background.b), pane.tab_background);
             }
         }
     }.body);

@@ -2558,7 +2558,9 @@ pub const Host = struct {
     /// own swap then shows it once. Started over another's, its original
     /// would be that unsaved preview, and ending both would free the config
     /// the other palette's catalog borrows.
-    fn showPaletteThemePreview(self: *Host, preview: configpkg.Config) void {
+    /// Tests start a preview here: `previewPaletteTheme` reads the user's
+    /// config files.
+    pub fn showPaletteThemePreview(self: *Host, preview: configpkg.Config) void {
         if (self.palette_theme_preview_original == null) {
             for (self.app.registry.hosts.items) |other| {
                 if (other != self) _ = other.supersedePaletteThemePreview();

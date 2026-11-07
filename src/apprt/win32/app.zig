@@ -6066,15 +6066,18 @@ pub const App = struct {
     /// (`app_wide_config_change`), so each window applies its half once, in
     /// the app's step.
     ///
-    /// A pane's step that fails ends core's update before the app's, and the
-    /// panes left the windows to it: then every window still takes its half
-    /// of `config`, as the app's step would have had it, and the pane's
-    /// error is returned. Before that pass the theme is rebuilt from the app
-    /// config, as the app's step rebuilds it first: where the update ended a
-    /// palette's live theme preview, the chrome shows the config it put
-    /// back, and the palette is dismissed; and the system theme message a
-    /// light/dark reload runs after it (`systemColorSetChanged`) finds the
-    /// theme current and applies no window again.
+    /// A pane's step that fails ends core's update before the app's, which
+    /// never installs `config`: the panes before the failing one took it,
+    /// the others kept what they had (a palette preview the update ended,
+    /// among them), and the panes left the windows to the app's step. Then
+    /// everything goes back on the config the app keeps, `app.config`, in
+    /// the app's light/dark state, as core gives each pane its config: every
+    /// pane, the theme (rebuilt, as the app's step rebuilds it first) and
+    /// every window, and the pane's error is returned. Where the update
+    /// ended a preview its palette, open with no preview left for Escape to
+    /// revert, is dismissed. The system theme message a light/dark reload
+    /// runs after it (`systemColorSetChanged`) finds the theme current and
+    /// applies no window again.
     pub fn updateCoreConfig(self: *App, config: *const configpkg.Config) !void {
         // Before core reads `config`, which is the app config itself in a
         // soft reload: the reload starts from the config a preview replaced.
@@ -6089,17 +6092,22 @@ pub const App = struct {
         }
         self.coreConfigUpdate(config) catch |err| {
             if (!self.app_wide_windows_applied) {
-                // The screen still shows a preview the update ended, and its
-                // palette, open, has no preview left for Escape to revert.
                 if (superseded) for (self.registry.hosts.items) |host| {
                     if (host.overlay_mode == .command_palette) host.hideOverlay();
                 };
+                // Still inside the app-wide change: each pane leaves its
+                // window to the pass below.
+                for (self.registry.windows.items) |pane| {
+                    self.updatePaneCoreConfig(pane, &self.config) catch |pane_err| {
+                        log.warn("win32 pane config restore after a failed update failed err={}", .{pane_err});
+                    };
+                }
                 self.reconfigureTheme(.caller_applies);
-                // In the app's light/dark state, as core gives the app its
-                // config, or as it is if that fails, as core goes on then.
-                var shown_ = config.changeConditionalState(self.core_app.config_conditional_state) catch null;
+                // In the app's light/dark state, as core gives its config,
+                // or as it is if that fails, as core goes on then.
+                var shown_ = self.config.changeConditionalState(self.core_app.config_conditional_state) catch null;
                 defer if (shown_) |*shown| shown.deinit();
-                self.applyWindowsConfig(if (shown_) |*shown| shown else config) catch |window_err| {
+                self.applyWindowsConfig(if (shown_) |*shown| shown else &self.config) catch |window_err| {
                     log.warn("win32 window config apply after a failed update failed err={}", .{window_err});
                 };
             }
@@ -6151,7 +6159,7 @@ pub const App = struct {
 
     /// Core's config update of `pane` alone (`Surface.updateConfig`), which
     /// ends in its `.surface` `config_change`.
-    pub fn updatePaneCoreConfig(self: *App, pane: *Surface, config: *const configpkg.Config) !void {
+    pub fn updatePaneCoreConfig(self: *App, pane: *Surface, config: *const configpkg.Config) anyerror!void {
         if (builtin.is_test and self.test_surface_init_stage != null) {
             // In the pane's light/dark state, as core's `Surface.updateConfig`
             // puts it; `syncSystemColorScheme` makes that the app's.
