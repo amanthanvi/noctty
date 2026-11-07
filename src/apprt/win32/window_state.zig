@@ -839,7 +839,9 @@ var test_blur_behind_fails = false;
 var test_background_opacity_applies: usize = 0;
 var test_background_opacity_applied: f64 = 1.0;
 var test_background_opacity_log: ?*std.ArrayListUnmanaged(TestOpacityApply) = null;
-const TestOpacityApply = struct { host: *const Host, opacity: f64 };
+/// `theme_rebuilds` is the app's count of theme rebuilds when the window
+/// applied, which tells an apply after a rebuild from one before it.
+const TestOpacityApply = struct { host: *const Host, opacity: f64, theme_rebuilds: u32 = 0 };
 
 /// The window whose layered alpha fails to apply in a test, as
 /// `SetLayeredWindowAttributes` can.
@@ -1126,6 +1128,7 @@ fn applyBackgroundOpacity(host: *Host) !void {
         if (test_background_opacity_log) |applied| applied.append(std.testing.allocator, .{
             .host = host,
             .opacity = host.top_level.opacity,
+            .theme_rebuilds = host.app.theme_rebuilds,
         }) catch {};
     }
     var shown = shownOpacity(host);
@@ -3266,8 +3269,8 @@ test "win32 a Settings preview of a theme and an opacity that ends applies the o
             try std.testing.expectEqual(@as(?u8, null), testBackgroundAlpha(hwnd));
 
             // A cancel-shaped end (`endSettingsPreview` directly; closing
-            // Settings for real reverts each preview first, open item (c) of
-            // the OPACITY-640-FOLLOWUPS log entry) ends the same way, back at
+            // Settings for real reaches it through the window's
+            // `endPreviews`, tested on its own below) ends the same way, back at
             // the config's own translucent opacity and theme: one apply, at
             // that value, and blur-behind asserted once for it.
             app.config.@"background-opacity" = 0.8;
@@ -3287,6 +3290,169 @@ test "win32 a Settings preview of a theme and an opacity that ends applies the o
             try std.testing.expect(!testHostIsLayered(hwnd));
             try std.testing.expectEqual(@as(?u8, 204), testBackgroundAlpha(hwnd));
             try std.testing.expect(std.meta.eql(win32.resolveTheme(&app.config), app.resolved_theme));
+        }
+    }.body);
+}
+
+/// The real Settings window over a `WindowStartTestApp`, for the tests of
+/// what its previews and their end show in the windows: opened, given a
+/// translucent opacity and the Light theme to preview through its own
+/// controls, and torn down with its window classes.
+const SettingsPreviewWindow = struct {
+    const field_model = @import("../win32_settings_fields.zig");
+    const cb_setcursel = 0x014E;
+    const cbn_selchange = 1;
+    const bm_click = 0x00F5;
+    const settings_class = std.unicode.utf8ToUtf16LeStringLiteral("noctty.win32.settings");
+    const viewport_class = std.unicode.utf8ToUtf16LeStringLiteral("noctty.win32.settings.viewport");
+
+    /// Opens Settings and previews opacity 0.5 and the Light theme, as typing
+    /// into the opacity field and choosing in the theme dropdown do.
+    fn openWithPreviews(app: *App) !void {
+        // No app message loop drains a deferred UIA disconnect here.
+        app.settings_window.handle.deferUiaDisconnect = null;
+        const settings = &app.settings_window;
+        try settings.open();
+        _ = sys.SetWindowTextW(settings.fields.edit_bg_opacity.?, std.unicode.utf8ToUtf16LeStringLiteral("0.5"));
+        const combo = settings.fields.combo_window_theme.?;
+        _ = sys.SendMessageW(combo, cb_setcursel, 2, 0);
+        const id: usize = @intCast(sys.GetDlgCtrlID(combo));
+        _ = sys.SendMessageW(settings.hwnd.?, c.WM_COMMAND, id | (@as(usize, cbn_selchange) << 16), @bitCast(@intFromPtr(combo)));
+        try std.testing.expect(settings.hasPendingChanges());
+        try std.testing.expectEqual(@as(f64, 0.5), app.shownConfig().@"background-opacity");
+        try std.testing.expect(app.shownConfig().@"window-theme" == .light);
+    }
+
+    /// Closes Settings as its title bar's close and the prompt's Discard
+    /// do: `WM_CLOSE` opens the prompt, Discard posts the close, and the
+    /// window's own message runs `closeNow` (`DestroyWindow`, whose
+    /// `WM_NCDESTROY` rolls the previews back, then `onClosed`).
+    fn cancel(app: *App) !void {
+        const settings = &app.settings_window;
+        const hwnd = settings.hwnd.?;
+        _ = sys.SendMessageW(hwnd, c.WM_CLOSE, 0, 0);
+        try std.testing.expect(settings.close_prompt_visible);
+        _ = sys.SendMessageW(settings.btn_discard_changes.?, bm_click, 0, 0);
+        try std.testing.expect(settings.close_posted);
+        var msg: sys.MSG = undefined;
+        var left: usize = 256;
+        while (settings.hwnd != null and left > 0) : (left -= 1) {
+            if (sys.PeekMessageW(&msg, hwnd, 0, 0, c.PM_REMOVE) == 0) break;
+            _ = sys.DispatchMessageW(&msg);
+        }
+        try std.testing.expect(settings.hwnd == null);
+    }
+
+    /// Row `binding`'s Reset button, shown.
+    fn resetButton(app: *App, comptime binding: []const u8) !HWND {
+        const index = comptime for (field_model.form_fields, 0..) |row, i| {
+            if (std.mem.eql(u8, row.native.binding, binding)) break i;
+        } else @compileError("no form row " ++ binding);
+        const button = app.settings_window.reset_buttons[index] orelse return error.TestNoResetButton;
+        try std.testing.expect(sys.IsWindowVisible(button) != 0);
+        return button;
+    }
+
+    fn deinit(app: *App) void {
+        app.settings_window.deinit();
+        _ = sys.UnregisterClassW(settings_class, app.settings_window.handle.hinstance);
+        _ = sys.UnregisterClassW(viewport_class, app.settings_window.handle.hinstance);
+    }
+};
+
+test "win32 closing Settings with a theme and an opacity preview left applies each window's opacity once, at the saved value, after the theme" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    try runOnHiddenDesktop(struct {
+        fn body() !void {
+            var fixture: WindowStartTestApp = .{};
+            try fixture.init();
+            defer fixture.deinit();
+            const app = &fixture.app;
+            if (!app.com_initialized) return error.SkipZigTest;
+            defer SettingsPreviewWindow.deinit(app);
+            test_pane_renderer = .opengl;
+            defer test_pane_renderer = null;
+
+            // Two translucent windows under the saved Dark theme.
+            app.config.@"window-theme" = .dark;
+            app.config.@"background-opacity" = 0.8;
+            try app.createWindow(default_title);
+            const first = fixture.newest().host.?;
+            try app.createWindow(default_title);
+            const second = fixture.newest().host.?;
+            for ([_]*Host{ first, second }) |host| try std.testing.expectEqual(@as(?u8, 204), testBackgroundAlpha(host.hwnd.?));
+            try SettingsPreviewWindow.openWithPreviews(app);
+            for ([_]*Host{ first, second }) |host| try std.testing.expectEqual(@as(?u8, 128), testBackgroundAlpha(host.hwnd.?));
+
+            // The cancel: Settings closes with both previews left. Each
+            // window applies its opacity once, at the saved 0.8, after the
+            // one theme rebuild, and asserts blur-behind once for it. The
+            // reverts one at a time (the opacity's, then the theme's
+            // refresh) applied each window twice, the first before the
+            // rebuild.
+            var applied: std.ArrayListUnmanaged(TestOpacityApply) = .empty;
+            defer applied.deinit(std.testing.allocator);
+            test_background_opacity_log = &applied;
+            defer test_background_opacity_log = null;
+            const rebuilds = app.theme_rebuilds;
+            const asserts = test_blur_behind_asserts;
+            try SettingsPreviewWindow.cancel(app);
+            try std.testing.expect(app.settings_preview == null);
+            try std.testing.expectEqual(rebuilds + 1, app.theme_rebuilds);
+            try std.testing.expectEqual(@as(usize, 2), applied.items.len);
+            for ([_]*Host{ first, second }) |host| try expectAppliedOnce(applied.items, host, 0.8);
+            for (applied.items) |apply| try std.testing.expectEqual(rebuilds + 1, apply.theme_rebuilds);
+            try std.testing.expectEqual(asserts + 2, test_blur_behind_asserts);
+            for ([_]*Host{ first, second }) |host| {
+                try std.testing.expect(!testHostIsLayered(host.hwnd.?));
+                try std.testing.expectEqual(@as(?u8, 204), testBackgroundAlpha(host.hwnd.?));
+            }
+            try std.testing.expect(std.meta.eql(win32.resolveTheme(&app.config), app.resolved_theme));
+        }
+    }.body);
+}
+
+test "win32 a Settings Reset of the opacity row alone, with the theme preview kept, applies each window's opacity once" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    try runOnHiddenDesktop(struct {
+        fn body() !void {
+            var fixture: WindowStartTestApp = .{};
+            try fixture.init();
+            defer fixture.deinit();
+            const app = &fixture.app;
+            if (!app.com_initialized) return error.SkipZigTest;
+            defer SettingsPreviewWindow.deinit(app);
+            test_pane_renderer = .opengl;
+            defer test_pane_renderer = null;
+
+            app.config.@"window-theme" = .dark;
+            app.config.@"background-opacity" = 0.8;
+            try app.createWindow(default_title);
+            const host = fixture.newest().host.?;
+            try SettingsPreviewWindow.openWithPreviews(app);
+            const resolved = app.resolved_theme;
+
+            // The opacity row's Reset puts the draft at the default, 1.0, an
+            // edit of one row: the window applies its opacity once, at 1.0,
+            // the theme is not rebuilt, and its preview stays.
+            var applied: std.ArrayListUnmanaged(TestOpacityApply) = .empty;
+            defer applied.deinit(std.testing.allocator);
+            test_background_opacity_log = &applied;
+            defer test_background_opacity_log = null;
+            const rebuilds = app.theme_rebuilds;
+            const asserts = test_blur_behind_asserts;
+            const reset = try SettingsPreviewWindow.resetButton(app, "edit_bg_opacity");
+            _ = sys.SendMessageW(reset, SettingsPreviewWindow.bm_click, 0, 0);
+            try std.testing.expectEqual(@as(f64, 1.0), app.settings_window.pending.?.@"background-opacity");
+            try std.testing.expectEqual(@as(usize, 1), applied.items.len);
+            try expectAppliedOnce(applied.items, host, 1.0);
+            try std.testing.expectEqual(rebuilds, app.theme_rebuilds);
+            try std.testing.expectEqual(asserts, test_blur_behind_asserts);
+            try std.testing.expectEqual(@as(?u8, null), testBackgroundAlpha(host.hwnd.?));
+            try std.testing.expect(app.settings_preview != null);
+            try std.testing.expect(app.shownConfig().@"window-theme" == .light);
+            try std.testing.expect(std.meta.eql(resolved, app.resolved_theme));
+            try std.testing.expect(app.settings_window.hasPendingChanges());
         }
     }.body);
 }

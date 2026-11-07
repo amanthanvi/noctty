@@ -183,6 +183,7 @@ const settingsCustomUiaProvidersEnabledThunk = win32.settingsCustomUiaProvidersE
 const settingsDeferUiaDisconnectThunk = win32.settingsDeferUiaDisconnectThunk;
 const settingsDiskVerdict = win32.settingsDiskVerdict;
 const settingsEndSessionThunk = win32.settingsEndSessionThunk;
+const settingsEndPreviewsThunk = win32.settingsEndPreviewsThunk;
 const settingsFailureDetailThunk = win32.settingsFailureDetailThunk;
 const settingsFileOpenable = win32.settingsFileOpenable;
 const settingsHighContrastThunk = win32.settingsHighContrastThunk;
@@ -1315,6 +1316,7 @@ pub const App = struct {
             .saveAndReload = &settingsSaveAndReloadThunk,
             .configRevision = &settingsConfigRevisionThunk,
             .previewField = &settingsPreviewFieldThunk,
+            .endPreviews = &settingsEndPreviewsThunk,
             .notifyConflict = &settingsNotifyConflictThunk,
             .reconcileDisk = &settingsReconcileDiskThunk,
             .failureDetail = &settingsFailureDetailThunk,
@@ -1857,6 +1859,7 @@ pub const App = struct {
         // The window rolls its previews back as it goes, and the hosts and
         // windows a redraw walks are gone by now: nothing to show it to.
         self.settings_window.handle.previewField = null;
+        self.settings_window.handle.endPreviews = null;
         self.settings_window.deinit();
         self.dropSettingsPreview();
         const uia_disconnect_hr = win32_uia.disconnectAllProviders();
@@ -6336,9 +6339,11 @@ pub const App = struct {
     }
 
     /// Settings previews nothing any more: a save wrote every draft, or the
-    /// window closed. Normally nothing is left to end: a save's reload shows
-    /// no preview (`livePreviews` is empty while a save is in flight) and a
-    /// close rolls its previews back. A save without a reload (safe mode)
+    /// window rolled its previews back (a close, Discard: its `endPreviews`
+    /// hook, `settingsEndPreviewsThunk`, so a theme and an opacity reverted
+    /// together show each window once). A save's reload shows no preview
+    /// (`livePreviews` is empty while a save is in flight), so normally a
+    /// save leaves nothing to end; a save without a reload (safe mode)
     /// leaves the overlay, and the transaction ends its previews at a save
     /// without a rollback effect, so the windows go to the saved config here.
     pub fn endSettingsPreview(self: *App) void {
@@ -12816,6 +12821,32 @@ test "PKG-39 a Settings preview is shown without reaching the config terminals a
     if (!isHighContrastActive()) try std.testing.expect(app.resolved_theme.is_dark);
     app.endSettingsPreview();
     try std.testing.expectEqual(rebuilds + 1, app.theme_rebuilds);
+}
+
+test "PKG-39 App.terminate takes both Settings preview hooks away before the window rolls its previews back" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    try runOnHiddenDesktop(struct {
+        fn body() !void {
+            const core = try CoreApp.create(std.testing.allocator);
+            defer core.destroy();
+            var app: App = undefined;
+            try app.init(core, .{ .safe_mode = true });
+            const hinstance = app.hinstance;
+            defer {
+                _ = sys.UnregisterClassW(host_class_name, hinstance);
+                _ = sys.UnregisterClassW(palette_list_class_name, hinstance);
+                _ = sys.UnregisterClassW(scrollbar_class_name, hinstance);
+            }
+            try std.testing.expect(app.settings_window.handle.previewField != null);
+            try std.testing.expect(app.settings_window.handle.endPreviews != null);
+            // `settings_window.deinit` rolls the previews back after the
+            // hosts and windows a redraw walks are freed: neither a field's
+            // revert nor the end of them all may reach the app.
+            app.terminate();
+            try std.testing.expect(app.settings_window.handle.previewField == null);
+            try std.testing.expect(app.settings_window.handle.endPreviews == null);
+        }
+    }.body);
 }
 
 test "win32 a DPI change holds the terminal grid from WM_GETDPISCALEDSIZE to WM_DPICHANGED" {

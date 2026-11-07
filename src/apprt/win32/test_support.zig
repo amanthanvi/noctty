@@ -68,6 +68,7 @@ pub fn Fixtures(comptime runtime: anytype) type {
         const settingsCurrentConfigThunk = runtime.settingsCurrentConfigThunk;
         const settingsCustomUiaProvidersEnabledThunk = runtime.settingsCustomUiaProvidersEnabledThunk;
         const settingsDeferUiaDisconnectThunk = runtime.settingsDeferUiaDisconnectThunk;
+        const settingsEndPreviewsThunk = runtime.settingsEndPreviewsThunk;
         const settingsFailureDetailThunk = runtime.settingsFailureDetailThunk;
         const settingsHighContrastThunk = runtime.settingsHighContrastThunk;
         const settingsMaskedKeysThunk = runtime.settingsMaskedKeysThunk;
@@ -289,6 +290,7 @@ pub fn Fixtures(comptime runtime: anytype) type {
                         .saveAndReload = &settingsSaveAndReloadThunk,
                         .configRevision = &settingsConfigRevisionThunk,
                         .previewField = &settingsPreviewFieldThunk,
+                        .endPreviews = &settingsEndPreviewsThunk,
                         .notifyConflict = &settingsNotifyConflictThunk,
                         .reconcileDisk = &settingsReconcileDiskThunk,
                         .failureDetail = &settingsFailureDetailThunk,

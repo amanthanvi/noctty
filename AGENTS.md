@@ -273,7 +273,10 @@ that govern each symbol you change, or that none does.
   baselines (the rebuild's, `App.system_theme_refresh` and
   `SystemThemeSnapshot`, which `reconfigureTheme` and `App.init` set; the
   retry's, `App.system_inputs` and `window_state.SystemInputs`, which only
-  `reconfigureSystemTheme` and `App.init` set), `App.endSettingsPreview`, the
+  `reconfigureSystemTheme` and `App.init` set), `App.endSettingsPreview`
+  (and the Settings rollback that ends both previews through it:
+  `rollbackPreviews`, the handle's `endPreviews`,
+  `settingsEndPreviewsThunk`), the
   window half of a config change (the `.surface` and `.app`
   `config_change` arms, `App.app_wide_config_change`,
   `App.updateCoreConfig`, `App.updatePaneCoreConfig`, and after a failed
@@ -419,7 +422,8 @@ that govern each symbol you change, or that none does.
   (`win32_settings.zig`, `win32_settings_fields.zig`): its controls and when
   they are made (`SettingsWindow.open`, `materializeSection`), dialog
   manager, viewport, live preview (`App.settings_preview`, `App.shownConfig`,
-  `App.shownBackgroundOpacity`), theming (`SettingsThemeAdapter`,
+  `App.shownBackgroundOpacity`, and its rollback at a close or Discard:
+  `rollbackPreviews` and the handle's `endPreviews`), theming (`SettingsThemeAdapter`,
   `themeChanged`), its own UIA patterns, combo and open traces
   (`NOCTTY_SETTINGS_COMBO_TRACE`, `NOCTTY_SETTINGS_OPEN_TRACE`,
   `win32/bench_trace.zig`), the Default profile row

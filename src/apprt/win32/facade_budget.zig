@@ -22,10 +22,15 @@ const budget = .{
         .surface_presentation_test_runtime = 3,
         .session_runtime = 26,
         .quick_terminal_host_runtime = 21,
-        .test_support_runtime = 46,
+        // why: `settingsEndPreviewsThunk`, so `TestSession`'s Settings
+        // handle ends a rollback's previews as the App's does.
+        .test_support_runtime = 47,
     },
     // The facade's pub declarations: what the files that import it can reach.
-    .facade_pub_decls = 476,
+    // why: `settingsEndPreviewsThunk`, the Settings handle's `endPreviews`
+    // beside `settingsPreviewFieldThunk`, which the App and the shared
+    // fixtures both wire.
+    .facade_pub_decls = 477,
     // Root declarations of win32.zig whose value is a field access (`a.b`).
     .facade_aliases = 188,
     // Fields of win32.App named `test_*`.

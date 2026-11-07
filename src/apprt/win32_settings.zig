@@ -2331,6 +2331,14 @@ pub const AppHandle = struct {
     /// Optional live-preview hook for ownership-safe fields. Effects are
     /// idempotent: apply `value` as the current preview for `field`.
     previewField: ?*const fn (ctx: *anyopaque, field: SettingField, value: SettingValue) void = null,
+    /// Optional. Every live preview ends at once, back to what is saved: the
+    /// window closed, or Discard dropped the draft (`rollbackPreviews`). One
+    /// call, so the app can end a theme and an opacity in its own order and
+    /// show each window once; the reverts one at a time could not tell it
+    /// where the rollback ends. Without it the rollback sends `previewField`
+    /// the saved value of each previewed field. A Reset or an edit of one row
+    /// still goes through `previewField`.
+    endPreviews: ?*const fn (ctx: *anyopaque) void = null,
     /// Optional conflict notification. The UI model retains the draft until
     /// `resolveConflict` is called with keep-mine or use-disk.
     notifyConflict: ?*const fn (ctx: *anyopaque, field: SettingField) void = null,
@@ -2987,13 +2995,20 @@ pub const SettingsWindow = struct {
     }
 
     /// Put every live preview back to the saved value, the window's own
-    /// `current` snapshot.
+    /// `current` snapshot. The app ends them together (`endPreviews`), not
+    /// one `set_preview` at a time: a theme and an opacity reverted apart
+    /// showed every window's opacity twice.
     fn rollbackPreviews(self: *SettingsWindow) void {
         const transaction = &(self.transaction orelse return);
         var effects: [setting_field_count]SettingsTransaction.Effect = undefined;
-        if (transaction.dispatch(.revert, &effects)) |emitted| {
-            self.dispatchEffects(emitted);
-        } else |err| std.log.warn("settings: preview rollback failed err={}", .{err});
+        const emitted = transaction.dispatch(.revert, &effects) catch |err| {
+            std.log.warn("settings: preview rollback failed err={}", .{err});
+            return;
+        };
+        // `.revert` emits only `set_preview`, one per previewed field.
+        if (emitted.len == 0) return;
+        if (self.handle.endPreviews) |end| return end(self.handle.ctx);
+        self.dispatchEffects(emitted);
     }
 
     /// Drop the pending draft (if any) and its arena. Safe to call
