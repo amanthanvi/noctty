@@ -2576,7 +2576,7 @@ pub const Host = struct {
                 // here (Zig's test runner fails a test that logs an error)
                 // and costs a release build nothing it could turn into UB.
                 log.err("palette theme preview started while another window's is live; ending that one", .{});
-                _ = other.supersedePaletteThemePreview();
+                other.supersedePaletteThemePreview();
             }
             const original = self.swapRuntimeConfigFromPalette(preview);
             self.palette_theme_preview_original = original;
@@ -2589,7 +2589,7 @@ pub const Host = struct {
     }
 
     pub fn revertPaletteThemePreview(self: *Host) void {
-        _ = self.endPaletteThemePreview(.revert);
+        self.endPaletteThemePreview(.revert);
     }
 
     /// A reload supersedes a live theme preview. The config the preview
@@ -2598,14 +2598,14 @@ pub const Host = struct {
     /// the reload alone shows its config, once, in every pane and window.
     /// Restored and shown, it would put every window at the pre-preview
     /// opacity first and give every pane the pre-preview config after the
-    /// reload's. Returns whether a preview was live; the screen still shows
-    /// it until something shows the app config.
-    pub fn supersedePaletteThemePreview(self: *Host) bool {
-        return self.endPaletteThemePreview(.superseded);
+    /// reload's. The screen still shows it until something shows the app
+    /// config.
+    pub fn supersedePaletteThemePreview(self: *Host) void {
+        self.endPaletteThemePreview(.superseded);
     }
 
-    fn endPaletteThemePreview(self: *Host, how: enum { revert, superseded }) bool {
-        const original = self.palette_theme_preview_original orelse return false;
+    fn endPaletteThemePreview(self: *Host, how: enum { revert, superseded }) void {
+        const original = self.palette_theme_preview_original orelse return;
         self.palette_theme_preview_original = null;
         const old = switch (how) {
             .revert => self.swapRuntimeConfigFromPalette(original),
@@ -2629,7 +2629,6 @@ pub const Host = struct {
                 disposable.deinit();
             },
         }
-        return true;
     }
 
     pub fn commitPaletteTheme(self: *Host, name: []const u8) !void {
@@ -2762,7 +2761,7 @@ pub const Host = struct {
             );
         }
         if (saved_partly_applied) {
-            log.warn("palette theme saved, but applying the reload failed partway theme={f}", .{internal_os.redact.bytes(theme_name)});
+            log.warn("palette theme saved, but applying the reload failed; the running settings are the previous ones, or partly updated after a late failure theme={f}", .{internal_os.redact.bytes(theme_name)});
             runUiActionOrLog(
                 "palette partly applied theme banner failed",
                 self.setBanner(.err, if (partly_masked)

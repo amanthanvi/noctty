@@ -3227,6 +3227,70 @@ test "win32 a reload that fails at a pane's step after it ended the palette's li
     }.body);
 }
 
+test "win32 a reload that fails at a pane's step during a palette preview, and whose own restore cannot take the config, still closes the palette and shows the app config" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    try runOnHiddenDesktop(struct {
+        fn body() !void {
+            var fixture: WindowStartTestApp = .{};
+            try fixture.init();
+            defer fixture.deinit();
+            const app = &fixture.app;
+            test_pane_renderer = .opengl;
+            defer test_pane_renderer = null;
+
+            // A window of two tabs, whose palette previews the Light theme at
+            // 0.7 over the Dark one at 0.5, and a window of one.
+            app.config.@"background-opacity" = 0.5;
+            app.config.@"window-theme" = .dark;
+            app.reconfigureTheme(.refresh);
+            const dark = app.resolved_theme;
+            try app.createWindow(default_title);
+            const first = fixture.newest();
+            const palette = first.host.?;
+            _ = try app.createWindowSurface(&app.config, default_title, .{ .host_id = first.host_id });
+            try app.createWindow(default_title);
+            const hosts = [_]*Host{ palette, fixture.newest().host.? };
+            var previewed = try app.config.clone(std.testing.allocator);
+            previewed.@"background-opacity" = 0.7;
+            previewed.@"window-theme" = .light;
+            palette.showPaletteThemePreview(previewed);
+            palette.overlay_mode = .command_palette;
+            try std.testing.expect(!std.meta.eql(dark, app.resolved_theme));
+
+            var applied: std.ArrayListUnmanaged(TestOpacityApply) = .empty;
+            defer applied.deinit(std.testing.allocator);
+            test_background_opacity_log = &applied;
+            defer test_background_opacity_log = null;
+
+            // A reload to 0.6 whose first pane's step fails, and the app
+            // step of its restore cannot clone the config (memory ran out):
+            // the palette still closes, and the chrome (Dark) and every
+            // window, once, after the rebuild, show the app config the
+            // preview replaced. Before, the preview's theme stayed on screen
+            // and the palette open with nothing left to revert.
+            var reloaded = try palette.palette_theme_preview_original.?.clone(std.testing.allocator);
+            defer reloaded.deinit();
+            reloaded.@"background-opacity" = 0.6;
+            const rebuilds = app.theme_rebuilds;
+            Surface.test_scrollbar_refresh_fails = first;
+            defer Surface.test_scrollbar_refresh_fails = null;
+            App.test_app_config_clone_fails = true;
+            defer App.test_app_config_clone_fails = false;
+            try std.testing.expectError(error.TestScrollbarRefreshFailed, reloadConfig(app, &reloaded));
+            App.test_app_config_clone_fails = false;
+            Surface.test_scrollbar_refresh_fails = null;
+            try std.testing.expect(palette.palette_theme_preview_original == null);
+            try std.testing.expect(palette.overlay_mode != .command_palette);
+            try std.testing.expectEqual(@as(f64, 0.5), app.config.@"background-opacity");
+            try std.testing.expect(std.meta.eql(dark, app.resolved_theme));
+            try std.testing.expectEqual(rebuilds + 1, app.theme_rebuilds);
+            try std.testing.expectEqual(hosts.len, applied.items.len);
+            for (hosts) |host| try expectAppliedOnce(applied.items, host, 0.5);
+            for (applied.items) |apply| try std.testing.expectEqual(rebuilds + 1, apply.theme_rebuilds);
+        }
+    }.body);
+}
+
 test "win32 a reload in which a pane's step fails puts every pane and window back on the app config, each window once, and returns the failure" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
     try runOnHiddenDesktop(struct {
@@ -3285,7 +3349,7 @@ test "win32 a reload in which a pane's step fails puts every pane and window bac
     }.body);
 }
 
-test "win32 a reload in which a window fails to apply its opacity still applies every window after it, and returns the failure" {
+test "win32 a reload in which a window fails to apply its opacity still applies every window after it, tells Settings, and returns the failure" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
     try runOnHiddenDesktop(struct {
         fn body() !void {
@@ -3318,10 +3382,18 @@ test "win32 a reload in which a window fails to apply its opacity still applies 
             test_background_opacity_log = &applied;
             defer test_background_opacity_log = null;
 
+            // Settings open, at 0.5: it keeps a snapshot of its own, which
+            // only `externalConfigChanged` moves.
+            app.settings_window.handle.deferUiaDisconnect = null;
+            try app.settings_window.open();
+            defer SettingsPreviewWindow.deinit(app);
+            try SettingsPreviewWindow.expectSavedControls(app, "0.5", app.config.@"window-theme");
+
             // A reload to 0.6 in which the first window's layered alpha
             // fails: each window after it still applies its opacity, the
-            // window kept empty for undo too, and the reload returns the
-            // failure.
+            // window kept empty for undo too, Settings hears of the config
+            // installed, and the reload returns the failure. Before, the
+            // failure ended the app's step before Settings, which kept 0.5.
             var config = try app.config.clone(std.testing.allocator);
             defer config.deinit();
             config.@"background-opacity" = 0.6;
@@ -3333,6 +3405,7 @@ test "win32 a reload in which a window fails to apply its opacity still applies 
             try std.testing.expectEqual(@as(?u8, 153), testBackgroundAlpha(translucent.hwnd.?));
             try std.testing.expectEqual(@as(f64, 0.6), emptied.top_level.opacity);
             try std.testing.expectEqual(@as(?u8, 153), testBackgroundAlpha(emptied.hwnd.?));
+            try SettingsPreviewWindow.expectSavedControls(app, "0.6", app.config.@"window-theme");
         }
     }.body);
 }
@@ -3814,13 +3887,32 @@ test "win32 a light/dark change and its reload apply each window's opacity once,
             };
         }
 
-        /// The app config, the chrome and Settings (which reads the app
-        /// config) in `theme`.
+        /// The app config and the chrome in `theme`.
         fn expectAppIn(app: *App, theme: configpkg.ConditionalState.Theme) !void {
             try std.testing.expectEqual(opacity(theme), app.config.@"background-opacity");
             try std.testing.expectEqual(divider(theme), app.resolved_theme.pane_divider);
             const color = app.config.@"split-divider-color".?;
             try std.testing.expectEqual(divider(theme), win32_theme.rgb(color.r, color.g, color.b));
+        }
+
+        /// Settings' snapshot of the opacity (`current`) and the field it
+        /// shows, in `theme`, with nothing unsaved.
+        fn expectSettingsIn(app: *App, theme: configpkg.ConditionalState.Theme) !void {
+            const settings = &app.settings_window;
+            try std.testing.expect(!settings.hasPendingChanges());
+            const entry = for (settings.transaction.?.entries) |*entry| {
+                if (entry.field == .background_opacity) break entry;
+            } else return error.TestNoOpacityEntry;
+            const SettingValue = @import("../win32_settings.zig").SettingValue;
+            try std.testing.expect(std.meta.eql(SettingValue{ .background_opacity = opacity(theme) }, entry.current));
+            var text: [32]u16 = undefined;
+            const len = sys.GetWindowTextW(settings.fields.edit_bg_opacity.?, &text, text.len);
+            var utf8: [64]u8 = undefined;
+            const shown = utf8[0..try std.unicode.utf16LeToUtf8(&utf8, text[0..@intCast(len)])];
+            try std.testing.expectEqualStrings(switch (theme) {
+                .light => "0.6",
+                .dark => "0.8",
+            }, shown);
         }
 
         fn alpha(theme: configpkg.ConditionalState.Theme) u8 {
@@ -3963,6 +4055,13 @@ test "win32 a light/dark change and its reload apply each window's opacity once,
             // chrome stayed in the old one.
             {
                 try before(app);
+                // Settings open, on the app config as it was: it keeps a
+                // snapshot of its own, which only `externalConfigChanged`
+                // moves.
+                app.settings_window.handle.deferUiaDisconnect = null;
+                try app.settings_window.open();
+                defer SettingsPreviewWindow.deinit(app);
+                try expectSettingsIn(app, other());
                 applied.clearRetainingCapacity();
                 const asserts = test_blur_behind_asserts;
                 Surface.test_scrollbar_refresh_fails = app.core_app.surfaces.items[0];
@@ -3973,6 +4072,11 @@ test "win32 a light/dark change and its reload apply each window's opacity once,
                 for (hosts) |host| try expectAppliedOnce(applied.items, host, opacity(system()));
                 try std.testing.expectEqual(asserts + hosts.len, test_blur_behind_asserts);
                 try expectAppIn(app, system());
+                // The app's step fails at the same pane's scrollbar again,
+                // and Settings still hears of the config it installed.
+                // Before, that failure ended the step first, and Settings
+                // kept the other state's opacity.
+                try expectSettingsIn(app, system());
             }
 
             // Failing again, it latches again after that one try.

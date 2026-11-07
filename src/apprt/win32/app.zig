@@ -4159,6 +4159,7 @@ pub const App = struct {
             .config_change => {
                 switch (target) {
                     .app => {
+                        if (builtin.is_test and test_app_config_clone_fails) return error.OutOfMemory;
                         var config = try value.config.clone(self.core_app.alloc);
                         // Profile lists are built from these keys, so a change to
                         // any of them drops every list the hosts and the jump
@@ -4236,11 +4237,24 @@ pub const App = struct {
                         // Every window has its apply, past one that fails:
                         // the theme left the opacity to this loop, so a
                         // window it skipped would show none of the reload.
-                        // The first failure is returned after it, so the
-                        // scrollbar refresh is still skipped.
+                        // A window's failure still skips the scrollbar
+                        // refresh; a pane's skips no other pane's. Either
+                        // way the config is installed, so the steps after
+                        // them run (Settings hears of it), and the first
+                        // failure, a window's before a pane's, is returned
+                        // last.
                         self.app_wide_windows_applied = true;
-                        try self.applyWindowsConfig(&self.config);
-                        for (self.registry.windows.items) |surface| try surface.refreshScrollbarWindow();
+                        const windows_applied = self.applyWindowsConfig(&self.config);
+                        var scrollbars: @TypeOf(Surface.refreshScrollbarWindow(undefined)) = {};
+                        if (windows_applied) |_| {
+                            for (self.registry.windows.items) |surface| {
+                                surface.refreshScrollbarWindow() catch |err| {
+                                    if (scrollbars) |_| {
+                                        scrollbars = err;
+                                    } else |_| log.warn("win32 scrollbar refresh after a config change failed err={}", .{err});
+                                };
+                            }
+                        } else |_| {}
                         // A reload that turns automatic checks on in a process
                         // that started with them off (or on another channel).
                         if (self.registry.windows.items.len > 0 and self.update_startup_ready) self.maybeScheduleAutomaticUpdateCheck();
@@ -4251,6 +4265,8 @@ pub const App = struct {
                         } else {
                             self.stopQuitTimer();
                         }
+                        try windows_applied;
+                        try scrollbars;
                     },
                     .surface => |core_surface| {
                         const surface = self.registry.findSurfaceByCore(core_surface) orelse return false;
@@ -6029,10 +6045,13 @@ pub const App = struct {
     /// is its one try. The message after the reload then finds both
     /// baselines current (it still rebuilds a missing resource), after a
     /// reload that failed at a pane's step too (`updateCoreConfig` rebuilds
-    /// the theme then). Without a reload (the light/dark state did not
-    /// change, safe mode) the message runs as before: the sync then changes
+    /// the theme then). Without a reload the message runs as before, then
+    /// the sync: where the light/dark state did not change, it changes
     /// nothing (a pane's `colorSchemeCallback` and core's `colorSchemeEvent`
-    /// return at once on an unchanged scheme).
+    /// return at once on an unchanged scheme); in safe mode with a changed
+    /// one, they still move each pane's and core's light/dark state, and
+    /// only the reload core asks for does nothing (the `.reload_config` arm
+    /// returns in safe mode), as on the "ImmersiveColorSet" path before.
     pub fn systemColorSetChanged(self: *App) void {
         const scheme: configpkg.ConditionalState.Theme = if (isSystemDarkMode()) .dark else .light;
         const reloads = !self.safe_mode and self.core_app.config_conditional_state.theme != scheme;
@@ -6100,6 +6119,10 @@ pub const App = struct {
         };
     }
 
+    /// The `.app` `config_change` arm's clone of the config fails in a test,
+    /// as it can when memory runs out.
+    pub var test_app_config_clone_fails = false;
+
     /// `updateCoreConfig`'s end after an update that failed before the app's
     /// step: core's order with `app.config`, logging a step that fails and
     /// going on. Still inside the app-wide change, so each pane leaves its
@@ -6118,6 +6141,21 @@ pub const App = struct {
         _ = self.performAction(.app, .config_change, .{ .config = if (kept_) |*kept| kept else &self.config }) catch |err| {
             log.warn("win32 app config restore after a failed update failed err={}", .{err});
         };
+        // The arm ends before its window pass only where it could not take
+        // the config (its clone ran out of memory), and then nothing shows
+        // `app.config`: a palette preview the update ended stays on screen,
+        // with no preview left for its palette to revert. With nothing
+        // allocated, every palette still closes, and the theme and every
+        // window show `app.config` as it is, once.
+        if (!self.app_wide_windows_applied) {
+            for (self.registry.hosts.items) |host| {
+                if (host.overlay_mode == .command_palette) host.hideOverlay();
+            }
+            self.reconfigureTheme(.caller_applies);
+            self.applyWindowsConfig(&self.config) catch |err| {
+                log.warn("win32 window config apply after a failed update failed err={}", .{err});
+            };
+        }
     }
 
     /// A reload replaces the app config: a palette's live theme preview
@@ -6125,7 +6163,7 @@ pub const App = struct {
     /// (`Host.supersedePaletteThemePreview`), and the palette closes in the
     /// `.app` `config_change` arm.
     fn supersedePaletteThemePreviews(self: *App) void {
-        for (self.registry.hosts.items) |host| _ = host.supersedePaletteThemePreview();
+        for (self.registry.hosts.items) |host| host.supersedePaletteThemePreview();
     }
 
     /// `updateCoreConfig` without its window pass after a failure.
