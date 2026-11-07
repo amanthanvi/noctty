@@ -1442,6 +1442,11 @@ pub const SurfaceControls = struct {
     }
 };
 
+/// While a test points this at a list, each pane whose Outcome reaches the
+/// core step goes on it in place of the core call: a fixture pane has no
+/// core.
+var test_core_steps: ?*std.ArrayListUnmanaged(*const Surface) = null;
+
 /// Carries out an Outcome. Nothing after the core step may use a View taken
 /// before it: the core's synchronous reports can free what it borrows.
 fn applyDockedSearch(surface: *Surface, out: docked_search.Outcome) anyerror!void {
@@ -1482,13 +1487,19 @@ fn applyDockedSearch(surface: *Surface, out: docked_search.Outcome) anyerror!voi
     if (out.timer_changed) {
         if (surface.host) |host| host.refreshSearchTimerState();
     }
-    if (out.core) |command| switch (command) {
-        .search => |search| _ = try surface.core_surface.setSearchQuery(search.text, search.options),
-        .stop => _ = try surface.core_surface.setSearchQuery("", .{}),
-        .invalidate => _ = try surface.core_surface.invalidateSearchResults(),
-        .navigate => |dir| _ = try surface.core_surface.performBindingAction(.{ .navigate_search = dir }),
-        .end => _ = try surface.core_surface.endSearch(),
-    };
+    if (out.core) |command| core: {
+        if (builtin.is_test) if (test_core_steps) |steps| {
+            try steps.append(std.testing.allocator, surface);
+            break :core;
+        };
+        switch (command) {
+            .search => |search| _ = try surface.core_surface.setSearchQuery(search.text, search.options),
+            .stop => _ = try surface.core_surface.setSearchQuery("", .{}),
+            .invalidate => _ = try surface.core_surface.invalidateSearchResults(),
+            .navigate => |dir| _ = try surface.core_surface.performBindingAction(.{ .navigate_search = dir }),
+            .end => _ = try surface.core_surface.endSearch(),
+        }
+    }
     if (out.focus_terminal) {
         if (surface.hwnd) |hwnd| _ = sys.SetFocus(hwnd);
     }
@@ -1636,7 +1647,7 @@ test "win32 docked search stops run query, prev, next, regex, case, word, close"
     try std.testing.expectEqual(@as(?Role, null), searchFocusStopRole(search_focus_stop_count));
 }
 
-test "win32 a docked search debounce pending in a background tab keeps the host's search timer running" {
+test "win32 a docked search debounce pending in a background tab keeps the host's search timer running, and fires there when due" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
     try win32.test_support.runOnHiddenDesktop(struct {
         fn body() !void {
@@ -1670,6 +1681,22 @@ test "win32 a docked search debounce pending in a background tab keeps the host'
             _ = try background.docked_search.apply(.{ .edit = "" }, now);
             try std.testing.expect(!background.docked_search.view().wants_tick);
             host.refreshSearchTimerState();
+            try std.testing.expect(!host.search_timer_active);
+
+            // Once due, a tick runs the background pane's search (its core
+            // step, recorded here), and the timer stops. Ticked in the
+            // active tab alone, it ran nothing and the timer kept running.
+            var core_steps: std.ArrayListUnmanaged(*const Surface) = .empty;
+            defer core_steps.deinit(std.testing.allocator);
+            test_core_steps = &core_steps;
+            defer test_core_steps = null;
+            _ = try background.docked_search.apply(.{ .edit = "needle" }, now - 1_000);
+            host.refreshSearchTimerState();
+            try std.testing.expect(host.search_timer_active);
+            host.tickSearchBars();
+            try std.testing.expectEqual(@as(usize, 1), core_steps.items.len);
+            try std.testing.expect(core_steps.items[0] == background);
+            try std.testing.expect(!background.docked_search.view().wants_tick);
             try std.testing.expect(!host.search_timer_active);
         }
     }.body);

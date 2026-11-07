@@ -3049,25 +3049,37 @@ test "win32 a reload and the palette's theme apply each window's opacity once, a
 test "win32 a reload during the palette's live theme preview supersedes it: every pane and window takes the reload, each window once" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
     try runOnHiddenDesktop(struct {
+        /// The backgrounds of the config, the palette's preview and the
+        /// reload, each its own: the pane half of a config change a pane's
+        /// own step stores (`setTabBackground`), which the `.app` arm leaves
+        /// alone.
+        const original_background: configpkg.Config.Color = .{ .r = 0x10, .g = 0x20, .b = 0x30 };
+        const preview_background: configpkg.Config.Color = .{ .r = 0x40, .g = 0x50, .b = 0x60 };
+        const reload_background: configpkg.Config.Color = .{ .r = 0x70, .g = 0x80, .b = 0x90 };
+
         /// The palette previews a theme at opacity 0.7, its panes' scrollbar
         /// hidden, over the config at 0.5 with the scrollbar shown.
         fn preview(app: *App, host: *Host) !void {
             var previewed = try app.config.clone(std.testing.allocator);
             previewed.@"background-opacity" = 0.7;
             previewed.scrollbar = .never;
+            previewed.background = preview_background;
             host.palette_theme_preview_original = host.swapRuntimeConfigFromPalette(previewed);
             host.overlay_mode = .command_palette;
             try std.testing.expectEqual(@as(?u8, 179), testBackgroundAlpha(host.hwnd.?));
         }
 
-        fn expect(app: *App, applied: []const TestOpacityApply, hosts: []const *Host, opacity: f64, scrollbar: configpkg.Config.Scrollbar) !void {
+        fn expect(app: *App, applied: []const TestOpacityApply, hosts: []const *Host, opacity: f64, scrollbar: configpkg.Config.Scrollbar, background: configpkg.Config.Color) !void {
             try std.testing.expectEqual(hosts.len, applied.len);
             for (hosts) |host| {
                 try expectAppliedOnce(applied, host, opacity);
                 try std.testing.expect(host.palette_theme_preview_original == null);
                 try std.testing.expect(host.overlay_mode != .command_palette);
             }
-            for (app.registry.windows.items) |pane| try std.testing.expectEqual(scrollbar, pane.scrollbar_config);
+            for (app.registry.windows.items) |pane| {
+                try std.testing.expectEqual(scrollbar, pane.scrollbar_config);
+                try std.testing.expectEqual(win32_theme.rgb(background.r, background.g, background.b), pane.tab_background);
+            }
             try std.testing.expectEqual(opacity, app.config.@"background-opacity");
             try std.testing.expectEqual(scrollbar, app.config.scrollbar);
         }
@@ -3084,6 +3096,7 @@ test "win32 a reload during the palette's live theme preview supersedes it: ever
             // one.
             app.config.@"background-opacity" = 0.5;
             app.config.scrollbar = .system;
+            app.config.background = original_background;
             try app.createWindow(default_title);
             const palette = fixture.newest().host.?;
             _ = try app.createWindowSurface(&app.config, default_title, .{ .host_id = fixture.newest().host_id });
@@ -3096,18 +3109,21 @@ test "win32 a reload during the palette's live theme preview supersedes it: ever
             defer test_background_opacity_log = null;
 
             // A reload of a config read again (a Settings save, a hard
-            // reload) at 0.6, the scrollbar shown: every pane and window
-            // takes it, each window once, and the palette closes. Restoring
-            // the preview's original first showed 0.5 in every window, then
-            // gave every pane the original's config after the reload's.
+            // reload) at 0.6, the scrollbar shown, another background: every
+            // pane and window takes it, each window once, and the palette
+            // closes. Restoring the preview's original first showed 0.5 in
+            // every window, then gave every pane the original's config after
+            // the reload's (its background; the `.app` arm stores every
+            // pane's scrollbar setting again, but no background).
             try preview(app, palette);
             applied.clearRetainingCapacity();
             var reloaded = try app.config.clone(std.testing.allocator);
             defer reloaded.deinit();
             reloaded.@"background-opacity" = 0.6;
             reloaded.scrollbar = .system;
+            reloaded.background = reload_background;
             try reloadConfig(app, &reloaded);
-            try expect(app, applied.items, &hosts, 0.6, .system);
+            try expect(app, applied.items, &hosts, 0.6, .system, reload_background);
 
             // A reload of the app config itself (the soft reload a
             // light/dark change makes) starts from the config the preview
@@ -3115,7 +3131,7 @@ test "win32 a reload during the palette's live theme preview supersedes it: ever
             try preview(app, palette);
             applied.clearRetainingCapacity();
             try std.testing.expect(try app.performAction(.app, .reload_config, .{ .soft = true }));
-            try expect(app, applied.items, &hosts, 0.6, .system);
+            try expect(app, applied.items, &hosts, 0.6, .system, reload_background);
 
             // A pick with no live preview keeps the catalog's config alive
             // across the save's reload with a clone of the config shown,
