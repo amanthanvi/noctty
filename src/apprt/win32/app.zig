@@ -1308,6 +1308,7 @@ pub const App = struct {
             .textPrimary = &settingsTextPrimaryThunk,
             .themeColors = &settingsThemeColorsThunk,
             .highContrast = &settingsHighContrastThunk,
+            .os_build = self.os_build,
             .openInEditor = &settingsOpenInEditorThunk,
             .copyText = &settingsCopyTextThunk,
             .currentConfig = &settingsCurrentConfigThunk,
