@@ -3344,9 +3344,10 @@ test "win32 a reload in which a pane's step fails puts every pane and window bac
             Surface.test_scrollbar_refreshes_of = later;
             Surface.test_scrollbar_refreshes = 0;
             defer Surface.test_scrollbar_refreshes_of = null;
-            app.quit_timer_id = sys.SetTimer(null, 0, 60_000, null);
+            const quit_timer = sys.SetTimer(null, 0, 60_000, null);
+            try std.testing.expect(quit_timer != 0);
+            app.quit_timer_id = quit_timer;
             defer App.killThreadTimer(&app.quit_timer_id);
-            try std.testing.expect(app.quit_timer_id != null);
             try std.testing.expectError(error.TestScrollbarRefreshFailed, reloadConfig(app, &config));
             // Core's update stopped at the first pane; the restore gave the
             // later pane its own step (one refresh), and the app's step went

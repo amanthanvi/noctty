@@ -4238,8 +4238,9 @@ pub const App = struct {
                         // the theme left the opacity to this loop, so a
                         // window it skipped would show none of the reload.
                         // Then every pane's scrollbar, past one that fails,
-                        // after a window's failure too: the scrollbar reads
-                        // nothing a window's apply sets. The config is
+                        // after a window's failure too: the refresh, still
+                        // after the window pass, does not need a window's
+                        // opacity to have applied. The config is
                         // installed either way, so the steps after them run
                         // (Settings hears of it), and the first failure, a
                         // window's before a pane's, is returned last.
@@ -9197,8 +9198,10 @@ pub const App = struct {
         // be installed partly read. It updates each terminal and then the
         // app (`SavedPartlyApplied` either way): a terminal's step that
         // fails leaves the running settings as they were (`updateCoreConfig`
-        // reloads the app config in place), and a step of the app's that
-        // fails after the install leaves the rest of it undone.
+        // reloads the app config in place), and a failure in the app's step
+        // after the install leaves only the failing window's apply or pane's
+        // scrollbar refresh undone (the step goes on past it and runs its
+        // tail before it returns the failure).
         postWriteStep(.apply);
         self.updateCoreConfig(applied) catch |err| {
             log.warn("settings save: saved, but applying the reload failed; the running settings are the previous ones, or partly updated after a late failure err={}", .{err});

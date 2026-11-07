@@ -324,7 +324,7 @@ that govern each symbol you change, or that none does.
   and how a reload ends it
   (`Host.swapRuntimeConfigFromPalette`, `installRuntimeConfigFromPalette`,
   `showPaletteThemePreview`, `supersedePaletteThemePreview`,
-  `detachLivePaletteCatalogConfig`, and
+  `App.supersedePaletteThemePreviews`, `detachLivePaletteCatalogConfig`, and
   `App.updateCoreConfig`'s fallback after a failed reload,
   `App.reloadKeptConfig`, which reloads `app.config` in core's light/dark
   state), ranking, MRU
