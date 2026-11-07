@@ -2528,7 +2528,7 @@ pub const Host = struct {
             return;
         };
         self.previewPaletteTheme(name) catch |err| {
-            log.warn("palette theme preview failed theme={s} err={}", .{ name, err });
+            log.warn("palette theme preview failed theme={f} err={}", .{ internal_os.redact.bytes(name), err });
             self.revertPaletteThemePreview();
             runUiActionOrLog(
                 "palette theme preview banner failed",
@@ -2675,7 +2675,7 @@ pub const Host = struct {
             .completed_partly_applied,
             => self.app.settings_window.externalConfigChanged(&self.app.config, self.app.config_revision),
             .failed => |err| {
-                log.warn("palette theme save failed theme={s} err={}", .{ theme_name, err });
+                log.warn("palette theme save failed theme={f} err={}", .{ internal_os.redact.bytes(theme_name), err });
                 // Roll back without another allocation: `original` is already
                 // an owned deep clone of the pre-preview baseline. Transfer it
                 // into the runtime config and suppress the local deferred deinit.
@@ -2725,28 +2725,28 @@ pub const Host = struct {
             );
         }
         if (saved_but_masked) {
-            log.warn("palette theme saved but masked by a later config layer theme={s}", .{theme_name});
+            log.warn("palette theme saved but masked by a later config layer theme={f}", .{internal_os.redact.bytes(theme_name)});
             runUiActionOrLog(
                 "palette masked theme banner failed",
                 self.setBanner(.err, "Theme saved, but a later config layer masks it."),
             );
         }
         if (saved_but_unread) {
-            log.warn("palette theme saved, but the reload could not read a config file whole theme={s}", .{theme_name});
+            log.warn("palette theme saved, but the reload could not read a config file whole theme={f}", .{internal_os.redact.bytes(theme_name)});
             runUiActionOrLog(
                 "palette unread theme banner failed",
                 self.setBanner(.err, "Theme saved, but a config file could not be read whole. Reload the configuration once it can be read."),
             );
         }
         if (saved_not_applied) {
-            log.warn("palette theme saved, but the reload could not be applied theme={s}", .{theme_name});
+            log.warn("palette theme saved, but the reload could not be applied theme={f}", .{internal_os.redact.bytes(theme_name)});
             runUiActionOrLog(
                 "palette unapplied theme banner failed",
                 self.setBanner(.err, "Theme saved, but the saved settings could not be applied. Reload the configuration to use them."),
             );
         }
         if (saved_partly_applied) {
-            log.warn("palette theme saved, but applying the reload failed partway theme={s}", .{theme_name});
+            log.warn("palette theme saved, but applying the reload failed partway theme={f}", .{internal_os.redact.bytes(theme_name)});
             runUiActionOrLog(
                 "palette partly applied theme banner failed",
                 self.setBanner(.err, if (partly_masked)
@@ -8660,7 +8660,7 @@ pub const Host = struct {
                     return false;
                 }
                 const action = input.Binding.Action.parse(text) catch |err| {
-                    log.warn("win32 command palette invalid action action={s} err={}", .{ text, err });
+                    log.warn("win32 command palette invalid action action={f} err={}", .{ internal_os.redact.bytes(text), err });
                     try self.setBanner(.err, "Unknown Noctty action. Example: new_tab or toggle_fullscreen");
                     if (self.palette_list_uia_provider) |provider| {
                         win32_uia.events.raiseNotification(&provider.base, .action_aborted, "Unknown command");
@@ -8692,7 +8692,7 @@ pub const Host = struct {
             },
             .tab_overview => {
                 const requested = std.fmt.parseUnsigned(usize, text, 10) catch |err| {
-                    log.warn("win32 tab overview invalid selection value={s} err={}", .{ text, err });
+                    log.warn("win32 tab overview invalid selection value={f} err={}", .{ internal_os.redact.bytes(text), err });
                     try self.setBanner(.err, "Enter a numeric tab index.");
                     return false;
                 };
