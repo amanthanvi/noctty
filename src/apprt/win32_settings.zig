@@ -3013,8 +3013,10 @@ pub const SettingsWindow = struct {
         // `.revert` emits only `set_preview`, one per previewed field
         // (`SettingsTransaction.revert`, pinned by "settings transaction
         // revert emits only set_preview, one per previewed field"), so the
-        // one end drops no other effect.
-        for (emitted) |effect| std.debug.assert(effect == .set_preview);
+        // one end drops no other effect. Should it ever emit another, each
+        // effect goes through `dispatchEffects` instead: a check that holds
+        // in a release build, where an assert would be an assumption.
+        for (emitted) |effect| if (effect != .set_preview) return self.dispatchEffects(emitted);
         if (self.handle.endPreviews) |end| return end(self.handle.ctx);
         self.dispatchEffects(emitted);
     }

@@ -12871,7 +12871,7 @@ test "PKG-39 a Settings preview is shown without reaching the config terminals a
     try std.testing.expectEqual(rebuilds + 1, app.theme_rebuilds);
 }
 
-test "PKG-39 App.terminate takes both Settings preview hooks away before the window rolls its previews back" {
+test "PKG-39 App.terminate takes both Settings preview hooks away before the window rolls its previews back, with both previews live" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
     try runOnHiddenDesktop(struct {
         fn body() !void {
@@ -12887,10 +12887,50 @@ test "PKG-39 App.terminate takes both Settings preview hooks away before the win
             }
             try std.testing.expect(app.settings_window.handle.previewField != null);
             try std.testing.expect(app.settings_window.handle.endPreviews != null);
+            const settings_class = std.unicode.utf8ToUtf16LeStringLiteral("noctty.win32.settings");
+            const viewport_class = std.unicode.utf8ToUtf16LeStringLiteral("noctty.win32.settings.viewport");
+            defer {
+                _ = sys.UnregisterClassW(settings_class, hinstance);
+                _ = sys.UnregisterClassW(viewport_class, hinstance);
+            }
+
+            // Settings open with an opacity and a theme preview, made through
+            // its own controls, so its rollback has both to end.
+            app.settings_window.handle.deferUiaDisconnect = null;
+            try app.settings_window.open();
+            _ = sys.SetWindowTextW(app.settings_window.fields.edit_bg_opacity.?, std.unicode.utf8ToUtf16LeStringLiteral("0.5"));
+            const combo = app.settings_window.fields.combo_window_theme.?;
+            const field_model = @import("../win32_settings_fields.zig");
+            const cb_setcursel = 0x014E;
+            const cbn_selchange = 1;
+            _ = sys.SendMessageW(combo, cb_setcursel, field_model.Combo(.window_theme).toIndex(.light), 0);
+            const id: usize = @intCast(sys.GetDlgCtrlID(combo));
+            _ = sys.SendMessageW(app.settings_window.hwnd.?, c.WM_COMMAND, id | (@as(usize, cbn_selchange) << 16), @bitCast(@intFromPtr(combo)));
+            try std.testing.expectEqual(@as(f64, 0.5), app.shownConfig().@"background-opacity");
+            try std.testing.expect(app.shownConfig().@"window-theme" == .light);
+
             // `settings_window.deinit` rolls the previews back after the
             // hosts and windows a redraw walks are freed: neither a field's
-            // revert nor the end of them all may reach the app.
+            // revert nor the end of them all may reach the app. The hooks
+            // count instead of reaching it, so a hook left in place shows as
+            // a call, not as a redraw over freed hosts.
+            const Calls = struct {
+                var preview_field: usize = 0;
+                var end_previews: usize = 0;
+                fn previewField(_: *anyopaque, _: win32_settings.SettingField, _: win32_settings.SettingValue) void {
+                    preview_field += 1;
+                }
+                fn endPreviews(_: *anyopaque) void {
+                    end_previews += 1;
+                }
+            };
+            Calls.preview_field = 0;
+            Calls.end_previews = 0;
+            app.settings_window.handle.previewField = &Calls.previewField;
+            app.settings_window.handle.endPreviews = &Calls.endPreviews;
             app.terminate();
+            try std.testing.expectEqual(@as(usize, 0), Calls.preview_field);
+            try std.testing.expectEqual(@as(usize, 0), Calls.end_previews);
             try std.testing.expect(app.settings_window.handle.previewField == null);
             try std.testing.expect(app.settings_window.handle.endPreviews == null);
         }
