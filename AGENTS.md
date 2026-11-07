@@ -268,8 +268,10 @@ that govern each symbol you change, or that none does.
   `retryBackgroundOpacity`, `releaseBackgroundOpacity`, `childCreated` and
   `solidifies` in `win32/window_state.zig`, with `Host.chrome_alpha` and
   `Host.blur_behind_failed`; when a window shows it again: the `opacity`
-  argument of `App.reconfigureTheme`, `App.systemColorSetChanged` (a
-  light/dark change and its reload), `reconfigureSystemTheme` and its two
+  argument of `App.reconfigureTheme`, `App.systemColorSetChanged` (every
+  system theme message, `WM_THEMECHANGED`, `WM_SYSCOLORCHANGE` and a
+  theme-affecting `WM_SETTINGCHANGE`, with a light/dark change's reload),
+  `reconfigureSystemTheme` and its two
   baselines (the rebuild's, `App.system_theme_refresh` and
   `SystemThemeSnapshot`, which `reconfigureTheme` and `App.init` set; the
   retry's, `App.system_inputs` and `window_state.SystemInputs`, which only
@@ -315,11 +317,14 @@ that govern each symbol you change, or that none does.
 - [chrome-overlays.md](docs/agents/log/chrome-overlays.md): the command
   palette (`win32_palette.zig`, `win32/palette_controller.zig`, its live
   theme preview, one window's at a time (`Host.showOverlay`, which closes
-  every other window's palette and an open one before another overlay),
+  every other window's palette; `Surface.toggleTabOverview`, which closes
+  what is open first like every overlay's open; the error
+  `showPaletteThemePreview` logs over another window's live preview),
   and how a reload ends it
   (`Host.swapRuntimeConfigFromPalette`, `showPaletteThemePreview`,
   `supersedePaletteThemePreview`, `detachLivePaletteCatalogConfig`, and
-  `App.updateCoreConfig`'s fallback after a failed reload), ranking, MRU
+  `App.updateCoreConfig`'s fallback after a failed reload, which puts
+  every pane and window back on `app.config`), ranking, MRU
   and its `palette-mru.txt` lines: `writePaletteMruLine`, palette list, the
   catalog's capacity and the installed themes that fit it:
   `palette_catalog_capacity`, `appendInstalledThemesToPalette`, and the
@@ -344,7 +349,8 @@ that govern each symbol you change, or that none does.
   end_search and clears in `src/Surface.zig`; visible Up/Down versus
   core `.next`/`.previous`, debounce and the host's search timer over
   every tab: `Host.refreshSearchTimerState`, `tickSearchBars`, the
-  `test_core_steps` seam of `applyDockedSearch`) and the
+  restart after `restoreClosedTabEntryNative` and `redoSplitCreateEntry`,
+  the `test_core_steps` seam of `applyDockedSearch`) and the
   layered overlay scrollbar
   (`win32_scrollbar_geometry.zig`, heartbeat, alpha, markers).
 - [tabs-panes.md](docs/agents/log/tabs-panes.md): tabs, splits and windows as
