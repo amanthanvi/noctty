@@ -9029,9 +9029,9 @@ pub const Host = struct {
         const id = self.id;
         self.closing = true;
         for (surfaces.items) |surface| surface.close(false);
-        if (app.registry.findHostById(id) == null) return;
-        self.closing = false;
-        window_state.refreshBackgroundOpacity(self);
+        const kept = app.registry.findHostById(id) orelse return;
+        kept.closing = false;
+        window_state.refreshBackgroundOpacity(kept);
     }
 
     /// The tab and window title prompts are filled from the active surface
