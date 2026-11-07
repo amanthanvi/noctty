@@ -6096,8 +6096,13 @@ pub const App = struct {
     /// takes `app.config` in its own light/dark state, and the app's step
     /// installs `app.config` replayed in the app's (its own config files
     /// as last read, nothing of the failed update), so the panes, the
-    /// theme, Settings and every window, each once, agree on it; any open
-    /// palette closes, as in every reload. The pane's error is returned.
+    /// theme, Settings and every window, each once, agree on it, the arm
+    /// telling Settings past a window or pane that fails; any open palette
+    /// closes, as in every reload. A pane whose step fails again keeps what
+    /// that step did not reach (its scrollbar refresh, say). Where the arm
+    /// cannot take the config at all (its clone runs out of memory), every
+    /// palette still closes and the theme and every window show `app.config`
+    /// as it is, with nothing allocated. The pane's error is returned.
     /// The system theme message a light/dark reload runs after it
     /// (`systemColorSetChanged`) finds the theme current and applies no
     /// window again.
