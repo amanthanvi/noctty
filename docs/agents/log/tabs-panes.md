@@ -9,6 +9,7 @@ Corrected in other files:
 See also:
 - `inheritWindowStateFrom`, which the 2026-10-10 entry lists among the steps under `Surface.init`'s errdefers, is `window_state.advance(host, .after_show)` now, still before `destroy_on_wm_destroy`, and a new window's start is staged by `window_state.begin`/`advance` around core init: the 2026-11-02 WINDOW-STATE-01 entry in window-frame.md.
 - Background-tab close prompts and the undo-off banner are in the 2026-10-15 SMALL-04 A entry in accessibility.md.
+- A tab restored from undo history (`Host.restoreClosedTabEntryNative`) and a split's redo (`redoSplitCreateEntry`) restart the window's search timer for a pane waiting out a docked search debounce: the 2026-11-07 background-tab debounce entry in search-scrollbar.md.
 - The terminal snapshot an undo captures (`TerminalFormatter`/`ScreenFormatter`) is in the 2026-10-15 PKG-53 entry in terminal-core.md.
 - Saving the session as the last window, tab or pane goes (the quick terminal and a window kept empty for undo never count): the 2026-10-19 #497 entry in app-lifecycle.md.
 - Which panes `unfocused-split-opacity` dims (`tab.focused` and the zoomed pane, never keyboard focus) and the focus paths that call `Host.syncSplitDim`: the 2026-10-19 #408 entry in renderer.md.
