@@ -1385,7 +1385,9 @@ pub const Host = struct {
         // Its programs may have ended while the tab waited in undo history.
         self.refreshTabStatus(insert_index);
         // A pane of it may wait out a search debounce, which no tick reached
-        // while the tab was in undo history (G4 walks this window's tabs).
+        // while the tab was in undo history (the tick walks this window's
+        // tabs: the 2026-11-07 background-tab debounce entry in
+        // search-scrollbar.md).
         self.refreshSearchTimerState();
         // A D3D11 pane coming back fades the window whole again.
         window_state.refreshBackgroundOpacity(self);
@@ -2677,10 +2679,11 @@ pub const Host = struct {
         });
         switch (save_outcome) {
             .completed, .completed_masked, .completed_lists_unchecked => {},
-            // Saved, with a reload the save does not apply, or applied only
-            // partly: the running config stays as it is (the preview, when
-            // one ran; else the config from before the pick, or what part of
-            // the reload took). Nothing is rolled back: the file holds the
+            // Saved, with a reload the save does not apply, or that failed:
+            // the running config stays as it is (the preview, when one ran;
+            // else the config from before the pick, which a terminal's step
+            // that fails puts back, or the reload, where a later step of the
+            // app's failed). Nothing is rolled back: the file holds the
             // pick. An open Settings window hears of the running config, as
             // it would of a reload.
             .completed_unread,
@@ -7551,7 +7554,8 @@ pub const Host = struct {
 
     /// The timer runs while a pane of any tab waits out a debounce, a
     /// background tab's included, so its search fires on schedule rather
-    /// than when the user next acts in that tab (G4).
+    /// than when the user next acts in that tab (the 2026-11-07
+    /// background-tab debounce entry in search-scrollbar.md).
     pub fn refreshSearchTimerState(self: *Host) void {
         const wants_timer = tabs: for (self.tabs.items) |*tab| {
             var it = tab.tree.iterator();

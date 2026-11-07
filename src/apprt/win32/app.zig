@@ -9152,11 +9152,13 @@ pub const App = struct {
         // would put it in that state again, reading the theme again,
         // unchecked, and a theme that had become unreadable in between would
         // be installed partly read. It updates each terminal and then the
-        // app, so one that fails may have applied part of the reload
-        // (`SavedPartlyApplied`).
+        // app (`SavedPartlyApplied` either way): a terminal's step that
+        // fails leaves the running settings as they were (`updateCoreConfig`
+        // reloads the app config in place), and a step of the app's that
+        // fails after the install leaves the rest of it undone.
         postWriteStep(.apply);
         self.updateCoreConfig(applied) catch |err| {
-            log.warn("settings save: saved, but applying the reload failed partway; the running settings may be partly updated err={}", .{err});
+            log.warn("settings save: saved, but applying the reload failed; the running settings are the previous ones, or partly updated after a late failure err={}", .{err});
             return error.SavedPartlyApplied;
         };
         // The reload read the file again, so what is wrong in it is news.
@@ -12885,14 +12887,20 @@ test "PKG-39 App.terminate takes both Settings preview hooks away before the win
                 _ = sys.UnregisterClassW(palette_list_class_name, hinstance);
                 _ = sys.UnregisterClassW(scrollbar_class_name, hinstance);
             }
-            try std.testing.expect(app.settings_window.handle.previewField != null);
-            try std.testing.expect(app.settings_window.handle.endPreviews != null);
             const settings_class = std.unicode.utf8ToUtf16LeStringLiteral("noctty.win32.settings");
             const viewport_class = std.unicode.utf8ToUtf16LeStringLiteral("noctty.win32.settings.viewport");
             defer {
                 _ = sys.UnregisterClassW(settings_class, hinstance);
                 _ = sys.UnregisterClassW(viewport_class, hinstance);
             }
+            // A step below that fails, the skip included, still tears the
+            // app down, before its window classes go; the end of the test
+            // terminates it once.
+            var terminated = false;
+            errdefer if (!terminated) app.terminate();
+            if (!app.com_initialized) return error.SkipZigTest;
+            try std.testing.expect(app.settings_window.handle.previewField != null);
+            try std.testing.expect(app.settings_window.handle.endPreviews != null);
 
             // Settings open with an opacity and a theme preview, made through
             // its own controls, so its rollback has both to end.
@@ -12928,6 +12936,7 @@ test "PKG-39 App.terminate takes both Settings preview hooks away before the win
             Calls.end_previews = 0;
             app.settings_window.handle.previewField = &Calls.previewField;
             app.settings_window.handle.endPreviews = &Calls.endPreviews;
+            terminated = true;
             app.terminate();
             try std.testing.expectEqual(@as(usize, 0), Calls.preview_field);
             try std.testing.expectEqual(@as(usize, 0), Calls.end_previews);

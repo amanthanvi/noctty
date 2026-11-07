@@ -4788,19 +4788,12 @@ pub fn isSystemDarkMode() bool {
     return internal_os.color_scheme.isDark();
 }
 
-const immersive_color_set_w = std.unicode.utf8ToUtf16LeStringLiteral("ImmersiveColorSet");
-
 /// The setting a `WM_SETTINGCHANGE` names in its lParam, or null when it
 /// names none.
 fn settingChangeName(lParam: LPARAM) ?[:0]const u16 {
     if (lParam == 0) return null;
     const name: [*:0]const u16 = @ptrFromInt(@as(usize, @bitCast(lParam)));
     return std.mem.span(name);
-}
-
-fn settingChangeIsImmersiveColorSet(lParam: LPARAM) bool {
-    const name = settingChangeName(lParam) orelse return false;
-    return std.mem.eql(u16, name, immersive_color_set_w);
 }
 
 pub fn settingChangeAffectsTheme(lparam: LPARAM) bool {
@@ -4810,14 +4803,6 @@ pub fn settingChangeAffectsTheme(lparam: LPARAM) bool {
         if (std.mem.eql(u16, name, value)) return false;
     }
     return true;
-}
-
-test "issue149 Windows setting change filters terminal color sync" {
-    const immersive = std.unicode.utf8ToUtf16LeStringLiteral("ImmersiveColorSet");
-    const unrelated = std.unicode.utf8ToUtf16LeStringLiteral("Environment");
-    try std.testing.expect(settingChangeIsImmersiveColorSet(@bitCast(@intFromPtr(immersive))));
-    try std.testing.expect(!settingChangeIsImmersiveColorSet(@bitCast(@intFromPtr(unrelated))));
-    try std.testing.expect(!settingChangeIsImmersiveColorSet(0));
 }
 
 pub fn readDynamicScrollbars(default_value: bool) bool {

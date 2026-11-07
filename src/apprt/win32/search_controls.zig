@@ -1692,6 +1692,53 @@ test "win32 a docked search debounce pending in a tab restored from undo history
     }.body);
 }
 
+test "win32 a docked search debounce pending in a pane a split's redo brings back starts the host's search timer again" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    try win32.test_support.runOnHiddenDesktop(struct {
+        fn body() !void {
+            var w: win32.ToastTestWindow = .{};
+            try w.init(false);
+            defer w.deinit();
+            const inserted = try win32.toastTestSplit(&w);
+            defer {
+                var cleanup = inserted;
+                cleanup.deinit();
+            }
+
+            // The split's undo takes `q` out of its tab, and its search
+            // then waits out a debounce: no tab of the window has it.
+            var split_create: Host.SplitCreateUndo = .{
+                .source_surface = &w.p,
+                .created_surface = &w.q,
+                .direction = .right,
+            };
+            try std.testing.expect(try w.host.undoSplitCreateEntry(&split_create));
+            const now: i64 = @intCast(sys.GetTickCount64());
+            _ = try w.q.docked_search.apply(.{ .open = "" }, now);
+            _ = try w.q.docked_search.apply(.{ .edit = "needle" }, now + 60_000);
+
+            // The search timer needs the window's handle; this fixture's
+            // window has none, so a plain one stands in.
+            const hwnd = sys.CreateWindowExW(0, std.unicode.utf8ToUtf16LeStringLiteral("STATIC"), std.unicode.utf8ToUtf16LeStringLiteral(""), 0, 0, 0, 1, 1, null, null, null, null) orelse return error.Unexpected;
+            defer _ = sys.DestroyWindow(hwnd);
+            w.host.hwnd = hwnd;
+            defer w.host.hwnd = null;
+            w.host.tickSearchBars();
+            try std.testing.expect(!w.host.search_timer_active);
+
+            // The redo brings `q` back with its debounce pending, and the
+            // timer runs. Before, it stayed off until the user acted there.
+            try std.testing.expect(try w.host.redoSplitCreateEntry(&split_create));
+            try std.testing.expect(w.q.docked_search.view().wants_tick);
+            try std.testing.expect(w.host.search_timer_active);
+
+            _ = try w.q.docked_search.apply(.{ .edit = "" }, now);
+            w.host.refreshSearchTimerState();
+            try std.testing.expect(!w.host.search_timer_active);
+        }
+    }.body);
+}
+
 test "win32 a docked search debounce pending in a background tab keeps the host's search timer running, and fires there when due" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
     try win32.test_support.runOnHiddenDesktop(struct {
