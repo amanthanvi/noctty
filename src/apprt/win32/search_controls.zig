@@ -1443,9 +1443,14 @@ pub const SurfaceControls = struct {
 };
 
 /// While a test points this at a list, each pane whose Outcome reaches the
-/// core step goes on it in place of the core call: a fixture pane has no
-/// core.
-var test_core_steps: ?*std.ArrayListUnmanaged(*const Surface) = null;
+/// core step goes on it, with the command, in place of the core call: a
+/// fixture pane has no core. A `.search` text is the pane's query storage,
+/// which only its next `.open` or `.edit` replaces.
+var test_core_steps: ?*std.ArrayListUnmanaged(TestCoreStep) = null;
+const TestCoreStep = struct {
+    surface: *const Surface,
+    command: @typeInfo(@FieldType(docked_search.Outcome, "core")).optional.child,
+};
 
 /// Carries out an Outcome. Nothing after the core step may use a View taken
 /// before it: the core's synchronous reports can free what it borrows.
@@ -1489,7 +1494,7 @@ fn applyDockedSearch(surface: *Surface, out: docked_search.Outcome) anyerror!voi
     }
     if (out.core) |command| core: {
         if (builtin.is_test) if (test_core_steps) |steps| {
-            try steps.append(std.testing.allocator, surface);
+            try steps.append(std.testing.allocator, .{ .surface = surface, .command = command });
             break :core;
         };
         switch (command) {
@@ -1647,6 +1652,46 @@ test "win32 docked search stops run query, prev, next, regex, case, word, close"
     try std.testing.expectEqual(@as(?Role, null), searchFocusStopRole(search_focus_stop_count));
 }
 
+test "win32 a docked search debounce pending in a tab restored from undo history starts the host's search timer again" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    try win32.test_support.runOnHiddenDesktop(struct {
+        fn body() !void {
+            var fixture: win32.test_support.WindowStartTestApp = .{};
+            try fixture.init();
+            defer fixture.deinit();
+            const app = &fixture.app;
+
+            // A window of two tabs; the first, in the background, has an
+            // edit waiting out its debounce, not yet due.
+            try app.createWindow(win32.default_title);
+            const background = fixture.newest();
+            const host = background.host.?;
+            try std.testing.expect(try app.performAction(.{ .surface = background.core() }, .new_tab, {}));
+            const now: i64 = @intCast(sys.GetTickCount64());
+            _ = try background.docked_search.apply(.{ .open = "" }, now);
+            _ = try background.docked_search.apply(.{ .edit = "needle" }, now + 60_000);
+            host.refreshSearchTimerState();
+            try std.testing.expect(host.search_timer_active);
+
+            // Closed into undo history: the next tick finds nothing pending
+            // in the window's tabs and stops the timer.
+            var entry = host.detachTabForUndo(0).?;
+            host.tickSearchBars();
+            try std.testing.expect(!host.search_timer_active);
+
+            // Restored, its debounce is pending again, and the timer runs.
+            // Before, it stayed off until the user acted in that tab.
+            try std.testing.expect(try host.restoreClosedTabEntryNative(&entry.payload.close_tab));
+            try std.testing.expect(background.docked_search.view().wants_tick);
+            try std.testing.expect(host.search_timer_active);
+
+            _ = try background.docked_search.apply(.{ .edit = "" }, now);
+            host.refreshSearchTimerState();
+            try std.testing.expect(!host.search_timer_active);
+        }
+    }.body);
+}
+
 test "win32 a docked search debounce pending in a background tab keeps the host's search timer running, and fires there when due" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
     try win32.test_support.runOnHiddenDesktop(struct {
@@ -1686,7 +1731,7 @@ test "win32 a docked search debounce pending in a background tab keeps the host'
             // Once due, a tick runs the background pane's search (its core
             // step, recorded here), and the timer stops. Ticked in the
             // active tab alone, it ran nothing and the timer kept running.
-            var core_steps: std.ArrayListUnmanaged(*const Surface) = .empty;
+            var core_steps: std.ArrayListUnmanaged(TestCoreStep) = .empty;
             defer core_steps.deinit(std.testing.allocator);
             test_core_steps = &core_steps;
             defer test_core_steps = null;
@@ -1695,7 +1740,13 @@ test "win32 a docked search debounce pending in a background tab keeps the host'
             try std.testing.expect(host.search_timer_active);
             host.tickSearchBars();
             try std.testing.expectEqual(@as(usize, 1), core_steps.items.len);
-            try std.testing.expect(core_steps.items[0] == background);
+            try std.testing.expect(core_steps.items[0].surface == background);
+            const search = switch (core_steps.items[0].command) {
+                .search => |value| value,
+                else => return error.TestExpectedSearch,
+            };
+            try std.testing.expectEqualStrings("needle", search.text);
+            try std.testing.expect(search.options.isDefault());
             try std.testing.expect(!background.docked_search.view().wants_tick);
             try std.testing.expect(!host.search_timer_active);
         }

@@ -1384,6 +1384,9 @@ pub const Host = struct {
         }
         // Its programs may have ended while the tab waited in undo history.
         self.refreshTabStatus(insert_index);
+        // A pane of it may wait out a search debounce, which no tick reached
+        // while the tab was in undo history (G4 walks this window's tabs).
+        self.refreshSearchTimerState();
         // A D3D11 pane coming back fades the window whole again.
         window_state.refreshBackgroundOpacity(self);
         return self.activeSurface() != null;
@@ -1560,6 +1563,8 @@ pub const Host = struct {
             self.active_tab = edit.tab_index;
         }
         value.detached = false;
+        // The pane back may wait out a search debounce, as a restored tab's.
+        self.refreshSearchTimerState();
         self.notifyActiveTabUiaSelectionChanged(previous_tab_id);
         return true;
     }
