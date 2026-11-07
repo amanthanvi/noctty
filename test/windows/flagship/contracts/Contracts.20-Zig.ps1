@@ -253,7 +253,12 @@ foreach ($extractedWin32Module in $extractedWin32TestModules.Keys) {
 # handed it in facade S7 lost theirs when labels.zig's row went. With the
 # series done (S8) its floor is its named tests at any indent, 391: a change
 # that moves tests out to the module they test lowers it and says why here.
-$win32RuntimeTestFloor = 391
+# 390: "issue149 Windows setting change filters terminal color sync" went with
+# the helper it tested, `settingChangeIsImmersiveColorSet`, which lost its
+# last caller when every system theme message came to run the light/dark
+# change (#685); what the handler still uses, `settingChangeAffectsTheme`,
+# has its own test in win32/app.zig.
+$win32RuntimeTestFloor = 390
 $win32RuntimeTestCount = [regex]::Matches(
     $win32RuntimeText,
     '(?m)^[ \t]*test "[^"\r\n]+" \{\r?$'

@@ -444,6 +444,44 @@ test "settings transaction rolls live preview back to current disk value" {
     try std.testing.expectEqual(@as(usize, 0), transaction.dirtyCount());
 }
 
+test "settings transaction revert emits only set_preview, one per previewed field" {
+    var storage: [2]TestTransaction.Entry = undefined;
+    var transaction = try initialTestTransaction(&storage);
+    var effects: [3]TestTransaction.Effect = undefined;
+
+    // Both fields previewed: one `set_preview` each, back at its current
+    // value, in entry order, and no other effect.
+    _ = try transaction.dispatch(.{ .edit = .{ .field = .font_size, .value = .{ .integer = 14 }, .live_preview = true } }, &effects);
+    _ = try transaction.dispatch(.{ .edit = .{ .field = .opacity, .value = .{ .decimal = 0.5 }, .live_preview = true } }, &effects);
+    const both = try transaction.dispatch(.revert, &effects);
+    try std.testing.expectEqual(@as(usize, 2), both.len);
+    for (both) |effect| try std.testing.expect(effect == .set_preview);
+    try std.testing.expectEqual(TestField.font_size, both[0].set_preview.field);
+    try std.testing.expectEqual(@as(u32, 12), both[0].set_preview.value.integer);
+    try std.testing.expectEqual(TestField.opacity, both[1].set_preview.field);
+    try std.testing.expectEqual(@as(f64, 1.0), both[1].set_preview.value.decimal);
+    try std.testing.expectEqual(@as(usize, 0), transaction.dirtyCount());
+
+    // A dirty field that was never previewed, a conflict and a draft in
+    // progress emit nothing of their own: only the previewed field's.
+    _ = try transaction.dispatch(.{ .edit = .{ .field = .font_size, .value = .{ .integer = 16 } } }, &effects);
+    _ = try transaction.dispatch(.{ .edit = .{ .field = .opacity, .value = .{ .decimal = 0.7 }, .live_preview = true } }, &effects);
+    _ = try transaction.dispatch(.{ .external_update = .{
+        .revision = 11,
+        .changes = &.{.{ .field = .font_size, .value = .{ .integer = 18 } }},
+    } }, &effects);
+    try std.testing.expectEqual(@as(usize, 1), transaction.conflictCount());
+    const one = try transaction.dispatch(.revert, &effects);
+    try std.testing.expectEqual(@as(usize, 1), one.len);
+    try std.testing.expect(one[0] == .set_preview);
+    try std.testing.expectEqual(TestField.opacity, one[0].set_preview.field);
+    try std.testing.expectEqual(@as(f64, 1.0), one[0].set_preview.value.decimal);
+    try std.testing.expectEqual(@as(usize, 0), transaction.conflictCount());
+
+    // Nothing previewed: nothing at all.
+    try std.testing.expectEqual(@as(usize, 0), (try transaction.dispatch(.revert, &effects)).len);
+}
+
 test "settings transaction adopts disjoint external edits without conflict" {
     var storage: [2]TestTransaction.Entry = undefined;
     var transaction = try initialTestTransaction(&storage);

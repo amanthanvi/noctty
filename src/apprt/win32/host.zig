@@ -1384,6 +1384,11 @@ pub const Host = struct {
         }
         // Its programs may have ended while the tab waited in undo history.
         self.refreshTabStatus(insert_index);
+        // A pane of it may wait out a search debounce, which no tick reached
+        // while the tab was in undo history (the tick walks this window's
+        // tabs: the 2026-11-07 background-tab debounce entry in
+        // search-scrollbar.md).
+        self.refreshSearchTimerState();
         // A D3D11 pane coming back fades the window whole again.
         window_state.refreshBackgroundOpacity(self);
         return self.activeSurface() != null;
@@ -1560,6 +1565,8 @@ pub const Host = struct {
             self.active_tab = edit.tab_index;
         }
         value.detached = false;
+        // The pane back may wait out a search debounce, as a restored tab's.
+        self.refreshSearchTimerState();
         self.notifyActiveTabUiaSelectionChanged(previous_tab_id);
         return true;
     }
@@ -2444,12 +2451,7 @@ pub const Host = struct {
     }
 
     pub fn swapRuntimeConfigFromPalette(self: *Host, new_config: configpkg.Config) configpkg.Config {
-        const old = self.app.config;
-        self.app.config = new_config;
-        // A Settings preview stays shown over the palette's theme.
-        self.app.restoreSettingsPreview();
-        self.app.config_revision +%= 1;
-        if (self.app.config_revision == 0) self.app.config_revision = 1;
+        const old = self.installRuntimeConfigFromPalette(new_config);
         self.app.reconfigureTheme(.caller_applies);
         {
             // Every pane, then every window: an app-wide change, whose
@@ -2478,6 +2480,19 @@ pub const Host = struct {
         return old;
     }
 
+    /// `swapRuntimeConfigFromPalette` without showing `new_config`: no
+    /// theme, pane or window takes it. Only for a config equal to the one it
+    /// replaces, or one a reload replaces before it shows anything.
+    fn installRuntimeConfigFromPalette(self: *Host, new_config: configpkg.Config) configpkg.Config {
+        const old = self.app.config;
+        self.app.config = new_config;
+        // A Settings preview stays shown over the palette's theme.
+        self.app.restoreSettingsPreview();
+        self.app.config_revision +%= 1;
+        if (self.app.config_revision == 0) self.app.config_revision = 1;
+        return old;
+    }
+
     fn preserveOrDeinitPaletteCatalogConfig(
         self: *Host,
         old: configpkg.Config,
@@ -2501,7 +2516,9 @@ pub const Host = struct {
         if (self.palette_catalog_config_source != .live) return;
         var clone = try self.app.config.clone(self.app.core_app.alloc);
         errdefer clone.deinit();
-        const old = self.swapRuntimeConfigFromPalette(clone);
+        // The clone shows what is shown already, and the save's reload
+        // replaces it: nothing applies it.
+        const old = self.installRuntimeConfigFromPalette(clone);
         std.debug.assert(self.palette_catalog_retained_config == null);
         self.palette_catalog_retained_config = old;
         self.palette_catalog_config_source = .retained;
@@ -2518,7 +2535,7 @@ pub const Host = struct {
             return;
         };
         self.previewPaletteTheme(name) catch |err| {
-            log.warn("palette theme preview failed theme={s} err={}", .{ name, err });
+            log.warn("palette theme preview failed theme={f} err={}", .{ internal_os.redact.bytes(name), err });
             self.revertPaletteThemePreview();
             runUiActionOrLog(
                 "palette theme preview banner failed",
@@ -2535,9 +2552,32 @@ pub const Host = struct {
             if (std.mem.eql(u8, current.light, name) and std.mem.eql(u8, current.dark, name)) return;
         }
 
-        var preview = try self.loadPaletteThemeConfig(name);
-        errdefer preview.deinit();
+        const preview = try self.loadPaletteThemeConfig(name);
+        self.showPaletteThemePreview(preview);
+    }
+
+    /// Shows `preview` as this palette's live theme preview, taking it over.
+    /// One window's preview at a time. The overlay code keeps that already:
+    /// a palette opening closes every other window's (`showOverlay`), and
+    /// every other overlay's open closes the window's own first, each
+    /// reverting its preview. Another window's preview still live here is a
+    /// regression there: it is logged as an error, and ends first, unshown,
+    /// as a reload ends it (`supersedePaletteThemePreview`), so this
+    /// preview's own swap shows it once. Started over another's, its
+    /// original would be that unsaved preview, and ending both would free
+    /// the config the other palette's catalog borrows.
+    /// Tests start a preview here: `previewPaletteTheme` reads the user's
+    /// config files.
+    pub fn showPaletteThemePreview(self: *Host, preview: configpkg.Config) void {
         if (self.palette_theme_preview_original == null) {
+            for (self.app.registry.hosts.items) |other| {
+                if (other == self or other.palette_theme_preview_original == null) continue;
+                // An error log, not an assert: it fails any test that gets
+                // here (Zig's test runner fails a test that logs an error)
+                // and costs a release build nothing it could turn into UB.
+                log.err("palette theme preview started while another window's is live; ending that one", .{});
+                other.supersedePaletteThemePreview();
+            }
             const original = self.swapRuntimeConfigFromPalette(preview);
             self.palette_theme_preview_original = original;
             if (self.palette_catalog_config_source == .live) {
@@ -2549,9 +2589,28 @@ pub const Host = struct {
     }
 
     pub fn revertPaletteThemePreview(self: *Host) void {
+        self.endPaletteThemePreview(.revert);
+    }
+
+    /// A reload supersedes a live theme preview. The config the preview
+    /// replaced goes back as the app config without being shown, so a
+    /// reload of the app config (a light/dark change) starts from it, and
+    /// the reload alone shows its config, once, in every pane and window.
+    /// Restored and shown, it would put every window at the pre-preview
+    /// opacity first and give every pane the pre-preview config after the
+    /// reload's. The screen still shows it until something shows the app
+    /// config.
+    pub fn supersedePaletteThemePreview(self: *Host) void {
+        self.endPaletteThemePreview(.superseded);
+    }
+
+    fn endPaletteThemePreview(self: *Host, how: enum { revert, superseded }) void {
         const original = self.palette_theme_preview_original orelse return;
         self.palette_theme_preview_original = null;
-        const old = self.swapRuntimeConfigFromPalette(original);
+        const old = switch (how) {
+            .revert => self.swapRuntimeConfigFromPalette(original),
+            .superseded => self.installRuntimeConfigFromPalette(original),
+        };
         switch (self.palette_catalog_config_source) {
             .live => {
                 std.debug.assert(self.palette_catalog_retained_config == null);
@@ -2619,10 +2678,11 @@ pub const Host = struct {
         });
         switch (save_outcome) {
             .completed, .completed_masked, .completed_lists_unchecked => {},
-            // Saved, with a reload the save does not apply, or applied only
-            // partly: the running config stays as it is (the preview, when
-            // one ran; else the config from before the pick, or what part of
-            // the reload took). Nothing is rolled back: the file holds the
+            // Saved, with a reload the save does not apply, or that failed:
+            // the running config stays as it is (the preview, when one ran;
+            // else the config from before the pick, which a terminal's step
+            // that fails puts back, or the reload, where a later step of the
+            // app's failed). Nothing is rolled back: the file holds the
             // pick. An open Settings window hears of the running config, as
             // it would of a reload.
             .completed_unread,
@@ -2630,7 +2690,7 @@ pub const Host = struct {
             .completed_partly_applied,
             => self.app.settings_window.externalConfigChanged(&self.app.config, self.app.config_revision),
             .failed => |err| {
-                log.warn("palette theme save failed theme={s} err={}", .{ theme_name, err });
+                log.warn("palette theme save failed theme={f} err={}", .{ internal_os.redact.bytes(theme_name), err });
                 // Roll back without another allocation: `original` is already
                 // an owned deep clone of the pre-preview baseline. Transfer it
                 // into the runtime config and suppress the local deferred deinit.
@@ -2680,28 +2740,28 @@ pub const Host = struct {
             );
         }
         if (saved_but_masked) {
-            log.warn("palette theme saved but masked by a later config layer theme={s}", .{theme_name});
+            log.warn("palette theme saved but masked by a later config layer theme={f}", .{internal_os.redact.bytes(theme_name)});
             runUiActionOrLog(
                 "palette masked theme banner failed",
                 self.setBanner(.err, "Theme saved, but a later config layer masks it."),
             );
         }
         if (saved_but_unread) {
-            log.warn("palette theme saved, but the reload could not read a config file whole theme={s}", .{theme_name});
+            log.warn("palette theme saved, but the reload could not read a config file whole theme={f}", .{internal_os.redact.bytes(theme_name)});
             runUiActionOrLog(
                 "palette unread theme banner failed",
                 self.setBanner(.err, "Theme saved, but a config file could not be read whole. Reload the configuration once it can be read."),
             );
         }
         if (saved_not_applied) {
-            log.warn("palette theme saved, but the reload could not be applied theme={s}", .{theme_name});
+            log.warn("palette theme saved, but the reload could not be applied theme={f}", .{internal_os.redact.bytes(theme_name)});
             runUiActionOrLog(
                 "palette unapplied theme banner failed",
                 self.setBanner(.err, "Theme saved, but the saved settings could not be applied. Reload the configuration to use them."),
             );
         }
         if (saved_partly_applied) {
-            log.warn("palette theme saved, but applying the reload failed partway theme={s}", .{theme_name});
+            log.warn("palette theme saved, but applying the reload failed; the running settings are the previous ones, or partly updated after a late failure theme={f}", .{internal_os.redact.bytes(theme_name)});
             runUiActionOrLog(
                 "palette partly applied theme banner failed",
                 self.setBanner(.err, if (partly_masked)
@@ -7491,27 +7551,26 @@ pub const Host = struct {
         self.search_timer_active = false;
     }
 
+    /// The timer runs while a pane of any tab waits out a debounce, a
+    /// background tab's included, so its search fires on schedule rather
+    /// than when the user next acts in that tab (the 2026-11-07
+    /// background-tab debounce entry in search-scrollbar.md).
     pub fn refreshSearchTimerState(self: *Host) void {
-        const tab = self.activeTab() orelse {
-            self.killSearchTimer();
-            return;
-        };
-
-        var wants_timer = false;
-        var it = tab.tree.iterator();
-        while (it.next()) |entry| {
-            if (entry.view.docked_search.view().wants_tick) {
-                wants_timer = true;
-                break;
+        const wants_timer = tabs: for (self.tabs.items) |*tab| {
+            var it = tab.tree.iterator();
+            while (it.next()) |entry| {
+                if (entry.view.docked_search.view().wants_tick) break :tabs true;
             }
-        }
+        } else false;
 
         if (wants_timer) self.ensureSearchTimer() else self.killSearchTimer();
     }
 
     pub fn tickSearchBars(self: *Host) void {
-        if (self.activeTab()) |tab| {
-            var it = tab.tree.iterator();
+        // By index: a search's core reports run inside the tick.
+        var index: usize = 0;
+        while (index < self.tabs.items.len) : (index += 1) {
+            var it = self.tabs.items[index].tree.iterator();
             while (it.next()) |entry| {
                 _ = entry.view.dockedSearch(.tick) catch |err| {
                     log.warn("win32 search refresh failed err={}", .{err});
@@ -8617,7 +8676,7 @@ pub const Host = struct {
                     return false;
                 }
                 const action = input.Binding.Action.parse(text) catch |err| {
-                    log.warn("win32 command palette invalid action action={s} err={}", .{ text, err });
+                    log.warn("win32 command palette invalid action action={f} err={}", .{ internal_os.redact.bytes(text), err });
                     try self.setBanner(.err, "Unknown Noctty action. Example: new_tab or toggle_fullscreen");
                     if (self.palette_list_uia_provider) |provider| {
                         win32_uia.events.raiseNotification(&provider.base, .action_aborted, "Unknown command");
@@ -8649,7 +8708,7 @@ pub const Host = struct {
             },
             .tab_overview => {
                 const requested = std.fmt.parseUnsigned(usize, text, 10) catch |err| {
-                    log.warn("win32 tab overview invalid selection value={s} err={}", .{ text, err });
+                    log.warn("win32 tab overview invalid selection value={f} err={}", .{ internal_os.redact.bytes(text), err });
                     try self.setBanner(.err, "Enter a numeric tab index.");
                     return false;
                 };
@@ -9029,9 +9088,9 @@ pub const Host = struct {
         const id = self.id;
         self.closing = true;
         for (surfaces.items) |surface| surface.close(false);
-        if (app.registry.findHostById(id) == null) return;
-        self.closing = false;
-        window_state.refreshBackgroundOpacity(self);
+        const kept = app.registry.findHostById(id) orelse return;
+        kept.closing = false;
+        window_state.refreshBackgroundOpacity(kept);
     }
 
     /// The tab and window title prompts are filled from the active surface
@@ -11148,6 +11207,124 @@ test "win32 palette theme commit mutates pending without losing rollback source"
 
     try std.testing.expectEqualStrings("Original Theme", original.theme.?.light);
     try std.testing.expectEqualStrings("Committed Theme", pending.theme.?.light);
+}
+
+test "win32 a palette pick with no live preview keeps the catalog's config alive with a clone it does not show" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    try win32.runOnHiddenDesktop(struct {
+        fn body() !void {
+            var fixture: win32.WindowStartTestApp = .{};
+            try fixture.init();
+            defer fixture.deinit();
+            const app = &fixture.app;
+            try app.createWindow(default_title);
+            const host = fixture.newest().host.?;
+
+            // Before a pick's save reloads, the catalog's config is kept and
+            // the app takes a clone of the config shown, which shows nothing
+            // new: no theme rebuild, so no window applies it. Shown, it
+            // rebuilt the theme and applied every window once.
+            try std.testing.expect(host.palette_catalog_config_source == .live);
+            const rebuilds = app.theme_rebuilds;
+            const revision = app.config_revision;
+            try host.detachLivePaletteCatalogConfig();
+            try std.testing.expectEqual(rebuilds, app.theme_rebuilds);
+            try std.testing.expect(app.config_revision != revision);
+            try std.testing.expect(host.palette_catalog_config_source == .retained);
+            host.resetPaletteCatalogConfigOwner();
+        }
+    }.body);
+}
+
+test "win32 the tab overview's toggle ends what is open first: a palette's theme preview and catalog, a confirm prompt's pending operation" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    try win32.runOnHiddenDesktop(struct {
+        var cancels: usize = 0;
+
+        fn accept(_: ?*anyopaque) void {}
+
+        fn cancel(_: ?*anyopaque, reason: overlay_session.ConfirmCancelReason) void {
+            std.debug.assert(reason == .dismissed);
+            cancels += 1;
+        }
+
+        fn body() !void {
+            var fixture: win32.WindowStartTestApp = .{};
+            try fixture.init();
+            defer fixture.deinit();
+            const app = &fixture.app;
+            app.config.@"background-opacity" = 0.5;
+            try app.createWindow(default_title);
+            const first_pane = fixture.newest();
+            const first = first_pane.host.?;
+            try app.createWindow(default_title);
+            const second = fixture.newest().host.?;
+
+            // The first window's palette, with one row in its catalog (the
+            // palette opens with no catalog: building one lists the user's
+            // theme and layout folders) and a theme preview. The tab
+            // overview's toggle then replaces it: the palette ends as Escape
+            // ends it, the preview reverted and the catalog empty, letting
+            // go of the config. Before, both stayed with the window in
+            // `.tab_overview`, which the next palette's open, looking for
+            // `.command_palette`, left alone: two live previews, and a
+            // catalog borrowing a config the other palette's swaps free.
+            const catalog = first.palette_catalog;
+            first.palette_catalog = null;
+            try first.showOverlay(.command_palette, null);
+            first.palette_catalog = catalog;
+            try std.testing.expect(first.appendPaletteDescriptor(.{
+                .item = .{
+                    .id = win32_palette.catalog.actionStableId("Row", "text:row"),
+                    .title = "Row",
+                    .subtitle = "",
+                    .keywords = "text:row",
+                },
+                .payload = .{ .action = .{ .snapshot_index = 0, .action = "text:row" } },
+            }));
+            try std.testing.expectEqual(@as(usize, 1), first.palette_catalog.?.items().len);
+            var previewed = try app.config.clone(std.testing.allocator);
+            previewed.@"background-opacity" = 0.7;
+            first.showPaletteThemePreview(previewed);
+            try std.testing.expect(first.palette_catalog_config_source == .preview_original);
+            try std.testing.expect(try first_pane.toggleTabOverview());
+            try std.testing.expect(first.overlay_mode == .tab_overview);
+            try std.testing.expectEqual(@as(usize, 0), first.palette_catalog.?.items().len);
+            try std.testing.expect(first.palette_theme_preview_original == null);
+            try std.testing.expect(first.palette_catalog_config_source == .live);
+            try std.testing.expect(first.palette_catalog_retained_config == null);
+            try std.testing.expectEqual(@as(f64, 0.5), app.config.@"background-opacity");
+
+            // Another window's palette opens and previews: its original is
+            // the saved config, and it is the one palette open.
+            second.palette_catalog = null;
+            try second.showOverlay(.command_palette, null);
+            var other = try app.config.clone(std.testing.allocator);
+            other.@"background-opacity" = 0.8;
+            second.showPaletteThemePreview(other);
+            try std.testing.expectEqual(@as(f64, 0.5), second.palette_theme_preview_original.?.@"background-opacity");
+            var open: usize = 0;
+            for (app.registry.hosts.items) |host| {
+                if (host.overlay_mode == .command_palette) open += 1;
+            }
+            try std.testing.expectEqual(@as(usize, 1), open);
+            second.hideOverlay();
+            first.hideOverlay();
+            try std.testing.expectEqual(@as(f64, 0.5), app.config.@"background-opacity");
+
+            // A confirm prompt the toggle replaces releases its pending
+            // operation, as any other overlay's open does (`.dismissed`).
+            // Before, the payload stayed under `.tab_overview`.
+            cancels = 0;
+            try first.showConfirm(.{ .title = "Close?", .body = "Body", .accept_label = "Close" }, &accept, &cancel, null);
+            try std.testing.expect(first.overlay_mode == .confirm);
+            try std.testing.expect(try first_pane.toggleTabOverview());
+            try std.testing.expect(first.overlay_mode == .tab_overview);
+            try std.testing.expect(first.confirm_payload == null);
+            try std.testing.expectEqual(@as(usize, 1), cancels);
+            first.hideOverlay();
+        }
+    }.body);
 }
 
 test "win32 a clicked search button's tooltip stays down until the button is left, hidden or destroyed" {
