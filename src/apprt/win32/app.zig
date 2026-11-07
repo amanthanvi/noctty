@@ -6058,9 +6058,12 @@ pub const App = struct {
     /// A pane's step that fails ends core's update before the app's, and the
     /// panes left the windows to it: then every window still takes its half
     /// of `config`, as the app's step would have had it, and the pane's
-    /// error is returned. Where the update ended a palette's live theme
-    /// preview, the chrome is shown the app config it put back, and the
-    /// palette is dismissed, as the app's step would have done.
+    /// error is returned. Before that pass the theme is rebuilt from the app
+    /// config, as the app's step rebuilds it first: where the update ended a
+    /// palette's live theme preview, the chrome shows the config it put
+    /// back, and the palette is dismissed; and the system theme message a
+    /// light/dark reload runs after it (`systemColorSetChanged`) finds the
+    /// theme current and applies no window again.
     pub fn updateCoreConfig(self: *App, config: *const configpkg.Config) !void {
         // Before core reads `config`, which is the app config itself in a
         // soft reload: the reload starts from the config a preview replaced.
@@ -6075,14 +6078,12 @@ pub const App = struct {
         }
         self.coreConfigUpdate(config) catch |err| {
             if (!self.app_wide_windows_applied) {
-                if (superseded) {
-                    // The screen still shows the preview, and its palette,
-                    // open, has no preview left for Escape to revert.
-                    for (self.registry.hosts.items) |host| {
-                        if (host.overlay_mode == .command_palette) host.hideOverlay();
-                    }
-                    self.reconfigureTheme(.caller_applies);
-                }
+                // The screen still shows a preview the update ended, and its
+                // palette, open, has no preview left for Escape to revert.
+                if (superseded) for (self.registry.hosts.items) |host| {
+                    if (host.overlay_mode == .command_palette) host.hideOverlay();
+                };
+                self.reconfigureTheme(.caller_applies);
                 // In the app's light/dark state, as core gives the app its
                 // config, or as it is if that fails, as core goes on then.
                 var shown_ = config.changeConditionalState(self.core_app.config_conditional_state) catch null;

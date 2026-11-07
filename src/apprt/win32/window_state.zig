@@ -3758,7 +3758,7 @@ test "win32 a window whose blur-behind failed fades whole, and tries it again on
     }.body);
 }
 
-test "win32 a light/dark change and its reload apply each window's opacity once, and retry a failed blur-behind once" {
+test "win32 a light/dark change and its reload apply each window's opacity once, a failed reload's too, and retry a failed blur-behind once" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
     try runOnHiddenDesktop(struct {
         /// An "ImmersiveColorSet" message after the system turned light or
@@ -3815,6 +3815,21 @@ test "win32 a light/dark change and its reload apply each window's opacity once,
             try std.testing.expectEqual(asserts + hosts.len, test_blur_behind_asserts);
             try std.testing.expect(!failed.blur_behind_failed);
             try std.testing.expectEqual(@as(?u8, 128), testBackgroundAlpha(failed.hwnd.?));
+
+            // With a reload whose first pane's step fails: the update's own
+            // window pass is each window's one apply, after its theme
+            // rebuild, and the message after it finds the theme current.
+            // Before, the message rebuilt the theme the failed update never
+            // had, and applied every window again (4 where 2).
+            applied.clearRetainingCapacity();
+            asserts = test_blur_behind_asserts;
+            Surface.test_scrollbar_refresh_fails = app.core_app.surfaces.items[0];
+            defer Surface.test_scrollbar_refresh_fails = null;
+            try message(app, true);
+            Surface.test_scrollbar_refresh_fails = null;
+            try std.testing.expectEqual(hosts.len, applied.items.len);
+            for (hosts) |host| try expectAppliedOnce(applied.items, host, 0.5);
+            try std.testing.expectEqual(asserts + hosts.len, test_blur_behind_asserts);
 
             // Failing again, it latches again after that one try.
             fixture.closeWindow(fixture.newest());
