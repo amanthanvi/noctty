@@ -2545,9 +2545,23 @@ pub const Host = struct {
             if (std.mem.eql(u8, current.light, name) and std.mem.eql(u8, current.dark, name)) return;
         }
 
-        var preview = try self.loadPaletteThemeConfig(name);
-        errdefer preview.deinit();
+        const preview = try self.loadPaletteThemeConfig(name);
+        self.showPaletteThemePreview(preview);
+    }
+
+    /// Shows `preview` as this palette's live theme preview, taking it over.
+    /// One window's preview at a time: a palette stays open when its window
+    /// loses focus, so another window's may still be live, and its original
+    /// is the config to come back to. That one ends first, unshown, as a
+    /// reload ends it (`supersedePaletteThemePreview`), and this preview's
+    /// own swap then shows it once. Started over another's, its original
+    /// would be that unsaved preview, and ending both would free the config
+    /// the other palette's catalog borrows.
+    fn showPaletteThemePreview(self: *Host, preview: configpkg.Config) void {
         if (self.palette_theme_preview_original == null) {
+            for (self.app.registry.hosts.items) |other| {
+                if (other != self) _ = other.supersedePaletteThemePreview();
+            }
             const original = self.swapRuntimeConfigFromPalette(preview);
             self.palette_theme_preview_original = original;
             if (self.palette_catalog_config_source == .live) {
@@ -2559,7 +2573,7 @@ pub const Host = struct {
     }
 
     pub fn revertPaletteThemePreview(self: *Host) void {
-        self.endPaletteThemePreview(.revert);
+        _ = self.endPaletteThemePreview(.revert);
     }
 
     /// A reload supersedes a live theme preview. The config the preview
@@ -2568,13 +2582,14 @@ pub const Host = struct {
     /// the reload alone shows its config, once, in every pane and window.
     /// Restored and shown, it would put every window at the pre-preview
     /// opacity first and give every pane the pre-preview config after the
-    /// reload's.
-    pub fn supersedePaletteThemePreview(self: *Host) void {
-        self.endPaletteThemePreview(.superseded);
+    /// reload's. Returns whether a preview was live; the screen still shows
+    /// it until something shows the app config.
+    pub fn supersedePaletteThemePreview(self: *Host) bool {
+        return self.endPaletteThemePreview(.superseded);
     }
 
-    fn endPaletteThemePreview(self: *Host, how: enum { revert, superseded }) void {
-        const original = self.palette_theme_preview_original orelse return;
+    fn endPaletteThemePreview(self: *Host, how: enum { revert, superseded }) bool {
+        const original = self.palette_theme_preview_original orelse return false;
         self.palette_theme_preview_original = null;
         const old = switch (how) {
             .revert => self.swapRuntimeConfigFromPalette(original),
@@ -2598,6 +2613,7 @@ pub const Host = struct {
                 disposable.deinit();
             },
         }
+        return true;
     }
 
     pub fn commitPaletteTheme(self: *Host, name: []const u8) !void {
@@ -11174,6 +11190,61 @@ test "win32 palette theme commit mutates pending without losing rollback source"
 
     try std.testing.expectEqualStrings("Original Theme", original.theme.?.light);
     try std.testing.expectEqualStrings("Committed Theme", pending.theme.?.light);
+}
+
+test "win32 a palette theme preview started while another window's is live ends that one first, so a reload starts from the saved config" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    try win32.runOnHiddenDesktop(struct {
+        /// `host`'s palette previews a theme at `opacity`. A test cannot load
+        /// one by name (`previewPaletteTheme` reads the user's config files).
+        fn preview(app: *App, host: *Host, opacity: f64) !void {
+            var previewed = try app.config.clone(std.testing.allocator);
+            previewed.@"background-opacity" = opacity;
+            host.showPaletteThemePreview(previewed);
+            host.overlay_mode = .command_palette;
+            try std.testing.expectEqual(opacity, app.config.@"background-opacity");
+        }
+
+        fn body() !void {
+            var fixture: win32.WindowStartTestApp = .{};
+            try fixture.init();
+            defer fixture.deinit();
+            const app = &fixture.app;
+            app.config.@"background-opacity" = 0.5;
+            try app.createWindow(default_title);
+            const first = fixture.newest().host.?;
+            try app.createWindow(default_title);
+            const second = fixture.newest().host.?;
+
+            // Two windows' palettes preview in turn, the first one's still
+            // open in the background, and a light/dark change then reloads
+            // the app config: it starts from the saved config. With both
+            // previews live, the second's original was the first's preview,
+            // which the reload's ends put back last and reloaded (0.7).
+            try preview(app, first, 0.7);
+            const rebuilds = app.theme_rebuilds;
+            try preview(app, second, 0.8);
+            try std.testing.expectEqual(rebuilds + 1, app.theme_rebuilds);
+            try std.testing.expect(try app.performAction(.app, .reload_config, .{ .soft = true }));
+            try std.testing.expectEqual(@as(f64, 0.5), app.config.@"background-opacity");
+            for ([_]*Host{ first, second }) |host| {
+                try std.testing.expect(host.palette_theme_preview_original == null);
+                try std.testing.expect(host.overlay_mode != .command_palette);
+            }
+
+            // The second preview takes over the first: the first's ended,
+            // unshown, and the second's original is the saved config, which
+            // the first palette's catalog borrows again as the app config.
+            try preview(app, first, 0.7);
+            try preview(app, second, 0.8);
+            try std.testing.expect(first.palette_theme_preview_original == null);
+            try std.testing.expect(first.palette_catalog_config_source == .live);
+            try std.testing.expectEqual(@as(f64, 0.5), second.palette_theme_preview_original.?.@"background-opacity");
+            second.revertPaletteThemePreview();
+            try std.testing.expectEqual(@as(f64, 0.5), app.config.@"background-opacity");
+            for ([_]*Host{ first, second }) |host| host.overlay_mode = .none;
+        }
+    }.body);
 }
 
 test "win32 a clicked search button's tooltip stays down until the button is left, hidden or destroyed" {

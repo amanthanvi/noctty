@@ -4190,7 +4190,7 @@ pub const App = struct {
                         // catalog before the incoming config replaces the
                         // baseline. A later Escape can never resurrect the
                         // stale pre-reload config.
-                        self.supersedePaletteThemePreviews();
+                        _ = self.supersedePaletteThemePreviews();
                         for (self.registry.hosts.items) |host| {
                             if (host.overlay_mode == .command_palette) host.hideOverlay();
                         }
@@ -6058,11 +6058,13 @@ pub const App = struct {
     /// A pane's step that fails ends core's update before the app's, and the
     /// panes left the windows to it: then every window still takes its half
     /// of `config`, as the app's step would have had it, and the pane's
-    /// error is returned.
+    /// error is returned. Where the update ended a palette's live theme
+    /// preview, the chrome is shown the app config it put back, and the
+    /// palette is dismissed, as the app's step would have done.
     pub fn updateCoreConfig(self: *App, config: *const configpkg.Config) !void {
         // Before core reads `config`, which is the app config itself in a
         // soft reload: the reload starts from the config a preview replaced.
-        self.supersedePaletteThemePreviews();
+        const superseded = self.supersedePaletteThemePreviews();
         const outer = self.app_wide_config_change;
         const outer_applied = self.app_wide_windows_applied;
         self.app_wide_config_change = true;
@@ -6073,6 +6075,14 @@ pub const App = struct {
         }
         self.coreConfigUpdate(config) catch |err| {
             if (!self.app_wide_windows_applied) {
+                if (superseded) {
+                    // The screen still shows the preview, and its palette,
+                    // open, has no preview left for Escape to revert.
+                    for (self.registry.hosts.items) |host| {
+                        if (host.overlay_mode == .command_palette) host.hideOverlay();
+                    }
+                    self.reconfigureTheme(.caller_applies);
+                }
                 // In the app's light/dark state, as core gives the app its
                 // config, or as it is if that fails, as core goes on then.
                 var shown_ = config.changeConditionalState(self.core_app.config_conditional_state) catch null;
@@ -6089,8 +6099,13 @@ pub const App = struct {
     /// ends without being reverted on screen
     /// (`Host.supersedePaletteThemePreview`), and the palette closes in the
     /// `.app` `config_change` arm.
-    fn supersedePaletteThemePreviews(self: *App) void {
-        for (self.registry.hosts.items) |host| host.supersedePaletteThemePreview();
+    /// Returns whether one was live.
+    fn supersedePaletteThemePreviews(self: *App) bool {
+        var superseded = false;
+        for (self.registry.hosts.items) |host| {
+            if (host.supersedePaletteThemePreview()) superseded = true;
+        }
+        return superseded;
     }
 
     /// `updateCoreConfig` without its window pass after a failure.
