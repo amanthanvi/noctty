@@ -834,9 +834,16 @@ var test_blur_behind_asserts: usize = 0;
 var test_blur_behind_fails = false;
 
 /// Every `applyBackgroundOpacity` on a window, in a test, and the opacity it
-/// applied last.
+/// applied last; and, while a test points `test_background_opacity_log` at a
+/// list, each window it applied to, with that opacity.
 var test_background_opacity_applies: usize = 0;
 var test_background_opacity_applied: f64 = 1.0;
+var test_background_opacity_log: ?*std.ArrayListUnmanaged(TestOpacityApply) = null;
+const TestOpacityApply = struct { host: *const Host, opacity: f64 };
+
+/// The window whose layered alpha fails to apply in a test, as
+/// `SetLayeredWindowAttributes` can.
+var test_layered_fails: ?HWND = null;
 
 fn paneRenderer(pane: ?*const Surface) PaneRenderer {
     if (builtin.is_test) {
@@ -1116,6 +1123,10 @@ fn applyBackgroundOpacity(host: *Host) !void {
     if (builtin.is_test) {
         test_background_opacity_applies += 1;
         test_background_opacity_applied = host.top_level.opacity;
+        if (test_background_opacity_log) |applied| applied.append(std.testing.allocator, .{
+            .host = host,
+            .opacity = host.top_level.opacity,
+        }) catch {};
     }
     var shown = shownOpacity(host);
     if (shown.background != null) {
@@ -1128,7 +1139,7 @@ fn applyBackgroundOpacity(host: *Host) !void {
         const kept = if (host.chrome_alpha != null) setBlurBehind(hwnd, true) else beginBackgroundAlpha(hwnd);
         if (!kept) {
             host.blur_behind_failed = true;
-            log.warn("win32 blur-behind failed; this window's background-opacity fades it whole from now on", .{});
+            log.warn("win32 blur-behind failed; this window's background-opacity fades it whole until the system theme changes", .{});
             shown = shownOpacity(host);
         }
     }
@@ -1167,6 +1178,47 @@ pub fn refreshBackgroundOpacity(host: *Host) void {
         log.warn("win32 background opacity refresh failed err={}", .{err});
     };
 }
+
+/// `refreshBackgroundOpacity`, where a failed blur-behind
+/// (`Host.blur_behind_failed`) tries once more; failing again latches it
+/// again, with one warning.
+pub fn retryBackgroundOpacity(host: *Host) void {
+    host.blur_behind_failed = false;
+    refreshBackgroundOpacity(host);
+}
+
+/// What a system theme message can change and no rebuild of the app's own
+/// does: the light/dark mode, High Contrast and its colors, the non-client
+/// metrics and client animations; not the config's `window-theme` or
+/// `split-divider-color`. A failed blur-behind tries again only when these
+/// changed since the last system theme message
+/// (`App.reconfigureSystemTheme`).
+pub const SystemInputs = struct {
+    dark: bool,
+    high_contrast: bool,
+    /// High Contrast's system colors, while it is on.
+    high_contrast_colors: ?win32.ThemeColors,
+    metrics: ?sys.NONCLIENTMETRICSW,
+    animations: bool,
+
+    pub fn capture() SystemInputs {
+        if (builtin.is_test) if (test_system_inputs) |inputs| return inputs;
+        const high_contrast = win32.isHighContrastActive();
+        var metrics = std.mem.zeroes(sys.NONCLIENTMETRICSW);
+        metrics.cbSize = @sizeOf(sys.NONCLIENTMETRICSW);
+        return .{
+            .dark = win32.isSystemDarkMode(),
+            .high_contrast = high_contrast,
+            .high_contrast_colors = if (high_contrast) win32.highContrastThemeFromSysColors() else null,
+            .metrics = if (sys.SystemParametersInfoW(c.SPI_GETNONCLIENTMETRICS, @sizeOf(sys.NONCLIENTMETRICSW), @ptrCast(&metrics), 0) != 0) metrics else null,
+            .animations = Host.clientAnimationsEnabled(),
+        };
+    }
+};
+
+/// What `SystemInputs.capture` returns in a test that sets it, so a test can
+/// change a system input without changing the system.
+var test_system_inputs: ?SystemInputs = null;
 
 /// A child control `host`'s window made: made solid while the window's
 /// background alone is translucent (`solidChild`).
@@ -1250,6 +1302,7 @@ fn setLayered(hwnd: HWND, alpha: ?u8) !void {
     if ((ex_style & c.WS_EX_LAYERED) == 0) {
         _ = sys.SetWindowLongPtrW(hwnd, c.GWL_EXSTYLE, @bitCast(@as(isize, @intCast(ex_style | c.WS_EX_LAYERED))));
     }
+    if (builtin.is_test and test_layered_fails == hwnd) return error.TestLayeredFailed;
     if (sys.SetLayeredWindowAttributes(hwnd, 0, layered, c.LWA_ALPHA) == 0) {
         return lastError();
     }
@@ -2473,13 +2526,22 @@ test "win32 a config reload of maximize and fullscreen leaves the windows alread
     }.body);
 }
 
-/// What a reload does once the file is read (`CoreApp.updateConfig`): each
-/// pane's config change, then the app's.
+/// What a reload does once the file is read (`App.updateCoreConfig`): each
+/// pane's config change, then the app's, as core orders them (a test pane
+/// has no core: `App.test_surface_init_stage`).
 fn reloadConfig(app: *App, config: *const configpkg.Config) !void {
-    for (app.registry.windows.items) |pane| {
-        try std.testing.expect(try app.performAction(.{ .surface = pane.core() }, .config_change, .{ .config = config }));
-    }
-    try std.testing.expect(try app.performAction(.app, .config_change, .{ .config = config }));
+    try app.updateCoreConfig(config);
+}
+
+/// That `applied` has `host`'s window applying its opacity once, at
+/// `opacity`.
+fn expectAppliedOnce(applied: []const TestOpacityApply, host: *const Host, opacity: f64) !void {
+    var applies: usize = 0;
+    for (applied) |apply| if (apply.host == host) {
+        applies += 1;
+        try std.testing.expectEqual(opacity, apply.opacity);
+    };
+    try std.testing.expectEqual(@as(usize, 1), applies);
 }
 
 /// The alpha `hwnd`'s window shows at, either way: layered whole, or its
@@ -2715,6 +2777,97 @@ test "win32 a window with a D3D11 pane fades whole and leaves its panes at their
     }.body);
 }
 
+test "win32 a window closing whole shows no opacity as its panes go, and a pane closing in a window that stays shows it once" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    try runOnHiddenDesktop(struct {
+        /// A window whose first tab runs D3D11 and its `others` OpenGL: it
+        /// fades whole.
+        fn window(fixture: *WindowStartTestApp, others: []*Surface) !*Surface {
+            const app = &fixture.app;
+            test_pane_renderer = .d3d11;
+            try app.createWindow(default_title);
+            const d3d11 = fixture.newest();
+            test_d3d11_pane = d3d11;
+            test_pane_renderer = .opengl;
+            for (others) |*other| other.* = try app.createWindowSurface(&app.config, default_title, .{ .host_id = d3d11.host_id });
+            try std.testing.expectEqual(@as(?u8, 128), testLayeredAlpha(d3d11.host.?.hwnd.?));
+            return d3d11;
+        }
+
+        /// One pane's window is destroyed, as at the end of any pane close
+        /// (`App.windowDestroyed`).
+        fn closePane(fixture: *WindowStartTestApp, pane: *Surface, applies: usize) !void {
+            const before = test_background_opacity_applies;
+            fixture.core_app.deleteSurface(pane);
+            _ = sys.DestroyWindow(pane.hwnd.?);
+            try std.testing.expectEqual(before + applies, test_background_opacity_applies);
+        }
+
+        fn body() !void {
+            var fixture: WindowStartTestApp = .{};
+            try fixture.init();
+            defer fixture.deinit();
+            const app = &fixture.app;
+            defer test_pane_renderer = null;
+            defer test_d3d11_pane = null;
+            app.config.@"background-opacity" = 0.5;
+
+            var tabs: [4]*Surface = undefined;
+            const d3d11 = try window(&fixture, &tabs);
+            const host = d3d11.host.?;
+
+            // A pane of a window that stays: the window shows its opacity
+            // again, once.
+            try closePane(&fixture, tabs[3], 1);
+
+            // A window close that asks and is cancelled closes nothing, and a
+            // pane closing after it still shows the opacity again.
+            host.askBeforeClosing(.window, 1, &win32.hostCloseConfirmAccept, host);
+            try std.testing.expect(host.confirm_payload != null);
+            host.invokeConfirmCancel();
+            try std.testing.expectEqual(@as(usize, 4), host.tabs.items.len);
+            try closePane(&fixture, tabs[2], 1);
+
+            // The window closes whole, its D3D11 pane first: nothing shows
+            // its opacity on the way, so it never turns per-pixel for the
+            // moment before it goes.
+            const id = host.id;
+            for ([_]*Surface{ d3d11, tabs[0], tabs[1] }) |pane| fixture.core_app.deleteSurface(pane);
+            var applies = test_background_opacity_applies;
+            var asserts = test_blur_behind_asserts;
+            host.closeConfirmed();
+            try std.testing.expect(app.registry.findHostById(id) == null);
+            try std.testing.expectEqual(applies, test_background_opacity_applies);
+            try std.testing.expectEqual(asserts, test_blur_behind_asserts);
+
+            // A pane whose close is refused (`requestClose` refuses one with
+            // no window, among others) keeps its window, which shows its
+            // opacity once, for the panes it has: with the D3D11 pane gone,
+            // the background alone is translucent.
+            var kept: [1]*Surface = undefined;
+            const faded = try window(&fixture, &kept);
+            const stays = faded.host.?;
+            const refused = kept[0].hwnd.?;
+            kept[0].hwnd = null;
+            fixture.core_app.deleteSurface(faded);
+            applies = test_background_opacity_applies;
+            asserts = test_blur_behind_asserts;
+            stays.closeConfirmed();
+            kept[0].hwnd = refused;
+            try std.testing.expectEqual(@as(usize, 1), stays.tabs.items.len);
+            try std.testing.expectEqual(applies + 1, test_background_opacity_applies);
+            try std.testing.expectEqual(asserts + 1, test_blur_behind_asserts);
+            try std.testing.expect(!testHostIsLayered(stays.hwnd.?));
+            try std.testing.expectEqual(@as(?u8, 128), testBackgroundAlpha(stays.hwnd.?));
+
+            // And it is an ordinary window again: a pane of it closing later
+            // shows its opacity again.
+            const later = try app.createWindowSurface(&app.config, default_title, .{ .host_id = stays.id });
+            try closePane(&fixture, later, 1);
+        }
+    }.body);
+}
+
 test "win32 a config change that toggles decorations and changes opacity applies the opacity once, at its new value" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
     try runOnHiddenDesktop(struct {
@@ -2758,7 +2911,68 @@ test "win32 a config change that toggles decorations and changes opacity applies
     }.body);
 }
 
-test "win32 a window whose blur-behind failed fades whole and does not try it again" {
+test "win32 a theme change or a reload that flips the frame mode asserts blur-behind after the frame write" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    try runOnHiddenDesktop(struct {
+        /// `test_blur_behind_asserts` when the window's frame last changed.
+        var asserts_at_frame: ?usize = null;
+        var previous: ?*const anyopaque = null;
+
+        fn proc(hwnd: HWND, msg: UINT, wp: usize, lp: LPARAM) callconv(.winapi) isize {
+            if (msg == c.WM_WINDOWPOSCHANGED) {
+                const pos: *const sys.WINDOWPOS = @ptrFromInt(@as(usize, @bitCast(lp)));
+                if (pos.flags & c.SWP_FRAMECHANGED != 0) asserts_at_frame = test_blur_behind_asserts;
+            }
+            return sys.CallWindowProcW(previous, hwnd, msg, wp, lp);
+        }
+
+        fn body() !void {
+            var fixture: WindowStartTestApp = .{};
+            try fixture.init();
+            defer fixture.deinit();
+            const app = &fixture.app;
+            test_pane_renderer = .opengl;
+            defer test_pane_renderer = null;
+
+            app.config.@"background-opacity" = 0.5;
+            try app.createWindow(default_title);
+            const hwnd = fixture.newest().host.?.hwnd.?;
+            try std.testing.expectEqual(@as(?u8, 128), testBackgroundAlpha(hwnd));
+            previous = @ptrFromInt(@as(usize, @bitCast(sys.SetWindowLongPtrW(hwnd, c.GWLP_WNDPROC, @bitCast(@intFromPtr(&proc))))));
+
+            // On Windows 11 the tab strip shown is the integrated titlebar and
+            // hidden the stock frame: each way, the frame changes, and the
+            // window applies its opacity once, after it. A theme rebuild that
+            // refreshes it does so itself; a reload's leaves it to the
+            // `applyConfig` that follows.
+            app.os_build = c.OS_BUILD_WIN11_21H2;
+            for ([_]bool{ false, true }) |reload| {
+                for ([_]configpkg.Config.WindowShowTabBar{ .auto, .never }) |tabs| {
+                    const integrated = app.use_integrated_titlebar;
+                    const applies = test_background_opacity_applies;
+                    asserts_at_frame = null;
+                    if (reload) {
+                        var config = try app.config.clone(std.testing.allocator);
+                        defer config.deinit();
+                        config.@"window-show-tab-bar" = tabs;
+                        try std.testing.expect(try app.performAction(.app, .config_change, .{ .config = &config }));
+                    } else {
+                        app.config.@"window-show-tab-bar" = tabs;
+                        app.reconfigureTheme(.refresh);
+                    }
+                    try std.testing.expect(app.use_integrated_titlebar != integrated);
+                    const at_frame = asserts_at_frame orelse return error.TestFrameNeverChanged;
+                    try std.testing.expect(test_blur_behind_asserts > at_frame);
+                    try std.testing.expectEqual(applies + 1, test_background_opacity_applies);
+                    try std.testing.expect(!testHostIsLayered(hwnd));
+                    try std.testing.expectEqual(@as(?u8, 128), testBackgroundAlpha(hwnd));
+                }
+            }
+        }
+    }.body);
+}
+
+test "win32 a reload and the palette's theme apply each window's opacity once, at its new value, a window kept empty for undo included" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
     try runOnHiddenDesktop(struct {
         fn body() !void {
@@ -2768,10 +2982,277 @@ test "win32 a window whose blur-behind failed fades whole and does not try it ag
             const app = &fixture.app;
             test_pane_renderer = .opengl;
             defer test_pane_renderer = null;
+
+            // A window of two tabs, a window of one, and a window whose only
+            // tab is in undo history, which no pane's config change reaches.
+            app.config.@"background-opacity" = 0.5;
+            try app.createWindow(default_title);
+            const shown = fixture.newest();
+            _ = try app.createWindowSurface(&app.config, default_title, .{ .host_id = shown.host_id });
+            try app.createWindow(default_title);
+            const single = fixture.newest();
+            try app.createWindow(default_title);
+            const emptied = fixture.newest().host.?;
+            var entry = emptied.detachTabForUndo(0).?;
+            defer _ = emptied.restoreClosedTabEntryNative(&entry.payload.close_tab) catch false;
+            const hosts = [_]*Host{ shown.host.?, single.host.?, emptied };
+            for (hosts) |host| try std.testing.expectEqual(@as(?u8, 128), testBackgroundAlpha(host.hwnd.?));
+
+            var applied: std.ArrayListUnmanaged(TestOpacityApply) = .empty;
+            defer applied.deinit(std.testing.allocator);
+            test_background_opacity_log = &applied;
+            defer test_background_opacity_log = null;
+
+            // A reload (every pane's config change, then the app's) and the
+            // palette's theme (every pane's, then its window loop): each
+            // window applies its opacity once, in the app-wide step after the
+            // theme rebuild, at the new value, so blur-behind is asserted
+            // only where a window ends translucent, once.
+            for ([_]bool{ false, true }) |palette| {
+                for ([_]struct { opacity: f64, shown: ?u8 }{
+                    .{ .opacity = 1.0, .shown = null },
+                    .{ .opacity = 0.5, .shown = 128 },
+                }) |step| {
+                    var config = try app.config.clone(std.testing.allocator);
+                    config.@"background-opacity" = step.opacity;
+                    applied.clearRetainingCapacity();
+                    const asserts = test_blur_behind_asserts;
+                    if (palette) {
+                        var left = shown.host.?.swapRuntimeConfigFromPalette(config);
+                        left.deinit();
+                    } else {
+                        defer config.deinit();
+                        try reloadConfig(app, &config);
+                    }
+                    try std.testing.expectEqual(hosts.len, applied.items.len);
+                    for (hosts) |host| {
+                        try expectAppliedOnce(applied.items, host, step.opacity);
+                        try std.testing.expectEqual(step.shown, testBackgroundAlpha(host.hwnd.?));
+                    }
+                    try std.testing.expectEqual(asserts + if (step.shown != null) hosts.len else 0, test_blur_behind_asserts);
+                }
+            }
+
+            // A pane's own config change, outside an app-wide one, still
+            // gives its window the config, from the pane the window shows.
+            applied.clearRetainingCapacity();
+            try std.testing.expect(try app.performAction(.{ .surface = single.core() }, .config_change, .{ .config = &app.config }));
+            try std.testing.expectEqual(@as(usize, 1), applied.items.len);
+            try expectAppliedOnce(applied.items, single.host.?, 0.5);
+        }
+    }.body);
+}
+
+test "win32 a reload in which a pane's step fails still applies every window, and returns the failure" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    try runOnHiddenDesktop(struct {
+        fn body() !void {
+            var fixture: WindowStartTestApp = .{};
+            try fixture.init();
+            defer fixture.deinit();
+            const app = &fixture.app;
+            test_pane_renderer = .opengl;
+            defer test_pane_renderer = null;
+
+            // A window of two tabs, a window of one, and a window whose only
+            // tab is in undo history.
+            app.config.@"background-opacity" = 0.5;
+            try app.createWindow(default_title);
+            const first = fixture.newest();
+            _ = try app.createWindowSurface(&app.config, default_title, .{ .host_id = first.host_id });
+            try app.createWindow(default_title);
+            const single = fixture.newest().host.?;
+            try app.createWindow(default_title);
+            const emptied = fixture.newest().host.?;
+            var entry = emptied.detachTabForUndo(0).?;
+            defer _ = emptied.restoreClosedTabEntryNative(&entry.payload.close_tab) catch false;
+
+            var applied: std.ArrayListUnmanaged(TestOpacityApply) = .empty;
+            defer applied.deinit(std.testing.allocator);
+            test_background_opacity_log = &applied;
+            defer test_background_opacity_log = null;
+
+            // A reload to 0.6 whose first pane's step fails (its scrollbar
+            // refresh), which ends core's update before the app's step: the
+            // panes left the windows to that step, and each window still
+            // applies its opacity once, at the new value; the reload returns
+            // the pane's failure.
+            var config = try app.config.clone(std.testing.allocator);
+            defer config.deinit();
+            config.@"background-opacity" = 0.6;
+            try std.testing.expect(app.core_app.surfaces.items[0] == first);
+            Surface.test_scrollbar_refresh_fails = first;
+            defer Surface.test_scrollbar_refresh_fails = null;
+            try std.testing.expectError(error.TestScrollbarRefreshFailed, reloadConfig(app, &config));
+            try std.testing.expectEqual(@as(usize, 3), applied.items.len);
+            for ([_]*Host{ first.host.?, single, emptied }) |host| {
+                try expectAppliedOnce(applied.items, host, 0.6);
+                try std.testing.expectEqual(@as(?u8, 153), testBackgroundAlpha(host.hwnd.?));
+            }
+        }
+    }.body);
+}
+
+test "win32 a reload in which a window fails to apply its opacity still applies every window after it, and returns the failure" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    try runOnHiddenDesktop(struct {
+        fn body() !void {
+            var fixture: WindowStartTestApp = .{};
+            try fixture.init();
+            defer fixture.deinit();
+            const app = &fixture.app;
+            defer test_pane_renderer = null;
+            defer test_d3d11_pane = null;
+
+            // First a window that fades whole (its pane runs D3D11), then a
+            // translucent OpenGL window and a window kept empty for undo.
+            app.config.@"background-opacity" = 0.5;
+            test_pane_renderer = .d3d11;
+            try app.createWindow(default_title);
+            const faded = fixture.newest().host.?;
+            test_d3d11_pane = fixture.newest();
+            test_pane_renderer = .opengl;
+            try app.createWindow(default_title);
+            const translucent = fixture.newest().host.?;
+            try app.createWindow(default_title);
+            const emptied = fixture.newest().host.?;
+            var entry = emptied.detachTabForUndo(0).?;
+            defer _ = emptied.restoreClosedTabEntryNative(&entry.payload.close_tab) catch false;
+            try std.testing.expectEqual(@as(?u8, 128), testLayeredAlpha(faded.hwnd.?));
+            try std.testing.expectEqual(@as(?u8, 128), testBackgroundAlpha(translucent.hwnd.?));
+
+            var applied: std.ArrayListUnmanaged(TestOpacityApply) = .empty;
+            defer applied.deinit(std.testing.allocator);
+            test_background_opacity_log = &applied;
+            defer test_background_opacity_log = null;
+
+            // A reload to 0.6 in which the first window's layered alpha
+            // fails: each window after it still applies its opacity, the
+            // window kept empty for undo too, and the reload returns the
+            // failure.
+            var config = try app.config.clone(std.testing.allocator);
+            defer config.deinit();
+            config.@"background-opacity" = 0.6;
+            test_layered_fails = faded.hwnd.?;
+            defer test_layered_fails = null;
+            try std.testing.expectError(error.TestLayeredFailed, reloadConfig(app, &config));
+            try std.testing.expectEqual(@as(usize, 3), applied.items.len);
+            for ([_]*Host{ faded, translucent, emptied }) |host| try expectAppliedOnce(applied.items, host, 0.6);
+            try std.testing.expectEqual(@as(?u8, 153), testBackgroundAlpha(translucent.hwnd.?));
+            try std.testing.expectEqual(@as(f64, 0.6), emptied.top_level.opacity);
+            try std.testing.expectEqual(@as(?u8, 153), testBackgroundAlpha(emptied.hwnd.?));
+        }
+    }.body);
+}
+
+test "win32 a Settings preview of a theme and an opacity that ends applies the opacity once, at the saved value" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    try runOnHiddenDesktop(struct {
+        fn body() !void {
+            var fixture: WindowStartTestApp = .{};
+            try fixture.init();
+            defer fixture.deinit();
+            const app = &fixture.app;
+            test_pane_renderer = .opengl;
+            defer test_pane_renderer = null;
+
+            app.config.@"window-theme" = .dark;
+            try app.createWindow(default_title);
+            const hwnd = fixture.newest().host.?.hwnd.?;
+            try std.testing.expectEqual(@as(?u8, null), testBackgroundAlpha(hwnd));
+
+            // Settings previews a translucent opacity and another theme.
+            try std.testing.expect(app.previewSetting(.{ .background_opacity = 0.5 }));
+            app.refreshSettingsPreview(.opacity);
+            try std.testing.expect(app.previewSetting(.{ .window_theme = .light }));
+            app.refreshSettingsPreview(.theme);
+            try std.testing.expectEqual(@as(?u8, 128), testBackgroundAlpha(hwnd));
+
+            // A save without a reload (safe mode) ends both together, at the
+            // saved, opaque config: the window applies its opacity once, and
+            // never asserts blur-behind at the previewed one on the way.
+            const applies = test_background_opacity_applies;
+            const asserts = test_blur_behind_asserts;
+            app.endSettingsPreview();
+            try std.testing.expect(app.settings_preview == null);
+            try std.testing.expectEqual(applies + 1, test_background_opacity_applies);
+            try std.testing.expectEqual(@as(f64, 1.0), test_background_opacity_applied);
+            try std.testing.expectEqual(asserts, test_blur_behind_asserts);
+            try std.testing.expect(!testHostIsLayered(hwnd));
+            try std.testing.expectEqual(@as(?u8, null), testBackgroundAlpha(hwnd));
+
+            // Closing Settings without saving ends the same way, back at the
+            // config's own translucent opacity and theme: one apply, at that
+            // value, and blur-behind asserted once for it.
+            app.config.@"background-opacity" = 0.8;
+            try applyConfig(fixture.newest().host.?, &app.config);
+            try std.testing.expectEqual(@as(?u8, 204), testBackgroundAlpha(hwnd));
+            try std.testing.expect(app.previewSetting(.{ .background_opacity = 0.5 }));
+            app.refreshSettingsPreview(.opacity);
+            try std.testing.expect(app.previewSetting(.{ .window_theme = .light }));
+            app.refreshSettingsPreview(.theme);
+            try std.testing.expectEqual(@as(?u8, 128), testBackgroundAlpha(hwnd));
+            const cancel_applies = test_background_opacity_applies;
+            const cancel_asserts = test_blur_behind_asserts;
+            app.endSettingsPreview();
+            try std.testing.expectEqual(cancel_applies + 1, test_background_opacity_applies);
+            try std.testing.expectEqual(@as(f64, 0.8), test_background_opacity_applied);
+            try std.testing.expectEqual(cancel_asserts + 1, test_blur_behind_asserts);
+            try std.testing.expect(!testHostIsLayered(hwnd));
+            try std.testing.expectEqual(@as(?u8, 204), testBackgroundAlpha(hwnd));
+            try std.testing.expect(std.meta.eql(win32.resolveTheme(&app.config), app.resolved_theme));
+        }
+    }.body);
+}
+
+test "win32 a window whose blur-behind failed fades whole, and tries it again only at a system theme change" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    try runOnHiddenDesktop(struct {
+        /// A system theme message, after a system change (light/dark,
+        /// through `test_system_inputs`, with the theme rebuilt) or only
+        /// finding a resource missing, with blur-behind failing or not: it
+        /// applies the opacity once and tries blur-behind `tries` times.
+        fn themeMessage(app: *App, host: *Host, changed: bool, fails: bool, tries: usize) !void {
+            test_blur_behind_fails = fails;
+            if (changed) {
+                test_system_inputs.?.dark = !test_system_inputs.?.dark;
+                app.system_theme_refresh = .{};
+            } else {
+                _ = sys.DeleteObject(host.chrome_brush.?);
+                host.chrome_brush = null;
+            }
+            const applies = test_background_opacity_applies;
+            const asserts = test_blur_behind_asserts;
+            app.reconfigureSystemTheme();
+            try std.testing.expectEqual(applies + 1, test_background_opacity_applies);
+            try std.testing.expectEqual(asserts + tries, test_blur_behind_asserts);
+        }
+
+        /// A system theme message that changed nothing, after a theme change
+        /// of the app's own: it rebuilds nothing and does not try.
+        fn unchangedMessage(app: *App, host: *const Host) !void {
+            const rebuilds = app.theme_rebuilds;
+            const asserts = test_blur_behind_asserts;
+            app.reconfigureSystemTheme();
+            try std.testing.expectEqual(rebuilds, app.theme_rebuilds);
+            try std.testing.expectEqual(asserts, test_blur_behind_asserts);
+            try std.testing.expect(host.blur_behind_failed);
+        }
+
+        fn body() !void {
+            var fixture: WindowStartTestApp = .{};
+            try fixture.init();
+            defer fixture.deinit();
+            const app = &fixture.app;
+            test_pane_renderer = .opengl;
+            defer test_pane_renderer = null;
             test_blur_behind_fails = true;
             defer test_blur_behind_fails = false;
+            test_system_inputs = SystemInputs.capture();
+            defer test_system_inputs = null;
 
             app.config.@"background-opacity" = 0.5;
+            app.config.@"window-theme" = .dark;
             try app.createWindow(default_title);
             const pane = fixture.newest();
             const host = pane.host.?;
@@ -2791,6 +3272,76 @@ test "win32 a window whose blur-behind failed fades whole and does not try it ag
             try std.testing.expectEqual(asserts, test_blur_behind_asserts);
             try std.testing.expectEqual(@as(?u8, 128), testLayeredAlpha(hwnd));
             try std.testing.expectEqual(@as(?u8, null), testBackgroundAlpha(hwnd));
+
+            // A system theme change tries it again. Where it fails again, the
+            // window latches again after one try, so one warning, and still
+            // fades whole.
+            try themeMessage(app, host, true, true, 1);
+            try std.testing.expect(host.blur_behind_failed);
+            try std.testing.expectEqual(@as(?u8, 128), testLayeredAlpha(hwnd));
+            try std.testing.expectEqual(@as(?u8, null), testBackgroundAlpha(hwnd));
+
+            // The app's own theme changes are none of the system's: with
+            // blur-behind working again, after Settings previews another
+            // theme, after that preview ends, after a reload and after the
+            // palette's theme, each of another theme, a theme message that
+            // changed nothing rebuilds nothing and does not try.
+            test_blur_behind_fails = false;
+            try std.testing.expect(app.previewSetting(.{ .window_theme = .light }));
+            app.refreshSettingsPreview(.theme);
+            try unchangedMessage(app, host);
+            app.endSettingsPreview();
+            try unchangedMessage(app, host);
+            reloaded.@"window-theme" = .light;
+            try reloadConfig(app, &reloaded);
+            try unchangedMessage(app, host);
+            var palette = try app.config.clone(std.testing.allocator);
+            palette.@"window-theme" = .dark;
+            var left = host.swapRuntimeConfigFromPalette(palette);
+            left.deinit();
+            try unchangedMessage(app, host);
+            try std.testing.expectEqual(@as(?u8, 128), testLayeredAlpha(hwnd));
+
+            // A system change a rebuild of the app's own takes in before its
+            // message arrives: the system turns light or dark, a reload
+            // rebuilds the theme (and leaves the latch, as a reload does),
+            // then the message finds the theme as the reload left it, so
+            // nothing to rebuild, but the change is still the system's: the
+            // window tries once, and where it fails again latches again.
+            test_system_inputs.?.dark = !test_system_inputs.?.dark;
+            reloaded.@"window-theme" = .light;
+            var asserts_before = test_blur_behind_asserts;
+            try reloadConfig(app, &reloaded);
+            try std.testing.expectEqual(asserts_before, test_blur_behind_asserts);
+            try std.testing.expect(host.blur_behind_failed);
+            test_blur_behind_fails = true;
+            const rebuilds = app.theme_rebuilds;
+            const applies = test_background_opacity_applies;
+            asserts_before = test_blur_behind_asserts;
+            app.reconfigureSystemTheme();
+            try std.testing.expectEqual(rebuilds, app.theme_rebuilds);
+            try std.testing.expectEqual(applies + 1, test_background_opacity_applies);
+            try std.testing.expectEqual(asserts_before + 1, test_blur_behind_asserts);
+            try std.testing.expect(host.blur_behind_failed);
+            try std.testing.expectEqual(@as(?u8, 128), testLayeredAlpha(hwnd));
+            // That message was the change's: the next one, with nothing
+            // changed, does not try again.
+            test_blur_behind_fails = false;
+            try unchangedMessage(app, host);
+
+            // A theme message that changed nothing but finds a resource
+            // missing rebuilds the theme without trying.
+            try themeMessage(app, host, false, false, 0);
+            try std.testing.expect(host.blur_behind_failed);
+            try std.testing.expectEqual(@as(?u8, 128), testLayeredAlpha(hwnd));
+
+            // Where DWM works again, the next theme change shows the
+            // background alone translucent.
+            try themeMessage(app, host, true, false, 1);
+            try std.testing.expect(!host.blur_behind_failed);
+            try std.testing.expect(!testHostIsLayered(hwnd));
+            try std.testing.expectEqual(@as(?u8, 128), testBackgroundAlpha(hwnd));
+            try std.testing.expectEqual(@as(?f64, 0.5), pane.background_opacity);
         }
     }.body);
 }

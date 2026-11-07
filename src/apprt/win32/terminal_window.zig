@@ -3540,8 +3540,12 @@ pub const Surface = struct {
     }
 
     pub fn refreshScrollbarWindow(self: *Surface) !void {
+        if (builtin.is_test and test_scrollbar_refresh_fails == self) return error.TestScrollbarRefreshFailed;
         try self.syncScrollbarWindowNow(sys.GetTickCount64());
     }
+
+    /// The pane whose `refreshScrollbarWindow` fails in a test.
+    pub var test_scrollbar_refresh_fails: ?*const Surface = null;
 
     pub fn scrollbarNeedsHeartbeat(self: *const Surface) bool {
         return scrollbarNeedsHeartbeatForState(

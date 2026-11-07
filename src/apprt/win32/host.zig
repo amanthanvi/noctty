@@ -537,6 +537,10 @@ pub const Host = struct {
     /// How this new window starts, from `window_state.begin` until its
     /// first show is done.
     pending_start: ?window_state.Pending = null,
+    /// `closeConfirmed` is closing every pane of this window, which goes
+    /// with its last one: the panes' teardown leaves its opacity as it is
+    /// (`App.windowDestroyed`).
+    closing: bool = false,
     /// This host is the quick terminal. Its tabs and splits are all part of
     /// it, so this, not a flag on one surface, says what the window is.
     quick_terminal: bool = false,
@@ -677,10 +681,10 @@ pub const Host = struct {
     /// once blur-behind and `BufferedPaintInit` succeeded; `deinit` ends the
     /// buffered paint.
     chrome_alpha: ?u8 = null,
-    /// `DwmEnableBlurBehindWindow` failed on this window once: it fades whole
-    /// from then on (`TopLevel.shows`) and never tries again, so a machine
-    /// where it keeps failing does not flicker opaque and faded, and warn, on
-    /// every apply.
+    /// `DwmEnableBlurBehindWindow` failed on this window: it fades whole
+    /// (`TopLevel.shows`) and tries again only at a system theme change
+    /// (`window_state.retryBackgroundOpacity`), so a machine where it keeps
+    /// failing does not flicker opaque and faded, and warn, on every apply.
     blur_behind_failed: bool = false,
     chrome_paint_pending: bool = false,
     chrome_paint_mask: ChromeRepaintMask = .{},
@@ -2446,14 +2450,22 @@ pub const Host = struct {
         self.app.restoreSettingsPreview();
         self.app.config_revision +%= 1;
         if (self.app.config_revision == 0) self.app.config_revision = 1;
-        self.app.reconfigureTheme();
-        for (self.app.registry.windows.items) |surface| {
-            surface.core().updateConfig(&self.app.config) catch |err| {
-                log.warn("palette theme core apply failed err={}", .{err});
-            };
-            surface.applyRuntimeConfig(&self.app.config) catch |err| {
-                log.warn("palette theme runtime apply failed err={}", .{err});
-            };
+        self.app.reconfigureTheme(.caller_applies);
+        {
+            // Every pane, then every window: an app-wide change, whose
+            // panes leave the window half to the host loop below, so each
+            // window applies it once.
+            const outer = self.app.app_wide_config_change;
+            self.app.app_wide_config_change = true;
+            defer self.app.app_wide_config_change = outer;
+            for (self.app.registry.windows.items) |surface| {
+                self.app.updatePaneCoreConfig(surface, &self.app.config) catch |err| {
+                    log.warn("palette theme core apply failed err={}", .{err});
+                };
+                surface.applyRuntimeConfig(&self.app.config) catch |err| {
+                    log.warn("palette theme runtime apply failed err={}", .{err});
+                };
+            }
         }
         for (self.app.registry.hosts.items) |host| {
             window_state.applyConfig(host, &self.app.config) catch |err| {
@@ -9010,7 +9022,16 @@ pub const Host = struct {
         // The session's last window, whatever else is open: a quick terminal
         // or a window kept empty for undo is not part of the session.
         if (self.app.closingEndsSession(self)) self.app.saveSessionAsItEnds();
+        // The last pane's teardown destroys and frees the window, so it is
+        // looked up by id after the loop. A pane that does not close keeps
+        // it, which then shows its opacity once, for the panes it has.
+        const app = self.app;
+        const id = self.id;
+        self.closing = true;
         for (surfaces.items) |surface| surface.close(false);
+        if (app.registry.findHostById(id) == null) return;
+        self.closing = false;
+        window_state.refreshBackgroundOpacity(self);
     }
 
     /// The tab and window title prompts are filled from the active surface

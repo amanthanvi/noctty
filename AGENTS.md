@@ -265,9 +265,20 @@ that govern each symbol you change, or that none does.
   a window shows it: `TopLevel.shows` in `win32/window_start.zig`; blur-behind,
   the layered fade, the solid child controls and the panes' renderer opacity:
   `applyBackgroundOpacity`, `refreshBackgroundOpacity`,
-  `releaseBackgroundOpacity`, `childCreated` and `solidifies` in
-  `win32/window_state.zig`, with `Host.chrome_alpha` and
-  `Host.blur_behind_failed`; `Surface.setBackgroundOpacity`,
+  `retryBackgroundOpacity`, `releaseBackgroundOpacity`, `childCreated` and
+  `solidifies` in `win32/window_state.zig`, with `Host.chrome_alpha` and
+  `Host.blur_behind_failed`; when a window shows it again: the `opacity`
+  argument of `App.reconfigureTheme`, `reconfigureSystemTheme` and its two
+  baselines (the rebuild's, `App.system_theme_refresh` and
+  `SystemThemeSnapshot`, which `reconfigureTheme` and `App.init` set; the
+  retry's, `App.system_inputs` and `window_state.SystemInputs`, which only
+  `reconfigureSystemTheme` and `App.init` set), `App.endSettingsPreview`, the
+  window half of a config change (the `.surface` and `.app`
+  `config_change` arms, `App.app_wide_config_change`,
+  `App.updateCoreConfig`, `App.updatePaneCoreConfig`, and after a failed
+  update `App.app_wide_windows_applied` and `App.applyWindowsConfig`), and
+  `Host.closing` in `Host.closeConfirmed` and `App.windowDestroyed`;
+  `Surface.setBackgroundOpacity`,
   `rendererSwitchedToOpenGL` and `WM_WINHOSTTY_RENDERER_SWITCHED`; the
   renderer's `background_opacity_override`; how a pane's frame reaches a
   window that composes its alpha: `composesAlpha` and `splitDimPass` in
@@ -325,7 +336,8 @@ that govern each symbol you change, or that none does.
 - [tabs-panes.md](docs/agents/log/tabs-panes.md): tabs, splits and windows as
   a structure: `Surface.init` ordering, `activateSurface`, showing and hiding
   pane surfaces (occlusion, overlapping WGL children), `windowDestroyed`,
-  close and close-confirm flows, quit teardown (`destroyAllWindows`,
+  close and close-confirm flows (`Host.closeConfirmed` and its
+  `Host.closing`), quit teardown (`destroyAllWindows`,
   `App.destroyPaneOf`, both in `win32/app.zig`; host and surface lookups in
   `win32/registry.zig`), focus after a close, shell reducer effects,
   local and structural undo/redo (`win32_undo.zig`,
@@ -483,6 +495,9 @@ that govern each symbol you change, or that none does.
   `test/windows/renderer/Invoke-RendererParity.ps1`, `bench-windows.ps1`'s
   `ForceForeground` and render-trace snapshots, transient captures (a banner,
   the overlay scrollbar) in the visible check `Invoke-VisibleD3D11Check.ps1`,
+  the measure-AUMID builds an A/B compares
+  (`Invoke-InteractiveWin11MeasureBuild` in
+  `scripts/interactive-win11-measure-lib.ps1`),
   the PKG-37, LAT-01 and LAT-02 measurement harnesses on the
   `origin/*-measurement-harness` branches), CI test steps (the raw
   `zig test src/apprt/win32_compositor_native.zig` step, which confines

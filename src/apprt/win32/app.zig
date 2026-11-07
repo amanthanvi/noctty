@@ -678,11 +678,27 @@ pub const App = struct {
     /// persistence.
     session_state_excluded_for_elevation: bool = false,
     config_revision: u64 = 1,
+    /// Set while a config change goes to every pane and then to the app
+    /// (`updateCoreConfig`; the palette's theme swap,
+    /// `Host.swapRuntimeConfigFromPalette`). A pane's `.surface`
+    /// `config_change` then leaves the window half to the app-wide step,
+    /// which applies it for every window once, after the theme's frame write
+    /// (`window_state.applyConfig`).
+    app_wide_config_change: bool = false,
+    /// Set once an app-wide change reaches the `.app` arm's window pass, so
+    /// `updateCoreConfig` knows whether an update that failed before it
+    /// still owes the windows their half.
+    app_wide_windows_applied: bool = false,
     resolved_theme: ThemeColors = darkTheme(),
     /// Completed `reconfigureTheme` passes; a test reads it to prove that a
     /// settings preview which cannot change the theme does not run one.
     theme_rebuilds: u32 = 0,
     system_theme_refresh: SystemThemeRefresh = .{},
+    /// The system's own theme inputs at the last system theme message (or
+    /// at `init`): a failed blur-behind tries again only when they changed
+    /// (`reconfigureSystemTheme`). Unlike `system_theme_refresh`, no rebuild
+    /// of the app's own (a reload, a Settings preview) moves it.
+    system_inputs: ?window_state.SystemInputs = null,
     hinstance: HINSTANCE,
     class_atom: ATOM = 0,
     host_class_atom: ATOM = 0,
@@ -706,7 +722,10 @@ pub const App = struct {
     ) anyerror!*Surface = null,
     /// Test-only seam that stands in for the GL context and the core surface
     /// in `Surface.init`, neither of which a unit test can create. The window,
-    /// tab, shell and unwind steps around them run for real.
+    /// tab, shell and unwind steps around them run for real. A pane it made
+    /// has no core to update a config of, so while it is set a config update
+    /// (`updatePaneCoreConfig`, `updateCoreConfig`) gives each pane what
+    /// core's update ends in for it: its `.surface` `config_change`.
     test_surface_init_stage: ?*const fn (surface: *Surface, stage: Surface.InitStage) anyerror!void = null,
     /// Test-only seam for automation snapshots built without a live core
     /// surface. Returned strings are owned by the caller.
@@ -1272,7 +1291,12 @@ pub const App = struct {
         };
         self.refreshSystemWheelSettings();
         self.refreshSystemScrollbarPreference();
-        self.resolved_theme = resolveTheme(&self.config);
+        // The first system theme message compares with the theme the app
+        // starts in, as later ones do with the last rebuild.
+        const start_theme = SystemThemeSnapshot.capture(&self.config);
+        self.system_theme_refresh.previous = start_theme;
+        self.resolved_theme = start_theme.theme;
+        self.system_inputs = window_state.SystemInputs.capture();
         self.loadPaletteMru();
         self.settings_window = win32_settings.SettingsWindow.init(.{
             .ctx = @ptrCast(self),
@@ -4190,13 +4214,22 @@ pub const App = struct {
                             self.jump_list.?.requestProfileDiscovery();
                         }
                         self.scheduleGlobalHotkeySync();
-                        self.reconfigureTheme();
+                        self.reconfigureTheme(.caller_applies);
                         // Every value is stored before the first step that
                         // can fail, and the windows' decorations and opacity
                         // go before the panes' scrollbar refresh, as each
-                        // pane's config change once ordered them.
+                        // pane's config change once ordered them. This is
+                        // each window's one apply in a reload (the panes'
+                        // `.surface` arms leave it here), a window kept empty
+                        // for undo included, after the theme's frame write.
                         for (self.registry.windows.items) |surface| surface.takeRuntimeConfig(&self.config);
-                        for (self.registry.hosts.items) |host| try window_state.applyConfig(host, &self.config);
+                        // Every window has its apply, past one that fails:
+                        // the theme left the opacity to this loop, so a
+                        // window it skipped would show none of the reload.
+                        // The first failure is returned after it, so the
+                        // scrollbar refresh is still skipped.
+                        self.app_wide_windows_applied = true;
+                        try self.applyWindowsConfig(&self.config);
                         for (self.registry.windows.items) |surface| try surface.refreshScrollbarWindow();
                         // A reload that turns automatic checks on in a process
                         // that started with them off (or on another channel).
@@ -4211,12 +4244,15 @@ pub const App = struct {
                     },
                     .surface => |core_surface| {
                         const surface = self.registry.findSurfaceByCore(core_surface) orelse return false;
-                        // The pane stores its config first; the window takes
-                        // a pane's config only from the pane it shows, before
-                        // the pane's fallible scrollbar refresh.
+                        // The pane stores its config first. A pane's own
+                        // config change gives its window the config only from
+                        // the pane the window shows, before the pane's
+                        // fallible scrollbar refresh. One that is part of an
+                        // app-wide change leaves the window to the app's
+                        // step, which applies it for every window once.
                         surface.takeRuntimeConfig(value.config);
                         surface.setTabBackground(value.config.background);
-                        if (surface.host) |host| if (host.activeSurface() == surface) try window_state.applyConfig(host, value.config);
+                        if (!self.app_wide_config_change) if (surface.host) |host| if (host.activeSurface() == surface) try window_state.applyConfig(host, value.config);
                         try surface.refreshScrollbarWindow();
                     },
                 }
@@ -4230,7 +4266,7 @@ pub const App = struct {
                 if (self.safe_mode) return true;
                 if (value.soft) {
                     switch (target) {
-                        .app => try self.core_app.updateConfig(self, &self.config),
+                        .app => try self.updateCoreConfig(&self.config),
                         .surface => |core_surface| try core_surface.updateConfig(&self.config),
                     }
                     return true;
@@ -4262,7 +4298,7 @@ pub const App = struct {
 
                 var config = try configpkg.Config.load(self.core_app.alloc);
                 defer config.deinit();
-                try self.core_app.updateConfig(self, &config);
+                try self.updateCoreConfig(&config);
                 // A reload that found problems says so, whatever
                 // `app-notifications` allows: "reloaded" would be false.
                 // The config in effect, not the one just read: the app
@@ -5975,26 +6011,122 @@ pub const App = struct {
         try self.core_app.colorSchemeEvent(self, scheme);
     }
 
-    pub fn reconfigureSystemTheme(self: *App) void {
-        const snapshot = SystemThemeSnapshot.capture(self.shownConfig());
-        const changed = self.system_theme_refresh.accept(snapshot) or !std.meta.eql(snapshot.theme, self.resolved_theme);
-        if (!changed) {
-            const missing_resources = for (self.registry.hosts.items) |host| {
-                if (host.hwnd != null and (host.chrome_brush == null or
-                    host.overlay_brush == null or host.edit_brush == null or
-                    host.chrome_font == null or host.preview_font == null or
-                    (!host.titlebar_icons_geometric and
-                        (host.titlebar_caption_icon_font == null or host.titlebar_action_icon_font == null)) or
-                    // The search font stays lazy. Only a failed attempt, not
-                    // its intentionally unused state, needs another chance.
-                    (host.search_icon_font_resolved and host.search_icon_font == null))) break true;
-            } else false;
-            if (!missing_resources) return;
+    /// Every update of the app's config from here: core `App.updateConfig`,
+    /// which updates each pane (its `.surface` `config_change`) and then the
+    /// app (the `.app` one), as one app-wide change
+    /// (`app_wide_config_change`), so each window applies its half once, in
+    /// the app's step.
+    ///
+    /// A pane's step that fails ends core's update before the app's, and the
+    /// panes left the windows to it: then every window still takes its half
+    /// of `config`, as the app's step would have had it, and the pane's
+    /// error is returned.
+    pub fn updateCoreConfig(self: *App, config: *const configpkg.Config) !void {
+        const outer = self.app_wide_config_change;
+        const outer_applied = self.app_wide_windows_applied;
+        self.app_wide_config_change = true;
+        self.app_wide_windows_applied = false;
+        defer {
+            self.app_wide_config_change = outer;
+            self.app_wide_windows_applied = outer_applied;
         }
-        self.reconfigureTheme();
+        self.coreConfigUpdate(config) catch |err| {
+            if (!self.app_wide_windows_applied) {
+                // In the app's light/dark state, as core gives the app its
+                // config, or as it is if that fails, as core goes on then.
+                var shown_ = config.changeConditionalState(self.core_app.config_conditional_state) catch null;
+                defer if (shown_) |*shown| shown.deinit();
+                self.applyWindowsConfig(if (shown_) |*shown| shown else config) catch |window_err| {
+                    log.warn("win32 window config apply after a failed update failed err={}", .{window_err});
+                };
+            }
+            return err;
+        };
     }
 
-    pub fn reconfigureTheme(self: *App) void {
+    /// `updateCoreConfig` without its window pass after a failure.
+    fn coreConfigUpdate(self: *App, config: *const configpkg.Config) !void {
+        if (builtin.is_test and self.test_surface_init_stage != null) {
+            // Core's order, for panes with no core: each pane, then the app
+            // (without the app's light/dark state, which core puts the
+            // config in first).
+            for (self.core_app.surfaces.items) |pane| try self.updatePaneCoreConfig(pane, config);
+            _ = try self.performAction(.app, .config_change, .{ .config = config });
+            return;
+        }
+        try self.core_app.updateConfig(self, config);
+    }
+
+    /// The window half of an app-wide change (`window_state.applyConfig`)
+    /// for every window, past one that fails: a later failure is logged, the
+    /// first is returned once every window had its turn.
+    fn applyWindowsConfig(self: *App, config: *const configpkg.Config) @TypeOf(window_state.applyConfig(undefined, undefined)) {
+        var applied: @TypeOf(window_state.applyConfig(undefined, undefined)) = {};
+        for (self.registry.hosts.items) |host| {
+            window_state.applyConfig(host, config) catch |err| {
+                if (applied) |_| {
+                    applied = err;
+                } else |_| log.warn("win32 window config apply failed err={}", .{err});
+            };
+        }
+        return applied;
+    }
+
+    /// Core's config update of `pane` alone (`Surface.updateConfig`), which
+    /// ends in its `.surface` `config_change`.
+    pub fn updatePaneCoreConfig(self: *App, pane: *Surface, config: *const configpkg.Config) !void {
+        if (builtin.is_test and self.test_surface_init_stage != null) {
+            _ = try self.performAction(.{ .surface = pane.core() }, .config_change, .{ .config = config });
+            return;
+        }
+        try pane.core().updateConfig(config);
+    }
+
+    pub fn reconfigureSystemTheme(self: *App) void {
+        // A rebuild when the snapshot differs from the last rebuild's,
+        // whatever made that one (each takes it again), or a resource is
+        // missing.
+        const snapshot = SystemThemeSnapshot.capture(self.shownConfig());
+        const changed = self.system_theme_refresh.accept(snapshot) or !std.meta.eql(snapshot.theme, self.resolved_theme);
+        const rebuild = changed or for (self.registry.hosts.items) |host| {
+            if (host.hwnd != null and (host.chrome_brush == null or
+                host.overlay_brush == null or host.edit_brush == null or
+                host.chrome_font == null or host.preview_font == null or
+                (!host.titlebar_icons_geometric and
+                    (host.titlebar_caption_icon_font == null or host.titlebar_action_icon_font == null)) or
+                // The search font stays lazy. Only a failed attempt, not
+                // its intentionally unused state, needs another chance.
+                (host.search_icon_font_resolved and host.search_icon_font == null))) break true;
+        } else false;
+        // A retry when the system's own inputs differ from the last system
+        // theme message's. Not from the snapshot: a reload or a Settings
+        // preview between a system change and its message rebuilds with the
+        // change, and the message then finds the snapshot as it left it.
+        // Resources a message finds missing are GDI's, not DWM's.
+        const inputs = window_state.SystemInputs.capture();
+        const system_changed = if (self.system_inputs) |last| !std.meta.eql(last, inputs) else true;
+        self.system_inputs = inputs;
+        if (rebuild) {
+            self.reconfigureTheme(if (system_changed) .retry else .refresh);
+        } else if (system_changed) {
+            // Nothing to rebuild: an app rebuild already took the change in,
+            // or the change needs none (light/dark under a fixed
+            // `window-theme`). Either way every window whose blur-behind had
+            // not failed shows its opacity; only a failed one tries again.
+            for (self.registry.hosts.items) |host| {
+                if (host.blur_behind_failed) window_state.retryBackgroundOpacity(host);
+            }
+        }
+    }
+
+    /// Rebuilds every window's chrome, frame and DWM attributes for the
+    /// theme and `window-show-tab-bar`; then, after the frame write, `opacity`:
+    /// - `retry`: each window shows its opacity again, and one whose
+    ///   blur-behind failed tries it once more;
+    /// - `refresh`: each window shows its opacity again;
+    /// - `caller_applies`: none does; the caller's `window_state.applyConfig`
+    ///   applies it next, at the value it will show.
+    pub fn reconfigureTheme(self: *App, opacity: enum { retry, refresh, caller_applies }) void {
         const previous_integrated_titlebar = self.use_integrated_titlebar;
         self.use_integrated_titlebar = shouldUseIntegratedTitlebar(
             self.os_build,
@@ -6010,7 +6142,13 @@ pub const App = struct {
             previous_tab_bar_visible != self.tab_bar_visible;
         // The theme as Settings previews it.
         const shown = self.shownConfig();
-        self.resolved_theme = resolveTheme(shown);
+        // What the next system theme message compares with to decide on a
+        // rebuild is this rebuild, whatever asked for it (Settings' preview,
+        // a reload, the palette's theme). Whether a failed blur-behind tries
+        // again it decides from `system_inputs`, which this leaves alone.
+        const snapshot = SystemThemeSnapshot.capture(shown);
+        self.system_theme_refresh.previous = snapshot;
+        self.resolved_theme = snapshot.theme;
         for (self.registry.hosts.items) |host| {
             host.rebuildThemeBrushes();
             host.recreateChromeFont();
@@ -6026,13 +6164,6 @@ pub const App = struct {
             }
             if (host.hwnd) |hwnd| {
                 applyDwmThemeWithBuild(hwnd, &self.resolved_theme, shown, self.os_build);
-                // High Contrast shows every window opaque, and a window that
-                // had blur-behind asserts it again across the theme change.
-                // On a reload this runs before `window_state.applyConfig`
-                // stores the new opacity, so the window applies its old one
-                // first and the new one right after: harmless, the first
-                // changes nothing it had not already.
-                window_state.refreshBackgroundOpacity(host);
                 if (frame_mode_changed) {
                     _ = sys.SetWindowPos(
                         hwnd,
@@ -6044,6 +6175,15 @@ pub const App = struct {
                         c.SWP_NOMOVE | c.SWP_NOSIZE | c.SWP_NOZORDER | c.SWP_NOACTIVATE | c.SWP_FRAMECHANGED,
                     );
                     host.scheduleCaptionUiaSync();
+                }
+                // High Contrast shows every window opaque, and a window that
+                // had blur-behind asserts it again across the theme change,
+                // after the frame write above, as after every style write
+                // that changes the frame.
+                switch (opacity) {
+                    .retry => window_state.retryBackgroundOpacity(host),
+                    .refresh => window_state.refreshBackgroundOpacity(host),
+                    .caller_applies => {},
                 }
                 if (chrome_layout_changed) {
                     runUiActionOrLog("theme update layout failed", host.layout());
@@ -6076,10 +6216,10 @@ pub const App = struct {
 
     /// The opacity a window applies along with `config`
     /// (`window_state.applyConfig`): Settings' preview of it while one is
-    /// shown, whatever `config` is. A reload reaches each terminal's own
-    /// config before the app's (`CoreApp.updateConfig`), so a window that
-    /// took the saved value there would show it until the app's
-    /// `config_change` put the preview back, a theme rebuild later.
+    /// shown, whatever `config` is, so neither a pane's own config change
+    /// (its `.surface` `config_change` outside an app-wide change) nor a
+    /// reload's app-wide step shows a window the saved value under a
+    /// preview.
     pub fn shownBackgroundOpacity(self: *const App, config: *const configpkg.Config) f64 {
         if (self.settings_preview) |*preview| {
             if (preview.@"background-opacity" != self.config.@"background-opacity") return preview.@"background-opacity";
@@ -6108,7 +6248,7 @@ pub const App = struct {
     pub fn refreshSettingsPreview(self: *App, effect: win32_settings.PreviewEffect) void {
         switch (effect) {
             .none => {},
-            .theme => self.reconfigureTheme(),
+            .theme => self.reconfigureTheme(.refresh),
             .opacity => {
                 for (self.registry.windows.items) |surface| {
                     surface.applyRuntimeConfig(&self.config) catch |err| {
@@ -6164,8 +6304,22 @@ pub const App = struct {
             if (effect == .none) continue;
             if (!std.meta.eql(win32_settings.settingValue(&previous, field), win32_settings.settingValue(&self.config, field))) changed.insert(effect);
         }
+        // The theme before the opacity: `EnumSet` iterates in tag order,
+        // which is `PreviewEffect`'s declaration order. An opacity that ends
+        // with the theme is applied by the opacity's own `applyConfig`, for
+        // every window, so the theme does not show the previewed opacity
+        // first.
+        comptime {
+            if (@intFromEnum(win32_settings.PreviewEffect.theme) > @intFromEnum(win32_settings.PreviewEffect.opacity)) {
+                @compileError("endSettingsPreview ends the theme before the opacity: PreviewEffect must declare .theme before .opacity");
+            }
+        }
         var effects = changed.iterator();
-        while (effects.next()) |effect| self.refreshSettingsPreview(effect);
+        while (effects.next()) |effect| {
+            if (effect == .theme and changed.contains(.opacity)) {
+                self.reconfigureTheme(.caller_applies);
+            } else self.refreshSettingsPreview(effect);
+        }
     }
 
     /// Where the picker starts when nothing was chosen or hinted: the profile
@@ -7080,8 +7234,10 @@ pub const App = struct {
                     self.removeHost(host);
                 }
             } else {
-                // The last D3D11 pane may have closed.
-                if (!self.quitting) window_state.refreshBackgroundOpacity(host);
+                // The last D3D11 pane may have closed. Not in a window that
+                // closes whole (`Host.closing`), which would show a mode for
+                // the moment before it goes.
+                if (!self.quitting and !host.closing) window_state.refreshBackgroundOpacity(host);
                 if (self.running) {
                     // A close never restores, raises or takes focus from a
                     // window the user is not looking at, and moves focus only
@@ -8899,7 +9055,7 @@ pub const App = struct {
         // app, so one that fails may have applied part of the reload
         // (`SavedPartlyApplied`).
         postWriteStep(.apply);
-        self.core_app.updateConfig(self, applied) catch |err| {
+        self.updateCoreConfig(applied) catch |err| {
             log.warn("settings save: saved, but applying the reload failed partway; the running settings may be partly updated err={}", .{err});
             return error.SavedPartlyApplied;
         };
@@ -9328,7 +9484,7 @@ pub const App = struct {
         }
         if (!apply) return error.DiskChanged;
         log.info("settings save: the config file changed on disk under an edited setting; offering the choice", .{});
-        self.core_app.updateConfig(self, &disk) catch |err| {
+        self.updateCoreConfig(&disk) catch |err| {
             log.warn("settings save: applying the changed config file failed err={}", .{err});
             return error.ReloadFailed;
         };
@@ -9619,7 +9775,7 @@ pub const App = struct {
             app.cli_config_override_path = @constCast(target);
             var loaded = try load(std.testing.allocator);
             defer loaded.deinit();
-            try app.core_app.updateConfig(app, &loaded);
+            try app.updateCoreConfig(&loaded);
         }
 
         fn end(app: *App) void {
@@ -9677,7 +9833,7 @@ pub const App = struct {
             {
                 var loaded = try SaveTest.load(alloc);
                 defer loaded.deinit();
-                try app.core_app.updateConfig(&app, &loaded);
+                try app.updateCoreConfig(&loaded);
             }
             var original = try app.config.clone(alloc);
             defer original.deinit();
@@ -9711,7 +9867,7 @@ pub const App = struct {
         {
             var loaded = try SaveTest.load(alloc);
             defer loaded.deinit();
-            try app.core_app.updateConfig(&app, &loaded);
+            try app.updateCoreConfig(&loaded);
         }
         var original = try app.config.clone(alloc);
         defer original.deinit();
@@ -9760,7 +9916,7 @@ pub const App = struct {
             {
                 var loaded = try SaveTest.load(alloc);
                 defer loaded.deinit();
-                try app.core_app.updateConfig(&app, &loaded);
+                try app.updateCoreConfig(&loaded);
             }
             var original = try app.config.clone(alloc);
             defer original.deinit();
@@ -9818,7 +9974,7 @@ pub const App = struct {
             {
                 var loaded = try SaveTest.load(alloc);
                 defer loaded.deinit();
-                try app.core_app.updateConfig(&app, &loaded);
+                try app.updateCoreConfig(&loaded);
             }
             var original = try app.config.clone(alloc);
             defer original.deinit();
@@ -10514,7 +10670,7 @@ pub const App = struct {
             {
                 var loaded = try SaveTest.load(alloc);
                 defer loaded.deinit();
-                try app.core_app.updateConfig(&app, &loaded);
+                try app.updateCoreConfig(&loaded);
             }
             SaveTest.fail_next = &fail_next;
             SaveTest.fail_step = .apply;
@@ -10641,7 +10797,7 @@ pub const App = struct {
         {
             var loaded = try SaveTest.load(alloc);
             defer loaded.deinit();
-            try app.core_app.updateConfig(&app, &loaded);
+            try app.updateCoreConfig(&loaded);
         }
         var light_original = try app.config.clone(alloc);
         defer light_original.deinit();
@@ -10755,7 +10911,7 @@ pub const App = struct {
         {
             var loaded = try SaveTest.load(alloc);
             defer loaded.deinit();
-            try app.core_app.updateConfig(&app, &loaded);
+            try app.updateCoreConfig(&loaded);
         }
         var original = try app.config.clone(alloc);
         defer original.deinit();
@@ -10885,7 +11041,7 @@ pub const App = struct {
             defer loaded.deinit();
             var switched = (try loaded.changeConditionalState(.{ .theme = .dark })) orelse return error.TestExpectedSwitch;
             defer switched.deinit();
-            try app.core_app.updateConfig(&app, &switched);
+            try app.updateCoreConfig(&switched);
         }
         try settings_profiles.followFile(&original, &pending, &app.config, &baselines);
         try std.testing.expect(baselines.profiles.values.name.get("py") != null);
@@ -12491,6 +12647,22 @@ test "CHROME57 system broadcasts rebuild once and retain font and accessibility 
     inline for (.{ "Environment", "intl", "Policy" }) |name| {
         try std.testing.expect(!settingChangeAffectsTheme(@bitCast(@intFromPtr(std.unicode.utf8ToUtf16LeStringLiteral(name)))));
     }
+}
+
+test "CHROME57 a system theme message that changed nothing since startup rebuilds nothing" {
+    // Without a baseline, the first message after startup counted as a
+    // change: a theme rebuild, and a retry of a failed blur-behind.
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    try runOnHiddenDesktop(struct {
+        fn body() !void {
+            var fixture: win32.test_support.SafeModeAppFixture = .{};
+            try fixture.init();
+            defer fixture.deinit();
+            const rebuilds = fixture.app.theme_rebuilds;
+            fixture.app.reconfigureSystemTheme();
+            try std.testing.expectEqual(rebuilds, fixture.app.theme_rebuilds);
+        }
+    }.body);
 }
 
 test "CHROME57 repeated host system messages apply the app theme only once" {
