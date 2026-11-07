@@ -314,7 +314,9 @@ that govern each symbol you change, or that none does.
   `win32/child_window.zig`), tweens.
 - [chrome-overlays.md](docs/agents/log/chrome-overlays.md): the command
   palette (`win32_palette.zig`, `win32/palette_controller.zig`, its live
-  theme preview, one window's at a time, and how a reload ends it
+  theme preview, one window's at a time (`Host.showOverlay`, which closes
+  every other window's palette and an open one before another overlay),
+  and how a reload ends it
   (`Host.swapRuntimeConfigFromPalette`, `showPaletteThemePreview`,
   `supersedePaletteThemePreview`, `detachLivePaletteCatalogConfig`, and
   `App.updateCoreConfig`'s fallback after a failed reload), ranking, MRU
