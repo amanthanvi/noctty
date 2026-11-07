@@ -7519,27 +7519,25 @@ pub const Host = struct {
         self.search_timer_active = false;
     }
 
+    /// The timer runs while a pane of any tab waits out a debounce, a
+    /// background tab's included, so its search fires on schedule rather
+    /// than when the user next acts in that tab (G4).
     pub fn refreshSearchTimerState(self: *Host) void {
-        const tab = self.activeTab() orelse {
-            self.killSearchTimer();
-            return;
-        };
-
-        var wants_timer = false;
-        var it = tab.tree.iterator();
-        while (it.next()) |entry| {
-            if (entry.view.docked_search.view().wants_tick) {
-                wants_timer = true;
-                break;
+        const wants_timer = tabs: for (self.tabs.items) |*tab| {
+            var it = tab.tree.iterator();
+            while (it.next()) |entry| {
+                if (entry.view.docked_search.view().wants_tick) break :tabs true;
             }
-        }
+        } else false;
 
         if (wants_timer) self.ensureSearchTimer() else self.killSearchTimer();
     }
 
     pub fn tickSearchBars(self: *Host) void {
-        if (self.activeTab()) |tab| {
-            var it = tab.tree.iterator();
+        // By index: a search's core reports run inside the tick.
+        var index: usize = 0;
+        while (index < self.tabs.items.len) : (index += 1) {
+            var it = self.tabs.items[index].tree.iterator();
             while (it.next()) |entry| {
                 _ = entry.view.dockedSearch(.tick) catch |err| {
                     log.warn("win32 search refresh failed err={}", .{err});

@@ -1635,3 +1635,42 @@ test "win32 docked search stops run query, prev, next, regex, case, word, close"
     }
     try std.testing.expectEqual(@as(?Role, null), searchFocusStopRole(search_focus_stop_count));
 }
+
+test "win32 a docked search debounce pending in a background tab keeps the host's search timer running" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    try win32.test_support.runOnHiddenDesktop(struct {
+        fn body() !void {
+            var fixture: win32.test_support.WindowStartTestApp = .{};
+            try fixture.init();
+            defer fixture.deinit();
+            const app = &fixture.app;
+
+            // A window of two tabs; the first, in the background, has an
+            // edit waiting out its debounce, not yet due.
+            try app.createWindow(win32.default_title);
+            const background = fixture.newest();
+            const host = background.host.?;
+            try std.testing.expect(try app.performAction(.{ .surface = background.core() }, .new_tab, {}));
+            try std.testing.expect(host.activeSurface() != background);
+            const now: i64 = @intCast(sys.GetTickCount64());
+            _ = try background.docked_search.apply(.{ .open = "" }, now);
+            _ = try background.docked_search.apply(.{ .edit = "needle" }, now + 60_000);
+            try std.testing.expect(background.docked_search.view().wants_tick);
+
+            // The timer runs for it, and a tick before it is due keeps it
+            // running. Counted in the active tab alone, the timer stopped,
+            // and the search waited for the user's next act in that tab.
+            host.refreshSearchTimerState();
+            try std.testing.expect(host.search_timer_active);
+            host.tickSearchBars();
+            try std.testing.expect(host.search_timer_active);
+            try std.testing.expect(background.docked_search.view().wants_tick);
+
+            // With nothing pending, the timer stops.
+            _ = try background.docked_search.apply(.{ .edit = "" }, now);
+            try std.testing.expect(!background.docked_search.view().wants_tick);
+            host.refreshSearchTimerState();
+            try std.testing.expect(!host.search_timer_active);
+        }
+    }.body);
+}

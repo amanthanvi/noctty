@@ -334,7 +334,9 @@ that govern each symbol you change, or that none does.
   `searchEditProc` and the bar's paint and UIA in
   `win32/search_controls.zig`; the order of `Surface.endSearch`'s
   end_search and clears in `src/Surface.zig`; visible Up/Down versus
-  core `.next`/`.previous`, debounce) and the layered overlay scrollbar
+  core `.next`/`.previous`, debounce and the host's search timer over
+  every tab: `Host.refreshSearchTimerState`, `tickSearchBars`) and the
+  layered overlay scrollbar
   (`win32_scrollbar_geometry.zig`, heartbeat, alpha, markers).
 - [tabs-panes.md](docs/agents/log/tabs-panes.md): tabs, splits and windows as
   a structure: `Surface.init` ordering, `activateSurface`, showing and hiding
