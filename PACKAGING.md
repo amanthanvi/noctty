@@ -60,7 +60,9 @@ then produces:
 7. Generated package-manager metadata
 
 The symbols ZIP holds one `symbols` folder with `noctty.pdb`,
-`noctty-command.pdb` (for `noctty.com`), `ghostty-vt.pdb` and
+`noctty-command.pdb` (for `noctty.com`), `ghostty-vt.pdb` (only while the
+portable ZIP still carries `ghostty-vt.dll`; see
+[Library consumers](#library-consumers)) and
 `noctty-terminal-handoff-proxy.pdb`. Release builds therefore pass
 `-Dstrip=false` (`scripts/build-package-windows.ps1` does). Left alone,
 that would have grown `noctty.exe` by 2.1 MB and `noctty.com` by 1.4 MB, so
@@ -424,7 +426,34 @@ full toolchain rules live in [HACKING.md](HACKING.md#toolchain).
 
 ## Library consumers
 
-`libghostty-vt` remains intentionally retained and keeps its existing public
-name. The app binary and Windows packaging are rebranded to `noctty`,
-but the library surface is not being renamed as part of this packaging
-cleanup.
+noctty does not ship `libghostty-vt` as a library for other programs.
+`noctty.exe` does not load `ghostty-vt.dll` (its import table has no such
+entry). The copy earlier releases put beside it is version 0.1.0 with the
+pre-1.0 C ABI, under the same name as upstream's libghostty-vt 1.0 DLL,
+which has a stable C ABI. To use the library:
+
+- take upstream's official libghostty-vt, with its Windows x64 DLL, from
+  [lib.ghostty.org](https://lib.ghostty.org); or
+- build it from this tree: `zig build -Demit-lib-vt`, or the CMake wrapper
+  (`CMakeLists.txt`, `dist/cmake/`). CI still builds and tests it (the
+  `windows-lib-vt` job).
+
+Setup no longer installs `ghostty-vt.dll`, and it deletes the copy an
+earlier Setup installed (`[InstallDelete]` in `dist/windows/noctty.iss`).
+Neither package carries `share/pkgconfig/libghostty-vt.pc` any more, and
+Setup deletes that file too. (The updater replaces a portable copy's `share`
+folder as a whole.)
+
+The portable ZIP still carries `ghostty-vt.dll`, and the symbols ZIP
+`ghostty-vt.pdb`, for a transition. The portable updater in noctty 1.3.136
+and earlier refuses a portable update whose payload lacks any file it
+manages, `ghostty-vt.dll` included. It checks that in the running copy when
+it stages the update, and again in the swap, which runs from a copy of the
+same old executable. The updater of later releases accepts a payload
+without the file. When it applies one, it moves the copy aside with the other
+files it replaces, so a rollback puts it back and a confirmed update deletes
+it (`retired_entries` in `src/update/portable_apply.zig`). Once a release
+with that updater has been the latest one for long enough, the portable and
+symbols ZIPs drop the file. A copy older than that release then cannot
+stage the update: its notice offers the release page, and that copy has to
+be updated by hand.

@@ -29,6 +29,11 @@ $buildCapabilitiesPath = Join-Path $zigOutBin "noctty-build-capabilities.json"
 $runtimeFiles = @(
     "noctty.com",
     "noctty.exe",
+    # Transitional: noctty does not use ghostty-vt.dll (libghostty-vt 0.1.0)
+    # and Setup no longer installs it, but the portable updater of 1.3.136
+    # and older refuses a portable ZIP without it. Drop it (and
+    # -Demit-lib-vt=true) only together with
+    # portable_zip_carries_legacy_entries in src/update/portable_apply.zig.
     "ghostty-vt.dll",
     "noctty-terminal-handoff-proxy.dll"
 )

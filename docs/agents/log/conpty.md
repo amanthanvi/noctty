@@ -5,6 +5,7 @@ Dates descend; entries that share a date are not always newest first. A newer-da
 Corrected in other files:
 - 2026-09-23 "Base64 typed into Neovim after an OSC 52 paste" (#261): its "OSC 52 matrix entry above" is the 2026-09-23 "After #264 an OSC 52 paste" entry in clipboard.md, which corrects its size threshold and its Neovim 0.10.4 native result.
 - 2026-09-23 "Input on the wrong row after minimize/restore" (#262): item (b), "NOT fixed", is fixed by the 2026-09-23 "Item (b) of the #262 entry" entry in window-frame.md.
+- 2026-09-15 "Triaging a scrambled TUI report" (#243), trap (2), "every portable release ZIP already ships one for its own version": Setup no longer installs `ghostty-vt.dll`, and the portable ZIP carries it only until a release drops it; from then on, build it with `zig build -Demit-lib-vt=true`. See the 2026-11-08 GHOSTTY-VT-RETIRE entry in build-release-ci.md.
 
 See also:
 - 2026-09-15 "Triaging a scrambled TUI report": its "2026-09-14 PowerShell entry below" is the 2026-09-14 "OSC 133 D in `integration.ps1`" entry in shell-integration.md.

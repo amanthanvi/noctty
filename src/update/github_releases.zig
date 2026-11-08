@@ -2633,11 +2633,7 @@ fn verifyPortablePayload(
 ) !void {
     const manifest = try verifiedPortablePayloadManifestAlloc(alloc, manifest_path);
     defer alloc.free(manifest);
-    for (portable_apply.managed_entries) |entry| {
-        const path = try std.fs.path.join(alloc, &.{ payload_root, entry });
-        defer alloc.free(path);
-        std.fs.accessAbsolute(path, .{}) catch return error.IncompletePortablePayload;
-    }
+    try portable_apply.requirePayloadEntries(alloc, payload_root);
     try verifyPortablePayloadAgainstManifest(alloc, payload_root, manifest);
     try verifyPortablePayloadBinaries(alloc, payload_root);
 }
@@ -2698,6 +2694,14 @@ fn verifyInstalledPortablePayloadAgainstManifest(
         const managed_path = try std.fs.path.join(alloc, &.{ install_root, managed_entry });
         defer alloc.free(managed_path);
         if (!std.mem.eql(u8, managed_entry, "share")) {
+            // A retired file the target payload does not ship is not part of
+            // its identity, whether or not a copy is still on disk.
+            if (portable_apply.isRetiredEntry(managed_entry)) {
+                _ = parseExpectedSha256(manifest, managed_entry) catch |err| switch (err) {
+                    error.InstallerChecksumMissing => continue,
+                    else => {},
+                };
+            }
             try verifyPortableManifestFile(
                 alloc,
                 install_root,
@@ -4943,6 +4947,63 @@ test "portable concurrent launch content identity verifies the installed managed
     try std.testing.expectError(
         error.PortablePayloadManifestMismatch,
         verifyInstalledPortablePayloadAgainstManifest(alloc, install_root, manifest.items),
+    );
+}
+
+test "portable payload and installed identity without a retired file" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.makePath("payload/share");
+    try tmp.dir.makePath("install/share");
+
+    // A payload of a release that no longer ships the retired files.
+    var manifest: std.ArrayList(u8) = .empty;
+    defer manifest.deinit(alloc);
+    for (portable_apply.managed_entries) |managed_entry| {
+        if (portable_apply.isRetiredEntry(managed_entry)) continue;
+        const name = if (std.mem.eql(u8, managed_entry, "share")) "share/theme.txt" else managed_entry;
+        for ([_][]const u8{ "payload", "install" }) |root| {
+            const sub_path = try std.fs.path.join(alloc, &.{ root, name });
+            defer alloc.free(sub_path);
+            try tmp.dir.writeFile(.{ .sub_path = sub_path, .data = name });
+        }
+        var digest: [Sha256.digest_length]u8 = undefined;
+        Sha256.hash(name, &digest, .{});
+        try manifest.writer(alloc).print("{s} *{s}\n", .{ std.fmt.bytesToHex(digest, .lower), name });
+    }
+    const payload_root = try tmp.dir.realpathAlloc(alloc, "payload");
+    defer alloc.free(payload_root);
+    const install_root = try tmp.dir.realpathAlloc(alloc, "install");
+    defer alloc.free(install_root);
+
+    // What staging checks after the manifest's signature.
+    try portable_apply.requirePayloadEntries(alloc, payload_root);
+    try verifyPortablePayloadAgainstManifest(alloc, payload_root, manifest.items);
+    // What the new build checks to confirm the swap, with or without a
+    // leftover copy that the target does not ship.
+    try verifyInstalledPortablePayloadAgainstManifest(alloc, install_root, manifest.items);
+    try tmp.dir.writeFile(.{ .sub_path = "install/ghostty-vt.dll", .data = "leftover" });
+    try verifyInstalledPortablePayloadAgainstManifest(alloc, install_root, manifest.items);
+
+    // A target that ships it still has to match it.
+    var digest: [Sha256.digest_length]u8 = undefined;
+    Sha256.hash("shipped", &digest, .{});
+    try manifest.writer(alloc).print("{s} *ghostty-vt.dll\n", .{std.fmt.bytesToHex(digest, .lower)});
+    try std.testing.expectError(
+        error.PortablePayloadManifestMismatch,
+        verifyInstalledPortablePayloadAgainstManifest(alloc, install_root, manifest.items),
+    );
+    try tmp.dir.deleteFile("install/ghostty-vt.dll");
+    try std.testing.expectError(
+        error.FileNotFound,
+        verifyInstalledPortablePayloadAgainstManifest(alloc, install_root, manifest.items),
+    );
+    // And a payload that leaves out anything else is incomplete.
+    try tmp.dir.deleteFile("payload/noctty.com");
+    try std.testing.expectError(
+        error.IncompletePortablePayload,
+        portable_apply.requirePayloadEntries(alloc, payload_root),
     );
 }
 
