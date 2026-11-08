@@ -502,10 +502,18 @@ that govern each symbol you change, or that none does.
   and resources, the Windows target floor (`src/build/Config.zig`,
   `-Dtarget` `win10`/`win10_rs5`, and the std APIs it gates), packaging
   (`scripts/package-windows.ps1`, `dist/windows/noctty.iss`, what Setup's
-  `CloseApplications` closes), signing, the updater (including
-  `RegisterApplicationRestart` while an installer closes noctty, with
-  `stagedInstallerRunning`; `pkg/wuffs/src/deflate.zig`, the raw DEFLATE
-  decoder for update payloads), release workflows
+  `CloseApplications` closes, and what it installs and deletes), signing,
+  the updater (including `RegisterApplicationRestart` while an installer
+  closes noctty, with `stagedInstallerRunning`; `pkg/wuffs/src/deflate.zig`,
+  the raw DEFLATE decoder for update payloads; the files a portable payload
+  must hold and the ones it may drop: `managed_entries`, `retired_entries`,
+  `legacy_updater_required_entries`, `portable_zip_carries_legacy_entries`,
+  `requirePayloadEntries`, `swapPayload`, `rollback`, `fileMatches`,
+  `verifyBackupManifest` and `checkSetupRetiresLibVt` in
+  `src/update/portable_apply.zig`, `verifyPortablePayload` and
+  `verifyInstalledPortablePayloadAgainstManifest` in
+  `src/update/github_releases.zig`, and the packaging scripts'
+  `$runtimeFiles`), release workflows
   and package managers (WinGet, Scoop,
   Chocolatey), GitHub Actions CI (path filter, caching, runners), CRLF and
   `.gitattributes` in shipped files.

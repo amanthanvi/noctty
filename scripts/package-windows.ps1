@@ -61,6 +61,11 @@ $buildCapabilitiesPath = Join-Path $zigOutBin "noctty-build-capabilities.json"
 $runtimeFiles = @(
     "noctty.com",
     "noctty.exe",
+    # Transitional: noctty does not use ghostty-vt.dll (libghostty-vt 0.1.0)
+    # and Setup no longer installs it, but the portable updater of 1.3.136
+    # and older refuses a portable ZIP without it. Drop it (and
+    # -Demit-lib-vt=true) only together with
+    # portable_zip_carries_legacy_entries in src/update/portable_apply.zig.
     "ghostty-vt.dll",
     "noctty-terminal-handoff-proxy.dll"
 )
@@ -664,6 +669,20 @@ try {
 
     if (Test-Path -LiteralPath $zigOutShare) {
         Copy-Tree -Source $zigOutShare -Destination $portableRoot
+    }
+    # -Demit-lib-vt=true installs libghostty-vt's pkg-config file into
+    # zig-out\share. noctty ships no library for it to describe, and the
+    # updater swaps share\ as one directory, so no older updater needs it.
+    $libVtPkgConfigDir = Join-Path $portableRoot "share\pkgconfig"
+    $libVtPkgConfig = Join-Path $libVtPkgConfigDir "libghostty-vt.pc"
+    if (Test-Path -LiteralPath $libVtPkgConfig) {
+        Remove-Item -LiteralPath $libVtPkgConfig -Force
+    }
+    if (Test-Path -LiteralPath $libVtPkgConfig) {
+        throw "Staged payload still contains $libVtPkgConfig after its removal."
+    }
+    if ((Test-Path -LiteralPath $libVtPkgConfigDir) -and -not (Get-ChildItem -LiteralPath $libVtPkgConfigDir -Force)) {
+        Remove-Item -LiteralPath $libVtPkgConfigDir -Force
     }
 
     # The compiled entries for TERM=xterm-ghostty that the build writes on

@@ -66,7 +66,10 @@ noctty is based on post-`v1.3.1` upstream main (`1.3.2-dev`, `ba398dfff`,
   from `PROMPT`; an active Clink adds command-finish marks and exit codes when
   it loads the shipped script.
 - Live config reload via keybind (`Ctrl+Shift+,`).
-- `libghostty-vt` retained for Zig and C consumers.
+- `libghostty-vt` retained in the tree, built and tested, for Zig and C
+  consumers who build it themselves. Setup no longer installs it, and the
+  portable ZIP carries `ghostty-vt.dll` only for the updater transition
+  ([PACKAGING.md](../PACKAGING.md#library-consumers)).
 
 Win32-validated VT protocol coverage is tracked in
 [windows-vt-conformance.md](windows-vt-conformance.md).
