@@ -23,7 +23,8 @@ bugs don't get buried.
    results in the description. Call out risks or follow-up work if a
    change is intentionally partial.
 4. Preserve `libghostty-vt`: it stays buildable and tested from this repo
-   (`zig build -Demit-lib-vt`), though releases do not ship it as a library
+   (`zig build -Demit-lib-vt`). Setup no longer installs it, and the portable
+   ZIP carries `ghostty-vt.dll` only for the updater transition
    ([PACKAGING.md](PACKAGING.md#library-consumers)).
 5. Keep docs, packaging, and user-visible strings aligned with the
    shipped `noctty` product identity.

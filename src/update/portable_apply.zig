@@ -315,8 +315,8 @@ test "portable managed script list parser rejects missing extra and duplicate en
 ///   on its own) and the pins of that list in
 ///   test/windows/flagship/contracts/Contracts.93-ConPty.ps1;
 /// - scripts/test-windows-build-capabilities.ps1;
-/// - the packaged-DLL smoke: test/windows/package-portable-cli.ps1 and
-///   test/windows/test_dll_init.c;
+/// - the packaged-DLL smoke: test/windows/package-portable-cli.ps1,
+///   test/windows/test_dll_init.c and its section in test/windows/README.md;
 /// - the symbols fixture in
 ///   test/windows/flagship/contracts/Contracts.82-ReleaseSymbols.ps1. It is
 ///   synthetic but not independent: `Assert-SymbolsMatchBinaries` takes its
