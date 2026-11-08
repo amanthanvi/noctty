@@ -674,7 +674,13 @@ try {
     # zig-out\share. noctty ships no library for it to describe, and the
     # updater swaps share\ as one directory, so no older updater needs it.
     $libVtPkgConfigDir = Join-Path $portableRoot "share\pkgconfig"
-    Remove-Item -LiteralPath (Join-Path $libVtPkgConfigDir "libghostty-vt.pc") -Force -ErrorAction SilentlyContinue
+    $libVtPkgConfig = Join-Path $libVtPkgConfigDir "libghostty-vt.pc"
+    if (Test-Path -LiteralPath $libVtPkgConfig) {
+        Remove-Item -LiteralPath $libVtPkgConfig -Force
+    }
+    if (Test-Path -LiteralPath $libVtPkgConfig) {
+        throw "Staged payload still contains $libVtPkgConfig after its removal."
+    }
     if ((Test-Path -LiteralPath $libVtPkgConfigDir) -and -not (Get-ChildItem -LiteralPath $libVtPkgConfigDir -Force)) {
         Remove-Item -LiteralPath $libVtPkgConfigDir -Force
     }

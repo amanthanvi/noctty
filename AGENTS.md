@@ -507,8 +507,11 @@ that govern each symbol you change, or that none does.
   closes noctty, with `stagedInstallerRunning`; `pkg/wuffs/src/deflate.zig`,
   the raw DEFLATE decoder for update payloads; the files a portable payload
   must hold and the ones it may drop: `managed_entries`, `retired_entries`,
-  `requirePayloadEntries` and `swapPayload` in
-  `src/update/portable_apply.zig`, and the packaging scripts'
+  `legacy_updater_required_entries`, `portable_zip_carries_legacy_entries`,
+  `requirePayloadEntries`, `swapPayload` and `rollback` in
+  `src/update/portable_apply.zig`, `verifyPortablePayload` and
+  `verifyInstalledPortablePayloadAgainstManifest` in
+  `src/update/github_releases.zig`, and the packaging scripts'
   `$runtimeFiles`), release workflows
   and package managers (WinGet, Scoop,
   Chocolatey), GitHub Actions CI (path filter, caching, runners), CRLF and

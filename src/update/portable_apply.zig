@@ -194,11 +194,32 @@ pub fn requirePayloadEntries(alloc: Allocator, payload_root: []const u8) !void {
 /// Whether a payload has `name`: false only for a retired entry it leaves
 /// out, `IncompletePortablePayload` for any other entry it cannot show.
 fn payloadEntryPresent(path: []const u8, name: []const u8) !bool {
-    std.fs.accessAbsolute(path, .{}) catch |err| {
-        if (err == error.FileNotFound and isRetiredEntry(name)) return false;
-        return error.IncompletePortablePayload;
-    };
+    std.fs.accessAbsolute(path, .{}) catch |err| return payloadEntryAbsent(err, name);
     return true;
+}
+
+/// How a failed access of a payload entry reads: only a retired entry that is
+/// not there at all is allowed to be missing. Any other error, for a retired
+/// entry too (access denied, a bad name), leaves the payload incomplete.
+fn payloadEntryAbsent(err: anyerror, name: []const u8) error{IncompletePortablePayload}!bool {
+    if (err == error.FileNotFound and isRetiredEntry(name)) return false;
+    return error.IncompletePortablePayload;
+}
+
+test "portable payload entry access errors other than not-found are incomplete, retired or not" {
+    try std.testing.expectEqual(false, try payloadEntryAbsent(error.FileNotFound, "ghostty-vt.dll"));
+    for ([_]anyerror{
+        error.AccessDenied,
+        error.BadPathName,
+        error.NameTooLong,
+        error.InputOutput,
+        error.PermissionDenied,
+        error.Unexpected,
+    }) |err| {
+        try std.testing.expectError(error.IncompletePortablePayload, payloadEntryAbsent(err, "ghostty-vt.dll"));
+        try std.testing.expectError(error.IncompletePortablePayload, payloadEntryAbsent(err, "noctty.com"));
+    }
+    try std.testing.expectError(error.IncompletePortablePayload, payloadEntryAbsent(error.FileNotFound, "noctty.com"));
 }
 
 // Test-only drift guard for the literal foreach lists in both manifest scripts.
@@ -295,16 +316,37 @@ test "portable managed script list parser rejects missing extra and duplicate en
 ///   test/windows/flagship/contracts/Contracts.93-ConPty.ps1;
 /// - scripts/test-windows-build-capabilities.ps1;
 /// - the packaged-DLL smoke: test/windows/package-portable-cli.ps1 and
-///   test/windows/test_dll_init.c.
+///   test/windows/test_dll_init.c;
+/// - the symbols fixture in
+///   test/windows/flagship/contracts/Contracts.82-ReleaseSymbols.ps1. It is
+///   synthetic but not independent: `Assert-SymbolsMatchBinaries` takes its
+///   binary list from `Get-WindowsSignedRuntimePayloads`, so with the DLL gone
+///   from that list the fixture's ghostty-vt.pdb "matches no shipped binary",
+///   its evidence count of 3 is wrong, and the age-mismatch case has to move
+///   to another binary;
+/// - the list in the github_releases.zig test "portable payload PEs are
+///   publisher-pinned except the bundled ConPTY pair", which mirrors
+///   `Get-WindowsSignedRuntimePayloads`.
 /// These keep naming it. The `$managedRootFiles` allowlists in
 /// scripts/portable-manifest-verification.ps1 and scripts/package-windows.ps1
 /// must match `managed_entries`, which keeps the DLL while the updater manages
 /// retired copies (they permit it in a payload, they do not require it).
-/// And these verify releases that shipped it:
-/// docs/verify-release.md, scripts/check-site-copy.ps1,
-/// site/tests/trust.test.mjs, and the synthetic ghostty-vt.pdb fixture in
-/// Contracts.82-ReleaseSymbols.ps1. The lib-vt job in
-/// .github/workflows/test.yml stays while CI builds lib-vt.
+/// And these verify releases that shipped it: docs/verify-release.md,
+/// scripts/check-site-copy.ps1 and site/tests/trust.test.mjs. The lib-vt job
+/// in .github/workflows/test.yml stays while CI builds lib-vt.
+///
+/// An option for that change, for the maintainer to weigh: ship a tiny
+/// noctty-signed stub named ghostty-vt.dll (no exports) in place of the
+/// library, so copies of 1.3.136 or older still update in-app. Their updater
+/// (read at e629842e9, the 1.3.136 release commit, `github_releases.zig`)
+/// asks of a payload DLL only that it exists (`verifyPortablePayload` and
+/// `swapPayload`), has a line in the signed manifest with its SHA-256
+/// (`verifyPortablePayloadAgainstManifest`), is `MZ`/`PE` with the build's
+/// machine (`readPeMachine`) and carries a pinned-publisher Authenticode
+/// signature (`verifyPortablePayloadBinaries`). Nothing reads its exports or
+/// size. The cost: a file under the clashing name stays in the portable ZIP
+/// (a program that loads it fails on missing entry points rather than a
+/// mismatched ABI), and it stays in `Get-WindowsSignedRuntimePayloads`.
 const portable_zip_carries_legacy_entries = true;
 
 /// The quoted names of a PowerShell `<marker> @(` list, one per line.
@@ -334,6 +376,116 @@ fn innoSection(script: []const u8, header: []const u8) ![]const u8 {
     const body = script[start + header.len ..];
     const end = std.mem.indexOf(u8, body, "\n[") orelse body.len;
     return body[0..end];
+}
+
+/// The next line of an Inno section that ISCC compiles: trimmed, and neither
+/// blank nor a `;` comment.
+fn nextActiveInnoLine(lines: *std.mem.SplitIterator(u8, .scalar)) ?[]const u8 {
+    while (lines.next()) |raw_line| {
+        const line = std.mem.trim(u8, raw_line, " \t\r");
+        if (line.len == 0 or line[0] == ';') continue;
+        return line;
+    }
+    return null;
+}
+
+fn innoSectionHasLine(section: []const u8, rule: []const u8) bool {
+    var lines = std.mem.splitScalar(u8, section, '\n');
+    while (nextActiveInnoLine(&lines)) |line| {
+        if (std.mem.eql(u8, line, rule)) return true;
+    }
+    return false;
+}
+
+/// The `[InstallDelete]` rules for the libghostty-vt files an older Setup
+/// installed under share\ (the portable updater swaps share\ whole, so these
+/// left both packages without a transition).
+const setup_delete_pc_rule = "Type: files; Name: \"{app}\\share\\pkgconfig\\libghostty-vt.pc\"";
+const setup_delete_pc_dir_rule = "Type: dirifempty; Name: \"{app}\\share\\pkgconfig\"";
+const setup_lib_vt_share_delete_rules = [_][]const u8{ setup_delete_pc_rule, setup_delete_pc_dir_rule };
+
+/// Setup never installs a retired file, and deletes the copies an older Setup
+/// left: exactly one active stage rule, whose `Excludes` names each retired
+/// entry at the stage root, and an active `[InstallDelete]` rule for each.
+fn checkSetupRetiresLibVt(alloc: Allocator, iss: []const u8) !void {
+    const files = try innoSection(iss, "\n[Files]");
+    const install_delete = try innoSection(iss, "\n[InstallDelete]");
+
+    const stage_prefix = "Source: \"{#StageDir}\\*\";";
+    var stage_rule: ?[]const u8 = null;
+    var lines = std.mem.splitScalar(u8, files, '\n');
+    while (nextActiveInnoLine(&lines)) |line| {
+        if (!std.mem.startsWith(u8, line, stage_prefix)) continue;
+        if (stage_rule != null) return error.SetupStageRuleNotUnique;
+        stage_rule = line;
+    }
+    const rule = stage_rule orelse return error.SetupStageRuleMissing;
+
+    // The rule's `Excludes: "..."` parameter, split at its commas.
+    var excludes: ?[]const u8 = null;
+    var params = std.mem.splitScalar(u8, rule, ';');
+    while (params.next()) |raw_param| {
+        const param = std.mem.trim(u8, raw_param, " \t");
+        const name = "Excludes: \"";
+        if (!std.mem.startsWith(u8, param, name) or param[param.len - 1] != '"') continue;
+        excludes = param[name.len .. param.len - 1];
+    }
+    for (retired_entries) |entry| {
+        const exclude = try std.fmt.allocPrint(alloc, "\\{s}", .{entry});
+        defer alloc.free(exclude);
+        var patterns = std.mem.splitScalar(u8, excludes orelse return error.RetiredEntryInstalledBySetup, ',');
+        while (patterns.next()) |pattern| {
+            if (std.mem.eql(u8, std.mem.trim(u8, pattern, " "), exclude)) break;
+        } else return error.RetiredEntryInstalledBySetup;
+
+        const delete_rule = try std.fmt.allocPrint(alloc, "Type: files; Name: \"{{app}}\\{s}\"", .{entry});
+        defer alloc.free(delete_rule);
+        if (!innoSectionHasLine(install_delete, delete_rule)) return error.RetiredEntryLeftBySetup;
+    }
+    for (setup_lib_vt_share_delete_rules) |delete_rule| {
+        if (!innoSectionHasLine(install_delete, delete_rule)) return error.LibVtShareFileLeftBySetup;
+    }
+}
+
+test "Setup retirement check reads only the rules ISCC compiles" {
+    const alloc = std.testing.allocator;
+    const iss = try std.fs.cwd().readFileAlloc(alloc, "dist/windows/noctty.iss", 1024 * 1024);
+    defer alloc.free(iss);
+    try checkSetupRetiresLibVt(alloc, iss);
+
+    // Each mutation of the shipped script must fail: a rule commented out,
+    // a rule deleted, the Excludes dropped or not naming the root file.
+    const Mutation = struct { from: []const u8, to: []const u8, err: anyerror };
+    const delete_dll = "Type: files; Name: \"{app}\\ghostty-vt.dll\"";
+    const delete_pc = setup_delete_pc_rule;
+    const delete_pc_dir = setup_delete_pc_dir_rule;
+    const excludes = " Excludes: \"\\ghostty-vt.dll\";";
+    const stage = "Source: \"{#StageDir}\\*\";";
+    for ([_]Mutation{
+        .{ .from = delete_dll, .to = "; " ++ delete_dll, .err = error.RetiredEntryLeftBySetup },
+        .{ .from = delete_dll, .to = "", .err = error.RetiredEntryLeftBySetup },
+        .{ .from = delete_dll, .to = "Type: files; Name: \"{app}\\share\\ghostty-vt.dll\"", .err = error.RetiredEntryLeftBySetup },
+        .{ .from = delete_pc, .to = ";" ++ delete_pc, .err = error.LibVtShareFileLeftBySetup },
+        .{ .from = delete_pc_dir, .to = "  ; " ++ delete_pc_dir, .err = error.LibVtShareFileLeftBySetup },
+        .{ .from = excludes, .to = "", .err = error.RetiredEntryInstalledBySetup },
+        .{ .from = excludes, .to = " Excludes: \"ghostty-vt.dll.txt\";", .err = error.RetiredEntryInstalledBySetup },
+        .{ .from = stage, .to = "; " ++ stage, .err = error.SetupStageRuleMissing },
+    }) |mutation| {
+        try std.testing.expect(std.mem.indexOf(u8, iss, mutation.from) != null);
+        const mutated = try std.mem.replaceOwned(u8, alloc, iss, mutation.from, mutation.to);
+        defer alloc.free(mutated);
+        checkSetupRetiresLibVt(alloc, mutated) catch |err| {
+            try std.testing.expectEqual(mutation.err, err);
+            continue;
+        };
+        std.debug.print("mutation passed: '{s}' -> '{s}'\n", .{ mutation.from, mutation.to });
+        return error.TestExpectedError;
+    }
+
+    // A commented-out duplicate of the stage rule is not a second rule.
+    const commented_copy = try std.mem.replaceOwned(u8, alloc, iss, "\n[InstallDelete]", "\n; Source: \"{#StageDir}\\*\"; DestDir: \"{app}\"\n[InstallDelete]");
+    defer alloc.free(commented_copy);
+    try checkSetupRetiresLibVt(alloc, commented_copy);
 }
 
 test "portable payload keeps retired entries while older updaters require them" {
@@ -380,32 +532,7 @@ test "portable payload keeps retired entries while older updaters require them" 
     // installed.
     const iss = try std.fs.cwd().readFileAlloc(alloc, "dist/windows/noctty.iss", 1024 * 1024);
     defer alloc.free(iss);
-    const files = try innoSection(iss, "\n[Files]");
-    const install_delete = try innoSection(iss, "\n[InstallDelete]");
-    for (retired_entries) |entry| {
-        const exclude = try std.fmt.allocPrint(alloc, "\\{s}", .{entry});
-        defer alloc.free(exclude);
-        var stage_rules: usize = 0;
-        var lines = std.mem.splitScalar(u8, files, '\n');
-        while (lines.next()) |line| {
-            if (std.mem.indexOf(u8, line, "Source: \"{#StageDir}\\*\"") == null) continue;
-            stage_rules += 1;
-            const excludes_start = std.mem.indexOf(u8, line, "Excludes: \"") orelse
-                return error.RetiredEntryInstalledBySetup;
-            const excludes_body = line[excludes_start + "Excludes: \"".len ..];
-            const excludes_end = std.mem.indexOfScalar(u8, excludes_body, '"') orelse
-                return error.RetiredEntryInstalledBySetup;
-            var patterns = std.mem.splitScalar(u8, excludes_body[0..excludes_end], ',');
-            while (patterns.next()) |pattern| {
-                if (std.mem.eql(u8, std.mem.trim(u8, pattern, " "), exclude)) break;
-            } else return error.RetiredEntryInstalledBySetup;
-        }
-        try std.testing.expectEqual(@as(usize, 1), stage_rules);
-
-        const delete_rule = try std.fmt.allocPrint(alloc, "Type: files; Name: \"{{app}}\\{s}\"", .{entry});
-        defer alloc.free(delete_rule);
-        if (std.mem.indexOf(u8, install_delete, delete_rule) == null) return error.RetiredEntryLeftBySetup;
-    }
+    try checkSetupRetiresLibVt(alloc, iss);
 }
 
 test "portable script list parser reads quoted names and rejects other syntax" {
@@ -763,9 +890,15 @@ fn verifyBackupManifest(
         if (restore_root) |root| {
             const target = try joinPortableRelativePath(alloc, root, name);
             defer alloc.free(target);
-            if (!share_already_restored or
-                !(std.mem.eql(u8, name, "share") or std.mem.startsWith(u8, name, "share/")))
+            if ((!share_already_restored or
+                !(std.mem.eql(u8, name, "share") or std.mem.startsWith(u8, name, "share/"))) and
+                !fileMatches(target, &expected))
             {
+                // A file the failed swap never changed already holds the
+                // backup's bytes. Rewriting it anyway fails exactly when the
+                // swap did, on a copy another process holds open without
+                // delete sharing, and a rollback that fails relaunches
+                // nothing.
                 const restore_temp = try std.fmt.allocPrint(alloc, "{s}.restore", .{target});
                 defer alloc.free(restore_temp);
                 removePathIfExists(restore_temp) catch |err| switch (err) {
@@ -836,6 +969,16 @@ fn verifyBackupManifest(
         }
         if (restored_file_count != file_count) return error.IncompletePortableUpdateRollback;
     }
+}
+
+/// Whether `path` is a file whose SHA-256 is `expected`. Any failure to read
+/// it (missing, a directory, unreadable) is a no.
+fn fileMatches(path: []const u8, expected: *const [std.crypto.hash.sha2.Sha256.digest_length]u8) bool {
+    if (pathIsWindowsReparsePoint(path)) return false;
+    const kind = pathKind(path) catch return false;
+    if (kind != .file) return false;
+    const actual = sha256File(path) catch return false;
+    return std.mem.eql(u8, expected, &actual);
 }
 
 fn joinPortableRelativePath(alloc: Allocator, root: []const u8, relative: []const u8) ![]u8 {
@@ -1208,6 +1351,72 @@ test "portable swap removes a retired file the payload leaves out, and rollback 
         try std.testing.expectEqualStrings(restored[1], contents);
     }
     try std.testing.expectError(error.FileNotFound, tmp.dir.access("install/LICENSE", .{}));
+}
+
+test "portable rollback succeeds when the swap failed on a file held without delete sharing" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.makePath("install/share");
+    try tmp.dir.writeFile(.{ .sub_path = "install/noctty.exe", .data = "old exe" });
+    try tmp.dir.writeFile(.{ .sub_path = "install/noctty.com", .data = "old com" });
+    try tmp.dir.writeFile(.{ .sub_path = "install/ghostty-vt.dll", .data = "old vt" });
+    try tmp.dir.writeFile(.{ .sub_path = "install/share/theme.txt", .data = "old share" });
+    try writeTestPayload(tmp.dir, "payload", &retired_entries);
+
+    const root = try tmp.dir.realpathAlloc(alloc, ".");
+    defer alloc.free(root);
+    const install_root = try std.fs.path.join(alloc, &.{ root, "install" });
+    defer alloc.free(install_root);
+    const payload_root = try std.fs.path.join(alloc, &.{ root, "payload" });
+    defer alloc.free(payload_root);
+    const backup_root = try std.fs.path.join(alloc, &.{ root, "backup" });
+    defer alloc.free(backup_root);
+    const displaced_root = try std.fs.path.join(alloc, &.{ root, "displaced" });
+    defer alloc.free(displaced_root);
+    const dll_path = try std.fs.path.join(alloc, &.{ install_root, "ghostty-vt.dll" });
+    defer alloc.free(dll_path);
+
+    // Another process reading the DLL without FILE_SHARE_DELETE: it can be
+    // read and copied, but neither renamed nor replaced.
+    const dll_w = try std.unicode.utf8ToUtf16LeAllocZ(alloc, dll_path);
+    defer alloc.free(dll_w);
+    const holder = std.os.windows.kernel32.CreateFileW(
+        dll_w.ptr,
+        std.os.windows.GENERIC_READ,
+        std.os.windows.FILE_SHARE_READ | std.os.windows.FILE_SHARE_WRITE,
+        null,
+        std.os.windows.OPEN_EXISTING,
+        std.os.windows.FILE_ATTRIBUTE_NORMAL,
+        null,
+    );
+    try std.testing.expect(holder != std.os.windows.INVALID_HANDLE_VALUE);
+    defer std.os.windows.CloseHandle(holder);
+
+    try prepareBackup(alloc, install_root, backup_root);
+    // The swap replaced noctty.com, then could not move the held DLL aside.
+    if (swapPayload(alloc, install_root, payload_root, backup_root, displaced_root)) |_| {
+        return error.TestExpectedError;
+    } else |_| {}
+    const partial = try tmp.dir.readFileAlloc(alloc, "install/noctty.com", 32);
+    defer alloc.free(partial);
+    try std.testing.expectEqualStrings("new noctty.com", partial);
+
+    // Rollback leaves the untouched, still held DLL alone and restores the
+    // rest, so the helper goes on to relaunch the old build.
+    try rollback(alloc, install_root, backup_root, displaced_root);
+    for ([_][2][]const u8{
+        .{ "install/noctty.com", "old com" },
+        .{ "install/ghostty-vt.dll", "old vt" },
+        .{ "install/noctty.exe", "old exe" },
+        .{ "install/share/theme.txt", "old share" },
+    }) |restored| {
+        const contents = try tmp.dir.readFileAlloc(alloc, restored[0], 16);
+        defer alloc.free(contents);
+        try std.testing.expectEqualStrings(restored[1], contents);
+    }
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access("install/ghostty-vt.dll.restore", .{}));
 }
 
 test "portable swap of an install without the retired file, or a payload with it" {
