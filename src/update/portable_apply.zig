@@ -293,11 +293,14 @@ test "portable managed script list parser rejects missing extra and duplicate en
 ///   chain derives its expected signature count from it, so the count drops
 ///   on its own) and the pins of that list in
 ///   test/windows/flagship/contracts/Contracts.93-ConPty.ps1;
-/// - scripts/portable-manifest-verification.ps1 and
-///   scripts/test-windows-build-capabilities.ps1;
+/// - scripts/test-windows-build-capabilities.ps1;
 /// - the packaged-DLL smoke: test/windows/package-portable-cli.ps1 and
 ///   test/windows/test_dll_init.c.
-/// These keep naming it, because they verify releases that shipped it:
+/// These keep naming it. The `$managedRootFiles` allowlists in
+/// scripts/portable-manifest-verification.ps1 and scripts/package-windows.ps1
+/// must match `managed_entries`, which keeps the DLL while the updater manages
+/// retired copies (they permit it in a payload, they do not require it).
+/// And these verify releases that shipped it:
 /// docs/verify-release.md, scripts/check-site-copy.ps1,
 /// site/tests/trust.test.mjs, and the synthetic ghostty-vt.pdb fixture in
 /// Contracts.82-ReleaseSymbols.ps1. The lib-vt job in
