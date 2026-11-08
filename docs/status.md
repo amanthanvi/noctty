@@ -34,10 +34,10 @@ noctty is based on post-`v1.3.1` upstream main (`1.3.2-dev`, `ba398dfff`,
   weekly, non-required job on Windows Server 2022 (build 20348) runs the unit
   suite and a hidden-desktop launch below build 22000, which exercises the
   startup-time Windows 10 branches; unit tests also stand in for older builds.
-  A person runs the
-  [Windows 10 release checklist](windows10-release-checklist.md) on a Windows 10
-  22H2 machine before a release. Chrome, input and startup changes are
-  unmeasured on Windows 10 unless a page says otherwise.
+  A release does not require a manual Windows 10 pass; the
+  [Windows 10 manual checklist](windows10-release-checklist.md) is an optional
+  pass for a change that needs Windows 10 evidence. Chrome, input and startup
+  changes are unmeasured on Windows 10 unless a page says otherwise.
   [windows.md](windows.md#windows-tabs-and-splits) describes the
   frameless undecorated window on Windows 10, which was exercised only by
   forcing that code path on Windows 11.

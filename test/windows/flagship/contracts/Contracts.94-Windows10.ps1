@@ -1,7 +1,7 @@
-# The Windows 10 pre-release checklist must keep up with the code that branches on
+# The Windows 10 manual checklist must keep up with the code that branches on
 # the Windows build, and the report-only workflow must stay what the checklist
-# says it is. No GitHub-hosted image is Windows 10, so these contracts are what
-# stops the checklist from going stale between releases.
+# says it is. No GitHub-hosted image is Windows 10 and a release does not
+# require the checklist, so these contracts are what stops it from going stale.
 $win10ChecklistPath = Join-Path $repoRoot 'docs\windows10-release-checklist.md'
 $win10WorkflowPath = Join-Path $repoRoot '.github\workflows\windows10-branches.yml'
 $win10Checklist = Get-Content -LiteralPath $win10ChecklistPath -Raw
@@ -165,13 +165,6 @@ $win10Contracts = @(
         Pattern = '\(\.\./\.github/workflows/windows10-branches\.yml\)'
         Kind = 'Text'
         Description = 'the checklist links the report-only Windows 10 workflow'
-    }
-    @{
-        File = (Join-Path $repoRoot 'PACKAGING.md')
-        Content = { Get-Content -LiteralPath (Join-Path $repoRoot 'PACKAGING.md') -Raw }
-        Pattern = '(?s)### Release runbook.*docs/windows10-release-checklist\.md.*### WinGet'
-        Kind = 'Text'
-        Description = 'the release runbook links the Windows 10 checklist'
     }
     @{
         File = $win10WorkflowPath
