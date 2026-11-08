@@ -283,6 +283,25 @@ test "portable managed script list parser rejects missing extra and duplicate en
 /// that drops them from the packaging scripts, once a release with
 /// `retired_entries` has been the latest one long enough for copies to reach
 /// it; a copy older than that still has to update by hand.
+///
+/// That change also drops the DLL from (names, not line numbers, so this
+/// survives edits):
+/// - `$runtimeFiles` and `-Demit-lib-vt=true` in scripts/package-windows.ps1
+///   and scripts/build-package-windows.ps1, and ghostty-vt.pdb from the
+///   symbols ZIP they build;
+/// - `Get-WindowsSignedRuntimePayloads` in scripts/common.ps1 (the release
+///   chain derives its expected signature count from it, so the count drops
+///   on its own) and the pins of that list in
+///   test/windows/flagship/contracts/Contracts.93-ConPty.ps1;
+/// - scripts/portable-manifest-verification.ps1 and
+///   scripts/test-windows-build-capabilities.ps1;
+/// - the packaged-DLL smoke: test/windows/package-portable-cli.ps1 and
+///   test/windows/test_dll_init.c.
+/// These keep naming it, because they verify releases that shipped it:
+/// docs/verify-release.md, scripts/check-site-copy.ps1,
+/// site/tests/trust.test.mjs, and the synthetic ghostty-vt.pdb fixture in
+/// Contracts.82-ReleaseSymbols.ps1. The lib-vt job in
+/// .github/workflows/test.yml stays while CI builds lib-vt.
 const portable_zip_carries_legacy_entries = true;
 
 /// The quoted names of a PowerShell `<marker> @(` list, one per line.
