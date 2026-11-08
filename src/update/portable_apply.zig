@@ -408,12 +408,33 @@ const setup_lib_vt_share_delete_rules = [_][]const u8{ setup_delete_pc_rule, set
 /// left: exactly one active stage rule, whose `Excludes` names each retired
 /// entry at the stage root, no other `[Files]` rule that could install one,
 /// and an active `[InstallDelete]` rule for each.
+///
+/// This catches an edit that breaks the transition by mistake. It reads the
+/// script as ISCC would only as far as ISPP conditionals and `{#...}`
+/// expansions go (both refused around and in these rules); deliberately
+/// obfuscating the script (`#include`, `#emit`, macros) is for review to catch.
 fn checkSetupRetiresLibVt(alloc: Allocator, iss: []const u8) !void {
     const files = try innoSection(iss, "\n[Files]");
     const install_delete = try innoSection(iss, "\n[InstallDelete]");
 
-    // ISPP can drop any line it wraps (`#if 0`), so neither section may hold a
-    // preprocessor line; the active lines read below are then what ISCC compiles.
+    // ISPP drops whatever a false conditional wraps, including a whole section
+    // when the conditional opens before its header, so neither header may sit
+    // inside one.
+    var depth: usize = 0;
+    var script_lines = std.mem.splitScalar(u8, iss, '\n');
+    while (script_lines.next()) |raw_line| {
+        const line = std.mem.trim(u8, raw_line, " \t\r");
+        if (std.mem.startsWith(u8, line, "#if")) {
+            depth += 1;
+        } else if (std.mem.startsWith(u8, line, "#endif")) {
+            depth -|= 1;
+        } else if (depth > 0 and (std.mem.eql(u8, line, "[Files]") or std.mem.eql(u8, line, "[InstallDelete]"))) {
+            return error.SetupRuleConditional;
+        }
+    }
+
+    // Nor may either section hold a preprocessor line, so the active lines read
+    // below are what ISCC compiles.
     for ([_][]const u8{ files, install_delete }) |section| {
         var raw_lines = std.mem.splitScalar(u8, section, '\n');
         while (raw_lines.next()) |raw_line| {
@@ -432,7 +453,9 @@ fn checkSetupRetiresLibVt(alloc: Allocator, iss: []const u8) !void {
             continue;
         }
         // The stage rule's Excludes covers only that rule, so any other rule
-        // names its files: no wildcard, and nothing from libghostty-vt.
+        // names its files literally: no ISPP expansion, no wildcard, and
+        // nothing from libghostty-vt.
+        if (std.mem.indexOf(u8, line, "{#") != null) return error.SetupRuleExpansion;
         if (std.mem.indexOfAny(u8, line, "*?") != null) return error.SetupExtraWildcardRule;
         for (retired_entries) |entry| {
             if (std.ascii.indexOfIgnoreCase(line, entry) != null) return error.RetiredEntryInstalledBySetup;
@@ -494,9 +517,13 @@ test "Setup retirement check reads only the rules ISCC compiles" {
         .{ .from = stage, .to = "; " ++ stage, .err = error.SetupStageRuleMissing },
         .{ .from = delete_dll, .to = "#if 0\n" ++ delete_dll ++ "\n#endif", .err = error.SetupRuleConditional },
         .{ .from = stage, .to = "#if 0\n#endif\n" ++ stage, .err = error.SetupRuleConditional },
-        .{ .from = files_end, .to = "\nSource: \"{#StageDir}\\ghostty-vt.dll\"; DestDir: \"{app}\"" ++ files_end, .err = error.RetiredEntryInstalledBySetup },
-        .{ .from = files_end, .to = "\nSource: \"{#StageDir}\\share\\pkgconfig\\libghostty-vt.pc\"; DestDir: \"{app}\\share\\pkgconfig\"" ++ files_end, .err = error.LibVtShareFileInstalledBySetup },
-        .{ .from = files_end, .to = "\nSource: \"{#StageDir}\\ghostty-*.dll\"; DestDir: \"{app}\"" ++ files_end, .err = error.SetupExtraWildcardRule },
+        .{ .from = files_end, .to = "\nSource: \"stage\\ghostty-vt.dll\"; DestDir: \"{app}\"" ++ files_end, .err = error.RetiredEntryInstalledBySetup },
+        .{ .from = files_end, .to = "\nSource: \"stage\\share\\pkgconfig\\libghostty-vt.pc\"; DestDir: \"{app}\\share\\pkgconfig\"" ++ files_end, .err = error.LibVtShareFileInstalledBySetup },
+        .{ .from = files_end, .to = "\nSource: \"stage\\ghostty-*.dll\"; DestDir: \"{app}\"" ++ files_end, .err = error.SetupExtraWildcardRule },
+        // An ISPP expansion hides the name an extra rule installs.
+        .{ .from = files_end, .to = "\nSource: \"{#LegacyDll}\"; DestDir: \"{app}\"" ++ files_end, .err = error.SetupRuleExpansion },
+        // A conditional opened before a section header drops the whole section.
+        .{ .from = files_end, .to = "\n[Icons]\n#if 0" ++ files_end, .err = error.SetupRuleConditional },
     }) |mutation| {
         try std.testing.expect(std.mem.indexOf(u8, iss, mutation.from) != null);
         const mutated = try std.mem.replaceOwned(u8, alloc, iss, mutation.from, mutation.to);
