@@ -166,6 +166,14 @@ Assert-WorkflowContract `
     -Path $releaseCommonScript `
     -Pattern "(?ms)function Get-WindowsSignedRuntimePayloads.*?noctty/noctty\.com.*?noctty/noctty\.exe.*?noctty/ghostty-vt\.dll.*?noctty/noctty-terminal-handoff-proxy\.dll" `
     -Description 'the shared signed-runtime payload list covers every PE noctty ships and signs'
+# noctty/ghostty-vt.dll in that list is the placeholder, not libghostty-vt
+# (src/build/GhosttyVtStub.zig). It is signed in the same staging loop as the
+# other runtime PEs, then checked to be the placeholder; the old portable
+# updaters require a pinned-publisher signature on every payload DLL.
+Assert-WorkflowContract `
+    -Path $windowsPackager `
+    -Pattern '(?ms)\$runtimeFiles = @\(\r?\n(?:[^\r\n]*\r?\n)*?\s*"ghostty-vt-stub\\ghostty-vt\.dll",\r?\n(?:[^\r\n]*\r?\n)*?\)\r?\n.*?foreach \(\$runtimeFile in \$runtimeFiles\) \{.*?\$destinationPath = Join-Path \$portableRoot \(Split-Path -Leaf \$runtimeFile\).*?Invoke-SignFile -SigningConfig \$signingConfig -PathToSign \$destinationPath.*?Assert-ValidSignature -PathToCheck \$destinationPath.*?Assert-GhosttyVtStub -Path \(Join-Path \$portableRoot "ghostty-vt\.dll"\).*?Packaging phase: create portable zip' `
+    -Description 'the ghostty-vt.dll placeholder is staged, signed and verified with the other runtime PEs, and checked to be the placeholder before the portable zip is made'
 foreach ($payloadConsumer in @(
     $releaseArtifactVerifier,
     $publishedReleaseVerifierScript,

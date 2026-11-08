@@ -60,8 +60,8 @@ then produces:
 7. Generated package-manager metadata
 
 The symbols ZIP holds one `symbols` folder with `noctty.pdb`,
-`noctty-command.pdb` (for `noctty.com`), `ghostty-vt.pdb` (only while the
-portable ZIP still carries `ghostty-vt.dll`; see
+`noctty-command.pdb` (for `noctty.com`), `ghostty-vt.pdb` (for the portable
+ZIP's `ghostty-vt.dll` placeholder, until v1.4.100; see
 [Library consumers](#library-consumers)) and
 `noctty-terminal-handoff-proxy.pdb`. Release builds therefore pass
 `-Dstrip=false` (`scripts/build-package-windows.ps1` does). Left alone,
@@ -149,7 +149,7 @@ powershell -ExecutionPolicy Bypass -File scripts/package-windows.ps1 -Version 1.
 
 The packager builds with `-Dstrip=false`. To package an existing build with
 `-SkipBuild`, build it the same way
-(`zig build -Demit-exe=true -Demit-lib-vt=true -Doptimize=ReleaseFast -Dstrip=false ...`),
+(`zig build -Demit-exe=true -Doptimize=ReleaseFast -Dstrip=false ...`),
 or the symbols ZIP is skipped with a warning (`-RequireSymbols` makes that
 fatal).
 
@@ -428,15 +428,15 @@ full toolchain rules live in [HACKING.md](HACKING.md#toolchain).
 
 noctty does not ship `libghostty-vt` as a library for other programs.
 `noctty.exe` does not load `ghostty-vt.dll` (its import table has no such
-entry). The copy earlier releases put beside it is version 0.1.0 with the
-pre-1.0 C ABI, under the same name as upstream's libghostty-vt 1.0 DLL,
-which has a stable C ABI. To use the library:
+entry). The copy releases up to 1.3.136 put beside it is libghostty-vt
+version 0.1.0 with the pre-1.0 C ABI, under the same name as upstream's
+libghostty-vt 1.0 DLL, which has a stable C ABI. To use the library:
 
 - take upstream's official libghostty-vt, with its Windows x64 DLL, from
   [lib.ghostty.org](https://lib.ghostty.org); or
 - build it from this tree: `zig build -Demit-lib-vt`, or the CMake wrapper
   (`CMakeLists.txt`, `dist/cmake/`). CI still builds and tests it (the
-  `windows-lib-vt` job).
+  `windows-lib-vt` job). Packaging no longer builds it.
 
 Setup no longer installs `ghostty-vt.dll`, and it deletes the copy an
 earlier Setup installed (`[InstallDelete]` in `dist/windows/noctty.iss`).
@@ -444,16 +444,32 @@ Neither package carries `share/pkgconfig/libghostty-vt.pc` any more, and
 Setup deletes that file too. (The updater replaces a portable copy's `share`
 folder as a whole.)
 
-The portable ZIP still carries `ghostty-vt.dll`, and the symbols ZIP
-`ghostty-vt.pdb`, for a transition. The portable updater in noctty 1.3.136
-and earlier refuses a portable update whose payload lacks any file it
-manages, `ghostty-vt.dll` included. It checks that in the running copy when
-it stages the update, and again in the swap, which runs from a copy of the
-same old executable. The updater of later releases accepts a payload
-without the file. When it applies one, it moves the copy aside with the other
-files it replaces, so a rollback puts it back and a confirmed update deletes
-it (`retired_entries` in `src/update/portable_apply.zig`). Once a release
-with that updater has been the latest one for long enough, the portable and
-symbols ZIPs drop the file. A copy older than that release then cannot
-stage the update: its notice offers the release page, and that copy has to
-be updated by hand.
+From 1.3.137, the portable ZIP's `ghostty-vt.dll` is a placeholder that
+noctty builds (`src/ghostty_vt_stub/`), not libghostty-vt, and the symbols
+ZIP's `ghostty-vt.pdb` is the placeholder's. The placeholder exports and
+imports nothing, and its `DllMain` refuses to initialise, so `LoadLibrary`
+fails with `ERROR_DLL_INIT_FAILED` instead of handing a program an old ABI.
+Its version resource describes it as "noctty placeholder for the retired
+ghostty-vt.dll; not libghostty-vt". There is one per architecture, and it is
+signed in the same packaging step as noctty's other binaries.
+
+It is there for the portable updater of noctty 1.3.125 to 1.3.136, which
+refuses a portable update whose payload lacks any file it manages,
+`ghostty-vt.dll` included. It checks that in the running copy when it stages
+the update, and again in the swap, which runs from a copy of the same old
+executable. Of each DLL in the payload it asks only that the file is listed
+in the signed payload manifest with its hash, is built for the right machine
+and carries noctty's publisher signature; it never loads it. The updater
+from 1.3.137 on accepts a payload without the file. When it applies one, it
+moves the copy aside with the other files it replaces, so a rollback puts it
+back and a confirmed update deletes it (`retired_entries` in
+`src/update/portable_apply.zig`).
+
+**Manual update at v1.4.100.** v1.4.100 drops the placeholder from the
+portable and symbols ZIPs. A portable copy on 1.3.125 to 1.3.136 that has
+not installed a release from 1.3.137 on by then cannot stage that update: its
+update notice offers the release page, and the copy has to be updated by
+hand from there. A portable copy that has installed 1.3.137 or later keeps
+updating in-app. Releases up to 1.3.124 never updated a portable copy
+in-app, so those copies already update by hand. Setup installs are not
+affected.

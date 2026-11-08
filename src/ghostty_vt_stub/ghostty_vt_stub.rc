@@ -1,0 +1,45 @@
+// Version resource of the ghostty-vt.dll placeholder (ghostty_vt_stub.c).
+// It is for people and tools that look at the file: no noctty updater reads
+// it. scripts/ghostty-vt-stub.ps1 and test/windows/test_dll_init.c check the
+// FileDescription below, so keep the three in step.
+
+// LANG_NEUTRAL(0), SUBLANG_NEUTRAL(0)
+LANGUAGE 0, 0
+
+// The noctty version that built it comes from src/build/GhosttyVtStub.zig.
+#ifndef NOCTTY_VERSION_MAJOR
+#define NOCTTY_VERSION_MAJOR 0
+#define NOCTTY_VERSION_MINOR 0
+#define NOCTTY_VERSION_PATCH 0
+#define NOCTTY_VERSION_STRING "0.0.0-dev"
+#endif
+
+1 VERSIONINFO
+// The file version stays 0.0.0.0: this is no version of libghostty-vt, so a
+// tool that compares ghostty-vt.dll versions must not take it for a newer one.
+FILEVERSION     0,0,0,0
+PRODUCTVERSION  NOCTTY_VERSION_MAJOR,NOCTTY_VERSION_MINOR,NOCTTY_VERSION_PATCH,0
+FILEFLAGSMASK   0x3f
+FILEFLAGS      0
+FILEOS         0x40004 // VOS_NT_WINDOWS32
+FILETYPE       2 // VFT_DLL
+FILESUBTYPE    0
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904b0"
+        BEGIN
+        VALUE "Comments",           "Exports nothing and fails to load (ERROR_DLL_INIT_FAILED). The portable ZIP carries it so portable copies of noctty 1.3.125 to 1.3.136 can still update in-app. For libghostty-vt, use upstream Ghostty's libghostty-vt 1.0."
+        VALUE "FileDescription",    "noctty placeholder for the retired ghostty-vt.dll; not libghostty-vt"
+        VALUE "FileVersion",        "0.0.0.0"
+        VALUE "InternalName",       "ghostty-vt-stub"
+        VALUE "OriginalFilename",   "ghostty-vt.dll"
+        VALUE "ProductName",        "noctty"
+        VALUE "ProductVersion",     NOCTTY_VERSION_STRING
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x0409,1200
+    END
+END

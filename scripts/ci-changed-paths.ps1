@@ -75,7 +75,9 @@ $script:CiPathRules = @(
     # none of which a Zig source names. (package-windows.ps1 and
     # build-package-windows.ps1 are read by a unit test that compares their
     # $runtimeFiles lists, so they stay on the default rule.)
-    @{ Needs = 'package'; Pattern = '^scripts/(symbols-verification|signing-trust|interactive-win11-lib|dev-windows)\.(ps1|cmd)$' }
+    # ghostty-vt-stub.ps1 checks the staged ghostty-vt.dll placeholder for
+    # package-windows.ps1 and package-portable-cli.ps1.
+    @{ Needs = 'package'; Pattern = '^scripts/(symbols-verification|signing-trust|interactive-win11-lib|dev-windows|ghostty-vt-stub)\.(ps1|cmd)$' }
 
     # Test harnesses the checks job runs, or that only a person or the manual
     # interactive job runs.
