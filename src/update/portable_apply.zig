@@ -406,18 +406,38 @@ const setup_lib_vt_share_delete_rules = [_][]const u8{ setup_delete_pc_rule, set
 
 /// Setup never installs a retired file, and deletes the copies an older Setup
 /// left: exactly one active stage rule, whose `Excludes` names each retired
-/// entry at the stage root, and an active `[InstallDelete]` rule for each.
+/// entry at the stage root, no other `[Files]` rule that could install one,
+/// and an active `[InstallDelete]` rule for each.
 fn checkSetupRetiresLibVt(alloc: Allocator, iss: []const u8) !void {
     const files = try innoSection(iss, "\n[Files]");
     const install_delete = try innoSection(iss, "\n[InstallDelete]");
+
+    // ISPP can drop any line it wraps (`#if 0`), so neither section may hold a
+    // preprocessor line; the active lines read below are then what ISCC compiles.
+    for ([_][]const u8{ files, install_delete }) |section| {
+        var raw_lines = std.mem.splitScalar(u8, section, '\n');
+        while (raw_lines.next()) |raw_line| {
+            const line = std.mem.trim(u8, raw_line, " \t\r");
+            if (line.len > 0 and line[0] == '#') return error.SetupRuleConditional;
+        }
+    }
 
     const stage_prefix = "Source: \"{#StageDir}\\*\";";
     var stage_rule: ?[]const u8 = null;
     var lines = std.mem.splitScalar(u8, files, '\n');
     while (nextActiveInnoLine(&lines)) |line| {
-        if (!std.mem.startsWith(u8, line, stage_prefix)) continue;
-        if (stage_rule != null) return error.SetupStageRuleNotUnique;
-        stage_rule = line;
+        if (std.mem.startsWith(u8, line, stage_prefix)) {
+            if (stage_rule != null) return error.SetupStageRuleNotUnique;
+            stage_rule = line;
+            continue;
+        }
+        // The stage rule's Excludes covers only that rule, so any other rule
+        // names its files: no wildcard, and nothing from libghostty-vt.
+        if (std.mem.indexOfAny(u8, line, "*?") != null) return error.SetupExtraWildcardRule;
+        for (retired_entries) |entry| {
+            if (std.ascii.indexOfIgnoreCase(line, entry) != null) return error.RetiredEntryInstalledBySetup;
+        }
+        if (std.ascii.indexOfIgnoreCase(line, "libghostty-vt") != null) return error.LibVtShareFileInstalledBySetup;
     }
     const rule = stage_rule orelse return error.SetupStageRuleMissing;
 
@@ -454,13 +474,15 @@ test "Setup retirement check reads only the rules ISCC compiles" {
     try checkSetupRetiresLibVt(alloc, iss);
 
     // Each mutation of the shipped script must fail: a rule commented out,
-    // a rule deleted, the Excludes dropped or not naming the root file.
+    // deleted or wrapped in an ISPP conditional, the Excludes dropped or not
+    // naming the root file, or a separate [Files] rule that bypasses it.
     const Mutation = struct { from: []const u8, to: []const u8, err: anyerror };
     const delete_dll = "Type: files; Name: \"{app}\\ghostty-vt.dll\"";
     const delete_pc = setup_delete_pc_rule;
     const delete_pc_dir = setup_delete_pc_dir_rule;
     const excludes = " Excludes: \"\\ghostty-vt.dll\";";
     const stage = "Source: \"{#StageDir}\\*\";";
+    const files_end = "\n[InstallDelete]";
     for ([_]Mutation{
         .{ .from = delete_dll, .to = "; " ++ delete_dll, .err = error.RetiredEntryLeftBySetup },
         .{ .from = delete_dll, .to = "", .err = error.RetiredEntryLeftBySetup },
@@ -470,6 +492,11 @@ test "Setup retirement check reads only the rules ISCC compiles" {
         .{ .from = excludes, .to = "", .err = error.RetiredEntryInstalledBySetup },
         .{ .from = excludes, .to = " Excludes: \"ghostty-vt.dll.txt\";", .err = error.RetiredEntryInstalledBySetup },
         .{ .from = stage, .to = "; " ++ stage, .err = error.SetupStageRuleMissing },
+        .{ .from = delete_dll, .to = "#if 0\n" ++ delete_dll ++ "\n#endif", .err = error.SetupRuleConditional },
+        .{ .from = stage, .to = "#if 0\n#endif\n" ++ stage, .err = error.SetupRuleConditional },
+        .{ .from = files_end, .to = "\nSource: \"{#StageDir}\\ghostty-vt.dll\"; DestDir: \"{app}\"" ++ files_end, .err = error.RetiredEntryInstalledBySetup },
+        .{ .from = files_end, .to = "\nSource: \"{#StageDir}\\share\\pkgconfig\\libghostty-vt.pc\"; DestDir: \"{app}\\share\\pkgconfig\"" ++ files_end, .err = error.LibVtShareFileInstalledBySetup },
+        .{ .from = files_end, .to = "\nSource: \"{#StageDir}\\ghostty-*.dll\"; DestDir: \"{app}\"" ++ files_end, .err = error.SetupExtraWildcardRule },
     }) |mutation| {
         try std.testing.expect(std.mem.indexOf(u8, iss, mutation.from) != null);
         const mutated = try std.mem.replaceOwned(u8, alloc, iss, mutation.from, mutation.to);
