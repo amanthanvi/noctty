@@ -149,7 +149,7 @@ powershell -ExecutionPolicy Bypass -File scripts/package-windows.ps1 -Version 1.
 
 The packager builds with `-Dstrip=false`. To package an existing build with
 `-SkipBuild`, build it the same way
-(`zig build -Demit-exe=true -Doptimize=ReleaseFast -Dstrip=false ...`),
+(`zig build -Demit-exe=true -Demit-lib-vt=true -Doptimize=ReleaseFast -Dstrip=false ...`),
 or the symbols ZIP is skipped with a warning (`-RequireSymbols` makes that
 fatal).
 
