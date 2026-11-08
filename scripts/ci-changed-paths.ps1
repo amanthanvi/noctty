@@ -19,10 +19,11 @@ runs always run everything. Any failure to read the diff does the same.
 What the compiled jobs read (verified against the sources; the guards in
 test/windows/ci-scripts.ps1 re-check it on every change):
 - Zig tests, bench, exe builds and lib-vt: src/, pkg/, include/, vendor/,
-  build.zig(.zon), dist/windows/*, and the three scripts Zig names itself:
+  build.zig(.zon), dist/windows/*, and the four scripts Zig names itself:
   scripts/stage-conpty-redist.ps1 (build step, with the scripts it dot-sources),
-  scripts/package-windows.ps1 and scripts/portable-manifest-verification.ps1
-  (read by a unit test that compares their managed-file lists).
+  scripts/package-windows.ps1, scripts/build-package-windows.ps1 and
+  scripts/portable-manifest-verification.ps1 (read by unit tests that compare
+  their managed-file and runtime-file lists).
 - Portable package smoke and the ARM64 build job: the packaging scripts, the
   CLI harnesses package-portable-cli.ps1 runs, README.md, LICENSE and the
   icon source in images/.
@@ -71,9 +72,10 @@ $script:CiPathRules = @(
     @{ Needs = 'none'; Pattern = '^scripts/(release-[a-z-]+\.ps1|interactive-win11\.(ps1|cmd)|interactive-win11-window-lib\.ps1)$' }
     # Packaging only: dot-sourced by build-package-windows.ps1, package-windows.ps1
     # and the CLI harnesses package-portable-cli.ps1 runs (interactive-win11-lib),
-    # none of which a Zig source names. (package-windows.ps1 itself is read by a
-    # unit test, so it stays on the default rule.)
-    @{ Needs = 'package'; Pattern = '^scripts/(build-package-windows|symbols-verification|signing-trust|interactive-win11-lib|dev-windows)\.(ps1|cmd)$' }
+    # none of which a Zig source names. (package-windows.ps1 and
+    # build-package-windows.ps1 are read by a unit test that compares their
+    # $runtimeFiles lists, so they stay on the default rule.)
+    @{ Needs = 'package'; Pattern = '^scripts/(symbols-verification|signing-trust|interactive-win11-lib|dev-windows)\.(ps1|cmd)$' }
 
     # Test harnesses the checks job runs, or that only a person or the manual
     # interactive job runs.
