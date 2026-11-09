@@ -154,9 +154,12 @@ public static class Tt {
     // chord) and Caps Lock; returns the modifiers it found down. A hidden
     // desktop keeps out the user's keys, not their modifiers (input.md,
     // 2026-10-11 Win32 input mode, trap 11).
-    public static int Neutralize(IntPtr h) {
+    public static int Neutralize(IntPtr h) { return Neutralize(h,true); }
+    // `exists` false: a window the key closed (a pane's close_surface) has
+    // no thread left to read a state, so there is none to check.
+    static int Neutralize(IntPtr h,bool exists) {
         uint pid; uint tid=GetWindowThreadProcessId(h,out pid); uint me=GetCurrentThreadId();
-        if(tid==0) throw new Exception("No window thread");
+        if(tid==0) { if(exists) throw new Exception("No window thread"); return 0; }
         if(!AttachThreadInput(me,tid,true)) throw new Exception("AttachThreadInput failed: "+Marshal.GetLastWin32Error());
         try {
             var s=new byte[256]; GetKeyboardState(s);
@@ -173,13 +176,13 @@ public static class Tt {
     // again once the app is idle after it.
     public static void Key(IntPtr h,int key) {
         HeldReal+=Held();
+        uint pid; GetWindowThreadProcessId(h,out pid);
         LatchedBefore+=Neutralize(h);
         if(!PostMessageW(h,0x100,new IntPtr(key),new IntPtr(1))) throw new Exception("Key-down post failed");
         if(!PostMessageW(h,0x101,new IntPtr(key),new IntPtr(0xC0000001L))) throw new Exception("Key-up post failed");
-        uint pid; GetWindowThreadProcessId(h,out pid);
-        try { using(var p=System.Diagnostics.Process.GetProcessById((int)pid)) { p.WaitForInputIdle(2000); } } catch(InvalidOperationException) { System.Threading.Thread.Sleep(300); }
+        try { using(var p=System.Diagnostics.Process.GetProcessById((int)pid)) { p.WaitForInputIdle(2000); } } catch(Exception) { System.Threading.Thread.Sleep(300); }
         System.Threading.Thread.Sleep(50);
-        LatchedAfter+=Neutralize(h);
+        LatchedAfter+=Neutralize(h,false);
         HeldReal+=Held();
     }
     // What `vk` types with no modifier in the layout of `h`'s thread, or null.
