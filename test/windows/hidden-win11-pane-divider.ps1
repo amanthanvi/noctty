@@ -136,15 +136,18 @@ using System;
 using System.IO;
 using System.Runtime.InteropServices;
 public static class PaneDividerConsoleSize {
-    [StructLayout(LayoutKind.Sequential)] struct COORD { public short X, Y; }
-    [StructLayout(LayoutKind.Sequential)] struct SMALL_RECT { public short Left, Top, Right, Bottom; }
-    [StructLayout(LayoutKind.Sequential)] struct CSBI { public COORD dwSize, dwCursorPosition; public ushort wAttributes; public SMALL_RECT srWindow; public COORD dwMaximumWindowSize; }
+    // Public so the harness can pin their layout against the SDK.
+    [StructLayout(LayoutKind.Sequential)] public struct COORD { public short X, Y; }
+    [StructLayout(LayoutKind.Sequential)] public struct SMALL_RECT { public short Left, Top, Right, Bottom; }
+    [StructLayout(LayoutKind.Sequential)] public struct CSBI { public COORD dwSize, dwCursorPosition; public ushort wAttributes; public SMALL_RECT srWindow; public COORD dwMaximumWindowSize; }
     [DllImport("kernel32.dll")] static extern bool FreeConsole();
     [DllImport("kernel32.dll", SetLastError = true)] static extern bool AttachConsole(uint pid);
     [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)] static extern IntPtr CreateFileW(string n, uint a, uint s, IntPtr sa, uint d, uint f, IntPtr t);
     [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr h);
     [DllImport("kernel32.dll", SetLastError = true)] static extern bool GetConsoleScreenBufferInfo(IntPtr h, out CSBI i);
-    [StructLayout(LayoutKind.Explicit, Size = 20)] struct INPUT_RECORD { [FieldOffset(0)] public ushort EventType; [FieldOffset(4)] public int KeyDown; [FieldOffset(10)] public ushort VirtualKeyCode; }
+    [StructLayout(LayoutKind.Sequential)] public struct KEY_EVENT_RECORD { public int bKeyDown; public ushort wRepeatCount, wVirtualKeyCode, wVirtualScanCode, UnicodeChar; public uint dwControlKeyState; }
+    // The SDK's Event is a union of 4-byte-aligned records, the largest 16 bytes.
+    [StructLayout(LayoutKind.Explicit, Size = 20)] public struct INPUT_RECORD { [FieldOffset(0)] public ushort EventType; [FieldOffset(4)] public KEY_EVENT_RECORD KeyEvent; }
     [DllImport("kernel32.dll", SetLastError = true)] static extern bool PeekConsoleInputW(IntPtr h, [Out] INPUT_RECORD[] buffer, uint length, out uint read);
     public static int Main(string[] args) {
         string text; int rc = 0;
@@ -161,7 +164,7 @@ public static class PaneDividerConsoleSize {
             else if (!PeekConsoleInputW(h, records, (uint)records.Length, out n)) { text = "ERROR peek " + Marshal.GetLastWin32Error(); rc = 6; CloseHandle(h); }
             else {
                 int escapes = 0;
-                for (int i = 0; i < n; i++) if (records[i].EventType == 1 && records[i].VirtualKeyCode == 0x1B) escapes++;
+                for (int i = 0; i < n; i++) if (records[i].EventType == 1 && records[i].KeyEvent.wVirtualKeyCode == 0x1B) escapes++;
                 text = escapes.ToString(); CloseHandle(h);
             }
             FreeConsole();
@@ -214,6 +217,31 @@ $compile.UseShellExecute = $false; $compile.CreateNoWindow = $true
 $compile.RedirectStandardOutput = $true; $compile.RedirectStandardError = $true
 $compiler = [Diagnostics.Process]::Start($compile)
 if (-not $compiler.WaitForExit(60000) -or -not (Test-Path -LiteralPath $sizeExe)) { throw 'Console size reader did not compile.' }
+# The struct mirrors above, pinned against the Windows SDK before any is
+# used (AGENTS.md, Win32 FFI): the marshaler's sizes and field offsets, from
+# winuser.h (GUITHREADINFO, RECT, POINT) and wincontypes.h (COORD,
+# SMALL_RECT, CONSOLE_SCREEN_BUFFER_INFO, KEY_EVENT_RECORD, INPUT_RECORD).
+# 64-bit (x64 and arm64 lay them out alike) and 32-bit values.
+Add-Type -TypeDefinition $script:ConsoleSizeSource
+$pointer = [IntPtr]::Size
+$layouts = @(
+    @{ Type = [Pd+GuiThreadInfo]; Size = $(if ($pointer -eq 8) { 72 } else { 48 }); Offsets = $(if ($pointer -eq 8) {
+        @{ cbSize = 0; flags = 4; active = 8; focus = 16; capture = 24; menuOwner = 32; moveSize = 40; caret = 48; caretRect = 56 } } else {
+        @{ cbSize = 0; flags = 4; active = 8; focus = 12; capture = 16; menuOwner = 20; moveSize = 24; caret = 28; caretRect = 32 } }) }
+    @{ Type = [Pd+Rect]; Size = 16; Offsets = @{ Left = 0; Top = 4; Right = 8; Bottom = 12 } }
+    @{ Type = [Pd+Point]; Size = 8; Offsets = @{ X = 0; Y = 4 } }
+    @{ Type = [PaneDividerConsoleSize+COORD]; Size = 4; Offsets = @{ X = 0; Y = 2 } }
+    @{ Type = [PaneDividerConsoleSize+SMALL_RECT]; Size = 8; Offsets = @{ Left = 0; Top = 2; Right = 4; Bottom = 6 } }
+    @{ Type = [PaneDividerConsoleSize+CSBI]; Size = 22; Offsets = @{ dwSize = 0; dwCursorPosition = 4; wAttributes = 8; srWindow = 10; dwMaximumWindowSize = 18 } }
+    @{ Type = [PaneDividerConsoleSize+KEY_EVENT_RECORD]; Size = 16; Offsets = @{ bKeyDown = 0; wRepeatCount = 4; wVirtualKeyCode = 6; wVirtualScanCode = 8; UnicodeChar = 10; dwControlKeyState = 12 } }
+    @{ Type = [PaneDividerConsoleSize+INPUT_RECORD]; Size = 20; Offsets = @{ EventType = 0; KeyEvent = 4 } }
+)
+foreach ($layout in $layouts) {
+    $measured = @{ Size = [Runtime.InteropServices.Marshal]::SizeOf([type]$layout.Type) }
+    foreach ($field in $layout.Offsets.Keys) { $measured[$field] = [int][Runtime.InteropServices.Marshal]::OffsetOf([type]$layout.Type, $field) }
+    $wrong = @($layout.Offsets.Keys | Where-Object { $measured[$_] -ne $layout.Offsets[$_] })
+    Check ("layout: {0} matches the SDK ({1}-bit)" -f $layout.Type.Name, (8 * $pointer)) ($measured.Size -eq $layout.Size -and $wrong.Count -eq 0) (@{ Size = $layout.Size } + $layout.Offsets) $measured
+}
 $WM = @{ MouseMove = 0x200; LDown = 0x201; LUp = 0x202; CancelMode = 0x1F; KeyDown = 0x100; KeyUp = 0x101 }
 $HTTRANSPARENT = -1; $HTCLIENT = 1
 # Keybinds on keys nobody types (a posted Ctrl is invisible to GetKeyboardState).
@@ -415,14 +443,20 @@ try {
     Check 'capture loss: the capture is gone' $lostReleased $true $lostReleased
     Check 'capture loss: a later move does not drag' ($afterLost[0].Right -eq $lost[0].Right) $lost[0].Right $afterLost[0].Right
 
-    # A double-click equalizes the split.
+    # A double-click equalizes the split, and the host holds the capture
+    # while the second press is down, so its release (the divider may have
+    # moved from under it) reaches no terminal.
     $d3 = $lost[1].Left - 1
-    foreach ($m in @($WM.LDown, $WM.LUp, $WM.LDown, $WM.LUp)) { [Pd]::Post($h, $m, $(if ($m -eq $WM.LDown) { 1 } else { 0 }), $d3, $y) }
+    foreach ($m in @($WM.LDown, $WM.LUp, $WM.LDown)) { [Pd]::Post($h, $m, $(if ($m -eq $WM.LDown) { 1 } else { 0 }), $d3, $y) }
     Settle
+    $secondHeld = Capture-Held $h
     $even = Panes $h
-    $script:samples.Add(@{ Step = 'double-click'; After = @($even | ForEach-Object { Rect-Of $_ }) })
+    [Pd]::Post($h, $WM.LUp, 0, $d3, $y); Settle
+    $secondReleased = -not (Capture-Held $h)
+    $script:samples.Add(@{ Step = 'double-click'; After = @($even | ForEach-Object { Rect-Of $_ }); CaptureDuringSecondPress = $secondHeld })
     Check 'double-click: the two panes are equal' (Near $even[0].Width $even[1].Width 2) $even[0].Width $even[1].Width
-    Check 'double-click: the capture is gone' (-not (Capture-Held $h)) $true (-not (Capture-Held $h))
+    Check 'double-click: the host holds the capture while the second press is down' $secondHeld $true $secondHeld
+    Check 'double-click: its release lets the capture go' $secondReleased $true $secondReleased
 
     # A zoomed pane shows no divider: the old gap takes no press.
     $d4 = $even[1].Left - 1
