@@ -7931,11 +7931,19 @@ pub const App = struct {
         }
     }
 
+    /// Runs in `releaseTabDragPreview` between the provider's detach and the
+    /// label window's destruction, for the test that watches a fixture's
+    /// teardown do both in that order, before the apartment goes.
+    pub var test_tab_drag_preview_released: ?*const fn (*App) void = null;
+
     /// The tab drag's label and its UIA provider go, the provider first:
     /// before the COM apartment does, at the App's end and a fixture's
     /// (CodeRabbit r4512044918).
     pub fn releaseTabDragPreview(self: *App) void {
         win32.detachChromeControlProvider(self, &self.tab_drag_preview_uia_provider);
+        if (builtin.is_test) {
+            if (test_tab_drag_preview_released) |hook| hook(self);
+        }
         const preview = self.tab_drag_preview_hwnd orelse return;
         setWindowData(preview, null);
         if (self.tab_drag_preview_prev_proc) |previous| _ = sys.SetWindowLongPtrW(preview, c.GWLP_WNDPROC, @bitCast(@intFromPtr(previous)));
@@ -17549,13 +17557,35 @@ test "win32 a tab move whose wake cannot be posted is woken by the re-wake timer
     }.body);
 }
 
-test "win32 the tab drag's label goes with its UIA provider before the apartment does (CodeRabbit r4512044918)" {
+extern "ole32" fn CoGetApartmentType(apt_type: *i32, qualifier: *i32) callconv(.winapi) i32;
+
+const TestWatchPreviewRelease = struct {
+    var label: ?HWND = null;
+    var ran = false;
+    var provider_gone = false;
+    var label_alive = false;
+    var apartment_alive = false;
+
+    /// What the release finds between its two steps: the provider detached,
+    /// the label window not yet destroyed, the apartment still there.
+    fn hook(app: *App) void {
+        ran = true;
+        provider_gone = app.tab_drag_preview_uia_provider == null;
+        label_alive = if (label) |hwnd| sys.IsWindow(hwnd) != 0 else false;
+        var apt: i32 = 0;
+        var qualifier: i32 = 0;
+        apartment_alive = CoGetApartmentType(&apt, &qualifier) == 0;
+    }
+};
+
+test "win32 a fixture's teardown lets go of the drag label's UIA provider, then its window, while the apartment is still there (CodeRabbit r4512044918, review 5830642608)" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
     try runOnHiddenDesktop(struct {
         fn body() !void {
             var fixture: win32.WindowStartTestApp = .{};
             try fixture.init();
-            defer fixture.deinit();
+            var torn_down = false;
+            defer if (!torn_down) fixture.deinit();
             const app = &fixture.app;
             app.shell_runtime_initialized = true;
             const setup: TabMoveFixture = .{ .fixture = &fixture };
@@ -17564,16 +17594,25 @@ test "win32 the tab drag's label goes with its UIA provider before the apartment
             const button = host.tabs.items[host.active_tab].button_hwnd orelse return error.TestNoTabButton;
             var client: RECT = undefined;
             try std.testing.expect(sys.GetClientRect(host.hwnd.?, &client) != 0);
-            // A drag out of the window shows the label.
+            // A drag out of the window shows the label; UIA asks it for its
+            // provider, which the app makes then.
             testPostTabMouse(button, c.WM_LBUTTONDOWN, 20, 10);
             testPostTabMouse(button, c.WM_MOUSEMOVE, 20, client.bottom + 200);
-            try std.testing.expect(app.tab_drag_preview_hwnd != null);
-            const label = app.tab_drag_preview_hwnd.?;
             testPostTabMouse(button, c.WM_LBUTTONUP, 20, 10);
-            // What teardown runs before the apartment goes.
-            app.releaseTabDragPreview();
-            try std.testing.expect(app.tab_drag_preview_hwnd == null);
-            try std.testing.expect(app.tab_drag_preview_uia_provider == null);
+            const label = app.tab_drag_preview_hwnd orelse return error.TestNoDragLabel;
+            _ = sys.SendMessageW(label, c.WM_GETOBJECT, 0, win32_uia.UiaRootObjectId);
+            try std.testing.expect(app.tab_drag_preview_uia_provider != null);
+            TestWatchPreviewRelease.label = label;
+            TestWatchPreviewRelease.ran = false;
+            App.test_tab_drag_preview_released = &TestWatchPreviewRelease.hook;
+            defer App.test_tab_drag_preview_released = null;
+            // The fixture's own teardown, nothing released before it.
+            torn_down = true;
+            fixture.deinit();
+            try std.testing.expect(TestWatchPreviewRelease.ran);
+            try std.testing.expect(TestWatchPreviewRelease.provider_gone);
+            try std.testing.expect(TestWatchPreviewRelease.label_alive);
+            try std.testing.expect(TestWatchPreviewRelease.apartment_alive);
             try std.testing.expect(sys.IsWindow(label) == 0);
         }
     }.body);

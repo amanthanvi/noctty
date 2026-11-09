@@ -322,14 +322,15 @@ function Launch-Case([string]$Name,[string]$RendererName,[string[]]$Extra=@()) {
     # cmd.exe, which keeps no PSReadLine history, prints a marker of its own
     # (`%RANDOM%`, which cmd seeds from the clock in whole seconds, so two
     # shells started in the same second print the same values: the last part
-    # is the time's seconds and hundredths) for the move to keep. `direct:` with the
+    # is the time's seconds and hundredths, and `-END` closes it so a wrap
+    # cannot cut it short unseen) for the move to keep. `direct:` with the
     # System32 path: a shell string runs under Exec's outer `cmd /c`, whose
     # AutoRun hooks an inner /D does not turn off (test-harnesses.md).
     $cmd=Join-Path ([Environment]::GetFolderPath('System')) 'cmd.exe'
     @("working-directory = $dir",'single-instance = false','window-save-state = never',
       'copy-on-select = false','clipboard-read = deny','clipboard-write = deny',
       'confirm-close-surface = false','shell-integration = none',
-      "command = direct:$cmd /d /k echo TEAROFF-%RANDOM%-%RANDOM%-%TIME:~6,2%%TIME:~9,2%",
+      "command = direct:$cmd /d /k echo TEAROFF-%RANDOM%-%RANDOM%-%TIME:~6,2%%TIME:~9,2%-END",
       "renderer = $RendererName",
       'keybind = f6=new_tab','keybind = f7=move_tab_to_new_window','keybind = f9=close_surface') + $Extra | Set-Content -LiteralPath $config
     $exe=Join-Path $dir 'noctty.exe'
@@ -468,10 +469,12 @@ function Marker([IntPtr]$Pane) {
     $pattern=$null
     if(-not $element.TryGetCurrentPattern([System.Windows.Automation.TextPattern]::Pattern,[ref]$pattern)) { return $null }
     $text=$pattern.DocumentRange.GetText(-1)
-    $m=[regex]::Match($text,'TEAROFF-\d+-\d+-\d+')
+    $m=[regex]::Match($text,'TEAROFF-\d+-\d+-\d+-END')
     # A pane narrower than the marker wraps it across rows: only then, the
-    # rows joined (CodeRabbit r4512044925).
-    if(-not $m.Success) { $m=[regex]::Match(($text -replace "`r?`n",''),'TEAROFF-\d+-\d+-\d+') }
+    # rows joined (CodeRabbit r4512044925). The marker ends in `-END`, so a
+    # row that holds only its start, its last number cut short by the wrap,
+    # matches nothing and the joined text decides (CodeRabbit r4516372927).
+    if(-not $m.Success) { $m=[regex]::Match(($text -replace "`r?`n",''),'TEAROFF-\d+-\d+-\d+-END') }
     if($m.Success) { return $m.Value } else { return $null }
 }
 function Wait-Marker([IntPtr]$Pane) {
@@ -556,11 +559,11 @@ function Pane-Consoles($case) {
         } finally { Remove-Item -LiteralPath $out,"$out.log" -ErrorAction SilentlyContinue }
         if($lines.Count -lt 2) { continue }
         $rows=@($lines | Select-Object -Skip 2)
-        $m=[regex]::Match(($rows -join "`n"),'TEAROFF-\d+-\d+-\d+')
+        $m=[regex]::Match(($rows -join "`n"),'TEAROFF-\d+-\d+-\d+-END')
         # Wrapped across rows in a narrow pane (rows are full there, so none
         # ends in trimmed spaces): only then, the rows joined. A marker two
         # consoles show still maps to neither, below.
-        if(-not $m.Success) { $m=[regex]::Match(($rows -join ''),'TEAROFF-\d+-\d+-\d+') }
+        if(-not $m.Success) { $m=[regex]::Match(($rows -join ''),'TEAROFF-\d+-\d+-\d+-END') }
         if(-not $m.Success) { continue }
         # A marker two consoles show maps to neither: their panes are then
         # not found, never folded into one entry.
