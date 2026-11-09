@@ -457,12 +457,12 @@ It is there for the portable updater of noctty 1.3.125 to 1.3.136, which
 refuses a portable update whose payload lacks any file it manages,
 `ghostty-vt.dll` included. It checks that in the running copy when it stages
 the update, and again in the swap, which runs from a copy of the same old
-executable. Of each DLL in the payload it asks only that the file is listed
-in the signed payload manifest with its hash, is built for the right machine
-and carries noctty's publisher signature; it never loads it. The updater
-from 1.3.137 on accepts a payload without the file. When it applies one, it
-moves the copy aside with the other files it replaces, so a rollback puts it
-back and a confirmed update deletes it (`retired_entries` in
+executable. Of each noctty-built DLL in the payload it asks only that the
+file is listed in the signed payload manifest with its hash, is built for the
+right machine and carries noctty's publisher signature; it never loads it.
+The updater from 1.3.137 on accepts a payload without the file. When it
+applies one, it moves the copy aside with the other files it replaces, so a
+rollback puts it back and a confirmed update deletes it (`retired_entries` in
 `src/update/portable_apply.zig`).
 
 **Manual update at v1.4.100.** v1.4.100 drops the placeholder from the

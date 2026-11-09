@@ -797,7 +797,9 @@ under that name, not libghostty-vt (see
 is empty (read from the file, so nothing in it runs), and the version
 resource's FileDescription is the one passed in. The portable package CLI
 smoke (`package-portable-cli.ps1`) compiles and runs it against the packaged
-DLL, passing `$GhosttyVtStubDescription` from `scripts/ghostty-vt-stub.ps1`.
+x64 DLL, and the native ARM64 job (`.github/workflows/windows-arm64.yml`, its
+packaged smoke step) against the packaged arm64 DLL, both passing
+`$GhosttyVtStubDescription` from `scripts/ghostty-vt-stub.ps1`.
 
 ### Build
 
