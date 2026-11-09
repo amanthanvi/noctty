@@ -7983,7 +7983,8 @@ pub const App = struct {
                 to.host.hwnd == null or to.host.tabs.items.len == 0) return false,
         }
         const tab_id = source.tabs.items[index].id;
-        const insert: usize = switch (dest) {
+        const source_id = source.id;
+        var insert: usize = switch (dest) {
             .new_window => 0,
             .host => |to| @min(to.index, to.host.tabs.items.len),
         };
@@ -8004,9 +8005,10 @@ pub const App = struct {
             .host => |to| to.host,
         };
         try target.tabs.ensureUnusedCapacity(self.core_app.alloc, 1);
+        const target_id = target.id;
         // Making the window ran its window procedures: the tab is found again
         // by id, and a tab gone meanwhile is a move with nothing to do.
-        const at = source.findTabIndexById(tab_id) orelse {
+        var at = source.findTabIndexById(tab_id) orelse {
             // Not an error, so the errdefer does not run.
             if (created) |host| self.discardUnusedHost(host);
             return false;
@@ -8028,26 +8030,32 @@ pub const App = struct {
         var shell_tab: ?win32_shell.model.TabId = null;
         if (self.shell_runtime_initialized) {
             shell_tab = source.tabs.items[at].shell_id orelse return error.ShellStateOutOfSync;
-            const window: ?win32_shell.model.WindowId = switch (dest) {
-                .new_window => null,
-                .host => |to| to.host.shell_id orelse return error.ShellStateOutOfSync,
-            };
-            const intent: win32_shell.intent.Intent = .{ .move_tab_to_window = .{
-                .tab = shell_tab.?,
-                .window = window,
-                .index = insert,
-            } };
-            shell_prepared = self.shell_runtime.prepare(intent) catch |err| switch (err) {
-                error.InvalidTransfer => retry: {
-                    try clearMoveHistory(source, dest);
-                    history_cleared = true;
-                    if (builtin.is_test) {
-                        if (test_tab_move_shell_step) |hook| hook(self, .retry_prepare);
-                    }
-                    break :retry try self.shell_runtime.prepare(intent);
-                },
+            shell_prepared = self.shell_runtime.prepare(try moveTabIntent(shell_tab.?, dest, insert)) catch |err| switch (err) {
+                error.InvalidTransfer => null,
                 else => return err,
             };
+            if (shell_prepared == null) {
+                try clearMoveHistory(source, dest);
+                history_cleared = true;
+                if (builtin.is_test) {
+                    if (test_tab_move_shell_step) |hook| hook(self, .retry_prepare);
+                }
+                // The clear closed the windows that history kept, whose code
+                // can close a tab or a whole window: both windows and the tab
+                // are found again, and the move asked again of what is there
+                // now (Greptile r4510568134). Gone, it is a move with nothing
+                // to do.
+                const still = self.registry.findHostById(source_id) != null and
+                    self.registry.findHostById(target_id) != null;
+                const now: ?usize = if (still) source.findTabIndexById(tab_id) else null;
+                at = now orelse {
+                    if (created) |host| self.discardUnusedHost(host);
+                    return false;
+                };
+                insert = @min(insert, target.tabs.items.len);
+                shell_tab = source.tabs.items[at].shell_id orelse return error.ShellStateOutOfSync;
+                shell_prepared = try self.shell_runtime.prepare(try moveTabIntent(shell_tab.?, dest, insert));
+            }
         }
         defer if (shell_prepared) |*prepared| prepared.deinit();
 
@@ -8075,10 +8083,9 @@ pub const App = struct {
         // (CodeRabbit review 5822445361).
         const new_window = created != null;
         created = null;
-        const landed = source.giveTab(at, target, insert);
-        const moved_id = target.tabs.items[landed].id;
-        const source_id = source.id;
-        const target_id = target.id;
+        // By id: what `giveTab` runs first (a confirm's cancel, the prompts it
+        // hides, the drag it ends) can close a tab.
+        const moved_id: ?u32 = if (source.giveTab(tab_id, target, insert)) |landed| target.tabs.items[landed].id else null;
 
         // Undo history goes in both windows, as for a reorder (`moveTab`):
         // its entries keep tab indices and panes of their window. After the
@@ -8104,15 +8111,14 @@ pub const App = struct {
         const target_emptied = target_live and target.tabs.items.len == 0;
         if (source_emptied) self.forgetEmptiedShellWindow(source);
         if (target_emptied) self.forgetEmptiedShellWindow(target);
-        const landed_now: ?usize = if (target_live) target.findTabIndexById(moved_id) else null;
+        const landed_now: ?usize = if (target_live) if (moved_id) |id| target.findTabIndexById(id) else null else null;
 
         // Showing the tab puts the target's DPI's font into its panes, and
         // with `window-width`/`window-height` set the core then asks for its
         // window's size again (`recomputeInitialSize`): not of this window.
+        // Let go at the end, before an emptied window is settled, which can
+        // free it (Greptile r4510568141).
         if (target_live) target.hold_initial_size = true;
-        defer if (target_live) {
-            target.hold_initial_size = false;
-        };
         // The panes stay in a live tab throughout; toasts follow them to
         // their new window.
         self.notifications.panesChanged();
@@ -8129,15 +8135,35 @@ pub const App = struct {
             runUiActionOrLog("tab move source chrome refresh failed", source.refreshChrome());
             source.refreshSearchTimerState();
         }
-        // After the target took the foreground.
-        defer if (source_emptied) self.settleEmptiedHost(source);
-        defer if (target_emptied) self.settleEmptiedHost(target);
+        // The moved tab, shown and focused in its window, unless it closed
+        // while history was disposed.
+        show: {
+            const landed_at = landed_now orelse break :show;
+            self.showMovedTab(target, landed_at, new_window);
+        }
 
-        const landed_at = landed_now orelse {
-            // The moved tab closed while history was disposed.
-            self.auditShellNativeMapping("tab-move-window");
-            return true;
+        // The end of the move, in one order, with no defer left to touch a
+        // window after one is freed: the size hold goes, then each window
+        // left with no tab settles, after the target took the foreground.
+        if (target_live) target.hold_initial_size = false;
+        if (target_emptied) self.settleEmptiedHost(target);
+        if (source_emptied) self.settleEmptiedHost(source);
+        self.auditShellNativeMapping("tab-move-window");
+        return true;
+    }
+
+    /// `move_tab_to_window` for `tab` into `dest` at `insert`.
+    fn moveTabIntent(tab: win32_shell.model.TabId, dest: TabMoveDest, insert: usize) !win32_shell.intent.Intent {
+        const window: ?win32_shell.model.WindowId = switch (dest) {
+            .new_window => null,
+            .host => |to| to.host.shell_id orelse return error.ShellStateOutOfSync,
         };
+        return .{ .move_tab_to_window = .{ .tab = tab, .window = window, .index = insert } };
+    }
+
+    /// The tab a move put at `landed_at` of `target`: shown in front, and in
+    /// a new window, what `Surface.init` does for the window it creates.
+    fn showMovedTab(self: *App, target: *Host, landed_at: usize, new_window: bool) void {
         target.refreshTabStatus(landed_at);
         // A pane may wait out a search debounce, which the target's timer
         // now ticks (the 2026-11-07 background-tab debounce entry in
@@ -8145,7 +8171,7 @@ pub const App = struct {
         target.refreshSearchTimerState();
         // A D3D11 pane arriving fades the target whole (OPACITY-640).
         window_state.refreshBackgroundOpacity(target);
-        const pane = target.tabs.items[landed_at].focusedSurface() orelse return true;
+        const pane = target.tabs.items[landed_at].focusedSurface() orelse return;
         if (new_window) {
             // What `Surface.init` does for the window it creates: the panes
             // shown, then the first show, then what the window takes after it.
@@ -8178,8 +8204,6 @@ pub const App = struct {
         while (it.next()) |entry| entry.view.requestRepaint() catch |err| {
             log.warn("moved pane repaint request failed err={}", .{err});
         };
-        self.auditShellNativeMapping("tab-move-window");
-        return true;
     }
 
     /// A window a tab move left with no tab: the model removed its window
@@ -16996,6 +17020,110 @@ test "win32 a redo from before a tab move whose history clear failed is disposed
             try std.testing.expect((try host.applyLatestStructuralRedo()) == null);
             try std.testing.expectEqual(@as(usize, 2), host.tabs.items.len);
             try std.testing.expect(host.peekStructuralRedo() == null);
+            try app.validateShellNativeMapping();
+        }
+    }.body);
+}
+
+const TestCloseEarlierTab = struct {
+    var host: ?*Host = null;
+    var core: ?*CoreApp = null;
+
+    /// While the history a transfer kept is cleared for the move's second
+    /// prepare, window code closes the source's first tab, before the
+    /// moving one.
+    fn hook(_: *App, step: App.TabMoveShellStep) void {
+        if (step != .retry_prepare) return;
+        const source = host orelse return;
+        host = null;
+        core.?.deleteSurface(source.tabs.items[0].focusedSurface().?);
+        _ = source.closeTabInPlace(0);
+    }
+};
+
+test "win32 a tab move whose history clear closes an earlier tab moves the tab it was asked to (Greptile r4510568134)" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    try runOnHiddenDesktop(struct {
+        fn body() !void {
+            var fixture: win32.WindowStartTestApp = .{};
+            try fixture.init();
+            defer fixture.deinit();
+            const app = &fixture.app;
+            app.shell_runtime_initialized = true;
+            const setup: TabMoveFixture = .{ .fixture = &fixture };
+            const source = try setup.window(4, false);
+            // The first tab dragged into a split of the third: a transfer in
+            // undo history names the split tab, which then moves, so the
+            // model asks for that history to go first.
+            const split_pane = source.tabs.items[2].focusedSurface().?;
+            // A drop splits the tab in front.
+            try std.testing.expect(source.activateTabIndex(2));
+            source.tab_drop_operation = .split_right;
+            source.tab_drop_target_surface = split_pane;
+            try std.testing.expect(source.commitTabDropSplit(0));
+            const at = for (source.tabs.items, 0..) |*tab, i| {
+                if (tab.findHandle(split_pane) != null) break i;
+            } else return error.TestNoSplitTab;
+            try std.testing.expectEqual(@as(usize, 1), at);
+            TestCloseEarlierTab.host = source;
+            TestCloseEarlierTab.core = &fixture.core_app;
+            App.test_tab_move_shell_step = &TestCloseEarlierTab.hook;
+            defer App.test_tab_move_shell_step = null;
+            try std.testing.expect(try app.moveTabToWindow(source, at, .{ .new_window = null }));
+            App.test_tab_move_shell_step = null;
+            // The split tab is the one in the new window, and the source
+            // keeps the other.
+            try std.testing.expectEqual(@as(usize, 1), source.tabs.items.len);
+            try std.testing.expect(source.tabs.items[0].findHandle(split_pane) == null);
+            const torn = app.registry.hosts.items[app.registry.hosts.items.len - 1];
+            try std.testing.expect(torn != source);
+            try std.testing.expectEqual(@as(usize, 1), torn.tabs.items.len);
+            try std.testing.expect(torn.tabs.items[0].findHandle(split_pane) != null);
+            try app.validateShellNativeMapping();
+        }
+    }.body);
+}
+
+const TestEmptyTarget = struct {
+    var target: ?*Host = null;
+    var core: ?*CoreApp = null;
+
+    /// While undo history is disposed, window code closes every tab of the
+    /// window the tab joined, the moved one included.
+    fn hook(_: *App, step: App.TabMoveShellStep) void {
+        if (step != .history) return;
+        const host = target orelse return;
+        target = null;
+        while (host.tabs.items.len > 0) {
+            core.?.deleteSurface(host.tabs.items[0].focusedSurface().?);
+            if (!host.closeTabInPlace(0)) return;
+        }
+    }
+};
+
+test "win32 a tab move whose destination empties while history is disposed writes nothing to it once it is gone (Greptile r4510568141)" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    try runOnHiddenDesktop(struct {
+        fn body() !void {
+            var fixture: win32.WindowStartTestApp = .{};
+            try fixture.init();
+            defer fixture.deinit();
+            const app = &fixture.app;
+            app.shell_runtime_initialized = true;
+            const setup: TabMoveFixture = .{ .fixture = &fixture };
+            const source = try setup.window(2, false);
+            const target = try setup.window(1, false);
+            const target_id = target.id;
+            TestEmptyTarget.target = target;
+            TestEmptyTarget.core = &fixture.core_app;
+            App.test_tab_move_shell_step = &TestEmptyTarget.hook;
+            defer App.test_tab_move_shell_step = null;
+            try std.testing.expect(try app.moveTabToWindow(source, 0, .{ .host = .{ .host = target, .index = 1 } }));
+            App.test_tab_move_shell_step = null;
+            // The emptied destination went with its history; the source
+            // keeps its other tab.
+            try std.testing.expect(app.registry.findHostById(target_id) == null);
+            try std.testing.expectEqual(@as(usize, 1), source.tabs.items.len);
             try app.validateShellNativeMapping();
         }
     }.body);
