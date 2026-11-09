@@ -8909,7 +8909,10 @@ test "a binding chain whose closing action fails after freeing the surface ends 
 
 test "a binding chain whose closing action closes nothing keeps what came before it" {
     const testing = std.testing;
-    // `unconsumed:a=scroll_to_top>close_window>ignore` where the close
+    // The chain `scroll_to_top>close_window>ignore` on an unconsumed key
+    // (in a config: `keybind = unconsumed:a=scroll_to_top`, then
+    // `keybind = chain=close_window` and `keybind = chain=ignore`; a `>`
+    // inside a keybind separates the keys of a sequence), where the close
     // finds nothing to close: the dropped `ignore` must not make the key
     // ignored.
     var target: TestChainTarget = .{ .closes = false };

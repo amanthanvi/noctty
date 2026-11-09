@@ -383,8 +383,8 @@ that govern each symbol you change, or that none does.
   `keyEvent`, `performAllChainedAction`, `performAllOwnedChain`,
   `performChainOnAll`, `performAllAction`, `forEachListed`,
   `receivesAppWideActions` and `hasSurfaceInstance`, Win32's
-  `handleGlobalHotkey`, `holdLastWindowQuit`, `afterLastWindow`,
-  `onTerminalHandoffIdleTimer`,
+  `handleGlobalHotkey`, `holdLastWindowQuit`, `releaseLastWindowQuit`,
+  `afterLastWindow`, `onTerminalHandoffIdleTimer`, `settingsOnClosedThunk`,
   `Surface.receivesAppWideActions` and `keyEventTogglesCommandPalette`,
   and the inspector's tag-only `Event.binding` in
   `src/inspector/widgets/key.zig`).
