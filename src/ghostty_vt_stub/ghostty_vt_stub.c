@@ -16,7 +16,9 @@
  * (src/build/GhosttyVtStub.zig), so the image is this function and its
  * version resource. A Zig DLL brings Zig's start code (_DllMainCRTStartup) as
  * its entry and, unless built with -fno-dll-export-fns, exports it and the
- * TLS symbols.
+ * TLS symbols. -fsingle-threaded drops the TLS, not the start code: the entry
+ * is still _DllMainCRTStartup (docs/agents/log/build-release-ci.md,
+ * GHOSTTY-VT-STUB trap 1).
  */
 
 typedef int BOOL;

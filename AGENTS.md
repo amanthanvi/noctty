@@ -502,7 +502,10 @@ that govern each symbol you change, or that none does.
   and resources, the Windows target floor (`src/build/Config.zig`,
   `-Dtarget` `win10`/`win10_rs5`, and the std APIs it gates), packaging
   (`scripts/package-windows.ps1`, `dist/windows/noctty.iss`, what Setup's
-  `CloseApplications` closes, and what it installs and deletes), signing,
+  `CloseApplications` closes, and what it installs and deletes; the
+  placeholder staging contract and its controls,
+  `Get-PlaceholderStagingProblems` and `Assert-PlaceholderControlFails` in
+  `Contracts.93-ConPty.ps1`), signing,
   the updater (including `RegisterApplicationRestart` while an installer
   closes noctty, with `stagedInstallerRunning`; `pkg/wuffs/src/deflate.zig`,
   the raw DEFLATE decoder for update payloads; the files a portable payload
