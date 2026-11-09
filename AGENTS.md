@@ -377,9 +377,9 @@ that govern each symbol you change, or that none does.
   `src/input/mouse_encode.zig` writes), wheel and context-menu input, and
   key binding dispatch and chains (`Surface.maybeHandleBinding`,
   `dispatchLeaf`, `bindingOutcome`, `startLeader`, `performChain`,
-  `closeToken`, `closesCaller`, `mayDetachCaller`, `closingAction`,
-  `bindingTags`, `cursorKeyWrite`, `GenericLeaf.cloneActions` and
-  `Action.cloneSlice` in `src/input/Binding.zig`, `src/App.zig`'s
+  `closeToken`, `closesCaller`, `mayDetachCaller`, the stand-ins'
+  `closingAction`, `bindingTags`, `cursorKeyWrite`,
+  `GenericLeaf.cloneActions` and `Action.cloneSlice` in `src/input/Binding.zig`, `src/App.zig`'s
   `keyEvent`, `performAllChainedAction`, `performAllOwnedChain`,
   `performChainOnAll`, `performAllAction`, `forEachListed`,
   `receivesAppWideActions` and `hasSurfaceInstance`, Win32's

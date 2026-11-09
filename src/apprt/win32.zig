@@ -18069,8 +18069,8 @@ fn testLastWindowQuitAtChainEnd(embedding: bool, reopens: bool) !void {
     });
     defer session.deinit();
     // No window is registered, so this is the last one gone; with no
-    // delay a quit is posted at once. Embedding mode with no handoff
-    // server is an idle server.
+    // delay it quits at once (`running` goes false; under test no WM_QUIT
+    // is posted). Embedding mode with no handoff server is an idle server.
     try std.testing.expect(!app.hasLiveUiWindows());
     app.config.@"quit-after-last-window-closed" = true;
     app.config.@"quit-after-last-window-closed-delay" = null;
@@ -18081,7 +18081,6 @@ fn testLastWindowQuitAtChainEnd(embedding: bool, reopens: bool) !void {
     app.holdLastWindowQuit();
     app.afterLastWindow(); // `close_window` took the last window
     try std.testing.expect(app.running);
-    try std.testing.expectEqual(@as(u32, 0), app.test_last_window_quits);
     try std.testing.expect(app.last_window_quit_pending);
 
     // `new_window` later in the chain: a window is registered again.
@@ -18092,13 +18091,7 @@ fn testLastWindowQuitAtChainEnd(embedding: bool, reopens: bool) !void {
     app.releaseLastWindowQuit();
     try std.testing.expect(!app.last_window_quit_pending);
     try std.testing.expectEqual(@as(u32, 0), app.last_window_quit_holds);
-    if (reopens) {
-        try std.testing.expect(app.running);
-        try std.testing.expectEqual(@as(u32, 0), app.test_last_window_quits);
-    } else {
-        try std.testing.expect(!app.running);
-        try std.testing.expectEqual(@as(u32, 1), app.test_last_window_quits);
-    }
+    try std.testing.expectEqual(reopens, app.running);
 }
 
 test "win32 a held last-window quit keeps a process whose chain reopened a window" {

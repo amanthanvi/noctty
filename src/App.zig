@@ -1153,11 +1153,12 @@ fn receivesAppWideActions(surface: *apprt.Surface) bool {
 }
 
 /// Calls `visitor.visit(item)` for each item of `list` as it stood at the
-/// call, in order, that `visitor.receives(item)`. A visit can remove items and add some: an item that is
-/// gone when its turn comes is skipped, and one added is not visited. An
-/// item is known by its address and `visitor.id(item)` together, since a
-/// freed address can come back as a new item (Surface ids are random u64
-/// values), and `id` is read only from an item still in the list.
+/// call, in order, that `visitor.receives(item)`. A visit can remove items
+/// and add some: an item that is gone when its turn comes is skipped, and
+/// one added is not visited. An item is known by its address and
+/// `visitor.id(item)` together, since a freed address can come back as a
+/// new item (Surface ids are random u64 values), and `id` is read only
+/// from an item still in the list.
 fn forEachListed(
     alloc: Allocator,
     comptime T: type,
@@ -1298,7 +1299,11 @@ const TestChainApp = struct {
 
     fn performAllAction(self: TestChainApp, action: input.Binding.Action) !void {
         try self.seen.append(std.testing.allocator, action);
-        if (action == .reload_config or Surface.closingAction(action)) {
+        const closes = switch (action) {
+            .close_surface, .close_window, .close_tab => true,
+            else => false,
+        };
+        if (action == .reload_config or closes) {
             @memset(self.storage, poison);
         }
     }

@@ -816,9 +816,6 @@ pub const App = struct {
     /// A last-window quit came while held; `releaseLastWindowQuit` decides
     /// it again.
     last_window_quit_pending: bool = false,
-    /// Under test, the WM_QUIT posts of the last-window paths
-    /// (`postLastWindowQuit`), counted instead of posted to the test thread.
-    test_last_window_quits: u32 = 0,
     terminal_handoff_idle_timer_id: ?UINT_PTR = null,
     terminal_handoff_server: ?*win32_terminal_handoff.Server = null,
     undo_prune_timer_id: ?UINT_PTR = null,
@@ -2938,11 +2935,11 @@ pub const App = struct {
         }
     }
 
+    /// Posts WM_QUIT for a last-window quit, never to a test thread: there
+    /// the decision shows in `running`, which every caller clears first.
     fn postLastWindowQuit(self: *App) void {
-        if (builtin.is_test) {
-            self.test_last_window_quits += 1;
-            return;
-        }
+        _ = self;
+        if (builtin.is_test) return;
         sys.PostQuitMessage(0);
     }
 
@@ -7827,11 +7824,11 @@ pub const App = struct {
     }
 
     /// `quit` and `close_all_windows` run from the message loop, through the
-    /// target's window. Core does not count either as a closing action
-    /// (`closingAction`) and goes on using the terminal whose key binding
-    /// asked for it, so destroying the windows from inside that call freed
-    /// the terminal under its own key handler: an access violation in
-    /// `endKeySequence` in Debug builds.
+    /// target's window. Core does not count either as an action that can
+    /// close its surface (`closesCaller`) and goes on using the terminal
+    /// whose key binding asked for it, so destroying the windows from inside
+    /// that call freed the terminal under its own key handler: an access
+    /// violation in `endKeySequence` in Debug builds.
     fn postQuit(self: *App, target: apprt.Target) void {
         // A quit from a terminal asks on its window. One from the app as a
         // whole (a global key, automation) asks on the focused window, if

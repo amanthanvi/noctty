@@ -4477,8 +4477,9 @@ fn maybeHandleBinding(
                     // maybe.
                     //
                     // Deactivated below, once the binding's actions are
-                    // copied (`dispatchLeaf`), or before a leader starts
-                    // its sequence, so a failed copy leaves the table up.
+                    // copied (`dispatchLeaf`), or once a leader key's
+                    // sequence is set up (`startLeader`), so a failed copy
+                    // or setup leaves the table up.
                     // (A press has already dropped its own consumed-press
                     // entry and retained release above.)
                     pop_once_table = table.once and i == 0;
@@ -8271,14 +8272,13 @@ pub fn setSearchQuery(
     return true;
 }
 
-/// Returns true if performing the given action result in closing
-/// the surface. This is used to determine if our self pointer is
-/// still valid after performing some binding action.
-///
-/// This is the broad test, for a chain that runs across the app (`all:`,
-/// `global:`), where another surface's `close_tab:other` can close this
-/// one. On one surface, only `closesCaller` actions can.
-pub fn closingAction(action: input.Binding.Action) bool {
+/// The test stand-ins' model of an action that closes surfaces when it
+/// runs across the app (`all:`, `global:`): `close_surface`,
+/// `close_window` and every `close_tab`, since another surface's
+/// `close_tab:other` can close this one. No production path decides by it:
+/// the key handler asks whether the surface survived (`closeToken`), and on
+/// one surface stops at `closesCaller` and `mayDetachCaller` actions.
+fn closingAction(action: input.Binding.Action) bool {
     return switch (action) {
         .close_surface,
         .close_window,
@@ -8293,7 +8293,7 @@ pub fn closingAction(action: input.Binding.Action) bool {
 /// that surface itself: `close_surface`, `close_window` and
 /// `close_tab:this`. `close_tab:other` and `close_tab:right` close only
 /// the tabs beside it (on Win32, `App.closeTab`), so they are not, though
-/// `closingAction` counts them for an app-wide chain.
+/// the test stand-ins' `closingAction` counts them as an app-wide close.
 ///
 /// One that returns false had nothing to close, so the surface is still
 /// there; one that performs or fails may have freed it (`performChain`).
