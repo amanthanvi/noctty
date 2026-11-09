@@ -459,7 +459,10 @@ their scrollback, titles, split ratios and zoom. A window's only tab moves
 the window, as in Windows Terminal, and joins another window's tab bar if
 an ordinary move ends over it, which closes the window it left; a move that
 ends maximized or snapped (half, quarter or a Snap Layouts zone) stays a
-move. Esc cancels a drag.
+move. On Windows 10 builds without `IsWindowArranged` the snap is judged from
+the window's rect and size: a window already at a snap zone's exact size
+counts as unresized and can merge, and a move onto a monitor of another DPI
+that ends against a side of its work area never merges. Esc cancels a drag.
 `move_tab_to_new_window` (the palette's "Move Tab to New Window", unbound
 by default) does the tear-off from the keyboard; in a window of one tab it
 does nothing. A move is not undoable,

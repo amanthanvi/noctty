@@ -64,11 +64,15 @@ pub const Edges = struct { left: i32, top: i32, right: i32, bottom: i32 };
 /// has it (`api`), else whether the move ended looking snapped (`looks`,
 /// `looksSnapped`) at a size it did not keep (`kept`, `keptSize`): a plain
 /// move keeps its size, so a window sized by hand to the full height against
-/// a side is not taken for a Snap Fill (CodeRabbit r4509693771). The rect is
-/// never asked where the API answers: a plain move against an edge looks
-/// snapped and would decline a merge for nothing.
-pub fn snapped(api: ?bool, looks: bool, kept: bool) bool {
-    return api orelse (looks and !kept);
+/// a side is not taken for a Snap Fill (CodeRabbit r4509693771). Across
+/// DPIs (`dpi_changed`) the kept size is the rescaled one, which a snap zone
+/// can come within the slack of (CodeRabbit r4510086538): there a rect that
+/// looks snapped is a snap whatever its size, and such a plain move does not
+/// merge. That errs toward keeping the window, on these builds only. The
+/// rect is never asked where the API answers: a plain move against an edge
+/// looks snapped and would decline a merge for nothing.
+pub fn snapped(api: ?bool, looks: bool, kept: bool, dpi_changed: bool) bool {
+    return api orelse (looks and (!kept or dpi_changed));
 }
 
 /// Whether a window ended its move at the size it moved at (`at`, at
@@ -295,20 +299,24 @@ test "a window against a side and the top or bottom of its work area looks snapp
         .resized = true,
         .dpi_changed = true,
         .zoomed = false,
-        .arranged = snapped(null, looksSnapped(.{ .left = -7, .top = 0, .right = 967, .bottom = 1039 }, work, 12), keptSize(.{ .width = 1200, .height = 900 }, 144, .{ .width = 974, .height = 1039 }, 96, 12)),
+        .arranged = snapped(null, looksSnapped(.{ .left = -7, .top = 0, .right = 967, .bottom = 1039 }, work, 12), keptSize(.{ .width = 1200, .height = 900 }, 144, .{ .width = 974, .height = 1039 }, 96, 12), true),
         .over_strip = true,
     }));
 }
 
 test "a snap is IsWindowArranged's answer where it has one, the rect's only where it has none" {
     // Present and false: a plain move, whatever the rect looks like.
-    try std.testing.expect(!snapped(false, true, false));
-    try std.testing.expect(snapped(true, false, true));
+    try std.testing.expect(!snapped(false, true, false, false));
+    try std.testing.expect(snapped(true, false, true, false));
     // Absent (Windows 10 builds): the rect decides, with the size the move
     // gave it.
-    try std.testing.expect(snapped(null, true, false));
-    try std.testing.expect(!snapped(null, false, false));
-    try std.testing.expect(!snapped(null, true, true));
+    try std.testing.expect(snapped(null, true, false, false));
+    try std.testing.expect(!snapped(null, false, false, false));
+    try std.testing.expect(!snapped(null, true, true, false));
+    // Across DPIs, a rect that looks snapped is a snap even at the kept
+    // size; one that does not is a plain move.
+    try std.testing.expect(snapped(null, true, true, true));
+    try std.testing.expect(!snapped(null, false, true, true));
 }
 
 test "a window move that kept its size is a plain move however snapped it looks, one that took a zone's size a snap (CodeRabbit r4509693771)" {
@@ -324,19 +332,29 @@ test "a window move that kept its size is a plain move however snapped it looks,
         .resized = false,
         .dpi_changed = false,
         .zoomed = false,
-        .arranged = snapped(null, looksSnapped(tall, work, 12), keptSize(tall_size, 96, tall_size, 96, 12)),
+        .arranged = snapped(null, looksSnapped(tall, work, 12), keptSize(tall_size, 96, tall_size, 96, 12), false),
         .over_strip = true,
     }));
     // The same window onto a 144 DPI monitor, rescaled there: still the size
-    // it moved at.
+    // it moved at, but a snap zone there can be within the slack of that
+    // size, so against a side it does not merge (CodeRabbit r4510086538);
+    // away from the sides it does.
     const scaled: Size = .{ .width = 1350, .height = 1559 };
     try std.testing.expect(keptSize(tall_size, 96, scaled, 144, 12));
+    try std.testing.expect(!windowMoveMerges(.{
+        .moved = true,
+        .resized = true,
+        .dpi_changed = true,
+        .zoomed = false,
+        .arranged = snapped(null, true, keptSize(tall_size, 96, scaled, 144, 12), true),
+        .over_strip = true,
+    }));
     try std.testing.expect(windowMoveMerges(.{
         .moved = true,
         .resized = true,
         .dpi_changed = true,
         .zoomed = false,
-        .arranged = snapped(null, true, keptSize(tall_size, 96, scaled, 144, 12)),
+        .arranged = snapped(null, false, keptSize(tall_size, 96, scaled, 144, 12), true),
         .over_strip = true,
     }));
     // Snap Fill: an 800x600 window takes a third of the width and the full
@@ -348,7 +366,7 @@ test "a window move that kept its size is a plain move however snapped it looks,
         .resized = true,
         .dpi_changed = true,
         .zoomed = false,
-        .arranged = snapped(null, looksSnapped(fill, work, 12), keptSize(.{ .width = 800, .height = 600 }, 144, .{ .width = 654, .height = 1039 }, 96, 12)),
+        .arranged = snapped(null, looksSnapped(fill, work, 12), keptSize(.{ .width = 800, .height = 600 }, 144, .{ .width = 654, .height = 1039 }, 96, 12), true),
         .over_strip = true,
     }));
     // A size within the slack of the scaled one is kept; past it is not.

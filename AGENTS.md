@@ -301,7 +301,8 @@ that govern each symbol you change, or that none does.
   `window_start.placeTearOff`), the quick terminal (`win32_quick_terminal.zig`,
   `win32/quick_terminal_host.zig`).
 - [chrome-tabs-paint.md](docs/agents/log/chrome-tabs-paint.md): tab buttons
-  (`tabButtonProc`, `drawButton`, labels, tooltips, close X, the active tab's
+  (`tabButtonProc`, `drawButton`, labels, tooltips, close X and the press it
+  needs (`Host.tab_close_press`, `App.takeHeldRelease`), the active tab's
   join to its terminal, `win32_tab_visual.zig`; what a tab's label, tooltip
   and UIA name say and which tabs the strip shows: `win32/tab_label.zig`,
   `key`, `text`, `tooltip`, `uiaName`, `visible`, and `Tab.cachedKey` and

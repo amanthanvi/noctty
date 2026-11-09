@@ -3182,6 +3182,9 @@ pub const Host = struct {
         if (tab.button_hwnd) |button| if (sys.GetCapture() == button) {
             self.endTabDrag();
             self.tab_drag_cancelled = true;
+            // With the capture gone it can land in any window, on a
+            // terminal there too: the pump takes it (`App.takeHeldRelease`).
+            self.app.held_release_pending = true;
         };
         detachChromeControlProvider(self.app, &tab.uia_provider);
         destroySubclassedWindow(&tab.button_hwnd, &tab.button_prev_proc);
@@ -3998,6 +4001,7 @@ pub const Host = struct {
         if ((self.tab_drag_index != null or self.tab_drag_cancelled) and self.tabs.items[index].id == self.tab_drag_tab_id) {
             self.endTabDrag();
             self.tab_drag_cancelled = true;
+            self.app.held_release_pending = true;
         }
         var tab = self.tabs.orderedRemove(index);
         self.destroyTabButton(&tab);

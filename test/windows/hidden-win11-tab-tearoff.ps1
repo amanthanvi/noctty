@@ -153,7 +153,6 @@ public static class Tt {
     // When each posted key or drag ran (GetTickCount64 at its start and end),
     // set against the real keyboard's samples (modifier-sampler.c).
     public static System.Collections.Generic.List<ulong[]> Windows=new System.Collections.Generic.List<ulong[]>();
-    public static void Ran(ulong start) { Windows.Add(new ulong[]{start,GetTickCount64()}); }
     // The sampler's rows (`tick,held,active`; `done,n` skipped) against the
     // posted keys' and drags' spans: the spans sorted and merged (a drag's
     // Esc key runs inside its drag), the rows sorted by tick, one sweep over
@@ -197,18 +196,29 @@ public static class Tt {
             if(!SetKeyboardState(new byte[256])) throw new Exception("SetKeyboardState failed");
         } finally { AttachThreadInput(me,tid,false); }
     }
+    // Posted keys whose span is still open. Each lasts until the harness has
+    // seen what the key did (`Settled`, after the wait for its effect): no
+    // round trip can tell when the app handled it, since a message sent to
+    // its thread is delivered before the posted ones still queued
+    // (CodeRabbit r4510086545), and `WaitForInputIdle` waits only once per
+    // process.
+    static System.Collections.Generic.List<ulong> Pending=new System.Collections.Generic.List<ulong>();
+    // A drag's span: open from its press until the next `Settled`, as a
+    // key's (CodeRabbit r4510237566).
+    public static void Open(ulong start) { Pending.Add(start); }
+    public static void Settled() {
+        var now=GetTickCount64();
+        foreach(var start in Pending) Windows.Add(new ulong[]{start,now});
+        Pending.Clear();
+    }
     // A key as a posted WM_KEYDOWN/WM_KEYUP pair (a posted triple types it
-    // twice), with the app's keyboard state cleared first; its window of
-    // time lasts until the app is idle after it.
+    // twice), with the app's keyboard state cleared first; its span opens
+    // here and closes at the next `Settled`.
     public static void Key(IntPtr h,int key) {
-        var start=GetTickCount64();
-        uint pid; GetWindowThreadProcessId(h,out pid);
+        Pending.Add(GetTickCount64());
         Neutralize(h);
         if(!PostMessageW(h,0x100,new IntPtr(key),new IntPtr(1))) throw new Exception("Key-down post failed");
         if(!PostMessageW(h,0x101,new IntPtr(key),new IntPtr(0xC0000001L))) throw new Exception("Key-up post failed");
-        try { using(var p=System.Diagnostics.Process.GetProcessById((int)pid)) { p.WaitForInputIdle(2000); } } catch(Exception) { System.Threading.Thread.Sleep(300); }
-        System.Threading.Thread.Sleep(50);
-        Ran(start);
     }
     // What `vk` types with no modifier in the layout of `h`'s thread, or null.
     public static string Typed(IntPtr h,int vk) {
@@ -219,30 +229,51 @@ public static class Tt {
     }
 }
 '@
+# The console dumps a run left (`Pane-Consoles`: `attach-<8 hex>.txt` and its
+# `.log`, which hold marker text), after the driver: deleted only once the
+# driver's job is confirmed empty, which `Invoke-LocalHiddenDriver` records
+# in the run's `startup-state.json` (`OwnedJobCleanedUp`, true only after
+# `StopOwnedJob` saw no process left), since a helper still running could
+# write one again. Returns the dumps removed, the ones left in place and the
+# deletions that failed, by path; nothing is swallowed.
+function Settle-ConsoleDumps([string]$Evidence) {
+    $result=@{ Removed=@(); Left=@(); Failed=@(); JobEmpty=$false }
+    if(-not (Test-Path -LiteralPath $Evidence)) { return $result }
+    $state=Join-Path $Evidence 'startup-state.json'
+    if(Test-Path -LiteralPath $state) {
+        try { $result.JobEmpty=((Get-Content -LiteralPath $state -Raw | ConvertFrom-Json).OwnedJobCleanedUp -eq $true) }
+        catch { $result.Failed+=('{0}: unreadable ({1})' -f $state,$_.Exception.Message) }
+    }
+    $dumps=@(Get-ChildItem -LiteralPath $Evidence -File | Where-Object { $_.Name -match '^attach-[0-9a-f]{8}\.txt(\.log)?$' })
+    foreach($dump in $dumps) {
+        if(-not $result.JobEmpty) { $result.Left+=$dump.FullName; continue }
+        try { Remove-Item -LiteralPath $dump.FullName -Force -ErrorAction Stop; $result.Removed+=$dump.FullName }
+        catch { $result.Failed+=('{0}: {1}' -f $dump.FullName,$_.Exception.Message) }
+    }
+    return $result
+}
+
 if (-not $Driver) {
     # A run directory that exists is refused before anything runs, and
     # nothing in it is touched: the cleanup below is only for the directory
     # this invocation makes (Invoke-LocalHiddenDriver creates it).
     $evidence=[IO.Path]::GetFullPath($Run)
     if(Test-Path -LiteralPath $evidence) { throw 'Run directory must be new.' }
-    $createdRun=$false
+    $driverError=$null
     try {
-        $createdRun=$true
         Invoke-LocalHiddenDriver -Script $PSCommandPath -Bin $Bin -Run $Run -TimeoutSeconds $DriverTimeoutSeconds `
             -ExpectedStartupHash $ExpectedStartupHash -ExpectedStartupModified $ExpectedStartupModified `
             -DesktopPrefix 'noctty-tearoff-' -Label 'Hidden tab tear-off' -PassDesktopName -GuardClipboard `
             -DriverArguments @(@("-Renderer $Renderer") + $(if($SampleRealKeyboard) { @('-SampleRealKeyboard') } else { @() }))
-    } finally {
-        # The driver's job has stopped by now, every console helper with it:
-        # a dump a helper that would not exit left (its marker text) goes.
-        # Only the names `Pane-Consoles` gives its dumps, only in this run's
-        # own directory.
-        if($createdRun -and (Test-Path -LiteralPath $evidence)) {
-            Get-ChildItem -LiteralPath $evidence -File -ErrorAction SilentlyContinue |
-                Where-Object { $_.Name -match '^attach-[0-9a-f]{8}\.txt(\.log)?$' } |
-                Remove-Item -Force -ErrorAction SilentlyContinue
-        }
-    }
+    } catch { $driverError=$_ }
+    # The directory did not exist above: this invocation made it, if it is
+    # there. Its dumps go only once the driver's job is confirmed empty.
+    $createdRun=Test-Path -LiteralPath $evidence
+    $dumps=if($createdRun) { Settle-ConsoleDumps $evidence } else { @{ Left=@(); Failed=@() } }
+    foreach($path in $dumps.Left) { Write-Host ("INCONCLUSIVE: the driver's job was not confirmed empty, so this console dump is left in place: " + $path) }
+    foreach($line in $dumps.Failed) { Write-Host ("FAIL: console dump cleanup: " + $line) }
+    if($driverError) { throw $driverError }
+    if($dumps.Left.Count -or $dumps.Failed.Count) { throw 'Console dump cleanup did not finish; see the lines above.' }
     exit
 }
 
@@ -317,6 +348,7 @@ function Launch-Case([string]$Name,[string]$RendererName,[string[]]$Extra=@()) {
     throw "Window startup failed for case $Name."
 }
 function Close-Case($case) {
+    [Tt]::Settled()
     foreach($h in [HiddenLocal]::Hosts($case.Pid)) { [void][Tt]::PostMessageW($h,0x10,[IntPtr]::Zero,[IntPtr]::Zero) }
     if([HiddenLocal]::WaitForSingleObject($case.Pi.process,5000) -eq 258) {
         # The handle is this launch's own process: no name or pattern match.
@@ -424,6 +456,7 @@ function New-Pane($case,[IntPtr]$From) {
     $before=@(foreach($h in Hosts $case) { Panes $h })
     [Tt]::Key($From,$VK_F6)
     [void](Wait-Until { @(foreach($h in Hosts $case) { Panes $h }).Count -gt $before.Count } 10)
+    [Tt]::Settled()
     $after=@(foreach($h in Hosts $case) { Panes $h })
     $new=@($after | Where-Object { $before -notcontains $_ })
     if($new.Count -ne 1) { throw 'new_tab made no pane.' }
@@ -444,8 +477,8 @@ function Drag($h,[int]$Index,[int]$X,[int]$Y,[switch]$Escape,[IntPtr]$EscapeTo) 
     Start-Sleep -Milliseconds 300
     if($Escape) { [Tt]::Key($EscapeTo,$VK_ESCAPE); Start-Sleep -Milliseconds 200 }
     [Tt]::Mouse($button,$WM_LBUTTONUP,$X-$origin.Left,$Y-$origin.Top,0)
-    Start-Sleep -Milliseconds 100
-    [Tt]::Ran($started)
+    # Open until the caller has seen what the drag did (`Settled`).
+    [Tt]::Open($started)
 }
 function Same-Set($a,$b) { return (@($a) -join ',') -eq (@($b) -join ',') }
 # Each window owns the pseudo console of each of its panes: a moved pane's
@@ -529,6 +562,7 @@ function Measure-Case([string]$RendererName) {
         [Tt]::Key($p2,$VK_F7)
         # The new window exists before the tab is in it: wait for the pane.
         $moved=Wait-Until { $o=HostOf $case $p2; $o -ne [IntPtr]::Zero -and $o -ne $h1 } 10
+        [Tt]::Settled()
         Start-Sleep -Milliseconds 300
         $h2=HostOf $case $p2
         Check "${RendererName} action: a second window opens" $moved 2 (Hosts $case).Count
@@ -563,6 +597,7 @@ function Measure-Case([string]$RendererName) {
         Check "${RendererName} drag: the drop point is on screen, past the window" ($dropX -lt $work[2] -and $dropY -lt $work[3]) @($work[2],$work[3]) @($dropX,$dropY)
         Drag $h1 1 $dropX $dropY
         $torn=Wait-Until { $o=HostOf $case $p3; $o -ne [IntPtr]::Zero -and $o -ne $h1 } 10
+        [Tt]::Settled()
         Start-Sleep -Milliseconds 300
         $h3=HostOf $case $p3
         Check "${RendererName} drag: a third window opens" $torn 3 (Hosts $case).Count
@@ -590,6 +625,7 @@ function Measure-Case([string]$RendererName) {
         Start-Sleep -Milliseconds 800
         Check "${RendererName} Esc: no window opens" ((Hosts $case).Count -eq 3) 3 (Hosts $case).Count
         Check "${RendererName} Esc: the tab stays" ((HostOf $case $p4) -eq $h1 -and (Panes $h1).Count -eq 2) 'two panes in the first window' (Panes $h1).Count
+        [Tt]::Settled()
 
         # 4. A drag onto another window's tab strip: the tab moves there.
         # The windows side by side, so neither covers the other's strip.
@@ -601,6 +637,7 @@ function Measure-Case([string]$RendererName) {
         $stripX=$c3.Left+12; $stripY=$c3.Top+12
         Drag $h1 1 $stripX $stripY
         $joined=Wait-Until { (HostOf $case $p4) -eq $h3 } 10
+        [Tt]::Settled()
         Check "${RendererName} drop: the tab joins the other window" $joined 'in the third window' $null
         Check "${RendererName} drop: no window opened or closed" ((Hosts $case).Count -eq 3) 3 (Hosts $case).Count
         Check "${RendererName} drop: the target window has both tabs, the source one" ((Panes $h3).Count -eq 2 -and (Panes $h1).Count -eq 1) '2 and 1' @{Target=(Panes $h3).Count;Source=(Panes $h1).Count}
@@ -620,6 +657,7 @@ function Measure-Case([string]$RendererName) {
         $before=Shell-Pids $case
         [Tt]::Key($p4,$VK_F9)
         $ended=Wait-Until { (Shell-Pids $case).Count -lt $before.Count } 10
+        [Tt]::Settled()
         Check "${RendererName} control: closing a pane ends its shell" $ended ("< " + $before.Count) (Shell-Pids $case).Count
         Check "${RendererName}: the process is still running" ([HiddenLocal]::WaitForSingleObject($case.Pi.process,0) -eq 258) $true $null
         $sample.ShellCount=(Shell-Pids $case).Count
@@ -627,6 +665,45 @@ function Measure-Case([string]$RendererName) {
         $script:samples.Add($sample)
         Close-Case $case
     }
+}
+
+# A tab with a split moves whole: both panes' windows and both pseudo
+# consoles go to the new window, and both shells keep running (CodeRabbit
+# r4510086554). F5 for the split: a real F10 is a system key.
+function Measure-Split([string]$RendererName) {
+    $case=Launch-Case "split-$RendererName" $RendererName @('keybind = f5=new_split:right')
+    try {
+        $h1=(Hosts $case)[0]
+        $p1=(Panes $h1)[0]
+        $p2=New-Pane $case $p1
+        $before=@(Panes $h1)
+        [Tt]::Key($p2,0x74)   # F5: new_split:right
+        [void](Wait-Until { @(Panes $h1).Count -gt $before.Count } 10)
+        [Tt]::Settled()
+        $split=@(Panes $h1 | Where-Object { $before -notcontains $_ })
+        Check "${RendererName} split: the split opens in the second tab" ($split.Count -eq 1) 1 $split.Count
+        if($split.Count -ne 1) { return }
+        $p3=$split[0]
+        $m2=Wait-Marker $p2; $m3=Wait-Marker $p3
+        Check "${RendererName} split: both panes printed their own marker" ($null -ne $m2 -and $null -ne $m3 -and $m2 -ne $m3) 'two markers' $null
+        [void](Wait-Until { (Shell-Pids $case).Count -ge 3 } 10)
+        Start-Sleep -Milliseconds 500
+        $pids=Shell-Pids $case
+        [Tt]::Key($p3,$VK_F7)
+        $moved=Wait-Until { $o=HostOf $case $p3; $o -ne [IntPtr]::Zero -and $o -ne $h1 } 10
+        [Tt]::Settled()
+        Start-Sleep -Milliseconds 300
+        $h2=HostOf $case $p3
+        Check "${RendererName} split: both panes' windows are the new window's" ($moved -and $h2 -ne [IntPtr]::Zero -and [Tt]::GetParent($p2) -eq $h2 -and [Tt]::GetParent($p3) -eq $h2) 'children of the new window' $null
+        Check "${RendererName} split: the window it left keeps its first tab" ((Panes $h1).Count -eq 1 -and (Panes $h1)[0] -eq $p1) 1 (Panes $h1).Count
+        $owners=Consoles-Follow $case
+        $moved_rows=@($owners.Panes | Where-Object { $_.Window -eq [long]$h2 })
+        Check "${RendererName} split: each moved pane's console window is the new window's" ($owners.Holds -and $moved_rows.Count -eq 2 -and @($moved_rows | Where-Object { $_.Owned }).Count -eq 2) 'two owned by the new window' $owners
+        $after=Shell-Pids $case
+        Check "${RendererName} split: no shell started or ended" (Same-Set $pids $after) ($pids -join ',') ($after -join ',')
+        Check "${RendererName} split: both moved shells kept their output" ($null -ne $m2 -and $null -ne $m3 -and (Marker $p2) -eq $m2 -and (Marker $p3) -eq $m3) 'same, non-null markers' $null
+        Check-Backend $case $RendererName 'after the split tab moved' @($p1,$p2,$p3)
+    } finally { Close-Case $case }
 }
 
 # A pane whose search bar is open moves to a new window, the window it left
@@ -641,10 +718,12 @@ function Measure-Search([string]$RendererName) {
         [void](Wait-Marker $p2)
         [Tt]::Key($p2,0x77)   # F8: start_search
         $opened=Wait-Until { $e=[Tt]::Child($h1,2101); $e -ne [IntPtr]::Zero -and [Tt]::Visible($e) } 5
+        [Tt]::Settled()
         Check "${RendererName} search: the search bar opens" $opened 'shown' $null
         $edit=[Tt]::Child($h1,2101)
         [Tt]::Key($p2,$VK_F7)
         $moved=Wait-Until { $o=HostOf $case $p2; $o -ne [IntPtr]::Zero -and $o -ne $h1 } 10
+        [Tt]::Settled()
         Check "${RendererName} search: the tab with the search bar moves" $moved 'a new window' $null
         $h2=HostOf $case $p2
         Check "${RendererName} search: the search box went with it" ($edit -ne [IntPtr]::Zero -and [Tt]::GetParent($edit) -eq $h2) 'child of the new window' $null
@@ -657,6 +736,7 @@ function Measure-Search([string]$RendererName) {
         [Tt]::Key($edit,0x58)   # X, typed into the moved search box
         Start-Sleep -Milliseconds 800
         $alive=[HiddenLocal]::WaitForSingleObject($case.Pi.process,0) -eq 258
+        [Tt]::Settled()
         Check "${RendererName} search: the process stays up as the moved search box is typed into" $alive 'running' $null
         if($null -eq $expect) {
             $script:skips.Add("${RendererName} search: the X key types nothing by itself in this layout")
@@ -702,6 +782,7 @@ function Measure-CrossDpi([string]$RendererName,[ValidateSet('down','up')][strin
         $dropX=$m[0]+200; $dropY=$m[1]+160
         Drag $h1 1 $dropX $dropY
         $torn=Wait-Until { $o=HostOf $case $p2; $o -ne [IntPtr]::Zero -and $o -ne $h1 } 10
+        [Tt]::Settled()
         Check "${RendererName} cross-DPI ${Direction}: the tab tears off onto the other monitor" $torn 'a new window' $null
         if(-not $torn) { return }
         $h2=HostOf $case $p2
@@ -760,6 +841,7 @@ try {
     foreach($name in $renderers) { Measure-Case $name }
     foreach($name in $renderers) { Measure-CrossDpi $name 'down'; Measure-CrossDpi $name 'up' }
     foreach($name in $renderers) { Measure-Search $name }
+    foreach($name in $renderers) { Measure-Split $name }
 } catch {
     $script:checks.Add(@{Name='Harness execution'; Passed=$false; Error=$_.Exception.Message})
 } finally {
@@ -768,6 +850,7 @@ try {
     # passed (input.md, 2026-10-11, trap 11). Nothing held is not a pass
     # either: nothing here can hold a real key to show the sampler would see
     # one.
+    [Tt]::Settled()
     $keyboard=@{ Windows=[Tt]::Windows.Count }
     if($script:sampler) {
         New-Item -ItemType File -Path $samplerStop -Force | Out-Null

@@ -11076,6 +11076,9 @@ pub fn tabButtonProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) call
                     return 0;
                 },
                 c.WM_CAPTURECHANGED => {
+                    // Its press on the X is over: the release, if it comes
+                    // back here, is not that press's (CodeRabbit r4510086520).
+                    if (v.tab_close_press == hwnd) v.tab_close_press = null;
                     v.tab_drag_cancelled = false;
                     v.tab_drag_index = null;
                     v.tab_drag_active = false;
@@ -11678,8 +11681,13 @@ pub fn hostWindowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) cal
                     }
                     switch (ht) {
                         c.HTCLOSE => {
+                            // Only the release of this window's own press
+                            // on Close closes it: not one whose press a tab
+                            // that left mid-drag held, nor one whose press
+                            // began elsewhere (council round 6 L2).
+                            const pressed = v.caption_pressed == .close;
                             v.clearCaptionPressed();
-                            _ = sys.SendMessageW(hwnd, c.WM_SYSCOMMAND, c.SC_CLOSE, lParam);
+                            if (pressed) _ = sys.SendMessageW(hwnd, c.WM_SYSCOMMAND, c.SC_CLOSE, lParam);
                             return 0;
                         },
                         else => v.clearCaptionPressed(),
