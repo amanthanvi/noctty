@@ -18068,6 +18068,44 @@ test "win32 pane divider reconciles held keys through the host's WM_ACTIVATEAPP"
     try std.testing.expect(!app.paneDividerDragKey(c.WM_KEYUP, f24, paneDividerKeyLParam(0x76, false, .release)));
 }
 
+test "win32 pane divider reconciles an IME key by the key the IME took" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var core_app: CoreApp = undefined;
+    var app: App = undefined;
+    var host: Host = undefined;
+    var surface_a: Surface = undefined;
+    var surface_b: Surface = undefined;
+    var session: TestSession = .{};
+    try session.init(.{
+        .core_app = &core_app,
+        .app = &app,
+        .hosts = &.{.{ .storage = &host, .register = true }},
+        .surfaces = &.{
+            .{ .storage = &surface_a, .host = &host, .register = true },
+            .{ .storage = &surface_b, .host = &host },
+        },
+        .tabs = &.{.{ .host = &host, .surface = &surface_a, .id = 1 }},
+    });
+    defer session.deinit();
+    try paneDividerTestSplit(&host, &surface_a, &surface_b, .right, 0.5);
+
+    // An IME is composing: 'A' (scan 0x1E) arrives as VK_PROCESSKEY during a
+    // drag, the IME reporting 'A' as the key it took.
+    app_module.test_ime_original_key = 'A';
+    defer app_module.test_ime_original_key = null;
+    try std.testing.expect(host.beginPaneDividerDrag(pane_divider_test_content, .{ .x = 400, .y = 300 }, 1000));
+    try std.testing.expect(app.paneDividerDragKey(c.WM_KEYDOWN, c.VK_PROCESSKEY, paneDividerKeyLParam(0x1E, false, .press)));
+    host.finishPaneDividerDrag(pane_divider_test_content);
+    // Back from another app with 'A' still down: asked by 'A', not by
+    // VK_PROCESSKEY (never down), it stays held, and its release is
+    // swallowed rather than reaching a terminal that never saw the press.
+    pane_divider_test_down = 'A';
+    defer pane_divider_test_down = null;
+    app.reconcilePaneDividerHeldKeys(&paneDividerTestKeyDown);
+    try std.testing.expect(app.paneDividerDragKey(c.WM_KEYUP, c.VK_PROCESSKEY, paneDividerKeyLParam(0x1E, false, .release)));
+}
+
 test "win32 pane divider double-click equalizes only the split its first click was on" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
@@ -18153,6 +18191,59 @@ test "win32 pane divider rereads the start pixel when the content width changes 
     tab.focused = tab.findHandle(&surface_a).?;
     host.cancelPaneDividerDrag();
     try std.testing.expectEqual(@as(usize, 0), host.structural_undo_entries.items.len);
+}
+
+test "win32 pane divider rereads the start pixel on a layout between drag steps" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var core_app: CoreApp = undefined;
+    var app: App = undefined;
+    var host: Host = undefined;
+    var surface_a: Surface = undefined;
+    var surface_b: Surface = undefined;
+    var surface_c: Surface = undefined;
+    var session: TestSession = .{};
+    try session.init(.{
+        .core_app = &core_app,
+        .app = &app,
+        .hosts = &.{.{ .storage = &host, .register = true }},
+        .surfaces = &.{
+            .{ .storage = &surface_a, .host = &host, .register = true },
+            .{ .storage = &surface_b, .host = &host },
+            .{ .storage = &surface_c, .host = &host },
+        },
+        .tabs = &.{.{ .host = &host, .surface = &surface_a, .id = 1 }},
+    });
+    defer session.deinit();
+    const start: f16 = 0.400390625;
+    try paneDividerTestSplit(&host, &surface_a, &surface_b, .right, start);
+    try paneDividerTestStructuralHistory(&host, &surface_a, &surface_b);
+    const tab = &host.tabs.items[0];
+
+    // At 3840 px a 1 px move stays on pixel 1538: no change yet.
+    host.test_pane_divider_content = .{ .left = 0, .top = 0, .right = 3840, .bottom = 600 };
+    try std.testing.expect(host.beginPaneDividerDrag(host.test_pane_divider_content.?, .{ .x = 1538, .y = 300 }, 1000));
+    host.dragPaneDivider(host.test_pane_divider_content.?, .{ .x = 1539, .y = 300 });
+    try std.testing.expect(paneDividerTestRatio(&host, .root) != start);
+    // The window grows to 3841 px (WM_SIZE lays the panes out, with no drag
+    // step): the same ratio is pixel 1539 there, off its start pixel.
+    host.test_pane_divider_content = .{ .left = 0, .top = 0, .right = 3841, .bottom = 600 };
+    try host.layout();
+    // Automation splits a pane, replacing the tree, before the next step.
+    const inserted = try SplitTreeSurface.init(std.testing.allocator, &surface_c);
+    defer {
+        var cleanup = inserted;
+        cleanup.deinit();
+    }
+    const split = try tab.tree.split(std.testing.allocator, tab.findHandle(&surface_b).?, .down, 0.5, &inserted);
+    tab.tree.deinit();
+    tab.tree = split;
+    // The next move drops the drag: it was off its start pixel, a change,
+    // so the history from before the press goes.
+    host.dragPaneDivider(host.test_pane_divider_content.?, .{ .x = 1540, .y = 300 });
+    try std.testing.expect(host.pane_divider_drag == null);
+    try std.testing.expectEqual(@as(usize, 0), host.structural_undo_entries.items.len);
+    try std.testing.expectEqual(@as(usize, 0), host.structural_redo_entries.items.len);
 }
 
 test "win32 pane divider drag dropped after it moved starts settle repaints" {

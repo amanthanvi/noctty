@@ -494,15 +494,24 @@ pub fn repaintHostedChild(self: *Surface) !void {
 }
 
 /// `repaintHostedChild`, painting at once (`update_now`) or queueing the
-/// paint. A repaint deferred by a live frame resize is flushed at once
-/// either way, as before.
+/// paint, a repaint a live frame resize deferred included: outside a
+/// divider step `update_now` is always true, so that flush paints at once
+/// as it did; within one it takes the step's budget like any other.
 pub fn repaintHostedChildWith(self: *Surface, update_now: bool) !void {
     if (self.live_resize_repaint_deferred) {
-        _ = try self.flushDeferredLiveResizeRepaint(struct {
-            fn repaint(surface: *Surface) !void {
-                try surface.queuePaintRequest(true);
-            }
-        }.repaint);
+        if (update_now) {
+            _ = try self.flushDeferredLiveResizeRepaint(struct {
+                fn repaint(surface: *Surface) !void {
+                    try surface.queuePaintRequest(true);
+                }
+            }.repaint);
+        } else {
+            _ = try self.flushDeferredLiveResizeRepaint(struct {
+                fn repaint(surface: *Surface) !void {
+                    try surface.queuePaintRequest(false);
+                }
+            }.repaint);
+        }
         return;
     }
 

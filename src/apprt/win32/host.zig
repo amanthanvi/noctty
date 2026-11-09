@@ -4493,6 +4493,30 @@ pub const Host = struct {
         try std.testing.expect(SizeChangeForwarder.sizes >= 3);
         try std.testing.expectEqual(@as(usize, 1), surface_presentation.test_sync_paint_requests);
         host.finishPaneDividerDrag(content);
+
+        // A step of the inner divider moves B and C and leaves A alone. A
+        // holds a repaint an earlier frame resize deferred and never
+        // flushed: the step's layout flushes it with the rest, within the
+        // same one synchronous paint, not as one more.
+        surface_a.paint_pending = false;
+        surface_a.live_resize_repaint_deferred = true;
+        const inner = tab.tree.nodes[0].split.right;
+        const line = try paneDividerPositionAt(&host, content, inner);
+        const x = content.right - 40;
+        try std.testing.expect(host.beginPaneDividerDrag(content, .{ .x = x, .y = line }, 9000));
+        try std.testing.expectEqual(inner, host.pane_divider_drag.?.handle);
+        surface_presentation.test_sync_paint_requests = 0;
+        host.dragPaneDivider(content, .{ .x = x, .y = line - 30 });
+        try std.testing.expect(!surface_a.live_resize_repaint_deferred);
+        try std.testing.expectEqual(@as(usize, 1), surface_presentation.test_sync_paint_requests);
+        host.finishPaneDividerDrag(content);
+    }
+
+    fn paneDividerPositionAt(host: *Host, content: RECT, handle: SplitTreeSurface.Node.Handle) !i32 {
+        const tab = host.activeTab() orelse return error.TestNoTab;
+        var spatial = try tab.tree.spatial(std.testing.allocator);
+        defer spatial.deinit(std.testing.allocator);
+        return (PaneDividers.divider(&tab.tree, spatial, paneDividerArea(content), handle, 0) orelse return error.TestNoDivider).position;
     }
 
     /// Sends a stand-in pane's WM_SIZE to its Surface's `windowSizeChanged`.
@@ -11259,6 +11283,20 @@ pub const Host = struct {
         self.startResizeSettleRepaints();
     }
 
+    /// While a drag's tree is still valid, reread whether its divider sits
+    /// off its start pixel in the panes' current rectangle. A layout the
+    /// drag did not make (WM_SIZE, an overlay opening) moves the pixels
+    /// without a drag step, and a tree replaced before the next step is
+    /// decided by this value (`dropPaneDividerDrag`); once the tree is
+    /// replaced, it keeps the last value read on the valid tree.
+    fn refreshPaneDividerOffStart(self: *Host) void {
+        const drag = if (self.pane_divider_drag) |*active| active else return;
+        const tab = self.paneDividerDragTab(drag.*) orelse return;
+        const content = self.paneDividerContent() orelse return;
+        const ratio = tab.tree.nodes[drag.handle.idx()].split.ratio;
+        drag.off_start = ratio != drag.start_ratio and !self.paneDividerOnStartPixel(tab, drag.*, content);
+    }
+
     fn releasePaneDividerCapture(self: *Host) void {
         const hwnd = self.hwnd orelse return;
         if (sys.GetCapture() == hwnd) _ = sys.ReleaseCapture();
@@ -11280,6 +11318,7 @@ pub const Host = struct {
         // Every structural change ends in a layout, including the ones that
         // fail or return before placing panes.
         defer self.syncSplitDim();
+        self.refreshPaneDividerOffStart();
         const rect = (try self.layoutClientRect()) orelse return;
         var chrome_layout_changed = false;
         if (!self.layoutChromeForRect(rect, &chrome_layout_changed)) return;

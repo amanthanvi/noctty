@@ -655,6 +655,10 @@ test "PKG32 tabClosedMessage falls back for layout-dependent physical and text o
     try std.testing.expectEqualStrings(fallback, tabClosedMessage(&set, .{}, &buf));
 }
 
+/// Test-only: the virtual key an IME reports for a VK_PROCESSKEY message
+/// (`ImmGetVirtualKey`), which no test can make an IME produce.
+pub var test_ime_original_key: ?u8 = null;
+
 pub const App = struct {
     pub const must_draw_from_app_thread = true;
     pub const renderer_pacing_clock = win32_power.renderer_clock;
@@ -1782,7 +1786,7 @@ pub const App = struct {
                 continue;
             }
 
-            if (self.paneDividerDragKey(msg.message, msg.wParam, msg.lParam)) {
+            if (self.paneDividerDragKeyFrom(msg.hwnd, msg.message, msg.wParam, msg.lParam)) {
                 try self.tickCoreApp();
                 continue;
             }
@@ -1830,6 +1834,13 @@ pub const App = struct {
     /// repeats during the drag reach nothing, but its release is delivered.
     /// Returns whether the message was taken.
     pub fn paneDividerDragKey(self: *App, message: UINT, wParam: WPARAM, lParam: LPARAM) bool {
+        return self.paneDividerDragKeyFrom(null, message, wParam, lParam);
+    }
+
+    /// `paneDividerDragKey` for a message of `hwnd`, which the loop passes
+    /// so an IME's key can be recorded by the key it took
+    /// (`paneDividerOriginalKey`).
+    pub fn paneDividerDragKeyFrom(self: *App, hwnd: ?HWND, message: UINT, wParam: WPARAM, lParam: LPARAM) bool {
         // Owned by physical key: left and right Shift share VK_SHIFT, and
         // the terminal tells them apart (and main from keypad Enter), so a
         // virtual key would hand one key's release to the other.
@@ -1846,7 +1857,7 @@ pub const App = struct {
                 const host = self.paneDividerDragHost() orelse return false;
                 if (repeat) return true;
                 self.pane_divider_held_keys.set(key);
-                self.pane_divider_held_vks[key] = paneDividerHeldVirtualKey(@truncate(wParam), lParam);
+                self.pane_divider_held_vks[key] = paneDividerHeldVirtualKey(paneDividerOriginalKey(hwnd, @truncate(wParam), lParam), lParam);
                 // With an IME composing, Windows hands the window
                 // VK_PROCESSKEY for every key, Esc included; the scan code
                 // still says which, and its release may come as either
@@ -1884,6 +1895,26 @@ pub const App = struct {
 
     pub fn asyncKeyDown(vk: u8) bool {
         return sys.GetAsyncKeyState(vk) < 0;
+    }
+
+    /// A key message's virtual key as the keyboard sent it. With an IME
+    /// composing, the message says VK_PROCESSKEY, whose state is never down,
+    /// so reconciling by it would forget the key and deliver its release;
+    /// `ImmGetVirtualKey` gives back the key the IME took while the message
+    /// is the current one (the loop calls this before `TranslateMessage`),
+    /// and the scan code is the fallback when it reports nothing.
+    fn paneDividerOriginalKey(hwnd: ?HWND, vk: u8, lParam: LPARAM) u8 {
+        if (vk != c.VK_PROCESSKEY) return vk;
+        if (@import("builtin").is_test) if (test_ime_original_key) |key| return key;
+        if (hwnd) |window| {
+            const original: u8 = @truncate(sys.ImmGetVirtualKey(window));
+            if (original != 0 and original != c.VK_PROCESSKEY) return original;
+        }
+        const bits: usize = @bitCast(lParam);
+        const scan: UINT = @intCast((bits >> 16) & 0xFF);
+        const extended: UINT = if ((bits >> 24) & 1 != 0) 0xE000 else 0;
+        const mapped: u8 = @truncate(sys.MapVirtualKeyW(scan | extended, 3)); // MAPVK_VSC_TO_VK_EX
+        return if (mapped != 0) mapped else vk;
     }
 
     /// The virtual key whose state says whether the physical key of a key

@@ -727,6 +727,8 @@ pub extern "dwmapi" fn DwmDefWindowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, l
 
 pub extern "imm32" fn ImmGetContext(hWnd: HWND) callconv(.winapi) ?*anyopaque;
 
+pub extern "imm32" fn ImmGetVirtualKey(hWnd: HWND) callconv(.winapi) UINT;
+
 pub extern "imm32" fn ImmReleaseContext(hWnd: HWND, hIMC: ?*anyopaque) callconv(.winapi) BOOL;
 
 pub extern "imm32" fn ImmGetCompositionStringW(hIMC: *anyopaque, dwIndex: u32, lpBuf: ?*anyopaque, dwBufLen: u32) callconv(.winapi) i32;
