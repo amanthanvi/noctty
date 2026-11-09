@@ -170,10 +170,35 @@ Assert-WorkflowContract `
 # (src/build/GhosttyVtStub.zig). It is signed in the same staging loop as the
 # other runtime PEs, then checked to be the placeholder; the old portable
 # updaters require a pinned-publisher signature on every payload DLL.
+# Each required call must start an active line (only spaces or tabs before
+# it), so a call that is commented out fails the contract, as a deleted one
+# does; the controls below prove both.
+$stubStagingPattern = '(?ms)\$runtimeFiles = @\(\r?\n(?:[^\r\n]*\r?\n)*?\s*"ghostty-vt-stub\\ghostty-vt\.dll",\r?\n(?:[^\r\n]*\r?\n)*?\)\r?\n.*?^[ \t]*foreach \(\$runtimeFile in \$runtimeFiles\) \{.*?^[ \t]*\$destinationPath = Join-Path \$portableRoot \(Split-Path -Leaf \$runtimeFile\).*?^[ \t]*Invoke-SignFile -SigningConfig \$signingConfig -PathToSign \$destinationPath.*?^[ \t]*Assert-ValidSignature -PathToCheck \$destinationPath.*?^[ \t]*Assert-GhosttyVtStub -Path \(Join-Path \$portableRoot "ghostty-vt\.dll"\).*?Packaging phase: create portable zip'
 Assert-WorkflowContract `
     -Path $windowsPackager `
-    -Pattern '(?ms)\$runtimeFiles = @\(\r?\n(?:[^\r\n]*\r?\n)*?\s*"ghostty-vt-stub\\ghostty-vt\.dll",\r?\n(?:[^\r\n]*\r?\n)*?\)\r?\n.*?foreach \(\$runtimeFile in \$runtimeFiles\) \{.*?\$destinationPath = Join-Path \$portableRoot \(Split-Path -Leaf \$runtimeFile\).*?Invoke-SignFile -SigningConfig \$signingConfig -PathToSign \$destinationPath.*?Assert-ValidSignature -PathToCheck \$destinationPath.*?Assert-GhosttyVtStub -Path \(Join-Path \$portableRoot "ghostty-vt\.dll"\).*?Packaging phase: create portable zip' `
+    -Pattern $stubStagingPattern `
     -Description 'the ghostty-vt.dll placeholder is staged, signed and verified with the other runtime PEs, and checked to be the placeholder before the portable zip is made'
+$windowsPackagerText = Get-Content -LiteralPath $windowsPackager -Raw
+$runtimeLoopStart = $windowsPackagerText.IndexOf('foreach ($runtimeFile in $runtimeFiles) {')
+if ($runtimeLoopStart -lt 0) { throw "Contract control: the runtime staging loop is missing ($windowsPackager)" }
+foreach ($requiredCall in @(
+    'Invoke-SignFile -SigningConfig $signingConfig -PathToSign $destinationPath',
+    'Assert-ValidSignature -PathToCheck $destinationPath',
+    'Assert-GhosttyVtStub -Path (Join-Path $portableRoot "ghostty-vt.dll")'
+)) {
+    $callIndex = $windowsPackagerText.IndexOf($requiredCall, $runtimeLoopStart)
+    if ($callIndex -lt 0) { throw "Contract control: '$requiredCall' is missing after the runtime staging loop ($windowsPackager)" }
+    $before = $windowsPackagerText.Substring(0, $callIndex)
+    $after = $windowsPackagerText.Substring($callIndex + $requiredCall.Length)
+    foreach ($disabled in @(
+        @{ How = 'commented out'; Text = $before + '# ' + $requiredCall + $after },
+        @{ How = 'deleted'; Text = $before + $after }
+    )) {
+        if ($disabled.Text -match $stubStagingPattern) {
+            throw "Contract control failed: the placeholder staging contract still passes with '$requiredCall' $($disabled.How)"
+        }
+    }
+}
 foreach ($payloadConsumer in @(
     $releaseArtifactVerifier,
     $publishedReleaseVerifierScript,

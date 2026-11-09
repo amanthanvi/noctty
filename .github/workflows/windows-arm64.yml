@@ -220,6 +220,16 @@ jobs:
             throw "Packaged noctty.com +version did not report custom shader support."
           }
 
+          # The packaged ghostty-vt.dll is the placeholder: it fails to load
+          # (ERROR_DLL_INIT_FAILED), exports nothing and names itself. The x64
+          # portable smoke runs the same check (package-portable-cli.ps1).
+          . ./scripts/ghostty-vt-stub.ps1
+          $dllSmoke = Join-Path $env:RUNNER_TEMP 'test_dll_init.exe'
+          zig cc test/windows/test_dll_init.c -lshell32 -lversion -o $dllSmoke
+          if ($LASTEXITCODE -ne 0) { throw "Packaged ARM64 DLL smoke compilation failed: $LASTEXITCODE" }
+          & $dllSmoke (Join-Path $portableRoot 'ghostty-vt.dll') $GhosttyVtStubDescription
+          if ($LASTEXITCODE -ne 0) { throw "Packaged ARM64 DLL smoke failed: $LASTEXITCODE" }
+
           $themesText = & $portableCommand +list-themes | Out-String
           if ($themesText -notmatch "0x96f") {
             throw "Packaged ARM64 +list-themes did not find packaged resources."

@@ -791,8 +791,8 @@ use a private window station because desktops on WinSta0 share the clipboard.
 ## test_dll_init.c
 
 Packaged ghostty-vt.dll smoke. The portable ZIP carries a noctty placeholder
-under that name, not libghostty-vt (see "If you need libghostty-vt" in
-PACKAGING.md), and this checks the file a package carries is the placeholder:
+under that name, not libghostty-vt (see
+[Library consumers](../../PACKAGING.md#library-consumers)), and this checks the file a package carries is the placeholder:
 `LoadLibraryExW` fails with `ERROR_DLL_INIT_FAILED` (1114), the export table
 is empty (read from the file, so nothing in it runs), and the version
 resource's FileDescription is the one passed in. The portable package CLI
