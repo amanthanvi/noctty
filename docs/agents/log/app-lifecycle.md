@@ -9,6 +9,7 @@ Corrected in other files:
 - 2026-10-24 FLAKY-CLIFWD-CLOSE-01 (the startup font scan's stop), its trap (3), "The scan always reads the HKCU font registry": since FONTVF the scan also reads the machine's HKLM registered fonts, resolving and deduplicating them with HKCU's, and its stop check is still between files, so an unreachable HKLM network path can still hold shutdown (limit (4) of that entry): the 2026-10-25 PKG-54 / FONTVF entry in renderer.md.
 
 See also:
+- A saved split ratio of -0.0 passes validation; `buildRestoredSessionSplitTree` keeps it as +0 (`SplitTree.canonicalRatio`), since the divider drag's fit search orders ratios by their f16 bits: the 2026-11-08 PANE-DRAG-01 entry in tabs-panes.md.
 - Toast title and body UTF-8 truncation (`utf8Prefix`) is in the 2026-10-11 PKG-27 entry in terminal-core.md.
 - CLI start-up and exit time, and which DLLs an action loads: the 2026-10-17 "OpenGL32.dll imposed an approximately 61 ms process-exit tail" entry in renderer.md.
 - Where the GUI resets a launcher's inherited Ctrl+C-ignore attribute (`process_shared.enableGuiChildCtrlC`, after CLI dispatch in `src/main_ghostty.zig`): the 2026-10-18 "Windows' Ctrl+C-ignore attribute can survive into a Windows-subsystem GUI" entry (#486) in conpty.md.

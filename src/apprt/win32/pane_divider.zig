@@ -247,9 +247,14 @@ pub fn For(comptime Tree: type) type {
                 .leaf => return ratio,
                 .split => |s| s.layout,
             };
+            // The search below orders ratios by their bits, where -0 (0x8000)
+            // is above them all: the search's endpoints are +0 for either
+            // zero (Sol on #689: a -0 start probed 34.3 and `spatial`
+            // asserted). The caller keeps its own start for an Esc.
+            const from = Tree.canonicalRatio(start_ratio);
             const entry = tree.nodes[handle.idx()].split.ratio;
             defer tree.resizeInPlace(handle, entry);
-            tree.resizeInPlace(handle, start_ratio);
+            tree.resizeInPlace(handle, from);
             var start = try tree.spatial(alloc);
             defer start.deinit(alloc);
             // Walk toward the start one f16 at a time: the nearest ratio that
@@ -257,19 +262,20 @@ pub fn For(comptime Tree: type) type {
             // chain's rounding: a binary search alone stopped a drag at
             // 0.566 where 0.5995 fits), so the walk is what is exact; it
             // usually takes a step or two.
-            var candidate = ratio;
+            var candidate = Tree.canonicalRatio(ratio);
             var steps: usize = 0;
-            while (candidate != start_ratio and steps < walk_steps) : (steps += 1) {
+            while (candidate != from and steps < walk_steps) : (steps += 1) {
                 if (try fitsAt(alloc, tree, start, content, handle, axis, candidate, min_px)) return candidate;
-                candidate = std.math.nextAfter(f16, candidate, start_ratio);
+                candidate = Tree.canonicalRatio(std.math.nextAfter(f16, candidate, from));
             }
-            if (candidate == start_ratio) return start_ratio;
+            if (candidate == from) return from;
             // A long way to go (a split a few pixels across): a binary search
             // for the rest, which always ends on a ratio that fits, since the
             // start does.
-            // Ratios are in [0, 1], where an f16's bits order as its value.
+            // Ratios are in [0, 1], where an f16's bits order as its value
+            // (+0 is 0; both endpoints are canonical above).
             var failing: i32 = @as(u16, @bitCast(candidate));
-            var fitting: i32 = @as(u16, @bitCast(start_ratio));
+            var fitting: i32 = @as(u16, @bitCast(from));
             while (@abs(fitting - failing) > 1) {
                 const middle = failing + @divTrunc(fitting - failing, 2);
                 const probe: f16 = @bitCast(@as(u16, @intCast(middle)));
@@ -763,27 +769,8 @@ test "pane divider: a deep chain keeps every pane at its floor at the bound (Cod
     defer labels.deinit();
     const views = try alloc.alloc(TestView, 119);
     defer alloc.free(views);
-    for (views, 0..) |*view, i| view.* = .{ .label = try std.fmt.allocPrint(labels.allocator(), "P{d}", .{i}) };
-    var tree = try TestTree.init(alloc, &views[0]);
+    var tree = try buildChain(alloc, labels.allocator(), views);
     defer tree.deinit();
-    {
-        var first = try TestTree.init(alloc, &views[1]);
-        defer first.deinit();
-        const next = try tree.split(alloc, .root, .right, 0.5, &first);
-        tree.deinit();
-        tree = next;
-    }
-    var last = handleOfView(&tree, views[1].label);
-    for (0..117) |i| {
-        var inserted = try TestTree.init(alloc, &views[i + 2]);
-        defer inserted.deinit();
-        const left_share: f16 = @floatCast(1.0 / @as(f32, @floatFromInt(118 - i)));
-        // The new pane goes right of the last one, which keeps 1/(118 - i).
-        const next = try tree.split(alloc, last, .right, left_share, &inserted);
-        tree.deinit();
-        tree = next;
-        last = handleOfView(&tree, views[i + 2].label);
-    }
     var panes: usize = 0;
     var counting = tree.iterator();
     while (counting.next()) |_| panes += 1;
@@ -810,6 +797,85 @@ test "pane divider: a deep chain keeps every pane at its floor at the bound (Cod
         }
     }
     try testing.expectEqual(@as(usize, 0), short);
+}
+
+test "pane divider: a starting ratio of -0 fits as +0 does" {
+    // Sol on #689: a saved layout may say "ratio": -0.0 (validation takes
+    // it, since -0 < 0 is false), and an f16 -0 is 0x8000, so the fit's
+    // bit search between it and a ratio near 1 probed 34.3 and `spatial`
+    // asserted. One pane at ratio 0 beside the 118-pane chain, dragged to
+    // the upper bound (past 256 f16 steps, so the search runs), on Sol's
+    // 4774 px and a sample of 300 to 12,000 px; +0 is the control.
+    const alloc = testing.allocator;
+    var labels = std.heap.ArenaAllocator.init(alloc);
+    defer labels.deinit();
+    const views = try alloc.alloc(TestView, 119);
+    defer alloc.free(views);
+    var tree = try buildChain(alloc, labels.allocator(), views);
+    defer tree.deinit();
+    const negative_zero: f16 = @bitCast(@as(u16, 0x8000));
+    var widths: [32]i32 = undefined;
+    widths[0] = 4774;
+    for (widths[1..], 0..) |*width, i| width.* = 300 + @as(i32, @intCast(i)) * 377;
+    for (widths) |width| {
+        const content: Rect = .{ .left = 0, .top = 0, .right = width, .bottom = 600 };
+        var fitted: [2]f16 = undefined;
+        for ([_]f16{ 0, negative_zero }, 0..) |zero, i| {
+            tree.resizeInPlace(.root, zero);
+            var start = try tree.spatial(alloc);
+            defer start.deinit(alloc);
+            const found = Dividers.divider(&tree, start, content, .root, 3).?;
+            const bounds = Dividers.ratioBounds(&tree, start, content, found, 40).?;
+            fitted[i] = try Dividers.stepRatio(alloc, &tree, content, found, 2.0, bounds, zero, 40);
+            try testing.expect(fitted[i] >= 0 and fitted[i] <= 1);
+            tree.resizeInPlace(.root, fitted[i]);
+            var now = try tree.spatial(alloc);
+            defer now.deinit(alloc);
+            var it = tree.iterator();
+            while (it.next()) |entry| {
+                const px_now = win32_layout.roundedSlotPixel(@floatCast(now.slots[entry.handle.idx()].width), width);
+                const px_start = win32_layout.roundedSlotPixel(@floatCast(start.slots[entry.handle.idx()].width), width);
+                try testing.expect(px_now >= @min(40, px_start));
+            }
+        }
+        try testing.expectEqual(@as(u16, @bitCast(fitted[0])), @as(u16, @bitCast(fitted[1])));
+    }
+    // A candidate of -0 (a lower bound of -0 from that start) searches
+    // from +0 as well: dragged down from the chain's bound, it lands where
+    // the +0 candidate does.
+    const content: Rect = .{ .left = 0, .top = 0, .right = 4774, .bottom = 600 };
+    tree.resizeInPlace(.root, 0.5);
+    const from_positive = try Dividers.fitRatio(alloc, &tree, content, .root, 0, 0.5, 40);
+    const from_negative = try Dividers.fitRatio(alloc, &tree, content, .root, negative_zero, 0.5, 40);
+    try testing.expectEqual(@as(u16, @bitCast(from_positive)), @as(u16, @bitCast(from_negative)));
+}
+
+/// One pane left of the root and a chain of `views.len - 2` on its right,
+/// the chain's split i giving its left side f16(1/(n - i)), so the chain's
+/// panes are equal (CodeRabbit's shape on #689).
+fn buildChain(alloc: std.mem.Allocator, label_alloc: std.mem.Allocator, views: []TestView) !TestTree {
+    for (views, 0..) |*view, i| view.* = .{ .label = try std.fmt.allocPrint(label_alloc, "P{d}", .{i}) };
+    var tree = try TestTree.init(alloc, &views[0]);
+    errdefer tree.deinit();
+    {
+        var first = try TestTree.init(alloc, &views[1]);
+        defer first.deinit();
+        const next = try tree.split(alloc, .root, .right, 0.5, &first);
+        tree.deinit();
+        tree = next;
+    }
+    const chain = views.len - 1;
+    var last = handleOfView(&tree, views[1].label);
+    for (0..chain - 1) |i| {
+        var inserted = try TestTree.init(alloc, &views[i + 2]);
+        defer inserted.deinit();
+        const left_share: f16 = @floatCast(1.0 / @as(f32, @floatFromInt(chain - i)));
+        const next = try tree.split(alloc, last, .right, left_share, &inserted);
+        tree.deinit();
+        tree = next;
+        last = handleOfView(&tree, views[i + 2].label);
+    }
+    return tree;
 }
 
 test "pane divider: a pane at the content's far edge keeps its floor as the layout places it" {

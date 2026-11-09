@@ -374,8 +374,10 @@ that govern each symbol you change, or that none does.
   `App.takeGlobalHotkey`), the gaps and slot rounding they find
   (`win32_layout.zig`: `splitSurfacePlacement`, `roundedSlotPixel`), the tree
   identity a drag checks (`SplitTree.generation` in
-  `src/datastruct/split_tree.zig`) and the keyboard `resize_split` they
-  match (`App.resizeSplitFallback`).
+  `src/datastruct/split_tree.zig`), the +0 every ratio enters the tree as
+  (`SplitTree.canonicalRatio`, which the session restore's
+  `buildRestoredSessionSplitTree` also takes) and the keyboard
+  `resize_split` they match (`App.resizeSplitFallback`).
 - [input.md](docs/agents/log/input.md): `win32/input.zig` and key messages
   (`WM_KEYDOWN`/`WM_CHAR`/`WM_SYSCHAR`, dead keys, `ToUnicode`, non-Latin
   layouts), default Windows keybindings, Win32 input mode (DEC 9001), the
