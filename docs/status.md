@@ -67,8 +67,12 @@ noctty is based on post-`v1.3.1` upstream main (`1.3.2-dev`, `ba398dfff`,
   it loads the shipped script.
 - Live config reload via keybind (`Ctrl+Shift+,`).
 - `libghostty-vt` retained in the tree, built and tested, for Zig and C
-  consumers who build it themselves. Setup no longer installs it, and the
-  portable ZIP carries `ghostty-vt.dll` only for the updater transition
+  consumers who build it themselves. No package ships it. From 1.3.137 the
+  portable ZIP's `ghostty-vt.dll` is a noctty placeholder, not the library:
+  it exports nothing and fails to load (`ERROR_DLL_INIT_FAILED`), and it is
+  there only because the portable updater of 1.3.125 to 1.3.136 requires the
+  file. v1.4.100 drops it; portable copies on 1.3.125 to 1.3.136 that have
+  not installed 1.3.137 or later by then update by hand
   ([PACKAGING.md](../PACKAGING.md#library-consumers)).
 
 Win32-validated VT protocol coverage is tracked in

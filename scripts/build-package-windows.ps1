@@ -26,15 +26,17 @@ $archInfo = Get-WindowsPackageArchitecture -Architecture $(if ($Architecture) { 
 $repoRoot = Get-RepoRoot
 $zigOutBin = Join-Path $repoRoot "zig-out/bin"
 $buildCapabilitiesPath = Join-Path $zigOutBin "noctty-build-capabilities.json"
+# Paths under zig-out\bin, as in scripts/package-windows.ps1.
 $runtimeFiles = @(
     "noctty.com",
     "noctty.exe",
-    # Transitional: noctty does not use ghostty-vt.dll (libghostty-vt 0.1.0)
-    # and Setup no longer installs it, but the portable updater of 1.3.136
-    # and older refuses a portable ZIP without it. Drop it (and
-    # -Demit-lib-vt=true) only together with
-    # portable_zip_carries_legacy_entries in src/update/portable_apply.zig.
-    "ghostty-vt.dll",
+    # The ghostty-vt.dll placeholder (src/build/GhosttyVtStub.zig), not
+    # libghostty-vt: it exports nothing and fails to load. The portable
+    # updater of 1.3.125 to 1.3.136 refuses a ZIP without a ghostty-vt.dll.
+    # Never stage zig-out\bin\ghostty-vt.dll, the -Demit-lib-vt=true library:
+    # portable_zip_carries_legacy_entries in src/update/portable_apply.zig
+    # says when the placeholder goes.
+    "ghostty-vt-stub\ghostty-vt.dll",
     "noctty-terminal-handoff-proxy.dll"
 )
 
@@ -46,7 +48,6 @@ try {
     $buildArgs = @(
         "build",
         "-Demit-exe=true",
-        "-Demit-lib-vt=true",
         "-Dtarget=$($archInfo.ZigTarget)",
         "-Dcpu=baseline",
         "-Dstrip=false",

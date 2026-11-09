@@ -16,12 +16,14 @@ $reviewedArtifactDigests = @{
         'de66d7d1c3859a56540d4dc8b67080befc1a52a46e53baafc07e7a84699fd11d'
 
     # Reviewed in full after the Noctty rebrand and for PKG-35's packaged DLL
-    # load/allocator smoke, retaining the staged portable CLI siblings.
+    # load/allocator smoke, retaining the staged portable CLI siblings, and
+    # again when that smoke became the ghostty-vt.dll placeholder check
+    # (load fails with ERROR_DLL_INIT_FAILED, no exports, its FileDescription).
     # This combined artifact intentionally differs from origin/main; its exact
     # SHA remains fail-closed tamper evidence, taken over the LF-canonical
     # bytes that .gitattributes now guarantees on every checkout.
     'test/windows/package-portable-cli.ps1' =
-        'e835bc487ce36413b95dd1eaea79b96b98a125547e3fc1297dce298d55448ff4'
+        'ffcba2b3c6b617a3952e5dcccf2742ad2967f6c7346fb4843d4f03cf953de88a'
 }
 foreach ($baselinePath in Get-ChildItem -LiteralPath (Join-Path $root 'baselines') -Filter '*.json') {
     Assert-JsonDocument `
