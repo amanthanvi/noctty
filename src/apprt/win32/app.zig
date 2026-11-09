@@ -8046,6 +8046,21 @@ pub const App = struct {
             self.discardCreatedHost(created);
             return false;
         };
+        // What handing the tab over runs first is window code (the prompts
+        // it puts away, the drag it ends): before the model's commit, and
+        // both windows and the tab found again after it, so the commit is
+        // never followed by window code before the transfer, nor by a
+        // transfer that cannot happen (council round 8 M1).
+        source.prepareGiveTab(tab_id, target_id);
+        if (self.registry.findHostById(source_id) == null or self.registry.findHostById(target_id) == null) {
+            self.discardCreatedHost(created);
+            return false;
+        }
+        at = source.findTabIndexById(tab_id) orelse {
+            self.discardCreatedHost(created);
+            return false;
+        };
+        insert = @min(insert, target.tabs.items.len);
 
         // The shell model's half. Undo history goes only once the model has
         // the move: the commit comes first (a stale one is rebuilt by
@@ -8123,9 +8138,10 @@ pub const App = struct {
         // and watches cloaking only), but nothing here may rely on that.
         const new_window = created != null;
         created = null;
-        // By id: what `giveTab` runs first (a confirm's cancel, the prompts it
-        // hides, the drag it ends) can close a tab.
-        const moved_id: ?u32 = if (source.giveTab(tab_id, target, insert)) |landed| target.tabs.items[landed].id else null;
+        // In two steps: in one expression the slice is read before the
+        // transfer grows it.
+        const landed = source.giveTab(at, target, insert);
+        const moved_id = target.tabs.items[landed].id;
 
         // Undo history goes in both windows, as for a reorder (`moveTab`):
         // its entries keep tab indices and panes of their window. After the
@@ -8154,7 +8170,7 @@ pub const App = struct {
         const target_emptied = target_live and target.tabs.items.len == 0;
         if (source_emptied) self.forgetEmptiedShellWindow(source);
         if (target_emptied) self.forgetEmptiedShellWindow(target);
-        const landed_now: ?usize = if (target_live) if (moved_id) |id| target.findTabIndexById(id) else null else null;
+        const landed_now: ?usize = if (target_live) target.findTabIndexById(moved_id) else null;
 
         // Showing the tab puts the target's DPI's font into its panes, and
         // with `window-width`/`window-height` set the core then asks for its
@@ -8172,19 +8188,18 @@ pub const App = struct {
             // keyboard from the window the tab went to.
             window_state.refreshBackgroundOpacity(source);
             if (source.activeTab()) |front| if (front.focusedSurface()) |pane| self.activateSurfaceNoFocus(pane);
-            runUiActionOrLog("tab move source layout failed", source.layout());
-            // Its caption counts its tabs ("[2/2]"), and an activation that
-            // keeps the pane in front skips the chrome sync that says so.
-            runUiActionOrLog("tab move source chrome refresh failed", source.refreshChrome());
-            source.refreshSearchTimerState();
+            // Activation is window code: found again (council round 8 M1).
+            if (self.registry.findHostById(source_id)) |host| {
+                runUiActionOrLog("tab move source layout failed", host.layout());
+                // Its caption counts its tabs ("[2/2]"), and an activation that
+                // keeps the pane in front skips the chrome sync that says so.
+                runUiActionOrLog("tab move source chrome refresh failed", host.refreshChrome());
+                host.refreshSearchTimerState();
+            }
         }
         // The moved tab, shown and focused in its window, unless it closed
         // while history was disposed.
-        show: {
-            const shown = self.registry.findHostById(target_id) orelse break :show;
-            const landed_at = (if (landed_now != null) if (moved_id) |id| shown.findTabIndexById(id) else null else null) orelse break :show;
-            self.showMovedTab(shown, landed_at, new_window);
-        }
+        if (landed_now != null) self.showMovedTab(target_id, moved_id, new_window);
 
         // The end of the move, in one order, with no defer left to touch a
         // window after one is freed: the size hold goes, then each window
@@ -8211,46 +8226,68 @@ pub const App = struct {
         return .{ .move_tab_to_window = .{ .tab = tab, .window = window, .index = insert } };
     }
 
-    /// The tab a move put at `landed_at` of `target`: shown in front, and in
-    /// a new window, what `Surface.init` does for the window it creates.
-    fn showMovedTab(self: *App, target: *Host, landed_at: usize, new_window: bool) void {
-        target.refreshTabStatus(landed_at);
+    const MovedTab = struct { host: *Host, at: usize, pane: *Surface };
+
+    /// The moved tab `moved_id` in the window `target_id`, and its focused
+    /// pane, if all three still are.
+    fn findMovedTab(self: *App, target_id: u32, moved_id: u32) ?MovedTab {
+        const host = self.registry.findHostById(target_id) orelse return null;
+        const at = host.findTabIndexById(moved_id) orelse return null;
+        const pane = host.tabs.items[at].focusedSurface() orelse return null;
+        return .{ .host = host, .at = at, .pane = pane };
+    }
+
+    /// The tab a move put in the window `target_id`: shown in front, and in
+    /// a new window, what `Surface.init` does for the window it creates. The
+    /// window, the tab and its pane are found again by id after each step
+    /// that runs window code (the panes shown, the first show, activation),
+    /// since what ran can close any of them (council round 8 M1).
+    fn showMovedTab(self: *App, target_id: u32, moved_id: u32, new_window: bool) void {
+        var found = self.findMovedTab(target_id, moved_id) orelse return;
+        found.host.refreshTabStatus(found.at);
         // A pane may wait out a search debounce, which the target's timer
         // now ticks (the 2026-11-07 background-tab debounce entry in
         // search-scrollbar.md).
-        target.refreshSearchTimerState();
+        found.host.refreshSearchTimerState();
         // A D3D11 pane arriving fades the target whole (OPACITY-640).
-        window_state.refreshBackgroundOpacity(target);
-        const pane = target.tabs.items[landed_at].focusedSurface() orelse return;
+        window_state.refreshBackgroundOpacity(found.host);
+        found = self.findMovedTab(target_id, moved_id) orelse return;
         if (new_window) {
             // What `Surface.init` does for the window it creates: the panes
             // shown, then the first show, then what the window takes after it.
-            target.active_tab = landed_at;
-            target.prepareActiveTabVisibility(landed_at);
-            target.showTabPanes(&target.tabs.items[landed_at]);
-            const presents = window_state.advance(target, .before_show) catch |err| presents: {
+            found.host.active_tab = found.at;
+            found.host.prepareActiveTabVisibility(found.at);
+            found.host.showTabPanes(&found.host.tabs.items[found.at]);
+            found = self.findMovedTab(target_id, moved_id) orelse return;
+            const presents = window_state.advance(found.host, .before_show) catch |err| presents: {
                 log.warn("torn-off tab window first show failed err={}", .{err});
                 break :presents true;
             };
-            if (presents) pane.presentWindow();
+            found = self.findMovedTab(target_id, moved_id) orelse return;
+            if (presents) found.pane.presentWindow();
             // Its live tab must not sit in a window nobody can reach.
-            if (target.hwnd) |hwnd| if (sys.IsWindowVisible(hwnd) == 0) {
+            if (found.host.hwnd) |hwnd| if (sys.IsWindowVisible(hwnd) == 0) {
                 _ = sys.ShowWindow(hwnd, c.SW_SHOW);
-                pane.presentWindow();
+                found = self.findMovedTab(target_id, moved_id) orelse return;
+                found.pane.presentWindow();
             };
-            window_state.advance(target, .after_show) catch |err| {
+            found = self.findMovedTab(target_id, moved_id) orelse return;
+            window_state.advance(found.host, .after_show) catch |err| {
                 log.warn("torn-off tab window start failed err={}", .{err});
             };
+            found = self.findMovedTab(target_id, moved_id) orelse return;
             // Hidden until now, the panes took the window's size before its
             // DPI's font; each takes both again as one resize (the
             // 2026-10-25 DPI-HIDDEN-TAB-BATCH-01 entry in window-frame.md).
-            target.applyDpiChangeToVisibleSurfaces();
+            found.host.applyDpiChangeToVisibleSurfaces();
+            found = self.findMovedTab(target_id, moved_id) orelse return;
         }
         if (builtin.is_test) {
-            if (test_tab_move_activating) |hook| hook(target, pane) catch |err| log.err("tab move test hook failed err={}", .{err});
+            if (test_tab_move_activating) |hook| hook(found.host, found.pane) catch |err| log.err("tab move test hook failed err={}", .{err});
         }
-        self.activateSurface(pane);
-        var it = target.tabs.items[landed_at].tree.iterator();
+        self.activateSurface(found.pane);
+        found = self.findMovedTab(target_id, moved_id) orelse return;
+        var it = found.host.tabs.items[found.at].tree.iterator();
         while (it.next()) |entry| entry.view.requestRepaint() catch |err| {
             log.warn("moved pane repaint request failed err={}", .{err});
         };
@@ -17401,6 +17438,11 @@ test "win32 a caption Close press closes the window on its release over Close, a
             try std.testing.expect(host.usingIntegratedTitlebar());
             const hwnd = host.hwnd.?;
             const close_at = try testCaptionClosePoint(host);
+            // Its panes leave the core first, as a closing window's are torn
+            // down, so a close at any step below tears down as the window's
+            // own does, and the test fails on an assertion, not in teardown
+            // (council round 8 L2).
+            for (host.tabs.items) |*tab| fixture.core_app.deleteSurface(tab.focusedSurface().?);
             // A press on Close and its release elsewhere on the caption, or a
             // press whose capture another window took: the window stays.
             _ = sys.SendMessageW(hwnd, c.WM_NCLBUTTONDOWN, @bitCast(@as(isize, c.HTCLOSE)), 0);
@@ -17412,13 +17454,16 @@ test "win32 a caption Close press closes the window on its release over Close, a
             try std.testing.expect(sys.IsWindow(hwnd) != 0);
             // A press on Close, the pointer off the frame and back, and the
             // release over Close: the window closes, as a stock caption
-            // button's does. Its panes leave the core first, as a closing
-            // window's are torn down.
-            for (host.tabs.items) |*tab| fixture.core_app.deleteSurface(tab.focusedSurface().?);
+            // button's does.
             _ = sys.SendMessageW(hwnd, c.WM_NCLBUTTONDOWN, @bitCast(@as(isize, c.HTCLOSE)), 0);
             _ = sys.SendMessageW(hwnd, c.WM_NCMOUSELEAVE, 0, 0);
             testClientMouse(hwnd, c.WM_LBUTTONUP, close_at);
-            try std.testing.expect(sys.IsWindow(hwnd) == 0);
+            if (sys.IsWindow(hwnd) != 0) {
+                // Not closed: closed here, so the teardown is a closed
+                // window's, and the failure is this assertion's.
+                _ = sys.DestroyWindow(hwnd);
+                return error.TestExpectedTheWindowClosed;
+            }
         }
     }.body);
 }
@@ -17530,6 +17575,129 @@ test "win32 the tab drag's label goes with its UIA provider before the apartment
             try std.testing.expect(app.tab_drag_preview_hwnd == null);
             try std.testing.expect(app.tab_drag_preview_uia_provider == null);
             try std.testing.expect(sys.IsWindow(label) == 0);
+        }
+    }.body);
+}
+
+const TestTargetGoesMidHandover = struct {
+    var target_id: u32 = 0;
+    var core: ?*CoreApp = null;
+    var at: Host.GiveTabStep = .after_source_prompts;
+    var fired = false;
+
+    /// Where handing the tab over has just run window code (a prompt's
+    /// cancel), every pane of the window the tab is to join exits, as an
+    /// exited shell's does, and that window goes (council round 8 M1).
+    fn hook(host: *Host, step: Host.GiveTabStep) void {
+        if (step != at or fired) return;
+        fired = true;
+        const app = host.app;
+        while (app.registry.findHostById(target_id)) |live| {
+            if (live.tabs.items.len == 0) return;
+            const before = live.tabs.items.len;
+            const pane = live.tabs.items[0].focusedSurface().?;
+            core.?.deleteSurface(pane);
+            pane.close(false);
+            const after = app.registry.findHostById(target_id) orelse return;
+            if (after.tabs.items.len >= before) return;
+        }
+    }
+};
+
+fn testTargetGoesMidHandover(step: Host.GiveTabStep) !void {
+    const Body = struct {
+        var which: Host.GiveTabStep = undefined;
+        fn body() !void {
+            var fixture: win32.WindowStartTestApp = .{};
+            try fixture.init();
+            defer fixture.deinit();
+            const app = &fixture.app;
+            app.shell_runtime_initialized = true;
+            const setup: TabMoveFixture = .{ .fixture = &fixture };
+            const source = try setup.window(2, false);
+            const target = try setup.window(1, false);
+            TestTargetGoesMidHandover.target_id = target.id;
+            TestTargetGoesMidHandover.core = &fixture.core_app;
+            TestTargetGoesMidHandover.at = which;
+            TestTargetGoesMidHandover.fired = false;
+            Host.test_give_tab_step = &TestTargetGoesMidHandover.hook;
+            defer Host.test_give_tab_step = null;
+            const moved = try app.moveTabToWindow(source, 0, .{ .host = .{ .host = target, .index = 1 } });
+            Host.test_give_tab_step = null;
+            try std.testing.expect(TestTargetGoesMidHandover.fired);
+            // The window the tab was to join went before the move: nothing
+            // moved, the source keeps both tabs, and the model agrees.
+            try std.testing.expect(!moved);
+            try std.testing.expectEqual(@as(usize, 2), source.tabs.items.len);
+            try app.validateShellNativeMapping();
+        }
+    };
+    Body.which = step;
+    try runOnHiddenDesktop(Body.body);
+}
+
+test "win32 a tab move whose destination goes while the source's prompts are put away reads no freed window (council round 8 M1, probe A)" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    try testTargetGoesMidHandover(.after_source_prompts);
+}
+
+test "win32 a tab move whose destination goes while its own prompts are put away moves nothing, the model too (council round 8 M1, probe B)" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    try testTargetGoesMidHandover(.after_target_prompts);
+}
+
+test "win32 a held caption Close looks pressed only while the pointer is over it (council round 8 L1)" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    try runOnHiddenDesktop(struct {
+        fn body() !void {
+            var fixture: win32.WindowStartTestApp = .{};
+            try fixture.init();
+            defer fixture.deinit();
+            const app = &fixture.app;
+            app.shell_runtime_initialized = true;
+            app.use_integrated_titlebar = true;
+            const setup: TabMoveFixture = .{ .fixture = &fixture };
+            const host = try setup.window(2, false);
+            const hwnd = host.hwnd.?;
+            const close_at = try testCaptionClosePoint(host);
+            _ = sys.SendMessageW(hwnd, c.WM_NCLBUTTONDOWN, @bitCast(@as(isize, c.HTCLOSE)), 0);
+            try std.testing.expect(host.caption_pressed == .close);
+            // Off Close, still held: not pressed. Back over it: pressed.
+            testClientMouse(hwnd, c.WM_MOUSEMOVE, .{ .x = close_at.x - 300, .y = 8 });
+            try std.testing.expect(host.caption_pressed == .none);
+            try std.testing.expect(host.caption_close_held);
+            testClientMouse(hwnd, c.WM_MOUSEMOVE, close_at);
+            try std.testing.expect(host.caption_pressed == .close);
+            // Released elsewhere: the window stays, and the hold is over.
+            testClientMouse(hwnd, c.WM_LBUTTONUP, .{ .x = close_at.x - 300, .y = 8 });
+            try std.testing.expect(sys.IsWindow(hwnd) != 0);
+            try std.testing.expect(!host.caption_close_held);
+            try std.testing.expect(host.caption_pressed == .none);
+        }
+    }.body);
+}
+
+test "win32 a caption Close press whose release comes as a non-client one lets go of the pointer (council round 8 L1)" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    try runOnHiddenDesktop(struct {
+        fn body() !void {
+            var fixture: win32.WindowStartTestApp = .{};
+            try fixture.init();
+            defer fixture.deinit();
+            const app = &fixture.app;
+            app.shell_runtime_initialized = true;
+            app.use_integrated_titlebar = true;
+            const setup: TabMoveFixture = .{ .fixture = &fixture };
+            const host = try setup.window(2, false);
+            const hwnd = host.hwnd.?;
+            _ = sys.SendMessageW(hwnd, c.WM_NCLBUTTONDOWN, @bitCast(@as(isize, c.HTCLOSE)), 0);
+            try std.testing.expect(host.caption_close_held);
+            _ = sys.SendMessageW(hwnd, c.WM_NCLBUTTONUP, @bitCast(@as(isize, c.HTCAPTION)), 0);
+            // The hold is over and the capture let go, so the next click in
+            // the window is its own.
+            try std.testing.expect(!host.caption_close_held);
+            try std.testing.expect(sys.GetCapture() != hwnd);
+            try std.testing.expect(sys.IsWindow(hwnd) != 0);
         }
     }.body);
 }

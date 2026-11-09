@@ -3980,47 +3980,73 @@ pub const Host = struct {
         }
     }
 
-    /// Takes the tab `tab_id` out of this window and puts it at `insert`
-    /// in `target` with its panes, which keep running (`App.moveTabToWindow`
-    /// commits the shell model first; nothing here fails). The panes are
-    /// hidden while they change windows, so no two OpenGL children overlap
-    /// in either (the 2026-04-14 entries in tabs-panes.md), and nothing pumps
-    /// messages between the tab leaving one list and joining the other (the
-    /// 2026-11-01 NOTIFY-MODULE entry in app-lifecycle.md). `target` has room
-    /// for the tab. Returns the tab's index there, or null when the tab
-    /// closed under what runs before it leaves.
-    pub fn giveTab(self: *Host, tab_id: u32, target: *Host, insert: usize) ?usize {
-        const previous_tab_id = if (self.active_tab < self.tabs.items.len) self.tabs.items[self.active_tab].id else null;
-        const first = self.findTabIndexById(tab_id) orelse return null;
-        const target_id = target.id;
+    /// Runs at the two points of handing a tab over where window code has
+    /// just run (the prompts it cancels), for the tests that make a window go
+    /// there (council round 8 M1).
+    pub var test_give_tab_step: ?*const fn (*Host, GiveTabStep) void = null;
+    pub const GiveTabStep = enum { after_source_prompts, after_target_prompts };
+
+    /// What handing tab `tab_id` over to the window `target_id` runs first,
+    /// all of it window code: the prompts it puts away, the rename it hides,
+    /// the drag it ends. Before the model's commit (`App.moveTabToWindow`),
+    /// so nothing between the commit and the transfer runs a window's code
+    /// (council round 8 M1); each window is found again by id before it is
+    /// read, since what ran can close one, and the caller finds them and the
+    /// tab again after it.
+    pub fn prepareGiveTab(source: *Host, tab_id: u32, target_id: u32) void {
+        const app = source.app;
+        const source_id = source.id;
         // A prompt one of its terminals raised stays with this window and
         // would answer a terminal that has left it.
-        self.cancelConfirmFromTab(&self.tabs.items[first]);
+        if (source.findTabIndexById(tab_id)) |at| source.cancelConfirmFromTab(&source.tabs.items[at]);
         // A prompt to close this window, or its other or right tabs, counted
         // terminals the tab takes away; one in the window it joins counted
         // none of its own, so its Close would end them unwarned. Both go,
         // and the next close asks with the windows as they are.
-        self.cancelCountingClosePrompt();
-        target.cancelCountingClosePrompt();
+        if (app.registry.findHostById(source_id)) |host| {
+            host.cancelCountingClosePrompt();
+            if (builtin.is_test) {
+                if (test_give_tab_step) |hook| hook(host, .after_source_prompts);
+            }
+        }
+        if (app.registry.findHostById(target_id)) |host| host.cancelCountingClosePrompt();
+        if (builtin.is_test) {
+            if (app.registry.findHostById(source_id)) |host| if (test_give_tab_step) |hook| hook(host, .after_target_prompts);
+        }
+        const self = app.registry.findHostById(source_id) orelse return;
+        const first = self.findTabIndexById(tab_id) orelse return;
         // So would a rename of the tab in front, or of its terminal, which
         // `submitOverlay` applies to the front tab as it is at Enter.
         if (first == self.active_tab and (self.overlay_mode == .tab_title or self.overlay_mode == .surface_title)) self.hideOverlay();
-        self.setHoveredButton(null);
+        const host = app.registry.findHostById(source_id) orelse return;
+        host.setHoveredButton(null);
         // The dragged tab leaving (a key binding moved it mid-drag) ends the
         // drag, as a pane's teardown does (`windowDestroyed`).
         // So does a drag Esc ended whose release has not come yet. The
-        // button is still down: its release is swallowed, as above.
-        if ((self.tab_drag_index != null or self.tab_drag_cancelled) and tab_id == self.tab_drag_tab_id) {
-            self.endTabDrag();
-            self.tab_drag_cancelled = true;
-            self.app.held_release_pending = true;
+        // button is still down: its release is swallowed, in this window and
+        // wherever it lands (`App.takeHeldRelease`).
+        if ((host.tab_drag_index != null or host.tab_drag_cancelled) and tab_id == host.tab_drag_tab_id) {
+            host.endTabDrag();
+            host.tab_drag_cancelled = true;
+            app.held_release_pending = true;
         }
-        // What ran above (a confirm's cancel, the overlays it hid, the drag
-        // it ended) can close a tab: found again by id, and gone, nothing
-        // moves (Greptile r4510568134).
-        const index = self.findTabIndexById(tab_id) orelse return null;
-        // So can the window it joins go; then the tab stays here.
-        if (self.app.registry.findHostById(target_id) == null) return null;
+    }
+
+    /// Takes the tab at `index` out of this window and puts it at `insert`
+    /// in `target` with its panes, which keep running: the transfer alone,
+    /// once the model has the move (`App.moveTabToWindow`) and what it runs
+    /// first has run (`prepareGiveTab`). It runs no code of a window that
+    /// can close a tab or a window: list moves, the panes hidden and given
+    /// their new parent (`SetParent`), and the old button destroyed, whose
+    /// messages reach only noctty's own pane, button and host procedures.
+    /// The panes are hidden while they change windows, so no two OpenGL
+    /// children overlap in either (the 2026-04-14 entries in tabs-panes.md),
+    /// and nothing pumps messages between the tab leaving one list and
+    /// joining the other (the 2026-11-01 NOTIFY-MODULE entry in
+    /// app-lifecycle.md). `target` has room for the tab. Returns the tab's
+    /// index there.
+    pub fn giveTab(self: *Host, index: usize, target: *Host, insert: usize) usize {
+        const previous_tab_id = if (self.active_tab < self.tabs.items.len) self.tabs.items[self.active_tab].id else null;
         var tab = self.tabs.orderedRemove(index);
         self.destroyTabButton(&tab);
         tab.button_placement = .{};

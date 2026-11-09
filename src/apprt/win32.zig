@@ -11682,16 +11682,26 @@ pub fn hostWindowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) cal
         c.WM_LBUTTONUP => {
             if (host) |v| if (v.caption_close_held) {
                 v.caption_close_held = false;
-                const pressed = v.caption_pressed == .close;
-                var at: POINT = .{ .x = signedLowWord(lParamBits(lParam)), .y = signedHighWord(lParamBits(lParam)) };
-                _ = sys.ClientToScreen(hwnd, &at);
-                const sx: u32 = @as(u16, @bitCast(@as(i16, @truncate(at.x))));
-                const sy: u32 = @as(u16, @bitCast(@as(i16, @truncate(at.y))));
-                const screen: LPARAM = @bitCast(@as(usize, (sy << 16) | sx));
+                const screen = captionScreenPoint(hwnd, lParam);
                 const over_close = sys.SendMessageW(hwnd, c.WM_NCHITTEST, 0, screen) == c.HTCLOSE;
                 if (sys.GetCapture() == hwnd) _ = sys.ReleaseCapture();
                 v.clearCaptionPressed();
-                if (pressed and over_close) _ = sys.SendMessageW(hwnd, c.WM_SYSCOMMAND, c.SC_CLOSE, screen);
+                if (over_close) _ = sys.SendMessageW(hwnd, c.WM_SYSCOMMAND, c.SC_CLOSE, screen);
+                return 0;
+            };
+            return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
+        },
+        // While Close holds the pointer, it looks pressed only with the
+        // pointer over it, as a stock caption button does (council round 8
+        // L1).
+        c.WM_MOUSEMOVE => {
+            if (host) |v| if (v.caption_close_held) {
+                const over_close = sys.SendMessageW(hwnd, c.WM_NCHITTEST, 0, captionScreenPoint(hwnd, lParam)) == c.HTCLOSE;
+                const look: CaptionButton = if (over_close) .close else .none;
+                if (v.caption_pressed != look) {
+                    v.caption_pressed = look;
+                    v.repaintTopChrome();
+                }
                 return 0;
             };
             return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
@@ -11706,6 +11716,13 @@ pub fn hostWindowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) cal
         },
         c.WM_NCLBUTTONUP => {
             if (host) |v| {
+                // A release that came as a non-client one ends Close's hold
+                // too, and lets go of the pointer, or the window's next click
+                // would be taken for it (council round 8 L1).
+                if (v.caption_close_held) {
+                    v.caption_close_held = false;
+                    if (sys.GetCapture() == hwnd) _ = sys.ReleaseCapture();
+                }
                 if (v.usingIntegratedTitlebar()) {
                     if (dispatchDwmNcMessage(hwnd, msg, wParam, lParam)) |lr| return lr;
                     const ht: i32 = @intCast(@as(i64, @bitCast(wParam)));
@@ -12292,6 +12309,16 @@ pub fn desiredTabIndex(total: usize, current: usize, goto: apprt.action.GotoTab)
             break :blk @min(idx, total - 1);
         },
     };
+}
+
+/// A client point of a mouse message's `lParam`, as the screen point
+/// `WM_NCHITTEST` takes.
+fn captionScreenPoint(hwnd: HWND, lParam: LPARAM) LPARAM {
+    var at: POINT = .{ .x = signedLowWord(lParamBits(lParam)), .y = signedHighWord(lParamBits(lParam)) };
+    _ = sys.ClientToScreen(hwnd, &at);
+    const sx: u32 = @as(u16, @bitCast(@as(i16, @truncate(at.x))));
+    const sy: u32 = @as(u16, @bitCast(@as(i16, @truncate(at.y))));
+    return @bitCast(@as(usize, (sy << 16) | sx));
 }
 
 fn tabButtonCloseHit(x: i32, y: i32, close_left: i32, close_top: i32) bool {
