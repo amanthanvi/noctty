@@ -19,6 +19,8 @@ $ghosttyExe82 = Join-Path $repoRoot 'src\build\GhosttyExe.zig'
 $ghosttyExeText82 = Get-Content -LiteralPath $ghosttyExe82 -Raw
 $proxyBuild82 = Join-Path $repoRoot 'src\build\TerminalHandoffProxy.zig'
 $proxyBuildText82 = Get-Content -LiteralPath $proxyBuild82 -Raw
+$vtStubBuild82 = Join-Path $repoRoot 'src\build\GhosttyVtStub.zig'
+$vtStubBuildText82 = Get-Content -LiteralPath $vtStubBuild82 -Raw
 $buildConfig82 = Join-Path $repoRoot 'src\build\Config.zig'
 $buildConfigText82 = Get-Content -LiteralPath $buildConfig82 -Raw
 $buildZig82 = Join-Path $repoRoot 'build.zig'
@@ -135,6 +137,20 @@ Invoke-ContractTable -Contracts @(
         Pattern = 'module\.addCMacro\("NOCTTY_RELEASE_SYMBOLS", if \(cfg\.release_symbols\) "1" else "0"\);'
         Kind = 'Text'
         Description = 'the handoff proxy (C only, blind to build options) hashes release_symbols, so a DLL linked without /OPT:REF is not reused'
+    }
+    @{
+        File = $vtStubBuild82
+        Content = { $vtStubBuildText82 }
+        Pattern = '(?s)\.strip = cfg\.strip,.*?module\.addCMacro\("NOCTTY_RELEASE_SYMBOLS", if \(cfg\.release_symbols\) "1" else "0"\);.*?library\.producesPdbFile\(\).*?addInstallFileWithDir\(\s*library\.getEmittedPdb\(\),\s*\.\{ \.custom = "bin/" \+\+ install_dir \},\s*name \+\+ "\.pdb",'
+        Kind = 'Text'
+        Description = 'the ghostty-vt.dll placeholder keeps debug info with the exe, hashes release_symbols and installs ghostty-vt.pdb beside itself in zig-out\bin\ghostty-vt-stub'
+    }
+    @{
+        File = $windowsPackager82
+        Content = { $windowsPackagerText82 }
+        Pattern = '(?s)foreach \(\$binaryName in \(Get-WindowsSymbolBinaryNames\)\).*?\$runtimeSource = @\(\$runtimeFiles \| Where-Object \{ \(Split-Path -Leaf \$_\) -ceq \$binaryName \}\).*?\$pdbSource = Join-Path \(Split-Path -Parent \(Join-Path \$zigOutBin \$runtimeSource\[0\]\)\) \$identity\.PdbName'
+        Kind = 'Text'
+        Description = 'a PDB is taken from beside the build output its binary was staged from, so ghostty-vt.pdb is the placeholder''s and never a lib-vt build''s'
     }
 )
 
@@ -270,7 +286,10 @@ try {
         'ghostty-vt.pdb' = [guid]'41a76387-36f3-935c-4c4c-44205044422e'
     }
     # The CodeView record carries the build machine's absolute path; only the
-    # file name is looked up.
+    # file name is looked up. ghostty-vt.dll stands for the placeholder the
+    # portable ZIP carries (src/build/GhosttyVtStub.zig), whose CodeView
+    # record names ghostty-vt.pdb; the doc comment on
+    # portable_zip_carries_legacy_entries says what changes here when it goes.
     New-SymbolsTestPe -Path (Join-Path $payload 'noctty.exe') -PdbPath 'D:\a\noctty\.zig-cache\o\x\noctty.pdb' -Guid $guids['noctty.pdb'] -Age 1
     New-SymbolsTestPe -Path (Join-Path $payload 'noctty.com') -PdbPath 'D:\a\noctty\.zig-cache\o\y\noctty-command.pdb' -Guid $guids['noctty-command.pdb'] -Age 1
     New-SymbolsTestPe -Path (Join-Path $payload 'ghostty-vt.dll') -PdbPath 'ghostty-vt.pdb' -Guid $guids['ghostty-vt.pdb'] -Age 3

@@ -30,10 +30,14 @@ foreach ($path in @($portableRoot, $portableExe, $portableCommand, $portableReso
     }
 }
 
+# The portable ZIP's ghostty-vt.dll is the placeholder, not libghostty-vt: it
+# fails to load with ERROR_DLL_INIT_FAILED, exports nothing and says what it
+# is in its version resource.
+. (Join-Path $repoRoot 'scripts\ghostty-vt-stub.ps1')
 $dllSmoke = Join-Path $stageBase 'test_dll_init.exe'
-& zig cc (Join-Path $PSScriptRoot 'test_dll_init.c') -I (Join-Path $repoRoot 'include') -lshell32 -o $dllSmoke
+& zig cc (Join-Path $PSScriptRoot 'test_dll_init.c') -lshell32 -lversion -o $dllSmoke
 if ($LASTEXITCODE -ne 0) { throw "Packaged DLL smoke compilation failed: $LASTEXITCODE" }
-& $dllSmoke (Join-Path $portableRoot 'ghostty-vt.dll')
+& $dllSmoke (Join-Path $portableRoot 'ghostty-vt.dll') $GhosttyVtStubDescription
 if ($LASTEXITCODE -ne 0) { throw "Packaged DLL smoke failed: $LASTEXITCODE" }
 
 & $shellHarness `
