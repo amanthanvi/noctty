@@ -370,8 +370,9 @@ that govern each symbol you change, or that none does.
   the shell model: `Host.applyCommittedSplitHistory`), split dividers under
   the mouse (`win32/pane_divider.zig`, `Host.handlePaneDividerMessage` and
   the drag behind it, `Host.paneDividerAtScreen`, keys during a drag:
-  `App.paneDividerDragKey`, global hotkeys during a drag:
-  `App.takeGlobalHotkey`), the gaps and slot rounding they find
+  `App.paneDividerDragKey`, and the loop's routing that hands it a
+  message before translation, `App.routeLoopMessage`; global hotkeys
+  during a drag: `App.takeGlobalHotkey`), the gaps and slot rounding they find
   (`win32_layout.zig`: `splitSurfacePlacement`, `roundedSlotPixel`), the tree
   identity a drag checks (`SplitTree.generation` in
   `src/datastruct/split_tree.zig`), the +0 every ratio enters the tree as
