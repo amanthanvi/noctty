@@ -13,8 +13,10 @@ pub const Event = struct {
     event: input.KeyEvent,
 
     /// The binding that was triggered as a result of this event.
-    /// Multiple bindings are possible if they are chained.
-    binding: []const input.Binding.Action = &.{},
+    /// Multiple bindings are possible if they are chained. Only each
+    /// action's tag (its name) is kept: an action's payload borrows memory
+    /// the event outlives.
+    binding: []const std.meta.Tag(input.Binding.Action) = &.{},
 
     /// The data sent to the pty as a result of this keyboard event.
     /// This is allocated using the inspector allocator.

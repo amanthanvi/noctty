@@ -1055,10 +1055,11 @@ pub fn performAction(
 /// `actions` may be borrowed from binding storage: the chain runs from a
 /// copy taken first, because an action can free that storage while the
 /// chain still runs (a reload frees the config that owns it; a close
-/// frees the surface that owns its own). The chain ends at its first
-/// closing action (`Surface.closingAction`), and the actions after it are
-/// dropped, as on a single surface: the close can free the surface whose
-/// key ran the chain.
+/// frees the surface that owns its own). Every action runs, after a
+/// closing one too: with the copy, nothing here reads what a close frees
+/// (`performAllAction` walks the surfaces as they are then), so an app-wide
+/// chain is not cut short. The surface whose key ran it may be gone, which
+/// is the caller's to handle (`Surface.dispatchLeaf` returns `.closed`).
 pub fn performAllChainedAction(
     self: *App,
     rt_app: *apprt.App,
@@ -1096,7 +1097,6 @@ fn performChainOnAll(
                 err,
             });
         };
-        if (Surface.closingAction(action)) return;
     }
 }
 
@@ -1246,14 +1246,14 @@ test "an app-wide chain reads the actions after a reload from its own copy" {
     );
 }
 
-test "an app-wide chain drops the actions after a closing action" {
+test "an app-wide chain runs the actions after a closing action from its own copy" {
     const testing = std.testing;
     var seen: std.ArrayListUnmanaged(TestChainApp.Tag) = .empty;
     defer seen.deinit(testing.allocator);
     try testChainOnAll(&.{ .ignore, .close_window, .new_window }, &seen);
     try testing.expectEqualSlices(
         TestChainApp.Tag,
-        &.{ .ignore, .close_window },
+        &.{ .ignore, .close_window, .new_window },
         seen.items,
     );
 }
