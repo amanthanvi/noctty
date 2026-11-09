@@ -103,9 +103,9 @@ const leaves = .{
         // `decide`/`Input`/`Target`/`Over`, `movesWindow`, `leavesStrip`,
         // `insertIndex`/`InsertScan`/`Button`, `grabOffset`/`Offset`,
         // `windowMoveMerges`/`WindowMoveEnd`, `moveResized`/`Size`, and
-        // `looksSnapped`/`Edges`/`snapped` for Windows 10 builds without
-        // `IsWindowArranged`.
-        .pub_decls = 18,
+        // `looksSnapped`/`Edges`/`snapped`/`keptSize` for Windows 10 builds
+        // without `IsWindowArranged`.
+        .pub_decls = 19,
     },
 };
 

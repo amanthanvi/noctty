@@ -936,6 +936,11 @@ pub const Host = struct {
     resize_settle_until_ms: u64 = 0,
     structural_history_disposing: bool = false,
     destroy_after_structural_dispose: bool = false,
+    /// Structural history with a lower sequence (`sequence_id`) is from
+    /// before a tab move that could not dispose it (`App.retireMoveHistory`):
+    /// it keeps tab indices and panes of the windows as they were, so it
+    /// never replays. An undo or redo that reaches it disposes it instead.
+    history_floor: u64 = 0,
     structural_undo_entries: win32_structural_history.List(StructuralUndoEntry) = .empty,
     structural_redo_entries: win32_structural_history.List(StructuralUndoEntry) = .empty,
 
@@ -1935,12 +1940,20 @@ pub const Host = struct {
         return true;
     }
 
+    /// What an undo or redo says when history from before a tab move
+    /// (`history_floor`) could not be disposed yet; the prune tries again.
+    const history_floor_message = "Undo history from before a tab moved is still being cleared.";
+
     pub fn applyLatestStructuralUndo(self: *Host) !?[]const u8 {
         // Replays move panes between tabs; their status badges follow.
         defer self.refreshAllTabStatus();
         // Once the replay's activation is done: an undo may show another
         // tab than the model has in front until it activates it.
         defer self.app.auditShellNativeMapping("structural-undo");
+        if (self.peekStructuralUndo()) |newest| if (newest.sequence_id < self.history_floor) {
+            // From before a tab move: disposed, never replayed.
+            return if (self.discardNewestStructuralUndo()) null else history_floor_message;
+        };
         const entry = (try self.popStructuralUndo()) orelse return null;
         errdefer self.restoreLastStructuralUndoPop();
 
@@ -1989,6 +2002,9 @@ pub const Host = struct {
         // Replays move panes between tabs; their status badges follow.
         defer self.refreshAllTabStatus();
         defer self.app.auditShellNativeMapping("structural-redo");
+        if (self.peekStructuralRedo()) |newest| if (newest.sequence_id < self.history_floor) {
+            return if (self.discardNewestStructuralRedo()) null else history_floor_message;
+        };
         const entry = (try self.popStructuralRedo()) orelse return null;
         errdefer self.restoreLastStructuralRedoPop();
 

@@ -212,10 +212,11 @@ pub const WM_WINHOSTTY_TOAST_REMOVALS = WM_APP + 16;
 /// the switch runs inside the pane's paint, holding the renderer's lock.
 pub const WM_WINHOSTTY_RENDERER_SWITCHED = WM_APP + 17;
 /// Wakes the message loop for a tab move a drag or `move_tab_to_new_window`
-/// asked of this window (`Host.pending_tab_moves`). The outer pump runs it
-/// (`App.drainPendingTabMoves`); the message itself does nothing, so a nested
-/// modal loop (a menu, the system move loop) that dispatches it runs no move
-/// under the handler that opened that loop.
+/// asked of this window (`App.pending_tab_moves`). The outer pump runs it
+/// (`App.drainPendingTabMoves`); the message only wakes it, so a nested modal
+/// loop (a menu, the system move loop) that dispatches it runs no move under
+/// the handler that opened that loop, and arms the App's re-wake timer
+/// instead (`App.noteTabMoveWake`).
 pub const WM_WINHOSTTY_TAB_MOVE = WM_APP + 18;
 
 pub const PM_NOREMOVE: UINT = 0x0000;

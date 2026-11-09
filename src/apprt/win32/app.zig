@@ -7965,7 +7965,9 @@ pub const App = struct {
         const target: *Host = switch (dest) {
             .new_window => |drop| target: {
                 created = try self.createHost(default_title, &self.config, .{ .tear_off = .{ .source = source, .drop = drop } });
-                if (test_tear_off_window_created) |hook| try hook(created.?);
+                if (builtin.is_test) {
+                    if (test_tear_off_window_created) |hook| try hook(created.?);
+                }
                 break :target created.?;
             },
             .host => |to| to.host,
@@ -8001,7 +8003,9 @@ pub const App = struct {
                 error.InvalidTransfer => retry: {
                     try clearMoveHistory(source, dest);
                     history_cleared = true;
-                    if (test_tab_move_shell_step) |hook| hook(self, .retry_prepare);
+                    if (builtin.is_test) {
+                        if (test_tab_move_shell_step) |hook| hook(self, .retry_prepare);
+                    }
                     break :retry try self.shell_runtime.prepare(intent);
                 },
                 else => return err,
@@ -8010,7 +8014,9 @@ pub const App = struct {
         defer if (shell_prepared) |*prepared| prepared.deinit();
 
         if (shell_prepared) |*prepared| {
-            if (test_tab_move_shell_step) |hook| hook(self, .commit);
+            if (builtin.is_test) {
+                if (test_tab_move_shell_step) |hook| hook(self, .commit);
+            }
             // A focus message between the prepare and here makes it stale:
             // it is prepared again on what is current.
             try prepared.commitRetryingStale(&self.shell_runtime);
@@ -8023,11 +8029,13 @@ pub const App = struct {
         // its model discard) leaves its entry, and the model the closed tab
         // it names: both stay with their window, which only ever finds its
         // panes by identity, and the undo prune disposes them later.
-        if (test_tab_move_shell_step) |hook| hook(self, .history);
-        if (!history_cleared) clearMoveHistory(source, dest) catch |err| {
-            log.warn("tab move left undo history it could not dispose err={}", .{err});
-        };
-        if (test_tab_move_shell_step) |hook| hook(self, .after_history);
+        if (builtin.is_test) {
+            if (test_tab_move_shell_step) |hook| hook(self, .history);
+        }
+        if (!history_cleared) self.retireMoveHistory(source, dest);
+        if (builtin.is_test) {
+            if (test_tab_move_shell_step) |hook| hook(self, .after_history);
+        }
         // The clear closed what history kept, never a live tab; find it again.
         const at = source.findTabIndexById(tab_id).?;
         source.tabs.items[at].clearRedoHistory();
@@ -8124,7 +8132,9 @@ pub const App = struct {
             // 2026-10-25 DPI-HIDDEN-TAB-BATCH-01 entry in window-frame.md).
             target.applyDpiChangeToVisibleSurfaces();
         }
-        if (test_tab_move_activating) |hook| hook(target, pane) catch |err| log.err("tab move test hook failed err={}", .{err});
+        if (builtin.is_test) {
+            if (test_tab_move_activating) |hook| hook(target, pane) catch |err| log.err("tab move test hook failed err={}", .{err});
+        }
         self.activateSurface(pane);
         var it = target.tabs.items[landed].tree.iterator();
         while (it.next()) |entry| entry.view.requestRepaint() catch |err| {
@@ -8132,6 +8142,27 @@ pub const App = struct {
         };
         self.auditShellNativeMapping("tab-move-window");
         return true;
+    }
+
+    /// After a tab move's commit: both windows' undo history goes, each
+    /// window's whether or not the other's could. What a disposal cannot
+    /// finish (out of memory in its model discard) stays whole, under a floor
+    /// that keeps it from ever replaying (`Host.history_floor`): its entries
+    /// keep tab indices and panes of the windows as they were before the
+    /// move. An undo or redo that reaches one disposes it instead.
+    fn retireMoveHistory(self: *App, source: *Host, dest: TabMoveDest) void {
+        const floor = self.next_undo_sequence;
+        retireHostHistory(source, floor);
+        switch (dest) {
+            .new_window => {},
+            .host => |to| retireHostHistory(to.host, floor),
+        }
+    }
+
+    fn retireHostHistory(host: *Host, floor: u64) void {
+        if (host.tryClearStructuralHistory(.normal)) return;
+        host.history_floor = @max(host.history_floor, floor);
+        log.warn("tab move left undo history it could not dispose; it will not replay", .{});
     }
 
     fn clearMoveHistory(source: *Host, dest: TabMoveDest) !void {
@@ -8356,16 +8387,17 @@ pub const App = struct {
         if (sys.GetCursorPos(&pointer) == 0) return;
         const over = self.tabStripTargetAt(pointer, hwnd, null);
         const was = started.rect;
+        const start_size: tab_drag.Size = .{ .width = was.right - was.left, .height = was.bottom - was.top };
+        const end_size: tab_drag.Size = .{ .width = now.right - now.left, .height = now.bottom - now.top };
+        const end_dpi = sys.GetDpiForWindow(hwnd);
+        // The size it moved at, on the monitor it started on.
+        const kept = tab_drag.keptSize(started.moving orelse start_size, started.dpi, end_size, end_dpi, Host.scaledBy(12, end_dpi));
         if (!tab_drag.windowMoveMerges(.{
             .moved = now.left != was.left or now.top != was.top,
-            .resized = tab_drag.moveResized(
-                .{ .width = was.right - was.left, .height = was.bottom - was.top },
-                started.moving,
-                .{ .width = now.right - now.left, .height = now.bottom - now.top },
-            ),
-            .dpi_changed = sys.GetDpiForWindow(hwnd) != started.dpi,
+            .resized = tab_drag.moveResized(start_size, started.moving, end_size),
+            .dpi_changed = end_dpi != started.dpi,
             .zoomed = sys.IsZoomed(hwnd) != 0,
-            .arranged = tab_drag.snapped(windowArranged(hwnd), windowLooksSnapped(hwnd, now)),
+            .arranged = tab_drag.snapped(windowArranged(hwnd), windowLooksSnapped(hwnd, now), kept),
             .over_strip = over != null,
         })) return;
         _ = self.requestTabMove(host, host.tabs.items[0].id, .{ .window = over.? });
@@ -16484,6 +16516,44 @@ test "win32 a window a tab move keeps hidden for its undo history stays hidden t
             try std.testing.expect(!source.hidden_by_toggle);
             try source.showAfterToggle();
             try std.testing.expect(sys.IsWindowVisible(source.hwnd.?) == 0);
+            try app.validateShellNativeMapping();
+        }
+    }.body);
+}
+
+test "win32 undo history a tab move could not dispose never replays, in the window the tab left or the one it joined (CodeRabbit review 5821962511)" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    try runOnHiddenDesktop(struct {
+        fn body() !void {
+            var fixture: win32.WindowStartTestApp = .{};
+            try fixture.init();
+            defer fixture.deinit();
+            const app = &fixture.app;
+            app.shell_runtime_initialized = true;
+            const setup: TabMoveFixture = .{ .fixture = &fixture };
+            const source = try setup.window(3, false);
+            const target = try setup.window(2, false);
+            // A closed tab kept for undo in each window.
+            fixture.core_app.deleteSurface(source.tabs.items[0].focusedSurface().?);
+            try std.testing.expect(try app.closeTabUndoable(source, 0));
+            fixture.core_app.deleteSurface(target.tabs.items[0].focusedSurface().?);
+            try std.testing.expect(try app.closeTabUndoable(target, 0));
+            // A tab joins the other window, and every disposal after the
+            // commit runs out of memory: both windows keep their entries.
+            App.test_tab_move_shell_step = &TestHistoryDisposalFailure.hook;
+            defer App.test_tab_move_shell_step = null;
+            try std.testing.expect(try app.moveTabToWindow(source, 0, .{ .host = .{ .host = target, .index = 1 } }));
+            App.test_tab_move_shell_step = null;
+            try std.testing.expect(source.hasStructuralHistory());
+            try std.testing.expect(target.hasStructuralHistory());
+            // Neither replays: they keep tab indices and panes of the windows
+            // as they were. An undo disposes them instead.
+            try std.testing.expect((try target.applyLatestStructuralUndo()) == null);
+            try std.testing.expectEqual(@as(usize, 2), target.tabs.items.len);
+            try std.testing.expect(!target.hasStructuralHistory());
+            try std.testing.expect((try source.applyLatestStructuralUndo()) == null);
+            try std.testing.expectEqual(@as(usize, 1), source.tabs.items.len);
+            try std.testing.expect(!source.hasStructuralHistory());
             try app.validateShellNativeMapping();
         }
     }.body);

@@ -149,6 +149,34 @@ public static class Tt {
     // set against the real keyboard's samples (modifier-sampler.c).
     public static System.Collections.Generic.List<ulong[]> Windows=new System.Collections.Generic.List<ulong[]>();
     public static void Ran(ulong start) { Windows.Add(new ulong[]{start,GetTickCount64()}); }
+    // The sampler's rows (`tick,held,active`; `done,n` skipped) against the
+    // posted keys' and drags' spans: the spans sorted and merged (a drag's
+    // Esc key runs inside its drag), the rows sorted by tick, one sweep over
+    // both. Returns the held and inactive samples inside a span; the ticks
+    // of the held ones go to `heldTicks`.
+    public static long[] Correlate(string[] rows,System.Collections.Generic.List<ulong> heldTicks) {
+        var spans=new System.Collections.Generic.List<ulong[]>();
+        foreach(var w in System.Linq.Enumerable.OrderBy(Windows,x=>x[0])) {
+            if(spans.Count>0 && w[0]<=spans[spans.Count-1][1]) { if(w[1]>spans[spans.Count-1][1]) spans[spans.Count-1][1]=w[1]; }
+            else spans.Add(new ulong[]{w[0],w[1]});
+        }
+        var samples=new System.Collections.Generic.List<ulong[]>();
+        foreach(var row in rows) {
+            var f=row.Split(',');
+            if(f.Length!=3) continue;
+            samples.Add(new ulong[]{ulong.Parse(f[0]),ulong.Parse(f[1]),ulong.Parse(f[2])});
+        }
+        samples.Sort((a,b)=>a[0].CompareTo(b[0]));
+        long held=0, inactive=0; int at=0;
+        foreach(var s in samples) {
+            while(at<spans.Count && spans[at][1]<s[0]) at++;
+            if(at==spans.Count) break;
+            if(spans[at][0]>s[0]) continue;
+            if(s[1]==1) { held++; heldTicks.Add(s[0]); }
+            if(s[2]==0) inactive++;
+        }
+        return new long[]{held,inactive};
+    }
     // Clears the keyboard state `h`'s thread reads (GetKeyState and
     // GetKeyboardState: a modifier down there turns a posted key into a
     // chord) and Caps Lock. Attaching resets that state by itself
@@ -187,10 +215,19 @@ public static class Tt {
 }
 '@
 if (-not $Driver) {
-    Invoke-LocalHiddenDriver -Script $PSCommandPath -Bin $Bin -Run $Run -TimeoutSeconds $DriverTimeoutSeconds `
-        -ExpectedStartupHash $ExpectedStartupHash -ExpectedStartupModified $ExpectedStartupModified `
-        -DesktopPrefix 'noctty-tearoff-' -Label 'Hidden tab tear-off' -PassDesktopName -GuardClipboard `
-        -DriverArguments @("-Renderer $Renderer")
+    try {
+        Invoke-LocalHiddenDriver -Script $PSCommandPath -Bin $Bin -Run $Run -TimeoutSeconds $DriverTimeoutSeconds `
+            -ExpectedStartupHash $ExpectedStartupHash -ExpectedStartupModified $ExpectedStartupModified `
+            -DesktopPrefix 'noctty-tearoff-' -Label 'Hidden tab tear-off' -PassDesktopName -GuardClipboard `
+            -DriverArguments @("-Renderer $Renderer")
+    } finally {
+        # The driver's job has stopped by now, every console helper with it:
+        # a dump a helper that would not exit left (its marker text) goes.
+        $evidence=[IO.Path]::GetFullPath($Run)
+        if(Test-Path -LiteralPath $evidence) {
+            Get-ChildItem -LiteralPath $evidence -Filter 'attach-*' -File -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+        }
+    }
     exit
 }
 
@@ -227,7 +264,7 @@ function Launch-Case([string]$Name,[string]$RendererName,[string[]]$Extra=@()) {
     @("working-directory = $dir",'single-instance = false','window-save-state = never',
       'copy-on-select = false','clipboard-read = deny','clipboard-write = deny',
       'confirm-close-surface = false','shell-integration = none',
-      "command = direct:$cmd /d /k echo TEAROFF-%RANDOM%-%RANDOM%",
+      "command = direct:$cmd /d /k echo TEAROFF-%RANDOM%-%RANDOM%-%RANDOM%",
       "renderer = $RendererName",
       'keybind = f6=new_tab','keybind = f7=move_tab_to_new_window','keybind = f9=close_surface') + $Extra | Set-Content -LiteralPath $config
     $exe=Join-Path $dir 'noctty.exe'
@@ -354,7 +391,7 @@ function Marker([IntPtr]$Pane) {
     $pattern=$null
     if(-not $element.TryGetCurrentPattern([System.Windows.Automation.TextPattern]::Pattern,[ref]$pattern)) { return $null }
     $text=$pattern.DocumentRange.GetText(-1)
-    $m=[regex]::Match($text,'TEAROFF-\d+-\d+')
+    $m=[regex]::Match($text,'TEAROFF-\d+-\d+-\d+')
     if($m.Success) { return $m.Value } else { return $null }
 }
 function Wait-Marker([IntPtr]$Pane) {
@@ -407,21 +444,31 @@ function Pane-Consoles($case) {
     foreach($id in Shell-Pids $case) {
         $out=Join-Path $Run ('attach-' + [guid]::NewGuid().ToString('N').Substring(0,8) + '.txt')
         $pi=[Tt]::SpawnLogged($script:attachExe,('"{0}" {1} "{2}" window-dump' -f $script:attachExe,$id,$out),$Run,$desktopPath,"$out.log")
+        $exited=$false
         try {
             $done=[HiddenLocal]::WaitForSingleObject($pi.process,10000) -eq 0
+            $exited=$done
             if(-not $done) {
                 # Past its time: ended through its own handle, never by name,
                 # and gone before its dump is deleted, so it cannot write the
                 # file again after.
                 [void][HiddenLocal]::TerminateProcess($pi.process,1)
-                if([HiddenLocal]::WaitForSingleObject($pi.process,5000) -ne 0) { throw "Console helper $($pi.pid) did not exit." }
+                $exited=[HiddenLocal]::WaitForSingleObject($pi.process,5000) -eq 0
             }
         } finally { [void][HiddenLocal]::CloseHandle($pi.thread); [void][HiddenLocal]::CloseHandle($pi.process) }
-        $lines=if($done -and (Test-Path -LiteralPath $out)) { @(Get-Content -LiteralPath $out) } else { @() }
-        Remove-Item -LiteralPath $out,"$out.log" -ErrorAction SilentlyContinue
+        # One that would not exit could write its dump again: the outer run
+        # deletes it once the driver's job has stopped (the `-not $Driver`
+        # branch above).
+        if(-not $exited) { throw "Console helper $($pi.pid) did not exit." }
+        try {
+            $lines=if($done -and (Test-Path -LiteralPath $out)) { @(Get-Content -LiteralPath $out) } else { @() }
+        } finally { Remove-Item -LiteralPath $out,"$out.log" -ErrorAction SilentlyContinue }
         if($lines.Count -lt 2) { continue }
-        $m=[regex]::Match((@($lines | Select-Object -Skip 2) -join "`n"),'TEAROFF-\d+-\d+')
-        if($m.Success) { $byMarker[$m.Value]=[IntPtr][long]$lines[1] }
+        $m=[regex]::Match((@($lines | Select-Object -Skip 2) -join "`n"),'TEAROFF-\d+-\d+-\d+')
+        if(-not $m.Success) { continue }
+        # A marker two consoles show maps to neither: their panes are then
+        # not found, never folded into one entry.
+        if($byMarker.ContainsKey($m.Value)) { $byMarker[$m.Value]=[IntPtr]::Zero } else { $byMarker[$m.Value]=[IntPtr][long]$lines[1] }
     }
     $rows=@(foreach($owner in Hosts $case) {
         foreach($p in Panes $owner) {
@@ -545,6 +592,9 @@ function Measure-Case([string]$RendererName) {
         $after=Shell-Pids $case
         Check "${RendererName} drop: no shell started or ended" (Same-Set $pids $after) ($pids -join ',') ($after -join ',')
         Check "${RendererName} drop: the moved shell's output is still there" ($null -ne $m4 -and (Marker $p4) -eq $m4) 'same, non-null marker' $null
+        # cmd's `%RANDOM%` gives no guarantee: each pane's marker is checked
+        # to be its own, since the console owner map keys on it.
+        Check "${RendererName}: every pane's marker is its own" (@($m1,$m2,$m3,$m4 | Where-Object { $null -ne $_ } | Sort-Object -Unique).Count -eq 4) 4 @($m1,$m2,$m3,$m4 | Where-Object { $null -ne $_ } | Sort-Object -Unique).Count
         Check "${RendererName}: every moved shell kept its output" ($null -ne $m1 -and $null -ne $m2 -and $null -ne $m3 -and $null -ne $m4 -and (Marker $p1) -eq $m1 -and (Marker $p2) -eq $m2 -and (Marker $p3) -eq $m3 -and (Marker $p4) -eq $m4) 'same, non-null markers' $null
         Check-Backend $case $RendererName 'after the drop' @($p1,$p2,$p3,$p4)
         $owners=Consoles-Follow $case
@@ -710,17 +760,12 @@ try {
         }
         $rows=if(Test-Path -LiteralPath $samplerOut) { @(Get-Content -LiteralPath $samplerOut) } else { @() }
         $finished=@($rows | Where-Object { $_ -like 'done,*' }).Count -eq 1
-        $held=0; $inactive=0
-        foreach($row in $rows) {
-            $f=$row -split ','
-            if($f[0] -eq 'done') { $keyboard.Samples=[long]$f[1]; continue }
-            $tick=[uint64]$f[0]
-            $inside=@([Tt]::Windows | Where-Object { $_[0] -le $tick -and $tick -le $_[1] }).Count -gt 0
-            if(-not $inside) { continue }
-            if($f[1] -eq '1') { $held++ }
-            if($f[2] -eq '0') { $inactive++ }
-        }
+        foreach($row in $rows) { if($row -like 'done,*') { $keyboard.Samples=[long]($row -split ',')[1] } }
+        $heldTicks=[Collections.Generic.List[uint64]]::new()
+        $correlated=[Tt]::Correlate([string[]]$rows,$heldTicks)
+        $held=$correlated[0]; $inactive=$correlated[1]
         $keyboard.HeldInWindows=$held; $keyboard.InactiveInWindows=$inactive; $keyboard.Finished=$finished
+        $keyboard.HeldTicks=@($heldTicks); $keyboard.Recorded=$rows.Count
         if($held -gt 0) {
             Check 'INTERFERED: a modifier was held at the real keyboard while a posted key or drag ran' $false 0 $keyboard
         } elseif(-not $finished) {
