@@ -172,8 +172,9 @@ Assert-WorkflowContract `
 # updaters require a pinned-publisher signature on every payload DLL.
 # Read through PowerShell's parser, not as text: a line comment, a block
 # comment or a here-string around a required call leaves no command there, so
-# it fails the contract as a deleted call does; the controls below prove each.
-# (Deliberately dead code, such as `if ($false)`, is for review to catch.)
+# it fails the contract as a deleted call does, and so does a signing filter
+# without ".dll"; the controls below prove each. (Deliberately dead code, such
+# as `if ($false)`, is for review to catch.)
 function Get-PlaceholderStagingProblems {
     param([Parameter(Mandatory)] [string] $ScriptText)
 
@@ -209,6 +210,20 @@ function Get-PlaceholderStagingProblems {
     if ($null -eq $stagingLoop) {
         $problems.Add('no runtime staging loop signs (Invoke-SignFile) and verifies (Assert-ValidSignature) each staged file')
         return , $problems
+    }
+    # The loop signs by extension; an `if` around the signing call must
+    # still take a .dll, or the placeholder ships unsigned.
+    $signCall = @($stagingLoop.Body.FindAll($isCommand, $true) | Where-Object { $_.GetCommandName() -eq 'Invoke-SignFile' }) | Select-Object -First 1
+    for ($node = $signCall.Parent; $null -ne $node -and $node -ne $stagingLoop; $node = $node.Parent) {
+        if ($node -isnot [System.Management.Automation.Language.IfStatementAst]) { continue }
+        foreach ($clause in $node.Clauses) {
+            if ($signCall.Extent.StartOffset -lt $clause.Item2.Extent.StartOffset -or $signCall.Extent.EndOffset -gt $clause.Item2.Extent.EndOffset) { continue }
+            $takesDll = @($clause.Item1.FindAll({
+                param($n)
+                $n -is [System.Management.Automation.Language.StringConstantExpressionAst] -and $n.Value -eq '.dll'
+            }, $true)).Count -gt 0
+            if (-not $takesDll) { $problems.Add('the staging loop signs only behind a condition that does not take ".dll"') }
+        }
     }
 
     $commands = @($ast.FindAll($isCommand, $true))
@@ -248,12 +263,19 @@ foreach ($requiredCall in @(
     foreach ($disabled in @(
         @{ How = 'line-commented'; Text = $before + '# ' + $requiredCall + $after },
         @{ How = 'block-commented'; Text = $before + '<# ' + $requiredCall + ' #>' + $after },
+        @{ How = 'block-commented over lines'; Text = $before + "<#`n" + $requiredCall + "`n#>" + $after },
+        @{ How = 'inside a here-string'; Text = $before + "@'`n" + $requiredCall + "`n'@" + $after },
         @{ How = 'deleted'; Text = $before + $after }
     )) {
         if ((Get-PlaceholderStagingProblems -ScriptText $disabled.Text).Count -eq 0) {
             throw "Contract control failed: the placeholder staging contract still passes with '$requiredCall' $($disabled.How)"
         }
     }
+}
+$signFilter = '@(".com", ".exe", ".dll") -contains'
+if ($windowsPackagerText.IndexOf($signFilter, $runtimeLoopStart) -lt 0) { throw "Contract control: the staging loop's signing filter '$signFilter' is missing from $windowsPackager" }
+if ((Get-PlaceholderStagingProblems -ScriptText $windowsPackagerText.Replace($signFilter, '@(".com", ".exe") -contains')).Count -eq 0) {
+    throw 'Contract control failed: the placeholder staging contract still passes with ".dll" dropped from the signing filter'
 }
 foreach ($payloadConsumer in @(
     $releaseArtifactVerifier,

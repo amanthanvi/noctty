@@ -13,9 +13,10 @@
  * portable_zip_carries_legacy_entries in src/update/portable_apply.zig.
  *
  * Plain C, linked with no C runtime and this function as the entry point
- * (src/build/GhosttyVtStub.zig). A Zig DLL would not do: Zig's start code
- * exports _DllMainCRTStartup from every Zig DLL, so the export table would
- * not be empty.
+ * (src/build/GhosttyVtStub.zig), so the image is this function and its
+ * version resource. A Zig DLL brings Zig's start code (_DllMainCRTStartup) as
+ * its entry and, unless built with -fno-dll-export-fns, exports it and the
+ * TLS symbols.
  */
 
 typedef int BOOL;

@@ -345,8 +345,9 @@ test "portable managed script list parser rejects missing extra and duplicate en
 ///   test/windows/test_dll_init.c, its section in test/windows/README.md and
 ///   its rule in scripts/ci-changed-paths.ps1;
 /// - the placeholder pins in the contracts: `$vtStubBuild82` in
-///   Contracts.82-ReleaseSymbols.ps1, the staging pin (`$stubStagingPattern`)
-///   in Contracts.93-ConPty.ps1, and the reviewed package-portable-cli.ps1
+///   Contracts.82-ReleaseSymbols.ps1, the staging check
+///   (`Get-PlaceholderStagingProblems` and its controls) in
+///   Contracts.93-ConPty.ps1, and the reviewed package-portable-cli.ps1
 ///   digest in Contracts.99-Baselines.ps1 and baselines/origin-main.json;
 /// - the ARM64 packaged smoke step in .github/workflows/windows-arm64.yml;
 /// - the comment on the stage rule in dist/windows/noctty.iss, and the
