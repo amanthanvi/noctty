@@ -1,7 +1,7 @@
 # Shared by the hidden-desktop harnesses that run on a developer machine
 # (hidden-win11-docked-search.ps1, -single-tab-close, -dpi-geometry,
 # -quick-terminal-identity, -session-restore, -default-shell, -restore-quarantine,
-# -app-delivery, -window-start and -restart-manager). Dot-source it. The hosted-runner harnesses use
+# -app-delivery, -window-start, -restart-manager and -pane-divider). Dot-source it. The hosted-runner harnesses use
 # hidden-win11-lib.ps1 instead.
 #
 # What it gives them:
