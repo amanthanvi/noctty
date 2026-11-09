@@ -365,7 +365,11 @@ that govern each symbol you change, or that none does.
   `win32/registry.zig`), focus after a close, shell reducer effects,
   local and structural undo/redo (`win32_undo.zig`,
   `win32_structural_history.zig`, `undo-timeout`, split undo and redo through
-  the shell model: `Host.applyCommittedSplitHistory`).
+  the shell model: `Host.applyCommittedSplitHistory`), split dividers under
+  the mouse (`win32/pane_divider.zig`, `Host.handlePaneDividerMessage` and
+  the drag behind it, `Host.paneDividerAtScreen`, keys during a drag:
+  `App.paneDividerDragKey`) and the keyboard `resize_split` they match
+  (`App.resizeSplitFallback`).
 - [input.md](docs/agents/log/input.md): `win32/input.zig` and key messages
   (`WM_KEYDOWN`/`WM_CHAR`/`WM_SYSCHAR`, dead keys, `ToUnicode`, non-Latin
   layouts), default Windows keybindings, Win32 input mode (DEC 9001), the
