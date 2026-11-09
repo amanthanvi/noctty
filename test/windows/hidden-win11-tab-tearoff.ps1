@@ -33,6 +33,9 @@ param(
     # modifier held there fails the run as INTERFERED. Off by default:
     # AGENTS.md has every process a driver starts on the private desktop.
     [switch] $SampleRealKeyboard,
+    # `held-release` runs only the case of a drag's release after its tab
+    # moved away (`Measure-HeldRelease`), for an A/B against another build.
+    [ValidateSet('all','held-release')] [string] $Cases = 'all',
     [ValidateRange(1,1800)] [int] $DriverTimeoutSeconds = 400,
     [string] $ExpectedStartupHash,
     [string] $ExpectedStartupModified
@@ -264,7 +267,7 @@ if (-not $Driver) {
         Invoke-LocalHiddenDriver -Script $PSCommandPath -Bin $Bin -Run $Run -TimeoutSeconds $DriverTimeoutSeconds `
             -ExpectedStartupHash $ExpectedStartupHash -ExpectedStartupModified $ExpectedStartupModified `
             -DesktopPrefix 'noctty-tearoff-' -Label 'Hidden tab tear-off' -PassDesktopName -GuardClipboard `
-            -DriverArguments @(@("-Renderer $Renderer") + $(if($SampleRealKeyboard) { @('-SampleRealKeyboard') } else { @() }))
+            -DriverArguments @(@("-Renderer $Renderer","-Cases $Cases") + $(if($SampleRealKeyboard) { @('-SampleRealKeyboard') } else { @() }))
     } catch { $driverError=$_ }
     # The directory did not exist above: this invocation made it, if it is
     # there. Its dumps go only once the driver's job is confirmed empty.
@@ -706,6 +709,78 @@ function Measure-Split([string]$RendererName) {
     } finally { Close-Case $case }
 }
 
+# The SGR button reports a mouse-reporting program in a pane received, from
+# `console-input-records.c`'s records: with VT input on, ConPTY hands it the
+# reports as the code units of key records. Presses end in `M`, releases in
+# `m`; button 0 is the left one.
+function Mouse-Reports([string]$Records) {
+    $text=''
+    try {
+        $fs=[IO.FileStream]::new($Records,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::ReadWrite)
+        try { $lines=@([IO.StreamReader]::new($fs).ReadToEnd() -split "`r?`n") } finally { $fs.Dispose() }
+        $units=foreach($line in $lines) { $f=$line -split ','; if($f.Count -ge 6 -and $f[0] -eq 'KEY' -and $f[1] -eq '1') { [char][int]$f[5] } }
+        $text=-join $units
+    } catch { }
+    return @{ Presses=[regex]::Matches($text,"\x1b\[<0;\d+;\d+M").Count; Releases=[regex]::Matches($text,"\x1b\[<0;\d+;\d+m").Count }
+}
+# A drag holds a tab's button, a key binding moves that tab to a new window,
+# and the held button comes up over a terminal left in the window: the
+# release is no press's, and the program there must not get it (council
+# round 6 Sol M1, CodeRabbit r4510086531; `App.takeHeldRelease`). The first
+# tab runs a mouse-reporting program, posted input reaches it through the
+# app's own pump, and a press and release before and after are the controls.
+function Measure-HeldRelease([string]$RendererName) {
+    $records=Join-Path $Run "held-release-$RendererName.csv"; $ready=Join-Path $Run "held-release-$RendererName.ready"; $stop=Join-Path $Run "held-release-$RendererName.stop"
+    # `direct:` takes the words as they are: no path here may hold a space.
+    if(($script:recordsExe + $records) -match ' ') { $script:skips.Add("${RendererName} held release: the run path holds a space"); return }
+    $case=Launch-Case "held-release-$RendererName" $RendererName @(('initial-command = direct:{0} {1} {2} {3} 298 vt-mouse' -f $script:recordsExe,$records,$ready,$stop))
+    try {
+        $h1=(Hosts $case)[0]
+        $p1=(Panes $h1)[0]
+        $up=Wait-Until { Test-Path -LiteralPath $ready } 10
+        Check "${RendererName} held release: the mouse-reporting program runs in the first tab" $up 'ready' $null
+        if(-not $up) { return }
+        Start-Sleep -Milliseconds 500
+        # Control: a press and release on its terminal are reported.
+        [Tt]::Mouse($p1,$WM_LBUTTONDOWN,30,30,1); [Tt]::Mouse($p1,$WM_LBUTTONUP,30,30,0)
+        $control=Wait-Until { (Mouse-Reports $records).Releases -ge 1 } 5
+        $before=Mouse-Reports $records
+        Check "${RendererName} held release: a press and release there are reported (the control)" ($control -and $before.Presses -ge 1 -and $before.Releases -ge 1) 'press and release' $before
+        # A second tab (cmd), its button pressed: a drag held.
+        $p2=New-Pane $case $p1
+        # The strip makes the new tab's button as it lays out: wait for it.
+        [void](Wait-Until { $script:heldButton=[Tt]::Child($h1,$TabButton+1); $script:heldButton -ne [IntPtr]::Zero } 5)
+        $button=$script:heldButton
+        Check "${RendererName} held release: the second tab has its button" ($button -ne [IntPtr]::Zero) 'a button' $null
+        if($button -eq [IntPtr]::Zero) { return }
+        [Tt]::Mouse($button,$WM_LBUTTONDOWN,20,10,1)
+        [Tt]::Mouse($button,$WM_MOUSEMOVE,26,12,1)
+        Start-Sleep -Milliseconds 200
+        # `move_tab_to_new_window` moves the dragged tab while it is held.
+        [Tt]::Key($p2,$VK_F7)
+        $moved=Wait-Until { $o=HostOf $case $p2; $o -ne [IntPtr]::Zero -and $o -ne $h1 } 10
+        [Tt]::Settled()
+        Start-Sleep -Milliseconds 300
+        Check "${RendererName} held release: the held tab moved to a new window" ($moved -and -not [Tt]::Alive($button)) 'moved, its button gone' $null
+        Check "${RendererName} held release: the terminal left in the window shows" ([Tt]::Visible($p1)) 'visible' $null
+        # The held button comes up over that terminal.
+        [Tt]::Mouse($p1,$WM_LBUTTONUP,30,30,0)
+        Start-Sleep -Milliseconds 800
+        $after=Mouse-Reports $records
+        Check "${RendererName} held release: the program gets no release no press of its made" ($after.Releases -eq $before.Releases -and $after.Presses -eq $before.Presses) @($before.Presses,$before.Releases) @($after.Presses,$after.Releases)
+        # A fresh press and release afterwards are reported again.
+        [Tt]::Mouse($p1,$WM_LBUTTONDOWN,30,30,1); [Tt]::Mouse($p1,$WM_LBUTTONUP,30,30,0)
+        $fresh=Wait-Until { (Mouse-Reports $records).Releases -gt $after.Releases } 5
+        $last=Mouse-Reports $records
+        Check "${RendererName} held release: a fresh press and release after are reported" ($fresh -and $last.Presses -gt $after.Presses) @(($after.Presses+1),($after.Releases+1)) @($last.Presses,$last.Releases)
+        Check-Backend $case $RendererName 'after the held release' @($p1,$p2)
+    } finally {
+        New-Item -ItemType File -Path $stop -Force | Out-Null
+        Start-Sleep -Milliseconds 300
+        Close-Case $case
+    }
+}
+
 # A pane whose search bar is open moves to a new window, the window it left
 # closes, and the search box still takes typing: its controls named the old
 # window and read it after it was freed (council round 1, 0xC0000005).
@@ -817,7 +892,8 @@ try {
     $samplerExe=Join-Path $Run 'modifier-sampler.exe'
     $compile=Join-Path $Run 'helpers.cmd'
     $lines=@('@echo off')
-    foreach($helper in @(@('console-attach-info',$script:attachExe),@('modifier-sampler',$samplerExe))) {
+    $script:recordsExe=Join-Path $Run 'console-input-records.exe'
+    foreach($helper in @(@('console-attach-info',$script:attachExe),@('modifier-sampler',$samplerExe),@('console-input-records',$script:recordsExe))) {
         $lines+=('call "{0}" cl /nologo /W4 /WX /O2 /DUNICODE /D_UNICODE "{1}" /Fe:"{2}" /Fo:"{3}" || exit /b 1' -f
             (Join-Path $root 'scripts\dev-windows.cmd'),(Join-Path $PSScriptRoot ($helper[0] + '.c')),$helper[1],(Join-Path $Run ($helper[0] + '.obj')))
     }
@@ -828,7 +904,7 @@ try {
         if([HiddenLocal]::WaitForSingleObject($cp.process,240000) -ne 0) { throw 'Helper compile timed out.' }
         [uint32]$code=1; [void][HiddenLocal]::GetExitCodeProcess($cp.process,[ref]$code)
     } finally { [void][HiddenLocal]::CloseHandle($cp.thread); [void][HiddenLocal]::CloseHandle($cp.process) }
-    if($code -ne 0 -or -not (Test-Path -LiteralPath $script:attachExe) -or -not (Test-Path -LiteralPath $samplerExe)) { throw 'Helper compile failed.' }
+    if($code -ne 0 -or -not (Test-Path -LiteralPath $script:attachExe) -or -not (Test-Path -LiteralPath $samplerExe) -or -not (Test-Path -LiteralPath $script:recordsExe)) { throw 'Helper compile failed.' }
     # The sampler runs on the user's desktop, the one whose keyboard
     # GetAsyncKeyState reads (it reads 0 from this one): no window, no
     # foreground, only whether a modifier is down.
@@ -838,10 +914,13 @@ try {
         $script:launches.Add($script:sampler.process); [void][HiddenLocal]::CloseHandle($script:sampler.thread)
     }
     $renderers=if($Renderer -eq 'both') { @('opengl','d3d11') } else { @($Renderer) }
-    foreach($name in $renderers) { Measure-Case $name }
-    foreach($name in $renderers) { Measure-CrossDpi $name 'down'; Measure-CrossDpi $name 'up' }
-    foreach($name in $renderers) { Measure-Search $name }
-    foreach($name in $renderers) { Measure-Split $name }
+    if($Cases -eq 'all') {
+        foreach($name in $renderers) { Measure-Case $name }
+        foreach($name in $renderers) { Measure-CrossDpi $name 'down'; Measure-CrossDpi $name 'up' }
+        foreach($name in $renderers) { Measure-Search $name }
+        foreach($name in $renderers) { Measure-Split $name }
+    }
+    foreach($name in $renderers) { Measure-HeldRelease $name }
 } catch {
     $script:checks.Add(@{Name='Harness execution'; Passed=$false; Error=$_.Exception.Message})
 } finally {
