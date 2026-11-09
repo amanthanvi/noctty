@@ -10959,6 +10959,7 @@ pub fn tabButtonProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) call
                     // is gone (its button may be too), so a close X press
                     // gets its own release.
                     v.tab_drag_cancelled = false;
+                    v.tab_close_press = null;
                     v.noteChromePointerInput();
                     // A click answers the question the tooltip was there to
                     // answer, and the strip is about to relayout under it.
@@ -10970,6 +10971,7 @@ pub fn tabButtonProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) call
                     const close_left = btn_rect.right - v.scaled(host_tab_close_zone_width);
                     if (tabButtonCloseHit(down_x, down_y, close_left, v.tabContentTopInset()) and tabCloseAction(v.tabs.items.len) != .none) {
                         // Click in close zone — capture for mouseup but don't start drag
+                        v.tab_close_press = hwnd;
                         _ = sys.SetCapture(hwnd);
                     } else {
                         // Start potential drag: record origin
@@ -10987,7 +10989,11 @@ pub fn tabButtonProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) call
                     return 0;
                 },
                 c.WM_LBUTTONUP => {
-                    // The release after Esc ended the drag (`cancelTabDrag`).
+                    // Whether this button took the press on its X.
+                    const pressed_close = v.tab_close_press == hwnd;
+                    v.tab_close_press = null;
+                    // The release after Esc ended the drag (`cancelTabDrag`),
+                    // or after the dragged tab left (`destroyTabButton`).
                     if (v.tab_drag_cancelled) {
                         v.tab_drag_cancelled = false;
                         _ = sys.ReleaseCapture();
@@ -11062,7 +11068,9 @@ pub fn tabButtonProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) call
                         .activate => {
                             _ = v.activateTabIndex(index);
                         },
-                        .close => _ = v.closeTabFromStrip(index),
+                        .close => if (pressed_close) {
+                            _ = v.closeTabFromStrip(index);
+                        },
                         .none => {},
                     }
                     return 0;

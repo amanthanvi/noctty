@@ -843,6 +843,11 @@ pub const Host = struct {
     /// the capture until it comes up, and that release does nothing, so it
     /// neither clicks a tab's X nor reaches a terminal as a stray release.
     tab_drag_cancelled: bool = false,
+    /// The tab button that took the press inside its close X: only its own
+    /// release there closes its tab, never a release whose press began
+    /// elsewhere (on a tab that left mid-drag, in another window, outside
+    /// noctty).
+    tab_close_press: ?HWND = null,
     /// What dropping the dragged tab would do now (`tab_drag.decide`).
     tab_drag_target: tab_drag.Target = .stay,
     /// In this window, while another window's tab is dragged over its strip:
@@ -3169,7 +3174,15 @@ pub const Host = struct {
         // before the window goes, so its own `WM_CAPTURECHANGED` cleanup
         // would never run, and the label, the insert bar and the drag state
         // (which takes the next Esc anywhere) would stay.
-        if (tab.button_hwnd) |button| if ((self.tab_drag_index != null or self.tab_drag_cancelled) and sys.GetCapture() == button) self.endTabDrag();
+        // Its press still holds the button down (a drag, a press on its X),
+        // and the release comes to whatever is under the pointer then:
+        // swallowed, so it closes no other tab's X (council round 5 M1).
+        // `endTabDrag` releases the capture, whose `WM_CAPTURECHANGED`
+        // clears the swallow, so it is set after.
+        if (tab.button_hwnd) |button| if (sys.GetCapture() == button) {
+            self.endTabDrag();
+            self.tab_drag_cancelled = true;
+        };
         detachChromeControlProvider(self.app, &tab.uia_provider);
         destroySubclassedWindow(&tab.button_hwnd, &tab.button_prev_proc);
     }
@@ -3980,8 +3993,12 @@ pub const Host = struct {
         self.setHoveredButton(null);
         // The dragged tab leaving (a key binding moved it mid-drag) ends the
         // drag, as a pane's teardown does (`windowDestroyed`).
-        // So does a drag Esc ended whose release has not come yet.
-        if ((self.tab_drag_index != null or self.tab_drag_cancelled) and self.tabs.items[index].id == self.tab_drag_tab_id) self.endTabDrag();
+        // So does a drag Esc ended whose release has not come yet. The
+        // button is still down: its release is swallowed, as above.
+        if ((self.tab_drag_index != null or self.tab_drag_cancelled) and self.tabs.items[index].id == self.tab_drag_tab_id) {
+            self.endTabDrag();
+            self.tab_drag_cancelled = true;
+        }
         var tab = self.tabs.orderedRemove(index);
         self.destroyTabButton(&tab);
         tab.button_placement = .{};

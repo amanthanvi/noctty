@@ -28,6 +28,11 @@ param(
     [switch] $Driver,
     [string] $DesktopName,
     [ValidateSet('both','opengl','d3d11')] [string] $Renderer = 'both',
+    # Starts modifier-sampler.c on the user's desktop (WinSta0\Default; no
+    # window), the one desktop whose keyboard GetAsyncKeyState reads, so a
+    # modifier held there fails the run as INTERFERED. Off by default:
+    # AGENTS.md has every process a driver starts on the private desktop.
+    [switch] $SampleRealKeyboard,
     [ValidateRange(1,1800)] [int] $DriverTimeoutSeconds = 400,
     [string] $ExpectedStartupHash,
     [string] $ExpectedStartupModified
@@ -219,7 +224,7 @@ if (-not $Driver) {
         Invoke-LocalHiddenDriver -Script $PSCommandPath -Bin $Bin -Run $Run -TimeoutSeconds $DriverTimeoutSeconds `
             -ExpectedStartupHash $ExpectedStartupHash -ExpectedStartupModified $ExpectedStartupModified `
             -DesktopPrefix 'noctty-tearoff-' -Label 'Hidden tab tear-off' -PassDesktopName -GuardClipboard `
-            -DriverArguments @("-Renderer $Renderer")
+            -DriverArguments @(@("-Renderer $Renderer") + $(if($SampleRealKeyboard) { @('-SampleRealKeyboard') } else { @() }))
     } finally {
         # The driver's job has stopped by now, every console helper with it:
         # a dump a helper that would not exit left (its marker text) goes.
@@ -737,8 +742,10 @@ try {
     # GetAsyncKeyState reads (it reads 0 from this one): no window, no
     # foreground, only whether a modifier is down.
     $samplerOut=Join-Path $Run 'modifier-samples.txt'; $samplerStop=Join-Path $Run 'modifier-sampler.stop'
-    $script:sampler=[Tt]::SpawnLogged($samplerExe,('"{0}" "{1}" "{2}"' -f $samplerExe,$samplerOut,$samplerStop),$Run,'WinSta0\Default',(Join-Path $Run 'modifier-sampler.log'))
-    $script:launches.Add($script:sampler.process); [void][HiddenLocal]::CloseHandle($script:sampler.thread)
+    if($SampleRealKeyboard) {
+        $script:sampler=[Tt]::SpawnLogged($samplerExe,('"{0}" "{1}" "{2}"' -f $samplerExe,$samplerOut,$samplerStop),$Run,'WinSta0\Default',(Join-Path $Run 'modifier-sampler.log'))
+        $script:launches.Add($script:sampler.process); [void][HiddenLocal]::CloseHandle($script:sampler.thread)
+    }
     $renderers=if($Renderer -eq 'both') { @('opengl','d3d11') } else { @($Renderer) }
     foreach($name in $renderers) { Measure-Case $name }
     foreach($name in $renderers) { Measure-CrossDpi $name 'down'; Measure-CrossDpi $name 'up' }
@@ -775,6 +782,8 @@ try {
         } else {
             $script:unverified.Add("real keyboard: no modifier seen down during $($keyboard.Windows) posted keys and drags ($($keyboard.Samples) samples on the input desktop), with no positive control")
         }
+    } elseif(-not $SampleRealKeyboard) {
+        $script:unverified.Add('real keyboard: not sampled (sampler off; -SampleRealKeyboard runs it on the user''s desktop)')
     } else {
         $script:unverified.Add('real keyboard: not sampled (the run stopped before the sampler started)')
     }

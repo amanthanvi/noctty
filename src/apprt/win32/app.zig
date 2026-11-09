@@ -8165,6 +8165,10 @@ pub const App = struct {
         log.warn("tab move left undo history it could not dispose; it will not replay", .{});
     }
 
+    /// Before the move, for the `InvalidTransfer` retry only: a failure here
+    /// aborts the move, so each window's history is still its own and the
+    /// destination's is left whole, not cleared for a move that does not
+    /// happen. After a commit, `retireMoveHistory` clears both.
     fn clearMoveHistory(source: *Host, dest: TabMoveDest) !void {
         if (!source.tryClearStructuralHistory(.normal)) return error.HistoryDisposalDeferred;
         switch (dest) {
@@ -16444,7 +16448,8 @@ test "win32 a close X click works after Esc ended a drag whose tab a key binding
             const esc: MSG = .{ .hwnd = button, .message = c.WM_KEYDOWN, .wParam = c.VK_ESCAPE, .lParam = 1, .time = 0, .pt = .{ .x = 0, .y = 0 }, .lPrivate = 0 };
             try std.testing.expect(app.cancelTabDragForKey(&esc));
             try std.testing.expect(try app.moveTabToWindow(host, host.findTabIndexById(dragged).?, .{ .new_window = null }));
-            try std.testing.expect(!host.tab_drag_cancelled);
+            // The held button's release is still coming, and is swallowed.
+            try std.testing.expect(host.tab_drag_cancelled);
             try std.testing.expectEqual(@as(usize, 2), host.tabs.items.len);
             // The next click on a close X in that window closes its tab.
             const closing = host.tabs.items[0].button_hwnd orelse return error.TestNoTabButton;
@@ -16555,6 +16560,95 @@ test "win32 undo history a tab move could not dispose never replays, in the wind
             try std.testing.expectEqual(@as(usize, 1), source.tabs.items.len);
             try std.testing.expect(!source.hasStructuralHistory());
             try app.validateShellNativeMapping();
+        }
+    }.body);
+}
+
+/// The held button's release, landing on tab `index`'s close X with no press
+/// there: what a release after the dragged tab left does.
+fn testReleaseOnCloseX(host: *Host, index: usize) !void {
+    const button = host.tabs.items[index].button_hwnd orelse return error.TestNoTabButton;
+    var rect: RECT = undefined;
+    _ = sys.GetClientRect(button, &rect);
+    testPostTabMouse(button, c.WM_LBUTTONUP, rect.right - 4, @divTrunc(rect.bottom, 2));
+}
+
+test "win32 the held button's release closes nothing when the dragged tab left mid-drag (council round 5 M1)" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const Case = enum { esc_then_key_move, key_move, closed };
+    for ([_]Case{ .esc_then_key_move, .key_move, .closed }) |case| try runOnHiddenDesktopWith(case);
+}
+
+fn runOnHiddenDesktopWith(case: anytype) !void {
+    const Body = struct {
+        var which: @TypeOf(case) = undefined;
+        fn body() !void {
+            var fixture: win32.WindowStartTestApp = .{};
+            try fixture.init();
+            defer fixture.deinit();
+            const app = &fixture.app;
+            app.shell_runtime_initialized = true;
+            const setup: TabMoveFixture = .{ .fixture = &fixture };
+            const host = try setup.window(3, false);
+            try host.layout();
+            const dragged = host.tabs.items[0].id;
+            const button = host.tabs.items[0].button_hwnd orelse return error.TestNoTabButton;
+            const over_second = try testTabMiddleIn(host, 1, button);
+            testPostTabMouse(button, c.WM_LBUTTONDOWN, 20, 10);
+            testPostTabMouse(button, c.WM_MOUSEMOVE, over_second.x, over_second.y);
+            // The tab leaves while the button is still down.
+            switch (which) {
+                .esc_then_key_move => {
+                    const esc: MSG = .{ .hwnd = button, .message = c.WM_KEYDOWN, .wParam = c.VK_ESCAPE, .lParam = 1, .time = 0, .pt = .{ .x = 0, .y = 0 }, .lPrivate = 0 };
+                    try std.testing.expect(app.cancelTabDragForKey(&esc));
+                    try std.testing.expect(try app.moveTabToWindow(host, host.findTabIndexById(dragged).?, .{ .new_window = null }));
+                },
+                .key_move => try std.testing.expect(try app.moveTabToWindow(host, host.findTabIndexById(dragged).?, .{ .new_window = null })),
+                .closed => {
+                    const at = host.findTabIndexById(dragged).?;
+                    fixture.core_app.deleteSurface(host.tabs.items[at].focusedSurface().?);
+                    try std.testing.expect(host.closeTabInPlace(at));
+                },
+            }
+            try std.testing.expectEqual(@as(usize, 2), host.tabs.items.len);
+            // Its release, over another tab's X, closes nothing.
+            try testReleaseOnCloseX(host, 0);
+            try std.testing.expectEqual(@as(usize, 2), host.tabs.items.len);
+            try app.validateShellNativeMapping();
+        }
+    };
+    Body.which = case;
+    try runOnHiddenDesktop(Body.body);
+}
+
+test "win32 a close X release closes its tab only after a press on that X (council round 5 M1)" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    try runOnHiddenDesktop(struct {
+        fn body() !void {
+            var fixture: win32.WindowStartTestApp = .{};
+            try fixture.init();
+            defer fixture.deinit();
+            const app = &fixture.app;
+            app.shell_runtime_initialized = true;
+            const setup: TabMoveFixture = .{ .fixture = &fixture };
+            const host = try setup.window(3, false);
+            try host.layout();
+            // A release whose press began elsewhere (another window, outside
+            // noctty): nothing.
+            try testReleaseOnCloseX(host, 0);
+            try std.testing.expectEqual(@as(usize, 3), host.tabs.items.len);
+            // A press on one tab's X and its release on another's: nothing.
+            const first = host.tabs.items[0].button_hwnd orelse return error.TestNoTabButton;
+            var rect: RECT = undefined;
+            _ = sys.GetClientRect(first, &rect);
+            testPostTabMouse(first, c.WM_LBUTTONDOWN, rect.right - 4, @divTrunc(rect.bottom, 2));
+            try testReleaseOnCloseX(host, 1);
+            try std.testing.expectEqual(@as(usize, 3), host.tabs.items.len);
+            // A press and its release on the same X closes that tab.
+            fixture.core_app.deleteSurface(host.tabs.items[0].focusedSurface().?);
+            testPostTabMouse(first, c.WM_LBUTTONDOWN, rect.right - 4, @divTrunc(rect.bottom, 2));
+            testPostTabMouse(first, c.WM_LBUTTONUP, rect.right - 4, @divTrunc(rect.bottom, 2));
+            try std.testing.expectEqual(@as(usize, 2), host.tabs.items.len);
         }
     }.body);
 }
