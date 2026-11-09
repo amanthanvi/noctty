@@ -816,6 +816,9 @@ pub const App = struct {
     /// A last-window quit came while held; `releaseLastWindowQuit` decides
     /// it again.
     last_window_quit_pending: bool = false,
+    /// Under test, the WM_QUIT posts of the last-window paths
+    /// (`postLastWindowQuit`), counted instead of posted to the test thread.
+    test_last_window_quits: u32 = 0,
     terminal_handoff_idle_timer_id: ?UINT_PTR = null,
     terminal_handoff_server: ?*win32_terminal_handoff.Server = null,
     undo_prune_timer_id: ?UINT_PTR = null,
@@ -2906,7 +2909,41 @@ pub const App = struct {
         self.last_window_quit_holds -= 1;
         if (self.last_window_quit_holds > 0 or !self.last_window_quit_pending) return;
         self.last_window_quit_pending = false;
-        self.startQuitTimer();
+        // Decided as when the last window went: a window the chain opened
+        // keeps the process, and in embedding mode the handoff server's
+        // idleness is asked again.
+        self.afterLastWindow();
+    }
+
+    /// What the app does once its last terminal window is gone (a window's
+    /// teardown, `windowDestroyed`, or the end of a held chain): in
+    /// embedding mode it exits only if the terminal handoff server is idle,
+    /// else it quits as `quit-after-last-window-closed` says. Held while an
+    /// app-wide chain runs (`holdLastWindowQuit`).
+    pub fn afterLastWindow(self: *App) void {
+        if (self.registry.windows.items.len != 0 or !self.running) return;
+        if (self.last_window_quit_holds > 0) {
+            self.last_window_quit_pending = true;
+            return;
+        }
+        if (self.embedding_mode) {
+            if (self.exitEmbeddingServerIfIdle()) {
+                self.running = false;
+                self.postLastWindowQuit();
+            } else {
+                self.startTerminalHandoffIdleTimer();
+            }
+        } else {
+            self.startQuitTimer();
+        }
+    }
+
+    fn postLastWindowQuit(self: *App) void {
+        if (builtin.is_test) {
+            self.test_last_window_quits += 1;
+            return;
+        }
+        sys.PostQuitMessage(0);
     }
 
     fn registeredGlobalHotkeyForSpec(self: *const App, spec: GlobalHotkeySpec) ?RegisteredGlobalHotkey {
@@ -3737,7 +3774,7 @@ pub const App = struct {
         const delay = self.config.@"quit-after-last-window-closed-delay" orelse {
             self.stopQuitTimer();
             self.running = false;
-            sys.PostQuitMessage(0);
+            self.postLastWindowQuit();
             return;
         };
 
@@ -7436,18 +7473,7 @@ pub const App = struct {
             }
         }
 
-        if (self.registry.windows.items.len == 0 and self.running) {
-            if (self.embedding_mode) {
-                if (self.exitEmbeddingServerIfIdle()) {
-                    self.running = false;
-                    sys.PostQuitMessage(0);
-                } else {
-                    self.startTerminalHandoffIdleTimer();
-                }
-            } else {
-                self.startQuitTimer();
-            }
-        }
+        self.afterLastWindow();
     }
 
     fn gotoWindow(self: *App, target: apprt.Target, direction: apprt.action.GotoWindow) !bool {

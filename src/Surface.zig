@@ -8305,6 +8305,23 @@ fn closesCaller(action: input.Binding.Action) bool {
     };
 }
 
+/// Returns true if performing the given action on a surface can take that
+/// surface out of every live tab without closing it: `undo` and `redo`
+/// replay structural history, so an undo of the split that made this pane
+/// (or a redo of its tab's close) detaches it, hidden, for the other
+/// direction. A detached pane is freed by whatever disposes that history
+/// next, and a later action in the same chain can (`reset`, `new_split`,
+/// anything that clears redo), so the chain must not run on it
+/// (`performChain`). Nothing else detaches the pane a key ran on: tab moves
+/// only reorder, the quick terminal toggle hides its window with the pane
+/// still in its tab, and `close_tab:this` is a `closesCaller` action.
+fn mayDetachCaller(action: input.Binding.Action) bool {
+    return switch (action) {
+        .undo, .redo => true,
+        else => false,
+    };
+}
+
 /// What running a key binding's actions on one surface came to.
 const ChainRun = struct {
     /// An action that can close the surface ran and the surface is gone:
@@ -8334,7 +8351,10 @@ const ChainRun = struct {
 /// `target.closeToken()` taken before the action asks the app's list of
 /// surfaces afterwards, without reading the surface: gone is `closed`, and
 /// neither `target` nor `actions` is read again; still there leaves the
-/// result to what performed, with that action counted as reached.
+/// result to what performed, with that action counted as reached. The
+/// same check follows an action that can detach the surface
+/// (`mayDetachCaller`): if it is gone, or still there but in no live tab
+/// (`attached`), the chain ends there too.
 fn performChain(
     target: anytype,
     actions: []const input.Binding.Action,
@@ -8342,9 +8362,10 @@ fn performChain(
     var performed: bool = false;
     for (actions, 0..) |action, i| {
         const closing = closesCaller(action);
-        // Taken before the close, so the surface's fate can be read without
-        // reading the surface.
-        const token = if (closing) target.closeToken() else null;
+        const detaching = mayDetachCaller(action);
+        // Taken before the action, so the surface's fate can be read
+        // without reading the surface.
+        const token = if (closing or detaching) target.closeToken() else null;
         const v = target.performBindingAction(action) catch |err| v: {
             log.info(
                 "key binding action failed action={t} err={}",
@@ -8352,9 +8373,13 @@ fn performChain(
             );
             break :v false;
         };
-        if (closing) {
+        if (closing or detaching) {
             if (!token.?.survived()) return .{ .closed = true, .reached = i + 1 };
-            return .{ .performed = performed or v, .reached = i + 1 };
+            // Still there, but out of every live tab: nothing more may run
+            // on it, since the next action could free it.
+            if (closing or !token.?.attached()) {
+                return .{ .performed = performed or v, .reached = i + 1 };
+            }
         }
         performed = performed or v;
     }
@@ -8584,6 +8609,16 @@ const CloseToken = struct {
     fn survived(self: CloseToken) bool {
         return self.app.hasSurfaceInstance(self.rt_surface, self.id);
     }
+
+    /// Still there and in a live tab: not detached for undo or redo. On a
+    /// runtime with no such tabs, still there is enough.
+    fn attached(self: CloseToken) bool {
+        if (!self.survived()) return false;
+        if (comptime @hasDecl(apprt.Surface, "receivesAppWideActions")) {
+            return self.rt_surface.receivesAppWideActions();
+        }
+        return true;
+    }
 };
 
 fn closeToken(self: *Surface) CloseToken {
@@ -8619,6 +8654,11 @@ const TestChainTarget = struct {
         .{ .close_tab = .this },
     },
     closes: bool = true,
+    /// The actions that take this surface out of its tab when they perform
+    /// here (an undo of the split that made it), listed rather than taken
+    /// from `mayDetachCaller`.
+    detaches: []const input.Binding.Action = &.{},
+    detached: bool = false,
     /// A close that performs but leaves the surface (a confirmation that
     /// was cancelled).
     keeps: bool = false,
@@ -8661,6 +8701,14 @@ const TestChainTarget = struct {
             return true;
         }
         if (action == .reload_config) @memset(self.storage, poison);
+        for (self.detaches) |detaches| {
+            if (std.meta.eql(detaches, action)) self.detached = true;
+        }
+        // Clearing redo history disposes a detached pane: a `reset` frees it.
+        if (self.detached and action == .reset) {
+            @memset(self.storage, poison);
+            self.freed = true;
+        }
         return true;
     }
 
@@ -8676,15 +8724,19 @@ const TestChainTarget = struct {
     }
 
     const Token = struct {
-        freed: *const bool,
+        target: *const TestChainTarget,
 
         fn survived(self: Token) bool {
-            return !self.freed.*;
+            return !self.target.freed;
+        }
+
+        fn attached(self: Token) bool {
+            return self.survived() and !self.target.detached;
         }
     };
 
     fn closeToken(self: *TestChainTarget) Token {
-        return .{ .freed = &self.freed };
+        return .{ .target = self };
     }
 
     /// As `App.performAllChainedAction`: every action, across the app (so
@@ -8969,6 +9021,11 @@ test "closesCaller names every action that can close the surface it runs on" {
         // Every action that can close its surface is a closing action.
         if (case.closes) try testing.expect(closingAction(case.action));
     }
+    try testing.expect(mayDetachCaller(.undo));
+    try testing.expect(mayDetachCaller(.redo));
+    try testing.expect(!mayDetachCaller(.{ .move_tab = 1 }));
+    try testing.expect(!mayDetachCaller(.toggle_quick_terminal));
+    try testing.expect(!mayDetachCaller(.reset));
     // And every closing action is in the table.
     for (std.enums.values(std.meta.Tag(input.Binding.Action))) |tag| {
         const closing = switch (tag) {
@@ -8999,6 +9056,34 @@ test "a binding whose actions cannot be copied leaves the key state and the one-
     // No `deactivate_key_table`, no key state reset, nothing performed.
     try testing.expectEqual(@as(usize, 0), target.seen_len);
     try testing.expect(!target.began);
+}
+
+test "a binding chain ends where an undo detaches its surface" {
+    const testing = std.testing;
+    // `undo>reset>scroll_to_top` on the pane a split made: the undo
+    // detaches it for redo, and the `reset` would clear redo and free it.
+    for ([_]input.Binding.Action{ .undo, .redo }) |replay| {
+        var target: TestChainTarget = .{ .detaches = &.{replay} };
+        const result = try testDispatch(&target, &.{ replay, .reset, .scroll_to_top }, .{});
+        try testing.expectEqual(@as(usize, 0), target.calls_after_free);
+        try testing.expect(!target.freed);
+        try testing.expect(!result.closed);
+        try testing.expectEqual(BindingOutcome.consumed, result.outcome);
+        try testing.expectEqualSlices(
+            TestChainTarget.Tag,
+            &.{std.meta.activeTag(replay)},
+            target.seenTags(),
+        );
+    }
+
+    // An undo that leaves this pane in its tab: the chain goes on.
+    var target: TestChainTarget = .{};
+    _ = try testDispatch(&target, &.{ .undo, .reset, .scroll_to_top }, .{});
+    try testing.expectEqualSlices(
+        TestChainTarget.Tag,
+        &.{ .undo, .reset, .scroll_to_top },
+        target.seenTags(),
+    );
 }
 
 test "a binding chain whose close leaves the surface keeps the key's release" {

@@ -18054,9 +18054,7 @@ test "win32 a pane detached for undo does not receive app-wide actions" {
     try std.testing.expect(surface_b.receivesAppWideActions());
 }
 
-test "win32 a last-window quit waits for the app-wide chain that closed the window" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
+fn testLastWindowQuitAtChainEnd(embedding: bool, reopens: bool) !void {
     var core_app: CoreApp = undefined;
     var app: App = undefined;
     var host: Host = undefined;
@@ -18070,27 +18068,57 @@ test "win32 a last-window quit waits for the app-wide chain that closed the wind
         .tabs = &.{.{ .host = &host, .surface = &surface, .id = 1 }},
     });
     defer session.deinit();
-    // No window is registered, so this is the last one gone; with no delay
-    // a quit posts WM_QUIT at once.
+    // No window is registered, so this is the last one gone; with no
+    // delay a quit is posted at once. Embedding mode with no handoff
+    // server is an idle server.
     try std.testing.expect(!app.hasLiveUiWindows());
     app.config.@"quit-after-last-window-closed" = true;
     app.config.@"quit-after-last-window-closed-delay" = null;
+    app.embedding_mode = embedding;
     app.running = true;
     defer app.running = false;
 
     app.holdLastWindowQuit();
-    app.startQuitTimer(); // the last window closed part way through
+    app.afterLastWindow(); // `close_window` took the last window
     try std.testing.expect(app.running);
+    try std.testing.expectEqual(@as(u32, 0), app.test_last_window_quits);
     try std.testing.expect(app.last_window_quit_pending);
 
-    // The chain opened a window again (`new_window`): no quit at its end.
-    // (Standing in for one: the quit is not wanted, so none is posted to
-    // the test thread either way.)
-    app.config.@"quit-after-last-window-closed" = false;
+    // `new_window` later in the chain: a window is registered again.
+    if (reopens) try app.registry.windows.append(app.core_app.alloc, &surface);
+    defer if (reopens) {
+        _ = app.registry.windows.pop();
+    };
     app.releaseLastWindowQuit();
-    try std.testing.expect(app.running);
     try std.testing.expect(!app.last_window_quit_pending);
     try std.testing.expectEqual(@as(u32, 0), app.last_window_quit_holds);
+    if (reopens) {
+        try std.testing.expect(app.running);
+        try std.testing.expectEqual(@as(u32, 0), app.test_last_window_quits);
+    } else {
+        try std.testing.expect(!app.running);
+        try std.testing.expectEqual(@as(u32, 1), app.test_last_window_quits);
+    }
+}
+
+test "win32 a held last-window quit keeps a process whose chain reopened a window" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    try testLastWindowQuitAtChainEnd(false, true);
+}
+
+test "win32 a held last-window quit quits a process whose chain left no window" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    try testLastWindowQuitAtChainEnd(false, false);
+}
+
+test "win32 a held embedding-mode exit keeps a server whose chain reopened a window" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    try testLastWindowQuitAtChainEnd(true, true);
+}
+
+test "win32 a held embedding-mode exit asks an idle server again and exits" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    try testLastWindowQuitAtChainEnd(true, false);
 }
 
 test "win32 close_tab structural undo detaches the last remaining tab" {
