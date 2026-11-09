@@ -1652,6 +1652,30 @@ pub const Action = union(enum) {
         return copy;
     }
 
+    test "cloneSlice copies the bytes an action carries" {
+        const testing = std.testing;
+        var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+        defer arena.deinit();
+
+        // Binding storage whose bytes a reload frees: overwritten below.
+        var text = "hello".*;
+        var normal = "[A".*;
+        var application = "OA".*;
+        const source = [_]Action{
+            .{ .text = &text },
+            .{ .cursor_key = .{ .normal = &normal, .application = &application } },
+        };
+        const leaf: Set.GenericLeaf = .{ .flags = .{}, .actions = .{ .many = &source } };
+        const copy = try leaf.cloneActions(arena.allocator());
+        @memset(&text, 'x');
+        @memset(&normal, 'x');
+        @memset(&application, 'x');
+
+        try testing.expectEqualStrings("hello", copy[0].text);
+        try testing.expectEqualStrings("[A", copy[1].cursor_key.normal);
+        try testing.expectEqualStrings("OA", copy[1].cursor_key.application);
+    }
+
     fn cloneValue(
         alloc: Allocator,
         value: anytype,
