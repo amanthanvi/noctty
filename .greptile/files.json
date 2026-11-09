@@ -351,9 +351,11 @@
         "build.zig.zon",
         "src/build/**",
         "src/update/**",
+        "src/ghostty_vt_stub/**",
         "pkg/wuffs/**",
         "scripts/**",
         "dist/**",
+        "test/windows/test_dll_init.c",
         ".github/**"
       ]
     },

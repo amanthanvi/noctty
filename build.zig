@@ -184,6 +184,11 @@ pub fn build(b: *std.Build) !void {
             const TerminalHandoffProxy = @import("src/build/TerminalHandoffProxy.zig");
             const handoff_proxy = try TerminalHandoffProxy.init(b, &config);
             handoff_proxy.install();
+            // The portable ZIP's ghostty-vt.dll placeholder, in its own
+            // directory under zig-out\bin (src/build/GhosttyVtStub.zig).
+            const GhosttyVtStub = @import("src/build/GhosttyVtStub.zig");
+            const vt_stub = try GhosttyVtStub.init(b, &config);
+            vt_stub.install();
             if (config.bundled_conpty) {
                 const ConptyRedist = @import("src/build/ConptyRedist.zig");
                 ConptyRedist.install(b, config.target);

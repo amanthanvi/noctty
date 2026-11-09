@@ -166,6 +166,117 @@ Assert-WorkflowContract `
     -Path $releaseCommonScript `
     -Pattern "(?ms)function Get-WindowsSignedRuntimePayloads.*?noctty/noctty\.com.*?noctty/noctty\.exe.*?noctty/ghostty-vt\.dll.*?noctty/noctty-terminal-handoff-proxy\.dll" `
     -Description 'the shared signed-runtime payload list covers every PE noctty ships and signs'
+# noctty/ghostty-vt.dll in that list is the placeholder, not libghostty-vt
+# (src/build/GhosttyVtStub.zig). It is signed in the same staging loop as the
+# other runtime PEs, then checked to be the placeholder; the old portable
+# updaters require a pinned-publisher signature on every payload DLL.
+# Read through PowerShell's parser, not as text: a line comment, a block
+# comment or a here-string around a required call leaves no command there, so
+# it fails the contract as a deleted call does, and so does a signing filter
+# without ".dll"; the controls below prove each. (Deliberately dead code, such
+# as `if ($false)`, is for review to catch.)
+function Get-PlaceholderStagingProblems {
+    param([Parameter(Mandatory)] [string] $ScriptText)
+
+    $tokens = $null
+    $parseErrors = $null
+    $ast = [System.Management.Automation.Language.Parser]::ParseInput($ScriptText, [ref]$tokens, [ref]$parseErrors)
+    $problems = [System.Collections.Generic.List[string]]::new()
+    if (@($parseErrors).Count -gt 0) {
+        $problems.Add("the packager does not parse: $($parseErrors[0].Message)")
+        return , $problems
+    }
+    $isCommand = { param($node) $node -is [System.Management.Automation.Language.CommandAst] }
+
+    $listsStub = @($ast.FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and $node.Left.Extent.Text -eq '$runtimeFiles'
+    }, $true) | Where-Object {
+        @($_.Right.FindAll({
+            param($node)
+            $node -is [System.Management.Automation.Language.StringConstantExpressionAst] -and $node.Value -eq 'ghostty-vt-stub\ghostty-vt.dll'
+        }, $true)).Count -gt 0
+    })
+    if ($listsStub.Count -eq 0) { $problems.Add('$runtimeFiles does not list ghostty-vt-stub\ghostty-vt.dll') }
+
+    $stagingLoop = @($ast.FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.ForEachStatementAst] -and $node.Variable.VariablePath.UserPath -eq 'runtimeFile'
+    }, $true) | Where-Object {
+        $loopCommands = @($_.Body.FindAll($isCommand, $true))
+        @($loopCommands | Where-Object { $_.GetCommandName() -eq 'Invoke-SignFile' -and $_.Extent.Text -match '-PathToSign \$destinationPath' }).Count -gt 0 -and
+        @($loopCommands | Where-Object { $_.GetCommandName() -eq 'Assert-ValidSignature' -and $_.Extent.Text -match '-PathToCheck \$destinationPath' }).Count -gt 0
+    }) | Select-Object -First 1
+    if ($null -eq $stagingLoop) {
+        $problems.Add('no runtime staging loop signs (Invoke-SignFile) and verifies (Assert-ValidSignature) each staged file')
+        return , $problems
+    }
+    # The loop signs by extension; an `if` around the signing call must
+    # still take a .dll, or the placeholder ships unsigned.
+    $signCall = @($stagingLoop.Body.FindAll($isCommand, $true) | Where-Object { $_.GetCommandName() -eq 'Invoke-SignFile' }) | Select-Object -First 1
+    for ($node = $signCall.Parent; $null -ne $node -and $node -ne $stagingLoop; $node = $node.Parent) {
+        if ($node -isnot [System.Management.Automation.Language.IfStatementAst]) { continue }
+        foreach ($clause in $node.Clauses) {
+            if ($signCall.Extent.StartOffset -lt $clause.Item2.Extent.StartOffset -or $signCall.Extent.EndOffset -gt $clause.Item2.Extent.EndOffset) { continue }
+            $takesDll = @($clause.Item1.FindAll({
+                param($n)
+                $n -is [System.Management.Automation.Language.StringConstantExpressionAst] -and $n.Value -eq '.dll'
+            }, $true)).Count -gt 0
+            if (-not $takesDll) { $problems.Add('the staging loop signs only behind a condition that does not take ".dll"') }
+        }
+    }
+
+    $commands = @($ast.FindAll($isCommand, $true))
+    $zipPhase = $commands | Where-Object { $_.GetCommandName() -eq 'Write-Host' -and $_.Extent.Text -match 'Packaging phase: create portable zip' } | Select-Object -First 1
+    if ($null -eq $zipPhase) {
+        $problems.Add('the portable zip phase is missing')
+        return , $problems
+    }
+    $stubCheck = $commands | Where-Object {
+        $_.GetCommandName() -eq 'Assert-GhosttyVtStub' -and
+        $_.Extent.Text -match 'Join-Path \$portableRoot "ghostty-vt\.dll"' -and
+        $_.Extent.StartOffset -gt $stagingLoop.Extent.EndOffset -and
+        $_.Extent.StartOffset -lt $zipPhase.Extent.StartOffset
+    } | Select-Object -First 1
+    if ($null -eq $stubCheck) { $problems.Add('the staged ghostty-vt.dll is not checked to be the placeholder (Assert-GhosttyVtStub) before the portable zip is made') }
+    return , $problems
+}
+
+$windowsPackagerText = Get-Content -LiteralPath $windowsPackager -Raw
+$stagingProblems = Get-PlaceholderStagingProblems -ScriptText $windowsPackagerText
+if ($stagingProblems.Count -gt 0) {
+    throw "Workflow contract missing: the ghostty-vt.dll placeholder is staged, signed and verified with the other runtime PEs, and checked to be the placeholder before the portable zip is made: $($stagingProblems -join '; ') ($windowsPackager)"
+}
+$runtimeLoopStart = $windowsPackagerText.IndexOf('foreach ($runtimeFile in $runtimeFiles) {')
+if ($runtimeLoopStart -lt 0) { throw "Contract control: the runtime staging loop is missing ($windowsPackager)" }
+foreach ($requiredCall in @(
+    '"ghostty-vt-stub\ghostty-vt.dll",',
+    'Invoke-SignFile -SigningConfig $signingConfig -PathToSign $destinationPath',
+    'Assert-ValidSignature -PathToCheck $destinationPath',
+    'Assert-GhosttyVtStub -Path (Join-Path $portableRoot "ghostty-vt.dll")'
+)) {
+    $searchFrom = if ($requiredCall.StartsWith('"')) { 0 } else { $runtimeLoopStart }
+    $callIndex = $windowsPackagerText.IndexOf($requiredCall, $searchFrom)
+    if ($callIndex -lt 0) { throw "Contract control: '$requiredCall' is missing from $windowsPackager" }
+    $before = $windowsPackagerText.Substring(0, $callIndex)
+    $after = $windowsPackagerText.Substring($callIndex + $requiredCall.Length)
+    foreach ($disabled in @(
+        @{ How = 'line-commented'; Text = $before + '# ' + $requiredCall + $after },
+        @{ How = 'block-commented'; Text = $before + '<# ' + $requiredCall + ' #>' + $after },
+        @{ How = 'block-commented over lines'; Text = $before + "<#`n" + $requiredCall + "`n#>" + $after },
+        @{ How = 'inside a here-string'; Text = $before + "@'`n" + $requiredCall + "`n'@" + $after },
+        @{ How = 'deleted'; Text = $before + $after }
+    )) {
+        if ((Get-PlaceholderStagingProblems -ScriptText $disabled.Text).Count -eq 0) {
+            throw "Contract control failed: the placeholder staging contract still passes with '$requiredCall' $($disabled.How)"
+        }
+    }
+}
+$signFilter = '@(".com", ".exe", ".dll") -contains'
+if ($windowsPackagerText.IndexOf($signFilter, $runtimeLoopStart) -lt 0) { throw "Contract control: the staging loop's signing filter '$signFilter' is missing from $windowsPackager" }
+if ((Get-PlaceholderStagingProblems -ScriptText $windowsPackagerText.Replace($signFilter, '@(".com", ".exe") -contains')).Count -eq 0) {
+    throw 'Contract control failed: the placeholder staging contract still passes with ".dll" dropped from the signing filter'
+}
 foreach ($payloadConsumer in @(
     $releaseArtifactVerifier,
     $publishedReleaseVerifierScript,

@@ -1465,8 +1465,11 @@ click on a portable copy's entry in Action Center goes to the installed
 copy's activator, which hands it to the portable copy when that is the
 running single-instance noctty. Uninstalling removes the activator and its
 `CustomActivator` value. None of this has been exercised against Windows'
-notification platform yet; the release checklist (W10-23) carries the
-checks.
+notification platform yet. Row W10-23 of the
+[Windows 10 manual checklist](windows10-release-checklist.md) checks most of
+these paths. It does not cover a toast shown by a second instance, or a copy
+running as administrator, in safe mode or as the default terminal's console
+host.
 
 A pane keeps at most one toast in Action Center: a newer toast from the same
 pane that Windows takes replaces its older one (one Windows refuses, or one

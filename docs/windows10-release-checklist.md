@@ -1,9 +1,11 @@
-# Windows 10 pre-release checklist
+# Windows 10 manual checklist
 
-A manual pass on Windows 10 22H2 before each release. Windows 10 1809 (build 17763) and newer is a supported floor (see [status.md](status.md#supported-platform)),
-but no per-PR job or interactive harness runs on a Windows 10 desktop, and every
+An optional manual pass on Windows 10 22H2. Windows 10 1809 (build 17763) and
+newer is a supported floor (see [status.md](status.md#supported-platform)), but
+no per-PR job or interactive harness runs on a Windows 10 desktop, and every
 chrome, input and startup change is measured on Windows 11 only. This list is how
-a release gets Windows 10 evidence. It is a release step, not a PR gate.
+a change gets Windows 10 desktop evidence when it needs some. It is not a release
+step or a PR gate: a release does not require it.
 
 The scheduled [Windows 10 branches](../.github/workflows/windows10-branches.yml)
 workflow covers the part a hosted runner can reach; [what the workflow covers](#what-the-workflow-covers)
@@ -12,21 +14,18 @@ desktop.
 
 ## When to run it
 
-- Before every release, with the release candidate's artifacts (see the
-  [release runbook](../PACKAGING.md#release-runbook)).
-- Produce the candidate from the exact intended source SHA with the
-  [local packaging procedure](../PACKAGING.md#local-packaging), passing
-  `-RequireConPty` and with Inno Setup available for the installed rows. Local
-  builds are unsigned unless signing is configured; record that limit.
-  **Release Readiness** produces no candidate artifacts. Record the candidate's
-  source SHA and hashes. Stable publication rebuilds assets, so the pass binds
-  to the source SHA; record shipped hashes separately. A later source change
-  needs a new candidate and the affected rows repeated before publication.
-- A release whose diff since the last Windows 10 pass touches none of the files in
-  the [gate inventory](#gate-inventory) and no chrome, input or startup code may
-  run only the rows marked **Core**. Say in the release notes which pass was run.
-- Record the outcome in the [results table](#results). A failed row blocks the
-  release unless the release notes list it as a known Windows 10 limit.
+- When a change needs Windows 10 evidence: a fix for a Windows 10 report, or a
+  change to a gate in the [gate inventory](#gate-inventory). Run the rows the
+  change touches; the rows marked **Core** make a short smoke pass.
+- Test a build that contains the change: a local build of the source SHA you
+  are testing, made with the [local packaging procedure](../PACKAGING.md#local-packaging),
+  passing `-RequireConPty` and with Inno Setup available for the installed rows,
+  or a published release that includes it. An earlier release is only a
+  baseline. Local builds are unsigned unless signing is configured; record that
+  limit. Record the source SHA and the SHA-256 of each ZIP and installer you
+  tested.
+- Record the outcome in the [results table](#results), in the PR or issue that
+  asked for the pass.
 
 ## The machine
 
@@ -42,9 +41,10 @@ desktop.
   `renderer = d3d11-warp` in `config.ghostty` beside `noctty.exe` first (see
   [Starting without OpenGL](windows.md#starting-without-opengl)) and record that
   you did; the rows below do not depend on the renderer.
-- The release candidate's portable ZIP, checked against its `SHA256SUMS` file
-  ([verify-release.md](verify-release.md)), unpacked into a new folder. Rows
-  marked **installed** also need the installer on a clean snapshot.
+- The portable ZIP under test, checked against its `SHA256SUMS` file
+  ([verify-release.md](verify-release.md)) when it is a release, unpacked into
+  a new folder. Rows marked **installed** also need the installer on a clean
+  snapshot.
 - A second machine at build 17763 is optional and used for one row (W10-02).
 
 Do not change input, display or lock settings beyond what a row says. Do not
@@ -431,7 +431,7 @@ pixels on Server 2022 only.
 
 ## Results
 
-Copy this table into the release notes' validation section or the release PR.
+Copy this table into the PR or issue that asked for the pass.
 
 | Row               | Result (pass, fail, n/a) | Build | Evidence (screenshot, log line, note)        |
 | ----------------- | ------------------------ | ----- | -------------------------------------------- |
@@ -465,5 +465,5 @@ Copy this table into the release notes' validation section or the release PR.
 | W10-28            |                          |       |                                              |
 | W10-29            |                          |       |                                              |
 | Machine and image |                          |       | `winver`, VM type, display scaling           |
-| Artifact          |                          |       | source SHA, version, SHA-256 of ZIP or setup |
+| Artifact          |                          |       | source SHA, version, SHA-256 of each file    |
 | Date and tester   |                          |       |                                              |
