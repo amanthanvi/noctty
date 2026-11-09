@@ -8618,18 +8618,18 @@ fn beginBindingActions(self: *Surface) void {
 
 /// Who this surface is, to ask the app after a closing action whether it
 /// is still there, without reading the surface (`performChain`).
-const CloseToken = struct {
+pub const CloseToken = struct {
     app: *App,
     rt_surface: *apprt.Surface,
     id: u64,
 
-    fn survived(self: CloseToken) bool {
+    pub fn survived(self: CloseToken) bool {
         return self.app.hasSurfaceInstance(self.rt_surface, self.id);
     }
 
     /// Still there and in a live tab: not detached for undo or redo. On a
     /// runtime with no such tabs, still there is enough.
-    fn attached(self: CloseToken) bool {
+    pub fn attached(self: CloseToken) bool {
         if (!self.survived()) return false;
         if (comptime @hasDecl(apprt.Surface, "receivesAppWideActions")) {
             return self.rt_surface.receivesAppWideActions();
@@ -8638,7 +8638,8 @@ const CloseToken = struct {
     }
 };
 
-fn closeToken(self: *Surface) CloseToken {
+/// Public for the runtime tests that check `attached` against real tabs.
+pub fn closeToken(self: *Surface) CloseToken {
     return .{ .app = self.app, .rt_surface = self.rt_surface, .id = self.id };
 }
 

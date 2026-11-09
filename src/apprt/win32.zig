@@ -18118,6 +18118,66 @@ test "win32 a held embedding-mode exit asks an idle server again and exits" {
     try testLastWindowQuitAtChainEnd(true, false);
 }
 
+test "win32 the core close token sees a pane retained for undo out of its tab" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var core_app: CoreApp = undefined;
+    var app: App = undefined;
+    var host: Host = undefined;
+    var surface_a: Surface = undefined;
+    var surface_b: Surface = undefined;
+    var unregistered: Surface = undefined;
+    var session: TestSession = .{};
+    try session.init(.{
+        .core_app = &core_app,
+        .app = &app,
+        .hosts = &.{.{ .storage = &host, .active_tab = 1 }},
+        .surfaces = &.{
+            .{ .storage = &surface_a, .host = &host },
+            .{ .storage = &surface_b, .host = &host },
+            .{ .storage = &unregistered, .host = &host },
+        },
+        .tabs = &.{
+            .{ .host = &host, .surface = &surface_a, .id = 1 },
+            .{ .host = &host, .surface = &surface_b, .id = 2 },
+        },
+    });
+    defer session.deinit();
+
+    // The production token (`CoreSurface.closeToken`) asks the core App's
+    // surface list and then the runtime's live-tab check, so the panes are
+    // registered with the core App as real ones are, and their cores name
+    // the App, themselves and an id. The fixture cores are inert otherwise.
+    const ids = [_]u64{ 0x1111, 0x2222, 0x3333 };
+    for ([_]*Surface{ &surface_a, &surface_b, &unregistered }, ids) |surface, id| {
+        surface.core_surface.app = &core_app;
+        surface.core_surface.rt_surface = surface;
+        surface.core_surface.id = id;
+    }
+    try core_app.surfaces.appendSlice(core_app.alloc, &.{ &surface_a, &surface_b });
+    // Before `session.deinit`, whose core App teardown would deinit them.
+    defer core_app.surfaces.clearRetainingCapacity();
+
+    try std.testing.expect(surface_a.core_surface.closeToken().attached());
+    try std.testing.expect(surface_b.core_surface.closeToken().attached());
+    // Not one of the App's surfaces: neither there nor attached.
+    try std.testing.expect(!unregistered.core_surface.closeToken().survived());
+    try std.testing.expect(!unregistered.core_surface.closeToken().attached());
+
+    // `close_tab:this` keeps the tab's pane registered, hidden, for undo:
+    // still one of the App's surfaces, but in no live tab.
+    var entry = host.detachTabForUndo(1).?;
+    defer entry.dispose(&host, .host_destroy) catch {}; // Best-effort test teardown.
+    const retained = surface_b.core_surface.closeToken();
+    try std.testing.expect(retained.survived());
+    try std.testing.expect(!retained.attached());
+    try std.testing.expect(surface_a.core_surface.closeToken().attached());
+
+    // Back in a live tab, attached again.
+    try std.testing.expect(try host.restoreClosedTabEntry(&entry.payload.close_tab));
+    try std.testing.expect(surface_b.core_surface.closeToken().attached());
+}
+
 test "win32 an open Settings window keeps an idle embedding server" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
