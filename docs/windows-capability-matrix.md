@@ -462,7 +462,9 @@ ends maximized or snapped (half, quarter or a Snap Layouts zone) stays a
 move. On Windows 10 builds without `IsWindowArranged` the snap is judged from
 the window's rect and size: a window already at a snap zone's exact size
 counts as unresized and can merge, and a move onto a monitor of another DPI
-that ends against a side of its work area never merges. Esc cancels a drag.
+that ends where a snap would put it (the full height against a side, or a
+half or quarter of the work area) never merges, whatever its size. Esc
+cancels a drag.
 `move_tab_to_new_window` (the palette's "Move Tab to New Window", unbound
 by default) does the tear-off from the keyboard; in a window of one tab it
 does nothing. A move is not undoable,

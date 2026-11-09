@@ -554,6 +554,8 @@ pub fn Fixtures(comptime runtime: anytype) type {
             pub fn deinit(self: *WindowStartTestApp) void {
                 App.test_tear_off_window_created = null;
                 self.closeWindows();
+                // A drag's label and its UIA provider, before the apartment.
+                self.app.releaseTabDragPreview();
                 if (self.app.com_initialized) sys.OleUninitialize();
                 const instance = self.app.hinstance;
                 self.session.deinit();

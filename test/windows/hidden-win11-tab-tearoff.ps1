@@ -359,7 +359,7 @@ function Launch-Case([string]$Name,[string]$RendererName,[string[]]$Extra=@()) {
             [void][Tt]::ShowWindow($hosts[0],4)
             [void][Tt]::SetWindowPos($hosts[0],[IntPtr]::Zero,40,40,900,600,0x14)
             Start-Sleep -Milliseconds 1500
-            return @{Pi=$pi; Pid=$pi.pid; Dir=$dir; Log=$log}
+            return @{Pi=$pi; Pid=$pi.pid; Dir=$dir; Log=$log; Name=$Name}
         }
         Start-Sleep -Milliseconds 100
     } while([datetime]::UtcNow -lt $deadline)
@@ -369,10 +369,21 @@ function Launch-Case([string]$Name,[string]$RendererName,[string[]]$Extra=@()) {
 function Close-Case($case) {
     [Tt]::Settled()
     foreach($h in [HiddenLocal]::Hosts($case.Pid)) { [void][Tt]::PostMessageW($h,0x10,[IntPtr]::Zero,[IntPtr]::Zero) }
-    if([HiddenLocal]::WaitForSingleObject($case.Pi.process,5000) -eq 258) {
+    $exited=[HiddenLocal]::WaitForSingleObject($case.Pi.process,5000) -ne 258
+    if(-not $exited) {
         # The handle is this launch's own process: no name or pattern match.
         [void][HiddenLocal]::TerminateProcess($case.Pi.process,1)
         [void][HiddenLocal]::WaitForSingleObject($case.Pi.process,5000)
+    }
+    # A case that hangs at its close, or ends with a crash's code, fails the
+    # run, whatever its checks said (CodeRabbit r4512044965). Read through
+    # the handle, before anything closes it.
+    if($case.Name) {
+        Check "$($case.Name): the app exits by itself once its windows close" $exited 'exited' $(if($exited) { 'exited' } else { 'killed after 5 s' })
+        if($exited) {
+            [uint32]$code=1; [void][HiddenLocal]::GetExitCodeProcess($case.Pi.process,[ref]$code)
+            Check "$($case.Name): the app's exit code is 0" ($code -eq 0) 0 ('0x{0:X8}' -f $code)
+        }
     }
     # The process handle stays open for the final check.
     [void][HiddenLocal]::CloseHandle($case.Pi.thread)
@@ -458,6 +469,9 @@ function Marker([IntPtr]$Pane) {
     if(-not $element.TryGetCurrentPattern([System.Windows.Automation.TextPattern]::Pattern,[ref]$pattern)) { return $null }
     $text=$pattern.DocumentRange.GetText(-1)
     $m=[regex]::Match($text,'TEAROFF-\d+-\d+-\d+')
+    # A pane narrower than the marker wraps it across rows: only then, the
+    # rows joined (CodeRabbit r4512044925).
+    if(-not $m.Success) { $m=[regex]::Match(($text -replace "`r?`n",''),'TEAROFF-\d+-\d+-\d+') }
     if($m.Success) { return $m.Value } else { return $null }
 }
 function Wait-Marker([IntPtr]$Pane) {
@@ -541,7 +555,12 @@ function Pane-Consoles($case) {
             $lines=if($done -and (Test-Path -LiteralPath $out)) { @(Get-Content -LiteralPath $out) } else { @() }
         } finally { Remove-Item -LiteralPath $out,"$out.log" -ErrorAction SilentlyContinue }
         if($lines.Count -lt 2) { continue }
-        $m=[regex]::Match((@($lines | Select-Object -Skip 2) -join "`n"),'TEAROFF-\d+-\d+-\d+')
+        $rows=@($lines | Select-Object -Skip 2)
+        $m=[regex]::Match(($rows -join "`n"),'TEAROFF-\d+-\d+-\d+')
+        # Wrapped across rows in a narrow pane (rows are full there, so none
+        # ends in trimmed spaces): only then, the rows joined. A marker two
+        # consoles show still maps to neither, below.
+        if(-not $m.Success) { $m=[regex]::Match(($rows -join ''),'TEAROFF-\d+-\d+-\d+') }
         if(-not $m.Success) { continue }
         # A marker two consoles show maps to neither: their panes are then
         # not found, never folded into one entry.
@@ -748,7 +767,9 @@ function Mouse-Reports([string]$Records) {
         $units=foreach($line in $lines) { $f=$line -split ','; if($f.Count -ge 6 -and $f[0] -eq 'KEY' -and $f[1] -eq '1') { [char][int]$f[5] } }
         $text=-join $units
     } catch { }
-    return @{ Presses=[regex]::Matches($text,"\x1b\[<0;\d+;\d+M").Count; Releases=[regex]::Matches($text,"\x1b\[<0;\d+;\d+m").Count }
+    # Every left-button report in order, `M` a press and `m` a release.
+    $events=@([regex]::Matches($text,"\x1b\[<0;\d+;\d+([Mm])") | ForEach-Object { $_.Groups[1].Value })
+    return @{ Presses=@($events | Where-Object { $_ -ceq 'M' }).Count; Releases=@($events | Where-Object { $_ -ceq 'm' }).Count; Events=$events }
 }
 # A drag holds a tab's button, a key binding moves that tab to a new window,
 # and the held button comes up over a terminal left in the window: the
@@ -783,9 +804,12 @@ function Measure-HeldRelease([string]$RendererName,[ValidateSet('source','destin
         Check "${label}: the mouse-reporting program runs in the first tab" $up 'ready' $null
         if(-not $up) { return }
         Start-Sleep -Milliseconds 500
-        # Control: a press and release on its terminal are reported.
+        # Control: a press and release on its terminal are reported. Its
+        # span lasts until the recorder has both (CodeRabbit r4512044942).
+        $start=[Tt]::GetTickCount64()
         [Tt]::Mouse($p1,$WM_LBUTTONDOWN,30,30,1); [Tt]::Mouse($p1,$WM_LBUTTONUP,30,30,0)
         $control=Wait-Until { (Mouse-Reports $records).Releases -ge 1 } 5
+        [Tt]::Open($start); [Tt]::Settled()
         $before=Mouse-Reports $records
         Check "${label}: a press and release there are reported (the control)" ($control -and $before.Presses -ge 1 -and $before.Releases -ge 1) 'press and release' $before
         # A second tab (cmd).
@@ -827,11 +851,18 @@ function Measure-HeldRelease([string]$RendererName,[ValidateSet('source','destin
         Start-Sleep -Milliseconds 800
         $after=Mouse-Reports $records
         Check "${label}: the program gets no release no press of its made" ($after.Releases -eq $before.Releases -and $after.Presses -eq $before.Presses) @($before.Presses,$before.Releases) @($after.Presses,$after.Releases)
-        # A fresh press and release afterwards are reported again.
+        # A fresh press and release afterwards are reported again, its span
+        # open until the recorder has both; since the baseline, exactly that
+        # press then that release, and nothing of the held one
+        # (CodeRabbit r4512044942, r4512044953).
+        $start=[Tt]::GetTickCount64()
         [Tt]::Mouse($p1,$WM_LBUTTONDOWN,30,30,1); [Tt]::Mouse($p1,$WM_LBUTTONUP,30,30,0)
-        $fresh=Wait-Until { (Mouse-Reports $records).Releases -gt $after.Releases } 5
+        $fresh=Wait-Until { (Mouse-Reports $records).Events.Count -ge ($after.Events.Count + 2) } 5
+        [Tt]::Open($start); [Tt]::Settled()
+        Start-Sleep -Milliseconds 300
         $last=Mouse-Reports $records
-        Check "${label}: a fresh press and release after are reported" ($fresh -and $last.Presses -gt $after.Presses) @(($after.Presses+1),($after.Releases+1)) @($last.Presses,$last.Releases)
+        $since=@($last.Events | Select-Object -Skip $before.Events.Count)
+        Check "${label}: since the control, exactly one press then one release, the fresh pair's" ($fresh -and ($since -join ',') -ceq 'M,m') 'M,m' ($since -join ',')
         Check-Backend $case $RendererName "after the held release ($Variant)" @(@($p1) + @(if([Tt]::Alive($p2)) { $p2 }))
     } finally {
         New-Item -ItemType File -Path $stop -Force | Out-Null

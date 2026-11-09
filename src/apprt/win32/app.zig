@@ -1873,16 +1873,9 @@ pub const App = struct {
         if (self.hasSessionWindows()) self.saveSessionAsItEnds();
         self.releaseSessionOwnership();
         self.destroyAllWindows();
-        win32.detachChromeControlProvider(self, &self.tab_drag_preview_uia_provider);
+        self.releaseTabDragPreview();
         self.pending_tab_moves.deinit(self.core_app.alloc);
         killThreadTimer(&self.tab_move_wake_timer);
-        if (self.tab_drag_preview_hwnd) |preview| {
-            setWindowData(preview, null);
-            if (self.tab_drag_preview_prev_proc) |previous| _ = sys.SetWindowLongPtrW(preview, c.GWLP_WNDPROC, @bitCast(@intFromPtr(previous)));
-            self.tab_drag_preview_prev_proc = null;
-            _ = sys.DestroyWindow(preview);
-            self.tab_drag_preview_hwnd = null;
-        }
         if (self.shell_runtime_initialized) {
             self.shell_runtime.deinit();
             self.shell_runtime_initialized = false;
@@ -7838,6 +7831,9 @@ pub const App = struct {
     /// `.after_history`), for the tests that make them fail.
     pub var test_tab_move_shell_step: ?*const fn (*App, TabMoveShellStep) void = null;
     pub const TabMoveShellStep = enum { retry_prepare, commit, history, source_history_retired, after_history };
+    /// The posted tab-move wake fails, as with the window's queue full, for
+    /// the test of what wakes the pump then.
+    pub var test_tab_move_wake_post_fails = false;
 
     pub const PendingTabMove = struct { host_id: u32, request: Host.TabMoveRequest };
 
@@ -7877,8 +7873,13 @@ pub const App = struct {
         };
         slot.* = .{ .host_id = host.id, .request = .{ .tab_id = tab_id, .dest = dest } };
         // A wake for the pump, which runs the queue before its next wait.
-        if (sys.PostMessageW(hwnd, c.WM_WINHOSTTY_TAB_MOVE, 0, 0) == 0) {
-            log.warn("tab move wake could not be posted err={}", .{windows.kernel32.GetLastError()});
+        const posted = if (builtin.is_test and test_tab_move_wake_post_fails) false else sys.PostMessageW(hwnd, c.WM_WINHOSTTY_TAB_MOVE, 0, 0) != 0;
+        if (!posted) {
+            // A full queue: the re-wake thread timer, whose `WM_TIMER` the
+            // system makes when the queue has nothing else, wakes the pump
+            // instead (CodeRabbit r4512044883).
+            log.warn("tab move wake could not be posted err={}; the re-wake timer wakes the pump", .{windows.kernel32.GetLastError()});
+            self.armTabMoveWakeTimer();
         }
         return true;
     }
@@ -7895,10 +7896,17 @@ pub const App = struct {
             killThreadTimer(&self.tab_move_wake_timer);
             return;
         }
+        self.armTabMoveWakeTimer();
+    }
+
+    /// The one re-wake thread timer, if it is not running. Should even that
+    /// fail, the move waits for the pump's next message; nothing else can
+    /// wake it then.
+    fn armTabMoveWakeTimer(self: *App) void {
         if (self.tab_move_wake_timer != null) return;
         const id = sys.SetTimer(null, 0, 50, null);
         if (id == 0) {
-            log.warn("tab move re-wake timer failed err={}", .{windows.kernel32.GetLastError()});
+            log.err("tab move re-wake timer failed err={}; the move waits for the next message", .{windows.kernel32.GetLastError()});
             return;
         }
         self.tab_move_wake_timer = id;
@@ -7921,6 +7929,19 @@ pub const App = struct {
             },
             else => return false,
         }
+    }
+
+    /// The tab drag's label and its UIA provider go, the provider first:
+    /// before the COM apartment does, at the App's end and a fixture's
+    /// (CodeRabbit r4512044918).
+    pub fn releaseTabDragPreview(self: *App) void {
+        win32.detachChromeControlProvider(self, &self.tab_drag_preview_uia_provider);
+        const preview = self.tab_drag_preview_hwnd orelse return;
+        setWindowData(preview, null);
+        if (self.tab_drag_preview_prev_proc) |previous| _ = sys.SetWindowLongPtrW(preview, c.GWLP_WNDPROC, @bitCast(@intFromPtr(previous)));
+        self.tab_drag_preview_prev_proc = null;
+        _ = sys.DestroyWindow(preview);
+        self.tab_drag_preview_hwnd = null;
     }
 
     /// The outer pump retrieved a tick of the tab-move re-wake timer: it
@@ -7992,15 +8013,19 @@ pub const App = struct {
         // A torn-off tab's window, hidden and already where it will show,
         // and room for the tab: made before any undo history goes, so a
         // failure here loses none.
-        var created: ?*Host = null;
-        errdefer if (created) |host| self.discardUnusedHost(host);
+        // The window made for the tab, by id: the history clear's window code
+        // can remove it too (CodeRabbit r4512044895), so every cleanup finds
+        // it again first, an error's included.
+        var created: ?u32 = null;
+        errdefer self.discardCreatedHost(created);
         const target: *Host = switch (dest) {
             .new_window => |drop| target: {
-                created = try self.createHost(default_title, &self.config, .{ .tear_off = .{ .source = source, .drop = drop } });
+                const made = try self.createHost(default_title, &self.config, .{ .tear_off = .{ .source = source, .drop = drop } });
+                created = made.id;
                 if (builtin.is_test) {
-                    if (test_tear_off_window_created) |hook| try hook(created.?);
+                    if (test_tear_off_window_created) |hook| try hook(made);
                 }
-                break :target created.?;
+                break :target made;
             },
             .host => |to| to.host,
         };
@@ -8009,7 +8034,7 @@ pub const App = struct {
         // 5823245522): it is found again by id before anything reads it.
         if (self.registry.findHostById(source_id) == null) {
             // Not an error, so the errdefer does not run.
-            if (created) |host| self.discardUnusedHost(host);
+            self.discardCreatedHost(created);
             return false;
         }
         try target.tabs.ensureUnusedCapacity(self.core_app.alloc, 1);
@@ -8018,7 +8043,7 @@ pub const App = struct {
         // move with nothing to do.
         var at = source.findTabIndexById(tab_id) orelse {
             // Not an error, so the errdefer does not run.
-            if (created) |host| self.discardUnusedHost(host);
+            self.discardCreatedHost(created);
             return false;
         };
 
@@ -8060,7 +8085,7 @@ pub const App = struct {
                     self.registry.findHostById(target_id) != null;
                 const now: ?usize = if (still) source.findTabIndexById(tab_id) else null;
                 at = now orelse {
-                    if (created) |host| self.discardUnusedHost(host);
+                    self.discardCreatedHost(created);
                     return false;
                 };
                 insert = @min(insert, target.tabs.items.len);
@@ -8077,7 +8102,9 @@ pub const App = struct {
             // A focus message between the prepare and here makes it stale:
             // it is prepared again on what is current.
             try prepared.commitRetryingStale(&self.shell_runtime);
-            if (created) |host| host.shell_id = self.shell_runtime.state.tabConst(shell_tab.?).?.window;
+            if (created) |id| if (self.registry.findHostById(id)) |host| {
+                host.shell_id = self.shell_runtime.state.tabConst(shell_tab.?).?.window;
+            };
         }
         source.tabs.items[at].clearRedoHistory();
         // The tab the destination showed starts a new branch too, as a
@@ -8305,6 +8332,13 @@ pub const App = struct {
         if (target_id) |id| if (self.registry.findHostById(id)) |host| {
             if (!host.tryClearStructuralHistory(.normal)) return error.HistoryDisposalDeferred;
         };
+    }
+
+    /// The window `moveTabToWindow` made, by id (`created`), if it still is
+    /// one: discarded, as `discardUnusedHost` does.
+    fn discardCreatedHost(self: *App, created: ?u32) void {
+        const id = created orelse return;
+        if (self.registry.findHostById(id)) |host| self.discardUnusedHost(host);
     }
 
     /// A window `moveTabToWindow` made and could not use: still hidden,
@@ -17385,6 +17419,117 @@ test "win32 a caption Close press closes the window on its release over Close, a
             _ = sys.SendMessageW(hwnd, c.WM_NCMOUSELEAVE, 0, 0);
             testClientMouse(hwnd, c.WM_LBUTTONUP, close_at);
             try std.testing.expect(sys.IsWindow(hwnd) == 0);
+        }
+    }.body);
+}
+
+const TestRemoveCreatedHost = struct {
+    var source_id: u32 = 0;
+    var removed = false;
+
+    /// While the history a transfer kept is cleared for the move's second
+    /// prepare, a teardown removes the window made for the tab.
+    fn hook(app: *App, step: App.TabMoveShellStep) void {
+        if (step != .retry_prepare) return;
+        for (app.registry.hosts.items) |host| if (host.id != source_id) {
+            if (host.hwnd) |hwnd| _ = sys.DestroyWindow(hwnd);
+            app.removeHost(host);
+            removed = true;
+            return;
+        };
+    }
+};
+
+test "win32 a tab move whose new window goes while history is cleared reads no freed window (CodeRabbit r4512044895)" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    try runOnHiddenDesktop(struct {
+        fn body() !void {
+            var fixture: win32.WindowStartTestApp = .{};
+            try fixture.init();
+            defer fixture.deinit();
+            const app = &fixture.app;
+            app.shell_runtime_initialized = true;
+            const setup: TabMoveFixture = .{ .fixture = &fixture };
+            const source = try setup.window(3, false);
+            // A transfer in undo history names the front tab, which moves:
+            // the model asks for that history to go first.
+            source.tab_drop_operation = .split_right;
+            source.tab_drop_target_surface = source.tabs.items[2].focusedSurface().?;
+            try std.testing.expect(source.commitTabDropSplit(0));
+            TestRemoveCreatedHost.source_id = source.id;
+            TestRemoveCreatedHost.removed = false;
+            App.test_tab_move_shell_step = &TestRemoveCreatedHost.hook;
+            defer App.test_tab_move_shell_step = null;
+            try std.testing.expect(!(try app.moveTabToWindow(source, source.active_tab, .{ .new_window = null })));
+            App.test_tab_move_shell_step = null;
+            try std.testing.expect(TestRemoveCreatedHost.removed);
+            // Nothing moved, and only the source is left.
+            try std.testing.expectEqual(@as(usize, 2), source.tabs.items.len);
+            try std.testing.expectEqual(@as(usize, 1), app.registry.hosts.items.len);
+            try app.validateShellNativeMapping();
+        }
+    }.body);
+}
+
+test "win32 a tab move whose wake cannot be posted is woken by the re-wake timer (CodeRabbit r4512044883)" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    try runOnHiddenDesktop(struct {
+        fn body() !void {
+            var fixture: win32.WindowStartTestApp = .{};
+            try fixture.init();
+            defer fixture.deinit();
+            const app = &fixture.app;
+            app.shell_runtime_initialized = true;
+            const setup: TabMoveFixture = .{ .fixture = &fixture };
+            const source = try setup.window(2, false);
+            // The window's queue is full: the posted wake fails.
+            App.test_tab_move_wake_post_fails = true;
+            defer App.test_tab_move_wake_post_fails = false;
+            try std.testing.expect(app.requestTabMove(source, source.tabs.items[1].id, .{ .new_window = null }));
+            try std.testing.expect(app.tab_move_wake_timer != null);
+            // The timer's own tick reaches the pump, which runs the move.
+            const until = sys.GetTickCount64() + 1000;
+            var msg: MSG = undefined;
+            const ticked = tick: while (sys.GetTickCount64() < until) {
+                while (sys.PeekMessageW(&msg, null, c.WM_TIMER, c.WM_TIMER, c.PM_REMOVE) != 0) {
+                    if (app.takeTabMoveWakeTick(&msg)) break :tick true;
+                    _ = sys.DispatchMessageW(&msg);
+                }
+                std.Thread.sleep(5 * std.time.ns_per_ms);
+            } else false;
+            try std.testing.expect(ticked);
+            app.drainPendingTabMoves();
+            try std.testing.expectEqual(@as(usize, 1), source.tabs.items.len);
+        }
+    }.body);
+}
+
+test "win32 the tab drag's label goes with its UIA provider before the apartment does (CodeRabbit r4512044918)" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    try runOnHiddenDesktop(struct {
+        fn body() !void {
+            var fixture: win32.WindowStartTestApp = .{};
+            try fixture.init();
+            defer fixture.deinit();
+            const app = &fixture.app;
+            app.shell_runtime_initialized = true;
+            const setup: TabMoveFixture = .{ .fixture = &fixture };
+            const host = try setup.window(3, false);
+            try host.layout();
+            const button = host.tabs.items[host.active_tab].button_hwnd orelse return error.TestNoTabButton;
+            var client: RECT = undefined;
+            try std.testing.expect(sys.GetClientRect(host.hwnd.?, &client) != 0);
+            // A drag out of the window shows the label.
+            testPostTabMouse(button, c.WM_LBUTTONDOWN, 20, 10);
+            testPostTabMouse(button, c.WM_MOUSEMOVE, 20, client.bottom + 200);
+            try std.testing.expect(app.tab_drag_preview_hwnd != null);
+            const label = app.tab_drag_preview_hwnd.?;
+            testPostTabMouse(button, c.WM_LBUTTONUP, 20, 10);
+            // What teardown runs before the apartment goes.
+            app.releaseTabDragPreview();
+            try std.testing.expect(app.tab_drag_preview_hwnd == null);
+            try std.testing.expect(app.tab_drag_preview_uia_provider == null);
+            try std.testing.expect(sys.IsWindow(label) == 0);
         }
     }.body);
 }
