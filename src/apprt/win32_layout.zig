@@ -137,7 +137,9 @@ fn surfacePlacementFromBaseRect(
     };
 }
 
-fn roundedSlotPixel(value: f32, span: i32) i32 {
+/// A normalized slot coordinate in pixels of `span`, rounded as the pane
+/// layout rounds it. `win32/pane_divider.zig` finds the gaps with it.
+pub fn roundedSlotPixel(value: f32, span: i32) i32 {
     return @intFromFloat(@round(value * @as(f32, @floatFromInt(span))));
 }
 

@@ -3625,6 +3625,25 @@ pub const Surface = struct {
         self.handleScrollbarLeftButtonUpLocal(x, y);
     }
 
+    /// Whether a `WM_NCHITTEST` point (`lParam`, screen coordinates) is on
+    /// this pane's scrollbar band, which keeps the mouse even inside a split
+    /// divider's grab zone.
+    pub fn scrollbarBandAtScreen(self: *const Surface, hwnd: HWND, lParam: LPARAM) bool {
+        if (!self.window_visible or !self.scrollbarScrollable()) return false;
+        if (self.scrollbarPolicy() == .never or !self.placement.rect_known) return false;
+        var point: POINT = .{
+            .x = signedLowWord(lParamBits(lParam)),
+            .y = signedHighWord(lParamBits(lParam)),
+        };
+        if (sys.ScreenToClient(hwnd, &point) == 0) return false;
+        return scrollbarProxyPointFromSurfaceCoords(
+            self.placement.rect,
+            self.scrollbarHoverWidthPx(),
+            point.x,
+            point.y,
+        ).over_band;
+    }
+
     fn scrollbarProxyPointFromScreenCursor(self: *const Surface, hwnd: HWND) ?ScrollbarProxyPoint {
         if (!self.window_visible or !self.scrollbarScrollable()) return null;
         if (self.scrollbarPolicy() == .never or !self.placement.rect_known) return null;

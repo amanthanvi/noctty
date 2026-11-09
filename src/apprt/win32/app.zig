@@ -902,6 +902,9 @@ pub const App = struct {
     /// tree disposal happens once, after the native cascade completes.
     session_restore_rollback_host: ?*Host = null,
     windows_hidden: bool = false,
+    /// Keys pressed while a split divider drag held the mouse, whose
+    /// releases are swallowed too (`paneDividerDragKey`).
+    pane_divider_held_keys: std.StaticBitSet(256) = .initEmpty(),
     quick_terminal_keyboard_diagnostic_logged: bool = false,
     update_notice: ?UpdateNotice = null,
     /// The host whose banner button started the running update action, so
@@ -1774,6 +1777,11 @@ pub const App = struct {
                 continue;
             }
 
+            if (self.paneDividerDragKey(msg.message, msg.wParam)) {
+                try self.tickCoreApp();
+                continue;
+            }
+
             // The settings surface is a modeless native dialog. Route its
             // keyboard messages through the system dialog manager so Tab,
             // Shift+Tab, arrow-key radio navigation, and default buttons use
@@ -1801,6 +1809,42 @@ pub const App = struct {
 
             if (try self.finishLoopStep()) break;
         }
+    }
+
+    /// Keys while a split divider drag holds the mouse, taken in the loop
+    /// before `TranslateMessage`: Esc puts the split back
+    /// (`Host.cancelPaneDividerDrag`), and no key press reaches a terminal,
+    /// a keybinding or a control until the button goes up, so nothing
+    /// changes the panes under the drag and no Esc reaches the program. The
+    /// release of a key pressed during the drag is swallowed as well, after
+    /// the drag too, so no program sees a release without its press.
+    /// Returns whether the message was taken.
+    pub fn paneDividerDragKey(self: *App, message: UINT, wParam: WPARAM) bool {
+        const vk: u8 = @truncate(wParam);
+        switch (message) {
+            c.WM_KEYDOWN, c.WM_SYSKEYDOWN => {
+                const host = self.paneDividerDragHost() orelse {
+                    self.pane_divider_held_keys.unset(vk);
+                    return false;
+                };
+                self.pane_divider_held_keys.set(vk);
+                if (vk == c.VK_ESCAPE) host.cancelPaneDividerDrag();
+                return true;
+            },
+            c.WM_KEYUP, c.WM_SYSKEYUP => {
+                if (!self.pane_divider_held_keys.isSet(vk)) return false;
+                self.pane_divider_held_keys.unset(vk);
+                return true;
+            },
+            else => return false,
+        }
+    }
+
+    fn paneDividerDragHost(self: *App) ?*Host {
+        for (self.registry.hosts.items) |host| {
+            if (host.pane_divider_drag != null) return host;
+        }
+        return null;
     }
 
     /// What the message loop does after it dispatched a message: sync the

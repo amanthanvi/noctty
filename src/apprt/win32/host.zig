@@ -140,6 +140,7 @@ const overlayLabelReservation = win32.overlayLabelReservation;
 const overlayPanelInterior = win32.overlayPanelInterior;
 const overlay_session = @import("overlay_session.zig");
 const overlay_view = @import("overlay_view.zig");
+const pane_divider = @import("pane_divider.zig");
 const ownedStringEquals = paint_text.ownedStringEquals;
 const paintPinnedSlotBadge = win32.paintPinnedSlotBadge;
 const paintTargetButtonBadge = win32.paintTargetButtonBadge;
@@ -523,6 +524,33 @@ fn nextTabOverviewSelection(current: usize, total: usize, reverse: bool) usize {
     return if (clamped >= total) 1 else clamped + 1;
 }
 
+const PaneDividers = pane_divider.For(SplitTreeSurface);
+
+/// A split divider drag in progress (`Host.beginPaneDividerDrag`): what it
+/// moves and what Esc puts back. The tab and its tree are checked again at
+/// every step (`Host.paneDividerDragTab`): a pane can close, and the tree be
+/// replaced, while the button is held.
+pub const PaneDividerDrag = struct {
+    tab_id: u32,
+    nodes: [*]const SplitTreeSurface.Node,
+    nodes_len: usize,
+    handle: SplitTreeSurface.Node.Handle,
+    layout: SplitTreeSurface.Split.Layout,
+    start_ratio: f16,
+    /// The pointer's distance from the divider's position at the press, so
+    /// the divider moves with the pointer instead of jumping to it.
+    grab_offset: i32,
+};
+
+/// A press on a divider, which a second one on the same divider within the
+/// system's double-click time and rectangle makes a double-click.
+pub const PaneDividerPress = struct {
+    tab_id: u32,
+    handle: SplitTreeSurface.Node.Handle,
+    time_ms: u32,
+    point: POINT,
+};
+
 pub const Host = struct {
     app: *App,
     id: u32,
@@ -567,6 +595,15 @@ pub const Host = struct {
     /// must still defer terminal surface repaints so the explicit
     /// post-layout flush owns the single repaint request.
     defer_surface_repaints_until_flush: bool = false,
+    /// The split divider the mouse is dragging (`beginPaneDividerDrag`),
+    /// while the host holds the capture.
+    pane_divider_drag: ?PaneDividerDrag = null,
+    /// The divider the last host `WM_MOUSEMOVE` was over, for a
+    /// `WM_SETCURSOR` whose `GetCursorPos` fails (a private desktop).
+    pane_divider_hover: ?SplitTreeSurface.Split.Layout = null,
+    /// The last press on a divider, which a second press makes a
+    /// double-click (the host class has no `CS_DBLCLKS`).
+    pane_divider_press: ?PaneDividerPress = null,
     overlay_mode: HostOverlayMode = .none,
     /// Surface a title prompt's text was last filled from, while
     /// `overlay_view.shape(overlay_mode).follows_active_surface`, so the
@@ -10582,6 +10619,285 @@ pub const Host = struct {
         try std.testing.expect(!surface_a.split_dimmed);
         // A surface without a started core tells no renderer yet.
         try std.testing.expect(!surface_b.split_dimmed_sent);
+    }
+
+    // Split dividers under the mouse. The host paints the 2 px gap between
+    // panes and receives the mouse there; a pane leaves the rest of a
+    // divider's grab zone to the host by answering `HTTRANSPARENT`
+    // (`paneDividerAtScreen`), as it does for the frame's resize edges
+    // (`resizesFrom`). Geometry and ratios are `win32/pane_divider.zig`'s.
+
+    /// The rectangle the panes are laid out in, in client coordinates, as
+    /// `layout` computes it, without recording the client rect.
+    fn paneDividerContent(self: *Host) ?RECT {
+        const hwnd = self.hwnd orelse return null;
+        var live: RECT = undefined;
+        if (sys.GetClientRect(hwnd, &live) == 0) return null;
+        const rect = hostLayoutClientRect(live, self.last_layout_client_rect) orelse return null;
+        return self.contentRectFromClient(rect);
+    }
+
+    /// The tab whose dividers the mouse can use: the active one, when it is
+    /// split, not zoomed, and no overlay is over the window.
+    fn paneDividerTab(self: *Host) ?*Tab {
+        if (self.overlay_mode != .none) return null;
+        const tab = self.activeTab() orelse return null;
+        if (tab.tree.zoomed != null or tab.leafCount() < 2) return null;
+        return tab;
+    }
+
+    fn paneDividerArea(content: RECT) pane_divider.Rect {
+        return .{ .left = content.left, .top = content.top, .right = content.right, .bottom = content.bottom };
+    }
+
+    /// The innermost divider of the active tab whose grab zone holds `point`
+    /// (client coordinates), with the panes laid out in `content`.
+    pub fn paneDividerAt(self: *Host, content: RECT, point: POINT) ?PaneDividers.Divider {
+        const tab = self.paneDividerTab() orelse return null;
+        var fallback = std.heap.stackFallback(2048, self.app.core_app.alloc);
+        const alloc = fallback.get();
+        var spatial = tab.tree.spatial(alloc) catch return null;
+        defer spatial.deinit(alloc);
+        return PaneDividers.hitTest(
+            &tab.tree,
+            spatial,
+            paneDividerArea(content),
+            .{ .x = point.x, .y = point.y },
+            pane_divider.grabMargin(self.current_dpi),
+        );
+    }
+
+    /// Whether a terminal pane's `WM_NCHITTEST` point (`lParam`, screen
+    /// coordinates) is in a divider's grab zone, which the pane then leaves
+    /// to the host.
+    pub fn paneDividerAtScreen(self: *Host, lParam: LPARAM) bool {
+        const hwnd = self.hwnd orelse return false;
+        if (self.paneDividerTab() == null) return false;
+        const bits: u32 = @truncate(@as(u64, @bitCast(lParam)));
+        var point: POINT = .{
+            .x = @as(i16, @bitCast(@as(u16, @truncate(bits)))),
+            .y = @as(i16, @bitCast(@as(u16, @truncate(bits >> 16)))),
+        };
+        if (sys.ScreenToClient(hwnd, &point) == 0) return false;
+        const content = self.paneDividerContent() orelse return false;
+        return self.paneDividerAt(content, point) != null;
+    }
+
+    fn setPaneDividerCursor(self: *const Host, divider_layout: SplitTreeSurface.Split.Layout) void {
+        if (self.hwnd == null) return;
+        _ = sys.SetCursor(sys.LoadCursorW(null, switch (divider_layout) {
+            .horizontal => c.IDC_SIZEWE,
+            .vertical => c.IDC_SIZENS,
+        }));
+    }
+
+    /// The host's `WM_SETCURSOR`, `WM_MOUSEMOVE`, `WM_LBUTTONDOWN`,
+    /// `WM_LBUTTONUP` and `WM_CAPTURECHANGED` for the dividers. Returns
+    /// whether the message was a divider's; the window procedure then
+    /// answers it (TRUE for `WM_SETCURSOR`, else 0).
+    pub fn handlePaneDividerMessage(self: *Host, msg: UINT, wParam: WPARAM, lParam: LPARAM) bool {
+        switch (msg) {
+            c.WM_SETCURSOR => {
+                const hwnd = self.hwnd orelse return false;
+                // The host's own client area only: a child's DefWindowProc
+                // passes its WM_SETCURSOR up with the child in wParam.
+                if (wParam != @intFromPtr(hwnd)) return false;
+                if ((@as(usize, @bitCast(lParam)) & 0xFFFF) != c.HTCLIENT) return false;
+                if (self.pane_divider_drag) |drag| {
+                    self.setPaneDividerCursor(drag.layout);
+                    return true;
+                }
+                var point: POINT = .{ .x = 0, .y = 0 };
+                const divider_layout = if (sys.GetCursorPos(&point) != 0 and sys.ScreenToClient(hwnd, &point) != 0) found: {
+                    const content = self.paneDividerContent() orelse return false;
+                    break :found (self.paneDividerAt(content, point) orelse return false).layout;
+                } else self.pane_divider_hover orelse return false;
+                self.setPaneDividerCursor(divider_layout);
+                return true;
+            },
+            c.WM_MOUSEMOVE => {
+                const point = paneDividerClientPoint(lParam);
+                if (self.pane_divider_drag != null) {
+                    if (self.paneDividerContent()) |content| self.dragPaneDivider(content, point);
+                    if (self.pane_divider_drag) |drag| self.setPaneDividerCursor(drag.layout);
+                    return true;
+                }
+                const content = self.paneDividerContent() orelse {
+                    self.pane_divider_hover = null;
+                    return false;
+                };
+                const found = self.paneDividerAt(content, point);
+                self.pane_divider_hover = if (found) |hit| hit.layout else null;
+                if (found) |hit| self.setPaneDividerCursor(hit.layout);
+                return found != null;
+            },
+            c.WM_LBUTTONDOWN => {
+                const content = self.paneDividerContent() orelse return false;
+                return self.beginPaneDividerDrag(content, paneDividerClientPoint(lParam), @bitCast(sys.GetMessageTime()));
+            },
+            c.WM_LBUTTONUP => {
+                if (self.pane_divider_drag == null) return false;
+                if (self.paneDividerContent()) |content| self.dragPaneDivider(content, paneDividerClientPoint(lParam));
+                self.finishPaneDividerDrag();
+                return true;
+            },
+            c.WM_CAPTURECHANGED => {
+                // Another window took the mouse (Alt+Tab, a menu, a modal
+                // loop): the drag ends where it is, as a release does.
+                if (self.pane_divider_drag == null) return false;
+                self.finishPaneDividerDrag();
+                return true;
+            },
+            else => return false,
+        }
+    }
+
+    fn paneDividerClientPoint(lParam: LPARAM) POINT {
+        const bits: u32 = @truncate(@as(u64, @bitCast(lParam)));
+        return .{
+            .x = @as(i16, @bitCast(@as(u16, @truncate(bits)))),
+            .y = @as(i16, @bitCast(@as(u16, @truncate(bits >> 16)))),
+        };
+    }
+
+    /// A press at `point` (client coordinates, panes in `content`, message
+    /// time `time_ms`): on a divider it takes the mouse and starts a drag,
+    /// or, as the second press of a double-click on the same divider,
+    /// equalizes that split (`equalizePaneDivider`). Returns whether the
+    /// press was on a divider.
+    pub fn beginPaneDividerDrag(self: *Host, content: RECT, point: POINT, time_ms: u32) bool {
+        if (self.pane_divider_drag != null) return true;
+        const found = self.paneDividerAt(content, point) orelse {
+            self.pane_divider_press = null;
+            return false;
+        };
+        const tab = self.activeTab() orelse return false;
+        if (self.pane_divider_press) |press| {
+            if (press.tab_id == tab.id and press.handle == found.handle and paneDividerDoubleClick(press, time_ms, point)) {
+                self.pane_divider_press = null;
+                self.equalizePaneDivider(tab, found.handle);
+                return true;
+            }
+        }
+        self.pane_divider_press = .{ .tab_id = tab.id, .handle = found.handle, .time_ms = time_ms, .point = point };
+        const along = switch (found.layout) {
+            .horizontal => point.x,
+            .vertical => point.y,
+        };
+        self.pane_divider_drag = .{
+            .tab_id = tab.id,
+            .nodes = tab.tree.nodes.ptr,
+            .nodes_len = tab.tree.nodes.len,
+            .handle = found.handle,
+            .layout = found.layout,
+            .start_ratio = tab.tree.nodes[found.handle.idx()].split.ratio,
+            .grab_offset = along - found.position,
+        };
+        if (self.hwnd) |hwnd| _ = sys.SetCapture(hwnd);
+        self.setPaneDividerCursor(found.layout);
+        return true;
+    }
+
+    fn paneDividerDoubleClick(press: PaneDividerPress, time_ms: u32, point: POINT) bool {
+        if (time_ms -% press.time_ms > sys.GetDoubleClickTime()) return false;
+        const half_width = @divTrunc(@max(1, sys.GetSystemMetrics(c.SM_CXDOUBLECLK)), 2);
+        const half_height = @divTrunc(@max(1, sys.GetSystemMetrics(c.SM_CYDOUBLECLK)), 2);
+        return @abs(point.x - press.point.x) <= half_width and @abs(point.y - press.point.y) <= half_height;
+    }
+
+    /// The tab a drag started in, while it is still in front with the same
+    /// tree, unzoomed and with no overlay, and the drag's node is still a
+    /// split of its layout; null once anything replaced it.
+    fn paneDividerDragTab(self: *Host, drag: PaneDividerDrag) ?*Tab {
+        const tab = self.paneDividerTab() orelse return null;
+        if (tab.id != drag.tab_id) return null;
+        if (tab.tree.nodes.ptr != drag.nodes or tab.tree.nodes.len != drag.nodes_len) return null;
+        if (drag.handle.idx() >= tab.tree.nodes.len) return null;
+        return switch (tab.tree.nodes[drag.handle.idx()]) {
+            .split => |s| if (s.layout == drag.layout) tab else null,
+            .leaf => null,
+        };
+    }
+
+    /// Move the dragged divider to follow `point`, held at the minimum pane
+    /// size, and lay the panes out at once: the terminals reflow as the
+    /// mouse moves, as they do for a keyboard `resize_split`. The ratio is
+    /// changed in place (`resizeInPlace`); the history is not touched until
+    /// the drag ends.
+    pub fn dragPaneDivider(self: *Host, content: RECT, point: POINT) void {
+        const drag = self.pane_divider_drag orelse return;
+        const tab = self.paneDividerDragTab(drag) orelse {
+            // The panes changed under the drag (one closed, a zoom, another
+            // tab): forget it, and leave the new tree alone.
+            self.pane_divider_drag = null;
+            self.releasePaneDividerCapture();
+            return;
+        };
+        var fallback = std.heap.stackFallback(2048, self.app.core_app.alloc);
+        const alloc = fallback.get();
+        var spatial = tab.tree.spatial(alloc) catch return;
+        defer spatial.deinit(alloc);
+        const area = paneDividerArea(content);
+        const found = PaneDividers.divider(&tab.tree, spatial, area, drag.handle, 0) orelse return;
+        const along = switch (drag.layout) {
+            .horizontal => point.x,
+            .vertical => point.y,
+        } - drag.grab_offset;
+        const ratio = PaneDividers.dragRatio(&tab.tree, spatial, area, found, along, pane_divider.minPane(self.current_dpi)) orelse return;
+        if (ratio == tab.tree.nodes[drag.handle.idx()].split.ratio) return;
+        tab.tree.resizeInPlace(drag.handle, ratio);
+        runUiActionOrLog("pane divider drag layout failed", self.layout());
+    }
+
+    /// End the drag where it is. A drag is one change of the split, so it
+    /// clears the undo history once, as one keyboard `resize_split` does
+    /// (`App.resizeSplitFallback`: structural undo and redo, and the tab's
+    /// terminal redo); a drag that ends where it started keeps it. History
+    /// that cannot be disposed now refuses the change, as it does there.
+    pub fn finishPaneDividerDrag(self: *Host) void {
+        const drag = self.pane_divider_drag orelse return;
+        // Before the capture goes: `ReleaseCapture` sends WM_CAPTURECHANGED
+        // at once, which would finish the drag a second time.
+        self.pane_divider_drag = null;
+        defer self.releasePaneDividerCapture();
+        const tab = self.paneDividerDragTab(drag) orelse return;
+        if (tab.tree.nodes[drag.handle.idx()].split.ratio == drag.start_ratio) return;
+        if (!self.tryClearStructuralHistory(.normal)) {
+            tab.tree.resizeInPlace(drag.handle, drag.start_ratio);
+            runUiActionOrLog("pane divider drag rollback layout failed", self.layout());
+            return;
+        }
+        tab.clearRedoHistory();
+    }
+
+    /// Esc during a drag: the split goes back to the ratio the drag started
+    /// from, and the history is kept.
+    pub fn cancelPaneDividerDrag(self: *Host) void {
+        const drag = self.pane_divider_drag orelse return;
+        self.pane_divider_drag = null;
+        self.pane_divider_press = null;
+        defer self.releasePaneDividerCapture();
+        const tab = self.paneDividerDragTab(drag) orelse return;
+        if (tab.tree.nodes[drag.handle.idx()].split.ratio == drag.start_ratio) return;
+        tab.tree.resizeInPlace(drag.handle, drag.start_ratio);
+        runUiActionOrLog("pane divider drag cancel layout failed", self.layout());
+    }
+
+    fn releasePaneDividerCapture(self: *Host) void {
+        const hwnd = self.hwnd orelse return;
+        if (sys.GetCapture() == hwnd) _ = sys.ReleaseCapture();
+    }
+
+    /// Double-click on a divider: that split takes the ratio `equalize_splits`
+    /// gives it (its sides weighted by their panes), one change of the split
+    /// like a drag. `equalize_splits` itself still equalizes the whole tab.
+    fn equalizePaneDivider(self: *Host, tab: *Tab, handle: SplitTreeSurface.Node.Handle) void {
+        const ratio = PaneDividers.equalRatio(&tab.tree, handle) orelse return;
+        if (ratio == tab.tree.nodes[handle.idx()].split.ratio) return;
+        if (!self.tryClearStructuralHistory(.normal)) return;
+        tab.clearRedoHistory();
+        tab.tree.resizeInPlace(handle, ratio);
+        runUiActionOrLog("pane divider equalize layout failed", self.layout());
     }
 
     pub fn layout(self: *Host) !void {

@@ -365,6 +365,10 @@ pub extern "user32" fn GetActiveWindow() callconv(.winapi) ?HWND;
 
 pub extern "user32" fn GetCursorPos(lpPoint: *POINT) callconv(.winapi) BOOL;
 
+pub extern "user32" fn GetDoubleClickTime() callconv(.winapi) UINT;
+
+pub extern "user32" fn GetMessageTime() callconv(.winapi) i32;
+
 pub extern "user32" fn WindowFromPoint(point: POINT) callconv(.winapi) ?HWND;
 
 pub extern "user32" fn GetCaretPos(lpPoint: *POINT) callconv(.winapi) BOOL;
