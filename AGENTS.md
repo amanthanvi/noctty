@@ -372,8 +372,10 @@ that govern each symbol you change, or that none does.
   the drag behind it, `Host.paneDividerAtScreen`, keys during a drag:
   `App.paneDividerDragKey`, global hotkeys during a drag:
   `App.takeGlobalHotkey`), the gaps and slot rounding they find
-  (`win32_layout.zig`: `splitSurfacePlacement`, `roundedSlotPixel`) and the
-  keyboard `resize_split` they match (`App.resizeSplitFallback`).
+  (`win32_layout.zig`: `splitSurfacePlacement`, `roundedSlotPixel`), the tree
+  identity a drag checks (`SplitTree.generation` in
+  `src/datastruct/split_tree.zig`) and the keyboard `resize_split` they
+  match (`App.resizeSplitFallback`).
 - [input.md](docs/agents/log/input.md): `win32/input.zig` and key messages
   (`WM_KEYDOWN`/`WM_CHAR`/`WM_SYSCHAR`, dead keys, `ToUnicode`, non-Latin
   layouts), default Windows keybindings, Win32 input mode (DEC 9001), the
