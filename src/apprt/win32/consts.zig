@@ -77,6 +77,7 @@ pub const HRESULT_NO_ASSOCIATION: i32 = @bitCast(@as(u32, 0x80070483));
 pub const WPF_RESTORETOMAXIMIZED = 0x0002;
 const WM_APP = 0x8000;
 pub const WM_ACTIVATE = 0x0006;
+pub const WM_ACTIVATEAPP = 0x001C;
 pub const WA_INACTIVE = 0;
 pub const WM_COMMAND = 0x0111;
 pub const WM_CAPTURECHANGED = 0x0215;

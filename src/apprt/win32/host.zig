@@ -543,9 +543,36 @@ pub const PaneDividerDrag = struct {
     /// pointer, and a pointer back at the press gives `start_ratio` exactly,
     /// which a round trip through the rounded pixel position would not.
     press_along: i32,
-    /// Whether the drag ever wrote a ratio other than `start_ratio`, for a
-    /// drag whose tree was replaced before it could be put back or committed.
+    /// The pointer's distance from the divider's position at the press,
+    /// along the axis: where a re-anchor puts the divider.
+    grab_offset: i32,
+    /// The next undo sequence at the press: history recorded before it is
+    /// what this drag, as a resize made at the press, discards when it ends
+    /// changed (`Host.clearPaneDividerHistory`); history recorded during it
+    /// stays.
+    press_sequence: u64,
+    /// The tree's generation at the press (`SplitTree.generation`): a tree
+    /// that replaced it has another, even at the same address and length.
+    generation: u64,
+    /// What moves are measured from: the pointer coordinate, the ratio and
+    /// the panes' rectangle of the last anchor, at first the press. When the
+    /// rectangle changes mid-drag (an overlay opens and moves the content's
+    /// top), coordinates from the old anchor no longer match the layout, so
+    /// the drag re-anchors where the divider sits under the pointer at its
+    /// grab offset (`Host.dragPaneDivider`).
+    anchor_along: i32,
+    anchor_ratio: f32,
+    anchor_content: RECT,
+    /// Whether the drag ever wrote a ratio other than `start_ratio`: the
+    /// panes were resized, so its end catches their repaints up.
     moved: bool = false,
+    /// Whether the divider sits off the pixel it started on, as of the last
+    /// step taken while the drag's tree was valid. When the tree is
+    /// replaced (a pane closes under the drag), that decides the history:
+    /// a divider off its start pixel is a change that may live on in the
+    /// new tree and cannot be put back, so it counts as one change; one
+    /// back on its start pixel (an out-and-back drag) changed nothing.
+    off_start: bool = false,
     /// The ratios the drag may take (the minimum pane), measured at the
     /// press and again only when the split's extent changes
     /// (`Host.paneDividerBounds`).
@@ -618,6 +645,10 @@ pub const Host = struct {
     /// divider's but whose drag already ended (Esc, a double-click, the
     /// panes changing under it), until that button's release.
     pane_divider_button_held: bool = false,
+    /// While a divider step lays the panes out, how many more of them may
+    /// paint synchronously on their WM_SIZE (`paneDividerStepRepaintMode`);
+    /// null outside a step.
+    pane_divider_step_paints: ?u8 = null,
     /// Test-only: the content rectangle `paneDividerContent` reports for a
     /// host with no window, so tests can drive `handlePaneDividerMessage`.
     test_pane_divider_content: ?RECT = null,
@@ -1253,6 +1284,15 @@ pub const Host = struct {
             &self.structural_undo_entries,
             &self.structural_redo_entries,
         );
+    }
+
+    /// Disposes the structural undo and redo recorded before
+    /// `min_sequence_id` (`App.nextUndoSequence`), keeping what was recorded
+    /// since. False when an entry could not be disposed now.
+    pub fn pruneStructuralHistoryBeforeSequence(self: *Host, min_sequence_id: u64) bool {
+        const undo_complete = win32_structural_history.pruneBeforeSequence(StructuralUndoEntry, &self.structural_undo_entries, min_sequence_id, self, disposeStructuralNormalLogged);
+        const redo_complete = win32_structural_history.pruneBeforeSequence(StructuralUndoEntry, &self.structural_redo_entries, min_sequence_id, self, disposeStructuralNormalLogged);
+        return undo_complete and redo_complete;
     }
 
     pub fn pruneStructuralHistoryBefore(self: *Host, min_timestamp_ms: u64) bool {
@@ -10836,6 +10876,12 @@ pub const Host = struct {
             .layout = found.layout,
             .start_ratio = start_ratio,
             .press_along = along,
+            .press_sequence = self.app.next_undo_sequence,
+            .generation = tab.tree.generation,
+            .grab_offset = along - found.position,
+            .anchor_along = along,
+            .anchor_ratio = start_ratio,
+            .anchor_content = content,
             .bounds = bounds,
         };
         if (self.hwnd) |hwnd| _ = sys.SetCapture(hwnd);
@@ -10860,6 +10906,7 @@ pub const Host = struct {
     fn paneDividerDragTab(self: *Host, drag: PaneDividerDrag) ?*Tab {
         for (self.tabs.items) |*tab| {
             if (tab.id != drag.tab_id) continue;
+            if (tab.tree.generation != drag.generation) return null;
             if (tab.tree.nodes.ptr != drag.nodes or tab.tree.nodes.len != drag.nodes_len) return null;
             if (drag.handle.idx() >= tab.tree.nodes.len) return null;
             return switch (tab.tree.nodes[drag.handle.idx()]) {
@@ -10879,6 +10926,10 @@ pub const Host = struct {
         return active == tab and tab.tree.zoomed == null;
     }
 
+    fn paneDividerSameRect(a: RECT, b: RECT) bool {
+        return a.left == b.left and a.top == b.top and a.right == b.right and a.bottom == b.bottom;
+    }
+
     fn paneDividerAlong(divider_layout: SplitTreeSurface.Split.Layout, point: POINT) i32 {
         return switch (divider_layout) {
             .horizontal => point.x,
@@ -10895,9 +10946,16 @@ pub const Host = struct {
     pub fn dragPaneDivider(self: *Host, content: RECT, point: POINT) void {
         const drag = if (self.pane_divider_drag) |*active| active else return;
         const tab = self.paneDividerDragTab(drag.*) orelse return self.dropPaneDividerDrag();
-        if (!self.paneDividerDragLive(tab)) return self.finishPaneDividerDrag(content);
+        if (!self.paneDividerDragLive(tab)) {
+            self.finishPaneDividerDrag(content);
+            // The button is still down: its release must not reach a
+            // terminal that never saw the press.
+            self.pane_divider_button_held = true;
+            return;
+        }
         const along = paneDividerAlong(drag.layout, point);
-        const ratio = if (along == drag.press_along) drag.start_ratio else ratio: {
+        const same_content = paneDividerSameRect(content, drag.anchor_content);
+        const ratio = if (same_content and along == drag.press_along and drag.anchor_along == drag.press_along) drag.start_ratio else ratio: {
             var fallback = std.heap.stackFallback(2048, self.app.core_app.alloc);
             const alloc = fallback.get();
             var spatial = tab.tree.spatial(alloc) catch return;
@@ -10906,15 +10964,26 @@ pub const Host = struct {
             const found = PaneDividers.divider(&tab.tree, spatial, area, drag.handle, 0) orelse return;
             const extent = PaneDividers.splitExtent(found);
             if (extent <= 0) return;
-            if (extent != drag.bounds.extent) {
+            if (extent != drag.bounds.extent or pane_divider.minPane(self.current_dpi) != drag.bounds.min_px) {
                 drag.bounds = self.paneDividerBounds(tab, drag.handle, drag.start_ratio, content) orelse return;
             }
-            const want = @as(f32, drag.start_ratio) + @as(f32, @floatFromInt(along - drag.press_along)) / @as(f32, @floatFromInt(extent));
+            const span: f32 = @floatFromInt(extent);
+            if (!same_content) {
+                const split_start = switch (drag.layout) {
+                    .horizontal => found.split.left,
+                    .vertical => found.split.top,
+                };
+                drag.anchor_ratio = @as(f32, @floatFromInt(along - drag.grab_offset - split_start)) / span;
+                drag.anchor_along = along;
+                drag.anchor_content = content;
+            }
+            const want = drag.anchor_ratio + @as(f32, @floatFromInt(along - drag.anchor_along)) / span;
             break :ratio PaneDividers.ratioAt(found, want, drag.bounds, tab.tree.nodes[drag.handle.idx()].split.ratio);
         };
         if (ratio == tab.tree.nodes[drag.handle.idx()].split.ratio) return;
         tab.tree.resizeInPlace(drag.handle, ratio);
         if (ratio != drag.start_ratio) drag.moved = true;
+        drag.off_start = ratio != drag.start_ratio and !self.paneDividerOnStartPixel(tab, drag.*, content);
         self.layoutPaneDividerStep();
     }
 
@@ -10935,21 +11004,26 @@ pub const Host = struct {
         return PaneDividers.ratioBounds(&tab.tree, spatial, area, found, pane_divider.minPane(self.current_dpi));
     }
 
-    /// The drag's tree was replaced (a pane closed under it). Its change may
-    /// live on in the tree that replaced it and cannot be put back, so a
-    /// drag that moved is accounted for as a change of the split.
+    /// The drag's tree was replaced (a pane closed under it). A divider off
+    /// its start pixel is a change that may live on in the tree that
+    /// replaced it and cannot be put back, so it counts as a change of the
+    /// split (`off_start`); one back on its start pixel changed nothing.
     fn dropPaneDividerDrag(self: *Host) void {
         const drag = self.pane_divider_drag orelse return;
         self.pane_divider_drag = null;
         self.pane_divider_button_held = true;
-        if (drag.moved) _ = self.clearPaneDividerHistory(drag.tab_id);
+        if (drag.off_start) _ = self.clearPaneDividerHistory(drag.tab_id, drag.press_sequence);
     }
 
-    /// What one keyboard `resize_split` clears (`App.resizeSplitFallback`):
-    /// structural undo and redo, and the terminal redo of the tab's panes.
-    /// False when the structural history cannot be disposed now.
-    fn clearPaneDividerHistory(self: *Host, tab_id: u32) bool {
-        if (!self.tryClearStructuralHistory(.normal)) return false;
+    /// What one keyboard `resize_split` clears (`App.resizeSplitFallback`),
+    /// for a resize made at the press: the structural undo and redo recorded
+    /// before `press_sequence`, and the terminal redo of the tab's panes.
+    /// What was recorded during the drag (a close, a split, an undo that
+    /// automation made meanwhile) is newer than the resize and stays: a
+    /// close's entry keeps its tab's sessions. False when an entry could not
+    /// be disposed now.
+    fn clearPaneDividerHistory(self: *Host, tab_id: u32, press_sequence: u64) bool {
+        if (!self.pruneStructuralHistoryBeforeSequence(press_sequence)) return false;
         for (self.tabs.items) |*tab| {
             if (tab.id == tab_id) tab.clearRedoHistory();
         }
@@ -10990,13 +11064,13 @@ pub const Host = struct {
     /// (no window) the ratios are compared as they are.
     pub fn finishPaneDividerDrag(self: *Host, content: ?RECT) void {
         const drag = self.pane_divider_drag orelse return;
-        // The release and a capture loss end the hold after this; any other
-        // end leaves the button the host's until its release, so the
-        // release cannot reach a terminal that never saw the press.
+        // A release or a capture loss calls this and ends the hold itself;
+        // a drag ended from a move (its tab left the front or was zoomed)
+        // keeps the button until its release (`dragPaneDivider`).
         self.pane_divider_drag = null;
-        self.pane_divider_button_held = true;
+        if (drag.moved) self.settlePaneDividerRepaints();
         const tab = self.paneDividerDragTab(drag) orelse {
-            if (drag.moved) _ = self.clearPaneDividerHistory(drag.tab_id);
+            if (drag.off_start) _ = self.clearPaneDividerHistory(drag.tab_id, drag.press_sequence);
             return;
         };
         if (tab.tree.nodes[drag.handle.idx()].split.ratio == drag.start_ratio) return;
@@ -11005,7 +11079,7 @@ pub const Host = struct {
             self.layoutPaneDividerStep();
             return;
         };
-        if (!self.clearPaneDividerHistory(drag.tab_id)) {
+        if (!self.clearPaneDividerHistory(drag.tab_id, drag.press_sequence)) {
             tab.tree.resizeInPlace(drag.handle, drag.start_ratio);
             self.layoutPaneDividerStep();
         }
@@ -11019,8 +11093,9 @@ pub const Host = struct {
         self.pane_divider_drag = null;
         self.pane_divider_press = null;
         self.pane_divider_button_held = true;
+        if (drag.moved) self.settlePaneDividerRepaints();
         const tab = self.paneDividerDragTab(drag) orelse {
-            if (drag.moved) _ = self.clearPaneDividerHistory(drag.tab_id);
+            if (drag.off_start) _ = self.clearPaneDividerHistory(drag.tab_id, drag.press_sequence);
             return;
         };
         if (tab.tree.nodes[drag.handle.idx()].split.ratio == drag.start_ratio) return;
@@ -11028,15 +11103,23 @@ pub const Host = struct {
         self.layoutPaneDividerStep();
     }
 
-    /// Lay the panes out for a divider step, with resize-settle repaints on:
-    /// a stream of WM_MOUSEMOVE outranks the panes' queued WM_PAINT, so
-    /// without them the panes would stay stale until the pointer paused.
-    /// Settle mode is what a frame resize uses after WM_EXITSIZEMOVE; its
-    /// deadline and its one synchronous paint per core tick bound it
-    /// (renderer.md, 2026-10-10), and each step pushes the deadline on.
+    /// Lay the panes out for a divider step. One pane the step resizes
+    /// paints synchronously on its WM_SIZE and the others queue
+    /// (`surface_presentation.paneDividerStepRepaintMode`): a stream of
+    /// WM_MOUSEMOVE outranks queued WM_PAINT, but a synchronous paint per
+    /// resized pane would wait for vsync once each, on every move. The
+    /// drag's end catches every pane up (`settlePaneDividerRepaints`).
     fn layoutPaneDividerStep(self: *Host) void {
-        self.startResizeSettleRepaints();
+        self.pane_divider_step_paints = 1;
+        defer self.pane_divider_step_paints = null;
         runUiActionOrLog("pane divider layout failed", self.layout());
+    }
+
+    /// After a drag that changed the panes, resize-settle repaints bring
+    /// every pane up to date, as after WM_EXITSIZEMOVE, within settle
+    /// mode's bounds (renderer.md, 2026-10-10).
+    fn settlePaneDividerRepaints(self: *Host) void {
+        self.startResizeSettleRepaints();
     }
 
     fn releasePaneDividerCapture(self: *Host) void {
@@ -11050,10 +11133,10 @@ pub const Host = struct {
     fn equalizePaneDivider(self: *Host, tab: *Tab, handle: SplitTreeSurface.Node.Handle) void {
         const ratio = PaneDividers.equalRatio(&tab.tree, handle) orelse return;
         if (ratio == tab.tree.nodes[handle.idx()].split.ratio) return;
-        if (!self.tryClearStructuralHistory(.normal)) return;
-        tab.clearRedoHistory();
+        if (!self.clearPaneDividerHistory(tab.id, self.app.next_undo_sequence)) return;
         tab.tree.resizeInPlace(handle, ratio);
         self.layoutPaneDividerStep();
+        self.settlePaneDividerRepaints();
     }
 
     pub fn layout(self: *Host) !void {

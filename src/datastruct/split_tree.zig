@@ -61,6 +61,20 @@ pub fn SplitTree(comptime V: type) type {
         /// operations may unzoom (e.g. resize).
         zoomed: ?Node.Handle,
 
+        /// Unique to this tree value among those made in the process (by
+        /// `init`, `clone`, `split`, `remove`, `equalize`, `resize`, or a
+        /// restore that builds one): a tree that replaced another has a new
+        /// one even at the same address and length, while in-place changes
+        /// (`resizeInPlace`, `zoom`) keep it. 0 for `empty`.
+        generation: u64 = 0,
+
+        var generation_counter: std.atomic.Value(u64) = .init(1);
+
+        /// A generation no tree of this type has had.
+        pub fn nextGeneration() u64 {
+            return generation_counter.fetchAdd(1, .monotonic);
+        }
+
         /// An empty tree.
         pub const empty: Self = .{
             // Arena can be undefined because we have zero allocated nodes.
@@ -122,6 +136,7 @@ pub fn SplitTree(comptime V: type) type {
                 .arena = arena,
                 .nodes = nodes,
                 .zoomed = null,
+                .generation = nextGeneration(),
             };
         }
 
@@ -161,6 +176,7 @@ pub fn SplitTree(comptime V: type) type {
                 .arena = arena,
                 .nodes = nodes,
                 .zoomed = self.zoomed,
+                .generation = nextGeneration(),
             };
         }
 
@@ -565,6 +581,7 @@ pub fn SplitTree(comptime V: type) type {
                 .nodes = nodes,
                 // Splitting always resets zoom state.
                 .zoomed = null,
+                .generation = nextGeneration(),
             };
         }
 
@@ -596,6 +613,7 @@ pub fn SplitTree(comptime V: type) type {
                 .arena = arena,
                 .nodes = nodes,
                 .zoomed = null,
+                .generation = nextGeneration(),
             };
 
             // Traverse the tree and copy all our nodes into place.
@@ -791,6 +809,7 @@ pub fn SplitTree(comptime V: type) type {
                 .arena = arena,
                 .nodes = nodes,
                 .zoomed = self.zoomed,
+                .generation = nextGeneration(),
             };
         }
 

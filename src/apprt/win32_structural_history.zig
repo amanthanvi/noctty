@@ -134,6 +134,48 @@ pub fn pruneExpired(
     return complete;
 }
 
+/// Disposes the entries recorded before `min_sequence_id` (their sequence is
+/// smaller), keeping the ones recorded since. False when an entry could not
+/// be disposed now; it stays.
+pub fn pruneBeforeSequence(
+    comptime Entry: type,
+    list: *List(Entry),
+    min_sequence_id: u64,
+    ctx: anytype,
+    disposeFn: anytype,
+) bool {
+    var complete = true;
+    var i: usize = 0;
+    while (i < list.items.len) {
+        if (list.items[i].sequence_id >= min_sequence_id) {
+            i += 1;
+            continue;
+        }
+        disposeFn(ctx, &list.items[i]) catch {
+            complete = false;
+            i += 1;
+            continue;
+        };
+        _ = list.orderedRemove(i);
+    }
+    return complete;
+}
+
+test "structural history prunes only the entries recorded before a sequence" {
+    var list: List(DummyEntry) = .empty;
+    defer list.deinit(std.testing.allocator);
+    var ctx: DummyCtx = .{};
+    for ([_]u64{ 3, 7, 5, 9 }) |sequence| try list.append(std.testing.allocator, .{ .timestamp_ms = 1, .sequence_id = sequence });
+    try std.testing.expect(pruneBeforeSequence(DummyEntry, &list, 6, &ctx, disposeDummy));
+    try std.testing.expectEqual(@as(usize, 2), list.items.len);
+    try std.testing.expectEqual(@as(u64, 7), list.items[0].sequence_id);
+    try std.testing.expectEqual(@as(u64, 9), list.items[1].sequence_id);
+    // An entry that cannot be disposed now stays, and says so.
+    ctx.fail_on_sequence = 7;
+    try std.testing.expect(!pruneBeforeSequence(DummyEntry, &list, 100, &ctx, disposeDummy));
+    try std.testing.expectEqual(@as(usize, 1), list.items.len);
+}
+
 pub fn evictOldest(
     comptime Entry: type,
     list: *List(Entry),

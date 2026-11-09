@@ -902,9 +902,10 @@ pub const App = struct {
     /// tree disposal happens once, after the native cascade completes.
     session_restore_rollback_host: ?*Host = null,
     windows_hidden: bool = false,
-    /// Keys pressed while a split divider drag held the mouse, whose
-    /// releases are swallowed too (`paneDividerDragKey`).
-    pane_divider_held_keys: std.StaticBitSet(256) = .initEmpty(),
+    /// Physical keys pressed while a split divider drag held the mouse,
+    /// whose repeats and releases are swallowed too (`paneDividerDragKey`,
+    /// indexed by `paneDividerPhysicalKey`).
+    pane_divider_held_keys: std.StaticBitSet(768) = .initEmpty(),
     quick_terminal_keyboard_diagnostic_logged: bool = false,
     update_notice: ?UpdateNotice = null,
     /// The host whose banner button started the running update action, so
@@ -1814,7 +1815,8 @@ pub const App = struct {
     /// Keys while a split divider drag holds the mouse, taken in the loop
     /// before `TranslateMessage`: Esc puts the split back
     /// (`Host.cancelPaneDividerDrag`), and no key press reaches a terminal,
-    /// a keybinding or a control until the button goes up, so nothing
+    /// a keybinding or a control until the button goes up, also after Esc
+    /// or a double-click ended the drag early (`paneDividerDragHost`), so nothing
     /// changes the panes under the drag and no Esc reaches the program.
     /// A press is the drag's when it starts during the drag (lParam bit 30,
     /// the previous key state, clear): its auto-repeats and its release are
@@ -1824,43 +1826,64 @@ pub const App = struct {
     /// repeats during the drag reach nothing, but its release is delivered.
     /// Returns whether the message was taken.
     pub fn paneDividerDragKey(self: *App, message: UINT, wParam: WPARAM, lParam: LPARAM) bool {
-        const vk: u8 = @truncate(wParam);
+        // Owned by physical key: left and right Shift share VK_SHIFT, and
+        // the terminal tells them apart (and main from keypad Enter), so a
+        // virtual key would hand one key's release to the other.
+        const key = paneDividerPhysicalKey(wParam, lParam);
         switch (message) {
             c.WM_KEYDOWN, c.WM_SYSKEYDOWN => {
                 const repeat = (@as(usize, @bitCast(lParam)) >> 30) & 1 != 0;
-                if (self.pane_divider_held_keys.isSet(vk)) {
+                if (self.pane_divider_held_keys.isSet(key)) {
                     if (repeat) return true;
                     // A fresh press of a key the drag held: its release
                     // went elsewhere (a focus change); it is not held now.
-                    self.pane_divider_held_keys.unset(vk);
+                    self.pane_divider_held_keys.unset(key);
                 }
                 const host = self.paneDividerDragHost() orelse return false;
                 if (repeat) return true;
-                self.pane_divider_held_keys.set(vk);
+                self.pane_divider_held_keys.set(key);
                 // With an IME composing, Windows hands the window
                 // VK_PROCESSKEY for every key, Esc included; the scan code
-                // (lParam bits 16-23) still says which. Its release may come
-                // as either key, so both are marked.
+                // still says which, and its release may come as either
+                // virtual key, on the same physical key.
+                const vk: u8 = @truncate(wParam);
                 const ime_escape = vk == c.VK_PROCESSKEY and ((@as(usize, @bitCast(lParam)) >> 16) & 0xFF) == escape_scan_code;
-                if (ime_escape) self.pane_divider_held_keys.set(c.VK_ESCAPE);
                 if (vk == c.VK_ESCAPE or ime_escape) host.cancelPaneDividerDrag();
                 return true;
             },
             c.WM_KEYUP, c.WM_SYSKEYUP => {
-                if (!self.pane_divider_held_keys.isSet(vk)) return false;
-                self.pane_divider_held_keys.unset(vk);
+                if (!self.pane_divider_held_keys.isSet(key)) return false;
+                self.pane_divider_held_keys.unset(key);
                 return true;
             },
             else => return false,
         }
     }
 
+    /// The app lost activation (WM_ACTIVATEAPP): a key the drag held can go
+    /// up, and down again, in another app, so a later repeat of it is a new
+    /// press's, not the drag's.
+    pub fn forgetPaneDividerHeldKeys(self: *App) void {
+        self.pane_divider_held_keys = .initEmpty();
+    }
+
+    /// A key message's physical key: its scan code and extended-key bit
+    /// (lParam bits 16-24), or, for a message with no scan code (an
+    /// injected VK_PACKET), 512 plus its virtual key.
+    fn paneDividerPhysicalKey(wParam: WPARAM, lParam: LPARAM) usize {
+        const scan = (@as(usize, @bitCast(lParam)) >> 16) & 0x1FF;
+        if (scan & 0xFF != 0) return scan;
+        return 512 + (wParam & 0xFF);
+    }
+
     /// Esc's set-1 scan code, which a VK_PROCESSKEY message still carries.
     const escape_scan_code = 0x01;
 
+    /// The host whose divider gesture holds the mouse: a drag, or the
+    /// button of one that ended early (Esc, a double-click), until it goes up.
     fn paneDividerDragHost(self: *App) ?*Host {
         for (self.registry.hosts.items) |host| {
-            if (host.pane_divider_drag != null) return host;
+            if (host.pane_divider_drag != null or host.pane_divider_button_held) return host;
         }
         return null;
     }

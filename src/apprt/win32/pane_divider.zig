@@ -22,7 +22,10 @@ pub const Point = struct { x: i32, y: i32 };
 /// How far (96 DPI) a divider's grab zone reaches into each pane beside it.
 /// With the 2 px gap that is an 8 px target at 100% and 10 at 150%, while a
 /// terminal keeps every pixel more than 3 DIP from its edge, which is mostly
-/// its `window-padding`.
+/// its `window-padding`. Beside a pane that can scroll, its overlay
+/// scrollbar's band (10 DIP at its right edge) keeps the margin on that
+/// side (`Surface.scrollbarBandAtScreen`), so the target there is the gap
+/// and the other pane's margin: 5 px at 100%, 6 at 150%.
 pub const grab_margin_dip: i32 = 3;
 
 /// The smallest (96 DPI) a drag leaves a pane, along the drag: about two
@@ -180,6 +183,7 @@ pub fn For(comptime Tree: type) type {
                 .lo = @max(0, minExtent(tree, spatial, content, s.left, s.layout, min) / span),
                 .hi = @min(1, 1 - minExtent(tree, spatial, content, s.right, s.layout, min) / span),
                 .extent = extent,
+                .min_px = min_px,
             };
         }
 
@@ -228,6 +232,9 @@ pub fn For(comptime Tree: type) type {
             hi: f32,
             /// The split's extent along its axis the bounds were measured at.
             extent: i32,
+            /// The minimum pane, in pixels, they were measured with: it
+            /// changes with the DPI while the extent may not.
+            min_px: i32,
         };
 
         /// The split's extent along its axis, in pixels.
@@ -572,6 +579,73 @@ test "pane divider: the minimum holds after the ratio is rounded to f16" {
             subject.resizeInPlace(.root, 0.5);
         }
     }
+}
+
+test "pane divider: the minimum holds after the ratio is rounded to f16, stacked" {
+    // A stacked split 3840 px tall: the same rounding, measured in heights.
+    const tall: Rect = .{ .left = 0, .top = 0, .right = 600, .bottom = 3840 };
+    var views = [_]TestView{ .{ .label = "A" }, .{ .label = "B" } };
+    var tree = try buildTree(&views, &.{.{ .at = .root, .direction = .down, .ratio = 0.5 }});
+    defer tree.deinit();
+    for ([_]i32{ 4000, -100 }) |along| {
+        var spatial = try tree.spatial(testing.allocator);
+        const found = Dividers.divider(&tree, spatial, tall, .root, 3).?;
+        const ratio = Dividers.dragRatio(&tree, spatial, tall, found, along, 40).?;
+        spatial.deinit(testing.allocator);
+        tree.resizeInPlace(.root, ratio);
+        var after = try tree.spatial(testing.allocator);
+        defer after.deinit(testing.allocator);
+        var it = tree.iterator();
+        while (it.next()) |entry| {
+            const height = win32_layout.roundedSlotPixel(@floatCast(after.slots[entry.handle.idx()].height), tall.height());
+            try testing.expect(height >= 40);
+        }
+        tree.resizeInPlace(.root, 0.5);
+    }
+}
+
+test "pane divider: no pane of a nested split rounds under its floor at the bounds" {
+    // `ratioAt` checks the dragged divider's pixel; a nested pane is laid
+    // out through more f16 slot arithmetic. Sweeps of 942,648 placements
+    // (three nested shapes, inner ratios 1/3 to 0.7, outer starts 0.2 to
+    // 0.8, side by side and stacked, 200 to 4000 px, both bounds) found
+    // none under its floor (40 px, or its size at the press if smaller);
+    // this keeps a sample of them.
+    const ratios = [_]f16{ 0.5, 0.3, 0.7, 1.0 / 3.0 };
+    var views = [_]TestView{ .{ .label = "A" }, .{ .label = "B" }, .{ .label = "C" } };
+    for ([_]TestTree.Split.Direction{ .right, .down }) |dir| for (0..2) |shape| for (ratios) |inner| {
+        var tree = try buildTree(views[0..2], &.{.{ .at = .root, .direction = dir, .ratio = 0.5 }});
+        defer tree.deinit();
+        {
+            var inserted = try TestTree.init(testing.allocator, &views[2]);
+            defer inserted.deinit();
+            const at = if (shape == 1) handleOfView(&tree, "A") else handleOfView(&tree, "B");
+            const next = try tree.split(testing.allocator, at, dir, inner, &inserted);
+            tree.deinit();
+            tree = next;
+        }
+        var span: i32 = 200;
+        while (span <= 4000) : (span += 37) {
+            const content: Rect = if (dir == .right) .{ .left = 0, .top = 0, .right = span, .bottom = 300 } else .{ .left = 0, .top = 0, .right = 300, .bottom = span };
+            for ([_]i32{ -100000, 100000 }) |along| {
+                tree.resizeInPlace(.root, 0.5);
+                var start = try tree.spatial(testing.allocator);
+                defer start.deinit(testing.allocator);
+                const d = Dividers.divider(&tree, start, content, .root, 3).?;
+                tree.resizeInPlace(.root, Dividers.dragRatio(&tree, start, content, d, along, 40).?);
+                var now = try tree.spatial(testing.allocator);
+                defer now.deinit(testing.allocator);
+                var it = tree.iterator();
+                while (it.next()) |e| {
+                    const axis_now: f16 = if (dir == .right) now.slots[e.handle.idx()].width else now.slots[e.handle.idx()].height;
+                    const axis_start: f16 = if (dir == .right) start.slots[e.handle.idx()].width else start.slots[e.handle.idx()].height;
+                    const px_now = win32_layout.roundedSlotPixel(@floatCast(axis_now), span);
+                    const px_start = win32_layout.roundedSlotPixel(@floatCast(axis_start), span);
+                    try testing.expect(px_now >= @min(40, px_start));
+                }
+            }
+        }
+    };
 }
 
 test "pane divider: a pane already below the minimum keeps its size and does not jump" {

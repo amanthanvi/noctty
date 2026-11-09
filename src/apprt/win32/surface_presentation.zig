@@ -236,6 +236,44 @@ pub fn surfaceSizeChangeRepaintMode(host: ?*const Host, now_ms: u64) SurfaceRepa
     return .queue;
 }
 
+/// A split divider drag step (`Host.layoutPaneDividerStep`) lets one pane
+/// it resizes paint synchronously on its WM_SIZE, so the panes keep up
+/// while the mouse moves, and queues the others; `remaining` is
+/// `Host.pane_divider_step_paints`, null outside a step. Several
+/// synchronous paints in one step would each wait for vsync, the cost the
+/// renderer's one synchronous paint per core tick avoids
+/// (`rendererTickRepaintMode`); the drag's end catches every pane up with
+/// resize-settle repaints. A live frame resize keeps deferring.
+pub fn paneDividerStepRepaintMode(mode: SurfaceRepaintRequestMode, remaining: *?u8) SurfaceRepaintRequestMode {
+    const left = remaining.* orelse return mode;
+    if (mode == .defer_until_flush) return mode;
+    if (left == 0) return .queue;
+    remaining.* = left - 1;
+    return .update_now;
+}
+
+test "a split divider drag step paints one resized pane synchronously and queues the rest" {
+    // No step in progress: modes pass through.
+    var none: ?u8 = null;
+    try std.testing.expectEqual(SurfaceRepaintRequestMode.update_now, paneDividerStepRepaintMode(.update_now, &none));
+    try std.testing.expectEqual(SurfaceRepaintRequestMode.queue, paneDividerStepRepaintMode(.queue, &none));
+    // A step that resizes four panes, with settle mode on (every pane's
+    // own mode is update_now): one synchronous paint, three queued.
+    var budget: ?u8 = 1;
+    var synchronous: usize = 0;
+    for (0..4) |_| {
+        if (paneDividerStepRepaintMode(.update_now, &budget) == .update_now) synchronous += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 1), synchronous);
+    // With settle mode off the first pane still paints at once.
+    budget = 1;
+    try std.testing.expectEqual(SurfaceRepaintRequestMode.update_now, paneDividerStepRepaintMode(.queue, &budget));
+    try std.testing.expectEqual(SurfaceRepaintRequestMode.queue, paneDividerStepRepaintMode(.queue, &budget));
+    // A live frame resize keeps deferring.
+    budget = 1;
+    try std.testing.expectEqual(SurfaceRepaintRequestMode.defer_until_flush, paneDividerStepRepaintMode(.defer_until_flush, &budget));
+}
+
 pub fn surfaceSizeChangePrimesRenderer(repaint_mode: SurfaceRepaintRequestMode) bool {
     return repaint_mode == .update_now;
 }
@@ -579,7 +617,8 @@ pub fn windowSizeChanged(self: *Surface) void {
     // guaranteeing a follow-up paint for the newly exposed pixels. Request
     // one from the child itself after `WM_SIZE`, when the default
     // framebuffer and client rect have both advanced to the new size.
-    const repaint_mode = surfaceSizeChangeRepaintMode(self.host, sys.GetTickCount64());
+    var repaint_mode = surfaceSizeChangeRepaintMode(self.host, sys.GetTickCount64());
+    if (self.host) |host| repaint_mode = paneDividerStepRepaintMode(repaint_mode, &host.pane_divider_step_paints);
     if (surfaceSizeChangePrimesRenderer(repaint_mode)) _ = self.beginRendererRepaintRequest();
     self.requestRepaintWithMode(repaint_mode) catch |err| {
         log.err("win32 size-change repaint request failed err={}", .{err});

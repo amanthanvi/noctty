@@ -1179,6 +1179,7 @@ pub fn buildRestoredSessionSplitTree(
         .arena = arena,
         .nodes = tree_nodes,
         .zoomed = null,
+        .generation = SplitTreeSurface.nextGeneration(),
     };
 }
 
