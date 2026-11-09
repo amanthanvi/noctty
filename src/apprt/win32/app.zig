@@ -815,6 +815,14 @@ pub const App = struct {
     /// Esc ended a tab drag; its key-up is taken too, so no terminal sees a
     /// release it never saw pressed.
     tab_drag_escape_down: bool = false,
+    /// The label's UIA element (`live_text`): it says what a drop does.
+    tab_drag_preview_uia_provider: ?*win32_uia.ChromeControlProvider = null,
+    /// What a drop does, as the label says it (`tabDragLabelAction`).
+    tab_drag_label_action: []const u8 = "",
+    /// The label's whole text, which its UIA element reads.
+    tab_drag_label_text: [256]u8 = undefined,
+    tab_drag_label_len: usize = 0,
+    tab_drag_preview_prev_proc: ?*const anyopaque = null,
     core_ticking: bool = false,
     quit_timer_id: ?UINT_PTR = null,
     terminal_handoff_idle_timer_id: ?UINT_PTR = null,
@@ -1842,7 +1850,11 @@ pub const App = struct {
         if (self.hasSessionWindows()) self.saveSessionAsItEnds();
         self.releaseSessionOwnership();
         self.destroyAllWindows();
+        win32.detachChromeControlProvider(self, &self.tab_drag_preview_uia_provider);
         if (self.tab_drag_preview_hwnd) |preview| {
+            setWindowData(preview, null);
+            if (self.tab_drag_preview_prev_proc) |previous| _ = sys.SetWindowLongPtrW(preview, c.GWLP_WNDPROC, @bitCast(@intFromPtr(previous)));
+            self.tab_drag_preview_prev_proc = null;
             _ = sys.DestroyWindow(preview);
             self.tab_drag_preview_hwnd = null;
         }
@@ -7779,6 +7791,11 @@ pub const App = struct {
     /// test executable cannot make the layered one.
     pub var test_tear_off_window_created: ?*const fn (*Host) anyerror!void = null;
 
+    /// Runs while `moveTabToWindow` activates the moved tab in its window,
+    /// with the window holding its size (`Host.hold_initial_size`), for the
+    /// test of what a moved pane's font change does then.
+    pub var test_tab_move_activating: ?*const fn (*Host, *Surface) anyerror!void = null;
+
     /// Where a tab leaving its window goes (`moveTabToWindow`).
     pub const TabMoveDest = union(enum) {
         /// A new window: where the tab was dropped, or (null, for
@@ -7898,6 +7915,11 @@ pub const App = struct {
         const landed = source.giveTab(at, target, insert);
         // The model removed the window it emptied (`move_tab_to_window`).
         if (source.tabs.items.len == 0) source.shell_id = null;
+        // Showing the tab puts the target's DPI's font into its panes, and
+        // with `window-width`/`window-height` set the core then asks for its
+        // window's size again (`recomputeInitialSize`): not of this window.
+        target.hold_initial_size = true;
+        defer target.hold_initial_size = false;
         // The panes stay in a live tab throughout; toasts follow them to
         // their new window.
         self.notifications.panesChanged();
@@ -7952,6 +7974,7 @@ pub const App = struct {
             // 2026-10-25 DPI-HIDDEN-TAB-BATCH-01 entry in window-frame.md).
             target.applyDpiChangeToVisibleSurfaces();
         }
+        if (test_tab_move_activating) |hook| hook(target, pane) catch |err| log.err("tab move test hook failed err={}", .{err});
         self.activateSurface(pane);
         var it = target.tabs.items[landed].tree.iterator();
         while (it.next()) |entry| entry.view.requestRepaint() catch |err| {
@@ -7993,7 +8016,10 @@ pub const App = struct {
     /// tab (the drop opens a new window instead), and neither does this
     /// process's quick terminal, a window kept empty for undo or a window
     /// whose strip is hidden or not under the point.
-    pub fn tabStripTargetAt(self: *App, screen: POINT, skip: ?HWND) ?tab_drag.Over {
+    /// `blocker` (the window a tab is dragged in) takes the point when it is
+    /// the topmost there, so a window under it takes no tab, while one over
+    /// it, an always-on-top window or one simply in front, does.
+    pub fn tabStripTargetAt(self: *App, screen: POINT, skip: ?HWND, blocker: ?HWND) ?tab_drag.Over {
         var next = sys.GetTopWindow(null);
         var guard: usize = 0;
         while (next) |hwnd| : (next = sys.GetWindow(hwnd, c.GW_HWNDNEXT)) {
@@ -8002,6 +8028,7 @@ pub const App = struct {
             if (skip) |skipped| if (hwnd == skipped) continue;
             if (self.tab_drag_preview_hwnd) |preview| if (hwnd == preview) continue;
             if (!takesDragPointer(hwnd, screen)) continue;
+            if (blocker) |source| if (hwnd == source) return null;
             const host = self.registry.findHostByHwnd(hwnd) orelse return null;
             if (host.quick_terminal or host.tabs.items.len == 0) return null;
             const strip = host.tabStripScreenRect() orelse return null;
@@ -8030,14 +8057,43 @@ pub const App = struct {
         }
     }
 
+    /// What the drag label says a drop does: "New window", "Move to this
+    /// window", or empty while no label shows.
+    pub fn tabDragLabelAction(self: *const App) []const u8 {
+        return self.tab_drag_label_action;
+    }
+
     pub fn endTabDragFeedback(self: *App) void {
         for (self.registry.hosts.items) |host| host.hideTabInsertMarker();
         self.hideTabDragPreview();
     }
 
     fn hideTabDragPreview(self: *App) void {
+        // The next label says what a drop does again.
+        self.tab_drag_label_action = "";
         const preview = self.tab_drag_preview_hwnd orelse return;
         _ = sys.ShowWindow(preview, c.SW_HIDE);
+    }
+
+    fn tabDragLabelUiaName(ctx: *anyopaque, _: usize, buf: []u8) []const u8 {
+        const self: *App = @ptrCast(@alignCast(ctx));
+        const len = @min(self.tab_drag_label_len, buf.len);
+        @memcpy(buf[0..len], self.tab_drag_label_text[0..len]);
+        return buf[0..len];
+    }
+
+    /// The label answers UIA with its live text element; the rest is the
+    /// STATIC's.
+    fn tabDragLabelProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.winapi) LRESULT {
+        const data: usize = @bitCast(sys.GetWindowLongPtrW(hwnd, c.GWLP_USERDATA));
+        const app: ?*App = if (data == 0) null else @ptrFromInt(data);
+        if (app) |self| {
+            if (msg == c.WM_GETOBJECT) if (self.tab_drag_preview_uia_provider) |provider| {
+                if (win32_uia.returnChromeControlProvider(hwnd, wParam, lParam, provider)) |lr| return lr;
+            };
+            if (self.tab_drag_preview_prev_proc) |previous| return sys.CallWindowProcW(previous, hwnd, msg, wParam, lParam);
+        }
+        return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
     }
 
     /// The label by the pointer during a tab drag: what a drop does, and
@@ -8062,6 +8118,23 @@ pub const App = struct {
             );
             const preview = self.tab_drag_preview_hwnd orelse return;
             _ = sys.SetLayeredWindowAttributes(preview, 0, 235, c.LWA_ALPHA);
+            // A UIA element of its own (accessibility.md 2026-04-16: every
+            // new widget gets a provider), live text, so a screen reader
+            // hears what a drop does when that changes.
+            setWindowData(preview, self);
+            const previous = sys.SetWindowLongPtrW(preview, c.GWLP_WNDPROC, @bitCast(@intFromPtr(&tabDragLabelProc)));
+            self.tab_drag_preview_prev_proc = if (previous == 0) null else @ptrFromInt(@as(usize, @bitCast(previous)));
+            if (self.com_initialized) {
+                self.tab_drag_preview_uia_provider = win32_uia.ChromeControlProvider.create(std.heap.page_allocator, preview, .{
+                    .ctx = @ptrCast(self),
+                    .role = .live_text,
+                    .name = &tabDragLabelUiaName,
+                    .use_com_threading = true,
+                }) catch |err| provider: {
+                    log.warn("tab drag label UIA provider unavailable err={}", .{err});
+                    break :provider null;
+                };
+            }
         }
         const preview = self.tab_drag_preview_hwnd orelse return;
         var utf8: [256]u8 = undefined;
@@ -8078,6 +8151,14 @@ pub const App = struct {
             std.unicode.utf8ToUtf16Le(utf16[0 .. utf16.len - 1], action) catch 0;
         utf16[units] = 0;
         _ = sys.SetWindowTextW(preview, @ptrCast(&utf16));
+        const kept = @min(text.len, self.tab_drag_label_text.len);
+        @memcpy(self.tab_drag_label_text[0..kept], text[0..kept]);
+        self.tab_drag_label_len = kept;
+        // Spoken when what a drop does changes, never per pointer move.
+        if (!std.mem.eql(u8, self.tab_drag_label_action, action)) {
+            self.tab_drag_label_action = action;
+            if (self.tab_drag_preview_uia_provider) |provider| provider.raiseLiveRegionChanged();
+        }
         if (source.chrome_font) |font| _ = sys.SendMessageW(preview, c.WM_SETFONT, @intFromPtr(font), 0);
         _ = sys.SetWindowPos(
             preview,
@@ -8106,7 +8187,7 @@ pub const App = struct {
         if (sys.IsZoomed(hwnd) != 0) return;
         var pointer: POINT = undefined;
         if (sys.GetCursorPos(&pointer) == 0) return;
-        const over = self.tabStripTargetAt(pointer, hwnd) orelse return;
+        const over = self.tabStripTargetAt(pointer, hwnd, null) orelse return;
         _ = self.requestTabMove(host, host.tabs.items[0].id, .{ .window = over });
     }
 
@@ -15031,6 +15112,199 @@ test "win32 a tab dragged onto another window's strip moves there at the pointer
             try std.testing.expectEqual(@as(usize, 3), target.tabs.items.len);
             try std.testing.expectEqual(@as(usize, 1), source.tabs.items.len);
             try app.validateShellNativeMapping();
+        }
+    }.body);
+}
+
+fn testWindowData(hwnd: HWND) usize {
+    return @bitCast(sys.GetWindowLongPtrW(hwnd, c.GWLP_USERDATA));
+}
+
+test "win32 a moved pane's search bar answers to its new window, and no child of it names the window it left" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    try runOnHiddenDesktop(struct {
+        var freed: usize = 0;
+        var named_freed: usize = 0;
+
+        fn visit(child: HWND, _: LPARAM) callconv(.winapi) BOOL {
+            if (testWindowData(child) == freed) named_freed += 1;
+            return 1;
+        }
+
+        fn body() !void {
+            var fixture: win32.WindowStartTestApp = .{};
+            try fixture.init();
+            defer fixture.deinit();
+            const app = &fixture.app;
+            app.shell_runtime_initialized = true;
+            const setup: TabMoveFixture = .{ .fixture = &fixture };
+            const source = try setup.window(1, false);
+            const target = try setup.window(2, false);
+            const pane = source.activeSurface().?;
+            try pane.ensureSearchBarControls();
+            const edit = pane.search_bar_edit_hwnd.?;
+            const buttons = [_]HWND{
+                pane.search_bar_prev_hwnd.?, pane.search_bar_next_hwnd.?, pane.search_bar_regex_hwnd.?,
+                pane.search_bar_case_hwnd.?, pane.search_bar_word_hwnd.?, pane.search_bar_close_hwnd.?,
+            };
+            try std.testing.expectEqual(@intFromPtr(source), testWindowData(edit));
+
+            // The only tab joins the other window, and its window is freed.
+            freed = @intFromPtr(source);
+            named_freed = 0;
+            try std.testing.expect(try app.moveTabToWindow(source, 0, .{ .host = .{ .host = target, .index = 0 } }));
+            try std.testing.expectEqual(target, pane.host.?);
+            // The edit and the buttons find their pane through their window.
+            try std.testing.expectEqual(@intFromPtr(target), testWindowData(edit));
+            for (buttons) |button| try std.testing.expectEqual(@intFromPtr(target), testWindowData(button));
+            try std.testing.expectEqual(pane, target.searchControlSurface(edit).?);
+            for (buttons) |button| try std.testing.expectEqual(pane, target.searchControlSurface(button).?);
+            // Nothing in the window names the freed one.
+            _ = sys.EnumChildWindows(target.hwnd.?, &visit, 0);
+            try std.testing.expectEqual(@as(usize, 0), named_freed);
+            try app.validateShellNativeMapping();
+        }
+    }.body);
+}
+
+test "win32 a tab dragged over another window on top of its own goes to the one on top" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    try runOnHiddenDesktop(struct {
+        fn post(button: HWND, msg: UINT, x: i32, y: i32) void {
+            const lx: u32 = @as(u16, @bitCast(@as(i16, @truncate(x))));
+            const ly: u32 = @as(u16, @bitCast(@as(i16, @truncate(y))));
+            _ = sys.SendMessageW(button, msg, if (msg == c.WM_LBUTTONUP) 0 else 1, @bitCast(@as(usize, (ly << 16) | lx)));
+        }
+
+        fn body() !void {
+            var fixture: win32.WindowStartTestApp = .{};
+            try fixture.init();
+            defer fixture.deinit();
+            const app = &fixture.app;
+            app.shell_runtime_initialized = true;
+            const setup: TabMoveFixture = .{ .fixture = &fixture };
+            const source = try setup.window(2, false);
+            const target = try setup.window(2, false);
+            var source_rect: RECT = undefined;
+            try std.testing.expect(sys.GetWindowRect(source.hwnd.?, &source_rect) != 0);
+            // The target over the middle of the source, above it (an
+            // always-on-top window, or simply one in front).
+            _ = sys.SetWindowPos(target.hwnd.?, @ptrFromInt(@as(usize, @bitCast(@as(isize, -1)))), source_rect.left + 120, source_rect.top + 160, 420, 260, c.SWP_NOACTIVATE);
+            try source.layout();
+            try target.layout();
+            const button = source.tabs.items[0].button_hwnd orelse return error.TestNoTabButton;
+            const strip = target.tabStripScreenRect() orelse return error.TestNoTabStrip;
+            const at: POINT = .{ .x = strip.left + 4, .y = strip.top + @divTrunc(strip.bottom - strip.top, 2) };
+            var local = at;
+            _ = sys.ScreenToClient(button, &local);
+
+            post(button, c.WM_LBUTTONDOWN, 20, 10);
+            post(button, c.WM_MOUSEMOVE, local.x, local.y);
+            switch (source.tab_drag_target) {
+                .window => |over| try std.testing.expectEqual(target.id, over.host_id),
+                else => return error.TestExpectedWindowTarget,
+            }
+            // The source over the target instead: the source covers that
+            // strip, and the drag stays where it is.
+            _ = sys.SetWindowPos(target.hwnd.?, @ptrFromInt(@as(usize, @bitCast(@as(isize, -2)))), 0, 0, 0, 0, c.SWP_NOMOVE | c.SWP_NOSIZE | c.SWP_NOACTIVATE);
+            _ = sys.SetWindowPos(target.hwnd.?, source.hwnd.?, 0, 0, 0, 0, c.SWP_NOMOVE | c.SWP_NOSIZE | c.SWP_NOACTIVATE);
+            post(button, c.WM_MOUSEMOVE, local.x + 1, local.y);
+            try std.testing.expect(source.tab_drag_target != .window);
+            post(button, c.WM_LBUTTONUP, local.x + 1, local.y);
+        }
+    }.body);
+}
+
+test "win32 a torn-off window keeps its size while its moved pane's font changes" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    try runOnHiddenDesktop(struct {
+        var before: RECT = undefined;
+        var after: RECT = undefined;
+        var ran = false;
+
+        /// What the core does as the moved pane takes the new window's DPI
+        /// with `window-width`/`window-height` set: an `initial_size` from
+        /// its new font (`Surface.recomputeInitialSize`).
+        fn activating(host: *Host, pane: *Surface) anyerror!void {
+            ran = true;
+            if (sys.GetWindowRect(host.hwnd.?, &before) == 0) return error.TestNoRect;
+            _ = try pane.app.performAction(.{ .surface = pane.core() }, .initial_size, .{ .width = 300, .height = 200 });
+            if (sys.GetWindowRect(host.hwnd.?, &after) == 0) return error.TestNoRect;
+        }
+
+        fn body() !void {
+            var fixture: win32.WindowStartTestApp = .{};
+            try fixture.init();
+            defer fixture.deinit();
+            const app = &fixture.app;
+            app.shell_runtime_initialized = true;
+            const setup: TabMoveFixture = .{ .fixture = &fixture };
+            const source = try setup.window(2, false);
+            const pane = source.activeSurface().?;
+            ran = false;
+            App.test_tab_move_activating = &activating;
+            defer App.test_tab_move_activating = null;
+            try std.testing.expect(try app.moveTabToWindow(source, 1, .{ .new_window = null }));
+            try std.testing.expect(ran);
+            try std.testing.expectEqualDeep(before, after);
+            // The size is still the pane's, for `reset_window_size`.
+            try std.testing.expectEqual(@as(u32, 300), pane.metrics.default_client_size.?.width);
+            // After the move it resizes its window again, as any pane does.
+            var resized: RECT = undefined;
+            _ = try app.performAction(.{ .surface = pane.core() }, .initial_size, .{ .width = 320, .height = 220 });
+            try std.testing.expect(sys.GetWindowRect(pane.host.?.hwnd.?, &resized) != 0);
+            try std.testing.expect(!std.meta.eql(resized, after));
+        }
+    }.body);
+}
+
+test "win32 a tab drag's label is a live UIA element that speaks when what a drop does changes, and the insert bar is decorative" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    try runOnHiddenDesktop(struct {
+        fn post(button: HWND, msg: UINT, x: i32, y: i32) void {
+            const lx: u32 = @as(u16, @bitCast(@as(i16, @truncate(x))));
+            const ly: u32 = @as(u16, @bitCast(@as(i16, @truncate(y))));
+            _ = sys.SendMessageW(button, msg, if (msg == c.WM_LBUTTONUP) 0 else 1, @bitCast(@as(usize, (ly << 16) | lx)));
+        }
+
+        fn body() !void {
+            var fixture: win32.WindowStartTestApp = .{};
+            try fixture.init();
+            defer fixture.deinit();
+            const app = &fixture.app;
+            app.shell_runtime_initialized = true;
+            const setup: TabMoveFixture = .{ .fixture = &fixture };
+            const source = try setup.window(2, false);
+            const target = try setup.window(2, false);
+            var source_rect: RECT = undefined;
+            try std.testing.expect(sys.GetWindowRect(source.hwnd.?, &source_rect) != 0);
+            _ = sys.SetWindowPos(target.hwnd.?, null, source_rect.right + 40, source_rect.top, 640, 480, c.SWP_NOZORDER | c.SWP_NOACTIVATE);
+            try source.layout();
+            try target.layout();
+            const button = source.tabs.items[0].button_hwnd orelse return error.TestNoTabButton;
+            const strip = target.tabStripScreenRect() orelse return error.TestNoTabStrip;
+            var on_strip: POINT = .{ .x = strip.left + 4, .y = strip.top + @divTrunc(strip.bottom - strip.top, 2) };
+            _ = sys.ScreenToClient(button, &on_strip);
+            var client: RECT = undefined;
+            try std.testing.expect(sys.GetClientRect(source.hwnd.?, &client) != 0);
+
+            const spoken = win32_uia.events.testing_live_regions;
+            post(button, c.WM_LBUTTONDOWN, 20, 10);
+            // Out of the window: "New window", said once however far it goes.
+            post(button, c.WM_MOUSEMOVE, 20, client.bottom + 200);
+            post(button, c.WM_MOUSEMOVE, 24, client.bottom + 210);
+            post(button, c.WM_MOUSEMOVE, 28, client.bottom + 220);
+            try std.testing.expectEqual(spoken + 1, win32_uia.events.testing_live_regions);
+            try std.testing.expect(app.tab_drag_preview_uia_provider != null);
+            try std.testing.expectEqualStrings("New window", app.tabDragLabelAction());
+            // Over the other window's strip: "Move to this window", once.
+            post(button, c.WM_MOUSEMOVE, on_strip.x, on_strip.y);
+            post(button, c.WM_MOUSEMOVE, on_strip.x + 1, on_strip.y);
+            try std.testing.expectEqual(spoken + 2, win32_uia.events.testing_live_regions);
+            try std.testing.expectEqualStrings("Move to this window", app.tabDragLabelAction());
+            try std.testing.expect(target.tab_insert_marker_uia_provider != null);
+            post(button, c.WM_LBUTTONUP, 20, 10);
+            TabMoveFixture.runPosted(source);
         }
     }.body);
 }

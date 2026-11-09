@@ -697,6 +697,7 @@ fn setInitialSize(host: *Host, pane: *Surface, size: apprt.action.InitialSize) !
         .height = @intCast(size.height),
     };
     const hwnd = host.hwnd orelse return;
+    if (host.hold_initial_size) return;
     if (host.top_level.isFullscreen() or sys.IsZoomed(hwnd) != 0 or paneCount(host) != 1) return;
     const client_size = scaleInitialClientSize(pane.metrics.default_client_size.?, pane.content_scale);
     try resizeClientArea(host, client_size.width, client_size.height);

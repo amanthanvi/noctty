@@ -71,13 +71,32 @@ pub const Button = struct { index: usize, left: i32, right: i32 };
 /// button whose middle is right of `x`, else after the last visible one.
 /// With no visible button it goes at the end.
 pub fn insertIndex(buttons: []const Button, x: i32, tab_count: usize) usize {
-    for (buttons) |button| {
-        const middle = button.left + @divTrunc(button.right - button.left, 2);
-        if (x < middle) return @min(button.index, tab_count);
-    }
-    if (buttons.len == 0) return tab_count;
-    return @min(buttons[buttons.len - 1].index + 1, tab_count);
+    var scan: InsertScan = .{ .x = x, .tab_count = tab_count };
+    for (buttons) |button| if (scan.add(button)) |index| return index;
+    return scan.end();
 }
+
+/// `insertIndex` one button at a time, left to right, with no list: a wide
+/// strip can show any number of tabs.
+pub const InsertScan = struct {
+    x: i32,
+    tab_count: usize,
+    last: ?usize = null,
+
+    /// The index, once a button's middle is right of the pointer.
+    pub fn add(self: *InsertScan, button: Button) ?usize {
+        const middle = button.left + @divTrunc(button.right - button.left, 2);
+        if (self.x < middle) return @min(button.index, self.tab_count);
+        self.last = button.index;
+        return null;
+    }
+
+    /// Past every button: after the last one shown, or at the end.
+    pub fn end(self: *const InsertScan) usize {
+        const last = self.last orelse return self.tab_count;
+        return @min(last + 1, self.tab_count);
+    }
+};
 
 pub const Offset = struct { x: i32, y: i32 };
 
@@ -147,6 +166,21 @@ test "a dropped tab goes before the first button whose middle is past the pointe
     try std.testing.expectEqual(@as(usize, 2), insertIndex(&all, 500, 2));
     try std.testing.expectEqual(@as(usize, 0), insertIndex(&all, 10, 2));
     try std.testing.expectEqual(@as(usize, 3), insertIndex(&.{}, 10, 3));
+}
+
+test "a dropped tab's index counts every tab shown, past 64 of them" {
+    // 70 tabs, all shown, 20 px each: a drop right of the 65th goes after it.
+    var buttons: [70]Button = undefined;
+    for (&buttons, 0..) |*button, i| {
+        const left: i32 = @intCast(i * 20);
+        button.* = .{ .index = i, .left = left, .right = left + 20 };
+    }
+    try std.testing.expectEqual(@as(usize, 65), insertIndex(&buttons, 64 * 20 + 15, 70));
+    try std.testing.expectEqual(@as(usize, 69), insertIndex(&buttons, 68 * 20 + 15, 70));
+    try std.testing.expectEqual(@as(usize, 70), insertIndex(&buttons, 2000, 70));
+    var scan: InsertScan = .{ .x = 64 * 20 + 15, .tab_count = 70 };
+    for (buttons[0..65]) |button| try std.testing.expect(scan.add(button) == null);
+    try std.testing.expectEqual(@as(usize, 65), scan.add(buttons[65]).?);
 }
 
 test "the pointer keeps its place over the tab in the new window" {

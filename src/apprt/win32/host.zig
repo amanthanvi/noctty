@@ -842,12 +842,20 @@ pub const Host = struct {
     /// the bar where the tab would go.
     tab_insert_marker_hwnd: ?HWND = null,
     tab_insert_marker_placement: ChildPlacement = .{},
+    /// The insert bar's UIA element: decorative, since the drag label says
+    /// where the tab goes.
+    tab_insert_marker_uia_provider: ?*win32_uia.ChromeControlProvider = null,
+    tab_insert_marker_prev_proc: ?*const anyopaque = null,
     /// A tab move asked of this window, run from the message loop
     /// (`c.WM_WINHOSTTY_TAB_MOVE`, `App.runPendingTabMove`).
     pending_tab_move: ?TabMoveRequest = null,
     /// This window's only tab started a window move (`beginOnlyTabWindowMove`);
     /// where it ends decides whether the tab joins another window's strip.
     only_tab_window_move: ?RECT = null,
+    /// A moved tab is being shown here (`App.moveTabToWindow`): a pane's
+    /// `initial_size` from its new DPI's font records its size but does not
+    /// resize the window, whose size the move decided (`placeTearOff`).
+    hold_initial_size: bool = false,
 
     // Hover tooltip for the tab strip. Created on the first hover that has
     // something to show and reused after that; `tab_tooltip_tab_id` names the
@@ -3005,7 +3013,8 @@ pub const Host = struct {
         }
         destroyChildWindow(&self.palette_list_hwnd);
         destroyChildWindow(&self.tab_drop_preview_hwnd);
-        destroyChildWindow(&self.tab_insert_marker_hwnd);
+        detachChromeControlProvider(self.app, &self.tab_insert_marker_uia_provider);
+        destroySubclassedWindow(&self.tab_insert_marker_hwnd, &self.tab_insert_marker_prev_proc);
         detachChromeControlProvider(self.app, &self.tab_tooltip_uia_provider);
         destroyChildWindow(&self.tab_tooltip_hwnd);
         self.tab_tooltip_tab_id = null;
@@ -3669,18 +3678,15 @@ pub const Host = struct {
     /// of the strip keeps a stale rect, so only the shown ones count (the
     /// 2026-09-19 entry in chrome-tabs-paint.md).
     pub fn tabInsertIndexAtScreenX(self: *Host, x: i32) usize {
-        var buttons: [64]tab_drag.Button = undefined;
-        var count: usize = 0;
+        var scan: tab_drag.InsertScan = .{ .x = x, .tab_count = self.tabs.items.len };
         for (self.tabs.items, 0..) |tab, i| {
-            if (count == buttons.len) break;
             if (!tab.button_placement.visible_known or !tab.button_placement.visible) continue;
             const button = tab.button_hwnd orelse continue;
             var rect: RECT = undefined;
             if (sys.GetWindowRect(button, &rect) == 0) continue;
-            buttons[count] = .{ .index = i, .left = rect.left, .right = rect.right };
-            count += 1;
+            if (scan.add(.{ .index = i, .left = rect.left, .right = rect.right })) |index| return index;
         }
-        return tab_drag.insertIndex(buttons[0..count], x, self.tabs.items.len);
+        return scan.end();
     }
 
     /// The bar that shows where a tab dragged from another window would go
@@ -3717,9 +3723,37 @@ pub const Host = struct {
             self.tab_insert_marker_placement = .{};
         }
         const marker = self.tab_insert_marker_hwnd orelse return;
+        if (self.tab_insert_marker_uia_provider == null) {
+            setWindowData(marker, self);
+            const previous = sys.SetWindowLongPtrW(marker, c.GWLP_WNDPROC, @bitCast(@intFromPtr(&tabInsertMarkerProc)));
+            self.tab_insert_marker_prev_proc = if (previous == 0) null else @ptrFromInt(@as(usize, @bitCast(previous)));
+            self.tab_insert_marker_uia_provider = self.createChromeUiaProvider(marker, .{
+                .ctx = @ptrCast(self),
+                .role = .decorative,
+                .name = &tabInsertMarkerUiaName,
+            });
+        }
         _ = applyChildRect(marker, &self.tab_insert_marker_placement, rect);
         if (applyChildVisibility(marker, &self.tab_insert_marker_placement, true)) raiseChildToTop(hwnd, marker);
         _ = sys.InvalidateRect(marker, null, 0);
+    }
+
+    fn tabInsertMarkerUiaName(_: *anyopaque, _: usize, _: []u8) []const u8 {
+        return "";
+    }
+
+    /// The insert bar answers UIA with its decorative element; the rest is
+    /// the STATIC's.
+    fn tabInsertMarkerProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.winapi) LRESULT {
+        const data: usize = @bitCast(sys.GetWindowLongPtrW(hwnd, c.GWLP_USERDATA));
+        const host: ?*Host = if (data == 0) null else @ptrFromInt(data);
+        if (host) |v| {
+            if (msg == c.WM_GETOBJECT) if (v.tab_insert_marker_uia_provider) |provider| {
+                if (win32_uia.returnChromeControlProvider(hwnd, wParam, lParam, provider)) |lr| return lr;
+            };
+            if (v.tab_insert_marker_prev_proc) |previous| return sys.CallWindowProcW(previous, hwnd, msg, wParam, lParam);
+        }
+        return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
     }
 
     pub fn hideTabInsertMarker(self: *Host) void {
@@ -3782,7 +3816,7 @@ pub const Host = struct {
             .inside_source = inside,
             .outside_strip = tab_drag.leavesStrip(client.y, 0, band, @max(self.scaled(16), @divTrunc(band, 2))),
             .split_zone = self.tab_drop_operation != .none,
-            .over = if (inside) null else self.app.tabStripTargetAt(screen, hwnd),
+            .over = self.app.tabStripTargetAt(screen, null, hwnd),
         });
         self.tab_drag_target = target;
         // A tear-off or a move takes no split zone of this window.
@@ -3906,6 +3940,23 @@ pub const Host = struct {
             // controls that paint themselves solid as they arrive.
             window_state.childCreated(target, child);
         }
+        // The search edit and its six buttons find their pane through the
+        // Host in their window data (`searchEditProc`, `hostButtonProc`,
+        // `Host.searchControlSurface`); the pane, its quick-select overlay,
+        // the scrollbar, the search frame and the results chip name the
+        // Surface itself, which moves with them. Left naming the window the
+        // tab left, search stopped in the new one, and once an only tab's
+        // merge freed that window, they read freed memory.
+        const host_named = [_]?HWND{
+            surface.search_bar_edit_hwnd,
+            surface.search_bar_prev_hwnd,
+            surface.search_bar_next_hwnd,
+            surface.search_bar_regex_hwnd,
+            surface.search_bar_case_hwnd,
+            surface.search_bar_word_hwnd,
+            surface.search_bar_close_hwnd,
+        };
+        for (host_named) |control| if (control) |child| setWindowData(child, target);
         if (surface.scrollbar_hwnd) |bar| stackChildAbove(bar, pane);
         // The pseudo console's window, which a console program parents its
         // dialogs to, is owned by the window it opened in (`consoleOwner`).

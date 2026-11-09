@@ -105,11 +105,14 @@ function Launch-Case([string]$Name,[string]$RendererName) {
     $dir=Join-Path $Run "$Name\bin"; Copy-Portable $Bin $dir
     $config=Join-Path $dir 'case.ghostty'
     # cmd.exe, which keeps no PSReadLine history, prints a marker of its own
-    # (`%RANDOM%`, which cmd expands) for the move to keep.
+    # (`%RANDOM%`, which cmd expands) for the move to keep. `direct:` with the
+    # System32 path: a shell string runs under Exec's outer `cmd /c`, whose
+    # AutoRun hooks an inner /D does not turn off (test-harnesses.md).
+    $cmd=Join-Path ([Environment]::GetFolderPath('System')) 'cmd.exe'
     @("working-directory = $dir",'single-instance = false','window-save-state = never',
       'copy-on-select = false','clipboard-read = deny','clipboard-write = deny',
       'confirm-close-surface = false','shell-integration = none',
-      'command = cmd.exe /d /k echo TEAROFF-%RANDOM%-%RANDOM%',
+      "command = direct:$cmd /d /k echo TEAROFF-%RANDOM%-%RANDOM%",
       "renderer = $RendererName",
       'keybind = f6=new_tab','keybind = f7=move_tab_to_new_window','keybind = f9=close_surface') | Set-Content -LiteralPath $config
     $exe=Join-Path $dir 'noctty.exe'
@@ -218,8 +221,7 @@ function Measure-Case([string]$RendererName) {
         $p2=New-Pane $case $p1
         $m1=Wait-Marker $p1; $m2=Wait-Marker $p2
         Check "${RendererName}: each shell printed its marker" ($null -ne $m1 -and $null -ne $m2 -and $m1 -ne $m2) 'two markers' @{One=($null -ne $m1);Two=($null -ne $m2)}
-        # Exec runs a command through an outer `cmd /c`, so a pane's shell is
-        # two cmd.exe processes: compare the sets, never a count per pane.
+        # Compare PID sets, never a count per pane: a shell may start helpers.
         [void](Wait-Until { (Shell-Pids $case).Count -ge 2 } 10)
         Start-Sleep -Milliseconds 500
         $pids=Shell-Pids $case
