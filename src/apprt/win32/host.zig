@@ -750,6 +750,10 @@ pub const Host = struct {
     /// `WM_NCMOUSELEAVE`.
     caption_hover: CaptionButton = .none,
     caption_pressed: CaptionButton = .none,
+    /// The integrated titlebar's Close took the press and holds the pointer
+    /// (`SetCapture`) until the release, which closes the window only over
+    /// Close; a capture lost meanwhile forgets the press.
+    caption_close_held: bool = false,
     /// Last zoomed state the caption buttons were announced with. The
     /// middle button's UIA name is "Maximize" or "Restore", so a flip has
     /// to raise a Name property-changed event.
@@ -1950,15 +1954,17 @@ pub const Host = struct {
     const history_floor_message = "Undo history from before a tab moved is still being cleared.";
 
     pub fn applyLatestStructuralUndo(self: *Host) !?[]const u8 {
+        // From before a tab move: disposed, never replayed. No live tab
+        // changes, so nothing to refresh or audit, which also holds when a
+        // move is still under way.
+        if (self.peekStructuralUndo()) |newest| if (newest.sequence_id < self.history_floor) {
+            return if (self.discardNewestStructuralUndo()) null else history_floor_message;
+        };
         // Replays move panes between tabs; their status badges follow.
         defer self.refreshAllTabStatus();
         // Once the replay's activation is done: an undo may show another
         // tab than the model has in front until it activates it.
         defer self.app.auditShellNativeMapping("structural-undo");
-        if (self.peekStructuralUndo()) |newest| if (newest.sequence_id < self.history_floor) {
-            // From before a tab move: disposed, never replayed.
-            return if (self.discardNewestStructuralUndo()) null else history_floor_message;
-        };
         const entry = (try self.popStructuralUndo()) orelse return null;
         errdefer self.restoreLastStructuralUndoPop();
 
@@ -2004,12 +2010,12 @@ pub const Host = struct {
     }
 
     pub fn applyLatestStructuralRedo(self: *Host) !?[]const u8 {
-        // Replays move panes between tabs; their status badges follow.
-        defer self.refreshAllTabStatus();
-        defer self.app.auditShellNativeMapping("structural-redo");
         if (self.peekStructuralRedo()) |newest| if (newest.sequence_id < self.history_floor) {
             return if (self.discardNewestStructuralRedo()) null else history_floor_message;
         };
+        // Replays move panes between tabs; their status badges follow.
+        defer self.refreshAllTabStatus();
+        defer self.app.auditShellNativeMapping("structural-redo");
         const entry = (try self.popStructuralRedo()) orelse return null;
         errdefer self.restoreLastStructuralRedoPop();
 
@@ -2400,7 +2406,10 @@ pub const Host = struct {
     pub fn handleNcMouseLeave(self: *Host) void {
         self.caption_track_armed = false;
         self.setCaptionHover(.none);
-        self.clearCaptionPressed();
+        // A press on Close holds the pointer (`caption_close_held`): the
+        // pointer may leave the frame and come back before the release, as
+        // with a stock caption button (council round 7 L1).
+        if (!self.caption_close_held) self.clearCaptionPressed();
     }
 
     pub const paletteSnapshot = palette_controller.HostControls.paletteSnapshot;
@@ -3983,6 +3992,7 @@ pub const Host = struct {
     pub fn giveTab(self: *Host, tab_id: u32, target: *Host, insert: usize) ?usize {
         const previous_tab_id = if (self.active_tab < self.tabs.items.len) self.tabs.items[self.active_tab].id else null;
         const first = self.findTabIndexById(tab_id) orelse return null;
+        const target_id = target.id;
         // A prompt one of its terminals raised stays with this window and
         // would answer a terminal that has left it.
         self.cancelConfirmFromTab(&self.tabs.items[first]);
@@ -4009,6 +4019,8 @@ pub const Host = struct {
         // it ended) can close a tab: found again by id, and gone, nothing
         // moves (Greptile r4510568134).
         const index = self.findTabIndexById(tab_id) orelse return null;
+        // So can the window it joins go; then the tab stays here.
+        if (self.app.registry.findHostById(target_id) == null) return null;
         var tab = self.tabs.orderedRemove(index);
         self.destroyTabButton(&tab);
         tab.button_placement = .{};

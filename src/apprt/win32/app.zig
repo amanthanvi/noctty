@@ -7837,7 +7837,7 @@ pub const App = struct {
     /// around the history clear after the commit (`.history`,
     /// `.after_history`), for the tests that make them fail.
     pub var test_tab_move_shell_step: ?*const fn (*App, TabMoveShellStep) void = null;
-    pub const TabMoveShellStep = enum { retry_prepare, commit, history, after_history };
+    pub const TabMoveShellStep = enum { retry_prepare, commit, history, source_history_retired, after_history };
 
     pub const PendingTabMove = struct { host_id: u32, request: Host.TabMoveRequest };
 
@@ -8004,10 +8004,18 @@ pub const App = struct {
             },
             .host => |to| to.host,
         };
+        // Making the window ran its window procedures, whose code can close
+        // the window the tab is leaving (council round 7, CodeRabbit review
+        // 5823245522): it is found again by id before anything reads it.
+        if (self.registry.findHostById(source_id) == null) {
+            // Not an error, so the errdefer does not run.
+            if (created) |host| self.discardUnusedHost(host);
+            return false;
+        }
         try target.tabs.ensureUnusedCapacity(self.core_app.alloc, 1);
         const target_id = target.id;
-        // Making the window ran its window procedures: the tab is found again
-        // by id, and a tab gone meanwhile is a move with nothing to do.
+        // The tab is found again by id too, and a tab gone meanwhile is a
+        // move with nothing to do.
         var at = source.findTabIndexById(tab_id) orelse {
             // Not an error, so the errdefer does not run.
             if (created) |host| self.discardUnusedHost(host);
@@ -8035,7 +8043,10 @@ pub const App = struct {
                 else => return err,
             };
             if (shell_prepared == null) {
-                try clearMoveHistory(source, dest);
+                try self.clearMoveHistory(source_id, switch (dest) {
+                    .new_window => null,
+                    .host => target_id,
+                });
                 history_cleared = true;
                 if (builtin.is_test) {
                     if (test_tab_move_shell_step) |hook| hook(self, .retry_prepare);
@@ -8078,9 +8089,11 @@ pub const App = struct {
 
         // Nothing fails from here on. The tab moves first, and nothing
         // between the commit and here runs a window's code: disposing undo
-        // history closes windows, whose hooks (WinEvent, UIA) can run code
-        // that closes a tab, so the moving tab is never in flight then
-        // (CodeRabbit review 5822445361).
+        // history closes windows, so the moving tab is never in flight then
+        // (CodeRabbit review 5822445361). That window code closing a tab is
+        // a defensive premise: no in-process path does today (UIA
+        // disconnects are deferred, the one WinEvent hook is out of context
+        // and watches cloaking only), but nothing here may rely on that.
         const new_window = created != null;
         created = null;
         // By id: what `giveTab` runs first (a confirm's cancel, the prompts it
@@ -8098,7 +8111,10 @@ pub const App = struct {
         if (builtin.is_test) {
             if (test_tab_move_shell_step) |hook| hook(self, .history);
         }
-        if (!history_cleared) self.retireMoveHistory(source, dest);
+        if (!history_cleared) self.retireMoveHistory(source_id, switch (dest) {
+            .new_window => null,
+            .host => target_id,
+        });
         if (builtin.is_test) {
             if (test_tab_move_shell_step) |hook| hook(self, .after_history);
         }
@@ -8138,16 +8154,23 @@ pub const App = struct {
         // The moved tab, shown and focused in its window, unless it closed
         // while history was disposed.
         show: {
-            const landed_at = landed_now orelse break :show;
-            self.showMovedTab(target, landed_at, new_window);
+            const shown = self.registry.findHostById(target_id) orelse break :show;
+            const landed_at = (if (landed_now != null) if (moved_id) |id| shown.findTabIndexById(id) else null else null) orelse break :show;
+            self.showMovedTab(shown, landed_at, new_window);
         }
 
         // The end of the move, in one order, with no defer left to touch a
         // window after one is freed: the size hold goes, then each window
         // left with no tab settles, after the target took the foreground.
-        if (target_live) target.hold_initial_size = false;
-        if (target_emptied) self.settleEmptiedHost(target);
-        if (source_emptied) self.settleEmptiedHost(source);
+        // Found again by id: what ran since (activation, the show) is window
+        // code too.
+        if (self.registry.findHostById(target_id)) |host| {
+            host.hold_initial_size = false;
+            if (target_emptied and host.tabs.items.len == 0) self.settleEmptiedHost(host);
+        }
+        if (source_emptied) if (self.registry.findHostById(source_id)) |host| {
+            if (host.tabs.items.len == 0) self.settleEmptiedHost(host);
+        };
         self.auditShellNativeMapping("tab-move-window");
         return true;
     }
@@ -8241,18 +8264,30 @@ pub const App = struct {
     /// that keeps it from ever replaying (`Host.history_floor`): its entries
     /// keep tab indices and panes of the windows as they were before the
     /// move. An undo or redo that reaches one disposes it instead.
-    fn retireMoveHistory(self: *App, source: *Host, dest: TabMoveDest) void {
+    ///
+    /// By window id, each window found again before its clear: a disposal
+    /// closes windows, whose code can close the other window (council round
+    /// 7 M1b). And both windows' history is held from replay before either
+    /// clear begins, not only after one fails: code a disposal in one window
+    /// runs could otherwise undo in the other and put a tab back at an index
+    /// from before the move (CodeRabbit review 5823245522). Like the rest of
+    /// that premise, defensive: no in-process path runs such code today.
+    fn retireMoveHistory(self: *App, source_id: u32, target_id: ?u32) void {
         const floor = self.next_undo_sequence;
-        retireHostHistory(source, floor);
-        switch (dest) {
-            .new_window => {},
-            .host => |to| retireHostHistory(to.host, floor),
+        for ([_]?u32{ source_id, target_id }) |maybe| {
+            const id = maybe orelse continue;
+            const host = self.registry.findHostById(id) orelse continue;
+            host.history_floor = @max(host.history_floor, floor);
         }
+        if (self.registry.findHostById(source_id)) |host| retireHostHistory(host);
+        if (builtin.is_test) {
+            if (test_tab_move_shell_step) |hook| hook(self, .source_history_retired);
+        }
+        if (target_id) |id| if (self.registry.findHostById(id)) |host| retireHostHistory(host);
     }
 
-    fn retireHostHistory(host: *Host, floor: u64) void {
+    fn retireHostHistory(host: *Host) void {
         if (host.tryClearStructuralHistory(.normal)) return;
-        host.history_floor = @max(host.history_floor, floor);
         log.warn("tab move left undo history it could not dispose; it will not replay", .{});
     }
 
@@ -8260,12 +8295,16 @@ pub const App = struct {
     /// aborts the move, so each window's history is still its own and the
     /// destination's is left whole, not cleared for a move that does not
     /// happen. After a commit, `retireMoveHistory` clears both.
-    fn clearMoveHistory(source: *Host, dest: TabMoveDest) !void {
-        if (!source.tryClearStructuralHistory(.normal)) return error.HistoryDisposalDeferred;
-        switch (dest) {
-            .new_window => {},
-            .host => |to| if (!to.host.tryClearStructuralHistory(.normal)) return error.HistoryDisposalDeferred,
+    /// By window id, as `retireMoveHistory`: the source's clear can close
+    /// the destination. A window gone is left to the caller, which finds
+    /// both again.
+    fn clearMoveHistory(self: *App, source_id: u32, target_id: ?u32) !void {
+        if (self.registry.findHostById(source_id)) |host| {
+            if (!host.tryClearStructuralHistory(.normal)) return error.HistoryDisposalDeferred;
         }
+        if (target_id) |id| if (self.registry.findHostById(id)) |host| {
+            if (!host.tryClearStructuralHistory(.normal)) return error.HistoryDisposalDeferred;
+        };
     }
 
     /// A window `moveTabToWindow` made and could not use: still hidden,
@@ -16836,6 +16875,7 @@ test "win32 window cycling passes over a window kept empty for its undo history 
             const source = try setup.window(2, false);
             const target = try setup.window(1, false);
             const third = try setup.window(1, false);
+            const fourth = try setup.window(1, false);
             fixture.core_app.deleteSurface(source.tabs.items[0].focusedSurface().?);
             try std.testing.expect(try app.closeTabUndoable(source, 0));
             App.test_tab_move_shell_step = &TestHistoryDisposalFailure.hook;
@@ -16843,13 +16883,21 @@ test "win32 window cycling passes over a window kept empty for its undo history 
             try std.testing.expect(try app.moveTabToWindow(source, 0, .{ .host = .{ .host = target, .index = 1 } }));
             App.test_tab_move_shell_step = null;
             try std.testing.expect(source.destroy_after_structural_dispose);
-            // The windows in order: the kept source, the target, the third.
-            // From the third, the next is past the source: the target; and
-            // from the target, the previous is past it: the third.
-            const from_third = third.activeSurface().?;
-            try std.testing.expect(try app.gotoWindow(.{ .surface = from_third.core() }, .next));
-            const from_target = target.activeSurface().?;
-            try std.testing.expect(try app.gotoWindow(.{ .surface = from_target.core() }, .previous));
+            // The windows in order: the kept source (nothing to show), the
+            // target, the third, the fourth. Each step lands on the window
+            // after or before, the source passed over.
+            const Step = struct { from: *Host, direction: apprt.action.GotoWindow, to: *Host };
+            for ([_]Step{
+                .{ .from = fourth, .direction = .next, .to = target },
+                .{ .from = target, .direction = .previous, .to = fourth },
+                .{ .from = target, .direction = .next, .to = third },
+                .{ .from = third, .direction = .previous, .to = target },
+                .{ .from = third, .direction = .next, .to = fourth },
+            }) |step| {
+                try std.testing.expect(try app.gotoWindow(.{ .surface = step.from.activeSurface().?.core() }, step.direction));
+                // The keyboard is in the window it landed on.
+                try std.testing.expectEqual(step.to.activeSurface().?.hwnd, sys.GetFocus());
+            }
         }
     }.body);
 }
@@ -17125,6 +17173,218 @@ test "win32 a tab move whose destination empties while history is disposed write
             try std.testing.expect(app.registry.findHostById(target_id) == null);
             try std.testing.expectEqual(@as(usize, 1), source.tabs.items.len);
             try app.validateShellNativeMapping();
+        }
+    }.body);
+}
+
+const TestExitTargetPanes = struct {
+    var target: ?*Host = null;
+    var core: ?*CoreApp = null;
+
+    /// While undo history is disposed, every pane of the window the tab
+    /// joined closes as an exited shell's does (`Surface.close`), and
+    /// `windowDestroyed` frees that window.
+    fn hook(_: *App, step: App.TabMoveShellStep) void {
+        if (step != .history) return;
+        const host = target orelse return;
+        target = null;
+        // The last pane's close frees the window: nothing reads it after.
+        const app = host.app;
+        const id = host.id;
+        while (app.registry.findHostById(id)) |live| {
+            if (live.tabs.items.len == 0) return;
+            const before = live.tabs.items.len;
+            const pane = live.tabs.items[0].focusedSurface().?;
+            core.?.deleteSurface(pane);
+            pane.close(false);
+            const after = app.registry.findHostById(id) orelse return;
+            if (after.tabs.items.len >= before) return;
+        }
+    }
+};
+
+test "win32 a tab move whose destination's panes all exit while history is disposed clears no history through the freed window (council round 7 M1b)" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    try runOnHiddenDesktop(struct {
+        fn body() !void {
+            var fixture: win32.WindowStartTestApp = .{};
+            try fixture.init();
+            defer fixture.deinit();
+            const app = &fixture.app;
+            app.shell_runtime_initialized = true;
+            const setup: TabMoveFixture = .{ .fixture = &fixture };
+            const source = try setup.window(2, false);
+            const target = try setup.window(1, false);
+            const target_id = target.id;
+            TestExitTargetPanes.target = target;
+            TestExitTargetPanes.core = &fixture.core_app;
+            App.test_tab_move_shell_step = &TestExitTargetPanes.hook;
+            defer App.test_tab_move_shell_step = null;
+            try std.testing.expect(try app.moveTabToWindow(source, 0, .{ .host = .{ .host = target, .index = 1 } }));
+            App.test_tab_move_shell_step = null;
+            try std.testing.expect(app.registry.findHostById(target_id) == null);
+            try std.testing.expectEqual(@as(usize, 1), source.tabs.items.len);
+            try app.validateShellNativeMapping();
+        }
+    }.body);
+}
+
+const TestUndoInTargetMidRetire = struct {
+    var target: ?*Host = null;
+    var replayed: ?[]const u8 = null;
+    var ran = false;
+
+    /// Between the two windows' history clears, window code runs an undo in
+    /// the window the tab joined: what a hook during the source's disposal
+    /// could do.
+    fn hook(_: *App, step: App.TabMoveShellStep) void {
+        if (step != .source_history_retired) return;
+        const host = target orelse return;
+        target = null;
+        ran = true;
+        replayed = host.applyLatestStructuralUndo() catch null;
+    }
+};
+
+test "win32 an undo in the destination while the source's history is retired replays nothing from before the move (CodeRabbit review 5823245522)" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    try runOnHiddenDesktop(struct {
+        fn body() !void {
+            var fixture: win32.WindowStartTestApp = .{};
+            try fixture.init();
+            defer fixture.deinit();
+            const app = &fixture.app;
+            app.shell_runtime_initialized = true;
+            const setup: TabMoveFixture = .{ .fixture = &fixture };
+            const source = try setup.window(2, false);
+            const target = try setup.window(2, false);
+            // A closed tab kept for undo in the destination, from before the
+            // move.
+            fixture.core_app.deleteSurface(target.tabs.items[0].focusedSurface().?);
+            try std.testing.expect(try app.closeTabUndoable(target, 0));
+            try std.testing.expectEqual(@as(usize, 1), target.tabs.items.len);
+            TestUndoInTargetMidRetire.target = target;
+            TestUndoInTargetMidRetire.replayed = null;
+            TestUndoInTargetMidRetire.ran = false;
+            App.test_tab_move_shell_step = &TestUndoInTargetMidRetire.hook;
+            defer App.test_tab_move_shell_step = null;
+            try std.testing.expect(try app.moveTabToWindow(source, 0, .{ .host = .{ .host = target, .index = 1 } }));
+            App.test_tab_move_shell_step = null;
+            try std.testing.expect(TestUndoInTargetMidRetire.ran);
+            // The closed tab did not come back at its index from before.
+            try std.testing.expect(TestUndoInTargetMidRetire.replayed == null);
+            try std.testing.expectEqual(@as(usize, 2), target.tabs.items.len);
+            try app.validateShellNativeMapping();
+        }
+    }.body);
+}
+
+const TestCloseSourceWhileWindowIsMade = struct {
+    var source: ?*Host = null;
+    var core: ?*CoreApp = null;
+    var stage: ?*const fn (*Host) anyerror!void = null;
+
+    /// Making the torn-off tab's window runs window procedures; there, every
+    /// pane of the window the tab is leaving exits, and that window goes.
+    fn hook(created: *Host) anyerror!void {
+        if (stage) |original| try original(created);
+        const host = source orelse return;
+        source = null;
+        const id = host.id;
+        while (created.app.registry.findHostById(id)) |live| {
+            if (live.tabs.items.len == 0) return;
+            const pane = live.tabs.items[0].focusedSurface().?;
+            core.?.deleteSurface(pane);
+            pane.close(false);
+        }
+    }
+};
+
+test "win32 a tab move whose source goes while its window is made does nothing, through no freed window (council round 7 pointer audit)" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    try runOnHiddenDesktop(struct {
+        fn body() !void {
+            var fixture: win32.WindowStartTestApp = .{};
+            try fixture.init();
+            defer fixture.deinit();
+            const app = &fixture.app;
+            app.shell_runtime_initialized = true;
+            const setup: TabMoveFixture = .{ .fixture = &fixture };
+            const source = try setup.window(2, false);
+            const source_id = source.id;
+            TestCloseSourceWhileWindowIsMade.source = source;
+            TestCloseSourceWhileWindowIsMade.core = &fixture.core_app;
+            TestCloseSourceWhileWindowIsMade.stage = App.test_tear_off_window_created;
+            const original = App.test_tear_off_window_created;
+            App.test_tear_off_window_created = &TestCloseSourceWhileWindowIsMade.hook;
+            defer App.test_tear_off_window_created = original;
+            try std.testing.expect(!(try app.moveTabToWindow(source, 0, .{ .new_window = null })));
+            App.test_tear_off_window_created = original;
+            try std.testing.expect(app.registry.findHostById(source_id) == null);
+            // The window made for the move is gone too.
+            try std.testing.expectEqual(@as(usize, 0), app.registry.hosts.items.len);
+            try app.validateShellNativeMapping();
+        }
+    }.body);
+}
+
+/// A client point of `host` over its caption Close button, found by hit
+/// testing along the caption row from the right.
+fn testCaptionClosePoint(host: *Host) !POINT {
+    const hwnd = host.hwnd orelse return error.TestNoWindow;
+    var client: RECT = undefined;
+    _ = sys.GetClientRect(hwnd, &client);
+    var x: i32 = client.right - 1;
+    while (x > client.right - 400) : (x -= 4) {
+        var at: POINT = .{ .x = x, .y = 8 };
+        _ = sys.ClientToScreen(hwnd, &at);
+        const lx: u32 = @as(u16, @bitCast(@as(i16, @truncate(at.x))));
+        const ly: u32 = @as(u16, @bitCast(@as(i16, @truncate(at.y))));
+        const ht = sys.SendMessageW(hwnd, c.WM_NCHITTEST, 0, @bitCast(@as(usize, (ly << 16) | lx)));
+        if (ht == c.HTCLOSE) return .{ .x = x, .y = 8 };
+    }
+    return error.TestNoCloseButton;
+}
+
+fn testClientMouse(hwnd: HWND, msg: UINT, at: POINT) void {
+    const lx: u32 = @as(u16, @bitCast(@as(i16, @truncate(at.x))));
+    const ly: u32 = @as(u16, @bitCast(@as(i16, @truncate(at.y))));
+    _ = sys.SendMessageW(hwnd, msg, 0, @bitCast(@as(usize, (ly << 16) | lx)));
+}
+
+test "win32 a caption Close press closes the window on its release over Close, after the pointer left and came back (council round 7 L1, CodeRabbit review 5823245522)" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    try runOnHiddenDesktop(struct {
+        fn body() !void {
+            var fixture: win32.WindowStartTestApp = .{};
+            try fixture.init();
+            defer fixture.deinit();
+            const app = &fixture.app;
+            app.shell_runtime_initialized = true;
+            app.use_integrated_titlebar = true;
+            const setup: TabMoveFixture = .{ .fixture = &fixture };
+            const host = try setup.window(2, false);
+            try std.testing.expect(host.usingIntegratedTitlebar());
+            const hwnd = host.hwnd.?;
+            const close_at = try testCaptionClosePoint(host);
+            // A press on Close and its release elsewhere on the caption, or a
+            // press whose capture another window took: the window stays.
+            _ = sys.SendMessageW(hwnd, c.WM_NCLBUTTONDOWN, @bitCast(@as(isize, c.HTCLOSE)), 0);
+            testClientMouse(hwnd, c.WM_LBUTTONUP, .{ .x = close_at.x - 300, .y = 8 });
+            try std.testing.expect(sys.IsWindow(hwnd) != 0);
+            _ = sys.SendMessageW(hwnd, c.WM_NCLBUTTONDOWN, @bitCast(@as(isize, c.HTCLOSE)), 0);
+            _ = sys.SendMessageW(hwnd, c.WM_CAPTURECHANGED, 0, 0);
+            _ = sys.SendMessageW(hwnd, c.WM_NCLBUTTONUP, @bitCast(@as(isize, c.HTCLOSE)), 0);
+            try std.testing.expect(sys.IsWindow(hwnd) != 0);
+            // A press on Close, the pointer off the frame and back, and the
+            // release over Close: the window closes, as a stock caption
+            // button's does. Its panes leave the core first, as a closing
+            // window's are torn down.
+            for (host.tabs.items) |*tab| fixture.core_app.deleteSurface(tab.focusedSurface().?);
+            _ = sys.SendMessageW(hwnd, c.WM_NCLBUTTONDOWN, @bitCast(@as(isize, c.HTCLOSE)), 0);
+            _ = sys.SendMessageW(hwnd, c.WM_NCMOUSELEAVE, 0, 0);
+            testClientMouse(hwnd, c.WM_LBUTTONUP, close_at);
+            try std.testing.expect(sys.IsWindow(hwnd) == 0);
         }
     }.body);
 }

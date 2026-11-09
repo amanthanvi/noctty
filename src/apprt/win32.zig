@@ -11665,9 +11665,43 @@ pub fn hostWindowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) cal
                         _ = sys.SendMessageW(hwnd, c.WM_SYSCOMMAND, cmd, lParam);
                         return 0;
                     }
-                    if (ht == c.HTCLOSE) return 0;
+                    if (ht == c.HTCLOSE) {
+                        // Held as a stock caption button is: the release,
+                        // wherever the pointer went meanwhile, comes here as
+                        // `WM_LBUTTONUP` (council round 7 L1).
+                        _ = sys.SetCapture(hwnd);
+                        v.caption_close_held = true;
+                        return 0;
+                    }
                 }
             }
+            return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
+        },
+        // The release of a press on Close (`caption_close_held`): over Close
+        // it closes the window, anywhere else it does nothing.
+        c.WM_LBUTTONUP => {
+            if (host) |v| if (v.caption_close_held) {
+                v.caption_close_held = false;
+                const pressed = v.caption_pressed == .close;
+                var at: POINT = .{ .x = signedLowWord(lParamBits(lParam)), .y = signedHighWord(lParamBits(lParam)) };
+                _ = sys.ClientToScreen(hwnd, &at);
+                const sx: u32 = @as(u16, @bitCast(@as(i16, @truncate(at.x))));
+                const sy: u32 = @as(u16, @bitCast(@as(i16, @truncate(at.y))));
+                const screen: LPARAM = @bitCast(@as(usize, (sy << 16) | sx));
+                const over_close = sys.SendMessageW(hwnd, c.WM_NCHITTEST, 0, screen) == c.HTCLOSE;
+                if (sys.GetCapture() == hwnd) _ = sys.ReleaseCapture();
+                v.clearCaptionPressed();
+                if (pressed and over_close) _ = sys.SendMessageW(hwnd, c.WM_SYSCOMMAND, c.SC_CLOSE, screen);
+                return 0;
+            };
+            return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
+        },
+        c.WM_CAPTURECHANGED => {
+            // Another window took the pointer: the press on Close is over.
+            if (host) |v| if (v.caption_close_held) {
+                v.caption_close_held = false;
+                v.clearCaptionPressed();
+            };
             return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
         },
         c.WM_NCLBUTTONUP => {

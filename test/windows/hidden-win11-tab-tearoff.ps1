@@ -223,6 +223,20 @@ public static class Tt {
         if(!PostMessageW(h,0x100,new IntPtr(key),new IntPtr(1))) throw new Exception("Key-down post failed");
         if(!PostMessageW(h,0x101,new IntPtr(key),new IntPtr(0xC0000001L))) throw new Exception("Key-up post failed");
     }
+    [DllImport("user32.dll")] static extern int GetWindowLongW(IntPtr h,int index);
+    public static int Pid(IntPtr h) { uint pid; GetWindowThreadProcessId(h,out pid); return (int)pid; }
+    // Whether the process shows a tab drag's label: a visible STATIC popup
+    // that is layered and click-through (`App.showTabDragPreview`).
+    public static bool DragLabelShown(int pid) {
+        bool shown=false;
+        EnumWindows((h,p)=> {
+            uint owner; GetWindowThreadProcessId(h,out owner);
+            if(owner!=(uint)pid || !IsWindowVisible(h)) return true;
+            var s=new StringBuilder(32); GetClassNameW(h,s,32);
+            if(s.ToString()=="Static" && (GetWindowLongW(h,-20)&0x80020)==0x80020) { shown=true; return false; }
+            return true; },IntPtr.Zero);
+        return shown;
+    }
     // What `vk` types with no modifier in the layout of `h`'s thread, or null.
     public static string Typed(IntPtr h,int vk) {
         uint pid; uint tid=GetWindowThreadProcessId(h,out pid); var hkl=GetKeyboardLayout(tid);
@@ -480,7 +494,17 @@ function Drag($h,[int]$Index,[int]$X,[int]$Y,[switch]$Escape,[IntPtr]$EscapeTo) 
     [Tt]::Mouse($button,$WM_MOUSEMOVE,40,40,1)
     [Tt]::Mouse($button,$WM_MOUSEMOVE,$X-$origin.Left,$Y-$origin.Top,1)
     Start-Sleep -Milliseconds 300
-    if($Escape) { [Tt]::Key($EscapeTo,$VK_ESCAPE); Start-Sleep -Milliseconds 200 }
+    if($Escape) {
+        # Esc's span closes at its effect, the drag label hiding; the
+        # release after it has none to see (CodeRabbit r4510743420).
+        $process=[Tt]::Pid($h)
+        $label=Wait-Until { [Tt]::DragLabelShown($process) } 3
+        [Tt]::Key($EscapeTo,$VK_ESCAPE)
+        $hidden=$label -and (Wait-Until { -not [Tt]::DragLabelShown($process) } 3)
+        if($hidden) { [Tt]::Settled() }
+        else { $script:unverified.Add('a drag''s Esc: the label it hides was not seen hiding, so its span closed at the next settle') }
+        $script:unverified.Add('the release after a drag''s Esc: nothing shows it was handled, so the drag''s span closes after the checks that follow it')
+    }
     [Tt]::Mouse($button,$WM_LBUTTONUP,$X-$origin.Left,$Y-$origin.Top,0)
     # Open until the caller has seen what the drag did (`Settled`).
     [Tt]::Open($started)
@@ -732,51 +756,83 @@ function Mouse-Reports([string]$Records) {
 # round 6 Sol M1, CodeRabbit r4510086531; `App.takeHeldRelease`). The first
 # tab runs a mouse-reporting program, posted input reaches it through the
 # app's own pump, and a press and release before and after are the controls.
-function Measure-HeldRelease([string]$RendererName) {
-    $records=Join-Path $Run "held-release-$RendererName.csv"; $ready=Join-Path $Run "held-release-$RendererName.ready"; $stop=Join-Path $Run "held-release-$RendererName.stop"
+# Where the held release lands, and how the held tab left:
+#   source       a key binding moves the held second tab; the release lands
+#                on the program's terminal left in the window;
+#   destination  a key binding moves the held first tab, the program's own;
+#                the release lands on its terminal in the new window;
+#   pane-exit    the held second tab's shell exits; the release lands on the
+#                program's terminal (council round 7 L3).
+function Measure-HeldRelease([string]$RendererName,[ValidateSet('source','destination','pane-exit')][string]$Variant) {
+    $name="held-release-$Variant-$RendererName"
+    $records=Join-Path $Run "$name.csv"; $ready=Join-Path $Run "$name.ready"; $stop=Join-Path $Run "$name.stop"
     # `direct:` takes the words as they are: no path here may hold a space.
-    if(($script:recordsExe + $records) -match ' ') { $script:skips.Add("${RendererName} held release: the run path holds a space"); return }
-    $case=Launch-Case "held-release-$RendererName" $RendererName @(('initial-command = direct:{0} {1} {2} {3} 298 vt-mouse' -f $script:recordsExe,$records,$ready,$stop))
+    # A run that asked for this case alone fails then, never passes on a
+    # skip (CodeRabbit r4510706439).
+    if(($script:recordsExe + $records) -match ' ') {
+        if($Cases -eq 'held-release') { Check "${RendererName} held release ${Variant}: the case can run here (no space in the run path)" $false 'no space' $Run }
+        else { $script:skips.Add("${RendererName} held release ${Variant}: the run path holds a space") }
+        return
+    }
+    $case=Launch-Case $name $RendererName @(('initial-command = direct:{0} {1} {2} {3} 298 vt-mouse' -f $script:recordsExe,$records,$ready,$stop))
+    $label="${RendererName} held release ${Variant}"
     try {
         $h1=(Hosts $case)[0]
         $p1=(Panes $h1)[0]
         $up=Wait-Until { Test-Path -LiteralPath $ready } 10
-        Check "${RendererName} held release: the mouse-reporting program runs in the first tab" $up 'ready' $null
+        Check "${label}: the mouse-reporting program runs in the first tab" $up 'ready' $null
         if(-not $up) { return }
         Start-Sleep -Milliseconds 500
         # Control: a press and release on its terminal are reported.
         [Tt]::Mouse($p1,$WM_LBUTTONDOWN,30,30,1); [Tt]::Mouse($p1,$WM_LBUTTONUP,30,30,0)
         $control=Wait-Until { (Mouse-Reports $records).Releases -ge 1 } 5
         $before=Mouse-Reports $records
-        Check "${RendererName} held release: a press and release there are reported (the control)" ($control -and $before.Presses -ge 1 -and $before.Releases -ge 1) 'press and release' $before
-        # A second tab (cmd), its button pressed: a drag held.
+        Check "${label}: a press and release there are reported (the control)" ($control -and $before.Presses -ge 1 -and $before.Releases -ge 1) 'press and release' $before
+        # A second tab (cmd).
         $p2=New-Pane $case $p1
-        # The strip makes the new tab's button as it lays out: wait for it.
-        [void](Wait-Until { $script:heldButton=[Tt]::Child($h1,$TabButton+1); $script:heldButton -ne [IntPtr]::Zero } 5)
+        [void](Wait-Marker $p2)
+        # The held tab: the program's own for `destination`, else the second.
+        $held=if($Variant -eq 'destination') { 0 } else { 1 }
+        [void](Wait-Until { $script:heldButton=[Tt]::Child($h1,$TabButton+$held); $script:heldButton -ne [IntPtr]::Zero } 5)
         $button=$script:heldButton
-        Check "${RendererName} held release: the second tab has its button" ($button -ne [IntPtr]::Zero) 'a button' $null
+        Check "${label}: the held tab has its button" ($button -ne [IntPtr]::Zero) 'a button' $null
         if($button -eq [IntPtr]::Zero) { return }
         [Tt]::Mouse($button,$WM_LBUTTONDOWN,20,10,1)
         [Tt]::Mouse($button,$WM_MOUSEMOVE,26,12,1)
         Start-Sleep -Milliseconds 200
-        # `move_tab_to_new_window` moves the dragged tab while it is held.
-        [Tt]::Key($p2,$VK_F7)
-        $moved=Wait-Until { $o=HostOf $case $p2; $o -ne [IntPtr]::Zero -and $o -ne $h1 } 10
+        switch($Variant) {
+            'source' {
+                [Tt]::Key($p2,$VK_F7)
+                $left=Wait-Until { $o=HostOf $case $p2; $o -ne [IntPtr]::Zero -and $o -ne $h1 } 10
+            }
+            'destination' {
+                [Tt]::Key($p1,$VK_F7)
+                $left=Wait-Until { $o=HostOf $case $p1; $o -ne [IntPtr]::Zero -and $o -ne $h1 } 10
+            }
+            'pane-exit' {
+                # `exit` and Enter, typed into its shell.
+                foreach($vk in @(0x45,0x58,0x49,0x54,0x0D)) { [Tt]::Key($p2,$vk) }
+                $left=Wait-Until { -not [Tt]::Alive($p2) } 10
+            }
+        }
         [Tt]::Settled()
         Start-Sleep -Milliseconds 300
-        Check "${RendererName} held release: the held tab moved to a new window" ($moved -and -not [Tt]::Alive($button)) 'moved, its button gone' $null
-        Check "${RendererName} held release: the terminal left in the window shows" ([Tt]::Visible($p1)) 'visible' $null
-        # The held button comes up over that terminal.
+        Check "${label}: the held tab left its window, its button gone" ($left -and -not [Tt]::Alive($button)) 'gone' $null
+        Check "${label}: the program's terminal shows" ([Tt]::Visible($p1)) 'visible' $null
+        if($Variant -eq 'destination') {
+            Check "${label}: the program's terminal is in another window now" ((HostOf $case $p1) -ne $h1) 'another window' $null
+        }
+        # The held button comes up over the program's terminal.
         [Tt]::Mouse($p1,$WM_LBUTTONUP,30,30,0)
         Start-Sleep -Milliseconds 800
         $after=Mouse-Reports $records
-        Check "${RendererName} held release: the program gets no release no press of its made" ($after.Releases -eq $before.Releases -and $after.Presses -eq $before.Presses) @($before.Presses,$before.Releases) @($after.Presses,$after.Releases)
+        Check "${label}: the program gets no release no press of its made" ($after.Releases -eq $before.Releases -and $after.Presses -eq $before.Presses) @($before.Presses,$before.Releases) @($after.Presses,$after.Releases)
         # A fresh press and release afterwards are reported again.
         [Tt]::Mouse($p1,$WM_LBUTTONDOWN,30,30,1); [Tt]::Mouse($p1,$WM_LBUTTONUP,30,30,0)
         $fresh=Wait-Until { (Mouse-Reports $records).Releases -gt $after.Releases } 5
         $last=Mouse-Reports $records
-        Check "${RendererName} held release: a fresh press and release after are reported" ($fresh -and $last.Presses -gt $after.Presses) @(($after.Presses+1),($after.Releases+1)) @($last.Presses,$last.Releases)
-        Check-Backend $case $RendererName 'after the held release' @($p1,$p2)
+        Check "${label}: a fresh press and release after are reported" ($fresh -and $last.Presses -gt $after.Presses) @(($after.Presses+1),($after.Releases+1)) @($last.Presses,$last.Releases)
+        Check-Backend $case $RendererName "after the held release ($Variant)" @(@($p1) + @(if([Tt]::Alive($p2)) { $p2 }))
     } finally {
         New-Item -ItemType File -Path $stop -Force | Out-Null
         Start-Sleep -Milliseconds 300
@@ -812,7 +868,9 @@ function Measure-Search([string]$RendererName) {
         # What the X key types in the app's own layout (not always `x`).
         $expect=[Tt]::Typed($edit,0x58)
         [Tt]::Key($edit,0x58)   # X, typed into the moved search box
-        Start-Sleep -Milliseconds 800
+        # Its span closes when the text shows (CodeRabbit r4510726441).
+        $shown=if($null -ne $expect) { Wait-Until { ([HiddenLocal]::WaitForSingleObject($case.Pi.process,0) -eq 258) -and ([Tt]::Text($edit)).Contains($expect) } 5 } else { Start-Sleep -Milliseconds 800; $false }
+        if(-not $shown) { $script:unverified.Add("${RendererName} search: the typed key's effect was not seen, so its span closed at the next settle") }
         $alive=[HiddenLocal]::WaitForSingleObject($case.Pi.process,0) -eq 258
         [Tt]::Settled()
         Check "${RendererName} search: the process stays up as the moved search box is typed into" $alive 'running' $null
@@ -923,7 +981,7 @@ try {
         foreach($name in $renderers) { Measure-Search $name }
         foreach($name in $renderers) { Measure-Split $name }
     }
-    foreach($name in $renderers) { Measure-HeldRelease $name }
+    foreach($name in $renderers) { foreach($variant in @('source','destination','pane-exit')) { Measure-HeldRelease $name $variant } }
 } catch {
     $script:checks.Add(@{Name='Harness execution'; Passed=$false; Error=$_.Exception.Message})
 } finally {
