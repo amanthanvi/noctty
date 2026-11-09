@@ -1703,17 +1703,7 @@ pub const App = struct {
                 }
                 if (self.terminal_handoff_idle_timer_id) |timer_id| {
                     if (msg.wParam == timer_id) {
-                        self.stopTerminalHandoffIdleTimer();
-                        self.drainPendingHandoffs();
-                        if (self.embedding_mode and self.registry.windows.items.len == 0) {
-                            if (self.exitEmbeddingServerIfIdle()) {
-                                log.info("terminal handoff server idle timeout", .{});
-                                self.running = false;
-                                sys.PostQuitMessage(0);
-                            } else {
-                                self.startTerminalHandoffIdleTimer();
-                            }
-                        }
+                        self.onTerminalHandoffIdleTimer();
                         continue;
                     }
                 }
@@ -2918,7 +2908,10 @@ pub const App = struct {
     /// else it quits as `quit-after-last-window-closed` says. Held while an
     /// app-wide chain runs (`holdLastWindowQuit`).
     pub fn afterLastWindow(self: *App) void {
-        if (self.registry.windows.items.len != 0 or !self.running) return;
+        // An open Settings window is a window too: in embedding mode an
+        // idle server would otherwise exit under it and lose its draft.
+        // Its close decides again (`settingsOnClosedThunk`).
+        if (self.hasLiveUiWindows() or !self.running) return;
         if (self.last_window_quit_holds > 0) {
             self.last_window_quit_pending = true;
             return;
@@ -2932,6 +2925,23 @@ pub const App = struct {
             }
         } else {
             self.startQuitTimer();
+        }
+    }
+
+    /// The terminal handoff idle timer: in embedding mode with no window
+    /// left, a Settings window included, the server exits once it is idle,
+    /// else the timer runs again. With Settings open it stops: Settings'
+    /// close decides (`afterLastWindow`), so a draft is never lost to it.
+    pub fn onTerminalHandoffIdleTimer(self: *App) void {
+        self.stopTerminalHandoffIdleTimer();
+        self.drainPendingHandoffs();
+        if (!self.embedding_mode or self.hasLiveUiWindows()) return;
+        if (self.exitEmbeddingServerIfIdle()) {
+            log.info("terminal handoff server idle timeout", .{});
+            self.running = false;
+            self.postLastWindowQuit();
+        } else {
+            self.startTerminalHandoffIdleTimer();
         }
     }
 

@@ -5792,10 +5792,11 @@ pub fn settingsOnClosedThunk(ctx: *anyopaque) void {
     if (restored) |surface| app.activateSurface(surface);
     // Saved or discarded from the prompt a quit raised: carry on quitting.
     if (app.settings_window.takeQuitAfterClose()) return app.requestQuit(restored);
-    // Mirrors the kick after the last terminal window closes; the
-    // quit timer observes `hasLiveUiWindows()` so this is a no-op
-    // when any terminal HWND is still alive.
-    if (app.running and !app.hasLiveUiWindows()) app.startQuitTimer();
+    // Decided as after the last terminal window closes (a no-op while any
+    // terminal HWND is still alive): the quit timer, or in embedding mode
+    // the handoff server's idle exit, which an open Settings window held
+    // off so its draft was not lost.
+    app.afterLastWindow();
 }
 
 pub fn settingsDeferUiaDisconnectThunk(
@@ -18112,6 +18113,42 @@ test "win32 a held embedding-mode exit keeps a server whose chain reopened a win
 test "win32 a held embedding-mode exit asks an idle server again and exits" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
     try testLastWindowQuitAtChainEnd(true, false);
+}
+
+test "win32 an open Settings window keeps an idle embedding server" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var core_app: CoreApp = undefined;
+    var app: App = undefined;
+    var host: Host = undefined;
+    var surface: Surface = undefined;
+    var session: TestSession = .{};
+    try session.init(.{
+        .core_app = &core_app,
+        .app = &app,
+        .hosts = &.{.{ .storage = &host }},
+        .surfaces = &.{.{ .storage = &surface, .host = &host }},
+        .tabs = &.{.{ .host = &host, .surface = &surface, .id = 1 }},
+    });
+    defer session.deinit();
+    // The last terminal window is gone; the handoff server (none here) is
+    // idle; Settings is open, perhaps with unsaved changes.
+    app.embedding_mode = true;
+    app.running = true;
+    defer app.running = false;
+    app.settings_window.hwnd = @ptrFromInt(0x1000);
+    defer app.settings_window.hwnd = null;
+
+    app.afterLastWindow();
+    try std.testing.expect(app.running);
+    app.onTerminalHandoffIdleTimer();
+    try std.testing.expect(app.running);
+    try std.testing.expect(app.terminal_handoff_idle_timer_id == null);
+
+    // Settings closes: the server is asked again and, idle, exits.
+    app.settings_window.hwnd = null;
+    settingsOnClosedThunk(@ptrCast(&app));
+    try std.testing.expect(!app.running);
 }
 
 test "win32 close_tab structural undo detaches the last remaining tab" {

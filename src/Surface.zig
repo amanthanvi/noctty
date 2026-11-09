@@ -8431,8 +8431,10 @@ const Dispatch = union(enum) {
     },
 };
 
-/// Runs a binding's leaf on `target` (the surface; a stand-in in tests):
-/// the binding's actions are copied into `alloc` (an arena) first, then a
+/// Runs a binding's leaf on `target` (the surface; a stand-in in tests),
+/// unless the surface is in no live tab (`CloseToken.attached`), when it
+/// runs nothing. The binding's actions are copied into `alloc` (an arena)
+/// first, then a
 /// one-shot key table is deactivated (`pop_once_table`), the key state is
 /// reset for an action (`target.beginBindingActions`), and the actions run,
 /// across the app for a `global:` or `all:` binding
@@ -8453,6 +8455,17 @@ fn dispatchLeaf(
     leaf: input.Binding.Set.GenericLeaf,
     pop_once_table: bool,
 ) !Dispatch {
+    // A key queued for a pane that is no longer in a live tab (an `undo`
+    // detached it for redo before the key was handled) runs no action: one
+    // that clears redo (`reset`, a single action too) would dispose the
+    // pane while it runs, and what follows would read it freed. The key is
+    // swallowed as a consumed one, its release with it, and nothing else
+    // changes.
+    if (!target.closeToken().attached()) {
+        log.debug("key binding refused: the surface is in no live tab", .{});
+        return .{ .done = .{ .outcome = .consumed, .reached = &.{} } };
+    }
+
     const actions = try leaf.cloneActions(alloc);
 
     // If this is a one-shot activation AND its the currently active
@@ -9084,6 +9097,32 @@ test "a binding chain ends where an undo detaches its surface" {
         &.{ .undo, .reset, .scroll_to_top },
         target.seenTags(),
     );
+}
+
+test "a binding on a pane an undo detached runs nothing" {
+    const testing = std.testing;
+    // A key queued for the pane before the undo took it out of its tab.
+    // `reset` would clear redo and free it while it runs; the
+    // `scroll_to_top` after it would then run on freed memory.
+    var target: TestChainTarget = .{ .detached = true };
+    const result = try testDispatch(&target, &.{ .reset, .scroll_to_top }, .{});
+    try testing.expectEqual(@as(usize, 0), target.calls_after_free);
+    try testing.expect(!target.freed);
+    try testing.expect(!result.closed);
+    try testing.expectEqual(BindingOutcome.consumed, result.outcome);
+    try testing.expectEqual(@as(usize, 0), target.seen_len);
+    try testing.expect(!target.began);
+
+    // A single `reset`: the surface would be freed under the key handler.
+    target = .{ .detached = true };
+    const single = try testDispatch(&target, &.{.reset}, .{});
+    try testing.expect(!target.freed);
+    try testing.expectEqual(@as(usize, 0), single.reached_len);
+
+    // Across the app too.
+    target = .{ .detached = true };
+    _ = try testDispatch(&target, &.{.reset}, .{ .all = true });
+    try testing.expectEqual(@as(usize, 0), target.seen_len);
 }
 
 test "a binding chain whose close leaves the surface keeps the key's release" {
