@@ -4543,8 +4543,9 @@ fn maybeHandleBinding(
         },
         .done => |done| done,
     };
-    // The actions that ran: the chain ends at a closing action, so the
-    // ones after it count for nothing below.
+    // The actions that ran: the chain ends at an action that closed the
+    // surface or left it, or after an undo or redo that detached it
+    // (`mayDetachCaller`), so the ones after it count for nothing below.
     const actions = dispatch.reached;
 
     switch (dispatch.outcome) {
@@ -8330,8 +8331,9 @@ const ChainRun = struct {
     /// At least one action performed.
     performed: bool = false,
     /// How many of the actions ran, from the first: all of them, unless an
-    /// action that can close the surface ended the chain (it counts as
-    /// run).
+    /// action that can close the surface (`closesCaller`), or an undo or
+    /// redo that detached it (`mayDetachCaller`), ended the chain (it
+    /// counts as run).
     reached: usize,
 };
 
@@ -8426,7 +8428,9 @@ const Dispatch = union(enum) {
         /// What the key handler does with the key.
         outcome: BindingOutcome,
         /// The actions that ran, copied: the binding's actions up to the
-        /// closing action that ended the chain, or all of them.
+        /// closing action that ended the chain (or the undo or redo that
+        /// detached the surface, `mayDetachCaller`), or all of them. None
+        /// for a surface in no live tab, which runs no binding.
         reached: []const input.Binding.Action,
     },
 };

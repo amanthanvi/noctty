@@ -18073,7 +18073,10 @@ fn testLastWindowQuitAtChainEnd(embedding: bool, reopens: bool) !void {
     // delay it quits at once (`running` goes false; under test no WM_QUIT
     // is posted). Embedding mode with no handoff server is an idle server.
     try std.testing.expect(!app.hasLiveUiWindows());
-    app.config.@"quit-after-last-window-closed" = true;
+    // Quitting is on for the plain mode. Embedding mode's exit asks only
+    // the handoff server, so it is off there: a release that went through
+    // `startQuitTimer` (as round 3's did) would then keep the process.
+    app.config.@"quit-after-last-window-closed" = !embedding;
     app.config.@"quit-after-last-window-closed-delay" = null;
     app.embedding_mode = embedding;
     app.running = true;
