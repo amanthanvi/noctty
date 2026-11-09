@@ -206,7 +206,8 @@
         "src/input/**",
         "src/config/Config.zig",
         "src/Surface.zig",
-        "src/App.zig"
+        "src/App.zig",
+        "src/inspector/widgets/key.zig"
       ]
     },
     {

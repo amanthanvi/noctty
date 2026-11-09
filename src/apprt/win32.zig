@@ -18016,6 +18016,83 @@ test "win32 close_tab structural undo restores and redoes a detached tab" {
     try std.testing.expect(close_tab.tab != null);
 }
 
+test "win32 a pane detached for undo does not receive app-wide actions" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var core_app: CoreApp = undefined;
+    var app: App = undefined;
+    var host: Host = undefined;
+    var surface_a: Surface = undefined;
+    var surface_b: Surface = undefined;
+    var session: TestSession = .{};
+    try session.init(.{
+        .core_app = &core_app,
+        .app = &app,
+        .hosts = &.{.{ .storage = &host, .active_tab = 1 }},
+        .surfaces = &.{
+            .{ .storage = &surface_a, .host = &host },
+            .{ .storage = &surface_b, .host = &host },
+        },
+        .tabs = &.{
+            .{ .host = &host, .surface = &surface_a, .id = 1 },
+            .{ .host = &host, .surface = &surface_b, .id = 2 },
+        },
+    });
+    defer session.deinit();
+
+    try std.testing.expect(surface_a.receivesAppWideActions());
+    try std.testing.expect(surface_b.receivesAppWideActions());
+
+    // `close_tab:this` keeps the tab's panes, hidden, for undo.
+    var entry = host.detachTabForUndo(1).?;
+    defer entry.dispose(&host, .host_destroy) catch {}; // Best-effort test teardown.
+    try std.testing.expect(surface_a.receivesAppWideActions());
+    try std.testing.expect(!surface_b.receivesAppWideActions());
+
+    // Back in a live tab, it does again.
+    try std.testing.expect(try host.restoreClosedTabEntry(&entry.payload.close_tab));
+    try std.testing.expect(surface_b.receivesAppWideActions());
+}
+
+test "win32 a last-window quit waits for the app-wide chain that closed the window" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var core_app: CoreApp = undefined;
+    var app: App = undefined;
+    var host: Host = undefined;
+    var surface: Surface = undefined;
+    var session: TestSession = .{};
+    try session.init(.{
+        .core_app = &core_app,
+        .app = &app,
+        .hosts = &.{.{ .storage = &host }},
+        .surfaces = &.{.{ .storage = &surface, .host = &host }},
+        .tabs = &.{.{ .host = &host, .surface = &surface, .id = 1 }},
+    });
+    defer session.deinit();
+    // No window is registered, so this is the last one gone; with no delay
+    // a quit posts WM_QUIT at once.
+    try std.testing.expect(!app.hasLiveUiWindows());
+    app.config.@"quit-after-last-window-closed" = true;
+    app.config.@"quit-after-last-window-closed-delay" = null;
+    app.running = true;
+    defer app.running = false;
+
+    app.holdLastWindowQuit();
+    app.startQuitTimer(); // the last window closed part way through
+    try std.testing.expect(app.running);
+    try std.testing.expect(app.last_window_quit_pending);
+
+    // The chain opened a window again (`new_window`): no quit at its end.
+    // (Standing in for one: the quit is not wanted, so none is posted to
+    // the test thread either way.)
+    app.config.@"quit-after-last-window-closed" = false;
+    app.releaseLastWindowQuit();
+    try std.testing.expect(app.running);
+    try std.testing.expect(!app.last_window_quit_pending);
+    try std.testing.expectEqual(@as(u32, 0), app.last_window_quit_holds);
+}
+
 test "win32 close_tab structural undo detaches the last remaining tab" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 

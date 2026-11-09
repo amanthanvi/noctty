@@ -1218,6 +1218,17 @@ pub const Surface = struct {
         return &self.core_surface;
     }
 
+    /// False for a pane in no live tab: one detached with its tab for undo
+    /// (`close_tab:this`) or out of its split for redo. It stays one of
+    /// the app's surfaces, hidden, with its program running, so an
+    /// app-wide binding (`all:`, `global:`) must not reach it: the text of
+    /// `global:...=close_tab:this>text:...` would go to the tab just
+    /// closed. Core asks before each surface of a fan-out
+    /// (`App.performAllAction`).
+    pub fn receivesAppWideActions(self: *Surface) bool {
+        return Host.findTabForSurface(self) != null;
+    }
+
     pub fn takeAdoptedSession(self: *Surface) ?ptypkg.AdoptedSession {
         const result = self.adopted_session;
         self.adopted_session = null;

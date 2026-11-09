@@ -809,6 +809,13 @@ pub const App = struct {
     lifecycle_hwnd: ?HWND = null,
     core_ticking: bool = false,
     quit_timer_id: ?UINT_PTR = null,
+    /// Above zero while an app-wide binding chain runs
+    /// (`holdLastWindowQuit`): a last-window quit then waits for the chain
+    /// to end, which may open a window again (`close_window>new_window`).
+    last_window_quit_holds: u32 = 0,
+    /// A last-window quit came while held; `releaseLastWindowQuit` decides
+    /// it again.
+    last_window_quit_pending: bool = false,
     terminal_handoff_idle_timer_id: ?UINT_PTR = null,
     terminal_handoff_server: ?*win32_terminal_handoff.Server = null,
     undo_prune_timer_id: ?UINT_PTR = null,
@@ -2884,6 +2891,24 @@ pub const App = struct {
         }
     }
 
+    /// Called by core around an app-wide binding chain
+    /// (`App.performAllChainedAction`): the last window can close part way
+    /// through (`close_window`), and with no delay configured
+    /// `startQuitTimer` would post WM_QUIT at once, so a `new_window` later
+    /// in the chain would open a window into a process that is ending. The
+    /// quit is decided again when the chain is done.
+    pub fn holdLastWindowQuit(self: *App) void {
+        self.last_window_quit_holds += 1;
+    }
+
+    pub fn releaseLastWindowQuit(self: *App) void {
+        std.debug.assert(self.last_window_quit_holds > 0);
+        self.last_window_quit_holds -= 1;
+        if (self.last_window_quit_holds > 0 or !self.last_window_quit_pending) return;
+        self.last_window_quit_pending = false;
+        self.startQuitTimer();
+    }
+
     fn registeredGlobalHotkeyForSpec(self: *const App, spec: GlobalHotkeySpec) ?RegisteredGlobalHotkey {
         for (self.global_hotkeys.items) |hotkey| {
             if (hotkeySpecEql(hotkey.spec, spec)) return hotkey;
@@ -3698,6 +3723,10 @@ pub const App = struct {
         if (!self.running) return;
         if (self.hasLiveUiWindows()) {
             self.stopQuitTimer();
+            return;
+        }
+        if (self.last_window_quit_holds > 0) {
+            self.last_window_quit_pending = true;
             return;
         }
         if (!self.config.@"quit-after-last-window-closed") {

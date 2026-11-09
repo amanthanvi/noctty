@@ -4496,20 +4496,13 @@ fn maybeHandleBinding(
     // Determine if this entry has an action or if its a leader key.
     const leaf: input.Binding.Set.GenericLeaf = switch (entry.value_ptr.*) {
         .leader => |set| {
-            // A one-shot table ends when one of its keys is used, a
-            // leader key included.
-            if (pop_once_table) _ = try self.performBindingAction(
-                .deactivate_key_table,
-            );
-
-            // Setup the next set we'll look at, storing this event so that we
-            // can drain and encode on invalid. We don't need to cap this
-            // because it is naturally capped by the config validation.
-            try self.keyboard.enterSequence(
-                self.alloc,
-                set,
-                try self.encodeKey(event, insp_ev),
-            );
+            // Set up the sequence, then deactivate a one-shot table
+            // (`startLeader`), so a failed setup leaves the table up.
+            try startLeader(self, LeaderSequence{
+                .set = set,
+                .event = event,
+                .insp_ev = insp_ev,
+            }, pop_once_table);
 
             // Start or continue our key sequence
             _ = self.rt_app.performAction(
@@ -4527,18 +4520,6 @@ fn maybeHandleBinding(
         },
 
         inline .leaf, .leaf_chained => |leaf| leaf.generic(),
-    };
-
-    // consumed determines if the input is consumed or if we continue
-    // encoding the key (if we have a key to encode).
-    const consumed = consumed: {
-        // If the consumed flag is explicitly set, then we are consumed.
-        if (leaf.flags.consumed) break :consumed true;
-
-        // If the global or all flag is set, we always consume.
-        if (leaf.flags.global or leaf.flags.all) break :consumed true;
-
-        break :consumed false;
     };
 
     // Setup and perform our actions (`dispatchLeaf`). They run from a
@@ -4561,16 +4542,14 @@ fn maybeHandleBinding(
         },
         .done => |done| done,
     };
-    const performed = dispatch.performed;
-
     // The actions that ran: the chain ends at a closing action, so the
     // ones after it count for nothing below.
     const actions = dispatch.reached;
 
-    if (performed) {
+    switch (dispatch.outcome) {
         // If our action was "ignore" then we return the special input
         // effect of "ignored".
-        for (actions) |action| if (action == .ignore) {
+        .ignored => {
             // If we're in a sequence, clear it.
             self.endKeySequence(.drop, .retain);
 
@@ -4587,53 +4566,55 @@ fn maybeHandleBinding(
             }
 
             return .ignored;
-        };
+        },
+
+        // If we have the performable flag and the action was not performed,
+        // then we act as though a binding didn't exist.
+        .unbound => {
+            // If we're in a sequence, we treat this as if we pressed a key
+            // that doesn't exist in the sequence. Reset our sequence and flush
+            // any queued events.
+            self.endKeySequence(.flush, .retain);
+
+            return null;
+        },
+
+        // If we consume this event, then we are done. If we don't consume
+        // it, we processed the action but we still want to process our
+        // encodings, too.
+        .consumed => {
+            // If we had queued events, we deinit them since we consumed
+            self.endKeySequence(.drop, .retain);
+
+            // Store our last trigger so we don't encode the release event
+            const identity = KeyPressIdentity.fromEvent(event);
+            self.keyboard.last_trigger = identity;
+            if (event.action == .press) {
+                try self.keyboard.rememberConsumedPress(self.alloc, identity);
+            }
+
+            if (insp_ev) |ev| {
+                // Only the names: the actions' payloads are in this call's
+                // arena, which goes on return.
+                ev.binding = bindingTags(self.alloc, actions) catch |err| binding: {
+                    log.warn(
+                        "error allocating binding action for inspector err={}",
+                        .{err},
+                    );
+                    break :binding &.{};
+                };
+            }
+            return .consumed;
+        },
+
+        // If we didn't perform OR we didn't consume, then we want to
+        // encode any queued events for a sequence.
+        .encode => {
+            self.endKeySequence(.flush, .retain);
+
+            return null;
+        },
     }
-
-    // If we have the performable flag and the action was not performed,
-    // then we act as though a binding didn't exist.
-    if (leaf.flags.performable and !performed) {
-        // If we're in a sequence, we treat this as if we pressed a key
-        // that doesn't exist in the sequence. Reset our sequence and flush
-        // any queued events.
-        self.endKeySequence(.flush, .retain);
-
-        return null;
-    }
-
-    // If we consume this event, then we are done. If we don't consume
-    // it, we processed the action but we still want to process our
-    // encodings, too.
-    if (consumed) {
-        // If we had queued events, we deinit them since we consumed
-        self.endKeySequence(.drop, .retain);
-
-        // Store our last trigger so we don't encode the release event
-        const identity = KeyPressIdentity.fromEvent(event);
-        self.keyboard.last_trigger = identity;
-        if (event.action == .press) {
-            try self.keyboard.rememberConsumedPress(self.alloc, identity);
-        }
-
-        if (insp_ev) |ev| {
-            // Only the names: the actions' payloads are in this call's
-            // arena, which goes on return.
-            ev.binding = bindingTags(self.alloc, actions) catch |err| binding: {
-                log.warn(
-                    "error allocating binding action for inspector err={}",
-                    .{err},
-                );
-                break :binding &.{};
-            };
-        }
-        return .consumed;
-    }
-
-    // If we didn't perform OR we didn't consume, then we want to
-    // encode any queued events for a sequence.
-    self.endKeySequence(.flush, .retain);
-
-    return null;
 }
 
 fn copyModeStartPin(
@@ -7261,11 +7242,7 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
                 break :normal !self.io.terminal.modes.get(.cursor_keys);
             };
 
-            if (normal) {
-                self.queueIo(.{ .write_stable = ck.normal }, .unlocked);
-            } else {
-                self.queueIo(.{ .write_stable = ck.application }, .unlocked);
-            }
+            self.queueIo(try cursorKeyWrite(self.alloc, ck, normal), .unlocked);
         },
 
         .reset => {
@@ -8330,7 +8307,7 @@ fn closesCaller(action: input.Binding.Action) bool {
 
 /// What running a key binding's actions on one surface came to.
 const ChainRun = struct {
-    /// A closing action performed: the surface may be freed already, and
+    /// An action that can close the surface ran and the surface is gone:
     /// neither it nor the binding storage may be read again.
     closed: bool = false,
     /// At least one action performed.
@@ -8348,16 +8325,16 @@ const ChainRun = struct {
 ///
 /// The chain ends at its first action that can close this surface
 /// (`closesCaller`), and the actions after it are dropped: the close can
-/// free the surface before
-/// `performBindingAction` returns (on Win32 it does, synchronously), so
-/// nothing may run on it afterwards. Once that action performed, this
-/// reports `closed` and reads neither `target` nor `actions` again. If it
-/// did not perform (nothing to close: no tab beside, no window), the
-/// result is what the actions before it did. If it failed, the surface is
-/// usually still there (a failed `close_tab:this` is rolled back), but not
-/// always (a rollback that fails disposes the detached tab), so a
-/// `target.closeToken()` taken before the close says which, from the app's
-/// list of surfaces: gone is `closed`, still there is as for false.
+/// free the surface before `performBindingAction` returns (on Win32 it
+/// does, synchronously), so nothing may run on it afterwards. Whether it
+/// did is not what the action returns: one that performed may have only
+/// opened a confirmation (and a cancelled one leaves the surface), and one
+/// that failed is usually rolled back (`close_tab:this`) but not always (a
+/// rollback that fails disposes the detached tab). So a
+/// `target.closeToken()` taken before the action asks the app's list of
+/// surfaces afterwards, without reading the surface: gone is `closed`, and
+/// neither `target` nor `actions` is read again; still there leaves the
+/// result to what performed, with that action counted as reached.
 fn performChain(
     target: anytype,
     actions: []const input.Binding.Action,
@@ -8365,37 +8342,64 @@ fn performChain(
     var performed: bool = false;
     for (actions, 0..) |action, i| {
         const closing = closesCaller(action);
-        // Taken before the close, so the failure path can tell whether the
-        // surface is still there without reading it.
+        // Taken before the close, so the surface's fate can be read without
+        // reading the surface.
         const token = if (closing) target.closeToken() else null;
-        if (target.performBindingAction(action)) |v| {
-            if (closing) {
-                if (v) return .{ .closed = true, .reached = i + 1 };
-                return .{ .performed = performed, .reached = i + 1 };
-            }
-            performed = performed or v;
-        } else |err| {
+        const v = target.performBindingAction(action) catch |err| v: {
             log.info(
                 "key binding action failed action={t} err={}",
                 .{ action, err },
             );
-            if (closing) {
-                if (!token.?.survived()) return .{ .closed = true, .reached = i + 1 };
-                return .{ .performed = performed, .reached = i + 1 };
-            }
+            break :v false;
+        };
+        if (closing) {
+            if (!token.?.survived()) return .{ .closed = true, .reached = i + 1 };
+            return .{ .performed = performed or v, .reached = i + 1 };
         }
+        performed = performed or v;
     }
 
     return .{ .performed = performed, .reached = actions.len };
 }
 
+/// What the key handler does with a key whose binding ran and whose
+/// surface is still there.
+const BindingOutcome = enum {
+    /// An `ignore` ran: swallow the key and its release.
+    ignored,
+    /// A `performable:` binding performed nothing: as if it were unbound.
+    unbound,
+    /// The binding consumes the key: swallow it and its release.
+    consumed,
+    /// The binding ran but does not consume the key: encode it too.
+    encode,
+};
+
+/// The key handler's decision for a binding with `flags` whose
+/// `reached` actions ran (only those count: an `ignore` a closing action
+/// dropped was not run).
+fn bindingOutcome(
+    flags: input.Binding.Flags,
+    performed: bool,
+    reached: []const input.Binding.Action,
+) BindingOutcome {
+    if (performed) {
+        for (reached) |action| if (action == .ignore) return .ignored;
+    }
+    if (flags.performable and !performed) return .unbound;
+    // If the consumed flag is explicitly set, then we are consumed. If the
+    // global or all flag is set, we always consume.
+    if (flags.consumed or flags.global or flags.all) return .consumed;
+    return .encode;
+}
+
 /// What `dispatchLeaf` left for the key handler.
 const Dispatch = union(enum) {
-    /// A closing action ran: the surface may be freed already.
+    /// A closing action ran and the surface is gone.
     closed,
     done: struct {
-        /// At least one action performed.
-        performed: bool,
+        /// What the key handler does with the key.
+        outcome: BindingOutcome,
         /// The actions that ran, copied: the binding's actions up to the
         /// closing action that ended the chain, or all of them.
         reached: []const input.Binding.Action,
@@ -8408,7 +8412,7 @@ const Dispatch = union(enum) {
 /// reset for an action (`target.beginBindingActions`), and the actions run,
 /// across the app for a `global:` or `all:` binding
 /// (`target.performAllChainedAction`) and through `performChain`
-/// otherwise.
+/// otherwise. It ends with the key handler's decision (`bindingOutcome`).
 ///
 /// The copy comes first for two reasons. An action can free the binding
 /// storage the leaf borrows while the chain still runs (a reload replaces
@@ -8440,24 +8444,113 @@ fn dispatchLeaf(
 
     // If this is a global or all action, then we perform it on the app and
     // it applies to every surface. "All" actions are always performed
-    // since they are global. Whether the chain closes is decided before
-    // anything runs, since nothing may read the surface once a closing
-    // action has run (it may have closed this surface with the others).
+    // since they are global. The chain may close this surface with the
+    // others (another surface's `close_tab:other` can), or close nothing
+    // (`all:close_tab:right` in a window with one tab), so a token taken
+    // before it asks the app afterwards whether the surface is still there.
     if (leaf.flags.global or leaf.flags.all) {
-        const closing = for (actions) |action| {
-            if (closingAction(action)) break true;
-        } else false;
+        const token = target.closeToken();
         target.performAllChainedAction(actions);
-        if (closing) return .closed;
-        return .{ .done = .{ .performed = true, .reached = actions } };
+        if (!token.survived()) return .closed;
+        return .{ .done = .{
+            .outcome = bindingOutcome(leaf.flags, true, actions),
+            .reached = actions,
+        } };
     }
 
     const run = performChain(target, actions);
     if (run.closed) return .closed;
+    const reached = actions[0..run.reached];
     return .{ .done = .{
-        .performed = run.performed,
-        .reached = actions[0..run.reached],
+        .outcome = bindingOutcome(leaf.flags, run.performed, reached),
+        .reached = reached,
     } };
+}
+
+/// Starts a key sequence at a leader key on `target` (the surface; a
+/// stand-in in tests): the sequence is set up first
+/// (`target.startSequence(sequence)`: the key encoded and queued, the next
+/// set entered), and only then is a one-shot key table deactivated
+/// (`pop_once_table`), so a setup that fails (an encoding or queue
+/// allocation) leaves the table up and no sequence entered.
+fn startLeader(
+    target: anytype,
+    sequence: anytype,
+    pop_once_table: bool,
+) !void {
+    try target.startSequence(sequence);
+
+    // A one-shot table ends when one of its keys is used, a leader key
+    // included.
+    if (pop_once_table) _ = try target.performBindingAction(.deactivate_key_table);
+}
+
+/// What a leader key needs to start its sequence (`startLeader`).
+const LeaderSequence = struct {
+    set: *input.Binding.Set,
+    event: input.KeyEvent,
+    insp_ev: ?*inspectorpkg.KeyEvent,
+};
+
+/// Sets up the next set we'll look at, storing this event so that we can
+/// drain and encode on invalid. We don't need to cap this because it is
+/// naturally capped by the config validation.
+fn startSequence(self: *Surface, sequence: LeaderSequence) !void {
+    try self.keyboard.enterSequence(
+        self.alloc,
+        sequence.set,
+        try self.encodeKey(sequence.event, sequence.insp_ev),
+    );
+}
+
+/// The write a `cursor_key` binding queues for the pty. It owns its bytes:
+/// the action's are the key handler's copy of the binding
+/// (`dispatchLeaf`), which goes when the handler returns, while the IO
+/// thread may read the write later (a `write_stable` borrowed them).
+fn cursorKeyWrite(
+    alloc: Allocator,
+    ck: input.Binding.Action.CursorKey,
+    normal: bool,
+) !termio.Message {
+    return try termio.Message.writeReq(alloc, if (normal) ck.normal else ck.application);
+}
+
+test "a cursor_key write owns its bytes past the binding's copy" {
+    const testing = std.testing;
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    // The key handler's copy of the binding, as `dispatchLeaf` makes it.
+    const source = [_]input.Binding.Action{.{ .cursor_key = .{
+        .normal = "[A",
+        .application = "OA-application-mode-sequence-long-enough-to-allocate",
+    } }};
+    const leaf: input.Binding.Set.GenericLeaf = .{ .flags = .{}, .actions = .{ .many = &source } };
+    const copy = try leaf.cloneActions(arena.allocator());
+
+    const small = try cursorKeyWrite(testing.allocator, copy[0].cursor_key, true);
+    defer small.deinit();
+    const large = try cursorKeyWrite(testing.allocator, copy[0].cursor_key, false);
+    defer large.deinit();
+
+    // The handler returns: its copy is overwritten and freed before the IO
+    // thread gets to the writes.
+    @memset(@constCast(copy[0].cursor_key.normal), 'x');
+    @memset(@constCast(copy[0].cursor_key.application), 'x');
+    arena.deinit();
+
+    try testing.expectEqualStrings("[A", testMessageBytes(&small));
+    try testing.expectEqualStrings(
+        "OA-application-mode-sequence-long-enough-to-allocate",
+        testMessageBytes(&large),
+    );
+}
+
+fn testMessageBytes(message: *const termio.Message) []const u8 {
+    return switch (message.*) {
+        .write_small => |*v| v.data[0..v.len],
+        .write_stable => |v| v,
+        .write_alloc => |v| v.data,
+        else => unreachable,
+    };
 }
 
 /// The tags (names) of `actions`, owned by the caller, for the inspector.
@@ -8497,12 +8590,13 @@ fn closeToken(self: *Surface) CloseToken {
     return .{ .app = self.app, .rt_surface = self.rt_surface, .id = self.id };
 }
 
-/// Runs a `global:` or `all:` binding's actions across the app.
+/// Runs a `global:` or `all:` binding's actions across the app, from the
+/// key handler's own copy (`dispatchLeaf`), which is not copied again.
 fn performAllChainedAction(
     self: *Surface,
     actions: []const input.Binding.Action,
 ) void {
-    self.app.performAllChainedAction(self.rt_app, actions);
+    self.app.performAllOwnedChain(self.rt_app, actions);
 }
 
 /// A stand-in surface for `dispatchLeaf` and `performChain` tests. A
@@ -8517,8 +8611,21 @@ const TestChainTarget = struct {
     const poison: input.Binding.Action = .clear_screen;
 
     storage: []input.Binding.Action = undefined,
+    /// The actions that close this surface when they perform here, listed
+    /// rather than taken from `closesCaller`, so the tests pin that.
+    frees: []const input.Binding.Action = &.{
+        .close_surface,
+        .close_window,
+        .{ .close_tab = .this },
+    },
     closes: bool = true,
+    /// A close that performs but leaves the surface (a confirmation that
+    /// was cancelled).
+    keeps: bool = false,
     fails: bool = false,
+    /// A leader key whose sequence cannot be set up.
+    sequence_fails: bool = false,
+    sequence_started: bool = false,
     /// A failed close that freed the surface anyway (a rollback that
     /// failed).
     fail_frees: bool = false,
@@ -8539,7 +8646,7 @@ const TestChainTarget = struct {
         self.seen[self.seen_len] = action;
         self.seen_len += 1;
 
-        if (closesCaller(action)) {
+        if (self.freesOn(action)) {
             if (self.fails) {
                 if (self.fail_frees) {
                     @memset(self.storage, poison);
@@ -8548,6 +8655,7 @@ const TestChainTarget = struct {
                 return error.TestCloseFailed;
             }
             if (!self.closes) return false;
+            if (self.keeps) return true;
             @memset(self.storage, poison);
             self.freed = true;
             return true;
@@ -8558,6 +8666,13 @@ const TestChainTarget = struct {
 
     fn beginBindingActions(self: *TestChainTarget) void {
         self.began = true;
+    }
+
+    fn freesOn(self: *const TestChainTarget, action: input.Binding.Action) bool {
+        for (self.frees) |frees| {
+            if (std.meta.eql(frees, action)) return true;
+        }
+        return false;
     }
 
     const Token = struct {
@@ -8581,10 +8696,20 @@ const TestChainTarget = struct {
         for (actions) |action| {
             self.seen[self.seen_len] = action;
             self.seen_len += 1;
-            if (action == .reload_config or closingAction(action)) {
+            if (action == .reload_config) @memset(self.storage, poison);
+            // A close across the app closes this surface too, unless there
+            // is nothing for it to close (`closes = false`).
+            if (closingAction(action) and self.closes) {
                 @memset(self.storage, poison);
+                self.freed = true;
             }
         }
+    }
+
+    fn startSequence(self: *TestChainTarget, sequence: void) !void {
+        _ = sequence;
+        if (self.sequence_fails) return error.OutOfMemory;
+        self.sequence_started = true;
     }
 
     fn seenTags(self: *const TestChainTarget) []const Tag {
@@ -8596,7 +8721,7 @@ const TestChainTarget = struct {
 /// (the copies they point into go with the arena).
 const TestDispatch = struct {
     closed: bool,
-    performed: bool = false,
+    outcome: BindingOutcome = .encode,
     reached: [8]TestChainTarget.Tag = undefined,
     reached_len: usize = 0,
 
@@ -8628,7 +8753,7 @@ fn testDispatch(
     return switch (try dispatchLeaf(target, arena.allocator(), leaf, false)) {
         .closed => .{ .closed = true },
         .done => |done| done: {
-            var out: TestDispatch = .{ .closed = false, .performed = done.performed };
+            var out: TestDispatch = .{ .closed = false, .outcome = done.outcome };
             for (done.reached) |action| {
                 out.reached[out.reached_len] = action;
                 out.reached_len += 1;
@@ -8682,17 +8807,19 @@ test "a binding chain whose closing action fails keeps the surface and what came
         .{},
     );
     try testing.expect(!result.closed);
-    try testing.expect(result.performed);
+    try testing.expectEqual(BindingOutcome.consumed, result.outcome);
     try testing.expectEqualSlices(
         TestChainTarget.Tag,
         &.{ .scroll_to_top, .close_tab },
         result.reachedTags(),
     );
 
+    // Alone, it performed nothing, and the key is still consumed: its
+    // release is swallowed with it.
     target = .{ .fails = true };
     const alone = try testDispatch(&target, &.{.{ .close_tab = .this }}, .{});
     try testing.expect(!alone.closed);
-    try testing.expect(!alone.performed);
+    try testing.expectEqual(BindingOutcome.consumed, alone.outcome);
 }
 
 test "a binding chain whose closing action fails after freeing the surface ends closed" {
@@ -8719,7 +8846,8 @@ test "a binding chain whose closing action closes nothing keeps what came before
         .{ .consumed = false },
     );
     try testing.expect(!result.closed);
-    try testing.expect(result.performed);
+    // The key gets past the binding to the program.
+    try testing.expectEqual(BindingOutcome.encode, result.outcome);
     try testing.expectEqualSlices(
         TestChainTarget.Tag,
         &.{ .scroll_to_top, .close_window },
@@ -8734,7 +8862,7 @@ test "a binding chain whose closing action closes nothing keeps what came before
     target = .{ .closes = false };
     const alone = try testDispatch(&target, &.{.close_window}, .{});
     try testing.expect(!alone.closed);
-    try testing.expect(!alone.performed);
+    try testing.expectEqual(BindingOutcome.consumed, alone.outcome);
 }
 
 test "a binding chain reads the actions after a reload from its own copy" {
@@ -8794,7 +8922,7 @@ test "a binding chain goes on after closing the tabs beside it" {
         var target: TestChainTarget = .{};
         const result = try testDispatch(&target, &.{ beside, .scroll_to_top, .ignore }, .{});
         try testing.expect(!result.closed);
-        try testing.expect(result.performed);
+        try testing.expectEqual(BindingOutcome.ignored, result.outcome);
         try testing.expectEqualSlices(
             TestChainTarget.Tag,
             &.{ .close_tab, .scroll_to_top, .ignore },
@@ -8817,8 +8945,41 @@ test "a binding chain without a closing action runs every action" {
         &.{ .ignore, .scroll_to_top, .text },
         target.seenTags(),
     );
-    try testing.expect(result.performed);
+    try testing.expectEqual(BindingOutcome.ignored, result.outcome);
     try testing.expect(target.began);
+}
+
+test "closesCaller names every action that can close the surface it runs on" {
+    const testing = std.testing;
+    const cases = [_]struct { action: input.Binding.Action, closes: bool }{
+        .{ .action = .close_surface, .closes = true },
+        .{ .action = .close_window, .closes = true },
+        .{ .action = .{ .close_tab = .this }, .closes = true },
+        .{ .action = .{ .close_tab = .other }, .closes = false },
+        .{ .action = .{ .close_tab = .right }, .closes = false },
+        // App-scoped: they never close one surface from its key (`quit`
+        // and `close_all_windows` post on Win32).
+        .{ .action = .quit, .closes = false },
+        .{ .action = .close_all_windows, .closes = false },
+        .{ .action = .new_window, .closes = false },
+        .{ .action = .ignore, .closes = false },
+    };
+    for (cases) |case| {
+        try testing.expectEqual(case.closes, closesCaller(case.action));
+        // Every action that can close its surface is a closing action.
+        if (case.closes) try testing.expect(closingAction(case.action));
+    }
+    // And every closing action is in the table.
+    for (std.enums.values(std.meta.Tag(input.Binding.Action))) |tag| {
+        const closing = switch (tag) {
+            .close_surface, .close_window, .close_tab => true,
+            else => false,
+        };
+        const named = for (cases) |case| {
+            if (std.meta.activeTag(case.action) == tag) break true;
+        } else false;
+        if (closing) try testing.expect(named);
+    }
 }
 
 test "a binding whose actions cannot be copied leaves the key state and the one-shot table" {
@@ -8838,6 +8999,47 @@ test "a binding whose actions cannot be copied leaves the key state and the one-
     // No `deactivate_key_table`, no key state reset, nothing performed.
     try testing.expectEqual(@as(usize, 0), target.seen_len);
     try testing.expect(!target.began);
+}
+
+test "a binding chain whose close leaves the surface keeps the key's release" {
+    const testing = std.testing;
+    // A consumed `close_surface` that opens a confirmation which is then
+    // cancelled: it performed, and the surface is still there.
+    var target: TestChainTarget = .{ .keeps = true };
+    const result = try testDispatch(&target, &.{ .close_surface, .scroll_to_top }, .{});
+    try testing.expect(!result.closed);
+    try testing.expectEqual(BindingOutcome.consumed, result.outcome);
+    // The chain still ends at the close.
+    try testing.expectEqualSlices(
+        TestChainTarget.Tag,
+        &.{.close_surface},
+        target.seenTags(),
+    );
+}
+
+test "an all: binding chain that closes nothing keeps the key's release" {
+    const testing = std.testing;
+    // `all:close_tab:right` in a window with one tab.
+    var target: TestChainTarget = .{ .closes = false };
+    const result = try testDispatch(&target, &.{.{ .close_tab = .right }}, .{ .all = true });
+    try testing.expect(!result.closed);
+    try testing.expectEqual(BindingOutcome.consumed, result.outcome);
+}
+
+test "a leader key whose sequence cannot start leaves the one-shot table" {
+    const testing = std.testing;
+    var target: TestChainTarget = .{ .sequence_fails = true };
+    try testing.expectError(error.OutOfMemory, startLeader(&target, {}, true));
+    try testing.expectEqual(@as(usize, 0), target.seen_len);
+
+    target = .{};
+    try startLeader(&target, {}, true);
+    try testing.expect(target.sequence_started);
+    try testing.expectEqualSlices(
+        TestChainTarget.Tag,
+        &.{.deactivate_key_table},
+        target.seenTags(),
+    );
 }
 
 test "a one-shot table is deactivated before the binding's actions run" {
