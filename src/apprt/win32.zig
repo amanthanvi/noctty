@@ -11501,7 +11501,7 @@ pub fn hostWindowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) cal
             // Only a wake: the outer pump runs the move (`drainPendingTabMoves`),
             // which can free this window, never a nested loop's dispatch. A
             // nested loop that took the wake gets it again on a timer.
-            if (host) |v| v.app.noteTabMoveWake(hwnd, msg);
+            if (host) |v| v.app.noteTabMoveWake(msg);
             return 0;
         },
         c.WM_PARENTNOTIFY => {
@@ -11550,12 +11550,6 @@ pub fn hostWindowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) cal
         // Separate from the App-level quit timer, which uses
         // `sys.SetTimer(null, …)` on the thread queue.
         c.WM_TIMER => {
-            if (wParam == c.TAB_MOVE_TIMER_ID) {
-                if (host) |v| v.app.noteTabMoveWake(hwnd, msg) else {
-                    _ = sys.KillTimer(hwnd, c.TAB_MOVE_TIMER_ID);
-                }
-                return 0;
-            }
             if (wParam == c.TWEEN_TIMER_ID) {
                 if (host) |v| v.tickTweens();
                 return 0;

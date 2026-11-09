@@ -72,7 +72,9 @@ pub fn snapped(api: ?bool, looks: bool) bool {
 /// `IsWindowArranged` before later builds): against a side of its monitor's
 /// work area and its top or bottom, half its width wide, and its full or
 /// half height tall (a half or a quarter snap), each within `slack` (the
-/// frame's invisible resize border) and twice that for the size.
+/// frame's invisible resize border) and twice that for the size; or against
+/// a side and both its top and bottom at any width, as Snap Fill and a
+/// resize of two snapped windows along their shared border leave one.
 pub fn looksSnapped(window: Edges, work: Edges, slack: i32) bool {
     const near = struct {
         fn f(a: i32, b: i32, s: i32) bool {
@@ -80,7 +82,10 @@ pub fn looksSnapped(window: Edges, work: Edges, slack: i32) bool {
         }
     }.f;
     const side = near(window.left, work.left, slack) or near(window.right, work.right, slack);
-    const end = near(window.top, work.top, slack) or near(window.bottom, work.bottom, slack);
+    const top = near(window.top, work.top, slack);
+    const bottom = near(window.bottom, work.bottom, slack);
+    if (side and top and bottom) return true;
+    const end = top or bottom;
     const width = window.right - window.left;
     const height = window.bottom - window.top;
     const work_width = work.right - work.left;
@@ -257,6 +262,15 @@ test "a window against a side and the top or bottom of its work area looks snapp
     try std.testing.expect(!looksSnapped(.{ .left = 3, .top = 8, .right = 803, .bottom = 608 }, work, 12));
     try std.testing.expect(!looksSnapped(.{ .left = 300, .top = 0, .right = 1100, .bottom = 600 }, work, 12));
     try std.testing.expect(!looksSnapped(.{ .left = -7, .top = 200, .right = 793, .bottom = 800 }, work, 12));
+    // Snap Fill, or two snapped windows resized along the border they
+    // share: full height against a side, at a width of its own (CodeRabbit
+    // r4509329318).
+    try std.testing.expect(looksSnapped(.{ .left = -7, .top = 0, .right = 647, .bottom = 1039 }, work, 12));
+    try std.testing.expect(looksSnapped(.{ .left = 633, .top = 0, .right = 1927, .bottom = 1039 }, work, 12));
+    // Full height away from both sides, or against a side and short of the
+    // top: a size of its own.
+    try std.testing.expect(!looksSnapped(.{ .left = 300, .top = 0, .right = 1100, .bottom = 1039 }, work, 12));
+    try std.testing.expect(!looksSnapped(.{ .left = -7, .top = 60, .right = 647, .bottom = 1039 }, work, 12));
     // A cross-DPI snap on a build without `IsWindowArranged`: resized with
     // the DPI, so only this keeps it from merging.
     try std.testing.expect(!windowMoveMerges(.{

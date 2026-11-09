@@ -818,8 +818,10 @@ pub const App = struct {
     /// The message the outer pump is dispatching now, or 0 while it waits
     /// (`noteTabMoveWake`).
     outer_dispatch_message: UINT = 0,
-    /// The window whose timer wakes the pump again for a waiting tab move.
-    tab_move_wake_timer: ?HWND = null,
+    /// The thread timer that wakes the pump again for a waiting tab move a
+    /// nested loop took the wake of: one for the App, whichever windows the
+    /// wakes went to (`noteTabMoveWake`).
+    tab_move_wake_timer: ?UINT_PTR = null,
     /// Tab moves asked of windows, in order, one per tab, run by the outer
     /// message pump (`drainPendingTabMoves`), never from inside a handler or
     /// a nested modal loop: a move can free the window it was asked of. As
@@ -1778,6 +1780,12 @@ pub const App = struct {
                         continue;
                     }
                 }
+                // The outer pump has the tab-move wake again: its next turn
+                // runs the moves.
+                if (threadTimerFired(&msg, self.tab_move_wake_timer)) {
+                    killThreadTimer(&self.tab_move_wake_timer);
+                    continue;
+                }
                 if (threadTimerFired(&msg, self.program_status_notify_timer_id)) {
                     self.flushProgramStatusNotifications();
                     continue;
@@ -1867,6 +1875,7 @@ pub const App = struct {
         self.destroyAllWindows();
         win32.detachChromeControlProvider(self, &self.tab_drag_preview_uia_provider);
         self.pending_tab_moves.deinit(self.core_app.alloc);
+        killThreadTimer(&self.tab_move_wake_timer);
         if (self.tab_drag_preview_hwnd) |preview| {
             setWindowData(preview, null);
             if (self.tab_drag_preview_prev_proc) |previous| _ = sys.SetWindowLongPtrW(preview, c.GWLP_WNDPROC, @bitCast(@intFromPtr(previous)));
@@ -7147,6 +7156,10 @@ pub const App = struct {
     /// leaves the ID retained by its window, which releases it when it
     /// closes. Nothing else names the ID by then.
     pub fn releaseRetainedShellPane(self: *App, pane_id: win32_shell.model.PaneId) void {
+        // Released already, with the window that kept it: a tab move took
+        // the window's last tab and the model removed the window with its
+        // retained panes before the history clear got here.
+        if (!self.shell_runtime.state.pane_ids.isCurrent(pane_id)) return;
         var prepared = self.shell_runtime.prepare(.{ .discard_detached_pane = pane_id }) catch |err| {
             log.warn("split redo disposal kept shell pane={d}:{d} err={}", .{ pane_id.index, pane_id.generation, err });
             return;
@@ -7813,10 +7826,11 @@ pub const App = struct {
     pub var test_tab_move_activating: ?*const fn (*Host, *Surface) anyerror!void = null;
 
     /// Runs before `moveTabToWindow`'s shell steps that can still fail after
-    /// a history clear (`.retry_prepare`) or before it (`.commit`), for the
-    /// tests that make them fail.
+    /// a history clear (`.retry_prepare`) or before it (`.commit`), and
+    /// around the history clear after the commit (`.history`,
+    /// `.after_history`), for the tests that make them fail.
     pub var test_tab_move_shell_step: ?*const fn (*App, TabMoveShellStep) void = null;
-    pub const TabMoveShellStep = enum { retry_prepare, commit };
+    pub const TabMoveShellStep = enum { retry_prepare, commit, history, after_history };
 
     pub const PendingTabMove = struct { host_id: u32, request: Host.TabMoveRequest };
 
@@ -7862,19 +7876,25 @@ pub const App = struct {
         return true;
     }
 
-    /// A tab move's wake, or its timer, reached `hwnd`. Dispatched by the
-    /// outer pump itself, its next turn runs the move, and the timer stops.
-    /// Taken by a nested loop instead (a menu, the system move loop, a sent
-    /// message's loop while the pump waits in `GetMessage`), nothing would
-    /// wake the pump once that loop ends: a short timer keeps waking until
-    /// the outer pump dispatches one.
-    pub fn noteTabMoveWake(self: *App, hwnd: HWND, message: UINT) void {
+    /// A tab move's wake reached a window. Dispatched by the outer pump
+    /// itself, its next turn runs the move. Taken by a nested loop instead (a
+    /// menu, the system move loop, a sent message's loop while the pump waits
+    /// in `GetMessage`), nothing would wake the pump once that loop ends: one
+    /// thread timer, whichever window the wake went to, keeps waking until
+    /// the outer pump retrieves a tick of it (a nested loop's dispatch drops
+    /// a thread timer's message) or the queue is empty.
+    pub fn noteTabMoveWake(self: *App, message: UINT) void {
         if (self.pending_tab_moves.items.len == 0 or self.outer_dispatch_message == message) {
-            if (self.tab_move_wake_timer) |timer| _ = sys.KillTimer(timer, c.TAB_MOVE_TIMER_ID);
-            self.tab_move_wake_timer = null;
+            killThreadTimer(&self.tab_move_wake_timer);
             return;
         }
-        if (sys.SetTimer(hwnd, c.TAB_MOVE_TIMER_ID, 50, null) != 0) self.tab_move_wake_timer = hwnd;
+        if (self.tab_move_wake_timer != null) return;
+        const id = sys.SetTimer(null, 0, 50, null);
+        if (id == 0) {
+            log.warn("tab move re-wake timer failed err={}", .{windows.kernel32.GetLastError()});
+            return;
+        }
+        self.tab_move_wake_timer = id;
     }
 
     /// Runs every waiting tab move, from the outer message pump, with no
@@ -7890,6 +7910,8 @@ pub const App = struct {
             self.runTabMove(host, pending.request);
         }
         self.pending_tab_moves.clearAndFree(self.core_app.alloc);
+        // Nothing waits: no timer outlives the queue.
+        killThreadTimer(&self.tab_move_wake_timer);
     }
 
     fn runTabMove(self: *App, host: *Host, request: Host.TabMoveRequest) void {
@@ -7948,14 +7970,16 @@ pub const App = struct {
         try target.tabs.ensureUnusedCapacity(self.core_app.alloc, 1);
 
         // The shell model's half. Undo history goes only once the model has
-        // the move, so nothing that can still fail runs after it: the commit
-        // comes first (a stale one is rebuilt by preparing again, which can
-        // run out of memory, with the history still whole), the history
-        // clear after it. One case cannot keep it: the model refuses the
-        // move while a transfer in that history names the tab
-        // (`InvalidTransfer`), so the history goes first and the second
-        // prepare can still fail; then the move fails with the history gone
-        // (TEAROFF-01).
+        // the move: the commit comes first (a stale one is rebuilt by
+        // preparing again, which can run out of memory, with the history
+        // still whole), the history clear after it. One rule for every
+        // failure (TEAROFF-01): the model and the windows always agree, and
+        // no closed tab the model keeps for undo is left without its window.
+        // History that cannot be disposed stays with its window (below); it
+        // is given up only where the model needs it gone first: it refuses
+        // the move while a transfer in that history names the tab
+        // (`InvalidTransfer`), so then the history goes before a second
+        // prepare, which can still fail, and the move fails with it gone.
         var history_cleared = false;
         var shell_prepared: ?win32_shell.runtime.Prepared = null;
         var shell_tab: ?win32_shell.model.TabId = null;
@@ -7992,11 +8016,15 @@ pub const App = struct {
         // Undo history goes in both windows, as for a reorder (`moveTab`):
         // its entries keep tab indices and panes of their window. After the
         // commit, which is then never stale from it; each disposal commits
-        // its own release. A disposal that cannot finish is logged and
-        // leaves its entry, which only ever finds its panes by identity.
+        // its own release. A disposal that cannot finish (out of memory in
+        // its model discard) leaves its entry, and the model the closed tab
+        // it names: both stay with their window, which only ever finds its
+        // panes by identity, and the undo prune disposes them later.
+        if (test_tab_move_shell_step) |hook| hook(self, .history);
         if (!history_cleared) clearMoveHistory(source, dest) catch |err| {
             log.warn("tab move left undo history it could not dispose err={}", .{err});
         };
+        if (test_tab_move_shell_step) |hook| hook(self, .after_history);
         // The clear closed what history kept, never a live tab; find it again.
         const at = source.findTabIndexById(tab_id).?;
         source.tabs.items[at].clearRedoHistory();
@@ -8011,8 +8039,19 @@ pub const App = struct {
         const new_window = created != null;
         created = null;
         const landed = source.giveTab(at, target, insert);
-        // The model removed the window it emptied (`move_tab_to_window`).
-        if (source.tabs.items.len == 0) source.shell_id = null;
+        // An emptied window goes with its last tab, as the model's does
+        // (`move_tab_to_window`), unless undo history it could not dispose
+        // is left in it: the model then keeps its window for the closed tabs
+        // that history names, and this side keeps it too, hidden, until the
+        // undo prune disposes that history and closes it
+        // (`destroy_after_structural_dispose`), as a window whose last tab
+        // closed is kept. Before, it went, and the model kept a window and a
+        // closed tab nothing native owned.
+        const source_emptied = source.tabs.items.len == 0;
+        const source_kept = source_emptied and source.hasStructuralHistory();
+        if (source_emptied) if (source.shell_id) |id| {
+            if (!self.shell_runtime_initialized or self.shell_runtime.state.windowConst(id) == null) source.shell_id = null;
+        };
         // Showing the tab puts the target's DPI's font into its panes, and
         // with `window-width`/`window-height` set the core then asks for its
         // window's size again (`recomputeInitialSize`): not of this window.
@@ -8023,7 +8062,6 @@ pub const App = struct {
         self.notifications.panesChanged();
         if (shell_prepared) |*prepared| self.applyShellEffects(prepared.effects(), .{ .focus = false });
 
-        const source_emptied = source.tabs.items.len == 0;
         if (!source_emptied) {
             // The tab beside it comes to the front, without taking the
             // keyboard from the window the tab went to.
@@ -8035,7 +8073,13 @@ pub const App = struct {
             runUiActionOrLog("tab move source chrome refresh failed", source.refreshChrome());
             source.refreshSearchTimerState();
         }
-        defer if (source_emptied) {
+        defer if (source_kept) {
+            // After the target took the foreground. Nothing the user can
+            // reach is left in it.
+            source.destroy_after_structural_dispose = true;
+            if (source.hwnd) |hwnd| _ = sys.ShowWindow(hwnd, c.SW_HIDE);
+            self.scheduleUndoPruneTimer();
+        } else if (source_emptied) {
             // As the last pane's teardown closes it (`windowDestroyed`):
             // nothing is left in it to destroy with it. After the target
             // took the foreground.
@@ -16061,14 +16105,16 @@ test "win32 a tab move whose wake a nested loop took wakes the pump again until 
             while (sys.PeekMessageW(&msg, null, c.WM_WINHOSTTY_TAB_MOVE, c.WM_WINHOSTTY_TAB_MOVE, c.PM_REMOVE) != 0) {
                 _ = sys.DispatchMessageW(&msg);
             }
-            try std.testing.expectEqual(@as(?HWND, source.hwnd.?), app.tab_move_wake_timer);
-            // The timer reaching the outer pump stops it; the pump's next turn
-            // runs the move.
-            app.outer_dispatch_message = c.WM_TIMER;
-            _ = sys.SendMessageW(source.hwnd.?, c.WM_TIMER, c.TAB_MOVE_TIMER_ID, 0);
-            app.outer_dispatch_message = 0;
-            try std.testing.expect(app.tab_move_wake_timer == null);
+            try std.testing.expect(app.tab_move_wake_timer != null);
+            // A second wake a nested loop takes starts no second timer.
+            const timer = app.tab_move_wake_timer;
+            try std.testing.expect(app.requestTabMove(source, source.tabs.items[0].id, .{ .new_window = null }));
+            testNestedLoopTakesTabMoveWakes(app);
+            try std.testing.expectEqual(timer, app.tab_move_wake_timer);
+            // The pump's next turn runs the moves, and the timer stops with
+            // the queue.
             app.drainPendingTabMoves();
+            try std.testing.expect(app.tab_move_wake_timer == null);
             try std.testing.expectEqual(@as(usize, 1), source.tabs.items.len);
         }
     }.body);
@@ -16195,6 +16241,134 @@ test "win32 a tab move a transfer in undo history names keeps it gone if its sec
             // With memory, the same move goes through.
             try std.testing.expect(try app.moveTabToWindow(host, host.active_tab, .{ .new_window = null }));
             try std.testing.expectEqual(@as(usize, 2), app.registry.hosts.items.len);
+        }
+    }.body);
+}
+
+/// What a nested loop does with the tab-move wakes it takes: dispatches them
+/// with the outer pump out of the way.
+fn testNestedLoopTakesTabMoveWakes(app: *App) void {
+    const outer = app.outer_dispatch_message;
+    app.outer_dispatch_message = 0;
+    defer app.outer_dispatch_message = outer;
+    var msg: MSG = undefined;
+    while (sys.PeekMessageW(&msg, null, c.WM_WINHOSTTY_TAB_MOVE, c.WM_WINHOSTTY_TAB_MOVE, c.PM_REMOVE) != 0) {
+        _ = sys.DispatchMessageW(&msg);
+    }
+}
+
+test "win32 tab-move wakes a nested loop took from two windows leave nothing waking the app once both moves ran" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    try runOnHiddenDesktop(struct {
+        fn body() !void {
+            var fixture: win32.WindowStartTestApp = .{};
+            try fixture.init();
+            defer fixture.deinit();
+            const app = &fixture.app;
+            app.shell_runtime_initialized = true;
+            const setup: TabMoveFixture = .{ .fixture = &fixture };
+            const first = try setup.window(2, false);
+            const second = try setup.window(2, false);
+            // A menu's loop takes the wake of a move asked of each window.
+            try std.testing.expect(app.requestTabMove(first, first.tabs.items[1].id, .{ .new_window = null }));
+            testNestedLoopTakesTabMoveWakes(app);
+            try std.testing.expect(app.requestTabMove(second, second.tabs.items[1].id, .{ .new_window = null }));
+            testNestedLoopTakesTabMoveWakes(app);
+            const timer = app.tab_move_wake_timer;
+            try std.testing.expect(timer != null);
+            // The pump's next turn runs both.
+            app.drainPendingTabMoves();
+            try std.testing.expect(app.tab_move_wake_timer == null);
+            try std.testing.expectEqual(@as(usize, 1), first.tabs.items.len);
+            try std.testing.expectEqual(@as(usize, 1), second.tabs.items.len);
+            // Then nothing wakes the app for them any more: the one move
+            // timer is gone (round 4 had one per window, and the first kept
+            // firing, 8 times in this wait). Other timers go on.
+            var fired: usize = 0;
+            const until = sys.GetTickCount64() + 250;
+            var msg: MSG = undefined;
+            while (sys.GetTickCount64() < until) {
+                while (sys.PeekMessageW(&msg, null, c.WM_TIMER, c.WM_TIMER, c.PM_REMOVE) != 0) {
+                    if (@intFromPtr(msg.hwnd) == 0 and msg.wParam == timer.?) {
+                        fired += 1;
+                        continue;
+                    }
+                    _ = sys.DispatchMessageW(&msg);
+                }
+                std.Thread.sleep(10 * std.time.ns_per_ms);
+            }
+            try std.testing.expectEqual(@as(usize, 0), fired);
+        }
+    }.body);
+}
+
+const TestHistoryDisposalFailure = struct {
+    var failing: std.testing.FailingAllocator = undefined;
+    var kept: std.mem.Allocator = undefined;
+    var armed = false;
+
+    /// The history clear after a tab move's commit runs with every model
+    /// allocation failing: the first, the clone `discard_detached_tab`'s
+    /// prepare makes, fails it.
+    fn hook(app: *App, step: App.TabMoveShellStep) void {
+        switch (step) {
+            .history => {
+                kept = app.shell_runtime.state.allocator;
+                failing = std.testing.FailingAllocator.init(kept, .{ .fail_index = 0 });
+                app.shell_runtime.state.allocator = failing.allocator();
+                armed = true;
+            },
+            .after_history => if (armed) {
+                app.shell_runtime.state.allocator = kept;
+                armed = false;
+            },
+            else => {},
+        }
+    }
+};
+
+test "win32 a tab move that empties its window keeps the window, hidden, while undo history it could not dispose names a closed tab (TEAROFF-01)" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    try runOnHiddenDesktop(struct {
+        fn body() !void {
+            var fixture: win32.WindowStartTestApp = .{};
+            try fixture.init();
+            defer fixture.deinit();
+            const app = &fixture.app;
+            app.shell_runtime_initialized = true;
+            const setup: TabMoveFixture = .{ .fixture = &fixture };
+            const source = try setup.window(2, false);
+            const target = try setup.window(1, false);
+            // A closed tab kept for undo: the model keeps the source's window
+            // for it when its live tab leaves.
+            fixture.core_app.deleteSurface(source.tabs.items[0].focusedSurface().?);
+            try std.testing.expect(try app.closeTabUndoable(source, 0));
+            try std.testing.expectEqual(@as(usize, 1), source.tabs.items.len);
+            const window = source.shell_id.?;
+            // Its live tab joins the other window, and disposing the closed
+            // one after the commit runs out of memory.
+            App.test_tab_move_shell_step = &TestHistoryDisposalFailure.hook;
+            defer App.test_tab_move_shell_step = null;
+            try std.testing.expect(try app.moveTabToWindow(source, 0, .{ .host = .{ .host = target, .index = 1 } }));
+            App.test_tab_move_shell_step = null;
+            try std.testing.expect(TestHistoryDisposalFailure.failing.has_induced_failure);
+            try std.testing.expectEqual(@as(usize, 2), target.tabs.items.len);
+            // The source stays, empty and hidden, with the history and its
+            // model window: nothing the model keeps is left without a window.
+            try std.testing.expectEqual(@as(usize, 2), app.registry.hosts.items.len);
+            try std.testing.expectEqual(@as(usize, 0), source.tabs.items.len);
+            try std.testing.expect(source.hasStructuralHistory());
+            try std.testing.expect(source.destroy_after_structural_dispose);
+            try std.testing.expect(sys.IsWindowVisible(source.hwnd.?) == 0);
+            try std.testing.expect(source.shell_id != null and source.shell_id.?.eql(window));
+            try std.testing.expect(app.shell_runtime.state.windowConst(window) != null);
+            try app.validateShellNativeMapping();
+            // The undo prune disposes the history, and the window goes with
+            // the model's.
+            _ = app.pruneUndoHistoryBefore(std.math.maxInt(u64));
+            try std.testing.expectEqual(@as(usize, 1), app.registry.hosts.items.len);
+            try std.testing.expect(app.shell_runtime.state.windowConst(window) == null);
+            try app.validateShellNativeMapping();
         }
     }.body);
 }

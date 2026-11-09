@@ -1136,8 +1136,10 @@ pub const Host = struct {
     }
 
     fn disposeStructuralNormalLogged(self: *Host, entry: *StructuralUndoEntry) !void {
+        // A warning: the entry stays, whole, and the undo prune disposes it
+        // later (`pruneUndoHistoryNow` retries a second on); nothing is lost.
         entry.dispose(self, .normal) catch |err| {
-            log.err("structural history disposal deferred err={}", .{err});
+            log.warn("structural history disposal deferred err={}", .{err});
             return err;
         };
     }

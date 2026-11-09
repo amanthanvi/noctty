@@ -141,49 +141,41 @@ public static class Tt {
     [DllImport("user32.dll", SetLastError=true)] static extern bool AttachThreadInput(uint a,uint b,bool attach);
     [DllImport("user32.dll")] static extern bool GetKeyboardState(byte[] s);
     [DllImport("user32.dll")] static extern bool SetKeyboardState(byte[] s);
-    [DllImport("user32.dll")] static extern short GetAsyncKeyState(int vk);
     [DllImport("user32.dll")] static extern IntPtr GetKeyboardLayout(uint tid);
     [DllImport("user32.dll")] static extern uint MapVirtualKeyExW(uint code,uint type,IntPtr hkl);
     [DllImport("user32.dll", CharSet=CharSet.Unicode)] static extern int ToUnicodeEx(uint vk,uint scan,byte[] state,StringBuilder buf,int n,uint flags,IntPtr hkl);
-    static readonly int[] Modifiers={0x10,0x11,0x12,0x5B,0x5C,0xA0,0xA1,0xA2,0xA3,0xA4,0xA5};
-    // Modifiers found down in the app's keyboard state before a posted key
-    // (cleared), after it ran, and at the real keyboard around it.
-    public static int LatchedBefore, LatchedAfter, HeldReal;
+    [DllImport("kernel32.dll")] public static extern ulong GetTickCount64();
+    // When each posted key or drag ran (GetTickCount64 at its start and end),
+    // set against the real keyboard's samples (modifier-sampler.c).
+    public static System.Collections.Generic.List<ulong[]> Windows=new System.Collections.Generic.List<ulong[]>();
+    public static void Ran(ulong start) { Windows.Add(new ulong[]{start,GetTickCount64()}); }
     // Clears the keyboard state `h`'s thread reads (GetKeyState and
     // GetKeyboardState: a modifier down there turns a posted key into a
-    // chord) and Caps Lock; returns the modifiers it found down. A hidden
-    // desktop keeps out the user's keys, not their modifiers (input.md,
-    // 2026-10-11 Win32 input mode, trap 11).
-    public static int Neutralize(IntPtr h) { return Neutralize(h,true); }
-    // `exists` false: a window the key closed (a pane's close_surface) has
-    // no thread left to read a state, so there is none to check.
-    static int Neutralize(IntPtr h,bool exists) {
+    // chord) and Caps Lock. Attaching resets that state by itself
+    // (AttachThreadInput's documentation), which is the point here; for the
+    // same reason a read after attaching shows nothing of what the thread
+    // had, so nothing is read. A hidden desktop keeps out the user's keys,
+    // not their modifiers (input.md, 2026-10-11 Win32 input mode, trap 11).
+    public static void Neutralize(IntPtr h) {
         uint pid; uint tid=GetWindowThreadProcessId(h,out pid); uint me=GetCurrentThreadId();
-        if(tid==0) { if(exists) throw new Exception("No window thread"); return 0; }
+        if(tid==0) throw new Exception("No window thread");
         if(!AttachThreadInput(me,tid,true)) throw new Exception("AttachThreadInput failed: "+Marshal.GetLastWin32Error());
         try {
-            var s=new byte[256]; GetKeyboardState(s);
-            int down=0; foreach(var vk in Modifiers) if((s[vk]&0x80)!=0) down++;
-            for(int i=0;i<256;i++) s[i]&=0x01;
-            s[0x14]=0;
-            if(!SetKeyboardState(s)) throw new Exception("SetKeyboardState failed");
-            return down;
+            if(!SetKeyboardState(new byte[256])) throw new Exception("SetKeyboardState failed");
         } finally { AttachThreadInput(me,tid,false); }
     }
-    static int Held() { int n=0; foreach(var vk in Modifiers) if((GetAsyncKeyState(vk)&0x8000)!=0) n++; return n; }
     // A key as a posted WM_KEYDOWN/WM_KEYUP pair (a posted triple types it
-    // twice), with the app's keyboard state neutral before it and checked
-    // again once the app is idle after it.
+    // twice), with the app's keyboard state cleared first; its window of
+    // time lasts until the app is idle after it.
     public static void Key(IntPtr h,int key) {
-        HeldReal+=Held();
+        var start=GetTickCount64();
         uint pid; GetWindowThreadProcessId(h,out pid);
-        LatchedBefore+=Neutralize(h);
+        Neutralize(h);
         if(!PostMessageW(h,0x100,new IntPtr(key),new IntPtr(1))) throw new Exception("Key-down post failed");
         if(!PostMessageW(h,0x101,new IntPtr(key),new IntPtr(0xC0000001L))) throw new Exception("Key-up post failed");
         try { using(var p=System.Diagnostics.Process.GetProcessById((int)pid)) { p.WaitForInputIdle(2000); } } catch(Exception) { System.Threading.Thread.Sleep(300); }
         System.Threading.Thread.Sleep(50);
-        LatchedAfter+=Neutralize(h,false);
-        HeldReal+=Held();
+        Ran(start);
     }
     // What `vk` types with no modifier in the layout of `h`'s thread, or null.
     public static string Typed(IntPtr h,int vk) {
@@ -210,6 +202,9 @@ $script:checks=[Collections.Generic.List[object]]::new()
 $script:samples=[Collections.Generic.List[object]]::new()
 # Cases that could not run here: reported, never counted as passes.
 $script:skips=[Collections.Generic.List[string]]::new()
+# What the run could not measure: reported, never counted as passes.
+$script:unverified=[Collections.Generic.List[string]]::new()
+$script:sampler=$null
 $script:processes=[Collections.Generic.List[object]]::new()
 # Each launch's process handle, kept until the final check (a PID may be
 # reused once its process is gone).
@@ -387,7 +382,8 @@ function Drag($h,[int]$Index,[int]$X,[int]$Y,[switch]$Escape,[IntPtr]$EscapeTo) 
     $button=[Tt]::Child($h,$TabButton+$Index)
     if($button -eq [IntPtr]::Zero) { throw "No tab button $Index." }
     # No modifier down for the drag either (a Ctrl or Shift drag is not one).
-    [Tt]::LatchedBefore+=[Tt]::Neutralize($button)
+    $started=[Tt]::GetTickCount64()
+    [Tt]::Neutralize($button)
     $origin=[Tt]::RectOf($button)
     [Tt]::Mouse($button,$WM_MOUSEMOVE,20,10,0)
     [Tt]::Mouse($button,$WM_LBUTTONDOWN,20,10,1)
@@ -396,6 +392,8 @@ function Drag($h,[int]$Index,[int]$X,[int]$Y,[switch]$Escape,[IntPtr]$EscapeTo) 
     Start-Sleep -Milliseconds 300
     if($Escape) { [Tt]::Key($EscapeTo,$VK_ESCAPE); Start-Sleep -Milliseconds 200 }
     [Tt]::Mouse($button,$WM_LBUTTONUP,$X-$origin.Left,$Y-$origin.Top,0)
+    Start-Sleep -Milliseconds 100
+    [Tt]::Ran($started)
 }
 function Same-Set($a,$b) { return (@($a) -join ',') -eq (@($b) -join ',') }
 # Each window owns the pseudo console of each of its panes: a moved pane's
@@ -409,8 +407,16 @@ function Pane-Consoles($case) {
     foreach($id in Shell-Pids $case) {
         $out=Join-Path $Run ('attach-' + [guid]::NewGuid().ToString('N').Substring(0,8) + '.txt')
         $pi=[Tt]::SpawnLogged($script:attachExe,('"{0}" {1} "{2}" window-dump' -f $script:attachExe,$id,$out),$Run,$desktopPath,"$out.log")
-        try { $done=[HiddenLocal]::WaitForSingleObject($pi.process,10000) -eq 0 }
-        finally { [void][HiddenLocal]::CloseHandle($pi.thread); [void][HiddenLocal]::CloseHandle($pi.process) }
+        try {
+            $done=[HiddenLocal]::WaitForSingleObject($pi.process,10000) -eq 0
+            if(-not $done) {
+                # Past its time: ended through its own handle, never by name,
+                # and gone before its dump is deleted, so it cannot write the
+                # file again after.
+                [void][HiddenLocal]::TerminateProcess($pi.process,1)
+                if([HiddenLocal]::WaitForSingleObject($pi.process,5000) -ne 0) { throw "Console helper $($pi.pid) did not exit." }
+            }
+        } finally { [void][HiddenLocal]::CloseHandle($pi.thread); [void][HiddenLocal]::CloseHandle($pi.process) }
         $lines=if($done -and (Test-Path -LiteralPath $out)) { @(Get-Content -LiteralPath $out) } else { @() }
         Remove-Item -LiteralPath $out,"$out.log" -ErrorAction SilentlyContinue
         if($lines.Count -lt 2) { continue }
@@ -658,20 +664,31 @@ function Measure-CrossDpi([string]$RendererName,[ValidateSet('down','up')][strin
 }
 
 try {
-    # The console helper, built here once (dev-windows.cmd; no console of its
-    # own, CREATE_NO_WINDOW).
+    # The console helper and the real keyboard's sampler, built here once
+    # (dev-windows.cmd; no console of their own, CREATE_NO_WINDOW).
     $root=Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
     $script:attachExe=Join-Path $Run 'console-attach-info.exe'
-    $compile=Join-Path $Run 'console-attach-info.cmd'
-    @('@echo off',('call "{0}" cl /nologo /W4 /WX /O2 /DUNICODE /D_UNICODE "{1}" /Fe:"{2}" /Fo:"{3}"' -f
-        (Join-Path $root 'scripts\dev-windows.cmd'),(Join-Path $PSScriptRoot 'console-attach-info.c'),$script:attachExe,(Join-Path $Run 'console-attach-info.obj')),
-        'exit /b %errorlevel%') | Set-Content -LiteralPath $compile -Encoding ascii
-    $cp=[Tt]::SpawnLogged($env:ComSpec,('"{0}" /d /c ""{1}""' -f $env:ComSpec,$compile),$Run,$desktopPath,(Join-Path $Run 'console-attach-info.compile.log'))
+    $samplerExe=Join-Path $Run 'modifier-sampler.exe'
+    $compile=Join-Path $Run 'helpers.cmd'
+    $lines=@('@echo off')
+    foreach($helper in @(@('console-attach-info',$script:attachExe),@('modifier-sampler',$samplerExe))) {
+        $lines+=('call "{0}" cl /nologo /W4 /WX /O2 /DUNICODE /D_UNICODE "{1}" /Fe:"{2}" /Fo:"{3}" || exit /b 1' -f
+            (Join-Path $root 'scripts\dev-windows.cmd'),(Join-Path $PSScriptRoot ($helper[0] + '.c')),$helper[1],(Join-Path $Run ($helper[0] + '.obj')))
+    }
+    $lines+='exit /b 0'
+    $lines | Set-Content -LiteralPath $compile -Encoding ascii
+    $cp=[Tt]::SpawnLogged($env:ComSpec,('"{0}" /d /c ""{1}""' -f $env:ComSpec,$compile),$Run,$desktopPath,(Join-Path $Run 'helpers.compile.log'))
     try {
-        if([HiddenLocal]::WaitForSingleObject($cp.process,180000) -ne 0) { throw 'Console helper compile timed out.' }
+        if([HiddenLocal]::WaitForSingleObject($cp.process,240000) -ne 0) { throw 'Helper compile timed out.' }
         [uint32]$code=1; [void][HiddenLocal]::GetExitCodeProcess($cp.process,[ref]$code)
     } finally { [void][HiddenLocal]::CloseHandle($cp.thread); [void][HiddenLocal]::CloseHandle($cp.process) }
-    if($code -ne 0 -or -not (Test-Path -LiteralPath $script:attachExe)) { throw 'Console helper compile failed.' }
+    if($code -ne 0 -or -not (Test-Path -LiteralPath $script:attachExe) -or -not (Test-Path -LiteralPath $samplerExe)) { throw 'Helper compile failed.' }
+    # The sampler runs on the user's desktop, the one whose keyboard
+    # GetAsyncKeyState reads (it reads 0 from this one): no window, no
+    # foreground, only whether a modifier is down.
+    $samples=Join-Path $Run 'modifier-samples.txt'; $samplerStop=Join-Path $Run 'modifier-sampler.stop'
+    $script:sampler=[Tt]::SpawnLogged($samplerExe,('"{0}" "{1}" "{2}"' -f $samplerExe,$samples,$samplerStop),$Run,'WinSta0\Default',(Join-Path $Run 'modifier-sampler.log'))
+    $script:launches.Add($script:sampler.process); [void][HiddenLocal]::CloseHandle($script:sampler.thread)
     $renderers=if($Renderer -eq 'both') { @('opengl','d3d11') } else { @($Renderer) }
     foreach($name in $renderers) { Measure-Case $name }
     foreach($name in $renderers) { Measure-CrossDpi $name 'down'; Measure-CrossDpi $name 'up' }
@@ -679,18 +696,53 @@ try {
 } catch {
     $script:checks.Add(@{Name='Harness execution'; Passed=$false; Error=$_.Exception.Message})
 } finally {
+    # The real keyboard against the posted keys and drags. A modifier held
+    # there while one ran means the run was interfered with, never that it
+    # passed (input.md, 2026-10-11, trap 11). Nothing held is not a pass
+    # either: nothing here can hold a real key to show the sampler would see
+    # one.
+    $keyboard=@{ Windows=[Tt]::Windows.Count }
+    if($script:sampler) {
+        New-Item -ItemType File -Path $samplerStop -Force | Out-Null
+        if([HiddenLocal]::WaitForSingleObject($script:sampler.process,5000) -ne 0) {
+            [void][HiddenLocal]::TerminateProcess($script:sampler.process,1)
+            [void][HiddenLocal]::WaitForSingleObject($script:sampler.process,5000)
+        }
+        $rows=if(Test-Path -LiteralPath $samples) { @(Get-Content -LiteralPath $samples) } else { @() }
+        $finished=@($rows | Where-Object { $_ -like 'done,*' }).Count -eq 1
+        $held=0; $inactive=0
+        foreach($row in $rows) {
+            $f=$row -split ','
+            if($f[0] -eq 'done') { $keyboard.Samples=[long]$f[1]; continue }
+            $tick=[uint64]$f[0]
+            $inside=@([Tt]::Windows | Where-Object { $_[0] -le $tick -and $tick -le $_[1] }).Count -gt 0
+            if(-not $inside) { continue }
+            if($f[1] -eq '1') { $held++ }
+            if($f[2] -eq '0') { $inactive++ }
+        }
+        $keyboard.HeldInWindows=$held; $keyboard.InactiveInWindows=$inactive; $keyboard.Finished=$finished
+        if($held -gt 0) {
+            Check 'INTERFERED: a modifier was held at the real keyboard while a posted key or drag ran' $false 0 $keyboard
+        } elseif(-not $finished) {
+            $script:unverified.Add('real keyboard: the sampler did not finish, so it is not known whether a modifier was held')
+        } elseif($inactive -gt 0) {
+            $script:unverified.Add("real keyboard: INCONCLUSIVE, the user's desktop was not the input desktop for $inactive samples while posted keys ran (locked, or another desktop)")
+        } else {
+            $script:unverified.Add("real keyboard: no modifier seen down during $($keyboard.Windows) posted keys and drags ($($keyboard.Samples) samples on the input desktop), with no positive control")
+        }
+    } else {
+        $script:unverified.Add('real keyboard: not sampled (the run stopped before the sampler started)')
+    }
+    $script:unverified.Add('the app thread''s keyboard state while it handled each posted key: not read (attaching to the thread resets it), so a latched modifier shows only through a binding that did not run')
     # Through each launch's own handle, never a PID lookup.
     $remaining=@($script:launches | Where-Object { [HiddenLocal]::WaitForSingleObject($_,0) -ne 0 })
     Check 'owned runtime processes exited' ($remaining.Count -eq 0) 0 $remaining.Count
     foreach($handle in $script:launches) { [void][HiddenLocal]::CloseHandle($handle) }
-    Check 'the keyboard state the app read held no modifier as a posted key ran' ([Tt]::LatchedAfter -eq 0) 0 @{Cleared=[Tt]::LatchedBefore; After=[Tt]::LatchedAfter}
-    # A modifier held at the real keyboard means the run was interfered
-    # with, never that it passed (input.md, 2026-10-11, trap 11).
-    Check 'INTERFERED unless no modifier was held at the real keyboard around a posted key' ([Tt]::HeldReal -eq 0) 0 ([Tt]::HeldReal)
-    @{Checks=$script:checks; Skipped=$script:skips; Samples=$script:samples; Processes=$script:processes; Limit='Posted window messages on a never-switched desktop; real pointer and keyboard input, the system window move, the clipboard and visual composition (a D3D11 present) are not exercised.'} | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath (Join-Path $Run 'tab-tearoff-results.json')
+    @{Checks=$script:checks; Skipped=$script:skips; Unverified=$script:unverified; Keyboard=$keyboard; Samples=$script:samples; Processes=$script:processes; Limit='Posted window messages on a never-switched desktop; real pointer and keyboard input, the system window move, the clipboard and visual composition (a D3D11 present) are not exercised.'} | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath (Join-Path $Run 'tab-tearoff-results.json')
 }
 $failed=@($script:checks|Where-Object {-not $_.Passed})
 $passed=@($script:checks|Where-Object {$_.Passed})
 Write-Host ("checks passed {0}/{1}" -f $passed.Count,$script:checks.Count)
 $script:skips | ForEach-Object { Write-Host ("SKIPPED: " + $_) }
+$script:unverified | ForEach-Object { Write-Host ("UNVERIFIED: " + $_) }
 if($failed.Count){ $failed | ForEach-Object { Write-Host ("FAIL: " + $_.Name) }; exit 1 }

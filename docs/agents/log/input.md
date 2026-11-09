@@ -3,6 +3,7 @@
 Dates descend; entries that share a date are not always newest first. A newer-dated entry, or an item under "Corrected in other files", overrides an older one on the same subject; when same-date entries disagree, the code decides. [AGENTS.md](../../../AGENTS.md) indexes the area files and says how to add an entry.
 
 Corrected in other files:
+- 2026-10-11 Win32 input mode, trap 11: `GetAsyncKeyState` reads 0 from a desktop that is not the active one (its documentation), so the modifiers it advises sampling must be sampled from the user's desktop, not from a driver on the private desktop: item (8) of the 2026-11-08 tab tear-off harness entry in test-harnesses.md (round 5).
 - 2026-10-11 PKG-32, item (4): the test that ties the default F3 and Shift+F3 to Enter and Shift+Enter ("PKG32 default F3 and Shift+F3 match the docked search F3 and Enter directions") is in `win32/docked_search.zig` and compares the bindings with what `DockedSearch.apply` asks the core for at the edit and at a button; `dockedSearchEnterDirection` and the other labels.zig direction helpers are gone. See the 2026-11-01 "Docked search is one per-pane module" entry in search-scrollbar.md.
 
 See also:
