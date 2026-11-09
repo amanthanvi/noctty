@@ -790,32 +790,43 @@ use a private window station because desktops on WinSta0 share the clipboard.
 
 ## test_dll_init.c
 
-Packaged libghostty-vt smoke. Loads an explicit ghostty-vt.dll path and calls
-ghostty_build_info, ghostty_osc_new, and ghostty_osc_free to verify export and
-allocator initialization. The portable package CLI smoke compiles and runs it.
+Packaged ghostty-vt.dll smoke. The portable ZIP carries a noctty placeholder
+under that name, not libghostty-vt (see
+[Library consumers](../../PACKAGING.md#library-consumers)), and this checks the file a package carries is the placeholder:
+`LoadLibraryExW` fails with `ERROR_DLL_INIT_FAILED` (1114), the export table
+is empty (read from the file, so nothing in it runs), and the version
+resource's FileDescription is the one passed in. The portable package CLI
+smoke (`package-portable-cli.ps1`) compiles and runs it against the packaged
+x64 DLL, and the native ARM64 job (`.github/workflows/windows-arm64.yml`, its
+packaged smoke step) against the packaged arm64 DLL, both passing
+`$GhosttyVtStubDescription` from `scripts/ghostty-vt-stub.ps1`.
 
 ### Build
 
-From the repository root, build libghostty-vt and compile the test:
+From the repository root, build noctty (which builds the placeholder into
+`zig-out\bin\ghostty-vt-stub\`) and compile the test:
 
 ```powershell
-zig build -Demit-lib-vt=true
-zig cc test/windows/test_dll_init.c -I include -lshell32 -o test_dll_init.exe
+zig build -Demit-exe=true
+zig cc test/windows/test_dll_init.c -lshell32 -lversion -o test_dll_init.exe
 ```
 
 ### Run
 
-Pass the absolute path of the built or packaged DLL:
+Pass the absolute path of the built or packaged DLL and the expected
+FileDescription:
 
 ```powershell
-.\test_dll_init.exe (Resolve-Path .\zig-out\bin\ghostty-vt.dll).Path
+. .\scripts\ghostty-vt-stub.ps1
+.\test_dll_init.exe (Resolve-Path .\zig-out\bin\ghostty-vt-stub\ghostty-vt.dll).Path $GhosttyVtStubDescription
 ```
 
 Expected output:
 
 ```text
-libghostty-vt DLL smoke: 3/3 checks passed (version=<version string>)
+ghostty-vt.dll placeholder smoke: 3/3 checks passed
 ```
 
-The OSC parser allocation and free exercise the DLL's C runtime. Missing
-exports, failed allocation, or an empty version fail the smoke.
+A DLL that loads (libghostty-vt from `zig build -Demit-lib-vt=true` does),
+fails to load for any other reason, has an export table or carries another
+FileDescription fails the smoke.

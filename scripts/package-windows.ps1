@@ -26,6 +26,7 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
 . (Join-Path $PSScriptRoot "signing-trust.ps1")
 . (Join-Path $PSScriptRoot "windows-build-capabilities.ps1")
 . (Join-Path $PSScriptRoot "conpty-redist.ps1")
+. (Join-Path $PSScriptRoot "ghostty-vt-stub.ps1")
 
 $archInfo = Get-WindowsPackageArchitecture -Architecture $(if ($Architecture) { $Architecture } else { Get-DefaultWindowsPackageArchitecture })
 $Architecture = $archInfo.Name
@@ -58,15 +59,18 @@ $zigOutBin = Join-Path $repoRoot "zig-out/bin"
 $zigOutShare = Join-Path $repoRoot "zig-out/share"
 $exePath = Join-Path $zigOutBin "noctty.exe"
 $buildCapabilitiesPath = Join-Path $zigOutBin "noctty-build-capabilities.json"
+# Paths under zig-out\bin; each is staged at the portable root under its leaf
+# name.
 $runtimeFiles = @(
     "noctty.com",
     "noctty.exe",
-    # Transitional: noctty does not use ghostty-vt.dll (libghostty-vt 0.1.0)
-    # and Setup no longer installs it, but the portable updater of 1.3.136
-    # and older refuses a portable ZIP without it. Drop it (and
-    # -Demit-lib-vt=true) only together with
-    # portable_zip_carries_legacy_entries in src/update/portable_apply.zig.
-    "ghostty-vt.dll",
+    # The ghostty-vt.dll placeholder (src/build/GhosttyVtStub.zig), not
+    # libghostty-vt: it exports nothing and fails to load. The portable
+    # updater of 1.3.125 to 1.3.136 refuses a ZIP without a ghostty-vt.dll.
+    # Never stage zig-out\bin\ghostty-vt.dll, the -Demit-lib-vt=true library:
+    # portable_zip_carries_legacy_entries in src/update/portable_apply.zig
+    # says when the placeholder goes.
+    "ghostty-vt-stub\ghostty-vt.dll",
     "noctty-terminal-handoff-proxy.dll"
 )
 $licensePath = Join-Path $repoRoot "LICENSE"
@@ -583,7 +587,7 @@ try {
         try {
             Remove-Item -LiteralPath $buildCapabilitiesPath -Force -ErrorAction SilentlyContinue
             # -Dstrip=false keeps the debug info the symbols zip is made from.
-            & zig build -Demit-exe=true -Demit-lib-vt=true -Doptimize=ReleaseFast -Dstrip=false "-Dtarget=$zigTarget" -Dcpu=baseline -Dcustom-shaders=true "-Dversion-string=$Version"
+            & zig build -Demit-exe=true -Doptimize=ReleaseFast -Dstrip=false "-Dtarget=$zigTarget" -Dcpu=baseline -Dcustom-shaders=true "-Dversion-string=$Version"
             if ($LASTEXITCODE -ne 0) {
                 throw "Zig build failed with exit code $LASTEXITCODE."
             }
@@ -632,7 +636,7 @@ try {
             throw "Expected runtime artifact was not found: $runtimePath"
         }
 
-        $destinationPath = Join-Path $portableRoot $runtimeFile
+        $destinationPath = Join-Path $portableRoot (Split-Path -Leaf $runtimeFile)
         Copy-Item -LiteralPath $runtimePath -Destination $destinationPath -Force
 
         if ($signingConfig -and @(".com", ".exe", ".dll") -contains [System.IO.Path]::GetExtension($destinationPath)) {
@@ -640,6 +644,10 @@ try {
             Assert-ValidSignature -PathToCheck $destinationPath -SigningConfig $signingConfig
         }
     }
+
+    # The portable root's ghostty-vt.dll is the placeholder, never the
+    # library: a stub's size, no export or import table, its FileDescription.
+    Assert-GhosttyVtStub -Path (Join-Path $portableRoot "ghostty-vt.dll")
 
     # Portable staging's downgrade guard reads noctty.exe's fixed PE version.
     # Check both the display string and numeric fields, including the zero
@@ -670,9 +678,11 @@ try {
     if (Test-Path -LiteralPath $zigOutShare) {
         Copy-Tree -Source $zigOutShare -Destination $portableRoot
     }
-    # -Demit-lib-vt=true installs libghostty-vt's pkg-config file into
-    # zig-out\share. noctty ships no library for it to describe, and the
-    # updater swaps share\ as one directory, so no older updater needs it.
+    # A -Demit-lib-vt=true build installs libghostty-vt's pkg-config file
+    # into zig-out\share, and packaging copies the tree as it finds it, so a
+    # warm tree can still hold one. noctty ships no library for it to
+    # describe, and the updater swaps share\ as one directory, so no older
+    # updater needs it.
     $libVtPkgConfigDir = Join-Path $portableRoot "share\pkgconfig"
     $libVtPkgConfig = Join-Path $libVtPkgConfigDir "libghostty-vt.pc"
     if (Test-Path -LiteralPath $libVtPkgConfig) {
@@ -761,7 +771,14 @@ try {
         foreach ($binaryName in (Get-WindowsSymbolBinaryNames)) {
             $identity = Get-PeCodeViewIdentity -Path (Join-Path $portableRoot $binaryName)
             if ($null -eq $identity) { continue }
-            $pdbSource = Join-Path $zigOutBin $identity.PdbName
+            # A PDB sits beside the build output its binary was staged from,
+            # so the placeholder's ghostty-vt.pdb comes from ghostty-vt-stub\
+            # and never from a library build's zig-out\bin\ghostty-vt.pdb.
+            $runtimeSource = @($runtimeFiles | Where-Object { (Split-Path -Leaf $_) -ceq $binaryName })
+            if ($runtimeSource.Count -ne 1) {
+                throw "Expected one runtime file staged as $binaryName, found $($runtimeSource.Count)."
+            }
+            $pdbSource = Join-Path (Split-Path -Parent (Join-Path $zigOutBin $runtimeSource[0])) $identity.PdbName
             if (-not (Test-Path -LiteralPath $pdbSource -PathType Leaf)) {
                 throw "Expected build output was not found: $pdbSource (named by $binaryName)."
             }

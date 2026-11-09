@@ -522,11 +522,15 @@ that govern each symbol you change, or that none does.
   must hold and the ones it may drop: `managed_entries`, `retired_entries`,
   `legacy_updater_required_entries`, `portable_zip_carries_legacy_entries`,
   `requirePayloadEntries`, `swapPayload`, `rollback`, `fileMatches`,
-  `verifyBackupManifest` and `checkSetupRetiresLibVt` in
+  `verifyBackupManifest`, `checkSetupRetiresLibVt`, `retired_placeholders`
+  and `checkPackagingStagesPlaceholders` in
   `src/update/portable_apply.zig`, `verifyPortablePayload` and
   `verifyInstalledPortablePayloadAgainstManifest` in
   `src/update/github_releases.zig`, and the packaging scripts'
-  `$runtimeFiles`), release workflows
+  `$runtimeFiles`; the portable ZIP's `ghostty-vt.dll` placeholder:
+  `src/build/GhosttyVtStub.zig`, `src/ghostty_vt_stub/`,
+  `scripts/ghostty-vt-stub.ps1` `Assert-GhosttyVtStub`, and its packaged
+  smoke `test/windows/test_dll_init.c`), release workflows
   and package managers (WinGet, Scoop,
   Chocolatey), GitHub Actions CI (path filter, caching, runners), CRLF and
   `.gitattributes` in shipped files.

@@ -149,11 +149,13 @@ pub const managed_entries = [_][]const u8{
 /// payload without every `managed_entries` name while staging
 /// (`verifyPortablePayload`, in the running app) and again in the swap (run by
 /// `portable-update-helper.exe`, a copy of the running, old, executable). So
-/// the portable ZIP keeps shipping a retired file until a release with this
-/// list has been out; `legacy_updater_required_entries` pins that.
+/// the portable ZIP keeps a file under each retired name until a release with
+/// this list has been out; `legacy_updater_required_entries` pins that, and
+/// `retired_placeholders` says what the file is meanwhile.
 pub const retired_entries = [_][]const u8{
-    // libghostty-vt 0.1.0, the pre-1.0 C ABI under the name upstream's
-    // libghostty-vt 1.0 DLL uses. noctty.exe does not import it.
+    // The name of libghostty-vt 0.1.0, the pre-1.0 C ABI, which is also the
+    // name upstream's libghostty-vt 1.0 DLL uses. noctty.exe does not import
+    // it, and the portable ZIP carries a placeholder under it.
     "ghostty-vt.dll",
 };
 
@@ -297,26 +299,60 @@ test "portable managed script list parser rejects missing extra and duplicate en
     try std.testing.expectError(error.InvalidManagedRootList, expectScriptManagedEntries(prefix ++ "    $dynamicName\n" ++ suffix));
 }
 
-/// Whether the portable ZIP still carries the retired entries that
-/// `legacy_updater_required_entries` names. Without them, every portable copy
-/// of 1.3.136 or older fails to stage the update (`IncompletePortablePayload`)
-/// and falls back to the release page. Set it to false only in the change
-/// that drops them from the packaging scripts, once a release with
-/// `retired_entries` has been the latest one long enough for copies to reach
-/// it; a copy older than that still has to update by hand.
+/// Whether the portable ZIP still carries a file under each retired name
+/// that `legacy_updater_required_entries` names. From 1.3.137 that file is a
+/// placeholder (`retired_placeholders`), not the retired library. Without it,
+/// every portable copy of 1.3.125 to 1.3.136 fails to stage the update
+/// (`IncompletePortablePayload`) and falls back to the release page. (No
+/// release up to 1.3.124 updates a portable copy in-app, so those copies
+/// already update by hand.)
 ///
-/// That change also drops the DLL from (names, not line numbers, so this
+/// Why a placeholder satisfies them: their updater (identical from v1.3.125
+/// to v1.3.136 in `github_releases.zig`) asks of a payload DLL only that it
+/// exists (`verifyPortablePayload`, and `swapPayload` in the helper), has its
+/// SHA-256 line in the signed manifest
+/// (`verifyPortablePayloadAgainstManifest`), is `MZ`/`PE` with the build's
+/// machine (`verifyPortablePeMachine`, `readPeMachine`) and carries a
+/// pinned-publisher Authenticode signature (`verifyPortablePayloadBinaries`,
+/// `portableBinaryTrust`). Nothing reads its exports, size or version
+/// resource (`readWindowsFileVersion`, later `verifyStagedBinaryVersion`,
+/// reads only noctty.exe), and nothing loads it: their only `LoadLibraryW`
+/// calls are for wintrust.dll and version.dll. So the placeholder's DllMain
+/// never runs during an update.
+///
+/// Set it to false in v1.4.100 (the maintainer's decision), in the change
+/// that drops the placeholder. Portable copies on 1.3.125 to 1.3.136 that
+/// never installed a release with the placeholder (1.3.137 or later) then
+/// have to update by hand; every later copy has `retired_entries` and
+/// updates in-app. That change drops (names, not line numbers, so this
 /// survives edits):
-/// - `$runtimeFiles` and `-Demit-lib-vt=true` in scripts/package-windows.ps1
-///   and scripts/build-package-windows.ps1, and ghostty-vt.pdb from the
-///   symbols ZIP they build;
-/// - `Get-WindowsSignedRuntimePayloads` in scripts/common.ps1 (the release
-///   chain derives its expected signature count from it, so the count drops
-///   on its own) and the pins of that list in
-///   test/windows/flagship/contracts/Contracts.93-ConPty.ps1;
-/// - scripts/test-windows-build-capabilities.ps1;
-/// - the packaged-DLL smoke: test/windows/package-portable-cli.ps1,
-///   test/windows/test_dll_init.c and its section in test/windows/README.md;
+/// - the placeholder from `$runtimeFiles` in scripts/package-windows.ps1 and
+///   scripts/build-package-windows.ps1, its `Assert-GhosttyVtStub` call in
+///   scripts/package-windows.ps1, and so ghostty-vt.pdb from the symbols ZIP;
+/// - its build: `GhosttyVtStub` in build.zig, src/build/GhosttyVtStub.zig,
+///   src/ghostty_vt_stub/ and scripts/ghostty-vt-stub.ps1;
+/// - `retired_placeholders` and its check here (the test "portable payload
+///   keeps retired entries while older updaters require them");
+/// - `noctty/ghostty-vt.dll` from `Get-WindowsSignedRuntimePayloads` in
+///   scripts/common.ps1 (the release chain derives its expected signature
+///   count from it, so the count drops on its own) and the pins of that list
+///   in test/windows/flagship/contracts/Contracts.93-ConPty.ps1;
+/// - the list in the github_releases.zig test "portable payload PEs are
+///   publisher-pinned except the bundled ConPTY pair", which mirrors
+///   `Get-WindowsSignedRuntimePayloads`;
+/// - scripts/test-windows-build-capabilities.ps1's placeholder path;
+/// - the placeholder smoke: test/windows/package-portable-cli.ps1,
+///   test/windows/test_dll_init.c, its section in test/windows/README.md and
+///   its rule in scripts/ci-changed-paths.ps1;
+/// - the placeholder pins in the contracts: `$vtStubBuild82` in
+///   Contracts.82-ReleaseSymbols.ps1, the staging check
+///   (`Get-PlaceholderStagingProblems` and its controls) in
+///   Contracts.93-ConPty.ps1, and the reviewed package-portable-cli.ps1
+///   digest in Contracts.99-Baselines.ps1 and baselines/origin-main.json;
+/// - the ARM64 packaged smoke step in .github/workflows/windows-arm64.yml;
+/// - the comment on the stage rule in dist/windows/noctty.iss, and the
+///   placeholder's names in the AGENTS.md build-release-ci trigger and the
+///   .greptile scope;
 /// - the symbols fixture in
 ///   test/windows/flagship/contracts/Contracts.82-ReleaseSymbols.ps1. It is
 ///   synthetic but not independent: `Assert-SymbolsMatchBinaries` takes its
@@ -324,50 +360,117 @@ test "portable managed script list parser rejects missing extra and duplicate en
 ///   from that list the fixture's ghostty-vt.pdb "matches no shipped binary",
 ///   its evidence count of 3 is wrong, and the age-mismatch case has to move
 ///   to another binary;
-/// - the list in the github_releases.zig test "portable payload PEs are
-///   publisher-pinned except the bundled ConPTY pair", which mirrors
-///   `Get-WindowsSignedRuntimePayloads`.
+/// - what PACKAGING.md, CONTRIBUTING.md and docs/status.md say the portable
+///   ZIP carries, and the v1.4.100 notice in them.
 /// These keep naming it. The `$managedRootFiles` allowlists in
 /// scripts/portable-manifest-verification.ps1 and scripts/package-windows.ps1
 /// must match `managed_entries`, which keeps the DLL while the updater manages
 /// retired copies (they permit it in a payload, they do not require it).
-/// And these verify releases that shipped it: docs/verify-release.md,
-/// scripts/check-site-copy.ps1 and site/tests/trust.test.mjs. The lib-vt job
-/// in .github/workflows/test.yml stays while CI builds lib-vt.
+/// And these verify releases that shipped the library: docs/verify-release.md,
+/// scripts/check-site-copy.ps1 and site/tests/trust.test.mjs. The lib-vt jobs
+/// in .github/workflows/test.yml stay while CI builds lib-vt; packaging
+/// stopped building it in 1.3.137.
 ///
-/// An option for that change, for the maintainer to weigh: ship a tiny
-/// noctty-signed stub named ghostty-vt.dll (no exports) in place of the
-/// library, so copies of 1.3.136 or older still update in-app. Their updater
-/// (read at e629842e9, the 1.3.136 release commit, `github_releases.zig`)
-/// asks of a payload DLL only that it exists (`verifyPortablePayload` and
-/// `swapPayload`), has a line in the signed manifest with its SHA-256
-/// (`verifyPortablePayloadAgainstManifest`), is `MZ`/`PE` with the build's
-/// machine (`readPeMachine`) and carries a pinned-publisher Authenticode
-/// signature (`verifyPortablePayloadBinaries`). Nothing reads its exports or
-/// size. The cost: a file under the clashing name stays in the portable ZIP
-/// (a program that loads it fails on missing entry points rather than a
-/// mismatched ABI), and it stays in `Get-WindowsSignedRuntimePayloads`.
+/// The placeholder's cost: a file under the name upstream's libghostty-vt 1.0
+/// DLL uses stays in the portable ZIP until then. A program that loads it
+/// fails at once (`ERROR_DLL_INIT_FAILED`) rather than binding to an old ABI.
 const portable_zip_carries_legacy_entries = true;
 
-/// The quoted names of a PowerShell `<marker> @(` list, one per line.
+/// What the packaging scripts stage under a retired name while
+/// `portable_zip_carries_legacy_entries` holds: a `$runtimeFiles` path under
+/// zig-out\bin whose leaf is the retired name, built by noctty for the
+/// purpose. Any other `$runtimeFiles` item with that leaf (above all the
+/// `-Demit-lib-vt=true` library at zig-out\bin\ghostty-vt.dll) is refused.
+const RetiredPlaceholder = struct {
+    entry: []const u8,
+    runtime_file: []const u8,
+};
+
+const retired_placeholders = [_]RetiredPlaceholder{
+    // src/build/GhosttyVtStub.zig: exports and imports nothing, and its
+    // DllMain fails DLL_PROCESS_ATTACH. scripts/package-windows.ps1 checks
+    // the staged file (`Assert-GhosttyVtStub`) and the packaged smoke
+    // (test/windows/test_dll_init.c) loads it.
+    .{ .entry = "ghostty-vt.dll", .runtime_file = "ghostty-vt-stub\\ghostty-vt.dll" },
+};
+
+fn retiredPlaceholder(entry: []const u8) ?RetiredPlaceholder {
+    for (retired_placeholders) |placeholder| {
+        if (std.mem.eql(u8, placeholder.entry, entry)) return placeholder;
+    }
+    return null;
+}
+
+/// The quoted names of a PowerShell `<marker> @(` list, one per line, with
+/// blank and `#` comment lines skipped. Any other syntax is refused rather
+/// than skipped, so a computed name cannot hide from a check.
+const ScriptListIterator = struct {
+    lines: std.mem.SplitIterator(u8, .scalar),
+
+    fn init(script: []const u8, marker: []const u8) !ScriptListIterator {
+        const start = std.mem.indexOf(u8, script, marker) orelse return error.ScriptListMissing;
+        const body = script[start + marker.len ..];
+        const end = std.mem.indexOf(u8, body, "\n)") orelse return error.ScriptListMissing;
+        return .{ .lines = std.mem.splitScalar(u8, body[0..end], '\n') };
+    }
+
+    fn next(self: *ScriptListIterator) !?[]const u8 {
+        while (self.lines.next()) |raw_line| {
+            var line = std.mem.trim(u8, raw_line, " \t\r");
+            if (line.len == 0 or line[0] == '#') continue;
+            if (line[line.len - 1] == ',') line = line[0 .. line.len - 1];
+            if (line.len < 2 or (line[0] != '"' and line[0] != '\'') or line[line.len - 1] != line[0])
+                return error.InvalidScriptList;
+            return line[1 .. line.len - 1];
+        }
+        return null;
+    }
+};
+
 fn scriptListContains(script: []const u8, marker: []const u8, name: []const u8) !bool {
-    const start = std.mem.indexOf(u8, script, marker) orelse return error.ScriptListMissing;
-    const body = script[start + marker.len ..];
-    const end = std.mem.indexOf(u8, body, "\n)") orelse return error.ScriptListMissing;
-    var lines = std.mem.splitScalar(u8, body[0..end], '\n');
+    var items = try ScriptListIterator.init(script, marker);
     var count: usize = 0;
     var found = false;
-    while (lines.next()) |raw_line| {
-        var line = std.mem.trim(u8, raw_line, " \t\r");
-        if (line.len == 0 or line[0] == '#') continue;
-        if (line[line.len - 1] == ',') line = line[0 .. line.len - 1];
-        if (line.len < 2 or (line[0] != '"' and line[0] != '\'') or line[line.len - 1] != line[0])
-            return error.InvalidScriptList;
+    while (try items.next()) |item| {
         count += 1;
-        if (std.mem.eql(u8, line[1 .. line.len - 1], name)) found = true;
+        if (std.mem.eql(u8, item, name)) found = true;
     }
     if (count == 0) return error.ScriptListMissing;
     return found;
+}
+
+/// A packaging script stages a placeholder, never the retired file, under
+/// each retired name the older updaters require, and builds no libghostty-vt:
+/// - no `$runtimeFiles` item other than a placeholder has a retired leaf name
+///   (compared without case, as Windows does);
+/// - the placeholder is listed exactly while
+///   `portable_zip_carries_legacy_entries` holds;
+/// - no line outside a `#` comment passes `-Demit-lib-vt`.
+fn checkPackagingStagesPlaceholders(script: []const u8) !void {
+    var items = try ScriptListIterator.init(script, "$runtimeFiles = @(");
+    while (try items.next()) |item| {
+        const leaf_start = if (std.mem.lastIndexOfAny(u8, item, "\\/")) |i| i + 1 else 0;
+        const leaf = item[leaf_start..];
+        for (retired_entries) |entry| {
+            if (!std.ascii.eqlIgnoreCase(leaf, entry)) continue;
+            const placeholder = retiredPlaceholder(entry) orelse return error.RetiredEntryStaged;
+            if (!std.mem.eql(u8, item, placeholder.runtime_file)) return error.RetiredEntryStaged;
+        }
+    }
+
+    for (legacy_updater_required_entries) |entry| {
+        if (!isRetiredEntry(entry)) continue;
+        const placeholder = retiredPlaceholder(entry) orelse return error.RetiredEntryWithoutPlaceholder;
+        const shipped = try scriptListContains(script, "$runtimeFiles = @(", placeholder.runtime_file);
+        if (shipped != portable_zip_carries_legacy_entries) return error.RetiredEntryTransitionBroken;
+    }
+
+    var lines = std.mem.splitScalar(u8, script, '\n');
+    while (lines.next()) |raw_line| {
+        const line = std.mem.trim(u8, raw_line, " \t\r");
+        if (line.len > 0 and line[0] == '#') continue;
+        if (std.mem.indexOf(u8, line, "-Demit-lib-vt") != null) return error.PackagingBuildsLibVt;
+    }
 }
 
 /// The text of one `[Section]` of an Inno Setup script.
@@ -560,25 +663,22 @@ test "portable payload keeps retired entries while older updaters require them" 
         try std.testing.expect(!std.mem.eql(u8, entry, "share"));
     }
 
-    // The portable ZIP is staged from `$runtimeFiles` (built by both scripts).
+    for (retired_entries) |entry| {
+        if (retiredPlaceholder(entry) == null) return error.RetiredEntryWithoutPlaceholder;
+    }
+
+    // The portable ZIP is staged from `$runtimeFiles` (built by both scripts):
+    // a placeholder under each retired name, never the library.
     for ([_][]const u8{
         "scripts/package-windows.ps1",
         "scripts/build-package-windows.ps1",
     }) |path| {
         const script = try std.fs.cwd().readFileAlloc(alloc, path, 1024 * 1024);
         defer alloc.free(script);
-        for (legacy_updater_required_entries) |entry| {
-            if (!isRetiredEntry(entry)) continue;
-            const shipped = try scriptListContains(script, "$runtimeFiles = @(", entry);
-            if (shipped != portable_zip_carries_legacy_entries) {
-                std.debug.print("{s}: $runtimeFiles {s} {s}\n", .{
-                    path,
-                    if (shipped) "still lists" else "dropped",
-                    entry,
-                });
-                return error.RetiredEntryTransitionBroken;
-            }
-        }
+        checkPackagingStagesPlaceholders(script) catch |err| {
+            std.debug.print("{s}: {s}\n", .{ path, @errorName(err) });
+            return err;
+        };
     }
 
     // Setup runs the new release's own script, so it needs no transition:
@@ -587,6 +687,54 @@ test "portable payload keeps retired entries while older updaters require them" 
     const iss = try std.fs.cwd().readFileAlloc(alloc, "dist/windows/noctty.iss", 1024 * 1024);
     defer alloc.free(iss);
     try checkSetupRetiresLibVt(alloc, iss);
+}
+
+test "packaging placeholder check refuses the library, a dropped placeholder and a lib-vt build" {
+    const alloc = std.testing.allocator;
+    const Mutation = struct { from: []const u8, to: []const u8, err: anyerror };
+    const placeholder = "\"ghostty-vt-stub\\ghostty-vt.dll\",";
+    const common = [_]Mutation{
+        // The -Demit-lib-vt=true library, by its zig-out\bin path, in another
+        // case, or from another directory.
+        .{ .from = placeholder, .to = "\"ghostty-vt.dll\",", .err = error.RetiredEntryStaged },
+        .{ .from = placeholder, .to = "\"GHOSTTY-VT.DLL\",", .err = error.RetiredEntryStaged },
+        .{ .from = placeholder, .to = "'lib\\ghostty-vt.dll',", .err = error.RetiredEntryStaged },
+        .{ .from = placeholder, .to = placeholder ++ "\n    \"ghostty-vt.dll\",", .err = error.RetiredEntryStaged },
+        // The placeholder dropped or commented out while older updaters
+        // still require the name.
+        .{ .from = placeholder, .to = "", .err = error.RetiredEntryTransitionBroken },
+        .{ .from = placeholder, .to = "# " ++ placeholder, .err = error.RetiredEntryTransitionBroken },
+        // A computed name cannot hide from the check.
+        .{ .from = placeholder, .to = "$libVtDll,", .err = error.InvalidScriptList },
+    };
+    const Script = struct { path: []const u8, build: Mutation };
+    for ([_]Script{
+        .{ .path = "scripts/package-windows.ps1", .build = .{
+            .from = "& zig build -Demit-exe=true -Doptimize",
+            .to = "& zig build -Demit-exe=true -Demit-lib-vt=true -Doptimize",
+            .err = error.PackagingBuildsLibVt,
+        } },
+        .{ .path = "scripts/build-package-windows.ps1", .build = .{
+            .from = "\"-Demit-exe=true\",",
+            .to = "\"-Demit-exe=true\",\n        \"-Demit-lib-vt=true\",",
+            .err = error.PackagingBuildsLibVt,
+        } },
+    }) |script_case| {
+        const script = try std.fs.cwd().readFileAlloc(alloc, script_case.path, 1024 * 1024);
+        defer alloc.free(script);
+        try checkPackagingStagesPlaceholders(script);
+        for (common ++ [_]Mutation{script_case.build}) |mutation| {
+            try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, script, mutation.from));
+            const mutated = try std.mem.replaceOwned(u8, alloc, script, mutation.from, mutation.to);
+            defer alloc.free(mutated);
+            checkPackagingStagesPlaceholders(mutated) catch |err| {
+                try std.testing.expectEqual(mutation.err, err);
+                continue;
+            };
+            std.debug.print("{s}: mutation passed: '{s}' -> '{s}'\n", .{ script_case.path, mutation.from, mutation.to });
+            return error.TestExpectedError;
+        }
+    }
 }
 
 test "portable script list parser reads quoted names and rejects other syntax" {
