@@ -686,8 +686,8 @@ try {
     # The sampler runs on the user's desktop, the one whose keyboard
     # GetAsyncKeyState reads (it reads 0 from this one): no window, no
     # foreground, only whether a modifier is down.
-    $samples=Join-Path $Run 'modifier-samples.txt'; $samplerStop=Join-Path $Run 'modifier-sampler.stop'
-    $script:sampler=[Tt]::SpawnLogged($samplerExe,('"{0}" "{1}" "{2}"' -f $samplerExe,$samples,$samplerStop),$Run,'WinSta0\Default',(Join-Path $Run 'modifier-sampler.log'))
+    $samplerOut=Join-Path $Run 'modifier-samples.txt'; $samplerStop=Join-Path $Run 'modifier-sampler.stop'
+    $script:sampler=[Tt]::SpawnLogged($samplerExe,('"{0}" "{1}" "{2}"' -f $samplerExe,$samplerOut,$samplerStop),$Run,'WinSta0\Default',(Join-Path $Run 'modifier-sampler.log'))
     $script:launches.Add($script:sampler.process); [void][HiddenLocal]::CloseHandle($script:sampler.thread)
     $renderers=if($Renderer -eq 'both') { @('opengl','d3d11') } else { @($Renderer) }
     foreach($name in $renderers) { Measure-Case $name }
@@ -708,7 +708,7 @@ try {
             [void][HiddenLocal]::TerminateProcess($script:sampler.process,1)
             [void][HiddenLocal]::WaitForSingleObject($script:sampler.process,5000)
         }
-        $rows=if(Test-Path -LiteralPath $samples) { @(Get-Content -LiteralPath $samples) } else { @() }
+        $rows=if(Test-Path -LiteralPath $samplerOut) { @(Get-Content -LiteralPath $samplerOut) } else { @() }
         $finished=@($rows | Where-Object { $_ -like 'done,*' }).Count -eq 1
         $held=0; $inactive=0
         foreach($row in $rows) {
