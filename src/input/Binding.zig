@@ -1641,6 +1641,17 @@ pub const Action = union(enum) {
         };
     }
 
+    /// `actions` cloned into `alloc` (an arena: nothing is freed one by
+    /// one), each through `clone`, the slices they carry included.
+    pub fn cloneSlice(
+        alloc: Allocator,
+        actions: []const Action,
+    ) Allocator.Error![]const Action {
+        const copy = try alloc.alloc(Action, actions.len);
+        for (actions, copy) |action, *out| out.* = try action.clone(alloc);
+        return copy;
+    }
+
     fn cloneValue(
         alloc: Allocator,
         value: anytype,
@@ -2365,10 +2376,7 @@ pub const Set = struct {
             self: *const GenericLeaf,
             alloc: Allocator,
         ) Allocator.Error![]const Action {
-            const source = self.actionsSlice();
-            const copy = try alloc.alloc(Action, source.len);
-            for (source, copy) |action, *out| out.* = try action.clone(alloc);
-            return copy;
+            return Action.cloneSlice(alloc, self.actionsSlice());
         }
     };
 

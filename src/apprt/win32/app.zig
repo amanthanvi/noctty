@@ -2900,11 +2900,14 @@ pub const App = struct {
         for (self.global_hotkeys.items) |hotkey| {
             if (hotkey.id != id) continue;
 
-            switch (hotkey.binding.*) {
+            // The actions are borrowed from `self.config`, which a reload in
+            // the chain frees; `performAllChainedAction` runs them from its
+            // own copy. Nothing here reads the binding after the call.
+            const generic: input.Binding.Set.GenericLeaf = switch (hotkey.binding.*) {
                 .leader => unreachable,
-                .leaf => |*leaf| self.core_app.performAllChainedAction(self, leaf.generic().actionsSlice()),
-                .leaf_chained => |*leaf| self.core_app.performAllChainedAction(self, leaf.generic().actionsSlice()),
-            }
+                inline .leaf, .leaf_chained => |*leaf| leaf.generic(),
+            };
+            self.core_app.performAllChainedAction(self, generic.actionsSlice());
             return;
         }
     }

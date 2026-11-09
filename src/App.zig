@@ -946,6 +946,13 @@ pub fn keyEvent(
     // If we aren't focused, then we only process global keybinds.
     if (!self.focused and !leaf.flags.global) return false;
 
+    // Global keybinds are done using performAll so that they
+    // can target all surfaces too. It runs the chain from its own copy.
+    if (leaf.flags.global) {
+        self.performAllChainedAction(rt_app, leaf.actionsSlice());
+        return true;
+    }
+
     // A copy, not the binding storage: a reload in the chain replaces
     // `rt_app.config`, which owns that storage, before the chain is done.
     var actions_arena: std.heap.ArenaAllocator = .init(self.alloc);
@@ -954,13 +961,6 @@ pub fn keyEvent(
         log.warn("error copying app keybind actions err={}", .{err});
         return false;
     };
-
-    // Global keybinds are done using performAll so that they
-    // can target all surfaces too.
-    if (leaf.flags.global) {
-        self.performAllChainedAction(rt_app, actions);
-        return true;
-    }
 
     // Must be focused to process non-global keybinds
     assert(self.focused);
@@ -1052,17 +1052,45 @@ pub fn performAction(
 /// Performs a chained action. We will continue executing each action
 /// even if there is a failure in a prior action.
 ///
-/// The chain ends at its first closing action (`Surface.closingAction`),
-/// and the actions after it are dropped, as on a single surface: the close
-/// can free the surface whose key ran the chain, and that surface's config
-/// may own `actions` (copy them out of binding storage before calling).
+/// `actions` may be borrowed from binding storage: the chain runs from a
+/// copy taken first, because an action can free that storage while the
+/// chain still runs (a reload frees the config that owns it; a close
+/// frees the surface that owns its own). The chain ends at its first
+/// closing action (`Surface.closingAction`), and the actions after it are
+/// dropped, as on a single surface: the close can free the surface whose
+/// key ran the chain.
 pub fn performAllChainedAction(
     self: *App,
     rt_app: *apprt.App,
     actions: []const input.Binding.Action,
 ) void {
-    for (actions) |action| {
-        self.performAllAction(rt_app, action) catch |err| {
+    const Performer = struct {
+        app: *App,
+        rt_app: *apprt.App,
+
+        fn performAllAction(p: @This(), action: input.Binding.Action) !void {
+            return p.app.performAllAction(p.rt_app, action);
+        }
+    };
+    performChainOnAll(self.alloc, Performer{ .app = self, .rt_app = rt_app }, actions);
+}
+
+/// The body of `performAllChainedAction`, over any `performer` with a
+/// `performAllAction(action) !void` (the app; a stand-in in tests).
+fn performChainOnAll(
+    alloc: Allocator,
+    performer: anytype,
+    actions: []const input.Binding.Action,
+) void {
+    var arena: std.heap.ArenaAllocator = .init(alloc);
+    defer arena.deinit();
+    const owned = input.Binding.Action.cloneSlice(arena.allocator(), actions) catch |err| {
+        log.warn("error copying chained actions err={}", .{err});
+        return;
+    };
+
+    for (owned) |action| {
+        performer.performAllAction(action) catch |err| {
             log.warn("error performing chained action action={s} err={}", .{
                 @tagName(action),
                 err,
@@ -1070,6 +1098,62 @@ pub fn performAllChainedAction(
         };
         if (Surface.closingAction(action)) return;
     }
+}
+
+/// A stand-in app for `performChainOnAll` tests. A reload or a closing
+/// action overwrites the binding storage the chain came from with another
+/// action, as freeing the config that owns it would (a free that leaves
+/// valid values, so a stale read fails an assertion instead of ending the
+/// test binary).
+const TestChainApp = struct {
+    const Tag = std.meta.Tag(input.Binding.Action);
+    const poison: input.Binding.Action = .clear_screen;
+
+    storage: []input.Binding.Action,
+    seen: *std.ArrayListUnmanaged(Tag),
+
+    fn performAllAction(self: TestChainApp, action: input.Binding.Action) !void {
+        try self.seen.append(std.testing.allocator, action);
+        if (action == .reload_config or Surface.closingAction(action)) {
+            @memset(self.storage, poison);
+        }
+    }
+};
+
+fn testChainOnAll(
+    chain: []const input.Binding.Action,
+    seen: *std.ArrayListUnmanaged(TestChainApp.Tag),
+) !void {
+    const alloc = std.testing.allocator;
+    // The binding storage the chain borrows, as a config's set holds it
+    // (a global hotkey passes exactly this: `handleGlobalHotkey`).
+    const storage = try alloc.dupe(input.Binding.Action, chain);
+    defer alloc.free(storage);
+    performChainOnAll(alloc, TestChainApp{ .storage = storage, .seen = seen }, storage);
+}
+
+test "an app-wide chain reads the actions after a reload from its own copy" {
+    const testing = std.testing;
+    var seen: std.ArrayListUnmanaged(TestChainApp.Tag) = .empty;
+    defer seen.deinit(testing.allocator);
+    try testChainOnAll(&.{ .reload_config, .new_window, .{ .text = "x" } }, &seen);
+    try testing.expectEqualSlices(
+        TestChainApp.Tag,
+        &.{ .reload_config, .new_window, .text },
+        seen.items,
+    );
+}
+
+test "an app-wide chain drops the actions after a closing action" {
+    const testing = std.testing;
+    var seen: std.ArrayListUnmanaged(TestChainApp.Tag) = .empty;
+    defer seen.deinit(testing.allocator);
+    try testChainOnAll(&.{ .ignore, .close_window, .new_window }, &seen);
+    try testing.expectEqualSlices(
+        TestChainApp.Tag,
+        &.{ .ignore, .close_window },
+        seen.items,
+    );
 }
 
 /// Perform an app-wide binding action. If the action is surface-specific
