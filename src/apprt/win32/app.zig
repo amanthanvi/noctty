@@ -815,6 +815,11 @@ pub const App = struct {
     /// Esc ended a tab drag; its key-up is taken too, so no terminal sees a
     /// release it never saw pressed.
     tab_drag_escape_down: bool = false,
+    /// The message the outer pump is dispatching now, or 0 while it waits
+    /// (`noteTabMoveWake`).
+    outer_dispatch_message: UINT = 0,
+    /// The window whose timer wakes the pump again for a waiting tab move.
+    tab_move_wake_timer: ?HWND = null,
     /// Tab moves asked of windows, in order, one per tab, run by the outer
     /// message pump (`drainPendingTabMoves`), never from inside a handler or
     /// a nested modal loop: a move can free the window it was asked of. As
@@ -1823,7 +1828,9 @@ pub const App = struct {
             }
 
             _ = sys.TranslateMessage(&msg);
+            self.outer_dispatch_message = msg.message;
             _ = sys.DispatchMessageW(&msg);
+            self.outer_dispatch_message = 0;
 
             if (try self.finishLoopStep()) break;
         }
@@ -7805,6 +7812,12 @@ pub const App = struct {
     /// test of what a moved pane's font change does then.
     pub var test_tab_move_activating: ?*const fn (*Host, *Surface) anyerror!void = null;
 
+    /// Runs before `moveTabToWindow`'s shell steps that can still fail after
+    /// a history clear (`.retry_prepare`) or before it (`.commit`), for the
+    /// tests that make them fail.
+    pub var test_tab_move_shell_step: ?*const fn (*App, TabMoveShellStep) void = null;
+    pub const TabMoveShellStep = enum { retry_prepare, commit };
+
     pub const PendingTabMove = struct { host_id: u32, request: Host.TabMoveRequest };
 
     /// How many moves wait for `host`'s tabs.
@@ -7847,6 +7860,21 @@ pub const App = struct {
             log.warn("tab move wake could not be posted err={}", .{windows.kernel32.GetLastError()});
         }
         return true;
+    }
+
+    /// A tab move's wake, or its timer, reached `hwnd`. Dispatched by the
+    /// outer pump itself, its next turn runs the move, and the timer stops.
+    /// Taken by a nested loop instead (a menu, the system move loop, a sent
+    /// message's loop while the pump waits in `GetMessage`), nothing would
+    /// wake the pump once that loop ends: a short timer keeps waking until
+    /// the outer pump dispatches one.
+    pub fn noteTabMoveWake(self: *App, hwnd: HWND, message: UINT) void {
+        if (self.pending_tab_moves.items.len == 0 or self.outer_dispatch_message == message) {
+            if (self.tab_move_wake_timer) |timer| _ = sys.KillTimer(timer, c.TAB_MOVE_TIMER_ID);
+            self.tab_move_wake_timer = null;
+            return;
+        }
+        if (sys.SetTimer(hwnd, c.TAB_MOVE_TIMER_ID, 50, null) != 0) self.tab_move_wake_timer = hwnd;
     }
 
     /// Runs every waiting tab move, from the outer message pump, with no
@@ -7919,10 +7947,15 @@ pub const App = struct {
         };
         try target.tabs.ensureUnusedCapacity(self.core_app.alloc, 1);
 
-        // The shell model's half. A transfer the tab is part of is undo
-        // history, which only goes once nothing else can fail; the model
-        // refuses the move while it names the tab, so then the history
-        // goes first (`InvalidTransfer`).
+        // The shell model's half. Undo history goes only once the model has
+        // the move, so nothing that can still fail runs after it: the commit
+        // comes first (a stale one is rebuilt by preparing again, which can
+        // run out of memory, with the history still whole), the history
+        // clear after it. One case cannot keep it: the model refuses the
+        // move while a transfer in that history names the tab
+        // (`InvalidTransfer`), so the history goes first and the second
+        // prepare can still fail; then the move fails with the history gone
+        // (TEAROFF-01).
         var history_cleared = false;
         var shell_prepared: ?win32_shell.runtime.Prepared = null;
         var shell_tab: ?win32_shell.model.TabId = null;
@@ -7941,6 +7974,7 @@ pub const App = struct {
                 error.InvalidTransfer => retry: {
                     try clearMoveHistory(source, dest);
                     history_cleared = true;
+                    if (test_tab_move_shell_step) |hook| hook(self, .retry_prepare);
                     break :retry try self.shell_runtime.prepare(intent);
                 },
                 else => return err,
@@ -7948,17 +7982,24 @@ pub const App = struct {
         }
         defer if (shell_prepared) |*prepared| prepared.deinit();
 
-        // Undo history goes in both windows, as for a reorder (`moveTab`):
-        // its entries keep tab indices and panes of their window. The last
-        // step before the commit, which rebuilds on what the clear committed.
-        if (!history_cleared) try clearMoveHistory(source, dest);
-        // The clear closed what history kept, never a live tab; find it again.
-        const at = source.findTabIndexById(tab_id) orelse return false;
-        source.tabs.items[at].clearRedoHistory();
         if (shell_prepared) |*prepared| {
+            if (test_tab_move_shell_step) |hook| hook(self, .commit);
+            // A focus message between the prepare and here makes it stale:
+            // it is prepared again on what is current.
             try prepared.commitRetryingStale(&self.shell_runtime);
             if (created) |host| host.shell_id = self.shell_runtime.state.tabConst(shell_tab.?).?.window;
         }
+        // Undo history goes in both windows, as for a reorder (`moveTab`):
+        // its entries keep tab indices and panes of their window. After the
+        // commit, which is then never stale from it; each disposal commits
+        // its own release. A disposal that cannot finish is logged and
+        // leaves its entry, which only ever finds its panes by identity.
+        if (!history_cleared) clearMoveHistory(source, dest) catch |err| {
+            log.warn("tab move left undo history it could not dispose err={}", .{err});
+        };
+        // The clear closed what history kept, never a live tab; find it again.
+        const at = source.findTabIndexById(tab_id).?;
+        source.tabs.items[at].clearRedoHistory();
         // The tab the destination showed starts a new branch too, as a
         // reorder's two tabs do: its panes' local redo goes.
         switch (dest) {
@@ -8275,7 +8316,7 @@ pub const App = struct {
             ),
             .dpi_changed = sys.GetDpiForWindow(hwnd) != started.dpi,
             .zoomed = sys.IsZoomed(hwnd) != 0,
-            .arranged = windowArranged(hwnd) or windowLooksSnapped(hwnd, now),
+            .arranged = tab_drag.snapped(windowArranged(hwnd), windowLooksSnapped(hwnd, now)),
             .over_strip = over != null,
         })) return;
         _ = self.requestTabMove(host, host.tabs.items[0].id, .{ .window = over.? });
@@ -8299,10 +8340,11 @@ pub const App = struct {
     /// `IsWindowArranged`: the window is snapped. Windows 10 has it only in
     /// later builds, and the target floor is older, so it is looked up; a
     /// build without it says nothing, and a snap still shows as a resize.
-    fn windowArranged(hwnd: HWND) bool {
+    /// Null where `user32` has no `IsWindowArranged`.
+    fn windowArranged(hwnd: HWND) ?bool {
         const IsWindowArranged = *const fn (HWND) callconv(.winapi) BOOL;
         const user32 = sys.GetModuleHandleW(std.unicode.utf8ToUtf16LeStringLiteral("user32.dll"));
-        const proc = sys.GetProcAddress(@ptrCast(user32), "IsWindowArranged") orelse return false;
+        const proc = sys.GetProcAddress(@ptrCast(user32), "IsWindowArranged") orelse return null;
         const arranged: IsWindowArranged = @ptrCast(@alignCast(proc));
         return arranged(hwnd) != 0;
     }
@@ -15932,6 +15974,227 @@ test "win32 a dragged tab that leaves its window by a key binding ends the drag 
             const down: MSG = .{ .hwnd = host.hwnd.?, .message = c.WM_KEYDOWN, .wParam = c.VK_ESCAPE, .lParam = 1, .time = 0, .pt = .{ .x = 0, .y = 0 }, .lPrivate = 0 };
             try std.testing.expect(!app.cancelTabDragForKey(&down));
             try app.validateShellNativeMapping();
+        }
+    }.body);
+}
+
+fn testAcceptNothing(_: ?*anyopaque) void {}
+
+test "win32 a close prompt counting a window's terminals goes when a tab joins or leaves that window" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    try runOnHiddenDesktop(struct {
+        fn body() !void {
+            var fixture: win32.WindowStartTestApp = .{};
+            try fixture.init();
+            defer fixture.deinit();
+            const app = &fixture.app;
+            app.shell_runtime_initialized = true;
+            const setup: TabMoveFixture = .{ .fixture = &fixture };
+            const source = try setup.window(3, false);
+            const target = try setup.window(2, false);
+            // "Close this window?" counting its two terminals, and "Close
+            // the other tabs?" in the source.
+            target.askBeforeClosing(.window, 2, &testAcceptNothing, @ptrCast(target));
+            try std.testing.expect(target.confirm_payload != null);
+            source.askBeforeClosing(.other_tabs, 2, &testAcceptNothing, @ptrCast(source));
+            try std.testing.expect(source.confirm_payload != null);
+            // A tab with a terminal of its own arrives: neither count holds.
+            try std.testing.expect(try app.moveTabToWindow(source, 0, .{ .host = .{ .host = target, .index = 0 } }));
+            try std.testing.expect(target.confirm_payload == null);
+            try std.testing.expect(source.confirm_payload == null);
+            // Another kind of prompt (here the quit prompt, which counts every
+            // window's terminals alike) stays.
+            target.askBeforeClosing(.app, 4, &testAcceptNothing, @ptrCast(target));
+            try std.testing.expect(try app.moveTabToWindow(source, 0, .{ .host = .{ .host = target, .index = 0 } }));
+            try std.testing.expect(target.confirm_payload != null);
+            target.hideOverlay();
+        }
+    }.body);
+}
+
+test "win32 Esc whose put-back reorder is refused leaves the strip and the shell model in step" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    try runOnHiddenDesktop(struct {
+        fn body() !void {
+            var fixture: win32.WindowStartTestApp = .{};
+            try fixture.init();
+            defer fixture.deinit();
+            const app = &fixture.app;
+            app.shell_runtime_initialized = true;
+            const setup: TabMoveFixture = .{ .fixture = &fixture };
+            const host = try setup.window(3, false);
+            try host.layout();
+            const first = host.tabs.items[0].focusedSurface().?;
+            const button = host.tabs.items[0].button_hwnd orelse return error.TestNoTabButton;
+            const over_third = try testTabMiddleIn(host, 2, button);
+            testPostTabMouse(button, c.WM_LBUTTONDOWN, 20, 10);
+            testPostTabMouse(button, c.WM_MOUSEMOVE, over_third.x, over_third.y);
+            try std.testing.expectEqual(first, host.tabs.items[2].focusedSurface().?);
+            // The put-back is refused: the tab stays where the drag left it,
+            // natively and in the model alike.
+            Host.test_swap_refused = true;
+            defer Host.test_swap_refused = false;
+            const down: MSG = .{ .hwnd = button, .message = c.WM_KEYDOWN, .wParam = c.VK_ESCAPE, .lParam = 1, .time = 0, .pt = .{ .x = 0, .y = 0 }, .lPrivate = 0 };
+            try std.testing.expect(app.cancelTabDragForKey(&down));
+            testPostTabMouse(button, c.WM_LBUTTONUP, over_third.x, over_third.y);
+            try std.testing.expectEqual(first, host.tabs.items[2].focusedSurface().?);
+            try app.validateShellNativeMapping();
+        }
+    }.body);
+}
+test "win32 a tab move whose wake a nested loop took wakes the pump again until the pump itself sees it" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    try runOnHiddenDesktop(struct {
+        fn body() !void {
+            var fixture: win32.WindowStartTestApp = .{};
+            try fixture.init();
+            defer fixture.deinit();
+            const app = &fixture.app;
+            app.shell_runtime_initialized = true;
+            const setup: TabMoveFixture = .{ .fixture = &fixture };
+            const source = try setup.window(2, false);
+            try std.testing.expect(app.requestTabMove(source, source.tabs.items[1].id, .{ .new_window = null }));
+            // A menu's loop, inside `GetMessage` (the pump dispatches nothing),
+            // takes the wake: a timer keeps waking.
+            app.outer_dispatch_message = 0;
+            var msg: MSG = undefined;
+            while (sys.PeekMessageW(&msg, null, c.WM_WINHOSTTY_TAB_MOVE, c.WM_WINHOSTTY_TAB_MOVE, c.PM_REMOVE) != 0) {
+                _ = sys.DispatchMessageW(&msg);
+            }
+            try std.testing.expectEqual(@as(?HWND, source.hwnd.?), app.tab_move_wake_timer);
+            // The timer reaching the outer pump stops it; the pump's next turn
+            // runs the move.
+            app.outer_dispatch_message = c.WM_TIMER;
+            _ = sys.SendMessageW(source.hwnd.?, c.WM_TIMER, c.TAB_MOVE_TIMER_ID, 0);
+            app.outer_dispatch_message = 0;
+            try std.testing.expect(app.tab_move_wake_timer == null);
+            app.drainPendingTabMoves();
+            try std.testing.expectEqual(@as(usize, 1), source.tabs.items.len);
+        }
+    }.body);
+}
+
+test "win32 a hover over a tab with no button down starts no drag, the only tab's window move least of all" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    try runOnHiddenDesktop(struct {
+        fn body() !void {
+            var fixture: win32.WindowStartTestApp = .{};
+            try fixture.init();
+            defer fixture.deinit();
+            const app = &fixture.app;
+            app.shell_runtime_initialized = true;
+            const setup: TabMoveFixture = .{ .fixture = &fixture };
+            const host = try setup.window(1, false);
+            try host.layout();
+            const button = host.tabs.items[0].button_hwnd orelse return error.TestNoTabButton;
+            // Drag state left behind with no capture and no button down.
+            host.tab_drag_index = 0;
+            host.tab_drag_active = true;
+            host.tab_drag_tab_id = host.tabs.items[0].id;
+            try std.testing.expect(sys.GetCapture() == null);
+            _ = sys.SendMessageW(button, c.WM_MOUSEMOVE, 0, @bitCast(@as(usize, (200 << 16) | 20)));
+            try std.testing.expect(host.only_tab_window_move == null);
+            try std.testing.expect(host.tab_drag_index == null);
+            // No system move was asked for either.
+            var msg: MSG = undefined;
+            try std.testing.expect(sys.PeekMessageW(&msg, host.hwnd.?, c.WM_SYSCOMMAND, c.WM_SYSCOMMAND, c.PM_REMOVE) == 0);
+        }
+    }.body);
+}
+
+const TestShellStepFailure = struct {
+    var failing: std.testing.FailingAllocator = undefined;
+    var kept: std.mem.Allocator = undefined;
+    var step_wanted: App.TabMoveShellStep = .commit;
+    var refocus: ?win32_shell.model.PaneId = null;
+
+    /// Makes the shell model's next allocation fail at `step_wanted`; at the
+    /// commit, a focus change first makes the prepared move stale, so the
+    /// commit prepares again.
+    fn hook(app: *App, step: App.TabMoveShellStep) void {
+        if (step != step_wanted) return;
+        if (refocus) |pane| _ = app.shell_runtime.focusPane(pane) catch {};
+        kept = app.shell_runtime.state.allocator;
+        failing = std.testing.FailingAllocator.init(kept, .{ .fail_index = 0 });
+        app.shell_runtime.state.allocator = failing.allocator();
+    }
+
+    fn restore(app: *App) void {
+        app.shell_runtime.state.allocator = kept;
+    }
+};
+
+test "win32 a tab move whose stale commit runs out of memory keeps both windows' undo history" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    try runOnHiddenDesktop(struct {
+        fn body() !void {
+            var fixture: win32.WindowStartTestApp = .{};
+            try fixture.init();
+            defer fixture.deinit();
+            const app = &fixture.app;
+            app.shell_runtime_initialized = true;
+            const setup: TabMoveFixture = .{ .fixture = &fixture };
+            const source = try setup.window(3, false);
+            fixture.core_app.deleteSurface(source.tabs.items[0].focusedSurface().?);
+            try std.testing.expect(try app.closeTabUndoable(source, 0));
+            try std.testing.expect(source.hasStructuralHistory());
+            // A focus change makes the prepared move stale at its commit, and
+            // preparing it again runs out of memory.
+            const front = source.activeSurface().?;
+            const other = source.tabs.items[0].focusedSurface().?;
+            TestShellStepFailure.step_wanted = .commit;
+            TestShellStepFailure.refocus = other.shell_id.?;
+            App.test_tab_move_shell_step = &TestShellStepFailure.hook;
+            defer App.test_tab_move_shell_step = null;
+            const moved = app.moveTabToWindow(source, source.active_tab, .{ .new_window = null });
+            TestShellStepFailure.restore(app);
+            try std.testing.expectError(error.OutOfMemory, moved);
+            // Nothing moved, the new window is gone, and the closed tab can
+            // still come back.
+            try std.testing.expect(source.hasStructuralHistory());
+            try std.testing.expectEqual(@as(usize, 2), source.tabs.items.len);
+            try std.testing.expectEqual(@as(usize, 1), app.registry.hosts.items.len);
+            // The focus change the hook made is put back for the audit.
+            _ = try app.shell_runtime.focusPane(front.shell_id.?);
+            try app.validateShellNativeMapping();
+        }
+    }.body);
+}
+
+test "win32 a tab move a transfer in undo history names keeps it gone if its second prepare runs out of memory (TEAROFF-01)" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    try runOnHiddenDesktop(struct {
+        fn body() !void {
+            var fixture: win32.WindowStartTestApp = .{};
+            try fixture.init();
+            defer fixture.deinit();
+            const app = &fixture.app;
+            app.shell_runtime_initialized = true;
+            const setup: TabMoveFixture = .{ .fixture = &fixture };
+            const host = try setup.window(3, false);
+            // The first tab dragged into a split of the front one: a transfer
+            // in undo history names the front tab.
+            host.tab_drop_operation = .split_right;
+            host.tab_drop_target_surface = host.tabs.items[2].focusedSurface().?;
+            try std.testing.expect(host.commitTabDropSplit(0));
+            try std.testing.expect(host.hasStructuralHistory());
+            TestShellStepFailure.step_wanted = .retry_prepare;
+            TestShellStepFailure.refocus = null;
+            App.test_tab_move_shell_step = &TestShellStepFailure.hook;
+            const moved = app.moveTabToWindow(host, host.active_tab, .{ .new_window = null });
+            TestShellStepFailure.restore(app);
+            App.test_tab_move_shell_step = null;
+            // The residual case: the model refuses the move while the
+            // transfer names the tab, so the history went first, and the
+            // move failed after it. Nothing moved and no window is left.
+            try std.testing.expectError(error.OutOfMemory, moved);
+            try std.testing.expect(!host.hasStructuralHistory());
+            try std.testing.expectEqual(@as(usize, 2), host.tabs.items.len);
+            try std.testing.expectEqual(@as(usize, 1), app.registry.hosts.items.len);
+            try app.validateShellNativeMapping();
+            // With memory, the same move goes through.
+            try std.testing.expect(try app.moveTabToWindow(host, host.active_tab, .{ .new_window = null }));
+            try std.testing.expectEqual(@as(usize, 2), app.registry.hosts.items.len);
         }
     }.body);
 }

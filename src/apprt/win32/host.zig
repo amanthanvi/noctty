@@ -3865,6 +3865,19 @@ pub const Host = struct {
         self.app.showTabDragFeedback(self, drag_index, target, screen);
     }
 
+    /// Hides an open close prompt that counted this window's terminals
+    /// (`window`, `other_tabs`, `right_tabs`). The quit prompt counts every
+    /// window's, which a move leaves the same; `this_tab` is the tab's own,
+    /// which `cancelConfirmFromTab` handles.
+    fn cancelCountingClosePrompt(self: *Host) void {
+        const payload = self.confirm_payload orelse return;
+        const scope = payload.close_scope orelse return;
+        switch (scope) {
+            .window, .other_tabs, .right_tabs => self.hideOverlay(),
+            .this_tab, .app, .update => {},
+        }
+    }
+
     /// A drag that ends because its tab left: nothing to put back.
     pub fn endTabDrag(self: *Host) void {
         self.tab_drag_index = null;
@@ -3874,7 +3887,9 @@ pub const Host = struct {
         self.tab_drag_cancelled = false;
         self.hideTabDropPreview();
         self.app.endTabDragFeedback();
-        _ = sys.ReleaseCapture();
+        if (sys.GetCapture()) |captured| if (self.tabIndexForButton(captured) != null) {
+            _ = sys.ReleaseCapture();
+        };
     }
 
     /// Esc during a tab drag: the drag ends where it began, a reorder made
@@ -3934,10 +3949,19 @@ pub const Host = struct {
         // A prompt one of its terminals raised stays with this window and
         // would answer a terminal that has left it.
         self.cancelConfirmFromTab(&self.tabs.items[index]);
+        // A prompt to close this window, or its other or right tabs, counted
+        // terminals the tab takes away; one in the window it joins counted
+        // none of its own, so its Close would end them unwarned. Both go,
+        // and the next close asks with the windows as they are.
+        self.cancelCountingClosePrompt();
+        target.cancelCountingClosePrompt();
         // So would a rename of the tab in front, or of its terminal, which
         // `submitOverlay` applies to the front tab as it is at Enter.
         if (index == self.active_tab and (self.overlay_mode == .tab_title or self.overlay_mode == .surface_title)) self.hideOverlay();
         self.setHoveredButton(null);
+        // The dragged tab leaving (a key binding moved it mid-drag) ends the
+        // drag, as a pane's teardown does (`windowDestroyed`).
+        if (self.tab_drag_index != null and self.tabs.items[index].id == self.tab_drag_tab_id) self.endTabDrag();
         var tab = self.tabs.orderedRemove(index);
         self.destroyTabButton(&tab);
         tab.button_placement = .{};
@@ -9440,7 +9464,9 @@ pub const Host = struct {
         const prompt = words.close(alloc, .{ .scope = .{ .scope = scope, .terminals = count, .behind = behind } });
         self.showConfirm(prompt, on_accept, null, userdata) catch |err| {
             log.warn("close confirm unavailable err={}; declining close to honour confirm-close-surface", .{err});
+            return;
         };
+        if (self.confirm_payload) |*payload| payload.close_scope = scope;
     }
 
     /// The tab of this window that holds `surface`, as a prompt names it,

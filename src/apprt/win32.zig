@@ -11087,6 +11087,13 @@ pub fn tabButtonProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) call
                     v.setHoveredButton(hwnd);
 
                     // Handle tab drag reorder
+                    // A drag only while this button holds the pointer or the
+                    // left button is down: a hover over stale drag state (no
+                    // button) must not start one, least of all the only
+                    // tab's window move.
+                    if (v.tab_drag_index != null and sys.GetCapture() != hwnd and (wParam & c.MK_LBUTTON) == 0) {
+                        v.endTabDrag();
+                    }
                     if (v.tab_drag_index != null) {
                         // This button's tab, wherever the list moved it.
                         const drag_idx = index;
@@ -11492,7 +11499,9 @@ pub fn hostWindowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) cal
         },
         c.WM_WINHOSTTY_TAB_MOVE => {
             // Only a wake: the outer pump runs the move (`drainPendingTabMoves`),
-            // which can free this window, never a nested loop's dispatch.
+            // which can free this window, never a nested loop's dispatch. A
+            // nested loop that took the wake gets it again on a timer.
+            if (host) |v| v.app.noteTabMoveWake(hwnd, msg);
             return 0;
         },
         c.WM_PARENTNOTIFY => {
@@ -11541,6 +11550,12 @@ pub fn hostWindowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) cal
         // Separate from the App-level quit timer, which uses
         // `sys.SetTimer(null, …)` on the thread queue.
         c.WM_TIMER => {
+            if (wParam == c.TAB_MOVE_TIMER_ID) {
+                if (host) |v| v.app.noteTabMoveWake(hwnd, msg) else {
+                    _ = sys.KillTimer(hwnd, c.TAB_MOVE_TIMER_ID);
+                }
+                return 0;
+            }
             if (wParam == c.TWEEN_TIMER_ID) {
                 if (host) |v| v.tickTweens();
                 return 0;

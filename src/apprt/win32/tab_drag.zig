@@ -60,12 +60,19 @@ pub const Size = struct { width: i32, height: i32 };
 /// A rect's edges, in screen coordinates.
 pub const Edges = struct { left: i32, top: i32, right: i32, bottom: i32 };
 
-/// Whether a window rect sits as Snap leaves one: against a side of its
-/// monitor's work area and against its top or bottom at once (a half snap
-/// spans the height, a quarter takes a corner, a Snap Layouts zone at least
-/// a corner), each within `slack` (the frame's invisible resize border).
-/// Windows 10 before `IsWindowArranged` says no more than this; a plain move
-/// into a corner reads as a snap too, which only declines a merge.
+/// Whether the window is snapped: `IsWindowArranged`'s answer where Windows
+/// has it (`api`), else what the rect looks like (`looks`, `looksSnapped`).
+/// The rect is never asked where the API answers: a plain move against an
+/// edge looks snapped and would decline a merge for nothing.
+pub fn snapped(api: ?bool, looks: bool) bool {
+    return api orelse looks;
+}
+
+/// Whether a window rect sits as Windows 10's Snap leaves one (it has no
+/// `IsWindowArranged` before later builds): against a side of its monitor's
+/// work area and its top or bottom, half its width wide, and its full or
+/// half height tall (a half or a quarter snap), each within `slack` (the
+/// frame's invisible resize border) and twice that for the size.
 pub fn looksSnapped(window: Edges, work: Edges, slack: i32) bool {
     const near = struct {
         fn f(a: i32, b: i32, s: i32) bool {
@@ -74,7 +81,13 @@ pub fn looksSnapped(window: Edges, work: Edges, slack: i32) bool {
     }.f;
     const side = near(window.left, work.left, slack) or near(window.right, work.right, slack);
     const end = near(window.top, work.top, slack) or near(window.bottom, work.bottom, slack);
-    return side and end;
+    const width = window.right - window.left;
+    const height = window.bottom - window.top;
+    const work_width = work.right - work.left;
+    const work_height = work.bottom - work.top;
+    const half_wide = near(width, @divTrunc(work_width, 2), 2 * slack);
+    const tall = near(height, work_height, 2 * slack) or near(height, @divTrunc(work_height, 2), 2 * slack);
+    return side and end and half_wide and tall;
 }
 
 /// Whether the window move changed the window's size: against the size it
@@ -239,6 +252,9 @@ test "a window against a side and the top or bottom of its work area looks snapp
     try std.testing.expect(looksSnapped(.{ .left = -7, .top = 516, .right = 967, .bottom = 1039 }, work, 12));
     // A window moved somewhere inside it, or only against one edge.
     try std.testing.expect(!looksSnapped(.{ .left = 300, .top = 200, .right = 1100, .bottom = 800 }, work, 12));
+    // Plain moves into a corner, at a size of their own (council round 3).
+    try std.testing.expect(!looksSnapped(.{ .left = -7, .top = 0, .right = 793, .bottom = 600 }, work, 12));
+    try std.testing.expect(!looksSnapped(.{ .left = 3, .top = 8, .right = 803, .bottom = 608 }, work, 12));
     try std.testing.expect(!looksSnapped(.{ .left = 300, .top = 0, .right = 1100, .bottom = 600 }, work, 12));
     try std.testing.expect(!looksSnapped(.{ .left = -7, .top = 200, .right = 793, .bottom = 800 }, work, 12));
     // A cross-DPI snap on a build without `IsWindowArranged`: resized with
@@ -251,6 +267,15 @@ test "a window against a side and the top or bottom of its work area looks snapp
         .arranged = looksSnapped(.{ .left = -7, .top = 0, .right = 967, .bottom = 1039 }, work, 12),
         .over_strip = true,
     }));
+}
+
+test "a snap is IsWindowArranged's answer where it has one, the rect's only where it has none" {
+    // Present and false: a plain move, whatever the rect looks like.
+    try std.testing.expect(!snapped(false, true));
+    try std.testing.expect(snapped(true, false));
+    // Absent (Windows 10 builds): the rect decides.
+    try std.testing.expect(snapped(null, true));
+    try std.testing.expect(!snapped(null, false));
 }
 
 test "a drag leaves the strip only past its band and the margin, above or below" {

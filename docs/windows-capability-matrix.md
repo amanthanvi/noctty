@@ -461,7 +461,8 @@ an ordinary move ends over it, which closes the window it left; a move that
 ends maximized or snapped (half, quarter or a Snap Layouts zone) stays a
 move. Esc cancels a drag.
 `move_tab_to_new_window` (the palette's "Move Tab to New Window", unbound
-by default) does the tear-off from the keyboard. A move is not undoable,
+by default) does the tear-off from the keyboard; in a window of one tab it
+does nothing. A move is not undoable,
 like a reorder: it clears both windows' structural undo history. A drop on
 a window of another noctty process opens a new window in the dragging
 process; tabs never cross processes. The quick terminal keeps its tabs.

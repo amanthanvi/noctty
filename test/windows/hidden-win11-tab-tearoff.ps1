@@ -135,10 +135,59 @@ public static class Tt {
     public static void Mouse(IntPtr h,uint msg,int x,int y,int buttons) {
         if(!PostMessageW(h,msg,new IntPtr(buttons),Pos(x,y))) throw new Exception("Mouse post failed");
     }
-    // A key as a posted WM_KEYDOWN/WM_KEYUP pair (a posted triple types it twice).
+    public static IntPtr Owner(IntPtr h) { return GetWindow(h,4); }
+    [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr h,out uint pid);
+    [DllImport("kernel32.dll")] static extern uint GetCurrentThreadId();
+    [DllImport("user32.dll", SetLastError=true)] static extern bool AttachThreadInput(uint a,uint b,bool attach);
+    [DllImport("user32.dll")] static extern bool GetKeyboardState(byte[] s);
+    [DllImport("user32.dll")] static extern bool SetKeyboardState(byte[] s);
+    [DllImport("user32.dll")] static extern short GetAsyncKeyState(int vk);
+    [DllImport("user32.dll")] static extern IntPtr GetKeyboardLayout(uint tid);
+    [DllImport("user32.dll")] static extern uint MapVirtualKeyExW(uint code,uint type,IntPtr hkl);
+    [DllImport("user32.dll", CharSet=CharSet.Unicode)] static extern int ToUnicodeEx(uint vk,uint scan,byte[] state,StringBuilder buf,int n,uint flags,IntPtr hkl);
+    static readonly int[] Modifiers={0x10,0x11,0x12,0x5B,0x5C,0xA0,0xA1,0xA2,0xA3,0xA4,0xA5};
+    // Modifiers found down in the app's keyboard state before a posted key
+    // (cleared), after it ran, and at the real keyboard around it.
+    public static int LatchedBefore, LatchedAfter, HeldReal;
+    // Clears the keyboard state `h`'s thread reads (GetKeyState and
+    // GetKeyboardState: a modifier down there turns a posted key into a
+    // chord) and Caps Lock; returns the modifiers it found down. A hidden
+    // desktop keeps out the user's keys, not their modifiers (input.md,
+    // 2026-10-11 Win32 input mode, trap 11).
+    public static int Neutralize(IntPtr h) {
+        uint pid; uint tid=GetWindowThreadProcessId(h,out pid); uint me=GetCurrentThreadId();
+        if(tid==0) throw new Exception("No window thread");
+        if(!AttachThreadInput(me,tid,true)) throw new Exception("AttachThreadInput failed: "+Marshal.GetLastWin32Error());
+        try {
+            var s=new byte[256]; GetKeyboardState(s);
+            int down=0; foreach(var vk in Modifiers) if((s[vk]&0x80)!=0) down++;
+            for(int i=0;i<256;i++) s[i]&=0x01;
+            s[0x14]=0;
+            if(!SetKeyboardState(s)) throw new Exception("SetKeyboardState failed");
+            return down;
+        } finally { AttachThreadInput(me,tid,false); }
+    }
+    static int Held() { int n=0; foreach(var vk in Modifiers) if((GetAsyncKeyState(vk)&0x8000)!=0) n++; return n; }
+    // A key as a posted WM_KEYDOWN/WM_KEYUP pair (a posted triple types it
+    // twice), with the app's keyboard state neutral before it and checked
+    // again once the app is idle after it.
     public static void Key(IntPtr h,int key) {
+        HeldReal+=Held();
+        LatchedBefore+=Neutralize(h);
         if(!PostMessageW(h,0x100,new IntPtr(key),new IntPtr(1))) throw new Exception("Key-down post failed");
         if(!PostMessageW(h,0x101,new IntPtr(key),new IntPtr(0xC0000001L))) throw new Exception("Key-up post failed");
+        uint pid; GetWindowThreadProcessId(h,out pid);
+        try { using(var p=System.Diagnostics.Process.GetProcessById((int)pid)) { p.WaitForInputIdle(2000); } } catch(InvalidOperationException) { System.Threading.Thread.Sleep(300); }
+        System.Threading.Thread.Sleep(50);
+        LatchedAfter+=Neutralize(h);
+        HeldReal+=Held();
+    }
+    // What `vk` types with no modifier in the layout of `h`'s thread, or null.
+    public static string Typed(IntPtr h,int vk) {
+        uint pid; uint tid=GetWindowThreadProcessId(h,out pid); var hkl=GetKeyboardLayout(tid);
+        var sb=new StringBuilder(8);
+        int n=ToUnicodeEx((uint)vk,MapVirtualKeyExW((uint)vk,0,hkl),new byte[256],sb,8,4,hkl);
+        return n>0 ? sb.ToString(0,n) : null;
     }
 }
 '@
@@ -159,6 +208,9 @@ $script:samples=[Collections.Generic.List[object]]::new()
 # Cases that could not run here: reported, never counted as passes.
 $script:skips=[Collections.Generic.List[string]]::new()
 $script:processes=[Collections.Generic.List[object]]::new()
+# Each launch's process handle, kept until the final check (a PID may be
+# reused once its process is gone).
+$script:launches=[Collections.Generic.List[IntPtr]]::new()
 $desktopPath="WinSta0\$DesktopName"
 $runClass='noctty-test-tearoff-' + [guid]::NewGuid().ToString('N').Substring(0,8)
 # Tab buttons are 1000 + their index (src/apprt/win32/host.zig).
@@ -191,7 +243,7 @@ function Launch-Case([string]$Name,[string]$RendererName,[string[]]$Extra=@()) {
     } finally {
         if($hadLog) { $env:GHOSTTY_LOG=$oldLog } else { Remove-Item Env:GHOSTTY_LOG -ErrorAction SilentlyContinue }
     }
-    $script:processes.Add(@{Case=$Name;Pid=$pi.pid})
+    $script:processes.Add(@{Case=$Name;Pid=$pi.pid}); $script:launches.Add($pi.process)
     $deadline=[datetime]::UtcNow.AddSeconds(25)
     do {
         $hosts=@([HiddenLocal]::Hosts($pi.pid))
@@ -221,12 +273,17 @@ function Close-Case($case) {
         [void][HiddenLocal]::TerminateProcess($case.Pi.process,1)
         [void][HiddenLocal]::WaitForSingleObject($case.Pi.process,5000)
     }
-    [void][HiddenLocal]::CloseHandle($case.Pi.thread); [void][HiddenLocal]::CloseHandle($case.Pi.process)
+    # The process handle stays open for the final check.
+    [void][HiddenLocal]::CloseHandle($case.Pi.thread)
 }
-# The cmd.exe processes under the case's noctty process: PIDs only.
+# The cmd.exe processes under the case's noctty process: PIDs only. A child
+# counts only if it started after its parent: a process whose parent's PID
+# was reused names the new owner of that PID (the root's PID is held by its
+# open handle, so it is the case's).
 function Shell-Pids($case) {
-    $all=@(Get-CimInstance Win32_Process -OperationTimeoutSec 5 | Select-Object ProcessId, ParentProcessId, Name)
-    $byParent=@{}
+    $all=@(Get-CimInstance Win32_Process -OperationTimeoutSec 5 | Select-Object ProcessId, ParentProcessId, Name, CreationDate)
+    $byParent=@{}; $created=@{}
+    foreach($p in $all) { $created[[int]$p.ProcessId]=$p.CreationDate }
     foreach($p in $all) { $k=[int]$p.ParentProcessId; if(-not $byParent.ContainsKey($k)) { $byParent[$k]=[Collections.Generic.List[object]]::new() }; $byParent[$k].Add($p) }
     $found=[Collections.Generic.List[int]]::new(); $queue=[Collections.Generic.Queue[int]]::new(); $queue.Enqueue([int]$case.Pid)
     $seen=[Collections.Generic.HashSet[int]]::new(); [void]$seen.Add([int]$case.Pid)
@@ -235,6 +292,7 @@ function Shell-Pids($case) {
         if(-not $byParent.ContainsKey($parent)) { continue }
         foreach($child in $byParent[$parent]) {
             $id=[int]$child.ProcessId
+            if($null -eq $child.CreationDate -or $null -eq $created[$parent] -or $child.CreationDate -lt $created[$parent]) { continue }
             if(-not $seen.Add($id)) { continue }
             if($child.Name -ieq 'cmd.exe') { $found.Add($id); $script:shellParents[$id]=[int]$child.ParentProcessId }
             $queue.Enqueue($id)
@@ -325,6 +383,8 @@ function New-Pane($case,[IntPtr]$From) {
 function Drag($h,[int]$Index,[int]$X,[int]$Y,[switch]$Escape,[IntPtr]$EscapeTo) {
     $button=[Tt]::Child($h,$TabButton+$Index)
     if($button -eq [IntPtr]::Zero) { throw "No tab button $Index." }
+    # No modifier down for the drag either (a Ctrl or Shift drag is not one).
+    [Tt]::LatchedBefore+=[Tt]::Neutralize($button)
     $origin=[Tt]::RectOf($button)
     [Tt]::Mouse($button,$WM_MOUSEMOVE,20,10,0)
     [Tt]::Mouse($button,$WM_LBUTTONDOWN,20,10,1)
@@ -336,10 +396,43 @@ function Drag($h,[int]$Index,[int]$X,[int]$Y,[switch]$Escape,[IntPtr]$EscapeTo) 
 }
 function Same-Set($a,$b) { return (@($a) -join ',') -eq (@($b) -join ',') }
 # Each window owns the pseudo console of each of its panes: a moved pane's
-# console window follows it (`Pty.reparentPseudoConsole`).
+# console window follows it (`Pty.reparentPseudoConsole`). Per pane: a helper
+# attaches to each shell's console and reads its window handle and its rows
+# (console-attach-info.c); the shell whose rows hold a pane's marker is that
+# pane's, and its console window's owner must be the pane's window. The rows
+# are compared here and their file deleted, never kept.
+function Pane-Consoles($case) {
+    $byMarker=@{}
+    foreach($id in Shell-Pids $case) {
+        $out=Join-Path $Run ('attach-' + [guid]::NewGuid().ToString('N').Substring(0,8) + '.txt')
+        $pi=[Tt]::SpawnLogged($script:attachExe,('"{0}" {1} "{2}" window-dump' -f $script:attachExe,$id,$out),$Run,$desktopPath,"$out.log")
+        try { $done=[HiddenLocal]::WaitForSingleObject($pi.process,10000) -eq 0 }
+        finally { [void][HiddenLocal]::CloseHandle($pi.thread); [void][HiddenLocal]::CloseHandle($pi.process) }
+        $lines=if($done -and (Test-Path -LiteralPath $out)) { @(Get-Content -LiteralPath $out) } else { @() }
+        Remove-Item -LiteralPath $out,"$out.log" -ErrorAction SilentlyContinue
+        if($lines.Count -lt 2) { continue }
+        $m=[regex]::Match((@($lines | Select-Object -Skip 2) -join "`n"),'TEAROFF-\d+-\d+')
+        if($m.Success) { $byMarker[$m.Value]=[IntPtr][long]$lines[1] }
+    }
+    $rows=@(foreach($owner in Hosts $case) {
+        foreach($p in Panes $owner) {
+            $marker=Marker $p
+            $console=if($null -ne $marker -and $byMarker.ContainsKey($marker)) { $byMarker[$marker] } else { [IntPtr]::Zero }
+            @{ Pane=[long]$p; Window=[long]$owner; Found=($console -ne [IntPtr]::Zero); Owned=($console -ne [IntPtr]::Zero -and [Tt]::Owner($console) -eq $owner) }
+        }
+    })
+    return @{ Holds=($rows.Count -gt 0 -and @($rows | Where-Object { -not $_.Owned }).Count -eq 0); Rows=$rows }
+}
 function Consoles-Follow($case) {
     $counts=@(foreach($h in Hosts $case) { @{ Owned=[Tt]::OwnedConsoles($h); Panes=(Panes $h).Count } })
-    return @{ Holds=(@($counts | Where-Object { $_.Owned -ne $_.Panes }).Count -eq 0); Counts=$counts }
+    $each=Pane-Consoles $case
+    return @{ Holds=($each.Holds -and @($counts | Where-Object { $_.Owned -ne $_.Panes }).Count -eq 0); Counts=$counts; Panes=$each.Rows }
+}
+# The work area of the monitor under the middle of `h`: left, top, right, bottom.
+function Work-Area([IntPtr]$h) {
+    $r=[Tt]::RectOf($h); $x=[int](($r.Left+$r.Right)/2); $y=[int](($r.Top+$r.Bottom)/2)
+    foreach($m in [Tt]::Monitors()) { if($m[0] -le $x -and $x -lt $m[2] -and $m[1] -le $y -and $y -lt $m[3]) { return @($m[5],$m[6],$m[7],$m[8]) } }
+    $m=@([Tt]::Monitors())[0]; return @($m[5],$m[6],$m[7],$m[8])
 }
 
 function Measure-Case([string]$RendererName) {
@@ -357,7 +450,7 @@ function Measure-Case([string]$RendererName) {
         $pids=Shell-Pids $case
         Check "${RendererName}: the shells run" ($pids.Count -ge 2) '>= 2' $pids.Count
         $owners=Consoles-Follow $case
-        Check "${RendererName}: the window owns its panes' console windows (the control)" ($owners.Holds -and $owners.Counts[0].Owned -eq 2) 'owned = panes = 2' $owners.Counts
+        Check "${RendererName}: the window owns its panes' console windows (the control)" ($owners.Holds -and $owners.Counts[0].Owned -eq 2 -and @($owners.Panes | Where-Object { $_.Found }).Count -eq 2) 'owned = panes = 2, each found' $owners
         Check "${RendererName}: the shells run with no outer cmd wrapper" (Shells-Direct $case) 'parent is noctty' $null
         Check-Backend $case $RendererName 'before the moves' @($p1,$p2)
 
@@ -373,10 +466,10 @@ function Measure-Case([string]$RendererName) {
         Check "${RendererName} action: the new window and the moved pane show" ($h2 -ne [IntPtr]::Zero -and [Tt]::Visible($h2) -and [Tt]::Visible($p2)) $true $null
         $after=Shell-Pids $case
         Check "${RendererName} action: no shell started or ended" (Same-Set $pids $after) ($pids -join ',') ($after -join ',')
-        Check "${RendererName} action: the moved shell's output is still there" ((Marker $p2) -eq $m2) 'same marker' $null
+        Check "${RendererName} action: the moved shell's output is still there" ($null -ne $m2 -and (Marker $p2) -eq $m2) 'same, non-null marker' $null
         Check-Backend $case $RendererName 'after the action' @($p1,$p2)
         $owners=Consoles-Follow $case
-        Check "${RendererName} action: each window owns its panes' console windows" $owners.Holds 'owned = panes' $owners.Counts
+        Check "${RendererName} action: each window owns its panes' console windows" $owners.Holds 'each pane''s console owned by its window' $owners
 
         # 2. A drag out of the window, to the right of it: a new window there.
         $p3=New-Pane $case $p1
@@ -385,8 +478,18 @@ function Measure-Case([string]$RendererName) {
         [void](Wait-Until { (Shell-Pids $case).Count -gt $pids.Count } 10)
         Start-Sleep -Milliseconds 500
         $pids=Shell-Pids $case
-        $r1=[Tt]::RectOf($h1)
+        # The drop lands on screen, to the right of the window: narrowed
+        # first when the monitor leaves no room (a new window is held to the
+        # work area, and would then not be under a drop past it).
+        $r1=[Tt]::RectOf($h1); $work=Work-Area $h1
+        if($r1.Right+120+300 -gt $work[2]) {
+            [void][Tt]::SetWindowPos($h1,[IntPtr]::Zero,$work[0]+20,$r1.Top,[Math]::Max(420,$work[2]-$work[0]-460),$r1.Bottom-$r1.Top,0x14)
+            Start-Sleep -Milliseconds 500
+            $r1=[Tt]::RectOf($h1)
+        }
         $dropX=$r1.Right+120; $dropY=$r1.Top+80
+        $sample.WorkArea=$work
+        Check "${RendererName} drag: the drop point is on screen, past the window" ($dropX -lt $work[2] -and $dropY -lt $work[3]) @($work[2],$work[3]) @($dropX,$dropY)
         Drag $h1 1 $dropX $dropY
         $torn=Wait-Until { $o=HostOf $case $p3; $o -ne [IntPtr]::Zero -and $o -ne $h1 } 10
         Start-Sleep -Milliseconds 300
@@ -400,10 +503,10 @@ function Measure-Case([string]$RendererName) {
         }
         $after=Shell-Pids $case
         Check "${RendererName} drag: no shell started or ended" (Same-Set $pids $after) ($pids -join ',') ($after -join ',')
-        Check "${RendererName} drag: the moved shell's output is still there" ((Marker $p3) -eq $m3) 'same marker' $null
+        Check "${RendererName} drag: the moved shell's output is still there" ($null -ne $m3 -and (Marker $p3) -eq $m3) 'same, non-null marker' $null
         Check-Backend $case $RendererName 'after the drag' @($p1,$p2,$p3)
         $owners=Consoles-Follow $case
-        Check "${RendererName} drag: each window owns its panes' console windows" $owners.Holds 'owned = panes' $owners.Counts
+        Check "${RendererName} drag: each window owns its panes' console windows" $owners.Holds 'each pane''s console owned by its window' $owners
 
         # 3. Esc during a drag: nothing moves.
         $p4=New-Pane $case $p1
@@ -432,11 +535,11 @@ function Measure-Case([string]$RendererName) {
         Check "${RendererName} drop: the target window has both tabs, the source one" ((Panes $h3).Count -eq 2 -and (Panes $h1).Count -eq 1) '2 and 1' @{Target=(Panes $h3).Count;Source=(Panes $h1).Count}
         $after=Shell-Pids $case
         Check "${RendererName} drop: no shell started or ended" (Same-Set $pids $after) ($pids -join ',') ($after -join ',')
-        Check "${RendererName} drop: the moved shell's output is still there" ((Marker $p4) -eq $m4) 'same marker' $null
+        Check "${RendererName} drop: the moved shell's output is still there" ($null -ne $m4 -and (Marker $p4) -eq $m4) 'same, non-null marker' $null
         Check "${RendererName}: every moved shell kept its output" ($null -ne $m1 -and $null -ne $m2 -and $null -ne $m3 -and $null -ne $m4 -and (Marker $p1) -eq $m1 -and (Marker $p2) -eq $m2 -and (Marker $p3) -eq $m3 -and (Marker $p4) -eq $m4) 'same, non-null markers' $null
         Check-Backend $case $RendererName 'after the drop' @($p1,$p2,$p3,$p4)
         $owners=Consoles-Follow $case
-        Check "${RendererName} drop: each window owns its panes' console windows" $owners.Holds 'owned = panes' $owners.Counts
+        Check "${RendererName} drop: each window owns its panes' console windows" $owners.Holds 'each pane''s console owned by its window' $owners
 
         # Positive control: closing a pane ends its shell, which the PID set
         # shows, so an unchanged set above is a measurement.
@@ -475,12 +578,18 @@ function Measure-Search([string]$RendererName) {
         $closed=Wait-Until { -not [Tt]::Alive($h1) } 10
         Check "${RendererName} search: the window it left closes" $closed 'closed' $null
         Start-Sleep -Milliseconds 500
+        # What the X key types in the app's own layout (not always `x`).
+        $expect=[Tt]::Typed($edit,0x58)
         [Tt]::Key($edit,0x58)   # X, typed into the moved search box
         Start-Sleep -Milliseconds 800
         $alive=[HiddenLocal]::WaitForSingleObject($case.Pi.process,0) -eq 258
         Check "${RendererName} search: the process stays up as the moved search box is typed into" $alive 'running' $null
-        $typed=$alive -and ([Tt]::Text($edit) -match '[xX]')
-        Check "${RendererName} search: the moved search box takes the typing" $typed 'x typed' $null
+        if($null -eq $expect) {
+            $script:skips.Add("${RendererName} search: the X key types nothing by itself in this layout")
+        } else {
+            $typed=$alive -and ([Tt]::Text($edit)).Contains($expect)
+            Check "${RendererName} search: the moved search box takes the typing" $typed 'the layout''s character for X' $null
+        }
     } finally { Close-Case $case }
 }
 
@@ -546,6 +655,20 @@ function Measure-CrossDpi([string]$RendererName,[ValidateSet('down','up')][strin
 }
 
 try {
+    # The console helper, built here once (dev-windows.cmd; no console of its
+    # own, CREATE_NO_WINDOW).
+    $root=Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
+    $script:attachExe=Join-Path $Run 'console-attach-info.exe'
+    $compile=Join-Path $Run 'console-attach-info.cmd'
+    @('@echo off',('call "{0}" cl /nologo /W4 /WX /O2 /DUNICODE /D_UNICODE "{1}" /Fe:"{2}" /Fo:"{3}"' -f
+        (Join-Path $root 'scripts\dev-windows.cmd'),(Join-Path $PSScriptRoot 'console-attach-info.c'),$script:attachExe,(Join-Path $Run 'console-attach-info.obj')),
+        'exit /b %errorlevel%') | Set-Content -LiteralPath $compile -Encoding ascii
+    $cp=[Tt]::SpawnLogged($env:ComSpec,('"{0}" /d /c ""{1}""' -f $env:ComSpec,$compile),$Run,$desktopPath,(Join-Path $Run 'console-attach-info.compile.log'))
+    try {
+        if([HiddenLocal]::WaitForSingleObject($cp.process,180000) -ne 0) { throw 'Console helper compile timed out.' }
+        [uint32]$code=1; [void][HiddenLocal]::GetExitCodeProcess($cp.process,[ref]$code)
+    } finally { [void][HiddenLocal]::CloseHandle($cp.thread); [void][HiddenLocal]::CloseHandle($cp.process) }
+    if($code -ne 0 -or -not (Test-Path -LiteralPath $script:attachExe)) { throw 'Console helper compile failed.' }
     $renderers=if($Renderer -eq 'both') { @('opengl','d3d11') } else { @($Renderer) }
     foreach($name in $renderers) { Measure-Case $name }
     foreach($name in $renderers) { Measure-CrossDpi $name 'down'; Measure-CrossDpi $name 'up' }
@@ -553,8 +676,14 @@ try {
 } catch {
     $script:checks.Add(@{Name='Harness execution'; Passed=$false; Error=$_.Exception.Message})
 } finally {
-    $remaining=@($script:processes | Where-Object {Get-Process -Id $_.Pid -ErrorAction SilentlyContinue})
+    # Through each launch's own handle, never a PID lookup.
+    $remaining=@($script:launches | Where-Object { [HiddenLocal]::WaitForSingleObject($_,0) -ne 0 })
     Check 'owned runtime processes exited' ($remaining.Count -eq 0) 0 $remaining.Count
+    foreach($handle in $script:launches) { [void][HiddenLocal]::CloseHandle($handle) }
+    Check 'the keyboard state the app read held no modifier as a posted key ran' ([Tt]::LatchedAfter -eq 0) 0 @{Cleared=[Tt]::LatchedBefore; After=[Tt]::LatchedAfter}
+    # A modifier held at the real keyboard means the run was interfered
+    # with, never that it passed (input.md, 2026-10-11, trap 11).
+    Check 'INTERFERED unless no modifier was held at the real keyboard around a posted key' ([Tt]::HeldReal -eq 0) 0 ([Tt]::HeldReal)
     @{Checks=$script:checks; Skipped=$script:skips; Samples=$script:samples; Processes=$script:processes; Limit='Posted window messages on a never-switched desktop; real pointer and keyboard input, the system window move, the clipboard and visual composition (a D3D11 present) are not exercised.'} | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath (Join-Path $Run 'tab-tearoff-results.json')
 }
 $failed=@($script:checks|Where-Object {-not $_.Passed})

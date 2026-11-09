@@ -314,9 +314,19 @@ pub const Drop = struct { at: POINT, grab: POINT, work: RECT, dpi: u32 = 0 };
 pub fn placeTearOff(p: *const Plan, occupied: Occupied, drop: ?Drop) Placement {
     const source = p.source.?;
     const info = source.monitor.info;
-    const normal = if (source.state.fullscreen) |back|
-        workspaceRectToScreen(back.placement.rcNormalPosition, (back.monitor orelse source.monitor).info)
-    else if (source.iconic or restoresMaximized(source.zoomed, source.iconic, &source.placement))
+    const normal = if (source.state.fullscreen) |saved| fullscreen: {
+        // Dropped, the size is taken as saved and scaled from its monitor's
+        // DPI below; not dropped, it cascades from where leaving fullscreen
+        // returns it to now, on the source's monitor (`returnOn`).
+        const back = if (drop == null) returnOn(saved, source.monitor) else saved;
+        const at = (back.monitor orelse source.monitor).info;
+        // A maximized window's return is its placement's normal rect; any
+        // other's (a snapped one too) is the rect it had.
+        break :fullscreen if (back.placement.showCmd == c.SW_MAXIMIZE)
+            workspaceRectToScreen(back.placement.rcNormalPosition, at)
+        else
+            back.rect;
+    } else if (source.iconic or restoresMaximized(source.zoomed, source.iconic, &source.placement))
         workspaceRectToScreen(source.placement.rcNormalPosition, info)
     else
         source.rect;
@@ -919,6 +929,15 @@ test "win32 a torn-off tab's window opens at its source's normal size, under the
         .iconic = true,
         .monitor = test_monitors.portrait,
     };
+    const fullscreen_maximized: Snapshot = .{
+        .state = .{ .fullscreen = .{
+            .rect = side.info.rcWork,
+            .placement = testPlacement(testRect(300, 200, 1000, 700), 0, c.SW_MAXIMIZE),
+            .monitor = side,
+        } },
+        .rect = side.info.rcMonitor,
+        .monitor = side,
+    };
     const Case = struct { source: Snapshot, drop: ?Drop, occupied: []const POINT = &.{}, rect: RECT };
     for ([_]Case{
         // The pointer stays 40 px right and 20 px down of the corner.
@@ -933,7 +952,11 @@ test "win32 a torn-off tab's window opens at its source's normal size, under the
         // Maximized, fullscreen or minimized: the size it returns to,
         // from workspace coordinates.
         .{ .source = maximized, .drop = .{ .at = .{ .x = 500, .y = 500 }, .grab = .{ .x = 0, .y = 0 }, .work = big.info.rcWork }, .rect = testRect(500, 500, 1300, 1100) },
-        .{ .source = fullscreen, .drop = .{ .at = .{ .x = 4000, .y = 100 }, .grab = .{ .x = 0, .y = 0 }, .work = side.info.rcWork }, .rect = testRect(4000, 100, 4700, 600) },
+        // A fullscreen source returns to the rect it had (a snapped
+        // 800x600 here, not its placement's 700x500 normal rect)...
+        .{ .source = fullscreen, .drop = .{ .at = .{ .x = 4000, .y = 100 }, .grab = .{ .x = 0, .y = 0 }, .work = side.info.rcWork }, .rect = testRect(4000, 100, 4800, 700) },
+        // ...and one that was maximized to its placement's normal rect.
+        .{ .source = fullscreen_maximized, .drop = .{ .at = .{ .x = 4000, .y = 100 }, .grab = .{ .x = 0, .y = 0 }, .work = side.info.rcWork }, .rect = testRect(4000, 100, 4700, 600) },
         .{ .source = minimized, .drop = .{ .at = .{ .x = 100, .y = 100 }, .grab = .{ .x = 0, .y = 0 }, .work = big.info.rcWork }, .rect = testRect(100, 100, 740, 580) },
         // No drop (the action): one cascade step off the source, past the
         // windows already there.
@@ -977,6 +1000,31 @@ test "win32 a torn-off tab's window opens at its source's normal size, under the
         try std.testing.expectEqual(@as(u32, c.SWP_NOACTIVATE), placed.flags);
         try std.testing.expect(placed.maximize == null and placed.fullscreen == null);
     }
+}
+
+test "win32 a torn-off tab's window from a fullscreen source cascades from where that window returns to now" {
+    const big = test_monitors.big;
+    const side = test_monitors.side;
+    // Fullscreen now on the 96 DPI monitor; it entered fullscreen on the big
+    // 144 DPI one, from a 1200x900 window.
+    const back: TopLevel.Return = .{
+        .rect = testRect(100, 100, 1300, 1000),
+        .placement = testPlacement(testRect(100, 100, 1300, 1000), 0, c.SW_RESTORE),
+        .monitor = big,
+    };
+    const source: Snapshot = .{ .state = .{ .fullscreen = back }, .rect = side.info.rcMonitor, .monitor = side };
+    const p = plan(.tear_off, .{}, .{}, &source, .activate, c.OS_BUILD_WIN11_21H2);
+    const placed = placeTearOff(&p, .none, null);
+    // On the source's monitor, at its DPI's size: what leaving fullscreen
+    // gives back there, one cascade step on.
+    const here = returnOn(back, side);
+    try std.testing.expectEqualDeep(cascadedRect(here.rect, cascadeStep(96), side.info.rcWork), placed.rect);
+    const work = side.info.rcWork;
+    try std.testing.expect(placed.rect.left >= work.left and placed.rect.right <= work.right and placed.rect.top >= work.top and placed.rect.bottom <= work.bottom);
+    // Sol's repro, exactly: 1200x900 at 144 DPI, fullscreen, moved to 96 DPI,
+    // then `move_tab_to_new_window`: 800x600, as a drop there gives.
+    try std.testing.expectEqual(@as(i32, 800), placed.rect.right - placed.rect.left);
+    try std.testing.expectEqual(@as(i32, 600), placed.rect.bottom - placed.rect.top);
 }
 
 test "win32 a copy of a maximized or fullscreen window starts in that state, and its own size stays its own" {
