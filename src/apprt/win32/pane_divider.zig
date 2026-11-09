@@ -71,7 +71,7 @@ pub fn For(comptime Tree: type) type {
             /// `split`.
             grab: Rect,
             /// Where the second child's slot starts along the split's axis:
-            /// the divider's position, which `dragRatio` moves.
+            /// the divider's position, which a drag moves (`stepRatio`).
             position: i32,
         };
 
@@ -329,6 +329,11 @@ pub fn For(comptime Tree: type) type {
         /// on the layout as it is. A drag moves by the pointer's distance
         /// from the press instead (`Host.dragPaneDivider`), which keeps the
         /// starting ratio exactly when the pointer has not moved.
+        /// No production caller: the drag goes through `stepRatio`. This is
+        /// the tested pure form of its first two steps (`ratioBounds`, then
+        /// `ratioAt`) for an absolute pointer pixel, which the tests here
+        /// pin those steps through; the third, `fitRatio`, has its own
+        /// tests through `stepRatio` (Muse on #689).
         pub fn dragRatio(tree: *const Tree, spatial: Spatial, content: Rect, found: Divider, along: i32, min_px: i32) ?f16 {
             const bounds = ratioBounds(tree, spatial, content, found, min_px) orelse return null;
             const start = switch (found.layout) {
