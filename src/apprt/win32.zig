@@ -11114,8 +11114,7 @@ pub fn tabButtonProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) call
                             }
                             if (v.tab_drag_target == .stay and v.tab_drop_operation == .none) {
                                 if (v.tabIndexAtScreenX(pt.x)) |target_idx| {
-                                    if (target_idx != drag_idx and v.tabs.items.len > 1) {
-                                        v.swapTabs(drag_idx, target_idx);
+                                    if (target_idx != drag_idx and v.tabs.items.len > 1 and v.swapTabs(drag_idx, target_idx)) {
                                         v.tab_drag_index = target_idx;
                                         v.tab_drag_start_x = mouse_x;
                                         v.tab_drag_start_y = mouse_y;
@@ -17183,7 +17182,7 @@ test "win32 swapTabs invalidates structural history before drag reorder" {
     });
 
     host.active_tab = 0;
-    host.swapTabs(0, 1);
+    _ = host.swapTabs(0, 1);
 
     try std.testing.expectEqual(@as(usize, 0), host.structural_undo_entries.items.len);
     try std.testing.expectEqual(@as(usize, 0), host.structural_redo_entries.items.len);
@@ -17689,7 +17688,7 @@ test "win32 shell and native projections agree over split, move, close and resto
     try Step.expectEqual(&app, &host, &surface_d);
 
     // Move: D's tab to the front of the strip.
-    host.swapTabs(1, 0);
+    _ = host.swapTabs(1, 0);
     try std.testing.expectEqual(@as(?*Surface, &surface_d), host.tabs.items[0].focusedSurface());
     try Step.expectEqual(&app, &host, &surface_d);
 
@@ -18386,7 +18385,7 @@ test "win32 shell and native projections agree through split undo and redo, and 
     // of that release instead of failing as stale.
     _ = try host.applyLatestStructuralUndo();
     try Step.expectEqual(&app, &host, &surface_a);
-    host.swapTabs(1, 0);
+    _ = host.swapTabs(1, 0);
     try std.testing.expectEqual(@as(u32, 2), host.tabs.items[0].id);
     try Step.expectEqual(&app, &host, &surface_a);
     try std.testing.expect(!app.shell_runtime.state.pane_ids.isCurrent(pane_b));

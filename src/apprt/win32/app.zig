@@ -8176,19 +8176,35 @@ pub const App = struct {
     /// another window's tab strip, the tab joins it, and this window, now
     /// empty, closes. A move that ended where it began (Esc, or no move)
     /// does nothing.
-    pub fn finishOnlyTabWindowMove(self: *App, host: *Host, started: RECT) void {
+    pub fn finishOnlyTabWindowMove(self: *App, host: *Host, started: Host.OnlyTabMove) void {
         const hwnd = host.hwnd orelse return;
         if (host.tabs.items.len != 1) return;
         var now: RECT = undefined;
         if (sys.GetWindowRect(hwnd, &now) == 0) return;
-        if (now.left == started.left and now.top == started.top and
-            now.right == started.right and now.bottom == started.bottom) return;
-        // Dragged to the top edge, it maximized: that was the move.
-        if (sys.IsZoomed(hwnd) != 0) return;
         var pointer: POINT = undefined;
         if (sys.GetCursorPos(&pointer) == 0) return;
-        const over = self.tabStripTargetAt(pointer, hwnd, null) orelse return;
-        _ = self.requestTabMove(host, host.tabs.items[0].id, .{ .window = over });
+        const over = self.tabStripTargetAt(pointer, hwnd, null);
+        const was = started.rect;
+        if (!tab_drag.windowMoveMerges(.{
+            .moved = now.left != was.left or now.top != was.top,
+            .resized = now.right - now.left != was.right - was.left or now.bottom - now.top != was.bottom - was.top,
+            .dpi_changed = sys.GetDpiForWindow(hwnd) != started.dpi,
+            .zoomed = sys.IsZoomed(hwnd) != 0,
+            .arranged = windowArranged(hwnd),
+            .over_strip = over != null,
+        })) return;
+        _ = self.requestTabMove(host, host.tabs.items[0].id, .{ .window = over.? });
+    }
+
+    /// `IsWindowArranged`: the window is snapped. Windows 10 has it only in
+    /// later builds, and the target floor is older, so it is looked up; a
+    /// build without it says nothing, and a snap still shows as a resize.
+    fn windowArranged(hwnd: HWND) bool {
+        const IsWindowArranged = *const fn (HWND) callconv(.winapi) BOOL;
+        const user32 = sys.GetModuleHandleW(std.unicode.utf8ToUtf16LeStringLiteral("user32.dll"));
+        const proc = sys.GetProcAddress(@ptrCast(user32), "IsWindowArranged") orelse return false;
+        const arranged: IsWindowArranged = @ptrCast(proc);
+        return arranged(hwnd) != 0;
     }
 
     /// Esc during a tab drag ends it where it began (`Host.cancelTabDrag`).
@@ -8202,6 +8218,9 @@ pub const App = struct {
             return true;
         }
         if (msg.message != c.WM_KEYDOWN) return false;
+        // A key-up that never came (focus left first) must not take the
+        // next Esc's.
+        self.tab_drag_escape_down = false;
         for (self.registry.hosts.items) |host| {
             // A button merely pressed is not a drag yet: Esc is the terminal's.
             if (host.tab_drag_index == null or !host.tab_drag_active) continue;
@@ -14967,6 +14986,16 @@ test "win32 move_tab_to_new_window moves the tab from the message loop, and does
             try std.testing.expect(lone_host.pending_tab_move == null);
 
             const source = try setup.window(2, false);
+            // A window the fixture made after the first is a `CW_USEDEFAULT`
+            // 1280x800, which on a small CI screen fills the work area, so a
+            // cascade step had no room and the new window sat on its source
+            // (CI run 42542639547). Put it where there is room to step.
+            const monitor = sys.MonitorFromWindow(source.hwnd.?, c.MONITOR_DEFAULTTONEAREST) orelse return error.TestNoMonitor;
+            var info: sys.MONITORINFO = std.mem.zeroes(sys.MONITORINFO);
+            info.cbSize = @sizeOf(sys.MONITORINFO);
+            try std.testing.expect(sys.GetMonitorInfoW(monitor, &info) != 0);
+            const work = info.rcWork;
+            try std.testing.expect(sys.SetWindowPos(source.hwnd.?, null, work.left + 100, work.top + 80, 480, 320, c.SWP_NOZORDER | c.SWP_NOACTIVATE) != 0);
             const front = source.activeSurface().?;
             try std.testing.expect(try app.performAction(.{ .surface = front.core() }, .move_tab_to_new_window, {}));
             // Nothing moves inside the key binding's call.
@@ -14978,12 +15007,17 @@ test "win32 move_tab_to_new_window moves the tab from the message loop, and does
             try std.testing.expectEqual(@as(usize, 3), app.registry.hosts.items.len);
             try std.testing.expectEqual(@as(usize, 1), source.tabs.items.len);
             try std.testing.expectEqual(@as(usize, 1), front.host.?.tabs.items.len);
-            // A cascade step off its source, as a new window from it.
+            // One cascade step off its source, at its size, as a new window
+            // from it.
             var source_rect: RECT = undefined;
             var moved_rect: RECT = undefined;
             try std.testing.expect(sys.GetWindowRect(source.hwnd.?, &source_rect) != 0);
             try std.testing.expect(sys.GetWindowRect(front.host.?.hwnd.?, &moved_rect) != 0);
-            try std.testing.expect(moved_rect.left != source_rect.left or moved_rect.top != source_rect.top);
+            const step = window_start.cascadeStep(sys.GetDpiForWindow(source.hwnd.?));
+            try std.testing.expectEqual(source_rect.left + step, moved_rect.left);
+            try std.testing.expectEqual(source_rect.top + step, moved_rect.top);
+            try std.testing.expectEqual(source_rect.right - source_rect.left, moved_rect.right - moved_rect.left);
+            try std.testing.expectEqual(source_rect.bottom - source_rect.top, moved_rect.bottom - moved_rect.top);
             try app.validateShellNativeMapping();
 
             // A request whose tab has gone does nothing.
@@ -15138,22 +15172,39 @@ test "win32 a moved pane's search bar answers to its new window, and no child of
             const app = &fixture.app;
             app.shell_runtime_initialized = true;
             const setup: TabMoveFixture = .{ .fixture = &fixture };
-            const source = try setup.window(1, false);
+            const first = try setup.window(2, false);
             const target = try setup.window(2, false);
-            const pane = source.activeSurface().?;
+            // The search bar is made before the tab moves.
+            const pane = first.activeSurface().?;
             try pane.ensureSearchBarControls();
             const edit = pane.search_bar_edit_hwnd.?;
             const buttons = [_]HWND{
                 pane.search_bar_prev_hwnd.?, pane.search_bar_next_hwnd.?, pane.search_bar_regex_hwnd.?,
                 pane.search_bar_case_hwnd.?, pane.search_bar_word_hwnd.?, pane.search_bar_close_hwnd.?,
             };
-            try std.testing.expectEqual(@intFromPtr(source), testWindowData(edit));
+            const frame = pane.search_bar_bg_hwnd.?;
+            const chip = pane.search_bar_results_hwnd.?;
+            try std.testing.expectEqual(@intFromPtr(first), testWindowData(edit));
 
-            // The only tab joins the other window, and its window is freed.
+            // A tear-off: the controls answer to the new window.
+            try std.testing.expect(try app.moveTabToWindow(first, first.active_tab, .{ .new_window = null }));
+            const source = pane.host.?;
+            try std.testing.expect(source != first);
+            try std.testing.expectEqual(@intFromPtr(source), testWindowData(edit));
+            for (buttons) |button| try std.testing.expectEqual(@intFromPtr(source), testWindowData(button));
+            try std.testing.expectEqual(pane, source.searchControlSurface(edit).?);
+            // The frame and the results chip name the pane, which moved with them.
+            try std.testing.expectEqual(@intFromPtr(pane), testWindowData(frame));
+            try std.testing.expectEqual(@intFromPtr(pane), testWindowData(chip));
+
+            // Then the torn-off window's only tab joins the other window,
+            // and the torn-off window is freed.
             freed = @intFromPtr(source);
             named_freed = 0;
             try std.testing.expect(try app.moveTabToWindow(source, 0, .{ .host = .{ .host = target, .index = 0 } }));
             try std.testing.expectEqual(target, pane.host.?);
+            try std.testing.expectEqual(@intFromPtr(pane), testWindowData(frame));
+            try std.testing.expectEqual(@intFromPtr(pane), testWindowData(chip));
             // The edit and the buttons find their pane through their window.
             try std.testing.expectEqual(@intFromPtr(target), testWindowData(edit));
             for (buttons) |button| try std.testing.expectEqual(@intFromPtr(target), testWindowData(button));
@@ -15305,6 +15356,132 @@ test "win32 a tab drag's label is a live UIA element that speaks when what a dro
             try std.testing.expect(target.tab_insert_marker_uia_provider != null);
             post(button, c.WM_LBUTTONUP, 20, 10);
             TabMoveFixture.runPosted(source);
+        }
+    }.body);
+}
+
+fn testPostTabMouse(button: HWND, msg: UINT, x: i32, y: i32) void {
+    const lx: u32 = @as(u16, @bitCast(@as(i16, @truncate(x))));
+    const ly: u32 = @as(u16, @bitCast(@as(i16, @truncate(y))));
+    _ = sys.SendMessageW(button, msg, if (msg == c.WM_LBUTTONUP) 0 else 1, @bitCast(@as(usize, (ly << 16) | lx)));
+}
+
+/// The middle of tab `index`'s button, in `from`'s client coordinates.
+fn testTabMiddleIn(host: *Host, index: usize, from: HWND) !POINT {
+    var rect: RECT = undefined;
+    if (sys.GetWindowRect(host.tabs.items[index].button_hwnd orelse return error.TestNoTabButton, &rect) == 0) return error.TestNoRect;
+    var at: POINT = .{ .x = rect.left + @divTrunc(rect.right - rect.left, 2), .y = rect.top + @divTrunc(rect.bottom - rect.top, 2) };
+    _ = sys.ScreenToClient(from, &at);
+    return at;
+}
+
+test "win32 Esc during a tab drag puts back a reorder made on the way, takes its key-up, and swallows the release" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    try runOnHiddenDesktop(struct {
+        fn body() !void {
+            var fixture: win32.WindowStartTestApp = .{};
+            try fixture.init();
+            defer fixture.deinit();
+            const app = &fixture.app;
+            app.shell_runtime_initialized = true;
+            const setup: TabMoveFixture = .{ .fixture = &fixture };
+            const host = try setup.window(3, false);
+            try host.layout();
+            const first = host.tabs.items[0].focusedSurface().?;
+            const second = host.tabs.items[1].focusedSurface().?;
+            const third = host.tabs.items[2].focusedSurface().?;
+            const button = host.tabs.items[0].button_hwnd orelse return error.TestNoTabButton;
+            const over_third = try testTabMiddleIn(host, 2, button);
+
+            // Along the strip onto the third tab: the first moves there.
+            testPostTabMouse(button, c.WM_LBUTTONDOWN, 20, 10);
+            testPostTabMouse(button, c.WM_MOUSEMOVE, over_third.x, over_third.y);
+            try std.testing.expectEqual(first, host.tabs.items[2].focusedSurface().?);
+            try std.testing.expectEqual(@as(?usize, 2), host.tab_drag_index);
+
+            const down: MSG = .{ .hwnd = button, .message = c.WM_KEYDOWN, .wParam = c.VK_ESCAPE, .lParam = 1, .time = 0, .pt = .{ .x = 0, .y = 0 }, .lPrivate = 0 };
+            const up: MSG = .{ .hwnd = button, .message = c.WM_KEYUP, .wParam = c.VK_ESCAPE, .lParam = @bitCast(@as(usize, 0xC0000001)), .time = 0, .pt = .{ .x = 0, .y = 0 }, .lPrivate = 0 };
+            try std.testing.expect(app.cancelTabDragForKey(&down));
+            // The order it had.
+            try std.testing.expectEqual(first, host.tabs.items[0].focusedSurface().?);
+            try std.testing.expectEqual(second, host.tabs.items[1].focusedSurface().?);
+            try std.testing.expectEqual(third, host.tabs.items[2].focusedSurface().?);
+            // Its key-up is taken once; a later one is the terminal's.
+            try std.testing.expect(app.cancelTabDragForKey(&up));
+            try std.testing.expect(!app.cancelTabDragForKey(&up));
+            // The release over the third tab neither reorders nor activates.
+            const active = host.active_tab;
+            try std.testing.expect(host.tab_drag_cancelled);
+            testPostTabMouse(button, c.WM_LBUTTONUP, over_third.x, over_third.y);
+            try std.testing.expect(!host.tab_drag_cancelled);
+            try std.testing.expectEqual(active, host.active_tab);
+            try std.testing.expectEqual(first, host.tabs.items[0].focusedSurface().?);
+
+            // A key-up that never came does not take the next Esc's: that
+            // Esc (no drag) is the terminal's, and so is its key-up.
+            testPostTabMouse(button, c.WM_LBUTTONDOWN, 20, 10);
+            testPostTabMouse(button, c.WM_MOUSEMOVE, over_third.x, over_third.y);
+            try std.testing.expect(app.cancelTabDragForKey(&down));
+            testPostTabMouse(button, c.WM_LBUTTONUP, over_third.x, over_third.y);
+            try std.testing.expect(!app.cancelTabDragForKey(&down));
+            try std.testing.expect(!app.cancelTabDragForKey(&up));
+            try app.validateShellNativeMapping();
+        }
+    }.body);
+}
+
+test "win32 a refused reorder during a tab drag leaves the drag on the tab it is on" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    try runOnHiddenDesktop(struct {
+        fn body() !void {
+            var fixture: win32.WindowStartTestApp = .{};
+            try fixture.init();
+            defer fixture.deinit();
+            const app = &fixture.app;
+            app.shell_runtime_initialized = true;
+            const setup: TabMoveFixture = .{ .fixture = &fixture };
+            const host = try setup.window(3, false);
+            try host.layout();
+            const first = host.tabs.items[0].focusedSurface().?;
+            const button = host.tabs.items[0].button_hwnd orelse return error.TestNoTabButton;
+            const over_second = try testTabMiddleIn(host, 1, button);
+            // Every reorder is refused (each real refusal logs an error,
+            // which fails a test, so the seam refuses quietly).
+            Host.test_swap_refused = true;
+            defer Host.test_swap_refused = false;
+            testPostTabMouse(button, c.WM_LBUTTONDOWN, 20, 10);
+            testPostTabMouse(button, c.WM_MOUSEMOVE, over_second.x, over_second.y);
+            try std.testing.expectEqual(first, host.tabs.items[0].focusedSurface().?);
+            try std.testing.expectEqual(@as(?usize, 0), host.tab_drag_index);
+            const down: MSG = .{ .hwnd = button, .message = c.WM_KEYDOWN, .wParam = c.VK_ESCAPE, .lParam = 1, .time = 0, .pt = .{ .x = 0, .y = 0 }, .lPrivate = 0 };
+            try std.testing.expect(app.cancelTabDragForKey(&down));
+            testPostTabMouse(button, c.WM_LBUTTONUP, over_second.x, over_second.y);
+        }
+    }.body);
+}
+
+test "win32 a title prompt about the tab in front closes when that tab moves away" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    try runOnHiddenDesktop(struct {
+        fn body() !void {
+            var fixture: win32.WindowStartTestApp = .{};
+            try fixture.init();
+            defer fixture.deinit();
+            const app = &fixture.app;
+            app.shell_runtime_initialized = true;
+            const setup: TabMoveFixture = .{ .fixture = &fixture };
+            const host = try setup.window(3, false);
+            // The front tab's rename prompt, then the tab leaves.
+            try host.showOverlay(.tab_title, "renamed");
+            try std.testing.expect(host.overlay_mode == .tab_title);
+            try std.testing.expect(try app.moveTabToWindow(host, host.active_tab, .{ .new_window = null }));
+            try std.testing.expect(host.overlay_mode == .none);
+            // A tab behind the front one leaves the prompt alone.
+            try host.showOverlay(.tab_title, "renamed");
+            const behind: usize = if (host.active_tab == 0) 1 else 0;
+            try std.testing.expect(try app.moveTabToWindow(host, behind, .{ .new_window = null }));
+            try std.testing.expect(host.overlay_mode == .tab_title);
+            host.hideOverlay();
         }
     }.body);
 }

@@ -98,7 +98,7 @@ const leaves = .{
         .file = "tab_drag.zig",
         .module = @import("tab_drag.zig"),
         .source = @embedFile("tab_drag.zig"),
-        .pub_decls = 10,
+        .pub_decls = 13,
     },
 };
 

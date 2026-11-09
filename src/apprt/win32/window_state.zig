@@ -269,6 +269,13 @@ fn onCreated(host: *Host, pending: *const Pending) !void {
         window_start.placeTearOff(&pending.plan, occupiedAround(host), pending.drop)
     else
         window_start.place(&pending.plan, occupiedAround(host), null);
+    if (pending.plan.kind == .tear_off) {
+        // Its rect is already in the drop monitor's pixels. The first move
+        // there changes the window's DPI, and `WM_DPICHANGED` applies
+        // Windows' rescaled suggestion of it; the second, at that DPI,
+        // puts it back where `placeTearOff` said.
+        _ = sys.SetWindowPos(hwnd, null, placed.rect.left, placed.rect.top, placed.rect.right - placed.rect.left, placed.rect.bottom - placed.rect.top, placed.flags);
+    }
     if (sys.SetWindowPos(
         hwnd,
         null,

@@ -754,6 +754,8 @@ pub extern "user32" fn GetWindow(hWnd: HWND, uCmd: UINT) callconv(.winapi) ?HWND
 /// The window at the top of `hWnd`'s children, or of the desktop's top-level
 /// windows when null; null when there is none.
 pub extern "user32" fn GetTopWindow(hWnd: ?HWND) callconv(.winapi) ?HWND;
+/// `MDT_EFFECTIVE_DPI` is 0. Windows 8.1 and later.
+pub extern "shcore" fn GetDpiForMonitor(hmonitor: HMONITOR, dpiType: u32, dpiX: *u32, dpiY: *u32) callconv(.winapi) i32;
 /// Returns the previous parent, or null on failure.
 pub extern "user32" fn SetParent(hWndChild: HWND, hWndNewParent: ?HWND) callconv(.winapi) ?HWND;
 

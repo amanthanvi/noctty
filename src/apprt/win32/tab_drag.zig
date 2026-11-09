@@ -55,6 +55,30 @@ pub fn movesWindow(tab_count: usize, quick_terminal: bool) bool {
     return tab_count == 1 and !quick_terminal;
 }
 
+/// How the window move an only tab started ended (`App.finishOnlyTabWindowMove`).
+pub const WindowMoveEnd = struct {
+    /// The window's top-left moved (an Esc puts it back where it was).
+    moved: bool,
+    /// Its size changed: a snap, unless its DPI changed with the monitor.
+    resized: bool,
+    dpi_changed: bool,
+    /// Maximized: a drag to the top edge.
+    zoomed: bool,
+    /// Snapped: half, quarter or a Snap Layouts zone (`IsWindowArranged`).
+    arranged: bool,
+    /// The pointer is over another window's tab strip.
+    over_strip: bool,
+};
+
+/// Whether the tab joins the strip the move ended over. A move that snapped
+/// or maximized the window was that, not a drop, wherever the pointer is.
+pub fn windowMoveMerges(end: WindowMoveEnd) bool {
+    if (!end.over_strip or !end.moved) return false;
+    if (end.zoomed or end.arranged) return false;
+    if (end.resized and !end.dpi_changed) return false;
+    return true;
+}
+
 /// Whether a pointer at client `y` has left the tab strip's band
 /// `[top, bottom)` by more than `margin`, the slack a drag along the strip
 /// gets before it tears off.
@@ -137,6 +161,27 @@ test "a drag stays in its window along the strip and over a split zone, and tear
     try std.testing.expect(movesWindow(1, false));
     try std.testing.expect(!movesWindow(1, true));
     try std.testing.expect(!movesWindow(2, false));
+}
+
+test "the only tab's window move joins another strip only as a plain move" {
+    const plain: WindowMoveEnd = .{ .moved = true, .resized = false, .dpi_changed = false, .zoomed = false, .arranged = false, .over_strip = true };
+    try std.testing.expect(windowMoveMerges(plain));
+    const Case = struct { end: WindowMoveEnd, merges: bool };
+    for ([_]Case{
+        // Not over a strip, or not moved (Esc, or no move at all).
+        .{ .end = .{ .moved = true, .resized = false, .dpi_changed = false, .zoomed = false, .arranged = false, .over_strip = false }, .merges = false },
+        .{ .end = .{ .moved = false, .resized = false, .dpi_changed = false, .zoomed = false, .arranged = false, .over_strip = true }, .merges = false },
+        // Maximized at the top edge, or snapped: that was the move.
+        .{ .end = .{ .moved = true, .resized = true, .dpi_changed = false, .zoomed = true, .arranged = false, .over_strip = true }, .merges = false },
+        .{ .end = .{ .moved = true, .resized = true, .dpi_changed = false, .zoomed = false, .arranged = true, .over_strip = true }, .merges = false },
+        // Resized without `IsWindowArranged` to say so (Windows 10 before
+        // it): a snap all the same.
+        .{ .end = .{ .moved = true, .resized = true, .dpi_changed = false, .zoomed = false, .arranged = false, .over_strip = true }, .merges = false },
+        // Onto a monitor of another DPI the size changes with it: a move.
+        .{ .end = .{ .moved = true, .resized = true, .dpi_changed = true, .zoomed = false, .arranged = false, .over_strip = true }, .merges = true },
+        // Snapped on a monitor of another DPI: still a snap.
+        .{ .end = .{ .moved = true, .resized = true, .dpi_changed = true, .zoomed = false, .arranged = true, .over_strip = true }, .merges = false },
+    }) |case| try std.testing.expectEqual(case.merges, windowMoveMerges(case.end));
 }
 
 test "a drag leaves the strip only past its band and the margin, above or below" {

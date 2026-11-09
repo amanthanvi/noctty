@@ -96,9 +96,9 @@ foreach ($win32TestModuleRoot in $win32TestModuleRoots) {
 # and a quick slot pick, and where a pick opens: its floor is the 6 tests from
 # labels.zig and the 3 open-target tests from win32.zig, 9.
 # tab_drag.zig says where a tab dragged out of its strip goes (tear-off, a
-# move into another window, the only tab's window move): its floor is its 4
-# tests, the drop decision table, the strip band, the insert index and the
-# grab offset.
+# move into another window, the only tab's window move): its floor is its 6
+# tests, the drop decision table, the only tab's merge table, the strip band,
+# the insert index (and past 64 tabs) and the grab offset.
 # overlay_view.zig says what the host overlay says and shows in each mode: its
 # floor is the 24 tests from labels.zig, rewritten against `compose`, `shape`,
 # `nextFocus` and `bannerLine` with the three mode tables as one `shape` table
@@ -119,7 +119,7 @@ $movedWin32TestFloors = [ordered]@{
     'tab_label.zig' = 18
     'profile_pick.zig' = 9
     'overlay_view.zig' = 20
-    'tab_drag.zig' = 4
+    'tab_drag.zig' = 6
 }
 foreach ($movedWin32TestModule in $movedWin32TestFloors.Keys) {
     $movedWin32TestModulePath = @($win32RuntimeModuleFiles | Where-Object {

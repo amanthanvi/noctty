@@ -300,9 +300,9 @@ pub fn plan(kind: Kind, wants: Wants, forwarded: Forwarded, source: ?*const Snap
 
 /// Where a torn-off tab was dropped: the pointer `at`, in screen
 /// coordinates; where the pointer sits in the new window, from its top-left
-/// (`grab`), so the tab lands under it; and the work area of the monitor
-/// under the point.
-pub const Drop = struct { at: POINT, grab: POINT, work: RECT };
+/// (`grab`, in the source window's pixels), so the tab lands under it; and
+/// the work area and DPI of the monitor under the point (0: the source's).
+pub const Drop = struct { at: POINT, grab: POINT, work: RECT, dpi: u32 = 0 };
 
 /// Where the window of a torn-off tab goes (`Kind.tear_off`). It has the
 /// size its source has, or returns to when the source is maximized,
@@ -320,11 +320,19 @@ pub fn placeTearOff(p: *const Plan, occupied: Occupied, drop: ?Drop) Placement {
         workspaceRectToScreen(source.placement.rcNormalPosition, info)
     else
         source.rect;
-    const width = @max(1, normal.right - normal.left);
-    const height = @max(1, normal.bottom - normal.top);
+    var width = @max(1, normal.right - normal.left);
+    var height = @max(1, normal.bottom - normal.top);
     if (drop) |dropped| {
-        const grab_x = std.math.clamp(dropped.grab.x, 0, width - 1);
-        const grab_y = std.math.clamp(dropped.grab.y, 0, height - 1);
+        // On a monitor of another DPI the window keeps its logical size, and
+        // the pointer its logical place in it: both scale by the DPIs before
+        // the rect is fitted to that monitor's work area, so the fit sees the
+        // size the window will have there (window-frame.md; TEAROFF-01).
+        const from = @max(source.monitor.dpi, 1);
+        const to = if (dropped.dpi == 0) from else dropped.dpi;
+        width = @max(1, mulDiv(width, to, from));
+        height = @max(1, mulDiv(height, to, from));
+        const grab_x = std.math.clamp(mulDiv(dropped.grab.x, to, from), 0, width - 1);
+        const grab_y = std.math.clamp(mulDiv(dropped.grab.y, to, from), 0, height - 1);
         return .{
             .rect = fitRectInWork(dropped.at.x - grab_x, dropped.at.y - grab_y, width, height, dropped.work),
             .flags = c.SWP_NOACTIVATE,
@@ -928,6 +936,19 @@ test "win32 a torn-off tab's window opens at its source's normal size, under the
         .{ .source = normal, .drop = null, .rect = testRect(148, 148, 1428, 948) },
         .{ .source = normal, .drop = null, .occupied = &.{.{ .x = 148, .y = 148 }}, .rect = testRect(196, 196, 1476, 996) },
         .{ .source = maximized, .drop = null, .rect = testRect(248, 198, 1048, 798) },
+        // From 144 DPI onto the 96 DPI monitor beside it: two thirds of the
+        // size and of the grab, so 1280x800 is 853x533, under the pointer,
+        // where 1280x800 would have been pushed up to fit the 1032 px work
+        // area and then shrunk away from the pointer.
+        .{ .source = normal, .drop = .{ .at = .{ .x = 4000, .y = 300 }, .grab = .{ .x = 60, .y = 30 }, .work = side.info.rcWork, .dpi = 96 }, .rect = testRect(3960, 280, 4813, 813) },
+        // From 96 DPI onto 144: half again as large.
+        .{
+            .source = .{ .state = .{}, .rect = testRect(3900, 100, 4540, 500), .monitor = side },
+            .drop = .{ .at = .{ .x = 1000, .y = 600 }, .grab = .{ .x = 40, .y = 20 }, .work = big.info.rcWork, .dpi = 144 },
+            .rect = testRect(940, 570, 1900, 1170),
+        },
+        // The same DPI, given: unchanged.
+        .{ .source = normal, .drop = .{ .at = .{ .x = 2000, .y = 1000 }, .grab = .{ .x = 40, .y = 20 }, .work = big.info.rcWork, .dpi = 144 }, .rect = testRect(1960, 980, 3240, 1780) },
     }) |case| {
         const p = plan(.tear_off, .{}, .{}, &case.source, .activate, c.OS_BUILD_WIN11_21H2);
         const placed = placeTearOff(&p, .of(&case.occupied), case.drop);

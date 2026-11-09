@@ -849,9 +849,10 @@ pub const Host = struct {
     /// A tab move asked of this window, run from the message loop
     /// (`c.WM_WINHOSTTY_TAB_MOVE`, `App.runPendingTabMove`).
     pending_tab_move: ?TabMoveRequest = null,
-    /// This window's only tab started a window move (`beginOnlyTabWindowMove`);
-    /// where it ends decides whether the tab joins another window's strip.
-    only_tab_window_move: ?RECT = null,
+    /// This window's only tab started a window move (`beginOnlyTabWindowMove`):
+    /// its rect and DPI then. How the move ends decides whether the tab joins
+    /// another window's strip (`tab_drag.windowMoveMerges`).
+    only_tab_window_move: ?OnlyTabMove = null,
     /// A moved tab is being shown here (`App.moveTabToWindow`): a pane's
     /// `initial_size` from its new DPI's font records its size but does not
     /// resize the window, whose size the move decided (`placeTearOff`).
@@ -3208,28 +3209,34 @@ pub const Host = struct {
         try std.testing.expectEqual(@as(?usize, null), host.tabIndexAtScreenX(x));
     }
 
-    pub fn swapTabs(self: *Host, a: usize, b: usize) void {
-        if (a == b) return;
-        if (a >= self.tabs.items.len or b >= self.tabs.items.len) return;
+    /// Refuses every reorder, quietly, for the test of a refused one: each
+    /// real refusal logs an error, which fails a test.
+    pub var test_swap_refused = false;
+
+    /// Whether the tab moved: a refused reorder leaves every index as it was.
+    pub fn swapTabs(self: *Host, a: usize, b: usize) bool {
+        if (a == b) return false;
+        if (a >= self.tabs.items.len or b >= self.tabs.items.len) return false;
+        if (builtin.is_test and test_swap_refused) return false;
         var shell_prepared: ?win32_shell.runtime.Prepared = null;
         if (self.app.shell_runtime_initialized) shell: {
             const shell_id = self.tabs.items[a].shell_id orelse {
                 log.err("refusing tab drag reorder: shell tab mapping missing", .{});
-                return;
+                return false;
             };
             shell_prepared = self.app.shell_runtime.prepare(.{ .reorder_tab = .{
                 .tab = shell_id,
                 .index = b,
             } }) catch |err| {
                 log.err("refusing tab drag reorder: shell preflight failed err={}", .{err});
-                return;
+                return false;
             };
             break :shell;
         }
         defer if (shell_prepared) |*prepared| prepared.deinit();
         if (!self.tryClearStructuralHistory(.normal)) {
             log.err("refusing tab drag reorder: structural history disposal deferred", .{});
-            return;
+            return false;
         }
 
         const old_active = self.active_tab;
@@ -3242,13 +3249,14 @@ pub const Host = struct {
             self.tabs.insertAssumeCapacity(a, rollback);
             self.active_tab = old_active;
             log.err("tab drag reorder shell commit failed err={}", .{err});
-            return;
+            return false;
         };
         if (shell_prepared) |*prepared| self.app.applyShellEffects(prepared.effects(), .{});
         self.tabs.items[a].clearRedoHistory();
         self.tabs.items[b].clearRedoHistory();
         self.app.auditShellNativeMapping("tab-drag-reorder");
         runUiActionOrLog("tab drag reorder layout failed", self.layout());
+        return true;
     }
 
     /// Hide the tooltip popup if one is up (a tab's title or a chrome button's name).
@@ -3644,6 +3652,8 @@ pub const Host = struct {
 
     /// A tab move asked of a window (`App.requestTabMove`): the tab by its
     /// id in that window, and where it goes.
+    pub const OnlyTabMove = struct { rect: RECT, dpi: u32 };
+
     pub const TabMoveRequest = struct {
         tab_id: u32,
         dest: Dest,
@@ -3797,7 +3807,11 @@ pub const Host = struct {
         var info: MONITORINFO = std.mem.zeroes(MONITORINFO);
         info.cbSize = @sizeOf(MONITORINFO);
         if (sys.GetMonitorInfoW(monitor, &info) == 0) return null;
-        return .{ .at = screen, .grab = .{ .x = grab.x, .y = grab.y }, .work = info.rcWork };
+        var dpi_x: u32 = 0;
+        var dpi_y: u32 = 0;
+        // 0 (unknown) keeps the source's DPI.
+        if (sys.GetDpiForMonitor(monitor, 0, &dpi_x, &dpi_y) < 0) dpi_x = 0;
+        return .{ .at = screen, .grab = .{ .x = grab.x, .y = grab.y }, .work = info.rcWork, .dpi = dpi_x };
     }
 
     /// The pointer moved during a tab drag that passed its threshold: lays
@@ -3837,7 +3851,7 @@ pub const Host = struct {
         self.hideTabDropPreview();
         self.app.endTabDragFeedback();
         if (origin) |from| if (current) |at| {
-            if (from != at and from < self.tabs.items.len and at < self.tabs.items.len) self.swapTabs(at, from);
+            if (from != at and from < self.tabs.items.len and at < self.tabs.items.len) _ = self.swapTabs(at, from);
         };
     }
 
@@ -3856,7 +3870,7 @@ pub const Host = struct {
         if (self.top_level.isFullscreen()) return;
         var rect: RECT = undefined;
         if (sys.GetWindowRect(hwnd, &rect) == 0) return;
-        self.only_tab_window_move = rect;
+        self.only_tab_window_move = .{ .rect = rect, .dpi = sys.GetDpiForWindow(hwnd) };
         const x: u32 = @as(u16, @bitCast(@as(i16, @truncate(screen.x))));
         const y: u32 = @as(u16, @bitCast(@as(i16, @truncate(screen.y))));
         const packed_point: LPARAM = @bitCast(@as(usize, (y << 16) | x));
@@ -3879,6 +3893,9 @@ pub const Host = struct {
         // A prompt one of its terminals raised stays with this window and
         // would answer a terminal that has left it.
         self.cancelConfirmFromTab(&self.tabs.items[index]);
+        // So would a rename of the tab in front, or of its terminal, which
+        // `submitOverlay` applies to the front tab as it is at Enter.
+        if (index == self.active_tab and (self.overlay_mode == .tab_title or self.overlay_mode == .surface_title)) self.hideOverlay();
         self.setHoveredButton(null);
         var tab = self.tabs.orderedRemove(index);
         self.destroyTabButton(&tab);
