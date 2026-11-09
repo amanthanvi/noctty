@@ -179,9 +179,17 @@ pub fn For(comptime Tree: type) type {
             if (extent <= 0) return null;
             const span: f32 = @floatFromInt(extent);
             const min: f32 = @floatFromInt(@max(0, min_px));
+            // The split's ratio now (the start, measured at the press) is
+            // always in the bounds: a pane already under the minimum counts
+            // at its size, through f32 shares that do not round as the f16
+            // slots do, and once put a bound just inside the start, so a
+            // drag toward that pane moved the divider away from the pointer
+            // (Opus on #689: 3 px back for a 1 px drag). `fitRatio` keeps
+            // the real floors either way.
+            const ratio: f32 = s.ratio;
             return .{
-                .lo = @max(0, minExtent(tree, spatial, content, s.left, s.layout, min) / span),
-                .hi = @min(1, 1 - minExtent(tree, spatial, content, s.right, s.layout, min) / span),
+                .lo = @min(ratio, @max(0, minExtent(tree, spatial, content, s.left, s.layout, min) / span)),
+                .hi = @max(ratio, @min(1, 1 - minExtent(tree, spatial, content, s.right, s.layout, min) / span)),
                 .extent = extent,
                 .min_px = min_px,
             };
@@ -223,8 +231,10 @@ pub fn For(comptime Tree: type) type {
         /// `ratio`, unless laying the panes out at it leaves a pane under
         /// the split at `handle` short of its floor along the split's axis
         /// (`min_px`, or its size at `start_ratio` if that was smaller):
-        /// then the ratio steps one f16 at a time toward `start_ratio`,
-        /// where every pane fits. Measured on the real slots
+        /// then the f16 nearest `ratio`, toward `start_ratio`, at which
+        /// every pane fits (the start always does: its floors are its own
+        /// sizes), found by walking up to `walk_steps` and searching past
+        /// that. Measured on the real slots
         /// (`SplitTree.spatial` and the layout's rounding), so it holds at
         /// any depth: the bounds are ratios, and a pane deep in a chain goes
         /// through f16 slot arithmetic at every level. In CodeRabbit's case
@@ -242,18 +252,40 @@ pub fn For(comptime Tree: type) type {
             tree.resizeInPlace(handle, start_ratio);
             var start = try tree.spatial(alloc);
             defer start.deinit(alloc);
+            // Walk toward the start one f16 at a time: the nearest ratio that
+            // fits. Fitting is not monotone at the scale of a pixel (a deep
+            // chain's rounding: a binary search alone stopped a drag at
+            // 0.566 where 0.5995 fits), so the walk is what is exact; it
+            // usually takes a step or two.
             var candidate = ratio;
-            // Each step moves the divider by about one f16 of the split; a
-            // deep chain at its bound needed tens. Past the cap, the start.
             var steps: usize = 0;
-            while (candidate != start_ratio and steps < 4096) : (steps += 1) {
-                tree.resizeInPlace(handle, candidate);
-                var now = try tree.spatial(alloc);
-                defer now.deinit(alloc);
-                if (leavesFit(tree, now, start, content, handle, axis, min_px)) return candidate;
+            while (candidate != start_ratio and steps < walk_steps) : (steps += 1) {
+                if (try fitsAt(alloc, tree, start, content, handle, axis, candidate, min_px)) return candidate;
                 candidate = std.math.nextAfter(f16, candidate, start_ratio);
             }
-            return start_ratio;
+            if (candidate == start_ratio) return start_ratio;
+            // A long way to go (a split a few pixels across): a binary search
+            // for the rest, which always ends on a ratio that fits, since the
+            // start does.
+            // Ratios are in [0, 1], where an f16's bits order as its value.
+            var failing: i32 = @as(u16, @bitCast(candidate));
+            var fitting: i32 = @as(u16, @bitCast(start_ratio));
+            while (@abs(fitting - failing) > 1) {
+                const middle = failing + @divTrunc(fitting - failing, 2);
+                const probe: f16 = @bitCast(@as(u16, @intCast(middle)));
+                if (try fitsAt(alloc, tree, start, content, handle, axis, probe, min_px)) fitting = middle else failing = middle;
+            }
+            return @bitCast(@as(u16, @intCast(fitting)));
+        }
+
+        /// How far `fitRatio` walks before it searches.
+        const walk_steps = 256;
+
+        fn fitsAt(alloc: std.mem.Allocator, tree: *Tree, start: Spatial, content: Rect, handle: Handle, axis: Layout, candidate: f16, min_px: i32) std.mem.Allocator.Error!bool {
+            tree.resizeInPlace(handle, candidate);
+            var now = try tree.spatial(alloc);
+            defer now.deinit(alloc);
+            return leavesFit(tree, now, start, content, handle, axis, min_px);
         }
 
         fn leavesFit(tree: *const Tree, now: Spatial, start: Spatial, content: Rect, handle: Handle, axis: Layout, min_px: i32) bool {
@@ -267,9 +299,14 @@ pub fn For(comptime Tree: type) type {
         }
 
         /// A slot's extent along `axis` in pixels, rounded as the layout
-        /// rounds a pane's width or height.
+        /// rounds a pane's width or height and clamped to the content's far
+        /// edges, as `win32_layout.splitSurfacePlacement` clamps the pane:
+        /// a pane's rounding can reach a pixel past the content, which the
+        /// layout takes off (Opus on #689: 39 px panes at the far edge).
         fn slotPixels(content: Rect, slot: anytype, axis: Layout) i32 {
-            const rect = slotRect(content, slot);
+            var rect = slotRect(content, slot);
+            rect.right = @min(rect.right, content.right);
+            rect.bottom = @min(rect.bottom, content.bottom);
             return switch (axis) {
                 .horizontal => rect.right - rect.left,
                 .vertical => rect.bottom - rect.top,
@@ -314,7 +351,9 @@ pub fn For(comptime Tree: type) type {
         /// without any pane in it getting smaller than `min_px`, given the
         /// ratios inside it (a drag of an outer divider scales them all). A
         /// pane that is already smaller counts at its size in `spatial`, so a
-        /// layout the keyboard made never blocks a drag or jumps on it.
+        /// layout the keyboard made does not block a drag. The shares are
+        /// f32 while the slots are f16, so the result can miss the start by
+        /// a hair; `ratioBounds` keeps the start inside the bounds.
         pub fn minExtent(tree: *const Tree, spatial: Spatial, content: Rect, handle: Handle, axis: Layout, min_px: f32) f32 {
             if (handle.idx() >= tree.nodes.len or handle.idx() >= spatial.slots.len) return 0;
             return switch (tree.nodes[handle.idx()]) {
@@ -773,15 +812,53 @@ test "pane divider: a deep chain keeps every pane at its floor at the bound (Cod
     try testing.expectEqual(@as(usize, 0), short);
 }
 
-fn handleOfViewPtr(tree: *const TestTree, view: *const TestView) TestTree.Node.Handle {
-    var it = tree.iterator();
-    while (it.next()) |entry| {
-        if (entry.view.label.ptr == view.label.ptr and entry.view == view) return entry.handle;
+test "pane divider: a pane at the content's far edge keeps its floor as the layout places it" {
+    // The layout clamps a pane to the content's far edge
+    // (`win32_layout.splitSurfacePlacement`), where its slot's own rounding
+    // can reach one pixel past it. [A | (B | C)] with the root at its upper
+    // bound, every width from 900 to 4000 px: each pane as the layout
+    // places it, with its pixels of the gap, keeps its floor (C, at the far
+    // edge, came out at 39 px from 950 px on).
+    var views = [_]TestView{ .{ .label = "A" }, .{ .label = "B" }, .{ .label = "C" } };
+    var tree = try buildTree(views[0..2], &.{.{ .at = .root, .direction = .right, .ratio = 0.5 }});
+    defer tree.deinit();
+    {
+        var inserted = try TestTree.init(testing.allocator, &views[2]);
+        defer inserted.deinit();
+        const next = try tree.split(testing.allocator, handleOfView(&tree, "B"), .right, 0.5, &inserted);
+        tree.deinit();
+        tree = next;
     }
-    unreachable;
+    var short: usize = 0;
+    var width: i32 = 900;
+    while (width <= 4000) : (width += 1) {
+        const content: Rect = .{ .left = 0, .top = 0, .right = width, .bottom = 300 };
+        tree.resizeInPlace(.root, 0.5);
+        var start = try tree.spatial(testing.allocator);
+        defer start.deinit(testing.allocator);
+        const found = Dividers.divider(&tree, start, content, .root, 3).?;
+        const bounds = Dividers.ratioBounds(&tree, start, content, found, 40).?;
+        const ratio = try Dividers.stepRatio(testing.allocator, &tree, content, found, 2.0, bounds, 0.5, 40);
+        tree.resizeInPlace(.root, ratio);
+        var now = try tree.spatial(testing.allocator);
+        defer now.deinit(testing.allocator);
+        var it = tree.iterator();
+        while (it.next()) |entry| {
+            const slot = now.slots[entry.handle.idx()];
+            const placed = win32_layout.splitSurfacePlacement(content, .{
+                .x = @floatCast(slot.x),
+                .y = @floatCast(slot.y),
+                .width = @floatCast(slot.width),
+                .height = @floatCast(slot.height),
+            }, true, false, 0).pane_rect;
+            const gaps: i32 = @as(i32, @intFromBool(placed.left > content.left)) + @intFromBool(placed.right < content.right);
+            if (placed.width() + gaps < 40) short += 1;
+        }
+    }
+    try testing.expectEqual(@as(usize, 0), short);
 }
 
-test "pane divider: a pane already below the minimum keeps its size and does not jump" {
+test "pane divider: a pane already below the minimum keeps its size" {
     // The keyboard `resize_split` clamps only to 0..1: A is 16 px of 800.
     var views = [_]TestView{ .{ .label = "A" }, .{ .label = "B" } };
     var tree = try buildTree(&views, &.{.{ .at = .root, .direction = .right, .ratio = 0.02 }});

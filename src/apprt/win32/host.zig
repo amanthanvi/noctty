@@ -655,6 +655,9 @@ pub const Host = struct {
     /// Test-only: the content rectangle `paneDividerContent` reports for a
     /// host with no window, so tests can drive `handlePaneDividerMessage`.
     test_pane_divider_content: ?RECT = null,
+    /// Test-only: makes `paneDividerPosition` fail, as when its slots
+    /// cannot be allocated.
+    test_pane_divider_lookup_fails: bool = false,
     overlay_mode: HostOverlayMode = .none,
     /// Surface a title prompt's text was last filled from, while
     /// `overlay_view.shape(overlay_mode).follows_active_surface`, so the
@@ -4534,6 +4537,10 @@ pub const Host = struct {
         }
 
         fn uninstall() void {
+            for (panes, previous) |pane, old| {
+                const window = pane orelse continue;
+                _ = sys.SetWindowLongPtrW(window, c.GWLP_WNDPROC, @as(LONG_PTR, @intCast(@intFromPtr(old))));
+            }
             panes = .{ null, null, null };
             surfaces = .{ null, null, null };
         }
@@ -11140,7 +11147,7 @@ pub const Host = struct {
         }
         // Read on every step, not only when the ratio moves: the same ratio
         // lands on another pixel once the panes' width changes.
-        drag.off_start = ratio != drag.start_ratio and !self.paneDividerOnStartPixel(tab, drag.*, content);
+        drag.off_start = self.paneDividerOffStart(tab, drag.*, content);
         if (changed) self.layoutPaneDividerStep();
     }
 
@@ -11193,6 +11200,7 @@ pub const Host = struct {
 
     /// Where the divider at `handle` sits in `content`, along its axis.
     fn paneDividerPosition(self: *Host, tab: *Tab, handle: SplitTreeSurface.Node.Handle, content: RECT) ?i32 {
+        if (builtin.is_test and self.test_pane_divider_lookup_fails) return null;
         var fallback = std.heap.stackFallback(2048, self.app.core_app.alloc);
         const alloc = fallback.get();
         var spatial = tab.tree.spatial(alloc) catch return null;
@@ -11205,13 +11213,29 @@ pub const Host = struct {
     /// `content`: both positions come from the same layout code, so this is
     /// exact where comparing ratios is not (f16 holds no 1 px step on a wide
     /// window, and a stationary click on an odd width rounds off the ratio).
-    fn paneDividerOnStartPixel(self: *Host, tab: *Tab, drag: PaneDividerDrag, content: RECT) bool {
+    /// Null when a position could not be computed (its slots could not be
+    /// allocated): nothing is confirmed, and callers keep the last reading
+    /// (`paneDividerOffStart`).
+    fn paneDividerOnStartPixel(self: *Host, tab: *Tab, drag: PaneDividerDrag, content: RECT) ?bool {
         const now = tab.tree.nodes[drag.handle.idx()].split.ratio;
         defer tab.tree.resizeInPlace(drag.handle, now);
-        const now_position = self.paneDividerPosition(tab, drag.handle, content) orelse return false;
+        const now_position = self.paneDividerPosition(tab, drag.handle, content) orelse return null;
         tab.tree.resizeInPlace(drag.handle, drag.start_ratio);
-        const start_position = self.paneDividerPosition(tab, drag.handle, content) orelse return false;
+        const start_position = self.paneDividerPosition(tab, drag.handle, content) orelse return null;
         return now_position == start_position;
+    }
+
+    /// Whether the drag's divider sits off its start pixel now, or, when
+    /// the position lookup fails, the last confirmed reading: an
+    /// unconfirmed position must not count as a move, since a move decides
+    /// that history (and the sessions it keeps) goes.
+    fn paneDividerOffStart(self: *Host, tab: *Tab, drag: PaneDividerDrag, content: RECT) bool {
+        if (tab.tree.nodes[drag.handle.idx()].split.ratio == drag.start_ratio) return false;
+        const on = self.paneDividerOnStartPixel(tab, drag, content) orelse {
+            log.warn("pane divider position lookup failed; keeping the last start-pixel reading", .{});
+            return drag.off_start;
+        };
+        return !on;
     }
 
     /// End the drag where it is. A drag is one change of the split, so it
@@ -11235,7 +11259,7 @@ pub const Host = struct {
             return;
         };
         if (tab.tree.nodes[drag.handle.idx()].split.ratio == drag.start_ratio) return;
-        if (content) |area| if (self.paneDividerOnStartPixel(tab, drag, area)) {
+        if (content) |area| if (!self.paneDividerOffStart(tab, drag, area)) {
             tab.tree.resizeInPlace(drag.handle, drag.start_ratio);
             self.layoutPaneDividerStep();
             return;
@@ -11293,8 +11317,7 @@ pub const Host = struct {
         const drag = if (self.pane_divider_drag) |*active| active else return;
         const tab = self.paneDividerDragTab(drag.*) orelse return;
         const content = self.paneDividerContent() orelse return;
-        const ratio = tab.tree.nodes[drag.handle.idx()].split.ratio;
-        drag.off_start = ratio != drag.start_ratio and !self.paneDividerOnStartPixel(tab, drag.*, content);
+        drag.off_start = self.paneDividerOffStart(tab, drag.*, content);
     }
 
     fn releasePaneDividerCapture(self: *Host) void {

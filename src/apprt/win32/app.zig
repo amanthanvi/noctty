@@ -659,6 +659,15 @@ test "PKG32 tabClosedMessage falls back for layout-dependent physical and text o
 /// (`ImmGetVirtualKey`), which no test can make an IME produce.
 pub var test_ime_original_key: ?u8 = null;
 
+/// Test-only: stands in for `ImmGetVirtualKey`, so a test can see which
+/// window the loop's lookup asks about and answer as an IME would.
+pub var test_imm_get_virtual_key: ?*const fn (HWND) UINT = null;
+
+fn immGetVirtualKey(hwnd: HWND) UINT {
+    if (@import("builtin").is_test) if (test_imm_get_virtual_key) |lookup| return lookup(hwnd);
+    return sys.ImmGetVirtualKey(hwnd);
+}
+
 pub const App = struct {
     pub const must_draw_from_app_thread = true;
     pub const renderer_pacing_clock = win32_power.renderer_clock;
@@ -1781,43 +1790,58 @@ pub const App = struct {
                 }
             }
 
-            if (msg.message == c.WM_HOTKEY) {
-                _ = self.takeGlobalHotkey(@intCast(msg.wParam));
-                continue;
-            }
-
-            if (self.paneDividerDragKeyFrom(msg.hwnd, msg.message, msg.wParam, msg.lParam)) {
-                try self.tickCoreApp();
-                continue;
-            }
-
-            // The settings surface is a modeless native dialog. Route its
-            // keyboard messages through the system dialog manager so Tab,
-            // Shift+Tab, arrow-key radio navigation, and default buttons use
-            // standard Win32 accessibility semantics.
-            if (self.settings_window.hwnd) |settings_hwnd| {
-                // The dialog manager consumes Tab and the arrow keys here and
-                // never dispatches them to the control that gains focus, so
-                // the settings window learns about keyboard navigation from
-                // the pump, not from its controls.
-                self.settings_window.noteInputMessage(msg.hwnd, msg.message, msg.wParam);
-                // Ctrl+S is not a dialog-manager key; take it before the
-                // manager sees it. Tab and the arrows still go to the manager.
-                if (self.settings_window.handleAccelerator(msg.hwnd, msg.message, msg.wParam, msg.lParam)) {
+            switch (self.routeLoopMessage(&msg)) {
+                .taken => continue,
+                .taken_tick => {
                     try self.tickCoreApp();
                     continue;
-                }
-                if (sys.IsDialogMessageW(settings_hwnd, &msg) != 0) {
-                    try self.tickCoreApp();
-                    continue;
-                }
+                },
+                .dispatched => if (try self.finishLoopStep()) break,
             }
-
-            _ = sys.TranslateMessage(&msg);
-            _ = sys.DispatchMessageW(&msg);
-
-            if (try self.finishLoopStep()) break;
         }
+    }
+
+    pub const LoopRoute = enum {
+        /// Taken before translation; the loop goes on to the next message.
+        taken,
+        /// Taken before translation; the loop ticks the core first.
+        taken_tick,
+        /// Translated and dispatched.
+        dispatched,
+    };
+
+    /// What the loop does with a message once its thread timers had theirs:
+    /// global hotkeys, the keys of a split divider drag, the Settings
+    /// window's dialog manager, and otherwise `TranslateMessage` and
+    /// `DispatchMessageW`. Everything before translation sees the message
+    /// with its window (`msg.hwnd`), as an IME's key lookup needs.
+    pub fn routeLoopMessage(self: *App, msg: *MSG) LoopRoute {
+        if (msg.message == c.WM_HOTKEY) {
+            _ = self.takeGlobalHotkey(@intCast(msg.wParam));
+            return .taken;
+        }
+
+        if (self.paneDividerDragKeyFrom(msg.hwnd, msg.message, msg.wParam, msg.lParam)) return .taken_tick;
+
+        // The settings surface is a modeless native dialog. Route its
+        // keyboard messages through the system dialog manager so Tab,
+        // Shift+Tab, arrow-key radio navigation, and default buttons use
+        // standard Win32 accessibility semantics.
+        if (self.settings_window.hwnd) |settings_hwnd| {
+            // The dialog manager consumes Tab and the arrow keys here and
+            // never dispatches them to the control that gains focus, so
+            // the settings window learns about keyboard navigation from
+            // the pump, not from its controls.
+            self.settings_window.noteInputMessage(msg.hwnd, msg.message, msg.wParam);
+            // Ctrl+S is not a dialog-manager key; take it before the
+            // manager sees it. Tab and the arrows still go to the manager.
+            if (self.settings_window.handleAccelerator(msg.hwnd, msg.message, msg.wParam, msg.lParam)) return .taken_tick;
+            if (sys.IsDialogMessageW(settings_hwnd, msg) != 0) return .taken_tick;
+        }
+
+        _ = sys.TranslateMessage(msg);
+        _ = sys.DispatchMessageW(msg);
+        return .dispatched;
     }
 
     /// Keys while a split divider drag holds the mouse, taken in the loop
@@ -1857,13 +1881,16 @@ pub const App = struct {
                 const host = self.paneDividerDragHost() orelse return false;
                 if (repeat) return true;
                 self.pane_divider_held_keys.set(key);
-                self.pane_divider_held_vks[key] = paneDividerHeldVirtualKey(paneDividerOriginalKey(hwnd, @truncate(wParam), lParam), lParam);
-                // With an IME composing, Windows hands the window
-                // VK_PROCESSKEY for every key, Esc included; the scan code
-                // still says which, and its release may come as either
-                // virtual key, on the same physical key.
                 const vk: u8 = @truncate(wParam);
-                const ime_escape = vk == c.VK_PROCESSKEY and ((@as(usize, @bitCast(lParam)) >> 16) & 0xFF) == escape_scan_code;
+                const original = paneDividerOriginalKey(hwnd, vk, lParam);
+                self.pane_divider_held_vks[key] = paneDividerHeldVirtualKey(original, lParam);
+                // With an IME composing, Windows hands the window
+                // VK_PROCESSKEY for every key, Esc included. Which key it was
+                // is the IME's (`paneDividerOriginalKey`): the key a layout
+                // puts on any scan code, Esc included, and the scan code of
+                // Esc only when neither the IME nor the layout says.
+                const ime_escape = vk == c.VK_PROCESSKEY and (original == c.VK_ESCAPE or
+                    (original == c.VK_PROCESSKEY and ((@as(usize, @bitCast(lParam)) >> 16) & 0xFF) == escape_scan_code));
                 if (vk == c.VK_ESCAPE or ime_escape) host.cancelPaneDividerDrag();
                 return true;
             },
@@ -1907,7 +1934,7 @@ pub const App = struct {
         if (vk != c.VK_PROCESSKEY) return vk;
         if (@import("builtin").is_test) if (test_ime_original_key) |key| return key;
         if (hwnd) |window| {
-            const original: u8 = @truncate(sys.ImmGetVirtualKey(window));
+            const original: u8 = @truncate(immGetVirtualKey(window));
             if (original != 0 and original != c.VK_PROCESSKEY) return original;
         }
         const bits: usize = @bitCast(lParam);
