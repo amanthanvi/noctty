@@ -220,7 +220,14 @@ public static class Tt {
 }
 '@
 if (-not $Driver) {
+    # A run directory that exists is refused before anything runs, and
+    # nothing in it is touched: the cleanup below is only for the directory
+    # this invocation makes (Invoke-LocalHiddenDriver creates it).
+    $evidence=[IO.Path]::GetFullPath($Run)
+    if(Test-Path -LiteralPath $evidence) { throw 'Run directory must be new.' }
+    $createdRun=$false
     try {
+        $createdRun=$true
         Invoke-LocalHiddenDriver -Script $PSCommandPath -Bin $Bin -Run $Run -TimeoutSeconds $DriverTimeoutSeconds `
             -ExpectedStartupHash $ExpectedStartupHash -ExpectedStartupModified $ExpectedStartupModified `
             -DesktopPrefix 'noctty-tearoff-' -Label 'Hidden tab tear-off' -PassDesktopName -GuardClipboard `
@@ -228,9 +235,12 @@ if (-not $Driver) {
     } finally {
         # The driver's job has stopped by now, every console helper with it:
         # a dump a helper that would not exit left (its marker text) goes.
-        $evidence=[IO.Path]::GetFullPath($Run)
-        if(Test-Path -LiteralPath $evidence) {
-            Get-ChildItem -LiteralPath $evidence -Filter 'attach-*' -File -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+        # Only the names `Pane-Consoles` gives its dumps, only in this run's
+        # own directory.
+        if($createdRun -and (Test-Path -LiteralPath $evidence)) {
+            Get-ChildItem -LiteralPath $evidence -File -ErrorAction SilentlyContinue |
+                Where-Object { $_.Name -match '^attach-[0-9a-f]{8}\.txt(\.log)?$' } |
+                Remove-Item -Force -ErrorAction SilentlyContinue
         }
     }
     exit
