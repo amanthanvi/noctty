@@ -8203,7 +8203,7 @@ pub const App = struct {
         const IsWindowArranged = *const fn (HWND) callconv(.winapi) BOOL;
         const user32 = sys.GetModuleHandleW(std.unicode.utf8ToUtf16LeStringLiteral("user32.dll"));
         const proc = sys.GetProcAddress(@ptrCast(user32), "IsWindowArranged") orelse return false;
-        const arranged: IsWindowArranged = @ptrCast(proc);
+        const arranged: IsWindowArranged = @ptrCast(@alignCast(proc));
         return arranged(hwnd) != 0;
     }
 
