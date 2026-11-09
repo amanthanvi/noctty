@@ -1144,7 +1144,8 @@ fn runChainOnAll(
 /// Whether an app-wide action (`all:`, `global:`) reaches `surface`: not
 /// when the runtime keeps it out of every live tab, as Win32 does a pane
 /// detached for undo, hidden with its program still running
-/// (`receivesAppWideActions` on the runtime surface).
+/// (`receivesAppWideActions` on the runtime surface, which also gates every
+/// binding through `Surface.CloseToken.attached`).
 fn receivesAppWideActions(surface: *apprt.Surface) bool {
     if (comptime @hasDecl(apprt.Surface, "receivesAppWideActions")) {
         return surface.receivesAppWideActions();

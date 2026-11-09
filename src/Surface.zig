@@ -8462,9 +8462,12 @@ fn dispatchLeaf(
     // A key queued for a pane that is no longer in a live tab (an `undo`
     // detached it for redo before the key was handled) runs no action: one
     // that clears redo (`reset`, a single action too) would dispose the
-    // pane while it runs, and what follows would read it freed. The key is
-    // swallowed as a consumed one, its release with it, and nothing else
-    // changes.
+    // pane while it runs, and what follows would read it freed. No action
+    // runs, no one-shot table is deactivated, and the key state is not
+    // reset for one; the key is then handled as a consumed one (`.consumed`
+    // in `maybeHandleBinding`), which drops a pending sequence and sets
+    // `last_trigger` and the consumed press, so its release is swallowed
+    // too.
     if (!target.closeToken().attached()) {
         log.debug("key binding refused: the surface is in no live tab", .{});
         return .{ .done = .{ .outcome = .consumed, .reached = &.{} } };

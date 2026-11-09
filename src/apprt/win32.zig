@@ -18197,6 +18197,10 @@ test "win32 an open Settings window keeps an idle embedding server" {
     // The last terminal window is gone; the handoff server (none here) is
     // idle; Settings is open, perhaps with unsaved changes.
     app.embedding_mode = true;
+    // Embedding mode's exit asks only the handoff server, so quitting is
+    // off: a close that started the quit timer instead of deciding again
+    // through `afterLastWindow` (main's callback) then keeps the process.
+    app.config.@"quit-after-last-window-closed" = false;
     app.running = true;
     defer app.running = false;
     app.settings_window.hwnd = @ptrFromInt(0x1000);
