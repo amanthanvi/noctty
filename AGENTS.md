@@ -375,9 +375,11 @@ that govern each symbol you change, or that none does.
   during a drag: `App.takeGlobalHotkey`), the gaps and slot rounding they find
   (`win32_layout.zig`: `splitSurfacePlacement`, `roundedSlotPixel`), the tree
   identity a drag checks (`SplitTree.generation` in
-  `src/datastruct/split_tree.zig`), the +0 every ratio enters the tree as
-  (`SplitTree.canonicalRatio`, which the session restore's
-  `buildRestoredSessionSplitTree` also takes) and the keyboard
+  `src/datastruct/split_tree.zig`), a ratio of -0 entering the tree as
+  +0, every other ratio as given (`SplitTree.canonicalRatio`, which the
+  session restore's `buildRestoredSessionSplitTree` also takes), the one
+  synchronous paint a drag step makes
+  (`surface_presentation.paneDividerStepRepaintMode`) and the keyboard
   `resize_split` they match (`App.resizeSplitFallback`).
 - [input.md](docs/agents/log/input.md): `win32/input.zig` and key messages
   (`WM_KEYDOWN`/`WM_CHAR`/`WM_SYSCHAR`, dead keys, `ToUnicode`, non-Latin
