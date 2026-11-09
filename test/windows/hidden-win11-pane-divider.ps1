@@ -54,6 +54,23 @@ public static class Pd {
     [DllImport("user32.dll")] static extern IntPtr SendMessageTimeoutW(IntPtr h, uint m, IntPtr w, IntPtr l, uint flags, uint ms, out IntPtr result);
     [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int show);
     [DllImport("user32.dll")] static extern bool GetGUIThreadInfo(int thread, ref GuiThreadInfo info);
+    [DllImport("user32.dll")] static extern bool AttachThreadInput(int from, int to, bool attach);
+    [DllImport("user32.dll")] static extern bool SetKeyboardState(byte[] state);
+    [DllImport("user32.dll")] static extern short GetAsyncKeyState(int key);
+    [DllImport("kernel32.dll")] static extern int GetCurrentThreadId();
+    // Clears the keyboard state of the UI thread that owns `h`, so a posted
+    // key reads no modifier the person at the real keyboard holds: this
+    // thread joins that thread's input queue for the call, no input is sent.
+    public static void ClearKeys(IntPtr h) {
+        int pid; int tid = GetWindowThreadProcessId(h, out pid); int me = GetCurrentThreadId();
+        if (!AttachThreadInput(me, tid, true)) throw new Exception("AttachThreadInput failed");
+        try { if (!SetKeyboardState(new byte[256])) throw new Exception("SetKeyboardState failed"); }
+        finally { AttachThreadInput(me, tid, false); }
+    }
+    // Whether Shift, Ctrl or Alt is down at the real keyboard now.
+    public static bool RealModifierDown() {
+        return (GetAsyncKeyState(0x10) & 0x8000) != 0 || (GetAsyncKeyState(0x11) & 0x8000) != 0 || (GetAsyncKeyState(0x12) & 0x8000) != 0;
+    }
     public static bool Visible(IntPtr h) { return IsWindowVisible(h); }
     public static uint Dpi(IntPtr h) { return GetDpiForWindow(h); }
     static IntPtr Pos(int x, int y) { return new IntPtr(((y & 0xFFFF) << 16) | (x & 0xFFFF)); }
@@ -112,7 +129,8 @@ public static class Pd {
 
 # The console reader runs in its own process: AttachConsole changes the
 # console of the whole calling process. It writes "<columns> <rows>" of the
-# shell's visible window, nothing of the screen's contents.
+# shell's visible window, or with "input" the number of Esc key records waiting
+# in its console (read, never taken), nothing of the screen's contents.
 $script:ConsoleSizeSource = @'
 using System;
 using System.IO;
@@ -126,10 +144,28 @@ public static class PaneDividerConsoleSize {
     [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)] static extern IntPtr CreateFileW(string n, uint a, uint s, IntPtr sa, uint d, uint f, IntPtr t);
     [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr h);
     [DllImport("kernel32.dll", SetLastError = true)] static extern bool GetConsoleScreenBufferInfo(IntPtr h, out CSBI i);
+    [StructLayout(LayoutKind.Explicit, Size = 20)] struct INPUT_RECORD { [FieldOffset(0)] public ushort EventType; [FieldOffset(4)] public int KeyDown; [FieldOffset(10)] public ushort VirtualKeyCode; }
+    [DllImport("kernel32.dll", SetLastError = true)] static extern bool PeekConsoleInputW(IntPtr h, [Out] INPUT_RECORD[] buffer, uint length, out uint read);
     public static int Main(string[] args) {
         string text; int rc = 0;
         FreeConsole();
         if (!AttachConsole(uint.Parse(args[0]))) { text = "ERROR attach " + Marshal.GetLastWin32Error(); rc = 4; }
+        else if (args.Length > 2 && args[2] == "input") {
+            // The input records waiting in the console, which a program that
+            // does not read its input (ping) leaves there. Read, never taken.
+            IntPtr h = CreateFileW("CONIN$", 0xC0000000, 3, IntPtr.Zero, 3, 0, IntPtr.Zero);
+            // Only Esc key records count: a resize or a focus change queues
+            // records of its own.
+            var records = new INPUT_RECORD[4096]; uint n;
+            if (h == new IntPtr(-1)) { text = "ERROR conin " + Marshal.GetLastWin32Error(); rc = 5; }
+            else if (!PeekConsoleInputW(h, records, (uint)records.Length, out n)) { text = "ERROR peek " + Marshal.GetLastWin32Error(); rc = 6; CloseHandle(h); }
+            else {
+                int escapes = 0;
+                for (int i = 0; i < n; i++) if (records[i].EventType == 1 && records[i].VirtualKeyCode == 0x1B) escapes++;
+                text = escapes.ToString(); CloseHandle(h);
+            }
+            FreeConsole();
+        }
         else {
             IntPtr h = CreateFileW("CONOUT$", 0xC0000000, 3, IntPtr.Zero, 3, 0, IntPtr.Zero);
             CSBI info;
@@ -156,16 +192,24 @@ if (-not $Driver) {
 $script:checks = [Collections.Generic.List[object]]::new()
 $script:samples = [Collections.Generic.List[object]]::new()
 $script:processes = [Collections.Generic.List[object]]::new()
+$script:interfered = [Collections.Generic.List[int]]::new()
 $desktopPath = "WinSta0\$DesktopName"
 $runClass = 'noctty-test-panediv-' + [guid]::NewGuid().ToString('N').Substring(0,8)
 $tools = Join-Path $Run 'tools'; [void](New-Item -ItemType Directory -Path $tools)
 $sizeExe = Join-Path $tools 'pane-divider-console-size.exe'
 # PowerShell 7's Add-Type cannot write a console executable; Windows
 # PowerShell 5.1 can. It runs hidden, with no console window of its own.
+# The paths reach it as arguments of a script, never inside a command
+# string, so a quote in the run directory cannot break the command.
 $sizeSource = Join-Path $tools 'pane-divider-console-size.cs'
 [IO.File]::WriteAllText($sizeSource, $script:ConsoleSizeSource)
+$compileScript = Join-Path $tools 'pane-divider-compile.ps1'
+[IO.File]::WriteAllText($compileScript, (@(
+    'param([string] $Source, [string] $Output)'
+    'Add-Type -TypeDefinition ([IO.File]::ReadAllText($Source)) -OutputAssembly $Output -OutputType ConsoleApplication'
+) -join "`r`n"))
 $compile = [Diagnostics.ProcessStartInfo]::new((Join-Path ([Environment]::GetFolderPath('System')) 'WindowsPowerShell\v1.0\powershell.exe'))
-foreach ($arg in @('-NoProfile', '-NonInteractive', '-Command', ("Add-Type -TypeDefinition ([IO.File]::ReadAllText('{0}')) -OutputAssembly '{1}' -OutputType ConsoleApplication" -f $sizeSource, $sizeExe))) { $compile.ArgumentList.Add($arg) }
+foreach ($arg in @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $compileScript, $sizeSource, $sizeExe)) { $compile.ArgumentList.Add($arg) }
 $compile.UseShellExecute = $false; $compile.CreateNoWindow = $true
 $compile.RedirectStandardOutput = $true; $compile.RedirectStandardError = $true
 $compiler = [Diagnostics.Process]::Start($compile)
@@ -199,6 +243,25 @@ function Console-Size([int]$ShellPid) {
     if ($text -notmatch '^(\d+) (\d+)$') { throw "Console size reader failed: $text" }
     return @{ Columns = [int]$Matches[1]; Rows = [int]$Matches[2] }
 }
+function Console-Input([int]$ShellPid) {
+    $out = Join-Path $tools ("input-{0}-{1}.txt" -f $ShellPid, [guid]::NewGuid().ToString('N').Substring(0,6))
+    $psi = [Diagnostics.ProcessStartInfo]::new($sizeExe)
+    foreach ($arg in @([string]$ShellPid, $out, 'input')) { $psi.ArgumentList.Add($arg) }
+    $psi.UseShellExecute = $false; $psi.CreateNoWindow = $true
+    $psi.RedirectStandardOutput = $true; $psi.RedirectStandardError = $true
+    $p = [Diagnostics.Process]::Start($psi)
+    if (-not $p.WaitForExit(10000)) { throw 'Console input reader timed out.' }
+    $text = [IO.File]::ReadAllText($out)
+    if ($text -notmatch '^(\d+)$') { throw "Console input reader failed: $text" }
+    return [int]$Matches[1]
+}
+# A posted key, with the target's keyboard state cleared first; a modifier
+# held at the real keyboard is recorded, since it marks the step interfered.
+function Post-Key($target, [int]$Key) {
+    [Pd]::ClearKeys($target)
+    if ([Pd]::RealModifierDown()) { $script:interfered.Add($Key) }
+    [Pd]::Key($target, $Key)
+}
 function Wait-Panes($h, [int]$Count) {
     if (-not (Wait-Until { (Panes $h).Count -eq $Count } 15)) { throw "Expected $Count visible panes." }
     Start-Sleep -Milliseconds 1200
@@ -221,7 +284,9 @@ try {
     $config = Join-Path $dir 'case.ghostty'
     @("working-directory = $dir", 'single-instance = false', 'window-save-state = never',
       'copy-on-select = false', 'clipboard-read = deny', 'clipboard-write = deny',
-      "command = direct:$cmd /D", 'shell-integration = none', 'confirm-close-surface = false',
+      "initial-command = direct:$cmd /D /K for /L %i in (1,1,150) do @echo scrollback line %i",
+      "command = direct:$cmd /D /C $(Join-Path ([Environment]::GetFolderPath('System')) 'PING.EXE') -n 3600 127.0.0.1",
+      'shell-integration = none', 'confirm-close-surface = false',
       'window-width = 140', 'window-height = 40',
       'keybind = f13=new_split:right', 'keybind = f14=new_split:down', 'keybind = f15=toggle_split_zoom') | Set-Content -LiteralPath $config
     $exe = Join-Path $dir 'noctty.exe'
@@ -236,7 +301,7 @@ try {
     $script:samples.Add(@{ Step = 'start'; Dpi = $dpi; Margin = $margin; MinPane = $min })
 
     # Two panes side by side.
-    [Pd]::Key((Key-Target $h), $Keys.SplitRight)
+    Post-Key (Key-Target $h) $Keys.SplitRight
     Wait-Panes $h 2
     $p = Panes $h; $left = $p[0]; $right = $p[1]
     $gap = $right.Left - $left.Right
@@ -249,8 +314,9 @@ try {
 
     # The hit zone. Inside it the pane answers HTTRANSPARENT, and the host,
     # asked next as real input would, answers HTCLIENT; outside it the pane
-    # keeps the mouse. The left pane's scrollbar band keeps it when it has
-    # scrollback, which a fresh cmd does not.
+    # keeps the mouse. The left pane has 150 lines of scrollback, so its
+    # overlay scrollbar's band (10 DIP at its right edge) keeps the mouse
+    # even inside the divider's zone; the right pane has none at its left.
     $inRight = $right.Left + $margin - 1; $pastRight = $right.Left + $margin
     $inLeft = $left.Right - $margin; $pastLeft = $left.Right - $margin - 1
     $codes = @{
@@ -262,7 +328,7 @@ try {
     $script:samples.Add(@{ Step = 'hit-zone'; Codes = $codes; Under = @{ Gap = [int64][Pd]::Under($h, $d, $y); RightIn = [int64][Pd]::Under($h, $inRight, $y); Center = [int64][Pd]::Under($h, $right.Left + 100, $y) } })
     Check 'hit zone: the right pane leaves its first margin columns to the host' ($codes.RightIn -eq $HTTRANSPARENT) $HTTRANSPARENT $codes.RightIn
     Check 'hit zone: the right pane keeps the column past the margin' ($codes.RightPast -eq $HTCLIENT) $HTCLIENT $codes.RightPast
-    Check 'hit zone: the left pane leaves its last margin columns to the host' ($codes.LeftIn -eq $HTTRANSPARENT) $HTTRANSPARENT $codes.LeftIn
+    Check 'hit zone: the left pane''s scrollbar band keeps its columns inside the zone' ($codes.LeftIn -eq $HTCLIENT) $HTCLIENT $codes.LeftIn
     Check 'hit zone: the left pane keeps the column past the margin' ($codes.LeftPast -eq $HTCLIENT) $HTCLIENT $codes.LeftPast
     Check 'hit zone: a pane keeps its middle' ($codes.Center -eq $HTCLIENT) $HTCLIENT $codes.Center
     Check 'hit zone: the host answers HTCLIENT where a pane gave way' ($codes.HostIn -eq $HTCLIENT) $HTCLIENT $codes.HostIn
@@ -276,6 +342,7 @@ try {
     $offDivider = [Pd]::SetCursor($h)
     $script:samples.Add(@{ Step = 'hover'; SetCursorOnDivider = $onDivider; SetCursorOffDivider = $offDivider })
     Check 'hover: the host sets the cursor over a divider' ($onDivider -eq 1) 1 $onDivider
+    Check 'hover: off a divider the host leaves the cursor to DefWindowProc' ($offDivider -eq 0) 0 $offDivider
 
     # Drag 200 px left: live while the button is down, kept after the release,
     # and both shells reflow to their new widths.
@@ -301,22 +368,36 @@ try {
     Check 'drag: the right shell has more columns' ($afterSize.Right.Columns -gt $before.Right.Columns) "> $($before.Right.Columns)" $afterSize.Right.Columns
     Check 'drag: the columns the left lost, the right gained (within one)' ([Math]::Abs(($before.Left.Columns - $afterSize.Left.Columns) - ($afterSize.Right.Columns - $before.Right.Columns)) -le 1) 'equal' @{ Lost = $before.Left.Columns - $afterSize.Left.Columns; Gained = $afterSize.Right.Columns - $before.Right.Columns }
 
-    # Esc during a drag puts the divider back where the drag started.
+    # Esc during a drag puts the divider back where the drag started, keeps
+    # the button the host's until its release, and never reaches a program:
+    # it is posted to the right pane, whose cmd waits on ping, which reads no
+    # input, so a key that got through would wait in its console.
     $d2 = $after[1].Left - 1; $start = $after
+    $inputBefore = Console-Input $shells[1]
     [Pd]::Post($h, $WM.LDown, 1, $d2, $y); Start-Sleep -Milliseconds 300
     [Pd]::Post($h, $WM.MouseMove, 1, $d2 + 150, $y); Settle
     $moved = Panes $h
-    $focus = Key-Target $h
-    [Pd]::Key($focus, 0x1B); Settle
+    $focus = $start[1].Hwnd
+    Post-Key $focus 0x1B; Settle
     $cancelled = Panes $h
-    $escReleased = -not (Capture-Held $h)
+    $escHeld = Capture-Held $h
     [Pd]::Post($h, $WM.LUp, 0, $d2 + 150, $y); Settle
+    $escReleased = -not (Capture-Held $h)
     $afterEscUp = Panes $h
     $escSize = Console-Size $shells[0]
-    $script:samples.Add(@{ Step = 'esc'; Moved = @($moved | ForEach-Object { Rect-Of $_ }); Cancelled = @($cancelled | ForEach-Object { Rect-Of $_ }); AfterUp = @($afterEscUp | ForEach-Object { Rect-Of $_ }); FocusIsPane = ($focus -eq $start[0].Hwnd -or $focus -eq $start[1].Hwnd); LeftConsole = $escSize })
+    Start-Sleep -Milliseconds 500
+    $inputAfter = Console-Input $shells[1]
+    # The positive control: the same key, with no drag, does arrive.
+    Post-Key $focus 0x1B
+    $controlArrived = Wait-Until { (Console-Input $shells[1]) -gt $inputAfter } 5
+    $inputControl = Console-Input $shells[1]
+    $script:samples.Add(@{ Step = 'esc'; Moved = @($moved | ForEach-Object { Rect-Of $_ }); Cancelled = @($cancelled | ForEach-Object { Rect-Of $_ }); AfterUp = @($afterEscUp | ForEach-Object { Rect-Of $_ }); LeftConsole = $escSize; InputBefore = $inputBefore; InputAfter = $inputAfter; InputControl = $inputControl })
     Check 'esc: the drag moved the divider first' (Near $moved[0].Right ($start[0].Right + 150)) ($start[0].Right + 150) $moved[0].Right
     Check 'esc: Esc puts the divider back' (Near $cancelled[0].Right $start[0].Right 1) $start[0].Right $cancelled[0].Right
-    Check 'esc: Esc lets the capture go' $escReleased $true $escReleased
+    Check 'esc: the host keeps the button after Esc, until its release' $escHeld $true $escHeld
+    Check 'esc: the release lets the capture go' $escReleased $true $escReleased
+    Check 'esc: no Esc reached the program in the pane' ($inputAfter -eq $inputBefore) $inputBefore $inputAfter
+    Check 'esc: the same Esc with no drag reaches it (control)' $controlArrived $true @{ Before = $inputAfter; After = $inputControl }
     Check 'esc: the release after Esc moves nothing' ($afterEscUp[0].Right -eq $cancelled[0].Right) $cancelled[0].Right $afterEscUp[0].Right
     Check 'esc: the left shell is back at its width' ($escSize.Columns -eq $afterSize.Left.Columns) $afterSize.Left.Columns $escSize.Columns
 
@@ -345,7 +426,7 @@ try {
 
     # A zoomed pane shows no divider: the old gap takes no press.
     $d4 = $even[1].Left - 1
-    [Pd]::Key((Key-Target $h), $Keys.Zoom)
+    Post-Key (Key-Target $h) $Keys.Zoom
     Wait-Panes $h 1
     $zoomed = Panes $h
     [Pd]::Post($h, $WM.LDown, 1, $d4, $y); Start-Sleep -Milliseconds 300
@@ -356,7 +437,7 @@ try {
     $script:samples.Add(@{ Step = 'zoom'; Zoomed = Rect-Of $zoomed[0]; PaneCodeAtOldGap = $zoomCode })
     Check 'zoom: the old gap takes no capture' (-not $zoomHeld) $false $zoomHeld
     Check 'zoom: the zoomed pane keeps the old hit zone' ($zoomCode -eq $HTCLIENT) $HTCLIENT $zoomCode
-    [Pd]::Key((Key-Target $h), $Keys.Zoom)
+    Post-Key (Key-Target $h) $Keys.Zoom
     Wait-Panes $h 2
     $unzoomed = Panes $h
     Check 'zoom: the split is as it was' (Near $unzoomed[0].Width $even[0].Width 1) $even[0].Width $unzoomed[0].Width
@@ -364,7 +445,7 @@ try {
     # A nested split: the focused pane splits down. Dragging the stack's line
     # moves only that split, and so does a press where the stack's line meets
     # the line beside it, inside both grab zones: the innermost divider wins.
-    [Pd]::Key((Key-Target $h), $Keys.SplitDown)
+    Post-Key (Key-Target $h) $Keys.SplitDown
     Wait-Panes $h 3
     $three = Panes $h
     $columns = @($three | Group-Object Left)
@@ -383,6 +464,7 @@ try {
     $jx = if ($stackOnRight) { $stackTop.Left } else { $stackTop.Right - 1 }
     $jy = ($nested | Where-Object { $_.Hwnd -eq $stackBottom.Hwnd }).Top - 1
     $junctionCode = [Pd]::HitTest($h, $nTop.Hwnd, $jx, $jy - 2)
+    $rowCode = [Pd]::HitTest($h, $nTop.Hwnd, $x, $nTop.Bottom - 1)
     [Pd]::Post($h, $WM.LDown, 1, $jx, $jy); Start-Sleep -Milliseconds 300
     [Pd]::Post($h, $WM.MouseMove, 1, $jx, $jy - 50)
     [Pd]::Post($h, $WM.LUp, 0, $jx, $jy - 50); Settle
@@ -392,6 +474,7 @@ try {
     Check 'nested: the stack line moves 100 px' (Near $nTop.Height ($stackTop.Height + 100)) ($stackTop.Height + 100) $nTop.Height
     Check 'nested: the pane beside the stack does not move' ($nSolo.Width -eq $solo.Width -and $nSolo.Height -eq $solo.Height) (Rect-Of $solo) (Rect-Of $nSolo)
     Check 'nested: the stack top gives way at the junction' ($junctionCode -eq $HTTRANSPARENT) $HTTRANSPARENT $junctionCode
+    Check 'nested: the stack top gives way along its bottom row' ($rowCode -eq $HTTRANSPARENT) $HTTRANSPARENT $rowCode
     Check 'nested: a press at the junction moves the stack line' (Near $jTop.Height ($nTop.Height - 50)) ($nTop.Height - 50) $jTop.Height
     Check 'nested: a press at the junction leaves the outer line' ($jSolo.Width -eq $nSolo.Width) $nSolo.Width $jSolo.Width
 
@@ -418,7 +501,7 @@ try {
     }
     $remaining = @($script:processes | Where-Object { Get-Process -Id $_.Pid -ErrorAction SilentlyContinue })
     Check 'owned runtime processes exited' ($remaining.Count -eq 0) 0 $remaining.Count
-    @{ Checks = $script:checks; Samples = $script:samples; Processes = $script:processes; Limit = 'Posted and sent window messages on a never-switched private desktop; the system routing a real click through HTTRANSPARENT, the cursor shape on screen, real Alt+Tab, real double-click timing, mixed-DPI drags and visual composition are not exercised.' } | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath (Join-Path $Run 'pane-divider-results.json')
+    @{ Checks = $script:checks; Samples = $script:samples; Processes = $script:processes; InterferedKeys = $script:interfered; Limit = 'Posted and sent window messages on a never-switched private desktop; the system routing a real click through HTTRANSPARENT, the cursor shape on screen, real Alt+Tab, real double-click timing, mixed-DPI drags and visual composition are not exercised.' } | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath (Join-Path $Run 'pane-divider-results.json')
 }
 $failed = @($script:checks | Where-Object { -not $_.Passed })
 if ($failed.Count) { $failed | ForEach-Object { Write-Host ("FAIL: " + $_.Name) }; exit 1 }
