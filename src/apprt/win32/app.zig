@@ -16372,3 +16372,68 @@ test "win32 a tab move that empties its window keeps the window, hidden, while u
         }
     }.body);
 }
+
+test "win32 a close X click works after Esc ended a drag whose tab a key binding then moved away (council round 4 L1)" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    try runOnHiddenDesktop(struct {
+        fn body() !void {
+            var fixture: win32.WindowStartTestApp = .{};
+            try fixture.init();
+            defer fixture.deinit();
+            const app = &fixture.app;
+            app.shell_runtime_initialized = true;
+            const setup: TabMoveFixture = .{ .fixture = &fixture };
+            const host = try setup.window(3, false);
+            try host.layout();
+            const dragged = host.tabs.items[0].id;
+            const button = host.tabs.items[0].button_hwnd orelse return error.TestNoTabButton;
+            const over_second = try testTabMiddleIn(host, 1, button);
+            // A drag, Esc with the button still down, then a key binding
+            // moves the dragged tab away before the release.
+            testPostTabMouse(button, c.WM_LBUTTONDOWN, 20, 10);
+            testPostTabMouse(button, c.WM_MOUSEMOVE, over_second.x, over_second.y);
+            const esc: MSG = .{ .hwnd = button, .message = c.WM_KEYDOWN, .wParam = c.VK_ESCAPE, .lParam = 1, .time = 0, .pt = .{ .x = 0, .y = 0 }, .lPrivate = 0 };
+            try std.testing.expect(app.cancelTabDragForKey(&esc));
+            try std.testing.expect(try app.moveTabToWindow(host, host.findTabIndexById(dragged).?, .{ .new_window = null }));
+            try std.testing.expect(!host.tab_drag_cancelled);
+            try std.testing.expectEqual(@as(usize, 2), host.tabs.items.len);
+            // The next click on a close X in that window closes its tab.
+            const closing = host.tabs.items[0].button_hwnd orelse return error.TestNoTabButton;
+            var rect: RECT = undefined;
+            _ = sys.GetClientRect(closing, &rect);
+            const x = rect.right - 4;
+            const y = @divTrunc(rect.bottom, 2);
+            fixture.core_app.deleteSurface(host.tabs.items[0].focusedSurface().?);
+            testPostTabMouse(closing, c.WM_LBUTTONDOWN, x, y);
+            testPostTabMouse(closing, c.WM_LBUTTONUP, x, y);
+            try std.testing.expectEqual(@as(usize, 1), host.tabs.items.len);
+        }
+    }.body);
+}
+
+test "win32 an only tab merged into another window while its window keeps a closed tab for undo takes both windows' history with it (council round 4)" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    try runOnHiddenDesktop(struct {
+        fn body() !void {
+            var fixture: win32.WindowStartTestApp = .{};
+            try fixture.init();
+            defer fixture.deinit();
+            const app = &fixture.app;
+            app.shell_runtime_initialized = true;
+            const setup: TabMoveFixture = .{ .fixture = &fixture };
+            const source = try setup.window(2, false);
+            const target = try setup.window(1, false);
+            fixture.core_app.deleteSurface(source.tabs.items[0].focusedSurface().?);
+            try std.testing.expect(try app.closeTabUndoable(source, 0));
+            const window = source.shell_id.?;
+            // With memory, the clear disposes the closed tab, the model's
+            // window goes with its last retained tab, and so does the native
+            // one: the path the commit-before-history order reshaped.
+            try std.testing.expect(try app.moveTabToWindow(source, 0, .{ .host = .{ .host = target, .index = 1 } }));
+            try std.testing.expectEqual(@as(usize, 1), app.registry.hosts.items.len);
+            try std.testing.expectEqual(@as(usize, 2), target.tabs.items.len);
+            try std.testing.expect(app.shell_runtime.state.windowConst(window) == null);
+            try app.validateShellNativeMapping();
+        }
+    }.body);
+}

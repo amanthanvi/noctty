@@ -853,7 +853,6 @@ pub const Host = struct {
     /// where the tab goes.
     tab_insert_marker_uia_provider: ?*win32_uia.ChromeControlProvider = null,
     tab_insert_marker_prev_proc: ?*const anyopaque = null,
-
     /// This window's only tab started a window move (`beginOnlyTabWindowMove`):
     /// its rect and DPI then. How the move ends decides whether the tab joins
     /// another window's strip (`tab_drag.windowMoveMerges`).
@@ -3154,7 +3153,7 @@ pub const Host = struct {
         // before the window goes, so its own `WM_CAPTURECHANGED` cleanup
         // would never run, and the label, the insert bar and the drag state
         // (which takes the next Esc anywhere) would stay.
-        if (tab.button_hwnd) |button| if (self.tab_drag_index != null and sys.GetCapture() == button) self.endTabDrag();
+        if (tab.button_hwnd) |button| if ((self.tab_drag_index != null or self.tab_drag_cancelled) and sys.GetCapture() == button) self.endTabDrag();
         detachChromeControlProvider(self.app, &tab.uia_provider);
         destroySubclassedWindow(&tab.button_hwnd, &tab.button_prev_proc);
     }
@@ -3665,8 +3664,8 @@ pub const Host = struct {
         _ = sys.InvalidateRect(preview, null, 1);
     }
 
-    /// A tab move asked of a window (`App.requestTabMove`): the tab by its
-    /// id in that window, and where it goes.
+    /// Where this window's only tab started a window move, and its size once
+    /// the move loop moved it (`Host.only_tab_window_move`).
     pub const OnlyTabMove = struct {
         rect: RECT,
         dpi: u32,
@@ -3676,6 +3675,8 @@ pub const Host = struct {
         moving: ?tab_drag.Size = null,
     };
 
+    /// A tab move asked of a window (`App.requestTabMove`): the tab by its
+    /// id in that window, and where it goes.
     pub const TabMoveRequest = struct {
         tab_id: u32,
         dest: Dest,
@@ -3963,7 +3964,8 @@ pub const Host = struct {
         self.setHoveredButton(null);
         // The dragged tab leaving (a key binding moved it mid-drag) ends the
         // drag, as a pane's teardown does (`windowDestroyed`).
-        if (self.tab_drag_index != null and self.tabs.items[index].id == self.tab_drag_tab_id) self.endTabDrag();
+        // So does a drag Esc ended whose release has not come yet.
+        if ((self.tab_drag_index != null or self.tab_drag_cancelled) and self.tabs.items[index].id == self.tab_drag_tab_id) self.endTabDrag();
         var tab = self.tabs.orderedRemove(index);
         self.destroyTabButton(&tab);
         tab.button_placement = .{};

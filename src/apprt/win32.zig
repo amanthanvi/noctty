@@ -10955,6 +10955,10 @@ pub fn tabButtonProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) call
                     }
                 },
                 c.WM_LBUTTONDOWN => {
+                    // A new press: whatever release an Esc left to swallow
+                    // is gone (its button may be too), so a close X press
+                    // gets its own release.
+                    v.tab_drag_cancelled = false;
                     v.noteChromePointerInput();
                     // A click answers the question the tooltip was there to
                     // answer, and the strip is about to relayout under it.
@@ -10969,7 +10973,6 @@ pub fn tabButtonProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) call
                         _ = sys.SetCapture(hwnd);
                     } else {
                         // Start potential drag: record origin
-                        v.tab_drag_cancelled = false;
                         v.tab_drag_index = index;
                         v.tab_drag_start_x = down_x;
                         v.tab_drag_start_y = down_y;

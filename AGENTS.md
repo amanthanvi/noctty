@@ -369,7 +369,8 @@ that govern each symbol you change, or that none does.
   the shell model: `Host.applyCommittedSplitHistory`), moving a tab to a new
   window or another window (tab tear-off: `App.moveTabToWindow`,
   `App.requestTabMove`, the outer-pump queue `App.pending_tab_moves` and
-  `App.drainPendingTabMoves`, `Host.giveTab`, `Host.reparentSurface`,
+  `App.drainPendingTabMoves`, its wake `App.noteTabMoveWake`,
+  `Host.endTabDrag`, `Host.giveTab`, `Host.reparentSurface`,
   `win32/tab_drag.zig`, the shell model's `move_tab_to_window`,
   `move_tab_to_new_window`).
 - [input.md](docs/agents/log/input.md): `win32/input.zig` and key messages
