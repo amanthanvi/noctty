@@ -347,6 +347,9 @@ pub const Action = union(Key) {
     /// otherwise the terminal-set title.
     copy_title_to_clipboard,
 
+    /// Move a tab to a new window.
+    move_tab_to_new_window,
+
     /// Save the target surface's focused window as a named layout.
     save_layout: SaveLayout,
 
@@ -439,6 +442,7 @@ pub const Action = union(Key) {
         search_match_rows,
         readonly,
         copy_title_to_clipboard,
+        move_tab_to_new_window,
         save_layout,
         launch_layout,
         toggle_quick_select,

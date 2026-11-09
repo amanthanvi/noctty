@@ -90,7 +90,15 @@ const leaves = .{
         // `composedFullscreenRect`, the rect a fullscreen OpenGL window
         // covers (#598), which window_state.zig asks with the monitors it
         // lists.
-        .pub_decls = 30,
+        // why: `Drop` and `placeTearOff`, where a torn-off tab's window
+        // goes, which window_state.zig asks with the monitor under the drop.
+        .pub_decls = 32,
+    },
+    .{
+        .file = "tab_drag.zig",
+        .module = @import("tab_drag.zig"),
+        .source = @embedFile("tab_drag.zig"),
+        .pub_decls = 10,
     },
 };
 

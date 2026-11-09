@@ -127,7 +127,7 @@ pub fn hostStyle(framed: bool, fullscreen: bool) u32 {
 }
 
 /// Where a new top-level window comes from (`window_state.Origin`).
-pub const Kind = enum { fresh, copy, restore, quick_terminal, adopted };
+pub const Kind = enum { fresh, copy, restore, quick_terminal, adopted, tear_off };
 
 /// The first show of a new host window.
 pub const InitialShow = enum {
@@ -250,14 +250,18 @@ pub const Plan = struct {
 };
 
 pub fn plan(kind: Kind, wants: Wants, forwarded: Forwarded, source: ?*const Snapshot, show: InitialShow, os_build: u32) Plan {
-    const keeps: Keeps = .{
+    // A torn-off tab's window goes where the tab was dropped, whatever
+    // `window-position-x/y` say, and takes nothing of its own over its
+    // source's state: no launch was forwarded to it.
+    const tear_off = kind == .tear_off;
+    const keeps: Keeps = if (tear_off) .{} else .{
         .position = wants.position != null,
         // Core init sizes the window only when both are set.
         .size = forwarded.size and wants.sized,
         .decoration = forwarded.decoration,
         .opacity = forwarded.opacity,
     };
-    const copied: ?Snapshot = if (kind == .copy and source != null) source.?.* else null;
+    const copied: ?Snapshot = if ((kind == .copy or tear_off) and source != null) source.?.* else null;
     var top_level: TopLevel = .{ .decorations_visible = wants.decorated, .opacity = wants.opacity };
     var popup = false;
     if (copied) |from| {
@@ -273,7 +277,9 @@ pub fn plan(kind: Kind, wants: Wants, forwarded: Forwarded, source: ?*const Snap
             top_level.opacity = wants.opacity;
             top_level.force_opaque = false;
         }
-        popup = from.state.isFullscreen() and !keeps.size;
+        // A torn-off tab's window is never fullscreen: it opens at the
+        // size its source returns to, where the tab was dropped.
+        popup = from.state.isFullscreen() and !keeps.size and !tear_off;
     }
     const framed = top_level.decorations_visible or undecoratedKeepsFrame(os_build, kind == .quick_terminal);
     return .{
@@ -281,15 +287,57 @@ pub fn plan(kind: Kind, wants: Wants, forwarded: Forwarded, source: ?*const Snap
         .keeps = keeps,
         .enter = switch (kind) {
             .fresh, .copy => .{ .maximize = wants.maximize, .fullscreen = wants.fullscreen },
-            .restore, .quick_terminal, .adopted => .{},
+            .restore, .quick_terminal, .adopted, .tear_off => .{},
         },
         .show = show,
         .top_level = top_level,
         .style = hostStyle(framed, popup),
         .hide_border = !top_level.decorations_visible and framed,
-        .position = wants.position,
+        .position = if (tear_off) null else wants.position,
         .source = copied,
     };
+}
+
+/// Where a torn-off tab was dropped: the pointer `at`, in screen
+/// coordinates; where the pointer sits in the new window, from its top-left
+/// (`grab`), so the tab lands under it; and the work area of the monitor
+/// under the point.
+pub const Drop = struct { at: POINT, grab: POINT, work: RECT };
+
+/// Where the window of a torn-off tab goes (`Kind.tear_off`). It has the
+/// size its source has, or returns to when the source is maximized,
+/// minimized or fullscreen, and never that state. Dropped at a point, it is
+/// placed so the pointer keeps its place in it, inside the work area of the
+/// monitor under the point. Without a drop (`move_tab_to_new_window`) it
+/// goes one cascade step off its source, past the windows already there, as
+/// a copy does.
+pub fn placeTearOff(p: *const Plan, occupied: Occupied, drop: ?Drop) Placement {
+    const source = p.source.?;
+    const info = source.monitor.info;
+    const normal = if (source.state.fullscreen) |back|
+        workspaceRectToScreen(back.placement.rcNormalPosition, (back.monitor orelse source.monitor).info)
+    else if (source.iconic or restoresMaximized(source.zoomed, source.iconic, &source.placement))
+        workspaceRectToScreen(source.placement.rcNormalPosition, info)
+    else
+        source.rect;
+    const width = @max(1, normal.right - normal.left);
+    const height = @max(1, normal.bottom - normal.top);
+    if (drop) |dropped| {
+        const grab_x = std.math.clamp(dropped.grab.x, 0, width - 1);
+        const grab_y = std.math.clamp(dropped.grab.y, 0, height - 1);
+        return .{
+            .rect = fitRectInWork(dropped.at.x - grab_x, dropped.at.y - grab_y, width, height, dropped.work),
+            .flags = c.SWP_NOACTIVATE,
+        };
+    }
+    const step = cascadeStep(source.monitor.dpi);
+    const sized: RECT = .{ .left = normal.left, .top = normal.top, .right = normal.left + width, .bottom = normal.top + height };
+    var rect = cascadedRect(sized, step, info.rcWork);
+    var steps: u8 = 0;
+    while (steps < 8 and occupied.startsAt(occupied.ctx, .{ .x = rect.left, .y = rect.top })) : (steps += 1) {
+        rect = cascadedRect(rect, step, info.rcWork);
+    }
+    return .{ .rect = rect, .flags = c.SWP_NOACTIVATE };
 }
 
 /// A window's outer size, in physical pixels.
@@ -814,6 +862,77 @@ test "win32 a copy goes one cascade step off its source, inside its work area, p
         const placed = place(&p, .of(&case.occupied), case.own);
         try std.testing.expectEqualDeep(case.rect, placed.rect);
         try std.testing.expectEqual(case.flags, placed.flags);
+        try std.testing.expect(placed.maximize == null and placed.fullscreen == null);
+    }
+}
+
+test "win32 a torn-off tab's window takes its source's state but never its fullscreen, its config's place or its maximize" {
+    const back: TopLevel.Return = .{ .rect = std.mem.zeroes(RECT), .placement = std.mem.zeroes(WINDOWPLACEMENT), .monitor = null };
+    const source: Snapshot = .{ .state = .{ .decorations_visible = false, .topmost = true, .opacity = 0.6, .fullscreen = back } };
+    const p = plan(.tear_off, .{ .position = .{ .x = 10, .y = 20 }, .maximize = true, .fullscreen = true, .sized = true }, .{}, &source, .activate, c.OS_BUILD_WIN11_21H2);
+    try std.testing.expectEqual(TopLevel{ .decorations_visible = false, .topmost = true, .opacity = 0.6 }, p.top_level);
+    try std.testing.expectEqual(Keeps{}, p.keeps);
+    try std.testing.expectEqual(Enter{}, p.enter);
+    try std.testing.expect(p.position == null);
+    // Framed, its border hidden, as an undecorated copy; never a popup.
+    try std.testing.expectEqual(@as(u32, WS_OVERLAPPEDWINDOW | c.WS_CLIPCHILDREN), p.style);
+    try std.testing.expect(p.hide_border);
+    try std.testing.expect(p.source != null);
+}
+
+test "win32 a torn-off tab's window opens at its source's normal size, under the pointer, inside the work area there" {
+    const big = test_monitors.big;
+    const side = test_monitors.side;
+    const normal: Snapshot = .{ .state = .{}, .rect = testRect(100, 100, 1380, 900), .monitor = big };
+    const maximized: Snapshot = .{
+        .state = .{},
+        .rect = testRect(-8, -8, 3848, 2096),
+        .placement = testPlacement(testRect(200, 150, 1000, 750), 0, c.SW_MAXIMIZE),
+        .zoomed = true,
+        .monitor = big,
+    };
+    const fullscreen: Snapshot = .{
+        .state = .{ .fullscreen = .{
+            .rect = testRect(300, 200, 1100, 800),
+            .placement = testPlacement(testRect(300, 200, 1000, 700), 0, c.SW_RESTORE),
+            .monitor = side,
+        } },
+        .rect = side.info.rcMonitor,
+        .monitor = side,
+    };
+    const minimized: Snapshot = .{
+        .state = .{},
+        .rect = testRect(-1080, 1880, -843, 1919),
+        .placement = testPlacement(testRect(-980, 52, -340, 532), 0, c.SW_SHOWMINIMIZED),
+        .iconic = true,
+        .monitor = test_monitors.portrait,
+    };
+    const Case = struct { source: Snapshot, drop: ?Drop, occupied: []const POINT = &.{}, rect: RECT };
+    for ([_]Case{
+        // The pointer stays 40 px right and 20 px down of the corner.
+        .{ .source = normal, .drop = .{ .at = .{ .x = 2000, .y = 1000 }, .grab = .{ .x = 40, .y = 20 }, .work = big.info.rcWork }, .rect = testRect(1960, 980, 3240, 1780) },
+        // Near the work area's corner it moves inside, at its size.
+        .{ .source = normal, .drop = .{ .at = .{ .x = 3800, .y = 2050 }, .grab = .{ .x = 40, .y = 20 }, .work = big.info.rcWork }, .rect = testRect(2560, 1288, 3840, 2088) },
+        // On the monitor beside it: that work area.
+        .{ .source = normal, .drop = .{ .at = .{ .x = 4000, .y = 100 }, .grab = .{ .x = 40, .y = 20 }, .work = side.info.rcWork }, .rect = testRect(3960, 80, 5240, 880) },
+        // A grab past the new size (from a wider maximized source) is held
+        // inside it.
+        .{ .source = maximized, .drop = .{ .at = .{ .x = 2000, .y = 1000 }, .grab = .{ .x = 1500, .y = 20 }, .work = big.info.rcWork }, .rect = testRect(1201, 980, 2001, 1580) },
+        // Maximized, fullscreen or minimized: the size it returns to,
+        // from workspace coordinates.
+        .{ .source = maximized, .drop = .{ .at = .{ .x = 500, .y = 500 }, .grab = .{ .x = 0, .y = 0 }, .work = big.info.rcWork }, .rect = testRect(500, 500, 1300, 1100) },
+        .{ .source = fullscreen, .drop = .{ .at = .{ .x = 4000, .y = 100 }, .grab = .{ .x = 0, .y = 0 }, .work = side.info.rcWork }, .rect = testRect(4000, 100, 4700, 600) },
+        .{ .source = minimized, .drop = .{ .at = .{ .x = 100, .y = 100 }, .grab = .{ .x = 0, .y = 0 }, .work = big.info.rcWork }, .rect = testRect(100, 100, 740, 580) },
+        // No drop (the action): one cascade step off the source, past the
+        // windows already there.
+        .{ .source = normal, .drop = null, .rect = testRect(148, 148, 1428, 948) },
+        .{ .source = normal, .drop = null, .occupied = &.{.{ .x = 148, .y = 148 }}, .rect = testRect(196, 196, 1476, 996) },
+        .{ .source = maximized, .drop = null, .rect = testRect(248, 198, 1048, 798) },
+    }) |case| {
+        const p = plan(.tear_off, .{}, .{}, &case.source, .activate, c.OS_BUILD_WIN11_21H2);
+        const placed = placeTearOff(&p, .of(&case.occupied), case.drop);
+        try std.testing.expectEqualDeep(case.rect, placed.rect);
+        try std.testing.expectEqual(@as(u32, c.SWP_NOACTIVATE), placed.flags);
         try std.testing.expect(placed.maximize == null and placed.fullscreen == null);
     }
 }

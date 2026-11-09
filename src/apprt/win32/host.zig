@@ -7,6 +7,12 @@ const BannerButton = win32.BannerButton;
 const ButtonTooltipAction = win32.ButtonTooltipAction;
 const CaptionButton = win32.CaptionButton;
 const ChildPlacement = child_window.ChildPlacement;
+const MONITORINFO = sys.MONITORINFO;
+const stackChildAbove = win32.stackChildAbove;
+const tab_drag = @import("tab_drag.zig");
+const window_start = @import("window_start.zig");
+/// `SetWindowPos`'s bottom of the z-order.
+const HWND_BOTTOM: ?*anyopaque = @ptrFromInt(1);
 const ChromeRepaintMask = win32.ChromeRepaintMask;
 const ChromeTextDirty = win32.ChromeTextDirty;
 const CloseScope = confirm_text.CloseScope;
@@ -819,6 +825,29 @@ pub const Host = struct {
     tab_drop_operation: win32_tab_drop_zones.Operation = .none,
     tab_drop_target_surface: ?*Surface = null,
     tab_drop_preview_hwnd: ?HWND = null,
+    /// Where the pointer held the dragged tab's button when the drag began,
+    /// in the button's client coordinates, so a torn-off tab lands under the
+    /// pointer in its new window (`tearOffDrop`). `tab_drag_start_*` moves
+    /// with each reorder step; this does not.
+    tab_drag_grab: POINT = .{ .x = 0, .y = 0 },
+    /// The tab's index when the drag began, which Esc puts it back at.
+    tab_drag_origin_index: ?usize = null,
+    /// Esc ended the drag while the button was still down: the button keeps
+    /// the capture until it comes up, and that release does nothing, so it
+    /// neither clicks a tab's X nor reaches a terminal as a stray release.
+    tab_drag_cancelled: bool = false,
+    /// What dropping the dragged tab would do now (`tab_drag.decide`).
+    tab_drag_target: tab_drag.Target = .stay,
+    /// In this window, while another window's tab is dragged over its strip:
+    /// the bar where the tab would go.
+    tab_insert_marker_hwnd: ?HWND = null,
+    tab_insert_marker_placement: ChildPlacement = .{},
+    /// A tab move asked of this window, run from the message loop
+    /// (`c.WM_WINHOSTTY_TAB_MOVE`, `App.runPendingTabMove`).
+    pending_tab_move: ?TabMoveRequest = null,
+    /// This window's only tab started a window move (`beginOnlyTabWindowMove`);
+    /// where it ends decides whether the tab joins another window's strip.
+    only_tab_window_move: ?RECT = null,
 
     // Hover tooltip for the tab strip. Created on the first hover that has
     // something to show and reused after that; `tab_tooltip_tab_id` names the
@@ -2976,6 +3005,7 @@ pub const Host = struct {
         }
         destroyChildWindow(&self.palette_list_hwnd);
         destroyChildWindow(&self.tab_drop_preview_hwnd);
+        destroyChildWindow(&self.tab_insert_marker_hwnd);
         detachChromeControlProvider(self.app, &self.tab_tooltip_uia_provider);
         destroyChildWindow(&self.tab_tooltip_hwnd);
         self.tab_tooltip_tab_id = null;
@@ -3601,6 +3631,287 @@ pub const Host = struct {
         );
         _ = sys.ShowWindow(preview, c.SW_SHOWNOACTIVATE);
         _ = sys.InvalidateRect(preview, null, 1);
+    }
+
+    /// A tab move asked of a window (`App.requestTabMove`): the tab by its
+    /// id in that window, and where it goes.
+    pub const TabMoveRequest = struct {
+        tab_id: u32,
+        dest: Dest,
+
+        pub const Dest = union(enum) {
+            /// A new window, where the tab was dropped, or (null) a cascade
+            /// step off this one (`move_tab_to_new_window`).
+            new_window: ?window_start.Drop,
+            /// Another window of this process, by id, at `index` in its strip.
+            window: tab_drag.Over,
+        };
+    };
+
+    /// The tab strip's band in screen coordinates: the client top, as tall
+    /// as the strip, as wide as tabs may go (the [+] and [v] cluster and the
+    /// caption buttons aside). Null with the strip hidden.
+    pub fn tabStripScreenRect(self: *Host) ?RECT {
+        if (!self.shouldShowTabBar()) return null;
+        const hwnd = self.hwnd orelse return null;
+        const height = self.tabBarHeight();
+        if (height <= 0) return null;
+        var client: RECT = undefined;
+        if (sys.GetClientRect(hwnd, &client) == 0) return null;
+        const width = @max(1, (client.right - client.left) - self.rightButtonsWidth() - self.captionButtonsWidth());
+        var origin: POINT = .{ .x = 0, .y = 0 };
+        if (sys.ClientToScreen(hwnd, &origin) == 0) return null;
+        return .{ .left = origin.x, .top = origin.y, .right = origin.x + width, .bottom = origin.y + height };
+    }
+
+    /// Where a tab dropped at screen `x` goes in this window's strip, from
+    /// the buttons on screen (`tab_drag.insertIndex`). A button scrolled out
+    /// of the strip keeps a stale rect, so only the shown ones count (the
+    /// 2026-09-19 entry in chrome-tabs-paint.md).
+    pub fn tabInsertIndexAtScreenX(self: *Host, x: i32) usize {
+        var buttons: [64]tab_drag.Button = undefined;
+        var count: usize = 0;
+        for (self.tabs.items, 0..) |tab, i| {
+            if (count == buttons.len) break;
+            if (!tab.button_placement.visible_known or !tab.button_placement.visible) continue;
+            const button = tab.button_hwnd orelse continue;
+            var rect: RECT = undefined;
+            if (sys.GetWindowRect(button, &rect) == 0) continue;
+            buttons[count] = .{ .index = i, .left = rect.left, .right = rect.right };
+            count += 1;
+        }
+        return tab_drag.insertIndex(buttons[0..count], x, self.tabs.items.len);
+    }
+
+    /// The bar that shows where a tab dragged from another window would go
+    /// in this strip: at the left edge of the tab now at `index`, or past the
+    /// last tab shown.
+    pub fn showTabInsertMarker(self: *Host, index: usize) void {
+        const hwnd = self.hwnd orelse return;
+        const placement = chrome_layout.tabButtonPlacement(self.tabBarHeight(), self.current_dpi, self.tabsFlushWithTop());
+        var x: ?i32 = null;
+        var last_right: ?i32 = null;
+        for (self.tabs.items, 0..) |tab, i| {
+            if (!tab.button_placement.visible_known or !tab.button_placement.visible or !tab.button_placement.rect_known) continue;
+            if (i >= index and x == null) x = tab.button_placement.rect.left;
+            last_right = tab.button_placement.rect.right;
+        }
+        const left = x orelse last_right orelse 0;
+        const width = @max(2, self.scaled(3));
+        const rect = childRect(@max(0, left - @divTrunc(width, 2)), placement.top, width, placement.height);
+        if (self.tab_insert_marker_hwnd == null) {
+            self.tab_insert_marker_hwnd = sys.CreateWindowExW(
+                0,
+                prompt_label_class,
+                std.unicode.utf8ToUtf16LeStringLiteral(""),
+                c.WS_CHILD | c.SS_OWNERDRAW,
+                rect.left,
+                rect.top,
+                rect.right - rect.left,
+                rect.bottom - rect.top,
+                hwnd,
+                null,
+                self.app.hinstance,
+                null,
+            );
+            self.tab_insert_marker_placement = .{};
+        }
+        const marker = self.tab_insert_marker_hwnd orelse return;
+        _ = applyChildRect(marker, &self.tab_insert_marker_placement, rect);
+        if (applyChildVisibility(marker, &self.tab_insert_marker_placement, true)) raiseChildToTop(hwnd, marker);
+        _ = sys.InvalidateRect(marker, null, 0);
+    }
+
+    pub fn hideTabInsertMarker(self: *Host) void {
+        const marker = self.tab_insert_marker_hwnd orelse return;
+        _ = applyChildVisibility(marker, &self.tab_insert_marker_placement, false);
+    }
+
+    /// `WM_DRAWITEM` for the insert bar: the accent, which High Contrast
+    /// gives the system highlight.
+    pub fn drawTabInsertMarker(self: *Host, draw: *const DRAWITEMSTRUCT) bool {
+        const marker = self.tab_insert_marker_hwnd orelse return false;
+        if (draw.hwndItem != marker) return false;
+        gdi.fillSolidRect(draw.hDC, draw.rcItem, self.app.resolved_theme.accent);
+        return true;
+    }
+
+    /// Where the window of a tab torn off at `screen` goes: the pointer, and
+    /// where it held the tab (`tab_drag_grab`) as an offset from the new
+    /// window's top-left (`tab_drag.grabOffset`), on the monitor under it.
+    pub fn tearOffDrop(self: *Host, screen: POINT, button: ?HWND) ?window_start.Drop {
+        const hwnd = self.hwnd orelse return null;
+        var window_rect: RECT = undefined;
+        if (sys.GetWindowRect(hwnd, &window_rect) == 0) return null;
+        var origin: POINT = .{ .x = 0, .y = 0 };
+        if (sys.ClientToScreen(hwnd, &origin) == 0) return null;
+        const placement = chrome_layout.tabButtonPlacement(self.tabBarHeight(), self.current_dpi, self.tabsFlushWithTop());
+        var button_width: i32 = self.scaled(host_tab_max_button_width);
+        if (button) |held| {
+            var rect: RECT = undefined;
+            if (sys.GetClientRect(held, &rect) != 0) button_width = rect.right - rect.left;
+        }
+        const grab = tab_drag.grabOffset(
+            origin.x - window_rect.left,
+            origin.y - window_rect.top,
+            placement.top,
+            self.tab_drag_grab.x,
+            self.tab_drag_grab.y,
+            button_width,
+        );
+        const monitor = sys.MonitorFromPoint(screen, c.MONITOR_DEFAULTTONEAREST) orelse return null;
+        var info: MONITORINFO = std.mem.zeroes(MONITORINFO);
+        info.cbSize = @sizeOf(MONITORINFO);
+        if (sys.GetMonitorInfoW(monitor, &info) == 0) return null;
+        return .{ .at = screen, .grab = .{ .x = grab.x, .y = grab.y }, .work = info.rcWork };
+    }
+
+    /// The pointer moved during a tab drag that passed its threshold: lays
+    /// out what a drop there would do (`tab_drag.decide`) and shows it.
+    /// `client` is `screen` in this window's client coordinates.
+    pub fn updateTabDragTarget(self: *Host, drag_index: usize, screen: POINT, client: POINT) void {
+        const hwnd = self.hwnd orelse return;
+        var client_rect: RECT = undefined;
+        const inside = sys.GetClientRect(hwnd, &client_rect) != 0 and
+            client.x >= client_rect.left and client.x < client_rect.right and
+            client.y >= client_rect.top and client.y < client_rect.bottom;
+        const band = @max(1, self.tabBarHeight());
+        const target = tab_drag.decide(.{
+            .tab_count = self.tabs.items.len,
+            .quick_terminal = self.quick_terminal,
+            .inside_source = inside,
+            .outside_strip = tab_drag.leavesStrip(client.y, 0, band, @max(self.scaled(16), @divTrunc(band, 2))),
+            .split_zone = self.tab_drop_operation != .none,
+            .over = if (inside) null else self.app.tabStripTargetAt(screen, hwnd),
+        });
+        self.tab_drag_target = target;
+        // A tear-off or a move takes no split zone of this window.
+        if (target != .stay) self.hideTabDropPreview();
+        self.app.showTabDragFeedback(self, drag_index, target, screen);
+    }
+
+    /// Esc during a tab drag: the drag ends where it began, a reorder made
+    /// on the way taken back, and nothing is dropped.
+    pub fn cancelTabDrag(self: *Host) void {
+        const origin = self.tab_drag_origin_index;
+        const current = self.tab_drag_index;
+        self.tab_drag_index = null;
+        self.tab_drag_active = false;
+        self.tab_drag_origin_index = null;
+        self.tab_drag_target = .stay;
+        self.tab_drag_cancelled = true;
+        self.hideTabDropPreview();
+        self.app.endTabDragFeedback();
+        if (origin) |from| if (current) |at| {
+            if (from != at and from < self.tabs.items.len and at < self.tabs.items.len) self.swapTabs(at, from);
+        };
+    }
+
+    /// The drag of a window's only tab passed its threshold: the window moves
+    /// with it, as the system moves it by its caption (Windows Terminal's
+    /// behaviour), and where the move ends decides whether the tab joins
+    /// another window's strip (`App.finishOnlyTabWindowMove`). A fullscreen
+    /// window stays where it is.
+    pub fn beginOnlyTabWindowMove(self: *Host, screen: POINT) void {
+        self.tab_drag_index = null;
+        self.tab_drag_active = false;
+        self.tab_drag_origin_index = null;
+        self.tab_drag_target = .stay;
+        _ = sys.ReleaseCapture();
+        const hwnd = self.hwnd orelse return;
+        if (self.top_level.isFullscreen()) return;
+        var rect: RECT = undefined;
+        if (sys.GetWindowRect(hwnd, &rect) == 0) return;
+        self.only_tab_window_move = rect;
+        const x: u32 = @as(u16, @bitCast(@as(i16, @truncate(screen.x))));
+        const y: u32 = @as(u16, @bitCast(@as(i16, @truncate(screen.y))));
+        const packed_point: LPARAM = @bitCast(@as(usize, (y << 16) | x));
+        // SC_MOVE with HTCAPTION in its low bits is the caption drag.
+        if (sys.PostMessageW(hwnd, c.WM_SYSCOMMAND, c.SC_MOVE | c.HTCAPTION, packed_point) == 0) {
+            self.only_tab_window_move = null;
+        }
+    }
+
+    /// Takes the tab at `index` out of this window and puts it at `insert`
+    /// in `target` with its panes, which keep running (`App.moveTabToWindow`
+    /// commits the shell model first; nothing here fails). The panes are
+    /// hidden while they change windows, so no two OpenGL children overlap
+    /// in either (the 2026-04-14 entries in tabs-panes.md), and nothing pumps
+    /// messages between the tab leaving one list and joining the other (the
+    /// 2026-11-01 NOTIFY-MODULE entry in app-lifecycle.md). `target` has room
+    /// for the tab. Returns the tab's index there.
+    pub fn giveTab(self: *Host, index: usize, target: *Host, insert: usize) usize {
+        const previous_tab_id = if (self.active_tab < self.tabs.items.len) self.tabs.items[self.active_tab].id else null;
+        // A prompt one of its terminals raised stays with this window and
+        // would answer a terminal that has left it.
+        self.cancelConfirmFromTab(&self.tabs.items[index]);
+        self.setHoveredButton(null);
+        var tab = self.tabs.orderedRemove(index);
+        self.destroyTabButton(&tab);
+        tab.button_placement = .{};
+        tab.button_label_cache_valid = false;
+        self.active_tab = activeTabAfterRemoval(self.active_tab, index, self.tabs.items.len);
+        var hide_it = tab.tree.iterator();
+        while (hide_it.next()) |entry| {
+            entry.view.host_active = false;
+            entry.view.setVisible(false);
+            _ = entry.view.hideSearchBarControls();
+        }
+        var move_it = tab.tree.iterator();
+        while (move_it.next()) |entry| reparentSurface(entry.view, target);
+        // Tab ids are a window's own.
+        tab.id = target.nextTabId();
+        const at = @min(insert, target.tabs.items.len);
+        target.tabs.insertAssumeCapacity(at, tab);
+        if (target.tabs.items.len == 1) target.active_tab = 0 else if (at <= target.active_tab) target.active_tab += 1;
+        self.notifyActiveTabUiaSelectionChanged(previous_tab_id);
+        self.notifyTabListUiaChanged();
+        return at;
+    }
+
+    /// `surface`'s pane and the controls it keeps in its window (the
+    /// scrollbar and the docked search bar) become `target`'s children. A
+    /// pane keeps its HWND, and with it its OpenGL context and pixel format
+    /// or its Direct3D 11 swap chain and composition target, which belong to
+    /// the pane's own window, not to the top-level one.
+    fn reparentSurface(surface: *Surface, target: *Host) void {
+        surface.host = target;
+        surface.host_id = target.id;
+        const parent = target.hwnd orelse return;
+        const pane = surface.hwnd orelse return;
+        _ = sys.SetParent(pane, parent);
+        // At the bottom, where a new tab's pane is made, so chrome the target
+        // raised over its panes stays over this one (the 2026-10-15 entry in
+        // chrome-tabs-paint.md).
+        _ = sys.SetWindowPos(pane, HWND_BOTTOM, 0, 0, 0, 0, c.SWP_NOMOVE | c.SWP_NOSIZE | c.SWP_NOACTIVATE);
+        // The cached rects and visibility were the old window's.
+        surface.placement = .{};
+        const controls = [_]struct { hwnd: ?HWND, placement: *ChildPlacement }{
+            .{ .hwnd = surface.scrollbar_hwnd, .placement = &surface.scrollbar_placement },
+            .{ .hwnd = surface.search_bar_bg_hwnd, .placement = &surface.search_bar_bg_placement },
+            .{ .hwnd = surface.search_bar_edit_hwnd, .placement = &surface.search_bar_edit_placement },
+            .{ .hwnd = surface.search_bar_prev_hwnd, .placement = &surface.search_bar_prev_placement },
+            .{ .hwnd = surface.search_bar_next_hwnd, .placement = &surface.search_bar_next_placement },
+            .{ .hwnd = surface.search_bar_regex_hwnd, .placement = &surface.search_bar_regex_placement },
+            .{ .hwnd = surface.search_bar_case_hwnd, .placement = &surface.search_bar_case_placement },
+            .{ .hwnd = surface.search_bar_word_hwnd, .placement = &surface.search_bar_word_placement },
+            .{ .hwnd = surface.search_bar_close_hwnd, .placement = &surface.search_bar_close_placement },
+            .{ .hwnd = surface.search_bar_results_hwnd, .placement = &surface.search_bar_results_placement },
+        };
+        for (controls) |control| {
+            const child = control.hwnd orelse continue;
+            _ = sys.SetParent(child, parent);
+            control.placement.* = .{};
+            // A window whose background alone is translucent makes the
+            // controls that paint themselves solid as they arrive.
+            window_state.childCreated(target, child);
+        }
+        if (surface.scrollbar_hwnd) |bar| stackChildAbove(bar, pane);
+        // The pseudo console's window, which a console program parents its
+        // dialogs to, is owned by the window it opened in (`consoleOwner`).
+        if (surface.core_initialized and surface.console_window_attached) surface.core_surface.ptyOwnerCallback(parent);
+        // The old window's font goes with it.
+        if (surface.search_bar_edit_hwnd != null) surface.applySearchBarFont(target.chrome_font);
     }
 
     pub fn commitTabDropSplit(self: *Host, source_index: usize) bool {

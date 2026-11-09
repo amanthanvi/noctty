@@ -429,6 +429,16 @@ pub fn ptyVisibility(self: *Exec, visible: bool) !void {
     }
 }
 
+/// Called on the IO thread when the terminal's tab moved to another window.
+/// An adopted session gets no signal it may not know
+/// (`Pty.reparentPseudoConsole` is a no-op for it).
+pub fn ptyOwner(self: *Exec, owner: usize) !void {
+    if (comptime builtin.os.tag != .windows) return;
+    const pty = if (self.subprocess.pty) |*value| value else return;
+    if (owner == 0) return;
+    try pty.reparentPseudoConsole(@ptrFromInt(owner));
+}
+
 /// Called on the IO thread after the terminal cleared its screen locally.
 pub fn ptyClear(self: *Exec, keep_cursor_row: bool) bool {
     if (comptime builtin.os.tag != .windows) return false;

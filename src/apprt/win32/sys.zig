@@ -751,6 +751,11 @@ pub extern "user32" fn EnableWindow(hWnd: HWND, bEnable: BOOL) callconv(.winapi)
 pub extern "user32" fn GetParent(hWnd: HWND) callconv(.winapi) ?HWND;
 pub extern "user32" fn GetDlgCtrlID(hWnd: HWND) callconv(.winapi) i32;
 pub extern "user32" fn GetWindow(hWnd: HWND, uCmd: UINT) callconv(.winapi) ?HWND;
+/// The window at the top of `hWnd`'s children, or of the desktop's top-level
+/// windows when null; null when there is none.
+pub extern "user32" fn GetTopWindow(hWnd: ?HWND) callconv(.winapi) ?HWND;
+/// Returns the previous parent, or null on failure.
+pub extern "user32" fn SetParent(hWndChild: HWND, hWndNewParent: ?HWND) callconv(.winapi) ?HWND;
 
 pub extern "user32" fn GetForegroundWindow() callconv(.winapi) ?HWND;
 

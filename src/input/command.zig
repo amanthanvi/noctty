@@ -450,6 +450,12 @@ fn actionCommands(action: Action.Key) []const Command {
             },
         },
 
+        .move_tab_to_new_window => comptime &.{.{
+            .action = .move_tab_to_new_window,
+            .title = "Move Tab to New Window",
+            .description = "Move the current tab to a new window.",
+        }},
+
         .toggle_tab_overview => comptime &.{.{
             .action = .toggle_tab_overview,
             .title = "Toggle Tab Overview",

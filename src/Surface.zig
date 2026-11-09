@@ -5198,6 +5198,11 @@ pub fn ptyVisibilityCallback(self: *Surface, visible: bool) void {
     self.queueIo(.{ .pty_visibility = visible }, .unlocked);
 }
 
+/// The surface's tab moved to another top-level window, `owner`.
+pub fn ptyOwnerCallback(self: *Surface, owner: *anyopaque) void {
+    self.queueIo(.{ .pty_owner = @intFromPtr(owner) }, .unlocked);
+}
+
 pub fn focusCallback(self: *Surface, focused: bool) !void {
     // Crash metadata in case we crash in here
     crash.sentry.thread_state = self.crashThreadState();
@@ -7796,6 +7801,12 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
             .{ .surface = self },
             .move_tab,
             .{ .amount = position },
+        ),
+
+        .move_tab_to_new_window => return try self.rt_app.performAction(
+            .{ .surface = self },
+            .move_tab_to_new_window,
+            {},
         ),
 
         .new_split => |direction| return try self.rt_app.performAction(
