@@ -18104,6 +18104,23 @@ test "win32 pane divider reconciles an IME key by the key the IME took" {
     defer pane_divider_test_down = null;
     app.reconcilePaneDividerHeldKeys(&paneDividerTestKeyDown);
     try std.testing.expect(app.paneDividerDragKey(c.WM_KEYUP, c.VK_PROCESSKEY, paneDividerKeyLParam(0x1E, false, .release)));
+
+    // The IME reports VK_SHIFT for right Shift (scan 0x36): the state is
+    // asked by the sided key, VK_RSHIFT, and the key is owned by its scan
+    // code, so left Shift's state does not keep it.
+    app_module.test_ime_original_key = c.VK_SHIFT;
+    try std.testing.expect(host.beginPaneDividerDrag(pane_divider_test_content, .{ .x = 400, .y = 300 }, 5000));
+    try std.testing.expect(app.paneDividerDragKey(c.WM_KEYDOWN, c.VK_PROCESSKEY, paneDividerKeyLParam(0x36, false, .press)));
+    host.finishPaneDividerDrag(pane_divider_test_content);
+    pane_divider_test_down = c.VK_LSHIFT;
+    app.reconcilePaneDividerHeldKeys(&paneDividerTestKeyDown);
+    try std.testing.expect(!app.paneDividerDragKey(c.WM_KEYUP, c.VK_SHIFT, paneDividerKeyLParam(0x36, false, .release)));
+    try std.testing.expect(host.beginPaneDividerDrag(pane_divider_test_content, .{ .x = 400, .y = 300 }, 9000));
+    try std.testing.expect(app.paneDividerDragKey(c.WM_KEYDOWN, c.VK_PROCESSKEY, paneDividerKeyLParam(0x36, false, .press)));
+    host.finishPaneDividerDrag(pane_divider_test_content);
+    pane_divider_test_down = c.VK_RSHIFT;
+    app.reconcilePaneDividerHeldKeys(&paneDividerTestKeyDown);
+    try std.testing.expect(app.paneDividerDragKey(c.WM_KEYUP, c.VK_SHIFT, paneDividerKeyLParam(0x36, false, .release)));
 }
 
 test "win32 pane divider double-click equalizes only the split its first click was on" {
