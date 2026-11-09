@@ -4530,6 +4530,17 @@ fn maybeHandleBinding(
         break :consumed false;
     };
 
+    // Setup our actions. They are a copy, not the binding storage: an
+    // action can free that storage while the chain still runs (a reload
+    // replaces this surface's config, and a closing action frees the
+    // surface and its config on Win32), and everything below reads the
+    // actions again. The arena outlives `self` safely: it holds only the
+    // allocator, which belongs to the app. Copied before the key state
+    // below changes, so a failed copy leaves it as it was.
+    var actions_arena: std.heap.ArenaAllocator = .init(self.alloc);
+    defer actions_arena.deinit();
+    const actions = try leaf.cloneActions(actions_arena.allocator());
+
     // We have an action, so at this point we're handling SOMETHING so
     // we reset the last trigger to null. We only set this if we actually
     // perform an action (below)
@@ -4537,16 +4548,6 @@ fn maybeHandleBinding(
 
     // An action also always resets the sequence set.
     self.keyboard.sequence_set = null;
-
-    // Setup our actions. They are a copy, not the binding storage: an
-    // action can free that storage while the chain still runs (a reload
-    // replaces this surface's config, and a closing action frees the
-    // surface and its config on Win32), and everything below reads the
-    // actions again. The arena outlives `self` safely: it holds only the
-    // allocator, which belongs to the app.
-    var actions_arena: std.heap.ArenaAllocator = .init(self.alloc);
-    defer actions_arena.deinit();
-    const actions = try leaf.cloneActions(actions_arena.allocator());
 
     // Decided before anything runs, since nothing may read `self` once a
     // closing action has run.
