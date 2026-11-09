@@ -82,15 +82,17 @@ Win32-validated VT protocol coverage is tracked in
   reason. See
   [windows-vt-conformance.md](windows-vt-conformance.md#conpty-transport-generations-and-mangling-catalog).
 - Native Win32 windows, tab bar with overflow, a numeric tab overview
-  (`toggle_tab_overview`, no default keybind), same-window tab reorder, and
-  exact-pane drag-to-split.
+  (`toggle_tab_overview`, no default keybind), tab reorder, exact-pane
+  drag-to-split, and tab tear-off into a new window or another window of the
+  same process (`move_tab_to_new_window`, no default keybind).
 - Horizontal and vertical splits.
 - Deliberate elevated windows through the command palette or
   `new_window_elevated:<profile-key>`, with integrity-scoped single-instance
   IPC and no elevated session restore. See [Running elevated](windows.md#running-elevated).
 - Structural undo/redo for new splits, single-tab close (restoring the
   exact tab, panes, and layout), and drag-to-split subtree transfers. Tab
-  reorder and multi-tab close modes are not undoable. `clear_screen` and
+  reorder, moving a tab to another window, and multi-tab close modes are not
+  undoable. `clear_screen` and
   `reset` have a terminal-local undo and redo that restores the saved
   screen; with the bundled ConPTY the restored content is shifted to the
   console's live cursor, and some cases can still leave noctty and ConPTY

@@ -297,7 +297,8 @@ that govern each symbol you change, or that none does.
   `initPresentComposedPipeline` and the `split_dim` pipeline's flags in
   `src/renderer/opengl/shaders.zig`, and
   `src/renderer/shaders/glsl/present_composed.f.glsl`), the
-  window menu, the quick terminal (`win32_quick_terminal.zig`,
+  window menu, a torn-off tab's window (`window_state.Origin.tear_off`,
+  `window_start.placeTearOff`), the quick terminal (`win32_quick_terminal.zig`,
   `win32/quick_terminal_host.zig`).
 - [chrome-tabs-paint.md](docs/agents/log/chrome-tabs-paint.md): tab buttons
   (`tabButtonProc`, `drawButton`, labels, tooltips, close X, the active tab's
@@ -365,7 +366,11 @@ that govern each symbol you change, or that none does.
   `win32/registry.zig`), focus after a close, shell reducer effects,
   local and structural undo/redo (`win32_undo.zig`,
   `win32_structural_history.zig`, `undo-timeout`, split undo and redo through
-  the shell model: `Host.applyCommittedSplitHistory`).
+  the shell model: `Host.applyCommittedSplitHistory`), moving a tab to a new
+  window or another window (tab tear-off: `App.moveTabToWindow`,
+  `App.requestTabMove`, `Host.giveTab`, `Host.reparentSurface`,
+  `win32/tab_drag.zig`, the shell model's `move_tab_to_window`,
+  `move_tab_to_new_window`).
 - [input.md](docs/agents/log/input.md): `win32/input.zig` and key messages
   (`WM_KEYDOWN`/`WM_CHAR`/`WM_SYSCHAR`, dead keys, `ToUnicode`, non-Latin
   layouts), default Windows keybindings, Win32 input mode (DEC 9001), the
