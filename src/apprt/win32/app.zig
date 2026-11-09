@@ -906,6 +906,10 @@ pub const App = struct {
     /// whose repeats and releases are swallowed too (`paneDividerDragKey`,
     /// indexed by `paneDividerPhysicalKey`).
     pane_divider_held_keys: std.StaticBitSet(768) = .initEmpty(),
+    /// For each held physical key, the virtual key that asks its state
+    /// (`reconcilePaneDividerHeldKeys`): VK_LSHIFT or VK_RSHIFT rather than
+    /// VK_SHIFT, and so on.
+    pane_divider_held_vks: [768]u8 = @splat(0),
     quick_terminal_keyboard_diagnostic_logged: bool = false,
     update_notice: ?UpdateNotice = null,
     /// The host whose banner button started the running update action, so
@@ -1842,6 +1846,7 @@ pub const App = struct {
                 const host = self.paneDividerDragHost() orelse return false;
                 if (repeat) return true;
                 self.pane_divider_held_keys.set(key);
+                self.pane_divider_held_vks[key] = paneDividerHeldVirtualKey(@truncate(wParam), lParam);
                 // With an IME composing, Windows hands the window
                 // VK_PROCESSKEY for every key, Esc included; the scan code
                 // still says which, and its release may come as either
@@ -1860,11 +1865,40 @@ pub const App = struct {
         }
     }
 
-    /// The app lost activation (WM_ACTIVATEAPP): a key the drag held can go
-    /// up, and down again, in another app, so a later repeat of it is a new
-    /// press's, not the drag's.
-    pub fn forgetPaneDividerHeldKeys(self: *App) void {
-        self.pane_divider_held_keys = .initEmpty();
+    /// The app is active again (WM_ACTIVATEAPP): a key the drag held may
+    /// have gone up while another app had the keyboard, and its release
+    /// went there. Keys still down (`keyDown`, `GetAsyncKeyState` in the
+    /// app) stay the drag's, so their release is swallowed when it comes;
+    /// keys that are up are forgotten, so a press made later is the
+    /// terminal's. A key released and pressed again while noctty was
+    /// inactive is down either way and cannot be told from one held the
+    /// whole time: its repeats and release are still swallowed once.
+    /// Forgetting every key at deactivation instead let the release of a
+    /// key held across the switch reach a terminal without its press.
+    pub fn reconcilePaneDividerHeldKeys(self: *App, keyDown: *const fn (u8) bool) void {
+        var it = self.pane_divider_held_keys.iterator(.{});
+        while (it.next()) |key| {
+            if (!keyDown(self.pane_divider_held_vks[key])) self.pane_divider_held_keys.unset(key);
+        }
+    }
+
+    pub fn asyncKeyDown(vk: u8) bool {
+        return sys.GetAsyncKeyState(vk) < 0;
+    }
+
+    /// The virtual key whose state says whether the physical key of a key
+    /// message is down: the sided one for Shift, Ctrl and Alt.
+    fn paneDividerHeldVirtualKey(vk: u8, lParam: LPARAM) u8 {
+        const bits: usize = @bitCast(lParam);
+        const scan = (bits >> 16) & 0xFF;
+        const extended = (bits >> 24) & 1 != 0;
+        return switch (vk) {
+            c.VK_SHIFT => if (scan == 0x36) c.VK_RSHIFT else c.VK_LSHIFT,
+            c.VK_CONTROL => if (extended) c.VK_RCONTROL else c.VK_LCONTROL,
+            c.VK_MENU => if (extended) c.VK_RMENU else c.VK_LMENU,
+            c.VK_PROCESSKEY => if (scan == escape_scan_code) c.VK_ESCAPE else vk,
+            else => vk,
+        };
     }
 
     /// A key message's physical key: its scan code and extended-key bit

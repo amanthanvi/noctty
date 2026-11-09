@@ -192,9 +192,9 @@ pub fn For(comptime Tree: type) type {
         /// conversion: an f16 has no 1 px step on a wide window, and the
         /// nearest one to 1 - 40/3840 (0.98958) is 0.98975, which puts the
         /// divider 1 px past the bound and leaves a 39 px pane; then the
-        /// ratio steps one f16 back toward the inside. (A pane inside a
-        /// nested split is measured through more f16 slot arithmetic and can
-        /// still come out at most 1 px under the minimum.)
+        /// ratio steps one f16 back toward the inside. A pane inside a
+        /// nested split goes through more f16 slot arithmetic; `fitRatio`,
+        /// after this, checks those on the real layout.
         pub fn ratioAt(found: Divider, want: f32, bounds: Bounds, current: f16) f16 {
             const span: f32 = @floatFromInt(@max(1, splitExtent(found)));
             // A subtree already smaller than its minimum keeps its size
@@ -209,6 +209,71 @@ pub fn For(comptime Tree: type) type {
             const px = @round(@as(f32, ratio) * span);
             if (px < lo_px or px > hi_px) return current;
             return ratio;
+        }
+
+        /// A drag step's ratio: `want` held in `bounds` (`ratioAt`), then
+        /// fitted to the real layout (`fitRatio`). The Host's drag and the
+        /// tests take this one path.
+        pub fn stepRatio(alloc: std.mem.Allocator, tree: *Tree, content: Rect, found: Divider, want: f32, bounds: Bounds, start_ratio: f16, min_px: i32) std.mem.Allocator.Error!f16 {
+            const current = tree.nodes[found.handle.idx()].split.ratio;
+            const at = ratioAt(found, want, bounds, current);
+            return fitRatio(alloc, tree, content, found.handle, at, start_ratio, min_px);
+        }
+
+        /// `ratio`, unless laying the panes out at it leaves a pane under
+        /// the split at `handle` short of its floor along the split's axis
+        /// (`min_px`, or its size at `start_ratio` if that was smaller):
+        /// then the ratio steps one f16 at a time toward `start_ratio`,
+        /// where every pane fits. Measured on the real slots
+        /// (`SplitTree.spatial` and the layout's rounding), so it holds at
+        /// any depth: the bounds are ratios, and a pane deep in a chain goes
+        /// through f16 slot arithmetic at every level. In CodeRabbit's case
+        /// on #689 (11,866 px, one pane beside a chain of 118, the root at
+        /// its upper bound) a chain pane came out at 39 px of a 40 px
+        /// minimum. The tree keeps the ratio it had on entry.
+        pub fn fitRatio(alloc: std.mem.Allocator, tree: *Tree, content: Rect, handle: Handle, ratio: f16, start_ratio: f16, min_px: i32) std.mem.Allocator.Error!f16 {
+            if (handle.idx() >= tree.nodes.len) return ratio;
+            const axis = switch (tree.nodes[handle.idx()]) {
+                .leaf => return ratio,
+                .split => |s| s.layout,
+            };
+            const entry = tree.nodes[handle.idx()].split.ratio;
+            defer tree.resizeInPlace(handle, entry);
+            tree.resizeInPlace(handle, start_ratio);
+            var start = try tree.spatial(alloc);
+            defer start.deinit(alloc);
+            var candidate = ratio;
+            // Each step moves the divider by about one f16 of the split; a
+            // deep chain at its bound needed tens. Past the cap, the start.
+            var steps: usize = 0;
+            while (candidate != start_ratio and steps < 4096) : (steps += 1) {
+                tree.resizeInPlace(handle, candidate);
+                var now = try tree.spatial(alloc);
+                defer now.deinit(alloc);
+                if (leavesFit(tree, now, start, content, handle, axis, min_px)) return candidate;
+                candidate = std.math.nextAfter(f16, candidate, start_ratio);
+            }
+            return start_ratio;
+        }
+
+        fn leavesFit(tree: *const Tree, now: Spatial, start: Spatial, content: Rect, handle: Handle, axis: Layout, min_px: i32) bool {
+            if (handle.idx() >= tree.nodes.len or handle.idx() >= now.slots.len or handle.idx() >= start.slots.len) return true;
+            return switch (tree.nodes[handle.idx()]) {
+                .leaf => slotPixels(content, now.slots[handle.idx()], axis) >=
+                    @min(min_px, slotPixels(content, start.slots[handle.idx()], axis)),
+                .split => |s| leavesFit(tree, now, start, content, s.left, axis, min_px) and
+                    leavesFit(tree, now, start, content, s.right, axis, min_px),
+            };
+        }
+
+        /// A slot's extent along `axis` in pixels, rounded as the layout
+        /// rounds a pane's width or height.
+        fn slotPixels(content: Rect, slot: anytype, axis: Layout) i32 {
+            const rect = slotRect(content, slot);
+            return switch (axis) {
+                .horizontal => rect.right - rect.left,
+                .vertical => rect.bottom - rect.top,
+            };
         }
 
         /// The ratio that puts `found`'s divider at `along` (a pixel on the
@@ -605,12 +670,12 @@ test "pane divider: the minimum holds after the ratio is rounded to f16, stacked
 }
 
 test "pane divider: no pane of a nested split rounds under its floor at the bounds" {
-    // `ratioAt` checks the dragged divider's pixel; a nested pane is laid
-    // out through more f16 slot arithmetic. Sweeps of 942,648 placements
+    // `ratioAt` alone, on shallow trees: sweeps of 942,648 placements
     // (three nested shapes, inner ratios 1/3 to 0.7, outer starts 0.2 to
-    // 0.8, side by side and stacked, 200 to 4000 px, both bounds) found
-    // none under its floor (40 px, or its size at the press if smaller);
-    // this keeps a sample of them.
+    // 0.8, side by side and stacked, 200 to 4000 px, both bounds) found no
+    // pane under its floor (40 px, or its size at the press if smaller);
+    // this keeps a sample of them. Deeper trees can (the deep-chain test
+    // below), which `fitRatio` covers.
     const ratios = [_]f16{ 0.5, 0.3, 0.7, 1.0 / 3.0 };
     var views = [_]TestView{ .{ .label = "A" }, .{ .label = "B" }, .{ .label = "C" } };
     for ([_]TestTree.Split.Direction{ .right, .down }) |dir| for (0..2) |shape| for (ratios) |inner| {
@@ -646,6 +711,74 @@ test "pane divider: no pane of a nested split rounds under its floor at the boun
             }
         }
     };
+}
+
+test "pane divider: a deep chain keeps every pane at its floor at the bound (CodeRabbit's case)" {
+    // 11,866 px: one pane on the left of the root and a chain of 118 on
+    // the right, the chain's split i giving its left side f16(1/(118 - i))
+    // so the 118 panes are equal (about 50 px). Dragging the root to its
+    // upper bound brings them to 40 px nominal, through 118 levels of f16
+    // slot arithmetic.
+    const alloc = testing.allocator;
+    var labels = std.heap.ArenaAllocator.init(alloc);
+    defer labels.deinit();
+    const views = try alloc.alloc(TestView, 119);
+    defer alloc.free(views);
+    for (views, 0..) |*view, i| view.* = .{ .label = try std.fmt.allocPrint(labels.allocator(), "P{d}", .{i}) };
+    var tree = try TestTree.init(alloc, &views[0]);
+    defer tree.deinit();
+    {
+        var first = try TestTree.init(alloc, &views[1]);
+        defer first.deinit();
+        const next = try tree.split(alloc, .root, .right, 0.5, &first);
+        tree.deinit();
+        tree = next;
+    }
+    var last = handleOfView(&tree, views[1].label);
+    for (0..117) |i| {
+        var inserted = try TestTree.init(alloc, &views[i + 2]);
+        defer inserted.deinit();
+        const left_share: f16 = @floatCast(1.0 / @as(f32, @floatFromInt(118 - i)));
+        // The new pane goes right of the last one, which keeps 1/(118 - i).
+        const next = try tree.split(alloc, last, .right, left_share, &inserted);
+        tree.deinit();
+        tree = next;
+        last = handleOfView(&tree, views[i + 2].label);
+    }
+    var panes: usize = 0;
+    var counting = tree.iterator();
+    while (counting.next()) |_| panes += 1;
+    try testing.expectEqual(@as(usize, 119), panes);
+
+    const content: Rect = .{ .left = 0, .top = 0, .right = 11866, .bottom = 600 };
+    var start = try tree.spatial(alloc);
+    defer start.deinit(alloc);
+    const found = Dividers.divider(&tree, start, content, .root, 3).?;
+    const bounds = Dividers.ratioBounds(&tree, start, content, found, 40).?;
+    const dragged = Dividers.dragRatio(&tree, start, content, found, 20000, 40).?;
+    const ratio = try Dividers.stepRatio(alloc, &tree, content, found, 2.0, bounds, 0.5, 40);
+    tree.resizeInPlace(.root, ratio);
+    var now = try tree.spatial(alloc);
+    defer now.deinit(alloc);
+    var short: usize = 0;
+    var it = tree.iterator();
+    while (it.next()) |entry| {
+        const px_now = win32_layout.roundedSlotPixel(@floatCast(now.slots[entry.handle.idx()].width), content.width());
+        const px_start = win32_layout.roundedSlotPixel(@floatCast(start.slots[entry.handle.idx()].width), content.width());
+        if (px_now < @min(40, px_start)) {
+            if (short == 0) std.debug.print("deep chain: a pane is {d} px (was {d}) at root ratio {d} (dragged {d})\n", .{ px_now, px_start, @as(f32, ratio), @as(f32, dragged) });
+            short += 1;
+        }
+    }
+    try testing.expectEqual(@as(usize, 0), short);
+}
+
+fn handleOfViewPtr(tree: *const TestTree, view: *const TestView) TestTree.Node.Handle {
+    var it = tree.iterator();
+    while (it.next()) |entry| {
+        if (entry.view.label.ptr == view.label.ptr and entry.view == view) return entry.handle;
+    }
+    unreachable;
 }
 
 test "pane divider: a pane already below the minimum keeps its size and does not jump" {

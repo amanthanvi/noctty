@@ -160,7 +160,12 @@ pub fn invalidateVisibleSurfaceChildPaint(
                 if (defer_surface_repaints) {
                     entry.view.markLiveResizeRepaintDeferred();
                 } else {
-                    entry.view.repaintHostedChild() catch |err| {
+                    // In a divider step, this repaint shares the step's one
+                    // synchronous paint with the panes' WM_SIZE
+                    // (`paneDividerStepRepaintMode`); outside one it paints
+                    // at once, as it always has.
+                    const now = paneDividerStepRepaintMode(.update_now, &self.pane_divider_step_paints) == .update_now;
+                    entry.view.repaintHostedChildWith(now) catch |err| {
                         log.err("win32 hosted child repaint request failed err={}", .{err});
                     };
                 }
@@ -394,8 +399,14 @@ pub fn markLiveResizeRepaintDeferred(self: *Surface) void {
     self.live_resize_repaint_deferred = true;
 }
 
+/// Test-only: synchronous paint requests (`queuePaintRequest(true)`, which
+/// is an `UpdateWindow` or, with a paint pending, a `RedrawWindow` with
+/// `RDW_UPDATENOW`), for tests that count what a layout step paints.
+pub var test_sync_paint_requests: usize = 0;
+
 pub fn queuePaintRequest(self: *Surface, update_now: bool) !void {
     const hwnd = self.hwnd orelse return error.NoWindow;
+    if (@import("builtin").is_test and update_now) test_sync_paint_requests += 1;
     self.render_trace.noteQueuePaint(update_now);
     if (self.paint_pending) {
         if (update_now) {
@@ -479,6 +490,13 @@ pub fn flushDeferredLiveResizeRepaint(self: *Surface, repaint_fn: anytype) !bool
 }
 
 pub fn repaintHostedChild(self: *Surface) !void {
+    return repaintHostedChildWith(self, true);
+}
+
+/// `repaintHostedChild`, painting at once (`update_now`) or queueing the
+/// paint. A repaint deferred by a live frame resize is flushed at once
+/// either way, as before.
+pub fn repaintHostedChildWith(self: *Surface, update_now: bool) !void {
     if (self.live_resize_repaint_deferred) {
         _ = try self.flushDeferredLiveResizeRepaint(struct {
             fn repaint(surface: *Surface) !void {
@@ -488,7 +506,7 @@ pub fn repaintHostedChild(self: *Surface) !void {
         return;
     }
 
-    try self.queuePaintRequest(true);
+    try self.queuePaintRequest(update_now);
 }
 
 pub fn requestRepaintWithMode(self: *Surface, repaint_mode: SurfaceRepaintRequestMode) !void {

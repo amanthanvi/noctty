@@ -1995,6 +1995,8 @@ pub const Surface = struct {
 
     pub const repaintHostedChild = surface_presentation.repaintHostedChild;
 
+    pub const repaintHostedChildWith = surface_presentation.repaintHostedChildWith;
+
     pub const requestRepaintWithMode = surface_presentation.requestRepaintWithMode;
 
     pub const requestRepaint = surface_presentation.requestRepaint;

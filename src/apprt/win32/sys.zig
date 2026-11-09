@@ -243,6 +243,8 @@ pub extern "user32" fn GetClientRect(hWnd: HWND, lpRect: *RECT) callconv(.winapi
 
 pub extern "user32" fn GetKeyState(nVirtKey: i32) callconv(.winapi) SHORT;
 
+pub extern "user32" fn GetAsyncKeyState(vKey: i32) callconv(.winapi) SHORT;
+
 pub extern "user32" fn GetKeyboardState(lpKeyState: *[256]u8) callconv(.winapi) BOOL;
 
 pub extern "user32" fn SetKeyboardState(lpKeyState: *const [256]u8) callconv(.winapi) BOOL;

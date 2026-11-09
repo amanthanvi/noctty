@@ -583,6 +583,9 @@ pub const PaneDividerDrag = struct {
 /// system's double-click time and rectangle makes a double-click.
 pub const PaneDividerPress = struct {
     tab_id: u32,
+    /// The tree's generation: a pane that exits between the clicks can put
+    /// another split at the same handle and spot.
+    generation: u64,
     handle: SplitTreeSurface.Node.Handle,
     time_ms: u32,
     point: POINT,
@@ -4403,6 +4406,132 @@ pub const Host = struct {
     test "showing a tab holds its panes' resizes until the whole tab is placed" {
         if (builtin.os.tag != .windows) return error.SkipZigTest;
         try runOnPrivateDesktop(shownTabResizeTestBody);
+    }
+
+    test "a divider drag step makes one synchronous paint request across all the panes it moves" {
+        if (builtin.os.tag != .windows) return error.SkipZigTest;
+        try runOnPrivateDesktop(dividerStepPaintCountTestBody);
+    }
+
+    fn dividerStepPaintCountTestBody() !void {
+        var core_app: CoreApp = undefined;
+        var app: App = undefined;
+        var host: Host = undefined;
+        var surface_a: Surface = undefined;
+        var surface_b: Surface = undefined;
+        var surface_c: Surface = undefined;
+        var session: TestSession = .{};
+        try session.init(.{
+            .core_app = &core_app,
+            .app = &app,
+            .hosts = &.{.{ .storage = &host, .register = true }},
+            .surfaces = &.{
+                .{ .storage = &surface_a, .host = &host, .register = true, .window_visible = false },
+                .{ .storage = &surface_b, .host = &host, .register = true, .window_visible = false },
+                .{ .storage = &surface_c, .host = &host, .register = true, .window_visible = false },
+            },
+            .tabs = &.{.{ .host = &host, .surface = &surface_a, .id = 1 }},
+        });
+        defer session.deinit();
+        const window = try BannerTestWindow.init(&host);
+        defer window.deinit(&host);
+        _ = sys.ShowWindow(window.parent, c.SW_SHOWNOACTIVATE);
+        defer if (host.cached_window_title) |value| std.testing.allocator.free(value);
+        host.surfaces_visible = true;
+        try startTestPane(&surface_a, &host, window.parent);
+        defer stopTestPane(&surface_a);
+        try startTestPane(&surface_b, &host, window.parent);
+        defer stopTestPane(&surface_b);
+        try startTestPane(&surface_c, &host, window.parent);
+        defer stopTestPane(&surface_c);
+
+        // [A | (B / C)]: the root's divider moves all three panes.
+        const tab = &host.tabs.items[0];
+        var b_tree = try SplitTreeSurface.init(std.testing.allocator, &surface_b);
+        defer b_tree.deinit();
+        const with_b = try tab.tree.split(std.testing.allocator, .root, .right, 0.5, &b_tree);
+        tab.tree.deinit();
+        tab.tree = with_b;
+        var c_tree = try SplitTreeSurface.init(std.testing.allocator, &surface_c);
+        defer c_tree.deinit();
+        const with_c = try tab.tree.split(std.testing.allocator, tab.findHandle(&surface_b).?, .down, 0.5, &c_tree);
+        tab.tree.deinit();
+        tab.tree = with_c;
+        tab.focused = tab.findHandle(&surface_a).?;
+        // The stand-ins have no renderer: the dim the layout gives each pane
+        // is the one already "sent", so nothing goes to a renderer thread.
+        const high_contrast = isHighContrastActive();
+        surface_a.split_dimmed_sent = win32_chrome_state.splitDimmed(3, true, high_contrast);
+        surface_b.split_dimmed_sent = win32_chrome_state.splitDimmed(3, false, high_contrast);
+        surface_c.split_dimmed_sent = win32_chrome_state.splitDimmed(3, false, high_contrast);
+        try host.layout();
+        try std.testing.expect(surface_a.window_visible and surface_b.window_visible and surface_c.window_visible);
+
+        // The stand-ins are STATIC windows: their WM_SIZE goes to the pane's
+        // `windowSizeChanged` here, as the terminal window's own procedure
+        // sends it.
+        SizeChangeForwarder.install(0, surface_a.hwnd.?, &surface_a);
+        SizeChangeForwarder.install(1, surface_b.hwnd.?, &surface_b);
+        SizeChangeForwarder.install(2, surface_c.hwnd.?, &surface_c);
+        defer SizeChangeForwarder.uninstall();
+        // Settle mode is on, as right after an earlier drag ended: on its own
+        // it makes every resized pane paint at once on its WM_SIZE.
+        host.startResizeSettleRepaints();
+        defer host.killResizeSettleTimer();
+        try std.testing.expect(surface_presentation.resizeSettleActive(&host, sys.GetTickCount64()));
+
+        const content = host.paneDividerContent() orelse return error.TestNoContent;
+        const press = try paneDividerPositionForTest(&host, content);
+        try std.testing.expect(host.beginPaneDividerDrag(content, .{ .x = press, .y = content.top + 10 }, 1000));
+        surface_presentation.test_sync_paint_requests = 0;
+        SizeChangeForwarder.sizes = 0;
+        // One step of the drag: the layout moves A, B and C. Their WM_SIZE
+        // paints and the layout's own repaint of every visible pane all
+        // count; one of them may paint at once, the others queue.
+        host.dragPaneDivider(content, .{ .x = press - 60, .y = content.top + 10 });
+        try std.testing.expect(tab.tree.nodes[0].split.ratio < 0.5);
+        try std.testing.expect(SizeChangeForwarder.sizes >= 3);
+        try std.testing.expectEqual(@as(usize, 1), surface_presentation.test_sync_paint_requests);
+        host.finishPaneDividerDrag(content);
+    }
+
+    /// Sends a stand-in pane's WM_SIZE to its Surface's `windowSizeChanged`.
+    const SizeChangeForwarder = struct {
+        var panes: [3]?HWND = .{ null, null, null };
+        var surfaces: [3]?*Surface = .{ null, null, null };
+        var previous: [3]?*const anyopaque = .{ null, null, null };
+        var sizes: usize = 0;
+
+        fn install(index: usize, pane: HWND, surface: *Surface) void {
+            panes[index] = pane;
+            surfaces[index] = surface;
+            const old = sys.SetWindowLongPtrW(pane, c.GWLP_WNDPROC, @as(LONG_PTR, @intCast(@intFromPtr(&proc))));
+            previous[index] = if (old == 0) null else @ptrFromInt(@as(usize, @intCast(old)));
+        }
+
+        fn uninstall() void {
+            panes = .{ null, null, null };
+            surfaces = .{ null, null, null };
+        }
+
+        fn proc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.winapi) LRESULT {
+            for (panes, 0..) |pane, i| {
+                if (pane != hwnd) continue;
+                if (msg == c.WM_SIZE) {
+                    sizes += 1;
+                    surfaces[i].?.windowSizeChanged();
+                }
+                return sys.CallWindowProcW(previous[i], hwnd, msg, wParam, lParam);
+            }
+            return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
+        }
+    };
+
+    fn paneDividerPositionForTest(host: *Host, content: RECT) !i32 {
+        const tab = host.activeTab() orelse return error.TestNoTab;
+        var spatial = try tab.tree.spatial(std.testing.allocator);
+        defer spatial.deinit(std.testing.allocator);
+        return (PaneDividers.divider(&tab.tree, spatial, paneDividerArea(content), .root, 0) orelse return error.TestNoDivider).position;
     }
 
     test "showing a zoomed tab keeps its other panes hidden until a layout places them" {
@@ -10851,7 +10980,7 @@ pub const Host = struct {
         };
         const tab = self.activeTab() orelse return false;
         if (self.pane_divider_press) |press| {
-            if (press.tab_id == tab.id and press.handle == found.handle and paneDividerDoubleClick(press, time_ms, point)) {
+            if (press.tab_id == tab.id and press.generation == tab.tree.generation and press.handle == found.handle and paneDividerDoubleClick(press, time_ms, point)) {
                 self.pane_divider_press = null;
                 self.equalizePaneDivider(tab, found.handle);
                 // The divider may have moved from under the pointer: the
@@ -10863,7 +10992,7 @@ pub const Host = struct {
         }
         const start_ratio = tab.tree.nodes[found.handle.idx()].split.ratio;
         const bounds = self.paneDividerBounds(tab, found.handle, start_ratio, content) orelse return false;
-        self.pane_divider_press = .{ .tab_id = tab.id, .handle = found.handle, .time_ms = time_ms, .point = point };
+        self.pane_divider_press = .{ .tab_id = tab.id, .generation = tab.tree.generation, .handle = found.handle, .time_ms = time_ms, .point = point };
         const along = switch (found.layout) {
             .horizontal => point.x,
             .vertical => point.y,
@@ -10978,13 +11107,17 @@ pub const Host = struct {
                 drag.anchor_content = content;
             }
             const want = drag.anchor_ratio + @as(f32, @floatFromInt(along - drag.anchor_along)) / span;
-            break :ratio PaneDividers.ratioAt(found, want, drag.bounds, tab.tree.nodes[drag.handle.idx()].split.ratio);
+            break :ratio PaneDividers.stepRatio(alloc, &tab.tree, area, found, want, drag.bounds, drag.start_ratio, pane_divider.minPane(self.current_dpi)) catch return;
         };
-        if (ratio == tab.tree.nodes[drag.handle.idx()].split.ratio) return;
-        tab.tree.resizeInPlace(drag.handle, ratio);
-        if (ratio != drag.start_ratio) drag.moved = true;
+        const changed = ratio != tab.tree.nodes[drag.handle.idx()].split.ratio;
+        if (changed) {
+            tab.tree.resizeInPlace(drag.handle, ratio);
+            if (ratio != drag.start_ratio) drag.moved = true;
+        }
+        // Read on every step, not only when the ratio moves: the same ratio
+        // lands on another pixel once the panes' width changes.
         drag.off_start = ratio != drag.start_ratio and !self.paneDividerOnStartPixel(tab, drag.*, content);
-        self.layoutPaneDividerStep();
+        if (changed) self.layoutPaneDividerStep();
     }
 
     /// The ratios a drag of the divider at `handle` may take, measured with
@@ -11012,16 +11145,20 @@ pub const Host = struct {
         const drag = self.pane_divider_drag orelse return;
         self.pane_divider_drag = null;
         self.pane_divider_button_held = true;
+        if (drag.moved) self.settlePaneDividerRepaints();
         if (drag.off_start) _ = self.clearPaneDividerHistory(drag.tab_id, drag.press_sequence);
     }
 
     /// What one keyboard `resize_split` clears (`App.resizeSplitFallback`),
     /// for a resize made at the press: the structural undo and redo recorded
     /// before `press_sequence`, and the terminal redo of the tab's panes.
-    /// What was recorded during the drag (a close, a split, an undo that
+    /// What was recorded during the drag (a close or a split that
     /// automation made meanwhile) is newer than the resize and stays: a
-    /// close's entry keeps its tab's sessions. False when an entry could not
-    /// be disposed now.
+    /// close's entry keeps its tab's sessions. Undo and redo cannot run
+    /// mid-drag (keys are intercepted, and `isSafeAutomationAction` refuses
+    /// both); an entry `moveNewest` carries between the stacks keeps its old
+    /// sequence, so one moved during a drag would go. False when an entry
+    /// could not be disposed now.
     fn clearPaneDividerHistory(self: *Host, tab_id: u32, press_sequence: u64) bool {
         if (!self.pruneStructuralHistoryBeforeSequence(press_sequence)) return false;
         for (self.tabs.items) |*tab| {
