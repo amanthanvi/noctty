@@ -434,6 +434,8 @@ pub fn Fixtures(comptime runtime: anytype) type {
                     app.registry.deinit(self.allocator);
                     app.notifications.deinit();
                     runtime.appDiscardDeferredOpens(app);
+                    // Tab moves a test asked for and never drained.
+                    app.pending_tab_moves.deinit(self.allocator);
                 }
                 if (self.core_app_initialized) self.core_app.?.deinit();
                 self.* = .{};
@@ -582,7 +584,8 @@ pub fn Fixtures(comptime runtime: anytype) type {
             }
 
             pub fn closeWindows(self: *WindowStartTestApp) void {
-                var left: usize = 16;
+                // One pass per window there is (a test can open more than 16).
+                var left: usize = self.app.registry.windows.items.len + 1;
                 while (self.app.registry.windows.items.len > 0 and left > 0) : (left -= 1) self.closeWindow(self.newest());
             }
 

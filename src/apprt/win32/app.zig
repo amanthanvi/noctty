@@ -815,6 +815,12 @@ pub const App = struct {
     /// Esc ended a tab drag; its key-up is taken too, so no terminal sees a
     /// release it never saw pressed.
     tab_drag_escape_down: bool = false,
+    /// Tab moves asked of windows, in order, one per tab, run by the outer
+    /// message pump (`drainPendingTabMoves`), never from inside a handler or
+    /// a nested modal loop: a move can free the window it was asked of. As
+    /// many as there are tabs, since an `all:` binding queues each before the
+    /// pump runs any.
+    pending_tab_moves: std.ArrayListUnmanaged(PendingTabMove) = .empty,
     /// The label's UIA element (`live_text`): it says what a drop does.
     tab_drag_preview_uia_provider: ?*win32_uia.ChromeControlProvider = null,
     /// What a drop does, as the label says it (`tabDragLabelAction`).
@@ -1853,6 +1859,7 @@ pub const App = struct {
         self.releaseSessionOwnership();
         self.destroyAllWindows();
         win32.detachChromeControlProvider(self, &self.tab_drag_preview_uia_provider);
+        self.pending_tab_moves.deinit(self.core_app.alloc);
         if (self.tab_drag_preview_hwnd) |preview| {
             setWindowData(preview, null);
             if (self.tab_drag_preview_prev_proc) |previous| _ = sys.SetWindowLongPtrW(preview, c.GWLP_WNDPROC, @bitCast(@intFromPtr(previous)));
@@ -7798,6 +7805,17 @@ pub const App = struct {
     /// test of what a moved pane's font change does then.
     pub var test_tab_move_activating: ?*const fn (*Host, *Surface) anyerror!void = null;
 
+    pub const PendingTabMove = struct { host_id: u32, request: Host.TabMoveRequest };
+
+    /// How many moves wait for `host`'s tabs.
+    pub fn pendingTabMoveCount(self: *const App, host: *const Host) usize {
+        var count: usize = 0;
+        for (self.pending_tab_moves.items) |pending| {
+            if (pending.host_id == host.id) count += 1;
+        }
+        return count;
+    }
+
     /// Where a tab leaving its window goes (`moveTabToWindow`).
     pub const TabMoveDest = union(enum) {
         /// A new window: where the tab was dropped, or (null, for
@@ -7816,20 +7834,14 @@ pub const App = struct {
     /// order, one per tab (a later one for the same tab replaces it), so an
     /// `all:` binding moves each tab it reaches; the only tab still stays.
     pub fn requestTabMove(self: *App, host: *Host, tab_id: u32, dest: Host.TabMoveRequest.Dest) bool {
-        _ = self;
         const hwnd = host.hwnd orelse return false;
-        const queued = host.pending_tab_moves[0..host.pending_tab_move_count];
-        const slot = for (queued) |*request| {
-            if (request.tab_id == tab_id) break request;
-        } else slot: {
-            if (host.pending_tab_move_count == host.pending_tab_moves.len) {
-                log.warn("tab move declined: too many waiting", .{});
-                return false;
-            }
-            host.pending_tab_move_count += 1;
-            break :slot &host.pending_tab_moves[host.pending_tab_move_count - 1];
+        const slot = for (self.pending_tab_moves.items) |*pending| {
+            if (pending.host_id == host.id and pending.request.tab_id == tab_id) break pending;
+        } else self.pending_tab_moves.addOne(self.core_app.alloc) catch {
+            log.warn("tab move declined: out of memory", .{});
+            return false;
         };
-        slot.* = .{ .tab_id = tab_id, .dest = dest };
+        slot.* = .{ .host_id = host.id, .request = .{ .tab_id = tab_id, .dest = dest } };
         // A wake for the pump, which runs the queue before its next wait.
         if (sys.PostMessageW(hwnd, c.WM_WINHOSTTY_TAB_MOVE, 0, 0) == 0) {
             log.warn("tab move wake could not be posted err={}", .{windows.kernel32.GetLastError()});
@@ -7841,16 +7853,15 @@ pub const App = struct {
     /// window procedure on the stack. A move can free the window it was asked
     /// of, so the windows are found again for each request.
     pub fn drainPendingTabMoves(self: *App) void {
-        var guard: usize = 0;
-        while (guard < 256) : (guard += 1) {
-            const host = for (self.registry.hosts.items) |host| {
-                if (host.pending_tab_move_count > 0) break host;
-            } else return;
-            const request = host.pending_tab_moves[0];
-            std.mem.copyForwards(Host.TabMoveRequest, host.pending_tab_moves[0 .. host.pending_tab_move_count - 1], host.pending_tab_moves[1..host.pending_tab_move_count]);
-            host.pending_tab_move_count -= 1;
-            self.runTabMove(host, request);
+        // Each run takes one request off the queue and adds none, so this ends.
+        while (self.pending_tab_moves.items.len > 0) {
+            const pending = self.pending_tab_moves.orderedRemove(0);
+            // The window may have gone meanwhile (its last pane closed, or an
+            // earlier move emptied it).
+            const host = self.registry.findHostById(pending.host_id) orelse continue;
+            self.runTabMove(host, pending.request);
         }
+        self.pending_tab_moves.clearAndFree(self.core_app.alloc);
     }
 
     fn runTabMove(self: *App, host: *Host, request: Host.TabMoveRequest) void {
@@ -15075,7 +15086,7 @@ test "win32 move_tab_to_new_window moves the tab from the message loop, and does
             const lone_host = try setup.window(1, false);
             const lone = lone_host.activeSurface().?;
             try std.testing.expect(!try app.performAction(.{ .surface = lone.core() }, .move_tab_to_new_window, {}));
-            try std.testing.expect(lone_host.pending_tab_move_count == 0);
+            try std.testing.expect(app.pendingTabMoveCount(lone_host) == 0);
 
             const source = try setup.window(2, false);
             // A window the fixture made after the first is a `CW_USEDEFAULT`
@@ -15092,9 +15103,9 @@ test "win32 move_tab_to_new_window moves the tab from the message loop, and does
             try std.testing.expect(try app.performAction(.{ .surface = front.core() }, .move_tab_to_new_window, {}));
             // Nothing moves inside the key binding's call.
             try std.testing.expectEqual(source, front.host.?);
-            try std.testing.expect(source.pending_tab_move_count != 0);
+            try std.testing.expect(app.pendingTabMoveCount(source) != 0);
             TabMoveFixture.runPosted(source);
-            try std.testing.expect(source.pending_tab_move_count == 0);
+            try std.testing.expect(app.pendingTabMoveCount(source) == 0);
             try std.testing.expect(front.host.? != source);
             try std.testing.expectEqual(@as(usize, 3), app.registry.hosts.items.len);
             try std.testing.expectEqual(@as(usize, 1), source.tabs.items.len);
@@ -15152,7 +15163,7 @@ test "win32 a tab dragged out of its window tears off where it is dropped, and E
             try std.testing.expect(source.tab_drag_index == null);
             try std.testing.expect(source.tab_drag_target == .stay);
             post(button, c.WM_LBUTTONUP, 20, client.bottom + 200);
-            try std.testing.expect(source.pending_tab_move_count == 0);
+            try std.testing.expect(app.pendingTabMoveCount(source) == 0);
             try std.testing.expectEqual(@as(usize, 3), source.tabs.items.len);
             try std.testing.expectEqual(source, dragged.host.?);
             // Esc with no drag is the terminal's.
@@ -15163,7 +15174,7 @@ test "win32 a tab dragged out of its window tears off where it is dropped, and E
             post(button, c.WM_MOUSEMOVE, 20, client.bottom + 200);
             try std.testing.expect(source.tab_drag_target == .new_window);
             post(button, c.WM_LBUTTONUP, 20, client.bottom + 200);
-            try std.testing.expect(source.pending_tab_move_count != 0);
+            try std.testing.expect(app.pendingTabMoveCount(source) != 0);
             var drop_at: POINT = .{ .x = 20, .y = client.bottom + 200 };
             _ = sys.ClientToScreen(button, &drop_at);
             TabMoveFixture.runPosted(source);
@@ -15658,7 +15669,7 @@ test "win32 a tab move a nested message loop dispatches waits for the outer pump
             }
             // Nothing moved, and the window is still whole.
             try std.testing.expectEqual(lone, pane.host.?);
-            try std.testing.expectEqual(@as(usize, 1), lone.pending_tab_move_count);
+            try std.testing.expectEqual(@as(usize, 1), app.pendingTabMoveCount(lone));
             // The outer pump runs it.
             app.drainPendingTabMoves();
             try std.testing.expectEqual(target, pane.host.?);
@@ -15682,7 +15693,7 @@ test "win32 an all: move_tab_to_new_window moves every tab it reaches but the la
             const panes = [_]*Surface{ source.tabs.items[0].focusedSurface().?, source.tabs.items[1].focusedSurface().?, source.tabs.items[2].focusedSurface().? };
             // What `all:` does: the action for every surface.
             for (panes) |pane| _ = try app.performAction(.{ .surface = pane.core() }, .move_tab_to_new_window, {});
-            try std.testing.expectEqual(@as(usize, 3), source.pending_tab_move_count);
+            try std.testing.expectEqual(@as(usize, 3), app.pendingTabMoveCount(source));
             app.drainPendingTabMoves();
             // Two moved, each into a window of its own; the last stays.
             try std.testing.expectEqual(@as(usize, 3), app.registry.hosts.items.len);
@@ -15779,7 +15790,7 @@ test "win32 a held Esc that ended a tab drag is taken until it comes up" {
             try std.testing.expect(!app.cancelTabDragForKey(&held));
             try std.testing.expect(!app.cancelTabDragForKey(&up));
             testPostTabMouse(button, c.WM_LBUTTONUP, 20, client.bottom + 200);
-            try std.testing.expectEqual(@as(usize, 0), host.pending_tab_move_count);
+            try std.testing.expectEqual(@as(usize, 0), app.pendingTabMoveCount(host));
         }
     }.body);
 }
@@ -15864,6 +15875,63 @@ test "win32 a tab drop goes where the windows are at its release" {
             try std.testing.expect(dragged.host.? != source);
             try std.testing.expect(dragged.host.? != target);
             try std.testing.expectEqual(@as(usize, 2), target.tabs.items.len);
+        }
+    }.body);
+}
+
+test "win32 an all: move_tab_to_new_window in a window of 18 tabs moves every one but the last" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    try runOnHiddenDesktop(struct {
+        fn body() !void {
+            var fixture: win32.WindowStartTestApp = .{};
+            try fixture.init();
+            defer fixture.deinit();
+            const app = &fixture.app;
+            app.shell_runtime_initialized = true;
+            const setup: TabMoveFixture = .{ .fixture = &fixture };
+            const source = try setup.window(18, false);
+            try std.testing.expectEqual(@as(usize, 18), source.tabs.items.len);
+            var panes: [18]*Surface = undefined;
+            for (source.tabs.items, 0..) |*tab, i| panes[i] = tab.focusedSurface().?;
+            for (panes) |pane| _ = try app.performAction(.{ .surface = pane.core() }, .move_tab_to_new_window, {});
+            app.drainPendingTabMoves();
+            try std.testing.expectEqual(@as(usize, 1), source.tabs.items.len);
+            try std.testing.expectEqual(@as(usize, 18), app.registry.hosts.items.len);
+            try app.validateShellNativeMapping();
+        }
+    }.body);
+}
+
+test "win32 a dragged tab that leaves its window by a key binding ends the drag and its feedback" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    try runOnHiddenDesktop(struct {
+        fn body() !void {
+            var fixture: win32.WindowStartTestApp = .{};
+            try fixture.init();
+            defer fixture.deinit();
+            const app = &fixture.app;
+            app.shell_runtime_initialized = true;
+            const setup: TabMoveFixture = .{ .fixture = &fixture };
+            const host = try setup.window(3, false);
+            try host.layout();
+            const front = host.active_tab;
+            const button = host.tabs.items[front].button_hwnd orelse return error.TestNoTabButton;
+            var client: RECT = undefined;
+            try std.testing.expect(sys.GetClientRect(host.hwnd.?, &client) != 0);
+            // Dragged out of the window: the label is up.
+            testPostTabMouse(button, c.WM_LBUTTONDOWN, 20, 10);
+            testPostTabMouse(button, c.WM_MOUSEMOVE, 20, client.bottom + 200);
+            try std.testing.expect(app.tab_drag_preview_hwnd != null and sys.IsWindowVisible(app.tab_drag_preview_hwnd.?) != 0);
+            // `move_tab_to_new_window` moves the dragged tab meanwhile.
+            try std.testing.expect(try app.moveTabToWindow(host, front, .{ .new_window = null }));
+            // The drag is over: no label, no drag state, and the next Esc is
+            // the terminal's.
+            try std.testing.expect(host.tab_drag_index == null);
+            try std.testing.expect(!host.tab_drag_active);
+            try std.testing.expect(sys.IsWindowVisible(app.tab_drag_preview_hwnd.?) == 0);
+            const down: MSG = .{ .hwnd = host.hwnd.?, .message = c.WM_KEYDOWN, .wParam = c.VK_ESCAPE, .lParam = 1, .time = 0, .pt = .{ .x = 0, .y = 0 }, .lPrivate = 0 };
+            try std.testing.expect(!app.cancelTabDragForKey(&down));
+            try app.validateShellNativeMapping();
         }
     }.body);
 }

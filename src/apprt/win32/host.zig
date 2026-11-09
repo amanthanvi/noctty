@@ -853,11 +853,7 @@ pub const Host = struct {
     /// where the tab goes.
     tab_insert_marker_uia_provider: ?*win32_uia.ChromeControlProvider = null,
     tab_insert_marker_prev_proc: ?*const anyopaque = null,
-    /// Tab moves asked of this window, in order, one per tab, run by the
-    /// outer message pump (`App.drainPendingTabMoves`), never from inside a
-    /// handler or a nested modal loop: a move can free this Host.
-    pending_tab_moves: [pending_tab_move_capacity]TabMoveRequest = undefined,
-    pending_tab_move_count: usize = 0,
+
     /// This window's only tab started a window move (`beginOnlyTabWindowMove`):
     /// its rect and DPI then. How the move ends decides whether the tab joins
     /// another window's strip (`tab_drag.windowMoveMerges`).
@@ -3151,6 +3147,12 @@ pub const Host = struct {
         if (self.tab_tooltip_tab_id) |shown| {
             if (shown == tab.id) self.hideTabTooltip();
         }
+        // The button of a tab being dragged (a key binding moved or closed
+        // it during the drag): the drag ends here. Its subclass is taken off
+        // before the window goes, so its own `WM_CAPTURECHANGED` cleanup
+        // would never run, and the label, the insert bar and the drag state
+        // (which takes the next Esc anywhere) would stay.
+        if (tab.button_hwnd) |button| if (self.tab_drag_index != null and sys.GetCapture() == button) self.endTabDrag();
         detachChromeControlProvider(self.app, &tab.uia_provider);
         destroySubclassedWindow(&tab.button_hwnd, &tab.button_prev_proc);
     }
@@ -3663,8 +3665,6 @@ pub const Host = struct {
 
     /// A tab move asked of a window (`App.requestTabMove`): the tab by its
     /// id in that window, and where it goes.
-    pub const pending_tab_move_capacity = 16;
-
     pub const OnlyTabMove = struct {
         rect: RECT,
         dpi: u32,
@@ -3863,6 +3863,18 @@ pub const Host = struct {
         // A tear-off or a move takes no split zone of this window.
         if (target != .stay) self.hideTabDropPreview();
         self.app.showTabDragFeedback(self, drag_index, target, screen);
+    }
+
+    /// A drag that ends because its tab left: nothing to put back.
+    pub fn endTabDrag(self: *Host) void {
+        self.tab_drag_index = null;
+        self.tab_drag_active = false;
+        self.tab_drag_origin_index = null;
+        self.tab_drag_target = .stay;
+        self.tab_drag_cancelled = false;
+        self.hideTabDropPreview();
+        self.app.endTabDragFeedback();
+        _ = sys.ReleaseCapture();
     }
 
     /// Esc during a tab drag: the drag ends where it began, a reorder made
