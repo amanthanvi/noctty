@@ -1780,12 +1780,7 @@ pub const App = struct {
                         continue;
                     }
                 }
-                // The outer pump has the tab-move wake again: its next turn
-                // runs the moves.
-                if (threadTimerFired(&msg, self.tab_move_wake_timer)) {
-                    killThreadTimer(&self.tab_move_wake_timer);
-                    continue;
-                }
+                if (self.takeTabMoveWakeTick(&msg)) continue;
                 if (threadTimerFired(&msg, self.program_status_notify_timer_id)) {
                     self.flushProgramStatusNotifications();
                     continue;
@@ -7897,6 +7892,14 @@ pub const App = struct {
         self.tab_move_wake_timer = id;
     }
 
+    /// The outer pump retrieved a tick of the tab-move re-wake timer: it
+    /// stops, and the pump's next turn runs the moves (`drainPendingTabMoves`).
+    fn takeTabMoveWakeTick(self: *App, msg: *const MSG) bool {
+        if (!threadTimerFired(msg, self.tab_move_wake_timer)) return false;
+        killThreadTimer(&self.tab_move_wake_timer);
+        return true;
+    }
+
     /// Runs every waiting tab move, from the outer message pump, with no
     /// window procedure on the stack. A move can free the window it was asked
     /// of, so the windows are found again for each request.
@@ -8075,8 +8078,10 @@ pub const App = struct {
         }
         defer if (source_kept) {
             // After the target took the foreground. Nothing the user can
-            // reach is left in it.
+            // reach is left in it, so a `toggle_visibility` that hid it while
+            // the move waited does not show it again either.
             source.destroy_after_structural_dispose = true;
+            source.hidden_by_toggle = false;
             if (source.hwnd) |hwnd| _ = sys.ShowWindow(hwnd, c.SW_HIDE);
             self.scheduleUndoPruneTimer();
         } else if (source_emptied) {
@@ -16111,11 +16116,23 @@ test "win32 a tab move whose wake a nested loop took wakes the pump again until 
             try std.testing.expect(app.requestTabMove(source, source.tabs.items[0].id, .{ .new_window = null }));
             testNestedLoopTakesTabMoveWakes(app);
             try std.testing.expectEqual(timer, app.tab_move_wake_timer);
-            // The pump's next turn runs the moves, and the timer stops with
-            // the queue.
-            app.drainPendingTabMoves();
+            // With nothing else posted, the timer's own tick reaches the
+            // pump, which takes it (`takeTabMoveWakeTick`) and runs the moves
+            // on its next turn.
+            const until = sys.GetTickCount64() + 1000;
+            const ticked = tick: while (sys.GetTickCount64() < until) {
+                while (sys.PeekMessageW(&msg, null, c.WM_TIMER, c.WM_TIMER, c.PM_REMOVE) != 0) {
+                    if (app.takeTabMoveWakeTick(&msg)) break :tick true;
+                    _ = sys.DispatchMessageW(&msg);
+                }
+                std.Thread.sleep(5 * std.time.ns_per_ms);
+            } else false;
+            try std.testing.expect(ticked);
             try std.testing.expect(app.tab_move_wake_timer == null);
+            try std.testing.expectEqual(@as(usize, 2), source.tabs.items.len);
+            app.drainPendingTabMoves();
             try std.testing.expectEqual(@as(usize, 1), source.tabs.items.len);
+            try std.testing.expectEqual(@as(usize, 0), app.pending_tab_moves.items.len);
         }
     }.body);
 }
@@ -16433,6 +16450,40 @@ test "win32 an only tab merged into another window while its window keeps a clos
             try std.testing.expectEqual(@as(usize, 1), app.registry.hosts.items.len);
             try std.testing.expectEqual(@as(usize, 2), target.tabs.items.len);
             try std.testing.expect(app.shell_runtime.state.windowConst(window) == null);
+            try app.validateShellNativeMapping();
+        }
+    }.body);
+}
+
+test "win32 a window a tab move keeps hidden for its undo history stays hidden through the toggle_visibility that hid it while the move waited" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    try runOnHiddenDesktop(struct {
+        fn body() !void {
+            var fixture: win32.WindowStartTestApp = .{};
+            try fixture.init();
+            defer fixture.deinit();
+            const app = &fixture.app;
+            app.shell_runtime_initialized = true;
+            const setup: TabMoveFixture = .{ .fixture = &fixture };
+            const source = try setup.window(2, false);
+            const target = try setup.window(1, false);
+            fixture.core_app.deleteSurface(source.tabs.items[0].focusedSurface().?);
+            try std.testing.expect(try app.closeTabUndoable(source, 0));
+            // `toggle_visibility` hides it while its live tab's merge waits.
+            try std.testing.expect(sys.IsWindowVisible(source.hwnd.?) != 0);
+            source.hideForToggle();
+            try std.testing.expect(source.hidden_by_toggle);
+            // The merge runs, and disposing the closed tab runs out of memory:
+            // the source stays, empty and hidden, for its history.
+            App.test_tab_move_shell_step = &TestHistoryDisposalFailure.hook;
+            defer App.test_tab_move_shell_step = null;
+            try std.testing.expect(try app.moveTabToWindow(source, 0, .{ .host = .{ .host = target, .index = 1 } }));
+            App.test_tab_move_shell_step = null;
+            try std.testing.expect(source.destroy_after_structural_dispose);
+            // It is not the toggle's to show again.
+            try std.testing.expect(!source.hidden_by_toggle);
+            try source.showAfterToggle();
+            try std.testing.expect(sys.IsWindowVisible(source.hwnd.?) == 0);
             try app.validateShellNativeMapping();
         }
     }.body);

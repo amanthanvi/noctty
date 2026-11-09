@@ -5809,6 +5809,9 @@ pub const Host = struct {
     pub fn showAfterToggle(self: *Host) !void {
         if (!self.hidden_by_toggle) return;
         self.hidden_by_toggle = false;
+        // An empty window waiting for its undo history to go
+        // (`destroy_after_structural_dispose`) stays hidden.
+        if (self.destroy_after_structural_dispose and self.tabs.items.len == 0) return;
         self.setVisible(true);
         try self.layout();
     }
