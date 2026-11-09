@@ -463,19 +463,37 @@ function Check-Backend($case,[string]$RendererName,[string]$When,[IntPtr[]]$Pane
     $b=Backend-Holds $case $RendererName $Panes.Count
     Check "${RendererName} ${When}: every pane still draws with $RendererName (no fallback)" $b.Holds $RendererName $b
 }
+# The marker in a terminal's text (its UIA TextPattern's). A pane narrower
+# than the marker wraps it across rows: only then, the rows joined
+# (CodeRabbit r4512044925). The marker ends in `-END`, so a row that holds
+# only its start, its last number cut short by the wrap, matches nothing and
+# the joined text decides (CodeRabbit r4516372927, r4516391313). Pure, for
+# `tab-tearoff-readers.ps1`.
+function Find-Marker([string]$Text) {
+    $m=[regex]::Match($Text,'TEAROFF-\d+-\d+-\d+-END')
+    if(-not $m.Success) { $m=[regex]::Match(($Text -replace "`r?`n",''),'TEAROFF-\d+-\d+-\d+-END') }
+    if($m.Success) { return $m.Value } else { return $null }
+}
+# The marker in a console's rows (`console-attach-info.c`'s dump). Wrapped
+# across rows in a narrow pane (rows are full there, so none ends in trimmed
+# spaces): only then, the rows joined. Pure, as `Find-Marker`.
+function Find-ConsoleMarker([string[]]$Rows) {
+    $m=[regex]::Match(($Rows -join "`n"),'TEAROFF-\d+-\d+-\d+-END')
+    if(-not $m.Success) { $m=[regex]::Match(($Rows -join ''),'TEAROFF-\d+-\d+-\d+-END') }
+    if($m.Success) { return $m.Value } else { return $null }
+}
+# A console's marker into the map of markers to console windows: a marker two
+# consoles show maps to neither, so their panes are not found, never folded
+# into one entry. Pure, as `Find-Marker`.
+function Add-ConsoleMarker([hashtable]$ByMarker,[string]$Marker,[IntPtr]$Window) {
+    if($ByMarker.ContainsKey($Marker)) { $ByMarker[$Marker]=[IntPtr]::Zero } else { $ByMarker[$Marker]=$Window }
+}
 # The terminal's text through its UIA TextPattern, and the marker in it.
 function Marker([IntPtr]$Pane) {
     $element=[System.Windows.Automation.AutomationElement]::FromHandle($Pane)
     $pattern=$null
     if(-not $element.TryGetCurrentPattern([System.Windows.Automation.TextPattern]::Pattern,[ref]$pattern)) { return $null }
-    $text=$pattern.DocumentRange.GetText(-1)
-    $m=[regex]::Match($text,'TEAROFF-\d+-\d+-\d+-END')
-    # A pane narrower than the marker wraps it across rows: only then, the
-    # rows joined (CodeRabbit r4512044925). The marker ends in `-END`, so a
-    # row that holds only its start, its last number cut short by the wrap,
-    # matches nothing and the joined text decides (CodeRabbit r4516372927).
-    if(-not $m.Success) { $m=[regex]::Match(($text -replace "`r?`n",''),'TEAROFF-\d+-\d+-\d+-END') }
-    if($m.Success) { return $m.Value } else { return $null }
+    return Find-Marker $pattern.DocumentRange.GetText(-1)
 }
 function Wait-Marker([IntPtr]$Pane) {
     $value=$null
@@ -558,16 +576,9 @@ function Pane-Consoles($case) {
             $lines=if($done -and (Test-Path -LiteralPath $out)) { @(Get-Content -LiteralPath $out) } else { @() }
         } finally { Remove-Item -LiteralPath $out,"$out.log" -ErrorAction SilentlyContinue }
         if($lines.Count -lt 2) { continue }
-        $rows=@($lines | Select-Object -Skip 2)
-        $m=[regex]::Match(($rows -join "`n"),'TEAROFF-\d+-\d+-\d+-END')
-        # Wrapped across rows in a narrow pane (rows are full there, so none
-        # ends in trimmed spaces): only then, the rows joined. A marker two
-        # consoles show still maps to neither, below.
-        if(-not $m.Success) { $m=[regex]::Match(($rows -join ''),'TEAROFF-\d+-\d+-\d+-END') }
-        if(-not $m.Success) { continue }
-        # A marker two consoles show maps to neither: their panes are then
-        # not found, never folded into one entry.
-        if($byMarker.ContainsKey($m.Value)) { $byMarker[$m.Value]=[IntPtr]::Zero } else { $byMarker[$m.Value]=[IntPtr][long]$lines[1] }
+        $marker=Find-ConsoleMarker ([string[]]@($lines | Select-Object -Skip 2))
+        if($null -eq $marker) { continue }
+        Add-ConsoleMarker $byMarker $marker ([IntPtr][long]$lines[1])
     }
     $rows=@(foreach($owner in Hosts $case) {
         foreach($p in Panes $owner) {
@@ -849,18 +860,23 @@ function Measure-HeldRelease([string]$RendererName,[ValidateSet('source','destin
         if($Variant -eq 'destination') {
             Check "${label}: the program's terminal is in another window now" ((HostOf $case $p1) -ne $h1) 'another window' $null
         }
-        # The held button comes up over the program's terminal.
+        # The held button comes up over the program's terminal. Its span
+        # opens here and stays open through the fresh pair below: the app
+        # handles its posted messages in order, so the recorder having the
+        # fresh pair is the proof this release was handled first (CodeRabbit
+        # r4516420008).
+        $start=[Tt]::GetTickCount64()
         [Tt]::Mouse($p1,$WM_LBUTTONUP,30,30,0)
         Start-Sleep -Milliseconds 800
         $after=Mouse-Reports $records
         Check "${label}: the program gets no release no press of its made" ($after.Releases -eq $before.Releases -and $after.Presses -eq $before.Presses) @($before.Presses,$before.Releases) @($after.Presses,$after.Releases)
-        # A fresh press and release afterwards are reported again, its span
+        # A fresh press and release afterwards are reported again, the span
         # open until the recorder has both; since the baseline, exactly that
         # press then that release, and nothing of the held one
         # (CodeRabbit r4512044942, r4512044953).
-        $start=[Tt]::GetTickCount64()
         [Tt]::Mouse($p1,$WM_LBUTTONDOWN,30,30,1); [Tt]::Mouse($p1,$WM_LBUTTONUP,30,30,0)
         $fresh=Wait-Until { (Mouse-Reports $records).Events.Count -ge ($after.Events.Count + 2) } 5
+        if(-not $fresh) { $script:unverified.Add("${label}: the held release's span: the fresh pair after it was not seen, so its handling is not confirmed") }
         [Tt]::Open($start); [Tt]::Settled()
         Start-Sleep -Milliseconds 300
         $last=Mouse-Reports $records

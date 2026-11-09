@@ -7834,6 +7834,9 @@ pub const App = struct {
     /// The posted tab-move wake fails, as with the window's queue full, for
     /// the test of what wakes the pump then.
     pub var test_tab_move_wake_post_fails = false;
+    /// The re-wake timer cannot be set either, for the test of a request
+    /// with no way to wake the pump.
+    pub var test_tab_move_wake_timer_fails = false;
 
     pub const PendingTabMove = struct { host_id: u32, request: Host.TabMoveRequest };
 
@@ -7865,9 +7868,12 @@ pub const App = struct {
     /// `all:` binding moves each tab it reaches; the only tab still stays.
     pub fn requestTabMove(self: *App, host: *Host, tab_id: u32, dest: Host.TabMoveRequest.Dest) bool {
         const hwnd = host.hwnd orelse return false;
-        const slot = for (self.pending_tab_moves.items) |*pending| {
+        const existing: ?*PendingTabMove = for (self.pending_tab_moves.items) |*pending| {
             if (pending.host_id == host.id and pending.request.tab_id == tab_id) break pending;
-        } else self.pending_tab_moves.addOne(self.core_app.alloc) catch {
+        } else null;
+        // The request this one replaces, put back should it be refused.
+        const replaced: ?PendingTabMove = if (existing) |slot| slot.* else null;
+        const slot = existing orelse self.pending_tab_moves.addOne(self.core_app.alloc) catch {
             log.warn("tab move declined: out of memory", .{});
             return false;
         };
@@ -7879,7 +7885,15 @@ pub const App = struct {
             // system makes when the queue has nothing else, wakes the pump
             // instead (CodeRabbit r4512044883).
             log.warn("tab move wake could not be posted err={}; the re-wake timer wakes the pump", .{windows.kernel32.GetLastError()});
-            self.armTabMoveWakeTimer();
+            if (!self.armTabMoveWakeTimer()) {
+                // No way to wake the pump at all: the request is refused, not
+                // left to wait for unrelated input, and the queue is as it was
+                // (CodeRabbit r4516398777). Nothing else was armed for it: a
+                // drag ended before it asked.
+                if (replaced) |previous| slot.* = previous else _ = self.pending_tab_moves.pop();
+                log.warn("tab move refused: no wake and no re-wake timer", .{});
+                return false;
+            }
         }
         return true;
     }
@@ -7896,20 +7910,21 @@ pub const App = struct {
             killThreadTimer(&self.tab_move_wake_timer);
             return;
         }
-        self.armTabMoveWakeTimer();
+        // A wake taken by a nested loop: should even the timer fail, the move
+        // waits for the pump's next message; nothing else can wake it then.
+        _ = self.armTabMoveWakeTimer();
     }
 
-    /// The one re-wake thread timer, if it is not running. Should even that
-    /// fail, the move waits for the pump's next message; nothing else can
-    /// wake it then.
-    fn armTabMoveWakeTimer(self: *App) void {
-        if (self.tab_move_wake_timer != null) return;
-        const id = sys.SetTimer(null, 0, 50, null);
+    /// The one re-wake thread timer, if it is not running; whether it runs.
+    fn armTabMoveWakeTimer(self: *App) bool {
+        if (self.tab_move_wake_timer != null) return true;
+        const id = if (builtin.is_test and test_tab_move_wake_timer_fails) 0 else sys.SetTimer(null, 0, 50, null);
         if (id == 0) {
-            log.err("tab move re-wake timer failed err={}; the move waits for the next message", .{windows.kernel32.GetLastError()});
-            return;
+            log.warn("tab move re-wake timer failed err={}", .{windows.kernel32.GetLastError()});
+            return false;
         }
         self.tab_move_wake_timer = id;
+        return true;
     }
 
     /// The pump's step for the release of a press a tab that left mid-drag
@@ -17737,6 +17752,47 @@ test "win32 a caption Close press whose release comes as a non-client one lets g
             try std.testing.expect(!host.caption_close_held);
             try std.testing.expect(sys.GetCapture() != hwnd);
             try std.testing.expect(sys.IsWindow(hwnd) != 0);
+        }
+    }.body);
+}
+
+test "win32 a tab move with no way to wake the pump is refused, and the queue stays as it was (CodeRabbit r4516398777)" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    try runOnHiddenDesktop(struct {
+        fn body() !void {
+            var fixture: win32.WindowStartTestApp = .{};
+            try fixture.init();
+            defer fixture.deinit();
+            const app = &fixture.app;
+            app.shell_runtime_initialized = true;
+            const setup: TabMoveFixture = .{ .fixture = &fixture };
+            const source = try setup.window(3, false);
+            const first = source.tabs.items[1].id;
+            const second = source.tabs.items[2].id;
+            // A move asked while the pump could be woken.
+            try std.testing.expect(app.requestTabMove(source, first, .{ .new_window = null }));
+            try std.testing.expectEqual(@as(usize, 1), app.pending_tab_moves.items.len);
+            // Then neither the wake nor the re-wake timer can be had.
+            App.test_tab_move_wake_post_fails = true;
+            App.test_tab_move_wake_timer_fails = true;
+            defer App.test_tab_move_wake_post_fails = false;
+            defer App.test_tab_move_wake_timer_fails = false;
+            // Asking again for the same tab is refused and keeps the move it
+            // would have replaced; asking for another tab is refused and
+            // queues nothing; no timer is left armed.
+            try std.testing.expect(!app.requestTabMove(source, first, .{ .window = .{ .host_id = source.id, .index = 0 } }));
+            try std.testing.expect(!app.requestTabMove(source, second, .{ .new_window = null }));
+            try std.testing.expectEqual(@as(usize, 1), app.pending_tab_moves.items.len);
+            try std.testing.expectEqual(first, app.pending_tab_moves.items[0].request.tab_id);
+            try std.testing.expect(app.pending_tab_moves.items[0].request.dest == .new_window);
+            try std.testing.expect(app.tab_move_wake_timer == null);
+            // The kept move runs as it was asked.
+            App.test_tab_move_wake_post_fails = false;
+            App.test_tab_move_wake_timer_fails = false;
+            app.drainPendingTabMoves();
+            try std.testing.expectEqual(@as(usize, 2), source.tabs.items.len);
+            try std.testing.expect(source.findTabIndexById(second) != null);
+            try std.testing.expect(source.findTabIndexById(first) == null);
         }
     }.body);
 }
