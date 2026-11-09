@@ -231,10 +231,13 @@ pub fn For(comptime Tree: type) type {
         /// `ratio`, unless laying the panes out at it leaves a pane under
         /// the split at `handle` short of its floor along the split's axis
         /// (`min_px`, or its size at `start_ratio` if that was smaller):
-        /// then the f16 nearest `ratio`, toward `start_ratio`, at which
-        /// every pane fits (the start always does: its floors are its own
-        /// sizes), found by walking up to `walk_steps` and searching past
-        /// that. Measured on the real slots
+        /// then an f16 between `ratio` and `start_ratio` at which every pane
+        /// fits (the start always does: its floors are its own sizes). The
+        /// nearest one within `walk_steps` f16 steps of `ratio`; past them,
+        /// the one a binary search ends on, which fits but need not be the
+        /// nearest, since fitting is not monotone at the pixel scale (Opus
+        /// on #689: from 0.999 on the 119-pane chain the search ends on
+        /// 0.56641, where 0.60156 also fits). Measured on the real slots
         /// (`SplitTree.spatial` and the layout's rounding), so it holds at
         /// any depth: the bounds are ratios, and a pane deep in a chain goes
         /// through f16 slot arithmetic at every level. In CodeRabbit's case
@@ -264,14 +267,16 @@ pub fn For(comptime Tree: type) type {
             // usually takes a step or two.
             var candidate = Tree.canonicalRatio(ratio);
             var steps: usize = 0;
-            while (candidate != from and steps < walk_steps) : (steps += 1) {
+            while (candidate != from) : (steps += 1) {
                 if (try fitsAt(alloc, tree, start, content, handle, axis, candidate, min_px)) return candidate;
+                if (steps == walk_steps) break;
                 candidate = Tree.canonicalRatio(std.math.nextAfter(f16, candidate, from));
             }
             if (candidate == from) return from;
             // A long way to go (a split a few pixels across): a binary search
-            // for the rest, which always ends on a ratio that fits, since the
-            // start does.
+            // for the rest, between the walk's last candidate, tested and
+            // failing, and the start, which fits, so it always ends on a
+            // ratio that fits.
             // Ratios are in [0, 1], where an f16's bits order as its value
             // (+0 is 0; both endpoints are canonical above).
             var failing: i32 = @as(u16, @bitCast(candidate));
@@ -895,33 +900,120 @@ test "pane divider: a pane at the content's far edge keeps its floor as the layo
         tree.deinit();
         tree = next;
     }
-    var short: usize = 0;
-    var width: i32 = 900;
-    while (width <= 4000) : (width += 1) {
-        const content: Rect = .{ .left = 0, .top = 0, .right = width, .bottom = 300 };
-        tree.resizeInPlace(.root, 0.5);
-        var start = try tree.spatial(testing.allocator);
-        defer start.deinit(testing.allocator);
-        const found = Dividers.divider(&tree, start, content, .root, 3).?;
-        const bounds = Dividers.ratioBounds(&tree, start, content, found, 40).?;
-        const ratio = try Dividers.stepRatio(testing.allocator, &tree, content, found, 2.0, bounds, 0.5, 40);
-        tree.resizeInPlace(.root, ratio);
-        var now = try tree.spatial(testing.allocator);
-        defer now.deinit(testing.allocator);
-        var it = tree.iterator();
-        while (it.next()) |entry| {
-            const slot = now.slots[entry.handle.idx()];
-            const placed = win32_layout.splitSurfacePlacement(content, .{
-                .x = @floatCast(slot.x),
-                .y = @floatCast(slot.y),
-                .width = @floatCast(slot.width),
-                .height = @floatCast(slot.height),
-            }, true, false, 0).pane_rect;
-            const gaps: i32 = @as(i32, @intFromBool(placed.left > content.left)) + @intFromBool(placed.right < content.right);
-            if (placed.width() + gaps < 40) short += 1;
-        }
+    // Stacked, [A / (B / C)] over the same heights: the bottom edge's clamp
+    // (Opus on #689: each guard is checked from both sides).
+    var stacked_views = [_]TestView{ .{ .label = "A" }, .{ .label = "B" }, .{ .label = "C" } };
+    var stacked = try buildTree(stacked_views[0..2], &.{.{ .at = .root, .direction = .down, .ratio = 0.5 }});
+    defer stacked.deinit();
+    {
+        var inserted = try TestTree.init(testing.allocator, &stacked_views[2]);
+        defer inserted.deinit();
+        const next = try stacked.split(testing.allocator, handleOfView(&stacked, "B"), .down, 0.5, &inserted);
+        stacked.deinit();
+        stacked = next;
     }
-    try testing.expectEqual(@as(usize, 0), short);
+    for ([_]*TestTree{ &tree, &stacked }) |subject| {
+        const across = subject == &tree;
+        var short: usize = 0;
+        var span: i32 = 900;
+        while (span <= 4000) : (span += 1) {
+            const content: Rect = if (across) .{ .left = 0, .top = 0, .right = span, .bottom = 300 } else .{ .left = 0, .top = 0, .right = 300, .bottom = span };
+            subject.resizeInPlace(.root, 0.5);
+            var start = try subject.spatial(testing.allocator);
+            defer start.deinit(testing.allocator);
+            const found = Dividers.divider(subject, start, content, .root, 3).?;
+            const bounds = Dividers.ratioBounds(subject, start, content, found, 40).?;
+            const ratio = try Dividers.stepRatio(testing.allocator, subject, content, found, 2.0, bounds, 0.5, 40);
+            subject.resizeInPlace(.root, ratio);
+            var now = try subject.spatial(testing.allocator);
+            defer now.deinit(testing.allocator);
+            var it = subject.iterator();
+            while (it.next()) |entry| {
+                const slot = now.slots[entry.handle.idx()];
+                const placed = win32_layout.splitSurfacePlacement(content, .{
+                    .x = @floatCast(slot.x),
+                    .y = @floatCast(slot.y),
+                    .width = @floatCast(slot.width),
+                    .height = @floatCast(slot.height),
+                }, true, false, 0).pane_rect;
+                const pixels = if (across)
+                    placed.width() + @as(i32, @intFromBool(placed.left > content.left)) + @intFromBool(placed.right < content.right)
+                else
+                    placed.height() + @as(i32, @intFromBool(placed.top > content.top)) + @intFromBool(placed.bottom < content.bottom);
+                if (pixels < 40) short += 1;
+            }
+        }
+        if (short != 0) std.debug.print("far edge: {d} short panes ({s})\n", .{ short, if (across) "side by side" else "stacked" });
+        try testing.expectEqual(@as(usize, 0), short);
+    }
+}
+
+test "pane divider: a 1 px drag toward a pane under the minimum never moves the divider away, on either side" {
+    // Opus's tree on #689, A | ((B | D)@0.25 | C)@0.04, and its mirror,
+    // (C | (D | B)@0.75)@0.96 | A, side by side and stacked, 400 to 8000
+    // px: B is under the minimum beside the root's divider, right of it or
+    // left. Dragged 1 px toward B, the divider stays or follows; before
+    // the bounds kept the start, it could step away (3 px on 5314 px).
+    var backward: usize = 0;
+    for ([_]bool{ false, true }) |mirrored| for ([_]bool{ true, false }) |across| for ([_]f16{ 0.4, 0.5, 0.6 }) |root| {
+        var views = [_]TestView{ .{ .label = "A" }, .{ .label = "B" }, .{ .label = "C" }, .{ .label = "D" } };
+        const toward_b: TestTree.Split.Direction = if (across)
+            (if (mirrored) .left else .right)
+        else
+            (if (mirrored) .up else .down);
+        const share = struct {
+            fn of(ratio: f16, flip: bool) f16 {
+                return if (flip) 1 - ratio else ratio;
+            }
+        }.of;
+        var tree = try buildTree(views[0..2], &.{.{ .at = .root, .direction = toward_b, .ratio = share(root, mirrored) }});
+        defer tree.deinit();
+        for ([_]struct { label: usize, ratio: f16 }{ .{ .label = 2, .ratio = 0.04 }, .{ .label = 3, .ratio = 0.25 } }) |step| {
+            var inserted = try TestTree.init(testing.allocator, &views[step.label]);
+            defer inserted.deinit();
+            const next = try tree.split(testing.allocator, handleOfView(&tree, "B"), toward_b, share(step.ratio, mirrored), &inserted);
+            tree.deinit();
+            tree = next;
+        }
+        const start_ratio = tree.nodes[0].split.ratio;
+        var span: i32 = 400;
+        while (span <= 8000) : (span += 3) {
+            const content: Rect = if (across) .{ .left = 0, .top = 0, .right = span, .bottom = 300 } else .{ .left = 0, .top = 0, .right = 300, .bottom = span };
+            tree.resizeInPlace(.root, start_ratio);
+            var start = try tree.spatial(testing.allocator);
+            defer start.deinit(testing.allocator);
+            const found = Dividers.divider(&tree, start, content, .root, 3).?;
+            const bounds = Dividers.ratioBounds(&tree, start, content, found, 40).?;
+            const step: f32 = (if (mirrored) @as(f32, -1) else 1) / @as(f32, @floatFromInt(span));
+            const ratio = try Dividers.stepRatio(testing.allocator, &tree, content, found, @as(f32, start_ratio) + step, bounds, start_ratio, 40);
+            tree.resizeInPlace(.root, ratio);
+            var now = try tree.spatial(testing.allocator);
+            defer now.deinit(testing.allocator);
+            const moved = Dividers.divider(&tree, now, content, .root, 3).?.position - found.position;
+            if (if (mirrored) moved > 0 else moved < 0) {
+                if (backward == 0) std.debug.print("backward: mirrored={} across={} root={d} span={d} moved={d}\n", .{ mirrored, across, @as(f32, root), span, moved });
+                backward += 1;
+            }
+        }
+    };
+    try testing.expectEqual(@as(usize, 0), backward);
+}
+
+test "pane divider: past the walk, the search ends on a ratio that fits next to one that does not" {
+    // Two panes at 800 px, from 0.5 down to 0.001: 256 f16 steps from
+    // 0.001 reach about 0.0012, so the binary search finds the rest. It
+    // must end on the side that fits (A at 40 px), not on the start
+    // (400 px) and not on the side that does not (39 px). Opus on #689:
+    // no test reached the search half.
+    var views = [_]TestView{ .{ .label = "A" }, .{ .label = "B" } };
+    var tree = try buildTree(&views, &.{.{ .at = .root, .direction = .right, .ratio = 0.5 }});
+    defer tree.deinit();
+    const fitted = try Dividers.fitRatio(testing.allocator, &tree, content_800x600, .root, 0.001, 0.5, 40);
+    try testing.expectEqual(@as(f16, 0.5), tree.nodes[0].split.ratio);
+    try testing.expectEqual(@as(i32, 40), win32_layout.roundedSlotPixel(@as(f32, fitted), 800));
+    // From 0.999 the walk (2^-11 a step near 1) reaches B's 40 px itself.
+    const far = try Dividers.fitRatio(testing.allocator, &tree, content_800x600, .root, 0.999, 0.5, 40);
+    try testing.expectEqual(@as(i32, 760), win32_layout.roundedSlotPixel(@as(f32, far), 800));
 }
 
 test "pane divider: a pane already below the minimum keeps its size" {
