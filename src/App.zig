@@ -941,11 +941,19 @@ pub fn keyEvent(
         // Leaf entries are good
         inline .leaf, .leaf_chained => |leaf| leaf.generic(),
     };
-    const actions: []const input.Binding.Action = leaf.actionsSlice();
-    assert(actions.len > 0);
+    assert(leaf.actionsSlice().len > 0);
 
     // If we aren't focused, then we only process global keybinds.
     if (!self.focused and !leaf.flags.global) return false;
+
+    // A copy, not the binding storage: a reload in the chain replaces
+    // `rt_app.config`, which owns that storage, before the chain is done.
+    var actions_arena: std.heap.ArenaAllocator = .init(self.alloc);
+    defer actions_arena.deinit();
+    const actions = leaf.cloneActions(actions_arena.allocator()) catch |err| {
+        log.warn("error copying app keybind actions err={}", .{err});
+        return false;
+    };
 
     // Global keybinds are done using performAll so that they
     // can target all surfaces too.
@@ -1043,6 +1051,11 @@ pub fn performAction(
 
 /// Performs a chained action. We will continue executing each action
 /// even if there is a failure in a prior action.
+///
+/// The chain ends at its first closing action (`Surface.closingAction`),
+/// and the actions after it are dropped, as on a single surface: the close
+/// can free the surface whose key ran the chain, and that surface's config
+/// may own `actions` (copy them out of binding storage before calling).
 pub fn performAllChainedAction(
     self: *App,
     rt_app: *apprt.App,
@@ -1055,6 +1068,7 @@ pub fn performAllChainedAction(
                 err,
             });
         };
+        if (Surface.closingAction(action)) return;
     }
 }
 
@@ -1097,13 +1111,26 @@ pub fn performAllAction(
 
         // Surface-scoped actions are performed on all surfaces. Errors
         // are logged but processing continues.
-        .surface => for (self.surfaces.items) |surface| {
-            _ = surface.core().performBindingAction(action) catch |err| {
-                log.warn("error performing binding action on surface ptr={X} err={}", .{
-                    @intFromPtr(surface),
-                    err,
-                });
-            };
+        //
+        // Over a copy of the list: an action can remove surfaces from it
+        // (a closing action frees every pane of a window, synchronously on
+        // Win32) or add some (`new_split`), and either moves or frees the
+        // items while the walk is on them. A surface that a close earlier
+        // in the walk removed is skipped; one an action added is not
+        // visited. No single action both closes and creates surfaces, so
+        // a pointer still in the list is the surface the copy saw.
+        .surface => {
+            const surfaces = try self.alloc.dupe(*apprt.Surface, self.surfaces.items);
+            defer self.alloc.free(surfaces);
+            for (surfaces) |surface| {
+                if (std.mem.indexOfScalar(*apprt.Surface, self.surfaces.items, surface) == null) continue;
+                _ = surface.core().performBindingAction(action) catch |err| {
+                    log.warn("error performing binding action on surface ptr={X} err={}", .{
+                        @intFromPtr(surface),
+                        err,
+                    });
+                };
+            }
         },
     }
 }

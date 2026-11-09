@@ -2353,6 +2353,23 @@ pub const Set = struct {
                 .many => |slice| slice,
             };
         }
+
+        /// The actions copied out of the binding storage, the slices
+        /// they carry included, into `alloc` (an arena: nothing is freed
+        /// one by one). A chain's actions borrow the config that owns the
+        /// binding set, and an action can free that config before the
+        /// chain is done: a reload replaces it, and on Win32 a closing
+        /// action frees the surface that owns it, both synchronously.
+        /// Read a running chain from this copy, never from the set.
+        pub fn cloneActions(
+            self: *const GenericLeaf,
+            alloc: Allocator,
+        ) Allocator.Error![]const Action {
+            const source = self.actionsSlice();
+            const copy = try alloc.alloc(Action, source.len);
+            for (source, copy) |action, *out| out.* = try action.clone(alloc);
+            return copy;
+        }
     };
 
     /// A full key-value entry for the set.
