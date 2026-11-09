@@ -306,14 +306,16 @@ function Launch-Case([string]$Name,[string]$RendererName,[string[]]$Extra=@()) {
     $dir=Join-Path $Run "$Name\bin"; Copy-Portable $Bin $dir
     $config=Join-Path $dir 'case.ghostty'
     # cmd.exe, which keeps no PSReadLine history, prints a marker of its own
-    # (`%RANDOM%`, which cmd expands) for the move to keep. `direct:` with the
+    # (`%RANDOM%`, which cmd seeds from the clock in whole seconds, so two
+    # shells started in the same second print the same values: the last part
+    # is the time's seconds and hundredths) for the move to keep. `direct:` with the
     # System32 path: a shell string runs under Exec's outer `cmd /c`, whose
     # AutoRun hooks an inner /D does not turn off (test-harnesses.md).
     $cmd=Join-Path ([Environment]::GetFolderPath('System')) 'cmd.exe'
     @("working-directory = $dir",'single-instance = false','window-save-state = never',
       'copy-on-select = false','clipboard-read = deny','clipboard-write = deny',
       'confirm-close-surface = false','shell-integration = none',
-      "command = direct:$cmd /d /k echo TEAROFF-%RANDOM%-%RANDOM%-%RANDOM%",
+      "command = direct:$cmd /d /k echo TEAROFF-%RANDOM%-%RANDOM%-%TIME:~6,2%%TIME:~9,2%",
       "renderer = $RendererName",
       'keybind = f6=new_tab','keybind = f7=move_tab_to_new_window','keybind = f9=close_surface') + $Extra | Set-Content -LiteralPath $config
     $exe=Join-Path $dir 'noctty.exe'
@@ -679,6 +681,7 @@ function Measure-Split([string]$RendererName) {
         $h1=(Hosts $case)[0]
         $p1=(Panes $h1)[0]
         $p2=New-Pane $case $p1
+        [void](Wait-Marker $p2)
         $before=@(Panes $h1)
         [Tt]::Key($p2,0x74)   # F5: new_split:right
         [void](Wait-Until { @(Panes $h1).Count -gt $before.Count } 10)
