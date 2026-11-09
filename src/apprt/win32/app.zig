@@ -6009,8 +6009,9 @@ pub const App = struct {
 
     /// Settings ends every preview at once (a close, Discard): one end, the
     /// theme before the opacity, so each window shows its opacity once, at
-    /// the saved value (`endSettingsPreview`).
-    fn settingsEndPreviewsThunk(ctx: *anyopaque) void {
+    /// the saved value (`endSettingsPreview`). Public so the real-window test
+    /// fixtures (`test_support.zig`) hand Settings this one, not a copy.
+    pub fn settingsEndPreviewsThunk(ctx: *anyopaque) void {
         const app: *App = @ptrCast(@alignCast(ctx));
         app.endSettingsPreview();
     }
@@ -6149,10 +6150,13 @@ pub const App = struct {
         // `app.config`: a palette preview the update ended stays on screen,
         // with no preview left for its palette to revert. Then every
         // palette still closes, and the theme and every window show
-        // `app.config` as it is, once. None of it needs another clone or an
-        // allocation to succeed: a palette's mode, catalog and preview are
-        // reset first, and its layout and text, and a theme resource
-        // rebuild, are best effort (each logs a failure and goes on).
+        // `app.config` as it is, once. None of it needs another config
+        // clone. What may allocate is best effort: a palette's mode, catalog
+        // and preview are reset first, and its layout and text, and a theme
+        // resource rebuild, each log a failure and go on. Nothing shows the
+        // whole of it working with memory exhausted (its test fails only the
+        // arm's clone). The panes' restore above goes through core, in each
+        // pane's light/dark state; this shows `app.config` unconditioned.
         if (!self.app_wide_windows_applied) {
             for (self.registry.hosts.items) |host| {
                 if (host.overlay_mode == .command_palette) host.hideOverlay();

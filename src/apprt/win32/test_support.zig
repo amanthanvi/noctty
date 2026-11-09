@@ -42,12 +42,6 @@ const WINDOWPLACEMENT = sys.WINDOWPLACEMENT;
 /// that state.
 pub fn Fixtures(comptime runtime: anytype) type {
     return struct {
-        /// The App's own `endPreviews` is private to it (app.zig).
-        fn endSettingsPreviewsThunk(ctx: *anyopaque) void {
-            const app: *App = @ptrCast(@alignCast(ctx));
-            app.endSettingsPreview();
-        }
-
         const App = runtime.App;
         const Host = runtime.Host;
         const Surface = runtime.Surface;
@@ -295,7 +289,7 @@ pub fn Fixtures(comptime runtime: anytype) type {
                         .saveAndReload = &settingsSaveAndReloadThunk,
                         .configRevision = &settingsConfigRevisionThunk,
                         .previewField = &settingsPreviewFieldThunk,
-                        .endPreviews = &endSettingsPreviewsThunk,
+                        .endPreviews = &App.settingsEndPreviewsThunk,
                         .notifyConflict = &settingsNotifyConflictThunk,
                         .reconcileDisk = &settingsReconcileDiskThunk,
                         .failureDetail = &settingsFailureDetailThunk,
