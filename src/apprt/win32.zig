@@ -17110,15 +17110,21 @@ test "win32 pane divider drag resizes the split live and its release clears the 
     host.dragPaneDivider(pane_divider_test_content, .{ .x = 900, .y = 300 });
     try std.testing.expectEqual(@as(f16, 0.95), paneDividerTestRatio(&host, .root));
 
-    host.finishPaneDividerDrag();
+    host.finishPaneDividerDrag(pane_divider_test_content);
     try std.testing.expect(host.pane_divider_drag == null);
     try std.testing.expectEqual(@as(f16, 0.95), paneDividerTestRatio(&host, .root));
     try expectPaneDividerHistory(&host, &surface_a, &surface_b, false);
 
-    // A press and release that moves nothing changes nothing.
+    // A press and release that moves nothing changes nothing, through the
+    // messages a click sends (the odd-width test below has the case whose
+    // ratio a round trip would change, and the terminal redo).
     try paneDividerTestStructuralHistory(&host, &surface_a, &surface_b);
-    try std.testing.expect(host.beginPaneDividerDrag(pane_divider_test_content, .{ .x = 760, .y = 300 }, 5000));
-    host.finishPaneDividerDrag();
+    host.test_pane_divider_content = pane_divider_test_content;
+    const at = paneDividerTestLParam(760, 300);
+    try std.testing.expect(host.handlePaneDividerMessage(c.WM_LBUTTONDOWN, 1, at));
+    try std.testing.expect(host.handlePaneDividerMessage(c.WM_MOUSEMOVE, 1, at));
+    try std.testing.expect(host.handlePaneDividerMessage(c.WM_LBUTTONUP, 0, at));
+    try std.testing.expect(host.pane_divider_drag == null);
     try std.testing.expectEqual(@as(f16, 0.95), paneDividerTestRatio(&host, .root));
     try std.testing.expectEqual(@as(usize, 1), host.structural_undo_entries.items.len);
     try std.testing.expectEqual(@as(usize, 1), host.structural_redo_entries.items.len);
@@ -17153,25 +17159,549 @@ test "win32 pane divider Esc puts back the ratio the drag started from and keeps
     try std.testing.expectEqual(@as(f16, 0.25), paneDividerTestRatio(&host, .root));
 
     // Other keys go nowhere while the mouse is held, and nothing changes.
-    try std.testing.expect(app.paneDividerDragKey(c.WM_KEYDOWN, 'Z'));
-    try std.testing.expect(app.paneDividerDragKey(c.WM_SYSKEYDOWN, c.VK_MENU));
+    try std.testing.expect(app.paneDividerDragKey(c.WM_KEYDOWN, 'Z', pane_divider_key_press));
+    try std.testing.expect(app.paneDividerDragKey(c.WM_SYSKEYDOWN, c.VK_MENU, pane_divider_key_press));
     try std.testing.expect(host.pane_divider_drag != null);
     try std.testing.expectEqual(@as(f16, 0.25), paneDividerTestRatio(&host, .root));
 
-    try std.testing.expect(app.paneDividerDragKey(c.WM_KEYDOWN, c.VK_ESCAPE));
+    try std.testing.expect(app.paneDividerDragKey(c.WM_KEYDOWN, c.VK_ESCAPE, pane_divider_key_press));
     try std.testing.expect(host.pane_divider_drag == null);
     try std.testing.expectEqual(@as(f16, 0.5), paneDividerTestRatio(&host, .root));
     try expectPaneDividerHistory(&host, &surface_a, &surface_b, true);
 
     // The releases of keys pressed during the drag are swallowed once each,
     // after it too; other keys pass.
-    try std.testing.expect(app.paneDividerDragKey(c.WM_KEYUP, c.VK_ESCAPE));
-    try std.testing.expect(!app.paneDividerDragKey(c.WM_KEYUP, c.VK_ESCAPE));
-    try std.testing.expect(app.paneDividerDragKey(c.WM_KEYUP, 'Z'));
-    try std.testing.expect(app.paneDividerDragKey(c.WM_SYSKEYUP, c.VK_MENU));
-    try std.testing.expect(!app.paneDividerDragKey(c.WM_KEYDOWN, 'Z'));
-    try std.testing.expect(!app.paneDividerDragKey(c.WM_KEYUP, 'Z'));
-    try std.testing.expect(!app.paneDividerDragKey(c.WM_KEYDOWN, c.VK_ESCAPE));
+    try std.testing.expect(app.paneDividerDragKey(c.WM_KEYUP, c.VK_ESCAPE, pane_divider_key_release));
+    try std.testing.expect(!app.paneDividerDragKey(c.WM_KEYUP, c.VK_ESCAPE, pane_divider_key_release));
+    try std.testing.expect(app.paneDividerDragKey(c.WM_KEYUP, 'Z', pane_divider_key_release));
+    try std.testing.expect(app.paneDividerDragKey(c.WM_SYSKEYUP, c.VK_MENU, pane_divider_key_release));
+    try std.testing.expect(!app.paneDividerDragKey(c.WM_KEYDOWN, 'Z', pane_divider_key_press));
+    try std.testing.expect(!app.paneDividerDragKey(c.WM_KEYUP, 'Z', pane_divider_key_release));
+    try std.testing.expect(!app.paneDividerDragKey(c.WM_KEYDOWN, c.VK_ESCAPE, pane_divider_key_press));
+}
+
+/// Key message lParams: a first press (bit 30, the previous state, clear),
+/// an auto-repeat (bit 30 set) and a release (bits 30 and 31 set).
+const pane_divider_key_press: LPARAM = 0x00000001;
+const pane_divider_key_repeat: LPARAM = 0x40000001;
+const pane_divider_key_release: LPARAM = @bitCast(@as(usize, 0xC0000001));
+
+test "win32 pane divider held Esc cancels once and its repeats and release stay with it" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var core_app: CoreApp = undefined;
+    var app: App = undefined;
+    var host: Host = undefined;
+    var surface_a: Surface = undefined;
+    var surface_b: Surface = undefined;
+    var session: TestSession = .{};
+    try session.init(.{
+        .core_app = &core_app,
+        .app = &app,
+        .hosts = &.{.{ .storage = &host, .register = true }},
+        .surfaces = &.{
+            .{ .storage = &surface_a, .host = &host, .register = true },
+            .{ .storage = &surface_b, .host = &host },
+        },
+        .tabs = &.{.{ .host = &host, .surface = &surface_a, .id = 1 }},
+    });
+    defer session.deinit();
+    try paneDividerTestSplit(&host, &surface_a, &surface_b, .right, 0.5);
+
+    try std.testing.expect(host.beginPaneDividerDrag(pane_divider_test_content, .{ .x = 400, .y = 300 }, 1000));
+    host.dragPaneDivider(pane_divider_test_content, .{ .x = 200, .y = 300 });
+    try std.testing.expect(app.paneDividerDragKey(c.WM_KEYDOWN, c.VK_ESCAPE, pane_divider_key_press));
+    try std.testing.expect(host.pane_divider_drag == null);
+    try std.testing.expectEqual(@as(f16, 0.5), paneDividerTestRatio(&host, .root));
+    // Esc is still held: its repeats, with no drag left, reach no terminal,
+    // and neither does its release.
+    try std.testing.expect(app.paneDividerDragKey(c.WM_KEYDOWN, c.VK_ESCAPE, pane_divider_key_repeat));
+    try std.testing.expect(app.paneDividerDragKey(c.WM_KEYDOWN, c.VK_ESCAPE, pane_divider_key_repeat));
+    try std.testing.expect(app.paneDividerDragKey(c.WM_KEYUP, c.VK_ESCAPE, pane_divider_key_release));
+    // The next press of Esc is the terminal's again.
+    try std.testing.expect(!app.paneDividerDragKey(c.WM_KEYDOWN, c.VK_ESCAPE, pane_divider_key_press));
+    try std.testing.expect(!app.paneDividerDragKey(c.WM_KEYDOWN, c.VK_ESCAPE, pane_divider_key_repeat));
+    try std.testing.expect(!app.paneDividerDragKey(c.WM_KEYUP, c.VK_ESCAPE, pane_divider_key_release));
+}
+
+test "win32 pane divider leaves the release of a key held from before the drag, a modifier included" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var core_app: CoreApp = undefined;
+    var app: App = undefined;
+    var host: Host = undefined;
+    var surface_a: Surface = undefined;
+    var surface_b: Surface = undefined;
+    var session: TestSession = .{};
+    try session.init(.{
+        .core_app = &core_app,
+        .app = &app,
+        .hosts = &.{.{ .storage = &host, .register = true }},
+        .surfaces = &.{
+            .{ .storage = &surface_a, .host = &host, .register = true },
+            .{ .storage = &surface_b, .host = &host },
+        },
+        .tabs = &.{.{ .host = &host, .surface = &surface_a, .id = 1 }},
+    });
+    defer session.deinit();
+    try paneDividerTestSplit(&host, &surface_a, &surface_b, .right, 0.5);
+
+    // 'A' and Shift go down before the press: the terminal has them.
+    try std.testing.expect(!app.paneDividerDragKey(c.WM_KEYDOWN, 'A', pane_divider_key_press));
+    try std.testing.expect(!app.paneDividerDragKey(c.WM_KEYDOWN, c.VK_SHIFT, pane_divider_key_press));
+    try std.testing.expect(host.beginPaneDividerDrag(pane_divider_test_content, .{ .x = 400, .y = 300 }, 1000));
+    // Their repeats during the drag reach no keybinding.
+    try std.testing.expect(app.paneDividerDragKey(c.WM_KEYDOWN, 'A', pane_divider_key_repeat));
+    try std.testing.expect(app.paneDividerDragKey(c.WM_KEYDOWN, c.VK_SHIFT, pane_divider_key_repeat));
+    // A key pressed during the drag is the drag's.
+    try std.testing.expect(app.paneDividerDragKey(c.WM_KEYDOWN, 'Z', pane_divider_key_press));
+    // Shift goes up during the drag, 'A' after it: the terminal sees both
+    // releases, so neither press is left without one.
+    try std.testing.expect(!app.paneDividerDragKey(c.WM_KEYUP, c.VK_SHIFT, pane_divider_key_release));
+    host.finishPaneDividerDrag(pane_divider_test_content);
+    try std.testing.expect(!app.paneDividerDragKey(c.WM_KEYDOWN, 'A', pane_divider_key_repeat));
+    try std.testing.expect(!app.paneDividerDragKey(c.WM_KEYUP, 'A', pane_divider_key_release));
+    // 'Z' was pressed during the drag: its repeats and release stay swallowed.
+    try std.testing.expect(app.paneDividerDragKey(c.WM_KEYDOWN, 'Z', pane_divider_key_repeat));
+    try std.testing.expect(app.paneDividerDragKey(c.WM_KEYUP, 'Z', pane_divider_key_release));
+    try std.testing.expect(!app.paneDividerDragKey(c.WM_KEYDOWN, 'Z', pane_divider_key_press));
+}
+
+fn paneDividerTestLParam(x: i32, y: i32) LPARAM {
+    const bits: u32 = (@as(u32, @as(u16, @bitCast(@as(i16, @intCast(y))))) << 16) | @as(u16, @bitCast(@as(i16, @intCast(x))));
+    return @intCast(bits);
+}
+
+test "win32 pane divider stationary click on an odd width changes nothing and keeps the history" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var core_app: CoreApp = undefined;
+    var app: App = undefined;
+    var host: Host = undefined;
+    var surface_a: Surface = undefined;
+    var surface_b: Surface = undefined;
+    var session: TestSession = .{};
+    try session.init(.{
+        .core_app = &core_app,
+        .app = &app,
+        .hosts = &.{.{ .storage = &host, .register = true }},
+        .surfaces = &.{
+            .{ .storage = &surface_a, .host = &host, .register = true },
+            .{ .storage = &surface_b, .host = &host },
+        },
+        .tabs = &.{.{ .host = &host, .surface = &surface_a, .id = 1 }},
+    });
+    defer session.deinit();
+    try paneDividerTestSplit(&host, &surface_a, &surface_b, .right, 0.5);
+    try paneDividerTestHistory(&host, &surface_a, &surface_b, 170);
+    // 801 px: the divider of 0.5 sits at round(400.5) = 401, and 401/801 is
+    // not 0.5 in f16.
+    host.test_pane_divider_content = .{ .left = 0, .top = 0, .right = 801, .bottom = 600 };
+    const at = paneDividerTestLParam(401, 300);
+    try std.testing.expect(host.handlePaneDividerMessage(c.WM_LBUTTONDOWN, 1, at));
+    try std.testing.expect(host.pane_divider_drag != null);
+    try std.testing.expect(host.handlePaneDividerMessage(c.WM_MOUSEMOVE, 1, at));
+    try std.testing.expectEqual(@as(f16, 0.5), paneDividerTestRatio(&host, .root));
+    try std.testing.expect(host.handlePaneDividerMessage(c.WM_LBUTTONUP, 0, at));
+    try std.testing.expect(host.pane_divider_drag == null);
+    try std.testing.expectEqual(@as(f16, 0.5), paneDividerTestRatio(&host, .root));
+    try expectPaneDividerHistory(&host, &surface_a, &surface_b, true);
+
+    // Out and back to the press: the start ratio exactly, the history kept.
+    // (Each press here is a new click, not the second of a double-click.)
+    host.pane_divider_press = null;
+    try std.testing.expect(host.handlePaneDividerMessage(c.WM_LBUTTONDOWN, 1, at));
+    try std.testing.expect(host.handlePaneDividerMessage(c.WM_MOUSEMOVE, 1, paneDividerTestLParam(201, 300)));
+    try std.testing.expect(paneDividerTestRatio(&host, .root) != 0.5);
+    try std.testing.expect(host.handlePaneDividerMessage(c.WM_LBUTTONUP, 0, at));
+    try std.testing.expectEqual(@as(f16, 0.5), paneDividerTestRatio(&host, .root));
+    try expectPaneDividerHistory(&host, &surface_a, &surface_b, true);
+
+    // At 1/3 on 800 px the divider sits at round(266.6) = 267, and 267/800
+    // is not f16(1/3) either: a click there keeps the ratio and the history.
+    const third: f16 = 1.0 / 3.0;
+    host.tabs.items[0].tree.resizeInPlace(.root, third);
+    host.test_pane_divider_content = pane_divider_test_content;
+    host.pane_divider_press = null;
+    const on_third = paneDividerTestLParam(267, 300);
+    try std.testing.expect(host.handlePaneDividerMessage(c.WM_LBUTTONDOWN, 1, on_third));
+    try std.testing.expect(host.handlePaneDividerMessage(c.WM_MOUSEMOVE, 1, on_third));
+    try std.testing.expect(host.handlePaneDividerMessage(c.WM_LBUTTONUP, 0, on_third));
+    try std.testing.expectEqual(third, paneDividerTestRatio(&host, .root));
+    try expectPaneDividerHistory(&host, &surface_a, &surface_b, true);
+    host.tabs.items[0].tree.resizeInPlace(.root, 0.5);
+    host.test_pane_divider_content = .{ .left = 0, .top = 0, .right = 801, .bottom = 600 };
+
+    // A real move is still one change.
+    host.pane_divider_press = null;
+    try std.testing.expect(host.handlePaneDividerMessage(c.WM_LBUTTONDOWN, 1, at));
+    try std.testing.expect(host.handlePaneDividerMessage(c.WM_LBUTTONUP, 0, paneDividerTestLParam(301, 300)));
+    try std.testing.expect(paneDividerTestRatio(&host, .root) < 0.4);
+    try expectPaneDividerHistory(&host, &surface_a, &surface_b, false);
+}
+
+test "win32 pane divider drag goes on under an overlay that opens mid-drag and still clears the history" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var core_app: CoreApp = undefined;
+    var app: App = undefined;
+    var host: Host = undefined;
+    var surface_a: Surface = undefined;
+    var surface_b: Surface = undefined;
+    var session: TestSession = .{};
+    try session.init(.{
+        .core_app = &core_app,
+        .app = &app,
+        .hosts = &.{.{ .storage = &host, .register = true }},
+        .surfaces = &.{
+            .{ .storage = &surface_a, .host = &host, .register = true },
+            .{ .storage = &surface_b, .host = &host },
+        },
+        .tabs = &.{.{ .host = &host, .surface = &surface_a, .id = 1 }},
+    });
+    defer session.deinit();
+    try paneDividerTestSplit(&host, &surface_a, &surface_b, .right, 0.5);
+    try paneDividerTestHistory(&host, &surface_a, &surface_b, 180);
+
+    try std.testing.expect(host.beginPaneDividerDrag(pane_divider_test_content, .{ .x = 400, .y = 300 }, 1000));
+    host.dragPaneDivider(pane_divider_test_content, .{ .x = 200, .y = 300 });
+    // A prompt opens (an OSC 52 request, a close confirmation): the tree
+    // is the drag's still, and the drag goes on to its end.
+    host.overlay_mode = .confirm;
+    defer host.overlay_mode = .none;
+    host.dragPaneDivider(pane_divider_test_content, .{ .x = 100, .y = 300 });
+    try std.testing.expect(host.pane_divider_drag != null);
+    try std.testing.expectEqual(@as(f16, 0.125), paneDividerTestRatio(&host, .root));
+    host.finishPaneDividerDrag(pane_divider_test_content);
+    try std.testing.expectEqual(@as(f16, 0.125), paneDividerTestRatio(&host, .root));
+    try expectPaneDividerHistory(&host, &surface_a, &surface_b, false);
+    // No new drag starts under it.
+    try std.testing.expect(!host.beginPaneDividerDrag(pane_divider_test_content, .{ .x = 100, .y = 300 }, 9000));
+}
+
+test "win32 pane divider keeps the button until its release after Esc or a double-click" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var core_app: CoreApp = undefined;
+    var app: App = undefined;
+    var host: Host = undefined;
+    var surface_a: Surface = undefined;
+    var surface_b: Surface = undefined;
+    var surface_c: Surface = undefined;
+    var session: TestSession = .{};
+    try session.init(.{
+        .core_app = &core_app,
+        .app = &app,
+        .hosts = &.{.{ .storage = &host, .register = true }},
+        .surfaces = &.{
+            .{ .storage = &surface_a, .host = &host, .register = true },
+            .{ .storage = &surface_b, .host = &host },
+            .{ .storage = &surface_c, .host = &host },
+        },
+        .tabs = &.{.{ .host = &host, .surface = &surface_a, .id = 1 }},
+    });
+    defer session.deinit();
+    // [A | (B | C)]: a double-click moves the divider from 400 to 267.
+    try paneDividerTestSplit(&host, &surface_a, &surface_b, .right, 0.5);
+    try paneDividerTestSplit(&host, &surface_b, &surface_c, .right, 0.5);
+    host.test_pane_divider_content = pane_divider_test_content;
+    const on = paneDividerTestLParam(400, 300);
+    const in_pane = paneDividerTestLParam(360, 300);
+
+    // Esc with the button down: the divider goes back and the pointer may
+    // now be over a pane, but the moves and the release are still the
+    // host's, so no terminal gets a release whose press it never saw.
+    try std.testing.expect(host.handlePaneDividerMessage(c.WM_LBUTTONDOWN, 1, on));
+    try std.testing.expect(host.handlePaneDividerMessage(c.WM_MOUSEMOVE, 1, paneDividerTestLParam(200, 300)));
+    try std.testing.expect(app.paneDividerDragKey(c.WM_KEYDOWN, c.VK_ESCAPE, pane_divider_key_press));
+    try std.testing.expect(host.pane_divider_drag == null);
+    try std.testing.expect(host.pane_divider_button_held);
+    try std.testing.expect(host.handlePaneDividerMessage(c.WM_MOUSEMOVE, 1, in_pane));
+    try std.testing.expectEqual(@as(f16, 0.5), paneDividerTestRatio(&host, .root));
+    try std.testing.expect(host.handlePaneDividerMessage(c.WM_LBUTTONUP, 0, in_pane));
+    try std.testing.expect(!host.pane_divider_button_held);
+    try std.testing.expect(!host.handlePaneDividerMessage(c.WM_MOUSEMOVE, 0, in_pane));
+    try std.testing.expect(app.paneDividerDragKey(c.WM_KEYUP, c.VK_ESCAPE, pane_divider_key_release));
+
+    // The second press of a double-click equalizes and keeps the button too.
+    host.pane_divider_press = null;
+    try std.testing.expect(host.handlePaneDividerMessage(c.WM_LBUTTONDOWN, 1, on));
+    try std.testing.expect(host.handlePaneDividerMessage(c.WM_LBUTTONUP, 0, on));
+    try std.testing.expect(host.handlePaneDividerMessage(c.WM_LBUTTONDOWN, 1, on));
+    try std.testing.expectEqual(@as(f16, 1.0 / 3.0), paneDividerTestRatio(&host, .root));
+    try std.testing.expect(host.pane_divider_drag == null);
+    try std.testing.expect(host.pane_divider_button_held);
+    try std.testing.expect(host.handlePaneDividerMessage(c.WM_MOUSEMOVE, 1, in_pane));
+    try std.testing.expect(host.handlePaneDividerMessage(c.WM_LBUTTONUP, 0, in_pane));
+    try std.testing.expect(!host.pane_divider_button_held);
+    // A capture taken away also ends the hold.
+    host.pane_divider_press = null;
+    try std.testing.expect(host.handlePaneDividerMessage(c.WM_LBUTTONDOWN, 1, paneDividerTestLParam(267, 300)));
+    try std.testing.expect(app.paneDividerDragKey(c.WM_KEYDOWN, c.VK_ESCAPE, pane_divider_key_press));
+    try std.testing.expect(host.handlePaneDividerMessage(c.WM_CAPTURECHANGED, 0, 0));
+    try std.testing.expect(!host.pane_divider_button_held);
+    try std.testing.expect(app.paneDividerDragKey(c.WM_KEYUP, c.VK_ESCAPE, pane_divider_key_release));
+}
+
+test "win32 pane divider drag whose tab leaves the front ends there as one change" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var core_app: CoreApp = undefined;
+    var app: App = undefined;
+    var host: Host = undefined;
+    var surface_a: Surface = undefined;
+    var surface_b: Surface = undefined;
+    var surface_c: Surface = undefined;
+    var session: TestSession = .{};
+    try session.init(.{
+        .core_app = &core_app,
+        .app = &app,
+        .hosts = &.{.{ .storage = &host, .register = true }},
+        .surfaces = &.{
+            .{ .storage = &surface_a, .host = &host, .register = true },
+            .{ .storage = &surface_b, .host = &host },
+            .{ .storage = &surface_c, .host = &host, .register = true },
+        },
+        .tabs = &.{
+            .{ .host = &host, .surface = &surface_a, .id = 1 },
+            .{ .host = &host, .surface = &surface_c, .id = 2 },
+        },
+    });
+    defer session.deinit();
+    host.active_tab = 0;
+    try paneDividerTestSplit(&host, &surface_a, &surface_b, .right, 0.5);
+    try paneDividerTestHistory(&host, &surface_a, &surface_b, 200);
+
+    try std.testing.expect(host.beginPaneDividerDrag(pane_divider_test_content, .{ .x = 400, .y = 300 }, 1000));
+    host.dragPaneDivider(pane_divider_test_content, .{ .x = 200, .y = 300 });
+    // Another tab comes to the front (automation, a forwarded request).
+    host.active_tab = 1;
+    host.dragPaneDivider(pane_divider_test_content, .{ .x = 100, .y = 300 });
+    try std.testing.expect(host.pane_divider_drag == null);
+    try std.testing.expectEqual(@as(f16, 0.25), paneDividerTestRatio(&host, .root));
+    try expectPaneDividerHistory(&host, &surface_a, &surface_b, false);
+    host.active_tab = 0;
+}
+
+test "win32 pane divider drag lets a pane below the minimum grow and shrink back to where it started" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var core_app: CoreApp = undefined;
+    var app: App = undefined;
+    var host: Host = undefined;
+    var surface_a: Surface = undefined;
+    var surface_b: Surface = undefined;
+    var session: TestSession = .{};
+    try session.init(.{
+        .core_app = &core_app,
+        .app = &app,
+        .hosts = &.{.{ .storage = &host, .register = true }},
+        .surfaces = &.{
+            .{ .storage = &surface_a, .host = &host, .register = true },
+            .{ .storage = &surface_b, .host = &host },
+        },
+        .tabs = &.{.{ .host = &host, .surface = &surface_a, .id = 1 }},
+    });
+    defer session.deinit();
+    // The keyboard made A 16 px of 800, under the 40 px minimum.
+    try paneDividerTestSplit(&host, &surface_a, &surface_b, .right, 0.02);
+
+    try std.testing.expect(host.beginPaneDividerDrag(pane_divider_test_content, .{ .x = 16, .y = 300 }, 1000));
+    host.dragPaneDivider(pane_divider_test_content, .{ .x = 30, .y = 300 });
+    try std.testing.expectApproxEqAbs(@as(f32, 30.0 / 800.0), @as(f32, paneDividerTestRatio(&host, .root)), 0.001);
+    // Back past where it started: the floor is the size A had at the press,
+    // not the size it grew to during the drag.
+    host.dragPaneDivider(pane_divider_test_content, .{ .x = 0, .y = 300 });
+    try std.testing.expectApproxEqAbs(@as(f32, 0.02), @as(f32, paneDividerTestRatio(&host, .root)), 0.001);
+    host.finishPaneDividerDrag(pane_divider_test_content);
+}
+
+test "win32 pane divider drag ends as a release when a move comes without the button" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var core_app: CoreApp = undefined;
+    var app: App = undefined;
+    var host: Host = undefined;
+    var surface_a: Surface = undefined;
+    var surface_b: Surface = undefined;
+    var session: TestSession = .{};
+    try session.init(.{
+        .core_app = &core_app,
+        .app = &app,
+        .hosts = &.{.{ .storage = &host, .register = true }},
+        .surfaces = &.{
+            .{ .storage = &surface_a, .host = &host, .register = true },
+            .{ .storage = &surface_b, .host = &host },
+        },
+        .tabs = &.{.{ .host = &host, .surface = &surface_a, .id = 1 }},
+    });
+    defer session.deinit();
+    try paneDividerTestSplit(&host, &surface_a, &surface_b, .right, 0.5);
+    try paneDividerTestHistory(&host, &surface_a, &surface_b, 210);
+    host.test_pane_divider_content = pane_divider_test_content;
+
+    try std.testing.expect(host.handlePaneDividerMessage(c.WM_LBUTTONDOWN, c.MK_LBUTTON, paneDividerTestLParam(400, 300)));
+    try std.testing.expect(host.handlePaneDividerMessage(c.WM_MOUSEMOVE, c.MK_LBUTTON, paneDividerTestLParam(200, 300)));
+    try std.testing.expectEqual(@as(f16, 0.25), paneDividerTestRatio(&host, .root));
+    // The button went up where the host never heard of it: the next move
+    // has no MK_LBUTTON. The drag ends where it was, one change; the divider
+    // does not follow the pointer to 100.
+    try std.testing.expect(host.handlePaneDividerMessage(c.WM_MOUSEMOVE, 0, paneDividerTestLParam(100, 300)));
+    try std.testing.expect(host.pane_divider_drag == null);
+    try std.testing.expect(!host.pane_divider_button_held);
+    try std.testing.expectEqual(@as(f16, 0.25), paneDividerTestRatio(&host, .root));
+    try expectPaneDividerHistory(&host, &surface_a, &surface_b, false);
+}
+
+test "win32 pane divider drag step asks for resize-settle repaints" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var core_app: CoreApp = undefined;
+    var app: App = undefined;
+    var host: Host = undefined;
+    var surface_a: Surface = undefined;
+    var surface_b: Surface = undefined;
+    var session: TestSession = .{};
+    try session.init(.{
+        .core_app = &core_app,
+        .app = &app,
+        .hosts = &.{.{ .storage = &host, .register = true }},
+        .surfaces = &.{
+            .{ .storage = &surface_a, .host = &host, .register = true },
+            .{ .storage = &surface_b, .host = &host },
+        },
+        .tabs = &.{.{ .host = &host, .surface = &surface_a, .id = 1 }},
+    });
+    defer session.deinit();
+    try paneDividerTestSplit(&host, &surface_a, &surface_b, .right, 0.5);
+    host.resize_settle_repaint_ticks = 0;
+    host.resize_settle_until_ms = 0;
+
+    // Settle mode makes the panes' size-change repaints synchronous
+    // (`surfaceSizeChangeRepaintMode`), as after a frame resize. (Its timer
+    // needs a window; the request is what this checks.)
+    try std.testing.expect(host.beginPaneDividerDrag(pane_divider_test_content, .{ .x = 400, .y = 300 }, 1000));
+    try std.testing.expectEqual(@as(u8, 0), host.resize_settle_repaint_ticks);
+    const before = sys.GetTickCount64();
+    host.dragPaneDivider(pane_divider_test_content, .{ .x = 200, .y = 300 });
+    try std.testing.expectEqual(@as(u8, c.RESIZE_SETTLE_REPAINT_TICKS), host.resize_settle_repaint_ticks);
+    try std.testing.expect(host.resize_settle_until_ms > before);
+    host.finishPaneDividerDrag(pane_divider_test_content);
+}
+
+test "win32 pane divider Esc through an IME composition cancels the drag" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var core_app: CoreApp = undefined;
+    var app: App = undefined;
+    var host: Host = undefined;
+    var surface_a: Surface = undefined;
+    var surface_b: Surface = undefined;
+    var session: TestSession = .{};
+    try session.init(.{
+        .core_app = &core_app,
+        .app = &app,
+        .hosts = &.{.{ .storage = &host, .register = true }},
+        .surfaces = &.{
+            .{ .storage = &surface_a, .host = &host, .register = true },
+            .{ .storage = &surface_b, .host = &host },
+        },
+        .tabs = &.{.{ .host = &host, .surface = &surface_a, .id = 1 }},
+    });
+    defer session.deinit();
+    try paneDividerTestSplit(&host, &surface_a, &surface_b, .right, 0.5);
+
+    try std.testing.expect(host.beginPaneDividerDrag(pane_divider_test_content, .{ .x = 400, .y = 300 }, 1000));
+    host.dragPaneDivider(pane_divider_test_content, .{ .x = 200, .y = 300 });
+    // An IME composing turns every key into VK_PROCESSKEY: 'A' (scan 0x1E)
+    // is swallowed and cancels nothing; Esc (scan 0x01) cancels.
+    try std.testing.expect(app.paneDividerDragKey(c.WM_KEYDOWN, c.VK_PROCESSKEY, 0x001E0001));
+    try std.testing.expect(host.pane_divider_drag != null);
+    try std.testing.expect(app.paneDividerDragKey(c.WM_KEYUP, c.VK_PROCESSKEY, @bitCast(@as(usize, 0xC01E0001))));
+    try std.testing.expect(app.paneDividerDragKey(c.WM_KEYDOWN, c.VK_PROCESSKEY, 0x00010001));
+    try std.testing.expect(host.pane_divider_drag == null);
+    try std.testing.expectEqual(@as(f16, 0.5), paneDividerTestRatio(&host, .root));
+    // Its release, as either key, reaches no terminal.
+    try std.testing.expect(app.paneDividerDragKey(c.WM_KEYUP, c.VK_ESCAPE, @bitCast(@as(usize, 0xC0010001))));
+}
+
+test "win32 pane divider drag takes no global hotkey while the mouse is held" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var core_app: CoreApp = undefined;
+    var app: App = undefined;
+    var host: Host = undefined;
+    var surface_a: Surface = undefined;
+    var surface_b: Surface = undefined;
+    var session: TestSession = .{};
+    try session.init(.{
+        .core_app = &core_app,
+        .app = &app,
+        .hosts = &.{.{ .storage = &host, .register = true }},
+        .surfaces = &.{
+            .{ .storage = &surface_a, .host = &host, .register = true },
+            .{ .storage = &surface_b, .host = &host },
+        },
+        .tabs = &.{.{ .host = &host, .surface = &surface_a, .id = 1 }},
+    });
+    defer session.deinit();
+    try paneDividerTestSplit(&host, &surface_a, &surface_b, .right, 0.5);
+
+    // A global hotkey (`new_split`, `resize_split`...) would change the
+    // panes under the drag: it is dropped, like a key press.
+    try std.testing.expect(host.beginPaneDividerDrag(pane_divider_test_content, .{ .x = 400, .y = 300 }, 1000));
+    try std.testing.expect(!app.takeGlobalHotkey(1));
+    host.finishPaneDividerDrag(pane_divider_test_content);
+    try std.testing.expect(app.takeGlobalHotkey(1));
+}
+
+test "win32 pane divider drag that moved and then lost its panes still clears the history" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var core_app: CoreApp = undefined;
+    var app: App = undefined;
+    var host: Host = undefined;
+    var surface_a: Surface = undefined;
+    var surface_b: Surface = undefined;
+    var session: TestSession = .{};
+    try session.init(.{
+        .core_app = &core_app,
+        .app = &app,
+        .hosts = &.{.{ .storage = &host, .register = true }},
+        .surfaces = &.{
+            .{ .storage = &surface_a, .host = &host, .register = true },
+            .{ .storage = &surface_b, .host = &host },
+        },
+        .tabs = &.{.{ .host = &host, .surface = &surface_a, .id = 1 }},
+    });
+    defer session.deinit();
+    try paneDividerTestSplit(&host, &surface_a, &surface_b, .right, 0.5);
+    const tab = &host.tabs.items[0];
+
+    // A zoom after the drag moved: the drag ends where it was, one change.
+    try paneDividerTestHistory(&host, &surface_a, &surface_b, 190);
+    try std.testing.expect(host.beginPaneDividerDrag(pane_divider_test_content, .{ .x = 400, .y = 300 }, 1000));
+    host.dragPaneDivider(pane_divider_test_content, .{ .x = 200, .y = 300 });
+    tab.tree.zoom(tab.findHandle(&surface_b).?);
+    host.dragPaneDivider(pane_divider_test_content, .{ .x = 100, .y = 300 });
+    try std.testing.expect(host.pane_divider_drag == null);
+    try std.testing.expectEqual(@as(f16, 0.25), paneDividerTestRatio(&host, .root));
+    try expectPaneDividerHistory(&host, &surface_a, &surface_b, false);
+    tab.tree.zoom(null);
+
+    // The tree replaced after the drag moved (the other pane closed): the
+    // change cannot be put back, so even Esc clears the structural history.
+    try paneDividerTestStructuralHistory(&host, &surface_a, &surface_b);
+    try std.testing.expect(host.beginPaneDividerDrag(pane_divider_test_content, .{ .x = 200, .y = 300 }, 5000));
+    host.dragPaneDivider(pane_divider_test_content, .{ .x = 300, .y = 300 });
+    const alone = try tab.tree.remove(std.testing.allocator, tab.findHandle(&surface_b).?);
+    tab.tree.deinit();
+    tab.tree = alone;
+    tab.focused = tab.findHandle(&surface_a).?;
+    host.cancelPaneDividerDrag();
+    try std.testing.expect(host.pane_divider_drag == null);
+    try std.testing.expectEqual(@as(usize, 0), host.structural_undo_entries.items.len);
+    try std.testing.expectEqual(@as(usize, 0), host.structural_redo_entries.items.len);
 }
 
 test "win32 pane divider capture loss ends the drag where it is" {
@@ -17317,13 +17847,13 @@ test "win32 pane divider double-click equalizes that split, as equalize_splits w
 
     // The first click is a press and release that moves nothing.
     try std.testing.expect(host.beginPaneDividerDrag(pane_divider_test_content, .{ .x = 400, .y = 300 }, 1000));
-    host.finishPaneDividerDrag();
+    host.finishPaneDividerDrag(pane_divider_test_content);
     try expectPaneDividerHistory(&host, &surface_a, &surface_b, true);
     // A second press too late is another drag.
     const late = 1000 +% sys.GetDoubleClickTime() +% 1;
     try std.testing.expect(host.beginPaneDividerDrag(pane_divider_test_content, .{ .x = 400, .y = 300 }, late));
     try std.testing.expect(host.pane_divider_drag != null);
-    host.finishPaneDividerDrag();
+    host.finishPaneDividerDrag(pane_divider_test_content);
     try std.testing.expectEqual(@as(f16, 0.5), paneDividerTestRatio(&host, .root));
 
     // In time, on the same divider: one change, which clears the history.
@@ -17372,7 +17902,7 @@ test "win32 pane divider press grabs the innermost divider and holds the DPI-sca
     // 80 px (40 DIP at 192 DPI) of the stack's 600.
     try std.testing.expectApproxEqAbs(@as(f32, 80.0 / 600.0), @as(f32, paneDividerTestRatio(&host, inner)), 0.001);
     try std.testing.expectEqual(@as(f16, 0.5), paneDividerTestRatio(&host, .root));
-    host.finishPaneDividerDrag();
+    host.finishPaneDividerDrag(pane_divider_test_content);
 
     // The root's line, away from the stack's.
     try std.testing.expect(host.beginPaneDividerDrag(pane_divider_test_content, .{ .x = 395, .y = 500 }, 9000));

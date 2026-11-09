@@ -41,7 +41,7 @@ pub fn minPane(dpi: u32) i32 {
     return win32_chrome_state.scaled(min_pane_dip, dpi);
 }
 
-pub fn contains(rect: Rect, point: Point) bool {
+fn contains(rect: Rect, point: Point) bool {
     return point.x >= rect.left and point.x < rect.right and
         point.y >= rect.top and point.y < rect.bottom;
 }
@@ -159,37 +159,89 @@ pub fn For(comptime Tree: type) type {
             visit(tree, spatial, content, point, margin, s.right, depth + 1, best);
         }
 
-        /// The ratio that puts `found`'s divider at `along` (a pixel on the
-        /// split's axis, in content coordinates), held where neither side
-        /// gets smaller than `min_px` (`minExtent`). Null when the split has
-        /// no extent.
-        pub fn dragRatio(tree: *const Tree, spatial: Spatial, content: Rect, found: Divider, along: i32, min_px: i32) ?f16 {
+        /// The ratios a drag of `found`'s divider may take: neither side
+        /// smaller than `min_px` (`minExtent`), measured on the layout as it
+        /// is. The Host takes them once, at the press, and again only when
+        /// the split's extent changes mid-drag (`Host.dragPaneDivider`):
+        /// measured on every move, a pane that started below the minimum
+        /// would count at the size the drag grew it to, and could not be
+        /// dragged back to where it was. Null when the split has no extent.
+        pub fn ratioBounds(tree: *const Tree, spatial: Spatial, content: Rect, found: Divider, min_px: i32) ?Bounds {
             if (found.handle.idx() >= tree.nodes.len) return null;
             const s = switch (tree.nodes[found.handle.idx()]) {
                 .leaf => return null,
                 .split => |s| s,
             };
-            const start: i32, const extent: i32 = switch (s.layout) {
-                .horizontal => .{ found.split.left, found.split.right - found.split.left },
-                .vertical => .{ found.split.top, found.split.bottom - found.split.top },
-            };
+            const extent = splitExtent(found);
             if (extent <= 0) return null;
             const span: f32 = @floatFromInt(extent);
             const min: f32 = @floatFromInt(@max(0, min_px));
-            const lo = @max(0, minExtent(tree, spatial, content, s.left, s.layout, min) / span);
-            const hi = @min(1, 1 - minExtent(tree, spatial, content, s.right, s.layout, min) / span);
-            const want = @as(f32, @floatFromInt(along - start)) / span;
+            return .{
+                .lo = @max(0, minExtent(tree, spatial, content, s.left, s.layout, min) / span),
+                .hi = @min(1, 1 - minExtent(tree, spatial, content, s.right, s.layout, min) / span),
+                .extent = extent,
+            };
+        }
+
+        /// `want` held in `bounds`, as an f16; `current` when no f16 ratio
+        /// fits them. The bounds are checked in pixels after the f16
+        /// conversion: an f16 has no 1 px step on a wide window, and the
+        /// nearest one to 1 - 40/3840 (0.98958) is 0.98975, which puts the
+        /// divider 1 px past the bound and leaves a 39 px pane; then the
+        /// ratio steps one f16 back toward the inside. (A pane inside a
+        /// nested split is measured through more f16 slot arithmetic and can
+        /// still come out at most 1 px under the minimum.)
+        pub fn ratioAt(found: Divider, want: f32, bounds: Bounds, current: f16) f16 {
+            const span: f32 = @floatFromInt(@max(1, splitExtent(found)));
             // A subtree already smaller than its minimum keeps its size
-            // (`minExtent`), so the current ratio always lies in [lo, hi];
-            // only rounding can cross them, which leaves the ratio as is.
-            if (!(lo <= hi)) return s.ratio;
-            return @floatCast(std.math.clamp(want, lo, hi));
+            // (`minExtent`), so the starting ratio lies in [lo, hi]; only
+            // rounding can cross them, which leaves the ratio as is.
+            if (!(bounds.lo <= bounds.hi)) return current;
+            const lo_px = @round(bounds.lo * span);
+            const hi_px = @round(bounds.hi * span);
+            var ratio: f16 = @floatCast(std.math.clamp(want, bounds.lo, bounds.hi));
+            if (@round(@as(f32, ratio) * span) > hi_px) ratio = std.math.nextAfter(f16, ratio, 0);
+            if (@round(@as(f32, ratio) * span) < lo_px) ratio = std.math.nextAfter(f16, ratio, 1);
+            const px = @round(@as(f32, ratio) * span);
+            if (px < lo_px or px > hi_px) return current;
+            return ratio;
+        }
+
+        /// The ratio that puts `found`'s divider at `along` (a pixel on the
+        /// split's axis, in content coordinates): `ratioBounds` and `ratioAt`
+        /// on the layout as it is. A drag moves by the pointer's distance
+        /// from the press instead (`Host.dragPaneDivider`), which keeps the
+        /// starting ratio exactly when the pointer has not moved.
+        pub fn dragRatio(tree: *const Tree, spatial: Spatial, content: Rect, found: Divider, along: i32, min_px: i32) ?f16 {
+            const bounds = ratioBounds(tree, spatial, content, found, min_px) orelse return null;
+            const start = switch (found.layout) {
+                .horizontal => found.split.left,
+                .vertical => found.split.top,
+            };
+            const span: f32 = @floatFromInt(bounds.extent);
+            const want = @as(f32, @floatFromInt(along - start)) / span;
+            return ratioAt(found, want, bounds, tree.nodes[found.handle.idx()].split.ratio);
+        }
+
+        pub const Bounds = struct {
+            lo: f32,
+            hi: f32,
+            /// The split's extent along its axis the bounds were measured at.
+            extent: i32,
+        };
+
+        /// The split's extent along its axis, in pixels.
+        pub fn splitExtent(found: Divider) i32 {
+            return switch (found.layout) {
+                .horizontal => found.split.right - found.split.left,
+                .vertical => found.split.bottom - found.split.top,
+            };
         }
 
         /// The smallest extent along `axis` the subtree at `handle` can take
         /// without any pane in it getting smaller than `min_px`, given the
         /// ratios inside it (a drag of an outer divider scales them all). A
-        /// pane that is already smaller counts at its current size, so a
+        /// pane that is already smaller counts at its size in `spatial`, so a
         /// layout the keyboard made never blocks a drag or jumps on it.
         pub fn minExtent(tree: *const Tree, spatial: Spatial, content: Rect, handle: Handle, axis: Layout, min_px: f32) f32 {
             if (handle.idx() >= tree.nodes.len or handle.idx() >= spatial.slots.len) return 0;
@@ -211,30 +263,19 @@ pub fn For(comptime Tree: type) type {
             return min / ratio;
         }
 
-        /// The ratio `SplitTree.equalize` gives the split at `handle`: its
-        /// sides weighted by their panes along its axis. Double-clicking a
-        /// divider applies it to that one split.
+        /// The ratio `SplitTree.equalize` gives the split at `handle`, from
+        /// the same `SplitTree.weight`: its sides weighted by their panes
+        /// along its axis. Double-clicking a divider applies it to that one
+        /// split.
         pub fn equalRatio(tree: *const Tree, handle: Handle) ?f16 {
             if (handle.idx() >= tree.nodes.len) return null;
             const s = switch (tree.nodes[handle.idx()]) {
                 .leaf => return null,
                 .split => |s| s,
             };
-            const first: f32 = @floatFromInt(weight(tree, s.left, s.layout));
-            const second: f32 = @floatFromInt(weight(tree, s.right, s.layout));
+            const first: f32 = @floatFromInt(tree.weight(s.left, s.layout, 0));
+            const second: f32 = @floatFromInt(tree.weight(s.right, s.layout, 0));
             return @floatCast(first / (first + second));
-        }
-
-        /// `SplitTree.weight`, which is private there.
-        fn weight(tree: *const Tree, handle: Handle, layout: Layout) usize {
-            if (handle.idx() >= tree.nodes.len) return 1;
-            return switch (tree.nodes[handle.idx()]) {
-                .leaf => 1,
-                .split => |s| if (s.layout == layout)
-                    weight(tree, s.left, layout) + weight(tree, s.right, layout)
-                else
-                    1,
-            };
         }
 
         fn slotRect(content: Rect, slot: anytype) Rect {
@@ -482,6 +523,55 @@ test "pane divider: a drag keeps every nested pane at its minimum" {
     const stack_root = Dividers.divider(&stack, stack_spatial, content_800x600, .root, 3).?;
     try testing.expectEqual(@as(f16, 0.95), Dividers.dragRatio(&stack, stack_spatial, content_800x600, stack_root, 800, 40).?);
     try testing.expectEqual(@as(f16, 0.5), Dividers.equalRatio(&stack, .root).?);
+}
+
+/// Every pane's laid-out width in `content`, rounded as the layout rounds it.
+fn expectPanesAtLeast(tree: *const TestTree, content: Rect, min: i32) !void {
+    var spatial = try tree.spatial(testing.allocator);
+    defer spatial.deinit(testing.allocator);
+    var it = tree.iterator();
+    while (it.next()) |entry| {
+        const slot = spatial.slots[entry.handle.idx()];
+        const width = win32_layout.roundedSlotPixel(@floatCast(slot.width), content.width());
+        if (width < min) {
+            std.debug.print("pane {s} is {d} px, under {d}\n", .{ entry.view.label, width, min });
+            return error.TestPaneUnderMinimum;
+        }
+    }
+}
+
+test "pane divider: the minimum holds after the ratio is rounded to f16" {
+    // 3840 px at 96 DPI: the bound 1 - 40/3840 = 0.98958 has no f16; the
+    // nearest one, 0.98975, would leave the right pane 39 px.
+    const wide: Rect = .{ .left = 0, .top = 0, .right = 3840, .bottom = 600 };
+    var views = [_]TestView{ .{ .label = "A" }, .{ .label = "B" } };
+    var tree = try buildTree(&views, &.{.{ .at = .root, .direction = .right, .ratio = 0.5 }});
+    defer tree.deinit();
+    // Three panes, [A | (B | C)]: the slots go through a division by 3.
+    var three_views = [_]TestView{ .{ .label = "A" }, .{ .label = "B" }, .{ .label = "C" } };
+    var three = try buildTree(&three_views, &.{.{ .at = .root, .direction = .right, .ratio = 0.5 }});
+    defer three.deinit();
+    {
+        var inserted = try TestTree.init(testing.allocator, &three_views[2]);
+        defer inserted.deinit();
+        const next = try three.split(testing.allocator, handleOfView(&three, "B"), .right, 0.5, &inserted);
+        three.deinit();
+        three = next;
+    }
+    for ([_]*TestTree{ &tree, &three }) |subject| {
+        for ([_]i32{ 4000, -100 }) |along| {
+            var spatial = try subject.spatial(testing.allocator);
+            const found = Dividers.divider(subject, spatial, wide, .root, 3).?;
+            const ratio = Dividers.dragRatio(subject, spatial, wide, found, along, 40).?;
+            spatial.deinit(testing.allocator);
+            subject.resizeInPlace(.root, ratio);
+            try expectPanesAtLeast(subject, wide, 40);
+            // Still at the bound, not stepped far from it: within 2 px.
+            const reach: f32 = if (along > 0) @as(f32, ratio) else 1 - @as(f32, ratio);
+            try testing.expect(reach * 3840 > 3840 - (if (subject == &tree) @as(f32, 40) else @as(f32, 80)) - 3);
+            subject.resizeInPlace(.root, 0.5);
+        }
+    }
 }
 
 test "pane divider: a pane already below the minimum keeps its size and does not jump" {

@@ -1773,11 +1773,11 @@ pub const App = struct {
             }
 
             if (msg.message == c.WM_HOTKEY) {
-                self.handleGlobalHotkey(@intCast(msg.wParam));
+                _ = self.takeGlobalHotkey(@intCast(msg.wParam));
                 continue;
             }
 
-            if (self.paneDividerDragKey(msg.message, msg.wParam)) {
+            if (self.paneDividerDragKey(msg.message, msg.wParam, msg.lParam)) {
                 try self.tickCoreApp();
                 continue;
             }
@@ -1815,20 +1815,35 @@ pub const App = struct {
     /// before `TranslateMessage`: Esc puts the split back
     /// (`Host.cancelPaneDividerDrag`), and no key press reaches a terminal,
     /// a keybinding or a control until the button goes up, so nothing
-    /// changes the panes under the drag and no Esc reaches the program. The
-    /// release of a key pressed during the drag is swallowed as well, after
-    /// the drag too, so no program sees a release without its press.
+    /// changes the panes under the drag and no Esc reaches the program.
+    /// A press is the drag's when it starts during the drag (lParam bit 30,
+    /// the previous key state, clear): its auto-repeats and its release are
+    /// swallowed with it, also after the drag, so a held Esc never reaches
+    /// the shell and no program sees a release without its press. A key
+    /// that was already down when the drag started is not the drag's: its
+    /// repeats during the drag reach nothing, but its release is delivered.
     /// Returns whether the message was taken.
-    pub fn paneDividerDragKey(self: *App, message: UINT, wParam: WPARAM) bool {
+    pub fn paneDividerDragKey(self: *App, message: UINT, wParam: WPARAM, lParam: LPARAM) bool {
         const vk: u8 = @truncate(wParam);
         switch (message) {
             c.WM_KEYDOWN, c.WM_SYSKEYDOWN => {
-                const host = self.paneDividerDragHost() orelse {
+                const repeat = (@as(usize, @bitCast(lParam)) >> 30) & 1 != 0;
+                if (self.pane_divider_held_keys.isSet(vk)) {
+                    if (repeat) return true;
+                    // A fresh press of a key the drag held: its release
+                    // went elsewhere (a focus change); it is not held now.
                     self.pane_divider_held_keys.unset(vk);
-                    return false;
-                };
+                }
+                const host = self.paneDividerDragHost() orelse return false;
+                if (repeat) return true;
                 self.pane_divider_held_keys.set(vk);
-                if (vk == c.VK_ESCAPE) host.cancelPaneDividerDrag();
+                // With an IME composing, Windows hands the window
+                // VK_PROCESSKEY for every key, Esc included; the scan code
+                // (lParam bits 16-23) still says which. Its release may come
+                // as either key, so both are marked.
+                const ime_escape = vk == c.VK_PROCESSKEY and ((@as(usize, @bitCast(lParam)) >> 16) & 0xFF) == escape_scan_code;
+                if (ime_escape) self.pane_divider_held_keys.set(c.VK_ESCAPE);
+                if (vk == c.VK_ESCAPE or ime_escape) host.cancelPaneDividerDrag();
                 return true;
             },
             c.WM_KEYUP, c.WM_SYSKEYUP => {
@@ -1839,6 +1854,9 @@ pub const App = struct {
             else => return false,
         }
     }
+
+    /// Esc's set-1 scan code, which a VK_PROCESSKEY message still carries.
+    const escape_scan_code = 0x01;
 
     fn paneDividerDragHost(self: *App) ?*Host {
         for (self.registry.hosts.items) |host| {
@@ -2938,6 +2956,16 @@ pub const App = struct {
     fn scheduleGlobalHotkeySync(self: *App) void {
         self.global_hotkeys_dirty = true;
         self.wakeup();
+    }
+
+    /// A `WM_HOTKEY` from the loop. While a split divider drag holds the
+    /// mouse it is dropped, as a key press is (`paneDividerDragKey`): a
+    /// global `new_split` or `resize_split` would change the panes under the
+    /// drag. Returns whether the hotkey ran.
+    pub fn takeGlobalHotkey(self: *App, id: i32) bool {
+        if (self.paneDividerDragHost() != null) return false;
+        self.handleGlobalHotkey(id);
+        return true;
     }
 
     fn handleGlobalHotkey(self: *App, id: i32) void {

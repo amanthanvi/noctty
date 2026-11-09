@@ -794,7 +794,11 @@ pub fn SplitTree(comptime V: type) type {
             };
         }
 
-        fn weight(
+        /// The panes along `layout` under `from`, as `equalize` weighs a
+        /// split's sides (a split across `layout` counts as one). `acc` is
+        /// added to a leaf's count. Public for the Win32 divider
+        /// double-click, which equalizes one split by the same rule.
+        pub fn weight(
             self: *const Self,
             from: Node.Handle,
             layout: Split.Layout,
