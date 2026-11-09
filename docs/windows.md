@@ -1727,8 +1727,11 @@ are not part of the cycle.
 The native Win32 host window provides a tab bar with overflow handling,
 drag reorder, exact-pane drag-to-split with reversible subtree transfer, and
 tab tear-off (drag a tab out of the bar for a new window, or onto another
-window's bar; `move_tab_to_new_window` from the keyboard), which keeps the
-tab's programs running; horizontal and vertical splits; per-monitor DPI handling;
+window's bar of the same noctty process, since a drop onto another process's
+window opens a new window instead; `move_tab_to_new_window` from the
+keyboard; see the
+[tab dragging notes](windows-capability-matrix.md#tab-dragging)), which keeps
+the tab's programs running; horizontal and vertical splits; per-monitor DPI handling;
 a DWM dark caption; high-contrast palette switching; IME support;
 drag-and-drop of files, plain text, URLs, and HTML into a pane; and native
 right-click context menus.

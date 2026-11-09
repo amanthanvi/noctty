@@ -98,7 +98,14 @@ const leaves = .{
         .file = "tab_drag.zig",
         .module = @import("tab_drag.zig"),
         .source = @embedFile("tab_drag.zig"),
-        .pub_decls = 13,
+        // why: the pure decisions of a tab drag and of the only tab's window
+        // move, each with its inputs, so their tables need no window:
+        // `decide`/`Input`/`Target`/`Over`, `movesWindow`, `leavesStrip`,
+        // `insertIndex`/`InsertScan`/`Button`, `grabOffset`/`Offset`,
+        // `windowMoveMerges`/`WindowMoveEnd`, `moveResized`/`Size`, and
+        // `looksSnapped`/`Edges` for Windows 10 builds without
+        // `IsWindowArranged`.
+        .pub_decls = 17,
     },
 };
 

@@ -1255,6 +1255,14 @@ pub fn childCreated(host: *const Host, child: HWND) void {
     if (host.chrome_alpha != null) _ = solidChild(child, 1);
 }
 
+/// A child control a tab move brought to `host`'s window: solid while that
+/// window's background alone is translucent, and given back where it is not
+/// (only what `solidChild` 1 layered; a child layered for its own sake keeps
+/// its layering).
+pub fn childReparented(host: *const Host, child: HWND) void {
+    _ = solidChild(child, if (host.chrome_alpha != null) 1 else 0);
+}
+
 /// Whether every pane of `host` whose renderer runs draws with OpenGL
 /// (`TopLevel.shows`). A pane still starting is not counted: its core init
 /// asks again once its renderer runs (`refreshBackgroundOpacity`). A

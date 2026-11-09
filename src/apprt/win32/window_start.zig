@@ -327,10 +327,14 @@ pub fn placeTearOff(p: *const Plan, occupied: Occupied, drop: ?Drop) Placement {
         // the pointer its logical place in it: both scale by the DPIs before
         // the rect is fitted to that monitor's work area, so the fit sees the
         // size the window will have there (window-frame.md; TEAROFF-01).
+        // The grab is in the source window's pixels now; the size, for a
+        // fullscreen source, in those of the monitor it entered fullscreen
+        // on, where its return rect was saved.
         const from = @max(source.monitor.dpi, 1);
+        const size_from = if (source.state.fullscreen) |back| @max((back.monitor orelse source.monitor).dpi, 1) else from;
         const to = if (dropped.dpi == 0) from else dropped.dpi;
-        width = @max(1, mulDiv(width, to, from));
-        height = @max(1, mulDiv(height, to, from));
+        width = @max(1, mulDiv(width, to, size_from));
+        height = @max(1, mulDiv(height, to, size_from));
         const grab_x = std.math.clamp(mulDiv(dropped.grab.x, to, from), 0, width - 1);
         const grab_y = std.math.clamp(mulDiv(dropped.grab.y, to, from), 0, height - 1);
         return .{
@@ -946,6 +950,23 @@ test "win32 a torn-off tab's window opens at its source's normal size, under the
             .source = .{ .state = .{}, .rect = testRect(3900, 100, 4540, 500), .monitor = side },
             .drop = .{ .at = .{ .x = 1000, .y = 600 }, .grab = .{ .x = 40, .y = 20 }, .work = big.info.rcWork, .dpi = 144 },
             .rect = testRect(940, 570, 1900, 1170),
+        },
+        // Fullscreen now on the 96 DPI monitor, its return saved at 144 on
+        // the big one, dropped back on the big one: the saved size as it
+        // was (1200x900), and the grab, in the 96 DPI window's pixels,
+        // half again (60x30).
+        .{
+            .source = .{
+                .state = .{ .fullscreen = .{
+                    .rect = testRect(100, 100, 1300, 1000),
+                    .placement = testPlacement(testRect(100, 100, 1300, 1000), 0, c.SW_RESTORE),
+                    .monitor = big,
+                } },
+                .rect = side.info.rcMonitor,
+                .monitor = side,
+            },
+            .drop = .{ .at = .{ .x = 1000, .y = 500 }, .grab = .{ .x = 40, .y = 20 }, .work = big.info.rcWork, .dpi = 144 },
+            .rect = testRect(940, 470, 2140, 1370),
         },
         // The same DPI, given: unchanged.
         .{ .source = normal, .drop = .{ .at = .{ .x = 2000, .y = 1000 }, .grab = .{ .x = 40, .y = 20 }, .work = big.info.rcWork, .dpi = 144 }, .rect = testRect(1960, 980, 3240, 1780) },

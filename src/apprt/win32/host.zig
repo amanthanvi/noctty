@@ -830,8 +830,15 @@ pub const Host = struct {
     /// pointer in its new window (`tearOffDrop`). `tab_drag_start_*` moves
     /// with each reorder step; this does not.
     tab_drag_grab: POINT = .{ .x = 0, .y = 0 },
-    /// The tab's index when the drag began, which Esc puts it back at.
+    /// The tab's index when the drag began.
     tab_drag_origin_index: ?usize = null,
+    /// The dragged tab, and the tab after it when the drag began (null: it
+    /// was last), by id: Esc puts it back before that tab. By id, since a
+    /// key binding (`move_tab`, `move_tab_to_new_window`, a close) can change
+    /// the list during a drag; the tab button's handler finds the dragged
+    /// tab by its own button for the same reason.
+    tab_drag_tab_id: u32 = 0,
+    tab_drag_next_id: ?u32 = null,
     /// Esc ended the drag while the button was still down: the button keeps
     /// the capture until it comes up, and that release does nothing, so it
     /// neither clicks a tab's X nor reaches a terminal as a stray release.
@@ -846,13 +853,17 @@ pub const Host = struct {
     /// where the tab goes.
     tab_insert_marker_uia_provider: ?*win32_uia.ChromeControlProvider = null,
     tab_insert_marker_prev_proc: ?*const anyopaque = null,
-    /// A tab move asked of this window, run from the message loop
-    /// (`c.WM_WINHOSTTY_TAB_MOVE`, `App.runPendingTabMove`).
-    pending_tab_move: ?TabMoveRequest = null,
+    /// Tab moves asked of this window, in order, one per tab, run by the
+    /// outer message pump (`App.drainPendingTabMoves`), never from inside a
+    /// handler or a nested modal loop: a move can free this Host.
+    pending_tab_moves: [pending_tab_move_capacity]TabMoveRequest = undefined,
+    pending_tab_move_count: usize = 0,
     /// This window's only tab started a window move (`beginOnlyTabWindowMove`):
     /// its rect and DPI then. How the move ends decides whether the tab joins
     /// another window's strip (`tab_drag.windowMoveMerges`).
     only_tab_window_move: ?OnlyTabMove = null,
+    /// The same, while the system's move loop runs (`WM_SYSCOMMAND`).
+    only_tab_move_loop: ?OnlyTabMove = null,
     /// A moved tab is being shown here (`App.moveTabToWindow`): a pane's
     /// `initial_size` from its new DPI's font records its size but does not
     /// resize the window, whose size the move decided (`placeTearOff`).
@@ -3652,7 +3663,16 @@ pub const Host = struct {
 
     /// A tab move asked of a window (`App.requestTabMove`): the tab by its
     /// id in that window, and where it goes.
-    pub const OnlyTabMove = struct { rect: RECT, dpi: u32 };
+    pub const pending_tab_move_capacity = 16;
+
+    pub const OnlyTabMove = struct {
+        rect: RECT,
+        dpi: u32,
+        /// The window's size once the move loop began moving it (its first
+        /// `WM_MOVING`): a snapped or maximized window takes back its normal
+        /// size there, which is not a resize at the end.
+        moving: ?tab_drag.Size = null,
+    };
 
     pub const TabMoveRequest = struct {
         tab_id: u32,
@@ -3731,12 +3751,19 @@ pub const Host = struct {
                 null,
             );
             self.tab_insert_marker_placement = .{};
+            // Subclassed once, as it is made: a second subclass would save
+            // `tabInsertMarkerProc` as its own previous procedure, and every
+            // message would forward to itself until the stack ran out.
+            if (self.tab_insert_marker_hwnd) |made| {
+                setWindowData(made, self);
+                const previous = sys.SetWindowLongPtrW(made, c.GWLP_WNDPROC, @bitCast(@intFromPtr(&tabInsertMarkerProc)));
+                self.tab_insert_marker_prev_proc = if (previous == 0) null else @ptrFromInt(@as(usize, @bitCast(previous)));
+            }
         }
         const marker = self.tab_insert_marker_hwnd orelse return;
+        // Its UIA element may be made later than the bar (no COM yet, or a
+        // failed allocation): only the provider is tried again.
         if (self.tab_insert_marker_uia_provider == null) {
-            setWindowData(marker, self);
-            const previous = sys.SetWindowLongPtrW(marker, c.GWLP_WNDPROC, @bitCast(@intFromPtr(&tabInsertMarkerProc)));
-            self.tab_insert_marker_prev_proc = if (previous == 0) null else @ptrFromInt(@as(usize, @bitCast(previous)));
             self.tab_insert_marker_uia_provider = self.createChromeUiaProvider(marker, .{
                 .ctx = @ptrCast(self),
                 .role = .decorative,
@@ -3841,8 +3868,6 @@ pub const Host = struct {
     /// Esc during a tab drag: the drag ends where it began, a reorder made
     /// on the way taken back, and nothing is dropped.
     pub fn cancelTabDrag(self: *Host) void {
-        const origin = self.tab_drag_origin_index;
-        const current = self.tab_drag_index;
         self.tab_drag_index = null;
         self.tab_drag_active = false;
         self.tab_drag_origin_index = null;
@@ -3850,9 +3875,13 @@ pub const Host = struct {
         self.tab_drag_cancelled = true;
         self.hideTabDropPreview();
         self.app.endTabDragFeedback();
-        if (origin) |from| if (current) |at| {
-            if (from != at and from < self.tabs.items.len and at < self.tabs.items.len) _ = self.swapTabs(at, from);
-        };
+        // Back before the tab it was before, whatever else changed meanwhile.
+        const at = self.findTabIndexById(self.tab_drag_tab_id) orelse return;
+        const before: usize = if (self.tab_drag_next_id) |next| before: {
+            const next_at = self.findTabIndexById(next) orelse return;
+            break :before if (next_at > at) next_at - 1 else next_at;
+        } else self.tabs.items.len - 1;
+        if (before != at) _ = self.swapTabs(at, before);
     }
 
     /// The drag of a window's only tab passed its threshold: the window moves
@@ -3954,8 +3983,9 @@ pub const Host = struct {
             _ = sys.SetParent(child, parent);
             control.placement.* = .{};
             // A window whose background alone is translucent makes the
-            // controls that paint themselves solid as they arrive.
-            window_state.childCreated(target, child);
+            // controls that paint themselves solid as they arrive; an opaque
+            // one gives back what a translucent source layered.
+            window_state.childReparented(target, child);
         }
         // The search edit and its six buttons find their pane through the
         // Host in their window data (`searchEditProc`, `hostButtonProc`,

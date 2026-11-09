@@ -1304,6 +1304,7 @@ test "a move that runs out of memory at any step leaves the model as it was" {
                 try candidate.validate();
                 try std.testing.expectEqual(@as(usize, 2), candidate.windows.items.len);
                 try std.testing.expect(candidate.tab(lone).?.window.eql(first_id));
+                try std.testing.expect(candidate.focused_window.?.eql(state.focused_window.?));
             }
         } else return error.TestMoveNeverSucceeded;
     }

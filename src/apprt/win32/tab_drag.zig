@@ -55,6 +55,36 @@ pub fn movesWindow(tab_count: usize, quick_terminal: bool) bool {
     return tab_count == 1 and !quick_terminal;
 }
 
+pub const Size = struct { width: i32, height: i32 };
+
+/// A rect's edges, in screen coordinates.
+pub const Edges = struct { left: i32, top: i32, right: i32, bottom: i32 };
+
+/// Whether a window rect sits as Snap leaves one: against a side of its
+/// monitor's work area and against its top or bottom at once (a half snap
+/// spans the height, a quarter takes a corner, a Snap Layouts zone at least
+/// a corner), each within `slack` (the frame's invisible resize border).
+/// Windows 10 before `IsWindowArranged` says no more than this; a plain move
+/// into a corner reads as a snap too, which only declines a merge.
+pub fn looksSnapped(window: Edges, work: Edges, slack: i32) bool {
+    const near = struct {
+        fn f(a: i32, b: i32, s: i32) bool {
+            return @abs(a - b) <= s;
+        }
+    }.f;
+    const side = near(window.left, work.left, slack) or near(window.right, work.right, slack);
+    const end = near(window.top, work.top, slack) or near(window.bottom, work.bottom, slack);
+    return side and end;
+}
+
+/// Whether the window move changed the window's size: against the size it
+/// moved at (`moving`, after a snapped or maximized window took back its
+/// normal size as the move began), else against the size it started at.
+pub fn moveResized(start: Size, moving: ?Size, end: Size) bool {
+    const at = moving orelse start;
+    return at.width != end.width or at.height != end.height;
+}
+
 /// How the window move an only tab started ended (`App.finishOnlyTabWindowMove`).
 pub const WindowMoveEnd = struct {
     /// The window's top-left moved (an Esc puts it back where it was).
@@ -182,6 +212,45 @@ test "the only tab's window move joins another strip only as a plain move" {
         // Snapped on a monitor of another DPI: still a snap.
         .{ .end = .{ .moved = true, .resized = true, .dpi_changed = true, .zoomed = false, .arranged = true, .over_strip = true }, .merges = false },
     }) |case| try std.testing.expectEqual(case.merges, windowMoveMerges(case.end));
+}
+
+test "a window move resizes only against the size it moved at" {
+    const normal: Size = .{ .width = 800, .height = 600 };
+    const maximized: Size = .{ .width = 1936, .height = 1056 };
+    // A plain move.
+    try std.testing.expect(!moveResized(normal, normal, normal));
+    try std.testing.expect(!moveResized(normal, null, normal));
+    // Out of a maximized or snapped window: restored as the move began,
+    // and moved at that size, which is no resize at the end...
+    try std.testing.expect(!moveResized(maximized, normal, normal));
+    // ...so the tab still joins a strip the move ends over.
+    try std.testing.expect(windowMoveMerges(.{ .moved = true, .resized = moveResized(maximized, normal, normal), .dpi_changed = false, .zoomed = false, .arranged = false, .over_strip = true }));
+    // Snapped at the end: a resize from the size it moved at.
+    try std.testing.expect(moveResized(normal, normal, .{ .width = 960, .height = 1032 }));
+    // No move message (the loop never moved it): the start's size decides.
+    try std.testing.expect(moveResized(maximized, null, normal));
+}
+
+test "a window against a side and the top or bottom of its work area looks snapped" {
+    const work: Edges = .{ .left = 0, .top = 0, .right = 1920, .bottom = 1032 };
+    // Halves and quarters, with the frame's 7 px invisible border.
+    try std.testing.expect(looksSnapped(.{ .left = -7, .top = 0, .right = 967, .bottom = 1039 }, work, 12));
+    try std.testing.expect(looksSnapped(.{ .left = 953, .top = 0, .right = 1927, .bottom = 1039 }, work, 12));
+    try std.testing.expect(looksSnapped(.{ .left = -7, .top = 516, .right = 967, .bottom = 1039 }, work, 12));
+    // A window moved somewhere inside it, or only against one edge.
+    try std.testing.expect(!looksSnapped(.{ .left = 300, .top = 200, .right = 1100, .bottom = 800 }, work, 12));
+    try std.testing.expect(!looksSnapped(.{ .left = 300, .top = 0, .right = 1100, .bottom = 600 }, work, 12));
+    try std.testing.expect(!looksSnapped(.{ .left = -7, .top = 200, .right = 793, .bottom = 800 }, work, 12));
+    // A cross-DPI snap on a build without `IsWindowArranged`: resized with
+    // the DPI, so only this keeps it from merging.
+    try std.testing.expect(!windowMoveMerges(.{
+        .moved = true,
+        .resized = true,
+        .dpi_changed = true,
+        .zoomed = false,
+        .arranged = looksSnapped(.{ .left = -7, .top = 0, .right = 967, .bottom = 1039 }, work, 12),
+        .over_strip = true,
+    }));
 }
 
 test "a drag leaves the strip only past its band and the margin, above or below" {

@@ -172,6 +172,7 @@ pub const WM_SHOWWINDOW = 0x0018;
 pub const WM_WINDOWPOSCHANGING = 0x0046;
 pub const WM_WINDOWPOSCHANGED = 0x0047;
 pub const WM_ENTERSIZEMOVE = 0x0231;
+pub const WM_MOVING = 0x0216;
 pub const WM_EXITSIZEMOVE = 0x0232;
 pub const SIZE_MAXIMIZED: u32 = 2;
 pub const SIZE_MINIMIZED: u32 = 1;
@@ -210,9 +211,11 @@ pub const WM_WINHOSTTY_TOAST_REMOVALS = WM_APP + 16;
 /// its opacity another way (`window_state.refreshBackgroundOpacity`). Posted:
 /// the switch runs inside the pane's paint, holding the renderer's lock.
 pub const WM_WINHOSTTY_RENDERER_SWITCHED = WM_APP + 17;
-/// A tab move a drag or `move_tab_to_new_window` asked of this window
-/// (`Host.pending_tab_move`), run from the message loop once the tab
-/// button's handler or the key binding has returned (`App.runPendingTabMove`).
+/// Wakes the message loop for a tab move a drag or `move_tab_to_new_window`
+/// asked of this window (`Host.pending_tab_moves`). The outer pump runs it
+/// (`App.drainPendingTabMoves`); the message itself does nothing, so a nested
+/// modal loop (a menu, the system move loop) that dispatches it runs no move
+/// under the handler that opened that loop.
 pub const WM_WINHOSTTY_TAB_MOVE = WM_APP + 18;
 
 pub const PM_NOREMOVE: UINT = 0x0000;

@@ -61,6 +61,8 @@ public static class Tt {
     public delegate bool EnumMonitor(IntPtr m, IntPtr dc, ref Rect r, IntPtr p);
     [DllImport("user32.dll")] static extern bool EnumDisplayMonitors(IntPtr dc, IntPtr clip, EnumMonitor cb, IntPtr p);
     [DllImport("shcore.dll")] static extern int GetDpiForMonitor(IntPtr m,int type,out uint x,out uint y);
+    [StructLayout(LayoutKind.Sequential)] struct MonitorInfo { public int cbSize; public Rect monitor, work; public uint flags; }
+    [DllImport("user32.dll")] static extern bool GetMonitorInfoW(IntPtr m, ref MonitorInfo info);
     // The pixel format of a pane's window: set by OpenGL (`SetPixelFormat`),
     // which a window keeps for good, and never by Direct3D 11.
     public static int PixelFormat(IntPtr h) {
@@ -68,12 +70,13 @@ public static class Tt {
         try { return GetPixelFormat(dc); } finally { ReleaseDC(h,dc); }
     }
     public static uint Dpi(IntPtr h) { return GetDpiForWindow(h); }
-    // Every monitor: its rect (physical) and DPI.
+    // Every monitor: its rect (physical), DPI and work area.
     public static System.Collections.Generic.List<int[]> Monitors() {
         var list=new System.Collections.Generic.List<int[]>();
         EnumDisplayMonitors(IntPtr.Zero,IntPtr.Zero,(IntPtr m,IntPtr dc,ref Rect r,IntPtr p)=> {
             uint x,y; GetDpiForMonitor(m,0,out x,out y);
-            list.Add(new int[]{r.Left,r.Top,r.Right,r.Bottom,(int)x}); return true; },IntPtr.Zero);
+            var info=new MonitorInfo(); info.cbSize=Marshal.SizeOf<MonitorInfo>(); GetMonitorInfoW(m,ref info);
+            list.Add(new int[]{r.Left,r.Top,r.Right,r.Bottom,(int)x,info.work.Left,info.work.Top,info.work.Right,info.work.Bottom}); return true; },IntPtr.Zero);
         return list;
     }
     [StructLayout(LayoutKind.Sequential, CharSet=CharSet.Unicode)] struct Startup {
@@ -179,7 +182,15 @@ function Launch-Case([string]$Name,[string]$RendererName,[string[]]$Extra=@()) {
       'keybind = f6=new_tab','keybind = f7=move_tab_to_new_window','keybind = f9=close_surface') + $Extra | Set-Content -LiteralPath $config
     $exe=Join-Path $dir 'noctty.exe'
     $log=Join-Path (Split-Path -Parent $dir) 'case.log'
-    $pi=[Tt]::SpawnLogged($exe,('"{0}" --config-file="{1}" --single-instance=false --window-save-state=never --class={2}' -f $exe,$config,$runClass),$dir,$desktopPath,$log)
+    # The backend proof reads the log from stderr: pin the destination for
+    # the child (GHOSTTY_LOG), put the caller's back after, print neither.
+    $hadLog=Test-Path Env:GHOSTTY_LOG; $oldLog=$env:GHOSTTY_LOG
+    $env:GHOSTTY_LOG='stderr'
+    try {
+        $pi=[Tt]::SpawnLogged($exe,('"{0}" --config-file="{1}" --single-instance=false --window-save-state=never --class={2}' -f $exe,$config,$runClass),$dir,$desktopPath,$log)
+    } finally {
+        if($hadLog) { $env:GHOSTTY_LOG=$oldLog } else { Remove-Item Env:GHOSTTY_LOG -ErrorAction SilentlyContinue }
+    }
     $script:processes.Add(@{Case=$Name;Pid=$pi.pid})
     $deadline=[datetime]::UtcNow.AddSeconds(25)
     do {
@@ -370,6 +381,7 @@ function Measure-Case([string]$RendererName) {
         # 2. A drag out of the window, to the right of it: a new window there.
         $p3=New-Pane $case $p1
         $m3=Wait-Marker $p3
+        Check "${RendererName} drag: the dragged shell printed its marker first" ($null -ne $m3) 'a marker' $null
         [void](Wait-Until { (Shell-Pids $case).Count -gt $pids.Count } 10)
         Start-Sleep -Milliseconds 500
         $pids=Shell-Pids $case
@@ -396,6 +408,7 @@ function Measure-Case([string]$RendererName) {
         # 3. Esc during a drag: nothing moves.
         $p4=New-Pane $case $p1
         $m4=Wait-Marker $p4
+        Check "${RendererName} drop: the dropped shell printed its marker first" ($null -ne $m4) 'a marker' $null
         [void](Wait-Until { (Shell-Pids $case).Count -gt $pids.Count } 10)
         Start-Sleep -Milliseconds 500
         $pids=Shell-Pids $case
@@ -420,7 +433,7 @@ function Measure-Case([string]$RendererName) {
         $after=Shell-Pids $case
         Check "${RendererName} drop: no shell started or ended" (Same-Set $pids $after) ($pids -join ',') ($after -join ',')
         Check "${RendererName} drop: the moved shell's output is still there" ((Marker $p4) -eq $m4) 'same marker' $null
-        Check "${RendererName}: every moved shell kept its output" ((Marker $p1) -eq $m1 -and (Marker $p2) -eq $m2 -and (Marker $p3) -eq $m3) 'same markers' $null
+        Check "${RendererName}: every moved shell kept its output" ($null -ne $m1 -and $null -ne $m2 -and $null -ne $m3 -and $null -ne $m4 -and (Marker $p1) -eq $m1 -and (Marker $p2) -eq $m2 -and (Marker $p3) -eq $m3 -and (Marker $p4) -eq $m4) 'same, non-null markers' $null
         Check-Backend $case $RendererName 'after the drop' @($p1,$p2,$p3,$p4)
         $owners=Consoles-Follow $case
         Check "${RendererName} drop: each window owns its panes' console windows" $owners.Holds 'owned = panes' $owners.Counts
@@ -476,46 +489,55 @@ function Measure-Search([string]$RendererName) {
 # its window's size again when the pane's font changes with the DPI
 # (`recomputeInitialSize`). The source is resized by hand first, so its size
 # is not the configured one either.
-function Measure-CrossDpi([string]$RendererName) {
-    $case=Launch-Case "crossdpi-$RendererName" $RendererName @('window-width = 90','window-height = 26')
-    $sample=@{ Renderer=$RendererName; Case='cross-dpi' }
+# `Direction` 'down' tears off from the highest-DPI monitor onto a lower one,
+# 'up' from a lower one onto the highest.
+function Measure-CrossDpi([string]$RendererName,[ValidateSet('down','up')][string]$Direction) {
+    $monitors=@([Tt]::Monitors() | Where-Object { $_[4] -gt 0 })
+    $high=@($monitors | Sort-Object { -$_[4] })[0]
+    $low=@($monitors | Where-Object { $_[4] -lt $high[4] } | Select-Object -First 1)
+    if(-not $low.Count) {
+        $script:skips.Add("${RendererName} cross-DPI ${Direction}: no monitor of another DPI")
+        return
+    }
+    $low=$low[0]
+    $from=if($Direction -eq 'down') { $high } else { $low }
+    $m=if($Direction -eq 'down') { $low } else { $high }
+    $case=Launch-Case "crossdpi-$Direction-$RendererName" $RendererName @('window-width = 90','window-height = 26')
+    $sample=@{ Renderer=$RendererName; Case='cross-dpi'; Direction=$Direction }
     try {
         $h1=(Hosts $case)[0]
         $p1=(Panes $h1)[0]
         $p2=New-Pane $case $p1
         [void](Wait-Marker $p2)
-        [void][Tt]::SetWindowPos($h1,[IntPtr]::Zero,60,60,1500,950,0x14)
-        Start-Sleep -Milliseconds 800
+        # Resized by hand, on the monitor it tears off from: twice, since the
+        # first move onto another DPI takes Windows' rescaled suggestion.
+        $w=if($from[4] -ge 144) { 1500 } else { 1000 }; $ht=if($from[4] -ge 144) { 950 } else { 640 }
+        foreach($i in 1..2) { [void][Tt]::SetWindowPos($h1,[IntPtr]::Zero,$from[5]+60,$from[6]+60,$w,$ht,0x14); Start-Sleep -Milliseconds 600 }
         $sourceDpi=[int][Tt]::Dpi($h1)
-        $other=@([Tt]::Monitors() | Where-Object { $_[4] -ne $sourceDpi -and $_[4] -gt 0 })
-        $sample.SourceDpi=$sourceDpi; $sample.Monitors=@([Tt]::Monitors() | ForEach-Object { ,@($_) })
-        if(-not $other.Count) {
-            $sample.Skipped='no monitor of another DPI'
-            $script:skips.Add("${RendererName} cross-DPI: no monitor of another DPI")
-            return
-        }
-        $m=$other[0]
+        $sample.SourceDpi=$sourceDpi; $sample.Monitors=@($monitors | ForEach-Object { ,@($_) })
         $r1=[Tt]::RectOf($h1)
         $dropX=$m[0]+200; $dropY=$m[1]+160
         Drag $h1 1 $dropX $dropY
         $torn=Wait-Until { $o=HostOf $case $p2; $o -ne [IntPtr]::Zero -and $o -ne $h1 } 10
-        Check "${RendererName} cross-DPI: the tab tears off onto the other monitor" $torn 'a new window' $null
+        Check "${RendererName} cross-DPI ${Direction}: the tab tears off onto the other monitor" $torn 'a new window' $null
         if(-not $torn) { return }
         $h2=HostOf $case $p2
         Start-Sleep -Milliseconds 1500
         $r2=[Tt]::RectOf($h2)
         $targetDpi=[int][Tt]::Dpi($h2)
         $ew=[int][Math]::Round(($r1.Right-$r1.Left)*$targetDpi/$sourceDpi); $eh=[int][Math]::Round(($r1.Bottom-$r1.Top)*$targetDpi/$sourceDpi)
+        # Held to the work area there, as `placeTearOff` holds it.
+        $ew=[Math]::Min($ew,$m[7]-$m[5]); $eh=[Math]::Min($eh,$m[8]-$m[6])
         $w=$r2.Right-$r2.Left; $hgt=$r2.Bottom-$r2.Top
         $sample.TargetDpi=$targetDpi; $sample.SourceRect=@($r1.Left,$r1.Top,$r1.Right,$r1.Bottom); $sample.TornRect=@($r2.Left,$r2.Top,$r2.Right,$r2.Bottom); $sample.Expected=@($ew,$eh)
-        Check "${RendererName} cross-DPI: the new window is on a monitor of another DPI" ($targetDpi -ne $sourceDpi) "not $sourceDpi" $targetDpi
-        Check "${RendererName} cross-DPI: it keeps its source's size there, not the configured grid's" ([Math]::Abs($w-$ew) -le 32 -and [Math]::Abs($hgt-$eh) -le 32) @($ew,$eh) @($w,$hgt)
+        Check "${RendererName} cross-DPI ${Direction}: the new window is on a monitor of another DPI" ($targetDpi -ne $sourceDpi) "not $sourceDpi" $targetDpi
+        Check "${RendererName} cross-DPI ${Direction}: it keeps its source's size there, not the configured grid's" ([Math]::Abs($w-$ew) -le 2 -and [Math]::Abs($hgt-$eh) -le 2) @($ew,$eh) @($w,$hgt)
         # Under the pointer, within the top band of the new window (its tab).
         $band=[int][Math]::Round(80*$targetDpi/96)
-        Check "${RendererName} cross-DPI: the pointer is on the new window's tab row" ($r2.Left -le $dropX -and $dropX -lt $r2.Right -and $r2.Top -le $dropY -and $dropY -lt ($r2.Top+$band)) @($dropX,$dropY) @($r2.Left,$r2.Top,$r2.Right,$r2.Bottom)
+        Check "${RendererName} cross-DPI ${Direction}: the pointer is on the new window's tab row" ($r2.Left -le $dropX -and $dropX -lt $r2.Right -and $r2.Top -le $dropY -and $dropY -lt ($r2.Top+$band)) @($dropX,$dropY) @($r2.Left,$r2.Top,$r2.Right,$r2.Bottom)
         Start-Sleep -Milliseconds 1000
         $r3=[Tt]::RectOf($h2)
-        Check "${RendererName} cross-DPI: and keeps it a moment later" (($r3.Right-$r3.Left) -eq $w -and ($r3.Bottom-$r3.Top) -eq $hgt) @($w,$hgt) @(($r3.Right-$r3.Left),($r3.Bottom-$r3.Top))
+        Check "${RendererName} cross-DPI ${Direction}: and keeps it a moment later" (($r3.Right-$r3.Left) -eq $w -and ($r3.Bottom-$r3.Top) -eq $hgt) @($w,$hgt) @(($r3.Right-$r3.Left),($r3.Bottom-$r3.Top))
         Check-Backend $case $RendererName 'after the cross-DPI tear-off' @($p1,$p2)
     } finally {
         $script:samples.Add($sample)
@@ -526,7 +548,7 @@ function Measure-CrossDpi([string]$RendererName) {
 try {
     $renderers=if($Renderer -eq 'both') { @('opengl','d3d11') } else { @($Renderer) }
     foreach($name in $renderers) { Measure-Case $name }
-    foreach($name in $renderers) { Measure-CrossDpi $name }
+    foreach($name in $renderers) { Measure-CrossDpi $name 'down'; Measure-CrossDpi $name 'up' }
     foreach($name in $renderers) { Measure-Search $name }
 } catch {
     $script:checks.Add(@{Name='Harness execution'; Passed=$false; Error=$_.Exception.Message})

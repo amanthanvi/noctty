@@ -457,7 +457,9 @@ another noctty window's tab bar moves there, at the bar shown where it
 lands. The tab keeps its live pane tree: its programs keep running, with
 their scrollback, titles, split ratios and zoom. A window's only tab moves
 the window, as in Windows Terminal, and joins another window's tab bar if
-the move ends over it, which closes the window it left. Esc cancels a drag.
+an ordinary move ends over it, which closes the window it left; a move that
+ends maximized or snapped (half, quarter or a Snap Layouts zone) stays a
+move. Esc cancels a drag.
 `move_tab_to_new_window` (the palette's "Move Tab to New Window", unbound
 by default) does the tear-off from the keyboard. A move is not undoable,
 like a reorder: it clears both windows' structural undo history. A drop on

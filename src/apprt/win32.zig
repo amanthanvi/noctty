@@ -10976,6 +10976,8 @@ pub fn tabButtonProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) call
                         v.tab_drag_active = false;
                         v.tab_drag_grab = .{ .x = down_x, .y = down_y };
                         v.tab_drag_origin_index = index;
+                        v.tab_drag_tab_id = v.tabs.items[index].id;
+                        v.tab_drag_next_id = if (index + 1 < v.tabs.items.len) v.tabs.items[index + 1].id else null;
                         v.tab_drag_target = .stay;
                         _ = sys.SetCapture(hwnd);
                     }
@@ -10988,7 +10990,21 @@ pub fn tabButtonProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) call
                         _ = sys.ReleaseCapture();
                         return 0;
                     }
-                    const drag_index = v.tab_drag_index;
+                    // What a drop does, from where it is released and the
+                    // windows as they are now: one may have moved since the
+                    // last pointer move.
+                    if (v.tab_drag_index != null and v.tab_drag_active and !tab_drag.movesWindow(v.tabs.items.len, v.quick_terminal)) {
+                        var at: POINT = .{ .x = signedLowWord(lParamBits(lParam)), .y = signedHighWord(lParamBits(lParam)) };
+                        _ = sys.ClientToScreen(hwnd, &at);
+                        v.updateTabDropPreview(index, at);
+                        if (v.hwnd) |host_hwnd| {
+                            var client = at;
+                            if (sys.ScreenToClient(host_hwnd, &client) != 0) v.updateTabDragTarget(index, at, client);
+                        }
+                    }
+                    // The dragged tab is this button's, wherever the list
+                    // moved it during the drag.
+                    const drag_index: ?usize = if (v.tab_drag_index != null) index else null;
                     const was_drag = v.tab_drag_active;
                     const drop_operation = v.tab_drop_operation;
                     const drop_target_surface = v.tab_drop_target_surface;
@@ -11071,7 +11087,9 @@ pub fn tabButtonProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) call
                     v.setHoveredButton(hwnd);
 
                     // Handle tab drag reorder
-                    if (v.tab_drag_index) |drag_idx| {
+                    if (v.tab_drag_index != null) {
+                        // This button's tab, wherever the list moved it.
+                        const drag_idx = index;
                         const mouse_x = signedLowWord(lParamBits(lParam));
                         const mouse_y = signedHighWord(lParamBits(lParam));
                         const dx = if (mouse_x > v.tab_drag_start_x)
@@ -11473,8 +11491,8 @@ pub fn hostWindowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) cal
             return 0;
         },
         c.WM_WINHOSTTY_TAB_MOVE => {
-            // May destroy this window: nothing after the call reads `v`.
-            if (host) |v| v.app.runPendingTabMove(v);
+            // Only a wake: the outer pump runs the move (`drainPendingTabMoves`),
+            // which can free this window, never a nested loop's dispatch.
             return 0;
         },
         c.WM_PARENTNOTIFY => {
@@ -12124,10 +12142,24 @@ pub fn hostWindowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) cal
             // leaves nothing armed for a later move.
             if (host) |v| if ((wParam & 0xFFF0) == c.SC_MOVE) if (v.only_tab_window_move) |started| {
                 v.only_tab_window_move = null;
+                v.only_tab_move_loop = started;
                 const result = sys.DefWindowProcW(hwnd, msg, wParam, lParam);
                 // The move loop pumps messages: find the window again.
-                if (getHost(hwnd)) |live| live.app.finishOnlyTabWindowMove(live, started);
+                if (getHost(hwnd)) |live| {
+                    const ended = live.only_tab_move_loop orelse started;
+                    live.only_tab_move_loop = null;
+                    live.app.finishOnlyTabWindowMove(live, ended);
+                }
                 return result;
+            };
+            return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
+        },
+        c.WM_MOVING => {
+            // The first move of an only tab's window move: the size it moves
+            // at, a snapped or maximized window's normal size by then.
+            if (host) |v| if (v.only_tab_move_loop) |*loop| if (loop.moving == null) {
+                const proposed: *const RECT = @ptrFromInt(@as(usize, @bitCast(lParam)));
+                loop.moving = .{ .width = proposed.right - proposed.left, .height = proposed.bottom - proposed.top };
             };
             return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
         },
