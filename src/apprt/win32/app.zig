@@ -1906,7 +1906,7 @@ pub const App = struct {
 
     /// `paneDividerDragKey` for a message of `hwnd`, which the loop passes
     /// so an IME's key can be recorded by the key it took
-    /// (`paneDividerOriginalKey`).
+    /// (`keyMessageOriginalKey`).
     pub fn paneDividerDragKeyFrom(self: *App, hwnd: ?HWND, message: UINT, wParam: WPARAM, lParam: LPARAM) bool {
         // Owned by physical key: left and right Shift share VK_SHIFT, and
         // the terminal tells them apart (and main from keypad Enter), so a
@@ -1925,16 +1925,9 @@ pub const App = struct {
                 if (repeat) return true;
                 self.pane_divider_held_keys.set(key);
                 const vk: u8 = @truncate(wParam);
-                const original = paneDividerOriginalKey(hwnd, vk, lParam);
+                const original = keyMessageOriginalKey(hwnd, vk, lParam);
                 self.pane_divider_held_vks[key] = paneDividerHeldVirtualKey(original, lParam);
-                // With an IME composing, Windows hands the window
-                // VK_PROCESSKEY for every key, Esc included. Which key it was
-                // is the IME's (`paneDividerOriginalKey`): the key a layout
-                // puts on any scan code, Esc included, and the scan code of
-                // Esc only when neither the IME nor the layout says.
-                const ime_escape = vk == c.VK_PROCESSKEY and (original == c.VK_ESCAPE or
-                    (original == c.VK_PROCESSKEY and ((@as(usize, @bitCast(lParam)) >> 16) & 0xFF) == escape_scan_code));
-                if (vk == c.VK_ESCAPE or ime_escape) host.cancelPaneDividerDrag();
+                if (isEscapeKey(vk, original, lParam)) host.cancelPaneDividerDrag();
                 return true;
             },
             c.WM_KEYUP, c.WM_SYSKEYUP => {
@@ -1972,8 +1965,10 @@ pub const App = struct {
     /// so reconciling by it would forget the key and deliver its release;
     /// `ImmGetVirtualKey` gives back the key the IME took while the message
     /// is the current one (the loop calls this before `TranslateMessage`),
-    /// and the scan code is the fallback when it reports nothing.
-    fn paneDividerOriginalKey(hwnd: ?HWND, vk: u8, lParam: LPARAM) u8 {
+    /// and the scan code is the fallback when it reports nothing. Shared by
+    /// the loop's key steps that act on a key while the mouse is held: a
+    /// split divider drag's keys and a tab drag's Esc (`cancelTabDragForKey`).
+    fn keyMessageOriginalKey(hwnd: ?HWND, vk: u8, lParam: LPARAM) u8 {
         if (vk != c.VK_PROCESSKEY) return vk;
         if (@import("builtin").is_test) if (test_ime_original_key) |key| return key;
         if (hwnd) |window| {
@@ -2013,6 +2008,19 @@ pub const App = struct {
 
     /// Esc's set-1 scan code, which a VK_PROCESSKEY message still carries.
     const escape_scan_code = 0x01;
+
+    /// Whether a key message with virtual key `vk`, which resolved to
+    /// `original` (`keyMessageOriginalKey`), is Esc. With an IME composing,
+    /// Windows hands the window VK_PROCESSKEY for every key, Esc included.
+    /// Which key it was is the IME's: the key a layout puts on any scan
+    /// code, Esc included, and the scan code of Esc only when neither the
+    /// IME nor the layout says.
+    fn isEscapeKey(vk: u8, original: u8, lParam: LPARAM) bool {
+        if (vk == c.VK_ESCAPE) return true;
+        if (vk != c.VK_PROCESSKEY) return false;
+        return original == c.VK_ESCAPE or
+            (original == c.VK_PROCESSKEY and ((@as(usize, @bitCast(lParam)) >> 16) & 0xFF) == escape_scan_code);
+    }
 
     /// The host whose divider gesture holds the mouse: a drag, or the
     /// button of one that ended early (Esc, a double-click), until it goes up.
@@ -8972,15 +8980,20 @@ pub const App = struct {
 
     /// Esc during a tab drag ends it where it began (`Host.cancelTabDrag`).
     /// The keyboard stays with the terminal during the drag, so the key is
-    /// taken here, before it reaches the terminal.
+    /// taken here, before it reaches the terminal. With an IME composing,
+    /// Esc comes as VK_PROCESSKEY, its repeats and release too: resolved as
+    /// a split divider drag's keys are (`keyMessageOriginalKey`,
+    /// `isEscapeKey`; Greptile r4528340159).
     fn cancelTabDragForKey(self: *App, msg: *const MSG) bool {
-        if (msg.wParam != c.VK_ESCAPE) return false;
+        if (msg.message != c.WM_KEYDOWN and msg.message != c.WM_KEYUP) return false;
+        if (msg.wParam != c.VK_ESCAPE and msg.wParam != c.VK_PROCESSKEY) return false;
+        const vk: u8 = @truncate(msg.wParam);
+        if (!isEscapeKey(vk, keyMessageOriginalKey(msg.hwnd, vk, msg.lParam), msg.lParam)) return false;
         if (msg.message == c.WM_KEYUP) {
             if (!self.tab_drag_escape_down) return false;
             self.tab_drag_escape_down = false;
             return true;
         }
-        if (msg.message != c.WM_KEYDOWN) return false;
         // Esc held after it ended a drag repeats (lParam bit 30, "was down"):
         // taken too, up to its key-up. A fresh press clears a key-up flag
         // that focus loss left (its key-up never came).
@@ -16463,6 +16476,58 @@ test "win32 a held Esc that ended a tab drag is taken until it comes up" {
     }.body);
 }
 
+test "win32 an Esc an IME hands over as VK_PROCESSKEY cancels a tab drag, and its release is taken (Greptile r4528340159)" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    try runOnHiddenDesktop(struct {
+        fn imeSaysNothing(_: HWND) UINT {
+            return 0;
+        }
+        fn body() !void {
+            var fixture: win32.WindowStartTestApp = .{};
+            try fixture.init();
+            defer fixture.deinit();
+            const app = &fixture.app;
+            app.shell_runtime_initialized = true;
+            const setup: TabMoveFixture = .{ .fixture = &fixture };
+            const host = try setup.window(3, false);
+            try host.layout();
+            const button = host.tabs.items[0].button_hwnd orelse return error.TestNoTabButton;
+            var client: RECT = undefined;
+            try std.testing.expect(sys.GetClientRect(host.hwnd.?, &client) != 0);
+            // Esc's scan code is 0x01; an IME composing reports VK_PROCESSKEY.
+            const down: MSG = .{ .hwnd = button, .message = c.WM_KEYDOWN, .wParam = c.VK_PROCESSKEY, .lParam = 0x00010001, .time = 0, .pt = .{ .x = 0, .y = 0 }, .lPrivate = 0 };
+            const held: MSG = .{ .hwnd = button, .message = c.WM_KEYDOWN, .wParam = c.VK_PROCESSKEY, .lParam = @bitCast(@as(usize, 0x40010001)), .time = 0, .pt = .{ .x = 0, .y = 0 }, .lPrivate = 0 };
+            const up: MSG = .{ .hwnd = button, .message = c.WM_KEYUP, .wParam = c.VK_PROCESSKEY, .lParam = @bitCast(@as(usize, 0xC0010001)), .time = 0, .pt = .{ .x = 0, .y = 0 }, .lPrivate = 0 };
+            // 'A' (scan 0x1E), also taken by the IME.
+            const letter: MSG = .{ .hwnd = button, .message = c.WM_KEYDOWN, .wParam = c.VK_PROCESSKEY, .lParam = 0x001E0001, .time = 0, .pt = .{ .x = 0, .y = 0 }, .lPrivate = 0 };
+            // The IME says which key it took: Esc. Then it says nothing, and
+            // the layout's key for the scan code decides.
+            for ([_]?u8{ c.VK_ESCAPE, null }) |says| {
+                test_ime_original_key = says;
+                test_imm_get_virtual_key = if (says == null) &imeSaysNothing else null;
+                defer test_ime_original_key = null;
+                defer test_imm_get_virtual_key = null;
+                testPostTabMouse(button, c.WM_LBUTTONDOWN, 20, 10);
+                testPostTabMouse(button, c.WM_MOUSEMOVE, 20, client.bottom + 200);
+                try std.testing.expect(host.tab_drag_active);
+                // Another key the IME took is not Esc: the drag goes on.
+                if (says == null) try std.testing.expect(!app.cancelTabDragForKey(&letter));
+                try std.testing.expect(host.tab_drag_active);
+                // Esc ends the drag; its repeats and its release are taken.
+                try std.testing.expect(app.cancelTabDragForKey(&down));
+                try std.testing.expect(!host.tab_drag_active);
+                try std.testing.expect(app.cancelTabDragForKey(&held));
+                try std.testing.expect(app.cancelTabDragForKey(&up));
+                try std.testing.expect(!app.cancelTabDragForKey(&up));
+                // The release below the window tears nothing off.
+                testPostTabMouse(button, c.WM_LBUTTONUP, 20, client.bottom + 200);
+                try std.testing.expectEqual(@as(usize, 0), app.pendingTabMoveCount(host));
+                try std.testing.expectEqual(@as(usize, 3), host.tabs.items.len);
+            }
+        }
+    }.body);
+}
+
 test "win32 a tab drag follows its own tab when a key binding changes the strip during it" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
     try runOnHiddenDesktop(struct {
@@ -16738,6 +16803,45 @@ test "win32 a hover over a tab with no button down starts no drag, the only tab'
             // No system move was asked for either.
             var msg: MSG = undefined;
             try std.testing.expect(sys.PeekMessageW(&msg, host.hwnd.?, c.WM_SYSCOMMAND, c.WM_SYSCOMMAND, c.PM_REMOVE) == 0);
+        }
+    }.body);
+}
+
+test "win32 an only tab's window move that cannot start swallows the release it leaves behind (CodeRabbit r4528360855)" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    try runOnHiddenDesktop(struct {
+        fn body() !void {
+            var fixture: win32.WindowStartTestApp = .{};
+            try fixture.init();
+            defer fixture.deinit();
+            const app = &fixture.app;
+            app.shell_runtime_initialized = true;
+            const setup: TabMoveFixture = .{ .fixture = &fixture };
+            const host = try setup.window(1, false);
+            try host.layout();
+            const pane = host.activeSurface().?;
+            // A fullscreen window does not move: the move returns early.
+            try std.testing.expect(try window_state.perform(host, pane, .toggle_fullscreen, .native));
+            defer _ = window_state.perform(host, pane, .toggle_fullscreen, .native) catch false;
+            const button = host.tabs.items[0].button_hwnd orelse return error.TestNoTabButton;
+            try std.testing.expect(!app.held_release_pending);
+            // The only tab dragged with the button down, past the threshold.
+            testPostTabMouse(button, c.WM_LBUTTONDOWN, 20, 10);
+            testPostTabMouse(button, c.WM_MOUSEMOVE, 20, 200);
+            var msg: MSG = undefined;
+            try std.testing.expect(sys.PeekMessageW(&msg, host.hwnd.?, c.WM_SYSCOMMAND, c.WM_SYSCOMMAND, c.PM_REMOVE) == 0);
+            try std.testing.expect(host.only_tab_window_move == null);
+            try std.testing.expect(sys.GetCapture() == null);
+            // Its release, over the terminal, is taken; the next one is not.
+            const pane_hwnd = pane.hwnd orelse return error.TestNoPane;
+            const up: MSG = .{ .hwnd = pane_hwnd, .message = c.WM_LBUTTONUP, .wParam = 0, .lParam = 0x00100010, .time = 0, .pt = .{ .x = 0, .y = 0 }, .lPrivate = 0 };
+            try std.testing.expect(app.takeHeldRelease(&up));
+            try std.testing.expect(!app.takeHeldRelease(&up));
+            // A move with the button already up arms nothing: its release
+            // has been made.
+            host.beginOnlyTabWindowMove(.{ .x = 20, .y = 200 }, false);
+            try std.testing.expect(!app.held_release_pending);
+            try std.testing.expect(!app.takeHeldRelease(&up));
         }
     }.body);
 }

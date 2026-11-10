@@ -4061,16 +4061,30 @@ pub const Host = struct {
     /// behaviour), and where the move ends decides whether the tab joins
     /// another window's strip (`App.finishOnlyTabWindowMove`). A fullscreen
     /// window stays where it is.
-    pub fn beginOnlyTabWindowMove(self: *Host, screen: POINT) void {
+    ///
+    /// The button gives up the pointer here. When no move starts after all
+    /// (no window, fullscreen, no rect, the post failing), the release would
+    /// land on whatever is under the pointer, a terminal pane included,
+    /// with no press there: the pump swallows it (`App.takeHeldRelease`;
+    /// CodeRabbit r4528360855). Only while `button_down`, the left button
+    /// down in the mouse move that got here, so its release is still to
+    /// come; a release already made is never armed for.
+    pub fn beginOnlyTabWindowMove(self: *Host, screen: POINT, button_down: bool) void {
         self.tab_drag_index = null;
         self.tab_drag_active = false;
         self.tab_drag_origin_index = null;
         self.tab_drag_target = .stay;
         _ = sys.ReleaseCapture();
-        const hwnd = self.hwnd orelse return;
-        if (self.top_level.isFullscreen()) return;
+        if (!self.startOnlyTabWindowMove(screen) and button_down) self.app.held_release_pending = true;
+    }
+
+    /// The system move `beginOnlyTabWindowMove` asks for, posted; false when
+    /// none was.
+    fn startOnlyTabWindowMove(self: *Host, screen: POINT) bool {
+        const hwnd = self.hwnd orelse return false;
+        if (self.top_level.isFullscreen()) return false;
         var rect: RECT = undefined;
-        if (sys.GetWindowRect(hwnd, &rect) == 0) return;
+        if (sys.GetWindowRect(hwnd, &rect) == 0) return false;
         self.only_tab_window_move = .{ .rect = rect, .dpi = sys.GetDpiForWindow(hwnd) };
         const x: u32 = @as(u16, @bitCast(@as(i16, @truncate(screen.x))));
         const y: u32 = @as(u16, @bitCast(@as(i16, @truncate(screen.y))));
@@ -4078,7 +4092,9 @@ pub const Host = struct {
         // SC_MOVE with HTCAPTION in its low bits is the caption drag.
         if (sys.PostMessageW(hwnd, c.WM_SYSCOMMAND, c.SC_MOVE | c.HTCAPTION, packed_point) == 0) {
             self.only_tab_window_move = null;
+            return false;
         }
+        return true;
     }
 
     /// Runs at the two points of handing a tab over where window code has

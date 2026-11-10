@@ -11143,7 +11143,7 @@ pub fn tabButtonProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) call
                             // A window's only tab moves its window, as
                             // Windows Terminal's does.
                             if (tab_drag.movesWindow(v.tabs.items.len, v.quick_terminal)) {
-                                v.beginOnlyTabWindowMove(pt);
+                                v.beginOnlyTabWindowMove(pt, (wParam & c.MK_LBUTTON) != 0);
                                 return 0;
                             }
                             v.updateTabDropPreview(drag_idx, pt);
