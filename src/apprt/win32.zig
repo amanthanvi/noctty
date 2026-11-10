@@ -130,7 +130,6 @@ pub const chrome_scene_runtime = .{
     .drawRoundedRect = drawRoundedRect,
     .drawTextWz = drawTextWz,
     .fillSolidRect = fillSolidRect,
-    .host_inspector_panel_height = host_inspector_panel_height,
     .host_overlay_accept_width = host_overlay_accept_width,
     .host_overlay_cancel_width = host_overlay_cancel_width,
     .host_overlay_label_width = host_overlay_label_width,

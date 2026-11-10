@@ -955,8 +955,8 @@ pub const HostControls = struct {
         const hwnd = self.hwnd orelse return 0;
         var rect: RECT = undefined;
         if (sys.GetClientRect(hwnd, &rect) == 0) return 0;
-        const bands = self.contentBands(self.tabBarHeight(), self.overlayBandHeight(), 0);
-        const list_top = bands.inspector_top;
+        // The list hangs under the overlay band, over an open inspector.
+        const list_top = self.chromeBands().inspector_top;
         return paletteVisibleRowCapacity(
             rect.bottom - list_top - self.scaled(8),
             self.scaled(palette_row_height),

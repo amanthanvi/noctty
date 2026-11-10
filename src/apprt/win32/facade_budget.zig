@@ -12,7 +12,7 @@ const win32 = @import("../win32.zig");
 const budget = .{
     // Entries in each `pub const *_runtime` bag on the facade.
     .bags = .{
-        .chrome_scene_runtime = 52,
+        .chrome_scene_runtime = 51,
         .chrome_scene_test_runtime = 4,
         .overlay_session_runtime = 26,
         .overlay_session_test_runtime = 5,

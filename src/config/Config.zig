@@ -3242,9 +3242,10 @@ keybind: Keybinds = .{},
 /// selected one.
 ///
 /// With `false` the line is hidden and the palette is one row shorter, so
-/// the terminal under it keeps that row. A message the palette raises while
-/// it is open (a help answer, or an action that could not run) still shows
-/// in that row until you type again.
+/// the terminal under it keeps that row. A message shown while the palette
+/// is open (a help answer, an action that could not run, a notification
+/// that falls back to a message) brings that row back until you type again
+/// or close the palette.
 @"command-palette-hint": bool = true,
 
 /// Sets the reporting format for OSC sequences that request color information.
