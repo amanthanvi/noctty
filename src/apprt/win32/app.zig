@@ -6153,7 +6153,9 @@ pub const App = struct {
         // `app.config` as it is, once. None of it needs another config
         // clone. What may allocate is best effort: a palette's mode, catalog
         // and preview are reset first, and its layout and text, and a theme
-        // resource rebuild, each log a failure and go on. Nothing shows the
+        // resource rebuild, go on without what they could not allocate (not
+        // every such failure is logged: a configured title font that cannot
+        // be allocated falls back silently). Nothing shows the
         // whole of it working with memory exhausted (its test fails only the
         // arm's clone). The panes' restore above goes through core, in each
         // pane's light/dark state; this shows `app.config` unconditioned.
