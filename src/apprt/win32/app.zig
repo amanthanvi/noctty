@@ -8988,6 +8988,14 @@ pub const App = struct {
         return arranged(hwnd) != 0;
     }
 
+    /// Whether a window has a tab drag past its threshold.
+    fn anyTabDragActive(self: *const App) bool {
+        for (self.registry.hosts.items) |host| {
+            if (host.tab_drag_index != null and host.tab_drag_active) return true;
+        }
+        return false;
+    }
+
     /// Esc during a tab drag ends it where it began (`Host.cancelTabDrag`).
     /// The keyboard stays with the terminal during the drag, so the key is
     /// taken here, before it reaches the terminal. With an IME composing,
@@ -8997,6 +9005,10 @@ pub const App = struct {
     fn cancelTabDragForKey(self: *App, msg: *const MSG) bool {
         if (msg.message != c.WM_KEYDOWN and msg.message != c.WM_KEYUP) return false;
         if (msg.wParam != c.VK_ESCAPE and msg.wParam != c.VK_PROCESSKEY) return false;
+        // With no drag and no Esc of one to finish, no key is the drag's:
+        // asked before the IME is, which every key it composes would cost
+        // otherwise (council round 12 L2).
+        if (!self.tab_drag_escape_down and !self.anyTabDragActive()) return false;
         const vk: u8 = @truncate(msg.wParam);
         if (!isEscapeKey(vk, keyMessageOriginalKey(msg.hwnd, vk, msg.lParam), msg.lParam)) return false;
         if (msg.message == c.WM_KEYUP) {
@@ -16534,6 +16546,53 @@ test "win32 an Esc an IME hands over as VK_PROCESSKEY cancels a tab drag, and it
                 try std.testing.expectEqual(@as(usize, 0), app.pendingTabMoveCount(host));
                 try std.testing.expectEqual(@as(usize, 3), host.tabs.items.len);
             }
+        }
+    }.body);
+}
+
+test "win32 a key an IME composes asks the IME nothing when no tab drag is on (council round 12 L2)" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    try runOnHiddenDesktop(struct {
+        var asked: usize = 0;
+        fn imeCounts(_: HWND) UINT {
+            asked += 1;
+            return c.VK_ESCAPE;
+        }
+        fn body() !void {
+            var fixture: win32.WindowStartTestApp = .{};
+            try fixture.init();
+            defer fixture.deinit();
+            const app = &fixture.app;
+            app.shell_runtime_initialized = true;
+            const setup: TabMoveFixture = .{ .fixture = &fixture };
+            const host = try setup.window(3, false);
+            try host.layout();
+            const button = host.tabs.items[0].button_hwnd orelse return error.TestNoTabButton;
+            var client: RECT = undefined;
+            try std.testing.expect(sys.GetClientRect(host.hwnd.?, &client) != 0);
+            test_imm_get_virtual_key = &imeCounts;
+            defer test_imm_get_virtual_key = null;
+            asked = 0;
+            const down: MSG = .{ .hwnd = button, .message = c.WM_KEYDOWN, .wParam = c.VK_PROCESSKEY, .lParam = 0x00010001, .time = 0, .pt = .{ .x = 0, .y = 0 }, .lPrivate = 0 };
+            const up: MSG = .{ .hwnd = button, .message = c.WM_KEYUP, .wParam = c.VK_PROCESSKEY, .lParam = @bitCast(@as(usize, 0xC0010001)), .time = 0, .pt = .{ .x = 0, .y = 0 }, .lPrivate = 0 };
+            // No drag: the composed key is the terminal's, and the IME is
+            // not asked about it.
+            try std.testing.expect(!app.cancelTabDragForKey(&down));
+            try std.testing.expect(!app.cancelTabDragForKey(&up));
+            try std.testing.expectEqual(@as(usize, 0), asked);
+            // A press alone is no drag yet: still not asked.
+            testPostTabMouse(button, c.WM_LBUTTONDOWN, 20, 10);
+            try std.testing.expect(!app.cancelTabDragForKey(&down));
+            try std.testing.expectEqual(@as(usize, 0), asked);
+            // A drag: asked, and its Esc ends it; its release is asked about
+            // and taken.
+            testPostTabMouse(button, c.WM_MOUSEMOVE, 20, client.bottom + 200);
+            try std.testing.expect(app.cancelTabDragForKey(&down));
+            try std.testing.expect(!host.tab_drag_active);
+            try std.testing.expect(app.cancelTabDragForKey(&up));
+            try std.testing.expectEqual(@as(usize, 2), asked);
+            testPostTabMouse(button, c.WM_LBUTTONUP, 20, client.bottom + 200);
+            try std.testing.expectEqual(@as(usize, 0), app.pendingTabMoveCount(host));
         }
     }.body);
 }
