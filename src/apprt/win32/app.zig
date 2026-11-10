@@ -18308,3 +18308,145 @@ test "win32 a tab move whose destination loses its window before the commit move
         }
     }.body);
 }
+
+const TestLoopKeyKind = enum { press, repeat, release };
+
+fn testLoopKeyMsg(hwnd: HWND, message: UINT, vk: WPARAM, scan: u8, kind: TestLoopKeyKind) MSG {
+    var bits: usize = 1 | (@as(usize, scan) << 16);
+    switch (kind) {
+        .press => {},
+        .repeat => bits |= 1 << 30,
+        .release => bits |= (1 << 30) | (1 << 31),
+    }
+    return .{ .hwnd = hwnd, .message = message, .wParam = vk, .lParam = @bitCast(bits), .time = 0, .pt = .{ .x = 0, .y = 0 }, .lPrivate = 0 };
+}
+
+fn testMouseLParam(x: i32, y: i32) LPARAM {
+    const lx: u32 = @as(u16, @bitCast(@as(i16, @truncate(x))));
+    const ly: u32 = @as(u16, @bitCast(@as(i16, @truncate(y))));
+    return @bitCast(@as(usize, (ly << 16) | lx));
+}
+
+test "win32 the loop routes a tab drag's Esc and held release, and a divider drag's Esc is the divider's (council round 11 L1)" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    try runOnHiddenDesktop(struct {
+        fn post(button: HWND, msg: UINT, x: i32, y: i32) void {
+            _ = sys.SendMessageW(button, msg, if (msg == c.WM_LBUTTONUP) 0 else 1, testMouseLParam(x, y));
+        }
+
+        fn body() !void {
+            var fixture: win32.WindowStartTestApp = .{};
+            try fixture.init();
+            defer fixture.deinit();
+            const app = &fixture.app;
+            app.shell_runtime_initialized = true;
+            const dummy = sys.CreateWindowExW(0, std.unicode.utf8ToUtf16LeStringLiteral("STATIC"), std.unicode.utf8ToUtf16LeStringLiteral(""), c.WS_POPUP, 0, 0, 10, 10, null, null, sys.GetModuleHandleW(null), null) orelse return error.TestNoWindow;
+            defer _ = sys.DestroyWindow(dummy);
+            const setup: TabMoveFixture = .{ .fixture = &fixture };
+            const source = try setup.window(3, true);
+            try source.layout();
+            const button = source.tabs.items[0].button_hwnd orelse return error.TestNoTabButton;
+            var client: RECT = undefined;
+            try std.testing.expect(sys.GetClientRect(source.hwnd.?, &client) != 0);
+
+            // 1. A tab drag: Esc through the loop's routing ends it, and its
+            // repeat and release are the drag's too.
+            post(button, c.WM_LBUTTONDOWN, 20, 10);
+            post(button, c.WM_MOUSEMOVE, 20, client.bottom + 200);
+            try std.testing.expect(source.tab_drag_index != null and source.tab_drag_active);
+            var esc_down = testLoopKeyMsg(dummy, c.WM_KEYDOWN, c.VK_ESCAPE, 0x01, .press);
+            try std.testing.expectEqual(App.LoopRoute.taken, app.routeLoopMessage(&esc_down));
+            try std.testing.expect(source.tab_drag_index == null);
+            var esc_repeat = testLoopKeyMsg(dummy, c.WM_KEYDOWN, c.VK_ESCAPE, 0x01, .repeat);
+            try std.testing.expectEqual(App.LoopRoute.taken, app.routeLoopMessage(&esc_repeat));
+            var esc_up = testLoopKeyMsg(dummy, c.WM_KEYUP, c.VK_ESCAPE, 0x01, .release);
+            try std.testing.expectEqual(App.LoopRoute.taken, app.routeLoopMessage(&esc_up));
+            try std.testing.expect(!app.tab_drag_escape_down);
+            post(button, c.WM_LBUTTONUP, 20, client.bottom + 200);
+
+            // 2. A held release through the loop: taken, and gone after.
+            app.held_release_pending = true;
+            var up: MSG = .{ .hwnd = source.hwnd.?, .message = c.WM_LBUTTONUP, .wParam = 0, .lParam = testMouseLParam(5, 5), .time = 0, .pt = .{ .x = 0, .y = 0 }, .lPrivate = 0 };
+            try std.testing.expectEqual(App.LoopRoute.taken, app.routeLoopMessage(&up));
+            try std.testing.expect(!app.held_release_pending);
+
+            // 3. A divider drag on the split tab: Esc is the divider's (it
+            // puts the split back), not the tab drag's, and its release
+            // stays the divider's.
+            _ = source.activateTabIndex(1);
+            const content: RECT = .{ .left = 0, .top = 0, .right = 800, .bottom = 600 };
+            source.test_pane_divider_content = content;
+            defer source.test_pane_divider_content = null;
+            const split_tab = &source.tabs.items[1];
+            const start = split_tab.tree.nodes[0].split.ratio;
+            try std.testing.expect(source.beginPaneDividerDrag(content, .{ .x = 400, .y = 300 }, 1000));
+            source.dragPaneDivider(content, .{ .x = 200, .y = 300 });
+            try std.testing.expect(source.tabs.items[1].tree.nodes[0].split.ratio != start);
+            esc_down = testLoopKeyMsg(dummy, c.WM_KEYDOWN, c.VK_ESCAPE, 0x01, .press);
+            try std.testing.expectEqual(App.LoopRoute.taken_tick, app.routeLoopMessage(&esc_down));
+            try std.testing.expect(source.pane_divider_drag == null);
+            try std.testing.expect(!app.tab_drag_escape_down);
+            try std.testing.expectEqual(start, source.tabs.items[1].tree.nodes[0].split.ratio);
+            esc_up = testLoopKeyMsg(dummy, c.WM_KEYUP, c.VK_ESCAPE, 0x01, .release);
+            try std.testing.expectEqual(App.LoopRoute.taken_tick, app.routeLoopMessage(&esc_up));
+            // The divider's button goes up.
+            _ = win32.hostWindowProc(source.hwnd.?, c.WM_LBUTTONUP, 0, testMouseLParam(200, 300));
+            try std.testing.expect(!source.pane_divider_button_held);
+        }
+    }.body);
+}
+
+test "win32 a tab automation moves out mid divider drag takes its ratio as it was, and the source keeps the button to its release (council round 11 L2)" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    try runOnHiddenDesktop(struct {
+        fn body() !void {
+            var fixture: win32.WindowStartTestApp = .{};
+            try fixture.init();
+            defer fixture.deinit();
+            const app = &fixture.app;
+            app.shell_runtime_initialized = true;
+            const dummy = sys.CreateWindowExW(0, std.unicode.utf8ToUtf16LeStringLiteral("STATIC"), std.unicode.utf8ToUtf16LeStringLiteral(""), c.WS_POPUP, 0, 0, 10, 10, null, null, sys.GetModuleHandleW(null), null) orelse return error.TestNoWindow;
+            defer _ = sys.DestroyWindow(dummy);
+            const setup: TabMoveFixture = .{ .fixture = &fixture };
+            const source = try setup.window(3, true);
+            _ = source.activateTabIndex(1);
+            try source.layout();
+            const moving = &source.tabs.items[1];
+            var leaves: [2]*Surface = undefined;
+            var it = moving.tree.iterator();
+            var n: usize = 0;
+            while (it.next()) |entry| : (n += 1) leaves[n] = entry.view;
+            const content: RECT = .{ .left = 0, .top = 0, .right = 800, .bottom = 600 };
+            source.test_pane_divider_content = content;
+            defer source.test_pane_divider_content = null;
+            const start = moving.tree.nodes[0].split.ratio;
+            try std.testing.expect(source.beginPaneDividerDrag(content, .{ .x = 400, .y = 300 }, 1000));
+            source.dragPaneDivider(content, .{ .x = 200, .y = 300 });
+            try std.testing.expect(moving.tree.nodes[0].split.ratio != start);
+
+            // Automation (perform_action) moves that tab to a new window.
+            _ = try app.performAction(.{ .surface = leaves[0].core() }, .move_tab_to_new_window, {});
+            TabMoveFixture.runPosted(source);
+            const target = leaves[0].host.?;
+            try std.testing.expect(target != source);
+            // The drag ended as Esc ends it, before the move: the tab goes
+            // with the ratio it had, and no drag is left for a tab the
+            // source no longer has.
+            try std.testing.expectEqual(start, target.tabs.items[0].tree.nodes[0].split.ratio);
+            try std.testing.expect(source.pane_divider_drag == null);
+            // The button stays the source's until it goes up: its keys are
+            // the drag's meanwhile, and its release reaches no terminal.
+            try std.testing.expect(source.pane_divider_button_held);
+            var z = testLoopKeyMsg(dummy, c.WM_KEYDOWN, 'Z', 0x2C, .press);
+            try std.testing.expectEqual(App.LoopRoute.taken_tick, app.routeLoopMessage(&z));
+            var z_up = testLoopKeyMsg(dummy, c.WM_KEYUP, 'Z', 0x2C, .release);
+            try std.testing.expectEqual(App.LoopRoute.taken_tick, app.routeLoopMessage(&z_up));
+            _ = win32.hostWindowProc(source.hwnd.?, c.WM_MOUSEMOVE, c.MK_LBUTTON, testMouseLParam(100, 300));
+            try std.testing.expect(source.pane_divider_drag == null);
+            try std.testing.expectEqual(start, target.tabs.items[0].tree.nodes[0].split.ratio);
+            _ = win32.hostWindowProc(source.hwnd.?, c.WM_LBUTTONUP, 0, testMouseLParam(100, 300));
+            try std.testing.expect(!source.pane_divider_button_held);
+            try app.validateShellNativeMapping();
+        }
+    }.body);
+}

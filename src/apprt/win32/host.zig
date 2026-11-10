@@ -4147,6 +4147,12 @@ pub const Host = struct {
             host.tab_drag_cancelled = true;
             app.held_release_pending = true;
         }
+        // A split divider of the tab mid-drag (automation moved it): the
+        // drag ends as Esc ends it, its ratio back, so the tab leaves with
+        // the split it had, and the button stays this window's until its
+        // release, no drag left for a tab it no longer has (council round
+        // 11 L2). Last: its layout is window code too.
+        if (host.pane_divider_drag) |drag| if (drag.tab_id == tab_id) host.cancelPaneDividerDrag();
     }
 
     /// Takes the tab at `index` out of this window and puts it at `insert`
