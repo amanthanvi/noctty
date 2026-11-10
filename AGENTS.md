@@ -278,8 +278,8 @@ that govern each symbol you change, or that none does.
   `App.takeSystemInputs`, from `reconfigureSystemTheme` and
   `systemColorSetChanged`, and `App.init` set), `App.endSettingsPreview`
   (and the Settings rollback that ends both previews through it:
-  `rollbackPreviews`, the handle's `endPreviews`, App's private
-  `settingsEndPreviewsThunk`), the
+  `rollbackPreviews`, the handle's `endPreviews`, and
+  `App.settingsEndPreviewsThunk`, which the Settings test fixtures share), the
   window half of a config change (the `.surface` and `.app`
   `config_change` arms, `App.app_wide_config_change`,
   `App.updateCoreConfig`, `App.updatePaneCoreConfig`, and after a failed
