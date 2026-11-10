@@ -11477,6 +11477,11 @@ pub const Host = struct {
     fn paneDividerHoverNow(self: *Host) ?SplitTreeSurface.Split.Layout {
         const hover = self.pane_divider_hover orelse return null;
         const tab = self.paneDividerTab() orelse return null;
+        // The generation alone decides today: every tree with a divider
+        // takes a new one from `SplitTree.nextGeneration`, a process-wide
+        // counter, so another tab's tree never shares it (a tab switch fails
+        // the generation check first). The tab id is defensive, for a tree
+        // ever built without a fresh generation; no test can reach it.
         if (tab.id != hover.tab_id or tab.tree.generation != hover.generation) return null;
         return hover.layout;
     }
