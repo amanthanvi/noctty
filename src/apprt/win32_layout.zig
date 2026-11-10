@@ -71,8 +71,10 @@ pub fn splitSurfacePlacement(
 
     var x = content_rect.left + roundedSlotPixel(slot.x, content_width);
     var y = content_rect.top + roundedSlotPixel(slot.y, content_height);
-    var w = @max(1, roundedSlotPixel(slot.width, content_width));
-    var h = @max(1, roundedSlotPixel(slot.height, content_height));
+    // i32, not the u31 `@max(1, ...)` would infer: a 1 px slot between two
+    // gaps loses a pixel on each side before the clamp below.
+    var w: i32 = @max(1, roundedSlotPixel(slot.width, content_width));
+    var h: i32 = @max(1, roundedSlotPixel(slot.height, content_height));
 
     // Match the existing host behaviour: create a 1px visual divider gap only
     // at internal split edges. Outer edges stay flush with content bounds.
@@ -137,8 +139,20 @@ fn surfacePlacementFromBaseRect(
     };
 }
 
-fn roundedSlotPixel(value: f32, span: i32) i32 {
+/// A normalized slot coordinate in pixels of `span`, rounded as the pane
+/// layout rounds it. `win32/pane_divider.zig` finds the gaps with it.
+pub fn roundedSlotPixel(value: f32, span: i32) i32 {
     return @intFromFloat(@round(value * @as(f32, @floatFromInt(span))));
+}
+
+test "a 1 px slot with a gap on both sides keeps a 1 px pane" {
+    // A keyboard `resize_split` can leave a pane's slot 1 px wide between
+    // two others; both of its edges are internal, so both lose a pixel to
+    // the gap. The pane keeps 1 px, in the content, without wrapping.
+    const content = childRect(0, 0, 1000, 600);
+    const placement = splitSurfacePlacement(content, .{ .x = 0.5, .y = 0, .width = 0.001, .height = 1 }, true, false, 0);
+    try std.testing.expectEqual(@as(i32, 1), placement.pane_rect.width());
+    try std.testing.expect(placement.pane_rect.left >= content.left and placement.pane_rect.right <= content.right);
 }
 
 test "zoomed placement reserves search frame above pane" {

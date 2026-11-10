@@ -190,7 +190,10 @@
         "src/apprt/win32_structural_history.zig",
         "src/apprt/win32_shell.zig",
         "src/apprt/win32_shell/**",
-        "src/apprt/win32/confirm_text.zig"
+        "src/apprt/win32/confirm_text.zig",
+        "src/apprt/win32/pane_divider.zig",
+        "src/apprt/win32_layout.zig",
+        "src/datastruct/split_tree.zig"
       ]
     },
     {

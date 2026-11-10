@@ -67,6 +67,12 @@ const leaves = .{
         .pub_decls = 9,
     },
     .{
+        .file = "pane_divider.zig",
+        .module = @import("pane_divider.zig"),
+        .source = @embedFile("pane_divider.zig"),
+        .pub_decls = 7,
+    },
+    .{
         .file = "profile_pick.zig",
         .module = @import("profile_pick.zig"),
         .source = @embedFile("profile_pick.zig"),

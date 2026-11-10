@@ -655,6 +655,19 @@ test "PKG32 tabClosedMessage falls back for layout-dependent physical and text o
     try std.testing.expectEqualStrings(fallback, tabClosedMessage(&set, .{}, &buf));
 }
 
+/// Test-only: the virtual key an IME reports for a VK_PROCESSKEY message
+/// (`ImmGetVirtualKey`), which no test can make an IME produce.
+pub var test_ime_original_key: ?u8 = null;
+
+/// Test-only: stands in for `ImmGetVirtualKey`, so a test can see which
+/// window the loop's lookup asks about and answer as an IME would.
+pub var test_imm_get_virtual_key: ?*const fn (HWND) UINT = null;
+
+fn immGetVirtualKey(hwnd: HWND) UINT {
+    if (@import("builtin").is_test) if (test_imm_get_virtual_key) |lookup| return lookup(hwnd);
+    return sys.ImmGetVirtualKey(hwnd);
+}
+
 pub const App = struct {
     pub const must_draw_from_app_thread = true;
     pub const renderer_pacing_clock = win32_power.renderer_clock;
@@ -909,6 +922,14 @@ pub const App = struct {
     /// tree disposal happens once, after the native cascade completes.
     session_restore_rollback_host: ?*Host = null,
     windows_hidden: bool = false,
+    /// Physical keys pressed while a split divider drag held the mouse,
+    /// whose repeats and releases are swallowed too (`paneDividerDragKey`,
+    /// indexed by `paneDividerPhysicalKey`).
+    pane_divider_held_keys: std.StaticBitSet(768) = .initEmpty(),
+    /// For each held physical key, the virtual key that asks its state
+    /// (`reconcilePaneDividerHeldKeys`): VK_LSHIFT or VK_RSHIFT rather than
+    /// VK_SHIFT, and so on.
+    pane_divider_held_vks: [768]u8 = @splat(0),
     quick_terminal_keyboard_diagnostic_logged: bool = false,
     update_notice: ?UpdateNotice = null,
     /// The host whose banner button started the running update action, so
@@ -1766,38 +1787,194 @@ pub const App = struct {
                 }
             }
 
-            if (msg.message == c.WM_HOTKEY) {
-                self.handleGlobalHotkey(@intCast(msg.wParam));
-                continue;
-            }
-
-            // The settings surface is a modeless native dialog. Route its
-            // keyboard messages through the system dialog manager so Tab,
-            // Shift+Tab, arrow-key radio navigation, and default buttons use
-            // standard Win32 accessibility semantics.
-            if (self.settings_window.hwnd) |settings_hwnd| {
-                // The dialog manager consumes Tab and the arrow keys here and
-                // never dispatches them to the control that gains focus, so
-                // the settings window learns about keyboard navigation from
-                // the pump, not from its controls.
-                self.settings_window.noteInputMessage(msg.hwnd, msg.message, msg.wParam);
-                // Ctrl+S is not a dialog-manager key; take it before the
-                // manager sees it. Tab and the arrows still go to the manager.
-                if (self.settings_window.handleAccelerator(msg.hwnd, msg.message, msg.wParam, msg.lParam)) {
+            switch (self.routeLoopMessage(&msg)) {
+                .taken => continue,
+                .taken_tick => {
                     try self.tickCoreApp();
                     continue;
-                }
-                if (sys.IsDialogMessageW(settings_hwnd, &msg) != 0) {
-                    try self.tickCoreApp();
-                    continue;
-                }
+                },
+                .dispatched => if (try self.finishLoopStep()) break,
             }
-
-            _ = sys.TranslateMessage(&msg);
-            _ = sys.DispatchMessageW(&msg);
-
-            if (try self.finishLoopStep()) break;
         }
+    }
+
+    pub const LoopRoute = enum {
+        /// Taken before translation; the loop goes on to the next message.
+        taken,
+        /// Taken before translation; the loop ticks the core first.
+        taken_tick,
+        /// Translated and dispatched.
+        dispatched,
+    };
+
+    /// What the loop does with a message once its thread timers had theirs:
+    /// global hotkeys, the keys of a split divider drag, the Settings
+    /// window's dialog manager, and otherwise `TranslateMessage` and
+    /// `DispatchMessageW`. Everything before translation sees the message
+    /// with its window (`msg.hwnd`), as an IME's key lookup needs.
+    pub fn routeLoopMessage(self: *App, msg: *MSG) LoopRoute {
+        if (msg.message == c.WM_HOTKEY) {
+            _ = self.takeGlobalHotkey(@intCast(msg.wParam));
+            return .taken;
+        }
+
+        if (self.paneDividerDragKeyFrom(msg.hwnd, msg.message, msg.wParam, msg.lParam)) return .taken_tick;
+
+        // The settings surface is a modeless native dialog. Route its
+        // keyboard messages through the system dialog manager so Tab,
+        // Shift+Tab, arrow-key radio navigation, and default buttons use
+        // standard Win32 accessibility semantics.
+        if (self.settings_window.hwnd) |settings_hwnd| {
+            // The dialog manager consumes Tab and the arrow keys here and
+            // never dispatches them to the control that gains focus, so
+            // the settings window learns about keyboard navigation from
+            // the pump, not from its controls.
+            self.settings_window.noteInputMessage(msg.hwnd, msg.message, msg.wParam);
+            // Ctrl+S is not a dialog-manager key; take it before the
+            // manager sees it. Tab and the arrows still go to the manager.
+            if (self.settings_window.handleAccelerator(msg.hwnd, msg.message, msg.wParam, msg.lParam)) return .taken_tick;
+            if (sys.IsDialogMessageW(settings_hwnd, msg) != 0) return .taken_tick;
+        }
+
+        _ = sys.TranslateMessage(msg);
+        _ = sys.DispatchMessageW(msg);
+        return .dispatched;
+    }
+
+    /// Keys while a split divider drag holds the mouse, taken in the loop
+    /// before `TranslateMessage`: Esc puts the split back
+    /// (`Host.cancelPaneDividerDrag`), and no key press reaches a terminal,
+    /// a keybinding or a control until the button goes up, also after Esc
+    /// or a double-click ended the drag early (`paneDividerDragHost`), so nothing
+    /// changes the panes under the drag and no Esc reaches the program.
+    /// A press is the drag's when it starts during the drag (lParam bit 30,
+    /// the previous key state, clear): its auto-repeats and its release are
+    /// swallowed with it, also after the drag, so a held Esc never reaches
+    /// the shell and no program sees a release without its press. A key
+    /// that was already down when the drag started is not the drag's: its
+    /// repeats during the drag reach nothing, but its release is delivered.
+    /// Returns whether the message was taken.
+    pub fn paneDividerDragKey(self: *App, message: UINT, wParam: WPARAM, lParam: LPARAM) bool {
+        return self.paneDividerDragKeyFrom(null, message, wParam, lParam);
+    }
+
+    /// `paneDividerDragKey` for a message of `hwnd`, which the loop passes
+    /// so an IME's key can be recorded by the key it took
+    /// (`paneDividerOriginalKey`).
+    pub fn paneDividerDragKeyFrom(self: *App, hwnd: ?HWND, message: UINT, wParam: WPARAM, lParam: LPARAM) bool {
+        // Owned by physical key: left and right Shift share VK_SHIFT, and
+        // the terminal tells them apart (and main from keypad Enter), so a
+        // virtual key would hand one key's release to the other.
+        const key = paneDividerPhysicalKey(wParam, lParam);
+        switch (message) {
+            c.WM_KEYDOWN, c.WM_SYSKEYDOWN => {
+                const repeat = (@as(usize, @bitCast(lParam)) >> 30) & 1 != 0;
+                if (self.pane_divider_held_keys.isSet(key)) {
+                    if (repeat) return true;
+                    // A fresh press of a key the drag held: its release
+                    // went elsewhere (a focus change); it is not held now.
+                    self.pane_divider_held_keys.unset(key);
+                }
+                const host = self.paneDividerDragHost() orelse return false;
+                if (repeat) return true;
+                self.pane_divider_held_keys.set(key);
+                const vk: u8 = @truncate(wParam);
+                const original = paneDividerOriginalKey(hwnd, vk, lParam);
+                self.pane_divider_held_vks[key] = paneDividerHeldVirtualKey(original, lParam);
+                // With an IME composing, Windows hands the window
+                // VK_PROCESSKEY for every key, Esc included. Which key it was
+                // is the IME's (`paneDividerOriginalKey`): the key a layout
+                // puts on any scan code, Esc included, and the scan code of
+                // Esc only when neither the IME nor the layout says.
+                const ime_escape = vk == c.VK_PROCESSKEY and (original == c.VK_ESCAPE or
+                    (original == c.VK_PROCESSKEY and ((@as(usize, @bitCast(lParam)) >> 16) & 0xFF) == escape_scan_code));
+                if (vk == c.VK_ESCAPE or ime_escape) host.cancelPaneDividerDrag();
+                return true;
+            },
+            c.WM_KEYUP, c.WM_SYSKEYUP => {
+                if (!self.pane_divider_held_keys.isSet(key)) return false;
+                self.pane_divider_held_keys.unset(key);
+                return true;
+            },
+            else => return false,
+        }
+    }
+
+    /// The app is active again (WM_ACTIVATEAPP): a key the drag held may
+    /// have gone up while another app had the keyboard, and its release
+    /// went there. Keys still down (`keyDown`, `GetAsyncKeyState` in the
+    /// app) stay the drag's, so their release is swallowed when it comes;
+    /// keys that are up are forgotten, so a press made later is the
+    /// terminal's. A key released and pressed again while noctty was
+    /// inactive is down either way and cannot be told from one held the
+    /// whole time: its repeats and release are still swallowed once.
+    /// Forgetting every key at deactivation instead let the release of a
+    /// key held across the switch reach a terminal without its press.
+    pub fn reconcilePaneDividerHeldKeys(self: *App, keyDown: *const fn (u8) bool) void {
+        var it = self.pane_divider_held_keys.iterator(.{});
+        while (it.next()) |key| {
+            if (!keyDown(self.pane_divider_held_vks[key])) self.pane_divider_held_keys.unset(key);
+        }
+    }
+
+    pub fn asyncKeyDown(vk: u8) bool {
+        return sys.GetAsyncKeyState(vk) < 0;
+    }
+
+    /// A key message's virtual key as the keyboard sent it. With an IME
+    /// composing, the message says VK_PROCESSKEY, whose state is never down,
+    /// so reconciling by it would forget the key and deliver its release;
+    /// `ImmGetVirtualKey` gives back the key the IME took while the message
+    /// is the current one (the loop calls this before `TranslateMessage`),
+    /// and the scan code is the fallback when it reports nothing.
+    fn paneDividerOriginalKey(hwnd: ?HWND, vk: u8, lParam: LPARAM) u8 {
+        if (vk != c.VK_PROCESSKEY) return vk;
+        if (@import("builtin").is_test) if (test_ime_original_key) |key| return key;
+        if (hwnd) |window| {
+            const original: u8 = @truncate(immGetVirtualKey(window));
+            if (original != 0 and original != c.VK_PROCESSKEY) return original;
+        }
+        const bits: usize = @bitCast(lParam);
+        const scan: UINT = @intCast((bits >> 16) & 0xFF);
+        const extended: UINT = if ((bits >> 24) & 1 != 0) 0xE000 else 0;
+        const mapped: u8 = @truncate(sys.MapVirtualKeyW(scan | extended, 3)); // MAPVK_VSC_TO_VK_EX
+        return if (mapped != 0) mapped else vk;
+    }
+
+    /// The virtual key whose state says whether the physical key of a key
+    /// message is down: the sided one for Shift, Ctrl and Alt.
+    fn paneDividerHeldVirtualKey(vk: u8, lParam: LPARAM) u8 {
+        const bits: usize = @bitCast(lParam);
+        const scan = (bits >> 16) & 0xFF;
+        const extended = (bits >> 24) & 1 != 0;
+        return switch (vk) {
+            c.VK_SHIFT => if (scan == 0x36) c.VK_RSHIFT else c.VK_LSHIFT,
+            c.VK_CONTROL => if (extended) c.VK_RCONTROL else c.VK_LCONTROL,
+            c.VK_MENU => if (extended) c.VK_RMENU else c.VK_LMENU,
+            c.VK_PROCESSKEY => if (scan == escape_scan_code) c.VK_ESCAPE else vk,
+            else => vk,
+        };
+    }
+
+    /// A key message's physical key: its scan code and extended-key bit
+    /// (lParam bits 16-24), or, for a message with no scan code (an
+    /// injected VK_PACKET), 512 plus its virtual key.
+    fn paneDividerPhysicalKey(wParam: WPARAM, lParam: LPARAM) usize {
+        const scan = (@as(usize, @bitCast(lParam)) >> 16) & 0x1FF;
+        if (scan & 0xFF != 0) return scan;
+        return 512 + (wParam & 0xFF);
+    }
+
+    /// Esc's set-1 scan code, which a VK_PROCESSKEY message still carries.
+    const escape_scan_code = 0x01;
+
+    /// The host whose divider gesture holds the mouse: a drag, or the
+    /// button of one that ended early (Esc, a double-click), until it goes up.
+    fn paneDividerDragHost(self: *App) ?*Host {
+        for (self.registry.hosts.items) |host| {
+            if (host.pane_divider_drag != null or host.pane_divider_button_held) return host;
+        }
+        return null;
     }
 
     /// What the message loop does after it dispatched a message: sync the
@@ -2963,6 +3140,16 @@ pub const App = struct {
     fn scheduleGlobalHotkeySync(self: *App) void {
         self.global_hotkeys_dirty = true;
         self.wakeup();
+    }
+
+    /// A `WM_HOTKEY` from the loop. While a split divider drag holds the
+    /// mouse it is dropped, as a key press is (`paneDividerDragKey`): a
+    /// global `new_split` or `resize_split` would change the panes under the
+    /// drag. Returns whether the hotkey ran.
+    pub fn takeGlobalHotkey(self: *App, id: i32) bool {
+        if (self.paneDividerDragHost() != null) return false;
+        self.handleGlobalHotkey(id);
+        return true;
     }
 
     fn handleGlobalHotkey(self: *App, id: i32) void {
