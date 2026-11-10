@@ -272,6 +272,8 @@ const host_tab_small_button_width: i32 = (win32_theme.ThemeMetrics{}).tab_small_
 
 const host_tab_overflow_button_width: i32 = (win32_theme.ThemeMetrics{}).tab_overflow_button_width;
 
+const host_overlay_query_height: i32 = (win32_theme.ThemeMetrics{}).height_overlay_query;
+
 pub const palette_catalog_capacity: usize = 768;
 
 const palette_catalog_label_capacity: usize = 768;
@@ -5706,6 +5708,7 @@ pub const Host = struct {
     }
 
     pub fn setBanner(self: *Host, kind: HostBannerKind, text: ?[]const u8) !void {
+        const band_height = self.overlayBandHeight();
         var next_text = text;
         var next_kind: HostBannerKind = if (text == null) .none else kind;
         if (text == null) {
@@ -5747,6 +5750,17 @@ pub const Host = struct {
         // While an overlay is open, banner text is rendered inside the
         // overlay feedback lane rather than the ordinary host banner lane.
         if (self.overlay_mode != .none) self.invalidateOverlayText();
+        // A command palette without its hint line has that lane only while
+        // a message is up, so the message coming or going moves the results
+        // list and the terminal by one row: paint the band at its new height
+        // as an overlay's open does, and when it shrinks, the terminal rows
+        // it gave up as `hideOverlay` does.
+        const next_band_height = self.overlayBandHeight();
+        if (next_band_height != band_height) {
+            runUiActionOrLog("overlay band layout failed", self.layout());
+            self.forceOverlayTransitionPaint();
+            if (next_band_height < band_height) self.forceVisibleSurfaceRepaintsNow();
+        }
         // A confirm prompt's feedback lane is an owner-drawn child rather
         // than chrome paint, so invalidating the paint text is not enough
         // to put a banner raised mid-prompt on screen. Push it into the
@@ -9200,9 +9214,24 @@ pub const Host = struct {
         return win32_chrome_state.scaled(base, dpi);
     }
 
+    /// The overlay band's height, scaled: none with no overlay open, else
+    /// the query row and the line under it, which the command palette has
+    /// only while it has something to say there (`overlay_view.feedbackRow`).
+    /// A message coming or going can change it, so `setBanner` lays the
+    /// window out again when it does.
+    pub fn overlayBandHeight(self: *const Host) i32 {
+        if (self.overlay_mode == .none) return 0;
+        const feedback_row = overlay_view.feedbackRow(
+            self.overlay_mode,
+            self.app.config.@"command-palette-hint",
+            self.banner_text != null,
+        );
+        return self.scaled(if (feedback_row) host_overlay_height else host_overlay_query_height);
+    }
+
     pub fn contentRectFromClient(self: *Host, rect: RECT) RECT {
         const tab_offset: i32 = self.tabBarHeight();
-        const overlay_offset: i32 = if (self.overlay_mode == .none) 0 else self.scaled(host_overlay_height);
+        const overlay_offset: i32 = self.overlayBandHeight();
         const inspector_offset: i32 = if (self.inspectorPanelVisible()) self.scaled(host_inspector_panel_height) else 0;
         const bands = self.contentBands(tab_offset, overlay_offset, inspector_offset);
         return .{
@@ -10385,11 +10414,8 @@ pub const Host = struct {
             const edit_hwnd = self.overlay_edit_hwnd orelse return false;
             const accept_hwnd = self.overlay_accept_hwnd orelse return false;
             const cancel_hwnd = self.overlay_cancel_hwnd orelse return false;
-            const bands = self.contentBands(
-                self.tabBarHeight(),
-                self.scaled(host_overlay_height),
-                0,
-            );
+            const band_height = self.overlayBandHeight();
+            const bands = self.contentBands(self.tabBarHeight(), band_height, 0);
             const overlay_y = bands.overlay_top;
             const padding = self.scaled(host_overlay_padding);
             const label_w = self.scaled(host_overlay_label_width);
@@ -10439,7 +10465,7 @@ pub const Host = struct {
             // above the topmost Surface sibling on the transition to
             // visible.
             const confirm_prompt = self.overlay_mode == .confirm;
-            const overlay_bottom = overlay_y + self.scaled(host_overlay_height);
+            const overlay_bottom = overlay_y + band_height;
             const panel_interior = overlayPanelInterior(overlay_y, overlay_bottom, self.current_dpi);
             const title_text = if (confirm_prompt)
                 confirmTextPlacement(confirmTitlePaintRect(
@@ -10558,7 +10584,7 @@ pub const Host = struct {
                     // feedback was still painting there and terminal content
                     // began at 58 px, producing the visible overlap reported
                     // in the palette theme screenshot.
-                    const list_y = overlay_y + self.scaled(host_overlay_height);
+                    const list_y = overlay_y + band_height;
                     const list_width_bounds = paletteListRect(width, list_x, padding, list_y, 0);
                     const has_list_width = paletteListWidthIsReadable(list_width_bounds, self.scaled(160));
                     const row_capacity = if (has_list_width)
@@ -10627,7 +10653,7 @@ pub const Host = struct {
                     confirmPreviewRect(
                         width,
                         rect.bottom,
-                        overlay_y + self.scaled(host_overlay_height),
+                        overlay_y + band_height,
                         padding + self.scaled(10),
                         padding,
                         self.current_dpi,
@@ -11987,6 +12013,77 @@ test "win32 a palette pick with no live preview keeps the catalog's config alive
             try std.testing.expect(app.config_revision != revision);
             try std.testing.expect(host.palette_catalog_config_source == .retained);
             host.resetPaletteCatalogConfigOwner();
+        }
+    }.body);
+}
+
+test "win32 command-palette-hint = false takes the palette's hint line and its row away, and a message brings the row back" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    try win32.runOnHiddenDesktop(struct {
+        /// The status line chrome paint draws under the query, from the
+        /// same facts paint reads.
+        fn feedback(arena: Allocator, host: *Host) ![]const u8 {
+            return (try overlay_view.compose(arena, host.overlayFacts(""))).feedback;
+        }
+
+        fn body() !void {
+            var fixture: win32.WindowStartTestApp = .{};
+            try fixture.init();
+            defer fixture.deinit();
+            const app = &fixture.app;
+            try app.createWindow(default_title);
+            const pane = fixture.newest();
+            const host = pane.host.?;
+            var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+            defer arena_state.deinit();
+            const arena = arena_state.allocator();
+            // The palette opens with no catalog: building one lists the
+            // user's theme and layout folders.
+            const catalog = host.palette_catalog;
+            host.palette_catalog = null;
+            defer host.palette_catalog = catalog;
+
+            const band_top = host.contentBands(host.tabBarHeight(), 0, 0).overlay_top;
+            const closed_top = pane.placement.rect.top;
+            // The query row and the status line under it, and the query row
+            // alone in its panel (4 above it, 24 for it, 4 under it in the
+            // panel and 6 under the panel).
+            const both_rows = host.scaled(58);
+            const query_row = host.scaled(38);
+
+            // By default the line and its row are there: the results list
+            // and the terminal start under both.
+            try host.showOverlay(.command_palette, null);
+            try std.testing.expectEqual(band_top + both_rows, host.palette_list_placement.rect.top);
+            try std.testing.expectEqual(closed_top + both_rows, pane.placement.rect.top);
+            try std.testing.expect(std.mem.indexOf(u8, try feedback(arena, host), "Type to search") != null);
+            host.hideOverlay();
+            try std.testing.expectEqual(closed_top, pane.placement.rect.top);
+
+            // Turned off, the line goes and so does its row: the list and
+            // the terminal move up under the query row.
+            app.config.@"command-palette-hint" = false;
+            try host.showOverlay(.command_palette, null);
+            try std.testing.expectEqualStrings("", try feedback(arena, host));
+            try std.testing.expectEqual(band_top + query_row, host.palette_list_placement.rect.top);
+            try std.testing.expectEqual(closed_top + query_row, pane.placement.rect.top);
+
+            // A message the palette raises has no other place on screen
+            // while it is open, so the row comes back for it, and the
+            // terminal moves down under it (`setBanner` lays the window out
+            // again)...
+            try host.setBanner(.err, "Tab is no longer available; reopen the palette.");
+            try std.testing.expectEqualStrings("Error: Tab is no longer available; reopen the palette.", try feedback(arena, host));
+            try std.testing.expectEqual(band_top + both_rows, host.palette_list_placement.rect.top);
+            try std.testing.expectEqual(closed_top + both_rows, pane.placement.rect.top);
+            // ... and goes again with it, as the next keystroke clears it
+            // (`syncCommandPaletteBanner`).
+            try host.setBanner(.none, null);
+            try std.testing.expectEqualStrings("", try feedback(arena, host));
+            try std.testing.expectEqual(band_top + query_row, host.palette_list_placement.rect.top);
+            try std.testing.expectEqual(closed_top + query_row, pane.placement.rect.top);
+            host.hideOverlay();
+            try std.testing.expectEqual(closed_top, pane.placement.rect.top);
         }
     }.body);
 }

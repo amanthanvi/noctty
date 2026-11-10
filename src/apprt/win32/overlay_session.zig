@@ -1027,6 +1027,7 @@ pub const HostControls = struct {
             .tab = if (surface) |value| self.app.hostTabStatus(value) else .{},
             .pane_count = if (self.activeTab()) |tab| tab.leafCount() else 1,
             .palette = self.palettePresentation(),
+            .palette_hint = self.app.config.@"command-palette-hint",
             .recent = for (self.app.palette_mru) |slot| {
                 if (slot) |action| break action;
             } else null,

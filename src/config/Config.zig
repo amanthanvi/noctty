@@ -3237,6 +3237,16 @@ keybind: Keybinds = .{},
 /// Available since: 1.2.0
 @"command-palette-entry": RepeatableCommand = .{},
 
+/// Show the hint line under the command palette's search field, which says
+/// what to type, how many results match and what Enter does with the
+/// selected one.
+///
+/// With `false` the line is hidden and the palette is one row shorter, so
+/// the terminal under it keeps that row. A message the palette raises while
+/// it is open (a help answer, or an action that could not run) still shows
+/// in that row until you type again.
+@"command-palette-hint": bool = true,
+
 /// Sets the reporting format for OSC sequences that request color information.
 /// The terminal core supports OSC 10 (foreground), OSC 11 (background), and
 /// OSC 4 (256 color palette) queries. On Windows, ConPTY may intercept OSC 10

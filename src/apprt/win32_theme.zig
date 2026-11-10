@@ -507,6 +507,7 @@ pub const ThemeMetrics = struct {
     height_tab_integrated: u16 = 40, // tabs-in-caption (Win11 default)
     height_titlebar: u16 = 40, // integrated titlebar total
     height_overlay: u16 = 58, // command palette / search
+    height_overlay_query: u16 = 38, // the query row alone (`command-palette-hint = false`)
     height_inspector: u16 = 42,
     height_search_bar: u16 = 40, // docked search row
 

@@ -27,7 +27,6 @@ const fillSolidRect = runtime.fillSolidRect;
 const host_inspector_panel_height = runtime.host_inspector_panel_height;
 const host_overlay_accept_width = runtime.host_overlay_accept_width;
 const host_overlay_cancel_width = runtime.host_overlay_cancel_width;
-const host_overlay_height = runtime.host_overlay_height;
 const host_overlay_label_width = runtime.host_overlay_label_width;
 const host_overlay_padding = runtime.host_overlay_padding;
 const host_overlay_row_height = runtime.host_overlay_row_height;
@@ -891,7 +890,7 @@ pub const HostScene = struct {
         var client_rect: RECT = undefined;
         if (sys.GetClientRect(hwnd, &client_rect) == 0) return;
         const tab_h = self.tabBarHeight();
-        const overlay_offset: i32 = if (self.overlay_mode != .none) self.scaled(host_overlay_height) else 0;
+        const overlay_offset: i32 = self.overlayBandHeight();
         const inspector_panel_visible = self.inspectorPanelVisible();
         const inspector_offset: i32 = if (inspector_panel_visible) self.scaled(host_inspector_panel_height) else 0;
         const bands = self.contentBands(tab_h, overlay_offset, inspector_offset);

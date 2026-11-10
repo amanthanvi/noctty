@@ -338,7 +338,10 @@ that govern each symbol you change, or that none does.
   profile overlay, host banners and the update notice, what the overlay
   says and shows in each mode (`win32/overlay_view.zig`: `compose`, its
   hint lane against chrome paint's feedback lane, `shape`, `nextFocus`,
-  `bannerLine`; the one reader of Host state for it, `Host.overlayFacts`,
+  `bannerLine`; the palette's hint line, `command-palette-hint`, and the
+  band's height, `feedbackRow` and `Host.overlayBandHeight`, which
+  `setBanner` lays out again; the one reader of Host state for it,
+  `Host.overlayFacts`,
   and the syncs that write its controls, `syncOverlayLabel`,
   `syncOverlayHint` and `syncOverlayButtons`, in
   `win32/overlay_session.zig`), overlay EDIT writes
