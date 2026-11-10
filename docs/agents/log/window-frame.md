@@ -3,6 +3,7 @@
 Dates descend; entries that share a date are not always newest first. A newer-dated entry, or an item under "Corrected in other files", overrides an older one on the same subject; when same-date entries disagree, the code decides. [AGENTS.md](../../../AGENTS.md) indexes the area files and says how to add an entry.
 
 Corrected in other files:
+- 2026-10-16 #285 real-input entry, harness trap "Check points with `WindowFromPoint`, as real input does": measured on a STATIC container; from another process `WindowFromPoint` does not follow a custom child's `HTTRANSPARENT` (it returns the terminal pane inside a split divider's grab zone), so read such points with `WM_NCHITTEST` readbacks: harness trap (a) of the 2026-11-08 PANE-DRAG-01 entry in tabs-panes.md.
 - 2026-04-17 `win32_nc_layout.zig` entry, its sentence "Sysmenu occludes the top-left corner resize zone intentionally; clicking top-left opens the system menu": no longer holds. The painted caption has no system-menu icon, and the invisible 40-DIP `HTSYSMENU` square over the first tab closed hidden windows on a posted NC double-click, so `win32_nc_layout.hitTest` returns no `HTSYSMENU` for ordinary and quick-terminal hosts (test "first caption square has resize and caption hits, never an invisible sysmenu"); edge priority, the native caption-button rectangles, `WS_SYSMENU` and the keyboard and right-click menu routes are kept: the 2026-10-24 TABGAP (#552) entry in chrome-tabs-paint.md.
 
 See also:

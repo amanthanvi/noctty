@@ -61,6 +61,20 @@ pub fn SplitTree(comptime V: type) type {
         /// operations may unzoom (e.g. resize).
         zoomed: ?Node.Handle,
 
+        /// Unique to this tree value among those made in the process (by
+        /// `init`, `clone`, `split`, `remove`, `equalize`, `resize`, or a
+        /// restore that builds one): a tree that replaced another has a new
+        /// one even at the same address and length, while in-place changes
+        /// (`resizeInPlace`, `zoom`) keep it. 0 for `empty`.
+        generation: u64 = 0,
+
+        var generation_counter: std.atomic.Value(u64) = .init(1);
+
+        /// A generation no tree of this type has had.
+        pub fn nextGeneration() u64 {
+            return generation_counter.fetchAdd(1, .monotonic);
+        }
+
         /// An empty tree.
         pub const empty: Self = .{
             // Arena can be undefined because we have zero allocated nodes.
@@ -122,6 +136,7 @@ pub fn SplitTree(comptime V: type) type {
                 .arena = arena,
                 .nodes = nodes,
                 .zoomed = null,
+                .generation = nextGeneration(),
             };
         }
 
@@ -161,6 +176,7 @@ pub fn SplitTree(comptime V: type) type {
                 .arena = arena,
                 .nodes = nodes,
                 .zoomed = self.zoomed,
+                .generation = nextGeneration(),
             };
         }
 
@@ -480,6 +496,16 @@ pub fn SplitTree(comptime V: type) type {
         /// and performance reasons where its very important for GUIs to
         /// update the ratio during a live resize than to redraw the entire
         /// widget tree.
+        /// `ratio`, with -0 as +0. They compare equal, but an f16 -0's bits
+        /// (0x8000) order above every ratio's, which a search over the bits
+        /// (the Win32 divider drag's fit) reads as the largest ratio. A
+        /// saved layout can say -0.0. Every way a ratio enters the tree
+        /// (`split`, `resizeInPlace`, and the session restore, which builds
+        /// the nodes itself) goes through this.
+        pub fn canonicalRatio(ratio: f16) f16 {
+            return if (ratio == 0) 0 else ratio;
+        }
+
         pub fn resizeInPlace(
             self: *Self,
             at: Node.Handle,
@@ -491,7 +517,7 @@ pub fn SplitTree(comptime V: type) type {
             // (without nasty stuff like this), but given this is internal
             // usage its perfectly fine to modify the node in-place.
             const s: *Split = @constCast(&self.nodes[at.idx()].split);
-            s.ratio = ratio;
+            s.ratio = canonicalRatio(ratio);
         }
 
         /// Insert another tree into this tree at the given node in the
@@ -552,7 +578,7 @@ pub fn SplitTree(comptime V: type) type {
             nodes[nodes.len - 1] = nodes[at.idx()];
             nodes[at.idx()] = .{ .split = .{
                 .layout = layout,
-                .ratio = ratio,
+                .ratio = canonicalRatio(ratio),
                 .left = @enumFromInt(if (left) self.nodes.len else nodes.len - 1),
                 .right = @enumFromInt(if (left) nodes.len - 1 else self.nodes.len),
             } };
@@ -565,6 +591,7 @@ pub fn SplitTree(comptime V: type) type {
                 .nodes = nodes,
                 // Splitting always resets zoom state.
                 .zoomed = null,
+                .generation = nextGeneration(),
             };
         }
 
@@ -596,6 +623,7 @@ pub fn SplitTree(comptime V: type) type {
                 .arena = arena,
                 .nodes = nodes,
                 .zoomed = null,
+                .generation = nextGeneration(),
             };
 
             // Traverse the tree and copy all our nodes into place.
@@ -791,10 +819,15 @@ pub fn SplitTree(comptime V: type) type {
                 .arena = arena,
                 .nodes = nodes,
                 .zoomed = self.zoomed,
+                .generation = nextGeneration(),
             };
         }
 
-        fn weight(
+        /// The panes along `layout` under `from`, as `equalize` weighs a
+        /// split's sides (a split across `layout` counts as one). `acc` is
+        /// added to a leaf's count. Public for the Win32 divider
+        /// double-click, which equalizes one split by the same rule.
+        pub fn weight(
             self: *const Self,
             from: Node.Handle,
             layout: Split.Layout,
@@ -1627,6 +1660,33 @@ test "SplitTree: split horizontal with zero ratio" {
             \\
         );
     }
+}
+
+test "SplitTree: a ratio of -0 enters the tree as +0" {
+    // An f16 -0 is 0x8000: compared it is 0, but code that orders ratios
+    // by their bits (the Win32 divider drag's fit search) reads it as the
+    // largest. Each way a ratio enters keeps +0 (Sol on #689).
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    const negative_zero: f16 = @bitCast(@as(u16, 0x8000));
+
+    var v1: TestTree.View = .{ .label = "A" };
+    var t1: TestTree = try .init(alloc, &v1);
+    defer t1.deinit();
+    var v2: TestTree.View = .{ .label = "B" };
+    var t2: TestTree = try .init(alloc, &v2);
+    defer t2.deinit();
+
+    var split = try t1.split(alloc, .root, .right, negative_zero, &t2);
+    defer split.deinit();
+    try testing.expectEqual(@as(u16, 0), @as(u16, @bitCast(split.nodes[0].split.ratio)));
+
+    split.resizeInPlace(.root, 0.5);
+    split.resizeInPlace(.root, negative_zero);
+    try testing.expectEqual(@as(u16, 0), @as(u16, @bitCast(split.nodes[0].split.ratio)));
+
+    try testing.expectEqual(@as(u16, 0), @as(u16, @bitCast(TestTree.canonicalRatio(negative_zero))));
+    try testing.expectEqual(@as(f16, 0.25), TestTree.canonicalRatio(0.25));
 }
 
 test "SplitTree: split vertical with zero ratio" {

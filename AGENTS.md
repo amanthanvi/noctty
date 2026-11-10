@@ -357,7 +357,9 @@ that govern each symbol you change, or that none does.
   restart after `restoreClosedTabEntryNative` and `redoSplitCreateEntry`,
   the `test_core_steps` seam of `applyDockedSearch`) and the
   layered overlay scrollbar
-  (`win32_scrollbar_geometry.zig`, heartbeat, alpha, markers).
+  (`win32_scrollbar_geometry.zig`, heartbeat, alpha, markers, and the band
+  that keeps the mouse beside a split divider:
+  `Surface.scrollbarBandAtScreen`).
 - [tabs-panes.md](docs/agents/log/tabs-panes.md): tabs, splits and windows as
   a structure: `Surface.init` ordering, `activateSurface`, showing and hiding
   pane surfaces (occlusion, overlapping WGL children), `windowDestroyed`,
@@ -374,7 +376,18 @@ that govern each symbol you change, or that none does.
   `App.revalidateTabMove`, `Host.endTabDrag`, `Host.prepareGiveTab`,
   `Host.giveTab`, `Host.reparentSurface`,
   `win32/tab_drag.zig`, the shell model's `move_tab_to_window`,
-  `move_tab_to_new_window`).
+  `move_tab_to_new_window`), split dividers under the mouse
+  (`win32/pane_divider.zig`, `Host.handlePaneDividerMessage` and
+  the drag behind it, `Host.paneDividerAtScreen`, keys during a drag:
+  `App.paneDividerDragKey`, and the loop's routing that hands it a
+  message before translation, `App.routeLoopMessage`; global hotkeys
+  during a drag: `App.takeGlobalHotkey`), the gaps and slot rounding they find
+  (`win32_layout.zig`: `splitSurfacePlacement`, `roundedSlotPixel`), the tree
+  identity a drag checks (`SplitTree.generation` in
+  `src/datastruct/split_tree.zig`), the +0 every ratio enters the tree as
+  (`SplitTree.canonicalRatio`, which the session restore's
+  `buildRestoredSessionSplitTree` also takes) and the keyboard
+  `resize_split` they match (`App.resizeSplitFallback`).
 - [input.md](docs/agents/log/input.md): `win32/input.zig` and key messages
   (`WM_KEYDOWN`/`WM_CHAR`/`WM_SYSCHAR`, dead keys, `ToUnicode`, non-Latin
   layouts), default Windows keybindings, Win32 input mode (DEC 9001), the

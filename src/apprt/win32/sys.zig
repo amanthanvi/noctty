@@ -243,6 +243,8 @@ pub extern "user32" fn GetClientRect(hWnd: HWND, lpRect: *RECT) callconv(.winapi
 
 pub extern "user32" fn GetKeyState(nVirtKey: i32) callconv(.winapi) SHORT;
 
+pub extern "user32" fn GetAsyncKeyState(vKey: i32) callconv(.winapi) SHORT;
+
 pub extern "user32" fn GetKeyboardState(lpKeyState: *[256]u8) callconv(.winapi) BOOL;
 
 pub extern "user32" fn SetKeyboardState(lpKeyState: *const [256]u8) callconv(.winapi) BOOL;
@@ -364,6 +366,10 @@ pub extern "user32" fn SetActiveWindow(hWnd: HWND) callconv(.winapi) ?HWND;
 pub extern "user32" fn GetActiveWindow() callconv(.winapi) ?HWND;
 
 pub extern "user32" fn GetCursorPos(lpPoint: *POINT) callconv(.winapi) BOOL;
+
+pub extern "user32" fn GetDoubleClickTime() callconv(.winapi) UINT;
+
+pub extern "user32" fn GetMessageTime() callconv(.winapi) i32;
 
 pub extern "user32" fn WindowFromPoint(point: POINT) callconv(.winapi) ?HWND;
 
@@ -720,6 +726,8 @@ pub extern "dwmapi" fn DwmEnableBlurBehindWindow(hwnd: HWND, pBlurBehind: *const
 pub extern "dwmapi" fn DwmDefWindowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM, plResult: *LRESULT) callconv(.winapi) BOOL;
 
 pub extern "imm32" fn ImmGetContext(hWnd: HWND) callconv(.winapi) ?*anyopaque;
+
+pub extern "imm32" fn ImmGetVirtualKey(hWnd: HWND) callconv(.winapi) UINT;
 
 pub extern "imm32" fn ImmReleaseContext(hWnd: HWND, hIMC: ?*anyopaque) callconv(.winapi) BOOL;
 
