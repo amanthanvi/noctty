@@ -622,6 +622,13 @@ pub const Action = union(enum) {
     /// the last tab.
     move_tab: isize,
 
+    /// Move a tab to a new window.
+    ///
+    /// On Windows the tab keeps its splits and its running programs; it is
+    /// the keyboard way to do what dragging a tab out of its tab bar does.
+    /// A window's only tab stays where it is.
+    move_tab_to_new_window,
+
     /// Toggle the tab overview.
     ///
     /// This is only supported on Linux and when the system's libadwaita
@@ -1500,6 +1507,7 @@ pub const Action = union(enum) {
             .last_tab,
             .goto_tab,
             .move_tab,
+            .move_tab_to_new_window,
             .toggle_tab_overview,
             .new_split,
             .goto_split,

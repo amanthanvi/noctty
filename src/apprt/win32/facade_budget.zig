@@ -96,7 +96,22 @@ const leaves = .{
         // `composedFullscreenRect`, the rect a fullscreen OpenGL window
         // covers (#598), which window_state.zig asks with the monitors it
         // lists.
-        .pub_decls = 30,
+        // why: `Drop` and `placeTearOff`, where a torn-off tab's window
+        // goes, which window_state.zig asks with the monitor under the drop.
+        .pub_decls = 32,
+    },
+    .{
+        .file = "tab_drag.zig",
+        .module = @import("tab_drag.zig"),
+        .source = @embedFile("tab_drag.zig"),
+        // why: the pure decisions of a tab drag and of the only tab's window
+        // move, each with its inputs, so their tables need no window:
+        // `decide`/`Input`/`Target`/`Over`, `movesWindow`, `leavesStrip`,
+        // `insertIndex`/`InsertScan`/`Button`, `grabOffset`/`Offset`,
+        // `windowMoveMerges`/`WindowMoveEnd`, `moveResized`/`Size`, and
+        // `looksSnapped`/`Edges`/`snapped`/`keptSize` for Windows 10 builds
+        // without `IsWindowArranged`.
+        .pub_decls = 19,
     },
 };
 

@@ -22,6 +22,7 @@ pub const ReduceError = error{
     LastPane,
     SameTab,
     InvalidTransfer,
+    SameWindow,
 } || std.mem.Allocator.Error;
 
 pub fn apply(state: *model.ShellState, intent: Intent) ReduceError!Reduction {
@@ -36,6 +37,7 @@ pub fn apply(state: *model.ShellState, intent: Intent) ReduceError!Reduction {
         .detach_tab => |id| try detachTab(state, &reduction, id),
         .restore_tab => |restore| try restoreTab(state, &reduction, restore.tab, restore.index, restore.activate),
         .discard_detached_tab => |id| try discardDetachedTab(state, id),
+        .move_tab_to_window => |move| try moveTabToWindow(state, &reduction, move.tab, move.window, move.index),
         .reorder_tab => |reorder| try reorderTab(state, &reduction, reorder.tab, reorder.index),
         .split_pane => |split| try splitPane(state, &reduction, split.pane, split.direction, split.ratio),
         .transfer_subtree => |transfer| try transferSubtree(state, &reduction, transfer.source_root, transfer.target_pane, transfer.direction, transfer.ratio),
@@ -673,6 +675,91 @@ fn discardDetachedTab(state: *model.ShellState, tab_id: model.TabId) !void {
     }
 }
 
+/// Tear-off and a drop into another window (`move_tab_to_window`). Every
+/// allocation is reserved before anything moves.
+fn moveTabToWindow(
+    state: *model.ShellState,
+    out: *Reduction,
+    tab_arg: model.TabId,
+    window_arg: ?model.WindowId,
+    index: ?usize,
+) !void {
+    // Scalars first: an argument may alias state that moves below (the
+    // 2026-10-19 `closeWindow` entry in tabs-panes.md).
+    const tab_id: model.TabId = .{ .index = tab_arg.index, .generation = tab_arg.generation };
+    const target_arg: ?model.WindowId = if (window_arg) |w| .{ .index = w.index, .generation = w.generation } else null;
+    for (state.transfers.items) |transfer| {
+        if (transfer.source_tab.eql(tab_id) or transfer.target_tab.eql(tab_id)) return error.InvalidTransfer;
+    }
+    const found = activeWindowForTab(state, tab_id) orelse return error.StaleId;
+    const source_id: model.WindowId = .{ .index = found.id.index, .generation = found.id.generation };
+    if (target_arg) |target_id| {
+        if (target_id.eql(source_id)) return error.SameWindow;
+        if (state.window(target_id) == null) return error.StaleId;
+    }
+
+    // Reserve. `state.windows` grows first: the window pointers below are
+    // taken after it can move.
+    try out.effects.ensureUnusedCapacity(state.allocator, 3);
+    if (target_arg == null) {
+        try state.windows.ensureUnusedCapacity(state.allocator, 1);
+        try state.window_ids.reserve(state.allocator);
+    }
+    var new_window: model.Window = .{ .id = undefined };
+    errdefer new_window.deinit(state.allocator);
+    if (target_arg) |target_id| {
+        try state.window(target_id).?.tabs.ensureUnusedCapacity(state.allocator, 1);
+    } else {
+        try new_window.tabs.ensureUnusedCapacity(state.allocator, 1);
+    }
+    const source = state.window(source_id).?;
+    const source_index = indexOfId(source.tabs.items, tab_id).?;
+    const source_goes = source.tabs.items.len == 1 and source.retained_tabs.items.len == 0;
+    if (source_goes) {
+        try state.window_ids.free.ensureUnusedCapacity(state.allocator, 1);
+        try state.pane_ids.free.ensureUnusedCapacity(state.allocator, source.retained_panes.items.len);
+    }
+
+    // Out of the source, as a close leaves it.
+    const was_active = source.active_tab != null and source.active_tab.?.eql(tab_id);
+    _ = source.tabs.orderedRemove(source_index);
+    if (source.tabs.items.len == 0) {
+        source.active_tab = null;
+    } else if (was_active) {
+        source.active_tab = source.tabs.items[@min(source_index, source.tabs.items.len - 1)];
+    }
+
+    // Into the target, in front.
+    var target_id: model.WindowId = undefined;
+    if (target_arg) |id| {
+        target_id = id;
+        const target = state.window(target_id).?;
+        target.tabs.insertAssumeCapacity(@min(index orelse target.tabs.items.len, target.tabs.items.len), tab_id);
+        target.active_tab = tab_id;
+    } else {
+        target_id = state.window_ids.acquireAssumeCapacity();
+        new_window.id = target_id;
+        new_window.tabs.appendAssumeCapacity(tab_id);
+        new_window.active_tab = tab_id;
+        state.windows.appendAssumeCapacity(new_window);
+        new_window = .{ .id = undefined };
+        out.effects.appendAssumeCapacity(.{ .create_window = target_id });
+    }
+    const tab = state.tab(tab_id).?;
+    tab.window = target_id;
+    state.focused_window = target_id;
+    const focused_pane = tab.focused_pane;
+
+    if (source_goes) {
+        try releaseRetainedPanes(state, state.window(source_id).?);
+        removeWindow(state, source_id);
+        try state.window_ids.release(state.allocator, source_id);
+    }
+
+    out.effects.appendAssumeCapacity(.{ .focus_surface = focused_pane });
+    out.effects.appendAssumeCapacity(.persist_session);
+}
+
 fn reorderTab(state: *model.ShellState, out: *Reduction, tab_id: model.TabId, index: usize) !void {
     const window = activeWindowForTab(state, tab_id) orelse return error.StaleId;
     if (index >= window.tabs.items.len) return error.InvalidIndex;
@@ -1026,4 +1113,199 @@ test "discarding the undo tab of a window opened before another removes that win
     try state.validate();
     try std.testing.expect(state.window(first_window) == null);
     try std.testing.expect(state.window(second_window) != null);
+}
+
+test "a tab moved to a new window keeps its panes and IDs, and the window it left fronts its neighbour" {
+    var state = model.ShellState.init(std.testing.allocator);
+    defer state.deinit();
+
+    var reduction = try apply(&state, .create_window);
+    reduction.deinit(std.testing.allocator);
+    const source_id = state.focused_window.?;
+    reduction = try apply(&state, .{ .create_tab = .{ .window = source_id } });
+    reduction.deinit(std.testing.allocator);
+    reduction = try apply(&state, .{ .create_tab = .{ .window = source_id } });
+    reduction.deinit(std.testing.allocator);
+    const tab_a = state.window(source_id).?.tabs.items[0];
+    const tab_b = state.window(source_id).?.tabs.items[1];
+    const tab_c = state.window(source_id).?.tabs.items[2];
+    // B, in front, splits: the move takes both panes and the split.
+    reduction = try apply(&state, .{ .focus_tab = tab_b });
+    reduction.deinit(std.testing.allocator);
+    const first_pane = state.tab(tab_b).?.focused_pane;
+    reduction = try apply(&state, .{ .split_pane = .{ .pane = first_pane, .direction = .right } });
+    reduction.deinit(std.testing.allocator);
+    const second_pane = state.tab(tab_b).?.focused_pane;
+    const root = state.tab(tab_b).?.root;
+    const panes_before = state.panes.items.len;
+    const nodes_before = state.nodes.items.len;
+
+    reduction = try apply(&state, .{ .move_tab_to_window = .{ .tab = tab_b } });
+    defer reduction.deinit(std.testing.allocator);
+    try state.validate();
+
+    const created = reduction.effects.items[0].create_window;
+    try std.testing.expect(!created.eql(source_id));
+    const target = state.window(created).?;
+    try std.testing.expectEqual(@as(usize, 1), target.tabs.items.len);
+    try std.testing.expect(target.tabs.items[0].eql(tab_b));
+    try std.testing.expect(target.active_tab.?.eql(tab_b));
+    try std.testing.expect(state.focused_window.?.eql(created));
+    // The same tab, root, panes and focus: nothing is made again.
+    const moved = state.tab(tab_b).?;
+    try std.testing.expect(moved.window.eql(created));
+    try std.testing.expect(moved.root.eql(root));
+    try std.testing.expect(moved.focused_pane.eql(second_pane));
+    try std.testing.expect(state.pane(first_pane).?.tab.eql(tab_b));
+    try std.testing.expectEqual(panes_before, state.panes.items.len);
+    try std.testing.expectEqual(nodes_before, state.nodes.items.len);
+    // The source keeps A and C, and C, beside B, comes to the front.
+    const source = state.window(source_id).?;
+    try std.testing.expectEqual(@as(usize, 2), source.tabs.items.len);
+    try std.testing.expect(source.tabs.items[0].eql(tab_a));
+    try std.testing.expect(source.tabs.items[1].eql(tab_c));
+    try std.testing.expect(source.active_tab.?.eql(tab_c));
+    // Native focus follows the moved tab's focused pane; the session saves.
+    try std.testing.expect(reduction.effects.items[1].focus_surface.eql(second_pane));
+    try std.testing.expect(reduction.effects.items[2] == .persist_session);
+}
+
+test "a tab moved into another window lands at its index, in front, and the emptied window goes" {
+    var state = model.ShellState.init(std.testing.allocator);
+    defer state.deinit();
+
+    var reduction = try apply(&state, .create_window);
+    reduction.deinit(std.testing.allocator);
+    const first_id = state.focused_window.?;
+    const lone = state.window(first_id).?.tabs.items[0];
+    reduction = try apply(&state, .create_window);
+    reduction.deinit(std.testing.allocator);
+    const second_id = state.focused_window.?;
+    reduction = try apply(&state, .{ .create_tab = .{ .window = second_id } });
+    reduction.deinit(std.testing.allocator);
+    const x = state.window(second_id).?.tabs.items[0];
+    const y = state.window(second_id).?.tabs.items[1];
+
+    // The first window's only tab, between X and Y. The first window is not
+    // the last one in `state.windows`, so its removal moves another into its
+    // slot (the aliasing trap the scalar copies guard against).
+    reduction = try apply(&state, .{ .move_tab_to_window = .{ .tab = lone, .window = second_id, .index = 1 } });
+    defer reduction.deinit(std.testing.allocator);
+    try state.validate();
+    try std.testing.expect(state.window(first_id) == null);
+    try std.testing.expectEqual(@as(usize, 1), state.windows.items.len);
+    const target = state.window(second_id).?;
+    try std.testing.expectEqual(@as(usize, 3), target.tabs.items.len);
+    try std.testing.expect(target.tabs.items[0].eql(x));
+    try std.testing.expect(target.tabs.items[1].eql(lone));
+    try std.testing.expect(target.tabs.items[2].eql(y));
+    try std.testing.expect(target.active_tab.?.eql(lone));
+    try std.testing.expect(state.focused_window.?.eql(second_id));
+    try std.testing.expect(reduction.effects.items[0] == .focus_surface);
+}
+
+test "moving a tab is refused into its own window, while a transfer names it, and for a tab kept for undo" {
+    var state = model.ShellState.init(std.testing.allocator);
+    defer state.deinit();
+
+    var reduction = try apply(&state, .create_window);
+    reduction.deinit(std.testing.allocator);
+    const window_id = state.focused_window.?;
+    reduction = try apply(&state, .{ .create_tab = .{ .window = window_id } });
+    reduction.deinit(std.testing.allocator);
+    const first = state.window(window_id).?.tabs.items[0];
+    const second = state.window(window_id).?.tabs.items[1];
+
+    try std.testing.expectError(error.SameWindow, apply(&state, .{ .move_tab_to_window = .{ .tab = first, .window = window_id } }));
+
+    // A tab dragged into a split of another: the transfer's undo would cross
+    // windows.
+    const target_pane = state.tab(second).?.focused_pane;
+    reduction = try apply(&state, .{ .transfer_subtree = .{
+        .source_root = state.tab(first).?.root,
+        .target_pane = target_pane,
+        .direction = .right,
+    } });
+    reduction.deinit(std.testing.allocator);
+    try std.testing.expectError(error.InvalidTransfer, apply(&state, .{ .move_tab_to_window = .{ .tab = second } }));
+    try state.validate();
+
+    // A tab kept for undo is no live tab.
+    var other = model.ShellState.init(std.testing.allocator);
+    defer other.deinit();
+    reduction = try apply(&other, .create_window);
+    reduction.deinit(std.testing.allocator);
+    const other_window = other.focused_window.?;
+    reduction = try apply(&other, .{ .create_tab = .{ .window = other_window } });
+    reduction.deinit(std.testing.allocator);
+    const kept = other.window(other_window).?.tabs.items[0];
+    reduction = try apply(&other, .{ .detach_tab = kept });
+    reduction.deinit(std.testing.allocator);
+    try std.testing.expectError(error.StaleId, apply(&other, .{ .move_tab_to_window = .{ .tab = kept } }));
+    try other.validate();
+}
+
+test "a window that keeps a tab for undo stays, with no live tab, when its last live tab moves out" {
+    var state = model.ShellState.init(std.testing.allocator);
+    defer state.deinit();
+
+    var reduction = try apply(&state, .create_window);
+    reduction.deinit(std.testing.allocator);
+    const source_id = state.focused_window.?;
+    reduction = try apply(&state, .{ .create_tab = .{ .window = source_id } });
+    reduction.deinit(std.testing.allocator);
+    const kept = state.window(source_id).?.tabs.items[0];
+    const moving = state.window(source_id).?.tabs.items[1];
+    reduction = try apply(&state, .{ .detach_tab = kept });
+    reduction.deinit(std.testing.allocator);
+
+    reduction = try apply(&state, .{ .move_tab_to_window = .{ .tab = moving } });
+    defer reduction.deinit(std.testing.allocator);
+    try state.validate();
+    const source = state.window(source_id).?;
+    try std.testing.expectEqual(@as(usize, 0), source.tabs.items.len);
+    try std.testing.expect(source.active_tab == null);
+    try std.testing.expectEqual(@as(usize, 1), source.retained_tabs.items.len);
+    try std.testing.expectEqual(@as(usize, 2), state.windows.items.len);
+}
+
+test "a move that runs out of memory at any step leaves the model as it was" {
+    var state = model.ShellState.init(std.testing.allocator);
+    defer state.deinit();
+    var reduction = try apply(&state, .create_window);
+    reduction.deinit(std.testing.allocator);
+    const first_id = state.focused_window.?;
+    const lone = state.window(first_id).?.tabs.items[0];
+    reduction = try apply(&state, .create_window);
+    reduction.deinit(std.testing.allocator);
+    const second_id = state.focused_window.?;
+
+    // To a new window, and into the other window, which empties the first.
+    const moves = [_]intent_mod.Intent{
+        .{ .move_tab_to_window = .{ .tab = lone } },
+        .{ .move_tab_to_window = .{ .tab = lone, .window = second_id } },
+    };
+    for (moves) |move| {
+        var fail_index: usize = 0;
+        while (fail_index < 64) : (fail_index += 1) {
+            var candidate = try state.clone();
+            defer candidate.deinit();
+            var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = fail_index });
+            candidate.allocator = failing.allocator();
+            const result = apply(&candidate, move);
+            candidate.allocator = std.testing.allocator;
+            if (result) |done| {
+                var finished = done;
+                finished.deinit(std.testing.allocator);
+                try candidate.validate();
+                break;
+            } else |err| {
+                try std.testing.expectEqual(error.OutOfMemory, err);
+                try candidate.validate();
+                try std.testing.expectEqual(@as(usize, 2), candidate.windows.items.len);
+                try std.testing.expect(candidate.tab(lone).?.window.eql(first_id));
+                try std.testing.expect(candidate.focused_window.?.eql(state.focused_window.?));
+            }
+        } else return error.TestMoveNeverSucceeded;
+    }
 }

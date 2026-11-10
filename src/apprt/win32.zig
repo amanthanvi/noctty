@@ -59,6 +59,7 @@ const win32_types = @import("win32_types.zig");
 const win32_layouts = @import("win32_layouts.zig");
 const session_module = @import("win32/session.zig");
 const quick_terminal_host = @import("win32/quick_terminal_host.zig");
+const tab_drag = @import("win32/tab_drag.zig");
 const win32_session_state = @import("win32_session_state.zig");
 const win32_session_persistence = @import("win32_session_persistence.zig");
 const win32_structural_history = @import("win32_structural_history.zig");
@@ -419,6 +420,7 @@ test {
     _ = @import("win32/docked_search.zig");
     _ = @import("win32/window_start.zig");
     _ = @import("win32/confirm_text.zig");
+    _ = @import("win32/tab_drag.zig");
     _ = @import("win32/tab_label.zig");
     _ = @import("win32/profile_pick.zig");
     _ = @import("win32/overlay_view.zig");
@@ -10955,6 +10957,11 @@ pub fn tabButtonProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) call
                     }
                 },
                 c.WM_LBUTTONDOWN => {
+                    // A new press: whatever release an Esc left to swallow
+                    // is gone (its button may be too), so a close X press
+                    // gets its own release.
+                    v.tab_drag_cancelled = false;
+                    v.tab_close_press = null;
                     v.noteChromePointerInput();
                     // A click answers the question the tooltip was there to
                     // answer, and the strip is about to relayout under it.
@@ -10966,6 +10973,7 @@ pub fn tabButtonProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) call
                     const close_left = btn_rect.right - v.scaled(host_tab_close_zone_width);
                     if (tabButtonCloseHit(down_x, down_y, close_left, v.tabContentTopInset()) and tabCloseAction(v.tabs.items.len) != .none) {
                         // Click in close zone — capture for mouseup but don't start drag
+                        v.tab_close_press = hwnd;
                         _ = sys.SetCapture(hwnd);
                     } else {
                         // Start potential drag: record origin
@@ -10973,19 +10981,70 @@ pub fn tabButtonProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) call
                         v.tab_drag_start_x = down_x;
                         v.tab_drag_start_y = down_y;
                         v.tab_drag_active = false;
+                        v.tab_drag_grab = .{ .x = down_x, .y = down_y };
+                        v.tab_drag_origin_index = index;
+                        v.tab_drag_tab_id = v.tabs.items[index].id;
+                        v.tab_drag_next_id = if (index + 1 < v.tabs.items.len) v.tabs.items[index + 1].id else null;
+                        v.tab_drag_target = .stay;
                         _ = sys.SetCapture(hwnd);
                     }
                     return 0;
                 },
                 c.WM_LBUTTONUP => {
-                    const drag_index = v.tab_drag_index;
+                    // Whether this button took the press on its X.
+                    const pressed_close = v.tab_close_press == hwnd;
+                    v.tab_close_press = null;
+                    // The release after Esc ended the drag (`cancelTabDrag`),
+                    // or after the dragged tab left (`destroyTabButton`).
+                    if (v.tab_drag_cancelled) {
+                        v.tab_drag_cancelled = false;
+                        _ = sys.ReleaseCapture();
+                        return 0;
+                    }
+                    // What a drop does, from where it is released and the
+                    // windows as they are now: one may have moved since the
+                    // last pointer move.
+                    if (v.tab_drag_index != null and v.tab_drag_active and !tab_drag.movesWindow(v.tabs.items.len, v.quick_terminal)) {
+                        var at: POINT = .{ .x = signedLowWord(lParamBits(lParam)), .y = signedHighWord(lParamBits(lParam)) };
+                        _ = sys.ClientToScreen(hwnd, &at);
+                        v.updateTabDropPreview(index, at);
+                        if (v.hwnd) |host_hwnd| {
+                            var client = at;
+                            if (sys.ScreenToClient(host_hwnd, &client) != 0) v.updateTabDragTarget(index, at, client);
+                        }
+                    }
+                    // The dragged tab is this button's, wherever the list
+                    // moved it during the drag.
+                    const drag_index: ?usize = if (v.tab_drag_index != null) index else null;
                     const was_drag = v.tab_drag_active;
                     const drop_operation = v.tab_drop_operation;
                     const drop_target_surface = v.tab_drop_target_surface;
+                    const drag_target = v.tab_drag_target;
                     v.tab_drag_index = null;
                     v.tab_drag_active = false;
+                    v.tab_drag_target = .stay;
+                    v.tab_drag_origin_index = null;
                     _ = sys.ReleaseCapture();
+                    v.app.endTabDragFeedback();
                     if (was_drag) {
+                        if (drag_index) |source_index| if (source_index < v.tabs.items.len and drag_target != .stay) {
+                            // Out of the strip: a new window where it was
+                            // dropped, or another window's strip. The move
+                            // runs from the message loop, since it destroys
+                            // this button.
+                            v.hideTabDropPreview();
+                            const tab_id = v.tabs.items[source_index].id;
+                            switch (drag_target) {
+                                .stay => unreachable,
+                                .new_window => {
+                                    var at: POINT = .{ .x = signedLowWord(lParamBits(lParam)), .y = signedHighWord(lParamBits(lParam)) };
+                                    _ = sys.ClientToScreen(hwnd, &at);
+                                    _ = v.app.requestTabMove(v, tab_id, .{ .new_window = v.tearOffDrop(at, hwnd) });
+                                },
+                                .window => |over| _ = v.app.requestTabMove(v, tab_id, .{ .window = over }),
+                            }
+                            return 0;
+                        };
                         if (drag_index) |source_index| {
                             v.tab_drop_operation = drop_operation;
                             v.tab_drop_target_surface = drop_target_surface;
@@ -11011,15 +11070,24 @@ pub fn tabButtonProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) call
                         .activate => {
                             _ = v.activateTabIndex(index);
                         },
-                        .close => _ = v.closeTabFromStrip(index),
+                        .close => if (pressed_close) {
+                            _ = v.closeTabFromStrip(index);
+                        },
                         .none => {},
                     }
                     return 0;
                 },
                 c.WM_CAPTURECHANGED => {
+                    // Its press on the X is over: the release, if it comes
+                    // back here, is not that press's (CodeRabbit r4510086520).
+                    if (v.tab_close_press == hwnd) v.tab_close_press = null;
+                    v.tab_drag_cancelled = false;
                     v.tab_drag_index = null;
                     v.tab_drag_active = false;
+                    v.tab_drag_target = .stay;
+                    v.tab_drag_origin_index = null;
                     v.hideTabDropPreview();
+                    v.app.endTabDragFeedback();
                 },
                 c.WM_MOUSEMOVE => {
                     // TME_HOVER arms WM_MOUSEHOVER for the title tooltip. The
@@ -11035,7 +11103,16 @@ pub fn tabButtonProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) call
                     v.setHoveredButton(hwnd);
 
                     // Handle tab drag reorder
-                    if (v.tab_drag_index) |drag_idx| {
+                    // A drag only while this button holds the pointer or the
+                    // left button is down: a hover over stale drag state (no
+                    // button) must not start one, least of all the only
+                    // tab's window move.
+                    if (v.tab_drag_index != null and sys.GetCapture() != hwnd and (wParam & c.MK_LBUTTON) == 0) {
+                        v.endTabDrag();
+                    }
+                    if (v.tab_drag_index != null) {
+                        // This button's tab, wherever the list moved it.
+                        const drag_idx = index;
                         const mouse_x = signedLowWord(lParamBits(lParam));
                         const mouse_y = signedHighWord(lParamBits(lParam));
                         const dx = if (mouse_x > v.tab_drag_start_x)
@@ -11063,11 +11140,22 @@ pub fn tabButtonProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) call
                             // keeps the established ordered-reorder gesture.
                             var pt: POINT = .{ .x = mouse_x, .y = mouse_y };
                             _ = sys.ClientToScreen(hwnd, &pt);
+                            // A window's only tab moves its window, as
+                            // Windows Terminal's does.
+                            if (tab_drag.movesWindow(v.tabs.items.len, v.quick_terminal)) {
+                                v.beginOnlyTabWindowMove(pt, (wParam & c.MK_LBUTTON) != 0);
+                                return 0;
+                            }
                             v.updateTabDropPreview(drag_idx, pt);
-                            if (v.tab_drop_operation == .none) {
+                            // Past the strip's band, outside the window or
+                            // over another window's strip, it tears off.
+                            if (v.hwnd) |host_hwnd| {
+                                var client = pt;
+                                if (sys.ScreenToClient(host_hwnd, &client) != 0) v.updateTabDragTarget(drag_idx, pt, client);
+                            }
+                            if (v.tab_drag_target == .stay and v.tab_drop_operation == .none) {
                                 if (v.tabIndexAtScreenX(pt.x)) |target_idx| {
-                                    if (target_idx != drag_idx and v.tabs.items.len > 1) {
-                                        v.swapTabs(drag_idx, target_idx);
+                                    if (target_idx != drag_idx and v.tabs.items.len > 1 and v.swapTabs(drag_idx, target_idx)) {
                                         v.tab_drag_index = target_idx;
                                         v.tab_drag_start_x = mouse_x;
                                         v.tab_drag_start_y = mouse_y;
@@ -11403,6 +11491,16 @@ pub fn applyConsoleWindowVisibility(hwnd: HWND, visible: bool) void {
     }
 }
 
+/// A host message for the split dividers (`Host.handlePaneDividerMessage`):
+/// the resize cursor, the drag and its capture, a double-click; otherwise
+/// `DefWindowProcW`.
+fn hostPaneDividerMessage(host: ?*Host, hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) LRESULT {
+    if (host) |v| if (v.handlePaneDividerMessage(msg, wParam, lParam)) {
+        return if (msg == c.WM_SETCURSOR) 1 else 0;
+    };
+    return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
+}
+
 pub fn hostWindowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.winapi) LRESULT {
     if (msg == c.WM_NCCREATE) {
         const cs: *const CREATESTRUCTW = @ptrFromInt(@as(usize, @bitCast(lParam)));
@@ -11423,6 +11521,13 @@ pub fn hostWindowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) cal
         },
         c.WM_WINHOSTTY_RENDERER_SWITCHED => {
             if (host) |v| window_state.refreshBackgroundOpacity(v);
+            return 0;
+        },
+        c.WM_WINHOSTTY_TAB_MOVE => {
+            // Only a wake: the outer pump runs the move (`drainPendingTabMoves`),
+            // which can free this window, never a nested loop's dispatch. A
+            // nested loop that took the wake gets it again on a timer.
+            if (host) |v| v.app.noteTabMoveWake(msg);
             return 0;
         },
         c.WM_PARENTNOTIFY => {
@@ -11516,6 +11621,7 @@ pub fn hostWindowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) cal
                 buffered.hDC = alpha_paint.hdc;
                 const draw = &buffered;
                 if (v.drawConfirmPromptText(draw)) return 1;
+                if (v.drawTabInsertMarker(draw)) return 1;
                 if (v.drawSearchBarBackground(draw, &alpha_paint)) return 1;
                 v.drawButton(draw);
                 return 1;
@@ -11576,13 +11682,64 @@ pub fn hostWindowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) cal
                         _ = sys.SendMessageW(hwnd, c.WM_SYSCOMMAND, cmd, lParam);
                         return 0;
                     }
-                    if (ht == c.HTCLOSE) return 0;
+                    if (ht == c.HTCLOSE) {
+                        // Held as a stock caption button is: the release,
+                        // wherever the pointer went meanwhile, comes here as
+                        // `WM_LBUTTONUP` (council round 7 L1).
+                        _ = sys.SetCapture(hwnd);
+                        v.caption_close_held = true;
+                        return 0;
+                    }
                 }
             }
             return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
         },
+        // The release of a press on Close (`caption_close_held`): over Close
+        // it closes the window, anywhere else it does nothing.
+        c.WM_LBUTTONUP => {
+            if (host) |v| if (v.caption_close_held) {
+                v.caption_close_held = false;
+                const screen = captionScreenPoint(hwnd, lParam);
+                const over_close = sys.SendMessageW(hwnd, c.WM_NCHITTEST, 0, screen) == c.HTCLOSE;
+                if (sys.GetCapture() == hwnd) _ = sys.ReleaseCapture();
+                v.clearCaptionPressed();
+                if (over_close) _ = sys.SendMessageW(hwnd, c.WM_SYSCOMMAND, c.SC_CLOSE, screen);
+                return 0;
+            };
+            return hostPaneDividerMessage(host, hwnd, msg, wParam, lParam);
+        },
+        // While Close holds the pointer, it looks pressed only with the
+        // pointer over it, as a stock caption button does (council round 8
+        // L1).
+        c.WM_MOUSEMOVE => {
+            if (host) |v| if (v.caption_close_held) {
+                const over_close = sys.SendMessageW(hwnd, c.WM_NCHITTEST, 0, captionScreenPoint(hwnd, lParam)) == c.HTCLOSE;
+                const look: CaptionButton = if (over_close) .close else .none;
+                if (v.caption_pressed != look) {
+                    v.caption_pressed = look;
+                    v.repaintTopChrome();
+                }
+                return 0;
+            };
+            return hostPaneDividerMessage(host, hwnd, msg, wParam, lParam);
+        },
+        c.WM_CAPTURECHANGED => {
+            // Another window took the pointer: the press on Close is over.
+            if (host) |v| if (v.caption_close_held) {
+                v.caption_close_held = false;
+                v.clearCaptionPressed();
+            };
+            return hostPaneDividerMessage(host, hwnd, msg, wParam, lParam);
+        },
         c.WM_NCLBUTTONUP => {
             if (host) |v| {
+                // A release that came as a non-client one ends Close's hold
+                // too, and lets go of the pointer, or the window's next click
+                // would be taken for it (council round 8 L1).
+                if (v.caption_close_held) {
+                    v.caption_close_held = false;
+                    if (sys.GetCapture() == hwnd) _ = sys.ReleaseCapture();
+                }
                 if (v.usingIntegratedTitlebar()) {
                     if (dispatchDwmNcMessage(hwnd, msg, wParam, lParam)) |lr| return lr;
                     const ht: i32 = @intCast(@as(i64, @bitCast(wParam)));
@@ -11592,8 +11749,13 @@ pub fn hostWindowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) cal
                     }
                     switch (ht) {
                         c.HTCLOSE => {
+                            // Only the release of this window's own press
+                            // on Close closes it: not one whose press a tab
+                            // that left mid-drag held, nor one whose press
+                            // began elsewhere (council round 6 L2).
+                            const pressed = v.caption_pressed == .close;
                             v.clearCaptionPressed();
-                            _ = sys.SendMessageW(hwnd, c.WM_SYSCOMMAND, c.SC_CLOSE, lParam);
+                            if (pressed) _ = sys.SendMessageW(hwnd, c.WM_SYSCOMMAND, c.SC_CLOSE, lParam);
                             return 0;
                         },
                         else => v.clearCaptionPressed(),
@@ -12067,15 +12229,43 @@ pub fn hostWindowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) cal
             }
             return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
         },
-
-        // The split dividers: the resize cursor, the drag and its capture,
-        // a double-click (`Host.handlePaneDividerMessage`).
-        c.WM_SETCURSOR, c.WM_MOUSEMOVE, c.WM_LBUTTONDOWN, c.WM_LBUTTONUP, c.WM_CAPTURECHANGED => {
-            if (host) |v| if (v.handlePaneDividerMessage(msg, wParam, lParam)) {
-                return if (msg == c.WM_SETCURSOR) 1 else 0;
+        c.WM_SYSCOMMAND => {
+            // The window move a drag of the only tab started
+            // (`Host.beginOnlyTabWindowMove`): the system's move loop runs
+            // inside DefWindowProc, and where it ended decides whether the
+            // tab joins another window's strip. Decided here, once the call
+            // returns, so a move that never started (the button already up)
+            // leaves nothing armed for a later move.
+            if (host) |v| if ((wParam & 0xFFF0) == c.SC_MOVE) if (v.only_tab_window_move) |started| {
+                v.only_tab_window_move = null;
+                v.only_tab_move_loop = started;
+                const result = sys.DefWindowProcW(hwnd, msg, wParam, lParam);
+                // The move loop pumps messages: find the window again.
+                if (getHost(hwnd)) |live| {
+                    const ended = live.only_tab_move_loop orelse started;
+                    live.only_tab_move_loop = null;
+                    live.app.finishOnlyTabWindowMove(live, ended);
+                }
+                return result;
             };
             return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
         },
+        c.WM_MOVING => {
+            // The first move of an only tab's window move: the size it moves
+            // at, a snapped or maximized window's normal size by then.
+            if (host) |v| if (v.only_tab_move_loop) |*loop| if (loop.moving == null) {
+                const proposed: *const RECT = @ptrFromInt(@as(usize, @bitCast(lParam)));
+                loop.moving = .{ .width = proposed.right - proposed.left, .height = proposed.bottom - proposed.top };
+            };
+            return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
+        },
+
+        // The split dividers: the resize cursor, the drag and its capture,
+        // a double-click (`Host.handlePaneDividerMessage`). `WM_MOUSEMOVE`,
+        // `WM_LBUTTONUP` and `WM_CAPTURECHANGED` reach them through the
+        // caption Close arms above, once a press on Close is not holding the
+        // pointer (`hostPaneDividerMessage`).
+        c.WM_SETCURSOR, c.WM_LBUTTONDOWN => return hostPaneDividerMessage(host, hwnd, msg, wParam, lParam),
 
         c.WM_MOUSEWHEEL, c.WM_MOUSEHWHEEL, c.WM_POINTERWHEEL, c.WM_POINTERHWHEEL => {
             if (host) |v| {
@@ -12143,6 +12333,16 @@ pub fn desiredTabIndex(total: usize, current: usize, goto: apprt.action.GotoTab)
             break :blk @min(idx, total - 1);
         },
     };
+}
+
+/// A client point of a mouse message's `lParam`, as the screen point
+/// `WM_NCHITTEST` takes.
+fn captionScreenPoint(hwnd: HWND, lParam: LPARAM) LPARAM {
+    var at: POINT = .{ .x = signedLowWord(lParamBits(lParam)), .y = signedHighWord(lParamBits(lParam)) };
+    _ = sys.ClientToScreen(hwnd, &at);
+    const sx: u32 = @as(u16, @bitCast(@as(i16, @truncate(at.x))));
+    const sy: u32 = @as(u16, @bitCast(@as(i16, @truncate(at.y))));
+    return @bitCast(@as(usize, (sy << 16) | sx));
 }
 
 fn tabButtonCloseHit(x: i32, y: i32, close_left: i32, close_top: i32) bool {
@@ -19259,7 +19459,7 @@ test "win32 swapTabs invalidates structural history before drag reorder" {
     });
 
     host.active_tab = 0;
-    host.swapTabs(0, 1);
+    _ = host.swapTabs(0, 1);
 
     try std.testing.expectEqual(@as(usize, 0), host.structural_undo_entries.items.len);
     try std.testing.expectEqual(@as(usize, 0), host.structural_redo_entries.items.len);
@@ -19765,7 +19965,7 @@ test "win32 shell and native projections agree over split, move, close and resto
     try Step.expectEqual(&app, &host, &surface_d);
 
     // Move: D's tab to the front of the strip.
-    host.swapTabs(1, 0);
+    _ = host.swapTabs(1, 0);
     try std.testing.expectEqual(@as(?*Surface, &surface_d), host.tabs.items[0].focusedSurface());
     try Step.expectEqual(&app, &host, &surface_d);
 
@@ -20663,7 +20863,7 @@ test "win32 shell and native projections agree through split undo and redo, and 
     // of that release instead of failing as stale.
     _ = try host.applyLatestStructuralUndo();
     try Step.expectEqual(&app, &host, &surface_a);
-    host.swapTabs(1, 0);
+    _ = host.swapTabs(1, 0);
     try std.testing.expectEqual(@as(u32, 2), host.tabs.items[0].id);
     try Step.expectEqual(&app, &host, &surface_a);
     try std.testing.expect(!app.shell_runtime.state.pane_ids.isCurrent(pane_b));
@@ -27319,4 +27519,89 @@ test "win32 tab overview parser accepts one-based tab numbers" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
     try std.testing.expectEqual(@as(usize, 2), try std.fmt.parseUnsigned(usize, "2", 10));
+}
+
+test "win32 a split window's host procedure gives the dividers their press, move, release and capture loss through the caption Close arms, and a held Close its own (council round 11 L1)" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    // A hidden desktop of its own, as the other window tests: the test host
+    // it makes goes nowhere near the runner's desktop (council round 12).
+    try runOnHiddenDesktop(struct {
+        fn body() !void {
+            var core_app: CoreApp = undefined;
+            var app: App = undefined;
+            var host: Host = undefined;
+            var surface_a: Surface = undefined;
+            var surface_b: Surface = undefined;
+            var session: TestSession = .{};
+            try session.init(.{
+                .core_app = &core_app,
+                .app = &app,
+                .hosts = &.{.{ .storage = &host, .register = true }},
+                .surfaces = &.{
+                    .{ .storage = &surface_a, .host = &host, .register = true },
+                    .{ .storage = &surface_b, .host = &host },
+                },
+                .tabs = &.{.{ .host = &host, .surface = &surface_a, .id = 1 }},
+            });
+            defer session.deinit();
+            try paneDividerTestSplit(&host, &surface_a, &surface_b, .right, 0.5);
+            host.test_pane_divider_content = pane_divider_test_content;
+            const window = try test_support.createTestHostWindow();
+            defer _ = sys.DestroyWindow(window);
+            setWindowData(window, &host);
+            defer setWindowData(window, null);
+
+            // Close not held: press, move and release through the window procedure.
+            try std.testing.expect(!host.caption_close_held);
+            _ = hostWindowProc(window, c.WM_LBUTTONDOWN, c.MK_LBUTTON, paneDividerTestLParam(400, 300));
+            try std.testing.expect(host.pane_divider_drag != null);
+            _ = hostWindowProc(window, c.WM_MOUSEMOVE, c.MK_LBUTTON, paneDividerTestLParam(200, 300));
+            const moved = paneDividerTestRatio(&host, .root);
+            try std.testing.expect(moved < 0.4);
+            _ = hostWindowProc(window, c.WM_LBUTTONUP, 0, paneDividerTestLParam(200, 300));
+            try std.testing.expect(host.pane_divider_drag == null);
+            try std.testing.expect(!host.pane_divider_button_held);
+            try std.testing.expectEqual(moved, paneDividerTestRatio(&host, .root));
+
+            // A capture loss through the procedure ends a drag where it is.
+            host.pane_divider_press = null;
+            _ = hostWindowProc(window, c.WM_LBUTTONDOWN, c.MK_LBUTTON, paneDividerTestLParam(200, 300));
+            try std.testing.expect(host.pane_divider_drag != null);
+            _ = hostWindowProc(window, c.WM_MOUSEMOVE, c.MK_LBUTTON, paneDividerTestLParam(300, 300));
+            _ = hostWindowProc(window, c.WM_CAPTURECHANGED, 0, 0);
+            try std.testing.expect(host.pane_divider_drag == null);
+            try std.testing.expect(!host.pane_divider_button_held);
+            const after_loss = paneDividerTestRatio(&host, .root);
+            try std.testing.expect(after_loss > moved);
+
+            // While Close holds the pointer, its moves and release are Close's: no
+            // hover, no drag, the ratio as it was, and the hold ends at the release.
+            host.pane_divider_press = null;
+            host.pane_divider_hover = null;
+            host.caption_close_held = true;
+            _ = hostWindowProc(window, c.WM_MOUSEMOVE, c.MK_LBUTTON, paneDividerTestLParam(300, 300));
+            try std.testing.expect(host.pane_divider_hover == null);
+            try std.testing.expect(host.pane_divider_drag == null);
+            _ = hostWindowProc(window, c.WM_LBUTTONUP, 0, paneDividerTestLParam(300, 300));
+            try std.testing.expect(!host.caption_close_held);
+            try std.testing.expect(host.pane_divider_drag == null);
+            try std.testing.expect(!host.pane_divider_button_held);
+            try std.testing.expectEqual(after_loss, paneDividerTestRatio(&host, .root));
+            // The hover is the dividers' again once the hold is over.
+            _ = hostWindowProc(window, c.WM_MOUSEMOVE, 0, paneDividerTestLParam(300, 300));
+            try std.testing.expect(host.pane_divider_hover != null);
+
+            // A Close hold that a capture change ended: the change reaches the
+            // dividers too, and the next divider press drags.
+            host.caption_close_held = true;
+            _ = hostWindowProc(window, c.WM_CAPTURECHANGED, 0, 0);
+            try std.testing.expect(!host.caption_close_held);
+            _ = hostWindowProc(window, c.WM_LBUTTONDOWN, c.MK_LBUTTON, paneDividerTestLParam(300, 300));
+            try std.testing.expect(host.pane_divider_drag != null);
+            _ = hostWindowProc(window, c.WM_MOUSEMOVE, c.MK_LBUTTON, paneDividerTestLParam(400, 300));
+            _ = hostWindowProc(window, c.WM_LBUTTONUP, 0, paneDividerTestLParam(400, 300));
+            try std.testing.expect(host.pane_divider_drag == null);
+            try std.testing.expect(paneDividerTestRatio(&host, .root) > after_loss);
+        }
+    }.body);
 }

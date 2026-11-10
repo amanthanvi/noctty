@@ -78,6 +78,11 @@ pub const Message = union(enum) {
     /// the bundled ConPTY's); it is not tab or renderer occlusion.
     pty_visibility: bool,
 
+    /// The terminal's tab moved to another top-level window (tab tear-off):
+    /// the pseudo console's window takes it as its owner. The HWND, as an
+    /// integer. See `Pty.reparentPseudoConsole`.
+    pty_owner: usize,
+
     /// The terminal changed its screen without the pty seeing it (a reset
     /// the user started), so a pty that keeps its own copy of the screen
     /// (ConPTY) must clear it too. See `Pty.clearPseudoConsole`.

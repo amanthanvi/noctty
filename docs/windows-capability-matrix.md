@@ -65,7 +65,7 @@ Last reviewed: 2026-10-16 (jump list, native settings and scrollbar rows; render
 | Named layouts                                                                     | Saves one window's tab/split/profile/cwd/title shape and materializes it in a new window from keybind, palette, or CLI.                                                                                              |
 | Quick select and copy mode                                                        | Visible regex targets plus modal keyboard selection and scrollback navigation. See [windows.md](windows.md#quick-select--copy-mode).                                                                                 |
 | Native settings                                                                   | A native settings window with staged, source-preserving saves. See [native settings notes](#native-settings).                                                                                                        |
-| Tab dragging                                                                      | Same-window reorder and exact-pane drag-to-split. See [tab dragging notes](#tab-dragging).                                                                                                                           |
+| Tab dragging                                                                      | Reorder, exact-pane drag-to-split, tear-off to a new window and a move into another window. See [tab dragging notes](#tab-dragging).                                                                                 |
 | Power-aware rendering                                                             | `unfocused-render-fps` caps visible background presentation; `power-saver-rendering` controls saver pacing; minimized and DWM-cloaked windows do not present. See [power and battery](windows.md#power-and-battery). |
 | SSH host discovery                                                                | Concrete aliases from `%USERPROFILE%\.ssh\config` appear as system `ssh.exe` launch entries in the picker and palette.                                                                                               |
 | Visual Studio developer shells                                                    | Each Visual Studio install's Developer Command Prompt and Developer PowerShell appear in the picker, palette and jump list (`visual-studio-profiles`, default the newest install). See [Visual Studio developer shells](windows.md#visual-studio-developer-shells). |
@@ -449,8 +449,28 @@ Same-window reorder and DPI-aware exact-pane drag-to-split ship, with
 operation-labeled drop previews. Transfers move the complete source split
 subtree through one authoritative ShellState/native transaction, and undo /
 redo restore exact tab, pane, split-tree, ratio, and focus identity. The
-universal palette provides the equivalent keyboard workflow. Cross-window
-OLE transfer is not shipped.
+universal palette provides the equivalent keyboard workflow.
+
+A tab dragged out of its tab bar (past the bar's band, or outside the
+window) opens in a new window where it is dropped, and a tab dropped on
+another noctty window's tab bar moves there, at the bar shown where it
+lands. The tab keeps its live pane tree: its programs keep running, with
+their scrollback, titles, split ratios and zoom. A window's only tab moves
+the window, as in Windows Terminal, and joins another window's tab bar if
+an ordinary move ends over it, which closes the window it left; a move that
+ends maximized or snapped (half, quarter or a Snap Layouts zone) stays a
+move. On Windows 10 builds without `IsWindowArranged` the snap is judged from
+the window's rect and size: a window already at a snap zone's exact size
+counts as unresized and can merge, and a move onto a monitor of another DPI
+that ends where a snap would put it (the full height against a side, or a
+half or quarter of the work area) never merges, whatever its size. Esc
+cancels a drag.
+`move_tab_to_new_window` (the palette's "Move Tab to New Window", unbound
+by default) does the tear-off from the keyboard; in a window of one tab it
+does nothing. A move is not undoable,
+like a reorder: it clears both windows' structural undo history. A drop on
+a window of another noctty process opens a new window in the dragging
+process; tabs never cross processes. The quick terminal keeps its tabs.
 
 ### Quick terminal
 

@@ -20,6 +20,19 @@ pub const Intent = union(enum) {
         activate: bool = true,
     },
     discard_detached_tab: model.TabId,
+    /// A live tab leaves its window for another one, or for a new window
+    /// when `window` is null, with its panes, nodes and IDs: nothing in it
+    /// restarts. It comes to the front of the window it joins, which becomes
+    /// the focused window. The window it left gives the front to the tab
+    /// beside it, as a close does, and goes when nothing is left in it (no
+    /// tab, none kept for undo). Transfer history naming the tab must be gone
+    /// first: a transfer's undo would cross windows.
+    move_tab_to_window: struct {
+        tab: model.TabId,
+        window: ?model.WindowId = null,
+        /// Where the tab goes in the window it joins; null appends.
+        index: ?usize = null,
+    },
     reorder_tab: struct {
         tab: model.TabId,
         index: usize,
