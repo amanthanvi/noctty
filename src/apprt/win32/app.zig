@@ -6150,7 +6150,9 @@ pub const App = struct {
         // `app.config`: a palette preview the update ended stays on screen,
         // with no preview left for its palette to revert. Then every
         // palette still closes, and the theme and every window show
-        // `app.config` as it is, once. None of it needs another config
+        // `app.config` as it is, once (or, while a Settings preview is live,
+        // its previewed theme and opacity: `shownConfig`,
+        // `shownBackgroundOpacity`). None of it needs another config
         // clone. What may allocate is best effort: a palette's mode, catalog
         // and preview are reset, and its layout and text, and a theme
         // resource rebuild, go on without what they could not allocate (not
