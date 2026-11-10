@@ -6153,9 +6153,9 @@ pub const App = struct {
         // `app.config` as it is, once (or, while a Settings preview is live,
         // its previewed theme and opacity: `shownConfig`,
         // `shownBackgroundOpacity`). None of it needs another config
-        // clone. What may allocate is best effort: a palette's mode, catalog
-        // and preview are reset, and its layout and text, and a theme
-        // resource rebuild, go on without what they could not allocate (not
+        // clone. A palette's mode, catalog and preview are reset without
+        // allocating; what may allocate (its layout and text, a theme
+        // resource rebuild) is best effort and goes on without it (not
         // every such failure is logged: a configured title font that cannot
         // be allocated falls back silently). Nothing shows the
         // whole of it working with memory exhausted (the only allocation its
