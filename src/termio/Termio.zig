@@ -1174,6 +1174,12 @@ pub fn ptyVisibility(self: *Termio, visible: bool) !void {
     }
 }
 
+pub fn ptyOwner(self: *Termio, owner: usize) !void {
+    switch (self.backend) {
+        .exec => |*exec| try exec.ptyOwner(owner),
+    }
+}
+
 /// The screen was cleared behind the pty's back; see `Pty.clearPseudoConsole`.
 pub fn ptyClear(self: *Termio, keep_cursor_row: bool) void {
     const cleared = switch (self.backend) {

@@ -92,6 +92,9 @@ pub const ConfirmPayload = struct {
     on_accept: *const fn (userdata: ?*anyopaque) void,
     on_cancel: ?*const fn (userdata: ?*anyopaque, reason: ConfirmCancelReason) void = null,
     userdata: ?*anyopaque = null,
+    /// What a close prompt (`Host.askBeforeClosing`) would close; null for
+    /// every other prompt.
+    close_scope: ?confirm_text.CloseScope = null,
 
     pub fn deinit(self: *ConfirmPayload, alloc: std.mem.Allocator) void {
         alloc.free(self.title);

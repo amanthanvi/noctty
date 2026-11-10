@@ -297,10 +297,12 @@ that govern each symbol you change, or that none does.
   `initPresentComposedPipeline` and the `split_dim` pipeline's flags in
   `src/renderer/opengl/shaders.zig`, and
   `src/renderer/shaders/glsl/present_composed.f.glsl`), the
-  window menu, the quick terminal (`win32_quick_terminal.zig`,
+  window menu, a torn-off tab's window (`window_state.Origin.tear_off`,
+  `window_start.placeTearOff`), the quick terminal (`win32_quick_terminal.zig`,
   `win32/quick_terminal_host.zig`).
 - [chrome-tabs-paint.md](docs/agents/log/chrome-tabs-paint.md): tab buttons
-  (`tabButtonProc`, `drawButton`, labels, tooltips, close X, the active tab's
+  (`tabButtonProc`, `drawButton`, labels, tooltips, close X and the press it
+  needs (`Host.tab_close_press`, `App.takeHeldRelease`), the active tab's
   join to its terminal, `win32_tab_visual.zig`; what a tab's label, tooltip
   and UIA name say and which tabs the strip shows: `win32/tab_label.zig`,
   `key`, `text`, `tooltip`, `uiaName`, `visible`, and `Tab.cachedKey` and
@@ -372,8 +374,19 @@ that govern each symbol you change, or that none does.
   `win32/registry.zig`), focus after a close, shell reducer effects,
   local and structural undo/redo (`win32_undo.zig`,
   `win32_structural_history.zig`, `undo-timeout`, split undo and redo through
-  the shell model: `Host.applyCommittedSplitHistory`), split dividers under
-  the mouse (`win32/pane_divider.zig`, `Host.handlePaneDividerMessage` and
+  the shell model: `Host.applyCommittedSplitHistory`), moving a tab to a new
+  window or another window (tab tear-off: `App.moveTabToWindow`,
+  `App.requestTabMove`, the outer-pump queue `App.pending_tab_moves` and
+  `App.drainPendingTabMoves`, its wake `App.noteTabMoveWake`,
+  `App.revalidateTabMove`, `Host.endTabDrag`, a drag's Esc
+  (`App.cancelTabDragForKey`, with the IME key resolver it shares with a
+  divider drag, `App.keyMessageOriginalKey` and `App.isEscapeKey`),
+  the only tab's window move (`Host.beginOnlyTabWindowMove`),
+  `Host.prepareGiveTab`,
+  `Host.giveTab`, `Host.reparentSurface`,
+  `win32/tab_drag.zig`, the shell model's `move_tab_to_window`,
+  `move_tab_to_new_window`), split dividers under the mouse
+  (`win32/pane_divider.zig`, `Host.handlePaneDividerMessage` and
   the drag behind it, `Host.paneDividerAtScreen`, keys during a drag:
   `App.paneDividerDragKey`, and the loop's routing that hands it a
   message before translation, `App.routeLoopMessage`; global hotkeys
