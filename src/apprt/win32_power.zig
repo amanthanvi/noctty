@@ -505,7 +505,7 @@ pub fn resolveCloaked(query: ?bool, observed: ?bool, previous: bool) bool {
 }
 
 /// Raw DWM cloak query. `null` means DWM could not answer transiently.
-fn queryCloaked(hwnd: HWND) ?bool {
+pub fn queryCloaked(hwnd: HWND) ?bool {
     var cloak_reason: DWORD = 0;
     const result = DwmGetWindowAttribute(
         hwnd,

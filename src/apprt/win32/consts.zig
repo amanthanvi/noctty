@@ -177,6 +177,7 @@ pub const WM_SHOWWINDOW = 0x0018;
 pub const WM_WINDOWPOSCHANGING = 0x0046;
 pub const WM_WINDOWPOSCHANGED = 0x0047;
 pub const WM_ENTERSIZEMOVE = 0x0231;
+pub const WM_MOVING = 0x0216;
 pub const WM_EXITSIZEMOVE = 0x0232;
 pub const SIZE_MAXIMIZED: u32 = 2;
 pub const SIZE_MINIMIZED: u32 = 1;
@@ -215,6 +216,13 @@ pub const WM_WINHOSTTY_TOAST_REMOVALS = WM_APP + 16;
 /// its opacity another way (`window_state.refreshBackgroundOpacity`). Posted:
 /// the switch runs inside the pane's paint, holding the renderer's lock.
 pub const WM_WINHOSTTY_RENDERER_SWITCHED = WM_APP + 17;
+/// Wakes the message loop for a tab move a drag or `move_tab_to_new_window`
+/// asked of this window (`App.pending_tab_moves`). The outer pump runs it
+/// (`App.drainPendingTabMoves`); the message only wakes it, so a nested modal
+/// loop (a menu, the system move loop) that dispatches it runs no move under
+/// the handler that opened that loop, and arms the App's re-wake timer
+/// instead (`App.noteTabMoveWake`).
+pub const WM_WINHOSTTY_TAB_MOVE = WM_APP + 18;
 
 pub const PM_NOREMOVE: UINT = 0x0000;
 pub const PM_REMOVE: UINT = 0x0001;
@@ -293,6 +301,9 @@ pub const EN_CHANGE = 0x0300;
 pub const BS_OWNERDRAW = 0x0000000B;
 pub const SS_RIGHT = 0x00000002;
 pub const SS_CENTERIMAGE = 0x00000200;
+pub const SS_CENTER = 0x00000001;
+pub const SS_NOPREFIX = 0x00000080;
+pub const SS_ENDELLIPSIS = 0x00004000;
 pub const SS_OWNERDRAW = 0x0000000D;
 pub const ES_AUTOHSCROLL = 0x0080;
 pub const ES_MULTILINE = 0x0004;

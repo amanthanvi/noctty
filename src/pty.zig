@@ -1112,7 +1112,9 @@ const WindowsPty = struct {
     /// window, so dialogs a console program parents to `GetConsoleWindow()`
     /// belong to the terminal (conhost sets `GWLP_HWNDPARENT`, which moves
     /// neither focus nor the foreground). Same scope as `clearPseudoConsole`.
-    fn reparentPseudoConsole(self: *Pty, owner: windows.HWND) PseudoConsoleSignalError!void {
+    /// Sent again when the terminal's tab moves to another window
+    /// (`Exec.ptyOwner`), as Windows Terminal does for a torn-off tab.
+    pub fn reparentPseudoConsole(self: *Pty, owner: windows.HWND) PseudoConsoleSignalError!void {
         const pc = self.createdPseudoConsole() orelse return;
         const reparent = pc.conpty.reparent orelse return;
         if (reparent(pc.handle, owner) != windows.S_OK) return error.SignalFailed;

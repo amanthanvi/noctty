@@ -428,6 +428,8 @@ pub fn Fixtures(comptime runtime: anytype) type {
                     app.registry.deinit(self.allocator);
                     app.notifications.deinit();
                     runtime.appDiscardDeferredOpens(app);
+                    // Tab moves a test asked for and never drained.
+                    app.pending_tab_moves.deinit(self.allocator);
                 }
                 if (self.core_app_initialized) self.core_app.?.deinit();
                 self.* = .{};
@@ -536,6 +538,7 @@ pub fn Fixtures(comptime runtime: anytype) type {
                 errdefer if (self.app.com_initialized) sys.OleUninitialize();
                 try runtime.appEnsureWindowClass(&self.app);
                 self.app.test_surface_init_stage = &stage;
+                App.test_tear_off_window_created = &standInTabStrip;
                 watched = null;
                 first_show = null;
                 minimize_first_show = false;
@@ -543,7 +546,10 @@ pub fn Fixtures(comptime runtime: anytype) type {
             }
 
             pub fn deinit(self: *WindowStartTestApp) void {
+                App.test_tear_off_window_created = null;
                 self.closeWindows();
+                // A drag's label and its UIA provider, before the apartment.
+                self.app.releaseTabDragPreview();
                 if (self.app.com_initialized) sys.OleUninitialize();
                 const instance = self.app.hinstance;
                 self.session.deinit();
@@ -574,8 +580,17 @@ pub fn Fixtures(comptime runtime: anytype) type {
             }
 
             pub fn closeWindows(self: *WindowStartTestApp) void {
-                var left: usize = 16;
+                // One pass per window there is (a test can open more than 16).
+                var left: usize = self.app.registry.windows.items.len + 1;
                 while (self.app.registry.windows.items.len > 0 and left > 0) : (left -= 1) self.closeWindow(self.newest());
+            }
+
+            /// The stand-in tab strip `stage` gives a window its pane's init
+            /// creates, for a window a torn-off tab opens in.
+            pub fn standInTabStrip(host: *Host) anyerror!void {
+                if (host.tab_container_hwnd == null) {
+                    host.tab_container_hwnd = try createTestChromeChild(host.hwnd.?, prompt_label_class);
+                }
             }
 
             pub fn stage(surface: *Surface, at: SurfaceInitStage) anyerror!void {

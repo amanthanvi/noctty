@@ -82,6 +82,12 @@ pub const Origin = union(window_start.Kind) {
     quick_terminal: InitialShow,
     /// A handed-off console's window, first shown as its client asked.
     adopted: InitialShow,
+    /// The window a tab moved out of `source` opens in, with no pane of its
+    /// own (`App.moveTabToWindow`): where the tab was dropped, or, from
+    /// `move_tab_to_new_window`, a cascade step off `source`
+    /// (`window_start.placeTearOff`). It takes its source's decorations,
+    /// opacity and topmost, never its maximize or fullscreen.
+    tear_off: struct { source: *const Host, drop: ?window_start.Drop = null },
 
     /// A copy of `source`, or a fresh window when there is none to copy
     /// (`Registry.newWindowSource`).
@@ -116,6 +122,8 @@ pub const Pending = struct {
     restore: ?struct { saved: SavedPlacement, enter: Enter } = null,
     /// The last stage carried out.
     reached: ?Stage = null,
+    /// Where a torn-off tab was dropped (`Origin.tear_off`).
+    drop: ?window_start.Drop = null,
 };
 
 /// What `config` asks of how its window starts.
@@ -158,6 +166,10 @@ pub fn begin(app: *const App, config: *const configpkg.Config, origin: Origin) !
             argv = copy.forwarded;
         },
         .quick_terminal, .adopted => |first_show| show = first_show,
+        .tear_off => |tear| {
+            snapshot = try snapshotOf(tear.source);
+            pending.drop = tear.drop;
+        },
         .restore => |saved| pending.restore = .{ .saved = saved, .enter = window_start.forRestore(wanted, saved) },
         .fresh => {},
     }
@@ -253,7 +265,17 @@ fn onCreated(host: *Host, pending: *const Pending) !void {
     // A copy starts hidden where it will show, on its source's monitor, so
     // core init runs at that monitor's DPI.
     if (pending.plan.source == null) return;
-    const placed = window_start.place(&pending.plan, occupiedAround(host), null);
+    const placed = if (pending.plan.kind == .tear_off)
+        window_start.placeTearOff(&pending.plan, occupiedAround(host), pending.drop)
+    else
+        window_start.place(&pending.plan, occupiedAround(host), null);
+    if (pending.plan.kind == .tear_off) {
+        // Its rect is already in the drop monitor's pixels. The first move
+        // there changes the window's DPI, and `WM_DPICHANGED` applies
+        // Windows' rescaled suggestion of it; the second, at that DPI,
+        // puts it back where `placeTearOff` said.
+        _ = sys.SetWindowPos(hwnd, null, placed.rect.left, placed.rect.top, placed.rect.right - placed.rect.left, placed.rect.bottom - placed.rect.top, placed.flags);
+    }
     if (sys.SetWindowPos(
         hwnd,
         null,
@@ -326,6 +348,9 @@ fn placeFullscreenCopy(host: *Host) !void {
 
 fn afterShow(host: *Host, pending: *const Pending) !void {
     if (pending.plan.source == null) return;
+    // A torn-off tab's window is at its place since `.created`, and its
+    // panes bring their own metrics. Only floating is left to take.
+    if (pending.plan.kind == .tear_off) return applyTopmost(host);
     // Its first pane takes the metrics of its source's active pane, but
     // for a client size of its own.
     if (pending.source_pane) |metrics| if (host.activeSurface()) |pane| {
@@ -679,6 +704,7 @@ fn setInitialSize(host: *Host, pane: *Surface, size: apprt.action.InitialSize) !
         .height = @intCast(size.height),
     };
     const hwnd = host.hwnd orelse return;
+    if (host.hold_initial_size) return;
     if (host.top_level.isFullscreen() or sys.IsZoomed(hwnd) != 0 or paneCount(host) != 1) return;
     const client_size = scaleInitialClientSize(pane.metrics.default_client_size.?, pane.content_scale);
     try resizeClientArea(host, client_size.width, client_size.height);
@@ -1227,6 +1253,14 @@ var test_system_inputs: ?SystemInputs = null;
 /// background alone is translucent (`solidChild`).
 pub fn childCreated(host: *const Host, child: HWND) void {
     if (host.chrome_alpha != null) _ = solidChild(child, 1);
+}
+
+/// A child control a tab move brought to `host`'s window: solid while that
+/// window's background alone is translucent, and given back where it is not
+/// (only what `solidChild` 1 layered; a child layered for its own sake keeps
+/// its layering).
+pub fn childReparented(host: *const Host, child: HWND) void {
+    _ = solidChild(child, if (host.chrome_alpha != null) 1 else 0);
 }
 
 /// Whether every pane of `host` whose renderer runs draws with OpenGL

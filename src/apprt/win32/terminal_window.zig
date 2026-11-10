@@ -2183,11 +2183,6 @@ pub const Surface = struct {
         _ = sys.PostMessageW(hwnd, c.WM_WINHOSTTY_CONSOLE_VISIBILITY, @intFromBool(visible), 0);
     }
 
-    /// The core asks this as it creates the pty: the host owns the pseudo
-    /// console's window, as in Windows Terminal, so a dialog a console program
-    /// parents to `GetConsoleWindow()` belongs to this window instead of an
-    /// unowned hidden one. A surface never moves to another host, so once is
-    /// enough; visibility changes after that follow `syncConsoleVisibility`.
     /// The core asks this as it starts the pty: a user profile's command line,
     /// which Exec passes to CreateProcess as written while the argv it runs is
     /// still that line's split.
@@ -2196,6 +2191,12 @@ pub const Surface = struct {
         return launch.command_line;
     }
 
+    /// The core asks this as it creates the pty: the host owns the pseudo
+    /// console's window, as in Windows Terminal, so a dialog a console program
+    /// parents to `GetConsoleWindow()` belongs to this window instead of an
+    /// unowned hidden one. A surface whose tab moves to another window tells
+    /// its pty the new owner (`Host.reparentSurface`, `ptyOwnerCallback`);
+    /// visibility changes after that follow `syncConsoleVisibility`.
     pub fn consoleOwner(self: *Surface) ?*anyopaque {
         const hwnd = (self.host orelse return null).hwnd orelse return null;
         self.console_window_attached = true;
