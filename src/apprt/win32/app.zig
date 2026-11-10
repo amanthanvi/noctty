@@ -18547,3 +18547,163 @@ test "win32 a tab automation moves out mid divider drag takes its ratio as it wa
         }
     }.body);
 }
+
+const TestCommitWindowCode = struct {
+    const Action = enum { fill_target, close_tab, source_loses_window };
+    var action: Action = .fill_target;
+    var host: ?*Host = null;
+    /// For `close_tab`: a pane of the tab that closes.
+    var pane: ?*Surface = null;
+    var kept: ?HWND = null;
+    var done = false;
+
+    /// Right before the commit, on the path with no retry, window code
+    /// changes what the move checked (council round 10 L2, Opus's probes):
+    /// it adds a tab to the window the tab is to join and leaves its list
+    /// full, closes a tab of the window the tab leaves, or takes that
+    /// window's `hwnd`, as its `WM_DESTROY` does before its removal.
+    fn hook(app: *App, step: App.TabMoveShellStep) void {
+        if (step != .commit) return;
+        const to = host orelse return;
+        host = null;
+        switch (action) {
+            .fill_target => {
+                const tab = app.createWindowSurface(&app.config, default_title, .{ .host_id = to.id }) catch return;
+                app.activateSurface(tab);
+                to.tabs.shrinkAndFree(app.core_app.alloc, to.tabs.items.len);
+                done = true;
+            },
+            .close_tab => {
+                const closing = pane orelse return;
+                for (to.tabs.items, 0..) |*tab, i| if (tab.findHandle(closing) != null) {
+                    done = to.closeTabInPlace(i);
+                    return;
+                };
+            },
+            .source_loses_window => {
+                kept = to.hwnd;
+                to.hwnd = null;
+                done = true;
+            },
+        }
+    }
+
+    fn arm(what: Action, on: *Host, closing: ?*Surface) void {
+        action = what;
+        host = on;
+        pane = closing;
+        kept = null;
+        done = false;
+        App.test_tab_move_shell_step = &hook;
+    }
+};
+
+test "win32 a tab move whose destination fills right before the commit reserves its slot again (council round 10 L2, probe G)" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    try runOnHiddenDesktop(struct {
+        fn body() !void {
+            var fixture: win32.WindowStartTestApp = .{};
+            try fixture.init();
+            defer fixture.deinit();
+            const app = &fixture.app;
+            app.shell_runtime_initialized = true;
+            const setup: TabMoveFixture = .{ .fixture = &fixture };
+            const source = try setup.window(2, false);
+            const target = try setup.window(1, false);
+            // No transfer in undo history: the move prepares once.
+            try std.testing.expect(!source.hasStructuralHistory());
+            TestCommitWindowCode.arm(.fill_target, target, null);
+            defer App.test_tab_move_shell_step = null;
+            try std.testing.expect(try app.moveTabToWindow(source, 0, .{ .host = .{ .host = target, .index = 1 } }));
+            App.test_tab_move_shell_step = null;
+            try std.testing.expect(TestCommitWindowCode.done);
+            // The tab joined the window's other two.
+            try std.testing.expectEqual(@as(usize, 3), target.tabs.items.len);
+            try std.testing.expectEqual(@as(usize, 1), source.tabs.items.len);
+            try app.validateShellNativeMapping();
+        }
+    }.body);
+}
+
+test "win32 a tab torn off a window that drops to one tab right before the commit moves nothing (council round 10 L2)" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    try runOnHiddenDesktop(struct {
+        fn body() !void {
+            var fixture: win32.WindowStartTestApp = .{};
+            try fixture.init();
+            defer fixture.deinit();
+            const app = &fixture.app;
+            app.shell_runtime_initialized = true;
+            const setup: TabMoveFixture = .{ .fixture = &fixture };
+            const source = try setup.window(2, false);
+            const moving = source.tabs.items[1].id;
+            const other = source.tabs.items[0].focusedSurface().?;
+            fixture.core_app.deleteSurface(other);
+            TestCommitWindowCode.arm(.close_tab, source, other);
+            defer App.test_tab_move_shell_step = null;
+            const moved = app.moveTabToWindow(source, 1, .{ .new_window = null });
+            App.test_tab_move_shell_step = null;
+            try std.testing.expect(TestCommitWindowCode.done);
+            // A new window from the only tab is no move: nothing moved, and
+            // the window made for it is gone.
+            try std.testing.expect(!(try moved));
+            try std.testing.expectEqual(@as(usize, 1), source.tabs.items.len);
+            try std.testing.expect(source.findTabIndexById(moving) != null);
+            try std.testing.expectEqual(@as(usize, 1), app.registry.hosts.items.len);
+            try app.validateShellNativeMapping();
+        }
+    }.body);
+}
+
+test "win32 a tab move whose moving tab closes right before the commit moves nothing (council round 10 L2)" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    try runOnHiddenDesktop(struct {
+        fn body() !void {
+            var fixture: win32.WindowStartTestApp = .{};
+            try fixture.init();
+            defer fixture.deinit();
+            const app = &fixture.app;
+            app.shell_runtime_initialized = true;
+            const setup: TabMoveFixture = .{ .fixture = &fixture };
+            const source = try setup.window(3, false);
+            const moving = source.tabs.items[1].focusedSurface().?;
+            fixture.core_app.deleteSurface(moving);
+            TestCommitWindowCode.arm(.close_tab, source, moving);
+            defer App.test_tab_move_shell_step = null;
+            const moved = app.moveTabToWindow(source, 1, .{ .new_window = null });
+            App.test_tab_move_shell_step = null;
+            try std.testing.expect(TestCommitWindowCode.done);
+            try std.testing.expect(!(try moved));
+            try std.testing.expectEqual(@as(usize, 2), source.tabs.items.len);
+            try std.testing.expectEqual(@as(usize, 1), app.registry.hosts.items.len);
+            try app.validateShellNativeMapping();
+        }
+    }.body);
+}
+
+test "win32 a tab move whose source loses its window right before the commit moves nothing (council round 10 L2)" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    try runOnHiddenDesktop(struct {
+        fn body() !void {
+            var fixture: win32.WindowStartTestApp = .{};
+            try fixture.init();
+            defer fixture.deinit();
+            const app = &fixture.app;
+            app.shell_runtime_initialized = true;
+            const setup: TabMoveFixture = .{ .fixture = &fixture };
+            const source = try setup.window(2, false);
+            const target = try setup.window(1, false);
+            TestCommitWindowCode.arm(.source_loses_window, source, null);
+            defer App.test_tab_move_shell_step = null;
+            const moved = app.moveTabToWindow(source, 0, .{ .host = .{ .host = target, .index = 1 } });
+            App.test_tab_move_shell_step = null;
+            // Its window back, for the teardown.
+            source.hwnd = TestCommitWindowCode.kept;
+            try std.testing.expect(TestCommitWindowCode.done);
+            try std.testing.expect(!(try moved));
+            try std.testing.expectEqual(@as(usize, 2), source.tabs.items.len);
+            try std.testing.expectEqual(@as(usize, 1), target.tabs.items.len);
+            try app.validateShellNativeMapping();
+        }
+    }.body);
+}
