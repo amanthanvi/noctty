@@ -828,9 +828,11 @@ pub const App = struct {
     /// Esc ended a tab drag; its key-up is taken too, so no terminal sees a
     /// release it never saw pressed.
     tab_drag_escape_down: bool = false,
-    /// A tab left mid-drag while its button was down (`Host.destroyTabButton`,
-    /// `Host.giveTab`): its release, which can land in any window now that
-    /// the capture is gone, is taken by the pump (`takeHeldRelease`).
+    /// A tab left mid-drag while its button was down
+    /// (`Host.destroyTabButton`, `Host.prepareGiveTab`), or an only tab's
+    /// window move that did not start (`Host.beginOnlyTabWindowMove`): its
+    /// release, which can land in any window now that the capture is gone,
+    /// is taken by the pump (`takeHeldRelease`).
     held_release_pending: bool = false,
     /// The message the outer pump is dispatching now, or 0 while it waits
     /// (`noteTabMoveWake`).

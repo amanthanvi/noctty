@@ -27398,80 +27398,85 @@ test "win32 tab overview parser accepts one-based tab numbers" {
 
 test "win32 a split window's host procedure gives the dividers their press, move, release and capture loss through the caption Close arms, and a held Close its own (council round 11 L1)" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
+    // A hidden desktop of its own, as the other window tests: the test host
+    // it makes goes nowhere near the runner's desktop (council round 12).
+    try runOnHiddenDesktop(struct {
+        fn body() !void {
+            var core_app: CoreApp = undefined;
+            var app: App = undefined;
+            var host: Host = undefined;
+            var surface_a: Surface = undefined;
+            var surface_b: Surface = undefined;
+            var session: TestSession = .{};
+            try session.init(.{
+                .core_app = &core_app,
+                .app = &app,
+                .hosts = &.{.{ .storage = &host, .register = true }},
+                .surfaces = &.{
+                    .{ .storage = &surface_a, .host = &host, .register = true },
+                    .{ .storage = &surface_b, .host = &host },
+                },
+                .tabs = &.{.{ .host = &host, .surface = &surface_a, .id = 1 }},
+            });
+            defer session.deinit();
+            try paneDividerTestSplit(&host, &surface_a, &surface_b, .right, 0.5);
+            host.test_pane_divider_content = pane_divider_test_content;
+            const window = try test_support.createTestHostWindow();
+            defer _ = sys.DestroyWindow(window);
+            setWindowData(window, &host);
+            defer setWindowData(window, null);
 
-    var core_app: CoreApp = undefined;
-    var app: App = undefined;
-    var host: Host = undefined;
-    var surface_a: Surface = undefined;
-    var surface_b: Surface = undefined;
-    var session: TestSession = .{};
-    try session.init(.{
-        .core_app = &core_app,
-        .app = &app,
-        .hosts = &.{.{ .storage = &host, .register = true }},
-        .surfaces = &.{
-            .{ .storage = &surface_a, .host = &host, .register = true },
-            .{ .storage = &surface_b, .host = &host },
-        },
-        .tabs = &.{.{ .host = &host, .surface = &surface_a, .id = 1 }},
-    });
-    defer session.deinit();
-    try paneDividerTestSplit(&host, &surface_a, &surface_b, .right, 0.5);
-    host.test_pane_divider_content = pane_divider_test_content;
-    const window = try test_support.createTestHostWindow();
-    defer _ = sys.DestroyWindow(window);
-    setWindowData(window, &host);
-    defer setWindowData(window, null);
+            // Close not held: press, move and release through the window procedure.
+            try std.testing.expect(!host.caption_close_held);
+            _ = hostWindowProc(window, c.WM_LBUTTONDOWN, c.MK_LBUTTON, paneDividerTestLParam(400, 300));
+            try std.testing.expect(host.pane_divider_drag != null);
+            _ = hostWindowProc(window, c.WM_MOUSEMOVE, c.MK_LBUTTON, paneDividerTestLParam(200, 300));
+            const moved = paneDividerTestRatio(&host, .root);
+            try std.testing.expect(moved < 0.4);
+            _ = hostWindowProc(window, c.WM_LBUTTONUP, 0, paneDividerTestLParam(200, 300));
+            try std.testing.expect(host.pane_divider_drag == null);
+            try std.testing.expect(!host.pane_divider_button_held);
+            try std.testing.expectEqual(moved, paneDividerTestRatio(&host, .root));
 
-    // Close not held: press, move and release through the window procedure.
-    try std.testing.expect(!host.caption_close_held);
-    _ = hostWindowProc(window, c.WM_LBUTTONDOWN, c.MK_LBUTTON, paneDividerTestLParam(400, 300));
-    try std.testing.expect(host.pane_divider_drag != null);
-    _ = hostWindowProc(window, c.WM_MOUSEMOVE, c.MK_LBUTTON, paneDividerTestLParam(200, 300));
-    const moved = paneDividerTestRatio(&host, .root);
-    try std.testing.expect(moved < 0.4);
-    _ = hostWindowProc(window, c.WM_LBUTTONUP, 0, paneDividerTestLParam(200, 300));
-    try std.testing.expect(host.pane_divider_drag == null);
-    try std.testing.expect(!host.pane_divider_button_held);
-    try std.testing.expectEqual(moved, paneDividerTestRatio(&host, .root));
+            // A capture loss through the procedure ends a drag where it is.
+            host.pane_divider_press = null;
+            _ = hostWindowProc(window, c.WM_LBUTTONDOWN, c.MK_LBUTTON, paneDividerTestLParam(200, 300));
+            try std.testing.expect(host.pane_divider_drag != null);
+            _ = hostWindowProc(window, c.WM_MOUSEMOVE, c.MK_LBUTTON, paneDividerTestLParam(300, 300));
+            _ = hostWindowProc(window, c.WM_CAPTURECHANGED, 0, 0);
+            try std.testing.expect(host.pane_divider_drag == null);
+            try std.testing.expect(!host.pane_divider_button_held);
+            const after_loss = paneDividerTestRatio(&host, .root);
+            try std.testing.expect(after_loss > moved);
 
-    // A capture loss through the procedure ends a drag where it is.
-    host.pane_divider_press = null;
-    _ = hostWindowProc(window, c.WM_LBUTTONDOWN, c.MK_LBUTTON, paneDividerTestLParam(200, 300));
-    try std.testing.expect(host.pane_divider_drag != null);
-    _ = hostWindowProc(window, c.WM_MOUSEMOVE, c.MK_LBUTTON, paneDividerTestLParam(300, 300));
-    _ = hostWindowProc(window, c.WM_CAPTURECHANGED, 0, 0);
-    try std.testing.expect(host.pane_divider_drag == null);
-    try std.testing.expect(!host.pane_divider_button_held);
-    const after_loss = paneDividerTestRatio(&host, .root);
-    try std.testing.expect(after_loss > moved);
+            // While Close holds the pointer, its moves and release are Close's: no
+            // hover, no drag, the ratio as it was, and the hold ends at the release.
+            host.pane_divider_press = null;
+            host.pane_divider_hover = null;
+            host.caption_close_held = true;
+            _ = hostWindowProc(window, c.WM_MOUSEMOVE, c.MK_LBUTTON, paneDividerTestLParam(300, 300));
+            try std.testing.expect(host.pane_divider_hover == null);
+            try std.testing.expect(host.pane_divider_drag == null);
+            _ = hostWindowProc(window, c.WM_LBUTTONUP, 0, paneDividerTestLParam(300, 300));
+            try std.testing.expect(!host.caption_close_held);
+            try std.testing.expect(host.pane_divider_drag == null);
+            try std.testing.expect(!host.pane_divider_button_held);
+            try std.testing.expectEqual(after_loss, paneDividerTestRatio(&host, .root));
+            // The hover is the dividers' again once the hold is over.
+            _ = hostWindowProc(window, c.WM_MOUSEMOVE, 0, paneDividerTestLParam(300, 300));
+            try std.testing.expect(host.pane_divider_hover != null);
 
-    // While Close holds the pointer, its moves and release are Close's: no
-    // hover, no drag, the ratio as it was, and the hold ends at the release.
-    host.pane_divider_press = null;
-    host.pane_divider_hover = null;
-    host.caption_close_held = true;
-    _ = hostWindowProc(window, c.WM_MOUSEMOVE, c.MK_LBUTTON, paneDividerTestLParam(300, 300));
-    try std.testing.expect(host.pane_divider_hover == null);
-    try std.testing.expect(host.pane_divider_drag == null);
-    _ = hostWindowProc(window, c.WM_LBUTTONUP, 0, paneDividerTestLParam(300, 300));
-    try std.testing.expect(!host.caption_close_held);
-    try std.testing.expect(host.pane_divider_drag == null);
-    try std.testing.expect(!host.pane_divider_button_held);
-    try std.testing.expectEqual(after_loss, paneDividerTestRatio(&host, .root));
-    // The hover is the dividers' again once the hold is over.
-    _ = hostWindowProc(window, c.WM_MOUSEMOVE, 0, paneDividerTestLParam(300, 300));
-    try std.testing.expect(host.pane_divider_hover != null);
-
-    // A Close hold that a capture change ended: the change reaches the
-    // dividers too, and the next divider press drags.
-    host.caption_close_held = true;
-    _ = hostWindowProc(window, c.WM_CAPTURECHANGED, 0, 0);
-    try std.testing.expect(!host.caption_close_held);
-    _ = hostWindowProc(window, c.WM_LBUTTONDOWN, c.MK_LBUTTON, paneDividerTestLParam(300, 300));
-    try std.testing.expect(host.pane_divider_drag != null);
-    _ = hostWindowProc(window, c.WM_MOUSEMOVE, c.MK_LBUTTON, paneDividerTestLParam(400, 300));
-    _ = hostWindowProc(window, c.WM_LBUTTONUP, 0, paneDividerTestLParam(400, 300));
-    try std.testing.expect(host.pane_divider_drag == null);
-    try std.testing.expect(paneDividerTestRatio(&host, .root) > after_loss);
+            // A Close hold that a capture change ended: the change reaches the
+            // dividers too, and the next divider press drags.
+            host.caption_close_held = true;
+            _ = hostWindowProc(window, c.WM_CAPTURECHANGED, 0, 0);
+            try std.testing.expect(!host.caption_close_held);
+            _ = hostWindowProc(window, c.WM_LBUTTONDOWN, c.MK_LBUTTON, paneDividerTestLParam(300, 300));
+            try std.testing.expect(host.pane_divider_drag != null);
+            _ = hostWindowProc(window, c.WM_MOUSEMOVE, c.MK_LBUTTON, paneDividerTestLParam(400, 300));
+            _ = hostWindowProc(window, c.WM_LBUTTONUP, 0, paneDividerTestLParam(400, 300));
+            try std.testing.expect(host.pane_divider_drag == null);
+            try std.testing.expect(paneDividerTestRatio(&host, .root) > after_loss);
+        }
+    }.body);
 }
