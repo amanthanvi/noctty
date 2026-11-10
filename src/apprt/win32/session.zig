@@ -1168,7 +1168,7 @@ pub fn buildRestoredSessionSplitTree(
                     .horizontal => .horizontal,
                     .vertical => .vertical,
                 },
-                .ratio = @floatCast(split.ratio),
+                .ratio = SplitTreeSurface.canonicalRatio(@floatCast(split.ratio)),
                 .left = @enumFromInt(remap[split.first]),
                 .right = @enumFromInt(remap[split.second]),
             } },
@@ -1179,6 +1179,7 @@ pub fn buildRestoredSessionSplitTree(
         .arena = arena,
         .nodes = tree_nodes,
         .zoomed = null,
+        .generation = SplitTreeSurface.nextGeneration(),
     };
 }
 
@@ -3155,6 +3156,26 @@ test "named layout fixture materializes through the session restore split tree b
     try std.testing.expectEqual(@as(f16, 0.75), tree.nodes[2].split.ratio);
     try std.testing.expectEqual(&surface_b, tree.nodes[3].leaf);
     try std.testing.expectEqual(&surface_c, tree.nodes[4].leaf);
+}
+
+test "win32 session restore takes a saved ratio of -0.0 as +0" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    // Validation takes "ratio": -0.0 (-0 < 0 is false); the tree must hold
+    // +0, whose f16 bits order with the other ratios (Sol on #689).
+    const fixture =
+        \\{"schema_version":1,"windows":[{"selected_tab":0,"tabs":[{"selected_leaf":0,"layout":{"root":0,"nodes":[{"split":{"axis":"horizontal","ratio":-0.0,"first":1,"second":2}},{"pane":{}},{"pane":{}}]}}]}]}
+    ;
+    var parsed = try win32_session_state.parseLayoutAlloc(std.testing.allocator, fixture);
+    defer parsed.deinit();
+    const layout = parsed.value.windows[0].tabs[0].layout;
+    try std.testing.expect(std.math.signbit(layout.nodes[0].split.ratio));
+
+    var surface_a: Surface = undefined;
+    var surface_b: Surface = undefined;
+    var tree = try App.buildRestoredSessionSplitTree(std.testing.allocator, layout, &.{ null, &surface_a, &surface_b });
+    defer tree.deinit();
+    try std.testing.expectEqual(@as(u16, 0), @as(u16, @bitCast(tree.nodes[0].split.ratio)));
 }
 
 test "win32 session restore rebuilds saved split tree shape" {

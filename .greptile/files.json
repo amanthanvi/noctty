@@ -190,7 +190,10 @@
         "src/apprt/win32_structural_history.zig",
         "src/apprt/win32_shell.zig",
         "src/apprt/win32_shell/**",
-        "src/apprt/win32/confirm_text.zig"
+        "src/apprt/win32/confirm_text.zig",
+        "src/apprt/win32/pane_divider.zig",
+        "src/apprt/win32_layout.zig",
+        "src/datastruct/split_tree.zig"
       ]
     },
     {
@@ -205,7 +208,9 @@
         "src/apprt/win32/terminal_window.zig",
         "src/input/**",
         "src/config/Config.zig",
-        "src/Surface.zig"
+        "src/Surface.zig",
+        "src/App.zig",
+        "src/inspector/widgets/key.zig"
       ]
     },
     {

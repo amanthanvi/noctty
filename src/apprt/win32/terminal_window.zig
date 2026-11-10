@@ -1218,6 +1218,26 @@ pub const Surface = struct {
         return &self.core_surface;
     }
 
+    /// Whether this pane is in one of its host's live tabs. The rule: a pane
+    /// that runs bindings or takes app-wide actions must be in a host tab.
+    /// A pane detached with its tab for undo (`close_tab:this`) or out of
+    /// its split for redo is not: it stays one of the app's surfaces,
+    /// hidden, with its program running, and whatever disposes that
+    /// history next frees it. Core asks it in two places:
+    /// - before each surface of an app-wide fan-out (`App.performAllAction`,
+    ///   through `forEachListed`), so `global:...=close_tab:this>text:...`
+    ///   does not type into the tab just closed;
+    /// - through `CoreSurface.CloseToken.attached`, which gates every
+    ///   binding on the pane (`dispatchLeaf` refuses one on a pane in no
+    ///   live tab) and ends a chain after an `undo` or `redo` that detached
+    ///   it (`performChain`, `mayDetachCaller`).
+    /// Core probes it by name (`@hasDecl(apprt.Surface,
+    /// "receivesAppWideActions")`), so a rename must change those probes
+    /// too, or the check silently stops.
+    pub fn receivesAppWideActions(self: *Surface) bool {
+        return Host.findTabForSurface(self) != null;
+    }
+
     pub fn takeAdoptedSession(self: *Surface) ?ptypkg.AdoptedSession {
         const result = self.adopted_session;
         self.adopted_session = null;
@@ -1994,6 +2014,8 @@ pub const Surface = struct {
     pub const flushDeferredLiveResizeRepaint = surface_presentation.flushDeferredLiveResizeRepaint;
 
     pub const repaintHostedChild = surface_presentation.repaintHostedChild;
+
+    pub const repaintHostedChildWith = surface_presentation.repaintHostedChildWith;
 
     pub const requestRepaintWithMode = surface_presentation.requestRepaintWithMode;
 
@@ -3623,6 +3645,25 @@ pub const Surface = struct {
         const x: f32 = @floatFromInt(signedLowWord(lParamBits(lParam)));
         const y: f32 = @floatFromInt(signedHighWord(lParamBits(lParam)));
         self.handleScrollbarLeftButtonUpLocal(x, y);
+    }
+
+    /// Whether a `WM_NCHITTEST` point (`lParam`, screen coordinates) is on
+    /// this pane's scrollbar band, which keeps the mouse even inside a split
+    /// divider's grab zone.
+    pub fn scrollbarBandAtScreen(self: *const Surface, hwnd: HWND, lParam: LPARAM) bool {
+        if (!self.window_visible or !self.scrollbarScrollable()) return false;
+        if (self.scrollbarPolicy() == .never or !self.placement.rect_known) return false;
+        var point: POINT = .{
+            .x = signedLowWord(lParamBits(lParam)),
+            .y = signedHighWord(lParamBits(lParam)),
+        };
+        if (sys.ScreenToClient(hwnd, &point) == 0) return false;
+        return scrollbarProxyPointFromSurfaceCoords(
+            self.placement.rect,
+            self.scrollbarHoverWidthPx(),
+            point.x,
+            point.y,
+        ).over_band;
     }
 
     fn scrollbarProxyPointFromScreenCursor(self: *const Surface, hwnd: HWND) ?ScrollbarProxyPoint {
