@@ -205,7 +205,9 @@
         "src/apprt/win32/terminal_window.zig",
         "src/input/**",
         "src/config/Config.zig",
-        "src/Surface.zig"
+        "src/Surface.zig",
+        "src/App.zig",
+        "src/inspector/widgets/key.zig"
       ]
     },
     {
