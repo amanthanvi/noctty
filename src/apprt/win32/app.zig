@@ -6152,13 +6152,15 @@ pub const App = struct {
         // palette still closes, and the theme and every window show
         // `app.config` as it is, once. None of it needs another config
         // clone. What may allocate is best effort: a palette's mode, catalog
-        // and preview are reset first, and its layout and text, and a theme
+        // and preview are reset, and its layout and text, and a theme
         // resource rebuild, go on without what they could not allocate (not
         // every such failure is logged: a configured title font that cannot
         // be allocated falls back silently). Nothing shows the
-        // whole of it working with memory exhausted (its test fails only the
-        // arm's clone). The panes' restore above goes through core, in each
-        // pane's light/dark state; this shows `app.config` unconditioned.
+        // whole of it working with memory exhausted (the only allocation its
+        // test fails is the arm's clone). The panes' restore above goes
+        // through core, in each pane's light/dark state; this shows
+        // `app.config` in the light/dark state it was installed in, which a
+        // light/dark reload may already have moved past.
         if (!self.app_wide_windows_applied) {
             for (self.registry.hosts.items) |host| {
                 if (host.overlay_mode == .command_palette) host.hideOverlay();
