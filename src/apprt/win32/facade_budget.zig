@@ -64,6 +64,9 @@ const leaves = .{
         .file = "overlay_view.zig",
         .module = @import("overlay_view.zig"),
         .source = @embedFile("overlay_view.zig"),
+        // why: `feedbackRow`, which host.zig asks whether the overlay band
+        // has its second row (`Host.overlayBandHeight`): the rule belongs
+        // with `compose`, whose `feedback` is what that row shows.
         .pub_decls = 10,
     },
     .{

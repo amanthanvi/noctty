@@ -339,9 +339,10 @@ that govern each symbol you change, or that none does.
   says and shows in each mode (`win32/overlay_view.zig`: `compose`, its
   hint lane against chrome paint's feedback lane, `shape`, `nextFocus`,
   `bannerLine`; the palette's hint line, `command-palette-hint`, and the
-  band's height, `feedbackRow` and `Host.overlayBandHeight`, which
-  `setBanner` lays out again; the one reader of Host state for it,
-  `Host.overlayFacts`,
+  band's height, `feedbackRow`, `Host.overlayBandHeight` and
+  `overlayBandChanged`, which `setBanner` and a palette theme's swap
+  (`swapRuntimeConfigFromPalette`) call; the one reader of Host state for
+  it, `Host.overlayFacts`,
   and the syncs that write its controls, `syncOverlayLabel`,
   `syncOverlayHint` and `syncOverlayButtons`, in
   `win32/overlay_session.zig`), overlay EDIT writes

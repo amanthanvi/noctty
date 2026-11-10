@@ -2579,6 +2579,14 @@ pub const Host = struct {
             host.refreshChrome() catch |err| {
                 log.warn("palette theme chrome refresh failed err={}", .{err});
             };
+            // A theme file is a config file and can set
+            // `command-palette-hint`, which moves an open palette's band
+            // with the tab strip and the decorations unchanged, so nothing
+            // above lays the window out (`refreshChrome` moves the list,
+            // not the terminal). The swap changes nothing else the band's
+            // height reads, so the replaced config's height is its height
+            // before the swap.
+            host.overlayBandChanged(host.overlayBandHeightWith(old.@"command-palette-hint"));
         }
         return old;
     }
@@ -5752,15 +5760,8 @@ pub const Host = struct {
         if (self.overlay_mode != .none) self.invalidateOverlayText();
         // A command palette without its hint line has that lane only while
         // a message is up, so the message coming or going moves the results
-        // list and the terminal by one row: paint the band at its new height
-        // as an overlay's open does, and when it shrinks, the terminal rows
-        // it gave up as `hideOverlay` does.
-        const next_band_height = self.overlayBandHeight();
-        if (next_band_height != band_height) {
-            runUiActionOrLog("overlay band layout failed", self.layout());
-            self.forceOverlayTransitionPaint();
-            if (next_band_height < band_height) self.forceVisibleSurfaceRepaintsNow();
-        }
+        // list and the terminal by one row.
+        self.overlayBandChanged(band_height);
         // A confirm prompt's feedback lane is an owner-drawn child rather
         // than chrome paint, so invalidating the paint text is not enough
         // to put a banner raised mid-prompt on screen. Push it into the
@@ -9217,16 +9218,32 @@ pub const Host = struct {
     /// The overlay band's height, scaled: none with no overlay open, else
     /// the query row and the line under it, which the command palette has
     /// only while it has something to say there (`overlay_view.feedbackRow`).
-    /// A message coming or going can change it, so `setBanner` lays the
-    /// window out again when it does.
+    /// A message coming or going can change it (`setBanner`), and so can a
+    /// palette theme, whose file may set `command-palette-hint`
+    /// (`swapRuntimeConfigFromPalette`); both lay the window out again when
+    /// it does (`overlayBandChanged`).
     pub fn overlayBandHeight(self: *const Host) i32 {
+        return self.overlayBandHeightWith(self.app.config.@"command-palette-hint");
+    }
+
+    /// `overlayBandHeight` with `palette_hint` for the app config's
+    /// `command-palette-hint`.
+    fn overlayBandHeightWith(self: *const Host, palette_hint: bool) i32 {
         if (self.overlay_mode == .none) return 0;
-        const feedback_row = overlay_view.feedbackRow(
-            self.overlay_mode,
-            self.app.config.@"command-palette-hint",
-            self.banner_text != null,
-        );
+        const feedback_row = overlay_view.feedbackRow(self.overlay_mode, palette_hint, self.banner_text != null);
         return self.scaled(if (feedback_row) host_overlay_height else host_overlay_query_height);
+    }
+
+    /// The overlay band was `before` high and may not be now: lay the window
+    /// out so the results list and the terminal follow it, paint the band
+    /// at its new height as an overlay's open does, and when it shrank, the
+    /// terminal rows it gave up as `hideOverlay` does.
+    fn overlayBandChanged(self: *Host, before: i32) void {
+        const after = self.overlayBandHeight();
+        if (after == before) return;
+        runUiActionOrLog("overlay band layout failed", self.layout());
+        self.forceOverlayTransitionPaint();
+        if (after < before) self.forceVisibleSurfaceRepaintsNow();
     }
 
     pub fn contentRectFromClient(self: *Host, rect: RECT) RECT {
@@ -12082,6 +12099,51 @@ test "win32 command-palette-hint = false takes the palette's hint line and its r
             try std.testing.expectEqualStrings("", try feedback(arena, host));
             try std.testing.expectEqual(band_top + query_row, host.palette_list_placement.rect.top);
             try std.testing.expectEqual(closed_top + query_row, pane.placement.rect.top);
+            host.hideOverlay();
+            try std.testing.expectEqual(closed_top, pane.placement.rect.top);
+        }
+    }.body);
+}
+
+test "win32 a palette theme preview whose theme sets command-palette-hint moves the terminal with the band, and its revert moves it back" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    try win32.runOnHiddenDesktop(struct {
+        fn body() !void {
+            var fixture: win32.WindowStartTestApp = .{};
+            try fixture.init();
+            defer fixture.deinit();
+            const app = &fixture.app;
+            try app.createWindow(default_title);
+            const pane = fixture.newest();
+            const host = pane.host.?;
+            const catalog = host.palette_catalog;
+            host.palette_catalog = null;
+            defer host.palette_catalog = catalog;
+
+            const band_top = host.contentBands(host.tabBarHeight(), 0, 0).overlay_top;
+            const closed_top = pane.placement.rect.top;
+            const both_rows = host.scaled(58);
+            const query_row = host.scaled(38);
+            try host.showOverlay(.command_palette, null);
+            try std.testing.expectEqual(closed_top + both_rows, pane.placement.rect.top);
+
+            // A theme file is a config file: one that sets the key changes
+            // it for as long as the preview runs, with the tab strip and
+            // the decorations as they were, so nothing else lays the
+            // window out.
+            var previewed = try app.config.clone(std.testing.allocator);
+            previewed.@"command-palette-hint" = false;
+            host.showPaletteThemePreview(previewed);
+            try std.testing.expect(!app.config.@"command-palette-hint");
+            try std.testing.expectEqual(band_top + query_row, host.palette_list_placement.rect.top);
+            try std.testing.expectEqual(closed_top + query_row, pane.placement.rect.top);
+
+            // The palette stays open when a preview is taken back without
+            // closing it (High Contrast, or a row that is no theme).
+            host.revertPaletteThemePreview();
+            try std.testing.expect(app.config.@"command-palette-hint");
+            try std.testing.expectEqual(band_top + both_rows, host.palette_list_placement.rect.top);
+            try std.testing.expectEqual(closed_top + both_rows, pane.placement.rect.top);
             host.hideOverlay();
             try std.testing.expectEqual(closed_top, pane.placement.rect.top);
         }
