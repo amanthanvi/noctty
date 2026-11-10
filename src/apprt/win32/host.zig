@@ -586,8 +586,6 @@ pub const PaneDividerDrag = struct {
     bounds: PaneDividers.Bounds,
 };
 
-/// A press on a divider, which a second one on the same divider within the
-/// system's double-click time and rectangle makes a double-click.
 /// A divider under the mouse, with the tab and tree it was read on.
 const PaneDividerHover = struct {
     layout: SplitTreeSurface.Split.Layout,
@@ -595,6 +593,8 @@ const PaneDividerHover = struct {
     generation: u64,
 };
 
+/// A press on a divider, which a second one on the same divider within the
+/// system's double-click time and rectangle makes a double-click.
 pub const PaneDividerPress = struct {
     tab_id: u32,
     /// The tree's generation: a pane that exits between the clicks can put

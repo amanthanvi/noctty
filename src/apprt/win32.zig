@@ -18969,12 +18969,10 @@ test "win32 pane divider drag takes no global hotkey while the mouse is held" {
 
     // A global hotkey (`new_split`, `resize_split`...) would change the
     // panes under the drag: it is dropped, like a key press.
-    const ctrl_shift_d = paneDividerHotkeyLParam('D');
     try std.testing.expect(host.beginPaneDividerDrag(pane_divider_test_content, .{ .x = 400, .y = 300 }, 1000));
-    try std.testing.expect(!app.takeGlobalHotkey(1, ctrl_shift_d, 1000));
+    try std.testing.expect(!app.takeGlobalHotkey(1));
     host.finishPaneDividerDrag(pane_divider_test_content);
-    // Another hotkey, pressed after the drag, runs.
-    try std.testing.expect(app.takeGlobalHotkey(2, paneDividerHotkeyLParam('E'), 1100));
+    try std.testing.expect(app.takeGlobalHotkey(1));
 }
 
 test "win32 pane divider cursor without a position trusts the hover only on its tree and off the panes" {
@@ -19030,66 +19028,6 @@ test "win32 pane divider cursor without a position trusts the hover only on its 
     try std.testing.expect(sys.ClientToScreen(window, &inside) != 0);
     _ = windowProc(pane, c.WM_NCHITTEST, 0, testPoint(inside.x, inside.y));
     try std.testing.expect(!host.handlePaneDividerMessage(c.WM_SETCURSOR, @intFromPtr(window), set_cursor));
-}
-
-/// A `WM_HOTKEY`'s lParam for Ctrl+Shift and `vk`.
-fn paneDividerHotkeyLParam(vk: u8) LPARAM {
-    return @intCast((@as(usize, vk) << 16) | c.MOD_CONTROL | c.MOD_SHIFT);
-}
-
-test "win32 pane divider keeps a hotkey it dropped until its key is up" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    var core_app: CoreApp = undefined;
-    var app: App = undefined;
-    var host: Host = undefined;
-    var surface_a: Surface = undefined;
-    var surface_b: Surface = undefined;
-    var session: TestSession = .{};
-    try session.init(.{
-        .core_app = &core_app,
-        .app = &app,
-        .hosts = &.{.{ .storage = &host, .register = true }},
-        .surfaces = &.{
-            .{ .storage = &surface_a, .host = &host, .register = true },
-            .{ .storage = &surface_b, .host = &host },
-        },
-        .tabs = &.{.{ .host = &host, .surface = &surface_a, .id = 1 }},
-    });
-    defer session.deinit();
-    try paneDividerTestSplit(&host, &surface_a, &surface_b, .right, 0.5);
-    // Hotkeys are registered without MOD_NOREPEAT, so one held repeats
-    // its WM_HOTKEY. CodeRabbit on #689: one pressed during a drag and held
-    // past the release went on to split or resize from its repeats, a
-    // press the user never saw act. Like a key the drag held, it is the
-    // drag's until its key is up.
-    const ctrl_shift_d = paneDividerHotkeyLParam('D');
-
-    // Released: a WM_KEYUP of its key reaches the loop.
-    try std.testing.expect(host.beginPaneDividerDrag(pane_divider_test_content, .{ .x = 400, .y = 300 }, 1000));
-    try std.testing.expect(!app.takeGlobalHotkey(1, ctrl_shift_d, 1000));
-    host.finishPaneDividerDrag(pane_divider_test_content);
-    try std.testing.expect(!app.takeGlobalHotkey(1, ctrl_shift_d, 1030));
-    try std.testing.expect(!app.takeGlobalHotkey(1, ctrl_shift_d, 1063));
-    try std.testing.expect(!app.paneDividerDragKey(c.WM_KEYUP, 'D', paneDividerKeyLParam(0x20, false, .release)));
-    try std.testing.expect(app.takeGlobalHotkey(1, ctrl_shift_d, 1100));
-
-    // Released while another app had the keyboard: back in noctty, the
-    // reconcile finds its key up.
-    try std.testing.expect(host.beginPaneDividerDrag(pane_divider_test_content, .{ .x = 400, .y = 300 }, 5000));
-    try std.testing.expect(!app.takeGlobalHotkey(1, ctrl_shift_d, 5000));
-    host.finishPaneDividerDrag(pane_divider_test_content);
-    app.reconcilePaneDividerHeldKeys(&paneDividerTestKeyDown);
-    try std.testing.expect(app.takeGlobalHotkey(1, ctrl_shift_d, 5030));
-
-    // Its key-up never seen: no WM_HOTKEY for longer than a held key's
-    // repeats leave between two (1 s delay, 400 ms period at the slowest)
-    // means a new press.
-    try std.testing.expect(host.beginPaneDividerDrag(pane_divider_test_content, .{ .x = 400, .y = 300 }, 9000));
-    try std.testing.expect(!app.takeGlobalHotkey(1, ctrl_shift_d, 9000));
-    host.finishPaneDividerDrag(pane_divider_test_content);
-    try std.testing.expect(!app.takeGlobalHotkey(1, ctrl_shift_d, 9000 + 1400));
-    try std.testing.expect(app.takeGlobalHotkey(1, ctrl_shift_d, 9000 + 1400 + 1401));
 }
 
 test "win32 pane divider drag that moved and then lost its panes still clears the history" {

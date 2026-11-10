@@ -965,11 +965,6 @@ pub const App = struct {
     /// (`reconcilePaneDividerHeldKeys`): VK_LSHIFT or VK_RSHIFT rather than
     /// VK_SHIFT, and so on.
     pane_divider_held_vks: [768]u8 = @splat(0),
-    /// Global hotkeys a split divider drag dropped, by virtual key, whose
-    /// repeats are dropped too until the key is seen up (`takeGlobalHotkey`).
-    pane_divider_held_hotkeys: std.StaticBitSet(256) = .initEmpty(),
-    /// For each held hotkey, the time of its last `WM_HOTKEY`.
-    pane_divider_hotkey_ms: [256]u32 = @splat(0),
     quick_terminal_keyboard_diagnostic_logged: bool = false,
     update_notice: ?UpdateNotice = null,
     /// The host whose banner button started the running update action, so
@@ -1858,7 +1853,7 @@ pub const App = struct {
     /// with its window (`msg.hwnd`), as an IME's key lookup needs.
     pub fn routeLoopMessage(self: *App, msg: *MSG) LoopRoute {
         if (msg.message == c.WM_HOTKEY) {
-            _ = self.takeGlobalHotkey(@intCast(msg.wParam), msg.lParam, msg.time);
+            _ = self.takeGlobalHotkey(@intCast(msg.wParam));
             return .taken;
         }
 
@@ -1938,8 +1933,6 @@ pub const App = struct {
                 return true;
             },
             c.WM_KEYUP, c.WM_SYSKEYUP => {
-                // A hotkey the drag dropped is up: its next press runs.
-                self.pane_divider_held_hotkeys.unset(@as(u8, @truncate(wParam)));
                 if (!self.pane_divider_held_keys.isSet(key)) return false;
                 self.pane_divider_held_keys.unset(key);
                 return true;
@@ -1962,10 +1955,6 @@ pub const App = struct {
         var it = self.pane_divider_held_keys.iterator(.{});
         while (it.next()) |key| {
             if (!keyDown(self.pane_divider_held_vks[key])) self.pane_divider_held_keys.unset(key);
-        }
-        var hotkeys = self.pane_divider_held_hotkeys.iterator(.{});
-        while (hotkeys.next()) |vk| {
-            if (!keyDown(@intCast(vk))) self.pane_divider_held_hotkeys.unset(vk);
         }
     }
 
@@ -3215,34 +3204,12 @@ pub const App = struct {
     /// A `WM_HOTKEY` from the loop. While a split divider drag holds the
     /// mouse it is dropped, as a key press is (`paneDividerDragKey`): a
     /// global `new_split` or `resize_split` would change the panes under the
-    /// drag. Hotkeys are registered without `MOD_NOREPEAT`, so a held one
-    /// repeats; like a key the drag held, a dropped one stays the drag's
-    /// until its key is up (`pane_divider_held_hotkeys`), so its repeats
-    /// after the drag do not split or resize from a press that never acted.
-    /// Returns whether the hotkey ran.
-    pub fn takeGlobalHotkey(self: *App, id: i32, lParam: LPARAM, time_ms: u32) bool {
-        const vk: u8 = @truncate(@as(usize, @bitCast(lParam)) >> 16);
-        if (self.paneDividerDragHost() != null) {
-            self.pane_divider_held_hotkeys.set(vk);
-            self.pane_divider_hotkey_ms[vk] = time_ms;
-            return false;
-        }
-        if (self.pane_divider_held_hotkeys.isSet(vk)) {
-            if (time_ms -% self.pane_divider_hotkey_ms[vk] <= pane_divider_hotkey_repeat_ms) {
-                self.pane_divider_hotkey_ms[vk] = time_ms;
-                return false;
-            }
-            self.pane_divider_held_hotkeys.unset(vk);
-        }
+    /// drag. Returns whether the hotkey ran.
+    pub fn takeGlobalHotkey(self: *App, id: i32) bool {
+        if (self.paneDividerDragHost() != null) return false;
         self.handleGlobalHotkey(id);
         return true;
     }
-
-    /// The longest a held key leaves between two of its `WM_HOTKEY`s: the
-    /// longest keyboard delay (1 s) and the slowest repeat (about 400 ms).
-    /// A dropped hotkey whose key-up noctty never saw (released in another
-    /// app) runs again on a press after a longer gap.
-    const pane_divider_hotkey_repeat_ms = 1400;
 
     fn handleGlobalHotkey(self: *App, id: i32) void {
         for (self.global_hotkeys.items) |hotkey| {
