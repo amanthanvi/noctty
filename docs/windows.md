@@ -2359,7 +2359,8 @@ update state is shared by every copy of the user's. Declining the elevation
 prompt does not quit noctty or record anything: the banner just says the
 installer could not be launched.
 
-For portable installs, **Apply** re-verifies the staged ZIP payload, records the
+For portable installs, the notice's button is also **Install**, and it asks
+first in the same way. It then re-verifies the staged ZIP payload, records the
 pending update, and exits noctty. On the next launch, noctty backs up the files
 being replaced, swaps in the staged payload, and starts the new build. The new
 build confirms the update only when its version matches the staged target;

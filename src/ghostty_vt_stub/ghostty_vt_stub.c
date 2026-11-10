@@ -16,7 +16,10 @@
  * (src/build/GhosttyVtStub.zig), so the image is this function and its
  * version resource. A Zig DLL brings Zig's start code (_DllMainCRTStartup) as
  * its entry and, unless built with -fno-dll-export-fns, exports it and the
- * TLS symbols.
+ * TLS symbols. With -fsingle-threaded and -fno-dll-export-fns a Zig DLL is an
+ * equivalent image, but its entry is std/start.zig's _DllMainCRTStartup; in C,
+ * DllMain itself is the entry (docs/agents/log/build-release-ci.md,
+ * GHOSTTY-VT-STUB trap 1).
  */
 
 typedef int BOOL;

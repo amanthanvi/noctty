@@ -148,7 +148,7 @@ The shipped section list and save semantics are tracked in the
 
 ## Verification
 
-Golden captures cover:
+The target is golden captures that cover:
 
 - Windows 10 and 11
 - light, dark, system, and High Contrast modes
@@ -157,6 +157,9 @@ Golden captures cover:
 - active and inactive windows
 - all component states, overflow, nested splits, palette, settings, drag
   previews, and recovery surfaces
+
+No golden-capture suite exists yet. What runs today, and on which Windows
+versions, is in [status.md](docs/status.md#supported-platform).
 
 Reject clipping, overlap, stale pixels, ambiguous focus, hidden state, or
 terminal viewport loss. Pair visual checks with:

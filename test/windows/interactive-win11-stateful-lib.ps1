@@ -88,10 +88,57 @@ function Set-StatefulEditText([IntPtr] $HostHwnd, [IntPtr] $Hwnd, [string] $Text
     [void](Send-StatefulMessage $HostHwnd 0x0111 ([UIntPtr]$command) $Hwnd $Deadline $Process "WM_COMMAND EN_CHANGE id=$controlId")
 }
 
+# Whether Show-StatefulHost has to take the foreground back: a window of
+# another named process, not noctty, holds it. When a harness closes its
+# windows, Windows activates the next window down, often another
+# application's; this process then matches none of the conditions under which
+# SetForegroundWindow may move the foreground until the foreground lock
+# time-out expires, and a harness's own injected keys are recent input. The
+# window under test can stay under that application's window
+# (EVIDENCE-FOREGROUND-01 in docs/agents/log/test-harnesses.md). Nothing in the
+# foreground, a noctty window there, or a process whose name cannot be read
+# keeps the plain calls, so no Alt tap is sent while noctty might hold the
+# foreground. Pure, so the contracts can table-test it.
+function Test-StatefulForeignForeground([uint32] $HostProcessId, [string] $HostProcessName, [uint32] $ForegroundProcessId, [string] $ForegroundProcessName) {
+    if ($ForegroundProcessId -eq 0 -or $ForegroundProcessId -eq $HostProcessId) { return $false }
+    if ([string]::IsNullOrEmpty($HostProcessName) -or [string]::IsNullOrEmpty($ForegroundProcessName)) { return $false }
+    return -not [string]::Equals($ForegroundProcessName, $HostProcessName, [StringComparison]::OrdinalIgnoreCase)
+}
+
+# The foreground window's process id, 0 when no window holds the foreground.
+function Get-StatefulForegroundProcessId {
+    $processId = [uint32]0
+    [void][InteractiveWin11WindowNative]::GetWindowThreadProcessId([InteractiveWin11WindowNative]::GetForegroundWindow(), [ref]$processId)
+    return $processId
+}
+
+# A process's name, $null for id 0 or a process whose name cannot be read.
+function Get-StatefulProcessName([uint32] $ProcessId) {
+    if ($ProcessId -eq 0) { return $null }
+    try { return (Get-Process -Id $ProcessId -ErrorAction Stop).ProcessName } catch { return $null }
+}
+
 function Show-StatefulHost([IntPtr] $HostHwnd) {
     [void][InteractiveWin11WindowNative]::ShowWindow($HostHwnd, 9)
     [void][InteractiveWin11WindowNative]::SetWindowPos($HostHwnd, [IntPtr](-1), 0, 0, 0, 0, 0x0043)
     [void][InteractiveWin11WindowNative]::SetForegroundWindow($HostHwnd)
+    $hostProcessId = [uint32]0
+    [void][InteractiveWin11WindowNative]::GetWindowThreadProcessId($HostHwnd, [ref]$hostProcessId)
+    $foregroundProcessId = Get-StatefulForegroundProcessId
+    $hostProcessName = Get-StatefulProcessName $hostProcessId
+    $foregroundProcessName = Get-StatefulProcessName $foregroundProcessId
+    if (Test-StatefulForeignForeground $hostProcessId $hostProcessName $foregroundProcessId $foregroundProcessName) {
+        # Reading the names takes a moment: send nothing if the foreground has
+        # moved to another process since. ForceForeground sends its Alt tap
+        # before it reads the foreground again, so a change in the few
+        # milliseconds between this check and the tap is not covered.
+        if ((Get-StatefulForegroundProcessId) -eq $foregroundProcessId) {
+            $taken = [InteractiveWin11WindowNative]::ForceForeground($HostHwnd, $true, $true)
+            [void][InteractiveWin11WindowNative]::SetWindowPos($HostHwnd, [IntPtr](-1), 0, 0, 0, 0, 0x0043)
+            $outcome = if ($taken) { 'took it back' } else { 'did not take it back' }
+            Write-Host "Show-StatefulHost: process '$foregroundProcessName' held the foreground; ForceForeground $outcome."
+        }
+    }
     Start-Sleep -Milliseconds $script:STATEFUL_HOST_SETTLE_MS
 }
 

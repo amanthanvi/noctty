@@ -6330,8 +6330,9 @@ pub const App = struct {
 
     /// Settings ends every preview at once (a close, Discard): one end, the
     /// theme before the opacity, so each window shows its opacity once, at
-    /// the saved value (`endSettingsPreview`).
-    fn settingsEndPreviewsThunk(ctx: *anyopaque) void {
+    /// the saved value (`endSettingsPreview`). Public so the real-window test
+    /// fixtures (`test_support.zig`) hand Settings this one, not a copy.
+    pub fn settingsEndPreviewsThunk(ctx: *anyopaque) void {
         const app: *App = @ptrCast(@alignCast(ctx));
         app.endSettingsPreview();
     }
@@ -6470,10 +6471,19 @@ pub const App = struct {
         // `app.config`: a palette preview the update ended stays on screen,
         // with no preview left for its palette to revert. Then every
         // palette still closes, and the theme and every window show
-        // `app.config` as it is, once. None of it needs another clone or an
-        // allocation to succeed: a palette's mode, catalog and preview are
-        // reset first, and its layout and text, and a theme resource
-        // rebuild, are best effort (each logs a failure and goes on).
+        // `app.config` as it is, once (or, while a Settings preview is live,
+        // its previewed theme and opacity: `shownConfig`,
+        // `shownBackgroundOpacity`). None of it needs another config
+        // clone. A palette's mode, catalog and preview are reset without
+        // allocating; what may allocate (its layout and text, a theme
+        // resource rebuild) is best effort and goes on without it (not
+        // every such failure is logged: a configured title font that cannot
+        // be allocated falls back silently). Nothing shows the
+        // whole of it working with memory exhausted (the only allocation its
+        // test fails is the arm's clone). The panes' restore above goes
+        // through core, in each pane's light/dark state; this shows
+        // `app.config` in the light/dark state it was installed in, which a
+        // light/dark reload may already have moved past.
         if (!self.app_wide_windows_applied) {
             for (self.registry.hosts.items) |host| {
                 if (host.overlay_mode == .command_palette) host.hideOverlay();
