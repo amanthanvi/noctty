@@ -829,6 +829,18 @@ function Measure-HeldRelease([string]$RendererName,[ValidateSet('source','destin
         # A second tab (cmd).
         $p2=New-Pane $case $p1
         [void](Wait-Marker $p2)
+        # `exit` is typed as virtual keys: the layout the app reads them in
+        # must type e, x, i and t, as Measure-Search checks its X. Another
+        # layout skips the variant, and a run that asked for this case alone
+        # fails then, never passes on a skip (CodeRabbit r4520679642).
+        if($Variant -eq 'pane-exit') {
+            $letters=-join (@(0x45,0x58,0x49,0x54) | ForEach-Object { [Tt]::Typed($p2,$_) })
+            if($letters -cne 'exit') {
+                if($Cases -eq 'held-release') { Check "${label}: the keyboard layout types exit from its virtual keys" $false 'exit' $letters }
+                else { $script:skips.Add("${label}: the keyboard layout does not type exit from its virtual keys") }
+                return
+            }
+        }
         # The held tab: the program's own for `destination`, else the second.
         $held=if($Variant -eq 'destination') { 0 } else { 1 }
         [void](Wait-Until { $script:heldButton=[Tt]::Child($h1,$TabButton+$held); $script:heldButton -ne [IntPtr]::Zero } 5)

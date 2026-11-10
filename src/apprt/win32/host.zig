@@ -3955,21 +3955,38 @@ pub const Host = struct {
     /// Where the window of a tab torn off at `screen` goes: the pointer, and
     /// where it held the tab (`tab_drag_grab`) as an offset from the new
     /// window's top-left (`tab_drag.grabOffset`), on the monitor under it.
+    /// Where a restored window of this one's kind puts its client area, from
+    /// its window rect's top-left, at this window's DPI: the frame a
+    /// torn-off tab's window opens with, whatever state this one is in now.
+    /// The integrated caption and a 0 px caption row put the client area's
+    /// top at the window's top (`handleNcCalcSize` keeps only the stock
+    /// side frame); the stock caption keeps the whole stock frame.
+    pub fn restoredClientOffset(self: *const Host, hwnd: HWND) POINT {
+        const keeps_frame = window_start.undecoratedKeepsFrame(self.app.os_build, self.quick_terminal);
+        const framed = self.top_level.decorations_visible or keeps_frame;
+        const ex_style: u32 = @truncate(@as(usize, @bitCast(sys.GetWindowLongPtrW(hwnd, c.GWL_EXSTYLE))));
+        var rect: RECT = .{ .left = 0, .top = 0, .right = 0, .bottom = 0 };
+        _ = sys.AdjustWindowRectExForDpi(&rect, window_start.hostStyle(framed, false), 0, ex_style, self.current_dpi);
+        const client_top = self.usingIntegratedTitlebar() or (keeps_frame and !self.top_level.decorations_visible);
+        return .{ .x = -rect.left, .y = if (client_top) 0 else -rect.top };
+    }
+
     pub fn tearOffDrop(self: *Host, screen: POINT, button: ?HWND) ?window_start.Drop {
         const hwnd = self.hwnd orelse return null;
-        var window_rect: RECT = undefined;
-        if (sys.GetWindowRect(hwnd, &window_rect) == 0) return null;
-        var origin: POINT = .{ .x = 0, .y = 0 };
-        if (sys.ClientToScreen(hwnd, &origin) == 0) return null;
-        const placement = chrome_layout.tabButtonPlacement(self.tabBarHeight(), self.current_dpi, self.tabsFlushWithTop());
+        // The new window opens restored, whatever this one is now (maximized,
+        // with its extra top margin and its tabs flush with the top;
+        // fullscreen, with no caption): the pointer goes where the restored
+        // window's frame and tab row put the tab (Greptile r4520680639).
+        const frame = self.restoredClientOffset(hwnd);
+        const placement = chrome_layout.tabButtonPlacement(self.tabBarHeight(), self.current_dpi, false);
         var button_width: i32 = self.scaled(host_tab_max_button_width);
         if (button) |held| {
             var rect: RECT = undefined;
             if (sys.GetClientRect(held, &rect) != 0) button_width = rect.right - rect.left;
         }
         const grab = tab_drag.grabOffset(
-            origin.x - window_rect.left,
-            origin.y - window_rect.top,
+            frame.x,
+            frame.y,
             placement.top,
             self.tab_drag_grab.x,
             self.tab_drag_grab.y,

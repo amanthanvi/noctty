@@ -4720,6 +4720,9 @@ pub const App = struct {
             .move_tab_to_new_window => {
                 // From the message loop: the move reparents the terminal
                 // whose key binding asked for it, and shows a new window.
+                // The result is whether the move was accepted (queued), not
+                // whether it later succeeded: a move that fails then says
+                // so in a banner on its window (`runTabMove`).
                 const surface = self.registry.findSurfaceForTarget(target) orelse return false;
                 const found = Host.findTabForSurface(surface) orelse return false;
                 if (found.host.quick_terminal or found.host.tabs.items.len < 2) return false;
@@ -8279,8 +8282,13 @@ pub const App = struct {
                 .index = over.index,
             } },
         };
+        const host_id = host.id;
         _ = self.moveTabToWindow(host, index, dest) catch |err| {
-            log.err("tab move failed err={}", .{err});
+            // What asked for the move (a drop, a key binding, the action)
+            // returned long ago: the window says so, as other window actions
+            // do when they fail (CodeRabbit r4520679604). The tab stays.
+            log.warn("tab move failed err={}", .{err});
+            if (self.registry.findHostById(host_id)) |source| source.setBanner(.err, "The tab could not be moved.") catch {};
         };
     }
 
@@ -16943,6 +16951,93 @@ test "win32 a tab move a transfer in undo history names keeps it gone if its sec
             try std.testing.expectEqual(@as(usize, 2), app.registry.hosts.items.len);
         }
     }.body);
+}
+
+test "win32 a queued tab move that fails says so in a banner on its window (CodeRabbit r4520679604)" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    try runOnHiddenDesktop(struct {
+        fn body() !void {
+            var fixture: win32.WindowStartTestApp = .{};
+            try fixture.init();
+            defer fixture.deinit();
+            const app = &fixture.app;
+            app.shell_runtime_initialized = true;
+            const setup: TabMoveFixture = .{ .fixture = &fixture };
+            const host = try setup.window(3, false);
+            // A transfer in undo history names the front tab, so the move
+            // prepares twice, and the second prepare runs out of memory.
+            host.tab_drop_operation = .split_right;
+            host.tab_drop_target_surface = host.tabs.items[2].focusedSurface().?;
+            try std.testing.expect(host.commitTabDropSplit(0));
+            const front = host.tabs.items[host.active_tab].id;
+            TestShellStepFailure.step_wanted = .retry_prepare;
+            TestShellStepFailure.refocus = null;
+            App.test_tab_move_shell_step = &TestShellStepFailure.hook;
+            defer App.test_tab_move_shell_step = null;
+            // The request is accepted; the move fails when the pump runs it.
+            try std.testing.expect(app.requestTabMove(host, front, .{ .new_window = null }));
+            TabMoveFixture.runPosted(host);
+            TestShellStepFailure.restore(app);
+            App.test_tab_move_shell_step = null;
+            try std.testing.expect(host.findTabIndexById(front) != null);
+            try std.testing.expectEqual(@as(usize, 1), app.registry.hosts.items.len);
+            try std.testing.expectEqual(HostBannerKind.err, host.banner_kind);
+            try std.testing.expectEqualStrings("The tab could not be moved.", host.banner_text.?);
+        }
+    }.body);
+}
+
+/// The grab offset a drop of tab 1 at a fixed point would get now.
+fn testTearOffGrab(host: *Host) !POINT {
+    const button = host.tabs.items[1].button_hwnd orelse return error.TestNoTabButton;
+    host.tab_drag_grab = .{ .x = 20, .y = 10 };
+    const drop = host.tearOffDrop(.{ .x = 600, .y = 400 }, button) orelse return error.TestNoDrop;
+    return drop.grab;
+}
+
+test "win32 a torn-off tab's grab offset is the restored window's, from a maximized or fullscreen source (Greptile r4520680639)" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    for ([_]bool{ true, false }) |integrated| {
+        const Body = struct {
+            var titlebar: bool = undefined;
+            fn body() !void {
+                var fixture: win32.WindowStartTestApp = .{};
+                try fixture.init();
+                defer fixture.deinit();
+                const app = &fixture.app;
+                app.shell_runtime_initialized = true;
+                app.use_integrated_titlebar = titlebar;
+                const setup: TabMoveFixture = .{ .fixture = &fixture };
+                const host = try setup.window(2, false);
+                const hwnd = host.hwnd.?;
+                try host.layout();
+                // Restored: the offset is where this window's own frame and
+                // tab row put the tab.
+                const restored = try testTearOffGrab(host);
+                var window_rect: RECT = undefined;
+                _ = sys.GetWindowRect(hwnd, &window_rect);
+                var origin: POINT = .{ .x = 0, .y = 0 };
+                _ = sys.ClientToScreen(hwnd, &origin);
+                const placement = @import("chrome_layout.zig").tabButtonPlacement(host.tabBarHeight(), host.current_dpi, host.tabsFlushWithTop());
+                try std.testing.expectEqual(origin.x - window_rect.left + 20, restored.x);
+                try std.testing.expectEqual(origin.y - window_rect.top + placement.top + 10, restored.y);
+                // Maximized, and fullscreen: the same, since the new window
+                // opens restored.
+                _ = sys.ShowWindow(hwnd, c.SW_MAXIMIZE);
+                try host.layout();
+                try std.testing.expectEqual(restored, try testTearOffGrab(host));
+                _ = sys.ShowWindow(hwnd, c.SW_RESTORE);
+                const pane = host.activeSurface().?;
+                try std.testing.expect(try window_state.perform(host, pane, .toggle_fullscreen, .native));
+                try host.layout();
+                const fullscreen = try testTearOffGrab(host);
+                try std.testing.expect(try window_state.perform(host, pane, .toggle_fullscreen, .native));
+                try std.testing.expectEqual(restored, fullscreen);
+            }
+        };
+        Body.titlebar = integrated;
+        try runOnHiddenDesktop(Body.body);
+    }
 }
 
 /// What a nested loop does with the tab-move wakes it takes: dispatches them
