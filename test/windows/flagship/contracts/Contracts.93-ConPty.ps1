@@ -173,8 +173,11 @@ Assert-WorkflowContract `
 # Read through PowerShell's parser, not as text: a line comment, a block
 # comment or a here-string around a required call leaves no command there, so
 # it fails the contract as a deleted call does, and so does a signing filter
-# without ".dll"; the controls below prove each. (Deliberately dead code, such
-# as `if ($false)`, is for review to catch.)
+# without ".dll"; the controls below prove each. A control that disables a
+# required call disables its whole line, and a control whose text no longer
+# parses proves nothing, so every control must still parse and must fail the
+# contract. (Deliberately dead code, such as `if ($false)`, is for review to
+# catch.)
 function Get-PlaceholderStagingProblems {
     param([Parameter(Mandatory)] [string] $ScriptText)
 
@@ -249,15 +252,40 @@ if ($stagingProblems.Count -gt 0) {
 }
 $runtimeLoopStart = $windowsPackagerText.IndexOf('foreach ($runtimeFile in $runtimeFiles) {')
 if ($runtimeLoopStart -lt 0) { throw "Contract control: the runtime staging loop is missing ($windowsPackager)" }
+function Assert-PlaceholderControlFails {
+    param([Parameter(Mandatory)] [string] $ScriptText, [Parameter(Mandatory)] [string] $What)
+
+    # Checked with the parser itself, not by the wording of the contract's
+    # own parse-error problem, so rewording that message can't turn this off.
+    $controlTokens = $null
+    $controlParseErrors = $null
+    [void][System.Management.Automation.Language.Parser]::ParseInput($ScriptText, [ref]$controlTokens, [ref]$controlParseErrors)
+    if (@($controlParseErrors).Count -gt 0) {
+        throw "Contract control is invalid: with $What the packager no longer parses, so the contract would fail for that reason alone ($($controlParseErrors[0].Message))"
+    }
+    $controlProblems = Get-PlaceholderStagingProblems -ScriptText $ScriptText
+    if ($controlProblems.Count -eq 0) {
+        throw "Contract control failed: the placeholder staging contract still passes with $What"
+    }
+}
+
 foreach ($requiredCall in @(
     '"ghostty-vt-stub\ghostty-vt.dll",',
     'Invoke-SignFile -SigningConfig $signingConfig -PathToSign $destinationPath',
-    'Assert-ValidSignature -PathToCheck $destinationPath',
+    'Assert-ValidSignature -PathToCheck $destinationPath -SigningConfig $signingConfig',
     'Assert-GhosttyVtStub -Path (Join-Path $portableRoot "ghostty-vt.dll")'
 )) {
     $searchFrom = if ($requiredCall.StartsWith('"')) { 0 } else { $runtimeLoopStart }
     $callIndex = $windowsPackagerText.IndexOf($requiredCall, $searchFrom)
     if ($callIndex -lt 0) { throw "Contract control: '$requiredCall' is missing from $windowsPackager" }
+    if ($windowsPackagerText.IndexOf($requiredCall, $callIndex + $requiredCall.Length) -ge 0) { throw "Contract control: '$requiredCall' occurs more than once in $windowsPackager; anchor each control on a line that occurs once" }
+    # A control must disable the whole line: an anchor that stops short leaves
+    # the rest of the line behind the comment or here-string.
+    $lineStart = if ($callIndex -eq 0) { 0 } else { $windowsPackagerText.LastIndexOf("`n", $callIndex - 1) + 1 }
+    $lineEnd = $windowsPackagerText.IndexOf("`n", $callIndex)
+    if ($lineEnd -lt 0) { $lineEnd = $windowsPackagerText.Length }
+    $anchorLine = $windowsPackagerText.Substring($lineStart, $lineEnd - $lineStart).Trim()
+    if ($anchorLine -ne $requiredCall) { throw "Contract control: '$requiredCall' is not a whole line in $windowsPackager (the line is '$anchorLine')" }
     $before = $windowsPackagerText.Substring(0, $callIndex)
     $after = $windowsPackagerText.Substring($callIndex + $requiredCall.Length)
     foreach ($disabled in @(
@@ -267,16 +295,12 @@ foreach ($requiredCall in @(
         @{ How = 'inside a here-string'; Text = $before + "@'`n" + $requiredCall + "`n'@" + $after },
         @{ How = 'deleted'; Text = $before + $after }
     )) {
-        if ((Get-PlaceholderStagingProblems -ScriptText $disabled.Text).Count -eq 0) {
-            throw "Contract control failed: the placeholder staging contract still passes with '$requiredCall' $($disabled.How)"
-        }
+        Assert-PlaceholderControlFails -ScriptText $disabled.Text -What "'$requiredCall' $($disabled.How)"
     }
 }
 $signFilter = '@(".com", ".exe", ".dll") -contains'
 if ($windowsPackagerText.IndexOf($signFilter, $runtimeLoopStart) -lt 0) { throw "Contract control: the staging loop's signing filter '$signFilter' is missing from $windowsPackager" }
-if ((Get-PlaceholderStagingProblems -ScriptText $windowsPackagerText.Replace($signFilter, '@(".com", ".exe") -contains')).Count -eq 0) {
-    throw 'Contract control failed: the placeholder staging contract still passes with ".dll" dropped from the signing filter'
-}
+Assert-PlaceholderControlFails -ScriptText $windowsPackagerText.Replace($signFilter, '@(".com", ".exe") -contains') -What '".dll" dropped from the signing filter'
 foreach ($payloadConsumer in @(
     $releaseArtifactVerifier,
     $publishedReleaseVerifierScript,
