@@ -5793,10 +5793,11 @@ pub fn settingsOnClosedThunk(ctx: *anyopaque) void {
     if (restored) |surface| app.activateSurface(surface);
     // Saved or discarded from the prompt a quit raised: carry on quitting.
     if (app.settings_window.takeQuitAfterClose()) return app.requestQuit(restored);
-    // Mirrors the kick after the last terminal window closes; the
-    // quit timer observes `hasLiveUiWindows()` so this is a no-op
-    // when any terminal HWND is still alive.
-    if (app.running and !app.hasLiveUiWindows()) app.startQuitTimer();
+    // Decided as after the last terminal window closes (a no-op while any
+    // terminal HWND is still alive): the quit timer, or in embedding mode
+    // the handoff server's idle exit, which an open Settings window held
+    // off so its draft was not lost.
+    app.afterLastWindow();
 }
 
 pub fn settingsDeferUiaDisconnectThunk(
@@ -20036,6 +20037,207 @@ test "win32 close_tab structural undo restores and redoes a detached tab" {
     try std.testing.expectEqual(@as(usize, 1), host.tabs.items.len);
     try std.testing.expectEqual(@as(usize, 0), host.active_tab);
     try std.testing.expect(close_tab.tab != null);
+}
+
+test "win32 a pane detached for undo does not receive app-wide actions" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var core_app: CoreApp = undefined;
+    var app: App = undefined;
+    var host: Host = undefined;
+    var surface_a: Surface = undefined;
+    var surface_b: Surface = undefined;
+    var session: TestSession = .{};
+    try session.init(.{
+        .core_app = &core_app,
+        .app = &app,
+        .hosts = &.{.{ .storage = &host, .active_tab = 1 }},
+        .surfaces = &.{
+            .{ .storage = &surface_a, .host = &host },
+            .{ .storage = &surface_b, .host = &host },
+        },
+        .tabs = &.{
+            .{ .host = &host, .surface = &surface_a, .id = 1 },
+            .{ .host = &host, .surface = &surface_b, .id = 2 },
+        },
+    });
+    defer session.deinit();
+
+    try std.testing.expect(surface_a.receivesAppWideActions());
+    try std.testing.expect(surface_b.receivesAppWideActions());
+
+    // `close_tab:this` keeps the tab's panes, hidden, for undo.
+    var entry = host.detachTabForUndo(1).?;
+    defer entry.dispose(&host, .host_destroy) catch {}; // Best-effort test teardown.
+    try std.testing.expect(surface_a.receivesAppWideActions());
+    try std.testing.expect(!surface_b.receivesAppWideActions());
+
+    // Back in a live tab, it does again.
+    try std.testing.expect(try host.restoreClosedTabEntry(&entry.payload.close_tab));
+    try std.testing.expect(surface_b.receivesAppWideActions());
+}
+
+fn testLastWindowQuitAtChainEnd(embedding: bool, reopens: bool) !void {
+    var core_app: CoreApp = undefined;
+    var app: App = undefined;
+    var host: Host = undefined;
+    var surface: Surface = undefined;
+    var session: TestSession = .{};
+    try session.init(.{
+        .core_app = &core_app,
+        .app = &app,
+        .hosts = &.{.{ .storage = &host }},
+        .surfaces = &.{.{ .storage = &surface, .host = &host }},
+        .tabs = &.{.{ .host = &host, .surface = &surface, .id = 1 }},
+    });
+    defer session.deinit();
+    // No window is registered, so this is the last one gone; with no
+    // delay it quits at once (`running` goes false; under test no WM_QUIT
+    // is posted). Embedding mode with no handoff server is an idle server.
+    try std.testing.expect(!app.hasLiveUiWindows());
+    // Quitting is on for the plain mode. Embedding mode's exit asks only
+    // the handoff server, so it is off there: a release that went through
+    // `startQuitTimer` (as round 3's did) would then keep the process.
+    app.config.@"quit-after-last-window-closed" = !embedding;
+    app.config.@"quit-after-last-window-closed-delay" = null;
+    app.embedding_mode = embedding;
+    app.running = true;
+    defer app.running = false;
+
+    app.holdLastWindowQuit();
+    app.afterLastWindow(); // `close_window` took the last window
+    try std.testing.expect(app.running);
+    try std.testing.expect(app.last_window_quit_pending);
+
+    // `new_window` later in the chain: a window is registered again.
+    if (reopens) try app.registry.windows.append(app.core_app.alloc, &surface);
+    defer if (reopens) {
+        _ = app.registry.windows.pop();
+    };
+    app.releaseLastWindowQuit();
+    try std.testing.expect(!app.last_window_quit_pending);
+    try std.testing.expectEqual(@as(u32, 0), app.last_window_quit_holds);
+    try std.testing.expectEqual(reopens, app.running);
+}
+
+test "win32 a held last-window quit keeps a process whose chain reopened a window" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    try testLastWindowQuitAtChainEnd(false, true);
+}
+
+test "win32 a held last-window quit quits a process whose chain left no window" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    try testLastWindowQuitAtChainEnd(false, false);
+}
+
+test "win32 a held embedding-mode exit keeps a server whose chain reopened a window" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    try testLastWindowQuitAtChainEnd(true, true);
+}
+
+test "win32 a held embedding-mode exit asks an idle server again and exits" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    try testLastWindowQuitAtChainEnd(true, false);
+}
+
+test "win32 the core close token sees a pane retained for undo out of its tab" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var core_app: CoreApp = undefined;
+    var app: App = undefined;
+    var host: Host = undefined;
+    var surface_a: Surface = undefined;
+    var surface_b: Surface = undefined;
+    var unregistered: Surface = undefined;
+    var session: TestSession = .{};
+    try session.init(.{
+        .core_app = &core_app,
+        .app = &app,
+        .hosts = &.{.{ .storage = &host, .active_tab = 1 }},
+        .surfaces = &.{
+            .{ .storage = &surface_a, .host = &host },
+            .{ .storage = &surface_b, .host = &host },
+            .{ .storage = &unregistered, .host = &host },
+        },
+        .tabs = &.{
+            .{ .host = &host, .surface = &surface_a, .id = 1 },
+            .{ .host = &host, .surface = &surface_b, .id = 2 },
+        },
+    });
+    defer session.deinit();
+
+    // The production token (`CoreSurface.closeToken`) asks the core App's
+    // surface list and then the runtime's live-tab check, so the panes are
+    // registered with the core App as real ones are, and their cores name
+    // the App, themselves and an id. The fixture cores are inert otherwise.
+    const ids = [_]u64{ 0x1111, 0x2222, 0x3333 };
+    for ([_]*Surface{ &surface_a, &surface_b, &unregistered }, ids) |surface, id| {
+        surface.core_surface.app = &core_app;
+        surface.core_surface.rt_surface = surface;
+        surface.core_surface.id = id;
+    }
+    try core_app.surfaces.appendSlice(core_app.alloc, &.{ &surface_a, &surface_b });
+    // Before `session.deinit`, whose core App teardown would deinit them.
+    defer core_app.surfaces.clearRetainingCapacity();
+
+    try std.testing.expect(surface_a.core_surface.closeToken().attached());
+    try std.testing.expect(surface_b.core_surface.closeToken().attached());
+    // Not one of the App's surfaces: neither there nor attached.
+    try std.testing.expect(!unregistered.core_surface.closeToken().survived());
+    try std.testing.expect(!unregistered.core_surface.closeToken().attached());
+
+    // `close_tab:this` keeps the tab's pane registered, hidden, for undo:
+    // still one of the App's surfaces, but in no live tab.
+    var entry = host.detachTabForUndo(1).?;
+    defer entry.dispose(&host, .host_destroy) catch {}; // Best-effort test teardown.
+    const retained = surface_b.core_surface.closeToken();
+    try std.testing.expect(retained.survived());
+    try std.testing.expect(!retained.attached());
+    try std.testing.expect(surface_a.core_surface.closeToken().attached());
+
+    // Back in a live tab, attached again.
+    try std.testing.expect(try host.restoreClosedTabEntry(&entry.payload.close_tab));
+    try std.testing.expect(surface_b.core_surface.closeToken().attached());
+}
+
+test "win32 an open Settings window keeps an idle embedding server" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var core_app: CoreApp = undefined;
+    var app: App = undefined;
+    var host: Host = undefined;
+    var surface: Surface = undefined;
+    var session: TestSession = .{};
+    try session.init(.{
+        .core_app = &core_app,
+        .app = &app,
+        .hosts = &.{.{ .storage = &host }},
+        .surfaces = &.{.{ .storage = &surface, .host = &host }},
+        .tabs = &.{.{ .host = &host, .surface = &surface, .id = 1 }},
+    });
+    defer session.deinit();
+    // The last terminal window is gone; the handoff server (none here) is
+    // idle; Settings is open, perhaps with unsaved changes.
+    app.embedding_mode = true;
+    // Embedding mode's exit asks only the handoff server, so quitting is
+    // off: a close that started the quit timer instead of deciding again
+    // through `afterLastWindow` (main's callback) then keeps the process.
+    app.config.@"quit-after-last-window-closed" = false;
+    app.running = true;
+    defer app.running = false;
+    app.settings_window.hwnd = @ptrFromInt(0x1000);
+    defer app.settings_window.hwnd = null;
+
+    app.afterLastWindow();
+    try std.testing.expect(app.running);
+    app.onTerminalHandoffIdleTimer();
+    try std.testing.expect(app.running);
+    try std.testing.expect(app.terminal_handoff_idle_timer_id == null);
+
+    // Settings closes: the server is asked again and, idle, exits.
+    app.settings_window.hwnd = null;
+    settingsOnClosedThunk(@ptrCast(&app));
+    try std.testing.expect(!app.running);
 }
 
 test "win32 close_tab structural undo detaches the last remaining tab" {

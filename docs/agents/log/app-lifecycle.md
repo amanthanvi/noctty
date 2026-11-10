@@ -10,6 +10,7 @@ Corrected in other files:
 
 See also:
 - A saved split ratio of -0.0 passes validation; `buildRestoredSessionSplitTree` keeps it as +0 (`SplitTree.canonicalRatio`), since the divider drag's fit search orders ratios by their f16 bits: the 2026-11-08 PANE-DRAG-01 entry in tabs-panes.md.
+- The last terminal window's going is decided in one place, `App.afterLastWindow` (from `windowDestroyed` and from the end of a held app-wide binding chain, `releaseLastWindowQuit`): the quit timer, or in terminal handoff (embedding) mode `exitEmbeddingServerIfIdle`; it waits while an app-wide chain runs (`holdLastWindowQuit`), and an open Settings window counts as a window there and in the handoff idle timer (`onTerminalHandoffIdleTimer`), with Settings' close deciding again (`settingsOnClosedThunk`), so an idle server no longer exits under an unsaved draft: rule (5) of the 2026-11-08 CHAIN-CLOSE-UAF entry in input.md.
 - Toast title and body UTF-8 truncation (`utf8Prefix`) is in the 2026-10-11 PKG-27 entry in terminal-core.md.
 - CLI start-up and exit time, and which DLLs an action loads: the 2026-10-17 "OpenGL32.dll imposed an approximately 61 ms process-exit tail" entry in renderer.md.
 - Where the GUI resets a launcher's inherited Ctrl+C-ignore attribute (`process_shared.enableGuiChildCtrlC`, after CLI dispatch in `src/main_ghostty.zig`): the 2026-10-18 "Windows' Ctrl+C-ignore attribute can survive into a Windows-subsystem GUI" entry (#486) in conpty.md.

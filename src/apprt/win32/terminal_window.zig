@@ -1218,6 +1218,26 @@ pub const Surface = struct {
         return &self.core_surface;
     }
 
+    /// Whether this pane is in one of its host's live tabs. The rule: a pane
+    /// that runs bindings or takes app-wide actions must be in a host tab.
+    /// A pane detached with its tab for undo (`close_tab:this`) or out of
+    /// its split for redo is not: it stays one of the app's surfaces,
+    /// hidden, with its program running, and whatever disposes that
+    /// history next frees it. Core asks it in two places:
+    /// - before each surface of an app-wide fan-out (`App.performAllAction`,
+    ///   through `forEachListed`), so `global:...=close_tab:this>text:...`
+    ///   does not type into the tab just closed;
+    /// - through `CoreSurface.CloseToken.attached`, which gates every
+    ///   binding on the pane (`dispatchLeaf` refuses one on a pane in no
+    ///   live tab) and ends a chain after an `undo` or `redo` that detached
+    ///   it (`performChain`, `mayDetachCaller`).
+    /// Core probes it by name (`@hasDecl(apprt.Surface,
+    /// "receivesAppWideActions")`), so a rename must change those probes
+    /// too, or the check silently stops.
+    pub fn receivesAppWideActions(self: *Surface) bool {
+        return Host.findTabForSurface(self) != null;
+    }
+
     pub fn takeAdoptedSession(self: *Surface) ?ptypkg.AdoptedSession {
         const result = self.adopted_session;
         self.adopted_session = null;

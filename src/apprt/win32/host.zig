@@ -460,11 +460,12 @@ fn keyEventTogglesCommandPalette(
 ) bool {
     const event = remapWin32KeyEvent(event_orig, remaps);
     const entry = keybinds.getEvent(event) orelse return false;
-    const actions: []const input.Binding.Action = switch (entry.value_ptr.*) {
+    // A local, not a temporary: a single action's slice points into it.
+    const generic: input.Binding.Set.GenericLeaf = switch (entry.value_ptr.*) {
         .leader => return false,
-        inline .leaf, .leaf_chained => |leaf| leaf.generic().actionsSlice(),
+        inline .leaf, .leaf_chained => |leaf| leaf.generic(),
     };
-    return bindingActionsToggleCommandPalette(actions);
+    return bindingActionsToggleCommandPalette(generic.actionsSlice());
 }
 
 /// A menu item's text: the label, then the shortcut after a tab. In a menu
