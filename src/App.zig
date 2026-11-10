@@ -942,18 +942,26 @@ pub fn keyEvent(
         // Leaf entries are good
         inline .leaf, .leaf_chained => |leaf| leaf.generic(),
     };
-    const actions: []const input.Binding.Action = leaf.actionsSlice();
-    assert(actions.len > 0);
+    assert(leaf.actionsSlice().len > 0);
 
     // If we aren't focused, then we only process global keybinds.
     if (!self.focused and !leaf.flags.global) return false;
 
     // Global keybinds are done using performAll so that they
-    // can target all surfaces too.
+    // can target all surfaces too. It runs the chain from its own copy.
     if (leaf.flags.global) {
-        self.performAllChainedAction(rt_app, actions);
+        self.performAllChainedAction(rt_app, leaf.actionsSlice());
         return true;
     }
+
+    // A copy, not the binding storage: a reload in the chain replaces
+    // `rt_app.config`, which owns that storage, before the chain is done.
+    var actions_arena: std.heap.ArenaAllocator = .init(self.alloc);
+    defer actions_arena.deinit();
+    const actions = leaf.cloneActions(actions_arena.allocator()) catch |err| {
+        log.warn("error copying app keybind actions err={}", .{err});
+        return false;
+    };
 
     // Must be focused to process non-global keybinds
     assert(self.focused);
@@ -1044,19 +1052,299 @@ pub fn performAction(
 
 /// Performs a chained action. We will continue executing each action
 /// even if there is a failure in a prior action.
+///
+/// `actions` may be borrowed from binding storage: the chain runs from a
+/// copy taken first, because an action can free that storage while the
+/// chain still runs (a reload frees the config that owns it; a close
+/// frees the surface that owns its own). Every action runs, after a
+/// closing one too: with the copy, nothing here reads what a close frees
+/// (`performAllAction` walks the surfaces as they are then), so an app-wide
+/// chain is not cut short. The surface whose key ran it may be gone, which
+/// is the caller's to handle (`Surface.dispatchLeaf` returns `.closed`).
 pub fn performAllChainedAction(
     self: *App,
     rt_app: *apprt.App,
     actions: []const input.Binding.Action,
 ) void {
+    self.performChainedAs(rt_app, actions, .borrowed);
+}
+
+fn performChainedAs(
+    self: *App,
+    rt_app: *apprt.App,
+    actions: []const input.Binding.Action,
+    comptime ownership: enum { borrowed, owned },
+) void {
+    const Performer = struct {
+        app: *App,
+        rt_app: *apprt.App,
+
+        fn performAllAction(p: @This(), action: input.Binding.Action) !void {
+            return p.app.performAllAction(p.rt_app, action);
+        }
+    };
+    // The chain can close the last window and open one again
+    // (`close_window>new_window`): the runtime decides a last-window quit
+    // once the chain is done, not part way (Win32's `holdLastWindowQuit`).
+    const holds_quit = comptime @hasDecl(apprt.App, "holdLastWindowQuit");
+    if (comptime holds_quit) rt_app.holdLastWindowQuit();
+    defer if (comptime holds_quit) rt_app.releaseLastWindowQuit();
+
+    const performer: Performer = .{ .app = self, .rt_app = rt_app };
+    switch (ownership) {
+        .borrowed => performChainOnAll(self.alloc, performer, actions),
+        .owned => runChainOnAll(performer, actions),
+    }
+}
+
+/// Performs an app-wide chain from `actions` that are the caller's own
+/// copy, which no action can free (a key handler's per-call copy:
+/// `Surface.dispatchLeaf`), without copying them again. With a second
+/// copy, one that failed after the first succeeded would run nothing while
+/// the key handler reported the binding performed.
+pub fn performAllOwnedChain(
+    self: *App,
+    rt_app: *apprt.App,
+    actions: []const input.Binding.Action,
+) void {
+    self.performChainedAs(rt_app, actions, .owned);
+}
+
+/// The body of `performAllChainedAction`, over any `performer` with a
+/// `performAllAction(action) !void` (the app; a stand-in in tests).
+fn performChainOnAll(
+    alloc: Allocator,
+    performer: anytype,
+    actions: []const input.Binding.Action,
+) void {
+    var arena: std.heap.ArenaAllocator = .init(alloc);
+    defer arena.deinit();
+    const owned = input.Binding.Action.cloneSlice(arena.allocator(), actions) catch |err| {
+        log.warn("error copying chained actions err={}", .{err});
+        return;
+    };
+    runChainOnAll(performer, owned);
+}
+
+/// Performs every action of `actions`, which nothing the chain does can
+/// free, through `performer.performAllAction`.
+fn runChainOnAll(
+    performer: anytype,
+    actions: []const input.Binding.Action,
+) void {
     for (actions) |action| {
-        self.performAllAction(rt_app, action) catch |err| {
+        performer.performAllAction(action) catch |err| {
             log.warn("error performing chained action action={s} err={}", .{
                 @tagName(action),
                 err,
             });
         };
     }
+}
+
+/// Whether an app-wide action (`all:`, `global:`) reaches `surface`: not
+/// when the runtime keeps it out of every live tab, as Win32 does a pane
+/// detached for undo, hidden with its program still running
+/// (`receivesAppWideActions` on the runtime surface, which also gates every
+/// binding through `Surface.CloseToken.attached`).
+fn receivesAppWideActions(surface: *apprt.Surface) bool {
+    if (comptime @hasDecl(apprt.Surface, "receivesAppWideActions")) {
+        return surface.receivesAppWideActions();
+    }
+    return true;
+}
+
+/// Calls `visitor.visit(item)` for each item of `list` as it stood at the
+/// call, in order, that `visitor.receives(item)`. A visit can remove items
+/// and add some: an item that is gone when its turn comes is skipped, and
+/// one added is not visited. An item is known by its address and
+/// `visitor.id(item)` together, since a freed address can come back as a
+/// new item (Surface ids are random u64 values), and `id` is read only
+/// from an item still in the list.
+fn forEachListed(
+    alloc: Allocator,
+    comptime T: type,
+    list: *const std.ArrayListUnmanaged(T),
+    visitor: anytype,
+) Allocator.Error!void {
+    const Seen = struct { item: T, id: u64 };
+    const seen = try alloc.alloc(Seen, list.items.len);
+    defer alloc.free(seen);
+    for (list.items, seen) |item, *out| out.* = .{ .item = item, .id = visitor.id(item) };
+    for (seen) |entry| {
+        if (std.mem.indexOfScalar(T, list.items, entry.item) == null) continue;
+        if (visitor.id(entry.item) != entry.id) continue;
+        if (!visitor.receives(entry.item)) continue;
+        visitor.visit(entry.item);
+    }
+}
+
+const TestListedItem = struct { id: u64 };
+
+/// A visitor that runs `script` on its first visit and records each visit.
+const TestListedVisitor = struct {
+    list: *std.ArrayListUnmanaged(*TestListedItem),
+    visited: *std.ArrayListUnmanaged(u64),
+    script: *const fn (*std.ArrayListUnmanaged(*TestListedItem)) void,
+    skip_odd: bool = false,
+
+    fn id(_: TestListedVisitor, item: *TestListedItem) u64 {
+        return item.id;
+    }
+
+    /// Items with an odd id stand in for panes kept for undo.
+    fn receives(v: TestListedVisitor, item: *TestListedItem) bool {
+        return !v.skip_odd or item.id % 2 == 0;
+    }
+
+    fn visit(v: TestListedVisitor, item: *TestListedItem) void {
+        v.visited.append(std.testing.allocator, item.id) catch unreachable;
+        if (v.visited.items.len == 1) v.script(v.list);
+    }
+};
+
+fn testRemove(list: *std.ArrayListUnmanaged(*TestListedItem), item: *TestListedItem) void {
+    const i = std.mem.indexOfScalar(*TestListedItem, list.items, item).?;
+    _ = list.swapRemove(i);
+}
+
+test "an app-wide fan-out skips a surface an earlier visit removed and visits none it added" {
+    const testing = std.testing;
+    const S = struct {
+        var b: TestListedItem = .{ .id = 2 };
+        var c: TestListedItem = .{ .id = 3 };
+        var d: TestListedItem = .{ .id = 4 };
+
+        fn script(list: *std.ArrayListUnmanaged(*TestListedItem)) void {
+            // A close of a window that holds the last surface, and a split.
+            testRemove(list, &c);
+            list.append(testing.allocator, &d) catch unreachable;
+        }
+    };
+    var a: TestListedItem = .{ .id = 1 };
+    var list: std.ArrayListUnmanaged(*TestListedItem) = .empty;
+    defer list.deinit(testing.allocator);
+    try list.appendSlice(testing.allocator, &.{ &a, &S.b, &S.c });
+    var visited: std.ArrayListUnmanaged(u64) = .empty;
+    defer visited.deinit(testing.allocator);
+
+    try forEachListed(testing.allocator, *TestListedItem, &list, TestListedVisitor{
+        .list = &list,
+        .visited = &visited,
+        .script = &S.script,
+    });
+    try testing.expectEqualSlices(u64, &.{ 1, 2 }, visited.items);
+}
+
+test "an app-wide fan-out skips the surfaces that do not receive it" {
+    const testing = std.testing;
+    const S = struct {
+        fn script(_: *std.ArrayListUnmanaged(*TestListedItem)) void {}
+    };
+    var a: TestListedItem = .{ .id = 2 };
+    var b: TestListedItem = .{ .id = 3 };
+    var c: TestListedItem = .{ .id = 4 };
+    var list: std.ArrayListUnmanaged(*TestListedItem) = .empty;
+    defer list.deinit(testing.allocator);
+    try list.appendSlice(testing.allocator, &.{ &a, &b, &c });
+    var visited: std.ArrayListUnmanaged(u64) = .empty;
+    defer visited.deinit(testing.allocator);
+
+    try forEachListed(testing.allocator, *TestListedItem, &list, TestListedVisitor{
+        .list = &list,
+        .visited = &visited,
+        .script = &S.script,
+        .skip_odd = true,
+    });
+    try testing.expectEqualSlices(u64, &.{ 2, 4 }, visited.items);
+}
+
+test "an app-wide fan-out skips a new surface at a removed surface's address" {
+    const testing = std.testing;
+    const S = struct {
+        var b: TestListedItem = .{ .id = 2 };
+
+        fn script(list: *std.ArrayListUnmanaged(*TestListedItem)) void {
+            // A pane freed (say, disposed from redo history) and a new one
+            // made at the same address.
+            testRemove(list, &b);
+            b = .{ .id = 99 };
+            list.append(testing.allocator, &b) catch unreachable;
+        }
+    };
+    var a: TestListedItem = .{ .id = 1 };
+    var list: std.ArrayListUnmanaged(*TestListedItem) = .empty;
+    defer list.deinit(testing.allocator);
+    try list.appendSlice(testing.allocator, &.{ &a, &S.b });
+    var visited: std.ArrayListUnmanaged(u64) = .empty;
+    defer visited.deinit(testing.allocator);
+
+    try forEachListed(testing.allocator, *TestListedItem, &list, TestListedVisitor{
+        .list = &list,
+        .visited = &visited,
+        .script = &S.script,
+    });
+    try testing.expectEqualSlices(u64, &.{1}, visited.items);
+}
+
+/// A stand-in app for `performChainOnAll` tests. A reload or a closing
+/// action overwrites the binding storage the chain came from with another
+/// action, as freeing the config that owns it would (a free that leaves
+/// valid values, so a stale read fails an assertion instead of ending the
+/// test binary).
+const TestChainApp = struct {
+    const Tag = std.meta.Tag(input.Binding.Action);
+    const poison: input.Binding.Action = .clear_screen;
+
+    storage: []input.Binding.Action,
+    seen: *std.ArrayListUnmanaged(Tag),
+
+    fn performAllAction(self: TestChainApp, action: input.Binding.Action) !void {
+        try self.seen.append(std.testing.allocator, action);
+        const closes = switch (action) {
+            .close_surface, .close_window, .close_tab => true,
+            else => false,
+        };
+        if (action == .reload_config or closes) {
+            @memset(self.storage, poison);
+        }
+    }
+};
+
+fn testChainOnAll(
+    chain: []const input.Binding.Action,
+    seen: *std.ArrayListUnmanaged(TestChainApp.Tag),
+) !void {
+    const alloc = std.testing.allocator;
+    // The binding storage the chain borrows, as a config's set holds it
+    // (a global hotkey passes exactly this: `handleGlobalHotkey`).
+    const storage = try alloc.dupe(input.Binding.Action, chain);
+    defer alloc.free(storage);
+    performChainOnAll(alloc, TestChainApp{ .storage = storage, .seen = seen }, storage);
+}
+
+test "an app-wide chain reads the actions after a reload from its own copy" {
+    const testing = std.testing;
+    var seen: std.ArrayListUnmanaged(TestChainApp.Tag) = .empty;
+    defer seen.deinit(testing.allocator);
+    try testChainOnAll(&.{ .reload_config, .new_window, .{ .text = "x" } }, &seen);
+    try testing.expectEqualSlices(
+        TestChainApp.Tag,
+        &.{ .reload_config, .new_window, .text },
+        seen.items,
+    );
+}
+
+test "an app-wide chain runs the actions after a closing action from its own copy" {
+    const testing = std.testing;
+    var seen: std.ArrayListUnmanaged(TestChainApp.Tag) = .empty;
+    defer seen.deinit(testing.allocator);
+    try testChainOnAll(&.{ .ignore, .close_window, .new_window }, &seen);
+    try testing.expectEqualSlices(
+        TestChainApp.Tag,
+        &.{ .ignore, .close_window, .new_window },
+        seen.items,
+    );
 }
 
 /// Perform an app-wide binding action. If the action is surface-specific
@@ -1082,7 +1370,9 @@ pub fn performAllAction(
     // A global binding runs it once, from the last focused surface.
     if (action == .goto_attention) {
         const surface = self.focusedSurface() orelse
-            if (self.surfaces.items.len > 0) self.surfaces.items[0].core() else return;
+            for (self.surfaces.items) |surface| {
+                if (receivesAppWideActions(surface)) break surface.core();
+            } else return;
         _ = try surface.performBindingAction(action);
         return;
     }
@@ -1096,15 +1386,35 @@ pub fn performAllAction(
             action.scoped(.app).?, // asserted through the scope match
         ),
 
-        // Surface-scoped actions are performed on all surfaces. Errors
-        // are logged but processing continues.
-        .surface => for (self.surfaces.items) |surface| {
-            _ = surface.core().performBindingAction(action) catch |err| {
-                log.warn("error performing binding action on surface ptr={X} err={}", .{
-                    @intFromPtr(surface),
-                    err,
-                });
+        // Surface-scoped actions are performed on all surfaces in a live
+        // tab (`receivesAppWideActions`: not a pane kept hidden for undo).
+        // Errors are logged but processing continues. The walk is over the list
+        // as it stood (`forEachListed`): an action can free surfaces (a
+        // close frees a window's panes, synchronously on Win32; a split
+        // can dispose a pane kept for redo) and create them (`new_split`),
+        // at an address a freed one had.
+        .surface => {
+            const Visitor = struct {
+                action: input.Binding.Action,
+
+                fn id(_: @This(), surface: *apprt.Surface) u64 {
+                    return surface.core().id;
+                }
+
+                fn receives(_: @This(), surface: *apprt.Surface) bool {
+                    return receivesAppWideActions(surface);
+                }
+
+                fn visit(v: @This(), surface: *apprt.Surface) void {
+                    _ = surface.core().performBindingAction(v.action) catch |err| {
+                        log.warn("error performing binding action on surface ptr={X} err={}", .{
+                            @intFromPtr(surface),
+                            err,
+                        });
+                    };
+                }
             };
+            try forEachListed(self.alloc, *apprt.Surface, &self.surfaces, Visitor{ .action = action });
         },
     }
 }
@@ -1293,6 +1603,17 @@ pub fn findSurfaceByID(self: *const App, id: u64) ?*Surface {
     }
 
     return null;
+}
+
+/// True if `rt_surface` is still one of the app's surfaces and is the
+/// surface whose core id is `id`, not a new one at a freed one's address.
+/// Reads the surface only once it is found in the list.
+pub fn hasSurfaceInstance(self: *const App, rt_surface: *apprt.Surface, id: u64) bool {
+    for (self.surfaces.items) |v| {
+        if (v == rt_surface) return v.core().id == id;
+    }
+
+    return false;
 }
 
 fn hasRtSurface(self: *const App, surface: *apprt.Surface) bool {

@@ -842,6 +842,13 @@ pub const App = struct {
     tab_drag_preview_prev_proc: ?*const anyopaque = null,
     core_ticking: bool = false,
     quit_timer_id: ?UINT_PTR = null,
+    /// Above zero while an app-wide binding chain runs
+    /// (`holdLastWindowQuit`): a last-window quit then waits for the chain
+    /// to end, which may open a window again (`close_window>new_window`).
+    last_window_quit_holds: u32 = 0,
+    /// A last-window quit came while held; `releaseLastWindowQuit` decides
+    /// it again.
+    last_window_quit_pending: bool = false,
     terminal_handoff_idle_timer_id: ?UINT_PTR = null,
     terminal_handoff_server: ?*win32_terminal_handoff.Server = null,
     undo_prune_timer_id: ?UINT_PTR = null,
@@ -1731,17 +1738,7 @@ pub const App = struct {
                 }
                 if (self.terminal_handoff_idle_timer_id) |timer_id| {
                     if (msg.wParam == timer_id) {
-                        self.stopTerminalHandoffIdleTimer();
-                        self.drainPendingHandoffs();
-                        if (self.embedding_mode and self.registry.windows.items.len == 0) {
-                            if (self.exitEmbeddingServerIfIdle()) {
-                                log.info("terminal handoff server idle timeout", .{});
-                                self.running = false;
-                                sys.PostQuitMessage(0);
-                            } else {
-                                self.startTerminalHandoffIdleTimer();
-                            }
-                        }
+                        self.onTerminalHandoffIdleTimer();
                         continue;
                     }
                 }
@@ -2928,6 +2925,78 @@ pub const App = struct {
         }
     }
 
+    /// Called by core around an app-wide binding chain
+    /// (`App.performAllChainedAction`): the last window can close part way
+    /// through (`close_window`), and with no delay configured
+    /// `startQuitTimer` would post WM_QUIT at once, so a `new_window` later
+    /// in the chain would open a window into a process that is ending. The
+    /// quit is decided again when the chain is done.
+    pub fn holdLastWindowQuit(self: *App) void {
+        self.last_window_quit_holds += 1;
+    }
+
+    pub fn releaseLastWindowQuit(self: *App) void {
+        std.debug.assert(self.last_window_quit_holds > 0);
+        self.last_window_quit_holds -= 1;
+        if (self.last_window_quit_holds > 0 or !self.last_window_quit_pending) return;
+        self.last_window_quit_pending = false;
+        // Decided as when the last window went: a window the chain opened
+        // keeps the process, and in embedding mode the handoff server's
+        // idleness is asked again.
+        self.afterLastWindow();
+    }
+
+    /// What the app does once its last terminal window is gone (a window's
+    /// teardown, `windowDestroyed`, or the end of a held chain): in
+    /// embedding mode it exits only if the terminal handoff server is idle,
+    /// else it quits as `quit-after-last-window-closed` says. Held while an
+    /// app-wide chain runs (`holdLastWindowQuit`).
+    pub fn afterLastWindow(self: *App) void {
+        // An open Settings window is a window too: in embedding mode an
+        // idle server would otherwise exit under it and lose its draft.
+        // Its close decides again (`settingsOnClosedThunk`).
+        if (self.hasLiveUiWindows() or !self.running) return;
+        if (self.last_window_quit_holds > 0) {
+            self.last_window_quit_pending = true;
+            return;
+        }
+        if (self.embedding_mode) {
+            if (self.exitEmbeddingServerIfIdle()) {
+                self.running = false;
+                self.postLastWindowQuit();
+            } else {
+                self.startTerminalHandoffIdleTimer();
+            }
+        } else {
+            self.startQuitTimer();
+        }
+    }
+
+    /// The terminal handoff idle timer: in embedding mode with no window
+    /// left, a Settings window included, the server exits once it is idle,
+    /// else the timer runs again. With Settings open it stops: Settings'
+    /// close decides (`afterLastWindow`), so a draft is never lost to it.
+    pub fn onTerminalHandoffIdleTimer(self: *App) void {
+        self.stopTerminalHandoffIdleTimer();
+        self.drainPendingHandoffs();
+        if (!self.embedding_mode or self.hasLiveUiWindows()) return;
+        if (self.exitEmbeddingServerIfIdle()) {
+            log.info("terminal handoff server idle timeout", .{});
+            self.running = false;
+            self.postLastWindowQuit();
+        } else {
+            self.startTerminalHandoffIdleTimer();
+        }
+    }
+
+    /// Posts WM_QUIT for a last-window quit, never to a test thread: there
+    /// the decision shows in `running`, which every caller clears first.
+    fn postLastWindowQuit(self: *App) void {
+        _ = self;
+        if (builtin.is_test) return;
+        sys.PostQuitMessage(0);
+    }
+
     fn registeredGlobalHotkeyForSpec(self: *const App, spec: GlobalHotkeySpec) ?RegisteredGlobalHotkey {
         for (self.global_hotkeys.items) |hotkey| {
             if (hotkeySpecEql(hotkey.spec, spec)) return hotkey;
@@ -2944,11 +3013,14 @@ pub const App = struct {
         for (self.global_hotkeys.items) |hotkey| {
             if (hotkey.id != id) continue;
 
-            switch (hotkey.binding.*) {
+            // The actions are borrowed from `self.config`, which a reload in
+            // the chain frees; `performAllChainedAction` runs them from its
+            // own copy. Nothing here reads the binding after the call.
+            const generic: input.Binding.Set.GenericLeaf = switch (hotkey.binding.*) {
                 .leader => unreachable,
-                .leaf => |*leaf| self.core_app.performAllChainedAction(self, leaf.generic().actionsSlice()),
-                .leaf_chained => |*leaf| self.core_app.performAllChainedAction(self, leaf.generic().actionsSlice()),
-            }
+                inline .leaf, .leaf_chained => |*leaf| leaf.generic(),
+            };
+            self.core_app.performAllChainedAction(self, generic.actionsSlice());
             return;
         }
     }
@@ -3741,6 +3813,10 @@ pub const App = struct {
             self.stopQuitTimer();
             return;
         }
+        if (self.last_window_quit_holds > 0) {
+            self.last_window_quit_pending = true;
+            return;
+        }
         if (!self.config.@"quit-after-last-window-closed") {
             self.stopQuitTimer();
             return;
@@ -3749,7 +3825,7 @@ pub const App = struct {
         const delay = self.config.@"quit-after-last-window-closed-delay" orelse {
             self.stopQuitTimer();
             self.running = false;
-            sys.PostQuitMessage(0);
+            self.postLastWindowQuit();
             return;
         };
 
@@ -7464,18 +7540,7 @@ pub const App = struct {
             }
         }
 
-        if (self.registry.windows.items.len == 0 and self.running) {
-            if (self.embedding_mode) {
-                if (self.exitEmbeddingServerIfIdle()) {
-                    self.running = false;
-                    sys.PostQuitMessage(0);
-                } else {
-                    self.startTerminalHandoffIdleTimer();
-                }
-            } else {
-                self.startQuitTimer();
-            }
-        }
+        self.afterLastWindow();
     }
 
     fn gotoWindow(self: *App, target: apprt.Target, direction: apprt.action.GotoWindow) !bool {
@@ -8752,11 +8817,11 @@ pub const App = struct {
     }
 
     /// `quit` and `close_all_windows` run from the message loop, through the
-    /// target's window. Core does not count either as a closing action
-    /// (`closingAction`) and goes on using the terminal whose key binding
-    /// asked for it, so destroying the windows from inside that call freed
-    /// the terminal under its own key handler: an access violation in
-    /// `endKeySequence` in Debug builds.
+    /// target's window. Core does not count either as an action that can
+    /// close its surface (`closesCaller`) and goes on using the terminal
+    /// whose key binding asked for it, so destroying the windows from inside
+    /// that call freed the terminal under its own key handler: an access
+    /// violation in `endKeySequence` in Debug builds.
     fn postQuit(self: *App, target: apprt.Target) void {
         // A quit from a terminal asks on its window. One from the app as a
         // whole (a global key, automation) asks on the focused window, if
