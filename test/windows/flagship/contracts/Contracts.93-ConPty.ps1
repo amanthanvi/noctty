@@ -173,10 +173,10 @@ Assert-WorkflowContract `
 # Read through PowerShell's parser, not as text: a line comment, a block
 # comment or a here-string around a required call leaves no command there, so
 # it fails the contract as a deleted call does, and so does a signing filter
-# without ".dll"; the controls below prove each. Each control disables a whole
-# line, and one that only stops the packager from parsing proves nothing, so a
-# control fails unless the contract reports a problem other than the parse
-# error. (Deliberately dead code, such as `if ($false)`, is for review to
+# without ".dll"; the controls below prove each. A control that disables a
+# required call disables its whole line, and a control whose text no longer
+# parses proves nothing, so every control must still parse and must fail the
+# contract. (Deliberately dead code, such as `if ($false)`, is for review to
 # catch.)
 function Get-PlaceholderStagingProblems {
     param([Parameter(Mandatory)] [string] $ScriptText)
@@ -255,12 +255,17 @@ if ($runtimeLoopStart -lt 0) { throw "Contract control: the runtime staging loop
 function Assert-PlaceholderControlFails {
     param([Parameter(Mandatory)] [string] $ScriptText, [Parameter(Mandatory)] [string] $What)
 
+    # Checked with the parser itself, not by the wording of the contract's
+    # own parse-error problem, so rewording that message can't turn this off.
+    $controlTokens = $null
+    $controlParseErrors = $null
+    [void][System.Management.Automation.Language.Parser]::ParseInput($ScriptText, [ref]$controlTokens, [ref]$controlParseErrors)
+    if (@($controlParseErrors).Count -gt 0) {
+        throw "Contract control is invalid: with $What the packager no longer parses, so the contract would fail for that reason alone ($($controlParseErrors[0].Message))"
+    }
     $controlProblems = Get-PlaceholderStagingProblems -ScriptText $ScriptText
     if ($controlProblems.Count -eq 0) {
         throw "Contract control failed: the placeholder staging contract still passes with $What"
-    }
-    if ($controlProblems[0].StartsWith('the packager does not parse')) {
-        throw "Contract control is invalid: with $What the packager no longer parses, so the contract fails for that reason alone ($($controlProblems[0]))"
     }
 }
 
@@ -273,6 +278,7 @@ foreach ($requiredCall in @(
     $searchFrom = if ($requiredCall.StartsWith('"')) { 0 } else { $runtimeLoopStart }
     $callIndex = $windowsPackagerText.IndexOf($requiredCall, $searchFrom)
     if ($callIndex -lt 0) { throw "Contract control: '$requiredCall' is missing from $windowsPackager" }
+    if ($windowsPackagerText.IndexOf($requiredCall, $callIndex + $requiredCall.Length) -ge 0) { throw "Contract control: '$requiredCall' occurs more than once in $windowsPackager; anchor each control on a line that occurs once" }
     # A control must disable the whole line: an anchor that stops short leaves
     # the rest of the line behind the comment or here-string.
     $lineStart = if ($callIndex -eq 0) { 0 } else { $windowsPackagerText.LastIndexOf("`n", $callIndex - 1) + 1 }
