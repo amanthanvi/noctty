@@ -304,6 +304,12 @@ Recommended order:
    workflow with `run_interactive_win11=true`. The interactive job runs
    only on this opted-in dispatch, and the **Release** workflow refuses
    to publish without its hash-bound evidence at the exact release SHA.
+   The job uses the visible desktop for about 20 to 25 minutes (60 at most)
+   and reads screen pixels, so a window or notification banner over the
+   windows it tests can fail the run. Before dispatching, turn on Do Not
+   Disturb, close any open shell flyout, and minimize every other window,
+   your own noctty windows included. Then leave the machine alone until the
+   job finishes.
 5. After readiness passes, either:
    - push tag `v<version>`, or
    - manually dispatch the **Release** workflow with `version=<version>` and

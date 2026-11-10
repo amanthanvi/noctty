@@ -129,7 +129,8 @@ $windowLibConsumerAsts = foreach ($source in $windowLibConsumerSources) {
 $forceForegroundCallContracts = @(
     [pscustomobject]@{ Path = $accessibilityHarness; Count = 20; AltTap = 'true'; SendInputAltTap = 'true' },
     [pscustomobject]@{ Path = $keyInputHarness; Count = 5; AltTap = 'false'; SendInputAltTap = 'false' },
-    [pscustomobject]@{ Path = $shellCommandLiveHarness; Count = 2; AltTap = 'true'; SendInputAltTap = 'false' }
+    [pscustomobject]@{ Path = $shellCommandLiveHarness; Count = 2; AltTap = 'true'; SendInputAltTap = 'false' },
+    [pscustomobject]@{ Path = $statefulWin11Lib; Count = 1; AltTap = 'true'; SendInputAltTap = 'true' }
 )
 foreach ($contract in $forceForegroundCallContracts) {
     $sourceAst = @($windowLibConsumerAsts | Where-Object { $_.Path -eq $contract.Path })[0].Ast
@@ -292,6 +293,254 @@ try {
 finally {
     Remove-Item -LiteralPath Function:\Wait-InteractiveWin11Until, Function:\Save-StatefulPixelDiagnostic -ErrorAction SilentlyContinue
     Remove-Variable -Scope Script -Name pixelDiagnosticCalls, InteractiveWin11PixelWindow -ErrorAction SilentlyContinue
+}
+
+# Show-StatefulHost takes the foreground back from another application with
+# ForceForeground, and only then (EVIDENCE-FOREGROUND-01). Its one call, on
+# $HostHwnd, sits in the body of an `if` whose whole condition re-reads the
+# foreground's process (the recheck below), and that `if` sits in the body of
+# one whose whole condition is the Test-StatefulForeignForeground call below:
+# no negation, no other operand, the arguments in order, no other clause. The
+# host's process id comes from $HostHwnd and the foreground's from
+# Get-StatefulForegroundProcessId, which reads GetForegroundWindow; each name
+# comes from Get-StatefulProcessName on its own id; and each of the four is
+# assigned once. The decision's answers are table-tested. The controls below
+# must each parse and be refused.
+$statefulFunction = {
+    param([string] $Name)
+    @($statefulLibAst.FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq $Name
+    }, $true))
+}
+$showHostFunctions = @(& $statefulFunction 'Show-StatefulHost')
+$foreignForegroundFunctions = @(& $statefulFunction 'Test-StatefulForeignForeground')
+$foregroundProcessIdFunctions = @(& $statefulFunction 'Get-StatefulForegroundProcessId')
+$processNameFunctions = @(& $statefulFunction 'Get-StatefulProcessName')
+if ($showHostFunctions.Count -ne 1 -or $foreignForegroundFunctions.Count -ne 1 -or $foregroundProcessIdFunctions.Count -ne 1 -or $processNameFunctions.Count -ne 1) {
+    throw 'The stateful library must define Show-StatefulHost, Test-StatefulForeignForeground, Get-StatefulForegroundProcessId and Get-StatefulProcessName once each.'
+}
+# Both helpers are pinned statement for statement, so nothing can be added
+# before their return (a reset id, extra pipeline output).
+$pinnedHelpers = @(
+    @{ Function = $foregroundProcessIdFunctions[0]; Parameters = $null; Statements = @(
+        '$processId = [uint32]0',
+        '[void][InteractiveWin11WindowNative]::GetWindowThreadProcessId([InteractiveWin11WindowNative]::GetForegroundWindow(), [ref]$processId)',
+        'return $processId') },
+    @{ Function = $processNameFunctions[0]; Parameters = '[uint32] $ProcessId'; Statements = @(
+        'if ($ProcessId -eq 0) { return $null }',
+        'try { return (Get-Process -Id $ProcessId -ErrorAction Stop).ProcessName } catch { return $null }') }
+)
+foreach ($helper in $pinnedHelpers) {
+    $body = $helper.Function.Body
+    $parameters = if ($null -eq $helper.Function.Parameters) { $null } else { ($helper.Function.Parameters | ForEach-Object { $_.Extent.Text }) -join ', ' }
+    if ($null -ne $body.ParamBlock -or $null -ne $body.BeginBlock -or $null -ne $body.ProcessBlock -or $null -ne $body.DynamicParamBlock -or
+        $parameters -cne $helper.Parameters -or
+        (($body.EndBlock.Statements | ForEach-Object { $_.Extent.Text }) -join "`n") -cne ($helper.Statements -join "`n")) {
+        throw "$($helper.Function.Name) must be exactly: $($helper.Statements -join '; ')."
+    }
+}
+# The name helper also runs: id 0, this process, and an id no process has.
+. ([scriptblock]::Create($processNameFunctions[0].Extent.Text))
+try {
+    $currentProcessName = [Diagnostics.Process]::GetCurrentProcess().ProcessName
+    if ($null -ne (Get-StatefulProcessName 0) -or (Get-StatefulProcessName ([uint32]$PID)) -cne $currentProcessName -or
+        $null -ne (Get-StatefulProcessName ([uint32]::MaxValue - 3))) {
+        throw 'Get-StatefulProcessName must answer $null for 0 and for an id no process has, and the name for a live process.'
+    }
+}
+finally {
+    Remove-Item -LiteralPath Function:\Get-StatefulProcessName -ErrorAction SilentlyContinue
+}
+$showHostGuardCall = 'Test-StatefulForeignForeground $hostProcessId $hostProcessName $foregroundProcessId $foregroundProcessName'
+$showHostRecheck = '(Get-StatefulForegroundProcessId) -eq $foregroundProcessId'
+$showHostHostRead = '[void][InteractiveWin11WindowNative]::GetWindowThreadProcessId($HostHwnd, [ref]$hostProcessId)'
+$showHostForegroundRead = '$foregroundProcessId = Get-StatefulForegroundProcessId'
+$showHostHostNameRead = '$hostProcessName = Get-StatefulProcessName $hostProcessId'
+$showHostForegroundNameRead = '$foregroundProcessName = Get-StatefulProcessName $foregroundProcessId'
+$testShowHostGuard = {
+    param([System.Management.Automation.Language.FunctionDefinitionAst] $Function)
+    $text = $Function.Extent.Text
+    foreach ($required in @($showHostHostRead, $showHostForegroundRead, $showHostHostNameRead, $showHostForegroundNameRead)) {
+        if (([regex]::Matches($text, [regex]::Escape($required))).Count -ne 1) { return $false }
+    }
+    foreach ($variable in @('hostProcessId', 'hostProcessName', 'foregroundProcessId', 'foregroundProcessName')) {
+        if (([regex]::Matches($text, "\`$$variable\s*=(?!=)")).Count -ne 1) { return $false }
+    }
+    if (([regex]::Matches($text, '\[ref\]\$hostProcessId')).Count -ne 1) { return $false }
+    $calls = @(Get-NamedMemberExpressions -Ast $Function.Body -Name 'ForceForeground' -InvocationOnly)
+    if ($calls.Count -ne 1 -or $calls[0].Arguments.Count -ne 3 -or
+        $calls[0].Arguments[0] -isnot [System.Management.Automation.Language.VariableExpressionAst] -or
+        $calls[0].Arguments[0].VariablePath.UserPath -cne 'HostHwnd') { return $false }
+    # Innermost first: the recheck, then the guard.
+    $inner = $calls[0]
+    foreach ($expected in @(@{ Text = $showHostRecheck; Command = $false }, @{ Text = $showHostGuardCall; Command = $true })) {
+        $if = $inner.Parent
+        while ($null -ne $if -and $if -isnot [System.Management.Automation.Language.IfStatementAst]) { $if = $if.Parent }
+        if ($null -eq $if -or $if.Clauses.Count -ne 1 -or $null -ne $if.ElseClause) { return $false }
+        $condition = $if.Clauses[0].Item1
+        if ($condition -isnot [System.Management.Automation.Language.PipelineAst] -or $condition.PipelineElements.Count -ne 1 -or
+            $condition.PipelineElements[0].Extent.Text -cne $expected.Text -or
+            ($expected.Command -and $condition.PipelineElements[0] -isnot [System.Management.Automation.Language.CommandAst])) { return $false }
+        $inBody = $false
+        for ($node = $inner; $null -ne $node; $node = $node.Parent) {
+            if ([object]::ReferenceEquals($node, $if.Clauses[0].Item2)) { $inBody = $true; break }
+        }
+        if (-not $inBody) { return $false }
+        $inner = $if
+    }
+    return $true
+}
+if (-not (& $testShowHostGuard $showHostFunctions[0])) {
+    throw 'Show-StatefulHost must call ForceForeground once, on $HostHwnd, only under the foreground recheck inside an if whose whole condition is Test-StatefulForeignForeground, with both process ids and both names read once from their sources.'
+}
+$showHostText = $showHostFunctions[0].Extent.Text
+$showHostGuardLine = "if ($showHostGuardCall) {"
+$showHostRecheckLine = "if ($showHostRecheck) {"
+$showHostForceLine = '$taken = [InteractiveWin11WindowNative]::ForceForeground($HostHwnd, $true, $true)'
+foreach ($control in @(
+        @{ Name = 'an always-true guard'; Edits = @(, @($showHostGuardLine, 'if ($true) {')) },
+        @{ Name = 'a negated guard'; Edits = @(, @($showHostGuardLine, "if (-not ($showHostGuardCall)) {")) },
+        @{ Name = 'a guard with another operand'; Edits = @(, @($showHostGuardLine, "if (($showHostGuardCall) -or `$true) {")) },
+        @{ Name = 'swapped arguments'; Edits = @(, @($showHostGuardLine, 'if (Test-StatefulForeignForeground $foregroundProcessId $foregroundProcessName $hostProcessId $hostProcessName) {')) },
+        @{ Name = 'a second clause'; Edits = @(, @($showHostGuardLine, "if (`$false) { } elseif ($showHostGuardCall) {")) },
+        @{ Name = 'the recheck removed'; Edits = @(, @($showHostRecheckLine, 'if ($true) {')) },
+        @{ Name = 'the recheck negated'; Edits = @(, @($showHostRecheckLine, "if (-not ($showHostRecheck)) {")) },
+        @{ Name = 'the foreground id read from the host'; Edits = @(, @($showHostForegroundRead, '$foregroundProcessId = $hostProcessId')) },
+        @{ Name = 'the host id read from the foreground'; Edits = @(, @($showHostHostRead, '$hostProcessId = Get-StatefulForegroundProcessId')) },
+        @{ Name = 'the host name read from the foreground id'; Edits = @(, @($showHostHostNameRead, '$hostProcessName = Get-StatefulProcessName $foregroundProcessId')) },
+        @{ Name = 'the foreground name read from the host id'; Edits = @(, @($showHostForegroundNameRead, '$foregroundProcessName = Get-StatefulProcessName $hostProcessId')) },
+        @{ Name = 'the host id overwritten'; Edits = @(, @($showHostForegroundRead, "$showHostForegroundRead; `$hostProcessId = `$foregroundProcessId")) },
+        @{ Name = 'the host name overwritten'; Edits = @(, @($showHostGuardLine, "`$hostProcessName = `$foregroundProcessName; $showHostGuardLine")) },
+        @{ Name = 'a null target'; Edits = @(, @($showHostForceLine, '$taken = [InteractiveWin11WindowNative]::ForceForeground([IntPtr]::Zero, $true, $true)')) },
+        @{ Name = 'the call moved out of the ifs'; Edits = @(@($showHostForceLine, '$taken = $false'), @($showHostGuardLine, "$showHostForceLine; $showHostGuardLine")) }
+    )) {
+    $controlText = $showHostText
+    foreach ($edit in $control.Edits) {
+        if (([regex]::Matches($controlText, [regex]::Escape($edit[0]))).Count -ne 1) {
+            throw "Show-StatefulHost guard control '$($control.Name)' lost its anchor."
+        }
+        $controlText = $controlText.Replace($edit[0], $edit[1])
+    }
+    $controlTokens = $null
+    $controlErrors = $null
+    $controlAst = [System.Management.Automation.Language.Parser]::ParseInput($controlText, [ref]$controlTokens, [ref]$controlErrors)
+    $controlFunction = @($controlAst.FindAll({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true))
+    if ($controlErrors.Count -ne 0 -or $controlFunction.Count -ne 1) {
+        throw "Show-StatefulHost guard control '$($control.Name)' does not parse."
+    }
+    if (& $testShowHostGuard $controlFunction[0]) {
+        throw "The Show-StatefulHost guard check accepted $($control.Name)."
+    }
+}
+. ([scriptblock]::Create($foreignForegroundFunctions[0].Extent.Text))
+try {
+    $foreignForegroundCases = @(
+        @{ Case = 'nothing in the foreground'; Args = @(100, 'noctty', 0, $null); Expected = $false },
+        @{ Case = 'no foreground window, whatever the name'; Args = @(100, 'noctty', 0, 'explorer'); Expected = $false },
+        @{ Case = 'the host itself'; Args = @(100, 'noctty', 100, 'noctty'); Expected = $false },
+        @{ Case = "the host's process, whatever the name"; Args = @(100, 'noctty', 100, 'explorer'); Expected = $false },
+        @{ Case = 'another noctty process'; Args = @(100, 'noctty', 200, 'noctty'); Expected = $false },
+        @{ Case = 'another noctty, other case'; Args = @(100, 'noctty', 200, 'NOCTTY'); Expected = $false },
+        @{ Case = 'another application'; Args = @(100, 'noctty', 300, 'T3 Code (Nightly)'); Expected = $true },
+        @{ Case = 'a process whose name cannot be read'; Args = @(100, 'noctty', 300, $null); Expected = $false },
+        @{ Case = "a host whose name cannot be read"; Args = @(100, $null, 300, 'chrome'); Expected = $false }
+    )
+    foreach ($case in $foreignForegroundCases) {
+        $answer = Test-StatefulForeignForeground $case.Args[0] $case.Args[1] $case.Args[2] $case.Args[3]
+        if ($answer -isnot [bool] -or $answer -ne $case.Expected) {
+            throw "Test-StatefulForeignForeground answered $answer for $($case.Case); expected $($case.Expected)."
+        }
+    }
+}
+finally {
+    Remove-Item -LiteralPath Function:\Test-StatefulForeignForeground -ErrorAction SilentlyContinue
+}
+
+# Behavior, with no desktop: the real Show-StatefulHost and its helpers run with
+# InteractiveWin11WindowNative swapped for a recording stand-in (the foreground
+# window is handle 2; it can change process between the first read and the
+# recheck) and Get-Process for a table of names, so nothing touches a window,
+# the foreground or input.
+if (-not ('StatefulHostContractNative' -as [type])) {
+    Add-Type -TypeDefinition @'
+using System;
+using System.Collections.Generic;
+public static class StatefulHostContractNative {
+    public static uint HostPid, ForegroundPid, ForegroundPidLater;
+    public static int ForegroundReads;
+    public static bool ForceResult;
+    public static List<string> Calls = new List<string>();
+    public static void Reset(uint hostPid, uint foregroundPid, uint foregroundPidLater, bool forceResult) {
+        HostPid = hostPid; ForegroundPid = foregroundPid; ForegroundPidLater = foregroundPidLater;
+        ForegroundReads = 0; ForceResult = forceResult; Calls.Clear();
+    }
+    public static bool ShowWindow(IntPtr hwnd, int command) { Calls.Add("ShowWindow:" + hwnd + ":" + command); return true; }
+    public static bool SetWindowPos(IntPtr hwnd, IntPtr after, int x, int y, int cx, int cy, uint flags) { Calls.Add("SetWindowPos:" + hwnd + ":" + after + ":" + flags); return true; }
+    public static bool SetForegroundWindow(IntPtr hwnd) { Calls.Add("SetForegroundWindow:" + hwnd); return false; }
+    public static IntPtr GetForegroundWindow() { return new IntPtr(2); }
+    public static uint GetWindowThreadProcessId(IntPtr hwnd, out uint processId) {
+        if (hwnd == new IntPtr(2)) { ForegroundReads++; processId = ForegroundReads == 1 ? ForegroundPid : ForegroundPidLater; }
+        else { processId = hwnd == IntPtr.Zero ? 0u : HostPid; }
+        return processId == 0 ? 0u : 1u;
+    }
+    public static bool ForceForeground(IntPtr hwnd, bool altTap, bool useSendInputForAltTap) {
+        Calls.Add("ForceForeground:" + hwnd + ":" + altTap + ":" + useSendInputForAltTap); return ForceResult;
+    }
+}
+'@
+}
+$script:statefulContractNames = @{ 100 = 'noctty'; 200 = 'noctty'; 300 = 'T3 Code (Nightly)'; 301 = 'explorer' }
+function script:Get-Process {
+    [CmdletBinding()]
+    param([int] $Id)
+    if (-not $script:statefulContractNames.ContainsKey($Id)) { throw "no process $Id" }
+    [pscustomobject]@{ ProcessName = $script:statefulContractNames[$Id] }
+}
+$statefulBehaviorFunctions = @($showHostFunctions[0], $foregroundProcessIdFunctions[0], $processNameFunctions[0], $foreignForegroundFunctions[0])
+$savedSettle = $script:STATEFUL_HOST_SETTLE_MS
+$script:STATEFUL_HOST_SETTLE_MS = 0
+try {
+    foreach ($function in $statefulBehaviorFunctions) {
+        . ([scriptblock]::Create($function.Extent.Text.Replace('[InteractiveWin11WindowNative]', '[StatefulHostContractNative]')))
+    }
+    $plain = 'ShowWindow:10:9|SetWindowPos:10:-1:67|SetForegroundWindow:10'
+    $forced = "$plain|ForceForeground:10:True:True|SetWindowPos:10:-1:67"
+    foreach ($case in @(
+            @{ Case = 'nothing in the foreground'; Host = 10; Foreground = 0; Later = 0; Expected = $plain },
+            @{ Case = 'the host in the foreground'; Host = 10; Foreground = 100; Later = 100; Expected = $plain },
+            @{ Case = 'another noctty in the foreground'; Host = 10; Foreground = 200; Later = 200; Expected = $plain },
+            @{ Case = 'a process whose name cannot be read'; Host = 10; Foreground = 400; Later = 400; Expected = $plain },
+            @{ Case = 'another application'; Host = 10; Foreground = 300; Later = 300; Expected = $forced; Log = "process 'T3 Code (Nightly)' held the foreground; ForceForeground took it back." },
+            @{ Case = 'explorer'; Host = 10; Foreground = 301; Later = 301; Expected = $forced; Log = "process 'explorer' held the foreground; ForceForeground took it back." },
+            @{ Case = 'another application, take-back failed'; Host = 10; Foreground = 300; Later = 300; Force = $false; Expected = $forced; Log = 'ForceForeground did not take it back.' },
+            @{ Case = 'another application, then the host'; Host = 10; Foreground = 300; Later = 100; Expected = $plain },
+            @{ Case = 'another application, then another'; Host = 10; Foreground = 300; Later = 301; Expected = $plain },
+            @{ Case = 'a null host window'; Host = 0; Foreground = 300; Later = 300; Expected = 'ShowWindow:0:9|SetWindowPos:0:-1:67|SetForegroundWindow:0' }
+        )) {
+        $forceResult = if ($case.ContainsKey('Force')) { $case.Force } else { $true }
+        [StatefulHostContractNative]::Reset(100, [uint32]$case.Foreground, [uint32]$case.Later, $forceResult)
+        $hostLines = @(Show-StatefulHost ([IntPtr]$case.Host) 6>&1 | ForEach-Object { "$_" })
+        $calls = [StatefulHostContractNative]::Calls -join '|'
+        $logged = $hostLines -join "`n"
+        if ($calls -cne $case.Expected -or
+            ($case.ContainsKey('Log') -and ($hostLines.Count -ne 1 -or -not $logged.EndsWith($case.Log, [StringComparison]::Ordinal))) -or
+            (-not $case.ContainsKey('Log') -and $hostLines.Count -ne 0)) {
+            throw "Show-StatefulHost with $($case.Case): calls '$calls', output '$logged'; expected calls '$($case.Expected)'."
+        }
+    }
+    [StatefulHostContractNative]::Reset(100, 300, 300, $true)
+    $foregroundIds = @(Get-StatefulForegroundProcessId)
+    if ($foregroundIds.Count -ne 1 -or $foregroundIds[0] -isnot [uint32] -or $foregroundIds[0] -ne 300) {
+        throw "Get-StatefulForegroundProcessId must return the foreground's process id as one [uint32]; it returned '$($foregroundIds -join ',')'."
+    }
+}
+finally {
+    $script:STATEFUL_HOST_SETTLE_MS = $savedSettle
+    foreach ($behaviorFunctionName in @('Show-StatefulHost', 'Get-StatefulForegroundProcessId', 'Get-StatefulProcessName', 'Test-StatefulForeignForeground', 'Get-Process')) {
+        Remove-Item -LiteralPath "Function:\$behaviorFunctionName" -ErrorAction SilentlyContinue
+    }
+    Remove-Variable -Scope Script -Name statefulContractNames -ErrorAction SilentlyContinue
 }
 
 # Harness screenshots go to the uploaded artifacts of a public repository, so
