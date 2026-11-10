@@ -8019,13 +8019,16 @@ pub const App = struct {
     /// False when there is nothing to do: the quick terminal keeps its tabs,
     /// a window's only tab is already alone, and only an ordinary window
     /// with a tab takes one.
-    pub fn moveTabToWindow(self: *App, source: *Host, index: usize, dest: TabMoveDest) !bool {
-        if (source.quick_terminal or index >= source.tabs.items.len) return false;
-        switch (dest) {
-            .new_window => if (source.tabs.items.len < 2) return false,
-            .host => |to| if (to.host == source or to.host.quick_terminal or
-                to.host.hwnd == null or to.host.tabs.items.len == 0) return false,
-        }
+    pub fn moveTabToWindow(self: *App, asked: *Host, index: usize, dest: TabMoveDest) !bool {
+        if (asked.quick_terminal or index >= asked.tabs.items.len) return false;
+        if (!moveTabAllowed(asked, switch (dest) {
+            .new_window => null,
+            .host => |to| to.host,
+        })) return false;
+        // The windows as the move holds them: found again by id, with every
+        // check above applied again and the destination's slot reserved
+        // again, after each step that runs window code (`revalidateTabMove`).
+        var source = asked;
         const tab_id = source.tabs.items[index].id;
         const source_id = source.id;
         var insert: usize = switch (dest) {
@@ -8041,7 +8044,7 @@ pub const App = struct {
         // it again first, an error's included.
         var created: ?u32 = null;
         errdefer self.discardCreatedHost(created);
-        const target: *Host = switch (dest) {
+        var target: *Host = switch (dest) {
             .new_window => |drop| target: {
                 const made = try self.createHost(default_title, &self.config, .{ .tear_off = .{ .source = source, .drop = drop } });
                 created = made.id;
@@ -8055,34 +8058,34 @@ pub const App = struct {
         // Making the window ran its window procedures, whose code can close
         // the window the tab is leaving (council round 7, CodeRabbit review
         // 5823245522): it is found again by id before anything reads it.
-        if (self.registry.findHostById(source_id) == null) {
-            // Not an error, so the errdefer does not run.
-            self.discardCreatedHost(created);
-            return false;
-        }
-        try target.tabs.ensureUnusedCapacity(self.core_app.alloc, 1);
         const target_id = target.id;
-        // The tab is found again by id too, and a tab gone meanwhile is a
-        // move with nothing to do.
-        var at = source.findTabIndexById(tab_id) orelse {
+        const to_new_window = dest == .new_window;
+        var at: usize = undefined;
+        {
             // Not an error, so the errdefer does not run.
-            self.discardCreatedHost(created);
-            return false;
-        };
+            const now = (try self.revalidateTabMove(source_id, target_id, tab_id, to_new_window)) orelse {
+                self.discardCreatedHost(created);
+                return false;
+            };
+            source = now.source;
+            target = now.target;
+            at = now.at;
+        }
         // What handing the tab over runs first is window code (the prompts
         // it puts away, the drag it ends): before the model's commit, and
         // both windows and the tab found again after it, so the commit is
         // never followed by window code before the transfer, nor by a
         // transfer that cannot happen (council round 8 M1).
         source.prepareGiveTab(tab_id, target_id);
-        if (self.registry.findHostById(source_id) == null or self.registry.findHostById(target_id) == null) {
-            self.discardCreatedHost(created);
-            return false;
+        {
+            const now = (try self.revalidateTabMove(source_id, target_id, tab_id, to_new_window)) orelse {
+                self.discardCreatedHost(created);
+                return false;
+            };
+            source = now.source;
+            target = now.target;
+            at = now.at;
         }
-        at = source.findTabIndexById(tab_id) orelse {
-            self.discardCreatedHost(created);
-            return false;
-        };
         insert = @min(insert, target.tabs.items.len);
 
         // The shell model's half. Undo history goes only once the model has
@@ -8101,7 +8104,7 @@ pub const App = struct {
         var shell_tab: ?win32_shell.model.TabId = null;
         if (self.shell_runtime_initialized) {
             shell_tab = source.tabs.items[at].shell_id orelse return error.ShellStateOutOfSync;
-            shell_prepared = self.shell_runtime.prepare(try moveTabIntent(shell_tab.?, dest, insert)) catch |err| switch (err) {
+            shell_prepared = self.shell_runtime.prepare(try moveTabIntent(shell_tab.?, if (to_new_window) null else target, insert)) catch |err| switch (err) {
                 error.InvalidTransfer => null,
                 else => return err,
             };
@@ -8119,24 +8122,37 @@ pub const App = struct {
                 // are found again, and the move asked again of what is there
                 // now (Greptile r4510568134). Gone, it is a move with nothing
                 // to do.
-                const still = self.registry.findHostById(source_id) != null and
-                    self.registry.findHostById(target_id) != null;
-                const now: ?usize = if (still) source.findTabIndexById(tab_id) else null;
-                at = now orelse {
+                const now = (try self.revalidateTabMove(source_id, target_id, tab_id, to_new_window)) orelse {
                     self.discardCreatedHost(created);
                     return false;
                 };
+                source = now.source;
+                target = now.target;
+                at = now.at;
                 insert = @min(insert, target.tabs.items.len);
                 shell_tab = source.tabs.items[at].shell_id orelse return error.ShellStateOutOfSync;
-                shell_prepared = try self.shell_runtime.prepare(try moveTabIntent(shell_tab.?, dest, insert));
+                shell_prepared = try self.shell_runtime.prepare(try moveTabIntent(shell_tab.?, if (to_new_window) null else target, insert));
             }
         }
         defer if (shell_prepared) |*prepared| prepared.deinit();
 
+        if (builtin.is_test) {
+            if (test_tab_move_shell_step) |hook| hook(self, .commit);
+        }
+        // Right before the commit, once more: the transfer after it uses the
+        // reserved slot and the windows as they are now, and must not fail
+        // (council round 9 M1).
+        {
+            const now = (try self.revalidateTabMove(source_id, target_id, tab_id, to_new_window)) orelse {
+                self.discardCreatedHost(created);
+                return false;
+            };
+            source = now.source;
+            target = now.target;
+            at = now.at;
+            insert = @min(insert, target.tabs.items.len);
+        }
         if (shell_prepared) |*prepared| {
-            if (builtin.is_test) {
-                if (test_tab_move_shell_step) |hook| hook(self, .commit);
-            }
             // A focus message between the prepare and here makes it stale:
             // it is prepared again on what is current.
             try prepared.commitRetryingStale(&self.shell_runtime);
@@ -8147,10 +8163,7 @@ pub const App = struct {
         source.tabs.items[at].clearRedoHistory();
         // The tab the destination showed starts a new branch too, as a
         // reorder's two tabs do: its panes' local redo goes.
-        switch (dest) {
-            .new_window => {},
-            .host => |to| if (to.host.activeTab()) |front| front.clearRedoHistory(),
-        }
+        if (!to_new_window) if (target.activeTab()) |front| front.clearRedoHistory();
 
         // Nothing fails from here on. The tab moves first, and nothing
         // between the commit and here runs a window's code: disposing undo
@@ -8210,7 +8223,10 @@ pub const App = struct {
             // The tab beside it comes to the front, without taking the
             // keyboard from the window the tab went to.
             window_state.refreshBackgroundOpacity(source);
-            if (source.activeTab()) |front| if (front.focusedSurface()) |pane| self.activateSurfaceNoFocus(pane);
+            // Window code too (council round 9 L1): found again first.
+            if (self.registry.findHostById(source_id)) |host| {
+                if (host.activeTab()) |front| if (front.focusedSurface()) |pane| self.activateSurfaceNoFocus(pane);
+            }
             // Activation is window code: found again (council round 8 M1).
             if (self.registry.findHostById(source_id)) |host| {
                 runUiActionOrLog("tab move source layout failed", host.layout());
@@ -8240,13 +8256,40 @@ pub const App = struct {
         return true;
     }
 
-    /// `move_tab_to_window` for `tab` into `dest` at `insert`.
-    fn moveTabIntent(tab: win32_shell.model.TabId, dest: TabMoveDest, insert: usize) !win32_shell.intent.Intent {
-        const window: ?win32_shell.model.WindowId = switch (dest) {
-            .new_window => null,
-            .host => |to| to.host.shell_id orelse return error.ShellStateOutOfSync,
-        };
+    /// `move_tab_to_window` for `tab` into `target` at `insert`, or into a
+    /// new window (null).
+    fn moveTabIntent(tab: win32_shell.model.TabId, target: ?*const Host, insert: usize) !win32_shell.intent.Intent {
+        const window: ?win32_shell.model.WindowId = if (target) |host| host.shell_id orelse return error.ShellStateOutOfSync else null;
         return .{ .move_tab_to_window = .{ .tab = tab, .window = window, .index = insert } };
+    }
+
+    /// Whether `source` may give a tab to `target`, an existing window, or
+    /// to a new one (null): never from the quick terminal or a window being
+    /// destroyed, a new window only from a window that keeps a tab, and an
+    /// existing one only if it is another ordinary window that has a tab.
+    fn moveTabAllowed(source: *const Host, target: ?*const Host) bool {
+        if (source.quick_terminal or source.hwnd == null) return false;
+        const to = target orelse return source.tabs.items.len >= 2;
+        return to != source and !to.quick_terminal and to.hwnd != null and to.tabs.items.len > 0;
+    }
+
+    const TabMoveCheck = struct { source: *Host, target: *Host, at: usize };
+
+    /// Where a tab move stands after window code ran, which can close or
+    /// change either window (council round 9 M1, L2): both windows and the
+    /// tab found again by id, every check `moveTabAllowed` makes applied
+    /// again (a window whose `WM_DESTROY` has run has no `hwnd` before it
+    /// is removed), and the destination's slot reserved again. Null: the
+    /// move has nothing left to do.
+    fn revalidateTabMove(self: *App, source_id: u32, target_id: u32, tab_id: u32, to_new_window: bool) !?TabMoveCheck {
+        const source = self.registry.findHostById(source_id) orelse return null;
+        const target = self.registry.findHostById(target_id) orelse return null;
+        if (to_new_window) {
+            if (!moveTabAllowed(source, null) or target.hwnd == null) return null;
+        } else if (!moveTabAllowed(source, target)) return null;
+        const at = source.findTabIndexById(tab_id) orelse return null;
+        try target.tabs.ensureUnusedCapacity(self.core_app.alloc, 1);
+        return .{ .source = source, .target = target, .at = at };
     }
 
     const MovedTab = struct { host: *Host, at: usize, pane: *Surface };
@@ -8288,6 +8331,8 @@ pub const App = struct {
             };
             found = self.findMovedTab(target_id, moved_id) orelse return;
             if (presents) found.pane.presentWindow();
+            // Presenting focuses the pane: window code (council round 9 L1).
+            found = self.findMovedTab(target_id, moved_id) orelse return;
             // Its live tab must not sit in a window nobody can reach.
             if (found.host.hwnd) |hwnd| if (sys.IsWindowVisible(hwnd) == 0) {
                 _ = sys.ShowWindow(hwnd, c.SW_SHOW);
@@ -17793,6 +17838,102 @@ test "win32 a tab move with no way to wake the pump is refused, and the queue st
             try std.testing.expectEqual(@as(usize, 2), source.tabs.items.len);
             try std.testing.expect(source.findTabIndexById(second) != null);
             try std.testing.expect(source.findTabIndexById(first) == null);
+        }
+    }.body);
+}
+
+const TestFillTarget = struct {
+    var target: ?*Host = null;
+    var added = false;
+
+    /// While the history a transfer kept is cleared for the move's second
+    /// prepare, window code adds a tab to the window the tab is to join, and
+    /// its list is left full: the slot the move reserved is gone (council
+    /// round 9 M1, probe C).
+    fn hook(app: *App, step: App.TabMoveShellStep) void {
+        if (step != .retry_prepare) return;
+        const host = target orelse return;
+        target = null;
+        // As window code that adds a tab does: made, then brought forward.
+        const tab = app.createWindowSurface(&app.config, default_title, .{ .host_id = host.id }) catch return;
+        app.activateSurface(tab);
+        host.tabs.shrinkAndFree(app.core_app.alloc, host.tabs.items.len);
+        added = true;
+    }
+};
+
+test "win32 a tab move whose destination fills while history is cleared reserves its slot again before the commit (council round 9 M1, probe C)" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    try runOnHiddenDesktop(struct {
+        fn body() !void {
+            var fixture: win32.WindowStartTestApp = .{};
+            try fixture.init();
+            defer fixture.deinit();
+            const app = &fixture.app;
+            app.shell_runtime_initialized = true;
+            const setup: TabMoveFixture = .{ .fixture = &fixture };
+            const source = try setup.window(3, false);
+            const target = try setup.window(1, false);
+            // A transfer in undo history names the front tab, which moves:
+            // the model asks for that history to go first.
+            source.tab_drop_operation = .split_right;
+            source.tab_drop_target_surface = source.tabs.items[2].focusedSurface().?;
+            try std.testing.expect(source.commitTabDropSplit(0));
+            TestFillTarget.target = target;
+            TestFillTarget.added = false;
+            App.test_tab_move_shell_step = &TestFillTarget.hook;
+            defer App.test_tab_move_shell_step = null;
+            try std.testing.expect(try app.moveTabToWindow(source, source.active_tab, .{ .host = .{ .host = target, .index = 1 } }));
+            App.test_tab_move_shell_step = null;
+            try std.testing.expect(TestFillTarget.added);
+            // The tab joined the window's other two.
+            try std.testing.expectEqual(@as(usize, 3), target.tabs.items.len);
+            try std.testing.expectEqual(@as(usize, 1), source.tabs.items.len);
+            try app.validateShellNativeMapping();
+        }
+    }.body);
+}
+
+const TestTargetLosesWindow = struct {
+    var target: ?*Host = null;
+    var kept: ?HWND = null;
+
+    /// Right before the commit, the window the tab is to join is between its
+    /// `WM_DESTROY`, which takes its `hwnd`, and its removal (council round 9
+    /// L2).
+    fn hook(_: *App, step: App.TabMoveShellStep) void {
+        if (step != .commit) return;
+        const host = target orelse return;
+        target = null;
+        kept = host.hwnd;
+        host.hwnd = null;
+    }
+};
+
+test "win32 a tab move whose destination loses its window before the commit moves nothing (council round 9 L2)" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    try runOnHiddenDesktop(struct {
+        fn body() !void {
+            var fixture: win32.WindowStartTestApp = .{};
+            try fixture.init();
+            defer fixture.deinit();
+            const app = &fixture.app;
+            app.shell_runtime_initialized = true;
+            const setup: TabMoveFixture = .{ .fixture = &fixture };
+            const source = try setup.window(2, false);
+            const target = try setup.window(1, false);
+            TestTargetLosesWindow.target = target;
+            TestTargetLosesWindow.kept = null;
+            App.test_tab_move_shell_step = &TestTargetLosesWindow.hook;
+            defer App.test_tab_move_shell_step = null;
+            const moved = app.moveTabToWindow(source, 0, .{ .host = .{ .host = target, .index = 1 } });
+            App.test_tab_move_shell_step = null;
+            // Its window back, for the teardown.
+            target.hwnd = TestTargetLosesWindow.kept;
+            try std.testing.expect(!(try moved));
+            try std.testing.expectEqual(@as(usize, 2), source.tabs.items.len);
+            try std.testing.expectEqual(@as(usize, 1), target.tabs.items.len);
+            try app.validateShellNativeMapping();
         }
     }.body);
 }
