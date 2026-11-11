@@ -8259,22 +8259,47 @@ pub const App = struct {
     /// window procedure on the stack. A move can free the window it was asked
     /// of, so the windows are found again for each request.
     pub fn drainPendingTabMoves(self: *App) void {
+        // The windows a move of this drain took a tab from (`tabMoveDeclined`).
+        var gave: TabMoveGivers = .{};
         // Each run takes one request off the queue and adds none, so this ends.
         while (self.pending_tab_moves.items.len > 0) {
             const pending = self.pending_tab_moves.orderedRemove(0);
             // The window may have gone meanwhile (its last pane closed, or an
             // earlier move emptied it).
             const host = self.registry.findHostById(pending.host_id) orelse continue;
-            self.runTabMove(host, pending.request);
+            if (self.runTabMove(host, pending.request, &gave)) gave.add(pending.host_id);
         }
         self.pending_tab_moves.clearAndFree(self.core_app.alloc);
         // Nothing waits: no timer outlives the queue.
         killThreadTimer(&self.tab_move_wake_timer);
     }
 
-    fn runTabMove(self: *App, host: *Host, request: Host.TabMoveRequest) void {
+    /// The windows a drain's moves took a tab from, by id. Past its room
+    /// every window counts, which only keeps a declined move quiet.
+    const TabMoveGivers = struct {
+        ids: [16]u32 = undefined,
+        len: usize = 0,
+        overflowed: bool = false,
+
+        fn add(self: *TabMoveGivers, id: u32) void {
+            if (self.has(id)) return;
+            if (self.len == self.ids.len) {
+                self.overflowed = true;
+                return;
+            }
+            self.ids[self.len] = id;
+            self.len += 1;
+        }
+
+        fn has(self: *const TabMoveGivers, id: u32) bool {
+            return self.overflowed or std.mem.indexOfScalar(u32, self.ids[0..self.len], id) != null;
+        }
+    };
+
+    /// One queued move; true when the tab moved.
+    fn runTabMove(self: *App, host: *Host, request: Host.TabMoveRequest, gave: *const TabMoveGivers) bool {
         // The tab may have closed meanwhile: nothing to move or to say.
-        const index = host.findTabIndexById(request.tab_id) orelse return;
+        const index = host.findTabIndexById(request.tab_id) orelse return false;
         const host_id = host.id;
         const to_new_window = request.dest == .new_window;
         const dest: TabMoveDest = switch (request.dest) {
@@ -8282,16 +8307,21 @@ pub const App = struct {
             .window => |over| .{
                 .host = .{
                     // The window it was to join is gone.
-                    .host = self.registry.findHostById(over.host_id) orelse return self.tabMoveDeclined(host_id, request.tab_id, false),
+                    .host = self.registry.findHostById(over.host_id) orelse {
+                        self.tabMoveDeclined(host_id, request.tab_id, false, gave);
+                        return false;
+                    },
                     .index = over.index,
                 },
             },
         };
         const moved = self.moveTabToWindow(host, index, dest) catch |err| {
             log.warn("tab move failed err={}", .{err});
-            return self.tabMoveDeclined(host_id, request.tab_id, to_new_window);
+            self.tabMoveDeclined(host_id, request.tab_id, to_new_window, gave);
+            return false;
         };
-        if (!moved) self.tabMoveDeclined(host_id, request.tab_id, to_new_window);
+        if (!moved) self.tabMoveDeclined(host_id, request.tab_id, to_new_window, gave);
+        return moved;
     }
 
     /// An accepted tab move that did not happen: what asked for it (a drop,
@@ -8299,16 +8329,19 @@ pub const App = struct {
     /// leave says so while the tab is still in it, as other window actions do
     /// when they fail (CodeRabbit r4520679604; a declined one too, #703 M2:
     /// the window it was to join gone, or refusing it at the last moment).
-    /// Not when the tab is now its window's only one and was to get a new
-    /// window: an `all:` binding moved the others first, and the only tab
-    /// stays, as asked for alone it would (the action refuses it).
-    fn tabMoveDeclined(self: *App, host_id: u32, tab_id: u32, to_new_window: bool) void {
+    /// Not when the tab is its window's only one now because moves of this
+    /// same drain took the others (`gave`): an `all:` binding asked a new
+    /// window for each, and the last stays, as asked for alone it would (the
+    /// action refuses it). A window left with one tab any other way (a
+    /// chain's `close_tab:other` after the move was asked for) says so
+    /// (#703 round 2, Sol).
+    fn tabMoveDeclined(self: *App, host_id: u32, tab_id: u32, to_new_window: bool, gave: *const TabMoveGivers) void {
         const source = self.registry.findHostById(host_id) orelse return;
         // A window whose `WM_DESTROY` has run has no `hwnd` before it is
         // removed (`revalidateTabMove`): nowhere to show it.
         if (source.hwnd == null) return;
         if (source.findTabIndexById(tab_id) == null) return;
-        if (to_new_window and source.tabs.items.len < 2) return;
+        if (to_new_window and source.tabs.items.len < 2 and gave.has(host_id)) return;
         source.setBanner(.err, "The tab could not be moved.") catch {};
     }
 
@@ -17119,6 +17152,52 @@ test "win32 a queued tab move whose destination is gone or refuses it says so in
     }.body);
 }
 
+test "win32 a queued tab move left with one tab by a close says so, unlike an all: binding's last tab (#703 round 2)" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    try runOnHiddenDesktop(struct {
+        fn body() !void {
+            var fixture: win32.WindowStartTestApp = .{};
+            try fixture.init();
+            defer fixture.deinit();
+            const app = &fixture.app;
+            app.shell_runtime_initialized = true;
+            const setup: TabMoveFixture = .{ .fixture = &fixture };
+            const host = try setup.window(2, false);
+            // A chain: `move_tab_to_new_window` is accepted for the second
+            // tab, then `close_tab:other` closes the first before the queue
+            // drains, so the move finds the tab alone and is declined.
+            const moving = host.tabs.items[1].id;
+            try std.testing.expect(app.requestTabMove(host, moving, .{ .new_window = null }));
+            const other = host.tabs.items[0].focusedSurface().?;
+            fixture.core_app.deleteSurface(other);
+            try std.testing.expect(host.closeTabInPlace(0));
+            try std.testing.expectEqual(@as(usize, 1), host.tabs.items.len);
+            TabMoveFixture.runPosted(host);
+            try std.testing.expect(host.findTabIndexById(moving) != null);
+            try std.testing.expectEqual(@as(usize, 1), app.registry.hosts.items.len);
+            try std.testing.expectEqual(HostBannerKind.err, host.banner_kind);
+            try std.testing.expectEqualStrings("The tab could not be moved.", host.banner_text.?);
+            try host.setBanner(.none, null);
+            // A dragged tear-off: dropped with the window's other tab still
+            // there, which then closes before the queued move runs.
+            const second = try setup.window(2, false);
+            try second.layout();
+            const dragged = second.tabs.items[1].id;
+            const button = second.tabs.items[1].button_hwnd orelse return error.TestNoTabButton;
+            const drop = second.tearOffDrop(.{ .x = 600, .y = 400 }, button) orelse return error.TestNoDrop;
+            try std.testing.expect(app.requestTabMove(second, dragged, .{ .new_window = drop }));
+            const left_behind = second.tabs.items[0].focusedSurface().?;
+            fixture.core_app.deleteSurface(left_behind);
+            try std.testing.expect(second.closeTabInPlace(0));
+            TabMoveFixture.runPosted(second);
+            try std.testing.expect(second.findTabIndexById(dragged) != null);
+            try std.testing.expectEqual(HostBannerKind.err, second.banner_kind);
+            try std.testing.expectEqualStrings("The tab could not be moved.", second.banner_text.?);
+            try app.validateShellNativeMapping();
+        }
+    }.body);
+}
+
 /// The grab offset a drop of tab 1 at a fixed point would get now.
 fn testTearOffGrab(host: *Host) !POINT {
     const button = host.tabs.items[1].button_hwnd orelse return error.TestNoTabButton;
@@ -17240,6 +17319,45 @@ test "win32 a tab torn off onto a monitor of another DPI lands under the pointer
 
 const TestMonitor = struct { work: RECT, dpi: u32 };
 
+/// Drop points in `work` where a `width` x `height` window, with the pointer
+/// `grab` from its top-left, fits whole, so nothing moves it to fit
+/// (`fitRectInWork`): the middle of that range and its bottom-right end, the
+/// window against the work area's bottom and right edges. Null when the
+/// window cannot fit at all (Greptile r4532749495: a short display has no
+/// room below its middle).
+fn testTearOffDropPoints(work: RECT, width: i32, height: i32, grab: POINT) ?[2]POINT {
+    const lo: POINT = .{ .x = work.left + grab.x, .y = work.top + grab.y };
+    const hi: POINT = .{ .x = work.right - (width - grab.x) - 1, .y = work.bottom - (height - grab.y) - 1 };
+    if (hi.x < lo.x or hi.y < lo.y) return null;
+    return .{ .{ .x = @divTrunc(lo.x + hi.x, 2), .y = @divTrunc(lo.y + hi.y, 2) }, hi };
+}
+
+fn testWindowFits(work: RECT, at: POINT, width: i32, height: i32, grab: POINT) bool {
+    const left = at.x - grab.x;
+    const top = at.y - grab.y;
+    return left >= work.left and top >= work.top and left + width <= work.right and top + height <= work.bottom;
+}
+
+test "win32 the drained-drop test's drop points keep the window whole on a 1024x768 display, and skip a window too big for it (Greptile r4532749495)" {
+    // 1024x768 less a 40 px taskbar, the CI runner's likely display; a
+    // 640x480 restored window, the pointer 30,58 into it.
+    const work: RECT = .{ .left = 0, .top = 0, .right = 1024, .bottom = 728 };
+    const grab: POINT = .{ .x = 30, .y = 58 };
+    // The work area's middle leaves no room below: the trap.
+    try std.testing.expect(!testWindowFits(work, .{ .x = 512, .y = 364 }, 640, 480, grab));
+    const points = testTearOffDropPoints(work, 640, 480, grab).?;
+    for (points) |at| try std.testing.expect(testWindowFits(work, at, 640, 480, grab));
+    // The bottom-right point puts the window 1 px inside both edges.
+    try std.testing.expectEqual(@as(i32, 1024 - 640 + 30 - 1), points[1].x);
+    try std.testing.expectEqual(@as(i32, 728 - 480 + 58 - 1), points[1].y);
+    // A window as wide or as tall as the work area cannot fit: skipped.
+    try std.testing.expect(testTearOffDropPoints(work, 1024, 480, grab) == null);
+    try std.testing.expect(testTearOffDropPoints(work, 640, 728, grab) == null);
+    // A monitor that is not at the origin.
+    const side: RECT = .{ .left = 3840, .top = 471, .right = 5760, .bottom = 1503 };
+    for (testTearOffDropPoints(side, 1034, 600, grab).?) |at| try std.testing.expect(testWindowFits(side, at, 1034, 600, grab));
+}
+
 /// The monitors there are (up to eight), each with its work area and DPI.
 fn testMonitorList(out: *[8]TestMonitor) usize {
     const Search = struct {
@@ -17304,12 +17422,18 @@ test "win32 a tab dropped from a maximized or fullscreen window opens restored w
                 app.os_build = c.OS_BUILD_WIN11_21H2;
                 app.use_integrated_titlebar = titlebar;
                 const setup: TabMoveFixture = .{ .fixture = &fixture };
-                const host = try setup.window(2, false);
+                // Three tabs: two are dropped, and the window keeps one.
+                const host = try setup.window(3, false);
                 const hwnd = host.hwnd.?;
                 const pane = host.activeSurface().?;
-                // On the source's monitor, then maximized or fullscreen there.
-                _ = sys.SetWindowPos(hwnd, null, from.work.left + 80, from.work.top + 80, 0, 0, c.SWP_NOSIZE | c.SWP_NOZORDER | c.SWP_NOACTIVATE);
+                // On the source's monitor at 400x300, small enough for a small
+                // display, then maximized or fullscreen there.
+                _ = sys.SetWindowPos(hwnd, null, from.work.left + 80, from.work.top + 80, 400, 300, c.SWP_NOZORDER | c.SWP_NOACTIVATE);
                 try host.layout();
+                // Its restored size: what a torn-off tab's window opens at,
+                // scaled to the drop's DPI (`placeTearOff`).
+                var restored: RECT = undefined;
+                try std.testing.expect(sys.GetWindowRect(hwnd, &restored) != 0);
                 switch (source_state) {
                     .maximized => _ = sys.ShowWindow(hwnd, c.SW_MAXIMIZE),
                     .fullscreen => try std.testing.expect(try window_state.perform(host, pane, .toggle_fullscreen, .native)),
@@ -17318,37 +17442,60 @@ test "win32 a tab dropped from a maximized or fullscreen window opens restored w
                 try std.testing.expectEqual(titlebar or source_state == .fullscreen, host.tabsFlushWithTop());
                 const from_dpi = host.current_dpi;
                 try std.testing.expectEqual(from.dpi, from_dpi);
-                // Tab 2, held 30,15 into its button, dropped in the middle of
-                // the drop's monitor, away from its edges.
-                const moving = host.tabs.items[1].id;
-                const button = host.tabs.items[1].button_hwnd orelse return error.TestNoTabButton;
+                // A tab held 30,15 into its button. Where it lands in the new
+                // window (`grab`) depends only on the drop monitor's DPI, so a
+                // first drop in the middle of that monitor gives it.
                 host.tab_drag_grab = .{ .x = 30, .y = 15 };
-                const at: POINT = .{ .x = @divTrunc(to.work.left + to.work.right, 2), .y = @divTrunc(to.work.top + to.work.bottom, 2) };
-                const drop = host.tearOffDrop(at, button) orelse return error.TestNoDrop;
-                try std.testing.expect(app.requestTabMove(host, moving, .{ .new_window = drop }));
-                TabMoveFixture.runPosted(host);
-                // The new window: restored, at the drop's DPI, its tab under
-                // the pointer where the tab was held.
-                var made: ?*Host = null;
-                for (app.registry.hosts.items) |other| if (other != host and other.tabs.items.len > 0) {
-                    made = other;
+                const middle: POINT = .{ .x = @divTrunc(to.work.left + to.work.right, 2), .y = @divTrunc(to.work.top + to.work.bottom, 2) };
+                const probe_button = host.tabs.items[1].button_hwnd orelse return error.TestNoTabButton;
+                const grab = (host.tearOffDrop(middle, probe_button) orelse return error.TestNoDrop).grab;
+                // The drop points where the whole new window fits the work
+                // area, so nothing moves it to fit (`fitRectInWork`; a short
+                // display has no room below its middle, Greptile r4532749495):
+                // the middle of that range, and its bottom-right end, the
+                // window against the work area's bottom and right edges.
+                const width = Host.scaleByDpi(restored.right - restored.left, to.dpi, from_dpi);
+                const height = Host.scaleByDpi(restored.bottom - restored.top, to.dpi, from_dpi);
+                const points = testTearOffDropPoints(to.work, width, height, grab) orelse {
+                    std.log.warn("drop monitor's work area is {d}x{d}, too small for a {d}x{d} window: case skipped", .{ to.work.right - to.work.left, to.work.bottom - to.work.top, width, height });
+                    if (source_state == .fullscreen) _ = try window_state.perform(host, pane, .toggle_fullscreen, .native);
+                    return;
                 };
-                const target = made orelse return error.TestNoNewWindow;
-                try std.testing.expectEqual(@as(usize, 1), target.tabs.items.len);
-                try std.testing.expect(sys.IsZoomed(target.hwnd.?) == 0);
-                try std.testing.expect(!target.top_level.isFullscreen());
-                try std.testing.expectEqual(to.dpi, target.current_dpi);
-                try target.layout();
-                const tab_button = target.tabs.items[0].button_hwnd orelse return error.TestNoTabButton;
-                var rect: RECT = undefined;
-                try std.testing.expect(sys.GetWindowRect(tab_button, &rect) != 0);
-                try std.testing.expect(at.x >= rect.left and at.x < rect.right and at.y >= rect.top and at.y < rect.bottom);
-                const want_x = Host.scaleByDpi(30, to.dpi, from_dpi);
-                const want_y = Host.scaleByDpi(15, to.dpi, from_dpi);
-                // Exactly: the frame at the drop's DPI, not scaled to it (a
-                // stock frame is 8,31 at 96 DPI and 11,45 at 144).
-                try std.testing.expectEqual(want_x, at.x - rect.left);
-                try std.testing.expectEqual(want_y, at.y - rect.top);
+                for (points) |at| {
+                    const moving = host.tabs.items[1].id;
+                    const button = host.tabs.items[1].button_hwnd orelse return error.TestNoTabButton;
+                    var before: [8]*Host = undefined;
+                    const before_count = app.registry.hosts.items.len;
+                    @memcpy(before[0..before_count], app.registry.hosts.items);
+                    const drop = host.tearOffDrop(at, button) orelse return error.TestNoDrop;
+                    try std.testing.expect(app.requestTabMove(host, moving, .{ .new_window = drop }));
+                    TabMoveFixture.runPosted(host);
+                    // The new window: restored, at the drop's DPI, its tab
+                    // under the pointer where the tab was held.
+                    var made: ?*Host = null;
+                    for (app.registry.hosts.items) |other| {
+                        if (std.mem.indexOfScalar(*Host, before[0..before_count], other) == null) made = other;
+                    }
+                    const target = made orelse return error.TestNoNewWindow;
+                    try std.testing.expectEqual(@as(usize, 1), target.tabs.items.len);
+                    try std.testing.expect(sys.IsZoomed(target.hwnd.?) == 0);
+                    try std.testing.expect(!target.top_level.isFullscreen());
+                    try std.testing.expectEqual(to.dpi, target.current_dpi);
+                    var opened: RECT = undefined;
+                    try std.testing.expect(sys.GetWindowRect(target.hwnd.?, &opened) != 0);
+                    try std.testing.expect(opened.left >= to.work.left and opened.top >= to.work.top and opened.right <= to.work.right and opened.bottom <= to.work.bottom);
+                    try target.layout();
+                    const tab_button = target.tabs.items[0].button_hwnd orelse return error.TestNoTabButton;
+                    var rect: RECT = undefined;
+                    try std.testing.expect(sys.GetWindowRect(tab_button, &rect) != 0);
+                    try std.testing.expect(at.x >= rect.left and at.x < rect.right and at.y >= rect.top and at.y < rect.bottom);
+                    const want_x = Host.scaleByDpi(30, to.dpi, from_dpi);
+                    const want_y = Host.scaleByDpi(15, to.dpi, from_dpi);
+                    // Exactly: the frame at the drop's DPI, not scaled to it
+                    // (a stock frame is 8,31 at 96 DPI and 11,45 at 144).
+                    try std.testing.expectEqual(want_x, at.x - rect.left);
+                    try std.testing.expectEqual(want_y, at.y - rect.top);
+                }
                 if (source_state == .fullscreen) _ = try window_state.perform(host, pane, .toggle_fullscreen, .native);
             }
         };

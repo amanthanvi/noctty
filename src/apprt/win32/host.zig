@@ -4007,6 +4007,8 @@ pub const Host = struct {
         const from = @max(self.current_dpi, 1);
         const to = if (dpi == 0) from else dpi;
         const frame = self.restoredClientOffset(hwnd, to);
+        // Only `.top` is read, which depends on the DPI alone (this window's
+        // tab-bar height, at its own DPI, sets only `.height`).
         const placement = chrome_layout.tabButtonPlacement(self.tabBarHeight(), to, false);
         var button_width: i32 = self.scaled(host_tab_max_button_width);
         if (button) |held| {

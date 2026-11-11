@@ -373,6 +373,7 @@ that govern each symbol you change, or that none does.
   window or another window (tab tear-off: `App.moveTabToWindow`,
   `App.requestTabMove`, the outer-pump queue `App.pending_tab_moves` and
   `App.drainPendingTabMoves` and the move it runs, `App.runTabMove`,
+  and what a declined one says, `App.tabMoveDeclined`,
   its wake `App.noteTabMoveWake`,
   `App.revalidateTabMove` and the entry checks it applies again,
   `App.moveTabAllowed`, `Host.endTabDrag`, a drag's Esc
@@ -383,7 +384,9 @@ that govern each symbol you change, or that none does.
   the only tab's window move (`Host.beginOnlyTabWindowMove`),
   `Host.prepareGiveTab`,
   `Host.giveTab`, `Host.reparentSurface`, where a torn-off tab's
-  pointer lands: `Host.tearOffDrop`, `Host.restoredClientOffset`,
+  pointer lands: `Host.tearOffDrop`, `Host.tearOffDropOn`,
+  `Host.restoredClientOffset`, and the window it lands in,
+  `window_start.placeTearOff`,
   `win32/tab_drag.zig`, the shell model's `move_tab_to_window`,
   `move_tab_to_new_window`), split dividers under the mouse
   (`win32/pane_divider.zig`, `Host.handlePaneDividerMessage` and

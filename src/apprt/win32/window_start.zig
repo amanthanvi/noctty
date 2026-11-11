@@ -338,7 +338,8 @@ pub fn placeTearOff(p: *const Plan, occupied: Occupied, drop: ?Drop) Placement {
         // the pointer its logical place in it: both scale by the DPIs before
         // the rect is fitted to that monitor's work area, so the fit sees the
         // size the window will have there (window-frame.md; TEAROFF-01).
-        // The grab is in the source window's pixels now; the size, for a
+        // The grab is in `grab_dpi`'s pixels (0: the source window's); the
+        // size, for a
         // fullscreen source, in those of the monitor it entered fullscreen
         // on, where its return rect was saved.
         const from = @max(source.monitor.dpi, 1);
