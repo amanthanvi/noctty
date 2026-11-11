@@ -3822,6 +3822,12 @@ pub const Host = struct {
     pub const TabMoveRequest = struct {
         tab_id: u32,
         dest: Dest,
+        /// Accepted from `move_tab_to_new_window` (`.new_window = null`)
+        /// when every other tab of its window already had a move queued, as
+        /// an `all:` binding's last tab is: once those run it is the window's
+        /// only tab. Only such a request finding its tab alone is declined
+        /// in silence (`App.tabMoveDeclined`, CodeRabbit r4536317953).
+        last_queued: bool = false,
 
         pub const Dest = union(enum) {
             /// A new window, where the tab was dropped, or (null) a cascade

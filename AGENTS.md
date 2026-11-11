@@ -373,7 +373,8 @@ that govern each symbol you change, or that none does.
   window or another window (tab tear-off: `App.moveTabToWindow`,
   `App.requestTabMove`, the outer-pump queue `App.pending_tab_moves` and
   `App.drainPendingTabMoves` and the move it runs, `App.runTabMove`,
-  and what a declined one says, `App.tabMoveDeclined`,
+  and what a declined one says, `App.tabMoveDeclined`, by what its request
+  was accepted as, `Host.TabMoveRequest.last_queued`,
   its wake `App.noteTabMoveWake`,
   `App.revalidateTabMove` and the entry checks it applies again,
   `App.moveTabAllowed`, `Host.endTabDrag`, a drag's Esc
