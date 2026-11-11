@@ -113,9 +113,15 @@ function Get-StatefulForegroundProcessId {
 }
 
 # A process's name, $null for id 0 or a process whose name cannot be read.
+# This helper and Show-StatefulHost call their cmdlets module-qualified, which
+# no plain-named function or alias can stand in for; Contracts.30 pins both
+# functions statement for statement and refuses the rest (a function named
+# with the qualified name, any use of PowerShell's default parameter values or
+# information preference variable) in this library, the window library, and the
+# interactive, measure and history libraries its calling harnesses load first.
 function Get-StatefulProcessName([uint32] $ProcessId) {
     if ($ProcessId -eq 0) { return $null }
-    try { return (Get-Process -Id $ProcessId -ErrorAction Stop).ProcessName } catch { return $null }
+    try { return (Microsoft.PowerShell.Management\Get-Process -Id $ProcessId -ErrorAction Stop).ProcessName } catch { return $null }
 }
 
 function Show-StatefulHost([IntPtr] $HostHwnd) {
@@ -136,10 +142,10 @@ function Show-StatefulHost([IntPtr] $HostHwnd) {
             $taken = [InteractiveWin11WindowNative]::ForceForeground($HostHwnd, $true, $true)
             [void][InteractiveWin11WindowNative]::SetWindowPos($HostHwnd, [IntPtr](-1), 0, 0, 0, 0, 0x0043)
             $outcome = if ($taken) { 'took it back' } else { 'did not take it back' }
-            Write-Host "Show-StatefulHost: process '$foregroundProcessName' held the foreground; ForceForeground $outcome."
+            Microsoft.PowerShell.Utility\Write-Host "Show-StatefulHost: process '$foregroundProcessName' held the foreground; ForceForeground $outcome."
         }
     }
-    Start-Sleep -Milliseconds $script:STATEFUL_HOST_SETTLE_MS
+    Microsoft.PowerShell.Utility\Start-Sleep -Milliseconds $script:STATEFUL_HOST_SETTLE_MS
 }
 
 function Get-StatefulPixelSamplePoints($Rect) {

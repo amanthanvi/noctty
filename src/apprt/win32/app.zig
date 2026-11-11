@@ -1147,8 +1147,9 @@ pub const App = struct {
         target: []u8,
         text_editor: struct { path: []u8, from_settings: bool },
         on_screen_keyboard,
-        /// Install or Apply, once it is confirmed: `applyStagedUpdate` reaches
-        /// `ShellExecuteW`, so it runs from the loop like the opens do.
+        /// Install, once it is confirmed: for an installer copy
+        /// `applyStagedUpdate` reaches `ShellExecuteW`, so it runs from the
+        /// loop like the opens do.
         apply_staged_update,
         elevated_window: struct { parameters: [:0]u8, cwd: ?[]const u8 },
 
@@ -3889,7 +3890,7 @@ pub const App = struct {
         self.quitConfirmed();
     }
 
-    /// Say in the banner why Install or Apply could not go ahead.
+    /// Say in the banner why Install could not go ahead.
     fn showUpdateApplyFailure(self: *App, err: anyerror) void {
         self.showUpdateInfo(.err, updateApplyFailureMessage(err)) catch |banner_err| {
             log.warn("failed to show updater apply failure err={}", .{banner_err});
@@ -9076,8 +9077,9 @@ pub const App = struct {
         self.quitConfirmed();
     }
 
-    /// Install and Apply end every session the way a quit does, so they ask
-    /// the same way, in the same place. The answer queues `applyStagedUpdate`.
+    /// Install ends every session the way a quit does, for an installed or a
+    /// portable copy alike, so it asks the same way, in the same place. The
+    /// answer queues `applyStagedUpdate`.
     pub fn requestApplyStagedUpdate(self: *App) !void {
         // Before the prompt, so nobody is asked to close their sessions for an
         // install that then declines.
@@ -9103,10 +9105,11 @@ pub const App = struct {
         return true;
     }
 
-    /// `applyStagedUpdate` reaches `ShellExecuteW`, which dispatches window
-    /// messages (see `runDeferredOpens`), and the confirm's answer arrives
-    /// inside the overlay's own handlers, so the apply waits for the loop.
-    /// While one is queued or under way, asking again does nothing.
+    /// For an installer copy `applyStagedUpdate` reaches `ShellExecuteW`,
+    /// which dispatches window messages (see `runDeferredOpens`), and the
+    /// confirm's answer arrives inside the overlay's own handlers, so the
+    /// apply waits for the loop. While one is queued or under way, asking
+    /// again does nothing.
     pub fn queueApplyStagedUpdate(self: *App) !void {
         if (self.update_apply_queued or self.update_apply_in_flight) return;
         try self.deferShellRequest(.apply_staged_update);

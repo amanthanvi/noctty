@@ -44,6 +44,15 @@ $commandResolutionProbes = @(
     [pscustomobject]@{ Reject = $true; Text = '#ReQuIrEs -Version 5.1 -PsSnApIn Example.SnapIn' }
     [pscustomobject]@{ Reject = $true; Text = '#requires -Modules Example.Module' }
     [pscustomobject]@{ Reject = $true; Text = '#requires -M Example.Module' }
+    [pscustomobject]@{ Reject = $true; Text = 'using module Microsoft.PowerShell.Utility' }
+    [pscustomobject]@{ Reject = $true; Text = 'USING MODULE Microsoft.PowerShell.Management' }
+    # `using assembly` parses only when the assembly loads, so name one by path.
+    [pscustomobject]@{ Reject = $true; Text = "using assembly '$([System.Xml.XmlDocument].Assembly.Location)'" }
+    [pscustomobject]@{ Reject = $false; Text = 'using namespace System.Text' }
+    [pscustomobject]@{ Reject = $true; Text = '[scriptblock]${function:global:Microsoft.PowerShell.Utility\Start-Sleep} = { }' }
+    [pscustomobject]@{ Reject = $true; Text = '$first, ${function:Get-StatefulProcessName} = 1, { }' }
+    [pscustomobject]@{ Reject = $true; Text = '[string]${alias:Get-StatefulProcessName} = ''Get-Date''' }
+    [pscustomobject]@{ Reject = $false; Text = '[int]$count, $rest = 1, 2' }
     [pscustomobject]@{ Reject = $false; Text = '#requires -Version 5.1' }
     [pscustomobject]@{ Reject = $false; Text = '#requires -PSEdition Desktop' }
     [pscustomobject]@{ Reject = $false; Text = 'Write-Host ''#requires -PSSnapin Example.SnapIn''' }
