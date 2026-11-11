@@ -3952,9 +3952,6 @@ pub const Host = struct {
         return true;
     }
 
-    /// Where the window of a tab torn off at `screen` goes: the pointer, and
-    /// where it held the tab (`tab_drag_grab`) as an offset from the new
-    /// window's top-left (`tab_drag.grabOffset`), on the monitor under it.
     /// Where a restored window of this one's kind puts its client area, from
     /// its window rect's top-left, at `dpi`: the frame a
     /// torn-off tab's window opens with, whatever state this one is in now.
@@ -3966,11 +3963,23 @@ pub const Host = struct {
         const framed = self.top_level.decorations_visible or keeps_frame;
         const ex_style: u32 = @truncate(@as(usize, @bitCast(sys.GetWindowLongPtrW(hwnd, c.GWL_EXSTYLE))));
         var rect: RECT = .{ .left = 0, .top = 0, .right = 0, .bottom = 0 };
-        _ = sys.AdjustWindowRectExForDpi(&rect, window_start.hostStyle(framed, false), 0, ex_style, dpi);
+        if (sys.AdjustWindowRectExForDpi(&rect, window_start.hostStyle(framed, false), 0, ex_style, dpi) == 0) {
+            // Not a (0,0) frame: this window's own, scaled to `dpi`, which is
+            // what the grab used before #703.
+            log.warn("tear-off frame at dpi={} not known err={}; this window's own frame, scaled", .{ dpi, windows.kernel32.GetLastError() });
+            var window_rect: RECT = undefined;
+            var origin: POINT = .{ .x = 0, .y = 0 };
+            if (sys.GetWindowRect(hwnd, &window_rect) == 0 or sys.ClientToScreen(hwnd, &origin) == 0) return .{ .x = 0, .y = 0 };
+            const from = @max(self.current_dpi, 1);
+            return .{ .x = window_start.mulDiv(origin.x - window_rect.left, dpi, from), .y = window_start.mulDiv(origin.y - window_rect.top, dpi, from) };
+        }
         const client_top = self.usingIntegratedTitlebar() or (keeps_frame and !self.top_level.decorations_visible);
         return .{ .x = -rect.left, .y = if (client_top) 0 else -rect.top };
     }
 
+    /// Where the window of a tab torn off at `screen` goes: the pointer, and
+    /// where it held the tab (`tab_drag_grab`) as an offset from the new
+    /// window's top-left (`tab_drag.grabOffset`), on the monitor under it.
     pub fn tearOffDrop(self: *Host, screen: POINT, button: ?HWND) ?window_start.Drop {
         if (self.hwnd == null) return null;
         const monitor = sys.MonitorFromPoint(screen, c.MONITOR_DEFAULTTONEAREST) orelse return null;

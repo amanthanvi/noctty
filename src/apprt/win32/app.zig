@@ -8304,6 +8304,9 @@ pub const App = struct {
     /// stays, as asked for alone it would (the action refuses it).
     fn tabMoveDeclined(self: *App, host_id: u32, tab_id: u32, to_new_window: bool) void {
         const source = self.registry.findHostById(host_id) orelse return;
+        // A window whose `WM_DESTROY` has run has no `hwnd` before it is
+        // removed (`revalidateTabMove`): nowhere to show it.
+        if (source.hwnd == null) return;
         if (source.findTabIndexById(tab_id) == null) return;
         if (to_new_window and source.tabs.items.len < 2) return;
         source.setBanner(.err, "The tab could not be moved.") catch {};
@@ -17126,20 +17129,28 @@ fn testTearOffGrab(host: *Host) !POINT {
 
 test "win32 a torn-off tab's grab offset is the restored window's, from a maximized or fullscreen source (Greptile r4520680639)" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
-    for ([_]bool{ true, false }) |integrated| {
+    const Mode = enum { integrated, stock, undecorated };
+    for ([_]Mode{ .integrated, .stock, .undecorated }) |mode| {
         const Body = struct {
-            var titlebar: bool = undefined;
+            var which: Mode = undefined;
             fn body() !void {
                 var fixture: win32.WindowStartTestApp = .{};
                 try fixture.init();
                 defer fixture.deinit();
                 const app = &fixture.app;
                 app.shell_runtime_initialized = true;
-                app.use_integrated_titlebar = titlebar;
+                // Windows 11: tabs flush with the top when maximized or
+                // fullscreen, and a 0 px caption row without decorations
+                // (#703, Opus M1).
+                app.os_build = c.OS_BUILD_WIN11_21H2;
+                app.use_integrated_titlebar = which == .integrated;
                 const setup: TabMoveFixture = .{ .fixture = &fixture };
                 const host = try setup.window(2, false);
                 const hwnd = host.hwnd.?;
+                const pane = host.activeSurface().?;
+                if (which == .undecorated) try std.testing.expect(try window_state.perform(host, pane, .toggle_window_decorations, {}));
                 try host.layout();
+                try std.testing.expect(!host.tabsFlushWithTop());
                 // Restored: the offset is where this window's own frame and
                 // tab row put the tab.
                 const restored = try testTearOffGrab(host);
@@ -17147,24 +17158,26 @@ test "win32 a torn-off tab's grab offset is the restored window's, from a maximi
                 _ = sys.GetWindowRect(hwnd, &window_rect);
                 var origin: POINT = .{ .x = 0, .y = 0 };
                 _ = sys.ClientToScreen(hwnd, &origin);
-                const placement = @import("chrome_layout.zig").tabButtonPlacement(host.tabBarHeight(), host.current_dpi, host.tabsFlushWithTop());
+                const placement = @import("chrome_layout.zig").tabButtonPlacement(host.tabBarHeight(), host.current_dpi, false);
                 try std.testing.expectEqual(origin.x - window_rect.left + 20, restored.x);
                 try std.testing.expectEqual(origin.y - window_rect.top + placement.top + 10, restored.y);
                 // Maximized, and fullscreen: the same, since the new window
-                // opens restored.
+                // opens restored, though this one's tabs are flush with its
+                // top now (but a stock caption's, maximized).
                 _ = sys.ShowWindow(hwnd, c.SW_MAXIMIZE);
                 try host.layout();
+                try std.testing.expectEqual(which != .stock, host.tabsFlushWithTop());
                 try std.testing.expectEqual(restored, try testTearOffGrab(host));
                 _ = sys.ShowWindow(hwnd, c.SW_RESTORE);
-                const pane = host.activeSurface().?;
                 try std.testing.expect(try window_state.perform(host, pane, .toggle_fullscreen, .native));
                 try host.layout();
+                try std.testing.expect(host.tabsFlushWithTop());
                 const fullscreen = try testTearOffGrab(host);
                 try std.testing.expect(try window_state.perform(host, pane, .toggle_fullscreen, .native));
                 try std.testing.expectEqual(restored, fullscreen);
             }
         };
-        Body.titlebar = integrated;
+        Body.which = mode;
         try runOnHiddenDesktop(Body.body);
     }
 }
@@ -17223,6 +17236,128 @@ test "win32 a tab torn off onto a monitor of another DPI lands under the pointer
         Body.which = mode;
         try runOnHiddenDesktop(Body.body);
     }
+}
+
+const TestMonitor = struct { work: RECT, dpi: u32 };
+
+/// The monitors there are (up to eight), each with its work area and DPI.
+fn testMonitorList(out: *[8]TestMonitor) usize {
+    const Search = struct {
+        list: *[8]TestMonitor,
+        len: usize = 0,
+        fn each(monitor: sys.HMONITOR, _: win32.HDC, _: *RECT, data: LPARAM) callconv(.winapi) BOOL {
+            const self: *@This() = @ptrFromInt(@as(usize, @bitCast(data)));
+            if (self.len == self.list.len) return 0;
+            var info: sys.MONITORINFO = std.mem.zeroes(sys.MONITORINFO);
+            info.cbSize = @sizeOf(sys.MONITORINFO);
+            if (sys.GetMonitorInfoW(monitor, &info) == 0) return 1;
+            var dpi_x: u32 = 0;
+            var dpi_y: u32 = 0;
+            if (sys.GetDpiForMonitor(monitor, 0, &dpi_x, &dpi_y) < 0) return 1;
+            self.list[self.len] = .{ .work = info.rcWork, .dpi = dpi_x };
+            self.len += 1;
+            return 1;
+        }
+    };
+    var search: Search = .{ .list = out };
+    _ = sys.EnumDisplayMonitors(null, null, Search.each, @as(LPARAM, @bitCast(@intFromPtr(&search))));
+    return search.len;
+}
+
+test "win32 a tab dropped from a maximized or fullscreen window opens restored with the drop point in its tab, on this monitor and on one of another DPI (#703 Opus M2, Sol M1)" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    // The test binary is DPI-unaware: it would read every monitor at the
+    // system DPI (window-frame.md, the 2026-09-24 window-decoration entry,
+    // trap 5). Per-monitor aware here and on the window's thread.
+    const previous_dpi = sys.SetThreadDpiAwarenessContext(-4);
+    defer _ = sys.SetThreadDpiAwarenessContext(previous_dpi);
+    var monitors: [8]TestMonitor = undefined;
+    const count = testMonitorList(&monitors);
+    if (count == 0) return error.SkipZigTest;
+    // The source's monitor and the drop's: the same one, and, where there
+    // is one, a monitor of another DPI each way.
+    var pairs: [3][2]usize = undefined;
+    var pair_count: usize = 1;
+    pairs[0] = .{ 0, 0 };
+    for (monitors[1..count], 1..) |m, i| if (m.dpi != monitors[0].dpi) {
+        pairs[1] = .{ 0, i };
+        pairs[2] = .{ i, 0 };
+        pair_count = 3;
+        break;
+    };
+    if (pair_count == 1) std.log.warn("no monitor of another DPI here: the same-DPI drop alone", .{});
+    const Source = enum { maximized, fullscreen };
+    for ([_]bool{ true, false }) |integrated| for ([_]Source{ .maximized, .fullscreen }) |state| for (pairs[0..pair_count]) |pair| {
+        const Body = struct {
+            var source_state: Source = undefined;
+            var titlebar: bool = undefined;
+            var from: TestMonitor = undefined;
+            var to: TestMonitor = undefined;
+            fn body() !void {
+                const thread_dpi = sys.SetThreadDpiAwarenessContext(-4);
+                defer _ = sys.SetThreadDpiAwarenessContext(thread_dpi);
+                var fixture: win32.WindowStartTestApp = .{};
+                try fixture.init();
+                defer fixture.deinit();
+                const app = &fixture.app;
+                app.shell_runtime_initialized = true;
+                app.os_build = c.OS_BUILD_WIN11_21H2;
+                app.use_integrated_titlebar = titlebar;
+                const setup: TabMoveFixture = .{ .fixture = &fixture };
+                const host = try setup.window(2, false);
+                const hwnd = host.hwnd.?;
+                const pane = host.activeSurface().?;
+                // On the source's monitor, then maximized or fullscreen there.
+                _ = sys.SetWindowPos(hwnd, null, from.work.left + 80, from.work.top + 80, 0, 0, c.SWP_NOSIZE | c.SWP_NOZORDER | c.SWP_NOACTIVATE);
+                try host.layout();
+                switch (source_state) {
+                    .maximized => _ = sys.ShowWindow(hwnd, c.SW_MAXIMIZE),
+                    .fullscreen => try std.testing.expect(try window_state.perform(host, pane, .toggle_fullscreen, .native)),
+                }
+                try host.layout();
+                try std.testing.expectEqual(titlebar or source_state == .fullscreen, host.tabsFlushWithTop());
+                const from_dpi = host.current_dpi;
+                try std.testing.expectEqual(from.dpi, from_dpi);
+                // Tab 2, held 30,15 into its button, dropped in the middle of
+                // the drop's monitor, away from its edges.
+                const moving = host.tabs.items[1].id;
+                const button = host.tabs.items[1].button_hwnd orelse return error.TestNoTabButton;
+                host.tab_drag_grab = .{ .x = 30, .y = 15 };
+                const at: POINT = .{ .x = @divTrunc(to.work.left + to.work.right, 2), .y = @divTrunc(to.work.top + to.work.bottom, 2) };
+                const drop = host.tearOffDrop(at, button) orelse return error.TestNoDrop;
+                try std.testing.expect(app.requestTabMove(host, moving, .{ .new_window = drop }));
+                TabMoveFixture.runPosted(host);
+                // The new window: restored, at the drop's DPI, its tab under
+                // the pointer where the tab was held.
+                var made: ?*Host = null;
+                for (app.registry.hosts.items) |other| if (other != host and other.tabs.items.len > 0) {
+                    made = other;
+                };
+                const target = made orelse return error.TestNoNewWindow;
+                try std.testing.expectEqual(@as(usize, 1), target.tabs.items.len);
+                try std.testing.expect(sys.IsZoomed(target.hwnd.?) == 0);
+                try std.testing.expect(!target.top_level.isFullscreen());
+                try std.testing.expectEqual(to.dpi, target.current_dpi);
+                try target.layout();
+                const tab_button = target.tabs.items[0].button_hwnd orelse return error.TestNoTabButton;
+                var rect: RECT = undefined;
+                try std.testing.expect(sys.GetWindowRect(tab_button, &rect) != 0);
+                try std.testing.expect(at.x >= rect.left and at.x < rect.right and at.y >= rect.top and at.y < rect.bottom);
+                const want_x = window_start.mulDiv(30, to.dpi, from_dpi);
+                const want_y = window_start.mulDiv(15, to.dpi, from_dpi);
+                // Exactly: the frame at the drop's DPI, not scaled to it (a
+                // stock frame is 8,31 at 96 DPI and 11,45 at 144).
+                try std.testing.expectEqual(want_x, at.x - rect.left);
+                try std.testing.expectEqual(want_y, at.y - rect.top);
+                if (source_state == .fullscreen) _ = try window_state.perform(host, pane, .toggle_fullscreen, .native);
+            }
+        };
+        Body.source_state = state;
+        Body.titlebar = integrated;
+        Body.from = monitors[pair[0]];
+        Body.to = monitors[pair[1]];
+        try runOnHiddenDesktop(Body.body);
+    };
 }
 
 /// What a nested loop does with the tab-move wakes it takes: dispatches them

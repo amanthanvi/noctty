@@ -377,7 +377,9 @@ that govern each symbol you change, or that none does.
   `App.revalidateTabMove` and the entry checks it applies again,
   `App.moveTabAllowed`, `Host.endTabDrag`, a drag's Esc
   (`App.cancelTabDragForKey`, with the IME key resolver it shares with a
-  divider drag, `App.keyMessageOriginalKey` and `App.isEscapeKey`),
+  divider drag, `App.keyMessageOriginalKey` and `App.isEscapeKey`, and
+  what it asks first, `App.anyTabDragActive` and
+  `App.tab_drag_escape_down`),
   the only tab's window move (`Host.beginOnlyTabWindowMove`),
   `Host.prepareGiveTab`,
   `Host.giveTab`, `Host.reparentSurface`, where a torn-off tab's
