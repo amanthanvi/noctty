@@ -17098,6 +17098,12 @@ test "win32 a queued tab move whose destination is gone or refuses it says so in
             try source.setBanner(.none, null);
             // The window it was to join refuses it at the last moment: its
             // `WM_DESTROY` has taken its `hwnd` before the commit.
+            // Its window, saved before the hook can take it and put back on
+            // every path: a move that fails before the commit leaves `kept`
+            // null, and a window the teardown never destroys keeps its class
+            // registered (CodeRabbit r4542471146).
+            const target_window = target.hwnd;
+            defer target.hwnd = target_window;
             TestTargetLosesWindow.target = target;
             TestTargetLosesWindow.kept = null;
             App.test_tab_move_shell_step = &TestTargetLosesWindow.hook;
@@ -17105,7 +17111,8 @@ test "win32 a queued tab move whose destination is gone or refuses it says so in
             try std.testing.expect(app.requestTabMove(source, first, .{ .window = .{ .host_id = target.id, .index = 1 } }));
             TabMoveFixture.runPosted(source);
             App.test_tab_move_shell_step = null;
-            target.hwnd = TestTargetLosesWindow.kept;
+            try std.testing.expectEqual(target_window, TestTargetLosesWindow.kept);
+            target.hwnd = target_window;
             try std.testing.expect(source.findTabIndexById(first) != null);
             try std.testing.expectEqual(@as(usize, 1), target.tabs.items.len);
             try std.testing.expectEqual(HostBannerKind.err, source.banner_kind);
@@ -18901,14 +18908,20 @@ test "win32 a tab move whose destination loses its window before the commit move
             const setup: TabMoveFixture = .{ .fixture = &fixture };
             const source = try setup.window(2, false);
             const target = try setup.window(1, false);
+            // Its window, saved before the hook can take it and put back on
+            // every path: a move that fails before the commit leaves `kept`
+            // null, and a window the teardown never destroys keeps its class
+            // registered (CodeRabbit r4542471146).
+            const target_window = target.hwnd;
+            defer target.hwnd = target_window;
             TestTargetLosesWindow.target = target;
             TestTargetLosesWindow.kept = null;
             App.test_tab_move_shell_step = &TestTargetLosesWindow.hook;
             defer App.test_tab_move_shell_step = null;
             const moved = app.moveTabToWindow(source, 0, .{ .host = .{ .host = target, .index = 1 } });
             App.test_tab_move_shell_step = null;
-            // Its window back, for the teardown.
-            target.hwnd = TestTargetLosesWindow.kept;
+            try std.testing.expectEqual(target_window, TestTargetLosesWindow.kept);
+            target.hwnd = target_window;
             try std.testing.expect(!(try moved));
             try std.testing.expectEqual(@as(usize, 2), source.tabs.items.len);
             try std.testing.expectEqual(@as(usize, 1), target.tabs.items.len);
@@ -19204,12 +19217,18 @@ test "win32 a tab move whose source loses its window right before the commit mov
             const setup: TabMoveFixture = .{ .fixture = &fixture };
             const source = try setup.window(2, false);
             const target = try setup.window(1, false);
+            // Its window, saved before the hook can take it and put back on
+            // every path: a move that fails before the commit leaves `kept`
+            // null, and a window the teardown never destroys keeps its class
+            // registered (CodeRabbit r4542471146).
+            const source_window = source.hwnd;
+            defer source.hwnd = source_window;
             TestCommitWindowCode.arm(.source_loses_window, source, null);
             defer App.test_tab_move_shell_step = null;
             const moved = app.moveTabToWindow(source, 0, .{ .host = .{ .host = target, .index = 1 } });
             App.test_tab_move_shell_step = null;
-            // Its window back, for the teardown.
-            source.hwnd = TestCommitWindowCode.kept;
+            try std.testing.expectEqual(source_window, TestCommitWindowCode.kept);
+            source.hwnd = source_window;
             try std.testing.expect(TestCommitWindowCode.done);
             try std.testing.expect(!(try moved));
             try std.testing.expectEqual(@as(usize, 2), source.tabs.items.len);
@@ -19236,12 +19255,18 @@ test "win32 a queued tab move whose source loses its window right before the com
             // nowhere to say so (`App.tabMoveDeclined`'s guard).
             const moving = source.tabs.items[0].id;
             try std.testing.expect(app.requestTabMove(source, moving, .{ .window = .{ .host_id = target.id, .index = 1 } }));
+            // Its window, saved before the hook can take it and put back on
+            // every path: a move that fails before the commit leaves `kept`
+            // null, and a window the teardown never destroys keeps its class
+            // registered (CodeRabbit r4542471146).
+            const source_window = source.hwnd;
+            defer source.hwnd = source_window;
             TestCommitWindowCode.arm(.source_loses_window, source, null);
             defer App.test_tab_move_shell_step = null;
             TabMoveFixture.runPosted(source);
             App.test_tab_move_shell_step = null;
-            // Its window back, for the teardown.
-            source.hwnd = TestCommitWindowCode.kept;
+            try std.testing.expectEqual(source_window, TestCommitWindowCode.kept);
+            source.hwnd = source_window;
             try std.testing.expect(TestCommitWindowCode.done);
             try std.testing.expect(source.findTabIndexById(moving) != null);
             try std.testing.expectEqual(@as(usize, 2), source.tabs.items.len);
