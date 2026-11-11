@@ -13,7 +13,7 @@ pub const ApplyPolicy = enum { live, new_terminals, restart };
 pub const PreviewEffect = enum { none, theme, opacity };
 /// `profile` is a dropdown whose items are the profiles the app lists
 /// (`AppHandle.profileChoices`), not a fixed `Combo`.
-pub const Kind = enum { integer, number, padding, boolean, choice, blur, notifications, font_families, theme, command, profile };
+pub const Kind = enum { integer, number, padding, boolean, choice, blur, notifications, font_families, theme, command, profile, directory };
 /// Platform availability drives native enablement and all reason labels.
 pub const Support = enum {
     available,
@@ -263,6 +263,7 @@ pub const descriptors = [_]Descriptor{
     .{ .key = .theme, .native = .{ .binding = "edit_theme", .id = 413, .order = 2, .form_label = "Terminal theme name, absolute path, or light/dark pair", .accessible_name = "Terminal theme" }, .label = "Terminal theme", .help = "Built-in theme name, absolute path, or a light/dark theme pair. Leave blank for the default.", .placeholder = "Default theme", .section = .appearance, .kind = .theme, .apply = .live, .validation = .theme, .keywords = "settings preferences configuration theme", .default_display = .inherited },
     .{ .key = .command, .native = .{ .binding = "edit_command", .id = 414, .order = 0, .form_label = "Default command (blank = Default profile or auto-detect)", .accessible_name = "Default command" }, .label = "Default command", .help = "Command for new terminals. It wins over Default profile; leave it blank to start that profile, or to detect a shell when Default profile is Automatic.", .placeholder = "Default profile or automatic shell", .section = .shell, .kind = .command, .apply = .new_terminals, .validation = .command, .keywords = "settings preferences configuration command", .default_display = .automatic },
     .{ .key = .@"default-profile", .native = .{ .binding = "combo_default_profile", .id = 427, .order = 1, .form_label = "Default profile (Default command wins when set)", .accessible_name = "Default profile" }, .label = "Default profile", .help = "The profile new terminals start when Default command is blank: a detected shell, a Visual Studio shell or a profile from the config file. A Default command wins over it. Automatic removes the setting.", .section = .shell, .kind = .profile, .apply = .new_terminals, .keywords = "settings preferences configuration default-profile profile shell", .default_display = .automatic },
+    .{ .key = .@"working-directory", .native = .{ .binding = "edit_working_dir", .id = 428, .order = 3, .form_label = "Starting folder (blank = your home folder)", .accessible_name = "Starting folder" }, .label = "Starting folder", .help = "The folder new terminals start in: a path such as C:\\Projects, home for your home folder, or inherit for the folder noctty was started from. A profile's own starting folder wins over it.", .placeholder = "Your home folder", .section = .shell, .kind = .directory, .apply = .new_terminals, .keywords = "settings preferences configuration working-directory starting folder start directory cwd path", .default_display = .automatic },
 };
 
 pub const FormField = struct {
@@ -366,6 +367,7 @@ pub fn assertCoverage(comptime owned_keys: anytype) void {
             .theme => T == ?Config.Theme,
             .command => T == ?Config.Command,
             .profile => T == ?[:0]const u8,
+            .directory => T == ?Config.WorkingDirectory,
         };
         if (!type_matches) @compileError("Settings editor kind differs from Config type: " ++ @tagName(spec.key));
         if (spec.label.len == 0 or spec.keywords.len == 0) @compileError("Settings metadata must be named");
@@ -611,7 +613,18 @@ pub fn writeOwnedSettingValue(comptime key: Config.Key, writer: *std.Io.Writer, 
             try writeCommandForEdit(writer, command);
         } else try writer.writeAll("(automatic)"),
         .@"default-profile" => try writer.writeAll(config.@"default-profile" orelse "(automatic)"),
+        .@"working-directory" => if (config.@"working-directory") |directory| try writeWorkingDirectoryForEdit(writer, directory) else try writer.writeAll("(home folder)"),
         else => @compileError("Not an owned Settings edit"),
+    }
+}
+
+/// A starting folder as the field shows it and the config file takes it:
+/// `home`, `inherit` or the path.
+pub fn writeWorkingDirectoryForEdit(writer: *std.Io.Writer, directory: Config.WorkingDirectory) !void {
+    switch (directory) {
+        .home => try writer.writeAll("home"),
+        .inherit => try writer.writeAll("inherit"),
+        .path => |path| try writer.writeAll(path),
     }
 }
 
@@ -655,7 +668,7 @@ pub const round_trip_config =
     \\clipboard-trim-trailing-spaces = false
     \\desktop-notifications = false
     \\app-notifications = no-clipboard-copy,no-config-reload
-    \\confirm-close-surface = always
+    \\confirm-close-surface = false
     \\copy-on-select = clipboard
     \\clipboard-read = deny
     \\clipboard-write = deny
@@ -673,6 +686,7 @@ pub const round_trip_config =
     \\theme = light:Light,dark:Dark
     \\command = direct:pwsh.exe -NoLogo -Command "echo #; literal"
     \\default-profile = user:py312
+    \\working-directory = C:\Projects
 ;
 /// Behavioral round trips use Config's real grammar and formatter, including
 /// composite/owned keys, rather than checking source text or pointer equality.
@@ -753,7 +767,7 @@ test "settings model validates scalar ranges with the form's exact types" {
 
 test "settings model separates saved apply timing from edit previews and Windows support" {
     for (descriptors) |spec| {
-        const new_terminal = spec.key == .@"scrollback-limit" or spec.key == .command or spec.key == .@"shell-integration" or spec.key == .@"window-padding-x" or spec.key == .@"window-padding-y" or spec.key == .@"window-padding-balance" or spec.key == .@"default-profile";
+        const new_terminal = spec.key == .@"scrollback-limit" or spec.key == .command or spec.key == .@"shell-integration" or spec.key == .@"window-padding-x" or spec.key == .@"window-padding-y" or spec.key == .@"window-padding-balance" or spec.key == .@"default-profile" or spec.key == .@"working-directory";
         try std.testing.expectEqual(if (new_terminal) ApplyPolicy.new_terminals else ApplyPolicy.live, spec.apply);
         const unavailable = spec.key == .@"background-blur" or spec.key == .@"link-previews";
         try std.testing.expectEqual(if (unavailable) Support.unsupported_on_windows else Support.available, spec.support);

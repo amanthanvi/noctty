@@ -7597,6 +7597,10 @@ pub const Host = struct {
 
     pub const showConfirmOverlay = overlay_session.HostControls.showConfirmOverlay;
 
+    pub const showConfirmDialog = overlay_session.HostControls.showConfirmDialog;
+
+    pub const runConfirmDialog = overlay_session.HostControls.runConfirmDialog;
+
     pub const invokeConfirmAccept = overlay_session.HostControls.invokeConfirmAccept;
 
     pub const invokeConfirmCancel = overlay_session.HostControls.invokeConfirmCancel;
@@ -7894,7 +7898,6 @@ pub const Host = struct {
         _ = sys.AppendMenuW(menu, c.MF_STRING, c.CTX_SELECT_ALL, std.unicode.utf8ToUtf16LeStringLiteral("Select All"));
         _ = sys.AppendMenuW(menu, c.MF_SEPARATOR, 0, null);
         _ = sys.AppendMenuW(menu, c.MF_STRING, c.CTX_FIND, std.unicode.utf8ToUtf16LeStringLiteral("Find...\tCtrl+Shift+F"));
-        _ = sys.AppendMenuW(menu, c.MF_STRING, c.CTX_COMMAND_PALETTE, std.unicode.utf8ToUtf16LeStringLiteral("Command Palette\tCtrl+Shift+P"));
         _ = sys.AppendMenuW(menu, c.MF_SEPARATOR, 0, null);
         _ = sys.AppendMenuW(menu, c.MF_STRING, c.CTX_NEW_TAB, std.unicode.utf8ToUtf16LeStringLiteral("New Tab"));
 
@@ -7907,6 +7910,8 @@ pub const Host = struct {
         _ = sys.AppendMenuW(menu, c.MF_POPUP, @intFromPtr(split_menu), std.unicode.utf8ToUtf16LeStringLiteral("Split"));
 
         _ = sys.AppendMenuW(menu, c.MF_STRING, c.CTX_NEW_WINDOW, std.unicode.utf8ToUtf16LeStringLiteral("New Window"));
+        _ = sys.AppendMenuW(menu, c.MF_SEPARATOR, 0, null);
+        _ = sys.AppendMenuW(menu, c.MF_STRING, c.CTX_SETTINGS, std.unicode.utf8ToUtf16LeStringLiteral("Settings...\tCtrl+,"));
 
         // Menu must be owned by top-level host HWND to avoid dismiss bugs
         _ = sys.SetForegroundWindow(hwnd);
@@ -7935,8 +7940,8 @@ pub const Host = struct {
             c.CTX_FIND => {
                 runUiActionOrLog("context menu find failed", surface.dockedSearch(.{ .open = "" }));
             },
-            c.CTX_COMMAND_PALETTE => {
-                runUiActionOrLog("context menu command palette failed", surface.toggleCommandPalette());
+            c.CTX_SETTINGS => {
+                runUiActionOrLog("context menu settings failed", self.app.performAction(.{ .surface = surface.core() }, .open_config, {}));
             },
             c.CTX_NEW_TAB => {
                 self.postDeferredNewTab();
@@ -8165,29 +8170,56 @@ pub const Host = struct {
         const menu = sys.CreatePopupMenu() orelse return;
         defer _ = sys.DestroyMenu(menu);
 
-        // Profile list — each profile gets a numbered shortcut hint
+        // Profile list — each profile gets a numbered shortcut hint. Remote
+        // Desktop profiles go in their own submenu, and every terminal
+        // profile also in "Run as administrator".
         const selected_idx = self.selectedProfileIndex();
+        const rdp_menu = sys.CreatePopupMenu() orelse return;
+        const admin_menu = sys.CreatePopupMenu() orelse return;
+        var rdp_count: usize = 0;
+        var admin_count: usize = 0;
         if (self.shownProfiles()) |profiles| {
+            var terminals: usize = 0;
             for (profiles, 0..) |*profile, i| {
+                if (i >= 100) break;
                 const label_utf8 = buildDropdownProfileLabel(alloc, profile, i) catch continue;
                 defer alloc.free(label_utf8);
                 const label_w = std.unicode.utf8ToUtf16LeAllocZ(alloc, label_utf8) catch continue;
                 defer alloc.free(label_w);
+                if (profileIsRdp(profile)) {
+                    _ = sys.AppendMenuW(rdp_menu, c.MF_STRING, c.CTX_PROFILE_BASE + i, label_w.ptr);
+                    rdp_count += 1;
+                    continue;
+                }
                 const is_selected = selected_idx != null and selected_idx.? == i;
                 const flags: UINT = if (is_selected) c.MF_STRING | c.MF_CHECKED else c.MF_STRING;
                 _ = sys.AppendMenuW(menu, flags, c.CTX_PROFILE_BASE + i, label_w.ptr);
+                terminals += 1;
+                const plain_w = std.unicode.utf8ToUtf16LeAllocZ(alloc, profile.label) catch continue;
+                defer alloc.free(plain_w);
+                _ = sys.AppendMenuW(admin_menu, c.MF_STRING, c.CTX_ELEVATED_BASE + i, plain_w.ptr);
+                admin_count += 1;
             }
-            if (profiles.len > 0) _ = sys.AppendMenuW(menu, c.MF_SEPARATOR, 0, null);
+            if (terminals > 0) _ = sys.AppendMenuW(menu, c.MF_SEPARATOR, 0, null);
         }
+        // Always offered: with no Remote Desktop profile yet, its only item
+        // imports them.
+        if (rdp_count > 0) _ = sys.AppendMenuW(rdp_menu, c.MF_SEPARATOR, 0, null);
+        _ = sys.AppendMenuW(rdp_menu, c.MF_STRING, c.CTX_IMPORT_TERMINALS, std.unicode.utf8ToUtf16LeStringLiteral("Import from Terminals..."));
+        _ = sys.AppendMenuW(menu, c.MF_POPUP, @intFromPtr(rdp_menu), std.unicode.utf8ToUtf16LeStringLiteral("Remote Desktop"));
+        if (admin_count > 0)
+            _ = sys.AppendMenuW(menu, c.MF_POPUP, @intFromPtr(admin_menu), std.unicode.utf8ToUtf16LeStringLiteral("Run as administrator"))
+        else
+            _ = sys.DestroyMenu(admin_menu);
+        _ = sys.AppendMenuW(menu, c.MF_SEPARATOR, 0, null);
 
         // Utility items
         _ = sys.AppendMenuW(menu, c.MF_STRING, c.CTX_NEW_TAB, std.unicode.utf8ToUtf16LeStringLiteral("Open a new tab"));
         _ = sys.AppendMenuW(menu, c.MF_STRING, c.CTX_NEW_WINDOW, std.unicode.utf8ToUtf16LeStringLiteral("New Window"));
-        _ = sys.AppendMenuW(menu, c.MF_SEPARATOR, 0, null);
-        _ = sys.AppendMenuW(menu, c.MF_STRING, c.CTX_COMMAND_PALETTE, std.unicode.utf8ToUtf16LeStringLiteral("Command Palette\tCtrl+Shift+P"));
         _ = sys.AppendMenuW(menu, c.MF_STRING, c.CTX_FIND, std.unicode.utf8ToUtf16LeStringLiteral("Find...\tCtrl+Shift+F"));
         _ = sys.AppendMenuW(menu, c.MF_SEPARATOR, 0, null);
-        _ = sys.AppendMenuW(menu, c.MF_STRING, c.CTX_INSPECTOR, std.unicode.utf8ToUtf16LeStringLiteral("Toggle Inspector"));
+        _ = sys.AppendMenuW(menu, c.MF_STRING, c.CTX_SETTINGS, std.unicode.utf8ToUtf16LeStringLiteral("Settings...\tCtrl+,"));
+        _ = sys.AppendMenuW(menu, c.MF_STRING, c.CTX_ABOUT, std.unicode.utf8ToUtf16LeStringLiteral("About noctty"));
 
         _ = sys.SetForegroundWindow(hwnd);
         const cmd = sys.TrackPopupMenu(menu, c.TPM_RETURNCMD | c.TPM_RIGHTBUTTON | c.TPM_LEFTALIGN | c.TPM_TOPALIGN, rect.left, rect.bottom, 0, hwnd, null);
@@ -8225,13 +8257,39 @@ pub const Host = struct {
             return;
         }
 
+        // Run as administrator: the profile in a new elevated window, after
+        // Windows' UAC prompt.
+        if (cmd_id >= c.CTX_ELEVATED_BASE and cmd_id < c.CTX_ELEVATED_BASE + 100) {
+            const profile_index = cmd_id - c.CTX_ELEVATED_BASE;
+            const profiles = self.shownProfiles() orelse return;
+            if (profile_index >= profiles.len) return;
+            const key = self.app.core_app.alloc.dupe(u8, profiles[profile_index].key) catch return;
+            defer self.app.core_app.alloc.free(key);
+            runUiActionOrLog("overflow run as administrator failed", self.app.performAction(.app, .new_window_elevated, .{ .profile_key = key }));
+            return;
+        }
+        switch (cmd_id) {
+            c.CTX_SETTINGS => {
+                runUiActionOrLog("overflow settings failed", self.app.performAction(.app, .open_config, {}));
+                return;
+            },
+            c.CTX_ABOUT => {
+                self.showAbout();
+                return;
+            },
+            c.CTX_IMPORT_TERMINALS => {
+                const app = self.app;
+                runUiActionOrLog("overflow settings failed", app.performAction(.app, .open_config, {}));
+                app.settings_window.importTerminalsFromMenu();
+                return;
+            },
+            else => {},
+        }
+
         const surface = self.activeSurface() orelse return;
         if (!surface.core_initialized) return;
 
         switch (cmd_id) {
-            c.CTX_COMMAND_PALETTE => {
-                runUiActionOrLog("overflow command palette failed", surface.toggleCommandPalette());
-            },
             c.CTX_FIND => {
                 runUiActionOrLog("overflow find failed", surface.dockedSearch(.{ .open = "" }));
             },
@@ -8241,11 +8299,28 @@ pub const Host = struct {
             c.CTX_NEW_WINDOW => {
                 runUiActionOrLog("overflow new window failed", self.app.performAction(.{ .surface = surface.core() }, .new_window, .{}));
             },
-            c.CTX_INSPECTOR => {
-                runUiActionOrLog("overflow inspector toggle failed", self.app.toggleInspectorForSurface(surface));
-            },
             else => {},
         }
+    }
+
+    /// Whether `profile` opens a Remote Desktop tab (`rdp_pane.targetOf`).
+    fn profileIsRdp(profile: *const windows_shell.Profile) bool {
+        const user = profile.user orelse return false;
+        return @import("rdp_pane.zig").targetOf(user.command_line) != null;
+    }
+
+    extern "user32" fn MessageBoxW(hwnd: ?HWND, text: [*:0]const u16, caption: [*:0]const u16, kind: u32) callconv(.winapi) i32;
+
+    /// The ▾ menu's About noctty: the version, in a Windows dialog.
+    fn showAbout(self: *Host) void {
+        const alloc = self.app.core_app.alloc;
+        const text = std.fmt.allocPrint(alloc, "noctty {s}\n\nA Windows terminal based on Ghostty, with Remote Desktop tabs.", .{build_config.version_string}) catch return;
+        defer alloc.free(text);
+        const text_w = std.unicode.utf8ToUtf16LeAllocZ(alloc, text) catch return;
+        defer alloc.free(text_w);
+        const MB_OK: u32 = 0x0;
+        const MB_ICONINFORMATION: u32 = 0x40;
+        _ = MessageBoxW(self.hwnd, text_w.ptr, std.unicode.utf8ToUtf16LeStringLiteral("About noctty"), MB_OK | MB_ICONINFORMATION);
     }
 
     pub const isOverlayButton = overlay_session.HostControls.isOverlayButton;
@@ -9272,7 +9347,13 @@ pub const Host = struct {
         defer words.deinit(alloc);
         const behind = if (scope == .this_tab) self.backgroundTabRef(@ptrCast(@alignCast(userdata))) else null;
         const prompt = words.close(alloc, .{ .scope = .{ .scope = scope, .terminals = count, .behind = behind } });
-        self.showConfirm(prompt, on_accept, null, userdata) catch |err| {
+        // A standard Windows dialog asks, not the banner. The tests drive the
+        // same held request through the banner, which needs no modal loop.
+        const shown = if (@import("builtin").is_test)
+            self.showConfirm(prompt, on_accept, null, userdata)
+        else
+            self.showConfirmDialog(prompt, on_accept, userdata);
+        shown catch |err| {
             log.warn("close confirm unavailable err={}; declining close to honour confirm-close-surface", .{err});
         };
     }

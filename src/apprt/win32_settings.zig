@@ -37,6 +37,26 @@ const settings_reference = @import("win32_settings_reference.zig");
 const settings_keybinds = @import("win32_settings_keybinds.zig");
 const settings_profiles = @import("win32_settings_profiles.zig");
 const settings_patch = @import("win32/settings_patch.zig");
+const terminals_import = @import("win32/terminals_import.zig");
+const terminals_dialog = @import("win32/terminals_import_dialog.zig");
+const profile_credentials = @import("win32/profile_credentials.zig");
+
+/// A path a file dialog returned (`C:\...`, plain Win32 form) as WTF-8 for
+/// `std.fs`: its `...W` calls want an NT-prefixed path and stop at a plain
+/// one (`OBJECT_PATH_SYNTAX_BAD`).
+fn dialogPathAlloc(alloc: std.mem.Allocator, path: [:0]const u16) ![]u8 {
+    return std.unicode.wtf16LeToWtf8Alloc(alloc, path);
+}
+
+/// `bytes` as the whole of the file at `path`, made or replaced.
+fn writeWholeFile(path: [:0]const u16, bytes: []const u8) !void {
+    const alloc = std.heap.page_allocator;
+    const path_utf8 = try dialogPathAlloc(alloc, path);
+    defer alloc.free(path_utf8);
+    const file = try std.fs.createFileAbsolute(path_utf8, .{ .truncate = true });
+    defer file.close();
+    try file.writeAll(bytes);
+}
 const profile_map = @import("../config/profile_map.zig");
 const LineIterator = @import("../cli/args.zig").LineIterator;
 const bench_trace = @import("win32/bench_trace.zig");
@@ -527,6 +547,7 @@ const OwnedSettingField = enum {
     /// A dropdown, not a text field: a choice is staged at once and never
     /// waits in `owned_text_changed`.
     default_profile,
+    working_directory,
 
     fn section(self: OwnedSettingField) Section {
         return nativeSection(self.descriptor().section);
@@ -541,6 +562,7 @@ const OwnedSettingField = enum {
             .theme => .theme,
             .command => .command,
             .default_profile => .@"default-profile",
+            .working_directory => .@"working-directory",
         }).?;
     }
 };
@@ -632,6 +654,9 @@ fn display_edit_theme(self: *SettingsWindow) void {
 fn display_edit_command(self: *SettingsWindow) void {
     if (!self.owned_text_changed[@intFromEnum(OwnedSettingField.command)]) self.displayCommandInEdit();
 }
+fn display_edit_working_dir(self: *SettingsWindow) void {
+    if (!self.owned_text_changed[@intFromEnum(OwnedSettingField.working_directory)]) self.displayWorkingDirInEdit();
+}
 /// A dropdown whose items are the field's curated `Combo` options.
 fn comboAdapter(comptime field: SettingField) FieldAdapter {
     const bound = struct {
@@ -701,6 +726,7 @@ const field_adapters = .{
     .edit_theme = FieldAdapter{ .display = display_edit_theme, .changed = ownedEditChanged(.theme, "edit_theme"), .left = SettingsWindow.syncThemeFromEdit },
     .edit_command = FieldAdapter{ .display = display_edit_command, .changed = ownedEditChanged(.command, "edit_command"), .left = SettingsWindow.syncCommandFromEdit },
     .combo_default_profile = FieldAdapter{ .display = SettingsWindow.displayDefaultProfile, .changed = SettingsWindow.syncDefaultProfileFromCombo },
+    .edit_working_dir = FieldAdapter{ .display = display_edit_working_dir, .changed = ownedEditChanged(.working_directory, "edit_working_dir"), .left = SettingsWindow.syncWorkingDirFromEdit },
     .edit_pad_x = paddingAdapter(.window_padding_x),
     .edit_pad_y = paddingAdapter(.window_padding_y),
     .chk_app_notify_clipboard = checkboxAdapter(.app_notify_clipboard),
@@ -755,7 +781,7 @@ pub const editable_keys = .{
     Config.Key.@"shell-integration",      Config.Key.@"cursor-style",      Config.Key.@"background-blur",
     Config.Key.@"window-padding-balance", Config.Key.@"auto-update",       Config.Key.@"auto-update-channel",
     Config.Key.@"font-family",            Config.Key.theme,                Config.Key.command,
-    Config.Key.@"default-profile",
+    Config.Key.@"default-profile",        Config.Key.@"working-directory",
 };
 
 /// A control that goes with a number field and writes the field as typing
@@ -4113,6 +4139,7 @@ pub const SettingsWindow = struct {
             .theme => self.displayThemeInEdit(),
             .command => self.displayCommandInEdit(),
             .default_profile => self.displayDefaultProfile(),
+            .working_directory => self.displayWorkingDirInEdit(),
         }
     }
 
@@ -4121,6 +4148,7 @@ pub const SettingsWindow = struct {
             .font_family => self.syncFontFamilyFromEdit(),
             .theme => self.syncThemeFromEdit(),
             .command => self.syncCommandFromEdit(),
+            .working_directory => self.syncWorkingDirFromEdit(),
             // A choice is staged when it is made.
             .default_profile => {},
         }
@@ -6318,6 +6346,41 @@ pub const SettingsWindow = struct {
         self.trackOwnedEdit(.command);
     }
 
+    /// The Starting folder field: blank is unset (the home folder), else
+    /// `home`, `inherit` or a path, as the config file takes it.
+    fn syncWorkingDirFromEdit(self: *SettingsWindow) void {
+        if (self.suppress_edit_events or !self.owned_text_changed[@intFromEnum(OwnedSettingField.working_directory)]) return;
+        const p = &(self.pending orelse return);
+        const arena = p.*._arena.?.allocator();
+        const edit = self.fields.edit_working_dir orelse return;
+        var text_buf: [edit_text_max_utf8]u8 = undefined;
+        const text = readEditUtf8(edit, &text_buf) orelse return;
+        const trimmed = std.mem.trim(u8, text, " \t");
+        if (trimmed.len == 0) {
+            p.*.@"working-directory" = null;
+            self.clearValidationError(edit);
+            self.trackOwnedEdit(.working_directory);
+            return;
+        }
+        if (std.mem.indexOfAny(u8, trimmed, "\r\n") != null)
+            return self.setValidationError(edit, "Starting folder cannot hold a line break.");
+        var directory: Config.WorkingDirectory = .inherit;
+        directory.parseCLI(arena, trimmed) catch
+            return self.setValidationError(edit, "Starting folder is invalid.");
+        p.*.@"working-directory" = directory;
+        self.clearValidationError(edit);
+        self.trackOwnedEdit(.working_directory);
+    }
+
+    fn displayWorkingDirInEdit(self: *SettingsWindow) void {
+        const edit = self.fields.edit_working_dir orelse return;
+        const p = self.pending orelse return;
+        var buf: [edit_text_max_utf8]u8 = undefined;
+        var writer: std.Io.Writer = .fixed(&buf);
+        if (p.@"working-directory") |directory| field_model.writeWorkingDirectoryForEdit(&writer, directory) catch {};
+        setEditText(edit, writer.buffered(), &self.suppress_edit_events);
+    }
+
     fn displayCommandInEdit(self: *SettingsWindow) void {
         const edit = self.fields.edit_command orelse return;
         const p = self.pending orelse return;
@@ -8109,6 +8172,183 @@ pub const SettingsWindow = struct {
         return self.profile_edit != null;
     }
 
+    /// The window menu's Remote Desktop > Import from Terminals: the
+    /// Profiles page, then the import (`profileImportTerminals`). Settings
+    /// must be open already.
+    pub fn importTerminalsFromMenu(self: *SettingsWindow) void {
+        if (self.hwnd == null) return;
+        self.setActiveSection(.profiles);
+        self.profileImportTerminals();
+    }
+
+    /// Ctrl+I or the list menu's Import from Terminals: the connections of a
+    /// Terminals favorites export the person picks, listed with a check box
+    /// each; the checked ones become profiles of the draft
+    /// (`settings_profiles.addImported`), which Save writes. An SSH
+    /// connection runs `ssh`, an RDP one `mstsc.exe`; other protocols are
+    /// listed and cannot be checked. No password, note or path is read into
+    /// the draft or logged.
+    fn profileImportTerminals(self: *SettingsWindow) void {
+        if (!self.draftTakesEdits()) return;
+        if (!self.profileEditDone()) return;
+        const alloc = self.handle.alloc;
+        const path_buf = alloc.alloc(u16, 32768) catch return self.profileChangeFailed();
+        defer alloc.free(path_buf);
+        const path = terminals_dialog.pickFile(self.hwnd, path_buf) orelse return;
+        const path_utf8 = dialogPathAlloc(alloc, path) catch return self.profileChangeFailed();
+        defer alloc.free(path_utf8);
+        const bytes = read: {
+            const file = std.fs.openFileAbsolute(path_utf8, .{}) catch |err|
+                return self.setProfileNote(.refused, "Error: the file could not be opened ({s}).", .{@errorName(err)});
+            defer file.close();
+            break :read file.readToEndAlloc(alloc, terminals_import.max_file_bytes) catch |err| return switch (err) {
+                error.FileTooBig => self.setProfileNote(.refused, "Error: the file is too large for a Terminals export.", .{}),
+                else => self.setProfileNote(.refused, "Error: the file could not be read.", .{}),
+            };
+        };
+        defer alloc.free(bytes);
+        var parsed = terminals_import.parse(alloc, bytes) catch |err| return switch (err) {
+            error.OutOfMemory => self.profileChangeFailed(),
+            error.NotTerminalsExport, error.NotText => self.setProfileNote(.refused, "Error: that file is not a Terminals favorites export.", .{}),
+        };
+        defer parsed.deinit();
+        if (parsed.favorites.len == 0) return self.setProfileNote(.said, "That Terminals export holds no connections.", .{});
+
+        var arena: std.heap.ArenaAllocator = .init(alloc);
+        defer arena.deinit();
+        const a = arena.allocator();
+        const items = a.alloc(terminals_dialog.Item, parsed.favorites.len) catch return self.profileChangeFailed();
+        const commands = a.alloc(?[]const u8, parsed.favorites.len) catch return self.profileChangeFailed();
+        var importable: usize = 0;
+        {
+            const draft = if (self.pending) |*config| config else return;
+            for (parsed.favorites, items, commands) |favorite, *item, *command| {
+                const refused = terminals_import.refusal(favorite);
+                command.* = if (refused == null) (terminals_import.allocCommand(a, favorite) catch return self.profileChangeFailed()) else null;
+                const exists = if (command.*) |text| settings_profiles.hasCommand(draft, text) else false;
+                const server = if (favorite.port) |port|
+                    std.fmt.allocPrint(a, "{s}:{d}", .{ favorite.server, port }) catch return self.profileChangeFailed()
+                else
+                    favorite.server;
+                item.* = .{
+                    .name = favorite.name,
+                    .kind = favorite.protocol_text,
+                    .server = server,
+                    .note = if (refused) |why| why.text() else if (exists) "already a profile" else "",
+                    .selectable = refused == null,
+                    .checked = refused == null and !exists,
+                };
+                if (refused == null) importable += 1;
+            }
+        }
+        if (importable == 0) return self.setProfileNote(.said, "None of the export's connections can become a profile: only SSH and RDP ones can.", .{});
+        const intro = "Check the connections to add as profiles. SSH connections run ssh, RDP connections open Remote Desktop (mstsc.exe). " ++
+            "Passwords and notes are not imported. Save in Settings keeps the profiles.";
+        const accepted = terminals_dialog.choose(alloc, self.hwnd, items, intro) catch return self.profileChangeFailed();
+        if (!accepted) return;
+        // The dialog's loop may have let an external reload replace the draft.
+        if (!self.draftTakesEdits()) return;
+        const draft = if (self.pending) |*config| config else return;
+        if (self.search_query.active()) self.clearSearch();
+        var added: usize = 0;
+        var skipped: usize = 0;
+        var unkept: usize = 0;
+        var first: ?u64 = null;
+        for (parsed.favorites, items, commands) |favorite, item, command| {
+            if (!item.checked) continue;
+            const text = command orelse continue;
+            var base_buf: [terminals_import.max_base_len]u8 = undefined;
+            const base = terminals_import.baseId(&base_buf, favorite.name, terminals_import.protocolWord(favorite));
+            const id = settings_profiles.addImported(draft, base, favorite.name, text) catch return self.profileChangeFailed();
+            if (id) |owned| {
+                if (first == null) first = settings_profiles.identity(.profile, owned, null);
+                added += 1;
+                // The password goes to the Credential Manager, never the
+                // config file.
+                if (favorite.password.len != 0) profile_credentials.store(owned, favorite.user, favorite.password) catch {
+                    unkept += 1;
+                };
+            } else skipped += 1;
+        }
+        if (added == 0) return self.setProfileNote(.said, "No profile was added.", .{});
+        self.profileDraftChanged(first);
+        if (skipped == 0 and unkept == 0)
+            self.setProfileNote(.said, "Added {d} profile(s) from Terminals; their passwords are kept apart from the config file. Save to keep them.", .{added})
+        else
+            self.setProfileNote(.said, "Added {d} profile(s) from Terminals; {d} could not be added and {d} password(s) could not be kept. Save to keep them.", .{ added, skipped, unkept });
+    }
+
+    /// The list menu's Export to Terminals XML: every SSH and RDP profile of
+    /// the draft (`terminals_import.parseCommand` reads its command line) in
+    /// a Terminals favorites file the person picks, with the password the
+    /// Credential Manager keeps for it, in plain text as Terminals writes
+    /// it. Nothing is logged.
+    fn profileExportTerminals(self: *SettingsWindow) void {
+        if (!self.profileEditDone()) return;
+        const alloc = self.handle.alloc;
+        const config: *const Config = if (self.pending) |*draft| draft else self.handle.currentConfig(self.handle.ctx);
+        var arena: std.heap.ArenaAllocator = .init(alloc);
+        defer arena.deinit();
+        const a = arena.allocator();
+        var entries: std.ArrayListUnmanaged(terminals_import.ExportEntry) = .empty;
+        var with_password: usize = 0;
+        for (config.@"profile-command".entries.items) |entry| {
+            if (entry.removed) continue;
+            const connection = terminals_import.parseCommand(entry.value) orelse continue;
+            const password = (profile_credentials.read(a, entry.id) catch return self.profileChangeFailed()) orelse "";
+            if (password.len != 0) with_password += 1;
+            entries.append(a, .{
+                .name = config.@"profile-name".get(entry.id) orelse entry.id,
+                .connection = connection,
+                .password = password,
+            }) catch return self.profileChangeFailed();
+        }
+        if (entries.items.len == 0) return self.setProfileNote(.said, "No profile runs ssh or mstsc.exe, so there is nothing to export.", .{});
+        var out: std.Io.Writer.Allocating = .init(a);
+        terminals_import.writeXml(&out.writer, entries.items) catch return self.profileChangeFailed();
+        const path_buf = a.alloc(u16, 32768) catch return self.profileChangeFailed();
+        const path = terminals_dialog.pickSaveFile(
+            self.hwnd,
+            path_buf,
+            std.unicode.utf8ToUtf16LeStringLiteral("Export profiles to a Terminals file (passwords in plain text)"),
+            std.unicode.utf8ToUtf16LeStringLiteral("Terminals export (*.xml)\x00*.xml\x00All files (*.*)\x00*.*\x00"),
+            std.unicode.utf8ToUtf16LeStringLiteral("xml"),
+            std.unicode.utf8ToUtf16LeStringLiteral("noctty-profiles.xml"),
+        ) orelse return;
+        writeWholeFile(path, out.written()) catch
+            return self.setProfileNote(.refused, "Error: the export could not be written.", .{});
+        self.setProfileNote(.said, "Exported {d} profile(s) to a Terminals file, {d} with a password in plain text. Keep the file somewhere safe.", .{ entries.items.len, with_password });
+    }
+
+    /// The list menu's Back up config file: a copy of noctty's config file
+    /// where the person picks.
+    fn profileBackupConfig(self: *SettingsWindow) void {
+        const alloc = self.handle.alloc;
+        const source = config_file_load.preferredDefaultFilePath(alloc) catch return self.profileChangeFailed();
+        defer alloc.free(source);
+        const bytes = read: {
+            const file = std.fs.openFileAbsolute(source, .{}) catch
+                return self.setProfileNote(.refused, "Error: noctty's config file could not be opened.", .{});
+            defer file.close();
+            break :read file.readToEndAlloc(alloc, 64 * 1024 * 1024) catch
+                return self.setProfileNote(.refused, "Error: noctty's config file could not be read.", .{});
+        };
+        defer alloc.free(bytes);
+        const path_buf = alloc.alloc(u16, 32768) catch return self.profileChangeFailed();
+        defer alloc.free(path_buf);
+        const path = terminals_dialog.pickSaveFile(
+            self.hwnd,
+            path_buf,
+            std.unicode.utf8ToUtf16LeStringLiteral("Back up noctty's config file"),
+            std.unicode.utf8ToUtf16LeStringLiteral("Config backup (*.config)\x00*.config\x00All files (*.*)\x00*.*\x00"),
+            std.unicode.utf8ToUtf16LeStringLiteral("config"),
+            std.unicode.utf8ToUtf16LeStringLiteral("noctty-backup.config"),
+        ) orelse return;
+        writeWholeFile(path, bytes) catch
+            return self.setProfileNote(.refused, "Error: the backup could not be written.", .{});
+        self.setProfileNote(.said, "Backed up noctty's config file ({d} bytes).", .{bytes.len});
+    }
+
     /// Insert or Ctrl+N: a new profile, typed into the "New profile" row.
     fn profileNew(self: *SettingsWindow) void {
         if (!self.profileEditDone()) return;
@@ -8898,6 +9138,9 @@ pub const SettingsWindow = struct {
                 std.unicode.utf8ToUtf16LeStringLiteral("&Hide in the picker\tCtrl+H"));
         };
         if (row.kind != .new_profile) _ = sys.AppendMenuW(menu, MF_STRING, profile_menu_new, std.unicode.utf8ToUtf16LeStringLiteral("&New profile\tInsert"));
+        _ = sys.AppendMenuW(menu, MF_STRING | @as(UINT, if (self.draftTakesEdits()) 0 else MF_GRAYED), profile_menu_import, std.unicode.utf8ToUtf16LeStringLiteral("&Import from Terminals...\tCtrl+I"));
+        _ = sys.AppendMenuW(menu, MF_STRING, profile_menu_export, std.unicode.utf8ToUtf16LeStringLiteral("E&xport to Terminals file (with passwords)..."));
+        _ = sys.AppendMenuW(menu, MF_STRING, profile_menu_backup, std.unicode.utf8ToUtf16LeStringLiteral("&Back up config file..."));
         _ = sys.AppendMenuW(menu, MF_STRING, reference_menu_open, std.unicode.utf8ToUtf16LeStringLiteral("&Open config file"));
         const picked: usize = if (self.context_menu_pick) |pick|
             pick(menu)
@@ -8910,6 +9153,9 @@ pub const SettingsWindow = struct {
             profile_menu_up => self.profileMove(-1),
             profile_menu_down => self.profileMove(1),
             profile_menu_hide => self.profileToggleHidden(),
+            profile_menu_import => self.profileImportTerminals(),
+            profile_menu_export => self.profileExportTerminals(),
+            profile_menu_backup => self.profileBackupConfig(),
             reference_menu_open => self.handle.openInEditor(self.handle.ctx),
             else => {},
         }
@@ -11118,7 +11364,7 @@ test "settings open and a first visit create each window once in its final form"
             // Every section shown: the whole form, the All settings list (its
             // page is shown last), and still one font build.
             for (std.enums.values(Section)) |section| settings.setActiveSection(section);
-            try std.testing.expectEqual(@as(usize, 77), Work.Tree.of(fixture.hwnd()).len);
+            try std.testing.expectEqual(@as(usize, 79), Work.Tree.of(fixture.hwnd()).len);
             try std.testing.expectEqual(@as(u32, 1), settings.font_builds);
             try std.testing.expectEqual(@as(u32, 0), settings.theme_applications);
         }
@@ -11186,7 +11432,7 @@ test "settings sections shown in any order leave the window as one made whole at
             // Every window in the same z-order, with the same styles, place,
             // client area, check, dropdown heights, text and font, and every
             // field and text with its UIA provider.
-            try std.testing.expectEqual(@as(usize, 76), states[0].len);
+            try std.testing.expectEqual(@as(usize, 78), states[0].len);
             try State.expectSame(&states[0], &states[1]);
             try std.testing.expectEqual(providers[0], providers[1]);
             for (providers[1]) |provided| try std.testing.expect(provided);
@@ -11626,7 +11872,7 @@ test "settings an invalid field marks its rail section, the title and UIA" {
             try std.testing.expectEqualStrings("noctty settings", try titleOf(hwnd));
 
             // An unsaved edit marks its own section and the title, not the others.
-            _ = sys.SendMessageW(settings.fields.combo_confirm_close.?, CB_SETCURSEL, 2, 0);
+            _ = sys.SendMessageW(settings.fields.combo_confirm_close.?, CB_SETCURSEL, 1, 0);
             settings.syncCombo(.confirm_close);
             try std.testing.expectEqual(Marker.unsaved, settings.sectionProvider(.terminal).?.markerState());
             try std.testing.expectEqual(Marker.none, settings.sectionProvider(.appearance).?.markerState());
@@ -11732,7 +11978,7 @@ test "settings status and close prompt are live regions" {
             events.testing_live_regions = 0;
             // A half-typed number and the hint that follows an edit: silent.
             typeInto(settings.fields.edit_font_size.?, "1");
-            _ = sys.SendMessageW(settings.fields.combo_confirm_close.?, CB_SETCURSEL, 2, 0);
+            _ = sys.SendMessageW(settings.fields.combo_confirm_close.?, CB_SETCURSEL, 1, 0);
             settings.syncCombo(.confirm_close);
             try std.testing.expectEqual(@as(usize, 0), events.testing_live_regions);
             // The error, once it is shown: spoken, once, and not again for the
@@ -11763,7 +12009,7 @@ test "settings a failed Save and close is spoken when the prompt goes away" {
             dialog_test.makeAllSections(settings);
             const events = win32_uia.events;
 
-            _ = sys.SendMessageW(settings.fields.combo_confirm_close.?, CB_SETCURSEL, 2, 0);
+            _ = sys.SendMessageW(settings.fields.combo_confirm_close.?, CB_SETCURSEL, 1, 0);
             settings.syncCombo(.confirm_close);
             settings.showClosePrompt();
             // The status line is hidden behind the prompt: nothing to speak yet.
@@ -16791,7 +17037,7 @@ test "settings display-only text row needs no persistence adapter" {
             try std.testing.expectEqual(@as(LONG_PTR, 499), sys.GetWindowLongPtrW(control, -12));
             try std.testing.expect(sys.GetWindowLongPtrW(control, GWL_STYLE) & WS_TABSTOP == 0);
             try std.testing.expect(sys.IsWindowEnabled(fixture.settings.btn_save.?) == 0);
-            try std.testing.expectEqual(@as(usize, 25), editable_keys.len);
+            try std.testing.expectEqual(@as(usize, 26), editable_keys.len);
         }
     }.body);
 }
@@ -18437,7 +18683,7 @@ test "settings status line says whether an edit previews or waits for a save" {
             try std.testing.expectEqualStrings("Applies when you save.", try statusTextOf(settings, &buf));
 
             // A setting that is only read at save says so too.
-            _ = sys.SendMessageW(settings.fields.combo_confirm_close.?, CB_SETCURSEL, 2, 0);
+            _ = sys.SendMessageW(settings.fields.combo_confirm_close.?, CB_SETCURSEL, 1, 0);
             settings.syncCombo(.confirm_close);
             try std.testing.expectEqualStrings("Applies when you save.", try statusTextOf(settings, &buf));
 
@@ -18502,7 +18748,7 @@ test "settings outcome messages show over a conflict and do not outlive their ed
             // A failure is about edits that are still there to save.
             settings.status_note = .save_failed;
             try std.testing.expectEqualStrings(nothing_to_save_text, settings.idleStatusText());
-            _ = sys.SendMessageW(settings.fields.combo_confirm_close.?, CB_SETCURSEL, 2, 0);
+            _ = sys.SendMessageW(settings.fields.combo_confirm_close.?, CB_SETCURSEL, 1, 0);
             settings.syncCombo(.confirm_close);
             // The edit replaced the note.
             try std.testing.expectEqualStrings("Applies when you save.", settings.idleStatusText());
@@ -21623,9 +21869,12 @@ const profile_menu_new: usize = 5;
 const profile_menu_up: usize = 6;
 const profile_menu_down: usize = 7;
 const profile_menu_hide: usize = 8;
+const profile_menu_import: usize = 9;
+const profile_menu_export: usize = 10;
+const profile_menu_backup: usize = 11;
 /// What the Profiles list's UIA help text says: the keys it takes.
 const profile_list_help = "Up and Down move through the profiles, in the picker's order, and your profiles' fields: command line, name, starting folder and variables. " ++
-    "Enter edits the selected field, Delete removes it (a profile asks twice), Insert or Ctrl+N adds a profile, Alt+Up and Alt+Down move a profile, Ctrl+H hides it or shows it, and Shift+F10 offers these. " ++
+    "Enter edits the selected field, Delete removes it (a profile asks twice), Insert or Ctrl+N adds a profile, Ctrl+I imports profiles from a Terminals export, Alt+Up and Alt+Down move a profile, Ctrl+H hides it or shows it, and Shift+F10 offers these. " ++
     "A profile noctty found on this computer can be moved and hidden, not edited; one noctty hides itself (an older Visual Studio) can be none of these.";
 /// The help text of the field being typed into.
 const profile_edit_help = "Enter keeps the change and Escape cancels it. Save writes your changes to the config file.";
@@ -22601,6 +22850,11 @@ const ReferenceList = struct {
             'N' => {
                 if (self.kind != .profiles or !win32_input.keyPressed(VK_CONTROL) or win32_input.keyPressed(VK_MENU) or win32_input.keyPressed(VK_SHIFT)) return false;
                 self.owner().profileNew();
+            },
+            // Ctrl+I imports profiles from a Terminals export.
+            'I' => {
+                if (self.kind != .profiles or !win32_input.keyPressed(VK_CONTROL) or win32_input.keyPressed(VK_MENU) or win32_input.keyPressed(VK_SHIFT)) return false;
+                self.owner().profileImportTerminals();
             },
             // Ctrl+H hides the selected profile from the picker, or shows it.
             'H' => {
@@ -27635,6 +27889,15 @@ fn optionalCommandEql(a: ?Config.Command, b: ?Config.Command) bool {
     return commandEql(a.?, b.?);
 }
 
+fn optionalWorkingDirectoryEql(a: ?Config.WorkingDirectory, b: ?Config.WorkingDirectory) bool {
+    if (a == null or b == null) return a == null and b == null;
+    return switch (a.?) {
+        .home => b.? == .home,
+        .inherit => b.? == .inherit,
+        .path => |path| b.? == .path and std.mem.eql(u8, path, b.?.path),
+    };
+}
+
 fn optionalStringEql(a: ?[:0]const u8, b: ?[:0]const u8) bool {
     if (a == null or b == null) return a == null and b == null;
     return std.mem.eql(u8, a.?, b.?);
@@ -27646,6 +27909,7 @@ fn ownedSettingEql(a: *const Config, b: *const Config, field: OwnedSettingField)
         .theme => optionalThemeEql(a.theme, b.theme),
         .command => optionalCommandEql(a.command, b.command),
         .default_profile => optionalStringEql(a.@"default-profile", b.@"default-profile"),
+        .working_directory => optionalWorkingDirectoryEql(a.@"working-directory", b.@"working-directory"),
     };
 }
 
@@ -27656,6 +27920,7 @@ fn ownedSettingBlank(config: *const Config, field: OwnedSettingField) bool {
         .theme => config.theme == null,
         .command => config.command == null,
         .default_profile => config.@"default-profile" == null,
+        .working_directory => config.@"working-directory" == null,
     };
 }
 
@@ -27679,6 +27944,7 @@ const OwnedSettingValue = union(OwnedSettingField) {
     theme: @FieldType(Config, "theme"),
     command: @FieldType(Config, "command"),
     default_profile: @FieldType(Config, "default-profile"),
+    working_directory: @FieldType(Config, "working-directory"),
 };
 
 /// `source`'s value of `field`, copied into `target`'s arena but not stored.
@@ -27689,6 +27955,7 @@ fn cloneOwnedSetting(target: *Config, source: *const Config, field: OwnedSetting
         .theme => .{ .theme = if (source.theme) |*value| try value.clone(alloc) else null },
         .command => .{ .command = if (source.command) |*value| try value.clone(alloc) else null },
         .default_profile => .{ .default_profile = if (source.@"default-profile") |value| try alloc.dupeZ(u8, value) else null },
+        .working_directory => .{ .working_directory = if (source.@"working-directory") |value| try value.clone(alloc) else null },
     };
 }
 
@@ -27698,6 +27965,7 @@ fn storeOwnedSetting(target: *Config, value: OwnedSettingValue) void {
         .theme => |v| target.theme = v,
         .command => |v| target.command = v,
         .default_profile => |v| target.@"default-profile" = v,
+        .working_directory => |v| target.@"working-directory" = v,
     }
 }
 
@@ -28038,6 +28306,7 @@ test "win32_settings: advanced diff includes arena-backed-only edits" {
     try pending_command.parseCLI(pending_alloc, "direct:pwsh.exe -NoLogo");
     pending.command = pending_command;
     pending.@"default-profile" = try pending_alloc.dupeZ(u8, "user:py312");
+    pending.@"working-directory" = .{ .path = try pending_alloc.dupe(u8, "C:\\Projects") };
 
     const dirty = [_]bool{true} ** owned_setting_field_count;
     var conflict = [_]bool{false} ** owned_setting_field_count;
@@ -28045,13 +28314,14 @@ test "win32_settings: advanced diff includes arena-backed-only edits" {
     var buf: [1024]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buf);
     const owned = writeOwnedSettingDiffs(&writer, &original, &pending, dirty, conflict);
-    try std.testing.expectEqual(@as(usize, 4), owned.lines);
+    try std.testing.expectEqual(@as(usize, 5), owned.lines);
     try std.testing.expect(!owned.truncated);
     const text = writer.buffered();
     try std.testing.expect(std.mem.indexOf(u8, text, "Font family: Cascadia Mono -> JetBrains Mono, Symbols Nerd Font") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "Terminal theme: Old Theme -> light:Day,dark:Night (conflict)") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "Default command: cmd.exe -> direct:pwsh.exe -NoLogo") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "Default profile: (automatic) -> user:py312") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "Starting folder: (home folder) -> C:\\Projects") != null);
 }
 
 test "win32_settings: font-family edit text builds repeatable list" {

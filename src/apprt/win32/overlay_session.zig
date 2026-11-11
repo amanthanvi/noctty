@@ -920,6 +920,76 @@ pub const HostControls = struct {
         try self.showOverlay(.confirm, null);
     }
 
+    /// `showConfirm` as a standard Windows dialog (OK and Cancel) instead of
+    /// the banner: the closes that ask first (a tab, the window, the whole
+    /// program). The request is held as the banner's is (`confirm_payload`),
+    /// so a terminal that goes meanwhile drops it (`cancelConfirmIfOwnedBy`),
+    /// and the dialog opens from the message loop (`runConfirmDialog`), not
+    /// inside the key or click that asked.
+    pub fn showConfirmDialog(
+        self: *Host,
+        prompt: confirm_text.Prompt,
+        on_accept: *const fn (userdata: ?*anyopaque) void,
+        userdata: ?*anyopaque,
+    ) !void {
+        const alloc = self.app.core_app.alloc;
+        const title_owned = try alloc.dupe(u8, prompt.title);
+        errdefer alloc.free(title_owned);
+        const body_owned = try alloc.dupe(u8, prompt.body);
+        errdefer alloc.free(body_owned);
+        const accept_owned = try alloc.dupe(u8, prompt.accept_label);
+        errdefer alloc.free(accept_owned);
+        const cancel_owned = try alloc.dupe(u8, prompt.cancel_label);
+        errdefer alloc.free(cancel_owned);
+        if (self.overlay_mode != .none) self.hideOverlay();
+        try beginConfirmOverlay(self, .{
+            .title = title_owned,
+            .body = body_owned,
+            .accept_label = accept_owned,
+            .cancel_label = cancel_owned,
+            .preview = null,
+            .program_request = false,
+            .armed_at_ms = 0,
+            .on_accept = on_accept,
+            .on_cancel = null,
+            .userdata = userdata,
+        }, &noConfirmControls, &postConfirmDialog);
+    }
+
+    extern "user32" fn MessageBoxW(hwnd: ?HWND, text: [*:0]const u16, caption: [*:0]const u16, kind: u32) callconv(.winapi) i32;
+
+    fn noConfirmControls(_: *Host) anyerror!void {}
+
+    fn postConfirmDialog(host: *Host) anyerror!void {
+        const hwnd = host.hwnd orelse return error.NoHostWindow;
+        if (sys.PostMessageW(hwnd, c.WM_WINHOSTTY_CONFIRM_DIALOG, 0, 0) == 0) return error.PostFailed;
+    }
+
+    /// The posted half of `showConfirmDialog`: ask, and on OK run the held
+    /// request if it is still held (the window and the request may both
+    /// have gone while the dialog was up).
+    pub fn runConfirmDialog(self: *Host) void {
+        const payload = self.confirm_payload orelse return;
+        const alloc = self.app.core_app.alloc;
+        const on_accept = payload.on_accept;
+        const userdata = payload.userdata;
+        const host_id = self.id;
+        const app = self.app;
+        const title = std.unicode.utf8ToUtf16LeAllocZ(alloc, payload.title) catch return self.invokeConfirmCancel();
+        defer alloc.free(title);
+        const body = std.unicode.utf8ToUtf16LeAllocZ(alloc, payload.body) catch return self.invokeConfirmCancel();
+        defer alloc.free(body);
+        const MB_OKCANCEL: u32 = 0x1;
+        const MB_ICONWARNING: u32 = 0x30;
+        const MB_SETFOREGROUND: u32 = 0x10000;
+        const IDOK: i32 = 1;
+        const answer = MessageBoxW(self.hwnd, body.ptr, title.ptr, MB_OKCANCEL | MB_ICONWARNING | MB_SETFOREGROUND);
+        // The dialog's loop may have destroyed this window.
+        const host = app.registry.findHostById(host_id) orelse return;
+        if (!host.showsConfirm(on_accept, userdata orelse return)) return;
+        if (answer == IDOK) host.invokeConfirmAccept() else host.invokeConfirmCancel();
+    }
+
     /// Fire the accept callback and close the overlay. Critical
     /// ordering: hide the overlay + free the payload FIRST, then
     /// dispatch the callback. The accept handler can synchronously

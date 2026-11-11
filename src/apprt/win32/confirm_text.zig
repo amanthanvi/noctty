@@ -201,8 +201,8 @@ fn scopePrompt(scope: CloseScope, count: usize, body_buf: *[256]u8) Prompt {
                 .this_tab => .{
                     .title = "Close this tab?",
                     .accept = "Close tab",
-                    .one = "A process is still running in this tab. Closing the tab will terminate it, and undo is off.",
-                    .many = "Processes are still running in {d} terminals in this tab. Closing the tab will terminate them, and undo is off.",
+                    .one = "A process is still running in this tab. Closing the tab will terminate it.",
+                    .many = "Processes are still running in {d} terminals in this tab. Closing the tab will terminate them.",
                 },
                 .other_tabs => .{
                     .title = "Close the other tabs?",
@@ -297,9 +297,9 @@ fn backgroundTabBody(alloc: Allocator, count: usize, tab: TabRef) ![]u8 {
     const name = try promptTabName(alloc, tab);
     defer alloc.free(name);
     return if (count <= 1)
-        std.fmt.allocPrint(alloc, "A process is still running in {s}. Closing that tab will terminate it, and undo is off.", .{name})
+        std.fmt.allocPrint(alloc, "A process is still running in {s}. Closing that tab will terminate it.", .{name})
     else
-        std.fmt.allocPrint(alloc, "Processes are still running in {d} terminals in {s}. Closing that tab will terminate them, and undo is off.", .{ count, name });
+        std.fmt.allocPrint(alloc, "Processes are still running in {d} terminals in {s}. Closing that tab will terminate them.", .{ count, name });
 }
 
 /// The same for a terminal that closes by itself in a tab that is not the
@@ -530,7 +530,7 @@ test "win32 close prompts count the terminals they would end" {
             .{ .scope = .{ .scope = .this_tab, .terminals = 2 } },
             "Close this tab?",
             "Close tab",
-            "Processes are still running in 2 terminals in this tab. Closing the tab will terminate them, and undo is off.",
+            "Processes are still running in 2 terminals in this tab. Closing the tab will terminate them.",
         },
         .{
             .{ .scope = .{ .scope = .app, .terminals = 3 } },
@@ -578,12 +578,12 @@ test "the close prompt for a tab behind the front one names it as the clipboard 
         .{
             .{ .scope = .{ .scope = .this_tab, .terminals = 1, .behind = vim } },
             "Close tab 3?",
-            "A process is still running in Tab 3 (vim). Closing that tab will terminate it, and undo is off.",
+            "A process is still running in Tab 3 (vim). Closing that tab will terminate it.",
         },
         .{
             .{ .scope = .{ .scope = .this_tab, .terminals = 2, .behind = .{ .number = 12, .title = null } } },
             "Close tab 12?",
-            "Processes are still running in 2 terminals in Tab 12 (noctty). Closing that tab will terminate them, and undo is off.",
+            "Processes are still running in 2 terminals in Tab 12 (noctty). Closing that tab will terminate them.",
         },
         .{
             .{ .terminal = .{ .behind = .{ .number = 2, .title = "vim" } } },
@@ -599,7 +599,7 @@ test "the close prompt for a tab behind the front one names it as the clipboard 
         .{
             .{ .scope = .{ .scope = .this_tab, .terminals = 1, .behind = .{ .number = 4, .title = "\u{202E}abcdefghijklmnopqrstuvwxyz0123456789" } } },
             "Close tab 4?",
-            "A process is still running in Tab 4 (\u{FFFD}abcdefghijklmnopqrst...). Closing that tab will terminate it, and undo is off.",
+            "A process is still running in Tab 4 (\u{FFFD}abcdefghijklmnopqrst...). Closing that tab will terminate it.",
         },
         // Only "this tab" has words for a tab behind; the other scopes run
         // from the tab in front or have no tab.
@@ -627,7 +627,7 @@ test "a close prompt for a tab behind keeps its numbered title when its body can
     const tab = tab_words.close(alloc, .{ .scope = .{ .scope = .this_tab, .terminals = 2, .behind = vim } });
     try std.testing.expectEqualStrings("Close tab 3?", tab.title);
     try std.testing.expectEqualStrings(
-        "Processes are still running in 2 terminals in this tab. Closing the tab will terminate them, and undo is off.",
+        "Processes are still running in 2 terminals in this tab. Closing the tab will terminate them.",
         tab.body,
     );
 

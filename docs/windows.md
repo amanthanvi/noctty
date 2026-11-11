@@ -1114,6 +1114,58 @@ noctty's command line is shown and not changed. `profile-order` and
 `profile-hidden` are not edited there: a hidden profile is marked, and both
 are changed in the config file.
 
+### Importing and exporting Terminals connections
+
+The Profiles list's menu (Shift+F10, the menu key or a right click) offers
+three more items:
+
+- **Import from Terminals...** (Ctrl+I) reads a favorites export of the
+  Terminals connection manager (`<favorites>` XML) and lists its connections
+  with a check box each. An SSH connection becomes a profile that runs
+  `ssh -l <user> -p <port> <server>`; an RDP connection one that runs
+  `mstsc.exe /v:<server>:<port>`, which opens Remote Desktop in its own
+  window. Other protocols (VNC, Telnet, ...) are listed and cannot be
+  checked, and a connection whose command line is already a profile starts
+  unchecked. The profile's id comes from the connection's name (`Coletor NF`
+  is `coletor-nf`, with `-2`, `-3` and so on when taken), and its label is
+  the name. A connection's password never goes into the config file: it is
+  kept in the Windows Credential Manager as `noctty:profile:<id>`. Notes are
+  not read. The new profiles are a draft until you Save.
+- **Export to Terminals file (with passwords)...** writes every profile that
+  runs `ssh` or `mstsc.exe` to a Terminals favorites XML you pick, with the
+  password the Credential Manager keeps for it **in plain text**, as
+  Terminals writes it. Keep that file somewhere safe.
+- **Back up config file...** copies noctty's config file where you pick.
+
+In portable mode the logins are not in the Credential Manager: each is a file
+in the portable folder, `credentials\<id>.cred`, encrypted with DPAPI for the
+Windows user, so the whole folder moves as one unit. DPAPI opens the file only
+for the same Windows user; on another computer, sign in again (the prompt's
+Remember keeps the new login) or import the Terminals file again.
+
+### Remote Desktop tabs
+
+A profile whose command line is `mstsc.exe /v:<server>[:<port>]` (what the
+Terminals import makes of an RDP connection) opens the remote desktop inside
+its tab instead of starting `mstsc.exe` in a window of its own. The tab hosts
+Windows' Remote Desktop control (`mstscax.dll`), and works like any other tab:
+splits, undo, close confirmation and session restore.
+
+- It signs in with the login kept for the profile. With none kept, Windows'
+  credential prompt asks first; check **Remember** to keep that login.
+- Clipboard text goes both ways between this computer and the remote one.
+- Click inside the remote desktop and the mouse and keys work there.
+  **Ctrl+Alt+Home** gives the keyboard back to noctty, so its keybindings
+  (Ctrl+Tab, Ctrl+Shift+W, ...) work again; click inside to go back.
+- `rdp-scaling = proportional` (the default) scales the remote desktop to the
+  tab keeping its proportions; `rdp-scaling = fill` stretches it over the
+  whole tab, which may distort it. Its resolution is the tab's size when it
+  connects.
+- `rdp-trust-certificates = true` connects to a server whose identity cannot
+  be checked (a self-signed certificate) without asking. With the default,
+  `false`, Windows asks as `mstsc.exe` does.
+- When the session ends, the tab says so; close it, or open the profile again.
+
 ### Listing profiles
 
 `noctty +list-profiles` prints the profiles the picker and the palette offer,
@@ -2399,8 +2451,9 @@ starts noctty before its last page, so in the setup wizard, leaving
 **Launch noctty** checked there opens one more window.
 Setup's restart of noctty itself has not been tried on a real install.
 
-With the default `confirm-close-surface`, noctty declines, without a prompt,
-while a terminal runs a program (the programs `confirm-close-surface` asks
+With the default `confirm-close-surface = always`, noctty declines, without a
+prompt, while any terminal is open; with `confirm-close-surface = true` it
+declines only while a terminal runs a program (the programs `confirm-close-surface` asks
 about), and it always declines while Settings has unsaved edits. The
 declining process stays open and loses nothing, but Setup cannot replace the
 files and stops; a silent Setup under a package manager exits with code 5.

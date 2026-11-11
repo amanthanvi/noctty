@@ -215,6 +215,9 @@ pub const WM_WINHOSTTY_TOAST_REMOVALS = WM_APP + 16;
 /// its opacity another way (`window_state.refreshBackgroundOpacity`). Posted:
 /// the switch runs inside the pane's paint, holding the renderer's lock.
 pub const WM_WINHOSTTY_RENDERER_SWITCHED = WM_APP + 17;
+/// Posted by `Host.showConfirmDialog`: the close confirmation's Windows
+/// dialog opens from the loop (`Host.runConfirmDialog`).
+pub const WM_WINHOSTTY_CONFIRM_DIALOG = WM_APP + 18;
 
 pub const PM_NOREMOVE: UINT = 0x0000;
 pub const PM_REMOVE: UINT = 0x0001;
@@ -427,6 +430,11 @@ pub const CTX_TAB_CLOSE_OTHERS: usize = 4022;
 pub const CTX_TAB_MOVE_LEFT: usize = 4023;
 pub const CTX_TAB_MOVE_RIGHT: usize = 4024;
 pub const CTX_PROFILE_BASE: usize = 4100; // profile dropdown items: CTX_PROFILE_BASE + index
+pub const CTX_SETTINGS: usize = 4013;
+pub const CTX_ABOUT: usize = 4014;
+pub const CTX_IMPORT_TERMINALS: usize = 4015;
+/// "Run as administrator" items: CTX_ELEVATED_BASE + profile index.
+pub const CTX_ELEVATED_BASE: usize = 4300;
 pub const SEARCH_BG_ID: usize = 2100;
 pub const SEARCH_EDIT_ID: usize = 2101;
 pub const SEARCH_PREV_ID: usize = 2102;

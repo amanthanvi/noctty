@@ -166,6 +166,8 @@ const win32_undo = @import("../win32_undo.zig");
 const window_state = @import("window_state.zig");
 const windows = win32.windows;
 const windows_shell = @import("../../config/windows_shell.zig");
+const rdp_pane_mod = @import("rdp_pane.zig");
+const profile_credentials = @import("profile_credentials.zig");
 const writeImeWindowFormsTrace = win32.writeImeWindowFormsTrace;
 
 // Test dependencies.
@@ -425,6 +427,15 @@ pub const Surface = struct {
     /// was launched with (`pane_launch.Stamp.user`), kept with
     /// `launch_command` so an inheriting tab or split runs the same launch.
     launch_user: ?windows_shell.UserLaunch = null,
+    /// A Remote Desktop session covering the pane (`rdp_pane.zig`): the
+    /// launch was an `mstsc.exe /v:` profile, so the core runs a placeholder
+    /// shell under it, with `rdp_config` (the config with that shell as its
+    /// command), which lives as long as the surface.
+    rdp_pane: ?*rdp_pane_mod.Pane = null,
+    rdp_config: ?configpkg.Config = null,
+    /// Ctrl+Alt+Home gave the keyboard back to noctty: the pane keeps the
+    /// focus instead of handing it to the session.
+    rdp_released: bool = false,
     mouse_shape: terminal.MouseShape = .text,
     mouse_visible: bool = true,
     hovered_link: ?[:0]const u8 = null,
@@ -913,15 +924,32 @@ pub const Surface = struct {
             if (source.host_id == self.host_id) self.metrics = source.metrics;
         }
 
+        // An `mstsc.exe /v:` profile opens a Remote Desktop session in the
+        // pane: the core runs a placeholder shell under the control.
+        var rdp_line_buf: [1024]u8 = undefined;
+        const rdp_target = self.rdpTarget(&rdp_line_buf);
+        const core_config: *const configpkg.Config = if (rdp_target != null) placeholder: {
+            self.rdp_config = try config.clone(app.core_app.alloc);
+            const cloned = &self.rdp_config.?;
+            cloned.command = .{ .direct = &rdp_pane_mod.placeholder_argv };
+            cloned.@"initial-command" = null;
+            break :placeholder cloned;
+        } else config;
+        errdefer if (self.rdp_config) |*cloned| {
+            cloned.deinit();
+            self.rdp_config = null;
+        };
+
         if (app.test_surface_init_stage) |stage| try stage(self, .core_surface) else {
             try self.core_surface.init(
                 app.core_app.alloc,
-                config,
+                core_config,
                 app.core_app,
                 app,
                 self,
             );
             self.core_initialized = true;
+            if (rdp_target) |target| self.openRdpPane(config, target);
             log.debug("surface.init core surface initialized", .{});
             // A pane made behind its tab's focus (a restored layout) was
             // marked dimmed before it had a renderer to tell.
@@ -4006,6 +4034,124 @@ pub const Surface = struct {
         _ = sys.PostMessageW(hwnd, c.WM_WINHOSTTY_RENDERER_SWITCHED, 0, 0);
     }
 
+    /// The Remote Desktop target of this pane's launch (`rdp_pane.targetOf`),
+    /// read from the profile's command line, or from the launch command's
+    /// words joined into `buf`. Null for any other launch.
+    fn rdpTarget(self: *const Surface, buf: []u8) ?rdp_pane_mod.Target {
+        if (self.launch_user) |user| return rdp_pane_mod.targetOf(user.command_line);
+        const command = self.launch_command orelse return null;
+        return switch (command) {
+            .shell => |line| rdp_pane_mod.targetOf(line),
+            .direct => |argv| joined: {
+                var writer: std.Io.Writer = .fixed(buf);
+                for (argv, 0..) |arg, i| {
+                    if (i != 0) writer.writeByte(' ') catch return null;
+                    writer.writeAll(arg) catch return null;
+                }
+                break :joined rdp_pane_mod.targetOf(writer.buffered());
+            },
+        };
+    }
+
+    /// Cover the pane with a Remote Desktop session to `target`, signed in
+    /// with the password the Credential Manager keeps for the profile that
+    /// names it in `config`. With no control (`Pane.create` null), the
+    /// placeholder shell shows.
+    fn openRdpPane(self: *Surface, config: *const configpkg.Config, target: rdp_pane_mod.Target) void {
+        const hwnd = self.hwnd orelse return;
+        const alloc = self.app.core_app.alloc;
+        // The profile that names the target, and the login kept for it.
+        var profile_id: ?[]const u8 = null;
+        var kept: ?profile_credentials.Entry = null;
+        defer if (kept) |entry| entry.deinit(alloc);
+        for (config.@"profile-command".entries.items) |entry| {
+            if (entry.removed) continue;
+            const other = rdp_pane_mod.targetOf(entry.value) orelse continue;
+            if (other.port != target.port or !std.ascii.eqlIgnoreCase(other.server, target.server)) continue;
+            if (profile_id == null) profile_id = entry.id;
+            kept = profile_credentials.readEntry(alloc, entry.id) catch null;
+            if (kept != null) {
+                profile_id = entry.id;
+                break;
+            }
+        }
+        var rect: RECT = undefined;
+        if (sys.GetClientRect(hwnd, &rect) == 0) rect = .{ .left = 0, .top = 0, .right = 800, .bottom = 600 };
+        self.rdp_pane = rdp_pane_mod.Pane.create(alloc, hwnd, target, .{
+            .profile_id = profile_id,
+            .user = if (kept) |entry| entry.user else target.user,
+            .password = if (kept) |entry| entry.password else null,
+        }, rect.right, rect.bottom, .{
+            .scaling = switch (config.@"rdp-scaling") {
+                .proportional => .proportional,
+                .fill => .fill,
+            },
+            .trust_certificates = config.@"rdp-trust-certificates",
+        }, .{
+            .ctx = self,
+            .ended = &rdpEnded,
+            .released = &rdpReleased,
+            .connected = &rdpConnected,
+        });
+    }
+
+    /// The Remote Desktop session is over and its control gone: the pane
+    /// shows its placeholder shell, which says so.
+    fn rdpEnded(ctx: *anyopaque) void {
+        const self: *Surface = @ptrCast(@alignCast(ctx));
+        self.rdp_pane = null;
+        self.rdp_released = false;
+        if (self.hwnd) |hwnd| if (self.window_focused or sys.GetFocus() == null) {
+            _ = sys.SetFocus(hwnd);
+        };
+        self.requestRepaint() catch {};
+    }
+
+    /// Ctrl+Alt+Home in the Remote Desktop session: the keyboard comes back
+    /// to noctty (its keybindings work again), until a click inside the
+    /// session or the tab's next focus.
+    fn rdpReleased(ctx: *anyopaque) void {
+        const self: *Surface = @ptrCast(@alignCast(ctx));
+        const hwnd = self.hwnd orelse return;
+        self.rdp_released = true;
+        _ = sys.SetFocus(hwnd);
+        self.showRdpNotice("Keyboard back in noctty. Click inside the remote desktop to use it again.");
+    }
+
+    /// The session connected: say how to leave it.
+    fn rdpConnected(ctx: *anyopaque) void {
+        const self: *Surface = @ptrCast(@alignCast(ctx));
+        self.showRdpNotice("Remote Desktop: the mouse and keys work inside it. Ctrl+Alt+Home gives the keyboard back to noctty.");
+    }
+
+    fn showRdpNotice(self: *Surface, message: []const u8) void {
+        _ = self.app.showHostBanner(.{ .surface = self.core() }, .info, message) catch |err| {
+            log.warn("rdp notice failed err={}", .{err});
+        };
+    }
+
+    /// The pane's client area changed: the Remote Desktop control follows.
+    pub fn resizeRdpPane(self: *Surface) void {
+        const pane = self.rdp_pane orelse return;
+        const hwnd = self.hwnd orelse return;
+        var rect: RECT = undefined;
+        if (sys.GetClientRect(hwnd, &rect) == 0) return;
+        pane.resize(rect.right, rect.bottom);
+    }
+
+    /// The pane took the keyboard focus: a Remote Desktop session takes it,
+    /// unless Ctrl+Alt+Home just gave it back to noctty.
+    pub fn forwardFocusToRdp(self: *Surface) void {
+        if (self.rdp_released) return;
+        if (self.rdp_pane) |pane| pane.focus();
+    }
+
+    /// The pane lost the keyboard focus (to the session after a click, or to
+    /// another tab): its next focus goes into the session again.
+    pub fn rdpFocusLeft(self: *Surface) void {
+        self.rdp_released = false;
+    }
+
     pub fn focusChanged(self: *Surface, focused: bool) void {
         self.window_focused = focused;
         // The idle benchmark invalidates a sample when focus moves during
@@ -4511,6 +4657,11 @@ pub const Surface = struct {
         self.destroy_on_wm_destroy = false;
         self.deferred_char.clear();
         self.closeQuickSelect(false);
+        // The Remote Desktop session ends with its pane.
+        if (self.rdp_pane) |pane| {
+            self.rdp_pane = null;
+            pane.destroy();
+        }
 
         if (self.terminal_accessibility) |session| {
             self.core_surface.setTerminalOutputInterested(false);
@@ -4559,6 +4710,10 @@ pub const Surface = struct {
 
         self.destroyGL();
         self.freeOwnedStrings();
+        if (self.rdp_config) |*cloned| {
+            cloned.deinit();
+            self.rdp_config = null;
+        }
 
         // App-level detachment is still per-pane teardown: `windowDestroyed`
         // removes this surface from `App.windows`, discards the structural

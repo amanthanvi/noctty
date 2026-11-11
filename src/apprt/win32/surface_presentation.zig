@@ -633,6 +633,8 @@ test "a pane's resize batch needs a started core" {
 
 pub fn windowSizeChanged(self: *Surface) void {
     self.syncCoreSizeFromClientRect();
+    // A Remote Desktop session covering the pane follows its size.
+    self.resizeRdpPane();
 
     // Quick select holds a viewport snapshot plus the cell metrics that
     // were current when it opened. A resize or font-size change invalidates

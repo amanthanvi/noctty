@@ -426,6 +426,10 @@ test {
     _ = child_window;
     _ = paint_text;
     _ = @import("win32/settings_patch.zig");
+    _ = @import("win32/terminals_import.zig");
+    _ = @import("win32/terminals_import_dialog.zig");
+    _ = @import("win32/profile_credentials.zig");
+    _ = @import("win32/rdp_pane.zig");
     _ = clipboard_write;
     _ = @import("win32_aumid.zig");
     _ = @import("win32_toast_activator.zig");
@@ -2023,7 +2027,24 @@ fn settingsDiskValueDiffers(
     // The window keeps a command nobody set as automatic (null); the load
     // fills in the one it found.
     if (key == .command and configpkg.pane_launch.nocttyCommand(disk) != null and known.command == null) return false;
+    // Settings' copies hold the starting folder as written (`asWritten`);
+    // the load resolved its default and expanded it.
+    // A config no `finalize` ran on holds the value as written already.
+    if (key == .@"working-directory" and disk._launch.working_directory_recorded)
+        return !writtenWorkingDirectoryEql(known.@"working-directory", disk._launch.working_directory_written);
     return known.changed(disk, key);
+}
+
+/// Whether `directory` is what `written` (`home`, `inherit`, a path, or null
+/// for unset) says.
+fn writtenWorkingDirectoryEql(directory: ?configpkg.Config.WorkingDirectory, written: ?[:0]const u8) bool {
+    const value = directory orelse return written == null;
+    const text = written orelse return false;
+    return switch (value) {
+        .home => std.mem.eql(u8, text, "home"),
+        .inherit => std.mem.eql(u8, text, "inherit"),
+        .path => |path| std.mem.eql(u8, text, path),
+    };
 }
 
 test "win32 bounded UTF-8 prefix never splits a codepoint" {
@@ -6808,7 +6829,7 @@ test "win32 settings save names the edited keys a later config layer overrides" 
         \\clipboard-trim-trailing-spaces = false
         \\desktop-notifications = false
         \\app-notifications = no-clipboard-copy,no-config-reload
-        \\confirm-close-surface = always
+        \\confirm-close-surface = false
         \\copy-on-select = clipboard
         \\clipboard-read = deny
         \\clipboard-write = deny
@@ -11425,6 +11446,10 @@ pub fn hostWindowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) cal
             if (host) |v| window_state.refreshBackgroundOpacity(v);
             return 0;
         },
+        c.WM_WINHOSTTY_CONFIRM_DIALOG => {
+            if (host) |v| v.runConfirmDialog();
+            return 0;
+        },
         c.WM_PARENTNOTIFY => {
             // A control made while the window's background alone is
             // translucent is made solid as it is made.
@@ -12639,7 +12664,11 @@ pub fn windowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
         },
 
         c.WM_SETFOCUS => {
-            if (surface) |v| v.focusChanged(true);
+            if (surface) |v| {
+                v.focusChanged(true);
+                // A Remote Desktop session covering the pane takes the keys.
+                v.forwardFocusToRdp();
+            }
             return 0;
         },
 
@@ -12647,6 +12676,7 @@ pub fn windowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
             if (surface) |v| {
                 v.deferred_char.clear();
                 v.focusChanged(false);
+                v.rdpFocusLeft();
             }
             return 0;
         },
@@ -12878,6 +12908,22 @@ pub fn windowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
 
         c.WM_MOUSEWHEEL, c.WM_POINTERWHEEL => {
             if (surface) |v| {
+                // Ctrl+wheel zooms (`mouse-wheel-zoom`): the font grows or
+                // shrinks by one point a notch.
+                if (v.app.config.@"mouse-wheel-zoom" and
+                    win32_input.keyPressed(c.VK_CONTROL) and
+                    !win32_input.keyPressed(c.VK_SHIFT) and
+                    !win32_input.keyPressed(c.VK_MENU))
+                {
+                    const delta = wheelDeltaFromWParam(wParam);
+                    if (delta != 0) {
+                        const action: input.Binding.Action = if (delta > 0) .{ .increase_font_size = 1 } else .{ .decrease_font_size = 1 };
+                        _ = v.core_surface.performBindingAction(action) catch |err| {
+                            log.warn("win32 wheel zoom failed err={}", .{err});
+                        };
+                    }
+                    return 0;
+                }
                 v.updateWheelCursorPos(hwnd, lParam);
                 v.handleMouseWheel(normalizeWheelDelta(
                     v.wheelNormalizationContext(),
@@ -16132,7 +16178,7 @@ test "win32 close_tab this asks first once undo is off" {
     // Tab 2 is in front, so the prompt says which tab it is about.
     try std.testing.expectEqualStrings("Close tab 1?", host.confirm_payload.?.title);
     try std.testing.expectEqualStrings(
-        "A process is still running in Tab 1 (noctty). Closing that tab will terminate it, and undo is off.",
+        "A process is still running in Tab 1 (noctty). Closing that tab will terminate it.",
         host.confirm_payload.?.body,
     );
     // Nothing closed, and nothing sits in undo history: the tab was not detached.
@@ -16150,7 +16196,7 @@ test "win32 close_tab this asks first once undo is off" {
     surface_b.core_initialized = false;
     try std.testing.expectEqualStrings("Close this tab?", host.confirm_payload.?.title);
     try std.testing.expectEqualStrings(
-        "A process is still running in this tab. Closing the tab will terminate it, and undo is off.",
+        "A process is still running in this tab. Closing the tab will terminate it.",
         host.confirm_payload.?.body,
     );
     host.invokeConfirmCancel();
@@ -16220,7 +16266,7 @@ test "win32 a terminal that asks to close in a tab behind the front one names th
     try std.testing.expectEqual(HostOverlayMode.none, host.overlay_mode);
 }
 
-test "win32 close_tab this closes at once while undo is on or nothing would be lost" {
+test "win32 close_tab this asks with undo on too, and closes at once when nothing would be lost" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
     var core_app: CoreApp = undefined;
@@ -16247,11 +16293,14 @@ test "win32 close_tab this closes at once while undo is on or nothing would be l
     });
     defer session.deinit();
 
-    // Undo is on (the default): a busy tab closes without a prompt, because
-    // the tab can come back.
+    // Undo is on (the default): a busy tab still asks first, and the close
+    // it confirms can be undone.
     surface_a.core_surface.readonly = true;
     surface_a.core_initialized = true;
     try std.testing.expect(try app.closeTab(.{ .surface = surface_a.core() }, .this));
+    try std.testing.expectEqual(HostOverlayMode.confirm, host.overlay_mode);
+    try std.testing.expectEqual(@as(usize, 3), host.tabs.items.len);
+    host.invokeConfirmAccept();
     surface_a.core_initialized = false;
     try std.testing.expectEqual(HostOverlayMode.none, host.overlay_mode);
     try std.testing.expectEqual(@as(usize, 2), host.tabs.items.len);

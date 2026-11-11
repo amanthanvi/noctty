@@ -1469,6 +1469,40 @@ pub fn setCommand(draft: *Config, id: []const u8, text: []const u8) Allocator.Er
     try draft.@"profile-command".put(arenaOf(draft), id, text);
 }
 
+/// Whether a profile `draft` lists runs exactly `command`: an import that
+/// would add it again starts unchecked.
+pub fn hasCommand(draft: *const Config, command: []const u8) bool {
+    for (draft.@"profile-command".entries.items) |entry| {
+        if (entry.removed) continue;
+        if (std.mem.eql(u8, std.mem.trim(u8, entry.value, &std.ascii.whitespace), command)) return true;
+    }
+    return false;
+}
+
+/// A profile brought in from another program (`win32/terminals_import.zig`):
+/// the first id of `base`, `base-2`, `base-3`, ... that `checkNewId` takes,
+/// its command line and, when `checkText` takes it, its label. Returns the id,
+/// in the draft's arena, or null when no id was free or Settings refuses the
+/// command line.
+pub fn addImported(draft: *Config, base: []const u8, label: []const u8, command: []const u8) Allocator.Error!?[]const u8 {
+    var buf: [profile_map.max_id_len]u8 = undefined;
+    var n: usize = 1;
+    const id = while (n < 1000) : (n += 1) {
+        const candidate = if (n == 1)
+            std.fmt.bufPrint(&buf, "{s}", .{base}) catch return null
+        else
+            std.fmt.bufPrint(&buf, "{s}-{d}", .{ base, n }) catch return null;
+        // Not an id a removed profile left either: it would come back with
+        // the fields it had.
+        if (checkNewId(draft, candidate) == null and draft.@"profile-command".indexOf(candidate) == null) break candidate;
+    } else return null;
+    if (checkCommand(id, command) != null) return null;
+    const owned = try arenaOf(draft).dupe(u8, id);
+    try setCommand(draft, owned, command);
+    if (label.len != 0 and checkText(.name, owned, label) == null) try setField(draft, .name, owned, label);
+    return owned;
+}
+
 /// Profile `id`'s label (`.name`) or starting folder (`.folder`) is `text`;
 /// an empty one takes it out.
 pub fn setField(draft: *Config, field: enum { name, folder }, id: []const u8, text: []const u8) Allocator.Error!void {
@@ -1657,6 +1691,33 @@ test "settings profiles: a row for each profile and each of its fields, in defin
     try testing.expect(model.emptyValue(model.rows[4]));
     try testing.expectEqual(@as(?u16, 5), model.findField(.variable, "PY", "path"));
     try testing.expectEqual(@as(?u16, null), model.findField(.profile, "gone", null));
+}
+
+test "settings profiles: an imported profile takes a free id, its command line and its label" {
+    const alloc = testing.allocator;
+    var draft = try testConfig(alloc,
+        \\profile-command = coletor-nf: mstsc.exe /v:a
+        \\profile-command = old: x.exe
+        \\profile-command = old:
+        \\
+    , &.{});
+    defer draft.deinit();
+    try testing.expect(hasCommand(&draft, "mstsc.exe /v:a"));
+    try testing.expect(!hasCommand(&draft, "x.exe"));
+
+    const first = (try addImported(&draft, "coletor-nf", "Coletor NF", "mstsc.exe /v:b:5589")).?;
+    try expectSameText("coletor-nf-2", first);
+    try expectSameText("mstsc.exe /v:b:5589", draft.@"profile-command".get("coletor-nf-2").?);
+    try expectSameText("Coletor NF", draft.@"profile-name".get("coletor-nf-2").?);
+
+    // A removed profile's id is not taken again: it would bring its fields.
+    const second = (try addImported(&draft, "old", "", "ssh h")).?;
+    try expectSameText("old-2", second);
+    try testing.expect(draft.@"profile-name".get("old-2") == null);
+
+    // A command line Settings refuses adds nothing.
+    try testing.expect((try addImported(&draft, "bad", "Bad", "direct:x")) == null);
+    try testing.expect(draft.@"profile-command".get("bad") == null);
 }
 
 test "settings profiles: what the draft changed is marked, and a removed variable marks its profile" {

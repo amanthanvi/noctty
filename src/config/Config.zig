@@ -1058,6 +1058,27 @@ palette: Palette = .{},
 /// The default value is "3" for discrete devices and "1" for precision devices.
 @"mouse-scroll-multiplier": MouseScrollMultiplier = .default,
 
+/// Ctrl held while turning the mouse wheel zooms the terminal: up makes the
+/// font larger (`increase_font_size:1`), down smaller
+/// (`decrease_font_size:1`), as Ctrl+= and Ctrl+- do. Set to `false` to
+/// send Ctrl+wheel to the terminal instead.
+@"mouse-wheel-zoom": bool = true,
+
+/// How a Remote Desktop pane (a profile that runs `mstsc.exe /v:<server>`,
+/// which noctty shows inside the tab) fits the remote desktop to the pane:
+///
+///   * `proportional` - scale it to the pane keeping its proportions, with
+///     bars where the shapes differ.
+///   * `fill` - stretch it over the whole pane, which may distort it.
+///
+/// The remote desktop's resolution is the pane's size when it connects.
+@"rdp-scaling": RdpScaling = .proportional,
+
+/// Connect a Remote Desktop pane to a server whose identity cannot be
+/// checked (a self-signed certificate, a name that does not match) without
+/// asking. With `false`, Windows asks each time, as mstsc.exe does.
+@"rdp-trust-certificates": bool = false,
+
 /// The opacity level (opposite of transparency) of the background. A value of
 /// 1 is fully opaque and a value of 0 is fully transparent. A value less than 0
 /// or greater than 1 will be clamped to the nearest valid value.
@@ -2839,17 +2860,15 @@ keybind: Keybinds = .{},
 
 /// Confirms that a surface should be closed before closing it.
 ///
-/// This defaults to `true`. If set to `false`, surfaces will close without
-/// any confirmation. This can also be set to `always`, which will always
-/// confirm closing a surface, even if shell integration says a process isn't
-/// running.
+/// This defaults to `always`, which always confirms closing a surface, a
+/// tab or the whole program, even if shell integration says a process isn't
+/// running. Set to `true` to ask only while a process is running, or to
+/// `false` to close without any confirmation.
 ///
-/// Closing a window, quitting, `close_all_windows` and `close_tab:other` or
-/// `close_tab:right` ask once for all the surfaces they would close.
-/// `close_tab:this` does not ask, because `undo` can bring the tab back
-/// until `undo-timeout` runs out; with `undo-timeout = 0` it cannot, so
-/// `close_tab:this` asks like the others.
-@"confirm-close-surface": ConfirmCloseSurface = .true,
+/// Closing a window, quitting, `close_all_windows`, `close_tab:this`,
+/// `close_tab:other` and `close_tab:right` ask once for all the surfaces they
+/// would close.
+@"confirm-close-surface": ConfirmCloseSurface = .always,
 
 /// Whether or not to quit after the last surface is closed.
 ///
@@ -5650,6 +5669,15 @@ pub fn finalize(self: *Config) !void {
     // it nor a layer set `command`.
     try pane_launch.finalize(self);
 
+    // What the layers wrote, before the default and the expansion below:
+    // Settings shows and saves this (`pane_launch.asWritten`).
+    self._launch.working_directory_written = if (self.@"working-directory") |written| switch (written) {
+        .home => "home",
+        .inherit => "inherit",
+        .path => |path| try alloc.dupeZ(u8, path),
+    } else null;
+    self._launch.working_directory_recorded = true;
+
     // The default for the working directory depends on the system.
     var wd: WorkingDirectory = self.@"working-directory" orelse if (probable_cli)
         .inherit
@@ -7114,6 +7142,12 @@ pub const ConfirmCloseSurface = enum(c_int) {
     false,
     true,
     always,
+};
+
+/// Valid values for rdp-scaling.
+pub const RdpScaling = enum {
+    proportional,
+    fill,
 };
 
 /// Valid values for custom-shader-animation

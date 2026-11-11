@@ -73,6 +73,7 @@ const closeOtherTabsConfirmAccept = win32.closeOtherTabsConfirmAccept;
 const closeRightTabsConfirmAccept = win32.closeRightTabsConfirmAccept;
 const closeThisTabConfirmAccept = win32.closeThisTabConfirmAccept;
 const config_edit = @import("../../config/edit.zig");
+const rdp_pane = @import("rdp_pane.zig");
 const config_file_load = @import("../../config/file_load.zig");
 const configpkg = @import("../../config.zig");
 const confirm_text = @import("confirm_text.zig");
@@ -1819,6 +1820,9 @@ pub const App = struct {
         }
 
         if (self.paneDividerDragKeyFrom(msg.hwnd, msg.message, msg.wParam, msg.lParam)) return .taken_tick;
+
+        // Ctrl+Alt+Home in a Remote Desktop pane gives the keyboard back.
+        if (rdp_pane.takeReleaseKey(msg.hwnd, msg.message, msg.wParam)) return .taken_tick;
 
         // The settings surface is a modeless native dialog. Route its
         // keyboard messages through the system dialog manager so Tab,
@@ -7802,14 +7806,12 @@ pub const App = struct {
 
         switch (mode) {
             .this => {
-                // With `undo-timeout = 0` the close cannot be taken back, so it
-                // asks like the closes that are not undoable.
-                if (self.undoOff()) {
-                    const count = tabsCloseConfirmCount(host.tabs.items[current_idx..][0..1]);
-                    if (count != 0) {
-                        host.askBeforeClosing(.this_tab, count, &closeThisTabConfirmAccept, current);
-                        return true;
-                    }
+                // Asks like the other closes, undo or not: the accepted close
+                // can still be taken back with `undo`.
+                const count = tabsCloseConfirmCount(host.tabs.items[current_idx..][0..1]);
+                if (count != 0) {
+                    host.askBeforeClosing(.this_tab, count, &closeThisTabConfirmAccept, current);
+                    return true;
                 }
                 return try self.closeTabUndoable(host, current_idx);
             },

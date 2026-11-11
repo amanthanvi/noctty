@@ -522,6 +522,14 @@ pub fn filesDefine(config: *const Config, key: []const u8) bool {
 /// no `default-profile` (`defaultProfile` is null, `outcome` is `.untried`),
 /// since the load looked up another value or none.
 pub fn asWritten(config: *Config) void {
+    // The starting folder as written: unset stays unset, not the home path
+    // `finalize` resolved it to.
+    if (config._launch.working_directory_recorded) config.@"working-directory" = written: {
+        const text = config._launch.working_directory_written orelse break :written null;
+        var directory: Config.WorkingDirectory = .inherit;
+        directory.parseCLI(config._arena.?.allocator(), text) catch break :written null;
+        break :written directory;
+    };
     if (config._launch.command_from != .layer) config.command = null;
     config._launch.command_from = .layer;
     config.@"default-profile" = filesDefaultProfile(config);
@@ -941,6 +949,14 @@ pub const Ledger = struct {
     command_cli: ?[:0]const u8 = null,
     initial_command_cli: ?[:0]const u8 = null,
 
+    /// `working-directory` as the layers wrote it (`home`, `inherit` or a
+    /// path), before `finalize` gave it the default and expanded `~/`: what
+    /// Settings shows and saves (`asWritten`). Null when no layer set it.
+    working_directory_written: ?[:0]const u8 = null,
+    /// `finalize` recorded `working_directory_written` (and replaced the
+    /// value): a config no `finalize` ran on still holds what was written.
+    working_directory_recorded: bool = false,
+
     /// `--elevated-profile-env=KEY=VALUE` on the command line, which
     /// `new_window_elevated:user:<id>` passes for each of the profile's
     /// variables. `finalize` puts them over `env` once every config file has
@@ -967,6 +983,7 @@ pub const Ledger = struct {
         const default_profile_file = try dupeOptional(alloc, self.default_profile_file);
         const command_cli = try dupeOptional(alloc, self.command_cli);
         const initial_command_cli = try dupeOptional(alloc, self.initial_command_cli);
+        const working_directory_written = try dupeOptional(alloc, self.working_directory_written);
         const profile_places = try cloneProfilePlaces(self, alloc);
         return .{
             .command_from = self.command_from,
@@ -977,6 +994,8 @@ pub const Ledger = struct {
             .default_profile_file = default_profile_file,
             .command_cli = command_cli,
             .initial_command_cli = initial_command_cli,
+            .working_directory_written = working_directory_written,
+            .working_directory_recorded = self.working_directory_recorded,
             .profile_places = profile_places,
         };
     }
@@ -2084,6 +2103,31 @@ test "asWritten: a Settings copy holds what the files say, and no choice of noct
     defer set.deinit();
     asWritten(&set);
     try testing.expectEqualStrings("vim.exe", set.command.?.shell);
+}
+
+test "asWritten: the starting folder is what the files wrote, not finalize's default" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    // Unset: finalize gives it a default, the Settings copy none.
+    var unset = try fixtures.load(alloc, .{ .file = "font-size = 12\n" });
+    defer unset.deinit();
+    try testing.expect(unset._launch.working_directory_recorded);
+    try testing.expect(unset._launch.working_directory_written == null);
+    asWritten(&unset);
+    try testing.expect(unset.@"working-directory" == null);
+
+    var home = try fixtures.load(alloc, .{ .file = "working-directory = home\n" });
+    defer home.deinit();
+    asWritten(&home);
+    try testing.expect(home.@"working-directory".? == .home);
+
+    var path = try fixtures.load(alloc, .{ .file = "working-directory = C:\\Projects\n" });
+    defer path.deinit();
+    var copy = try path.clone(alloc);
+    defer copy.deinit();
+    asWritten(&copy);
+    try testing.expectEqualStrings("C:\\Projects", copy.@"working-directory".?.path);
 }
 
 test "keepSources: a config built again from the files keeps the running launch" {
