@@ -4721,6 +4721,9 @@ pub const App = struct {
             .move_tab_to_new_window => {
                 // From the message loop: the move reparents the terminal
                 // whose key binding asked for it, and shows a new window.
+                // The result is whether the move was accepted (queued), not
+                // whether it later succeeded: a move that fails then says
+                // so in a banner on its window (`runTabMove`).
                 const surface = self.registry.findSurfaceForTarget(target) orelse return false;
                 const found = Host.findTabForSurface(surface) orelse return false;
                 if (found.host.quick_terminal or found.host.tabs.items.len < 2) return false;
@@ -8270,19 +8273,50 @@ pub const App = struct {
         killThreadTimer(&self.tab_move_wake_timer);
     }
 
+    /// One queued move.
     fn runTabMove(self: *App, host: *Host, request: Host.TabMoveRequest) void {
-        // The tab may have closed, or the target window gone, meanwhile.
+        // The tab may have closed meanwhile: nothing to move or to say.
         const index = host.findTabIndexById(request.tab_id) orelse return;
+        const host_id = host.id;
         const dest: TabMoveDest = switch (request.dest) {
             .new_window => |drop| .{ .new_window = drop },
-            .window => |over| .{ .host = .{
-                .host = self.registry.findHostById(over.host_id) orelse return,
-                .index = over.index,
-            } },
+            .window => |over| .{
+                .host = .{
+                    // The window it was to join is gone.
+                    .host = self.registry.findHostById(over.host_id) orelse {
+                        self.tabMoveDeclined(host_id, request);
+                        return;
+                    },
+                    .index = over.index,
+                },
+            },
         };
-        _ = self.moveTabToWindow(host, index, dest) catch |err| {
-            log.err("tab move failed err={}", .{err});
+        const moved = self.moveTabToWindow(host, index, dest) catch |err| {
+            log.warn("tab move failed err={}", .{err});
+            self.tabMoveDeclined(host_id, request);
+            return;
         };
+        if (!moved) self.tabMoveDeclined(host_id, request);
+    }
+
+    /// An accepted tab move that did not happen: what asked for it (a drop,
+    /// a key binding, the action) returned long ago, so the window it was to
+    /// leave says so while the tab is still in it, as other window actions do
+    /// when they fail (CodeRabbit r4520679604; a declined one too, #703 M2:
+    /// the window it was to join gone, or refusing it at the last moment).
+    /// Every one says so, whatever left the tab alone in its window (another
+    /// queued move, a close): nothing about what asked for it is inferred,
+    /// and an `all:` binding's last tab, which cannot move, says so too
+    /// (#703 round 2, Sol; CodeRabbit r4536317953, r4536737315). A request
+    /// refused up front (a window's only tab) is never accepted and says
+    /// nothing.
+    fn tabMoveDeclined(self: *App, host_id: u32, request: Host.TabMoveRequest) void {
+        const source = self.registry.findHostById(host_id) orelse return;
+        // A window whose `WM_DESTROY` has run has no `hwnd` before it is
+        // removed (`revalidateTabMove`): nowhere to show it.
+        if (source.hwnd == null) return;
+        if (source.findTabIndexById(request.tab_id) == null) return;
+        source.setBanner(.err, "The tab could not be moved.") catch {};
     }
 
     /// Moves the tab at `index` of `source` into `dest` with its whole pane
@@ -8981,6 +9015,14 @@ pub const App = struct {
         return arranged(hwnd) != 0;
     }
 
+    /// Whether a window has a tab drag past its threshold.
+    fn anyTabDragActive(self: *const App) bool {
+        for (self.registry.hosts.items) |host| {
+            if (host.tab_drag_index != null and host.tab_drag_active) return true;
+        }
+        return false;
+    }
+
     /// Esc during a tab drag ends it where it began (`Host.cancelTabDrag`).
     /// The keyboard stays with the terminal during the drag, so the key is
     /// taken here, before it reaches the terminal. With an IME composing,
@@ -8990,6 +9032,10 @@ pub const App = struct {
     fn cancelTabDragForKey(self: *App, msg: *const MSG) bool {
         if (msg.message != c.WM_KEYDOWN and msg.message != c.WM_KEYUP) return false;
         if (msg.wParam != c.VK_ESCAPE and msg.wParam != c.VK_PROCESSKEY) return false;
+        // With no drag and no Esc of one to finish, no key is the drag's:
+        // asked before the IME is, which every key it composes would cost
+        // otherwise (council round 12 L2).
+        if (!self.tab_drag_escape_down and !self.anyTabDragActive()) return false;
         const vk: u8 = @truncate(msg.wParam);
         if (!isEscapeKey(vk, keyMessageOriginalKey(msg.hwnd, vk, msg.lParam), msg.lParam)) return false;
         if (msg.message == c.WM_KEYUP) {
@@ -16436,6 +16482,9 @@ test "win32 an all: move_tab_to_new_window moves every tab it reaches but the la
             try std.testing.expectEqual(@as(usize, 1), source.tabs.items.len);
             try std.testing.expect(panes[0].host.? != source and panes[1].host.? != source and panes[0].host.? != panes[1].host.?);
             try std.testing.expectEqual(source, panes[2].host.?);
+            // The last tab could not move, and its window says so.
+            try std.testing.expectEqual(HostBannerKind.err, source.banner_kind);
+            try std.testing.expectEqualStrings("The tab could not be moved.", source.banner_text.?);
             try app.validateShellNativeMapping();
         }
     }.body);
@@ -16579,6 +16628,53 @@ test "win32 an Esc an IME hands over as VK_PROCESSKEY cancels a tab drag, and it
                 try std.testing.expectEqual(@as(usize, 0), app.pendingTabMoveCount(host));
                 try std.testing.expectEqual(@as(usize, 3), host.tabs.items.len);
             }
+        }
+    }.body);
+}
+
+test "win32 a key an IME composes asks the IME nothing when no tab drag is on (council round 12 L2)" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    try runOnHiddenDesktop(struct {
+        var asked: usize = 0;
+        fn imeCounts(_: HWND) UINT {
+            asked += 1;
+            return c.VK_ESCAPE;
+        }
+        fn body() !void {
+            var fixture: win32.WindowStartTestApp = .{};
+            try fixture.init();
+            defer fixture.deinit();
+            const app = &fixture.app;
+            app.shell_runtime_initialized = true;
+            const setup: TabMoveFixture = .{ .fixture = &fixture };
+            const host = try setup.window(3, false);
+            try host.layout();
+            const button = host.tabs.items[0].button_hwnd orelse return error.TestNoTabButton;
+            var client: RECT = undefined;
+            try std.testing.expect(sys.GetClientRect(host.hwnd.?, &client) != 0);
+            test_imm_get_virtual_key = &imeCounts;
+            defer test_imm_get_virtual_key = null;
+            asked = 0;
+            const down: MSG = .{ .hwnd = button, .message = c.WM_KEYDOWN, .wParam = c.VK_PROCESSKEY, .lParam = 0x00010001, .time = 0, .pt = .{ .x = 0, .y = 0 }, .lPrivate = 0 };
+            const up: MSG = .{ .hwnd = button, .message = c.WM_KEYUP, .wParam = c.VK_PROCESSKEY, .lParam = @bitCast(@as(usize, 0xC0010001)), .time = 0, .pt = .{ .x = 0, .y = 0 }, .lPrivate = 0 };
+            // No drag: the composed key is the terminal's, and the IME is
+            // not asked about it.
+            try std.testing.expect(!app.cancelTabDragForKey(&down));
+            try std.testing.expect(!app.cancelTabDragForKey(&up));
+            try std.testing.expectEqual(@as(usize, 0), asked);
+            // A press alone is no drag yet: still not asked.
+            testPostTabMouse(button, c.WM_LBUTTONDOWN, 20, 10);
+            try std.testing.expect(!app.cancelTabDragForKey(&down));
+            try std.testing.expectEqual(@as(usize, 0), asked);
+            // A drag: asked, and its Esc ends it; its release is asked about
+            // and taken.
+            testPostTabMouse(button, c.WM_MOUSEMOVE, 20, client.bottom + 200);
+            try std.testing.expect(app.cancelTabDragForKey(&down));
+            try std.testing.expect(!host.tab_drag_active);
+            try std.testing.expect(app.cancelTabDragForKey(&up));
+            try std.testing.expectEqual(@as(usize, 2), asked);
+            testPostTabMouse(button, c.WM_LBUTTONUP, 20, client.bottom + 200);
+            try std.testing.expectEqual(@as(usize, 0), app.pendingTabMoveCount(host));
         }
     }.body);
 }
@@ -16996,6 +17092,523 @@ test "win32 a tab move a transfer in undo history names keeps it gone if its sec
             try std.testing.expectEqual(@as(usize, 2), app.registry.hosts.items.len);
         }
     }.body);
+}
+
+test "win32 a queued tab move that fails says so in a banner on its window (CodeRabbit r4520679604)" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    try runOnHiddenDesktop(struct {
+        fn body() !void {
+            var fixture: win32.WindowStartTestApp = .{};
+            try fixture.init();
+            defer fixture.deinit();
+            const app = &fixture.app;
+            app.shell_runtime_initialized = true;
+            const setup: TabMoveFixture = .{ .fixture = &fixture };
+            const host = try setup.window(3, false);
+            // A transfer in undo history names the front tab, so the move
+            // prepares twice, and the second prepare runs out of memory.
+            host.tab_drop_operation = .split_right;
+            host.tab_drop_target_surface = host.tabs.items[2].focusedSurface().?;
+            try std.testing.expect(host.commitTabDropSplit(0));
+            const front = host.tabs.items[host.active_tab].id;
+            TestShellStepFailure.step_wanted = .retry_prepare;
+            TestShellStepFailure.refocus = null;
+            App.test_tab_move_shell_step = &TestShellStepFailure.hook;
+            defer App.test_tab_move_shell_step = null;
+            // The request is accepted; the move fails when the pump runs it.
+            try std.testing.expect(app.requestTabMove(host, front, .{ .new_window = null }));
+            TabMoveFixture.runPosted(host);
+            TestShellStepFailure.restore(app);
+            App.test_tab_move_shell_step = null;
+            try std.testing.expect(host.findTabIndexById(front) != null);
+            try std.testing.expectEqual(@as(usize, 1), app.registry.hosts.items.len);
+            try std.testing.expectEqual(HostBannerKind.err, host.banner_kind);
+            try std.testing.expectEqualStrings("The tab could not be moved.", host.banner_text.?);
+        }
+    }.body);
+}
+
+test "win32 a queued tab move whose destination is gone or refuses it says so in a banner, an all: binding's last tab too (#703 M2)" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    try runOnHiddenDesktop(struct {
+        fn body() !void {
+            var fixture: win32.WindowStartTestApp = .{};
+            try fixture.init();
+            defer fixture.deinit();
+            const app = &fixture.app;
+            app.shell_runtime_initialized = true;
+            const setup: TabMoveFixture = .{ .fixture = &fixture };
+            const source = try setup.window(3, false);
+            const target = try setup.window(1, false);
+            // The window the tab was to join is gone by the time the move
+            // runs (an id no window has).
+            const first = source.tabs.items[0].id;
+            try std.testing.expect(app.requestTabMove(source, first, .{ .window = .{ .host_id = 0xFFFF_FFF0, .index = 0 } }));
+            TabMoveFixture.runPosted(source);
+            try std.testing.expect(source.findTabIndexById(first) != null);
+            try std.testing.expectEqual(HostBannerKind.err, source.banner_kind);
+            try std.testing.expectEqualStrings("The tab could not be moved.", source.banner_text.?);
+            try source.setBanner(.none, null);
+            // The window it was to join refuses it at the last moment: its
+            // `WM_DESTROY` has taken its `hwnd` before the commit.
+            // Its window, saved before the hook can take it and put back on
+            // every path: a move that fails before the commit leaves `kept`
+            // null, and a window the teardown never destroys keeps its class
+            // registered (CodeRabbit r4542471146).
+            const target_window = target.hwnd;
+            defer target.hwnd = target_window;
+            TestTargetLosesWindow.target = target;
+            TestTargetLosesWindow.kept = null;
+            App.test_tab_move_shell_step = &TestTargetLosesWindow.hook;
+            defer App.test_tab_move_shell_step = null;
+            try std.testing.expect(app.requestTabMove(source, first, .{ .window = .{ .host_id = target.id, .index = 1 } }));
+            TabMoveFixture.runPosted(source);
+            App.test_tab_move_shell_step = null;
+            try std.testing.expectEqual(target_window, TestTargetLosesWindow.kept);
+            target.hwnd = target_window;
+            try std.testing.expect(source.findTabIndexById(first) != null);
+            try std.testing.expectEqual(@as(usize, 1), target.tabs.items.len);
+            try std.testing.expectEqual(HostBannerKind.err, source.banner_kind);
+            try std.testing.expectEqualStrings("The tab could not be moved.", source.banner_text.?);
+            try source.setBanner(.none, null);
+            // An `all:` binding asked a new window for each of a window's two
+            // tabs: the first goes, the second is then the only one and stays,
+            // and its window says it could not move.
+            const pair = try setup.window(2, false);
+            const a = pair.tabs.items[0].id;
+            const b = pair.tabs.items[1].id;
+            try std.testing.expect(app.requestTabMove(pair, a, .{ .new_window = null }));
+            try std.testing.expect(app.requestTabMove(pair, b, .{ .new_window = null }));
+            TabMoveFixture.runPosted(pair);
+            try std.testing.expect(pair.findTabIndexById(a) == null);
+            try std.testing.expect(pair.findTabIndexById(b) != null);
+            try std.testing.expectEqual(HostBannerKind.err, pair.banner_kind);
+            try std.testing.expectEqualStrings("The tab could not be moved.", pair.banner_text.?);
+            try app.validateShellNativeMapping();
+        }
+    }.body);
+}
+
+test "win32 a queued tab move left with one tab by a close says so (#703 round 2)" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    try runOnHiddenDesktop(struct {
+        fn body() !void {
+            var fixture: win32.WindowStartTestApp = .{};
+            try fixture.init();
+            defer fixture.deinit();
+            const app = &fixture.app;
+            app.shell_runtime_initialized = true;
+            const setup: TabMoveFixture = .{ .fixture = &fixture };
+            const host = try setup.window(2, false);
+            // A chain: `move_tab_to_new_window` is accepted for the second
+            // tab, then `close_tab:other` closes the first before the queue
+            // drains, so the move finds the tab alone and is declined.
+            const moving = host.tabs.items[1].id;
+            try std.testing.expect(app.requestTabMove(host, moving, .{ .new_window = null }));
+            const other = host.tabs.items[0].focusedSurface().?;
+            fixture.core_app.deleteSurface(other);
+            try std.testing.expect(host.closeTabInPlace(0));
+            try std.testing.expectEqual(@as(usize, 1), host.tabs.items.len);
+            TabMoveFixture.runPosted(host);
+            try std.testing.expect(host.findTabIndexById(moving) != null);
+            try std.testing.expectEqual(@as(usize, 1), app.registry.hosts.items.len);
+            try std.testing.expectEqual(HostBannerKind.err, host.banner_kind);
+            try std.testing.expectEqualStrings("The tab could not be moved.", host.banner_text.?);
+            try host.setBanner(.none, null);
+            // A dragged tear-off: dropped with the window's other tab still
+            // there, which then closes before the queued move runs.
+            const second = try setup.window(2, false);
+            try second.layout();
+            const dragged = second.tabs.items[1].id;
+            const button = second.tabs.items[1].button_hwnd orelse return error.TestNoTabButton;
+            const drop = second.tearOffDrop(.{ .x = 600, .y = 400 }, button) orelse return error.TestNoDrop;
+            try std.testing.expect(app.requestTabMove(second, dragged, .{ .new_window = drop }));
+            const left_behind = second.tabs.items[0].focusedSurface().?;
+            fixture.core_app.deleteSurface(left_behind);
+            try std.testing.expect(second.closeTabInPlace(0));
+            TabMoveFixture.runPosted(second);
+            try std.testing.expect(second.findTabIndexById(dragged) != null);
+            try std.testing.expectEqual(HostBannerKind.err, second.banner_kind);
+            try std.testing.expectEqualStrings("The tab could not be moved.", second.banner_text.?);
+            try app.validateShellNativeMapping();
+        }
+    }.body);
+}
+
+test "win32 two queued tab moves whose window loses its third tab: the move left alone says so (CodeRabbit r4536317953)" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    try runOnHiddenDesktop(struct {
+        fn body() !void {
+            var fixture: win32.WindowStartTestApp = .{};
+            try fixture.init();
+            defer fixture.deinit();
+            const app = &fixture.app;
+            app.shell_runtime_initialized = true;
+            const setup: TabMoveFixture = .{ .fixture = &fixture };
+            const host = try setup.window(3, false);
+            // Moves asked for the first two tabs, then the third closes
+            // before the queue drains: the first moves, and the second finds
+            // its tab alone. Not an `all:` binding's last tab: its window had
+            // a tab no move was asked for.
+            const first = host.tabs.items[0].id;
+            const second = host.tabs.items[1].id;
+            try std.testing.expect(app.requestTabMove(host, first, .{ .new_window = null }));
+            try std.testing.expect(app.requestTabMove(host, second, .{ .new_window = null }));
+            const third = host.tabs.items[2].focusedSurface().?;
+            fixture.core_app.deleteSurface(third);
+            try std.testing.expect(host.closeTabInPlace(2));
+            TabMoveFixture.runPosted(host);
+            try std.testing.expect(host.findTabIndexById(first) == null);
+            try std.testing.expect(host.findTabIndexById(second) != null);
+            try std.testing.expectEqual(@as(usize, 2), app.registry.hosts.items.len);
+            try std.testing.expectEqual(HostBannerKind.err, host.banner_kind);
+            try std.testing.expectEqualStrings("The tab could not be moved.", host.banner_text.?);
+            try app.validateShellNativeMapping();
+        }
+    }.body);
+}
+
+test "win32 a drop's queued move, then move_tab_to_new_window for the other tab: the move left alone says so (CodeRabbit r4536737315)" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    try runOnHiddenDesktop(struct {
+        fn body() !void {
+            var fixture: win32.WindowStartTestApp = .{};
+            try fixture.init();
+            defer fixture.deinit();
+            const app = &fixture.app;
+            app.shell_runtime_initialized = true;
+            const setup: TabMoveFixture = .{ .fixture = &fixture };
+            const host = try setup.window(2, false);
+            const target = try setup.window(1, false);
+            // A drop asks the first tab into the other window; before the
+            // queue drains, a key binding asks a new window for the second.
+            // The first moves, and the second finds its tab alone.
+            const dropped = host.tabs.items[0].id;
+            const pane = host.tabs.items[1].focusedSurface().?;
+            try std.testing.expect(app.requestTabMove(host, dropped, .{ .window = .{ .host_id = target.id, .index = 1 } }));
+            try std.testing.expect(try app.performAction(.{ .surface = pane.core() }, .move_tab_to_new_window, {}));
+            TabMoveFixture.runPosted(host);
+            try std.testing.expectEqual(@as(usize, 2), target.tabs.items.len);
+            try std.testing.expectEqual(@as(usize, 1), host.tabs.items.len);
+            try std.testing.expectEqual(host, pane.host.?);
+            try std.testing.expectEqual(@as(usize, 2), app.registry.hosts.items.len);
+            try std.testing.expectEqual(HostBannerKind.err, host.banner_kind);
+            try std.testing.expectEqualStrings("The tab could not be moved.", host.banner_text.?);
+            try app.validateShellNativeMapping();
+        }
+    }.body);
+}
+
+/// The grab offset a drop of tab 1 at a fixed point would get now.
+fn testTearOffGrab(host: *Host) !POINT {
+    const button = host.tabs.items[1].button_hwnd orelse return error.TestNoTabButton;
+    host.tab_drag_grab = .{ .x = 20, .y = 10 };
+    const drop = host.tearOffDrop(.{ .x = 600, .y = 400 }, button) orelse return error.TestNoDrop;
+    return drop.grab;
+}
+
+test "win32 a torn-off tab's grab offset is the restored window's, from a maximized or fullscreen source (Greptile r4520680639)" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const Mode = enum { integrated, stock, undecorated };
+    for ([_]Mode{ .integrated, .stock, .undecorated }) |mode| {
+        const Body = struct {
+            var which: Mode = undefined;
+            fn body() !void {
+                var fixture: win32.WindowStartTestApp = .{};
+                try fixture.init();
+                defer fixture.deinit();
+                const app = &fixture.app;
+                app.shell_runtime_initialized = true;
+                // Windows 11: tabs flush with the top when maximized or
+                // fullscreen, and a 0 px caption row without decorations
+                // (#703, Opus M1).
+                app.os_build = c.OS_BUILD_WIN11_21H2;
+                app.use_integrated_titlebar = which == .integrated;
+                const setup: TabMoveFixture = .{ .fixture = &fixture };
+                const host = try setup.window(2, false);
+                const hwnd = host.hwnd.?;
+                const pane = host.activeSurface().?;
+                if (which == .undecorated) try std.testing.expect(try window_state.perform(host, pane, .toggle_window_decorations, {}));
+                try host.layout();
+                try std.testing.expect(!host.tabsFlushWithTop());
+                // Restored: the offset is where this window's own frame and
+                // tab row put the tab.
+                const restored = try testTearOffGrab(host);
+                var window_rect: RECT = undefined;
+                _ = sys.GetWindowRect(hwnd, &window_rect);
+                var origin: POINT = .{ .x = 0, .y = 0 };
+                _ = sys.ClientToScreen(hwnd, &origin);
+                const placement = @import("chrome_layout.zig").tabButtonPlacement(host.tabBarHeight(), host.current_dpi, false);
+                try std.testing.expectEqual(origin.x - window_rect.left + 20, restored.x);
+                try std.testing.expectEqual(origin.y - window_rect.top + placement.top + 10, restored.y);
+                // Maximized, and fullscreen: the same, since the new window
+                // opens restored, though this one's tabs are flush with its
+                // top now (but a stock caption's, maximized).
+                _ = sys.ShowWindow(hwnd, c.SW_MAXIMIZE);
+                try host.layout();
+                try std.testing.expectEqual(which != .stock, host.tabsFlushWithTop());
+                try std.testing.expectEqual(restored, try testTearOffGrab(host));
+                _ = sys.ShowWindow(hwnd, c.SW_RESTORE);
+                try std.testing.expect(try window_state.perform(host, pane, .toggle_fullscreen, .native));
+                try host.layout();
+                try std.testing.expect(host.tabsFlushWithTop());
+                const fullscreen = try testTearOffGrab(host);
+                try std.testing.expect(try window_state.perform(host, pane, .toggle_fullscreen, .native));
+                try std.testing.expectEqual(restored, fullscreen);
+            }
+        };
+        Body.which = mode;
+        try runOnHiddenDesktop(Body.body);
+    }
+}
+
+test "win32 a tab torn off onto a monitor of another DPI lands under the pointer, its frame taken at that DPI (#703 M1)" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const Mode = enum { integrated, stock, undecorated };
+    for ([_]Mode{ .integrated, .stock, .undecorated }) |mode| {
+        const Body = struct {
+            var which: Mode = undefined;
+            fn body() !void {
+                var fixture: win32.WindowStartTestApp = .{};
+                try fixture.init();
+                defer fixture.deinit();
+                const app = &fixture.app;
+                app.shell_runtime_initialized = true;
+                app.use_integrated_titlebar = which == .integrated;
+                const setup: TabMoveFixture = .{ .fixture = &fixture };
+                const host = try setup.window(2, false);
+                if (which == .undecorated) host.top_level.decorations_visible = false;
+                const hwnd = host.hwnd.?;
+                const button = host.tabs.items[1].button_hwnd orelse return error.TestNoTabButton;
+                host.tab_drag_grab = .{ .x = 30, .y = 15 };
+                const work: RECT = .{ .left = -5000, .top = -5000, .right = 10000, .bottom = 10000 };
+                const at: POINT = .{ .x = 2000, .y = 1000 };
+                for ([_][2]u32{ .{ 96, 192 }, .{ 192, 96 }, .{ 96, 144 }, .{ 144, 96 } }) |pair| {
+                    const from = pair[0];
+                    const to = pair[1];
+                    host.current_dpi = from;
+                    const drop = host.tearOffDropOn(at, button, work, to) orelse return error.TestNoDrop;
+                    // Where the pointer must sit in the new window: its frame
+                    // and tab row at the DPI it opens at, and the point the
+                    // tab was held at, scaled.
+                    const keeps_frame = window_start.undecoratedKeepsFrame(app.os_build, host.quick_terminal);
+                    const framed = host.top_level.decorations_visible or keeps_frame;
+                    const ex_style: u32 = @truncate(@as(usize, @bitCast(sys.GetWindowLongPtrW(hwnd, c.GWL_EXSTYLE))));
+                    var frame: RECT = .{ .left = 0, .top = 0, .right = 0, .bottom = 0 };
+                    try std.testing.expect(sys.AdjustWindowRectExForDpi(&frame, window_start.hostStyle(framed, false), 0, ex_style, to) != 0);
+                    const client_top = host.usingIntegratedTitlebar() or (keeps_frame and !host.top_level.decorations_visible);
+                    const want_x = -frame.left + Host.scaleByDpi(30, to, from);
+                    const want_y = (if (client_top) 0 else -frame.top) + Host.scaledBy(3, to) + Host.scaleByDpi(15, to, from);
+                    // The window, placed: the pointer at that point in it.
+                    const source: window_start.Snapshot = .{
+                        .state = .{},
+                        .rect = .{ .left = 100, .top = 100, .right = 1100, .bottom = 700 },
+                        .monitor = .{ .id = 1, .info = .{ .cbSize = @sizeOf(sys.MONITORINFO), .rcMonitor = work, .rcWork = work, .dwFlags = 0 }, .dpi = from },
+                    };
+                    const corners: []const POINT = &.{};
+                    const p = window_start.plan(.tear_off, .{}, .{}, &source, .activate, app.os_build);
+                    const placed = window_start.placeTearOff(&p, .of(&corners), drop);
+                    try std.testing.expectEqual(at.x - want_x, placed.rect.left);
+                    try std.testing.expectEqual(at.y - want_y, placed.rect.top);
+                }
+            }
+        };
+        Body.which = mode;
+        try runOnHiddenDesktop(Body.body);
+    }
+}
+
+const TestMonitor = struct { work: RECT, dpi: u32 };
+
+/// Drop points in `work` where a `width` x `height` window, with the pointer
+/// `grab` from its top-left, fits whole, so nothing moves it to fit
+/// (`fitRectInWork`): the middle of that range and its bottom-right end, the
+/// window against the work area's bottom and right edges. Null when the
+/// window cannot fit at all (Greptile r4532749495: a short display has no
+/// room below its middle).
+fn testTearOffDropPoints(work: RECT, width: i32, height: i32, grab: POINT) ?[2]POINT {
+    const lo: POINT = .{ .x = work.left + grab.x, .y = work.top + grab.y };
+    const hi: POINT = .{ .x = work.right - (width - grab.x) - 1, .y = work.bottom - (height - grab.y) - 1 };
+    if (hi.x < lo.x or hi.y < lo.y) return null;
+    return .{ .{ .x = @divTrunc(lo.x + hi.x, 2), .y = @divTrunc(lo.y + hi.y, 2) }, hi };
+}
+
+fn testWindowFits(work: RECT, at: POINT, width: i32, height: i32, grab: POINT) bool {
+    const left = at.x - grab.x;
+    const top = at.y - grab.y;
+    return left >= work.left and top >= work.top and left + width <= work.right and top + height <= work.bottom;
+}
+
+test "win32 the drained-drop test's drop points keep the window whole on a 1024x768 display, and skip a window too big for it (Greptile r4532749495)" {
+    // 1024x768 less a 40 px taskbar, the CI runner's likely display; a
+    // 640x480 restored window, the pointer 30,58 into it.
+    const work: RECT = .{ .left = 0, .top = 0, .right = 1024, .bottom = 728 };
+    const grab: POINT = .{ .x = 30, .y = 58 };
+    // The work area's middle leaves no room below: the trap.
+    try std.testing.expect(!testWindowFits(work, .{ .x = 512, .y = 364 }, 640, 480, grab));
+    const points = testTearOffDropPoints(work, 640, 480, grab).?;
+    for (points) |at| try std.testing.expect(testWindowFits(work, at, 640, 480, grab));
+    // The bottom-right point puts the window 1 px inside both edges.
+    try std.testing.expectEqual(@as(i32, 1024 - 640 + 30 - 1), points[1].x);
+    try std.testing.expectEqual(@as(i32, 728 - 480 + 58 - 1), points[1].y);
+    // A window as wide or as tall as the work area cannot fit: skipped.
+    try std.testing.expect(testTearOffDropPoints(work, 1024, 480, grab) == null);
+    try std.testing.expect(testTearOffDropPoints(work, 640, 728, grab) == null);
+    // A monitor that is not at the origin.
+    const side: RECT = .{ .left = 3840, .top = 471, .right = 5760, .bottom = 1503 };
+    for (testTearOffDropPoints(side, 1034, 600, grab).?) |at| try std.testing.expect(testWindowFits(side, at, 1034, 600, grab));
+}
+
+/// The monitors there are (up to eight), each with its work area and DPI.
+fn testMonitorList(out: *[8]TestMonitor) usize {
+    const Search = struct {
+        list: *[8]TestMonitor,
+        len: usize = 0,
+        fn each(monitor: sys.HMONITOR, _: win32.HDC, _: *RECT, data: LPARAM) callconv(.winapi) BOOL {
+            const self: *@This() = @ptrFromInt(@as(usize, @bitCast(data)));
+            if (self.len == self.list.len) return 0;
+            var info: sys.MONITORINFO = std.mem.zeroes(sys.MONITORINFO);
+            info.cbSize = @sizeOf(sys.MONITORINFO);
+            if (sys.GetMonitorInfoW(monitor, &info) == 0) return 1;
+            var dpi_x: u32 = 0;
+            var dpi_y: u32 = 0;
+            if (sys.GetDpiForMonitor(monitor, 0, &dpi_x, &dpi_y) < 0) return 1;
+            self.list[self.len] = .{ .work = info.rcWork, .dpi = dpi_x };
+            self.len += 1;
+            return 1;
+        }
+    };
+    var search: Search = .{ .list = out };
+    _ = sys.EnumDisplayMonitors(null, null, Search.each, @as(LPARAM, @bitCast(@intFromPtr(&search))));
+    return search.len;
+}
+
+test "win32 a tab dropped from a maximized or fullscreen window opens restored with the drop point in its tab, on this monitor and on one of another DPI (#703 Opus M2, Sol M1)" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    // The test binary is DPI-unaware: it would read every monitor at the
+    // system DPI (window-frame.md, the 2026-09-24 window-decoration entry,
+    // trap 5). Per-monitor aware here and on the window's thread.
+    const previous_dpi = sys.SetThreadDpiAwarenessContext(-4);
+    defer _ = sys.SetThreadDpiAwarenessContext(previous_dpi);
+    var monitors: [8]TestMonitor = undefined;
+    const count = testMonitorList(&monitors);
+    if (count == 0) return error.SkipZigTest;
+    // The source's monitor and the drop's: the same one, and, where there
+    // is one, a monitor of another DPI each way.
+    var pairs: [3][2]usize = undefined;
+    var pair_count: usize = 1;
+    pairs[0] = .{ 0, 0 };
+    for (monitors[1..count], 1..) |m, i| if (m.dpi != monitors[0].dpi) {
+        pairs[1] = .{ 0, i };
+        pairs[2] = .{ i, 0 };
+        pair_count = 3;
+        break;
+    };
+    if (pair_count == 1) std.log.warn("no monitor of another DPI here: the same-DPI drop alone", .{});
+    const Source = enum { maximized, fullscreen };
+    for ([_]bool{ true, false }) |integrated| for ([_]Source{ .maximized, .fullscreen }) |state| for (pairs[0..pair_count]) |pair| {
+        const Body = struct {
+            var source_state: Source = undefined;
+            var titlebar: bool = undefined;
+            var from: TestMonitor = undefined;
+            var to: TestMonitor = undefined;
+            fn body() !void {
+                const thread_dpi = sys.SetThreadDpiAwarenessContext(-4);
+                defer _ = sys.SetThreadDpiAwarenessContext(thread_dpi);
+                var fixture: win32.WindowStartTestApp = .{};
+                try fixture.init();
+                defer fixture.deinit();
+                const app = &fixture.app;
+                app.shell_runtime_initialized = true;
+                app.os_build = c.OS_BUILD_WIN11_21H2;
+                app.use_integrated_titlebar = titlebar;
+                const setup: TabMoveFixture = .{ .fixture = &fixture };
+                // Three tabs: two are dropped, and the window keeps one.
+                const host = try setup.window(3, false);
+                const hwnd = host.hwnd.?;
+                const pane = host.activeSurface().?;
+                // On the source's monitor at 400x300, small enough for a small
+                // display, then maximized or fullscreen there.
+                _ = sys.SetWindowPos(hwnd, null, from.work.left + 80, from.work.top + 80, 400, 300, c.SWP_NOZORDER | c.SWP_NOACTIVATE);
+                try host.layout();
+                // Its restored size: what a torn-off tab's window opens at,
+                // scaled to the drop's DPI (`placeTearOff`).
+                var restored: RECT = undefined;
+                try std.testing.expect(sys.GetWindowRect(hwnd, &restored) != 0);
+                switch (source_state) {
+                    .maximized => _ = sys.ShowWindow(hwnd, c.SW_MAXIMIZE),
+                    .fullscreen => try std.testing.expect(try window_state.perform(host, pane, .toggle_fullscreen, .native)),
+                }
+                try host.layout();
+                try std.testing.expectEqual(titlebar or source_state == .fullscreen, host.tabsFlushWithTop());
+                const from_dpi = host.current_dpi;
+                try std.testing.expectEqual(from.dpi, from_dpi);
+                // A tab held 30,15 into its button. Where it lands in the new
+                // window (`grab`) depends only on the drop monitor's DPI, so a
+                // first drop in the middle of that monitor gives it.
+                host.tab_drag_grab = .{ .x = 30, .y = 15 };
+                const middle: POINT = .{ .x = @divTrunc(to.work.left + to.work.right, 2), .y = @divTrunc(to.work.top + to.work.bottom, 2) };
+                const probe_button = host.tabs.items[1].button_hwnd orelse return error.TestNoTabButton;
+                const grab = (host.tearOffDrop(middle, probe_button) orelse return error.TestNoDrop).grab;
+                // The drop points where the whole new window fits the work
+                // area, so nothing moves it to fit (`fitRectInWork`; a short
+                // display has no room below its middle, Greptile r4532749495):
+                // the middle of that range, and its bottom-right end, the
+                // window against the work area's bottom and right edges.
+                const width = Host.scaleByDpi(restored.right - restored.left, to.dpi, from_dpi);
+                const height = Host.scaleByDpi(restored.bottom - restored.top, to.dpi, from_dpi);
+                const points = testTearOffDropPoints(to.work, width, height, grab) orelse {
+                    std.log.warn("drop monitor's work area is {d}x{d}, too small for a {d}x{d} window: case skipped", .{ to.work.right - to.work.left, to.work.bottom - to.work.top, width, height });
+                    if (source_state == .fullscreen) _ = try window_state.perform(host, pane, .toggle_fullscreen, .native);
+                    return;
+                };
+                for (points) |at| {
+                    const moving = host.tabs.items[1].id;
+                    const button = host.tabs.items[1].button_hwnd orelse return error.TestNoTabButton;
+                    var before: [8]*Host = undefined;
+                    const before_count = app.registry.hosts.items.len;
+                    @memcpy(before[0..before_count], app.registry.hosts.items);
+                    const drop = host.tearOffDrop(at, button) orelse return error.TestNoDrop;
+                    try std.testing.expect(app.requestTabMove(host, moving, .{ .new_window = drop }));
+                    TabMoveFixture.runPosted(host);
+                    // The new window: restored, at the drop's DPI, its tab
+                    // under the pointer where the tab was held.
+                    var made: ?*Host = null;
+                    for (app.registry.hosts.items) |other| {
+                        if (std.mem.indexOfScalar(*Host, before[0..before_count], other) == null) made = other;
+                    }
+                    const target = made orelse return error.TestNoNewWindow;
+                    try std.testing.expectEqual(@as(usize, 1), target.tabs.items.len);
+                    // A move that happened says nothing.
+                    try std.testing.expectEqual(HostBannerKind.none, host.banner_kind);
+                    try std.testing.expectEqual(HostBannerKind.none, target.banner_kind);
+                    try std.testing.expect(sys.IsZoomed(target.hwnd.?) == 0);
+                    try std.testing.expect(!target.top_level.isFullscreen());
+                    try std.testing.expectEqual(to.dpi, target.current_dpi);
+                    var opened: RECT = undefined;
+                    try std.testing.expect(sys.GetWindowRect(target.hwnd.?, &opened) != 0);
+                    try std.testing.expect(opened.left >= to.work.left and opened.top >= to.work.top and opened.right <= to.work.right and opened.bottom <= to.work.bottom);
+                    try target.layout();
+                    const tab_button = target.tabs.items[0].button_hwnd orelse return error.TestNoTabButton;
+                    var rect: RECT = undefined;
+                    try std.testing.expect(sys.GetWindowRect(tab_button, &rect) != 0);
+                    try std.testing.expect(at.x >= rect.left and at.x < rect.right and at.y >= rect.top and at.y < rect.bottom);
+                    const want_x = Host.scaleByDpi(30, to.dpi, from_dpi);
+                    const want_y = Host.scaleByDpi(15, to.dpi, from_dpi);
+                    // Exactly: the frame at the drop's DPI, not scaled to it
+                    // (a stock frame is 8,31 at 96 DPI and 11,45 at 144).
+                    try std.testing.expectEqual(want_x, at.x - rect.left);
+                    try std.testing.expectEqual(want_y, at.y - rect.top);
+                }
+                if (source_state == .fullscreen) _ = try window_state.perform(host, pane, .toggle_fullscreen, .native);
+            }
+        };
+        Body.source_state = state;
+        Body.titlebar = integrated;
+        Body.from = monitors[pair[0]];
+        Body.to = monitors[pair[1]];
+        try runOnHiddenDesktop(Body.body);
+    };
 }
 
 /// What a nested loop does with the tab-move wakes it takes: dispatches them
@@ -18348,14 +18961,20 @@ test "win32 a tab move whose destination loses its window before the commit move
             const setup: TabMoveFixture = .{ .fixture = &fixture };
             const source = try setup.window(2, false);
             const target = try setup.window(1, false);
+            // Its window, saved before the hook can take it and put back on
+            // every path: a move that fails before the commit leaves `kept`
+            // null, and a window the teardown never destroys keeps its class
+            // registered (CodeRabbit r4542471146).
+            const target_window = target.hwnd;
+            defer target.hwnd = target_window;
             TestTargetLosesWindow.target = target;
             TestTargetLosesWindow.kept = null;
             App.test_tab_move_shell_step = &TestTargetLosesWindow.hook;
             defer App.test_tab_move_shell_step = null;
             const moved = app.moveTabToWindow(source, 0, .{ .host = .{ .host = target, .index = 1 } });
             App.test_tab_move_shell_step = null;
-            // Its window back, for the teardown.
-            target.hwnd = TestTargetLosesWindow.kept;
+            try std.testing.expectEqual(target_window, TestTargetLosesWindow.kept);
+            target.hwnd = target_window;
             try std.testing.expect(!(try moved));
             try std.testing.expectEqual(@as(usize, 2), source.tabs.items.len);
             try std.testing.expectEqual(@as(usize, 1), target.tabs.items.len);
@@ -18501,6 +19120,211 @@ test "win32 a tab automation moves out mid divider drag takes its ratio as it wa
             try std.testing.expectEqual(start, target.tabs.items[0].tree.nodes[0].split.ratio);
             _ = win32.hostWindowProc(source.hwnd.?, c.WM_LBUTTONUP, 0, testMouseLParam(100, 300));
             try std.testing.expect(!source.pane_divider_button_held);
+            try app.validateShellNativeMapping();
+        }
+    }.body);
+}
+
+const TestCommitWindowCode = struct {
+    const Action = enum { fill_target, close_tab, source_loses_window };
+    var action: Action = .fill_target;
+    var host: ?*Host = null;
+    /// For `close_tab`: a pane of the tab that closes.
+    var pane: ?*Surface = null;
+    var kept: ?HWND = null;
+    var done = false;
+
+    /// Right before the commit, on the path with no retry, window code
+    /// changes what the move checked (council round 10 L2, Opus's probes):
+    /// it adds a tab to the window the tab is to join and leaves its list
+    /// full, closes a tab of the window the tab leaves, or takes that
+    /// window's `hwnd`, as its `WM_DESTROY` does before its removal.
+    fn hook(app: *App, step: App.TabMoveShellStep) void {
+        if (step != .commit) return;
+        const to = host orelse return;
+        host = null;
+        switch (action) {
+            .fill_target => {
+                const tab = app.createWindowSurface(&app.config, default_title, .{ .host_id = to.id }) catch return;
+                app.activateSurface(tab);
+                to.tabs.shrinkAndFree(app.core_app.alloc, to.tabs.items.len);
+                done = true;
+            },
+            .close_tab => {
+                const closing = pane orelse return;
+                for (to.tabs.items, 0..) |*tab, i| if (tab.findHandle(closing) != null) {
+                    done = to.closeTabInPlace(i);
+                    return;
+                };
+            },
+            .source_loses_window => {
+                kept = to.hwnd;
+                to.hwnd = null;
+                done = true;
+            },
+        }
+    }
+
+    fn arm(what: Action, on: *Host, closing: ?*Surface) void {
+        action = what;
+        host = on;
+        pane = closing;
+        kept = null;
+        done = false;
+        App.test_tab_move_shell_step = &hook;
+    }
+};
+
+test "win32 a tab move whose destination fills right before the commit reserves its slot again (council round 10 L2, probe G)" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    try runOnHiddenDesktop(struct {
+        fn body() !void {
+            var fixture: win32.WindowStartTestApp = .{};
+            try fixture.init();
+            defer fixture.deinit();
+            const app = &fixture.app;
+            app.shell_runtime_initialized = true;
+            const setup: TabMoveFixture = .{ .fixture = &fixture };
+            const source = try setup.window(2, false);
+            const target = try setup.window(1, false);
+            // No transfer in undo history: the move prepares once.
+            try std.testing.expect(!source.hasStructuralHistory());
+            TestCommitWindowCode.arm(.fill_target, target, null);
+            defer App.test_tab_move_shell_step = null;
+            try std.testing.expect(try app.moveTabToWindow(source, 0, .{ .host = .{ .host = target, .index = 1 } }));
+            App.test_tab_move_shell_step = null;
+            try std.testing.expect(TestCommitWindowCode.done);
+            // The tab joined the window's other two.
+            try std.testing.expectEqual(@as(usize, 3), target.tabs.items.len);
+            try std.testing.expectEqual(@as(usize, 1), source.tabs.items.len);
+            try app.validateShellNativeMapping();
+        }
+    }.body);
+}
+
+test "win32 a tab torn off a window that drops to one tab right before the commit moves nothing (council round 10 L2)" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    try runOnHiddenDesktop(struct {
+        fn body() !void {
+            var fixture: win32.WindowStartTestApp = .{};
+            try fixture.init();
+            defer fixture.deinit();
+            const app = &fixture.app;
+            app.shell_runtime_initialized = true;
+            const setup: TabMoveFixture = .{ .fixture = &fixture };
+            const source = try setup.window(2, false);
+            const moving = source.tabs.items[1].id;
+            const other = source.tabs.items[0].focusedSurface().?;
+            fixture.core_app.deleteSurface(other);
+            TestCommitWindowCode.arm(.close_tab, source, other);
+            defer App.test_tab_move_shell_step = null;
+            const moved = app.moveTabToWindow(source, 1, .{ .new_window = null });
+            App.test_tab_move_shell_step = null;
+            try std.testing.expect(TestCommitWindowCode.done);
+            // A new window from the only tab is no move: nothing moved, and
+            // the window made for it is gone.
+            try std.testing.expect(!(try moved));
+            try std.testing.expectEqual(@as(usize, 1), source.tabs.items.len);
+            try std.testing.expect(source.findTabIndexById(moving) != null);
+            try std.testing.expectEqual(@as(usize, 1), app.registry.hosts.items.len);
+            try app.validateShellNativeMapping();
+        }
+    }.body);
+}
+
+test "win32 a tab move whose moving tab closes right before the commit moves nothing (council round 10 L2)" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    try runOnHiddenDesktop(struct {
+        fn body() !void {
+            var fixture: win32.WindowStartTestApp = .{};
+            try fixture.init();
+            defer fixture.deinit();
+            const app = &fixture.app;
+            app.shell_runtime_initialized = true;
+            const setup: TabMoveFixture = .{ .fixture = &fixture };
+            const source = try setup.window(3, false);
+            const moving = source.tabs.items[1].focusedSurface().?;
+            fixture.core_app.deleteSurface(moving);
+            TestCommitWindowCode.arm(.close_tab, source, moving);
+            defer App.test_tab_move_shell_step = null;
+            const moved = app.moveTabToWindow(source, 1, .{ .new_window = null });
+            App.test_tab_move_shell_step = null;
+            try std.testing.expect(TestCommitWindowCode.done);
+            try std.testing.expect(!(try moved));
+            try std.testing.expectEqual(@as(usize, 2), source.tabs.items.len);
+            try std.testing.expectEqual(@as(usize, 1), app.registry.hosts.items.len);
+            try app.validateShellNativeMapping();
+        }
+    }.body);
+}
+
+test "win32 a tab move whose source loses its window right before the commit moves nothing (council round 10 L2)" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    try runOnHiddenDesktop(struct {
+        fn body() !void {
+            var fixture: win32.WindowStartTestApp = .{};
+            try fixture.init();
+            defer fixture.deinit();
+            const app = &fixture.app;
+            app.shell_runtime_initialized = true;
+            const setup: TabMoveFixture = .{ .fixture = &fixture };
+            const source = try setup.window(2, false);
+            const target = try setup.window(1, false);
+            // Its window, saved before the hook can take it and put back on
+            // every path: a move that fails before the commit leaves `kept`
+            // null, and a window the teardown never destroys keeps its class
+            // registered (CodeRabbit r4542471146).
+            const source_window = source.hwnd;
+            defer source.hwnd = source_window;
+            TestCommitWindowCode.arm(.source_loses_window, source, null);
+            defer App.test_tab_move_shell_step = null;
+            const moved = app.moveTabToWindow(source, 0, .{ .host = .{ .host = target, .index = 1 } });
+            App.test_tab_move_shell_step = null;
+            try std.testing.expectEqual(source_window, TestCommitWindowCode.kept);
+            source.hwnd = source_window;
+            try std.testing.expect(TestCommitWindowCode.done);
+            try std.testing.expect(!(try moved));
+            try std.testing.expectEqual(@as(usize, 2), source.tabs.items.len);
+            try std.testing.expectEqual(@as(usize, 1), target.tabs.items.len);
+            try app.validateShellNativeMapping();
+        }
+    }.body);
+}
+
+test "win32 a queued tab move whose source loses its window right before the commit shows no banner there (#703 round 3, Opus)" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    try runOnHiddenDesktop(struct {
+        fn body() !void {
+            var fixture: win32.WindowStartTestApp = .{};
+            try fixture.init();
+            defer fixture.deinit();
+            const app = &fixture.app;
+            app.shell_runtime_initialized = true;
+            const setup: TabMoveFixture = .{ .fixture = &fixture };
+            const source = try setup.window(2, false);
+            const target = try setup.window(1, false);
+            // Queued as a drop asks it; the source's `WM_DESTROY` takes its
+            // `hwnd` right before the commit, so the move is declined with
+            // nowhere to say so (`App.tabMoveDeclined`'s guard).
+            const moving = source.tabs.items[0].id;
+            try std.testing.expect(app.requestTabMove(source, moving, .{ .window = .{ .host_id = target.id, .index = 1 } }));
+            // Its window, saved before the hook can take it and put back on
+            // every path: a move that fails before the commit leaves `kept`
+            // null, and a window the teardown never destroys keeps its class
+            // registered (CodeRabbit r4542471146).
+            const source_window = source.hwnd;
+            defer source.hwnd = source_window;
+            TestCommitWindowCode.arm(.source_loses_window, source, null);
+            defer App.test_tab_move_shell_step = null;
+            TabMoveFixture.runPosted(source);
+            App.test_tab_move_shell_step = null;
+            try std.testing.expectEqual(source_window, TestCommitWindowCode.kept);
+            source.hwnd = source_window;
+            try std.testing.expect(TestCommitWindowCode.done);
+            try std.testing.expect(source.findTabIndexById(moving) != null);
+            try std.testing.expectEqual(@as(usize, 2), source.tabs.items.len);
+            try std.testing.expectEqual(@as(usize, 1), target.tabs.items.len);
+            try std.testing.expectEqual(HostBannerKind.none, source.banner_kind);
             try app.validateShellNativeMapping();
         }
     }.body);

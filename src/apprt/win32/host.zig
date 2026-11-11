@@ -3975,29 +3975,36 @@ pub const Host = struct {
         return true;
     }
 
+    /// Where a restored window of this one's kind puts its client area, from
+    /// its window rect's top-left, at `dpi`: the frame a
+    /// torn-off tab's window opens with, whatever state this one is in now.
+    /// The integrated caption and a 0 px caption row put the client area's
+    /// top at the window's top (`handleNcCalcSize` keeps only the stock
+    /// side frame); the stock caption keeps the whole stock frame.
+    pub fn restoredClientOffset(self: *const Host, hwnd: HWND, dpi: u32) POINT {
+        const keeps_frame = window_start.undecoratedKeepsFrame(self.app.os_build, self.quick_terminal);
+        const framed = self.top_level.decorations_visible or keeps_frame;
+        const ex_style: u32 = @truncate(@as(usize, @bitCast(sys.GetWindowLongPtrW(hwnd, c.GWL_EXSTYLE))));
+        var rect: RECT = .{ .left = 0, .top = 0, .right = 0, .bottom = 0 };
+        if (sys.AdjustWindowRectExForDpi(&rect, window_start.hostStyle(framed, false), 0, ex_style, dpi) == 0) {
+            // Not a (0,0) frame: this window's own, scaled to `dpi`, which is
+            // what the grab used before #703.
+            log.warn("tear-off frame at dpi={} not known err={}; this window's own frame, scaled", .{ dpi, windows.kernel32.GetLastError() });
+            var window_rect: RECT = undefined;
+            var origin: POINT = .{ .x = 0, .y = 0 };
+            if (sys.GetWindowRect(hwnd, &window_rect) == 0 or sys.ClientToScreen(hwnd, &origin) == 0) return .{ .x = 0, .y = 0 };
+            const from = @max(self.current_dpi, 1);
+            return .{ .x = scaleByDpi(origin.x - window_rect.left, dpi, from), .y = scaleByDpi(origin.y - window_rect.top, dpi, from) };
+        }
+        const client_top = self.usingIntegratedTitlebar() or (keeps_frame and !self.top_level.decorations_visible);
+        return .{ .x = -rect.left, .y = if (client_top) 0 else -rect.top };
+    }
+
     /// Where the window of a tab torn off at `screen` goes: the pointer, and
     /// where it held the tab (`tab_drag_grab`) as an offset from the new
     /// window's top-left (`tab_drag.grabOffset`), on the monitor under it.
     pub fn tearOffDrop(self: *Host, screen: POINT, button: ?HWND) ?window_start.Drop {
-        const hwnd = self.hwnd orelse return null;
-        var window_rect: RECT = undefined;
-        if (sys.GetWindowRect(hwnd, &window_rect) == 0) return null;
-        var origin: POINT = .{ .x = 0, .y = 0 };
-        if (sys.ClientToScreen(hwnd, &origin) == 0) return null;
-        const placement = chrome_layout.tabButtonPlacement(self.tabBarHeight(), self.current_dpi, self.tabsFlushWithTop());
-        var button_width: i32 = self.scaled(host_tab_max_button_width);
-        if (button) |held| {
-            var rect: RECT = undefined;
-            if (sys.GetClientRect(held, &rect) != 0) button_width = rect.right - rect.left;
-        }
-        const grab = tab_drag.grabOffset(
-            origin.x - window_rect.left,
-            origin.y - window_rect.top,
-            placement.top,
-            self.tab_drag_grab.x,
-            self.tab_drag_grab.y,
-            button_width,
-        );
+        if (self.hwnd == null) return null;
         const monitor = sys.MonitorFromPoint(screen, c.MONITOR_DEFAULTTONEAREST) orelse return null;
         var info: MONITORINFO = std.mem.zeroes(MONITORINFO);
         info.cbSize = @sizeOf(MONITORINFO);
@@ -4006,7 +4013,40 @@ pub const Host = struct {
         var dpi_y: u32 = 0;
         // 0 (unknown) keeps the source's DPI.
         if (sys.GetDpiForMonitor(monitor, 0, &dpi_x, &dpi_y) < 0) dpi_x = 0;
-        return .{ .at = screen, .grab = .{ .x = grab.x, .y = grab.y }, .work = info.rcWork, .dpi = dpi_x };
+        return self.tearOffDropOn(screen, button, info.rcWork, dpi_x);
+    }
+
+    /// `tearOffDrop` onto a monitor of work area `work` and DPI `dpi` (0:
+    /// this window's). The new window opens restored, whatever this one is
+    /// now (maximized, with its extra top margin and its tabs flush with the
+    /// top; fullscreen, with no caption), and at the DPI it is dropped at:
+    /// the pointer goes where that window's frame and tab row put the tab
+    /// (Greptile r4520680639), each taken at that DPI, since a frame does
+    /// not scale with it (a stock caption is 8,31 at 96 DPI and 13,58 at 192,
+    /// not 16,62; #703 M1). Only where the pointer held the tab scales. The
+    /// grab is in the destination's pixels (`grab_dpi`).
+    pub fn tearOffDropOn(self: *Host, screen: POINT, button: ?HWND, work: RECT, dpi: u32) ?window_start.Drop {
+        const hwnd = self.hwnd orelse return null;
+        const from = @max(self.current_dpi, 1);
+        const to = if (dpi == 0) from else dpi;
+        const frame = self.restoredClientOffset(hwnd, to);
+        // Only `.top` is read, which depends on the DPI alone (this window's
+        // tab-bar height, at its own DPI, sets only `.height`).
+        const placement = chrome_layout.tabButtonPlacement(self.tabBarHeight(), to, false);
+        var button_width: i32 = self.scaled(host_tab_max_button_width);
+        if (button) |held| {
+            var rect: RECT = undefined;
+            if (sys.GetClientRect(held, &rect) != 0) button_width = rect.right - rect.left;
+        }
+        const grab = tab_drag.grabOffset(
+            frame.x,
+            frame.y,
+            placement.top,
+            scaleByDpi(self.tab_drag_grab.x, to, from),
+            scaleByDpi(self.tab_drag_grab.y, to, from),
+            scaleByDpi(button_width, to, from),
+        );
+        return .{ .at = screen, .grab = .{ .x = grab.x, .y = grab.y }, .work = work, .dpi = dpi, .grab_dpi = to };
     }
 
     /// The pointer moved during a tab drag that passed its threshold: lays
@@ -9778,6 +9818,17 @@ pub const Host = struct {
 
     pub fn scaled(self: *const Host, base: i32) i32 {
         return win32_chrome_state.scaled(base, self.current_dpi);
+    }
+
+    /// `value`, in pixels at DPI `from`, in pixels at `to`: rounded as
+    /// kernel32's `MulDiv`, as `window_start.placeTearOff` scales (that leaf
+    /// keeps its own copy private: its pub surface is budgeted).
+    pub fn scaleByDpi(value: i32, to: u32, from: u32) i32 {
+        std.debug.assert(from > 0);
+        const product = @as(i64, value) * to;
+        const half: i64 = from / 2;
+        const rounded = if (product < 0) product - half else product + half;
+        return std.math.cast(i32, @divTrunc(rounded, @as(i64, from))) orelse -1;
     }
 
     /// DPI-scale helper usable from free functions that lack a Host pointer.

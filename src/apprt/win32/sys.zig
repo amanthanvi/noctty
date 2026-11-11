@@ -784,6 +784,7 @@ pub extern "user32" fn SetWindowRgn(hWnd: HWND, hRgn: ?HRGN, bRedraw: BOOL) call
 pub extern "user32" fn NotifyWinEvent(event: u32, hwnd: HWND, idObject: i32, idChild: i32) callconv(.winapi) void;
 
 pub extern "user32" fn GetClassNameW(hwnd: HWND, name: [*]u16, count: c_int) callconv(.winapi) c_int;
+pub extern "user32" fn AdjustWindowRectExForDpi(rect: *RECT, style: u32, menu: BOOL, ex_style: u32, dpi: UINT) callconv(.winapi) BOOL;
 
 pub extern "user32" fn EnumChildWindows(hWndParent: HWND, lpEnumFunc: *const fn (HWND, LPARAM) callconv(.winapi) BOOL, lParam: LPARAM) callconv(.winapi) BOOL;
 

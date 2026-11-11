@@ -192,6 +192,7 @@
         "src/apprt/win32_shell/**",
         "src/apprt/win32/confirm_text.zig",
         "src/apprt/win32/tab_drag.zig",
+        "src/apprt/win32/window_start.zig",
         "src/apprt/win32/pane_divider.zig",
         "src/apprt/win32_layout.zig",
         "src/datastruct/split_tree.zig"

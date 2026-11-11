@@ -8324,9 +8324,12 @@ fn closesCaller(action: input.Binding.Action) bool {
 /// direction. A detached pane is freed by whatever disposes that history
 /// next, and a later action in the same chain can (`reset`, `new_split`,
 /// anything that clears redo), so the chain must not run on it
-/// (`performChain`). Nothing else detaches the pane a key ran on: tab moves
-/// only reorder, the quick terminal toggle hides its window with the pane
-/// still in its tab, and `close_tab:this` is a `closesCaller` action.
+/// (`performChain`). Nothing else detaches the pane a key ran on: `move_tab`
+/// reorders its tab in its window, and `move_tab_to_new_window` only queues
+/// the move for the app's next pump turn (`App.requestTabMove`), so the pane
+/// stays in a live tab for the rest of the chain; the quick terminal toggle
+/// hides its window with the pane still in its tab, and `close_tab:this` is a
+/// `closesCaller` action.
 fn mayDetachCaller(action: input.Binding.Action) bool {
     return switch (action) {
         .undo, .redo => true,
