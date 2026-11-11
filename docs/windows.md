@@ -2346,10 +2346,15 @@ staged update keeps the staged files and records the dismissal.
 
 For installer-managed installs, the update notice can launch the verified
 staged installer. Applying an update is always user-initiated. The notice says
-that installing closes all windows and running sessions, and **Install**
-asks first, like quitting, when a terminal still has a running process. It
-then re-verifies the staged installer, records apply intent, launches the
-installer elevated (UAC may prompt), and exits the app. The silent setup
+that installing closes all windows and running sessions. While the Settings
+window has unsaved changes, **Install** does not start or wait: a banner asks
+you to save or discard them and then press **Install** again. Otherwise it
+asks first, like quitting, whenever `confirm-close-surface` would ask about a
+terminal (by default, one still running a program). Just before it starts, it
+checks Settings again, then re-verifies the staged installer, launches it
+elevated (UAC may prompt), records apply intent, and exits the app. If that
+record cannot be written, noctty logs it and exits anyway, and the check for
+an unfinished update described below has nothing to go on. The silent setup
 starts noctty again when it finishes, through Explorer so that it is meant to
 run as the logged-on user and not elevated, so an update that works ends with
 a new window. (The wizard's "Launch noctty" box starts it the same way.) That
@@ -2365,14 +2370,15 @@ update state is shared by every copy of the user's. Declining the elevation
 prompt does not quit noctty or record anything: the banner just says the
 installer could not be launched.
 
-For portable installs, the notice's button is also **Install**, and it asks
-first in the same way. It then re-verifies the staged ZIP payload, records the
-pending update, and exits noctty. On the next launch, noctty backs up the files
-being replaced, swaps in the staged payload, and starts the new build. The new
-build confirms the update only when its version matches the staged target;
-otherwise noctty restores the backup. A new build that exits with an error
-during the bounded startup check, or a swap that remains unconfirmed on a later
-launch, also rolls back and relaunches the previous build.
+For portable installs, the notice's button is also **Install**, and it behaves
+the same way up to the point where it starts: Settings, the same question, and
+the second Settings check. It then re-verifies the staged ZIP payload, records
+the pending update, and exits noctty. On the next launch, noctty backs up the
+files being replaced, swaps in the staged payload, and starts the new build.
+The new build confirms the update only when its version matches the staged
+target; otherwise noctty restores the backup. A new build that exits with an
+error during the bounded startup check, or a swap that remains unconfirmed on
+a later launch, also rolls back and relaunches the previous build.
 
 If recovery files are lost after a swap, noctty abandons the unrecoverable
 transaction, launches the installed build, and shows a warning with manual

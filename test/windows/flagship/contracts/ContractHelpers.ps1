@@ -1668,7 +1668,16 @@ function Test-ForbiddenScriptMutationNode {
             $Node.Extent.Text -match '(?i)(?:alias|function|variable):'
     }
     if ($Node -is [System.Management.Automation.Language.AssignmentStatementAst]) {
-        return $Node.Left.Extent.Text -match '(?i)^\$(?:\{)?(?:global:|script:|local:|private:)?(?:alias|function|variable):'
+        # Any alias:, function: or variable: target, not only one at the start
+        # of the left-hand side: a type constraint ([scriptblock]${function:...})
+        # or a destructuring list puts it further in.
+        $providerTargets = @($Node.Left.FindAll({
+            param($target)
+            $target -is [System.Management.Automation.Language.VariableExpressionAst] -and
+                $target.Extent.Text -match '(?i)^\$(?:\{)?(?:global:|script:|local:|private:)?(?:alias|function|variable):'
+        }, $true))
+        return $providerTargets.Count -ne 0 -or
+            $Node.Left.Extent.Text -match '(?i)^\$(?:\{)?(?:global:|script:|local:|private:)?(?:alias|function|variable):'
     }
     return $false
 }
@@ -1685,7 +1694,7 @@ function Assert-CommandResolutionContract {
     $mutators = @($Ast.FindAll({ param($node) Test-ForbiddenScriptMutationNode -Node $node }, $true))
     if ($mutators.Count -ne 0) { throw "Command resolution mutation is forbidden: $Context" }
     if (Test-CommandLoadingRequirement -Ast $Ast -Tokens $Tokens) {
-        throw "Command-loading #requires directive is forbidden: $Context"
+        throw "Command-loading #requires directive or using statement is forbidden: $Context"
     }
     $dotSources = @($Ast.FindAll({
         param($node)
@@ -1719,6 +1728,18 @@ function Test-CommandLoadingRequirement {
 
     if ($null -ne $Ast.ScriptRequirements -and
         @($Ast.ScriptRequirements.RequiredModules).Count -ne 0) {
+        return $true
+    }
+    # `using module` and `using assembly` load commands and types when the
+    # script is parsed, like #requires -Modules; `using namespace` loads nothing.
+    $loadingUsingKinds = @(
+        [System.Management.Automation.Language.UsingStatementKind]::Module,
+        [System.Management.Automation.Language.UsingStatementKind]::Assembly
+    )
+    if (@($Ast.FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.UsingStatementAst] -and $node.UsingStatementKind -in $loadingUsingKinds
+    }, $true)).Count -ne 0) {
         return $true
     }
 
