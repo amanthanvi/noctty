@@ -38,6 +38,8 @@ pub const Facts = struct {
     /// Panes in the active tab.
     pane_count: usize = 1,
     palette: Presentation = .{},
+    /// The palette's hint line is on (`command-palette-hint`).
+    palette_hint: bool = true,
     /// The newest palette action, if any.
     recent: ?[]const u8 = null,
     profiles: Profiles = .unavailable,
@@ -188,6 +190,15 @@ pub fn shape(mode: Mode) Shape {
     };
 }
 
+/// The overlay band has its second row, the line under the query, which
+/// says what `compose`'s `feedback` says. Only the command palette goes
+/// without it: with its hint line off (`palette_hint`) it has nothing to say
+/// there until a message is raised (`banner`), which has no other place on
+/// screen while an overlay is open (`Host.bannerShown`).
+pub fn feedbackRow(mode: Mode, palette_hint: bool, banner: bool) bool {
+    return mode != .command_palette or palette_hint or banner;
+}
+
 /// Keyboard focus stops inside the overlay row, in tab order.
 /// `preview` is the confirm pane: it takes focus so a keyboard user
 /// can scroll the payload before deciding, and so that clicking it
@@ -306,7 +317,7 @@ fn hintLine(arena: Allocator, facts: Facts) Allocator.Error![]const u8 {
     const tab = facts.tab;
     return switch (facts.mode) {
         .none => "",
-        .command_palette => try paletteFeedback(arena, facts),
+        .command_palette => if (facts.palette_hint) try paletteFeedback(arena, facts) else "",
         .profile => if (facts.profiles == .detecting)
             "Detecting Windows profiles..."
         else
@@ -781,6 +792,51 @@ test "win32 overlay feedback line prefers inline banner state" {
     const profile = try compose(a, .{ .mode = .profile, .banner = "Plain notice" });
     try std.testing.expectEqualStrings("Plain notice", profile.feedback);
     try std.testing.expectEqualStrings("No supported Windows profiles detected.", profile.hint);
+}
+
+test "win32 command-palette-hint = false empties the palette's line and its row until a message needs them" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    // Every state of the palette's own line goes: the empty query, a query
+    // with no match, and one with a selected result.
+    const empty = try compose(a, .{ .mode = .command_palette, .palette_hint = false, .recent = "new_tab" });
+    try std.testing.expectEqualStrings("", empty.feedback);
+    try std.testing.expectEqualStrings("", empty.hint);
+    const unmatched = try compose(a, .{ .mode = .command_palette, .palette_hint = false, .typed = "zzz" });
+    try std.testing.expectEqualStrings("", unmatched.feedback);
+    const matched = try compose(a, .{
+        .mode = .command_palette,
+        .palette_hint = false,
+        .typed = "split",
+        .palette = .{ .match_count = 3, .title = "Split Right", .available = true },
+    });
+    try std.testing.expectEqualStrings("", matched.feedback);
+    // The rest of the palette is as it was.
+    try std.testing.expectEqualStrings("Command 3", matched.paint_label);
+    try std.testing.expectEqualStrings("Activate", matched.buttons.?.accept);
+
+    // A message still shows on that line.
+    const message = try compose(a, .{
+        .mode = .command_palette,
+        .palette_hint = false,
+        .banner_kind = .info,
+        .banner = "Keyboard shortcuts are configured in Settings > Keybindings.",
+    });
+    try std.testing.expectEqualStrings("Info: Keyboard shortcuts are configured in Settings > Keybindings.", message.feedback);
+
+    // The row goes with the line, and comes back for a message.
+    try std.testing.expect(feedbackRow(.command_palette, true, false));
+    try std.testing.expect(!feedbackRow(.command_palette, false, false));
+    try std.testing.expect(feedbackRow(.command_palette, false, true));
+    // The key is the palette's: every other overlay keeps its line.
+    for ([_]Mode{ .none, .profile, .search, .surface_title, .tab_title, .tab_overview, .confirm }) |mode| {
+        try std.testing.expect(feedbackRow(mode, false, false));
+        const text = try compose(a, .{ .mode = mode, .palette_hint = false, .typed = "x" });
+        const shown = try compose(a, .{ .mode = mode, .typed = "x" });
+        try std.testing.expectEqualStrings(shown.feedback, text.feedback);
+    }
 }
 
 test "win32 overlay accept label reflects overlay action state" {

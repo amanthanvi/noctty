@@ -1834,7 +1834,13 @@ The universal palette puts actions, live tabs, panes, Windows profiles,
 named layouts, and native settings in one fuzzy-ranked, keyboard-driven
 list. Type a prefix to filter one category: `>` actions, `@` tabs, `/`
 panes, `~` profiles, `:` settings, `%` themes, `!` recent commands, `^`
-layouts, or `?` for help. The native Settings window stages edits until Save
+layouts, or `?` for help. The line under the search field says what to
+type, how many results match and what Enter does; `command-palette-hint =
+false` hides it and makes the palette one row shorter. A message shown while
+the palette is open (a help answer, an action that could not run, a
+notification that falls back to a message) brings that row back until you
+type again or close the palette. The native Settings window stages edits
+until Save
 (or Discard changes, which first asks how many fields would be lost) and
 patches your config without rewriting unrelated text. While you edit, Window
 theme and Background opacity preview in the open windows; the other fields,

@@ -12,11 +12,11 @@ const win32 = @import("../win32.zig");
 const budget = .{
     // Entries in each `pub const *_runtime` bag on the facade.
     .bags = .{
-        .chrome_scene_runtime = 53,
+        .chrome_scene_runtime = 51,
         .chrome_scene_test_runtime = 4,
         .overlay_session_runtime = 26,
         .overlay_session_test_runtime = 5,
-        .palette_controller_runtime = 40,
+        .palette_controller_runtime = 39,
         .palette_controller_test_runtime = 7,
         .surface_presentation_runtime = 12,
         .surface_presentation_test_runtime = 3,
@@ -64,7 +64,10 @@ const leaves = .{
         .file = "overlay_view.zig",
         .module = @import("overlay_view.zig"),
         .source = @embedFile("overlay_view.zig"),
-        .pub_decls = 9,
+        // why: `feedbackRow`, which host.zig asks whether the overlay band
+        // has its second row (`Host.overlayBandHeight`): the rule belongs
+        // with `compose`, whose `feedback` is what that row shows.
+        .pub_decls = 10,
     },
     .{
         .file = "pane_divider.zig",
