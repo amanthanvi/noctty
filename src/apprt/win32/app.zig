@@ -17217,8 +17217,8 @@ test "win32 a tab torn off onto a monitor of another DPI lands under the pointer
                     var frame: RECT = .{ .left = 0, .top = 0, .right = 0, .bottom = 0 };
                     try std.testing.expect(sys.AdjustWindowRectExForDpi(&frame, window_start.hostStyle(framed, false), 0, ex_style, to) != 0);
                     const client_top = host.usingIntegratedTitlebar() or (keeps_frame and !host.top_level.decorations_visible);
-                    const want_x = -frame.left + window_start.mulDiv(30, to, from);
-                    const want_y = (if (client_top) 0 else -frame.top) + Host.scaledBy(3, to) + window_start.mulDiv(15, to, from);
+                    const want_x = -frame.left + Host.scaleByDpi(30, to, from);
+                    const want_y = (if (client_top) 0 else -frame.top) + Host.scaledBy(3, to) + Host.scaleByDpi(15, to, from);
                     // The window, placed: the pointer at that point in it.
                     const source: window_start.Snapshot = .{
                         .state = .{},
@@ -17343,8 +17343,8 @@ test "win32 a tab dropped from a maximized or fullscreen window opens restored w
                 var rect: RECT = undefined;
                 try std.testing.expect(sys.GetWindowRect(tab_button, &rect) != 0);
                 try std.testing.expect(at.x >= rect.left and at.x < rect.right and at.y >= rect.top and at.y < rect.bottom);
-                const want_x = window_start.mulDiv(30, to.dpi, from_dpi);
-                const want_y = window_start.mulDiv(15, to.dpi, from_dpi);
+                const want_x = Host.scaleByDpi(30, to.dpi, from_dpi);
+                const want_y = Host.scaleByDpi(15, to.dpi, from_dpi);
                 // Exactly: the frame at the drop's DPI, not scaled to it (a
                 // stock frame is 8,31 at 96 DPI and 11,45 at 144).
                 try std.testing.expectEqual(want_x, at.x - rect.left);

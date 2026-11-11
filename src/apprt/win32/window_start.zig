@@ -636,7 +636,7 @@ pub fn screenRectToWorkspace(rect: RECT, info: MONITORINFO) RECT {
 /// file cannot call) gives it for a denominator above zero: the product in
 /// 64 bits, rounded half away from zero, and -1 for a result that does not
 /// fit. Every caller scales by DPIs, which are above zero.
-pub fn mulDiv(value: i32, numerator: u32, denominator: u32) i32 {
+fn mulDiv(value: i32, numerator: u32, denominator: u32) i32 {
     std.debug.assert(denominator > 0);
     const product = @as(i64, value) * numerator;
     const half: i64 = denominator / 2;

@@ -3971,7 +3971,7 @@ pub const Host = struct {
             var origin: POINT = .{ .x = 0, .y = 0 };
             if (sys.GetWindowRect(hwnd, &window_rect) == 0 or sys.ClientToScreen(hwnd, &origin) == 0) return .{ .x = 0, .y = 0 };
             const from = @max(self.current_dpi, 1);
-            return .{ .x = window_start.mulDiv(origin.x - window_rect.left, dpi, from), .y = window_start.mulDiv(origin.y - window_rect.top, dpi, from) };
+            return .{ .x = scaleByDpi(origin.x - window_rect.left, dpi, from), .y = scaleByDpi(origin.y - window_rect.top, dpi, from) };
         }
         const client_top = self.usingIntegratedTitlebar() or (keeps_frame and !self.top_level.decorations_visible);
         return .{ .x = -rect.left, .y = if (client_top) 0 else -rect.top };
@@ -4017,9 +4017,9 @@ pub const Host = struct {
             frame.x,
             frame.y,
             placement.top,
-            window_start.mulDiv(self.tab_drag_grab.x, to, from),
-            window_start.mulDiv(self.tab_drag_grab.y, to, from),
-            window_start.mulDiv(button_width, to, from),
+            scaleByDpi(self.tab_drag_grab.x, to, from),
+            scaleByDpi(self.tab_drag_grab.y, to, from),
+            scaleByDpi(button_width, to, from),
         );
         return .{ .at = screen, .grab = .{ .x = grab.x, .y = grab.y }, .work = work, .dpi = dpi, .grab_dpi = to };
     }
@@ -9786,6 +9786,17 @@ pub const Host = struct {
 
     pub fn scaled(self: *const Host, base: i32) i32 {
         return win32_chrome_state.scaled(base, self.current_dpi);
+    }
+
+    /// `value`, in pixels at DPI `from`, in pixels at `to`: rounded as
+    /// kernel32's `MulDiv`, as `window_start.placeTearOff` scales (that leaf
+    /// keeps its own copy private: its pub surface is budgeted).
+    pub fn scaleByDpi(value: i32, to: u32, from: u32) i32 {
+        std.debug.assert(from > 0);
+        const product = @as(i64, value) * to;
+        const half: i64 = from / 2;
+        const rounded = if (product < 0) product - half else product + half;
+        return std.math.cast(i32, @divTrunc(rounded, @as(i64, from))) orelse -1;
     }
 
     /// DPI-scale helper usable from free functions that lack a Host pointer.
