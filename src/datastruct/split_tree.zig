@@ -489,6 +489,17 @@ pub fn SplitTree(comptime V: type) type {
             );
         }
 
+        /// `ratio`, with -0 as +0. They compare equal, but an f16 -0's bits
+        /// (0x8000) order above every ratio's, which a search over the bits
+        /// (the Win32 divider drag's fit) reads as the largest ratio. A
+        /// saved layout can say -0.0. Every caller-supplied ratio (`split`,
+        /// `resizeInPlace`, and the session restore, which builds the nodes
+        /// itself) goes through this; `equalize` writes only ratios of
+        /// positive weights.
+        pub fn canonicalRatio(ratio: f16) f16 {
+            return if (ratio == 0) 0 else ratio;
+        }
+
         /// Resize the given node in place. The node MUST be a split (asserted).
         ///
         /// In general, this is an immutable data structure so this is
@@ -496,16 +507,6 @@ pub fn SplitTree(comptime V: type) type {
         /// and performance reasons where its very important for GUIs to
         /// update the ratio during a live resize than to redraw the entire
         /// widget tree.
-        /// `ratio`, with -0 as +0. They compare equal, but an f16 -0's bits
-        /// (0x8000) order above every ratio's, which a search over the bits
-        /// (the Win32 divider drag's fit) reads as the largest ratio. A
-        /// saved layout can say -0.0. Every way a ratio enters the tree
-        /// (`split`, `resizeInPlace`, and the session restore, which builds
-        /// the nodes itself) goes through this.
-        pub fn canonicalRatio(ratio: f16) f16 {
-            return if (ratio == 0) 0 else ratio;
-        }
-
         pub fn resizeInPlace(
             self: *Self,
             at: Node.Handle,

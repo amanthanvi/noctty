@@ -588,6 +588,13 @@ pub const PaneDividerDrag = struct {
     bounds: PaneDividers.Bounds,
 };
 
+/// A divider under the mouse, with the tab and tree it was read on.
+const PaneDividerHover = struct {
+    layout: SplitTreeSurface.Split.Layout,
+    tab_id: u32,
+    generation: u64,
+};
+
 /// A press on a divider, which a second one on the same divider within the
 /// system's double-click time and rectangle makes a double-click.
 pub const PaneDividerPress = struct {
@@ -648,8 +655,11 @@ pub const Host = struct {
     /// while the host holds the capture.
     pane_divider_drag: ?PaneDividerDrag = null,
     /// The divider the last host `WM_MOUSEMOVE` was over, for a
-    /// `WM_SETCURSOR` whose `GetCursorPos` fails (a private desktop).
-    pane_divider_hover: ?SplitTreeSurface.Split.Layout = null,
+    /// `WM_SETCURSOR` whose `GetCursorPos` fails (a private desktop). It
+    /// holds only for the tree it was read on (`PaneDividerHover`), and a
+    /// pane that keeps the mouse in its hit test clears it: the host hears
+    /// no `WM_MOUSEMOVE` while the pointer is in a pane.
+    pane_divider_hover: ?PaneDividerHover = null,
     /// The last press on a divider, which a second press makes a
     /// double-click (the host class has no `CS_DBLCLKS`).
     pane_divider_press: ?PaneDividerPress = null,
@@ -667,6 +677,9 @@ pub const Host = struct {
     /// Test-only: makes `paneDividerPosition` fail, as when its slots
     /// cannot be allocated.
     test_pane_divider_lookup_fails: bool = false,
+    /// Test-only: `WM_SETCURSOR` reads no cursor position, as on a private
+    /// desktop, where `GetCursorPos` fails.
+    test_pane_divider_no_cursor_pos: bool = false,
     overlay_mode: HostOverlayMode = .none,
     /// Surface a title prompt's text was last filled from, while
     /// `overlay_view.shape(overlay_mode).follows_active_surface`, so the
@@ -11512,6 +11525,21 @@ pub const Host = struct {
         return self.paneDividerAt(content, point) != null;
     }
 
+    /// The hovered divider's layout, while the tree it was read on is still
+    /// the front tab's.
+    fn paneDividerHoverNow(self: *Host) ?SplitTreeSurface.Split.Layout {
+        const hover = self.pane_divider_hover orelse return null;
+        const tab = self.paneDividerTab() orelse return null;
+        // Both are needed. A tree's generation changes whenever the tree is
+        // rebuilt (`SplitTree.nextGeneration`), but a tab moved to another
+        // window and back (`prepareGiveTab`, `giveTab`) keeps its tree, and
+        // so its generation, while each window gives it a new id: the
+        // hover cached before the move then names the same generation under
+        // the old id (Sol, council round 2 on #702).
+        if (tab.id != hover.tab_id or tab.tree.generation != hover.generation) return null;
+        return hover.layout;
+    }
+
     fn setPaneDividerCursor(self: *const Host, divider_layout: SplitTreeSurface.Split.Layout) void {
         if (self.hwnd == null) return;
         _ = sys.SetCursor(sys.LoadCursorW(null, switch (divider_layout) {
@@ -11537,10 +11565,11 @@ pub const Host = struct {
                     return true;
                 }
                 var point: POINT = .{ .x = 0, .y = 0 };
-                const divider_layout = if (sys.GetCursorPos(&point) != 0 and sys.ScreenToClient(hwnd, &point) != 0) found: {
+                const no_position = builtin.is_test and self.test_pane_divider_no_cursor_pos;
+                const divider_layout = if (!no_position and sys.GetCursorPos(&point) != 0 and sys.ScreenToClient(hwnd, &point) != 0) found: {
                     const content = self.paneDividerContent() orelse return false;
                     break :found (self.paneDividerAt(content, point) orelse return false).layout;
-                } else self.pane_divider_hover orelse return false;
+                } else self.paneDividerHoverNow() orelse return false;
                 self.setPaneDividerCursor(divider_layout);
                 return true;
             },
@@ -11567,7 +11596,10 @@ pub const Host = struct {
                     return false;
                 };
                 const found = self.paneDividerAt(content, point);
-                self.pane_divider_hover = if (found) |hit| hit.layout else null;
+                self.pane_divider_hover = null;
+                if (found) |hit| if (self.paneDividerTab()) |tab| {
+                    self.pane_divider_hover = .{ .layout = hit.layout, .tab_id = tab.id, .generation = tab.tree.generation };
+                };
                 if (found) |hit| self.setPaneDividerCursor(hit.layout);
                 return found != null;
             },

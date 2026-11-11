@@ -71,7 +71,7 @@ pub fn For(comptime Tree: type) type {
             /// `split`.
             grab: Rect,
             /// Where the second child's slot starts along the split's axis:
-            /// the divider's position, which `dragRatio` moves.
+            /// the divider's position, which a drag moves (`stepRatio`).
             position: i32,
         };
 
@@ -329,6 +329,11 @@ pub fn For(comptime Tree: type) type {
         /// on the layout as it is. A drag moves by the pointer's distance
         /// from the press instead (`Host.dragPaneDivider`), which keeps the
         /// starting ratio exactly when the pointer has not moved.
+        /// No production caller: the drag goes through `stepRatio`. This is
+        /// the tested pure form of its first two steps (`ratioBounds`, then
+        /// `ratioAt`) for an absolute pointer pixel, which the tests here
+        /// pin those steps through; the third, `fitRatio`, has its own
+        /// tests through `stepRatio` (Muse on #689).
         pub fn dragRatio(tree: *const Tree, spatial: Spatial, content: Rect, found: Divider, along: i32, min_px: i32) ?f16 {
             const bounds = ratioBounds(tree, spatial, content, found, min_px) orelse return null;
             const start = switch (found.layout) {
@@ -853,6 +858,40 @@ test "pane divider: a starting ratio of -0 fits as +0 does" {
     const from_positive = try Dividers.fitRatio(alloc, &tree, content, .root, 0, 0.5, 40);
     const from_negative = try Dividers.fitRatio(alloc, &tree, content, .root, negative_zero, 0.5, 40);
     try testing.expectEqual(@as(u16, @bitCast(from_positive)), @as(u16, @bitCast(from_negative)));
+}
+
+test "pane divider: the walk finds a long chain's fit that the search alone stops short of" {
+    // Opus on #689: one pane beside a chain of 300 at 30,000 px, dragged
+    // to the root's upper bound. The walk ends on 0.58887; with a walk of
+    // one step (`walk_steps = 1`) the search took over and stopped at
+    // 0.50195, 2,607 px short, since fitting is not monotone.
+    const alloc = testing.allocator;
+    var labels = std.heap.ArenaAllocator.init(alloc);
+    defer labels.deinit();
+    const views = try alloc.alloc(TestView, 301);
+    defer alloc.free(views);
+    var tree = try buildChain(alloc, labels.allocator(), views);
+    defer tree.deinit();
+    const content: Rect = .{ .left = 0, .top = 0, .right = 30000, .bottom = 600 };
+    var start = try tree.spatial(alloc);
+    defer start.deinit(alloc);
+    const found = Dividers.divider(&tree, start, content, .root, 3).?;
+    const bounds = Dividers.ratioBounds(&tree, start, content, found, 40).?;
+    const ratio = try Dividers.stepRatio(alloc, &tree, content, found, 2.0, bounds, 0.5, 40);
+    try testing.expectApproxEqAbs(@as(f32, 0.58887), @as(f32, ratio), 0.0001);
+}
+
+test "pane divider: the walk's last candidate is tested before the search" {
+    // Opus on #689: two panes at 800 px, from 256 f16 steps below the
+    // first ratio at which A fits (0x2a52). The walk's 257th candidate is
+    // that ratio; taking it as failing without testing it, the search
+    // returned the next one up (0x2a53).
+    var views = [_]TestView{ .{ .label = "A" }, .{ .label = "B" } };
+    var tree = try buildTree(&views, &.{.{ .at = .root, .direction = .right, .ratio = 0.5 }});
+    defer tree.deinit();
+    const below: f16 = @bitCast(@as(u16, 0x2a52 - 256));
+    const fitted = try Dividers.fitRatio(testing.allocator, &tree, content_800x600, .root, below, 0.5, 40);
+    try testing.expectEqual(@as(u16, 0x2a52), @as(u16, @bitCast(fitted)));
 }
 
 /// One pane left of the root and a chain of `views.len - 2` on its right,

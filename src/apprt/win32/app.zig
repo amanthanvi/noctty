@@ -15589,6 +15589,56 @@ const TabMoveFixture = struct {
     }
 };
 
+test "win32 a split tab moved to another window and back does not bring back the divider hover cached before the move" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    try runOnHiddenDesktop(struct {
+        fn body() !void {
+            var fixture: win32.WindowStartTestApp = .{};
+            try fixture.init();
+            defer fixture.deinit();
+            const app = &fixture.app;
+            app.shell_runtime_initialized = true;
+            const setup: TabMoveFixture = .{ .fixture = &fixture };
+            // A, then B split into B1 | B2, in front.
+            const source = try setup.window(2, true);
+            const target = try setup.window(1, false);
+            _ = source.activateTabIndex(1);
+            const moving = &source.tabs.items[1];
+            try std.testing.expectEqual(@as(usize, 2), moving.leafCount());
+            const old_id = moving.id;
+            const generation = moving.tree.generation;
+
+            // With no cursor position (a private desktop), WM_SETCURSOR goes
+            // by the divider the host's last WM_MOUSEMOVE was over: cached
+            // for B's tree, it shows (the control).
+            source.test_pane_divider_no_cursor_pos = true;
+            source.pane_divider_hover = .{ .layout = .horizontal, .tab_id = old_id, .generation = generation };
+            const set_cursor: LPARAM = c.HTCLIENT | (c.WM_MOUSEMOVE << 16);
+            try std.testing.expect(source.handlePaneDividerMessage(c.WM_SETCURSOR, @intFromPtr(source.hwnd.?), set_cursor));
+
+            // B goes to the other window and comes back, as a tab move hands
+            // it over (`prepareGiveTab`, then `giveTab`), with its tree.
+            source.prepareGiveTab(old_id, target.id);
+            try target.tabs.ensureUnusedCapacity(app.core_app.alloc, 1);
+            const there = source.giveTab(source.findTabIndexById(old_id).?, target, target.tabs.items.len);
+            const there_id = target.tabs.items[there].id;
+            target.prepareGiveTab(there_id, source.id);
+            try source.tabs.ensureUnusedCapacity(app.core_app.alloc, 1);
+            const back = target.giveTab(target.findTabIndexById(there_id).?, source, source.tabs.items.len);
+            _ = source.activateTabIndex(back);
+            const returned = &source.tabs.items[back];
+
+            // The same tree, so the same generation, under a new id: the
+            // hover cached before the move must not show for it (Sol,
+            // council round 2 on #702).
+            try std.testing.expectEqual(generation, returned.tree.generation);
+            try std.testing.expect(returned.id != old_id);
+            try std.testing.expectEqual(@as(usize, 2), returned.leafCount());
+            try std.testing.expect(!source.handlePaneDividerMessage(c.WM_SETCURSOR, @intFromPtr(source.hwnd.?), set_cursor));
+        }
+    }.body);
+}
+
 test "win32 a tab torn off into a new window keeps its panes, split, zoom and windows, and the window it left fronts its neighbour" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
     try runOnHiddenDesktop(struct {

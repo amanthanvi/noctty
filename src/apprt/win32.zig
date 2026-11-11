@@ -12803,6 +12803,8 @@ pub fn windowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
                 // divider is wider than its 2 px gap; this pane's own
                 // scrollbar keeps its band.
                 if (host.paneDividerAtScreen(lParam) and !v.scrollbarBandAtScreen(hwnd, lParam)) return c.HTTRANSPARENT;
+                // This pane keeps the mouse, so the host's hover is over.
+                host.pane_divider_hover = null;
             };
             return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
         },
@@ -18970,6 +18972,61 @@ test "win32 pane divider drag takes no global hotkey while the mouse is held" {
     try std.testing.expect(app.takeGlobalHotkey(1));
 }
 
+test "win32 pane divider cursor without a position trusts the hover only on its tree and off the panes" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var core_app: CoreApp = undefined;
+    var app: App = undefined;
+    var host: Host = undefined;
+    var surface_a: Surface = undefined;
+    var surface_b: Surface = undefined;
+    var surface_c: Surface = undefined;
+    var session: TestSession = .{};
+    try session.init(.{
+        .core_app = &core_app,
+        .app = &app,
+        .hosts = &.{.{ .storage = &host, .register = true }},
+        .surfaces = &.{
+            .{ .storage = &surface_a, .host = &host, .register = true },
+            .{ .storage = &surface_b, .host = &host },
+            .{ .storage = &surface_c, .host = &host },
+        },
+        .tabs = &.{.{ .host = &host, .surface = &surface_a, .id = 1 }},
+    });
+    defer session.deinit();
+    try paneDividerTestSplit(&host, &surface_a, &surface_b, .right, 0.5);
+    const window = try test_support.createTestHostWindow();
+    defer _ = sys.DestroyWindow(window);
+    host.hwnd = window;
+    defer host.hwnd = null;
+    host.test_pane_divider_content = pane_divider_test_content;
+    // With no cursor position (a private desktop), `WM_SETCURSOR` goes by
+    // the divider the host's last `WM_MOUSEMOVE` was over. CodeRabbit on
+    // #689: nothing cleared it once the tree changed or a pane took the
+    // mouse, so a stale divider could set the resize cursor.
+    host.test_pane_divider_no_cursor_pos = true;
+    const set_cursor: LPARAM = c.HTCLIENT | (c.WM_MOUSEMOVE << 16);
+
+    // Over the divider, the hover sets the cursor.
+    try std.testing.expect(host.handlePaneDividerMessage(c.WM_MOUSEMOVE, 0, paneDividerTestLParam(400, 300)));
+    try std.testing.expect(host.handlePaneDividerMessage(c.WM_SETCURSOR, @intFromPtr(window), set_cursor));
+    // Automation splits a pane: the hover was read on another tree.
+    try paneDividerTestSplit(&host, &surface_b, &surface_c, .down, 0.5);
+    try std.testing.expect(!host.handlePaneDividerMessage(c.WM_SETCURSOR, @intFromPtr(window), set_cursor));
+
+    // Over the divider again, then into a pane, whose hit test keeps the
+    // mouse (the host hears no WM_MOUSEMOVE from there).
+    try std.testing.expect(host.handlePaneDividerMessage(c.WM_MOUSEMOVE, 0, paneDividerTestLParam(400, 300)));
+    try std.testing.expect(host.handlePaneDividerMessage(c.WM_SETCURSOR, @intFromPtr(window), set_cursor));
+    const pane = try test_support.createTestHostWindow();
+    defer _ = sys.DestroyWindow(pane);
+    setWindowData(pane, &surface_a);
+    var inside: POINT = .{ .x = 100, .y = 120 };
+    try std.testing.expect(sys.ClientToScreen(window, &inside) != 0);
+    _ = windowProc(pane, c.WM_NCHITTEST, 0, testPoint(inside.x, inside.y));
+    try std.testing.expect(!host.handlePaneDividerMessage(c.WM_SETCURSOR, @intFromPtr(window), set_cursor));
+}
+
 test "win32 pane divider drag that moved and then lost its panes still clears the history" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
@@ -19172,7 +19229,13 @@ test "win32 pane divider double-click equalizes that split, as equalize_splits w
     try std.testing.expectEqual(@as(f16, 0.5), paneDividerTestRatio(&host, .root));
 
     // In time, on the same divider: one change, which clears the history.
-    try std.testing.expect(host.beginPaneDividerDrag(pane_divider_test_content, .{ .x = 401, .y = 301 }, late +% 50));
+    // At the system's own limits, inclusive (CodeRabbit on #689: a fixed
+    // 50 ms failed under a shorter double-click time): the full interval
+    // later, and 1 px away where the double-click rectangle allows it
+    // (more could leave the divider's grab zone).
+    const nudge_x: i32 = @min(1, @divTrunc(@max(1, sys.GetSystemMetrics(c.SM_CXDOUBLECLK)), 2));
+    const nudge_y: i32 = @min(1, @divTrunc(@max(1, sys.GetSystemMetrics(c.SM_CYDOUBLECLK)), 2));
+    try std.testing.expect(host.beginPaneDividerDrag(pane_divider_test_content, .{ .x = 400 + nudge_x, .y = 300 + nudge_y }, late +% sys.GetDoubleClickTime()));
     try std.testing.expect(host.pane_divider_drag == null);
     try std.testing.expectEqual(@as(f16, 1.0 / 3.0), paneDividerTestRatio(&host, .root));
     try expectPaneDividerHistory(&host, &surface_a, &surface_b, false);
