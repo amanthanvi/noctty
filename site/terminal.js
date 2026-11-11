@@ -103,8 +103,25 @@ function initDemo(win) {
   const results = win.querySelector('[data-nc-results]');
   const stepButtons = [...section.querySelectorAll('[data-nc-step]')];
   const motionButton = section.querySelector('[data-nc-motion]');
+  // Phones show the selected step's explanation under the step row. The
+  // caption holds a copy of every step's explanation, stacked in one cell so
+  // it is always as tall as the longest, and shows the selected one; it is
+  // hidden from screen readers, which read each button's own text.
+  const caption = section.querySelector('[data-nc-caption]');
+  const captionItems = caption
+    ? stepButtons.map((button) => {
+        const item = document.createElement('span');
+        const body = button.querySelector?.('.nc-step__body');
+        if (body) item.append(...[...body.childNodes].map((node) => node.cloneNode(true)));
+        return item;
+      })
+    : [];
+  if (caption) caption.replaceChildren(...captionItems);
+  // The step buttons' own chips; the caption's copies are pressed alongside.
   const keyChips = new Map(
-    [...section.querySelectorAll('[data-nc-key]')].map((chip) => [chip.dataset.ncKey, chip]),
+    [...section.querySelectorAll('[data-nc-key]')]
+      .filter((chip) => !chip.closest?.('[data-nc-caption]'))
+      .map((chip) => [chip.dataset.ncKey, chip]),
   );
   if (!panes || !left || !right || !bar || !results || !motionButton) return;
 
@@ -255,10 +272,16 @@ function initDemo(win) {
 
   function pressKey(name, pressed) {
     keyChips.get(name)?.classList.toggle('is-pressed', pressed);
+    for (const chip of caption?.querySelectorAll(`[data-nc-key="${name}"]`) ?? []) chip.classList.toggle('is-pressed', pressed);
   }
 
   function releaseKeys() {
     for (const chip of keyChips.values()) chip.classList.remove('is-pressed');
+    for (const chip of caption?.querySelectorAll('[data-nc-key]') ?? []) chip.classList.remove('is-pressed');
+  }
+
+  function showCaption(index) {
+    captionItems.forEach((item, i) => item.classList.toggle('is-active', i === index));
   }
 
   // Still frames: where the demo starts, and where each step ends.
@@ -387,6 +410,7 @@ function initDemo(win) {
     // Restart the underline even when the same step plays again.
     void section.offsetWidth;
     stepButtons[index]?.setAttribute('aria-pressed', 'true');
+    showCaption(index);
   }
 
   async function playFrom(index) {

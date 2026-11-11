@@ -393,8 +393,11 @@ test("trust page carries every implemented release verification layer", () => {
     /verifies GitHub build-provenance attestations[\s\S]*?every published[\s\S]*?asset except the static icon/i,
   );
   assert.match(trustHtml, /verify-published-release\.ps1/);
+  // The commands as a reader sees them: the markup keeps flags and file
+  // names whole with spans and breaks lines with <wbr>, neither of which is
+  // part of the command.
   assert.match(
-    trustHtml,
+    trustHtml.replace(/<\/?(?:span|wbr)\b[^>]*>/g, ""),
     /\$version = "&lt;1\.3\.124-or-later&gt;".*?git clone --branch "v\$version" --depth 1.*?-Version \$version/s,
   );
   assert.match(

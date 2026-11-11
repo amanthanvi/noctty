@@ -26,7 +26,7 @@
   <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml" />
   <link rel="shortcut icon" href="/assets/favicon.svg" type="image/svg+xml" />
   <link rel="preload" as="font" type="font/woff2" href="/assets/fonts/geist.woff2" crossorigin />
-  <link rel="stylesheet" href="/styles.css?v=a0ac2fbec2bce8acaadc3c79c78186bdff4ce8109a862a364d7584233b6a5178" />
+  <link rel="stylesheet" href="/styles.css?v=a51855e7301c070d24b9df7a0cdf50aed3084dd4773c629f76707c65dd33e6c8" />
   <script>
     (function () {
       var root = document.documentElement;
@@ -70,9 +70,9 @@
 
       <nav class="nc-nav" aria-label="Primary">
         <a class="nc-nav__link nc-nav__link--optional" href="/#features">Features</a>
-        <a class="nc-nav__link nc-nav__link--optional" href="/#install">Install</a>
+        <a class="nc-nav__link" href="/#install">Install</a>
         <a class="nc-nav__link" href="/why-noctty.html" aria-current="page">About</a>
-        <a class="nc-nav__link" href="https://github.com/amanthanvi/noctty" target="_blank" rel="noopener noreferrer">GitHub</a>
+        <a class="nc-nav__link nc-nav__link--wide" href="https://github.com/amanthanvi/noctty" target="_blank" rel="noopener noreferrer">GitHub</a>
         <button type="button" class="nc-theme-toggle" id="theme-toggle" aria-label="Toggle color theme" title="Toggle color theme">
           <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
             <circle cx="8" cy="8" r="6.25" stroke="currentColor" stroke-width="1.5" />
@@ -103,6 +103,7 @@
         has the dates.
         <span class="nc-sr-only" id="nc-version-summary">Version 1.3.137, latest release, for Windows 11, and Windows 10 version 1809 or later (supported, not tested), on x64 and ARM64.</span>
       </p>
+      <p class="nc-sr-only" aria-live="polite" id="nc-copy-status"></p>
     </section>
 
     <section class="nc-section" id="why" aria-labelledby="why-title">
@@ -130,10 +131,10 @@
             <a href="https://github.com/amanthanvi/noctty/blob/main/docs/windows-capability-matrix.md" target="_blank" rel="noopener noreferrer">capability matrix</a>.
           </p>
         </div>
-        <dl class="nc-facts-table">
+        <dl class="nc-facts-table nc-facts-grid">
           <div>
             <dt>Architectures</dt>
-            <dd>x64 and ARM64</dd>
+            <dd>x64 and ARM64.</dd>
           </div>
           <div>
             <dt>Distribution</dt>
@@ -141,11 +142,7 @@
           </div>
           <div>
             <dt>Release process</dt>
-            <dd>Public workflows, packaging scripts, checksums, provenance</dd>
-          </div>
-          <div>
-            <dt>Network</dt>
-            <dd>The update check is the only connection Noctty makes on its own; there is no telemetry or analytics. <code>auto-update = off</code> disables automatic release checks and downloads; manual update checks remain available.</dd>
+            <dd>Public workflows, packaging scripts, checksums, provenance.</dd>
           </div>
           <div>
             <dt>Accessibility</dt>
@@ -154,6 +151,10 @@
           <div>
             <dt>Performance</dt>
             <dd>One same-machine baseline published, including two results that miss their budget.</dd>
+          </div>
+          <div>
+            <dt>Network</dt>
+            <dd>The update check is the only connection Noctty makes on its own; there is no telemetry or analytics. <code>auto-update = off</code> disables automatic release checks and downloads; manual update checks remain available.</dd>
           </div>
         </dl>
       </div>
@@ -212,7 +213,10 @@
       <h2 class="nc-section__title" id="verify-title">How to verify a release</h2>
       <p class="nc-section__intro">
         Download the installer or portable ZIP and the checksum file from the
-        same GitHub release, then run these checks before you install.
+        same GitHub release, then run these checks before you install. The
+        commands are templates: replace <code>&lt;version&gt;</code> with the
+        release number without its leading <code>v</code>, and
+        <code>&lt;arch&gt;</code> with <code>x64</code> or <code>arm64</code>.
       </p>
 
       <ol class="nc-verify-steps">
@@ -220,15 +224,29 @@
           <div>
             <h3>Compare the checksum</h3>
             <p>
-              Hash the file you downloaded, installer or portable ZIP, and
+              Hash the file you downloaded, installer or portable ZIP (the
+              first line is for the installer, the second for the ZIP), and
               compare it with the line for that file in
               <code>SHA256SUMS-windows-&lt;arch&gt;.txt</code>. If it differs,
               stop. A matching checksum shows the file is the one on the
               release page. It does not show who published it.
             </p>
           </div>
-          <pre class="nc-proof-code" tabindex="0"><code>Get-FileHash .\noctty-&lt;version&gt;-windows-&lt;arch&gt;-setup.exe -Algorithm SHA256
-Get-FileHash .\noctty-&lt;version&gt;-windows-&lt;arch&gt;-portable.zip -Algorithm SHA256</code></pre>
+          <div class="nc-proof">
+            <div class="nc-proof__bar">
+              <span>PowerShell</span>
+              <button type="button" class="nc-copy" data-nc-copy="verify-checksum" aria-label="Copy the checksum command templates">
+                <svg class="nc-copy__icon--copy" width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                  <rect x="5.5" y="5.5" width="8" height="9" rx="1.5" stroke="currentColor" stroke-width="1.25" />
+                  <path d="M5 10.5H4a1.5 1.5 0 0 1-1.5-1.5V3.5A1.5 1.5 0 0 1 4 2h6a1.5 1.5 0 0 1 1.5 1.5V5" stroke="currentColor" stroke-width="1.25" />
+                </svg>
+                <svg class="nc-copy__icon--done" width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                  <path d="M3.5 8.5 6.5 11.5 12.5 4.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" />
+                </svg>
+              </button>
+            </div>
+            <pre class="nc-proof-code" tabindex="0" data-nc-pan="left:0"><code><span class="nc-proof-line nc-proof-line--whole"><span class="nc-nobr">Get-FileHash</span> <span class="nc-nobr">.\noctty-&lt;version&gt;-windows-&lt;arch&gt;-setup.exe</span> <span class="nc-nobr">-Algorithm</span> SHA256</span><span class="nc-proof-line nc-proof-line--whole"><span class="nc-nobr">Get-FileHash</span> <span class="nc-nobr">.\noctty-&lt;version&gt;-windows-&lt;arch&gt;-portable.zip</span> <span class="nc-nobr">-Algorithm</span> SHA256</span></code></pre>
+          </div>
         </li>
         <li>
           <div>
@@ -250,11 +268,21 @@ Get-FileHash .\noctty-&lt;version&gt;-windows-&lt;arch&gt;-portable.zip -Algorit
               <a href="https://github.com/amanthanvi/noctty/blob/main/docs/verify-release.md" target="_blank" rel="noopener noreferrer">the verification guide</a>.
             </p>
           </div>
-          <pre class="nc-proof-code" tabindex="0"><code>$version = "&lt;1.3.124-or-later&gt;"
-git clone --branch "v$version" --depth 1 https://github.com/amanthanvi/noctty.git
-Set-Location .\noctty
-$env:WINDOWS_CODESIGN_TRUST_SELF_SIGNED = "true"
-pwsh .\scripts\verify-published-release.ps1 -Version $version</code></pre>
+          <div class="nc-proof">
+            <div class="nc-proof__bar">
+              <span>PowerShell</span>
+              <button type="button" class="nc-copy" data-nc-copy="verify-release" aria-label="Copy the verifier command template">
+                <svg class="nc-copy__icon--copy" width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                  <rect x="5.5" y="5.5" width="8" height="9" rx="1.5" stroke="currentColor" stroke-width="1.25" />
+                  <path d="M5 10.5H4a1.5 1.5 0 0 1-1.5-1.5V3.5A1.5 1.5 0 0 1 4 2h6a1.5 1.5 0 0 1 1.5 1.5V5" stroke="currentColor" stroke-width="1.25" />
+                </svg>
+                <svg class="nc-copy__icon--done" width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                  <path d="M3.5 8.5 6.5 11.5 12.5 4.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" />
+                </svg>
+              </button>
+            </div>
+            <pre class="nc-proof-code" tabindex="0" data-nc-pan="left:0"><code><span class="nc-proof-line">$version = <span class="nc-nobr">"&lt;1.3.124-or-later&gt;"</span></span><span class="nc-proof-line">git clone <span class="nc-nobr">--branch</span> "v$version" <span class="nc-nobr">--depth</span> 1 https://github.com/<wbr>amanthanvi/<wbr>noctty.git</span><span class="nc-proof-line"><span class="nc-nobr">Set-Location</span> .\noctty</span><span class="nc-proof-line"><span class="nc-nobr">$env:WINDOWS_CODESIGN_TRUST_SELF_SIGNED</span> = "true"</span><span class="nc-proof-line">pwsh <span class="nc-nobr">.\scripts\verify-published-release.ps1</span> <span class="nc-nobr">-Version</span> $version</span></code></pre>
+          </div>
         </li>
       </ol>
 
@@ -358,7 +386,8 @@ pwsh .\scripts\verify-published-release.ps1 -Version $version</code></pre>
     </p>
   </footer>
 
-  <script type="module" src="/app.js?v=def851c82b908513d211facbc6d1c7122a287a7dcfa678fd18081ebfe51d1c09"></script>
+  <script type="module" src="/app.js?v=41691a86507f7b47e47d905cd2381c7a06ec577be5c362f4171ca81d702832b1"></script>
   <script type="module" src="/version.js?v=4e3807b381b8d133d45c4ed24c6f44794e8b06961b878c9228330e191eaae363"></script>
+  <script type="module" src="/install.js?v=becfa5780040e396f293a59c70d421d0904b66a00f1986796193f3796e71f9b4"></script>
 </body>
 </html>

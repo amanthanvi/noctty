@@ -10,7 +10,7 @@
   <meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)" />
   <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml" />
   <link rel="shortcut icon" href="/assets/favicon.svg" type="image/svg+xml" />
-  <link rel="stylesheet" href="/styles.css?v=a0ac2fbec2bce8acaadc3c79c78186bdff4ce8109a862a364d7584233b6a5178" />
+  <link rel="stylesheet" href="/styles.css?v=a51855e7301c070d24b9df7a0cdf50aed3084dd4773c629f76707c65dd33e6c8" />
   <script>
     (function () {
       var root = document.documentElement;
@@ -52,8 +52,10 @@
         <span>Noctty</span>
       </a>
       <nav class="nc-nav" aria-label="Primary">
+        <a class="nc-nav__link nc-nav__link--optional" href="/#features">Features</a>
+        <a class="nc-nav__link" href="/#install">Install</a>
         <a class="nc-nav__link" href="/why-noctty.html">About</a>
-        <a class="nc-nav__link" href="https://github.com/amanthanvi/noctty" target="_blank" rel="noopener noreferrer">GitHub</a>
+        <a class="nc-nav__link nc-nav__link--wide" href="https://github.com/amanthanvi/noctty" target="_blank" rel="noopener noreferrer">GitHub</a>
         <button type="button" class="nc-theme-toggle" id="theme-toggle" aria-label="Toggle color theme" title="Toggle color theme">
           <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
             <circle cx="8" cy="8" r="6.25" stroke="currentColor" stroke-width="1.5" />
@@ -67,6 +69,16 @@
   <main id="main-content" class="nc-frame nc-lost">
     <h1 class="nc-lost__title">Nothing at this path.</h1>
     <div class="nc-term">
+      <div class="nc-term__bar" aria-hidden="true">
+        <div class="nc-term__tabs">
+          <div class="nc-term__tab is-active"><span>* 1: PowerShell</span></div>
+        </div>
+        <div class="nc-term__caption">
+          <span><svg viewBox="0 0 10 10" fill="none"><path d="M0 5h10" stroke="currentColor" /></svg></span>
+          <span><svg viewBox="0 0 10 10" fill="none"><rect x="0.5" y="0.5" width="9" height="9" stroke="currentColor" /></svg></span>
+          <span><svg viewBox="0 0 10 10" fill="none"><path d="M0.5 0.5l9 9M9.5 0.5l-9 9" stroke="currentColor" /></svg></span>
+        </div>
+      </div>
       <div class="nc-term__panes">
         <div class="nc-term__pane is-focused">
           <div class="nc-term__line"><span class="nc-term__prompt">PS C:\&gt;</span> cd <span data-nc-lost-path>\that-page</span></div>
@@ -82,6 +94,6 @@
     <a class="nc-btn nc-btn--primary" href="/">Back to noctty.com</a>
   </main>
 
-  <script type="module" src="/app.js?v=def851c82b908513d211facbc6d1c7122a287a7dcfa678fd18081ebfe51d1c09"></script>
+  <script type="module" src="/app.js?v=41691a86507f7b47e47d905cd2381c7a06ec577be5c362f4171ca81d702832b1"></script>
 </body>
 </html>
