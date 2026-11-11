@@ -8153,13 +8153,11 @@ pub const App = struct {
         } else null;
         // The request this one replaces, put back should it be refused.
         const replaced: ?PendingTabMove = if (existing) |slot| slot.* else null;
-        // Taken before a new slot is added, which holds nothing yet.
-        const last_queued = dest == .new_window and dest.new_window == null and self.othersQueuedToMove(host, tab_id);
         const slot = existing orelse self.pending_tab_moves.addOne(self.core_app.alloc) catch {
             log.warn("tab move declined: out of memory", .{});
             return false;
         };
-        slot.* = .{ .host_id = host.id, .request = .{ .tab_id = tab_id, .dest = dest, .last_queued = last_queued } };
+        slot.* = .{ .host_id = host.id, .request = .{ .tab_id = tab_id, .dest = dest } };
         // A wake for the pump, which runs the queue before its next wait.
         const posted = if (builtin.is_test and test_tab_move_wake_post_fails) false else sys.PostMessageW(hwnd, c.WM_WINHOSTTY_TAB_MOVE, 0, 0) != 0;
         if (!posted) {
@@ -8176,18 +8174,6 @@ pub const App = struct {
                 log.warn("tab move refused: no wake and no re-wake timer", .{});
                 return false;
             }
-        }
-        return true;
-    }
-
-    /// Whether every tab of `host` but `tab_id` has a move queued.
-    fn othersQueuedToMove(self: *const App, host: *const Host, tab_id: u32) bool {
-        for (host.tabs.items) |tab| {
-            if (tab.id == tab_id) continue;
-            const queued = for (self.pending_tab_moves.items) |pending| {
-                if (pending.host_id == host.id and pending.request.tab_id == tab.id) break true;
-            } else false;
-            if (!queued) return false;
         }
         return true;
     }
@@ -8317,20 +8303,18 @@ pub const App = struct {
     /// leave says so while the tab is still in it, as other window actions do
     /// when they fail (CodeRabbit r4520679604; a declined one too, #703 M2:
     /// the window it was to join gone, or refusing it at the last moment).
-    /// Not when the tab is its window's only one now and the request was
-    /// accepted as its last (`last_queued`): an `all:` binding asked a new
-    /// window for each tab, and the last stays, as asked for alone it would
-    /// (the action refuses it). A window left with one tab any other way (a
-    /// chain's `close_tab:other` after the move was asked for, a close of a
-    /// tab no move was asked for) says so (#703 round 2, Sol; CodeRabbit
-    /// r4536317953).
+    /// Every one says so, whatever left the tab alone in its window (another
+    /// queued move, a close): nothing about what asked for it is inferred,
+    /// and an `all:` binding's last tab, which cannot move, says so too
+    /// (#703 round 2, Sol; CodeRabbit r4536317953, r4536737315). A request
+    /// refused up front (a window's only tab) is never accepted and says
+    /// nothing.
     fn tabMoveDeclined(self: *App, host_id: u32, request: Host.TabMoveRequest) void {
         const source = self.registry.findHostById(host_id) orelse return;
         // A window whose `WM_DESTROY` has run has no `hwnd` before it is
         // removed (`revalidateTabMove`): nowhere to show it.
         if (source.hwnd == null) return;
         if (source.findTabIndexById(request.tab_id) == null) return;
-        if (request.last_queued and source.tabs.items.len < 2) return;
         source.setBanner(.err, "The tab could not be moved.") catch {};
     }
 
@@ -16445,7 +16429,9 @@ test "win32 an all: move_tab_to_new_window moves every tab it reaches but the la
             try std.testing.expectEqual(@as(usize, 1), source.tabs.items.len);
             try std.testing.expect(panes[0].host.? != source and panes[1].host.? != source and panes[0].host.? != panes[1].host.?);
             try std.testing.expectEqual(source, panes[2].host.?);
-            try std.testing.expectEqual(HostBannerKind.none, source.banner_kind);
+            // The last tab could not move, and its window says so.
+            try std.testing.expectEqual(HostBannerKind.err, source.banner_kind);
+            try std.testing.expectEqualStrings("The tab could not be moved.", source.banner_text.?);
             try app.validateShellNativeMapping();
         }
     }.body);
@@ -17127,7 +17113,7 @@ test "win32 a queued tab move whose destination is gone or refuses it says so in
             try source.setBanner(.none, null);
             // An `all:` binding asked a new window for each of a window's two
             // tabs: the first goes, the second is then the only one and stays,
-            // with nothing to say.
+            // and its window says it could not move.
             const pair = try setup.window(2, false);
             const a = pair.tabs.items[0].id;
             const b = pair.tabs.items[1].id;
@@ -17136,13 +17122,14 @@ test "win32 a queued tab move whose destination is gone or refuses it says so in
             TabMoveFixture.runPosted(pair);
             try std.testing.expect(pair.findTabIndexById(a) == null);
             try std.testing.expect(pair.findTabIndexById(b) != null);
-            try std.testing.expectEqual(HostBannerKind.none, pair.banner_kind);
+            try std.testing.expectEqual(HostBannerKind.err, pair.banner_kind);
+            try std.testing.expectEqualStrings("The tab could not be moved.", pair.banner_text.?);
             try app.validateShellNativeMapping();
         }
     }.body);
 }
 
-test "win32 a queued tab move left with one tab by a close says so, unlike an all: binding's last tab (#703 round 2)" {
+test "win32 a queued tab move left with one tab by a close says so (#703 round 2)" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
     try runOnHiddenDesktop(struct {
         fn body() !void {
@@ -17213,6 +17200,37 @@ test "win32 two queued tab moves whose window loses its third tab: the move left
             TabMoveFixture.runPosted(host);
             try std.testing.expect(host.findTabIndexById(first) == null);
             try std.testing.expect(host.findTabIndexById(second) != null);
+            try std.testing.expectEqual(@as(usize, 2), app.registry.hosts.items.len);
+            try std.testing.expectEqual(HostBannerKind.err, host.banner_kind);
+            try std.testing.expectEqualStrings("The tab could not be moved.", host.banner_text.?);
+            try app.validateShellNativeMapping();
+        }
+    }.body);
+}
+
+test "win32 a drop's queued move, then move_tab_to_new_window for the other tab: the move left alone says so (CodeRabbit r4536737315)" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    try runOnHiddenDesktop(struct {
+        fn body() !void {
+            var fixture: win32.WindowStartTestApp = .{};
+            try fixture.init();
+            defer fixture.deinit();
+            const app = &fixture.app;
+            app.shell_runtime_initialized = true;
+            const setup: TabMoveFixture = .{ .fixture = &fixture };
+            const host = try setup.window(2, false);
+            const target = try setup.window(1, false);
+            // A drop asks the first tab into the other window; before the
+            // queue drains, a key binding asks a new window for the second.
+            // The first moves, and the second finds its tab alone.
+            const dropped = host.tabs.items[0].id;
+            const pane = host.tabs.items[1].focusedSurface().?;
+            try std.testing.expect(app.requestTabMove(host, dropped, .{ .window = .{ .host_id = target.id, .index = 1 } }));
+            try std.testing.expect(try app.performAction(.{ .surface = pane.core() }, .move_tab_to_new_window, {}));
+            TabMoveFixture.runPosted(host);
+            try std.testing.expectEqual(@as(usize, 2), target.tabs.items.len);
+            try std.testing.expectEqual(@as(usize, 1), host.tabs.items.len);
+            try std.testing.expectEqual(host, pane.host.?);
             try std.testing.expectEqual(@as(usize, 2), app.registry.hosts.items.len);
             try std.testing.expectEqual(HostBannerKind.err, host.banner_kind);
             try std.testing.expectEqualStrings("The tab could not be moved.", host.banner_text.?);
