@@ -468,8 +468,10 @@ cancels a drag.
 `move_tab_to_new_window` (the palette's "Move Tab to New Window", unbound
 by default) does the tear-off from the keyboard; in a window of one tab it
 does nothing. The action reports whether the move was accepted; a move that
-then fails (out of memory, say) leaves the tab where it was and says "The tab
-could not be moved." in a banner on its window. A move is not undoable,
+then cannot happen (the window it was to join is gone, or out of memory)
+leaves the tab where it was and says "The tab could not be moved." in a
+banner on its window. An `all:` binding's last tab stays where it is
+without one, as the action does for a window's only tab. A move is not undoable,
 like a reorder: it clears both windows' structural undo history. A drop on
 a window of another noctty process opens a new window in the dragging
 process; tabs never cross processes. The quick terminal keeps its tabs.

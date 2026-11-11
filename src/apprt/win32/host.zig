@@ -3956,29 +3956,49 @@ pub const Host = struct {
     /// where it held the tab (`tab_drag_grab`) as an offset from the new
     /// window's top-left (`tab_drag.grabOffset`), on the monitor under it.
     /// Where a restored window of this one's kind puts its client area, from
-    /// its window rect's top-left, at this window's DPI: the frame a
+    /// its window rect's top-left, at `dpi`: the frame a
     /// torn-off tab's window opens with, whatever state this one is in now.
     /// The integrated caption and a 0 px caption row put the client area's
     /// top at the window's top (`handleNcCalcSize` keeps only the stock
     /// side frame); the stock caption keeps the whole stock frame.
-    pub fn restoredClientOffset(self: *const Host, hwnd: HWND) POINT {
+    pub fn restoredClientOffset(self: *const Host, hwnd: HWND, dpi: u32) POINT {
         const keeps_frame = window_start.undecoratedKeepsFrame(self.app.os_build, self.quick_terminal);
         const framed = self.top_level.decorations_visible or keeps_frame;
         const ex_style: u32 = @truncate(@as(usize, @bitCast(sys.GetWindowLongPtrW(hwnd, c.GWL_EXSTYLE))));
         var rect: RECT = .{ .left = 0, .top = 0, .right = 0, .bottom = 0 };
-        _ = sys.AdjustWindowRectExForDpi(&rect, window_start.hostStyle(framed, false), 0, ex_style, self.current_dpi);
+        _ = sys.AdjustWindowRectExForDpi(&rect, window_start.hostStyle(framed, false), 0, ex_style, dpi);
         const client_top = self.usingIntegratedTitlebar() or (keeps_frame and !self.top_level.decorations_visible);
         return .{ .x = -rect.left, .y = if (client_top) 0 else -rect.top };
     }
 
     pub fn tearOffDrop(self: *Host, screen: POINT, button: ?HWND) ?window_start.Drop {
+        if (self.hwnd == null) return null;
+        const monitor = sys.MonitorFromPoint(screen, c.MONITOR_DEFAULTTONEAREST) orelse return null;
+        var info: MONITORINFO = std.mem.zeroes(MONITORINFO);
+        info.cbSize = @sizeOf(MONITORINFO);
+        if (sys.GetMonitorInfoW(monitor, &info) == 0) return null;
+        var dpi_x: u32 = 0;
+        var dpi_y: u32 = 0;
+        // 0 (unknown) keeps the source's DPI.
+        if (sys.GetDpiForMonitor(monitor, 0, &dpi_x, &dpi_y) < 0) dpi_x = 0;
+        return self.tearOffDropOn(screen, button, info.rcWork, dpi_x);
+    }
+
+    /// `tearOffDrop` onto a monitor of work area `work` and DPI `dpi` (0:
+    /// this window's). The new window opens restored, whatever this one is
+    /// now (maximized, with its extra top margin and its tabs flush with the
+    /// top; fullscreen, with no caption), and at the DPI it is dropped at:
+    /// the pointer goes where that window's frame and tab row put the tab
+    /// (Greptile r4520680639), each taken at that DPI, since a frame does
+    /// not scale with it (a stock caption is 8,31 at 96 DPI and 13,58 at 192,
+    /// not 16,62; #703 M1). Only where the pointer held the tab scales. The
+    /// grab is in the destination's pixels (`grab_dpi`).
+    pub fn tearOffDropOn(self: *Host, screen: POINT, button: ?HWND, work: RECT, dpi: u32) ?window_start.Drop {
         const hwnd = self.hwnd orelse return null;
-        // The new window opens restored, whatever this one is now (maximized,
-        // with its extra top margin and its tabs flush with the top;
-        // fullscreen, with no caption): the pointer goes where the restored
-        // window's frame and tab row put the tab (Greptile r4520680639).
-        const frame = self.restoredClientOffset(hwnd);
-        const placement = chrome_layout.tabButtonPlacement(self.tabBarHeight(), self.current_dpi, false);
+        const from = @max(self.current_dpi, 1);
+        const to = if (dpi == 0) from else dpi;
+        const frame = self.restoredClientOffset(hwnd, to);
+        const placement = chrome_layout.tabButtonPlacement(self.tabBarHeight(), to, false);
         var button_width: i32 = self.scaled(host_tab_max_button_width);
         if (button) |held| {
             var rect: RECT = undefined;
@@ -3988,19 +4008,11 @@ pub const Host = struct {
             frame.x,
             frame.y,
             placement.top,
-            self.tab_drag_grab.x,
-            self.tab_drag_grab.y,
-            button_width,
+            window_start.mulDiv(self.tab_drag_grab.x, to, from),
+            window_start.mulDiv(self.tab_drag_grab.y, to, from),
+            window_start.mulDiv(button_width, to, from),
         );
-        const monitor = sys.MonitorFromPoint(screen, c.MONITOR_DEFAULTTONEAREST) orelse return null;
-        var info: MONITORINFO = std.mem.zeroes(MONITORINFO);
-        info.cbSize = @sizeOf(MONITORINFO);
-        if (sys.GetMonitorInfoW(monitor, &info) == 0) return null;
-        var dpi_x: u32 = 0;
-        var dpi_y: u32 = 0;
-        // 0 (unknown) keeps the source's DPI.
-        if (sys.GetDpiForMonitor(monitor, 0, &dpi_x, &dpi_y) < 0) dpi_x = 0;
-        return .{ .at = screen, .grab = .{ .x = grab.x, .y = grab.y }, .work = info.rcWork, .dpi = dpi_x };
+        return .{ .at = screen, .grab = .{ .x = grab.x, .y = grab.y }, .work = work, .dpi = dpi, .grab_dpi = to };
     }
 
     /// The pointer moved during a tab drag that passed its threshold: lays
