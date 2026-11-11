@@ -17075,7 +17075,7 @@ test "win32 a queued tab move that fails says so in a banner on its window (Code
     }.body);
 }
 
-test "win32 a queued tab move whose destination is gone or refuses it says so in a banner, and an all: binding's last tab stays quietly (#703 M2)" {
+test "win32 a queued tab move whose destination is gone or refuses it says so in a banner, an all: binding's last tab too (#703 M2)" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
     try runOnHiddenDesktop(struct {
         fn body() !void {
@@ -17519,6 +17519,9 @@ test "win32 a tab dropped from a maximized or fullscreen window opens restored w
                     }
                     const target = made orelse return error.TestNoNewWindow;
                     try std.testing.expectEqual(@as(usize, 1), target.tabs.items.len);
+                    // A move that happened says nothing.
+                    try std.testing.expectEqual(HostBannerKind.none, host.banner_kind);
+                    try std.testing.expectEqual(HostBannerKind.none, target.banner_kind);
                     try std.testing.expect(sys.IsZoomed(target.hwnd.?) == 0);
                     try std.testing.expect(!target.top_level.isFullscreen());
                     try std.testing.expectEqual(to.dpi, target.current_dpi);
@@ -19211,6 +19214,39 @@ test "win32 a tab move whose source loses its window right before the commit mov
             try std.testing.expect(!(try moved));
             try std.testing.expectEqual(@as(usize, 2), source.tabs.items.len);
             try std.testing.expectEqual(@as(usize, 1), target.tabs.items.len);
+            try app.validateShellNativeMapping();
+        }
+    }.body);
+}
+
+test "win32 a queued tab move whose source loses its window right before the commit shows no banner there (#703 round 3, Opus)" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    try runOnHiddenDesktop(struct {
+        fn body() !void {
+            var fixture: win32.WindowStartTestApp = .{};
+            try fixture.init();
+            defer fixture.deinit();
+            const app = &fixture.app;
+            app.shell_runtime_initialized = true;
+            const setup: TabMoveFixture = .{ .fixture = &fixture };
+            const source = try setup.window(2, false);
+            const target = try setup.window(1, false);
+            // Queued as a drop asks it; the source's `WM_DESTROY` takes its
+            // `hwnd` right before the commit, so the move is declined with
+            // nowhere to say so (`App.tabMoveDeclined`'s guard).
+            const moving = source.tabs.items[0].id;
+            try std.testing.expect(app.requestTabMove(source, moving, .{ .window = .{ .host_id = target.id, .index = 1 } }));
+            TestCommitWindowCode.arm(.source_loses_window, source, null);
+            defer App.test_tab_move_shell_step = null;
+            TabMoveFixture.runPosted(source);
+            App.test_tab_move_shell_step = null;
+            // Its window back, for the teardown.
+            source.hwnd = TestCommitWindowCode.kept;
+            try std.testing.expect(TestCommitWindowCode.done);
+            try std.testing.expect(source.findTabIndexById(moving) != null);
+            try std.testing.expectEqual(@as(usize, 2), source.tabs.items.len);
+            try std.testing.expectEqual(@as(usize, 1), target.tabs.items.len);
+            try std.testing.expectEqual(HostBannerKind.none, source.banner_kind);
             try app.validateShellNativeMapping();
         }
     }.body);

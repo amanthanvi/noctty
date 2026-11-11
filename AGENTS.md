@@ -385,7 +385,8 @@ that govern each symbol you change, or that none does.
   `Host.prepareGiveTab`,
   `Host.giveTab`, `Host.reparentSurface`, where a torn-off tab's
   pointer lands: `Host.tearOffDrop`, `Host.tearOffDropOn`,
-  `Host.restoredClientOffset`, and the window it lands in,
+  `Host.restoredClientOffset`, the grab's DPI scaling `Host.scaleByDpi`,
+  and the window it lands in,
   `window_start.placeTearOff`,
   `win32/tab_drag.zig`, the shell model's `move_tab_to_window`,
   `move_tab_to_new_window`), split dividers under the mouse
