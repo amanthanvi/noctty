@@ -433,6 +433,7 @@ test {
     _ = @import("win32/rdp_connection_dialog.zig");
     _ = @import("win32/profile_dialog.zig");
     _ = @import("win32/settings_backup.zig");
+    _ = @import("win32/local_update.zig");
     _ = clipboard_write;
     _ = @import("win32_aumid.zig");
     _ = @import("win32_toast_activator.zig");

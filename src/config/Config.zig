@@ -3765,6 +3765,8 @@ term: []const u8 = "xterm-ghostty",
 ///    notify the user, but do not automatically apply the update. Windows
 ///    stages only signed, checksum-matching installer releases and can launch
 ///    the verified staged installer after a user click.
+///
+/// Unset, noctty checks for nothing on its own (the same as `off`).
 @"auto-update": ?AutoUpdate = null,
 
 /// The HTTPS release-feed URL used for stable auto-update checks.

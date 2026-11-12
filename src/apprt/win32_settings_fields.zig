@@ -502,7 +502,7 @@ pub fn Combo(comptime field: SettingField) type {
         },
         // An unset auto-update behaves as check.
         .auto_update => &.{
-            .{ .value = null, .label = "Default (check for updates)" },
+            .{ .value = null, .label = "Default (off)" },
             .{ .value = .off, .label = "Off" },
             .{ .value = .check, .label = "Check for updates" },
             .{ .value = .download, .label = "Check and download updates" },

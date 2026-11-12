@@ -1,0 +1,15 @@
+noctty 1.3.139
+
+- Updates without a server: drop update.zip beside noctty.exe and noctty
+  offers it at the next start (what's new, Update or Ignore).
+- Automatic update checks over the internet are off.
+- Remote Desktop tabs are named after their connection, and use the Remote
+  Desktop control this Windows really serves.
+- Remote Desktop quality: colors, compression and visual quality in
+  Settings > Shell, and per connection in its window.
+- Settings > Profiles: one row per profile; Enter opens its window (name,
+  command, starting folder, zoom, open as administrator, variables), new
+  profiles based on detected ones, and Delete.
+- Tab menu: Create Profile from This Tab.
+- Window menu: Back up all settings (.zip), passwords included.
+- Settings > Shell: Starting folder.

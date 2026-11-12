@@ -74,6 +74,7 @@ const closeRightTabsConfirmAccept = win32.closeRightTabsConfirmAccept;
 const closeThisTabConfirmAccept = win32.closeThisTabConfirmAccept;
 const config_edit = @import("../../config/edit.zig");
 const rdp_pane = @import("rdp_pane.zig");
+const local_update = @import("local_update.zig");
 const config_file_load = @import("../../config/file_load.zig");
 const configpkg = @import("../../config.zig");
 const confirm_text = @import("confirm_text.zig");
@@ -941,6 +942,10 @@ pub const App = struct {
     /// Repeating thread timer that re-runs the automatic check in a process
     /// that stays open for days. See `update_recheck_interval_ms`.
     update_recheck_timer_id: ?UINT_PTR = null,
+    /// The one look for an `update.zip` beside the executable, a moment
+    /// after the first window shows (`local_update`).
+    local_update_timer_id: ?UINT_PTR = null,
+    local_update_checked: bool = false,
     /// Detected on first use: the install directory cannot change under a
     /// running process.
     install_kind: ?InstallKind = null,
@@ -1778,6 +1783,11 @@ pub const App = struct {
                 }
                 if (threadTimerFired(&msg, self.update_recheck_timer_id)) {
                     self.onUpdateRecheckTimer();
+                    continue;
+                }
+                if (threadTimerFired(&msg, self.local_update_timer_id)) {
+                    killThreadTimer(&self.local_update_timer_id);
+                    self.runLocalUpdateCheck();
                     continue;
                 }
                 if (threadTimerFired(&msg, self.profile_discovery_watchdog_id)) {
@@ -3179,18 +3189,53 @@ pub const App = struct {
     }
 
     fn automaticUpdateChecksEnabled(self: *const App) bool {
-        return self.config.@"auto-update" != .off and
+        // Off unless `auto-update` asks for checks: an unset one is off.
+        const mode = self.config.@"auto-update" orelse return false;
+        return mode != .off and
             self.config.@"auto-update-channel" == .stable and
             self.ui_thread_id != 0;
     }
 
     pub fn maybeScheduleAutomaticUpdateCheck(self: *App) void {
+        self.scheduleLocalUpdateCheck();
         if (self.update_auto_check_started) return;
         if (!self.automaticUpdateChecksEnabled()) return;
 
         self.update_auto_check_started = true;
         self.runAutomaticUpdateCheck();
         self.startUpdateRecheckTimer();
+    }
+
+    /// Look once for an `update.zip` beside the executable, a moment after
+    /// the first window shows, so its dialog opens over that window.
+    fn scheduleLocalUpdateCheck(self: *App) void {
+        if (self.local_update_checked or self.ui_thread_id == 0) return;
+        self.local_update_checked = true;
+        const timer_id = sys.SetTimer(null, 0, 1500, null);
+        if (timer_id != 0) self.local_update_timer_id = timer_id;
+    }
+
+    /// A newer `update.zip`: what is new, and Update or Ignore. Update starts
+    /// the swap (`local_update.apply`) and quits; the script starts noctty
+    /// again.
+    fn runLocalUpdateCheck(self: *App) void {
+        var arena: std.heap.ArenaAllocator = .init(self.core_app.alloc);
+        defer arena.deinit();
+        const a = arena.allocator();
+        const pending = local_update.find(a, build_config.version_string) orelse return;
+        const owner: ?HWND = for (self.registry.hosts.items) |host| {
+            if (host.hwnd) |hwnd| break hwnd;
+        } else null;
+        switch (local_update.ask(a, owner, pending, build_config.version_string)) {
+            .ignore => local_update.ignore(a, pending),
+            .update => {
+                local_update.apply(a, pending) catch |err| {
+                    log.warn("local update could not start err={}", .{err});
+                    return;
+                };
+                self.quitConfirmed();
+            },
+        }
     }
 
     fn runAutomaticUpdateCheck(self: *App) void {
