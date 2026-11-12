@@ -14149,9 +14149,10 @@ const dialog_test = struct {
         }
         // The apartment the App's UI thread has (`App.initComApartment`), on
         // this thread. Without it a provider's UIA disconnect worked only once
-        // an earlier test had left a multithreaded apartment in the process,
-        // and a `-Dtest-shards` process need not have run that test: hosted
-        // shards logged CO_E_NOTINITIALIZED 3153 times (TEST-SHARDS-01).
+        // an earlier test had left a multithreaded apartment in the process
+        // (inferred), and a `-Dtest-shards` process need not have run that
+        // test: hosted shards logged CO_E_NOTINITIALIZED 3153 times, and none
+        // with it (TEST-SHARDS-01).
         const ole = sys.OleInitialize(null);
         defer if (ole == 0 or ole == 1) sys.OleUninitialize();
         // A new thread's key table starts as a copy of the real keyboard's,

@@ -68,10 +68,14 @@ pub fn build(b: *std.Build) !void {
     // a disjoint shard of its tests (src/test_runner.zig), and the build
     // summary counts them together. The stock runner runs one test at a time,
     // so on CI's four-core runners one process left three cores idle.
+    // Not with --fuzz: the build runner would rebuild the one test compile
+    // concurrently for each sharded run step, and a build script cannot see
+    // --fuzz to refuse it (Zig 0.15.2's libfuzzer does not build for Windows
+    // anyway).
     const test_shards = b.option(
         u32,
         "test-shards",
-        "Run each Zig test executable as this many concurrent shards (default 1)",
+        "Run each Zig test executable as this many concurrent shards (default 1; not with --fuzz)",
     ) orelse 1;
     if (test_shards == 0 or test_shards > 64) {
         std.debug.print("-Dtest-shards must be between 1 and 64, not {d}\n", .{test_shards});
