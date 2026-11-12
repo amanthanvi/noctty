@@ -946,6 +946,8 @@ pub const App = struct {
     /// after the first window shows (`local_update`).
     local_update_timer_id: ?UINT_PTR = null,
     local_update_checked: bool = false,
+    /// `prefetchProfiles` ran.
+    profiles_prefetched: bool = false,
     /// Detected on first use: the install directory cannot change under a
     /// running process.
     install_kind: ?InstallKind = null,
@@ -3198,12 +3200,24 @@ pub const App = struct {
 
     pub fn maybeScheduleAutomaticUpdateCheck(self: *App) void {
         self.scheduleLocalUpdateCheck();
+        self.prefetchProfiles();
         if (self.update_auto_check_started) return;
         if (!self.automaticUpdateChecksEnabled()) return;
 
         self.update_auto_check_started = true;
         self.runAutomaticUpdateCheck();
         self.startUpdateRecheckTimer();
+    }
+
+    /// Start looking for the profiles once the first window shows, in the
+    /// background, so the window menu (▾) lists them on its first opening.
+    /// The jump list starts it otherwise, and a portable copy builds none.
+    fn prefetchProfiles(self: *App) void {
+        if (self.profiles_prefetched) return;
+        if (self.registry.hosts.items.len == 0) return;
+        self.profiles_prefetched = true;
+        const host = self.registry.hosts.items[0];
+        if (host.profiles == null) host.requestProfiles();
     }
 
     /// Look once for an `update.zip` beside the executable, a moment after

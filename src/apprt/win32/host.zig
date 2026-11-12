@@ -8217,6 +8217,11 @@ pub const Host = struct {
             }
             if (terminals > 0) _ = sys.AppendMenuW(menu, c.MF_SEPARATOR, 0, null);
         }
+        // Still being looked for: say so rather than open empty.
+        if (self.shownProfiles() == null) {
+            _ = sys.AppendMenuW(menu, c.MF_GRAYED, 0, std.unicode.utf8ToUtf16LeStringLiteral("Loading profiles..."));
+            _ = sys.AppendMenuW(menu, c.MF_SEPARATOR, 0, null);
+        }
         // Always offered: with no Remote Desktop profile yet, its only item
         // imports them.
         if (rdp_count > 0) _ = sys.AppendMenuW(rdp_menu, c.MF_SEPARATOR, 0, null);
