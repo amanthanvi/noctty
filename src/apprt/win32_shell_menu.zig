@@ -1,4 +1,4 @@
-//! Classic Explorer context-menu registration for noctty.
+//! Classic Explorer context-menu registration for koreterm.
 //!
 //! The CLI actions use HKCU only. Installer registration is owned by Inno
 //! Setup so its registry root follows the selected install scope.
@@ -63,18 +63,18 @@ const REG_CREATED_NEW_KEY: DWORD = 1;
 const SHCNE_ASSOCCHANGED: i32 = 0x08000000;
 const SHCNF_IDLIST: u32 = 0;
 
-pub const display_name = "Open noctty here";
+pub const display_name = "Open koreterm here";
 
 pub const verb_key_paths = [_][]const u8{
-    "Software\\Classes\\Directory\\shell\\noctty",
-    "Software\\Classes\\Directory\\Background\\shell\\noctty",
-    "Software\\Classes\\Drive\\shell\\noctty",
+    "Software\\Classes\\Directory\\shell\\koreterm",
+    "Software\\Classes\\Directory\\Background\\shell\\koreterm",
+    "Software\\Classes\\Drive\\shell\\koreterm",
 };
 
 pub const command_key_paths = [_][]const u8{
-    "Software\\Classes\\Directory\\shell\\noctty\\command",
-    "Software\\Classes\\Directory\\Background\\shell\\noctty\\command",
-    "Software\\Classes\\Drive\\shell\\noctty\\command",
+    "Software\\Classes\\Directory\\shell\\koreterm\\command",
+    "Software\\Classes\\Directory\\Background\\shell\\koreterm\\command",
+    "Software\\Classes\\Drive\\shell\\koreterm\\command",
 };
 
 pub const register_key_paths = [_][]const u8{
@@ -161,10 +161,10 @@ const SnapshotResult = union(enum) {
 };
 
 /// Resolve the GUI executable next to the current launcher. This intentionally
-/// avoids registering `noctty.com` when the action was reached through PATH.
+/// avoids registering `koreterm.com` when the action was reached through PATH.
 pub fn executablePathAlloc(alloc: Allocator, self_path: []const u8) ![]u8 {
     const dir = std.fs.path.dirname(self_path) orelse return error.FileNotFound;
-    return try std.fs.path.join(alloc, &.{ dir, "noctty.exe" });
+    return try std.fs.path.join(alloc, &.{ dir, "koreterm.exe" });
 }
 
 /// Build the `command` default value.
@@ -575,15 +575,15 @@ test "shell-menu key paths cover folders backgrounds and drives" {
     const testing = std.testing;
     try testing.expectEqual(@as(usize, 3), verb_key_paths.len);
     try testing.expectEqualStrings(
-        "Software\\Classes\\Directory\\shell\\noctty",
+        "Software\\Classes\\Directory\\shell\\koreterm",
         verb_key_paths[0],
     );
     try testing.expectEqualStrings(
-        "Software\\Classes\\Directory\\Background\\shell\\noctty",
+        "Software\\Classes\\Directory\\Background\\shell\\koreterm",
         verb_key_paths[1],
     );
     try testing.expectEqualStrings(
-        "Software\\Classes\\Drive\\shell\\noctty",
+        "Software\\Classes\\Drive\\shell\\koreterm",
         verb_key_paths[2],
     );
     try testing.expectEqual(@as(usize, 9), value_specs.len);
@@ -596,18 +596,18 @@ test "shell-menu command quotes an executable path containing spaces" {
     const testing = std.testing;
     const value = try commandValueAlloc(
         testing.allocator,
-        "C:\\Program Files\\noctty\\noctty.exe",
+        "C:\\Program Files\\koreterm\\koreterm.exe",
     );
     defer testing.allocator.free(value);
 
     try testing.expectEqualStrings(
-        "\"C:\\Program Files\\noctty\\noctty.exe\" --single-instance=false --working-directory=\"%V\\.\"",
+        "\"C:\\Program Files\\koreterm\\koreterm.exe\" --single-instance=false --working-directory=\"%V\\.\"",
         value,
     );
 }
 
 /// Expand Explorer's `%V` and parse the result the way Windows does, so the
-/// tests below assert what noctty actually receives in `argv`.
+/// tests below assert what koreterm actually receives in `argv`.
 fn expandAndParseForTest(
     alloc: Allocator,
     command_value: []const u8,
@@ -658,7 +658,7 @@ fn freeParsedForTest(alloc: Allocator, argv: []const []const u8) void {
 
 test "shell-menu command survives Windows argv parsing for local and UNC folders" {
     const testing = std.testing;
-    const exe = "C:\\Program Files\\noctty\\noctty.exe";
+    const exe = "C:\\Program Files\\koreterm\\koreterm.exe";
     const value = try commandValueAlloc(testing.allocator, exe);
     defer testing.allocator.free(value);
 
@@ -678,13 +678,13 @@ test "shell-menu command survives Windows argv parsing for local and UNC folders
         const argv = try expandAndParseForTest(
             testing.allocator,
             value,
-            "D:\\My Projects\\noctty",
+            "D:\\My Projects\\koreterm",
         );
         defer freeParsedForTest(testing.allocator, argv);
         try testing.expectEqual(@as(usize, 3), argv.len);
         try testing.expectEqualStrings(exe, argv[0]);
         try testing.expectEqualStrings("--single-instance=false", argv[1]);
-        try testing.expectEqualStrings("--working-directory=D:\\My Projects\\noctty\\.", argv[2]);
+        try testing.expectEqualStrings("--working-directory=D:\\My Projects\\koreterm\\.", argv[2]);
     }
 
     // Non-ASCII folder names survive the UTF-8 -> UTF-16 -> argv round trip.
@@ -727,11 +727,11 @@ test "shell-menu command survives Windows argv parsing for local and UNC folders
 
 test "shell-menu command preserves percent placeholders in the executable path" {
     const testing = std.testing;
-    const exe = "C:\\Apps\\100%Valid\\noctty.exe";
+    const exe = "C:\\Apps\\100%Valid\\koreterm.exe";
     const value = try commandValueAlloc(testing.allocator, exe);
     defer testing.allocator.free(value);
     try testing.expectEqualStrings(
-        "\"C:\\Apps\\100%%Valid\\noctty.exe\" --single-instance=false --working-directory=\"%V\\.\"",
+        "\"C:\\Apps\\100%%Valid\\koreterm.exe\" --single-instance=false --working-directory=\"%V\\.\"",
         value,
     );
 
@@ -744,18 +744,18 @@ test "shell-menu command preserves percent placeholders in the executable path" 
 }
 
 test "shell-menu display name is stable" {
-    try std.testing.expectEqualStrings("Open noctty here", display_name);
+    try std.testing.expectEqualStrings("Open koreterm here", display_name);
 }
 
 test "shell-menu register key list is exact" {
     const testing = std.testing;
     const expected = [_][]const u8{
-        "Software\\Classes\\Directory\\shell\\noctty",
-        "Software\\Classes\\Directory\\shell\\noctty\\command",
-        "Software\\Classes\\Directory\\Background\\shell\\noctty",
-        "Software\\Classes\\Directory\\Background\\shell\\noctty\\command",
-        "Software\\Classes\\Drive\\shell\\noctty",
-        "Software\\Classes\\Drive\\shell\\noctty\\command",
+        "Software\\Classes\\Directory\\shell\\koreterm",
+        "Software\\Classes\\Directory\\shell\\koreterm\\command",
+        "Software\\Classes\\Directory\\Background\\shell\\koreterm",
+        "Software\\Classes\\Directory\\Background\\shell\\koreterm\\command",
+        "Software\\Classes\\Drive\\shell\\koreterm",
+        "Software\\Classes\\Drive\\shell\\koreterm\\command",
     };
     try testing.expectEqual(expected.len, register_key_paths.len);
     for (expected, register_key_paths) |want, actual| {
@@ -766,12 +766,12 @@ test "shell-menu register key list is exact" {
 test "shell-menu unregister key list is exact and leaf first" {
     const testing = std.testing;
     const expected = [_][]const u8{
-        "Software\\Classes\\Directory\\shell\\noctty\\command",
-        "Software\\Classes\\Directory\\shell\\noctty",
-        "Software\\Classes\\Directory\\Background\\shell\\noctty\\command",
-        "Software\\Classes\\Directory\\Background\\shell\\noctty",
-        "Software\\Classes\\Drive\\shell\\noctty\\command",
-        "Software\\Classes\\Drive\\shell\\noctty",
+        "Software\\Classes\\Directory\\shell\\koreterm\\command",
+        "Software\\Classes\\Directory\\shell\\koreterm",
+        "Software\\Classes\\Directory\\Background\\shell\\koreterm\\command",
+        "Software\\Classes\\Directory\\Background\\shell\\koreterm",
+        "Software\\Classes\\Drive\\shell\\koreterm\\command",
+        "Software\\Classes\\Drive\\shell\\koreterm",
     };
     try testing.expectEqual(expected.len, unregister_key_paths.len);
     for (expected, unregister_key_paths) |want, actual| {
@@ -799,8 +799,8 @@ test "shell-menu executable path targets the GUI binary" {
     const testing = std.testing;
     const path = try executablePathAlloc(
         testing.allocator,
-        "C:\\Tools\\noctty\\noctty.com",
+        "C:\\Tools\\koreterm\\koreterm.com",
     );
     defer testing.allocator.free(path);
-    try testing.expectEqualStrings("C:\\Tools\\noctty\\noctty.exe", path);
+    try testing.expectEqualStrings("C:\\Tools\\koreterm\\koreterm.exe", path);
 }

@@ -1,16 +1,16 @@
-# Packaging noctty for distribution
+# Packaging koreterm for distribution
 
 This repository publishes Windows user artifacts directly from GitHub
 Releases. The public packaging targets are:
 
-- `noctty-<version>-windows-x64-setup.exe`
-- `noctty-<version>-windows-x64-portable.zip`
-- `noctty-<version>-windows-x64-portable.manifest.ps1`
-- `noctty-<version>-windows-x64-symbols.zip`
-- `noctty-<version>-windows-arm64-setup.exe`
-- `noctty-<version>-windows-arm64-portable.zip`
-- `noctty-<version>-windows-arm64-portable.manifest.ps1`
-- `noctty-<version>-windows-arm64-symbols.zip`
+- `koreterm-<version>-windows-x64-setup.exe`
+- `koreterm-<version>-windows-x64-portable.zip`
+- `koreterm-<version>-windows-x64-portable.manifest.ps1`
+- `koreterm-<version>-windows-x64-symbols.zip`
+- `koreterm-<version>-windows-arm64-setup.exe`
+- `koreterm-<version>-windows-arm64-portable.zip`
+- `koreterm-<version>-windows-arm64-portable.manifest.ps1`
+- `koreterm-<version>-windows-arm64-symbols.zip`
 - `SHA256SUMS-windows-x64.txt`
 - `SHA256SUMS-windows-arm64.txt`
 - `SHA256SUMS.txt` legacy alias for existing x64 auto-update clients
@@ -23,10 +23,10 @@ https://github.com/amanthanvi/noctty/releases
 
 ## Release inputs
 
-noctty releases use plain semver tags such as `v1.3.100`:
+koreterm releases use plain semver tags such as `v1.3.100`:
 
 - `major.minor` track the Ghostty upstream compatibility line
-- `patch` is the noctty release number on that line
+- `patch` is the koreterm release number on that line
 - fork releases start at patch `100` for a new upstream line
 
 The exact upstream base release is stored in
@@ -46,7 +46,7 @@ updater embeds `dist/windows/conpty-redist.json` itself
 `zig build` stages the same pair into `zig-out\bin` with the same
 `Install-ConPtyRedist`, through `scripts/stage-conpty-redist.ps1`
 (`src/build/ConptyRedist.zig`), and keeps the verified package in the Zig
-global cache under `noctty-conpty`, so it needs no pin refresh either.
+global cache under `koreterm-conpty`, so it needs no pin refresh either.
 
 The release workflow builds the Windows executable, stages runtime files,
 then produces:
@@ -59,13 +59,13 @@ then produces:
 6. A release icon asset
 7. Generated package-manager metadata
 
-The symbols ZIP holds one `symbols` folder with `noctty.pdb`,
-`noctty-command.pdb` (for `noctty.com`), `ghostty-vt.pdb` (for the portable
+The symbols ZIP holds one `symbols` folder with `koreterm.pdb`,
+`koreterm-command.pdb` (for `koreterm.com`), `ghostty-vt.pdb` (for the portable
 ZIP's `ghostty-vt.dll` placeholder, until v1.4.100; see
 [Library consumers](#library-consumers)) and
-`noctty-terminal-handoff-proxy.pdb`. Release builds therefore pass
+`koreterm-terminal-handoff-proxy.pdb`. Release builds therefore pass
 `-Dstrip=false` (`scripts/build-package-windows.ps1` does). Left alone,
-that would have grown `noctty.exe` by 2.1 MB and `noctty.com` by 1.4 MB, so
+that would have grown `koreterm.exe` by 2.1 MB and `koreterm.com` by 1.4 MB, so
 three things keep the shipped binaries the size of a stripped release: frame
 pointers are still omitted and unwind tables kept (`src/build/Config.zig`);
 `build.zig` adds `-OPT:REF` to lld's `_LINK_` environment variable, because
@@ -77,12 +77,12 @@ any image that keeps debug info (about 114 KB). The PDBs then describe the
 binary users run, and the images are within about 2 KB of a stripped build.
 They are not byte-identical: LLVM generates a few dozen instructions
 differently when it keeps debug info (99 more in a 3.1 million instruction
-`noctty.exe`).
-The `noctty.com` measurements above describe the former full console runtime.
+`koreterm.exe`).
+The `koreterm.com` measurements above describe the former full console runtime.
 It is now a native forwarder (38,400 bytes in the measured x64 ReleaseFast
-build) that starts its sibling `noctty.exe`; it does not link the application's
+build) that starts its sibling `koreterm.exe`; it does not link the application's
 runtime dependencies or `process_shared.zig` panic handler. Its entrypoint uses
-`std.debug.no_panic`. The installed filename and `noctty-command.pdb` name stay
+`std.debug.no_panic`. The installed filename and `koreterm-command.pdb` name stay
 the same, and CI caps the forwarder at 128 KiB to catch an accidental runtime link.
 The PDBs stay out of the portable ZIP and the installer (the packager stages
 an explicit file list). `scripts/symbols-verification.ps1` reads each shipped
@@ -101,7 +101,7 @@ the symbols ZIP.
 
 Local unsigned packaging is allowed for smoke validation, but the GitHub
 Release workflow requires signing and fails closed when signing is absent.
-The release installer, portable payload manifest, and noctty-built Windows PE
+The release installer, portable payload manifest, and koreterm-built Windows PE
 files inside the portable ZIP are Authenticode-signed; the pinned Microsoft
 `conpty.dll` and `OpenConsole.exe` remain byte-for-byte vendor artifacts and
 are not re-signed. Because they cannot satisfy the updater's publisher pin,
@@ -129,7 +129,7 @@ zig build -Demit-exe=true
 
 x64 packaging also requires LLVM's `llvm-objdump` on `PATH` or in the
 standard LLVM installation directory. The packaging gate disassembles every
-noctty-built runtime PE and rejects AMD-only SSE4a instructions so published x64 builds
+koreterm-built runtime PE and rejects AMD-only SSE4a instructions so published x64 builds
 retain the documented baseline CPU compatibility. Executable PE sections are
 treated as code; intentional constants must remain in non-executable sections.
 
@@ -154,7 +154,7 @@ or the symbols ZIP is skipped with a warning (`-RequireSymbols` makes that
 fatal).
 
 The packaging script caches the verified NuGet package outside the source tree
-under `%LOCALAPPDATA%\noctty\cache\conpty\<version>`. A valid cached package is
+under `%LOCALAPPDATA%\koreterm\cache\conpty\<version>`. A valid cached package is
 re-hashed on every use and supports offline packaging. If no valid cache exists
 and the download fails, local packaging warns clearly, omits the bundled pair,
 and continues; the resulting package uses the in-box conhost and may silently
@@ -177,7 +177,7 @@ To refresh the pin:
    the archive, each extracted file, and both PE machine types before staging.
 
 Microsoft's MIT text is committed as `dist/windows/LICENSE-conpty.txt` and is
-staged beside noctty's `LICENSE` in every portable and installer package.
+staged beside koreterm's `LICENSE` in every portable and installer package.
 
 In a native Windows ARM64 PowerShell process, the packaging script defaults
 to ARM64. An x64/emulated shell defaults to x64, even on ARM64 hardware.
@@ -192,7 +192,7 @@ To exercise the local signing path, export these environment variables
 first:
 
 ```powershell
-$env:WINDOWS_CODESIGN_PFX_PATH = "C:\secure\noctty-signing.pfx"
+$env:WINDOWS_CODESIGN_PFX_PATH = "C:\secure\koreterm-signing.pfx"
 $env:WINDOWS_CODESIGN_PFX_PASSWORD = "<pfx-password>"
 $env:WINDOWS_CODESIGN_TRUST_SELF_SIGNED = "true" # only for internal/self-signed PFXs
 powershell -ExecutionPolicy Bypass -File scripts/package-windows.ps1 `
@@ -213,8 +213,8 @@ powershell -ExecutionPolicy Bypass -File scripts/package-package-managers.ps1 `
 
 This emits:
 
-- `dist/artifacts/noctty-<version>-windows-x64/package-managers/scoop/`
-- `dist/artifacts/noctty-<version>-windows-x64/package-managers/metadata.json`
+- `dist/artifacts/koreterm-<version>-windows-x64/package-managers/scoop/`
+- `dist/artifacts/koreterm-<version>-windows-x64/package-managers/metadata.json`
 
 ## Release automation
 
@@ -262,8 +262,8 @@ Recommended setup:
 Example `gh` commands:
 
 ```powershell
-$repo = "amanthanvi/noctty"
-$pfxPath = "C:\secure\noctty-signing.pfx"
+$repo = "amanthanvi/koreterm"
+$pfxPath = "C:\secure\koreterm-signing.pfx"
 $pfxBase64 = [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($pfxPath))
 
 $pfxBase64 | gh secret set WINDOWS_CODESIGN_PFX_BASE64 --repo $repo --env release
@@ -286,7 +286,7 @@ When `WINDOWS_CODESIGN_TRUST_SELF_SIGNED=true`, signature validation accepts
 the expected self-signed signer thumbprint plus the narrow untrusted-root
 statuses reported by `Get-AuthenticodeSignature`. This keeps
 internal/self-signed release probes green on the current runner, but it
-does not create public publisher trust on other machines. Until noctty
+does not create public publisher trust on other machines. Until koreterm
 moves from internal/self-signed signing to a publicly trusted certificate,
 treat SmartScreen and publisher trust as incomplete.
 
@@ -311,9 +311,9 @@ Recommended order:
 6. Confirm the workflow published artifacts for both x64 and ARM64:
    - installer
    - portable ZIP
-   - `noctty-<version>-windows-x64-portable.manifest.ps1`
-   - `noctty-<version>-windows-arm64-portable.manifest.ps1`
-   - `noctty-<version>-windows-<arch>-symbols.zip`
+   - `koreterm-<version>-windows-x64-portable.manifest.ps1`
+   - `koreterm-<version>-windows-arm64-portable.manifest.ps1`
+   - `koreterm-<version>-windows-<arch>-symbols.zip`
    - `SHA256SUMS-windows-<arch>.txt`
    - legacy x64 `SHA256SUMS.txt`
    - GitHub Release notes/assets
@@ -341,12 +341,12 @@ on first publish and `gh release upload --clobber` on reruns.
 - Repo variable: `WINGET_PACKAGE_IDENTIFIER`
 - Current automation path: `wingetcreate update ... --submit`
 
-The WinGet package identifier is `AmanThanvi.noctty` and the package is
-published (`microsoft/winget-pkgs/manifests/a/AmanThanvi/noctty`, first version
+The WinGet package identifier is `AmanThanvi.koreterm` and the package is
+published (`microsoft/winget-pkgs/manifests/a/AmanThanvi/koreterm`, first version
 1.3.131). The repository variable `WINGET_PACKAGE_IDENTIFIER` is set to it, and
 stable preflight verifies that the manifest folder exists and that the latest
 public manifest covers x64 and arm64. Users install with
-`winget install --id AmanThanvi.noctty -e`. The old
+`winget install --id AmanThanvi.koreterm -e`. The old
 `AmanThanvi.winghostty` identifier is retired. Keep CI on the truthful
 `update` path; do not switch to `wingetcreate new` for automated releases.
 
@@ -363,21 +363,21 @@ is review-driven and should stay explicit.
 The official Scoop track is the fork-owned bucket:
 
 ```powershell
-scoop bucket add noctty https://github.com/amanthanvi/scoop-noctty
-scoop install noctty/noctty
+scoop bucket add koreterm https://github.com/amanthanvi/scoop-noctty
+scoop install koreterm/koreterm
 ```
 
 Release preflight verifies that the configured manifest exists, defaulting
-to `bucket/noctty.json` when `SCOOP_BUCKET_MANIFEST_PATH` is unset.
+to `bucket/koreterm.json` when `SCOOP_BUCKET_MANIFEST_PATH` is unset.
 
 ### Chocolatey
 
 - Secret: `CHOCO_API_KEY` (in the `release` environment)
 - Optional repo variable: `CHOCOLATEY_PUBLISH` (`off` skips the push; it is
   unset, so the push runs)
-- Package id: `noctty`
+- Package id: `koreterm`
 
-The package is published: users install with `choco install noctty`
+The package is published: users install with `choco install koreterm`
 (chocolatey.org approved 1.3.134 on 2026-10-23, and the `CHOCOLATEY_PUBLISH`
 variable was deleted that day). The release workflow always generates the
 Chocolatey package metadata, and its Chocolatey step runs after Scoop and
@@ -401,8 +401,8 @@ published assets and then runs `scripts/release-publish-chocolatey.ps1`, the
 script the Release step uses. To publish a generated package by hand:
 
 ```powershell
-choco pack .\noctty.nuspec --output-directory .\out
-choco push .\out\noctty.<version>.nupkg --source https://push.chocolatey.org/ --api-key $env:CHOCO_API_KEY
+choco pack .\koreterm.nuspec --output-directory .\out
+choco push .\out\koreterm.<version>.nupkg --source https://push.chocolatey.org/ --api-key $env:CHOCO_API_KEY
 ```
 
 The chocolatey.org account and its API key (stored on 2026-10-17) are the
@@ -417,8 +417,8 @@ full toolchain rules live in [HACKING.md](HACKING.md#toolchain).
 
 ## Library consumers
 
-noctty does not ship `libghostty-vt` as a library for other programs.
-`noctty.exe` does not load `ghostty-vt.dll` (its import table has no such
+koreterm does not ship `libghostty-vt` as a library for other programs.
+`koreterm.exe` does not load `ghostty-vt.dll` (its import table has no such
 entry). The copy releases up to 1.3.136 put beside it is libghostty-vt
 version 0.1.0 with the pre-1.0 C ABI, under the same name as upstream's
 libghostty-vt 1.0 DLL, which has a stable C ABI. To use the library:
@@ -430,27 +430,27 @@ libghostty-vt 1.0 DLL, which has a stable C ABI. To use the library:
   `windows-lib-vt` job). Packaging no longer builds it.
 
 Setup no longer installs `ghostty-vt.dll`, and it deletes the copy an
-earlier Setup installed (`[InstallDelete]` in `dist/windows/noctty.iss`).
+earlier Setup installed (`[InstallDelete]` in `dist/windows/koreterm.iss`).
 Neither package carries `share/pkgconfig/libghostty-vt.pc` any more, and
 Setup deletes that file too. (The updater replaces a portable copy's `share`
 folder as a whole.)
 
 From 1.3.137, the portable ZIP's `ghostty-vt.dll` is a placeholder that
-noctty builds (`src/ghostty_vt_stub/`), not libghostty-vt, and the symbols
+koreterm builds (`src/ghostty_vt_stub/`), not libghostty-vt, and the symbols
 ZIP's `ghostty-vt.pdb` is the placeholder's. The placeholder exports and
 imports nothing, and its `DllMain` refuses to initialise, so `LoadLibrary`
 fails with `ERROR_DLL_INIT_FAILED` instead of handing a program an old ABI.
-Its version resource describes it as "noctty placeholder for the retired
+Its version resource describes it as "koreterm placeholder for the retired
 ghostty-vt.dll; not libghostty-vt". There is one per architecture, and it is
-signed in the same packaging step as noctty's other binaries.
+signed in the same packaging step as koreterm's other binaries.
 
-It is there for the portable updater of noctty 1.3.125 to 1.3.136, which
+It is there for the portable updater of koreterm 1.3.125 to 1.3.136, which
 refuses a portable update whose payload lacks any file it manages,
 `ghostty-vt.dll` included. It checks that in the running copy when it stages
 the update, and again in the swap, which runs from a copy of the same old
-executable. Of each noctty-built DLL in the payload it asks only that the
+executable. Of each koreterm-built DLL in the payload it asks only that the
 file is listed in the signed payload manifest with its hash, is built for the
-right machine and carries noctty's publisher signature; it never loads it.
+right machine and carries koreterm's publisher signature; it never loads it.
 The updater from 1.3.137 on accepts a payload without the file. When it
 applies one, it moves the copy aside with the other files it replaces, so a
 rollback puts it back and a confirmed update deletes it (`retired_entries` in

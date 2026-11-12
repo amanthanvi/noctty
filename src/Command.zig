@@ -828,25 +828,25 @@ test "Command: windows-cmd-shell-command-line preserves cmd tail" {
             .argv = &.{
                 "C:\\Windows\\System32\\cmd.exe",
                 "/C",
-                "echo hello world > \"C:\\Program Files\\Noctty Logs\\output.txt\"",
+                "echo hello world > \"C:\\Program Files\\Koreterm Logs\\output.txt\"",
             },
-            .expected = "C:\\Windows\\System32\\cmd.exe /C \"echo hello world > \"C:\\Program Files\\Noctty Logs\\output.txt\"\"",
+            .expected = "C:\\Windows\\System32\\cmd.exe /C \"echo hello world > \"C:\\Program Files\\Koreterm Logs\\output.txt\"\"",
         },
         .{
             .argv = &.{
                 "C:\\Windows\\System32\\cmd.exe",
                 "/C",
-                "echo \"C:\\Program Files\\noctty\\\"",
+                "echo \"C:\\Program Files\\koreterm\\\"",
             },
-            .expected = "C:\\Windows\\System32\\cmd.exe /C \"echo \"C:\\Program Files\\noctty\\\"\"",
+            .expected = "C:\\Windows\\System32\\cmd.exe /C \"echo \"C:\\Program Files\\koreterm\\\"\"",
         },
         .{
             .argv = &.{
                 "C:\\Windows Root\\System32\\cmd.exe",
                 "/C",
-                "\"C:\\Program Files\\Noctty Tools\\probe.exe\" --message \"hello world\"",
+                "\"C:\\Program Files\\Koreterm Tools\\probe.exe\" --message \"hello world\"",
             },
-            .expected = "\"C:\\Windows Root\\System32\\cmd.exe\" /C \"\"C:\\Program Files\\Noctty Tools\\probe.exe\" --message \"hello world\"\"",
+            .expected = "\"C:\\Windows Root\\System32\\cmd.exe\" /C \"\"C:\\Program Files\\Koreterm Tools\\probe.exe\" --message \"hello world\"\"",
         },
         .{
             .argv = &.{
@@ -886,17 +886,17 @@ test "Command: windows-direct-command-line keeps argv quoting" {
     const actual = try windowsCreateCommandLine(
         allocator,
         &.{
-            "C:\\Program Files\\Noctty Tools\\probe.exe",
+            "C:\\Program Files\\Koreterm Tools\\probe.exe",
             "--message",
             "say \"hello\"",
-            "C:\\Program Files\\noctty\\",
+            "C:\\Program Files\\koreterm\\",
         },
         false,
     );
     defer allocator.free(actual);
 
     try testing.expectEqualStrings(
-        "\"C:\\Program Files\\Noctty Tools\\probe.exe\" --message \"say \\\"hello\\\"\" \"C:\\Program Files\\noctty\\\\\"",
+        "\"C:\\Program Files\\Koreterm Tools\\probe.exe\" --message \"say \\\"hello\\\"\" \"C:\\Program Files\\koreterm\\\\\"",
         actual,
     );
 }
@@ -1629,7 +1629,7 @@ test "Command: windows_process_created discriminates pre- and post-creation fail
 
     // Pre-creation failure: CreateProcessW itself fails, no child exists.
     {
-        const missing = "C:\\Windows\\System32\\noctty-does-not-exist.exe";
+        const missing = "C:\\Windows\\System32\\koreterm-does-not-exist.exe";
         var cmd: Command = .{
             .path = missing,
             .args = &.{missing},

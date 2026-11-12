@@ -6,7 +6,7 @@ Scope: Win32 updater v2 for true download, staging, verification, and apply on W
 
 ## Problem
 
-noctty already has a Windows update check path, but it stops at
+koreterm already has a Windows update check path, but it stops at
 "new version available" and opens the GitHub release page. The repo accepts
 `auto-update = download`, yet current user-facing docs and code explicitly say
 that `download` behaves the same as `check`.
@@ -58,15 +58,15 @@ The design intentionally extends current repo behavior instead of replacing it:
   - Can Authenticode-sign staged `.exe`/`.dll` artifacts and the final
     installer when secrets are present.
   - Writes `SHA256SUMS.txt`.
-- `dist/windows/noctty.iss`
+- `dist/windows/koreterm.iss`
   - Defines the current installer identity, default install root, shortcut
     AUMID wiring, and post-install launch behavior.
 - `.github/workflows/release.yml`
   - Publishes:
-    - `noctty-<version>-windows-x64-setup.exe`
-    - `noctty-<version>-windows-x64-portable.zip`
+    - `koreterm-<version>-windows-x64-setup.exe`
+    - `koreterm-<version>-windows-x64-portable.zip`
     - `SHA256SUMS.txt`
-    - `noctty-icon.svg`
+    - `koreterm-icon.svg`
 - `docs/getting-started.md`, `docs/status.md`, and
   `docs/windows-capability-matrix.md`
   - All currently describe the updater as notify-only and describe
@@ -136,8 +136,8 @@ The design intentionally extends current repo behavior instead of replacing it:
 
 For a release to be eligible for `auto-update = download`, it must publish:
 
-- `noctty-<version>-windows-x64-setup.exe`
-- `noctty-<version>-windows-x64-portable.zip`
+- `koreterm-<version>-windows-x64-setup.exe`
+- `koreterm-<version>-windows-x64-portable.zip`
 - `SHA256SUMS.txt`
 
 The current filename conventions in `scripts/package-windows.ps1` and
@@ -145,8 +145,8 @@ The current filename conventions in `scripts/package-windows.ps1` and
 
 `SHA256SUMS.txt` must contain exact `sha256 *filename` lines for at least:
 
-- `noctty-<version>-windows-x64-setup.exe`
-- `noctty-<version>-windows-x64-portable.zip`
+- `koreterm-<version>-windows-x64-setup.exe`
+- `koreterm-<version>-windows-x64-portable.zip`
 
 ### Authenticode requirements
 
@@ -159,7 +159,7 @@ Windows Authenticode for publisher and signing-chain trust.
   - ZIP hash against the checksum manifest.
   - Basic extracted-tree shape after unzip.
   - Valid Authenticode signatures on shipped PE files where present
-    (`noctty.exe`, `ghostty-vt.dll`, and any future dedicated update
+    (`koreterm.exe`, `ghostty-vt.dll`, and any future dedicated update
     helper).
 
 Production auto-apply must reject invalid Authenticode results. Test/self-signed
@@ -190,7 +190,7 @@ Detection order:
      executable directory.
 2. Classify as `portable` when the current executable directory is a writable,
    self-contained packaged tree with:
-   - `noctty.exe`
+   - `koreterm.exe`
    - `ghostty-vt.dll`
    - bundled `share/ghostty/...` resources consistent with the current
      `resourcesDir()` sentinel lookup in `src/os/resourcesdir.zig`
@@ -216,14 +216,14 @@ Retain the current `update-state.json` concept from
 Suggested layout:
 
 ```text
-%LOCALAPPDATA%\noctty\
+%LOCALAPPDATA%\koreterm\
   update-state.json
   updates\
     1.3.110\
       SHA256SUMS.txt
       asset\
-        noctty-1.3.110-windows-x64-setup.exe
-        noctty-1.3.110-windows-x64-portable.zip
+        koreterm-1.3.110-windows-x64-setup.exe
+        koreterm-1.3.110-windows-x64-portable.zip
       extracted\          # portable mode only
       rollback\           # portable mode only
       logs\
@@ -244,7 +244,7 @@ Suggested state shape:
     "version": "1.3.110",
     "channel": "stable",
     "asset_kind": "installer",
-    "asset_name": "noctty-1.3.110-windows-x64-setup.exe",
+    "asset_name": "koreterm-1.3.110-windows-x64-setup.exe",
     "asset_sha256": "<hex>",
     "release_url": "https://github.com/amanthanvi/noctty/releases/tag/v1.3.110",
     "stage_dir": "C:\\Users\\...\\updates\\1.3.110",
@@ -333,7 +333,7 @@ This avoids a stale "verified once, trusted forever" assumption.
 
 ### Shared rule: out-of-process helper
 
-The running `noctty.exe` must never directly execute a flow that requires
+The running `koreterm.exe` must never directly execute a flow that requires
 its own files to be replaced. Add a dedicated update helper in a later code
 tranche:
 
@@ -361,7 +361,7 @@ When `install_mode = installed` and a verified installer is staged:
 2. User chooses `Restart and install`.
 3. App writes `apply_requested_at` into `update-state.json`.
 4. App spawns the update helper and exits cleanly.
-5. Helper waits for all `noctty.exe` processes from the same install root
+5. Helper waits for all `koreterm.exe` processes from the same install root
    to exit.
 6. Helper launches the staged installer elevated with `ShellExecuteExW` and the
    `runas` verb.
@@ -372,7 +372,7 @@ When `install_mode = installed` and a verified installer is staged:
      preserved
    - log path inside the stage dir
 8. Installer exits:
-   - success -> helper relaunches installed `noctty.exe`
+   - success -> helper relaunches installed `koreterm.exe`
    - UAC canceled -> helper preserves the staged payload and records a
      non-blocking failure
    - nonzero exit -> helper records failure and leaves the old install in place
@@ -383,7 +383,7 @@ Notes:
 - The current app must not try to keep windows alive while apply is in
   progress.
 - If the installer requires script-level changes for silent close behavior,
-  those changes belong in `dist/windows/noctty.iss`.
+  those changes belong in `dist/windows/koreterm.iss`.
 
 ### Portable apply flow
 
@@ -398,12 +398,12 @@ When `install_mode = portable` and a verified ZIP is staged:
 6. Helper extracts the ZIP into the stage dir if not already extracted.
 7. Helper copies the current packaged tree into `rollback\`.
 8. Helper atomically replaces known packaged files/directories in place:
-   - `noctty.exe`
-   - `noctty.com`
+   - `koreterm.exe`
+   - `koreterm.com`
    - `ghostty-vt.dll`
    - bundled `share\`
    - packaged docs/icons/templates that ship beside the exe
-9. Helper relaunches the new `noctty.exe`.
+9. Helper relaunches the new `koreterm.exe`.
 
 Portable failure rules:
 
@@ -533,7 +533,7 @@ Required future changes:
 - sign every production PE that will be auto-applied or executed
 - continue writing `SHA256SUMS.txt`
 
-### `dist/windows/noctty.iss`
+### `dist/windows/koreterm.iss`
 
 Required review points for silent updater compatibility:
 
@@ -630,7 +630,7 @@ update validation. The eventual harness should exercise:
 - UAC cancel
 - portable-mode stage -> swap -> relaunch
 - portable rollback after forced copy failure
-- preservation of `%LOCALAPPDATA%\noctty\config.ghostty`
+- preservation of `%LOCALAPPDATA%\koreterm\config.ghostty`
 
 ### Release workflow gate
 
@@ -688,7 +688,7 @@ These are the files most likely to move first once coding starts:
 - `src/update/github_releases.zig`
 - `src/apprt/win32.zig`
 - `scripts/package-windows.ps1`
-- `dist/windows/noctty.iss`
+- `dist/windows/koreterm.iss`
 - `.github/workflows/release.yml`
 - `scripts/release-preflight.ps1`
 - `scripts/package-package-managers.ps1`

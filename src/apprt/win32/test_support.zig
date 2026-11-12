@@ -114,7 +114,7 @@ pub fn Fixtures(comptime runtime: anytype) type {
                 }
             };
             var name_buf: [80]u8 = undefined;
-            const name = try std.fmt.bufPrint(&name_buf, "noctty-pkg43-test-{x}-{d}", .{ @intFromPtr(&name_buf), sys.GetTickCount64() });
+            const name = try std.fmt.bufPrint(&name_buf, "koreterm-pkg43-test-{x}-{d}", .{ @intFromPtr(&name_buf), sys.GetTickCount64() });
             const wide_name = try std.unicode.utf8ToUtf16LeAllocZ(std.testing.allocator, name);
             defer std.testing.allocator.free(wide_name);
             const desktop = Desktop.CreateDesktopW(wide_name.ptr, null, null, 0, 0x10000000, null) orelse return error.SkipZigTest;

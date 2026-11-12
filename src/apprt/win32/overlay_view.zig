@@ -675,7 +675,7 @@ test "win32 confirm overlay paints its payload title and body" {
     defer arena.deinit();
     const confirm: Facts.Confirm = .{
         .title = "Allow clipboard paste?",
-        .body = "noctty needs confirmation before completing this clipboard paste or read request.",
+        .body = "koreterm needs confirmation before completing this clipboard paste or read request.",
         .accept = "Allow",
         .cancel = "Cancel",
     };
@@ -718,7 +718,7 @@ test "win32 the confirm hint is the body line chrome paint draws" {
     // the screen does not say.
     const confirm: Facts.Confirm = .{
         .title = "Allow clipboard paste?",
-        .body = "noctty needs confirmation before completing this clipboard paste or read request.",
+        .body = "koreterm needs confirmation before completing this clipboard paste or read request.",
         .accept = "Allow",
         .cancel = "Cancel",
         .caption = "3 bytes",
@@ -738,7 +738,7 @@ test "win32 the confirm hint is the body line chrome paint draws" {
     // being approved stays visible when the pane only shows its head.
     const plain = try compose(a, .{ .mode = .confirm, .confirm = confirm });
     try std.testing.expectEqualStrings(
-        "noctty needs confirmation before completing this clipboard paste or read request.  (3 bytes)",
+        "koreterm needs confirmation before completing this clipboard paste or read request.  (3 bytes)",
         plain.hint,
     );
 
@@ -763,10 +763,10 @@ test "win32 overlay feedback line prefers inline banner state" {
     const err = try compose(a, .{
         .mode = .command_palette,
         .banner_kind = .err,
-        .banner = "Unknown Noctty action. Example: new_tab or toggle_fullscreen",
+        .banner = "Unknown Koreterm action. Example: new_tab or toggle_fullscreen",
     });
     try std.testing.expectEqualStrings(
-        "Error: Unknown Noctty action. Example: new_tab or toggle_fullscreen",
+        "Error: Unknown Koreterm action. Example: new_tab or toggle_fullscreen",
         err.feedback,
     );
     // The hint control has no banner: the palette's keeps its status line.

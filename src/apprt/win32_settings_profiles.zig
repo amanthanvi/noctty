@@ -14,7 +14,7 @@
 //! into; the search does not find a variable by its value.
 //! With the app's list of profiles (`Listed`, `Model.buildListed`) the page
 //! shows every profile, in the picker's order with the hidden ones last:
-//! user profiles with their fields, and the ones noctty finds (shells, WSL,
+//! user profiles with their fields, and the ones koreterm finds (shells, WSL,
 //! Visual Studio, SSH hosts) as one row each. Moving a profile or hiding it
 //! writes `profile-order` and `profile-hidden` whole into the draft
 //! (`moveProfile`, `setProfileHidden`), which a save writes to the file.
@@ -60,13 +60,13 @@ pub const Variable = struct {
 /// picker's order: hidden ones last, and up to three quick-slot ones first.
 pub const Listed = struct {
     /// The picker's key: `user:<id>` for a user profile (its id in lower
-    /// case), else what noctty found (`pwsh.exe`, `wsl:Ubuntu`, ...).
+    /// case), else what koreterm found (`pwsh.exe`, `wsl:Ubuntu`, ...).
     key: []const u8,
     label: []const u8,
     hidden: bool = false,
     /// The launcher's quick slot that pins it to the front (1 to 3).
     quick_slot: ?u8 = null,
-    /// Hidden by noctty itself, not by `profile-hidden`: an older Visual
+    /// Hidden by koreterm itself, not by `profile-hidden`: an older Visual
     /// Studio under `visual-studio-profiles = newest`. The page shows it
     /// last among the hidden ones, and neither list it writes names it.
     found_hidden: bool = false,
@@ -111,16 +111,16 @@ fn refMap(a: Allocator, refs: []const Reference) Allocator.Error!RefMap {
 }
 
 pub const Profile = struct {
-    /// A user profile's id; for one noctty found, its key.
+    /// A user profile's id; for one koreterm found, its key.
     id: []const u8,
-    /// The picker's key: `user:<id>`, or what noctty found.
+    /// The picker's key: `user:<id>`, or what koreterm found.
     key: []const u8 = "",
-    /// Found by noctty, not a user profile: no fields to edit, only its
+    /// Found by koreterm, not a user profile: no fields to edit, only its
     /// place and whether it is hidden.
     detected: bool = false,
     /// The launcher's quick slot that pins it to the front of the picker.
     quick_slot: ?u8 = null,
-    /// Hidden by noctty itself (`Listed.found_hidden`): it stays hidden and
+    /// Hidden by koreterm itself (`Listed.found_hidden`): it stays hidden and
     /// does not move.
     found_hidden: bool = false,
     command: []const u8,
@@ -131,7 +131,7 @@ pub const Profile = struct {
     default: bool,
     /// `profile-hidden` names it.
     hidden: bool,
-    /// Its command line comes from noctty's command line: shown, not edited,
+    /// Its command line comes from koreterm's command line: shown, not edited,
     /// since a save would write it into the config file.
     read_only: bool,
     /// Which fields are not what the draft started with.
@@ -171,7 +171,7 @@ pub const Model = struct {
     profiles: []const Profile = &.{},
     rows: []const Row = &.{},
     /// Built from the app's whole list (`buildListed` with `complete`): a
-    /// profile can be moved or hidden. Not while the profiles noctty finds
+    /// profile can be moved or hidden. Not while the profiles koreterm finds
     /// are still being looked for, or with no list at all.
     complete: bool = false,
     /// The page's order and hidden profiles as the draft started them
@@ -233,7 +233,7 @@ pub const Model = struct {
         var truncated = false;
         for (entries) |page_entry| {
             if (page_entry.user == null) {
-                // A profile noctty found: one row.
+                // A profile koreterm found: one row.
                 if (rows.items.len + 1 > max_rows) {
                     truncated = true;
                     break;
@@ -348,7 +348,7 @@ pub const Model = struct {
     }
 
     /// The page's state now: the keys of its profiles in its order and of
-    /// the hidden ones, none that noctty hides itself (as `moved` and
+    /// the hidden ones, none that koreterm hides itself (as `moved` and
     /// `toggledHidden` give it). From `a`.
     pub fn state(self: *const Model, a: Allocator) Allocator.Error!Lists {
         var order: std.ArrayListUnmanaged([]const u8) = .empty;
@@ -367,7 +367,7 @@ pub const Model = struct {
     /// page's rows.
     /// - `profile-order`: the page's keys in its order. A value that names
     ///   none of them (a profile this computer does not list, or only ones
-    ///   noctty hides itself) keeps its place after the value before it. An
+    ///   koreterm hides itself) keeps its place after the value before it. An
     ///   alias that names several (`wsl`) stays as written, after the last
     ///   of them, so it orders only profiles found later.
     /// - `profile-hidden`: every value as written, but one that names a
@@ -503,7 +503,7 @@ pub const Model = struct {
     /// only within the shown profiles or within the hidden ones, and never
     /// past a quick-slot profile, which the picker shows first whatever its
     /// place (`applyQuickSlotPreferenceOrder`), nor a quick-slot one itself;
-    /// nor one noctty hides itself, which stays last (`found_hidden`). Not
+    /// nor one koreterm hides itself, which stays last (`found_hidden`). Not
     /// before the list is complete.
     pub fn moveTarget(self: *const Model, index: u32, step: i2) ?u32 {
         if (!self.complete) return null;
@@ -536,7 +536,7 @@ pub const Model = struct {
         var hidden: std.ArrayListUnmanaged([]const u8) = .empty;
         for (places) |at| {
             const profile = &self.profiles[at];
-            // One noctty hides itself is not the page's to write.
+            // One koreterm hides itself is not the page's to write.
             if (profile.found_hidden) continue;
             try keys.append(a, profile.key);
             if (profile.hidden) try hidden.append(a, profile.key);
@@ -651,7 +651,7 @@ pub const Model = struct {
     pub fn summary(self: *const Model, row: Row) []const u8 {
         return switch (row.kind) {
             .new_profile => "Add a profile: Enter asks for its id, then for its command line.",
-            .profile => if (self.profiles[row.profile].detected) "Found by noctty on this computer." else self.profiles[row.profile].command,
+            .profile => if (self.profiles[row.profile].detected) "Found by koreterm on this computer." else self.profiles[row.profile].command,
             .command => "The program and arguments the profile starts.",
             .name => if (self.profiles[row.profile].label == null) "None: the picker shows the profile's id." else "The profile's label in the picker and the palette.",
             .folder => if (self.profiles[row.profile].folder == null) "None: the profile starts in the home folder." else "Where the profile starts: home, inherit or a folder.",
@@ -669,18 +669,18 @@ pub const Model = struct {
         );
         const profile = &self.profiles[row.profile];
         if (profile.detected) {
-            try writer.print("Profile {s}, which noctty found on this computer: its command line, name and folder are noctty's, so Settings does not change them. ", .{profile.key});
+            try writer.print("Profile {s}, which koreterm found on this computer: its command line, name and folder are koreterm's, so Settings does not change them. ", .{profile.key});
             return writeOrderHelp(profile, writer);
         }
         if (profile.read_only and row.kind != .profile) return writer.print(
-            "Profile user:{s} comes from noctty's command line, so Settings does not change it: a change saved to the config file would not be used while that command line names it.",
+            "Profile user:{s} comes from koreterm's command line, so Settings does not change it: a change saved to the config file would not be used while that command line names it.",
             .{profile.id},
         );
         switch (row.kind) {
             .new_profile => unreachable,
             .profile => {
                 if (profile.read_only)
-                    try writer.print("Profile user:{s} comes from noctty's command line, so Settings does not change its fields. ", .{profile.id})
+                    try writer.print("Profile user:{s} comes from koreterm's command line, so Settings does not change its fields. ", .{profile.id})
                 else {
                     try writer.print("Profile user:{s}. Its id cannot be changed: sessions, layouts and the taskbar's jump list name the profile by it. Enter edits its command line; Delete removes the profile.", .{profile.id});
                     if (profile.default) try writer.writeAll(" Default profile names it: once it is removed, new tabs open the automatic shell.");
@@ -778,7 +778,7 @@ pub const Lists = struct {
 
 /// The page's state for `entries` (`pageEntries` of `config`), as
 /// `Model.state` gives it: every profile's key in page order and the hidden
-/// ones', none that noctty hides itself.
+/// ones', none that koreterm hides itself.
 fn stateOf(a: Allocator, config: *const Config, entries: []const PageEntry) Allocator.Error!Lists {
     const commands = config.@"profile-command".entries.items;
     var order: std.ArrayListUnmanaged([]const u8) = .empty;
@@ -813,7 +813,7 @@ const PageEntry = struct {
 
     /// Shown or hidden: the picker shows the shown ones first, then the
     /// hidden ones, each in their order (`arrangeProfiles`' partition), those
-    /// noctty hides itself among them.
+    /// koreterm hides itself among them.
     fn group(self: PageEntry) u1 {
         return @intFromBool(self.hidden or self.foundHidden());
     }
@@ -884,7 +884,7 @@ fn pageEntries(a: Allocator, draft: *const Config, original: ?*const Config, lis
     }
     // The picker's order: the shown profiles, the quick-slot ones first in
     // slot order, as the picker pulls them (`applyQuickSlotPreferenceOrder`);
-    // then the hidden ones, those noctty hides itself last. A new profile
+    // then the hidden ones, those koreterm hides itself last. A new profile
     // placed among the pinned ones goes after them.
     std.sort.insertion(PageEntry, entries.items, {}, struct {
         fn lessThan(_: void, x: PageEntry, y: PageEntry) bool {
@@ -1011,7 +1011,7 @@ fn writeMarks(profile: *const Profile, writer: *std.Io.Writer, open: []const u8,
     const slot_text: []const u8 = if (profile.quick_slot) |slot| std.fmt.bufPrint(&slot_buf, "quick slot {d}", .{slot}) catch "quick slot" else "";
     const marks = [_]struct { on: bool, text: []const u8 }{
         .{ .on = profile.default, .text = "default profile" },
-        .{ .on = profile.hidden, .text = if (profile.found_hidden) "hidden by noctty" else "hidden" },
+        .{ .on = profile.hidden, .text = if (profile.found_hidden) "hidden by koreterm" else "hidden" },
         .{ .on = profile.quick_slot != null and !profile.hidden, .text = slot_text },
         .{ .on = profile.read_only, .text = "from the command line, read-only" },
         .{ .on = profile.changed.any(), .text = if (profile.changed.new) "new, not saved yet" else "changed here, not saved yet" },
@@ -1044,8 +1044,8 @@ fn writeOrderHelp(profile: *const Profile, writer: *std.Io.Writer) std.Io.Writer
     if (profile.hidden and profile.default) try writer.writeAll(" Default profile names it, so new tabs still start it.");
 }
 
-/// Why a profile noctty hides itself stays hidden.
-pub const found_hidden_help = "noctty hides it: with visual-studio-profiles = newest it lists only the newest Visual Studio. Set visual-studio-profiles = all to list the others.";
+/// Why a profile koreterm hides itself stays hidden.
+pub const found_hidden_help = "koreterm hides it: with visual-studio-profiles = newest it lists only the newest Visual Studio. Set visual-studio-profiles = all to list the others.";
 
 /// What UIA knows a row by: its kind, its profile's id and its variable's
 /// name, without case, which is how the loader tells them apart; an `ssh:`
@@ -1102,7 +1102,7 @@ fn hiddenIn(config: *const Config, id: []const u8) bool {
     return false;
 }
 
-/// The ids whose `profile-command` was last written by noctty's command line
+/// The ids whose `profile-command` was last written by koreterm's command line
 /// (`pane_launch.ProfilePlace`), in lower case.
 fn commandLineIds(a: Allocator, config: *const Config) Allocator.Error!std.StringHashMapUnmanaged(void) {
     var last: std.StringHashMapUnmanaged(bool) = .empty;
@@ -1309,7 +1309,7 @@ pub fn checkText(comptime kind: profile_map.Kind, id: []const u8, text: []const 
     const value = std.fmt.bufPrint(&buf, "{s}: {s}", .{ id, text }) catch return "That is too long for one line of the config file.";
     _ = profile_map.check(kind, value) catch |err| return switch (err) {
         error.MissingProfileId, error.InvalidProfileId => "A profile id is 1 to 64 letters, digits, dots, hyphens or underscores.",
-        error.ReservedProfileId => "That id names one of noctty's detected profiles: choose another.",
+        error.ReservedProfileId => "That id names one of koreterm's detected profiles: choose another.",
         error.ProfileIdLooksLikeDrive => "A one-letter profile id cannot have a value that starts with \\ or /: it reads as a drive. Choose a longer id.",
         error.ProfileCommandPrefix => "A profile's command line cannot start with direct: or shell:.",
         error.ProfileNoProgram => "The command line names no program.",
@@ -1337,7 +1337,7 @@ fn fitsOneLine(comptime kind: profile_map.Kind, key: []const u8, id: []const u8,
 pub fn checkNewId(draft: *const Config, id: []const u8) ?[]const u8 {
     if (id.len == 0) return "Type the new profile's id.";
     if (!profile_map.isValidId(id)) return "A profile id is 1 to 64 letters, digits, dots, hyphens or underscores.";
-    if (profile_map.isReservedId(id)) return "That id names one of noctty's detected profiles: choose another.";
+    if (profile_map.isReservedId(id)) return "That id names one of koreterm's detected profiles: choose another.";
     if (draft.@"profile-command".get(id) != null) return "A profile with that id exists already.";
     return null;
 }
@@ -1889,7 +1889,7 @@ test "settings profiles: with the app's list, every profile in the picker's orde
     const keys = try testKeysText(alloc, &model);
     defer alloc.free(keys);
     try expectSameText("pwsh.exe\nuser:py\nuser:node\nssh:prod\ncmd.exe (hidden)\n", keys);
-    // A profile noctty found is one row; a user profile keeps its fields.
+    // A profile koreterm found is one row; a user profile keeps its fields.
     const text = try testRowsText(alloc, &model);
     defer alloc.free(text);
     try expectSameText(
@@ -2058,14 +2058,14 @@ test "settings profiles: the pinned profiles stay first whatever the draft's ord
     }
 }
 
-test "settings profiles: a profile noctty hides itself keeps the app's place among the hidden ones, and its explicit name" {
+test "settings profiles: a profile koreterm hides itself keeps the app's place among the hidden ones, and its explicit name" {
     const alloc = testing.allocator;
     var original = try testConfig(alloc, "profile-command = py: python.exe\nprofile-hidden = cmd.exe\nprofile-hidden = vs:old:cmd\n", &.{});
     defer original.deinit();
     var draft = try original.clone(alloc);
     defer draft.deinit();
     // As the app arranges them: the hidden ones after the shown ones, in
-    // its order, the one noctty hides among them.
+    // its order, the one koreterm hides among them.
     const listed = [_]Listed{
         .{ .key = "pwsh.exe", .label = "PowerShell" },
         .{ .key = "user:py", .label = "py" },

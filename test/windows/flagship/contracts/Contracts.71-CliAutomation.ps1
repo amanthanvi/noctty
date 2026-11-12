@@ -15,8 +15,8 @@ if ($cliAutomationErrors.Count -ne 0) {
 }
 
 foreach ($requiredText in @(
-        'NOCTTY_CLI_AUTOMATION_BOOTSTRAPPED',
-        'noctty.windows.v3',
+        'KORETERM_CLI_AUTOMATION_BOOTSTRAPPED',
+        'koreterm.windows.v3',
         'ConvertFrom-Json',
         '$serverPid = $server.Id',
         '$State.instance.pid -ne $ServerPid',

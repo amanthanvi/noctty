@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
 const siteDir = join(dirname(fileURLToPath(import.meta.url)), '..');
-const PAGES = ['index.html', 'why-noctty.html', '404.html'];
+const PAGES = ['index.html', 'why-koreterm.html', '404.html'];
 
 const pages = new Map(
   PAGES.map((page) => [page, readFileSync(join(siteDir, page), 'utf8')]),

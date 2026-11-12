@@ -252,7 +252,7 @@ pub const LoadingImage = struct {
         // TOCTOU issues. On Windows the open is local_path's, which refuses a
         // link or a mapped drive to a share before any SMB contact (an
         // ordinary open would follow it and wait on the server), and a path
-        // that is not drive-absolute, which would resolve against noctty's own
+        // that is not drive-absolute, which would resolve against koreterm's own
         // current directory, a place the client knows nothing about.
         var file = if (comptime builtin.os.tag == .windows) switch (try local_path.open(alloc, path, .{ .data = true })) {
             .found => |found| hit: {
@@ -1626,7 +1626,7 @@ test "image load: windows file through a link to a share that does not answer is
     const Case = struct { name: []const u8, target: []const u8, loads: bool };
     for ([_]Case{
         .{ .name = "to-local", .target = real, .loads = true },
-        .{ .name = "to-share", .target = "\\\\192.0.2.1\\noctty-test-none$", .loads = false },
+        .{ .name = "to-share", .target = "\\\\192.0.2.1\\koreterm-test-none$", .loads = false },
     }) |case| {
         const link = try std.fs.path.join(alloc, &.{ root, case.name });
         defer alloc.free(link);
@@ -1661,7 +1661,7 @@ test "image load: windows file path that is not drive-absolute is refused" {
     if (!kitty_windows.isDriveAbsolute(real_path) or !std.ascii.eqlIgnoreCase(cwd[0..2], real_path[0..2]))
         return error.SkipZigTest;
 
-    // The same file as text the client cannot mean: relative to noctty's own
+    // The same file as text the client cannot mean: relative to koreterm's own
     // current directory, rooted on its drive, or relative on its drive.
     const relative = try std.fs.path.relative(alloc, cwd, real_path);
     defer alloc.free(relative);

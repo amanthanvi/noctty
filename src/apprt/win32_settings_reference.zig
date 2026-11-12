@@ -655,7 +655,7 @@ pub const Model = struct {
         if (!self.lines_known) return writer.print("Not known where {s} sets it: Settings reads only a file on a local drive, as text, and could not read this one.", .{path});
         // No step set the key: a line of this file that names it was not taken.
         if (row.origin == .derived)
-            try writer.print("Not set in {s}: noctty chose this value when it read the config.", .{path})
+            try writer.print("Not set in {s}: koreterm chose this value when it read the config.", .{path})
         else
             try writer.print("Not set in {s}.", .{path});
         return self.writeOtherLines(writer, row, null);
@@ -674,7 +674,7 @@ pub const Model = struct {
         // The line no longer holds what was read there: still where the value
         // came from, but the line named may now hold other text.
         if (row.origin_changed) {
-            try writer.print("Set on line {d} of {s} when noctty read it; that line has changed since.", .{ line, path });
+            try writer.print("Set on line {d} of {s} when koreterm read it; that line has changed since.", .{ line, path });
             return self.writeOtherLines(writer, row, null);
         }
         if (row.set.count > 1 and row.set.last == line)
@@ -719,7 +719,7 @@ pub const Model = struct {
 };
 
 /// Where the value Settings shows for `key` comes from (`config.origin.of`).
-/// When noctty's command line named a `default-profile` for this process,
+/// When koreterm's command line named a `default-profile` for this process,
 /// Settings shows the config files' value instead
 /// (`pane_launch.filesDefaultProfile`), which that argument did not set: its
 /// origin is the last file line that set it (`config.origin.ofFiles`).
@@ -1160,7 +1160,7 @@ test "settings reference says where a value comes from: an included file, the th
         derived += 1;
         writer = .fixed(&buf);
         try model.writeLocation(&writer, &model.rows[index(key)]);
-        try testing.expectEqualStrings(try std.fmt.bufPrint(&expected, "Not set in {s}: noctty chose this value when it read the config.", .{named}), writer.buffered());
+        try testing.expectEqualStrings(try std.fmt.bufPrint(&expected, "Not set in {s}: koreterm chose this value when it read the config.", .{named}), writer.buffered());
     };
     try testing.expect(derived > 0);
     // Any other key's value no step set reads as the default.
@@ -1331,7 +1331,7 @@ test "settings reference saved default-profile keeps its included-file origin un
     const alloc = testing.allocator;
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
-    // The config file names A, a file it includes names B, and noctty's
+    // The config file names A, a file it includes names B, and koreterm's
     // command line names C.
     try tmp.dir.writeFile(.{ .sub_path = "included.conf", .data = "default-profile = pwsh.exe\n" });
     const text = "font-size = 12\ndefault-profile = cmd.exe\nconfig-file = included.conf\n";
@@ -1509,7 +1509,7 @@ fn expectChangedFile(read: []const u8, now: []const u8, want: []const struct { k
     try testing.expectEqualStrings("13", model.rows[index(.@"font-size")].value);
 }
 
-const changed_since = " when noctty read it; that line has changed since.";
+const changed_since = " when koreterm read it; that line has changed since.";
 
 test "settings reference changed file: the same line, now a value the loader would refuse" {
     try expectChangedFile("font-size = 13\n", "font-size = abc\n", &.{

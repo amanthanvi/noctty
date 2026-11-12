@@ -32,7 +32,7 @@ pub const Options = struct {
     }
 };
 
-/// The `show-config` command shows the current configuration in a valid noctty
+/// The `show-config` command shows the current configuration in a valid koreterm
 /// configuration file format.
 ///
 /// When executed without any arguments this will output the current
@@ -40,7 +40,7 @@ pub const Options = struct {
 /// using the default configuration this will output nothing.
 ///
 /// If you are a new user and want to see all available options with
-/// documentation, run `noctty +show-config --default --docs`.
+/// documentation, run `koreterm +show-config --default --docs`.
 ///
 /// The output is not in any specific order, but the order should be consistent
 /// between runs. The output is not guaranteed to be exactly match the input

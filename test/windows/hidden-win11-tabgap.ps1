@@ -30,7 +30,7 @@ $ErrorActionPreference='Stop'
 # Reuse the executable-byte identity check, including its HiddenWin helper.
 # Dot-sourcing only defines helpers; the hosted launcher is never invoked.
 . (Join-Path $PSScriptRoot 'hidden-win11-lib.ps1')
-Assert-MeasureAumid (Join-Path $Bin 'noctty.exe')
+Assert-MeasureAumid (Join-Path $Bin 'koreterm.exe')
 Add-Type @'
 using System;
 using System.Collections.Generic;
@@ -121,7 +121,7 @@ public static class TabGap {
  // Only the owned private-desktop input queues are attached. Synchronous
  // key messages finish before the saved state is restored and detached.
  public static void Key(IntPtr surface,int vk){uint pid;uint target=GetWindowThreadProcessId(surface,out pid),current=GetCurrentThreadId();if(!AttachThreadInput(current,target,true))throw new Exception("Private input attach failed");var saved=new byte[256];bool have=false;try{if(!GetKeyboardState(saved))throw new Exception("Private keyboard read failed");have=true;if(!SetKeyboardState(new byte[256]))throw new Exception("Private keyboard reset failed");IntPtr result;if(SendMessageTimeoutW(surface,0x100,new IntPtr(vk),new IntPtr(1),2,2000,out result)==IntPtr.Zero||SendMessageTimeoutW(surface,0x101,new IntPtr(vk),new IntPtr(0xC0000001L),2,2000,out result)==IntPtr.Zero)throw new Exception("Private key timeout");}finally{bool restored=!have||SetKeyboardState(saved);bool detached=AttachThreadInput(current,target,false);if(!restored||!detached)throw new Exception("Private input restore/detach failed");}}
- public static void Fullscreen(IntPtr host){var s=Read(host);foreach(var c in s.Children)if(c.Class=="noctty.win32"){Key(new IntPtr(c.Hwnd),122);return;}throw new Exception("Surface absent");}
+ public static void Fullscreen(IntPtr host){var s=Read(host);foreach(var c in s.Children)if(c.Class=="koreterm.win32"){Key(new IntPtr(c.Hwnd),122);return;}throw new Exception("Surface absent");}
 }
 '@
 if(-not $Driver){
@@ -130,7 +130,7 @@ if(-not $Driver){
     if(Test-Path -LiteralPath $guardDir){throw 'State guard evidence directory must be new.'}
     [void](New-Item -ItemType Directory -Path $guardDir)
     $guard=Start-InteractiveWin11StateGuard -Harness TABGAP -ReceiptDirectory $guardDir
-    try{Invoke-LocalHiddenDriver -Script $PSCommandPath -Bin $Bin -Run $Run -TimeoutSeconds $DriverTimeoutSeconds -DesktopPrefix 'noctty-tabgap-' -Label 'TABGAP measurement' -PassDesktopName -GuardClipboard -RunFiles @{'harness-used.ps1'=[IO.File]::ReadAllText($PSCommandPath)} -DriverArguments $(if($ExpectFlush){@('-ExpectFlush')}else{@()})}
+    try{Invoke-LocalHiddenDriver -Script $PSCommandPath -Bin $Bin -Run $Run -TimeoutSeconds $DriverTimeoutSeconds -DesktopPrefix 'koreterm-tabgap-' -Label 'TABGAP measurement' -PassDesktopName -GuardClipboard -RunFiles @{'harness-used.ps1'=[IO.File]::ReadAllText($PSCommandPath)} -DriverArguments $(if($ExpectFlush){@('-ExpectFlush')}else{@()})}
     finally{Assert-InteractiveWin11StateGuard -Guard $guard}
     exit
 }
@@ -142,8 +142,8 @@ function Launch-Case([string]$Name,[string]$Decoration,$Monitor,[bool]$AddTab=$t
     $root=Join-Path $Run $Name; $dir=Join-Path $root 'bin'; Copy-Portable $Bin $dir
     foreach($n in @('localappdata','appdata')){[void](New-Item -ItemType Directory -Path (Join-Path $root $n))}
     $config=Join-Path $dir 'tabgap.ghostty'
-    @('command = cmd.exe /d /k','shell-integration = none','single-instance = false',"class = noctty-test-tabgap-$([guid]::NewGuid().ToString('N'))",'window-save-state = never','confirm-close-surface = false','window-show-tab-bar = always',"window-decoration = $Decoration",'clipboard-read = deny','clipboard-write = deny','copy-on-select = false','keybind = f11=toggle_fullscreen','keybind = f10=toggle_quick_terminal','quick-terminal-autohide = false','quick-terminal-animation-duration = 0','quick-terminal-keyboard-interactivity = on-demand') | Set-Content -LiteralPath $config
-    $exe=Join-Path $dir 'noctty.exe'; $oldLocal=$env:LOCALAPPDATA;$oldRoaming=$env:APPDATA
+    @('command = cmd.exe /d /k','shell-integration = none','single-instance = false',"class = koreterm-test-tabgap-$([guid]::NewGuid().ToString('N'))",'window-save-state = never','confirm-close-surface = false','window-show-tab-bar = always',"window-decoration = $Decoration",'clipboard-read = deny','clipboard-write = deny','copy-on-select = false','keybind = f11=toggle_fullscreen','keybind = f10=toggle_quick_terminal','quick-terminal-autohide = false','quick-terminal-animation-duration = 0','quick-terminal-keyboard-interactivity = on-demand') | Set-Content -LiteralPath $config
+    $exe=Join-Path $dir 'koreterm.exe'; $oldLocal=$env:LOCALAPPDATA;$oldRoaming=$env:APPDATA
     try{
         $env:LOCALAPPDATA=Join-Path $root 'localappdata';$env:APPDATA=Join-Path $root 'appdata'
         $pi=[HiddenLocal]::Spawn($exe,('"{0}" --config-file="{1}" --single-instance=false' -f $exe,$config),$dir,"WinSta0\$DesktopName")
@@ -195,7 +195,7 @@ function Sample([string]$Name,$Case,[string]$StateName,[string]$Decoration){
     Check "$Name tab top" ($tabs[0].Rect.Top -eq $expected -and $tabs[1].Rect.Top -eq $expected) $expected @($tabs|ForEach-Object {$_.Rect.Top})
     $expectedBottom=[int][Math]::Floor(3*$s.Dpi/96)+$height-[int][Math]::Floor(6*$s.Dpi/96)
     Check "$Name tab bottom" ($tabs[0].Rect.Bottom -eq $expectedBottom -and $tabs[1].Rect.Bottom -eq $expectedBottom) $expectedBottom @($tabs|ForEach-Object {$_.Rect.Bottom})
-    $panes=@($s.Children|Where-Object Class -eq 'noctty.win32')
+    $panes=@($s.Children|Where-Object Class -eq 'koreterm.win32')
     Check "$Name pane band" (@($panes|Where-Object {$_.Rect.Top -ne $height}).Count -eq 0 -and $panes.Count -gt 0) $height @($panes|ForEach-Object {$_.Rect.Top})
     if($ExpectFlush){Check "$Name first-tab strip has no sysmenu target" (@($scans.first|Where-Object Code -eq 3).Count -eq 0) 0 @($scans.first|Where-Object Code -eq 3).Count}
     if($StateName -eq 'maximized'){
@@ -231,7 +231,7 @@ function Sample([string]$Name,$Case,[string]$StateName,[string]$Decoration){
 }
 function Test-WindowMenus([string]$Name,$Case){
     $h=$Case.Host;$s=[TabGap]::Read($h)
-    $pane=@($s.Children|Where-Object Class -eq 'noctty.win32')[0]
+    $pane=@($s.Children|Where-Object Class -eq 'koreterm.win32')[0]
     if(-not $pane){throw 'Menu probe needs a visible pane.'}
     $row=[int][Math]::Floor(20*$s.Dpi/96)
     $captionRun=[TabGap]::WidestCaptionRun($h,$row)
@@ -305,7 +305,7 @@ function Test-QuickTerminal([string]$Name,$Monitor){
     $case=$null
     try{
         $case=Launch-Case "$Name-quick" 'auto' $Monitor $false
-        $pane=@(([TabGap]::Read($case.Host)).Children|Where-Object Class -eq 'noctty.win32')[0]
+        $pane=@(([TabGap]::Read($case.Host)).Children|Where-Object Class -eq 'koreterm.win32')[0]
         [TabGap]::Key([IntPtr]$pane.Hwnd,121)
         $opened=Wait-Until {@([HiddenLocal]::Hosts($case.Process.Id)|Where-Object {$_ -ne $case.Host}).Count -eq 1} 10
         Check "$Name quick terminal opens" $opened $true $opened

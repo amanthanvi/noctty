@@ -30,7 +30,7 @@ if ($ResetState) { $forwardedArgs += '-ResetState' }
 Invoke-InteractiveWin11HarnessMain `
     -RepoRoot $repoRoot `
     -LauncherPath $launcherPath `
-    -EnvironmentVariable 'NOCTTY_INTERACTIVE_WIN11_PROGRESS_BOOTSTRAPPED' `
+    -EnvironmentVariable 'KORETERM_INTERACTIVE_WIN11_PROGRESS_BOOTSTRAPPED' `
     -ArgumentList $forwardedArgs
 
 Add-Type -AssemblyName System.Drawing
@@ -38,7 +38,7 @@ Add-Type @'
 using System;
 using System.Runtime.InteropServices;
 
-public static class NocttyWin32 {
+public static class KoretermWin32 {
     [DllImport("user32.dll", SetLastError = true)]
     public static extern bool MoveWindow(IntPtr hWnd, int X, int Y, int nWidth, int nHeight, bool bRepaint);
 
@@ -102,8 +102,8 @@ function Show-ProgressHarnessWindow {
         [Parameter(Mandatory)] [IntPtr] $Hwnd
     )
 
-    [void] [NocttyWin32]::ShowWindow($Hwnd, 9)
-    [void] [NocttyWin32]::SetForegroundWindow($Hwnd)
+    [void] [KoretermWin32]::ShowWindow($Hwnd, 9)
+    [void] [KoretermWin32]::SetForegroundWindow($Hwnd)
 }
 
 $harness = Initialize-InteractiveWin11Sandbox -RepoRoot $repoRoot -SandboxName 'progress' -ResetState:$ResetState -IncludeResourcesDir
@@ -232,7 +232,7 @@ $runtimeFailurePattern = 'taskbar progress init failed|taskbar progress sync fai
 $launchArgs = @(
     Get-InteractiveWin11ContainmentArguments
     '--single-instance=false'
-    "--class=noctty-progress-$($layout.SandboxId)"
+    "--class=koreterm-progress-$($layout.SandboxId)"
     "--config-file=$configPath"
     '-e'
     'powershell.exe'
@@ -259,7 +259,7 @@ try {
         $process.Refresh()
         if ($process.MainWindowHandle -ne 0) {
             Assert-Win32CallSucceeded `
-                -Succeeded ([NocttyWin32]::MoveWindow($process.MainWindowHandle, 80, 80, 1000, 720, $true)) `
+                -Succeeded ([KoretermWin32]::MoveWindow($process.MainWindowHandle, 80, 80, 1000, 720, $true)) `
                 -Operation "MoveWindow(hwnd=$($process.MainWindowHandle))"
             Show-ProgressHarnessWindow -Hwnd $process.MainWindowHandle
             break
@@ -268,7 +268,7 @@ try {
     }
 
     if ($process.MainWindowHandle -eq 0) {
-        throw 'noctty main window handle was not ready before timeout.'
+        throw 'koreterm main window handle was not ready before timeout.'
     }
 
     foreach ($state in $states) {
@@ -279,7 +279,7 @@ try {
             if (Test-Path -LiteralPath $state.Marker) {
                 Show-ProgressHarnessWindow -Hwnd $process.MainWindowHandle
                 Start-Sleep -Milliseconds $script:PROGRESS_CAPTURE_SETTLE_MS
-                # Diagnostic only, and saved only where it shows noctty alone.
+                # Diagnostic only, and saved only where it shows koreterm alone.
                 $shot = Save-StatefulScreenCapture -Hwnd $process.MainWindowHandle -Path $state.Screenshot
                 $state.Saved = $shot.Path
                 $state.Note = $shot.Note
@@ -296,7 +296,7 @@ try {
             }
 
             if ($process.HasExited) {
-                throw "noctty exited before state '$stateName' was captured (exit code $($process.ExitCode))"
+                throw "koreterm exited before state '$stateName' was captured (exit code $($process.ExitCode))"
             }
 
             Start-Sleep -Milliseconds $script:PROGRESS_POLL_MS

@@ -22,7 +22,7 @@ pub const Options = struct {
     internal_format: gl.Texture.InternalFormat,
 
     /// Back the target with a texture instead of a renderbuffer, so that
-    /// presenting can sample it (noctty, #640: a composed frame).
+    /// presenting can sample it (koreterm, #640: a composed frame).
     sampled: bool = false,
 };
 
@@ -47,7 +47,7 @@ renderbuffer: ?gl.Renderbuffer,
 texture: ?gl.Texture = null,
 
 /// The dim of an unfocused split that presenting lays over this sampled
-/// target after converting it (noctty, #640): the bytes of the fill and its
+/// target after converting it (koreterm, #640): the bytes of the fill and its
 /// alpha, as `splitDimUniforms` gives them. The dim blends in gamma space on
 /// the window's sRGB-premultiplied pixels, so drawn into the target first
 /// the conversion would read it as linear light. Set for each frame by the

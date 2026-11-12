@@ -1,6 +1,6 @@
 # Code signing certificate decision
 
-Noctty releases are signed with a self-signed certificate
+Koreterm releases are signed with a self-signed certificate
 (`CN=winghostty Local Dev Signing`, valid to 2029-04-30). That gives a valid
 cryptographic signature and, through the SPKI pin described in
 [ADR 0005](0005-pin-updater-publisher-public-keys.md), a real trust anchor for

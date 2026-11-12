@@ -11,12 +11,12 @@ const Pager = @import("Pager.zig");
 pub const Options = struct {
     /// The config option to explain. For example:
     ///
-    ///   noctty +explain-config --option=font-size
+    ///   koreterm +explain-config --option=font-size
     option: ?[]const u8 = null,
 
     /// The keybind action to explain. For example:
     ///
-    ///   noctty +explain-config --keybind=copy_to_clipboard
+    ///   koreterm +explain-config --keybind=copy_to_clipboard
     keybind: ?[]const u8 = null,
 
     pub fn deinit(self: Options) void {
@@ -31,14 +31,14 @@ pub const Options = struct {
 };
 
 /// The `explain-config` command prints the documentation for a single
-/// noctty configuration option or keybind action.
+/// koreterm configuration option or keybind action.
 ///
 /// Examples:
 ///
-///   noctty +explain-config font-size
-///   noctty +explain-config copy_to_clipboard
-///   noctty +explain-config --option=font-size
-///   noctty +explain-config --keybind=copy_to_clipboard
+///   koreterm +explain-config font-size
+///   koreterm +explain-config copy_to_clipboard
+///   koreterm +explain-config --option=font-size
+///   koreterm +explain-config --keybind=copy_to_clipboard
 ///
 /// Flags:
 ///
@@ -78,9 +78,9 @@ pub fn run(alloc: Allocator) !u8 {
         var stderr: std.fs.File = .stderr();
         var buffer: [4096]u8 = undefined;
         var stderr_writer = stderr.writerStreaming(&buffer);
-        try stderr_writer.interface.writeAll("Usage: noctty +explain-config <option>\n");
-        try stderr_writer.interface.writeAll("       noctty +explain-config --option=<option>\n");
-        try stderr_writer.interface.writeAll("       noctty +explain-config --keybind=<action>\n");
+        try stderr_writer.interface.writeAll("Usage: koreterm +explain-config <option>\n");
+        try stderr_writer.interface.writeAll("       koreterm +explain-config --option=<option>\n");
+        try stderr_writer.interface.writeAll("       koreterm +explain-config --keybind=<action>\n");
         try stderr_writer.interface.flush();
         return 1;
     };

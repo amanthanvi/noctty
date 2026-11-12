@@ -15,7 +15,7 @@ const powershell = @import("../apprt/win32_powershell_install.zig");
 const integration_sha256_hex = std.fmt.bytesToHex(powershell.integration_script_sha256, .lower);
 
 pub const Options = struct {
-    /// Directory to create. Defaults to `noctty-diagnostic-bundle`.
+    /// Directory to create. Defaults to `koreterm-diagnostic-bundle`.
     output: ?[:0]const u8 = null,
 
     /// Copy local crash dumps into the bundle. Disabled by default because
@@ -33,7 +33,7 @@ pub const Options = struct {
 };
 
 const Manifest = struct {
-    schema: []const u8 = "noctty.diagnostics.v1",
+    schema: []const u8 = "koreterm.diagnostics.v1",
     schema_version: u8 = 1,
     application: []const u8 = build_config.app_name,
     version: []const u8 = build_config.version_string,
@@ -208,7 +208,7 @@ pub fn run(alloc: Allocator) !u8 {
 
 fn create(alloc: Allocator, opts: Options, stdout: *std.Io.Writer) !u8 {
     const generated_output = if (opts.output == null)
-        try std.fmt.allocPrint(alloc, "noctty-diagnostic-bundle-{d}", .{@max(std.time.milliTimestamp(), 0)})
+        try std.fmt.allocPrint(alloc, "koreterm-diagnostic-bundle-{d}", .{@max(std.time.milliTimestamp(), 0)})
     else
         null;
     defer if (generated_output) |path| alloc.free(path);
@@ -416,7 +416,7 @@ test "diagnostic manifest defaults exclude sensitive data" {
         .crash_report_count = 0,
         .crash_dumps_included = false,
     };
-    try std.testing.expectEqualStrings("noctty.diagnostics.v1", manifest.schema);
+    try std.testing.expectEqualStrings("koreterm.diagnostics.v1", manifest.schema);
     try std.testing.expect(!manifest.crash_dumps_included);
     try std.testing.expect(!manifest.privacy.terminal_content);
     try std.testing.expect(!manifest.privacy.commands);
@@ -430,7 +430,7 @@ test "diagnostic manifest defaults exclude sensitive data" {
     var serialized_manifest = manifest;
     serialized_manifest.conpty = .{
         .source = .bundled,
-        .dll_path = "C:\\Users\\example-user\\noctty\\conpty.dll",
+        .dll_path = "C:\\Users\\example-user\\koreterm\\conpty.dll",
     };
     try std.json.Stringify.value(serialized_manifest, .{}, &writer);
     const json = writer.buffered();

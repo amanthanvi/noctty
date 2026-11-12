@@ -29,7 +29,7 @@ if ($ResetState) { $forwardedArgs += '-ResetState' }
 Invoke-InteractiveWin11HarnessMain `
     -RepoRoot $repoRoot `
     -LauncherPath $launcherPath `
-    -EnvironmentVariable 'NOCTTY_INTERACTIVE_WIN11_IME_CANDIDATE_BOOTSTRAPPED' `
+    -EnvironmentVariable 'KORETERM_INTERACTIVE_WIN11_IME_CANDIDATE_BOOTSTRAPPED' `
     -ArgumentList $forwardedArgs
 
 Add-Type @'
@@ -56,8 +56,8 @@ $SW_RESTORE = 9
 $WM_MOUSEMOVE = 0x0200
 $WM_IME_STARTCOMPOSITION = 0x010D
 $WM_IME_ENDCOMPOSITION = 0x010E
-$surfaceClassName = 'noctty.win32'
-$hostClassName = 'noctty.win32.host'
+$surfaceClassName = 'koreterm.win32'
+$hostClassName = 'koreterm.win32.host'
 $poisonX = 7
 $poisonY = 11
 
@@ -277,7 +277,7 @@ $payloadPath = Join-Path $layout.Temp 'interactive-win11-ime-candidate-payload.p
 $readyPath = Join-Path $layout.Temp 'interactive-win11-ime-candidate-ready.txt'
 $tracePath = Join-Path $layout.Temp 'interactive-win11-ime-candidate-trace.json'
 $resultPath = Join-Path $layout.Temp 'interactive-win11-ime-candidate-result.json'
-$instanceClass = "noctty-ime-candidate-$($layout.SandboxId)"
+$instanceClass = "koreterm-ime-candidate-$($layout.SandboxId)"
 
 if ($launchAction -eq 'build') {
     Invoke-InteractiveWin11Build -RepoRoot $repoRoot
@@ -321,8 +321,8 @@ $launchArgs = @(
     $payloadPath
 )
 
-$previousImeTraceFile = $env:NOCTTY_WIN32_IME_FORM_TRACE_FILE
-$env:NOCTTY_WIN32_IME_FORM_TRACE_FILE = $tracePath
+$previousImeTraceFile = $env:KORETERM_WIN32_IME_FORM_TRACE_FILE
+$env:KORETERM_WIN32_IME_FORM_TRACE_FILE = $tracePath
 
 $process = Start-Process `
     -FilePath $exePath `
@@ -467,10 +467,10 @@ finally {
 
     Stop-InteractiveWin11Process -Process $process -Contained
     if ($null -eq $previousImeTraceFile) {
-        Remove-Item Env:NOCTTY_WIN32_IME_FORM_TRACE_FILE -ErrorAction SilentlyContinue
+        Remove-Item Env:KORETERM_WIN32_IME_FORM_TRACE_FILE -ErrorAction SilentlyContinue
     }
     else {
-        $env:NOCTTY_WIN32_IME_FORM_TRACE_FILE = $previousImeTraceFile
+        $env:KORETERM_WIN32_IME_FORM_TRACE_FILE = $previousImeTraceFile
     }
 }
 

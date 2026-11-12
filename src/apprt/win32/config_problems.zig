@@ -159,12 +159,12 @@ pub const Problems = struct {
         if (listed < self.entries.items.len) {
             const closing = std.fmt.bufPrint(
                 &line_buf,
-                "...and {d} more. Run noctty +validate-config for the full list.\n",
+                "...and {d} more. Run koreterm +validate-config for the full list.\n",
                 .{self.entries.items.len - listed},
             ) catch unreachable;
             appendWhole(buf, &len, closing);
         } else if (any_cut) {
-            appendWhole(buf, &len, "Run noctty +validate-config for the full text.\n");
+            appendWhole(buf, &len, "Run koreterm +validate-config for the full text.\n");
         }
         return buf[0..len];
     }
@@ -311,7 +311,7 @@ test "config problems: a long path loses its tail, not the problem" {
     try std.testing.expect(std.mem.indexOf(u8, list, "1. font-szie: unknown field (C:\\deep\\") != null);
     try std.testing.expect(std.mem.indexOf(u8, list, ellipsis ++ "\n") != null);
     // A cut entry says where the whole text is.
-    try std.testing.expect(std.mem.endsWith(u8, list, "Run noctty +validate-config for the full text.\n"));
+    try std.testing.expect(std.mem.endsWith(u8, list, "Run koreterm +validate-config for the full text.\n"));
 }
 
 test "config problems: a font family is listed once however often it is reported" {

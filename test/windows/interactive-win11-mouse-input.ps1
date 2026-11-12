@@ -13,7 +13,7 @@ try {
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
-if (-not $ExePath) { $ExePath = Join-Path $repoRoot 'zig-out\bin\noctty.exe' }
+if (-not $ExePath) { $ExePath = Join-Path $repoRoot 'zig-out\bin\koreterm.exe' }
 if (-not $RunRoot) { $RunRoot = Join-Path $repoRoot ('.zig-cache\pkg26\mouse-' + [guid]::NewGuid().ToString('N')) }
 . (Join-Path $PSScriptRoot 'interactive-win11-hidden-desktop-lib.ps1')
 
@@ -35,18 +35,18 @@ public static class MouseInputNative {
 if (-not $Worker) {
     $ExePath = (Resolve-Path -LiteralPath $ExePath).Path
     if (Test-Path -LiteralPath $RunRoot) { throw 'RunRoot must be fresh.' }
-    $realStartup = Join-Path $env:LOCALAPPDATA 'noctty\startup-attempts.json'
+    $realStartup = Join-Path $env:LOCALAPPDATA 'koreterm\startup-attempts.json'
     $before = Get-Fingerprint $realStartup
     [void](New-Item -ItemType Directory -Path $RunRoot)
     $RunRoot = (Resolve-Path -LiteralPath $RunRoot).Path
-    Copy-Item -LiteralPath $ExePath -Destination (Join-Path $RunRoot 'noctty.exe')
+    Copy-Item -LiteralPath $ExePath -Destination (Join-Path $RunRoot 'koreterm.exe')
     $bin = Split-Path -Parent $ExePath
-    foreach ($name in @('conpty.dll', 'OpenConsole.exe', 'noctty.ico')) {
+    foreach ($name in @('conpty.dll', 'OpenConsole.exe', 'koreterm.ico')) {
         $source = Join-Path $bin $name
         if (Test-Path -LiteralPath $source) { Copy-Item -LiteralPath $source -Destination $RunRoot }
     }
     Copy-Item -LiteralPath (Join-Path (Split-Path -Parent $bin) 'share') -Destination (Join-Path $RunRoot 'share') -Recurse
-    [IO.File]::WriteAllText((Join-Path $RunRoot 'noctty.portable'), '')
+    [IO.File]::WriteAllText((Join-Path $RunRoot 'koreterm.portable'), '')
     $fixtureSource = @'
 using System;
 using System.IO;
@@ -115,7 +115,7 @@ $env:LOCALAPPDATA = Join-Path $RunRoot 'local'
 $env:APPDATA = Join-Path $RunRoot 'roaming'
 $env:GHOSTTY_RESOURCES_DIR = Join-Path $RunRoot 'share\ghostty'
 $marker = Join-Path $RunRoot 'reports'
-$exe = Join-Path $RunRoot 'noctty.exe'
+$exe = Join-Path $RunRoot 'koreterm.exe'
 $app = $null
 $result = [ordered]@{ status = 'FAIL'; action = $RightClickAction; error = $null; observations = @() }
 function Wait-File([string] $Path) {

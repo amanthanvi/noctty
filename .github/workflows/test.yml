@@ -112,7 +112,7 @@ jobs:
       - name: Cmd and Clink integration tests (portable)
         shell: pwsh
         run: |
-          $clinkRoot = Join-Path $env:RUNNER_TEMP 'noctty-clink'
+          $clinkRoot = Join-Path $env:RUNNER_TEMP 'koreterm-clink'
           New-Item -ItemType Directory -Path $clinkRoot | Out-Null
           $archive = Join-Path $clinkRoot 'clink.zip'
           Invoke-WebRequest 'https://github.com/chrisant996/clink/releases/download/v1.9.34/clink.1.9.34.4e8ae4.zip' -OutFile $archive
@@ -368,10 +368,10 @@ jobs:
       - name: Verify default source-build shader mode
         shell: pwsh
         run: |
-          $versionText = & .\zig-out\bin\noctty.com +version | Out-String
+          $versionText = & .\zig-out\bin\koreterm.com +version | Out-String
           Write-Host $versionText
           if ($LASTEXITCODE -ne 0) {
-            throw "noctty.com +version failed with exit code $LASTEXITCODE."
+            throw "koreterm.com +version failed with exit code $LASTEXITCODE."
           }
           if ($versionText -notmatch "Build Config" -or
               $versionText -notmatch "custom shaders: disabled") {
@@ -429,7 +429,7 @@ jobs:
         timeout-minutes: 10
         # Hosted runners need not have an OpenGL 4.3 driver. Local hardware
         # parity uses the same harness without -WarpOnly.
-        run: ./test/windows/renderer/Invoke-RendererParity.ps1 -Binary ./renderer-smoke/bin/noctty.exe -OutputDirectory ./renderer-smoke/evidence -WarpOnly
+        run: ./test/windows/renderer/Invoke-RendererParity.ps1 -Binary ./renderer-smoke/bin/koreterm.exe -OutputDirectory ./renderer-smoke/evidence -WarpOnly
 
       - name: Upload x64 renderer evidence
         if: always()
@@ -546,9 +546,9 @@ jobs:
       - name: Run opt-in ConPTY transport and key input probes
         timeout-minutes: 15
         env:
-          NOCTTY_RUN_CONPTY_TRANSPORT_TEST: '1'
-          NOCTTY_CONPTY_TRANSPORT_PROBE: '1'
-          NOCTTY_CONPTY_KEY_INPUT_PROBE: '1'
+          KORETERM_RUN_CONPTY_TRANSPORT_TEST: '1'
+          KORETERM_CONPTY_TRANSPORT_PROBE: '1'
+          KORETERM_CONPTY_KEY_INPUT_PROBE: '1'
         run: zig build test -Demit-test-exe=true -Dcustom-shaders=true -Dtest-filter=ConPTY --summary all
 
   windows-portable-smoke:
@@ -594,7 +594,7 @@ jobs:
           retention-days: 14
           path: |
             test/windows/flagship/artifacts/portable-x64
-            dist/artifacts/noctty-0.0.1-windows-x64
+            dist/artifacts/koreterm-0.0.1-windows-x64
 
   # Report only, nightly and on demand: the same four workloads and the palette
   # benchmark as the `bench` gate, without floors, with the medians written to
@@ -679,7 +679,7 @@ jobs:
     # Dispatch Test with run_interactive_win11=true and arm the runner to
     # produce release evidence.
     if: github.event_name == 'workflow_dispatch' && inputs.run_interactive_win11
-    runs-on: [self-hosted, Windows, X64, noctty-interactive]
+    runs-on: [self-hosted, Windows, X64, koreterm-interactive]
     timeout-minutes: 60
 
     steps:
@@ -699,8 +699,8 @@ jobs:
       - name: Prove interactive runner provenance
         shell: pwsh
         env:
-          NOCTTY_EXPECTED_CHECKOUT_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
-        run: ./test/windows/assert-interactive-runner.ps1 -OutputPath "$env:RUNNER_TEMP/noctty-runner-provenance.json"
+          KORETERM_EXPECTED_CHECKOUT_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+        run: ./test/windows/assert-interactive-runner.ps1 -OutputPath "$env:RUNNER_TEMP/koreterm-runner-provenance.json"
 
       - name: Run interactive Win11 composite
         shell: pwsh
@@ -722,4 +722,4 @@ jobs:
           path: |
             test/windows/flagship/artifacts/interactive-win11
             ${{ github.workspace }}/.sandbox/win11/**/logs/**
-            ${{ runner.temp }}/noctty-runner-provenance.json
+            ${{ runner.temp }}/koreterm-runner-provenance.json

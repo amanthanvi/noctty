@@ -70,14 +70,14 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 $portablePayloads = @(Get-WindowsSignedRuntimePayloads) + @(
-    'noctty/conpty.dll',
-    'noctty/OpenConsole.exe'
+    'koreterm/conpty.dll',
+    'koreterm/OpenConsole.exe'
 )
 $architectures = @(Get-WindowsPackageArchitectures)
 $expectedScanCount = $architectures.Count * (1 + $portablePayloads.Count)
 $scanPaths = @(
     foreach ($architecture in $architectures) {
-        $artifactDirectory = Join-Path $ArtifactRoot "noctty-$Version-windows-$architecture"
+        $artifactDirectory = Join-Path $ArtifactRoot "koreterm-$Version-windows-$architecture"
         $setupName = New-WindowsPackageArtifactName `
             -Version $Version `
             -Architecture $architecture `
@@ -88,7 +88,7 @@ $scanPaths = @(
         }
         $setupPath
 
-        $extractDirectory = Join-Path $ExtractionRoot "noctty-release-verify-$architecture"
+        $extractDirectory = Join-Path $ExtractionRoot "koreterm-release-verify-$architecture"
         foreach ($relativePath in $portablePayloads) {
             $payloadPath = Join-Path $extractDirectory $relativePath
             if (-not (Test-Path -LiteralPath $payloadPath -PathType Leaf)) {

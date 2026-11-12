@@ -1,5 +1,5 @@
 {
-  "schema_version": "noctty.verification.baseline-manifest.v1",
+  "schema_version": "koreterm.verification.baseline-manifest.v1",
   "captured_at": "2026-07-11T00:00:00Z",
   "git_commit": "77c5354f60000000000000000000000000000000",
   "platform": {
@@ -9,9 +9,9 @@
   },
   "artifacts": [
     {
-      "id": "noctty-exe",
+      "id": "koreterm-exe",
       "kind": "executable",
-      "path": "bin/noctty.exe",
+      "path": "bin/koreterm.exe",
       "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
       "scenario_id": null
     }

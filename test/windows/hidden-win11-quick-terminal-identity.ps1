@@ -72,7 +72,7 @@ public static class Qt {
 if (-not $Driver) {
     Invoke-LocalHiddenDriver -Script $PSCommandPath -Bin $Bin -Run $Run -TimeoutSeconds $DriverTimeoutSeconds `
         -ExpectedStartupHash $ExpectedStartupHash -ExpectedStartupModified $ExpectedStartupModified `
-        -DesktopPrefix 'noctty-qt-' -Label 'Hidden quick terminal identity' -PassDesktopName
+        -DesktopPrefix 'koreterm-qt-' -Label 'Hidden quick terminal identity' -PassDesktopName
     exit
 }
 
@@ -97,7 +97,7 @@ function Launch-Case([string]$Name,[string]$Extra='') {
     @('command = cmd.exe /d /k','shell-integration = none','single-instance = false','window-save-state = never','confirm-close-surface = false',
       'keybind = f10=toggle_quick_terminal','keybind = f9=new_split:right','keybind = f8=close_surface','keybind = f7=close_tab:this','keybind = f6=toggle_visibility','keybind = f5=new_window',
       'quick-terminal-screen = main','quick-terminal-autohide = false','quick-terminal-animation-duration = 0','quick-terminal-size = 25%', $Extra) | Set-Content -LiteralPath $config
-    $exe=Join-Path $dir 'noctty.exe'
+    $exe=Join-Path $dir 'koreterm.exe'
     # An explicit lpDesktop: a child that a private-desktop driver starts with a null desktop can
     # land on the interactive desktop. The Process object holds its own handle before the launch
     # handles close, so it stays this launch's process.

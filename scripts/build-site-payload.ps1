@@ -58,7 +58,7 @@ $allowlist = [string[]] @(
     'assets/fonts/OFL-JetBrainsMono.txt'
     'assets/fonts/geist.woff2'
     'assets/fonts/jetbrains-mono.woff2'
-    'assets/noctty-social.jpg'
+    'assets/koreterm-social.jpg'
     'assets/shot-palette-dark.webp'
     'assets/shot-palette-light.webp'
     'assets/shot-restored-dark.webp'
@@ -70,7 +70,7 @@ $allowlist = [string[]] @(
     'styles.css'
     'terminal.js'
     'version.js'
-    'why-noctty.html'
+    'why-koreterm.html'
 )
 [Array]::Sort($allowlist, [StringComparer]::Ordinal)
 

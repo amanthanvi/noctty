@@ -104,7 +104,7 @@ swap_interval_supported: bool = false,
 default_framebuffer: gl.Framebuffer,
 default_framebuffer_srgb: bool,
 
-/// noctty divergence (#640): the window composes this renderer's alpha
+/// koreterm divergence (#640): the window composes this renderer's alpha
 /// (Win32 blur-behind), so the frame must reach it as sRGB-premultiplied
 /// pixels. With linear blending the target holds linear premultiplied color
 /// that the framebuffer sRGB-encodes, `srgb(c * a)`, which DWM would show too
@@ -299,7 +299,7 @@ fn prepareContext(getProcAddress: anytype) !void {
     if (comptime build_config.renderer_test_tools) {
         // A real context and pixel format exist by now, as on a machine whose
         // only OpenGL is GDI Generic 1.1; only the version is made up.
-        if (std.process.hasEnvVarConstant("NOCTTY_RENDERER_FAIL_OPENGL_VERSION")) {
+        if (std.process.hasEnvVarConstant("KORETERM_RENDERER_FAIL_OPENGL_VERSION")) {
             major = 1;
             minor = 1;
         }
@@ -311,7 +311,7 @@ fn prepareContext(getProcAddress: anytype) !void {
         (major == MIN_VERSION_MAJOR and minor < MIN_VERSION_MINOR))
     {
         log.warn(
-            "OpenGL version is too old. noctty requires OpenGL {d}.{d}",
+            "OpenGL version is too old. koreterm requires OpenGL {d}.{d}",
             .{ MIN_VERSION_MAJOR, MIN_VERSION_MINOR },
         );
         // Queried only on this below-floor branch; a successful start does
@@ -771,11 +771,11 @@ pub fn capture(self: *OpenGL, hdc: *anyopaque) !void {
     log.info("renderer readback storage={s} framebuffer={d} first_pixel={d},{d},{d},{d}", .{
         @tagName(target.storage), target.framebuffer.id, pixels[0], pixels[1], pixels[2], pixels[3],
     });
-    if (noctty_renderer_blit(hdc, pixels.ptr, @intCast(target.width), @intCast(target.height), 1) == 0)
+    if (koreterm_renderer_blit(hdc, pixels.ptr, @intCast(target.width), @intCast(target.height), 1) == 0)
         return error.CaptureBlitFailed;
 }
 
-extern fn noctty_renderer_blit(*anyopaque, [*]u8, u32, u32, c_int) c_int;
+extern fn koreterm_renderer_blit(*anyopaque, [*]u8, u32, u32, c_int) c_int;
 
 /// Returns the options to use when constructing buffers.
 pub inline fn bufferOptions(self: OpenGL) bufferpkg.Options {

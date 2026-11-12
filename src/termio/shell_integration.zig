@@ -590,7 +590,7 @@ test detectShell {
     try testing.expectEqual(.bash, try detectShell(alloc, .{ .shell = "\"/a b/bash\"" }));
 }
 
-const expected_powershell_bootstrap_suffix = "'; try { if ($ExecutionContext.SessionState.LanguageMode -ne 'FullLanguage') { Microsoft.PowerShell.Utility\\Write-Warning 'noctty PowerShell integration skipped: unsupported language mode.' -WarningAction Continue } else { $__ghostty_load_error_head = $null; if ($Error.Count) { $__ghostty_load_error_head = $Error[0] }; Microsoft.PowerShell.Core\\Import-Module ([Reflection.Assembly]::Load('Microsoft.PowerShell.Security').Location) -ErrorAction Stop; if ((Microsoft.PowerShell.Security\\Get-ExecutionPolicy -ErrorAction Stop) -eq 'AllSigned') { . $__ghostty_integration_path } else { . ([scriptblock]::Create([IO.File]::ReadAllText($__ghostty_integration_path))) } } } catch { while ($Error.Count -gt 0 -and -not [object]::ReferenceEquals($Error[0], $__ghostty_load_error_head)) { $Error.RemoveAt(0) }; Microsoft.PowerShell.Utility\\Write-Warning 'noctty PowerShell integration could not load (execution policy or script error).' -WarningAction Continue } }";
+const expected_powershell_bootstrap_suffix = "'; try { if ($ExecutionContext.SessionState.LanguageMode -ne 'FullLanguage') { Microsoft.PowerShell.Utility\\Write-Warning 'koreterm PowerShell integration skipped: unsupported language mode.' -WarningAction Continue } else { $__ghostty_load_error_head = $null; if ($Error.Count) { $__ghostty_load_error_head = $Error[0] }; Microsoft.PowerShell.Core\\Import-Module ([Reflection.Assembly]::Load('Microsoft.PowerShell.Security').Location) -ErrorAction Stop; if ((Microsoft.PowerShell.Security\\Get-ExecutionPolicy -ErrorAction Stop) -eq 'AllSigned') { . $__ghostty_integration_path } else { . ([scriptblock]::Create([IO.File]::ReadAllText($__ghostty_integration_path))) } } } catch { while ($Error.Count -gt 0 -and -not [object]::ReferenceEquals($Error[0], $__ghostty_load_error_head)) { $Error.RemoveAt(0) }; Microsoft.PowerShell.Utility\\Write-Warning 'koreterm PowerShell integration could not load (execution policy or script error).' -WarningAction Continue } }";
 
 test "setup powershell: interactive direct command auto injects" {
     if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
@@ -1110,7 +1110,7 @@ fn setupCmd(
 
     const script_path = try std.fs.path.join(alloc, &.{
         integration_dir,
-        "noctty-shell-integration.lua",
+        "koreterm-shell-integration.lua",
     });
     defer alloc.free(script_path);
 
@@ -1374,7 +1374,7 @@ fn cmdScreenAfterResizeForTest(
     stream.nextSlice(drawn.items);
     if (running_output.len > 0) {
         stream.nextSlice("ping -t x");
-        // noctty writes Enter; cmd has no C mark.
+        // koreterm writes Enter; cmd has no C mark.
         t.screens.active.semanticPromptInputSubmitted();
         stream.nextSlice(running_output);
     }
@@ -1386,7 +1386,7 @@ fn cmdScreenAfterResizeForTest(
 // The prompt the Windows Terminal shell-integration docs tell cmd users to
 // `setx`. Its `$e` is lowercase, so `buildCmdPrompt` does not recognise the
 // marks as the user's own and wraps it, and each prompt then carries
-// noctty's A;redraw=0 followed by the docs' D and bare A.
+// koreterm's A;redraw=0 followed by the docs' D and bare A.
 const wt_docs_cmd_prompt = "$e]133;D$e\\$e]133;A$e\\$e]9;9;$P$e\\$P$G$e]133;B$e\\";
 
 test "cmd: the Windows Terminal docs' PROMPT survives a resize" {
@@ -1422,41 +1422,41 @@ test "cmd: the Windows Terminal docs' PROMPT keeps a running command's output th
 test "cmd Clink path composition prepends once and rejects semicolons" {
     const testing = std.testing;
 
-    const empty = try composeCmdClinkPath(testing.allocator, "", "C:\\noctty\\cmd");
+    const empty = try composeCmdClinkPath(testing.allocator, "", "C:\\koreterm\\cmd");
     defer testing.allocator.free(empty);
-    try testing.expectEqualStrings("C:\\noctty\\cmd", empty);
+    try testing.expectEqualStrings("C:\\koreterm\\cmd", empty);
 
     const existing = try composeCmdClinkPath(
         testing.allocator,
         "C:\\user\\clink;D:\\shared\\clink",
-        "C:\\noctty\\cmd",
+        "C:\\koreterm\\cmd",
     );
     defer testing.allocator.free(existing);
     try testing.expectEqualStrings(
-        "C:\\noctty\\cmd;C:\\user\\clink;D:\\shared\\clink",
+        "C:\\koreterm\\cmd;C:\\user\\clink;D:\\shared\\clink",
         existing,
     );
 
     const idempotent = try composeCmdClinkPath(
         testing.allocator,
         existing,
-        "C:\\noctty\\cmd",
+        "C:\\koreterm\\cmd",
     );
     defer testing.allocator.free(idempotent);
     try testing.expectEqualStrings(existing, idempotent);
 
     const repeated = try composeCmdClinkPath(
         testing.allocator,
-        "C:\\user\\clink;C:\\noctty\\cmd;D:\\shared\\clink",
-        "C:\\noctty\\cmd",
+        "C:\\user\\clink;C:\\koreterm\\cmd;D:\\shared\\clink",
+        "C:\\koreterm\\cmd",
     );
     defer testing.allocator.free(repeated);
     try testing.expectEqualStrings(
-        "C:\\noctty\\cmd;C:\\user\\clink;D:\\shared\\clink",
+        "C:\\koreterm\\cmd;C:\\user\\clink;D:\\shared\\clink",
         repeated,
     );
 
-    try testing.expect(cmdClinkIntegrationDirSafe("C:\\noctty\\cmd"));
+    try testing.expect(cmdClinkIntegrationDirSafe("C:\\koreterm\\cmd"));
     try testing.expect(!cmdClinkIntegrationDirSafe("C:\\unsafe;path\\cmd"));
 }
 
@@ -1472,7 +1472,7 @@ test "cmd Clink setup fails closed for semicolon integration path" {
     defer tmp_dir.cleanup();
     try tmp_dir.dir.makePath("resources;unsafe/shell-integration/cmd");
     try tmp_dir.dir.writeFile(.{
-        .sub_path = "resources;unsafe/shell-integration/cmd/noctty-shell-integration.lua",
+        .sub_path = "resources;unsafe/shell-integration/cmd/koreterm-shell-integration.lua",
         .data = "",
     });
 
@@ -1513,7 +1513,7 @@ test "PKG48 cmd exposes Clink script without an installed executable" {
     _ = (try setupCmd(alloc, .{ .direct = &.{"cmd.exe"} }, resources.path, &env)).?;
     try testing.expectEqualStrings(expected, env.get("CLINK_PATH").?);
 
-    try resources.tmp_dir.dir.deleteFile("shell-integration/cmd/noctty-shell-integration.lua");
+    try resources.tmp_dir.dir.deleteFile("shell-integration/cmd/koreterm-shell-integration.lua");
     try env.put("CLINK_PATH", "C:\\trusted\\scripts");
     _ = (try setupCmd(alloc, .{ .direct = &.{"cmd.exe"} }, resources.path, &env)).?;
     try testing.expectEqualStrings("C:\\trusted\\scripts", env.get("CLINK_PATH").?);
@@ -2532,7 +2532,7 @@ test "the shell-integration scripts have LF line endings in every checkout" {
     // bash rejects the CR. The PowerShell script is pinned by `*.ps1`.
     const scripts = .{
         .{ "bash/ghostty.bash", @embedFile("../shell-integration/bash/ghostty.bash") },
-        .{ "cmd/noctty-shell-integration.lua", @embedFile("../shell-integration/cmd/noctty-shell-integration.lua") },
+        .{ "cmd/koreterm-shell-integration.lua", @embedFile("../shell-integration/cmd/koreterm-shell-integration.lua") },
         .{ "elvish/lib/ghostty-integration.elv", @embedFile("../shell-integration/elvish/lib/ghostty-integration.elv") },
         .{ "fish/vendor_conf.d/ghostty-shell-integration.fish", @embedFile("../shell-integration/fish/vendor_conf.d/ghostty-shell-integration.fish") },
         .{ "nushell/vendor/autoload/ghostty.nu", @embedFile("../shell-integration/nushell/vendor/autoload/ghostty.nu") },
@@ -2586,7 +2586,7 @@ const TmpResourcesDir = struct {
                 .data = "",
             }),
             .cmd => try tmp_dir.dir.writeFile(.{
-                .sub_path = "shell-integration/cmd/noctty-shell-integration.lua",
+                .sub_path = "shell-integration/cmd/koreterm-shell-integration.lua",
                 .data = "",
             }),
             .nushell => {

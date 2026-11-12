@@ -30,7 +30,7 @@ function Assert-ExpectedFailure($Guard, [string] $Case) {
 function Get-ProtectedStatePaths {
     $roaming = [Environment]::GetFolderPath('ApplicationData')
     return @(
-        (Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'noctty/startup-attempts.json'),
+        (Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'koreterm/startup-attempts.json'),
         (Join-Path $roaming 'Microsoft/Windows/Recent/CustomDestinations/c2214d6ebc43ff3f.customDestinations-ms')
     )
 }

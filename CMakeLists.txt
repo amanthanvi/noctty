@@ -6,7 +6,7 @@
 # directly. However, downstream users do still require `zig` on the PATH.
 # See dist/cmake/README.md and the repo build docs for toolchain details.
 #
-# Building within the noctty repo
+# Building within the koreterm repo
 # ---------------------------------
 #
 #   cmake -B build
@@ -23,18 +23,18 @@
 # Option 1 — FetchContent (recommended, no manual install step):
 #
 #   include(FetchContent)
-#   FetchContent_Declare(noctty
+#   FetchContent_Declare(koreterm
 #       GIT_REPOSITORY https://github.com/amanthanvi/noctty.git
 #       GIT_TAG main
 #   )
-#   FetchContent_MakeAvailable(noctty)
+#   FetchContent_MakeAvailable(koreterm)
 #
 #   target_link_libraries(myapp PRIVATE ghostty-vt)        # shared
 #   target_link_libraries(myapp PRIVATE ghostty-vt-static) # static
 #
 # To use a local checkout instead of fetching:
 #
-#   cmake -B build -DFETCHCONTENT_SOURCE_DIR_NOCTTY=/path/to/noctty
+#   cmake -B build -DFETCHCONTENT_SOURCE_DIR_KORETERM=/path/to/koreterm
 #
 # Option 2 — find_package (after installing to a prefix):
 #

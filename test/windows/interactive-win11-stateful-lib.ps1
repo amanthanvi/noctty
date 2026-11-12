@@ -32,7 +32,7 @@ function Find-StatefulHost([int] $ProcessId) {
         param([IntPtr]$hwnd, [IntPtr]$data)
         $windowProcessId = [uint32]0
         [void][InteractiveWin11MessageNativeV2]::GetWindowThreadProcessId($hwnd, [ref]$windowProcessId)
-        if ($windowProcessId -eq $script:StatefulPid -and (Get-StatefulClassName $hwnd) -eq 'noctty.win32.host') {
+        if ($windowProcessId -eq $script:StatefulPid -and (Get-StatefulClassName $hwnd) -eq 'koreterm.win32.host') {
             $script:StatefulHost = $hwnd
             return $false
         }
@@ -64,7 +64,7 @@ function Get-StatefulTabCount([IntPtr] $HostHwnd) {
 }
 
 function Get-StatefulSurface([IntPtr] $HostHwnd) {
-    return Get-StatefulChildren $HostHwnd | Where-Object Class -eq 'noctty.win32' | Select-Object -First 1
+    return Get-StatefulChildren $HostHwnd | Where-Object Class -eq 'koreterm.win32' | Select-Object -First 1
 }
 
 function Get-StatefulWindowRect([IntPtr] $Hwnd) {
@@ -219,7 +219,7 @@ function ConvertTo-StatefulRectData($Rect) {
 }
 
 # What the screenshot decision needs, read from the screen at one moment: the
-# sampled rect, noctty's top-level window (its state, its client area inset by
+# sampled rect, koreterm's top-level window (its state, its client area inset by
 # the Windows 11 corner radius, whether it is see-through), the top-level
 # window under each sample point and the visible windows above it that overlap
 # the rect, of any process. -WithColors also reads the 16 sample colors.
@@ -271,9 +271,9 @@ function Get-StatefulScreenFacts([IntPtr] $Hwnd, [switch] $WithColors) {
             if ($null -ne $graphics) { $graphics.Dispose() }
             if ($null -ne $bitmap) { $bitmap.Dispose() }
         }
-        # GW_HWNDPREV walks up the z-order from noctty's top-level window: every
+        # GW_HWNDPREV walks up the z-order from koreterm's top-level window: every
         # visible window above it that overlaps the rect, of any process, with
-        # its DWM cloak state (the decision says which of them hide noctty).
+        # its DWM cloak state (the decision says which of them hide koreterm).
         $above = if ($root -eq [IntPtr]::Zero) { [IntPtr]::Zero } else { [StatefulPixelDiagnosticNative]::GetWindow($root, 3) }
         for ($guard = 0; $above -ne [IntPtr]::Zero -and $guard -lt 4096; $guard++) {
             $aboveRect = Get-StatefulWindowRect $above
@@ -301,12 +301,12 @@ function Get-StatefulScreenFacts([IntPtr] $Hwnd, [switch] $WithColors) {
     }
 }
 
-# Whether a screenshot of the sampled rect would show only noctty, from facts
+# Whether a screenshot of the sampled rect would show only koreterm, from facts
 # alone (Get-StatefulScreenFacts), so the contracts can table-test it. It is
-# taken only while noctty's top-level window is shown, uncloaked (DWM must say
+# taken only while koreterm's top-level window is shown, uncloaked (DWM must say
 # so), not minimized and opaque, every sample point lies on a window of
-# noctty's process, and no window of another process above noctty overlaps the
-# rect unless DWM says it is cloaked; the capture is clipped to noctty's inset
+# koreterm's process, and no window of another process above koreterm overlaps the
+# rect unless DWM says it is cloaked; the capture is clipped to koreterm's inset
 # client area (CaptureRect, set whenever both rects are known). Occluders lists
 # those other-process windows in every case.
 function Get-StatefulScreenshotDecision($Facts) {
@@ -323,16 +323,16 @@ function Get-StatefulScreenshotDecision($Facts) {
         if ($capture.Right -le $capture.Left -or $capture.Bottom -le $capture.Top) { $capture = $null }
     }
     $note = if ($null -eq $Facts.Rect) { 'not taken: the window rect could not be read' }
-    elseif ($null -eq $root) { "withheld: noctty's top-level window could not be found" }
-    elseif (-not $Facts.RootVisible -or -not $Facts.WindowVisible) { "withheld: noctty's window is hidden" }
-    elseif ($Facts.RootMinimized) { "withheld: noctty's window is minimized" }
-    elseif ($Facts.RootCloaked -lt 0) { "withheld: DWM could not say whether noctty's window is cloaked" }
-    elseif ($Facts.RootCloaked -ne 0) { "withheld: noctty's window is cloaked ($($Facts.RootCloaked))" }
-    elseif (-not $Facts.RootOpaque) { "withheld: noctty's window is see-through (layered)" }
+    elseif ($null -eq $root) { "withheld: koreterm's top-level window could not be found" }
+    elseif (-not $Facts.RootVisible -or -not $Facts.WindowVisible) { "withheld: koreterm's window is hidden" }
+    elseif ($Facts.RootMinimized) { "withheld: koreterm's window is minimized" }
+    elseif ($Facts.RootCloaked -lt 0) { "withheld: DWM could not say whether koreterm's window is cloaked" }
+    elseif ($Facts.RootCloaked -ne 0) { "withheld: koreterm's window is cloaked ($($Facts.RootCloaked))" }
+    elseif (-not $Facts.RootOpaque) { "withheld: koreterm's window is see-through (layered)" }
     elseif ($foreign -ne 0) { "withheld: $foreign sample point(s) lie on windows of other processes" }
     elseif ($occluders.Count -ne 0) { "withheld: $($occluders.Count) window(s) of other processes overlap the sampled rect" }
-    elseif ($null -eq $bounds) { "withheld: noctty's client area could not be read" }
-    elseif ($null -eq $capture) { "withheld: the sampled rect lies outside noctty's client area" }
+    elseif ($null -eq $bounds) { "withheld: koreterm's client area could not be read" }
+    elseif ($null -eq $capture) { "withheld: the sampled rect lies outside koreterm's client area" }
     else { $null }
     return [pscustomobject]@{ Capture = $null -eq $note; CaptureRect = $capture; Note = $note; Occluders = $occluders }
 }
@@ -353,7 +353,7 @@ function Read-StatefulScreenArea($Area) {
 # Every screenshot a harness saves goes through here, because the interactive
 # job uploads the sandbox logs to the artifacts of a public repository
 # (EVIDENCE-SCREENSHOT-PRIVACY-01). It reads the screen over the decision's
-# CaptureRect (the window's rect clipped to noctty's inset client area) and
+# CaptureRect (the window's rect clipped to koreterm's inset client area) and
 # saves that to $Path only while Get-StatefulScreenshotDecision allows it, both
 # before the read and right after it. Without -PassThru the screen is read only
 # when it may be saved; with it the screen is read anyway and the bitmap is
@@ -388,9 +388,9 @@ function Save-StatefulScreenCapture([IntPtr] $Hwnd, [string] $Path, [switch] $Pa
 
 # Records what was on screen where a screen-pixel assertion looked: the window
 # under each sample point and its color, the foreground window, whether
-# noctty's window was hung, cloaked, minimized, hidden or see-through, which
+# koreterm's window was hung, cloaked, minimized, hidden or see-through, which
 # other processes' windows lay above it, and a screenshot of the sampled rect
-# when Get-StatefulScreenshotDecision says it shows only noctty, before the
+# when Get-StatefulScreenshotDecision says it shows only koreterm, before the
 # capture and right after it (Save-StatefulScreenCapture). The 16 colors are
 # recorded either way.
 function Save-StatefulPixelDiagnostic([IntPtr] $Hwnd, [string] $Description, [string] $Directory = $script:StatefulDiagnosticDirectory) {
@@ -451,7 +451,7 @@ function Start-StatefulApp($Layout, [string] $Exe, [string] $RepoRoot, [string] 
 
 function Wait-StatefulHost($Run, [DateTime] $Deadline) {
     $script:StatefulWaitProcess = $Run.Process
-    Wait-InteractiveWin11Until -Deadline $Deadline -Description 'noctty host window' -Process $Run.Process -Condition {
+    Wait-InteractiveWin11Until -Deadline $Deadline -Description 'koreterm host window' -Process $Run.Process -Condition {
         [IntPtr]::Zero -ne (Find-StatefulHost $script:StatefulWaitProcess.Id)
     }
     return Find-StatefulHost $Run.Process.Id
@@ -505,7 +505,7 @@ function Close-StatefulHost([IntPtr] $HostHwnd, $Run, [DateTime] $Deadline) {
             -Hwnd $HostHwnd `
             -Message 0x0010 `
             -Deadline $Deadline `
-            -Description 'WM_CLOSE to noctty' `
+            -Description 'WM_CLOSE to koreterm' `
             -Flags $script:InteractiveWin11SmtoBlock `
             -ToleratedErrors @($script:InteractiveWin11ErrorInvalidWindowHandle) `
             -ObservedToleratedError $toleratedCloseError `
@@ -520,10 +520,10 @@ function Close-StatefulHost([IntPtr] $HostHwnd, $Run, [DateTime] $Deadline) {
         if (-not $Run.Process.HasExited) {
             throw $sendError
         }
-        Write-Warning "WM_CLOSE send raced noctty exit: $sendError"
+        Write-Warning "WM_CLOSE send raced koreterm exit: $sendError"
     }
     try {
-        Wait-InteractiveWin11Until -Deadline $Deadline -Description 'noctty graceful exit' -Condition { $Run.Process.Refresh(); $Run.Process.HasExited }
+        Wait-InteractiveWin11Until -Deadline $Deadline -Description 'koreterm graceful exit' -Condition { $Run.Process.Refresh(); $Run.Process.HasExited }
     }
     catch {
         if ($null -ne $closeSkipDetail) { throw "$($_.Exception.Message) ($closeSkipDetail)" }
@@ -532,6 +532,6 @@ function Close-StatefulHost([IntPtr] $HostHwnd, $Run, [DateTime] $Deadline) {
     $exitCode = Get-InteractiveWin11ProcessExitCode -Process $Run.Process -ProcessHandle $processHandle
     if ($exitCode -ne 0) {
         $suffix = if ($null -ne $closeSkipDetail) { " ($closeSkipDetail)" } else { '' }
-        throw "noctty exited with code $exitCode during graceful-close validation$suffix"
+        throw "koreterm exited with code $exitCode during graceful-close validation$suffix"
     }
 }

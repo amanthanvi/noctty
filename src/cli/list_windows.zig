@@ -12,7 +12,7 @@ pub const Options = struct {
     _arena: ?ArenaAllocator = null,
 
     /// If set, query a custom single-instance namespace instead of the
-    /// default local noctty instance.
+    /// default local koreterm instance.
     class: ?[:0]const u8 = null,
 
     /// How long to wait for the running instance to respond.
@@ -34,7 +34,7 @@ pub const Options = struct {
 };
 
 /// The `list-windows` command prints a read-only automation snapshot for the
-/// matching local noctty instance as JSON.
+/// matching local koreterm instance as JSON.
 ///
 /// The current schema exposes instance metadata, stable host/tab/pane
 /// identifiers, titles, last-known working directories, focus state,
@@ -44,7 +44,7 @@ pub const Options = struct {
 /// Flags:
 ///
 ///   * `--class=<class>`: Query a custom instance namespace instead of the
-///     default local noctty instance.
+///     default local koreterm instance.
 ///
 ///   * `--timeout=<ms>`: Response timeout in milliseconds, from 0 through
 ///     10000. The default is 10000.
@@ -122,7 +122,7 @@ fn runArgsWithQuery(
     defer if (payload) |bytes| alloc.free(bytes);
 
     const json = payload orelse {
-        try stderr.print("No matching noctty instance is listening for automation queries.\n", .{});
+        try stderr.print("No matching koreterm instance is listening for automation queries.\n", .{});
         return 2;
     };
 
@@ -151,7 +151,7 @@ test "automation-window-list cli prints json payload" {
                 .class => |class| try testing.allocator.dupe(u8, class),
                 .detect => return error.UnexpectedTarget,
             };
-            return try alloc.dupe(u8, "{\"schema\":\"noctty.windows.v3\",\"api_version\":3,\"instance\":{\"pid\":1,\"version\":\"test\",\"class\":\"lane9\"},\"windows\":[]}");
+            return try alloc.dupe(u8, "{\"schema\":\"koreterm.windows.v3\",\"api_version\":3,\"instance\":{\"pid\":1,\"version\":\"test\",\"class\":\"lane9\"},\"windows\":[]}");
         }
     };
     defer if (Hook.seen_class) |value| testing.allocator.free(value);
@@ -178,7 +178,7 @@ test "automation-window-list cli prints json payload" {
 
     try testing.expectEqual(@as(u8, 0), exit_code);
     try testing.expectEqualStrings(
-        "{\"schema\":\"noctty.windows.v3\",\"api_version\":3,\"instance\":{\"pid\":1,\"version\":\"test\",\"class\":\"lane9\"},\"windows\":[]}\n",
+        "{\"schema\":\"koreterm.windows.v3\",\"api_version\":3,\"instance\":{\"pid\":1,\"version\":\"test\",\"class\":\"lane9\"},\"windows\":[]}\n",
         stdout_buf.written(),
     );
     try testing.expectEqualStrings("", stderr_buf.written());
@@ -288,7 +288,7 @@ test "automation-window-list cli reports missing instance" {
     try testing.expectEqual(@as(u8, 2), exit_code);
     try testing.expectEqualStrings("", stdout_buf.written());
     try testing.expectEqualStrings(
-        "No matching noctty instance is listening for automation queries.\n",
+        "No matching koreterm instance is listening for automation queries.\n",
         stderr_buf.written(),
     );
 }

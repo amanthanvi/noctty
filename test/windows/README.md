@@ -96,7 +96,7 @@ pwsh -NoProfile -File .\interactive-win11-shell-command.ps1 -ResetState
 
 ## interactive-win11-shell-command-live.ps1
 
-Types a Noctty CLI action into a live terminal and validates focus, screen
+Types a Koreterm CLI action into a live terminal and validates focus, screen
 capture, and command output.
 
 ```powershell
@@ -119,11 +119,11 @@ sampling, process launch, and cleanup. It is not a standalone harness.
 
 ## cli-shell-command.ps1
 
-Runs a Noctty CLI action through `cmd.exe` or PowerShell and verifies its
+Runs a Koreterm CLI action through `cmd.exe` or PowerShell and verifies its
 exit code plus expected redirected text.
 
 ```powershell
-pwsh -NoProfile -File .\cli-shell-command.ps1 -Shell cmd -Arguments +help -ExpectedText 'Usage: noctty'
+pwsh -NoProfile -File .\cli-shell-command.ps1 -Shell cmd -Arguments +help -ExpectedText 'Usage: koreterm'
 ```
 
 ## cli-redirected-text-action.ps1
@@ -132,7 +132,7 @@ Runs a GUI-subsystem CLI action with redirected stdout/stderr and verifies
 clean, bounded text-mode completion. Wired into `package-portable-cli.ps1`.
 
 ```powershell
-pwsh -NoProfile -File .\cli-redirected-text-action.ps1 -Action +help -ExpectedText 'Usage: noctty'
+pwsh -NoProfile -File .\cli-redirected-text-action.ps1 -Action +help -ExpectedText 'Usage: koreterm'
 ```
 
 ## cli-detached-action.ps1
@@ -179,9 +179,9 @@ pwsh -NoProfile -File .\powershell-shell-integration.ps1
 ```
 
 Most of the script dot-sources `integration.ps1` at its own scope. The final
-section instead spawns a child running noctty's real injected argv
+section instead spawns a child running koreterm's real injected argv
 (`-NoExit -Command "& { $__ghostty_utf8_console = $false; . <path> }"`) with a
-`NOCTTYPROBE> ` prompt pre-installed, because the `& { }` child scope is where
+`KORETERMPROBE> ` prompt pre-installed, because the `& { }` child scope is where
 scope-loss regressions like #231 show up and an in-scope dot-source cannot see
 them. Worth running under `powershell.exe` (5.1) as well as `pwsh` (7):
 
@@ -203,12 +203,12 @@ powershell.exe -ExecutionPolicy Bypass -File .\interactive-win11-validate.ps1 -R
 
 Pass `-Rebuild` to force one upfront `zig build -Demit-exe=true` before
 the suite starts. The suite also does that upfront build automatically
-when tracked inputs are newer than `zig-out\bin\noctty.exe`, so child
+when tracked inputs are newer than `zig-out\bin\koreterm.exe`, so child
 harnesses reuse one fresh binary instead of rebuilding in parallel.
 
 ## interactive-win11-smoke.ps1
 
-Interactive Win11 startup smoke validation. It launches `noctty`
+Interactive Win11 startup smoke validation. It launches `koreterm`
 inside the repo-local Win11 sandbox and waits for shell startup to be
 observed in stderr.
 
@@ -221,7 +221,7 @@ powershell.exe -ExecutionPolicy Bypass -File .\interactive-win11-smoke.ps1 -Rese
 ## interactive-win11-command-finish.ps1
 
 Interactive Win11 validation for command-finished notifications. It launches
-`noctty` inside the repo-local Win11 sandbox, emits raw OSC `133;C`,
+`koreterm` inside the repo-local Win11 sandbox, emits raw OSC `133;C`,
 OSC `9;4`, and OSC `133;D;17`, and then validates that the
 command-finished path fired.
 
@@ -240,7 +240,7 @@ powershell.exe -ExecutionPolicy Bypass -File .\interactive-win11-command-finish.
 ```
 
 The harness rebuilds automatically when `build.zig`, `build.zig.zon`, or
-files under `src\` are newer than `zig-out\bin\noctty.exe`. Pass
+files under `src\` are newer than `zig-out\bin\koreterm.exe`. Pass
 `-Rebuild` to force a full rebuild anyway.
 
 ## vt-probe-win32-conformance.ps1
@@ -268,14 +268,14 @@ progress.
 ## interactive-win11-progress.ps1
 
 Interactive Win11 validation for native progress state changes. It
-launches `noctty` inside the repo-local Win11 sandbox, emits raw
+launches `koreterm` inside the repo-local Win11 sandbox, emits raw
 OSC `9;4` state transitions for `set`, `pause`, `error`,
-`indeterminate`, and `remove`, takes a screenshot of the `noctty` window
+`indeterminate`, and `remove`, takes a screenshot of the `koreterm` window
 for each state, and fails if:
 
 - the runtime logs `taskbar progress init failed`,
   `taskbar progress sync failed`, or a crash
-- noctty exits, or the payload does not reach one of the states before
+- koreterm exits, or the payload does not reach one of the states before
   the timeout
 
 The script reports whether the `set`/`remove` and `pause`/`error`
@@ -283,7 +283,7 @@ screenshots differ (`unknown` when one was not saved). The comparison is
 diagnostic only: hosted desktop environments do not always expose the
 rendered window to screen capture. The screenshots go through the same
 gate as the pixel diagnostic (see the interactive job below), so a state
-whose screenshot would show anything but noctty logs why and saves none.
+whose screenshot would show anything but koreterm logs why and saves none.
 The harness takes no capture of the taskbar: a strip of the bottom of the
 screen showed whatever the user had pinned and running there and was
 never evidence of taskbar rendering.
@@ -300,7 +300,7 @@ Interactive Win11 validation for custom post-processing shaders. It builds
 with `-Dcustom-shaders=true`, loads a deterministic solid-magenta ShaderToy
 fixture, takes a screenshot of the terminal surface child window (through the
 screenshot gate), and fails unless the dominant sampled surface color is
-magenta. With `NOCTTY_INTERACTIVE_MEASURE_AUMID=1`
+magenta. With `KORETERM_INTERACTIVE_MEASURE_AUMID=1`
 (the release job), `-Rebuild` rebuilds the measurement generation instead, which
 always carries custom shaders.
 
@@ -332,10 +332,10 @@ powershell.exe -ExecutionPolicy Bypass -File .\interactive-win11-shader-pacing.p
 ## interactive-win11-resize.ps1
 
 Interactive Win11 validation for resize repaint coverage. It launches
-`noctty` with a light terminal background, synthesizes a live resize
+`koreterm` with a light terminal background, synthesizes a live resize
 growth, exits the resize loop, captures the settled enlarged window, and fails
 if the newly exposed right or bottom content bands are mostly near-black or
-unpainted neutral gray. Each capture is clipped to noctty's client area inset
+unpainted neutral gray. Each capture is clipped to koreterm's client area inset
 by the corner radius, and the band check reads it in memory; it is saved to
 the logs only through the screenshot gate (see the interactive job below).
 
@@ -347,11 +347,11 @@ powershell.exe -ExecutionPolicy Bypass -File .\interactive-win11-resize.ps1 -Res
 
 ## interactive-win11-conpty-sync.ps1
 
-Differential check that noctty's screen agrees with ConPTY's own buffer after
+Differential check that koreterm's screen agrees with ConPTY's own buffer after
 resizes, the search bar, splits, maximize, minimize and full-screen programs.
-Each scenario starts a portable copy of noctty on a hidden desktop, puts cmd,
+Each scenario starts a portable copy of koreterm on a hidden desktop, puts cmd,
 Windows PowerShell or pwsh into a known state, applies the trigger, and
-compares noctty's visible rows (UIA `TextPattern`) with ConPTY's (a helper that
+compares koreterm's visible rows (UIA `TextPattern`) with ConPTY's (a helper that
 attaches to the shell's console and reads it with `ReadConsoleOutputW`), then
 types a marker and compares again. It never takes the foreground or touches
 the real profile, and it redirects PSReadLine's history (which ignores
@@ -380,10 +380,10 @@ hosted `windows-2025` runner (x64 only) for pushes to `main` and for pull
 requests that touch the build inputs or the harness; it is not a required check.
 It is not part of the interactive composite. The composite is dispatch-only, so
 it never sees a pull request, and in measurement mode the harness asserts the
-measurement build's `noctty.exe` but stages `zig-out\bin` (the product build, or
+measurement build's `koreterm.exe` but stages `zig-out\bin` (the product build, or
 nothing), so it would test the wrong binary until that is changed.
 
-On the runner the step sets `NOCTTY_INTERACTIVE_WIN11_CONPTY_SYNC_BOOTSTRAPPED=1`
+On the runner the step sets `KORETERM_INTERACTIVE_WIN11_CONPTY_SYNC_BOOTSTRAPPED=1`
 and runs the harness under `powershell.exe`. The sentinel skips the relaunch
 through `scripts\dev-windows.cmd` that the harness otherwise makes, which
 `-NoBuild` does not need: it builds nothing. `-NoBuild` needs a build of this checkout in
@@ -398,7 +398,7 @@ outer half prints a diagnostics block before it ends the run: the inner
 process's tree with thread states and wait reasons, and the hidden desktop's
 windows with Windows' hung flag (no command lines, titles or environment). That
 block is how a hang in this harness was traced to its cause: the walk that finds
-the shell under noctty followed `ParentProcessId` without noticing that Windows
+the shell under koreterm followed `ParentProcessId` without noticing that Windows
 reuses process numbers, found a cycle and spun at 100% CPU.
 `flagship/contracts/Contracts.97-ConptySync.ps1` drives that walk, and the dump
 reader's retry, with synthetic input.
@@ -406,7 +406,7 @@ reader's retry, with synthetic input.
 ## interactive-win11-ime-candidate.ps1
 
 Interactive Win11 validation for IME candidate anchoring. It launches
-`noctty`, scripts the terminal cursor to a non-origin row/column,
+`koreterm`, scripts the terminal cursor to a non-origin row/column,
 sends a synthetic mouse move near the surface origin to poison the old
 mouse-derived path, triggers `WM_IME_STARTCOMPOSITION` on the surface
 HWND, and reads the env-gated runtime trace for the composition/candidate
@@ -428,7 +428,7 @@ powershell.exe -ExecutionPolicy Bypass -File .\interactive-win11-ime-candidate.p
 ## interactive-win11-undo.ps1
 
 Interactive Win11 validation for the shipped undo/redo action set. It launches
-`noctty`, exercises split creation, tab close/restore, and empty-host
+`koreterm`, exercises split creation, tab close/restore, and empty-host
 survival after last-tab close, then verifies the visible tab/surface counts
 after each replay step. Last-tab headless undo/redo remains covered by focused
 Zig tests plus manual validation; this harness does not claim foreground
@@ -494,12 +494,12 @@ powershell.exe -ExecutionPolicy Bypass -File .\interactive-win11-session-restore
 
 ## hidden-win11-profile-matrix.ps1
 
-Starts each shell profile noctty detects (`cmd.exe`, `powershell.exe`,
+Starts each shell profile koreterm detects (`cmd.exe`, `powershell.exe`,
 `pwsh.exe`, Git Bash) through a restored session on a hidden desktop and checks
-what the profile really started: the process under noctty and a redacted shape of
+what the profile really started: the process under koreterm and a redacted shape of
 its command line (the PowerShell injection, Git Bash's `--login -i`), and the
 working directory the shell reports with OSC 7, read from the `session-state.json`
-noctty saves at close. cmd and Git Bash are sent a directory change as posted keys;
+koreterm saves at close. cmd and Git Bash are sent a directory change as posted keys;
 PowerShell panes are never typed into. Their run-owned integration copy sets a
 new run-local PSReadLine history path and `SaveNothing` before the first read;
 a marker written after the actual integration prompt replaces a fixed delay.
@@ -513,7 +513,7 @@ probe WSL. A profile that is not installed is skipped and reported; `-RequireAll
 turns any such skip into a failure. The hosted workflow requires all four.
 
 ```powershell
-pwsh -NoProfile -File .\hidden-win11-profile-matrix.ps1 -Bin <dir with noctty.exe> -Run <new dir>
+pwsh -NoProfile -File .\hidden-win11-profile-matrix.ps1 -Bin <dir with koreterm.exe> -Run <new dir>
 ```
 
 The binary must carry the measurement AppUserModelID (the jump list is keyed by
@@ -535,7 +535,7 @@ drives the walk, and the same rule in `hidden-win11-default-shell.ps1`'s
 
 ## hidden-win11-list-profiles.ps1
 
-Runs `noctty.com +list-profiles` from a portable copy on a hidden desktop and
+Runs `koreterm.com +list-profiles` from a portable copy on a hidden desktop and
 checks the profile list it prints: the profiles of a fixture configuration (two
 `profile-order` entries first, one `profile-hidden` entry last), the detected
 shells and SSH hosts after them, the fields of each line, `--plain` equal to the
@@ -556,7 +556,7 @@ harness proves the real `startup-attempts.json`, the PowerShell history files'
 metadata and the clipboard sequence number did not change.
 
 ```powershell
-pwsh -NoProfile -File .\hidden-win11-list-profiles.ps1 -Bin <dir with noctty.exe and noctty.com> -Run <new dir>
+pwsh -NoProfile -File .\hidden-win11-list-profiles.ps1 -Bin <dir with koreterm.exe and koreterm.com> -Run <new dir>
 ```
 
 Results are in `results.json` and `checks.txt`; the output of each run is in
@@ -564,12 +564,12 @@ Results are in `results.json` and `checks.txt`; the output of each run is in
 
 ## hidden-win11-embedding-idle.ps1
 
-Ephemeral-runner lifecycle of `noctty.exe -Embedding`, the process Windows starts to hand
+Ephemeral-runner lifecycle of `koreterm.exe -Embedding`, the process Windows starts to hand
 over a delegated console. It starts one with nothing to hand over, with
 `LOCALAPPDATA` and the portable folder holding seeded `session-state.json`,
 `palette-mru.txt`, `update-state.json`, `jump-list-recents.json`,
 `startup-attempts.json` and `config.ghostty`, and checks that it opens no window
-(other than the never-shown `noctty.win32.lifecycle` window every noctty process
+(other than the never-shown `koreterm.win32.lifecycle` window every koreterm process
 makes so that Restart Manager can ask it to close, and the default IME windows
 Windows gives its thread for it, all of which must stay hidden),
 exits by itself after its five-second idle timer with code 0, leaves every seeded
@@ -579,7 +579,7 @@ expects the window oracle to fire. It writes no delegation registry value and
 delivers no handoff; journeys that need one need a machine that can be restored.
 The workflow also runs that negative control with `-Renderer d3d11-warp` so
 an ordinary instance can open a window on the GPU-less runner.
-The harness refuses to start when the user's `DelegationTerminal` selects noctty:
+The harness refuses to start when the user's `DelegationTerminal` selects koreterm:
 the measurement AUMID does not isolate the session's live COM handoff class.
 That check, `Assert-EmbeddingDelegationSafe`, has one copy,
 `hidden-win11-embedding-guard.ps1`, which both `hidden-win11-lib.ps1` and
@@ -588,7 +588,7 @@ That check, `Assert-EmbeddingDelegationSafe`, has one copy,
 both harnesses' calls with mutation controls.
 
 ```powershell
-pwsh -NoProfile -File .\hidden-win11-embedding-idle.ps1 -Bin <dir with noctty.exe> -Run <new dir>
+pwsh -NoProfile -File .\hidden-win11-embedding-idle.ps1 -Bin <dir with koreterm.exe> -Run <new dir>
 ```
 
 Both scripts currently require an ephemeral GitHub-hosted runner; local launches
@@ -597,7 +597,7 @@ hosted evidence. The workflow supplies the runner environment and collects the
 desktop metadata receipts and binary fingerprints with its artifacts.
 `hidden-win11-desktop-control.ps1` is a hosted-only positive control: a harmless
 window in a nested owned job must be detected from the outer job on Default.
-It launches no noctty and stops its owned helpers after the check.
+It launches no koreterm and stops its owned helpers after the check.
 
 Both scripts share `hidden-win11-lib.ps1` (private desktop, owned job, explicit
 desktop selection for harness launches, inherited desktop handles for direct
@@ -608,7 +608,7 @@ approving app launch. The control window stays until app-job cleanup and the par
 check acknowledge a bounded release handshake; Default checks continue through exit.
 The outer process independently enumerates the named private
 desktop and rejects job-owned top-level windows on Default, including hidden
-windows. Profile readiness requires the known noctty PID's window on the private
+windows. Profile readiness requires the known koreterm PID's window on the private
 desktop before posted input.
 
 Server 2022 returned `GetThreadDesktop` error 5 (access denied) for live foreign
@@ -678,7 +678,7 @@ the exact build arguments.
 
 `interactive-win11-job.ps1` is the Test workflow's `windows-interactive` job:
 the composite, then the shader, shader-pacing, accessibility, palette-theme and
-session-restore leaves, all with `NOCTTY_INTERACTIVE_MEASURE_AUMID=1`, so every
+session-restore leaves, all with `KORETERM_INTERACTIVE_MEASURE_AUMID=1`, so every
 launch uses the composite's measurement build and none rewrites the product
 jump list (the Shell keeps one per AUMID in the real profile, which a redirected
 `APPDATA` does not move). One state guard spans the whole job: a change to the
@@ -689,13 +689,13 @@ When a screen-pixel wait (`Get-StatefulPixel` inside `Wait-InteractiveWin11Until
 times out, the harness writes `pixel-diagnostic-*.json` to its sandbox `logs`
 folder, which the job uploads: the window under each of the 16 sample points
 (handle, class, process name; never a title) and the color read there, the
-foreground window, whether noctty's window was hung, cloaked, minimized, hidden
+foreground window, whether koreterm's window was hung, cloaked, minimized, hidden
 or see-through, the input idle time, the windows above it that overlap the
 rect, and a screenshot of the sampled rect. The screenshot is taken only while
-noctty's window is shown, uncloaked, not minimized and opaque, every sample
-point lies on a noctty window, and no window of another process above it
+koreterm's window is shown, uncloaked, not minimized and opaque, every sample
+point lies on a koreterm window, and no window of another process above it
 overlaps the rect (unless DWM says that window is cloaked); it is clipped to
-noctty's client area inset by the corner radius, and written only if the same
+koreterm's client area inset by the corner radius, and written only if the same
 check still holds right after the capture (`Get-StatefulScreenshotDecision`).
 Otherwise the report says why it was withheld. The 16 single-pixel colors are
 recorded either way, so a sample point on another application's window records
@@ -734,7 +734,7 @@ pwsh -NoProfile -File ..\..\scripts\check-test-skips.ps1 -TestLog ghostty-test.l
 
 Generic repo-local Win11 launcher for ad hoc debugging. It uses the
 same sandbox setup logic as the focused harnesses and can either
-launch `noctty` directly or open a shell with the sandbox
+launch `koreterm` directly or open a shell with the sandbox
 environment applied.
 
 Run with:
@@ -753,14 +753,14 @@ it into fresh portable directories, redirects AppData, and uses a unique class.
 
 ```powershell
 pwsh -NoProfile -File test/windows/interactive-win11-stale-modes.ps1 `
-    -ExePath <measurement-build>/zig-out/bin/noctty.exe -Scenario Modes `
+    -ExePath <measurement-build>/zig-out/bin/koreterm.exe -Scenario Modes `
     -Shells cmd -ExerciseInheritedCtrlCIgnore
 ```
 
 `-ExerciseInheritedCtrlCIgnore` starts the hidden worker with
 `CREATE_NEW_PROCESS_GROUP`, which disables Ctrl+C through an inheritable Windows
 process attribute. The hidden controller explicitly enables Ctrl+C with
-`SetConsoleCtrlHandler(NULL, FALSE)` before launching noctty. Registering the
+`SetConsoleCtrlHandler(NULL, FALSE)` before launching koreterm. Registering the
 fixture's `Console.CancelKeyPress` handler alone does not clear that attribute.
 Without the controller reset, the cmd regression times out at
 `31-exit.ctrl.interrupted`; a native input observer confirmed that the Ctrl+C
@@ -790,7 +790,7 @@ use a private window station because desktops on WinSta0 share the clipboard.
 
 ## test_dll_init.c
 
-Packaged ghostty-vt.dll smoke. The portable ZIP carries a noctty placeholder
+Packaged ghostty-vt.dll smoke. The portable ZIP carries a koreterm placeholder
 under that name, not libghostty-vt (see
 [Library consumers](../../PACKAGING.md#library-consumers)), and this checks the file a package carries is the placeholder:
 `LoadLibraryExW` fails with `ERROR_DLL_INIT_FAILED` (1114), the export table
@@ -803,7 +803,7 @@ packaged smoke step) against the packaged arm64 DLL, both passing
 
 ### Build
 
-From the repository root, build noctty (which builds the placeholder into
+From the repository root, build koreterm (which builds the placeholder into
 `zig-out\bin\ghostty-vt-stub\`) and compile the test:
 
 ```powershell

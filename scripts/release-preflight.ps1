@@ -161,7 +161,7 @@ function Test-GitHubContentPath {
 
     $headers = @{
         "Accept" = "application/vnd.github+json"
-        "User-Agent" = "noctty-release-preflight"
+        "User-Agent" = "koreterm-release-preflight"
         "X-GitHub-Api-Version" = "2022-11-28"
     }
     if (-not [string]::IsNullOrWhiteSpace($Token)) {
@@ -229,7 +229,7 @@ function Test-GitHubContentPath {
 
 $versionMatch = [regex]::Match($Version, '^(?<major>\d+)\.(?<minor>\d+)\.(?<patch>\d+)$')
 if (-not $versionMatch.Success) {
-    throw "Unsupported release version format '$Version'. noctty releases must use plain semver <major>.<minor>.<patch>."
+    throw "Unsupported release version format '$Version'. koreterm releases must use plain semver <major>.<minor>.<patch>."
 }
 
 if (-not (Test-Path -LiteralPath $releaseMetaPath)) {
@@ -252,7 +252,7 @@ if ($versionLine -ne $upstreamLine) {
 
 $patch = [int]$versionMatch.Groups['patch'].Value
 if ($patch -lt $firstForkPatch) {
-    throw "Release patch '$patch' is below the configured firstForkPatch '$firstForkPatch'. noctty fork releases on line $versionLine must start at $versionLine.$firstForkPatch or later."
+    throw "Release patch '$patch' is below the configured firstForkPatch '$firstForkPatch'. koreterm fork releases on line $versionLine must start at $versionLine.$firstForkPatch or later."
 }
 
 $trustSelfSigned = ([string](Get-OptionalEnvValue -Name "WINDOWS_CODESIGN_TRUST_SELF_SIGNED")).Trim().ToLowerInvariant() -in @('true', '1', 'yes', 'on')
@@ -297,7 +297,7 @@ function Assert-WingetArchitectureCoverage {
 
     $headers = @{
         "Accept" = "application/vnd.github+json"
-        "User-Agent" = "noctty-release-preflight"
+        "User-Agent" = "koreterm-release-preflight"
         "X-GitHub-Api-Version" = "2022-11-28"
     }
     if (-not [string]::IsNullOrWhiteSpace($Token)) {
@@ -406,7 +406,7 @@ if ($RequirePackageManagers) {
     $scoopManifestPath = if (Test-EnvPresent -Name "SCOOP_BUCKET_MANIFEST_PATH") {
         Get-EnvValue -Name "SCOOP_BUCKET_MANIFEST_PATH"
     } else {
-        "bucket/noctty.json"
+        "bucket/koreterm.json"
     }
     $wingetManifestPath = Get-WingetManifestPath -PackageIdentifier (Get-EnvValue -Name "WINGET_PACKAGE_IDENTIFIER")
 

@@ -263,7 +263,7 @@ pub const SessionOwnerLock = struct {
     }
 };
 
-/// Resolve `%LOCALAPPDATA%\noctty\session-state.json`. Caller
+/// Resolve `%LOCALAPPDATA%\koreterm\session-state.json`. Caller
 /// frees with `core_app.alloc`.
 pub fn sessionStatePath(self: *const App) ?[]u8 {
     return self.localAppDataPath("session-state.json");
@@ -387,7 +387,7 @@ pub fn loadSessionStateAt(self: *App, path: []const u8) !?std.json.Parsed(win32_
             return err;
         },
         .newer_schema => newer: {
-            log.warn("win32 session restore: state was written by a newer noctty; leaving file untouched and not saving over it", .{});
+            log.warn("win32 session restore: state was written by a newer koreterm; leaving file untouched and not saving over it", .{});
             self.session_state_left_alone = true;
             break :newer null;
         },
@@ -417,7 +417,7 @@ pub fn restoreSessionState(self: *App) !bool {
     // Debug-only fault for the restore crash-loop harness: the process
     // ends mid-restore, as a release abort does (ExitProcess(3)), without
     // the breakpoint a Debug panic raises.
-    if (builtin.mode == .Debug and std.process.hasEnvVarConstant("NOCTTY_DEBUG_CRASH_SESSION_RESTORE")) {
+    if (builtin.mode == .Debug and std.process.hasEnvVarConstant("KORETERM_DEBUG_CRASH_SESSION_RESTORE")) {
         std.process.exit(3);
     }
 
@@ -2428,7 +2428,7 @@ test "security regression win32 session save drops one hostile pane field" {
 
     var surface: Surface = undefined;
     surface.launched_ssh = false;
-    surface.pwd = "C:\\src\\noctty";
+    surface.pwd = "C:\\src\\koreterm";
     surface.launch_profile_key = "pwsh";
     surface.title_override = "Build\x1b\x07";
     surface.tab_title_override = "Docs";
@@ -2443,7 +2443,7 @@ test "security regression win32 session save drops one hostile pane field" {
 
     try std.testing.expect(std.mem.indexOf(u8, encoded, "\"title_override\":") == null);
     try std.testing.expect(std.mem.indexOf(u8, encoded, "\\u001b") == null);
-    try std.testing.expect(std.mem.indexOf(u8, encoded, "\"cwd\":\"C:\\\\src\\\\noctty\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, encoded, "\"cwd\":\"C:\\\\src\\\\koreterm\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, encoded, "\"profile\":\"pwsh\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, encoded, "\"tab_title_override\":\"Docs\"") != null);
 
@@ -2510,7 +2510,7 @@ test "win32 session state is saved only by the process that owns it" {
     try std.testing.expect(!app.sessionStateEnabled());
     app.embedding_mode = false;
 
-    // Neither may an explicit-directory launch (Explorer's "Open noctty
+    // Neither may an explicit-directory launch (Explorer's "Open koreterm
     // here" verb, a jump-list folder), which never restored it either.
     app.explicit_startup_working_directory = true;
     try std.testing.expect(!app.sessionStateEnabled());
@@ -2713,7 +2713,7 @@ test "win32 session owner lock admits one live owner" {
     const root = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
     defer std.testing.allocator.free(root);
     // The directory does not exist yet on a first run.
-    const state_path = try std.fs.path.join(std.testing.allocator, &.{ root, "noctty", "session-state.json" });
+    const state_path = try std.fs.path.join(std.testing.allocator, &.{ root, "koreterm", "session-state.json" });
     defer std.testing.allocator.free(state_path);
 
     const first = (try SessionOwnerLock.acquire(std.testing.allocator, state_path)).?;

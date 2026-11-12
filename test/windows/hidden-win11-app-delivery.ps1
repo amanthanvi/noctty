@@ -85,24 +85,24 @@ public static class AppDeliverySmoke {
         var input=OpenInputDesktop(0,false,1); // DESKTOP_READOBJECTS
         if(input==IntPtr.Zero) throw new Exception("Input desktop inspection failed");
         try {
-            return !String.IsNullOrEmpty(expected) && expected.StartsWith("noctty-pkg19-",StringComparison.Ordinal) &&
+            return !String.IsNullOrEmpty(expected) && expected.StartsWith("koreterm-pkg19-",StringComparison.Ordinal) &&
                 DesktopNameOf(GetThreadDesktop(GetCurrentThreadId()))==expected && DesktopNameOf(input)!=expected;
         } finally { CloseDesktop(input); }
     }
     public static IntPtr[] Hosts(int pid) {
         var result=new List<IntPtr>();
         EnumWindows((h,p)=>{ int owner; GetWindowThreadProcessId(h,out owner);
-            if(owner==pid && Class(h)=="noctty.win32.host") result.Add(h); return true; },IntPtr.Zero);
+            if(owner==pid && Class(h)=="koreterm.win32.host") result.Add(h); return true; },IntPtr.Zero);
         return result.ToArray();
     }
     public static IntPtr Surface(IntPtr host) {
         IntPtr result=IntPtr.Zero;
-        EnumChildWindows(host,(h,p)=>{ if(Class(h)=="noctty.win32") result=h; return true; },IntPtr.Zero);
+        EnumChildWindows(host,(h,p)=>{ if(Class(h)=="koreterm.win32") result=h; return true; },IntPtr.Zero);
         return result;
     }
     public static IntPtr AppWindow(int pid) {
         var h=IntPtr.Zero;
-        while((h=FindWindowExW(new IntPtr(-3),h,"noctty.win32.app",null))!=IntPtr.Zero) {
+        while((h=FindWindowExW(new IntPtr(-3),h,"koreterm.win32.app",null))!=IntPtr.Zero) {
             int owner; GetWindowThreadProcessId(h,out owner); if(owner==pid) return h;
         }
         return IntPtr.Zero;
@@ -207,7 +207,7 @@ if(-not $Driver) {
     $Bin=(Resolve-Path -LiteralPath $Bin).Path
     $Run=[IO.Path]::GetFullPath($Run)
     if(Test-Path -LiteralPath $Run){throw 'Run directory must be new.'}
-    if(-not(Test-Path -LiteralPath (Join-Path $Bin 'noctty.exe'))){throw 'Bin must contain noctty.exe.'}
+    if(-not(Test-Path -LiteralPath (Join-Path $Bin 'koreterm.exe'))){throw 'Bin must contain koreterm.exe.'}
     $before=Startup-Fingerprint
     $historyGuard=Start-WindowsHarnessHistoryGuard -Harness 'hidden-win11-app-delivery.ps1'
     if(($ExpectedStartupHash -and $before.Hash -ne $ExpectedStartupHash) -or ($ExpectedStartupModified -and $before.Modified -ne $ExpectedStartupModified)){throw 'Real startup state differs from adopted baseline; no launches performed.'}
@@ -217,9 +217,9 @@ if(-not $Driver) {
     Get-ChildItem -LiteralPath $Bin -File | ForEach-Object {Copy-Item -LiteralPath $_.FullName -Destination $portableBin}
     $share=Join-Path (Split-Path -Parent $Bin) 'share'
     if(Test-Path -LiteralPath $share){Copy-Item -LiteralPath $share -Destination (Join-Path $Run 'portable\share') -Recurse}
-    Set-Content -LiteralPath (Join-Path $portableBin 'noctty.portable') -Value '' -NoNewline
+    Set-Content -LiteralPath (Join-Path $portableBin 'koreterm.portable') -Value '' -NoNewline
     foreach($name in @('localappdata','appdata')){[void](New-Item -ItemType Directory -Path (Join-Path $Run $name))}
-    $desktopName='noctty-pkg19-'+[guid]::NewGuid().ToString('N')
+    $desktopName='koreterm-pkg19-'+[guid]::NewGuid().ToString('N')
     $desktop=[HiddenLocal]::CreateDesktopW($desktopName,[IntPtr]::Zero,[IntPtr]::Zero,0,0x10000000,[IntPtr]::Zero)
     if($desktop -eq [IntPtr]::Zero){throw 'CreateDesktop failed.'}
     $oldLocal=$env:LOCALAPPDATA;$oldRoaming=$env:APPDATA
@@ -266,8 +266,8 @@ if(-not $Driver) {
 # Driver runs only on the newly created desktop. Every launch inherits its job.
 $Bin=(Resolve-Path -LiteralPath $Bin).Path
 $Run=[IO.Path]::GetFullPath($Run)
-if(-not(Test-Path -LiteralPath (Join-Path $Bin 'noctty.portable')) -or $env:LOCALAPPDATA -ne (Join-Path $Run 'localappdata') -or $env:APPDATA -ne (Join-Path $Run 'appdata') -or -not[AppDeliverySmoke]::IsPrivateDesktop($DesktopName)){throw 'Driver isolation contract is absent.'}
-$exe=Join-Path $Bin 'noctty.exe'
+if(-not(Test-Path -LiteralPath (Join-Path $Bin 'koreterm.portable')) -or $env:LOCALAPPDATA -ne (Join-Path $Run 'localappdata') -or $env:APPDATA -ne (Join-Path $Run 'appdata') -or -not[AppDeliverySmoke]::IsPrivateDesktop($DesktopName)){throw 'Driver isolation contract is absent.'}
+$exe=Join-Path $Bin 'koreterm.exe'
 $checks=[Collections.Generic.List[object]]::new()
 $samples=[Collections.Generic.List[object]]::new()
 $owned=[Collections.Generic.List[object]]::new()
@@ -284,12 +284,12 @@ function Launch-Owned([string[]]$Arguments){
     $number=$owned.Count+1
     $info=[AppDeliverySmoke]::Launch($exe,$Arguments,$Bin,"WinSta0\$DesktopName",[IntPtr]::Zero,(Join-Path $Run "process-$number.stdout.log"),(Join-Path $Run "process-$number.stderr.log"))
     $started=[AppDeliverySmoke]::Verify($info,$exe)
-    $owned.Add(@{Info=$info;Pid=$info.pid;StartTimeUtc=$started;Executable='noctty.exe'})
+    $owned.Add(@{Info=$info;Pid=$info.pid;StartTimeUtc=$started;Executable='koreterm.exe'})
     return $info
 }
 $runtime=$null;$hostWindow=[IntPtr]::Zero
 try {
-    $instanceClass='noctty-pkg19-'+[guid]::NewGuid().ToString('N')
+    $instanceClass='koreterm-pkg19-'+[guid]::NewGuid().ToString('N')
     $gate=Join-Path $Run 'allow-title.txt'
     $batch=Join-Path $Run 'title-driver.cmd'
     @('@echo off','title PKG19-before',':wait',"if exist `"$gate`" goto deliver",'ping.exe -n 2 127.0.0.1 >nul','goto wait',':deliver','ping.exe -n 2 127.0.0.1 >nul','title PKG19-during-menu',':hold','ping.exe -n 30 127.0.0.1 >nul','goto hold') | Set-Content -LiteralPath $batch -Encoding ascii

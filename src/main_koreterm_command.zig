@@ -1,4 +1,4 @@
-//! Console entrypoint. Keep the application in noctty.exe; this binary only
+//! Console entrypoint. Keep the application in koreterm.exe; this binary only
 //! chooses whether to wait and forwards the original Windows command line.
 const std = @import("std");
 const w = std.os.windows;
@@ -13,7 +13,7 @@ pub fn main() void {
     const code = forward() catch |err| {
         var buffer: [256]u8 = undefined;
         var writer = std.fs.File.stderr().writer(&buffer);
-        writer.interface.print("noctty command launcher could not start or wait for noctty.exe: {s}\n", .{@errorName(err)}) catch {};
+        writer.interface.print("koreterm command launcher could not start or wait for koreterm.exe: {s}\n", .{@errorName(err)}) catch {};
         writer.interface.flush() catch {};
         k.ExitProcess(1);
     };
@@ -22,12 +22,12 @@ pub fn main() void {
 
 fn forward() !u32 {
     const alloc = std.heap.page_allocator;
-    // Detection errors are actions too: noctty.exe owns their diagnostics.
+    // Detection errors are actions too: koreterm.exe owns their diagnostics.
     const wait = if (cli_action.detectArgs(Action, alloc)) |action| action != null else |_| true;
     // selfExePath resolves symlinks, preserving the old launcher's sibling rule.
     const self_path = try std.fs.selfExePathAlloc(alloc);
     defer alloc.free(self_path);
-    const image_path = try std.fs.path.join(alloc, &.{ std.fs.path.dirname(self_path) orelse return error.ExecutablePathUnavailable, "noctty.exe" });
+    const image_path = try std.fs.path.join(alloc, &.{ std.fs.path.dirname(self_path) orelse return error.ExecutablePathUnavailable, "koreterm.exe" });
     defer alloc.free(image_path);
     const image_z = try std.unicode.wtf8ToWtf16LeAllocZ(alloc, image_path);
     defer alloc.free(image_z);

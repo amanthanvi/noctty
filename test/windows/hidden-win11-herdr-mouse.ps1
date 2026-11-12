@@ -1,9 +1,9 @@
 #requires -Version 7.0
 <#
-G019 attribution: does herdr react to mouse clicks under noctty, and under
+G019 attribution: does herdr react to mouse clicks under koreterm, and under
 WezTerm as the comparison terminal? Supply a built Bin and a NEW Run directory.
-Copies noctty into Run with noctty.portable; redirects HOME, USERPROFILE,
-APPDATA and LOCALAPPDATA for every child (noctty, WezTerm, herdr), so herdr's
+Copies koreterm into Run with koreterm.portable; redirects HOME, USERPROFILE,
+APPDATA and LOCALAPPDATA for every child (koreterm, WezTerm, herdr), so herdr's
 config, state and API socket live in Run and the maintainer's herdr server is
 never touched. Everything runs on a private desktop; input is posted mouse
 messages only. Skips WezTerm or herdr phases when they are not installed.
@@ -137,7 +137,7 @@ public static class HerdrMouse {
             throw new Exception("Owned job cleanup exceeded five seconds");
         } finally { CloseHandle(j); }
     }
-    // show is the STARTUPINFO wShowWindow: SW_HIDE (0) for console and noctty
+    // show is the STARTUPINFO wShowWindow: SW_HIDE (0) for console and koreterm
     // children, SW_SHOWNOACTIVATE (4) for WezTerm, which honours the startup
     // show state and keeps a hidden window's clicks from reaching its panes.
     // Every window lives on the private desktop either way.
@@ -154,7 +154,7 @@ public static class HerdrMouse {
     public static IntPtr Surface(int pid) {
         IntPtr found=IntPtr.Zero;
         EnumWindows((h,p)=> { int id; GetWindowThreadProcessId(h,out id);
-            if(id==pid && Class(h)=="noctty.win32.host") EnumChildWindows(h,(c,q)=> { if(Class(c)=="noctty.win32") found=c; return true; },IntPtr.Zero);
+            if(id==pid && Class(h)=="koreterm.win32.host") EnumChildWindows(h,(c,q)=> { if(Class(c)=="koreterm.win32") found=c; return true; },IntPtr.Zero);
             return true;
         },IntPtr.Zero); return found;
     }
@@ -186,7 +186,7 @@ public static class HerdrMouse {
 }
 '@
 function Startup-Fingerprint {
-    $path=Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'noctty\startup-attempts.json'
+    $path=Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'koreterm\startup-attempts.json'
     if(-not (Test-Path -LiteralPath $path)) { return @{ Exists=$false; Hash=$null; Modified=$null } }
     return @{ Exists=$true; Hash=(Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant(); Modified=(Get-Item -LiteralPath $path).LastWriteTimeUtc.ToString('o') }
 }
@@ -205,7 +205,7 @@ function Compile-Helper([string]$Source,[string]$Exe,[IntPtr]$Job,[string]$Root)
 if(-not $Driver) {
     $Bin=(Resolve-Path -LiteralPath $Bin).Path; $Run=[IO.Path]::GetFullPath($Run)
     if(Test-Path -LiteralPath $Run) { throw 'Run directory must be new.' }
-    if(-not (Test-Path -LiteralPath (Join-Path $Bin 'noctty.exe'))) { throw 'Bin must contain a built noctty.exe.' }
+    if(-not (Test-Path -LiteralPath (Join-Path $Bin 'koreterm.exe'))) { throw 'Bin must contain a built koreterm.exe.' }
     [void](New-Item -ItemType Directory -Path $Run)
     $root=Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
     $compileJob=[HerdrMouse]::CreateOwnedJob()
@@ -220,9 +220,9 @@ if(-not $Driver) {
     Get-ChildItem -LiteralPath $Bin -File | ForEach-Object { Copy-Item -LiteralPath $_.FullName -Destination $portable }
     $share=Join-Path (Split-Path -Parent $Bin) 'share'
     if(Test-Path -LiteralPath $share) { Copy-Item -LiteralPath $share -Destination (Join-Path $Run 'source\share') -Recurse }
-    Set-Content -LiteralPath (Join-Path $portable 'noctty.portable') -Value '' -NoNewline
+    Set-Content -LiteralPath (Join-Path $portable 'koreterm.portable') -Value '' -NoNewline
     foreach($dir in @('home','localappdata','appdata','tmp')) { [void](New-Item -ItemType Directory -Path (Join-Path $Run $dir)) }
-    $desktopName='noctty-herdr-'+[guid]::NewGuid().ToString('N')
+    $desktopName='koreterm-herdr-'+[guid]::NewGuid().ToString('N')
     $desktop=[HerdrMouse]::CreateDesktopW($desktopName,[IntPtr]::Zero,[IntPtr]::Zero,0,0x10000000,[IntPtr]::Zero)
     if($desktop -eq [IntPtr]::Zero) { throw 'CreateDesktop failed.' }
     $saved=@{}; foreach($v in @('LOCALAPPDATA','APPDATA','HOME','USERPROFILE','TEMP','TMP','HERDR_SOCKET_PATH','WEZTERM_CONFIG_FILE','HERDR_WINDOWS_INPUT_TRACE')) { $saved[$v]=[Environment]::GetEnvironmentVariable($v) }
@@ -263,8 +263,8 @@ if(-not $Driver) {
 
 # Driver: on the private desktop with sandboxed profile directories.
 $driverDesktop=[HerdrMouse]::DesktopName()
-if(-not $driverDesktop.StartsWith('noctty-herdr-',[StringComparison]::Ordinal)) { throw 'Driver is not on the task private desktop.' }
-if(-not (Test-Path -LiteralPath (Join-Path $Bin 'noctty.portable'))) { throw 'Driver requires portable marker.' }
+if(-not $driverDesktop.StartsWith('koreterm-herdr-',[StringComparison]::Ordinal)) { throw 'Driver is not on the task private desktop.' }
+if(-not (Test-Path -LiteralPath (Join-Path $Bin 'koreterm.portable'))) { throw 'Driver requires portable marker.' }
 foreach($dir in @('LOCALAPPDATA','APPDATA','HOME','USERPROFILE')) {
     $value=[Environment]::GetEnvironmentVariable($dir)
     if(-not $value -or -not [IO.Path]::GetFullPath($value).StartsWith($Run.TrimEnd('\')+'\',[StringComparison]::OrdinalIgnoreCase)) { throw "Driver $dir isolation failed." }
@@ -311,15 +311,15 @@ $herdrConfigDir=Join-Path $env:APPDATA 'herdr'; [void](New-Item -ItemType Direct
 @('onboarding = false','[terminal]','default_shell = "cmd.exe"','[update]','version_check = false','manifest_check = false',
   '[ui]','mouse_capture = true','[ui.toast]','delivery = "off"','[ui.sound]','enabled = false') |
     Set-Content -LiteralPath (Join-Path $herdrConfigDir 'config.toml')
-$nocttyConfig=Join-Path $Bin 'herdr-mouse.ghostty'
+$koretermConfig=Join-Path $Bin 'herdr-mouse.ghostty'
 @('shell-integration = none','single-instance = false','window-save-state = never','confirm-close-surface = false','keybind = clear','window-width = 160','window-height = 40') |
-    Set-Content -LiteralPath $nocttyConfig
+    Set-Content -LiteralPath $koretermConfig
 $wezConfig=Join-Path $Run 'wezterm.lua'
 @("local wezterm = require 'wezterm'","return {","  check_for_updates = false,","  front_end = 'Software',","  initial_cols = 160,","  initial_rows = 40,",
   "  automatically_reload_config = false,","  window_close_confirmation = 'NeverPrompt',","  default_prog = { 'cmd.exe' },","  show_update_window = false,","}") |
     Set-Content -LiteralPath $wezConfig
 $env:WEZTERM_CONFIG_FILE=$wezConfig
-$nocttyExe=Join-Path $Bin 'noctty.exe'
+$koretermExe=Join-Path $Bin 'koreterm.exe'
 $haveHerdr=Test-Path -LiteralPath $Herdr; $haveWezTerm=Test-Path -LiteralPath $WezTerm
 $script:apiCalls=0
 function Progress([string]$Text) { Add-Content -LiteralPath (Join-Path $Run 'progress.log') -Value ("{0} {1}" -f (Get-Date).ToString('HH:mm:ss.fff'),$Text) }
@@ -371,13 +371,13 @@ function Attach-Info([int]$ProcessId) {
 }
 # Launch `program args` inside a terminal; returns process info and the window to click.
 function Start-Terminal([string]$Terminal,[string]$Program,[string]$Arguments) {
-    if($Terminal -eq 'noctty') {
-        $cmd='"{0}" --config-file="{1}" -e "{2}" {3}' -f $nocttyExe,$nocttyConfig,$Program,$Arguments
-        $p=[HerdrMouse]::Launch($nocttyExe,$cmd,$Bin,"WinSta0\$driverDesktop",$job,0x08000000,0)
-        $w=Wait-Window { [HerdrMouse]::Surface($p.pid) } $p.process 45 'noctty'
+    if($Terminal -eq 'koreterm') {
+        $cmd='"{0}" --config-file="{1}" -e "{2}" {3}' -f $koretermExe,$koretermConfig,$Program,$Arguments
+        $p=[HerdrMouse]::Launch($koretermExe,$cmd,$Bin,"WinSta0\$driverDesktop",$job,0x08000000,0)
+        $w=Wait-Window { [HerdrMouse]::Surface($p.pid) } $p.process 45 'koreterm'
         return @{Process=$p;Window=$w;Pid=$p.pid}
     }
-    $cls='noctty-g019-'+[guid]::NewGuid().ToString('N').Substring(0,8)
+    $cls='koreterm-g019-'+[guid]::NewGuid().ToString('N').Substring(0,8)
     $cmd='"{0}" --config-file "{1}" start --always-new-process --class {2} --cwd "{3}" -- "{4}" {5}' -f $WezTerm,$wezConfig,$cls,$Run,$Program,$Arguments
     $p=[HerdrMouse]::Launch($WezTerm,$cmd,$Run,"WinSta0\$driverDesktop",$job,0x08000000,4)
     $w=Wait-Window { [HerdrMouse]::TopLevel($p.pid,$cls) } $p.process 60 'WezTerm'
@@ -404,7 +404,7 @@ function Read-Records([string]$Path) {
     $end=$csv.LastIndexOf("`n"); if($end -lt 0) { return @() }
     return @($csv.Substring(0,$end+1) | ConvertFrom-Csv | ForEach-Object { ($_.PSObject.Properties | Where-Object { $_.Value -ne '' } | ForEach-Object { "$($_.Name)=$($_.Value)" }) -join ' ' })
 }
-$terminals=@('noctty'); if($haveWezTerm) { $terminals+='wezterm' }
+$terminals=@('koreterm'); if($haveWezTerm) { $terminals+='wezterm' }
 try {
     foreach($terminal in $terminals) {
         # Phase A: herdr itself, default (server+client) mode and monolithic mode.

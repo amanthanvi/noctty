@@ -1,9 +1,9 @@
 $ErrorActionPreference = 'Stop'
-$savedMeasureAumid = $env:NOCTTY_INTERACTIVE_MEASURE_AUMID
+$savedMeasureAumid = $env:KORETERM_INTERACTIVE_MEASURE_AUMID
 try {
 # The legacy timestamp cases below use synthetic paths, even when the composite
 # invokes this self-test with measurement mode inherited.
-$env:NOCTTY_INTERACTIVE_MEASURE_AUMID = $null
+$env:KORETERM_INTERACTIVE_MEASURE_AUMID = $null
 
 function Assert-Equal {
     param(
@@ -48,7 +48,7 @@ $ErrorActionPreference = $callerErrorActionPreference
 Assert-Equal $ErrorActionPreference $callerErrorActionPreference 'dot-sourcing the helper library should not overwrite caller ErrorActionPreference'
 $ErrorActionPreference = 'Stop'
 
-$pathScratch = Join-Path $env:TEMP 'noctty-interactive-win11-path-test'
+$pathScratch = Join-Path $env:TEMP 'koreterm-interactive-win11-path-test'
 $samePathA = Join-Path $pathScratch 'worktrees\feature-a\repo'
 $samePathB = '{0}\' -f ($samePathA.Replace('\', '/'))
 $otherPath = Join-Path $pathScratch 'worktrees\feature-b\repo'
@@ -88,16 +88,16 @@ Assert-True ($launchArgs -contains '--linux-cgroup=always') 'launch args should 
 Assert-True ($launchArgs -contains '--linux-cgroup-hard-fail=true') 'launch args should fail when Job Object attachment fails'
 Assert-True ($launchArgs -contains '--windows-job-object-kill-on-close=true') 'launch args should terminate contained descendants when the host exits'
 Assert-True ($launchArgs -contains '--single-instance=false') 'launch args should disable single-instance forwarding'
-Assert-True ($launchArgs -contains "--class=noctty-interactive-$($layout.SandboxId)") 'launch args should include a sandbox-unique class'
+Assert-True ($launchArgs -contains "--class=koreterm-interactive-$($layout.SandboxId)") 'launch args should include a sandbox-unique class'
 
 $defaultBuildInputs = @(Get-InteractiveWin11DefaultBuildInputs -RepoRoot $layout.RepoRoot)
 Assert-Equal $defaultBuildInputs.Count 3 'default build inputs should track build files and src'
 Assert-Equal $defaultBuildInputs[0] (Join-Path $layout.RepoRoot 'build.zig') 'default build inputs should include build.zig'
 Assert-Equal $defaultBuildInputs[1] (Join-Path $layout.RepoRoot 'build.zig.zon') 'default build inputs should include build.zig.zon'
 Assert-Equal $defaultBuildInputs[2] (Join-Path $layout.RepoRoot 'src') 'default build inputs should include src'
-Assert-Equal (Get-InteractiveWin11ExePath -RepoRoot $layout.RepoRoot) (Get-InteractiveWin11NormalizedPath -Path (Join-Path $layout.RepoRoot 'zig-out\bin\noctty.exe')) 'exe path helper should normalize the expected build output path'
+Assert-Equal (Get-InteractiveWin11ExePath -RepoRoot $layout.RepoRoot) (Get-InteractiveWin11NormalizedPath -Path (Join-Path $layout.RepoRoot 'zig-out\bin\koreterm.exe')) 'exe path helper should normalize the expected build output path'
 
-$scratchRepo = Join-Path $env:TEMP 'noctty-interactive-win11-test'
+$scratchRepo = Join-Path $env:TEMP 'koreterm-interactive-win11-test'
 $scratchLayout = Get-InteractiveWin11SandboxLayout -RepoRoot $scratchRepo
 New-Item -ItemType Directory -Force -Path $scratchLayout.Temp | Out-Null
 Set-Content -Path (Join-Path $scratchLayout.Temp 'marker.txt') -Value 'ok'
@@ -132,12 +132,12 @@ catch {
 Assert-True $resetBlocked 'prefix-collision sandbox target should be refused'
 Assert-True (Test-Path $escapeRoot) 'refused sandbox target should not be deleted'
 
-$launchScratch = Join-Path $env:TEMP 'noctty-interactive-win11-launch-test'
+$launchScratch = Join-Path $env:TEMP 'koreterm-interactive-win11-launch-test'
 Remove-Item -LiteralPath $launchScratch -Recurse -Force -ErrorAction SilentlyContinue
 
-$missingExe = Join-Path $launchScratch 'zig-out\bin\noctty.exe'
-$existingExe = Join-Path $launchScratch 'ready\zig-out\bin\noctty.exe'
-$directoryExe = Join-Path $launchScratch 'dir\zig-out\bin\noctty.exe'
+$missingExe = Join-Path $launchScratch 'zig-out\bin\koreterm.exe'
+$existingExe = Join-Path $launchScratch 'ready\zig-out\bin\koreterm.exe'
+$directoryExe = Join-Path $launchScratch 'dir\zig-out\bin\koreterm.exe'
 $staleInputDir = Join-Path $launchScratch 'stale\src'
 $staleInputFile = Join-Path $staleInputDir 'win32.zig'
 $metadataInputDir = Join-Path $launchScratch 'metadata\src'
@@ -194,7 +194,7 @@ try {
 }
 catch {
     $missingBinaryBlocked = $true
-    Assert-True ($_.Exception.Message -like '*noctty.exe*') 'missing binary with no-build should mention noctty.exe'
+    Assert-True ($_.Exception.Message -like '*koreterm.exe*') 'missing binary with no-build should mention koreterm.exe'
 }
 
 Assert-True $missingBinaryBlocked 'missing binary with no-build should throw'
@@ -223,7 +223,7 @@ catch {
 
 Assert-True $conflictingFlagsBlocked 'rebuild and no-build together should throw'
 
-$moduleScratch = Join-Path $env:TEMP 'noctty-interactive-win11-module-path-test'
+$moduleScratch = Join-Path $env:TEMP 'koreterm-interactive-win11-module-path-test'
 Remove-Item -LiteralPath $moduleScratch -Recurse -Force -ErrorAction SilentlyContinue
 $fakePwshHome = Join-Path $moduleScratch 'PowerShell\7'
 New-Item -ItemType Directory -Force -Path (Join-Path $fakePwshHome 'Modules') | Out-Null
@@ -248,10 +248,10 @@ Assert-Equal (
 ) ($windowsPowerShellModules -join ';') 'a Windows PowerShell module path should pass through unchanged'
 Remove-Item -LiteralPath $moduleScratch -Recurse -Force -ErrorAction SilentlyContinue
 
-$conptyScratch = Join-Path $env:TEMP 'noctty-interactive-win11-conpty-preflight-test'
+$conptyScratch = Join-Path $env:TEMP 'koreterm-interactive-win11-conpty-preflight-test'
 Remove-Item -LiteralPath $conptyScratch -Recurse -Force -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force -Path $conptyScratch | Out-Null
-$conptyExe = Join-Path $conptyScratch 'noctty.exe'
+$conptyExe = Join-Path $conptyScratch 'koreterm.exe'
 Set-Content -Path $conptyExe -Value 'stub'
 Assert-InteractiveWin11ExeExists -ExePath $conptyExe -AllowInboxConPty
 foreach ($missing in @('conpty.dll', 'OpenConsole.exe')) {
@@ -269,9 +269,9 @@ foreach ($missing in @('conpty.dll', 'OpenConsole.exe')) {
 Assert-InteractiveWin11ExeExists -ExePath $conptyExe
 Remove-Item -LiteralPath $conptyScratch -Recurse -Force -ErrorAction SilentlyContinue
 
-$env:NOCTTY_INTERACTIVE_MEASURE_AUMID = '1'
-Assert-Equal (Get-InteractiveWin11ProcessAumid) 'io.github.amanthanvi.noctty.measure' 'measurement process identity should follow the executable'
-Assert-Equal (Get-InteractiveWin11ToastAumid) 'io.github.amanthanvi.noctty' 'measurement mode must retain the product notifier gate'
+$env:KORETERM_INTERACTIVE_MEASURE_AUMID = '1'
+Assert-Equal (Get-InteractiveWin11ProcessAumid) 'io.github.amanthanvi.koreterm.measure' 'measurement process identity should follow the executable'
+Assert-Equal (Get-InteractiveWin11ToastAumid) 'io.github.amanthanvi.koreterm' 'measurement mode must retain the product notifier gate'
 $measureExe = Get-InteractiveWin11ExePath -RepoRoot $repoRoot
 Assert-Equal $measureExe (Get-InteractiveWin11MeasureExePath $repoRoot) 'measurement mode should route the executable'
 Assert-Equal (Get-InteractiveWin11MeasureRepoForExe $measureExe) $repoRoot 'raw measurement executable should recover its repository'
@@ -295,9 +295,9 @@ function Assert-InteractiveWin11MeasureBuild {
     $script:measureRoutingAssertCount++
     if ($script:measureRoutingRejectReceipt) { throw 'Synthetic invalid measurement receipt.' }
 }
-$measureRoutingRepo = Join-Path $env:TEMP ('noctty-measure-route-' + [guid]::NewGuid().ToString('N'))
+$measureRoutingRepo = Join-Path $env:TEMP ('koreterm-measure-route-' + [guid]::NewGuid().ToString('N'))
 $measureRoutingExe = Get-InteractiveWin11ExePath $measureRoutingRepo
-Assert-Equal (Join-Path (Split-Path -Parent $measureRoutingExe) 'noctty.com') (Get-InteractiveWin11MeasureLayout $measureRoutingRepo).Cli 'measurement routing must preserve the sibling CLI shim path'
+Assert-Equal (Join-Path (Split-Path -Parent $measureRoutingExe) 'koreterm.com') (Get-InteractiveWin11MeasureLayout $measureRoutingRepo).Cli 'measurement routing must preserve the sibling CLI shim path'
 Assert-Equal (Get-InteractiveWin11LaunchAction -ExePath $measureRoutingExe) 'build' 'missing measurement binary should request a build'
 New-Item -ItemType Directory -Force -Path (Split-Path -Parent $measureRoutingExe) | Out-Null
 Set-Content -LiteralPath $measureRoutingExe -Value 'synthetic executable'
@@ -328,15 +328,15 @@ try {
     Assert-Equal $env:LOCALAPPDATA $routingLayout.LocalAppData 'measurement mode must retain per-harness LOCALAPPDATA config semantics'
     Assert-Equal $env:XDG_CONFIG_HOME $routingLayout.LocalAppData 'measurement mode must retain per-harness config root'
     Assert-Equal $env:GHOSTTY_RESOURCES_DIR (Join-Path (Get-InteractiveWin11MeasureLayout $measureRoutingRepo).Prefix 'share\ghostty') 'measurement resources must come from the same generation prefix'
-    Assert-Equal $env:NOCTTY_INTERACTIVE_MEASURE_AUMID '1' 'sandbox redirection must retain inherited measurement mode'
-    Assert-True (-not [IO.File]::Exists((Join-Path (Split-Path -Parent $measureRoutingExe) 'noctty.portable'))) 'measurement routing must not add a shared portable config root'
+    Assert-Equal $env:KORETERM_INTERACTIVE_MEASURE_AUMID '1' 'sandbox redirection must retain inherited measurement mode'
+    Assert-True (-not [IO.File]::Exists((Join-Path (Split-Path -Parent $measureRoutingExe) 'koreterm.portable'))) 'measurement routing must not add a shared portable config root'
 } finally {
     foreach ($entry in $savedRoutingEnvironment.GetEnumerator()) { [Environment]::SetEnvironmentVariable($entry.Key, $entry.Value, 'Process') }
 }
-$env:NOCTTY_INTERACTIVE_MEASURE_AUMID = $null
-Assert-Equal (Get-InteractiveWin11ProcessAumid) 'io.github.amanthanvi.noctty' 'standalone normal mode should retain product process identity'
-Assert-Equal (Get-InteractiveWin11ToastAumid) 'io.github.amanthanvi.noctty' 'standalone normal mode should retain product notifier identity'
+$env:KORETERM_INTERACTIVE_MEASURE_AUMID = $null
+Assert-Equal (Get-InteractiveWin11ProcessAumid) 'io.github.amanthanvi.koreterm' 'standalone normal mode should retain product process identity'
+Assert-Equal (Get-InteractiveWin11ToastAumid) 'io.github.amanthanvi.koreterm' 'standalone normal mode should retain product notifier identity'
 Write-Host 'interactive-win11 helper tests: PASS'
 } finally {
-    $env:NOCTTY_INTERACTIVE_MEASURE_AUMID = $savedMeasureAumid
+    $env:KORETERM_INTERACTIVE_MEASURE_AUMID = $savedMeasureAumid
 }

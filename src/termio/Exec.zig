@@ -92,9 +92,9 @@ fn addGhosttyBinToPath(
     }
 
     const updated_path = if (builtin.os.tag == .windows)
-        // Windows shells resolve bare `noctty` from PATH/PATHEXT.
+        // Windows shells resolve bare `koreterm` from PATH/PATHEXT.
         // Put the current install first so an older shim/exe earlier on
-        // PATH doesn't shadow our local `noctty.com`.
+        // PATH doesn't shadow our local `koreterm.com`.
         try internal_os.prependEnv(alloc, path, exe_dir)
     else
         try internal_os.appendEnv(alloc, path, exe_dir);
@@ -110,7 +110,7 @@ fn addGhosttyBinToPath(
 /// Windows: less (git's pager), vim, nano and tput. They find it in the
 /// per-user terminfo directory where App.init installs it, and
 /// apprt/win32_terminfo.zig explains why TERMINFO cannot point at `dir`
-/// safely. An inherited TERMINFO that names `dir`, as older versions of noctty
+/// safely. An inherited TERMINFO that names `dir`, as older versions of koreterm
 /// exported it, is dropped. Whether that directory has the entry depends on
 /// the child's HOME, which the configured `env` can change, so
 /// putWindowsTerm settles TERM after those overrides.
@@ -901,7 +901,7 @@ const Subprocess = struct {
                 .adopted_client_process = session.client_process,
                 .rt_pre_exec_info = cfg.rt_pre_exec_info,
                 .rt_post_fork_info = cfg.rt_post_fork_info,
-                // Adopted sessions never create or join a noctty job object.
+                // Adopted sessions never create or join a koreterm job object.
                 .windows_job_object_plan = .{ .mode = .never },
             };
         };
@@ -1856,7 +1856,7 @@ pub const ReadThread = struct {
     /// `stop` is set or the output ends.
     ///
     /// The read is a synchronous ReadFile that only output, EOF or a cancel
-    /// ends. On a pseudo console noctty created, EOF does not come while we
+    /// ends. On a pseudo console koreterm created, EOF does not come while we
     /// wait: this process holds the pipe's write end until the pty closes,
     /// after the reader is joined. A cancel reaches only a read that is
     /// already pending, so `stop` is checked before every read. A reader
@@ -2232,7 +2232,7 @@ test "Subprocess.init frees the env it takes when it fails" {
             var env: EnvMap = .init(alloc);
             {
                 errdefer env.deinit();
-                try env.put("HOME", "C:\\Users\\noctty");
+                try env.put("HOME", "C:\\Users\\koreterm");
                 try env.put("SHELL", "cmd.exe");
             }
 
@@ -2504,7 +2504,7 @@ test "execCommand windows-direct-command-line keeps argv" {
     const result = try execCommand(
         arena.allocator(),
         .{ .direct = &.{
-            "C:\\Program Files\\Noctty Tools\\probe.exe",
+            "C:\\Program Files\\Koreterm Tools\\probe.exe",
             "--message",
             "hello world",
         } },
@@ -2513,7 +2513,7 @@ test "execCommand windows-direct-command-line keeps argv" {
 
     try std.testing.expect(!result.windows_cmd_shell);
     try std.testing.expectEqual(@as(usize, 3), result.args.len);
-    try std.testing.expectEqualStrings("C:\\Program Files\\Noctty Tools\\probe.exe", result.args[0]);
+    try std.testing.expectEqualStrings("C:\\Program Files\\Koreterm Tools\\probe.exe", result.args[0]);
     try std.testing.expectEqualStrings("--message", result.args[1]);
     try std.testing.expectEqualStrings("hello world", result.args[2]);
 }
@@ -2691,11 +2691,11 @@ test "addGhosttyBinToPath prepends on windows" {
 
     try env.put("PATH", "C:\\Users\\amant\\scoop\\shims;C:\\Windows\\System32");
 
-    try addGhosttyBinToPath(testing.allocator, &env, "C:\\Program Files\\noctty");
+    try addGhosttyBinToPath(testing.allocator, &env, "C:\\Program Files\\koreterm");
 
-    try testing.expectEqualStrings("C:\\Program Files\\noctty", env.get("GHOSTTY_BIN_DIR").?);
+    try testing.expectEqualStrings("C:\\Program Files\\koreterm", env.get("GHOSTTY_BIN_DIR").?);
     try testing.expectEqualStrings(
-        "C:\\Program Files\\noctty;C:\\Users\\amant\\scoop\\shims;C:\\Windows\\System32",
+        "C:\\Program Files\\koreterm;C:\\Users\\amant\\scoop\\shims;C:\\Windows\\System32",
         env.get("PATH").?,
     );
 }
@@ -2707,13 +2707,13 @@ test "addGhosttyBinToPath avoids duplicate windows entry" {
     var env: EnvMap = .init(testing.allocator);
     defer env.deinit();
 
-    try env.put("PATH", "C:\\Program Files\\Noctty;C:\\Windows\\System32");
+    try env.put("PATH", "C:\\Program Files\\Koreterm;C:\\Windows\\System32");
 
-    try addGhosttyBinToPath(testing.allocator, &env, "c:\\program files\\noctty");
+    try addGhosttyBinToPath(testing.allocator, &env, "c:\\program files\\koreterm");
 
-    try testing.expectEqualStrings("c:\\program files\\noctty", env.get("GHOSTTY_BIN_DIR").?);
+    try testing.expectEqualStrings("c:\\program files\\koreterm", env.get("GHOSTTY_BIN_DIR").?);
     try testing.expectEqualStrings(
-        "C:\\Program Files\\Noctty;C:\\Windows\\System32",
+        "C:\\Program Files\\Koreterm;C:\\Windows\\System32",
         env.get("PATH").?,
     );
 }
@@ -2727,14 +2727,14 @@ test "addGhosttyBinToPath prepends existing windows entry when not first" {
 
     try env.put(
         "PATH",
-        "C:\\Users\\amant\\scoop\\shims;C:\\Program Files\\Noctty;C:\\Windows\\System32",
+        "C:\\Users\\amant\\scoop\\shims;C:\\Program Files\\Koreterm;C:\\Windows\\System32",
     );
 
-    try addGhosttyBinToPath(testing.allocator, &env, "c:\\program files\\noctty");
+    try addGhosttyBinToPath(testing.allocator, &env, "c:\\program files\\koreterm");
 
-    try testing.expectEqualStrings("c:\\program files\\noctty", env.get("GHOSTTY_BIN_DIR").?);
+    try testing.expectEqualStrings("c:\\program files\\koreterm", env.get("GHOSTTY_BIN_DIR").?);
     try testing.expectEqualStrings(
-        "c:\\program files\\noctty;C:\\Users\\amant\\scoop\\shims;C:\\Program Files\\Noctty;C:\\Windows\\System32",
+        "c:\\program files\\koreterm;C:\\Users\\amant\\scoop\\shims;C:\\Program Files\\Koreterm;C:\\Windows\\System32",
         env.get("PATH").?,
     );
 }
@@ -2745,13 +2745,13 @@ test "putTermEnv on Windows exports TERM and no TERMINFO" {
     const testing = std.testing;
     var env: EnvMap = .init(testing.allocator);
     defer env.deinit();
-    try putTermEnv(&env, "xterm-ghostty", "C:\\noctty/share/terminfo");
+    try putTermEnv(&env, "xterm-ghostty", "C:\\koreterm/share/terminfo");
     try testing.expectEqualStrings("xterm-ghostty", env.get("TERM").?);
     try testing.expectEqualStrings("truecolor", env.get("COLORTERM").?);
     try testing.expectEqual(null, env.get("TERMINFO"));
 }
 
-test "putTermEnv on Windows drops a TERMINFO an older noctty exported" {
+test "putTermEnv on Windows drops a TERMINFO an older koreterm exported" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
     const testing = std.testing;
@@ -2759,18 +2759,18 @@ test "putTermEnv on Windows drops a TERMINFO an older noctty exported" {
     defer env.deinit();
 
     for ([_][]const u8{
-        "C:\\noctty/share/terminfo",
-        "c:\\Noctty\\share\\terminfo",
-        "C:/noctty/share/terminfo",
+        "C:\\koreterm/share/terminfo",
+        "c:\\Koreterm\\share\\terminfo",
+        "C:/koreterm/share/terminfo",
     }) |inherited| {
         try env.put("TERMINFO", inherited);
-        try putTermEnv(&env, "xterm-256color", "C:\\noctty/share/terminfo");
+        try putTermEnv(&env, "xterm-256color", "C:\\koreterm/share/terminfo");
         try testing.expectEqual(null, env.get("TERMINFO"));
     }
 
     // One the user set is theirs.
     try env.put("TERMINFO", "C:\\Users\\me\\terminfo");
-    try putTermEnv(&env, "xterm-256color", "C:\\noctty/share/terminfo");
+    try putTermEnv(&env, "xterm-256color", "C:\\koreterm/share/terminfo");
     try testing.expectEqualStrings("C:\\Users\\me\\terminfo", env.get("TERMINFO").?);
 }
 
@@ -3157,9 +3157,9 @@ test "a pane that starts WSL's bash.exe launcher runs WSL (#520 review)" {
 
 test "samePath" {
     const testing = std.testing;
-    try testing.expect(samePath("C:\\noctty/share/terminfo", "c:/NOCTTY\\share\\terminfo"));
-    try testing.expect(!samePath("C:\\noctty/share/terminfo", "C:\\noctty/share/terminfo2"));
-    try testing.expect(!samePath("C:\\noctty/share/terminfo", "C:\\noctty-share/terminfo"));
+    try testing.expect(samePath("C:\\koreterm/share/terminfo", "c:/KORETERM\\share\\terminfo"));
+    try testing.expect(!samePath("C:\\koreterm/share/terminfo", "C:\\koreterm/share/terminfo2"));
+    try testing.expect(!samePath("C:\\koreterm/share/terminfo", "C:\\koreterm-share/terminfo"));
 }
 
 test "Windows PTY read batches amortize high-volume output" {
@@ -3179,7 +3179,7 @@ test "Windows pty writes stay whole and in order when large writes overlap" {
     var name_buf: [128]u8 = undefined;
     const name = try std.fmt.bufPrint(
         &name_buf,
-        "\\\\.\\pipe\\LOCAL\\noctty-exec-write-order-{d}-{d}",
+        "\\\\.\\pipe\\LOCAL\\koreterm-exec-write-order-{d}-{d}",
         .{ windows.GetCurrentProcessId(), std.time.nanoTimestamp() },
     );
     var name_w_buf: [128]u16 = undefined;

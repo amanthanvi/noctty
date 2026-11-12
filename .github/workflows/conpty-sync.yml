@@ -1,10 +1,10 @@
 name: Windows ConPTY Sync
 
-# Differential check that noctty's screen agrees with ConPTY's own buffer after
+# Differential check that koreterm's screen agrees with ConPTY's own buffer after
 # resizes, the search bar, splits, maximize, minimize, full-screen programs and
 # a resize at a Clink prompt
 # (test/windows/interactive-win11-conpty-sync.ps1, PKG-13). Every scenario runs
-# a portable noctty on a hidden desktop of the runner's session; nothing here
+# a portable koreterm on a hidden desktop of the runner's session; nothing here
 # takes the foreground or any real input.
 #
 # This is the only per-change coverage for that class: the interactive
@@ -70,7 +70,7 @@ jobs:
           path: ${{ github.workspace }}\.zig-global-cache/p
           key: ${{ runner.os }}-${{ runner.arch }}-zig-0.15.2-${{ github.job }}-packages-v1-${{ hashFiles('build.zig.zon', 'pkg/**/build.zig.zon') }}
 
-      # The harness needs noctty.exe, the bundled ConPTY (conpty.dll and
+      # The harness needs koreterm.exe, the bundled ConPTY (conpty.dll and
       # OpenConsole.exe) and share/, all of which the default build stages.
       - name: Build native binaries
         shell: pwsh
@@ -83,7 +83,7 @@ jobs:
       - name: Fetch portable Clink
         shell: pwsh
         run: |
-          $clinkRoot = Join-Path $env:RUNNER_TEMP 'noctty-clink'
+          $clinkRoot = Join-Path $env:RUNNER_TEMP 'koreterm-clink'
           New-Item -ItemType Directory -Path $clinkRoot | Out-Null
           $archive = Join-Path $clinkRoot 'clink.zip'
           Invoke-WebRequest 'https://github.com/chrisant996/clink/releases/download/v1.9.34/clink.1.9.34.4e8ae4.zip' -OutFile $archive
@@ -105,10 +105,10 @@ jobs:
         shell: pwsh
         timeout-minutes: 15
         env:
-          NOCTTY_INTERACTIVE_WIN11_CONPTY_SYNC_BOOTSTRAPPED: '1'
+          KORETERM_INTERACTIVE_WIN11_CONPTY_SYNC_BOOTSTRAPPED: '1'
         run: |
           $powershell = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
-          $clink = Join-Path $env:RUNNER_TEMP 'noctty-clink\portable\clink_x64.exe'
+          $clink = Join-Path $env:RUNNER_TEMP 'koreterm-clink\portable\clink_x64.exe'
           & $powershell -NoProfile -ExecutionPolicy Bypass -File ./test/windows/interactive-win11-conpty-sync.ps1 -NoBuild -RequireAll -ResetState -TimeoutSeconds 600 -Clink $clink
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 

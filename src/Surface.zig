@@ -1430,7 +1430,7 @@ fn queueIo(
         }
     }
 
-    // Every byte noctty writes to the pty passes through here, so this is
+    // Every byte koreterm writes to the pty passes through here, so this is
     // the one place to notice that we just submitted a line.
     switch (msg) {
         .write_small => |v| self.noteSubmittedInput(v.data[0..v.len], mutex),
@@ -2148,7 +2148,7 @@ fn childExitedAbnormally(
     // Output our error message
     try t.setAttribute(.{ .@"8_fg" = .bright_red });
     try t.setAttribute(.{ .bold = {} });
-    try t.printString("noctty failed to launch the requested command:");
+    try t.printString("koreterm failed to launch the requested command:");
     try t.setAttribute(.{ .unset = {} });
 
     t.carriageReturn();
@@ -3416,7 +3416,7 @@ fn copySelectionToClipboards(
     }
 
     if (copied and self.config.app_notifications.@"clipboard-copy") {
-        self.showAppNotification("noctty", "Copied selection to clipboard") catch |err| {
+        self.showAppNotification("koreterm", "Copied selection to clipboard") catch |err| {
             // Clipboard delivery is the requested action; a secondary desktop
             // notification failure must not turn a successful copy into a
             // failure or strand copy mode after the clipboard was updated.
@@ -7379,7 +7379,7 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
             };
 
             if (self.config.app_notifications.@"clipboard-copy") {
-                try self.showAppNotification("noctty", "Copied last command output to clipboard");
+                try self.showAppNotification("koreterm", "Copied last command output to clipboard");
             }
             return true;
         },

@@ -196,7 +196,7 @@ fn safeHost(host: []const u8) bool {
     return host[0] != '-';
 }
 
-/// A user name with nothing a command line or noctty's `%VAR%` expansion
+/// A user name with nothing a command line or koreterm's `%VAR%` expansion
 /// would read: no quotes, `%`, control characters or white space.
 fn safeUser(user: []const u8) bool {
     if (user.len > 256 or user[0] == '-') return false;
@@ -314,10 +314,12 @@ pub const RdpOptions = struct {
     colors: ?ColorDepth = null,
     compression: ?bool = null,
     experience: ?Experience = null,
+    /// `/certificates:trust|ask` (`rdp-trust-certificates`).
+    trust_certificates: ?bool = null,
 };
 
 /// The command line of an RDP connection: `mstsc.exe /v:<server>[:<port>]`
-/// and its own options. noctty never starts it: a Remote Desktop tab reads
+/// and its own options. koreterm never starts it: a Remote Desktop tab reads
 /// it back (`parseCommand`).
 pub fn writeRdpCommand(writer: *std.Io.Writer, server: []const u8, port: u16, options: RdpOptions) std.Io.Writer.Error!void {
     try writer.print("mstsc.exe /v:{s}", .{server});
@@ -325,6 +327,7 @@ pub fn writeRdpCommand(writer: *std.Io.Writer, server: []const u8, port: u16, op
     if (options.colors) |colors| try writer.print(" /colors:{d}", .{@intFromEnum(colors)});
     if (options.compression) |on| try writer.print(" /compression:{s}", .{if (on) "on" else "off"});
     if (options.experience) |experience| try writer.print(" /experience:{t}", .{experience});
+    if (options.trust_certificates) |trust| try writer.print(" /certificates:{s}", .{if (trust) "trust" else "ask"});
 }
 
 /// Whether `server` can go on a command line as a host (`safeHost`).
@@ -375,6 +378,11 @@ pub fn parseCommand(command: []const u8) ?Connection {
             if (optionValue(arg, "compression")) |value| {
                 if (std.ascii.eqlIgnoreCase(value, "on")) conn.rdp.compression = true;
                 if (std.ascii.eqlIgnoreCase(value, "off")) conn.rdp.compression = false;
+                continue;
+            }
+            if (optionValue(arg, "certificates")) |value| {
+                if (std.ascii.eqlIgnoreCase(value, "trust")) conn.rdp.trust_certificates = true;
+                if (std.ascii.eqlIgnoreCase(value, "ask")) conn.rdp.trust_certificates = false;
                 continue;
             }
             if (optionValue(arg, "experience")) |value| {
@@ -456,14 +464,15 @@ fn escape(writer: *std.Io.Writer, text: []const u8) std.Io.Writer.Error!void {
 test "an RDP command line carries the connection's own quality settings" {
     var buf: [256]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buf);
-    try writeRdpCommand(&writer, "srv", 5589, .{ .colors = .@"16", .compression = false, .experience = .fast });
-    try std.testing.expectEqualStrings("mstsc.exe /v:srv:5589 /colors:16 /compression:off /experience:fast", writer.buffered());
+    try writeRdpCommand(&writer, "srv", 5589, .{ .colors = .@"16", .compression = false, .experience = .fast, .trust_certificates = false });
+    try std.testing.expectEqualStrings("mstsc.exe /v:srv:5589 /colors:16 /compression:off /experience:fast /certificates:ask", writer.buffered());
     const conn = parseCommand(writer.buffered()).?;
     try std.testing.expectEqualStrings("srv", conn.server);
     try std.testing.expectEqual(@as(u16, 5589), conn.port);
     try std.testing.expectEqual(@as(?ColorDepth, .@"16"), conn.rdp.colors);
     try std.testing.expectEqual(@as(?bool, false), conn.rdp.compression);
     try std.testing.expectEqual(@as(?Experience, .fast), conn.rdp.experience);
+    try std.testing.expectEqual(@as(?bool, false), conn.rdp.trust_certificates);
     // None given: the config decides; an unknown value is ignored.
     const plain = parseCommand("mstsc.exe /v:srv /colors:7").?;
     try std.testing.expect(plain.rdp.colors == null and plain.rdp.compression == null and plain.rdp.experience == null);

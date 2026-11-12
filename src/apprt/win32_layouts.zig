@@ -1,7 +1,7 @@
 //! Pure helpers for Windows named layouts.
 //!
 //! Layout documents use the existing `win32_session_state.SessionState` JSON
-//! schema and live below `%LOCALAPPDATA%\noctty\layouts`. The saved-name
+//! schema and live below `%LOCALAPPDATA%\koreterm\layouts`. The saved-name
 //! enumerator and launch-argv builder are the integration point for the future
 //! C12 jump-list work; this module deliberately contains no jump-list UI.
 
@@ -253,7 +253,7 @@ test "named layout schema save load round-trip preserves approved pane fields" {
             .second = 2,
         } },
         .{ .pane = .{
-            .cwd = "C:\\src\\noctty",
+            .cwd = "C:\\src\\koreterm",
             .profile = "pwsh",
             .title_override = "Build",
             .tab_title_override = "Project",
@@ -302,7 +302,7 @@ test "named layout schema save load round-trip preserves approved pane fields" {
     try std.testing.expect(parsed.windows[0].state == null);
     try std.testing.expectEqual(@as(usize, 3), parsed.windows[0].tabs[0].layout.nodes.len);
     const left = parsed.windows[0].tabs[0].layout.nodes[1].pane;
-    try std.testing.expectEqualStrings("C:\\src\\noctty", left.cwd.?);
+    try std.testing.expectEqualStrings("C:\\src\\koreterm", left.cwd.?);
     try std.testing.expectEqualStrings("pwsh", left.profile.?);
     try std.testing.expectEqualStrings("Build", left.title_override.?);
     try std.testing.expectEqualStrings("Project", left.tab_title_override.?);

@@ -11,7 +11,7 @@ const log = std.log.scoped(.list_profiles);
 
 /// The `schema` member of the JSON output. A change that removes or renames a
 /// member bumps the number.
-const json_schema = "noctty.profiles.v1";
+const json_schema = "koreterm.profiles.v1";
 
 const Format = enum { text, json };
 
@@ -64,14 +64,14 @@ pub const Options = struct {
 /// or working directory.
 ///
 /// It reads the configuration files and searches for shells the way a new
-/// noctty does when it starts, with this process's environment and for the
+/// koreterm does when it starts, with this process's environment and for the
 /// light or dark scheme Windows reports for apps (a `theme = light:A,dark:B`
 /// can set profile keys). That includes asking `wsl.exe` for its
 /// distributions when `wsl.exe` is on `PATH`. A
-/// quick slot pinned in a running noctty moves a profile to the front of that
+/// quick slot pinned in a running koreterm moves a profile to the front of that
 /// instance's picker, and this command, a separate process, does not see the
 /// pin. A `profile-command` line the config reader rejects leaves its profile
-/// out; `noctty +validate-config` reports it.
+/// out; `koreterm +validate-config` reports it.
 ///
 /// On a terminal the profiles are an aligned table with a header. Anywhere
 /// else, or with `--plain`, each profile is one line of tab-separated fields
@@ -87,7 +87,7 @@ pub const Options = struct {
 ///   * `--plain`: Print tab-separated lines even on a terminal. This is the
 ///     default when the output is not a terminal.
 ///
-///   * `--format=json`: Print one JSON document, `{"schema":"noctty.profiles.v1",
+///   * `--format=json`: Print one JSON document, `{"schema":"koreterm.profiles.v1",
 ///     "complete":true,"profiles":[{"key":"...","label":"...","source":"...",
 ///     "hidden":false}]}`, for scripts. It is ASCII: other characters are
 ///     `\u` escapes, so a console code page cannot garble it. `--format=text`
@@ -513,7 +513,7 @@ test "list-profiles prints one JSON document that lists the profiles in order" {
         defer run_result.deinit();
         try testing.expectEqual(@as(u8, 0), run_result.exit_code);
         try testing.expectEqualStrings(
-            "{\"schema\":\"noctty.profiles.v1\",\"complete\":true,\"profiles\":[" ++
+            "{\"schema\":\"koreterm.profiles.v1\",\"complete\":true,\"profiles\":[" ++
                 "{\"key\":\"pwsh.exe\",\"label\":\"PowerShell\",\"source\":\"detected\",\"hidden\":false}," ++
                 "{\"key\":\"user:py312\",\"label\":\"Python 3.12\",\"source\":\"config\",\"hidden\":false}," ++
                 "{\"key\":\"vs:6bb7cfd9:cmd\",\"label\":\"Developer Command Prompt for VS 2022\",\"source\":\"visual-studio\",\"hidden\":false}," ++
@@ -571,7 +571,7 @@ test "list-profiles writes a label that is not UTF-8 as a string in every style"
 
     try testWrite(&out, .json, &profiles);
     try testing.expectEqualStrings(
-        "{\"schema\":\"noctty.profiles.v1\",\"complete\":true,\"profiles\":[{\"key\":\"vs:1:cmd\"," ++
+        "{\"schema\":\"koreterm.profiles.v1\",\"complete\":true,\"profiles\":[{\"key\":\"vs:1:cmd\"," ++
             "\"label\":\"VS \\ufffd\\ufffd\\ufffd \\ufffd end\\ufffd\\ufffd\",\"source\":\"visual-studio\",\"hidden\":false}]}\n",
         out.written(),
     );
@@ -639,7 +639,7 @@ test "list-profiles prints no profiles for an empty list" {
     const json = try testRun("--format=json", false, Empty.discover);
     defer json.deinit();
     try testing.expectEqualStrings(
-        "{\"schema\":\"noctty.profiles.v1\",\"complete\":true,\"profiles\":[]}\n",
+        "{\"schema\":\"koreterm.profiles.v1\",\"complete\":true,\"profiles\":[]}\n",
         json.stdout,
     );
 }

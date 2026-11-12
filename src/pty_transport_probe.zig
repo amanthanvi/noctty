@@ -4,9 +4,9 @@ const internal_os = @import("os/main.zig");
 const windows = internal_os.windows;
 const ptypkg = @import("pty.zig");
 
-const child_env_name = "NOCTTY_CONPTY_TRANSPORT_PROBE_CHILD";
-const run_env_name = "NOCTTY_RUN_CONPTY_TRANSPORT_TEST";
-const ready_marker = "NOCTTY:READY";
+const child_env_name = "KORETERM_CONPTY_TRANSPORT_PROBE_CHILD";
+const run_env_name = "KORETERM_RUN_CONPTY_TRANSPORT_TEST";
+const ready_marker = "KORETERM:READY";
 const case_count = 24;
 const max_payload_len = 24;
 const max_output_bytes = 64 * 1024;
@@ -19,12 +19,12 @@ const input_alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ" ++
 // implementation byte for byte, which the round-trip cases above do not
 // cover (their alphabet is deliberately escape-free).
 const graphics_child_mode = "graphics";
-const graphics_run_env_name = "NOCTTY_CONPTY_TRANSPORT_PROBE";
-const graphics_begin_marker = "NOCTTY-PROBE-BEGIN";
-const graphics_middle_marker = "NOCTTY-PROBE-MIDDLE";
-const graphics_end_marker = "NOCTTY-PROBE-END";
+const graphics_run_env_name = "KORETERM_CONPTY_TRANSPORT_PROBE";
+const graphics_begin_marker = "KORETERM-PROBE-BEGIN";
+const graphics_middle_marker = "KORETERM-PROBE-MIDDLE";
+const graphics_end_marker = "KORETERM-PROBE-END";
 const kitty_apc = "\x1b_Gf=24,s=4,v=1,a=T;Tk9DVFRZS0lUVFkh\x1b\\";
-const sixel_dcs = "\x1bPqNOCTTYSIXEL~\x1b\\";
+const sixel_dcs = "\x1bPqKORETERMSIXEL~\x1b\\";
 const graphics_payload = graphics_begin_marker ++ kitty_apc ++
     graphics_middle_marker ++ sixel_dcs ++ graphics_end_marker;
 
@@ -34,11 +34,11 @@ const graphics_payload = graphics_begin_marker ++ kitty_apc ++
 // child, so an encoding its input state machine does not know is dropped
 // entirely rather than passed through.
 const key_input_child_mode = "keyinput";
-const key_input_run_env_name = "NOCTTY_CONPTY_KEY_INPUT_PROBE";
-const key_input_ready_marker = "NOCTTY-KEYS-READY";
-const key_input_begin_marker = "NOCTTY-KEYS-BEGIN";
-const key_input_end_marker = "NOCTTY-KEYS-END";
-const key_input_report_marker = "NOCTTY-KEYS-REPORT";
+const key_input_run_env_name = "KORETERM_CONPTY_KEY_INPUT_PROBE";
+const key_input_ready_marker = "KORETERM-KEYS-READY";
+const key_input_begin_marker = "KORETERM-KEYS-BEGIN";
+const key_input_end_marker = "KORETERM-KEYS-END";
+const key_input_report_marker = "KORETERM-KEYS-REPORT";
 
 /// The child writes nothing but lowercase hex digits between the key-input
 /// markers, but the in-box conhost re-renders that output and can put its
@@ -111,7 +111,7 @@ test "ConPTY key input probe reads the child's hex through conhost's sequences" 
         .{ .raw = "", .digits = "" },
         .{ .raw = "1b5b41", .digits = "1b5b41" },
         // The title, BEL-terminated, between a byte's two digits.
-        .{ .raw = "1b5\x1b]0;D:\\a\\noctty\\.zig-cache\\o\\e742\\ghostty-test.exe\x07b41", .digits = "1b5b41" },
+        .{ .raw = "1b5\x1b]0;D:\\a\\koreterm\\.zig-cache\\o\\e742\\ghostty-test.exe\x07b41", .digits = "1b5b41" },
         // ST-terminated, then a line break and a cursor move.
         .{ .raw = "0d\x1b]0;C:\\x\x1b\\\r\n\x1b[2;1H0a", .digits = "0d0a" },
         .{ .raw = "\x1b[?25l7f\x1b[?25h", .digits = "7f" },
@@ -158,13 +158,13 @@ const KeyInputCase = struct {
     legacy_equivalent: []const u8,
 };
 
-/// The encodings noctty can emit for Esc, Ctrl+[, Ctrl+C, Tab and Enter, plus
+/// The encodings koreterm can emit for Esc, Ctrl+[, Ctrl+C, Tab and Enter, plus
 /// one sequence (CSI A) ConPTY is known to understand, as a control case that
 /// proves the input state machine is active.
 ///
 /// A Kitty CSI-u key number is the key's own codepoint, so Ctrl+[ is 91 ('[')
 /// with a Ctrl modifier, not 27: `CSI 27;5 u` is Ctrl+Esc and is kept as its
-/// own case. `CSI 27;129 u` is the plain Esc noctty writes while Num Lock is
+/// own case. `CSI 27;129 u` is the plain Esc koreterm writes while Num Lock is
 /// on, because the Kitty modifier field carries the lock modifiers
 /// (num_lock = 128, reported as bitmask + 1). Both forms were captured from a
 /// real Claude Code session in issue #223.
@@ -429,7 +429,7 @@ pub fn runChildIfRequested() void {
                 var response: [64]u8 = undefined;
                 const marker = std.fmt.bufPrint(
                     &response,
-                    "NOCTTY:{d}:{s}\r\n",
+                    "KORETERM:{d}:{s}\r\n",
                     .{ case_index, line },
                 ) catch std.process.exit(98);
                 writeAll(stdout, marker);
@@ -679,7 +679,7 @@ pub fn runParentIfRequested() !void {
                 }
                 expected_markers[expected_count] = try std.fmt.allocPrint(
                     allocator,
-                    "NOCTTY:{d}:{s}",
+                    "KORETERM:{d}:{s}",
                     .{ case_index, payload[0..payload_len] },
                 );
                 expected_count += 1;
@@ -1209,7 +1209,7 @@ test "Windows ConPTY input transport probe reports key encoding survival" {
                 std.debug.print("\n", .{});
                 // Every case must reach the child byte for byte. ConPTY parses
                 // our bytes into INPUT_RECORDs and re-synthesises them, so a
-                // dropped or rewritten case is a transport limit that noctty's
+                // dropped or rewritten case is a transport limit that koreterm's
                 // key encoder has to work around.
                 if (survival != .passed_through) failures += 1;
             }

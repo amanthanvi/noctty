@@ -16,50 +16,50 @@ pub const Options = struct {
 };
 
 pub const keybinding_discovery_hint =
-    \\  `noctty +explain-config --keybind=<action>` explains one keybind action.
-    \\  `noctty +list-actions --docs` lists bindable actions with docs.
-    \\  `noctty +list-keybinds --default` shows the shipped default bindings.
-    \\  `noctty +list-keybinds --docs` annotates bindings with action docs.
+    \\  `koreterm +explain-config --keybind=<action>` explains one keybind action.
+    \\  `koreterm +list-actions --docs` lists bindable actions with docs.
+    \\  `koreterm +list-keybinds --default` shows the shipped default bindings.
+    \\  `koreterm +list-keybinds --docs` annotates bindings with action docs.
 ;
 
 const help_prelude =
-    \\Usage: noctty [+action] [options]
+    \\Usage: koreterm [+action] [options]
     \\
-    \\Run the Windows-native noctty terminal or a specific helper action.
+    \\Run the Windows-native koreterm terminal or a specific helper action.
     \\
-    \\If no `+action` is specified, run `noctty.exe`.
+    \\If no `+action` is specified, run `koreterm.exe`.
     \\All configuration keys are available as command line options.
     \\To specify a configuration key, use the `--<key>=<value>` syntax
     \\where key and value are the same format you'd put into a configuration
     \\file. For example, `--font-size=12` or `--font-family="Fira Code"`.
     \\
     \\Discover configuration from the CLI:
-    \\  `noctty +show-config --default --docs` lists every config key and its docs.
-    \\  `noctty +explain-config <option>` explains one config key.
+    \\  `koreterm +show-config --default --docs` lists every config key and its docs.
+    \\  `koreterm +explain-config <option>` explains one config key.
     \\
     \\A special command line argument `-e <command>` can be used to run
     \\the specific command inside the terminal emulator. For example,
-    \\`noctty -e top` will run the `top` command inside the terminal.
+    \\`koreterm -e top` will run the `top` command inside the terminal.
     \\
     \\Discover actions and keybindings:
     \\
 ++ keybinding_discovery_hint ++
     \\
     \\Useful Windows actions:
-    \\  `noctty +new-window` forwards into the running instance when possible.
-    \\  `noctty +list-windows` prints local automation window IDs as JSON.
-    \\  `noctty +list-profiles` prints the profile keys that `default-profile` takes.
-    \\  `noctty +perform-action new_tab` forwards a safe UI action.
-    \\  `noctty --safe-mode` uses built-in config and skips session restore.
-    \\  `noctty +diagnostic-bundle` creates a local redacted support bundle.
-    \\  `noctty +edit-config` opens the config file in your default editor.
+    \\  `koreterm +new-window` forwards into the running instance when possible.
+    \\  `koreterm +list-windows` prints local automation window IDs as JSON.
+    \\  `koreterm +list-profiles` prints the profile keys that `default-profile` takes.
+    \\  `koreterm +perform-action new_tab` forwards a safe UI action.
+    \\  `koreterm --safe-mode` uses built-in config and skips session restore.
+    \\  `koreterm +diagnostic-bundle` creates a local redacted support bundle.
+    \\  `koreterm +edit-config` opens the config file in your default editor.
     \\
     \\Available actions:
     \\
     \\
 ;
 
-/// The `help` command shows general help about noctty. Recognized as either
+/// The `help` command shows general help about koreterm. Recognized as either
 /// `-h, `--help`, or like other actions `+help`.
 ///
 /// You can also specify `--help` or `-h` along with any action such as
@@ -95,8 +95,8 @@ pub fn run(alloc: Allocator) !u8 {
 }
 
 test "help prelude is Windows-only" {
-    try std.testing.expect(std.mem.indexOf(u8, help_prelude, "Windows-native noctty terminal") != null);
-    try std.testing.expect(std.mem.indexOf(u8, help_prelude, "noctty.exe") != null);
+    try std.testing.expect(std.mem.indexOf(u8, help_prelude, "Windows-native koreterm terminal") != null);
+    try std.testing.expect(std.mem.indexOf(u8, help_prelude, "koreterm.exe") != null);
     try std.testing.expect(std.mem.indexOf(u8, help_prelude, "Ghostty.app") == null);
     try std.testing.expect(std.mem.indexOf(u8, help_prelude, "open -na") == null);
 }

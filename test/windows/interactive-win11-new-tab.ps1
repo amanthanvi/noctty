@@ -29,7 +29,7 @@ if ($ResetState) { $forwardedArgs += '-ResetState' }
 Invoke-InteractiveWin11HarnessMain `
     -RepoRoot $repoRoot `
     -LauncherPath $launcherPath `
-    -EnvironmentVariable 'NOCTTY_INTERACTIVE_WIN11_NEW_TAB_BOOTSTRAPPED' `
+    -EnvironmentVariable 'KORETERM_INTERACTIVE_WIN11_NEW_TAB_BOOTSTRAPPED' `
     -ArgumentList $forwardedArgs
 
 Add-Type -TypeDefinition @'
@@ -135,7 +135,7 @@ function Find-HostWindow {
             return $true
         }
 
-        if ((Get-WindowClassName -Hwnd $hwnd) -eq 'noctty.win32.host') {
+        if ((Get-WindowClassName -Hwnd $hwnd) -eq 'koreterm.win32.host') {
             $script:Win11NewTabFoundHost = $hwnd
             return $false
         }
@@ -234,7 +234,7 @@ function Invoke-NewTabScenario {
     $launchArgs = @(
         Get-InteractiveWin11ContainmentArguments
         '--single-instance=false'
-        "--class=noctty-new-tab-$Name-$($Layout.SandboxId)"
+        "--class=koreterm-new-tab-$Name-$($Layout.SandboxId)"
         '--command=cmd.exe'
     )
 
@@ -363,7 +363,7 @@ function Invoke-NewTabScenarioRun {
         -ResetState:$ResetState
     $scenarioLayout = $scenarioHarness.Layout
     $scenarioRepoRoot = $scenarioHarness.RepoRoot
-    $scenarioConfigDir = Join-Path $scenarioLayout.LocalAppData 'noctty'
+    $scenarioConfigDir = Join-Path $scenarioLayout.LocalAppData 'koreterm'
     $scenarioConfigPath = Join-Path $scenarioConfigDir 'config.ghostty'
     New-Item -ItemType Directory -Force -Path $scenarioConfigDir | Out-Null
     [System.IO.File]::WriteAllText(

@@ -46,24 +46,24 @@ $localAppData = if ($env:LOCALAPPDATA) {
     Join-Path $userHome "AppData\Local"
 }
 $zigTarget = $archInfo.ZigTarget
-$stageBase = Join-Path $outputRootPath "noctty-$Version-windows-$Architecture"
-$portableRoot = Join-Path $stageBase "noctty"
+$stageBase = Join-Path $outputRootPath "koreterm-$Version-windows-$Architecture"
+$portableRoot = Join-Path $stageBase "koreterm"
 $zipPath = Join-Path $stageBase (New-WindowsPackageArtifactName -Version $Version -Architecture $Architecture -Kind portable)
 $manifestPath = Join-Path $stageBase (New-WindowsPackageArtifactName -Version $Version -Architecture $Architecture -Kind manifest)
 $installerPath = Join-Path $stageBase (New-WindowsPackageArtifactName -Version $Version -Architecture $Architecture -Kind setup)
 $symbolsPath = Join-Path $stageBase (New-WindowsPackageArtifactName -Version $Version -Architecture $Architecture -Kind symbols)
 $symbolsRoot = Join-Path $stageBase "symbols"
 $checksumsPath = Join-Path $stageBase (New-WindowsPackageArtifactName -Version $Version -Architecture $Architecture -Kind checksums)
-$releaseIconPath = Join-Path $stageBase "noctty-icon.svg"
+$releaseIconPath = Join-Path $stageBase "koreterm-icon.svg"
 $zigOutBin = Join-Path $repoRoot "zig-out/bin"
 $zigOutShare = Join-Path $repoRoot "zig-out/share"
-$exePath = Join-Path $zigOutBin "noctty.exe"
-$buildCapabilitiesPath = Join-Path $zigOutBin "noctty-build-capabilities.json"
+$exePath = Join-Path $zigOutBin "koreterm.exe"
+$buildCapabilitiesPath = Join-Path $zigOutBin "koreterm-build-capabilities.json"
 # Paths under zig-out\bin; each is staged at the portable root under its leaf
 # name.
 $runtimeFiles = @(
-    "noctty.com",
-    "noctty.exe",
+    "koreterm.com",
+    "koreterm.exe",
     # The ghostty-vt.dll placeholder (src/build/GhosttyVtStub.zig), not
     # libghostty-vt: it exports nothing and fails to load. The portable
     # updater of 1.3.125 to 1.3.136 refuses a ZIP without a ghostty-vt.dll.
@@ -71,17 +71,17 @@ $runtimeFiles = @(
     # portable_zip_carries_legacy_entries in src/update/portable_apply.zig
     # says when the placeholder goes.
     "ghostty-vt-stub\ghostty-vt.dll",
-    "noctty-terminal-handoff-proxy.dll"
+    "koreterm-terminal-handoff-proxy.dll"
 )
 $licensePath = Join-Path $repoRoot "LICENSE"
 $conptyLicensePath = Join-Path $repoRoot "dist/windows/LICENSE-conpty.txt"
 $conptyPinPath = Join-Path $repoRoot "dist/windows/conpty-redist.json"
-$conptyCacheRoot = Join-Path $localAppData "noctty/cache/conpty"
+$conptyCacheRoot = Join-Path $localAppData "koreterm/cache/conpty"
 $readmePath = Join-Path $repoRoot "README.md"
 $configTemplatePath = Join-Path $repoRoot "src/config/config-template"
-$innoScriptPath = Join-Path $repoRoot "dist/windows/noctty.iss"
-$iconPath = Join-Path $repoRoot "dist/windows/noctty.ico"
-$releaseIconSourcePath = Join-Path $repoRoot "images/noctty-flag-light.svg"
+$innoScriptPath = Join-Path $repoRoot "dist/windows/koreterm.iss"
+$iconPath = Join-Path $repoRoot "dist/windows/koreterm.ico"
+$releaseIconSourcePath = Join-Path $repoRoot "images/koreterm-flag-light.svg"
 $signingPfxPath = if ($env:WINDOWS_CODESIGN_PFX_PATH) {
     $env:WINDOWS_CODESIGN_PFX_PATH
 } else {
@@ -105,7 +105,7 @@ $signingTimestampUrl = if ($env:WINDOWS_CODESIGN_TIMESTAMP_URL) {
 $signingDescription = if ($env:WINDOWS_CODESIGN_DESCRIPTION) {
     $env:WINDOWS_CODESIGN_DESCRIPTION
 } else {
-    "noctty"
+    "koreterm"
 }
 $signingUrl = if ($env:WINDOWS_CODESIGN_URL) {
     $env:WINDOWS_CODESIGN_URL
@@ -228,7 +228,7 @@ function New-TemporaryPfxFile {
         throw "WINDOWS_CODESIGN_PFX_BASE64 was not valid base64."
     }
 
-    $path = Join-Path ([System.IO.Path]::GetTempPath()) ("noctty-signing-" + [System.Guid]::NewGuid().ToString("N") + ".pfx")
+    $path = Join-Path ([System.IO.Path]::GetTempPath()) ("koreterm-signing-" + [System.Guid]::NewGuid().ToString("N") + ".pfx")
     [System.IO.File]::WriteAllBytes($path, $bytes)
     return $path
 }
@@ -249,7 +249,7 @@ function Remove-ArtifactSigningTemporaryRoot {
     $tempRoot = [System.IO.Path]::GetFullPath([System.IO.Path]::GetTempPath()).TrimEnd([System.IO.Path]::DirectorySeparatorChar)
     $resolved = [System.IO.Path]::GetFullPath($Path)
     if ([System.IO.Path]::GetDirectoryName($resolved) -ne $tempRoot -or
-        [System.IO.Path]::GetFileName($resolved) -notmatch '\Anoctty-artifact-signing-[0-9a-f]{32}\z') {
+        [System.IO.Path]::GetFileName($resolved) -notmatch '\Akoreterm-artifact-signing-[0-9a-f]{32}\z') {
         throw "Refusing to remove an unexpected Artifact Signing temporary path: $resolved"
     }
     if (Test-Path -LiteralPath $resolved) {
@@ -271,7 +271,7 @@ function Get-ArtifactSigningConfig {
         throw "Azure Artifact Signing needs signtool.exe $artifactSigningMinimumSignToolVersion or newer; $signToolPath is $signToolVersion."
     }
 
-    $temporaryRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("noctty-artifact-signing-" + [System.Guid]::NewGuid().ToString("N"))
+    $temporaryRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("koreterm-artifact-signing-" + [System.Guid]::NewGuid().ToString("N"))
     New-Item -ItemType Directory -Path $temporaryRoot -Force | Out-Null
     try {
         $packagePath = Join-Path $temporaryRoot "client.nupkg"
@@ -301,7 +301,7 @@ function Get-ArtifactSigningConfig {
             Endpoint = $Configuration.Endpoint
             CodeSigningAccountName = $Configuration.AccountName
             CertificateProfileName = $Configuration.CertificateProfileName
-            CorrelationId = "noctty-$Version-windows-$Architecture"
+            CorrelationId = "koreterm-$Version-windows-$Architecture"
             ExcludeCredentials = @(
                 "EnvironmentCredential",
                 "ManagedIdentityCredential",
@@ -510,17 +510,17 @@ function Write-PortablePayloadManifest {
         [System.StringComparer]::Ordinal
     )
     foreach ($name in @(
-        "noctty.com",
-        "noctty.exe",
+        "koreterm.com",
+        "koreterm.exe",
         "ghostty-vt.dll",
-        "noctty-terminal-handoff-proxy.dll",
+        "koreterm-terminal-handoff-proxy.dll",
         "conpty.dll",
         "OpenConsole.exe",
         "LICENSE",
         "LICENSE-conpty.txt",
         "config-template.ghostty",
         "README.md",
-        "noctty.ico",
+        "koreterm.ico",
         "share"
     )) {
         [void]$managedRootFiles.Add($name)
@@ -545,7 +545,7 @@ function Write-PortablePayloadManifest {
     $relativePaths.Sort([System.StringComparer]::Ordinal)
 
     $lines = [System.Collections.Generic.List[string]]::new()
-    $lines.Add("# noctty portable payload manifest")
+    $lines.Add("# koreterm portable payload manifest")
     foreach ($relativePath in $relativePaths) {
         $payloadPath = Join-Path $PayloadRoot $relativePath.Replace("/", "\")
         $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $payloadPath).Hash.ToLowerInvariant()
@@ -649,13 +649,13 @@ try {
     # library: a stub's size, no export or import table, its FileDescription.
     Assert-GhosttyVtStub -Path (Join-Path $portableRoot "ghostty-vt.dll")
 
-    # Portable staging's downgrade guard reads noctty.exe's fixed PE version.
+    # Portable staging's downgrade guard reads koreterm.exe's fixed PE version.
     # Check both the display string and numeric fields, including the zero
     # fourth component, before producing any release artifacts.
-    $stagedVersion = (Get-Item -LiteralPath (Join-Path $portableRoot "noctty.exe")).VersionInfo
+    $stagedVersion = (Get-Item -LiteralPath (Join-Path $portableRoot "koreterm.exe")).VersionInfo
     $numericVersion = "$($stagedVersion.FileMajorPart).$($stagedVersion.FileMinorPart).$($stagedVersion.FileBuildPart)"
     if ($stagedVersion.FileVersion -cne $Version -or $numericVersion -cne $Version -or $stagedVersion.FilePrivatePart -ne 0) {
-        throw "Staged noctty.exe version mismatch: expected '$Version' ($Version.0), got '$($stagedVersion.FileVersion)' ($numericVersion.$($stagedVersion.FilePrivatePart))."
+        throw "Staged koreterm.exe version mismatch: expected '$Version' ($Version.0), got '$($stagedVersion.FileVersion)' ($numericVersion.$($stagedVersion.FilePrivatePart))."
     }
 
     $conptyStaged = Install-ConPtyRedist `
@@ -672,7 +672,7 @@ try {
     Copy-Item -LiteralPath $licensePath -Destination (Join-Path $portableRoot "LICENSE") -Force
     Copy-Item -LiteralPath $configTemplatePath -Destination (Join-Path $portableRoot "config-template.ghostty") -Force
     Copy-Item -LiteralPath $readmePath -Destination (Join-Path $portableRoot "README.md") -Force
-    Copy-Item -LiteralPath $iconPath -Destination (Join-Path $portableRoot "noctty.ico") -Force
+    Copy-Item -LiteralPath $iconPath -Destination (Join-Path $portableRoot "koreterm.ico") -Force
     Copy-Item -LiteralPath $releaseIconSourcePath -Destination $releaseIconPath -Force
 
     if (Test-Path -LiteralPath $zigOutShare) {
@@ -680,7 +680,7 @@ try {
     }
     # A -Demit-lib-vt=true build installs libghostty-vt's pkg-config file
     # into zig-out\share, and packaging copies the tree as it finds it, so a
-    # warm tree can still hold one. noctty ships no library for it to
+    # warm tree can still hold one. koreterm ships no library for it to
     # describe, and the updater swaps share\ as one directory, so no older
     # updater needs it.
     $libVtPkgConfigDir = Join-Path $portableRoot "share\pkgconfig"
@@ -697,7 +697,7 @@ try {
 
     # The compiled entries for TERM=xterm-ghostty that the build writes on
     # Windows. They mark the resources directory (src/os/resourcesdir.zig)
-    # and can be copied or pointed at by hand; noctty installs the same entry
+    # and can be copied or pointed at by hand; koreterm installs the same entry
     # into the user's own terminfo directory at startup.
     foreach ($terminfoEntry in @("share\terminfo\78\xterm-ghostty", "share\terminfo\67\ghostty")) {
         $terminfoPath = Join-Path $portableRoot $terminfoEntry
@@ -709,13 +709,13 @@ try {
     $hostArchitecture = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString().ToLowerInvariant()
     if ($hostArchitecture -eq $Architecture) {
         Write-Host "Packaging phase: verify custom shader capability"
-        $portableCommand = Join-Path $portableRoot "noctty.com"
+        $portableCommand = Join-Path $portableRoot "koreterm.com"
         $versionText = & $portableCommand +version | Out-String
         if ($LASTEXITCODE -ne 0) {
-            throw "Packaged noctty.com +version failed with exit code $LASTEXITCODE."
+            throw "Packaged koreterm.com +version failed with exit code $LASTEXITCODE."
         }
         if ($versionText -notmatch "custom shaders: enabled") {
-            throw "Packaged noctty.com does not report custom shader support."
+            throw "Packaged koreterm.com does not report custom shader support."
         }
     }
     else {
@@ -759,8 +759,8 @@ try {
     # directory of their own and ship as one zip.
     Write-Host "Packaging phase: create symbols zip"
     $symbolsProduced = $false
-    if ($null -eq (Get-PeCodeViewIdentity -Path (Join-Path $portableRoot "noctty.exe"))) {
-        $symbolsSkipReason = "noctty.exe has no CodeView record, so this is a stripped build; build with -Dstrip=false."
+    if ($null -eq (Get-PeCodeViewIdentity -Path (Join-Path $portableRoot "koreterm.exe"))) {
+        $symbolsSkipReason = "koreterm.exe has no CodeView record, so this is a stripped build; build with -Dstrip=false."
         if ($RequireSymbols) {
             throw "Symbols are required, but $symbolsSkipReason"
         }

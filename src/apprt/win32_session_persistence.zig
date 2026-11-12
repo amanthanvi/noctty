@@ -536,7 +536,7 @@ test "win32 session persistence OOM load is transient and leaves source present"
 }
 
 test "win32 session persistence schema round-trips multi-window selected indices" {
-    const nodes = [_]schema.Node{.{ .pane = .{ .cwd = "C:\\src\\noctty" } }};
+    const nodes = [_]schema.Node{.{ .pane = .{ .cwd = "C:\\src\\koreterm" } }};
     const first_tabs = [_]schema.Tab{
         .{ .selected_leaf = 0, .layout = .{ .root = 0, .nodes = &nodes } },
         .{ .selected_leaf = 0, .layout = .{ .root = 0, .nodes = &nodes } },
@@ -562,7 +562,7 @@ test "win32 session persistence named layout load owns pane strings after the re
     // Deliberately escape-free values: `std.json` borrows those directly from
     // the read buffer that `loadAlloc` frees before it returns.
     const raw =
-        \\{"schema_version":1,"windows":[{"selected_tab":0,"tabs":[{"selected_leaf":0,"layout":{"root":0,"nodes":[{"pane":{"cwd":"C:/src/noctty","profile":"pwsh.exe","title_override":"Build","tab_title_override":"Project"}}]}}]}]}
+        \\{"schema_version":1,"windows":[{"selected_tab":0,"tabs":[{"selected_leaf":0,"layout":{"root":0,"nodes":[{"pane":{"cwd":"C:/src/koreterm","profile":"pwsh.exe","title_override":"Build","tab_title_override":"Project"}}]}}]}]}
     ;
     {
         var file = try tmp.dir.createFile("layout.json", .{});
@@ -586,7 +586,7 @@ test "win32 session persistence named layout load owns pane strings after the re
     @memset(scratch, 'Z');
 
     const pane = parsed.windows[0].tabs[0].layout.nodes[0].pane;
-    try std.testing.expectEqualStrings("C:/src/noctty", pane.cwd.?);
+    try std.testing.expectEqualStrings("C:/src/koreterm", pane.cwd.?);
     try std.testing.expectEqualStrings("pwsh.exe", pane.profile.?);
     try std.testing.expectEqualStrings("Build", pane.title_override.?);
     try std.testing.expectEqualStrings("Project", pane.tab_title_override.?);

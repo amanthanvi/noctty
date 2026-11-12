@@ -1,4 +1,4 @@
-//! noctty UI Automation — public module.
+//! koreterm UI Automation — public module.
 //!
 //! Exposes enough of the UIA contract that:
 //!   * The host HWND answers WM_GETOBJECT with a working root provider.

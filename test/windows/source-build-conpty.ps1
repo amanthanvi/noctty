@@ -7,8 +7,8 @@ param(
 )
 
 # Checks that `zig build` staged the pinned bundled ConPTY pair beside
-# noctty.exe (src/build/ConptyRedist.zig), with the release helper's own hash
-# and PE checks. On a native build it also checks that noctty selects it.
+# koreterm.exe (src/build/ConptyRedist.zig), with the release helper's own hash
+# and PE checks. On a native build it also checks that koreterm selects it.
 
 $ErrorActionPreference = "Stop"
 $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
@@ -32,9 +32,9 @@ foreach ($file in @(
 }
 
 if ($Architecture -eq (Get-DefaultWindowsPackageArchitecture)) {
-    $versionText = & (Join-Path $bin "noctty.com") +version | Out-String
+    $versionText = & (Join-Path $bin "koreterm.com") +version | Out-String
     if ($LASTEXITCODE -ne 0) {
-        throw "noctty.com +version failed with exit code $LASTEXITCODE."
+        throw "koreterm.com +version failed with exit code $LASTEXITCODE."
     }
     if ($versionText -notmatch "ConPTY\s*: bundled \(") {
         throw "The source build did not select the bundled ConPTY:`n$versionText"

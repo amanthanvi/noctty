@@ -1285,7 +1285,7 @@ pub const StreamHandler = struct {
             var stack_alloc = std.heap.stackFallback(1024, arena_alloc.allocator());
             defer arena_alloc.deinit();
             const path = internal_os.local_path.pwd(stack_alloc.get(), .{ .conemu = url }) catch |err| switch (err) {
-                // Not a plain path: a URL, read below (noctty's cmd
+                // Not a plain path: a URL, read below (koreterm's cmd
                 // integration sends `kitty-shell-cwd://localhost/%P`).
                 error.NotPlainPath => break :plain,
                 error.OutOfMemory => return error.OutOfMemory,

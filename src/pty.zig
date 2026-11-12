@@ -33,13 +33,13 @@ pub const ConPtyInfo = struct {
     }
 };
 
-/// Why noctty uses Windows' in-box conhost instead of the bundled pair. On the
+/// Why koreterm uses Windows' in-box conhost instead of the bundled pair. On the
 /// Windows builds measured, the in-box conhost re-renders output instead of
 /// forwarding it, answers device queries (DA, DSR, DECRQM) itself, never
 /// returns the OSC 4/10/11/12 colour or XTGETTCAP replies, and strips Kitty
 /// graphics and Sixel; see docs/windows.md, "ConPTY source".
 pub const ConPtyFallback = WindowsConPty.BundledLoadError || error{
-    /// `NOCTTY_CONPTY=inbox` asked for it.
+    /// `KORETERM_CONPTY=inbox` asked for it.
     ForcedInbox,
     /// The bundled pair loaded but could not create a pseudo console, and no
     /// bundled pseudo console was open, so the process was demoted.
@@ -48,9 +48,9 @@ pub const ConPtyFallback = WindowsConPty.BundledLoadError || error{
 
 pub fn describeConPtyFallback(reason: ConPtyFallback) []const u8 {
     return switch (reason) {
-        error.ForcedInbox => "NOCTTY_CONPTY=inbox is set",
+        error.ForcedInbox => "KORETERM_CONPTY=inbox is set",
         error.PathUnavailable => "bundled ConPTY path could not be resolved",
-        error.NotFound => "conpty.dll is not next to noctty.exe",
+        error.NotFound => "conpty.dll is not next to koreterm.exe",
         error.LoadFailed => "bundled ConPTY failed to load",
         error.OpenConsoleMissing => "bundled ConPTY is missing OpenConsole.exe",
         error.OpenConsoleWrongArch => "bundled OpenConsole.exe has the wrong architecture",
@@ -600,7 +600,7 @@ const WindowsConPty = struct {
         };
 
         log.warn("{s}; {s}", .{ describeConPtyFallback(reason), inbox_consequences });
-        // An explicit NOCTTY_CONPTY=inbox is the user's own choice.
+        // An explicit KORETERM_CONPTY=inbox is the user's own choice.
         if (reason != error.ForcedInbox) signalFallbackBanner();
         fallback_functions = .inboxBecause(reason);
         return &fallback_functions;
@@ -609,7 +609,7 @@ const WindowsConPty = struct {
     fn forceInbox() bool {
         const value = std.process.getEnvVarOwned(
             std.heap.page_allocator,
-            "NOCTTY_CONPTY",
+            "KORETERM_CONPTY",
         ) catch return false;
         defer std.heap.page_allocator.free(value);
 
@@ -806,9 +806,9 @@ const WindowsPty = struct {
     };
 
     pub const HandoffHandles = struct {
-        /// Read by OpenConsole; noctty writes keystrokes to `in_pipe`.
+        /// Read by OpenConsole; koreterm writes keystrokes to `in_pipe`.
         input: windows.HANDLE,
-        /// Written by OpenConsole; noctty reads application output here.
+        /// Written by OpenConsole; koreterm reads application output here.
         output: windows.HANDLE,
     };
 
@@ -1400,9 +1400,9 @@ test "handoff visibility resize and close share the signal lock" {
     }
 }
 
-/// The caller's `NOCTTY_CONPTY`, if set, for `restoreConPtyEnvForTest`.
+/// The caller's `KORETERM_CONPTY`, if set, for `restoreConPtyEnvForTest`.
 fn saveConPtyEnvForTest(alloc: std.mem.Allocator) !?[:0]u8 {
-    const raw = std.process.getEnvVarOwned(alloc, "NOCTTY_CONPTY") catch return null;
+    const raw = std.process.getEnvVarOwned(alloc, "KORETERM_CONPTY") catch return null;
     defer alloc.free(raw);
     return try alloc.dupeZ(u8, raw);
 }
@@ -1410,9 +1410,9 @@ fn saveConPtyEnvForTest(alloc: std.mem.Allocator) !?[:0]u8 {
 fn restoreConPtyEnvForTest(original: ?[:0]const u8) void {
     WindowsConPty.resetForTest();
     if (original) |value| {
-        _ = internal_os.setenv("NOCTTY_CONPTY", value);
+        _ = internal_os.setenv("KORETERM_CONPTY", value);
     } else {
-        _ = internal_os.unsetenv("NOCTTY_CONPTY");
+        _ = internal_os.unsetenv("KORETERM_CONPTY");
     }
 }
 
@@ -1425,7 +1425,7 @@ test "Windows ConPTY resolver selects inbox and default auto backends" {
     defer restoreConPtyEnvForTest(original);
 
     WindowsConPty.resetForTest();
-    try testing.expectEqual(@as(c_int, 0), internal_os.setenv("NOCTTY_CONPTY", "inbox"));
+    try testing.expectEqual(@as(c_int, 0), internal_os.setenv("KORETERM_CONPTY", "inbox"));
     try testing.expectEqual(ConPtySource.inbox, conPtyInfo().?.source);
     try testing.expectEqual(error.ForcedInbox, conPtyInfo().?.fallback.?);
     // The user asked for it, so there is nothing to warn about.
@@ -1438,7 +1438,7 @@ test "Windows ConPTY resolver selects inbox and default auto backends" {
     }
 
     WindowsConPty.resetForTest();
-    try testing.expectEqual(@as(c_int, 0), internal_os.unsetenv("NOCTTY_CONPTY"));
+    try testing.expectEqual(@as(c_int, 0), internal_os.unsetenv("KORETERM_CONPTY"));
     // The test binary may or may not sit beside a staged pair; either way an
     // in-box selection says why and a bundled one does not.
     const auto = conPtyInfo().?;
@@ -1460,9 +1460,9 @@ test "Windows ConPTY resolver selects inbox and default auto backends" {
 fn installFakeBundledBackendForTest() void {
     std.debug.assert(builtin.is_test);
 
-    _ = internal_os.setenv("NOCTTY_CONPTY", "inbox");
+    _ = internal_os.setenv("KORETERM_CONPTY", "inbox");
     _ = conPtyInfo();
-    _ = internal_os.unsetenv("NOCTTY_CONPTY");
+    _ = internal_os.unsetenv("KORETERM_CONPTY");
 
     WindowsConPty.bundled_functions = .{
         .source = .bundled,
@@ -1623,7 +1623,7 @@ test "Windows ConPTY fallback names a missing or unloadable bundled pair" {
     // What a source build that could not download the pair runs into.
     try testing.expectError(error.NotFound, WindowsConPty.loadBundledFrom(dir));
     try testing.expectEqualStrings(
-        "Using Windows' in-box console host because conpty.dll is not next to noctty.exe: colour queries, synchronized output, Kitty graphics and Sixel may not work.",
+        "Using Windows' in-box console host because conpty.dll is not next to koreterm.exe: colour queries, synchronized output, Kitty graphics and Sixel may not work.",
         conPtyFallbackBanner(error.NotFound),
     );
 
@@ -1689,7 +1689,7 @@ test "Windows ConPTY live bundled count follows real pseudo console open and clo
 
 /// Stand-ins for the bundled exports: they record what they were given and
 /// create real pseudo consoles through kernel32, always with flags 0, so a
-/// test can see the flags noctty asked for without kernel32 judging them.
+/// test can see the flags koreterm asked for without kernel32 judging them.
 const RecordingConPty = struct {
     var create_flags: ?windows.DWORD = null;
     var clear_args: ?struct { handle: windows.exp.HPCON, keep: windows.BOOL } = null;
@@ -1828,7 +1828,7 @@ test "Windows ConPTY optional exports reach the creating backend and are skipped
 
     // The in-box conhost has none of them: every call is a no-op.
     WindowsConPty.resetForTest();
-    try testing.expectEqual(@as(c_int, 0), internal_os.setenv("NOCTTY_CONPTY", "inbox"));
+    try testing.expectEqual(@as(c_int, 0), internal_os.setenv("KORETERM_CONPTY", "inbox"));
     {
         var pty = try WindowsPty.open(.{ .ws_row = 24, .ws_col = 80 }, .{ .text_measurement = .wcswidth });
         defer pty.deinit();
@@ -1890,7 +1890,7 @@ test "Windows ConPTY bundled loader rejects a DLL without create symbol" {
     defer testing.allocator.free(conpty_path);
     const open_console_path = try std.fs.path.join(testing.allocator, &.{ exe_dir, "OpenConsole.exe" });
     defer testing.allocator.free(open_console_path);
-    const suffix = try std.fmt.allocPrint(testing.allocator, ".noctty-test-backup-{d}", .{windows.GetCurrentProcessId()});
+    const suffix = try std.fmt.allocPrint(testing.allocator, ".koreterm-test-backup-{d}", .{windows.GetCurrentProcessId()});
     defer testing.allocator.free(suffix);
     const conpty_backup = try std.mem.concat(testing.allocator, u8, &.{ conpty_path, suffix });
     defer testing.allocator.free(conpty_backup);

@@ -318,7 +318,7 @@ test "win32 safe mode reload keeps recovery without loading config" {
 
 const releases_url = updatepkg.releases_url;
 
-const lifecycle_class_name = std.unicode.utf8ToUtf16LeStringLiteral("noctty.win32.lifecycle");
+const lifecycle_class_name = std.unicode.utf8ToUtf16LeStringLiteral("koreterm.win32.lifecycle");
 
 const shell_open: LPCWSTR = std.unicode.utf8ToUtf16LeStringLiteral("open");
 
@@ -401,7 +401,7 @@ const RecoverySafeModeNotice = struct {
     }
 };
 
-/// How this copy of noctty gets updated. A setup-managed copy applies a
+/// How this copy of koreterm gets updated. A setup-managed copy applies a
 /// staged installer and a portable-marker copy a staged ZIP. Anything else
 /// (Scoop, a ZIP extracted without its marker) was put there by someone else
 /// and cannot apply either, so downloading a staged update for it is wasted
@@ -872,7 +872,7 @@ pub const App = struct {
     /// Set only in the process that restored the saved session, or was
     /// eligible to and started with its first window instead. Only that
     /// process saves `session-state.json` or moves it aside: a launch that
-    /// forwarded to the primary, an Explorer "Open noctty here" window, an
+    /// forwarded to the primary, an Explorer "Open koreterm here" window, an
     /// `-Embedding` handoff server or a second `single-instance = false`
     /// instance never loaded it, so writing their own windows over it
     /// destroys the user's workspace.
@@ -883,7 +883,7 @@ pub const App = struct {
     /// moves it aside.
     session_state_left_alone: bool = false,
     /// Set once WM_ENDSESSION(TRUE) has saved for a sign-out, shutdown or
-    /// reboot, or for a Restart Manager close noctty agreed to. That snapshot
+    /// reboot, or for a Restart Manager close koreterm agreed to. That snapshot
     /// is final: shells the logoff kills afterwards close their panes, and the
     /// saves those closes would run must not shrink it or move it aside.
     session_ending: bool = false,
@@ -1017,7 +1017,7 @@ pub const App = struct {
     /// case `notifications` falls back to the in-app banner path. One
     /// notifier per App, released in `App.terminate`.
     winrt_toast: ?win32_toast_winrt.WinrtToast = null,
-    /// What noctty tells the user through toasts, and when a toast leaves
+    /// What koreterm tells the user through toasts, and when a toast leaves
     /// Action Center (`notifications.zig`), with `winrt_toast` as its sink
     /// once `init` has one.
     notifications: notifications.Notifications = .disabled,
@@ -1038,7 +1038,7 @@ pub const App = struct {
     /// relative path at save time, we'd end up writing to a different
     /// file than the one `Config.load()` used at launch.
     cli_config_override_path: ?[]u8 = null,
-    /// The last `--visual-studio-profiles=` argument on noctty's command
+    /// The last `--visual-studio-profiles=` argument on koreterm's command
     /// line, as written, which a Visual Studio shell's jump-list link passes
     /// on (`cliVisualStudioProfilesArg`). Null when the files decide it.
     cli_visual_studio_profiles_arg: ?[]u8 = null,
@@ -1251,7 +1251,7 @@ pub const App = struct {
         // attributes toasts to our AUMID. A test build never creates one, so
         // no test can reach Action Center; tests give `notifications` a
         // recorder as its sink instead.
-        const aumid_utf16 = std.unicode.utf8ToUtf16LeStringLiteral("io.github.amanthanvi.noctty");
+        const aumid_utf16 = std.unicode.utf8ToUtf16LeStringLiteral("io.github.amanthanvi.koreterm");
         self.winrt_toast = if (builtin.is_test) null else win32_toast_winrt.WinrtToast.init(core_app.alloc, aumid_utf16) catch |err| blk: {
             std.log.warn("winrt toast init failed err={}; falling back to host notifications", .{err});
             break :blk null;
@@ -1259,7 +1259,7 @@ pub const App = struct {
         const sink: ?notifications.ToastSink = if (self.winrt_toast) |*toast| .winrt(toast) else null;
         self.notifications = .init(core_app.alloc, sink, self.notificationPanes());
         // A `wgh://activate?...` argument on the command line. Windows never
-        // starts noctty with one: a click in Action Center reaches a cold
+        // starts koreterm with one: a click in Action Center reaches a cold
         // start through COM (`-ToastActivated`, `awaitColdToastActivation`).
         // It is honored for a launch by hand or a script, and the same string
         // is what a cold start forwards to a running instance. Silent on
@@ -1275,7 +1275,7 @@ pub const App = struct {
         }
 
         // Install the PowerShell shell-integration script into
-        // %LOCALAPPDATA%\noctty\shell-integration\powershell\
+        // %LOCALAPPDATA%\koreterm\shell-integration\powershell\
         // if missing or the on-disk hash doesn't match the embedded
         // payload (forces updates when we ship a new version). This
         // keeps the manual `$PROFILE` fallback on a stable path even
@@ -1921,7 +1921,7 @@ pub const App = struct {
     /// went there. Keys still down (`keyDown`, `GetAsyncKeyState` in the
     /// app) stay the drag's, so their release is swallowed when it comes;
     /// keys that are up are forgotten, so a press made later is the
-    /// terminal's. A key released and pressed again while noctty was
+    /// terminal's. A key released and pressed again while koreterm was
     /// inactive is down either way and cannot be told from one held the
     /// whole time: its repeats and release are still swallowed once.
     /// Forgetting every key at deactivation instead let the release of a
@@ -2110,7 +2110,7 @@ pub const App = struct {
         }
     }
 
-    /// Resolve `%LOCALAPPDATA%\noctty\<name>`. Caller frees with
+    /// Resolve `%LOCALAPPDATA%\koreterm\<name>`. Caller frees with
     /// `core_app.alloc`. Returns null if `LOCALAPPDATA` is unreadable
     /// or allocation fails.
     pub fn localAppDataPath(self: *const App, name: []const u8) ?[]u8 {
@@ -2146,7 +2146,7 @@ pub const App = struct {
 
     pub const sessionStatePath = session_module.sessionStatePath;
 
-    /// Resolve `%LOCALAPPDATA%\noctty\startup-attempts.json`, the recovery
+    /// Resolve `%LOCALAPPDATA%\koreterm\startup-attempts.json`, the recovery
     /// ledger. Caller frees with `core_app.alloc`.
     pub fn recoveryLedgerPath(self: *const App) ?[]u8 {
         return self.localAppDataPath("startup-attempts.json");
@@ -2170,14 +2170,14 @@ pub const App = struct {
 
     pub const releaseSessionOwnership = session_module.releaseSessionOwnership;
 
-    /// WM_QUERYENDSESSION, from any top-level window noctty owns (hosts, the
+    /// WM_QUERYENDSESSION, from any top-level window koreterm owns (hosts, the
     /// quick terminal among them, Settings, and the lifecycle window that
     /// stands in when there is no other): true agrees to end. Without
-    /// `ENDSESSION_CLOSEAPP` it is a sign-out, shutdown or reboot, which noctty
+    /// `ENDSESSION_CLOSEAPP` it is a sign-out, shutdown or reboot, which koreterm
     /// never declines, and which takes back any restart registration an
     /// installer's close left, so that Windows' option to restart apps at the
-    /// next sign-in never restarts noctty. With it, an installer asks through
-    /// Restart Manager to close noctty so it can replace its files. noctty
+    /// next sign-in never restarts koreterm. With it, an installer asks through
+    /// Restart Manager to close koreterm so it can replace its files. koreterm
     /// agrees only when a
     /// quit would ask nothing (`requestQuit`'s rules) and otherwise declines
     /// without a word, raising no prompt or window: nobody may be at the
@@ -2247,12 +2247,12 @@ pub const App = struct {
     }
 
     /// Lets Setup's restart step (Inno's RestartApplications, which calls
-    /// RmRestart) start noctty again after the close it agreed to, so the
+    /// RmRestart) start koreterm again after the close it agreed to, so the
     /// saved session comes back. Only for the session's owner with windows to
     /// restore: any other process closes as a quit would and stays closed.
     /// Registered here and not at startup, and taken back when the close is
     /// called off or a sign-out, shutdown or reboot begins, so a reboot, a
-    /// sign-in, a crash or the in-app update never restarts noctty. The
+    /// sign-in, a crash or the in-app update never restarts koreterm. The
     /// relaunch is a plain start that replays only the launch argv's
     /// `--config-file` and `--class` (`installerRestartCommandLine`); Windows
     /// adds the executable.
@@ -2260,8 +2260,8 @@ pub const App = struct {
         // Both are asked before the once-per-round check, so that they also
         // take back a registration an earlier round left: this process may
         // have stopped qualifying since (its last restorable window closed,
-        // or a reload turned saving off), or another noctty process's in-app
-        // Install is running this Setup, which starts noctty through
+        // or a reload turned saving off), or another koreterm process's in-app
+        // Install is running this Setup, which starts koreterm through
         // /RELAUNCH=1, so a restart would be a second start.
         if (!self.sessionStateEnabled() or !self.hasSessionWindows() or
             self.restart_api.installer_apply_running(self.core_app.alloc))
@@ -2305,7 +2305,7 @@ pub const App = struct {
     /// `ENDSESSION_CLOSEAPP`: a sign-out, shutdown or reboot
     /// (`saveForEndSession`), which also takes back a restart registration,
     /// even one a committed installer close kept. True with it:
-    /// Restart Manager closes noctty. Every window is saved while it is whole,
+    /// Restart Manager closes koreterm. Every window is saved while it is whole,
     /// as a quit saves, and the snapshot is latched; the quit itself runs from
     /// the message loop (`finishEndSessionClose`), never inside this sent
     /// message, which may have arrived in the middle of other work, nor
@@ -2442,8 +2442,8 @@ pub const App = struct {
                 return false;
             },
             .newer_schema => {
-                log.warn("named layout launch file was written by a newer noctty name={s} path={s}", .{ name, path });
-                if (banner_host) |host| host.setBanner(.err, "Layout was saved by a newer noctty.") catch {};
+                log.warn("named layout launch file was written by a newer koreterm name={s} path={s}", .{ name, path });
+                if (banner_host) |host| host.setBanner(.err, "Layout was saved by a newer koreterm.") catch {};
                 return false;
             },
             .corrupt => |err| {
@@ -2618,7 +2618,7 @@ pub const App = struct {
     }
 
     pub fn createMessageWindow(self: *App) !void {
-        const name = std.unicode.utf8ToUtf16LeStringLiteral("noctty.win32.app");
+        const name = std.unicode.utf8ToUtf16LeStringLiteral("koreterm.win32.app");
         var wc: WNDCLASSEXW = .{
             .cbSize = @sizeOf(WNDCLASSEXW),
             .style = 0,
@@ -2723,7 +2723,7 @@ pub const App = struct {
         const hwnd = sys.CreateWindowExW(
             c.WS_EX_TOOLWINDOW | c.WS_EX_NOACTIVATE,
             lifecycle_class_name,
-            std.unicode.utf8ToUtf16LeStringLiteral("noctty"),
+            std.unicode.utf8ToUtf16LeStringLiteral("koreterm"),
             c.WS_POPUP,
             0,
             0,
@@ -3230,7 +3230,7 @@ pub const App = struct {
     }
 
     /// A newer `update.zip`: what is new, and Update or Ignore. Update starts
-    /// the swap (`local_update.apply`) and quits; the script starts noctty
+    /// the swap (`local_update.apply`) and quits; the script starts koreterm
     /// again.
     fn runLocalUpdateCheck(self: *App) void {
         var arena: std.heap.ArenaAllocator = .init(self.core_app.alloc);
@@ -3436,7 +3436,7 @@ pub const App = struct {
         errdefer std.heap.page_allocator.destroy(request);
 
         // The ignored-feed note has to come from the resolver, not from the
-        // config value alone: NOCTTY_UPDATE_FEED_URL is also a feed source
+        // config value alone: KORETERM_UPDATE_FEED_URL is also a feed source
         // and it is also dropped when it is not HTTPS.
         const resolved_feed = try updatepkg.resolveReleaseFeed(
             self.core_app.alloc,
@@ -3955,7 +3955,7 @@ pub const App = struct {
             break :blk if (self.registry.hosts.items.len > 0) self.registry.hosts.items[0] else null;
         };
         if (host) |value| return value.setBanner(kind, message);
-        try showInfoMessage(.app, "noctty", message);
+        try showInfoMessage(.app, "koreterm", message);
     }
 
     test "showUpdateInfo answers in the window whose banner button was pressed" {
@@ -4383,6 +4383,11 @@ pub const App = struct {
                 defer alloc.free(cwd);
 
                 var relaunch: win32_elevation.RelaunchProfile = .none;
+                // The directory the elevated window starts in: the source
+                // pane's, unless the profile pins its own (the elevated
+                // process's `--working-directory` replaces the profile's).
+                var launch_cwd: []const u8 = cwd;
+                var home_buf: [std.fs.max_path_bytes]u8 = undefined;
                 var temporary_profiles: ?[]windows_shell.Profile = null;
                 defer if (temporary_profiles) |profiles| {
                     windows_shell.deinitProfiles(alloc, profiles);
@@ -4399,6 +4404,13 @@ pub const App = struct {
                     const found = (try self.elevatedWindowProfile(source_host, key, &temporary_profiles)) orelse {
                         log.warn("elevated window profile not found key={s}", .{key});
                         return false;
+                    };
+                    if (found.working_directory) |dir| switch (dir) {
+                        .path => |path| launch_cwd = path,
+                        .home => if (internal_os.home(&home_buf) catch null) |home| {
+                            launch_cwd = home;
+                        },
+                        .inherit => {},
                     };
                     // An unknown token passes the profile as arguments,
                     // which start it whichever account UAC uses.
@@ -4433,7 +4445,7 @@ pub const App = struct {
                     alloc,
                     argv,
                     self.config.class,
-                    cwd,
+                    launch_cwd,
                     self.startup_cwd orelse cwd,
                     relaunch,
                 );
@@ -4658,7 +4670,7 @@ pub const App = struct {
                 // font checks; explicitly re-announce without scanning twice.
                 if (self.reportRecordedConfigProblems()) return true;
                 if (self.config.@"app-notifications".@"config-reload") {
-                    self.notifications.show(.app, "noctty", "Configuration reloaded");
+                    self.notifications.show(.app, "koreterm", "Configuration reloaded");
                 }
                 return true;
             },
@@ -5402,7 +5414,7 @@ pub const App = struct {
             built += 1;
         }
 
-        const title = try alloc.dupe(u8, host.cached_window_title orelse "noctty");
+        const title = try alloc.dupe(u8, host.cached_window_title orelse "koreterm");
 
         return .{
             .window_id = host.id,
@@ -5908,7 +5920,7 @@ pub const App = struct {
         try app.config.@"profile-env".parseCLI(arena, "tool: MODE=new");
         app.config.@"tab-inherit-working-directory" = true;
         try app.config.finalize();
-        // A live directory that is noctty's own start directory.
+        // A live directory that is koreterm's own start directory.
         var startup = "C:\\startup".*;
         app.startup_cwd = &startup;
         defer app.startup_cwd = null;
@@ -6019,7 +6031,7 @@ pub const App = struct {
         try std.testing.expectEqualStrings("ssh:prod", created[2].launch_profile_key orelse "");
         try std.testing.expect(created[2].launched_ssh);
 
-        // A WSL pane whose live directory is noctty's start directory: the
+        // A WSL pane whose live directory is koreterm's start directory: the
         // explicit target's directory step reads the inherited command, so
         // the tab falls back to the pane's last reported folder.
         const wsl = [_][:0]const u8{ "wsl.exe", "-d", "Ubuntu" };
@@ -6105,7 +6117,7 @@ pub const App = struct {
         }
         var config = try apprt.surface.newConfig(self.core_app, &self.config, .window);
         defer config.deinit();
-        // Explorer's "Open in noctty" and a jump-list folder start a first
+        // Explorer's "Open in koreterm" and a jump-list folder start a first
         // window with `--working-directory=` when no instance runs.
         const launch = try pane_launch.prepare(&config, .{ .fresh = .{
             .named_directory = self.explicit_startup_working_directory,
@@ -6809,7 +6821,7 @@ pub const App = struct {
         // A `default-profile` the picker does not show (hidden) leaves the
         // choice to the caller rather than to its command's shell.
         if (pane_launch.defaultProfile(&self.config) != null) return null;
-        return windows_shell.profileIndexForDefaultCommand(profiles, pane_launch.nocttyCommand(&self.config) orelse return null);
+        return windows_shell.profileIndexForDefaultCommand(profiles, pane_launch.koretermCommand(&self.config) orelse return null);
     }
 
     pub fn applyLauncherQuickSlotPreferences(self: *App, profiles: []windows_shell.Profile) void {
@@ -7527,9 +7539,9 @@ pub const App = struct {
     /// arrives in `Activate` only after the class object is registered, so
     /// register it, pump messages until the call (COM dispatches it to this
     /// STA) or `cold_toast_activation_wait_ms`, and return what came. A call
-    /// that never came, or carried a launch noctty cannot read, yields the
+    /// that never came, or carried a launch koreterm cannot read, yields the
     /// empty target, which presents the primary window: the user clicked a
-    /// noctty toast either way, and nothing from it is applied as argv.
+    /// koreterm toast either way, and nothing from it is applied as argv.
     fn awaitColdToastActivation(self: *App) win32_toast_activation.ActivationTarget {
         if (!self.toastActivatorWanted()) {
             log.info("toast activation start in a copy that registers no activator", .{});
@@ -8334,13 +8346,13 @@ pub const App = struct {
                     };
                     var value: [2]u16 = undefined;
                     if (test_tools.GetEnvironmentVariableW(
-                        std.unicode.utf8ToUtf16LeStringLiteral("NOCTTY_TEST_OPENGL32_MISSING"),
+                        std.unicode.utf8ToUtf16LeStringLiteral("KORETERM_TEST_OPENGL32_MISSING"),
                         &value,
                         value.len,
                     ) == 1 and value[0] == '1') {
                         // Exercise the real Windows loader's missing-module path.
                         break :loaded windows.kernel32.LoadLibraryExW(
-                            std.unicode.utf8ToUtf16LeStringLiteral("noctty-opengl32-missing-test.dll"),
+                            std.unicode.utf8ToUtf16LeStringLiteral("koreterm-opengl32-missing-test.dll"),
                             null,
                             0x00000800, // LOAD_LIBRARY_SEARCH_SYSTEM32
                         ) != null;
@@ -8422,7 +8434,7 @@ pub const App = struct {
 
     /// Checks the target now, so a refused one still fails at the caller,
     /// and leaves the open itself to `runDeferredOpens`. It never asks:
-    /// pass only a target noctty chose or the user already confirmed. A
+    /// pass only a target koreterm chose or the user already confirmed. A
     /// link from terminal output goes through `openLink`.
     fn openUrl(self: *App, url: []const u8) !void {
         return openWin32Target(self.core_app.alloc, self, url, deferOpenTarget);
@@ -8609,9 +8621,9 @@ pub const App = struct {
         target: []const u8,
         comptime dispatch: anytype,
     ) !void {
-        // Noctty fork hardening: the upstream Windows fallback dispatches any
+        // Koreterm fork hardening: the upstream Windows fallback dispatches any
         // target through FileProtocolHandler. ShellExecuteW must instead stay
-        // inside the schemes and non-executable local files noctty produces.
+        // inside the schemes and non-executable local files koreterm produces.
         var arena = std.heap.ArenaAllocator.init(alloc);
         defer arena.deinit();
         const checked = try prepareWin32OpenTarget(arena.allocator(), target) orelse {
@@ -12242,8 +12254,8 @@ pub const App = struct {
                 defer sys.OleUninitialize();
                 // This test has no app message loop to drain COM teardown.
                 app.settings_window.handle.deferUiaDisconnect = null;
-                const settings_class = comptime std.unicode.utf8ToUtf16LeStringLiteral("noctty.win32.settings");
-                const viewport_class = comptime std.unicode.utf8ToUtf16LeStringLiteral("noctty.win32.settings.viewport");
+                const settings_class = comptime std.unicode.utf8ToUtf16LeStringLiteral("koreterm.win32.settings");
+                const viewport_class = comptime std.unicode.utf8ToUtf16LeStringLiteral("koreterm.win32.settings.viewport");
                 defer {
                     app.settings_window.deinit();
                     // Settings fixtures on later private desktops register
@@ -12298,8 +12310,8 @@ pub const App = struct {
                 if (!app.com_initialized) return error.SkipZigTest;
                 defer sys.OleUninitialize();
                 app.settings_window.handle.deferUiaDisconnect = null;
-                const settings_class = comptime std.unicode.utf8ToUtf16LeStringLiteral("noctty.win32.settings");
-                const viewport_class = comptime std.unicode.utf8ToUtf16LeStringLiteral("noctty.win32.settings.viewport");
+                const settings_class = comptime std.unicode.utf8ToUtf16LeStringLiteral("koreterm.win32.settings");
+                const viewport_class = comptime std.unicode.utf8ToUtf16LeStringLiteral("koreterm.win32.settings.viewport");
                 defer {
                     app.settings_window.deinit();
                     _ = sys.UnregisterClassW(settings_class, app.settings_window.handle.hinstance);
@@ -12521,7 +12533,7 @@ pub const App = struct {
     /// What the user knows a tab by: the title of its focused pane.
     fn toastTabName(tab: *const Tab, surface: *Surface) []const u8 {
         const shown = tab.focusedSurface() orelse surface;
-        return shown.effectiveTitle() orelse "noctty";
+        return shown.effectiveTitle() orelse "koreterm";
     }
 
     /// The window `host` is, as a toast from it names it. Every host but the
@@ -12551,7 +12563,7 @@ pub const App = struct {
         );
         defer self.core_app.alloc.free(message);
         if (try self.showHostBanner(target, .info, message)) return;
-        try showInfoMessage(target, "noctty", message);
+        try showInfoMessage(target, "koreterm", message);
     }
 
     const CommandFinishPlan = struct {
@@ -13256,8 +13268,8 @@ test "PKG-39 App.terminate takes both Settings preview hooks away before the win
                 _ = sys.UnregisterClassW(palette_list_class_name, hinstance);
                 _ = sys.UnregisterClassW(scrollbar_class_name, hinstance);
             }
-            const settings_class = std.unicode.utf8ToUtf16LeStringLiteral("noctty.win32.settings");
-            const viewport_class = std.unicode.utf8ToUtf16LeStringLiteral("noctty.win32.settings.viewport");
+            const settings_class = std.unicode.utf8ToUtf16LeStringLiteral("koreterm.win32.settings");
+            const viewport_class = std.unicode.utf8ToUtf16LeStringLiteral("koreterm.win32.settings.viewport");
             defer {
                 _ = sys.UnregisterClassW(settings_class, hinstance);
                 _ = sys.UnregisterClassW(viewport_class, hinstance);
@@ -13353,7 +13365,7 @@ test "win32 a DPI change holds the terminal grid from WM_GETDPISCALEDSIZE to WM_
 
 /// Which COM server, if any, started this process. COM appends -Embedding to
 /// every `LocalServer32` command, the toast activator's
-/// (`"noctty.exe" -ToastActivated`) included, so -Embedding alone does not
+/// (`"koreterm.exe" -ToastActivated`) included, so -Embedding alone does not
 /// make a terminal handoff server.
 const ComStart = enum {
     none,
@@ -13373,7 +13385,7 @@ const ComStart = enum {
     }
 };
 
-/// kernel32's restart registration, and whether another noctty's in-app
+/// kernel32's restart registration, and whether another koreterm's in-app
 /// Install is running Setup. A test build defaults to stand-ins that register
 /// nothing and look at no update stage, so no test makes the test runner
 /// restartable or reads the user's profile.
@@ -13416,13 +13428,13 @@ test "-ToastActivated is a launch argument, not a config diagnostic" {
 
     // It is a toast activation start, not a terminal handoff server, though
     // COM's -Embedding is there too.
-    try std.testing.expectEqual(ComStart.toast_activator, ComStart.ofArgs(&.{ "noctty.exe", "--font-size=13", "-ToastActivated", "-Embedding" }));
-    try std.testing.expectEqual(ComStart.terminal_handoff, ComStart.ofArgs(&.{ "noctty.exe", "-Embedding" }));
-    try std.testing.expectEqual(ComStart.none, ComStart.ofArgs(&.{ "noctty.exe", "-e", "x.exe", "-ToastActivated", "-Embedding" }));
-    try std.testing.expectEqual(ComStart.none, ComStart.ofArgs(&.{"noctty.exe"}));
+    try std.testing.expectEqual(ComStart.toast_activator, ComStart.ofArgs(&.{ "koreterm.exe", "--font-size=13", "-ToastActivated", "-Embedding" }));
+    try std.testing.expectEqual(ComStart.terminal_handoff, ComStart.ofArgs(&.{ "koreterm.exe", "-Embedding" }));
+    try std.testing.expectEqual(ComStart.none, ComStart.ofArgs(&.{ "koreterm.exe", "-e", "x.exe", "-ToastActivated", "-Embedding" }));
+    try std.testing.expectEqual(ComStart.none, ComStart.ofArgs(&.{"koreterm.exe"}));
 
     // The settings save target stops where the loader stops.
-    const saved = try cliConfigFileOverrideArgs(alloc, &.{ "noctty.exe", "--config-file=C:\\a.conf", "-ToastActivated", "--config-file=C:\\b.conf" });
+    const saved = try cliConfigFileOverrideArgs(alloc, &.{ "koreterm.exe", "--config-file=C:\\a.conf", "-ToastActivated", "--config-file=C:\\b.conf" });
     defer if (saved) |path| alloc.free(path);
     try std.testing.expect(std.mem.endsWith(u8, saved.?, "a.conf"));
 }
@@ -13665,7 +13677,7 @@ test "win32 runtime leaves the real profile alone when a test starts it" {
         defer app.terminate();
     }
 
-    // Before the gates this left `noctty\startup-attempts.json` with an
+    // Before the gates this left `koreterm\startup-attempts.json` with an
     // unfinished launch in it, which is how repeated test runs put the
     // developer's next real launch into safe mode, and replaced the
     // installed PowerShell integration script with the one under test.
@@ -13891,7 +13903,7 @@ test "security regression win32 link opener refuses UNC symlinks and local chain
     const alloc = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    tmp.dir.symLink("\\\\noctty-invalid-host.invalid\\share\\safe.txt", "network.txt", .{}) catch |err| switch (err) {
+    tmp.dir.symLink("\\\\koreterm-invalid-host.invalid\\share\\safe.txt", "network.txt", .{}) catch |err| switch (err) {
         error.AccessDenied => return error.SkipZigTest,
         else => return err,
     };
@@ -14249,7 +14261,7 @@ test "security regression win32 link opener dispatches the exact decoded file UR
 
 test "security regression win32 link opener PATHEXT live probe on hidden desktop" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
-    const enabled = std.process.getEnvVarOwned(std.testing.allocator, "NOCTTY_RUN_LINK_PATHEXT_PROBE") catch return error.SkipZigTest;
+    const enabled = std.process.getEnvVarOwned(std.testing.allocator, "KORETERM_RUN_LINK_PATHEXT_PROBE") catch return error.SkipZigTest;
     defer std.testing.allocator.free(enabled);
     if (!std.mem.eql(u8, enabled, "1")) return error.SkipZigTest;
 
@@ -14334,7 +14346,7 @@ test "security regression win32 link opener PATHEXT live probe on hidden desktop
             try std.testing.expectError(error.FileNotFound, tmp.dir.access("marker", .{}));
         }
     };
-    const name = try std.fmt.allocPrint(std.testing.allocator, "noctty-link-probe-{}", .{windows.GetCurrentProcessId()});
+    const name = try std.fmt.allocPrint(std.testing.allocator, "koreterm-link-probe-{}", .{windows.GetCurrentProcessId()});
     defer std.testing.allocator.free(name);
     const wide_name = try std.unicode.utf8ToUtf16LeAllocZ(std.testing.allocator, name);
     defer std.testing.allocator.free(wide_name);
@@ -14346,14 +14358,14 @@ test "security regression win32 link opener PATHEXT live probe on hidden desktop
     try result;
     // A successful filtered build is not proof this named test ran. The
     // wrapper supplies a fresh receipt path and requires this final sentinel.
-    const receipt_path = try std.process.getEnvVarOwned(std.testing.allocator, "NOCTTY_LINK_PATHEXT_PROBE_RECEIPT");
+    const receipt_path = try std.process.getEnvVarOwned(std.testing.allocator, "KORETERM_LINK_PATHEXT_PROBE_RECEIPT");
     defer std.testing.allocator.free(receipt_path);
     if (!windows_shell.isSafeWindowsPath(receipt_path) or
         !windows_shell.isDriveAbsolutePath(receipt_path) or
         internal_os.path.isNetworkOrDevicePath(receipt_path)) return error.UnsafeProbeReceiptPath;
     const receipt = try std.fs.createFileAbsolute(receipt_path, .{ .exclusive = true });
     defer receipt.close();
-    try receipt.writeAll("NOCTTY_LINK_PATHEXT_PROBE_COMPLETE\n");
+    try receipt.writeAll("KORETERM_LINK_PATHEXT_PROBE_COMPLETE\n");
 }
 
 test "win32 recovery ready marker keeps retrying transient write failures" {
@@ -14475,10 +14487,10 @@ test "win32 the notification panes adapter reports a pane's tab, name, window an
         try std.testing.expectEqualStrings("cargo build", tab.name);
         try std.testing.expectEqual(first_of_two, tab.window);
     }
-    // An untitled tab is "noctty"; the other window is the second, until
+    // An untitled tab is "koreterm"; the other window is the second, until
     // it is the quick terminal, which is named and not counted.
     const other = try Find.tab(panes, 0x3003);
-    try std.testing.expectEqualStrings("noctty", other.name);
+    try std.testing.expectEqualStrings("koreterm", other.name);
     try std.testing.expectEqual(notifications.Window{ .ordinary = .{ .number = 2, .open = 2 } }, other.window);
     w.other_host.quick_terminal = true;
     try std.testing.expectEqual(notifications.Window.quick_terminal, (try Find.tab(panes, 0x3003)).window);
@@ -14534,7 +14546,7 @@ test "win32 a notification with no memory for its banner goes to the log, and it
 test "win32 App.terminate removes this process's toast group" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
     var line_buf: [32]u8 = undefined;
-    const own_group = try std.fmt.bufPrint(&line_buf, "group noctty-{d}", .{sys.GetCurrentProcessId()});
+    const own_group = try std.fmt.bufPrint(&line_buf, "group koreterm-{d}", .{sys.GetCurrentProcessId()});
     // Both outlive the App, whose terminate calls them.
     var recorder: notifications.testing.Recorder = .{};
     defer recorder.deinit();

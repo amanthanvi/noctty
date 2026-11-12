@@ -33,7 +33,7 @@ const ipc_server_instance_access = c.PIPE_ACCESS_DUPLEX | windows.FILE_FLAG_OVER
 /// is created BEFORE the previous handle is closed, so the name is never
 /// momentarily unowned for a squatter to take.
 const ipc_server_pipe_access = ipc_server_instance_access | c.FILE_FLAG_FIRST_PIPE_INSTANCE;
-const ipc_pipe_prefix = "\\\\.\\pipe\\noctty.";
+const ipc_pipe_prefix = "\\\\.\\pipe\\koreterm.";
 
 const ForwardedArgIterator = struct {
     args: []const [:0]const u8,
@@ -48,9 +48,9 @@ const ForwardedArgIterator = struct {
 
 fn defaultIpcNamespace() []const u8 {
     return if (builtin.mode == .Debug)
-        "io.github.amanthanvi.noctty-debug"
+        "io.github.amanthanvi.koreterm-debug"
     else
-        "io.github.amanthanvi.noctty";
+        "io.github.amanthanvi.koreterm";
 }
 
 fn sanitizeIpcNamespace(alloc: Allocator, raw: ?[]const u8) ![]const u8 {
@@ -174,7 +174,7 @@ fn tokenIntegrityRid(token: windows.HANDLE) ?u32 {
 ///
 /// The single-instance pipe name is derived only from `--class`, so it is
 /// PREDICTABLE and lives in the machine-wide named-pipe namespace. Any local
-/// account can therefore pre-create `\\.\pipe\noctty.<class>` before we do.
+/// account can therefore pre-create `\\.\pipe\koreterm.<class>` before we do.
 /// The server-side owner-only DACL does not help here: it protects the pipe
 /// WE create, not the one we CONNECT to. Without this check a squatter would
 /// receive our forwarded startup arguments (including the working directory)
@@ -976,7 +976,7 @@ pub fn scanLaunchLayoutIpcArgument(
     for (argv) |arg| {
         // Config parsing treats everything after -e as command payload.
         // Match that boundary so a child command may legitimately receive an
-        // argument that looks like a Noctty layout option.
+        // argument that looks like a Koreterm layout option.
         if (std.mem.eql(u8, arg, "-e")) break;
         if (!std.mem.startsWith(u8, arg, prefix)) continue;
         if (name != null) return error.MixedLaunchLayoutArguments;
@@ -2064,14 +2064,14 @@ test "win32 elevated IPC pipe names are integrity scoped" {
 
     const medium_utf8 = try std.unicode.utf16LeToUtf8Alloc(std.testing.allocator, medium_name[0..medium_name.len]);
     defer std.testing.allocator.free(medium_utf8);
-    try std.testing.expectEqualStrings("\\\\.\\pipe\\noctty.demo_class.medium", medium_utf8);
+    try std.testing.expectEqualStrings("\\\\.\\pipe\\koreterm.demo_class.medium", medium_utf8);
 
     const elevated_name = try allocIpcPipeName(std.testing.allocator, "demo class", true);
     defer std.testing.allocator.free(elevated_name);
 
     const elevated_utf8 = try std.unicode.utf16LeToUtf8Alloc(std.testing.allocator, elevated_name[0..elevated_name.len]);
     defer std.testing.allocator.free(elevated_utf8);
-    try std.testing.expectEqualStrings("\\\\.\\pipe\\noctty.demo_class.elevated", elevated_utf8);
+    try std.testing.expectEqualStrings("\\\\.\\pipe\\koreterm.demo_class.elevated", elevated_utf8);
 
     const adversarial_medium = try allocIpcPipeName(std.testing.allocator, "demo class.elevated", false);
     defer std.testing.allocator.free(adversarial_medium);
@@ -2295,9 +2295,9 @@ test "win32 SDDL auto-inherit normalization keeps every access-bearing field" {
     }
 }
 
-/// A pipe name no other test uses: `\\.\pipe\noctty-ipc-<tag>-<tick>`.
+/// A pipe name no other test uses: `\\.\pipe\koreterm-ipc-<tag>-<tick>`.
 fn testUniquePipeName(alloc: Allocator, comptime tag: []const u8) ![:0]u16 {
-    const name = try std.fmt.allocPrint(alloc, "\\\\.\\pipe\\noctty-ipc-" ++ tag ++ "-{d}", .{sys.GetTickCount64()});
+    const name = try std.fmt.allocPrint(alloc, "\\\\.\\pipe\\koreterm-ipc-" ++ tag ++ "-{d}", .{sys.GetTickCount64()});
     defer alloc.free(name);
     return std.unicode.utf8ToUtf16LeAllocZ(alloc, name);
 }
@@ -2988,7 +2988,7 @@ const TestIpcServer = struct {
         self.app.config.@"single-instance" = .true;
         self.app.config.class = try std.fmt.bufPrintZ(
             &self.class_buf,
-            "noctty-test-pkg67-{d}-{d}",
+            "koreterm-test-pkg67-{d}-{d}",
             .{ sys.GetCurrentProcessId(), next_id.fetchAdd(1, .monotonic) },
         );
         self.app.is_elevated = false;
@@ -3207,7 +3207,7 @@ test "win32 launch-layout IPC validates names before cold fallback" {
 
     const pipe_name = try std.unicode.utf8ToUtf16LeAllocZ(
         std.testing.allocator,
-        "\\\\.\\pipe\\noctty.test.launch-layout-invalid-name",
+        "\\\\.\\pipe\\koreterm.test.launch-layout-invalid-name",
     );
     defer std.testing.allocator.free(pipe_name);
 
@@ -3228,7 +3228,7 @@ test "win32 startup layout forwarding intercepts before generic argv" {
 
     const pipe_name = try std.unicode.utf8ToUtf16LeAllocZ(
         std.testing.allocator,
-        "\\\\.\\pipe\\noctty.test.startup-layout-invalid-name",
+        "\\\\.\\pipe\\koreterm.test.startup-layout-invalid-name",
     );
     defer std.testing.allocator.free(pipe_name);
 

@@ -72,6 +72,7 @@ pub const SettingField = enum {
     rdp_color_depth,
     rdp_compression,
     rdp_experience,
+    rdp_trust_certificates,
 
     pub fn label(self: SettingField) []const u8 {
         if (projection(self)) |part| return part.label;
@@ -189,7 +190,7 @@ pub const Descriptor = struct {
         return switch (self.apply) {
             .live => "Applies when you save.",
             .new_terminals => "Applies to new terminals after saving.",
-            .restart => "Applies after restarting noctty.",
+            .restart => "Applies after restarting koreterm.",
         };
     }
 
@@ -248,7 +249,7 @@ pub const descriptors = [_]Descriptor{
     .{ .key = .@"app-notifications", .projections = &.{
         .{ .field = .app_notify_clipboard, .member = "clipboard-copy", .label = "Clipboard copy notification", .keywords = "settings preferences configuration app-notifications clipboard-copy toast", .default_label = "Clipboard copy", .native = .{ .binding = "chk_app_notify_clipboard", .id = 418, .order = 5, .caption = "Notify when clipboard copy completes", .accessible_name = "Clipboard-copy notification" } },
         .{ .field = .app_notify_config, .member = "config-reload", .label = "Config reload notification", .keywords = "settings preferences configuration app-notifications config-reload toast", .default_label = "Config reload", .native = .{ .binding = "chk_app_notify_config", .id = 419, .order = 6, .caption = "Notify after config reload", .accessible_name = "Config-reload notification" } },
-    }, .label = "App notifications", .help = "Choose which noctty actions show a desktop notification.", .section = .privacy, .kind = .notifications, .apply = .live, .keywords = "settings preferences configuration app-notifications clipboard-copy config-reload toast" },
+    }, .label = "App notifications", .help = "Choose which koreterm actions show a desktop notification.", .section = .privacy, .kind = .notifications, .apply = .live, .keywords = "settings preferences configuration app-notifications clipboard-copy config-reload toast" },
     .{ .key = .@"confirm-close-surface", .native = .{ .binding = "combo_confirm_close", .id = 403, .order = 1, .form_label = "Close confirmation", .accessible_name = "Close confirmation" }, .field = .confirm_close, .label = "Close confirmation", .help = "Choose when closing a terminal asks for confirmation. Prompt detection requires shell integration.", .section = .terminal, .kind = .choice, .apply = .live, .keywords = "settings preferences configuration confirm-close-surface quit exit running" },
     .{ .key = .@"copy-on-select", .native = .{ .binding = "combo_copy_on_select", .id = 404, .order = 2, .form_label = "Copy on select", .accessible_name = "Copy on select" }, .field = .copy_on_select, .label = "Copy on select", .help = "Choose whether selecting terminal text copies it to the clipboard.", .section = .terminal, .kind = .choice, .apply = .live, .keywords = "settings preferences configuration copy-on-select selection clipboard" },
     .{ .key = .@"clipboard-read", .native = .{ .binding = "combo_clipboard_read", .id = 422, .order = 0, .form_label = "OSC 52 clipboard read requests", .accessible_name = "OSC 52 clipboard read requests" }, .field = .clipboard_read, .label = "Clipboard read requests (OSC 52)", .help = "Control clipboard read requests from terminal programs using OSC 52.", .section = .privacy, .kind = .choice, .apply = .live, .keywords = "settings preferences configuration clipboard-read osc 52 paste" },
@@ -260,16 +261,17 @@ pub const descriptors = [_]Descriptor{
     .{ .key = .@"cursor-style", .native = .{ .binding = "combo_cursor_style", .id = 409, .order = 5, .form_label = "Cursor style", .accessible_name = "Cursor style" }, .field = .cursor_style, .label = "Cursor style", .help = "Default cursor shape. A terminal program can choose its own cursor shape.", .section = .appearance, .kind = .choice, .apply = .live, .keywords = "settings preferences configuration cursor-style caret block bar underline" },
     .{ .key = .@"background-blur", .native = .{ .binding = "chk_bg_blur", .id = 410, .order = 9, .caption = "Background blur", .accessible_name = "Background blur" }, .field = .background_blur, .label = "Background blur", .help = "Request background blur behind the terminal.", .section = .appearance, .kind = .blur, .apply = .live, .support = .unsupported_on_windows, .keywords = "settings preferences configuration background-blur" },
     .{ .key = .@"window-padding-balance", .native = .{ .binding = "combo_pad_balance", .id = 411, .order = 8, .form_label = "Window padding balance", .accessible_name = "Window padding balance" }, .field = .padding_balance, .label = "Window padding balance", .help = "Distribute remaining cell space across the terminal padding.", .section = .appearance, .kind = .choice, .apply = .new_terminals, .keywords = "settings preferences configuration window-padding-balance margin" },
-    .{ .key = .@"auto-update", .native = .{ .binding = "combo_auto_update", .id = 420, .order = 0, .form_label = "Auto-update mode", .accessible_name = "Auto-update mode" }, .field = .auto_update, .label = "Auto-update mode", .help = "Choose whether noctty checks for updates and prompts to install them.", .section = .updates, .kind = .choice, .apply = .live, .keywords = "settings preferences configuration auto-update upgrade" },
+    .{ .key = .@"auto-update", .native = .{ .binding = "combo_auto_update", .id = 420, .order = 0, .form_label = "Auto-update mode", .accessible_name = "Auto-update mode" }, .field = .auto_update, .label = "Auto-update mode", .help = "Choose whether koreterm checks for updates and prompts to install them.", .section = .updates, .kind = .choice, .apply = .live, .keywords = "settings preferences configuration auto-update upgrade" },
     .{ .key = .@"auto-update-channel", .native = .{ .binding = "combo_auto_update_channel", .id = 421, .order = 1, .form_label = "Auto-update channel", .accessible_name = "Auto-update channel" }, .field = .auto_update_channel, .label = "Auto-update channel", .help = "Choose stable releases or tip builds for update checks.", .section = .updates, .kind = .choice, .apply = .live, .keywords = "settings preferences configuration auto-update-channel stable tip release" },
     .{ .key = .@"font-family", .native = .{ .binding = "edit_font_family", .id = 412, .order = 0, .form_label = "Font family fallbacks (comma-separated)", .accessible_name = "Font family fallbacks" }, .label = "Font family", .help = "Comma-separated font fallback families. Leave blank to use the default font.", .placeholder = "Default font", .section = .appearance, .kind = .font_families, .apply = .live, .validation = .font_families, .keywords = "settings preferences configuration font-family", .default_display = .inherited },
     .{ .key = .theme, .native = .{ .binding = "edit_theme", .id = 413, .order = 2, .form_label = "Terminal theme name, absolute path, or light/dark pair", .accessible_name = "Terminal theme" }, .label = "Terminal theme", .help = "Built-in theme name, absolute path, or a light/dark theme pair. Leave blank for the default.", .placeholder = "Default theme", .section = .appearance, .kind = .theme, .apply = .live, .validation = .theme, .keywords = "settings preferences configuration theme", .default_display = .inherited },
     .{ .key = .command, .native = .{ .binding = "edit_command", .id = 414, .order = 0, .form_label = "Default command (blank = Default profile or auto-detect)", .accessible_name = "Default command" }, .label = "Default command", .help = "Command for new terminals. It wins over Default profile; leave it blank to start that profile, or to detect a shell when Default profile is Automatic.", .placeholder = "Default profile or automatic shell", .section = .shell, .kind = .command, .apply = .new_terminals, .validation = .command, .keywords = "settings preferences configuration command", .default_display = .automatic },
     .{ .key = .@"default-profile", .native = .{ .binding = "combo_default_profile", .id = 427, .order = 1, .form_label = "Default profile (Default command wins when set)", .accessible_name = "Default profile" }, .label = "Default profile", .help = "The profile new terminals start when Default command is blank: a detected shell, a Visual Studio shell or a profile from the config file. A Default command wins over it. Automatic removes the setting.", .section = .shell, .kind = .profile, .apply = .new_terminals, .keywords = "settings preferences configuration default-profile profile shell", .default_display = .automatic },
-    .{ .key = .@"working-directory", .native = .{ .binding = "edit_working_dir", .id = 428, .order = 3, .form_label = "Starting folder (blank = your home folder)", .accessible_name = "Starting folder" }, .label = "Starting folder", .help = "The folder new terminals start in: a path such as C:\\Projects, home for your home folder, or inherit for the folder noctty was started from. A profile's own starting folder wins over it.", .placeholder = "Your home folder", .section = .shell, .kind = .directory, .apply = .new_terminals, .keywords = "settings preferences configuration working-directory starting folder start directory cwd path", .default_display = .automatic },
+    .{ .key = .@"working-directory", .native = .{ .binding = "edit_working_dir", .id = 428, .order = 3, .form_label = "Starting folder (blank = your home folder)", .accessible_name = "Starting folder" }, .label = "Starting folder", .help = "The folder new terminals start in: a path such as C:\\Projects, home for your home folder, or inherit for the folder koreterm was started from. A profile's own starting folder wins over it.", .placeholder = "Your home folder", .section = .shell, .kind = .directory, .apply = .new_terminals, .keywords = "settings preferences configuration working-directory starting folder start directory cwd path", .default_display = .automatic },
     .{ .key = .@"rdp-color-depth", .native = .{ .binding = "combo_rdp_colors", .id = 429, .order = 4, .form_label = "Remote Desktop colors", .accessible_name = "Remote Desktop colors" }, .field = .rdp_color_depth, .label = "Remote Desktop colors", .help = "The colors a Remote Desktop tab asks the server for. Fewer colors send less over a slow link. A connection can set its own.", .section = .shell, .kind = .choice, .apply = .new_terminals, .keywords = "settings preferences configuration rdp-color-depth remote desktop colors palette bits quality" },
     .{ .key = .@"rdp-compression", .native = .{ .binding = "combo_rdp_compression", .id = 430, .order = 5, .form_label = "Remote Desktop compression", .accessible_name = "Remote Desktop compression" }, .field = .rdp_compression, .label = "Remote Desktop compression", .help = "Whether a Remote Desktop tab compresses what the server sends. A connection can set its own.", .section = .shell, .kind = .choice, .apply = .new_terminals, .keywords = "settings preferences configuration rdp-compression remote desktop compression stream bandwidth quality" },
     .{ .key = .@"rdp-experience", .native = .{ .binding = "combo_rdp_experience", .id = 431, .order = 6, .form_label = "Remote Desktop visual quality", .accessible_name = "Remote Desktop visual quality" }, .field = .rdp_experience, .label = "Remote Desktop visual quality", .help = "How much of the remote desktop's look to send: wallpaper, themes, animations and font smoothing. A connection can set its own.", .section = .shell, .kind = .choice, .apply = .new_terminals, .keywords = "settings preferences configuration rdp-experience remote desktop wallpaper themes animations font smoothing quality" },
+    .{ .key = .@"rdp-trust-certificates", .native = .{ .binding = "combo_rdp_certificates", .id = 432, .order = 7, .form_label = "Remote Desktop unverified server", .accessible_name = "Remote Desktop unverified server" }, .field = .rdp_trust_certificates, .label = "Remote Desktop unverified server", .help = "Whether a Remote Desktop tab connects to a server whose certificate cannot be checked without asking, or shows Windows' warning. A connection can set its own.", .section = .shell, .kind = .choice, .apply = .new_terminals, .keywords = "settings preferences configuration rdp-trust-certificates remote desktop certificate warning trust identity" },
 };
 
 pub const FormField = struct {
@@ -528,6 +530,10 @@ pub fn Combo(comptime field: SettingField) type {
             .{ .value = .balanced, .label = "Balanced" },
             .{ .value = .rich, .label = "Rich (everything)" },
         },
+        .rdp_trust_certificates => &.{
+            .{ .value = true, .label = "Connect without asking" },
+            .{ .value = false, .label = "Ask (Windows' warning)" },
+        },
         else => @compileError("Not a Settings dropdown"),
     };
     comptime {
@@ -713,6 +719,7 @@ pub const round_trip_config =
     \\rdp-color-depth = 16
     \\rdp-compression = false
     \\rdp-experience = fast
+    \\rdp-trust-certificates = false
 ;
 /// Behavioral round trips use Config's real grammar and formatter, including
 /// composite/owned keys, rather than checking source text or pointer equality.
@@ -793,7 +800,7 @@ test "settings model validates scalar ranges with the form's exact types" {
 
 test "settings model separates saved apply timing from edit previews and Windows support" {
     for (descriptors) |spec| {
-        const new_terminal = spec.key == .@"scrollback-limit" or spec.key == .command or spec.key == .@"shell-integration" or spec.key == .@"window-padding-x" or spec.key == .@"window-padding-y" or spec.key == .@"window-padding-balance" or spec.key == .@"default-profile" or spec.key == .@"working-directory" or spec.key == .@"rdp-color-depth" or spec.key == .@"rdp-compression" or spec.key == .@"rdp-experience";
+        const new_terminal = spec.key == .@"scrollback-limit" or spec.key == .command or spec.key == .@"shell-integration" or spec.key == .@"window-padding-x" or spec.key == .@"window-padding-y" or spec.key == .@"window-padding-balance" or spec.key == .@"default-profile" or spec.key == .@"working-directory" or spec.key == .@"rdp-color-depth" or spec.key == .@"rdp-compression" or spec.key == .@"rdp-experience" or spec.key == .@"rdp-trust-certificates";
         try std.testing.expectEqual(if (new_terminal) ApplyPolicy.new_terminals else ApplyPolicy.live, spec.apply);
         const unavailable = spec.key == .@"background-blur" or spec.key == .@"link-previews";
         try std.testing.expectEqual(if (unavailable) Support.unsupported_on_windows else Support.available, spec.support);

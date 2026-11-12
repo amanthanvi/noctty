@@ -28,7 +28,7 @@ if ($ResetState) { $forwardedArgs += '-ResetState' }
 Invoke-InteractiveWin11HarnessMain `
     -RepoRoot $repoRoot `
     -LauncherPath $launcherPath `
-    -EnvironmentVariable 'NOCTTY_INTERACTIVE_WIN11_SHADERS_BOOTSTRAPPED' `
+    -EnvironmentVariable 'KORETERM_INTERACTIVE_WIN11_SHADERS_BOOTSTRAPPED' `
     -ArgumentList $forwardedArgs
 
 if ($Rebuild) {
@@ -61,7 +61,7 @@ $layout = $harness.Layout
 . (Join-Path $PSScriptRoot 'interactive-win11-stateful-lib.ps1')
 
 $exePath = Get-InteractiveWin11ExePath -RepoRoot $repoRoot
-$commandPath = Join-Path (Split-Path -Parent $exePath) 'noctty.com'
+$commandPath = Join-Path (Split-Path -Parent $exePath) 'koreterm.com'
 $shaderPath = Join-Path $PSScriptRoot 'fixtures\solid-magenta-shader.glsl'
 $configPath = Join-Path $layout.Temp 'interactive-win11-shaders.conf'
 $payloadPath = Join-Path $layout.Temp 'interactive-win11-shaders-payload.ps1'
@@ -100,7 +100,7 @@ Remove-Item -LiteralPath $stdoutPath, $stderrPath, $screenshotPath -ErrorAction 
 $launchArgs = @(
     Get-InteractiveWin11ContainmentArguments
     '--single-instance=false'
-    "--class=noctty-shaders-$($layout.SandboxId)"
+    "--class=koreterm-shaders-$($layout.SandboxId)"
     "--config-file=$configPath"
     "--custom-shader=$shaderPath"
     '-e'
@@ -156,7 +156,7 @@ try {
         throw 'Failed to read the shader surface bounds.'
     }
 
-    # Evidence only, and saved only where it shows noctty alone.
+    # Evidence only, and saved only where it shows koreterm alone.
     Show-StatefulHost $hostHwnd
     $shot = Save-StatefulScreenCapture -Hwnd $surface.Hwnd -Path $screenshotPath
     $screenshotText = if ($null -ne $shot.Path) { $shot.Path } else { "not saved ($($shot.Note))" }

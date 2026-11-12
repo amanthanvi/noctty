@@ -135,7 +135,7 @@ $readme = Get-Text -RelativePath "README.md"
 $latestVersion = $null
 if ($null -eq $readme) {
     # Get-Text already recorded the missing-file failure.
-} elseif ($readme -match 'noctty\s+([0-9]+\.[0-9]+\.[0-9]+)\]\(https://github\.com/amanthanvi/noctty/releases/tag/v\1\)') {
+} elseif ($readme -match 'koreterm\s+([0-9]+\.[0-9]+\.[0-9]+)\]\(https://github\.com/amanthanvi/koreterm/releases/tag/v\1\)') {
     $latestVersion = $Matches[1]
 } else {
     Add-Failure "README.md: could not find a self-consistent latest stable release link."
@@ -145,7 +145,7 @@ $forbiddenRules = @(
     @{ Text = "1.3.111"; Reason = "README/docs/site release copy should not point at the stale May 12 release." },
     @{ Text = "1.3.113"; Reason = "README/docs/site release copy should not point at the stale May 24 release." },
     @{ Text = "ARM64 builds are added by the next release"; Reason = "Current releases already publish ARM64 assets." },
-    @{ Text = "noctty publishes two Windows artifacts"; Reason = "Current releases publish installer, portable, and checksum assets for both x64 and ARM64." },
+    @{ Text = "koreterm publishes two Windows artifacts"; Reason = "Current releases publish installer, portable, and checksum assets for both x64 and ARM64." },
     @{ Text = "Releases are currently unsigned"; Reason = "Public releases require signed installers and signed Windows binaries." },
     @{ Text = "Current releases are unsigned"; Reason = "Public releases require signed installers and signed Windows binaries." },
     @{ Text = "Unsigned releases are expected"; Reason = "Public releases require signed installers and signed Windows binaries." },
@@ -154,7 +154,7 @@ $forbiddenRules = @(
     @{ Text = "notify-only GitHub Releases updater"; Reason = "Download mode stages verified installers for user-initiated apply." },
     @{ Text = "updates stay notify-only"; Reason = "Download mode stages verified installers for user-initiated apply." },
     @{ Text = "updater only checks GitHub"; Reason = "Download mode can stage a verified installer after checking GitHub Releases." },
-    @{ Text = "The Zig package is still declared"; Reason = "build.zig.zon already uses the noctty package identity." }
+    @{ Text = "The Zig package is still declared"; Reason = "build.zig.zon already uses the koreterm package identity." }
 )
 
 foreach ($rule in $forbiddenRules) {
@@ -184,9 +184,9 @@ foreach ($symbolsDocPath in @("README.md", "docs/windows.md", "docs/verify-relea
 }
 
 foreach ($docsPath in @("docs/getting-started.md", "docs/windows.md")) {
-    Require-Contains -RelativePath $docsPath -Needle "noctty-<version>-windows-<arch>-setup.exe" -Reason "Install docs should describe both x64 and ARM64 setup artifacts."
-    Require-Contains -RelativePath $docsPath -Needle "noctty-<version>-windows-<arch>-portable.zip" -Reason "Install docs should describe both x64 and ARM64 portable artifacts."
-    Require-Contains -RelativePath $docsPath -Needle "noctty-<version>-windows-<arch>-portable.manifest.ps1" -Reason "Install docs should describe both signed portable payload manifests."
+    Require-Contains -RelativePath $docsPath -Needle "koreterm-<version>-windows-<arch>-setup.exe" -Reason "Install docs should describe both x64 and ARM64 setup artifacts."
+    Require-Contains -RelativePath $docsPath -Needle "koreterm-<version>-windows-<arch>-portable.zip" -Reason "Install docs should describe both x64 and ARM64 portable artifacts."
+    Require-Contains -RelativePath $docsPath -Needle "koreterm-<version>-windows-<arch>-portable.manifest.ps1" -Reason "Install docs should describe both signed portable payload manifests."
     Require-Contains -RelativePath $docsPath -Needle "SHA256SUMS-windows-<arch>.txt" -Reason "Checksum guidance should use architecture-specific checksum files."
     Require-Regex -RelativePath $docsPath -Pattern "(?i)\bx64\b" -Reason "Install docs should name the supported release architectures."
     Require-Regex -RelativePath $docsPath -Pattern "(?i)\barm64\b" -Reason "Install docs should name the supported release architectures."
@@ -218,8 +218,8 @@ if ($latestVersion) {
     $escapedVersion = [regex]::Escape($latestVersion)
     Require-Regex -RelativePath "site/version.js" -Pattern "DEFAULT_NC_VERSION\s*=\s*'$escapedVersion'" -Reason "Site source default release version should match README."
     Require-Regex -RelativePath "site/index.html" -Pattern "(?<![\d.])$escapedVersion(?![\d.])" -Reason "The landing page should ship the current README release version as its compiled default."
-    Require-Regex -RelativePath "site/why-noctty.html" -Pattern ('id="nc-version">v' + $escapedVersion + '</strong>') -Reason "The trust page's static latest-release text should match README; it only changes when version.js finds a newer tag."
-    Require-Regex -RelativePath "site/why-noctty.html" -Pattern ('id="nc-version-summary">Version ' + $escapedVersion + ',') -Reason "The trust page's screen-reader summary should match README."
+    Require-Regex -RelativePath "site/why-koreterm.html" -Pattern ('id="nc-version">v' + $escapedVersion + '</strong>') -Reason "The trust page's static latest-release text should match README; it only changes when version.js finds a newer tag."
+    Require-Regex -RelativePath "site/why-koreterm.html" -Pattern ('id="nc-version-summary">Version ' + $escapedVersion + ',') -Reason "The trust page's screen-reader summary should match README."
     Require-Regex -RelativePath "docs/getting-started.md" -Pattern ('current stable release is\s+`?' + $escapedVersion + '`?(?![\d.])') -Reason "Getting-started stable version should match README."
 }
 
@@ -229,7 +229,7 @@ if ($CheckRemoteLatest) {
     } elseif (-not (Get-Command gh -ErrorAction SilentlyContinue)) {
         Add-Failure "Cannot check remote latest release because gh is not installed."
     } else {
-        $ghOutput = & gh release view --repo amanthanvi/noctty --json tagName,publishedAt,assets
+        $ghOutput = & gh release view --repo amanthanvi/koreterm --json tagName,publishedAt,assets
         if ($LASTEXITCODE -ne 0) {
             Add-Failure "gh release view failed: $ghOutput"
         } else {

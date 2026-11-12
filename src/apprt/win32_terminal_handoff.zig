@@ -1,5 +1,5 @@
 //! Windows default-terminal registration and the ITerminalHandoff3 local
-//! server. noctty intentionally implements only the terminal half; the
+//! server. koreterm intentionally implements only the terminal half; the
 //! console half remains a compatible Windows Terminal OpenConsole process.
 
 const std = @import("std");
@@ -22,12 +22,12 @@ const LSTATUS = i32;
 
 pub const clsid_text = "{33368C6F-D328-410C-B225-26DC9F12C728}";
 pub const proxy_clsid_text = "{1D349824-21FB-46C7-ACF3-746EDC991D52}";
-pub const proxy_filename = "noctty-terminal-handoff-proxy.dll";
+pub const proxy_filename = "koreterm-terminal-handoff-proxy.dll";
 const iid_terminal_handoff1_text = "{59D55CCE-FC8A-48B4-ACE8-0A9286C6557F}";
 const iid_terminal_handoff2_text = "{AA6B364F-4A50-4176-9002-0AE755E7B5EF}";
 const iid_terminal_handoff3_text = "{6F23DA90-15C5-4203-9DB0-64E73F1B1B00}";
-pub const CLSID_NOCTTY_TERMINAL = GUID.parse(clsid_text);
-pub const CLSID_NOCTTY_TERMINAL_PROXY = GUID.parse(proxy_clsid_text);
+pub const CLSID_KORETERM_TERMINAL = GUID.parse(clsid_text);
+pub const CLSID_KORETERM_TERMINAL_PROXY = GUID.parse(proxy_clsid_text);
 pub const IID_ITerminalHandoff1 = GUID.parse(iid_terminal_handoff1_text);
 pub const IID_ITerminalHandoff2 = GUID.parse(iid_terminal_handoff2_text);
 pub const IID_ITerminalHandoff3 = GUID.parse(iid_terminal_handoff3_text);
@@ -58,7 +58,7 @@ const class_key_utf8 = "Software\\Classes\\CLSID\\" ++ clsid_text;
 const local_server_key_utf8 = class_key_utf8 ++ "\\LocalServer32";
 const proxy_class_key_utf8 = "Software\\Classes\\CLSID\\" ++ proxy_clsid_text;
 const proxy_inproc_server_key_utf8 = proxy_class_key_utf8 ++ "\\InprocServer32";
-const saved_state_key_utf8 = class_key_utf8 ++ "\\noctty.default-terminal";
+const saved_state_key_utf8 = class_key_utf8 ++ "\\koreterm.default-terminal";
 const startup_key_utf8 = "Console\\%%Startup";
 const InterfaceProxyRegistration = struct {
     /// `Interface\{IID}`, the parent of `key_utf8`.
@@ -423,7 +423,7 @@ pub const Server = struct {
         const refs_before = self.factory.refcount.load(.acquire);
         var cookie: DWORD = 0;
         const hr = CoRegisterClassObject(
-            &CLSID_NOCTTY_TERMINAL,
+            &CLSID_KORETERM_TERMINAL,
             @ptrCast(&self.factory.base),
             CLSCTX_LOCAL_SERVER,
             REGCLS_MULTIPLEUSE,
@@ -626,7 +626,7 @@ const TerminalHandoff = struct {
         }
         if (iidEqual(iid, &IID_ITerminalHandoff1) or iidEqual(iid, &IID_ITerminalHandoff2)) {
             if (!legacy_qi_logged.swap(true, .acq_rel)) {
-                log.warn("ITerminalHandoff v1/v2 rejected; noctty requires ITerminalHandoff3 from Windows Terminal/OpenConsole 1.24 or newer", .{});
+                log.warn("ITerminalHandoff v1/v2 rejected; koreterm requires ITerminalHandoff3 from Windows Terminal/OpenConsole 1.24 or newer", .{});
             }
         }
         return com.E_NOINTERFACE;
@@ -775,9 +775,9 @@ fn duplicateLocalHandle(source: HANDLE) !HANDLE {
 
 fn cloneStartupTitle(alloc: Allocator, startup_info: ?*const TERMINAL_STARTUP_INFO) ![]u8 {
     const bstr = if (startup_info) |info| info.pszTitle else null;
-    const title = bstr orelse return alloc.dupe(u8, "noctty");
+    const title = bstr orelse return alloc.dupe(u8, "koreterm");
     const len: usize = com.SysStringLen(title);
-    if (len == 0) return alloc.dupe(u8, "noctty");
+    if (len == 0) return alloc.dupe(u8, "koreterm");
     return startupTitleAlloc(alloc, title[0..len]);
 }
 
@@ -985,11 +985,11 @@ pub fn appendHandoffMilestone(alloc: Allocator, event: []const u8) void {
 }
 
 fn appendHandoffTrace(alloc: Allocator, line: []const u8) void {
-    if (!std.process.hasNonEmptyEnvVarConstant("NOCTTY_HANDOFF_TRACE")) return;
+    if (!std.process.hasNonEmptyEnvVarConstant("KORETERM_HANDOFF_TRACE")) return;
 
     const local_app_data = std.process.getEnvVarOwned(alloc, "LOCALAPPDATA") catch return;
     defer alloc.free(local_app_data);
-    const dir_path = std.fs.path.join(alloc, &.{ local_app_data, "noctty" }) catch return;
+    const dir_path = std.fs.path.join(alloc, &.{ local_app_data, "koreterm" }) catch return;
     defer alloc.free(dir_path);
     std.fs.cwd().makePath(dir_path) catch return;
     const log_path = std.fs.path.join(alloc, &.{ dir_path, "handoff.log" }) catch return;
@@ -1239,17 +1239,17 @@ fn decideSelectionCommit(
     return .commit;
 }
 
-pub fn nocttyExePathForLauncher(alloc: Allocator, launcher_path: []const u8) ![]u8 {
+pub fn koretermExePathForLauncher(alloc: Allocator, launcher_path: []const u8) ![]u8 {
     const dir = std.fs.path.dirname(launcher_path) orelse return error.InvalidExecutablePath;
-    const candidate = try std.fs.path.join(alloc, &.{ dir, "noctty.exe" });
+    const candidate = try std.fs.path.join(alloc, &.{ dir, "koreterm.exe" });
     defer alloc.free(candidate);
     return std.fs.path.resolve(alloc, &.{candidate});
 }
 
-pub fn currentNocttyExePath(alloc: Allocator) ![]u8 {
+pub fn currentKoretermExePath(alloc: Allocator) ![]u8 {
     const launcher = try std.fs.selfExePathAlloc(alloc);
     defer alloc.free(launcher);
-    return nocttyExePathForLauncher(alloc, launcher);
+    return koretermExePathForLauncher(alloc, launcher);
 }
 
 pub fn localServerCommand(alloc: Allocator, exe_path: []const u8) ![]u8 {
@@ -1277,8 +1277,8 @@ pub fn registerDefaultTerminal(alloc: Allocator, exe_path: []const u8) (Allocato
 
     const terminal_raw = try queryValueAlloc(alloc, startup_key_utf8, delegation_terminal_name);
     defer if (terminal_raw) |value| value.deinit(alloc);
-    const terminal_is_noctty = if (terminal_raw) |value| try registryValueEqualsGuidAlloc(alloc, value, clsid_text) else false;
-    if (terminal_is_noctty) {
+    const terminal_is_koreterm = if (terminal_raw) |value| try registryValueEqualsGuidAlloc(alloc, value, clsid_text) else false;
+    if (terminal_is_koreterm) {
         const saved = try loadSavedRegistryValue(alloc, saved_state_key_utf8);
         saved.deinit(alloc);
     }
@@ -1287,7 +1287,7 @@ pub fn registerDefaultTerminal(alloc: Allocator, exe_path: []const u8) (Allocato
     defer alloc.free(command);
     var refresh_snapshot = try RegistrationRefreshSnapshot.capture(alloc);
     defer refresh_snapshot.deinit(alloc);
-    const rollback = decideRegistrationRollback(terminal_is_noctty, refresh_snapshot.had_owned_state);
+    const rollback = decideRegistrationRollback(terminal_is_koreterm, refresh_snapshot.had_owned_state);
     // Ordering is load-bearing: every shared Interface value is snapshotted
     // before anything is written, and the user's terminal selection is
     // switched last, so a failure part way through leaves the previous
@@ -1320,9 +1320,9 @@ fn writeRegistration(
     for (interface_proxy_registrations) |registration| {
         try savePreviousInterfaceProxy(alloc, registration);
     }
-    try writeRegistrySz(alloc, class_key_utf8, null, "noctty Terminal Handoff");
+    try writeRegistrySz(alloc, class_key_utf8, null, "koreterm Terminal Handoff");
     try writeRegistrySz(alloc, local_server_key_utf8, null, command);
-    try writeRegistrySz(alloc, proxy_class_key_utf8, null, "noctty Terminal Handoff Proxy/Stub");
+    try writeRegistrySz(alloc, proxy_class_key_utf8, null, "koreterm Terminal Handoff Proxy/Stub");
     try writeRegistrySz(alloc, proxy_inproc_server_key_utf8, null, proxy_path);
     try writeRegistrySz(alloc, proxy_inproc_server_key_utf8, "ThreadingModel", "Both");
     for (interface_proxy_registrations) |registration| {
@@ -1348,7 +1348,7 @@ const UnregisterTransaction = struct {
 
     fn mutate(self: *@This()) (Allocator.Error || RegistrationError)!UnregisterResult {
         // Mirror of the registration order: hand the selection back first,
-        // then the shared Interface values, and only then delete noctty's own
+        // then the shared Interface values, and only then delete koreterm's own
         // classes, so no window of time has the selection pointing at a
         // removed class.
         const selection_result = try restoreSelectionIfOwned(self.alloc, self.terminal_restore);
@@ -1490,10 +1490,10 @@ fn runUnregisterMutationWithRollback(
 pub fn unregisterDefaultTerminal(alloc: Allocator) (Allocator.Error || RegistrationError)!UnregisterResult {
     const terminal_raw = try queryValueAlloc(alloc, startup_key_utf8, delegation_terminal_name);
     defer if (terminal_raw) |value| value.deinit(alloc);
-    const terminal_is_noctty = if (terminal_raw) |value| try registryValueEqualsGuidAlloc(alloc, value, clsid_text) else false;
+    const terminal_is_koreterm = if (terminal_raw) |value| try registryValueEqualsGuidAlloc(alloc, value, clsid_text) else false;
 
     var terminal_restore: ?SavedRegistryValue = null;
-    if (terminal_is_noctty) terminal_restore = try loadSavedRegistryValue(alloc, saved_state_key_utf8);
+    if (terminal_is_koreterm) terminal_restore = try loadSavedRegistryValue(alloc, saved_state_key_utf8);
     defer if (terminal_restore) |value| value.deinit(alloc);
 
     var interface_restores: [interface_proxy_registrations.len]?SavedRegistryValue = @splat(null);
@@ -1885,8 +1885,8 @@ fn registryFailure(comptime operation: []const u8, rc: LSTATUS) RegistrationErro
 }
 
 test "handoff permanent CLSID and IIDs have pinned bytes" {
-    try std.testing.expectEqualSlices(u8, &.{ 0x6f, 0x8c, 0x36, 0x33, 0x28, 0xd3, 0x0c, 0x41, 0xb2, 0x25, 0x26, 0xdc, 0x9f, 0x12, 0xc7, 0x28 }, std.mem.asBytes(&CLSID_NOCTTY_TERMINAL));
-    try std.testing.expectEqualSlices(u8, &.{ 0x24, 0x98, 0x34, 0x1d, 0xfb, 0x21, 0xc7, 0x46, 0xac, 0xf3, 0x74, 0x6e, 0xdc, 0x99, 0x1d, 0x52 }, std.mem.asBytes(&CLSID_NOCTTY_TERMINAL_PROXY));
+    try std.testing.expectEqualSlices(u8, &.{ 0x6f, 0x8c, 0x36, 0x33, 0x28, 0xd3, 0x0c, 0x41, 0xb2, 0x25, 0x26, 0xdc, 0x9f, 0x12, 0xc7, 0x28 }, std.mem.asBytes(&CLSID_KORETERM_TERMINAL));
+    try std.testing.expectEqualSlices(u8, &.{ 0x24, 0x98, 0x34, 0x1d, 0xfb, 0x21, 0xc7, 0x46, 0xac, 0xf3, 0x74, 0x6e, 0xdc, 0x99, 0x1d, 0x52 }, std.mem.asBytes(&CLSID_KORETERM_TERMINAL_PROXY));
     try std.testing.expectEqualSlices(u8, &.{ 0x90, 0xda, 0x23, 0x6f, 0xc5, 0x15, 0x03, 0x42, 0x9d, 0xb0, 0x64, 0xe7, 0x3f, 0x1b, 0x1b, 0x00 }, std.mem.asBytes(&IID_ITerminalHandoff3));
     try std.testing.expectEqualSlices(u8, &.{ 0xce, 0x5c, 0xd5, 0x59, 0x8a, 0xfc, 0xb4, 0x48, 0xac, 0xe8, 0x0a, 0x92, 0x86, 0xc6, 0x55, 0x7f }, std.mem.asBytes(&IID_ITerminalHandoff1));
     try std.testing.expectEqualSlices(u8, &.{ 0x4f, 0x36, 0x6b, 0xaa, 0x50, 0x4a, 0x76, 0x41, 0x90, 0x02, 0x0a, 0xe7, 0x55, 0xe7, 0xb5, 0xef }, std.mem.asBytes(&IID_ITerminalHandoff2));
@@ -2087,7 +2087,7 @@ test "handoff pending queue resolves only identifiers it issued" {
     session.* = .{
         .alloc = alloc,
         .adopted = null,
-        .title = try alloc.dupe(u8, "noctty"),
+        .title = try alloc.dupe(u8, "koreterm"),
     };
     const id = try server.queuePending(session);
     try std.testing.expect(id != 0);
@@ -2326,23 +2326,23 @@ test "handoff failure trace stays within its byte budget" {
 }
 
 test "handoff embedding argument detection respects command boundary" {
-    try std.testing.expect(isEmbeddingArgs(&.{ "noctty.exe", "-Embedding" }));
-    try std.testing.expect(isEmbeddingArgs(&.{ "noctty.exe", "-embedding" }));
-    try std.testing.expect(!isEmbeddingArgs(&.{"noctty.exe"}));
-    try std.testing.expect(!isEmbeddingArgs(&.{ "noctty.exe", "-e", "cmd.exe", "-Embedding" }));
+    try std.testing.expect(isEmbeddingArgs(&.{ "koreterm.exe", "-Embedding" }));
+    try std.testing.expect(isEmbeddingArgs(&.{ "koreterm.exe", "-embedding" }));
+    try std.testing.expect(!isEmbeddingArgs(&.{"koreterm.exe"}));
+    try std.testing.expect(!isEmbeddingArgs(&.{ "koreterm.exe", "-e", "cmd.exe", "-Embedding" }));
 }
 
 test "handoff registry builders target sibling GUI executable and quote once" {
-    const path = try nocttyExePathForLauncher(std.testing.allocator, "C:\\Apps\\noctty\\noctty.com");
+    const path = try koretermExePathForLauncher(std.testing.allocator, "C:\\Apps\\koreterm\\koreterm.com");
     defer std.testing.allocator.free(path);
-    try std.testing.expectEqualStrings("C:\\Apps\\noctty\\noctty.exe", path);
+    try std.testing.expectEqualStrings("C:\\Apps\\koreterm\\koreterm.exe", path);
     const command = try localServerCommand(std.testing.allocator, path);
     defer std.testing.allocator.free(command);
-    try std.testing.expectEqualStrings("\"C:\\Apps\\noctty\\noctty.exe\"", command);
+    try std.testing.expectEqualStrings("\"C:\\Apps\\koreterm\\koreterm.exe\"", command);
     try std.testing.expect(std.mem.indexOf(u8, command, "-Embedding") == null);
     const proxy_path = try proxyDllPathForExe(std.testing.allocator, path);
     defer std.testing.allocator.free(proxy_path);
-    try std.testing.expectEqualStrings("C:\\Apps\\noctty\\" ++ proxy_filename, proxy_path);
+    try std.testing.expectEqualStrings("C:\\Apps\\koreterm\\" ++ proxy_filename, proxy_path);
 }
 
 test "handoff shared interface proxy ownership is exact and case insensitive" {
@@ -2412,7 +2412,7 @@ const ScratchHive = struct {
     alloc: Allocator,
     prefix: []u8,
 
-    const name_start = "Software\\noctty-test-";
+    const name_start = "Software\\koreterm-test-";
 
     fn init(alloc: Allocator) !ScratchHive {
         const prefix = try std.fmt.allocPrint(alloc, name_start ++ "handoff-{d}-{d}", .{
@@ -2456,7 +2456,7 @@ const ScratchHive = struct {
 const wt_terminal_text = "{E12CFF52-A866-4C77-9A90-F570A7AA2C6B}";
 
 /// A directory holding the proxy DLL registration insists on finding beside
-/// `noctty.exe`. The DLL is an empty file: nothing loads it.
+/// `koreterm.exe`. The DLL is an empty file: nothing loads it.
 const ScratchInstall = struct {
     tmp: std.testing.TmpDir,
     exe_path: []u8,
@@ -2467,7 +2467,7 @@ const ScratchInstall = struct {
         (try tmp.dir.createFile(proxy_filename, .{})).close();
         const dir = try tmp.dir.realpathAlloc(alloc, ".");
         defer alloc.free(dir);
-        return .{ .tmp = tmp, .exe_path = try std.fs.path.join(alloc, &.{ dir, "noctty.exe" }) };
+        return .{ .tmp = tmp, .exe_path = try std.fs.path.join(alloc, &.{ dir, "koreterm.exe" }) };
     }
 
     fn deinit(self: *ScratchInstall, alloc: Allocator) void {

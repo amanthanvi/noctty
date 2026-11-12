@@ -14,10 +14,10 @@ $shellHarness = Join-Path $repoRoot 'test\windows\cli-shell-command.ps1'
 $redirectedHarness = Join-Path $repoRoot 'test\windows\cli-redirected-text-action.ps1'
 $detachedHarness = Join-Path $repoRoot 'test\windows\cli-detached-action.ps1'
 
-$stageBase = Join-Path $repoRoot ("dist\artifacts\noctty-{0}-windows-{1}" -f $Version, $Architecture)
-$portableRoot = Join-Path $stageBase 'noctty'
-$portableExe = Join-Path $portableRoot 'noctty.exe'
-$portableCommand = Join-Path $portableRoot 'noctty.com'
+$stageBase = Join-Path $repoRoot ("dist\artifacts\koreterm-{0}-windows-{1}" -f $Version, $Architecture)
+$portableRoot = Join-Path $stageBase 'koreterm'
+$portableExe = Join-Path $portableRoot 'koreterm.exe'
+$portableCommand = Join-Path $portableRoot 'koreterm.com'
 $portableResources = Join-Path $portableRoot 'share\ghostty'
 
 if (-not $SkipPackage) {
@@ -44,7 +44,7 @@ if ($LASTEXITCODE -ne 0) { throw "Packaged DLL smoke failed: $LASTEXITCODE" }
     -Shell cmd `
     -BinDir $portableRoot `
     -Arguments @('+help') `
-    -ExpectedText 'Usage: noctty [+action] [options]'
+    -ExpectedText 'Usage: koreterm [+action] [options]'
 
 & $shellHarness `
     -Shell powershell `
@@ -79,7 +79,7 @@ if ($LASTEXITCODE -ne 0) { throw "Packaged DLL smoke failed: $LASTEXITCODE" }
 & $redirectedHarness `
     -ExePath $portableExe `
     -Action '+help' `
-    -ExpectedText 'Usage: noctty [+action] [options]'
+    -ExpectedText 'Usage: koreterm [+action] [options]'
 
 & $detachedHarness `
     -ExePath $portableExe `

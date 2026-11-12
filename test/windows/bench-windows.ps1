@@ -2,8 +2,8 @@
 param(
     [ValidateSet('all', 'throughput', 'cold-start', 'memory', 'idle', 'conpty-rtt', 'key-to-pixel-proxy')]
     [string] $Metric = 'all',
-    [ValidateSet('noctty', 'alacritty', 'windows-terminal', 'tabby', 'wave')]
-    [string] $Target = 'noctty',
+    [ValidateSet('koreterm', 'alacritty', 'windows-terminal', 'tabby', 'wave')]
+    [string] $Target = 'koreterm',
     [ValidateRange(1, 100)] [int] $Runs = 5,
     [string] $OutputPath,
     [string] $ThresholdPath,
@@ -33,7 +33,7 @@ $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $libPath = Join-Path $repoRoot 'scripts\interactive-win11-lib.ps1'
 . $libPath
 
-if (-not $env:NOCTTY_BENCH_WINDOWS_BOOTSTRAPPED) {
+if (-not $env:KORETERM_BENCH_WINDOWS_BOOTSTRAPPED) {
     $forwardedArgs = @(
         '-Metric', $Metric,
         '-Target', $Target,
@@ -62,7 +62,7 @@ if (-not $env:NOCTTY_BENCH_WINDOWS_BOOTSTRAPPED) {
     Invoke-InteractiveWin11Bootstrap `
         -RepoRoot $repoRoot `
         -LauncherPath $launcherPath `
-        -EnvironmentVariable 'NOCTTY_BENCH_WINDOWS_BOOTSTRAPPED' `
+        -EnvironmentVariable 'KORETERM_BENCH_WINDOWS_BOOTSTRAPPED' `
         -ArgumentList $forwardedArgs `
         -ExitCode ([ref] $bootstrapExitCode)
     exit $bootstrapExitCode
@@ -106,14 +106,14 @@ elseif (-not [IO.Path]::IsPathRooted($ThresholdPath)) {
 $ThresholdPath = [IO.Path]::GetFullPath($ThresholdPath)
 $schemaPath = Join-Path $PSScriptRoot 'bench-evidence.schema.json'
 
-if (-not ('NocttyBenchNative' -as [type])) {
+if (-not ('KoretermBenchNative' -as [type])) {
     Add-Type -TypeDefinition @'
 using System;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Text;
 
-public static class NocttyBenchNative {
+public static class KoretermBenchNative {
     public delegate bool EnumWindowsProc(IntPtr hwnd, IntPtr lParam);
 
     [StructLayout(LayoutKind.Explicit, Size = 220, CharSet = CharSet.Unicode)]
@@ -507,11 +507,11 @@ function Get-BenchWindowsTerminalCandidate {
 function Get-BenchTargetAdapter {
     param([Parameter(Mandatory)] [string] $Name)
 
-    # `switch` unrolls a single-element array into a scalar, and the noctty
+    # `switch` unrolls a single-element array into a scalar, and the koreterm
     # branch has exactly one candidate. Without @() around it, the fallback
     # below indexes a string and resolves to its first character.
     $candidates = @(switch ($Name) {
-        'noctty' { @(Get-InteractiveWin11ExePath -RepoRoot $repoRoot) }
+        'koreterm' { @(Get-InteractiveWin11ExePath -RepoRoot $repoRoot) }
         'alacritty' { @('C:\Program Files\Alacritty\alacritty.exe') }
         'windows-terminal' { @((Get-BenchWindowsTerminalCandidate), 'wt.exe') }
         'tabby' { @('tabby.exe', (Join-Path $env:LOCALAPPDATA 'Programs\Tabby\Tabby.exe')) }
@@ -535,7 +535,7 @@ function Get-BenchTargetAdapter {
         }
     }
 
-    if ($null -eq $resolved -and $Name -eq 'noctty') {
+    if ($null -eq $resolved -and $Name -eq 'koreterm') {
         $resolved = [IO.Path]::GetFullPath($candidates[0])
     }
     if ($null -eq $resolved) {
@@ -552,11 +552,11 @@ function Get-BenchTargetAdapter {
         $versionInfo.FileVersion
     }
     else { $null }
-    if ($Name -eq 'noctty' -and [string]::IsNullOrWhiteSpace($version)) {
-        $cliPath = Join-Path (Split-Path -Parent $resolved) 'noctty.com'
+    if ($Name -eq 'koreterm' -and [string]::IsNullOrWhiteSpace($version)) {
+        $cliPath = Join-Path (Split-Path -Parent $resolved) 'koreterm.com'
         if (Test-Path -LiteralPath $cliPath -PathType Leaf) {
             $versionLine = @(& $cliPath '+version' 2>$null) | Select-Object -First 1
-            if ($LASTEXITCODE -eq 0 -and $versionLine -match '^noctty\s+(.+)$') {
+            if ($LASTEXITCODE -eq 0 -and $versionLine -match '^koreterm\s+(.+)$') {
                 $version = $Matches[1]
             }
         }
@@ -589,12 +589,12 @@ function Get-BenchTargetArguments {
     )
 
     switch ($Target) {
-        'noctty' {
+        'koreterm' {
             $targetArguments = @((Get-InteractiveWin11ContainmentArguments))
             $targetArguments += if ($EnableAutomation) { '--single-instance=true' } else { '--single-instance=false' }
             $targetArguments += @(
                 "--class=$script:instanceClass"
-                "--config-file=$script:nocttyConfigPath"
+                "--config-file=$script:koretermConfigPath"
             )
             if ($EnableAutomation) { return $targetArguments + @('--command=cmd.exe') }
             return $targetArguments + @('-e', 'powershell.exe') + $ChildArguments
@@ -603,7 +603,7 @@ function Get-BenchTargetArguments {
             return @('--config-file', $script:alacrittyConfigPath, '-e', 'powershell.exe') + $ChildArguments
         }
         'windows-terminal' {
-            return @('-w', "noctty-bench-$RunName", '--size', "$Cols,$Rows", 'new-tab', 'powershell.exe') + $ChildArguments
+            return @('-w', "koreterm-bench-$RunName", '--size', "$Cols,$Rows", 'new-tab', 'powershell.exe') + $ChildArguments
         }
         'tabby' {
             return @('run', 'powershell.exe') + $ChildArguments
@@ -640,38 +640,38 @@ function Start-BenchTarget {
     }
     $childArguments = @('-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $ChildScript) + $ChildScriptArguments
     $arguments = @(Get-BenchTargetArguments -ChildArguments $childArguments -RunName $RunName -EnableAutomation:$EnableAutomation)
-    $savedTracePath = $env:NOCTTY_RENDER_TRACE_FILE
-    $savedTraceLive = $env:NOCTTY_RENDER_TRACE_LIVE
-    $savedTermioTracePath = $env:NOCTTY_TERMIO_TRACE_FILE
-    $savedMemoryTracePath = $env:NOCTTY_BENCH_MEMORY_STAGE_TRACE_FILE
-    $savedEndMarker = $env:NOCTTY_BENCH_END_MARKER
-    if ($Target -eq 'noctty' -and -not [string]::IsNullOrWhiteSpace($TracePath)) {
-        $env:NOCTTY_RENDER_TRACE_FILE = $TracePath
-        if ($LiveTrace) { $env:NOCTTY_RENDER_TRACE_LIVE = '1' }
-        else { Remove-Item Env:NOCTTY_RENDER_TRACE_LIVE -ErrorAction SilentlyContinue }
+    $savedTracePath = $env:KORETERM_RENDER_TRACE_FILE
+    $savedTraceLive = $env:KORETERM_RENDER_TRACE_LIVE
+    $savedTermioTracePath = $env:KORETERM_TERMIO_TRACE_FILE
+    $savedMemoryTracePath = $env:KORETERM_BENCH_MEMORY_STAGE_TRACE_FILE
+    $savedEndMarker = $env:KORETERM_BENCH_END_MARKER
+    if ($Target -eq 'koreterm' -and -not [string]::IsNullOrWhiteSpace($TracePath)) {
+        $env:KORETERM_RENDER_TRACE_FILE = $TracePath
+        if ($LiveTrace) { $env:KORETERM_RENDER_TRACE_LIVE = '1' }
+        else { Remove-Item Env:KORETERM_RENDER_TRACE_LIVE -ErrorAction SilentlyContinue }
     }
     else {
-        Remove-Item Env:NOCTTY_RENDER_TRACE_FILE -ErrorAction SilentlyContinue
-        Remove-Item Env:NOCTTY_RENDER_TRACE_LIVE -ErrorAction SilentlyContinue
+        Remove-Item Env:KORETERM_RENDER_TRACE_FILE -ErrorAction SilentlyContinue
+        Remove-Item Env:KORETERM_RENDER_TRACE_LIVE -ErrorAction SilentlyContinue
     }
-    if ($Target -eq 'noctty') {
+    if ($Target -eq 'koreterm') {
         if (-not [string]::IsNullOrWhiteSpace($EndMarker)) {
-            $env:NOCTTY_BENCH_END_MARKER = $EndMarker
+            $env:KORETERM_BENCH_END_MARKER = $EndMarker
         }
-        else { Remove-Item Env:NOCTTY_BENCH_END_MARKER -ErrorAction SilentlyContinue }
+        else { Remove-Item Env:KORETERM_BENCH_END_MARKER -ErrorAction SilentlyContinue }
         if (-not [string]::IsNullOrWhiteSpace($TermioTracePath)) {
-            $env:NOCTTY_TERMIO_TRACE_FILE = $TermioTracePath
+            $env:KORETERM_TERMIO_TRACE_FILE = $TermioTracePath
         }
-        else { Remove-Item Env:NOCTTY_TERMIO_TRACE_FILE -ErrorAction SilentlyContinue }
+        else { Remove-Item Env:KORETERM_TERMIO_TRACE_FILE -ErrorAction SilentlyContinue }
         if (-not [string]::IsNullOrWhiteSpace($MemoryTracePath)) {
-            $env:NOCTTY_BENCH_MEMORY_STAGE_TRACE_FILE = $MemoryTracePath
+            $env:KORETERM_BENCH_MEMORY_STAGE_TRACE_FILE = $MemoryTracePath
         }
-        else { Remove-Item Env:NOCTTY_BENCH_MEMORY_STAGE_TRACE_FILE -ErrorAction SilentlyContinue }
+        else { Remove-Item Env:KORETERM_BENCH_MEMORY_STAGE_TRACE_FILE -ErrorAction SilentlyContinue }
     }
     else {
-        Remove-Item Env:NOCTTY_TERMIO_TRACE_FILE -ErrorAction SilentlyContinue
-        Remove-Item Env:NOCTTY_BENCH_MEMORY_STAGE_TRACE_FILE -ErrorAction SilentlyContinue
-        Remove-Item Env:NOCTTY_BENCH_END_MARKER -ErrorAction SilentlyContinue
+        Remove-Item Env:KORETERM_TERMIO_TRACE_FILE -ErrorAction SilentlyContinue
+        Remove-Item Env:KORETERM_BENCH_MEMORY_STAGE_TRACE_FILE -ErrorAction SilentlyContinue
+        Remove-Item Env:KORETERM_BENCH_END_MARKER -ErrorAction SilentlyContinue
     }
 
     $watch = [Diagnostics.Stopwatch]::StartNew()
@@ -685,16 +685,16 @@ function Start-BenchTarget {
             -PassThru
     }
     finally {
-        if ($null -eq $savedTracePath) { Remove-Item Env:NOCTTY_RENDER_TRACE_FILE -ErrorAction SilentlyContinue }
-        else { $env:NOCTTY_RENDER_TRACE_FILE = $savedTracePath }
-        if ($null -eq $savedTraceLive) { Remove-Item Env:NOCTTY_RENDER_TRACE_LIVE -ErrorAction SilentlyContinue }
-        else { $env:NOCTTY_RENDER_TRACE_LIVE = $savedTraceLive }
-        if ($null -eq $savedTermioTracePath) { Remove-Item Env:NOCTTY_TERMIO_TRACE_FILE -ErrorAction SilentlyContinue }
-        else { $env:NOCTTY_TERMIO_TRACE_FILE = $savedTermioTracePath }
-        if ($null -eq $savedMemoryTracePath) { Remove-Item Env:NOCTTY_BENCH_MEMORY_STAGE_TRACE_FILE -ErrorAction SilentlyContinue }
-        else { $env:NOCTTY_BENCH_MEMORY_STAGE_TRACE_FILE = $savedMemoryTracePath }
-        if ($null -eq $savedEndMarker) { Remove-Item Env:NOCTTY_BENCH_END_MARKER -ErrorAction SilentlyContinue }
-        else { $env:NOCTTY_BENCH_END_MARKER = $savedEndMarker }
+        if ($null -eq $savedTracePath) { Remove-Item Env:KORETERM_RENDER_TRACE_FILE -ErrorAction SilentlyContinue }
+        else { $env:KORETERM_RENDER_TRACE_FILE = $savedTracePath }
+        if ($null -eq $savedTraceLive) { Remove-Item Env:KORETERM_RENDER_TRACE_LIVE -ErrorAction SilentlyContinue }
+        else { $env:KORETERM_RENDER_TRACE_LIVE = $savedTraceLive }
+        if ($null -eq $savedTermioTracePath) { Remove-Item Env:KORETERM_TERMIO_TRACE_FILE -ErrorAction SilentlyContinue }
+        else { $env:KORETERM_TERMIO_TRACE_FILE = $savedTermioTracePath }
+        if ($null -eq $savedMemoryTracePath) { Remove-Item Env:KORETERM_BENCH_MEMORY_STAGE_TRACE_FILE -ErrorAction SilentlyContinue }
+        else { $env:KORETERM_BENCH_MEMORY_STAGE_TRACE_FILE = $savedMemoryTracePath }
+        if ($null -eq $savedEndMarker) { Remove-Item Env:KORETERM_BENCH_END_MARKER -ErrorAction SilentlyContinue }
+        else { $env:KORETERM_BENCH_END_MARKER = $savedEndMarker }
     }
     $startedAt = [DateTime]::UtcNow
     try { $startedAt = $process.StartTime.ToUniversalTime() } catch {}
@@ -703,7 +703,7 @@ function Start-BenchTarget {
         process_id = [int] $process.Id
         started_at = $startedAt.ToString('o')
         exe_path = [IO.Path]::GetFullPath($script:adapter.ExePath)
-        cleanup_method = if ($Target -eq 'noctty') { 'job-contained exact root' } else { 'exact root' }
+        cleanup_method = if ($Target -eq 'koreterm') { 'job-contained exact root' } else { 'exact root' }
         exit_confirmed = $false
         exited_at = $null
     }
@@ -725,7 +725,7 @@ function Start-BenchTarget {
 function Stop-BenchTarget {
     param([Parameter(Mandatory)] $Run)
     try {
-        if ($Target -eq 'noctty') {
+        if ($Target -eq 'koreterm') {
             Stop-InteractiveWin11Process -Process $Run.Process -Contained
             return
         }
@@ -767,13 +767,13 @@ function Wait-BenchFile {
     throw "Timed out waiting for $Description at $Path"
 }
 
-function Wait-BenchNocttyWindow {
+function Wait-BenchKoretermWindow {
     param([Parameter(Mandatory)] $Run)
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
-    Wait-InteractiveWin11Until -Deadline $deadline -Description 'noctty benchmark host window' -Process $Run.Process -Condition {
-        [NocttyBenchNative]::FindTopLevelWindow($Run.Process.Id, 'noctty.win32.host') -ne [IntPtr]::Zero
+    Wait-InteractiveWin11Until -Deadline $deadline -Description 'koreterm benchmark host window' -Process $Run.Process -Condition {
+        [KoretermBenchNative]::FindTopLevelWindow($Run.Process.Id, 'koreterm.win32.host') -ne [IntPtr]::Zero
     }
-    return [NocttyBenchNative]::FindTopLevelWindow($Run.Process.Id, 'noctty.win32.host')
+    return [KoretermBenchNative]::FindTopLevelWindow($Run.Process.Id, 'koreterm.win32.host')
 }
 
 function New-BenchKeyLParam {
@@ -794,14 +794,14 @@ function Send-BenchVirtualKeyMessage {
         [Parameter(Mandatory)] [DateTime] $Deadline,
         [Parameter(Mandatory)] [Diagnostics.Process] $Process
     )
-    $scanCode = [NocttyBenchNative]::MapVirtualKeyW([uint32] $VirtualKey, 0)
+    $scanCode = [KoretermBenchNative]::MapVirtualKeyW([uint32] $VirtualKey, 0)
     if ($scanCode -eq 0) { throw "MapVirtualKeyW returned 0 for VK=$VirtualKey" }
     [void](Invoke-InteractiveWin11Message -Hwnd $Hwnd -Message 0x0100 -WParam ([UIntPtr]([uint64] $VirtualKey)) -LParam (New-BenchKeyLParam -ScanCode ([uint16] $scanCode)) -Deadline $Deadline -Process $Process -Description "WM_KEYDOWN vk=$VirtualKey")
     [void](Invoke-InteractiveWin11Message -Hwnd $Hwnd -Message 0x0102 -WParam ([UIntPtr]([uint64] $CharCode)) -LParam (New-BenchKeyLParam -ScanCode ([uint16] $scanCode)) -Deadline $Deadline -Process $Process -Description "WM_CHAR char=$CharCode")
     [void](Invoke-InteractiveWin11Message -Hwnd $Hwnd -Message 0x0101 -WParam ([UIntPtr]([uint64] $VirtualKey)) -LParam (New-BenchKeyLParam -ScanCode ([uint16] $scanCode) -KeyUp) -Deadline $Deadline -Process $Process -Description "WM_KEYUP vk=$VirtualKey")
 }
 
-function Invoke-NocttyCli {
+function Invoke-KoretermCli {
     param(
         [Parameter(Mandatory)] [string] $Name,
         [Parameter(Mandatory)] [string[]] $Arguments
@@ -809,28 +809,28 @@ function Invoke-NocttyCli {
     $stdoutPath = Join-Path $layout.Logs "$Name-stdout.log"
     $stderrPath = Join-Path $layout.Logs "$Name-stderr.log"
     Remove-Item -LiteralPath $stdoutPath, $stderrPath -ErrorAction SilentlyContinue
-    $cliPath = Join-Path (Split-Path -Parent $script:adapter.ExePath) 'noctty.com'
+    $cliPath = Join-Path (Split-Path -Parent $script:adapter.ExePath) 'koreterm.com'
     if (-not (Test-Path -LiteralPath $cliPath -PathType Leaf)) {
-        throw "noctty CLI shim was not found: $cliPath"
+        throw "koreterm CLI shim was not found: $cliPath"
     }
     $process = Start-Process -FilePath $cliPath -ArgumentList $Arguments -WorkingDirectory $repoRoot -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath -PassThru
     $handle = $process.Handle
     if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
         Stop-InteractiveWin11Process -Process $process -RequireLiveRoot
-        throw "noctty CLI $Name timed out"
+        throw "koreterm CLI $Name timed out"
     }
     $process.Refresh()
     $exitCode = Get-InteractiveWin11ProcessExitCode -Process $process -ProcessHandle $handle
     if ($exitCode -ne 0) {
-        throw "noctty CLI $Name failed with exit $exitCode`: $(Get-InteractiveWin11TextFile -Path $stderrPath)"
+        throw "koreterm CLI $Name failed with exit $exitCode`: $(Get-InteractiveWin11TextFile -Path $stderrPath)"
     }
     return Get-InteractiveWin11TextFile -Path $stdoutPath
 }
 
-function Get-NocttyAutomationSnapshot {
+function Get-KoretermAutomationSnapshot {
     param([Parameter(Mandatory)] [string] $Name)
-    $raw = Invoke-NocttyCli -Name $Name -Arguments @('+list-windows', "--class=$script:instanceClass")
-    if ([string]::IsNullOrWhiteSpace($raw)) { throw 'noctty +list-windows returned empty stdout' }
+    $raw = Invoke-KoretermCli -Name $Name -Arguments @('+list-windows', "--class=$script:instanceClass")
+    if ([string]::IsNullOrWhiteSpace($raw)) { throw 'koreterm +list-windows returned empty stdout' }
     return $raw | ConvertFrom-Json
 }
 
@@ -1267,7 +1267,7 @@ function Request-BenchRenderTraceSnapshot {
 
     $message = $script:WmWinhosttyRenderTraceSnapshot
     [UIntPtr] $messageResult = [UIntPtr]::Zero
-    $sent = [NocttyBenchNative]::SendMessageTimeoutW(
+    $sent = [KoretermBenchNative]::SendMessageTimeoutW(
         $Hwnd,
         $message,
         [UIntPtr]::Zero,
@@ -1383,7 +1383,7 @@ function Set-BenchRenderTraceTarget {
 
     $message = $script:WmWinhosttyRenderTraceTarget
     [UIntPtr] $messageResult = [UIntPtr]::Zero
-    $sent = [NocttyBenchNative]::SendMessageTimeoutW(
+    $sent = [KoretermBenchNative]::SendMessageTimeoutW(
         $Hwnd,
         $message,
         [UIntPtr] $OutputBytes,
@@ -1407,7 +1407,7 @@ function Wait-BenchUiText {
 
     while ([DateTime]::UtcNow -lt $Deadline) {
         $Process.Refresh()
-        if ($Process.HasExited) { throw "noctty exited before UIA-observable text '$Text'" }
+        if ($Process.HasExited) { throw "koreterm exited before UIA-observable text '$Text'" }
         if (Test-BenchUiText -Hwnd $Hwnd -Text $Text) { return }
         Start-Sleep -Milliseconds 5
     }
@@ -1419,18 +1419,18 @@ function Invoke-BenchEchoRun {
         [Parameter(Mandatory)] [string] $RunName,
         [switch] $NeedProxy
     )
-    if ($Target -ne 'noctty') { throw "$RunName currently requires noctty's stable Win32 surface/UIA and render-trace contracts" }
+    if ($Target -ne 'koreterm') { throw "$RunName currently requires koreterm's stable Win32 surface/UIA and render-trace contracts" }
     $readyPath = Join-Path $layout.Temp "$RunName-ready.txt"
     $resultPath = Join-Path $layout.Temp "$RunName-result.json"
     $tracePath = Join-Path $layout.Temp "$RunName-render-trace.json"
     Remove-Item -LiteralPath $readyPath, $resultPath, $tracePath -ErrorAction SilentlyContinue
-    $nonce = "noctty-bench-$([Guid]::NewGuid().ToString('N'))"
+    $nonce = "koreterm-bench-$([Guid]::NewGuid().ToString('N'))"
     $run = Start-BenchTarget -RunName $RunName -ChildScript $script:echoScriptPath -ChildScriptArguments @('-ReadyPath', $readyPath, '-ResultPath', $resultPath, '-Nonce', $nonce) -TracePath $tracePath -EndMarker $nonce -LiveTrace
     try {
         Wait-BenchFile -Path $readyPath -Run $run -Description 'benchmark echo child readiness'
-        $hostHwnd = Wait-BenchNocttyWindow -Run $run
-        $surfaceHwnd = [NocttyBenchNative]::FindChildWindow($hostHwnd, 'noctty.win32')
-        if ($surfaceHwnd -eq [IntPtr]::Zero) { throw 'noctty surface HWND was not found' }
+        $hostHwnd = Wait-BenchKoretermWindow -Run $run
+        $surfaceHwnd = [KoretermBenchNative]::FindChildWindow($hostHwnd, 'koreterm.win32')
+        if ($surfaceHwnd -eq [IntPtr]::Zero) { throw 'koreterm surface HWND was not found' }
         $firstTrace = Get-BenchJsonFile -Path $tracePath -Deadline ([DateTime]::UtcNow.AddSeconds($TimeoutSeconds))
         if ([uint64] $firstTrace.swap_buffers_count -lt 1) { throw 'initial render trace did not contain a successful swap' }
         $traceSequence = [uint64] $firstTrace.snapshot_sequence
@@ -1438,7 +1438,7 @@ function Invoke-BenchEchoRun {
         $baselineOutputGeneration = [uint64] $firstTrace.last_swap_process_output_generation
         $baselineEndMarkerGeneration = [uint64] $firstTrace.last_swap_benchmark_end_marker_generation
         if ($NeedProxy) {
-            if (-not [NocttyBenchNative]::ForceForeground($hostHwnd)) { throw 'failed to foreground noctty before SendInput' }
+            if (-not [KoretermBenchNative]::ForceForeground($hostHwnd)) { throw 'failed to foreground koreterm before SendInput' }
             $foregroundTrace = Request-BenchRenderTraceSnapshot -Hwnd $surfaceHwnd -Path $tracePath -AfterSequence $traceSequence -Deadline ([DateTime]::UtcNow.AddSeconds($TimeoutSeconds))
             $traceSequence = [uint64] $foregroundTrace.snapshot_sequence
             $baselineSwapCount = [uint64] $foregroundTrace.swap_buffers_count
@@ -1447,10 +1447,10 @@ function Invoke-BenchEchoRun {
         }
 
         Set-BenchRenderTraceTarget -Hwnd $surfaceHwnd -OutputBytes 0
-        $inputTickMs = [NocttyBenchNative]::GetTickCount64()
+        $inputTickMs = [KoretermBenchNative]::GetTickCount64()
         $inputQpcTicks = [Diagnostics.Stopwatch]::GetTimestamp()
         if ($NeedProxy) {
-            [NocttyBenchNative]::SendUnicodeText('x')
+            [KoretermBenchNative]::SendUnicodeText('x')
         }
         else {
             Send-BenchVirtualKeyMessage -Hwnd $surfaceHwnd -VirtualKey 0x58 -CharCode 0x78 -Deadline ([DateTime]::UtcNow.AddSeconds($TimeoutSeconds)) -Process $run.Process
@@ -1480,7 +1480,7 @@ function Invoke-BenchEchoRun {
                 break
             }
             $run.Process.Refresh()
-            if ($run.Process.HasExited) { throw 'noctty exited before a swap consumed the controlled echo output' }
+            if ($run.Process.HasExited) { throw 'koreterm exited before a swap consumed the controlled echo output' }
             Start-Sleep -Milliseconds 5
         }
         if ($null -eq $conptyRttMs) { throw 'render trace did not report a swap that consumed the controlled echo output' }
@@ -1526,7 +1526,7 @@ function Get-BenchFingerprint {
         }
         else { [string] $windowsVersion.CurrentBuildNumber }
         $cpuModel = ([string] $processorKey.GetValue('ProcessorNameString')).Trim()
-        $physicalCores = [NocttyBenchNative]::GetPhysicalCoreCount()
+        $physicalCores = [KoretermBenchNative]::GetPhysicalCoreCount()
         $nvidiaSmi = Get-Command nvidia-smi.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
         if ($null -ne $nvidiaSmi) {
             $nvidiaLine = @(& $nvidiaSmi.Source '--query-gpu=name,driver_version' '--format=csv,noheader' 2>$null) | Select-Object -First 1
@@ -1553,15 +1553,15 @@ function Get-BenchFingerprint {
     if ([string]::IsNullOrWhiteSpace($osBuild)) { throw 'Unable to resolve the Windows build number' }
     if ([string]::IsNullOrWhiteSpace($cpuModel) -or $physicalCores -le 0 -or $logicalCores -le 0) { throw 'Unable to resolve the CPU model and core counts' }
     if ([string]::IsNullOrWhiteSpace($gpuName) -or [string]::IsNullOrWhiteSpace($gpuDriverVersion)) { throw 'Unable to resolve the GPU name and driver version' }
-    $mode = [NocttyBenchNative+DEVMODE]::new()
-    $mode.dmSize = [Runtime.InteropServices.Marshal]::SizeOf([type] [NocttyBenchNative+DEVMODE])
-    [void] [NocttyBenchNative]::EnumDisplaySettingsW($null, -1, [ref] $mode)
-    $primaryMode = [NocttyBenchNative]::GetPrimaryDisplayMode()
+    $mode = [KoretermBenchNative+DEVMODE]::new()
+    $mode.dmSize = [Runtime.InteropServices.Marshal]::SizeOf([type] [KoretermBenchNative+DEVMODE])
+    [void] [KoretermBenchNative]::EnumDisplaySettingsW($null, -1, [ref] $mode)
+    $primaryMode = [KoretermBenchNative]::GetPrimaryDisplayMode()
     if ($primaryMode[0] -gt 0) { $mode.dmPelsWidth = $primaryMode[0] }
     if ($primaryMode[1] -gt 0) { $mode.dmPelsHeight = $primaryMode[1] }
     if ($primaryMode[2] -gt 0) { $mode.dmDisplayFrequency = $primaryMode[2] }
-    $power = [NocttyBenchNative+SYSTEM_POWER_STATUS]::new()
-    $powerState = if ([NocttyBenchNative]::GetSystemPowerStatus([ref] $power)) {
+    $power = [KoretermBenchNative+SYSTEM_POWER_STATUS]::new()
+    $powerState = if ([KoretermBenchNative]::GetSystemPowerStatus([ref] $power)) {
         switch ($power.ACLineStatus) { 0 { 'battery' } 1 { 'ac' } default { 'unknown' } }
     }
     else { 'unknown' }
@@ -1576,18 +1576,18 @@ function Get-BenchFingerprint {
         gpu_name = $gpuName
         gpu_driver_version = $gpuDriverVersion
         display = [pscustomobject][ordered]@{
-            width_px = if ($mode.dmPelsWidth -gt 0) { [int] $mode.dmPelsWidth } else { [NocttyBenchNative]::GetSystemMetrics(0) }
-            height_px = if ($mode.dmPelsHeight -gt 0) { [int] $mode.dmPelsHeight } else { [NocttyBenchNative]::GetSystemMetrics(1) }
+            width_px = if ($mode.dmPelsWidth -gt 0) { [int] $mode.dmPelsWidth } else { [KoretermBenchNative]::GetSystemMetrics(0) }
+            height_px = if ($mode.dmPelsHeight -gt 0) { [int] $mode.dmPelsHeight } else { [KoretermBenchNative]::GetSystemMetrics(1) }
             refresh_hz = [double] $mode.dmDisplayFrequency
-            dpi_scale_percent = [Math]::Round(([NocttyBenchNative]::GetPrimaryDisplayDpi() / 96.0) * 100.0, 2)
+            dpi_scale_percent = [Math]::Round(([KoretermBenchNative]::GetPrimaryDisplayDpi() / 96.0) * 100.0, 2)
         }
         power_state = $powerState
     }
 }
 
 $script:adapter = Get-BenchTargetAdapter -Name $Target
-$script:instanceClass = "noctty-bench-$($layout.SandboxId)"
-$script:nocttyConfigPath = Join-Path $layout.Temp 'bench-noctty.conf'
+$script:instanceClass = "koreterm-bench-$($layout.SandboxId)"
+$script:koretermConfigPath = Join-Path $layout.Temp 'bench-koreterm.conf'
 $script:alacrittyConfigPath = Join-Path $layout.Temp 'bench-alacritty.toml'
 $script:throughputScriptPath = Join-Path $layout.Temp 'bench-throughput-child.ps1'
 $script:holdScriptPath = Join-Path $layout.Temp 'bench-hold-child.ps1'
@@ -1598,7 +1598,7 @@ if (-not ($fontRegistry.PSObject.Properties.Name -match '^Consolas .*TrueType'))
     throw 'Required benchmark font face Consolas is not installed'
 }
 
-$nocttyConfig = @"
+$koretermConfig = @"
 window-width = $Cols
 window-height = $Rows
 confirm-close-surface = false
@@ -1607,7 +1607,7 @@ font-size = $($FontSize.ToString([Globalization.CultureInfo]::InvariantCulture))
 cursor-style-blink = false
 undo-timeout = 5s
 "@ -replace "`n", "`r`n"
-[IO.File]::WriteAllText($script:nocttyConfigPath, $nocttyConfig, [Text.UTF8Encoding]::new($false))
+[IO.File]::WriteAllText($script:koretermConfigPath, $koretermConfig, [Text.UTF8Encoding]::new($false))
 $alacrittyConfig = @"
 [window]
 dimensions = { columns = $Cols, lines = $Rows }
@@ -1691,7 +1691,7 @@ if ($sourceStatus.Count -ne 0) {
 $commitSha = (& git -C $repoRoot rev-parse HEAD).Trim()
 if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($commitSha)) { throw 'git rev-parse HEAD failed' }
 
-if ($Target -eq 'noctty') {
+if ($Target -eq 'koreterm') {
     Invoke-InteractiveWin11Build -RepoRoot $repoRoot -Optimize ReleaseFast
     Assert-InteractiveWin11ExeExists -ExePath $script:adapter.ExePath -AllowInboxConPty
     $script:adapter = Get-BenchTargetAdapter -Name $Target
@@ -1704,7 +1704,7 @@ if ($script:adapter.Installed) {
     Add-Type -AssemblyName UIAutomationClient
     Add-Type -AssemblyName UIAutomationTypes
 
-    if ($Target -ne 'noctty') {
+    if ($Target -ne 'koreterm') {
         if (Test-BenchMetricRequested -Name 'throughput') {
             foreach ($name in @('throughput_mb_s', 'throughput_alt_screen_mb_s', 'scroll_mb_s')) {
                 $metrics.Add((New-BenchAdapterRequiredMetric -Name $name -Unit 'MB/s' -Capability 'causal full-consumption successful-present'))
@@ -1745,11 +1745,11 @@ if ($script:adapter.Installed) {
             $endpoint = 'atomically latched first successful SwapBuffers whose renderer snapshot includes the committed final-marker generation'
             $presentationTarget = 'committed visible end marker'
             $payloadPath = Join-Path $layout.Temp "bench-$($workload.Workload)-$Bytes-$Seed.bin"
-            [NocttyBenchNative]::WritePayload($payloadPath, $Bytes, $Seed, $workload.Workload, $Rows, $Cols)
+            [KoretermBenchNative]::WritePayload($payloadPath, $Bytes, $Seed, $workload.Workload, $Rows, $Cols)
             $samples = [Collections.Generic.List[double]]::new()
             $diagnosticProfiles = [Collections.Generic.List[object]]::new()
             try {
-                if ($Target -ne 'noctty') { throw 'causal consumed-and-presented throughput endpoint is currently available only for noctty' }
+                if ($Target -ne 'koreterm') { throw 'causal consumed-and-presented throughput endpoint is currently available only for koreterm' }
                 foreach ($runNumber in 1..$Runs) {
                     $name = "$($workload.Workload)-$runNumber"
                     $resultPath = Join-Path $layout.Temp "$name-result.json"
@@ -1766,9 +1766,9 @@ if ($script:adapter.Installed) {
                     $run = Start-BenchTarget -RunName $name -ChildScript $script:throughputScriptPath -ChildScriptArguments $childScriptArguments -TracePath $tracePath -TermioTracePath $termioTracePath -EndMarker $endMarker -LiveTrace
                     try {
                         Wait-BenchFile -Path $readyPath -Run $run -Description "$($workload.Workload) throughput child readiness"
-                        $hostHwnd = Wait-BenchNocttyWindow -Run $run
-                        $surfaceHwnd = [NocttyBenchNative]::FindChildWindow($hostHwnd, 'noctty.win32')
-                        if ($surfaceHwnd -eq [IntPtr]::Zero) { throw 'noctty surface HWND was not found' }
+                        $hostHwnd = Wait-BenchKoretermWindow -Run $run
+                        $surfaceHwnd = [KoretermBenchNative]::FindChildWindow($hostHwnd, 'koreterm.win32')
+                        if ($surfaceHwnd -eq [IntPtr]::Zero) { throw 'koreterm surface HWND was not found' }
                         $firstTrace = Get-BenchJsonFile -Path $tracePath -Deadline ([DateTime]::UtcNow.AddSeconds($TimeoutSeconds))
                         $initialTrace = Request-BenchRenderTraceSnapshot -Hwnd $surfaceHwnd -Path $tracePath -AfterSequence ([uint64] $firstTrace.snapshot_sequence) -Deadline ([DateTime]::UtcNow.AddSeconds($TimeoutSeconds))
                         $traceSequence = [uint64] $initialTrace.snapshot_sequence
@@ -1866,7 +1866,7 @@ if ($script:adapter.Installed) {
         $harnessSamples = [Collections.Generic.List[double]]::new()
         $appSamples = [Collections.Generic.List[double]]::new()
         try {
-            if ($Target -ne 'noctty') { throw 'app-side cold-start trace is available only for noctty' }
+            if ($Target -ne 'koreterm') { throw 'app-side cold-start trace is available only for koreterm' }
             foreach ($runNumber in 1..$Runs) {
                 $name = "cold-start-$runNumber"
                 $readyPath = Join-Path $layout.Temp "$name-ready.txt"
@@ -1899,7 +1899,7 @@ if ($script:adapter.Installed) {
         $additionalPanes = 3
         $destroySettleSeconds = 7
         try {
-            if ($Target -ne 'noctty') { throw 'memory-per-pane split automation is currently available only for noctty' }
+            if ($Target -ne 'koreterm') { throw 'memory-per-pane split automation is currently available only for koreterm' }
             foreach ($runNumber in 1..$Runs) {
                 $name = "memory-$runNumber"
                 $readyPath = Join-Path $layout.Temp "$name-ready.txt"
@@ -1907,14 +1907,14 @@ if ($script:adapter.Installed) {
                 Remove-Item -LiteralPath $readyPath, $memoryTracePath -ErrorAction SilentlyContinue
                 $run = Start-BenchTarget -RunName $name -ChildScript $script:holdScriptPath -ChildScriptArguments @('-ReadyPath', $readyPath) -MemoryTracePath $memoryTracePath -EnableAutomation
                 try {
-                    $memoryHostHwnd = Wait-BenchNocttyWindow -Run $run
-                    $memorySurfaceHwnd = [NocttyBenchNative]::FindChildWindow($memoryHostHwnd, 'noctty.win32')
-                    if ($memorySurfaceHwnd -eq [IntPtr]::Zero) { throw 'noctty baseline surface HWND was not found' }
+                    $memoryHostHwnd = Wait-BenchKoretermWindow -Run $run
+                    $memorySurfaceHwnd = [KoretermBenchNative]::FindChildWindow($memoryHostHwnd, 'koreterm.win32')
+                    if ($memorySurfaceHwnd -eq [IntPtr]::Zero) { throw 'koreterm baseline surface HWND was not found' }
                     Start-Sleep -Seconds 2
                     $allCreatedSurfaceIds = [Collections.Generic.HashSet[uint64]]::new()
                     foreach ($cycleNumber in 1..$MemoryCycles) {
                         $cycleName = "$name-cycle-$cycleNumber"
-                        $baselineSnapshot = Get-NocttyAutomationSnapshot -Name "$cycleName-list-baseline"
+                        $baselineSnapshot = Get-KoretermAutomationSnapshot -Name "$cycleName-list-baseline"
                         if ([int] $baselineSnapshot.windows[0].pane_count -ne 1) {
                             throw "memory cycle $cycleNumber baseline expected one pane, got $($baselineSnapshot.windows[0].pane_count)"
                         }
@@ -1931,17 +1931,17 @@ if ($script:adapter.Installed) {
                         $survivorSurfaceIdsAfterEachClose = [Collections.Generic.List[object]]::new()
                         $createdSurfaceIds = [Collections.Generic.List[uint64]]::new()
                         foreach ($paneNumber in 1..$additionalPanes) {
-                            $snapshot = Get-NocttyAutomationSnapshot -Name "$cycleName-list-$paneNumber"
+                            $snapshot = Get-KoretermAutomationSnapshot -Name "$cycleName-list-$paneNumber"
                             $surface = $snapshot.windows[0].tabs | ForEach-Object { $_.panes } | Where-Object { $_.focused } | Select-Object -First 1
                             if ($null -eq $surface) { throw 'no focused surface was returned by +list-windows' }
                             $beforeSurfaceIds = @($snapshot.windows[0].tabs | ForEach-Object { $_.panes } | ForEach-Object { [uint64] $_.surface_id })
-                            [void](Invoke-NocttyCli -Name "$cycleName-split-$paneNumber" -Arguments @('+perform-action', "--class=$script:instanceClass", "--surface-id=$($surface.surface_id)", 'new_split:right'))
+                            [void](Invoke-KoretermCli -Name "$cycleName-split-$paneNumber" -Arguments @('+perform-action', "--class=$script:instanceClass", "--surface-id=$($surface.surface_id)", 'new_split:right'))
                             $expected = $paneNumber + 1
                             $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
                             Wait-InteractiveWin11Until -Deadline $deadline -Description "memory cycle $cycleNumber pane count $expected" -Process $run.Process -Condition {
-                                try { [int](Get-NocttyAutomationSnapshot -Name "$cycleName-wait-$expected").windows[0].pane_count -eq $expected } catch { $false }
+                                try { [int](Get-KoretermAutomationSnapshot -Name "$cycleName-wait-$expected").windows[0].pane_count -eq $expected } catch { $false }
                             }
-                            $afterSplitSnapshot = Get-NocttyAutomationSnapshot -Name "$cycleName-list-after-$paneNumber"
+                            $afterSplitSnapshot = Get-KoretermAutomationSnapshot -Name "$cycleName-list-after-$paneNumber"
                             $afterSplitPaneCount = [int] $afterSplitSnapshot.windows[0].pane_count
                             if ($afterSplitPaneCount -ne $expected) {
                                 throw "memory cycle $cycleNumber split $paneNumber expected pane count $expected, got $afterSplitPaneCount"
@@ -1966,13 +1966,13 @@ if ($script:adapter.Installed) {
                         $samples.Add(($after - $baseline) / $additionalPanes)
                         for ($createdIndex = $createdSurfaceIds.Count - 1; $createdIndex -ge 0; $createdIndex--) {
                             $surfaceId = $createdSurfaceIds[$createdIndex]
-                            [void](Invoke-NocttyCli -Name "$cycleName-close-$createdIndex" -Arguments @('+perform-action', "--class=$script:instanceClass", "--surface-id=$surfaceId", 'close_surface'))
+                            [void](Invoke-KoretermCli -Name "$cycleName-close-$createdIndex" -Arguments @('+perform-action', "--class=$script:instanceClass", "--surface-id=$surfaceId", 'close_surface'))
                             $expected = $createdIndex + 1
                             $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
                             Wait-InteractiveWin11Until -Deadline $deadline -Description "memory cycle $cycleNumber pane count after close $expected" -Process $run.Process -Condition {
-                                try { [int](Get-NocttyAutomationSnapshot -Name "$cycleName-wait-close-$expected").windows[0].pane_count -eq $expected } catch { $false }
+                                try { [int](Get-KoretermAutomationSnapshot -Name "$cycleName-wait-close-$expected").windows[0].pane_count -eq $expected } catch { $false }
                             }
-                            $afterCloseSnapshot = Get-NocttyAutomationSnapshot -Name "$cycleName-list-after-close-$expected"
+                            $afterCloseSnapshot = Get-KoretermAutomationSnapshot -Name "$cycleName-list-after-close-$expected"
                             $afterClosePaneCount = [int] $afterCloseSnapshot.windows[0].pane_count
                             if ($afterClosePaneCount -ne $expected) {
                                 throw "memory cycle $cycleNumber cleanup expected pane count $expected, got $afterClosePaneCount"
@@ -1989,7 +1989,7 @@ if ($script:adapter.Installed) {
                         }
                         $privateBytesAfterLogicalClose = Get-BenchPrivateBytes -Process $run.Process
                         Start-Sleep -Seconds $destroySettleSeconds
-                        $afterDestroySettleSnapshot = Get-NocttyAutomationSnapshot -Name "$cycleName-list-after-destroy-settle"
+                        $afterDestroySettleSnapshot = Get-KoretermAutomationSnapshot -Name "$cycleName-list-after-destroy-settle"
                         if ([int] $afterDestroySettleSnapshot.windows[0].pane_count -ne 1) {
                             throw "memory cycle $cycleNumber lifecycle expected pane count 1 after destroy settle, got $($afterDestroySettleSnapshot.windows[0].pane_count)"
                         }
@@ -2097,7 +2097,7 @@ if ($script:adapter.Installed) {
             'swap_buffers_count'
         )
         try {
-            if ($Target -ne 'noctty') { throw 'render-trace idle swap assertion is currently available only for noctty' }
+            if ($Target -ne 'koreterm') { throw 'render-trace idle swap assertion is currently available only for koreterm' }
             foreach ($runNumber in 1..$Runs) {
                 $name = "idle-$runNumber"
                 $readyPath = Join-Path $layout.Temp "$name-ready.txt"
@@ -2106,10 +2106,10 @@ if ($script:adapter.Installed) {
                 $run = Start-BenchTarget -RunName $name -ChildScript $script:holdScriptPath -ChildScriptArguments @('-ReadyPath', $readyPath, '-SteadyCursor') -TracePath $tracePath -LiveTrace
                 try {
                     Wait-BenchFile -Path $readyPath -Run $run -Description 'idle child readiness'
-                    $hostHwnd = Wait-BenchNocttyWindow -Run $run
-                    $surfaceHwnd = [NocttyBenchNative]::FindChildWindow($hostHwnd, 'noctty.win32')
-                    if ($surfaceHwnd -eq [IntPtr]::Zero) { throw 'noctty surface HWND was not found' }
-                    if (-not [NocttyBenchNative]::ForceForeground($hostHwnd)) {
+                    $hostHwnd = Wait-BenchKoretermWindow -Run $run
+                    $surfaceHwnd = [KoretermBenchNative]::FindChildWindow($hostHwnd, 'koreterm.win32')
+                    if ($surfaceHwnd -eq [IntPtr]::Zero) { throw 'koreterm surface HWND was not found' }
+                    if (-not [KoretermBenchNative]::ForceForeground($hostHwnd)) {
                         throw "idle run $runNumber could not establish foreground ownership before quiescence"
                     }
                     $firstTrace = Get-BenchJsonFile -Path $tracePath -Deadline ([DateTime]::UtcNow.AddSeconds($TimeoutSeconds))
@@ -2413,7 +2413,7 @@ else { 'pass' }
 
 $exeHash = if ($script:adapter.Installed) { Get-BenchFileSha256 -Path $script:adapter.ExePath } else { $null }
 $evidence = [pscustomobject][ordered]@{
-    schema_version = 'io.github.amanthanvi.noctty.bench-evidence.v1'
+    schema_version = 'io.github.amanthanvi.koreterm.bench-evidence.v1'
     generated_at = [DateTime]::UtcNow.ToString('o')
     status = $topStatus
     machine = $machine
@@ -2422,14 +2422,14 @@ $evidence = [pscustomobject][ordered]@{
         font_size_pt = $FontSize
         rows = $Rows
         cols = $Cols
-        build_mode = if ($Target -eq 'noctty') { 'ReleaseFast' } else { $null }
+        build_mode = if ($Target -eq 'koreterm') { 'ReleaseFast' } else { $null }
     }
     target = [pscustomobject][ordered]@{
         name = $Target
         version = $script:adapter.Version
         exe_path = $script:adapter.ExePath
         exe_sha256 = $exeHash
-        commit_sha = if ($Target -eq 'noctty') { $commitSha } else { $null }
+        commit_sha = if ($Target -eq 'koreterm') { $commitSha } else { $null }
     }
     run_count = $Runs
     processes = @($processRecords.ToArray())

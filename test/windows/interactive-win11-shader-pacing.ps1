@@ -70,7 +70,7 @@ if ($OutputDirectory) { $forwardedArgs += @('-OutputDirectory', $OutputDirectory
 Invoke-InteractiveWin11HarnessMain `
     -RepoRoot $repoRoot `
     -LauncherPath $launcherPath `
-    -EnvironmentVariable 'NOCTTY_INTERACTIVE_WIN11_SHADER_PACING_BOOTSTRAPPED' `
+    -EnvironmentVariable 'KORETERM_INTERACTIVE_WIN11_SHADER_PACING_BOOTSTRAPPED' `
     -ArgumentList $forwardedArgs
 
 if ($Rebuild) {
@@ -88,7 +88,7 @@ if ($Rebuild) {
     }
 }
 
-$realStartupPath = Join-Path $env:LOCALAPPDATA 'noctty\startup-attempts.json'
+$realStartupPath = Join-Path $env:LOCALAPPDATA 'koreterm\startup-attempts.json'
 $profileBefore = if (Test-Path -LiteralPath $realStartupPath) { @{hash=(Get-FileHash -LiteralPath $realStartupPath).Hash;mtime=(Get-Item -LiteralPath $realStartupPath).LastWriteTimeUtc} } else { $null }
 $harness = Initialize-InteractiveWin11Sandbox -RepoRoot $repoRoot -SandboxName 'shader-pacing' -ResetState:$ResetState
 $repoRoot = $harness.RepoRoot
@@ -96,8 +96,8 @@ $layout = $harness.Layout
 
 . (Join-Path $PSScriptRoot 'interactive-win11-stateful-lib.ps1')
 
-if (-not ('NocttyShaderPacingNative' -as [type])) {
-    Add-Type -Namespace '' -Name 'NocttyShaderPacingNative' -MemberDefinition @'
+if (-not ('KoretermShaderPacingNative' -as [type])) {
+    Add-Type -Namespace '' -Name 'KoretermShaderPacingNative' -MemberDefinition @'
 [System.Runtime.InteropServices.DllImport("user32.dll", SetLastError = true, CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
 public static extern System.IntPtr SendMessageTimeoutW(
     System.IntPtr hWnd,
@@ -123,7 +123,7 @@ function Send-ShaderPacingKey {
     )
 
     $vk = [uint32] [char]::ToUpperInvariant($Char)
-    $scanCode = [NocttyShaderPacingNative]::MapVirtualKeyW($vk, 0)
+    $scanCode = [KoretermShaderPacingNative]::MapVirtualKeyW($vk, 0)
     if ($scanCode -eq 0) { throw "MapVirtualKeyW returned 0 for VK=$vk" }
     $down = [IntPtr] (1 -bor ([int32] $scanCode -shl 16))
     $up = [IntPtr] ($down.ToInt32() -bor (-1073741824))
@@ -168,7 +168,7 @@ function Request-ShaderPacingTrace {
     )
 
     [UIntPtr] $messageResult = [UIntPtr]::Zero
-    $sent = [NocttyShaderPacingNative]::SendMessageTimeoutW(
+    $sent = [KoretermShaderPacingNative]::SendMessageTimeoutW(
         $Hwnd, $script:SHADER_PACING_TRACE_SNAPSHOT_MESSAGE,
         [UIntPtr]::Zero, [IntPtr]::Zero, 2, 5000, [ref] $messageResult)
     if ($sent -eq [IntPtr]::Zero) {
@@ -187,7 +187,7 @@ function Request-ShaderPacingTrace {
 # proves nothing.
 function Assert-ShaderPacingForeground([string] $During) {
     if ([InteractiveWin11WindowNative]::GetForegroundWindow() -ne $script:ShaderPacingHost) {
-        throw "noctty lost the foreground during $During, which stops the shader animation the measurement needs"
+        throw "koreterm lost the foreground during $During, which stops the shader animation the measurement needs"
     }
 }
 
@@ -197,21 +197,21 @@ if ($Binary) {
     $Binary = [IO.Path]::GetFullPath($Binary)
     $portableBin = Join-Path $layout.Temp ('portable-' + [guid]::NewGuid().ToString('N'))
     [void](New-Item -ItemType Directory -Path $portableBin)
-    Copy-Item -LiteralPath $Binary -Destination (Join-Path $portableBin 'noctty.exe')
-    foreach ($name in @('noctty.com', 'conpty.dll', 'OpenConsole.exe')) {
+    Copy-Item -LiteralPath $Binary -Destination (Join-Path $portableBin 'koreterm.exe')
+    foreach ($name in @('koreterm.com', 'conpty.dll', 'OpenConsole.exe')) {
         $source = Join-Path (Split-Path $Binary) $name
         if (Test-Path -LiteralPath $source -PathType Leaf) { Copy-Item -LiteralPath $source -Destination $portableBin }
     }
-    Set-Content -LiteralPath (Join-Path $portableBin 'noctty.portable') -Value 'isolated shader pacing comparison'
-    if ((Get-FileHash -LiteralPath $Binary).Hash -ne (Get-FileHash -LiteralPath (Join-Path $portableBin 'noctty.exe')).Hash) { throw 'Copied shader binary differs.' }
+    Set-Content -LiteralPath (Join-Path $portableBin 'koreterm.portable') -Value 'isolated shader pacing comparison'
+    if ((Get-FileHash -LiteralPath $Binary).Hash -ne (Get-FileHash -LiteralPath (Join-Path $portableBin 'koreterm.exe')).Hash) { throw 'Copied shader binary differs.' }
     $share = Join-Path (Split-Path (Split-Path $Binary)) 'share'
     if (Test-Path -LiteralPath $share) { Copy-Item -LiteralPath $share -Destination $portableBin -Recurse }
-    $exePath = Join-Path $portableBin 'noctty.exe'
+    $exePath = Join-Path $portableBin 'koreterm.exe'
 }
 Assert-InteractiveWin11ExeExists -ExePath $exePath
-$commandPath = Join-Path (Split-Path -Parent $exePath) 'noctty.com'
+$commandPath = Join-Path (Split-Path -Parent $exePath) 'koreterm.com'
 $versionText = & $commandPath +version | Out-String
-if ($LASTEXITCODE -ne 0) { throw "noctty +version failed with exit code $LASTEXITCODE" }
+if ($LASTEXITCODE -ne 0) { throw "koreterm +version failed with exit code $LASTEXITCODE" }
 if ($versionText -notmatch 'custom shaders: enabled') {
     throw 'The current executable does not include custom shader support. Re-run with -Rebuild.'
 }
@@ -227,8 +227,8 @@ $configPath = Join-Path $layout.Temp 'interactive-win11-shader-pacing.conf'
 
 $tracePath = Join-Path $layout.Temp 'shader-pacing-render-trace.json'
 Remove-Item -LiteralPath $tracePath -ErrorAction SilentlyContinue
-$env:NOCTTY_RENDER_TRACE_FILE = $tracePath
-$env:NOCTTY_RENDER_TRACE_LIVE = '1'
+$env:KORETERM_RENDER_TRACE_FILE = $tracePath
+$env:KORETERM_RENDER_TRACE_LIVE = '1'
 
 $run = $null
 $before = $null
@@ -247,7 +247,7 @@ try {
     $script:ShaderPacingHost = $hostHwnd
     Wait-InteractiveWin11Until `
         -Deadline $deadline `
-        -Description 'the foreground for the noctty window' `
+        -Description 'the foreground for the koreterm window' `
         -Process $run.Process `
         -PollMilliseconds $script:SHADER_PACING_POLL_MS `
         -Condition {
@@ -338,8 +338,8 @@ finally {
     }
     $profileExistsAfter = Test-Path -LiteralPath $realStartupPath
     if (($null -ne $profileBefore) -ne $profileExistsAfter -or ($profileBefore -and ((Get-FileHash -LiteralPath $realStartupPath).Hash -ne $profileBefore.hash -or (Get-Item -LiteralPath $realStartupPath).LastWriteTimeUtc -ne $profileBefore.mtime))) { throw 'Real startup-attempts.json changed.' }
-    Remove-Item Env:\NOCTTY_RENDER_TRACE_FILE -ErrorAction SilentlyContinue
-    Remove-Item Env:\NOCTTY_RENDER_TRACE_LIVE -ErrorAction SilentlyContinue
+    Remove-Item Env:\KORETERM_RENDER_TRACE_FILE -ErrorAction SilentlyContinue
+    Remove-Item Env:\KORETERM_RENDER_TRACE_LIVE -ErrorAction SilentlyContinue
 }
 
 Write-Host ("interactive-win11 shader-pacing validation: PASS " +

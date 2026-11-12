@@ -48,7 +48,7 @@ $cases = @(
     @{ Name = 'the other script the Zig tests read'; Paths = @('scripts/portable-manifest-verification.ps1'); Expect = $allFlags }
     @{ Name = 'the conpty staging script'; Paths = @('scripts/stage-conpty-redist.ps1'); Expect = $allFlags }
     @{ Name = 'a build input'; Paths = @('build.zig.zon'); Expect = $allFlags }
-    @{ Name = 'the packaged icon'; Paths = @('dist/windows/noctty.ico'); Expect = $allFlags }
+    @{ Name = 'the packaged icon'; Paths = @('dist/windows/koreterm.ico'); Expect = $allFlags }
     @{ Name = 'the test workflow'; Paths = @('.github/workflows/test.yml'); Expect = $allFlags }
     @{ Name = 'the ARM64 workflow'; Paths = @('.github/workflows/windows-arm64.yml'); Expect = $allFlags }
     @{ Name = 'this filter'; Paths = @('scripts/ci-changed-paths.ps1'); Expect = $allFlags }
@@ -72,7 +72,7 @@ foreach ($case in $cases) {
 }
 
 # The CLI path: a fixed list in, GITHUB_OUTPUT lines out.
-$outputFile = Join-Path ([System.IO.Path]::GetTempPath()) ("noctty-ci-paths-$([guid]::NewGuid().ToString('N')).txt")
+$outputFile = Join-Path ([System.IO.Path]::GetTempPath()) ("koreterm-ci-paths-$([guid]::NewGuid().ToString('N')).txt")
 try {
     $env:GITHUB_OUTPUT = $outputFile
     & (Join-Path $repoRoot 'scripts\ci-changed-paths.ps1') -Paths @('docs/status.md') 6>$null | Out-Null
@@ -96,8 +96,8 @@ finally {
 # by a mandatory parameter) and only a warning in the log said so.
 $revisions = @(& git -C $repoRoot rev-list -n 2 HEAD)
 if ($revisions.Count -eq 2) {
-    $summaryFile = Join-Path ([System.IO.Path]::GetTempPath()) ("noctty-ci-summary-$([guid]::NewGuid().ToString('N')).md")
-    $outputFile = Join-Path ([System.IO.Path]::GetTempPath()) ("noctty-ci-output-$([guid]::NewGuid().ToString('N')).txt")
+    $summaryFile = Join-Path ([System.IO.Path]::GetTempPath()) ("koreterm-ci-summary-$([guid]::NewGuid().ToString('N')).md")
+    $outputFile = Join-Path ([System.IO.Path]::GetTempPath()) ("koreterm-ci-output-$([guid]::NewGuid().ToString('N')).txt")
     try {
         $env:GITHUB_STEP_SUMMARY = $summaryFile
         $env:GITHUB_OUTPUT = $outputFile
@@ -326,31 +326,31 @@ Assert-True ($trendCalls[0] -like '*per_page=100*') 'The run listing must cover 
 Assert-True ($null -eq (Get-PreviousTrendArtifact -Repository 'owner/repo' -CurrentRunId '300' -Api { param($Path) '{"workflow_runs":[],"artifacts":[]}' | ConvertFrom-Json })) 'With no earlier nightly there is no baseline.'
 
 # --- Installer: what Setup asks Restart Manager to close --------------------
-# The native ARM64 build job compiles dist/windows/noctty.iss on a pull request
+# The native ARM64 build job compiles dist/windows/koreterm.iss on a pull request
 # that touches it, with the runner image's Inno Setup (6.7.1 when measured; the
 # job skips the installer if the image has none), but a clean compile says
 # nothing about what Setup asks Restart Manager to close. This check pins that.
 # OpenConsole.exe (the bundled ConPTY host, one per pane) is an RmUnknownApp:
-# registered, it fails every non-forced RmShutdown before noctty is asked, and
-# Setup aborts. A forced close would kill the programs running in noctty's
+# registered, it fails every non-forced RmShutdown before koreterm is asked, and
+# Setup aborts. A forced close would kill the programs running in koreterm's
 # terminals.
 $setup = @{}
 $inSetup = $false
-foreach ($line in [System.IO.File]::ReadLines((Join-Path $repoRoot 'dist\windows\noctty.iss'))) {
+foreach ($line in [System.IO.File]::ReadLines((Join-Path $repoRoot 'dist\windows\koreterm.iss'))) {
     $trimmed = $line.Trim()
     if ($trimmed -match '^\[(.+)\]$') { $inSetup = $Matches[1] -eq 'Setup'; continue }
     if ($inSetup -and $trimmed -match '^([A-Za-z]+)\s*=\s*(.*)$') { $setup[$Matches[1]] = $Matches[2].Trim() }
 }
 Assert-True ($setup.ContainsKey('AppId')) 'The installer script parse found no [Setup] section; the parser is broken.'
 $closeApps = "$($setup['CloseApplications'])"
-Assert-True ($closeApps -in @('yes', 'true', '1')) "noctty.iss must ask running copies to close (CloseApplications=yes), and never force it; found '$closeApps'."
+Assert-True ($closeApps -in @('yes', 'true', '1')) "koreterm.iss must ask running copies to close (CloseApplications=yes), and never force it; found '$closeApps'."
 $excludes = @("$($setup['CloseApplicationsFilterExcludes'])" -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
-Assert-True ($excludes -contains 'OpenConsole.exe') "noctty.iss must keep OpenConsole.exe out of Restart Manager (CloseApplicationsFilterExcludes); found '$($excludes -join ',')'."
+Assert-True ($excludes -contains 'OpenConsole.exe') "koreterm.iss must keep OpenConsole.exe out of Restart Manager (CloseApplicationsFilterExcludes); found '$($excludes -join ',')'."
 # Inno's default filter is *.exe,*.dll,*.chm.
 $filter = @($(if ($setup.ContainsKey('CloseApplicationsFilter')) { $setup['CloseApplicationsFilter'] } else { '*.exe,*.dll,*.chm' }) -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
-foreach ($kept in @('noctty.exe', 'conpty.dll')) {
+foreach ($kept in @('koreterm.exe', 'conpty.dll')) {
     $held = @($filter | Where-Object { $kept -like $_ }).Count -and -not @($excludes | Where-Object { $kept -like $_ }).Count
-    Assert-True $held "noctty.iss must still close what holds $kept; CloseApplicationsFilter is '$($filter -join ',')', CloseApplicationsFilterExcludes '$($excludes -join ',')'."
+    Assert-True $held "koreterm.iss must still close what holds $kept; CloseApplicationsFilter is '$($filter -join ',')', CloseApplicationsFilterExcludes '$($excludes -join ',')'."
 }
 
 # The CLI cases above run git against a bad revision on purpose. Actions ends a

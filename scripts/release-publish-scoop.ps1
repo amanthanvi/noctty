@@ -31,18 +31,18 @@ if ([string]::IsNullOrWhiteSpace($RunnerTemp)) {
 }
 $RunnerTemp = [System.IO.Path]::GetFullPath($RunnerTemp)
 $bucketDirectory = [System.IO.Path]::GetFullPath(
-    (Join-Path $RunnerTemp 'noctty-scoop-bucket')
+    (Join-Path $RunnerTemp 'koreterm-scoop-bucket')
 )
 $bucketRelativePath = [System.IO.Path]::GetRelativePath(
     $RunnerTemp,
     $bucketDirectory
 )
-if ($bucketRelativePath -cne 'noctty-scoop-bucket') {
+if ($bucketRelativePath -cne 'koreterm-scoop-bucket') {
     throw "Refusing to use unexpected Scoop clone path: $bucketDirectory"
 }
 
 $manifestRelativePath = if ([string]::IsNullOrWhiteSpace($ManifestPath)) {
-    'bucket/noctty.json'
+    'bucket/koreterm.json'
 } else {
     $ManifestPath
 }
@@ -98,7 +98,7 @@ function Remove-ValidatedScoopClone {
     Remove-Item -LiteralPath $bucketDirectory -Recurse -Force
 }
 
-if (-not $PSCmdlet.ShouldProcess($BucketRepository, "publish noctty $Version Scoop manifest")) {
+if (-not $PSCmdlet.ShouldProcess($BucketRepository, "publish koreterm $Version Scoop manifest")) {
     return
 }
 
@@ -107,7 +107,7 @@ if ([string]::IsNullOrWhiteSpace($ArtifactRoot)) {
     $ArtifactRoot = Join-Path $repoRoot 'dist/artifacts'
 }
 $ArtifactRoot = [System.IO.Path]::GetFullPath($ArtifactRoot)
-$artifactDirectoryX64 = Join-Path $ArtifactRoot "noctty-$Version-windows-x64"
+$artifactDirectoryX64 = Join-Path $ArtifactRoot "koreterm-$Version-windows-x64"
 $metadataPath = Join-Path $artifactDirectoryX64 'package-managers/metadata.json'
 $metadata = Get-Content -LiteralPath $metadataPath -Raw | ConvertFrom-Json
 
@@ -198,7 +198,7 @@ try {
             throw "git diff --cached failed with exit code $LASTEXITCODE"
         }
 
-        & git commit -m "noctty: update to $Version"
+        & git commit -m "koreterm: update to $Version"
         if ($LASTEXITCODE -ne 0) {
             throw "git commit failed with exit code $LASTEXITCODE"
         }

@@ -1,20 +1,20 @@
 #requires -Version 7.0
 <#
 Console-API key record regression (Win32 input mode, DEC 9001). Supply a built
-Bin and a NEW Run directory. Copies noctty into Run with noctty.portable and
+Bin and a NEW Run directory. Copies koreterm into Run with koreterm.portable and
 redirects both AppData roots. All windows and the driver live on a private
 desktop. No real input, foreground changes, clipboard access, or protocol
 requests; only posted key messages whose characters the target's own
 TranslateMessage produces, as a keyboard's would.
 
 Two console clients run the same observer (console-input-records.c,
-ReadConsoleInputW in mode 0x98, no kitty/MOK requests): one inside noctty, so
-its records come from ConPTY decoding noctty's win32-input-mode sequences, and
+ReadConsoleInputW in mode 0x98, no kitty/MOK requests): one inside koreterm, so
+its records come from ConPTY decoding koreterm's win32-input-mode sequences, and
 one in a real console window (conhost.exe) on the same desktop, so its records
 are what Windows itself produces for the same key messages. Each case posts
 the same key messages to both and compares every KEY_EVENT record field.
 
-A second phase types into PSReadLine inside noctty and checks that Shift+Enter
+A second phase types into PSReadLine inside koreterm and checks that Shift+Enter
 adds a continuation line instead of running the line (one history entry for
 two lines). PSReadLine's history file is redirected into the run and set to
 SaveNothing before its first read; the real files' size and time are checked
@@ -130,7 +130,7 @@ public static class KeyRecords {
     public static IntPtr Surface(int pid) {
         IntPtr found=IntPtr.Zero;
         EnumWindows((h,p)=> { int id; GetWindowThreadProcessId(h,out id);
-            if(id==pid && Class(h)=="noctty.win32.host") EnumChildWindows(h,(c,q)=> { if(Class(c)=="noctty.win32") found=c; return true; },IntPtr.Zero);
+            if(id==pid && Class(h)=="koreterm.win32.host") EnumChildWindows(h,(c,q)=> { if(Class(c)=="koreterm.win32") found=c; return true; },IntPtr.Zero);
             return true;
         },IntPtr.Zero); return found;
     }
@@ -265,7 +265,7 @@ public static class KeyRecords {
 '@
 
 function Startup-Fingerprint {
-    $path=Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'noctty\startup-attempts.json'
+    $path=Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'koreterm\startup-attempts.json'
     if(-not (Test-Path -LiteralPath $path)) { return @{ Exists=$false; Hash=$null; Modified=$null } }
     return @{ Exists=$true; Hash=(Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant(); Modified=(Get-Item -LiteralPath $path).LastWriteTimeUtc.ToString('o') }
 }
@@ -279,7 +279,7 @@ function Assert-AdoptedStartup($Fingerprint) {
 if(-not $Driver) {
     $Bin=(Resolve-Path -LiteralPath $Bin).Path; $Run=[IO.Path]::GetFullPath($Run)
     if(Test-Path -LiteralPath $Run) { throw 'Run directory must be new.' }
-    if(-not $CompileOnly -and -not (Test-Path -LiteralPath (Join-Path $Bin 'noctty.exe'))) { throw 'Bin must contain a built noctty.exe.' }
+    if(-not $CompileOnly -and -not (Test-Path -LiteralPath (Join-Path $Bin 'koreterm.exe'))) { throw 'Bin must contain a built koreterm.exe.' }
     [void](New-Item -ItemType Directory -Path $Run)
     $root=Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
     $compile=Join-Path $Run 'compile.cmd'; $helper=Join-Path $Run 'console-input-records.exe'; $attach=Join-Path $Run 'console-attach-info.exe'
@@ -305,9 +305,9 @@ if(-not $Driver) {
     Get-ChildItem -LiteralPath $Bin -File | ForEach-Object { Copy-Item -LiteralPath $_.FullName -Destination $portable }
     $share=Join-Path (Split-Path -Parent $Bin) 'share'
     if(Test-Path -LiteralPath $share) { Copy-Item -LiteralPath $share -Destination (Join-Path $Run 'source\share') -Recurse }
-    Set-Content -LiteralPath (Join-Path $portable 'noctty.portable') -Value '' -NoNewline
+    Set-Content -LiteralPath (Join-Path $portable 'koreterm.portable') -Value '' -NoNewline
     foreach($dir in @('localappdata','appdata')) { [void](New-Item -ItemType Directory -Path (Join-Path $Run $dir)) }
-    $desktopName='noctty-keyrec-'+[guid]::NewGuid().ToString('N')
+    $desktopName='koreterm-keyrec-'+[guid]::NewGuid().ToString('N')
     $desktop=[KeyRecords]::CreateDesktopW($desktopName,[IntPtr]::Zero,[IntPtr]::Zero,0,0x10000000,[IntPtr]::Zero)
     if($desktop -eq [IntPtr]::Zero) { throw 'CreateDesktop failed.' }
     $oldLocal=$env:LOCALAPPDATA; $oldRoaming=$env:APPDATA; $job=[IntPtr]::Zero; $pi=$null; $code=1
@@ -347,8 +347,8 @@ if(-not $Driver) {
 
 # Driver: every child inherits this private desktop and sandboxed AppData.
 $driverDesktop=[KeyRecords]::DesktopName()
-if(-not $driverDesktop.StartsWith('noctty-keyrec-',[StringComparison]::Ordinal)) { throw 'Driver is not on the task private desktop.' }
-if(-not (Test-Path -LiteralPath (Join-Path $Bin 'noctty.portable'))) { throw 'Driver requires portable marker.' }
+if(-not $driverDesktop.StartsWith('koreterm-keyrec-',[StringComparison]::Ordinal)) { throw 'Driver is not on the task private desktop.' }
+if(-not (Test-Path -LiteralPath (Join-Path $Bin 'koreterm.portable'))) { throw 'Driver requires portable marker.' }
 foreach($dir in @('LOCALAPPDATA','APPDATA')) {
     $value=[Environment]::GetEnvironmentVariable($dir)
     if(-not $value -or -not [IO.Path]::GetFullPath($value).StartsWith($Run.TrimEnd('\')+'\',[StringComparison]::OrdinalIgnoreCase)) { throw 'Driver AppData isolation failed.' }
@@ -414,7 +414,7 @@ function Stroke([int]$Vk,[switch]$Ctrl,[switch]$Alt,[switch]$AltGr,[switch]$Shif
     $s=[KeyRecords+Stroke]::new(); $s.Vk=$Vk; $s.Ctrl=$Ctrl.IsPresent; $s.Alt=$Alt.IsPresent; $s.AltGr=$AltGr.IsPresent; $s.Shift=$Shift.IsPresent
     $s.Extended=$Extended.IsPresent; $s.Repeats=$Repeats; $s.DownOnly=$DownOnly.IsPresent; $s.UpOnly=$UpOnly.IsPresent; $s.Fake=$Fake.IsPresent; return $s
 }
-# Posts the same strokes to noctty's surface and to the reference console
+# Posts the same strokes to koreterm's surface and to the reference console
 # window, and compares every record. Expect (optional) pins fields the case
 # is about, so a reference that is itself wrong cannot pass the case.
 function Compare-Case([string]$Name,[KeyRecords+Stroke[]]$Strokes,[hashtable[]]$Expect=@(),[string]$Layout=$null,[bool]$CompareReleases=$true) {
@@ -439,23 +439,23 @@ function Compare-Case([string]$Name,[KeyRecords+Stroke[]]$Strokes,[hashtable[]]$
         # carries that count, so both sides are compared expanded.
         $oursCompared=@(Expand-Repeats @($ours | Where-Object { $CompareReleases -or $_.KeyDown -eq 1 }))
         $theirsCompared=@(Expand-Repeats @($theirs | Where-Object { $CompareReleases -or $_.KeyDown -eq 1 }))
-        if($oursCompared.Count -ne $theirsCompared.Count) { $status='FAIL'; $detail+="record count noctty=$($oursCompared.Count) conhost=$($theirsCompared.Count)" }
+        if($oursCompared.Count -ne $theirsCompared.Count) { $status='FAIL'; $detail+="record count koreterm=$($oursCompared.Count) conhost=$($theirsCompared.Count)" }
         else {
             for($i=0;$i -lt $oursCompared.Count;$i++) {
                 foreach($f in @('KeyDown','VirtualKey','ScanCode','CodeUnit','ControlState')) {
                     # conhost zeroes the scan code of a "fake" character message (the
-                    # accent a dead key flushes before Enter); noctty keeps the key's.
+                    # accent a dead key flushes before Enter); koreterm keeps the key's.
                     # Only that record, in a dead-key case, is exempt.
                     if($f -eq 'ScanCode' -and -not $CompareReleases -and $theirsCompared[$i][$f] -eq 0 -and $theirsCompared[$i]['CodeUnit'] -ne 0) { continue }
-                    if($oursCompared[$i][$f] -ne $theirsCompared[$i][$f]) { $status='FAIL'; $detail+="record $i ${f}: noctty=$($oursCompared[$i][$f]) conhost=$($theirsCompared[$i][$f])" }
+                    if($oursCompared[$i][$f] -ne $theirsCompared[$i][$f]) { $status='FAIL'; $detail+="record $i ${f}: koreterm=$($oursCompared[$i][$f]) conhost=$($theirsCompared[$i][$f])" }
                 }
             }
         }
         foreach($e in $Expect) {
             $hit=@($ours | Where-Object { $ok=$true; foreach($k in $e.Keys) { if($_[$k] -ne $e[$k]) { $ok=$false } }; $ok })
-            if($hit.Count -ne 1) { $status='FAIL'; $detail+=('expected exactly one noctty record with '+(($e.GetEnumerator() | ForEach-Object { "$($_.Key)=$($_.Value)" }) -join ' ')+", found $($hit.Count)") }
+            if($hit.Count -ne 1) { $status='FAIL'; $detail+=('expected exactly one koreterm record with '+(($e.GetEnumerator() | ForEach-Object { "$($_.Key)=$($_.Value)" }) -join ' ')+", found $($hit.Count)") }
         }
-        $checks.Add(@{Name=$Name;Status=$status;Detail=$detail;Noctty=@($ours | ForEach-Object { Record-Text $_ });Conhost=@($theirs | ForEach-Object { Record-Text $_ })})
+        $checks.Add(@{Name=$Name;Status=$status;Detail=$detail;Koreterm=@($ours | ForEach-Object { Record-Text $_ });Conhost=@($theirs | ForEach-Object { Record-Text $_ })})
     } catch {
         $checks.Add(@{Name=$Name;Status='FAIL';Error=$_.Exception.Message})
     } finally {
@@ -466,7 +466,7 @@ try {
     $config=Join-Path $Bin 'key-records.ghostty'
     @('shell-integration = none','single-instance = false','window-save-state = never','confirm-close-surface = false','keybind = clear','window-width = 80','window-height = 24') |
         Set-Content -LiteralPath $config
-    $exe=Join-Path $Bin 'noctty.exe'
+    $exe=Join-Path $Bin 'koreterm.exe'
     $command='"{0}" --config-file="{1}" -e "{2}" "{3}" "{4}" "{5}"' -f $exe,$config,$helper,$records,$ready,$stop
     $terminal=[KeyRecords]::Launch($exe,$command,$Bin,"WinSta0\$driverDesktop",$job,0x08000000)
     # The reference: the same observer in a real console window on this desktop.
@@ -479,10 +479,10 @@ try {
     do {
         $surface=[KeyRecords]::Surface($terminal.pid)
         if($surface -ne [IntPtr]::Zero -and (Test-Path -LiteralPath $ready)) { break }
-        if([KeyRecords]::WaitForSingleObject($terminal.process,0) -eq 0) { throw 'Noctty exited before observer ready.' }
+        if([KeyRecords]::WaitForSingleObject($terminal.process,0) -eq 0) { throw 'Koreterm exited before observer ready.' }
         Start-Sleep -Milliseconds 50
     } while([datetime]::UtcNow -lt $deadline)
-    if($surface -eq [IntPtr]::Zero) { throw 'Hidden startup timed out: no noctty surface.' }
+    if($surface -eq [IntPtr]::Zero) { throw 'Hidden startup timed out: no koreterm surface.' }
     $probe=Wait-Ready $ready $terminal.process 45
     if($probe.Count -lt 2 -or $probe[1] -ne '152') { throw 'Console observer input mode was not 0x98.' }
     $refProbe=Wait-Ready $refReady $reference.process 30
@@ -506,7 +506,7 @@ try {
     if($refThread -eq 0) { throw 'conhost input thread not found: no candidate thread carried Shift into the reference records.' }
     $usLayout=[KeyRecords]::UseLayout($surface,$surfaceThread,'00000409'); $refUsLayout=[KeyRecords]::UseLayout($refWindow,$refThread,'00000409')
     if($null -eq $usLayout -or $null -eq $refUsLayout) {
-        throw ('Hidden target US keyboard layout could not be controlled: noctty={0} (layout 0x{1:X}) conhost={2} (layout 0x{3:X}, thread {4}).' -f
+        throw ('Hidden target US keyboard layout could not be controlled: koreterm={0} (layout 0x{1:X}) conhost={2} (layout 0x{3:X}, thread {4}).' -f
             ($null -ne $usLayout),[KeyRecords]::ThreadLayout($surfaceThread).ToInt64(),($null -ne $refUsLayout),[KeyRecords]::ThreadLayout($refThread).ToInt64(),$refThread)
     }
     Start-Sleep -Milliseconds 400
@@ -533,7 +533,7 @@ try {
         @{Name='AltGr+q = @ (German)';Strokes=@((Stroke 0x51 -AltGr));Expect=@(@{KeyDown=1;VirtualKey=0x51;CodeUnit=64;ControlState=9});Layout='00000407'},
         @{Name='AltGr+7 = { (German)';Strokes=@((Stroke 0x37 -AltGr));Expect=@(@{KeyDown=1;VirtualKey=0x37;CodeUnit=123;ControlState=9});Layout='00000407'},
         # A latched dead key's break reads back as two accents in the console
-        # host (one record attributed to the following key); noctty sends the
+        # host (one record attributed to the following key); koreterm sends the
         # accent once on that release, as Windows Terminal does. Key downs
         # are compared with conhost; the releases are pinned here.
         @{Name='Dead acute then e (German)';Strokes=@((Stroke 0xDD),(Stroke 0x45));CompareReleases=$false;
@@ -569,10 +569,10 @@ try {
         do {
             $shellSurface=[KeyRecords]::Surface($shell.pid)
             if($shellSurface -ne [IntPtr]::Zero -and (Test-Path -LiteralPath $shellReady)) { break }
-            if([KeyRecords]::WaitForSingleObject($shell.process,0) -eq 0) { throw 'Noctty (pwsh) exited before ready.' }
+            if([KeyRecords]::WaitForSingleObject($shell.process,0) -eq 0) { throw 'Koreterm (pwsh) exited before ready.' }
             Start-Sleep -Milliseconds 100
         } while([datetime]::UtcNow -lt $deadline)
-        if($shellSurface -eq [IntPtr]::Zero -or -not (Test-Path -LiteralPath $shellReady)) { throw 'pwsh inside noctty did not become ready.' }
+        if($shellSurface -eq [IntPtr]::Zero -or -not (Test-Path -LiteralPath $shellReady)) { throw 'pwsh inside koreterm did not become ready.' }
         $shellThread=[KeyRecords]::WindowThread($shellSurface)
         $shellLayout=[KeyRecords]::UseLayout($shellSurface,$shellThread,'00000409')
         if($null -eq $shellLayout) { throw 'pwsh surface US layout could not be controlled.' }

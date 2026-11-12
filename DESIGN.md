@@ -1,6 +1,6 @@
-# noctty design system
+# koreterm design system
 
-This is the target visual and interaction contract for noctty's native
+This is the target visual and interaction contract for koreterm's native
 Windows shell. Existing implementation tokens remain authoritative until a
 surface is migrated; new work should converge on this contract without
 regressing platform behavior or accessibility.

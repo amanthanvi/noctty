@@ -5,10 +5,10 @@
 
 const COPY_RESET_MS = 1400;
 export const INSTALL_COMMANDS = {
-  winget: 'winget install --id AmanThanvi.noctty -e',
-  'scoop-bucket': 'scoop bucket add noctty https://github.com/amanthanvi/scoop-noctty',
-  'scoop-install': 'scoop install noctty/noctty',
-  choco: 'choco install noctty',
+  winget: 'winget install --id AmanThanvi.koreterm -e',
+  'scoop-bucket': 'scoop bucket add koreterm https://github.com/amanthanvi/scoop-noctty',
+  'scoop-install': 'scoop install koreterm/koreterm',
+  choco: 'choco install koreterm',
 };
 
 function writeClipboardTextFallback(text) {

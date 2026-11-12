@@ -1347,7 +1347,7 @@ fn semanticPromptScreenAfterNarrowingForTest(
     var s: Stream = .initAlloc(alloc, .init(&t));
     defer s.deinit();
 
-    // An empty step stands for the user pressing Enter, which noctty
+    // An empty step stands for the user pressing Enter, which koreterm
     // records on the screen as it writes it to the pty.
     inline for (steps) |step| {
         if (step.len == 0) {
@@ -1402,7 +1402,7 @@ test "semantic prompt: a theme's own mark keeps the PowerShell prompt through a 
 }
 
 test "semantic prompt: oh-my-posh's own marks keep the PowerShell prompt through a resize" {
-    // The bytes of oh-my-posh with shell_integration on, after noctty's
+    // The bytes of oh-my-posh with shell_integration on, after koreterm's
     // wrapper: our D, OSC 7, A;redraw=0 and B are written directly, then the
     // host draws oh-my-posh's returned string of D, A, its text, an erase to
     // end of line, and B.
@@ -1420,7 +1420,7 @@ test "semantic prompt: oh-my-posh's own marks keep the PowerShell prompt through
 test "semantic prompt: two marks of its own inside the PowerShell prompt keep it through a resize" {
     // The Windows Terminal docs' oh-my-posh recipe with oh-my-posh's own
     // shell_integration also on: the returned string carries the recipe's
-    // D, A and 9;9 and then oh-my-posh's D, A, text and B, after noctty's
+    // D, A and 9;9 and then oh-my-posh's D, A, text and B, after koreterm's
     // A;redraw=0 and B. The second of those bare A marks used to reset.
     const screen = try semanticPromptScreenAfterNarrowingForTest(testing.allocator, &.{
         "\x1b]133;D;0;aid=1\x07\x1b]133;A;cl=line;aid=1;redraw=0\x07\x1b]133;B\x07",
@@ -1431,7 +1431,7 @@ test "semantic prompt: two marks of its own inside the PowerShell prompt keep it
 }
 
 test "semantic prompt: a mark written directly by a prompt function keeps the PowerShell prompt" {
-    // The user's prompt function runs between noctty's A;redraw=0 and B, so
+    // The user's prompt function runs between koreterm's A;redraw=0 and B, so
     // a mark it writes with Write-Host or [Console]::Write lands before B.
     const screen = try semanticPromptScreenAfterNarrowingForTest(testing.allocator, &.{
         "\x1b]133;A;redraw=0\x07\x1b]133;B\x07PS> ls",
@@ -1523,7 +1523,7 @@ test "semantic prompt: bash's PS1 P marks keep redraw=last across readline redra
     try testing.expect(t.flags.shell_redraws_prompt == .last);
 }
 
-// Ghostty's bash integration as noctty injects it for Git Bash: A;redraw=last
+// Ghostty's bash integration as koreterm injects it for Git Bash: A;redraw=last
 // from PROMPT_COMMAND, then a PS1 wrapped in P;k=i ... B with P;k=s after each
 // `\n`. Git for Windows' default PS1 has several lines.
 const bash_prompt_a = "\x1b]133;A;redraw=last;cl=line;aid=1\x07";
@@ -1742,7 +1742,7 @@ test "semantic prompt: each typed-ahead line in cmd is waiting for its own promp
 }
 
 test "semantic prompt: each typed-ahead line waits for its own prompt with the Windows Terminal docs' cmd PROMPT" {
-    // That PROMPT writes a D and an A, inside the prompt noctty wraps it in.
+    // That PROMPT writes a D and an A, inside the prompt koreterm wraps it in.
     const p = "\x1b]133;A;redraw=0\x07\x1b]133;D\x07\x1b]133;A\x07C:\\>\x1b]133;B\x07\x1b]133;B\x07";
     var t: Terminal = try .init(testing.allocator, .{ .cols = 30, .rows = 10 });
     defer t.deinit(testing.allocator);
@@ -1871,7 +1871,7 @@ test "semantic prompt: a line read by a PowerShell command that then starts cmd 
 }
 
 test "semantic prompt: typeahead in PowerShell without PSReadLine starts a shell" {
-    // Without PSReadLine the host reads each line itself, and noctty's
+    // Without PSReadLine the host reads each line itself, and koreterm's
     // integration writes D and A;redraw=0 for every prompt but never a C.
     // PowerShell then needs the typeahead inference the way cmd does, so
     // its D must not drop the lines its next prompt reads.
@@ -1954,7 +1954,7 @@ test "semantic prompt: the second of two lines pasted into a PowerShell nested i
 }
 
 test "semantic prompt: a P mark with an explicit redraw sets it inside an open prompt" {
-    // noctty's PowerShell integration marks a prompt it could not wrap in
+    // koreterm's PowerShell integration marks a prompt it could not wrap in
     // time this way: a theme's bare A already opened it, and an A of our
     // own would fresh-line away from the end of the drawn prompt.
     var t: Terminal = try .init(testing.allocator, .{ .cols = 30, .rows = 10 });

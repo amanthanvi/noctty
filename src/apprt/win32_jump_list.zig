@@ -4,7 +4,7 @@
 //! Recent entries come from the terminal's pwd stream, which means a program
 //! running inside a session can emit OSC 7 for any path it likes and seed a
 //! persistent, user-visible entry. That is inherent to the data source and the
-//! blast radius is small (activating an entry only sets noctty's working
+//! blast radius is small (activating an entry only sets koreterm's working
 //! directory), but titles are rendered by the shell, so `buildTitleAlloc`
 //! strips Unicode bidi/isolate controls to keep a seeded entry from
 //! misrepresenting where it points.
@@ -44,7 +44,7 @@ fn eventTimestamp() i64 {
     return @intCast(std.time.nanoTimestamp());
 }
 const max_shell_link_chars: usize = 32_768;
-const profile_description_prefix = "noctty-profile:";
+const profile_description_prefix = "koreterm-profile:";
 
 const CLSCTX_INPROC_SERVER: DWORD = 0x1;
 const COINIT_APARTMENTTHREADED: DWORD = consts.COINIT_APARTMENTTHREADED;
@@ -895,7 +895,7 @@ pub fn buildProfileArgumentsAlloc(alloc: Allocator, command: Command) ![]u8 {
     return buildProfileArgumentsWithLaunchConfigAlloc(alloc, command, "home", false);
 }
 
-/// `visual_studio_arg` is the `--visual-studio-profiles=` argument noctty
+/// `visual_studio_arg` is the `--visual-studio-profiles=` argument koreterm
 /// was started with, if any, which a Visual Studio shell's link passes on
 /// (see `buildSelectorArgumentsAlloc`).
 fn buildProfileArgumentsForProfileAlloc(
@@ -923,9 +923,9 @@ fn buildProfileArgumentsForProfileAlloc(
 /// it does from the picker. A Visual Studio shell's link names it the same
 /// way (`vs:<instance>:cmd`), as Windows Terminal's `wt -p`: the new process
 /// asks Visual Studio again, so the link follows an install that moved. It
-/// also passes on a `--visual-studio-profiles=` argument noctty was started
+/// also passes on a `--visual-studio-profiles=` argument koreterm was started
 /// with, which decides whether a `vs:` key names a profile at all, as an
-/// elevated relaunch does: noctty started with `--visual-studio-profiles=all`
+/// elevated relaunch does: koreterm started with `--visual-studio-profiles=all`
 /// over a file's `none` lists these shells, and a link without it would read
 /// `none` again and start the automatic shell. Only that argument: a value
 /// from the config files is left to the files, so a later edit of
@@ -2219,7 +2219,7 @@ test "jump_list recent insert caps at ten and rejects nonlocal paths" {
 }
 
 test "jump_list JSON round trips and corrupt or oversized state starts empty" {
-    const values = [_][]const u8{ "C:\\src\\noctty", "D:\\work" };
+    const values = [_][]const u8{ "C:\\src\\koreterm", "D:\\work" };
     const hidden_profiles = [_][]const u8{"wsl:Ubuntu"};
     const removed_values = [_][]const u8{"E:\\removed"};
     const recent_events = [_]RecentEvent{.{
@@ -2852,7 +2852,7 @@ fn testJumpListWithExe(alloc: Allocator) !JumpList {
     return .{
         .alloc = alloc,
         .state_path = try alloc.dupe(u8, "unused"),
-        .exe_path = try alloc.dupe(u8, "C:\\noctty\\noctty.exe"),
+        .exe_path = try alloc.dupe(u8, "C:\\koreterm\\koreterm.exe"),
         .recents = .{},
         .removed_recents = .{},
         .hidden_profiles = .{},
@@ -3161,7 +3161,7 @@ test "jump_list names a Visual Studio shell by its key" {
         .label = "Developer PowerShell for VS 18",
         .command = .{ .direct = &.{ "C:\\Program Files\\PowerShell\\7\\pwsh.exe", "-NoExit", "-Command", "&{Import-Module 'C:\\VS\\m.dll'; Enter-VsDevShell 6bb7cfd9}" } },
     };
-    // noctty started with no `--visual-studio-profiles=`: the link names
+    // koreterm started with no `--visual-studio-profiles=`: the link names
     // none, so the files decide it for the new process too, and a later edit
     // of the setting still reaches it (a link that wrote the running mode
     // would hold `newest` on the command line over a file's `all` forever).
@@ -3320,5 +3320,5 @@ test "jump_list property keys and AUMID match Windows shell contracts" {
         GUID.parse("{F29F85E0-4FF9-1068-AB91-08002B27B3D9}"),
         PKEY_Title.fmtid,
     );
-    try std.testing.expectEqualStrings("io.github.amanthanvi.noctty", win32_aumid.aumid_utf8);
+    try std.testing.expectEqualStrings("io.github.amanthanvi.koreterm", win32_aumid.aumid_utf8);
 }

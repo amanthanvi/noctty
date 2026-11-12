@@ -134,7 +134,7 @@ public static class ComCliNative {
     // and its handle is inheritable so a driver started with an explicit
     // lpDesktop can open it. Every child names it through lpDesktop.
     public static IntPtr HiddenDesktop(string name) {
-        if(!name.StartsWith("noctty-pkg74-",StringComparison.Ordinal)) throw new Exception("Unexpected hidden desktop name");
+        if(!name.StartsWith("koreterm-pkg74-",StringComparison.Ordinal)) throw new Exception("Unexpected hidden desktop name");
         if(ObjectName(GetProcessWindowStation())!="WinSta0") throw new Exception("Controller is not on WinSta0");
         var pointer=Marshal.AllocHGlobal(Marshal.SizeOf(typeof(Security)));
         try {
@@ -145,7 +145,7 @@ public static class ComCliNative {
         } finally { Marshal.FreeHGlobal(pointer); }
     }
     public static IntPtr DriverDesktop(string desktop) {
-        if(!desktop.StartsWith("noctty-pkg74-",StringComparison.Ordinal)) throw new Exception("Unexpected hidden desktop name");
+        if(!desktop.StartsWith("koreterm-pkg74-",StringComparison.Ordinal)) throw new Exception("Unexpected hidden desktop name");
         if(ObjectName(GetProcessWindowStation())!="WinSta0" || ObjectName(GetThreadDesktop(GetCurrentThreadId()))!=desktop) throw new Exception("Driver station/desktop mismatch");
         var input=OpenInputDesktop(0,false,1);
         if(input!=IntPtr.Zero) {
@@ -195,7 +195,7 @@ public static class ComCliNative {
         return Launch(image,raw,cwd,desktop,mode,input,output,error,flags,0,false);
     }
     public static Child Launch(string image,string raw,string cwd,string desktop,string mode,string input,string output,string error,uint flags,int show,bool rawCommandLine) {
-        if(String.IsNullOrEmpty(desktop) || !desktop.StartsWith("WinSta0\\noctty-pkg74-",StringComparison.Ordinal)) throw new Exception("An explicit isolated hidden desktop is required");
+        if(String.IsNullOrEmpty(desktop) || !desktop.StartsWith("WinSta0\\koreterm-pkg74-",StringComparison.Ordinal)) throw new Exception("An explicit isolated hidden desktop is required");
         IntPtr stdin=IntPtr.Zero,stdout=IntPtr.Zero,stderr=IntPtr.Zero,outRead=IntPtr.Zero,errRead=IntPtr.Zero;
         var pi=new ProcessInfo(); bool created=false; IntPtr job=IntPtr.Zero;
         try {

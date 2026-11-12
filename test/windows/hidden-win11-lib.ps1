@@ -1,22 +1,22 @@
-# Shared by the hidden-desktop harnesses that start portable copies of noctty
+# Shared by the hidden-desktop harnesses that start portable copies of koreterm
 # (hidden-win11-profile-matrix.ps1, hidden-win11-embedding-idle.ps1). Dot-source it.
 #
 # Safety rules these harnesses keep (AGENTS.md, test/windows/README.md):
-#   * The driver and noctty use explicit desktop names and inherit ONE desktop
+#   * The driver and koreterm use explicit desktop names and inherit ONE desktop
 #     handle, which their ordinary shell/discovery launches can propagate.
 #     The driver self-reports its connected desktop before parent approval.
 #     Named-desktop enumeration checks actual job window PIDs; Default rejects all job windows.
 #     Sampling does not isolate short-lived processes or external brokers.
 #   * Launches are restricted to ephemeral GitHub-hosted runners until the exact
 #     bundled and in-box ConPTY host placement has been observed there.
-#   * Every noctty is a copy with a `noctty.portable` marker, with LOCALAPPDATA
+#   * Every koreterm is a copy with a `koreterm.portable` marker, with LOCALAPPDATA
 #     and APPDATA redirected into the run directory.
 #   * The real startup-attempts.json is checked by size, time and hash, and both real
 #     PSReadLine history files by size and time only (scripts/windows-harness-history.ps1),
 #     before and after, never read.
 #   * The clipboard sequence number is logged before and after. Nothing here
 #     can copy (no selection, no copy key, no OSC 52 answer).
-#   * A noctty with the product AppUserModelID would replace the real taskbar
+#   * A koreterm with the product AppUserModelID would replace the real taskbar
 #     jump list, so the binary must carry the measurement AUMID unless
 #     -AllowProductAumid says the machine is an ephemeral runner.
 
@@ -149,7 +149,7 @@ public static class HiddenWin {
     static string Class(IntPtr h) { var s = new StringBuilder(128); GetClassNameW(h, s, 128); return s.ToString(); }
     public static IntPtr[] Hosts(int pid) {
         var list = new List<IntPtr>(); EnumWindows((h, p) => { int id; GetWindowThreadProcessId(h, out id);
-            if (id == pid && Class(h) == "noctty.win32.host") list.Add(h); return true;
+            if (id == pid && Class(h) == "koreterm.win32.host") list.Add(h); return true;
         }, IntPtr.Zero); return list.ToArray();
     }
     // Every visible top-level window the process owns, dialogs included, whatever its class.
@@ -160,7 +160,7 @@ public static class HiddenWin {
     }
     public static IntPtr[] Surfaces(IntPtr host) {
         var list = new List<IntPtr>();
-        EnumChildWindows(host, (c, p) => { if (Class(c) == "noctty.win32" && IsWindowVisible(c)) list.Add(c); return true; }, IntPtr.Zero);
+        EnumChildWindows(host, (c, p) => { if (Class(c) == "koreterm.win32" && IsWindowVisible(c)) list.Add(c); return true; }, IntPtr.Zero);
         return list.ToArray();
     }
     [DllImport("user32.dll", SetLastError=true)] static extern IntPtr GetThreadDesktop(uint threadId);
@@ -373,7 +373,7 @@ function Assert-HiddenRunner {
 # proves sampled UI placement, not desktop membership of windowless threads.
 function Assert-HiddenDesktop([IntPtr] $Job, [string] $DesktopName, [string] $ReceiptPath, [int] $DriverPid = $PID, [int] $RequiredWindowPid = 0, [switch] $NoWindows) {
     try {
-        if ($DesktopName -cnotmatch '^noctty-hw-[0-9a-f]{32}$') { throw 'Invalid desktop name' }
+        if ($DesktopName -cnotmatch '^koreterm-hw-[0-9a-f]{32}$') { throw 'Invalid desktop name' }
         $ids = @([HiddenWin]::JobProcessIds($Job))
         $rows = @([HiddenWin]::PrivateJobWindows($Job, $DesktopName))
         foreach ($row in $rows) {
@@ -411,18 +411,18 @@ function Assert-HiddenDesktop([IntPtr] $Job, [string] $DesktopName, [string] $Re
     if ($RequiredWindowPid -gt 0 -and ($ids -notcontains $RequiredWindowPid -or @($rows | Where-Object { $_.ProcessId -eq $RequiredWindowPid -and $_.CompletedAttempt -eq $true }).Count -eq 0)) {
         throw 'Window startup required process window is absent; further input is blocked.'
     }
-    # noctty's lifecycle window is top-level so that Restart Manager can ask a process with no other
+    # koreterm's lifecycle window is top-level so that Restart Manager can ask a process with no other
     # window to close, and it is never shown. Windows gives the thread that owns a top-level window its
     # default IME windows (class IME, and MSCTFIME UI under Text Services), also hidden; a message-only
     # window gets none. -NoWindows tolerates exactly those classes, and only while hidden.
-    $toleratedHidden = @('noctty.win32.lifecycle', 'IME', 'MSCTFIME UI')
+    $toleratedHidden = @('koreterm.win32.lifecycle', 'IME', 'MSCTFIME UI')
     $unexpectedRows = @($rows | Where-Object { -not ($toleratedHidden -ccontains $_.ClassName -and $_.Visible -eq $false) })
     if ($NoWindows -and $unexpectedRows.Count) { throw 'Hidden desktop unexpected private job window; further launches are blocked.' }
 }
 
-# The child cannot launch noctty until the Default observer validates this receipt.
+# The child cannot launch koreterm until the Default observer validates this receipt.
 function Wait-HiddenDriverApproval([string] $Run, [string] $DesktopName) {
-    if ($DesktopName -cnotmatch '^noctty-hw-[0-9a-f]{32}$' -or [HiddenWin]::CurrentDesktopName() -cne $DesktopName) { throw 'Hidden desktop driver self-check failed.' }
+    if ($DesktopName -cnotmatch '^koreterm-hw-[0-9a-f]{32}$' -or [HiddenWin]::CurrentDesktopName() -cne $DesktopName) { throw 'Hidden desktop driver self-check failed.' }
     @{ ProcessId = $PID; Desktop = $DesktopName; WindowStation = [HiddenWin]::CurrentWindowStationName(); SessionId = [Diagnostics.Process]::GetCurrentProcess().SessionId } |
         ConvertTo-Json | Set-Content -LiteralPath (Join-Path $Run 'driver-desktop.json')
     $deadline = [datetime]::UtcNow.AddSeconds(15)
@@ -510,7 +510,7 @@ function Test-SameFingerprint($A, $B) {
 # through Start-/Assert-WindowsHarnessHistoryGuard; it is never hashed.
 function Get-RealStateFingerprints {
     return @{
-        Startup = Get-FileFingerprint (Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'noctty\startup-attempts.json')
+        Startup = Get-FileFingerprint (Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'koreterm\startup-attempts.json')
     }
 }
 
@@ -518,9 +518,9 @@ function Get-RealStateFingerprints {
 # build carries ".measure" after it (apply_aumid_isolate.py, never committed).
 function Assert-MeasureAumid([string] $Exe, [switch] $AllowProductAumid) {
     if ($AllowProductAumid) { return }
-    $needle = [Text.Encoding]::Unicode.GetBytes('io.github.amanthanvi.noctty.measure')
+    $needle = [Text.Encoding]::Unicode.GetBytes('io.github.amanthanvi.koreterm.measure')
     if (-not [HiddenWin]::ContainsBytes([IO.File]::ReadAllBytes($Exe), $needle)) {
-        throw 'noctty.exe does not carry the measurement AppUserModelID (io.github.amanthanvi.noctty.measure). A launch would replace the real taskbar jump list. Build with scripts that apply the measurement patch, or pass -AllowProductAumid on an ephemeral machine.'
+        throw 'koreterm.exe does not carry the measurement AppUserModelID (io.github.amanthanvi.koreterm.measure). A launch would replace the real taskbar jump list. Build with scripts that apply the measurement patch, or pass -AllowProductAumid on an ephemeral machine.'
     }
 }
 
@@ -533,7 +533,7 @@ function Copy-PortableBin([string] $Source, [string] $Destination) {
     Get-ChildItem -LiteralPath $Source -File | ForEach-Object { Copy-Item -LiteralPath $_.FullName -Destination $Destination }
     $share = Join-Path (Split-Path -Parent $Source) 'share'
     if (Test-Path -LiteralPath $share) { Copy-Item -LiteralPath $share -Destination (Join-Path (Split-Path -Parent $Destination) 'share') -Recurse }
-    Set-Content -LiteralPath (Join-Path $Destination 'noctty.portable') -Value '' -NoNewline
+    Set-Content -LiteralPath (Join-Path $Destination 'koreterm.portable') -Value '' -NoNewline
 }
 
 # Runs `-Script` again as a driver on a desktop created here, in an owned kill-on-close job, with
@@ -548,19 +548,19 @@ function Invoke-HiddenDriver {
     $Bin = (Resolve-Path -LiteralPath $Bin).Path
     $Run = [IO.Path]::GetFullPath($Run)
     if (Test-Path -LiteralPath $Run) { throw 'Run directory must be new.' }
-    if (-not (Test-Path -LiteralPath (Join-Path $Bin 'noctty.exe'))) { throw 'Bin must contain noctty.exe.' }
+    if (-not (Test-Path -LiteralPath (Join-Path $Bin 'koreterm.exe'))) { throw 'Bin must contain koreterm.exe.' }
     $before = Get-RealStateFingerprints
     $historyGuard = Start-WindowsHarnessHistoryGuard -Harness (Split-Path -Leaf $Script)
     $clipboardBefore = [HiddenWin]::GetClipboardSequenceNumber()
     [void](New-Item -ItemType Directory -Path $Run)
     Copy-PortableBin $Bin (Join-Path $Run 'source\bin')
-    $artifacts = foreach ($name in @('noctty.exe', 'conpty.dll', 'OpenConsole.exe')) {
+    $artifacts = foreach ($name in @('koreterm.exe', 'conpty.dll', 'OpenConsole.exe')) {
         @{ Name = $name; Fingerprint = Get-FileFingerprint (Join-Path $Run "source\bin\$name") }
     }
     @{ OSVersion = [Environment]::OSVersion.Version.ToString(); Artifacts = @($artifacts) } |
         ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $Run 'runtime-artifacts.json')
     foreach ($name in @('localappdata', 'appdata')) { [void](New-Item -ItemType Directory -Path (Join-Path $Run $name)) }
-    $desktopName = 'noctty-hw-' + [guid]::NewGuid().ToString('N')
+    $desktopName = 'koreterm-hw-' + [guid]::NewGuid().ToString('N')
     $desktop = [HiddenWin]::CreateInheritedDesktop($desktopName)
     $oldLocal = $env:LOCALAPPDATA; $oldRoaming = $env:APPDATA
     $pi = $null; $job = [IntPtr]::Zero; $code = 1
@@ -625,13 +625,13 @@ function Invoke-HiddenDriver {
     Write-Host "${Label}: PASS"
 }
 
-# Starts a portable noctty on the driver's desktop. The returned object owns the process.
-function Start-HiddenNoctty {
+# Starts a portable koreterm on the driver's desktop. The returned object owns the process.
+function Start-HiddenKoreterm {
     param([Parameter(Mandatory)] [string] $Dir, [Parameter(Mandatory)] [string[]] $Arguments, [Parameter(Mandatory)] [string] $DesktopName, [Parameter(Mandatory)] [IntPtr] $Job, [string] $StderrPath)
     Assert-HiddenRunner
     Assert-HiddenDesktop -Job $Job -DesktopName $DesktopName -ReceiptPath (Join-Path $Dir 'launch-desktops.jsonl')
-    $exe = Join-Path $Dir 'noctty.exe'
-    if (-not (Test-Path -LiteralPath (Join-Path $Dir 'noctty.portable'))) { throw 'Portable marker missing; launch blocked.' }
+    $exe = Join-Path $Dir 'koreterm.exe'
+    if (-not (Test-Path -LiteralPath (Join-Path $Dir 'koreterm.portable'))) { throw 'Portable marker missing; launch blocked.' }
     $line = '"{0}" {1}' -f $exe, ($Arguments -join ' ')
     $pi = [HiddenWin]::Launch($exe, $line, $Dir, "WinSta0\$DesktopName", $Job, $StderrPath)
     $process = [Diagnostics.Process]::GetProcessById($pi.pid)

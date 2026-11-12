@@ -132,7 +132,7 @@ if (-not $Driver) {
     # ExtraConfig goes in a file to keep arbitrary quotes and backslashes out of the driver's command line.
     Invoke-LocalHiddenDriver -Script $PSCommandPath -Bin $Bin -Run $Run -TimeoutSeconds $DriverTimeoutSeconds `
         -ExpectedStartupHash $ExpectedStartupHash -ExpectedStartupModified $ExpectedStartupModified `
-        -DesktopPrefix 'noctty-tabx-' -Label 'Hidden single-tab close' -PassDesktopName -GuardClipboard `
+        -DesktopPrefix 'koreterm-tabx-' -Label 'Hidden single-tab close' -PassDesktopName -GuardClipboard `
         -DriverArguments @("-Scenario $Scenario") -RunFiles @{ 'extra-config.txt' = $ExtraConfig }
     exit
 }
@@ -144,7 +144,7 @@ $script:checks=[Collections.Generic.List[object]]::new()
 $script:samples=[Collections.Generic.List[object]]::new()
 $script:processes=[Collections.Generic.List[object]]::new()
 $desktopPath="WinSta0\$DesktopName"
-$runClass='noctty-test-tabx-' + [guid]::NewGuid().ToString('N').Substring(0,8)
+$runClass='koreterm-test-tabx-' + [guid]::NewGuid().ToString('N').Substring(0,8)
 # Control IDs (src/apprt/win32/host.zig, src/apprt/win32/overlay_session.zig):
 # the tab buttons are 1000 + index, the confirm prompt's Allow button is 2003.
 $Id=@{ Tab0=1000; Accept=2003 }
@@ -162,7 +162,7 @@ function Launch-Case([string]$Name,[string[]]$Extra) {
     @("working-directory = $dir",'single-instance = false','window-save-state = never',
       'copy-on-select = false','clipboard-read = deny','clipboard-write = deny',
       'keybind = f5=close_tab:this') + $Extra + @($ExtraConfig -split ';' | Where-Object { $_.Trim() }) | Set-Content -LiteralPath $config
-    $exe=Join-Path $dir 'noctty.exe'
+    $exe=Join-Path $dir 'koreterm.exe'
     $pi=[HiddenLocal]::Spawn($exe,('"{0}" --config-file="{1}" --single-instance=false --class={2}' -f $exe,$config,$runClass),$dir,$desktopPath)
     $script:processes.Add(@{Case=$Name;Pid=$pi.pid})
     $deadline=[datetime]::UtcNow.AddSeconds(25)

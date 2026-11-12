@@ -2122,7 +2122,7 @@ test "win32 a new window from a normal one takes maximize, and a forwarded --max
 
 /// A running app with one normal window, for the tests of what a new window
 /// opened from it keeps of the keys a forwarded launch gives it (#496): a
-/// second `noctty` or `noctty +new-window` while one runs.
+/// second `koreterm` or `koreterm +new-window` while one runs.
 const ForwardedKeysTest = struct {
     fixture: WindowStartTestApp = .{},
     source: *Surface = undefined,
@@ -3507,8 +3507,8 @@ const SettingsPreviewWindow = struct {
     const cb_setcursel = 0x014E;
     const cbn_selchange = 1;
     const bm_click = 0x00F5;
-    const settings_class = std.unicode.utf8ToUtf16LeStringLiteral("noctty.win32.settings");
-    const viewport_class = std.unicode.utf8ToUtf16LeStringLiteral("noctty.win32.settings.viewport");
+    const settings_class = std.unicode.utf8ToUtf16LeStringLiteral("koreterm.win32.settings");
+    const viewport_class = std.unicode.utf8ToUtf16LeStringLiteral("koreterm.win32.settings.viewport");
 
     /// Opens Settings and previews opacity 0.5 and the Light theme, as typing
     /// into the opacity field and choosing in the theme dropdown do.

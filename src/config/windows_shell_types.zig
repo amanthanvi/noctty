@@ -28,7 +28,7 @@ pub const ProfileKind = enum {
     }
 };
 
-/// Who made a profile: noctty found it on this machine, the user defined it,
+/// Who made a profile: koreterm found it on this machine, the user defined it,
 /// or it is one of Visual Studio's developer shells.
 pub const ProfileSource = enum {
     /// The local shells, the WSL distributions and the SSH hosts discovery

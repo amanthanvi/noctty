@@ -19,7 +19,7 @@ const Terminal = bench_core.terminal.Terminal;
 const stats = @import("stats.zig");
 
 const default_bytes = 4 * 1024 * 1024;
-const schema_version = "noctty.vt-throughput.v1";
+const schema_version = "koreterm.vt-throughput.v1";
 
 // Synthetic OSC and UTF-8 workloads deliberately exercise malformed control
 // payloads. Terminal warning/info logging would otherwise dominate the timed
@@ -56,8 +56,8 @@ const JsonResult = struct {
     per_run_mb_s: []const f64,
     median_mb_s: f64,
     p95_mb_s: f64,
-    noctty_version: []const u8,
-    noctty_commit: ?[]const u8,
+    koreterm_version: []const u8,
+    koreterm_commit: ?[]const u8,
 };
 
 pub fn main() !void {
@@ -113,10 +113,10 @@ pub fn main() !void {
         .per_run_mb_s = samples,
         .median_mb_s = median_mb_s,
         .p95_mb_s = p95_mb_s,
-        .noctty_version = build_options.app_version_string,
+        .koreterm_version = build_options.app_version_string,
         // This fork uses semantic-version build metadata ("windows") here,
         // not a source revision. Do not mislabel it as a commit hash.
-        .noctty_commit = null,
+        .koreterm_commit = null,
     };
 
     if (args.json) |path| try emitJsonPath(path, result);
@@ -352,8 +352,8 @@ test "issue121-vt-bench-json-shape" {
         .per_run_mb_s = &samples,
         .median_mb_s = 20,
         .p95_mb_s = 30,
-        .noctty_version = "1.2.3",
-        .noctty_commit = "abc123",
+        .koreterm_version = "1.2.3",
+        .koreterm_commit = "abc123",
     };
 
     var output: std.Io.Writer.Allocating = .init(testing.allocator);
@@ -374,6 +374,6 @@ test "issue121-vt-bench-json-shape" {
     try testing.expectEqualStrings("ascii", object.get("workload").?.string);
     try testing.expectEqual(@as(i64, 4096), object.get("bytes").?.integer);
     try testing.expectEqual(@as(usize, 3), object.get("per_run_mb_s").?.array.items.len);
-    try testing.expectEqualStrings("1.2.3", object.get("noctty_version").?.string);
-    try testing.expectEqualStrings("abc123", object.get("noctty_commit").?.string);
+    try testing.expectEqualStrings("1.2.3", object.get("koreterm_version").?.string);
+    try testing.expectEqualStrings("abc123", object.get("koreterm_commit").?.string);
 }

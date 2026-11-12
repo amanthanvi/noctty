@@ -47,7 +47,7 @@ pub fn targetOf(command_line: []const u8) ?Target {
 
 /// What an RDP pane runs instead of mstsc.exe: a shell that says what to do
 /// once the session is over and then waits, reading no keys (`timeout
-/// /nobreak`), so what is typed while noctty has the keyboard goes nowhere.
+/// /nobreak`), so what is typed while koreterm has the keyboard goes nowhere.
 pub const placeholder_argv = [_][:0]const u8{
     "cmd.exe",
     "/d",
@@ -305,7 +305,7 @@ pub const Events = struct {
     ctx: *anyopaque,
     /// The session is over and the control has gone.
     ended: *const fn (ctx: *anyopaque) void,
-    /// Ctrl+Alt+Home: the keyboard goes back to noctty.
+    /// Ctrl+Alt+Home: the keyboard goes back to koreterm.
     released: *const fn (ctx: *anyopaque) void,
     /// The session connected: the pane may say how to leave it.
     connected: *const fn (ctx: *anyopaque) void,
@@ -351,11 +351,14 @@ pub const Pane = struct {
     seen_connecting: bool = false,
     /// It reported a full connection, and the surface was told.
     told_connected: bool = false,
+    /// Polls in a row that found the session not connected after it was
+    /// under way: auto-reconnect gets time before the pane gives up.
+    idle_polls: u32 = 0,
     /// The remote desktop's resolution, fixed when it connects.
     desk_w: i32,
     desk_h: i32,
 
-    const prop_name = L("noctty.rdp_pane");
+    const prop_name = L("koreterm.rdp_pane");
     const poll_timer: usize = 0x5244; // "RD"
     const start_timer: usize = 0x5253; // "RS"
     const GWL_STYLE: i32 = -16;
@@ -454,6 +457,15 @@ pub const Pane = struct {
             // Keys go to the remote desktop only while it has the focus,
             // so Ctrl+Alt+Home can give them back.
             _ = putI4(adv, L("KeyboardHookMode"), 0);
+            // The control sends no keep-alive by default (mstsc.exe does):
+            // an idle session, as in a tab in the background, then loses
+            // its NAT or firewall state and drops. One a minute keeps it.
+            _ = putI4(adv, L("keepAliveInterval"), 60_000);
+            // A dropped link reconnects by itself, as mstsc.exe does.
+            _ = putBool(adv, L("EnableAutoReconnect"), true);
+            _ = putI4(adv, L("MaxReconnectAttempts"), 20);
+            // No client-side idle disconnect.
+            _ = putI4(adv, L("MinutesToIdleTimeout"), 0);
         }
 
         _ = SetPropW(window, prop_name, self);
@@ -558,6 +570,7 @@ pub const Pane = struct {
         self.ticks +|= 1;
         const state = connectedState(self.control);
         if (state != 0) {
+            self.idle_polls = 0;
             self.seen_connecting = true;
             if (state == 1 and !self.told_connected) {
                 self.told_connected = true;
@@ -568,9 +581,27 @@ pub const Pane = struct {
         // Not connected: over once it was under way, or when it never
         // started (a bad server name fails before Connect returns).
         if (!self.seen_connecting and self.ticks < 5) return;
+        // Once under way, a short gap is the control reconnecting.
+        if (self.seen_connecting) {
+            self.idle_polls +|= 1;
+            if (self.idle_polls < 30) return;
+        }
+        logDisconnectReason(self.control);
         const events = self.events;
         self.destroy();
         events.ended(events.ctx);
+    }
+
+    /// Why the session ended, in the log (`ExtendedDisconnectReason`).
+    fn logDisconnectReason(disp: *IDispatch) void {
+        var v = get(disp, L("ExtendedDisconnectReason")) orelse return;
+        defer _ = VariantClear(&v);
+        const reason: i32 = switch (v.vt) {
+            VT_I2 => v.data.iVal,
+            VT_I4 => v.data.lVal,
+            else => -1,
+        };
+        log.info("rdp pane: session ended extended_reason={d}", .{reason});
     }
 
     /// The pane whose control holds `hwnd` (the control's own windows are
@@ -588,7 +619,7 @@ pub const Pane = struct {
 };
 
 /// Ctrl+Alt+Home pressed in a Remote Desktop pane, as the loop reads it
-/// before translation: the keyboard goes back to noctty (`Events.released`),
+/// before translation: the keyboard goes back to koreterm (`Events.released`),
 /// and the key reaches neither the remote desktop nor a terminal. Returns
 /// whether it took the message.
 pub fn takeReleaseKey(hwnd: ?HWND, message: UINT, wparam: usize) bool {
@@ -652,7 +683,7 @@ fn promptCredentials(alloc: Allocator, owner: HWND, user: []const u8) ?Typed {
         .cbSize = @sizeOf(CREDUI_INFOW),
         .hwndParent = owner,
         .pszMessageText = L("Sign in to the remote computer. Check Remember to keep the credentials in the Windows Credential Manager for this profile."),
-        .pszCaptionText = L("noctty Remote Desktop"),
+        .pszCaptionText = L("koreterm Remote Desktop"),
         .hbmBanner = null,
     };
     var package: u32 = 0;

@@ -1,4 +1,4 @@
-//! AppUserModelID (AUMID) registration for noctty.
+//! AppUserModelID (AUMID) registration for koreterm.
 //!
 //! AUMID is the Windows identity that drives:
 //!   * Taskbar grouping (duplicates collapse under one icon).
@@ -28,13 +28,13 @@
 //!      "no icon" resolution is then cached per AUMID, so a later
 //!      registry fix is not picked up by the running session (a reboot
 //!      cleared it in testing; sign-out alone was not measured). We
-//!      point it at the `noctty.ico` that the installer, the portable
+//!      point it at the `koreterm.ico` that the installer, the portable
 //!      ZIP and `zig build` all stage next to the exe. When that file is
 //!      missing the value is left as it was: the key is per user, not
 //!      per install, so a bare copy of the exe writing its own path
-//!      would strip the icon from every other noctty on the machine.
+//!      would strip the icon from every other koreterm on the machine.
 //!
-//! The AUMID string `io.github.amanthanvi.noctty` lives in a namespace
+//! The AUMID string `io.github.amanthanvi.koreterm` lives in a namespace
 //! we own (matching the instance/bundle id) rather than any
 //! Ghostty-owned reverse-DNS prefix, so it cannot collide with — or
 //! imply affiliation with — an upstream Ghostty install.
@@ -70,8 +70,8 @@ const REG_SZ: DWORD = 1;
 const REG_DWORD: DWORD = consts.REG_DWORD;
 const ERROR_SUCCESS: i32 = consts.ERROR_SUCCESS;
 
-const aumid_wide: [*:0]const u16 = std.unicode.utf8ToUtf16LeStringLiteral("io.github.amanthanvi.noctty");
-pub const aumid_utf8 = "io.github.amanthanvi.noctty";
+const aumid_wide: [*:0]const u16 = std.unicode.utf8ToUtf16LeStringLiteral("io.github.amanthanvi.koreterm");
+pub const aumid_utf8 = "io.github.amanthanvi.koreterm";
 
 /// Set the AUMID for the current process. Must run before any HWND is
 /// created; Windows copies the identity into the process's taskbar-
@@ -191,7 +191,7 @@ fn registerForExe(alloc: std.mem.Allocator, root: HKEY, subkey: LPCWSTR, exe_pat
     // Every write is attempted; a failed one is reported at the end.
     var complete = true;
     var wrote_icon = false;
-    const display_name = std.unicode.utf8ToUtf16LeStringLiteral("noctty");
+    const display_name = std.unicode.utf8ToUtf16LeStringLiteral("koreterm");
     const set_rc = writeRegSz(hkey, std.unicode.utf8ToUtf16LeStringLiteral("DisplayName"), display_name);
     if (set_rc != ERROR_SUCCESS) {
         std.log.warn("AUMID: write DisplayName failed rc={d}", .{set_rc});
@@ -210,7 +210,7 @@ fn registerForExe(alloc: std.mem.Allocator, root: HKEY, subkey: LPCWSTR, exe_pat
         // somewhere on its own): keep whatever `IconUri` already holds.
         // Writing this exe's path instead would register a value the
         // notification platform cannot render, and because the key is
-        // shared by every noctty the user runs, it would take the icon
+        // shared by every koreterm the user runs, it would take the icon
         // away from the installed build too.
         if (icon_path) |icon_source| {
             if (std.unicode.utf8ToUtf16LeAllocZ(alloc, icon_source)) |icon_uri| {
@@ -268,17 +268,17 @@ fn writeRegSz(hkey: HKEY, value_name: LPCWSTR, value: [:0]const u16) i32 {
     );
 }
 
-/// The icon file staged next to `noctty.exe` by `scripts/package-windows.ps1`
+/// The icon file staged next to `koreterm.exe` by `scripts/package-windows.ps1`
 /// (installer + portable ZIP) and by the `zig build` install step.
-pub const icon_file_name = "noctty.ico";
+pub const icon_file_name = "koreterm.ico";
 
-/// `<dir of exe_path>\noctty.ico`. Caller owns the returned slice.
+/// `<dir of exe_path>\koreterm.ico`. Caller owns the returned slice.
 fn siblingIconPath(alloc: std.mem.Allocator, exe_path: []const u8) ![]u8 {
     const dir = std.fs.path.dirname(exe_path) orelse ".";
     return try std.fs.path.join(alloc, &.{ dir, icon_file_name });
 }
 
-/// Resolve the value to write into `IconUri`: the sibling `noctty.ico`
+/// Resolve the value to write into `IconUri`: the sibling `koreterm.ico`
 /// when it exists on disk, otherwise `null` so the caller leaves the
 /// registry value alone (a dev tree that never ran the install step, or
 /// a bare copy of the exe). Caller owns a non-null result.
@@ -286,7 +286,7 @@ fn iconUriPath(alloc: std.mem.Allocator, exe_path: []const u8) !?[]u8 {
     const icon_path = try siblingIconPath(alloc, exe_path);
     errdefer alloc.free(icon_path);
     // A stat, not an access check: `IconUri` has to name an image file,
-    // and a directory that happens to be called `noctty.ico` passes
+    // and a directory that happens to be called `koreterm.ico` passes
     // `accessAbsolute` just the same.
     const stat = std.fs.cwd().statFile(icon_path) catch |err| {
         std.log.info("AUMID: {s} not found next to exe ({}); leaving IconUri unchanged", .{ icon_file_name, err });
@@ -305,9 +305,9 @@ test "aumid sibling icon path sits next to the exe" {
     const testing = std.testing;
     const sep = std.fs.path.sep_str;
 
-    const exe_path = try std.mem.join(testing.allocator, sep, &.{ "C:", "Program Files", "noctty", "noctty.exe" });
+    const exe_path = try std.mem.join(testing.allocator, sep, &.{ "C:", "Program Files", "koreterm", "koreterm.exe" });
     defer testing.allocator.free(exe_path);
-    const expected = try std.mem.join(testing.allocator, sep, &.{ "C:", "Program Files", "noctty", "noctty.ico" });
+    const expected = try std.mem.join(testing.allocator, sep, &.{ "C:", "Program Files", "koreterm", "koreterm.ico" });
     defer testing.allocator.free(expected);
 
     const actual = try siblingIconPath(testing.allocator, exe_path);
@@ -322,10 +322,10 @@ test "aumid icon uri is absent when the sibling icon is missing" {
 
     const dir = try tmp.dir.realpathAlloc(testing.allocator, ".");
     defer testing.allocator.free(dir);
-    const exe_path = try std.fs.path.join(testing.allocator, &.{ dir, "noctty.exe" });
+    const exe_path = try std.fs.path.join(testing.allocator, &.{ dir, "koreterm.exe" });
     defer testing.allocator.free(exe_path);
 
-    // No noctty.ico yet: the caller must leave IconUri as it is.
+    // No koreterm.ico yet: the caller must leave IconUri as it is.
     try testing.expectEqual(@as(?[]u8, null), try iconUriPath(testing.allocator, exe_path));
 
     // A directory of that name is not an icon either.
@@ -343,11 +343,11 @@ test "aumid icon uri is absent when the sibling icon is missing" {
 
 test "aumid string shape" {
     const testing = std.testing;
-    try testing.expectEqualStrings("io.github.amanthanvi.noctty", aumid_utf8);
+    try testing.expectEqualStrings("io.github.amanthanvi.koreterm", aumid_utf8);
 }
 
 const TestRegistry = struct {
-    const parent_prefix = "Software\\noctty-aumid-test-";
+    const parent_prefix = "Software\\koreterm-aumid-test-";
     const name = std.unicode.utf8ToUtf16LeStringLiteral("app");
 
     extern "advapi32" fn RegDeleteTreeW(key: HKEY, sub_key: ?LPCWSTR) callconv(.winapi) i32;
@@ -429,7 +429,7 @@ test "portable and elevated copies register no toast activator" {
     try tmp.dir.writeFile(.{ .sub_path = icon_file_name, .data = "ico" });
     const root = try tmp.dir.realpathAlloc(alloc, ".");
     defer alloc.free(root);
-    const exe = try std.fs.path.join(alloc, &.{ root, "noctty.exe" });
+    const exe = try std.fs.path.join(alloc, &.{ root, "koreterm.exe" });
     defer alloc.free(exe);
     const custom_activator = std.unicode.utf8ToUtf16LeStringLiteral("CustomActivator");
 
@@ -448,7 +448,7 @@ test "portable and elevated copies register no toast activator" {
         try std.testing.expect(try register(alloc, reg.parent, TestRegistry.name, exe, case.portable, activatorFor(case.installer_managed, case.portable, case.elevated)));
         const key = try reg.open(TestRegistry.name);
         defer _ = sys.RegCloseKey(key);
-        try TestRegistry.expectSz(key, "DisplayName", "noctty");
+        try TestRegistry.expectSz(key, "DisplayName", "koreterm");
         if (case.writes) {
             try TestRegistry.expectSz(key, "CustomActivator", win32_toast_activator.clsid_text);
         } else {
@@ -483,7 +483,7 @@ test "aumid registration: installed copies always write, portable copies only cr
             try tmp.dir.makeDir(dir);
             try tmp.dir.writeFile(.{ .sub_path = try std.fmt.bufPrint(&icon_buf, "{s}/{s}", .{ dir, icon_file_name }), .data = dir });
         }
-        exe.* = try std.fs.path.join(alloc, &.{ root, dir, "noctty.exe" });
+        exe.* = try std.fs.path.join(alloc, &.{ root, dir, "koreterm.exe" });
         icon.* = try siblingIconPath(alloc, exe.*);
     }
     defer for (exes, icons) |exe, icon| {
@@ -504,7 +504,7 @@ test "aumid registration: installed copies always write, portable copies only cr
         try std.testing.expect(try register(alloc, reg.parent, TestRegistry.name, p1, true, null));
         const key = try reg.open(TestRegistry.name);
         defer _ = sys.RegCloseKey(key);
-        try TestRegistry.expectSz(key, "DisplayName", "noctty");
+        try TestRegistry.expectSz(key, "DisplayName", "koreterm");
         try TestRegistry.expectSz(key, "IconUri", icons[1]);
         var show: u32 = 0;
         var show_bytes: DWORD = @sizeOf(u32);

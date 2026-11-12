@@ -56,7 +56,7 @@ fn architectureText(buf: []u8, arch: ?os_windows.ProcessArchitecture) []const u8
 
 pub const Options = struct {};
 
-/// The `version` command is used to display information about noctty. Recognized as
+/// The `version` command is used to display information about koreterm. Recognized as
 /// either `+version` or `--version`.
 pub fn run(alloc: Allocator) !u8 {
     _ = alloc;
@@ -73,7 +73,7 @@ pub fn run(alloc: Allocator) !u8 {
             .{commit_hash},
         );
     };
-    try stdout.print("noctty {s}\n\n", .{build_config.version_string});
+    try stdout.print("koreterm {s}\n\n", .{build_config.version_string});
     if (tty) try stdout.print("\x1b]8;;\x1b\\", .{});
 
     try stdout.print("Version\n", .{});
@@ -119,11 +119,11 @@ test "version output labels are Windows-facing" {
 test "version ConPTY line names the bundled DLL or the fallback reason" {
     var buf: [256]u8 = undefined;
     var writer = std.Io.Writer.fixed(&buf);
-    try writeConPty(&writer, .{ .source = .bundled, .dll_path = "C:\\noctty\\conpty.dll" });
+    try writeConPty(&writer, .{ .source = .bundled, .dll_path = "C:\\koreterm\\conpty.dll" });
     try writeConPty(&writer, .{ .source = .inbox, .dll_path = null, .fallback = error.NotFound });
     try std.testing.expectEqualStrings(
-        conpty_label ++ "bundled (C:\\noctty\\conpty.dll)\n" ++
-            conpty_label ++ "inbox (conpty.dll is not next to noctty.exe)\n",
+        conpty_label ++ "bundled (C:\\koreterm\\conpty.dll)\n" ++
+            conpty_label ++ "inbox (conpty.dll is not next to koreterm.exe)\n",
         writer.buffered(),
     );
 }

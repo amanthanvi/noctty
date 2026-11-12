@@ -3,11 +3,11 @@
 Exercise Clink's real script discovery, stopping prompt filters, C/D hooks, and
 a resize at the prompt. Supply an already extracted official portable Clink;
 never installs or modifies AutoRun. -Bin additionally runs the test inside a
-copied portable noctty build. Without -Bin, an explicit conhost runs cmd on the
+copied portable koreterm build. Without -Bin, an explicit conhost runs cmd on the
 private desktop. The resize step narrows that desktop's terminal window and
 posts Enter to it; no real input, clipboard, shell profiles, or user history.
 Its checks read the console's own buffer through Clink, so with -Bin they cover
-Clink and ConPTY, not noctty's grid: interactive-win11-conpty-sync.ps1 -Clink
+Clink and ConPTY, not koreterm's grid: interactive-win11-conpty-sync.ps1 -Clink
 compares those, and src/terminal/resize_replay.zig replays the shape headless.
 Evidence is retained in a NEW Run.
 #>
@@ -16,7 +16,7 @@ param(
     [Parameter(Mandatory)][string]$Clink,
     [Parameter(Mandatory)][string]$Run,
     [string]$Bin,
-    [string]$IntegrationScript = (Join-Path $PSScriptRoot '../../src/shell-integration/cmd/noctty-shell-integration.lua')
+    [string]$IntegrationScript = (Join-Path $PSScriptRoot '../../src/shell-integration/cmd/koreterm-shell-integration.lua')
 )
 
 . (Join-Path $PSScriptRoot '..\..\scripts\windows-harness-history.ps1')
@@ -91,14 +91,14 @@ public static class ClinkSmoke {
     static void ResizeStep(string desktop,int pid,IntPtr job,string ready,string done,Func<bool> alive) {
         Func<string,int,bool> waitFor=(path,ms)=>{ var until=DateTime.UtcNow.AddMilliseconds(ms); while(DateTime.UtcNow<until && alive()) { if(System.IO.File.Exists(path)) return true; System.Threading.Thread.Sleep(50); } return false; };
         if(!waitFor(ready,30000)) return;
-        // The terminal window itself: noctty's host, or the console window.
+        // The terminal window itself: koreterm's host, or the console window.
         // conhost reports its window as owned by the console's client (cmd),
         // not by itself, so that one is matched by its owner being one of
         // this harness's processes (all in its job).
         IntPtr window=IntPtr.Zero;
         var desk=OpenPrivateDesktop(desktop);
         try {
-            EnumDesktopWindows(desk,(h,p)=>{int owner; GetWindowThreadProcessId(h,out owner); var c=ClassOf(h); if((c=="ConsoleWindowClass" && InJob(owner,job)) || (owner==pid && c=="noctty.win32.host" && IsWindowVisible(h))) { window=h; return false; } return true;},IntPtr.Zero);
+            EnumDesktopWindows(desk,(h,p)=>{int owner; GetWindowThreadProcessId(h,out owner); var c=ClassOf(h); if((c=="ConsoleWindowClass" && InJob(owner,job)) || (owner==pid && c=="koreterm.win32.host" && IsWindowVisible(h))) { window=h; return false; } return true;},IntPtr.Zero);
         } finally { CloseDesktop(desk); }
         if(window==IntPtr.Zero) throw new Exception("No terminal window to resize on the private desktop");
         Rect r; if(!GetWindowRect(window,out r)) throw new Win32Exception(Marshal.GetLastWin32Error());
@@ -108,13 +108,13 @@ public static class ClinkSmoke {
         // finish without them.
         if(!waitFor(done,30000)) throw new Exception("The resize step's checks did not finish");
         long down=1|((long)MapVirtualKeyW(0x0D,0)<<16);
-        if(ClassOf(window)=="noctty.win32.host") {
+        if(ClassOf(window)=="koreterm.win32.host") {
             IntPtr surface=IntPtr.Zero;
-            EnumChildWindows(window,(h,p)=>{ if(IsWindowVisible(h) && ClassOf(h)=="noctty.win32") { surface=h; return false; } return true; },IntPtr.Zero);
-            if(surface==IntPtr.Zero) throw new Exception("No noctty terminal surface to press Enter in");
-            // The key-down/key-up pair only: noctty's pump runs
+            EnumChildWindows(window,(h,p)=>{ if(IsWindowVisible(h) && ClassOf(h)=="koreterm.win32") { surface=h; return false; } return true; },IntPtr.Zero);
+            if(surface==IntPtr.Zero) throw new Exception("No koreterm terminal surface to press Enter in");
+            // The key-down/key-up pair only: koreterm's pump runs
             // TranslateMessage, which makes the WM_CHAR, so a posted WM_CHAR as
-            // well would type Enter twice (AGENTS.md, Running noctty).
+            // well would type Enter twice (AGENTS.md, Running koreterm).
             PostMessageW(surface,0x0100,(IntPtr)0x0D,(IntPtr)down);
             PostMessageW(surface,0x0101,(IntPtr)0x0D,(IntPtr)(down|0xC0000000L));
         } else {
@@ -126,7 +126,7 @@ public static class ClinkSmoke {
     public static int Run(string app,string args,string cwd,string desktop,string ready,string done) {
         SetThreadDpiAwarenessContext((IntPtr)(-4));
         var si=new Startup {cb=Marshal.SizeOf<Startup>(),desktop="WinSta0\\"+desktop}; PI pi;
-        // Explicit conhost for the console case; GUI noctty creates its own ConPTY.
+        // Explicit conhost for the console case; GUI koreterm creates its own ConPTY.
         if(!CreateProcessW(app,new StringBuilder("\""+app+"\" "+args),IntPtr.Zero,IntPtr.Zero,false,4,IntPtr.Zero,cwd,ref si,out pi)) throw new Win32Exception(Marshal.GetLastWin32Error());
         var created=Created(pi.process);
         var job=CreateJobObjectW(IntPtr.Zero,null);
@@ -166,7 +166,7 @@ function Fingerprint([string]$Path) {
     $item = Get-Item -LiteralPath $Path
     return "$($item.Length):$($item.LastWriteTimeUtc.Ticks):$((Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash)"
 }
-$ledger = Join-Path $env:LOCALAPPDATA 'noctty/startup-attempts.json'
+$ledger = Join-Path $env:LOCALAPPDATA 'koreterm/startup-attempts.json'
 $before = Fingerprint $ledger
 # A wrong -Clink would otherwise surface only as a timeout, once cmd fails to
 # start it.
@@ -177,7 +177,7 @@ if (Test-Path -LiteralPath $Run) { throw 'Run must be a new directory.' }
 New-Item -ItemType Directory -Path $Run | Out-Null
 foreach ($dir in 'appdata','localappdata','profile','integration','scripts') { New-Item -ItemType Directory -Path (Join-Path $Run $dir) | Out-Null }
 Copy-Item -LiteralPath $IntegrationScript -Destination (Join-Path $Run 'integration')
-Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'cmd-clink.lua') -Destination (Join-Path $Run 'profile/zz-noctty-smoke.lua')
+Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'cmd-clink.lua') -Destination (Join-Path $Run 'profile/zz-koreterm-smoke.lua')
 # Clink loads the first .inputrc it finds, in the profile before %USERPROFILE%,
 # %LOCALAPPDATA%, %APPDATA% and %HOME%; an empty one here keeps a user's own out.
 [IO.File]::WriteAllText((Join-Path $Run 'profile/.inputrc'), '')
@@ -202,19 +202,19 @@ $batch = Join-Path $Run 'launch.cmd'
 if ($Bin) {
     $portable = Join-Path $Run 'portable'
     Copy-Item -LiteralPath $Bin -Destination $portable -Recurse
-    Set-Content -LiteralPath (Join-Path $portable 'noctty.portable') -Value '' -NoNewline
-    $app = Join-Path $portable 'noctty.exe'
+    Set-Content -LiteralPath (Join-Path $portable 'koreterm.portable') -Value '' -NoNewline
+    $app = Join-Path $portable 'koreterm.exe'
     # A class of its own, so the copy never hands its command line to a
-    # running noctty over the single-instance pipe.
-    $arguments = '--config-default-files=false --auto-update=off --confirm-close-surface=false --window-save-state=never --single-instance=false --class=noctty-test-clink-' + [guid]::NewGuid().ToString('n') + ' -e C:\Windows\System32\cmd.exe /d /k "' + $batch + '"'
+    # running koreterm over the single-instance pipe.
+    $arguments = '--config-default-files=false --auto-update=off --confirm-close-surface=false --window-save-state=never --single-instance=false --class=koreterm-test-clink-' + [guid]::NewGuid().ToString('n') + ' -e C:\Windows\System32\cmd.exe /d /k "' + $batch + '"'
 } else {
     $app = Join-Path $env:SystemRoot 'System32/conhost.exe'
     $arguments = 'C:\Windows\System32\cmd.exe /d /k "' + $batch + '"'
 }
 $environment = @{
     APPDATA = (Join-Path $Run 'appdata'); LOCALAPPDATA = (Join-Path $Run 'localappdata')
-    CLINK_PATH = (Join-Path $Run 'integration'); NOCTTY_CLINK_SCRIPT = $script; NOCTTY_CLINK_RESULTS = $result
-    NOCTTY_CLINK_RESIZE_READY = $resizeReady; NOCTTY_CLINK_RESIZE_DONE = $resizeDone
+    CLINK_PATH = (Join-Path $Run 'integration'); KORETERM_CLINK_SCRIPT = $script; KORETERM_CLINK_RESULTS = $result
+    KORETERM_CLINK_RESIZE_READY = $resizeReady; KORETERM_CLINK_RESIZE_DONE = $resizeDone
 }
 # Clink reads its overrides from CLINK_* variables, and several beat `inject -p`
 # or add places to load from (CLINK_PROFILE, CLINK_SETTINGS, CLINK_INPUTRC,
@@ -238,7 +238,7 @@ if (Test-ClinkInstalledScripts) {
 $savedClink = @{}
 foreach ($variable in @(Get-ChildItem -Path Env: | Where-Object { $_.Name -like 'CLINK_*' })) { $savedClink[$variable.Name] = $variable.Value }
 $saved = @{}
-$desktopName = 'noctty-clink-' + [guid]::NewGuid().ToString('n')
+$desktopName = 'koreterm-clink-' + [guid]::NewGuid().ToString('n')
 $desktop = [ClinkSmoke]::CreateDesktopW($desktopName,[IntPtr]::Zero,[IntPtr]::Zero,0,0x1ff,[IntPtr]::Zero)
 if ($desktop -eq [IntPtr]::Zero) { throw 'CreateDesktop failed.' }
 try {

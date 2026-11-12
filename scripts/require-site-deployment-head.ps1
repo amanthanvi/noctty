@@ -18,8 +18,8 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-if ($env:GITHUB_REPOSITORY -cne 'amanthanvi/noctty') {
-    throw 'Site deployment is restricted to amanthanvi/noctty.'
+if ($env:GITHUB_REPOSITORY -cne 'amanthanvi/koreterm') {
+    throw 'Site deployment is restricted to amanthanvi/koreterm.'
 }
 $originOutput = git remote get-url origin
 if ($LASTEXITCODE -ne 0) {

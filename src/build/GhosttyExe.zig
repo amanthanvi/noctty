@@ -4,18 +4,18 @@ const std = @import("std");
 const Config = @import("Config.zig");
 const SharedDeps = @import("SharedDeps.zig");
 
-/// The primary noctty executable.
+/// The primary koreterm executable.
 exe: *std.Build.Step.Compile,
 
 /// The install step for the executable.
 install_step: *std.Build.Step.InstallArtifact,
 
-/// Console launcher that shells resolve before noctty.exe.
+/// Console launcher that shells resolve before koreterm.exe.
 command_exe: ?*std.Build.Step.Compile = null,
 command_install_step: ?*std.Build.Step.InstallFile = null,
 command_pdb_install_step: ?*std.Build.Step.InstallFile = null,
 
-/// `noctty.ico` next to the exe. The AUMID registration points the toast
+/// `koreterm.ico` next to the exe. The AUMID registration points the toast
 /// `IconUri` at it (src/apprt/win32_aumid.zig), and the packaging script
 /// stages the same file in the portable/installer layout, so a dev tree
 /// gets the same toast icon as a release install.
@@ -23,7 +23,7 @@ icon_install_step: ?*std.Build.Step.InstallFile = null,
 
 pub fn init(b: *std.Build, cfg: *const Config, deps: *const SharedDeps) !Ghostty {
     const exe: *std.Build.Step.Compile = b.addExecutable(.{
-        .name = "noctty",
+        .name = "koreterm",
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/main.zig"),
             .target = cfg.target,
@@ -33,8 +33,8 @@ pub fn init(b: *std.Build, cfg: *const Config, deps: *const SharedDeps) !Ghostty
             // Kept when stripped. On x64 Windows these are the .pdata/.xdata
             // records a debugger unwinds with; a function without one is
             // taken for a leaf, so a minidump's stacks stop making sense at
-            // the first noctty frame (#299). Measured on ReleaseFast:
-            // +132,096 bytes (0.5%) on noctty.exe.
+            // the first koreterm frame (#299). Measured on ReleaseFast:
+            // +132,096 bytes (0.5%) on koreterm.exe.
             .unwind_tables = .sync,
         }),
         // Crashes on x86_64 self-hosted on 0.15.1
@@ -60,9 +60,9 @@ pub fn init(b: *std.Build, cfg: *const Config, deps: *const SharedDeps) !Ghostty
             try addWindowsResource(b, cfg, exe);
 
             const command = b.addExecutable(.{
-                .name = "noctty-command",
+                .name = "koreterm-command",
                 .root_module = b.createModule(.{
-                    .root_source_file = b.path("src/main_noctty_command.zig"),
+                    .root_source_file = b.path("src/main_koreterm_command.zig"),
                     .target = cfg.target,
                     .optimize = cfg.optimize,
                     .strip = cfg.strip,
@@ -73,14 +73,14 @@ pub fn init(b: *std.Build, cfg: *const Config, deps: *const SharedDeps) !Ghostty
             });
             command.subsystem = .Console;
             command_exe = command;
-            command_install_step = b.addInstallBinFile(command.getEmittedBin(), "noctty.com");
-            // The compiled name is noctty-command, so noctty.com's CodeView
-            // record asks for noctty-command.pdb. Installing the exe alone
+            command_install_step = b.addInstallBinFile(command.getEmittedBin(), "koreterm.com");
+            // The compiled name is koreterm-command, so koreterm.com's CodeView
+            // record asks for koreterm-command.pdb. Installing the exe alone
             // would leave that PDB in the build cache.
             if (command.producesPdbFile()) {
-                command_pdb_install_step = b.addInstallBinFile(command.getEmittedPdb(), "noctty-command.pdb");
+                command_pdb_install_step = b.addInstallBinFile(command.getEmittedPdb(), "koreterm-command.pdb");
             }
-            icon_install_step = b.addInstallBinFile(b.path("dist/windows/noctty.ico"), "noctty.ico");
+            icon_install_step = b.addInstallBinFile(b.path("dist/windows/koreterm.ico"), "koreterm.ico");
         },
 
         else => {},
@@ -96,7 +96,7 @@ pub fn init(b: *std.Build, cfg: *const Config, deps: *const SharedDeps) !Ghostty
     };
 }
 
-/// Add the noctty exe to the install target.
+/// Add the koreterm exe to the install target.
 pub fn install(self: *const Ghostty) void {
     const b = self.install_step.step.owner;
     b.getInstallStep().dependOn(&self.install_step.step);
@@ -105,7 +105,7 @@ pub fn install(self: *const Ghostty) void {
     if (self.icon_install_step) |step| b.getInstallStep().dependOn(&step.step);
 }
 
-/// Attach `noctty.rc` (icon, manifest, version) to a Windows executable. The
+/// Attach `koreterm.rc` (icon, manifest, version) to a Windows executable. The
 /// defines are part of Zig's resource cache key, so a version change rebuilds
 /// the resource. The updater's test fixture uses this too, so it exercises the
 /// same flags as the shipped exe.
@@ -120,13 +120,13 @@ pub fn addWindowsResource(
         cfg.version.minor > std.math.maxInt(u16) or
         cfg.version.patch > std.math.maxInt(u16)) return error.WindowsVersionComponentOutOfRange;
     compile.addWin32ResourceFile(.{
-        .file = b.path("dist/windows/noctty.rc"),
+        .file = b.path("dist/windows/koreterm.rc"),
         .flags = &.{
             try win32IconResourceStamp(b),
-            b.fmt("/DNOCTTY_VERSION_MAJOR={d}", .{cfg.version.major}),
-            b.fmt("/DNOCTTY_VERSION_MINOR={d}", .{cfg.version.minor}),
-            b.fmt("/DNOCTTY_VERSION_PATCH={d}", .{cfg.version.patch}),
-            b.fmt("/DNOCTTY_VERSION_STRING=\"{f}\"", .{cfg.version}),
+            b.fmt("/DKORETERM_VERSION_MAJOR={d}", .{cfg.version.major}),
+            b.fmt("/DKORETERM_VERSION_MINOR={d}", .{cfg.version.minor}),
+            b.fmt("/DKORETERM_VERSION_PATCH={d}", .{cfg.version.patch}),
+            b.fmt("/DKORETERM_VERSION_STRING=\"{f}\"", .{cfg.version}),
         },
     });
 }
@@ -134,14 +134,14 @@ pub fn addWindowsResource(
 fn win32IconResourceStamp(b: *std.Build) ![]const u8 {
     const icon_bytes = try std.fs.cwd().readFileAlloc(
         b.allocator,
-        "dist/windows/noctty.ico",
+        "dist/windows/koreterm.ico",
         1024 * 1024,
     );
     defer b.allocator.free(icon_bytes);
 
     return try std.fmt.allocPrint(
         b.allocator,
-        "/DNOCTTY_ICON_HASH_{x}",
+        "/DKORETERM_ICON_HASH_{x}",
         .{std.hash.Wyhash.hash(0, icon_bytes)},
     );
 }

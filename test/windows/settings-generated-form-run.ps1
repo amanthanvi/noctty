@@ -26,7 +26,7 @@
 .EXAMPLE
     ./settings-generated-form-run.ps1 -CompileOnly
 .EXAMPLE
-    ./settings-generated-form-run.ps1 -PortableExe C:/task/measure-stage/noctty.exe `
+    ./settings-generated-form-run.ps1 -PortableExe C:/task/measure-stage/koreterm.exe `
         -ExpectedExeSha256 <verified-sha256> `
         -OutputDirectory C:/Users/amant/.t3/worktrees/winghostty/wt-setform-run/generated-01
 #>
@@ -430,7 +430,7 @@ try {
     [IO.File]::WriteAllText($config, $seed + "`n", [Text.UTF8Encoding]::new($false))
     $configHash = (Get-FileHash -LiteralPath $config).Hash
     Start-Fixture
-    $viewport = [Set91.Native]::Child($settings, -1, 'noctty.win32.settings.viewport')
+    $viewport = [Set91.Native]::Child($settings, -1, 'koreterm.win32.settings.viewport')
     Assert-Contract ($viewport -ne [IntPtr]::Zero) 'Missing Settings viewport.'
     [Set91.Native]::AssertDesktop($viewport, $WorkerDesktop)
     foreach ($section in @(201, 202, 203, 206, 207, 204, 205)) {

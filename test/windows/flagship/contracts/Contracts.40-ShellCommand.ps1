@@ -55,14 +55,14 @@ function Format-PowerShellLiteral {
 }
 
 $binDir = [System.IO.Path]::GetFullPath($(if ($BinDir) { $BinDir } else { Join-Path $repoRoot 'zig-out\bin' }))
-$guiExe = Join-Path $binDir 'noctty.exe'
-$commandExe = Join-Path $binDir 'noctty.com'
+$guiExe = Join-Path $binDir 'koreterm.exe'
+$commandExe = Join-Path $binDir 'koreterm.com'
 $cmdExe = Join-Path ([Environment]::SystemDirectory) 'cmd.exe'
 $powershellExe = Join-Path ([Environment]::SystemDirectory) 'WindowsPowerShell\v1.0\powershell.exe'
 
 foreach ($requiredExecutable in @($guiExe, $commandExe, $cmdExe, $powershellExe)) {
     if (-not (Test-Path -LiteralPath $requiredExecutable -PathType Leaf)) {
-        throw "Missing required executable: $requiredExecutable. Run `zig build -Demit-exe=true` if the noctty binaries are absent."
+        throw "Missing required executable: $requiredExecutable. Run `zig build -Demit-exe=true` if the koreterm binaries are absent."
     }
 }
 
@@ -72,21 +72,21 @@ $shellLauncherTimeoutSeconds = 30
 
 switch ($Shell) {
     'cmd' {
-        $resolved = & $cmdExe /d /c "set ""PATH=$envPath""&& where noctty"
+        $resolved = & $cmdExe /d /c "set ""PATH=$envPath""&& where koreterm"
         if ($LASTEXITCODE -ne 0) {
-            throw "cmd could not resolve noctty from PATH."
+            throw "cmd could not resolve koreterm from PATH."
         }
         $resolvedPath = [System.IO.Path]::GetFullPath(($resolved | Select-Object -First 1))
         if (-not [string]::Equals($resolvedPath, $commandExe, [StringComparison]::OrdinalIgnoreCase)) {
-            throw "cmd resolved noctty to the wrong artifact: $resolvedPath"
+            throw "cmd resolved koreterm to the wrong artifact: $resolvedPath"
         }
 
-        $stdoutPath = Join-Path ([System.IO.Path]::GetTempPath()) ("noctty-cli-shell-" + [System.Guid]::NewGuid().ToString("N") + "-stdout.txt")
-        $stderrPath = Join-Path ([System.IO.Path]::GetTempPath()) ("noctty-cli-shell-" + [System.Guid]::NewGuid().ToString("N") + "-stderr.txt")
-        $payloadPath = Join-Path ([System.IO.Path]::GetTempPath()) ("noctty-cli-shell-" + [System.Guid]::NewGuid().ToString("N") + ".cmd")
+        $stdoutPath = Join-Path ([System.IO.Path]::GetTempPath()) ("koreterm-cli-shell-" + [System.Guid]::NewGuid().ToString("N") + "-stdout.txt")
+        $stderrPath = Join-Path ([System.IO.Path]::GetTempPath()) ("koreterm-cli-shell-" + [System.Guid]::NewGuid().ToString("N") + "-stderr.txt")
+        $payloadPath = Join-Path ([System.IO.Path]::GetTempPath()) ("koreterm-cli-shell-" + [System.Guid]::NewGuid().ToString("N") + ".cmd")
         try {
             $cmdArgs = [string]::Join(' ', ($Arguments | ForEach-Object { Format-CmdArgument $_ }))
-            $cmdCommand = if ([string]::IsNullOrEmpty($cmdArgs)) { 'noctty' } else { "noctty $cmdArgs" }
+            $cmdCommand = if ([string]::IsNullOrEmpty($cmdArgs)) { 'koreterm' } else { "koreterm $cmdArgs" }
             @(
                 '@echo off'
                 "set `"PATH=$envPath`""
@@ -128,24 +128,24 @@ switch ($Shell) {
         $oldPath = $env:PATH
         $env:PATH = $envPath
         try {
-            $resolved = & $powershellExe -NoProfile -Command "(Get-Command noctty).Source"
+            $resolved = & $powershellExe -NoProfile -Command "(Get-Command koreterm).Source"
             if ($LASTEXITCODE -ne 0) {
-                throw "PowerShell could not resolve noctty from PATH."
+                throw "PowerShell could not resolve koreterm from PATH."
             }
             $resolvedPath = [System.IO.Path]::GetFullPath($resolved)
             if (-not [string]::Equals($resolvedPath, $commandExe, [StringComparison]::OrdinalIgnoreCase)) {
-                throw "PowerShell resolved noctty to the wrong artifact: $resolvedPath"
+                throw "PowerShell resolved koreterm to the wrong artifact: $resolvedPath"
             }
 
-            $stdoutPath = Join-Path ([System.IO.Path]::GetTempPath()) ("noctty-cli-shell-" + [System.Guid]::NewGuid().ToString("N") + "-stdout.txt")
-            $stderrPath = Join-Path ([System.IO.Path]::GetTempPath()) ("noctty-cli-shell-" + [System.Guid]::NewGuid().ToString("N") + "-stderr.txt")
-            $payloadPath = Join-Path ([System.IO.Path]::GetTempPath()) ("noctty-cli-shell-" + [System.Guid]::NewGuid().ToString("N") + ".ps1")
+            $stdoutPath = Join-Path ([System.IO.Path]::GetTempPath()) ("koreterm-cli-shell-" + [System.Guid]::NewGuid().ToString("N") + "-stdout.txt")
+            $stderrPath = Join-Path ([System.IO.Path]::GetTempPath()) ("koreterm-cli-shell-" + [System.Guid]::NewGuid().ToString("N") + "-stderr.txt")
+            $payloadPath = Join-Path ([System.IO.Path]::GetTempPath()) ("koreterm-cli-shell-" + [System.Guid]::NewGuid().ToString("N") + ".ps1")
             try {
                 $env:PATH = $envPath
                 $argLiterals = [string]::Join(', ', ($Arguments | ForEach-Object { Format-PowerShellLiteral $_ }))
                 @(
                     '$argsList = @(' + $argLiterals + ')'
-                    '$output = & noctty @argsList | Out-String'
+                    '$output = & koreterm @argsList | Out-String'
                     '$exitCode = $LASTEXITCODE'
                     '[Console]::Out.Write($output)'
                     'exit $exitCode'
@@ -218,8 +218,8 @@ Assert-CommandResolutionContract -Ast $cliShellAst -Tokens $cliShellTokens -Cont
     ". (Join-Path `$PSScriptRoot '..\..\scripts\windows-harness-history.ps1')"
     ". (Join-Path `$repoRoot 'scripts\interactive-win11-lib.ps1')"
 ) -ExpectedAmpersandCommands @(
-    '& $cmdExe /d /c "set ""PATH=$envPath""&& where noctty"'
-    '& $powershellExe -NoProfile -Command "(Get-Command noctty).Source"'
+    '& $cmdExe /d /c "set ""PATH=$envPath""&& where koreterm"'
+    '& $powershellExe -NoProfile -Command "(Get-Command koreterm).Source"'
 )
 
 $commandFinishHarness = Join-Path $repoRoot 'test\windows\interactive-win11-command-finish.ps1'

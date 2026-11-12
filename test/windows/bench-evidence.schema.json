@@ -1,7 +1,7 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://noctty.com/schemas/benchmark/windows-evidence.v1.json",
-  "title": "noctty Windows benchmark evidence v1",
+  "title": "koreterm Windows benchmark evidence v1",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -17,7 +17,7 @@
   ],
   "properties": {
     "schema_version": {
-      "const": "io.github.amanthanvi.noctty.bench-evidence.v1"
+      "const": "io.github.amanthanvi.koreterm.bench-evidence.v1"
     },
     "generated_at": {
       "type": "string",
@@ -157,7 +157,7 @@
       "required": ["name", "version", "exe_path", "exe_sha256", "commit_sha"],
       "properties": {
         "name": {
-          "enum": ["noctty", "alacritty", "windows-terminal", "tabby", "wave"]
+          "enum": ["koreterm", "alacritty", "windows-terminal", "tabby", "wave"]
         },
         "version": {
           "type": ["string", "null"]

@@ -10,7 +10,7 @@
 //! bytes the release actually shipped.
 //!
 //! The pair is deliberately outside `Get-WindowsSignedRuntimePayloads` in
-//! `scripts/common.ps1`: noctty never re-signs it, so it can never satisfy
+//! `scripts/common.ps1`: koreterm never re-signs it, so it can never satisfy
 //! the updater's publisher pin.
 const std = @import("std");
 const builtin = @import("builtin");
@@ -27,7 +27,7 @@ pub const package_id = "Microsoft.Windows.Console.ConPTY";
 pub const license = "MIT";
 
 pub const Entry = struct {
-    /// Path relative to the portable payload root, which is the `noctty`
+    /// Path relative to the portable payload root, which is the `koreterm`
     /// directory inside the portable ZIP.
     payload_relative_path: []const u8,
     /// Key holding this file's pin inside an `architectures.<arch>` object.
@@ -275,7 +275,7 @@ test "conpty pins equal dist/windows/conpty-redist.json" {
 test "conpty pin lookup is exact" {
     try std.testing.expect(find("conpty.dll") != null);
     try std.testing.expect(find("OpenConsole.exe") != null);
-    try std.testing.expect(find("noctty.exe") == null);
+    try std.testing.expect(find("koreterm.exe") == null);
     try std.testing.expect(find("ghostty-vt.dll") == null);
     try std.testing.expect(find("share/conpty.dll") == null);
     try std.testing.expect(find("CONPTY.DLL") == null);

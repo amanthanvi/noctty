@@ -45,7 +45,7 @@ pub fn startupOrderForMode(
 /// The banner a surface shows when OpenGL could not start for it and the
 /// Direct3D 11 beta drew instead.
 pub fn openGLFallbackNotice(warp: bool) []const u8 {
-    const before = "OpenGL could not start, so noctty switched to the Direct3D 11 beta renderer";
+    const before = "OpenGL could not start, so koreterm switched to the Direct3D 11 beta renderer";
     const after = ". Custom shaders and images are not available. To choose a renderer, set renderer in the config.";
     return if (warp) before ++ ", in software (WARP)" ++ after else before ++ after;
 }
@@ -91,11 +91,11 @@ test "renderer feature selection names the first unsupported feature" {
 
 test "OpenGL fallback notice says what happened, what is missing, and how to choose" {
     try std.testing.expectEqualStrings(
-        "OpenGL could not start, so noctty switched to the Direct3D 11 beta renderer. Custom shaders and images are not available. To choose a renderer, set renderer in the config.",
+        "OpenGL could not start, so koreterm switched to the Direct3D 11 beta renderer. Custom shaders and images are not available. To choose a renderer, set renderer in the config.",
         openGLFallbackNotice(false),
     );
     try std.testing.expectEqualStrings(
-        "OpenGL could not start, so noctty switched to the Direct3D 11 beta renderer, in software (WARP). Custom shaders and images are not available. To choose a renderer, set renderer in the config.",
+        "OpenGL could not start, so koreterm switched to the Direct3D 11 beta renderer, in software (WARP). Custom shaders and images are not available. To choose a renderer, set renderer in the config.",
         openGLFallbackNotice(true),
     );
     // The renderer keeps its notice in a fixed 256-byte buffer.

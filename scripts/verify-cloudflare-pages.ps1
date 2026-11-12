@@ -6,8 +6,8 @@ param(
     [ValidateSet('Deployment', 'Redirect')]
     [string] $Mode,
 
-    [ValidatePattern('^noctty$')]
-    [string] $ProjectName = 'noctty',
+    [ValidatePattern('^koreterm$')]
+    [string] $ProjectName = 'koreterm',
 
     [ValidatePattern('^main$')]
     [string] $ProductionBranch = 'main',
@@ -76,7 +76,7 @@ $apiClient = [Net.Http.HttpClient]::new($apiHandler)
 $apiClient.Timeout = [TimeSpan]::FromSeconds(30)
 $apiClient.DefaultRequestHeaders.Authorization =
     [Net.Http.Headers.AuthenticationHeaderValue]::new('Bearer', $ApiToken)
-$apiClient.DefaultRequestHeaders.UserAgent.ParseAdd('noctty-site-verifier/1')
+$apiClient.DefaultRequestHeaders.UserAgent.ParseAdd('koreterm-site-verifier/1')
 $apiRoot = 'https://api.cloudflare.com/client/v4/accounts/' +
     [Uri]::EscapeDataString($AccountId) +
     '/pages/projects/' +
@@ -290,10 +290,10 @@ function ConvertTo-PublicBaseUri {
         throw 'Deployment verification URL must be an HTTPS origin.'
     }
     if ($Kind -eq 'pages' -and
-        $uri.DnsSafeHost -cnotmatch '^[0-9a-f]{8}\.noctty\.pages\.dev$') {
-        throw 'Deployment URL is not an immutable noctty Pages origin.'
+        $uri.DnsSafeHost -cnotmatch '^[0-9a-f]{8}\.koreterm\.pages\.dev$') {
+        throw 'Deployment URL is not an immutable koreterm Pages origin.'
     }
-    if ($Kind -eq 'canonical' -and $uri.DnsSafeHost -cne 'noctty.com') {
+    if ($Kind -eq 'canonical' -and $uri.DnsSafeHost -cne 'koreterm.com') {
         throw 'Canonical URL must be https://noctty.com/.'
     }
     return $uri
@@ -308,7 +308,7 @@ function Assert-ImmutablePagesDeploymentOrigin {
     $idMatch = [regex]::Match($DeploymentId, '^(?<label>[0-9a-f]{8})-')
     if (-not $idMatch.Success -or
         $Origin.DnsSafeHost -cne
-            "$($idMatch.Groups['label'].Value).noctty.pages.dev") {
+            "$($idMatch.Groups['label'].Value).koreterm.pages.dev") {
         throw 'Immutable Pages origin does not match the deployment ID.'
     }
 }
@@ -324,7 +324,7 @@ function New-PublicAssetUri {
     if ($RelativePath -ceq 'index.html') {
         $path = '/'
     } elseif ($RelativePath -ceq '404.html') {
-        $path = "/__noctty_missing_$($Commit.Substring(0, 12))/nested/page"
+        $path = "/__koreterm_missing_$($Commit.Substring(0, 12))/nested/page"
     } else {
         $publicPath = if ($RelativePath.EndsWith(
                 '.html',
@@ -340,7 +340,7 @@ function New-PublicAssetUri {
     }
     $builder = [UriBuilder]::new($Origin)
     $builder.Path = $path
-    $builder.Query = 'noctty_deployment=' + [Uri]::EscapeDataString($Id)
+    $builder.Query = 'koreterm_deployment=' + [Uri]::EscapeDataString($Id)
     return $builder.Uri
 }
 
@@ -356,7 +356,7 @@ $publicHandler.AllowAutoRedirect = $false
 $publicHandler.AutomaticDecompression = [Net.DecompressionMethods]::None
 $publicClient = [Net.Http.HttpClient]::new($publicHandler)
 $publicClient.Timeout = [TimeSpan]::FromSeconds(30)
-$publicClient.DefaultRequestHeaders.UserAgent.ParseAdd('noctty-site-verifier/1')
+$publicClient.DefaultRequestHeaders.UserAgent.ParseAdd('koreterm-site-verifier/1')
 $publicClient.DefaultRequestHeaders.CacheControl =
     [Net.Http.Headers.CacheControlHeaderValue]::new()
 $publicClient.DefaultRequestHeaders.CacheControl.NoCache = $true
@@ -494,7 +494,7 @@ function Test-PublicHeaderContractOnce {
     }
     if (-not $StaticOnly) {
         $probes += [pscustomobject]@{
-            Path = '/__noctty_header_contract_' +
+            Path = '/__koreterm_header_contract_' +
                 [Uri]::EscapeDataString($Id) + '/nested/page'
             ExpectedStatus = 404
             ExpectedCache = [string]$Contract.not_found.cache_control
@@ -503,7 +503,7 @@ function Test-PublicHeaderContractOnce {
     foreach ($probe in $probes) {
         $builder = [UriBuilder]::new($Origin)
         $builder.Path = $probe.Path
-        $builder.Query = 'noctty_deployment=' + [Uri]::EscapeDataString($Id)
+        $builder.Query = 'koreterm_deployment=' + [Uri]::EscapeDataString($Id)
         $request =
             [Net.Http.HttpRequestMessage]::new([Net.Http.HttpMethod]::Get, $builder.Uri)
         $response = $null
@@ -571,8 +571,8 @@ function Assert-WwwRedirectContract {
         [Parameter(Mandatory)] [string] $Commit
     )
 
-    $suffix = "/__noctty_redirect_$($Commit.Substring(0, 12))" +
-        "?noctty_deployment=$([Uri]::EscapeDataString($Id))"
+    $suffix = "/__koreterm_redirect_$($Commit.Substring(0, 12))" +
+        "?koreterm_deployment=$([Uri]::EscapeDataString($Id))"
     $source = [Uri]::new("https://www.noctty.com$suffix")
     $expected = [Uri]::new("https://noctty.com$suffix")
     $request = [Net.Http.HttpRequestMessage]::new([Net.Http.HttpMethod]::Get, $source)
@@ -723,7 +723,7 @@ try {
             $manifestHash = Get-FileSha256Lower `
                 -Path ([IO.Path]::GetFullPath($ManifestPath))
             Write-RedactedJson -Path $ProvenancePath -Value ([ordered]@{
-                schema_version = 'noctty.cloudflare-pages-provenance.v2'
+                schema_version = 'koreterm.cloudflare-pages-provenance.v2'
                 verified_at = [DateTimeOffset]::UtcNow.ToString('o')
                 project_name = $ProjectName
                 deployment_id = $DeploymentId

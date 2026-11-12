@@ -1,4 +1,4 @@
-//! Puts noctty's compiled terminfo entries where the ncurses tools of Git for
+//! Puts koreterm's compiled terminfo entries where the ncurses tools of Git for
 //! Windows look for them: the `.terminfo` directory under the HOME that
 //! git.exe and the MSYS2 runtime give those tools.
 //!
@@ -13,7 +13,7 @@
 //! it. The per-user directory adds no lookup path for any other program.
 //!
 //! The install never replaces a file it did not write. It records the
-//! SHA-256 of the entry it installed in `.noctty-installed` beside the
+//! SHA-256 of the entry it installed in `.koreterm-installed` beside the
 //! entries, so the record travels with them on a roaming or shared home, and
 //! updates a file only while that file still holds the recorded entry.
 //! Standalone MSYS2 and Cygwin keep HOME in their own `/home` and do not see
@@ -27,11 +27,11 @@ const terminfo = @import("../terminfo/main.zig");
 const log = std.log.scoped(.win32_terminfo);
 
 /// The file, in the database directory, that records the SHA-256 of the
-/// entry noctty last installed there.
-const record_name = ".noctty-installed";
+/// entry koreterm last installed there.
+const record_name = ".koreterm-installed";
 
 /// The `.terminfo` directory where Git for Windows' tools look, for the
-/// environment `env`, or null where noctty should not install or rely on one.
+/// environment `env`, or null where koreterm should not install or rely on one.
 ///
 /// When HOME is unset, git.exe sets it to HOMEDRIVE + HOMEPATH if that is a
 /// directory and to USERPROFILE otherwise (compat/mingw.c), while the MSYS2
@@ -129,7 +129,7 @@ pub const InstallResult = enum {
     /// At least one file was written.
     installed,
 
-    /// At least one file holds an entry noctty did not write, and was left
+    /// At least one file holds an entry koreterm did not write, and was left
     /// alone.
     kept,
 
@@ -139,13 +139,13 @@ pub const InstallResult = enum {
 
 /// Install the compiled `source` into the database directory `dir_path`, one
 /// file per name (see `terminfo.compiled.fileNames`), without replacing a file
-/// noctty did not write. The directory's parent, the home, must exist; only
+/// koreterm did not write. The directory's parent, the home, must exist; only
 /// the database directory and its subdirectories are created.
 ///
 /// A file is written when it is missing or when it holds exactly the entry
-/// recorded in `.noctty-installed`, as an older noctty left it; any other file
-/// that differs is kept. The entry is recorded once noctty's files hold it,
-/// and a file that already held it counts as noctty's.
+/// recorded in `.koreterm-installed`, as an older koreterm left it; any other file
+/// that differs is kept. The entry is recorded once koreterm's files hold it,
+/// and a file that already held it counts as koreterm's.
 pub fn install(
     alloc: Allocator,
     source: terminfo.Source,
@@ -194,7 +194,7 @@ fn installFiles(
             }
             const ours = if (recorded) |hash| std.mem.eql(u8, &sha256(data), &hash) else false;
             if (!ours) {
-                log.info("terminfo install keeping an entry noctty did not write path={s}\\{s}\\{s}", .{
+                log.info("terminfo install keeping an entry koreterm did not write path={s}\\{s}\\{s}", .{
                     dir_path, &hex, name,
                 });
                 result = .kept;
@@ -238,7 +238,7 @@ fn readRecordedHash(dir: std.fs.Dir) ?[32]u8 {
 
 /// Write through a temporary file and a rename, so a reader never sees a
 /// partial file. The temporary name is random and created exclusively, so
-/// two noctty processes never write into the same one, and an existing file
+/// two koreterm processes never write into the same one, and an existing file
 /// or link of that name is never followed.
 pub fn writeAtomically(dir: std.fs.Dir, name: []const u8, data: []const u8) !void {
     var random: [8]u8 = undefined;
@@ -354,7 +354,7 @@ test "install updates a file it wrote and keeps one it did not" {
     const entry = try testEntry(test_source);
     defer testing.allocator.free(entry);
 
-    // An older noctty wrote "old" into both files and recorded it.
+    // An older koreterm wrote "old" into both files and recorded it.
     const old = "old entry";
     try paths.put("78/xterm-test", old);
     try paths.put("74/test", old);

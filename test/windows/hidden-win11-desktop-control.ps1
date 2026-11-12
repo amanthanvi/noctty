@@ -3,7 +3,7 @@
 Hosted-only positive control for the outer Default-desktop window oracle. A dedicated
 helper in an owned outer job creates an inner job and a tiny window helper on Default.
 The parent must find that exact helper PID through both the outer job list and oracle.
-No noctty, foreground, input or clipboard operations. Never run this live locally.
+No koreterm, foreground, input or clipboard operations. Never run this live locally.
 #>
 [CmdletBinding()]
 param(
@@ -141,7 +141,7 @@ public static class HiddenDesktopControlWindow {
 
 function Invoke-PrivateDesktopControlDriver([string] $Run, [string] $DesktopName) {
     Assert-HiddenRunner
-    if ($DesktopName -cnotmatch '^noctty-hw-[0-9a-f]{32}$') { throw 'Invalid private control desktop.' }
+    if ($DesktopName -cnotmatch '^koreterm-hw-[0-9a-f]{32}$') { throw 'Invalid private control desktop.' }
     # Connect this thread, then retain a hidden sentinel on its assigned desktop.
     $actual = [HiddenWin]::CurrentDesktopName()
     if ($actual -cne $DesktopName) { throw 'Private control driver is on the wrong desktop.' }
@@ -165,7 +165,7 @@ function Invoke-PrivateDesktopControlParent([string] $Run) {
     $Run = [IO.Path]::GetFullPath($Run)
     if (Test-Path -LiteralPath $Run) { throw 'Run directory must be new.' }
     [void](New-Item -ItemType Directory -Path $Run)
-    $desktopName = 'noctty-hw-' + [guid]::NewGuid().ToString('N')
+    $desktopName = 'koreterm-hw-' + [guid]::NewGuid().ToString('N')
     $desktop = [IntPtr]::Zero; $job = [IntPtr]::Zero; $driver = $null
     $readyObserved = $false; $observed = $false; $passed = $false; $cleaned = $false; $count = 0
     try {
@@ -212,7 +212,7 @@ function Invoke-PrivateDesktopControlParent([string] $Run) {
     Write-Host 'Private desktop self-receipt and window-enumeration control: PASS'
 }
 
-# Only the parent starts anything (non-interactive pwsh -File helpers, no noctty and no typed input);
+# Only the parent starts anything (non-interactive pwsh -File helpers, no koreterm and no typed input);
 # its history check also runs when the control fails.
 $historyGuard = if ($Mode -eq 'Parent') { Start-WindowsHarnessHistoryGuard -Harness 'hidden-win11-desktop-control.ps1' }
 try {

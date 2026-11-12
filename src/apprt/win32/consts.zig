@@ -436,6 +436,7 @@ pub const CTX_ABOUT: usize = 4014;
 pub const CTX_IMPORT_TERMINALS: usize = 4015;
 pub const CTX_EDIT_CONNECTIONS: usize = 4016;
 pub const CTX_BACKUP: usize = 4017;
+pub const CTX_SHORTCUTS: usize = 4026;
 /// "Run as administrator" items: CTX_ELEVATED_BASE + profile index.
 pub const CTX_ELEVATED_BASE: usize = 4300;
 pub const SEARCH_BG_ID: usize = 2100;

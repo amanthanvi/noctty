@@ -1,15 +1,15 @@
 # FILES
 
-_\$XDG_CONFIG_HOME/noctty/config.ghostty_
+_\$XDG_CONFIG_HOME/koreterm/config.ghostty_
 
 : Location of the default configuration file.
 
-_\$HOME/Library/Application Support/io.github.amanthanvi.noctty/config.ghostty_
+_\$HOME/Library/Application Support/io.github.amanthanvi.koreterm/config.ghostty_
 
 : **On macOS**, location of the default configuration file. This location takes
 precedence over the XDG environment locations.
 
-_\$LOCALAPPDATA/noctty/config.ghostty_
+_\$LOCALAPPDATA/koreterm/config.ghostty_
 
 : **On Windows**, if _\$XDG_CONFIG_HOME_ is not set, _\$LOCALAPPDATA_ will be searched
 for configuration files.
@@ -20,7 +20,7 @@ for configuration files.
 
 : Default location for configuration files.
 
-**$HOME/Library/Application Support/io.github.amanthanvi.noctty**
+**$HOME/Library/Application Support/io.github.amanthanvi.koreterm**
 
 : **MACOS ONLY** default location for configuration files. This location takes
 precedence over the XDG environment locations.
@@ -39,4 +39,4 @@ Aman Thanvi and contributors <https://github.com/amanthanvi/noctty/graphs/contri
 
 # SEE ALSO
 
-**noctty(1)**
+**koreterm(1)**

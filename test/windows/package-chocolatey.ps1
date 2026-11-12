@@ -31,7 +31,7 @@ try {
     $setupPath = Join-Path $artifactRoot $setupName
     $portablePath = Join-Path $artifactRoot $portableName
     $checksumsPath = Join-Path $artifactRoot $checksumsName
-    $iconPath = Join-Path $artifactRoot 'noctty-icon.svg'
+    $iconPath = Join-Path $artifactRoot 'koreterm-icon.svg'
 
     Set-Content -LiteralPath $setupPath -Value "fake signed setup for $Architecture" -NoNewline
     Set-Content -LiteralPath $portablePath -Value "fake portable archive for $Architecture" -NoNewline
@@ -49,7 +49,7 @@ try {
         -ArtifactRoot $artifactRelative `
         -OutputRoot $outputRelative
 
-    $nuspecPath = Join-Path $outputRoot 'chocolatey\noctty.nuspec'
+    $nuspecPath = Join-Path $outputRoot 'chocolatey\koreterm.nuspec'
     $installScriptPath = Join-Path $outputRoot 'chocolatey\tools\chocolateyInstall.ps1'
     $metadataPath = Join-Path $outputRoot 'metadata.json'
     foreach ($path in @($nuspecPath, $installScriptPath, $metadataPath)) {
@@ -99,8 +99,8 @@ try {
         }
     }
 
-    if ($metadataNode.SelectSingleNode('n:id', $namespaceManager).InnerText -cne 'noctty') {
-        throw 'Generated nuspec package id is not noctty.'
+    if ($metadataNode.SelectSingleNode('n:id', $namespaceManager).InnerText -cne 'koreterm') {
+        throw 'Generated nuspec package id is not koreterm.'
     }
     if ($metadataNode.SelectSingleNode('n:version', $namespaceManager).InnerText -cne $Version) {
         throw "Generated nuspec version does not match requested version $Version."
@@ -124,7 +124,7 @@ try {
     if ($metadataNode.SelectSingleNode('n:packageSourceUrl', $namespaceManager).InnerText -cne $releaseSourceUrl) {
         throw "Generated nuspec packageSourceUrl must name the release tag's generator: $releaseSourceUrl"
     }
-    if ($metadataNode.SelectSingleNode('n:title', $namespaceManager).InnerText -ceq 'noctty') {
+    if ($metadataNode.SelectSingleNode('n:title', $namespaceManager).InnerText -ceq 'koreterm') {
         throw 'Generated nuspec title must not equal the package id.'
     }
     if ($metadataNode.SelectSingleNode('n:projectSourceUrl', $namespaceManager).InnerText -ceq
@@ -173,10 +173,10 @@ try {
     $dualArtifactBaseRelative = Join-Path $scratchRelative 'dual-artifacts'
     $dualArtifactDirs = @{}
     foreach ($dualArchitecture in @('x64', 'arm64')) {
-        $dualArtifactDirs[$dualArchitecture] = Join-Path $repoRoot (Join-Path $dualArtifactBaseRelative "noctty-$dualVersion-windows-$dualArchitecture")
+        $dualArtifactDirs[$dualArchitecture] = Join-Path $repoRoot (Join-Path $dualArtifactBaseRelative "koreterm-$dualVersion-windows-$dualArchitecture")
         New-Item -ItemType Directory -Path $dualArtifactDirs[$dualArchitecture] -Force | Out-Null
     }
-    Set-Content -LiteralPath (Join-Path $dualArtifactDirs['x64'] 'noctty-icon.svg') -Value '<svg xmlns="http://www.w3.org/2000/svg" />' -NoNewline
+    Set-Content -LiteralPath (Join-Path $dualArtifactDirs['x64'] 'koreterm-icon.svg') -Value '<svg xmlns="http://www.w3.org/2000/svg" />' -NoNewline
     $dualInstallers = @{}
     foreach ($dualArchitecture in @('x64', 'arm64')) {
         $dualSetupName = New-WindowsPackageArtifactName -Version $dualVersion -Architecture $dualArchitecture -Kind setup
@@ -206,7 +206,7 @@ try {
 
     # A package that carries both installers says so on its Chocolatey page.
     $dualNuspec = [System.Xml.XmlDocument]::new()
-    $dualNuspec.Load((Join-Path $repoRoot (Join-Path $dualOutputRelative 'chocolatey\noctty.nuspec')))
+    $dualNuspec.Load((Join-Path $repoRoot (Join-Path $dualOutputRelative 'chocolatey\koreterm.nuspec')))
     $dualNamespaces = [System.Xml.XmlNamespaceManager]::new($dualNuspec.NameTable)
     $dualNamespaces.AddNamespace('n', $nuspecNamespace)
     $dualDescription = $dualNuspec.SelectSingleNode('/n:package/n:metadata/n:description', $dualNamespaces).InnerText
@@ -217,17 +217,17 @@ try {
     # The process tree the generated script sees: this process first, then each ancestor in turn,
     # as executable paths. 'throw' makes the process query fail.
     $shellChain = @('C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe', 'C:\Windows\explorer.exe')
-    $nocttyClsid = '{33368C6F-D328-410C-B225-26DC9F12C728}'
+    $koretermClsid = '{33368C6F-D328-410C-B225-26DC9F12C728}'
     $baseTime = [datetime] '2026-10-23T12:00:00'
 
-    # What the generated script finds on the machine about noctty. By default noctty is not running,
+    # What the generated script finds on the machine about koreterm. By default koreterm is not running,
     # so the guard has nothing to do. Registry values are the install location under HKLM (in the
     # 64-bit view only, where Setup writes it; 'throw' = the key cannot be read) and HKCU and the
-    # default terminal; Embedding lists the running noctty.exe processes its default-terminal check
+    # default terminal; Embedding lists the running koreterm.exe processes its default-terminal check
     # finds ('throw' = that query fails); WindowClass is the class of this process's console window
     # ($null = no console window); Created gives the start time of each process in the chain
     # (default: each ancestor an hour older than its child).
-    function New-NocttyScenario {
+    function New-KoretermScenario {
         param([hashtable[]] $Override = @())
         $scenario = @{
             Running = $false; InstallLocation = $null; InstallLocationUser = $null; DelegationTerminal = $null
@@ -238,7 +238,7 @@ try {
     }
 
     function Get-GeneratedInstallerChoice {
-        param([string] $InstallScript, [AllowNull()] $CpuArchitecture, $ProcessChain = $shellChain, $Noctty = (New-NocttyScenario))
+        param([string] $InstallScript, [AllowNull()] $CpuArchitecture, $ProcessChain = $shellChain, $Koreterm = (New-KoretermScenario))
 
         $script:chosenInstaller = $null
         # Every call that installs or stops something, so a refusal can be shown to have done neither.
@@ -249,7 +249,7 @@ try {
         function Get-Process {
             [CmdletBinding()]
             param([string] $Name)
-            if ($Noctty.Running) { [pscustomobject] @{ Name = 'noctty' } }
+            if ($Koreterm.Running) { [pscustomobject] @{ Name = 'koreterm' } }
         }
         function Stop-Process { $script:ops += 'Stop-Process'; throw 'The generated install script must not call Stop-Process.' }
         function Wait-Process { $script:ops += 'Wait-Process'; throw 'The generated install script must not call Wait-Process.' }
@@ -257,21 +257,21 @@ try {
             [CmdletBinding()]
             param([string] $Path, [string] $LiteralPath, [string[]] $Name)
             if ($Path -ceq 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\io.github.amanthanvi.winghostty_is1') {
-                if ($Noctty.InstallLocationUser) { [pscustomobject] @{ InstallLocation = $Noctty.InstallLocationUser } }
+                if ($Koreterm.InstallLocationUser) { [pscustomobject] @{ InstallLocation = $Koreterm.InstallLocationUser } }
             }
             elseif ($LiteralPath -eq 'HKCU:\Console\%%Startup') {
-                if ($Noctty.DelegationTerminal) { [pscustomobject] @{ DelegationTerminal = $Noctty.DelegationTerminal } }
+                if ($Koreterm.DelegationTerminal) { [pscustomobject] @{ DelegationTerminal = $Koreterm.DelegationTerminal } }
             }
             # HKLM: shows a 32-bit PowerShell the 32-bit view, which lacks Setup's entry.
             else { $script:ops += "registry read of $Path$LiteralPath"; throw "Unexpected registry read: $Path$LiteralPath" }
         }
-        # Stands in for the script's own Open-NocttyRegistryBaseKey: an alias is found before a
+        # Stands in for the script's own Open-KoretermRegistryBaseKey: an alias is found before a
         # function, even one the script defines itself. The machine-wide entry is shown only to a
         # caller that asks for the 64-bit view, as a 32-bit PowerShell would otherwise miss it.
         function Open-StubRegistryBaseKey {
             param([Microsoft.Win32.RegistryHive] $Hive, [Microsoft.Win32.RegistryView] $View)
             $script:registryViews += "$Hive/$View"
-            $location = if ($Hive -eq 'LocalMachine' -and $View -eq 'Registry64') { $Noctty.InstallLocation } else { $null }
+            $location = if ($Hive -eq 'LocalMachine' -and $View -eq 'Registry64') { $Koreterm.InstallLocation } else { $null }
             $base = [pscustomobject] @{ Location = $location }
             $base | Add-Member -MemberType ScriptMethod -Name Close -Value { }
             $base | Add-Member -MemberType ScriptMethod -Name OpenSubKey -Value {
@@ -289,17 +289,17 @@ try {
             }
             $base
         }
-        Set-Alias -Name Open-NocttyRegistryBaseKey -Value Open-StubRegistryBaseKey -Scope Local
+        Set-Alias -Name Open-KoretermRegistryBaseKey -Value Open-StubRegistryBaseKey -Scope Local
         # Stands in for the console-window probe: the fake type is defined once per session and
         # takes the window class of the current scenario ($null = no console window).
         function Add-Type {
             [CmdletBinding()]
             param($Namespace, $Name, $MemberDefinition)
-            if ($Noctty.AddTypeFails) { throw 'Add-Type is unavailable' }
-            if (-not ('NocttyGuard.Native' -as [type])) {
-                Microsoft.PowerShell.Utility\Add-Type -TypeDefinition 'namespace NocttyGuard { public static class Native { public static string WindowClass; public static System.IntPtr GetConsoleWindow() { return WindowClass == null ? System.IntPtr.Zero : new System.IntPtr(1); } public static int GetClassName(System.IntPtr window, System.Text.StringBuilder name, int maxCount) { name.Append(WindowClass); return name.Length; } } }'
+            if ($Koreterm.AddTypeFails) { throw 'Add-Type is unavailable' }
+            if (-not ('KoretermGuard.Native' -as [type])) {
+                Microsoft.PowerShell.Utility\Add-Type -TypeDefinition 'namespace KoretermGuard { public static class Native { public static string WindowClass; public static System.IntPtr GetConsoleWindow() { return WindowClass == null ? System.IntPtr.Zero : new System.IntPtr(1); } public static int GetClassName(System.IntPtr window, System.Text.StringBuilder name, int maxCount) { name.Append(WindowClass); return name.Length; } } }'
             }
-            [NocttyGuard.Native]::WindowClass = $Noctty.WindowClass
+            [KoretermGuard.Native]::WindowClass = $Koreterm.WindowClass
         }
         function Get-CimInstance {
             [CmdletBinding()]
@@ -308,14 +308,14 @@ try {
                 # A hung WMI service must not hang the install, so every query needs a timeout.
                 if ($OperationTimeoutSec -le 0) { $script:ops += 'Win32_Process query without -OperationTimeoutSec' }
                 if ($Filter -like "Name = *") {
-                    if ($Noctty.Embedding -is [string] -and $Noctty.Embedding -eq 'throw') { throw 'process list unavailable' }
-                    return $Noctty.Embedding
+                    if ($Koreterm.Embedding -is [string] -and $Koreterm.Embedding -eq 'throw') { throw 'process list unavailable' }
+                    return $Koreterm.Embedding
                 }
                 if ("$ProcessChain" -eq 'throw') { throw 'process list unavailable' }
                 $processId = [int] ($Filter -replace '\D', '')
                 $index = if ($processId -eq $PID) { 0 } else { $processId - 1000 }
                 if ($index -ge $ProcessChain.Count) { return }
-                $created = if ($Noctty.Created) { $Noctty.Created[$index] } else { $baseTime.AddHours(-$index) }
+                $created = if ($Koreterm.Created) { $Koreterm.Created[$index] } else { $baseTime.AddHours(-$index) }
                 [pscustomobject] @{ ProcessId = $processId; ParentProcessId = 1001 + $index; ExecutablePath = $ProcessChain[$index]; CreationDate = $created }
                 return
             }
@@ -356,85 +356,85 @@ try {
         }
     }
 
-    # Run from inside a noctty window the upgrade must refuse before anything happens; from any
+    # Run from inside a koreterm window the upgrade must refuse before anything happens; from any
     # other terminal (including a sibling folder that merely shares the name prefix) it proceeds.
     # A refusal has to be the guard's own message: any other error fails the case.
-    $nocttyDir = Join-Path $(if ($env:ProgramW6432) { $env:ProgramW6432 } else { $env:ProgramFiles }) 'noctty'
-    $nocttyExe = Join-Path $nocttyDir 'noctty.exe'
-    $customDir = 'D:\Apps\noctty'
-    $customExe = Join-Path $customDir 'noctty.exe'
+    $koretermDir = Join-Path $(if ($env:ProgramW6432) { $env:ProgramW6432 } else { $env:ProgramFiles }) 'koreterm'
+    $koretermExe = Join-Path $koretermDir 'koreterm.exe'
+    $customDir = 'D:\Apps\koreterm'
+    $customExe = Join-Path $customDir 'koreterm.exe'
     # Each refusal has its own message, so a case fails when one is given for another.
     $insideMessage = '*cannot be upgraded from one of its own windows*'
-    $handoffMessage = '*noctty is your default terminal and is hosting console windows*'
+    $handoffMessage = '*koreterm is your default terminal and is hosting console windows*'
     $unreadableMessage = '*the process list could not be read*'
-    $comServer = [pscustomobject] @{ ExecutablePath = $nocttyExe; CommandLine = "`"$nocttyExe`" -Embedding" }
-    $strayServer = [pscustomobject] @{ ExecutablePath = Join-Path "$nocttyDir-portable" 'noctty.exe'; CommandLine = '"noctty.exe" -Embedding' }
+    $comServer = [pscustomobject] @{ ExecutablePath = $koretermExe; CommandLine = "`"$koretermExe`" -Embedding" }
+    $strayServer = [pscustomobject] @{ ExecutablePath = Join-Path "$koretermDir-portable" 'koreterm.exe'; CommandLine = '"koreterm.exe" -Embedding' }
     # COM appends -Embedding to every server it starts, the toast activator included.
-    $toastServer = [pscustomobject] @{ ExecutablePath = $nocttyExe; CommandLine = "`"$nocttyExe`" -ToastActivated -Embedding" }
-    $plainInstance = [pscustomobject] @{ ExecutablePath = $nocttyExe; CommandLine = "`"$nocttyExe`"" }
-    # noctty reads its own switches only before -e: after it comes the command a pane runs.
-    $paneCommand = [pscustomobject] @{ ExecutablePath = $nocttyExe; CommandLine = "`"$nocttyExe`" -e cmd.exe /k echo -Embedding" }
-    $paneToastCommand = [pscustomobject] @{ ExecutablePath = $nocttyExe; CommandLine = "`"$nocttyExe`" -Embedding -e cmd.exe /k echo -ToastActivated" }
+    $toastServer = [pscustomobject] @{ ExecutablePath = $koretermExe; CommandLine = "`"$koretermExe`" -ToastActivated -Embedding" }
+    $plainInstance = [pscustomobject] @{ ExecutablePath = $koretermExe; CommandLine = "`"$koretermExe`"" }
+    # koreterm reads its own switches only before -e: after it comes the command a pane runs.
+    $paneCommand = [pscustomobject] @{ ExecutablePath = $koretermExe; CommandLine = "`"$koretermExe`" -e cmd.exe /k echo -Embedding" }
+    $paneToastCommand = [pscustomobject] @{ ExecutablePath = $koretermExe; CommandLine = "`"$koretermExe`" -Embedding -e cmd.exe /k echo -ToastActivated" }
     # ...and from after the executable, whose path may itself contain " -e ".
-    $oddDir = 'D:\Tools -e x\noctty'
-    $oddServer = [pscustomobject] @{ ExecutablePath = Join-Path $oddDir 'noctty.exe'; CommandLine = "`"$(Join-Path $oddDir 'noctty.exe')`" -Embedding" }
-    $ownWindow = @($shellChain[0], $nocttyExe, $shellChain[1])
-    # The default-terminal handoff: noctty is the default terminal, its COM server runs, and this
+    $oddDir = 'D:\Tools -e x\koreterm'
+    $oddServer = [pscustomobject] @{ ExecutablePath = Join-Path $oddDir 'koreterm.exe'; CommandLine = "`"$(Join-Path $oddDir 'koreterm.exe')`" -Embedding" }
+    $ownWindow = @($shellChain[0], $koretermExe, $shellChain[1])
+    # The default-terminal handoff: koreterm is the default terminal, its COM server runs, and this
     # console is a pseudo console. Each case below removes one of those conditions.
-    $handoff = @{ Running = $true; DelegationTerminal = $nocttyClsid; Embedding = @($comServer); WindowClass = 'PseudoConsoleWindow' }
+    $handoff = @{ Running = $true; DelegationTerminal = $koretermClsid; Embedding = @($comServer); WindowClass = 'PseudoConsoleWindow' }
     $guardCases = @(
-        @{ Name = 'noctty is not running (nothing to close, so no process query, even if it would fail)'; Chain = 'throw'; Noctty = @{}; Message = $null },
-        @{ Name = 'noctty.exe is an ancestor'; Chain = $ownWindow; Noctty = @{ Running = $true }; Message = $insideMessage },
-        @{ Name = 'the process list cannot be read while noctty runs'; Chain = 'throw'; Noctty = @{ Running = $true }; Message = $unreadableMessage },
+        @{ Name = 'koreterm is not running (nothing to close, so no process query, even if it would fail)'; Chain = 'throw'; Koreterm = @{}; Message = $null },
+        @{ Name = 'koreterm.exe is an ancestor'; Chain = $ownWindow; Koreterm = @{ Running = $true }; Message = $insideMessage },
+        @{ Name = 'the process list cannot be read while koreterm runs'; Chain = 'throw'; Koreterm = @{ Running = $true }; Message = $unreadableMessage },
         # Processes the caller cannot open (another user's, protected ones) report no executable path.
-        @{ Name = 'an ancestor reports no executable path'; Chain = @($shellChain[0], $null, $shellChain[1]); Noctty = @{ Running = $true }; Message = $null },
-        @{ Name = 'noctty.exe is an ancestor above one that reports no executable path'; Chain = @($shellChain[0], $null, $nocttyExe, $shellChain[1]); Noctty = @{ Running = $true }; Message = $insideMessage },
+        @{ Name = 'an ancestor reports no executable path'; Chain = @($shellChain[0], $null, $shellChain[1]); Koreterm = @{ Running = $true }; Message = $null },
+        @{ Name = 'koreterm.exe is an ancestor above one that reports no executable path'; Chain = @($shellChain[0], $null, $koretermExe, $shellChain[1]); Koreterm = @{ Running = $true }; Message = $insideMessage },
         # An unknown start time cannot show a reused process ID, so the walk goes on past it.
-        @{ Name = 'noctty.exe is an ancestor above one that reports no start time'; Chain = @($shellChain[0], 'C:\Windows\System32\cmd.exe', $nocttyExe, $shellChain[1]); Noctty = @{ Running = $true; Created = @($baseTime, $null, $baseTime.AddHours(-2), $baseTime.AddHours(-3)) }; Message = $insideMessage },
-        @{ Name = 'a sibling folder shares the name prefix'; Chain = @($shellChain[0], (Join-Path "$nocttyDir-portable" 'noctty.exe')); Noctty = @{ Running = $true }; Message = $null },
-        @{ Name = 'an ordinary terminal runs it'; Chain = $shellChain; Noctty = @{ Running = $true }; Message = $null },
-        @{ Name = 'noctty is installed in a custom directory (machine-wide)'; Chain = @($shellChain[0], $customExe, $shellChain[1]); Noctty = @{ Running = $true; InstallLocation = "$customDir\" }; Message = $insideMessage },
-        @{ Name = 'noctty is installed in a custom directory (this user only)'; Chain = @($shellChain[0], $customExe, $shellChain[1]); Noctty = @{ Running = $true; InstallLocationUser = $customDir }; Message = $insideMessage },
-        @{ Name = 'the registered install is elsewhere than the default directory'; Chain = $ownWindow; Noctty = @{ Running = $true; InstallLocation = $customDir }; Message = $null },
-        @{ Name = 'the machine-wide install location wins over the user one'; Chain = @($shellChain[0], 'E:\Other\noctty\noctty.exe', $shellChain[1]); Noctty = @{ Running = $true; InstallLocation = $customDir; InstallLocationUser = 'E:\Other\noctty' }; Message = $null },
-        @{ Name = 'the machine-wide uninstall key cannot be read'; Chain = $shellChain; Noctty = @{ Running = $true; InstallLocation = 'throw' }; Message = $null },
-        @{ Name = 'the machine-wide uninstall key cannot be read and noctty is installed for this user only'; Chain = @($shellChain[0], $customExe, $shellChain[1]); Noctty = @{ Running = $true; InstallLocation = 'throw'; InstallLocationUser = $customDir }; Message = $insideMessage },
-        @{ Name = 'a parent process ID has been reused by a newer process'; Chain = $ownWindow; Noctty = @{ Running = $true; Created = @($baseTime, $baseTime.AddHours(1), $baseTime.AddHours(-2)) }; Message = $null },
-        @{ Name = 'a parent started at the same moment as its child'; Chain = $ownWindow; Noctty = @{ Running = $true; Created = @($baseTime, $baseTime, $baseTime.AddHours(-2)) }; Message = $null },
-        @{ Name = 'noctty hosts the console as the default terminal'; Chain = $shellChain; Noctty = $handoff; Message = $handoffMessage },
-        @{ Name = 'noctty hosts consoles as the default terminal from a directory whose name contains " -e "'; Chain = $shellChain; Noctty = @($handoff, @{ InstallLocation = $oddDir; Embedding = @($oddServer) }); Message = $handoffMessage },
-        @{ Name = 'the running noctty processes cannot be listed for the default-terminal check'; Chain = $shellChain; Noctty = @($handoff, @{ Embedding = 'throw' }); Message = $null },
-        @{ Name = 'the process in the install directory runs a pane command that contains -Embedding'; Chain = $shellChain; Noctty = @($handoff, @{ Embedding = @($paneCommand) }); Message = $null },
-        @{ Name = 'the handoff server runs a pane command that contains -ToastActivated'; Chain = $shellChain; Noctty = @($handoff, @{ Embedding = @($paneToastCommand) }); Message = $handoffMessage },
-        @{ Name = 'another application is the default terminal'; Chain = $shellChain; Noctty = @($handoff, @{ DelegationTerminal = '{00000000-0000-0000-0000-000000000000}' }); Message = $null },
-        @{ Name = 'no default terminal is set'; Chain = $shellChain; Noctty = @($handoff, @{ DelegationTerminal = $null }); Message = $null },
-        @{ Name = 'the noctty COM server is not running'; Chain = $shellChain; Noctty = @($handoff, @{ Embedding = @() }); Message = $null },
-        @{ Name = 'the COM server running is a copy outside the install directory'; Chain = $shellChain; Noctty = @($handoff, @{ Embedding = @($strayServer) }); Message = $null },
-        @{ Name = 'the process in the install directory is the toast activator, not a handoff server'; Chain = $shellChain; Noctty = @($handoff, @{ Embedding = @($toastServer) }); Message = $null },
-        @{ Name = 'the process in the install directory was not started by COM'; Chain = $shellChain; Noctty = @($handoff, @{ Embedding = @($plainInstance) }); Message = $null },
-        @{ Name = 'this is an ordinary console window'; Chain = $shellChain; Noctty = @($handoff, @{ WindowClass = 'ConsoleWindowClass' }); Message = $null },
-        @{ Name = 'this process has no console window'; Chain = $shellChain; Noctty = @($handoff, @{ WindowClass = $null }); Message = $null },
-        @{ Name = 'the console-window probe cannot run'; Chain = $shellChain; Noctty = @($handoff, @{ AddTypeFails = $true }); Message = $null }
+        @{ Name = 'koreterm.exe is an ancestor above one that reports no start time'; Chain = @($shellChain[0], 'C:\Windows\System32\cmd.exe', $koretermExe, $shellChain[1]); Koreterm = @{ Running = $true; Created = @($baseTime, $null, $baseTime.AddHours(-2), $baseTime.AddHours(-3)) }; Message = $insideMessage },
+        @{ Name = 'a sibling folder shares the name prefix'; Chain = @($shellChain[0], (Join-Path "$koretermDir-portable" 'koreterm.exe')); Koreterm = @{ Running = $true }; Message = $null },
+        @{ Name = 'an ordinary terminal runs it'; Chain = $shellChain; Koreterm = @{ Running = $true }; Message = $null },
+        @{ Name = 'koreterm is installed in a custom directory (machine-wide)'; Chain = @($shellChain[0], $customExe, $shellChain[1]); Koreterm = @{ Running = $true; InstallLocation = "$customDir\" }; Message = $insideMessage },
+        @{ Name = 'koreterm is installed in a custom directory (this user only)'; Chain = @($shellChain[0], $customExe, $shellChain[1]); Koreterm = @{ Running = $true; InstallLocationUser = $customDir }; Message = $insideMessage },
+        @{ Name = 'the registered install is elsewhere than the default directory'; Chain = $ownWindow; Koreterm = @{ Running = $true; InstallLocation = $customDir }; Message = $null },
+        @{ Name = 'the machine-wide install location wins over the user one'; Chain = @($shellChain[0], 'E:\Other\koreterm\koreterm.exe', $shellChain[1]); Koreterm = @{ Running = $true; InstallLocation = $customDir; InstallLocationUser = 'E:\Other\koreterm' }; Message = $null },
+        @{ Name = 'the machine-wide uninstall key cannot be read'; Chain = $shellChain; Koreterm = @{ Running = $true; InstallLocation = 'throw' }; Message = $null },
+        @{ Name = 'the machine-wide uninstall key cannot be read and koreterm is installed for this user only'; Chain = @($shellChain[0], $customExe, $shellChain[1]); Koreterm = @{ Running = $true; InstallLocation = 'throw'; InstallLocationUser = $customDir }; Message = $insideMessage },
+        @{ Name = 'a parent process ID has been reused by a newer process'; Chain = $ownWindow; Koreterm = @{ Running = $true; Created = @($baseTime, $baseTime.AddHours(1), $baseTime.AddHours(-2)) }; Message = $null },
+        @{ Name = 'a parent started at the same moment as its child'; Chain = $ownWindow; Koreterm = @{ Running = $true; Created = @($baseTime, $baseTime, $baseTime.AddHours(-2)) }; Message = $null },
+        @{ Name = 'koreterm hosts the console as the default terminal'; Chain = $shellChain; Koreterm = $handoff; Message = $handoffMessage },
+        @{ Name = 'koreterm hosts consoles as the default terminal from a directory whose name contains " -e "'; Chain = $shellChain; Koreterm = @($handoff, @{ InstallLocation = $oddDir; Embedding = @($oddServer) }); Message = $handoffMessage },
+        @{ Name = 'the running koreterm processes cannot be listed for the default-terminal check'; Chain = $shellChain; Koreterm = @($handoff, @{ Embedding = 'throw' }); Message = $null },
+        @{ Name = 'the process in the install directory runs a pane command that contains -Embedding'; Chain = $shellChain; Koreterm = @($handoff, @{ Embedding = @($paneCommand) }); Message = $null },
+        @{ Name = 'the handoff server runs a pane command that contains -ToastActivated'; Chain = $shellChain; Koreterm = @($handoff, @{ Embedding = @($paneToastCommand) }); Message = $handoffMessage },
+        @{ Name = 'another application is the default terminal'; Chain = $shellChain; Koreterm = @($handoff, @{ DelegationTerminal = '{00000000-0000-0000-0000-000000000000}' }); Message = $null },
+        @{ Name = 'no default terminal is set'; Chain = $shellChain; Koreterm = @($handoff, @{ DelegationTerminal = $null }); Message = $null },
+        @{ Name = 'the koreterm COM server is not running'; Chain = $shellChain; Koreterm = @($handoff, @{ Embedding = @() }); Message = $null },
+        @{ Name = 'the COM server running is a copy outside the install directory'; Chain = $shellChain; Koreterm = @($handoff, @{ Embedding = @($strayServer) }); Message = $null },
+        @{ Name = 'the process in the install directory is the toast activator, not a handoff server'; Chain = $shellChain; Koreterm = @($handoff, @{ Embedding = @($toastServer) }); Message = $null },
+        @{ Name = 'the process in the install directory was not started by COM'; Chain = $shellChain; Koreterm = @($handoff, @{ Embedding = @($plainInstance) }); Message = $null },
+        @{ Name = 'this is an ordinary console window'; Chain = $shellChain; Koreterm = @($handoff, @{ WindowClass = 'ConsoleWindowClass' }); Message = $null },
+        @{ Name = 'this process has no console window'; Chain = $shellChain; Koreterm = @($handoff, @{ WindowClass = $null }); Message = $null },
+        @{ Name = 'the console-window probe cannot run'; Chain = $shellChain; Koreterm = @($handoff, @{ AddTypeFails = $true }); Message = $null }
     )
-    # The cases replace Open-NocttyRegistryBaseKey and check the view its caller asks for, so the
+    # The cases replace Open-KoretermRegistryBaseKey and check the view its caller asks for, so the
     # function must pass that view on and be the script's only way to open a registry base key:
     # anything else would read the real registry of the machine running this test.
     if ([regex]::Matches($dualInstallScript, [regex]::Escape('::OpenBaseKey(')).Count -ne 1 -or
         -not $dualInstallScript.Contains('[Microsoft.Win32.RegistryKey]::OpenBaseKey($Hive, $View)') -or
         $dualInstallScript.Contains('[Microsoft.Win32.Registry]::')) {
-        throw 'Generated install script must open registry base keys only through Open-NocttyRegistryBaseKey, which passes on the view it is asked for.'
+        throw 'Generated install script must open registry base keys only through Open-KoretermRegistryBaseKey, which passes on the view it is asked for.'
     }
     foreach ($case in $guardCases) {
         $message = $null
         $choice = $null
-        $scenario = New-NocttyScenario @($case.Noctty)
+        $scenario = New-KoretermScenario @($case.Koreterm)
         try {
-            $choice = Get-GeneratedInstallerChoice -InstallScript $dualInstallScript -CpuArchitecture 9 -ProcessChain $case.Chain -Noctty $scenario
+            $choice = Get-GeneratedInstallerChoice -InstallScript $dualInstallScript -CpuArchitecture 9 -ProcessChain $case.Chain -Koreterm $scenario
         }
         catch {
             $message = $_.Exception.Message
         }
-        # With noctty running, the install directory is looked up once, in the 64-bit view.
+        # With koreterm running, the install directory is looked up once, in the 64-bit view.
         $expectedViews = if ($scenario.Running) { 'LocalMachine/Registry64' } else { '' }
         if (($script:registryViews -join ',') -cne $expectedViews) {
             throw "Generated install script opened the wrong registry views when $($case.Name): wanted '$expectedViews', got '$($script:registryViews -join ',')'."
@@ -463,7 +463,7 @@ try {
     Write-Host "Chocolatey install guard: PASS ($($guardCases.Count) cases)"
 
     $metadata = Get-Content -LiteralPath $metadataPath -Raw | ConvertFrom-Json
-    if ($metadata.chocolatey.packageName -cne 'noctty' -or
+    if ($metadata.chocolatey.packageName -cne 'koreterm' -or
         $metadata.chocolatey.nuspecPath -cne $nuspecPath -or
         $metadata.chocolatey.packageDirectory -cne (Split-Path -Parent $nuspecPath)) {
         throw 'metadata.json has an invalid Chocolatey block.'
@@ -475,7 +475,7 @@ try {
     }
 
     if ($ShowGeneratedFiles) {
-        Write-Host '--- generated noctty.nuspec ---'
+        Write-Host '--- generated koreterm.nuspec ---'
         Get-Content -LiteralPath $nuspecPath
         Write-Host '--- generated chocolateyInstall.ps1 ---'
         Get-Content -LiteralPath $installScriptPath
@@ -509,7 +509,7 @@ try {
         -OutputRoot $resubmitOutputRelative `
         -PackageSourceRef '0123456789abcdef0123456789abcdef01234567' | Out-Null
     $resubmitNuspec = [System.Xml.XmlDocument]::new()
-    $resubmitNuspec.Load((Join-Path $repoRoot (Join-Path $resubmitOutputRelative 'chocolatey\noctty.nuspec')))
+    $resubmitNuspec.Load((Join-Path $repoRoot (Join-Path $resubmitOutputRelative 'chocolatey\koreterm.nuspec')))
     $resubmitNamespaces = [System.Xml.XmlNamespaceManager]::new($resubmitNuspec.NameTable)
     $resubmitNamespaces.AddNamespace('n', $nuspecNamespace)
     $resubmitSourceUrl = $resubmitNuspec.SelectSingleNode('/n:package/n:metadata/n:packageSourceUrl', $resubmitNamespaces).InnerText

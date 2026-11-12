@@ -56,8 +56,8 @@ function Get-CertificateSpkiSha256 {
     }
 }
 
-function Initialize-NocttyAuthenticodeVerifier {
-    if ('NocttyAuthenticodeVerifier' -as [type]) {
+function Initialize-KoretermAuthenticodeVerifier {
+    if ('KoretermAuthenticodeVerifier' -as [type]) {
         return
     }
 
@@ -75,7 +75,7 @@ using System;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography.Pkcs;
 
-public static class NocttyAuthenticodeVerifier
+public static class KoretermAuthenticodeVerifier
 {
     private const uint CertQueryObjectFile = 1;
     private const uint CertQueryContentFlagPkcs7SignedEmbed = 0x00000400;
@@ -273,8 +273,8 @@ function Test-SelfSignedTrustStatus {
         -not (Test-Path -LiteralPath $Path -PathType Leaf)) {
         return $false
     }
-    Initialize-NocttyAuthenticodeVerifier
-    return [NocttyAuthenticodeVerifier]::VerifyEmbeddedSignatureAndFileHash(
+    Initialize-KoretermAuthenticodeVerifier
+    return [KoretermAuthenticodeVerifier]::VerifyEmbeddedSignatureAndFileHash(
         [System.IO.Path]::GetFullPath($Path)
     )
 }

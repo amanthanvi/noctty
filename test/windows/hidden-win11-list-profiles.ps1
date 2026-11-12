@@ -1,13 +1,13 @@
 #requires -Version 7.0
 <#
-Hidden-desktop check of `noctty +list-profiles` (LIST-PROFILES) against a real portable build: that the
+Hidden-desktop check of `koreterm +list-profiles` (LIST-PROFILES) against a real portable build: that the
 command reads the configuration and the environment it is given, lists the profiles with the order and
 the hidden state that configuration asks for (the picker's rules, `arrangeProfiles`, are unit-tested in
 windows_shell.zig), and never prints a command line, an environment value or a working directory.
-Run with -Bin <directory holding noctty.exe and noctty.com> and -Run <new evidence directory>.
+Run with -Bin <directory holding koreterm.exe and koreterm.com> and -Run <new evidence directory>.
 
 Fixture, all inside -Run:
-  * a portable copy (`noctty.portable`) with a `config.ghostty` of three user profiles, one hidden, a
+  * a portable copy (`koreterm.portable`) with a `config.ghostty` of three user profiles, one hidden, a
     `profile-order` that moves two of them to the front, `visual-studio-profiles = none`, so the
     result does not depend on this machine's Visual Studio, and `default-profile` naming the profile
     that is checked for secrets, with an explicit `working-directory = home`, which together reach the
@@ -49,7 +49,7 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'hidden-win11-local-lib.ps1')
 
 if (-not $Driver) {
-    Invoke-LocalHiddenDriver -Script $PSCommandPath -Bin $Bin -Run $Run -DesktopPrefix 'noctty-lp-' `
+    Invoke-LocalHiddenDriver -Script $PSCommandPath -Bin $Bin -Run $Run -DesktopPrefix 'koreterm-lp-' `
         -TimeoutSeconds 180 -Label 'Hidden list-profiles' -PassDesktopName -GuardClipboard `
         -ExpectedStartupHash $ExpectedStartupHash -ExpectedStartupModified $ExpectedStartupModified
     exit
@@ -96,7 +96,7 @@ function Invoke-ListProfiles([string] $Name, [string] $Arguments, [string] $Log 
     $out = Join-Path $Run "$Name.out.txt"
     $err = Join-Path $Run "$Name.err.txt"
     if ($Log) { $env:GHOSTTY_LOG = $Log } else { Remove-Item -LiteralPath Env:GHOSTTY_LOG -ErrorAction Ignore }
-    $line = '"{0}" /d /c ""{1}" +list-profiles {2} > "{3}" 2> "{4}""' -f $env:ComSpec, (Join-Path $Bin 'noctty.com'), $Arguments, $out, $err
+    $line = '"{0}" /d /c ""{1}" +list-profiles {2} > "{3}" 2> "{4}""' -f $env:ComSpec, (Join-Path $Bin 'koreterm.com'), $Arguments, $out, $err
     $clock = [Diagnostics.Stopwatch]::StartNew()
     $pi = [HiddenLocal]::Spawn($env:ComSpec, $line, $Run, $desktop)
     $wait = [HiddenLocal]::WaitForSingleObject($pi.process, 60000)
@@ -167,7 +167,7 @@ $json = Invoke-ListProfiles 'json' '--format=json'
 Check 'json' 'exits 0 with an empty stderr' ($json.Exit -eq 0 -and $json.Stderr -eq '') '0' "$($json.Exit) $($json.Stderr)"
 $document = $json.Stdout | ConvertFrom-Json
 Check 'json' 'schema, completeness and the profiles in the order of the text' (
-    $document.schema -eq 'noctty.profiles.v1' -and $document.complete -is [bool] -and
+    $document.schema -eq 'koreterm.profiles.v1' -and $document.complete -is [bool] -and
     (@($document.profiles | ForEach-Object key) -join ',') -eq ($keys -join ',')) ($keys -join ',') (@($document.profiles | ForEach-Object key) -join ',')
 Check 'json' 'the hidden flag follows the text state' (
     (@($document.profiles | Where-Object hidden | ForEach-Object key) -join ',') -eq 'user:hid') 'user:hid' (@($document.profiles | Where-Object hidden | ForEach-Object key) -join ',')

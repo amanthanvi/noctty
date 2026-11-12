@@ -28,7 +28,7 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
 # build created can refuse a normal one; that build then runs unserialized,
 # and the race costs at most a rebuild.
 try {
-    $mutex = [System.Threading.Mutex]::new($false, "Local\noctty-stage-conpty-redist")
+    $mutex = [System.Threading.Mutex]::new($false, "Local\koreterm-stage-conpty-redist")
 }
 catch [System.UnauthorizedAccessException] {
     $mutex = $null

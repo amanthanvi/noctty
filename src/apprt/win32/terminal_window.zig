@@ -433,7 +433,7 @@ pub const Surface = struct {
     /// command), which lives as long as the surface.
     rdp_pane: ?*rdp_pane_mod.Pane = null,
     rdp_config: ?configpkg.Config = null,
-    /// Ctrl+Alt+Home gave the keyboard back to noctty: the pane keeps the
+    /// Ctrl+Alt+Home gave the keyboard back to koreterm: the pane keeps the
     /// focus instead of handing it to the session.
     rdp_released: bool = false,
     mouse_shape: terminal.MouseShape = .text,
@@ -4100,14 +4100,14 @@ pub const Surface = struct {
                 .proportional => .proportional,
                 .fill => .fill,
             },
-            .trust_certificates = config.@"rdp-trust-certificates",
+            .trust_certificates = own.trust_certificates orelse config.@"rdp-trust-certificates",
         }, .{
             .ctx = self,
             .ended = &rdpEnded,
             .released = &rdpReleased,
             .connected = &rdpConnected,
         });
-        if (self.rdp_pane == null) self.showRdpNotice("Remote Desktop could not start: this Windows has no Remote Desktop control noctty can host.");
+        if (self.rdp_pane == null) self.showRdpNotice("Remote Desktop could not start: this Windows has no Remote Desktop control koreterm can host.");
     }
 
     /// The Remote Desktop session is over and its control gone: the pane
@@ -4120,23 +4120,24 @@ pub const Surface = struct {
             _ = sys.SetFocus(hwnd);
         };
         self.requestRepaint() catch {};
+        self.showRdpNotice("The Remote Desktop session ended. Open the profile again to reconnect.");
     }
 
     /// Ctrl+Alt+Home in the Remote Desktop session: the keyboard comes back
-    /// to noctty (its keybindings work again), until a click inside the
+    /// to koreterm (its keybindings work again), until a click inside the
     /// session or the tab's next focus.
     fn rdpReleased(ctx: *anyopaque) void {
         const self: *Surface = @ptrCast(@alignCast(ctx));
         const hwnd = self.hwnd orelse return;
         self.rdp_released = true;
         _ = sys.SetFocus(hwnd);
-        self.showRdpNotice("Keyboard back in noctty. Click inside the remote desktop to use it again.");
+        self.showRdpNotice("Keyboard back in koreterm. Click inside the remote desktop to use it again.");
     }
 
     /// The session connected: say how to leave it.
     fn rdpConnected(ctx: *anyopaque) void {
         const self: *Surface = @ptrCast(@alignCast(ctx));
-        self.showRdpNotice("Remote Desktop: the mouse and keys work inside it. Ctrl+Alt+Home gives the keyboard back to noctty.");
+        self.showRdpNotice("Remote Desktop: the mouse and keys work inside it. Ctrl+Alt+Home gives the keyboard back to koreterm.");
     }
 
     fn showRdpNotice(self: *Surface, message: []const u8) void {
@@ -4155,7 +4156,7 @@ pub const Surface = struct {
     }
 
     /// The pane took the keyboard focus: a Remote Desktop session takes it,
-    /// unless Ctrl+Alt+Home just gave it back to noctty.
+    /// unless Ctrl+Alt+Home just gave it back to koreterm.
     pub fn forwardFocusToRdp(self: *Surface) void {
         if (self.rdp_released) return;
         if (self.rdp_pane) |pane| pane.focus();

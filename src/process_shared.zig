@@ -41,14 +41,14 @@ test "GUI child Ctrl+C reset clears inherited ignore and is idempotent" {
 
 /// Give CLI output somewhere to go.
 ///
-/// noctty.exe is a Windows-subsystem binary, so a shell that launches it
-/// directly (`noctty.exe +version`) hands it no console and no standard
+/// koreterm.exe is a Windows-subsystem binary, so a shell that launches it
+/// directly (`koreterm.exe +version`) hands it no console and no standard
 /// handles: every write fails and the action reports `WriteFailed` without
 /// printing anything. Attaching to the launching process's console and binding
 /// the missing handles to it makes CLI actions behave like a console program.
 ///
-/// Handles that already work (a real console via noctty.com, or a redirection
-/// such as `noctty.exe +version > out.txt`) are left exactly as they are.
+/// Handles that already work (a real console via koreterm.com, or a redirection
+/// such as `koreterm.exe +version > out.txt`) are left exactly as they are.
 pub fn attachParentConsole() void {
     if (comptime builtin.os.tag != .windows) return;
 
@@ -130,7 +130,7 @@ pub fn reportStateInitError(err: anyerror) !void {
         error.InvalidAction => try stderr.print(
             "Error: unknown CLI action specified. CLI actions are specified with\n" ++
                 "the '+' character.\n\n" ++
-                "All valid CLI actions can be listed with `noctty +help`\n",
+                "All valid CLI actions can be listed with `koreterm +help`\n",
             .{},
         ),
 
@@ -164,17 +164,17 @@ fn formatCliActionFailureMessage(
         if (err == error.ActionHelpOutputUnavailable) {
             return std.fmt.bufPrint(
                 buf,
-                "noctty +{s} could not write help text. Launch it from Command Prompt, PowerShell, or Windows Terminal, or redirect the output to a file.\n",
+                "koreterm +{s} could not write help text. Launch it from Command Prompt, PowerShell, or Windows Terminal, or redirect the output to a file.\n",
                 .{@tagName(action)},
-            ) catch "noctty CLI action failed.\n";
+            ) catch "koreterm CLI action failed.\n";
         }
     }
 
     return std.fmt.bufPrint(
         buf,
-        "noctty +{s} failed: {s}\n",
+        "koreterm +{s} failed: {s}\n",
         .{ @tagName(action), @errorName(err) },
-    ) catch "noctty CLI action failed.\n";
+    ) catch "koreterm CLI action failed.\n";
 }
 
 fn writePlainStderr(message: []const u8) bool {
@@ -189,8 +189,8 @@ fn writePlainStderr(message: []const u8) bool {
 fn showWindowsCliFailureDialog(message: []const u8) void {
     if (comptime builtin.os.tag != .windows) return;
 
-    const caption = std.unicode.utf8ToUtf16LeStringLiteral("noctty CLI action failed");
-    const fallback = std.unicode.utf8ToUtf16LeStringLiteral("noctty CLI action failed.");
+    const caption = std.unicode.utf8ToUtf16LeStringLiteral("koreterm CLI action failed");
+    const fallback = std.unicode.utf8ToUtf16LeStringLiteral("koreterm CLI action failed.");
 
     const message_w = std.unicode.utf8ToUtf16LeAllocZ(std.heap.page_allocator, message) catch {
         _ = MessageBoxW(null, fallback, caption, MB_OK | MB_ICONERROR);
@@ -264,7 +264,7 @@ fn releasePanic(msg: []const u8, _: ?usize) noreturn {
 }
 
 // The attach must never disturb a handle that already works, or redirection
-// (`noctty.exe +version > out.txt`) and the noctty.com launcher would break.
+// (`koreterm.exe +version > out.txt`) and the koreterm.com launcher would break.
 // The test runner's own stdout is a live handle, so it stands in for both.
 test "cli console attach leaves working std handles alone" {
     if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
@@ -286,7 +286,7 @@ test "cli help output failures get a text output hint" {
         try std.testing.expect(std.mem.indexOf(u8, message, "write help text") != null);
     } else {
         try std.testing.expectEqualStrings(
-            "noctty +version failed: ActionHelpOutputUnavailable\n",
+            "koreterm +version failed: ActionHelpOutputUnavailable\n",
             message,
         );
     }

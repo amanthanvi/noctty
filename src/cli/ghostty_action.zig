@@ -60,28 +60,28 @@ pub const Action = enum {
     // Use IPC to tell the running Ghostty to open a new window.
     @"new-window",
 
-    // List read-only automation state for the running noctty instance.
+    // List read-only automation state for the running koreterm instance.
     @"list-windows",
 
-    // Forward a safe keybinding action to the running noctty instance.
+    // Forward a safe keybinding action to the running koreterm instance.
     @"perform-action",
 
-    /// Register noctty as the current user's default terminal.
+    /// Register koreterm as the current user's default terminal.
     @"register-default-terminal",
 
-    /// Restore the default-terminal selection saved by noctty.
+    /// Restore the default-terminal selection saved by koreterm.
     @"unregister-default-terminal",
 
-    // Focus a specific window or surface in the running noctty instance.
+    // Focus a specific window or surface in the running koreterm instance.
     focus,
 
     // Send policy-bounded printable text to a surface in the running instance.
     @"send-text",
 
-    // Create a tab in a running noctty instance.
+    // Create a tab in a running koreterm instance.
     @"new-tab",
 
-    // Create a split in a running noctty instance.
+    // Create a split in a running koreterm instance.
     @"new-split",
 
     // Register per-user classic Explorer context-menu verbs.

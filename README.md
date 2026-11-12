@@ -1,7 +1,7 @@
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="images/noctty-flag.svg" />
-    <img src="images/noctty-flag-light.svg" alt="Noctty" width="320" />
+    <source media="(prefers-color-scheme: dark)" srcset="images/koreterm-flag.svg" />
+    <img src="images/koreterm-flag-light.svg" alt="Koreterm" width="320" />
   </picture>
 </p>
 
@@ -30,12 +30,12 @@
 </p>
 
 <p align="center">
-  <img src="images/noctty-screenshot.png" alt="Noctty with two tabs and a vertical split, Dracula theme" width="820" />
+  <img src="images/koreterm-screenshot.png" alt="Koreterm with two tabs and a vertical split, Dracula theme" width="820" />
 </p>
 
 ---
 
-Noctty is a Windows terminal that pairs the terminal core from
+Koreterm is a Windows terminal that pairs the terminal core from
 [Ghostty](https://github.com/ghostty-org/ghostty) with a native Win32 app
 written for this fork.
 
@@ -54,7 +54,7 @@ written for this fork.
   are.
 - **Private by default:** no telemetry, and crash dumps never leave your PC.
 
-Noctty is young and has one maintainer. It installs alongside your current
+Koreterm is young and has one maintainer. It installs alongside your current
 terminal and does not replace it, so you can try both side by side. It runs on Windows
 only; macOS and Linux are not planned. See [docs/status.md](docs/status.md) for
 what works and what is still experimental, and the
@@ -68,7 +68,7 @@ Windows 11, on x64 or ARM64. The default renderer needs a GPU driver that
 supports OpenGL 4.3 or later.
 
 - Where OpenGL 4.3 cannot start (common over Remote Desktop and in VMs
-  without 3D acceleration), Noctty switches on its own to its Direct3D 11
+  without 3D acceleration), Koreterm switches on its own to its Direct3D 11
   renderer (beta): hardware Direct3D 11, then Microsoft's WARP software
   renderer, with a banner saying so. It draws text without OpenGL; custom
   shaders, background images, and Kitty images need OpenGL. Set
@@ -81,26 +81,26 @@ supports OpenGL 4.3 or later.
   or use the Direct3D 11 renderer (beta). The ARM64 build includes it.
 
 The latest release is
-[noctty 1.3.137](https://github.com/amanthanvi/noctty/releases/tag/v1.3.137),
+[koreterm 1.3.137](https://github.com/amanthanvi/noctty/releases/tag/v1.3.137),
 published 2026-11-09.
 
 ### With WinGet
 
 ```powershell
-winget install --id AmanThanvi.noctty -e
+winget install --id AmanThanvi.koreterm -e
 ```
 
 ### With Scoop
 
 ```powershell
-scoop bucket add noctty https://github.com/amanthanvi/scoop-noctty
-scoop install noctty/noctty
+scoop bucket add koreterm https://github.com/amanthanvi/scoop-noctty
+scoop install koreterm/koreterm
 ```
 
 ### With Chocolatey
 
 ```powershell
-choco install noctty
+choco install koreterm
 ```
 
 chocolatey.org reviews each version before listing it, so it can trail the
@@ -108,14 +108,14 @@ other channels after a release.
 
 ### Direct download
 
-The installer adds a Start menu entry, an "Open noctty here" item to
+The installer adds a Start menu entry, an "Open koreterm here" item to
 Explorer's right-click menu, and an uninstaller. The portable ZIP runs from
 any folder without installing.
 
 | Your PC                        | Installer                                                                                                                                          | Portable                                                                                                                                                 |
 | ------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **x64** (Intel and AMD)        | [`noctty-1.3.137-windows-x64-setup.exe`](https://github.com/amanthanvi/noctty/releases/download/v1.3.137/noctty-1.3.137-windows-x64-setup.exe)     | [`noctty-1.3.137-windows-x64-portable.zip`](https://github.com/amanthanvi/noctty/releases/download/v1.3.137/noctty-1.3.137-windows-x64-portable.zip)     |
-| **ARM64** (Windows on Arm PCs) | [`noctty-1.3.137-windows-arm64-setup.exe`](https://github.com/amanthanvi/noctty/releases/download/v1.3.137/noctty-1.3.137-windows-arm64-setup.exe) | [`noctty-1.3.137-windows-arm64-portable.zip`](https://github.com/amanthanvi/noctty/releases/download/v1.3.137/noctty-1.3.137-windows-arm64-portable.zip) |
+| **x64** (Intel and AMD)        | [`koreterm-1.3.137-windows-x64-setup.exe`](https://github.com/amanthanvi/noctty/releases/download/v1.3.137/koreterm-1.3.137-windows-x64-setup.exe)     | [`koreterm-1.3.137-windows-x64-portable.zip`](https://github.com/amanthanvi/noctty/releases/download/v1.3.137/koreterm-1.3.137-windows-x64-portable.zip)     |
+| **ARM64** (Windows on Arm PCs) | [`koreterm-1.3.137-windows-arm64-setup.exe`](https://github.com/amanthanvi/noctty/releases/download/v1.3.137/koreterm-1.3.137-windows-arm64-setup.exe) | [`koreterm-1.3.137-windows-arm64-portable.zip`](https://github.com/amanthanvi/noctty/releases/download/v1.3.137/koreterm-1.3.137-windows-arm64-portable.zip) |
 
 > [!NOTE]
 > Releases are signed with a self-signed certificate, so Windows SmartScreen
@@ -125,7 +125,7 @@ any folder without installing.
 > `SHA256SUMS-windows-arm64.txt` from the same release:
 >
 > ```powershell
-> Get-FileHash .\noctty-1.3.137-windows-x64-setup.exe -Algorithm SHA256
+> Get-FileHash .\koreterm-1.3.137-windows-x64-setup.exe -Algorithm SHA256
 > ```
 >
 > A matching checksum shows the file arrived intact, not who published it.
@@ -133,18 +133,18 @@ any folder without installing.
 > provenance and signature checks.
 
 Each release also includes signed manifests of the portable ZIP contents
-(`noctty-1.3.137-windows-x64-portable.manifest.ps1` and
-`noctty-1.3.137-windows-arm64-portable.manifest.ps1`) and `SHA256SUMS.txt`, an
+(`koreterm-1.3.137-windows-x64-portable.manifest.ps1` and
+`koreterm-1.3.137-windows-arm64-portable.manifest.ps1`) and `SHA256SUMS.txt`, an
 alias of the x64 checksum file kept for older auto-update clients. Newer
 releases also publish a symbols zip per architecture,
-`noctty-<version>-windows-<arch>-symbols.zip`, for reading crash dumps;
+`koreterm-<version>-windows-<arch>-symbols.zip`, for reading crash dumps;
 [docs/windows.md](docs/windows.md#crash-reports-and-diagnostics) says which
 releases have it.
 
-Scoop puts `noctty` on your `PATH`. WinGet and Chocolatey run the installer, and
+Scoop puts `koreterm` on your `PATH`. WinGet and Chocolatey run the installer, and
 neither the installer nor the portable ZIP adds it.
-To run the `noctty` commands in this README, add the install folder to `PATH`
-or run `.\noctty.com` from that folder.
+To run the `koreterm` commands in this README, add the install folder to `PATH`
+or run `.\koreterm.com` from that folder.
 
 For portable mode and uninstalling, see
 [docs/getting-started.md](docs/getting-started.md). Switching terminals? There
@@ -154,8 +154,8 @@ are guides for moving from
 
 ## Getting started
 
-On first launch, Noctty writes a config template to
-`%LOCALAPPDATA%\noctty\config.ghostty`. Every default is built into the app,
+On first launch, Koreterm writes a config template to
+`%LOCALAPPDATA%\koreterm\config.ghostty`. Every default is built into the app,
 so the template sets no options: add only what you want to change. You can
 also press <kbd>Ctrl</kbd>+<kbd>,</kbd> to open the Settings window.
 
@@ -166,7 +166,7 @@ theme = Dracula
 ```
 
 Save the file, then press <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>,</kbd> to
-reload. Run `noctty +list-themes` to browse the bundled themes.
+reload. Run `koreterm +list-themes` to browse the bundled themes.
 
 A few keys to start with:
 
@@ -184,33 +184,33 @@ A few keys to start with:
 
 The full list, and how to rebind keys, is in
 [docs/getting-started.md](docs/getting-started.md#keybindings). To drive
-Noctty from scripts and the command line, see
+Koreterm from scripts and the command line, see
 [docs/automation.md](docs/automation.md).
 
 ## Privacy and updates
 
-- **No telemetry.** On its own, Noctty goes online only to check for updates,
+- **No telemetry.** On its own, Koreterm goes online only to check for updates,
   from GitHub Releases unless you set another update feed.
-- **Updates** are checked when Noctty starts and about every six hours while a
+- **Updates** are checked when Koreterm starts and about every six hours while a
   window stays open, but no request is made if a check succeeded in the last
   24 hours. Nothing is installed until you start the update yourself. Set
   `auto-update = off` to stop checking, or `auto-update = download` to have
-  Noctty download and verify the update ahead of time.
-- **Crash dumps** stay on your PC in `%LOCALAPPDATA%\noctty\crash` and are
+  Koreterm download and verify the update ahead of time.
+- **Crash dumps** stay on your PC in `%LOCALAPPDATA%\koreterm\crash` and are
   never uploaded.
 
-The [privacy policy](PRIVACY.md) describes what Noctty stores on your PC, the
+The [privacy policy](PRIVACY.md) describes what Koreterm stores on your PC, the
 connections it makes, and how to remove your data. More detail on updates is
 in [docs/windows.md](docs/windows.md#updates).
 
 ## Troubleshooting
 
 - **Won't start?** If a broken config or saved session blocks launch, run
-  `noctty --safe-mode`. It starts once with built-in defaults and no session
+  `koreterm --safe-mode`. It starts once with built-in defaults and no session
   restore, so you can fix the config. It still needs OpenGL 4.3; without it,
   see [Starting without OpenGL](docs/windows.md#starting-without-opengl).
-- **Crashed?** `noctty +crash-report` lists the local crash dumps. For a bug
-  report, `noctty +diagnostic-bundle` writes a support bundle that leaves out
+- **Crashed?** `koreterm +crash-report` lists the local crash dumps. For a bug
+  report, `koreterm +diagnostic-bundle` writes a support bundle that leaves out
   terminal content, commands, and config values by default. Crash dumps can
   hold sensitive memory, so review anything before you share it.
 
@@ -226,11 +226,11 @@ You need:
 
 ```powershell
 git clone https://github.com/amanthanvi/noctty.git
-cd noctty
+cd koreterm
 zig build -Demit-exe=true
 ```
 
-The app is built to `zig-out\bin\noctty.exe`, beside Microsoft's pinned ConPTY
+The app is built to `zig-out\bin\koreterm.exe`, beside Microsoft's pinned ConPTY
 pair, which the first build downloads. Building has no Windows version
 requirement of its own, but running the result needs Windows 10 1809 or later.
 [HACKING.md](HACKING.md) covers the dev shell, offline builds and tests, and
@@ -238,7 +238,7 @@ requirement of its own, but running the result needs Windows 10 1809 or later.
 
 ## Relationship to Ghostty
 
-Noctty is a fork of Ghostty. It takes in upstream changes in planned merge
+Koreterm is a fork of Ghostty. It takes in upstream changes in planned merge
 windows, normally after each Ghostty release; see the
 [upstream merge policy](docs/upstream-merge-policy.md), and
 [docs/status.md](docs/status.md#upstream) for the Ghostty version it is
@@ -246,10 +246,10 @@ currently based on. It shares
 Ghostty's terminal core, fonts, renderer, input handling, config, shell
 integration, and `libghostty-vt`. The Win32 app, the updater, and the Windows
 packaging were written for this fork, and the macOS and GTK apps have been
-removed. When Windows conventions and upstream behavior disagree, Noctty
+removed. When Windows conventions and upstream behavior disagree, Koreterm
 follows Windows.
 
-Noctty is an independent project and is not affiliated with Ghostty.
+Koreterm is an independent project and is not affiliated with Ghostty.
 
 ## Contributing
 

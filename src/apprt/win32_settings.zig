@@ -495,10 +495,10 @@ pub const Section = enum(u32) {
         return switch (self) {
             .appearance => "Fonts, theme, opacity, cursor, and window padding.",
             .terminal => "Scrollback, closing, copying, and clipboard trimming.",
-            .shell => "The program a new tab starts, and how noctty works with your shell.",
+            .shell => "The program a new tab starts, and how koreterm works with your shell.",
             .profiles => "Your own profiles: command lines a new tab can start, each with a name, a starting folder and environment variables. Enter edits the selected field, Insert adds a profile and Delete removes what is selected. Save writes the changes to the config file.",
             .privacy => "What programs may do with your clipboard, links, and notifications.",
-            .updates => "Whether noctty checks for updates, and which releases it follows.",
+            .updates => "Whether koreterm checks for updates, and which releases it follows.",
             .keybindings => "Key bindings are set in the config file. Every binding in effect is listed below: Enter opens the config file, and Ctrl+C copies a binding's lines.",
             .advanced => "Open the config file in your text editor for settings that have no control here. The file Settings saves to, the problems found in the config, and changes you have not saved yet are listed below.",
             .reference => "Every setting the config file can hold, with the value in effect and what it does. Enter opens the config file, Ctrl+C copies a setting's name, and F2 edits one that has a control in Settings.",
@@ -740,6 +740,7 @@ const field_adapters = .{
     .combo_rdp_colors = comboAdapter(.rdp_color_depth),
     .combo_rdp_compression = comboAdapter(.rdp_compression),
     .combo_rdp_experience = comboAdapter(.rdp_experience),
+    .combo_rdp_certificates = comboAdapter(.rdp_trust_certificates),
 };
 
 comptime {
@@ -789,7 +790,7 @@ pub const editable_keys = .{
     Config.Key.@"window-padding-balance", Config.Key.@"auto-update",       Config.Key.@"auto-update-channel",
     Config.Key.@"font-family",            Config.Key.theme,                Config.Key.command,
     Config.Key.@"default-profile",        Config.Key.@"working-directory", Config.Key.@"rdp-color-depth",
-    Config.Key.@"rdp-compression",        Config.Key.@"rdp-experience",
+    Config.Key.@"rdp-compression",        Config.Key.@"rdp-experience",    Config.Key.@"rdp-trust-certificates",
 };
 
 /// A control that goes with a number field and writes the field as typing
@@ -961,7 +962,7 @@ const StatusNote = enum {
     /// settings may be partly the saved ones (`SaveError.SavedPartlyApplied`).
     saved_partly_applied,
     /// Saved, and a later layer adds to the hidden profiles a value whose
-    /// profiles noctty has not all found: whether it hides more than the save
+    /// profiles koreterm has not all found: whether it hides more than the save
     /// could not be checked (`SaveError.SavedListsUnchecked`).
     saved_lists_unchecked,
     save_failed,
@@ -1026,7 +1027,7 @@ const StatusNote = enum {
             .saved_unread => "Saved, but a config file could not be read whole, so the running settings are unchanged. Reload the configuration once it can be read to use the saved values.",
             .saved_not_applied => "Saved, but the saved settings could not be applied, so the running settings are unchanged. Reload the configuration to use the saved values.",
             .saved_partly_applied => "Saved, but the saved settings may be only partly applied. Reload the configuration to apply all of them.",
-            .saved_lists_unchecked => "Saved. A later config file or command-line option adds to the hidden profiles, and noctty has not found every profile yet, so it could not check whether that hides more of them.",
+            .saved_lists_unchecked => "Saved. A later config file or command-line option adds to the hidden profiles, and koreterm has not found every profile yet, so it could not check whether that hides more of them.",
             .disk_changed => "Nothing was saved: another program changed the config file while it was being saved. Save again. Your edits are kept.",
             .profile_changed => "Nothing was saved: another program changed a profile in the config file since Settings read it. Reload the configuration, then make the change again. Your edits are kept.",
             .profile_lists_foreign => "Nothing was saved: another layer than the config file Settings saves to sets the profile order or the hidden profiles. Your edits are kept.",
@@ -1366,14 +1367,14 @@ const SCROLLINFO = extern struct {
     nTrackPos: i32,
 };
 
-const class_name = std.unicode.utf8ToUtf16LeStringLiteral("noctty.win32.settings");
-const window_title = std.unicode.utf8ToUtf16LeStringLiteral("noctty settings");
+const class_name = std.unicode.utf8ToUtf16LeStringLiteral("koreterm.win32.settings");
+const window_title = std.unicode.utf8ToUtf16LeStringLiteral("koreterm settings");
 /// The title while there are edits to save, so the taskbar and Alt+Tab say so
 /// before the close prompt does. In words: a reader speaks the title.
-const window_title_unsaved = std.unicode.utf8ToUtf16LeStringLiteral("noctty settings (unsaved changes)");
+const window_title_unsaved = std.unicode.utf8ToUtf16LeStringLiteral("koreterm settings (unsaved changes)");
 /// The child window that holds the form: it clips the fields to the band
 /// between the section header and the action bar, and owns the scroll bar.
-const viewport_class_name = std.unicode.utf8ToUtf16LeStringLiteral("noctty.win32.settings.viewport");
+const viewport_class_name = std.unicode.utf8ToUtf16LeStringLiteral("koreterm.win32.settings.viewport");
 const edit_text_max_code_units: usize = 4096;
 const edit_text_max_utf8: usize = edit_text_max_code_units * 3;
 
@@ -2027,7 +2028,7 @@ pub const ProfileChoice = struct {
     /// The launcher's quick slot (1 to 3) that pins it to the front of the
     /// picker, which the Profiles page keeps it at.
     quick_slot: ?u8 = null,
-    /// Hidden by noctty itself, not by `profile-hidden` (an older Visual
+    /// Hidden by koreterm itself, not by `profile-hidden` (an older Visual
     /// Studio under `visual-studio-profiles = newest`): the Profiles page
     /// cannot show it.
     found_hidden: bool = false,
@@ -2474,7 +2475,7 @@ pub const SettingsWindow = struct {
     handle: AppHandle,
     combo_trace: bench_trace.SettingsComboTrace = .{},
     /// How long each step of the last `open` took, when the App's
-    /// `NOCTTY_SETTINGS_OPEN_TRACE` is on; the App writes and empties it.
+    /// `KORETERM_SETTINGS_OPEN_TRACE` is on; the App writes and empties it.
     creation_stamps: bench_trace.SettingsCreationStamps = .{},
     hwnd: ?HWND = null,
     /// The form's own window (`viewport_class_name`): every field, its label
@@ -2533,7 +2534,7 @@ pub const SettingsWindow = struct {
     /// one that failed would start another at once, and another. A move or a
     /// hide that needs the whole list asks for it (`findAllProfiles`).
     profile_ask_next: bool = true,
-    /// The selected row a rebuild could not find (a profile noctty found,
+    /// The selected row a rebuild could not find (a profile koreterm found,
     /// while the list is being looked for again): selected again once a
     /// rebuild has it.
     profile_selection_wanted: ?u64 = null,
@@ -7976,7 +7977,7 @@ pub const SettingsWindow = struct {
         // Tried once per draft: a failure is not tried again on every key.
         self.profile_stale = false;
         // The app's profiles, in the picker's order: asking may start the
-        // search for the ones noctty finds, which may say so at once
+        // search for the ones koreterm finds, which may say so at once
         // (`profilesChanged`), while this list is being built.
         // The draft's Default profile is asked about too: the item it starts
         // (`selected`) is marked, an alias resolved as the app does.
@@ -8116,7 +8117,7 @@ pub const SettingsWindow = struct {
 
     /// The labels of what Enter and Delete do on a row of the Profiles page,
     /// which its open row shows and its menu offers. None for a profile from
-    /// noctty's command line, which Settings does not change.
+    /// koreterm's command line, which Settings does not change.
     pub const ProfileActions = struct { enter: ?[]const u8 = null, delete: ?[]const u8 = null };
 
     fn profileActions(self: *const SettingsWindow, row: settings_profiles.Row) ProfileActions {
@@ -8166,7 +8167,7 @@ pub const SettingsWindow = struct {
         if (!self.draftTakesEdits()) return false;
         if (!self.profileEditDone()) return false;
         const row = self.selectedProfileRow() orelse return false;
-        // One title row a profile: its window edits it. A profile noctty
+        // One title row a profile: its window edits it. A profile koreterm
         // finds is a preset: Enter starts a new profile based on it.
         if (!self.profile_fields_shown) {
             if (row.kind == .new_profile) {
@@ -8188,12 +8189,12 @@ pub const SettingsWindow = struct {
             // Answered: the note says what can be done with it.
             if (profile.found_hidden) {
                 self.setProfileNote(.said, "{s}: " ++ settings_profiles.found_hidden_help, .{profile.key});
-            } else self.setProfileNote(.said, "noctty found {s} on this computer, so Settings does not change its command line. Alt+Up and Alt+Down move it; Ctrl+H hides it.", .{profile.key});
+            } else self.setProfileNote(.said, "koreterm found {s} on this computer, so Settings does not change its command line. Alt+Up and Alt+Down move it; Ctrl+H hides it.", .{profile.key});
             return true;
         };
         if (self.profile_model.profileOf(row)) |profile| if (profile.read_only) {
             // Answered: the note says why nothing opens.
-            self.setProfileNote(.said, "Profile {s} comes from noctty's command line, so Settings does not change it.", .{profile.id});
+            self.setProfileNote(.said, "Profile {s} comes from koreterm's command line, so Settings does not change it.", .{profile.id});
             return true;
         };
         // A Remote Desktop connection opens its own window.
@@ -8306,7 +8307,7 @@ pub const SettingsWindow = struct {
             var it = profile_dialog.VariableIterator.init(p.variables);
             while (it.next()) |variable| {
                 if (variable.name.len == 0) return .{ .field = .variables, .message = "Type each variable as NAME=VALUE, one a line." };
-                if (isReservedVariable(variable.name)) return .{ .field = .variables, .message = "NOCTTY_FONT_SIZE and NOCTTY_ELEVATED are the window's own fields: set them above." };
+                if (isReservedVariable(variable.name)) return .{ .field = .variables, .message = "KORETERM_FONT_SIZE and KORETERM_ELEVATED are the window's own fields: set them above." };
                 if (variable.value.len == 0) return .{ .field = .variables, .message = "A variable needs a value after its =." };
             }
             return null;
@@ -8355,7 +8356,7 @@ pub const SettingsWindow = struct {
             const profile = &self.profile_model.profiles[index];
             if (profile.detected) {
                 fields.command = self.presetCommand(a, profile.key) orelse
-                    return self.setProfileNote(.said, "noctty has not said what {s} runs yet: try again in a moment.", .{profile.key});
+                    return self.setProfileNote(.said, "koreterm has not said what {s} runs yet: try again in a moment.", .{profile.key});
             } else fields.command = a.dupe(u8, profile.command) catch return self.profileChangeFailed();
             const label = profile.label orelse profile.id;
             fields.name = if (existing_id != null) a.dupe(u8, label) catch return self.profileChangeFailed() else std.fmt.allocPrint(a, "{s} (copy)", .{label}) catch return self.profileChangeFailed();
@@ -8426,7 +8427,7 @@ pub const SettingsWindow = struct {
     }
 
     /// The list menu's Delete profile: a user profile is removed (after a
-    /// Windows dialog asks), one noctty finds is hidden from the picker,
+    /// Windows dialog asks), one koreterm finds is hidden from the picker,
     /// which is as far as it can go.
     fn profileDeleteFromMenu(self: *SettingsWindow) void {
         if (!self.draftTakesEdits()) return;
@@ -8437,7 +8438,7 @@ pub const SettingsWindow = struct {
             if (profile.hidden) return self.setProfileNote(.said, "{s} is hidden already; Show in the picker brings it back.", .{profile.key});
             return self.profileToggleHidden();
         }
-        if (profile.read_only) return self.setProfileNote(.said, "Profile {s} comes from noctty's command line, so Settings does not change it.", .{profile.id});
+        if (profile.read_only) return self.setProfileNote(.said, "Profile {s} comes from koreterm's command line, so Settings does not change it.", .{profile.id});
         const alloc = self.handle.alloc;
         var id_buf: [profile_map.max_id_len]u8 = undefined;
         const id = id_buf[0..profile.id.len];
@@ -8629,7 +8630,7 @@ pub const SettingsWindow = struct {
             std.unicode.utf8ToUtf16LeStringLiteral("Export profiles to a Terminals file (passwords in plain text)"),
             std.unicode.utf8ToUtf16LeStringLiteral("Terminals export (*.xml)\x00*.xml\x00All files (*.*)\x00*.*\x00"),
             std.unicode.utf8ToUtf16LeStringLiteral("xml"),
-            std.unicode.utf8ToUtf16LeStringLiteral("noctty-profiles.xml"),
+            std.unicode.utf8ToUtf16LeStringLiteral("koreterm-profiles.xml"),
         ) orelse return;
         writeWholeFile(path, exported.xml) catch
             return self.setProfileNote(.refused, "Error: the export could not be written.", .{});
@@ -8637,7 +8638,7 @@ pub const SettingsWindow = struct {
     }
 
     /// The list menu's (and the window menu's) Back up all settings: one ZIP
-    /// where the person picks, of noctty's config and state folders (in
+    /// where the person picks, of koreterm's config and state folders (in
     /// portable mode, the data files beside the executable, logins
     /// included; `settings_backup.collect`) and `profiles-terminals.xml`, the
     /// Terminals export of the connections with their passwords.
@@ -8648,7 +8649,7 @@ pub const SettingsWindow = struct {
         defer arena.deinit();
         const a = arena.allocator();
         var entries: std.ArrayListUnmanaged(settings_backup.Entry) = .empty;
-        settings_backup.collect(a, &entries) catch return self.setProfileNote(.refused, "Error: noctty's folders could not be read.", .{});
+        settings_backup.collect(a, &entries) catch return self.setProfileNote(.refused, "Error: koreterm's folders could not be read.", .{});
         if (self.terminalsExport(a) catch return self.profileChangeFailed()) |exported|
             entries.append(a, .{ .name = "profiles-terminals.xml", .data = exported.xml }) catch return self.profileChangeFailed();
         if (entries.items.len == 0) return self.setProfileNote(.said, "There are no settings to back up yet.", .{});
@@ -8659,17 +8660,17 @@ pub const SettingsWindow = struct {
         const path = terminals_dialog.pickSaveFile(
             self.hwnd,
             path_buf,
-            std.unicode.utf8ToUtf16LeStringLiteral("Back up all noctty settings (passwords included)"),
+            std.unicode.utf8ToUtf16LeStringLiteral("Back up all koreterm settings (passwords included)"),
             std.unicode.utf8ToUtf16LeStringLiteral("ZIP archive (*.zip)\x00*.zip\x00"),
             std.unicode.utf8ToUtf16LeStringLiteral("zip"),
-            std.unicode.utf8ToUtf16LeStringLiteral("noctty-backup.zip"),
+            std.unicode.utf8ToUtf16LeStringLiteral("koreterm-backup.zip"),
         ) orelse return;
         writeWholeFile(path, out.written()) catch
             return self.setProfileNote(.refused, "Error: the backup could not be written.", .{});
         self.setProfileNote(.said, "Backed up {d} file(s), passwords included. Keep the ZIP somewhere safe.", .{entries.items.len});
     }
 
-    /// The list menu's Back up config file: a copy of noctty's config file
+    /// The list menu's Back up config file: a copy of koreterm's config file
     /// where the person picks.
     fn profileBackupConfig(self: *SettingsWindow) void {
         const alloc = self.handle.alloc;
@@ -8677,10 +8678,10 @@ pub const SettingsWindow = struct {
         defer alloc.free(source);
         const bytes = read: {
             const file = std.fs.openFileAbsolute(source, .{}) catch
-                return self.setProfileNote(.refused, "Error: noctty's config file could not be opened.", .{});
+                return self.setProfileNote(.refused, "Error: koreterm's config file could not be opened.", .{});
             defer file.close();
             break :read file.readToEndAlloc(alloc, 64 * 1024 * 1024) catch
-                return self.setProfileNote(.refused, "Error: noctty's config file could not be read.", .{});
+                return self.setProfileNote(.refused, "Error: koreterm's config file could not be read.", .{});
         };
         defer alloc.free(bytes);
         const path_buf = alloc.alloc(u16, 32768) catch return self.profileChangeFailed();
@@ -8688,14 +8689,14 @@ pub const SettingsWindow = struct {
         const path = terminals_dialog.pickSaveFile(
             self.hwnd,
             path_buf,
-            std.unicode.utf8ToUtf16LeStringLiteral("Back up noctty's config file"),
+            std.unicode.utf8ToUtf16LeStringLiteral("Back up koreterm's config file"),
             std.unicode.utf8ToUtf16LeStringLiteral("Config backup (*.config)\x00*.config\x00All files (*.*)\x00*.*\x00"),
             std.unicode.utf8ToUtf16LeStringLiteral("config"),
-            std.unicode.utf8ToUtf16LeStringLiteral("noctty-backup.config"),
+            std.unicode.utf8ToUtf16LeStringLiteral("koreterm-backup.config"),
         ) orelse return;
         writeWholeFile(path, bytes) catch
             return self.setProfileNote(.refused, "Error: the backup could not be written.", .{});
-        self.setProfileNote(.said, "Backed up noctty's config file ({d} bytes).", .{bytes.len});
+        self.setProfileNote(.said, "Backed up koreterm's config file ({d} bytes).", .{bytes.len});
     }
 
     /// Insert or Ctrl+N: a new profile, typed into the "New profile" row.
@@ -8717,10 +8718,10 @@ pub const SettingsWindow = struct {
         const profile = self.profile_model.profileOf(row) orelse return;
         if (profile.detected) {
             if (profile.found_hidden) return self.setProfileNote(.said, "{s}: " ++ settings_profiles.found_hidden_help, .{profile.key});
-            return self.setProfileNote(.said, "noctty finds {s} on this computer, so it cannot be removed; Ctrl+H hides it from the picker.", .{profile.key});
+            return self.setProfileNote(.said, "koreterm finds {s} on this computer, so it cannot be removed; Ctrl+H hides it from the picker.", .{profile.key});
         }
         if (profile.read_only) {
-            return self.setProfileNote(.said, "Profile {s} comes from noctty's command line, so Settings does not change it.", .{profile.id});
+            return self.setProfileNote(.said, "Profile {s} comes from koreterm's command line, so Settings does not change it.", .{profile.id});
         }
         const pending = if (self.pending) |*config| config else return;
         var id_buf: [profile_map.max_id_len]u8 = undefined;
@@ -8871,7 +8872,7 @@ pub const SettingsWindow = struct {
             return true;
         }
         if (self.profile_model.built() and !self.profile_model.complete)
-            self.setProfileNote(.refused, "Nothing was saved: noctty is looking for the profiles on this computer, and the profile order can be saved once it has them all. Your edits are kept; save again.", .{})
+            self.setProfileNote(.refused, "Nothing was saved: koreterm is looking for the profiles on this computer, and the profile order can be saved once it has them all. Your edits are kept; save again.", .{})
         else
             self.setProfileNote(.refused, "Nothing was saved: there was not enough memory to update the profile order for the last change. Your edits are kept; save again.", .{});
         return false;
@@ -9542,7 +9543,7 @@ pub const SettingsWindow = struct {
         if (!self.profileEditDone()) return;
         const row = self.selectedProfileRow() orelse return;
         if (row.kind == .new_profile) return;
-        if (!self.wholeProfileList(row.identity)) return self.setProfileNote(.said, "noctty is looking for the profiles on this computer: the order can be changed once it has them all.", .{});
+        if (!self.wholeProfileList(row.identity)) return self.setProfileNote(.said, "koreterm is looking for the profiles on this computer: the order can be changed once it has them all.", .{});
         const model = &self.profile_model;
         const row_now = self.selectedProfileRow() orelse return;
         const profile = &model.profiles[row_now.profile];
@@ -9586,7 +9587,7 @@ pub const SettingsWindow = struct {
         if (!self.profileEditDone()) return;
         const row = self.selectedProfileRow() orelse return;
         if (row.kind == .new_profile) return;
-        if (!self.wholeProfileList(row.identity)) return self.setProfileNote(.said, "noctty is looking for the profiles on this computer: which are hidden can be changed once it has them all.", .{});
+        if (!self.wholeProfileList(row.identity)) return self.setProfileNote(.said, "koreterm is looking for the profiles on this computer: which are hidden can be changed once it has them all.", .{});
         const model = &self.profile_model;
         const row_now = self.selectedProfileRow() orelse return;
         const profile = &model.profiles[row_now.profile];
@@ -10228,7 +10229,7 @@ fn descriptionHash(text: []const u8) u64 {
 
 /// Where a form row's saved value comes from, as its label shows it on the
 /// right: a line of a file, named by the file's name, or the command line
-/// (`writeOriginNote`). Empty for a default, or a value noctty worked out.
+/// (`writeOriginNote`). Empty for a default, or a value koreterm worked out.
 const OriginNote = struct {
     /// A file name of 255 UTF-16 units is at most 765 bytes of UTF-8, and
     /// "Set by the theme " and ", line " with the number take under 64, and
@@ -11732,7 +11733,7 @@ test "settings open and a first visit create each window once in its final form"
             // Every section shown: the whole form, the All settings list (its
             // page is shown last), and still one font build.
             for (std.enums.values(Section)) |section| settings.setActiveSection(section);
-            try std.testing.expectEqual(@as(usize, 85), Work.Tree.of(fixture.hwnd()).len);
+            try std.testing.expectEqual(@as(usize, 87), Work.Tree.of(fixture.hwnd()).len);
             try std.testing.expectEqual(@as(u32, 1), settings.font_builds);
             try std.testing.expectEqual(@as(u32, 0), settings.theme_applications);
         }
@@ -11800,7 +11801,7 @@ test "settings sections shown in any order leave the window as one made whole at
             // Every window in the same z-order, with the same styles, place,
             // client area, check, dropdown heights, text and font, and every
             // field and text with its UIA provider.
-            try std.testing.expectEqual(@as(usize, 84), states[0].len);
+            try std.testing.expectEqual(@as(usize, 86), states[0].len);
             try State.expectSame(&states[0], &states[1]);
             try std.testing.expectEqual(providers[0], providers[1]);
             for (providers[1]) |provided| try std.testing.expect(provided);
@@ -12237,14 +12238,14 @@ test "settings an invalid field marks its rail section, the title and UIA" {
             for (std.enums.values(Section)) |section| {
                 try std.testing.expectEqual(Marker.none, settings.sectionProvider(section).?.markerState());
             }
-            try std.testing.expectEqualStrings("noctty settings", try titleOf(hwnd));
+            try std.testing.expectEqualStrings("koreterm settings", try titleOf(hwnd));
 
             // An unsaved edit marks its own section and the title, not the others.
             _ = sys.SendMessageW(settings.fields.combo_confirm_close.?, CB_SETCURSEL, 1, 0);
             settings.syncCombo(.confirm_close);
             try std.testing.expectEqual(Marker.unsaved, settings.sectionProvider(.terminal).?.markerState());
             try std.testing.expectEqual(Marker.none, settings.sectionProvider(.appearance).?.markerState());
-            try std.testing.expectEqualStrings("noctty settings (unsaved changes)", try titleOf(hwnd));
+            try std.testing.expectEqualStrings("koreterm settings (unsaved changes)", try titleOf(hwnd));
 
             // A half-typed number marks Appearance as unsaved, and as invalid
             // once its error is shown. The field says so too.
@@ -12268,7 +12269,7 @@ test "settings an invalid field marks its rail section, the title and UIA" {
             // The mark follows the section's own state through a discard.
             settings.discardChangesNow();
             try std.testing.expectEqual(Marker.none, settings.sectionProvider(.terminal).?.markerState());
-            try std.testing.expectEqualStrings("noctty settings", try titleOf(hwnd));
+            try std.testing.expectEqualStrings("koreterm settings", try titleOf(hwnd));
         }
     }.body);
 }
@@ -13088,7 +13089,7 @@ test "settings Discard changes throws the draft away and keeps the window" {
             try std.testing.expectEqual(@as(u32, 0), fixture.closed);
             try std.testing.expectEqual(@as(u32, 0), fixture.saved);
             try std.testing.expectEqualStrings("Changes discarded.", try statusTextOf(settings, &buf));
-            try std.testing.expectEqualStrings("noctty settings", try titleOf(fixture.hwnd()));
+            try std.testing.expectEqualStrings("koreterm settings", try titleOf(fixture.hwnd()));
 
             // The next edit replaces the note, as any outcome is replaced.
             _ = sys.SendMessageW(settings.fields.combo_cursor_style.?, CB_SETCURSEL, 2, 0);
@@ -14505,10 +14506,10 @@ const dialog_test = struct {
     }
 
     /// Write `capture` as a 32-bit BMP named `name` into the directory
-    /// `NOCTTY_SETTINGS_CAPTURE_DIR` names, when it is set: evidence for a
+    /// `KORETERM_SETTINGS_CAPTURE_DIR` names, when it is set: evidence for a
     /// reviewer, never read back.
     fn saveCapture(capture: Capture, name: []const u8) !void {
-        const dir_path = std.process.getEnvVarOwned(std.testing.allocator, "NOCTTY_SETTINGS_CAPTURE_DIR") catch return;
+        const dir_path = std.process.getEnvVarOwned(std.testing.allocator, "KORETERM_SETTINGS_CAPTURE_DIR") catch return;
         defer std.testing.allocator.free(dir_path);
         var dir = try std.fs.openDirAbsolute(dir_path, .{});
         defer dir.close();
@@ -14556,7 +14557,7 @@ const dialog_test = struct {
         fn activate() !CommonControls6 {
             var tmp = std.testing.tmpDir(.{});
             defer tmp.cleanup();
-            // The dependency the app's manifest (`dist/windows/noctty.manifest`) declares.
+            // The dependency the app's manifest (`dist/windows/koreterm.manifest`) declares.
             const manifest =
                 \\<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
                 \\<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
@@ -14793,7 +14794,7 @@ const dialog_test = struct {
         // worktrees) shared one named desktop, and the Ctrl+S test failed in a
         // run that overlapped another one while passing on its own.
         var name_utf8: [64]u8 = undefined;
-        const name = try std.fmt.bufPrint(&name_utf8, "noctty-test-settings-dialog-{d}", .{windows.GetCurrentProcessId()});
+        const name = try std.fmt.bufPrint(&name_utf8, "koreterm-test-settings-dialog-{d}", .{windows.GetCurrentProcessId()});
         var name_w: [64:0]u16 = undefined;
         const desktop = CreateDesktopW(
             utf8ToW(&name_w, name),
@@ -14864,7 +14865,7 @@ const dialog_test = struct {
         /// (`settingsMaskedKeyNames`, `SaveError.SavedButMasked`).
         reload_from_disk: bool = false,
         /// The command line that reload reads after `save_path`, with its
-        /// places, as `Config.load` reads noctty's.
+        /// places, as `Config.load` reads koreterm's.
         reload_args: []const []const u8 = &.{},
         /// The file `AppHandle.configSource` reads, as the App's does; none
         /// when null.
@@ -16177,10 +16178,10 @@ test "settings the All settings page never follows a link to a share to read the
     // The share is on TEST-NET-1 (RFC 5737), which nothing answers: a read
     // that followed a link there would hang on the connection, as it would
     // on the UI thread for a share that went away. So each read is timed.
-    const share = "\\\\192.0.2.1\\noctty-test-none$";
+    const share = "\\\\192.0.2.1\\koreterm-test-none$";
     const on_share = try join(alloc, base, "cfg-on-share");
     defer alloc.free(on_share);
-    try links.junction(alloc, on_share, "\\??\\UNC\\192.0.2.1\\noctty-test-none$");
+    try links.junction(alloc, on_share, "\\??\\UNC\\192.0.2.1\\koreterm-test-none$");
     const local_dir = try join(alloc, base, "cfg-local");
     defer alloc.free(local_dir);
     const real_dir = try join(alloc, base, "real");
@@ -16241,12 +16242,12 @@ test "settings the default config file is named only when every candidate it nee
     const alloc = std.testing.allocator;
     // A probe standing in for the file system: no file is opened.
     const Probe = struct {
-        const Kind = enum { noctty, ghostty, winghostty };
+        const Kind = enum { koreterm, ghostty, winghostty };
         var unknown: ?Kind = null;
         var content: ?Kind = null;
         fn kind(path: []const u8) Kind {
             if (std.mem.indexOf(u8, path, "winghostty") != null) return .winghostty;
-            return if (std.mem.endsWith(u8, path, "config.ghostty")) .noctty else .ghostty;
+            return if (std.mem.endsWith(u8, path, "config.ghostty")) .koreterm else .ghostty;
         }
         fn state(_: std.mem.Allocator, path: []const u8) ?config_file_load.FileState {
             if (unknown == kind(path)) return null;
@@ -16256,7 +16257,7 @@ test "settings the default config file is named only when every candidate it nee
     };
     const xdg = try config_file_load.defaultXdgPath(alloc);
     defer alloc.free(xdg);
-    // Nothing anywhere: the noctty file.
+    // Nothing anywhere: the koreterm file.
     Probe.unknown = null;
     Probe.content = null;
     const none = (try config_file_load.preferredXdgPathProbed(alloc, &Probe.state)).?;
@@ -16270,7 +16271,7 @@ test "settings the default config file is named only when every candidate it nee
     }
     // One with content earlier in the order decides before an unknown later.
     Probe.unknown = .winghostty;
-    Probe.content = .noctty;
+    Probe.content = .koreterm;
     const found = (try config_file_load.preferredXdgPathProbed(alloc, &Probe.state)).?;
     defer alloc.free(found);
     try std.testing.expectEqualStrings(xdg, found);
@@ -17405,7 +17406,7 @@ test "settings display-only text row needs no persistence adapter" {
             try std.testing.expectEqual(@as(LONG_PTR, 499), sys.GetWindowLongPtrW(control, -12));
             try std.testing.expect(sys.GetWindowLongPtrW(control, GWL_STYLE) & WS_TABSTOP == 0);
             try std.testing.expect(sys.IsWindowEnabled(fixture.settings.btn_save.?) == 0);
-            try std.testing.expectEqual(@as(usize, 29), editable_keys.len);
+            try std.testing.expectEqual(@as(usize, 30), editable_keys.len);
         }
     }.body);
 }
@@ -18671,7 +18672,7 @@ test "settings default profile dropdown offers the listed profiles and saves key
                 try rows(combo, &.{ "Automatic", "PowerShell", "Command Prompt", "Python 3.12", "user:other (not found)" });
             }
             {
-                // In a window noctty started with `--default-profile` (a
+                // In a window koreterm started with `--default-profile` (a
                 // jump-list link, New Elevated Window) that value wins in this
                 // process, but Settings shows and saves the files' value: it
                 // preselects what the files name, and Automatic removes what
@@ -18965,7 +18966,7 @@ test "settings UIA checkbox and combo actions update the draft and discard resto
                 }
             }
             try std.testing.expectEqual(@as(usize, 5), checks);
-            try std.testing.expectEqual(@as(usize, 16), combos);
+            try std.testing.expectEqual(@as(usize, 17), combos);
             const retired = settings.control_uia_providers[settings.controlIndex(settings.fields.chk_trim_trail.?).?].?;
             retired.detach();
             try std.testing.expectEqual(com.UIA_E_ELEMENTNOTAVAILABLE, retired.toggle_iface.vtbl.Toggle(&retired.toggle_iface));
@@ -19756,11 +19757,11 @@ test "settings an origin note names a file by its name and line, the theme, or t
     var buf: [OriginNote.capacity]u8 = undefined;
     const Case = struct { found: config_origin.Origin, text: []const u8 };
     for ([_]Case{
-        .{ .found = .{ .file = .{ .path = "C:\\Users\\me\\noctty\\included.conf", .line = 2, .kind = .included } }, .text = "Set in included.conf, line 2" },
-        .{ .found = .{ .file = .{ .path = "C:\\Users\\me\\noctty\\config", .line = 9, .kind = .config } }, .text = "Set in config, line 9" },
+        .{ .found = .{ .file = .{ .path = "C:\\Users\\me\\koreterm\\included.conf", .line = 2, .kind = .included } }, .text = "Set in included.conf, line 2" },
+        .{ .found = .{ .file = .{ .path = "C:\\Users\\me\\koreterm\\config", .line = 9, .kind = .config } }, .text = "Set in config, line 9" },
         .{ .found = .{ .file = .{ .path = "C:\\themes\\Nord", .line = 7, .kind = .theme } }, .text = "Set by the theme Nord, line 7" },
         .{ .found = .{ .cli = 3 }, .text = "Set on the command line" },
-        // A default, and what noctty works out, say nothing: the Reset
+        // A default, and what koreterm works out, say nothing: the Reset
         // button's marker already says whether a value is the default.
         .{ .found = .default, .text = "" },
         .{ .found = .{ .derived = .automatic }, .text = "" },
@@ -19799,8 +19800,8 @@ test "settings a row says where its saved value comes from, in its label and its
             defer alloc.free(theme_path);
             const text = try std.fmt.allocPrint(alloc, "scrollback-limit = 5000\nfont-size = 12\nconfig-file = included.conf\ntheme = {s}\nclipboard-trim-trailing-spaces = true\n", .{theme_path});
             defer alloc.free(text);
-            try tmp.dir.writeFile(.{ .sub_path = "noctty.conf", .data = text });
-            const path = try tmp.dir.realpathAlloc(alloc, "noctty.conf");
+            try tmp.dir.writeFile(.{ .sub_path = "koreterm.conf", .data = text });
+            const path = try tmp.dir.realpathAlloc(alloc, "koreterm.conf");
             defer alloc.free(path);
 
             var fake: FakeAnnotations = .{};
@@ -19819,11 +19820,11 @@ test "settings a row says where its saved value comes from, in its label and its
             for ([_]Case{
                 // An included file's line wins over the target's.
                 .{ .field = settings.fields.edit_font_size.?, .note = "Set in included.conf, line 2", .differs = true },
-                .{ .field = settings.fields.edit_scrollback.?, .note = "Set in noctty.conf, line 1", .differs = true },
+                .{ .field = settings.fields.edit_scrollback.?, .note = "Set in koreterm.conf, line 1", .differs = true },
                 .{ .field = settings.fields.combo_cursor_style.?, .note = "Set by the theme mytheme, line 1", .differs = true },
-                .{ .field = settings.fields.edit_theme.?, .note = "Set in noctty.conf, line 4", .differs = true },
+                .{ .field = settings.fields.edit_theme.?, .note = "Set in koreterm.conf, line 4", .differs = true },
                 // A line that sets the default value is still where it is set.
-                .{ .field = settings.fields.chk_trim_trail.?, .note = "Set in noctty.conf, line 5", .differs = false },
+                .{ .field = settings.fields.chk_trim_trail.?, .note = "Set in koreterm.conf, line 5", .differs = false },
                 .{ .field = settings.fields.edit_bg_opacity.?, .note = "", .differs = false },
             }) |case| {
                 const index = settings.controlIndex(case.field).?;
@@ -19926,8 +19927,8 @@ test "settings a long origin note is shortened, and the field's label keeps its 
             // Longer than a note held before review (96 bytes in all).
             const long_name = "a-config-file-whose-name-is-much-longer-than-the-label-it-is-drawn-beside-and-longer-than-a-note-once-held.conf";
             try tmp.dir.writeFile(.{ .sub_path = long_name, .data = "font-size = 15\n" });
-            try tmp.dir.writeFile(.{ .sub_path = "noctty.conf", .data = "config-file = " ++ long_name ++ "\n" });
-            const path = try tmp.dir.realpathAlloc(alloc, "noctty.conf");
+            try tmp.dir.writeFile(.{ .sub_path = "koreterm.conf", .data = "config-file = " ++ long_name ++ "\n" });
+            const path = try tmp.dir.realpathAlloc(alloc, "koreterm.conf");
             defer alloc.free(path);
 
             const fixture = try dialog_test.Fixture.prepare(false);
@@ -19970,8 +19971,8 @@ test "settings Save of a value an included file overrides writes the target file
             defer tmp.cleanup();
             const included_before = "\nfont-size = 15\n";
             try tmp.dir.writeFile(.{ .sub_path = "included.conf", .data = included_before });
-            try tmp.dir.writeFile(.{ .sub_path = "noctty.conf", .data = "font-size = 12\nconfig-file = included.conf\n" });
-            const path = try tmp.dir.realpathAlloc(alloc, "noctty.conf");
+            try tmp.dir.writeFile(.{ .sub_path = "koreterm.conf", .data = "font-size = 12\nconfig-file = included.conf\n" });
+            const path = try tmp.dir.realpathAlloc(alloc, "koreterm.conf");
             defer alloc.free(path);
 
             const fixture = try dialog_test.Fixture.prepare(false);
@@ -19995,7 +19996,7 @@ test "settings Save of a value an included file overrides writes the target file
             try std.testing.expectEqual(@as(u32, 1), fixture.saved);
             // The edit goes to the file Settings saves to, on the line that
             // set it; the included file is not touched.
-            const after = try tmp.dir.readFileAlloc(alloc, "noctty.conf", 1 << 20);
+            const after = try tmp.dir.readFileAlloc(alloc, "koreterm.conf", 1 << 20);
             defer alloc.free(after);
             try std.testing.expectEqualStrings("font-size = 18\nconfig-file = included.conf\n", after);
             const included_after = try tmp.dir.readFileAlloc(alloc, "included.conf", 1 << 20);
@@ -20020,11 +20021,11 @@ test "settings Save of a default profile the command line overrides names the co
             const alloc = std.testing.allocator;
             var tmp = std.testing.tmpDir(.{});
             defer tmp.cleanup();
-            try tmp.dir.writeFile(.{ .sub_path = "noctty.conf", .data = "default-profile = pwsh.exe\n" });
-            const path = try tmp.dir.realpathAlloc(alloc, "noctty.conf");
+            try tmp.dir.writeFile(.{ .sub_path = "koreterm.conf", .data = "default-profile = pwsh.exe\n" });
+            const path = try tmp.dir.realpathAlloc(alloc, "koreterm.conf");
             defer alloc.free(path);
 
-            // noctty was started with `--default-profile=` (a jump-list link,
+            // koreterm was started with `--default-profile=` (a jump-list link,
             // New Elevated Window): that value wins in this process, before
             // the save and after its reload.
             const argv: []const []const u8 = &.{"--default-profile=user:py312"};
@@ -20050,7 +20051,7 @@ test "settings Save of a default profile the command line overrides names the co
             _ = sys.SendMessageW(settings.hwnd.?, WM_COMMAND, id | (@as(usize, CBN_SELCHANGE) << 16), @bitCast(@intFromPtr(combo)));
             settings.save();
             try std.testing.expectEqual(@as(u32, 1), fixture.saved);
-            const after = try tmp.dir.readFileAlloc(alloc, "noctty.conf", 1 << 20);
+            const after = try tmp.dir.readFileAlloc(alloc, "koreterm.conf", 1 << 20);
             defer alloc.free(after);
             try std.testing.expectEqualStrings("default-profile = cmd.exe\n", after);
             // The status names what wins, the command line, not the line the
@@ -20070,8 +20071,8 @@ test "settings an origin-note says when the line it names has changed since the 
             const alloc = std.testing.allocator;
             var tmp = std.testing.tmpDir(.{});
             defer tmp.cleanup();
-            try tmp.dir.writeFile(.{ .sub_path = "noctty.conf", .data = "font-size = 13\nscrollback-limit = 5000\n" });
-            const path = try tmp.dir.realpathAlloc(alloc, "noctty.conf");
+            try tmp.dir.writeFile(.{ .sub_path = "koreterm.conf", .data = "font-size = 13\nscrollback-limit = 5000\n" });
+            const path = try tmp.dir.realpathAlloc(alloc, "koreterm.conf");
             defer alloc.free(path);
 
             const fixture = try dialog_test.Fixture.prepare(false);
@@ -20083,15 +20084,15 @@ test "settings an origin-note says when the line it names has changed since the 
             dialog_test.makeAllSections(settings);
             const font = settings.controlIndex(settings.fields.edit_font_size.?).?;
             const scrollback = settings.controlIndex(settings.fields.edit_scrollback.?).?;
-            try std.testing.expectEqualStrings("Set in noctty.conf, line 1", settings.origin_notes[font].text());
-            try std.testing.expectEqualStrings("Set in noctty.conf, line 2", settings.origin_notes[scrollback].text());
+            try std.testing.expectEqualStrings("Set in koreterm.conf, line 1", settings.origin_notes[font].text());
+            try std.testing.expectEqualStrings("Set in koreterm.conf, line 2", settings.origin_notes[scrollback].text());
 
             // The first line taken out, and the config not read again: both
             // lines named no longer hold what was read there.
-            try tmp.dir.writeFile(.{ .sub_path = "noctty.conf", .data = "scrollback-limit = 5000\n" });
+            try tmp.dir.writeFile(.{ .sub_path = "koreterm.conf", .data = "scrollback-limit = 5000\n" });
             settings.externalConfigChanged(&fixture.config, 2);
-            try std.testing.expectEqualStrings("Set in noctty.conf, line 1; the file has changed since", settings.origin_notes[font].text());
-            try std.testing.expectEqualStrings("Set in noctty.conf, line 2; the file has changed since", settings.origin_notes[scrollback].text());
+            try std.testing.expectEqualStrings("Set in koreterm.conf, line 1; the file has changed since", settings.origin_notes[font].text());
+            try std.testing.expectEqualStrings("Set in koreterm.conf, line 2; the file has changed since", settings.origin_notes[scrollback].text());
 
             // Read again: the line is current, and so is the note.
             var reloaded = try Config.default(alloc);
@@ -20102,7 +20103,7 @@ test "settings an origin-note says when the line it names has changed since the 
             fixture.config.deinit();
             fixture.config = reloaded;
             settings.externalConfigChanged(&fixture.config, 3);
-            try std.testing.expectEqualStrings("Set in noctty.conf, line 1", settings.origin_notes[scrollback].text());
+            try std.testing.expectEqualStrings("Set in koreterm.conf, line 1", settings.origin_notes[scrollback].text());
             try std.testing.expectEqualStrings("", settings.origin_notes[font].text());
         }
     }.body);
@@ -22199,7 +22200,7 @@ const profile_button_help = [profile_button_count][]const u8{
     "Hides the profile from the picker, the palette and the jump list, or shows it again. Ctrl+H does the same.",
 };
 extern "user32" fn GetNextDlgTabItem(dialog: HWND, control: ?HWND, previous: BOOL) callconv(.winapi) ?HWND;
-const reference_list_class_name = std.unicode.utf8ToUtf16LeStringLiteral("noctty.win32.settings.list");
+const reference_list_class_name = std.unicode.utf8ToUtf16LeStringLiteral("koreterm.win32.settings.list");
 /// The commands of a list's context menu.
 const reference_menu_copy: usize = 1;
 const reference_menu_open: usize = 2;
@@ -22213,7 +22214,7 @@ const reference_open_label = "Open config file (Enter)";
 /// What the open row of a key with no Settings control says.
 const reference_read_only_note = "Settings has no control for this setting: change it in the config file.";
 /// Where an open binding comes from.
-const keybind_default_note = "One of noctty's default bindings.";
+const keybind_default_note = "One of koreterm's default bindings.";
 const keybind_set_note = "Not one of the default bindings: the config file sets it.";
 
 /// Which list a `ReferenceList` is: the All settings page's keys, the
@@ -22246,7 +22247,7 @@ const profile_menu_delete: usize = 14;
 /// What the Profiles list's UIA help text says: the keys it takes.
 const profile_list_help = "Up and Down move through the profiles, in the picker's order, and your profiles' fields: command line, name, starting folder and variables. " ++
     "Enter edits the selected field, Delete removes it (a profile asks twice), Insert or Ctrl+N adds a profile, Ctrl+I imports profiles from a Terminals export, Alt+Up and Alt+Down move a profile, Ctrl+H hides it or shows it, and Shift+F10 offers these. " ++
-    "A profile noctty found on this computer can be moved and hidden, not edited; one noctty hides itself (an older Visual Studio) can be none of these.";
+    "A profile koreterm found on this computer can be moved and hidden, not edited; one koreterm hides itself (an older Visual Studio) can be none of these.";
 /// The help text of the field being typed into.
 const profile_edit_help = "Enter keeps the change and Escape cancels it. Save writes your changes to the config file.";
 
@@ -22340,7 +22341,7 @@ fn stringsOf(a: std.mem.Allocator, items: []const [:0]const u8) std.mem.Allocato
 /// The property that holds the row a profile button is over, its
 /// identity's low bits (`syncProfileButtons`): read by its Invoke on the
 /// client's thread (`postProfileButtonInvoke`).
-const profile_button_row_prop = std.unicode.utf8ToUtf16LeStringLiteral("noctty.settings.profile-row");
+const profile_button_row_prop = std.unicode.utf8ToUtf16LeStringLiteral("koreterm.settings.profile-row");
 /// A profile button's Invoke, posted for the row it is over now
 /// (`SettingsWindow.profileButtonInvoked`): the selection may move before
 /// the list handles it.
@@ -23846,13 +23847,13 @@ fn expectSameText(expected: []const u8, actual: []const u8) !void {
     try std.testing.expect(std.mem.eql(u8, expected, actual));
 }
 
-/// A Settings window on the config file `text` (`noctty.conf` in `tmp`),
+/// A Settings window on the config file `text` (`koreterm.conf` in `tmp`),
 /// which its Save writes and reads back. `path` is the caller's to free once
 /// the fixture is finished.
 fn profileFixture(tmp: *std.testing.TmpDir, text: []const u8, path: *[]u8) !*dialog_test.Fixture {
     const alloc = std.testing.allocator;
-    try tmp.dir.writeFile(.{ .sub_path = "noctty.conf", .data = text });
-    path.* = try tmp.dir.realpathAlloc(alloc, "noctty.conf");
+    try tmp.dir.writeFile(.{ .sub_path = "koreterm.conf", .data = text });
+    path.* = try tmp.dir.realpathAlloc(alloc, "koreterm.conf");
     errdefer alloc.free(path.*);
     const fixture = try dialog_test.Fixture.prepare(true);
     errdefer fixture.finish();
@@ -23884,8 +23885,8 @@ fn themedProfileFixture(tmp: *std.testing.TmpDir, body: []const u8, light: []con
     defer alloc.free(dark_path);
     const text = try std.fmt.allocPrint(alloc, "theme = light:{s},dark:{s}\n{s}", .{ light_path, dark_path, body });
     defer alloc.free(text);
-    try tmp.dir.writeFile(.{ .sub_path = "noctty.conf", .data = text });
-    path.* = try tmp.dir.realpathAlloc(alloc, "noctty.conf");
+    try tmp.dir.writeFile(.{ .sub_path = "koreterm.conf", .data = text });
+    path.* = try tmp.dir.realpathAlloc(alloc, "koreterm.conf");
     errdefer alloc.free(path.*);
     const fixture = try dialog_test.Fixture.prepare(true);
     errdefer fixture.finish();
@@ -23914,8 +23915,8 @@ fn switchFixtureTheme(fixture: *dialog_test.Fixture, state: @TypeOf(fixture.conf
 fn layeredProfileFixture(tmp: *std.testing.TmpDir, text: []const u8, cli: []const []const u8, path: *[]u8) !*dialog_test.Fixture {
     const alloc = std.testing.allocator;
     const cli_args = @import("../cli/args.zig");
-    try tmp.dir.writeFile(.{ .sub_path = "noctty.conf", .data = text });
-    path.* = try tmp.dir.realpathAlloc(alloc, "noctty.conf");
+    try tmp.dir.writeFile(.{ .sub_path = "koreterm.conf", .data = text });
+    path.* = try tmp.dir.realpathAlloc(alloc, "koreterm.conf");
     errdefer alloc.free(path.*);
     const fixture = try dialog_test.Fixture.prepare(true);
     errdefer fixture.finish();
@@ -23981,7 +23982,7 @@ test "settings a save after the app went dark is no conflict for the dark theme'
                 settings.save();
                 try std.testing.expectEqual(@as(u32, 1), fixture.saved);
                 try std.testing.expect(settings.status_note != .profile_changed);
-                const after = try tmp.dir.readFileAlloc(alloc, "noctty.conf", 1 << 16);
+                const after = try tmp.dir.readFileAlloc(alloc, "koreterm.conf", 1 << 16);
                 defer alloc.free(after);
                 try std.testing.expect(std.mem.indexOf(u8, after, "profile-order =\n") != null);
                 try std.testing.expect(std.mem.indexOf(u8, after, "profile-hidden =\n") != null);
@@ -24018,7 +24019,7 @@ test "settings a list that followed the file and one that kept its baseline are 
                 try std.testing.expectEqual(@as(usize, 1), pending.@"profile-hidden".list.items.len);
                 // Another program edits the file's own line for either list,
                 // or neither.
-                const before = try tmp.dir.readFileAlloc(alloc, "noctty.conf", 1 << 16);
+                const before = try tmp.dir.readFileAlloc(alloc, "koreterm.conf", 1 << 16);
                 defer alloc.free(before);
                 const added: []const u8 = switch (outside) {
                     .none => "",
@@ -24027,10 +24028,10 @@ test "settings a list that followed the file and one that kept its baseline are 
                 };
                 const edited = try std.mem.concat(alloc, u8, &.{ before, added });
                 defer alloc.free(edited);
-                try tmp.dir.writeFile(.{ .sub_path = "noctty.conf", .data = edited });
+                try tmp.dir.writeFile(.{ .sub_path = "koreterm.conf", .data = edited });
                 settings.save();
                 try std.testing.expectEqual(@as(u32, 1), fixture.saved);
-                const after = try tmp.dir.readFileAlloc(alloc, "noctty.conf", 1 << 16);
+                const after = try tmp.dir.readFileAlloc(alloc, "koreterm.conf", 1 << 16);
                 defer alloc.free(after);
                 switch (outside) {
                     // Each list in its own state: no false conflict.
@@ -24091,7 +24092,7 @@ test "settings the Profiles page lists the profiles and their fields, made with 
             settings.profile_list.selectPosition(2);
             var help_buf: [2048]u8 = undefined;
             const help = referenceUiaRowHelp(&settings.profile_list, 2, &help_buf);
-            try std.testing.expect(std.mem.endsWith(u8, help, "Set in noctty.conf, line 1"));
+            try std.testing.expect(std.mem.endsWith(u8, help, "Set in koreterm.conf, line 1"));
 
             // The page is one window, and another page takes it away.
             settings.setActiveSection(.terminal);
@@ -24235,7 +24236,7 @@ test "settings a profile's field is typed into in place, and Save writes its lin
 
             settings.save();
             try std.testing.expectEqual(@as(u32, 1), fixture.saved);
-            const after = try tmp.dir.readFileAlloc(alloc, "noctty.conf", 1 << 20);
+            const after = try tmp.dir.readFileAlloc(alloc, "koreterm.conf", 1 << 20);
             defer alloc.free(after);
             try expectSameText("# mine\nprofile-command = py: python.exe -X utf8\nprofile-name = py: Python\nprofile-command = other: o.exe\n", after);
             try std.testing.expect(!settings.hasPendingChanges());
@@ -24289,7 +24290,7 @@ test "settings a new profile asks for its id, then its command line, and Save ap
             try expectSameText("dev, profile user:dev, new, not saved yet", profileRowName(settings, selected, &buf));
 
             settings.save();
-            const after = try tmp.dir.readFileAlloc(alloc, "noctty.conf", 1 << 20);
+            const after = try tmp.dir.readFileAlloc(alloc, "koreterm.conf", 1 << 20);
             defer alloc.free(after);
             try expectSameText("profile-command = py: python.exe\n\nprofile-command = dev: cmd.exe /k\n", after);
         }
@@ -24341,7 +24342,7 @@ test "settings removing a profile takes a second Delete, says what it does, and 
             // it: its line becomes the tombstone, which keeps the id known
             // to the loader (`settings_patch.referencedElsewhere`).
             settings.save();
-            const after = try tmp.dir.readFileAlloc(alloc, "noctty.conf", 1 << 20);
+            const after = try tmp.dir.readFileAlloc(alloc, "koreterm.conf", 1 << 20);
             defer alloc.free(after);
             try expectSameText("profile-command = py:\ndefault-profile = py\nprofile-command = keep: k.exe\n", after);
         }
@@ -25220,7 +25221,7 @@ test "settings the Profiles page lists every profile, and Alt+Up, Ctrl+H and the
 
             // Saved: the file gets both lists whole, after its own lines.
             settings.save();
-            const text = try tmp.dir.readFileAlloc(alloc, "noctty.conf", 1 << 16);
+            const text = try tmp.dir.readFileAlloc(alloc, "koreterm.conf", 1 << 16);
             defer alloc.free(text);
             try std.testing.expect(std.mem.indexOf(u8, text, "profile-order =\nprofile-order = user:py\nprofile-order = pwsh.exe\nprofile-order = cmd.exe\n") != null);
             try std.testing.expect(std.mem.indexOf(u8, text, "profile-hidden =\nprofile-hidden = cmd.exe\n") != null);
@@ -25341,14 +25342,14 @@ test "settings the Profiles page asks for the profiles once, never when a discov
             var buf: [512]u8 = undefined;
             _ = sys.SendMessageW(hwnd, WM_SYSKEYDOWN, focus_cue.vk_up, 1 << 29);
             try std.testing.expectEqual(@as(u32, 1), fixture.find_all_calls);
-            try expectSameText("noctty is looking for the profiles on this computer: the order can be changed once it has them all.", try statusTextOf(settings, &buf));
+            try expectSameText("koreterm is looking for the profiles on this computer: the order can be changed once it has them all.", try statusTextOf(settings, &buf));
             try std.testing.expect(!settings.hasPendingChanges());
             // The pointer asks too: the row's buttons are enabled for it.
             const up = settings.profile_buttons[0] orelse return error.TestExpectedButton;
             try std.testing.expect(sys.IsWindowEnabled(up) != 0);
             _ = sys.SendMessageW(up, BM_CLICK, 0, 0);
             try std.testing.expectEqual(@as(u32, 2), fixture.find_all_calls);
-            try expectSameText("noctty is looking for the profiles on this computer: the order can be changed once it has them all.", try statusTextOf(settings, &buf));
+            try expectSameText("koreterm is looking for the profiles on this computer: the order can be changed once it has them all.", try statusTextOf(settings, &buf));
             // This time the whole list comes at once: py moves.
             fixture.find_all_gives = &whole;
             _ = sys.SendMessageW(hwnd, WM_SYSKEYDOWN, focus_cue.vk_up, 1 << 29);
@@ -25393,7 +25394,7 @@ test "settings a search on the Profiles page finds its rows among a list that ar
     }.body);
 }
 
-test "settings a pinned profile is named when it stops a move, a hidden default says new tabs still start it, and noctty's own hidden ones stay hidden" {
+test "settings a pinned profile is named when it stops a move, a hidden default says new tabs still start it, and koreterm's own hidden ones stay hidden" {
     try dialog_test.onHiddenDesktop(struct {
         fn body() !void {
             const keyboard = win32_input.TestingKeyboard.pinNone();
@@ -25427,7 +25428,7 @@ test "settings a pinned profile is named when it stops a move, a hidden default 
             _ = sys.SendMessageW(hwnd, WM_KEYDOWN, 'H', 0);
             try dialog_test.holdKeys(.{});
             try expectSameText("PowerShell is hidden: the picker, the palette and the jump list leave it out. Default profile names it, so new tabs still start it.", try statusTextOf(settings, &buf));
-            // The Visual Studio that noctty hides is not shown, and the Show
+            // The Visual Studio that koreterm hides is not shown, and the Show
             // button is disabled for it.
             const old = settings.profile_model.findField(.profile, "vs:old:cmd", null) orelse return error.TestExpectedRow;
             try selectProfileRow(list, old);
@@ -25743,7 +25744,7 @@ test "settings the Profiles page moves and hides nothing while the command line,
                 // Nothing to save, and nothing written.
                 try std.testing.expect(!settings.hasPendingChanges());
                 settings.save();
-                const file = try tmp.dir.readFileAlloc(alloc, "noctty.conf", 1 << 16);
+                const file = try tmp.dir.readFileAlloc(alloc, "koreterm.conf", 1 << 16);
                 defer alloc.free(file);
                 try expectSameText(text, file);
             }
@@ -25794,12 +25795,12 @@ test "settings a profile change whose lists could not be worked out is worked ou
                 try std.testing.expect(settings.profile_lists_unsettled);
                 // Save while it still cannot: nothing is written, the draft
                 // and its new profile are kept, and the status says so.
-                const before = try tmp.dir.readFileAlloc(alloc, "noctty.conf", 1 << 16);
+                const before = try tmp.dir.readFileAlloc(alloc, "koreterm.conf", 1 << 16);
                 defer alloc.free(before);
                 const saves = fixture.saved;
                 settings.save();
                 try std.testing.expectEqual(saves, fixture.saved);
-                const unchanged = try tmp.dir.readFileAlloc(alloc, "noctty.conf", 1 << 16);
+                const unchanged = try tmp.dir.readFileAlloc(alloc, "koreterm.conf", 1 << 16);
                 defer alloc.free(unchanged);
                 try expectSameText(before, unchanged);
                 try std.testing.expect((settings.pending orelse return error.TestExpectedDraft).@"profile-command".get("dev") != null);
@@ -25810,7 +25811,7 @@ test "settings a profile change whose lists could not be worked out is worked ou
                 SettingsWindow.test_profile_settle_fails = false;
                 settings.save();
                 try std.testing.expect(!settings.profile_lists_unsettled);
-                const after = try tmp.dir.readFileAlloc(alloc, "noctty.conf", 1 << 16);
+                const after = try tmp.dir.readFileAlloc(alloc, "koreterm.conf", 1 << 16);
                 defer alloc.free(after);
                 try std.testing.expect(std.mem.indexOf(u8, after, "profile-order = user:dev\n") != null);
             }
@@ -25858,7 +25859,7 @@ test "settings a profile change on a page with part of the profiles leaves its l
                 try std.testing.expect(fixture.pumpKey(VK_RETURN));
                 try std.testing.expect(settings.profile_lists_unsettled);
                 try std.testing.expect(!settings.profile_model.complete);
-                const before = try tmp.dir.readFileAlloc(alloc, "noctty.conf", 1 << 16);
+                const before = try tmp.dir.readFileAlloc(alloc, "koreterm.conf", 1 << 16);
                 defer alloc.free(before);
                 if (part == .discovery_partial) {
                     // Save asks for the rest; none comes yet: nothing is
@@ -25868,7 +25869,7 @@ test "settings a profile change on a page with part of the profiles leaves its l
                     settings.save();
                     try std.testing.expect(fixture.find_all_calls > asked);
                     try std.testing.expectEqual(saves, fixture.saved);
-                    const unchanged = try tmp.dir.readFileAlloc(alloc, "noctty.conf", 1 << 16);
+                    const unchanged = try tmp.dir.readFileAlloc(alloc, "koreterm.conf", 1 << 16);
                     defer alloc.free(unchanged);
                     try expectSameText(before, unchanged);
                     try std.testing.expectEqual(StatusNote.profile_refused, settings.status_note);
@@ -25880,7 +25881,7 @@ test "settings a profile change on a page with part of the profiles leaves its l
                 // out, and the saved order names the new profile.
                 settings.save();
                 try std.testing.expect(!settings.profile_lists_unsettled);
-                const after = try tmp.dir.readFileAlloc(alloc, "noctty.conf", 1 << 16);
+                const after = try tmp.dir.readFileAlloc(alloc, "koreterm.conf", 1 << 16);
                 defer alloc.free(after);
                 try std.testing.expect(std.mem.indexOf(u8, after, "profile-order = user:dev\n") != null);
             }
@@ -26338,7 +26339,7 @@ test "settings Alt+Up on the Profiles page leaves no Alt press behind to open th
     }.body);
 }
 
-test "settings a profile noctty found is moved and hidden, never edited or removed, and nothing moves before the list is whole" {
+test "settings a profile koreterm found is moved and hidden, never edited or removed, and nothing moves before the list is whole" {
     try dialog_test.onHiddenDesktop(struct {
         fn body() !void {
             const keyboard = win32_input.TestingKeyboard.pinNone();
@@ -26362,7 +26363,7 @@ test "settings a profile noctty found is moved and hidden, never edited or remov
             const hwnd = list.hwnd orelse return error.TestExpectedList;
             var buf: [512]u8 = undefined;
             _ = sys.SendMessageW(hwnd, WM_SYSKEYDOWN, focus_cue.vk_up, 1 << 29);
-            try expectSameText("noctty is looking for the profiles on this computer: the order can be changed once it has them all.", try statusTextOf(settings, &buf));
+            try expectSameText("koreterm is looking for the profiles on this computer: the order can be changed once it has them all.", try statusTextOf(settings, &buf));
             try std.testing.expect(!settings.hasPendingChanges());
             // Whole: Enter and Delete say what can be done, and open and
             // remove nothing.
@@ -26370,9 +26371,9 @@ test "settings a profile noctty found is moved and hidden, never edited or remov
             try selectProfileRow(list, settings.profile_model.findField(.profile, "pwsh.exe", null) orelse return error.TestExpectedRow);
             try std.testing.expect(fixture.pumpKey(VK_RETURN));
             try std.testing.expect(settings.profile_edit == null);
-            try expectSameText("noctty found pwsh.exe on this computer, so Settings does not change its command line. Alt+Up and Alt+Down move it; Ctrl+H hides it.", try statusTextOf(settings, &buf));
+            try expectSameText("koreterm found pwsh.exe on this computer, so Settings does not change its command line. Alt+Up and Alt+Down move it; Ctrl+H hides it.", try statusTextOf(settings, &buf));
             try std.testing.expect(fixture.pumpKey(VK_DELETE));
-            try expectSameText("noctty finds pwsh.exe on this computer, so it cannot be removed; Ctrl+H hides it from the picker.", try statusTextOf(settings, &buf));
+            try expectSameText("koreterm finds pwsh.exe on this computer, so it cannot be removed; Ctrl+H hides it from the picker.", try statusTextOf(settings, &buf));
             try std.testing.expect(!settings.hasPendingChanges());
             // It moves, though.
             _ = sys.SendMessageW(hwnd, WM_SYSKEYDOWN, focus_cue.vk_up, 1 << 29);
@@ -26515,7 +26516,7 @@ test "settings a profile field a later file masks is saved, and the status names
             _ = sys.SendMessageW(settings.btn_save.?, BM_CLICK, 0, 0);
             try std.testing.expect(settings.profile_edit == null);
             try std.testing.expectEqual(@as(u32, 1), fixture.saved);
-            const after = try tmp.dir.readFileAlloc(alloc, "noctty.conf", 1 << 20);
+            const after = try tmp.dir.readFileAlloc(alloc, "koreterm.conf", 1 << 20);
             defer alloc.free(after);
             try expectSameText("profile-command = team: t.exe\nprofile-name = team: Mine\nconfig-file = later.conf\n", after);
             try std.testing.expectEqual(StatusNote.saved_overridden, settings.status_note);
@@ -26527,7 +26528,7 @@ test "settings a profile field a later file masks is saved, and the status names
     }.body);
 }
 
-test "settings a profile from noctty's command line is shown and not changed" {
+test "settings a profile from koreterm's command line is shown and not changed" {
     try dialog_test.onHiddenDesktop(struct {
         fn body() !void {
             // Keys read as pressed alone, whatever the live keyboard holds.
@@ -26550,7 +26551,7 @@ test "settings a profile from noctty's command line is shown and not changed" {
             try std.testing.expect(settings.profile_edit == null);
             try std.testing.expect(fixture.pumpKey(VK_DELETE));
             try std.testing.expect(!settings.hasPendingChanges());
-            try expectSameText("Profile cli comes from noctty's command line, so Settings does not change it.", try statusTextOf(settings, &buf));
+            try expectSameText("Profile cli comes from koreterm's command line, so Settings does not change it.", try statusTextOf(settings, &buf));
         }
     }.body);
 }
@@ -26928,7 +26929,7 @@ test "settings an edit begun on the All settings page round-trips through Save, 
             var tmp = std.testing.tmpDir(.{});
             defer tmp.cleanup();
             const before =
-                "# noctty config, kept by hand\n" ++
+                "# koreterm config, kept by hand\n" ++
                 "font-family = Cascadia Code\n" ++
                 "font-size   =   13\n" ++
                 "\n" ++
@@ -26967,7 +26968,7 @@ test "settings an edit begun on the All settings page round-trips through Save, 
             // The edited line is rewritten in place and the new key is added
             // at the end; every other byte is the file's.
             try std.testing.expectEqualStrings(
-                "# noctty config, kept by hand\n" ++
+                "# koreterm config, kept by hand\n" ++
                     "font-family = Cascadia Code\n" ++
                     "font-size = 15\n" ++
                     "\n" ++
@@ -28716,13 +28717,13 @@ test "win32_settings: direct command edit text quotes argv boundaries" {
     defer arena.deinit();
 
     var source: Config.Command = undefined;
-    try source.parseCLI(arena.allocator(), "direct:cmd.exe /c \"echo hello\" \"C:\\Program Files\\noctty\"");
+    try source.parseCLI(arena.allocator(), "direct:cmd.exe /c \"echo hello\" \"C:\\Program Files\\koreterm\"");
 
     var buf: [256]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buf);
     try writeCommandForEdit(&writer, source);
     try testing.expectEqualStrings(
-        "direct:cmd.exe /c \"echo hello\" \"C:\\Program Files\\noctty\"",
+        "direct:cmd.exe /c \"echo hello\" \"C:\\Program Files\\koreterm\"",
         writer.buffered(),
     );
 
@@ -28731,7 +28732,7 @@ test "win32_settings: direct command edit text quotes argv boundaries" {
     try testing.expect(round_trip == .direct);
     try testing.expectEqual(@as(usize, 4), round_trip.direct.len);
     try testing.expectEqualStrings("echo hello", round_trip.direct[2]);
-    try testing.expectEqualStrings("C:\\Program Files\\noctty", round_trip.direct[3]);
+    try testing.expectEqualStrings("C:\\Program Files\\koreterm", round_trip.direct[3]);
 }
 
 test "win32_settings: keybinding help points to discoverability commands" {
@@ -29114,7 +29115,7 @@ test "settings toggles round-trip through Save from a click and from Space, the 
             var tmp = std.testing.tmpDir(.{});
             defer tmp.cleanup();
             const before =
-                "# noctty config, kept by hand\n" ++
+                "# koreterm config, kept by hand\n" ++
                 "clipboard-trim-trailing-spaces   =   true\n" ++
                 "\n" ++
                 "  # an indented comment, and a line Settings has no control for\n" ++
@@ -29165,7 +29166,7 @@ test "settings toggles round-trip through Save from a click and from Space, the 
             // The edited line is rewritten in place and the new key is added
             // at the end; every other byte is the file's.
             try std.testing.expectEqualStrings(
-                "# noctty config, kept by hand\n" ++
+                "# koreterm config, kept by hand\n" ++
                     "clipboard-trim-trailing-spaces = false\n" ++
                     "\n" ++
                     "  # an indented comment, and a line Settings has no control for\n" ++
@@ -29329,7 +29330,7 @@ test "settings the trackbar and up-downs round-trip through Save, the rest of th
             var tmp = std.testing.tmpDir(.{});
             defer tmp.cleanup();
             const before =
-                "# noctty config, kept by hand\n" ++
+                "# koreterm config, kept by hand\n" ++
                 "background-opacity   =   0.9\n" ++
                 "\n" ++
                 "  # an indented comment, and a line Settings has no control for\n" ++
@@ -29368,7 +29369,7 @@ test "settings the trackbar and up-downs round-trip through Save, the rest of th
             // The edited line is rewritten in place and the new keys are
             // added at the end; every other byte is the file's.
             var expected: [512]u8 = undefined;
-            try std.testing.expectEqualStrings(try std.fmt.bufPrint(&expected, "# noctty config, kept by hand\n" ++
+            try std.testing.expectEqualStrings(try std.fmt.bufPrint(&expected, "# koreterm config, kept by hand\n" ++
                 "background-opacity = 0.89\n" ++
                 "\n" ++
                 "  # an indented comment, and a line Settings has no control for\n" ++

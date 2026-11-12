@@ -1063,7 +1063,7 @@ const WglPixelFormatSelector = struct {
     }
 };
 
-const wgl_bootstrap_class_name = std.unicode.utf8ToUtf16LeStringLiteral("noctty.win32.wgl_bootstrap");
+const wgl_bootstrap_class_name = std.unicode.utf8ToUtf16LeStringLiteral("koreterm.win32.wgl_bootstrap");
 
 fn wglBootstrapWindowProc(
     hwnd: HWND,

@@ -1,10 +1,10 @@
--- Noctty cmd.exe shell integration for Clink.
+-- Koreterm cmd.exe shell integration for Clink.
 -- PROMPT supplies the plain-cmd fallback; Clink adds C/D and protects the
 -- prompt marks from themes which replace PROMPT and stop the filter chain.
 
 local ESC = string.char(27)
 local BEL = string.char(7)
-local state_key = "__noctty_cmd_shell_integration"
+local state_key = "__koreterm_cmd_shell_integration"
 local state = rawget(_G, state_key)
 
 if not state then

@@ -1,17 +1,17 @@
 #requires -Version 7.0
 <#
-Ephemeral-runner `-Embedding` lifecycle (PKG-76, G050). Windows starts `noctty.exe -Embedding` to hand it a
+Ephemeral-runner `-Embedding` lifecycle (PKG-76, G050). Windows starts `koreterm.exe -Embedding` to hand it a
 delegated console (windows.md, "Default terminal"). This starts the same process with nothing to
 hand it and checks what an idle handoff server does to a user's data:
 
   * it opens no window of its own and exits by itself once its five-second idle timer expires, with
     exit code 0 (the log line "terminal handoff server idle timeout" is the evidence of the path).
-    The windows allowed are the never-shown top-level lifecycle window (noctty.win32.lifecycle)
-    that every noctty process makes so that Restart Manager can ask it to close, and the default IME
+    The windows allowed are the never-shown top-level lifecycle window (koreterm.win32.lifecycle)
+    that every koreterm process makes so that Restart Manager can ask it to close, and the default IME
     windows Windows gives its thread for it; all must stay hidden;
   * every state file that already existed is byte-identical afterwards: session-state.json,
     palette-mru.txt, update-state.json, jump-list-recents.json, startup-attempts.json and
-    config.ghostty, in the portable directory and in the redirected LOCALAPPDATA\noctty;
+    config.ghostty, in the portable directory and in the redirected LOCALAPPDATA\koreterm;
   * nothing is quarantined (no *.corrupt* sibling) and no recovery ledger is created;
   * the Windows console delegation values in HKCU\Console\%%Startup are unchanged (read, never written).
 
@@ -19,10 +19,10 @@ It never changes the delegation registry, registers a COM class in the registry,
 handoff. Journeys that need a delegation change (show state, title, elevated consoles, unregister
 residue) are not covered here; they need a machine that can be restored.
 
-Run with -Bin <directory holding noctty.exe and its sibling files> -Run <new evidence directory>. The
+Run with -Bin <directory holding koreterm.exe and its sibling files> -Run <new evidence directory>. The
 binary must carry the measurement AUMID unless -AllowProductAumid is given (an ephemeral CI runner).
 Before any launch, the delegation guard must pass: this refuses to run while HKCU Console\%%Startup
-selects noctty as DelegationTerminal, because the real COM handoff CLSID is shared even by a
+selects koreterm as DelegationTerminal, because the real COM handoff CLSID is shared even by a
 measurement build. Run only in a sandbox with independent delegation in that case; no bypass exists.
 Exit 1 when a check fails. The optional Windows 10 branches workflow runs both modes.
 Launches currently require an ephemeral GitHub-hosted runner. Job/thread desktop metadata is
@@ -46,7 +46,7 @@ Assert-HiddenRunner
 Assert-EmbeddingDelegationSafe
 
 if (-not $Driver) {
-    Assert-MeasureAumid (Join-Path (Resolve-Path -LiteralPath $Bin).Path 'noctty.exe') -AllowProductAumid:$AllowProductAumid
+    Assert-MeasureAumid (Join-Path (Resolve-Path -LiteralPath $Bin).Path 'koreterm.exe') -AllowProductAumid:$AllowProductAumid
     $extra = @(); if ($AllowProductAumid) { $extra += '-AllowProductAumid' }; if ($NegativeControl) { $extra += '-NegativeControl' }
     if ($Renderer) { $extra += @('-Renderer', $Renderer) }
     Invoke-HiddenDriver -Script $PSCommandPath -Bin $Bin -Run $Run -TimeoutSeconds $DriverTimeoutSeconds -ExtraArguments $extra -Label 'Hidden embedding idle'
@@ -54,7 +54,7 @@ if (-not $Driver) {
 }
 
 $desktopName = [HiddenWin]::CurrentDesktopName()
-if (-not $desktopName.StartsWith('noctty-hw-')) { throw "Driver is not on its own desktop (found '$desktopName')." }
+if (-not $desktopName.StartsWith('koreterm-hw-')) { throw "Driver is not on its own desktop (found '$desktopName')." }
 $sentinel = [HiddenWin]::CreateDriverSentinel()
 $driverFailure = $null; $job = [IntPtr]::Zero; $driverApproved = $false
 try {
@@ -69,7 +69,7 @@ function Hash-Of([string] $Path) { if (Test-Path -LiteralPath $Path) { (Get-File
 
 $dir = Join-Path $Run 'embedding\bin'
 Copy-PortableBin $Bin $dir
-$stateDirs = @($dir, (Join-Path $env:LOCALAPPDATA 'noctty'))
+$stateDirs = @($dir, (Join-Path $env:LOCALAPPDATA 'koreterm'))
 [void](New-Item -ItemType Directory -Force -Path $stateDirs[1])
 $session = '{"schema_version":1,"added_later":{"generation":7},"windows":[{"selected_tab":0,"tabs":[{"selected_leaf":0,"layout":{"root":0,"nodes":[{"pane":{"cwd":"C:\\Windows","profile":"cmd.exe"}}]}}]}]}'
 $seeds = [ordered]@{
@@ -95,12 +95,12 @@ $delegationBefore = Get-Delegation
 
 $stderr = Join-Path $Run 'embedding\stderr.txt'
 $classes = [Collections.Generic.HashSet[string]]::new()
-$uniqueClass = "--class=noctty-test-pkg76-embedding-$([guid]::NewGuid().ToString('N').Substring(0, 8))"
+$uniqueClass = "--class=koreterm-test-pkg76-embedding-$([guid]::NewGuid().ToString('N').Substring(0, 8))"
 # -Embedding stops option parsing: isolation must precede that marker.
 $launchArguments = @('--single-instance=false', $uniqueClass)
 if (-not $NegativeControl) { $launchArguments += '-Embedding' }
 Assert-EmbeddingDelegationSafe
-$started = Start-HiddenNoctty -Dir $dir -DesktopName $desktopName -Job $job -StderrPath $stderr -Arguments $launchArguments
+$started = Start-HiddenKoreterm -Dir $dir -DesktopName $desktopName -Job $job -StderrPath $stderr -Arguments $launchArguments
 $sw = [Diagnostics.Stopwatch]::StartNew()
 $closed = $false
 try {

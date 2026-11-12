@@ -359,12 +359,12 @@ fn buildHostAwareBaseTitle(
     else
         null;
     const composed = if (host.total <= 1)
-        try alloc.dupe(u8, normalized_title orelse "noctty")
+        try alloc.dupe(u8, normalized_title orelse "koreterm")
     else
         try std.fmt.allocPrint(
             alloc,
             "[{d}/{d}] {s}",
-            .{ host.index + 1, host.total, normalized_title orelse "noctty" },
+            .{ host.index + 1, host.total, normalized_title orelse "koreterm" },
         );
     defer alloc.free(composed);
     return try win32_elevation.allocPrefixedTitle(alloc, composed, elevated);
@@ -2828,7 +2828,7 @@ pub const Host = struct {
                 else if (saved_partly_applied)
                     "Theme saved; the saved settings may be only partly applied"
                 else if (self.app.safe_mode)
-                    "Theme saved; restart noctty to apply it"
+                    "Theme saved; restart koreterm to apply it"
                 else
                     "Theme applied",
             );
@@ -2837,7 +2837,7 @@ pub const Host = struct {
         if (self.app.safe_mode) {
             runUiActionOrLog(
                 "palette recovery theme banner failed",
-                self.setBanner(.info, "Theme saved; restart noctty to apply it."),
+                self.setBanner(.info, "Theme saved; restart koreterm to apply it."),
             );
         }
         if (saved_but_masked) {
@@ -6629,11 +6629,11 @@ pub const Host = struct {
         try std.testing.expect(bannerTestVisible(dismiss));
         var name_buf: [256]u8 = undefined;
         try std.testing.expectEqualStrings(
-            "Update available: noctty 1.3.200 is ready on GitHub Releases.",
+            "Update available: koreterm 1.3.200 is ready on GitHub Releases.",
             bannerUiaName(@ptrCast(&host), 0, &name_buf),
         );
         try std.testing.expectEqualStrings(
-            "Open Release: Update available: noctty 1.3.200 is ready on GitHub Releases.",
+            "Open Release: Update available: koreterm 1.3.200 is ready on GitHub Releases.",
             bannerButtonUiaName(@ptrCast(&host), @intFromEnum(BannerButton.primary), &name_buf),
         );
         try std.testing.expectEqualStrings("Dismiss update notice", bannerButtonUiaName(@ptrCast(&host), @intFromEnum(BannerButton.dismiss), &name_buf));
@@ -6707,7 +6707,7 @@ pub const Host = struct {
             }
         };
         var name_buf: [64]u8 = undefined;
-        const name = try std.fmt.bufPrint(&name_buf, "noctty-banner-test-{x}-{d}", .{ @intFromPtr(&name_buf), sys.GetTickCount64() });
+        const name = try std.fmt.bufPrint(&name_buf, "koreterm-banner-test-{x}-{d}", .{ @intFromPtr(&name_buf), sys.GetTickCount64() });
         const wide_name = try std.unicode.utf8ToUtf16LeAllocZ(std.testing.allocator, name);
         defer std.testing.allocator.free(wide_name);
         const desktop = Desktop.CreateDesktopW(wide_name.ptr, null, null, 0, 0x10000000, null) orelse return error.SkipZigTest;
@@ -6847,7 +6847,7 @@ pub const Host = struct {
         try std.testing.expect(host.banner_expires_at != null);
     }
 
-    test "NOCTTY_RENDERER_KEEP_NOTICES keeps info banners up in test-tools builds only" {
+    test "KORETERM_RENDERER_KEEP_NOTICES keeps info banners up in test-tools builds only" {
         if (builtin.os.tag != .windows) return error.SkipZigTest;
         try runOnPrivateDesktop(bannerKeepNoticesTestBody);
     }
@@ -6869,7 +6869,7 @@ pub const Host = struct {
         _ = sys.ShowWindow(window.parent, c.SW_SHOWNOACTIVATE);
         host.refreshSurfaceVisibility();
 
-        const name = std.unicode.utf8ToUtf16LeStringLiteral("NOCTTY_RENDERER_KEEP_NOTICES");
+        const name = std.unicode.utf8ToUtf16LeStringLiteral("KORETERM_RENDERER_KEEP_NOTICES");
         if (windows.kernel32.SetEnvironmentVariableW(name, std.unicode.utf8ToUtf16LeStringLiteral("1")) == 0) return lastError();
         defer _ = windows.kernel32.SetEnvironmentVariableW(name, null);
         try host.setBanner(.info, "OpenGL could not start.");
@@ -8241,7 +8241,8 @@ pub const Host = struct {
         _ = sys.AppendMenuW(menu, c.MF_SEPARATOR, 0, null);
         _ = sys.AppendMenuW(menu, c.MF_STRING, c.CTX_SETTINGS, std.unicode.utf8ToUtf16LeStringLiteral("Settings...\tCtrl+,"));
         _ = sys.AppendMenuW(menu, c.MF_STRING, c.CTX_BACKUP, std.unicode.utf8ToUtf16LeStringLiteral("Back up all settings (.zip)..."));
-        _ = sys.AppendMenuW(menu, c.MF_STRING, c.CTX_ABOUT, std.unicode.utf8ToUtf16LeStringLiteral("About noctty"));
+        _ = sys.AppendMenuW(menu, c.MF_STRING, c.CTX_SHORTCUTS, std.unicode.utf8ToUtf16LeStringLiteral("Create Desktop and Start Menu Shortcuts"));
+        _ = sys.AppendMenuW(menu, c.MF_STRING, c.CTX_ABOUT, std.unicode.utf8ToUtf16LeStringLiteral("About koreterm"));
 
         _ = sys.SetForegroundWindow(hwnd);
         const cmd = sys.TrackPopupMenu(menu, c.TPM_RETURNCMD | c.TPM_RIGHTBUTTON | c.TPM_LEFTALIGN | c.TPM_TOPALIGN, rect.left, rect.bottom, 0, hwnd, null);
@@ -8297,6 +8298,10 @@ pub const Host = struct {
             },
             c.CTX_ABOUT => {
                 self.showAbout();
+                return;
+            },
+            c.CTX_SHORTCUTS => {
+                self.createShortcuts();
                 return;
             },
             c.CTX_BACKUP => {
@@ -8377,16 +8382,43 @@ pub const Host = struct {
 
     extern "user32" fn MessageBoxW(hwnd: ?HWND, text: [*:0]const u16, caption: [*:0]const u16, kind: u32) callconv(.winapi) i32;
 
-    /// The ▾ menu's About noctty: the version, in a Windows dialog.
+    /// The ▾ menu's About koreterm: the version, in a Windows dialog.
     fn showAbout(self: *Host) void {
         const alloc = self.app.core_app.alloc;
-        const text = std.fmt.allocPrint(alloc, "noctty {s}\n\nA Windows terminal based on Ghostty, with Remote Desktop tabs.", .{build_config.version_string}) catch return;
+        const text = std.fmt.allocPrint(alloc, "koreterm {s}\n\nA Windows terminal based on Ghostty, with Remote Desktop tabs.", .{build_config.version_string}) catch return;
         defer alloc.free(text);
         const text_w = std.unicode.utf8ToUtf16LeAllocZ(alloc, text) catch return;
         defer alloc.free(text_w);
         const MB_OK: u32 = 0x0;
         const MB_ICONINFORMATION: u32 = 0x40;
-        _ = MessageBoxW(self.hwnd, text_w.ptr, std.unicode.utf8ToUtf16LeStringLiteral("About noctty"), MB_OK | MB_ICONINFORMATION);
+        _ = MessageBoxW(self.hwnd, text_w.ptr, std.unicode.utf8ToUtf16LeStringLiteral("About koreterm"), MB_OK | MB_ICONINFORMATION);
+    }
+
+    /// The ▾ menu's shortcut item: koreterm.lnk on the Desktop and in the
+    /// Start menu, then a Windows dialog that says what was made.
+    fn createShortcuts(self: *Host) void {
+        const shortcuts = @import("desktop_shortcuts.zig");
+        const alloc = self.app.core_app.alloc;
+        const desktop = if (shortcuts.create(alloc, .desktop)) |_| true else |err| blk: {
+            log.warn("desktop shortcut failed err={}", .{err});
+            break :blk false;
+        };
+        const start = if (shortcuts.create(alloc, .start_menu)) |_| true else |err| blk: {
+            log.warn("start menu shortcut failed err={}", .{err});
+            break :blk false;
+        };
+        const ok = desktop and start;
+        const text = if (ok)
+            std.unicode.utf8ToUtf16LeStringLiteral("Shortcuts to koreterm were created on the Desktop and in the Start menu.")
+        else if (desktop)
+            std.unicode.utf8ToUtf16LeStringLiteral("The Desktop shortcut was created, but the Start menu one could not be.")
+        else if (start)
+            std.unicode.utf8ToUtf16LeStringLiteral("The Start menu shortcut was created, but the Desktop one could not be.")
+        else
+            std.unicode.utf8ToUtf16LeStringLiteral("The shortcuts could not be created.");
+        const MB_ICONINFORMATION: u32 = 0x40;
+        const MB_ICONWARNING: u32 = 0x30;
+        _ = MessageBoxW(self.hwnd, text, std.unicode.utf8ToUtf16LeStringLiteral("koreterm"), if (ok) MB_ICONINFORMATION else MB_ICONWARNING);
     }
 
     pub const isOverlayButton = overlay_session.HostControls.isOverlayButton;
@@ -9073,7 +9105,7 @@ pub const Host = struct {
                 }
                 const action = input.Binding.Action.parse(text) catch |err| {
                     log.warn("win32 command palette invalid action action={f} err={}", .{ internal_os.redact.bytes(text), err });
-                    try self.setBanner(.err, "Unknown Noctty action. Example: new_tab or toggle_fullscreen");
+                    try self.setBanner(.err, "Unknown Koreterm action. Example: new_tab or toggle_fullscreen");
                     if (self.palette_list_uia_provider) |provider| {
                         win32_uia.events.raiseNotification(&provider.base, .action_aborted, "Unknown command");
                     }
@@ -11686,7 +11718,7 @@ test "win32 elevated host title prefixes surface and default title once" {
         .total = 1,
     }, true);
     defer std.testing.allocator.free(default);
-    try std.testing.expectEqualStrings("Administrator: noctty", default);
+    try std.testing.expectEqualStrings("Administrator: koreterm", default);
 
     const idempotent = try buildHostAwareBaseTitle(std.testing.allocator, "Administrator: pwsh", .{
         .index = 1,

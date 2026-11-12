@@ -2,7 +2,7 @@
   "files": [
     {
       "path": "AGENTS.md",
-      "description": "Repository-specific agent instructions: commands, running noctty safely, Win32 FFI, fork-targeting rules, and the index of the Self-Correction Log area files."
+      "description": "Repository-specific agent instructions: commands, running koreterm safely, Win32 FFI, fork-targeting rules, and the index of the Self-Correction Log area files."
     },
     {
       "path": "docs/agents/log/conpty.md",

@@ -17,10 +17,10 @@ pub fn genActions(writer: *std.Io.Writer) !void {
     try writer.writeAll(
         \\---
         \\title: Reference
-        \\description: Reference of all noctty action subcommands.
+        \\description: Reference of all koreterm action subcommands.
         \\editOnGithubLink: https://github.com/amanthanvi/noctty/tree/main/src/cli
         \\---
-        \\noctty includes a number of utility actions that can be accessed as subcommands.
+        \\koreterm includes a number of utility actions that can be accessed as subcommands.
         \\Actions provide utilities to work with config, list keybinds, list fonts, demo themes,
         \\and debug.
         \\
@@ -44,8 +44,8 @@ pub fn genActions(writer: *std.Io.Writer) !void {
             }
             try writer.writeAll("\n```\n");
             switch (action) {
-                .help, .version => try writer.writeAll("noctty --" ++ field.name ++ "\n"),
-                else => try writer.writeAll("noctty +" ++ field.name ++ "\n"),
+                .help, .version => try writer.writeAll("koreterm --" ++ field.name ++ "\n"),
+                else => try writer.writeAll("koreterm +" ++ field.name ++ "\n"),
             }
             try writer.writeAll("```\n\n");
         }

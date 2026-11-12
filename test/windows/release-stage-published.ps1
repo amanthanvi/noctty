@@ -46,11 +46,11 @@ if ($env:FAKE_VERIFY -eq 'fail-after-download') {
 }
 foreach ($arch in 'x64', 'arm64') {
     foreach ($kind in 'setup.exe', 'portable.zip') {
-        Set-Content -LiteralPath (Join-Path $DownloadDirectory "noctty-$Version-windows-$arch-$kind") -Value "$arch $kind"
+        Set-Content -LiteralPath (Join-Path $DownloadDirectory "koreterm-$Version-windows-$arch-$kind") -Value "$arch $kind"
     }
     Set-Content -LiteralPath (Join-Path $DownloadDirectory "SHA256SUMS-windows-$arch.txt") -Value "sums $arch"
 }
-Set-Content -LiteralPath (Join-Path $DownloadDirectory 'noctty-icon.svg') -Value '<svg />'
+Set-Content -LiteralPath (Join-Path $DownloadDirectory 'koreterm-icon.svg') -Value '<svg />'
 '@
     # Stand-in generator: records how it was called.
     Set-Content -LiteralPath (Join-Path $scriptsDirectory 'package-package-managers.ps1') -Value @'
@@ -100,7 +100,7 @@ exit 2
             Packages   = @(if (Test-Path -LiteralPath $packageLog) { Get-Content -LiteralPath $packageLog })
             Staged     = Test-Path -LiteralPath (Join-Path $root 'dist')
             Downloaded = Test-Path -LiteralPath $downloadDirectory
-            Leftovers  = @(Get-ChildItem -LiteralPath $scratchTemp -Directory -Filter 'noctty-chocolatey-release-*')
+            Leftovers  = @(Get-ChildItem -LiteralPath $scratchTemp -Directory -Filter 'koreterm-chocolatey-release-*')
         }
     }
 
@@ -123,14 +123,14 @@ exit 2
     $result = Invoke-Stager -SourceRef 'abcdef0'
     $attestations = @($result.GhCalls | Where-Object { $_ -like 'attestation verify *' })
     Assert-Case 'both installers are verified against the tag commit' ($result.ExitCode -eq 0 -and $attestations.Count -eq 2 -and
-        @($attestations | Where-Object { $_ -match ('--source-digest ' + $tagCommit + '$') -and $_ -match '--signer-workflow amanthanvi/noctty/\.github/workflows/release\.yml' }).Count -eq 2 -and
+        @($attestations | Where-Object { $_ -match ('--source-digest ' + $tagCommit + '$') -and $_ -match '--signer-workflow amanthanvi/koreterm/\.github/workflows/release\.yml' }).Count -eq 2 -and
         ($attestations -join "`n") -match 'windows-x64-setup\.exe' -and ($attestations -join "`n") -match 'windows-arm64-setup\.exe') $result
     $stagedFiles = foreach ($architecture in @('x64', 'arm64')) {
         foreach ($kind in @('setup', 'portable', 'checksums')) {
-            Join-Path $root ("dist\artifacts\noctty-$version-windows-$architecture\" + (New-WindowsPackageArtifactName -Version $version -Architecture $architecture -Kind $kind))
+            Join-Path $root ("dist\artifacts\koreterm-$version-windows-$architecture\" + (New-WindowsPackageArtifactName -Version $version -Architecture $architecture -Kind $kind))
         }
     }
-    $stagedFiles += Join-Path $root "dist\artifacts\noctty-$version-windows-x64\noctty-icon.svg"
+    $stagedFiles += Join-Path $root "dist\artifacts\koreterm-$version-windows-x64\koreterm-icon.svg"
     Assert-Case 'the verified files are staged where the generator reads them' (@($stagedFiles | Where-Object { -not (Test-Path -LiteralPath $_ -PathType Leaf) }).Count -eq 0) $result
     Assert-Case 'the generator runs once for both architectures at the given source ref' ($result.Packages.Count -eq 1 -and $result.Packages[0] -ceq "$version|x64,arm64|abcdef0") $result
     Assert-Case 'each installer hash is printed for comparison' ($result.Output -match 'Installer x64 SHA-256: [0-9a-f]{64}' -and $result.Output -match 'Installer arm64 SHA-256: [0-9a-f]{64}') $result

@@ -48,7 +48,7 @@ try {
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
-if (-not $ExePath) { $ExePath = Join-Path $repoRoot 'zig-out\bin\noctty.exe' }
+if (-not $ExePath) { $ExePath = Join-Path $repoRoot 'zig-out\bin\koreterm.exe' }
 if (-not $RunRoot) { $RunRoot = Join-Path $repoRoot ('.zig-cache\pkg16\stale-modes-' + [guid]::NewGuid().ToString('N')) }
 if ($TimeoutSeconds -lt 1) { throw 'TimeoutSeconds must be positive.' }
 if ($Scenario -eq 'Paste' -and $Shells -contains 'pwsh') { throw 'Paste supports cmd only; use -Shells cmd.' }
@@ -220,21 +220,21 @@ if (-not $Worker) {
         $binaryBytes = [IO.File]::ReadAllBytes($ExePath)
         $binary = [Text.Encoding]::Unicode.GetString($binaryBytes)
         $oddBinary = if ($binaryBytes.Length -gt 1) { [Text.Encoding]::Unicode.GetString($binaryBytes, 1, $binaryBytes.Length - 1) } else { '' }
-        if ((-not $binary.Contains("io.github.amanthanvi.noctty.measure`0") -and -not $oddBinary.Contains("io.github.amanthanvi.noctty.measure`0")) -or
-            $binary.Contains("io.github.amanthanvi.noctty`0") -or $oddBinary.Contains("io.github.amanthanvi.noctty`0")) {
+        if ((-not $binary.Contains("io.github.amanthanvi.koreterm.measure`0") -and -not $oddBinary.Contains("io.github.amanthanvi.koreterm.measure`0")) -or
+            $binary.Contains("io.github.amanthanvi.koreterm`0") -or $oddBinary.Contains("io.github.amanthanvi.koreterm`0")) {
             throw 'Measurement AUMID required, with no product AUMID literal; no launch performed.'
         }
         $binary = $null; $oddBinary = $null; $binaryBytes = $null
     }
     if (Test-Path -LiteralPath $RunRoot) { throw 'RunRoot must be a fresh directory.' }
-    $realStartup = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'noctty\startup-attempts.json'
+    $realStartup = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'koreterm\startup-attempts.json'
     $startupBefore = Get-Fingerprint $realStartup
     if ($ExpectedStartupFingerprint -and $startupBefore -ne $ExpectedStartupFingerprint) {
         throw 'Real startup-attempts.json differs from the supplied fingerprint; no launch performed.'
     }
     # Measurement builds promise to suppress registration; ordinary product
     # builds can legitimately create their display-name registration.
-    $registrationIds = if ($RequireMeasurementAumid) { @('io.github.amanthanvi.noctty', 'io.github.amanthanvi.noctty.measure') } else { @() }
+    $registrationIds = if ($RequireMeasurementAumid) { @('io.github.amanthanvi.koreterm', 'io.github.amanthanvi.koreterm.measure') } else { @() }
     $registrationsBefore = @{}; foreach ($id in $registrationIds) { $registrationsBefore[$id] = Get-AumidRegistrationFingerprint $id }
     # GetFolderPath deliberately ignores redirected APPDATA, as PSReadLine does.
     $historyRoot = [Environment]::GetFolderPath([Environment+SpecialFolder]::ApplicationData)
@@ -364,8 +364,8 @@ class Fixture {
             $shell = $case.shell
             $caseRoot = Join-Path $RunRoot $case.name
             [void](New-Item -ItemType Directory -Path $caseRoot)
-            Copy-Item -LiteralPath $ExePath -Destination (Join-Path $caseRoot 'noctty.exe')
-            if ((Get-FileHash -LiteralPath (Join-Path $caseRoot 'noctty.exe')).Hash -ne $sourceEvidence.sha256) { throw 'Supplied executable changed while staging the matrix.' }
+            Copy-Item -LiteralPath $ExePath -Destination (Join-Path $caseRoot 'koreterm.exe')
+            if ((Get-FileHash -LiteralPath (Join-Path $caseRoot 'koreterm.exe')).Hash -ne $sourceEvidence.sha256) { throw 'Supplied executable changed while staging the matrix.' }
             foreach ($name in @('conpty.dll', 'OpenConsole.exe')) {
                 $path = Join-Path (Split-Path -Parent $ExePath) $name
                 if ($case.backend -eq 'Bundled' -and -not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "Bundled control requires $name beside the supplied build." }
@@ -375,10 +375,10 @@ class Fixture {
             $share = Join-Path (Split-Path -Parent (Split-Path -Parent $ExePath)) 'share'
             if (-not (Test-Path -LiteralPath $share)) { throw "Build share directory absent: $share" }
             Copy-Item -LiteralPath $share -Destination (Join-Path $caseRoot 'share') -Recurse
-            [IO.File]::WriteAllText((Join-Path $caseRoot 'noctty.portable'), '')
+            [IO.File]::WriteAllText((Join-Path $caseRoot 'koreterm.portable'), '')
             Copy-Item -LiteralPath $sourcePath -Destination (Join-Path $caseRoot 'mode-fixture.cs')
             [void](New-Item -ItemType Directory -Path (Join-Path $caseRoot 'local'), (Join-Path $caseRoot 'roaming'))
-            $uniqueName = 'noctty-stale-' + [guid]::NewGuid().ToString('N')
+            $uniqueName = 'koreterm-stale-' + [guid]::NewGuid().ToString('N')
             $needsClipboard = $Scenario -in @('All', 'Paste')
             $stationName = if ($needsClipboard) { $uniqueName } else { 'WinSta0' }
             $desktopLeaf = if ($needsClipboard) { 'hidden' } else { $uniqueName }
@@ -507,7 +507,7 @@ $env:APPDATA = Join-Path $RunRoot 'roaming'
 $env:GHOSTTY_RESOURCES_DIR = Join-Path $RunRoot 'share\ghostty'
 $shell = $Shells[0]
 $fixture = Join-Path $RunRoot 'mode-fixture.exe'
-$runExe = Join-Path $RunRoot 'noctty.exe'
+$runExe = Join-Path $RunRoot 'koreterm.exe'
 $checks = [Collections.Generic.List[string]]::new()
 $result = [ordered]@{ shell = $shell; scenario = $Scenario; parentCtrlC = $ParentCtrlC; conPty = $ConPty;
     inheritedCtrlCIgnore = [bool]$ExerciseInheritedCtrlCIgnore; controllerNormalized = $false;
@@ -639,7 +639,7 @@ $script:PromptSequence = 0
 try {
     $desktopName = [IO.File]::ReadAllText((Join-Path $RunRoot 'desktop.txt'))
     [StaleModesNative]::VerifyDesktop($desktopName, [IntPtr]::Zero)
-    if (-not (Test-Path -LiteralPath (Join-Path $RunRoot 'noctty.portable') -PathType Leaf)) { throw 'Portable marker missing.' }
+    if (-not (Test-Path -LiteralPath (Join-Path $RunRoot 'koreterm.portable') -PathType Leaf)) { throw 'Portable marker missing.' }
     # csc is a console helper too. It runs on the driver's explicit desktop,
     # CREATE_NO_WINDOW and BELOW_NORMAL_PRIORITY_CLASS, inside the owned job.
     $compiler = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
@@ -652,7 +652,7 @@ try {
     }
     $config = Join-Path $RunRoot 'config.ghostty'
     $configText = "auto-update = off`nconfirm-close-surface = false`nwindow-save-state = never`nsingle-instance = false`nclipboard-paste-protection = false`nkeybind = ctrl+v=paste_from_clipboard`n"
-    $instanceClass = 'noctty-test-ctrlc-' + [guid]::NewGuid().ToString('N')
+    $instanceClass = 'koreterm-test-ctrlc-' + [guid]::NewGuid().ToString('N')
     $configText += "class = $instanceClass`n"
     if ($Scenario -eq 'CtrlC') {
         # No selection/copy branch exists for this key, including on main.
@@ -660,8 +660,8 @@ try {
         # to exclude clipboard actions while retaining normal key encoding,
         # including ConPTY's win32-input-mode records when negotiated.
         $configText += 'copy-on-select = false' + "`n" + 'keybind = clear' + "`n"
-        if ($ConPty -eq 'Inbox') { $env:NOCTTY_CONPTY = 'inbox' }
-        else { Remove-Item Env:\NOCTTY_CONPTY -ErrorAction SilentlyContinue }
+        if ($ConPty -eq 'Inbox') { $env:KORETERM_CONPTY = 'inbox' }
+        else { Remove-Item Env:\KORETERM_CONPTY -ErrorAction SilentlyContinue }
     }
     if ($shell -eq 'pwsh') {
         $integration = Join-Path $RunRoot 'share\ghostty\shell-integration\powershell\integration.ps1'
@@ -676,7 +676,7 @@ try {
     if ($Scenario -eq 'CtrlC') {
         $ignore = $ParentCtrlC -eq 'Ignoring'
         $result.ignoreRequested = $ignore
-        # Set the driver's bit immediately before creating noctty. Setting a
+        # Set the driver's bit immediately before creating koreterm. Setting a
         # managed CancelKeyPress handler here would not provide this control.
         $result.controlCallSucceeded = [StaleModesNative]::SetConsoleCtrlHandler([IntPtr]::Zero, $ignore)
         if (-not $result.controlCallSucceeded) { throw "Driver SetConsoleCtrlHandler failed (Win32 $([Runtime.InteropServices.Marshal]::GetLastWin32Error()))." }
@@ -699,7 +699,7 @@ try {
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
     while ($hostWindow -eq [IntPtr]::Zero) {
         $hostWindow = [HiddenDesktopNative]::Host($app.Id)
-        if ($app.HasExited -or [DateTime]::UtcNow -ge $deadline) { throw 'No hidden noctty host appeared.' }
+        if ($app.HasExited -or [DateTime]::UtcNow -ge $deadline) { throw 'No hidden koreterm host appeared.' }
         Start-Sleep -Milliseconds 50
     }
     $surface = [HiddenDesktopNative]::Surface($hostWindow)

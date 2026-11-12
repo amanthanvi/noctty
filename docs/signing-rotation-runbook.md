@@ -59,7 +59,7 @@ From a public certificate file:
 
 ```powershell
 . .\scripts\signing-trust.ps1
-$certificate = [System.Security.Cryptography.X509Certificates.X509CertificateLoader]::LoadCertificateFromFile('C:\secure\noctty-next.cer')
+$certificate = [System.Security.Cryptography.X509Certificates.X509CertificateLoader]::LoadCertificateFromFile('C:\secure\koreterm-next.cer')
 try { $pin = Get-CertificateSpkiSha256 -Certificate $certificate; $pin } finally { $certificate.Dispose() }
 ```
 
@@ -69,7 +69,7 @@ From a PFX, if that is all you have (prompted, never echoed):
 . .\scripts\signing-trust.ps1
 $secure = Read-Host -Prompt 'PFX password' -AsSecureString
 $certificate = Import-CodeSigningCertificate `
-  -PfxPath 'C:\secure\noctty-next.pfx' `
+  -PfxPath 'C:\secure\koreterm-next.pfx' `
   -Password ([System.Net.NetworkCredential]::new('', $secure).Password)
 try { $pin = Get-CertificateSpkiSha256 -Certificate $certificate; $pin } finally { $certificate.Dispose() }
 ```
@@ -166,8 +166,8 @@ certificate profile name, and OIDC federation described in ADR 0006 are set
 instead.
 
 ```powershell
-$repo = "amanthanvi/noctty"
-[Convert]::ToBase64String([IO.File]::ReadAllBytes("C:\secure\noctty-next.pfx")) |
+$repo = "amanthanvi/koreterm"
+[Convert]::ToBase64String([IO.File]::ReadAllBytes("C:\secure\koreterm-next.pfx")) |
   gh secret set WINDOWS_CODESIGN_PFX_BASE64 --repo $repo --env release
 gh secret set WINDOWS_CODESIGN_PFX_PASSWORD --repo $repo --env release
 gh variable delete WINDOWS_CODESIGN_TRUST_SELF_SIGNED --repo $repo --env release

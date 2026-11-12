@@ -19,7 +19,7 @@ comptime {
 const default_ring_size = 1024 * 1024;
 const max_frame_payload = 64 * 1024;
 // LOCAL affects AppContainer pipe-name resolution, not desktop-process security.
-const pipe_prefix = "\\\\.\\pipe\\LOCAL\\noctty-conpty-host-";
+const pipe_prefix = "\\\\.\\pipe\\LOCAL\\koreterm-conpty-host-";
 const pipe_access_duplex = 0x00000003;
 const file_flag_first_pipe_instance = 0x00080000;
 const pipe_reject_remote_clients = 0x00000008;

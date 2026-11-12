@@ -7,7 +7,7 @@ running one (position, size, decorations, opacity), and which running window
 that is (the one active last). Run with -Bin <source bin
 directory> -Run <new evidence directory>. The run directory must not already
 exist. Every file the app reads or writes is a sample this script creates
-beside a portable copy of the app: the real %LOCALAPPDATA%\noctty is never
+beside a portable copy of the app: the real %LOCALAPPDATA%\koreterm is never
 written, and only the hash and time of its startup state file are read,
 before and after. Never switches desktops, injects real input or registers a
 global hotkey: the only keys are posted F11 (`toggle_fullscreen`), F12
@@ -159,7 +159,7 @@ public static class Ws {
 if (-not $Driver) {
     Invoke-LocalHiddenDriver -Script $PSCommandPath -Bin $Bin -Run $Run -TimeoutSeconds $DriverTimeoutSeconds `
         -ExpectedStartupHash $ExpectedStartupHash -ExpectedStartupModified $ExpectedStartupModified `
-        -DesktopPrefix 'noctty-ws-' -Label 'Hidden window start' -PassDesktopName -GuardClipboard
+        -DesktopPrefix 'koreterm-ws-' -Label 'Hidden window start' -PassDesktopName -GuardClipboard
     exit
 }
 
@@ -185,11 +185,11 @@ function New-Case([string]$Name,[string[]]$Lines,[hashtable]$Files=@{},[string]$
     foreach($relative in $Files.Keys) { Set-Content -LiteralPath (Join-Path $dir $relative) -Value $Files[$relative] -NoNewline -Encoding utf8NoBOM }
     $config=Join-Path $dir 'window-start.ghostty'
     $single=if($Class){'single-instance = true'}else{'single-instance = false'}
-    $class=if($Class){$Class}else{"noctty-test-issue496-$runId-$Name"}
+    $class=if($Class){$Class}else{"koreterm-test-issue496-$runId-$Name"}
     # `command` pins cmd.exe, so no PowerShell starts and no shell history can be written.
     @('command = cmd.exe /d /k','shell-integration = none',$single,"class = $class",'confirm-close-surface = false','auto-update = off',
       'window-position-x = 120','window-position-y = 90','window-width = 90','window-height = 26') + $Lines | Set-Content -LiteralPath $config
-    return @{ Name=$Name; Dir=$dir; Config=$config; Exe=(Join-Path $dir 'noctty.exe') }
+    return @{ Name=$Name; Dir=$dir; Config=$config; Exe=(Join-Path $dir 'koreterm.exe') }
 }
 function Spawn-Owned($case,[string]$Arguments,[int]$Show=-1,[switch]$Action) {
     # A CLI action has to come first on the command line.
@@ -271,8 +271,8 @@ try {
     } finally { Stop-Case $case }
 
     # Forwarded: a second launch with `--maximize`, and `+new-window
-    # --fullscreen=true`, into a running noctty whose window is normal.
-    $class="noctty-test-issue496-$runId-fwd"
+    # --fullscreen=true`, into a running koreterm whose window is normal.
+    $class="koreterm-test-issue496-$runId-fwd"
     $primary=Start-Case (New-Case 'forward-primary' @('window-save-state = never') -Class $class)
     $second=New-Case 'forward-second' @('window-save-state = never') -Class $class
     try {
@@ -280,7 +280,7 @@ try {
         $p=Spawn-Owned $second '--maximize'
         Stop-Process-Exact $p 15000
         $ok=Wait-Until { @(Hosts-With-Pane $primary.Process).Count -eq 2 } 15
-        Check 'forwarded launch opened a window in the running noctty' $ok 2 @(Hosts-With-Pane $primary.Process).Count
+        Check 'forwarded launch opened a window in the running koreterm' $ok 2 @(Hosts-With-Pane $primary.Process).Count
         Start-Sleep -Milliseconds 1200
         $made=@(Hosts-With-Pane $primary.Process|Where-Object {$_ -ne $first})
         if($made.Count -eq 1) {
@@ -312,7 +312,7 @@ try {
     $case=Start-Case (New-Case 'keys-reference' @('window-save-state = never','window-width = 60','window-height = 20'))
     try { $reference=Sample 'keys-reference' $case.Host } finally { Stop-Case $case }
     function Close-Button($h,$s) { return [Ws]::HitTest($h,$s.Rect.Right-30,$s.Rect.Top+20) }
-    $class="noctty-test-issue496-$runId-keys"
+    $class="koreterm-test-issue496-$runId-keys"
     $primary=Start-Case (New-Case 'keys-primary' @('window-save-state = never','quit-after-last-window-closed = false') -Class $class)
     $second=New-Case 'keys-second' @('window-save-state = never') -Class $class
     function Forward([string]$Name,[string]$Arguments) {
@@ -320,7 +320,7 @@ try {
         $p=Spawn-Owned $second "+new-window --class=$class --timeout=10000 $Arguments" -Action
         Stop-Process-Exact $p 15000
         $ok=Wait-Until { @(Hosts-With-Pane $primary.Process).Count -eq $before.Count+1 } 15
-        Check "${Name}: +new-window opened a window in the running noctty" ($p.ExitCode -eq 0 -and $ok) 'exit 0, one more window' @{ExitCode=$p.ExitCode; Windows=@(Hosts-With-Pane $primary.Process).Count}
+        Check "${Name}: +new-window opened a window in the running koreterm" ($p.ExitCode -eq 0 -and $ok) 'exit 0, one more window' @{ExitCode=$p.ExitCode; Windows=@(Hosts-With-Pane $primary.Process).Count}
         Start-Sleep -Milliseconds 1200
         $made=@(Hosts-With-Pane $primary.Process|Where-Object {$before -notcontains $_})
         if($made.Count -ne 1) { return $null }
@@ -402,7 +402,7 @@ try {
     # window, and with that one kept empty it copied nothing and opened as a
     # first window does. No configured position (an empty value resets it),
     # so a plain forward is one cascade step off the window it copies.
-    $class="noctty-test-fwdsource-$runId"
+    $class="koreterm-test-fwdsource-$runId"
     $primary=Start-Case (New-Case 'source-primary' @('window-position-x =','window-position-y =','window-save-state = never','undo-timeout = 60s','keybind = f9=close_tab:this') -Class $class)
     $second=New-Case 'source-second' @('window-save-state = never') -Class $class
     # One step off the window `s` describes, as `cascadeStep` (MulDiv,
@@ -545,9 +545,9 @@ try {
             $s=Sample $show.N $case.Host
             Check "$($show.N): the first window starts fullscreen" ($s.Popup -and -not $s.Iconic -and (Rect-Same $s.Rect $s.Monitor 0)) (Rect-Array $s.Monitor) @{Popup=$s.Popup; Iconic=$s.Iconic; Rect=(Rect-Array $s.Rect)}
             Press (Pane $case.Host) 0x77 300       # F8: open_config
-            $ok=Wait-Until { @([Ws]::TopLevel($case.Process.Id,'noctty.win32.settings')|Where-Object {[Ws]::Read($_).Visible}).Count -gt 0 } 15
+            $ok=Wait-Until { @([Ws]::TopLevel($case.Process.Id,'koreterm.win32.settings')|Where-Object {[Ws]::Read($_).Visible}).Count -gt 0 } 15
             Check "$($show.N): Settings opened" $ok $true $ok
-            $settings=@([Ws]::TopLevel($case.Process.Id,'noctty.win32.settings'))
+            $settings=@([Ws]::TopLevel($case.Process.Id,'koreterm.win32.settings'))
             if($settings.Count) {
                 Start-Sleep -Milliseconds 600
                 $t=Sample "$($show.N)-settings" $settings[0]

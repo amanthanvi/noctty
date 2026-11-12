@@ -61,6 +61,7 @@ const id_colors: u16 = 115;
 const id_compression: u16 = 116;
 const id_experience: u16 = 117;
 const id_password_note: u16 = 118;
+const id_certificates: u16 = 119;
 
 const DWLP_USER: i32 = @sizeOf(usize) * 2;
 const WM_INITDIALOG: UINT = 0x0110;
@@ -77,6 +78,8 @@ const compression_labels = [_][:0]const u16{ L("Default (Settings)"), L("On"), L
 const compression_values = [_]?bool{ null, true, false };
 const experience_labels = [_][:0]const u16{ L("Default (Settings)"), L("Fast (no wallpaper, themes or animations)"), L("Balanced (themes and font smoothing)"), L("Rich (everything)") };
 const experience_values = [_]?terminals_import.Experience{ null, .fast, .balanced, .rich };
+const certificate_labels = [_][:0]const u16{ L("Default (Settings)"), L("Connect without asking"), L("Ask (Windows' warning)") };
+const certificate_values = [_]?bool{ null, true, false };
 
 const State = struct {
     alloc: Allocator,
@@ -143,11 +146,11 @@ fn buildTemplate(alloc: Allocator) Allocator.Error![]align(4) u8 {
     const combo: u16 = 0x0085;
 
     const w: i16 = 280;
-    const h: i16 = 214;
+    const h: i16 = 232;
     const label_w: i16 = 86;
     const field_x: i16 = 7 + label_w + 4;
     const field_w: i16 = w - field_x - 7;
-    const count: u16 = 8 * 2 + 1 + 2;
+    const count: u16 = 9 * 2 + 1 + 2;
     try t.int(u32, 0x80000000 | 0x00C00000 | 0x00080000 | 0x80 | 0x40 | 0x800); // popup, caption, sysmenu, modal frame, setfont, center
     try t.int(u32, 0);
     try t.int(u16, count);
@@ -171,6 +174,7 @@ fn buildTemplate(alloc: Allocator) Allocator.Error![]align(4) u8 {
         .{ .label = L("&Colors"), .id = id_colors, .kind = .choice },
         .{ .label = L("Com&pression"), .id = id_compression, .kind = .choice },
         .{ .label = L("&Visual quality"), .id = id_experience, .kind = .choice },
+        .{ .label = L("Unverified ser&ver"), .id = id_certificates, .kind = .choice },
     };
     var y: i16 = 9;
     for (rows) |row| {
@@ -261,6 +265,7 @@ fn dialogProc(hwnd: HWND, msg: UINT, wparam: WPARAM, lparam: LPARAM) callconv(.w
             fillCombo(hwnd, id_colors, &color_labels, indexOf(?terminals_import.ColorDepth, &color_values, conn.options.colors));
             fillCombo(hwnd, id_compression, &compression_labels, indexOf(?bool, &compression_values, conn.options.compression));
             fillCombo(hwnd, id_experience, &experience_labels, indexOf(?terminals_import.Experience, &experience_values, conn.options.experience));
+            fillCombo(hwnd, id_certificates, &certificate_labels, indexOf(?bool, &certificate_values, conn.options.trust_certificates));
             return 1;
         },
         WM_COMMAND => {
@@ -305,6 +310,7 @@ fn dialogProc(hwnd: HWND, msg: UINT, wparam: WPARAM, lparam: LPARAM) callconv(.w
                             .colors = color_values[@min(comboIndex(hwnd, id_colors), color_values.len - 1)],
                             .compression = compression_values[@min(comboIndex(hwnd, id_compression), compression_values.len - 1)],
                             .experience = experience_values[@min(comboIndex(hwnd, id_experience), experience_values.len - 1)],
+                            .trust_certificates = certificate_values[@min(comboIndex(hwnd, id_certificates), certificate_values.len - 1)],
                         },
                     };
                     _ = EndDialog(hwnd, IDOK);

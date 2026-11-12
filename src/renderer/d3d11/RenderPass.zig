@@ -39,7 +39,7 @@ pub fn step(self: *Self, s: Step) !void {
         .texture => return error.Direct3D11CustomShadersUnsupported,
     };
     if (self.step_number == 0) if (self.attachments[0].clear_color) |color| {
-        try api.check(api.noctty_d3d11_clear(target.handle, &color));
+        try api.check(api.koreterm_d3d11_clear(target.handle, &color));
     };
     switch (s.pipeline.kind) {
         .image, .bg_image => return error.Direct3D11ImagesUnsupported,
@@ -49,7 +49,7 @@ pub fn step(self: *Self, s: Step) !void {
     const bg = if (s.buffers.len > 1) s.buffers[1] else null;
     const gray = textureHandle(s.textures, 0);
     const color = textureHandle(s.textures, 1);
-    try api.check(api.noctty_d3d11_draw(target.handle, @intFromEnum(s.pipeline.kind), s.uniforms, text, bg, gray, color, @intCast(s.draw.vertex_count), @intCast(s.draw.instance_count)));
+    try api.check(api.koreterm_d3d11_draw(target.handle, @intFromEnum(s.pipeline.kind), s.uniforms, text, bg, gray, color, @intCast(s.draw.vertex_count), @intCast(s.draw.instance_count)));
     self.step_number += 1;
 }
 pub fn complete(_: *const Self) void {}

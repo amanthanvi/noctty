@@ -1,5 +1,5 @@
-//! Which local Windows path a program-reported (or noctty-held) path names,
-//! and whether noctty may act on it: the directory an OSC 7 or OSC 9;9
+//! Which local Windows path a program-reported (or koreterm-held) path names,
+//! and whether koreterm may act on it: the directory an OSC 7 or OSC 9;9
 //! report names (`pwd`), the file link or quick-select text names
 //! (`linkTarget`, `isLocalShape`), and a bounded open on a local drive for
 //! the link opener, the editor and the Settings config read (`open`).
@@ -125,7 +125,7 @@ pub const Report = union(enum) {
 
 pub const PwdError = Allocator.Error || error{
     /// `.conemu` only: not a plain path, so the caller reads the value as a
-    /// URL (noctty's cmd integration sends `kitty-shell-cwd://localhost/%P`).
+    /// URL (koreterm's cmd integration sends `kitty-shell-cwd://localhost/%P`).
     NotPlainPath,
     /// A share or device path, in any spelling, after translation.
     NetworkOrDevicePath,
@@ -886,10 +886,10 @@ test "local path open refuses links to a share before opening them, and tells a 
     };
     // Links to a share on TEST-NET-1 (RFC 5737), which no route reaches:
     // following one would hang on the connection, so each open is timed.
-    const share = "\\\\192.0.2.1\\noctty-test-none$";
+    const share = "\\\\192.0.2.1\\koreterm-test-none$";
     const junction_dir = try at.path(alloc, base, "to-share");
     defer alloc.free(junction_dir);
-    try test_links.junction(alloc, junction_dir, "\\??\\UNC\\192.0.2.1\\noctty-test-none$");
+    try test_links.junction(alloc, junction_dir, "\\??\\UNC\\192.0.2.1\\koreterm-test-none$");
     const local_junction = try at.path(alloc, base, "to-real");
     defer alloc.free(local_junction);
     const real_dir = try at.path(alloc, base, "real");
@@ -1328,8 +1328,8 @@ test "pwd reads the plain path of OSC 9;9" {
         // A path with spaces needs no quotes of its own.
         .{ "C:\\Program Files\\Git", "C:\\Program Files\\Git" },
         // A forward slash is the other separator, and the letter keeps its case.
-        .{ "d:/work/noctty", "d:\\work\\noctty" },
-        .{ "D:/work/noctty", "D:\\work\\noctty" },
+        .{ "d:/work/koreterm", "d:\\work\\koreterm" },
+        .{ "D:/work/koreterm", "D:\\work\\koreterm" },
         .{ "C:\\", "C:\\" },
         .{ "C:/", "C:\\" },
         // The UNC form `wslpath -w` prints is the distro's own path.
@@ -1342,7 +1342,7 @@ test "pwd reads the plain path of OSC 9;9" {
 
 test "pwd leaves every OSC 9;9 value but a plain path to the URL parse" {
     for ([_][]const u8{
-        // The URL forms, including the one noctty's cmd integration sends.
+        // The URL forms, including the one koreterm's cmd integration sends.
         "kitty-shell-cwd://localhost/C:\\Users\\aman",
         "file://localhost/C:/Users/aman",
         // Not drive-absolute, and not WSL's own UNC form: a share or device
@@ -1695,16 +1695,16 @@ test "link target: an MSYS2 or Cygwin drive path is the Windows path it names (#
     // Only the form MSYS2 and Cygwin print; the drive is not checked, so a
     // letter that is no drive gives its Windows path for the opener to refuse.
     for ([_]struct { []const u8, []const u8 }{
-        .{ "/c/Users/noctty-msys-test/.config/fish/conf.d", "C:\\Users\\noctty-msys-test\\.config\\fish\\conf.d" },
-        .{ "/cygdrive/c/Users/noctty-msys-test", "C:\\Users\\noctty-msys-test" },
-        .{ "/D/noctty-msys-test", "D:\\noctty-msys-test" },
+        .{ "/c/Users/koreterm-msys-test/.config/fish/conf.d", "C:\\Users\\koreterm-msys-test\\.config\\fish\\conf.d" },
+        .{ "/cygdrive/c/Users/koreterm-msys-test", "C:\\Users\\koreterm-msys-test" },
+        .{ "/D/koreterm-msys-test", "D:\\koreterm-msys-test" },
         // A location stays on when nothing is there without it either.
-        .{ "/c/noctty-msys-test/main.zig:12:5", "C:\\noctty-msys-test\\main.zig:12:5" },
+        .{ "/c/koreterm-msys-test/main.zig:12:5", "C:\\koreterm-msys-test\\main.zig:12:5" },
         // A doubled separator never makes a share out of the rest.
         .{ "/c//server/share", "C:\\server\\share" },
         // `..` is fine while it stays below the drive's root.
-        .{ "/c/noctty-msys-test/../y", "C:\\noctty-msys-test\\..\\y" },
-        .{ "/c/.../noctty-msys-test", "C:\\...\\noctty-msys-test" },
+        .{ "/c/koreterm-msys-test/../y", "C:\\koreterm-msys-test\\..\\y" },
+        .{ "/c/.../koreterm-msys-test", "C:\\...\\koreterm-msys-test" },
     }) |case| {
         try expectLinkTarget(case[1], case[0], .{ .wsl = false });
         try std.testing.expect(isLocalShape(case[0], false));
@@ -2115,12 +2115,12 @@ test "link target: no short pane directory aborts or leaks" {
 
 test "link target: no text in the full sweep aborts or leaks" {
     // The PKG-42 sweep's sizes, rerun for every new path-to-filesystem seam:
-    // hours, so only on request (`NOCTTY_RUN_LOCAL_PATH_SWEEP=1`). Its sets
-    // are sized by `NOCTTY_LOCAL_PATH_SWEEP_LENGTH`, `_REGEX_LENGTH` and
+    // hours, so only on request (`KORETERM_RUN_LOCAL_PATH_SWEEP=1`). Its sets
+    // are sized by `KORETERM_LOCAL_PATH_SWEEP_LENGTH`, `_REGEX_LENGTH` and
     // `_RANDOM` (`SweepSizes`); `_SEED`, `_PART` and `_PARTS` let processes
     // split the random strings.
     const alloc = std.testing.allocator;
-    const run = std.process.getEnvVarOwned(alloc, "NOCTTY_RUN_LOCAL_PATH_SWEEP") catch return error.SkipZigTest;
+    const run = std.process.getEnvVarOwned(alloc, "KORETERM_RUN_LOCAL_PATH_SWEEP") catch return error.SkipZigTest;
     defer alloc.free(run);
     if (!std.mem.eql(u8, run, "1")) return error.SkipZigTest;
     const Env = struct {
@@ -2131,12 +2131,12 @@ test "link target: no text in the full sweep aborts or leaks" {
         }
     };
     const sizes: SweepSizes = .{
-        .length = try Env.number(alloc, "NOCTTY_LOCAL_PATH_SWEEP_LENGTH", 5),
-        .regex_length = try Env.number(alloc, "NOCTTY_LOCAL_PATH_SWEEP_REGEX_LENGTH", 6),
-        .random = try Env.number(alloc, "NOCTTY_LOCAL_PATH_SWEEP_RANDOM", 22_000_000),
-        .seed = try Env.number(alloc, "NOCTTY_LOCAL_PATH_SWEEP_SEED", 0x514),
-        .part = try Env.number(alloc, "NOCTTY_LOCAL_PATH_SWEEP_PART", 0),
-        .parts = try Env.number(alloc, "NOCTTY_LOCAL_PATH_SWEEP_PARTS", 1),
+        .length = try Env.number(alloc, "KORETERM_LOCAL_PATH_SWEEP_LENGTH", 5),
+        .regex_length = try Env.number(alloc, "KORETERM_LOCAL_PATH_SWEEP_REGEX_LENGTH", 6),
+        .random = try Env.number(alloc, "KORETERM_LOCAL_PATH_SWEEP_RANDOM", 22_000_000),
+        .seed = try Env.number(alloc, "KORETERM_LOCAL_PATH_SWEEP_SEED", 0x514),
+        .part = try Env.number(alloc, "KORETERM_LOCAL_PATH_SWEEP_PART", 0),
+        .parts = try Env.number(alloc, "KORETERM_LOCAL_PATH_SWEEP_PARTS", 1),
     };
     const count = try sweepLinkText(sweep_alphabet, sizes);
     std.debug.print("local path sweep: {d} strings of up to {d} bytes; {d} url.regex matches in {d} strings of up to {d}; " ++

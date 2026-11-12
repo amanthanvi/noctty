@@ -1,12 +1,12 @@
-//! PowerShell shell-integration installer for noctty.
+//! PowerShell shell-integration installer for koreterm.
 //!
 //! Lifecycle (called from `App.init`):
-//!   1. `resolveInstallPath` -> `%LOCALAPPDATA%\noctty\shell-integration\
+//!   1. `resolveInstallPath` -> `%LOCALAPPDATA%\koreterm\shell-integration\
 //!      powershell\integration.ps1`, creating intermediate dirs as needed.
 //!   2. `installIfStale` compares the on-disk SHA-256 against the comptime
 //!      `integration_script_sha256`. Writes atomically (temp + rename) only
 //!      when the hash differs or the file is missing, and not over a copy
-//!      that declares a newer `# noctty-integration-revision`.
+//!      that declares a newer `# koreterm-integration-revision`.
 //!   3. `buildInjectedArgv` wraps interactive PowerShell launches with
 //!      `-NoExit -Command "& { $__ghostty_utf8_console = $true|$false; ... }"`
 //!      loads UTF-8 script text, retaining file signature checks under AllSigned,
@@ -24,7 +24,7 @@
 //!   `Cannot overwrite variable ... because it is read-only or constant`,
 //!   the dot-source proceeds anyway, and the profile's value wins. Measured
 //!   on pwsh 7 and Windows PowerShell 5.1: with a `ReadOnly` profile
-//!   sentinel of `$true` and noctty asking for `$false`, the block form
+//!   sentinel of `$true` and koreterm asking for `$false`, the block form
 //!   leaves the console at codepage 437 (correct) while the global form
 //!   ends at 65001 with a visible error. The block is therefore load-bearing
 //!   for the `utf8-console = never` guarantee.
@@ -120,9 +120,9 @@ pub const InstallResult = enum {
     failed, // couldn't write; caller logs and continues
 };
 
-const revision_prefix = "# noctty-integration-revision:";
+const revision_prefix = "# koreterm-integration-revision:";
 
-/// The revision a script declares in its `# noctty-integration-revision: N`
+/// The revision a script declares in its `# koreterm-integration-revision: N`
 /// line, among its first lines; null for a script without one, such as a copy
 /// an older build installed. A line whose number cannot be read counts as the
 /// highest revision: such a copy is left alone, not replaced. An older build
@@ -266,7 +266,7 @@ pub fn buildInjectedArgv(
     return buildInjectedArgvAfter(alloc, pwsh_argv, null, integration_path, utf8_console);
 }
 
-/// `buildInjectedArgv`, with `prelude`, a `-Command` script noctty built
+/// `buildInjectedArgv`, with `prelude`, a `-Command` script koreterm built
 /// (a Developer PowerShell's: `windows_visual_studio.devShellPrelude`), run
 /// before the integration loads. `pwsh_argv` is the launch without that
 /// script and its `-Command`. The payload is `<prelude>; & { ... }`: the
@@ -551,13 +551,13 @@ fn buildCommandValue(alloc: Allocator, escaped: []const u8, utf8_console: bool) 
         alloc,
         "& {{ ${s} = ${s}; $__ghostty_integration_path = '{s}'; " ++
             "try {{ if ($ExecutionContext.SessionState.LanguageMode -ne 'FullLanguage') {{ " ++
-            "Microsoft.PowerShell.Utility\\Write-Warning 'noctty PowerShell integration skipped: unsupported language mode.' -WarningAction Continue " ++
+            "Microsoft.PowerShell.Utility\\Write-Warning 'koreterm PowerShell integration skipped: unsupported language mode.' -WarningAction Continue " ++
             "}} else {{ $__ghostty_load_error_head = $null; if ($Error.Count) {{ $__ghostty_load_error_head = $Error[0] }}; " ++
             "Microsoft.PowerShell.Core\\Import-Module ([Reflection.Assembly]::Load('Microsoft.PowerShell.Security').Location) -ErrorAction Stop; " ++
             "if ((Microsoft.PowerShell.Security\\Get-ExecutionPolicy -ErrorAction Stop) -eq 'AllSigned') {{ . $__ghostty_integration_path " ++
             "}} else {{ . ([scriptblock]::Create([IO.File]::ReadAllText($__ghostty_integration_path))) }} }} " ++
             "}} catch {{ while ($Error.Count -gt 0 -and -not [object]::ReferenceEquals($Error[0], $__ghostty_load_error_head)) {{ $Error.RemoveAt(0) }}; Microsoft.PowerShell.Utility\\Write-Warning " ++
-            "'noctty PowerShell integration could not load (execution policy or script error).' -WarningAction Continue }} }}",
+            "'koreterm PowerShell integration could not load (execution policy or script error).' -WarningAction Continue }} }}",
         .{ utf8_console_variable, if (utf8_console) "true" else "false", escaped },
     );
 }
@@ -1041,7 +1041,7 @@ test "integration.ps1 emits OSC 133 C from the line reader" {
         "__ghostty_install_alias 'PSConsoleHostReadLine' '__ghostty_readline'",
     ));
     try std.testing.expect(codeContains("$line = & $read_line"));
-    // noctty must leave the user's AddToHistoryHandler, and PSReadLine's
+    // koreterm must leave the user's AddToHistoryHandler, and PSReadLine's
     // default sensitive-history filter, exactly as it found them. The only
     // place the option is still set is where a session's OLDER copy of this
     // script installed a handler and we put the original back.
@@ -1415,7 +1415,7 @@ test "buildInjectedArgv: policy bootstrap executes in Windows PowerShell hosts" 
             try std.testing.expect(std.mem.indexOf(u8, stdout.items, "ERROR-COUNT=0") != null);
             if (std.mem.eql(u8, policy, "AllSigned")) {
                 try std.testing.expect(std.mem.indexOf(u8, stdout.items, "HELPER-LOADED") == null);
-                try std.testing.expect(std.mem.indexOf(u8, stdout.items, "noctty PowerShell integration could not load") != null);
+                try std.testing.expect(std.mem.indexOf(u8, stdout.items, "koreterm PowerShell integration could not load") != null);
             } else {
                 try std.testing.expect(std.mem.indexOf(u8, stdout.items, "HELPER-LOADED") != null);
                 try std.testing.expect(std.mem.indexOf(u8, stdout.items, "]133;A;") != null);
@@ -1434,7 +1434,7 @@ test "buildInjectedArgv: policy bootstrap executes in Windows PowerShell hosts" 
     }
 }
 
-const expected_bootstrap_suffix = "'; try { if ($ExecutionContext.SessionState.LanguageMode -ne 'FullLanguage') { Microsoft.PowerShell.Utility\\Write-Warning 'noctty PowerShell integration skipped: unsupported language mode.' -WarningAction Continue } else { $__ghostty_load_error_head = $null; if ($Error.Count) { $__ghostty_load_error_head = $Error[0] }; Microsoft.PowerShell.Core\\Import-Module ([Reflection.Assembly]::Load('Microsoft.PowerShell.Security').Location) -ErrorAction Stop; if ((Microsoft.PowerShell.Security\\Get-ExecutionPolicy -ErrorAction Stop) -eq 'AllSigned') { . $__ghostty_integration_path } else { . ([scriptblock]::Create([IO.File]::ReadAllText($__ghostty_integration_path))) } } } catch { while ($Error.Count -gt 0 -and -not [object]::ReferenceEquals($Error[0], $__ghostty_load_error_head)) { $Error.RemoveAt(0) }; Microsoft.PowerShell.Utility\\Write-Warning 'noctty PowerShell integration could not load (execution policy or script error).' -WarningAction Continue } }";
+const expected_bootstrap_suffix = "'; try { if ($ExecutionContext.SessionState.LanguageMode -ne 'FullLanguage') { Microsoft.PowerShell.Utility\\Write-Warning 'koreterm PowerShell integration skipped: unsupported language mode.' -WarningAction Continue } else { $__ghostty_load_error_head = $null; if ($Error.Count) { $__ghostty_load_error_head = $Error[0] }; Microsoft.PowerShell.Core\\Import-Module ([Reflection.Assembly]::Load('Microsoft.PowerShell.Security').Location) -ErrorAction Stop; if ((Microsoft.PowerShell.Security\\Get-ExecutionPolicy -ErrorAction Stop) -eq 'AllSigned') { . $__ghostty_integration_path } else { . ([scriptblock]::Create([IO.File]::ReadAllText($__ghostty_integration_path))) } } } catch { while ($Error.Count -gt 0 -and -not [object]::ReferenceEquals($Error[0], $__ghostty_load_error_head)) { $Error.RemoveAt(0) }; Microsoft.PowerShell.Utility\\Write-Warning 'koreterm PowerShell integration could not load (execution policy or script error).' -WarningAction Continue } }";
 
 test "buildInjectedArgv: interactive shell injects without changing banner semantics" {
     const argv = [_][]const u8{"pwsh.exe"};
@@ -1749,19 +1749,19 @@ test "integration.ps1 declares its revision near the top" {
 }
 
 test "scriptRevision reads the declaration line only among the first lines" {
-    try std.testing.expectEqual(@as(?u32, 7), scriptRevision("# a\r\n# noctty-integration-revision: 7\r\nx"));
-    try std.testing.expectEqual(@as(?u32, 12), scriptRevision("# noctty-integration-revision:12"));
+    try std.testing.expectEqual(@as(?u32, 7), scriptRevision("# a\r\n# koreterm-integration-revision: 7\r\nx"));
+    try std.testing.expectEqual(@as(?u32, 12), scriptRevision("# koreterm-integration-revision:12"));
     try std.testing.expectEqual(@as(?u32, null), scriptRevision("# no revision\n$x = 1\n"));
     // A declaration that cannot be read fails closed: leave that copy alone.
-    try std.testing.expectEqual(@as(?u32, std.math.maxInt(u32)), scriptRevision("# noctty-integration-revision: next\n"));
-    try std.testing.expectEqual(@as(?u32, std.math.maxInt(u32)), scriptRevision("# noctty-integration-revision: -1\n"));
+    try std.testing.expectEqual(@as(?u32, std.math.maxInt(u32)), scriptRevision("# koreterm-integration-revision: next\n"));
+    try std.testing.expectEqual(@as(?u32, std.math.maxInt(u32)), scriptRevision("# koreterm-integration-revision: -1\n"));
     // A mention deep in the body is not a declaration.
-    const deep = "\n" ** 20 ++ "# noctty-integration-revision: 9\n";
+    const deep = "\n" ** 20 ++ "# koreterm-integration-revision: 9\n";
     try std.testing.expectEqual(@as(?u32, null), scriptRevision(deep));
 }
 
 test "installIfStale: a newer revision is not replaced by an older build" {
-    const newer = std.fmt.comptimePrint("# noctty-integration-revision: {d}\n# a newer script\n", .{9999});
+    const newer = std.fmt.comptimePrint("# koreterm-integration-revision: {d}\n# a newer script\n", .{9999});
     var fx = try InstallFixture.init(newer);
     defer fx.deinit();
 
@@ -1787,8 +1787,8 @@ test "integration.ps1 changes only with its revision" {
 test "installIfStale: the same or an older revision, or none, is replaced" {
     const embedded = scriptRevision(integration_script).?;
     var buf: [2][96]u8 = undefined;
-    const same = try std.fmt.bufPrint(&buf[0], "# noctty-integration-revision: {d}\n# edited\n", .{embedded});
-    const older = try std.fmt.bufPrint(&buf[1], "# noctty-integration-revision: {d}\n# older\n", .{embedded - 1});
+    const same = try std.fmt.bufPrint(&buf[0], "# koreterm-integration-revision: {d}\n# edited\n", .{embedded});
+    const older = try std.fmt.bufPrint(&buf[1], "# koreterm-integration-revision: {d}\n# older\n", .{embedded - 1});
     for ([_][]const u8{ same, older, "# stale, no revision" }) |existing| {
         var fx = try InstallFixture.init(existing);
         defer fx.deinit();
@@ -1801,7 +1801,7 @@ test "installIfStale: the same or an older revision, or none, is replaced" {
 }
 
 test "installIfStale: a revision line that cannot be read leaves the copy alone" {
-    const garbled = "# noctty-integration-revision: garbage\n# edited by hand\n";
+    const garbled = "# koreterm-integration-revision: garbage\n# edited by hand\n";
     var fx = try InstallFixture.init(garbled);
     defer fx.deinit();
 
@@ -1812,7 +1812,7 @@ test "installIfStale: a revision line that cannot be read leaves the copy alone"
 }
 
 test "installIfStale: a copy that cannot be read is left for the next launch, one too large to be a script is replaced" {
-    var held_fx = try InstallFixture.init("# noctty-integration-revision: 9999\n");
+    var held_fx = try InstallFixture.init("# koreterm-integration-revision: 9999\n");
     defer held_fx.deinit();
     {
         // Exclusive: its bytes cannot be read, as when a scanner has the file.
@@ -1823,7 +1823,7 @@ test "installIfStale: a copy that cannot be read is left for the next launch, on
     }
     const kept = try held_fx.read();
     defer std.testing.allocator.free(kept);
-    try std.testing.expectEqualStrings("# noctty-integration-revision: 9999\n", kept);
+    try std.testing.expectEqualStrings("# koreterm-integration-revision: 9999\n", kept);
 
     var big_fx = try InstallFixture.init(null);
     defer big_fx.deinit();
@@ -1883,7 +1883,7 @@ test "installIfStale: leaves a file with the old fixed temporary name alone" {
 // through the bundled pseudo console (Windows PowerShell 5.1 produces the
 // same mark order): PSReadLine's per-keystroke re-render is cut to its final
 // frame and the aid, cwd and command are shortened. An empty step stands for
-// the user pressing Enter, which noctty records on the screen as it writes it
+// the user pressing Enter, which koreterm records on the screen as it writes it
 // to the pty.
 
 const terminal_for_tests = @import("../terminal/main.zig");
@@ -1956,7 +1956,7 @@ test "PowerShell marks: the prompt text is prompt and the last command is recove
 
 fn pwshNestedShellAfterTransientRepeat(alloc: Allocator, c_mark: []const u8) ![]const u8 {
     // A prompt theme's transient prompt (Starship's Enable-TransientPrompt,
-    // oh-my-posh's) redraws the prompt from its Enter handler, AFTER noctty
+    // oh-my-posh's) redraws the prompt from its Enter handler, AFTER koreterm
     // wrote the Enter, so the redrawn prompt's A opens a prompt again, and
     // only a C mark closes it. The line repeats the previous history entry,
     // so the old AddToHistoryHandler hook sent no C, and the nested shell's
@@ -2022,7 +2022,7 @@ test "PowerShell marks: a prompt the wrapper did not draw gets its marks from th
         // text, the D puts the command's end on the prompt's row, past the
         // end of its output.
         try std.testing.expect(try t.screens.active.lastCommandOutputString(alloc) == null);
-        // Input is marked, so noctty knows a line editor is reading here...
+        // Input is marked, so koreterm knows a line editor is reading here...
         try std.testing.expect(t.screens.active.semanticPromptInputPending());
         // ...and the prompt says it cannot redraw, so a resize keeps it.
         try std.testing.expect(t.flags.shell_redraws_prompt == .false);

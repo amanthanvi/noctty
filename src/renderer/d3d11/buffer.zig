@@ -12,7 +12,7 @@ pub fn Buffer(comptime T: type) type {
 
         pub fn init(opts: Options, len: usize) !Self {
             const bytes = std.math.mul(usize, len, @sizeOf(T)) catch return error.Direct3D11Failed;
-            const handle = api.noctty_d3d11_buffer_create(opts.device, bytes, @intFromBool(opts.uniform)) orelse return api.allocationError(opts.device);
+            const handle = api.koreterm_d3d11_buffer_create(opts.device, bytes, @intFromBool(opts.uniform)) orelse return api.allocationError(opts.device);
             return .{ .buffer = handle, .opts = opts, .len = len };
         }
         pub fn initFill(opts: Options, data: []const T) !Self {
@@ -22,20 +22,20 @@ pub fn Buffer(comptime T: type) type {
             return result;
         }
         pub fn deinit(self: Self) void {
-            api.noctty_d3d11_buffer_destroy(self.buffer);
+            api.koreterm_d3d11_buffer_destroy(self.buffer);
         }
         fn reserve(self: *Self, len: usize) !bool {
             if (len <= self.len) return false;
             const capacity = std.math.mul(usize, len, 2) catch return error.Direct3D11Failed;
             const bytes = std.math.mul(usize, capacity, @sizeOf(T)) catch return error.Direct3D11Failed;
-            try api.check(api.noctty_d3d11_buffer_reserve(self.buffer, bytes));
+            try api.check(api.koreterm_d3d11_buffer_reserve(self.buffer, bytes));
             self.len = capacity;
             return true;
         }
         fn write(self: *Self, offset: usize, data: []const T) !void {
             if (data.len == 0) return;
             const bytes = std.mem.sliceAsBytes(data);
-            try api.check(api.noctty_d3d11_buffer_write(self.buffer, offset * @sizeOf(T), bytes.ptr, bytes.len));
+            try api.check(api.koreterm_d3d11_buffer_write(self.buffer, offset * @sizeOf(T), bytes.ptr, bytes.len));
         }
         pub fn sync(self: *Self, data: []const T) !void {
             _ = try self.reserve(data.len);

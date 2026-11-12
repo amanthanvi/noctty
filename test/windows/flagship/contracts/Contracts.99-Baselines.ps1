@@ -15,7 +15,7 @@ $reviewedArtifactDigests = @{
     'src/apprt/win32_session_state.zig' =
         'de66d7d1c3859a56540d4dc8b67080befc1a52a46e53baafc07e7a84699fd11d'
 
-    # Reviewed in full after the Noctty rebrand and for PKG-35's packaged DLL
+    # Reviewed in full after the Koreterm rebrand and for PKG-35's packaged DLL
     # load/allocator smoke, retaining the staged portable CLI siblings, and
     # again when that smoke became the ghostty-vt.dll placeholder check
     # (load fails with ERROR_DLL_INIT_FAILED, no exports, its FileDescription).

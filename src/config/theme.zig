@@ -437,7 +437,7 @@ test "theme list keeps first duplicate by directory priority" {
     try std.testing.expect(found_legacy_user);
 }
 
-test "issue149 user theme locations prefer noctty before legacy ghostty" {
+test "issue149 user theme locations prefer koreterm before legacy ghostty" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
 

@@ -171,8 +171,8 @@ pub const Wants = struct {
     sized: bool = false,
 };
 
-/// The window keys a forwarded launch's argv names (a second `noctty`, or
-/// `noctty +new-window`; `ipc_server.forwardedArgvSetsKey`). The same keys
+/// The window keys a forwarded launch's argv names (a second `koreterm`, or
+/// `koreterm +new-window`; `ipc_server.forwardedArgvSetsKey`). The same keys
 /// from the app config do not count: a copy still takes those from its
 /// source (window-frame.md 2026-10-20 #496 part 2, trap 1).
 pub const Forwarded = packed struct(u3) {

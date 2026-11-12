@@ -29,7 +29,7 @@ foreach ($siteScript in @(
 $siteCopyChecker = Join-Path $repoRoot 'scripts\check-site-copy.ps1'
 $authoredSiteSources = @(
     'site\index.html',
-    'site\why-noctty.html',
+    'site\why-koreterm.html',
     'site\install.js',
     'site\terminal.js',
     'site\version.js',
@@ -279,7 +279,7 @@ $releaseCopyScript = Get-SiteWorkflowStepScript -Step $releaseCopyStep -Source "
 # C:\Users\O'Brien, so every run exercises the step command's quoting.
 $siteStepFixtureRoot = [IO.Path]::GetFullPath((Join-Path (
     [IO.Path]::GetTempPath()
-) "noctty-site-step's-contract-$PID-$([Guid]::NewGuid().ToString('N'))"))
+) "koreterm-site-step's-contract-$PID-$([Guid]::NewGuid().ToString('N'))"))
 if (-not $siteStepFixtureRoot.StartsWith(
         [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\', '/') + [IO.Path]::DirectorySeparatorChar,
         [StringComparison]::OrdinalIgnoreCase
@@ -298,22 +298,22 @@ try {
     $siteChecks = @('check-site-copy', 'build-site-assets', 'get-site-header-contract', 'check-release-copy')
     foreach ($siteCheckName in @('check-site-copy', 'get-site-header-contract', 'check-release-copy')) {
         [IO.File]::WriteAllText((Join-Path $siteStepFixtureRoot "scripts\$siteCheckName.ps1"), @"
-Add-Content -LiteralPath `$env:NOCTTY_SITE_FIXTURE_LOG -Value ('$siteCheckName ' + (`$args -join ' ')).TrimEnd()
-if (`$env:NOCTTY_SITE_FIXTURE_FAIL -ceq '$siteCheckName') {
-    if (`$env:NOCTTY_SITE_FIXTURE_MODE -ceq 'throw') { throw 'site check fixture failure' }
+Add-Content -LiteralPath `$env:KORETERM_SITE_FIXTURE_LOG -Value ('$siteCheckName ' + (`$args -join ' ')).TrimEnd()
+if (`$env:KORETERM_SITE_FIXTURE_FAIL -ceq '$siteCheckName') {
+    if (`$env:KORETERM_SITE_FIXTURE_MODE -ceq 'throw') { throw 'site check fixture failure' }
     exit 1
 }
 "@)
     }
     [IO.File]::WriteAllText((Join-Path $siteStepFixtureRoot 'scripts\build-site-assets.mjs'), @'
 import { appendFileSync } from "node:fs";
-appendFileSync(process.env.NOCTTY_SITE_FIXTURE_LOG, `build-site-assets ${process.argv.slice(2).join(" ")}`.trimEnd() + "\n");
-if (process.env.NOCTTY_SITE_FIXTURE_FAIL === "build-site-assets") process.exit(1);
+appendFileSync(process.env.KORETERM_SITE_FIXTURE_LOG, `build-site-assets ${process.argv.slice(2).join(" ")}`.trimEnd() + "\n");
+if (process.env.KORETERM_SITE_FIXTURE_FAIL === "build-site-assets") process.exit(1);
 '@)
-    # gh answers the latest-release query with NOCTTY_SITE_FIXTURE_TAG.
+    # gh answers the latest-release query with KORETERM_SITE_FIXTURE_TAG.
     [IO.File]::WriteAllText(
         (Join-Path $siteStepFixtureRoot 'bin\gh.cmd'),
-        "@>>`"%NOCTTY_SITE_FIXTURE_LOG%`" echo(gh %*`r`n@echo(%NOCTTY_SITE_FIXTURE_TAG%`r`n@exit /b %NOCTTY_SITE_FIXTURE_GH_EXIT%`r`n"
+        "@>>`"%KORETERM_SITE_FIXTURE_LOG%`" echo(gh %*`r`n@echo(%KORETERM_SITE_FIXTURE_TAG%`r`n@exit /b %KORETERM_SITE_FIXTURE_GH_EXIT%`r`n"
     )
 
     $allChecks = @('check-site-copy', 'build-site-assets --check', 'get-site-header-contract', 'check-release-copy -CheckRemoteLatest')
@@ -325,14 +325,14 @@ if (process.env.NOCTTY_SITE_FIXTURE_FAIL === "build-site-assets") process.exit(1
         foreach ($siteCheckIndex in 0..3) {
             foreach ($siteFailMode in @('exit', 'throw')) {
                 if ($siteChecks[$siteCheckIndex] -ceq 'build-site-assets' -and $siteFailMode -ceq 'throw') { continue }
-                @{ GITHUB_EVENT_NAME = 'push'; NOCTTY_SITE_FIXTURE_FAIL = $siteChecks[$siteCheckIndex]; NOCTTY_SITE_FIXTURE_MODE = $siteFailMode; Pass = $false; Calls = $allChecks[0..$siteCheckIndex] }
+                @{ GITHUB_EVENT_NAME = 'push'; KORETERM_SITE_FIXTURE_FAIL = $siteChecks[$siteCheckIndex]; KORETERM_SITE_FIXTURE_MODE = $siteFailMode; Pass = $false; Calls = $allChecks[0..$siteCheckIndex] }
             }
         }
     )
     foreach ($siteCase in $siteCheckCases) {
         Remove-Item -LiteralPath $siteStepLog -ErrorAction Ignore
-        $siteEnvironment = @{ NOCTTY_SITE_FIXTURE_LOG = $siteStepLog }
-        foreach ($siteEnvName in @('GITHUB_EVENT_NAME', 'RELEASE_TAG', 'NOCTTY_SITE_FIXTURE_FAIL', 'NOCTTY_SITE_FIXTURE_MODE')) {
+        $siteEnvironment = @{ KORETERM_SITE_FIXTURE_LOG = $siteStepLog }
+        foreach ($siteEnvName in @('GITHUB_EVENT_NAME', 'RELEASE_TAG', 'KORETERM_SITE_FIXTURE_FAIL', 'KORETERM_SITE_FIXTURE_MODE')) {
             $siteEnvironment[$siteEnvName] = $siteCase[$siteEnvName]
         }
         $siteJobResult = 'passed'
@@ -344,7 +344,7 @@ if (process.env.NOCTTY_SITE_FIXTURE_FAIL === "build-site-assets") process.exit(1
             }
         }
         $siteCalls = @(Get-Content -LiteralPath $siteStepLog -ErrorAction Ignore)
-        $siteCaseName = "$($siteCase.GITHUB_EVENT_NAME) $($siteCase.RELEASE_TAG) $($siteCase.NOCTTY_SITE_FIXTURE_FAIL) $($siteCase.NOCTTY_SITE_FIXTURE_MODE)".Trim() -replace '\s+', ' '
+        $siteCaseName = "$($siteCase.GITHUB_EVENT_NAME) $($siteCase.RELEASE_TAG) $($siteCase.KORETERM_SITE_FIXTURE_FAIL) $($siteCase.KORETERM_SITE_FIXTURE_MODE)".Trim() -replace '\s+', ' '
         if (($siteJobResult -ceq 'passed') -ne $siteCase.Pass -or ($siteCalls -join "`n") -cne ($siteCase.Calls -join "`n")) {
             throw "Deploy Site validation ($siteCaseName) must $(if ($siteCase.Pass) { 'pass' } else { 'fail' }) after running [$($siteCase.Calls -join '; ')]; it $siteJobResult after running [$($siteCalls -join '; ')]."
         }
@@ -362,7 +362,7 @@ if (process.env.NOCTTY_SITE_FIXTURE_FAIL === "build-site-assets") process.exit(1
     foreach ($siteCase in $releaseCopyCases) {
         Remove-Item -LiteralPath $siteStepLog, $siteStepOutput, $siteStepSummary -ErrorAction Ignore
         [IO.File]::WriteAllText((Join-Path $siteStepFixtureRoot 'README.md'), $(if ($siteCase.Copy) {
-            "Latest stable release: [noctty $($siteCase.Copy)](https://github.com/amanthanvi/noctty/releases/tag/v$($siteCase.Copy)), published 2026-10-20.`n"
+            "Latest stable release: [koreterm $($siteCase.Copy)](https://github.com/amanthanvi/noctty/releases/tag/v$($siteCase.Copy)), published 2026-10-20.`n"
         } else {
             "No release link.`n"
         }))
@@ -371,9 +371,9 @@ if (process.env.NOCTTY_SITE_FIXTURE_FAIL === "build-site-assets") process.exit(1
             GITHUB_OUTPUT = $siteStepOutput
             GITHUB_STEP_SUMMARY = $siteStepSummary
             GH_TOKEN = 'site-fixture-token'
-            NOCTTY_SITE_FIXTURE_LOG = $siteStepLog
-            NOCTTY_SITE_FIXTURE_TAG = $siteCase.Tag
-            NOCTTY_SITE_FIXTURE_GH_EXIT = [int]$siteCase.GhExit
+            KORETERM_SITE_FIXTURE_LOG = $siteStepLog
+            KORETERM_SITE_FIXTURE_TAG = $siteCase.Tag
+            KORETERM_SITE_FIXTURE_GH_EXIT = [int]$siteCase.GhExit
         }
         $siteOutputLines = @(Get-Content -LiteralPath $siteStepOutput -ErrorAction Ignore)
         $siteCaseName = "README v$($siteCase.Copy), latest release $($siteCase.Tag), gh exit $([int]$siteCase.GhExit)"
@@ -387,10 +387,10 @@ if (process.env.NOCTTY_SITE_FIXTURE_FAIL === "build-site-assets") process.exit(1
         $siteHeld = $siteCase.Published -ceq 'false'
         if ($siteStepResult.ExitCode -ne 0 -or
             ($siteOutputLines -join "`n") -cne "published=$($siteCase.Published)" -or
-            ($siteCalls -join "`n") -cne 'gh release view --repo amanthanvi/noctty --json tagName --jq .tagName' -or
+            ($siteCalls -join "`n") -cne 'gh release view --repo amanthanvi/koreterm --json tagName --jq .tagName' -or
             $siteHeld -ne ($siteStepResult.Output -match '(?m)^::notice title=Site deploy held::README\.md names v') -or
             $siteHeld -ne ([IO.File]::Exists($siteStepSummary) -and [IO.File]::ReadAllText($siteStepSummary) -match '### Site deploy held')) {
-            throw "The release-copy hold ($siteCaseName) must query only amanthanvi/noctty's latest release, write published=$($siteCase.Published), and explain a hold, and only a hold, in a notice and the job summary; it exited $($siteStepResult.ExitCode) with [$($siteOutputLines -join '; ')] after [$($siteCalls -join '; ')]: $($siteStepResult.Output.Trim())"
+            throw "The release-copy hold ($siteCaseName) must query only amanthanvi/koreterm's latest release, write published=$($siteCase.Published), and explain a hold, and only a hold, in a notice and the job summary; it exited $($siteStepResult.ExitCode) with [$($siteOutputLines -join '; ')] after [$($siteCalls -join '; ')]: $($siteStepResult.Output.Trim())"
         }
     }
 }
@@ -432,7 +432,7 @@ foreach ($deployStepName in @(
             Content = {
                 $deployStep
             }
-            Pattern = '(?ms)wranglerVersion: 4\.114\.0.*?workingDirectory: \$\{\{ steps\.payload\.outputs\.wrangler_directory \}\}.*?pages deploy "\$\{\{ steps\.payload\.outputs\.directory \}\}".*?--project-name=noctty.*?--commit-hash="\$\{\{ steps\.source\.outputs\.sha \}\}".*?--commit-dirty=false'
+            Pattern = '(?ms)wranglerVersion: 4\.114\.0.*?workingDirectory: \$\{\{ steps\.payload\.outputs\.wrangler_directory \}\}.*?pages deploy "\$\{\{ steps\.payload\.outputs\.directory \}\}".*?--project-name=koreterm.*?--commit-hash="\$\{\{ steps\.source\.outputs\.sha \}\}".*?--commit-dirty=false'
             Kind = 'Text'
             Description = 'isolated Wrangler deploys the same clean exact-commit payload with the required version and visible diagnostics'
         }
@@ -460,7 +460,7 @@ Invoke-ContractTable -Contracts @(
         Content = {
             (Get-Content -LiteralPath $siteDeploymentHeadGate -Raw)
         }
-        Pattern = '(?ms)GITHUB_REPOSITORY -cne ''amanthanvi/noctty''.*?git remote get-url origin.*?git fetch --force --no-tags origin.*?git rev-parse HEAD.*?refs/remotes/origin/\$DefaultBranch.*?\$head -cne \$ExpectedSha.*?git status --porcelain=v1 --untracked-files=all'
+        Pattern = '(?ms)GITHUB_REPOSITORY -cne ''amanthanvi/koreterm''.*?git remote get-url origin.*?git fetch --force --no-tags origin.*?git rev-parse HEAD.*?refs/remotes/origin/\$DefaultBranch.*?\$head -cne \$ExpectedSha.*?git status --porcelain=v1 --untracked-files=all'
         Kind = 'Text'
         Description = 'the shared site gate binds both phases to a clean exact fork-local main head'
     }
@@ -493,7 +493,7 @@ Invoke-ContractTable -Contracts @(
         Content = {
             $sitePayloadStep
         }
-        Pattern = '(?ms)noctty-wrangler-.*?New-Item -ItemType Directory -Path \$wrangler.*?wrangler_directory='
+        Pattern = '(?ms)koreterm-wrangler-.*?New-Item -ItemType Directory -Path \$wrangler.*?wrangler_directory='
         Kind = 'Text'
         Description = 'Wrangler installs in a runner-temporary directory outside the checkout'
     }
@@ -565,7 +565,7 @@ Invoke-ContractTable -Contracts @(
         Content = {
             $cloudflarePagesVerifierText
         }
-        Pattern = '"/__noctty_missing_\$\(\$Commit\.Substring\(0, 12\)\)/nested/page"'
+        Pattern = '"/__koreterm_missing_\$\(\$Commit\.Substring\(0, 12\)\)/nested/page"'
         Kind = 'Text'
         Description = 'deployment verification exercises the 404 fallback below a multi-segment path'
     }
@@ -574,7 +574,7 @@ Invoke-ContractTable -Contracts @(
         Content = {
             $siteIndexText
         }
-        Pattern = '(?ms)property="og:image" content="https://noctty\.com/assets/noctty-social\.jpg".*?property="og:image:type" content="image/jpeg".*?property="og:image:width" content="1200".*?property="og:image:height" content="630".*?name="twitter:card" content="summary_large_image".*?name="twitter:image" content="https://noctty\.com/assets/noctty-social\.jpg"'
+        Pattern = '(?ms)property="og:image" content="https://noctty\.com/assets/koreterm-social\.jpg".*?property="og:image:type" content="image/jpeg".*?property="og:image:width" content="1200".*?property="og:image:height" content="630".*?name="twitter:card" content="summary_large_image".*?name="twitter:image" content="https://noctty\.com/assets/koreterm-social\.jpg"'
         Kind = 'Text'
         Description = 'social previews use a current raster large-image card with explicit dimensions'
     }
@@ -583,7 +583,7 @@ Invoke-ContractTable -Contracts @(
         Content = {
             $sitePayloadBuilderText
         }
-        Pattern = "'assets/noctty-social\.jpg'"
+        Pattern = "'assets/koreterm-social\.jpg'"
         Kind = 'Text'
         Description = 'the deterministic Cloudflare payload includes the social preview image'
     }
@@ -619,7 +619,7 @@ Invoke-ContractTable -Contracts @(
         Content = {
             $siteAssetBuilderText
         }
-        Pattern = '(?ms)const SITE_PAGES = new Map\(\[.*?"index\.html".*?"404\.html".*?"why-noctty\.html".*?function getInlineScriptContract.*?SITE_PAGES\.keys\(\).*?inlineScripts\.length !== 1.*?sharedScript !== undefined.*?must be byte-identical'
+        Pattern = '(?ms)const SITE_PAGES = new Map\(\[.*?"index\.html".*?"404\.html".*?"why-koreterm\.html".*?function getInlineScriptContract.*?SITE_PAGES\.keys\(\).*?inlineScripts\.length !== 1.*?sharedScript !== undefined.*?must be byte-identical'
         Kind = 'Text'
         Description = 'both pages must carry one byte-identical inline bootstrap so the CSP pins exactly one script hash'
     }
@@ -637,7 +637,7 @@ Invoke-ContractTable -Contracts @(
         Content = {
             $siteAssetBuilderText
         }
-        Pattern = '(?ms)const SITE_PAGES = new Map\(\[\s*\[\s*"index\.html",\s*\["styles\.css", "app\.js", "version\.js", "install\.js", "terminal\.js"\],\s*\],\s*\["404\.html", \["styles\.css", "app\.js"\]\],\s*\["why-noctty\.html", \["styles\.css", "app\.js", "version\.js"\]\],\s*\]\);.*?for \(const asset of new Set\(\[\.\.\.SITE_PAGES\.values\(\)\]\.flat\(\)\)\).*?for \(const \[htmlName, assets\] of SITE_PAGES\).*?withAssetCacheKeys\('
+        Pattern = '(?ms)const SITE_PAGES = new Map\(\[\s*\[\s*"index\.html",\s*\["styles\.css", "app\.js", "version\.js", "install\.js", "terminal\.js"\],\s*\],\s*\["404\.html", \["styles\.css", "app\.js"\]\],\s*\["why-koreterm\.html", \["styles\.css", "app\.js", "version\.js"\]\],\s*\]\);.*?for \(const asset of new Set\(\[\.\.\.SITE_PAGES\.values\(\)\]\.flat\(\)\)\).*?for \(const \[htmlName, assets\] of SITE_PAGES\).*?withAssetCacheKeys\('
         Kind = 'Text'
         Description = 'SHA-256 cache keys cover every local script and stylesheet referenced by each page'
     }
@@ -751,15 +751,15 @@ $publicBaseUriFunctionText = Get-PowerShellBlockText `
     -HeaderPattern '^function\s+ConvertTo-PublicBaseUri(?=\s|\{)'
 . ([scriptblock]::Create($publicBaseUriFunctionText))
 $immutablePagesOrigin = ConvertTo-PublicBaseUri `
-    -Value 'https://69cd5628.noctty.pages.dev/' `
+    -Value 'https://69cd5628.koreterm.pages.dev/' `
     -Kind pages
 if ($immutablePagesOrigin.DnsSafeHost -cne
-    '69cd5628.noctty.pages.dev') {
+    '69cd5628.koreterm.pages.dev') {
     throw 'Immutable Pages deployment origin was not preserved.'
 }
 foreach ($mutablePagesUrl in @(
     'https://noctty.pages.dev/',
-    'https://main.noctty.pages.dev/'
+    'https://main.koreterm.pages.dev/'
 )) {
     $mutablePagesOriginRejected = $false
     try {
@@ -859,8 +859,8 @@ function Assert-ImmutablePagesDeploymentOrigin {
     $script:originBindingProbeDeploymentId = $DeploymentId
 }
 try {
-    $pagesOrigin = [Uri]'https://11111111.noctty.pages.dev/'
-    $apiOrigin = [Uri]'https://22222222.noctty.pages.dev/'
+    $pagesOrigin = [Uri]'https://11111111.koreterm.pages.dev/'
+    $apiOrigin = [Uri]'https://22222222.koreterm.pages.dev/'
     # The extracted deployment slice consumes this variable dynamically; keep
     # the static reference so PSScriptAnalyzer can see the intentional use.
     [void] $apiOrigin
@@ -1005,15 +1005,15 @@ $publicAssetUriFunction = Get-PowerShellBlockText `
 $publicAssetUriProbe = & ([scriptblock]::Create(
         $publicAssetUriFunction + @'
 New-PublicAssetUri `
-    -Origin ([Uri]'https://11111111.noctty.pages.dev/') `
-    -RelativePath 'why-noctty.html' `
+    -Origin ([Uri]'https://11111111.koreterm.pages.dev/') `
+    -RelativePath 'why-koreterm.html' `
     -Id '11111111-1d01-4095-9774-6f8cfe7d7d1e' `
     -Commit '0123456789abcdef0123456789abcdef01234567'
 '@
     ))
-if ($publicAssetUriProbe.AbsolutePath -cne '/why-noctty' -or
+if ($publicAssetUriProbe.AbsolutePath -cne '/why-koreterm' -or
     $publicAssetUriProbe.Query -cne
-        '?noctty_deployment=11111111-1d01-4095-9774-6f8cfe7d7d1e') {
+        '?koreterm_deployment=11111111-1d01-4095-9774-6f8cfe7d7d1e') {
     throw 'Pages public HTML asset URLs must use the extensionless canonical route.'
 }
 Invoke-ContractTable -Contracts @(
@@ -1031,7 +1031,7 @@ Invoke-ContractTable -Contracts @(
         Content = {
             (Get-PowerShellBlockText -Content $cloudflarePagesVerifierText -HeaderPattern '^function\s+Test-PublicHeaderContractOnce(?=\s|\{)')
         }
-        Pattern = '(?ms)\[switch\]\s+\$StaticOnly.*?if \(-not \$StaticOnly\) \{.*?Path = ''/''.*?\}.*?Path = ''/styles\.css''.*?if \(-not \$StaticOnly\) \{.*?Path = ''/__noctty_header_contract_'''
+        Pattern = '(?ms)\[switch\]\s+\$StaticOnly.*?if \(-not \$StaticOnly\) \{.*?Path = ''/''.*?\}.*?Path = ''/styles\.css''.*?if \(-not \$StaticOnly\) \{.*?Path = ''/__koreterm_header_contract_'''
         Kind = 'Text'
         Description = 'static-only response verification always checks stylesheet asset controls and excludes HTML route probes'
     }
@@ -1040,7 +1040,7 @@ Invoke-ContractTable -Contracts @(
         Content = {
             $cloudflarePagesVerifierText
         }
-        Pattern = '(?ms)schema_version\s*=\s*''noctty\.cloudflare-pages-provenance\.v2''.*?immutable_html_verified\s*=\s*\$true.*?canonical_static_assets_verified\s*=\s*-not \[string\]::IsNullOrWhiteSpace\(\$CanonicalBaseUrl\).*?canonical_html_verified\s*=\s*\$false'
+        Pattern = '(?ms)schema_version\s*=\s*''koreterm\.cloudflare-pages-provenance\.v2''.*?immutable_html_verified\s*=\s*\$true.*?canonical_static_assets_verified\s*=\s*-not \[string\]::IsNullOrWhiteSpace\(\$CanonicalBaseUrl\).*?canonical_html_verified\s*=\s*\$false'
         Kind = 'Text'
         Description = 'deployment provenance distinguishes immutable HTML, canonical static assets, and unverified canonical HTML'
     }
@@ -1203,7 +1203,7 @@ Invoke-ContractTable -Contracts @(
 
 $siteCspFixtureRoot = Join-Path (
     [IO.Path]::GetTempPath()
-) "noctty-site-csp-contract-$PID-$([Guid]::NewGuid().ToString('N'))"
+) "koreterm-site-csp-contract-$PID-$([Guid]::NewGuid().ToString('N'))"
 $siteCspFixtureRoot = [IO.Path]::GetFullPath($siteCspFixtureRoot)
 $siteCspTempPrefix = [IO.Path]::GetFullPath(
     [IO.Path]::GetTempPath()
@@ -1453,7 +1453,7 @@ Invoke-ContractTable -Contracts @(
         Content = {
             (Get-PowerShellBlockText -Content $cloudflarePagesVerifierText -HeaderPattern '^function\s+Test-PublicHeaderContractOnce(?=\s|\{)')
         }
-        Pattern = "(?ms)Path = '/'.*?ExpectedStatus = 200.*?Path = '/styles\.css'.*?ExpectedStatus = 200.*?__noctty_header_contract_.*?nested/page'.*?ExpectedStatus = 404.*?Cache-Control"
+        Pattern = "(?ms)Path = '/'.*?ExpectedStatus = 200.*?Path = '/styles\.css'.*?ExpectedStatus = 200.*?__koreterm_header_contract_.*?nested/page'.*?ExpectedStatus = 404.*?Cache-Control"
         Kind = 'Text'
         Description = 'public header verification covers canonical HTML, an asset, and a nested 404 fallback'
     }
@@ -1503,7 +1503,7 @@ Invoke-ContractTable -Contracts @(
 
 $sitePayloadFixtureRoot = Join-Path (
     [IO.Path]::GetTempPath()
-) "noctty-site-payload-contract-$PID-$([Guid]::NewGuid().ToString('N'))"
+) "koreterm-site-payload-contract-$PID-$([Guid]::NewGuid().ToString('N'))"
 $sitePayloadFixtureRoot = [IO.Path]::GetFullPath($sitePayloadFixtureRoot)
 $tempPrefix = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\', '/') +
     [IO.Path]::DirectorySeparatorChar
@@ -1560,7 +1560,7 @@ try {
     foreach ($requiredPayloadPath in @(
         'index.html',
         '404.html',
-        'why-noctty.html',
+        'why-koreterm.html',
         'styles.css',
         'app.js',
         'version.js',
@@ -1577,7 +1577,7 @@ try {
         'assets/fonts/OFL-JetBrainsMono.txt'
         'assets/fonts/geist.woff2'
         'assets/fonts/jetbrains-mono.woff2'
-        'assets/noctty-social.jpg'
+        'assets/koreterm-social.jpg'
         'assets/shot-palette-dark.webp'
         'assets/shot-palette-light.webp'
         'assets/shot-restored-dark.webp'

@@ -8,7 +8,7 @@
 //!
 //! `pid` names the process that showed the toast. Window, tab and surface
 //! ids mean something only inside that process, so a launch that reaches
-//! another one (a COM activation routed to whichever noctty registered the
+//! another one (a COM activation routed to whichever koreterm registered the
 //! activator, or a cold start after the first process ended) must not be
 //! resolved against them.
 //!
@@ -51,9 +51,9 @@ pub const ActivationTarget = struct {
     }
 };
 
-/// Drops a click that arrives a second time. A toast click can reach noctty
+/// Drops a click that arrives a second time. A toast click can reach koreterm
 /// twice: through the toast's in-process `Activated` handler and through the
-/// COM activator (`win32_toast_activator.zig`), or through a second noctty's
+/// COM activator (`win32_toast_activator.zig`), or through a second koreterm's
 /// activator that forwards it over IPC. Both carry the same launch string,
 /// so the same target inside `window_ms` of the first is the same click,
 /// even when another toast's click arrived in between. Two real clicks on

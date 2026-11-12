@@ -16,7 +16,7 @@ $forwardedArgs = @('-TimeoutSeconds', $TimeoutSeconds.ToString())
 if ($Rebuild) { $forwardedArgs += '-Rebuild' }; if ($ResetState) { $forwardedArgs += '-ResetState' }
 if ($ExerciseHighContrast) { $forwardedArgs += '-ExerciseHighContrast' }
 Invoke-InteractiveWin11HarnessMain -RepoRoot $repoRoot -LauncherPath $launcher `
-    -EnvironmentVariable 'NOCTTY_INTERACTIVE_WIN11_PALETTE_THEME_BOOTSTRAPPED' `
+    -EnvironmentVariable 'KORETERM_INTERACTIVE_WIN11_PALETTE_THEME_BOOTSTRAPPED' `
     -ArgumentList $forwardedArgs
 . (Join-Path $PSScriptRoot 'interactive-win11-stateful-lib.ps1')
 $harness = Initialize-InteractiveWin11Sandbox -RepoRoot $repoRoot -SandboxName 'palette-theme' -ResetState:$ResetState -IncludeResourcesDir
@@ -24,7 +24,7 @@ $layout = $harness.Layout
 $exe = Get-InteractiveWin11ExePath -RepoRoot $repoRoot
 if ((Get-InteractiveWin11LaunchAction -ExePath $exe -Rebuild:$Rebuild -BuildInputs (Get-InteractiveWin11DefaultBuildInputs -RepoRoot $repoRoot)) -eq 'build') { Invoke-InteractiveWin11Build -RepoRoot $repoRoot }
 Assert-InteractiveWin11ExeExists -ExePath $exe
-$configDir = Join-Path $layout.LocalAppData 'noctty'; New-Item -ItemType Directory -Force -Path $configDir | Out-Null
+$configDir = Join-Path $layout.LocalAppData 'koreterm'; New-Item -ItemType Directory -Force -Path $configDir | Out-Null
 $configPath = Join-Path $configDir 'config.ghostty'
 # Close-StatefulHost expects WM_CLOSE to end the process; a close that lands
 # before the shell's first prompt mark would otherwise raise the close prompt.
@@ -109,10 +109,10 @@ $themeRgb = [Convert]::ToInt32('262427', 16)
 try {
     if ($ExerciseHighContrast) {
         $currentUserSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
-        $hcMutex = [Threading.Mutex]::new($false, "Global\NocttyHighContrastHarness-$currentUserSid")
+        $hcMutex = [Threading.Mutex]::new($false, "Global\KoretermHighContrastHarness-$currentUserSid")
         $hostLocalAppData = [Environment]::GetFolderPath([Environment+SpecialFolder]::LocalApplicationData)
         if ([string]::IsNullOrWhiteSpace($hostLocalAppData)) { throw 'Unable to resolve the host LocalAppData directory for High Contrast recovery.' }
-        $hcRecoveryPath = Join-Path $hostLocalAppData 'noctty\harness-state\high-contrast-restore-off.marker'
+        $hcRecoveryPath = Join-Path $hostLocalAppData 'koreterm\harness-state\high-contrast-restore-off.marker'
         try {
             $hcMutexAcquired = $hcMutex.WaitOne([TimeSpan]::FromSeconds(10))
         }
@@ -325,13 +325,13 @@ finally {
             if (-not $run.Process.HasExited) { Stop-InteractiveWin11Process -Process $run.Process -Contained }
         }
         catch {
-            [void]$cleanupErrors.Add("noctty process cleanup failed: $($_.Exception.Message)")
+            [void]$cleanupErrors.Add("koreterm process cleanup failed: $($_.Exception.Message)")
         }
     }
     if ($cleanupErrors.Count -gt 0) {
         $cleanupMessage = "Palette/theme cleanup failed: $($cleanupErrors -join '; ')"
         if ($null -ne $primaryError) {
-            $primaryError.Exception.Data['NocttyCleanupErrors'] = $cleanupMessage
+            $primaryError.Exception.Data['KoretermCleanupErrors'] = $cleanupMessage
             Write-Error $cleanupMessage -ErrorAction Continue
         }
         else {

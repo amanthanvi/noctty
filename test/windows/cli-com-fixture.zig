@@ -1,11 +1,11 @@
-//! Stand-in for noctty.exe in cli-com-forwarder.ps1: a windowless process that
+//! Stand-in for koreterm.exe in cli-com-forwarder.ps1: a windowless process that
 //! records what the launcher gave it (desktop, station, startup flags, standard
 //! handles, console, raw command line) to the file named by
-//! NOCTTY_COM_FIXTURE_RECEIPT, then exits. Test knobs are environment variables:
-//!   NOCTTY_COM_FIXTURE_EXIT     exit code (decimal u32, default 0)
-//!   NOCTTY_COM_FIXTURE_HOLD_MS  sleep before exiting (default 3000)
-//!   NOCTTY_COM_FIXTURE_STDIN    set: read all of stdin, report its length and SHA-256
-//!   NOCTTY_COM_FIXTURE_OUT      set: write one line to stdout and one to stderr
+//! KORETERM_COM_FIXTURE_RECEIPT, then exits. Test knobs are environment variables:
+//!   KORETERM_COM_FIXTURE_EXIT     exit code (decimal u32, default 0)
+//!   KORETERM_COM_FIXTURE_HOLD_MS  sleep before exiting (default 3000)
+//!   KORETERM_COM_FIXTURE_STDIN    set: read all of stdin, report its length and SHA-256
+//!   KORETERM_COM_FIXTURE_OUT      set: write one line to stdout and one to stderr
 const std = @import("std");
 const w = std.os.windows;
 
@@ -13,10 +13,10 @@ pub const panic = std.debug.no_panic;
 
 pub fn main() !void {
     const alloc = std.heap.page_allocator;
-    const path = try std.process.getEnvVarOwned(alloc, "NOCTTY_COM_FIXTURE_RECEIPT");
+    const path = try std.process.getEnvVarOwned(alloc, "KORETERM_COM_FIXTURE_RECEIPT");
     defer alloc.free(path);
-    const exit_code = envU32(alloc, "NOCTTY_COM_FIXTURE_EXIT", 0);
-    const hold_ms = envU32(alloc, "NOCTTY_COM_FIXTURE_HOLD_MS", 3000);
+    const exit_code = envU32(alloc, "KORETERM_COM_FIXTURE_EXIT", 0);
+    const hold_ms = envU32(alloc, "KORETERM_COM_FIXTURE_HOLD_MS", 3000);
 
     var startup: w.STARTUPINFOW = std.mem.zeroes(w.STARTUPINFOW);
     startup.cb = @sizeOf(w.STARTUPINFOW);
@@ -27,7 +27,7 @@ pub fn main() !void {
 
     var stdin_bytes: u64 = 0;
     var digest: [32]u8 = undefined;
-    if (envSet(alloc, "NOCTTY_COM_FIXTURE_STDIN")) {
+    if (envSet(alloc, "KORETERM_COM_FIXTURE_STDIN")) {
         var hasher = std.crypto.hash.sha2.Sha256.init(.{});
         var buffer: [4096]u8 = undefined;
         const stdin = std.fs.File.stdin();
@@ -42,7 +42,7 @@ pub fn main() !void {
     const hex = std.fmt.bytesToHex(digest, .lower);
     const hex_slice: []const u8 = hex[0..];
 
-    if (envSet(alloc, "NOCTTY_COM_FIXTURE_OUT")) {
+    if (envSet(alloc, "KORETERM_COM_FIXTURE_OUT")) {
         if (isUsable(stdout_kind)) std.fs.File.stdout().writeAll("fixture-out\n") catch {};
         if (isUsable(stderr_kind)) std.fs.File.stderr().writeAll("fixture-err\n") catch {};
     }

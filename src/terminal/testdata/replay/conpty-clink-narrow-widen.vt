@@ -1,5 +1,5 @@
 # Clink at the bottom of a full screen, with a typed line that wraps when the
-# window narrows. Shortened from what the bundled ConPTY sent noctty for
+# window narrows. Shortened from what the bundled ConPTY sent koreterm for
 # portable Clink 1.9.34 in cmd (CLINK-RESIZE-01, 2026-10-25, hidden desktop,
 # 80x20 at 150%); the expectations are ConPTY's own buffer, read through
 # AttachConsole at each step.

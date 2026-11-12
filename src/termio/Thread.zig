@@ -239,17 +239,17 @@ pub fn threadMain(self: *Thread, io: *termio.Termio) void {
 
             error.BundledConptyInconsistent => {
                 const str =
-                    \\The bundled ConPTY (conpty.dll next to noctty.exe) could not
+                    \\The bundled ConPTY (conpty.dll next to koreterm.exe) could not
                     \\create a pseudo console for this terminal.
                     \\
                     \\Other terminals in this process are still running on the
-                    \\bundled ConPTY, so noctty refused to fall back to the in-box
+                    \\bundled ConPTY, so koreterm refused to fall back to the in-box
                     \\conhost for just this one: mixing the two implementations in
                     \\one process is not supported.
                     \\
                     \\Close the other terminals and open a new one to allow the
-                    \\fallback, or restart noctty with NOCTTY_CONPTY=inbox. Run
-                    \\`noctty +version` to see which ConPTY is in use.
+                    \\fallback, or restart koreterm with KORETERM_CONPTY=inbox. Run
+                    \\`koreterm +version` to see which ConPTY is in use.
                     \\
                     \\This terminal is non-functional. Please close it and try again.
                 ;
@@ -285,7 +285,7 @@ pub fn threadMain(self: *Thread, io: *termio.Termio) void {
                     io,
                     err,
                     cause,
-                    "noctty failed to launch the requested command:",
+                    "koreterm failed to launch the requested command:",
                     \\No child process was created, so there is no exit code.
                     \\
                     \\The underlying shell or command was unable to be started.
@@ -304,8 +304,8 @@ pub fn threadMain(self: *Thread, io: *termio.Termio) void {
                     io,
                     err,
                     cause,
-                    "noctty failed to launch the requested command:",
-                    \\The child process was created, but noctty could not
+                    "koreterm failed to launch the requested command:",
+                    \\The child process was created, but koreterm could not
                     \\finish launching it. Depending on the cause above, the
                     \\child either exited on its own during launch setup or
                     \\cleanup attempted to stop it, so no exit code is
@@ -324,7 +324,7 @@ pub fn threadMain(self: *Thread, io: *termio.Termio) void {
                     io,
                     err,
                     null,
-                    "noctty encountered an IO-thread failure while running the requested command:",
+                    "koreterm encountered an IO-thread failure while running the requested command:",
                     "The command or its terminal IO could not continue.",
                 );
             },

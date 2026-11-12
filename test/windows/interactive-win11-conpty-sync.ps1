@@ -25,21 +25,21 @@ $windowsHarnessHistoryGuard = Start-WindowsHarnessHistoryGuard -Harness 'interac
 try {
 
 
-# Differential harness: does noctty's screen agree with ConPTY's?
+# Differential harness: does koreterm's screen agree with ConPTY's?
 #
 # ConPTY keeps its own copy of the screen. Console-API programs (cmd's line
 # editor, PSReadLine, anything using SetConsoleCursorPosition) draw into that
 # copy, and ConPTY forwards the result as VT with ABSOLUTE cursor positions in
-# its own coordinates. If noctty's grid disagrees with ConPTY's buffer about
+# its own coordinates. If koreterm's grid disagrees with ConPTY's buffer about
 # which line sits on which row, every later absolute write lands on the wrong
 # row. A resize is where the two drift apart: ConPTY keeps no scrollback and
-# sends nothing after a resize (AGENTS.md, #262), so whatever noctty's
+# sends nothing after a resize (AGENTS.md, #262), so whatever koreterm's
 # PageList does on its own side must match what conhost does on its side.
 #
-# Each scenario starts a fresh portable noctty on a hidden desktop, puts a
+# Each scenario starts a fresh portable koreterm on a hidden desktop, puts a
 # shell into a known state, applies a trigger (resize, search bar, split,
 # maximize, ...), and then compares, row by row:
-#   * noctty's visible rows, read through the terminal's UIA TextPattern, and
+#   * koreterm's visible rows, read through the terminal's UIA TextPattern, and
 #   * ConPTY's visible rows, read by a helper process that attaches to the
 #     shell's console (FreeConsole, AttachConsole, CONOUT$,
 #     ReadConsoleOutputW). AttachConsole is process-wide, so it never runs in
@@ -53,7 +53,7 @@ try {
 # explains, so the rest must still agree.
 #
 # Input is window messages to the terminal HWND: no SendInput, no foreground,
-# no mouse. Every noctty this runs is a copy with a `noctty.portable` marker in
+# no mouse. Every koreterm this runs is a copy with a `koreterm.portable` marker in
 # the sandbox, with APPDATA and LOCALAPPDATA pointing into the sandbox, and the
 # real profile's startup-attempts.json is checked before and after.
 
@@ -66,14 +66,14 @@ $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 # ---------------------------------------------------------------------------
 # Native helpers shared by both halves.
 # ---------------------------------------------------------------------------
-if (-not ('NocttyConptySyncNative' -as [type])) {
+if (-not ('KoretermConptySyncNative' -as [type])) {
     Add-Type -TypeDefinition @'
 using System;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using System.Text;
 
-public static class NocttyConptySyncNative {
+public static class KoretermConptySyncNative {
     [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
 
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
@@ -143,7 +143,7 @@ public static class NocttyConptySyncNative {
     }
 
     public static System.Diagnostics.Process StartOnDesktop(string exe, string args, string cwd, string desktop) {
-        if (String.IsNullOrEmpty(desktop) || !desktop.StartsWith("noctty-conpty-sync-", StringComparison.Ordinal))
+        if (String.IsNullOrEmpty(desktop) || !desktop.StartsWith("koreterm-conpty-sync-", StringComparison.Ordinal))
             throw new ArgumentException("a private conpty-sync desktop is required");
         var si = new STARTUPINFO();
         si.cb = Marshal.SizeOf(typeof(STARTUPINFO));
@@ -196,7 +196,7 @@ public static class NocttyConptySyncNative {
     }
 
     // Kill every process in the job when the last handle closes, so a
-    // timed-out run cannot leave an invisible noctty behind on a desktop
+    // timed-out run cannot leave an invisible koreterm behind on a desktop
     // nobody can see.
     public static IntPtr NewKillOnCloseJob() {
         IntPtr job = CreateJobObjectW(IntPtr.Zero, null);
@@ -221,7 +221,7 @@ using System.IO;
 using System.Runtime.InteropServices;
 using System.Text;
 
-public static class NocttyConptySyncDump {
+public static class KoretermConptySyncDump {
     [StructLayout(LayoutKind.Sequential)] struct COORD { public short X, Y; }
     [StructLayout(LayoutKind.Sequential)] struct SMALL_RECT { public short Left, Top, Right, Bottom; }
     [StructLayout(LayoutKind.Sequential)] struct CSBI { public COORD dwSize, dwCursorPosition; public ushort wAttributes; public SMALL_RECT srWindow; public COORD dwMaximumWindowSize; }
@@ -346,7 +346,7 @@ function Write-ConptySyncTimeoutDiagnostics([IntPtr] $Desktop, [int] $RootPid) {
     }
     catch { Write-Host "process diagnostics failed: $($_.Exception.Message)" }
     try {
-        foreach ($line in [NocttyConptySyncNative]::DescribeDesktopWindows($Desktop)) { Write-Host "window $line" }
+        foreach ($line in [KoretermConptySyncNative]::DescribeDesktopWindows($Desktop)) { Write-Host "window $line" }
     }
     catch { Write-Host "window diagnostics failed: $($_.Exception.Message)" }
     Write-Host '--- end of timeout diagnostics ---'
@@ -355,7 +355,7 @@ function Write-ConptySyncTimeoutDiagnostics([IntPtr] $Desktop, [int] $RootPid) {
 function Get-ConptySyncRealStartupAttempts {
     # SHGetKnownFolderPath ignores the sandboxed LOCALAPPDATA variable.
     $real = [Environment]::GetFolderPath([Environment+SpecialFolder]::LocalApplicationData)
-    $path = Join-Path $real 'noctty\startup-attempts.json'
+    $path = Join-Path $real 'koreterm\startup-attempts.json'
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return "absent:$path" }
     $item = Get-Item -LiteralPath $path
     $hash = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash
@@ -377,10 +377,10 @@ function Get-ConptySyncRealPSReadLineState {
 # ===========================================================================
 if ($Inner) {
     Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes
-    [void][NocttyConptySyncNative]::SetThreadDpiAwarenessContext([IntPtr](-4))
+    [void][KoretermConptySyncNative]::SetThreadDpiAwarenessContext([IntPtr](-4))
     # Clink reads its overrides from CLINK_* variables, and several beat
     # `clink inject -p` or add places to load from: CLINK_PROFILE, CLINK_PATH
-    # (noctty prepends its own folder to it), CLINK_SETTINGS, CLINK_INPUTRC,
+    # (koreterm prepends its own folder to it), CLINK_SETTINGS, CLINK_INPUTRC,
     # CLINK_CUSTOMPROMPT, CLINK_COLORTHEME, CLINK_THEMES_DIR,
     # CLINK_COMPLETIONS_DIR. Remove every one, so a developer's own Clink
     # scripts, prompt, settings and history stay out of the Clink scenario.
@@ -393,7 +393,7 @@ if ($Inner) {
     # `clink inject` still runs.
     $env:CLINK_NOAUTORUN = '1'
 
-    $script:Exe = Join-Path $RunRoot 'bin\noctty.exe'
+    $script:Exe = Join-Path $RunRoot 'bin\koreterm.exe'
     $script:DumpExe = Join-Path $RunRoot 'tools\conpty-sync-dump.exe'
     $script:ClinkExe = Join-Path $RunRoot 'tools\clink\clink_x64.exe'
     $script:Evidence = Join-Path $RunRoot 'evidence'
@@ -408,21 +408,21 @@ if ($Inner) {
 
     function Send-SyncMessage([IntPtr] $Hwnd, [int] $Message, [int64] $WParam, [int64] $LParam) {
         $result = [IntPtr]::Zero
-        $ok = [NocttyConptySyncNative]::SendMessageTimeoutW($Hwnd, [uint32]$Message, [IntPtr]$WParam, [IntPtr]$LParam, 2, 5000, [ref]$result)
+        $ok = [KoretermConptySyncNative]::SendMessageTimeoutW($Hwnd, [uint32]$Message, [IntPtr]$WParam, [IntPtr]$LParam, 2, 5000, [ref]$result)
         if ($ok -eq [IntPtr]::Zero) { throw ('SendMessageTimeout 0x{0:X} to 0x{1:X} failed or timed out' -f $Message, $Hwnd.ToInt64()) }
     }
 
     # A key as TranslateMessage would deliver it: the surface drops a WM_CHAR
     # that no WM_KEYDOWN announced (AGENTS.md, DeferredCharState).
     function Send-SyncKey([IntPtr] $Hwnd, [int] $Vk, [int] $Char = 0, [switch] $MayDestroy) {
-        $scan = [NocttyConptySyncNative]::MapVirtualKeyW([uint32]$Vk, 0)
+        $scan = [KoretermConptySyncNative]::MapVirtualKeyW([uint32]$Vk, 0)
         $down = [int64](1 -bor ([int64]$scan -shl 16))
         $up = $down -bor 0xC0000000L
         Send-SyncMessage $Hwnd $script:SYNC_WM_KEYDOWN $Vk $down
         if ($Char -ne 0) { Send-SyncMessage $Hwnd $script:SYNC_WM_CHAR $Char $down }
         if ($MayDestroy) {
             # The key may have closed this window (close_surface).
-            [void][NocttyConptySyncNative]::PostMessageW($Hwnd, $script:SYNC_WM_KEYUP, [IntPtr]$Vk, [IntPtr]$up)
+            [void][KoretermConptySyncNative]::PostMessageW($Hwnd, $script:SYNC_WM_KEYUP, [IntPtr]$Vk, [IntPtr]$up)
         }
         else { Send-SyncMessage $Hwnd $script:SYNC_WM_KEYUP $Vk $up }
     }
@@ -445,7 +445,7 @@ if ($Inner) {
         }
     }
 
-    function Get-SyncSurfaces($Ctx) { @([NocttyConptySyncNative]::VisibleChildren($Ctx.Host, 'noctty.win32')) }
+    function Get-SyncSurfaces($Ctx) { @([KoretermConptySyncNative]::VisibleChildren($Ctx.Host, 'koreterm.win32')) }
 
     # ParentProcessId is the number the process was created with, and Windows
     # reuses numbers (a hosted VM's stay in the hundreds). A process whose parent
@@ -494,7 +494,7 @@ if ($Inner) {
             ForEach-Object { [int]$_.ProcessId })
     }
 
-    function Read-SyncNoctty([IntPtr] $Surface) {
+    function Read-SyncKoreterm([IntPtr] $Surface) {
         $element = [System.Windows.Automation.AutomationElement]::FromHandle($Surface)
         $pattern = $null
         if (-not $element.TryGetCurrentPattern([System.Windows.Automation.TextPattern]::Pattern, [ref]$pattern)) {
@@ -518,7 +518,7 @@ if ($Inner) {
         for ($attempt = 1; ; $attempt++) {
             $path = Join-Path $script:Work ('dump-{0}.txt' -f [guid]::NewGuid().ToString('N'))
             $arguments = '{0} "{1}"' -f $ShellPid, $path
-            $proc = [NocttyConptySyncNative]::StartOnDesktop($script:DumpExe, $arguments, $script:Work, $DesktopName)
+            $proc = [KoretermConptySyncNative]::StartOnDesktop($script:DumpExe, $arguments, $script:Work, $DesktopName)
             if (-not $proc.WaitForExit(10000)) { $proc.Kill(); throw 'console dump timed out' }
             $raw = [System.IO.File]::ReadAllText($path, [System.Text.Encoding]::UTF8)
             Remove-Item -LiteralPath $path -Force
@@ -544,7 +544,7 @@ if ($Inner) {
 
     # Cells the two sides cannot spell the same way: conhost holds one UTF-16
     # unit per cell and no grapheme clusters (it shows U+FFFD for a non-BMP
-    # character or a VS16 sequence), noctty holds whole clusters. A cluster
+    # character or a VS16 sequence), koreterm holds whole clusters. A cluster
     # that is more than one UTF-16 unit, or is U+FFFD or a lone surrogate,
     # compares as one placeholder.
     $script:SyncCluster = New-Object System.Text.RegularExpressions.Regex (
@@ -559,15 +559,15 @@ if ($Inner) {
         return $script:SyncCluster.Replace($Text.TrimEnd(), $script:SyncClusterEvaluator)
     }
 
-    function Compare-SyncViews([string[]] $Noctty, $Conpty, [int[]] $IgnoreRows = @()) {
-        $rows = [Math]::Max($Noctty.Count, $Conpty.Lines.Count)
+    function Compare-SyncViews([string[]] $Koreterm, $Conpty, [int[]] $IgnoreRows = @()) {
+        $rows = [Math]::Max($Koreterm.Count, $Conpty.Lines.Count)
         $diff = New-Object System.Collections.Generic.List[string]
         for ($i = 0; $i -lt $rows; $i++) {
             if ($IgnoreRows -contains $i) { continue }
-            $a = if ($i -lt $Noctty.Count) { $Noctty[$i] } else { '' }
+            $a = if ($i -lt $Koreterm.Count) { $Koreterm[$i] } else { '' }
             $b = if ($i -lt $Conpty.Lines.Count) { $Conpty.Lines[$i] } else { '' }
             if ((Get-SyncNormalized $a) -cne (Get-SyncNormalized $b)) {
-                $diff.Add(('row {0,2} noctty: {1}' -f $i, $a.TrimEnd()))
+                $diff.Add(('row {0,2} koreterm: {1}' -f $i, $a.TrimEnd()))
                 $diff.Add(('row {0,2} conpty: {1}' -f $i, $b.TrimEnd()))
             }
         }
@@ -583,9 +583,9 @@ if ($Inner) {
         $stableSince = $null
         $settled = $false
         while ($true) {
-            $noctty = Read-SyncNoctty $Ctx.Surface
+            $koreterm = Read-SyncKoreterm $Ctx.Surface
             $conpty = Read-SyncConpty $Ctx.ShellPid
-            $key = ($noctty -join "`n") + "`n--`n" + $conpty.Header + "`n" + ($conpty.Lines -join "`n")
+            $key = ($koreterm -join "`n") + "`n--`n" + $conpty.Header + "`n" + ($conpty.Lines -join "`n")
             $now = Get-Date
             if ($key -ceq $previous) {
                 if ($null -eq $stableSince) { $stableSince = $now }
@@ -596,16 +596,16 @@ if ($Inner) {
             if ($now -gt $deadline) { break }
             Start-Sleep -Milliseconds 150
         }
-        $cmp = Compare-SyncViews $noctty $conpty @($Ctx.IgnoreRows)
+        $cmp = Compare-SyncViews $koreterm $conpty @($Ctx.IgnoreRows)
         $file = Join-Path $script:Evidence ('{0}-{1}.txt' -f $Ctx.Name, $Label)
         $body = @("conpty: $($conpty.Header)", "diff rows=$($cmp.Rows) settled=$settled") + $cmp.Lines +
-            @('--- noctty ---') + $noctty + @('--- conpty ---') + $conpty.Lines
+            @('--- koreterm ---') + $koreterm + @('--- conpty ---') + $conpty.Lines
         Set-Content -LiteralPath $file -Value $body -Encoding UTF8
         Write-SyncLog ('{0} {1}: {2} diff rows={3} settled={4}' -f $Ctx.Name, $Label, $conpty.Header, $cmp.Rows, $settled)
         # A difference that is still moving says nothing about the trigger,
         # so it must not count as the known desync either.
         if ($RequireSettled -and -not $settled) { throw "the views did not hold still for $SettleMs ms within $MaxMs ms ($file)" }
-        return [pscustomobject]@{ Diff = $cmp.Rows; Lines = $cmp.Lines; Conpty = $conpty; Noctty = $noctty; File = $file }
+        return [pscustomobject]@{ Diff = $cmp.Rows; Lines = $cmp.Lines; Conpty = $conpty; Koreterm = $koreterm; File = $file }
     }
 
     # Conditions are plain script blocks: they run in a child of this call,
@@ -621,7 +621,7 @@ if ($Inner) {
 
     function Wait-SyncText($Ctx, [string] $Needle, [int] $TimeoutMs = 20000) {
         Wait-SyncCondition -Description "'$Needle' on screen" -TimeoutMs $TimeoutMs -Condition {
-            ((Read-SyncNoctty $Ctx.Surface) -join "`n").Contains($Needle)
+            ((Read-SyncKoreterm $Ctx.Surface) -join "`n").Contains($Needle)
         }
     }
 
@@ -629,8 +629,8 @@ if ($Inner) {
     # the known folder, so the sandboxed APPDATA does not move it. Every
     # PowerShell here therefore points PSReadLine at a sandbox file before
     # its first prompt reads or writes one. That needs `-Command`, which
-    # turns off noctty's automatic injection, so the integration is
-    # dot-sourced here the way noctty's own launch wrapper does it: as text in
+    # turns off koreterm's automatic injection, so the integration is
+    # dot-sourced here the way koreterm's own launch wrapper does it: as text in
     # a child scope, so no execution policy stands in the way.
     function Get-SyncPowerShellCommand([string] $Exe, [string] $Name, [string] $ExtraOptions, [string[]] $History) {
         # History a scenario needs is read from the redirected file.
@@ -675,7 +675,7 @@ if ($Inner) {
         return "cmd.exe /d /k `"$launch`""
     }
 
-    function Start-SyncNoctty([string] $Name, [string] $Shell, [string] $PSReadLineOptions = '', [string[]] $History = @()) {
+    function Start-SyncKoreterm([string] $Name, [string] $Shell, [string] $PSReadLineOptions = '', [string[]] $History = @()) {
         $shellCommand = switch ($Shell) {
             # /d: no AutoRun, so no Clink a developer installed for AutoRun.
             'cmd' { 'cmd.exe /d' }
@@ -707,30 +707,30 @@ if ($Inner) {
         # single-instance class per scenario, and nothing else.
         $arguments = @(Get-InteractiveWin11LaunchArguments -Layout ([ordered]@{ SandboxId = "$DesktopName-$Name" }) -UseConfiguredCommand) +
             @("`"--config-file=$configPath`"")
-        $process = [NocttyConptySyncNative]::StartOnDesktop($script:Exe, ($arguments -join ' '), $script:Work, $DesktopName)
+        $process = [KoretermConptySyncNative]::StartOnDesktop($script:Exe, ($arguments -join ' '), $script:Work, $DesktopName)
         # One line per step, so a run that stops says which step it stopped in.
-        Write-SyncLog ('{0}: launched noctty pid={1}' -f $Name, $process.Id)
+        Write-SyncLog ('{0}: launched koreterm pid={1}' -f $Name, $process.Id)
         $ctx = [pscustomobject]@{
             Name = $Name; Shell = $Shell; ShellExe = $shellExe; Process = $process
             Host = [IntPtr]::Zero; Surface = [IntPtr]::Zero; ShellPid = 0
         }
-        Wait-SyncCondition -Description 'noctty host window' -Condition {
-            if ($process.HasExited) { throw "noctty exited early with $($process.ExitCode)" }
-            $hosts = @([NocttyConptySyncNative]::TopWindows($process.Id, 'noctty.win32.host') |
-                Where-Object { [NocttyConptySyncNative]::IsWindowVisible($_) })
+        Wait-SyncCondition -Description 'koreterm host window' -Condition {
+            if ($process.HasExited) { throw "koreterm exited early with $($process.ExitCode)" }
+            $hosts = @([KoretermConptySyncNative]::TopWindows($process.Id, 'koreterm.win32.host') |
+                Where-Object { [KoretermConptySyncNative]::IsWindowVisible($_) })
             if ($hosts.Count -eq 0) { return $false }
             $ctx.Host = $hosts[0]
             # Sanity assertion for the HWND before driving it. EnumWindows
             # already scopes discovery to this desktop; lpDesktop above is
             # what prevents a launch onto the interactive desktop.
-            if ([NocttyConptySyncNative]::DesktopOf($ctx.Host) -cne $DesktopName) { throw 'noctty window is on the wrong desktop' }
+            if ([KoretermConptySyncNative]::DesktopOf($ctx.Host) -cne $DesktopName) { throw 'koreterm window is on the wrong desktop' }
             $surfaces = @(Get-SyncSurfaces $ctx)
             if ($surfaces.Count -ne 1) { return $false }
             $ctx.Surface = $surfaces[0]
             return $true
         }
         Write-SyncLog ('{0}: host window 0x{1:X}' -f $Name, $ctx.Host.ToInt64())
-        Wait-SyncCondition -Description "$shellExe under noctty" -Condition {
+        Wait-SyncCondition -Description "$shellExe under koreterm" -Condition {
             $pids = @(Get-SyncShellPids $ctx)
             if ($pids.Count -eq 0) { return $false }
             $ctx.ShellPid = $pids[0]
@@ -738,7 +738,7 @@ if ($Inner) {
         }
         Write-SyncLog ('{0}: {1} pid={2}' -f $Name, $shellExe, $ctx.ShellPid)
         Wait-SyncCondition -Description 'first prompt' -Condition {
-            ((Read-SyncNoctty $ctx.Surface) -join "`n").Contains('>')
+            ((Read-SyncKoreterm $ctx.Surface) -join "`n").Contains('>')
         }
         Write-SyncLog ('{0}: first prompt' -f $Name)
         if ($Shell -in @('powershell', 'pwsh')) {
@@ -746,39 +746,39 @@ if ($Inner) {
             # marks (redraw=0), so prove it loaded.
             Send-SyncText $ctx.Surface ("if ((Get-Command __ghostty_write_osc -ErrorAction Ignore) -and (Get-PSReadLineOption).HistorySavePath.StartsWith('$($script:Work)')) { 'integration=' + 'on' } else { 'integration=' + 'off' }`r")
             Wait-SyncCondition -Description 'integration check' -Condition {
-                $text = (Read-SyncNoctty $ctx.Surface) -join "`n"
+                $text = (Read-SyncKoreterm $ctx.Surface) -join "`n"
                 if ($text.Contains('integration=off')) { throw 'the PowerShell integration did not load, or PSReadLine history is not redirected' }
                 $text.Contains('integration=on')
             }
         }
-        Write-SyncLog ('{0}: noctty pid={1} shell pid={2} host=0x{3:X}' -f $Name, $process.Id, $ctx.ShellPid, $ctx.Host.ToInt64())
+        Write-SyncLog ('{0}: koreterm pid={1} shell pid={2} host=0x{3:X}' -f $Name, $process.Id, $ctx.ShellPid, $ctx.Host.ToInt64())
         return $ctx
     }
 
-    function Stop-SyncNoctty($Ctx) {
+    function Stop-SyncKoreterm($Ctx) {
         if ($null -eq $Ctx) { return }
         $process = $Ctx.Process
         if ($process.HasExited) { return }
-        foreach ($h in [NocttyConptySyncNative]::TopWindows($process.Id, 'noctty.win32.host')) {
-            [void][NocttyConptySyncNative]::PostMessageW($h, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero)
+        foreach ($h in [KoretermConptySyncNative]::TopWindows($process.Id, 'koreterm.win32.host')) {
+            [void][KoretermConptySyncNative]::PostMessageW($h, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero)
         }
         if (-not $process.WaitForExit(10000)) {
             # Exact process we started; the job object takes its children.
-            Write-SyncLog "$($Ctx.Name): noctty pid=$($process.Id) did not close, terminating it"
+            Write-SyncLog "$($Ctx.Name): koreterm pid=$($process.Id) did not close, terminating it"
             $process.Kill()
             [void]$process.WaitForExit(5000)
         }
     }
 
     function Get-SyncHostRect($Ctx) {
-        $r = New-Object NocttyConptySyncNative+RECT
-        [void][NocttyConptySyncNative]::GetWindowRect($Ctx.Host, [ref]$r)
+        $r = New-Object KoretermConptySyncNative+RECT
+        [void][KoretermConptySyncNative]::GetWindowRect($Ctx.Host, [ref]$r)
         return $r
     }
 
     # SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE
     function Set-SyncHostSize($Ctx, [int] $Width, [int] $Height) {
-        [void][NocttyConptySyncNative]::SetWindowPos($Ctx.Host, [IntPtr]::Zero, 0, 0, $Width, $Height, 0x0016)
+        [void][KoretermConptySyncNative]::SetWindowPos($Ctx.Host, [IntPtr]::Zero, 0, 0, $Width, $Height, 0x0016)
     }
 
     function Resize-SyncHost($Ctx, [double] $WidthFactor, [double] $HeightFactor) {
@@ -828,11 +828,11 @@ if ($Inner) {
         $before = Read-SyncConpty $Ctx.ShellPid
         Send-SyncText $Ctx.Surface ($Command + "`r")
         Wait-SyncText $Ctx 'ALT SCREEN'
-        [void][NocttyConptySyncNative]::ShowWindow($Ctx.Host, 3) # SW_MAXIMIZE
+        [void][KoretermConptySyncNative]::ShowWindow($Ctx.Host, 3) # SW_MAXIMIZE
         [void](Wait-SyncGrid $Ctx { param($d) $d.Rows -gt $before.Rows } 'maximized grid')
         Start-Sleep -Milliseconds 500
         Send-SyncKey $Ctx.Surface 0x51 ([int][char]'q')
-        Wait-SyncCondition -Description 'left the alternate screen' -Condition { -not (((Read-SyncNoctty $Ctx.Surface) -join "`n").Contains('ALT SCREEN')) }
+        Wait-SyncCondition -Description 'left the alternate screen' -Condition { -not (((Read-SyncKoreterm $Ctx.Surface) -join "`n").Contains('ALT SCREEN')) }
     }
 
     # Open a split below the pane, wait for its shell, close it again, and
@@ -875,11 +875,11 @@ if ($Inner) {
             Setup = { param($c) Invoke-SyncFill $c }
             Trigger = {
                 param($c)
-                [void][NocttyConptySyncNative]::ShowWindow($c.Host, 7) # SW_SHOWMINNOACTIVE
-                Wait-SyncCondition -Description 'minimized' -Condition { [NocttyConptySyncNative]::IsIconic($c.Host) }
+                [void][KoretermConptySyncNative]::ShowWindow($c.Host, 7) # SW_SHOWMINNOACTIVE
+                Wait-SyncCondition -Description 'minimized' -Condition { [KoretermConptySyncNative]::IsIconic($c.Host) }
                 Start-Sleep -Milliseconds 500
-                [void][NocttyConptySyncNative]::ShowWindow($c.Host, 4) # SW_SHOWNOACTIVATE
-                Wait-SyncCondition -Description 'restored' -Condition { -not [NocttyConptySyncNative]::IsIconic($c.Host) }
+                [void][KoretermConptySyncNative]::ShowWindow($c.Host, 4) # SW_SHOWNOACTIVATE
+                Wait-SyncCondition -Description 'restored' -Condition { -not [KoretermConptySyncNative]::IsIconic($c.Host) }
             }
         }
         [pscustomobject]@{
@@ -900,7 +900,7 @@ if ($Inner) {
                 param($c)
                 Invoke-SyncFill $c
                 Send-SyncText $c.Surface "cls`r"
-                Wait-SyncCondition -Description 'cleared' -Condition { -not (((Read-SyncNoctty $c.Surface) -join "`n").Contains('L40')) }
+                Wait-SyncCondition -Description 'cleared' -Condition { -not (((Read-SyncKoreterm $c.Surface) -join "`n").Contains('L40')) }
             }
             Trigger = {
                 param($c)
@@ -957,7 +957,7 @@ if ($Inner) {
             Trigger = {
                 param($c)
                 $before = Read-SyncConpty $c.ShellPid
-                [void][NocttyConptySyncNative]::ShowWindow($c.Host, 3) # SW_MAXIMIZE
+                [void][KoretermConptySyncNative]::ShowWindow($c.Host, 3) # SW_MAXIMIZE
                 [void](Wait-SyncGrid $c { param($d) $d.Rows -gt $before.Rows } 'maximized grid')
             }
         }
@@ -968,10 +968,10 @@ if ($Inner) {
             Trigger = {
                 param($c)
                 $before = Read-SyncConpty $c.ShellPid
-                [void][NocttyConptySyncNative]::ShowWindow($c.Host, 3) # SW_MAXIMIZE
+                [void][KoretermConptySyncNative]::ShowWindow($c.Host, 3) # SW_MAXIMIZE
                 [void](Wait-SyncGrid $c { param($d) $d.Rows -gt $before.Rows } 'maximized grid')
                 Start-Sleep -Milliseconds 500
-                [void][NocttyConptySyncNative]::ShowWindow($c.Host, 9) # SW_RESTORE
+                [void][KoretermConptySyncNative]::ShowWindow($c.Host, 9) # SW_RESTORE
                 [void](Wait-SyncGrid $c { param($d) $d.Rows -eq $before.Rows } 'restored grid')
             }
         }
@@ -1019,7 +1019,7 @@ if ($Inner) {
                 Send-SyncText $c.Surface ("& '$(Get-SyncVim)' -u NONE -N -i NONE -n`r")
                 Wait-SyncCondition -Description 'vim running' -Condition { @(Get-SyncDescendants $c.ShellPid | Where-Object Name -ieq 'vim.exe').Count -gt 0 }
                 Wait-SyncText $c 'Vi IMproved'
-                [void][NocttyConptySyncNative]::ShowWindow($c.Host, 3) # SW_MAXIMIZE
+                [void][KoretermConptySyncNative]::ShowWindow($c.Host, 3) # SW_MAXIMIZE
                 [void](Wait-SyncGrid $c { param($d) $d.Rows -gt $before.Rows } 'maximized grid')
                 # vim can drop keys typed while it redraws for the new size,
                 # so ask again until it is gone.
@@ -1039,7 +1039,7 @@ if ($Inner) {
             Name = 'narrow-widen-powershell'; Shell = 'powershell'; Expect = 'sync'; Finding = 'F015'
             Description = 'narrow until lines wrap, then widen back, prompt at the bottom'
             # ConPTY lost the head of the line that scrolled off its top while
-            # narrow and shows only its tail on row 0; noctty still has the
+            # narrow and shows only its tail on row 0; koreterm still has the
             # head in scrollback and unwraps the whole line back into row 0.
             IgnoreRows = @(0)
             Setup = {
@@ -1073,8 +1073,8 @@ if ($Inner) {
                 param($c)
                 # `clink inject` is quiet: without Clink in cmd this would
                 # only test plain cmd, which never leaves those rows. Any cmd
-                # under noctty: the interactive one may be a child of the one
-                # noctty started.
+                # under koreterm: the interactive one may be a child of the one
+                # koreterm started.
                 Wait-SyncCondition -Description 'Clink loaded in cmd' -Condition {
                     @(Get-SyncShellPids $c | Where-Object {
                             @((Get-Process -Id $_ -ErrorAction Ignore).Modules | Where-Object { $_.ModuleName -ieq 'clink_dll_x64.dll' }).Count -gt 0
@@ -1112,7 +1112,7 @@ if ($Inner) {
                 param($c)
                 # Started from a command short enough not to wrap; see the
                 # wrapped variant below.
-                Invoke-SyncAltScreenMaximize $c "iex (gc -raw `$env:NOCTTY_SYNC_ALTAPP)"
+                Invoke-SyncAltScreenMaximize $c "iex (gc -raw `$env:KORETERM_SYNC_ALTAPP)"
             }
         }
         [pscustomobject]@{
@@ -1186,7 +1186,7 @@ if ($Inner) {
                 Write-SyncLog "$($s.Name): SKIP $missing"
                 continue
             }
-            $ctx = Start-SyncNoctty $s.Name $s.Shell $s.PSReadLine @($s.History)
+            $ctx = Start-SyncKoreterm $s.Name $s.Shell $s.PSReadLine @($s.History)
             $ctx | Add-Member -NotePropertyName IgnoreRows -NotePropertyValue @($s.IgnoreRows | Where-Object { $null -ne $_ })
             & $s.Setup $ctx
             $before = Get-SyncComparison $ctx 'before'
@@ -1225,7 +1225,7 @@ if ($Inner) {
             }
         }
         finally {
-            try { Stop-SyncNoctty $ctx } catch { Write-SyncLog "stop failed: $($_.Exception.Message)" }
+            try { Stop-SyncKoreterm $ctx } catch { Write-SyncLog "stop failed: $($_.Exception.Message)" }
         }
         Write-SyncLog ('{0}: {1} before={2} after={3} marker={4} {5}' -f $result.Name, $result.Status, $result.Before, $result.After, $result.Marker, $result.Detail)
         $results.Add([pscustomobject]$result)
@@ -1254,7 +1254,7 @@ if ($Clink) { $forwardedArgs += @('-Clink', (Resolve-Path -LiteralPath $Clink -E
 Invoke-InteractiveWin11HarnessMain `
     -RepoRoot $repoRoot `
     -LauncherPath $launcherPath `
-    -EnvironmentVariable 'NOCTTY_INTERACTIVE_WIN11_CONPTY_SYNC_BOOTSTRAPPED' `
+    -EnvironmentVariable 'KORETERM_INTERACTIVE_WIN11_CONPTY_SYNC_BOOTSTRAPPED' `
     -ArgumentList $forwardedArgs
 
 # `-Scenario a,b` reaches a bootstrapped child as one string (AGENTS.md).
@@ -1263,7 +1263,7 @@ $Scenario = @($Scenario | ForEach-Object { $_ -split ',' } | Where-Object { $_ }
 # One run per worktree at a time: this sandbox is reset and restaged on every
 # run, which would pull it out from under a run in progress. The mutex goes
 # away with this process, however it ends.
-$runMutex = New-Object System.Threading.Mutex($false, ('Local\noctty-conpty-sync-' + (Get-InteractiveWin11WorktreeId -RepoRoot $repoRoot)))
+$runMutex = New-Object System.Threading.Mutex($false, ('Local\koreterm-conpty-sync-' + (Get-InteractiveWin11WorktreeId -RepoRoot $repoRoot)))
 $haveRunMutex = $false
 try { $haveRunMutex = $runMutex.WaitOne(0) } catch [System.Threading.AbandonedMutexException] { $haveRunMutex = $true }
 if (-not $haveRunMutex) { throw 'another interactive-win11-conpty-sync.ps1 run is using this worktree''s sandbox; wait for it to finish' }
@@ -1279,7 +1279,7 @@ Assert-InteractiveWin11ExeExists -ExePath $exePath
 
 $realStartupBefore = Get-ConptySyncRealStartupAttempts
 
-# Stage a portable copy. noctty only ever runs from here.
+# Stage a portable copy. koreterm only ever runs from here.
 $runRoot = Join-Path $layout.SandboxRoot 'run'
 $sandboxPrefix = (Get-InteractiveWin11NormalizedPath -Path $layout.SandboxRoot) + '\'
 $normalizedRunRoot = Get-InteractiveWin11NormalizedPath -Path $runRoot
@@ -1287,13 +1287,13 @@ if (-not $normalizedRunRoot.StartsWith($sandboxPrefix, [StringComparison]::Ordin
 if (Test-Path -LiteralPath $normalizedRunRoot) { [System.IO.Directory]::Delete($normalizedRunRoot, $true) }
 $zigOut = Join-Path $repoRoot 'zig-out'
 New-Item -ItemType Directory -Force -Path (Join-Path $runRoot 'bin'), (Join-Path $runRoot 'tools') | Out-Null
-foreach ($file in @('noctty.exe', 'conpty.dll', 'OpenConsole.exe')) {
+foreach ($file in @('koreterm.exe', 'conpty.dll', 'OpenConsole.exe')) {
     $source = Join-Path $zigOut "bin\$file"
     if (-not (Test-Path -LiteralPath $source -PathType Leaf)) { throw "missing $source (the bundled ConPTY is part of every build since #313)" }
     Copy-Item -LiteralPath $source -Destination (Join-Path $runRoot 'bin')
 }
 Copy-Item -LiteralPath (Join-Path $zigOut 'share') -Destination (Join-Path $runRoot 'share') -Recurse
-Set-Content -LiteralPath (Join-Path $runRoot 'bin\noctty.portable') -Value 'conpty-sync harness' -Encoding ASCII
+Set-Content -LiteralPath (Join-Path $runRoot 'bin\koreterm.portable') -Value 'conpty-sync harness' -Encoding ASCII
 Copy-Item -LiteralPath (Join-Path $repoRoot 'src\shell-integration\powershell\integration.ps1') -Destination (Join-Path $runRoot 'tools')
 # A full-screen program for the alternate-screen scenarios. Its path reaches
 # the shell through the environment so the command that runs it stays short.
@@ -1303,7 +1303,7 @@ Set-Content -LiteralPath $altApp -Encoding ASCII -Value @(
     '[void][Console]::ReadKey($true)'
     "[Console]::Write([char]27 + '[?1049l')"
 )
-$env:NOCTTY_SYNC_ALTAPP = $altApp
+$env:KORETERM_SYNC_ALTAPP = $altApp
 Add-Type -TypeDefinition $script:ConptySyncDumpSource -OutputAssembly (Join-Path $runRoot 'tools\conpty-sync-dump.exe') -OutputType ConsoleApplication
 if ($Clink) {
     # The whole extracted folder: clink_x64.exe loads its DLL and scripts from
@@ -1319,7 +1319,7 @@ if ($Clink) {
 }
 
 $historyBefore = Get-ConptySyncRealPSReadLineState
-$clipboardBefore = [NocttyConptySyncNative]::GetClipboardSequenceNumber()
+$clipboardBefore = [KoretermConptySyncNative]::GetClipboardSequenceNumber()
 Write-Host "clipboard sequence before: $clipboardBefore"
 
 # A short prompt keeps cmd's line from wrapping; the integration keeps it.
@@ -1327,11 +1327,11 @@ $env:PROMPT = 'sync$G'
 $resultPath = Join-Path $layout.Logs 'conpty-sync-results.json'
 if (Test-Path -LiteralPath $resultPath) { Remove-Item -LiteralPath $resultPath -Force }
 
-$desktopName = 'noctty-conpty-sync-' + [guid]::NewGuid().ToString('N').Substring(0, 8)
-$desktop = [NocttyConptySyncNative]::CreateDesktopW($desktopName, [IntPtr]::Zero, [IntPtr]::Zero, 0, 0x10000000, [IntPtr]::Zero)
+$desktopName = 'koreterm-conpty-sync-' + [guid]::NewGuid().ToString('N').Substring(0, 8)
+$desktop = [KoretermConptySyncNative]::CreateDesktopW($desktopName, [IntPtr]::Zero, [IntPtr]::Zero, 0, 0x10000000, [IntPtr]::Zero)
 if ($desktop -eq [IntPtr]::Zero) { throw "CreateDesktopW failed: $([Runtime.InteropServices.Marshal]::GetLastWin32Error())" }
-$job = [NocttyConptySyncNative]::NewKillOnCloseJob()
-if ($job -eq [IntPtr]::Zero) { [void][NocttyConptySyncNative]::CloseDesktop($desktop); throw 'could not create the cleanup job object' }
+$job = [KoretermConptySyncNative]::NewKillOnCloseJob()
+if ($job -eq [IntPtr]::Zero) { [void][KoretermConptySyncNative]::CloseDesktop($desktop); throw 'could not create the cleanup job object' }
 $innerExit = $null
 $guardFailures = New-Object System.Collections.Generic.List[string]
 try {
@@ -1340,45 +1340,45 @@ try {
         '-RunRoot', "`"$runRoot`"", '-ResultPath', "`"$resultPath`"", '-DesktopName', $desktopName)
     if ($Scenario.Count -gt 0) { $innerArgs += @('-Scenario', ($Scenario -join ',')) }
     $commandLine = New-Object System.Text.StringBuilder ("`"$powershell`" " + ($innerArgs -join ' '))
-    $si = New-Object NocttyConptySyncNative+STARTUPINFO
-    $si.cb = [Runtime.InteropServices.Marshal]::SizeOf([type][NocttyConptySyncNative+STARTUPINFO])
+    $si = New-Object KoretermConptySyncNative+STARTUPINFO
+    $si.cb = [Runtime.InteropServices.Marshal]::SizeOf([type][KoretermConptySyncNative+STARTUPINFO])
     $si.lpDesktop = "WinSta0\$desktopName"
     $si.lpReserved = [NullString]::Value
     $si.lpTitle = [NullString]::Value
-    $pi = New-Object NocttyConptySyncNative+PROCESS_INFORMATION
+    $pi = New-Object KoretermConptySyncNative+PROCESS_INFORMATION
     # CREATE_SUSPENDED | CREATE_NO_WINDOW | BELOW_NORMAL_PRIORITY_CLASS:
     # suspended so it is in the job before it can start anything.
-    if (-not [NocttyConptySyncNative]::CreateProcessW([NullString]::Value, $commandLine, [IntPtr]::Zero, [IntPtr]::Zero, $false, 0x08004004, [IntPtr]::Zero, $repoRoot, [ref]$si, [ref]$pi)) {
+    if (-not [KoretermConptySyncNative]::CreateProcessW([NullString]::Value, $commandLine, [IntPtr]::Zero, [IntPtr]::Zero, $false, 0x08004004, [IntPtr]::Zero, $repoRoot, [ref]$si, [ref]$pi)) {
         throw "CreateProcessW failed: $([Runtime.InteropServices.Marshal]::GetLastWin32Error())"
     }
     try {
-        if (-not [NocttyConptySyncNative]::AssignProcessToJobObject($job, $pi.hProcess)) {
+        if (-not [KoretermConptySyncNative]::AssignProcessToJobObject($job, $pi.hProcess)) {
             $assignError = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
             # It is still suspended and outside the job: end this exact
             # process before its handle goes.
-            [void][NocttyConptySyncNative]::TerminateProcess($pi.hProcess, 1)
+            [void][KoretermConptySyncNative]::TerminateProcess($pi.hProcess, 1)
             throw "AssignProcessToJobObject failed: $assignError"
         }
-        [void][NocttyConptySyncNative]::ResumeThread($pi.hThread)
-        $wait = [NocttyConptySyncNative]::WaitForSingleObject($pi.hProcess, [uint32]($TimeoutSeconds * 1000))
+        [void][KoretermConptySyncNative]::ResumeThread($pi.hThread)
+        $wait = [KoretermConptySyncNative]::WaitForSingleObject($pi.hProcess, [uint32]($TimeoutSeconds * 1000))
         if ($wait -eq 0) {
             $code = [uint32]0
-            [void][NocttyConptySyncNative]::GetExitCodeProcess($pi.hProcess, [ref]$code)
+            [void][KoretermConptySyncNative]::GetExitCodeProcess($pi.hProcess, [ref]$code)
             $innerExit = [int]$code
         }
         else { Write-ConptySyncTimeoutDiagnostics $desktop $pi.dwProcessId }
     }
     finally {
-        [void][NocttyConptySyncNative]::CloseHandle($pi.hThread)
-        [void][NocttyConptySyncNative]::CloseHandle($pi.hProcess)
+        [void][KoretermConptySyncNative]::CloseHandle($pi.hThread)
+        [void][KoretermConptySyncNative]::CloseHandle($pi.hProcess)
     }
 }
 finally {
     # Closing the job ends anything the inner half left running.
-    [void][NocttyConptySyncNative]::CloseHandle($job)
-    [void][NocttyConptySyncNative]::CloseDesktop($desktop)
+    [void][KoretermConptySyncNative]::CloseHandle($job)
+    [void][KoretermConptySyncNative]::CloseDesktop($desktop)
     try {
-        $clipboardAfter = [NocttyConptySyncNative]::GetClipboardSequenceNumber()
+        $clipboardAfter = [KoretermConptySyncNative]::GetClipboardSequenceNumber()
         Write-Host "clipboard sequence after: $clipboardAfter"
         if ($clipboardAfter -ne $clipboardBefore) { $guardFailures.Add('clipboard sequence changed during conpty-sync; stop all launches and report') }
     }

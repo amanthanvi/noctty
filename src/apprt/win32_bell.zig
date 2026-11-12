@@ -109,9 +109,9 @@ fn onRemoteDrive(path: []const u8) bool {
     return GetDriveTypeW(&root) == DRIVE_REMOTE;
 }
 
-const alias = "noctty_bell";
+const alias = "koreterm_bell";
 
-/// `open "<path>" [type mpegvideo] alias noctty_bell`, UTF-16, for
+/// `open "<path>" [type mpegvideo] alias koreterm_bell`, UTF-16, for
 /// `mciSendStringW`. Only the `mpegvideo` device (Windows Media, which plays
 /// WAV, MP3, WMA and more) takes `setaudio ... volume`: the `waveaudio` device
 /// MCI picks for a .wav answers it with "driver cannot recognize the command".
@@ -434,8 +434,8 @@ test "win32 bell sound path: a drive letter is local unless it maps a share" {
 test "win32 bell open command quotes the path and names the alias" {
     const path = "C:\\My Sounds\\bell \u{00e9}.wav";
     inline for (.{
-        .{ true, "open \"" ++ path ++ "\" type mpegvideo alias noctty_bell" },
-        .{ false, "open \"" ++ path ++ "\" alias noctty_bell" },
+        .{ true, "open \"" ++ path ++ "\" type mpegvideo alias koreterm_bell" },
+        .{ false, "open \"" ++ path ++ "\" alias koreterm_bell" },
     }) |case| {
         const cmd = try openCommand(testing.allocator, path, case[0]);
         defer testing.allocator.free(cmd);

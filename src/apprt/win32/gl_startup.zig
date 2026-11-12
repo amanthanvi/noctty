@@ -270,8 +270,8 @@ pub fn reportStartupFailure(err: anyerror) void {
     var buf: [4096]u8 = undefined;
     const message = formatStartupFailureMessage(&buf, err);
 
-    const caption = std.unicode.utf8ToUtf16LeStringLiteral("noctty failed");
-    const fallback = std.unicode.utf8ToUtf16LeStringLiteral("noctty failed.");
+    const caption = std.unicode.utf8ToUtf16LeStringLiteral("koreterm failed");
+    const fallback = std.unicode.utf8ToUtf16LeStringLiteral("koreterm failed.");
 
     const message_w = std.unicode.utf8ToUtf16LeAllocZ(std.heap.page_allocator, message) catch {
         _ = sys.MessageBoxW(null, fallback, caption, c.MB_OK | c.MB_ICONERROR | c.MB_SETFOREGROUND);
@@ -291,14 +291,14 @@ fn formatStartupFailureMessage(buf: []u8, err: anyerror) []const u8 {
             os_windows.detectProcessArchitecture(),
             .{ .d3d11 = build_config.d3d11 },
         ) catch
-            "noctty could not initialize the Windows OpenGL renderer.";
+            "koreterm could not initialize the Windows OpenGL renderer.";
     }
 
     return std.fmt.bufPrint(
         buf,
-        "noctty {s} failed: {s}\n\nOpen an issue with the full log if this keeps happening.",
+        "koreterm {s} failed: {s}\n\nOpen an issue with the full log if this keeps happening.",
         .{ build_config.version_string, @errorName(err) },
-    ) catch "noctty failed.";
+    ) catch "koreterm failed.";
 }
 
 /// What the dialog can say about renderers other than OpenGL.
@@ -317,11 +317,11 @@ fn formatRendererParagraph(
     d3d11_error_name: ?[]const u8,
 ) []const u8 {
     if (!choice.d3d11) return if (below_floor)
-        "This build does not include a software, DirectX, or ANGLE fallback renderer, so noctty cannot start below OpenGL 4.3."
+        "This build does not include a software, DirectX, or ANGLE fallback renderer, so koreterm cannot start below OpenGL 4.3."
     else
-        "noctty currently uses OpenGL 4.3 through WGL on Windows. This build does not include a DirectX or ANGLE fallback renderer.";
+        "koreterm currently uses OpenGL 4.3 through WGL on Windows. This build does not include a DirectX or ANGLE fallback renderer.";
 
-    const paragraph = "noctty starts with OpenGL 4.3 through WGL and switches to its beta Direct3D 11 renderer, which does not need OpenGL, when OpenGL cannot start. Direct3D 11 could not start either, including its software renderer (WARP). Direct3D 11 error: {s}.";
+    const paragraph = "koreterm starts with OpenGL 4.3 through WGL and switches to its beta Direct3D 11 renderer, which does not need OpenGL, when OpenGL cannot start. Direct3D 11 could not start either, including its software renderer (WARP). Direct3D 11 error: {s}.";
     return std.fmt.bufPrint(buf, paragraph, .{d3d11_error_name orelse "not reported"}) catch
         std.fmt.comptimePrint(paragraph, .{"not reported"});
 }
@@ -349,7 +349,7 @@ const Remediation = enum {
     }
 };
 
-/// The machine noctty is running on, falling back to the build target when
+/// The machine koreterm is running on, falling back to the build target when
 /// Windows reported nothing usable.
 ///
 /// The fallback is safe in the direction that matters: an ARM64 binary only
@@ -368,13 +368,13 @@ fn nativeMachineOrBuild(arch: ?os_windows.ProcessArchitecture) u16 {
 fn detectedRemediationAdvice(remediation: Remediation) []const u8 {
     return switch (remediation) {
         .arm64 =>
-        \\This is a Windows on ARM PC, and Qualcomm Snapdragon systems ship no desktop OpenGL driver at all. A detected renderer of "GDI Generic" at version 1.1 means none is installed: get the free "OpenCL, OpenGL, and Vulkan Compatibility Pack" from the Microsoft Store and restart noctty. It supplies a desktop OpenGL implementation that runs on Direct3D 12.
+        \\This is a Windows on ARM PC, and Qualcomm Snapdragon systems ship no desktop OpenGL driver at all. A detected renderer of "GDI Generic" at version 1.1 means none is installed: get the free "OpenCL, OpenGL, and Vulkan Compatibility Pack" from the Microsoft Store and restart koreterm. It supplies a desktop OpenGL implementation that runs on Direct3D 12.
         \\
-        \\If that pack is already installed and the detected version above is still below 4.3, it is not exposing enough OpenGL on this GPU and noctty's OpenGL renderer cannot start on it. Microsoft's support statement for the pack promises only OpenGL 3.3, so a version between 3.3 and 4.3 is the pack working as documented rather than a broken install.
+        \\If that pack is already installed and the detected version above is still below 4.3, it is not exposing enough OpenGL on this GPU and koreterm's OpenGL renderer cannot start on it. Microsoft's support statement for the pack promises only OpenGL 3.3, so a version between 3.3 and 4.3 is the pack working as documented rather than a broken install.
         \\
-        \\If you are on Remote Desktop, end the session and launch noctty in a local console session. In a VM, enable 3D acceleration and install the guest graphics driver.
+        \\If you are on Remote Desktop, end the session and launch koreterm in a local console session. In a VM, enable 3D acceleration and install the guest graphics driver.
         ,
-        .vendor_icd => "Try ending Remote Desktop and launching noctty in a local console session; enabling 3D acceleration and installing the VM guest graphics driver; or updating or reinstalling your GPU driver. On hybrid-GPU systems, you can also force noctty.exe to the discrete or integrated GPU in Windows Graphics settings.",
+        .vendor_icd => "Try ending Remote Desktop and launching koreterm in a local console session; enabling 3D acceleration and installing the VM guest graphics driver; or updating or reinstalling your GPU driver. On hybrid-GPU systems, you can also force koreterm.exe to the discrete or integrated GPU in Windows Graphics settings.",
     };
 }
 
@@ -382,8 +382,8 @@ fn detectedRemediationAdvice(remediation: Remediation) []const u8 {
 /// than a detected version.
 fn stepRemediationAdvice(remediation: Remediation) []const u8 {
     return switch (remediation) {
-        .arm64 => "This is a Windows on ARM PC, and Qualcomm Snapdragon systems ship no desktop OpenGL driver at all. Install the free \"OpenCL, OpenGL, and Vulkan Compatibility Pack\" from the Microsoft Store and restart noctty: it is the only way to get a desktop OpenGL implementation here, and it supplies one that runs on Direct3D 12. If it still fails, attach this text and the log to https://github.com/amanthanvi/noctty/issues/64.",
-        .vendor_icd => "Try updating or reinstalling the OEM AMD graphics driver, then the NVIDIA driver. You can also force noctty.exe to the discrete or integrated GPU in Windows Graphics settings. If it still fails, attach this text and the log to https://github.com/amanthanvi/noctty/issues/64.",
+        .arm64 => "This is a Windows on ARM PC, and Qualcomm Snapdragon systems ship no desktop OpenGL driver at all. Install the free \"OpenCL, OpenGL, and Vulkan Compatibility Pack\" from the Microsoft Store and restart koreterm: it is the only way to get a desktop OpenGL implementation here, and it supplies one that runs on Direct3D 12. If it still fails, attach this text and the log to https://github.com/amanthanvi/noctty/issues/64.",
+        .vendor_icd => "Try updating or reinstalling the OEM AMD graphics driver, then the NVIDIA driver. You can also force koreterm.exe to the discrete or integrated GPU in Windows Graphics settings. If it still fails, attach this text and the log to https://github.com/amanthanvi/noctty/issues/64.",
     };
 }
 
@@ -443,7 +443,7 @@ fn formatOpenGLStartupFailureMessage(
             "not reported";
 
         return std.fmt.bufPrint(buf,
-            \\noctty {s} could not initialize the Windows OpenGL renderer while {s}.
+            \\koreterm {s} could not initialize the Windows OpenGL renderer while {s}.
             \\
             \\Startup error: {s}
             \\Win32 error: {s}
@@ -475,7 +475,7 @@ fn formatOpenGLStartupFailureMessage(
 
     if (failure.win32_error) |win32_error| {
         return std.fmt.bufPrint(buf,
-            \\noctty {s} could not initialize the Windows OpenGL renderer while {s}.
+            \\koreterm {s} could not initialize the Windows OpenGL renderer while {s}.
             \\
             \\Startup error: {s}
             \\Win32 error: {d}{s}
@@ -500,7 +500,7 @@ fn formatOpenGLStartupFailureMessage(
     }
 
     return std.fmt.bufPrint(buf,
-        \\noctty {s} could not initialize the Windows OpenGL renderer while {s}.
+        \\koreterm {s} could not initialize the Windows OpenGL renderer while {s}.
         \\
         \\Startup error: {s}
         \\Win32 error: not reported
@@ -631,7 +631,7 @@ test "win32-opengl-startup-failure-message-reports-detected-version" {
     try std.testing.expect(std.mem.indexOf(u8, message, "Detected renderer: GDI Generic") != null);
     try std.testing.expect(std.mem.indexOf(u8, message, "Detected vendor: Microsoft Corporation") != null);
     try std.testing.expect(std.mem.indexOf(u8, message, "Win32 error: not reported") != null);
-    try std.testing.expect(std.mem.indexOf(u8, message, "noctty cannot start below OpenGL 4.3") != null);
+    try std.testing.expect(std.mem.indexOf(u8, message, "koreterm cannot start below OpenGL 4.3") != null);
 }
 
 // The step label and Win32 error come from the record, not from literal
@@ -779,7 +779,7 @@ test "win32-opengl-startup-arm64-message-names-the-compatibility-pack" {
     try expectNoVendorGpuAdvice(bare_message);
 }
 
-// noctty has no DirectX or ANGLE fallback renderer. The ARM64 advice must
+// koreterm has no DirectX or ANGLE fallback renderer. The ARM64 advice must
 // describe the Microsoft mapping layer without implying otherwise.
 test "win32-opengl-startup-arm64-message-does-not-claim-a-fallback-renderer" {
     var buf: [4096]u8 = undefined;
@@ -790,8 +790,8 @@ test "win32-opengl-startup-arm64-message-does-not-claim-a-fallback-renderer" {
     }, test_arm64, test_no_d3d11);
 
     try std.testing.expect(std.mem.indexOf(u8, message, "does not include a software, DirectX, or ANGLE fallback renderer") != null);
-    try std.testing.expect(std.mem.indexOf(u8, message, "noctty cannot start below OpenGL 4.3") != null);
-    try std.testing.expect(std.mem.indexOf(u8, message, "noctty supports DirectX") == null);
+    try std.testing.expect(std.mem.indexOf(u8, message, "koreterm cannot start below OpenGL 4.3") != null);
+    try std.testing.expect(std.mem.indexOf(u8, message, "koreterm supports DirectX") == null);
     try std.testing.expect(std.mem.indexOf(u8, message, "fallback to Direct3D") == null);
 }
 

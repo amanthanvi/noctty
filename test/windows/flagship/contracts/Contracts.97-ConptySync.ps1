@@ -1,10 +1,10 @@
 # ConPTY sync harness contracts (PKG-13).
 #
-# interactive-win11-conpty-sync.ps1 needs a hidden desktop and a built noctty, so
+# interactive-win11-conpty-sync.ps1 needs a hidden desktop and a built koreterm, so
 # only the hosted conpty-sync workflow runs it. Two of its functions can be
 # driven here with synthetic input, each in a runspace of its own with a
 # deadline, after being pulled out of the script by AST: the process walk that
-# finds the shell under noctty, and the console dump reader's retry. The third
+# finds the shell under koreterm, and the console dump reader's retry. The third
 # check pins how the workflow invokes the harness.
 
 $conptySyncScript = Join-Path $repoRoot 'test\windows\interactive-win11-conpty-sync.ps1'
@@ -26,15 +26,15 @@ function Get-ConptySyncFunctionText {
     return $found[0].Extent.Text
 }
 
-# A process table in which Windows reused a number. noctty (100) took the number
+# A process table in which Windows reused a number. koreterm (100) took the number
 # of an older process, so two older processes still name 100 as their parent
-# (500 directly, 600 through 500), and noctty's own real parent is 600: the
+# (500 directly, 600 through 500), and koreterm's own real parent is 600: the
 # parent links form a cycle 100 -> 500 -> 600 -> 100. The real descendants are
 # its cmd.exe (101) and that cmd.exe's conhost.exe (102). A walk that follows
 # ParentProcessId alone spins forever; this is what hung 5 of 54 hosted runs.
 $conptySyncStarted = [datetime]'2026-10-25T02:00:00Z'
 $conptySyncProcessTable = @(
-    [pscustomobject]@{ ProcessId = 100; ParentProcessId = 600; Name = 'noctty.exe'; CreationDate = $conptySyncStarted },
+    [pscustomobject]@{ ProcessId = 100; ParentProcessId = 600; Name = 'koreterm.exe'; CreationDate = $conptySyncStarted },
     [pscustomobject]@{ ProcessId = 101; ParentProcessId = 100; Name = 'cmd.exe'; CreationDate = $conptySyncStarted.AddSeconds(1) },
     [pscustomobject]@{ ProcessId = 102; ParentProcessId = 101; Name = 'conhost.exe'; CreationDate = $conptySyncStarted.AddSeconds(2) },
     [pscustomobject]@{ ProcessId = 500; ParentProcessId = 100; Name = 'stale-a.exe'; CreationDate = $conptySyncStarted.AddHours(-1) },
@@ -75,7 +75,7 @@ if (($conptySyncTiedIds -join ',') -ne '500,600') {
 
 # A start time CIM could not read proves nothing about a child, so it is kept.
 $conptySyncUnknownTable = @(
-    [pscustomobject]@{ ProcessId = 100; ParentProcessId = 4; Name = 'noctty.exe'; CreationDate = $conptySyncStarted },
+    [pscustomobject]@{ ProcessId = 100; ParentProcessId = 4; Name = 'koreterm.exe'; CreationDate = $conptySyncStarted },
     [pscustomobject]@{ ProcessId = 110; ParentProcessId = 100; Name = 'cmd.exe'; CreationDate = $null }
 )
 $conptySyncUnknownIds = @(Invoke-ContractScriptWithDeadline `
@@ -88,9 +88,9 @@ if (($conptySyncUnknownIds -join ',') -ne '110') {
 }
 
 # Read-SyncConpty with a fake dump helper whose exit codes are scripted.
-$conptySyncReadText = (Get-ConptySyncFunctionText 'Read-SyncConpty').Replace('[NocttyConptySyncNative]', '[ConptySyncContractDump]')
+$conptySyncReadText = (Get-ConptySyncFunctionText 'Read-SyncConpty').Replace('[KoretermConptySyncNative]', '[ConptySyncContractDump]')
 if ($conptySyncReadText -ceq (Get-ConptySyncFunctionText 'Read-SyncConpty')) {
-    throw 'Read-SyncConpty no longer reaches the dump helper through [NocttyConptySyncNative]; update this contract.'
+    throw 'Read-SyncConpty no longer reaches the dump helper through [KoretermConptySyncNative]; update this contract.'
 }
 if (-not ('ConptySyncContractDump' -as [type])) {
     Add-Type -TypeDefinition @'
@@ -179,7 +179,7 @@ Invoke-ContractTable -Contracts @(
     @{
         File = $conptySyncWorkflow
         Content = { $conptySyncWorkflowText }
-        Pattern = '(?s)NOCTTY_INTERACTIVE_WIN11_CONPTY_SYNC_BOOTSTRAPPED: ''1''.*?interactive-win11-conpty-sync\.ps1 -NoBuild -RequireAll\b'
+        Pattern = '(?s)KORETERM_INTERACTIVE_WIN11_CONPTY_SYNC_BOOTSTRAPPED: ''1''.*?interactive-win11-conpty-sync\.ps1 -NoBuild -RequireAll\b'
         Kind = 'Text'
         Description = 'the ConPTY sync workflow skips the dev-shell relaunch and fails a skipped scenario'
     }

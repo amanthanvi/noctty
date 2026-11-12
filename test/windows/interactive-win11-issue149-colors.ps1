@@ -16,7 +16,7 @@ $ErrorActionPreference = 'Stop'
 $launcher = if ($PSCommandPath) { $PSCommandPath } else { $MyInvocation.MyCommand.Path }
 $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 . (Join-Path $repoRoot 'scripts\interactive-win11-lib.ps1')
-if (-not $env:NOCTTY_INTERACTIVE_WIN11_ISSUE149_COLORS_BOOTSTRAPPED) {
+if (-not $env:KORETERM_INTERACTIVE_WIN11_ISSUE149_COLORS_BOOTSTRAPPED) {
     $args = @(
         '-TimeoutSeconds', $TimeoutSeconds.ToString(),
         '-ExpectedThemeBackground', $ExpectedThemeBackground,
@@ -28,7 +28,7 @@ if (-not $env:NOCTTY_INTERACTIVE_WIN11_ISSUE149_COLORS_BOOTSTRAPPED) {
     Invoke-InteractiveWin11Bootstrap `
         -RepoRoot $repoRoot `
         -LauncherPath $launcher `
-        -EnvironmentVariable 'NOCTTY_INTERACTIVE_WIN11_ISSUE149_COLORS_BOOTSTRAPPED' `
+        -EnvironmentVariable 'KORETERM_INTERACTIVE_WIN11_ISSUE149_COLORS_BOOTSTRAPPED' `
         -ArgumentList $args `
         -ExitCode ([ref]$code)
     exit $code
@@ -36,7 +36,7 @@ if (-not $env:NOCTTY_INTERACTIVE_WIN11_ISSUE149_COLORS_BOOTSTRAPPED) {
 
 . (Join-Path $PSScriptRoot 'interactive-win11-stateful-lib.ps1')
 Add-Type -AssemblyName System.Drawing
-if (-not ('NocttyIssue149Framebuffer' -as [type])) {
+if (-not ('KoretermIssue149Framebuffer' -as [type])) {
     Add-Type -ReferencedAssemblies System.Drawing -TypeDefinition @'
 using System;
 using System.ComponentModel;
@@ -44,7 +44,7 @@ using System.Drawing;
 using System.Runtime.InteropServices;
 using System.Threading.Tasks;
 
-public static class NocttyIssue149Framebuffer {
+public static class KoretermIssue149Framebuffer {
     [StructLayout(LayoutKind.Sequential)]
     private struct RECT { public int left, top, right, bottom; }
 
@@ -148,7 +148,7 @@ function Write-Issue149Config(
 }
 
 function Get-Issue149VisibleSurfaces([IntPtr]$HostHwnd) {
-    return @(Get-StatefulChildren $HostHwnd | Where-Object Class -eq 'noctty.win32')
+    return @(Get-StatefulChildren $HostHwnd | Where-Object Class -eq 'koreterm.win32')
 }
 
 function Assert-Issue149PublicConfig(
@@ -230,7 +230,7 @@ function Assert-Issue149FrameColors(
     [string]$Palette1,
     [string]$EvidenceDirectory
 ) {
-    $capture = [NocttyIssue149Framebuffer]::CaptureClientAsync($SurfaceHwnd)
+    $capture = [KoretermIssue149Framebuffer]::CaptureClientAsync($SurfaceHwnd)
     if (-not $capture.Wait(10000)) { throw "$Name client-frame readback timed out." }
     $bitmap = $capture.GetAwaiter().GetResult()
     try {
@@ -259,7 +259,7 @@ function Assert-Issue149FrameColors(
                     $Name, $key, $expected[$key].ToString('x6'), $counts[$key], $minimum, $sampleCount)
             }
         }
-        $dpi = [NocttyIssue149Framebuffer]::GetDpiForWindow($SurfaceHwnd)
+        $dpi = [KoretermIssue149Framebuffer]::GetDpiForWindow($SurfaceHwnd)
         if ($dpi -lt $MinimumDpi) { throw "$Name rendered at $dpi DPI; required at least $MinimumDpi DPI." }
         Write-Host ('{0}: dpi={1} client={2}x{3} samples={4} background={5} foreground={6} palette1={7}' -f `
             $Name, $dpi, $bitmap.Width, $bitmap.Height, $sampleCount,
@@ -298,7 +298,7 @@ $harness = Initialize-InteractiveWin11Sandbox `
     -IncludeResourcesDir
 $layout = $harness.Layout
 $exe = Get-InteractiveWin11ExePath -RepoRoot $repoRoot
-$cli = Join-Path (Split-Path -Parent $exe) 'noctty.com'
+$cli = Join-Path (Split-Path -Parent $exe) 'koreterm.com'
 if ((Get-InteractiveWin11LaunchAction `
         -ExePath $exe `
         -Rebuild:$Rebuild `
@@ -306,9 +306,9 @@ if ((Get-InteractiveWin11LaunchAction `
     Invoke-InteractiveWin11Build -RepoRoot $repoRoot
 }
 Assert-InteractiveWin11ExeExists -ExePath $exe
-if (-not [IO.File]::Exists($cli)) { throw "Missing noctty.com at $cli" }
+if (-not [IO.File]::Exists($cli)) { throw "Missing koreterm.com at $cli" }
 
-$configDirectory = Join-Path $layout.LocalAppData 'noctty'
+$configDirectory = Join-Path $layout.LocalAppData 'koreterm'
 $markerDirectory = Join-Path $layout.SandboxRoot 'issue149-markers'
 $evidenceDirectory = Join-Path $layout.Logs 'issue149-framebuffers'
 [IO.Directory]::CreateDirectory($configDirectory) | Out-Null

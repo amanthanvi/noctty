@@ -1,6 +1,6 @@
 # Status
 
-What works in noctty, what is experimental, and what is out of scope. When
+What works in koreterm, what is experimental, and what is out of scope. When
 this page disagrees with a commit message, trust this page.
 
 Last updated: 2026-10-16, against fork `main` at `f41abb9a9`.
@@ -13,7 +13,7 @@ paths, shells, updates, automation, and troubleshooting, see
 
 ## Upstream
 
-noctty is based on post-`v1.3.1` upstream main (`1.3.2-dev`, `ba398dfff`,
+koreterm is based on post-`v1.3.1` upstream main (`1.3.2-dev`, `ba398dfff`,
 2026-04-05). It is a hard fork with scheduled merge windows; see the
 [upstream merge policy](upstream-merge-policy.md).
 
@@ -24,7 +24,7 @@ noctty is based on post-`v1.3.1` upstream main (`1.3.2-dev`, `ba398dfff`,
   rather than degrade. The default OpenGL renderer on a Snapdragon PC
   additionally needs the Microsoft Store "OpenCL, OpenGL, and Vulkan
   Compatibility Pack", because Qualcomm ships no desktop OpenGL driver;
-  without it noctty falls back to the D3D11 renderer (beta), which is included
+  without it koreterm falls back to the D3D11 renderer (beta), which is included
   in the ARM64 build and does not need it for text. See
   [windows.md](windows.md#windows-on-arm-without-a-vendor-opengl-driver-needs-the-compatibility-pack).
 - Windows 10 is a supported floor, not a tested target. CI runs on Windows
@@ -68,7 +68,7 @@ noctty is based on post-`v1.3.1` upstream main (`1.3.2-dev`, `ba398dfff`,
 - Live config reload via keybind (`Ctrl+Shift+,`).
 - `libghostty-vt` retained in the tree, built and tested, for Zig and C
   consumers who build it themselves. No package ships it. From 1.3.137 the
-  portable ZIP's `ghostty-vt.dll` is a noctty placeholder, not the library:
+  portable ZIP's `ghostty-vt.dll` is a koreterm placeholder, not the library:
   it exports nothing and fails to load (`ERROR_DLL_INIT_FAILED`), and it is
   there only because the portable updater of 1.3.125 to 1.3.136 requires the
   file. v1.4.100 drops it; portable copies on 1.3.125 to 1.3.136 that have
@@ -80,7 +80,7 @@ Win32-validated VT protocol coverage is tracked in
 
 ### Windows application runtime (new in this fork)
 
-- Packaged and source builds carry the bundled side-by-side ConPTY. If noctty
+- Packaged and source builds carry the bundled side-by-side ConPTY. If koreterm
   falls back to the in-box conhost, which strips Kitty APC and Sixel DCS
   payloads and returns no colour-query replies, it shows a banner naming the
   reason. See
@@ -97,7 +97,7 @@ Win32-validated VT protocol coverage is tracked in
   reorder and multi-tab close modes are not undoable. `clear_screen` and
   `reset` have a terminal-local undo and redo that restores the saved
   screen; with the bundled ConPTY the restored content is shifted to the
-  console's live cursor, and some cases can still leave noctty and ConPTY
+  console's live cursor, and some cases can still leave koreterm and ConPTY
   out of step (see [Known caveats](#known-caveats)).
 - Native right-click context menus.
 - A close X on every tab, the only tab of a window included (an undecorated
@@ -113,7 +113,7 @@ Win32-validated VT protocol coverage is tracked in
   shell profiles. From 1.3.133 a portable copy builds none, so it leaves the
   installed app's list alone; earlier portable copies replaced it at every
   start.
-- Classic Explorer `Open noctty here` verbs for folders, folder backgrounds,
+- Classic Explorer `Open koreterm here` verbs for folders, folder backgrounds,
   and drives, registered by the installer or explicitly per-user for
   portable builds.
 - Per-monitor DPI scaling. With `window-width` and `window-height` set, a
@@ -191,7 +191,7 @@ Win32-validated VT protocol coverage is tracked in
   what was open when the session ended: what the last window held when it
   went, however it went (its close, its last tab or pane, its last shell
   exiting), or every window a quit closed. Undo history is not saved. Only
-  one noctty process
+  one koreterm process
   owns `session-state.json`; a second instance, a forwarded launch, `-e` and
   `--working-directory` launches neither restore nor save it.
 - Named layouts (C17): save the focused window's tabs, splits, profiles,
@@ -211,7 +211,7 @@ Win32-validated VT protocol coverage is tracked in
   editor" button and `+edit-config` without `VISUAL`/`EDITOR` open the config
   through the `.txt` association rather than the file's own (Settings still
   refuses an executable-type extension). A "Config
-  problems" list (palette row, Settings > Advanced) shows what noctty could
+  problems" list (palette row, Settings > Advanced) shows what koreterm could
   not use from the config file.
 - Universal palette: actions, tabs, panes, profiles, named layouts, themes,
   native settings, help, and recent commands in one fuzzy-searched,
@@ -282,14 +282,14 @@ Win32-validated VT protocol coverage is tracked in
 
 ### Windows package managers
 
-- WinGet package id: `AmanThanvi.noctty` (published; `winget install --id AmanThanvi.noctty -e`).
-- Chocolatey package id: `noctty` (published; `choco install noctty`).
+- WinGet package id: `AmanThanvi.koreterm` (published; `winget install --id AmanThanvi.koreterm -e`).
+- Chocolatey package id: `koreterm` (published; `choco install koreterm`).
   community.chocolatey.org approved 1.3.134 on 2026-10-23. The release
   workflow builds the package and its last step, after WinGet, pushes it; the
   repository variable `CHOCOLATEY_PUBLISH` was deleted on 2026-10-23, so the
   step runs on every release. Chocolatey reviews each version before listing
   it, so a release can reach it after the other channels. The community
-  maintainer `virtualex`, who submitted `noctty` 1.3.131 on 2026-10-16, added
+  maintainer `virtualex`, who submitted `koreterm` 1.3.131 on 2026-10-16, added
   `amanthanvi` as a maintainer on 2026-10-20 and stays on as a co-maintainer.
   The install script asks the CPU which installer to use, because Chocolatey
   runs as an emulated x64 process on ARM64 Windows; that ships with the first
@@ -300,10 +300,10 @@ Win32-validated VT protocol coverage is tracked in
 
 ### Crash reports
 
-- Crash dumps stay local under `%LOCALAPPDATA%\noctty\crash`. noctty never
+- Crash dumps stay local under `%LOCALAPPDATA%\koreterm\crash`. koreterm never
   uploads anything from there, and the Sentry initialization path is a no-op
   on Windows.
-- `noctty +crash-report` reads whatever is there. Releases from 1.3.133 on
+- `koreterm +crash-report` reads whatever is there. Releases from 1.3.133 on
   also publish a zip of debug symbols per architecture for reading a dump
   with a debugger; it is not in the installer or the portable ZIP. Details in
   [windows.md](windows.md#crash-reports-and-diagnostics).
@@ -326,13 +326,13 @@ Win32-validated VT protocol coverage is tracked in
 `+register-default-terminal` and `+unregister-default-terminal` implement
 per-user registration and exact selection restore, using Windows Terminal
 1.24 or newer OpenConsole for console delegation. A delegated console
-application is adopted into a visible noctty window, verified live on
-Windows 11 26200. Still missing: noctty cannot appear in the Windows Settings
+application is adopted into a visible koreterm window, verified live on
+Windows 11 26200. Still missing: koreterm cannot appear in the Windows Settings
 picker without package identity, and it implements no `IConsoleHandoff`, so
 Windows Terminal must stay selected as the console half. A handoff is served
-by a separate `-Embedding` noctty process that opens its own window and has
+by a separate `-Embedding` koreterm process that opens its own window and has
 no single-instance IPC, jump list or global hotkeys; it never reaches the
-noctty you already have open, and elevated consoles were not verified. Details in
+koreterm you already have open, and elevated consoles were not verified. Details in
 [windows.md](windows.md#default-terminal).
 
 ### Windows UI Automation (accessibility)
@@ -357,10 +357,10 @@ them.
 
 Not yet covered: the profile picker and tab-overview overlay rows, context
 menus, toasts, the tab drag preview, quick-terminal chrome, and the
-in-progress IME composition. noctty draws the composition itself and exposes
+in-progress IME composition. koreterm draws the composition itself and exposes
 none of it through UI Automation, as Windows Terminal does. NVDA reads IMM32
 and TSF compositions through its own IME support (from its source, not
-measured in noctty). Microsoft's IME requirements require an IME's own
+measured in koreterm). Microsoft's IME requirements require an IME's own
 candidate window to expose itself to Narrator, and how Narrator reads the
 composition string is not documented; neither is measured here. A
 hands-on check with real IMEs and screen readers is still owed (see
@@ -419,9 +419,9 @@ incrementally.
   discussion, and feedback, use
   [Discussions](https://github.com/amanthanvi/noctty/discussions).
 - OpenGL 4.3 through WGL is a floor for the default renderer. Below it, or
-  when WGL fails, noctty falls back to the D3D11 beta (hardware, then WARP)
+  when WGL fails, koreterm falls back to the D3D11 beta (hardware, then WARP)
   with a banner; custom shaders, background images and Kitty images still need
-  OpenGL 4.3. Only when D3D11 cannot start either does noctty show a startup
+  OpenGL 4.3. Only when D3D11 cannot start either does koreterm show a startup
   diagnostic with the detected OpenGL version and the D3D11 error, and not
   start. Releases up to 1.3.132 counted those launches toward safe mode; see
   [windows.md](windows.md#starting-without-opengl) and
@@ -447,7 +447,7 @@ incrementally.
   repaint can differ from the restored content. Shifting down to a later live
   row inserts blank rows above and can clip saved rows at the bottom. A clear
   the shell redraws itself (at a prompt) keeps the old undo behavior and can
-  still leave noctty's cursor and ConPTY's apart until the shell clears
+  still leave koreterm's cursor and ConPTY's apart until the shell clears
   again; a clear that is still queued when undo runs can erase the restored
   content. An alternate-screen snapshot keeps its whole picture and the live
   cursor, since it has no scrollback to take shifted rows. The application's
@@ -515,17 +515,17 @@ incrementally.
 - Alt+Space still sends ESC SPACE to the program as well as opening the
   window menu (#381). Once conhost has seen a Win32 input record it holds a
   lone ESC back until more input arrives, as under Windows Terminal (#335).
-- Since 1.3.132 (#335) noctty sends keys to ConPTY as Win32 input records
+- Since 1.3.132 (#335) koreterm sends keys to ConPTY as Win32 input records
   (unless the program asked for the Kitty keyboard protocol). A record's text
   is Windows' translation of the key against the keyboard state at key-down,
-  not a `WM_CHAR` that follows it. So a tool that types into noctty by sending
+  not a `WM_CHAR` that follows it. So a tool that types into koreterm by sending
   `WM_KEYDOWN` and then `WM_CHAR` to its window (`SendMessage`) without setting
   that keyboard state (for example with `AttachThreadInput` and
   `SetKeyboardState`) gets a Shift chord's unshifted character: Shift+.
   arrives as `.`, and the tool's `WM_CHAR` is dropped. Real keys, `SendInput`
   and IME commits are unaffected.
 - A Japanese IME commit of 【】 freezes input in a `wslc exec -it` session
-  (#395); reading wslc's source points at `wslc.exe` itself, not noctty (not
+  (#395); reading wslc's source points at `wslc.exe` itself, not koreterm (not
   reproduced with a real IME or container).
 - Power- and visibility-aware render pacing has not been exercised on a
   machine with a battery (forced saver pacing, `power-saver-rendering = on`,

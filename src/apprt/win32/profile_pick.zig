@@ -18,7 +18,7 @@ pub const OpenTarget = enum {
     window,
     split,
 
-    /// The target a name such as `NOCTTY_WIN32_DEFAULT_PROFILE_TARGET`'s
+    /// The target a name such as `KORETERM_WIN32_DEFAULT_PROFILE_TARGET`'s
     /// names, in any case: `tab`, `window` or `win`, `split` or `pane`.
     pub fn parse(raw: []const u8) ?OpenTarget {
         if (std.ascii.eqlIgnoreCase(raw, "tab")) return .tab;
@@ -67,7 +67,7 @@ const Preference = struct {
     app_key: ?[]const u8 = null,
     /// `default-profile`'s profile, as the config load resolved it.
     default_key: ?[]const u8 = null,
-    /// `NOCTTY_WIN32_DEFAULT_PROFILE`, read as typed text.
+    /// `KORETERM_WIN32_DEFAULT_PROFILE`, read as typed text.
     hint: ?[]const u8 = null,
     /// The place an empty hint names.
     fallback: usize = 0,
@@ -217,7 +217,7 @@ test "win32 the picker starts on this window's choice, then the app's, then the 
 
 test "win32 the picker starts on default-profile after a choice and before the hint" {
     // `default-profile` comes after a choice the user made and before the
-    // `NOCTTY_WIN32_DEFAULT_PROFILE` hint, in any case of its key.
+    // `KORETERM_WIN32_DEFAULT_PROFILE` hint, in any case of its key.
     try std.testing.expectEqual(@as(?usize, 1), preferred(&test_shells, .{ .default_key = "GIT-BASH", .hint = "cmd" }));
     try std.testing.expectEqual(@as(?usize, 2), preferred(&test_shells, .{ .window_key = "cmd.exe", .default_key = "git-bash", .hint = "pwsh" }));
     try std.testing.expectEqual(@as(?usize, 0), preferred(&test_shells, .{ .app_key = "pwsh.exe", .default_key = "git-bash", .fallback = 1 }));

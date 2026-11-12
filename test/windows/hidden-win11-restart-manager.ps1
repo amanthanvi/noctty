@@ -1,6 +1,6 @@
 #requires -Version 7.0
 <#
-Portable, hidden-desktop measurement of how noctty answers an installer's
+Portable, hidden-desktop measurement of how koreterm answers an installer's
 Restart Manager close (WM_QUERYENDSESSION / WM_ENDSESSION with
 ENDSESSION_CLOSEAPP), the way Inno Setup asks for it: RmStartSession,
 RmRegisterResources on the files Setup replaces, RmGetList, RmShutdown without
@@ -11,15 +11,15 @@ run directory must not already exist.
 The files registered are the ones Setup would check: every file of the copy
 that the installer script's CloseApplicationsFilter matches (Inno's default
 *.exe,*.dll,*.chm when it sets none) and its CloseApplicationsFilterExcludes
-does not, by file name. The script is dist/windows/noctty.iss unless -Iss
+does not, by file name. The script is dist/windows/koreterm.iss unless -Iss
 names another, such as an older revision to show what it did.
 
 Cases (each its own portable copy, restoring a seeded session of two windows:
 the first with two tabs, the second of them split, the second with one tab):
-  idle-two-windows  nothing running: RmShutdown returns 0, noctty exits 0 and
+  idle-two-windows  nothing running: RmShutdown returns 0, koreterm exits 0 and
                     the saved session still holds both windows, tabs and split.
   inno-set-idle     the installer's view of the same idle session: Restart
-                    Manager lists only noctty, RmShutdown returns 0, noctty
+                    Manager lists only koreterm, RmShutdown returns 0, koreterm
                     exits 0 with the session kept, and none of its
                     OpenConsole.exe children (one ConPTY host per pane) is
                     still running when RmShutdown returns, so the excluded
@@ -27,11 +27,11 @@ the first with two tabs, the second of them split, the second with one tab):
                     a script without the exclusion, OpenConsole.exe is
                     registered, Restart Manager lists the hosts as
                     RmUnknownApp, and RmShutdown fails with 351 at once,
-                    before noctty is asked anything.
+                    before koreterm is asked anything.
   busy-always       confirm-close-surface = always, and
   busy-ping         `ping -t localhost` in every pane with the default
                     confirm-close-surface: RmShutdown returns
-                    ERROR_FAIL_SHUTDOWN (351) at once, noctty keeps running,
+                    ERROR_FAIL_SHUTDOWN (351) at once, koreterm keeps running,
                     shows no prompt, keeps the foreground where it was, and the
                     saved session is the one written at the query.
   settings-dirty    Settings open with an unsaved font size: declined, and the
@@ -41,7 +41,7 @@ the first with two tabs, the second of them split, the second with one tab):
                     stays held, and a later save still writes the file. A
                     Restart Manager close then still succeeds.
   signout           WM_QUERYENDSESSION and WM_ENDSESSION(TRUE) without
-                    ENDSESSION_CLOSEAPP, as a sign-out sends them: noctty saves,
+                    ENDSESSION_CLOSEAPP, as a sign-out sends them: koreterm saves,
                     latches (a later checkpoint writes nothing) and does not
                     quit by itself (Windows ends the process).
   restartable       registration for Setup's restart: not restartable at
@@ -54,7 +54,7 @@ the first with two tabs, the second of them split, the second with one tab):
   restartable-busy  confirm-close-surface = always: the declining owner is not
                     restartable.
   restartable-install-running
-                    another noctty's in-app Install is running Setup (a
+                    another koreterm's in-app Install is running Setup (a
                     stand-in Setup, a copy of ping.exe that shows no
                     window, running from a read-only staged installer
                     under the copy's updates\<version>): the owner agrees
@@ -68,11 +68,11 @@ These three only list (RmGetList) and send the query and end messages
 themselves; they never call RmShutdown.
 
 Cases with no terminal window (no seeded session is restored), which only the
-hidden lifecycle window (class noctty.win32.lifecycle) lets Restart Manager
+hidden lifecycle window (class koreterm.win32.lifecycle) lets Restart Manager
 ask:
   headless          initial-window = false and quit-after-last-window-closed =
                     false: Restart Manager lists the process as RmOtherWindow
-                    (2), RmShutdown returns 0 and noctty exits 0. The lifecycle
+                    (2), RmShutdown returns 0 and koreterm exits 0. The lifecycle
                     window is a top-level window that is never visible and is
                     not among UI Automation's top-level elements.
   settings-only-clean, settings-only-dirty
@@ -87,7 +87,7 @@ ask:
                     class object in the session's live COM class table (the
                     measurement AUMID does not isolate it). So the case is
                     refused, before anything starts, while HKCU
-                    Console\%%Startup DelegationTerminal selects noctty: a
+                    Console\%%Startup DelegationTerminal selects koreterm: a
                     console started then could be handed to this copy.
 
 Safety. Only this run's portable copies are registered with Restart Manager,
@@ -114,7 +114,7 @@ param(
     [switch] $Driver,
     [string] $DesktopName,
     [string] $Cases = '',
-    [string] $Iss = (Join-Path $PSScriptRoot '..\..\dist\windows\noctty.iss'),
+    [string] $Iss = (Join-Path $PSScriptRoot '..\..\dist\windows\koreterm.iss'),
     [ValidateRange(1,1800)] [int] $DriverTimeoutSeconds = 900,
     [string] $ExpectedStartupHash,
     [string] $ExpectedStartupModified
@@ -124,7 +124,7 @@ $ErrorActionPreference = 'Stop'
 
 # The -Embedding case publishes the real handoff class object in the session's
 # live class table, which neither the private desktop nor the measurement AUMID
-# isolates, so it is refused while the user's console delegation selects noctty
+# isolates, so it is refused while the user's console delegation selects koreterm
 # (Assert-EmbeddingDelegationSafe, hidden-win11-embedding-guard.ps1, through
 # hidden-win11-local-lib.ps1): before anything starts and again before the launch.
 $requestedCases=if($Cases) { @($Cases -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ }) } else { @('embedding-idle') }
@@ -180,9 +180,9 @@ public static class Rm {
         return result;
     }
     public static Sample Take(long ms, int pid, IntPtr process) {
-        var hosts=Windows(pid,"noctty.win32.host"); bool prompt=false, shown=false;
+        var hosts=Windows(pid,"koreterm.win32.host"); bool prompt=false, shown=false;
         foreach(var host in hosts) if(PromptShown(host)) prompt=true;
-        foreach(var w in Windows(pid,"noctty.win32.lifecycle")) if(IsWindowVisible(w)) shown=true;
+        foreach(var w in Windows(pid,"koreterm.win32.lifecycle")) if(IsWindowVisible(w)) shown=true;
         return new Sample { Ms=ms, Hosts=hosts.Length, Alive=WaitForSingleObject(process,0)==258, Prompt=prompt, LifecycleShown=shown, Foreground=GetForegroundWindow() };
     }
     [DllImport("user32.dll", CharSet=CharSet.Unicode)] static extern IntPtr FindWindowExW(IntPtr parent,IntPtr after,string cls,string title);
@@ -193,7 +193,7 @@ public static class Rm {
     // does not list.
     public static IntPtr MessageWindow(int pid) {
         var h=IntPtr.Zero;
-        while((h=FindWindowExW(new IntPtr(-3),h,"noctty.win32.app",null))!=IntPtr.Zero) { int id; GetWindowThreadProcessId(h,out id); if(id==pid) return h; }
+        while((h=FindWindowExW(new IntPtr(-3),h,"koreterm.win32.app",null))!=IntPtr.Zero) { int id; GetWindowThreadProcessId(h,out id); if(id==pid) return h; }
         return IntPtr.Zero;
     }
     public static bool Visible(IntPtr h) { return IsWindowVisible(h); }
@@ -245,11 +245,11 @@ public static class Rm {
         }
     }
     // A key-down and key-up for a pane, which runs the in-app keybind for
-    // that key (as hidden-win11-session-restore.ps1 does). noctty reads the
+    // that key (as hidden-win11-session-restore.ps1 does). koreterm reads the
     // modifiers from its thread's keyboard state, which a posted key does not
     // update and a private desktop can leave stale (a plain F9 arrived as
     // Shift+F9 on 10-18), so they are cleared there: this thread joins that
-    // input queue and the key is sent, not posted, so noctty handles it
+    // input queue and the key is sent, not posted, so koreterm handles it
     // before the queues part. The user's keyboard is another queue.
     public static void Key(IntPtr h,int key) {
         int pid; uint target=(uint)GetWindowThreadProcessId(h,out pid); uint me=GetCurrentThreadId();
@@ -268,7 +268,7 @@ public static class Rm {
 if (-not $Driver) {
     Invoke-LocalHiddenDriver -Script $PSCommandPath -Bin $Bin -Run $Run -TimeoutSeconds $DriverTimeoutSeconds `
         -ExpectedStartupHash $ExpectedStartupHash -ExpectedStartupModified $ExpectedStartupModified `
-        -DesktopPrefix 'noctty-rm-' -Label 'Hidden Restart Manager close' -PassDesktopName -GuardClipboard `
+        -DesktopPrefix 'koreterm-rm-' -Label 'Hidden Restart Manager close' -PassDesktopName -GuardClipboard `
         -DriverArguments @("-Cases `"$Cases`"","-Iss `"$((Resolve-Path -LiteralPath $Iss).Path)`"")
     exit
 }
@@ -280,7 +280,7 @@ trap { if($Driver) { Set-Content -LiteralPath (Join-Path $Run 'driver-error.txt'
 $script:checks=[Collections.Generic.List[object]]::new()
 $script:processes=[Collections.Generic.List[object]]::new()
 $results=[ordered]@{ Cases=[ordered]@{} }
-$runClass='noctty-test-rm-' + [guid]::NewGuid().ToString('N').Substring(0,8)
+$runClass='koreterm-test-rm-' + [guid]::NewGuid().ToString('N').Substring(0,8)
 $closeApp=1
 $Msg=@{ Close=0x10; QueryEndSession=0x11; EndSession=0x16; DisplayChange=0x7E }
 
@@ -317,7 +317,7 @@ function Start-Case([string]$Name,[string[]]$Config,[int]$HostCount=2,[switch]$E
     $cfg=Join-Path $dir 'case.ghostty'
     (@('command = cmd.exe /d /k','single-instance = false','window-save-state = always',
        'copy-on-select = false','clipboard-read = deny','clipboard-write = deny') + $Config) | Set-Content -LiteralPath $cfg
-    $exe=Join-Path $dir 'noctty.exe'
+    $exe=Join-Path $dir 'koreterm.exe'
     $line='"{0}" --config-file="{1}" --single-instance=false --class={2}' -f $exe,$cfg,$runClass
     if($Embedding) { $line+=' -Embedding' }
     $pi=[HiddenLocal]::Spawn($exe,$line,$dir,"WinSta0\$DesktopName")
@@ -337,8 +337,8 @@ function Start-Case([string]$Name,[string[]]$Config,[int]$HostCount=2,[switch]$E
         $ready -and @([HiddenLocal]::Hosts($p.Id)).Count -ge $HostCount
     } 30
     $hosts=@([HiddenLocal]::Hosts($p.Id))
-    if(-not $ok) { Stop-Case $case; throw "Case ${Name}: noctty did not start as expected (hosts $($hosts.Count))." }
-    $owned=@($hosts) + @([Rm]::Windows($p.Id,'noctty.win32.lifecycle')) + @([Rm]::MessageWindow($p.Id) | Where-Object { $_ -ne [IntPtr]::Zero })
+    if(-not $ok) { Stop-Case $case; throw "Case ${Name}: koreterm did not start as expected (hosts $($hosts.Count))." }
+    $owned=@($hosts) + @([Rm]::Windows($p.Id,'koreterm.win32.lifecycle')) + @([Rm]::MessageWindow($p.Id) | Where-Object { $_ -ne [IntPtr]::Zero })
     foreach($h in $owned) { if([HiddenLocal]::WindowDesktop($h) -ne $DesktopName) { Stop-Case $case; throw "Case ${Name}: a window is not on the private desktop." } }
     $case.Hosts=$hosts
     if($Embedding) { Start-Sleep -Milliseconds 300 }
@@ -349,7 +349,7 @@ function Start-Case([string]$Name,[string[]]$Config,[int]$HostCount=2,[switch]$E
 # The lifecycle windows the copy has, and whether each is hidden, top-level
 # (a child of the desktop, not of HWND_MESSAGE) and a tool window.
 function Lifecycle-State($case) {
-    return @(@([Rm]::Windows($case.Process.Id,'noctty.win32.lifecycle')) | ForEach-Object {
+    return @(@([Rm]::Windows($case.Process.Id,'koreterm.win32.lifecycle')) | ForEach-Object {
         @{ Visible=[Rm]::Visible($_); TopLevel=[Rm]::TopLevel($_); ToolWindow=(([Rm]::ExStyle($_) -band 0x80) -ne 0) }
     })
 }
@@ -366,9 +366,9 @@ function Uia-TopLevel([int]$ProcessId) {
 function Settings-Only($case,[bool]$Dirty) {
     $out=[ordered]@{}
     [Rm]::Key((Pane $case.Hosts[0]),0x77)
-    $ok=Wait-Until { @([Rm]::Windows($case.Process.Id,'noctty.win32.settings')).Count -gt 0 -and [Rm]::Child(@([Rm]::Windows($case.Process.Id,'noctty.win32.settings'))[0],402) -ne [IntPtr]::Zero } 15
+    $ok=Wait-Until { @([Rm]::Windows($case.Process.Id,'koreterm.win32.settings')).Count -gt 0 -and [Rm]::Child(@([Rm]::Windows($case.Process.Id,'koreterm.win32.settings'))[0],402) -ne [IntPtr]::Zero } 15
     if(-not $ok) { throw "$($case.Name): Settings did not open." }
-    $out.Settings=@([Rm]::Windows($case.Process.Id,'noctty.win32.settings'))[0]
+    $out.Settings=@([Rm]::Windows($case.Process.Id,'koreterm.win32.settings'))[0]
     $edit=[Rm]::Child($out.Settings,402)
     if($Dirty) {
         $original=[Rm]::Text($edit)
@@ -543,7 +543,7 @@ foreach($name in $selected) {
                 $r.Exited=$exited; if($exited) { $r.ExitCode=$case.Process.ExitCode }
                 $r.ShapeAfter=Session-Shape $case.State
                 Check "${name}: RmShutdown succeeds" ($r.Rm.Result -eq 0) 0 $r.Rm.Result
-                Check "${name}: noctty exits 0" ($exited -and $r.ExitCode -eq 0) 'exit 0' $(if($exited){$r.ExitCode}else{'running'})
+                Check "${name}: koreterm exits 0" ($exited -and $r.ExitCode -eq 0) 'exit 0' $(if($exited){$r.ExitCode}else{'running'})
                 Check "${name}: no prompt" (-not $r.Rm.PromptSeen) $false $r.Rm.PromptSeen
                 Check "${name}: the saved session keeps both windows, their tabs and the split" ($r.ShapeAfter -eq $seededShape) $seededShape $r.ShapeAfter
                 $r.LockFreeAfter=-not (Lock-Held $case.State)
@@ -562,17 +562,17 @@ foreach($name in $selected) {
                 [void](Wait-Until { -not @(Running-Hosts $r.Rm.ConsoleHosts).Count } 5)
                 $r.HostsLeft=@(Running-Hosts $r.Rm.ConsoleHosts | ForEach-Object { $_.Pid })
                 $registered=@($r.Rm.Registered)
-                Check "${name}: Setup's set includes noctty.exe" ($registered -contains 'noctty.exe') 'noctty.exe' ($registered -join ',')
-                Check "${name}: Restart Manager lists only noctty" (@($r.Rm.Listed).Count -eq 1) 1 (@($r.Rm.Listed | ForEach-Object { "$($_.Pid)/type $($_.Type)" }) -join ',')
+                Check "${name}: Setup's set includes koreterm.exe" ($registered -contains 'koreterm.exe') 'koreterm.exe' ($registered -join ',')
+                Check "${name}: Restart Manager lists only koreterm" (@($r.Rm.Listed).Count -eq 1) 1 (@($r.Rm.Listed | ForEach-Object { "$($_.Pid)/type $($_.Type)" }) -join ',')
                 Check "${name}: RmShutdown succeeds" ($r.Rm.Result -eq 0) 0 "$($r.Rm.Result) in $($r.Rm.Ms) ms"
-                Check "${name}: noctty exits 0" ($exited -and $r.ExitCode -eq 0) 'exit 0' $(if($exited){$r.ExitCode}else{'running'})
+                Check "${name}: koreterm exits 0" ($exited -and $r.ExitCode -eq 0) 'exit 0' $(if($exited){$r.ExitCode}else{'running'})
                 Check "${name}: the saved session keeps both windows, their tabs and the split" ($r.ShapeAfter -eq $seededShape) $seededShape $r.ShapeAfter
                 Check "${name}: the copy ran ConPTY hosts" (@($r.Rm.ConsoleHosts).Count -gt 0) '> 0' @($r.Rm.ConsoleHosts).Count
                 # Setup goes straight from the close step to [InstallDelete]
                 # OpenConsole.exe and the [Files] copy, so a host still
                 # running when RmShutdown returns holds the excluded file.
                 Check "${name}: no ConPTY host is running when RmShutdown returns" (-not @($r.Rm.HostsAtReturn).Count) 'none' (@($r.Rm.HostsAtReturn) -join ',')
-                Check "${name}: no ConPTY host outlives noctty" (-not $r.HostsLeft.Count) 'none' ($r.HostsLeft -join ',')
+                Check "${name}: no ConPTY host outlives koreterm" (-not $r.HostsLeft.Count) 'none' ($r.HostsLeft -join ',')
             } finally { Stop-Case $case }
         }
         { $_ -in 'busy-always','busy-ping' } {
@@ -590,7 +590,7 @@ foreach($name in $selected) {
                 $r.PromptAfter=@(@([HiddenLocal]::Hosts($case.Process.Id)) | Where-Object { [Rm]::PromptShown($_) }).Count -gt 0
                 Check "${name}: declined (ERROR_FAIL_SHUTDOWN)" ($r.Rm.Result -eq 351) 351 $r.Rm.Result
                 Check "${name}: declined at once" ($r.Rm.Ms -lt 2000) '< 2000 ms' $r.Rm.Ms
-                Check "${name}: noctty keeps running with both windows" ($r.Alive -and $r.Hosts -eq 2) 'alive, 2 windows' "alive=$($r.Alive), $($r.Hosts) windows"
+                Check "${name}: koreterm keeps running with both windows" ($r.Alive -and $r.Hosts -eq 2) 'alive, 2 windows' "alive=$($r.Alive), $($r.Hosts) windows"
                 Check "${name}: no prompt, during or after" (-not $r.Rm.PromptSeen -and -not $r.PromptAfter) $false "$($r.Rm.PromptSeen)/$($r.PromptAfter)"
                 Check "${name}: the foreground stays where it was" (-not $r.Rm.ForegroundChanged) $false $r.Rm.ForegroundChanged
                 Check "${name}: the query wrote the session as it was" ($r.SessionRewritten -and $r.ShapeAfter -eq $seededShape) "rewritten, $seededShape" "$($r.SessionRewritten), $($r.ShapeAfter)"
@@ -600,9 +600,9 @@ foreach($name in $selected) {
             $case=Start-Case $name @('keybind = f8=open_config')
             try {
                 [Rm]::Key((Pane $case.Hosts[0]),0x77)
-                $ok=Wait-Until { @([Rm]::Windows($case.Process.Id,'noctty.win32.settings')).Count -gt 0 -and [Rm]::Child(@([Rm]::Windows($case.Process.Id,'noctty.win32.settings'))[0],402) -ne [IntPtr]::Zero } 15
+                $ok=Wait-Until { @([Rm]::Windows($case.Process.Id,'koreterm.win32.settings')).Count -gt 0 -and [Rm]::Child(@([Rm]::Windows($case.Process.Id,'koreterm.win32.settings'))[0],402) -ne [IntPtr]::Zero } 15
                 if(-not $ok) { throw "${name}: Settings did not open." }
-                $settings=@([Rm]::Windows($case.Process.Id,'noctty.win32.settings'))[0]
+                $settings=@([Rm]::Windows($case.Process.Id,'koreterm.win32.settings'))[0]
                 $edit=[Rm]::Child($settings,402)
                 $original=[Rm]::Text($edit)
                 $typed=if($original -eq '17') { '18' } else { '17' }
@@ -611,12 +611,12 @@ foreach($name in $selected) {
                 $r.Rm=Rm-Close $case
                 Start-Sleep -Milliseconds 800
                 $r.Alive=-not $case.Process.HasExited
-                $r.SettingsOpen=@([Rm]::Windows($case.Process.Id,'noctty.win32.settings')).Count -eq 1
+                $r.SettingsOpen=@([Rm]::Windows($case.Process.Id,'koreterm.win32.settings')).Count -eq 1
                 $r.Hosts=@([HiddenLocal]::Hosts($case.Process.Id)).Count
                 $r.EditKept=$r.SettingsOpen -and ([Rm]::Text([Rm]::Child($settings,402)) -eq $typed)
                 Check "${name}: declined" ($r.Rm.Result -eq 351) 351 $r.Rm.Result
                 Check "${name}: declined at once" ($r.Rm.Ms -lt 2000) '< 2000 ms' $r.Rm.Ms
-                Check "${name}: noctty, both windows and Settings stay open" ($r.Alive -and $r.Hosts -eq 2 -and $r.SettingsOpen) 'alive, 2 windows, Settings' "alive=$($r.Alive), $($r.Hosts) windows, Settings=$($r.SettingsOpen)"
+                Check "${name}: koreterm, both windows and Settings stay open" ($r.Alive -and $r.Hosts -eq 2 -and $r.SettingsOpen) 'alive, 2 windows, Settings' "alive=$($r.Alive), $($r.Hosts) windows, Settings=$($r.SettingsOpen)"
                 Check "${name}: the unsaved edit survives" $r.EditKept $typed $r.EditKept
             } finally { Stop-Case $case }
         }
@@ -665,7 +665,7 @@ foreach($name in $selected) {
                 Check "${name}: every window agrees" (@($r.Queries | Where-Object { $_ -ne 1 }).Count -eq 0 -and $r.Queries.Count -eq 2) '1,1' ($r.Queries -join ',')
                 Check "${name}: the session is saved as it ends" ($r.Saved -and $r.ShapeAfter -eq $seededShape) "saved, $seededShape" "$($r.Saved), $($r.ShapeAfter)"
                 Check "${name}: and latched: a later checkpoint writes nothing" $r.LatchedAfter $true $r.LatchedAfter
-                Check "${name}: noctty does not quit by itself" ($r.Alive -and $r.Hosts -eq 2) 'alive, 2 windows' "alive=$($r.Alive), $($r.Hosts) windows"
+                Check "${name}: koreterm does not quit by itself" ($r.Alive -and $r.Hosts -eq 2) 'alive, 2 windows' "alive=$($r.Alive), $($r.Hosts) windows"
             } finally { Stop-Case $case }
         }
         'headless' {
@@ -682,7 +682,7 @@ foreach($name in $selected) {
                 Check "${name}: not among UI Automation's top-level elements" ($r.UiaTopLevel -eq 0) 0 $r.UiaTopLevel
                 Check "${name}: listed as RmOtherWindow" ($type -eq 2) 2 $type
                 Check "${name}: RmShutdown succeeds" ($r.Rm.Result -eq 0) 0 $r.Rm.Result
-                Check "${name}: noctty exits 0" ($exited -and $r.ExitCode -eq 0) 'exit 0' $(if($exited){$r.ExitCode}else{'running'})
+                Check "${name}: koreterm exits 0" ($exited -and $r.ExitCode -eq 0) 'exit 0' $(if($exited){$r.ExitCode}else{'running'})
                 Check "${name}: the lifecycle window never shows" (@($r.Rm.Timeline | Where-Object { $_.LifecycleShown }).Count -eq 0) $false 'see Timeline'
             } finally { Stop-Case $case }
         }
@@ -699,17 +699,17 @@ foreach($name in $selected) {
                 if($dirty) {
                     Start-Sleep -Milliseconds 800
                     $r.Alive=-not $case.Process.HasExited
-                    $r.SettingsOpen=@([Rm]::Windows($case.Process.Id,'noctty.win32.settings')).Count -eq 1
+                    $r.SettingsOpen=@([Rm]::Windows($case.Process.Id,'koreterm.win32.settings')).Count -eq 1
                     $r.EditKept=$r.SettingsOpen -and ([Rm]::Text([Rm]::Child($s.Settings,402)) -eq $s.Typed)
                     Check "${name}: declined" ($r.Rm.Result -eq 351) 351 $r.Rm.Result
                     Check "${name}: declined at once" ($r.Rm.Ms -lt 2000) '< 2000 ms' $r.Rm.Ms
-                    Check "${name}: noctty and Settings stay open" ($r.Alive -and $r.SettingsOpen) 'alive, Settings' "alive=$($r.Alive), Settings=$($r.SettingsOpen)"
+                    Check "${name}: koreterm and Settings stay open" ($r.Alive -and $r.SettingsOpen) 'alive, Settings' "alive=$($r.Alive), Settings=$($r.SettingsOpen)"
                     Check "${name}: the unsaved edit survives" $r.EditKept $s.Typed $r.EditKept
                 } else {
                     $exited=$case.Process.WaitForExit(10000)
                     $r.Exited=$exited; if($exited) { $r.ExitCode=$case.Process.ExitCode }
                     Check "${name}: RmShutdown succeeds" ($r.Rm.Result -eq 0) 0 $r.Rm.Result
-                    Check "${name}: noctty exits 0" ($exited -and $r.ExitCode -eq 0) 'exit 0' $(if($exited){$r.ExitCode}else{'running'})
+                    Check "${name}: koreterm exits 0" ($exited -and $r.ExitCode -eq 0) 'exit 0' $(if($exited){$r.ExitCode}else{'running'})
                     Check "${name}: Settings is one of UI Automation's top-level elements" ($r.UiaTopLevel -ge 1) '>= 1' $r.UiaTopLevel
                 }
                 Check "${name}: the lifecycle window never shows" (@($r.Rm.Timeline | Where-Object { $_.LifecycleShown }).Count -eq 0 -and @($r.Lifecycle | Where-Object { $_.Visible }).Count -eq 0) $false 'see Timeline'
@@ -759,7 +759,7 @@ foreach($name in $selected) {
 
                 # A second instance of the same copy: the session lock is held,
                 # so it is not the owner and opens a window of its own.
-                $exe=Join-Path $case.Dir 'noctty.exe'
+                $exe=Join-Path $case.Dir 'koreterm.exe'
                 $cfg=Join-Path $case.Dir 'case.ghostty'
                 $pi=[HiddenLocal]::Spawn($exe,('"{0}" --config-file="{1}" --single-instance=false --class={2}' -f $exe,$cfg,$runClass),$case.Dir,"WinSta0\$DesktopName")
                 try { $second=[Diagnostics.Process]::GetProcessById($pi.pid); [void]$second.Handle }
@@ -802,7 +802,7 @@ foreach($name in $selected) {
                 $p=$case.Process
                 $stage=Join-Path $case.Dir 'updates\1.3.999'
                 [void](New-Item -ItemType Directory -Force -Path $stage)
-                $setup=Join-Path $stage 'noctty-1.3.999-windows-x64-setup.exe'
+                $setup=Join-Path $stage 'koreterm-1.3.999-windows-x64-setup.exe'
                 # The stand-in Setup: a console program started with no
                 # window, on this desktop, inside the owned job. Read-only, as
                 # a write open then fails with access denied, not a sharing

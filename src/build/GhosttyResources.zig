@@ -57,7 +57,7 @@ pub fn init(b: *std.Build, cfg: *const Config, deps: *const SharedDeps) !Ghostty
         }
 
         // Windows doesn't have the binaries below, so compile the database
-        // with our own encoder. At runtime noctty installs the same entry
+        // with our own encoder. At runtime koreterm installs the same entry
         // into the per-user terminfo directory (apprt/win32_terminfo.zig);
         // the copy here marks the resources directory and can be used
         // directly.

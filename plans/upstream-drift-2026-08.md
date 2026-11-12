@@ -1,7 +1,7 @@
 # Upstream drift analysis — August 2026
 
 - **Analysis date:** 2026-08-22
-- **Fork:** `amanthanvi/noctty`
+- **Fork:** `amanthanvi/koreterm`
 - **Issue:** #141, C33 — upstream merge cadence and published merge policy
 - **Scope:** drift analysis plus the bounded 2026-08 merge window slice
 
@@ -116,7 +116,7 @@ on sampled fork diffs, not only filenames or line counts.
 | Application / apprt / surface   |          5 | B, C            | Semantic-output transport, search generations, Job Object setup, initial PTY sizing, progress state, and automation actions.      |
 | Benchmarks / examples / tests   |         13 | A, B            | `ghostty-vt` naming and Darwin-import guards needed for Windows builds.                                                           |
 | Build / deps / CI / packaging   |         30 | B, C            | Windows-only build graph, Win32 runtime default, conditional lib-vt/custom shaders, and Windows CI/release jobs.                  |
-| CLI                             |         18 | A, B, C         | Noctty naming, Windows console/editor/resource handling, local automation actions, and divergent dispatch/help logic.             |
+| CLI                             |         18 | A, B, C         | Koreterm naming, Windows console/editor/resource handling, local automation actions, and divergent dispatch/help logic.             |
 | Config                          |         10 | A, B, C         | Rebrand plus Win32 defaults, Windows shell behavior, Job Objects, quick-terminal semantics, and removed platform fields.          |
 | Docs / repository metadata      |          7 | A               | Project identity, ownership, contribution, and Windows-only policy.                                                               |
 | Font                            |         11 | B, C            | Windows FreeType backend, registry discovery, deferred-face loading, and removal/guarding of CoreText/fontconfig paths.           |
@@ -124,7 +124,7 @@ on sampled fork diffs, not only filenames or line counts.
 | Public libghostty-vt API        |          1 | A               | One fork documentation-line change; no fork-side ABI change.                                                                      |
 | Renderer                        |          8 | B, C            | Win32 presentation/vsync, follow-up pacing, mailbox behavior, search ownership, shader gating, and renderer-wake timestamps.      |
 | Shared runtime / OS / utilities |         21 | B, C            | Windows process launch, Job Objects, WSL/cwd behavior, WinMain/console paths, and queue semantics.                                |
-| Shell integration               |          7 | A, B, C         | Noctty executable names plus PowerShell detection and injection.                                                                  |
+| Shell integration               |          7 | A, B, C         | Koreterm executable names plus PowerShell detection and injection.                                                                  |
 | Terminal / VT core              |         23 | C               | Regex/whole-word search, async generations, semantic-output tracking, committed-codepoint state, and PageList integrity behavior. |
 | Termio / PTY                    |          6 | B, C            | Windows shell/WSL/ConPTY launch, renderer wakes, semantic output, Windows OSC 7 conversion, and Job Object lifecycle.             |
 | **Total**                       |    **165** |                 |                                                                                                                                   |
@@ -331,7 +331,7 @@ key-input harnesses; those results are recorded below.
 
 Run on 2026-09-03 against `main` at `eaff07831`, which carries the seven picks
 (merged as #175). Machine: Windows 11 build 26200 (25H2), console session,
-Debug build, `noctty.exe` SHA-256
+Debug build, `koreterm.exe` SHA-256
 `FB21EFAF572A6265AEAFF50A4276450AE9A1661DB10B642BF22603B7E3970E8E`.
 
 ```powershell

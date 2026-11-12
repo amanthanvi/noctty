@@ -74,7 +74,7 @@ public static class DpiGeometry {
     }
     static string Class(IntPtr h) { var s=new StringBuilder(128); GetClassNameW(h,s,128); return s.ToString(); }
     public static IntPtr Surface(IntPtr h) { IntPtr found=IntPtr.Zero;
-        EnumChildWindows(h,(c,p)=> { if(Class(c)=="noctty.win32") found=c; return true; },IntPtr.Zero); return found;
+        EnumChildWindows(h,(c,p)=> { if(Class(c)=="koreterm.win32") found=c; return true; },IntPtr.Zero); return found;
     }
     public static State Read(IntPtr h) {
         var old=SetThreadDpiAwarenessContext(new IntPtr(-4));
@@ -98,7 +98,7 @@ public static class DpiGeometry {
 if (-not $Driver) {
     Invoke-LocalHiddenDriver -Script $PSCommandPath -Bin $Bin -Run $Run -TimeoutSeconds $DriverTimeoutSeconds `
         -ExpectedStartupHash $ExpectedStartupHash -ExpectedStartupModified $ExpectedStartupModified `
-        -DesktopPrefix 'noctty-dpi-' -Label 'Hidden DPI geometry' -PassDesktopName
+        -DesktopPrefix 'koreterm-dpi-' -Label 'Hidden DPI geometry' -PassDesktopName
     exit
 }
 
@@ -129,7 +129,7 @@ function Launch-Case([string]$Name,[string]$Extra='') {
     $dir=Join-Path $Run "$Name\bin"; Copy-Portable $Bin $dir
     $config=Join-Path $dir 'geometry.ghostty'
     @('command = cmd.exe /d /k','shell-integration = none','single-instance = false','window-save-state = never','confirm-close-surface = false','keybind = f11=toggle_fullscreen','keybind = f10=toggle_quick_terminal','quick-terminal-screen = main','quick-terminal-autohide = false','quick-terminal-size = 25%', $Extra) | Set-Content -LiteralPath $config
-    $exe=Join-Path $dir 'noctty.exe'
+    $exe=Join-Path $dir 'koreterm.exe'
     # An explicit lpDesktop: a child that a private-desktop driver starts with a null desktop can
     # land on the interactive desktop. The Process object holds its own handle before the launch
     # handles close, so it stays this launch's process.

@@ -1,4 +1,4 @@
-//! Root `IRawElementProviderSimple` for the noctty host HWND.
+//! Root `IRawElementProviderSimple` for the koreterm host HWND.
 //!
 //! Returned from `WM_GETOBJECT` when the client asks for
 //! `UiaRootObjectId`. Reports:
@@ -257,11 +257,11 @@ pub const RootProvider = struct {
         return com.SysAllocString(literal);
     }
 
-    /// Allocate a BSTR for the current HWND title, or a "noctty"
+    /// Allocate a BSTR for the current HWND title, or a "koreterm"
     /// fallback if the title is empty or the query fails. Runs per
     /// property query — caching is unsafe because the caller frees.
     fn allocNameBstr(self: *RootProvider) ?[*:0]u16 {
-        const fallback = std.unicode.utf8ToUtf16LeStringLiteral("noctty");
+        const fallback = std.unicode.utf8ToUtf16LeStringLiteral("koreterm");
         const len = com.GetWindowTextLengthW(self.hwnd);
         if (len <= 0) return com.SysAllocString(fallback);
 

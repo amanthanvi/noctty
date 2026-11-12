@@ -1,8 +1,8 @@
-# Publish noctty on Chocolatey
+# Publish koreterm on Chocolatey
 
-Every stable release builds a Chocolatey package, `noctty`, and the last step of
+Every stable release builds a Chocolatey package, `koreterm`, and the last step of
 the `Release` workflow pushes it to the community repository. The community
-maintainer `virtualex` created the package: they submitted `noctty` 1.3.131 on
+maintainer `virtualex` created the package: they submitted `koreterm` 1.3.131 on
 2026-10-16 from their package auto-updater, so their account owned the id, and
 Chocolatey refused this repository's pushes with `403` (the 1.3.132 push from
 the Chocolatey Publish workflow on 2026-10-17 and the 1.3.133 release's push on
@@ -12,13 +12,13 @@ On 2026-10-20, as agreed in
 [virtualex-itv/chocolatey-packages#35](https://github.com/virtualex-itv/chocolatey-packages/issues/35),
 `virtualex` added `amanthanvi` as a maintainer of the package, stayed on as a
 co-maintainer, and rejected 1.3.131
-([its page](https://community.chocolatey.org/packages/noctty/1.3.131)). On
+([its page](https://community.chocolatey.org/packages/koreterm/1.3.131)). On
 2026-10-21 the Chocolatey Publish workflow pushed 1.3.134 (dry run
 [39578632348](https://github.com/amanthanvi/noctty/actions/runs/39578632348),
 push [39578893616](https://github.com/amanthanvi/noctty/actions/runs/39578893616):
-`noctty.1.3.134.nupkg was pushed successfully`). Read at 10:21 UTC that day,
+`koreterm.1.3.134.nupkg was pushed successfully`). Read at 10:21 UTC that day,
 the feed's
-[entry for it](https://community.chocolatey.org/api/v2/Packages(Id='noctty',Version='1.3.134'))
+[entry for it](https://community.chocolatey.org/api/v2/Packages(Id='koreterm',Version='1.3.134'))
 had `PackageStatus` `Submitted`, `PackageSubmittedStatus` `Pending`,
 `IsApproved` `false`, `PackageValidationResultStatus` `Passing` (since 10:16
 UTC) and `PackageTestResultStatus` `Pending`.
@@ -27,8 +27,8 @@ Chocolatey approved 1.3.134 on 2026-10-23, about two days after the push. Read
 at 16:28 UTC on 2026-10-24, the same feed entry had `PackageStatus` `Approved`,
 `IsApproved` `true`, `PackageReviewer` `Windos` (reviewed and approved at
 07:44 UTC on 2026-10-23), `PackageValidationResultStatus` `Passing` and
-`PackageTestResultStatus` `Passing`, and `choco search noctty --exact` listed
-`noctty|1.3.134`. So `choco install noctty` works. Chocolatey's own install
+`PackageTestResultStatus` `Passing`, and `choco search koreterm --exact` listed
+`koreterm|1.3.134`. So `choco install koreterm` works. Chocolatey's own install
 test passed; this repository did not run an install, which would run Setup on
 the machine that checked.
 
@@ -48,7 +48,7 @@ variable, so that a release does not end red for a refusal nothing in this
 repository can fix:
 
 ```powershell
-gh variable set CHOCOLATEY_PUBLISH --body off --repo amanthanvi/noctty
+gh variable set CHOCOLATEY_PUBLISH --body off --repo amanthanvi/koreterm
 ```
 
 The `Release` workflow then skips its **Publish Chocolatey package** step (the
@@ -60,7 +60,7 @@ way to try a push while the release step is off. To turn the push back on,
 delete the variable:
 
 ```powershell
-gh variable delete CHOCOLATEY_PUBLISH --repo amanthanvi/noctty
+gh variable delete CHOCOLATEY_PUBLISH --repo amanthanvi/koreterm
 ```
 
 Chocolatey accepts a push only when this repository's account owns (or
@@ -84,15 +84,15 @@ architecture (`Win32_Processor.Architecture` 12 is ARM64), because Chocolatey
 runs as an emulated x64 process on ARM64 Windows and the process reports x64
 there; a package without an ARM64 installer keeps the x64 one. Chocolatey's own
 uninstaller removes it through the installer's entry in Apps. Setup has to
-close noctty, and noctty cannot close while Chocolatey is running in it, so the
+close koreterm, and koreterm cannot close while Chocolatey is running in it, so the
 install script stops before it downloads the installer when it runs inside a
-noctty window (it asks for another terminal) or while noctty is the default
+koreterm window (it asks for another terminal) or while koreterm is the default
 terminal and hosts console windows (it asks to close those and run the upgrade
-from a terminal app such as Windows Terminal). When noctty is running but the
+from a terminal app such as Windows Terminal). When koreterm is running but the
 script cannot read which processes started it, it stops too and asks to close
-noctty. The package
-contains no binaries, so it needs no `VERIFICATION.txt`. The id is `noctty`,
-the title `Noctty`, the license is the repository's MIT `LICENSE` at the release
+koreterm. The package
+contains no binaries, so it needs no `VERIFICATION.txt`. The id is `koreterm`,
+the title `Koreterm`, the license is the repository's MIT `LICENSE` at the release
 tag, and the icon is the website's `https://noctty.com/assets/favicon.svg`,
 because the validator rejects an icon served from GitHub. The package has its
 own description for its Chocolatey page, which names the packaged architectures
@@ -118,7 +118,7 @@ key, copy a new one from the account page
 than on the command line:
 
 ```powershell
-gh secret set CHOCO_API_KEY --repo amanthanvi/noctty --env release
+gh secret set CHOCO_API_KEY --repo amanthanvi/koreterm --env release
 ```
 
 ## Publishing a version that is already released
@@ -129,8 +129,8 @@ Run the **Chocolatey Publish** workflow
 the push:
 
 ```powershell
-gh workflow run chocolatey-publish.yml --repo amanthanvi/noctty --ref main -f version=1.3.133
-gh workflow run chocolatey-publish.yml --repo amanthanvi/noctty --ref main -f version=1.3.133 -f push=true
+gh workflow run chocolatey-publish.yml --repo amanthanvi/koreterm --ref main -f version=1.3.133
+gh workflow run chocolatey-publish.yml --repo amanthanvi/koreterm --ref main -f version=1.3.133 -f push=true
 ```
 
 Do not rerun that version's `Release` run instead. A rerun rebuilds the
@@ -147,7 +147,7 @@ runner, where Chocolatey is preinstalled
 ([Windows Server 2025 image](https://github.com/actions/runner-images/blob/main/images/windows/Windows2025-Readme.md):
 Chocolatey 2.7.4 in image 20261013.288.2), and builds nothing:
 
-1. It refuses to run unless the repository is `amanthanvi/noctty`, the
+1. It refuses to run unless the repository is `amanthanvi/koreterm`, the
    version is plain three-part semver such as `1.3.132`, and the workflow
    commit is the head of `main`.
 2. `scripts/release-stage-published.ps1` downloads the published release and
@@ -180,7 +180,7 @@ except the Scoop and WinGet manifests, so before the first push of a version,
 compare the
 `Installer <arch> SHA-256` lines the build step prints with `InstallerSha256`
 in the WinGet manifest of that version (`microsoft/winget-pkgs`,
-`manifests/a/AmanThanvi/noctty/<version>`), which was published from the
+`manifests/a/AmanThanvi/koreterm/<version>`), which was published from the
 original build. For 1.3.132 the release's installers and that manifest were
 identical on 2026-10-17 for both x64 (`b59f99a3...`) and arm64
 (`f7c465e1...`).
@@ -190,7 +190,7 @@ lookup also lists a version that is still in moderation (measured on
 2026-10-17: versions with the status `Submitted` and `Ready` answer `200`
 there, while `FindPackagesById` leaves them out), so a corrected package for
 such a version needs `-f resubmit=true` as well. Without it the run reports
-`Chocolatey already has noctty <version>; nothing to push.`
+`Chocolatey already has koreterm <version>; nothing to push.`
 
 The check that the run starts from `main` guards against a mistake, not
 against a person with write access: it is part of the workflow file, and on
@@ -212,7 +212,7 @@ this repository that Chocolatey accepted, was approved about two days later
 recorded 28 and 54 days for its first two approvals in 2026. How long later
 versions take has not been measured, so a release can reach Chocolatey after
 GitHub, WinGet and Scoop. Follow the state at
-`https://community.chocolatey.org/packages/noctty/<version>` under
+`https://community.chocolatey.org/packages/koreterm/<version>` under
 **Package Status**; `Submitted` means it is still queued.
 
 If a moderator asks for changes, the status turns to **Waiting for
@@ -223,7 +223,7 @@ run the **Chocolatey Publish** workflow again for that version, with
 `resubmit` so that the listed version is not skipped:
 
 ```powershell
-gh workflow run chocolatey-publish.yml --repo amanthanvi/noctty --ref main -f version=<version> -f push=true -f resubmit=true
+gh workflow run chocolatey-publish.yml --repo amanthanvi/koreterm --ref main -f version=<version> -f push=true -f resubmit=true
 ```
 
 Do not rerun the release instead: it would rebuild its installers.
@@ -265,7 +265,7 @@ While a version is in moderation and none is approved, Chocolatey refuses every
 new version with `403`: one of the causes it documents is "Package has a
 version in moderation and no approved versions"
 ([common errors](https://docs.chocolatey.org/en-us/community-repository/maintainers/common-errors/)).
-That was the state of `noctty` from 2026-10-21 to 2026-10-23. A release in such
+That was the state of `koreterm` from 2026-10-21 to 2026-10-23. A release in such
 a window still publishes to GitHub and Scoop and submits the WinGet manifest
 update. The Chocolatey step runs last so that it cannot hold back WinGet; it
 fails, the run turns red, and its message names the possible causes of a `403`,

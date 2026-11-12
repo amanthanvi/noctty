@@ -115,7 +115,7 @@ jobs:
               # The bootstrap names itself, so a script that stopped writing it under TEMP cannot pass here.
               $ranFrom = @($oddRun.Output | ForEach-Object { if ($_ -match '^Bootstrap: "(.+)"$') { $Matches[1] } }) | Select-Object -First 1
               if (-not $ranFrom -or -not $ranFrom.StartsWith($oddTemp + '\', [System.StringComparison]::OrdinalIgnoreCase)) { throw "$label ran its bootstrap from '$ranFrom', not from inside '$oddTemp'." }
-              if (@(Get-ChildItem -LiteralPath $oddTemp -Filter 'noctty-dev-windows-*.cmd').Count -ne 0) { throw "$label left its bootstrap file in '$oddTemp'." }
+              if (@(Get-ChildItem -LiteralPath $oddTemp -Filter 'koreterm-dev-windows-*.cmd').Count -ne 0) { throw "$label left its bootstrap file in '$oddTemp'." }
             }
           } finally {
             $env:TEMP = $savedTemp.TEMP

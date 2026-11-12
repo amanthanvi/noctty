@@ -14,33 +14,33 @@
 #include "bridge.h"
 #include "composition.h"
 #include "terminal_bytecode.h"
-#ifndef NOCTTY_RENDERER_TEST_TOOLS
-#define NOCTTY_RENDERER_TEST_TOOLS 0
+#ifndef KORETERM_RENDERER_TEST_TOOLS
+#define KORETERM_RENDERER_TEST_TOOLS 0
 #endif
 
 #define RELEASE(p) do { if (p) { IUnknown_Release((IUnknown *)(p)); (p) = NULL; } } while (0)
 
-struct NocttyD3DBuffer {
-    NocttyD3D *owner;
-    struct NocttyD3DBuffer *next;
+struct KoretermD3DBuffer {
+    KoretermD3D *owner;
+    struct KoretermD3DBuffer *next;
     ID3D11Buffer *gpu;
     ID3D11ShaderResourceView *srv;
     unsigned char *cpu;
     size_t size;
     uint32_t uniform;
 };
-struct NocttyD3DTexture {
-    NocttyD3D *owner;
-    struct NocttyD3DTexture *next;
+struct KoretermD3DTexture {
+    KoretermD3D *owner;
+    struct KoretermD3DTexture *next;
     ID3D11Texture2D *gpu;
     ID3D11ShaderResourceView *srv;
     unsigned char *cpu;
     uint32_t width, height, pixel_size;
     DXGI_FORMAT format;
 };
-struct NocttyD3DTarget {
-    NocttyD3D *owner;
-    struct NocttyD3DTarget *next;
+struct KoretermD3DTarget {
+    KoretermD3D *owner;
+    struct KoretermD3DTarget *next;
     ID3D11Texture2D *gpu;
     ID3D11RenderTargetView *rtv;
     /* A UNORM view of a linear (sRGB) target's texture, for a step that
@@ -49,42 +49,42 @@ struct NocttyD3DTarget {
     ID3D11RenderTargetView *gamma_rtv;
     uint32_t width, height, linear, rendered;
 };
-/* noctty_d3d11_draw pipeline numbers (d3d11/Pipeline.zig Kind). */
+/* koreterm_d3d11_draw pipeline numbers (d3d11/Pipeline.zig Kind). */
 enum { PIPELINE_BG = 0, PIPELINE_CELL_BG = 1, PIPELINE_TEXT = 2, PIPELINE_SPLIT_DIM = 5 };
-struct NocttyD3D {
+struct KoretermD3D {
     HWND hwnd;
     HMODULE library;
     PFN_D3D11_CREATE_DEVICE create_device_proc;
     ID3D11Device *device;
     ID3D11DeviceContext *context;
     IDXGISwapChain1 *swapchain;
-    NocttyComposition *composition;
+    KoretermComposition *composition;
     uint32_t composition_committed;
     ID3D11Texture2D *backbuffer;
     ID3D11VertexShader *bg_vs, *text_vs;
     ID3D11PixelShader *ps[3];
     ID3D11BlendState *blend, *opaque;
     ID3D11RasterizerState *rasterizer;
-    NocttyD3DBuffer *buffers;
-    NocttyD3DTexture *textures;
-    NocttyD3DTarget *targets;
-    NocttyD3DTarget *last_rendered;
+    KoretermD3DBuffer *buffers;
+    KoretermD3DTexture *textures;
+    KoretermD3DTarget *targets;
+    KoretermD3DTarget *last_rendered;
     uint32_t width, height, force_warp, occluded;
     uint64_t hardware_retry_after_ms;
     uint64_t next_present_test_ms;
-#if NOCTTY_RENDERER_TEST_TOOLS
+#if KORETERM_RENDERER_TEST_TOOLS
     uint32_t fail_hardware, fail_device, fail_resource, test_present_status;
     HRESULT next_present_failure;
 #endif
     LARGE_INTEGER frequency, frame_start;
-    NocttyD3DStats stats;
+    KoretermD3DStats stats;
 };
 
-#if NOCTTY_RENDERER_TEST_TOOLS
-/* readback.c: swaps RGBA to BGRA in place, saves NOCTTY_RENDERER_CAPTURE_PATH
+#if KORETERM_RENDERER_TEST_TOOLS
+/* readback.c: swaps RGBA to BGRA in place, saves KORETERM_RENDERER_CAPTURE_PATH
  * and draws into dc unless it is NULL; nonzero when either succeeded. */
-int noctty_renderer_blit(void *dc, unsigned char *rgba, uint32_t w, uint32_t h, int bottom_up);
-static uint64_t elapsed_ns(NocttyD3D *d, LARGE_INTEGER start, LARGE_INTEGER end) {
+int koreterm_renderer_blit(void *dc, unsigned char *rgba, uint32_t w, uint32_t h, int bottom_up);
+static uint64_t elapsed_ns(KoretermD3D *d, LARGE_INTEGER start, LARGE_INTEGER end) {
     return (uint64_t)((end.QuadPart - start.QuadPart) * 1000000000.0 / d->frequency.QuadPart);
 }
 static uint64_t env_number(const char *name) {
@@ -109,14 +109,14 @@ static int device_lost(HRESULT hr) {
         hr == DXGI_ERROR_DEVICE_HUNG || hr == DXGI_ERROR_DRIVER_INTERNAL_ERROR;
 }
 /* Recovery rebuilds every GPU resource, so no target holds a presentable frame. */
-static void mark_recovery_pending(NocttyD3D *d) {
+static void mark_recovery_pending(KoretermD3D *d) {
     d->stats.recovery_pending = 1;
     d->last_rendered = NULL;
-    for (NocttyD3DTarget *t = d->targets; t; t = t->next) t->rendered = 0;
+    for (KoretermD3DTarget *t = d->targets; t; t = t->next) t->rendered = 0;
 }
 /* Resource allocations, resize, Present and Map all route failures here. Void
  * context calls are checked at frame boundaries via GetDeviceRemovedReason. */
-static HRESULT record_result(NocttyD3D *d, HRESULT hr) {
+static HRESULT record_result(KoretermD3D *d, HRESULT hr) {
     if (SUCCEEDED(hr)) return hr;
     HRESULT reason = d->device ? ID3D11Device_GetDeviceRemovedReason(d->device) : S_OK;
     d->stats.last_error = hr;
@@ -136,22 +136,22 @@ static HRESULT record_result(NocttyD3D *d, HRESULT hr) {
     }
     return hr;
 }
-static HRESULT device_status(NocttyD3D *d) {
+static HRESULT device_status(KoretermD3D *d) {
     if (d->stats.unavailable) return FAILED(d->stats.last_error) ? d->stats.last_error : E_FAIL;
     if (d->stats.recovery_pending) return DXGI_ERROR_DEVICE_REMOVED;
     if (!d->device) return record_result(d, E_FAIL);
     HRESULT hr = ID3D11Device_GetDeviceRemovedReason(d->device);
-    if (SUCCEEDED(hr) && d->composition) hr = noctty_composition_check_state(d->composition);
+    if (SUCCEEDED(hr) && d->composition) hr = koreterm_composition_check_state(d->composition);
     return record_result(d, hr);
 }
 /* A pending recovery recreates GPU resources from their CPU copies, so a
  * failure now is not final. An unavailable device never recovers. */
-static int recovery_will_rebuild(const NocttyD3D *d) {
+static int recovery_will_rebuild(const KoretermD3D *d) {
     return d->stats.recovery_pending && !d->stats.unavailable;
 }
-static HRESULT buffer_gpu(NocttyD3DBuffer *b) {
+static HRESULT buffer_gpu(KoretermD3DBuffer *b) {
     if (!b->owner->device) return E_FAIL;
-#if NOCTTY_RENDERER_TEST_TOOLS
+#if KORETERM_RENDERER_TEST_TOOLS
     if (b->owner->fail_resource && !b->owner->stats.warp) return E_OUTOFMEMORY;
 #endif
     ID3D11Buffer *gpu = NULL;
@@ -183,7 +183,7 @@ static HRESULT buffer_gpu(NocttyD3DBuffer *b) {
     b->srv = srv;
     return S_OK;
 }
-static HRESULT texture_gpu(NocttyD3DTexture *t) {
+static HRESULT texture_gpu(KoretermD3DTexture *t) {
     if (!t->owner->device) return E_FAIL;
     ID3D11Texture2D *gpu = NULL;
     ID3D11ShaderResourceView *srv = NULL;
@@ -205,7 +205,7 @@ static HRESULT texture_gpu(NocttyD3DTexture *t) {
     t->gpu = gpu; t->srv = srv;
     return S_OK;
 }
-static HRESULT target_gpu(NocttyD3DTarget *t) {
+static HRESULT target_gpu(KoretermD3DTarget *t) {
     if (!t->owner->device) return E_FAIL;
     if (!t->width || !t->height) return S_OK;
     ID3D11Texture2D *gpu = NULL;
@@ -234,13 +234,13 @@ static HRESULT target_gpu(NocttyD3DTarget *t) {
     t->gpu = gpu; t->rtv = rtv; t->gamma_rtv = gamma_rtv; t->rendered = 0;
     return S_OK;
 }
-static void release_device(NocttyD3D *d) {
+static void release_device(KoretermD3D *d) {
     if (d->context) ID3D11DeviceContext_ClearState(d->context);
-    for (NocttyD3DBuffer *b = d->buffers; b; b = b->next) { RELEASE(b->srv); RELEASE(b->gpu); }
-    for (NocttyD3DTexture *t = d->textures; t; t = t->next) { RELEASE(t->srv); RELEASE(t->gpu); }
-    for (NocttyD3DTarget *t = d->targets; t; t = t->next) { RELEASE(t->gamma_rtv); RELEASE(t->rtv); RELEASE(t->gpu); t->rendered = 0; }
+    for (KoretermD3DBuffer *b = d->buffers; b; b = b->next) { RELEASE(b->srv); RELEASE(b->gpu); }
+    for (KoretermD3DTexture *t = d->textures; t; t = t->next) { RELEASE(t->srv); RELEASE(t->gpu); }
+    for (KoretermD3DTarget *t = d->targets; t; t = t->next) { RELEASE(t->gamma_rtv); RELEASE(t->rtv); RELEASE(t->gpu); t->rendered = 0; }
     d->last_rendered = NULL;
-    noctty_composition_destroy(d->composition);
+    koreterm_composition_destroy(d->composition);
     d->composition = NULL;
     d->composition_committed = 0;
     RELEASE(d->backbuffer);
@@ -254,9 +254,9 @@ static void release_device(NocttyD3D *d) {
     d->width = d->height = 0;
     d->occluded = 0;
 }
-static HRESULT create_device(NocttyD3D *d, uint32_t warp) {
+static HRESULT create_device(KoretermD3D *d, uint32_t warp) {
     D3D_FEATURE_LEVEL requested = D3D_FEATURE_LEVEL_11_0, obtained;
-#if NOCTTY_RENDERER_TEST_TOOLS
+#if KORETERM_RENDERER_TEST_TOOLS
     if (!warp) ++d->stats.hardware_attempts;
     if (d->fail_device || (!warp && d->fail_hardware)) return E_FAIL;
 #endif
@@ -288,12 +288,12 @@ static HRESULT create_device(NocttyD3D *d, uint32_t warp) {
         }
         RELEASE(adapter); RELEASE(dxgi_device);
     }
-    hr = ID3D11Device_CreateVertexShader(d->device, noctty_bg_vs, sizeof(noctty_bg_vs), NULL, &d->bg_vs);
+    hr = ID3D11Device_CreateVertexShader(d->device, koreterm_bg_vs, sizeof(koreterm_bg_vs), NULL, &d->bg_vs);
     if (FAILED(hr)) return hr;
-    hr = ID3D11Device_CreateVertexShader(d->device, noctty_text_vs, sizeof(noctty_text_vs), NULL, &d->text_vs);
+    hr = ID3D11Device_CreateVertexShader(d->device, koreterm_text_vs, sizeof(koreterm_text_vs), NULL, &d->text_vs);
     if (FAILED(hr)) return hr;
-    const unsigned char *code[] = { noctty_bg_ps, noctty_cellbg_ps, noctty_text_ps };
-    const size_t lengths[] = { sizeof(noctty_bg_ps), sizeof(noctty_cellbg_ps), sizeof(noctty_text_ps) };
+    const unsigned char *code[] = { koreterm_bg_ps, koreterm_cellbg_ps, koreterm_text_ps };
+    const size_t lengths[] = { sizeof(koreterm_bg_ps), sizeof(koreterm_cellbg_ps), sizeof(koreterm_text_ps) };
     for (size_t i = 0; i < 3; ++i) {
         hr = ID3D11Device_CreatePixelShader(d->device, code[i], lengths[i], NULL, &d->ps[i]);
         if (FAILED(hr)) return hr;
@@ -320,12 +320,12 @@ static HRESULT create_device(NocttyD3D *d, uint32_t warp) {
     rasterizer.DepthClipEnable = TRUE;
     hr = ID3D11Device_CreateRasterizerState(d->device, &rasterizer, &d->rasterizer);
     if (FAILED(hr)) return hr;
-    for (NocttyD3DBuffer *b = d->buffers; b; b = b->next) if (FAILED(hr = buffer_gpu(b))) return hr;
-    for (NocttyD3DTexture *t = d->textures; t; t = t->next) if (FAILED(hr = texture_gpu(t))) return hr;
-    for (NocttyD3DTarget *t = d->targets; t; t = t->next) if (FAILED(hr = target_gpu(t))) return hr;
+    for (KoretermD3DBuffer *b = d->buffers; b; b = b->next) if (FAILED(hr = buffer_gpu(b))) return hr;
+    for (KoretermD3DTexture *t = d->textures; t; t = t->next) if (FAILED(hr = texture_gpu(t))) return hr;
+    for (KoretermD3DTarget *t = d->targets; t; t = t->next) if (FAILED(hr = target_gpu(t))) return hr;
     return S_OK;
 }
-static HRESULT resize_swapchain(NocttyD3D *d, uint32_t width, uint32_t height) {
+static HRESULT resize_swapchain(KoretermD3D *d, uint32_t width, uint32_t height) {
     if (d->width == width && d->height == height && d->backbuffer) return S_OK;
     HRESULT hr;
     ID3D11DeviceContext_OMSetRenderTargets(d->context, 0, NULL, NULL);
@@ -354,7 +354,7 @@ static HRESULT resize_swapchain(NocttyD3D *d, uint32_t width, uint32_t height) {
             desc.AlphaMode = DXGI_ALPHA_MODE_IGNORE;
             hr = IDXGIFactory2_CreateSwapChainForComposition(factory, (IUnknown *)d->device,
                 &desc, NULL, &d->swapchain);
-            if (SUCCEEDED(hr)) hr = noctty_composition_create(dxgi_device, d->hwnd,
+            if (SUCCEEDED(hr)) hr = koreterm_composition_create(dxgi_device, d->hwnd,
                 d->swapchain, &d->composition);
         }
         RELEASE(factory); RELEASE(adapter); RELEASE(dxgi_device);
@@ -369,7 +369,7 @@ static HRESULT resize_swapchain(NocttyD3D *d, uint32_t width, uint32_t height) {
 }
 
 /* Keep a failed candidate's diagnosis, then release everything it made. */
-static void discard_candidate(NocttyD3D *d, HRESULT hr) {
+static void discard_candidate(KoretermD3D *d, HRESULT hr) {
     d->stats.last_error = hr;
     if (d->device) {
         HRESULT reason = ID3D11Device_GetDeviceRemovedReason(d->device);
@@ -379,7 +379,7 @@ static void discard_candidate(NocttyD3D *d, HRESULT hr) {
 }
 /* Each candidate owns every resource or none. Hardware recovery has a bounded
  * retry window; an explicit software preference never probes hardware. */
-static HRESULT create_candidates(NocttyD3D *d, uint32_t try_hardware) {
+static HRESULT create_candidates(KoretermD3D *d, uint32_t try_hardware) {
     HRESULT hr;
     if (try_hardware) {
         hr = create_device(d, 0);
@@ -390,15 +390,15 @@ static HRESULT create_candidates(NocttyD3D *d, uint32_t try_hardware) {
     if (FAILED(hr)) discard_candidate(d, hr);
     return hr;
 }
-NocttyD3D *noctty_d3d11_create(void *hwnd, uint32_t force_warp) {
+KoretermD3D *koreterm_d3d11_create(void *hwnd, uint32_t force_warp) {
     if (!hwnd || !IsWindow((HWND)hwnd)) return NULL;
-    NocttyD3D *d = (NocttyD3D *)calloc(1, sizeof(*d));
+    KoretermD3D *d = (KoretermD3D *)calloc(1, sizeof(*d));
     if (!d) return NULL;
     d->hwnd = (HWND)hwnd;
     /* Only opted-in surfaces load graphics support. Missing D3D11 must never
      * prevent the OpenGL-default executable from reaching its fallback. */
-#if NOCTTY_RENDERER_TEST_TOOLS
-    if (env_number("NOCTTY_RENDERER_FAIL_LIBRARY")) { free(d); return NULL; }
+#if KORETERM_RENDERER_TEST_TOOLS
+    if (env_number("KORETERM_RENDERER_FAIL_LIBRARY")) { free(d); return NULL; }
 #endif
     if (!InitOnceExecuteOnce(&d3d_library_once, load_d3d_library, NULL, NULL)) { free(d); return NULL; }
     d->library = d3d_library;
@@ -407,23 +407,23 @@ NocttyD3D *noctty_d3d11_create(void *hwnd, uint32_t force_warp) {
     if (!d->create_device_proc) { free(d); return NULL; }
     d->force_warp = force_warp != 0;
     d->stats.last_present_status = S_FALSE;
-#if NOCTTY_RENDERER_TEST_TOOLS
-    d->fail_hardware = env_number("NOCTTY_RENDERER_FAIL_HARDWARE") != 0;
-    d->fail_device = env_number("NOCTTY_RENDERER_FAIL_DEVICE") != 0;
-    d->fail_resource = env_number("NOCTTY_RENDERER_FAIL_RESOURCE") != 0;
-    d->test_present_status = env_number("NOCTTY_RENDERER_TEST_PRESENT_STATUS") != 0;
+#if KORETERM_RENDERER_TEST_TOOLS
+    d->fail_hardware = env_number("KORETERM_RENDERER_FAIL_HARDWARE") != 0;
+    d->fail_device = env_number("KORETERM_RENDERER_FAIL_DEVICE") != 0;
+    d->fail_resource = env_number("KORETERM_RENDERER_FAIL_RESOURCE") != 0;
+    d->test_present_status = env_number("KORETERM_RENDERER_TEST_PRESENT_STATUS") != 0;
     QueryPerformanceFrequency(&d->frequency);
 #endif
     HRESULT hr = create_device(d, d->force_warp);
     if (FAILED(hr)) {
         fprintf(stderr, "d3d11 initialization_failed hr=0x%08lx\n", (unsigned long)hr);
-        noctty_d3d11_destroy(d);
+        koreterm_d3d11_destroy(d);
         return NULL;
     }
     d->stats.generation = 1;
     return d;
 }
-void noctty_d3d11_set_recovery_preference(NocttyD3D *d, uint32_t force_warp) {
+void koreterm_d3d11_set_recovery_preference(KoretermD3D *d, uint32_t force_warp) {
     if (d->force_warp && !force_warp && d->stats.warp) {
         /* Startup just failed its hardware candidate. Do not immediately probe
          * again on loss; later recovery may retry after the normal window. */
@@ -431,17 +431,17 @@ void noctty_d3d11_set_recovery_preference(NocttyD3D *d, uint32_t force_warp) {
     }
     d->force_warp = force_warp != 0;
 }
-void noctty_d3d11_destroy(NocttyD3D *d) {
+void koreterm_d3d11_destroy(KoretermD3D *d) {
     if (!d) return;
     release_device(d);
     // Renderer normally destroys resources first. Drain on failed initialization too.
-    while (d->buffers) noctty_d3d11_buffer_destroy(d->buffers);
-    while (d->textures) noctty_d3d11_texture_destroy(d->textures);
-    while (d->targets) noctty_d3d11_target_destroy(d->targets);
+    while (d->buffers) koreterm_d3d11_buffer_destroy(d->buffers);
+    while (d->textures) koreterm_d3d11_texture_destroy(d->textures);
+    while (d->targets) koreterm_d3d11_target_destroy(d->targets);
     // The process pins the runtime; drivers may finish worker teardown later.
     free(d);
 }
-int32_t noctty_d3d11_recover(NocttyD3D *d) {
+int32_t koreterm_d3d11_recover(KoretermD3D *d) {
     if (d->stats.unavailable) return device_status(d);
     (void)device_status(d);
     if (!d->stats.recovery_pending) return device_status(d);
@@ -465,18 +465,18 @@ int32_t noctty_d3d11_recover(NocttyD3D *d) {
         (unsigned long)d->stats.removed_reason);
     return S_OK;
 }
-int32_t noctty_d3d11_begin(NocttyD3D *d) {
-    HRESULT hr = noctty_d3d11_recover(d);
+int32_t koreterm_d3d11_begin(KoretermD3D *d) {
+    HRESULT hr = koreterm_d3d11_recover(d);
     if (FAILED(hr)) return hr;
-#if NOCTTY_RENDERER_TEST_TOOLS
+#if KORETERM_RENDERER_TEST_TOOLS
     QueryPerformanceCounter(&d->frame_start);
 #endif
     return S_OK;
 }
-static HRESULT present_target(NocttyD3D *d, NocttyD3DTarget *target, uint32_t vsync, int encoded) {
+static HRESULT present_target(KoretermD3D *d, KoretermD3DTarget *target, uint32_t vsync, int encoded) {
     HRESULT hr = device_status(d);
     if (FAILED(hr)) return hr;
-#if NOCTTY_RENDERER_TEST_TOOLS
+#if KORETERM_RENDERER_TEST_TOOLS
     if (FAILED(d->next_present_failure)) {
         hr = d->next_present_failure;
         d->next_present_failure = S_OK;
@@ -488,7 +488,7 @@ static HRESULT present_target(NocttyD3D *d, NocttyD3DTarget *target, uint32_t vs
         ++d->stats.frames;
         target->rendered = 1;
         d->last_rendered = target;
-#if NOCTTY_RENDERER_TEST_TOOLS
+#if KORETERM_RENDERER_TEST_TOOLS
         LARGE_INTEGER encoded_at;
         QueryPerformanceCounter(&encoded_at);
         d->stats.encode_ns += elapsed_ns(d, d->frame_start, encoded_at);
@@ -517,19 +517,19 @@ static HRESULT present_target(NocttyD3D *d, NocttyD3DTarget *target, uint32_t vs
     }
     ID3D11DeviceContext_OMSetRenderTargets(d->context, 0, NULL, NULL);
     ID3D11DeviceContext_CopyResource(d->context, (ID3D11Resource *)d->backbuffer, (ID3D11Resource *)target->gpu);
-#if NOCTTY_RENDERER_TEST_TOOLS
+#if KORETERM_RENDERER_TEST_TOOLS
     LARGE_INTEGER before, after;
     QueryPerformanceCounter(&before);
 #endif
     hr = IDXGISwapChain1_Present(d->swapchain, vsync ? 1 : 0, 0);
-#if NOCTTY_RENDERER_TEST_TOOLS
+#if KORETERM_RENDERER_TEST_TOOLS
     /* Exercise post-Present success classification on hidden desktops too.
      * This test-only substitution preserves real failures, but may replace
      * occlusion; it proves classification, not visible presentation. */
     if (SUCCEEDED(hr) && d->test_present_status) hr = DXGI_STATUS_MODE_CHANGED;
 #endif
     d->stats.last_present_status = hr;
-#if NOCTTY_RENDERER_TEST_TOOLS
+#if KORETERM_RENDERER_TEST_TOOLS
     QueryPerformanceCounter(&after);
     d->stats.present_ns += elapsed_ns(d, before, after);
 #endif
@@ -542,7 +542,7 @@ static HRESULT present_target(NocttyD3D *d, NocttyD3DTarget *target, uint32_t vs
         // Attach only initialized pixels. A failed DComp commit is a failed
         // submission, so it cannot signal the app's first-frame handshake.
         if (!d->composition_committed) {
-            hr = noctty_composition_commit(d->composition);
+            hr = koreterm_composition_commit(d->composition);
             if (FAILED(hr)) return record_result(d, hr);
             d->composition_committed = 1;
             ++d->stats.composition_commits;
@@ -552,19 +552,19 @@ static HRESULT present_target(NocttyD3D *d, NocttyD3DTarget *target, uint32_t vs
     }
     return hr;
 }
-int32_t noctty_d3d11_present(NocttyD3D *d, NocttyD3DTarget *target, uint32_t vsync) {
+int32_t koreterm_d3d11_present(KoretermD3D *d, KoretermD3DTarget *target, uint32_t vsync) {
     return present_target(d, target, vsync, 1);
 }
-void noctty_d3d11_stats(NocttyD3D *d, NocttyD3DStats *stats) { *stats = d->stats; }
-uint32_t noctty_d3d11_needs_redraw(NocttyD3D *d) {
+void koreterm_d3d11_stats(KoretermD3D *d, KoretermD3DStats *stats) { *stats = d->stats; }
+uint32_t koreterm_d3d11_needs_redraw(KoretermD3D *d) {
     return d->stats.recovery_pending || !d->last_rendered;
 }
-uint32_t noctty_d3d11_occluded(NocttyD3D *d) { return d->occluded; }
-uint32_t noctty_d3d11_recovery_pending(NocttyD3D *d) { return d->stats.recovery_pending; }
-uint32_t noctty_d3d11_unavailable(NocttyD3D *d) { return d->stats.unavailable; }
-int32_t noctty_d3d11_last_error(NocttyD3D *d) { return d->stats.last_error; }
-int32_t noctty_d3d11_request_device_loss(NocttyD3D *d) {
-#if NOCTTY_RENDERER_TEST_TOOLS
+uint32_t koreterm_d3d11_occluded(KoretermD3D *d) { return d->occluded; }
+uint32_t koreterm_d3d11_recovery_pending(KoretermD3D *d) { return d->stats.recovery_pending; }
+uint32_t koreterm_d3d11_unavailable(KoretermD3D *d) { return d->stats.unavailable; }
+int32_t koreterm_d3d11_last_error(KoretermD3D *d) { return d->stats.last_error; }
+int32_t koreterm_d3d11_request_device_loss(KoretermD3D *d) {
+#if KORETERM_RENDERER_TEST_TOOLS
     /* Deterministically inject the HRESULT into the real loss classifier. This
      * is not a system-wide driver reset and is not evidence of TDR behavior. */
     (void)record_result(d, DXGI_ERROR_DEVICE_REMOVED);
@@ -574,11 +574,11 @@ int32_t noctty_d3d11_request_device_loss(NocttyD3D *d) {
     return E_NOTIMPL;
 #endif
 }
-int32_t noctty_d3d11_present_last(NocttyD3D *d, uint32_t vsync) {
+int32_t koreterm_d3d11_present_last(KoretermD3D *d, uint32_t vsync) {
     return d->last_rendered ? present_target(d, d->last_rendered, vsync, 0) : S_FALSE;
 }
-int32_t noctty_d3d11_set_test_failures(NocttyD3D *d, uint32_t hardware, uint32_t device) {
-#if NOCTTY_RENDERER_TEST_TOOLS
+int32_t koreterm_d3d11_set_test_failures(KoretermD3D *d, uint32_t hardware, uint32_t device) {
+#if KORETERM_RENDERER_TEST_TOOLS
     d->fail_hardware = hardware != 0;
     d->fail_device = device != 0;
     /* Clearing injected failures also expires the retry window, so canaries
@@ -594,8 +594,8 @@ int32_t noctty_d3d11_set_test_failures(NocttyD3D *d, uint32_t hardware, uint32_t
 #endif
 }
 
-int32_t noctty_d3d11_fail_next_present(NocttyD3D *d) {
-#if NOCTTY_RENDERER_TEST_TOOLS
+int32_t koreterm_d3d11_fail_next_present(KoretermD3D *d) {
+#if KORETERM_RENDERER_TEST_TOOLS
     d->next_present_failure = E_OUTOFMEMORY;
     return S_OK;
 #else
@@ -604,9 +604,9 @@ int32_t noctty_d3d11_fail_next_present(NocttyD3D *d) {
 #endif
 }
 
-#if NOCTTY_RENDERER_TEST_TOOLS
-static HRESULT readback(NocttyD3D *d, unsigned char **pixels, uint32_t *width, uint32_t *height) {
-    NocttyD3DTarget *target = d->last_rendered;
+#if KORETERM_RENDERER_TEST_TOOLS
+static HRESULT readback(KoretermD3D *d, unsigned char **pixels, uint32_t *width, uint32_t *height) {
+    KoretermD3DTarget *target = d->last_rendered;
     if (!target || !target->gpu || !d->context) return E_FAIL;
     HRESULT hr = device_status(d);
     if (FAILED(hr)) return hr;
@@ -641,13 +641,13 @@ static HRESULT readback(NocttyD3D *d, unsigned char **pixels, uint32_t *width, u
     return S_OK;
 }
 #endif
-int32_t noctty_d3d11_capture(NocttyD3D *d, void *hdc) {
-#if NOCTTY_RENDERER_TEST_TOOLS
+int32_t koreterm_d3d11_capture(KoretermD3D *d, void *hdc) {
+#if KORETERM_RENDERER_TEST_TOOLS
     unsigned char *rgba = NULL;
     uint32_t width, height;
     HRESULT hr = readback(d, &rgba, &width, &height);
     if (FAILED(hr)) return hr;
-    int captured = noctty_renderer_blit(hdc, rgba, width, height, 0);
+    int captured = koreterm_renderer_blit(hdc, rgba, width, height, 0);
     free(rgba);
     return captured ? S_OK : E_FAIL;
 #else
@@ -656,21 +656,21 @@ int32_t noctty_d3d11_capture(NocttyD3D *d, void *hdc) {
 #endif
 }
 
-NocttyD3DBuffer *noctty_d3d11_buffer_create(NocttyD3D *d, size_t size, uint32_t uniform) {
-    NocttyD3DBuffer *b = (NocttyD3DBuffer *)calloc(1, sizeof(*b));
+KoretermD3DBuffer *koreterm_d3d11_buffer_create(KoretermD3D *d, size_t size, uint32_t uniform) {
+    KoretermD3DBuffer *b = (KoretermD3DBuffer *)calloc(1, sizeof(*b));
     if (!b) { (void)record_result(d, E_OUTOFMEMORY); return NULL; }
     b->owner = d; b->uniform = uniform;
-    if (FAILED(noctty_d3d11_buffer_reserve(b, size))) { free(b->cpu); free(b); return NULL; }
+    if (FAILED(koreterm_d3d11_buffer_reserve(b, size))) { free(b->cpu); free(b); return NULL; }
     b->next = d->buffers; d->buffers = b;
     return b;
 }
-void noctty_d3d11_buffer_destroy(NocttyD3DBuffer *b) {
-    NocttyD3DBuffer **link = &b->owner->buffers;
+void koreterm_d3d11_buffer_destroy(KoretermD3DBuffer *b) {
+    KoretermD3DBuffer **link = &b->owner->buffers;
     while (*link && *link != b) link = &(*link)->next;
     if (*link) *link = b->next;
     RELEASE(b->srv); RELEASE(b->gpu); free(b->cpu); free(b);
 }
-int32_t noctty_d3d11_buffer_reserve(NocttyD3DBuffer *b, size_t size) {
+int32_t koreterm_d3d11_buffer_reserve(KoretermD3DBuffer *b, size_t size) {
     size_t align = b->uniform ? 16 : 4;
     if (size > UINT_MAX - align || (b->uniform && size > 65536)) return record_result(b->owner, E_INVALIDARG);
     size = (size + align - 1) & ~(align - 1);
@@ -692,7 +692,7 @@ int32_t noctty_d3d11_buffer_reserve(NocttyD3DBuffer *b, size_t size) {
     free(old_cpu);
     return S_OK;
 }
-int32_t noctty_d3d11_buffer_write(NocttyD3DBuffer *b, size_t offset, const void *data, size_t size) {
+int32_t koreterm_d3d11_buffer_write(KoretermD3DBuffer *b, size_t offset, const void *data, size_t size) {
     if (offset > b->size || size > b->size - offset) return record_result(b->owner, E_INVALIDARG);
     if (!size) return S_OK;
     memcpy(b->cpu + offset, data, size);
@@ -710,11 +710,11 @@ int32_t noctty_d3d11_buffer_write(NocttyD3DBuffer *b, size_t offset, const void 
     b->owner->stats.upload_bytes += size;
     return S_OK;
 }
-NocttyD3DTexture *noctty_d3d11_texture_create(NocttyD3D *d, uint32_t width, uint32_t height, uint32_t format, uint32_t srgb, const void *data) {
+KoretermD3DTexture *koreterm_d3d11_texture_create(KoretermD3D *d, uint32_t width, uint32_t height, uint32_t format, uint32_t srgb, const void *data) {
     if (!width || !height || width > D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION || height > D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION || format > 2) {
         (void)record_result(d, E_INVALIDARG); return NULL;
     }
-    NocttyD3DTexture *t = (NocttyD3DTexture *)calloc(1, sizeof(*t));
+    KoretermD3DTexture *t = (KoretermD3DTexture *)calloc(1, sizeof(*t));
     if (!t) { (void)record_result(d, E_OUTOFMEMORY); return NULL; }
     t->owner = d; t->width = width; t->height = height;
     t->pixel_size = format == 0 ? 1 : 4;
@@ -734,13 +734,13 @@ NocttyD3DTexture *noctty_d3d11_texture_create(NocttyD3D *d, uint32_t width, uint
     d->stats.upload_bytes += data ? bytes : 0;
     return t;
 }
-void noctty_d3d11_texture_destroy(NocttyD3DTexture *t) {
-    NocttyD3DTexture **link = &t->owner->textures;
+void koreterm_d3d11_texture_destroy(KoretermD3DTexture *t) {
+    KoretermD3DTexture **link = &t->owner->textures;
     while (*link && *link != t) link = &(*link)->next;
     if (*link) *link = t->next;
     RELEASE(t->srv); RELEASE(t->gpu); free(t->cpu); free(t);
 }
-int32_t noctty_d3d11_texture_write(NocttyD3DTexture *t, uint32_t x, uint32_t y, uint32_t width, uint32_t height, const void *data) {
+int32_t koreterm_d3d11_texture_write(KoretermD3DTexture *t, uint32_t x, uint32_t y, uint32_t width, uint32_t height, const void *data) {
     if (x > t->width || width > t->width - x || y > t->height || height > t->height - y) return record_result(t->owner, E_INVALIDARG);
     if (!width || !height) return S_OK;
     size_t pitch = (size_t)width * t->pixel_size;
@@ -755,11 +755,11 @@ int32_t noctty_d3d11_texture_write(NocttyD3DTexture *t, uint32_t x, uint32_t y, 
     t->owner->stats.upload_bytes += pitch * height;
     return S_OK;
 }
-NocttyD3DTarget *noctty_d3d11_target_create(NocttyD3D *d, uint32_t width, uint32_t height, uint32_t linear) {
+KoretermD3DTarget *koreterm_d3d11_target_create(KoretermD3D *d, uint32_t width, uint32_t height, uint32_t linear) {
     if (width > D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION || height > D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION) {
         (void)record_result(d, E_INVALIDARG); return NULL;
     }
-    NocttyD3DTarget *t = (NocttyD3DTarget *)calloc(1, sizeof(*t));
+    KoretermD3DTarget *t = (KoretermD3DTarget *)calloc(1, sizeof(*t));
     if (!t) { (void)record_result(d, E_OUTOFMEMORY); return NULL; }
     t->owner = d; t->width = width; t->height = height; t->linear = linear;
     HRESULT hr = device_status(d);
@@ -768,14 +768,14 @@ NocttyD3DTarget *noctty_d3d11_target_create(NocttyD3D *d, uint32_t width, uint32
     t->next = d->targets; d->targets = t;
     return t;
 }
-void noctty_d3d11_target_destroy(NocttyD3DTarget *t) {
-    NocttyD3DTarget **link = &t->owner->targets;
+void koreterm_d3d11_target_destroy(KoretermD3DTarget *t) {
+    KoretermD3DTarget **link = &t->owner->targets;
     while (*link && *link != t) link = &(*link)->next;
     if (*link) *link = t->next;
     if (t->owner->last_rendered == t) t->owner->last_rendered = NULL;
     RELEASE(t->gamma_rtv); RELEASE(t->rtv); RELEASE(t->gpu); free(t);
 }
-int32_t noctty_d3d11_clear(NocttyD3DTarget *t, const float *color) {
+int32_t koreterm_d3d11_clear(KoretermD3DTarget *t, const float *color) {
     HRESULT hr = device_status(t->owner);
     if (FAILED(hr)) return hr;
     if (!t->rtv) return record_result(t->owner, E_FAIL);
@@ -784,10 +784,10 @@ int32_t noctty_d3d11_clear(NocttyD3DTarget *t, const float *color) {
     ID3D11DeviceContext_ClearRenderTargetView(t->owner->context, t->rtv, color);
     return S_OK;
 }
-int32_t noctty_d3d11_draw(NocttyD3DTarget *target, uint32_t pipeline, NocttyD3DBuffer *uniforms,
-    NocttyD3DBuffer *text, NocttyD3DBuffer *backgrounds, NocttyD3DTexture *gray,
-    NocttyD3DTexture *color, uint32_t vertices, uint32_t instances) {
-    NocttyD3D *d = target->owner;
+int32_t koreterm_d3d11_draw(KoretermD3DTarget *target, uint32_t pipeline, KoretermD3DBuffer *uniforms,
+    KoretermD3DBuffer *text, KoretermD3DBuffer *backgrounds, KoretermD3DTexture *gray,
+    KoretermD3DTexture *color, uint32_t vertices, uint32_t instances) {
+    KoretermD3D *d = target->owner;
     HRESULT hr = device_status(d);
     if (FAILED(hr)) return hr;
     if ((pipeline > PIPELINE_TEXT && pipeline != PIPELINE_SPLIT_DIM) || !target->rtv || !uniforms || uniforms->owner != d || !uniforms->gpu) return record_result(d, E_INVALIDARG);
@@ -822,16 +822,16 @@ int32_t noctty_d3d11_draw(NocttyD3DTarget *target, uint32_t pipeline, NocttyD3DB
     return device_status(d);
 }
 
-int32_t noctty_d3d11_suspend_presentation(NocttyD3D *d) {
+int32_t koreterm_d3d11_suspend_presentation(KoretermD3D *d) {
     // Strict healthy handoff: detach must complete before WGL can present.
     // Invalid composition graphs have no usable content to keep attached.
     if (d->composition) {
-        HRESULT hr = noctty_composition_check_state(d->composition);
+        HRESULT hr = koreterm_composition_check_state(d->composition);
         if (SUCCEEDED(hr)) {
-            hr = noctty_composition_detach(d->composition);
+            hr = koreterm_composition_detach(d->composition);
             if (FAILED(hr)) return hr;
         }
-        noctty_composition_destroy(d->composition);
+        koreterm_composition_destroy(d->composition);
         d->composition = NULL;
     }
     d->composition_committed = 0;

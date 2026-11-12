@@ -1,6 +1,6 @@
 # 2026 Competitive Roadmap
 
-The decided, prioritized competitive-response roadmap for noctty,
+The decided, prioritized competitive-response roadmap for koreterm,
 assembled 2026-08-19 from the competitive-analysis wayfinder effort:
 twelve research deep-dives, a cross-referenced synthesis, and a full
 adopt/reject/defer decision session. Every entry below carries an
@@ -27,7 +27,7 @@ explicit ruling. The rulings are final; some implementation targets remain stage
 
 - **Naming:** wait and see. No rename, no permission request, no
   branding freeze. The trademark statement by an upstream collaborator
-  (2026-07-12, ghostty-org discussion #12371, naming noctty) is a
+  (2026-07-12, ghostty-org discussion #12371, naming koreterm) is a
   known, accepted risk.
 - **Upstream posture:** hard fork. No upstreaming ("we don't gunk up
   the upstream Ghostty repo"); open to adopting and adapting upstream
@@ -181,7 +181,7 @@ absent (no `ICustomDestinationList` usage). **Shape:**
 integration) + pinned profiles; extend with named layouts once C17
 lands. Evidence: synthesis C12; wintty §3/§10.4, conemu §3/§10.4.
 
-### C13 · Explorer "Open noctty here" context menu — S · [#127](https://github.com/amanthanvi/noctty/issues/127)
+### C13 · Explorer "Open koreterm here" context menu — S · [#127](https://github.com/amanthanvi/noctty/issues/127)
 
 **Ruling:** adopt. **Why:** cheapest expected OS entry point; even
 minimal Alacritty ships it; Tabby users fight registry hacks for it.
@@ -235,7 +235,7 @@ wt §3, conemu §3, wintty §3.
 
 **Ruling:** adopt. **Why:** session restore currently brings back layout and pane metadata but no scrollback content, so restored panes start blank; Windows Terminal ships buffer snapshots (with
 instructive rollout bugs), Warp's restored blocks are a top retention
-feature; noctty's transactional session machinery can do it
+feature; koreterm's transactional session machinery can do it
 reliably — the second tier of the amended session promise. **Shape:**
 optionally persist last-N lines per pane with `window-save-state`,
 restored clearly marked as a snapshot; size/redaction knobs; crash-safe
@@ -301,7 +301,7 @@ mixed-elevation tabs are explicitly out. **Why:** the benchmark user
 runs elevated shells weekly; an undesigned surface violates "be native
 where behavior matters"; ConEmu's elevated tabs remain the unmatched
 affordance, WT documents a deliberate separate-window model. **Shape:**
-document what elevated noctty means (incl. what restore does with
+document what elevated koreterm means (incl. what restore does with
 elevated sessions); add a "run elevated" profile flag + palette action
 opening a clearly-marked elevated window. Evidence: synthesis C14;
 conemu §3/§10.1, wt §3/§10.8, wave §3.
@@ -368,7 +368,7 @@ Evidence: synthesis C18; alacritty §4/§10.2–3, wez §5/§10.3, rio
 **Ruling:** adopt (lean slice only, per the amended user scope).
 **Why:** the benchmark user's week includes remote hosts (Tabby's 74k
 stars are built on connection management; WezTerm auto-populates SSH
-domains); discovery is the missing piece — noctty already wraps
+domains); discovery is the missing piece — koreterm already wraps
 ssh for terminfo. **Shape:** parse `%USERPROFILE%\.ssh\config`,
 surface hosts as launchable profiles/palette entries running the
 system `ssh`; no bundled client, no vault (deferred), no fleet tools
@@ -392,7 +392,7 @@ conemu §7, wave §10.3, up §10.4.
 
 **Ruling:** adopt. **Why:** the entire competitive field ignores
 accessibility (one rival fork admits screen readers can't read its
-panes); noctty's partial UIA work is unique — worth finishing and
+panes); koreterm's partial UIA work is unique — worth finishing and
 stating; aligns with the existing WCAG commitment. **Shape:** complete
 the UIA work already on status.md's next list; publish a per-release
 Narrator/NVDA/JAWS compatibility matrix; state it on the trust page.
@@ -402,10 +402,10 @@ Evidence: synthesis C34; forks §10.
 
 **Ruling:** adopt — full send under the current name (rename risk
 accepted with eyes open). **Why:** every distribution advantage
-noctty already has — signed releases, winget/Scoop, ARM64, CI,
+koreterm already has — signed releases, winget/Scoop, ARM64, CI,
 session restore — is unmarketed; fork confusion is documented in
 upstream's own threads; trust is the moat the swarm can't cross.
-**Shape:** a "why noctty / how we differ from the fork field / how
+**Shape:** a "why koreterm / how we differ from the fork field / how
 to verify our binaries (signing, checksums) / what we will never do"
 page publishing the eleven non-goals; "migrate from Windows Terminal"
 and "migrate from Git Bash/mintty" guides; visible release cadence.

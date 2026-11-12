@@ -1,24 +1,24 @@
 #requires -Version 7.0
 <#
 PKG-74 / D20 baseline and replacement regression harness (x64 and ARM64).
-Requires a measure-AUMID portable directory with noctty.com, noctty.exe,
-noctty.portable and share/ghostty, plus the windowless desktop fixture built
+Requires a measure-AUMID portable directory with koreterm.com, koreterm.exe,
+koreterm.portable and share/ghostty, plus the windowless desktop fixture built
 from test/windows/cli-com-fixture.zig. Does not build anything.
 Run: ./test/windows/cli-com-forwarder.ps1 -BinDir <portable> -OutputDir <new-dir> [-DesktopFixture <exe>] [-ThinForwarder] [-ExerciseInheritedCtrlCIgnore]
-Alternatively -ExePath <portable/noctty.com>. Evidence is retained in OutputDir.
+Alternatively -ExePath <portable/koreterm.com>. Evidence is retained in OutputDir.
 -DesktopFixture defaults to <repo>/zig-out/cli-com-fixture.exe and must exist.
 The no-action GUI case writes gui-close.json on every run: StageMs holds the
 milliseconds from just before its launch to the end of each stage it finished,
 and a failure also keeps its stage and, on an exit timeout, close diagnostics.
 
 Everything runs on ONE new hidden desktop of the current window station
-(WinSta0\noctty-pkg74-<guid>, never switched to, inheritable handle). Every
+(WinSta0\koreterm-pkg74-<guid>, never switched to, inheritable handle). Every
 harness-created child names it through an explicit lpDesktop. Console helpers
 use CREATE_NO_WINDOW; Ctrl+C uses a console event. No profiles, typed shell
 commands, clipboard operations or real registration.
 
 The first cases are a mandatory setup gate that runs a windowless fixture in
-place of noctty.exe: no real GUI window or failure dialog is created until the
+place of koreterm.exe: no real GUI window or failure dialog is created until the
 gate has shown that the launcher keeps the hidden desktop. -ProveDesktopOnly
 stops after the gate. -ThinForwarder adds the fixture cases that only hold for
 the thin CreateProcessW forwarder (raw command line, stdin, full DWORD exit
@@ -84,12 +84,12 @@ if (-not $Driver) {
     Assert-Condition (Test-Path -LiteralPath $DesktopFixture -PathType Leaf) "Missing windowless desktop fixture '$DesktopFixture'. Build test/windows/cli-com-fixture.zig (see .github/workflows/cli-forwarder.yml) and pass -DesktopFixture."
     $DesktopFixture = (Resolve-Path -LiteralPath $DesktopFixture).Path
     if ($ExePath) {
-        Assert-Condition ([IO.Path]::GetFileName($ExePath) -eq 'noctty.com') 'ExePath must name noctty.com.'
+        Assert-Condition ([IO.Path]::GetFileName($ExePath) -eq 'koreterm.com') 'ExePath must name koreterm.com.'
         $BinDir = Split-Path -Parent (Resolve-Path -LiteralPath $ExePath).Path
     }
     Assert-Condition (-not [string]::IsNullOrWhiteSpace($BinDir)) 'Specify BinDir or ExePath.'
     $BinDir = (Resolve-Path -LiteralPath $BinDir).Path
-    foreach ($required in @('noctty.com', 'noctty.exe', 'noctty.portable')) {
+    foreach ($required in @('koreterm.com', 'koreterm.exe', 'koreterm.portable')) {
         Assert-Condition (Test-Path -LiteralPath (Join-Path $BinDir $required)) "Missing portable input: $required"
     }
     $sourceShare = Join-Path $BinDir 'share'
@@ -108,7 +108,7 @@ if (-not $Driver) {
     foreach ($name in @('appdata', 'localappdata', 'home')) {
         [void](New-Item -ItemType Directory -Path (Join-Path $OutputDir $name))
     }
-    $class = 'noctty-test-pkg74-' + [guid]::NewGuid().ToString('N')
+    $class = 'koreterm-test-pkg74-' + [guid]::NewGuid().ToString('N')
     # Isolated config supplies identity even for actions whose own options reject
     # GUI flags. Explicit flags are also supplied on the no-action GUI invocation.
     @(
@@ -121,13 +121,13 @@ if (-not $Driver) {
         'shell-integration = none'
         'command = C:\Windows\System32\cmd.exe /d /q'
     ) | Set-Content -LiteralPath (Join-Path $portable 'config.ghostty') -Encoding utf8NoBOM
-    $startupPath = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'noctty/startup-attempts.json'
+    $startupPath = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'koreterm/startup-attempts.json'
     $startupBefore = Get-StateMetadata $startupPath
     $historyGuard = Start-WindowsHarnessHistoryGuard -Harness 'cli-com-forwarder.ps1'
     $clipboardBefore = [ComCliNative]::GetClipboardSequenceNumber()
     $batchStarted = [datetime]::UtcNow
     $clock = [Diagnostics.Stopwatch]::StartNew()
-    $DesktopName = 'noctty-pkg74-' + [guid]::NewGuid().ToString('N')
+    $DesktopName = 'koreterm-pkg74-' + [guid]::NewGuid().ToString('N')
     $desktopHandle = $null
     $controller = $null
     $saved = @{}
@@ -189,8 +189,8 @@ if (-not $Driver) {
             ClipboardUnchanged = $clipboardBefore -eq $clipboardAfter
             StartupUnchanged = ($startupBefore | ConvertTo-Json -Compress) -ceq ($startupAfter | ConvertTo-Json -Compress)
             HistoryUnchanged = $null -eq $historyFailure
-            ComBytes = (Get-Item -LiteralPath (Join-Path $portable 'noctty.com')).Length
-            ComSha256 = (Get-FileHash -LiteralPath (Join-Path $portable 'noctty.com')).Hash
+            ComBytes = (Get-Item -LiteralPath (Join-Path $portable 'koreterm.com')).Length
+            ComSha256 = (Get-FileHash -LiteralPath (Join-Path $portable 'koreterm.com')).Hash
             Status = if ($failure) { 'Failed' } else { 'Passed' }
             Failure = if ($failure) { $failure.Exception.Message } else { $null }
             NativeErrorCode = if ($failure -and $failure.Exception.InnerException -is [ComponentModel.Win32Exception]) { $failure.Exception.InnerException.NativeErrorCode } else { $null }
@@ -218,8 +218,8 @@ $ctrlCIgnoredAfterReset = [ComCliNative]::CtrlCIgnored()
     ConvertTo-Json | Set-Content -LiteralPath (Join-Path $OutputDir "driver-$($DetachedOnly.IsPresent).json") -Encoding utf8NoBOM
 Assert-Condition ($ctrlCIgnoredOnEntry -or -not $ExerciseInheritedCtrlCIgnore) 'The seeded driver did not inherit the Ctrl+C ignore attribute, so the positive control proves nothing.'
 Assert-Condition (-not $ctrlCIgnoredAfterReset) 'Enabling Ctrl+C did not clear the driver''s ignore attribute.'
-$com = Join-Path $BinDir 'noctty.com'
-$gui = Join-Path $BinDir 'noctty.exe'
+$com = Join-Path $BinDir 'koreterm.com'
+$gui = Join-Path $BinDir 'koreterm.exe'
 $results = [Collections.Generic.List[object]]::new()
 $versionTimes = [Collections.Generic.List[double]]::new()
 $script:caseIndex = 0
@@ -265,7 +265,7 @@ function Assert-Version($Result) {
 }
 function Test-NoHandles {
     Assert-Condition (-not [ComCliNative]::HasConsole()) 'No-handle test controller must have no console.'
-    $title = 'noctty CLI action failed'
+    $title = 'koreterm CLI action failed'
     $child = [ComCliNative]::Launch($com, '+version', $BinDir, $desktopPath, 'none', $null, $null, $null, 8)
     try {
         $script:found = $null
@@ -287,21 +287,21 @@ function Test-NoHandles {
 }
 
 # Fixture cases: a copy of the launcher next to a windowless stand-in for
-# noctty.exe. Returns the launcher child; the caller disposes it.
+# koreterm.exe. Returns the launcher child; the caller disposes it.
 $fixtureBin = Join-Path $OutputDir 'fixture-bin'
-$fixtureExe = Join-Path $fixtureBin 'noctty.exe'
-$fixtureCom = Join-Path $fixtureBin 'noctty.com'
+$fixtureExe = Join-Path $fixtureBin 'koreterm.exe'
+$fixtureCom = Join-Path $fixtureBin 'koreterm.com'
 function Initialize-FixtureBin {
     [void](New-Item -ItemType Directory -Path $fixtureBin)
     Copy-Item -LiteralPath $com -Destination $fixtureCom
     Copy-Item -LiteralPath $DesktopFixture -Destination $fixtureExe
-    [IO.File]::WriteAllText((Join-Path $fixtureBin 'noctty.portable'), '')
+    [IO.File]::WriteAllText((Join-Path $fixtureBin 'koreterm.portable'), '')
 }
 function Start-Fixture([string] $Raw, [hashtable] $Knobs = @{}, [string] $Mode = 'files', [string] $InputPath, [switch] $RawCommandLine) {
     $script:fixtureIndex++
     $receiptPath = Join-Path $OutputDir "fixture-$script:fixtureIndex.json"
-    $variables = @{ NOCTTY_COM_FIXTURE_RECEIPT = $receiptPath; NOCTTY_COM_FIXTURE_HOLD_MS = '0' }
-    foreach ($key in $Knobs.Keys) { $variables["NOCTTY_COM_FIXTURE_$key"] = [string] $Knobs[$key] }
+    $variables = @{ KORETERM_COM_FIXTURE_RECEIPT = $receiptPath; KORETERM_COM_FIXTURE_HOLD_MS = '0' }
+    foreach ($key in $Knobs.Keys) { $variables["KORETERM_COM_FIXTURE_$key"] = [string] $Knobs[$key] }
     $previous = @{}
     foreach ($key in $variables.Keys) { $previous[$key] = [Environment]::GetEnvironmentVariable($key); [Environment]::SetEnvironmentVariable($key, $variables[$key]) }
     try {
@@ -319,7 +319,7 @@ function Read-FixtureReceipt($Run) {
 }
 function Assert-FixtureDesktop($Receipt) {
     Assert-Condition ($Receipt.station -ceq 'WinSta0' -and $Receipt.desktop -ceq $DesktopName) "Fixture left the hidden desktop: $($Receipt.station)\$($Receipt.desktop)."
-    Assert-Condition (@([ComCliNative]::Windows($desktopHandle, 'noctty.win32.host')).Count -eq 0) 'A GUI window exists during the windowless setup gate.'
+    Assert-Condition (@([ComCliNative]::Windows($desktopHandle, 'koreterm.win32.host')).Count -eq 0) 'A GUI window exists during the windowless setup gate.'
 }
 $useStdHandles = 0x100
 $useShowWindow = 0x1
@@ -328,10 +328,10 @@ try {
     if (-not $DetachedOnly) {
         Initialize-FixtureBin
         # Setup gate 1 (always, before any real GUI or dialog): a no-action
-        # launch passes the hidden desktop to a detached, windowless noctty.exe
+        # launch passes the hidden desktop to a detached, windowless koreterm.exe
         # and returns at once without waiting for it.
         Test-Case 'gate: no-action launch keeps the hidden desktop and does not wait' {
-            $run = Start-Fixture '--single-instance=false --class=noctty-test-pkg74-fixture' @{ HOLD_MS = 3000 }
+            $run = Start-Fixture '--single-instance=false --class=koreterm-test-pkg74-fixture' @{ HOLD_MS = 3000 }
             $fixtureChild = $null
             try {
                 Assert-Condition ($run.Child.Wait(5000) -and $run.Child.ExitCode -eq 0) "Fixture no-action launcher failed to return promptly (exit=$($run.Child.ExitCode))."
@@ -347,7 +347,7 @@ try {
                 Assert-JobEmpty $run.Child 'the no-action fixture'
             } finally { if ($fixtureChild) { $fixtureChild.Dispose() }; $run.Child.Dispose() }
         }
-        # Setup gate 2 (thin forwarder): an action reaches noctty.exe on the same
+        # Setup gate 2 (thin forwarder): an action reaches koreterm.exe on the same
         # desktop with inherited standard handles and its exit code comes back.
         if ($ThinForwarder) {
             Test-Case 'gate: forwarded action keeps the hidden desktop, stdio and exit code' {
@@ -489,7 +489,7 @@ try {
             }
         }
         Test-Case 'thin: no-action launch closes redirected pipes and tolerates an empty command line' {
-            $run = Start-Fixture '--single-instance=false --class=noctty-test-pkg74-fixture' @{ HOLD_MS = 6000 } 'pipes'
+            $run = Start-Fixture '--single-instance=false --class=koreterm-test-pkg74-fixture' @{ HOLD_MS = 6000 } 'pipes'
             try {
                 Assert-Condition ($run.Child.Wait(2000) -and $run.Child.ExitCode -eq 0) 'No-action launcher did not return promptly.'
                 $receipt = Read-FixtureReceipt $run
@@ -552,8 +552,8 @@ try {
             Assert-Condition ($child.ExitCode -eq 0) 'No-action launcher returned nonzero.'
             $close.StageMs.LauncherReturn = $stageClock.Elapsed.TotalMilliseconds
             $close.Stage = 'host-window'
-            Wait-Condition { @([ComCliNative]::Windows($desktopHandle, 'noctty.win32.host')).Count -eq 1 } 'GUI host on the hidden desktop'
-            $window = @([ComCliNative]::Windows($desktopHandle, 'noctty.win32.host'))[0]
+            Wait-Condition { @([ComCliNative]::Windows($desktopHandle, 'koreterm.win32.host')).Count -eq 1 } 'GUI host on the hidden desktop'
+            $window = @([ComCliNative]::Windows($desktopHandle, 'koreterm.win32.host'))[0]
             $guiChild = [ComCliNative]::WindowProcess($window, $gui, $child)
             $close.StageMs.HostWindow = $stageClock.Elapsed.TotalMilliseconds
             $close.Stage = 'title'

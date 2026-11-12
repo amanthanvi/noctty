@@ -102,13 +102,13 @@ $win10WorkflowSteps = [ordered]@{
         '(?m)^zig build test -Demit-test-exe=true -Dcustom-shaders=true --summary all 2>&1 \| Tee-Object -FilePath zig-test\.log\s*\r?\n\$code = \$LASTEXITCODE\s*$'
         '(?m)^if \(\$code -ne 0\) \{ exit \$code \}\s*$'
     )
-    'noctty +version smoke' = @(
-        '(?m)^\$versionText = & \.\\zig-out\\bin\\noctty\.com \+version \| Out-String\s*$'
+    'koreterm +version smoke' = @(
+        '(?m)^\$versionText = & \.\\zig-out\\bin\\koreterm\.com \+version \| Out-String\s*$'
         '(?m)^if \(\$LASTEXITCODE -ne 0\) \{ throw '
         '(?m)^if \(\$versionText -notmatch ''ConPTY''\) \{ throw '
     )
     'Hidden-desktop WARP lifecycle smoke' = @(
-        '\A\./test/windows/renderer/Invoke-RendererParity\.ps1 -Binary \./renderer-smoke/bin/noctty\.exe -OutputDirectory \./renderer-smoke/evidence -WarpOnly\s*\z'
+        '\A\./test/windows/renderer/Invoke-RendererParity\.ps1 -Binary \./renderer-smoke/bin/koreterm\.exe -OutputDirectory \./renderer-smoke/evidence -WarpOnly\s*\z'
     )
     'Require the app to take the Windows 10 branch' = @(
         '(?m)^\$logs = @\(Get-ChildItem -Path renderer-smoke/evidence, hidden-evidence -Recurse -Filter stderr\.txt\)\s*$'
@@ -255,9 +255,9 @@ foreach ($case in @(
     @{ Step = 'Full Zig test suite'; From = 'if ($code -ne 0) { exit $code }'; To = '' }
     @{ Step = 'Full Zig test suite'; From = '$code -ne 0'; To = '$code -eq 0' }
     @{ Step = 'Full Zig test suite'; From = 'exit $code'; To = 'exit 0' }
-    @{ Step = 'noctty +version smoke'; From = '$LASTEXITCODE -ne 0'; To = '$LASTEXITCODE -eq 0' }
-    @{ Step = 'noctty +version smoke'; From = "if (`$versionText -notmatch 'ConPTY')"; To = "if (`$versionText -match 'ConPTY')" }
-    @{ Step = 'noctty +version smoke'; From = "if (`$versionText -notmatch 'ConPTY')"; To = "# if (`$versionText -notmatch 'ConPTY')" }
+    @{ Step = 'koreterm +version smoke'; From = '$LASTEXITCODE -ne 0'; To = '$LASTEXITCODE -eq 0' }
+    @{ Step = 'koreterm +version smoke'; From = "if (`$versionText -notmatch 'ConPTY')"; To = "if (`$versionText -match 'ConPTY')" }
+    @{ Step = 'koreterm +version smoke'; From = "if (`$versionText -notmatch 'ConPTY')"; To = "# if (`$versionText -notmatch 'ConPTY')" }
     @{ Step = 'Hidden-desktop WARP lifecycle smoke'; From = 'run: ./test/windows/renderer/Invoke-RendererParity.ps1'; To = 'run: # ./test/windows/renderer/Invoke-RendererParity.ps1' }
     @{ Step = 'Require the app to take the Windows 10 branch'; From = '$logs.Count -eq 0'; To = '$logs.Count -lt 0' }
     @{ Step = 'Require the app to take the Windows 10 branch'; From = 'if (-not $lines)'; To = 'if ($lines)' }

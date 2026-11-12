@@ -78,7 +78,7 @@ foreach ($percentile in 'p50', 'p99') {
 if (-not $metrics.Contains('palette p99')) { throw 'The palette benchmark printed no p99 line.' }
 
 $report = [ordered]@{
-    schema_version = 'noctty.bench-trend.v1'
+    schema_version = 'koreterm.bench-trend.v1'
     generated_at = (Get-Date).ToUniversalTime().ToString('o')
     commit = $env:GITHUB_SHA
     run_id = $env:GITHUB_RUN_ID

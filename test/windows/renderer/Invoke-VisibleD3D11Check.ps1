@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)][string]$Binary,
-    [string]$OutputDirectory = (Join-Path $env:TEMP ('noctty-visible-d3d11-' + [guid]::NewGuid().ToString('N'))),
+    [string]$OutputDirectory = (Join-Path $env:TEMP ('koreterm-visible-d3d11-' + [guid]::NewGuid().ToString('N'))),
     [switch]$PrepareOnly
 )
 
@@ -23,7 +23,7 @@ function Assert-PeMachine([string]$PathToCheck, [string]$ExpectedArchitecture) {
 $Binary = [IO.Path]::GetFullPath($Binary)
 $OutputDirectory = [IO.Path]::GetFullPath($OutputDirectory)
 if (Test-Path -LiteralPath $OutputDirectory) { throw 'Use a fresh output directory; existing evidence is preserved.' }
-$realProfile = Join-Path $env:LOCALAPPDATA 'noctty\startup-attempts.json'
+$realProfile = Join-Path $env:LOCALAPPDATA 'koreterm\startup-attempts.json'
 function ProfileReceipt {
     if (Test-Path -LiteralPath $realProfile) { return @{exists=$true;hash=(Get-FileHash -LiteralPath $realProfile).Hash;mtime=(Get-Item -LiteralPath $realProfile).LastWriteTimeUtc.ToString('o')} }
     return @{exists=$false}
@@ -35,9 +35,9 @@ function AssertProfile {
 }
 $bin = Join-Path $OutputDirectory 'bin'
 [void](New-Item -ItemType Directory -Path $bin)
-Copy-Item -LiteralPath $Binary -Destination (Join-Path $bin 'noctty.exe')
-Set-Content -LiteralPath (Join-Path $bin 'noctty.portable') -Value 'maintainer visible renderer check'
-if ((Get-FileHash -LiteralPath $Binary).Hash -ne (Get-FileHash -LiteralPath (Join-Path $bin 'noctty.exe')).Hash) { throw 'Copied executable differs.' }
+Copy-Item -LiteralPath $Binary -Destination (Join-Path $bin 'koreterm.exe')
+Set-Content -LiteralPath (Join-Path $bin 'koreterm.portable') -Value 'maintainer visible renderer check'
+if ((Get-FileHash -LiteralPath $Binary).Hash -ne (Get-FileHash -LiteralPath (Join-Path $bin 'koreterm.exe')).Hash) { throw 'Copied executable differs.' }
 $share = Join-Path (Split-Path (Split-Path $Binary)) 'share'
 if (Test-Path -LiteralPath $share) { Copy-Item -LiteralPath $share -Destination $OutputDirectory -Recurse }
 $architecture = if ([RendererNative]::PeMachine($Binary) -eq 0xaa64) { 'arm64' } else { 'x64' }
@@ -111,7 +111,7 @@ try {
     $historyReady = Join-Path $bin ('history-ready-' + [guid]::NewGuid().ToString('N') + '.txt')
     $historyReadyLiteral = $historyReady.Replace("'", "''")
     [IO.File]::WriteAllText($historyBootstrap, "try {`nImport-Module PSReadLine -ErrorAction Stop`nSet-PSReadLineOption -HistorySavePath '$historyPath' -HistorySaveStyle SaveNothing -ErrorAction Stop`nif ((Get-PSReadLineOption).HistorySaveStyle -ne 'SaveNothing' -or (Get-PSReadLineOption).HistorySavePath -cne '$historyPath') { exit 1 }`n[IO.File]::WriteAllText('$historyReadyLiteral', 'isolated')`n} catch { exit 1 }`n")
-    $proc = Start-Process -FilePath (Join-Path $bin 'noctty.exe') -ArgumentList @('--single-instance=false','-e',('"'+$shell+'"'),'-NoProfile','-NoExit','-File',('"'+$historyBootstrap+'"')) -WorkingDirectory $bin -Environment $environment -PassThru
+    $proc = Start-Process -FilePath (Join-Path $bin 'koreterm.exe') -ArgumentList @('--single-instance=false','-e',('"'+$shell+'"'),'-NoProfile','-NoExit','-File',('"'+$historyBootstrap+'"')) -WorkingDirectory $bin -Environment $environment -PassThru
     $identity = $proc.StartTime
     Write-Host "Visible test PID=$($proc.Id), portable run=$OutputDirectory"
     $deadline=[DateTime]::UtcNow.AddSeconds(40);$hostWindow=[IntPtr]::Zero

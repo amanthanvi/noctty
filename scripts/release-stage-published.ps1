@@ -31,7 +31,7 @@ $ErrorActionPreference = 'Stop'
 $repoRoot = Get-RepoRoot
 $createdDownloadDirectory = [string]::IsNullOrWhiteSpace($DownloadDirectory)
 if ($createdDownloadDirectory) {
-    $DownloadDirectory = Join-Path ([System.IO.Path]::GetTempPath()) "noctty-chocolatey-release-$Version-$([guid]::NewGuid().ToString('N'))"
+    $DownloadDirectory = Join-Path ([System.IO.Path]::GetTempPath()) "koreterm-chocolatey-release-$Version-$([guid]::NewGuid().ToString('N'))"
 }
 $DownloadDirectory = [System.IO.Path]::GetFullPath($DownloadDirectory)
 
@@ -49,7 +49,7 @@ try {
     # fails this one. (A rebuild of the same commit, or of a commit the tag was
     # moved to, still passes both; the WinGet manifest's InstallerSha256 values are
     # the independent record to compare.)
-    $repository = if ([string]::IsNullOrWhiteSpace($env:GITHUB_REPOSITORY)) { 'amanthanvi/noctty' } else { $env:GITHUB_REPOSITORY }
+    $repository = if ([string]::IsNullOrWhiteSpace($env:GITHUB_REPOSITORY)) { 'amanthanvi/koreterm' } else { $env:GITHUB_REPOSITORY }
     $tagCommit = ((& gh api "repos/$repository/commits/v$Version" --jq .sha) | Out-String).Trim()
     if ($LASTEXITCODE -ne 0 -or $tagCommit -cnotmatch '\A[0-9a-f]{40}\z') {
         throw "Could not resolve the commit of tag v$Version in $repository."
@@ -69,7 +69,7 @@ try {
     # read: one directory per architecture, the icon beside the x64 files.
     $artifactRoot = Join-Path $repoRoot 'dist/artifacts'
     foreach ($architecture in $architectures) {
-        $architectureDirectory = Join-Path $artifactRoot "noctty-$Version-windows-$architecture"
+        $architectureDirectory = Join-Path $artifactRoot "koreterm-$Version-windows-$architecture"
         New-Item -ItemType Directory -Path $architectureDirectory -Force | Out-Null
         foreach ($kind in @('setup', 'portable', 'checksums')) {
             $name = New-WindowsPackageArtifactName -Version $Version -Architecture $architecture -Kind $kind
@@ -81,8 +81,8 @@ try {
         }
     }
     Copy-Item `
-        -LiteralPath (Join-Path $DownloadDirectory 'noctty-icon.svg') `
-        -Destination (Join-Path $artifactRoot "noctty-$Version-windows-x64/noctty-icon.svg") `
+        -LiteralPath (Join-Path $DownloadDirectory 'koreterm-icon.svg') `
+        -Destination (Join-Path $artifactRoot "koreterm-$Version-windows-x64/koreterm-icon.svg") `
         -Force
 
     $packageArguments = @{
@@ -100,7 +100,7 @@ finally {
     if ($createdDownloadDirectory -and (Test-Path -LiteralPath $DownloadDirectory)) {
         $tempRoot = [System.IO.Path]::GetFullPath([System.IO.Path]::GetTempPath()).TrimEnd('\', '/') + [System.IO.Path]::DirectorySeparatorChar
         if ($DownloadDirectory.StartsWith($tempRoot, [System.StringComparison]::OrdinalIgnoreCase) -and
-            (Split-Path -Leaf $DownloadDirectory) -like 'noctty-chocolatey-release-*') {
+            (Split-Path -Leaf $DownloadDirectory) -like 'koreterm-chocolatey-release-*') {
             Remove-Item -LiteralPath $DownloadDirectory -Recurse -Force -ErrorAction Continue
         }
     }

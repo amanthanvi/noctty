@@ -13,7 +13,7 @@ import { dirname, join } from 'node:path';
 import vm from 'node:vm';
 
 const siteDir = join(dirname(fileURLToPath(import.meta.url)), '..');
-const PAGES = ['index.html', '404.html', 'why-noctty.html'];
+const PAGES = ['index.html', '404.html', 'why-koreterm.html'];
 
 function inlineBootstrap(page) {
   const html = readFileSync(join(siteDir, page), 'utf8');

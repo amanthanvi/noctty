@@ -1,11 +1,11 @@
-# Noctty shell integration for PowerShell 5.1+ / pwsh 7+
+# Koreterm shell integration for PowerShell 5.1+ / pwsh 7+
 # Emits OSC 133 (command marking) and OSC 7 (current working directory) sequences.
-# noctty-integration-revision: 1
-#   Raise it when a change must not be undone by an older noctty that shares
+# koreterm-integration-revision: 1
+#   Raise it when a change must not be undone by an older koreterm that shares
 #   the installed copy; see src/apprt/win32_powershell_install.zig.
 #
 # ── Scope contract ───────────────────────────────────────────────────────
-# noctty dot-sources this file from INSIDE a `& { ... }` script block:
+# koreterm dot-sources this file from INSIDE a `& { ... }` script block:
 #
 #   pwsh -NoExit -Command "& { $__ghostty_utf8_console = $false; . '<path>' }"
 #
@@ -28,7 +28,7 @@
 # variables (the unprefixed escape/bell character variables this script used
 # to define did exactly that).
 
-# Per-launch UTF-8 console request. noctty sets $__ghostty_utf8_console in the
+# Per-launch UTF-8 console request. koreterm sets $__ghostty_utf8_console in the
 # scope that dot-sources this script, never in the environment: profiles run
 # before our -Command does, so an environment variable would already have been
 # inherited by anything a profile spawned. Get-Variable keeps this safe under
@@ -268,26 +268,26 @@ function global:__ghostty_find_command_application {
     return $null
 }
 
-function global:__ghostty_find_noctty {
+function global:__ghostty_find_koreterm {
     if (-not [string]::IsNullOrEmpty($env:GHOSTTY_BIN_DIR)) {
-        foreach ($name in @('noctty.com', 'noctty.exe', 'noctty')) {
+        foreach ($name in @('koreterm.com', 'koreterm.exe', 'koreterm')) {
             $candidate = Join-Path $env:GHOSTTY_BIN_DIR $name
             if (Test-Path -LiteralPath $candidate -PathType Leaf) {
                 return $candidate
             }
         }
     }
-    return __ghostty_find_command_application @('noctty.com', 'noctty.exe', 'noctty')
+    return __ghostty_find_command_application @('koreterm.com', 'koreterm.exe', 'koreterm')
 }
 
 function global:__ghostty_ssh_cache {
     param([Parameter(ValueFromRemainingArguments=$true)][string[]]$Arguments)
 
-    $noctty = __ghostty_find_noctty
-    if ($null -eq $noctty) { return $false }
+    $koreterm = __ghostty_find_koreterm
+    if ($null -eq $koreterm) { return $false }
 
     try {
-        & $noctty '+ssh-cache' @Arguments *> $null
+        & $koreterm '+ssh-cache' @Arguments *> $null
         # Read through the helper: if the invocation never reached the
         # executable, $LASTEXITCODE can still be unset and a direct read
         # would be a terminating error under Set-StrictMode.
@@ -373,7 +373,7 @@ function global:__ghostty_build_ssh_invocation {
 #
 #   * It ran on every launch, before we knew whether we were going to
 #     install anything at all. A `function ssh { ... }` defined in the
-#     user's $PROFILE — which runs BEFORE noctty's injected `-Command` —
+#     user's $PROFILE — which runs BEFORE koreterm's injected `-Command` —
 #     was therefore deleted even when GHOSTTY_SHELL_FEATURES carried no
 #     `ssh-*` feature and nothing replaced it.
 #   * `Function:\global:ssh` is not a valid provider path: a scope
@@ -405,7 +405,7 @@ if (__ghostty_ssh_wrapper_is_ours) {
 
 if ((__ghostty_has_feature_prefix 'ssh-') -and
     $null -ne (Get-Command -Name 'ssh' -CommandType Function,Alias -ErrorAction Ignore)) {
-    Write-Warning 'noctty PowerShell SSH integration skipped: a profile function or alias owns ssh.' -WarningAction Continue
+    Write-Warning 'koreterm PowerShell SSH integration skipped: a profile function or alias owns ssh.' -WarningAction Continue
 } elseif (__ghostty_has_feature_prefix 'ssh-') {
     function global:ssh {
         # __ghostty_ssh_wrapper_marker — `__ghostty_ssh_wrapper_is_ours`
@@ -418,7 +418,7 @@ if ((__ghostty_has_feature_prefix 'ssh-') -and
 
         $ssh_command = __ghostty_find_command_application @('ssh.exe', 'ssh')
         if ($null -eq $ssh_command) {
-            throw 'noctty PowerShell SSH integration could not find ssh'
+            throw 'koreterm PowerShell SSH integration could not find ssh'
         }
 
         # Usage and version requests need neither a destination probe nor
@@ -506,7 +506,7 @@ function global:__ghostty_encode_cwd_uri {
 # stays a Function, as about_Prompts documents, and PSReadLine, which reads
 # the prompt function once to decide whether to repaint part of the prompt on
 # a parse error, sees a function that calls a command and leaves the prompt
-# alone, as it always has under noctty.
+# alone, as it always has under koreterm.
 #
 # A prompt replaced after startup (`. $PROFILE`, an oh-my-posh or Starship
 # re-init, a venv) is wrapped again by `__ghostty_readline` before the next
@@ -758,7 +758,7 @@ function global:__ghostty_prompt_body {
         # nice-to-have; the user's prompt is not. If any of our helpers
         # throws, PowerShell discards the whole prompt function and silently
         # substitutes its built-in `PS C:\...>` — which is exactly how #231
-        # presented, and it looks to the user like noctty deleted their
+        # presented, and it looks to the user like koreterm deleted their
         # starship / oh-my-posh configuration. Degrading to "no OSC marks
         # this tick" is always the better failure. The harness asserts the
         # marks ARE emitted, so this cannot quietly swallow a real
@@ -913,14 +913,14 @@ function global:__ghostty_append_input_mark {
 # and PSReadLine 2.0.0 (Windows PowerShell 5.1) calls it for every line it
 # replays out of the history file, so it needed a buffer-state gate as well.
 # None of that applies here: this runs once per ReadLine return, never for
-# replayed history, and noctty no longer touches the AddToHistoryHandler at
+# replayed history, and koreterm no longer touches the AddToHistoryHandler at
 # all. (CommandValidationHandler, the hook before that, only fires for
 # `ValidateAndAcceptLine`, which Enter is not bound to by default.)
 #
 # An empty or whitespace-only line gets no C: PowerShell runs nothing for
 # it, and a C there would make it the terminal's "last command", so
 # `insert_last_command` and `copy_last_command_output` would lose the real
-# one. That matches noctty's clink integration, zsh and bash.
+# one. That matches koreterm's clink integration, zsh and bash.
 function global:__ghostty_readline {
     # $? FIRST, for the same reason as in the generated prompt: PSReadLine's
     # own PSConsoleHostReadLine reads $? as its first statement and hands it
@@ -1059,7 +1059,7 @@ function global:__ghostty_readline {
 }
 
 # ── Retiring hooks an older copy of this script installed ─────────────────
-# A session that loaded an earlier noctty and then sources this one (a
+# A session that loaded an earlier koreterm and then sources this one (a
 # `. $PROFILE` that dot-sources the installed copy after an upgrade) still
 # has the old hooks: `function prompt` replaced by a wrapper that saved the
 # user's prompt in `$__ghostty_original_prompt`, and an AddToHistoryHandler

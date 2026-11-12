@@ -35,7 +35,7 @@ pub const Options = struct {
 };
 
 /// The `list-keybinds` command is used to list all the available keybinds for
-/// noctty.
+/// koreterm.
 ///
 /// When executed without any arguments this will list the current keybinds
 /// loaded by the config file. If no config file is found or there aren't any
@@ -450,9 +450,9 @@ test "list-keybinds action help describes docs mode truthfully" {
 }
 
 test "list-keybinds --default prints the Windows default keymap" {
-    // The snapshot is the plain output of `noctty +list-keybinds --default`.
+    // The snapshot is the plain output of `koreterm +list-keybinds --default`.
     // Change a default and this fails: regenerate the file from the new output
-    // (`noctty +list-keybinds --default --plain > src/cli/testdata/default_keybinds_windows.txt`
+    // (`koreterm +list-keybinds --default --plain > src/cli/testdata/default_keybinds_windows.txt`
     // from a copy of the build) after checking every changed line.
     if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
     const alloc = std.testing.allocator;

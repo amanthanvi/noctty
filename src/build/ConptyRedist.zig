@@ -117,7 +117,7 @@ fn make(step: *Step, options: Step.MakeOptions) !void {
             })
         else
             "pwsh";
-        const cache_root = b.graph.global_cache_root.join(arena, &.{"noctty-conpty"}) catch @panic("OOM");
+        const cache_root = b.graph.global_cache_root.join(arena, &.{"koreterm-conpty"}) catch @panic("OOM");
         const result = std.process.Child.run(.{
             .allocator = arena,
             .env_map = &env,
@@ -174,7 +174,7 @@ fn make(step: *Step, options: Step.MakeOptions) !void {
     }
     step.result_stderr = b.fmt(
         \\warning: the bundled ConPTY was not staged because {s}.
-        \\noctty in '{s}' will fall back to Windows' in-box conhost, which re-renders
+        \\koreterm in '{s}' will fall back to Windows' in-box conhost, which re-renders
         \\output, drops OSC 4/10/11/12 and XTGETTCAP replies, and may strip Kitty
         \\graphics and Sixel. Once that is fixed, build again to stage conpty.dll and
         \\OpenConsole.exe from {s}, or pass -Dbundled-conpty=false to stop trying.

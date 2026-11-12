@@ -18,27 +18,27 @@ $launcherPath = if ($PSCommandPath) { $PSCommandPath } else { $MyInvocation.MyCo
 $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 . (Join-Path $repoRoot 'scripts\interactive-win11-lib.ps1')
 
-if (-not $env:NOCTTY_INTERACTIVE_WIN11_HINTS_BOOTSTRAPPED) {
+if (-not $env:KORETERM_INTERACTIVE_WIN11_HINTS_BOOTSTRAPPED) {
     $forwarded = @('-TimeoutSeconds', $TimeoutSeconds.ToString(), '-Scenario', $Scenario)
     if ($Rebuild) { $forwarded += '-Rebuild' }
     if ($ResetState) { $forwarded += '-ResetState' }
     $code = 0
     Invoke-InteractiveWin11Bootstrap -RepoRoot $repoRoot -LauncherPath $launcherPath `
-        -EnvironmentVariable 'NOCTTY_INTERACTIVE_WIN11_HINTS_BOOTSTRAPPED' `
+        -EnvironmentVariable 'KORETERM_INTERACTIVE_WIN11_HINTS_BOOTSTRAPPED' `
         -ArgumentList $forwarded -ExitCode ([ref]$code)
     exit $code
 }
 
 Add-Type -AssemblyName UIAutomationClient
 Add-Type -AssemblyName UIAutomationTypes
-if (-not ('NocttyHintsNative' -as [type])) {
+if (-not ('KoretermHintsNative' -as [type])) {
     Add-Type @'
 using System;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using System.Text;
 
-public static class NocttyHintsNative {
+public static class KoretermHintsNative {
     public delegate bool EnumProc(IntPtr hwnd, IntPtr data);
 
     [StructLayout(LayoutKind.Sequential)] public struct GUITHREADINFO {
@@ -316,7 +316,7 @@ public static class NocttyHintsNative {
 '@
 }
 
-if (-not [NocttyHintsNative]::ClassNamesEqual('Button', 'BUTTON')) {
+if (-not [KoretermHintsNative]::ClassNamesEqual('Button', 'BUTTON')) {
     throw 'Win32 class-name matching must be ordinal case-insensitive.'
 }
 
@@ -345,14 +345,14 @@ function Send-HintsChord {
         [Parameter(Mandatory)][string] $Description,
         [IntPtr] $ExpectedFocus = [IntPtr]::Zero
     )
-    if (-not [NocttyHintsNative]::ForceForeground($HostHwnd)) {
-        throw "Unable to foreground noctty before $Description."
+    if (-not [KoretermHintsNative]::ForceForeground($HostHwnd)) {
+        throw "Unable to foreground koreterm before $Description."
     }
-    if ($ExpectedFocus -ne [IntPtr]::Zero -and [NocttyHintsNative]::FocusedWindowFor($HostHwnd) -ne $ExpectedFocus) {
+    if ($ExpectedFocus -ne [IntPtr]::Zero -and [KoretermHintsNative]::FocusedWindowFor($HostHwnd) -ne $ExpectedFocus) {
         $element = [System.Windows.Automation.AutomationElement]::FromHandle($ExpectedFocus)
         if ($null -ne $element) { $element.SetFocus() }
     }
-    if (-not [NocttyHintsNative]::SendChord($Keys)) {
+    if (-not [KoretermHintsNative]::SendChord($Keys)) {
         throw "SendInput failed for ${Description}: $([Runtime.InteropServices.Marshal]::GetLastWin32Error())"
     }
     Start-Sleep -Milliseconds 120
@@ -448,7 +448,7 @@ function Write-HintsDescendantInventory {
     @(
         "phase=$Phase"
         ('parent=0x{0:X}' -f $HostHwnd.ToInt64())
-        [NocttyHintsNative]::DescribeDescendants($HostHwnd)
+        [KoretermHintsNative]::DescribeDescendants($HostHwnd)
     ) | Set-Content -LiteralPath $Path -Encoding UTF8
 }
 
@@ -568,8 +568,8 @@ function Write-HintsQuickSelectFailureDiagnostics {
         [Parameter(Mandatory)][string] $Phase
     )
     $Process.Refresh()
-    $foreground = [NocttyHintsNative]::GetForegroundWindow()
-    $focused = [NocttyHintsNative]::FocusedWindowFor($HostHwnd)
+    $foreground = [KoretermHintsNative]::GetForegroundWindow()
+    $focused = [KoretermHintsNative]::FocusedWindowFor($HostHwnd)
     $keyFocusLines = if (Test-Path -LiteralPath $StderrPath) {
         @(Get-Content -LiteralPath $StderrPath | Where-Object {
                 $_ -match 'key event binding|toggle_quick_select|mailbox message=.*focus'
@@ -581,13 +581,13 @@ function Write-HintsQuickSelectFailureDiagnostics {
         'expected_chord=Ctrl+Shift+Space'
         "process_id=$($Process.Id)"
         "process_exited=$($Process.HasExited)"
-        "host=$([NocttyHintsNative]::DescribeWindow($HostHwnd))"
-        "surface=$([NocttyHintsNative]::DescribeWindow($SurfaceHwnd))"
-        "foreground=$([NocttyHintsNative]::DescribeWindow($foreground))"
-        "focused=$([NocttyHintsNative]::DescribeWindow($focused))"
+        "host=$([KoretermHintsNative]::DescribeWindow($HostHwnd))"
+        "surface=$([KoretermHintsNative]::DescribeWindow($SurfaceHwnd))"
+        "foreground=$([KoretermHintsNative]::DescribeWindow($foreground))"
+        "focused=$([KoretermHintsNative]::DescribeWindow($focused))"
         "pty_event_count=$(@(Get-HintsInputEvents -Path $InputPath).Count)"
         'descendants_begin'
-        [NocttyHintsNative]::DescribeDescendants($HostHwnd)
+        [KoretermHintsNative]::DescribeDescendants($HostHwnd)
         'descendants_end'
         'stderr_key_focus_lines_begin'
         $keyFocusLines
@@ -641,15 +641,15 @@ while ($true) {
         '-File'
         $PayloadPath
     )
-    $previousTrace = $env:NOCTTY_WIN32_OPEN_URL_TRACE_FILE
-    $env:NOCTTY_WIN32_OPEN_URL_TRACE_FILE = $UrlTracePath
+    $previousTrace = $env:KORETERM_WIN32_OPEN_URL_TRACE_FILE
+    $env:KORETERM_WIN32_OPEN_URL_TRACE_FILE = $UrlTracePath
     try {
         return Start-Process -FilePath $ExePath -ArgumentList $args -WorkingDirectory $repoRoot `
             -RedirectStandardOutput $StdoutPath -RedirectStandardError $StderrPath -PassThru
     }
     finally {
-        if ($null -eq $previousTrace) { Remove-Item Env:NOCTTY_WIN32_OPEN_URL_TRACE_FILE -ErrorAction SilentlyContinue }
-        else { $env:NOCTTY_WIN32_OPEN_URL_TRACE_FILE = $previousTrace }
+        if ($null -eq $previousTrace) { Remove-Item Env:KORETERM_WIN32_OPEN_URL_TRACE_FILE -ErrorAction SilentlyContinue }
+        else { $env:KORETERM_WIN32_OPEN_URL_TRACE_FILE = $previousTrace }
     }
 }
 
@@ -673,9 +673,9 @@ $process = $null
 $primaryFailure = $null
 $evidence = [ordered]@{ scenario = $Scenario }
 try {
-    [NocttyHintsNative]::InitializeClipboard()
+    [KoretermHintsNative]::InitializeClipboard()
     $clipboardInitialized = $true
-    $clipboardObject = [NocttyHintsNative]::CaptureClipboard()
+    $clipboardObject = [KoretermHintsNative]::CaptureClipboard()
     $clipboardCaptured = $true
 
     if ($scenarioPlan.RunMain) {
@@ -698,18 +698,18 @@ try {
         $process.Refresh()
         -not $process.HasExited -and
             (Test-Path -LiteralPath $readyPath) -and
-            [NocttyHintsNative]::FindTopLevel([uint32]$process.Id, 'noctty.win32.host') -ne [IntPtr]::Zero
+            [KoretermHintsNative]::FindTopLevel([uint32]$process.Id, 'koreterm.win32.host') -ne [IntPtr]::Zero
     }
-    $hostHwnd = [NocttyHintsNative]::FindTopLevel([uint32]$process.Id, 'noctty.win32.host')
-    $surfaceHwnd = [NocttyHintsNative]::FindDescendant($hostHwnd, 'noctty.win32', $true)
+    $hostHwnd = [KoretermHintsNative]::FindTopLevel([uint32]$process.Id, 'koreterm.win32.host')
+    $surfaceHwnd = [KoretermHintsNative]::FindDescendant($hostHwnd, 'koreterm.win32', $true)
     if ($surfaceHwnd -eq [IntPtr]::Zero) { throw 'Terminal surface HWND was unavailable.' }
 
-    [NocttyHintsNative]::SetClipboardText('clipboard-sentinel')
+    [KoretermHintsNative]::SetClipboardText('clipboard-sentinel')
     Send-HintsChord -Process $process -HostHwnd $hostHwnd -ExpectedFocus $surfaceHwnd `
         -Keys @([uint16]0x11, [uint16]0x10, [uint16]0x20) -Description 'open quick select'
     try {
         Wait-HintsUntil -Deadline $deadline -TimeoutSeconds $TimeoutSeconds -Description 'quick-select overlay' -Process $process -Condition {
-            [NocttyHintsNative]::FindDescendant($hostHwnd, 'noctty.win32.quick_select', $true) -ne [IntPtr]::Zero
+            [KoretermHintsNative]::FindDescendant($hostHwnd, 'koreterm.win32.quick_select', $true) -ne [IntPtr]::Zero
         }
     }
     catch {
@@ -721,7 +721,7 @@ try {
         catch { Write-Warning "Unable to write quick-select failure diagnostics: $_" }
         throw
     }
-    $quickHwnd = [NocttyHintsNative]::FindDescendant($hostHwnd, 'noctty.win32.quick_select', $true)
+    $quickHwnd = [KoretermHintsNative]::FindDescendant($hostHwnd, 'koreterm.win32.quick_select', $true)
     $quick = [System.Windows.Automation.AutomationElement]::FromHandle($quickHwnd)
     if ($null -eq $quick) { throw 'Quick-select overlay exposes no UIA root.' }
     if ($quick.Current.ControlType -ne [System.Windows.Automation.ControlType]::List) { throw 'Quick-select UIA root is not a List.' }
@@ -750,17 +750,17 @@ try {
     Send-HintsChord -Process $process -HostHwnd $hostHwnd -ExpectedFocus $quickHwnd `
         -Keys @([uint16]0x41) -Description 'copy quick-select target'
     Wait-HintsUntil -Deadline $deadline -TimeoutSeconds $TimeoutSeconds -Description 'quick-select clipboard result' -Process $process -Condition {
-        [NocttyHintsNative]::GetClipboardText() -eq $url -and
-            [NocttyHintsNative]::FindDescendant($hostHwnd, 'noctty.win32.quick_select', $true) -eq [IntPtr]::Zero
+        [KoretermHintsNative]::GetClipboardText() -eq $url -and
+            [KoretermHintsNative]::FindDescendant($hostHwnd, 'koreterm.win32.quick_select', $true) -eq [IntPtr]::Zero
     }
     if (@(Get-HintsInputEvents -Path $inputPath).Count -ne 0) { throw 'Quick-select label input leaked to the PTY.' }
 
-    [NocttyHintsNative]::SetClipboardText('open-sentinel')
+    [KoretermHintsNative]::SetClipboardText('open-sentinel')
     Send-HintsChord -Process $process -HostHwnd $hostHwnd -ExpectedFocus $surfaceHwnd `
         -Keys @([uint16]0x11, [uint16]0x10, [uint16]0x20) -Description 'reopen quick select'
     try {
         Wait-HintsUntil -Deadline $deadline -TimeoutSeconds $TimeoutSeconds -Description 'quick-select overlay for open' -Process $process -Condition {
-            [NocttyHintsNative]::FindDescendant($hostHwnd, 'noctty.win32.quick_select', $true) -ne [IntPtr]::Zero
+            [KoretermHintsNative]::FindDescendant($hostHwnd, 'koreterm.win32.quick_select', $true) -ne [IntPtr]::Zero
         }
     }
     catch {
@@ -772,16 +772,16 @@ try {
         catch { Write-Warning "Unable to write quick-select failure diagnostics: $_" }
         throw
     }
-    $quickHwnd = [NocttyHintsNative]::FindDescendant($hostHwnd, 'noctty.win32.quick_select', $true)
+    $quickHwnd = [KoretermHintsNative]::FindDescendant($hostHwnd, 'koreterm.win32.quick_select', $true)
     Send-HintsChord -Process $process -HostHwnd $hostHwnd -ExpectedFocus $quickHwnd `
         -Keys @([uint16]0x11, [uint16]0x41) -Description 'record quick-select URL open'
     Wait-HintsUntil -Deadline $deadline -TimeoutSeconds $TimeoutSeconds -Description 'recorded quick-select URL open' -Process $process -Condition {
         (Test-Path -LiteralPath $urlTracePath) -and (Get-Content -LiteralPath $urlTracePath -Raw).Trim() -eq $url
     }
-    if ([NocttyHintsNative]::GetClipboardText() -ne 'open-sentinel') { throw 'Ctrl-open unexpectedly changed the clipboard.' }
+    if ([KoretermHintsNative]::GetClipboardText() -ne 'open-sentinel') { throw 'Ctrl-open unexpectedly changed the clipboard.' }
     if (@(Get-HintsInputEvents -Path $inputPath).Count -ne 0) { throw 'Ctrl-open label input leaked to the PTY.' }
 
-    [NocttyHintsNative]::SetClipboardText('copy-mode-sentinel')
+    [KoretermHintsNative]::SetClipboardText('copy-mode-sentinel')
     Send-HintsChord -Process $process -HostHwnd $hostHwnd -ExpectedFocus $surfaceHwnd `
         -Keys @([uint16]0x11, [uint16]0x10, [uint16]0x58) -Description 'enter copy mode'
     $terminal = [System.Windows.Automation.AutomationElement]::FromHandle($surfaceHwnd)
@@ -836,7 +836,7 @@ try {
     Send-HintsChord -Process $process -HostHwnd $hostHwnd -ExpectedFocus $surfaceHwnd `
         -Keys @([uint16]0x59) -Description 'copy and exit copy mode'
     Wait-HintsUntil -Deadline $deadline -TimeoutSeconds $TimeoutSeconds -Description 'copy-mode clipboard result' -Process $process -Condition {
-        [NocttyHintsNative]::GetClipboardText() -ne 'copy-mode-sentinel'
+        [KoretermHintsNative]::GetClipboardText() -ne 'copy-mode-sentinel'
     }
     Send-HintsChord -Process $process -HostHwnd $hostHwnd -ExpectedFocus $surfaceHwnd `
         -Keys @([uint16]0x42) -Description 'prove PTY input after copy-mode exit'
@@ -902,22 +902,22 @@ try {
         $process.Refresh()
         -not $process.HasExited -and
             (Test-Path -LiteralPath $unsafeReadyPath) -and
-            [NocttyHintsNative]::FindTopLevel([uint32]$process.Id, 'noctty.win32.host') -ne [IntPtr]::Zero
+            [KoretermHintsNative]::FindTopLevel([uint32]$process.Id, 'koreterm.win32.host') -ne [IntPtr]::Zero
     }
-    $hostHwnd = [NocttyHintsNative]::FindTopLevel([uint32]$process.Id, 'noctty.win32.host')
-    $surfaceHwnd = [NocttyHintsNative]::FindDescendant($hostHwnd, 'noctty.win32', $true)
+    $hostHwnd = [KoretermHintsNative]::FindTopLevel([uint32]$process.Id, 'koreterm.win32.host')
+    $surfaceHwnd = [KoretermHintsNative]::FindDescendant($hostHwnd, 'koreterm.win32', $true)
     Send-HintsChord -Process $process -HostHwnd $hostHwnd -ExpectedFocus $surfaceHwnd `
         -Keys @([uint16]0x11, [uint16]0x10, [uint16]0x20) -Description 'open unsafe-paste quick select'
     Wait-HintsUntil -Deadline $deadline -TimeoutSeconds $TimeoutSeconds -Description 'unsafe-paste quick-select overlay' -Process $process -Condition {
-        [NocttyHintsNative]::FindDescendant($hostHwnd, 'noctty.win32.quick_select', $true) -ne [IntPtr]::Zero
+        [KoretermHintsNative]::FindDescendant($hostHwnd, 'koreterm.win32.quick_select', $true) -ne [IntPtr]::Zero
     }
-    $quickHwnd = [NocttyHintsNative]::FindDescendant($hostHwnd, 'noctty.win32.quick_select', $true)
+    $quickHwnd = [KoretermHintsNative]::FindDescendant($hostHwnd, 'koreterm.win32.quick_select', $true)
     Send-HintsChord -Process $process -HostHwnd $hostHwnd -ExpectedFocus $quickHwnd `
         -Keys @([uint16]0x12, [uint16]0x41) -Description 'request protected quick-select paste'
     $allow = $null
     try {
         Wait-HintsUntil -Deadline $deadline -TimeoutSeconds $TimeoutSeconds -Description 'protected-paste confirmation' -Process $process -Condition {
-            $allowHwnd = [NocttyHintsNative]::FindDescendantByText($hostHwnd, 'BUTTON', 'Allow', $true)
+            $allowHwnd = [KoretermHintsNative]::FindDescendantByText($hostHwnd, 'BUTTON', 'Allow', $true)
             $script:allow = if ($allowHwnd -ne [IntPtr]::Zero) {
                 [System.Windows.Automation.AutomationElement]::FromHandle($allowHwnd)
             } else { $null }
@@ -938,7 +938,7 @@ try {
     # this control's WM_GETOBJECT, so without asserting the pattern here a
     # Cancel button with no provider -- or a generic one -- would pass the
     # whole scenario unnoticed.
-    $cancelHwnd = [NocttyHintsNative]::FindDescendantByText($hostHwnd, 'BUTTON', 'Cancel', $true)
+    $cancelHwnd = [KoretermHintsNative]::FindDescendantByText($hostHwnd, 'BUTTON', 'Cancel', $true)
     if ($cancelHwnd -eq [IntPtr]::Zero) { throw 'Protected-paste Cancel control is absent.' }
     $cancel = [System.Windows.Automation.AutomationElement]::FromHandle($cancelHwnd)
     $cancelInvoke = Get-HintsButtonInvokePattern -Element $cancel `
@@ -949,7 +949,7 @@ try {
     # without ever being told what was being approved, so assert the two
     # lines are real, named, on-screen elements rather than paint.
     $titlePrefix = 'Allow clipboard paste?'
-    $bodyPrefix = 'noctty needs confirmation'
+    $bodyPrefix = 'koreterm needs confirmation'
     $promptLines = Get-HintsConfirmPromptLines -HostHwnd $hostHwnd `
         -TitlePrefix $titlePrefix -BodyPrefix $bodyPrefix
     try {
@@ -974,7 +974,7 @@ try {
     # provider end to end.
     $cancelInvoke.Invoke()
     Wait-HintsUntil -Deadline $deadline -TimeoutSeconds $TimeoutSeconds -Description 'protected-paste confirmation dismissed by Cancel Invoke' -Process $process -Condition {
-        [NocttyHintsNative]::FindDescendantByText($hostHwnd, 'BUTTON', 'Allow', $true) -eq [IntPtr]::Zero
+        [KoretermHintsNative]::FindDescendantByText($hostHwnd, 'BUTTON', 'Allow', $true) -eq [IntPtr]::Zero
     }
     if (@(Get-HintsInputEvents -Path $unsafeInputPath).Count -ne 0) {
         throw 'Protected paste cancelled through Invoke reached the PTY.'
@@ -983,13 +983,13 @@ try {
     Send-HintsChord -Process $process -HostHwnd $hostHwnd -ExpectedFocus $surfaceHwnd `
         -Keys @([uint16]0x11, [uint16]0x10, [uint16]0x20) -Description 'reopen unsafe-paste quick select after Invoke cancel'
     Wait-HintsUntil -Deadline $deadline -TimeoutSeconds $TimeoutSeconds -Description 'unsafe-paste quick-select overlay after Invoke cancel' -Process $process -Condition {
-        [NocttyHintsNative]::FindDescendant($hostHwnd, 'noctty.win32.quick_select', $true) -ne [IntPtr]::Zero
+        [KoretermHintsNative]::FindDescendant($hostHwnd, 'koreterm.win32.quick_select', $true) -ne [IntPtr]::Zero
     }
-    $escapeQuickHwnd = [NocttyHintsNative]::FindDescendant($hostHwnd, 'noctty.win32.quick_select', $true)
+    $escapeQuickHwnd = [KoretermHintsNative]::FindDescendant($hostHwnd, 'koreterm.win32.quick_select', $true)
     Send-HintsChord -Process $process -HostHwnd $hostHwnd -ExpectedFocus $escapeQuickHwnd `
         -Keys @([uint16]0x12, [uint16]0x41) -Description 'request protected quick-select paste for the Escape round'
     Wait-HintsUntil -Deadline $deadline -TimeoutSeconds $TimeoutSeconds -Description 'protected-paste confirmation before Escape' -Process $process -Condition {
-        [NocttyHintsNative]::FindDescendantByText($hostHwnd, 'BUTTON', 'Allow', $true) -ne [IntPtr]::Zero
+        [KoretermHintsNative]::FindDescendantByText($hostHwnd, 'BUTTON', 'Allow', $true) -ne [IntPtr]::Zero
     }
 
     # And through the keyboard, which is a separate handler in
@@ -1001,15 +1001,15 @@ try {
     Send-HintsChord -Process $process -HostHwnd $hostHwnd -ExpectedFocus $surfaceHwnd `
         -Keys @([uint16]0x11, [uint16]0x10, [uint16]0x20) -Description 'reopen unsafe-paste quick select'
     Wait-HintsUntil -Deadline $deadline -TimeoutSeconds $TimeoutSeconds -Description 'unsafe-paste quick-select overlay after cancel' -Process $process -Condition {
-        [NocttyHintsNative]::FindDescendant($hostHwnd, 'noctty.win32.quick_select', $true) -ne [IntPtr]::Zero
+        [KoretermHintsNative]::FindDescendant($hostHwnd, 'koreterm.win32.quick_select', $true) -ne [IntPtr]::Zero
     }
-    $quickHwnd = [NocttyHintsNative]::FindDescendant($hostHwnd, 'noctty.win32.quick_select', $true)
+    $quickHwnd = [KoretermHintsNative]::FindDescendant($hostHwnd, 'koreterm.win32.quick_select', $true)
     Send-HintsChord -Process $process -HostHwnd $hostHwnd -ExpectedFocus $quickHwnd `
         -Keys @([uint16]0x12, [uint16]0x41) -Description 'request protected quick-select paste again'
     $retryAllow = $null
     try {
         Wait-HintsUntil -Deadline $deadline -TimeoutSeconds $TimeoutSeconds -Description 'protected-paste confirmation after retry' -Process $process -Condition {
-            $retryAllowHwnd = [NocttyHintsNative]::FindDescendantByText($hostHwnd, 'BUTTON', 'Allow', $true)
+            $retryAllowHwnd = [KoretermHintsNative]::FindDescendantByText($hostHwnd, 'BUTTON', 'Allow', $true)
             $script:retryAllow = if ($retryAllowHwnd -ne [IntPtr]::Zero) {
                 [System.Windows.Automation.AutomationElement]::FromHandle($retryAllowHwnd)
             } else { $null }
@@ -1065,13 +1065,13 @@ finally {
         try { Stop-InteractiveWin11Process -Process $process -Contained }
         catch {
             $stopFailure = $_
-            Write-Warning "Unable to stop the noctty process: $($_.Exception.Message)"
+            Write-Warning "Unable to stop the koreterm process: $($_.Exception.Message)"
         }
     }
     try {
         if ($clipboardCaptured) {
             try {
-                [NocttyHintsNative]::RestoreClipboard($clipboardObject)
+                [KoretermHintsNative]::RestoreClipboard($clipboardObject)
                 $clipboardObject = [IntPtr]::Zero
                 $clipboardCaptured = $false
             }
@@ -1083,7 +1083,7 @@ finally {
     }
     finally {
         if ($clipboardInitialized) {
-            [NocttyHintsNative]::ShutdownClipboard()
+            [KoretermHintsNative]::ShutdownClipboard()
             $clipboardInitialized = $false
         }
     }

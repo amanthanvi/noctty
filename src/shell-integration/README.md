@@ -1,12 +1,12 @@
 # Shell Integration Code
 
 This is the shell-specific shell-integration code that is
-used for the shell-integration feature set that noctty
+used for the shell-integration feature set that koreterm
 supports.
 
 This README is meant as developer documentation and not as
 user documentation. For user documentation, see the main
-README or the public noctty repository documentation
+README or the public koreterm repository documentation
 
 ## Implementation Details
 
@@ -14,12 +14,12 @@ README or the public noctty repository documentation
 
 | Shell | Automatic injection | Prompt / cwd marks | `ssh-env` | `ssh-terminfo` |
 | --- | --- | --- | --- | --- |
-| Bash | Yes, via POSIX `ENV` wrapper | Yes | Yes | Installs remote `xterm-ghostty` terminfo with local `infocmp`, remote `tic`, and `noctty +ssh-cache` |
-| Zsh | Yes, via temporary `ZDOTDIR` | Yes | Yes | Installs remote `xterm-ghostty` terminfo with local `infocmp`, remote `tic`, and `noctty +ssh-cache` |
-| Fish | Yes, via `XDG_DATA_DIRS` vendor config | Yes | Yes | Installs remote `xterm-ghostty` terminfo with local `infocmp`, remote `tic`, and `noctty +ssh-cache` |
-| Nushell | Yes, via `XDG_DATA_DIRS` vendor autoload plus `use ghostty *` | Shell-native where available | Yes | Installs remote `xterm-ghostty` terminfo with local `infocmp`, remote `tic`, and `noctty +ssh-cache` |
-| Elvish | Available as distributed module | Shell-native where available | Yes | Installs remote `xterm-ghostty` terminfo with local `infocmp`, remote `tic`, and `noctty +ssh-cache` |
-| PowerShell | Yes on Windows for interactive `powershell.exe` / `pwsh.exe` | OSC 7 + OSC 133 | Yes | Cache-aware only: uses `xterm-ghostty` for hosts already present in `noctty +ssh-cache`, otherwise falls back to `xterm-256color` |
+| Bash | Yes, via POSIX `ENV` wrapper | Yes | Yes | Installs remote `xterm-ghostty` terminfo with local `infocmp`, remote `tic`, and `koreterm +ssh-cache` |
+| Zsh | Yes, via temporary `ZDOTDIR` | Yes | Yes | Installs remote `xterm-ghostty` terminfo with local `infocmp`, remote `tic`, and `koreterm +ssh-cache` |
+| Fish | Yes, via `XDG_DATA_DIRS` vendor config | Yes | Yes | Installs remote `xterm-ghostty` terminfo with local `infocmp`, remote `tic`, and `koreterm +ssh-cache` |
+| Nushell | Yes, via `XDG_DATA_DIRS` vendor autoload plus `use ghostty *` | Shell-native where available | Yes | Installs remote `xterm-ghostty` terminfo with local `infocmp`, remote `tic`, and `koreterm +ssh-cache` |
+| Elvish | Available as distributed module | Shell-native where available | Yes | Installs remote `xterm-ghostty` terminfo with local `infocmp`, remote `tic`, and `koreterm +ssh-cache` |
+| PowerShell | Yes on Windows for interactive `powershell.exe` / `pwsh.exe` | OSC 7 + OSC 133 | Yes | Cache-aware only: uses `xterm-ghostty` for hosts already present in `koreterm +ssh-cache`, otherwise falls back to `xterm-256color` |
 | cmd.exe | Yes on Windows for interactive launches via `PROMPT`; `CLINK_PATH` exposes the optional script to active Clink | OSC 9;9 + OSC 133 A/B; active Clink adds OSC 133 C/D | No | No |
 
 ### Bash
@@ -34,7 +34,7 @@ Bash shell integration can also be sourced manually from `bash/ghostty.bash`.
 This also works for older versions of Bash.
 
 ```bash
-# noctty shell integration for Bash. This must be at the top of your bashrc!
+# koreterm shell integration for Bash. This must be at the top of your bashrc!
 if [ -n "${GHOSTTY_RESOURCES_DIR}" ]; then
     builtin source "${GHOSTTY_RESOURCES_DIR}/shell-integration/bash/ghostty.bash"
 fi
@@ -56,7 +56,7 @@ Elvish, on startup, searches for paths defined in `XDG_DATA_DIRS`
 variable for `./elvish/lib/*.elv` files and imports them. They are thus
 made available for use as modules by way of `use <filename>`.
 
-noctty launches Elvish, passing the environment with `XDG_DATA_DIRS` prepended
+koreterm launches Elvish, passing the environment with `XDG_DATA_DIRS` prepended
 with `$GHOSTTY_RESOURCES_DIR/src/shell-integration`. It contains
 `./elvish/lib/ghostty-integration.elv`. The user can then import it
 by `use ghostty-integration` every time after shell startup or
@@ -64,7 +64,7 @@ autostart integration in `$XDG_CONFIG_HOME/elvish/rc.elv`,
 which will run the integration routines.
 
 If you decide to autostart `ghostty-integration` with `rc.elv`, you should
-detect whether the terminal is noctty or not. To do this, add this to the end
+detect whether the terminal is koreterm or not. To do this, add this to the end
 of your `rc.elv` file:
 
 ```elvish
@@ -74,14 +74,14 @@ if (eq $E:TERM "xterm-ghostty") {
 ```
 
 The [Elvish](https://elv.sh) shell integration is supported by
-the community and is not officially supported by noctty. We distribute
+the community and is not officially supported by koreterm. We distribute
 it for ease of access and use but do not provide support for it.
 If you experience issues with the Elvish shell integration, I welcome
 any contributions to fix them. Thank you!
 
 ### Fish
 
-For [Fish](https://fishshell.com/), noctty prepends to the
+For [Fish](https://fishshell.com/), koreterm prepends to the
 `XDG_DATA_DIRS` directory. Fish automatically loads configuration
 files in `<XDG_DATA_DIR>/fish/vendor_conf.d/*.fish` on startup,
 allowing us to automatically integrate with the shell. For details
@@ -93,28 +93,28 @@ converted for its MSYS/Cygwin environment. Load the integration manually there.
 
 ### Nushell
 
-For [Nushell](https://www.nushell.sh/), noctty prepends to the
+For [Nushell](https://www.nushell.sh/), koreterm prepends to the
 `XDG_DATA_DIRS` directory, making the `ghostty` module available through
-Nushell's vendor autoload mechanism. noctty then automatically imports
+Nushell's vendor autoload mechanism. koreterm then automatically imports
 the module using the `-e "use ghostty *"` flag when starting Nushell.
 
-Native Windows Nushell ignores `XDG_DATA_DIRS`, so noctty instead sources the
+Native Windows Nushell ignores `XDG_DATA_DIRS`, so koreterm instead sources the
 distributed module by its absolute path in the startup clause. A user-supplied
 `--execute` or `-e` clause takes precedence; load the module manually in that case.
 
 Nushell provides many shell features itself, such as `title` and `cursor`,
-so our integration focuses on noctty-specific features like `sudo`,
+so our integration focuses on koreterm-specific features like `sudo`,
 `ssh-env`, and `ssh-terminfo`. The integration's `ssh` and `sudo` wrappers keep
 your external completer (such as carapace) through `@complete external`, which
 needs Nushell 0.108 or later; an older Nushell cannot parse the module and loads
 none of it.
 
-The shell integration is automatically enabled when running Nushell in noctty,
+The shell integration is automatically enabled when running Nushell in koreterm,
 but you can also load it manually if shell integration is disabled. Replace the
 example path with the absolute path to `ghostty.nu` in your installed resources:
 
 ```nushell
-source "C:/path/to/noctty/share/ghostty/shell-integration/nushell/vendor/autoload/ghostty.nu"
+source "C:/path/to/koreterm/share/ghostty/shell-integration/nushell/vendor/autoload/ghostty.nu"
 use ghostty *
 ```
 
@@ -126,7 +126,7 @@ value will be retained and restored after our shell integration scripts are
 run.
 
 However, if `ZDOTDIR` is set in a system-wide file like `/etc/zshenv`, it will
-override noctty's `ZDOTDIR` value, preventing the shell integration from being
+override koreterm's `ZDOTDIR` value, preventing the shell integration from being
 loaded. In this case, the shell integration needs to be loaded manually.
 
 To load the Zsh shell integration manually:
@@ -168,7 +168,7 @@ with ASCII apostrophes.
 OSC 7 reports the filesystem provider's native path, including filesystem
 PSDrives. Registry and other providers retain the terminal's previous cwd
 without emitting a replacement URI; OSC 133 prompt and command marks continue.
-UNC paths also retain the previous cwd without emitting OSC 7. Noctty does not
+UNC paths also retain the previous cwd without emitting OSC 7. Koreterm does not
 inherit network directories, and a local UNC authority such as `localhost`
 would otherwise make the URI's share path look like a POSIX cwd to the receiver.
 
@@ -185,7 +185,7 @@ own `-Command` would change exit behavior or corrupt the user payload.
 
 For the manual fallback, the Win32 runtime also installs a copy of
 `integration.ps1` to
-`%LOCALAPPDATA%\noctty\shell-integration\powershell\integration.ps1`
+`%LOCALAPPDATA%\koreterm\shell-integration\powershell\integration.ps1`
 so users can source it from `$PROFILE` if automatic injection is
 disabled or the command shape is unsupported.
 
@@ -288,7 +288,7 @@ so without PSReadLine there is no C and nothing else changes.
 Earlier versions hung C off PSReadLine's `AddToHistoryHandler`, which
 PSReadLine skips for a line equal to the previous history entry under the
 default `HistoryNoDuplicates`, and for whitespace-only lines, so running the
-same command twice got no C the second time. noctty no longer touches the
+same command twice got no C the second time. koreterm no longer touches the
 `AddToHistoryHandler` at all: the user's handler, and PSReadLine's default one
 that keeps credential-shaped lines out of the history file, stay exactly as
 they were. Loading the script into a session that already ran an older copy
@@ -330,7 +330,7 @@ hosts:
 
 The `ssh` wrapper below is installed only when an `ssh-*` feature is enabled,
 and only a wrapper this script installed is ever removed — a `function ssh`
-defined in the user's `$PROFILE` (which runs before noctty's injected
+defined in the user's `$PROFILE` (which runs before koreterm's injected
 `-Command`) is left alone.
 
 The exit code carried by OSC 133 D is derived without ever writing to
@@ -387,7 +387,7 @@ When `GHOSTTY_SHELL_FEATURES` contains `ssh-env` or `ssh-terminfo`, PowerShell
 wraps `ssh` and runs the remote session with `TERM=xterm-256color` by default.
 `ssh-env` also sends `COLORTERM`, `TERM_PROGRAM`, and `TERM_PROGRAM_VERSION`
 and sets `COLORTERM=truecolor` for the SSH process. When `ssh-terminfo` is
-enabled, the wrapper checks `noctty +ssh-cache` for the resolved
+enabled, the wrapper checks `koreterm +ssh-cache` for the resolved
 `user@hostname` from `ssh -G`; cached hosts use `TERM=xterm-ghostty`.
 
 PowerShell intentionally does not auto-install remote terminfo. The POSIX
@@ -398,9 +398,9 @@ installed by another shell integration path or manually added to the SSH cache.
 
 Interactive `cmd.exe` launches are auto-integrated by wrapping the inherited
 `PROMPT` (or cmd's `$P$G` default) with OSC 133 A/B prompt marks and OSC 9;9 cwd
-reports. When the shipped cmd Lua script is present, noctty prepends its directory
+reports. When the shipped cmd Lua script is present, koreterm prepends its directory
 to `CLINK_PATH`, but does not activate Clink. An already-active Clink discovers
-`noctty-shell-integration.lua` and adds OSC 133 C/D command boundaries. The script
+`koreterm-shell-integration.lua` and adds OSC 133 C/D command boundaries. The script
 also preserves marks around the final normal prompt after Clink themes replace
 it, while respecting existing prompt marks; without Clink, prompt/cwd marks
 remain available. See [windows.md](../../docs/windows.md#shells) for configured
@@ -411,6 +411,6 @@ remain available. See [windows.md](../../docs/windows.md#shells) for configured
 When `shell-integration-features` includes `ssh-terminfo`, the Bash integration
 wraps `ssh` to install the `xterm-ghostty` terminfo entry on remote hosts using
 local `infocmp` plus remote `tic`. Successful installs are cached through
-`noctty +ssh-cache`, preferring `$GHOSTTY_BIN_DIR/noctty` and falling
-back to a `noctty` found on `PATH`. If the cache helper is unavailable, SSH
+`koreterm +ssh-cache`, preferring `$GHOSTTY_BIN_DIR/koreterm` and falling
+back to a `koreterm` found on `PATH`. If the cache helper is unavailable, SSH
 still attempts installation but may repeat it on later connections.

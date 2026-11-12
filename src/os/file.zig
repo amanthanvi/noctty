@@ -117,12 +117,12 @@ test "allocTmpDir without TMP follows GetTempPathW to TEMP" {
     try testing.expect(kernel32.SetEnvironmentVariableW(tmp_name, null) != 0);
     try testing.expect(kernel32.SetEnvironmentVariableW(
         temp_name,
-        std.unicode.utf8ToUtf16LeStringLiteral("C:\\noctty-test-temp\\"),
+        std.unicode.utf8ToUtf16LeStringLiteral("C:\\koreterm-test-temp\\"),
     ) != 0);
 
     const dir = try allocTmpDir(alloc);
     defer freeTmpDir(alloc, dir);
-    try testing.expectEqualStrings("C:\\noctty-test-temp", dir);
+    try testing.expectEqualStrings("C:\\koreterm-test-temp", dir);
 }
 
 test "allocTmpDir keeps the separator of a drive root" {

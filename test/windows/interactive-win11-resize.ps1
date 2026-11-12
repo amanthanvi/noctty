@@ -34,7 +34,7 @@ if ($ResetState) { $forwardedArgs += '-ResetState' }
 Invoke-InteractiveWin11HarnessMain `
     -RepoRoot $repoRoot `
     -LauncherPath $launcherPath `
-    -EnvironmentVariable 'NOCTTY_INTERACTIVE_WIN11_RESIZE_BOOTSTRAPPED' `
+    -EnvironmentVariable 'KORETERM_INTERACTIVE_WIN11_RESIZE_BOOTSTRAPPED' `
     -ArgumentList $forwardedArgs
 
 Add-Type -AssemblyName System.Windows.Forms
@@ -44,7 +44,7 @@ using System;
 using System.Runtime.InteropServices;
 using System.Text;
 
-public static class NocttyResizeWin32 {
+public static class KoretermResizeWin32 {
     public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
 
     [StructLayout(LayoutKind.Sequential)]
@@ -102,7 +102,7 @@ $hostNewTabCommandId = 1904
 $paletteEditControlId = 2002
 $tabControlIdMin = 1000
 $tabControlIdMaxExclusive = 1900
-$surfaceWindowClassName = 'noctty.win32'
+$surfaceWindowClassName = 'koreterm.win32'
 
 function Assert-Win32CallSucceeded {
     param(
@@ -121,8 +121,8 @@ function Get-WindowRectObject {
         [Parameter(Mandatory)] [IntPtr] $Hwnd
     )
 
-    $rect = New-Object NocttyResizeWin32+RECT
-    if (-not [NocttyResizeWin32]::GetWindowRect($Hwnd, [ref] $rect)) {
+    $rect = New-Object KoretermResizeWin32+RECT
+    if (-not [KoretermResizeWin32]::GetWindowRect($Hwnd, [ref] $rect)) {
         throw "GetWindowRect failed for hwnd=$Hwnd"
     }
 
@@ -142,7 +142,7 @@ function Get-WindowClassName {
     )
 
     $builder = [System.Text.StringBuilder]::new(256)
-    [void] [NocttyResizeWin32]::GetClassNameW($Hwnd, $builder, $builder.Capacity)
+    [void] [KoretermResizeWin32]::GetClassNameW($Hwnd, $builder, $builder.Capacity)
     return $builder.ToString()
 }
 
@@ -152,13 +152,13 @@ function Get-VisibleChildWindows {
     )
 
     $children = [System.Collections.Generic.List[object]]::new()
-    $callback = [NocttyResizeWin32+EnumWindowsProc] {
+    $callback = [KoretermResizeWin32+EnumWindowsProc] {
         param([IntPtr] $hwnd, [IntPtr] $lParam)
 
-        if ([NocttyResizeWin32]::IsWindowVisible($hwnd)) {
+        if ([KoretermResizeWin32]::IsWindowVisible($hwnd)) {
             [void] $children.Add([pscustomobject]@{
                 Hwnd = $hwnd
-                Id = [NocttyResizeWin32]::GetDlgCtrlID($hwnd)
+                Id = [KoretermResizeWin32]::GetDlgCtrlID($hwnd)
                 ClassName = Get-WindowClassName -Hwnd $hwnd
             })
         }
@@ -166,7 +166,7 @@ function Get-VisibleChildWindows {
         return $true
     }
 
-    [void] [NocttyResizeWin32]::EnumChildWindows($Parent, $callback, [IntPtr]::Zero)
+    [void] [KoretermResizeWin32]::EnumChildWindows($Parent, $callback, [IntPtr]::Zero)
     return $children.ToArray()
 }
 
@@ -265,9 +265,9 @@ function Show-ResizeHarnessWindow {
         [Parameter(Mandatory)] [IntPtr] $Hwnd
     )
 
-    [void] [NocttyResizeWin32]::ShowWindow($Hwnd, $showWindowRestore)
+    [void] [KoretermResizeWin32]::ShowWindow($Hwnd, $showWindowRestore)
     $noMoveNoSizeShow = [uint32](0x0001 -bor 0x0002 -bor 0x0040)
-    [void] [NocttyResizeWin32]::SetWindowPos(
+    [void] [KoretermResizeWin32]::SetWindowPos(
         $Hwnd,
         [IntPtr](-1),
         0,
@@ -276,11 +276,11 @@ function Show-ResizeHarnessWindow {
         0,
         $noMoveNoSizeShow
     )
-    [void] [NocttyResizeWin32]::SetForegroundWindow($Hwnd)
+    [void] [KoretermResizeWin32]::SetForegroundWindow($Hwnd)
 }
 
-# Reads noctty's window from the screen, clipped to its client area inset by
-# the corner radius, and saves it to $Path only where it shows noctty alone
+# Reads koreterm's window from the screen, clipped to its client area inset by
+# the corner radius, and saves it to $Path only where it shows koreterm alone
 # (Save-StatefulScreenCapture). -PassThru also returns the in-memory image for
 # the band check, which the caller disposes. $Promote is the top-level window
 # to raise again before a retry.
@@ -503,7 +503,7 @@ $payloadPath = Join-Path $layout.Temp 'interactive-win11-resize-payload.ps1'
 $screenshotPath = Join-Path $layout.Logs 'interactive-win11-resize-grown.png'
 $surfaceScreenshotPath = Join-Path $layout.Logs 'interactive-win11-resize-grown-surface.png'
 $liveScreenshotPath = Join-Path $layout.Logs 'interactive-win11-resize-live-grown.png'
-$instanceClass = "noctty-resize-$($layout.SandboxId)"
+$instanceClass = "koreterm-resize-$($layout.SandboxId)"
 
 if ($launchAction -eq 'build') {
     Invoke-InteractiveWin11Build -RepoRoot $repoRoot
@@ -568,14 +568,14 @@ try {
         }
 
         if ($process.HasExited) {
-            throw "noctty exited before resize validation could start (exit code $($process.ExitCode))"
+            throw "koreterm exited before resize validation could start (exit code $($process.ExitCode))"
         }
 
         Start-Sleep -Milliseconds $script:RESIZE_POLL_MS
     }
 
     if ($process.MainWindowHandle -eq 0) {
-        throw 'noctty main window handle was not ready before timeout.'
+        throw 'koreterm main window handle was not ready before timeout.'
     }
 
     $workingArea = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
@@ -588,7 +588,7 @@ try {
 
     Show-ResizeHarnessWindow -Hwnd $process.MainWindowHandle
     Assert-Win32CallSucceeded `
-        -Succeeded ([NocttyResizeWin32]::MoveWindow($process.MainWindowHandle, $x, $y, $initialWidth, $initialHeight, $true)) `
+        -Succeeded ([KoretermResizeWin32]::MoveWindow($process.MainWindowHandle, $x, $y, $initialWidth, $initialHeight, $true)) `
         -Operation "initial MoveWindow(hwnd=$($process.MainWindowHandle))"
     Start-Sleep -Milliseconds $script:RESIZE_INITIAL_SETTLE_MS
 
@@ -606,24 +606,24 @@ try {
     [void] (Invoke-InteractiveWin11Message -Hwnd $process.MainWindowHandle -Message $wmEnterSizeMove -Deadline $scenarioDeadline -Description 'WM_ENTERSIZEMOVE' -Flags $script:InteractiveWin11SmtoBlock -Process $process)
     $enteredSizeMove = $true
     Assert-Win32CallSucceeded `
-        -Succeeded ([NocttyResizeWin32]::MoveWindow($process.MainWindowHandle, $x, $y, $grownWidth, $grownHeight, $true)) `
+        -Succeeded ([KoretermResizeWin32]::MoveWindow($process.MainWindowHandle, $x, $y, $grownWidth, $grownHeight, $true)) `
         -Operation "grown MoveWindow(hwnd=$($process.MainWindowHandle))"
     Show-ResizeHarnessWindow -Hwnd $process.MainWindowHandle
-    [void] [NocttyResizeWin32]::UpdateWindow($process.MainWindowHandle)
+    [void] [KoretermResizeWin32]::UpdateWindow($process.MainWindowHandle)
     Start-Sleep -Milliseconds $script:RESIZE_STEP_SETTLE_MS
     $liveShot = Capture-WindowImage -Hwnd $process.MainWindowHandle -Promote $process.MainWindowHandle -Path $liveScreenshotPath -PassThru
     $liveRatios = Assert-ResizeImageHasNoUnpaintedExpansionBands -Shot $liveShot
-    [void] [NocttyResizeWin32]::UpdateWindow($process.MainWindowHandle)
+    [void] [KoretermResizeWin32]::UpdateWindow($process.MainWindowHandle)
     Start-Sleep -Milliseconds $script:RESIZE_COMPLETION_SETTLE_MS
 
     [void] (Invoke-InteractiveWin11Message -Hwnd $process.MainWindowHandle -Message $wmExitSizeMove -Deadline $scenarioDeadline -Description 'WM_EXITSIZEMOVE' -Flags $script:InteractiveWin11SmtoBlock -Process $process)
     $enteredSizeMove = $false
-    [void] [NocttyResizeWin32]::UpdateWindow($process.MainWindowHandle)
+    [void] [KoretermResizeWin32]::UpdateWindow($process.MainWindowHandle)
     Start-Sleep -Milliseconds $script:RESIZE_COMPLETION_SETTLE_MS
 
-    $surfaceHwnd = [NocttyResizeWin32]::FindWindowExW($process.MainWindowHandle, [IntPtr]::Zero, $surfaceWindowClassName, $null)
+    $surfaceHwnd = [KoretermResizeWin32]::FindWindowExW($process.MainWindowHandle, [IntPtr]::Zero, $surfaceWindowClassName, $null)
     if ($surfaceHwnd -eq [IntPtr]::Zero) {
-        throw 'failed to locate noctty surface child HWND after resize'
+        throw 'failed to locate koreterm surface child HWND after resize'
     }
     $hostRect = Get-WindowRectObject -Hwnd $process.MainWindowHandle
     $surfaceRect = Get-WindowRectObject -Hwnd $surfaceHwnd

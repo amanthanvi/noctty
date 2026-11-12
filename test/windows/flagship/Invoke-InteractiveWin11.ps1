@@ -22,13 +22,13 @@ $status = 'error'
 $failure = $null
 $commit = $null
 $measurements = [ordered]@{}
-$oldForeground = $env:NOCTTY_INTERACTIVE_RUN_FOREGROUND_HARNESS
+$oldForeground = $env:KORETERM_INTERACTIVE_RUN_FOREGROUND_HARNESS
 
-if (-not ('Noctty.Flagship.DesktopProbe' -as [type])) {
+if (-not ('Koreterm.Flagship.DesktopProbe' -as [type])) {
     Add-Type -TypeDefinition @'
 using System;
 using System.Runtime.InteropServices;
-namespace Noctty.Flagship {
+namespace Koreterm.Flagship {
     public static class DesktopProbe {
         [StructLayout(LayoutKind.Sequential)]
         private struct USEROBJECTFLAGS {
@@ -60,7 +60,7 @@ namespace Noctty.Flagship {
 }
 '@
 }
-$interactiveDesktop = [Environment]::UserInteractive -and [Noctty.Flagship.DesktopProbe]::HasVisibleWindowStation()
+$interactiveDesktop = [Environment]::UserInteractive -and [Koreterm.Flagship.DesktopProbe]::HasVisibleWindowStation()
 
 try {
     if (-not $interactiveDesktop) {
@@ -72,7 +72,7 @@ try {
     $commit = (& git -C $repoRoot rev-parse HEAD).Trim()
     New-Item -ItemType Directory -Force -Path $outputPath | Out-Null
     if ($IncludeForegroundHarness) {
-        $env:NOCTTY_INTERACTIVE_RUN_FOREGROUND_HARNESS = '1'
+        $env:KORETERM_INTERACTIVE_RUN_FOREGROUND_HARNESS = '1'
     }
     $arguments = @(
         '-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass',
@@ -92,7 +92,7 @@ catch {
 }
 finally {
     New-Item -ItemType Directory -Force -Path $outputPath | Out-Null
-    $env:NOCTTY_INTERACTIVE_RUN_FOREGROUND_HARNESS = $oldForeground
+    $env:KORETERM_INTERACTIVE_RUN_FOREGROUND_HARNESS = $oldForeground
     if ($commit -and (Test-Path -LiteralPath $rawTranscriptPath)) {
         $redacted = Get-Content -LiteralPath $rawTranscriptPath -Raw
         foreach ($replacement in @(
@@ -111,7 +111,7 @@ finally {
     } else { $null }
 
     $result = [ordered]@{
-        schema_version = 'noctty.verification.result.v1'
+        schema_version = 'koreterm.verification.result.v1'
         scenario_id = 'windows.interactive-win11.composite'
         status = $status
         started_at = $started.ToString('o')

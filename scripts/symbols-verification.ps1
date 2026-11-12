@@ -6,7 +6,7 @@
 # PowerShell 5.1 compatible like package-windows.ps1.
 
 function Get-WindowsSymbolBinaryNames {
-    # The noctty-built PEs that ship in the portable ZIP, by file name.
+    # The koreterm-built PEs that ship in the portable ZIP, by file name.
     return @(
         Get-WindowsSignedRuntimePayloads |
             ForEach-Object { $_.Substring($_.LastIndexOf('/') + 1) }
@@ -204,16 +204,16 @@ function Assert-SymbolsArchiveMatchesPortable {
 }
 
 function Assert-SymbolsMatchBinaries {
-    # Every noctty-built PE under $PayloadRoot with a CodeView record has the
+    # Every koreterm-built PE under $PayloadRoot with a CodeView record has the
     # PDB it names in $SymbolsRoot with the same GUID and age, and the symbols
-    # directory holds nothing else. noctty.exe and noctty.com must have one.
+    # directory holds nothing else. koreterm.exe and koreterm.com must have one.
     param(
         [Parameter(Mandatory)] [string]$SymbolsRoot,
         [Parameter(Mandatory)] [string]$PayloadRoot,
         [Parameter(Mandatory)] [string]$Label
     )
 
-    $required = @('noctty.exe', 'noctty.com')
+    $required = @('koreterm.exe', 'koreterm.com')
     $expectedPdbs = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
     $evidence = @()
     foreach ($binaryName in (Get-WindowsSymbolBinaryNames)) {

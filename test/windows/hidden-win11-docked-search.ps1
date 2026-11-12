@@ -131,7 +131,7 @@ public static class Ds {
 if (-not $Driver) {
     Invoke-LocalHiddenDriver -Script $PSCommandPath -Bin $Bin -Run $Run -TimeoutSeconds $DriverTimeoutSeconds `
         -ExpectedStartupHash $ExpectedStartupHash -ExpectedStartupModified $ExpectedStartupModified `
-        -DesktopPrefix 'noctty-search-' -Label 'Hidden docked search' -PassDesktopName -GuardClipboard
+        -DesktopPrefix 'koreterm-search-' -Label 'Hidden docked search' -PassDesktopName -GuardClipboard
     exit
 }
 
@@ -182,7 +182,7 @@ function Launch-Case([string]$Name) {
     @("working-directory = $dir",'command = cmd.exe /d /c fill.cmd','shell-integration = none','single-instance = false','window-save-state = never','confirm-close-surface = false',
       'copy-on-select = false','clipboard-read = deny','clipboard-write = deny',
       'keybind = f4=start_search','keybind = f5=new_split:right') | Set-Content -LiteralPath $config
-    $exe=Join-Path $dir 'noctty.exe'
+    $exe=Join-Path $dir 'koreterm.exe'
     $pi=[HiddenLocal]::Spawn($exe,('"{0}" --config-file="{1}"' -f $exe,$config),$dir,$desktopPath)
     $script:processes.Add(@{Case=$Name;Pid=$pi.pid})
     $deadline=[datetime]::UtcNow.AddSeconds(20)

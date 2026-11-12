@@ -34,11 +34,11 @@ desktop.
   build 19045.3031 or newer (KB5026435), the first update with that setting; see
   [Windows Terminal installation](https://learn.microsoft.com/en-us/windows/terminal/install#set-your-default-terminal-application)
   (Microsoft Learn, updated 2025-11-12).
-- A snapshot taken before any noctty is installed. Revert to it between the
+- A snapshot taken before any koreterm is installed. Revert to it between the
   portable pass and the installed pass, and after the default-terminal rows.
 - Display scaling 100% to start; rows that need another scale say so.
 - A VM without GPU acceleration has no OpenGL 4.3 driver. Put
-  `renderer = d3d11-warp` in `config.ghostty` beside `noctty.exe` first (see
+  `renderer = d3d11-warp` in `config.ghostty` beside `koreterm.exe` first (see
   [Starting without OpenGL](windows.md#starting-without-opengl)) and record that
   you did; the rows below do not depend on the renderer.
 - The portable ZIP under test, checked against its `SHA256SUMS` file
@@ -48,7 +48,7 @@ desktop.
 - A second machine at build 17763 is optional and used for one row (W10-02).
 
 Do not change input, display or lock settings beyond what a row says. Do not
-register noctty as the default terminal on a machine you cannot restore.
+register koreterm as the default terminal on a machine you cannot restore.
 
 ## What the workflow covers
 
@@ -60,7 +60,7 @@ branch. GitHub offers no Windows 10 image: `windows-2019` was retired on
 and the image list shows Windows Server 2025, Windows Server 2022 and Windows 11
 Arm64 ([runner-images README](https://github.com/actions/runner-images)).
 
-It exercises: the full unit suite, a `noctty +version` smoke, and a hidden-desktop
+It exercises: the full unit suite, a `koreterm +version` smoke, and a hidden-desktop
 launch of the real binary (the WARP lifecycle smoke) whose log is checked for
 `win32 os_build=<below 22000> integrated_titlebar=false`. It does not exercise a
 Windows 10 desktop shell, the taskbar, toasts, the jump list, Explorer, a real
@@ -104,11 +104,11 @@ Save the child's log first for the rows that read it. A GUI launch has no
 console, so start the executable with its stderr redirected:
 
 ```powershell
-Start-Process .\noctty.exe -ArgumentList '--single-instance=false' -RedirectStandardError .\err.txt
+Start-Process .\koreterm.exe -ArgumentList '--single-instance=false' -RedirectStandardError .\err.txt
 ```
 
-`noctty.com` starts the executable with stderr discarded, so use the `.exe`
-here. The noctty log is at info level in release builds.
+`koreterm.com` starts the executable with stderr discarded, so use the `.exe`
+here. The koreterm log is at info level in release builds.
 
 ### Startup and identity
 
@@ -120,7 +120,7 @@ fell to its Windows 10 default.
 
 **W10-02 Loads at all (optional, build 17763 machine).** `CreatePseudoConsole`
 is a static `kernel32` import, so 1809 is the hard floor ([windows.md](windows.md#supported-systems)).
-On the 1809 machine run `noctty.com +version`, then start `noctty.exe`. Expected:
+On the 1809 machine run `koreterm.com +version`, then start `koreterm.exe`. Expected:
 no "entry point not found" dialog; a terminal opens. The bundled ConPTY may not
 load on 1809; then the banner names the reason and the in-box conhost serves the
 shell (W10-19).
@@ -130,10 +130,10 @@ shell (W10-19).
 **W10-03 Stock caption with a separate tab row (Core).** Gate:
 `shouldUseIntegratedTitlebar`. Default config. Expected: Windows draws the title
 bar and its minimise, maximise and close buttons; the tab strip is a separate row
-below it (32 DIP tall at 100%, not the 40 DIP integrated row); noctty draws no
+below it (32 DIP tall at 100%, not the 40 DIP integrated row); koreterm draws no
 caption buttons of its own. Open two tabs, maximise, restore, double-click the
 caption, then run `toggle_fullscreen` and leave fullscreen. Repeat at 150%
-scaling (Settings > Display, then start a fresh noctty): the row scales and nothing
+scaling (Settings > Display, then start a fresh koreterm): the row scales and nothing
 clips. The separate tab row keeps its 3 DIP top
 inset when maximized and fullscreen; the flush top edge is a Windows 11 change.
 
@@ -153,7 +153,7 @@ Gate for W10-06 to W10-09: `undecoratedKeepsFrame`. On Windows 10 an undecorated
 window is frameless (see [Windows, tabs, and splits](windows.md#windows-tabs-and-splits)).
 
 **W10-06 First window with `window-decoration = none` (Core).** Set it in
-`config.ghostty`, close every noctty, start one. Expected: no title bar at all
+`config.ghostty`, close every koreterm, start one. Expected: no title bar at all
 (#270: `CreateWindowEx` adds `WS_CAPTION` to an overlapped style with no frame
 bits, and the host removes it again before the first tab), no border, no shadow.
 The cursor stays an arrow at every window edge (no resize border). `Alt+Space`
@@ -197,7 +197,7 @@ The host's outer edge is flush with the screen; its tab buttons keep their
 ### Theme and DWM
 
 **W10-11 Dark caption (Core).** Set Windows app mode to light, then `window-theme
-= dark`. Expected: the caption turns dark. noctty tries `DWMWA_USE_IMMERSIVE_DARK_MODE`
+= dark`. Expected: the caption turns dark. koreterm tries `DWMWA_USE_IMMERSIVE_DARK_MODE`
 (20) and, when DWM answers `E_INVALIDARG`, attribute 19. Microsoft documents
 attribute 20 from Windows 11 build 22000 ([DWMWINDOWATTRIBUTE](https://learn.microsoft.com/en-us/windows/win32/api/dwmapi/ne-dwmapi-dwmwindowattribute),
 page dated 2026-03-09); Windows 10 acceptance of 20 or 19 is observed behaviour, so
@@ -255,19 +255,19 @@ script whose box remains and the fonts that Windows 10 lacks.
 
 ### ConPTY and shells
 
-**W10-19 ConPTY source (Core).** Close all noctty windows before each case and
+**W10-19 ConPTY source (Core).** Close all koreterm windows before each case and
 start each test instance with `--single-instance=false` so an existing instance
 cannot consume the launch with a different environment or ConPTY source.
-(a) Run `.\noctty.com +version`. Expected: `ConPTY :
+(a) Run `.\koreterm.com +version`. Expected: `ConPTY :
 bundled (<path>)`. Open `cmd`, run `cls` and `dir`, then start a full-screen
-program (for example `more` on a long file). (b) Set `NOCTTY_CONPTY=inbox` in the
-environment and run `.\noctty.com +version` and a new instance. Expected: `+version` reads
-`ConPTY : inbox (NOCTTY_CONPTY=inbox is set)`, `err.txt` holds the warning
-`NOCTTY_CONPTY=inbox is set; using the in-box conhost`, there is no banner (a forced
+program (for example `more` on a long file). (b) Set `KORETERM_CONPTY=inbox` in the
+environment and run `.\koreterm.com +version` and a new instance. Expected: `+version` reads
+`ConPTY : inbox (KORETERM_CONPTY=inbox is set)`, `err.txt` holds the warning
+`KORETERM_CONPTY=inbox is set; using the in-box conhost`, there is no banner (a forced
 choice is the user's own, `pty.zig`), and the shell works. (c) Without the variable,
 copy the folder, delete `conpty.dll` from the copy and start it. Expected: a banner
 that begins "Using Windows' in-box console host because conpty.dll is not next to
-noctty.exe", and a working shell. [windows.md](windows.md#keyboard) says the in-box
+koreterm.exe", and a working shell. [windows.md](windows.md#keyboard) says the in-box
 conhost of build 19045 was not measured for key encoding; record anything that looks
 wrong in the in-box path as such.
 
@@ -289,33 +289,33 @@ and `jump_to_prompt` finds the previous prompt (OSC 133).
 
 **W10-22 Default terminal (installed, throwaway snapshot only).** Gate:
 `win32_terminal_handoff.zig`. (a) With Windows Terminal not installed, run
-`.\noctty.com +register-default-terminal`. Expected, per
+`.\koreterm.com +register-default-terminal`. Expected, per
 [Default terminal](windows.md#default-terminal): it refuses when `DelegationConsole`
-is missing, empty or the inbox console host, printing "Cannot register noctty as the
+is missing, empty or the inbox console host, printing "Cannot register koreterm as the
 default terminal: HKCU\Console\%%Startup\DelegationConsole is missing or selects
 the inbox console host", and writes nothing. Check that key is unchanged. (b) Install Windows Terminal 1.24 or newer, open its
 Settings > Startup and choose "Windows Terminal" as the default terminal application
 (installing it does not select it; registration needs that selection for the console
 half). Note `DelegationConsole` and `DelegationTerminal` under that key. Run
-`.\noctty.com +register-default-terminal`. Expected: it succeeds. Start `cmd.exe` from the
-Run dialog. Expected: a visible noctty window adopts the console (a separate
+`.\koreterm.com +register-default-terminal`. Expected: it succeeds. Start `cmd.exe` from the
+Run dialog. Expected: a visible koreterm window adopts the console (a separate
 `-Embedding` process, see [Default terminal](windows.md#default-terminal)). (c) Run
-`.\noctty.com +unregister-default-terminal` and start `cmd.exe` again. Expected: the two
+`.\koreterm.com +unregister-default-terminal` and start `cmd.exe` again. Expected: the two
 values are back to what (b) recorded, and the console opens in Windows Terminal.
 Revert to the snapshot afterwards.
 
 **W10-23 Toasts (installed).** Install with the installer so the Start Menu shortcut
 carries the AppUserModelID. Set `notify-on-command-finish = always` and
 `notify-on-command-finish-action = notify`, run `Start-Sleep 12` and switch to
-another window. Expected: a toast named "noctty" with the noctty
+another window. Expected: a toast named "koreterm" with the koreterm
 icon whose last line reads `Tab 1: <tab title>`, in Action Center afterwards;
 clicking its popup focuses the pane. Run it twice more without looking at the
 tab: Action Center holds one entry for the pane, the newest. Switch to the tab:
 the entry leaves Action Center. The next two checks test closing and
 quitting, so nothing may count as seeing the tab first: from the moment the
-toast is shown until the close or the quit, stay in the noctty window with
+toast is shown until the close or the quit, stay in the koreterm window with
 the pane focused. Do not switch windows, open Action Center or click the
-popup in between: bringing noctty forward or focusing the pane counts as
+popup in between: bringing koreterm forward or focusing the pane counts as
 seeing the tab and removes the entry by itself. With `always` the toast shows
 while the pane is focused. Press `Ctrl+Shift+T`, run `Start-Sleep 12` in the
 new tab, wait for the popup (if none appears, the check does not count), then
@@ -323,27 +323,27 @@ type `exit` there so its pane closes. Open Action Center: the entry is gone.
 Close Action Center, run `Start-Sleep 12` in the remaining tab, wait for the
 popup, then press `Ctrl+Shift+Q` without leaving the window. At an idle prompt
 no confirmation appears; if one does, the check does not count, so run it
-again. Open Action Center: the entry is gone. Start noctty again, turn Focus
+again. Open Action Center: the entry is gone. Start koreterm again, turn Focus
 Assist to "Alarms only" and repeat the first toast.
 Expected: either the toast (record whether it pops up or only reaches Action
 Center) or an in-app banner ending in the same tab line; never nothing. Turn
 Focus Assist off again. Action Center clicks: open a second tab, run
-`Start-Sleep 12` in the first, switch to the second tab, minimize noctty and
+`Start-Sleep 12` in the first, switch to the second tab, minimize koreterm and
 wait until the popup is gone. Click the entry in Action Center. Expected:
-noctty restores, shows the first tab with its pane focused, and comes to the
+koreterm restores, shows the first tab with its pane focused, and comes to the
 foreground (record whether it did or only flashed its taskbar button). Click
 a fresh toast's popup once: the pane is focused once. With
 `quit-after-last-window-closed = false`, close every window while a toast is
 in Action Center and click it: one window opens and comes forward. Start a
-portable copy while no installed noctty runs, so that it is the
-single-instance noctty, minimize it, and click one of its entries in Action
+portable copy while no installed koreterm runs, so that it is the
+single-instance koreterm, minimize it, and click one of its entries in Action
 Center: the installed activator hands the click over and the portable window
 restores and comes to the foreground (record whether it only flashed its
-taskbar button); close it. Then end noctty's
+taskbar button); close it. Then end koreterm's
 process in Task Manager while one of its toasts is in Action Center, and click
-that entry: one noctty window opens (with the session restored if that is
+that entry: one koreterm window opens (with the session restored if that is
 on) and comes forward. Uninstall, then check that
-`HKCU\Software\Classes\AppUserModelId\io.github.amanthanvi.noctty` has no
+`HKCU\Software\Classes\AppUserModelId\io.github.amanthanvi.koreterm` has no
 `CustomActivator` value and `Software\Classes\CLSID\{3E21F05E-C82D-4E45-AA7D-2EC361AD6C3E}`
 exists under neither HKLM nor HKCU. Then revert to the clean snapshot and repeat with the portable copy only:
 it creates the AppUserModelID registration where none exists
@@ -355,18 +355,18 @@ pane, and a click on its Action Center entry does nothing.
 
 **W10-24 Jump list (installed).** After `cd` in a few folders, right-click the taskbar
 button. Expected: "Recent" lists the folders, "Profiles" lists the detected shells;
-choosing an entry opens noctty in that folder or profile. A portable copy builds no
+choosing an entry opens koreterm in that folder or profile. A portable copy builds no
 jump list ([Taskbar jump list](windows.md#taskbar-jump-list)).
 
-**W10-25 Explorer verb and taskbar progress.** Run `.\noctty.com +register-shell-menu`, then
-right-click a folder in Explorer. Expected: "Open noctty here" is in the main context
+**W10-25 Explorer verb and taskbar progress.** Run `.\koreterm.com +register-shell-menu`, then
+right-click a folder in Explorer. Expected: "Open koreterm here" is in the main context
 menu (Windows 11 puts it under "Show more options"); it opens a new instance in that
-folder. Run `.\noctty.com +unregister-shell-menu` afterwards. Then, in a tab, print
+folder. Run `.\koreterm.com +unregister-shell-menu` afterwards. Then, in a tab, print
 `printf '\e]9;4;1;50\a'` from Git Bash or `[Console]::Write("$([char]27)]9;4;1;50$([char]7)")`
 from PowerShell. Expected: a progress bar on the taskbar button; `OSC 9;4;0` clears
 it.
 
-**W10-26 Power notifications.** Start noctty and read `err.txt`. Expected: no
+**W10-26 Power notifications.** Start koreterm and read `err.txt`. Expected: no
 `AC/DC power notifications unavailable` and no `battery-saver notifications
 unavailable` warning (Energy Saver registration may fail on Windows 10; that is
 logged at debug level only and is not a warning). On a laptop, turn on Battery Saver
@@ -381,7 +381,7 @@ in shell detection (whose guarded open came with #443), in the link opener and
 in the WSL safety probe. The rows exercise the first two; no row here reaches
 the WSL probe. It was written because an upstream report
 (openai/codex#46290) has Windows 10 22H2 build 19045.6456 rejecting the alias
-itself under that flag. That the same happens to noctty is inferred, and
+itself under that flag. That the same happens to koreterm is inferred, and
 neither row has been run on Windows 10. Record the build number with the
 result.
 
@@ -390,7 +390,7 @@ result.
 PowerShell 7 so that `pwsh.exe` is on `PATH`, for example with the MSI or
 `winget install Microsoft.PowerShell`, after W10-21, which needs the machine
 without it. Open a new console afterwards (a session started before the
-install keeps the old `PATH`, which noctty would inherit) and check that
+install keeps the old `PATH`, which koreterm would inherit) and check that
 `Get-Command pwsh.exe` finds it. Start the portable copy from that console
 with `--single-instance=false` and a
 `config.ghostty` that sets neither `command` nor `default-profile`. In the
@@ -405,10 +405,10 @@ to the next shell.
 **W10-28 Ctrl+click on a local file path (Core).** Gate: `directVolumePath` and
 `directVolumeDeviceName` (`os/windows.zig`), used by the link opener
 (`os/local_path.zig`). Create a text file on a local drive with
-`Set-Content "$env:TEMP\noctty-link.txt" hello`, print its path with
-`"$env:TEMP\noctty-link.txt"`, and Ctrl+click the printed path. Expected: the
+`Set-Content "$env:TEMP\koreterm-link.txt" hello`, print its path with
+`"$env:TEMP\koreterm-link.txt"`, and Ctrl+click the printed path. Expected: the
 file opens in the application registered for `.txt` (Notepad on a clean image).
-Then print `C:\no-such-folder\noctty-link.txt` and Ctrl+click it. Expected:
+Then print `C:\no-such-folder\koreterm-link.txt` and Ctrl+click it. Expected:
 nothing opens. Nothing opening for the existing file is a finding: the opener
 checks the file with `OBJ_DONT_REPARSE`, and refuses the link if that open
 fails.

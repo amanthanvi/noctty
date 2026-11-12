@@ -238,7 +238,7 @@ test "CommonDerivedConfig split fill defaults to the configured background" {
     try std.testing.expectEqual(terminal.color.RGB{ .r = 0xff, .g = 0xff, .b = 0xff }, derived.unfocused_split_fill);
 }
 
-/// Whether the window composes a renderer's alpha (noctty divergence, #640):
+/// Whether the window composes a renderer's alpha (koreterm divergence, #640):
 /// it set an opacity below 1, which only a window whose background alone is
 /// translucent does (an opaque one sets 1, a layered one none).
 fn composesAlpha(override: ?f64) bool {
@@ -1319,7 +1319,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
 
         /// What the window composes this terminal at (`background_opacity_override`).
         ///
-        /// noctty divergence (#640): upstream has no such override. The
+        /// koreterm divergence (#640): upstream has no such override. The
         /// frame's data is left alone. `updateFrame` applies the opacity to
         /// the background uniform and to every explicit-background cell
         /// together, in the full rebuild this asks for, so a frame that
@@ -1342,7 +1342,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
         /// split (`splitDimUniforms`), drawn last into `target`; null when
         /// nothing is to be drawn there.
         ///
-        /// noctty divergence (#640): a target that presenting converts for a
+        /// koreterm divergence (#640): a target that presenting converts for a
         /// window composing its alpha (OpenGL's `presentsComposed`) takes the
         /// dim as `Target.composed_dim` instead, to be laid over it after the
         /// conversion. The dim blends in gamma space, so drawn into the target
@@ -1977,7 +1977,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 );
             }
 
-            // noctty divergence (#640): a window that composes this pane's
+            // koreterm divergence (#640): a window that composes this pane's
             // alpha has its frames converted as they are presented, from
             // targets made for it (`GraphicsAPI.composed_alpha`). Any other
             // window keeps upstream's targets and present.

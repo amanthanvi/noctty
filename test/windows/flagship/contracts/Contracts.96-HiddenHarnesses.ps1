@@ -1,5 +1,5 @@
 # The hidden-desktop harnesses added for PKG-76 (profile matrix, -Embedding idle) start real
-# copies of noctty on ephemeral hosted runners, and the skip budget decides what CI may skip
+# copies of koreterm on ephemeral hosted runners, and the skip budget decides what CI may skip
 # silently. Both are pinned here: the safety rules by what the files may contain, the budget script
 # by running it on synthetic logs.
 $hiddenLib = Join-Path $repoRoot 'test\windows\hidden-win11-lib.ps1'
@@ -25,16 +25,16 @@ $hiddenContracts = @(
     @{
         File = $hiddenLib
         Content = { $hiddenLibText }
-        Pattern = '(?s)function Assert-MeasureAumid.*?io\.github\.amanthanvi\.noctty\.measure.*?throw'
+        Pattern = '(?s)function Assert-MeasureAumid.*?io\.github\.amanthanvi\.koreterm\.measure.*?throw'
         Kind = 'Text'
         Description = 'a launch is refused unless the binary carries the measurement AUMID, or the caller says it is an ephemeral runner'
     }
     @{
         File = $hiddenLib
         Content = { $hiddenLibText }
-        Pattern = '(?s)function Start-HiddenNoctty.*?noctty\.portable.*?throw.*?"WinSta0\\\$DesktopName"'
+        Pattern = '(?s)function Start-HiddenKoreterm.*?koreterm\.portable.*?throw.*?"WinSta0\\\$DesktopName"'
         Kind = 'Text'
-        Description = 'every noctty copy is portable and is started on an explicit desktop'
+        Description = 'every koreterm copy is portable and is started on an explicit desktop'
     }
     @{
         File = $hiddenLib
@@ -78,9 +78,9 @@ foreach ($script in $hiddenScripts) {
     if ($name -eq 'hidden-win11-profile-matrix.ps1') { $hiddenContracts += @{
         File = $script
         Content = $text
-        Pattern = "(?s)'--single-instance=false'.*?--class=noctty-test-pkg76"
+        Pattern = "(?s)'--single-instance=false'.*?--class=koreterm-test-pkg76"
         Kind = 'Text'
-        Description = "$name starts every noctty with single-instance off and a unique class"
+        Description = "$name starts every koreterm with single-instance off and a unique class"
     } }
 }
 Invoke-ContractTable -Contracts $hiddenContracts
@@ -144,7 +144,7 @@ public static class TYPE_NAME {
     static bool TerminateProcess(IntPtr process, uint code) { return true; }
     static bool EnumWindows(EnumWindow cb, IntPtr p) { if (EnumFails) return false; for (int i = 1; i <= 4; i++) cb(new IntPtr(i), p); return true; }
     static int GetWindowThreadProcessId(IntPtr h, out int pid) { pid = h.ToInt32() == 4 ? 99 : 42; return 1; }
-    static string Class(IntPtr h) { return h.ToInt32() == 1 ? "noctty.win32.host" : "#32770"; }
+    static string Class(IntPtr h) { return h.ToInt32() == 1 ? "koreterm.win32.host" : "#32770"; }
     static bool IsWindowVisible(IntPtr h) { return h.ToInt32() == 2 || h.ToInt32() == 4; }
 METHODS
 }
@@ -199,7 +199,7 @@ Assert-HiddenMutation 'desktop name error stage lost' $nativeCode ($nativeCode.R
 Assert-HiddenMutation 'missing job assignment' $nativeCode ($nativeCode.Replace('!AssignProcessToJobObject(job, pi.process) || ', '')) ${function:Test-HiddenNativeCode}
 Assert-HiddenMutation 'missing no-window flag' $nativeCode ($nativeCode.Replace('0x08004004', '0x00004004')) ${function:Test-HiddenNativeCode}
 Assert-HiddenMutation 'hidden windows counted as UI' $nativeCode ($nativeCode.Replace(' && IsWindowVisible(h)', '')) ${function:Test-HiddenNativeCode}
-Assert-HiddenMutation 'visible dialogs omitted' $nativeCode ($nativeCode.Replace('id == pid && IsWindowVisible(h)', 'id == pid && IsWindowVisible(h) && Class(h) == "noctty.win32.host"')) ${function:Test-HiddenNativeCode}
+Assert-HiddenMutation 'visible dialogs omitted' $nativeCode ($nativeCode.Replace('id == pid && IsWindowVisible(h)', 'id == pid && IsWindowVisible(h) && Class(h) == "koreterm.win32.host"')) ${function:Test-HiddenNativeCode}
 Assert-HiddenMutation 'stale thread last error retained' $nativeCode ($nativeCode.Replace('SetLastError(0);', '')) ${function:Test-HiddenNativeCode}
 Assert-HiddenMutation 'unconnected native thread rejected' $nativeCode ($nativeCode.Replace('if (error == 0) return null;', 'if (error == 0) throw new Exception("unconnected");')) ${function:Test-HiddenNativeCode}
 Assert-HiddenMutation 'current desktop never connected' $nativeCode ($nativeCode.Replace('if (GetDesktopWindow() == IntPtr.Zero)', 'if (false)')) ${function:Test-HiddenNativeCode}
@@ -432,7 +432,7 @@ public class HiddenStartContract {
 }
 '@
 }
-$startFunction = (Get-HiddenFunction $hiddenLibText 'Start-HiddenNoctty').Replace('[HiddenWin]', '[HiddenStartContract]').Replace('[Diagnostics.Process]', '[HiddenStartContract]')
+$startFunction = (Get-HiddenFunction $hiddenLibText 'Start-HiddenKoreterm').Replace('[HiddenWin]', '[HiddenStartContract]').Replace('[Diagnostics.Process]', '[HiddenStartContract]')
 function Test-HiddenPrelaunchMetadata([string] $Code) {
     . ([scriptblock]::Create($Code))
     foreach ($fail in @($false, $true)) {
@@ -445,7 +445,7 @@ function Test-HiddenPrelaunchMetadata([string] $Code) {
         }
         function Test-Path { return $true }
         $blocked = $false
-        try { $null = Start-HiddenNoctty -Dir 'C:\fixture' -Arguments @('unused') -DesktopName 'private' -Job ([IntPtr]7) }
+        try { $null = Start-HiddenKoreterm -Dir 'C:\fixture' -Arguments @('unused') -DesktopName 'private' -Job ([IntPtr]7) }
         catch { $blocked = $_.Exception.Message -ceq 'fixture prelaunch metadata failure' }
         if ($blocked -ne $fail -or $script:prelaunchMetadataCalls -ne 1 -or $script:prelaunchRunnerCalls -ne 1 -or
             [HiddenStartContract]::Launches -ne [int](-not $fail)) { throw 'Prelaunch metadata must execute before and block a failed launch.' }
@@ -498,11 +498,11 @@ function Test-HiddenDriverCode([string] $Code) {
     function Approve-HiddenDriver { param($Job, $Run); Set-Content -LiteralPath (Join-Path $Run 'driver-desktop-release-requested') -Value ''; return $true }
     [HiddenDriverContract]::Waits = [HiddenDriverContract]::Stops = [HiddenDriverContract]::ExitReads = 0
     [HiddenDriverContract]::ExitCode = 0; [HiddenDriverContract]::ExitQueryFails = $false
-    $fixture = Join-Path ([IO.Path]::GetTempPath()) ('noctty-hidden-contract-' + [guid]::NewGuid().ToString('N'))
+    $fixture = Join-Path ([IO.Path]::GetTempPath()) ('koreterm-hidden-contract-' + [guid]::NewGuid().ToString('N'))
     $savedLocal = $env:LOCALAPPDATA; $savedRoaming = $env:APPDATA
     try {
         $null = New-Item -ItemType Directory -Path (Join-Path $fixture 'bin')
-        Set-Content -LiteralPath (Join-Path $fixture 'bin\noctty.exe') -Value ''
+        Set-Content -LiteralPath (Join-Path $fixture 'bin\koreterm.exe') -Value ''
         $runPath = Join-Path $fixture 'run'
         Invoke-HiddenDriver -Script 'unused.ps1' -Bin (Join-Path $fixture 'bin') -Run $runPath -TimeoutSeconds 1 -Label 'managed isolation fixture' 6>$null
         if (-not $script:driverRunnerGuardCalled) { throw 'Driver lost the hosted-runner gate.' }
@@ -510,7 +510,7 @@ function Test-HiddenDriverCode([string] $Code) {
         if ($script:metadataCalls -lt 1) { throw 'Outer polling must collect thread desktop metadata.' }
         if ([HiddenDriverContract]::Local -cne (Join-Path $runPath 'localappdata') -or
             [HiddenDriverContract]::Roaming -cne (Join-Path $runPath 'appdata') -or
-            [HiddenDriverContract]::Desktop -notmatch '^WinSta0\\noctty-hw-[0-9a-f]{32}$') { throw 'Driver launch lost run-scoped app data or explicit desktop.' }
+            [HiddenDriverContract]::Desktop -notmatch '^WinSta0\\koreterm-hw-[0-9a-f]{32}$') { throw 'Driver launch lost run-scoped app data or explicit desktop.' }
         if ($env:LOCALAPPDATA -cne $savedLocal -or $env:APPDATA -cne $savedRoaming) { throw 'Driver did not restore its environment.' }
         if ([HiddenDriverContract]::Stops -ne 1) { throw 'Driver must clean up its owned job.' }
         if (-not (Test-Path -LiteralPath (Join-Path $runPath 'driver-desktop-released'))) { throw 'Parent omitted sentinel release acknowledgment after private observation.' }
@@ -543,7 +543,7 @@ function Test-HiddenDriverCode([string] $Code) {
     } finally {
         $env:LOCALAPPDATA = $savedLocal; $env:APPDATA = $savedRoaming
         if ([IO.Path]::GetDirectoryName($fixture) -eq [IO.Path]::GetTempPath().TrimEnd('\', '/') -and
-            (Split-Path -Leaf $fixture) -match '^noctty-hidden-contract-[0-9a-f]{32}$') { Remove-Item -LiteralPath $fixture -Recurse -Force }
+            (Split-Path -Leaf $fixture) -match '^koreterm-hidden-contract-[0-9a-f]{32}$') { Remove-Item -LiteralPath $fixture -Recurse -Force }
     }
 }
 Assert-HiddenMutation 'driver desktop null' $driverFunction ($driverFunction.Replace('"WinSta0\$desktopName"', '$null')) ${function:Test-HiddenDriverCode}
@@ -595,7 +595,7 @@ public static class HiddenDesktopContract {
 $desktopAssertion = (Get-HiddenFunction $hiddenLibText 'Assert-HiddenDesktop').Replace('[HiddenWin]', '[HiddenDesktopContract]')
 function Test-HiddenDesktopAssertion([string] $Code) {
     . ([scriptblock]::Create($Code))
-    $name = 'noctty-hw-' + ('a' * 32)
+    $name = 'koreterm-hw-' + ('a' * 32)
     foreach ($fixture in @(
         @{}, @{ Required = 42 }, @{ Empty = $true }, @{ Empty = $true; Required = 42; Blocked = $true }
         @{ Required = 99; Blocked = $true }, @{ WrongPid = $true; Blocked = $true }
@@ -603,9 +603,9 @@ function Test-HiddenDesktopAssertion([string] $Code) {
         @{ WrongCurrent = $true; Blocked = $true }, @{ BadName = $true; Blocked = $true }
         @{ NoWindows = $true; Blocked = $true }, @{ Empty = $true; NoWindows = $true }
         @{ Stale = $true }, @{ Stale = $true; Required = 42; Blocked = $true }, @{ Stale = $true; NoWindows = $true; Blocked = $true }
-        @{ Class = 'noctty.win32.lifecycle'; NoWindows = $true }, @{ Class = 'noctty.win32.lifecycle'; Visible = $true; NoWindows = $true; Blocked = $true }
+        @{ Class = 'koreterm.win32.lifecycle'; NoWindows = $true }, @{ Class = 'koreterm.win32.lifecycle'; Visible = $true; NoWindows = $true; Blocked = $true }
         @{ Class = 'IME'; NoWindows = $true }, @{ Class = 'MSCTFIME UI'; NoWindows = $true }, @{ Class = 'IME'; Visible = $true; NoWindows = $true; Blocked = $true }
-        @{ Class = 'noctty.win32.host'; NoWindows = $true; Blocked = $true }
+        @{ Class = 'koreterm.win32.host'; NoWindows = $true; Blocked = $true }
         @{ Native = 'OpenDesktopW'; Code = 5; Blocked = $true }
         @{ Native = 'EnumDesktopWindows'; Code = 170; Blocked = $true }
         @{ Native = 'GetWindowThreadProcessId'; Code = 1400; Blocked = $true }
@@ -681,7 +681,7 @@ function Test-HiddenApproval([string] $Code) {
     . ([scriptblock]::Create($Code))
     foreach ($fixture in @(@{}, @{ Missing = $true }, @{ Incomplete = $true }, @{ MissingWindow = $true; Blocked = $true }, @{ WrongPid = $true; Blocked = $true }, @{ WrongDesktop = $true; Blocked = $true },
         @{ WrongStation = $true; Blocked = $true }, @{ WrongSession = $true; Blocked = $true }, @{ MissingMember = $true; Blocked = $true })) {
-        $name = 'noctty-hw-' + ('a' * 32); $script:approvalWrites = 0; $script:approvalWindowChecks = 0
+        $name = 'koreterm-hw-' + ('a' * 32); $script:approvalWrites = 0; $script:approvalWindowChecks = 0
         [HiddenApprovalContract]::MissingMember = [bool]$fixture.MissingMember
         function Test-Path { return -not $fixture.Missing }
         function Get-Content {
@@ -1077,7 +1077,7 @@ function Test-PrivateDesktopControl([string] $Code) {
         [PrivateDesktopContract]::UtcNow = [datetime]'2026-01-01T00:00:00Z'
         $requestedRun = if ($fixture.Relative) { '.\fixture-private' } else { 'C:\fixture\private' }
         $expectedRun = [IO.Path]::GetFullPath($requestedRun)
-        $expectedDesktop = 'noctty-hw-' + ('a' * 32)
+        $expectedDesktop = 'koreterm-hw-' + ('a' * 32)
         [PrivateDesktopContract]::Current = if ($fixture.WrongCurrent) { 'wrong' } elseif ($fixture.Mode -eq 'Driver') { $expectedDesktop } else { 'Default' }
         $writes = @{}
         function Assert-HiddenRunner { [PrivateDesktopContract]::Gates++; if ($fixture.GateFails) { throw 'Fixture gate' } }
@@ -1148,7 +1148,7 @@ if (-not ('EmbeddingAbortContract' -as [type])) { Add-Type 'public static class 
 $embeddingPoll = $embeddingPoll.Replace('[HiddenWin]', '[EmbeddingAbortContract]')
 function Test-EmbeddingAbortEvidence([string] $Code) {
     foreach ($fixture in @(@{}, @{ PrivateWindow = $true; Blocked = $true }, @{ QueryFails = $true; Blocked = $true }, @{ Negative = $true })) {
-        $Run = 'C:\fixture'; $desktopName = 'noctty-hw-fixture'; $job = [IntPtr]7; $NegativeControl = [bool]$fixture.Negative
+        $Run = 'C:\fixture'; $desktopName = 'koreterm-hw-fixture'; $job = [IntPtr]7; $NegativeControl = [bool]$fixture.Negative
         $started = @{ Process = @{ HasExited = $false }; Pid = 42 }; $closed = $false
         $sw = @{ Elapsed = @{ TotalSeconds = 0 } }; $script:embeddingAbortSleeps = 0
         $classes = [Collections.Generic.HashSet[string]]::new(); $checks = [Collections.Generic.List[object]]::new(); $receipts = [Collections.Generic.List[string]]::new()
@@ -1179,7 +1179,7 @@ function Test-EmbeddingArguments([string] $Code) {
             $NegativeControl = $control
             . ([scriptblock]::Create($Code))
             $marker = [array]::IndexOf($launchArguments, '-Embedding')
-            if ($launchArguments[0] -cne '--single-instance=false' -or $launchArguments[1] -notmatch '^--class=noctty-test-pkg76-embedding-[0-9a-f]{8}$' -or
+            if ($launchArguments[0] -cne '--single-instance=false' -or $launchArguments[1] -notmatch '^--class=koreterm-test-pkg76-embedding-[0-9a-f]{8}$' -or
                 ($control -and $marker -ne -1) -or (-not $control -and ($marker -ne 2 -or $launchArguments.Count -ne 3))) { throw 'Embedding isolation must precede the stop marker.' }
         }
     }
@@ -1190,7 +1190,7 @@ $oracle = $embeddingAst.Find({ param($node) $node -is [Management.Automation.Lan
     $node.GetCommandName() -eq 'Check' -and $node.CommandElements[1].Extent.Text -eq "'it opens no visible top-level window'" }, $true).Extent.Text
 function Test-EmbeddingOracle([string] $Code) {
     if (-not $Code) { throw 'Embedding visible UI oracle missing.' }
-    foreach ($class in @('', 'noctty.win32.host', '#32770')) {
+    foreach ($class in @('', 'koreterm.win32.host', '#32770')) {
         & {
             $classes = [Collections.Generic.HashSet[string]]::new()
             if ($class) { [void]$classes.Add($class) }
@@ -1201,18 +1201,18 @@ function Test-EmbeddingOracle([string] $Code) {
         }
     }
 }
-Assert-HiddenMutation 'host-only embedding oracle misses dialog' $oracle ($oracle.Replace('$classes.Count -eq 0', "-not `$classes.Contains('noctty.win32.host')")) ${function:Test-EmbeddingOracle}
+Assert-HiddenMutation 'host-only embedding oracle misses dialog' $oracle ($oracle.Replace('$classes.Count -eq 0', "-not `$classes.Contains('koreterm.win32.host')")) ${function:Test-EmbeddingOracle}
 
 $profileText = Remove-PowerShellComments (Get-Content -LiteralPath $hiddenScripts[0] -Raw)
 $powerShellProbe = Get-HiddenFunction $profileText 'Install-HiddenPowerShellProbe'
 function Test-PowerShellProbe([string] $Code) {
     . ([scriptblock]::Create($Code))
     foreach ($emitOsc in @($false, $true)) {
-        $fixture = Join-Path ([IO.Path]::GetTempPath()) ('noctty-prompt-contract-' + [guid]::NewGuid().ToString('N'))
+        $fixture = Join-Path ([IO.Path]::GetTempPath()) ('koreterm-prompt-contract-' + [guid]::NewGuid().ToString('N'))
         $path = Join-Path $fixture 'share\ghostty\shell-integration\powershell\integration.ps1'
         $savedPrompt = $function:global:prompt; $savedWriter = $function:global:__ghostty_write_osc
         $savedGlobals = @{}
-        foreach ($name in @('__noctty_test_original_prompt', '__noctty_test_original_write_osc', '__noctty_test_cwd_written')) {
+        foreach ($name in @('__koreterm_test_original_prompt', '__koreterm_test_original_write_osc', '__koreterm_test_cwd_written')) {
             $variable = Get-Variable -Name $name -Scope Global -ErrorAction Ignore
             $savedGlobals[$name] = @{ Exists = $null -ne $variable; Value = $variable.Value }
         }
@@ -1259,13 +1259,13 @@ function global:prompt {
                 if ($savedGlobals[$name].Exists) { Set-Variable -Name $name -Value $savedGlobals[$name].Value -Scope Global } else { Remove-Variable -Name $name -Scope Global -ErrorAction Ignore }
             }
             if ([IO.Path]::GetDirectoryName($fixture) -eq [IO.Path]::GetTempPath().TrimEnd('\', '/') -and
-                (Split-Path -Leaf $fixture) -match '^noctty-prompt-contract-[0-9a-f]{32}$') { Remove-Item -LiteralPath $fixture -Recurse -Force }
+                (Split-Path -Leaf $fixture) -match '^koreterm-prompt-contract-[0-9a-f]{32}$') { Remove-Item -LiteralPath $fixture -Recurse -Force }
         }
     }
 }
 Assert-HiddenMutation 'PowerShell history saving left enabled' $powerShellProbe ($powerShellProbe.Replace('-HistorySaveStyle SaveNothing', '-HistorySaveStyle SaveIncrementally')) ${function:Test-PowerShellProbe}
-Assert-HiddenMutation 'PowerShell readiness without OSC' $powerShellProbe ($powerShellProbe.Replace('if ($Global:__noctty_test_cwd_written)', 'if ($true)')) ${function:Test-PowerShellProbe}
-Assert-HiddenMutation 'PowerShell actual prompt omitted' $powerShellProbe ($powerShellProbe.Replace('$result = & $Global:__noctty_test_original_prompt', '$result = "fixture prompt>"')) ${function:Test-PowerShellProbe}
+Assert-HiddenMutation 'PowerShell readiness without OSC' $powerShellProbe ($powerShellProbe.Replace('if ($Global:__koreterm_test_cwd_written)', 'if ($true)')) ${function:Test-PowerShellProbe}
+Assert-HiddenMutation 'PowerShell actual prompt omitted' $powerShellProbe ($powerShellProbe.Replace('$result = & $Global:__koreterm_test_original_prompt', '$result = "fixture prompt>"')) ${function:Test-PowerShellProbe}
 
 if (-not ('HiddenPromptClock' -as [type])) { Add-Type 'public static class HiddenPromptClock { public static System.DateTime UtcNow; }' }
 $promptWait = (Get-HiddenFunction $profileText 'Wait-HiddenPowerShellPrompt').Replace('[datetime]::UtcNow', '[HiddenPromptClock]::UtcNow')
@@ -1274,7 +1274,7 @@ function Test-PowerShellPromptWait([string] $Code) {
     foreach ($fixture in @(@{}, @{ Delay = $true }, @{ WrongPid = $true; Blocked = $true }, @{ NoOsc = $true; Blocked = $true },
         @{ BadStyle = $true; Blocked = $true }, @{ Missing = $true; Blocked = $true }, @{ OracleFails = $true; Blocked = $true })) {
         [HiddenPromptClock]::UtcNow = [datetime]'2026-01-01T00:00:00Z'; $script:promptSleeps = 0; $script:promptOracles = 0
-        $job = [IntPtr]7; $desktopName = 'noctty-hw-fixture'; $desktopReceipt = 'unused'
+        $job = [IntPtr]7; $desktopName = 'koreterm-hw-fixture'; $desktopReceipt = 'unused'
         function Start-Sleep { param($Milliseconds); $script:promptSleeps++; [HiddenPromptClock]::UtcNow = [HiddenPromptClock]::UtcNow.AddMilliseconds($Milliseconds) }
         function Test-Path { return -not $fixture.Missing -and (-not $fixture.Delay -or $script:promptSleeps -ge 5) }
         function Get-Content { @{ ProcessId = $(if ($fixture.WrongPid) { 99 } else { 41 }); PromptReturned = $true; CwdOscForwarded = -not $fixture.NoOsc; HistorySaveStyle = $(if ($fixture.BadStyle) { 'SaveIncrementally' } else { 'SaveNothing' }) } | ConvertTo-Json }
@@ -1305,14 +1305,14 @@ function Test-EmbeddingDelegationGuard([string] $Code) {
         $blocked = $false
         try { Assert-EmbeddingDelegationSafe } catch { $blocked = $true }
         $expected = $value -like '*33368*-d328-410c-b225-26dc9f12c728*' -or $value -eq 'unreadable'
-        if ($blocked -ne $expected) { throw 'Delegation guard failed to distinguish absent/unrelated selection from noctty or unreadable state.' }
+        if ($blocked -ne $expected) { throw 'Delegation guard failed to distinguish absent/unrelated selection from koreterm or unreadable state.' }
     }
 }
 Assert-HiddenMutation 'real COM handoff CLSID unguarded' $delegationGuard ($delegationGuard.Replace('33368C6F-D328-410C-B225-26DC9F12C728', '11111111-1111-1111-1111-111111111111')) ${function:Test-EmbeddingDelegationGuard}
 # Check the actual call sites as well as the callable guard; comments are already removed.
 function Test-EmbeddingGuardCalls([string] $Code) {
     if ($Code -notmatch '(?m)^Assert-EmbeddingDelegationSafe\r?\n\s*if \(-not \$Driver\)' -or
-        $Code -notmatch '(?m)^Assert-EmbeddingDelegationSafe\r?\n\$started = Start-HiddenNoctty') { throw 'Embedding launch lost the entry/prelaunch delegation guard.' }
+        $Code -notmatch '(?m)^Assert-EmbeddingDelegationSafe\r?\n\$started = Start-HiddenKoreterm') { throw 'Embedding launch lost the entry/prelaunch delegation guard.' }
 }
 Assert-HiddenMutation 'delegation guard call removed' $embeddingText ($embeddingText -replace '(?m)^Assert-EmbeddingDelegationSafe\r?\n', '') ${function:Test-EmbeddingGuardCalls}
 Assert-HiddenMutation 'unreadable delegation key accepted' $delegationGuard ($delegationGuard.Replace('catch [Management.Automation.ItemNotFoundException] { return }', 'catch { return }')) ${function:Test-EmbeddingDelegationGuard}
@@ -1435,14 +1435,14 @@ Assert-HiddenMutation 'WSL bash accepted' $gitFunctions ($gitFunctions.Replace('
     } finally { $env:PATH = $savedPath }
 }
 
-# The two process-tree walks, Get-Descendants (the profile matrix finds the shell under noctty with it)
+# The two process-tree walks, Get-Descendants (the profile matrix finds the shell under koreterm with it)
 # and the default-shell harness's Find-Shell, follow ParentProcessId, which is a number and not an
 # identity: Windows reuses numbers, so a process whose parent exited can name a newer process that
-# took its number. Here noctty (100) took the number of an older process whose stale children (500,
-# and 600 under it) still name it, and noctty's own real parent is 600, so the links form the cycle
+# took its number. Here koreterm (100) took the number of an older process whose stale children (500,
+# and 600 under it) still name it, and koreterm's own real parent is 600, so the links form the cycle
 # 100 -> 500 -> 600 -> 100. Its real descendants are cmd.exe (101) and conhost.exe (102); the stale
-# 500 is a pwsh.exe listed first, which a walk without the age rule takes for noctty's shell, and the
-# stale 103 names 101 but is older than it (not older than noctty), which a rule that compares a
+# 500 is a pwsh.exe listed first, which a walk without the age rule takes for koreterm's shell, and the
+# stale 103 names 101 but is older than it (not older than koreterm), which a rule that compares a
 # child with the root instead of its own parent keeps. With
 # one start time for all, only the visited set ends the cycle; a start time CIM did not return
 # proves nothing. The fake CIM query drops CreationDate unless it is asked for, as CIM does, and
@@ -1456,17 +1456,17 @@ $walkTables = @(
     @{ Name = 'a recycled parent number'; Descendants = '101,102'; Shell = '101'; Table = @(
         New-WalkProcess 500 100 'pwsh.exe' $walkStart.AddHours(-1)
         New-WalkProcess 600 500 'stale.exe' $walkStart.AddHours(-1).AddSeconds(1)
-        New-WalkProcess 100 600 'noctty.exe' $walkStart
+        New-WalkProcess 100 600 'koreterm.exe' $walkStart
         New-WalkProcess 103 101 'pwsh.exe' $walkStart.AddMilliseconds(500)
         New-WalkProcess 101 100 'cmd.exe' $walkStart.AddSeconds(1)
         New-WalkProcess 102 101 'conhost.exe' $walkStart.AddSeconds(2)
         New-WalkProcess 700 4 'other.exe' $walkStart.AddHours(-2)) }
     @{ Name = 'a parent cycle with one start time'; Descendants = '500,600'; Shell = '500'; Table = @(
-        New-WalkProcess 100 600 'noctty.exe' $walkStart
+        New-WalkProcess 100 600 'koreterm.exe' $walkStart
         New-WalkProcess 500 100 'cmd.exe' $walkStart
         New-WalkProcess 600 500 'stale.exe' $walkStart) }
     @{ Name = 'a child without a start time'; Descendants = '110'; Shell = '110'; Table = @(
-        New-WalkProcess 100 4 'noctty.exe' $walkStart
+        New-WalkProcess 100 4 'koreterm.exe' $walkStart
         New-WalkProcess 110 100 'cmd.exe' $null) }
 )
 $walkRunner = {
@@ -1552,7 +1552,7 @@ foreach ($runner in $budget.runners.PSObject.Properties) {
         if (-not $n.StartsWith($budget.familyPrefix, [StringComparison]::Ordinal)) { throw "Budget for $($runner.Name) lists '$n', outside '$($budget.familyPrefix)'." }
     }
 }
-$skipTemp = Join-Path ([IO.Path]::GetTempPath()) ('noctty-skip-budget-' + [guid]::NewGuid().ToString('N'))
+$skipTemp = Join-Path ([IO.Path]::GetTempPath()) ('koreterm-skip-budget-' + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $skipTemp | Out-Null
 try {
     $fixtureBudget = Join-Path $skipTemp 'budget.json'
@@ -1611,7 +1611,7 @@ try {
 finally {
     # The root was made above from the temp directory and a GUID: assert that before a recursive delete.
     if ($skipTemp.StartsWith([IO.Path]::GetTempPath(), [StringComparison]::OrdinalIgnoreCase) -and
-        (Split-Path -Leaf $skipTemp) -match '^noctty-skip-budget-[0-9a-f]{32}$') {
+        (Split-Path -Leaf $skipTemp) -match '^koreterm-skip-budget-[0-9a-f]{32}$') {
         Remove-Item -LiteralPath $skipTemp -Recurse -Force -ErrorAction SilentlyContinue
     }
 }

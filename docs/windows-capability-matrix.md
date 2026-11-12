@@ -1,6 +1,6 @@
 # Windows Capability Matrix
 
-Maps current official Ghostty docs surfaces to noctty behavior on
+Maps current official Ghostty docs surfaces to koreterm behavior on
 Windows. Cells stay short; rows with real nuance point into the
 [Notes](#notes) section below. Update rows when Windows behavior changes or
 when upstream docs add or remove a surface that this fork cares about.
@@ -18,15 +18,15 @@ Last reviewed: 2026-10-16 (jump list, native settings and scrollbar rows; render
 
 ## Supported
 
-| Ghostty docs surface                                                                                               | noctty note                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| Ghostty docs surface                                                                                               | koreterm note                                                                                                                                                                                                                                                                                                                                                                                                                            |
 | ------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| [Configuration](https://ghostty.org/docs/config) and [option reference](https://ghostty.org/docs/config/reference) | Same config grammar and generated docs. Config lives at `%LOCALAPPDATA%\noctty\config.ghostty`; live reload via `Ctrl+Shift+,`.                                                                                                                                                                                                                                                                                                        |
+| [Configuration](https://ghostty.org/docs/config) and [option reference](https://ghostty.org/docs/config/reference) | Same config grammar and generated docs. Config lives at `%LOCALAPPDATA%\koreterm\config.ghostty`; live reload via `Ctrl+Shift+,`.                                                                                                                                                                                                                                                                                                        |
 | [Custom keybindings](https://ghostty.org/docs/config/keybind)                                                      | Same `keybind = trigger=action` grammar and `+list-keybinds` flow; defaults are the shared non-macOS set with Windows-specific exceptions.                                                                                                                                                                                                                                                                                             |
 | [Color Theme](https://ghostty.org/docs/features/theme)                                                             | Built-in themes, separate light/dark themes, custom themes, and `+list-themes` ship on Windows.                                                                                                                                                                                                                                                                                                                                        |
 | [Configuration: `background-opacity`](https://ghostty.org/docs/config/reference)                                   | Below 0.999, while every pane of a window draws with OpenGL (the default), only the terminal background is translucent: text, the tab strip, the title bar and the other chrome stay solid, and what is behind shows through unblurred. A window with a D3D11 pane fades as a whole. It can be toggled live; High Contrast shows windows opaque, and `background-blur` has no effect. See [background blur](#background-blur).         |
 | [Terminal API (VT)](https://ghostty.org/docs/vt) and [VT reference](https://ghostty.org/docs/vt/reference)         | The shared Ghostty terminal core carries the documented VT/OSC/Kitty surface. Win32-validated coverage: [windows-vt-conformance.md](windows-vt-conformance.md).                                                                                                                                                                                                                                                                        |
 | [Kitty keyboard protocol](https://ghostty.org/docs/vt)                                                             | Win32 supplies press, repeat, release, lock, and sided modifier state to the shared encoder. See [keyboard input](#keyboard-input).                                                                                                                                                                                                                                                                                                    |
-| [Features overview: windows, tabs, and splits](https://ghostty.org/docs/features)                                  | Native Win32 windows, tabs, and splits ship today in noctty.                                                                                                                                                                                                                                                                                                                                                                           |
+| [Features overview: windows, tabs, and splits](https://ghostty.org/docs/features)                                  | Native Win32 windows, tabs, and splits ship today in koreterm.                                                                                                                                                                                                                                                                                                                                                                           |
 | [Configuration: `scrollbar`](https://ghostty.org/docs/config/reference)                                            | Per-pane graphical scrollbars honor `system` (Windows dynamic-scrollbar preference) or `never`; search matches appear as markers. See [search and scrollbars](#search-and-scrollbars).                                                                                                                                                                                                                                                 |
 | [Configuration: `notify-on-command-finish`](https://ghostty.org/docs/config/reference)                             | Focus policy, duration threshold, and bell/`notify` actions are applied; `notify` also needs `desktop-notifications`. See [notifications and progress](#notifications-and-progress).                                                                                                                                                                                                                                                   |
 | [Configuration: `clipboard-codepoint-map`](https://ghostty.org/docs/config/reference)                              | Selection copies apply the map before the clipboard write. See [clipboard and drag-drop](#clipboard-and-drag-drop).                                                                                                                                                                                                                                                                                                                    |
@@ -36,14 +36,14 @@ Last reviewed: 2026-10-16 (jump list, native settings and scrollbar rows; render
 
 ## Partial
 
-| Ghostty docs surface                                                                         | noctty note                                                                                                                                                                                                                                                                                                                                                                   |
+| Ghostty docs surface                                                                         | koreterm note                                                                                                                                                                                                                                                                                                                                                                   |
 | -------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | [Shell integration](https://ghostty.org/docs/features/shell-integration)                     | Upstream shell docs apply; Windows adds PowerShell injection and `cmd.exe` prompt/cwd marks. Clink is required for cmd command-finish marks and exit codes. See [shell integration notes](#shell-integration).                                                                                                                                                                |
 | [Action reference](https://ghostty.org/docs/config/keybind/reference)                        | Shared action grammar is intact, but upstream mixes in macOS/Linux behavior. For Windows truth, prefer `+show-config --default --docs` plus `+list-keybinds`.                                                                                                                                                                                                                 |
 | [Action reference: `toggle_secure_input`](https://ghostty.org/docs/config/keybind/reference) | A local sensitive-input indicator only; no Windows equivalent of macOS Secure Keyboard Entry, and system-wide keyboard hooks are not blocked.                                                                                                                                                                                                                                 |
 | [Configuration: `auto-update`](https://ghostty.org/docs/config/reference)                    | Stable-release checking and prompts backed by GitHub Releases. `download` stages installer releases after SHA-256 and Authenticode verification; portable ZIP staging/apply additionally requires a pinned-publisher-signed manifest covering every payload file and otherwise stays on the release-page path. Apply is user-initiated. See [windows.md](windows.md#updates). |
-| [Configuration: `window-save-state`](https://ghostty.org/docs/config/reference)              | Persists windows, tabs, splits, profiles, working directories, and titles under `%LOCALAPPDATA%\noctty\session-state.json`. `window-save-state-scrollback` opts in to bounded plain-text pane snapshots; child processes are not restored.                                                                                                                                    |
-| [Configuration: `background-blur`](https://ghostty.org/docs/config/reference)                | Accepted but inert on every Windows build: noctty asks DWM for no backdrop material, so a translucent background shows what is behind unblurred. Enabling it logs a warning. See [background blur](#background-blur).                                                                                                                                                         |
+| [Configuration: `window-save-state`](https://ghostty.org/docs/config/reference)              | Persists windows, tabs, splits, profiles, working directories, and titles under `%LOCALAPPDATA%\koreterm\session-state.json`. `window-save-state-scrollback` opts in to bounded plain-text pane snapshots; child processes are not restored.                                                                                                                                    |
+| [Configuration: `background-blur`](https://ghostty.org/docs/config/reference)                | Accepted but inert on every Windows build: koreterm asks DWM for no backdrop material, so a translucent background shows what is behind unblurred. Enabling it logs a warning. See [background blur](#background-blur).                                                                                                                                                         |
 | [Configuration: `unfocused-split-opacity`](https://ghostty.org/docs/config/reference)        | Unfocused splits are dimmed by the renderer on OpenGL and D3D11, toward `unfocused-split-fill` in sRGB space as upstream does, and `split-divider-color` colors the gap between panes. The overlay scrollbar and a docked search bar are not dimmed, the gap and the focus accent do not scale with DPI, and High Contrast keeps system colors with no dim.                   |
 | [Features overview](https://ghostty.org/docs/features)                                       | Accessibility is partial: UI Automation covers the daily chrome and terminal text, but caption buttons, overlay rows, and menus are uncovered. Only NVDA has been measured, with mixed results. See [accessibility notes](#accessibility) and the [screen-reader matrix](accessibility-matrix.md).                                                                            |
 | OSC 52 primary/selection clipboard selectors                                                 | Windows has one native clipboard: writes with selectors `c`, `s`, and `p` all target it; read replies still echo the requested selector.                                                                                                                                                                                                                                      |
@@ -52,12 +52,12 @@ Last reviewed: 2026-10-16 (jump list, native settings and scrollbar rows; render
 
 ## Windows-Specific
 
-| Ghostty docs surface                                                              | noctty note                                                                                                                                                                                                          |
+| Ghostty docs surface                                                              | koreterm note                                                                                                                                                                                                          |
 | --------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| [Features overview](https://ghostty.org/docs/features)                            | Upstream docs still say Windows support is planned. noctty ships a native Win32 app on Windows 10/11 x64 and ARM64.                                                                                                  |
+| [Features overview](https://ghostty.org/docs/features)                            | Upstream docs still say Windows support is planned. koreterm ships a native Win32 app on Windows 10/11 x64 and ARM64.                                                                                                  |
 | Elevated windows                                                                  | Separate `runas` windows with integrity-scoped IPC and no elevated session restore. See [Running elevated](windows.md#running-elevated).                                                                             |
 | [Features overview: GPU-accelerated rendering](https://ghostty.org/docs/features) | Terminal content renders with OpenGL 4.3+ via WGL by default, or the opt-in D3D11 beta. See [renderer notes](#renderer).                                                                                             |
-| [Configuration](https://ghostty.org/docs/config)                                  | Windows state/config paths live under `%LOCALAPPDATA%\noctty\...`, not the macOS/Linux paths documented upstream.                                                                                                    |
+| [Configuration](https://ghostty.org/docs/config)                                  | Windows state/config paths live under `%LOCALAPPDATA%\koreterm\...`, not the macOS/Linux paths documented upstream.                                                                                                    |
 | Local automation                                                                  | Versioned JSON state and stable local verbs for windows, tabs, splits, focus, policy-allowed actions, and control-free text. See [automation.md](automation.md).                                                     |
 | [Features overview](https://ghostty.org/docs/features)                            | Win32-specific UX: DWM dark caption, high-contrast palette switching, IME, and native context menus.                                                                                                                 |
 | Integrated title bar                                                              | Windows 11 uses app-owned caption chrome with native caption actions and Snap Layout hover while the tab bar and decorations are visible; `window-show-tab-bar = never` and older builds use the stock caption.      |
@@ -69,7 +69,7 @@ Last reviewed: 2026-10-16 (jump list, native settings and scrollbar rows; render
 | Power-aware rendering                                                             | `unfocused-render-fps` caps visible background presentation; `power-saver-rendering` controls saver pacing; minimized and DWM-cloaked windows do not present. See [power and battery](windows.md#power-and-battery). |
 | SSH host discovery                                                                | Concrete aliases from `%USERPROFILE%\.ssh\config` appear as system `ssh.exe` launch entries in the picker and palette.                                                                                               |
 | Visual Studio developer shells                                                    | Each Visual Studio install's Developer Command Prompt and Developer PowerShell appear in the picker, palette and jump list (`visual-studio-profiles`, default the newest install). See [Visual Studio developer shells](windows.md#visual-studio-developer-shells). |
-| Windows default terminal                                                          | `+register-default-terminal` selects noctty per user through the Windows Terminal 1.24-or-newer OpenConsole handoff; see [windows.md](windows.md#default-terminal).                                                  |
+| Windows default terminal                                                          | `+register-default-terminal` selects koreterm per user through the Windows Terminal 1.24-or-newer OpenConsole handoff; see [windows.md](windows.md#default-terminal).                                                  |
 | Taskbar jump lists                                                                | Recent working directories and the shell profiles the picker shows (detected ones, Visual Studio developer shells and your own user profiles; `profile-hidden` ones are left out) launch from the pinned or running taskbar button; from 1.3.133 a portable copy builds none. See [taskbar jump list](windows.md#taskbar-jump-list). |
 | Quick terminal and global hotkeys                                                 | Configurable edge/center terminal toggled by a bindable action; `global:` bindings use `RegisterHotKey`. See [quick terminal](#quick-terminal).                                                                      |
 | Desktop notifications                                                             | WinRT Action Center toasts with a local fallback; every terminal toast names its tab and focuses its pane when its popup is clicked. See [notifications and progress](#notifications-and-progress).                  |
@@ -101,7 +101,7 @@ motion plus ECH and skipped single cells inside a word, so a terminal that
 models one of those contexts differently loses the re-anchoring an absolute CUP
 would have given it; do not infer the same shape for another conhost without
 measuring it. Releases before 1.3.125 have no bundled pair and always take that
-path; `NOCTTY_CONPTY=inbox` reproduces it on current builds. See the
+path; `KORETERM_CONPTY=inbox` reproduces it on current builds. See the
 generation-specific
 [transport catalog](windows-vt-conformance.md#conpty-transport-generations-and-mangling-catalog).
 
@@ -113,7 +113,7 @@ that:
 
 - Automatic PowerShell injection (`powershell.exe`, `pwsh.exe`), with a
   manual fallback at
-  `%LOCALAPPDATA%\noctty\shell-integration\powershell\integration.ps1`.
+  `%LOCALAPPDATA%\koreterm\shell-integration\powershell\integration.ps1`.
 - PowerShell emits OSC 7 cwd URIs and OSC 133 A / B prompt marks plus
   OSC 133 D command-finish status, around whatever `prompt` is current
   (starship, oh-my-posh, hand-written). B follows the visible prompt text: the
@@ -140,32 +140,32 @@ that:
   and PSReadLine's default one that keeps credential-shaped lines out of the
   on-disk history file, stay exactly as they were.
 - The user's prompt sees the `$?` their command left, so a prompt that shows
-  it, such as Starship's error status, reports failures inside noctty; under
+  it, such as Starship's error status, reports failures inside koreterm; under
   the previous wrapper it always read success.
 - OSC 133 prompt marks back previous/next prompt navigation, copying the last
   completed command output, and inserting the last recoverable single-line
   command back on the prompt from the command palette. Copy-output needs a
   complete OSC 133;C..D region; insert needs OSC 133;B and OSC 133;C and a B
-  mark that noctty has not itself submitted
+  mark that koreterm has not itself submitted
   with Enter since; it does not inspect or modify the shell's line editor, and
   it does not submit the command — OSC 133 marks are forgeable by any program
   writing to the terminal, so the user reviews and presses Enter.
 - PowerShell wraps `ssh` for `ssh-env` and cache-aware `ssh-terminfo`, but
   does not auto-install remote terminfo; uncached hosts use
   `xterm-256color`. The wrapper is installed only when an `ssh-*` feature is
-  enabled, and only a wrapper noctty itself installed is ever removed: a
-  `function ssh` defined in the user's `$PROFILE` — which runs before noctty's
+  enabled, and only a wrapper koreterm itself installed is ever removed: a
+  `function ssh` defined in the user's `$PROFILE` — which runs before koreterm's
   injected `-Command` — is left in place.
 - Automatic `cmd.exe` integration wraps the existing `PROMPT` (or cmd's
   `$P$G` default) to emit OSC 133 A/B prompt marks and OSC 9;9 cwd reports.
-  When the shipped Clink Lua script is present, noctty prepends its directory to
+  When the shipped Clink Lua script is present, koreterm prepends its directory to
   `CLINK_PATH`; an already-active Clink can then load it and emit OSC 133 C/D
-  command marks and exit codes. Noctty does not activate Clink. Without the
+  command marks and exit codes. Koreterm does not activate Clink. Without the
   loaded Clink script, prompt/cwd marks still work but command-finish marks and
   exit codes are unavailable.
 - Working-directory reports drive tab titles and the directory new tabs and
   splits start in. OSC 7 must be a URL (`file://`, or the `kitty-shell-cwd://`
-  noctty's own cmd integration sends) whose host is `localhost` or this machine
+  koreterm's own cmd integration sends) whose host is `localhost` or this machine
   (NetBIOS, DNS host or fully qualified name, in any letter case, with or
   without a trailing dot), so Git Bash, WSL, fish and nushell reports count and
   an ssh session's does not. OSC 9;9, the form Windows Terminal documents and
@@ -180,14 +180,14 @@ that:
   `share\terminfo`, in the hex-directory layout (`78\xterm-ghostty`) that
   ncurses uses on Windows. The Windows build compiles them itself, byte for
   byte as ncurses 6.6 `tic -x` does.
-- At startup noctty installs the same entries into `.terminfo` under the home
+- At startup koreterm installs the same entries into `.terminfo` under the home
   that Git for Windows gives its tools: `HOME` if set, else `HOMEDRIVE` +
   `HOMEPATH`. That is usually `%USERPROFILE%\.terminfo\78\xterm-ghostty` and
   `67\ghostty`. Git for Windows' `less`, `vim`, `nano` and `tput` find them
   there whichever drive the current directory is on, whether they are started
   from PowerShell, from git, or from Git Bash.
 - It never replaces a file it did not write. It records the SHA-256 of the
-  entry it installed in `.terminfo\.noctty-installed`, and updates a file only
+  entry it installed in `.terminfo\.koreterm-installed`, and updates a file only
   while that file still holds the recorded entry.
 - It installs nothing in portable mode, which leaves nothing on the host, or
   when `term` names another entry.
@@ -205,7 +205,7 @@ that:
   `/proc/cygdrive/...` path is read by native Windows programs such as Neovim
   and Helix as a folder at the root of the current drive, which another
   account can create.
-- `TERM` falls back to `xterm-256color` whenever it names noctty's entry and
+- `TERM` falls back to `xterm-256color` whenever it names koreterm's entry and
   the child's home has no such entry, for example in portable mode.
   `TERM_PROGRAM=ghostty` is set either way.
 - Standalone MSYS2 and Cygwin keep `HOME` under their own `/home` and do not
@@ -213,7 +213,7 @@ that:
   unknown unless you copy the two files into that `.terminfo` folder or set
   `term = xterm-256color`.
 - WSL passes a Linux process only what `WSLENV` lists. For a launch of
-  `wsl.exe`, noctty lists `COLORTERM`, `TERM_PROGRAM` and
+  `wsl.exe`, koreterm lists `COLORTERM`, `TERM_PROGRAM` and
   `TERM_PROGRAM_VERSION`, and `TERM` when the distribution has a terminfo
   entry for it (asked with `infocmp`); otherwise the distribution keeps
   `xterm-256color`. A launch of WSL's `bash.exe` gets the same three, and
@@ -245,7 +245,7 @@ non-US keyboard has not been used.
 Kitty and modifyOtherKeys encodings survive the pseudo console byte for byte
 on the two sources measured here — the in-box conhost of Windows
 `10.0.26200.0` and the bundled OpenConsole `1.24.260710001`; older in-box
-conhosts are unmeasured. noctty implements Win32 input mode (`CSI ?9001h`),
+conhosts are unmeasured. koreterm implements Win32 input mode (`CSI ?9001h`),
 which ConPTY requests at the start of every session: while it is set and no
 application has asked for the Kitty keyboard protocol, every key event goes to
 ConPTY as a `KEY_EVENT_RECORD` with the real virtual key, scan code,
@@ -256,7 +256,7 @@ line instead of running the line). Measured against a real console window on
 the same keys in
 [windows-vt-conformance.md](windows-vt-conformance.md#measured-win32-input-mode-records):
 every measured record agrees with conhost's except a latched dead key's
-release, where conhost emits the accent twice and Windows Terminal and noctty
+release, where conhost emits the accent twice and Windows Terminal and koreterm
 once; a physical non-US keyboard, IME composition and the in-box conhost as
 the pty are not measured. An application that reads VT bytes and asked for
 Kitty keeps those bytes; every other VT-input child, modifyOtherKeys included
@@ -264,12 +264,12 @@ Kitty keeps those bytes; every other VT-input child, modifyOtherKeys included
 records, as under Windows Terminal.
 
 Mouse input for console-API children goes the other way: a child that sets
-`ENABLE_MOUSE_INPUT` makes the bundled ConPTY ask noctty for SGR mouse
+`ENABLE_MOUSE_INPUT` makes the bundled ConPTY ask koreterm for SGR mouse
 reporting (`CSI ?1003;1006h`, `VtIo::Writer::WriteSGR1006`) and decode
-noctty's reports into `MOUSE_EVENT` records, which a `ReadConsoleInputW`
+koreterm's reports into `MOUSE_EVENT` records, which a `ReadConsoleInputW`
 reader receives (measured, `test/windows/hidden-win11-herdr-mouse.ps1`). herdr
 0.8.2 in its default client/server mode reads those and its pane focus follows
-clicks under noctty (`pane current`: `w1:p1`, `w1:p2`, `w1:p1`) and under
+clicks under koreterm (`pane current`: `w1:p1`, `w1:p2`, `w1:p1`) and under
 WezTerm (`w1:p1`, `w1:p2`, `w1:p3`, with the split's pane reported as `w1:p3`
 there; herdr's own input trace shows the same clicks at the same cells under
 both). Its `--no-session` (monolithic) mode ignores clicks under both
@@ -277,7 +277,7 @@ terminals: it leaves the console in mode 0x98 (crossterm's
 `EnableMouseCapture` on Windows sets the console mode and emits no
 `CSI ?1000h`) and reads stdin as bytes, which a console never fills from
 `MOUSE_EVENT` records. That is the audit's G019 observation and it is herdr's,
-not noctty's. The same observer under WezTerm 20240203's own OpenConsole
+not koreterm's. The same observer under WezTerm 20240203's own OpenConsole
 receives no mouse records at all, with or without
 `ENABLE_VIRTUAL_TERMINAL_INPUT` and also when it writes `CSI ?1003;1006h`
 itself (its focus records arrive, so it is attached and read), which fits an
@@ -312,7 +312,7 @@ transparent DPI-sized D2D surfaces, DirectWrite host banner text) exists in
 the source but is not started: `App.init` gives its backend no driver, so
 chrome text is drawn with GDI. That pipeline
 does not replace or call the terminal renderer. The default terminal renderer
-has an OpenGL 4.3-via-WGL floor; below it, noctty falls back to the
+has an OpenGL 4.3-via-WGL floor; below it, koreterm falls back to the
 `renderer = d3d11` beta (feature level 11.0, with Microsoft's WARP software
 renderer as its own fallback) with a banner, and shows a startup diagnostic
 and does not launch only when that fails too. The D3D11 beta is a separate
@@ -325,7 +325,7 @@ D3D11 surface ignores them. See
 ### Background blur
 
 `background-blur` has no visible effect on Windows in this build, on any build
-number, and noctty never asks for a DWM backdrop material. Since #640 a window
+number, and koreterm never asks for a DWM backdrop material. Since #640 a window
 whose panes all draw with OpenGL shows `background-opacity` per pixel: it turns
 on `DwmEnableBlurBehindWindow` with an empty region, which keeps the alpha the
 renderer draws but blurs nothing, and paints its GDI chrome with an alpha
@@ -346,7 +346,7 @@ Flipping the attribute from outside the process on the same window with
 `WS_EX_LAYERED` stripped by hand changed nothing either, so the layered alpha
 that implements `background-opacity` is not the obstacle — a synthetic window
 that does extend its frame renders a visibly different material per backdrop
-type whether or not it is layered. The obstacle is that noctty never opts in.
+type whether or not it is layered. The obstacle is that koreterm never opts in.
 
 A blur now needs a backdrop material whose tint leaves the theme's background
 alone, and a D3D11 window would also need its composition swap chain to carry
@@ -358,7 +358,7 @@ supported on Windows", so nobody there toggles it and waits for a change.
 
 ### Settings accepted without effect
 
-noctty keeps the full upstream configuration surface so that a shared config
+koreterm keeps the full upstream configuration surface so that a shared config
 file loads, and only `background-blur` (below) logs a warning when it is set.
 Searching `src/` (outside `Config.zig`, the doc generators and the tests'
 deny-lists) on `e6dae0919` finds no code that acts on these keys beyond that
@@ -455,14 +455,14 @@ OLE transfer is not shipped.
 ### Quick terminal
 
 No default keybind. Bind `toggle_quick_terminal`; add the `global:` prefix
-for a system-wide hotkey while noctty is running. Windows can reject a
+for a system-wide hotkey while koreterm is running. Windows can reject a
 reserved or conflicting trigger. Position, size, monitor, animation,
 autohide, and focus behavior are configurable. `exclusive` maps to focused
 input, and `quick-terminal-space-behavior` has no Windows effect.
 
 ### Notifications and progress
 
-WinRT toasts use noctty's AppUserModelID and fall back to a host banner, then
+WinRT toasts use koreterm's AppUserModelID and fall back to a host banner, then
 the log, when native delivery fails. `desktop-notifications` gates every
 toast. Command-finish toasts additionally need `notify-on-command-finish` and
 a `notify-on-command-finish-action` that includes `notify`. Every toast from
@@ -473,9 +473,9 @@ attribution line, carries a launch argument, and focuses the originating pane
 when its popup is clicked, and in an installed copy also when its Action
 Center entry is clicked (a COM toast activator; portable copies have none).
 A pane's newer toast, once Windows takes it,
-replaces its older one, and noctty removes a pane's toast from Action Center
+replaces its older one, and koreterm removes a pane's toast from Action Center
 when its tab is seen, when the pane or its tab closes, and every toast it
-showed for a pane at exit. A click with noctty not running starts the
+showed for a pane at exit. A click with koreterm not running starts the
 installed copy through the activator's registration.
 `notify-on-command-finish-after` and the focus policy are applied before the
 bell or toast; command marks come from shell integration or OSC 133, which
@@ -518,7 +518,7 @@ sound on every bell: set `bell-features = system` to get it back.
 
 With `progress-style = true`, terminal progress reports map to normal, paused,
 error, or indeterminate taskbar states for the active pane in each host. If
-the taskbar COM interface fails, noctty disables the native indicator.
+the taskbar COM interface fails, koreterm disables the native indicator.
 
 ### Search and scrollbars
 

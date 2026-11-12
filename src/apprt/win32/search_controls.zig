@@ -121,7 +121,7 @@ const search_word_label = std.unicode.utf8ToUtf16LeStringLiteral("Whole word");
 const search_close_label = std.unicode.utf8ToUtf16LeStringLiteral("Close search");
 
 /// The search bar's icons are VS Code's (Codicons), drawn from the Symbols
-/// Nerd Font that noctty already embeds for the terminal (Nerd Fonts bundles
+/// Nerd Font that koreterm already embeds for the terminal (Nerd Fonts bundles
 /// Codicons). The system icon fonts have no regex, match-case or whole-word
 /// glyph, and taking all six from one set keeps them the same weight and
 /// size. `win32_icons` stays the fallback when the font is unavailable.

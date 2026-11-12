@@ -138,8 +138,8 @@ if ([string]::IsNullOrWhiteSpace($env:ZIG_LOCAL_CACHE_DIR)) {
 $bootstrap = @'
 @echo off
 echo Bootstrap: "%~f0"
-call "%NOCTTY_DEV_VSDEVCMD%" -arch=%NOCTTY_DEV_ARCH% || exit /b 1
-set "PATH=%NOCTTY_DEV_PATH%;%PATH%"
+call "%KORETERM_DEV_VSDEVCMD%" -arch=%KORETERM_DEV_ARCH% || exit /b 1
+set "PATH=%KORETERM_DEV_PATH%;%PATH%"
 echo == Versions ==
 where git || exit /b 1
 where cl || exit /b 1
@@ -158,10 +158,10 @@ echo skipped ^(set DEV_WINDOWS_CHECK_WSL=1 to probe WSL^)
 )
 '@
 
-$bootstrapPath = Join-Path ([System.IO.Path]::GetTempPath()) ("noctty-dev-windows-" + [guid]::NewGuid().ToString("N") + ".cmd")
-$env:NOCTTY_DEV_VSDEVCMD = $vsDevCmd
-$env:NOCTTY_DEV_ARCH = $Architecture
-$env:NOCTTY_DEV_PATH = "$gitCmd;$gitUsrBin;$env:ZIG_HOME"
+$bootstrapPath = Join-Path ([System.IO.Path]::GetTempPath()) ("koreterm-dev-windows-" + [guid]::NewGuid().ToString("N") + ".cmd")
+$env:KORETERM_DEV_VSDEVCMD = $vsDevCmd
+$env:KORETERM_DEV_ARCH = $Architecture
+$env:KORETERM_DEV_PATH = "$gitCmd;$gitUsrBin;$env:ZIG_HOME"
 try {
     [System.IO.File]::WriteAllText($bootstrapPath, $bootstrap.Replace("`r`n", "`n").Replace("`n", "`r`n"), [System.Text.Encoding]::ASCII)
     # Passing the path itself let PowerShell decide its quoting, and a path without
@@ -176,16 +176,16 @@ try {
     # Continue, as for vswhere above: under Stop, Windows PowerShell 5.1 turns a stderr
     # line that a caller's 2>&1 redirects (VsDevCmd.bat writes some) into a terminating
     # error; the exit code below still decides.
-    $env:NOCTTY_DEV_BOOTSTRAP = $bootstrapPath
+    $env:KORETERM_DEV_BOOTSTRAP = $bootstrapPath
     & {
         $ErrorActionPreference = "Continue"
         $PSNativeCommandArgumentPassing = "Legacy"
-        & (Join-Path $env:SystemRoot "System32\cmd.exe") /d /s /c '""%NOCTTY_DEV_BOOTSTRAP%""'
+        & (Join-Path $env:SystemRoot "System32\cmd.exe") /d /s /c '""%KORETERM_DEV_BOOTSTRAP%""'
     }
     $bootstrapExit = $LASTEXITCODE
 } finally {
     Remove-Item -LiteralPath $bootstrapPath -Force -ErrorAction Ignore
-    Remove-Item -LiteralPath Env:NOCTTY_DEV_VSDEVCMD, Env:NOCTTY_DEV_ARCH, Env:NOCTTY_DEV_PATH, Env:NOCTTY_DEV_BOOTSTRAP -ErrorAction Ignore
+    Remove-Item -LiteralPath Env:KORETERM_DEV_VSDEVCMD, Env:KORETERM_DEV_ARCH, Env:KORETERM_DEV_PATH, Env:KORETERM_DEV_BOOTSTRAP -ErrorAction Ignore
 }
 # A script run with -File exits 0 when it ends normally, whatever its last native command returned.
 if ($bootstrapExit -ne 0) { throw "The Visual Studio developer shell bootstrap failed with exit code $bootstrapExit." }

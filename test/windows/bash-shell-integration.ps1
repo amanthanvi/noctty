@@ -11,7 +11,7 @@ try {
 # Runs src/shell-integration/bash/ghostty.bash in Git for Windows' bash over a
 # pipe and reads back what it writes. It covers what the Zig tests cannot reach:
 # the status in OSC 133;D, the PATH feature, and the working directory in OSC 7
-# as noctty reads it. Nothing here touches the user's bash files: HOME is a
+# as koreterm reads it. Nothing here touches the user's bash files: HOME is a
 # scratch folder, there is no profile, and history goes to /dev/null.
 
 $ErrorActionPreference = 'Stop'
@@ -39,7 +39,7 @@ function Find-GitBash {
 
 if (-not $BashPath) { $BashPath = Find-GitBash }
 $script:Integration = Join-Path $RepoRoot 'src\shell-integration\bash\ghostty.bash'
-$script:TempDir = Join-Path ([System.IO.Path]::GetTempPath()) ('noctty-bash-si-' + [guid]::NewGuid().ToString('n'))
+$script:TempDir = Join-Path ([System.IO.Path]::GetTempPath()) ('koreterm-bash-si-' + [guid]::NewGuid().ToString('n'))
 
 # Start bash with the integration as its rcfile, feed it `Stdin`, and return
 # what it wrote (stdout and stderr together) as text with the controls kept.
@@ -70,8 +70,8 @@ function Invoke-Bash {
     $vars['HISTFILE'] = '/dev/null'
     $vars['PS1'] = '$ '
     $vars['GHOSTTY_SHELL_FEATURES'] = 'cursor,path,title'
-    $vars['GHOSTTY_BIN_DIR'] = 'C:\Program Files\noctty'
-    # noctty exports the starting directory as a Windows path.
+    $vars['GHOSTTY_BIN_DIR'] = 'C:\Program Files\koreterm'
+    # koreterm exports the starting directory as a Windows path.
     if ($StartPwd) { $vars['PWD'] = $StartPwd }
     foreach ($key in $ExtraEnv.Keys) { $vars[$key] = $ExtraEnv[$key] }
 
@@ -141,14 +141,14 @@ try {
     Assert-True (([regex]::Matches($hooks.Groups[2].Value, '__ghostty_hook')).Count -eq 1) "Sourcing twice installed the hook more than once: '$($hooks.Groups[2].Value)'"
     Assert-True ($hooks.Groups[1].Value -eq '2') "The array PROMPT_COMMAND should hold the user's entry and the hook, held '$($hooks.Groups[1].Value)'."
 
-    # The PATH feature must not split C:\Program Files\noctty at its colon.
+    # The PATH feature must not split C:\Program Files\koreterm at its colon.
     $out = Invoke-Bash -Stdin "echo PATHLIST:`$PATH`nexit`n"
     $entries = ([regex]::Match($out, 'PATHLIST:([^\r\n]*)').Groups[1].Value) -split ':'
     Assert-True ($entries.Count -gt 1) 'Could not read PATH back from bash.'
     Assert-True (-not ($entries -contains 'C')) 'PATH gained a relative "C" entry.'
-    Assert-True (-not ($entries | Where-Object { $_ -like '*noctty' })) 'PATH gained a noctty entry from the Windows GHOSTTY_BIN_DIR.'
+    Assert-True (-not ($entries | Where-Object { $_ -like '*koreterm' })) 'PATH gained a koreterm entry from the Windows GHOSTTY_BIN_DIR.'
 
-    # The working directory, starting from the Windows PWD noctty exports, and
+    # The working directory, starting from the Windows PWD koreterm exports, and
     # after cd to a drive mount and to a directory outside any drive.
     $out = Invoke-Bash -StartPwd $cwd -WorkingDirectory $cwd -Stdin "echo PWDNOW:`$PWD`ncd /tmp`ncd /`nexit`n"
     $posix = [regex]::Match($out, 'PWDNOW:([^\r\n]*)').Groups[1].Value
@@ -159,7 +159,7 @@ try {
     Assert-True ($reports[0][1].EndsWith('/a b#c%d')) "First OSC 7 path was '$($reports[0][1])', expected the start directory"
     Assert-True ($reports[0][0] -ne '') 'OSC 7 lost its host.'
     foreach ($report in $reports) {
-        # noctty reads only `/X:/...` as a Windows directory; `/c/...` is a WSL path.
+        # koreterm reads only `/X:/...` as a Windows directory; `/c/...` is a WSL path.
         Assert-True ($report[1] -match '^/[A-Z]:/') "OSC 7 path '$($report[1])' is not in the /X:/... form."
     }
 
@@ -173,7 +173,7 @@ try {
         New-Item -ItemType Directory -Force -Path (Join-Path $script:TempDir $name) | Out-Null
     }
     # Git's own prompt from /etc/bash.bashrc prints $PWD raw in its title and
-    # is not noctty's, so the first line replaces it. The host name changes
+    # is not koreterm's, so the first line replaces it. The host name changes
     # only after the SOH directory: its ESC would cut that report short.
     $stdin = "PS1='`$ '`necho PWDNOW:`$PWD`ncd z*`nHOSTNAME=`$'h\e]52;c;SGk=\a'`ncd ../x*`nexit`n"
     $out = Invoke-Bash -StartPwd $script:TempDir -WorkingDirectory $script:TempDir -Stdin $stdin
@@ -241,7 +241,7 @@ try {
         $root = [System.IO.Path]::GetFullPath([System.IO.Path]::GetTempPath())
         $target = [System.IO.Path]::GetFullPath($script:TempDir)
         if ($target.StartsWith($root, [System.StringComparison]::OrdinalIgnoreCase) -and
-            (Split-Path $target -Leaf) -like 'noctty-bash-si-*') {
+            (Split-Path $target -Leaf) -like 'koreterm-bash-si-*') {
             Remove-Item -LiteralPath $target -Recurse -Force -ErrorAction SilentlyContinue
         }
     }

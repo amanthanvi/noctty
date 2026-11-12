@@ -1,4 +1,4 @@
-//! COM `IDropTarget` implementation for noctty terminal surfaces.
+//! COM `IDropTarget` implementation for koreterm terminal surfaces.
 //!
 //! Wraps the payload-parsing logic in `win32_surface_drop.zig` behind the
 //! standard OLE drag-drop COM interface so Explorer (and any other drag

@@ -2,10 +2,10 @@
 <#
 Portable, hidden-desktop check of the shell a new terminal starts when `command`
 is unset (PKG-49): PowerShell 7 if it is on PATH, else Windows PowerShell, else
-cmd.exe, and cmd.exe in safe mode. Run with -Bin <directory holding a noctty.exe
+cmd.exe, and cmd.exe in safe mode. Run with -Bin <directory holding a koreterm.exe
 and its share folder> and -Run <new evidence directory>.
 
-Cases, each one launch of noctty with no `command` in its config:
+Cases, each one launch of koreterm with no `command` in its config:
   default           a quoted, explicit PowerShell 7 install directory first on
                     PATH: expects pwsh.exe (inherited PATH follows it so user
                     profile dependencies remain available)
@@ -32,8 +32,8 @@ does not predict discovery from inherited PATH. The Windows PowerShell cases use
 a minimal PATH, so user profiles that require external tools may fail those cases.
 
 Every file the app reads or writes is one this script creates beside a portable
-copy (`noctty.portable`), with LOCALAPPDATA and APPDATA redirected into the run
-directory: the real %LOCALAPPDATA%\noctty is never written or deleted, and only
+copy (`koreterm.portable`), with LOCALAPPDATA and APPDATA redirected into the run
+directory: the real %LOCALAPPDATA%\koreterm is never written or deleted, and only
 the hash and time of its startup state file are read, before and after. Every
 process starts on a private desktop named explicitly in STARTUPINFO, inside a
 job this script owns. Nothing is typed and nothing can copy; the clipboard
@@ -120,7 +120,7 @@ if (-not $Driver) {
     $Run = [IO.Path]::GetFullPath($Run)
     if (Test-Path -LiteralPath $Run) { throw 'Run directory must be new.' }
     $source = (Resolve-Path -LiteralPath $Bin).Path
-    if (-not (Test-Path -LiteralPath (Join-Path $source 'noctty.exe'))) { throw "No noctty.exe in $source." }
+    if (-not (Test-Path -LiteralPath (Join-Path $source 'koreterm.exe'))) { throw "No koreterm.exe in $source." }
     $PowerShell7Directory = [IO.Path]::GetFullPath($PowerShell7Directory)
     if (-not (Test-Path -LiteralPath (Join-Path $PowerShell7Directory 'pwsh.exe') -PathType Leaf)) { throw 'PowerShell7Directory must name an installed PowerShell 7 directory.' }
     $root = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\..')).Path
@@ -136,7 +136,7 @@ if (-not $Driver) {
     Copy-Portable $source $copy
     foreach ($name in @('localappdata','appdata')) { [void](New-Item -ItemType Directory -Path (Join-Path $Run $name)) }
     $attach = Join-Path $Run 'console-attach-info.exe'
-    $desktopName = 'noctty-ds-' + [guid]::NewGuid().ToString('N')
+    $desktopName = 'koreterm-ds-' + [guid]::NewGuid().ToString('N')
     $desktop = [HiddenLocal]::CreateDesktopW($desktopName,[IntPtr]::Zero,[IntPtr]::Zero,0,0x10000000,[IntPtr]::Zero)
     if ($desktop -eq [IntPtr]::Zero) { throw 'CreateDesktop failed.' }
     $oldLocal=$env:LOCALAPPDATA; $oldRoaming=$env:APPDATA
@@ -199,7 +199,7 @@ $shellNames = @('pwsh.exe','powershell.exe','cmd.exe')
 # payload inside this function and never returned.
 # ParentProcessId is a number Windows reuses: a process whose parent exited can name the newer
 # process that took its number, so a shell older than the process it claims as its parent is not
-# under noctty (its screen would be someone else's), and is skipped. A start time CIM could not read
+# under koreterm (its screen would be someone else's), and is skipped. A start time CIM could not read
 # proves nothing. The query has a deadline of its own: the caller's 30 s loop cannot interrupt a call.
 function Find-Shell([int]$RootPid) {
     $all = @(Get-CimInstance -ClassName Win32_Process -Property ProcessId,ParentProcessId,Name,ExecutablePath,CommandLine,CreationDate -OperationTimeoutSec 15 -ErrorAction Stop)
@@ -238,9 +238,9 @@ function Launch-Case([string]$Case,[string]$Exe,[string[]]$ExtraArgs,[hashtable]
     @('window-save-state = never','confirm-close-surface = false','auto-update = off') | Set-Content -LiteralPath (Join-Path $dir 'config.ghostty')
     $saved = @{}
     foreach ($k in $Env.Keys) { $saved[$k] = [Environment]::GetEnvironmentVariable($k); [Environment]::SetEnvironmentVariable($k,$Env[$k]) }
-    $class = "noctty-test-pkg49-$([guid]::NewGuid().ToString('N').Substring(0,12))"
+    $class = "koreterm-test-pkg49-$([guid]::NewGuid().ToString('N').Substring(0,12))"
     $line = '"{0}" --single-instance=false --class={1} {2}' -f $Exe,$class,($ExtraArgs -join ' ')
-    $record = @{ Case=$Case; Shell=$null; Integration=$null; PromptMs=$null; PromptLine=$null; Screen=@(); NocttyWarnings=@(); HostNoise=@(); Unexplained=@(); NoAutoRun=$null }
+    $record = @{ Case=$Case; Shell=$null; Integration=$null; PromptMs=$null; PromptLine=$null; Screen=@(); KoretermWarnings=@(); HostNoise=@(); Unexplained=@(); NoAutoRun=$null }
     $clock = [Diagnostics.Stopwatch]::StartNew()
     try { $pi = [Ds]::Launch($Exe,$line,$dir,$Desktop,[IntPtr]::Zero,$false) }
     finally { foreach ($k in $saved.Keys) { [Environment]::SetEnvironmentVariable($k,$saved[$k]) } }
@@ -276,14 +276,14 @@ function Launch-Case([string]$Case,[string]$Exe,[string[]]$ExtraArgs,[hashtable]
             }
             # Only a policy-blocked user profile is expected under Restricted.
             # PSReadLine errors must fail, including inherited PS7 module-path failures.
-            $record.NocttyWarnings = @($record.Screen | Where-Object { $_ -match '(?i)noctty|integration (skipped|could not)|could not load' })
+            $record.KoretermWarnings = @($record.Screen | Where-Object { $_ -match '(?i)koreterm|integration (skipped|could not)|could not load' })
             $profileBlocked = ($record.Screen -join "`n") -match '(?i)profile\.ps1.*cannot be loaded'
-            $record.HostNoise = @($record.Screen | Where-Object { $Case -eq 'restricted-51' -and $profileBlocked -and $_ -notmatch '(?i)PSReadLine|noctty|integration' -and $_ -match '(?i)profile\.ps1|about_Execution_Policies|SecurityError|UnauthorizedAccess|FullyQualifiedErrorId|^\s*\+ |^At line:|^because running scripts|^about_Execution' })
+            $record.HostNoise = @($record.Screen | Where-Object { $Case -eq 'restricted-51' -and $profileBlocked -and $_ -notmatch '(?i)PSReadLine|koreterm|integration' -and $_ -match '(?i)profile\.ps1|about_Execution_Policies|SecurityError|UnauthorizedAccess|FullyQualifiedErrorId|^\s*\+ |^At line:|^because running scripts|^about_Execution' })
             # Every row but the last (the prompt) must be a row the host explains; wrapped lines of the profile error count.
             $record.Unexplained = @($record.Screen | Select-Object -SkipLast 1 | Where-Object { $record.HostNoise -notcontains $_ -and $_ -notmatch '^(because|about_|\. :|File )' })
         }
         if ([HiddenLocal]::WaitForSingleObject($pi.process,0) -ne 0) {
-            foreach ($h in [Ds]::Windows($pi.pid,'noctty.win32.host')) { [void][Ds]::PostMessageW($h,0x10,[IntPtr]::Zero,[IntPtr]::Zero) }
+            foreach ($h in [Ds]::Windows($pi.pid,'koreterm.win32.host')) { [void][Ds]::PostMessageW($h,0x10,[IntPtr]::Zero,[IntPtr]::Zero) }
             if ([HiddenLocal]::WaitForSingleObject($pi.process,8000) -ne 0) {
                 # Our own handle from CreateProcess: the exact process we started.
                 [void][Ds]::TerminateProcess($pi.process,1); [void][HiddenLocal]::WaitForSingleObject($pi.process,5000)
@@ -296,7 +296,7 @@ function Launch-Case([string]$Case,[string]$Exe,[string[]]$ExtraArgs,[hashtable]
 }
 
 try {
-    $exe = Join-Path $Bin 'noctty.exe'
+    $exe = Join-Path $Bin 'koreterm.exe'
     # An explicit installed PS7 fixture wins before any inherited entry. Quoting
     # it also exercises discovery's quoted PATH handling without a second resolver.
     $withPwsh = '"{0}";{1}' -f $PowerShell7Directory,$env:PATH
@@ -316,7 +316,7 @@ try {
     Check 'default' 'the shell integration payload is on its command line' ($r.Integration -eq $true) $true $r.Integration
     Check 'default' 'the shell starts and its screen settles' ($null -ne $r.PromptMs) 'settled' $r.PromptLine
     Check 'default' 'nothing unexplained above the prompt' ($r.Unexplained.Count -eq 0) 0 $r.Unexplained
-    Check 'default' 'no warning from this app on the screen' ($r.NocttyWarnings.Count -eq 0) 0 $r.NocttyWarnings
+    Check 'default' 'no warning from this app on the screen' ($r.KoretermWarnings.Count -eq 0) 0 $r.KoretermWarnings
 
     $r = Launch-Case 'no-pwsh' $exe @() @{ PATH = $withoutPwsh; PSModulePath = $windowsPowerShellModules }
     Check 'no-pwsh' 'without pwsh.exe on PATH the first tab runs system Windows PowerShell' ($r.Shell -eq 'powershell.exe' -and $r.ShellPath -eq $expectedWindowsPowerShell) $expectedWindowsPowerShell $r.ShellPath
@@ -328,7 +328,7 @@ try {
     Check 'restricted-51' 'the integration payload is on its command line' ($r.Integration -eq $true) $true $r.Integration
     Check 'restricted-51' 'the shell starts and its screen settles' ($null -ne $r.PromptMs) 'settled' $r.PromptLine
     Check 'restricted-51' 'every row above the prompt is the host or the user profile under Restricted' ($r.Unexplained.Count -eq 0) 0 $r.Unexplained
-    Check 'restricted-51' 'no integration warning or PSReadLine load error on the screen' ($r.NocttyWarnings.Count -eq 0 -and -not ($r.Screen -match 'Cannot load PSReadline')) 0 $r.NocttyWarnings
+    Check 'restricted-51' 'no integration warning or PSReadLine load error on the screen' ($r.KoretermWarnings.Count -eq 0 -and -not ($r.Screen -match 'Cannot load PSReadline')) 0 $r.KoretermWarnings
 
     $r = Launch-Case 'safe-mode' $exe @('--safe-mode') @{ PATH = $withPwsh }
     Check 'safe-mode' 'safe mode starts system cmd.exe although PowerShell is installed' ($r.Shell -eq 'cmd.exe' -and $r.ShellPath -eq $expectedCmd) $expectedCmd $r.ShellPath

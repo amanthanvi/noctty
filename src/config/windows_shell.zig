@@ -139,7 +139,7 @@ pub const Profile = struct {
     }
 };
 
-/// Whether two profile keys, as noctty stores them (a pane's launch key, a
+/// Whether two profile keys, as koreterm stores them (a pane's launch key, a
 /// quick slot's), name one profile: an `ssh:` key exactly, its prefix
 /// included (OpenSSH aliases are case-sensitive), any other key in any
 /// case. A reference a user writes (`default-profile`, `profile-order`) is
@@ -177,8 +177,8 @@ pub const EnvEntry = struct {
 /// The variables Settings' profile window keeps a user profile's own
 /// options in (`profile-env`, so they save, export and back up with it):
 /// its zoom, a font size in points, and `1` to open it as administrator.
-pub const font_size_env = "NOCTTY_FONT_SIZE";
-pub const elevated_env = "NOCTTY_ELEVATED";
+pub const font_size_env = "KORETERM_FONT_SIZE";
+pub const elevated_env = "KORETERM_ELEVATED";
 
 /// The value of the variable `name` (any case) among `env`, if set.
 pub fn reservedEnv(env: []const EnvEntry, name: []const u8) ?[]const u8 {
@@ -268,7 +268,7 @@ pub const UserProfiles = struct {
     arena: std.heap.ArenaAllocator,
     definitions: []const Definition = &.{},
     /// `profile-order` and `profile-hidden`: references (a user profile id,
-    /// `user:<id>`, a detected key or a `NOCTTY_WIN32_PROFILE_ORDER` alias)
+    /// `user:<id>`, a detected key or a `KORETERM_WIN32_PROFILE_ORDER` alias)
     /// that `arrangeProfiles` applies to the whole list.
     order: []const []const u8 = &.{},
     hidden: []const []const u8 = &.{},
@@ -282,7 +282,7 @@ pub const UserProfiles = struct {
         working_directory: ?[]const u8 = null,
         env: []const EnvEntry = &.{},
         /// The config's `env` entries, in order: `%NAME%` reads them before
-        /// noctty's own environment (`expandProfileText`), so a value sees
+        /// koreterm's own environment (`expandProfileText`), so a value sees
         /// the environment the shell would get without this profile.
         global_env: []const EnvEntry = &.{},
     };
@@ -348,7 +348,7 @@ pub const UserProfiles = struct {
     }
 };
 
-/// noctty's own environment, read by name for `%NAME%` in a user profile
+/// koreterm's own environment, read by name for `%NAME%` in a user profile
 /// (`expandProfileText`). The seam `appendUserProfiles` takes; tests pass a
 /// table of their own.
 pub const ProcessEnvironment = struct {
@@ -415,7 +415,7 @@ fn profileVariable(alloc: Allocator, name: []const u8, global_env: []const EnvEn
     return try process.get(alloc, name);
 }
 
-/// `ExpandEnvironmentStringsW` on noctty's own environment, which
+/// `ExpandEnvironmentStringsW` on koreterm's own environment, which
 /// `expandProfileText` must match when no `env` entry is involved.
 fn expandEnvironmentStrings(alloc: Allocator, text: []const u8) ![]u8 {
     const source = try std.unicode.wtf8ToWtf16LeAllocZ(alloc, text);
@@ -447,7 +447,7 @@ const ExpandEnvironment = struct {
 };
 /// Split a Windows command line into argv with the rules CreateProcess's
 /// callee (the MSVC runtime, `CommandLineToArgvW`) applies, so the argv
-/// noctty inspects is the argv the program will see.
+/// koreterm inspects is the argv the program will see.
 pub fn splitWindowsCommandLine(alloc: Allocator, line: []const u8) ![][:0]const u8 {
     const wide = try std.unicode.wtf8ToWtf16LeAllocZ(alloc, line);
     defer alloc.free(wide);
@@ -644,7 +644,7 @@ fn userWorkingDirectory(
     return .{ .path = try alloc.dupeZ(u8, value) };
 }
 
-/// noctty's environment for tests, a fixed table: the seam
+/// koreterm's environment for tests, a fixed table: the seam
 /// `appendUserProfiles` takes. Names compare without case, as Windows
 /// compares them.
 const TestEnvironment = struct {
@@ -766,7 +766,7 @@ test "user profiles expand %NAME% in the command, the directory and env values" 
     } };
     const definitions = [_]UserProfiles.Definition{.{
         .id = "Tool",
-        .command = "  \"%TOOLS%\\x.exe\" --flag %NOCTTY_UNDEFINED% 100%  ",
+        .command = "  \"%TOOLS%\\x.exe\" --flag %KORETERM_UNDEFINED% 100%  ",
         .working_directory = "\"%WORK%\\src\"",
         .env = &.{
             .{ .key = "PATH", .value = "%TOOLS%;%PATH%" },
@@ -778,16 +778,16 @@ test "user profiles expand %NAME% in the command, the directory and env values" 
     try testing.expectEqual(@as(usize, 1), profiles.len);
     const profile = profiles[0];
     try testing.expectEqual(ProfileKind.user, profile.kind);
-    try testing.expectEqualStrings("\"C:\\T dir\\x.exe\" --flag %NOCTTY_UNDEFINED% 100%", profile.user.?.command_line);
+    try testing.expectEqualStrings("\"C:\\T dir\\x.exe\" --flag %KORETERM_UNDEFINED% 100%", profile.user.?.command_line);
     try testing.expectEqualStrings("C:\\T dir\\x.exe", profile.command.direct[0]);
-    try testing.expectEqualStrings("%NOCTTY_UNDEFINED%", profile.command.direct[2]);
+    try testing.expectEqualStrings("%KORETERM_UNDEFINED%", profile.command.direct[2]);
     try testing.expectEqualStrings("D:\\w\\src", profile.working_directory.?.path);
     try testing.expectEqualStrings("PATH", profile.user.?.env[0].key);
     try testing.expectEqualStrings("C:\\T dir;C:\\Windows", profile.user.?.env[0].value);
     try testing.expectEqualStrings("%nope%", profile.user.?.env[1].value);
 }
 
-test "user profile %NAME% reads env lines before noctty's environment" {
+test "user profile %NAME% reads env lines before koreterm's environment" {
     const testing = std.testing;
     const alloc = testing.allocator;
     const process = TestEnvironment{ .vars = &.{
@@ -796,7 +796,7 @@ test "user profile %NAME% reads env lines before noctty's environment" {
         .{ "MODE", "process" },
     } };
     // `env = Path=C:\team` and `env = PATH=C:\later` (Windows sees the
-    // later one), plus a variable only noctty's environment has.
+    // later one), plus a variable only koreterm's environment has.
     const global = [_]EnvEntry{
         .{ .key = "Path", .value = "C:\\team" },
         .{ .key = "OTHER", .value = "%USERPROFILE%" },
@@ -847,7 +847,7 @@ test "user profile expansion matches ExpandEnvironmentStringsW" {
     const alloc = testing.allocator;
     // Names this process has (`SystemRoot`, `windir`) and does not have, in
     // every arrangement of `%` the scanner has to agree on.
-    const unset = "NOCTTY_TEST_SURELY_UNDEFINED_8C1F";
+    const unset = "KORETERM_TEST_SURELY_UNDEFINED_8C1F";
     const cases = [_][]const u8{
         "",
         "plain",
@@ -1970,7 +1970,7 @@ test "the machine's Visual Studio shells, through the stages a listing runs" {
                 try testing.expect(!std.mem.containsAtLeast(u8, profile.key, 1, first_id.?));
             }
         }
-        if (std.process.hasEnvVarConstant("NOCTTY_PRINT_VISUAL_STUDIO_PROFILES")) {
+        if (std.process.hasEnvVarConstant("KORETERM_PRINT_VISUAL_STUDIO_PROFILES")) {
             std.debug.print("visual-studio-profiles = {s}: {d} shown, {d} hidden\n", .{ @tagName(mode), shown_vs, vs_count - shown_vs });
             for (profiles) |profile| {
                 if (std.mem.startsWith(u8, profile.key, "vs:")) std.debug.print("  {s} {s}{s}\n", .{ profile.key, profile.label, if (profile.hidden) " (hidden)" else "" });
@@ -2254,7 +2254,7 @@ pub fn shellIntegrationDiagnostic(kind: ProfileKind) ShellIntegrationDiagnostic 
         .user => .{
             .support = .manual,
             .summary = "User profile; shell integration follows the program it runs",
-            .next_step = "Start a shell noctty integrates (PowerShell, cmd, Git Bash) or enable integration in the program's own startup.",
+            .next_step = "Start a shell koreterm integrates (PowerShell, cmd, Git Bash) or enable integration in the program's own startup.",
         },
     };
 }
@@ -2267,7 +2267,7 @@ pub fn profileShellIntegrationDiagnostic(alloc: Allocator, profile: *const Profi
     const shell = (try @import("../termio/shell_integration.zig").detectShell(alloc, profile.command)) orelse
         return shellIntegrationDiagnostic(.user);
     return switch (shell) {
-        // A line in exactly the form of noctty's own Developer PowerShell
+        // A line in exactly the form of koreterm's own Developer PowerShell
         // is integrated as that profile is.
         .powershell => if (profile.command == .direct and
             visual_studio.devShellPrelude(profile.command.direct) != null)
@@ -3292,7 +3292,7 @@ fn deinitProfileList(alloc: Allocator, profiles: *std.ArrayList(Profile)) void {
 }
 
 fn detectProfileOrderHint(alloc: Allocator) ?[]u8 {
-    const raw = std.process.getEnvVarOwned(alloc, "NOCTTY_WIN32_PROFILE_ORDER") catch
+    const raw = std.process.getEnvVarOwned(alloc, "KORETERM_WIN32_PROFILE_ORDER") catch
         return null;
     errdefer alloc.free(raw);
 
@@ -3741,7 +3741,7 @@ pub fn visibleProfiles(profiles: []Profile) []Profile {
 }
 
 /// What `resolveProfileReference` needs from the system: the lookups
-/// discovery uses, noctty's environment for `%NAME%` in a user profile,
+/// discovery uses, koreterm's environment for `%NAME%` in a user profile,
 /// and Visual Studio's instances (`visual-studio-profiles`) for a `vs:` key;
 /// and the automatic default shell, for a config load (`pane_launch`).
 pub const ReferenceHost = struct {
@@ -5887,7 +5887,7 @@ test "registryString reads a string value and nothing else" {
     const key_write: windows.DWORD = 0x20006;
 
     // A key of this test's own, under HKCU, deleted at the end.
-    const key_name = try std.fmt.allocPrint(alloc, "Software\\noctty-test-pkg17-{d}", .{windows.GetCurrentProcessId()});
+    const key_name = try std.fmt.allocPrint(alloc, "Software\\koreterm-test-pkg17-{d}", .{windows.GetCurrentProcessId()});
     defer alloc.free(key_name);
     const subkey = try std.unicode.utf8ToUtf16LeAllocZ(alloc, key_name);
     defer alloc.free(subkey);
@@ -6277,7 +6277,7 @@ fn testWslPipe(read_end: *windows.HANDLE, write_end: *windows.HANDLE) !void {
     };
     Count.next += 1;
     var name_buf: [96]u8 = undefined;
-    const name = try std.fmt.bufPrint(&name_buf, "\\\\.\\pipe\\noctty-test-wsl-drain-{d}-{d}", .{ windows.GetCurrentProcessId(), Count.next });
+    const name = try std.fmt.bufPrint(&name_buf, "\\\\.\\pipe\\koreterm-test-wsl-drain-{d}-{d}", .{ windows.GetCurrentProcessId(), Count.next });
     var wide: [96:0]u16 = undefined;
     const len = try std.unicode.utf8ToUtf16Le(&wide, name);
     wide[len] = 0;
@@ -6462,7 +6462,7 @@ test "wsl -l -q runs without an inherited WSL_UTF8, so it writes the UTF-16LE it
         try env.put("Path", "C:\\Windows\\System32");
         try env.put(name, "1");
         Spawn.pinned = null;
-        try testing.expectError(error.TestNotSpawned, listWslDistrosIn(alloc, "C:\\noctty-test\\wsl.exe", &env));
+        try testing.expectError(error.TestNotSpawned, listWslDistrosIn(alloc, "C:\\koreterm-test\\wsl.exe", &env));
         try testing.expectEqual(@as(?bool, true), Spawn.pinned);
     }
 }
@@ -6921,7 +6921,7 @@ test "prepareCommand injects translated cwd for wsl direct command" {
 
     const command = try directCommand(alloc, &.{"wsl.exe"});
     defer command.deinit(alloc);
-    const prepared = try prepareCommandWithLookup(alloc, command, "D:\\work\\noctty", false, false, struct {
+    const prepared = try prepareCommandWithLookup(alloc, command, "D:\\work\\koreterm", false, false, struct {
         fn lookup(a: Allocator, exe: []const u8) !?[]u8 {
             if (std.mem.eql(u8, exe, "wsl.exe")) return try a.dupe(u8, "C:\\Windows\\System32\\wsl.exe");
             return null;
@@ -6933,7 +6933,7 @@ test "prepareCommand injects translated cwd for wsl direct command" {
     try testing.expectEqual(@as(usize, 3), prepared.direct.len);
     try testing.expectEqualStrings("C:\\Windows\\System32\\wsl.exe", prepared.direct[0]);
     try testing.expectEqualStrings("--cd", prepared.direct[1]);
-    try testing.expectEqualStrings("/mnt/d/work/noctty", prepared.direct[2]);
+    try testing.expectEqualStrings("/mnt/d/work/koreterm", prepared.direct[2]);
 }
 
 test "prepareCommand replaces default wsl home sentinel with explicit cwd" {
@@ -6942,7 +6942,7 @@ test "prepareCommand replaces default wsl home sentinel with explicit cwd" {
 
     const command = try directCommand(alloc, &.{ "wsl.exe", "~" });
     defer command.deinit(alloc);
-    const prepared = try prepareCommandWithLookup(alloc, command, "D:\\work\\noctty", false, false, struct {
+    const prepared = try prepareCommandWithLookup(alloc, command, "D:\\work\\koreterm", false, false, struct {
         fn lookup(a: Allocator, exe: []const u8) !?[]u8 {
             if (std.mem.eql(u8, exe, "wsl.exe")) return try a.dupe(u8, "C:\\Windows\\System32\\wsl.exe");
             return null;
@@ -6954,7 +6954,7 @@ test "prepareCommand replaces default wsl home sentinel with explicit cwd" {
     try testing.expectEqual(@as(usize, 3), prepared.direct.len);
     try testing.expectEqualStrings("C:\\Windows\\System32\\wsl.exe", prepared.direct[0]);
     try testing.expectEqualStrings("--cd", prepared.direct[1]);
-    try testing.expectEqualStrings("/mnt/d/work/noctty", prepared.direct[2]);
+    try testing.expectEqualStrings("/mnt/d/work/koreterm", prepared.direct[2]);
 }
 
 test "prepareCommand rewrites wsl home sentinel to explicit --cd" {

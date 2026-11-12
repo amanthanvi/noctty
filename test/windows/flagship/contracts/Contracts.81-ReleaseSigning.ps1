@@ -27,7 +27,7 @@ $releaseArtifactVerifierStatement =
 $releaseArtifactVerifierSideEffect =
     "${releaseArtifactVerifierIndent}Set-Content -LiteralPath " +
     "([IO.Path]::Combine([IO.Path]::GetTempPath(), " +
-    "'noctty-release-pin-mutant')) -Value 'mutated'"
+    "'koreterm-release-pin-mutant')) -Value 'mutated'"
 $releaseArtifactVerifierMutants = [ordered] @{
     'injected early return' = $canonicalReleaseArtifactVerifier.Replace(
         $releaseArtifactVerifierCriticalStatement,
@@ -160,7 +160,7 @@ if ($releaseSignatureText -notmatch '\bGet-CertificateSpkiSha256\b' -or
 # evidence are observed by the real signed/tampered-PE policy test below. Local
 # parameter names and implementation ordering add no contract coverage.
 $checksumProbeRoot = Join-Path ([IO.Path]::GetTempPath()) (
-    'noctty-checksum-contract-' + [Guid]::NewGuid().ToString('N')
+    'koreterm-checksum-contract-' + [Guid]::NewGuid().ToString('N')
 )
 $checksumValidPath = Join-Path $checksumProbeRoot 'valid.txt'
 $checksumDuplicatePath = Join-Path $checksumProbeRoot 'duplicate.txt'
@@ -394,7 +394,7 @@ $preflightTimestampProbes = [ordered] @{
     'Artifact Signing partly configured' = [pscustomobject]@{
         Environment = @{
             WINDOWS_CODESIGN_TIMESTAMP_URL = 'http://timestamp.acs.microsoft.com'
-            ARTIFACT_SIGNING_ACCOUNT_NAME = 'nocttyprobe'
+            ARTIFACT_SIGNING_ACCOUNT_NAME = 'koretermprobe'
         }
         ExpectedExitCode = 1
         MustMatch = 'Azure Artifact Signing is partly configured'
@@ -405,8 +405,8 @@ $preflightTimestampProbes = [ordered] @{
             WINDOWS_CODESIGN_TIMESTAMP_URL = 'http://timestamp.acs.microsoft.com'
             WINDOWS_CODESIGN_PFX_BASE64 = 'cHJvYmU='
             ARTIFACT_SIGNING_ENDPOINT = 'https://eus.codesigning.azure.net'
-            ARTIFACT_SIGNING_ACCOUNT_NAME = 'nocttyprobe'
-            ARTIFACT_SIGNING_CERTIFICATE_PROFILE_NAME = 'nocttyprobeprofile'
+            ARTIFACT_SIGNING_ACCOUNT_NAME = 'koretermprobe'
+            ARTIFACT_SIGNING_CERTIFICATE_PROFILE_NAME = 'koretermprobeprofile'
             ARTIFACT_SIGNING_TENANT_ID = '00000000-0000-0000-0000-000000000001'
             ARTIFACT_SIGNING_CLIENT_ID = '00000000-0000-0000-0000-000000000002'
         }
@@ -418,8 +418,8 @@ $preflightTimestampProbes = [ordered] @{
         Environment = @{
             WINDOWS_CODESIGN_TIMESTAMP_URL = 'http://timestamp.acs.microsoft.com'
             ARTIFACT_SIGNING_ENDPOINT = 'https://eus.codesigning.azure.net.example'
-            ARTIFACT_SIGNING_ACCOUNT_NAME = 'nocttyprobe'
-            ARTIFACT_SIGNING_CERTIFICATE_PROFILE_NAME = 'nocttyprobeprofile'
+            ARTIFACT_SIGNING_ACCOUNT_NAME = 'koretermprobe'
+            ARTIFACT_SIGNING_CERTIFICATE_PROFILE_NAME = 'koretermprobeprofile'
             ARTIFACT_SIGNING_TENANT_ID = '00000000-0000-0000-0000-000000000001'
             ARTIFACT_SIGNING_CLIENT_ID = '00000000-0000-0000-0000-000000000002'
         }
@@ -431,8 +431,8 @@ $preflightTimestampProbes = [ordered] @{
         Environment = @{
             WINDOWS_CODESIGN_TIMESTAMP_URL = 'http://timestamp.acs.microsoft.com'
             ARTIFACT_SIGNING_ENDPOINT = 'https://eus.codesigning.azure.net'
-            ARTIFACT_SIGNING_ACCOUNT_NAME = 'nocttyprobe'
-            ARTIFACT_SIGNING_CERTIFICATE_PROFILE_NAME = 'nocttyprobeprofile'
+            ARTIFACT_SIGNING_ACCOUNT_NAME = 'koretermprobe'
+            ARTIFACT_SIGNING_CERTIFICATE_PROFILE_NAME = 'koretermprobeprofile'
             ARTIFACT_SIGNING_TENANT_ID = '00000000-0000-0000-0000-000000000001'
             ARTIFACT_SIGNING_CLIENT_ID = '00000000-0000-0000-0000-000000000002'
         }
@@ -580,14 +580,14 @@ foreach ($contract in @(
     @{ Pattern = '\$expectedAssetCount = if \(\$requiresPortableManifests\) \{ 10 \} else \{ 8 \}\s*if \(\$requiresSymbols\) \{ \$expectedAssetCount \+= 2 \}'; Description = 'published verifier preserves the historical asset set, requires ten assets from v1.3.124 and twelve from the first symbols release' },
     @{ Pattern = '(?s)\$firstSymbolsVersion = \[version\]''1\.3\.133''.*?\$requiresSymbols = \(\$releaseVersion -ge \$firstSymbolsVersion\)'; Description = 'published verifier starts requiring the symbols zips at v1.3.133' },
     @{ Pattern = '(?s)\$requiresSymbols\) \{\s*\$expectedNames\.Add\(\(New-WindowsPackageArtifactName[^\n]*-Kind symbols\)\)\s*\}'; Description = 'published verifier adds the per-architecture symbols zip to the exact asset set' },
-    @{ Pattern = '(?s)\$requiresSymbols\) \{\s*\[void\]\(Assert-SymbolsArchiveMatchesPortable.*?-SymbolsZip.*?-PayloadRoot \(Join-Path \$extractDirectory ''noctty''\)'; Description = 'published verifier matches every downloaded PDB to the downloaded portable binaries by GUID and age' },
+    @{ Pattern = '(?s)\$requiresSymbols\) \{\s*\[void\]\(Assert-SymbolsArchiveMatchesPortable.*?-SymbolsZip.*?-PayloadRoot \(Join-Path \$extractDirectory ''koreterm''\)'; Description = 'published verifier matches every downloaded PDB to the downloaded portable binaries by GUID and age' },
     @{ Pattern = '(?s)\$missing = .*?\$unexpected = .*?\$missing\.Count -gt 0 -or \$unexpected\.Count -gt 0.*?asset set mismatch'; Description = 'published verifier rejects missing and unexpected assets' },
     @{ Pattern = '(?s)Get-FileSha256Lower.*?\$digest = .*?\$digest -notmatch.*?\$actualHash -ne \$digest\.Substring\(7\)\.ToLowerInvariant\(\).*?digest mismatch'; Description = 'published verifier compares downloaded bytes with GitHub SHA-256 digests' },
     @{ Pattern = 'SequenceEqual'; Description = 'published verifier preserves byte-identical legacy x64 checksum alias' },
     @{ Pattern = '(?s)\$checksums\.Count -ne \$expectedChecksumNames\.Count.*?\$checksums\.Contains\(\$_\).*?\$checksums\[\$name\] -ne \$actualHash'; Description = 'published verifier enforces exact checksum names, count, and hashes' },
     @{ Pattern = '(?s)\$signatureEvidence\.Add\(\(Assert-ReleaseSignature.*?Setup \$architecture.*?Portable manifest \$architecture.*?Assert-PortableManifestMatchesPayload.*?foreach \(\$relativePath.*?\$signatureEvidence\.Add\(\(Assert-ReleaseSignature.*?\$signedAssetsPerArchitecture = if \(\$requiresPortableManifests\) \{ 2 \} else \{ 1 \}.*?\$expectedSignatureCount =.*?@\(Get-WindowsPackageArchitectures\)\.Count \*.*?\(\$signedAssetsPerArchitecture \+ @\(Get-WindowsSignedRuntimePayloads\)\.Count\).*?\$signatureEvidence\.Count -ne \$expectedSignatureCount'; Description = 'published verifier validates two manifests plus a derived count of every signed portable PE while preserving pre-manifest releases' },
     @{ Pattern = '(?s)gh attestation verify \$Path.*?--repo \$Repository.*?--signer-workflow.*?release\.yml'; Description = 'published verifier binds provenance to the canonical release workflow' },
-    @{ Pattern = '(?s)\$expectedAttestationNames = @\(\$expectedNames \| Where-Object \{ \$_ -ne ''noctty-icon\.svg'' \}\).*?foreach \(\$asset in \$assets\).*?\$expectedAttestationNames -contains \[string\]\$asset\.name.*?\$expectedAttestationNames\.Count -ne \$expectedAttestationCount.*?\$attestationEvidenceCount -ne \$expectedAttestationNames\.Count'; Description = 'published verifier binds the exact non-icon asset names (nine, eleven with symbols) to attestation evidence' },
+    @{ Pattern = '(?s)\$expectedAttestationNames = @\(\$expectedNames \| Where-Object \{ \$_ -ne ''koreterm-icon\.svg'' \}\).*?foreach \(\$asset in \$assets\).*?\$expectedAttestationNames -contains \[string\]\$asset\.name.*?\$expectedAttestationNames\.Count -ne \$expectedAttestationCount.*?\$attestationEvidenceCount -ne \$expectedAttestationNames\.Count'; Description = 'published verifier binds the exact non-icon asset names (nine, eleven with symbols) to attestation evidence' },
     @{ Pattern = '\$expectedAttestationCount = \$expectedAssetCount - 1'; Description = 'published verifier attests every asset but the static icon' },
     @{ Pattern = '(?s)\$thumbprints\.Count -ne 1 -or \$pins\.Count -ne 1.*?one consistent certificate'; Description = 'published verifier requires one consistent signer after shared updater-pin verification' },
     @{ Pattern = "Get-WindowsSignedRuntimePayloads"; Description = 'published verifier checks every packaged runtime PE for both architectures' },

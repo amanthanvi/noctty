@@ -12,7 +12,7 @@ function Get-FileSha256Lower {
 }
 
 function Get-WindowsSignedRuntimePayloads {
-    # Portable-ZIP-relative paths of every PE that noctty builds and signs.
+    # Portable-ZIP-relative paths of every PE that koreterm builds and signs.
     # This is the single list behind release Authenticode re-verification,
     # published-release verification, and the Defender scan, so a newly
     # shipped binary becomes covered by all three by being added here once.
@@ -20,9 +20,9 @@ function Get-WindowsSignedRuntimePayloads {
     # re-signed by us and is verified against its own pinned hashes and
     # Microsoft's signature instead.
     return @(
-        'noctty/noctty.com',
-        'noctty/noctty.exe',
-        'noctty/ghostty-vt.dll',
-        'noctty/noctty-terminal-handoff-proxy.dll'
+        'koreterm/koreterm.com',
+        'koreterm/koreterm.exe',
+        'koreterm/ghostty-vt.dll',
+        'koreterm/koreterm-terminal-handoff-proxy.dll'
     )
 }

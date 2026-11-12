@@ -123,7 +123,7 @@ public sealed class HintsHeldInputWriterProbe : IDisposable {
 '@
 }
 
-$inputRoot = Join-Path ([IO.Path]::GetTempPath()) ('noctty-hints-input-contract-' + [guid]::NewGuid().ToString('N'))
+$inputRoot = Join-Path ([IO.Path]::GetTempPath()) ('koreterm-hints-input-contract-' + [guid]::NewGuid().ToString('N'))
 [void](New-Item -ItemType Directory -Path $inputRoot)
 $lease = $null
 $sharedWriter = $null

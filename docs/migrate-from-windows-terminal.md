@@ -1,6 +1,6 @@
 # Migrate from Windows Terminal
 
-Noctty and Windows Terminal install side by side. Installing Noctty does not
+Koreterm and Windows Terminal install side by side. Installing Koreterm does not
 replace Windows Terminal, modify its `settings.json`, or change your default
 terminal application. Keep Windows Terminal until your shells, font, colors, and
 keybindings behave the way you expect.
@@ -11,7 +11,7 @@ translates the settings that affect a normal session and names the ones that
 have no equivalent.
 
 **Open a specific shell.** Windows Terminal's `Ctrl+Shift+1` to `Ctrl+Shift+9`
-open a new tab with profile 1 to 9. Noctty has no keybinding yet that opens a
+open a new tab with profile 1 to 9. Koreterm has no keybinding yet that opens a
 named profile in a new tab. Press `Ctrl+Shift+P`, type `~` and part of the
 name (`~ubuntu`, `~pwsh`), and press Enter, or pick the profile from the [▾]
 menu next to the new-tab button. To make one shell what `Ctrl+Shift+T` opens,
@@ -23,45 +23,45 @@ set `default-profile` (not together with `command`, which outranks it).
 In Windows Terminal, open Settings and note your default profile, its command
 line and starting directory, the font, the color scheme, opacity and padding,
 and any keybinding you changed from the default. Leave `settings.json` where it
-is; Noctty never reads it.
+is; Koreterm never reads it.
 
-## 2. Install and verify Noctty
+## 2. Install and verify Koreterm
 
 ```powershell
-scoop bucket add noctty https://github.com/amanthanvi/scoop-noctty
-scoop install noctty/noctty
+scoop bucket add koreterm https://github.com/amanthanvi/scoop-noctty
+scoop install koreterm/koreterm
 ```
 
-Or install with WinGet: `winget install --id AmanThanvi.noctty -e`.
+Or install with WinGet: `winget install --id AmanThanvi.koreterm -e`.
 
-The installer does not add `noctty` to `PATH`. To run the `noctty +...` commands
-below from a shell, add the install folder to `PATH` or run `.\noctty.com`
+The installer does not add `koreterm` to `PATH`. To run the `koreterm +...` commands
+below from a shell, add the install folder to `PATH` or run `.\koreterm.com`
 from that folder.
 
 For a direct download, run the checksum and signature checks on the
-[Why Noctty and verification page](https://noctty.com/why-noctty.html#verify).
+[Why Koreterm and verification page](https://noctty.com/why-koreterm.html#verify).
 The release signing certificate is self-signed, so SmartScreen warns even when
 every check passes.
 
 ## 3. Translate the settings
 
-Noctty's config is a plain key/value file at
-`%LOCALAPPDATA%\noctty\config.ghostty`. One setting per line, no JSON, no
+Koreterm's config is a plain key/value file at
+`%LOCALAPPDATA%\koreterm\config.ghostty`. One setting per line, no JSON, no
 profile inheritance. Copy only the lines you need.
 
-| Windows Terminal             | Noctty                                 | Notes                                                                               |
+| Windows Terminal             | Koreterm                                 | Notes                                                                               |
 | ---------------------------- | -------------------------------------- | ----------------------------------------------------------------------------------- |
 | `commandline`                | `command`                              | Quote a path containing spaces with the `direct:` form.                             |
 | `startingDirectory`          | `working-directory`                    |                                                                                     |
 | `font.face`                  | `font-family`                          |                                                                                     |
 | `font.size`                  | `font-size`                            |                                                                                     |
-| `colorScheme`                | `theme`                                | Bundled names come from `noctty +list-themes`. A WT scheme is not imported.         |
+| `colorScheme`                | `theme`                                | Bundled names come from `koreterm +list-themes`. A WT scheme is not imported.         |
 | `opacity`                    | `background-opacity`                   | Divide the Windows Terminal percentage by 100: `50` becomes `0.5`; `1.0` is opaque. |
 | `useAcrylic`                 | `background-blur`                      | Accepted but inert on Windows; a translucent background is never blurred.           |
-| `padding`                    | `window-padding-x`, `window-padding-y` | Noctty splits horizontal and vertical padding.                                      |
+| `padding`                    | `window-padding-x`, `window-padding-y` | Koreterm splits horizontal and vertical padding.                                      |
 | `copyOnSelect`               | `copy-on-select`                       |                                                                                     |
 | `cursorShape`                | `cursor-style`                         |                                                                                     |
-| `historySize`                | `scrollback-limit`                     | Different unit: WT counts lines, Noctty counts bytes. The default is 10 MB.         |
+| `historySize`                | `scrollback-limit`                     | Different unit: WT counts lines, Koreterm counts bytes. The default is 10 MB.         |
 | `initialCols`, `initialRows` | `window-width`, `window-height`        | Grid cells, as in WT. Both must be set or both are ignored.                         |
 | `backgroundImage`            | `background-image`                     |                                                                                     |
 | `bellStyle`, `bellSound`     | `bell-features`, `bell-audio-path`     | See [The bell](#the-bell) below.                                                    |
@@ -70,7 +70,7 @@ profile inheritance. Copy only the lines you need.
 
 `bell-features` is a comma-separated list, and a feature with a `no-` prefix is
 off. Unspecified features keep their defaults, so the mappings below explicitly
-turn off noctty's title glyph. These are the closest equivalents for Windows
+turn off koreterm's title glyph. These are the closest equivalents for Windows
 Terminal's `bellStyle`:
 
 | `bellStyle` | `bell-features`                |
@@ -87,7 +87,7 @@ The `window` mapping substitutes a taskbar flash for Windows Terminal's window f
 taskbar button until the window is in front, and `bellSound` is `audio` with
 `bell-audio-path` (and `bell-audio-volume`, which Windows Terminal has no
 equivalent for). Windows Terminal also accepts an array of sound files and picks
-one at random; noctty accepts one path. Windows Terminal's default is `audible`; noctty's default is
+one at random; koreterm accepts one path. Windows Terminal's default is `audible`; koreterm's default is
 `attention,title`, which plays nothing and, for a terminal you are not looking
 at, flashes the taskbar button and puts a bell glyph on the tab and the window
 caption until you focus or type into it. Set
@@ -109,14 +109,14 @@ copy-on-select = clipboard
 ```
 
 Theme files are configuration files, so only load theme files from a source you
-trust. The full option reference is `noctty +show-config --default --docs`.
+trust. The full option reference is `koreterm +show-config --default --docs`.
 
 ## 4. Translate the keybindings
 
 Windows Terminal has changed its defaults across versions, so check yours under
-Settings, Actions rather than trusting memory. Against current Noctty defaults:
+Settings, Actions rather than trusting memory. Against current Koreterm defaults:
 
-| Action                 | Windows Terminal default         | Noctty default                                                                                                 |
+| Action                 | Windows Terminal default         | Koreterm default                                                                                                 |
 | ---------------------- | -------------------------------- | -------------------------------------------------------------------------------------------------------------- |
 | Copy                   | `Ctrl+C` with selection          | `Ctrl+Shift+C`                                                                                                 |
 | Paste                  | `Ctrl+V`                         | `Ctrl+Shift+V`                                                                                                 |
@@ -180,12 +180,12 @@ section has the details. Whenever the paste does happen, the program never sees
 Ctrl+V, so Vim's visual-block Ctrl+V needs Ctrl+Q instead, as in Windows
 Terminal.
 
-`noctty +list-keybinds` prints the effective set, including anything not listed
+`koreterm +list-keybinds` prints the effective set, including anything not listed
 above.
 
 ## 5. Start the same shell
 
-Noctty detects PowerShell 7, Windows PowerShell, Command Prompt, Git Bash, and
+Koreterm detects PowerShell 7, Windows PowerShell, Command Prompt, Git Bash, and
 installed WSL distributions, and lists them in the command palette at
 `Ctrl+Shift+P` (type `~` to show only profiles; Enter opens the one you pick in
 a new tab). Try each one there before changing your default.
@@ -212,8 +212,8 @@ working-directory rules.
 ## 6. Validate before switching habits
 
 ```powershell
-noctty +validate-config
-noctty +version
+koreterm +validate-config
+koreterm +version
 ```
 
 Then run one real session of each shell you use:
@@ -222,12 +222,12 @@ Then run one real session of each shell you use:
 2. Confirm the prompt starts in the expected directory.
 3. Copy and paste multiline text.
 4. Run a full-screen TUI and any SSH workflow you depend on.
-5. Close Noctty normally, reopen it, and confirm windows, tabs, splits,
+5. Close Koreterm normally, reopen it, and confirm windows, tabs, splits,
    profiles, and working directories restore. Child processes and live terminal
    contents are not restored.
 
 Leave Windows Terminal set as your default terminal application during the
-evaluation. Launch Noctty from the Start menu or its executable until the
+evaluation. Launch Koreterm from the Start menu or its executable until the
 workflows above hold up.
 
 ## What does not transfer
@@ -235,7 +235,7 @@ workflows above hold up.
 - `settings.json` itself: profile GUIDs, fragments, and JSON inheritance
 - Windows Terminal actions and command-palette entries, which have their own
   vocabulary
-- Acrylic and Mica materials; Noctty accepts `background-blur` but asks DWM
+- Acrylic and Mica materials; Koreterm accepts `background-blur` but asks DWM
   for no backdrop material, so a translucent background shows what is behind
   the window unblurred (with the D3D11 renderer beta the whole window fades,
   text and chrome included)

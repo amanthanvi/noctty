@@ -17,12 +17,12 @@ $textFiles = Get-ChildItem -Path $siteRoot -Recurse -File | Where-Object {
 }
 
 $forbiddenRules = @(
-    @{ Pattern = "(?i)\bscoop install noctty\b(?!/)"; Regex = $true; Reason = "Official Scoop installs should use the bucket-qualified command: scoop install noctty/noctty." },
-    @{ Pattern = "winget install noctty"; Reason = "Official WinGet installs should use the package id: winget install --id AmanThanvi.noctty -e." },
+    @{ Pattern = "(?i)\bscoop install koreterm\b(?!/)"; Regex = $true; Reason = "Official Scoop installs should use the bucket-qualified command: scoop install koreterm/koreterm." },
+    @{ Pattern = "winget install koreterm"; Reason = "Official WinGet installs should use the package id: winget install --id AmanThanvi.koreterm -e." },
     @{ Pattern = "D3D11"; Reason = "The shipping Windows renderer is OpenGL 4.3 via WGL." },
     @{ Pattern = "DirectX 11"; Reason = "The shipping Windows renderer is OpenGL 4.3 via WGL." },
-    @{ Pattern = "%APPDATA%\noctty\config"; Reason = "Windows docs use %LOCALAPPDATA%\\noctty\\config.ghostty." },
-    @{ Pattern = "%APPDATA%/noctty/config"; Reason = "Windows docs use %LOCALAPPDATA%\\noctty\\config.ghostty." },
+    @{ Pattern = "%APPDATA%\koreterm\config"; Reason = "Windows docs use %LOCALAPPDATA%\\koreterm\\config.ghostty." },
+    @{ Pattern = "%APPDATA%/koreterm/config"; Reason = "Windows docs use %LOCALAPPDATA%\\koreterm\\config.ghostty." },
     @{ Pattern = "replaces binaries silently"; Reason = "Updater apply must stay user-initiated." },
     @{ Pattern = "downloads updates automatically"; Reason = "Avoid implying automatic install/apply." },
     @{ Pattern = "silent auto-update"; Reason = "Updater apply must stay user-initiated." },
@@ -37,7 +37,7 @@ $forbiddenRules = @(
     @{ Pattern = "src/terminal, src/font, src/renderer, src/input, src/config, and libghostty-vt are shared"; Reason = "The shared upstream surface is broader today and includes termio/crash/shell-integration/inspector." },
     @{ Pattern = "Built on libghostty by Mitchell Hashimoto"; Reason = "Prefer the repo-accurate Ghostty terminal-core wording." },
     # Cross-terminal speed claims, site-wide coarse net. site/tests/trust.test.mjs
-    # is the authoritative and stricter guard for site/why-noctty.html and the two
+    # is the authoritative and stricter guard for site/why-koreterm.html and the two
     # migration guides: it also bans hardcoded rates, durations, throughput,
     # percentage deltas, multipliers, and comparisons keyed to a named competitor
     # while allowing configuration-size facts. Keep these two lists directionally
@@ -49,17 +49,17 @@ $forbiddenRules = @(
     @{ Pattern = "(?i)\b(?:than|versus|vs\.?|compared to|compared with)\s+(?:windows terminal|conhost|alacritty|wezterm|mintty|conemu|cmder|putty|iterm)\b"; Regex = $true; Reason = "No terminal has been measured at the same causal endpoint on the same machine; no comparison may be published." },
     @{ Pattern = "(?i)\b(?:twice|thrice|double|triple|\d+(?:\.\d+)?x)\s+the\s+(?:throughput|speed|performance|frame\s?rate)\b"; Regex = $true; Reason = "No cross-terminal performance result is published; see docs/windows-benchmark-methodology.md." },
     @{ Pattern = "(?i)blazing"; Regex = $true; Reason = "Performance copy must cite a measured figure, not an adjective." },
-    @{ Pattern = "noctty.dev"; Reason = "The project domain is noctty.com; noctty.dev is not owned by this project." }
+    @{ Pattern = "noctty.dev"; Reason = "The project domain is koreterm.com; noctty.dev is not owned by this project." }
 )
 
 $requiredRules = @(
     @{ Path = Join-Path $siteRoot "index.html"; Pattern = "https://github.com/amanthanvi/noctty/releases/latest"; Reason = "Primary download CTA should point to latest release." },
-    @{ Path = Join-Path $siteRoot "index.html"; Pattern = "%LOCALAPPDATA%\noctty\config.ghostty"; Reason = "Landing page should mention the real Windows config path." },
+    @{ Path = Join-Path $siteRoot "index.html"; Pattern = "%LOCALAPPDATA%\koreterm\config.ghostty"; Reason = "Landing page should mention the real Windows config path." },
     @{ Path = Join-Path $siteRoot "index.html"; Pattern = "https://github.com/amanthanvi/noctty"; Reason = "Landing page should keep a repo link." },
-    @{ Path = Join-Path $siteRoot "index.html"; Pattern = "winget install --id AmanThanvi.noctty -e"; Reason = "The hero install command should be the published WinGet command (WinGet is the default install path)." },
-    @{ Path = Join-Path $siteRoot "install.js"; Pattern = "winget install --id AmanThanvi.noctty -e"; Reason = "Copied install text should match the hero's WinGet command." },
+    @{ Path = Join-Path $siteRoot "index.html"; Pattern = "winget install --id AmanThanvi.koreterm -e"; Reason = "The hero install command should be the published WinGet command (WinGet is the default install path)." },
+    @{ Path = Join-Path $siteRoot "install.js"; Pattern = "winget install --id AmanThanvi.koreterm -e"; Reason = "Copied install text should match the hero's WinGet command." },
     @{ Path = Join-Path $siteRoot "index.html"; Pattern = "Formerly winghostty"; CaseSensitive = $true; Reason = "Footer should keep the rename note so former winghostty users recognize the project." },
-    @{ Path = Join-Path $siteRoot "index.html"; Pattern = "scoop install noctty/noctty"; Reason = "The install section should keep the official Scoop command as the alternate." },
+    @{ Path = Join-Path $siteRoot "index.html"; Pattern = "scoop install koreterm/koreterm"; Reason = "The install section should keep the official Scoop command as the alternate." },
     @{ Path = Join-Path $siteRoot "index.html"; Pattern = "https://github.com/amanthanvi/scoop-noctty"; Reason = "The install section should name the official Scoop bucket source." },
     @{ Path = Join-Path $siteRoot "index.html"; Pattern = "Session restoration"; Reason = "Landing page should describe current session restoration." },
     @{ Path = Join-Path $siteRoot "index.html"; Pattern = "Native settings"; Reason = "Landing page should describe the current native settings window." },
@@ -69,42 +69,42 @@ $requiredRules = @(
     @{ Path = Join-Path $siteRoot "index.html"; Pattern = "<noscript>"; Reason = "Landing page should retain a useful no-JavaScript fallback." },
     @{ Path = Join-Path $siteRoot "index.html"; Pattern = "https://github.com/amanthanvi/noctty/discussions"; Reason = "Footer should link to project Discussions." },
     @{ Path = Join-Path $siteRoot "index.html"; Pattern = "bug_report.yml"; Reason = "Footer should link directly to the bug report form." }
-    @{ Path = Join-Path $siteRoot "index.html"; Pattern = "why-noctty.html"; Reason = "The landing page should expose the identity and trust page." }
+    @{ Path = Join-Path $siteRoot "index.html"; Pattern = "why-koreterm.html"; Reason = "The landing page should expose the identity and trust page." }
     @{ Path = Join-Path $siteRoot "index.html"; Pattern = "https://github.com/amanthanvi/noctty/blob/main/PRIVACY.md"; Reason = "The landing page footer should link the privacy policy that the WinGet manifest's PrivacyUrl names." }
-    @{ Path = Join-Path $siteRoot "why-noctty.html"; Pattern = "https://github.com/amanthanvi/noctty/blob/main/PRIVACY.md"; Reason = "The trust page footer should link the privacy policy that the WinGet manifest's PrivacyUrl names." }
-    @{ Path = Join-Path $siteRoot "why-noctty.html"; Pattern = "Get-FileHash"; Reason = "The trust page should include an executable checksum check." }
-    @{ Path = Join-Path $siteRoot "why-noctty.html"; Pattern = "671ec822c41f39b1d79c31d27169b37486333c008c7a038261b4fae53818ce2a"; Reason = "The trust page should publish the current updater publisher-key pin." }
+    @{ Path = Join-Path $siteRoot "why-koreterm.html"; Pattern = "https://github.com/amanthanvi/noctty/blob/main/PRIVACY.md"; Reason = "The trust page footer should link the privacy policy that the WinGet manifest's PrivacyUrl names." }
+    @{ Path = Join-Path $siteRoot "why-koreterm.html"; Pattern = "Get-FileHash"; Reason = "The trust page should include an executable checksum check." }
+    @{ Path = Join-Path $siteRoot "why-koreterm.html"; Pattern = "671ec822c41f39b1d79c31d27169b37486333c008c7a038261b4fae53818ce2a"; Reason = "The trust page should publish the current updater publisher-key pin." }
     @{ Path = $verifyDoc; Pattern = "Assert-ReleaseSignature"; Reason = "The manual legacy-release path should validate the embedded Authenticode signature and signer pin with the repository helper." }
     @{ Path = $verifyDoc; Pattern = '$PSVersionTable.PSVersion.Major -lt 7'; Reason = "The manual signature verifier should fail before side effects when it is pasted into Windows PowerShell 5.1." }
     @{ Path = $verifyDoc; Pattern = "checkout --detach 5220df49e39c96182cf13150c53c4fd71fbc5b10"; Reason = "The manual v1.3.123 path should use a content-pinned verifier implementation that defines the signature helper." }
-    @{ Path = $verifyDoc; Pattern = 'noctty-release-verification-" + [Guid]::NewGuid()'; Reason = "The manual portable verifier should extract into a fresh workspace rather than reuse stale files." }
+    @{ Path = $verifyDoc; Pattern = 'koreterm-release-verification-" + [Guid]::NewGuid()'; Reason = "The manual portable verifier should extract into a fresh workspace rather than reuse stale files." }
     @{ Path = $verifyDoc; Pattern = "winghostty\winghostty.com"; Reason = "The manual legacy-release path should verify the console shim extracted from the portable ZIP." }
     @{ Path = $verifyDoc; Pattern = "winghostty\winghostty.exe"; Reason = "The manual legacy-release path should verify the application binary extracted from the portable ZIP." }
     @{ Path = $verifyDoc; Pattern = "winghostty\ghostty-vt.dll"; Reason = "The manual legacy-release path should verify the library extracted from the portable ZIP." }
     @{ Path = $verifyDoc; Pattern = '-AllowedPins @($expectedSpki)'; Reason = "The manual legacy-release path should fail closed when the signer does not match the publisher-key pin." }
-    @{ Path = Join-Path $siteRoot "why-noctty.html"; Pattern = "docs/verify-release.md"; Reason = "The trust page should link the verification guide that carries the legacy v1.3.123 procedure." }
-    @{ Path = Join-Path $siteRoot "why-noctty.html"; Pattern = "docs/migrate-from-windows-terminal.md"; Reason = "The trust page should link the Windows Terminal migration guide." }
-    @{ Path = Join-Path $siteRoot "why-noctty.html"; Pattern = "docs/migrate-from-git-bash.md"; Reason = "The trust page should link the Git Bash and mintty migration guide." }
-    @{ Path = Join-Path $siteRoot "why-noctty.html"; Pattern = "self-signed certificate"; Reason = "The trust page must state the current signing limitation plainly." }
-    @{ Path = Join-Path $siteRoot "why-noctty.html"; Pattern = "verifies GitHub build-provenance attestations"; Reason = "The trust page must describe the v1.3.124 provenance gate." }
-    @{ Path = Join-Path $siteRoot "why-noctty.html"; Pattern = "v1.3.123 uses the legacy"; Reason = "The trust page must state that the promoted stable release predates the current verifier contract." }
-    @{ Path = Join-Path $siteRoot "why-noctty.html"; Pattern = "verifier accepts v1.3.124 and later"; Reason = "The trust page should keep routing verifier-compatible releases correctly after the latest-version copy updates." }
-    @{ Path = Join-Path $siteRoot "why-noctty.html"; Pattern = "No screen reader has been run"; Reason = "The trust page must keep the accessibility limit unhedged." }
-    @{ Path = Join-Path $siteRoot "why-noctty.html"; Pattern = "NVDA pass against a pre-release Debug build found mixed results"; Reason = "The trust page must reflect the measured pre-release NVDA evidence without presenting it as release validation." }
-    @{ Path = Join-Path $siteRoot "why-noctty.html"; Pattern = "Narrator and JAWS remain unmeasured"; Reason = "The trust page must distinguish the unmeasured readers from the measured NVDA pass." }
-    @{ Path = Join-Path $siteRoot "why-noctty.html"; Pattern = "miss a budget stated in PRODUCT.md"; Reason = "The trust page must keep the missed performance budgets visible." }
-    @{ Path = Join-Path $siteRoot "why-noctty.html"; Pattern = "No comparison against another terminal is published"; Reason = "The trust page must keep the no-competitor-numbers statement." }
+    @{ Path = Join-Path $siteRoot "why-koreterm.html"; Pattern = "docs/verify-release.md"; Reason = "The trust page should link the verification guide that carries the legacy v1.3.123 procedure." }
+    @{ Path = Join-Path $siteRoot "why-koreterm.html"; Pattern = "docs/migrate-from-windows-terminal.md"; Reason = "The trust page should link the Windows Terminal migration guide." }
+    @{ Path = Join-Path $siteRoot "why-koreterm.html"; Pattern = "docs/migrate-from-git-bash.md"; Reason = "The trust page should link the Git Bash and mintty migration guide." }
+    @{ Path = Join-Path $siteRoot "why-koreterm.html"; Pattern = "self-signed certificate"; Reason = "The trust page must state the current signing limitation plainly." }
+    @{ Path = Join-Path $siteRoot "why-koreterm.html"; Pattern = "verifies GitHub build-provenance attestations"; Reason = "The trust page must describe the v1.3.124 provenance gate." }
+    @{ Path = Join-Path $siteRoot "why-koreterm.html"; Pattern = "v1.3.123 uses the legacy"; Reason = "The trust page must state that the promoted stable release predates the current verifier contract." }
+    @{ Path = Join-Path $siteRoot "why-koreterm.html"; Pattern = "verifier accepts v1.3.124 and later"; Reason = "The trust page should keep routing verifier-compatible releases correctly after the latest-version copy updates." }
+    @{ Path = Join-Path $siteRoot "why-koreterm.html"; Pattern = "No screen reader has been run"; Reason = "The trust page must keep the accessibility limit unhedged." }
+    @{ Path = Join-Path $siteRoot "why-koreterm.html"; Pattern = "NVDA pass against a pre-release Debug build found mixed results"; Reason = "The trust page must reflect the measured pre-release NVDA evidence without presenting it as release validation." }
+    @{ Path = Join-Path $siteRoot "why-koreterm.html"; Pattern = "Narrator and JAWS remain unmeasured"; Reason = "The trust page must distinguish the unmeasured readers from the measured NVDA pass." }
+    @{ Path = Join-Path $siteRoot "why-koreterm.html"; Pattern = "miss a budget stated in PRODUCT.md"; Reason = "The trust page must keep the missed performance budgets visible." }
+    @{ Path = Join-Path $siteRoot "why-koreterm.html"; Pattern = "No comparison against another terminal is published"; Reason = "The trust page must keep the no-competitor-numbers statement." }
 )
 
 $failures = New-Object System.Collections.Generic.List[string]
 
-# The WinGet package AmanThanvi.noctty is published, so neither the site nor the
+# The WinGet package AmanThanvi.koreterm is published, so neither the site nor the
 # docs may describe it as pending, planned or unpublished again. Matched on the
 # whole file (the docs are hard-wrapped), within one sentence, and not on
 # winget-pkgs, wingetcreate or WINGET_PACKAGE_IDENTIFIER.
 $wingetStateWords = "pending|planned|unpublished|coming\s+soon|not\s+(?:yet\s+)?(?:been\s+)?(?:published|available)|awaiting"
 $wingetPendingPattern = "(?is)\bwinget\b(?![-_]|create)[^.;,]{0,80}?\b(?:$wingetStateWords)\b|\b(?:$wingetStateWords)\b[^.;,]{0,80}?\bwinget\b(?![-_]|create)"
-$wingetPendingReason = "The WinGet package AmanThanvi.noctty is published; do not describe it as pending, planned or unpublished."
+$wingetPendingReason = "The WinGet package AmanThanvi.koreterm is published; do not describe it as pending, planned or unpublished."
 $wingetCopyFiles = @($textFiles.FullName) + @(
     (Join-Path $repoRoot "README.md"),
     (Join-Path $repoRoot "PACKAGING.md")

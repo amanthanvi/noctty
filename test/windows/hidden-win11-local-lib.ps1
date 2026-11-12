@@ -19,7 +19,7 @@
 #   * Small helpers the harnesses had each copied.
 #   * Assert-EmbeddingDelegationSafe, from hidden-win11-embedding-guard.ps1 (the
 #     one copy, shared with hidden-win11-lib.ps1), for a harness that starts
-#     `noctty.exe -Embedding`.
+#     `koreterm.exe -Embedding`.
 
 . (Join-Path $PSScriptRoot '..\..\scripts\windows-harness-history.ps1')
 . (Join-Path $PSScriptRoot 'hidden-win11-embedding-guard.ps1')
@@ -98,13 +98,13 @@ public static class HiddenLocal {
     static string Class(IntPtr h) { var s=new StringBuilder(128); GetClassNameW(h,s,128); return s.ToString(); }
     public static IntPtr[] Hosts(int pid) {
         var list=new List<IntPtr>(); EnumWindows((h,p)=> { int id; GetWindowThreadProcessId(h,out id);
-            if(id==pid && Class(h)=="noctty.win32.host") list.Add(h); return true;
+            if(id==pid && Class(h)=="koreterm.win32.host") list.Add(h); return true;
         },IntPtr.Zero); return list.ToArray();
     }
     // Every terminal pane of a host, in the order Windows enumerates them.
     public static IntPtr[] Surfaces(IntPtr host) {
         var list=new List<IntPtr>();
-        EnumChildWindows(host,(c,p)=> { if(Class(c)=="noctty.win32") list.Add(c); return true; },IntPtr.Zero);
+        EnumChildWindows(host,(c,p)=> { if(Class(c)=="koreterm.win32") list.Add(c); return true; },IntPtr.Zero);
         return list.ToArray();
     }
     // The name of the desktop of the thread that owns `h`.
@@ -138,7 +138,7 @@ public static class HiddenLocal {
 
 # Hash and time of the real startup-attempts.json; its contents are never read.
 function Startup-Fingerprint {
-    $path = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'noctty\startup-attempts.json'
+    $path = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'koreterm\startup-attempts.json'
     if (-not (Test-Path -LiteralPath $path)) { return @{ Exists=$false } }
     return @{ Exists=$true; Hash=(Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant(); Modified=(Get-Item -LiteralPath $path).LastWriteTimeUtc.ToString('o') }
 }
@@ -150,13 +150,13 @@ function Jump-List-Files {
 }
 
 # A portable copy: every file of the source bin directory, the share directory beside it, and
-# the `noctty.portable` marker that keeps the copy's state inside its own directory.
+# the `koreterm.portable` marker that keeps the copy's state inside its own directory.
 function Copy-Portable([string] $Source, [string] $Destination) {
     [void](New-Item -ItemType Directory -Path $Destination)
     Get-ChildItem -LiteralPath $Source -File | ForEach-Object { Copy-Item -LiteralPath $_.FullName -Destination $Destination }
     $share = Join-Path (Split-Path -Parent $Source) 'share'
     if (Test-Path -LiteralPath $share) { Copy-Item -LiteralPath $share -Destination (Join-Path (Split-Path -Parent $Destination) 'share') -Recurse }
-    Set-Content -LiteralPath (Join-Path $Destination 'noctty.portable') -Value '' -NoNewline
+    Set-Content -LiteralPath (Join-Path $Destination 'koreterm.portable') -Value '' -NoNewline
 }
 
 # Records one assertion in the calling harness's $script:checks.
@@ -191,7 +191,7 @@ function Invoke-LocalHiddenDriver {
     $Bin = (Resolve-Path -LiteralPath $Bin).Path
     $Run = [IO.Path]::GetFullPath($Run)
     if (Test-Path -LiteralPath $Run) { throw 'Run directory must be new.' }
-    if (-not (Test-Path -LiteralPath (Join-Path $Bin 'noctty.exe'))) { throw 'Source Bin must contain noctty.exe.' }
+    if (-not (Test-Path -LiteralPath (Join-Path $Bin 'koreterm.exe'))) { throw 'Source Bin must contain koreterm.exe.' }
     $before = Startup-Fingerprint
     $historyGuard = Start-WindowsHarnessHistoryGuard -Harness (Split-Path -Leaf $Script)
     if ($GuardClipboard) { $clipBefore = [HiddenLocal]::GetClipboardSequenceNumber() }

@@ -41,7 +41,7 @@ $script:PSReadLineImported = $false
 $script:OriginalAddToHistoryHandler = $null
 $script:OriginalHistoryOptions = $null
 $script:IntegrationPath = Join-Path $RepoRoot 'src\shell-integration\powershell\integration.ps1'
-$script:TempDir = Join-Path ([System.IO.Path]::GetTempPath()) ("noctty-ps-si-" + [guid]::NewGuid().ToString('n'))
+$script:TempDir = Join-Path ([System.IO.Path]::GetTempPath()) ("koreterm-ps-si-" + [guid]::NewGuid().ToString('n'))
 
 # APPDATA does not redirect PSReadLine history: point this host's history at the scratch folder
 # and stop it saving. The options it had first are kept, so cleanup can put them back.
@@ -70,10 +70,10 @@ try {
     # produces when our wrapper throws, so a fixture spelled that way cannot
     # tell "the user's prompt was preserved" apart from "the user's prompt was
     # lost and PowerShell fell back" (issue #231).
-    function global:prompt { 'NOCTTYPROBE> ' }
+    function global:prompt { 'KORETERMPROBE> ' }
 
     # The UTF-8 console decision must never travel in the child environment.
-    # A PowerShell profile runs before noctty's injected -Command, so an
+    # A PowerShell profile runs before koreterm's injected -Command, so an
     # environment variable would already have leaked to anything the profile
     # spawned by the time this script could clear it.
     $integrationSource = Get-Content -LiteralPath $script:IntegrationPath -Raw
@@ -228,13 +228,13 @@ try {
     Assert-True ($drawn.Osc.Contains($A)) "Prompt output missing OSC 133 A prompt metadata (redraw=0)"
     Assert-True ($drawn.Osc.Contains("$modeReset$([char]27)$A")) "Prompt did not reset Kitty and modifyOtherKeys before A"
     Assert-True (-not $drawn.Osc.Contains(']133;B')) "OSC 133 B was written directly, ahead of the prompt text: $($drawn.Osc -replace [char]27, '<ESC>')"
-    Assert-True ($drawn.Text -ceq "NOCTTYPROBE> $B") "The returned prompt is not the user's text followed by B: $($drawn.Text -replace [char]27, '<ESC>')"
+    Assert-True ($drawn.Text -ceq "KORETERMPROBE> $B") "The returned prompt is not the user's text followed by B: $($drawn.Text -replace [char]27, '<ESC>')"
 
     $unsupportedLocations = @('HKCU:\Software', 'Env:\')
     if ($UncPath) { $unsupportedLocations += $UncPath }
-    New-PSDrive -Name NocttyProbe -PSProvider FileSystem -Root $specialDir | Out-Null
+    New-PSDrive -Name KoretermProbe -PSProvider FileSystem -Root $specialDir | Out-Null
     try {
-        Push-Location 'NocttyProbe:\'
+        Push-Location 'KoretermProbe:\'
         Assert-True ((__ghostty_encode_cwd_uri).TrimEnd('/') -ceq $cwdUri.TrimEnd('/')) "A filesystem PSDrive emitted its logical drive name rather than the native cwd"
         Pop-Location
         foreach ($providerLocation in $unsupportedLocations) {
@@ -246,7 +246,7 @@ try {
             Pop-Location
         }
     } finally {
-        Remove-PSDrive NocttyProbe -Force -Confirm:$false -WhatIf:$false
+        Remove-PSDrive KoretermProbe -Force -Confirm:$false -WhatIf:$false
     }
 
     $savedPrompt = $function:global:prompt
@@ -326,8 +326,8 @@ try {
         # passes straight through, so exactly one D / A pair is written.
         function global:prompt { 'BASE> ' }
         __ghostty_wrap_prompt
-        $Global:__noctty_test_chained = (Get-Command prompt).ScriptBlock
-        function global:prompt { 'W:' + (& $Global:__noctty_test_chained) }
+        $Global:__koreterm_test_chained = (Get-Command prompt).ScriptBlock
+        function global:prompt { 'W:' + (& $Global:__koreterm_test_chained) }
         __ghostty_wrap_prompt
         $chained = Invoke-TestPrompt
         Assert-True ($chained.Text -ceq "W:BASE> $B") "A prompt chained through Get-Command was drawn wrong: $($chained.Text -replace [char]27, '<ESC>')"
@@ -359,7 +359,7 @@ try {
         Assert-True ($afterSuccess -ceq "Q=True> $B") "The user's prompt did not see `$? true after a success: $afterSuccess"
     } finally {
         [Console]::SetOut($script:OriginalOut)
-        Remove-Variable -Name '__noctty_test_chained' -Scope Global -ErrorAction Ignore
+        Remove-Variable -Name '__koreterm_test_chained' -Scope Global -ErrorAction Ignore
         $function:global:prompt = $savedPrompt
     }
 
@@ -378,14 +378,14 @@ try {
     # stand-in function of that name returns the line. What PSReadLine does
     # with a live console is covered by the pseudo-console recordings.
     Assert-True ((Get-Command PSConsoleHostReadLine -ErrorAction SilentlyContinue).CommandType -eq 'Alias') "PSConsoleHostReadLine is not hooked through an alias"
-    $Global:__noctty_test_status = New-Object System.Collections.ArrayList
-    $Global:__noctty_test_repaint = $null
+    $Global:__koreterm_test_status = New-Object System.Collections.ArrayList
+    $Global:__koreterm_test_repaint = $null
     function global:PSConsoleHostReadLine {
-        [void]$Global:__noctty_test_status.Add($?)
+        [void]$Global:__koreterm_test_status.Add($?)
         # Stands in for PSReadLine's InvokePrompt (Ctrl+L, a transient
         # prompt), which runs `prompt` while the line is being read.
-        if ($Global:__noctty_test_repaint) { $Global:__noctty_test_repaint = prompt }
-        return $Global:__noctty_test_next_line
+        if ($Global:__koreterm_test_repaint) { $Global:__koreterm_test_repaint = prompt }
+        return $Global:__koreterm_test_next_line
     }
     function Invoke-TestReadLine {
         # -AsHost: the host runs the reader with nothing else on the call
@@ -394,8 +394,8 @@ try {
         # sits under this script and this function, so raise the level to
         # match; without the switch it is a script calling the reader.
         param([string]$Line, [switch]$AfterFailure, [switch]$Repaint, [switch]$AsHost)
-        $Global:__noctty_test_next_line = $Line
-        $Global:__noctty_test_repaint = [bool]$Repaint
+        $Global:__koreterm_test_next_line = $Line
+        $Global:__koreterm_test_repaint = [bool]$Repaint
         $savedLevel = $global:NestedPromptLevel
         $capture = [System.IO.StringWriter]::new()
         [Console]::SetOut($capture)
@@ -419,7 +419,7 @@ try {
     # reader then writes B after the drawn prompt, and nothing else when the
     # prompt was ours.
     $drawn = Invoke-TestPrompt
-    Assert-True ($drawn.Text -ceq 'NOCTTYPROBE> ') "The prompt returned more than the user's text: $($drawn.Text -replace [char]27, '<ESC>')"
+    Assert-True ($drawn.Text -ceq 'KORETERMPROBE> ') "The prompt returned more than the user's text: $($drawn.Text -replace [char]27, '<ESC>')"
     Assert-True ($drawn.Osc.Contains($A) -and -not $drawn.Osc.Contains(']133;B')) "The prompt wrote B itself: $($drawn.Osc -replace [char]27, '<ESC>')"
     $read = Invoke-TestReadLine "Get-ChildItem 'a;b'" -AsHost
     Assert-True ($read.Returned -ceq "Get-ChildItem 'a;b'") "The line reader changed the line: $($read.Returned)"
@@ -453,7 +453,7 @@ try {
     # the next prompt is back to plain text.
     [void](Invoke-TestPrompt)
     $repainted = Invoke-TestReadLine 'Get-Date' -Repaint -AsHost
-    Assert-True ($Global:__noctty_test_repaint -ceq "REPLACED> $B") "A repaint did not carry its own B: $($Global:__noctty_test_repaint -replace [char]27, '<ESC>')"
+    Assert-True ($Global:__koreterm_test_repaint -ceq "REPLACED> $B") "A repaint did not carry its own B: $($Global:__koreterm_test_repaint -replace [char]27, '<ESC>')"
     Assert-True ([regex]::Matches($repainted.Osc, '\]133;P').Count -eq 0) "A repaint turned the next line into an unmarked one"
     Assert-True ((Invoke-TestPrompt).Text -ceq 'REPLACED> ') "After a repaint the prompt still carries B"
 
@@ -462,13 +462,13 @@ try {
     # the prompt ours.
     function global:prompt { $null = PSConsoleHostReadLine; 'ASKS> ' }
     __ghostty_wrap_prompt
-    $Global:__noctty_test_next_line = 'answer'
-    $Global:__noctty_test_repaint = $false
+    $Global:__koreterm_test_next_line = 'answer'
+    $Global:__koreterm_test_repaint = $false
     $asking = Invoke-TestPrompt
     Assert-True (-not ($asking.Osc -match '\]133;[PB]|\]133;A.*\]7;')) "A prompt's own call to the reader got prompt marks: $($asking.Osc -replace [char]27, '<ESC>')"
     $afterAsking = Invoke-TestReadLine 'Get-Date' -AsHost
     Assert-True ($afterAsking.Osc.StartsWith("$B$C")) "The host's read after a prompt's own reader call did not get exactly B, then C: $($afterAsking.Osc -replace [char]27, '<ESC>')"
-    function global:prompt { 'NOCTTYPROBE> ' }
+    function global:prompt { 'KORETERMPROBE> ' }
     __ghostty_wrap_prompt
     [void](Invoke-TestPrompt)
 
@@ -491,10 +491,10 @@ try {
 
     # PSReadLine's own PSConsoleHostReadLine reads $? first and hands it to
     # predictors as the previous command's status; ours must pass it on.
-    $Global:__noctty_test_status.Clear()
+    $Global:__koreterm_test_status.Clear()
     [void](Invoke-TestReadLine 'Get-Date')
     [void](Invoke-TestReadLine 'Get-Date' -AfterFailure)
-    Assert-True (($Global:__noctty_test_status -join ',') -eq 'True,False') "The line reader did not pass `$? through: $($Global:__noctty_test_status -join ',')"
+    Assert-True (($Global:__koreterm_test_status -join ',') -eq 'True,False') "The line reader did not pass `$? through: $($Global:__koreterm_test_status -join ',')"
 
     # With no function of that name the host reads the line itself; called
     # by hand, the alias must produce nothing rather than an error. The
@@ -503,7 +503,7 @@ try {
     $errorsBefore = $Error.Count
     $orphan = @(PSConsoleHostReadLine)
     Assert-True ($orphan.Count -eq 0 -and $Error.Count -eq $errorsBefore) "The line reader without PSConsoleHostReadLine produced output or an error"
-    Assert-True ((Invoke-TestPrompt).Text -ceq "NOCTTYPROBE> $B") "Without a line reader the prompt did not carry B"
+    Assert-True ((Invoke-TestPrompt).Text -ceq "KORETERMPROBE> $B") "Without a line reader the prompt did not carry B"
 
     # ── The user's history handler is not ours to touch ─────────────────
     #
@@ -559,14 +559,14 @@ try {
         # PSReadLine is loaded here, so its PSConsoleHostReadLine is what
         # writes B; the prompt returns the user's text alone.
         Assert-True ($legacyPrompt -ceq 'LEGACY-USER> ') "The prompt after retiring the previous version is wrong: $($legacyPrompt -replace [char]27, '<ESC>')"
-        $function:global:prompt = { 'NOCTTYPROBE> ' }
+        $function:global:prompt = { 'KORETERMPROBE> ' }
         __ghostty_wrap_prompt
     }
 
     # ── Injected-block scope contract (issue #231) ───────────────────────
     #
     # Everything above dot-sources integration.ps1 at THIS script's scope,
-    # where unqualified top-level definitions survive. noctty does not: it
+    # where unqualified top-level definitions survive. koreterm does not: it
     # runs `-NoExit -Command "& { $__ghostty_utf8_console = $false; . <path> }"`,
     # and that block's child scope is torn down when the dot-source returns.
     # The helpers therefore have to be `global:`-qualified or every prompt
@@ -591,12 +591,12 @@ try {
     # ReadToEndAsync exposes no partial output while a child is stuck. Drain
     # off the PowerShell runspace and keep a synchronized snapshot, including
     # text without a trailing newline. This works on .NET Framework / PS 5.1.
-    if (-not ('NocttyInjectedChildOutput' -as [type])) {
+    if (-not ('KoretermInjectedChildOutput' -as [type])) {
         Add-Type -TypeDefinition @'
 using System.IO;
 using System.Text;
 using System.Threading.Tasks;
-public sealed class NocttyInjectedChildOutput {
+public sealed class KoretermInjectedChildOutput {
     private readonly StringBuilder text = new StringBuilder();
     public async Task DrainAsync(TextReader reader) {
         var buffer = new char[4096];
@@ -610,7 +610,7 @@ public sealed class NocttyInjectedChildOutput {
 '@
     }
 
-    function Invoke-NocttyInjectedChild {
+    function Invoke-KoretermInjectedChild {
         param(
             [Parameter(Mandatory)][string]$CaseName,
             [string]$Preamble,
@@ -652,9 +652,9 @@ public sealed class NocttyInjectedChildOutput {
         # this guard. If the host loaded it, isolate it before it reads a line.
         $historyPrefix = "if (Get-Module PSReadLine) { Set-PSReadLineOption -HistorySaveStyle SaveNothing; Set-PSReadLineOption -HistorySavePath '$historyPath'; if ((Get-PSReadLineOption).HistorySaveStyle -ne 'SaveNothing' -or (Get-PSReadLineOption).HistorySavePath -ne '$historyPath') { throw 'Child history isolation failed' } }; [Console]::WriteLine('HISTORY' + '-ISOLATED'); "
         $payload = '[Console]::InputEncoding = [Text.UTF8Encoding]::new($false); ' + $historyPrefix + $prefix + $Preamble +
-            "function global:prompt { 'NOCTTYPROBE> ' }; " +
+            "function global:prompt { 'KORETERMPROBE> ' }; " +
             "& { `$__ghostty_utf8_console = `$false; `$__ghostty_integration_path = '$childQuotedPath" +
-            '''; try { if ($ExecutionContext.SessionState.LanguageMode -ne ''FullLanguage'') { Microsoft.PowerShell.Utility\Write-Warning ''noctty PowerShell integration skipped: unsupported language mode.'' -WarningAction Continue } else { $__ghostty_load_error_head = $null; if ($Error.Count) { $__ghostty_load_error_head = $Error[0] }; Microsoft.PowerShell.Core\Import-Module ([Reflection.Assembly]::Load(''Microsoft.PowerShell.Security'').Location) -ErrorAction Stop; if ((Microsoft.PowerShell.Security\Get-ExecutionPolicy -ErrorAction Stop) -eq ''AllSigned'') { . $__ghostty_integration_path } else { . ([scriptblock]::Create([IO.File]::ReadAllText($__ghostty_integration_path))) } } } catch { while ($Error.Count -gt 0 -and -not [object]::ReferenceEquals($Error[0], $__ghostty_load_error_head)) { $Error.RemoveAt(0) }; Microsoft.PowerShell.Utility\Write-Warning ''noctty PowerShell integration could not load (execution policy or script error).'' -WarningAction Continue } }' +
+            '''; try { if ($ExecutionContext.SessionState.LanguageMode -ne ''FullLanguage'') { Microsoft.PowerShell.Utility\Write-Warning ''koreterm PowerShell integration skipped: unsupported language mode.'' -WarningAction Continue } else { $__ghostty_load_error_head = $null; if ($Error.Count) { $__ghostty_load_error_head = $Error[0] }; Microsoft.PowerShell.Core\Import-Module ([Reflection.Assembly]::Load(''Microsoft.PowerShell.Security'').Location) -ErrorAction Stop; if ((Microsoft.PowerShell.Security\Get-ExecutionPolicy -ErrorAction Stop) -eq ''AllSigned'') { . $__ghostty_integration_path } else { . ([scriptblock]::Create([IO.File]::ReadAllText($__ghostty_integration_path))) } } } catch { while ($Error.Count -gt 0 -and -not [object]::ReferenceEquals($Error[0], $__ghostty_load_error_head)) { $Error.RemoveAt(0) }; Microsoft.PowerShell.Utility\Write-Warning ''koreterm PowerShell integration could not load (execution policy or script error).'' -WarningAction Continue } }' +
             $Postamble
         $payloadErrors = $null
         [void][System.Management.Automation.Language.Parser]::ParseInput($payload, [ref]$null, [ref]$payloadErrors)
@@ -695,7 +695,7 @@ public sealed class NocttyInjectedChildOutput {
             [Console]::InputEncoding = $parentInputEncoding
         }
         try {
-            $stderr = [NocttyInjectedChildOutput]::new()
+            $stderr = [KoretermInjectedChildOutput]::new()
             $stderrTask = $stderr.DrainAsync($process.StandardError)
             # Never queue a test line until the child confirms isolation. A
             # malformed startup payload with -NoExit otherwise reads stdin
@@ -715,7 +715,7 @@ public sealed class NocttyInjectedChildOutput {
                 $readyText = $ready.Result -replace '\x1B\[[0-?]*[ -/]*[@-~]', ''
                 if ($readyText -eq 'HISTORY-ISOLATED') { break }
             }
-            $stdout = [NocttyInjectedChildOutput]::new()
+            $stdout = [KoretermInjectedChildOutput]::new()
             $stdoutTask = $stdout.DrainAsync($process.StandardOutput)
             foreach ($line in $Lines) { $process.StandardInput.WriteLine($line) }
             $process.StandardInput.Close()
@@ -770,7 +770,7 @@ public sealed class NocttyInjectedChildOutput {
     )
     $timeoutMessage = ''
     try {
-        $null = Invoke-NocttyInjectedChild -CaseName 'timeout diagnostic fixture' -WithoutPSReadLine -Lines $timeoutLines -TimeoutReadyToken 'TIMEOUT-READY' -TimeoutMs 2000
+        $null = Invoke-KoretermInjectedChild -CaseName 'timeout diagnostic fixture' -WithoutPSReadLine -Lines $timeoutLines -TimeoutReadyToken 'TIMEOUT-READY' -TimeoutMs 2000
     } catch {
         $timeoutMessage = $_.Exception.Message
     }
@@ -793,37 +793,37 @@ public sealed class NocttyInjectedChildOutput {
         @{ Policy = 'Restricted'; Path = $script:IntegrationPath },
         @{ Policy = 'RemoteSigned'; Path = $motwPath }
     )) {
-        $policyOut = Invoke-NocttyInjectedChild -CaseName ('policy ' + $policyCase.Policy) -ExecutionPolicy $policyCase.Policy -IntegrationPath $policyCase.Path -WithoutPSReadLine -ScrubExecutionPolicy `
+        $policyOut = Invoke-KoretermInjectedChild -CaseName ('policy ' + $policyCase.Policy) -ExecutionPolicy $policyCase.Policy -IntegrationPath $policyCase.Path -WithoutPSReadLine -ScrubExecutionPolicy `
             -Postamble '; ("POLICY" + "CHECK=") + (Microsoft.PowerShell.Security\Get-ExecutionPolicy); '
         Assert-True ($policyOut.Contains("POLICYCHECK=$($policyCase.Policy)")) "Policy-focused child did not use $($policyCase.Policy): $policyOut"
         Assert-True ($policyOut.Contains('HELPER-RESOLVED') -and $policyOut.Contains(']133;A;')) "Integration failed under $($policyCase.Policy): $policyOut"
-        Assert-True ($policyOut.Contains(']7;file://') -and $policyOut.Contains('NOCTTYPROBE> ')) "Policy-focused child lost its cwd or user prompt: $policyOut"
+        Assert-True ($policyOut.Contains(']7;file://') -and $policyOut.Contains('KORETERMPROBE> ')) "Policy-focused child lost its cwd or user prompt: $policyOut"
         Assert-True (-not ($policyOut -match 'PSSecurityException|UnauthorizedAccess|cannot be loaded')) "Policy load left an error wall: $policyOut"
     }
     Assert-True ($env:PSExecutionPolicyPreference -ceq $parentPolicyPreference) "Policy-focused cases changed the parent's execution policy preference"
-    $signedOut = Invoke-NocttyInjectedChild -CaseName 'unsigned AllSigned' -ExecutionPolicy AllSigned -WithoutPSReadLine -Preamble '$Error.Clear(); ' `
+    $signedOut = Invoke-KoretermInjectedChild -CaseName 'unsigned AllSigned' -ExecutionPolicy AllSigned -WithoutPSReadLine -Preamble '$Error.Clear(); ' `
         -Postamble '; "ERR" + "COUNT=" + $Error.Count'
     Assert-True (-not $signedOut.Contains('HELPER-RESOLVED')) "AllSigned loaded an unsigned integration script"
-    Assert-True ($signedOut.Contains('WARNING: noctty PowerShell integration')) "AllSigned gave no concise integration warning: $signedOut"
+    Assert-True ($signedOut.Contains('WARNING: koreterm PowerShell integration')) "AllSigned gave no concise integration warning: $signedOut"
     Assert-True ($signedOut.Contains('ERRCOUNT=0') -and -not ($signedOut -match 'PSSecurityException|UnauthorizedAccess')) "AllSigned left a load error behind: $signedOut"
 
     foreach ($loadCase in @(
         @{ Policy = 'AllSigned'; Path = $script:IntegrationPath },
         @{ Policy = 'Bypass'; Path = (Join-Path $script:TempDir 'missing.ps1') }
     )) {
-        $failedOut = Invoke-NocttyInjectedChild -CaseName ('failed load ' + $loadCase.Policy) -ExecutionPolicy $loadCase.Policy -IntegrationPath $loadCase.Path -WithoutPSReadLine `
-            -Preamble '$Error.Clear(); Write-Error ''existing error'' -ErrorAction SilentlyContinue; $Global:__noctty_seed_error = $Error[0]; ' `
-            -Postamble '; if ($Error.Count -eq 1 -and [object]::ReferenceEquals($Error[0], $Global:__noctty_seed_error)) { ''ERROR'' + ''-PRESERVED'' }'
+        $failedOut = Invoke-KoretermInjectedChild -CaseName ('failed load ' + $loadCase.Policy) -ExecutionPolicy $loadCase.Policy -IntegrationPath $loadCase.Path -WithoutPSReadLine `
+            -Preamble '$Error.Clear(); Write-Error ''existing error'' -ErrorAction SilentlyContinue; $Global:__koreterm_seed_error = $Error[0]; ' `
+            -Postamble '; if ($Error.Count -eq 1 -and [object]::ReferenceEquals($Error[0], $Global:__koreterm_seed_error)) { ''ERROR'' + ''-PRESERVED'' }'
         Assert-True ($failedOut.Contains('ERROR-PRESERVED')) "A failed bootstrap erased or polluted the existing error history: $failedOut"
     }
 
-    $constrainedOut = Invoke-NocttyInjectedChild -CaseName 'constrained language' -WithoutPSReadLine `
+    $constrainedOut = Invoke-KoretermInjectedChild -CaseName 'constrained language' -WithoutPSReadLine `
         -Preamble '$ExecutionContext.SessionState.LanguageMode = ''ConstrainedLanguage''; '
     Assert-True ($constrainedOut.Contains('unsupported language mode.') -and -not $constrainedOut.Contains('HELPER-RESOLVED')) "ConstrainedLanguage installed partial hooks or missed its warning: $constrainedOut"
 
     $driveRootQuoted = ConvertTo-PowerShellLiteralContent $specialDir
-    $driveOut = Invoke-NocttyInjectedChild -CaseName 'filesystem PSDrive' -WithoutPSReadLine `
-        -Preamble "New-PSDrive NocttyProbe FileSystem '$driveRootQuoted' | Out-Null; Set-Location 'NocttyProbe:\'; " `
+    $driveOut = Invoke-KoretermInjectedChild -CaseName 'filesystem PSDrive' -WithoutPSReadLine `
+        -Preamble "New-PSDrive KoretermProbe FileSystem '$driveRootQuoted' | Out-Null; Set-Location 'KoretermProbe:\'; " `
         -Postamble '; "CWD" + "URI=" + (__ghostty_encode_cwd_uri)'
     Assert-True ($driveOut.Contains("CWDURI=$cwdUri")) "A real child reported the PSDrive name rather than the filesystem cwd: $driveOut"
 
@@ -832,8 +832,8 @@ public sealed class NocttyInjectedChildOutput {
         New-Item -ItemType Directory -Path $quotedDir | Out-Null
         $quotedPath = Join-Path $quotedDir 'integration.ps1'
         Copy-Item -LiteralPath $script:IntegrationPath -Destination $quotedPath
-        $quoteOut = Invoke-NocttyInjectedChild -CaseName ('quoted path U+' + ('{0:X4}' -f $point)) -IntegrationPath $quotedPath -WithoutPSReadLine
-        Assert-True ($quoteOut.Contains('HELPER-RESOLVED') -and $quoteOut.Contains('NOCTTYPROBE> ')) "Quoted integration path did not load (U+$('{0:X4}' -f $point)): $quoteOut"
+        $quoteOut = Invoke-KoretermInjectedChild -CaseName ('quoted path U+' + ('{0:X4}' -f $point)) -IntegrationPath $quotedPath -WithoutPSReadLine
+        Assert-True ($quoteOut.Contains('HELPER-RESOLVED') -and $quoteOut.Contains('KORETERMPROBE> ')) "Quoted integration path did not load (U+$('{0:X4}' -f $point)): $quoteOut"
     }
 
     # Opt-in local share fixture: do not open an arbitrary network server on
@@ -841,7 +841,7 @@ public sealed class NocttyInjectedChildOutput {
     # name look like a POSIX cwd, so omit UNC reports and keep the previous cwd.
     if ($UncPath) {
         $uncQuoted = ConvertTo-PowerShellLiteralContent $UncPath
-        $uncOut = Invoke-NocttyInjectedChild -CaseName 'UNC cwd' -WithoutPSReadLine `
+        $uncOut = Invoke-KoretermInjectedChild -CaseName 'UNC cwd' -WithoutPSReadLine `
             -Preamble "Set-Location -LiteralPath '$uncQuoted'; " `
             -Postamble '; if ($null -eq (__ghostty_encode_cwd_uri)) { "UNC" + "-CWD-SKIPPED" }'
         Assert-True ($uncOut.Contains('UNC-CWD-SKIPPED') -and -not $uncOut.Contains(']7;')) "A UNC child emitted a misleading OSC 7 cwd: $uncOut"
@@ -852,7 +852,7 @@ public sealed class NocttyInjectedChildOutput {
     # stand-in reader so this is a real host read without PSReadLine pipe errors.
     foreach ($providerLocation in $unsupportedLocations) {
         $providerQuoted = ConvertTo-PowerShellLiteralContent $providerLocation
-        $providerOut = Invoke-NocttyInjectedChild -CaseName ('provider ' + $providerLocation) -StandInReader `
+        $providerOut = Invoke-KoretermInjectedChild -CaseName ('provider ' + $providerLocation) -StandInReader `
             -Lines @(
                 "Set-Location -LiteralPath '$providerQuoted'; function global:prompt { 'PROVIDER> ' }",
                 '"PROVIDER" + "-READ"',
@@ -873,12 +873,12 @@ public sealed class NocttyInjectedChildOutput {
         @{ Name = 'plain'; Preamble = '' }
         @{ Name = 'Set-StrictMode -Version Latest'; Preamble = 'Set-StrictMode -Version Latest; ' }
     )) {
-        $childOut = Invoke-NocttyInjectedChild -CaseName $case.Name -Preamble $case.Preamble
+        $childOut = Invoke-KoretermInjectedChild -CaseName $case.Name -Preamble $case.Preamble
         $shown = $childOut -replace [char]27, '<ESC>'
         $where = "[$($case.Name)]"
 
         Assert-True ($childOut.Contains('HELPER-RESOLVED')) "$where Helper functions did not survive the injected & { } block: $shown"
-        Assert-True ($childOut.Contains('NOCTTYPROBE> ')) "$where Injected block replaced the user's prompt: $shown"
+        Assert-True ($childOut.Contains('KORETERMPROBE> ')) "$where Injected block replaced the user's prompt: $shown"
         # PowerShell swallows a throw from `prompt` without writing anything,
         # so these error patterns only catch load-time and StrictMode
         # failures; the marker and OSC assertions cover a prompt-draw
@@ -890,14 +890,14 @@ public sealed class NocttyInjectedChildOutput {
             Assert-True ($childOut.Contains($marker)) "$where Injected block emitted no $marker : $shown"
         }
         # The host drew the returned prompt, so B follows its text.
-        Assert-True ($childOut -match "\]133;A;cl=line;aid=\d+;redraw=0$([char]7)NOCTTYPROBE> $([char]27)\]133;B$([char]7)") "$where The prompt was not drawn as A, prompt text, B: $shown"
+        Assert-True ($childOut -match "\]133;A;cl=line;aid=\d+;redraw=0$([char]7)KORETERMPROBE> $([char]27)\]133;B$([char]7)") "$where The prompt was not drawn as A, prompt text, B: $shown"
     }
 
     # A prompt replaced after startup, the way `. $PROFILE` or a theme's
     # re-init does it, is drawn once as it is and wrapped again when the
     # next line is read. The host still calls the line reader with stdin
     # piped (PSReadLine then fails inside it and the host reads the pipe).
-    $replacedOut = Invoke-NocttyInjectedChild -CaseName 'replaced prompt' -Lines @(
+    $replacedOut = Invoke-KoretermInjectedChild -CaseName 'replaced prompt' -Lines @(
         "function global:prompt { 'RE' + 'PLACED> ' }",
         "'fil' + 'ler'",
         'exit'
@@ -911,7 +911,7 @@ public sealed class NocttyInjectedChildOutput {
     # native exit code still has to reach OSC 133;D, and a clean draw must
     # still report 0. Reading $LASTEXITCODE through Get-Variable is the part
     # that could silently have broken this.
-    $nativeOut = Invoke-NocttyInjectedChild -CaseName 'StrictMode native exit' `
+    $nativeOut = Invoke-KoretermInjectedChild -CaseName 'StrictMode native exit' `
         -Preamble 'Set-StrictMode -Version Latest; ' `
         -Lines @('cmd /c exit 7', 'exit')
     $nativeShown = $nativeOut -replace [char]27, '<ESC>'
@@ -920,7 +920,7 @@ public sealed class NocttyInjectedChildOutput {
 
     # ── A user's own `ssh` must survive a launch that installs no wrapper ──
     #
-    # The profile runs BEFORE noctty's injected -Command, so a
+    # The profile runs BEFORE koreterm's injected -Command, so a
     # `function ssh { ... }` the user defined there is already in the global
     # scope when we load. The old unconditional
     # `Remove-Item -Path Function:\ssh,Function:\global:ssh` deleted it on
@@ -935,11 +935,11 @@ public sealed class NocttyInjectedChildOutput {
     # count the host's own `PSConsoleReadLine::ReadLine ... Specified method is
     # not supported` record, which this harness provokes by piping stdin into
     # an interactive host and which has nothing to do with the script.
-    $userSshOut = Invoke-NocttyInjectedChild -CaseName 'user ssh preserved' `
+    $userSshOut = Invoke-KoretermInjectedChild -CaseName 'user ssh preserved' `
         -Preamble 'function global:ssh { ''USER-SSH-PRESERVED'' }; $Error.Clear(); ' `
-        -Postamble '; $Global:__noctty_load_errors = $Error.Count' `
+        -Postamble '; $Global:__koreterm_load_errors = $Error.Count' `
         -Lines @(
-            '"ERR" + "COUNT=" + $Global:__noctty_load_errors',
+            '"ERR" + "COUNT=" + $Global:__koreterm_load_errors',
             'if ((ssh) -eq "USER-SSH-PRESERVED") { "USER" + "-SSH-SURVIVED" }',
             'exit'
         )
@@ -951,16 +951,16 @@ public sealed class NocttyInjectedChildOutput {
     $captureQuoted = ConvertTo-PowerShellLiteralContent $fakeCapture
     foreach ($existingSsh in @(
         "function global:ssh { 'mine' }; ",
-        "function global:NocttyUserSsh { 'mine' }; Set-Alias ssh NocttyUserSsh -Scope Global; "
+        "function global:KoretermUserSsh { 'mine' }; Set-Alias ssh KoretermUserSsh -Scope Global; "
     )) {
-        $ownedOut = Invoke-NocttyInjectedChild -CaseName ('existing ssh ' + $existingSsh) -WithoutPSReadLine `
+        $ownedOut = Invoke-KoretermInjectedChild -CaseName ('existing ssh ' + $existingSsh) -WithoutPSReadLine `
             -Preamble ($existingSsh + "`$env:GHOSTTY_SHELL_FEATURES = 'ssh-env'; `$Error.Clear(); ") `
             -Postamble ("; function global:__ghostty_find_command_application { '$fakeQuoted' }; " + '; if ((ssh) -ceq "mine") { "USER" + "-SSH-SURVIVED" }; "ERR" + "COUNT=" + $Error.Count')
         Assert-True ($ownedOut.Contains('USER-SSH-SURVIVED') -and $ownedOut.Contains('ERRCOUNT=0')) "ssh-env replaced a profile function or alias: $ownedOut"
     }
 
     # Exercise the binder and cleanup after the bootstrap scope has died.
-    $sshChild = Invoke-NocttyInjectedChild -CaseName 'ssh wrapper argv' -WithoutPSReadLine `
+    $sshChild = Invoke-KoretermInjectedChild -CaseName 'ssh wrapper argv' -WithoutPSReadLine `
         -Preamble "`$env:GHOSTTY_SHELL_FEATURES = 'ssh-env'; " `
         -Postamble ("; function global:__ghostty_find_command_application { '$fakeQuoted' }; " +
             "`$env:FAKE_SSH_CAPTURE = '$captureQuoted'; " +
@@ -975,16 +975,16 @@ public sealed class NocttyInjectedChildOutput {
 
     # With the feature on we DO install a wrapper, and it must be ours rather
     # than the user's function left in place.
-    $wrapperOut = Invoke-NocttyInjectedChild -CaseName 'wrapper error history' `
+    $wrapperOut = Invoke-KoretermInjectedChild -CaseName 'wrapper error history' `
         -Preamble "`$env:GHOSTTY_SHELL_FEATURES = 'ssh-env'; `$Error.Clear(); " `
-        -Postamble '; $Global:__noctty_load_errors = $Error.Count' `
+        -Postamble '; $Global:__koreterm_load_errors = $Error.Count' `
         -Lines @(
-            '"ERR" + "COUNT=" + $Global:__noctty_load_errors',
+            '"ERR" + "COUNT=" + $Global:__koreterm_load_errors',
             'if (([string](Get-Command ssh -CommandType Function).ScriptBlock).Contains("__ghostty_ssh_wrapper_marker")) { "WRAPPER" + "-INSTALLED" }',
             'exit'
         )
     $wrapperShown = $wrapperOut -replace [char]27, '<ESC>'
-    Assert-True ($wrapperOut.Contains('WRAPPER-INSTALLED')) "ssh-env did not install the noctty ssh wrapper in a real child: $wrapperShown"
+    Assert-True ($wrapperOut.Contains('WRAPPER-INSTALLED')) "ssh-env did not install the koreterm ssh wrapper in a real child: $wrapperShown"
     Assert-True ($wrapperOut.Contains('ERRCOUNT=0')) "Installing the ssh wrapper polluted `$Error: $wrapperShown"
 
     # ── OSC 133 D disambiguation (CodeRabbit on #237) ────────────────────
@@ -1001,7 +1001,7 @@ public sealed class NocttyInjectedChildOutput {
     # a console, and PowerShell records that MethodInvocationException in
     # $Error once PER PROMPT — landing between our end-of-prompt snapshot
     # and the user's next command, which is exactly the window the signal
-    # reads. A real noctty session is a ConPTY, where PSReadLine reads fine
+    # reads. A real koreterm session is a ConPTY, where PSReadLine reads fine
     # and records nothing; measured through a live pseudo console on both
     # hosts, every sequence below holds with PSReadLine loaded. Asserting
     # the piped-stdin behaviour instead would pin an artifact of the rig.
@@ -1148,7 +1148,7 @@ public sealed class NocttyInjectedChildOutput {
     )
 
     foreach ($case in $dCases) {
-        $childOut = Invoke-NocttyInjectedChild -CaseName $case.Name `
+        $childOut = Invoke-KoretermInjectedChild -CaseName $case.Name `
             -Preamble $case.Pre `
             -Lines (@($case.Lines) + @('exit')) `
             -WithoutPSReadLine `
@@ -1159,7 +1159,7 @@ public sealed class NocttyInjectedChildOutput {
         $where = "[$($case.Name)]"
         Assert-True ((($marks) -join ',') -eq (($case.Expect) -join ',')) `
             "$where OSC 133 D sequence was $($marks -join ','), expected $($case.Expect -join ','): $shown"
-        Assert-True ($childOut.Contains('NOCTTYPROBE> ')) "$where Injected block replaced the user's prompt: $shown"
+        Assert-True ($childOut.Contains('KORETERMPROBE> ')) "$where Injected block replaced the user's prompt: $shown"
         if ($case.ContainsKey('Pattern')) {
             Assert-True ($childOut -match $case.Pattern) "$where Marks after the replaced prompt were out of order: $shown"
         }
@@ -1184,7 +1184,7 @@ public sealed class NocttyInjectedChildOutput {
             Remove-Item -LiteralPath "Alias:\$alias" -Force -ErrorAction SilentlyContinue
         }
     }
-    Remove-Variable -Name '__noctty_test_status', '__noctty_test_next_line' -Scope Global -ErrorAction Ignore
+    Remove-Variable -Name '__koreterm_test_status', '__koreterm_test_next_line' -Scope Global -ErrorAction Ignore
     if ($script:PSReadLineImported) {
         Set-PSReadLineOption -AddToHistoryHandler $script:OriginalAddToHistoryHandler
     }

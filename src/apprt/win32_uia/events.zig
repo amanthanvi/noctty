@@ -125,7 +125,7 @@ pub fn raiseNotification(
     raiseNotificationAs(
         provider,
         kind,
-        std.unicode.utf8ToUtf16LeStringLiteral("noctty.command-palette"),
+        std.unicode.utf8ToUtf16LeStringLiteral("koreterm.command-palette"),
         message,
     );
 }
@@ -144,7 +144,7 @@ pub fn raiseInputModeNotification(provider: *com.IRawElementProviderSimple, mess
     raiseNotificationAs(
         provider,
         .other,
-        std.unicode.utf8ToUtf16LeStringLiteral("noctty.input-mode"),
+        std.unicode.utf8ToUtf16LeStringLiteral("koreterm.input-mode"),
         message,
     );
 }
@@ -164,7 +164,7 @@ pub fn raiseBellNotification(provider: *com.IRawElementProviderSimple) void {
     raiseNotificationAs(
         provider,
         .other,
-        std.unicode.utf8ToUtf16LeStringLiteral("noctty.bell"),
+        std.unicode.utf8ToUtf16LeStringLiteral("koreterm.bell"),
         "Bell",
     );
 }

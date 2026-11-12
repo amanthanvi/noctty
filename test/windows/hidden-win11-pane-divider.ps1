@@ -186,7 +186,7 @@ public static class PaneDividerConsoleSize {
 if (-not $Driver) {
     Invoke-LocalHiddenDriver -Script $PSCommandPath -Bin $Bin -Run $Run -TimeoutSeconds $DriverTimeoutSeconds `
         -ExpectedStartupHash $ExpectedStartupHash -ExpectedStartupModified $ExpectedStartupModified `
-        -DesktopPrefix 'noctty-panediv-' -Label 'Hidden pane divider' -PassDesktopName -GuardClipboard
+        -DesktopPrefix 'koreterm-panediv-' -Label 'Hidden pane divider' -PassDesktopName -GuardClipboard
     exit
 }
 
@@ -197,7 +197,7 @@ $script:samples = [Collections.Generic.List[object]]::new()
 $script:processes = [Collections.Generic.List[object]]::new()
 $script:interfered = [Collections.Generic.List[int]]::new()
 $desktopPath = "WinSta0\$DesktopName"
-$runClass = 'noctty-test-panediv-' + [guid]::NewGuid().ToString('N').Substring(0,8)
+$runClass = 'koreterm-test-panediv-' + [guid]::NewGuid().ToString('N').Substring(0,8)
 $tools = Join-Path $Run 'tools'; [void](New-Item -ItemType Directory -Path $tools)
 $sizeExe = Join-Path $tools 'pane-divider-console-size.exe'
 # PowerShell 7's Add-Type cannot write a console executable; Windows
@@ -255,8 +255,8 @@ function Panes($h) {
 }
 function Rect-Of($p) { return @{ Left = $p.Left; Top = $p.Top; Right = $p.Right; Bottom = $p.Bottom } }
 # The shells of the case, oldest first: the first pane's, then each split's.
-function Shells([int]$NocttyPid) {
-    @(Get-CimInstance Win32_Process -Filter "ParentProcessId = $NocttyPid" -OperationTimeoutSec 10 |
+function Shells([int]$KoretermPid) {
+    @(Get-CimInstance Win32_Process -Filter "ParentProcessId = $KoretermPid" -OperationTimeoutSec 10 |
         Where-Object { $_.Name -eq 'cmd.exe' } | Sort-Object CreationDate | ForEach-Object { [int]$_.ProcessId })
 }
 function Console-Size([int]$ShellPid) {
@@ -317,7 +317,7 @@ try {
       'shell-integration = none', 'confirm-close-surface = false',
       'window-width = 140', 'window-height = 40',
       'keybind = f13=new_split:right', 'keybind = f14=new_split:down', 'keybind = f15=toggle_split_zoom') | Set-Content -LiteralPath $config
-    $exe = Join-Path $dir 'noctty.exe'
+    $exe = Join-Path $dir 'koreterm.exe'
     $pi = [HiddenLocal]::Spawn($exe, ('"{0}" --config-file="{1}" --single-instance=false --window-save-state=never --class={2}' -f $exe, $config, $runClass), $dir, $desktopPath)
     $script:processes.Add(@{ Pid = $pi.pid })
     if (-not (Wait-Until { @([HiddenLocal]::Hosts($pi.pid)).Count -gt 0 -and @([HiddenLocal]::Surfaces(@([HiddenLocal]::Hosts($pi.pid))[0])).Count -gt 0 } 25)) { throw 'Window startup failed.' }

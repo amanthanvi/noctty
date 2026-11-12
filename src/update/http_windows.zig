@@ -36,7 +36,7 @@ const error_winhttp_header_not_found = 12150; // WINHTTP_ERROR_BASE + 150
 const error_invalid_parameter = 87; // winerror.h
 
 pub const timeout_ms: i32 = 30_000;
-pub const user_agent = "noctty-updater";
+pub const user_agent = "koreterm-updater";
 
 const Context = struct {
     complete: std.Thread.ResetEvent = .{},
@@ -491,7 +491,7 @@ test "update requests send exactly one User-Agent and accept only identity throu
     while (lines.next()) |line| {
         if (std.ascii.startsWithIgnoreCase(line, "user-agent:")) {
             user_agents += 1;
-            try std.testing.expectEqualStrings("User-Agent: noctty-updater", line);
+            try std.testing.expectEqualStrings("User-Agent: koreterm-updater", line);
         }
         if (std.ascii.startsWithIgnoreCase(line, "accept-encoding:")) {
             accept_encodings += 1;

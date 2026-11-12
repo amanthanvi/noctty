@@ -22,8 +22,8 @@ pub fn init(
         install_name: []const u8,
         section: []const u8,
     }{
-        .{ .name = "ghostty", .install_name = "noctty", .section = "1" },
-        .{ .name = "ghostty", .install_name = "noctty", .section = "5" },
+        .{ .name = "ghostty", .install_name = "koreterm", .section = "1" },
+        .{ .name = "ghostty", .install_name = "koreterm", .section = "5" },
     };
 
     inline for (manpages) |manpage| {

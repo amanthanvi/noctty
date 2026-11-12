@@ -629,7 +629,7 @@ function Test-ReleaseInteractiveResultSelectionContract {
     if ($errors.Count -ne 0) { return $false }
 
     $probeRoot = Join-Path ([System.IO.Path]::GetTempPath()) (
-        'noctty-release-selection-' + [Guid]::NewGuid().ToString('N')
+        'koreterm-release-selection-' + [Guid]::NewGuid().ToString('N')
     )
     $priorRunnerTemp = $env:RUNNER_TEMP
     $priorRepository = $env:GH_REPOSITORY
@@ -746,7 +746,7 @@ function Test-ReleaseInteractiveResultSelectionContract {
     try {
         [System.IO.Directory]::CreateDirectory($probeRoot) | Out-Null
         $env:RUNNER_TEMP = $probeRoot
-        $env:GH_REPOSITORY = 'amanthanvi/noctty'
+        $env:GH_REPOSITORY = 'amanthanvi/koreterm'
         $single = Invoke-SelectionFixture -DuplicateComposite $false
         $duplicate = Invoke-SelectionFixture -DuplicateComposite $true
         return $null -eq $single.Message -and

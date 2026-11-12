@@ -28,7 +28,7 @@ pub const Mode = enum {
 };
 
 /// The architecture the developer environment targets (`-arch`) and the one
-/// its tools run on (`-host_arch`): the one noctty was built for, as in
+/// its tools run on (`-host_arch`): the one koreterm was built for, as in
 /// Windows Terminal.
 pub const Arch = enum { x64, arm64 };
 
@@ -189,7 +189,7 @@ pub fn devShellScript(
 ///
 /// It is the one `-Command` line shell integration wraps
 /// (`shell_integration.setupPowerShell`): the script runs first, as it does
-/// on its own, and the integration loads after it. noctty wrote it, and all
+/// on its own, and the integration loads after it. koreterm wrote it, and all
 /// it does is import a module from a path that is never expanded and enter
 /// the developer environment, which sets variables and leaves the prompt
 /// and the directory as they were, so nothing the integration adds changes
@@ -213,7 +213,7 @@ pub fn isDevShellScript(script: []const u8) bool {
     // The module path: a doubled quote character is one quote in it, as
     // `devShellScript` writes them, and the first quote that is not doubled
     // ends it. PowerShell also reads two different quote characters as one
-    // quote (measured with the parser, both hosts). noctty never writes
+    // quote (measured with the parser, both hosts). koreterm never writes
     // that, and such a path ends here at a quote the checks below refuse,
     // so up to an accepted end PowerShell reads the same string.
     const body = script[dev_shell_import.len..];
@@ -254,7 +254,7 @@ fn isDevCmdArgumentsText(text: []const u8) bool {
     return false;
 }
 
-/// An instance id noctty puts in a profile key and a PowerShell script:
+/// An instance id koreterm puts in a profile key and a PowerShell script:
 /// letters and digits only (Setup Configuration's are eight hex digits).
 pub fn isPlainInstanceId(id: []const u8) bool {
     if (id.len == 0 or id.len > 64) return false;
@@ -701,7 +701,7 @@ test "the Developer PowerShell script quotes the module path for PowerShell" {
     );
 }
 
-test "every Developer PowerShell script noctty builds is recognised as its own" {
+test "every Developer PowerShell script koreterm builds is recognised as its own" {
     const testing = std.testing;
     const alloc = testing.allocator;
     const paths = [_][]const u8{
@@ -728,7 +728,7 @@ test "every Developer PowerShell script noctty builds is recognised as its own" 
     }
 }
 
-test "a script noctty did not build is not a Developer PowerShell prelude" {
+test "a script koreterm did not build is not a Developer PowerShell prelude" {
     const testing = std.testing;
     const ok = "&{Import-Module 'C:\\VS\\Common7\\Tools\\Microsoft.VisualStudio.DevShell.dll'; Enter-VsDevShell '6bb7cfd9' -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64'}";
     try testing.expect(isDevShellScript(ok));
@@ -746,10 +746,10 @@ test "a script noctty did not build is not a Developer PowerShell prelude" {
         "&{Import-Module 'C:\\VS\\m.dll'; Enter-VsDevShell '6bb7cfd9' -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=arm64'}",
         // A lone quote ends the path, so the rest is code.
         "&{Import-Module 'C:\\VS\\'; Remove-Item x; 'm.dll'; Enter-VsDevShell '6bb7cfd9' -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64'}",
-        // A typographic quote closes it too, where noctty closes with `'`.
+        // A typographic quote closes it too, where koreterm closes with `'`.
         "&{Import-Module 'C:\\VS\\m.dll\u{2019}; Enter-VsDevShell '6bb7cfd9' -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64'}",
         // Two different quote characters, which PowerShell reads as one
-        // quote and noctty never writes.
+        // quote and koreterm never writes.
         "&{Import-Module 'C:\\VS\\a'\u{2019}m.dll'; Enter-VsDevShell '6bb7cfd9' -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64'}",
         "&{Import-Module 'C:\\VS\\a\u{2019}'m.dll'; Enter-VsDevShell '6bb7cfd9' -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64'}",
         // An id that is not one word of letters and digits.

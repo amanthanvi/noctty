@@ -11,7 +11,7 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'common.ps1')
 $repoRoot = Get-RepoRoot
 $repository = if ([string]::IsNullOrWhiteSpace($env:GITHUB_REPOSITORY)) {
-    'amanthanvi/noctty'
+    'amanthanvi/koreterm'
 } else {
     $env:GITHUB_REPOSITORY
 }
@@ -127,8 +127,8 @@ foreach ($architecture in (Get-WindowsPackageArchitectures)) {
     $expectedNames.Add((New-WindowsPackageArtifactName -Version $Version -Architecture $architecture -Kind checksums))
 }
 $expectedNames.Add((New-WindowsPackageArtifactName -Version $Version -Architecture x64 -Kind legacy-checksums))
-$expectedNames.Add('noctty-icon.svg')
-$expectedAttestationNames = @($expectedNames | Where-Object { $_ -ne 'noctty-icon.svg' })
+$expectedNames.Add('koreterm-icon.svg')
+$expectedAttestationNames = @($expectedNames | Where-Object { $_ -ne 'koreterm-icon.svg' })
 $expectedAssetCount = if ($requiresPortableManifests) { 10 } else { 8 }
 if ($requiresSymbols) { $expectedAssetCount += 2 }
 # Everything but the static icon is attested.
@@ -150,7 +150,7 @@ if ($missing.Count -gt 0 -or $unexpected.Count -gt 0) {
 
 $createdTempDirectory = [string]::IsNullOrWhiteSpace($DownloadDirectory)
 if ($createdTempDirectory) {
-    $DownloadDirectory = Join-Path ([System.IO.Path]::GetTempPath()) "noctty-published-$Version-$([Guid]::NewGuid().ToString('N'))"
+    $DownloadDirectory = Join-Path ([System.IO.Path]::GetTempPath()) "koreterm-published-$Version-$([Guid]::NewGuid().ToString('N'))"
 }
 $DownloadDirectory = [System.IO.Path]::GetFullPath($DownloadDirectory)
 if (Test-Path -LiteralPath $DownloadDirectory) {
@@ -248,13 +248,13 @@ try {
         if ($requiresPortableManifests) {
             Assert-PortableManifestMatchesPayload `
                 -ManifestPath (Join-Path $DownloadDirectory $manifestName) `
-                -PayloadRoot (Join-Path $extractDirectory 'noctty') `
+                -PayloadRoot (Join-Path $extractDirectory 'koreterm') `
                 -Label "Portable manifest $architecture"
         }
         if ($requiresSymbols) {
             [void](Assert-SymbolsArchiveMatchesPortable `
                 -SymbolsZip (Join-Path $DownloadDirectory $symbolsName) `
-                -PayloadRoot (Join-Path $extractDirectory 'noctty') `
+                -PayloadRoot (Join-Path $extractDirectory 'koreterm') `
                 -ExtractRoot (Join-Path $DownloadDirectory "extract-symbols-$architecture") `
                 -Label "Symbols $architecture")
         }
@@ -266,11 +266,11 @@ try {
         $conptyArchitecture = $conptyPin.architectures.PSObject.Properties[$architecture].Value
         $conptyPortablePayloads = @(
             [pscustomobject]@{
-                RelativePath = 'noctty/conpty.dll'
+                RelativePath = 'koreterm/conpty.dll'
                 Pin          = $conptyArchitecture.conptyDll
             },
             [pscustomobject]@{
-                RelativePath = 'noctty/OpenConsole.exe'
+                RelativePath = 'koreterm/OpenConsole.exe'
                 Pin          = $conptyArchitecture.openConsoleExe
             }
         )

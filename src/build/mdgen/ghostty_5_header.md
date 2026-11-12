@@ -1,18 +1,18 @@
-% NOCTTY(5) Version @@VERSION@@ | noctty terminal configuration file
+% KORETERM(5) Version @@VERSION@@ | koreterm terminal configuration file
 
 # NAME
 
-**noctty** - noctty terminal configuration file
+**koreterm** - koreterm terminal configuration file
 
 # DESCRIPTION
 
-To configure noctty, you must use a configuration file. GUI-based configuration
+To configure koreterm, you must use a configuration file. GUI-based configuration
 is on the roadmap but not yet supported. The configuration file must be placed
-at `$XDG_CONFIG_HOME/noctty/config.ghostty`, which defaults to `~/.config/noctty/config.ghostty`
+at `$XDG_CONFIG_HOME/koreterm/config.ghostty`, which defaults to `~/.config/koreterm/config.ghostty`
 if the [XDG environment is not set](https://specifications.freedesktop.org/basedir-spec/basedir-spec-latest.html).
 
 **If you are using macOS, the configuration file can also be placed at
-`$HOME/Library/Application Support/io.github.amanthanvi.noctty/config.ghostty`.** This is the
+`$HOME/Library/Application Support/io.github.amanthanvi.koreterm/config.ghostty`.** This is the
 default configuration location for macOS. It will be searched before any of the
 XDG environment locations listed above.
 
@@ -56,7 +56,7 @@ The file format is documented below as an example:
     palette = 15=#fbf1c7
 
 You can view all available configuration options and their documentation by
-executing the command `noctty +show-config --default --docs`. Note that this will
+executing the command `koreterm +show-config --default --docs`. Note that this will
 output the full default configuration with docs to stdout, so you may want to
 pipe that through a pager, an editor, etc.
 
@@ -68,49 +68,49 @@ attach the doc comment to.
 You can also see and read all available configuration options in the source
 Config structure. The available keys are the keys verbatim, and their possible
 values are typically documented in the comments. You also can search for
-the public config files of other noctty and Ghostty users for examples and inspiration.
+the public config files of other koreterm and Ghostty users for examples and inspiration.
 
 ## Configuration Errors
 
-If your configuration file has any errors, noctty does its best to ignore
+If your configuration file has any errors, koreterm does its best to ignore
 them and move on. Configuration errors will be logged.
 
 ## Debugging Configuration
 
 You can verify that configuration is being properly loaded by looking at the
-debug output of noctty.
+debug output of koreterm.
 
 In the debug output, you should see in the first 20 lines or so messages about
 loading (or not loading) a configuration file, as well as any errors it may have
 encountered. Configuration errors are also shown in a dedicated window on both
-macOS and Linux (GTK). noctty does not treat configuration errors as fatal and
+macOS and Linux (GTK). koreterm does not treat configuration errors as fatal and
 will fall back to default values for erroneous keys.
 
-You can also view the full configuration noctty is loading using `noctty
+You can also view the full configuration koreterm is loading using `koreterm
 +show-config` from the command-line. Use the `--help` flag to additional options
 for that command.
 
 ## Logging
 
-noctty can write logs to a number of destinations. On all platforms, logging to
-`stderr` is available. Depending on the platform and how noctty was launched,
+koreterm can write logs to a number of destinations. On all platforms, logging to
+`stderr` is available. Depending on the platform and how koreterm was launched,
 logs sent to `stderr` may be stored by the system and made available for later
 retrieval.
 
-On Linux if noctty is launched by the default `systemd` user service, you can use
-`journald` to see logs: `journalctl --user --unit app-io.github.amanthanvi.noctty.service`.
+On Linux if koreterm is launched by the default `systemd` user service, you can use
+`journald` to see logs: `journalctl --user --unit app-io.github.amanthanvi.koreterm.service`.
 
 On macOS logging to the macOS unified log is available and enabled by default.
---Use the system `log` CLI to view noctty logs: `sudo log stream --level debug
---predicate 'subsystem=="io.github.amanthanvi.noctty"'`.
+--Use the system `log` CLI to view koreterm logs: `sudo log stream --level debug
+--predicate 'subsystem=="io.github.amanthanvi.koreterm"'`.
 
-noctty logging can be configured in two ways. The first is by what
-optimization level noctty is compiled with. If noctty is compiled with `Debug`
-optimizations debug logs will be output to `stderr`. If noctty is compiled with
+koreterm logging can be configured in two ways. The first is by what
+optimization level koreterm is compiled with. If koreterm is compiled with `Debug`
+optimizations debug logs will be output to `stderr`. If koreterm is compiled with
 any other optimization the debug logs will not be output to `stderr`.
 
-noctty also checks the `GHOSTTY_LOG` environment variable. It can be used
-to control which destinations receive logs. noctty currently defines two
+koreterm also checks the `GHOSTTY_LOG` environment variable. It can be used
+to control which destinations receive logs. koreterm currently defines two
 destinations:
 
 - `stderr` - logging to `stderr`.

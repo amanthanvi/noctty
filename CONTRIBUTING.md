@@ -1,6 +1,6 @@
-# Contributing to noctty
+# Contributing to koreterm
 
-Thanks for working on noctty.
+Thanks for working on koreterm.
 
 This repository is a public, Windows-only project. Issues and pull
 requests are welcome, but contributions need to be small in scope, well
@@ -29,7 +29,7 @@ bugs don't get buried.
    portable copies on 1.3.125 to 1.3.136 that never took 1.3.137 or later
    have to update by hand ([PACKAGING.md](PACKAGING.md#library-consumers)).
 5. Keep docs, packaging, and user-visible strings aligned with the
-   shipped `noctty` product identity.
+   shipped `koreterm` product identity.
 
 ## Before you open a PR
 

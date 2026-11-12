@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 
 const siteDir = join(dirname(fileURLToPath(import.meta.url)), "..");
 const repoDir = resolve(siteDir, "..");
-const trustHtml = readFileSync(join(siteDir, "why-noctty.html"), "utf8");
+const trustHtml = readFileSync(join(siteDir, "why-koreterm.html"), "utf8");
 const publishedVerifier = readFileSync(
   join(repoDir, "scripts/verify-published-release.ps1"),
   "utf8",
@@ -97,7 +97,7 @@ const RANKING_VERB =
   "outmatch(?:es|ed|ing)?|outgun(?:s|ned|ning)?|beats?\\b|" +
   "dominat(?:e|es|ed|ing)";
 // Verbs and phrases that assert a ranking once a rival is in the same clause.
-// "Noctty's throughput exceeds Alacritty's" carries no preposition at all.
+// "Koreterm's throughput exceeds Alacritty's" carries no preposition at all.
 const COMPARATIVE_VERB =
   `${RANKING_VERB}|exceed(?:s|ed|ing)?|surpass(?:es|ed|ing)?|` +
   "overtak(?:e|es|en|ing)|eclips(?:e|es|ed|ing)|edg(?:e|es|ed)\\s+out|" +
@@ -282,7 +282,7 @@ test("every pending-document exemption is still cited by something", () => {
   const cited = new Set(
     [
       ...trustHtml.matchAll(
-        /https:\/\/github\.com\/amanthanvi\/noctty\/blob\/main\/([^"#]+)/g,
+        /https:\/\/github\.com\/amanthanvi\/koreterm\/blob\/main\/([^"#]+)/g,
       ),
     ].map((match) => match[1]),
   );
@@ -333,7 +333,7 @@ test("claims guards read rendered text without blocking operational rates", () =
   );
   assert.notDeepEqual(
     findClaimViolations(
-      visibleHtmlText("Noctty out<em>performs</em> Windows Terminal"),
+      visibleHtmlText("Koreterm out<em>performs</em> Windows Terminal"),
       CROSS_TERMINAL_CLAIM_PATTERNS,
     ),
     [],
@@ -358,14 +358,14 @@ test("claims guards read rendered text without blocking operational rates", () =
   );
   assert.notDeepEqual(
     findClaimViolations(
-      "Noctty renders at 500 MB/s",
+      "Koreterm renders at 500 MB/s",
       MIGRATION_PERFORMANCE_FIGURE_PATTERNS,
     ),
     [],
   );
   assert.notDeepEqual(
     findClaimViolations(
-      "Noctty processes 2 gibibytes per second",
+      "Koreterm processes 2 gibibytes per second",
       MIGRATION_PERFORMANCE_FIGURE_PATTERNS,
     ),
     [],
@@ -404,7 +404,7 @@ test("trust page carries every implemented release verification layer", () => {
   assert.match(trustHtml, /docs\/verify-release\.md/);
   assert.match(
     trustHtml,
-    /verifier accepts v1\.3\.124 and later.*?first release that uses the current Noctty asset\s+contract/is,
+    /verifier accepts v1\.3\.124 and later.*?first release that uses the current Koreterm asset\s+contract/is,
   );
   assert.match(
     trustHtml,
@@ -436,7 +436,7 @@ test("verification guide carries the manual legacy-release signature check", () 
   assert.match(verifyGuide, /Expand-Archive/);
   assert.match(
     verifyGuide,
-    /noctty-release-verification-.*?\[Guid\]::NewGuid\(\)/s,
+    /koreterm-release-verification-.*?\[Guid\]::NewGuid\(\)/s,
   );
   assert.match(
     verifyGuide,
@@ -554,7 +554,7 @@ test("trust page fragment links point at real section ids", () => {
 test("trust page links to repository files that exist", (t) => {
   const linked = [
     ...trustHtml.matchAll(
-      /https:\/\/github\.com\/amanthanvi\/noctty\/blob\/main\/([^"#]+)/g,
+      /https:\/\/github\.com\/amanthanvi\/koreterm\/blob\/main\/([^"#]+)/g,
     ),
   ].map((match) => match[1]);
   assert.ok(linked.length > 0);

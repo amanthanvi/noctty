@@ -48,9 +48,9 @@ register **Microsoft.CodeSigning**.
 
 Search for **Artifact Signing Accounts**, then **Create**:
 
-- a new resource group, for example `noctty-signing`;
+- a new resource group, for example `koreterm-signing`;
 - an account name, 3 to 24 letters and digits, globally unique, for example
-  `nocttysigning`;
+  `koretermsigning`;
 - a region; note its endpoint, for example East US is
   `https://eus.codesigning.azure.net` (the full table is in the quickstart);
 - pricing tier **Basic**.
@@ -71,39 +71,39 @@ that. If it asks for more documents, you get three upload attempts.
 ## 5. Create the certificate profile
 
 On the account, **Certificate profiles**, **Create**, **Public Trust**. Give it
-a name (5 to 100 letters and digits, for example `noctty`) and select your
+a name (5 to 100 letters and digits, for example `koreterm`) and select your
 completed identity validation.
 
 Keep this profile. Its custom EKU (`1.3.6.1.4.1.311.97.` followed by numbers
-unique to the profile) is what installed copies of noctty will trust, and
+unique to the profile) is what installed copies of koreterm will trust, and
 deleting and recreating the profile gives a new EKU that they will not.
 
 ## 6. Let the release job sign
 
 Microsoft Entra ID, **App registrations**, **New registration**: name it
-`noctty-release-signing`, single tenant, no redirect URI. From its overview,
+`koreterm-release-signing`, single tenant, no redirect URI. From its overview,
 note the **Application (client) ID** and the **Directory (tenant) ID**.
 
 In the app, **Certificates & secrets**, **Federated credentials**, **Add
 credential**:
 
 - scenario **GitHub Actions deploying Azure resources**;
-- organization `amanthanvi`, repository `noctty`;
+- organization `amanthanvi`, repository `koreterm`;
 - entity type **Environment**, environment name `release`;
-- name `noctty-release`.
+- name `koreterm-release`.
 
-The subject must read `repo:amanthanvi/noctty:environment:release` and the
+The subject must read `repo:amanthanvi/koreterm:environment:release` and the
 audience `api://AzureADTokenExchange`. Do not create a client secret: the
 federated credential is the only way in, and only a job running in the
 `release` environment of this repository can use it.
 
 On the certificate profile from step 5, **Access control (IAM)**, **Add role
 assignment**, role **Artifact Signing Certificate Profile Signer**, member the
-`noctty-release-signing` app.
+`koreterm-release-signing` app.
 
 ## 7. Read the profile's EKU
 
-Installed copies of noctty have to learn the EKU before any release is signed
+Installed copies of koreterm have to learn the EKU before any release is signed
 with it (step 8), so read it once from a signature. On your own machine, give
 yourself the **Artifact Signing Certificate Profile Signer** role on the
 profile as well, then in PowerShell 7:
@@ -114,17 +114,17 @@ pinned client as the release job:
 
 ```powershell
 az login
-$work = New-Item -ItemType Directory -Path (Join-Path $env:TEMP "noctty-eku-$(Get-Random)")
+$work = New-Item -ItemType Directory -Path (Join-Path $env:TEMP "koreterm-eku-$(Get-Random)")
 $package = Join-Path $work "client.nupkg"
 Invoke-WebRequest "https://api.nuget.org/v3-flatcontainer/microsoft.artifactsigning.client/1.0.146/microsoft.artifactsigning.client.1.0.146.nupkg" -OutFile $package
 if ([Convert]::ToBase64String([Security.Cryptography.SHA512]::HashData([IO.File]::ReadAllBytes($package))) -cne "/G0hG/VDIS6psW23b5t1V/ORIgn0PVAOtGj9w+hkPmAuI4pempfwlW50E2GtHscnz9+5Qz3hbC4mcb7ej2Yn1A==") { throw "client hash mismatch" }
 [IO.Compression.ZipFile]::ExtractToDirectory($package, (Join-Path $work "client"))
 @{
     Endpoint = "https://eus.codesigning.azure.net"
-    CodeSigningAccountName = "nocttysigning"
-    CertificateProfileName = "noctty"
+    CodeSigningAccountName = "koretermsigning"
+    CertificateProfileName = "koreterm"
 } | ConvertTo-Json | Set-Content (Join-Path $work "metadata.json")
-Set-Content (Join-Path $work "probe.ps1") "'noctty EKU probe'"
+Set-Content (Join-Path $work "probe.ps1") "'koreterm EKU probe'"
 $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\10.*\x64\signtool.exe" | Sort-Object FullName -Descending | Select-Object -First 1
 & $signtool.FullName sign /fd SHA256 /tr http://timestamp.acs.microsoft.com /td SHA256 /dlib (Join-Path $work "client\bin\x64\Azure.CodeSigning.Dlib.dll") /dmdf (Join-Path $work "metadata.json") (Join-Path $work "probe.ps1")
 (Get-AuthenticodeSignature (Join-Path $work "probe.ps1")).SignerCertificate.EnhancedKeyUsageList
@@ -171,10 +171,10 @@ never update in place have to reinstall by hand. This is the overlap step of
 ## 9. Switch the `release` environment
 
 ```powershell
-$repo = "amanthanvi/noctty"
+$repo = "amanthanvi/koreterm"
 gh variable set ARTIFACT_SIGNING_ENDPOINT --repo $repo --env release --body "https://eus.codesigning.azure.net"
-gh variable set ARTIFACT_SIGNING_ACCOUNT_NAME --repo $repo --env release --body "nocttysigning"
-gh variable set ARTIFACT_SIGNING_CERTIFICATE_PROFILE_NAME --repo $repo --env release --body "noctty"
+gh variable set ARTIFACT_SIGNING_ACCOUNT_NAME --repo $repo --env release --body "koretermsigning"
+gh variable set ARTIFACT_SIGNING_CERTIFICATE_PROFILE_NAME --repo $repo --env release --body "koreterm"
 gh variable set ARTIFACT_SIGNING_TENANT_ID --repo $repo --env release --body "<directory (tenant) ID from step 6>"
 gh variable set ARTIFACT_SIGNING_CLIENT_ID --repo $repo --env release --body "<application (client) ID from step 6>"
 gh variable set WINDOWS_CODESIGN_TIMESTAMP_URL --repo $repo --env release --body "http://timestamp.acs.microsoft.com"
@@ -199,7 +199,7 @@ for the next version. Its preflight must print:
 
 ```
 Signing source:          Azure Artifact Signing (GitHub OIDC)
-Signing account:         nocttysigning / noctty
+Signing account:         koretermsigning / koreterm
 Timestamp URL:           http://timestamp.acs.microsoft.com
 ```
 

@@ -41,15 +41,15 @@ pub fn init(b: *std.Build, cfg: *const Config) !Stub {
     // with /OPT:REF through the environment, which Zig's cache key ignores:
     // this macro stops a DLL linked without the flag from being reused (as
     // for the handoff proxy).
-    module.addCMacro("NOCTTY_RELEASE_SYMBOLS", if (cfg.release_symbols) "1" else "0");
+    module.addCMacro("KORETERM_RELEASE_SYMBOLS", if (cfg.release_symbols) "1" else "0");
     module.addCSourceFile(.{ .file = b.path(source_root ++ "/ghostty_vt_stub.c") });
     module.addWin32ResourceFile(.{
         .file = b.path(source_root ++ "/ghostty_vt_stub.rc"),
         .flags = &.{
-            b.fmt("/DNOCTTY_VERSION_MAJOR={d}", .{cfg.version.major}),
-            b.fmt("/DNOCTTY_VERSION_MINOR={d}", .{cfg.version.minor}),
-            b.fmt("/DNOCTTY_VERSION_PATCH={d}", .{cfg.version.patch}),
-            b.fmt("/DNOCTTY_VERSION_STRING=\"{f}\"", .{cfg.version}),
+            b.fmt("/DKORETERM_VERSION_MAJOR={d}", .{cfg.version.major}),
+            b.fmt("/DKORETERM_VERSION_MINOR={d}", .{cfg.version.minor}),
+            b.fmt("/DKORETERM_VERSION_PATCH={d}", .{cfg.version.patch}),
+            b.fmt("/DKORETERM_VERSION_STRING=\"{f}\"", .{cfg.version}),
         },
     });
 

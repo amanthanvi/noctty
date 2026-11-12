@@ -85,15 +85,15 @@ jobs:
       - name: Build executable
         run: zig build -Demit-exe=true
 
-      - name: noctty +version smoke
+      - name: koreterm +version smoke
         shell: pwsh
         run: |
-          $versionText = & .\zig-out\bin\noctty.com +version | Out-String
+          $versionText = & .\zig-out\bin\koreterm.com +version | Out-String
           Write-Host $versionText
-          if ($LASTEXITCODE -ne 0) { throw "noctty.com +version failed with exit code $LASTEXITCODE." }
-          if ($versionText -notmatch 'ConPTY') { throw 'noctty.com +version did not report the ConPTY source.' }
+          if ($LASTEXITCODE -ne 0) { throw "koreterm.com +version failed with exit code $LASTEXITCODE." }
+          if ($versionText -notmatch 'ConPTY') { throw 'koreterm.com +version did not report the ConPTY source.' }
 
-      # Check the deterministic budget before any noctty/profile launch.
+      # Check the deterministic budget before any koreterm/profile launch.
       - name: Per-test results from the test executable
         shell: pwsh
         run: |
@@ -134,7 +134,7 @@ jobs:
       - name: Hidden-desktop WARP lifecycle smoke
         shell: pwsh
         timeout-minutes: 10
-        run: ./test/windows/renderer/Invoke-RendererParity.ps1 -Binary ./renderer-smoke/bin/noctty.exe -OutputDirectory ./renderer-smoke/evidence -WarpOnly
+        run: ./test/windows/renderer/Invoke-RendererParity.ps1 -Binary ./renderer-smoke/bin/koreterm.exe -OutputDirectory ./renderer-smoke/evidence -WarpOnly
 
       - name: Require the app to take the Windows 10 branch
         shell: pwsh

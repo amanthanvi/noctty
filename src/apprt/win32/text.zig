@@ -358,9 +358,9 @@ test "win32 optionalOwnedStringEquals handles present and null values" {
 }
 
 test "win32 ownedStringEquals is false for nothing stored and for a different value" {
-    try std.testing.expect(!ownedStringEquals(null, "noctty"));
-    try std.testing.expect(ownedStringEquals("noctty", "noctty"));
-    try std.testing.expect(!ownedStringEquals("noctty", "noctty - 2"));
+    try std.testing.expect(!ownedStringEquals(null, "koreterm"));
+    try std.testing.expect(ownedStringEquals("koreterm", "koreterm"));
+    try std.testing.expect(!ownedStringEquals("koreterm", "koreterm - 2"));
 }
 
 test "win32 ownedBytesEquals handles present and missing values" {

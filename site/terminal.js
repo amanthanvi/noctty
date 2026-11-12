@@ -1,4 +1,4 @@
-// Hero demo: a scripted noctty window, drawn from captures of the app, that
+// Hero demo: a scripted koreterm window, drawn from captures of the app, that
 // plays three steps (the palette, a split, a close and reopen). It pauses
 // off-screen and in hidden tabs, sits on a still frame under reduced motion,
 // and the step buttons always switch steps. The palette rows, their order

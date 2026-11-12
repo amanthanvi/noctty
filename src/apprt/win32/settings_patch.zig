@@ -1560,7 +1560,7 @@ test "settings patch: a save that changed either list writes both, whole, and on
     var arena_state: std.heap.ArenaAllocator = .init(alloc);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
-    const path = "C:\\noctty-test\\config";
+    const path = "C:\\koreterm-test\\config";
     try testing.expectEqual(@as(usize, 0), (try editsForSave(arena, alloc, &.{&original}, .{}, &original, &pending, path, &testSamePath)).len);
     // The order changes: both lists are written whole, the hidden one as
     // the draft has it, so each is checked for another program's edit.
@@ -2589,14 +2589,14 @@ test "settings patch: a config file that did not decode is still named after the
     const arena = config._arena.?.allocator();
     // What `Config.invalidUtf16` records for a config file, as a replay brings
     // it back without the marker.
-    try config._diagnostics.append(arena, .{ .message = try arena.dupeZ(u8, "config-file C:\\noctty-test\\more.conf is not valid UTF-16; not reading it. Save it as UTF-8") });
+    try config._diagnostics.append(arena, .{ .message = try arena.dupeZ(u8, "config-file C:\\koreterm-test\\more.conf is not valid UTF-16; not reading it. Save it as UTF-8") });
     const unread = unreadConfigFile(&config) orelse return error.TestExpectedUnread;
     try testing.expect(unread.undecodable and unread.kind == .include);
-    try expectSameText("C:\\noctty-test\\more.conf", unread.path);
+    try expectSameText("C:\\koreterm-test\\more.conf", unread.path);
     // A config file's problem is not the theme's.
     try testing.expect(unreadTheme(&config) == null);
-    try config._diagnostics.append(arena, .{ .message = try arena.dupeZ(u8, "error reading theme C:\\noctty-test\\dark: error.ReadFailed") });
-    try expectSameText("C:\\noctty-test\\dark", (unreadTheme(&config) orelse return error.TestExpectedUnread).path);
+    try config._diagnostics.append(arena, .{ .message = try arena.dupeZ(u8, "error reading theme C:\\koreterm-test\\dark: error.ReadFailed") });
+    try expectSameText("C:\\koreterm-test\\dark", (unreadTheme(&config) orelse return error.TestExpectedUnread).path);
 }
 
 test "settings patch: the report after a save names a file only the reload as read records as undecodable" {
@@ -2606,13 +2606,13 @@ test "settings patch: the report after a save names a file only the reload as re
     // The light/dark switch drops the record; the reload as read has it.
     var loaded = try Config.default(alloc);
     defer loaded.deinit();
-    loaded._undecodable_file = try loaded._arena.?.allocator().dupeZ(u8, "C:\\noctty-test\\more.conf");
+    loaded._undecodable_file = try loaded._arena.?.allocator().dupeZ(u8, "C:\\koreterm-test\\more.conf");
     var switched = try Config.default(alloc);
     defer switched.deinit();
     switch (try reloadReport(&masked.writer, &.{}, &switched, &loaded, false)) {
         .unread => |unread| {
             try testing.expect(unread.undecodable);
-            try expectSameText("C:\\noctty-test\\more.conf", unread.path);
+            try expectSameText("C:\\koreterm-test\\more.conf", unread.path);
         },
         else => return error.TestExpectedUnread,
     }
@@ -2678,14 +2678,14 @@ test "settings patch: a reload that could not read a file whole reports the file
     defer reload.deinit();
     var buf: [16]u8 = undefined;
     var failing = @import("../../cli/args.zig").TestFailingReader.init("profile-command = py: python.exe\nprofile-na", &buf);
-    try reload.loadReader(alloc, &failing.interface, "C:\\noctty-test\\more.conf");
+    try reload.loadReader(alloc, &failing.interface, "C:\\koreterm-test\\more.conf");
     var masked: std.Io.Writer.Allocating = .init(alloc);
     defer masked.deinit();
     switch (try reloadReport(&masked.writer, &edits, &reload, &reload, false)) {
         .unread => |unread| {
             const text = try unread.describe(alloc);
             defer alloc.free(text);
-            try expectSameText("the included file C:\\noctty-test\\more.conf", text);
+            try expectSameText("the included file C:\\koreterm-test\\more.conf", text);
         },
         else => return error.TestExpectedUnread,
     }
@@ -2694,7 +2694,7 @@ test "settings patch: a reload that could not read a file whole reports the file
     var whole = try Config.default(alloc);
     defer whole.deinit();
     var reader: std.Io.Reader = .fixed("profile-command = py: python.exe\n");
-    try whole.loadReader(alloc, &reader, "C:\\noctty-test\\more.conf");
+    try whole.loadReader(alloc, &reader, "C:\\koreterm-test\\more.conf");
     try testing.expect(try reloadReport(&masked.writer, &edits, &whole, &whole, false) == .masked);
     try expectSameText("profile-name py", masked.written());
     // A save of ordinary settings alone is told the same: it used to be

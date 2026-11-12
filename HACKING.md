@@ -1,7 +1,7 @@
-# Developing noctty
+# Developing koreterm
 
 This fork is Windows-only. The native app target is Win32, the default
-build is `noctty.exe`, and the retained secondary deliverable is
+build is `koreterm.exe`, and the retained secondary deliverable is
 `libghostty-vt`.
 
 If you plan to change code here, read [CONTRIBUTING.md](CONTRIBUTING.md)
@@ -17,7 +17,7 @@ Use the standard Zig workflow from the repository root:
 | Command                                             | Description                                    |
 | --------------------------------------------------- | ---------------------------------------------- |
 | `zig build`                                         | Build the Win32 app and bundled resources      |
-| `zig build -Demit-exe=true`                         | Force-install `zig-out/bin/noctty.exe`         |
+| `zig build -Demit-exe=true`                         | Force-install `zig-out/bin/koreterm.exe`         |
 | `zig build test -Demit-test-exe=true --summary all` | Run the full test suite (about 5,300 tests)    |
 | `zig build test -Dtest-filter=<name> --summary all` | Run matching tests while iterating (see below) |
 | `zig build -Demit-lib-vt`                           | Build the retained `libghostty-vt` library     |
@@ -32,7 +32,7 @@ Windows PowerShell into the Zig global cache; later builds only re-hash the
 installed pair. If the download cannot happen (no network, `zig build
 --system`), the build prints a warning and the exe falls back to Windows'
 in-box conhost, which re-renders output and drops colour-query replies;
-`noctty +version` and an in-app banner name the reason. A package that does
+`koreterm +version` and an in-app banner name the reason. A package that does
 not match the pin fails the build. Pass `-Dbundled-conpty=false` to skip the
 download, for example where policy blocks PowerShell scripts.
 
@@ -58,8 +58,8 @@ rerun without `--seed` or `--watch` when you need the count.
 
 ### Running a source build day to day
 
-`zig build` installs into `zig-out\bin\` (`noctty.exe`, `noctty.com`,
-`noctty.ico`, debug symbols, and the bundled ConPTY pair unless its download
+`zig build` installs into `zig-out\bin\` (`koreterm.exe`, `koreterm.com`,
+`koreterm.ico`, debug symbols, and the bundled ConPTY pair unless its download
 failed) and `zig-out\share\`. `-Dbundled-conpty=false` only skips that step: a
 pair an earlier build left in `bin` is neither verified nor removed, and the
 exe loads a `conpty.dll` found beside it (`src/pty.zig`), so delete the pair to
@@ -72,15 +72,15 @@ custom shaders are off unless you pass the second flag.
 out-of-bounds index or an overflow stops with a panic instead of corrupting
 memory, at some cost in speed. It also loses crash dumps: per the Zig 0.15
 standard library source, Debug and ReleaseSafe builds install Zig's own
-segfault handler, which ends the process before noctty's crash-dump filter
+segfault handler, which ends the process before koreterm's crash-dump filter
 runs for an access violation. Crash capture is verified on ReleaseFast only.
 
 The installer, WinGet and Chocolatey (which run the same installer) create the
 Start menu entry; the Scoop package unpacks the portable ZIP and its manifest
 declares no shortcut. A source build gets none. `-p` (`--prefix`) moves the
 install root, so a build for daily use can live outside the repository. This
-installs to `$HOME\.local\noctty\bin` and adds a shortcut for the current user.
-Close noctty before you rebuild, because a running `noctty.exe` locks the file.
+installs to `$HOME\.local\koreterm\bin` and adds a shortcut for the current user.
+Close koreterm before you rebuild, because a running `koreterm.exe` locks the file.
 Build from a shell that has the toolchain. `scripts\dev-windows.cmd` opens
 Command Prompt by default, and the snippet is PowerShell, so start PowerShell
 through it from the repository root (the script runs the command it is given
@@ -91,23 +91,23 @@ scripts\dev-windows.cmd powershell -NoExit
 ```
 
 ```powershell
-zig build -Doptimize=ReleaseSafe -p "$HOME\.local\noctty"
-$bin = "$HOME\.local\noctty\bin"
-$lnk = Join-Path ([Environment]::GetFolderPath('Programs')) 'noctty (source build).lnk'
+zig build -Doptimize=ReleaseSafe -p "$HOME\.local\koreterm"
+$bin = "$HOME\.local\koreterm\bin"
+$lnk = Join-Path ([Environment]::GetFolderPath('Programs')) 'koreterm (source build).lnk'
 if (Test-Path -LiteralPath $lnk) {
     Write-Error "$lnk already exists; remove it or pick another name."
 } else {
     $s = (New-Object -ComObject WScript.Shell).CreateShortcut($lnk)
-    $s.TargetPath = "$bin\noctty.exe"
-    $s.IconLocation = "$bin\noctty.ico"
+    $s.TargetPath = "$bin\koreterm.exe"
+    $s.IconLocation = "$bin\koreterm.ico"
     $s.WorkingDirectory = $HOME
-    $s.Arguments = "--class=noctty-source"
+    $s.Arguments = "--class=koreterm-source"
     $s.Save()
 }
 ```
 
-`--class=noctty-source` gives this build its own single-instance namespace.
-Without it a launch from the shortcut would find a running installed noctty on
+`--class=koreterm-source` gives this build its own single-instance namespace.
+Without it a launch from the shortcut would find a running installed koreterm on
 the same pipe and hand its window to that process.
 
 Create the shortcut once; later rebuilds only need the `zig build` line. The
@@ -120,34 +120,34 @@ only its own statement.
 Differences from an installed copy:
 
 - A source build is not portable, so it behaves like an installed copy for
-  per-user state. It shares `%LOCALAPPDATA%\noctty` with an installed noctty.
+  per-user state. It shares `%LOCALAPPDATA%\koreterm` with an installed koreterm.
   Only some of that follows an XDG variable: `config.ghostty` follows
   `XDG_CONFIG_HOME`, and crash dumps and `update-state.json` follow
   `XDG_STATE_HOME`. `session-state.json`, `layouts\`, `palette-mru.txt`,
   `startup-attempts.json`, `jump-list-recents.json` and `shell-integration\`
-  stay under `%LOCALAPPDATA%\noctty` whatever the XDG variables say, so they
+  stay under `%LOCALAPPDATA%\koreterm` whatever the XDG variables say, so they
   cannot be separated that way. It also rewrites the
-  `AppUserModelId\io.github.amanthanvi.noctty` registration at every start so
-  that toasts take their icon from its `noctty.ico`, and replaces the taskbar
+  `AppUserModelId\io.github.amanthanvi.koreterm` registration at every start so
+  that toasts take their icon from its `koreterm.ico`, and replaces the taskbar
   jump list with entries that start its own exe. If you also run an installed
-  copy, add an empty `noctty.portable` file beside the exe (`portable.txt` or
+  copy, add an empty `koreterm.portable` file beside the exe (`portable.txt` or
   a `config.ghostty` there also count). Portable mode is what separates all of
   it: state then lives beside the exe, and the installed copy's registration
   and jump list stay alone. See
   [App identity](docs/windows.md#app-identity).
 - Portable mode does not separate the running instance. The single-instance
-  pipe is named from the `class` setting (default `io.github.amanthanvi.noctty`
+  pipe is named from the `class` setting (default `io.github.amanthanvi.koreterm`
   in every build but Debug) and the process's elevation, not from the install
   or the portable root (`src/apprt/win32/ipc_server.zig`, `allocIpcPipeName`),
-  so any build with the default class forwards a launch to a running noctty
-  that has it. `--class=noctty-source` in the shortcut is what separates them.
-  It also means `noctty +new-window` and the other `+` commands reach the source
-  build only with the same `--class=noctty-source`, and the jump-list entries
+  so any build with the default class forwards a launch to a running koreterm
+  that has it. `--class=koreterm-source` in the shortcut is what separates them.
+  It also means `koreterm +new-window` and the other `+` commands reach the source
+  build only with the same `--class=koreterm-source`, and the jump-list entries
   of a source build carry no `--class`. `class` does not feed the
   AppUserModelID (a fixed string) or the window class names, so taskbar
   grouping and the jump list are unaffected.
 - This shortcut has no AppUserModelID. The installer sets
-  `io.github.amanthanvi.noctty` on its shortcuts, and `WScript.Shell` has no
+  `io.github.amanthanvi.koreterm` on its shortcuts, and `WScript.Shell` has no
   property for one (inferred). The running exe still sets the ID for its own
   process, so a pinned shortcut may not group with the running window
   (inferred, not measured). A click on a toast in Action Center is delivered
@@ -191,7 +191,7 @@ powershell -ExecutionPolicy Bypass -File scripts/interactive-win11.ps1
 
 This launches the worktree executable with repo-local runtime state under
 `.sandbox/win11/<worktree-id>/` instead of global
-`%LOCALAPPDATA%\noctty`. Pass `-Rebuild` when you need a fresh
+`%LOCALAPPDATA%\koreterm`. Pass `-Rebuild` when you need a fresh
 executable after source edits, `-ResetState` for clean first-run repros,
 and `-OpenShell` to open a shell with the same sandbox environment.
 
@@ -258,10 +258,10 @@ Logging to `stderr` is always available. Debug builds also emit
 additional diagnostic output.
 
 Opt-in traces are off unless their environment variable is set:
-`NOCTTY_RENDER_TRACE_FILE` and `NOCTTY_TERMIO_TRACE_FILE` name a file that
+`KORETERM_RENDER_TRACE_FILE` and `KORETERM_TERMIO_TRACE_FILE` name a file that
 receives one JSON document (use an absolute path; the render trace is
-described in [docs/windows.md](docs/windows.md)), and `NOCTTY_HANDOFF_TRACE=1`
-appends to `%LOCALAPPDATA%\noctty\handoff.log`. Other `NOCTTY_*_TRACE_FILE`
+described in [docs/windows.md](docs/windows.md)), and `KORETERM_HANDOFF_TRACE=1`
+appends to `%LOCALAPPDATA%\koreterm\handoff.log`. Other `KORETERM_*_TRACE_FILE`
 variables serve the benchmark and IME harnesses. No default log file is
 written to the working directory.
 

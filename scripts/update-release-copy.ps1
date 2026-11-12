@@ -16,7 +16,7 @@ $ErrorActionPreference = 'Stop'
 $repoRoot = Get-RepoRoot
 $readmePath = Join-Path $repoRoot 'README.md'
 $readme = [System.IO.File]::ReadAllText($readmePath)
-if ($readme -notmatch 'noctty\s+(?<version>\d+\.\d+\.\d+)\]\(https://github\.com/amanthanvi/noctty/releases/tag/v\k<version>\)') {
+if ($readme -notmatch 'koreterm\s+(?<version>\d+\.\d+\.\d+)\]\(https://github\.com/amanthanvi/koreterm/releases/tag/v\k<version>\)') {
     throw 'Could not determine the current release version from README.md.'
 }
 $previous = $Matches.version
@@ -37,7 +37,7 @@ foreach ($relative in @(
 
 # The trust page also names older versions on purpose (the verifier floor v1.3.124,
 # the legacy v1.3.123 path), so only its two latest-release elements are rewritten.
-$trustPath = Join-Path $repoRoot 'site/why-noctty.html'
+$trustPath = Join-Path $repoRoot 'site/why-koreterm.html'
 $trust = [System.IO.File]::ReadAllText($trustPath)
 $trust = [regex]::Replace($trust, '(id="nc-version">v)\d+\.\d+\.\d+', "`${1}$Version", 1)
 $trust = [regex]::Replace($trust, '(id="nc-version-summary">Version )\d+\.\d+\.\d+', "`${1}$Version", 1)

@@ -47,22 +47,22 @@ completed draw encoding, before resize/copy/presentation work. Present timing
 covers normal Present submissions and excludes Present(TEST) probes.
 
 Test hooks require `-Drenderer-test-tools=true` (C macro
-`NOCTTY_RENDERER_TEST_TOOLS=1`). Production builds return `E_NOTIMPL` from the
+`KORETERM_RENDERER_TEST_TOOLS=1`). Production builds return `E_NOTIMPL` from the
 C hooks and reject them at the Zig boundary. Callers must hold the renderer
 draw mutex:
 
 - `capture(hdc)` reads the last completed offscreen target into a staging
   texture and draws a DIB;
-  its optional `NOCTTY_RENDERER_CAPTURE_PATH` writes the same pixels when a
+  its optional `KORETERM_RENDERER_CAPTURE_PATH` writes the same pixels when a
   cross-process HDC cannot be used. This bypasses DWM composition.
 - `requestDeviceLoss()` injects `DXGI_ERROR_DEVICE_REMOVED` into the production
   HRESULT classifier. It exercises recovery and resource restoration; it
   does not reset the system graphics driver or establish real TDR behavior.
 - `setTestFailures(hardware, device)` controls creation failures for recovery
-  tests. Test-only `NOCTTY_RENDERER_FAIL_HARDWARE=1` and
-  `NOCTTY_RENDERER_FAIL_DEVICE=1` configure the same failures at startup.
+  tests. Test-only `KORETERM_RENDERER_FAIL_HARDWARE=1` and
+  `KORETERM_RENDERER_FAIL_DEVICE=1` configure the same failures at startup.
 - `failNextPresent()` supplies an ordinary HRESULT failure to the production
-  presentation classifier; `NOCTTY_RENDERER_FAIL_RESOURCE=1` fails hardware
+  presentation classifier; `KORETERM_RENDERER_FAIL_RESOURCE=1` fails hardware
   buffer allocation during initialization. Both verify escalation to WARP.
 
 The hidden-desktop harness stages the checksum-pinned bundled ConPTY pair;

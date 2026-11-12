@@ -18,10 +18,10 @@ pub const Options = struct {
     }
 };
 
-/// Remove the current user's `Open noctty here` classic Explorer verbs for
+/// Remove the current user's `Open koreterm here` classic Explorer verbs for
 /// folders, folder backgrounds, and drives.
 ///
-/// The action removes only noctty's six owned keys under
+/// The action removes only koreterm's six owned keys under
 /// `HKCU\Software\Classes` and succeeds when they are already absent. The
 /// installer's all-users entries (HKLM) are not its to remove, so when they
 /// exist it says they remain.
@@ -87,7 +87,7 @@ fn report(
                 // action teaches that 5 means policy or a restricted token.
                 if (status == ERROR_ACCESS_DENIED) {
                     try stderr.print(
-                        "  Status 5 here can also mean the key contains subkeys noctty did not create; unregister never deletes those. Inspect the key and remove them first.\n",
+                        "  Status 5 here can also mean the key contains subkeys koreterm did not create; unregister never deletes those. Inspect the key and remove them first.\n",
                         .{},
                     );
                 }
@@ -98,8 +98,8 @@ fn report(
     // absent" above is about this user's only.
     if (machine_verbs) {
         try stdout.writeAll(
-            "Note: the noctty installer also registered \"Open noctty here\" for all users (HKLM\\Software\\Classes). " ++
-                "This action removes only the current user's entries and cannot remove those; uninstalling noctty does.\n",
+            "Note: the koreterm installer also registered \"Open koreterm here\" for all users (HKLM\\Software\\Classes). " ++
+                "This action removes only the current user's entries and cannot remove those; uninstalling koreterm does.\n",
         );
     }
     return if (failed) 1 else 0;
@@ -117,7 +117,7 @@ test "unregister reports the installer's all-users entries that it cannot remove
     try std.testing.expectEqual(@as(u8, 0), try report(&out, &err, absent, true));
     try std.testing.expect(std.mem.indexOf(u8, out.buffered(), "Already absent HKCU\\") != null);
     try std.testing.expect(std.mem.indexOf(u8, out.buffered(), "for all users (HKLM") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out.buffered(), "uninstalling noctty does") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.buffered(), "uninstalling koreterm does") != null);
 
     out = .fixed(&out_buf);
     try std.testing.expectEqual(@as(u8, 0), try report(&out, &err, absent, false));

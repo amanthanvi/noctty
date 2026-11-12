@@ -50,7 +50,7 @@ finally {
         (Get-FileHash -LiteralPath $transcriptPath -Algorithm SHA256).Hash.ToLowerInvariant()
     } else { $null }
 
-    $packageRelativePath = "dist/artifacts/noctty-$Version-windows-x64/noctty/noctty.exe"
+    $packageRelativePath = "dist/artifacts/koreterm-$Version-windows-x64/koreterm/koreterm.exe"
     $packagePath = Join-Path $repoRoot $packageRelativePath
     $packageHash = if ($commit -and (Test-Path -LiteralPath $packagePath -PathType Leaf)) {
         (Get-FileHash -LiteralPath $packagePath -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -68,7 +68,7 @@ finally {
     )
 
     $result = [ordered]@{
-        schema_version = 'noctty.verification.result.v1'
+        schema_version = 'koreterm.verification.result.v1'
         scenario_id = 'windows.portable-cli.x64'
         status = $status
         started_at = $started.ToString('o')

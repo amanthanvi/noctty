@@ -46,7 +46,7 @@ pub const Probe = struct {
 };
 
 /// The command line of a WSL launch, or null for any other command. The
-/// words of a `command = wsl.exe -d Ubuntu` shell command, which noctty runs
+/// words of a `command = wsl.exe -d Ubuntu` shell command, which koreterm runs
 /// as `cmd.exe /C <line>`, are its argv; they are allocated with `alloc`, which
 /// should be an arena.
 pub fn launchArgv(
@@ -484,7 +484,7 @@ fn probeKey(alloc: Allocator, env: *const EnvMap, argv: []const []const u8, cwd:
 /// of the variables that steer where the probe looks for terminfo. Asking
 /// costs a `wsl.exe` start, 200 ms or more, and a restored window opens
 /// several tabs at once, so ask once. Unanswered probes are retried. An install
-/// made while noctty runs is seen by the next noctty, not the next tab.
+/// made while koreterm runs is seen by the next koreterm, not the next tab.
 /// The lock covers the table only: a tab waits for a probe of its own question
 /// and for nothing else.
 /// Implicit selections include the current registry default ID in their key;
@@ -695,7 +695,7 @@ pub fn forwardIdentity(env: *EnvMap, include_term: bool) !void {
     if (include_term) try forward(env, &.{"TERM"});
 }
 
-/// The other half of `forwardIdentity`, for a TERM noctty chose: when the
+/// The other half of `forwardIdentity`, for a TERM koreterm chose: when the
 /// distribution has an entry for `probe.term`, make it the `TERM` of `env` and
 /// list it. That is not the `TERM` the Windows side settled on, which depends
 /// on the Windows home having the entry and says nothing about the

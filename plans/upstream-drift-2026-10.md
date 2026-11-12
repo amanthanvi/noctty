@@ -1,7 +1,7 @@
 # Upstream drift analysis — October 2026
 
 - **Analysis date:** 2026-10-30
-- **Fork:** `amanthanvi/noctty`
+- **Fork:** `amanthanvi/koreterm`
 - **Issue:** #141, C33 — upstream merge cadence and published merge policy
 - **Scope:** the 2026-10 merge window for Ghostty v1.4.0: drift analysis,
   security review, ten subsystem sync PRs, and the deferred list
@@ -473,10 +473,10 @@ to "reassess only shared" code; #625 takes its shared-core part.
   when the window closed. The maintainer chose upstream's macOS policy: show
   the target and its handler, and open only after a confirm. It is
   implemented in its own PR after this window.
-- **Git for Windows' `git-prompt.sh` title.** noctty's Git Bash injection
+- **Git for Windows' `git-prompt.sh` title.** koreterm's Git Bash injection
   sources `/etc/bash.bashrc`, which loads Git's prompt, whose title expands
   `$PWD` raw; a probe sent a complete OSC 52 through it. #616 closes only
-  noctty's own emitter. Filtering or replacing that title means editing a
+  koreterm's own emitter. Filtering or replacing that title means editing a
   user's `PS1`.
 
 Smaller choices left to the maintainer: whether `link-osc8 = false` should also

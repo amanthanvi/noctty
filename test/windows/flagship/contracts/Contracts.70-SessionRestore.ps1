@@ -41,7 +41,7 @@ $sessionBootstrapCalls = @(
 if ($sessionBootstrapCalls.Count -ne 1 -or
     -not (Test-CommandHasStringArgument `
         -Command $sessionBootstrapCalls[0] `
-        -Value 'NOCTTY_INTERACTIVE_WIN11_SESSION_RESTORE_BOOTSTRAPPED')) {
+        -Value 'KORETERM_INTERACTIVE_WIN11_SESSION_RESTORE_BOOTSTRAPPED')) {
     throw 'Session restore must invoke the shared bootstrap gate once with its stable sentinel.'
 }
 
@@ -63,17 +63,17 @@ Assert-NoUnreachableStatements `
 . ([scriptblock]::Create($sessionSnapshotFunctions[0].Extent.Text))
 $sessionProbeDirectory = Join-Path (
     [IO.Path]::GetTempPath()
-) ('noctty-session-contract-' + [Guid]::NewGuid().ToString('N'))
+) ('koreterm-session-contract-' + [Guid]::NewGuid().ToString('N'))
 [IO.Directory]::CreateDirectory($sessionProbeDirectory) | Out-Null
 $sessionOriginalExe = Get-Variable -Name exe -ValueOnly -ErrorAction SilentlyContinue
 $sessionOriginalLayout = Get-Variable -Name layout -ValueOnly -ErrorAction SilentlyContinue
 $sessionOriginalInstanceClass = Get-Variable -Name instanceClass -ValueOnly -ErrorAction SilentlyContinue
-$exe = Join-Path $sessionProbeDirectory 'noctty.exe'
-$sessionProbeCli = Join-Path $sessionProbeDirectory 'noctty.com'
+$exe = Join-Path $sessionProbeDirectory 'koreterm.exe'
+$sessionProbeCli = Join-Path $sessionProbeDirectory 'koreterm.com'
 [IO.File]::WriteAllText($sessionProbeCli, 'contract shim')
 $sessionOriginalRepoRoot = $repoRoot
 $layout = [pscustomobject]@{ Logs = $sessionProbeDirectory }
-$instanceClass = 'noctty-interactive-contract'
+$instanceClass = 'koreterm-interactive-contract'
 # The extracted snapshot helper consumes these variables dynamically; keep
 # static references so PSScriptAnalyzer can see the intentional uses.
 [void] @($exe, $layout, $instanceClass)
@@ -101,7 +101,7 @@ function script:Start-Process {
     $attempt = $script:sessionSnapshotStartCalls
     $script:sessionSnapshotLog.Add("start:$attempt")
     if ($FilePath -ne $sessionProbeCli -or
-        ($ArgumentList -join '|') -ne '+list-windows|--class=noctty-interactive-contract' -or
+        ($ArgumentList -join '|') -ne '+list-windows|--class=koreterm-interactive-contract' -or
         $WorkingDirectory -ne $repoRoot -or
         -not $PassThru) {
         throw 'Session snapshot mock received the wrong automation query arguments.'

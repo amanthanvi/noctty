@@ -1,4 +1,4 @@
-//! Desktop notifications: what noctty tells the user through Windows toasts,
+//! Desktop notifications: what koreterm tells the user through Windows toasts,
 //! when a toast leaves Action Center, and what a click on one brings forward.
 //!
 //! A toast from a pane is tagged by the pane and grouped by this process, so
@@ -6,7 +6,7 @@
 //! once the user has seen the pane's tab, or once the pane is in no live tab
 //! (closed, or waiting in undo or redo history), and every toast of the
 //! process leaves at exit. A removal names the tag and the group, never the
-//! AUMID alone and never `Clear`: other noctty processes share the AUMID.
+//! AUMID alone and never `Clear`: other koreterm processes share the AUMID.
 //!
 //! It also holds the cold start's wait for its click (`ColdToastCapture`,
 //! `pumpUntilColdToastActivation`): what a `-ToastActivated` start receives
@@ -60,14 +60,14 @@ pub const ToastSink = struct {
 
 /// Who a notification is from.
 pub const From = union(enum) {
-    /// noctty itself (a config reload, a Settings save): no tab line, no
-    /// launch and no tag; untitled, it is titled "noctty".
+    /// koreterm itself (a config reload, a Settings save): no tab line, no
+    /// launch and no tag; untitled, it is titled "koreterm".
     app,
     /// A pane, by core surface id, never a pointer: the pane may be gone
     /// by the time its toast is removed. A program's notification (OSC 9,
     /// OSC 777) and one the core shows about the pane (a clipboard-copy
-    /// notice, titled "noctty") arrive alike and are not told apart, not
-    /// by the title either: a program can send "noctty" too.
+    /// notice, titled "koreterm") arrive alike and are not told apart, not
+    /// by the title either: a program can send "koreterm" too.
     pane: u64,
 
     pub fn of(target: Target) From {
@@ -99,7 +99,7 @@ pub const Pane = struct {
         /// From 0.
         index: usize,
         /// What the user knows the tab by: its focused pane's title, or
-        /// "noctty", as it is (`show` sanitizes it).
+        /// "koreterm", as it is (`show` sanitizes it).
         name: []const u8,
         window: Window,
     };
@@ -368,7 +368,7 @@ pub const Notifications = struct {
         };
         const panes = self.panes;
         // Ids are this process's only when the toast is: a click on another
-        // noctty's toast (COM hands it to whichever process registered the
+        // koreterm's toast (COM hands it to whichever process registered the
         // activator, or to a new one after that process ended) must not pick
         // a window or tab that happens to share a number here.
         if (target.pid != sys.GetCurrentProcessId()) return panes.present(panes.ctx, .primary);
@@ -480,14 +480,14 @@ pub const Notifications = struct {
 
     /// Whether Windows took the toast. On success there is no banner:
     /// showing both would tell the user twice. A show error (notifications
-    /// turned off for noctty or for the user, the runtime unavailable, XML
+    /// turned off for koreterm or for the user, the runtime unavailable, XML
     /// rejected) falls back to the banner. Under Focus Assist (Do not
     /// disturb) Windows may instead accept the toast and file it in Action
     /// Center without a popup, and then no banner appears; which of the two
-    /// it does has not been measured for noctty.
+    /// it does has not been measured for koreterm.
     fn toSink(sink: ToastSink, request: ToastRequest) bool {
         var shown = request;
-        if (shown.title.len == 0) shown.title = "noctty";
+        if (shown.title.len == 0) shown.title = "koreterm";
         sink.show(sink.ctx, shown) catch |err| {
             // test/windows/interactive-win11-command-finish.ps1 matches
             // this line's opening words; keep them.
@@ -511,7 +511,7 @@ pub const Notifications = struct {
         if (self.panes.banner(self.panes.ctx, from, message.written())) return;
         // The composed message, so one with an empty body (a Settings save,
         // whose title carries it) still says something.
-        const caption = if (fallbackTitled(title)) title else "noctty";
+        const caption = if (fallbackTitled(title)) title else "koreterm";
         std.log.info("info notification (no visible target): {s} — {s}", .{ caption, message.written() });
     }
 };
@@ -567,13 +567,13 @@ fn toastTag(buf: *[16]u8, surface_id: u64) []const u8 {
     return std.fmt.bufPrint(buf, "{x:0>16}", .{surface_id}) catch unreachable;
 }
 
-/// This process's toast group, `noctty-<pid>`: other noctty processes share
+/// This process's toast group, `koreterm-<pid>`: other koreterm processes share
 /// the AUMID, so everything this process removes at once is named by it.
 fn toastGroup(buf: *[toast_group_max]u8) []const u8 {
-    return std.fmt.bufPrint(buf, "noctty-{d}", .{sys.GetCurrentProcessId()}) catch unreachable;
+    return std.fmt.bufPrint(buf, "koreterm-{d}", .{sys.GetCurrentProcessId()}) catch unreachable;
 }
 
-const toast_group_max = "noctty-".len + std.fmt.count("{d}", .{std.math.maxInt(u32)});
+const toast_group_max = "koreterm-".len + std.fmt.count("{d}", .{std.math.maxInt(u32)});
 
 /// The launch string a click on a pane's toast brings back: the pane, its
 /// tab (null in no tab), its window and this process.
@@ -591,11 +591,11 @@ fn buildLaunch(alloc: Allocator, pane: u64, tab_id: ?u32, window_id: u32) Alloca
 const tab_title_max = 64;
 
 fn fallbackTitled(title: []const u8) bool {
-    return title.len > 0 and !std.mem.eql(u8, title, "noctty");
+    return title.len > 0 and !std.mem.eql(u8, title, "koreterm");
 }
 
 /// The banner says what the toast would have: `<title>: <body>`, the
-/// body alone when the title is empty or just "noctty", and the tab
+/// body alone when the title is empty or just "koreterm", and the tab
 /// the toast came from after a dash.
 fn composeFallback(
     writer: *std.Io.Writer,
@@ -616,7 +616,7 @@ fn composeFallback(
 /// `Tab N: <name>`, `Tab N of window M: <name>` while more than one window
 /// is open, or `Tab N of the quick terminal: <name>`. The quick terminal is
 /// not counted as a window, so a window and an idle quick terminal don't
-/// number the window. The numbers are noctty's own, so a program can't pass
+/// number the window. The numbers are koreterm's own, so a program can't pass
 /// for another tab; the name is sanitized and cut to `tab_title_max` bytes.
 fn writeTabLine(
     writer: *std.Io.Writer,
@@ -653,7 +653,7 @@ pub const testing = struct {
         alloc: Allocator = std.testing.allocator,
         shown: usize = 0,
         /// Refuse every toast with this error, as Windows does when
-        /// notifications are turned off for noctty; the request is still
+        /// notifications are turned off for koreterm; the request is still
         /// recorded.
         refuse: ?anyerror = null,
         /// Runs inside the show, after the request is recorded, as the
@@ -909,7 +909,7 @@ test "a pane's toast is tagged by the pane, grouped by process and launches it" 
     t.n.show(.{ .pane = 0x2002 }, "", "tests passed");
     try t.recorder.expect(.tag, "0000000000002002");
     var group_buf: [32]u8 = undefined;
-    const group = try std.fmt.bufPrint(&group_buf, "noctty-{d}", .{sys.GetCurrentProcessId()});
+    const group = try std.fmt.bufPrint(&group_buf, "koreterm-{d}", .{sys.GetCurrentProcessId()});
     try t.recorder.expect(.group, group);
     try t.recorder.expectLaunch(0x2002, 2, 7);
     // Untitled (OSC 9), it is titled by its tab.
@@ -929,7 +929,7 @@ test "a pane's toast is tagged by the pane, grouped by process and launches it" 
     t.panes.put(0x2003, parked);
     t.n.show(.{ .pane = 0x2003 }, "", "x");
     try t.recorder.expect(.tag, "0000000000002003");
-    try t.recorder.expect(.title, "noctty");
+    try t.recorder.expect(.title, "koreterm");
     try std.testing.expect(t.recorder.attribution == null);
     try t.recorder.expectLaunch(0x2003, null, 7);
     try std.testing.expectEqual(@as(usize, 3), t.recorder.shown);
@@ -941,7 +941,7 @@ test "an app's toast has no tag, launch or tab line, nor has one from a pane no 
     defer t.deinit();
 
     t.n.show(.app, "", "Configuration reloaded");
-    try t.recorder.expect(.title, "noctty");
+    try t.recorder.expect(.title, "koreterm");
     try t.recorder.expect(.body, "Configuration reloaded");
     t.n.show(.{ .pane = 0x9999 }, "deploy", "rolled out");
     try t.recorder.expect(.title, "deploy");
@@ -1011,7 +1011,7 @@ test "a refused toast becomes a banner that names its tab once, else a log line"
     var t: TestNotifications = .{};
     t.init();
     defer t.deinit();
-    // As when notifications are turned off for noctty in Windows Settings.
+    // As when notifications are turned off for koreterm in Windows Settings.
     t.recorder.refuse = error.NotifierDisabled;
     t.panes.put(0x2002, testing.inTab(2, 1, "cargo build"));
     const pane: From = .{ .pane = 0x2002 };
@@ -1025,8 +1025,8 @@ test "a refused toast becomes a banner that names its tab once, else a log line"
     t.n.show(pane, "deploy", "rolled out");
     try std.testing.expectEqualStrings("deploy: rolled out \u{2014} Tab 2: cargo build", t.panes.banner_text.?);
     // The core's clipboard-copy notice comes from its pane as an OSC 777
-    // titled "noctty" would.
-    t.n.show(pane, "noctty", "Copied selection to clipboard");
+    // titled "koreterm" would.
+    t.n.show(pane, "koreterm", "Copied selection to clipboard");
     try std.testing.expectEqualStrings("Copied selection to clipboard \u{2014} Tab 2: cargo build", t.panes.banner_text.?);
 
     // An app notification names no tab; one with only a title (a Settings
@@ -1289,11 +1289,11 @@ test "a removal takes its entry off before its call, and a toast shown meanwhile
 
 test "exit removes this process's group once, after a tagged toast" {
     var group_buf: [32]u8 = undefined;
-    const own_group = try std.fmt.bufPrint(&group_buf, "group noctty-{d}", .{sys.GetCurrentProcessId()});
+    const own_group = try std.fmt.bufPrint(&group_buf, "group koreterm-{d}", .{sys.GetCurrentProcessId()});
 
     // The process's own group, in one call, and nothing else: not one
     // removal per pane, also for one still due, and never the AUMID-wide
-    // `Clear`, which would take other noctty processes' toasts too. One
+    // `Clear`, which would take other koreterm processes' toasts too. One
     // that showed no tagged toast makes no call: the app toast and refused
     // toast tests check that.
     var t: TestNotifications = .{};

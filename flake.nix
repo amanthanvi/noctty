@@ -1,5 +1,5 @@
 {
-  description = "libghostty-vt for noctty";
+  description = "libghostty-vt for koreterm";
 
   inputs = {
     # Keep Zig and glibc versions compatible with the systems consuming the

@@ -43,7 +43,7 @@ const runOnHiddenDesktop = win32.test_support.runOnHiddenDesktop;
 const scrollbar_class_name = win32.scrollbar_class_name;
 const setWindowData = child_window.setWindowData;
 
-const quick_terminal_title = std.unicode.utf8ToUtf16LeStringLiteral("noctty quick terminal");
+const quick_terminal_title = std.unicode.utf8ToUtf16LeStringLiteral("koreterm quick terminal");
 
 pub fn hideQuickTerminalHost(host: *Host) void {
     host.cancelQuickTerminalAnimation();

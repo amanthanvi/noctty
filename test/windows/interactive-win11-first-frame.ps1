@@ -48,13 +48,13 @@ if ($ResetState) { $forwardedArgs += '-ResetState' }
 Invoke-InteractiveWin11HarnessMain `
     -RepoRoot $repoRoot `
     -LauncherPath $launcherPath `
-    -EnvironmentVariable 'NOCTTY_INTERACTIVE_WIN11_FIRST_FRAME_BOOTSTRAPPED' `
+    -EnvironmentVariable 'KORETERM_INTERACTIVE_WIN11_FIRST_FRAME_BOOTSTRAPPED' `
     -ArgumentList $forwardedArgs
 
 . (Join-Path $PSScriptRoot 'interactive-win11-stateful-lib.ps1')
 
-if (-not ('NocttyFirstFrameNative' -as [type])) {
-    Add-Type -Namespace '' -Name 'NocttyFirstFrameNative' -MemberDefinition @'
+if (-not ('KoretermFirstFrameNative' -as [type])) {
+    Add-Type -Namespace '' -Name 'KoretermFirstFrameNative' -MemberDefinition @'
 [System.Runtime.InteropServices.DllImport("user32.dll", SetLastError = true, CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
 public static extern System.IntPtr SendMessageTimeoutW(
     System.IntPtr hWnd,
@@ -93,7 +93,7 @@ function Request-FirstFrameTrace {
     )
 
     [UIntPtr] $messageResult = [UIntPtr]::Zero
-    $sent = [NocttyFirstFrameNative]::SendMessageTimeoutW(
+    $sent = [KoretermFirstFrameNative]::SendMessageTimeoutW(
         $Hwnd, $script:FIRST_FRAME_TRACE_SNAPSHOT_MESSAGE,
         [UIntPtr]::Zero, [IntPtr]::Zero, 2, 5000, [ref] $messageResult)
     if ($sent -eq [IntPtr]::Zero) {
@@ -170,7 +170,7 @@ Assert-InteractiveWin11ExeExists -ExePath $exePath
 
 # The reporter runs a default config plus `auto-update = off`; keep that shape
 # so nothing here depends on a setting the bug report did not have.
-$stateDir = Join-Path $layout.LocalAppData 'noctty'
+$stateDir = Join-Path $layout.LocalAppData 'koreterm'
 New-Item -ItemType Directory -Force -Path $stateDir | Out-Null
 [IO.File]::WriteAllText(
     (Join-Path $stateDir 'config.ghostty'),
@@ -179,8 +179,8 @@ New-Item -ItemType Directory -Force -Path $stateDir | Out-Null
 
 $tracePath = Join-Path $layout.Temp 'first-frame-render-trace.json'
 Remove-Item -LiteralPath $tracePath -ErrorAction SilentlyContinue
-$env:NOCTTY_RENDER_TRACE_FILE = $tracePath
-$env:NOCTTY_RENDER_TRACE_LIVE = '1'
+$env:KORETERM_RENDER_TRACE_FILE = $tracePath
+$env:KORETERM_RENDER_TRACE_LIVE = '1'
 
 $script:firstFrameTraceCapture = $null
 $run = $null
@@ -240,8 +240,8 @@ finally {
     if ($null -ne $run -and -not $run.Process.HasExited) {
         Stop-InteractiveWin11Process -Process $run.Process -Contained
     }
-    Remove-Item Env:\NOCTTY_RENDER_TRACE_FILE -ErrorAction SilentlyContinue
-    Remove-Item Env:\NOCTTY_RENDER_TRACE_LIVE -ErrorAction SilentlyContinue
+    Remove-Item Env:\KORETERM_RENDER_TRACE_FILE -ErrorAction SilentlyContinue
+    Remove-Item Env:\KORETERM_RENDER_TRACE_LIVE -ErrorAction SilentlyContinue
 }
 
 if (Select-String -LiteralPath $run.Stderr -SimpleMatch 'shell/native invariant failed' -Quiet) {

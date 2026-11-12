@@ -6,7 +6,7 @@ last window has gone (#497): -Scenario restore, last-window, or all (the
 default). Run with -Bin <source bin directory> -Run <new
 evidence directory>. The run directory must not already exist. Every file the
 app reads or writes is a sample this script creates beside a portable copy of
-the app: the real %LOCALAPPDATA%\noctty is never written or deleted, and only
+the app: the real %LOCALAPPDATA%\koreterm is never written or deleted, and only
 the hash and time of its startup state file are read, before and after. Never switches desktops,
 injects real input or registers a global hotkey (the last-window cases press
 in-app keybinds with key messages sent to the pane, one case sends an arrow, one only Shift, and one clicks
@@ -100,10 +100,10 @@ public static class Sr {
     }
     // A key-down and key-up for a pane (or a host with no tab), which runs the
     // in-app keybind for that key. A keybind is not a global hotkey, so nothing
-    // is registered, and an F-key types no text. noctty reads the modifiers
+    // is registered, and an F-key types no text. koreterm reads the modifiers
     // from its thread's keyboard state, which a private desktop never updates,
     // so they are cleared there: this thread joins that input queue, and the
-    // key is sent rather than posted so noctty handles it before the queues
+    // key is sent rather than posted so koreterm handles it before the queues
     // part. The user's keyboard is another queue and is not touched.
     public static void Key(IntPtr h,int key) {
         uint pid; uint target=GetWindowThreadProcessId(h,out pid); uint me=GetCurrentThreadId();
@@ -136,7 +136,7 @@ if (-not $Driver) {
     $Bin = (Resolve-Path -LiteralPath $Bin).Path
     $Run = [IO.Path]::GetFullPath($Run)
     if (Test-Path -LiteralPath $Run) { throw 'Run directory must be new.' }
-    if (-not (Test-Path -LiteralPath (Join-Path $Bin 'noctty.exe'))) { throw 'Source Bin must contain noctty.exe.' }
+    if (-not (Test-Path -LiteralPath (Join-Path $Bin 'koreterm.exe'))) { throw 'Source Bin must contain koreterm.exe.' }
     $before = Startup-Fingerprint
     $historyGuard = Start-WindowsHarnessHistoryGuard -Harness 'hidden-win11-session-restore.ps1'
     $clipboardBefore = [HiddenLocal]::GetClipboardSequenceNumber()
@@ -144,7 +144,7 @@ if (-not $Driver) {
     [void](New-Item -ItemType Directory -Path $Run)
     Copy-Portable $Bin (Join-Path $Run 'source\bin')
     foreach ($name in @('localappdata','appdata')) { [void](New-Item -ItemType Directory -Path (Join-Path $Run $name)) }
-    $desktopName = 'noctty-sr-' + [guid]::NewGuid().ToString('N')
+    $desktopName = 'koreterm-sr-' + [guid]::NewGuid().ToString('N')
     $desktop = [HiddenLocal]::CreateDesktopW($desktopName,[IntPtr]::Zero,[IntPtr]::Zero,0,0x10000000,[IntPtr]::Zero)
     if ($desktop -eq [IntPtr]::Zero) { throw 'CreateDesktop failed.' }
     $oldLocal=$env:LOCALAPPDATA; $oldRoaming=$env:APPDATA
@@ -189,8 +189,8 @@ $script:checks=[Collections.Generic.List[object]]::new()
 $script:samples=[Collections.Generic.List[object]]::new()
 $script:processes=[Collections.Generic.List[object]]::new()
 # Every case runs with single instance off and a class of its own, so no copy
-# can reach a noctty already running on this machine.
-$runClass='noctty-test-sr-' + [guid]::NewGuid().ToString('N').Substring(0,8)
+# can reach a koreterm already running on this machine.
+$runClass='koreterm-test-sr-' + [guid]::NewGuid().ToString('N').Substring(0,8)
 function Inside-AWork($r,$works) {
     foreach($w in $works) { if($r.Left -ge $w.Left -and $r.Top -ge $w.Top -and $r.Right -le $w.Right -and $r.Bottom -le $w.Bottom) { return $true } }
     return $false
@@ -227,7 +227,7 @@ function New-Case([string]$Name,[hashtable]$Files,[string[]]$Extra=@()) {
     return @{ Name=$Name; Dir=$dir; Config=$config }
 }
 function Start-Case($case,[switch]$NoLedgerWait) {
-    $exe=Join-Path $case.Dir 'noctty.exe'
+    $exe=Join-Path $case.Dir 'koreterm.exe'
     # An explicit lpDesktop: a child that a private-desktop driver starts with a null desktop can
     # land on the interactive desktop. The Process object holds its own handle before the launch
     # handles close, so it stays this launch's process.
@@ -574,7 +574,7 @@ try {
 
     # G037: the shell integration script a newer build installed is kept, and
     # one an older build left is replaced. Ordered by the revision it declares.
-    $newerScript="# noctty-integration-revision: 9999`n# installed by a newer build`n"
+    $newerScript="# koreterm-integration-revision: 9999`n# installed by a newer build`n"
     $case=New-Case 'script-newer' @{ 'shell-integration\powershell\integration.ps1'=$newerScript }
     $script=Join-Path $case.Dir 'shell-integration\powershell\integration.ps1'
     $case=Start-Case $case
@@ -582,7 +582,7 @@ try {
     Check 'integration.ps1 from a newer build kept' ((Get-Content -LiteralPath $script -Raw) -eq $newerScript) $newerScript ((Get-Content -LiteralPath $script -Raw).Length)
     Check 'no temporary integration copy left behind' ((Siblings (Split-Path -Parent $script) '*.tmp').Count -eq 0) 0 (Siblings (Split-Path -Parent $script) '*.tmp')
 
-    $case=New-Case 'script-older' @{ 'shell-integration\powershell\integration.ps1'="# noctty-integration-revision: 0`n# installed by an older build`n" }
+    $case=New-Case 'script-older' @{ 'shell-integration\powershell\integration.ps1'="# koreterm-integration-revision: 0`n# installed by an older build`n" }
     $script=Join-Path $case.Dir 'shell-integration\powershell\integration.ps1'
     $case=Start-Case $case
     try { } finally { Stop-Case $case }

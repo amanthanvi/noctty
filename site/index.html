@@ -3,26 +3,26 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Noctty: Ghostty's terminal core, as a native Windows app</title>
-  <meta name="description" content="Noctty puts Ghostty's terminal core in a native Win32 app: tabs, splits, a command palette, and a layout that comes back after a restart. Signed x64 and ARM64 releases." />
+  <title>Koreterm: Ghostty's terminal core, as a native Windows app</title>
+  <meta name="description" content="Koreterm puts Ghostty's terminal core in a native Win32 app: tabs, splits, a command palette, and a layout that comes back after a restart. Signed x64 and ARM64 releases." />
   <meta name="robots" content="index, follow" />
   <meta name="theme-color" content="#09090b" media="(prefers-color-scheme: dark)" />
   <meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)" />
   <link rel="canonical" href="https://noctty.com/" />
   <meta property="og:type" content="website" />
-  <meta property="og:site_name" content="Noctty" />
-  <meta property="og:title" content="Noctty: Ghostty's terminal core, as a native Windows app" />
+  <meta property="og:site_name" content="Koreterm" />
+  <meta property="og:title" content="Koreterm: Ghostty's terminal core, as a native Windows app" />
   <meta property="og:description" content="Tabs, splits, a command palette, and a layout that comes back after a restart, in a signed native Win32 app." />
   <meta property="og:url" content="https://noctty.com/" />
-  <meta property="og:image" content="https://noctty.com/assets/noctty-social.jpg" />
+  <meta property="og:image" content="https://noctty.com/assets/koreterm-social.jpg" />
   <meta property="og:image:type" content="image/jpeg" />
   <meta property="og:image:width" content="1200" />
   <meta property="og:image:height" content="630" />
-  <meta property="og:image:alt" content="The Noctty mark and the line: Ghostty's terminal core, as a native Windows app, over a screenshot of Noctty with two panes side by side." />
+  <meta property="og:image:alt" content="The Koreterm mark and the line: Ghostty's terminal core, as a native Windows app, over a screenshot of Koreterm with two panes side by side." />
   <meta name="twitter:card" content="summary_large_image" />
-  <meta name="twitter:title" content="Noctty: Ghostty's terminal core, as a native Windows app" />
+  <meta name="twitter:title" content="Koreterm: Ghostty's terminal core, as a native Windows app" />
   <meta name="twitter:description" content="Tabs, splits, a command palette, and a layout that comes back after a restart, in a signed native Win32 app." />
-  <meta name="twitter:image" content="https://noctty.com/assets/noctty-social.jpg" />
+  <meta name="twitter:image" content="https://noctty.com/assets/koreterm-social.jpg" />
   <link rel="icon" href="assets/favicon.svg" type="image/svg+xml" />
   <link rel="shortcut icon" href="assets/favicon.svg" type="image/svg+xml" />
   <link rel="preload" as="font" type="font/woff2" href="assets/fonts/geist.woff2" crossorigin />
@@ -59,19 +59,19 @@
 
   <header class="nc-header">
     <div class="nc-frame nc-header__inner">
-      <a class="nc-wordmark" href="/" aria-label="Noctty home">
+      <a class="nc-wordmark" href="/" aria-label="Koreterm home">
         <svg width="22" height="21" viewBox="4 4 25 24" fill="none" aria-hidden="true">
           <path fill-rule="evenodd" clip-rule="evenodd" d="M5.6 14.6a8.6 8.6 0 1 0 17.2 0 8.6 8.6 0 1 0-17.2 0ZM10.1 13.2a6.1 6.1 0 1 0 12.2 0 6.1 6.1 0 1 0-12.2 0Z" fill="currentColor" />
           <path d="M25.2 5.4 26.05 6.95 27.6 7.8 26.05 8.65 25.2 10.2 24.35 8.65 22.8 7.8 24.35 6.95Z" fill="currentColor" opacity="0.6" />
           <rect x="18.5" y="23.8" width="6.4" height="2.6" rx="1.3" fill="currentColor" />
         </svg>
-        <span>Noctty</span>
+        <span>Koreterm</span>
       </a>
 
       <nav class="nc-nav" aria-label="Primary">
         <a class="nc-nav__link nc-nav__link--optional" href="#features">Features</a>
         <a class="nc-nav__link nc-nav__link--optional" href="#install">Install</a>
-        <a class="nc-nav__link" href="/why-noctty.html">About</a>
+        <a class="nc-nav__link" href="/why-koreterm.html">About</a>
         <a class="nc-nav__link" href="https://github.com/amanthanvi/noctty" target="_blank" rel="noopener noreferrer">GitHub</a>
         <button type="button" class="nc-theme-toggle" id="theme-toggle" aria-label="Toggle color theme" title="Toggle color theme">
           <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
@@ -102,7 +102,7 @@
         </a>
         <div class="nc-cmd">
           <span class="nc-cmd__sigil" aria-hidden="true">&gt;</span>
-          <code>winget install --id AmanThanvi.noctty -e</code>
+          <code>winget install --id AmanThanvi.koreterm -e</code>
           <button type="button" class="nc-copy" data-nc-copy="winget" aria-label="Copy the WinGet command">
             <svg class="nc-copy__icon--copy" width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
               <rect x="5.5" y="5.5" width="8" height="9" rx="1.5" stroke="currentColor" stroke-width="1.25" />
@@ -123,9 +123,9 @@
     </section>
 
     <section class="nc-demo" aria-labelledby="demo-title">
-      <h2 class="nc-sr-only" id="demo-title">What using Noctty looks like</h2>
+      <h2 class="nc-sr-only" id="demo-title">What using Koreterm looks like</h2>
       <p class="nc-sr-only">
-        A scripted demo of Noctty: the command palette opens and filters to the
+        A scripted demo of Koreterm: the command palette opens and filters to the
         split actions, the pane splits in two, and after the window closes and
         reopens the same tabs, split, and folders come back.
       </p>
@@ -214,7 +214,7 @@
           <h2 class="nc-feature__title" id="restore-title">Session restoration</h2>
           <div>
             <p class="nc-feature__body">
-              <strong>Close it Friday, open it Monday.</strong> Start Noctty again,
+              <strong>Close it Friday, open it Monday.</strong> Start Koreterm again,
               even after a reboot, and the same windows, tabs, and splits come
               back, each pane in the folder its shell last reported, with its
               profile and any title you set.
@@ -231,9 +231,9 @@
         <figure class="nc-figure">
           <div class="nc-figure__frame">
             <img class="nc-shot--dark" src="assets/shot-restored-dark.webp" width="1800" height="600" loading="lazy" decoding="async"
-                 alt="Noctty after a restart with its three tabs, api, web, and notes, and the api tab still split between PowerShell and cmd. Each pane shows its earlier output as plain text, then a line reading RESTORED SNAPSHOT END with the time it was saved, then a fresh prompt." />
+                 alt="Koreterm after a restart with its three tabs, api, web, and notes, and the api tab still split between PowerShell and cmd. Each pane shows its earlier output as plain text, then a line reading RESTORED SNAPSHOT END with the time it was saved, then a fresh prompt." />
             <img class="nc-shot--light" src="assets/shot-restored-light.webp" width="1800" height="600" loading="lazy" decoding="async"
-                 alt="Noctty in light mode, with the GitHub Light Default theme, after a restart with its three tabs, api, web, and notes, and the api tab still split between PowerShell and cmd. Each pane shows its earlier output as plain text, then a line reading RESTORED SNAPSHOT END with the time it was saved, then a fresh prompt." />
+                 alt="Koreterm in light mode, with the GitHub Light Default theme, after a restart with its three tabs, api, web, and notes, and the api tab still split between PowerShell and cmd. Each pane shows its earlier output as plain text, then a line reading RESTORED SNAPSHOT END with the time it was saved, then a fresh prompt." />
           </div>
           <figcaption class="nc-figure__caption">
             The real app after a restart, with <code>window-save-state-scrollback</code> set.
@@ -259,7 +259,7 @@
             <p class="nc-feature__body">
               <strong>Open any shell in a new tab.</strong> Type
               <code>~ubuntu</code> and press Enter. The list holds the shells
-              noctty detects (PowerShell, Command Prompt, Git Bash, each WSL
+              koreterm detects (PowerShell, Command Prompt, Git Bash, each WSL
               distribution, Visual Studio developer shells, SSH hosts from your
               config) and the profiles you define, except any you hide with
               <code>profile-hidden</code>. The <code>▾</code> beside the
@@ -273,9 +273,9 @@
         <figure class="nc-figure">
           <div class="nc-figure__frame">
             <img class="nc-shot--dark" src="assets/shot-palette-dark.webp" width="1800" height="600" loading="lazy" decoding="async"
-                 alt="The Noctty palette docked under the tab strip with the query split. The list shows Split Up, Split Down, Split Left, Split Right, the api tab, and the focus-split commands, with shortcuts where they have one." />
+                 alt="The Koreterm palette docked under the tab strip with the query split. The list shows Split Up, Split Down, Split Left, Split Right, the api tab, and the focus-split commands, with shortcuts where they have one." />
             <img class="nc-shot--light" src="assets/shot-palette-light.webp" width="1800" height="600" loading="lazy" decoding="async"
-                 alt="The Noctty palette in light mode, with the GitHub Light Default theme, docked under the tab strip with the query split. The list shows Split Up, Split Down, Split Left, Split Right, the api tab, and the focus-split commands, with shortcuts where they have one." />
+                 alt="The Koreterm palette in light mode, with the GitHub Light Default theme, docked under the tab strip with the query split. The list shows Split Up, Split Down, Split Left, Split Right, the api tab, and the focus-split commands, with shortcuts where they have one." />
           </div>
           <figcaption class="nc-figure__caption">The palette, filtered with “split”.</figcaption>
         </figure>
@@ -289,7 +289,7 @@
               <strong>Leaves your comments alone.</strong> A real Windows
               settings window for appearance, the terminal, shells, privacy, and
               updates. Saving rewrites only the keys you changed in
-              <code>%LOCALAPPDATA%\noctty\config.ghostty</code> and keeps every
+              <code>%LOCALAPPDATA%\koreterm\config.ghostty</code> and keeps every
               other line as it was.
             </p>
             <p class="nc-feature__body">Or edit the file by hand and reload it.</p>
@@ -302,9 +302,9 @@
         <figure class="nc-figure nc-figure--window">
           <div class="nc-figure__frame">
             <img class="nc-shot--dark" src="assets/shot-settings-dark.webp" width="1440" height="1004" loading="lazy" decoding="async"
-                 alt="The Noctty Settings window on its Appearance section, with fields for font, font size, terminal theme, window theme, cursor style, and padding." />
+                 alt="The Koreterm Settings window on its Appearance section, with fields for font, font size, terminal theme, window theme, cursor style, and padding." />
             <img class="nc-shot--light" src="assets/shot-settings-light.webp" width="1440" height="1004" loading="lazy" decoding="async"
-                 alt="The Noctty Settings window in light mode on its Appearance section, with the terminal theme set to GitHub Light Default and fields for font, font size, window theme, cursor style, and padding." />
+                 alt="The Koreterm Settings window in light mode on its Appearance section, with the terminal theme set to GitHub Light Default and fields for font, font size, window theme, cursor style, and padding." />
           </div>
           <figcaption class="nc-figure__caption">The Settings window, Appearance section.</figcaption>
         </figure>
@@ -329,7 +329,7 @@
           <p><kbd>Ctrl+Shift+F</kbd> opens a docked search with regex, case, and whole-word modes.</p>
         </li>
         <li>
-          <h3>Open noctty here</h3>
+          <h3>Open koreterm here</h3>
           <p>The installer adds it to Explorer's folder menu.</p>
         </li>
         <li>
@@ -338,7 +338,7 @@
         </li>
         <li>
           <h3>Quick terminal</h3>
-          <p>Bind <code>toggle_quick_terminal</code> to a <code>global:</code> hotkey to summon a terminal from any app while Noctty runs.</p>
+          <p>Bind <code>toggle_quick_terminal</code> to a <code>global:</code> hotkey to summon a terminal from any app while Koreterm runs.</p>
         </li>
       </ul>
     </section>
@@ -350,18 +350,18 @@
       <div class="nc-split">
         <div>
           <p>
-            Noctty takes Ghostty's terminal core, which handles parsing, fonts,
+            Koreterm takes Ghostty's terminal core, which handles parsing, fonts,
             rendering, and input, and takes in upstream changes in planned
             merge windows, normally after each Ghostty release. The Win32
             runtime,
             windowing, tabs and splits, the settings window, and the updater are
-            Noctty's own work.
+            Koreterm's own work.
           </p>
           <p>
-            Noctty is an independent project and is not affiliated with
+            Koreterm is an independent project and is not affiliated with
             <a href="https://ghostty.org" target="_blank" rel="noopener noreferrer">Ghostty</a>.
             Who maintains it and what has been measured are on the
-            <a href="/why-noctty.html">About page</a>.
+            <a href="/why-koreterm.html">About page</a>.
           </p>
         </div>
         <div>
@@ -370,7 +370,7 @@
             Releases are signed, but with a self-signed certificate, so Windows
             can't name a publisher and SmartScreen never builds a reputation
             for it. The About page shows how to
-            <a href="/why-noctty.html#verify">check a download's checksum and signature</a>
+            <a href="/why-koreterm.html#verify">check a download's checksum and signature</a>
             before you run it.
           </p>
           <h3>Accessibility</h3>
@@ -396,7 +396,7 @@
           <div class="nc-install__steps">
             <div class="nc-cmd">
               <span class="nc-cmd__sigil" aria-hidden="true">&gt;</span>
-              <code>winget install --id AmanThanvi.noctty -e</code>
+              <code>winget install --id AmanThanvi.koreterm -e</code>
               <button type="button" class="nc-copy" data-nc-copy="winget" aria-label="Copy the WinGet command">
                 <svg class="nc-copy__icon--copy" width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
                   <rect x="5.5" y="5.5" width="8" height="9" rx="1.5" stroke="currentColor" stroke-width="1.25" />
@@ -407,16 +407,16 @@
                 </svg>
               </button>
             </div>
-            <p class="nc-install__note">Runs the signed installer. It does not add <code>noctty</code> to PATH.</p>
+            <p class="nc-install__note">Runs the signed installer. It does not add <code>koreterm</code> to PATH.</p>
           </div>
         </div>
 
         <div class="nc-install__row">
-          <p class="nc-install__name">Scoop <small>Puts noctty on PATH</small></p>
+          <p class="nc-install__name">Scoop <small>Puts koreterm on PATH</small></p>
           <div class="nc-install__steps">
             <div class="nc-cmd">
               <span class="nc-cmd__sigil" aria-hidden="true">&gt;</span>
-              <code>scoop bucket add noctty https://github.com/<wbr>amanthanvi/<wbr>scoop-noctty</code>
+              <code>scoop bucket add koreterm https://github.com/<wbr>amanthanvi/<wbr>scoop-koreterm</code>
               <button type="button" class="nc-copy" data-nc-copy="scoop-bucket" aria-label="Copy the Scoop bucket command">
                 <svg class="nc-copy__icon--copy" width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
                   <rect x="5.5" y="5.5" width="8" height="9" rx="1.5" stroke="currentColor" stroke-width="1.25" />
@@ -429,7 +429,7 @@
             </div>
             <div class="nc-cmd">
               <span class="nc-cmd__sigil" aria-hidden="true">&gt;</span>
-              <code>scoop install noctty/noctty</code>
+              <code>scoop install koreterm/koreterm</code>
               <button type="button" class="nc-copy" data-nc-copy="scoop-install" aria-label="Copy the Scoop install command">
                 <svg class="nc-copy__icon--copy" width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
                   <rect x="5.5" y="5.5" width="8" height="9" rx="1.5" stroke="currentColor" stroke-width="1.25" />
@@ -453,7 +453,7 @@
           <div class="nc-install__steps">
             <div class="nc-cmd">
               <span class="nc-cmd__sigil" aria-hidden="true">&gt;</span>
-              <code>choco install noctty</code>
+              <code>choco install koreterm</code>
               <button type="button" class="nc-copy" data-nc-copy="choco" aria-label="Copy the Chocolatey command">
                 <svg class="nc-copy__icon--copy" width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
                   <rect x="5.5" y="5.5" width="8" height="9" rx="1.5" stroke="currentColor" stroke-width="1.25" />
@@ -467,7 +467,7 @@
             <p class="nc-install__note">
               chocolatey.org reviews each version before listing it, so a new
               release can reach it after the other channels. It does not add
-              <code>noctty</code> to PATH.
+              <code>koreterm</code> to PATH.
             </p>
           </div>
         </div>
@@ -478,8 +478,8 @@
             <p class="nc-install__note">
               Take the signed installer or the portable ZIP from the
               <a href="https://github.com/amanthanvi/noctty/releases/latest" target="_blank" rel="noopener noreferrer">latest release</a>.
-              For a portable copy, add an empty <code>noctty.portable</code>
-              file next to <code>noctty.exe</code>.
+              For a portable copy, add an empty <code>koreterm.portable</code>
+              file next to <code>koreterm.exe</code>.
             </p>
           </div>
         </div>
@@ -493,23 +493,23 @@
           <a href="https://github.com/amanthanvi/noctty/blob/main/docs/verify-release.md" target="_blank" rel="noopener noreferrer">verifying a release</a>
           covers checksums and signatures.
         </p>
-        <p>No telemetry. The update check is the only connection Noctty makes on its own, and <code>auto-update = off</code> turns it off.</p>
+        <p>No telemetry. The update check is the only connection Koreterm makes on its own, and <code>auto-update = off</code> turns it off.</p>
       </div>
     </section>
   </main>
 
   <footer class="nc-frame nc-footer">
     <div class="nc-footer__top">
-      <a class="nc-wordmark" href="/" aria-label="Noctty home">
+      <a class="nc-wordmark" href="/" aria-label="Koreterm home">
         <svg width="22" height="21" viewBox="4 4 25 24" fill="none" aria-hidden="true">
           <path fill-rule="evenodd" clip-rule="evenodd" d="M5.6 14.6a8.6 8.6 0 1 0 17.2 0 8.6 8.6 0 1 0-17.2 0ZM10.1 13.2a6.1 6.1 0 1 0 12.2 0 6.1 6.1 0 1 0-12.2 0Z" fill="currentColor" />
           <path d="M25.2 5.4 26.05 6.95 27.6 7.8 26.05 8.65 25.2 10.2 24.35 8.65 22.8 7.8 24.35 6.95Z" fill="currentColor" opacity="0.6" />
           <rect x="18.5" y="23.8" width="6.4" height="2.6" rx="1.3" fill="currentColor" />
         </svg>
-        <span>Noctty</span>
+        <span>Koreterm</span>
       </a>
       <nav class="nc-footer__links" aria-label="Project links">
-        <a href="/why-noctty.html">About</a>
+        <a href="/why-koreterm.html">About</a>
         <a href="https://github.com/amanthanvi/noctty" target="_blank" rel="noopener noreferrer">GitHub</a>
         <a href="https://github.com/amanthanvi/noctty/releases" target="_blank" rel="noopener noreferrer">Releases</a>
         <a href="https://github.com/amanthanvi/noctty/discussions" target="_blank" rel="noopener noreferrer">Discussions</a>

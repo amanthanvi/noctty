@@ -35,7 +35,7 @@ src/terminal/testdata/replay/*.vt text eol=lf
 # Files the build embeds (@embedFile) or ships as they are - always LF.
 # `core.autocrlf=true` (Git for Windows' default) checks out any text file that
 # is not pinned as CRLF, so a build from such a checkout, which the release
-# job's checkout evidently was, put CRLF bytes into noctty.exe's first-run config
+# job's checkout evidently was, put CRLF bytes into koreterm.exe's first-run config
 # template and into the bash, zsh, fish, nushell, elvish and Clink integration
 # scripts of the release package (measured on v1.3.131). A strict bash rejects
 # a CR (WSL's `bash -n` fails on the shipped ghostty.bash); Git Bash tolerates it.

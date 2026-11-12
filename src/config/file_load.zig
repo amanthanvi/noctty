@@ -25,7 +25,7 @@ pub fn legacyGhosttyDefaultXdgPath(alloc: Allocator) ![]const u8 {
 }
 
 /// Pre-rename fork default path for the XDG home configuration file.
-/// The fork shipped as "winghostty" before the Noctty rename, so
+/// The fork shipped as "winghostty" before the Koreterm rename, so
 /// existing users still have their config under that directory.
 /// Returned value must be freed by the caller.
 pub fn legacyForkXdgPath(alloc: Allocator) ![]const u8 {
@@ -55,12 +55,12 @@ fn fileState(path: []const u8) FileState {
 /// The per-user config file an edit has to land in: the one
 /// `Config.loadDefaultFiles` will read back.
 ///
-/// The loader reads `ghostty/config`, then `noctty/config.ghostty` over it,
+/// The loader reads `ghostty/config`, then `koreterm/config.ghostty` over it,
 /// and falls back to the pre-rename `winghostty/config.ghostty` only when
 /// neither exists. It never reads `ghostty/config.ghostty`, so that file is
 /// not a candidate. The highest-precedence file with content wins, so an edit
 /// is not shadowed by another layer; an empty file is only chosen when
-/// nothing has content, and the noctty path is the answer when nothing exists.
+/// nothing has content, and the koreterm path is the answer when nothing exists.
 ///
 /// Returned value must be freed by the caller.
 pub fn preferredXdgPath(alloc: Allocator) ![]const u8 {

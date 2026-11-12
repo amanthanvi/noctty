@@ -132,7 +132,7 @@ pub const Error = error{
 /// should raise suspicion that the producer of the paste data is
 /// acting strangely.
 pub fn isSafe(data: []const u8) bool {
-    // Noctty fork: a lone CR submits input in non-bracketed mode.
+    // Koreterm fork: a lone CR submits input in non-bracketed mode.
     return std.mem.indexOf(u8, data, "\n") == null and
         std.mem.indexOf(u8, data, "\r") == null and
         std.mem.indexOf(u8, data, "\x1b[201~") == null;

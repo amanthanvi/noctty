@@ -568,7 +568,7 @@ fn encodeTestPane(pane: Pane) ![]u8 {
 
 test "win32 session state round-trips split layout metadata" {
     const left: Pane = .{
-        .cwd = "C:\\src\\noctty",
+        .cwd = "C:\\src\\koreterm",
         .profile = "pwsh",
         .title_override = "Build",
         .tab_title_override = "Docs",
@@ -610,7 +610,7 @@ test "win32 session state round-trips split layout metadata" {
     defer std.testing.allocator.free(encoded);
 
     try std.testing.expectEqualStrings(
-        "{\"schema_version\":1,\"windows\":[{\"selected_tab\":0,\"tabs\":[{\"selected_leaf\":1,\"layout\":{\"root\":0,\"nodes\":[{\"split\":{\"axis\":\"horizontal\",\"ratio\":0.5,\"first\":1,\"second\":2}},{\"pane\":{\"cwd\":\"C:\\\\src\\\\noctty\",\"profile\":\"pwsh\",\"title_override\":\"Build\",\"tab_title_override\":\"Docs\"}},{\"pane\":{\"cwd\":\"C:\\\\logs\",\"profile\":\"cmd.exe\"}}]}}]}]}",
+        "{\"schema_version\":1,\"windows\":[{\"selected_tab\":0,\"tabs\":[{\"selected_leaf\":1,\"layout\":{\"root\":0,\"nodes\":[{\"split\":{\"axis\":\"horizontal\",\"ratio\":0.5,\"first\":1,\"second\":2}},{\"pane\":{\"cwd\":\"C:\\\\src\\\\koreterm\",\"profile\":\"pwsh\",\"title_override\":\"Build\",\"tab_title_override\":\"Docs\"}},{\"pane\":{\"cwd\":\"C:\\\\logs\",\"profile\":\"cmd.exe\"}}]}}]}]}",
         encoded,
     );
 
@@ -627,7 +627,7 @@ test "win32 session state round-trips pane scrollback snapshot" {
         "colors are not serialized",
     };
     const pane: Pane = .{
-        .cwd = "C:\\src\\noctty",
+        .cwd = "C:\\src\\koreterm",
         .scrollback = .{
             .captured_at_unix_ms = 1_777_777_777_123,
             .lines = &lines,
@@ -734,7 +734,7 @@ test "win32 session state load drops invalid pane scrollback without losing spli
 
 test "win32 session state omits unset optional pane metadata" {
     const nodes = [_]Node{
-        .{ .pane = .{ .cwd = "C:\\src\\noctty" } },
+        .{ .pane = .{ .cwd = "C:\\src\\koreterm" } },
     };
     const tabs = [_]Tab{
         .{
@@ -892,7 +892,7 @@ test "win32 session state parse requires explicit schema version" {
 
 test "win32 session state parse requires explicit selected_tab" {
     const raw =
-        \\{"schema_version":1,"windows":[{"tabs":[{"selected_leaf":0,"layout":{"root":0,"nodes":[{"pane":{"cwd":"C:\\src\\noctty"}}]}}]}]}
+        \\{"schema_version":1,"windows":[{"tabs":[{"selected_leaf":0,"layout":{"root":0,"nodes":[{"pane":{"cwd":"C:\\src\\koreterm"}}]}}]}]}
     ;
 
     try std.testing.expectError(
@@ -903,7 +903,7 @@ test "win32 session state parse requires explicit selected_tab" {
 
 test "win32 session state parse requires explicit selected_leaf" {
     const raw =
-        \\{"schema_version":1,"windows":[{"selected_tab":0,"tabs":[{"layout":{"root":0,"nodes":[{"pane":{"cwd":"C:\\src\\noctty"}}]}}]}]}
+        \\{"schema_version":1,"windows":[{"selected_tab":0,"tabs":[{"layout":{"root":0,"nodes":[{"pane":{"cwd":"C:\\src\\koreterm"}}]}}]}]}
     ;
 
     try std.testing.expectError(
@@ -914,7 +914,7 @@ test "win32 session state parse requires explicit selected_leaf" {
 
 test "win32 session state parse requires explicit layout root" {
     const raw =
-        \\{"schema_version":1,"windows":[{"selected_tab":0,"tabs":[{"selected_leaf":0,"layout":{"nodes":[{"pane":{"cwd":"C:\\src\\noctty"}}]}}]}]}
+        \\{"schema_version":1,"windows":[{"selected_tab":0,"tabs":[{"selected_leaf":0,"layout":{"nodes":[{"pane":{"cwd":"C:\\src\\koreterm"}}]}}]}]}
     ;
 
     try std.testing.expectError(
@@ -938,7 +938,7 @@ test "win32 session state parse skips unknown fields within the current schema" 
     // A field a later build adds without a version bump, at every level a
     // document nests: an older build still restores the rest.
     const raw =
-        \\{"schema_version":1,"future":{"a":[1,2]},"windows":[{"x":10,"y":20,"width":1280,"height":720,"state":"normal","monitor":"\\\\.\\DISPLAY2","selected_tab":0,"tabs":[{"selected_leaf":0,"pinned":true,"layout":{"root":0,"nodes":[{"split":{"axis":"horizontal","ratio":0.5,"first":1,"second":2,"gap":4}},{"pane":{"cwd":"C:\\src\\noctty","env":{"A":"b"},"scrollback":{"captured_at_unix_ms":1,"lines":["x"],"wrapped":true}}},{"pane":{"profile":"pwsh"}}]}}]}]}
+        \\{"schema_version":1,"future":{"a":[1,2]},"windows":[{"x":10,"y":20,"width":1280,"height":720,"state":"normal","monitor":"\\\\.\\DISPLAY2","selected_tab":0,"tabs":[{"selected_leaf":0,"pinned":true,"layout":{"root":0,"nodes":[{"split":{"axis":"horizontal","ratio":0.5,"first":1,"second":2,"gap":4}},{"pane":{"cwd":"C:\\src\\koreterm","env":{"A":"b"},"scrollback":{"captured_at_unix_ms":1,"lines":["x"],"wrapped":true}}},{"pane":{"profile":"pwsh"}}]}}]}]}
     ;
 
     var parsed = try parseAlloc(std.testing.allocator, raw);
@@ -946,7 +946,7 @@ test "win32 session state parse skips unknown fields within the current schema" 
     const window = parsed.value.windows[0];
     try std.testing.expectEqual(@as(?i32, 1280), window.width);
     try std.testing.expectEqual(@as(usize, 3), window.tabs[0].layout.nodes.len);
-    try std.testing.expectEqualStrings("C:\\src\\noctty", window.tabs[0].layout.nodes[1].pane.cwd.?);
+    try std.testing.expectEqualStrings("C:\\src\\koreterm", window.tabs[0].layout.nodes[1].pane.cwd.?);
     try std.testing.expectEqualStrings("x", window.tabs[0].layout.nodes[1].pane.scrollback.?.lines[0]);
 }
 
@@ -1013,7 +1013,7 @@ test "win32 session state parse still rejects a node kind it does not know" {
 test "security regression win32 session state parse owns restored pane strings" {
     const allocator = std.testing.allocator;
     var raw = try allocator.dupe(u8,
-        \\{"schema_version":1,"windows":[{"selected_tab":0,"tabs":[{"selected_leaf":0,"layout":{"root":0,"nodes":[{"pane":{"cwd":"C:\\src\\noctty","profile":"pwsh","title_override":"Build"}}]}}]}]}
+        \\{"schema_version":1,"windows":[{"selected_tab":0,"tabs":[{"selected_leaf":0,"layout":{"root":0,"nodes":[{"pane":{"cwd":"C:\\src\\koreterm","profile":"pwsh","title_override":"Build"}}]}}]}]}
     );
     const raw_start = @intFromPtr(raw.ptr);
     const raw_end = raw_start + raw.len;
@@ -1033,7 +1033,7 @@ test "security regression win32 session state parse owns restored pane strings" 
     defer allocator.free(scratch);
     @memset(scratch, 0xA5);
 
-    try std.testing.expectEqualStrings("C:\\src\\noctty", pane.cwd.?);
+    try std.testing.expectEqualStrings("C:\\src\\koreterm", pane.cwd.?);
     try std.testing.expectEqualStrings("pwsh", pane.profile.?);
     try std.testing.expectEqualStrings("Build", pane.title_override.?);
 }
@@ -1064,12 +1064,12 @@ test "security regression win32 session state rejects carriage return title" {
 
 test "win32 session state accepts ordinary Windows paths" {
     const ordinary_path =
-        \\{"schema_version":1,"windows":[{"selected_tab":0,"tabs":[{"selected_leaf":0,"layout":{"root":0,"nodes":[{"pane":{"cwd":"C:\\Users\\amant\\src\\noctty"}}]}}]}]}
+        \\{"schema_version":1,"windows":[{"selected_tab":0,"tabs":[{"selected_leaf":0,"layout":{"root":0,"nodes":[{"pane":{"cwd":"C:\\Users\\amant\\src\\koreterm"}}]}}]}]}
     ;
     var parsed = try parseAlloc(std.testing.allocator, ordinary_path);
     defer parsed.deinit();
     try std.testing.expectEqualStrings(
-        "C:\\Users\\amant\\src\\noctty",
+        "C:\\Users\\amant\\src\\koreterm",
         parsed.value.windows[0].tabs[0].layout.nodes[0].pane.cwd.?,
     );
 }
@@ -1087,7 +1087,7 @@ test "fuzz win32 session state parser" {
         "{}",
         \\{"schema_version":1,"windows":[]}
         ,
-        \\{"schema_version":1,"windows":[{"selected_tab":0,"tabs":[{"selected_leaf":0,"layout":{"root":0,"nodes":[{"pane":{"cwd":"C:\\src\\noctty"}}]}}]}]}
+        \\{"schema_version":1,"windows":[{"selected_tab":0,"tabs":[{"selected_leaf":0,"layout":{"root":0,"nodes":[{"pane":{"cwd":"C:\\src\\koreterm"}}]}}]}]}
         ,
         \\{"schema_version":1,"windows":[{"selected_tab":0,"tabs":[{"selected_leaf":0,"layout":{"root":0,"nodes":[{"pane":{"cwd":"C:\\safe\\\u0000BAD=1"}}]}}]}]}
         ,
@@ -1102,7 +1102,7 @@ test "bounded fuzz campaign win32 session state parser" {
             "{}",
             \\{"schema_version":1,"windows":[]}
             ,
-            \\{"schema_version":1,"windows":[{"selected_tab":0,"tabs":[{"selected_leaf":0,"layout":{"root":0,"nodes":[{"pane":{"cwd":"C:\\src\\noctty"}}]}}]}]}
+            \\{"schema_version":1,"windows":[{"selected_tab":0,"tabs":[{"selected_leaf":0,"layout":{"root":0,"nodes":[{"pane":{"cwd":"C:\\src\\koreterm"}}]}}]}]}
             ,
         },
     });
@@ -1116,7 +1116,7 @@ test "win32 session state encode rejects invalid split child index" {
             .first = 1,
             .second = 9,
         } },
-        .{ .pane = .{ .cwd = "C:\\src\\noctty" } },
+        .{ .pane = .{ .cwd = "C:\\src\\koreterm" } },
     };
     const tabs = [_]Tab{
         .{
@@ -1169,7 +1169,7 @@ test "win32 session state validates deep split layout without recursion" {
     }
 
     for (split_count..total_nodes) |i| {
-        nodes[i] = .{ .pane = .{ .cwd = "C:\\src\\noctty" } };
+        nodes[i] = .{ .pane = .{ .cwd = "C:\\src\\koreterm" } };
     }
 
     const tabs = [_]Tab{
@@ -1221,7 +1221,7 @@ test "win32 session state rejects layout node count above handle range" {
 
 test "win32 session state parse rejects shared-node layout before DFS stack overflow" {
     const raw =
-        \\{"schema_version":1,"windows":[{"selected_tab":0,"tabs":[{"selected_leaf":0,"layout":{"root":0,"nodes":[{"split":{"axis":"horizontal","ratio":0.5,"first":1,"second":2}},{"split":{"axis":"vertical","ratio":0.5,"first":2,"second":3}},{"pane":{"cwd":"C:\\src\\noctty"}},{"pane":{"cwd":"C:\\logs"}}]}}]}]}
+        \\{"schema_version":1,"windows":[{"selected_tab":0,"tabs":[{"selected_leaf":0,"layout":{"root":0,"nodes":[{"split":{"axis":"horizontal","ratio":0.5,"first":1,"second":2}},{"split":{"axis":"vertical","ratio":0.5,"first":2,"second":3}},{"pane":{"cwd":"C:\\src\\koreterm"}},{"pane":{"cwd":"C:\\logs"}}]}}]}]}
     ;
 
     try std.testing.expectError(
@@ -1232,7 +1232,7 @@ test "win32 session state parse rejects shared-node layout before DFS stack over
 
 test "win32 session state parse rejects self-referential layout before DFS stack overflow" {
     const raw =
-        \\{"schema_version":1,"windows":[{"selected_tab":0,"tabs":[{"selected_leaf":0,"layout":{"root":0,"nodes":[{"split":{"axis":"horizontal","ratio":0.5,"first":0,"second":1}},{"pane":{"cwd":"C:\\src\\noctty"}}]}}]}]}
+        \\{"schema_version":1,"windows":[{"selected_tab":0,"tabs":[{"selected_leaf":0,"layout":{"root":0,"nodes":[{"split":{"axis":"horizontal","ratio":0.5,"first":0,"second":1}},{"pane":{"cwd":"C:\\src\\koreterm"}}]}}]}]}
     ;
 
     try std.testing.expectError(

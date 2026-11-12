@@ -25,14 +25,14 @@ pub fn init(opts: Options, width: usize, height: usize, data: ?[]const u8) Error
     if (opts.unsupported_image) return error.Direct3D11ImagesUnsupported;
     if (width == 0 or height == 0 or width > 16384 or height > 16384) return error.Direct3D11Failed;
     if (data) |bytes| if (bytes.len < width * height * opts.format.pixelSize()) return error.Direct3D11Failed;
-    const handle = api.noctty_d3d11_texture_create(opts.device, @intCast(width), @intCast(height), @intFromEnum(opts.format), @intFromBool(opts.srgb), if (data) |bytes| bytes.ptr else null) orelse return api.allocationError(opts.device);
+    const handle = api.koreterm_d3d11_texture_create(opts.device, @intCast(width), @intCast(height), @intFromEnum(opts.format), @intFromBool(opts.srgb), if (data) |bytes| bytes.ptr else null) orelse return api.allocationError(opts.device);
     return .{ .handle = handle, .width = width, .height = height, .format = opts.format };
 }
 pub fn deinit(self: Self) void {
-    api.noctty_d3d11_texture_destroy(self.handle);
+    api.koreterm_d3d11_texture_destroy(self.handle);
 }
 pub fn replaceRegion(self: Self, x: usize, y: usize, width: usize, height: usize, data: []const u8) Error!void {
     if (x > self.width or width > self.width - x or y > self.height or height > self.height - y) return error.Direct3D11Failed;
     if (data.len < width * height * self.format.pixelSize()) return error.Direct3D11Failed;
-    try api.check(api.noctty_d3d11_texture_write(self.handle, @intCast(x), @intCast(y), @intCast(width), @intCast(height), data.ptr));
+    try api.check(api.koreterm_d3d11_texture_write(self.handle, @intCast(x), @intCast(y), @intCast(width), @intCast(height), data.ptr));
 }

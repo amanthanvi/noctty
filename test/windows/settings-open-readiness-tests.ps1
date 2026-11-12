@@ -53,7 +53,7 @@ $result = Get-NewReadyAttempt -State $state -PreviousStartedAt 100
 Check $result.ready 'subsequent complete atomic ledger can pass after a parse failure'
 $result = Get-NewReadyAttempt -State (State @())
 Check (-not $result.ready -and $result.stage -eq 'startup-empty') 'empty ledger remains pending'
-$missing = Join-Path ([IO.Path]::GetTempPath()) ('noctty-readiness-absent-' + [guid]::NewGuid().ToString('N'))
+$missing = Join-Path ([IO.Path]::GetTempPath()) ('koreterm-readiness-absent-' + [guid]::NewGuid().ToString('N'))
 $result = Get-NewReadyAttempt -State (Read-StartupAttempt -Path $missing)
 Check (-not $result.ready -and $result.stage -eq 'startup-missing') 'missing ledger remains pending'
 
@@ -78,7 +78,7 @@ Check ($result.ready -and $result.attempt.started_at_unix_ms -eq 1700) 'trimming
 $state = State (@($attempts) + @((Attempt 1800 'ready' 1820)))
 Check ($state.stage -eq 'invalid') 'oversized ledger is rejected'
 
-$receiptRoot = Join-Path ([IO.Path]::GetTempPath()) ('noctty-settings-receipt-' + [guid]::NewGuid().ToString('N'))
+$receiptRoot = Join-Path ([IO.Path]::GetTempPath()) ('koreterm-settings-receipt-' + [guid]::NewGuid().ToString('N'))
 [void][IO.Directory]::CreateDirectory($receiptRoot)
 $receiptPath = Join-Path $receiptRoot 'receipt.json'
 try {

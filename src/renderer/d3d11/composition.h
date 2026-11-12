@@ -1,26 +1,26 @@
-#ifndef NOCTTY_D3D11_COMPOSITION_H
-#define NOCTTY_D3D11_COMPOSITION_H
+#ifndef KORETERM_D3D11_COMPOSITION_H
+#define KORETERM_D3D11_COMPOSITION_H
 #include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-typedef struct NocttyComposition NocttyComposition;
+typedef struct KoretermComposition KoretermComposition;
 
 /* Borrows an IDXGIDevice, HWND and IDXGISwapChain. On success, the wrapper
  * retains the swapchain and owns its composition interfaces. The visual tree
  * is staged but not committed, so an uninitialized backbuffer stays hidden.
  * Failure always leaves *out NULL and releases any partially created target. */
-int32_t noctty_composition_create(void *dxgi_device, void *hwnd, void *swapchain,
-    NocttyComposition **out);
+int32_t koreterm_composition_create(void *dxgi_device, void *hwnd, void *swapchain,
+    KoretermComposition **out);
 
 /* Call only after the swapchain's first successful Present. This submits the
  * staged tree without waiting for scanout; later calls only check validity. */
-int32_t noctty_composition_commit(NocttyComposition *composition);
+int32_t koreterm_composition_commit(KoretermComposition *composition);
 
 /* CheckDeviceState(FALSE) is reported as DXGI_ERROR_DEVICE_REMOVED. */
-int32_t noctty_composition_check_state(NocttyComposition *composition);
+int32_t koreterm_composition_check_state(KoretermComposition *composition);
 
 /* Healthy renderer handoff: detach root/content and submit an asynchronous
  * Commit without waiting for DWM. Old pixels may briefly remain until applied.
@@ -28,11 +28,11 @@ int32_t noctty_composition_check_state(NocttyComposition *composition);
  * and attempts to restore a healthy tree. Do not construct a replacement
  * renderer unless this succeeds. Destroy before creating another target for
  * the same HWND; the detached wrapper still owns its target and swapchain. */
-int32_t noctty_composition_detach(NocttyComposition *composition);
+int32_t koreterm_composition_detach(KoretermComposition *composition);
 
 /* Best-effort teardown, including partial or invalid devices. Never waits for
  * commit completion. Accepts NULL and releases the HWND target first. */
-void noctty_composition_destroy(NocttyComposition *composition);
+void koreterm_composition_destroy(KoretermComposition *composition);
 
 #ifdef __cplusplus
 }

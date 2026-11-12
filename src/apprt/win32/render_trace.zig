@@ -18,7 +18,7 @@ const queryPerformanceCounter = bench_trace.queryPerformanceCounter;
 const queryPerformanceFrequency = bench_trace.queryPerformanceFrequency;
 
 fn renderTraceLiveEnabled(alloc: Allocator) bool {
-    const raw = std.process.getEnvVarOwned(alloc, "NOCTTY_RENDER_TRACE_LIVE") catch return false;
+    const raw = std.process.getEnvVarOwned(alloc, "KORETERM_RENDER_TRACE_LIVE") catch return false;
     defer alloc.free(raw);
     return std.mem.eql(u8, std.mem.trim(u8, raw, &std.ascii.whitespace), "1");
 }
@@ -135,7 +135,7 @@ pub const RenderTrace = struct {
     pub fn init(alloc: Allocator) RenderTrace {
         const raw = std.process.getEnvVarOwned(
             alloc,
-            "NOCTTY_RENDER_TRACE_FILE",
+            "KORETERM_RENDER_TRACE_FILE",
         ) catch return .{};
         errdefer alloc.free(raw);
 

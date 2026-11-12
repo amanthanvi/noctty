@@ -153,7 +153,7 @@ fn runArgsWithSend(
         else => return report(stderr, 5, "Automation text IPC failed.\n"),
     };
 
-    return if (ok) 0 else report(stderr, 2, "No matching noctty instance.\n");
+    return if (ok) 0 else report(stderr, 2, "No matching koreterm instance.\n");
 }
 
 /// Applies the CLI-side text policy before any IPC connection is attempted.

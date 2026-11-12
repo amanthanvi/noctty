@@ -1,13 +1,13 @@
-# noctty.com
+# koreterm.com
 
-Static site for `noctty.com`, deployed to Cloudflare Pages. Hand-written
+Static site for `koreterm.com`, deployed to Cloudflare Pages. Hand-written
 HTML, one stylesheet, four small ES modules, no framework and no npm
 dependencies.
 
 | File              | Purpose                                               |
 | ----------------- | ----------------------------------------------------- |
 | `index.html`      | Landing page                                          |
-| `why-noctty.html` | About page: identity, measurements, verification      |
+| `why-koreterm.html` | About page: identity, measurements, verification      |
 | `404.html`        | Not-found page                                        |
 | `styles.css`      | Whole stylesheet, `nc-` prefixed classes              |
 | `app.js`          | Theme toggle; the 404 page's requested-path text      |
@@ -50,7 +50,7 @@ only outbound request. Fonts and images are self-hosted.
 The page is chrome and the terminal is the content. Everything outside a
 terminal window uses the shadcn zinc scale: the tokens at the top of
 `styles.css` carry a light and a dark value through `light-dark()`. The only
-color on the site is inside terminal windows, taken from noctty's default
+color on the site is inside terminal windows, taken from koreterm's default
 colors (dark) and the GitHub Light Default theme (light). Light and dark
 follow the visitor's system until they press the toggle, which then sticks.
 
@@ -81,7 +81,7 @@ shots come from a real restart of that copy with
 `window-save-state-scrollback` set, each pane scrolled to the top. The
 terminal content is staged (a demo repository with a placeholder author), and
 the terminal shots are cropped to their top 600 rows. The social card,
-`noctty-social.jpg`, is rendered from HTML around one of the captures.
+`koreterm-social.jpg`, is rendered from HTML around one of the captures.
 
 ## Deployment
 
@@ -111,7 +111,7 @@ a release a person publishes. The workflow:
    zone-owned `www` redirect is preflighted here, before anything reaches
    production.
 4. Deploys the same payload to `main` and verifies it again at the
-   deployment URL and at `noctty.com`.
+   deployment URL and at `koreterm.com`.
 
 It needs the `cloudflare-pages-production` environment with
 `CLOUDFLARE_API_TOKEN` (Account / Cloudflare Pages / Edit) and
@@ -130,7 +130,7 @@ workflow verifies the zone-level 301.
 To build the payload locally:
 
 ```powershell
-$root = Join-Path $env:TEMP noctty-site-payload
+$root = Join-Path $env:TEMP koreterm-site-payload
 pwsh -File scripts/build-site-payload.ps1 `
   -OutputDirectory (Join-Path $root payload) `
   -ManifestPath (Join-Path $root payload.sha256)

@@ -26,7 +26,7 @@ pub const TabStatus = struct {
 
 /// A tab as its button is about to be drawn.
 pub const Facts = struct {
-    /// The focused pane's title; a tab without one draws "noctty".
+    /// The focused pane's title; a tab without one draws "koreterm".
     title: ?[]const u8,
     /// Position in the strip, from 0.
     index: usize,
@@ -258,7 +258,7 @@ fn tabButtonActiveMarker(active: bool) []const u8 {
 
 /// The label without the bell glyph.
 fn buildTabButtonLabel(alloc: Allocator, k: Key) ![]u8 {
-    const compact = try compactHostLabel(alloc, k.title orelse "noctty", titleBudget(k));
+    const compact = try compactHostLabel(alloc, k.title orelse "koreterm", titleBudget(k));
     defer alloc.free(compact);
     if (k.show_pane_count and k.pane_count > 1) {
         return try std.fmt.allocPrint(

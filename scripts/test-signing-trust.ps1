@@ -78,13 +78,13 @@ function Get-PeCertificateTableOffset {
     }
 }
 
-$tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) "noctty-signing-trust-$([Guid]::NewGuid().ToString('N'))"
+$tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) "koreterm-signing-trust-$([Guid]::NewGuid().ToString('N'))"
 [System.IO.Directory]::CreateDirectory($tempRoot) | Out-Null
 $rsa = [System.Security.Cryptography.RSA]::Create(2048)
 $certificate = $null
 try {
     $request = [System.Security.Cryptography.X509Certificates.CertificateRequest]::new(
-        'CN=noctty signing policy test',
+        'CN=koreterm signing policy test',
         $rsa,
         [System.Security.Cryptography.HashAlgorithmName]::SHA256,
         [System.Security.Cryptography.RSASignaturePadding]::Pkcs1
@@ -201,8 +201,8 @@ const pinned_publisher_spki_sha256 = [_][Sha256.digest_length]u8{
         -not (Test-SelfSignedTrustStatus -Signature $signature -Path $signedPath)) {
         throw "Cryptographic self-signed verification rejected an intact signed PE: $($signedResult.Status) $($signedResult.StatusMessage)"
     }
-    Initialize-NocttyAuthenticodeVerifier
-    if (-not [NocttyAuthenticodeVerifier]::VerifyEmbeddedSignatureAndFileHash($signedPath)) {
+    Initialize-KoretermAuthenticodeVerifier
+    if (-not [KoretermAuthenticodeVerifier]::VerifyEmbeddedSignatureAndFileHash($signedPath)) {
         throw 'Direct Authenticode verifier rejected an intact signed PE.'
     }
 
@@ -213,7 +213,7 @@ const pinned_publisher_spki_sha256 = [_][Sha256.digest_length]u8{
     if (Test-SelfSignedTrustStatus -Signature $bodyTamperedSignature -Path $bodyTamperedPath) {
         throw 'Self-signed verification accepted a PE with a modified signed body.'
     }
-    if ([NocttyAuthenticodeVerifier]::VerifyEmbeddedSignatureAndFileHash($bodyTamperedPath)) {
+    if ([KoretermAuthenticodeVerifier]::VerifyEmbeddedSignatureAndFileHash($bodyTamperedPath)) {
         throw 'Direct Authenticode verifier accepted a PE with a modified signed body.'
     }
 
@@ -225,7 +225,7 @@ const pinned_publisher_spki_sha256 = [_][Sha256.digest_length]u8{
     if (Test-SelfSignedTrustStatus -Signature $signatureTamperedSignature -Path $signatureTamperedPath) {
         throw 'Self-signed verification accepted a PE with a modified PKCS#7 signature.'
     }
-    if ([NocttyAuthenticodeVerifier]::VerifyEmbeddedSignatureAndFileHash($signatureTamperedPath)) {
+    if ([KoretermAuthenticodeVerifier]::VerifyEmbeddedSignatureAndFileHash($signatureTamperedPath)) {
         throw 'Direct Authenticode verifier accepted a PE with a modified PKCS#7 signature.'
     }
 }

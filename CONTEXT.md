@@ -1,6 +1,6 @@
-# noctty Product Context
+# koreterm Product Context
 
-This context defines the product language used to evaluate noctty's
+This context defines the product language used to evaluate koreterm's
 direction and user experience.
 
 ## Language

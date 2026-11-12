@@ -9,7 +9,7 @@ $conptyRedistHelperText = Get-Content -LiteralPath $conptyRedistHelper -Raw
 Assert-WorkflowContract `
     -Path $windowsPackager `
     -Pattern '(?ms)\. \(Join-Path \$PSScriptRoot "conpty-redist\.ps1"\).*?foreach \(\$runtimeFile in \$runtimeFiles\).*?Invoke-SignFile.*?Install-ConPtyRedist.*?-PinPath \$conptyPinPath.*?-Architecture \$Architecture.*?-Destination \$portableRoot.*?-CacheRoot \$conptyCacheRoot.*?-RequireConPty:\$RequireConPty.*?if \(\$conptyStaged\) \{.*?Copy-Item.*?LICENSE-conpty\.txt.*?\}' `
-    -Description 'Windows packaging stages pinned ConPTY after the noctty-only signing loop and includes its license only with the pair'
+    -Description 'Windows packaging stages pinned ConPTY after the koreterm-only signing loop and includes its license only with the pair'
 Assert-WorkflowContract `
     -Path $windowsPackageBuilder `
     -Pattern '(?ms)\[switch\]\$RequireConPty.*?if \(\$RequireConPty\) \{\s*\$packageArgs\.RequireConPty = \$true\s*\}.*?package-windows\.ps1.*?@packageArgs' `
@@ -17,7 +17,7 @@ Assert-WorkflowContract `
 Assert-WorkflowContractAbsent `
     -Path $conptyRedistHelper `
     -Pattern 'Invoke-SignFile|signtool|Set-AuthenticodeSignature' `
-    -Description 'Microsoft ConPTY binaries remain outside noctty signing'
+    -Description 'Microsoft ConPTY binaries remain outside koreterm signing'
 Assert-WorkflowContract `
     -Path $conptyRedistHelper `
     -Pattern '(?ms)Invoke-WebRequest.*?catch \{.*?if \(\$RequireConPty\).*?Write-Warning.*?return \$false.*?Assert-ConPtySha256 -Path \$downloadPath.*?Move-Item.*?Assert-ConPtySha256 -Path \$packagePath' `
@@ -32,7 +32,7 @@ Assert-WorkflowContract `
     -Description 'ConPTY ZIP extraction does not shadow the PowerShell input automatic variable'
 Assert-WorkflowContract `
     -Path $conptyRuntime `
-    -Pattern '(?ms)fn forceInbox\(\) bool.*?NOCTTY_CONPTY.*?return std\.ascii\.eqlIgnoreCase\(value, "inbox"\).*?LoadLibraryExW.*?OpenConsole\.exe.*?openConsoleMatchesArchitecture.*?return error\.OpenConsoleWrongArch' `
+    -Pattern '(?ms)fn forceInbox\(\) bool.*?KORETERM_CONPTY.*?return std\.ascii\.eqlIgnoreCase\(value, "inbox"\).*?LoadLibraryExW.*?OpenConsole\.exe.*?openConsoleMatchesArchitecture.*?return error\.OpenConsoleWrongArch' `
     -Description 'ConPTY selection only forces inbox explicitly and rejects a missing or wrong-architecture companion executable'
 Assert-WorkflowContract `
     -Path $conptyRuntime `
@@ -73,7 +73,7 @@ Assert-WorkflowContract `
     -Description 'source builds restage only through the release helper with a clean PSModulePath, re-verify its result, tolerate only a failed download, and remove an unpinned pair before falling back'
 Assert-WorkflowContract `
     -Path $conptyStageScript `
-    -Pattern '(?ms)\$ErrorActionPreference = "Stop".*?\. \(Join-Path \$PSScriptRoot "conpty-redist\.ps1"\).*?Mutex\]::new\(\$false, "Local\\noctty-stage-conpty-redist"\).*?WaitOne\(\[TimeSpan\]::FromMinutes\(2\)\).*?if \(-not \$owned\) \{.*?exit 3\s*\}.*?Install-ConPtyRedist\s*`\s*-PinPath \(Join-Path \$PSScriptRoot "\.\.\\dist\\windows\\conpty-redist\.json"\).*?ReleaseMutex\(\).*?if \(-not \$staged\) \{\s*exit 3\s*\}' `
+    -Pattern '(?ms)\$ErrorActionPreference = "Stop".*?\. \(Join-Path \$PSScriptRoot "conpty-redist\.ps1"\).*?Mutex\]::new\(\$false, "Local\\koreterm-stage-conpty-redist"\).*?WaitOne\(\[TimeSpan\]::FromMinutes\(2\)\).*?if \(-not \$owned\) \{.*?exit 3\s*\}.*?Install-ConPtyRedist\s*`\s*-PinPath \(Join-Path \$PSScriptRoot "\.\.\\dist\\windows\\conpty-redist\.json"\).*?ReleaseMutex\(\).*?if \(-not \$staged\) \{\s*exit 3\s*\}' `
     -Description 'source-build staging serializes on a named mutex, runs the release helper against the shared pin, and reports only a failed download as exit 3'
 Assert-WorkflowContractAbsent `
     -Path $conptyStageScript `
@@ -86,14 +86,14 @@ Assert-WorkflowContract `
 Assert-WorkflowContract `
     -Path (Join-Path $repoRoot 'test\windows\source-build-conpty.ps1') `
     -Pattern '(?ms)Assert-ConPtySha256 -Path \$path -Expected \$file\.Sha256.*?Assert-PeMachine -PathToCheck \$path -ExpectedArchitecture \$Architecture.*?ConPTY\\s\*: bundled \\\(' `
-    -Description 'the source-build ConPTY check uses the release hash and PE checks and requires noctty to select the pair'
+    -Description 'the source-build ConPTY check uses the release hash and PE checks and requires koreterm to select the pair'
 Assert-WorkflowContract `
     -Path $conptyRuntime `
     -Pattern '(?ms)fn signalFallbackBanner\(\) void \{\s*fallback_banner_pending\.store\(true, \.release\);\s*\}' `
     -Description 'a ConPTY fallback warns in every build mode, not only ReleaseFast'
 Assert-WorkflowContract `
     -Path $releaseDefenderScanner `
-    -Pattern '(?ms)\$portablePayloads = @\(Get-WindowsSignedRuntimePayloads\) \+ @\(\s*''noctty/conpty\.dll'',\s*''noctty/OpenConsole\.exe''\s*\).*?\$expectedScanCount = \$architectures\.Count \* \(1 \+ \$portablePayloads\.Count\)' `
+    -Pattern '(?ms)\$portablePayloads = @\(Get-WindowsSignedRuntimePayloads\) \+ @\(\s*''koreterm/conpty\.dll'',\s*''koreterm/OpenConsole\.exe''\s*\).*?\$expectedScanCount = \$architectures\.Count \* \(1 \+ \$portablePayloads\.Count\)' `
     -Description 'release Defender scan covers the bundled ConPTY pair in every architecture'
 Assert-WorkflowContract `
     -Path $releaseArtifactVerifier `
@@ -157,16 +157,16 @@ foreach ($packageStepSpec in @(
 }
 
 # --- Shared signed-runtime-payload list (issue #129 / #130) ----------------
-# Every PE noctty signs must be re-verified and Defender-scanned at release.
+# Every PE koreterm signs must be re-verified and Defender-scanned at release.
 # A single list feeds all three gates so a newly shipped binary cannot be
 # covered by one and silently missed by the others.
 $releaseCommonScript = Join-Path $repoRoot 'scripts\common.ps1'
 $publishedReleaseVerifierScript = Join-Path $repoRoot 'scripts\verify-published-release.ps1'
 Assert-WorkflowContract `
     -Path $releaseCommonScript `
-    -Pattern "(?ms)function Get-WindowsSignedRuntimePayloads.*?noctty/noctty\.com.*?noctty/noctty\.exe.*?noctty/ghostty-vt\.dll.*?noctty/noctty-terminal-handoff-proxy\.dll" `
-    -Description 'the shared signed-runtime payload list covers every PE noctty ships and signs'
-# noctty/ghostty-vt.dll in that list is the placeholder, not libghostty-vt
+    -Pattern "(?ms)function Get-WindowsSignedRuntimePayloads.*?koreterm/koreterm\.com.*?koreterm/koreterm\.exe.*?koreterm/ghostty-vt\.dll.*?koreterm/koreterm-terminal-handoff-proxy\.dll" `
+    -Description 'the shared signed-runtime payload list covers every PE koreterm ships and signs'
+# koreterm/ghostty-vt.dll in that list is the placeholder, not libghostty-vt
 # (src/build/GhosttyVtStub.zig). It is signed in the same staging loop as the
 # other runtime PEs, then checked to be the placeholder; the old portable
 # updaters require a pinned-publisher signature on every payload DLL.
@@ -312,7 +312,7 @@ foreach ($payloadConsumer in @(
         -Description "release gate $(Split-Path -Leaf $payloadConsumer) derives its payload set from the shared signed-runtime list"
     Assert-WorkflowContractAbsent `
         -Path $payloadConsumer `
-        -Pattern "'noctty/ghostty-vt\.dll'" `
+        -Pattern "'koreterm/ghostty-vt\.dll'" `
         -Description "release gate $(Split-Path -Leaf $payloadConsumer) does not hardcode a parallel payload list"
 }
 Assert-WorkflowContract `

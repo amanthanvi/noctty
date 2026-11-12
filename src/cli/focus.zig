@@ -127,7 +127,7 @@ fn runArgsWithFocus(
         else => return report(stderr, 5, "Automation focus IPC failed.\n"),
     };
 
-    return if (ok) 0 else report(stderr, 2, "No matching noctty instance.\n");
+    return if (ok) 0 else report(stderr, 2, "No matching koreterm instance.\n");
 }
 
 /// Requests focus for an exact surface or window in the running instance.

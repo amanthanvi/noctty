@@ -2,7 +2,7 @@ param([Parameter(Mandatory)][string] $BinDirectory)
 $ErrorActionPreference = 'Stop'
 
 # Inspect the emitted PE import descriptors, without executing either image.
-foreach ($name in @('noctty.exe', 'noctty.com')) {
+foreach ($name in @('koreterm.exe', 'koreterm.com')) {
     $path = Join-Path $BinDirectory $name
     $bytes = [IO.File]::ReadAllBytes((Resolve-Path -LiteralPath $path))
     function U16([int] $offset) { [BitConverter]::ToUInt16($bytes, $offset) }

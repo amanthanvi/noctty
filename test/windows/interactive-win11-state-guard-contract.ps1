@@ -1,4 +1,4 @@
-# Scratch-only controls. This script never launches noctty or reads real state.
+# Scratch-only controls. This script never launches koreterm or reads real state.
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot '..\..\scripts\interactive-win11-state-guard.ps1')
 
@@ -7,7 +7,7 @@ function Assert-Control {
     if (-not $Condition) { throw $Message }
 }
 
-$scratch = Join-Path ([IO.Path]::GetTempPath()) ('noctty-state-guard-contract-' + [Guid]::NewGuid().ToString('N'))
+$scratch = Join-Path ([IO.Path]::GetTempPath()) ('koreterm-state-guard-contract-' + [Guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $scratch | Out-Null
 $passed = 0
 function New-Control {
@@ -17,8 +17,8 @@ function New-Control {
     $roaming = Join-Path $root 'roaming'
     $logs = Join-Path $root 'logs'
     $destinations = Join-Path $roaming 'Microsoft\Windows\Recent\CustomDestinations'
-    New-Item -ItemType Directory -Force -Path (Join-Path $local 'noctty'), $destinations, $logs | Out-Null
-    $startup = Join-Path $local 'noctty\startup-attempts.json'
+    New-Item -ItemType Directory -Force -Path (Join-Path $local 'koreterm'), $destinations, $logs | Out-Null
+    $startup = Join-Path $local 'koreterm\startup-attempts.json'
     $product = Join-Path $destinations 'c2214d6ebc43ff3f.customDestinations-ms'
     [IO.File]::WriteAllText($startup, 'synthetic-startup')
     [IO.File]::WriteAllText($product, 'synthetic-product')
@@ -163,9 +163,9 @@ try {
     function Invoke-FinalizerControl {
         $windowsHarnessStateGuard = [pscustomobject]@{}
         $windowsHarnessHistoryGuard = [pscustomobject]@{}
-        $originalMeasureAumid = $env:NOCTTY_INTERACTIVE_MEASURE_AUMID
+        $originalMeasureAumid = $env:KORETERM_INTERACTIVE_MEASURE_AUMID
         $savedMeasureAumid = 'state-control-original'
-        $env:NOCTTY_INTERACTIVE_MEASURE_AUMID = '1'
+        $env:KORETERM_INTERACTIVE_MEASURE_AUMID = '1'
         $called = [Collections.Generic.List[string]]::new()
         function Assert-InteractiveWin11StateGuard { param($Guard) $called.Add('state'); throw 'state-control-failure' }
         function Assert-WindowsHarnessHistoryGuard { param($Guard) $called.Add('history'); throw 'history-control-failure' }
@@ -174,8 +174,8 @@ try {
             try { & $finalizer } catch { $message = $_.Exception.Message }
             Assert-Control (($called -join ',') -eq 'state,history') 'Composite skipped a guard after a failure.'
             Assert-Control ($message -like '*state-control-failure*history-control-failure*') 'Composite lost a guard failure.'
-            Assert-Control ($env:NOCTTY_INTERACTIVE_MEASURE_AUMID -ceq $savedMeasureAumid) 'Composite did not restore measure environment.'
-        } finally { $env:NOCTTY_INTERACTIVE_MEASURE_AUMID = $originalMeasureAumid }
+            Assert-Control ($env:KORETERM_INTERACTIVE_MEASURE_AUMID -ceq $savedMeasureAumid) 'Composite did not restore measure environment.'
+        } finally { $env:KORETERM_INTERACTIVE_MEASURE_AUMID = $originalMeasureAumid }
     }
     Invoke-FinalizerControl
     $passed++
@@ -209,16 +209,16 @@ try {
         $control = New-Control $Name $Reader
         $receiptPath = Join-Path $control.Root 'build.json'
         $seen = [Collections.Generic.List[string]]::new()
-        function Get-InteractiveWin11MeasureLayout { param($RepoRoot) [pscustomobject]@{ Receipt = $receiptPath; Exe = (Join-Path $control.Root 'noctty.exe') } }
+        function Get-InteractiveWin11MeasureLayout { param($RepoRoot) [pscustomobject]@{ Receipt = $receiptPath; Exe = (Join-Path $control.Root 'koreterm.exe') } }
         function Assert-InteractiveWin11MeasureBuild { param($RepoRoot, $ExePath) }
         function Invoke-InteractiveWin11JobStep {
             param($RepoRoot, $Step)
-            $seen.Add([string] $env:NOCTTY_INTERACTIVE_MEASURE_AUMID)
+            $seen.Add([string] $env:KORETERM_INTERACTIVE_MEASURE_AUMID)
             & $Step.Action $control $receiptPath
         }
         $stepObjects = @($Steps | ForEach-Object { [pscustomobject]@{ Script = 'synthetic'; Arguments = @{}; Action = $_ } })
-        $originalMeasureAumid = $env:NOCTTY_INTERACTIVE_MEASURE_AUMID
-        $env:NOCTTY_INTERACTIVE_MEASURE_AUMID = 'job-control-original'
+        $originalMeasureAumid = $env:KORETERM_INTERACTIVE_MEASURE_AUMID
+        $env:KORETERM_INTERACTIVE_MEASURE_AUMID = 'job-control-original'
         $message = ''
         try {
             try {
@@ -226,8 +226,8 @@ try {
                     LocalAppDataRoot = $control.Local; RoamingAppDataRoot = $control.Roaming; ClipboardSequenceReader = $control.Reader
                 } | Out-Null
             } catch { $message = $_.Exception.Message }
-            Assert-Control ($env:NOCTTY_INTERACTIVE_MEASURE_AUMID -ceq 'job-control-original') "Job $Name did not restore the measure environment."
-        } finally { $env:NOCTTY_INTERACTIVE_MEASURE_AUMID = $originalMeasureAumid }
+            Assert-Control ($env:KORETERM_INTERACTIVE_MEASURE_AUMID -ceq 'job-control-original') "Job $Name did not restore the measure environment."
+        } finally { $env:KORETERM_INTERACTIVE_MEASURE_AUMID = $originalMeasureAumid }
         Assert-Control (@($seen | Where-Object { $_ -cne '1' }).Count -eq 0) "Job $Name ran a step outside measurement mode."
         Assert-Control (Test-Path -LiteralPath (Join-Path $control.Logs 'state-after.json')) "Job $Name skipped its state guard."
         return [pscustomobject]@{ Message = $message; Steps = $seen.Count }
@@ -291,7 +291,7 @@ try {
 } finally {
     $resolved = [IO.Path]::GetFullPath($scratch)
     $expectedParent = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\')
-    if ([IO.Path]::GetDirectoryName($resolved) -cne $expectedParent -or [IO.Path]::GetFileName($resolved) -notlike 'noctty-state-guard-contract-*') {
+    if ([IO.Path]::GetDirectoryName($resolved) -cne $expectedParent -or [IO.Path]::GetFileName($resolved) -notlike 'koreterm-state-guard-contract-*') {
         throw 'Refusing unexpected scratch cleanup root.'
     }
     Remove-Item -LiteralPath $resolved -Recurse -Force

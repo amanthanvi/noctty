@@ -1,12 +1,12 @@
 . (Join-Path $PSScriptRoot 'interactive-win11-measure-lib.ps1')
 
 function Test-InteractiveWin11MeasureMode {
-    return $env:NOCTTY_INTERACTIVE_MEASURE_AUMID -eq '1'
+    return $env:KORETERM_INTERACTIVE_MEASURE_AUMID -eq '1'
 }
 
 function Get-InteractiveWin11ProcessAumid {
-    if (Test-InteractiveWin11MeasureMode) { return 'io.github.amanthanvi.noctty.measure' }
-    return 'io.github.amanthanvi.noctty'
+    if (Test-InteractiveWin11MeasureMode) { return 'io.github.amanthanvi.koreterm.measure' }
+    return 'io.github.amanthanvi.koreterm'
 }
 
 function Get-InteractiveWin11ToastAumid {
@@ -14,14 +14,14 @@ function Get-InteractiveWin11ToastAumid {
     # when the process/jump-list identity is isolated. Keep the release gate's
     # product notifier and product notification setting; do not substitute a
     # potentially unregistered measurement notifier or accept its fallback.
-    return 'io.github.amanthanvi.noctty'
+    return 'io.github.amanthanvi.koreterm'
 }
 
 function Get-InteractiveWin11MeasureRepoForExe {
     param([Parameter(Mandatory)] [string] $ExePath)
 
     $path = Get-InteractiveWin11NormalizedPath $ExePath
-    $match = [regex]::Match($path, '^(?<repo>.+)\\\.sandbox\\interactive-measure\\[0-9a-f]{40,64}\\prefix\\bin\\noctty\.exe$', [Text.RegularExpressions.RegexOptions]::IgnoreCase)
+    $match = [regex]::Match($path, '^(?<repo>.+)\\\.sandbox\\interactive-measure\\[0-9a-f]{40,64}\\prefix\\bin\\koreterm\.exe$', [Text.RegularExpressions.RegexOptions]::IgnoreCase)
     if (-not $match.Success) {
         throw 'Measurement mode requires the raw measurement prefix executable.'
     }
@@ -255,7 +255,7 @@ function Invoke-InteractiveWin11Message {
 
     $Process.Refresh()
     if ($Process.HasExited) {
-        throw "Refusing to send $Description because noctty already exited (exit code $($Process.ExitCode))."
+        throw "Refusing to send $Description because koreterm already exited (exit code $($Process.ExitCode))."
     }
 
     $sendTimeoutMs = Get-InteractiveWin11MessageTimeoutMs -Deadline $Deadline -Description "$Description hwnd=$Hwnd"
@@ -316,7 +316,7 @@ function Invoke-InteractiveWin11PostMessage {
 
     $Process.Refresh()
     if ($Process.HasExited) {
-        throw "Refusing to post $Description because noctty already exited (exit code $($Process.ExitCode))."
+        throw "Refusing to post $Description because koreterm already exited (exit code $($Process.ExitCode))."
     }
 
     [void](Assert-InteractiveWin11WindowOwner -Hwnd $Hwnd -Process $Process -Description $Description -Verb 'post')
@@ -345,7 +345,7 @@ function Get-InteractiveWin11LaunchArguments {
     return @(
         Get-InteractiveWin11ContainmentArguments
         '--single-instance=false'
-        "--class=noctty-interactive-$($Layout.SandboxId)"
+        "--class=koreterm-interactive-$($Layout.SandboxId)"
         # Most harnesses type cmd syntax or only need a prompt. PowerShell's
         # default history ignores APPDATA, so never inherit the product default.
         if (-not $UseConfiguredCommand) { '--command=cmd.exe' }
@@ -529,7 +529,7 @@ function Get-InteractiveWin11ExePath {
     )
 
     if (Test-InteractiveWin11MeasureMode) { return Get-InteractiveWin11MeasureExePath -RepoRoot $RepoRoot }
-    return Get-InteractiveWin11NormalizedPath -Path (Join-Path $RepoRoot 'zig-out\bin\noctty.exe')
+    return Get-InteractiveWin11NormalizedPath -Path (Join-Path $RepoRoot 'zig-out\bin\koreterm.exe')
 }
 
 function Invoke-InteractiveWin11Build {
@@ -611,17 +611,17 @@ function Assert-InteractiveWin11ExeExists {
         Assert-InteractiveWin11MeasureBuild -RepoRoot $measureRepo -ExePath $ExePath
     }
     if (-not [System.IO.File]::Exists($ExePath)) {
-        throw "Missing noctty.exe at $ExePath"
+        throw "Missing koreterm.exe at $ExePath"
     }
     if ($AllowInboxConPty) { return }
     # A build that could not stage the bundled ConPTY still succeeds, and
-    # noctty then falls back to the in-box conhost behind an error banner.
+    # koreterm then falls back to the in-box conhost behind an error banner.
     # That banner is a focus region and changes the output stream, so every
     # check below would measure a different app.
     $binDir = [System.IO.Path]::GetDirectoryName($ExePath)
     foreach ($name in @('conpty.dll', 'OpenConsole.exe')) {
         if (-not [System.IO.File]::Exists((Join-Path $binDir $name))) {
-            throw "Missing $name beside $ExePath; the build did not stage the bundled ConPTY (see its warning), so noctty would fall back to the in-box conhost."
+            throw "Missing $name beside $ExePath; the build did not stage the bundled ConPTY (see its warning), so koreterm would fall back to the in-box conhost."
         }
     }
 }
@@ -725,7 +725,7 @@ function Wait-InteractiveWin11Until {
     if ($ConditionFirst) {
         while ($true) {
             if ($null -ne $WatchProcess -and $WatchProcess.HasExited) {
-                throw "noctty exited while waiting for ${Description} (exit code $($WatchProcess.ExitCode))"
+                throw "koreterm exited while waiting for ${Description} (exit code $($WatchProcess.ExitCode))"
             }
 
             if (& $Condition) {
@@ -741,7 +741,7 @@ function Wait-InteractiveWin11Until {
     else {
     while ($true) {
         if ($null -ne $WatchProcess -and $WatchProcess.HasExited) {
-            throw "noctty exited while waiting for ${Description} (exit code $($WatchProcess.ExitCode))"
+            throw "koreterm exited while waiting for ${Description} (exit code $($WatchProcess.ExitCode))"
         }
 
         if ([DateTime]::UtcNow -ge $Deadline) {
@@ -1166,14 +1166,14 @@ function Get-InteractiveWin11LaunchAction {
             # Do not duplicate that full source walk inside leaf budgets.
             return 'launch'
         }
-        if ($NoBuild) { throw "Missing measurement noctty.exe at $resolvedExePath (-NoBuild)." }
+        if ($NoBuild) { throw "Missing measurement koreterm.exe at $resolvedExePath (-NoBuild)." }
         return 'build'
     }
 
     if ([System.IO.File]::Exists($resolvedExePath)) {
         if (Test-InteractiveWin11InputNewerThanBinary -ExePath $resolvedExePath -BuildInputs $BuildInputs) {
             if ($NoBuild) {
-                throw "noctty.exe at $resolvedExePath is older than the requested build inputs; rerun without -NoBuild or pass -Rebuild."
+                throw "koreterm.exe at $resolvedExePath is older than the requested build inputs; rerun without -NoBuild or pass -Rebuild."
             }
             return 'build'
         }
@@ -1181,7 +1181,7 @@ function Get-InteractiveWin11LaunchAction {
     }
 
     if ($NoBuild) {
-        throw "Missing noctty.exe at $resolvedExePath"
+        throw "Missing koreterm.exe at $resolvedExePath"
     }
 
     return 'build'

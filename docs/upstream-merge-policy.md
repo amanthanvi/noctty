@@ -2,7 +2,7 @@
 
 ## Posture
 
-noctty is a hard fork of Ghostty. It adopts upstream work through deliberate,
+koreterm is a hard fork of Ghostty. It adopts upstream work through deliberate,
 scheduled merge windows while retaining a Windows-only application runtime and
 fork-owned product behavior. This follows the roadmap's
 [published non-goal 9](../plans/2026-competitive-roadmap.md#published-non-goals)

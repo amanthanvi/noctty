@@ -23,7 +23,7 @@ $stateDirectory = Join-Path $root 'feed'
 $runnerTemp = Join-Path $root 'runner-temp'
 $artifactRoot = Join-Path $root 'artifacts'
 $callLog = Join-Path $root 'choco-calls.txt'
-$packageDirectory = Join-Path $artifactRoot "noctty-$version-windows-x64\package-managers\chocolatey"
+$packageDirectory = Join-Path $artifactRoot "koreterm-$version-windows-x64\package-managers\chocolatey"
 $listener = $null
 $feedJob = $null
 
@@ -31,16 +31,16 @@ try {
     foreach ($directory in @($binDirectory, $stateDirectory, $runnerTemp, $packageDirectory)) {
         New-Item -ItemType Directory -Path $directory -Force | Out-Null
     }
-    $nuspecPath = Join-Path $packageDirectory 'noctty.nuspec'
+    $nuspecPath = Join-Path $packageDirectory 'koreterm.nuspec'
     Set-Content -LiteralPath $nuspecPath -Value '<package />'
     $metadata = [ordered]@{
         chocolatey = [ordered]@{
-            packageName      = 'noctty'
+            packageName      = 'koreterm'
             nuspecPath       = $nuspecPath
             packageDirectory = $packageDirectory
         }
     }
-    Set-Content -LiteralPath (Join-Path $artifactRoot "noctty-$version-windows-x64\package-managers\metadata.json") -Value ($metadata | ConvertTo-Json -Depth 4)
+    Set-Content -LiteralPath (Join-Path $artifactRoot "koreterm-$version-windows-x64\package-managers\metadata.json") -Value ($metadata | ConvertTo-Json -Depth 4)
 
     # The fake choco: `pack` writes a package where --output-directory says,
     # `push` behaves as FAKE_CHOCO_PUSH says.
@@ -49,7 +49,7 @@ Add-Content -LiteralPath $env:FAKE_CHOCO_LOG -Value ((@($args) -join ' ') + ' | 
 switch ($args[0]) {
     'pack' {
         $output = $args[[array]::IndexOf($args, '--output-directory') + 1]
-        Set-Content -LiteralPath (Join-Path $output 'noctty.9.8.7.nupkg') -Value 'fake package'
+        Set-Content -LiteralPath (Join-Path $output 'koreterm.9.8.7.nupkg') -Value 'fake package'
         exit 0
     }
     'push' {
@@ -96,7 +96,7 @@ exit 2
         )
 
         Remove-Item -LiteralPath $callLog, $listedMarker -Force -ErrorAction Ignore
-        Remove-Item -LiteralPath (Join-Path $runnerTemp "noctty-chocolatey-$version") -Recurse -Force -ErrorAction Ignore
+        Remove-Item -LiteralPath (Join-Path $runnerTemp "koreterm-chocolatey-$version") -Recurse -Force -ErrorAction Ignore
         if ($Listed) { New-Item -ItemType File -Path $listedMarker | Out-Null }
         $saved = @{ PATH = $env:PATH; CHOCO_API_KEY = $env:CHOCO_API_KEY }
         try {

@@ -99,13 +99,13 @@ pub fn confirmationDecision(
 }
 
 /// ZIP entry policy applied to every central-directory entry before extraction.
-/// The release ZIP uses forward slashes and exactly one `noctty/` root.
+/// The release ZIP uses forward slashes and exactly one `koreterm/` root.
 pub fn isSafeZipEntryPath(path: []const u8) bool {
     if (path.len == 0 or path[0] == '/' or path[0] == '\\') return false;
     if (std.mem.indexOfScalar(u8, path, '\\') != null) return false;
     if (std.mem.indexOfScalar(u8, path, ':') != null) return false;
-    if (!std.mem.eql(u8, path, "noctty/") and
-        !std.mem.startsWith(u8, path, "noctty/")) return false;
+    if (!std.mem.eql(u8, path, "koreterm/") and
+        !std.mem.startsWith(u8, path, "koreterm/")) return false;
 
     var parts = std.mem.splitScalar(u8, path, '/');
     while (parts.next()) |part| {
@@ -120,10 +120,10 @@ pub fn isSafeZipEntryPath(path: []const u8) bool {
 /// unmanaged file, and one listed here but never staged makes apply fail as an
 /// incomplete payload, so the two lists have to stay equal.
 pub const managed_entries = [_][]const u8{
-    "noctty.com",
+    "koreterm.com",
     "ghostty-vt.dll",
-    "noctty-terminal-handoff-proxy.dll",
-    // Microsoft's bundled ConPTY pair. These are the only payload PEs noctty
+    "koreterm-terminal-handoff-proxy.dll",
+    // Microsoft's bundled ConPTY pair. These are the only payload PEs koreterm
     // does not sign; src/update/conpty_redist.zig pins their bytes instead.
     "conpty.dll",
     "OpenConsole.exe",
@@ -131,14 +131,14 @@ pub const managed_entries = [_][]const u8{
     "LICENSE-conpty.txt",
     "config-template.ghostty",
     "README.md",
-    "noctty.ico",
+    "koreterm.ico",
     "share",
     // Replace the executable last so an interrupted transaction always leaves
     // a launchable old or new preflight entrypoint.
-    "noctty.exe",
+    "koreterm.exe",
 };
 
-/// Managed entries noctty no longer needs in a payload. A payload may leave
+/// Managed entries koreterm no longer needs in a payload. A payload may leave
 /// one out: `requirePayloadEntries` does not ask for it, and `swapPayload`
 /// then moves the install's copy into the displaced directory, so a rollback
 /// restores it from the backup and a confirmed update deletes it. Each one
@@ -154,7 +154,7 @@ pub const managed_entries = [_][]const u8{
 /// `retired_placeholders` says what the file is meanwhile.
 pub const retired_entries = [_][]const u8{
     // The name of libghostty-vt 0.1.0, the pre-1.0 C ABI, which is also the
-    // name upstream's libghostty-vt 1.0 DLL uses. noctty.exe does not import
+    // name upstream's libghostty-vt 1.0 DLL uses. koreterm.exe does not import
     // it, and the portable ZIP carries a placeholder under it.
     "ghostty-vt.dll",
 };
@@ -170,18 +170,18 @@ pub fn isRetiredEntry(name: []const u8) bool {
 /// (their `managed_entries`). Frozen: an older copy updates only to a release
 /// whose portable ZIP holds every one of these.
 const legacy_updater_required_entries = [_][]const u8{
-    "noctty.com",
+    "koreterm.com",
     "ghostty-vt.dll",
-    "noctty-terminal-handoff-proxy.dll",
+    "koreterm-terminal-handoff-proxy.dll",
     "conpty.dll",
     "OpenConsole.exe",
     "LICENSE",
     "LICENSE-conpty.txt",
     "config-template.ghostty",
     "README.md",
-    "noctty.ico",
+    "koreterm.ico",
     "share",
-    "noctty.exe",
+    "koreterm.exe",
 };
 
 /// A payload has every managed entry except, possibly, retired ones.
@@ -219,9 +219,9 @@ test "portable payload entry access errors other than not-found are incomplete, 
         error.Unexpected,
     }) |err| {
         try std.testing.expectError(error.IncompletePortablePayload, payloadEntryAbsent(err, "ghostty-vt.dll"));
-        try std.testing.expectError(error.IncompletePortablePayload, payloadEntryAbsent(err, "noctty.com"));
+        try std.testing.expectError(error.IncompletePortablePayload, payloadEntryAbsent(err, "koreterm.com"));
     }
-    try std.testing.expectError(error.IncompletePortablePayload, payloadEntryAbsent(error.FileNotFound, "noctty.com"));
+    try std.testing.expectError(error.IncompletePortablePayload, payloadEntryAbsent(error.FileNotFound, "koreterm.com"));
 }
 
 // Test-only drift guard for the literal foreach lists in both manifest scripts.
@@ -268,7 +268,7 @@ test "portable managed entries match both PowerShell manifest script sets" {
         defer alloc.free(script);
         try expectScriptManagedEntries(script);
     }
-    try std.testing.expectEqualStrings("noctty.exe", managed_entries[managed_entries.len - 1]);
+    try std.testing.expectEqualStrings("koreterm.exe", managed_entries[managed_entries.len - 1]);
 }
 
 test "portable managed script list parser rejects missing extra and duplicate entries" {
@@ -277,24 +277,24 @@ test "portable managed script list parser rejects missing extra and duplicate en
     // The script order deliberately differs from replacement order, and both
     // quote styles are accepted without evaluating any PowerShell.
     const tail =
-        \\    "noctty.exe",
+        \\    "koreterm.exe",
         \\    'ghostty-vt.dll',
-        \\    'noctty-terminal-handoff-proxy.dll',
+        \\    'koreterm-terminal-handoff-proxy.dll',
         \\    'conpty.dll',
         \\    'OpenConsole.exe',
         \\    'LICENSE',
         \\    'LICENSE-conpty.txt',
         \\    'config-template.ghostty',
         \\    'README.md',
-        \\    'noctty.ico',
+        \\    'koreterm.ico',
         \\    'share'
         \\
     ;
-    const entries = "    'noctty.com',\n" ++ tail;
+    const entries = "    'koreterm.com',\n" ++ tail;
     try expectScriptManagedEntries(prefix ++ entries ++ suffix);
     try std.testing.expectError(error.MissingManagedRootEntry, expectScriptManagedEntries(prefix ++ tail ++ suffix));
     try std.testing.expectError(error.UnexpectedManagedRootEntry, expectScriptManagedEntries(prefix ++ "    'extra.txt',\n" ++ entries ++ suffix));
-    try std.testing.expectError(error.DuplicateManagedRootEntry, expectScriptManagedEntries(prefix ++ "    'noctty.com',\n" ++ entries ++ suffix));
+    try std.testing.expectError(error.DuplicateManagedRootEntry, expectScriptManagedEntries(prefix ++ "    'koreterm.com',\n" ++ entries ++ suffix));
     try std.testing.expectError(error.ManagedRootListMissing, expectScriptManagedEntries(""));
     try std.testing.expectError(error.InvalidManagedRootList, expectScriptManagedEntries(prefix ++ "    $dynamicName\n" ++ suffix));
 }
@@ -316,7 +316,7 @@ test "portable managed script list parser rejects missing extra and duplicate en
 /// pinned-publisher Authenticode signature (`verifyPortablePayloadBinaries`,
 /// `portableBinaryTrust`). Nothing reads its exports, size or version
 /// resource (`readWindowsFileVersion`, later `verifyStagedBinaryVersion`,
-/// reads only noctty.exe), and nothing loads it: their only `LoadLibraryW`
+/// reads only koreterm.exe), and nothing loads it: their only `LoadLibraryW`
 /// calls are for wintrust.dll and version.dll. So the placeholder's DllMain
 /// never runs during an update.
 ///
@@ -333,7 +333,7 @@ test "portable managed script list parser rejects missing extra and duplicate en
 ///   src/ghostty_vt_stub/ and scripts/ghostty-vt-stub.ps1;
 /// - `retired_placeholders` and its check here (the test "portable payload
 ///   keeps retired entries while older updaters require them");
-/// - `noctty/ghostty-vt.dll` from `Get-WindowsSignedRuntimePayloads` in
+/// - `koreterm/ghostty-vt.dll` from `Get-WindowsSignedRuntimePayloads` in
 ///   scripts/common.ps1 (the release chain derives its expected signature
 ///   count from it, so the count drops on its own) and the pins of that list
 ///   in test/windows/flagship/contracts/Contracts.93-ConPty.ps1;
@@ -350,7 +350,7 @@ test "portable managed script list parser rejects missing extra and duplicate en
 ///   Contracts.93-ConPty.ps1, and the reviewed package-portable-cli.ps1
 ///   digest in Contracts.99-Baselines.ps1 and baselines/origin-main.json;
 /// - the ARM64 packaged smoke step in .github/workflows/windows-arm64.yml;
-/// - the comment on the stage rule in dist/windows/noctty.iss, and the
+/// - the comment on the stage rule in dist/windows/koreterm.iss, and the
 ///   placeholder's names in the AGENTS.md build-release-ci trigger and the
 ///   .greptile scope;
 /// - the symbols fixture in
@@ -378,7 +378,7 @@ const portable_zip_carries_legacy_entries = true;
 
 /// What the packaging scripts stage under a retired name while
 /// `portable_zip_carries_legacy_entries` holds: a `$runtimeFiles` path under
-/// zig-out\bin whose leaf is the retired name, built by noctty for the
+/// zig-out\bin whose leaf is the retired name, built by koreterm for the
 /// purpose. Any other `$runtimeFiles` item with that leaf (above all the
 /// `-Demit-lib-vt=true` library at zig-out\bin\ghostty-vt.dll) is refused.
 const RetiredPlaceholder = struct {
@@ -595,7 +595,7 @@ fn checkSetupRetiresLibVt(alloc: Allocator, iss: []const u8) !void {
 
 test "Setup retirement check reads only the rules ISCC compiles" {
     const alloc = std.testing.allocator;
-    const iss = try std.fs.cwd().readFileAlloc(alloc, "dist/windows/noctty.iss", 1024 * 1024);
+    const iss = try std.fs.cwd().readFileAlloc(alloc, "dist/windows/koreterm.iss", 1024 * 1024);
     defer alloc.free(iss);
     try checkSetupRetiresLibVt(alloc, iss);
 
@@ -659,7 +659,7 @@ test "portable payload keeps retired entries while older updaters require them" 
         for (managed_entries) |managed| {
             if (std.mem.eql(u8, entry, managed)) break;
         } else return error.RetiredEntryNotManaged;
-        try std.testing.expect(!std.mem.eql(u8, entry, "noctty.exe"));
+        try std.testing.expect(!std.mem.eql(u8, entry, "koreterm.exe"));
         try std.testing.expect(!std.mem.eql(u8, entry, "share"));
     }
 
@@ -684,7 +684,7 @@ test "portable payload keeps retired entries while older updaters require them" 
     // Setup runs the new release's own script, so it needs no transition:
     // it never installs a retired file, and removes the copy an older Setup
     // installed.
-    const iss = try std.fs.cwd().readFileAlloc(alloc, "dist/windows/noctty.iss", 1024 * 1024);
+    const iss = try std.fs.cwd().readFileAlloc(alloc, "dist/windows/koreterm.iss", 1024 * 1024);
     defer alloc.free(iss);
     try checkSetupRetiresLibVt(alloc, iss);
 }
@@ -1120,7 +1120,7 @@ fn verifyBackupManifest(
     if (restore_root) |root| {
         for (managed_entries) |managed_entry| {
             if (std.mem.eql(u8, managed_entry, "share") or
-                std.mem.eql(u8, managed_entry, "noctty.exe")) continue;
+                std.mem.eql(u8, managed_entry, "koreterm.exe")) continue;
             const key = try std.ascii.allocLowerString(alloc, managed_entry);
             defer alloc.free(key);
             if (seen.contains(key)) continue;
@@ -1347,7 +1347,7 @@ test "portable update preserves complete backup across interrupted retry" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     try tmp.dir.makePath("install/share");
-    try tmp.dir.writeFile(.{ .sub_path = "install/noctty.com", .data = "old" });
+    try tmp.dir.writeFile(.{ .sub_path = "install/koreterm.com", .data = "old" });
     try tmp.dir.writeFile(.{ .sub_path = "install/share/resource theme.txt", .data = "old-resource" });
 
     const root = try tmp.dir.realpathAlloc(alloc, ".");
@@ -1358,10 +1358,10 @@ test "portable update preserves complete backup across interrupted retry" {
     defer alloc.free(backup_root);
 
     try prepareBackup(alloc, install_root, backup_root);
-    try tmp.dir.writeFile(.{ .sub_path = "install/noctty.com", .data = "mixed" });
+    try tmp.dir.writeFile(.{ .sub_path = "install/koreterm.com", .data = "mixed" });
     try prepareBackup(alloc, install_root, backup_root);
 
-    const backed_up = try tmp.dir.readFileAlloc(alloc, "backup/noctty.com", 16);
+    const backed_up = try tmp.dir.readFileAlloc(alloc, "backup/koreterm.com", 16);
     defer alloc.free(backed_up);
     try std.testing.expectEqualStrings("old", backed_up);
 }
@@ -1371,7 +1371,7 @@ test "portable rollback removes new-only managed files without deleting user dat
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     try tmp.dir.makePath("install/share");
-    try tmp.dir.writeFile(.{ .sub_path = "install/noctty.com", .data = "old" });
+    try tmp.dir.writeFile(.{ .sub_path = "install/koreterm.com", .data = "old" });
     try tmp.dir.writeFile(.{ .sub_path = "install/share/resource theme.txt", .data = "old-resource" });
     try tmp.dir.writeFile(.{ .sub_path = "install/user-data.txt", .data = "keep" });
 
@@ -1384,13 +1384,13 @@ test "portable rollback removes new-only managed files without deleting user dat
     const displaced_root = try std.fs.path.join(alloc, &.{ root, "displaced" });
     defer alloc.free(displaced_root);
     try prepareBackup(alloc, install_root, backup_root);
-    try tmp.dir.writeFile(.{ .sub_path = "install/noctty.com", .data = "new" });
+    try tmp.dir.writeFile(.{ .sub_path = "install/koreterm.com", .data = "new" });
     try tmp.dir.writeFile(.{ .sub_path = "install/share/resource theme.txt", .data = "new-resource" });
     try tmp.dir.writeFile(.{ .sub_path = "install/share/new-only.ps1", .data = "new-only share" });
     try tmp.dir.writeFile(.{ .sub_path = "install/LICENSE", .data = "new-only" });
 
     try rollback(alloc, install_root, backup_root, displaced_root);
-    const restored = try tmp.dir.readFileAlloc(alloc, "install/noctty.com", 16);
+    const restored = try tmp.dir.readFileAlloc(alloc, "install/koreterm.com", 16);
     defer alloc.free(restored);
     try std.testing.expectEqualStrings("old", restored);
     const restored_resource = try tmp.dir.readFileAlloc(alloc, "install/share/resource theme.txt", 32);
@@ -1408,7 +1408,7 @@ test "portable rollback renames displaced share tree back exactly" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     try tmp.dir.makePath("install/share/shell-integration");
-    try tmp.dir.writeFile(.{ .sub_path = "install/noctty.com", .data = "old executable" });
+    try tmp.dir.writeFile(.{ .sub_path = "install/koreterm.com", .data = "old executable" });
     try tmp.dir.writeFile(.{ .sub_path = "install/share/old-only.ps1", .data = "old only" });
     try tmp.dir.writeFile(.{ .sub_path = "install/share/shared.ps1", .data = "old shared" });
     try tmp.dir.writeFile(.{ .sub_path = "install/user-data.txt", .data = "keep" });
@@ -1426,12 +1426,12 @@ test "portable rollback renames displaced share tree back exactly" {
     try tmp.dir.makePath("displaced");
     try tmp.dir.rename("install/share", "displaced/share");
     try tmp.dir.makePath("install/share");
-    try tmp.dir.writeFile(.{ .sub_path = "install/noctty.com", .data = "new executable" });
+    try tmp.dir.writeFile(.{ .sub_path = "install/koreterm.com", .data = "new executable" });
     try tmp.dir.writeFile(.{ .sub_path = "install/share/shared.ps1", .data = "new shared" });
     try tmp.dir.writeFile(.{ .sub_path = "install/share/new-only.ps1", .data = "new only" });
 
     try rollback(alloc, install_root, backup_root, displaced_root);
-    const restored_executable = try tmp.dir.readFileAlloc(alloc, "install/noctty.com", 32);
+    const restored_executable = try tmp.dir.readFileAlloc(alloc, "install/koreterm.com", 32);
     defer alloc.free(restored_executable);
     try std.testing.expectEqualStrings("old executable", restored_executable);
     const restored_old_only = try tmp.dir.readFileAlloc(alloc, "install/share/old-only.ps1", 32);
@@ -1473,7 +1473,7 @@ test "portable payload check requires every managed entry except a retired one" 
     defer tmp.cleanup();
     try writeTestPayload(tmp.dir, "full", &.{});
     try writeTestPayload(tmp.dir, "without-retired", &retired_entries);
-    try writeTestPayload(tmp.dir, "without-com", &.{"noctty.com"});
+    try writeTestPayload(tmp.dir, "without-com", &.{"koreterm.com"});
     try writeTestPayload(tmp.dir, "without-share", &.{"share"});
 
     const root = try tmp.dir.realpathAlloc(alloc, ".");
@@ -1501,13 +1501,13 @@ test "portable swap removes a retired file the payload leaves out, and rollback 
     // An install from a release that still shipped ghostty-vt.dll, with the
     // user's own files beside it.
     try tmp.dir.makePath("install/share");
-    try tmp.dir.writeFile(.{ .sub_path = "install/noctty.exe", .data = "old exe" });
-    try tmp.dir.writeFile(.{ .sub_path = "install/noctty.com", .data = "old com" });
+    try tmp.dir.writeFile(.{ .sub_path = "install/koreterm.exe", .data = "old exe" });
+    try tmp.dir.writeFile(.{ .sub_path = "install/koreterm.com", .data = "old com" });
     try tmp.dir.writeFile(.{ .sub_path = "install/ghostty-vt.dll", .data = "old vt" });
     try tmp.dir.writeFile(.{ .sub_path = "install/share/theme.txt", .data = "old share" });
     try tmp.dir.writeFile(.{ .sub_path = "install/user-data.txt", .data = "keep" });
     try tmp.dir.writeFile(.{ .sub_path = "install/ghostty-vt.dll.txt", .data = "keep too" });
-    try tmp.dir.writeFile(.{ .sub_path = "install/noctty.portable", .data = "" });
+    try tmp.dir.writeFile(.{ .sub_path = "install/koreterm.portable", .data = "" });
     try writeTestPayload(tmp.dir, "payload", &retired_entries);
 
     const root = try tmp.dir.realpathAlloc(alloc, ".");
@@ -1528,13 +1528,13 @@ test "portable swap removes a retired file the payload leaves out, and rollback 
     const displaced = try tmp.dir.readFileAlloc(alloc, "displaced/ghostty-vt.dll", 16);
     defer alloc.free(displaced);
     try std.testing.expectEqualStrings("old vt", displaced);
-    const swapped = try tmp.dir.readFileAlloc(alloc, "install/noctty.com", 32);
+    const swapped = try tmp.dir.readFileAlloc(alloc, "install/koreterm.com", 32);
     defer alloc.free(swapped);
-    try std.testing.expectEqualStrings("new noctty.com", swapped);
+    try std.testing.expectEqualStrings("new koreterm.com", swapped);
     for ([_][2][]const u8{
         .{ "install/user-data.txt", "keep" },
         .{ "install/ghostty-vt.dll.txt", "keep too" },
-        .{ "install/noctty.portable", "" },
+        .{ "install/koreterm.portable", "" },
     }) |kept| {
         const contents = try tmp.dir.readFileAlloc(alloc, kept[0], 16);
         defer alloc.free(contents);
@@ -1544,8 +1544,8 @@ test "portable swap removes a retired file the payload leaves out, and rollback 
     try rollback(alloc, install_root, backup_root, displaced_root);
     for ([_][2][]const u8{
         .{ "install/ghostty-vt.dll", "old vt" },
-        .{ "install/noctty.com", "old com" },
-        .{ "install/noctty.exe", "old exe" },
+        .{ "install/koreterm.com", "old com" },
+        .{ "install/koreterm.exe", "old exe" },
         .{ "install/user-data.txt", "keep" },
     }) |restored| {
         const contents = try tmp.dir.readFileAlloc(alloc, restored[0], 16);
@@ -1561,8 +1561,8 @@ test "portable rollback succeeds when the swap failed on a file held without del
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     try tmp.dir.makePath("install/share");
-    try tmp.dir.writeFile(.{ .sub_path = "install/noctty.exe", .data = "old exe" });
-    try tmp.dir.writeFile(.{ .sub_path = "install/noctty.com", .data = "old com" });
+    try tmp.dir.writeFile(.{ .sub_path = "install/koreterm.exe", .data = "old exe" });
+    try tmp.dir.writeFile(.{ .sub_path = "install/koreterm.com", .data = "old com" });
     try tmp.dir.writeFile(.{ .sub_path = "install/ghostty-vt.dll", .data = "old vt" });
     try tmp.dir.writeFile(.{ .sub_path = "install/share/theme.txt", .data = "old share" });
     try writeTestPayload(tmp.dir, "payload", &retired_entries);
@@ -1597,21 +1597,21 @@ test "portable rollback succeeds when the swap failed on a file held without del
     defer std.os.windows.CloseHandle(holder);
 
     try prepareBackup(alloc, install_root, backup_root);
-    // The swap replaced noctty.com, then could not move the held DLL aside.
+    // The swap replaced koreterm.com, then could not move the held DLL aside.
     if (swapPayload(alloc, install_root, payload_root, backup_root, displaced_root)) |_| {
         return error.TestExpectedError;
     } else |_| {}
-    const partial = try tmp.dir.readFileAlloc(alloc, "install/noctty.com", 32);
+    const partial = try tmp.dir.readFileAlloc(alloc, "install/koreterm.com", 32);
     defer alloc.free(partial);
-    try std.testing.expectEqualStrings("new noctty.com", partial);
+    try std.testing.expectEqualStrings("new koreterm.com", partial);
 
     // Rollback leaves the untouched, still held DLL alone and restores the
     // rest, so the helper goes on to relaunch the old build.
     try rollback(alloc, install_root, backup_root, displaced_root);
     for ([_][2][]const u8{
-        .{ "install/noctty.com", "old com" },
+        .{ "install/koreterm.com", "old com" },
         .{ "install/ghostty-vt.dll", "old vt" },
-        .{ "install/noctty.exe", "old exe" },
+        .{ "install/koreterm.exe", "old exe" },
         .{ "install/share/theme.txt", "old share" },
     }) |restored| {
         const contents = try tmp.dir.readFileAlloc(alloc, restored[0], 16);
@@ -1626,7 +1626,7 @@ test "portable swap of an install without the retired file, or a payload with it
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     try tmp.dir.makePath("install");
-    try tmp.dir.writeFile(.{ .sub_path = "install/noctty.exe", .data = "old exe" });
+    try tmp.dir.writeFile(.{ .sub_path = "install/koreterm.exe", .data = "old exe" });
     try writeTestPayload(tmp.dir, "without", &retired_entries);
     try writeTestPayload(tmp.dir, "with", &.{});
 
@@ -1663,10 +1663,10 @@ test "portable swap refuses a payload missing a required entry before replacing 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     try tmp.dir.makePath("install");
-    try tmp.dir.writeFile(.{ .sub_path = "install/noctty.com", .data = "old com" });
+    try tmp.dir.writeFile(.{ .sub_path = "install/koreterm.com", .data = "old com" });
     try tmp.dir.writeFile(.{ .sub_path = "install/ghostty-vt.dll", .data = "old vt" });
-    // Missing noctty.exe, which the swap would reach last.
-    try writeTestPayload(tmp.dir, "payload", &.{ "noctty.exe", "ghostty-vt.dll" });
+    // Missing koreterm.exe, which the swap would reach last.
+    try writeTestPayload(tmp.dir, "payload", &.{ "koreterm.exe", "ghostty-vt.dll" });
 
     const root = try tmp.dir.realpathAlloc(alloc, ".");
     defer alloc.free(root);
@@ -1685,7 +1685,7 @@ test "portable swap refuses a payload missing a required entry before replacing 
         swapPayload(alloc, install_root, payload_root, backup_root, displaced_root),
     );
     for ([_][2][]const u8{
-        .{ "install/noctty.com", "old com" },
+        .{ "install/koreterm.com", "old com" },
         .{ "install/ghostty-vt.dll", "old vt" },
     }) |kept| {
         const contents = try tmp.dir.readFileAlloc(alloc, kept[0], 16);
@@ -1696,11 +1696,11 @@ test "portable swap refuses a payload missing a required entry before replacing 
 
 test "portable update rejects unsafe ZIP entry paths" {
     const testing = std.testing;
-    try testing.expect(isSafeZipEntryPath("noctty/"));
-    try testing.expect(isSafeZipEntryPath("noctty/share/ghostty/themes/a"));
-    try testing.expect(!isSafeZipEntryPath("/noctty/noctty.exe"));
-    try testing.expect(!isSafeZipEntryPath("C:/noctty/noctty.exe"));
-    try testing.expect(!isSafeZipEntryPath("noctty/../../outside"));
-    try testing.expect(!isSafeZipEntryPath("noctty\\noctty.exe"));
-    try testing.expect(!isSafeZipEntryPath("other/noctty.exe"));
+    try testing.expect(isSafeZipEntryPath("koreterm/"));
+    try testing.expect(isSafeZipEntryPath("koreterm/share/ghostty/themes/a"));
+    try testing.expect(!isSafeZipEntryPath("/koreterm/koreterm.exe"));
+    try testing.expect(!isSafeZipEntryPath("C:/koreterm/koreterm.exe"));
+    try testing.expect(!isSafeZipEntryPath("koreterm/../../outside"));
+    try testing.expect(!isSafeZipEntryPath("koreterm\\koreterm.exe"));
+    try testing.expect(!isSafeZipEntryPath("other/koreterm.exe"));
 }

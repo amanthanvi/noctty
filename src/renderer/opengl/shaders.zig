@@ -341,7 +341,7 @@ fn initPostPipelines(
     return pipelines;
 }
 
-/// noctty divergence (#640): presents a frame whose alpha the window manager
+/// koreterm divergence (#640): presents a frame whose alpha the window manager
 /// composes, from a sampled offscreen target (`OpenGL.present`).
 pub fn initPresentComposedPipeline() !Pipeline {
     return try Pipeline.init(null, .{

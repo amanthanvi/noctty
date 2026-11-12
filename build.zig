@@ -44,7 +44,7 @@ pub fn build(b: *std.Build) !void {
 
     // lld-link defaults to /OPT:NOREF,NOICF when it writes a PDB (/DEBUG), so a
     // release image that keeps its symbols (-Dstrip=false) would keep every
-    // unreferenced function: +2 MB on noctty.exe against the stripped release,
+    // unreferenced function: +2 MB on koreterm.exe against the stripped release,
     // none of it the debug info. Zig has no option for it on COFF, but lld
     // (the in-process one included) reads extra arguments from _LINK_, and
     // every compile step runs with this environment. REF gives back what a
@@ -95,7 +95,7 @@ pub fn build(b: *std.Build) !void {
         break :resources try GhosttyResources.init(b, &config, &deps);
     } else null;
 
-    // noctty executable, the actual runnable app binary.
+    // koreterm executable, the actual runnable app binary.
     const exe = if (config.app_runtime != .none)
         try GhosttyExe.init(b, &config, &deps)
     else
@@ -269,12 +269,12 @@ pub fn build(b: *std.Build) !void {
         _ = try deps.add(test_exe);
         // The installer script, for the test that holds its toast activator
         // CLSID to the runtime's (`@embedFile` cannot leave src/).
-        test_exe.root_module.addAnonymousImport("noctty_iss", .{
-            .root_source_file = b.path("dist/windows/noctty.iss"),
+        test_exe.root_module.addAnonymousImport("koreterm_iss", .{
+            .root_source_file = b.path("dist/windows/koreterm.iss"),
         });
 
         // An empty exe carrying the app's PE resource, built with the same
-        // flags as noctty.exe, so the updater's downgrade guard is tested
+        // flags as koreterm.exe, so the updater's downgrade guard is tested
         // against a real version block without compiling the whole app.
         if (config.target.result.os.tag == .windows) {
             const fixture_exe = b.addExecutable(.{

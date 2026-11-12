@@ -9,17 +9,17 @@ function Assert-PortableManifestMatchesPayload {
         [System.StringComparer]::Ordinal
     )
     foreach ($name in @(
-        'noctty.com',
-        'noctty.exe',
+        'koreterm.com',
+        'koreterm.exe',
         'ghostty-vt.dll',
-        'noctty-terminal-handoff-proxy.dll',
+        'koreterm-terminal-handoff-proxy.dll',
         'conpty.dll',
         'OpenConsole.exe',
         'LICENSE',
         'LICENSE-conpty.txt',
         'config-template.ghostty',
         'README.md',
-        'noctty.ico',
+        'koreterm.ico',
         'share'
     )) {
         [void]$managedRootFiles.Add($name)

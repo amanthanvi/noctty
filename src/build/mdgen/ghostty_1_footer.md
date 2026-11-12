@@ -1,15 +1,15 @@
 # FILES
 
-_\$XDG_CONFIG_HOME/noctty/config.ghostty_
+_\$XDG_CONFIG_HOME/koreterm/config.ghostty_
 
 : Location of the default configuration file.
 
-_\$HOME/Library/Application Support/io.github.amanthanvi.noctty/config.ghostty_
+_\$HOME/Library/Application Support/io.github.amanthanvi.koreterm/config.ghostty_
 
 : **On macOS**, location of the default configuration file. This location takes
 precedence over the XDG environment locations.
 
-_\$LOCALAPPDATA/noctty/config.ghostty_
+_\$LOCALAPPDATA/koreterm/config.ghostty_
 
 : **On Windows**, if _\$XDG_CONFIG_HOME_ is not set, _\$LOCALAPPDATA_ will be searched
 for configuration files.
@@ -22,13 +22,13 @@ for configuration files.
 
 **GHOSTTY_RESOURCES_DIR**
 
-: Where the noctty runtime resources can be found. (The variable name is kept for compatibility with tooling that targets the upstream Ghostty terminal core.)
+: Where the koreterm runtime resources can be found. (The variable name is kept for compatibility with tooling that targets the upstream Ghostty terminal core.)
 
 **XDG_CONFIG_HOME**
 
 : Default location for configuration files.
 
-**$HOME/Library/Application Support/io.github.amanthanvi.noctty**
+**$HOME/Library/Application Support/io.github.amanthanvi.koreterm**
 
 : **MACOS ONLY** default location for configuration files. This location takes
 precedence over the XDG environment locations.
@@ -40,7 +40,7 @@ precedence over the XDG environment locations.
 **GHOSTTY_LOG**
 
 : The `GHOSTTY_LOG` environment variable can be used to control which
-destinations receive logs. noctty currently defines two destinations:
+destinations receive logs. koreterm currently defines two destinations:
 
 : - `stderr` - logging to `stderr`.
 : - `macos` - logging to macOS's unified log (has no effect on non-macOS platforms).
@@ -60,4 +60,4 @@ Aman Thanvi and contributors <https://github.com/amanthanvi/noctty/graphs/contri
 
 # SEE ALSO
 
-**noctty(5)**
+**koreterm(5)**

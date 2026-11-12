@@ -50,12 +50,12 @@ function Invoke-InteractiveWin11Job {
         [hashtable] $StateGuardArguments = @{}
     )
 
-    $savedMeasureAumid = $env:NOCTTY_INTERACTIVE_MEASURE_AUMID
+    $savedMeasureAumid = $env:KORETERM_INTERACTIVE_MEASURE_AUMID
     $stateGuard = $null
     $failures = [Collections.Generic.List[string]]::new()
     try {
         # Inherited by every leaf and its bootstrap, as in the composite.
-        $env:NOCTTY_INTERACTIVE_MEASURE_AUMID = '1'
+        $env:KORETERM_INTERACTIVE_MEASURE_AUMID = '1'
         [void] [IO.Directory]::CreateDirectory($ReceiptDirectory)
         $stateGuard = Start-InteractiveWin11StateGuard -Harness 'interactive-win11-job.ps1' -ReceiptDirectory $ReceiptDirectory @StateGuardArguments
         $layout = Get-InteractiveWin11MeasureLayout $RepoRoot
@@ -75,7 +75,7 @@ function Invoke-InteractiveWin11Job {
     }
     catch { $failures.Add($_.Exception.Message) }
     finally {
-        $env:NOCTTY_INTERACTIVE_MEASURE_AUMID = $savedMeasureAumid
+        $env:KORETERM_INTERACTIVE_MEASURE_AUMID = $savedMeasureAumid
         if ($null -ne $stateGuard) {
             try { Assert-InteractiveWin11StateGuard -Guard $stateGuard }
             catch { $failures.Add($_.Exception.Message) }

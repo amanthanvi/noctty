@@ -78,7 +78,7 @@ if ($ResetState) { $forwardedArgs += '-ResetState' }
 Invoke-InteractiveWin11HarnessMain `
     -RepoRoot $repoRoot `
     -LauncherPath $launcherPath `
-    -EnvironmentVariable 'NOCTTY_INTERACTIVE_WIN11_KEY_INPUT_BOOTSTRAPPED' `
+    -EnvironmentVariable 'KORETERM_INTERACTIVE_WIN11_KEY_INPUT_BOOTSTRAPPED' `
     -ArgumentList $forwardedArgs
 
 Add-Type -TypeDefinition @'
@@ -266,7 +266,7 @@ function Find-HostWindow {
             return $true
         }
 
-        if ((Get-WindowClassName -Hwnd $hwnd) -eq 'noctty.win32.host') {
+        if ((Get-WindowClassName -Hwnd $hwnd) -eq 'koreterm.win32.host') {
             $script:Win11KeyInputFoundHost = $hwnd
             return $false
         }
@@ -287,7 +287,7 @@ function Find-SurfaceWindow {
     $callback = [Win11KeyInputNative+EnumWindowsProc] {
         param([IntPtr] $hwnd, [IntPtr] $lParam)
 
-        if ((Get-WindowClassName -Hwnd $hwnd) -eq 'noctty.win32') {
+        if ((Get-WindowClassName -Hwnd $hwnd) -eq 'koreterm.win32') {
             $script:Win11KeyInputFoundSurface = $hwnd
             return $false
         }
@@ -352,7 +352,7 @@ function Send-VirtualKeyMessage {
         throw "MapVirtualKeyW returned 0 for VK=$VirtualKey"
     }
 
-    # noctty takes a key's text from ToUnicode with the keyboard state at
+    # koreterm takes a key's text from ToUnicode with the keyboard state at
     # key-down, not from the WM_CHAR that follows, so Caps Lock or a held
     # modifier on this machine would change what a sent 'a' types. Share the
     # window's input queue and hand it a neutral state for this key, then put
@@ -605,7 +605,7 @@ try {
             $info = Get-GuiThreadInfo -Hwnd $hostHwnd
             $focused = $null -ne $info -and
                 $info.FocusHwnd -ne [IntPtr]::Zero -and
-                (Get-WindowClassName -Hwnd $info.FocusHwnd) -eq 'noctty.win32'
+                (Get-WindowClassName -Hwnd $info.FocusHwnd) -eq 'koreterm.win32'
             if (-not $focused) {
                 [void] [InteractiveWin11WindowNative]::ForceForeground($hostHwnd, $false, $false)
             }
@@ -643,7 +643,7 @@ try {
             $keyInputProcess.Refresh()
             if ($keyInputProcess.HasExited) {
                 $exitCode = Get-InteractiveWin11ProcessExitCode -Process $keyInputProcess -ProcessHandle $keyInputProcessHandle
-                throw "noctty exited while waiting for key input result file (exit code $exitCode)"
+                throw "koreterm exited while waiting for key input result file (exit code $exitCode)"
             }
             return $false
         }

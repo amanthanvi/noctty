@@ -24,24 +24,24 @@ foreach($line in $lines) { [Console]::Write($line+"`r`n") }
 # The split-dim cases compare a pane with itself across focus changes, and
 # the cursor's shape follows keyboard focus.
 if ($HideCursor) { [Console]::Write("$e[?25l") }
-if ($env:NOCTTY_RENDERER_TEST_KITTY -eq '1') { [Console]::Write("$e`_Ga=T,f=24,s=1,v=1,c=1,r=1,i=1; /wAA$e\".Replace('; ', ';')) }; if ($env:NOCTTY_RENDERER_READY_PATH) { [IO.File]::WriteAllText($env:NOCTTY_RENDERER_READY_PATH,'fixture-written') }; if ($Stream) {
+if ($env:KORETERM_RENDERER_TEST_KITTY -eq '1') { [Console]::Write("$e`_Ga=T,f=24,s=1,v=1,c=1,r=1,i=1; /wAA$e\".Replace('; ', ';')) }; if ($env:KORETERM_RENDERER_READY_PATH) { [IO.File]::WriteAllText($env:KORETERM_RENDERER_READY_PATH,'fixture-written') }; if ($Stream) {
  Start-Sleep -Seconds 2
  $clock=[Diagnostics.Stopwatch]::StartNew()
  $frame=0
  while($clock.Elapsed.TotalSeconds -lt 45) {
   [Console]::Write("$e[?2026h$e[14;1H$e[38;2;100;200;250mSTREAM frame=$frame$e[0m " + ('abcdef 日本語 😀 '*5) + "$e[K$e[15;1H" + ('─'*70) + "$e[?2026l")
   $frame++
-  if ($env:NOCTTY_RENDERER_TEST_IMAGE_CHURN -eq '1' -and $frame % 5 -eq 0) {
+  if ($env:KORETERM_RENDERER_TEST_IMAGE_CHURN -eq '1' -and $frame % 5 -eq 0) {
    $imageId = 1000 + [int]($frame / 5)
    # Distinct visible IDs exercise renderer-owned copies before each deletion.
    if ($imageId -gt 1001) { [Console]::Write("$e`_Ga=d,d=I,i=$($imageId-1),q=2$e\") }
    [Console]::Write("$e`_Ga=T,f=24,s=1,v=1,c=1,r=1,i=$imageId,q=2;/wAA$e\")
   }
-  if($frame % 30 -eq 0 -and $env:NOCTTY_RENDERER_STREAM_PROGRESS_FILE){
+  if($frame % 30 -eq 0 -and $env:KORETERM_RENDERER_STREAM_PROGRESS_FILE){
    $checkpoint=$frame.ToString()+','+$clock.ElapsedMilliseconds.ToString()+','+[Environment]::TickCount64.ToString()
    try {
-    [IO.File]::WriteAllText($env:NOCTTY_RENDERER_STREAM_PROGRESS_FILE+'.tmp', $checkpoint)
-    [IO.File]::Move($env:NOCTTY_RENDERER_STREAM_PROGRESS_FILE+'.tmp', $env:NOCTTY_RENDERER_STREAM_PROGRESS_FILE, $true)
+    [IO.File]::WriteAllText($env:KORETERM_RENDERER_STREAM_PROGRESS_FILE+'.tmp', $checkpoint)
+    [IO.File]::Move($env:KORETERM_RENDERER_STREAM_PROGRESS_FILE+'.tmp', $env:KORETERM_RENDERER_STREAM_PROGRESS_FILE, $true)
    } catch [IO.IOException] { } # Retry at the next checkpoint if a reader holds the file.
   }
   Start-Sleep -Milliseconds $IntervalMs
@@ -56,9 +56,9 @@ if ($env:NOCTTY_RENDERER_TEST_KITTY -eq '1') { [Console]::Write("$e`_Ga=T,f=24,s
 # cursor's row as well.
 if ($Tick) {
  $clock=[Diagnostics.Stopwatch]::StartNew()
- while(!(Test-Path -LiteralPath ($env:NOCTTY_RENDERER_READY_PATH+'.blink')) -and $clock.Elapsed.TotalSeconds -lt 85) { Start-Sleep -Milliseconds 50 }
+ while(!(Test-Path -LiteralPath ($env:KORETERM_RENDERER_READY_PATH+'.blink')) -and $clock.Elapsed.TotalSeconds -lt 85) { Start-Sleep -Milliseconds 50 }
  [Console]::Write("$e[1 q")
- while(!(Test-Path -LiteralPath ($env:NOCTTY_RENDERER_READY_PATH+'.tick')) -and $clock.Elapsed.TotalSeconds -lt 85) { Start-Sleep -Milliseconds 50 }
+ while(!(Test-Path -LiteralPath ($env:KORETERM_RENDERER_READY_PATH+'.tick')) -and $clock.Elapsed.TotalSeconds -lt 85) { Start-Sleep -Milliseconds 50 }
  [Console]::Write("$e[2 q")
  $count=0
  while($clock.Elapsed.TotalSeconds -lt 85) { [Console]::Write("${e}7$e[20;1HTICK $count$e[K${e}8"); $count++; Start-Sleep -Milliseconds 200 }

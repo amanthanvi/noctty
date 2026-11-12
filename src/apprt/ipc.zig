@@ -53,7 +53,7 @@ pub const Target = union(Key) {
     }
 };
 
-pub const automation_window_list_schema = "noctty.windows.v3";
+pub const automation_window_list_schema = "koreterm.windows.v3";
 pub const automation_window_list_api_version: u32 = 3;
 
 comptime {

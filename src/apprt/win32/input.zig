@@ -948,7 +948,7 @@ pub fn hotkeySpecEql(a: GlobalHotkeySpec, b: GlobalHotkeySpec) bool {
 
 pub fn hotkeyRegistrationFailureReason(err: windows.Win32Error) []const u8 {
     return switch (err) {
-        .HOTKEY_ALREADY_REGISTERED => "already registered by another app or another noctty instance",
+        .HOTKEY_ALREADY_REGISTERED => "already registered by another app or another koreterm instance",
         .ACCESS_DENIED => "access denied; hotkey may be reserved, occupied by an elevated app, or blocked by policy",
         .INVALID_PARAMETER => "invalid modifier or virtual-key combination",
         else => "unknown Win32 RegisterHotKey failure",
@@ -2899,7 +2899,7 @@ const TestingLayout = struct {
     key_state: [256]u8,
     lock: windows.HANDLE,
 
-    const lock_name = std.unicode.utf8ToUtf16LeStringLiteral("Local\\noctty-tests-keyboard-layouts");
+    const lock_name = std.unicode.utf8ToUtf16LeStringLiteral("Local\\koreterm-tests-keyboard-layouts");
     /// Each holder keeps the lock for a few milliseconds; a wait this long
     /// means a holder is stuck.
     const lock_timeout_ms = 60_000;
@@ -3175,7 +3175,7 @@ test "win32 key record takes the pump's characters and translates releases" {
 
 // The console host makes no record for the key messages it ignores: the
 // left Ctrl Windows synthesizes for AltGr (`FAKE_KEYSTROKE`) and a key the
-// IME took. Neither does noctty, while the ordinary message keeps its record.
+// IME took. Neither does koreterm, while the ordinary message keeps its record.
 test "win32 key record is skipped for the key messages the console host ignores" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
     const keyboard = TestingKeyboard.pinNone();
@@ -3497,7 +3497,7 @@ test "win32 hotkeyRegistrationFailureReason names conflicts" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
     try std.testing.expectEqualStrings(
-        "already registered by another app or another noctty instance",
+        "already registered by another app or another koreterm instance",
         hotkeyRegistrationFailureReason(.HOTKEY_ALREADY_REGISTERED),
     );
     try std.testing.expectEqualStrings(

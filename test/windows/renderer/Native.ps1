@@ -65,9 +65,9 @@ public static class RendererNative {
    }
   } finally {Marshal.FreeHGlobal(env);}
  }
- public static IntPtr Host(int pid) { IntPtr found=IntPtr.Zero; EnumWindows((h,l)=>{int p;GetWindowThreadProcessId(h,out p);if(p==pid && ClassOf(h)=="noctty.win32.host") found=h;return true;},IntPtr.Zero);return found; }
- public static IntPtr Surface(IntPtr host) { IntPtr found=IntPtr.Zero; EnumChildWindows(host,(h,l)=>{if(ClassOf(h)=="noctty.win32" && IsWindowVisible(h)) {found=h;return false;}return true;},IntPtr.Zero);return found; }
- public static IntPtr[] Surfaces(IntPtr host,bool visibleOnly) { var found=new List<IntPtr>();EnumChildWindows(host,(h,l)=>{if(ClassOf(h)=="noctty.win32" && (!visibleOnly || IsWindowVisible(h))) found.Add(h);return true;},IntPtr.Zero);return found.ToArray(); }
+ public static IntPtr Host(int pid) { IntPtr found=IntPtr.Zero; EnumWindows((h,l)=>{int p;GetWindowThreadProcessId(h,out p);if(p==pid && ClassOf(h)=="koreterm.win32.host") found=h;return true;},IntPtr.Zero);return found; }
+ public static IntPtr Surface(IntPtr host) { IntPtr found=IntPtr.Zero; EnumChildWindows(host,(h,l)=>{if(ClassOf(h)=="koreterm.win32" && IsWindowVisible(h)) {found=h;return false;}return true;},IntPtr.Zero);return found; }
+ public static IntPtr[] Surfaces(IntPtr host,bool visibleOnly) { var found=new List<IntPtr>();EnumChildWindows(host,(h,l)=>{if(ClassOf(h)=="koreterm.win32" && (!visibleOnly || IsWindowVisible(h))) found.Add(h);return true;},IntPtr.Zero);return found.ToArray(); }
  public static bool Action(IntPtr surf,int action) { IntPtr result;return SendMessageTimeoutW(surf,0x8056,(IntPtr)action,IntPtr.Zero,2,5000,out result)!=IntPtr.Zero && result!=IntPtr.Zero; }
  public static bool Scale(IntPtr surf,int dpi) { IntPtr result;return SendMessageTimeoutW(surf,0x8057,(IntPtr)dpi,IntPtr.Zero,2,5000,out result)!=IntPtr.Zero && result!=IntPtr.Zero; }
  public static bool LoseDevice(IntPtr surf) { IntPtr result;return SendMessageTimeoutW(surf,0x8050,IntPtr.Zero,IntPtr.Zero,2,5000,out result)!=IntPtr.Zero && result!=IntPtr.Zero; }

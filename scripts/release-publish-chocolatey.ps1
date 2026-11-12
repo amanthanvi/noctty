@@ -3,7 +3,7 @@ param(
     # $Version reaches a package file name and a public feed query. \A and \z
     # rather than ^ and $ because .NET's $ also matches before a trailing
     # newline, and [0-9] rather than \d because .NET's \d matches every Unicode
-    # decimal digit. Both would otherwise pass a value that is not a noctty
+    # decimal digit. Both would otherwise pass a value that is not a koreterm
     # release version.
     [Parameter(Mandatory = $true)]
     [ValidatePattern('\A[0-9]+\.[0-9]+\.[0-9]+\z')]
@@ -50,7 +50,7 @@ if ([string]::IsNullOrWhiteSpace($ArtifactRoot)) {
     $ArtifactRoot = Join-Path $repoRoot 'dist/artifacts'
 }
 $ArtifactRoot = [System.IO.Path]::GetFullPath($ArtifactRoot)
-$artifactDirectoryX64 = Join-Path $ArtifactRoot "noctty-$Version-windows-x64"
+$artifactDirectoryX64 = Join-Path $ArtifactRoot "koreterm-$Version-windows-x64"
 $metadataPath = Join-Path $artifactDirectoryX64 'package-managers/metadata.json'
 $metadata = Get-Content -LiteralPath $metadataPath -Raw | ConvertFrom-Json
 
@@ -117,7 +117,7 @@ if (-not $PSCmdlet.ShouldProcess($PushSource, "publish $packageName $Version to 
     return
 }
 
-$packageOutputDir = Join-Path $RunnerTemp "noctty-chocolatey-$Version"
+$packageOutputDir = Join-Path $RunnerTemp "koreterm-chocolatey-$Version"
 if (Test-Path -LiteralPath $packageOutputDir) {
     Remove-Item -LiteralPath $packageOutputDir -Recurse -Force
 }

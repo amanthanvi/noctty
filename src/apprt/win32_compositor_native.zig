@@ -624,7 +624,7 @@ test "native driver attaches commits and detaches a real top-level HWND" {
     const hwnd = sys.CreateWindowExW(
         0,
         std.unicode.utf8ToUtf16LeStringLiteral("STATIC"),
-        std.unicode.utf8ToUtf16LeStringLiteral("noctty compositor smoke"),
+        std.unicode.utf8ToUtf16LeStringLiteral("koreterm compositor smoke"),
         0,
         0,
         0,

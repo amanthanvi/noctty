@@ -1,6 +1,6 @@
 #version 430 core
 
-// noctty divergence (#640): presents a frame whose alpha the window manager
+// koreterm divergence (#640): presents a frame whose alpha the window manager
 // composes (Win32 blur-behind). With linear blending the target stores linear
 // premultiplied color that the framebuffer sRGB-encodes per channel,
 // srgb(c * a) with alpha a, while DWM composes sRGB-premultiplied pixels,

@@ -201,7 +201,7 @@ pub const TestHooks = if (builtin.is_test) struct {
     pub threadlocal var direct_volume_mapping: ?*const fn ([*:0]const u16, []u16) ?[]const u16 = null;
 
     pub fn unavailableVolume(_: [*:0]const u16, buf: []u16) ?[]const u16 {
-        const device = std.unicode.utf8ToUtf16LeStringLiteral("\\Device\\NocttyNoSuchVolume");
+        const device = std.unicode.utf8ToUtf16LeStringLiteral("\\Device\\KoretermNoSuchVolume");
         @memcpy(buf[0..device.len], device);
         return buf[0..device.len];
     }
@@ -392,11 +392,11 @@ const IsWow64Process2Fn = *const fn (
 /// Ask Windows for the process and native machine architecture, or null when
 /// it cannot be determined.
 ///
-/// `IsWow64Process2` needs Windows 10 1709, below noctty's own Windows 10 1809
+/// `IsWow64Process2` needs Windows 10 1709, below koreterm's own Windows 10 1809
 /// floor, so this should always succeed in practice. It is still resolved
 /// through `GetProcAddress` rather than statically imported, because a static
 /// import turns a missing export into a process-load failure for every user,
-/// and a diagnostic aid must never be the reason noctty cannot start.
+/// and a diagnostic aid must never be the reason koreterm cannot start.
 pub fn detectProcessArchitecture() ?ProcessArchitecture {
     if (comptime builtin.os.tag != .windows) return null;
 
@@ -491,7 +491,7 @@ test "Windows process architecture detection reaches IsWow64Process2" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
     try std.testing.expect(build_machine != IMAGE_FILE_MACHINE_UNKNOWN);
 
-    // IsWow64Process2 needs Windows 10 1709 and noctty's own floor is 1809,
+    // IsWow64Process2 needs Windows 10 1709 and koreterm's own floor is 1809,
     // so on any machine that can run this suite the export exists and the
     // call succeeds. Accepting null here would let a broken signature, a bad
     // cast, or a misspelled export name pass unnoticed.
@@ -569,7 +569,7 @@ fn isInnoUninstallerFileName(name: []const u8, extension: []const u8) bool {
 
 pub fn innoUninstallRegistryMatchesInstallDir(install_dir: []const u8) bool {
     if (builtin.os.tag != .windows) return false;
-    // dist/windows/noctty.iss deliberately retains this AppId. Inno appends
+    // dist/windows/koreterm.iss deliberately retains this AppId. Inno appends
     // `_is1` to AppId for its uninstall key and records InstallLocation there.
     const uninstall_subkey = std.unicode.utf8ToUtf16LeStringLiteral(
         "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\io.github.amanthanvi.winghostty_is1",
@@ -643,7 +643,7 @@ test "Windows installer management recognizes Inno uninstaller markers" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
     try std.testing.expect(isInnoUninstallerFileName("unins000.exe", ".exe"));
     try std.testing.expect(isInnoUninstallerFileName("UNINS001.DAT", ".dat"));
-    try std.testing.expect(!isInnoUninstallerFileName("noctty.exe", ".exe"));
+    try std.testing.expect(!isInnoUninstallerFileName("koreterm.exe", ".exe"));
     try std.testing.expect(!isInnoUninstallerFileName("unins.exe", ".exe"));
 
     var tmp = std.testing.tmpDir(.{});
@@ -659,12 +659,12 @@ test "Windows installer management recognizes Inno uninstaller markers" {
 test "Windows installer registry paths compare case-insensitively with trailing separators" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
     try std.testing.expect(windowsInstallPathsEqual(
-        std.unicode.utf8ToUtf16LeStringLiteral("C:\\Program Files\\Noctty\\"),
-        std.unicode.utf8ToUtf16LeStringLiteral("c:\\program files\\noctty"),
+        std.unicode.utf8ToUtf16LeStringLiteral("C:\\Program Files\\Koreterm\\"),
+        std.unicode.utf8ToUtf16LeStringLiteral("c:\\program files\\koreterm"),
     ));
     try std.testing.expect(!windowsInstallPathsEqual(
-        std.unicode.utf8ToUtf16LeStringLiteral("C:\\Program Files\\Noctty-old"),
-        std.unicode.utf8ToUtf16LeStringLiteral("C:\\Program Files\\Noctty"),
+        std.unicode.utf8ToUtf16LeStringLiteral("C:\\Program Files\\Koreterm-old"),
+        std.unicode.utf8ToUtf16LeStringLiteral("C:\\Program Files\\Koreterm"),
     ));
     try std.testing.expect(registeredInstallLocationMatchesWtf8(
         &[_]u16{ 'C', ':', '\\', 0xd800 },

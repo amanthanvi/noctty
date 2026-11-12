@@ -2,12 +2,12 @@
 
 Build with `zig build -Doptimize=ReleaseFast -Dcustom-shaders=true
 -Drenderer-test-tools=true`, then run `Invoke-RendererParity.ps1 -Binary
-<prefix>/bin/noctty.exe -OutputDirectory <new directory>`. On a development
+<prefix>/bin/koreterm.exe -OutputDirectory <new directory>`. On a development
 host, add `-RequireHardware` to require hardware parity rather than accepting
 WARP as the hardware candidate. `-WarpOnly` runs lifecycle coverage without
 needing an OpenGL 4.3 driver and is used on hosted x64 and native ARM64 CI.
 
-Every run copies the executable beside `noctty.portable`, stages the pinned
+Every run copies the executable beside `koreterm.portable`, stages the pinned
 ConPTY pair, redirects both app-data roots, verifies a private desktop, and
 checks the real startup-profile hash and mtime before and after launches.
 The caller can pin the accepted baseline with `-ExpectedProfileHash` and
@@ -84,7 +84,7 @@ The palette theme cases (`-PaletteThemeOnly` runs just them, and `-WarpOnly`
 runs the WARP one) read the command palette's theme preview, cancel and commit
 from the renderer's own frames, so nothing on the screen can disturb them.
 `../interactive-win11-palette-theme.ps1` reads screen pixels, and a
-release-evidence run of it once read `3c3c3c`, which is no noctty colour, where
+release-evidence run of it once read `3c3c3c`, which is no koreterm colour, where
 it expected Dracula (attributed to another window over the app, not measured).
 The fixture's config sets `theme = Dracula`, whose background is `282a36`, and
 no background or foreground of its own. The case opens the palette through the
@@ -138,7 +138,7 @@ Resize now checks actual swapchain dimensions and a new ResizeBuffers receipt,
 in addition to offscreen readback. Host notices are suppressed only in this
 test-tools parity run to keep reference geometry identical; production and the
 visible check retain them. The OpenGL startup fallback case reads its banner
-through UIA instead, and sets `NOCTTY_RENDERER_KEEP_NOTICES` (also honoured only
+through UIA instead, and sets `KORETERM_RENDERER_KEEP_NOTICES` (also honoured only
 by test-tools builds) so the banner stays up: an info banner counts down from its
 first paint, so a UI thread that is busy past the countdown no longer clears it
 unseen, but a slow UIA client may not reach it until the countdown is over.

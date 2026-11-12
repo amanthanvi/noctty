@@ -230,7 +230,7 @@ zig build bench:search-stream -- --mode=thread --lines=100000 --stream-mib=8 --r
 ## Measured interactive baseline
 
 First same-machine interactive baseline, recorded 2026-08-27 from
-`close-noctty-all-final-schema-n5-v3.json`. noctty `1.3.2-dev+windows`,
+`close-koreterm-all-final-schema-n5-v3.json`. koreterm `1.3.2-dev+windows`,
 `ReleaseFast`, commit `d031dc4`, exe SHA-256 `1a1bb883…a50378b`, Consolas 16 pt,
 45 rows x 140 columns, N = 5 per metric (`frame_time_p95_ms` pools 201 swap
 intervals).
@@ -397,7 +397,7 @@ machine/display fingerprint, endpoint, observers, and threshold provenance.
   evidence records what was actually chosen.
   `-MemoryCycles`
   repeats one-to-four-to-one pane lifecycles in the same process, from one to
-  five cycles. Every nondefault option is Noctty-memory-only and is rejected
+  five cycles. Every nondefault option is Koreterm-memory-only and is rejected
   with `-Gate`. Each cycle records its baseline and live private bytes, exact
   globally unique created surface IDs, every create/close pane count, the
   seven-second post-destroy settle, reclaimed bytes, and residual bytes. Repeated-cycle
@@ -438,7 +438,7 @@ machine/display fingerprint, endpoint, observers, and threshold provenance.
 
 ### Power and idle
 
-Recorded 2026-09-03, noctty `1.3.2-dev+windows`, `ReleaseFast`, from
+Recorded 2026-09-03, koreterm `1.3.2-dev+windows`, `ReleaseFast`, from
 `test/windows/bench-windows.ps1 -Metric idle -Runs 3 -IdleSeconds 30
 -ResetState`. Same machine as the tables above: Windows build 26200, Ryzen 9
 9900X, RTX 5070 Ti driver 32.0.16.1656, 3840x2160 at 240 Hz, 150% scale. It is
@@ -554,7 +554,7 @@ For physical acceptance:
 2. Use a hardware key actuator or switch-contact trigger and a photodiode taped
    over that cell, sampled by the same acquisition device. A 1,000 fps or faster
    camera may be used when its exposure and timestamp uncertainty are reported.
-3. Capture at least 30 trials for noctty and for the OS/compositor reference on
+3. Capture at least 30 trials for koreterm and for the OS/compositor reference on
    the same machine without changing display mode. Publish raw traces or frames,
    trigger/threshold rules, misses, median, p95, and measurement uncertainty.
 4. Subtract an OS/compositor floor only when it comes from the matched reference

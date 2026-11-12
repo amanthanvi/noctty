@@ -5,12 +5,12 @@ session that keeps ending the process while it is restored (PKG-45). Run with
 -Bin <Debug build bin directory> -Run <new evidence directory> -Label fixed for
 a build with the fix, or -Label main for one without (the label picks which
 behaviour the checks expect). The build must
-be a Debug build: its NOCTTY_DEBUG_CRASH_SESSION_RESTORE hook ends the process
+be a Debug build: its KORETERM_DEBUG_CRASH_SESSION_RESTORE hook ends the process
 with ExitProcess(3) after restore begins. Release builds have no such hook.
 
 Every file the app reads or writes is one this script creates beside a portable
-copy (`noctty.portable`), with LOCALAPPDATA and APPDATA redirected into the run
-directory: the real %LOCALAPPDATA%\noctty is never written or deleted, and only
+copy (`koreterm.portable`), with LOCALAPPDATA and APPDATA redirected into the run
+directory: the real %LOCALAPPDATA%\koreterm is never written or deleted, and only
 the hash and time of its startup state file are read, before and after. Every
 process starts on a private desktop named explicitly in STARTUPINFO, inside a
 job this script owns. Nothing is typed and nothing can copy; the clipboard
@@ -97,7 +97,7 @@ if (-not $Driver) {
     $Run = [IO.Path]::GetFullPath($Run)
     if (Test-Path -LiteralPath $Run) { throw 'Run directory must be new.' }
     $source = (Resolve-Path -LiteralPath $Bin).Path
-    if (-not (Test-Path -LiteralPath (Join-Path $source 'noctty.exe'))) { throw "No noctty.exe in $source." }
+    if (-not (Test-Path -LiteralPath (Join-Path $source 'koreterm.exe'))) { throw "No koreterm.exe in $source." }
     $before = Startup-Fingerprint
     $historyGuard = Start-WindowsHarnessHistoryGuard -Harness 'hidden-win11-restore-quarantine.ps1'
     $clipboardBefore = [HiddenLocal]::GetClipboardSequenceNumber()
@@ -109,7 +109,7 @@ if (-not $Driver) {
     $copy = Join-Path $Run 'case\bin'
     Copy-Portable $source $copy
     foreach ($name in @('localappdata','appdata')) { [void](New-Item -ItemType Directory -Path (Join-Path $Run $name)) }
-    $desktopName = 'noctty-rq-' + [guid]::NewGuid().ToString('N')
+    $desktopName = 'koreterm-rq-' + [guid]::NewGuid().ToString('N')
     $desktop = [HiddenLocal]::CreateDesktopW($desktopName,[IntPtr]::Zero,[IntPtr]::Zero,0,0x10000000,[IntPtr]::Zero)
     if ($desktop -eq [IntPtr]::Zero) { throw 'CreateDesktop failed.' }
     $oldLocal=$env:LOCALAPPDATA; $oldRoaming=$env:APPDATA
@@ -178,8 +178,8 @@ function Ledger([string]$Dir) {
     throw "Ledger stayed unreadable: $path"
 }
 function Launch-Once([string]$Build,[string]$Dir,[int]$Index) {
-    $exe = Join-Path $Dir 'noctty.exe'
-    $class = "noctty-test-pkg45-$([guid]::NewGuid().ToString('N').Substring(0,12))"
+    $exe = Join-Path $Dir 'koreterm.exe'
+    $class = "koreterm-test-pkg45-$([guid]::NewGuid().ToString('N').Substring(0,12))"
     $line = '"{0}" --config-file="{1}" --single-instance=false --class={2}' -f $exe,(Join-Path $Dir 'quarantine.ghostty'),$class
     $pi = [Rq]::Launch($exe,$line,$Dir,$Desktop,[IntPtr]::Zero)
     $record = @{ Build=$Build; Launch=$Index; Pid=$pi.pid; ExitCode=$null; HostWindow=$false; Notice=$null }
@@ -187,7 +187,7 @@ function Launch-Once([string]$Build,[string]$Dir,[int]$Index) {
         $deadline=[datetime]::UtcNow.AddSeconds(25)
         while ([datetime]::UtcNow -lt $deadline) {
             if ([HiddenLocal]::WaitForSingleObject($pi.process,100) -eq 0) { break }
-            $hosts = @([Rq]::Windows($pi.pid,'noctty.win32.host'))
+            $hosts = @([Rq]::Windows($pi.pid,'koreterm.win32.host'))
             $attempts = @(Ledger $Dir)
             $ready = $attempts.Count -gt 0 -and $null -ne $attempts[-1].ready_at_unix_ms
             if ($hosts.Count -gt 0 -and $ready) {
@@ -196,7 +196,7 @@ function Launch-Once([string]$Build,[string]$Dir,[int]$Index) {
                 $noticeDeadline=[datetime]::UtcNow.AddSeconds(4)
                 do {
                     foreach ($box in [Rq]::Windows($pi.pid,'#32770')) {
-                        if ([Rq]::Title($box) -eq 'noctty safe mode') { $record.Notice = [Rq]::MessageText($box) }
+                        if ([Rq]::Title($box) -eq 'koreterm safe mode') { $record.Notice = [Rq]::MessageText($box) }
                     }
                     if ($record.Notice) { break }
                     Start-Sleep -Milliseconds 100
@@ -205,7 +205,7 @@ function Launch-Once([string]$Build,[string]$Dir,[int]$Index) {
             }
         }
         if ([HiddenLocal]::WaitForSingleObject($pi.process,0) -ne 0) {
-            foreach ($h in [Rq]::Windows($pi.pid,'noctty.win32.host')) { [void][Rq]::PostMessageW($h,0x10,[IntPtr]::Zero,[IntPtr]::Zero) }
+            foreach ($h in [Rq]::Windows($pi.pid,'koreterm.win32.host')) { [void][Rq]::PostMessageW($h,0x10,[IntPtr]::Zero,[IntPtr]::Zero) }
             if ([HiddenLocal]::WaitForSingleObject($pi.process,8000) -ne 0) {
                 # Our own handle from CreateProcess: the exact process we started.
                 [void][Rq]::TerminateProcess($pi.process,1); [void][HiddenLocal]::WaitForSingleObject($pi.process,5000)
@@ -231,10 +231,10 @@ try {
         Set-Content -LiteralPath (Join-Path $dir 'session-state.json') -Value $session -NoNewline -Encoding utf8NoBOM
         $sessionHash = Hash-Of (Join-Path $dir 'session-state.json')
         @('command = cmd.exe /d /k','shell-integration = none','window-save-state = always','confirm-close-surface = false') | Set-Content -LiteralPath (Join-Path $dir 'quarantine.ghostty')
-        $env:NOCTTY_DEBUG_CRASH_SESSION_RESTORE = '1'
+        $env:KORETERM_DEBUG_CRASH_SESSION_RESTORE = '1'
         $runs = @()
         for ($i = 1; $i -le 5; $i++) { $runs += (Launch-Once $label $dir $i) }
-        Remove-Item Env:\NOCTTY_DEBUG_CRASH_SESSION_RESTORE
+        Remove-Item Env:\KORETERM_DEBUG_CRASH_SESSION_RESTORE
         $runs += (Launch-Once $label $dir 6)
         Check $label 'launch 6, without the fault, restores and reaches ready' ($runs[5].HostWindow -and $runs[5].ExitCode -ne 3) 'window' @{ Exit=$runs[5].ExitCode; Window=$runs[5].HostWindow }
 

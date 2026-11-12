@@ -5,7 +5,7 @@
 `src/host/proxy/ITerminalHandoff.idl` under that repository's MIT license.
 
 The checked-in `x64/` and `arm64/` C sources are generated with Windows SDK
-10.0.26100.0. MIDL is not part of the noctty build. To regenerate them from a
+10.0.26100.0. MIDL is not part of the koreterm build. To regenerate them from a
 PowerShell prompt at the repository root:
 
 ```powershell
@@ -26,7 +26,7 @@ All eight generated files carry a `Mon Jan 18 22:14:07 2038` MIDL timestamp.
 That is `INT32_MAX` seconds interpreted in UTC-5, it is identical across every
 file, and it is a property of the generator rather than a sign of tampering.
 
-The permanent noctty proxy CLSID is supplied by `src/build/TerminalHandoffProxy.zig` as
+The permanent koreterm proxy CLSID is supplied by `src/build/TerminalHandoffProxy.zig` as
 `{1D349824-21FB-46C7-ACF3-746EDC991D52}`. Never regenerate it. `exports.c` is
 the single source of the five DLL exports, expressed as linker pragmas because
 Zig 0.15.2 does not accept a module-definition file as a link input. It carries

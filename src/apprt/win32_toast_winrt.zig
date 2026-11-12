@@ -143,7 +143,7 @@ const IToastNotificationHistoryVtbl = extern struct {
     GetTrustLevel: *const fn (*anyopaque, *i32) callconv(.winapi) HRESULT,
     // IToastNotificationHistory. Only the `WithId` removals are called: an
     // unpackaged app names its AUMID. `Clear` and `ClearWithId` are here for
-    // the slot order only and are never called, because every noctty
+    // the slot order only and are never called, because every koreterm
     // process (installed and portable) shares the AUMID and they would
     // delete the other processes' toasts too.
     RemoveGroup: *const fn (*anyopaque, HSTRING) callconv(.winapi) HRESULT,
@@ -366,7 +366,7 @@ pub const ToastRequest = struct {
     title: []const u8,
     /// Shown under the title; an empty body shows no line.
     body: []const u8,
-    /// noctty's own line at the bottom of the toast
+    /// koreterm's own line at the bottom of the toast
     /// (`<text placement="attribution">`, Windows 10 1607 and later),
     /// styled apart from the program's text: which tab the toast is from.
     attribution: ?[]const u8 = null,
@@ -733,7 +733,7 @@ pub const WinrtToast = struct {
 
     /// Set the toast's Tag and Group (`IToastNotification2`). Any failure
     /// fails the show before `Show` is called, so the caller falls back to
-    /// its banner: a toast missing either property is one noctty would
+    /// its banner: a toast missing either property is one koreterm would
     /// count as shown but could neither replace nor remove, since every
     /// removal names both the tag and the process group.
     fn applyTagAndGroup(self: *WinrtToast, notification: *IToastNotification, request: ToastRequest) ShowError!void {
@@ -779,7 +779,7 @@ pub const WinrtToast = struct {
 
     /// Remove every toast in `group` from Action Center. Only this AUMID's
     /// toasts are searched, and the group names one process, so other
-    /// noctty processes keep theirs.
+    /// koreterm processes keep theirs.
     pub fn removeGroup(self: *WinrtToast, group: []const u8) HistoryError!void {
         const history = try self.openHistory();
         defer _ = history.release();
@@ -1333,7 +1333,7 @@ test "WinrtToast a toast whose Tag or Group cannot be set is not shown" {
         .aumid_hs = @ptrFromInt(1),
         .ro_initialized = false,
     };
-    const request: ToastRequest = .{ .title = "test", .body = "", .tag = "0000000000001001", .group = "noctty-1234" };
+    const request: ToastRequest = .{ .title = "test", .body = "", .tag = "0000000000001001", .group = "koreterm-1234" };
 
     // Positive control: both properties set, the toast is shown with them.
     Fake.reset(false, false, false);

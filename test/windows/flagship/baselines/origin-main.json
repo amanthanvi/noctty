@@ -1,5 +1,5 @@
 {
-  "schema_version": "noctty.verification.baseline-manifest.v1",
+  "schema_version": "koreterm.verification.baseline-manifest.v1",
   "captured_at": "2026-09-03T03:34:28.0175349Z",
   "git_commit": "34850eb9b191e0c350918f6311568d9348f534eb",
   "platform": {

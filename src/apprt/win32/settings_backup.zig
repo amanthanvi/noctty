@@ -1,4 +1,4 @@
-//! Back up every setting into one ZIP: noctty's config and state folders
+//! Back up every setting into one ZIP: koreterm's config and state folders
 //! (in portable mode, the data files of the folder beside the executable:
 //! the config, the logins under `credentials\`, the session and the rest),
 //! plus whatever the caller adds (Settings adds the Terminals export of the
@@ -21,16 +21,16 @@ pub const Entry = struct {
 /// The largest file the backup takes; a bigger one is left out.
 pub const max_file_bytes: usize = 32 * 1024 * 1024;
 
-/// Every data file of noctty's folders, each named `<folder>/<relative
+/// Every data file of koreterm's folders, each named `<folder>/<relative
 /// path>`, appended to `entries` in `a` (an arena: nothing is freed one by
 /// one).
 pub fn collect(a: Allocator, entries: *std.ArrayListUnmanaged(Entry)) !void {
     if (try xdg.portableRoot(a)) |root| {
-        try walk(a, entries, root, "noctty");
+        try walk(a, entries, root, "koreterm");
         return;
     }
-    const config_dir = try xdg.config(a, .{ .subdir = "noctty" });
-    const state_dir = try xdg.state(a, .{ .subdir = "noctty" });
+    const config_dir = try xdg.config(a, .{ .subdir = "koreterm" });
+    const state_dir = try xdg.state(a, .{ .subdir = "koreterm" });
     try walk(a, entries, config_dir, "config");
     if (!std.ascii.eqlIgnoreCase(config_dir, state_dir)) try walk(a, entries, state_dir, "state");
 }
@@ -39,7 +39,7 @@ pub fn collect(a: Allocator, entries: *std.ArrayListUnmanaged(Entry)) !void {
 fn skipped(name: []const u8) bool {
     const program_exts = [_][]const u8{ ".exe", ".dll", ".com", ".pdb", ".zip", ".ico", ".tmp" };
     for (program_exts) |ext| if (std.ascii.endsWithIgnoreCase(name, ext)) return true;
-    const program_files = [_][]const u8{ "LICENSE", "LICENSE-conpty.txt", "README.md", "config-template.ghostty", "noctty.portable", "portable.txt" };
+    const program_files = [_][]const u8{ "LICENSE", "LICENSE-conpty.txt", "README.md", "config-template.ghostty", "koreterm.portable", "portable.txt" };
     for (program_files) |file| if (std.ascii.eqlIgnoreCase(name, file)) return true;
     return false;
 }
@@ -152,8 +152,8 @@ test "settings backup: a stored ZIP lists its files and their bytes" {
     var out: std.Io.Writer.Allocating = .init(alloc);
     defer out.deinit();
     try writeZip(&out.writer, &.{
-        .{ .name = "noctty/config.ghostty", .data = "font-size = 13\n" },
-        .{ .name = "noctty/credentials/coletor-nf.cred", .data = "\x01\x02\x03" },
+        .{ .name = "koreterm/config.ghostty", .data = "font-size = 13\n" },
+        .{ .name = "koreterm/credentials/coletor-nf.cred", .data = "\x01\x02\x03" },
     }, 1762900000);
     const bytes = out.written();
     try std.testing.expect(std.mem.startsWith(u8, bytes, "PK\x03\x04"));
@@ -163,13 +163,13 @@ test "settings backup: a stored ZIP lists its files and their bytes" {
     try std.testing.expectEqual(@as(u16, 2), std.mem.readInt(u16, end[10..12], .little));
     // Stored: each file's bytes are in the archive as they are.
     try std.testing.expect(std.mem.indexOf(u8, bytes, "font-size = 13\n") != null);
-    try std.testing.expect(std.mem.indexOf(u8, bytes, "noctty/credentials/coletor-nf.cred") != null);
+    try std.testing.expect(std.mem.indexOf(u8, bytes, "koreterm/credentials/coletor-nf.cred") != null);
 }
 
 test "settings backup: program files and folders are left out" {
-    try std.testing.expect(skipped("noctty.exe"));
+    try std.testing.expect(skipped("koreterm.exe"));
     try std.testing.expect(skipped("conpty.DLL"));
-    try std.testing.expect(skipped("noctty.portable"));
+    try std.testing.expect(skipped("koreterm.portable"));
     try std.testing.expect(!skipped("config.ghostty"));
     try std.testing.expect(!skipped("session-state.json"));
     try std.testing.expect(skippedDir("share"));

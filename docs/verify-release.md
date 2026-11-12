@@ -2,11 +2,11 @@
 
 Every release publishes, for `<arch>` = `x64` and `arm64`:
 
-- `noctty-<version>-windows-<arch>-setup.exe`, the installer
-- `noctty-<version>-windows-<arch>-portable.zip`, the portable build
-- `noctty-<version>-windows-<arch>-portable.manifest.ps1`, signed hashes of
+- `koreterm-<version>-windows-<arch>-setup.exe`, the installer
+- `koreterm-<version>-windows-<arch>-portable.zip`, the portable build
+- `koreterm-<version>-windows-<arch>-portable.manifest.ps1`, signed hashes of
   every file inside the portable ZIP
-- `noctty-<version>-windows-<arch>-symbols.zip` (v1.3.133 and later), the
+- `koreterm-<version>-windows-<arch>-symbols.zip` (v1.3.133 and later), the
   debug symbols for the binaries in the portable ZIP
 - `SHA256SUMS-windows-<arch>.txt`, checksums for the assets above
 
@@ -24,8 +24,8 @@ Download the installer or the portable ZIP and the checksum file from the
 same release page, then hash the file you downloaded:
 
 ```powershell
-Get-FileHash .\noctty-<version>-windows-<arch>-setup.exe -Algorithm SHA256
-Get-FileHash .\noctty-<version>-windows-<arch>-portable.zip -Algorithm SHA256
+Get-FileHash .\koreterm-<version>-windows-<arch>-setup.exe -Algorithm SHA256
+Get-FileHash .\koreterm-<version>-windows-<arch>-portable.zip -Algorithm SHA256
 ```
 
 Compare the result with the matching line in `SHA256SUMS-windows-<arch>.txt`.
@@ -42,9 +42,9 @@ asset except the static icon. Bind the check to this repository and its
 release workflow:
 
 ```powershell
-gh attestation verify .\noctty-<version>-windows-<arch>-portable.zip `
-  --repo amanthanvi/noctty `
-  --signer-workflow amanthanvi/noctty/.github/workflows/release.yml
+gh attestation verify .\koreterm-<version>-windows-<arch>-portable.zip `
+  --repo amanthanvi/koreterm `
+  --signer-workflow amanthanvi/koreterm/.github/workflows/release.yml
 ```
 
 ## 3. Was it signed by the pinned publisher key?
@@ -61,7 +61,7 @@ It accepts v1.3.124 and later. Run it in PowerShell 7:
 ```powershell
 $version = "<1.3.124-or-later>"
 git clone --branch "v$version" --depth 1 https://github.com/amanthanvi/noctty.git
-Set-Location .\noctty
+Set-Location .\koreterm
 $env:WINDOWS_CODESIGN_TRUST_SELF_SIGNED = "true"
 pwsh .\scripts\verify-published-release.ps1 -Version $version
 ```
@@ -81,7 +81,7 @@ fade with time.
 | Certificate subject | `CN=winghostty Local Dev Signing`                                  |
 | SPKI SHA-256        | `671ec822c41f39b1d79c31d27169b37486333c008c7a038261b4fae53818ce2a` |
 
-The subject name predates the Noctty rename and proves nothing by itself. The
+The subject name predates the Koreterm rename and proves nothing by itself. The
 pinned public key is the constraint that matters: the in-app updater and the
 verifier both refuse an installer signed by any other key. Its rotation rules
 are in [ADR 0005](adr/0005-pin-updater-publisher-public-keys.md), and the
@@ -108,7 +108,7 @@ PowerShell 5.1, so run it in PowerShell 7 (`pwsh`).
 
 ```powershell
 if ($PSVersionTable.PSVersion.Major -lt 7) { throw "Run this block in PowerShell 7 (pwsh)." }
-$workRoot = Join-Path ([IO.Path]::GetTempPath()) ("noctty-release-verification-" + [Guid]::NewGuid().ToString("N"))
+$workRoot = Join-Path ([IO.Path]::GetTempPath()) ("koreterm-release-verification-" + [Guid]::NewGuid().ToString("N"))
 [IO.Directory]::CreateDirectory($workRoot) | Out-Null
 try {
   $setup = ".\winghostty-1.3.123-windows-<arch>-setup.exe"

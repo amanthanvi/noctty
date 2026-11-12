@@ -1,4 +1,4 @@
-/* noctty.com
+/* koreterm.com
    The page is chrome and the terminal is the content. Everything outside a
    terminal window is neutral (the shadcn zinc scale); the only color on the
    site is terminal output. Light and dark follow the visitor's system until
@@ -684,7 +684,7 @@ kbd,
 
 /* terminal window: the only place on the site that carries color. It is
    drawn from captures of the app at 100% scale (a 1200 px window, 16 px
-   JetBrains Mono): noctty's default colors in dark, GitHub Light Default in
+   JetBrains Mono): koreterm's default colors in dark, GitHub Light Default in
    light, and the chrome values sampled from the same captures. --px is one
    pixel of that window, so the whole thing scales with its column. */
 

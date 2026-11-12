@@ -5,7 +5,7 @@ param(
 
 . (Join-Path $PSScriptRoot '..\..\scripts\windows-harness-history.ps1')
 $windowsHarnessHistoryGuard = Start-WindowsHarnessHistoryGuard -Harness 'interactive-win11-validate.ps1'
-$savedMeasureAumid = $env:NOCTTY_INTERACTIVE_MEASURE_AUMID
+$savedMeasureAumid = $env:KORETERM_INTERACTIVE_MEASURE_AUMID
 $windowsHarnessStateGuard = $null
 try {
 
@@ -13,10 +13,10 @@ try {
 $ErrorActionPreference = 'Stop'
 # Inherited by every harness and its VS-dev/PowerShell bootstrap. Individual
 # harnesses retain their redirected LOCALAPPDATA configuration semantics.
-$env:NOCTTY_INTERACTIVE_MEASURE_AUMID = '1'
+$env:KORETERM_INTERACTIVE_MEASURE_AUMID = '1'
 
 $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
-$suiteLogDir = Join-Path $env:TEMP ("noctty-interactive-win11-suite-{0}" -f $PID)
+$suiteLogDir = Join-Path $env:TEMP ("koreterm-interactive-win11-suite-{0}" -f $PID)
 New-Item -ItemType Directory -Force -Path $suiteLogDir | Out-Null
 . (Join-Path $repoRoot 'scripts\interactive-win11-state-guard.ps1')
 $windowsHarnessStateGuard = Start-InteractiveWin11StateGuard -Harness 'interactive-win11-validate.ps1' -ReceiptDirectory $suiteLogDir
@@ -261,11 +261,11 @@ Invoke-HarnessWithPassSentinel -ScriptName 'interactive-win11-shell-command.ps1'
 # Three configured scenarios run sequentially in one process, each with its
 # own 30s deadline, so the outer budget covers all three plus startup.
 Invoke-HarnessWithPassSentinel -ScriptName 'interactive-win11-shell-command-live.ps1' -TimeoutSeconds 30 -WaitTimeoutSeconds 115 -AdditionalArguments @('-ConfiguredScenariosOnly') -ScenarioSlug 'configured'
-if ($env:NOCTTY_INTERACTIVE_RUN_FOREGROUND_HARNESS -eq '1') {
+if ($env:KORETERM_INTERACTIVE_RUN_FOREGROUND_HARNESS -eq '1') {
     Invoke-HarnessWithPassSentinel -ScriptName 'interactive-win11-shell-command-live.ps1' -TimeoutSeconds 25
 }
 else {
-    Write-Host 'interactive-win11 shell command live validation: SKIP (set NOCTTY_INTERACTIVE_RUN_FOREGROUND_HARNESS=1 to require the foreground-sensitive harness in the composite suite)'
+    Write-Host 'interactive-win11 shell command live validation: SKIP (set KORETERM_INTERACTIVE_RUN_FOREGROUND_HARNESS=1 to require the foreground-sensitive harness in the composite suite)'
 }
 Invoke-HarnessWithPassSentinel -ScriptName 'interactive-win11-key-input.ps1' -TimeoutSeconds 20 -ScenarioSlug 'classic-a'
 Invoke-HarnessWithPassSentinel -ScriptName 'interactive-win11-key-input.ps1' -TimeoutSeconds 20 -AdditionalArguments @('-Key', 'unicode-bmp') -ScenarioSlug 'bmp'
@@ -354,7 +354,7 @@ if ($finalProvenance.Head -cne $suiteProvenance.Head -or $finalProvenance.ExeSHA
     throw 'Measurement HEAD, binaries, or provenance evidence changed during the composite suite.'
 }
 } finally {
-    $env:NOCTTY_INTERACTIVE_MEASURE_AUMID = $savedMeasureAumid
+    $env:KORETERM_INTERACTIVE_MEASURE_AUMID = $savedMeasureAumid
     # Run both even if either fails, and retain both failure messages.
     $guardFailures = [Collections.Generic.List[string]]::new()
     try {

@@ -1,11 +1,11 @@
 #requires -Version 7.0
 <#
-Profile matrix (PKG-76, G032): launches each shell profile noctty detects through a restored session
+Profile matrix (PKG-76, G032): launches each shell profile koreterm detects through a restored session
 on a hidden desktop and checks what the profile really started, with no hook into the terminal core:
 
-  * the spawn command line, read from the process tree under noctty (reduced to a redacted shape);
+  * the spawn command line, read from the process tree under koreterm (reduced to a redacted shape);
   * that automatic shell integration was injected (the PowerShell script on the command line);
-  * the working directory the shell reports back with OSC 7, read from the session-state.json noctty
+  * the working directory the shell reports back with OSC 7, read from the session-state.json koreterm
     saves when its window closes (a pane's last-known directory is seeded from the launch directory
     and refreshed by OSC 7, see automation.md);
   * that the profile key and directory round trip through that file.
@@ -21,7 +21,7 @@ A control case runs cmd.exe with `shell-integration = none` and expects the seed
 directory checks above cannot pass by accident. No interactive WSL/SSH profile is launched;
 startup discovery may probe WSL. A profile that is not installed is reported as skipped, never as a pass.
 
-Run with -Bin <directory holding noctty.exe, conpty.dll, OpenConsole.exe> -Run <new evidence
+Run with -Bin <directory holding koreterm.exe, conpty.dll, OpenConsole.exe> -Run <new evidence
 directory>. The binary must carry the measurement AUMID unless -AllowProductAumid is given (an
 ephemeral CI runner). Exit 1 when a check fails. It never uses SendInput, takes the foreground or
 copies anything; the clipboard sequence number is logged before and after.
@@ -47,7 +47,7 @@ $ErrorActionPreference = 'Stop'
 Assert-HiddenRunner
 
 if (-not $Driver) {
-    Assert-MeasureAumid (Join-Path (Resolve-Path -LiteralPath $Bin).Path 'noctty.exe') -AllowProductAumid:$AllowProductAumid
+    Assert-MeasureAumid (Join-Path (Resolve-Path -LiteralPath $Bin).Path 'koreterm.exe') -AllowProductAumid:$AllowProductAumid
     $extra = @('-Profile', ($Profile -join ','))
     if ($Renderer) { $extra += @('-Renderer', $Renderer) }
     if ($AllowProductAumid) { $extra += '-AllowProductAumid' }
@@ -56,11 +56,11 @@ if (-not $Driver) {
     exit
 }
 
-# The driver and noctty share the inherited desktop handle. Observe their job
+# The driver and koreterm share the inherited desktop handle. Observe their job
 # threads as well: ConPTY's explicit handle list does not propagate that handle.
 $Profile = @($Profile | ForEach-Object { $_ -split ',' } | Where-Object { $_ })
 $desktopName = [HiddenWin]::CurrentDesktopName()
-if (-not $desktopName.StartsWith('noctty-hw-')) { throw "Driver is not on its own desktop (found '$desktopName')." }
+if (-not $desktopName.StartsWith('koreterm-hw-')) { throw "Driver is not on its own desktop (found '$desktopName')." }
 $sentinel = [HiddenWin]::CreateDriverSentinel()
 $driverFailure = $null; $job = [IntPtr]::Zero; $driverApproved = $false
 try {
@@ -154,8 +154,8 @@ function Test-Available([string] $Key) {
         default { return $false }
     }
 }
-# Each profile (a session pane's `profile` is the key noctty lists it under): the process that must
-# appear under noctty, the flags its command line must carry, and for a shell it is safe to type into
+# Each profile (a session pane's `profile` is the key koreterm lists it under): the process that must
+# appear under koreterm, the flags its command line must carry, and for a shell it is safe to type into
 # the command that changes directory. `pushd` rather than `cd /d`: a user's AutoRun can define a `cd`
 # macro that rejects /d, and this harness runs on machines that have one.
 $expectations = @{
@@ -179,19 +179,19 @@ Set-PSReadLineOption -HistorySavePath '__HISTORY__' -HistorySaveStyle SaveNothin
 if ((Get-PSReadLineOption).HistorySaveStyle -ne 'SaveNothing' -or (Get-PSReadLineOption).HistorySavePath -cne '__HISTORY__') { throw 'Test history isolation failed.' }
 '@
     $epilogue = @'
-$Global:__noctty_test_cwd_written = $false
-$Global:__noctty_test_original_write_osc = $function:global:__ghostty_write_osc
+$Global:__koreterm_test_cwd_written = $false
+$Global:__koreterm_test_original_write_osc = $function:global:__ghostty_write_osc
 function global:__ghostty_write_osc {
     param([string]$Sequence)
-    & $Global:__noctty_test_original_write_osc $Sequence
-    if ($Sequence.StartsWith(([string][char]27) + ']7;')) { $Global:__noctty_test_cwd_written = $true }
+    & $Global:__koreterm_test_original_write_osc $Sequence
+    if ($Sequence.StartsWith(([string][char]27) + ']7;')) { $Global:__koreterm_test_cwd_written = $true }
 }
-$Global:__noctty_test_original_prompt = $function:global:prompt
+$Global:__koreterm_test_original_prompt = $function:global:prompt
 function global:prompt {
-    $result = & $Global:__noctty_test_original_prompt
+    $result = & $Global:__koreterm_test_original_prompt
     $option = Get-PSReadLineOption
     if ($option.HistorySaveStyle -ne 'SaveNothing' -or $option.HistorySavePath -cne '__HISTORY__') { throw 'Test history isolation changed.' }
-    if ($Global:__noctty_test_cwd_written) {
+    if ($Global:__koreterm_test_cwd_written) {
         @{ ProcessId = $PID; PromptReturned = $true; CwdOscForwarded = $true; HistorySaveStyle = [string]$option.HistorySaveStyle } | ConvertTo-Json | Set-Content -LiteralPath '__READY__'
     }
     return $result
@@ -226,7 +226,7 @@ function Start-Case([string] $Key, [string] $Suffix, [string[]] $ExtraConfig) {
     if ($Key -cin @('powershell.exe', 'pwsh.exe')) { Install-HiddenPowerShellProbe -CaseRoot (Split-Path -Parent $dir) }
     $work = Join-Path $Run "$name\work"
     # The seed spells the directory with a trailing separator. A shell that reports its own directory
-    # drops it, so the saved path differs from the seed only if OSC 7 reached noctty.
+    # drops it, so the saved path differs from the seed only if OSC 7 reached koreterm.
     $cwdA = Join-Path $work 'a'; $cwdB = Join-Path $work 'b'
     [void](New-Item -ItemType Directory -Force -Path $cwdA, $cwdB, (Join-Path $Run "$name\home"))
     $seed = $cwdA + '\'
@@ -273,10 +273,10 @@ function Invoke-Case([string] $Key, [switch] $Control) {
     $started = $null
     try {
         Write-Step $label 'launch'
-        $started = Start-HiddenNoctty -Dir $case.Dir -DesktopName $desktopName -Job $job -StderrPath (Join-Path $Run "$($case.Name)\stderr.txt") -Arguments @(
-            "--config-file=`"$($case.Config)`"", '--single-instance=false', "--class=noctty-test-pkg76-$runId-$($case.Name)")
+        $started = Start-HiddenKoreterm -Dir $case.Dir -DesktopName $desktopName -Job $job -StderrPath (Join-Path $Run "$($case.Name)\stderr.txt") -Arguments @(
+            "--config-file=`"$($case.Config)`"", '--single-instance=false', "--class=koreterm-test-pkg76-$runId-$($case.Name)")
         $ready = Wait-Ready $case $started.Process
-        # The profile's own process appears under noctty (through ConPTY's host).
+        # The profile's own process appears under koreterm (through ConPTY's host).
         $shell = $null; $deadline = [datetime]::UtcNow.AddSeconds(20)
         Write-Step $label 'process tree'
         while ([datetime]::UtcNow -lt $deadline -and -not $shell) {
@@ -285,7 +285,7 @@ function Invoke-Case([string] $Key, [switch] $Control) {
             if (-not $shell) { Start-Sleep -Milliseconds 200 }
         }
         Write-Step $label 'interact'
-        Check $label "starts $($expected.Name) under noctty" ($null -ne $shell) $expected.Name ($(if ($shell) { $shell.Name } else { $null }))
+        Check $label "starts $($expected.Name) under koreterm" ($null -ne $shell) $expected.Name ($(if ($shell) { $shell.Name } else { $null }))
         $full = if ($shell) { Get-RedactedCommandLine $shell.CommandLine @($Run) -MaxArgumentLength 4000 -MaxArguments 40 } else { '' }
         $shape = if ($shell) { Get-RedactedCommandLine $shell.CommandLine @($Run) } else { '' }
         if (-not $Control) {
@@ -316,7 +316,7 @@ function Invoke-Case([string] $Key, [switch] $Control) {
         }
         Write-Step $label 'close'
         foreach ($h in [HiddenWin]::Hosts($started.Pid)) { [void][HiddenWin]::PostMessageW($h, 0x10, [IntPtr]::Zero, [IntPtr]::Zero) }
-        if (-not $started.Process.WaitForExit(15000)) { throw "noctty ($label) did not exit after WM_CLOSE" }
+        if (-not $started.Process.WaitForExit(15000)) { throw "koreterm ($label) did not exit after WM_CLOSE" }
         Write-Step $label 'read session'
         $saved = Get-Content -LiteralPath (Join-Path $case.Dir 'session-state.json') -Raw | ConvertFrom-Json
         $pane = $saved.windows[0].tabs[0].layout.nodes[0].pane

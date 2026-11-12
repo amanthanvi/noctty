@@ -369,9 +369,9 @@ pub fn add(
         step.addCSourceFile(.{
             .file = b.path("src/renderer/d3d11/bridge.c"),
             .flags = if (self.config.renderer_test_tools)
-                &.{ "-std=c11", "-DCOBJMACROS", "-DNOCTTY_RENDERER_TEST_TOOLS=1" }
+                &.{ "-std=c11", "-DCOBJMACROS", "-DKORETERM_RENDERER_TEST_TOOLS=1" }
             else
-                &.{ "-std=c11", "-DCOBJMACROS", "-DNOCTTY_RENDERER_TEST_TOOLS=0" },
+                &.{ "-std=c11", "-DCOBJMACROS", "-DKORETERM_RENDERER_TEST_TOOLS=0" },
         });
         step.addCSourceFile(.{
             .file = b.path("src/renderer/d3d11/composition.cpp"),

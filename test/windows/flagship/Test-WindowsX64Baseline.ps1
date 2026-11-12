@@ -11,7 +11,7 @@ try {
 $ErrorActionPreference = 'Stop'
 $repoRoot = Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $PSScriptRoot))
 $checker = Join-Path $repoRoot 'scripts/check-windows-x64-baseline.ps1'
-$tempRoot = Join-Path ([IO.Path]::GetTempPath()) "noctty-x64-baseline-$([Guid]::NewGuid().ToString('N'))"
+$tempRoot = Join-Path ([IO.Path]::GetTempPath()) "koreterm-x64-baseline-$([Guid]::NewGuid().ToString('N'))"
 $originalPath = $env:PATH
 
 function New-ProbePe {

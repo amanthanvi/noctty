@@ -1,6 +1,6 @@
 # Code signing policy
 
-This page states who signs Noctty releases, where the signing key lives, what
+This page states who signs Koreterm releases, where the signing key lives, what
 is signed, how you can check it, and what happens if the key is compromised.
 It describes the project as it is today. Where a decision has been made but not
 yet carried out, it says so.
@@ -8,8 +8,8 @@ yet carried out, it says so.
 ## Who may sign
 
 Aman Thanvi (GitHub `amanthanvi`), the sole maintainer, is the only person who
-may sign a Noctty release. No other person, organisation, or automated system
-is authorised to sign anything under the Noctty name.
+may sign a Koreterm release. No other person, organisation, or automated system
+is authorised to sign anything under the Koreterm name.
 
 Signing only happens inside the `Release` GitHub Actions workflow
 (`.github/workflows/release.yml`) on a GitHub-hosted `windows-latest` runner,
@@ -20,7 +20,7 @@ two secrets: `release-readiness.yml`, which passes them to
 `scripts/release-preflight.ps1` so it can check the certificate before a
 release is attempted. It packages and signs nothing. No other workflow in the
 repository can read them. There is no local signing path for published
-artifacts: a build signed on a workstation is not a Noctty release.
+artifacts: a build signed on a workstation is not a Koreterm release.
 
 ## Where the key lives
 
@@ -35,7 +35,7 @@ container image, and not on any always-on machine.
 
 Because the certificate is self-signed, Windows shows no publisher identity
 and SmartScreen warns on first run. That warning does not fade over time.
-Noctty compensates with a key pin rather than pretending otherwise: the SPKI
+Koreterm compensates with a key pin rather than pretending otherwise: the SPKI
 SHA-256 of the signing key is compiled into the application
 (`pinned_publisher_spki_sha256` in `src/update/github_releases.zig`), and both
 the in-app updater and the release verifier refuse an artifact signed by any
@@ -68,11 +68,11 @@ release that has to come first.
 
 For each release and each architecture (`x64`, `arm64`):
 
-- the installer, `noctty-<version>-windows-<arch>-setup.exe`
+- the installer, `koreterm-<version>-windows-<arch>-setup.exe`
 - every `.exe`, `.com`, and `.dll` that this project builds, inside the
   portable tree
 - the portable payload manifest,
-  `noctty-<version>-windows-<arch>-portable.manifest.ps1`
+  `koreterm-<version>-windows-<arch>-portable.manifest.ps1`
 
 The bundled ConPTY redistributable — `conpty.dll` and `OpenConsole.exe` — is
 **not** signed with this key. Those two files keep Microsoft's own Authenticode
@@ -85,7 +85,7 @@ failure.
 The portable ZIP container itself is not Authenticode-signed — a ZIP cannot
 carry an Authenticode signature — and is covered instead by its published
 SHA-256 and by GitHub build-provenance attestation. Nothing else published
-under the Noctty name is signed with this key: not source archives, not the
+under the Koreterm name is signed with this key: not source archives, not the
 website, not package-manager manifests.
 
 Signatures use SHA-256 (`signtool /fd SHA256`). RFC 3161 timestamping
@@ -136,6 +136,6 @@ back-dates it. Pin removal remains the mechanism that stops the in-app updater.
 
 ## Changes to this policy
 
-This page is version-controlled in the Noctty repository. Every change to it
+This page is version-controlled in the Koreterm repository. Every change to it
 goes through a pull request against `main` and is visible in that file's git
 history.

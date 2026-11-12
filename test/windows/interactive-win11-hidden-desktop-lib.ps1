@@ -1,5 +1,5 @@
 # Shared by interactive-win11-stale-modes.ps1 and interactive-win11-mouse-input.ps1, which run
-# their worker and a portable noctty copy on a newly created hidden desktop. Dot-source it.
+# their worker and a portable koreterm copy on a newly created hidden desktop. Dot-source it.
 # [HiddenDesktopNative] holds the desktop, process, owned-job and window plumbing both use;
 # each harness keeps its own input and fixture code.
 
@@ -106,10 +106,10 @@ public static class HiddenDesktopNative {
         EnumWindows((h,a)=> { int p; GetWindowThreadProcessId(h,out p); if(p==pid && ClassOf(h)==cls) found=h; return true; },IntPtr.Zero);
         return found;
     }
-    public static IntPtr Host(int pid) { return TopWindow(pid,"noctty.win32.host"); }
+    public static IntPtr Host(int pid) { return TopWindow(pid,"koreterm.win32.host"); }
     public static IntPtr Surface(IntPtr host) {
         IntPtr found=IntPtr.Zero;
-        EnumChildWindows(host,(h,a)=> { if(ClassOf(h)=="noctty.win32") found=h; return true; },IntPtr.Zero);
+        EnumChildWindows(host,(h,a)=> { if(ClassOf(h)=="koreterm.win32") found=h; return true; },IntPtr.Zero);
         return found;
     }
     public static void Send(IntPtr hwnd,uint msg,int value,long bits) {

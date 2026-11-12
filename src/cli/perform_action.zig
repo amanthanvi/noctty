@@ -12,7 +12,7 @@ pub const Options = struct {
     _arena: ?ArenaAllocator = null,
 
     /// If set, query a custom single-instance namespace instead of the
-    /// default local noctty instance.
+    /// default local koreterm instance.
     class: ?[:0]const u8 = null,
 
     /// How long to wait for the running instance to respond.
@@ -35,16 +35,16 @@ pub const Options = struct {
 };
 
 /// The `perform-action` command forwards one safe keybinding action to a
-/// running local noctty instance.
+/// running local koreterm instance.
 ///
 /// The action uses the same syntax as `keybind` values, for example:
 ///
-///   * `noctty +perform-action new_tab`
-///   * `noctty +perform-action --surface-id=42 toggle_fullscreen`
+///   * `koreterm +perform-action new_tab`
+///   * `koreterm +perform-action --surface-id=42 toggle_fullscreen`
 ///
 /// The default target is the focused surface for surface-scoped actions and the
 /// app for app-scoped actions. `--surface-id` accepts pane IDs from
-/// `noctty +list-windows` and is only valid for surface-scoped actions.
+/// `koreterm +list-windows` and is only valid for surface-scoped actions.
 ///
 /// To keep this automation surface bounded, terminal-input and arbitrary file
 /// helper actions such as `text`, `csi`, `esc`, `paste_from_clipboard`,
@@ -205,7 +205,7 @@ fn runArgsWithPerform(
 
     if (ok) return 0;
 
-    try stderr.print("No matching noctty instance is listening for automation actions.\n", .{});
+    try stderr.print("No matching koreterm instance is listening for automation actions.\n", .{});
     return 2;
 }
 

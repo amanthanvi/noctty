@@ -4,7 +4,7 @@
 # test/windows/package-portable-cli.ps1.
 
 # The FileDescription in src/ghostty_vt_stub/ghostty_vt_stub.rc.
-$script:GhosttyVtStubDescription = 'noctty placeholder for the retired ghostty-vt.dll; not libghostty-vt'
+$script:GhosttyVtStubDescription = 'koreterm placeholder for the retired ghostty-vt.dll; not libghostty-vt'
 # The stub is a few KB; libghostty-vt is megabytes. A bound well above the
 # first and far below the second.
 $script:GhosttyVtStubMaxBytes = 64KB

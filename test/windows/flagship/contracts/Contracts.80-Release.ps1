@@ -1386,17 +1386,17 @@ $releaseAttestationStep = Get-YamlStepBlock `
     -Name 'Attest published release artifacts' `
     -Source $releaseWorkflow
 $expectedAttestationSubjects = @(
-    'dist/artifacts/noctty-${{ steps.meta.outputs.version }}-windows-x64/noctty-${{ steps.meta.outputs.version }}-windows-x64-setup.exe',
-    'dist/artifacts/noctty-${{ steps.meta.outputs.version }}-windows-x64/noctty-${{ steps.meta.outputs.version }}-windows-x64-portable.zip',
-    'dist/artifacts/noctty-${{ steps.meta.outputs.version }}-windows-x64/noctty-${{ steps.meta.outputs.version }}-windows-x64-portable.manifest.ps1',
-    'dist/artifacts/noctty-${{ steps.meta.outputs.version }}-windows-x64/noctty-${{ steps.meta.outputs.version }}-windows-x64-symbols.zip',
-    'dist/artifacts/noctty-${{ steps.meta.outputs.version }}-windows-x64/SHA256SUMS-windows-x64.txt',
-    'dist/artifacts/noctty-${{ steps.meta.outputs.version }}-windows-arm64/noctty-${{ steps.meta.outputs.version }}-windows-arm64-setup.exe',
-    'dist/artifacts/noctty-${{ steps.meta.outputs.version }}-windows-arm64/noctty-${{ steps.meta.outputs.version }}-windows-arm64-portable.zip',
-    'dist/artifacts/noctty-${{ steps.meta.outputs.version }}-windows-arm64/noctty-${{ steps.meta.outputs.version }}-windows-arm64-portable.manifest.ps1',
-    'dist/artifacts/noctty-${{ steps.meta.outputs.version }}-windows-arm64/noctty-${{ steps.meta.outputs.version }}-windows-arm64-symbols.zip',
-    'dist/artifacts/noctty-${{ steps.meta.outputs.version }}-windows-arm64/SHA256SUMS-windows-arm64.txt',
-    'dist/artifacts/noctty-${{ steps.meta.outputs.version }}-windows-x64/SHA256SUMS.txt'
+    'dist/artifacts/koreterm-${{ steps.meta.outputs.version }}-windows-x64/koreterm-${{ steps.meta.outputs.version }}-windows-x64-setup.exe',
+    'dist/artifacts/koreterm-${{ steps.meta.outputs.version }}-windows-x64/koreterm-${{ steps.meta.outputs.version }}-windows-x64-portable.zip',
+    'dist/artifacts/koreterm-${{ steps.meta.outputs.version }}-windows-x64/koreterm-${{ steps.meta.outputs.version }}-windows-x64-portable.manifest.ps1',
+    'dist/artifacts/koreterm-${{ steps.meta.outputs.version }}-windows-x64/koreterm-${{ steps.meta.outputs.version }}-windows-x64-symbols.zip',
+    'dist/artifacts/koreterm-${{ steps.meta.outputs.version }}-windows-x64/SHA256SUMS-windows-x64.txt',
+    'dist/artifacts/koreterm-${{ steps.meta.outputs.version }}-windows-arm64/koreterm-${{ steps.meta.outputs.version }}-windows-arm64-setup.exe',
+    'dist/artifacts/koreterm-${{ steps.meta.outputs.version }}-windows-arm64/koreterm-${{ steps.meta.outputs.version }}-windows-arm64-portable.zip',
+    'dist/artifacts/koreterm-${{ steps.meta.outputs.version }}-windows-arm64/koreterm-${{ steps.meta.outputs.version }}-windows-arm64-portable.manifest.ps1',
+    'dist/artifacts/koreterm-${{ steps.meta.outputs.version }}-windows-arm64/koreterm-${{ steps.meta.outputs.version }}-windows-arm64-symbols.zip',
+    'dist/artifacts/koreterm-${{ steps.meta.outputs.version }}-windows-arm64/SHA256SUMS-windows-arm64.txt',
+    'dist/artifacts/koreterm-${{ steps.meta.outputs.version }}-windows-x64/SHA256SUMS.txt'
 )
 $attestationSubjectBlock = [regex]::Match(
     $releaseAttestationStep,
@@ -1413,7 +1413,7 @@ $actualAttestationSubjects = @(
 if ($actualAttestationSubjects.Count -ne 11 -or
     @($expectedAttestationSubjects | Where-Object { $_ -notin $actualAttestationSubjects }).Count -gt 0 -or
     @($actualAttestationSubjects | Where-Object { $_ -notin $expectedAttestationSubjects }).Count -gt 0 -or
-    $releaseAttestationStep.Contains('noctty-icon.svg', [StringComparison]::Ordinal)) {
+    $releaseAttestationStep.Contains('koreterm-icon.svg', [StringComparison]::Ordinal)) {
     throw 'Release attestation subjects must be exactly the eleven non-icon published assets.'
 }
 $releaseGithubPublisher = Join-Path $repoRoot 'scripts\release-publish-github.ps1'
@@ -1487,7 +1487,7 @@ foreach ($spec in $protectedReleaseScriptSpecs) {
     $statement = $spec.CriticalStatement.Substring($indent.Length)
     $sideEffect = "${indent}Set-Content -LiteralPath " +
         "([IO.Path]::Combine([IO.Path]::GetTempPath(), " +
-        "'noctty-release-pin-mutant')) -Value 'mutated'"
+        "'koreterm-release-pin-mutant')) -Value 'mutated'"
     $mutants = [ordered] @{
         'injected early return' = $canonicalScript.Replace(
             $spec.CriticalStatement,
@@ -1542,7 +1542,7 @@ if ($releaseScoopPublisherText -notmatch
     throw 'Scoop clone and push must both retain narrow Git low-speed transport bounds.'
 }
 if ($releaseScoopPublisherText -notmatch
-        '(?ms)\$manifestRelativePath = if \(\[string\]::IsNullOrWhiteSpace\(\$ManifestPath\)\) \{\s*''bucket/noctty\.json''') {
+        '(?ms)\$manifestRelativePath = if \(\[string\]::IsNullOrWhiteSpace\(\$ManifestPath\)\) \{\s*''bucket/koreterm\.json''') {
     throw 'Scoop publisher must map absent, empty, and whitespace manifest configuration to the safe default.'
 }
 $scoopTokens = $null
@@ -1575,17 +1575,17 @@ if ($scoopCleanupFunctions.Count -ne 1 -or
 }
 $scoopCleanupProbeRoot = Join-Path `
     ([IO.Path]::GetTempPath()) `
-    ('noctty-scoop-cleanup-contract-' + [guid]::NewGuid().ToString('N'))
+    ('koreterm-scoop-cleanup-contract-' + [guid]::NewGuid().ToString('N'))
 $scoopCleanupArtifactRoot = Join-Path $scoopCleanupProbeRoot 'artifacts'
 $scoopCleanupMetadataDirectory = Join-Path `
     $scoopCleanupArtifactRoot `
-    'noctty-1.3.999-windows-x64\package-managers'
+    'koreterm-1.3.999-windows-x64\package-managers'
 $scoopCleanupManifestSource = Join-Path `
     $scoopCleanupProbeRoot `
-    'noctty.json'
+    'koreterm.json'
 $scoopCleanupClonePath = Join-Path `
     $scoopCleanupProbeRoot `
-    'noctty-scoop-bucket'
+    'koreterm-scoop-bucket'
 $previousScoopCleanupToken = $env:GH_TOKEN
 try {
     [void] (New-Item `
@@ -1603,7 +1603,7 @@ try {
             Join-Path $scoopCleanupMetadataDirectory 'metadata.json'
         )
     Set-Content -LiteralPath $scoopCleanupClonePath -Value 'must survive'
-    $env:GH_TOKEN = 'noctty-cleanup-contract-token'
+    $env:GH_TOKEN = 'koreterm-cleanup-contract-token'
     function git {
         throw 'Scoop cleanup contract unexpectedly reached git.'
     }
@@ -1614,7 +1614,7 @@ try {
             -BucketRepository 'owner/repository' `
             -ArtifactRoot $scoopCleanupArtifactRoot `
             -RunnerTemp $scoopCleanupProbeRoot `
-            -ManifestPath 'bucket/noctty.json' 6> $null
+            -ManifestPath 'bucket/koreterm.json' 6> $null
     }
     catch {
         if ($_.Exception.Message -notmatch
@@ -1690,7 +1690,7 @@ if ($releaseScoopPublisherText -notmatch
 }
 $scoopManifestPathProbeRoot = Join-Path `
     ([IO.Path]::GetTempPath()) `
-    'noctty-scoop-manifest-path-contract'
+    'koreterm-scoop-manifest-path-contract'
 $invalidScoopManifestPaths = @(
     [pscustomobject] @{
         Label = 'rooted path'
@@ -1715,7 +1715,7 @@ $invalidScoopManifestPaths = @(
 )
 $previousScoopProbeToken = $env:GH_TOKEN
 try {
-    $env:GH_TOKEN = 'noctty-contract-probe-token'
+    $env:GH_TOKEN = 'koreterm-contract-probe-token'
     foreach ($case in $invalidScoopManifestPaths) {
         $rejected = $false
         try {
@@ -1752,7 +1752,7 @@ try {
     & $releaseScoopPublisher `
         -Version 1.3.999 `
         -BucketRepository 'owner/repository' `
-        -ManifestPath 'bucket\.\noctty.json' `
+        -ManifestPath 'bucket\.\koreterm.json' `
         -RunnerTemp $scoopManifestPathProbeRoot `
         -WhatIf 6> $null
 }
@@ -1842,7 +1842,7 @@ Invoke-ContractTable -Contracts @(
     @{
         File = $releaseGithubPublisher
         Content = { $releaseGithubPublisherText }
-        Pattern = '(?ms)SupportsShouldProcess.*?Get-WindowsPackageArchitectures.*?legacy-checksums.*?noctty-icon\.svg.*?gh release view \$Tag --repo \$Repository.*?gh release create \$Tag --repo \$Repository.*?Failed to create.*?gh release edit \$Tag --repo \$Repository --title \$Title "--prerelease=\$Prerelease".*?Failed to edit.*?gh release upload \$Tag --repo \$Repository.*?Failed to upload'
+        Pattern = '(?ms)SupportsShouldProcess.*?Get-WindowsPackageArchitectures.*?legacy-checksums.*?koreterm-icon\.svg.*?gh release view \$Tag --repo \$Repository.*?gh release create \$Tag --repo \$Repository.*?Failed to create.*?gh release edit \$Tag --repo \$Repository --title \$Title "--prerelease=\$Prerelease".*?Failed to edit.*?gh release upload \$Tag --repo \$Repository.*?Failed to upload'
         Kind = 'Text'
         Description = 'GitHub publisher preserves both-architecture assets, legacy alias, fork pinning, prerelease support, and fail-closed mutation paths'
     }
@@ -1878,7 +1878,7 @@ Invoke-ContractTable -Contracts @(
     @{
         File = $releaseDefenderScanner
         Content = { $releaseDefenderScannerText }
-        Pattern = '(?ms)Get-MpComputerStatus -ErrorAction Stop.*?AMServiceEnabled.*?AntivirusEnabled.*?AMRunningMode -ne ''Normal''.*?-replace ''-\\d\+\$'', ''''.*?-as \[version\].*?Sort-Object Version -Descending.*?MpCmdRun\.exe.*?-SignatureUpdate.*?if \(\$LASTEXITCODE -ne 0\).*?Get-WindowsSignedRuntimePayloads.*?noctty/conpty\.dll.*?noctty/OpenConsole\.exe.*?\$architectures = @\(Get-WindowsPackageArchitectures\).*?\$expectedScanCount = \$architectures\.Count \* \(1 \+ \$portablePayloads\.Count\).*?-Kind setup.*?noctty-release-verify-\$architecture.*?scanPaths\.Count -ne \$expectedScanCount.*?-Scan -ScanType 3 -File \$scanPath -DisableRemediation -ReturnHR.*?if \(\$LASTEXITCODE -ne 0\)'
+        Pattern = '(?ms)Get-MpComputerStatus -ErrorAction Stop.*?AMServiceEnabled.*?AntivirusEnabled.*?AMRunningMode -ne ''Normal''.*?-replace ''-\\d\+\$'', ''''.*?-as \[version\].*?Sort-Object Version -Descending.*?MpCmdRun\.exe.*?-SignatureUpdate.*?if \(\$LASTEXITCODE -ne 0\).*?Get-WindowsSignedRuntimePayloads.*?koreterm/conpty\.dll.*?koreterm/OpenConsole\.exe.*?\$architectures = @\(Get-WindowsPackageArchitectures\).*?\$expectedScanCount = \$architectures\.Count \* \(1 \+ \$portablePayloads\.Count\).*?-Kind setup.*?koreterm-release-verify-\$architecture.*?scanPaths\.Count -ne \$expectedScanCount.*?-Scan -ScanType 3 -File \$scanPath -DisableRemediation -ReturnHR.*?if \(\$LASTEXITCODE -ne 0\)'
         Kind = 'Text'
         Description = 'release scans installers and portable PE payloads with active current Microsoft Defender and fails closed'
     }
@@ -1900,7 +1900,7 @@ Invoke-ContractTable -Contracts @(
     @{
         File = $releaseWorkflow
         Content = { $releaseWorkflowText }
-        Pattern = '(?ms)^    permissions:.*?contents: write.*?actions: read.*?id-token: write.*?attestations: write.*?Prepare build provenance attestation.*?ATTEST_REPOSITORY.*?amanthanvi/noctty.*?ACTIONS_ID_TOKEN_REQUEST_URL.*?ACTIONS_ID_TOKEN_REQUEST_TOKEN.*?Attest published release artifacts.*?actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8.*?portable\.manifest\.ps1.*?SHA256SUMS\.txt'
+        Pattern = '(?ms)^    permissions:.*?contents: write.*?actions: read.*?id-token: write.*?attestations: write.*?Prepare build provenance attestation.*?ATTEST_REPOSITORY.*?amanthanvi/koreterm.*?ACTIONS_ID_TOKEN_REQUEST_URL.*?ACTIONS_ID_TOKEN_REQUEST_TOKEN.*?Attest published release artifacts.*?actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8.*?portable\.manifest\.ps1.*?SHA256SUMS\.txt'
         Kind = 'Text'
         Description = 'release provenance is job-scoped, canonical-repository guarded, pinned, and covers the eleven non-icon assets'
     }

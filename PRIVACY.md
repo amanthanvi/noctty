@@ -2,27 +2,27 @@
 
 Last updated: 16 October 2026
 
-This policy covers Noctty, the Windows terminal published by Aman Thanvi at
+This policy covers Koreterm, the Windows terminal published by Aman Thanvi at
 [github.com/amanthanvi/noctty](https://github.com/amanthanvi/noctty): the app
-(installer, portable ZIP, and the `noctty` command-line actions) and the
-[noctty.com](https://noctty.com) website. Package managers that install the
+(installer, portable ZIP, and the `koreterm` command-line actions) and the
+[koreterm.com](https://noctty.com) website. Package managers that install the
 published release files, such as Scoop or WinGet, install the same app.
 
 ## In short
 
-- Noctty has no telemetry, analytics, advertising, or accounts. It sends
+- Koreterm has no telemetry, analytics, advertising, or accounts. It sends
   nothing to the maintainer, and the maintainer collects no personal data
   from it.
-- The only server Noctty contacts on its own is GitHub (or an update feed you
+- The only server Koreterm contacts on its own is GitHub (or an update feed you
   set), to check for updates. You can turn that off.
-- What Noctty stores, such as your settings, your restorable session, recent
-  folders, and crash dumps, stays on your PC. Noctty uploads none of it.
+- What Koreterm stores, such as your settings, your restorable session, recent
+  folders, and crash dumps, stays on your PC. Koreterm uploads none of it.
 
 ## Network connections
 
 ### Update checks (on by default)
 
-- When Noctty starts, it asks the GitHub API for the latest stable release,
+- When Koreterm starts, it asks the GitHub API for the latest stable release,
   unless a check succeeded in the last 24 hours. While a window stays open it
   tries again about every six hours, and still sends no request if a check
   succeeded in the last 24 hours. A failed check is retried at the next of
@@ -32,17 +32,17 @@ published release files, such as Scoop or WinGet, install the same app.
   automatic checks off. In a pre-release build it opens the releases page in
   your browser instead.
 - The request carries no account, identifier, or information about your PC
-  or how you use Noctty. It sends standard HTTP headers, including a single
-  user-agent value, `noctty-updater`. As with any web request, GitHub sees
+  or how you use Koreterm. It sends standard HTTP headers, including a single
+  user-agent value, `koreterm-updater`. As with any web request, GitHub sees
   your IP address.
-- With `auto-update = download`, Noctty also downloads the new release's
+- With `auto-update = download`, Koreterm also downloads the new release's
   checksum file and installer (for a portable copy, its ZIP and file
   manifest). The file names show your PC's architecture (x64 or ARM64) and
-  whether the copy is portable. While Noctty verifies a download's
+  whether the copy is portable. While Koreterm verifies a download's
   signatures, Windows may contact the certificate issuers named in them to
   check for revoked certificates.
 - `auto-update = off` stops the automatic check. The `auto-update-feed-url`
-  setting or the `NOCTTY_UPDATE_FEED_URL` environment variable sends checks
+  setting or the `KORETERM_UPDATE_FEED_URL` environment variable sends checks
   to a feed you choose instead of GitHub, and downloads to the addresses that
   feed lists.
 - GitHub handles these requests under the
@@ -55,20 +55,20 @@ published release files, such as Scoop or WinGet, install the same app.
 - **Links.** Opening a link, such as a URL you click in the terminal or the
   update notice, hands it to your default browser or the app registered for
   that kind of link.
-- **SSH entries.** Noctty reads the `Host` aliases in
+- **SSH entries.** Koreterm reads the `Host` aliases in
   `%USERPROFILE%\.ssh\config` (and files it includes) and lists them as
   profiles. It uses nothing else from those files, never reads your keys,
   and never writes there. Opening an entry runs `ssh.exe` with that alias:
   the first `ssh.exe` on your `PATH`, otherwise Windows' OpenSSH. Set
-  `ssh-config-hosts = false` to stop Noctty reading the file.
+  `ssh-config-hosts = false` to stop Koreterm reading the file.
 - **Programs you run.** Shells, `ssh`, `git`, WSL, and other programs in
-  Noctty make their own connections. Noctty does not see, filter, or record
+  Koreterm make their own connections. Koreterm does not see, filter, or record
   their network traffic.
 - **Paths from programs.** A program can report its working directory. New
   tabs and splits, and your next session, start there if it is a folder on a
   drive letter, and in your home folder otherwise. A program can also ask
-  Noctty to display an image file, and a relative link you Ctrl+click is
-  looked up in the reported directory. Noctty refuses a working directory or
+  Koreterm to display an image file, and a relative link you Ctrl+click is
+  looked up in the reported directory. Koreterm refuses a working directory or
   image file on a network share or device path (`\\server\share`,
   `\\?\UNC\...`, `\\.\pipe\...`), so such a path never makes Windows connect
   to a share. A share you mapped to a drive letter is an ordinary drive to
@@ -85,19 +85,19 @@ published release files, such as Scoop or WinGet, install the same app.
 These apply only if you add them to `shell-integration-features`, or set it
 to `true`:
 
-- `ssh-env`: when you run `ssh` from a shell with Noctty's shell integration,
+- `ssh-env`: when you run `ssh` from a shell with Koreterm's shell integration,
   it passes `COLORTERM`, `TERM_PROGRAM`, and `TERM_PROGRAM_VERSION` (your
-  Noctty version) to the remote host, which keeps them only if its SSH server
+  Koreterm version) to the remote host, which keeps them only if its SSH server
   allows it.
 - `ssh-terminfo`: in bash, zsh, fish, elvish, and nushell, when you connect to
-  a host that is not in Noctty's local SSH host cache, the `ssh` wrapper first
-  opens a separate SSH connection to install Noctty's terminal description in
+  a host that is not in Koreterm's local SSH host cache, the `ssh` wrapper first
+  opens a separate SSH connection to install Koreterm's terminal description in
   your account on that host (normally in `~/.terminfo`). If that works, it
   adds the host to the cache (see below); if not, it tries again next time.
   Each attempt leaves a small `ghostty-ssh-*` folder in your shell's temp
   directory. The PowerShell wrapper installs nothing on remote hosts.
 
-### What Noctty does not do
+### What Koreterm does not do
 
 - It sends no telemetry, usage statistics, or crash reports. Its crash dumps
   stay on your PC; Windows Error Reporting follows your Windows settings.
@@ -109,27 +109,27 @@ to `true`:
 
 ## Data stored on your PC
 
-Unless noted, these files live in `%LOCALAPPDATA%\noctty`. In portable mode
-they live next to `noctty.exe` instead. If you set `XDG_CONFIG_HOME`, your
+Unless noted, these files live in `%LOCALAPPDATA%\koreterm`. In portable mode
+they live next to `koreterm.exe` instead. If you set `XDG_CONFIG_HOME`, your
 config goes there; if you set `XDG_STATE_HOME`, the update files, crash
 dumps, and SSH host cache go there.
 
-- **Config:** `config.ghostty`. If Noctty finds no config at all, it creates
+- **Config:** `config.ghostty`. If Koreterm finds no config at all, it creates
   a template here, with a comment giving the file's own path, which usually
   includes your Windows user name. The Settings window saves your changes
-  here. Noctty also reads `ghostty\config`, beside the `noctty` folder, if it
+  here. Koreterm also reads `ghostty\config`, beside the `koreterm` folder, if it
   exists and, when it finds no other config, `winghostty\config.ghostty` left
-  by an older version. Noctty does not read `ghostty\config.ghostty`. If you
-  have no Noctty config file, the Settings window saves to one of the older
-  files Noctty does read, `ghostty\config` or `winghostty\config.ghostty`, if
-  one exists, rather than creating a new Noctty config.
-- **Session restore:** `session-state.json`, saved when Noctty closes, when
+  by an older version. Koreterm does not read `ghostty\config.ghostty`. If you
+  have no Koreterm config file, the Settings window saves to one of the older
+  files Koreterm does read, `ghostty\config` or `winghostty\config.ghostty`, if
+  one exists, rather than creating a new Koreterm config.
+- **Session restore:** `session-state.json`, saved when Koreterm closes, when
   you sign out or shut down, when the display configuration changes, and
   one second after a burst of window, tab or pane structural changes settles, by
-  the one Noctty process that owns it: one started normally, which holds
-  `session-state.json.lock` while it runs. Other Noctty processes (a second
-  instance, an "Open noctty here" window, a default terminal handoff) never
-  write it. It is not saved in safe mode, when Noctty runs as administrator
+  the one Koreterm process that owns it: one started normally, which holds
+  `session-state.json.lock` while it runs. Other Koreterm processes (a second
+  instance, an "Open koreterm here" window, a default terminal handoff) never
+  write it. It is not saved in safe mode, when Koreterm runs as administrator
   through UAC, when it was started to run one command (`-e` or
   `initial-command`), without an initial window (`initial-window = false`),
   or from its startup profile picker, or
@@ -144,44 +144,44 @@ dumps, and SSH host cache go there.
 - **Recent folders:** `jump-list-recents.json` holds the 10 most recent
   working directories your shells reported, folders you removed from the
   jump list, and the profiles you launched, including SSH host aliases, with
-  timestamps. Noctty builds the taskbar jump list from it and from the
+  timestamps. Koreterm builds the taskbar jump list from it and from the
   profiles it detects, which can include SSH aliases from your SSH config.
   Windows keeps its own copy of the jump list. From 1.3.133 a portable copy
   builds no jump list and writes no `jump-list-recents.json`; earlier portable
   copies did both.
 - **Command palette history:** `palette-mru.txt` holds the last 5 commands you
   ran from the command palette, including any arguments you typed.
-- **Updates:** `update-state.json` records when Noctty last checked, the feed
+- **Updates:** `update-state.json` records when Koreterm last checked, the feed
   it used, the latest version it saw, the release page address, any version
   you dismissed, and the location and checksums of downloaded updates.
   Downloaded updates, and the installer log of an update you apply, go in
   `updates\`.
 - **Startup record:** `startup-attempts.json` holds the times, error codes and
-  Noctty version of up to 16 recent launches, and when each began restoring
-  the saved session and whether it finished, so Noctty can start in safe mode
+  Koreterm version of up to 16 recent launches, and when each began restoring
+  the saved session and whether it finished, so Koreterm can start in safe mode
   after repeated failed starts. From 1.3.133 a launch that ended because OpenGL
   could not start also records when, and does not count toward safe mode.
-- **Crash dumps:** `crash\`, written only when Noctty crashes. A dump is a
-  snapshot of parts of Noctty's memory and can include fragments of what was
-  on screen, file paths, and other text. `noctty +crash-report` lists them.
-- **Shell integration:** a copy of Noctty's PowerShell integration script in
-  `shell-integration\powershell\`. Noctty does not edit your shell profiles.
-- **Terminal description:** outside portable mode, Noctty writes its terminfo
-  entries, `78\xterm-ghostty` and `67\ghostty`, and a `.noctty-installed`
+- **Crash dumps:** `crash\`, written only when Koreterm crashes. A dump is a
+  snapshot of parts of Koreterm's memory and can include fragments of what was
+  on screen, file paths, and other text. `koreterm +crash-report` lists them.
+- **Shell integration:** a copy of Koreterm's PowerShell integration script in
+  `shell-integration\powershell\`. Koreterm does not edit your shell profiles.
+- **Terminal description:** outside portable mode, Koreterm writes its terminfo
+  entries, `78\xterm-ghostty` and `67\ghostty`, and a `.koreterm-installed`
   record to the `.terminfo` folder in your home directory, so Git for
   Windows' tools recognize it.
 - **SSH host cache:** with `ssh-terminfo` only,
   `ssh_cache` lists each `user@host` that received the terminal description,
-  with a date. It lives in `%LOCALAPPDATA%\noctty` (or `noctty` under
-  `XDG_STATE_HOME`), and directly next to `noctty.exe` in portable mode.
-  Older versions used a `ghostty\ssh_cache` file; Noctty leaves that file
+  with a date. It lives in `%LOCALAPPDATA%\koreterm` (or `koreterm` under
+  `XDG_STATE_HOME`), and directly next to `koreterm.exe` in portable mode.
+  Older versions used a `ghostty\ssh_cache` file; Koreterm leaves that file
   alone and rebuilds its new cache as needed.
 - **Screen files:** the write-screen-to-file actions
   (<kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>J</kbd> and its variants) write the
   terminal's contents, including scrollback, or the selection to a new folder
   in your temp directory and leave it there.
-- **Diagnostic bundle:** `noctty +diagnostic-bundle` writes a folder in the
-  current directory, or where `--output` says, with the Noctty version and
+- **Diagnostic bundle:** `koreterm +diagnostic-bundle` writes a folder in the
+  current directory, or where `--output` says, with the Koreterm version and
   build settings, Windows version and build, build and native architectures,
   emulation status, install kind, the embedded PowerShell integration script's
   SHA-256, ConPTY source and fallback reason, and a crash-report count.
@@ -193,44 +193,44 @@ dumps, and SSH host cache go there.
   dumps can contain sensitive process memory. Nothing is uploaded. An
   existing output directory is refused, so older dumps are never mixed into
   a new bundle.
-- **Opt-in traces:** setting `NOCTTY_HANDOFF_TRACE` writes `handoff.log`
-  (always in `%LOCALAPPDATA%\noctty`), and the `NOCTTY_*_TRACE_FILE`
+- **Opt-in traces:** setting `KORETERM_HANDOFF_TRACE` writes `handoff.log`
+  (always in `%LOCALAPPDATA%\koreterm`), and the `KORETERM_*_TRACE_FILE`
   environment variables write diagnostic traces to the files you name.
 - **Housekeeping:** `.lock` files beside some of these, a `.corrupt` copy of
-  any session or layout file Noctty could not read, a `.restore-failed`
-  copy of a saved session that repeatedly stopped Noctty while restoring it,
+  any session or layout file Koreterm could not read, a `.restore-failed`
+  copy of a saved session that repeatedly stopped Koreterm while restoring it,
   and a `.restore-ended` copy of a restored session whose programs all ended
   by themselves before anyone used it (up to five copies of each; older
   `.restore-failed` and `.restore-ended` copies are never replaced).
 
-Noctty writes these registry entries:
+Koreterm writes these registry entries:
 
 - **App identity:**
-  `HKCU\Software\Classes\AppUserModelId\io.github.amanthanvi.noctty` holds
+  `HKCU\Software\Classes\AppUserModelId\io.github.amanthanvi.koreterm` holds
   the app's name, the path of its icon, and a flag that lists it in Windows'
-  notification settings. An installed Noctty writes it at every start. From
+  notification settings. An installed Koreterm writes it at every start. From
   1.3.133 a portable copy writes it only if the key does not exist yet (and the
-  copy has its `noctty.ico` beside it), and never changes an existing one;
+  copy has its `koreterm.ico` beside it), and never changes an existing one;
   earlier portable copies write it at every start like an installed one. A
   portable start that is cut off at the wrong moment can leave a
-  `io.github.amanthanvi.noctty.pending-<hex>` key beside it.
-- **Installer:** Start menu (and optional desktop) shortcuts, the "Open noctty
+  `io.github.amanthanvi.koreterm.pending-<hex>` key beside it.
+- **Installer:** Start menu (and optional desktop) shortcuts, the "Open koreterm
   here" Explorer menu, the default-terminal handoff classes, and its uninstall
   entry. The uninstaller removes them.
-- **Explorer menu for portable copies:** `noctty +register-shell-menu` adds
-  "Open noctty here" for your account; `+unregister-shell-menu` removes it.
-- **Default terminal:** `noctty +register-default-terminal` makes Noctty the
+- **Explorer menu for portable copies:** `koreterm +register-shell-menu` adds
+  "Open koreterm here" for your account; `+unregister-shell-menu` removes it.
+- **Default terminal:** `koreterm +register-default-terminal` makes Koreterm the
   terminal Windows opens for console programs in your account. It writes
   per-user COM and console registry entries and saves the previous setting.
-  `+unregister-default-terminal` restores that setting and removes Noctty's
+  `+unregister-default-terminal` restores that setting and removes Koreterm's
   entries, though it can leave empty `Interface` keys behind.
 
-Windows keeps its own copies of some things Noctty shows: notifications stay
+Windows keeps its own copies of some things Koreterm shows: notifications stay
 in the notification center (they can contain text that programs in the
 terminal send), and text you copy goes to Windows clipboard history, or your
 other devices, if you have turned those on.
 
-Noctty does not keep a log file by default, a record of the commands you run
+Koreterm does not keep a log file by default, a record of the commands you run
 in the terminal, your keystrokes, or your clipboard. Apart from the cases
 listed above, it does not save terminal text.
 
@@ -240,24 +240,24 @@ Uninstalling removes the app, its shortcuts, and the registry entries the
 installer created. It does not remove your data. To remove everything:
 
 1. Before you uninstall:
-   - Remove the entries from Noctty's taskbar jump list by right-clicking
-     them. Noctty never deletes the list Windows keeps; after uninstalling,
+   - Remove the entries from Koreterm's taskbar jump list by right-clicking
+     them. Koreterm never deletes the list Windows keeps; after uninstalling,
      it stays in a `.customDestinations-ms` file in
      `%APPDATA%\Microsoft\Windows\Recent\CustomDestinations`.
-   - If you used them, run `noctty +unregister-default-terminal`,
-     `noctty +unregister-shell-menu`, and `noctty +ssh-cache --clear`.
-2. Close Noctty and delete `%LOCALAPPDATA%\noctty` (in portable mode, the files
-   next to `noctty.exe`), and the `noctty` folders in `XDG_CONFIG_HOME` and
+   - If you used them, run `koreterm +unregister-default-terminal`,
+     `koreterm +unregister-shell-menu`, and `koreterm +ssh-cache --clear`.
+2. Close Koreterm and delete `%LOCALAPPDATA%\koreterm` (in portable mode, the files
+   next to `koreterm.exe`), and the `koreterm` folders in `XDG_CONFIG_HOME` and
    `XDG_STATE_HOME` if you set them. Delete the `ghostty` and `winghostty`
-   folders in the same places too if Noctty is the only program that used
+   folders in the same places too if Koreterm is the only program that used
    them.
 3. Delete the registry key
-   `HKCU\Software\Classes\AppUserModelId\io.github.amanthanvi.noctty`, and
-   any `io.github.amanthanvi.noctty.pending-<hex>` key beside it.
-   Windows may also keep Noctty's notification settings under
-   `HKCU\Software\Microsoft\Windows\CurrentVersion\Notifications\Settings\io.github.amanthanvi.noctty`.
+   `HKCU\Software\Classes\AppUserModelId\io.github.amanthanvi.koreterm`, and
+   any `io.github.amanthanvi.koreterm.pending-<hex>` key beside it.
+   Windows may also keep Koreterm's notification settings under
+   `HKCU\Software\Microsoft\Windows\CurrentVersion\Notifications\Settings\io.github.amanthanvi.koreterm`.
 4. In the `.terminfo` folder in your home directory, delete
-   `78\xterm-ghostty`, `67\ghostty`, and `.noctty-installed`. Other programs
+   `78\xterm-ghostty`, `67\ghostty`, and `.koreterm-installed`. Other programs
    may use that folder, so do not delete it whole.
 5. Delete any screen files and `ghostty-ssh-*` folders left in your temp
    directory.
@@ -267,7 +267,7 @@ hosts it was installed on.
 
 ## Website
 
-noctty.com contains no analytics, advertising, or tracking, its own code
+koreterm.com contains no analytics, advertising, or tracking, its own code
 sets no cookies, and it loads no third-party scripts or fonts. Its content
 security policy blocks them.
 
@@ -276,7 +276,7 @@ security policy blocks them.
   under the [Cloudflare Privacy Policy](https://www.cloudflare.com/privacypolicy/).
 - To show the current version, your browser asks the GitHub API for the
   latest release, so GitHub sees your IP address and that the request came
-  from noctty.com. The answer is kept in your browser's session storage and
+  from koreterm.com. The answer is kept in your browser's session storage and
   reused for 30 minutes.
 - Your light or dark theme choice is kept in your browser's local storage.
 

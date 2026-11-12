@@ -27,7 +27,7 @@ prompt_open: bool = false,
 
 /// Lines submitted that no open prompt has read yet: typed ahead while a
 /// command was still running, or the lines after the first in a multi-line
-/// paste. Each prompt that opens takes one without noctty writing a
+/// paste. Each prompt that opens takes one without koreterm writing a
 /// submission of its own. A C mark leaves the count alone, so `exit` and
 /// `nu` pasted at a nested PowerShell's prompt leave `nu` counted for the
 /// cmd prompt that follows PowerShell's C.
@@ -39,7 +39,7 @@ prompt_open: bool = false,
 /// prompt, and the D cannot tell. Dropping them keeps PowerShell's own prompt
 /// from opening as presubmitted with nothing queued, which a repaint that
 /// writes B before a theme's bare A would misread as a new shell. Without
-/// PSReadLine, noctty's PowerShell integration writes D marks but no C, so
+/// PSReadLine, koreterm's PowerShell integration writes D marks but no C, so
 /// its D must not drop the lines its prompts read; `output_mark_seen` tells
 /// the two apart. A D inside a prompt is part of it, like the one the Windows
 /// Terminal docs' cmd PROMPT writes.
@@ -193,7 +193,7 @@ pub fn inputPending(self: *const SemanticCommand) bool {
     return pinIsValid(pending);
 }
 
-/// Consume the outstanding input mark because noctty itself just wrote a
+/// Consume the outstanding input mark because koreterm itself just wrote a
 /// submission (a carriage return, a newline, or an Enter key) to the pty.
 ///
 /// The B mark is the shell's claim that it is reading a line. Once we have

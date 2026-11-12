@@ -40,7 +40,7 @@ try {
     $portablePath = Join-Path $artifactRoot $portableName
     Set-Content -LiteralPath $setupPath -Value "fake signed setup for $Architecture" -NoNewline
     Set-Content -LiteralPath $portablePath -Value "fake portable archive for $Architecture" -NoNewline
-    Set-Content -LiteralPath (Join-Path $artifactRoot 'noctty-icon.svg') -Value '<svg xmlns="http://www.w3.org/2000/svg" />' -NoNewline
+    Set-Content -LiteralPath (Join-Path $artifactRoot 'koreterm-icon.svg') -Value '<svg xmlns="http://www.w3.org/2000/svg" />' -NoNewline
     $setupSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $setupPath).Hash.ToLowerInvariant()
     $portableSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $portablePath).Hash.ToLowerInvariant()
     Set-Content -LiteralPath (Join-Path $artifactRoot $checksumsName) -Value @(
@@ -54,7 +54,7 @@ try {
         -ArtifactRoot $artifactRelative `
         -OutputRoot $outputRelative
 
-    $manifestPath = Join-Path $outputRoot 'scoop\noctty.json'
+    $manifestPath = Join-Path $outputRoot 'scoop\koreterm.json'
     if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
         throw "Missing generated Scoop manifest: $manifestPath"
     }
@@ -62,35 +62,35 @@ try {
 
     # What the manifest already promised stays.
     if ($manifest.version -cne $Version) { throw 'Scoop manifest version does not match.' }
-    if ($manifest.bin -cne 'noctty.exe') { throw 'Scoop manifest bin must stay noctty.exe.' }
+    if ($manifest.bin -cne 'koreterm.exe') { throw 'Scoop manifest bin must stay koreterm.exe.' }
 
     $hookLines = @($manifest.pre_uninstall)
     if ($null -eq $manifest.pre_uninstall -or $hookLines.Count -eq 0) {
         throw 'The Scoop manifest has no pre_uninstall hook, so a Scoop uninstall leaves the default terminal registered to a folder that is gone.'
     }
     $hook = $hookLines -join "`n"
-    foreach ($expected in @("`$cmd -eq 'uninstall'", 'noctty.com', '+unregister-default-terminal', 'catch', '{33368C6F-D328-410C-B225-26DC9F12C728}', 'Get-Process')) {
+    foreach ($expected in @("`$cmd -eq 'uninstall'", 'koreterm.com', '+unregister-default-terminal', 'catch', '{33368C6F-D328-410C-B225-26DC9F12C728}', 'Get-Process')) {
         if (-not $hook.Contains($expected, [StringComparison]::Ordinal)) {
             throw "pre_uninstall is missing expected content: $expected"
         }
     }
     # The hook calls the console-subsystem shim: the GUI exe returns at once
     # and Scoop would delete the folder under the running unregister.
-    if (-not $hook.Contains("Join-Path `$dir 'noctty.com'", [StringComparison]::Ordinal)) {
-        throw 'pre_uninstall must call noctty.com, not the GUI noctty.exe.'
+    if (-not $hook.Contains("Join-Path `$dir 'koreterm.com'", [StringComparison]::Ordinal)) {
+        throw 'pre_uninstall must call koreterm.com, not the GUI koreterm.exe.'
     }
 
     # Run the hook the way Scoop does, as a script block that sees $cmd and
     # $dir. Nothing real is read or started: the registry value and the
     # process list come from stand-ins for Get-Item and Get-Process (functions
     # shadow cmdlets for the script block that runs below them), and the
-    # noctty.com that the hook would run is a text file, so reaching the call
+    # koreterm.com that the hook would run is a text file, so reaching the call
     # shows as one failure line and not reaching it leaves the output empty.
-    $appsDir = Join-Path $appRoot 'apps\noctty'
+    $appsDir = Join-Path $appRoot 'apps\koreterm'
     $versionDir = Join-Path $appsDir '1.0.0'
     $emptyVersionDir = Join-Path $appsDir '0.9.0'
     New-Item -ItemType Directory -Path $versionDir, $emptyVersionDir -Force | Out-Null
-    Set-Content -LiteralPath (Join-Path $versionDir 'noctty.com') -Value 'not an executable' -NoNewline
+    Set-Content -LiteralPath (Join-Path $versionDir 'koreterm.com') -Value 'not an executable' -NoNewline
 
     $block = [scriptblock]::Create($hook)
     function Invoke-Hook {
@@ -126,12 +126,12 @@ try {
         if ($Out.Trim()) { throw "${Label}: the hook should have done nothing, got: $Out" }
     }
 
-    $owned = '"{0}\noctty.exe"' -f $versionDir
+    $owned = '"{0}\koreterm.exe"' -f $versionDir
     # `scoop update` keeps the old version folder and the registration stays on
     # it; the uninstall that follows runs the hook for the newer folder.
-    $ownedByOlderVersion = '"{0}\noctty.exe"' -f $emptyVersionDir
-    $elsewhere = '"C:\Program Files\noctty\noctty.exe"'
-    $lookalike = '"{0}2\1.0.0\noctty.exe"' -f $appsDir
+    $ownedByOlderVersion = '"{0}\koreterm.exe"' -f $emptyVersionDir
+    $elsewhere = '"C:\Program Files\koreterm\koreterm.exe"'
+    $lookalike = '"{0}2\1.0.0\koreterm.exe"' -f $appsDir
 
     Assert-Reaches 'uninstall of the registered copy' (Invoke-Hook -Command 'uninstall' -Dir $versionDir -Registered $owned)
     Assert-Reaches 'uninstall after an update, registration on an older version folder' (Invoke-Hook -Command 'uninstall' -Dir $versionDir -Registered $ownedByOlderVersion)
@@ -140,8 +140,8 @@ try {
     Assert-Silent 'scoop update' (Invoke-Hook -Command 'update' -Dir $versionDir -Registered $owned)
     Assert-Silent 'a registration of another copy' (Invoke-Hook -Command 'uninstall' -Dir $versionDir -Registered $elsewhere)
     Assert-Silent 'no registration' (Invoke-Hook -Command 'uninstall' -Dir $versionDir -Registered $null)
-    Assert-Silent 'a copy still running (Scoop refuses the uninstall after this hook)' (Invoke-Hook -Command 'uninstall' -Dir $versionDir -Registered $owned -RunningPaths @((Join-Path $appsDir 'current\noctty.exe')))
-    Assert-Silent 'a version folder without noctty.com' (Invoke-Hook -Command 'uninstall' -Dir $emptyVersionDir -Registered ('"{0}\noctty.exe"' -f $emptyVersionDir))
+    Assert-Silent 'a copy still running (Scoop refuses the uninstall after this hook)' (Invoke-Hook -Command 'uninstall' -Dir $versionDir -Registered $owned -RunningPaths @((Join-Path $appsDir 'current\koreterm.exe')))
+    Assert-Silent 'a version folder without koreterm.com' (Invoke-Hook -Command 'uninstall' -Dir $emptyVersionDir -Registered ('"{0}\koreterm.exe"' -f $emptyVersionDir))
 
     Write-Host "Scoop manifest validation: PASS (version=$Version, architecture=$Architecture)"
 }

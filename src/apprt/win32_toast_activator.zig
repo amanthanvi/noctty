@@ -1,5 +1,5 @@
-//! The COM toast activator: how a click on a noctty toast in Action Center
-//! reaches noctty.
+//! The COM toast activator: how a click on a koreterm toast in Action Center
+//! reaches koreterm.
 //!
 //! An unpackaged app's toast keeps its in-process `Activated` handler only
 //! while the popup is up. A click on an entry in Action Center (or on a toast
@@ -11,7 +11,7 @@
 //! `INotificationActivationCallback::Activate` with the toast's launch string.
 //! If no running process registered the class object, COM starts the
 //! `LocalServer32` command and appends ` -Embedding` to it, so a cold start
-//! sees `noctty.exe -ToastActivated -Embedding`.
+//! sees `koreterm.exe -ToastActivated -Embedding`.
 //!
 //! Only an installed, non-elevated copy registers anything (`shouldRegister`):
 //! the installer writes the CLSID and the shortcut property, and the copy
@@ -36,11 +36,11 @@ const GUID = com.GUID;
 const DWORD = windows.DWORD;
 const BOOL = windows.BOOL;
 
-/// The activator's CLSID. `dist/windows/noctty.iss` registers the same value
+/// The activator's CLSID. `dist/windows/koreterm.iss` registers the same value
 /// (the test "installer toast activator CLSID matches the runtime" holds the
 /// two together).
 pub const clsid_text = "{3E21F05E-C82D-4E45-AA7D-2EC361AD6C3E}";
-pub const CLSID_NOCTTY_TOAST_ACTIVATOR = GUID.parse(clsid_text);
+pub const CLSID_KORETERM_TOAST_ACTIVATOR = GUID.parse(clsid_text);
 pub const IID_INotificationActivationCallback = GUID.parse("{53E31837-6600-4A81-9395-75CFFE746F94}");
 const IID_IClassFactory = GUID.parse("{00000001-0000-0000-C000-000000000046}");
 
@@ -67,7 +67,7 @@ extern "ole32" fn CoRevokeClassObject(cookie: DWORD) callconv(.winapi) HRESULT;
 
 /// Whether this copy registers the activator: a copy the installer put in
 /// place (the CLSID's `LocalServer32` names it), not a portable copy, and not
-/// elevated. An elevated noctty must not take the clicks of the user's
+/// elevated. An elevated koreterm must not take the clicks of the user's
 /// ordinary toasts, and its own pane toasts keep their popup handler.
 pub fn shouldRegister(installer_managed: bool, portable: bool, elevated: bool) bool {
     return installer_managed and !portable and !elevated;
@@ -124,7 +124,7 @@ pub fn register() !void {
     if (cookie != null) return;
     var value: DWORD = 0;
     const hr = CoRegisterClassObject(
-        &CLSID_NOCTTY_TOAST_ACTIVATOR,
+        &CLSID_KORETERM_TOAST_ACTIVATOR,
         @ptrCast(&factory),
         CLSCTX_LOCAL_SERVER,
         REGCLS_MULTIPLEUSE,
@@ -300,33 +300,33 @@ pub fn testCallback() *INotificationActivationCallback {
     return @ptrCast(@alignCast(out.?));
 }
 
-/// The process lives as long as noctty does, whatever a client locks.
+/// The process lives as long as koreterm does, whatever a client locks.
 fn lockServer(_: *IClassFactory, _: BOOL) callconv(.winapi) HRESULT {
     return com.S_OK;
 }
 
 test "toast activator LocalServer32 command quotes the exe and adds -ToastActivated" {
     const alloc = std.testing.allocator;
-    const command = try localServerCommand(alloc, "C:\\Program Files\\noctty\\noctty.exe");
+    const command = try localServerCommand(alloc, "C:\\Program Files\\koreterm\\koreterm.exe");
     defer alloc.free(command);
-    try std.testing.expectEqualStrings("\"C:\\Program Files\\noctty\\noctty.exe\" -ToastActivated", command);
+    try std.testing.expectEqualStrings("\"C:\\Program Files\\koreterm\\koreterm.exe\" -ToastActivated", command);
     // A cold start then sees the switch, with COM's -Embedding after it.
-    try std.testing.expect(hasLaunchSwitch(&.{ "noctty.exe", "-ToastActivated", "-Embedding" }));
-    try std.testing.expect(hasLaunchSwitch(&.{ "noctty.exe", "-toastactivated" }));
-    try std.testing.expect(!hasLaunchSwitch(&.{ "noctty.exe", "-Embedding" }));
-    try std.testing.expect(!hasLaunchSwitch(&.{ "noctty.exe", "-e", "cmd.exe", "-ToastActivated" }));
-    try std.testing.expect(!hasLaunchSwitch(&.{"noctty.exe"}));
+    try std.testing.expect(hasLaunchSwitch(&.{ "koreterm.exe", "-ToastActivated", "-Embedding" }));
+    try std.testing.expect(hasLaunchSwitch(&.{ "koreterm.exe", "-toastactivated" }));
+    try std.testing.expect(!hasLaunchSwitch(&.{ "koreterm.exe", "-Embedding" }));
+    try std.testing.expect(!hasLaunchSwitch(&.{ "koreterm.exe", "-e", "cmd.exe", "-ToastActivated" }));
+    try std.testing.expect(!hasLaunchSwitch(&.{"koreterm.exe"}));
     try std.testing.expect(!hasLaunchSwitch(&.{}));
 }
 
 test "installer toast activator CLSID matches the runtime" {
-    const iss = @embedFile("noctty_iss");
+    const iss = @embedFile("koreterm_iss");
     const bare = clsid_text[1 .. clsid_text.len - 1];
     // The class key (Inno doubles an opening brace), its LocalServer32
     // command, and the shortcut property on both [Icons] entries.
     const class_key = "Subkey: \"Software\\Classes\\CLSID\\{" ++ clsid_text ++ "\"";
     const server_key = "Subkey: \"Software\\Classes\\CLSID\\{" ++ clsid_text ++ "\\LocalServer32\"";
-    const server_value = "ValueData: \"\"\"{app}\\noctty.exe\"\" " ++ launch_switch ++ "\"";
+    const server_value = "ValueData: \"\"\"{app}\\koreterm.exe\"\" " ++ launch_switch ++ "\"";
     const shortcut = "AppUserModelToastActivatorCLSID: \"" ++ bare ++ "\"";
 
     var lines = std.mem.splitScalar(u8, iss, '\n');
@@ -346,7 +346,7 @@ test "installer toast activator CLSID matches the runtime" {
             try std.testing.expect(std.mem.indexOf(u8, line, server_value) != null);
             server_line = true;
         }
-        if (std.mem.startsWith(u8, line, "Name: \"{") and std.mem.indexOf(u8, line, "Filename: \"{app}\\noctty.exe\"") != null) {
+        if (std.mem.startsWith(u8, line, "Name: \"{") and std.mem.indexOf(u8, line, "Filename: \"{app}\\koreterm.exe\"") != null) {
             try std.testing.expect(std.mem.indexOf(u8, line, shortcut) != null);
             shortcuts += 1;
         }
@@ -406,7 +406,7 @@ test "toast activator Activate hands the launch string to the bound sink only" {
     try std.testing.expectEqual(com.E_NOINTERFACE, factory.vtbl.CreateInstance(&factory, null, &IID_IClassFactory, &unknown));
     try std.testing.expectEqual(CLASS_E_NOAGGREGATION, factory.vtbl.CreateInstance(&factory, @ptrCast(&factory), &com.IID_IUnknown, &unknown));
 
-    const aumid = std.unicode.utf8ToUtf16LeStringLiteral("io.github.amanthanvi.noctty");
+    const aumid = std.unicode.utf8ToUtf16LeStringLiteral("io.github.amanthanvi.koreterm");
     const launch = std.unicode.utf8ToUtf16LeStringLiteral("wgh://activate?surface=7&pid=12&action=focus");
     try std.testing.expectEqual(com.S_OK, cb.vtbl.Activate(cb, aumid, launch, null, 0));
     try std.testing.expectEqual(com.S_OK, cb.vtbl.Activate(cb, aumid, null, null, 0));

@@ -225,9 +225,9 @@ fn safeModeInArgs(argv: []const []const u8) bool {
 }
 
 test "safe mode only applies to application arguments" {
-    try std.testing.expect(safeModeInArgs(&.{ "noctty", "--safe-mode" }));
-    try std.testing.expect(!safeModeInArgs(&.{ "noctty", "-e", "tool", "--safe-mode" }));
-    try std.testing.expect(!safeModeInArgs(&.{"noctty"}));
+    try std.testing.expect(safeModeInArgs(&.{ "koreterm", "--safe-mode" }));
+    try std.testing.expect(!safeModeInArgs(&.{ "koreterm", "-e", "tool", "--safe-mode" }));
+    try std.testing.expect(!safeModeInArgs(&.{"koreterm"}));
 }
 
 /// Maintains the Unix resource limits that we set for our process. This

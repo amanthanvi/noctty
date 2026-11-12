@@ -24,7 +24,7 @@ $commandResolutionProbes = @(
     [pscustomobject]@{ Reject = $true; Text = '$factory = [type]("System.Management.Automation." + "ScriptBlock")' }
     [pscustomobject]@{ Reject = $true; Text = '$factory = "System.Management.Automation.ScriptBlock" -as [type]' }
     [pscustomobject]@{ Reject = $true; Text = '$typeName = "System.Management.Automation.ScriptBlock"; $factory = $typeName -as [type]' }
-    [pscustomobject]@{ Reject = $false; Text = '$factory = "NocttyStatefulNative" -as [type]' }
+    [pscustomobject]@{ Reject = $false; Text = '$factory = "KoretermStatefulNative" -as [type]' }
     [pscustomobject]@{ Reject = $true; Text = '[runspacefactory]::CreateRunspace()' }
     [pscustomobject]@{ Reject = $true; Text = '[System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspace()' }
     [pscustomobject]@{ Reject = $false; Text = '[ScriptBlock]::CreateDelegate("x")' }

@@ -13,27 +13,27 @@ Add the following to your project's `CMakeLists.txt`:
 
 ```cmake
 include(FetchContent)
-FetchContent_Declare(noctty
+FetchContent_Declare(koreterm
     GIT_REPOSITORY https://github.com/amanthanvi/noctty.git
     GIT_TAG main
 )
-FetchContent_MakeAvailable(noctty)
+FetchContent_MakeAvailable(koreterm)
 
 add_executable(myapp main.c)
 target_link_libraries(myapp PRIVATE ghostty-vt)
 ```
 
-This fetches the noctty source, builds libghostty-vt via Zig during your
+This fetches the koreterm source, builds libghostty-vt via Zig during your
 CMake build, and links it into your target. Headers are added to the
 include path automatically.
 
 ### Using a local checkout
 
-If you already have the noctty source checked out, skip the download by
+If you already have the koreterm source checked out, skip the download by
 pointing CMake at it:
 
 ```shell-session
-cmake -B build -DFETCHCONTENT_SOURCE_DIR_NOCTTY=/path/to/noctty
+cmake -B build -DFETCHCONTENT_SOURCE_DIR_KORETERM=/path/to/koreterm
 cmake --build build
 ```
 
@@ -42,7 +42,7 @@ cmake --build build
 Build and install libghostty-vt first:
 
 ```shell-session
-cd /path/to/noctty
+cd /path/to/koreterm
 cmake -B build
 cmake --build build
 cmake --install build --prefix /usr/local

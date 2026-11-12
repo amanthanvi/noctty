@@ -7,7 +7,7 @@ pub const zlib = @import("zlib.zig");
 pub const deflate = @import("deflate.zig");
 pub const Error = @import("error.zig").Error;
 
-/// The maximum image size, based on the 4G limit of noctty's
+/// The maximum image size, based on the 4G limit of koreterm's
 /// `image-storage-limit` config.
 pub const maximum_image_size = 4 * 1024 * 1024 * 1024;
 

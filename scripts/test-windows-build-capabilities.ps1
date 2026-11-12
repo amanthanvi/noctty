@@ -1,15 +1,15 @@
 $ErrorActionPreference = "Stop"
 . (Join-Path $PSScriptRoot "windows-build-capabilities.ps1")
 
-$fixtureRoot = Join-Path ([System.IO.Path]::GetTempPath()) "noctty-build-capabilities-$PID"
-$manifestPath = Join-Path $fixtureRoot "noctty-build-capabilities.json"
+$fixtureRoot = Join-Path ([System.IO.Path]::GetTempPath()) "koreterm-build-capabilities-$PID"
+$manifestPath = Join-Path $fixtureRoot "koreterm-build-capabilities.json"
 $runtimeFiles = @(
-    "noctty.com",
-    "noctty.exe",
+    "koreterm.com",
+    "koreterm.exe",
     # A path below the bin directory, as the packaging scripts list the
     # ghostty-vt.dll placeholder.
     "ghostty-vt-stub\ghostty-vt.dll",
-    "noctty-terminal-handoff-proxy.dll"
+    "koreterm-terminal-handoff-proxy.dll"
 )
 
 try {
@@ -31,7 +31,7 @@ try {
         -Architecture "arm64" `
         -RuntimeFiles $runtimeFiles
 
-    Add-Content -LiteralPath (Join-Path $fixtureRoot "noctty.exe") -Value "mutated"
+    Add-Content -LiteralPath (Join-Path $fixtureRoot "koreterm.exe") -Value "mutated"
     $hashMismatchRejected = $false
     try {
         Assert-WindowsBuildCapabilitiesManifest `

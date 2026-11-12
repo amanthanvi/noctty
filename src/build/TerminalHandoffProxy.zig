@@ -3,7 +3,7 @@ const Proxy = @This();
 const std = @import("std");
 const Config = @import("Config.zig");
 
-const name = "noctty-terminal-handoff-proxy";
+const name = "koreterm-terminal-handoff-proxy";
 const source_root = "src/apprt/win32_terminal_handoff_proxy";
 
 library: *std.Build.Step.Compile,
@@ -28,7 +28,7 @@ pub fn init(b: *std.Build, cfg: *const Config) !Proxy {
     // build.zig links a release that keeps its PDB with /OPT:REF through the
     // environment, which Zig's cache key ignores: this macro is what stops a
     // DLL linked without the flag from being reused.
-    module.addCMacro("NOCTTY_RELEASE_SYMBOLS", if (cfg.release_symbols) "1" else "0");
+    module.addCMacro("KORETERM_RELEASE_SYMBOLS", if (cfg.release_symbols) "1" else "0");
     module.addCMacro(
         "PROXY_CLSID_IS",
         "{0x1d349824,0x21fb,0x46c7,{0xac,0xf3,0x74,0x6e,0xdc,0x99,0x1d,0x52}}",

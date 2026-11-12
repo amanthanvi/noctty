@@ -97,7 +97,7 @@ test "minidump init creates missing parent directories" {
     defer tmp.cleanup();
     const root = try tmp.dir.realpathAlloc(alloc, ".");
     defer alloc.free(root);
-    const path = try std.fs.path.join(alloc, &.{ root, "absent", "noctty", "crash" });
+    const path = try std.fs.path.join(alloc, &.{ root, "absent", "koreterm", "crash" });
     defer alloc.free(path);
 
     try initIn(path);
@@ -214,21 +214,21 @@ fn formatDumpPath(
     const sep: []const u8 = if (std.fs.path.isSep(base_dir[base_dir.len - 1])) "" else &.{std.fs.path.sep};
     return try std.fmt.bufPrint(
         buf,
-        "{s}{s}noctty-{d}-{d}.dmp",
+        "{s}{s}koreterm-{d}-{d}.dmp",
         .{ base_dir, sep, pid, timestamp_ms },
     );
 }
 
 test "formatDumpPath appends separator and dmp extension" {
     var buf: [std.fs.max_path_bytes]u8 = undefined;
-    const path = try formatDumpPath(&buf, "C:\\Users\\a\\noctty\\crash", 42, 1234);
-    try std.testing.expectEqualStrings("C:\\Users\\a\\noctty\\crash\\noctty-42-1234.dmp", path);
+    const path = try formatDumpPath(&buf, "C:\\Users\\a\\koreterm\\crash", 42, 1234);
+    try std.testing.expectEqualStrings("C:\\Users\\a\\koreterm\\crash\\koreterm-42-1234.dmp", path);
 }
 
 test "formatDumpPath keeps existing separator" {
     var buf: [std.fs.max_path_bytes]u8 = undefined;
     const path = try formatDumpPath(&buf, "C:\\crash\\", 7, 9);
-    try std.testing.expectEqualStrings("C:\\crash\\noctty-7-9.dmp", path);
+    try std.testing.expectEqualStrings("C:\\crash\\koreterm-7-9.dmp", path);
 }
 
 test "writeMinidumpIn writes a dump that carries the exception" {

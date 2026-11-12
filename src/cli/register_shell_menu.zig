@@ -18,11 +18,11 @@ pub const Options = struct {
     }
 };
 
-/// Register `Open noctty here` in the current user's classic Explorer
+/// Register `Open koreterm here` in the current user's classic Explorer
 /// context menus for folders, folder backgrounds, and drives.
 ///
 /// The action writes only to `HKCU\Software\Classes`. It is idempotent and
-/// points every verb at the `noctty.exe` next to the current launcher.
+/// points every verb at the `koreterm.exe` next to the current launcher.
 pub fn run(alloc: Allocator) !u8 {
     var opts: Options = .{};
     defer opts.deinit();
@@ -63,7 +63,7 @@ fn runInner(
 
     const exe_path = shell_menu.executablePathAlloc(alloc, self_path) catch |err| {
         try stderr.print(
-            "Failed to register Explorer shell menu: noctty.exe path unavailable ({s}).\n",
+            "Failed to register Explorer shell menu: koreterm.exe path unavailable ({s}).\n",
             .{@errorName(err)},
         );
         return 1;
@@ -99,7 +99,7 @@ fn runInner(
             // get back to a clean state rather than leaving a half-installed
             // Explorer menu behind silently.
             try stderr.print(
-                "Some verbs may already be registered; run `noctty +unregister-shell-menu` to remove them.\n",
+                "Some verbs may already be registered; run `koreterm +unregister-shell-menu` to remove them.\n",
                 .{},
             );
             return 1;
@@ -131,7 +131,7 @@ test "shell-menu access denied explains per-user policy causes" {
 
     try writeRegistryFailure(&output.writer, .{
         .operation = .create_key,
-        .key_path = "Software\\Classes\\Directory\\shell\\noctty",
+        .key_path = "Software\\Classes\\Directory\\shell\\koreterm",
         .status = ERROR_ACCESS_DENIED,
     });
 
@@ -149,7 +149,7 @@ test "shell-menu access denied explains per-user policy causes" {
     output.clearRetainingCapacity();
     try writeRegistryFailure(&output.writer, .{
         .operation = .set_value,
-        .key_path = "Software\\Classes\\Drive\\shell\\noctty",
+        .key_path = "Software\\Classes\\Drive\\shell\\koreterm",
         .status = ERROR_ACCESS_DENIED,
     });
     try std.testing.expect(std.mem.indexOf(u8, output.written(), "during set_value") != null);

@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [string]$Binary = (Join-Path $PSScriptRoot '..\..\..\zig-out\bin\noctty.exe'),
+    [string]$Binary = (Join-Path $PSScriptRoot '..\..\..\zig-out\bin\koreterm.exe'),
     [string]$OutputDirectory = (Join-Path $PSScriptRoot 'artifacts'),
     [string]$ExpectedProfileHash = '',
     [string]$ExpectedProfileMtime = '',
@@ -30,7 +30,7 @@ function Assert-PeMachine([string]$PathToCheck, [string]$ExpectedArchitecture) {
 }
 $Binary = [IO.Path]::GetFullPath($Binary)
 $OutputDirectory = [IO.Path]::GetFullPath($OutputDirectory)
-if (!$RealProfile) { $RealProfile = Join-Path $env:LOCALAPPDATA 'noctty\startup-attempts.json' }
+if (!$RealProfile) { $RealProfile = Join-Path $env:LOCALAPPDATA 'koreterm\startup-attempts.json' }
 function Get-ProfileReceipt {
     if (!(Test-Path -LiteralPath $RealProfile)) { return @{ exists = $false } }
     return @{ exists = $true; sha256 = (Get-FileHash -LiteralPath $RealProfile -Algorithm SHA256).Hash.ToLowerInvariant(); mtime = (Get-Item -LiteralPath $RealProfile).LastWriteTimeUtc.ToString('o') }
@@ -97,11 +97,11 @@ function Invoke-Case([string]$Label, [string]$Backend, [hashtable]$ExtraEnvironm
     $run = Join-Path $OutputDirectory $Label
     $bin = Join-Path $run 'bin'
     [void](New-Item -ItemType Directory -Path $bin)
-    Copy-Item -LiteralPath $Binary -Destination (Join-Path $bin 'noctty.exe')
-    if ((Get-FileHash -LiteralPath (Join-Path $bin 'noctty.exe')).Hash -ne $result.binarySHA256) { throw 'Source binary changed during this batch.' }
+    Copy-Item -LiteralPath $Binary -Destination (Join-Path $bin 'koreterm.exe')
+    if ((Get-FileHash -LiteralPath (Join-Path $bin 'koreterm.exe')).Hash -ne $result.binarySHA256) { throw 'Source binary changed during this batch.' }
     $share = Join-Path (Split-Path (Split-Path $Binary)) 'share'
     if (Test-Path -LiteralPath $share) { Copy-Item -LiteralPath $share -Destination $run -Recurse }
-    Set-Content -LiteralPath (Join-Path $bin 'noctty.portable') -Value 'isolated renderer verification'
+    Set-Content -LiteralPath (Join-Path $bin 'koreterm.portable') -Value 'isolated renderer verification'
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'Fixture.ps1') -Destination $bin
     $architecture = if ([Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture -eq 'Arm64') { 'arm64' } else { 'x64' }
     if (!(Install-ConPtyRedist -PinPath (Join-Path $repoRoot 'dist/windows/conpty-redist.json') -Architecture $architecture -Destination $bin -CacheRoot (Join-Path $OutputDirectory 'conpty-cache') -RequireConPty)) { throw 'Pinned bundled ConPTY is required for protocol coverage.' }
@@ -123,16 +123,16 @@ function Invoke-Case([string]$Label, [string]$Backend, [hashtable]$ExtraEnvironm
         if ($SplitFill) { $config += 'unfocused-split-fill=#' + $SplitFill }
     }
     $config += $ExtraConfig
-    $config += 'class=noctty-test-renderer-' + [guid]::NewGuid().ToString('N')
+    $config += 'class=koreterm-test-renderer-' + [guid]::NewGuid().ToString('N')
     Set-Content -LiteralPath (Join-Path $bin 'config.ghostty') -Value ($config -join "`n") -Encoding utf8
-    $environment = @{ LOCALAPPDATA = (Join-Path $run 'LocalAppData'); APPDATA = (Join-Path $run 'AppData'); NOCTTY_RENDERER_CAPTURE_PATH = (Join-Path $run 'frame.bmp'); NOCTTY_RENDERER_STATUS_PATH = (Join-Path $run 'renderer.json'); NOCTTY_RENDERER_READY_PATH = (Join-Path $run 'ready.txt'); NOCTTY_RENDERER_HIDE_NOTICES = '1' }
+    $environment = @{ LOCALAPPDATA = (Join-Path $run 'LocalAppData'); APPDATA = (Join-Path $run 'AppData'); KORETERM_RENDERER_CAPTURE_PATH = (Join-Path $run 'frame.bmp'); KORETERM_RENDERER_STATUS_PATH = (Join-Path $run 'renderer.json'); KORETERM_RENDERER_READY_PATH = (Join-Path $run 'ready.txt'); KORETERM_RENDERER_HIDE_NOTICES = '1' }
     foreach ($key in $ExtraEnvironment.Keys) { $environment[$key] = $ExtraEnvironment[$key] }
     # The fallback case reads its banner through UIA. An info banner counts
     # down from its first paint, but a slow UIA client may not reach it until
     # the countdown is over; this test-tools switch keeps it up.
-    if ($OpenGLStartupFallback) { [void]$environment.Remove('NOCTTY_RENDERER_HIDE_NOTICES'); $environment.NOCTTY_RENDERER_KEEP_NOTICES = '1' }
+    if ($OpenGLStartupFallback) { [void]$environment.Remove('KORETERM_RENDERER_HIDE_NOTICES'); $environment.KORETERM_RENDERER_KEEP_NOTICES = '1' }
     [void](New-Item -ItemType Directory -Path $environment.LOCALAPPDATA, $environment.APPDATA)
-    if (!(Test-Path -LiteralPath (Join-Path $bin 'noctty.portable'))) { throw 'Portable marker missing; app launch blocked.' }
+    if (!(Test-Path -LiteralPath (Join-Path $bin 'koreterm.portable'))) { throw 'Portable marker missing; app launch blocked.' }
     $proc = $null
     $nativeProcess = New-Object RendererNative+PI
     if ($OpenGLStartupFallback) {
@@ -148,7 +148,7 @@ function Invoke-Case([string]$Label, [string]$Backend, [hashtable]$ExtraEnvironm
     }
     $case = [ordered]@{ label = $Label; requested = $Backend; portable = $true; appDataRedirected = $true }
     try {
-        $nativeProcess = [RendererNative]::Launch((Join-Path $bin 'noctty.exe'), $bin, $DesktopName, $environment, (Join-Path $run 'stderr.txt'))
+        $nativeProcess = [RendererNative]::Launch((Join-Path $bin 'koreterm.exe'), $bin, $DesktopName, $environment, (Join-Path $run 'stderr.txt'))
         try { $proc = Get-Process -Id $nativeProcess.pid } catch {
             $exitCode=0; [void][RendererNative]::GetExitCodeProcess($nativeProcess.process,[ref]$exitCode)
             throw "App exited before fixture: $exitCode"
@@ -200,23 +200,23 @@ function Invoke-Case([string]$Label, [string]$Backend, [hashtable]$ExtraEnvironm
                     }
                 }
             }
-            if ($surfaceWindow -ne [IntPtr]::Zero -and (Test-Path -LiteralPath $environment.NOCTTY_RENDERER_READY_PATH) -and (!$OpenGLStartupFallback -or $case.fallbackBanner)) { break }
+            if ($surfaceWindow -ne [IntPtr]::Zero -and (Test-Path -LiteralPath $environment.KORETERM_RENDERER_READY_PATH) -and (!$OpenGLStartupFallback -or $case.fallbackBanner)) { break }
             Start-Sleep -Milliseconds 25
         }
         if ($OpenGLStartupFallback) { $case.bannerWait.waitMs = $clock.ElapsedMilliseconds }
-        if ($surfaceWindow -eq [IntPtr]::Zero -or !(Test-Path -LiteralPath $environment.NOCTTY_RENDERER_READY_PATH)) { throw 'Fixture did not become ready.' }
+        if ($surfaceWindow -eq [IntPtr]::Zero -or !(Test-Path -LiteralPath $environment.KORETERM_RENDERER_READY_PATH)) { throw 'Fixture did not become ready.' }
         Start-Sleep -Milliseconds 500
         $capture = {
             param($Name, [switch]$NoReplay)
             if (!$NoReplay -and ![RendererNative]::Replay($surfaceWindow)) { throw 'Retained-frame redraw request failed.' }
             # Each capture must produce fresh GPU pixels and status. A failed
             # capture must never reuse an earlier frame's successful evidence.
-            foreach ($path in @($environment.NOCTTY_RENDERER_CAPTURE_PATH, $environment.NOCTTY_RENDERER_STATUS_PATH)) { if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path } }
+            foreach ($path in @($environment.KORETERM_RENDERER_CAPTURE_PATH, $environment.KORETERM_RENDERER_STATUS_PATH)) { if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path } }
             if (![RendererNative]::Capture($surfaceWindow, (Join-Path $run 'gdi.png'))) { throw 'Synchronous in-app GPU readback was rejected.' }
-            if (!(Test-Path -LiteralPath $environment.NOCTTY_RENDERER_CAPTURE_PATH) -or !(Test-Path -LiteralPath $environment.NOCTTY_RENDERER_STATUS_PATH)) { throw 'Fresh in-app GPU readback/status missing; GDI is not a substitute.' }
+            if (!(Test-Path -LiteralPath $environment.KORETERM_RENDERER_CAPTURE_PATH) -or !(Test-Path -LiteralPath $environment.KORETERM_RENDERER_STATUS_PATH)) { throw 'Fresh in-app GPU readback/status missing; GDI is not a substitute.' }
             $image = Join-Path $run ($Name + '.png')
-            [RendererNative]::Readback($environment.NOCTTY_RENDERER_CAPTURE_PATH, $image)
-            $status = Get-Content -LiteralPath $environment.NOCTTY_RENDERER_STATUS_PATH -Raw | ConvertFrom-Json
+            [RendererNative]::Readback($environment.KORETERM_RENDERER_CAPTURE_PATH, $image)
+            $status = Get-Content -LiteralPath $environment.KORETERM_RENDERER_STATUS_PATH -Raw | ConvertFrom-Json
             $pixels = [RendererNative]::PixelStats($image) | ConvertFrom-Json
             if ($pixels.colors -lt 50 -or $pixels.nonblack -lt 1000) { throw 'Readback does not contain a meaningful fixture.' }
             return @{ path = $image; status = $status; pixels = $pixels }
@@ -229,11 +229,11 @@ function Invoke-Case([string]$Label, [string]$Backend, [hashtable]$ExtraEnvironm
                 $shown = if ($null -eq $bannerWait.shownMs) { 'never shown' } else { "shown at $($bannerWait.shownMs) ms" }
                 throw "OpenGL startup fallback banner is incomplete: after $($bannerWait.waitMs) ms the banner was $shown, and after $($bannerWait.reads) reads (longest WM_NULL wait $($bannerWait.longestPingMs) ms, longest read $($bannerWait.longestReadMs) ms) the last UIA name, read at $($bannerWait.lastReadMs) ms, was '$($bannerWait.lastName)'."
             }
-            Remove-Item -LiteralPath $environment.NOCTTY_RENDERER_READY_PATH
+            Remove-Item -LiteralPath $environment.KORETERM_RENDERER_READY_PATH
             if (![RendererNative]::Action($surfaceWindow,1)) { throw 'New tab action rejected.' }
             $tabClock=[Diagnostics.Stopwatch]::StartNew()
-            while (!(Test-Path -LiteralPath $environment.NOCTTY_RENDERER_READY_PATH) -and $tabClock.Elapsed.TotalSeconds -lt 40) { Start-Sleep -Milliseconds 25 }
-            if (!(Test-Path -LiteralPath $environment.NOCTTY_RENDERER_READY_PATH)) { throw 'Second-tab fixture did not become ready.' }
+            while (!(Test-Path -LiteralPath $environment.KORETERM_RENDERER_READY_PATH) -and $tabClock.Elapsed.TotalSeconds -lt 40) { Start-Sleep -Milliseconds 25 }
+            if (!(Test-Path -LiteralPath $environment.KORETERM_RENDERER_READY_PATH)) { throw 'Second-tab fixture did not become ready.' }
             Start-Sleep -Milliseconds 500
             if ([RendererNative]::Surfaces($hostWindow,$false).Count -ne 2) { throw 'Cached fallback did not open a second surface.' }
             $surfaceWindow = [RendererNative]::Surface($hostWindow)
@@ -280,9 +280,9 @@ function Invoke-Case([string]$Label, [string]$Backend, [hashtable]$ExtraEnvironm
             $case.unavailableImages = @()
             foreach ($sample in 1..2) {
                 Start-Sleep -Milliseconds 600
-                Remove-Item -LiteralPath $environment.NOCTTY_RENDERER_STATUS_PATH -ErrorAction SilentlyContinue
+                Remove-Item -LiteralPath $environment.KORETERM_RENDERER_STATUS_PATH -ErrorAction SilentlyContinue
                 if ([RendererNative]::Capture($surfaceWindow, (Join-Path $run ('unavailable-' + $sample + '.png')))) { throw 'An unavailable device unexpectedly supplied GPU readback.' }
-                $status = Get-Content -LiteralPath $environment.NOCTTY_RENDERER_STATUS_PATH -Raw | ConvertFrom-Json
+                $status = Get-Content -LiteralPath $environment.KORETERM_RENDERER_STATUS_PATH -Raw | ConvertFrom-Json
                 if (!$status.unavailable -or $status.image_count -gt 2) { throw 'Unavailable-device image cleanup retained deleted copies.' }
                 $case.unavailableImages += $status
             }
@@ -420,11 +420,11 @@ function Invoke-Case([string]$Label, [string]$Backend, [hashtable]$ExtraEnvironm
                     Start-Sleep -Milliseconds 100
                 }
             }
-            Remove-Item -LiteralPath $environment.NOCTTY_RENDERER_READY_PATH
+            Remove-Item -LiteralPath $environment.KORETERM_RENDERER_READY_PATH
             if (![RendererNative]::Action($surfaceWindow, 2)) { throw 'Split action rejected.' }
             $splitClock = [Diagnostics.Stopwatch]::StartNew()
-            while (!(Test-Path -LiteralPath $environment.NOCTTY_RENDERER_READY_PATH) -and $splitClock.Elapsed.TotalSeconds -lt 40) { Start-Sleep -Milliseconds 25 }
-            if (!(Test-Path -LiteralPath $environment.NOCTTY_RENDERER_READY_PATH)) { throw 'Split fixture did not become ready.' }
+            while (!(Test-Path -LiteralPath $environment.KORETERM_RENDERER_READY_PATH) -and $splitClock.Elapsed.TotalSeconds -lt 40) { Start-Sleep -Milliseconds 25 }
+            if (!(Test-Path -LiteralPath $environment.KORETERM_RENDERER_READY_PATH)) { throw 'Split fixture did not become ready.' }
             # A held fixture starts its hold 1.5 s after it is ready.
             Start-Sleep -Milliseconds $(if ($HoldSync) { 2500 } else { 800 })
             $panes = @([RendererNative]::Surfaces($hostWindow, $true) | Sort-Object { [RendererNative]::Left($_) })
@@ -622,7 +622,7 @@ function Invoke-Case([string]$Label, [string]$Backend, [hashtable]$ExtraEnvironm
             # renderer counts the rebuilds that drew the caret with the
             # preedit row clean, and the captures ask for no redraw.
             $p.beforeTicks = & $compose 1 5 'preedit-before-ticks'; & $expectBar $p.beforeTicks 0 'Cursor 5 again'
-            Set-Content -LiteralPath ($environment.NOCTTY_RENDERER_READY_PATH + '.blink') -Value 'blink'
+            Set-Content -LiteralPath ($environment.KORETERM_RENDERER_READY_PATH + '.blink') -Value 'blink'
             Start-Sleep -Milliseconds 500
             $p.blinkStart = & $capture 'preedit-blink-start' -NoReplay
             $p.blinkStart.caret = & $box $p.blinkStart
@@ -634,7 +634,7 @@ function Invoke-Case([string]$Label, [string]$Backend, [hashtable]$ExtraEnvironm
             if ($null -eq $p.blinkEnd.status.preedit_caret_clean_rebuilds -or $p.cleanRebuilds -lt 2) { throw "No blink frames rebuilt with the preedit row clean ($($p.cleanRebuilds) in 2.5 s)." }
             & $expectBar $p.blinkEnd 0 'After blink frames with no output'
             # Output on another row: the cursor moves to it and back.
-            Set-Content -LiteralPath ($environment.NOCTTY_RENDERER_READY_PATH + '.tick') -Value 'tick'
+            Set-Content -LiteralPath ($environment.KORETERM_RENDERER_READY_PATH + '.tick') -Value 'tick'
             Start-Sleep -Milliseconds 1500
             $p.afterTicks = & $capture 'preedit-after-ticks' -NoReplay
             $p.afterTicks.caret = & $box $p.afterTicks
@@ -650,7 +650,7 @@ function Invoke-Case([string]$Label, [string]$Backend, [hashtable]$ExtraEnvironm
             # renderer's own frames. The config theme is Dracula (background
             # 282a36) and the theme searched for is 0x96f (262427). A screen
             # pixel read cannot tell a frame from another window drawn over
-            # the app: the 1.3.134 evidence run read 3c3c3c, which is no noctty
+            # the app: the 1.3.134 evidence run read 3c3c3c, which is no koreterm
             # colour, where it expected Dracula (attributed to such a window,
             # not measured).
             $dracula = '282a36'; $preview = '262427'
@@ -780,10 +780,10 @@ function Invoke-Case([string]$Label, [string]$Backend, [hashtable]$ExtraEnvironm
             $proc.Refresh()
             if (!$proc.HasExited) {
                 $live = Get-Process -Id $proc.Id -ErrorAction Ignore
-                if ($live -and $live.StartTime -eq $identity -and $live.Path -eq (Join-Path $bin 'noctty.exe')) {
+                if ($live -and $live.StartTime -eq $identity -and $live.Path -eq (Join-Path $bin 'koreterm.exe')) {
                     if ($hostWindow -ne [IntPtr]::Zero) { [void][RendererNative]::PostMessageW($hostWindow, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero) }
                     $case.teardown = 'graceful'
-                    if (!$proc.WaitForExit(5000)) { $proc.Refresh(); $live = Get-Process -Id $proc.Id -ErrorAction Ignore; if ($live -and $live.StartTime -eq $identity -and $live.Path -eq (Join-Path $bin 'noctty.exe')) { Stop-Process -Id $proc.Id; $proc.WaitForExit(); $case.teardown = 'forced' } }
+                    if (!$proc.WaitForExit(5000)) { $proc.Refresh(); $live = Get-Process -Id $proc.Id -ErrorAction Ignore; if ($live -and $live.StartTime -eq $identity -and $live.Path -eq (Join-Path $bin 'koreterm.exe')) { Stop-Process -Id $proc.Id; $proc.WaitForExit(); $case.teardown = 'forced' } }
                 } else { throw 'App PID identity changed; cleanup refused.' }
             }
             $proc.Dispose()
@@ -851,15 +851,15 @@ try {
     if ($PreeditCaretOnly) { Invoke-PreeditCaretCases; $result.status = 'pass'; return }
     if ($PaletteThemeOnly) { Invoke-PaletteThemeCases; $result.status = 'pass'; return }
     # These cases need no GL driver and run on x64 and native ARM64 CI too.
-    $startupFallback = Invoke-Case 'opengl-startup-fallback' 'opengl' @{NOCTTY_RENDERER_FAIL_OPENGL_VERSION='1'} -OpenGLStartupFallback
+    $startupFallback = Invoke-Case 'opengl-startup-fallback' 'opengl' @{KORETERM_RENDERER_FAIL_OPENGL_VERSION='1'} -OpenGLStartupFallback
     $result.runs += $startupFallback
     if ($OpenGLStartupOnly) { $result.status = 'pass'; return }
-    $blockedKitty = Invoke-Case 'kitty-without-gl' 'd3d11-warp' @{NOCTTY_RENDERER_FAIL_OPENGL='1';NOCTTY_RENDERER_TEST_KITTY='1';NOCTTY_RENDERER_TEST_IMAGE_CHURN='1'} @('power-saver-rendering=on') -Streaming -ReloadImages
+    $blockedKitty = Invoke-Case 'kitty-without-gl' 'd3d11-warp' @{KORETERM_RENDERER_FAIL_OPENGL='1';KORETERM_RENDERER_TEST_KITTY='1';KORETERM_RENDERER_TEST_IMAGE_CHURN='1'} @('power-saver-rendering=on') -Streaming -ReloadImages
     $result.runs += $blockedKitty
     if ($blockedKitty.initial.status.backend -ne 'd3d11' -or !$blockedKitty.initial.status.fallback_blocked) { throw 'Failed GL image fallback did not retain healthy D3D11.' }
-    $blockedReload = Invoke-Case 'reload-without-gl' 'd3d11-warp' @{NOCTTY_RENDERER_FAIL_OPENGL='1'} @('power-saver-rendering=on') -Streaming -ReloadUnsupported
+    $blockedReload = Invoke-Case 'reload-without-gl' 'd3d11-warp' @{KORETERM_RENDERER_FAIL_OPENGL='1'} @('power-saver-rendering=on') -Streaming -ReloadUnsupported
     $result.runs += $blockedReload
-    $noHardware = Invoke-Case 'no-hardware' 'd3d11' @{ NOCTTY_RENDERER_FAIL_HARDWARE = '1' } -RetryHardware; $result.runs += $noHardware
+    $noHardware = Invoke-Case 'no-hardware' 'd3d11' @{ KORETERM_RENDERER_FAIL_HARDWARE = '1' } -RetryHardware; $result.runs += $noHardware
     if ($WarpOnly) {
         $warp = Invoke-Case 'warp' 'd3d11-warp' -Lifecycle
         $result.runs += $warp
@@ -871,7 +871,7 @@ try {
         return
     }
     $gl = Invoke-Case 'opengl' 'opengl'; $result.runs += $gl
-    $hardware = Invoke-Case 'hardware' 'd3d11' @{ NOCTTY_RENDERER_TEST_PRESENT_STATUS = '1' } -Lifecycle; $result.runs += $hardware
+    $hardware = Invoke-Case 'hardware' 'd3d11' @{ KORETERM_RENDERER_TEST_PRESENT_STATUS = '1' } -Lifecycle; $result.runs += $hardware
     if ($hardware.initial.status.last_present_status -ne 0x087A0007 -or $hardware.initial.status.composition_commits -lt 1 -or $hardware.initial.status.presents -lt 1) { throw 'Successful nonzero Present status did not commit and complete startup.' }
     if ($RequireHardware -and $hardware.initial.status.warp) { throw 'Hardware required, but adapter selection used WARP.' }
     $warp = Invoke-Case 'warp' 'd3d11-warp' -Lifecycle; $result.runs += $warp
@@ -885,11 +885,11 @@ try {
     Invoke-SplitDimCases
     Invoke-PreeditCaretCases
     Invoke-PaletteThemeCases
-    $noDevice = Invoke-Case 'no-device' 'd3d11' @{ NOCTTY_RENDERER_FAIL_DEVICE = '1' }; $result.runs += $noDevice
+    $noDevice = Invoke-Case 'no-device' 'd3d11' @{ KORETERM_RENDERER_FAIL_DEVICE = '1' }; $result.runs += $noDevice
     if ($noDevice.initial.status.backend -ne 'opengl') { throw 'Unavailable D3D11 did not select OpenGL.' }
-    $noLibrary = Invoke-Case 'no-library' 'd3d11' @{ NOCTTY_RENDERER_FAIL_LIBRARY = '1' }; $result.runs += $noLibrary
+    $noLibrary = Invoke-Case 'no-library' 'd3d11' @{ KORETERM_RENDERER_FAIL_LIBRARY = '1' }; $result.runs += $noLibrary
     if ($noLibrary.initial.status.backend -ne 'opengl') { throw 'Unavailable D3D11 runtime did not select OpenGL.' }
-    $resource = Invoke-Case 'resource-failure' 'd3d11' @{ NOCTTY_RENDERER_FAIL_RESOURCE = '1' } -RetryHardware; $result.runs += $resource
+    $resource = Invoke-Case 'resource-failure' 'd3d11' @{ KORETERM_RENDERER_FAIL_RESOURCE = '1' } -RetryHardware; $result.runs += $resource
     if ($resource.initial.status.backend -ne 'd3d11' -or !$resource.initial.status.warp) { throw 'Hardware startup resource failure did not select WARP.' }
     $present = Invoke-Case 'present-failure' 'd3d11' -FailureAction 0x8054; $result.runs += $present
     if ($present.afterFailure.status.backend -ne 'd3d11' -or !$present.afterFailure.status.warp) { throw 'Ordinary hardware presentation failure did not select WARP.' }
@@ -908,7 +908,7 @@ try {
     try { $background.SetPixel(0, 0, [Drawing.Color]::Red); $background.Save($backgroundPath, [Drawing.Imaging.ImageFormat]::Png) } finally { $background.Dispose() }
     $image = Invoke-Case 'background-image-fallback' 'd3d11' @{} @('background-image=' + $backgroundPath); $result.runs += $image
     if ($image.initial.status.backend -ne 'opengl') { throw 'Background image did not select OpenGL.' }
-    $kitty = Invoke-Case 'kitty-fallback' 'd3d11' @{ NOCTTY_RENDERER_TEST_KITTY = '1' }; $result.runs += $kitty
+    $kitty = Invoke-Case 'kitty-fallback' 'd3d11' @{ KORETERM_RENDERER_TEST_KITTY = '1' }; $result.runs += $kitty
     if ($kitty.initial.status.backend -ne 'opengl') { throw 'Kitty images did not trigger OpenGL fallback.' }
     $result.status = 'pass'
 } catch { $result.failure = $_.Exception.Message }

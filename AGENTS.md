@@ -37,12 +37,12 @@ reading step under [Self-Correction Log](#self-correction-log).
   `scripts/dev-windows.cmd` and raw `zig test`; 2026-05-01 direct
   `zig test src/apprt.zig`.)
 
-## Running noctty
+## Running koreterm
 
-- Run noctty on a private desktop (`CreateDesktopW`), and pass
+- Run koreterm on a private desktop (`CreateDesktopW`), and pass
   `lpDesktop = WinSta0\<desktop>` to every process you start: a driver on a
   private desktop that passes a null one puts the child on the user's
-  desktop, and noctty takes the foreground. Drive it with posted messages
+  desktop, and koreterm takes the foreground. Drive it with posted messages
   (`SendInput` types into whatever window is in front): a key as a posted
   `WM_KEYDOWN`/`WM_KEYUP` pair, since a posted triple types it twice and a
   bare posted `WM_CHAR` types nothing. A posted Alt never reaches
@@ -55,11 +55,11 @@ reading step under [Self-Correction Log](#self-correction-log).
   needs a visible run, and a visible run starts only once the user is away.
   (search-scrollbar.md: 2026-10-16 D3D11-IFLIP-01; window-frame.md:
   2026-10-16 real DPI drag, last trap.)
-- Run a scratch portable copy (`noctty.portable` beside the exe) with
-  `--window-save-state=never` and `LOCALAPPDATA` redirected for that noctty;
+- Run a scratch portable copy (`koreterm.portable` beside the exe) with
+  `--window-save-state=never` and `LOCALAPPDATA` redirected for that koreterm;
   that isolates session and startup state. If a `zig build` runs under the
   redirect, pin `ZIG_GLOBAL_CACHE_DIR` to the real Zig cache. A test that
-  reached the real `%LOCALAPPDATA%\noctty` once put the user's launches into
+  reached the real `%LOCALAPPDATA%\koreterm` once put the user's launches into
   safe mode. (window-frame.md: 2026-09-23 "Item (b) of the #262 entry";
   test-harnesses.md: 2026-09-23 #261 trap 2.) Give each PowerShell you type
   into a run-local PSReadLine history path or `SaveNothing` before its first
@@ -138,14 +138,14 @@ out.
 - Never create an issue; report findings in the conversation or the PR
   instead.
 - Never create a PR to the upstream Ghostty repo; only work against this
-  fork, `amanthanvi/noctty`.
+  fork, `amanthanvi/koreterm`.
 - If the user asks you to create an issue or PR, confirm the target is this
   fork and refuse any upstream publish request. If publishing is still
   disallowed by the active task contract, offer a local patch summary or
   handoff instead.
 - `gh` can resolve upstream `ghostty-org/ghostty` here: pass
-  `--repo amanthanvi/noctty` to every `gh` command that takes it (name it
-  where the repository is positional, as in `gh repo view amanthanvi/noctty`),
+  `--repo amanthanvi/koreterm` to every `gh` command that takes it (name it
+  where the repository is positional, as in `gh repo view amanthanvi/koreterm`),
   and push to `origin`. (tooling.md: 2026-05-01 `gh pr view`/`gh repo`
   upstream; 2026-04-20 publish against `origin`.)
 
@@ -412,7 +412,7 @@ that govern each symbol you change, or that none does.
   `Config._launch` (which layer set `command`, the profile places, what
   `note` records) and why it stays beside `config.origin` with
   `origin.Derivation` at `.automatic`,
-  `useRecovery`, the queries `defaultProfile`, `nocttyCommand`,
+  `useRecovery`, the queries `defaultProfile`, `koretermCommand`,
   `commandLineNamesProfile`, `filesDefine` and `defaultProfileForKey`, and
   `keepSources`), profile
   discovery and user-defined profiles (`src/config/windows_shell.zig`: the
@@ -425,7 +425,7 @@ that govern each symbol you change, or that none does.
   `win32_elevation.RelaunchProfile`), safe mode's
   `cmd.exe /D`, `CreateProcessW` name resolution, Git Bash discovery, WSL
   (`wsl_env.zig`, the terminfo probe and its cache, `TERM`), the terminfo
-  install (`win32_terminfo.zig`), `noctty +list-profiles`
+  install (`win32_terminfo.zig`), `koreterm +list-profiles`
   (`src/cli/list_profiles.zig`, which applies the system color scheme through
   `os/color_scheme.zig`), what a log line may print of a command, an
   argument, an environment value or a directory (`os/redact.zig`,
@@ -466,7 +466,7 @@ that govern each symbol you change, or that none does.
   `App.shownBackgroundOpacity`, and its rollback at a close or Discard:
   `rollbackPreviews` and the handle's `endPreviews`), theming (`SettingsThemeAdapter`,
   `themeChanged`), its own UIA patterns, combo and open traces
-  (`NOCTTY_SETTINGS_COMBO_TRACE`, `NOCTTY_SETTINGS_OPEN_TRACE`,
+  (`KORETERM_SETTINGS_COMBO_TRACE`, `KORETERM_SETTINGS_OPEN_TRACE`,
   `win32/bench_trace.zig`), the Default profile row
   (`field_model.Kind.profile`, `AppHandle.profileChoices`, and what the
   load made of the value: `pane_launch.outcome`, `filesDefaultProfile`,
@@ -522,18 +522,18 @@ that govern each symbol you change, or that none does.
   bell (its title glyph: `title_glyph`, `withTitleGlyph` in
   `win32/tab_label.zig`), taskbar progress and icon, crash minidumps and
   Sentry, the COM apartment, default-terminal handoff, the CLI and the
-  `noctty.com` wrapper.
+  `koreterm.com` wrapper.
 - [build-release-ci.md](docs/agents/log/build-release-ci.md): `build.zig`
   (including the `bench:*` steps' `addBenchCoreImport`)
   and resources, the Windows target floor (`src/build/Config.zig`,
   `-Dtarget` `win10`/`win10_rs5`, and the std APIs it gates), packaging
-  (`scripts/package-windows.ps1`, `dist/windows/noctty.iss`, what Setup's
+  (`scripts/package-windows.ps1`, `dist/windows/koreterm.iss`, what Setup's
   `CloseApplications` closes, and what it installs and deletes; the
   placeholder staging contract and its controls,
   `Get-PlaceholderStagingProblems` and `Assert-PlaceholderControlFails` in
   `Contracts.93-ConPty.ps1`), signing,
   the updater (including `RegisterApplicationRestart` while an installer
-  closes noctty, with `stagedInstallerRunning`; `pkg/wuffs/src/deflate.zig`,
+  closes koreterm, with `stagedInstallerRunning`; `pkg/wuffs/src/deflate.zig`,
   the raw DEFLATE decoder for update payloads; the files a portable payload
   must hold and the ones it may drop: `managed_entries`, `retired_entries`,
   `legacy_updater_required_entries`, `portable_zip_carries_legacy_entries`,

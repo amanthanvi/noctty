@@ -134,7 +134,7 @@ pub const Words = struct {
         return switch (what) {
             .user_paste => |contents| .{
                 .title = "Allow clipboard paste?",
-                .body = "noctty needs confirmation before completing this clipboard paste.",
+                .body = "koreterm needs confirmation before completing this clipboard paste.",
                 .accept_label = "Allow",
                 .contents = contents,
             },
@@ -217,16 +217,16 @@ fn scopePrompt(scope: CloseScope, count: usize, body_buf: *[256]u8) Prompt {
                     .many = "Processes are still running in {d} terminals in the tabs to the right. Closing those tabs will terminate them.",
                 },
                 .app => .{
-                    .title = "Quit noctty?",
+                    .title = "Quit koreterm?",
                     .accept = "Quit",
-                    .one = "A process is still running. Quitting noctty will terminate it.",
-                    .many = "Processes are still running in {d} terminals. Quitting noctty will terminate them.",
+                    .one = "A process is still running. Quitting koreterm will terminate it.",
+                    .many = "Processes are still running in {d} terminals. Quitting koreterm will terminate them.",
                 },
                 .update => .{
                     .title = "Install the update?",
                     .accept = "Install",
-                    .one = "A process is still running. Installing the update closes noctty and will terminate it.",
-                    .many = "Processes are still running in {d} terminals. Installing the update closes noctty and will terminate them.",
+                    .one = "A process is still running. Installing the update closes koreterm and will terminate it.",
+                    .many = "Processes are still running in {d} terminals. Installing the update closes koreterm and will terminate them.",
                 },
             };
             return .{
@@ -251,7 +251,7 @@ const program_prompt_title_width = 24;
 /// U+FFFD. Any prompt that can come from a tab other than the one in front
 /// names it this way.
 fn promptTabName(alloc: Allocator, tab: TabRef) ![]u8 {
-    const raw = tab.title orelse "noctty";
+    const raw = tab.title orelse "koreterm";
     const limit = program_prompt_title_width;
     var title: std.ArrayListUnmanaged(u8) = .empty;
     defer title.deinit(alloc);
@@ -534,15 +534,15 @@ test "win32 close prompts count the terminals they would end" {
         },
         .{
             .{ .scope = .{ .scope = .app, .terminals = 3 } },
-            "Quit noctty?",
+            "Quit koreterm?",
             "Quit",
-            "Processes are still running in 3 terminals. Quitting noctty will terminate them.",
+            "Processes are still running in 3 terminals. Quitting koreterm will terminate them.",
         },
         .{
             .{ .scope = .{ .scope = .update, .terminals = 2 } },
             "Install the update?",
             "Install",
-            "Processes are still running in 2 terminals. Installing the update closes noctty and will terminate them.",
+            "Processes are still running in 2 terminals. Installing the update closes koreterm and will terminate them.",
         },
         // One pane's own prompt, in the tab in front.
         .{
@@ -583,7 +583,7 @@ test "the close prompt for a tab behind the front one names it as the clipboard 
         .{
             .{ .scope = .{ .scope = .this_tab, .terminals = 2, .behind = .{ .number = 12, .title = null } } },
             "Close tab 12?",
-            "Processes are still running in 2 terminals in Tab 12 (noctty). Closing that tab will terminate them.",
+            "Processes are still running in 2 terminals in Tab 12 (koreterm). Closing that tab will terminate them.",
         },
         .{
             .{ .terminal = .{ .behind = .{ .number = 2, .title = "vim" } } },
@@ -655,7 +655,7 @@ test "a program's clipboard prompt names its tab and cannot be reordered by its 
         .{
             .{ .program = .{ .request = .write, .contents = "a", .asked_by = .{ .number = 1, .title = null } } },
             write,
-            "Tab 1 (noctty) asked to replace your clipboard with the text below.",
+            "Tab 1 (koreterm) asked to replace your clipboard with the text below.",
         },
         .{
             .{ .program = .{ .request = .read, .contents = "a", .asked_by = .{ .number = 3, .title = "\u{202E}abcdefghijklmnopqrstuvwxyz0123456789" } } },
@@ -688,7 +688,7 @@ test "a program's clipboard prompt names its tab and cannot be reordered by its 
     defer paste_words.deinit(alloc);
     const paste = try paste_words.clipboard(alloc, .{ .user_paste = "a\nb" });
     try std.testing.expectEqualStrings("Allow clipboard paste?", paste.title);
-    try std.testing.expectEqualStrings("noctty needs confirmation before completing this clipboard paste.", paste.body);
+    try std.testing.expectEqualStrings("koreterm needs confirmation before completing this clipboard paste.", paste.body);
     try std.testing.expectEqualStrings("a\nb", paste.contents.?);
     try std.testing.expect(!paste.program_request);
 }

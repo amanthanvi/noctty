@@ -1,6 +1,6 @@
 -- Runs inside a real injected portable Clink, not a stub of its filter engine.
 local ESC, BEL = string.char(27), string.char(7)
-local output = assert(os.getenv("NOCTTY_CLINK_RESULTS"))
+local output = assert(os.getenv("KORETERM_CLINK_RESULTS"))
 local results, failures, marks = {}, 0, {}
 local function check(value, name)
     results[#results + 1] = (value and "PASS " or "FAIL ") .. name
@@ -67,7 +67,7 @@ end
 -- 1.5 s after the size settles, run the prompt filters again.
 local function resize_wait()
     local before = console.getwidth()
-    touch(assert(os.getenv("NOCTTY_CLINK_RESIZE_READY")), tostring(before))
+    touch(assert(os.getenv("KORETERM_CLINK_RESIZE_READY")), tostring(before))
     local deadline = os.time() + 20
     while console.getwidth() == before and os.time() < deadline do os.sleep(0.05) end
     local after = console.getwidth()
@@ -93,12 +93,12 @@ local function resize_wait()
     check(new_rows == 1 and old_rows == 0, "resized prompt shown once, without the old one" ..
         ((new_rows == 1 and old_rows == 0) and "" or (": new " .. new_rows .. ", old " .. old_rows)))
     resize.finished = true
-    touch(assert(os.getenv("NOCTTY_CLINK_RESIZE_DONE")), "done")
+    touch(assert(os.getenv("KORETERM_CLINK_RESIZE_DONE")), "done")
 end
 
 local tested = false
 local function prompt_checks()
-    check(rawget(_G, "__noctty_cmd_shell_integration") ~= nil,
+    check(rawget(_G, "__koreterm_cmd_shell_integration") ~= nil,
         "unique script name loaded alongside Clink's own clink.lua")
     local internal = clink._internal
     local owned = ESC .. "]133;A;redraw=0" .. BEL .. "BODY> " .. ESC .. "]133;B" .. BEL
@@ -106,8 +106,8 @@ local function prompt_checks()
     check(value == owned and right == "RIGHT> " and ok == true,
         "existing marks and right prompt preserved")
     local before = internal._filter_prompt
-    if rawget(_G, "__noctty_cmd_shell_integration") then
-        dofile(assert(os.getenv("NOCTTY_CLINK_SCRIPT")))
+    if rawget(_G, "__koreterm_cmd_shell_integration") then
+        dofile(assert(os.getenv("KORETERM_CLINK_SCRIPT")))
     end
     check(before == internal._filter_prompt, "reloading script registers no second wrapper")
     for _, integration in ipairs({"off", "on"}) do
@@ -134,13 +134,13 @@ local function prompt_checks()
     value = internal._filter_transient_prompt("OLD> ", "", "echo x", 7, true)
     check(value == "TRANSIENT> ", "transient redraw has no new normal-prompt marks")
     theme_mode = "pass"
-    local state = rawget(_G, "__noctty_cmd_shell_integration")
+    local state = rawget(_G, "__koreterm_cmd_shell_integration")
     if state then
         local saved = internal._filter_prompt
         local function reload_with(func)
             internal._filter_prompt = func
             state.prompt_registered = false
-            dofile(assert(os.getenv("NOCTTY_CLINK_SCRIPT")))
+            dofile(assert(os.getenv("KORETERM_CLINK_SCRIPT")))
         end
         reload_with(function() return nil, "RIGHT", false end)
         local p, r, success = internal._filter_prompt()
@@ -183,7 +183,7 @@ clink.onbeginedit(function()
 end)
 clink.onprovideline(function()
     step = step + 1
-    if step == 1 then return "echo noctty-clink-smoke & ping -n 3 127.0.0.1 >nul" end
+    if step == 1 then return "echo koreterm-clink-smoke & ping -n 3 127.0.0.1 >nul" end
     if step == 2 then
         theme_mode = "resize"
         return "cmd /d /c exit 3"
@@ -195,8 +195,8 @@ clink.onprovideline(function()
             if not ok then
                 check(false, "resize step: " .. tostring(err))
                 -- Both, so the harness moves on whichever step failed.
-                pcall(touch, os.getenv("NOCTTY_CLINK_RESIZE_READY"), "error")
-                pcall(touch, os.getenv("NOCTTY_CLINK_RESIZE_DONE"), "error")
+                pcall(touch, os.getenv("KORETERM_CLINK_RESIZE_READY"), "error")
+                pcall(touch, os.getenv("KORETERM_CLINK_RESIZE_DONE"), "error")
             end
         end)
         return nil

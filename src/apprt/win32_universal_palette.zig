@@ -332,7 +332,7 @@ const test_items = [_]Item{
     },
     .{
         .id = .{ .kind = .theme, .value = 60 },
-        .title = "Noctty Dark",
+        .title = "Koreterm Dark",
         .keywords = "appearance color",
     },
     .{

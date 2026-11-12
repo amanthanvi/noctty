@@ -295,7 +295,7 @@ finally {
 }
 
 # Harness screenshots go to the uploaded artifacts of a public repository, so
-# they may show noctty only (EVIDENCE-PIXEL-DIAG-01, EVIDENCE-SCREENSHOT-PRIVACY-01):
+# they may show koreterm only (EVIDENCE-PIXEL-DIAG-01, EVIDENCE-SCREENSHOT-PRIVACY-01):
 # the decision is table-tested from facts, and Save-StatefulScreenCapture, the
 # one place that saves a screen capture, is run with its screen read
 # (Read-StatefulScreenArea) and its recheck substituted, so no desktop is needed.
@@ -375,7 +375,7 @@ if (@(& $findMembers $saveDiagnostic 'CopyFromScreen').Count -ne 0 -or $diagnost
 }
 . ([scriptblock]::Create($diagnosticFunctions['Get-StatefulScreenshotDecision'].Extent.Text))
 try {
-    $ownProcess = [pscustomobject]@{ ProcessId = [uint32]40; ProcessName = 'noctty'; Class = 'noctty.win32.host' }
+    $ownProcess = [pscustomobject]@{ ProcessId = [uint32]40; ProcessName = 'koreterm'; Class = 'koreterm.win32.host' }
     $otherProcess = [pscustomobject]@{ ProcessId = [uint32]41; ProcessName = 'other'; Class = 'Other' }
     $screenshotFacts = {
         param([hashtable] $Change)
@@ -394,23 +394,23 @@ try {
     $oneForeignSample = @(1..15 | ForEach-Object { [pscustomobject]@{ Root = $ownProcess } }) + @([pscustomobject]@{ Root = $otherProcess })
     $noWindowSample = @(1..15 | ForEach-Object { [pscustomobject]@{ Root = $ownProcess } }) + @([pscustomobject]@{ Root = $null })
     $screenshotCases = @(
-        @{ Name = 'noctty shown and alone'; Change = @{}; Expected = 'capture 100,100,450,400 occluders=0' }
-        @{ Name = 'a window of noctty above'; Change = @{ WindowsAbove = @(& $screenshotAbove $ownProcess 0) }; Expected = 'capture 100,100,450,400 occluders=0' }
+        @{ Name = 'koreterm shown and alone'; Change = @{}; Expected = 'capture 100,100,450,400 occluders=0' }
+        @{ Name = 'a window of koreterm above'; Change = @{ WindowsAbove = @(& $screenshotAbove $ownProcess 0) }; Expected = 'capture 100,100,450,400 occluders=0' }
         @{ Name = 'a cloaked window of another process above'; Change = @{ WindowsAbove = @(& $screenshotAbove $otherProcess 1) }; Expected = 'capture 100,100,450,400 occluders=0' }
         @{ Name = 'a window of another process above'; Change = @{ WindowsAbove = @(& $screenshotAbove $otherProcess 0) }; Expected = 'withheld: 1 window(s) of other processes overlap the sampled rect occluders=1' }
         @{ Name = 'another process above, cloak unknown'; Change = @{ WindowsAbove = @(& $screenshotAbove $otherProcess -1) }; Expected = 'withheld: 1 window(s) of other processes overlap the sampled rect occluders=1' }
-        @{ Name = 'noctty hidden'; Change = @{ RootVisible = $false }; Expected = "withheld: noctty's window is hidden occluders=0" }
-        @{ Name = 'sampled window hidden'; Change = @{ WindowVisible = $false }; Expected = "withheld: noctty's window is hidden occluders=0" }
-        @{ Name = 'noctty cloaked'; Change = @{ RootCloaked = [long]2 }; Expected = "withheld: noctty's window is cloaked (2) occluders=0" }
-        @{ Name = 'noctty cloak unknown'; Change = @{ RootCloaked = [long]-1 }; Expected = "withheld: DWM could not say whether noctty's window is cloaked occluders=0" }
-        @{ Name = 'noctty minimized'; Change = @{ RootMinimized = $true }; Expected = "withheld: noctty's window is minimized occluders=0" }
-        @{ Name = 'noctty see-through'; Change = @{ RootOpaque = $false }; Expected = "withheld: noctty's window is see-through (layered) occluders=0" }
+        @{ Name = 'koreterm hidden'; Change = @{ RootVisible = $false }; Expected = "withheld: koreterm's window is hidden occluders=0" }
+        @{ Name = 'sampled window hidden'; Change = @{ WindowVisible = $false }; Expected = "withheld: koreterm's window is hidden occluders=0" }
+        @{ Name = 'koreterm cloaked'; Change = @{ RootCloaked = [long]2 }; Expected = "withheld: koreterm's window is cloaked (2) occluders=0" }
+        @{ Name = 'koreterm cloak unknown'; Change = @{ RootCloaked = [long]-1 }; Expected = "withheld: DWM could not say whether koreterm's window is cloaked occluders=0" }
+        @{ Name = 'koreterm minimized'; Change = @{ RootMinimized = $true }; Expected = "withheld: koreterm's window is minimized occluders=0" }
+        @{ Name = 'koreterm see-through'; Change = @{ RootOpaque = $false }; Expected = "withheld: koreterm's window is see-through (layered) occluders=0" }
         @{ Name = 'a sample on another process'; Change = @{ Samples = $oneForeignSample }; Expected = 'withheld: 1 sample point(s) lie on windows of other processes occluders=0' }
         @{ Name = 'a sample on no window'; Change = @{ Samples = $noWindowSample }; Expected = 'withheld: 1 sample point(s) lie on windows of other processes occluders=0' }
-        @{ Name = 'no top-level window'; Change = @{ Root = $null; WindowsAbove = @(& $screenshotAbove $ownProcess 0) }; Expected = "withheld: noctty's top-level window could not be found occluders=1" }
+        @{ Name = 'no top-level window'; Change = @{ Root = $null; WindowsAbove = @(& $screenshotAbove $ownProcess 0) }; Expected = "withheld: koreterm's top-level window could not be found occluders=1" }
         @{ Name = 'no rect'; Change = @{ Rect = $null }; Expected = 'not taken: the window rect could not be read occluders=0' }
-        @{ Name = 'no client area'; Change = @{ CaptureBounds = $null }; Expected = "withheld: noctty's client area could not be read occluders=0" }
-        @{ Name = 'rect outside the client area'; Change = @{ CaptureBounds = [pscustomobject]@{ Left = 600; Top = 90; Right = 700; Bottom = 800 } }; Expected = "withheld: the sampled rect lies outside noctty's client area occluders=0" }
+        @{ Name = 'no client area'; Change = @{ CaptureBounds = $null }; Expected = "withheld: koreterm's client area could not be read occluders=0" }
+        @{ Name = 'rect outside the client area'; Change = @{ CaptureBounds = [pscustomobject]@{ Left = 600; Top = 90; Right = 700; Bottom = 800 } }; Expected = "withheld: the sampled rect lies outside koreterm's client area occluders=0" }
     )
     foreach ($screenshotCase in $screenshotCases) {
         $screenshotDecision = Get-StatefulScreenshotDecision (& $screenshotFacts $screenshotCase.Change)
@@ -459,7 +459,7 @@ try {
             @{ Name = 'withheld, -PassThru'; Change = $coveredChange; Recheck = $null; PassThru = $true
                 Expected = "read 100,100,450,400; path=; bitmap=True; note=$covered" }
             @{ Name = 'no capture area, -PassThru'; Change = @{ Root = $null; CaptureBounds = $null }; Recheck = $null; PassThru = $true
-                Expected = "; path=; bitmap=False; note=withheld: noctty's top-level window could not be found" }
+                Expected = "; path=; bitmap=False; note=withheld: koreterm's top-level window could not be found" }
         )) {
         $script:captureLog.Clear()
         $script:recheckFacts = if ($null -ne $captureCase.Recheck) { & $screenshotFacts $captureCase.Recheck } else { $null }
@@ -575,7 +575,7 @@ if ($harnessMainFunctions.Count -ne 1 -or
 # bootstrap gate. Its private statement layout is deliberately not pinned.
 $harnessMainSource = $harnessMainFunctions[0].Extent.Text
 $harnessMainProbeEnvironment =
-    'NOCTTY_HARNESS_MAIN_CONTRACT_' + [Guid]::NewGuid().ToString('N')
+    'KORETERM_HARNESS_MAIN_CONTRACT_' + [Guid]::NewGuid().ToString('N')
 $harnessMainProbePrevious = [Environment]::GetEnvironmentVariable(
     $harnessMainProbeEnvironment,
     [EnvironmentVariableTarget]::Process
@@ -1052,7 +1052,7 @@ try {
     )
     if ($script:containmentForwardCalls -ne 1 -or
         ($launchArguments -join '|') -ne
-            '--contract-containment-probe|--single-instance=false|--class=noctty-interactive-contract-sandbox|--command=cmd.exe') {
+            '--contract-containment-probe|--single-instance=false|--class=koreterm-interactive-contract-sandbox|--command=cmd.exe') {
         throw 'Interactive launch composition did not invoke containment policy once and append isolation arguments.'
     }
 }

@@ -29,7 +29,7 @@ if ([string]::IsNullOrWhiteSpace($CliAction)) {
 }
 
 $typedCommandText = if ([string]::IsNullOrWhiteSpace($CommandText)) {
-    "noctty $CliAction"
+    "koreterm $CliAction"
 }
 else {
     $CommandText
@@ -54,7 +54,7 @@ if ($ConfiguredScenariosOnly) { $forwardedArgs += '-ConfiguredScenariosOnly' }
 Invoke-InteractiveWin11HarnessMain `
     -RepoRoot $repoRoot `
     -LauncherPath $launcherPath `
-    -EnvironmentVariable 'NOCTTY_INTERACTIVE_WIN11_SHELL_COMMAND_LIVE_BOOTSTRAPPED' `
+    -EnvironmentVariable 'KORETERM_INTERACTIVE_WIN11_SHELL_COMMAND_LIVE_BOOTSTRAPPED' `
     -ArgumentList $forwardedArgs
 
 if (-not ('Win11ShellCommandLiveNative' -as [type])) {
@@ -211,7 +211,7 @@ function Find-HostWindow {
             return $true
         }
 
-        if ((Get-WindowClassName -Hwnd $hwnd) -eq 'noctty.win32.host') {
+        if ((Get-WindowClassName -Hwnd $hwnd) -eq 'koreterm.win32.host') {
             $script:Win11ShellCommandLiveHost = $hwnd
             return $false
         }
@@ -232,7 +232,7 @@ function Find-SurfaceWindow {
     $callback = [Win11ShellCommandLiveNative+EnumWindowsProc] {
         param([IntPtr] $hwnd, [IntPtr] $lParam)
 
-        if ((Get-WindowClassName -Hwnd $hwnd) -ne 'noctty.win32') {
+        if ((Get-WindowClassName -Hwnd $hwnd) -ne 'koreterm.win32') {
             return $true
         }
 
@@ -452,7 +452,7 @@ function Send-ModifiedChar {
     if ($modifierMask -band 0x04) { $modifiers += [uint16] $VK_MENU }
     if ($modifierMask -band 0x01) { $modifiers += [uint16] $VK_SHIFT }
 
-    # A sent modifier message never reaches GetKeyboardState, and noctty reads
+    # A sent modifier message never reaches GetKeyboardState, and koreterm reads
     # a key's text from the keyboard state (ToUnicode) for the Win32 input
     # records it sends ConPTY, so Shift+. would type '.', and Caps Lock on this
     # machine would flip every letter. Share the window's input queue for this
@@ -711,7 +711,7 @@ function Invoke-ConfiguredShellCommandScenario {
     $scenarioArgs = @(
         Get-InteractiveWin11ContainmentArguments
         '--single-instance=false'
-        "--class=noctty-shell-config-$Name-$($layout.SandboxId)"
+        "--class=koreterm-shell-config-$Name-$($layout.SandboxId)"
         '--config-default-files=false'
         "--config-file=$ConfigPath"
     )
@@ -814,7 +814,7 @@ $failedStartConfigPath = Join-Path $layout.Temp 'interactive-win11-shell-command
 $failedStartCapturePath = Join-Path $layout.Temp 'interactive-win11-shell-command-failed-start.png'
 $failedStartStdoutPath = Join-Path $layout.Logs 'interactive-win11-shell-command-failed-start-stdout.log'
 $failedStartStderrPath = Join-Path $layout.Logs 'interactive-win11-shell-command-failed-start-stderr.log'
-$missingExecutablePath = "C:\noctty-issue151-missing-$([Guid]::NewGuid().ToString('N')).exe"
+$missingExecutablePath = "C:\koreterm-issue151-missing-$([Guid]::NewGuid().ToString('N')).exe"
 if (Test-Path -LiteralPath $missingExecutablePath) {
     throw "Failed-start validation path unexpectedly exists: $missingExecutablePath"
 }
@@ -866,7 +866,7 @@ if ($ConfiguredScenariosOnly) {
         -Name 'quoted' `
         -ConfigPath $quotedConfigPath `
         -ExpectedText @('CONFIG_QUOTED_A', 'CONFIG_QUOTED_B') `
-        -RejectedText @('noctty failed to launch the requested command:') `
+        -RejectedText @('koreterm failed to launch the requested command:') `
         -CapturePath $quotedCapturePath `
         -StdoutPath $quotedStdoutPath `
         -StderrPath $quotedStderrPath
@@ -875,7 +875,7 @@ if ($ConfiguredScenariosOnly) {
         -Name 'abnormal' `
         -ConfigPath $abnormalConfigPath `
         -ExpectedText @(
-            'noctty failed to launch the requested command:',
+            'koreterm failed to launch the requested command:',
             'cmd.exe /d /c "exit /b 37"',
             'Exit Code: 37',
             'Press any key to close the window.'
@@ -889,7 +889,7 @@ if ($ConfiguredScenariosOnly) {
         -ConfigPath $failedStartConfigPath `
         -ExpectedText @(
             'error starting IO thread: error.ProcessNotStarted (cause: error.FileNotFound)',
-            'noctty failed to launch the requested command:',
+            'koreterm failed to launch the requested command:',
             $missingExecutablePath,
             'No child process was created, so there is no exit code.',
             'common causes include a',
@@ -967,7 +967,7 @@ try {
     }
     Start-Sleep -Milliseconds $CAPTURE_SETTLE_MS
 
-    Send-Line -Hwnd $surfaceHwnd -Text 'where noctty>interactive-win11-shell-command-live-resolved.txt' -Deadline $deadline -Process $process
+    Send-Line -Hwnd $surfaceHwnd -Text 'where koreterm>interactive-win11-shell-command-live-resolved.txt' -Deadline $deadline -Process $process
     Wait-InteractiveWin11Until -Deadline $deadline -Description 'command resolution file' -Process $process -Condition {
         Test-Path -LiteralPath $resolvedPath
     }
@@ -982,9 +982,9 @@ try {
     }
     if (
         (-not $resolvedFirstDir.Equals($expectedCommandDir, [System.StringComparison]::OrdinalIgnoreCase)) -or
-        ($resolvedFirstName -notin @('noctty.com', 'noctty.exe'))
+        ($resolvedFirstName -notin @('koreterm.com', 'koreterm.exe'))
     ) {
-        throw "live shell resolved unexpected first noctty command: $($resolved[0]) (expected same install dir as $exePath)"
+        throw "live shell resolved unexpected first koreterm command: $($resolved[0]) (expected same install dir as $exePath)"
     }
 
     Send-Line -Hwnd $surfaceHwnd -Text ("{0} & echo POST>interactive-win11-shell-command-live-post.txt" -f $typedCommandText) -Deadline $deadline -Process $process
@@ -1002,7 +1002,7 @@ try {
 
     $stderr = Get-InteractiveWin11TextFile -Path $stderrPath
     if ($stderr -match 'error starting IO thread:|panic: reached unreachable code') {
-        throw 'noctty live shell command run reported a runtime failure'
+        throw 'koreterm live shell command run reported a runtime failure'
     }
 
     Write-Host ("interactive-win11 shell command live validation: PASS (pid={0}, command={1}, action={2}, seed_tabs={3}, changed={4}, sampled={5}, stdout={6}, stderr={7}, ready={8}, control={9}, resolved={10}, post={11}, before={12}, after={13})" -f $process.Id, $typedCommandText, $CliAction, $SeedTabs, $imageDelta.ChangedPixels, $imageDelta.SampledPixels, $stdoutPath, $stderrPath, $readyPath, $controlPath, $resolvedPath, $postPath, $beforeCapturePath, $afterCapturePath)

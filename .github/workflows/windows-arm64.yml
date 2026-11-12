@@ -114,7 +114,7 @@ jobs:
     timeout-minutes: 60
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
-      NOCTTY_CI_VERSION: 0.0.1
+      KORETERM_CI_VERSION: 0.0.1
       ZIG_GLOBAL_CACHE_DIR: ${{ github.workspace }}\.zig-global-cache
 
     steps:
@@ -163,7 +163,7 @@ jobs:
         timeout-minutes: 45
         run: >
           ./scripts/build-package-windows.ps1
-          -Version $env:NOCTTY_CI_VERSION
+          -Version $env:KORETERM_CI_VERSION
           -Architecture arm64
           -Optimize ReleaseFast
           -RequireSymbols
@@ -175,13 +175,13 @@ jobs:
       - name: Run ARM64 CLI smoke
         shell: pwsh
         run: |
-          $versionText = & .\zig-out\bin\noctty.com +version | Out-String
+          $versionText = & .\zig-out\bin\koreterm.com +version | Out-String
           Write-Host $versionText
           if ($versionText -notmatch "Build Config") {
-            throw "noctty.com +version did not print the expected version output."
+            throw "koreterm.com +version did not print the expected version output."
           }
           if ($versionText -notmatch "custom shaders: enabled") {
-            throw "noctty.com +version did not report custom shader support."
+            throw "koreterm.com +version did not report custom shader support."
           }
 
       - name: Build ARM64 D3D11 smoke tools
@@ -192,7 +192,7 @@ jobs:
       - name: Hidden-desktop ARM64 WARP lifecycle smoke
         shell: pwsh
         timeout-minutes: 10
-        run: ./test/windows/renderer/Invoke-RendererParity.ps1 -Binary ./renderer-smoke/bin/noctty.exe -OutputDirectory ./renderer-smoke/evidence -WarpOnly
+        run: ./test/windows/renderer/Invoke-RendererParity.ps1 -Binary ./renderer-smoke/bin/koreterm.exe -OutputDirectory ./renderer-smoke/evidence -WarpOnly
 
       - name: Upload ARM64 renderer evidence
         if: always()
@@ -205,8 +205,8 @@ jobs:
       - name: Run packaged ARM64 CLI smoke
         shell: pwsh
         run: |
-          $portableRoot = Join-Path $PWD "dist/artifacts/noctty-$env:NOCTTY_CI_VERSION-windows-arm64/noctty"
-          $portableCommand = Join-Path $portableRoot "noctty.com"
+          $portableRoot = Join-Path $PWD "dist/artifacts/koreterm-$env:KORETERM_CI_VERSION-windows-arm64/koreterm"
+          $portableCommand = Join-Path $portableRoot "koreterm.com"
           if (-not (Test-Path -LiteralPath $portableCommand)) {
             throw "Missing packaged ARM64 command shim: $portableCommand"
           }
@@ -214,10 +214,10 @@ jobs:
           $versionText = & $portableCommand +version | Out-String
           Write-Host $versionText
           if ($versionText -notmatch "Build Config") {
-            throw "Packaged noctty.com +version did not print the expected version output."
+            throw "Packaged koreterm.com +version did not print the expected version output."
           }
           if ($versionText -notmatch "custom shaders: enabled") {
-            throw "Packaged noctty.com +version did not report custom shader support."
+            throw "Packaged koreterm.com +version did not report custom shader support."
           }
 
           # The packaged ghostty-vt.dll is the placeholder: it fails to load

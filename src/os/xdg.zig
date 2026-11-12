@@ -10,7 +10,7 @@ const env_os = @import("env.zig");
 const windows_os = @import("windows.zig");
 
 pub const portable_marker_names = [_][]const u8{
-    "noctty.portable",
+    "koreterm.portable",
     "portable.txt",
     "config.ghostty",
 };
@@ -87,10 +87,10 @@ pub fn portableModeActive() bool {
 
 fn portablePath(alloc: Allocator, root: []const u8, subdir: ?[]const u8) ![]u8 {
     const requested = subdir orelse return try alloc.dupe(u8, root);
-    const relative = if (std.mem.startsWith(u8, requested, "noctty/"))
-        requested["noctty/".len..]
-    else if (std.mem.startsWith(u8, requested, "noctty\\"))
-        requested["noctty\\".len..]
+    const relative = if (std.mem.startsWith(u8, requested, "koreterm/"))
+        requested["koreterm/".len..]
+    else if (std.mem.startsWith(u8, requested, "koreterm\\"))
+        requested["koreterm\\".len..]
     else
         requested;
     if (relative.len == 0) return try alloc.dupe(u8, root);
@@ -266,27 +266,27 @@ test "portable marker detection requires a regular file" {
     ignored.close();
     try testing.expect((try detectPortableRoot(alloc, exe_dir)) == null);
 
-    const path_root = if (builtin.os.tag == .windows) "D:\\apps\\noctty" else "/apps/noctty";
+    const path_root = if (builtin.os.tag == .windows) "D:\\apps\\koreterm" else "/apps/koreterm";
 
-    const config_path = try portablePath(alloc, path_root, "noctty/config.ghostty");
+    const config_path = try portablePath(alloc, path_root, "koreterm/config.ghostty");
     defer alloc.free(config_path);
     const expected_config = try std.fs.path.join(alloc, &.{ path_root, "config.ghostty" });
     defer alloc.free(expected_config);
     try testing.expectEqualStrings(expected_config, config_path);
 
-    const state_path = try portablePath(alloc, path_root, "noctty\\update-state.json");
+    const state_path = try portablePath(alloc, path_root, "koreterm\\update-state.json");
     defer alloc.free(state_path);
     const expected_state = try std.fs.path.join(alloc, &.{ path_root, "update-state.json" });
     defer alloc.free(expected_state);
     try testing.expectEqualStrings(expected_state, state_path);
 
-    const crash_path = try portablePath(alloc, path_root, "noctty/crash");
+    const crash_path = try portablePath(alloc, path_root, "koreterm/crash");
     defer alloc.free(crash_path);
     const expected_crash = try std.fs.path.join(alloc, &.{ path_root, "crash" });
     defer alloc.free(expected_crash);
     try testing.expectEqualStrings(expected_crash, crash_path);
 
-    const ssh_path = try portablePath(alloc, path_root, "noctty/ssh_cache");
+    const ssh_path = try portablePath(alloc, path_root, "koreterm/ssh_cache");
     defer alloc.free(ssh_path);
     const expected_ssh = try std.fs.path.join(alloc, &.{ path_root, "ssh_cache" });
     defer alloc.free(expected_ssh);
@@ -307,7 +307,7 @@ test "ambiguous portable config marker does not override an installer-managed di
     defer alloc.free(legacy_root);
     try testing.expectEqualStrings(exe_dir, legacy_root);
 
-    for ([_][]const u8{ "noctty.portable", "portable.txt" }) |explicit_marker| {
+    for ([_][]const u8{ "koreterm.portable", "portable.txt" }) |explicit_marker| {
         try tmp.dir.writeFile(.{ .sub_path = explicit_marker, .data = explicit_marker });
         const explicit_root = (try detectPortableRootWithInstallerManaged(alloc, exe_dir, true)).?;
         defer alloc.free(explicit_root);

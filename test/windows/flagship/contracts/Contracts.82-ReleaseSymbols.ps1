@@ -29,14 +29,14 @@ $processShared82 = Join-Path $repoRoot 'src\process_shared.zig'
 $processSharedText82 = Get-Content -LiteralPath $processShared82 -Raw
 $mainZig82 = Join-Path $repoRoot 'src\main.zig'
 $mainZigText82 = Get-Content -LiteralPath $mainZig82 -Raw
-$mainCommandZig82 = Join-Path $repoRoot 'src\main_noctty_command.zig'
+$mainCommandZig82 = Join-Path $repoRoot 'src\main_koreterm_command.zig'
 $mainCommandZigText82 = Get-Content -LiteralPath $mainCommandZig82 -Raw
 
 Invoke-ContractTable -Contracts @(
     @{
         File = $windowsPackager82
         Content = { $windowsPackagerText82 }
-        Pattern = '(?s)\[switch\]\$RequireSymbols.*?& zig build [^\r\n]*-Doptimize=ReleaseFast -Dstrip=false [^\r\n]*.*?Get-PeCodeViewIdentity -Path \(Join-Path \$portableRoot "noctty\.exe"\).*?if \(\$RequireSymbols\) \{\s*throw "Symbols are required.*?Assert-SymbolsMatchBinaries\s*`\s*-SymbolsRoot \$symbolsRoot\s*`\s*-PayloadRoot \$portableRoot.*?CreateFromDirectory\(\s*\$symbolsRoot,\s*\$symbolsPath.*?if \(\$symbolsProduced\) \{\s*\$hashTargets \+= @\{'
+        Pattern = '(?s)\[switch\]\$RequireSymbols.*?& zig build [^\r\n]*-Doptimize=ReleaseFast -Dstrip=false [^\r\n]*.*?Get-PeCodeViewIdentity -Path \(Join-Path \$portableRoot "koreterm\.exe"\).*?if \(\$RequireSymbols\) \{\s*throw "Symbols are required.*?Assert-SymbolsMatchBinaries\s*`\s*-SymbolsRoot \$symbolsRoot\s*`\s*-PayloadRoot \$portableRoot.*?CreateFromDirectory\(\s*\$symbolsRoot,\s*\$symbolsPath.*?if \(\$symbolsProduced\) \{\s*\$hashTargets \+= @\{'
         Kind = 'Text'
         Description = 'packager keeps debug info, refuses a required-but-missing symbols zip, verifies GUID and age against the staged binaries, zips outside the portable tree and checksums it'
     }
@@ -64,7 +64,7 @@ Invoke-ContractTable -Contracts @(
     @{
         File = $armWorkflow82
         Content = { $armWorkflowText82 }
-        Pattern = '(?s)build-package-windows\.ps1\s+-Version \$env:NOCTTY_CI_VERSION\s+-Architecture arm64\s+-Optimize ReleaseFast\s+-RequireSymbols'
+        Pattern = '(?s)build-package-windows\.ps1\s+-Version \$env:KORETERM_CI_VERSION\s+-Architecture arm64\s+-Optimize ReleaseFast\s+-RequireSymbols'
         Kind = 'Text'
         Description = 'ARM64 CI exercises the symbols path on a native runner'
     }
@@ -78,9 +78,9 @@ Invoke-ContractTable -Contracts @(
     @{
         File = $ghosttyExe82
         Content = { $ghosttyExeText82 }
-        Pattern = '(?s)\.omit_frame_pointer = cfg\.omit_frame_pointer.*?\.omit_frame_pointer = cfg\.omit_frame_pointer.*?command\.producesPdbFile\(\).*?addInstallBinFile\(command\.getEmittedPdb\(\), "noctty-command\.pdb"\)'
+        Pattern = '(?s)\.omit_frame_pointer = cfg\.omit_frame_pointer.*?\.omit_frame_pointer = cfg\.omit_frame_pointer.*?command\.producesPdbFile\(\).*?addInstallBinFile\(command\.getEmittedPdb\(\), "koreterm-command\.pdb"\)'
         Kind = 'Text'
-        Description = 'noctty.exe and noctty.com keep release codegen without strip, and noctty-command.pdb is installed beside them'
+        Description = 'koreterm.exe and koreterm.com keep release codegen without strip, and koreterm-command.pdb is installed beside them'
     }
     @{
         File = $buildConfig82
@@ -115,14 +115,14 @@ Invoke-ContractTable -Contracts @(
         Content = { $mainZigText82 }
         Pattern = '(?s)pub const panic = if \(build_config\.exe_entrypoint == \.ghostty\)\s+@import\("process_shared\.zig"\)\.panic'
         Kind = 'Text'
-        Description = 'noctty.exe uses the shared release panic'
+        Description = 'koreterm.exe uses the shared release panic'
     }
     @{
         File = $mainCommandZig82
         Content = { $mainCommandZigText82 }
         Pattern = 'pub const panic = std\.debug\.no_panic;'
         Kind = 'Text'
-        Description = 'the thin noctty.com forwarder does not link a panic symbolizer'
+        Description = 'the thin koreterm.com forwarder does not link a panic symbolizer'
     }
     @{
         File = $proxyBuild82
@@ -134,14 +134,14 @@ Invoke-ContractTable -Contracts @(
     @{
         File = $proxyBuild82
         Content = { $proxyBuildText82 }
-        Pattern = 'module\.addCMacro\("NOCTTY_RELEASE_SYMBOLS", if \(cfg\.release_symbols\) "1" else "0"\);'
+        Pattern = 'module\.addCMacro\("KORETERM_RELEASE_SYMBOLS", if \(cfg\.release_symbols\) "1" else "0"\);'
         Kind = 'Text'
         Description = 'the handoff proxy (C only, blind to build options) hashes release_symbols, so a DLL linked without /OPT:REF is not reused'
     }
     @{
         File = $vtStubBuild82
         Content = { $vtStubBuildText82 }
-        Pattern = '(?s)\.strip = cfg\.strip,.*?module\.addCMacro\("NOCTTY_RELEASE_SYMBOLS", if \(cfg\.release_symbols\) "1" else "0"\);.*?library\.producesPdbFile\(\).*?addInstallFileWithDir\(\s*library\.getEmittedPdb\(\),\s*\.\{ \.custom = "bin/" \+\+ install_dir \},\s*name \+\+ "\.pdb",'
+        Pattern = '(?s)\.strip = cfg\.strip,.*?module\.addCMacro\("KORETERM_RELEASE_SYMBOLS", if \(cfg\.release_symbols\) "1" else "0"\);.*?library\.producesPdbFile\(\).*?addInstallFileWithDir\(\s*library\.getEmittedPdb\(\),\s*\.\{ \.custom = "bin/" \+\+ install_dir \},\s*name \+\+ "\.pdb",'
         Kind = 'Text'
         Description = 'the ghostty-vt.dll placeholder keeps debug info with the exe, hashes release_symbols and installs ghostty-vt.pdb beside itself in zig-out\bin\ghostty-vt-stub'
     }
@@ -273,16 +273,16 @@ function Assert-SymbolsCheckRejects {
     if ($message -notmatch $Pattern) { throw "Symbols check rejected '$Label' for the wrong reason: $message" }
 }
 
-$symbolsProbeRoot = Join-Path ([IO.Path]::GetTempPath()) ('noctty-symbols-contract-' + [Guid]::NewGuid().ToString('N'))
+$symbolsProbeRoot = Join-Path ([IO.Path]::GetTempPath()) ('koreterm-symbols-contract-' + [Guid]::NewGuid().ToString('N'))
 try {
-    $payload = Join-Path $symbolsProbeRoot 'noctty'
+    $payload = Join-Path $symbolsProbeRoot 'koreterm'
     $symbols = Join-Path $symbolsProbeRoot 'symbols'
     [void][IO.Directory]::CreateDirectory($payload)
     [void][IO.Directory]::CreateDirectory($symbols)
 
     $guids = @{
-        'noctty.pdb' = [guid]'5d6c9221-c4d6-a0f5-4c4c-44205044422e'
-        'noctty-command.pdb' = [guid]'70e653e4-9f2a-4622-4c4c-44205044422e'
+        'koreterm.pdb' = [guid]'5d6c9221-c4d6-a0f5-4c4c-44205044422e'
+        'koreterm-command.pdb' = [guid]'70e653e4-9f2a-4622-4c4c-44205044422e'
         'ghostty-vt.pdb' = [guid]'41a76387-36f3-935c-4c4c-44205044422e'
     }
     # The CodeView record carries the build machine's absolute path; only the
@@ -290,20 +290,20 @@ try {
     # portable ZIP carries (src/build/GhosttyVtStub.zig), whose CodeView
     # record names ghostty-vt.pdb; the doc comment on
     # portable_zip_carries_legacy_entries says what changes here when it goes.
-    New-SymbolsTestPe -Path (Join-Path $payload 'noctty.exe') -PdbPath 'D:\a\noctty\.zig-cache\o\x\noctty.pdb' -Guid $guids['noctty.pdb'] -Age 1
-    New-SymbolsTestPe -Path (Join-Path $payload 'noctty.com') -PdbPath 'D:\a\noctty\.zig-cache\o\y\noctty-command.pdb' -Guid $guids['noctty-command.pdb'] -Age 1
+    New-SymbolsTestPe -Path (Join-Path $payload 'koreterm.exe') -PdbPath 'D:\a\koreterm\.zig-cache\o\x\koreterm.pdb' -Guid $guids['koreterm.pdb'] -Age 1
+    New-SymbolsTestPe -Path (Join-Path $payload 'koreterm.com') -PdbPath 'D:\a\koreterm\.zig-cache\o\y\koreterm-command.pdb' -Guid $guids['koreterm-command.pdb'] -Age 1
     New-SymbolsTestPe -Path (Join-Path $payload 'ghostty-vt.dll') -PdbPath 'ghostty-vt.pdb' -Guid $guids['ghostty-vt.pdb'] -Age 3
-    New-SymbolsTestPe -Path (Join-Path $payload 'noctty-terminal-handoff-proxy.dll')   # no CodeView record
+    New-SymbolsTestPe -Path (Join-Path $payload 'koreterm-terminal-handoff-proxy.dll')   # no CodeView record
     foreach ($name in $guids.Keys) {
         New-SymbolsTestPdb -Path (Join-Path $symbols $name) -Guid $guids[$name] -Age $(if ($name -eq 'ghostty-vt.pdb') { 3 } else { 1 })
     }
 
     # Identity readers return exactly what was written.
-    $exeIdentity = Get-PeCodeViewIdentity -Path (Join-Path $payload 'noctty.exe')
-    if ($exeIdentity.Guid -ne $guids['noctty.pdb'] -or $exeIdentity.Age -ne 1 -or $exeIdentity.PdbName -cne 'noctty.pdb') {
+    $exeIdentity = Get-PeCodeViewIdentity -Path (Join-Path $payload 'koreterm.exe')
+    if ($exeIdentity.Guid -ne $guids['koreterm.pdb'] -or $exeIdentity.Age -ne 1 -or $exeIdentity.PdbName -cne 'koreterm.pdb') {
         throw 'Get-PeCodeViewIdentity must return the GUID, age and PDB file name of the RSDS record.'
     }
-    if ($null -ne (Get-PeCodeViewIdentity -Path (Join-Path $payload 'noctty-terminal-handoff-proxy.dll'))) {
+    if ($null -ne (Get-PeCodeViewIdentity -Path (Join-Path $payload 'koreterm-terminal-handoff-proxy.dll'))) {
         throw 'Get-PeCodeViewIdentity must return $null for a PE with no CodeView record.'
     }
     $pdbIdentity = Get-PdbIdentity -Path (Join-Path $symbols 'ghostty-vt.pdb')
@@ -319,16 +319,16 @@ try {
     # Matching symbols are accepted and reported.
     $evidence = @(Assert-SymbolsMatchBinaries -SymbolsRoot $symbols -PayloadRoot $payload -Label 'Symbols test')
     if ($evidence.Count -ne 3 -or
-        @($evidence | Where-Object { $_.Binary -ceq 'noctty.com' -and $_.Pdb -ceq 'noctty-command.pdb' }).Count -ne 1) {
-        throw 'Matching symbols must be reported per binary, with noctty.com mapped to noctty-command.pdb.'
+        @($evidence | Where-Object { $_.Binary -ceq 'koreterm.com' -and $_.Pdb -ceq 'koreterm-command.pdb' }).Count -ne 1) {
+        throw 'Matching symbols must be reported per binary, with koreterm.com mapped to koreterm-command.pdb.'
     }
 
     # Anything that is not a match is rejected.
-    Assert-SymbolsCheckRejects -Label 'GUID mismatch' -Pattern 'does not match noctty\.exe' -Check {
+    Assert-SymbolsCheckRejects -Label 'GUID mismatch' -Pattern 'does not match koreterm\.exe' -Check {
         $other = Join-Path $symbolsProbeRoot 'other-guid'
         [void][IO.Directory]::CreateDirectory($other)
         foreach ($file in Get-ChildItem -LiteralPath $symbols) { Copy-Item -LiteralPath $file.FullName -Destination $other }
-        New-SymbolsTestPdb -Path (Join-Path $other 'noctty.pdb') -Guid ([guid]'00000000-0000-0000-0000-000000000001') -Age 1
+        New-SymbolsTestPdb -Path (Join-Path $other 'koreterm.pdb') -Guid ([guid]'00000000-0000-0000-0000-000000000001') -Age 1
         Assert-SymbolsMatchBinaries -SymbolsRoot $other -PayloadRoot $payload -Label 'Symbols test'
     }
     Assert-SymbolsCheckRejects -Label 'age mismatch' -Pattern 'does not match ghostty-vt\.dll' -Check {
@@ -338,10 +338,10 @@ try {
         New-SymbolsTestPdb -Path (Join-Path $other 'ghostty-vt.pdb') -Guid $guids['ghostty-vt.pdb'] -Age 2
         Assert-SymbolsMatchBinaries -SymbolsRoot $other -PayloadRoot $payload -Label 'Symbols test'
     }
-    Assert-SymbolsCheckRejects -Label 'missing PDB' -Pattern 'has no noctty-command\.pdb' -Check {
+    Assert-SymbolsCheckRejects -Label 'missing PDB' -Pattern 'has no koreterm-command\.pdb' -Check {
         $other = Join-Path $symbolsProbeRoot 'missing'
         [void][IO.Directory]::CreateDirectory($other)
-        foreach ($file in Get-ChildItem -LiteralPath $symbols | Where-Object { $_.Name -cne 'noctty-command.pdb' }) {
+        foreach ($file in Get-ChildItem -LiteralPath $symbols | Where-Object { $_.Name -cne 'koreterm-command.pdb' }) {
             Copy-Item -LiteralPath $file.FullName -Destination $other
         }
         Assert-SymbolsMatchBinaries -SymbolsRoot $other -PayloadRoot $payload -Label 'Symbols test'
@@ -353,12 +353,12 @@ try {
         New-SymbolsTestPdb -Path (Join-Path $other 'stray.pdb') -Guid ([guid]::NewGuid()) -Age 1
         Assert-SymbolsMatchBinaries -SymbolsRoot $other -PayloadRoot $payload -Label 'Symbols test'
     }
-    Assert-SymbolsCheckRejects -Label 'stripped noctty.exe' -Pattern 'noctty\.exe carries no CodeView record' -Check {
+    Assert-SymbolsCheckRejects -Label 'stripped koreterm.exe' -Pattern 'koreterm\.exe carries no CodeView record' -Check {
         $other = Join-Path $symbolsProbeRoot 'stripped'
         [void][IO.Directory]::CreateDirectory($other)
         Copy-Item -LiteralPath $payload -Destination $other -Recurse
-        New-SymbolsTestPe -Path (Join-Path $other 'noctty\noctty.exe')
-        Assert-SymbolsMatchBinaries -SymbolsRoot $symbols -PayloadRoot (Join-Path $other 'noctty') -Label 'Symbols test'
+        New-SymbolsTestPe -Path (Join-Path $other 'koreterm\koreterm.exe')
+        Assert-SymbolsMatchBinaries -SymbolsRoot $symbols -PayloadRoot (Join-Path $other 'koreterm') -Label 'Symbols test'
     }
     Assert-SymbolsCheckRejects -Label 'PDB that is not an MSF container' -Pattern 'Not an MSF 7\.00 PDB' -Check {
         $junk = Join-Path $symbolsProbeRoot 'junk.pdb'
@@ -369,8 +369,8 @@ try {
         $other = Join-Path $symbolsProbeRoot 'odd-name'
         [void][IO.Directory]::CreateDirectory($other)
         Copy-Item -LiteralPath $payload -Destination $other -Recurse
-        New-SymbolsTestPe -Path (Join-Path $other 'noctty\noctty.exe') -PdbPath 'dir\evil name$.pdb' -Guid ([guid]::NewGuid())
-        Assert-SymbolsMatchBinaries -SymbolsRoot $symbols -PayloadRoot (Join-Path $other 'noctty') -Label 'Symbols test'
+        New-SymbolsTestPe -Path (Join-Path $other 'koreterm\koreterm.exe') -PdbPath 'dir\evil name$.pdb' -Guid ([guid]::NewGuid())
+        Assert-SymbolsMatchBinaries -SymbolsRoot $symbols -PayloadRoot (Join-Path $other 'koreterm') -Label 'Symbols test'
     }
 
     # The shipped zip layout: one `symbols` folder, nothing beside it.

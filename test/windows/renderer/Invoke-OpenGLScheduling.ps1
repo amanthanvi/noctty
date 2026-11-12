@@ -17,7 +17,7 @@ $ErrorActionPreference='Stop'
 $DefaultBinary=[IO.Path]::GetFullPath($DefaultBinary)
 $OpenGLOnlyBinary=[IO.Path]::GetFullPath($OpenGLOnlyBinary)
 $OutputDirectory=[IO.Path]::GetFullPath($OutputDirectory)
-if (!$RealProfile) {$RealProfile=Join-Path $env:LOCALAPPDATA 'noctty\startup-attempts.json'}
+if (!$RealProfile) {$RealProfile=Join-Path $env:LOCALAPPDATA 'koreterm\startup-attempts.json'}
 function Receipt {
     if(Test-Path -LiteralPath $RealProfile){return @{exists=$true;hash=(Get-FileHash -LiteralPath $RealProfile).Hash;mtime=(Get-Item -LiteralPath $RealProfile).LastWriteTimeUtc.ToString('o')}}
     return @{exists=$false}
@@ -65,27 +65,27 @@ function Case([string]$Name,[string]$Binary){
     CheckProfile
     $run=Join-Path $OutputDirectory $Name;$bin=Join-Path $run 'bin'
     [void](New-Item -ItemType Directory -Path $bin)
-    Copy-Item -LiteralPath $Binary -Destination (Join-Path $bin 'noctty.exe')
+    Copy-Item -LiteralPath $Binary -Destination (Join-Path $bin 'koreterm.exe')
     $hash=(Get-FileHash -LiteralPath $Binary).Hash
-    if((Get-FileHash -LiteralPath (Join-Path $bin 'noctty.exe')).Hash -ne $hash){throw 'Copied executable differs.'}
-    Set-Content -LiteralPath (Join-Path $bin 'noctty.portable') -Value 'isolated OpenGL stream/resize comparison'
+    if((Get-FileHash -LiteralPath (Join-Path $bin 'koreterm.exe')).Hash -ne $hash){throw 'Copied executable differs.'}
+    Set-Content -LiteralPath (Join-Path $bin 'koreterm.portable') -Value 'isolated OpenGL stream/resize comparison'
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'Fixture.ps1') -Destination $bin
     $share=Join-Path (Split-Path (Split-Path $Binary)) 'share'
     if(Test-Path -LiteralPath $share){Copy-Item -LiteralPath $share -Destination $run -Recurse}
     $command='command=direct:"'+(Get-Command pwsh).Source+'" -NoProfile -File "'+(Join-Path $bin 'Fixture.ps1')+'" -Stream -IntervalMs 1'
     Set-Content -LiteralPath (Join-Path $bin 'config.ghostty') -Value @('renderer=opengl','auto-update=off','confirm-close-surface=false','window-save-state=never','single-instance=false','shell-integration=none','window-vsync=false','window-width=96','window-height=28','windows-job-object-kill-on-close=true',$command)
-    $envForRun=@{LOCALAPPDATA=(Join-Path $run 'LocalAppData');APPDATA=(Join-Path $run 'AppData');NOCTTY_RENDERER_READY_PATH=(Join-Path $run 'ready.txt');NOCTTY_RENDER_TRACE_FILE=(Join-Path $run 'trace.json');NOCTTY_RENDER_TRACE_LIVE='1'}
+    $envForRun=@{LOCALAPPDATA=(Join-Path $run 'LocalAppData');APPDATA=(Join-Path $run 'AppData');KORETERM_RENDERER_READY_PATH=(Join-Path $run 'ready.txt');KORETERM_RENDER_TRACE_FILE=(Join-Path $run 'trace.json');KORETERM_RENDER_TRACE_LIVE='1'}
     [void](New-Item -ItemType Directory -Path $envForRun.LOCALAPPDATA,$envForRun.APPDATA)
     $proc=$null;$hostWindow=[IntPtr]::Zero;$nativeProcess=New-Object RendererNative+PI
     try{
         # On this private desktop by name, as Invoke-RendererParity.ps1 launches: a null desktop can land on the interactive one.
-        $nativeProcess=[RendererNative]::Launch((Join-Path $bin 'noctty.exe'),$bin,$DesktopName,$envForRun,(Join-Path $run 'stderr.txt'))
+        $nativeProcess=[RendererNative]::Launch((Join-Path $bin 'koreterm.exe'),$bin,$DesktopName,$envForRun,(Join-Path $run 'stderr.txt'))
         try{$proc=Get-Process -Id $nativeProcess.pid}catch{throw 'App exited before fixture.'}
         $identity=$proc.StartTime;$timer=[Diagnostics.Stopwatch]::StartNew();$surface=[IntPtr]::Zero
-        while($timer.Elapsed.TotalSeconds -lt 40){$proc.Refresh();if($proc.HasExited){throw 'App exited before fixture.'};$hostWindow=[RendererNative]::Host($proc.Id);if($hostWindow -ne [IntPtr]::Zero){[void][RendererNative]::ShowWindow($hostWindow,4);$surface=[RendererNative]::Surface($hostWindow)};if($surface -ne [IntPtr]::Zero -and (Test-Path -LiteralPath $envForRun.NOCTTY_RENDERER_READY_PATH)){break};Start-Sleep -Milliseconds 25}
+        while($timer.Elapsed.TotalSeconds -lt 40){$proc.Refresh();if($proc.HasExited){throw 'App exited before fixture.'};$hostWindow=[RendererNative]::Host($proc.Id);if($hostWindow -ne [IntPtr]::Zero){[void][RendererNative]::ShowWindow($hostWindow,4);$surface=[RendererNative]::Surface($hostWindow)};if($surface -ne [IntPtr]::Zero -and (Test-Path -LiteralPath $envForRun.KORETERM_RENDERER_READY_PATH)){break};Start-Sleep -Milliseconds 25}
         if($surface -eq [IntPtr]::Zero){throw 'No fixture surface.'}
         Start-Sleep -Milliseconds 2500
-        $initial=Snapshot $surface $envForRun.NOCTTY_RENDER_TRACE_FILE
+        $initial=Snapshot $surface $envForRun.KORETERM_RENDER_TRACE_FILE
         $rect=New-Object RendererNative+RECT;[void][RendererNative]::GetWindowRect($hostWindow,[ref]$rect)
         $w=$rect.r-$rect.l;$h=$rect.b-$rect.t;$latencies=@()
         $reply=[IntPtr]::Zero
@@ -93,20 +93,20 @@ function Case([string]$Name,[string]$Binary){
         for($i=0;$i -lt 80;$i++){
             $clock=[Diagnostics.Stopwatch]::StartNew()
             if(![RendererNative]::Resize($hostWindow,$w-($i%2)*90,$h-($i%2)*50)){throw 'Resize failed.'}
-            $sample=Snapshot $surface $envForRun.NOCTTY_RENDER_TRACE_FILE
+            $sample=Snapshot $surface $envForRun.KORETERM_RENDER_TRACE_FILE
             $latencies+=$clock.Elapsed.TotalMilliseconds
             Start-Sleep -Milliseconds 20
         }
         [void][RendererNative]::SendMessageTimeoutW($hostWindow,0x0232,[IntPtr]::Zero,[IntPtr]::Zero,2,5000,[ref]$reply)
         [void][RendererNative]::Resize($hostWindow,$w,$h)
         Start-Sleep -Milliseconds 350
-        $final=Snapshot $surface $envForRun.NOCTTY_RENDER_TRACE_FILE
+        $final=Snapshot $surface $envForRun.KORETERM_RENDER_TRACE_FILE
         $sorted=@($latencies | Sort-Object)
         $record=@{label=$Name;binarySHA256=$hash;resizeSamples=$latencies.Count;resizeAndSnapshotP50Ms=[math]::Round($sorted[40],2);resizeAndSnapshotP95Ms=[math]::Round($sorted[76],2);resizeAndSnapshotMaxMs=[math]::Round($sorted[-1],2);frameUpdates=([uint64]$final.renderer_update_frame_count-[uint64]$initial.renderer_update_frame_count);swapBuffers=([uint64]$final.swap_buffers_count-[uint64]$initial.swap_buffers_count);presentedOutputBytes=([uint64]$final.last_swap_process_output_bytes-[uint64]$initial.last_swap_process_output_bytes)}
         if($record.frameUpdates -lt 1 -or $record.presentedOutputBytes -lt 1000){throw 'Streaming stopped during resize.'}
         return $record
     }finally{
-        try{if($proc){$proc.Refresh();if(!$proc.HasExited){[void][RendererNative]::PostMessageW($hostWindow,0x0010,[IntPtr]::Zero,[IntPtr]::Zero);[void]$proc.WaitForExit(5000)};if(!$proc.HasExited){$live=Get-Process -Id $proc.Id;if($live.StartTime -ne $identity -or $live.Path -ne (Join-Path $bin 'noctty.exe')){throw 'Process identity changed.'};Stop-Process -Id $proc.Id;throw 'Graceful teardown failed.'}}}
+        try{if($proc){$proc.Refresh();if(!$proc.HasExited){[void][RendererNative]::PostMessageW($hostWindow,0x0010,[IntPtr]::Zero,[IntPtr]::Zero);[void]$proc.WaitForExit(5000)};if(!$proc.HasExited){$live=Get-Process -Id $proc.Id;if($live.StartTime -ne $identity -or $live.Path -ne (Join-Path $bin 'koreterm.exe')){throw 'Process identity changed.'};Stop-Process -Id $proc.Id;throw 'Graceful teardown failed.'}}}
         finally{
             if($nativeProcess.thread -ne [IntPtr]::Zero){[void][RendererNative]::CloseHandle($nativeProcess.thread)}
             if($nativeProcess.process -ne [IntPtr]::Zero){[void][RendererNative]::CloseHandle($nativeProcess.process)}

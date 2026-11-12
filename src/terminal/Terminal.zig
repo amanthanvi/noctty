@@ -1289,7 +1289,7 @@ pub fn semanticPrompt(
             // drawn, and oh-my-posh with shell integration on, or marks added
             // by hand the way the Windows Terminal docs suggest, then add a
             // D, A and B of their own. The prompt those docs give cmd users does
-            // the same inside noctty's wrapped cmd PROMPT, and a user's own A
+            // the same inside koreterm's wrapped cmd PROMPT, and a user's own A
             // inside Bash's PS1 would do it to `redraw=last`. Resetting on
             // any of those switches prompt clearing back on for a shell that
             // cannot redraw, and in cmd, which has no C mark, a resize during
@@ -1302,7 +1302,7 @@ pub fn semanticPrompt(
             // marks closes it with the C; for cmd, which has none,
             // `markPromptStart` treats a mark after such a prompt's B as new,
             // and only for a prompt that says `redraw=0`, the one setting a
-            // nested shell needs reset. Without PSReadLine, noctty's
+            // nested shell needs reset. Without PSReadLine, koreterm's
             // PowerShell integration writes no C either, and the same
             // inference serves its `redraw=0` prompts.
             self.semanticPromptApplyRedraw(redraw, new_prompt);
@@ -1361,7 +1361,7 @@ pub fn semanticPrompt(
             // a cmd or PowerShell tab stops inheriting their `redraw=0`. A P
             // inside a prompt an A already opened, which is how bash and zsh
             // mark PS1 on every redraw, changes nothing. An explicit
-            // `redraw` option applies either way, as on an A: noctty's
+            // `redraw` option applies either way, as on an A: koreterm's
             // PowerShell integration uses one to mark a prompt it could not
             // wrap in time, where an A's fresh-line would break the line.
             const redraw = cmd.readOption(.redraw);

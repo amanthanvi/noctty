@@ -16,7 +16,7 @@ $forwardedArgs = @('-TimeoutSeconds', $TimeoutSeconds.ToString())
 if ($Rebuild) { $forwardedArgs += '-Rebuild' }
 if ($ResetState) { $forwardedArgs += '-ResetState' }
 Invoke-InteractiveWin11HarnessMain -RepoRoot $repoRoot -LauncherPath $launcher `
-    -EnvironmentVariable 'NOCTTY_CLI_AUTOMATION_BOOTSTRAPPED' -ArgumentList $forwardedArgs
+    -EnvironmentVariable 'KORETERM_CLI_AUTOMATION_BOOTSTRAPPED' -ArgumentList $forwardedArgs
 
 $harness = Initialize-InteractiveWin11Sandbox -RepoRoot $repoRoot -SandboxName 'cli-automation' `
     -ResetState:$ResetState -IncludeResourcesDir
@@ -27,10 +27,10 @@ if ((Get-InteractiveWin11LaunchAction -ExePath $exe -Rebuild:$Rebuild `
     Invoke-InteractiveWin11Build -RepoRoot $repoRoot
 }
 Assert-InteractiveWin11ExeExists -ExePath $exe
-$cli = Join-Path (Split-Path -Parent $exe) 'noctty.com'
+$cli = Join-Path (Split-Path -Parent $exe) 'koreterm.com'
 if (-not (Test-Path -LiteralPath $cli -PathType Leaf)) { throw "Missing automation CLI shim: $cli" }
 
-$stateDir = Join-Path $layout.LocalAppData 'noctty'
+$stateDir = Join-Path $layout.LocalAppData 'koreterm'
 New-Item -ItemType Directory -Force -Path $stateDir | Out-Null
 [IO.File]::WriteAllText(
     (Join-Path $stateDir 'config.ghostty'),
@@ -38,7 +38,7 @@ New-Item -ItemType Directory -Force -Path $stateDir | Out-Null
     [Text.UTF8Encoding]::new($false)
 )
 
-$instanceClass = "noctty-automation-$($layout.SandboxId)"
+$instanceClass = "koreterm-automation-$($layout.SandboxId)"
 $serverStdout = Join-Path $layout.Logs 'server.stdout.log'
 $serverStderr = Join-Path $layout.Logs 'server.stderr.log'
 $server = $null
@@ -101,7 +101,7 @@ function Convert-AutomationSnapshot {
 function Assert-AutomationV3Shape {
     param([Parameter(Mandatory)] [psobject] $State, [Parameter(Mandatory)] [int] $ServerPid)
 
-    if ($State.schema -cne 'noctty.windows.v3' -or $State.api_version -ne 3 -or
+    if ($State.schema -cne 'koreterm.windows.v3' -or $State.api_version -ne 3 -or
         $State.instance.pid -ne $ServerPid -or $State.instance.class -cne $instanceClass -or
         [string]::IsNullOrWhiteSpace($State.instance.version)) {
         throw "Automation instance/schema mismatch: $($State | ConvertTo-Json -Depth 8 -Compress)"
@@ -217,7 +217,7 @@ try {
     )
     Assert-AutomationExit -Description '+send-text printable text' -Result $result -Expected 0
 
-    $unusedClass = "noctty-unused-$([Guid]::NewGuid().ToString('N'))"
+    $unusedClass = "koreterm-unused-$([Guid]::NewGuid().ToString('N'))"
     $result = Invoke-AutomationCli @('+list-windows', "--class=$unusedClass", '--timeout=0')
     Assert-AutomationExit -Description '+list-windows unused class' -Result $result -Expected 2
 }

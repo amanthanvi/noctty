@@ -1,5 +1,5 @@
 //! Program status records (OSC 7501) for one terminal, and the pure parts
-//! of how noctty presents them.
+//! of how koreterm presents them.
 //!
 //! Specification: https://www.superlogical.com/rex/docs/build/program-status
 //!
@@ -460,7 +460,7 @@ fn statePhrase(state: State, kind: ?Kind) []const u8 {
     };
 }
 
-/// The longest program-supplied text noctty shows outside the grid, in
+/// The longest program-supplied text koreterm shows outside the grid, in
 /// bytes. A notification or a screen reader has no use for 2 KiB of it.
 pub const max_shown_text_bytes = 240;
 

@@ -36,9 +36,9 @@ vsync_enabled: bool,
 
 pub fn init(_: std.mem.Allocator, opts: rendererpkg.Options) !Direct3D11 {
     const hwnd = opts.rt_surface.hwnd orelse return error.Direct3D11MissingWindow;
-    const device = api.noctty_d3d11_create(@ptrCast(hwnd), @intFromBool(opts.config.renderer_backend == .@"d3d11-warp")) orelse return error.Direct3D11Unavailable;
+    const device = api.koreterm_d3d11_create(@ptrCast(hwnd), @intFromBool(opts.config.renderer_backend == .@"d3d11-warp")) orelse return error.Direct3D11Unavailable;
     var receipt: api.Stats = undefined;
-    api.noctty_d3d11_stats(device, &receipt);
+    api.koreterm_d3d11_stats(device, &receipt);
     log.info("initialized driver={s} feature_level=0x{x} flip=sequential targets=offscreen", .{
         if (receipt.warp != 0) "WARP" else "hardware",
         receipt.feature_level,
@@ -52,13 +52,13 @@ pub fn init(_: std.mem.Allocator, opts: rendererpkg.Options) !Direct3D11 {
 }
 
 pub fn deinit(self: *Direct3D11) void {
-    api.noctty_d3d11_destroy(self.device);
+    api.koreterm_d3d11_destroy(self.device);
     self.* = undefined;
 }
 
 /// Startup's adapter candidate is independent of the user's recovery policy.
 pub fn setRecoveryPreference(self: *Direct3D11, requested: Config.RendererBackend) void {
-    api.noctty_d3d11_set_recovery_preference(self.device, @intFromBool(requested == .@"d3d11-warp"));
+    api.koreterm_d3d11_set_recovery_preference(self.device, @intFromBool(requested == .@"d3d11-warp"));
 }
 
 pub fn surfaceInit(_: *apprt.Surface) !void {}
@@ -70,7 +70,7 @@ pub fn displayRealized(_: *const Direct3D11) void {}
 pub fn drawFrameStart(self: *Direct3D11) void {
     // GenericRenderer prepares targets and atlases before beginFrame. Recover
     // first so a removed device cannot strand preparation on failed allocations.
-    api.check(api.noctty_d3d11_recover(self.device)) catch |err| {
+    api.check(api.koreterm_d3d11_recover(self.device)) catch |err| {
         log.warn("device recovery failed err={}", .{err});
     };
 }
@@ -82,14 +82,14 @@ pub fn hasVsync(self: *const Direct3D11) bool {
 /// Recovery replaces GPU targets. The generic renderer must encode a complete
 /// frame before considering unchanged terminal content safe to skip again.
 pub fn needsRedraw(self: *const Direct3D11) bool {
-    return api.noctty_d3d11_needs_redraw(self.device) != 0;
+    return api.koreterm_d3d11_needs_redraw(self.device) != 0;
 }
 pub fn isUnavailable(self: *const Direct3D11) bool {
-    return api.noctty_d3d11_unavailable(self.device) != 0;
+    return api.koreterm_d3d11_unavailable(self.device) != 0;
 }
 pub fn stats(self: *const Direct3D11) api.Stats {
     var result: api.Stats = undefined;
-    api.noctty_d3d11_stats(self.device, &result);
+    api.koreterm_d3d11_stats(self.device, &result);
     return result;
 }
 
@@ -114,11 +114,11 @@ pub fn initTarget(self: *const Direct3D11, width: usize, height: usize, custom: 
 
 pub fn present(self: *Direct3D11, target: Target) !void {
     if (target.width == 0 or target.height == 0) return;
-    try self.notePresentResult(api.noctty_d3d11_present(self.device, target.handle, @intFromBool(self.vsync_enabled)));
+    try self.notePresentResult(api.koreterm_d3d11_present(self.device, target.handle, @intFromBool(self.vsync_enabled)));
 }
 
 pub fn presentLastTarget(self: *Direct3D11) !void {
-    try self.notePresentResult(api.noctty_d3d11_present_last(self.device, @intFromBool(self.vsync_enabled)));
+    try self.notePresentResult(api.koreterm_d3d11_present_last(self.device, @intFromBool(self.vsync_enabled)));
 }
 
 /// The bridge returns S_OK for a frame it presented; S_FALSE (nothing to
@@ -132,24 +132,24 @@ fn notePresentResult(self: *Direct3D11, hr: i32) !void {
 /// This captures the rendered target, before any DWM composition.
 pub fn capture(self: *Direct3D11, hdc: *anyopaque) !void {
     if (!build_config.renderer_test_tools) return error.RendererTestToolsDisabled;
-    try api.check(api.noctty_d3d11_capture(self.device, hdc));
+    try api.check(api.koreterm_d3d11_capture(self.device, hdc));
 }
 
 /// Inject a device-removed HRESULT through the production recovery classifier.
 /// This tests resource restoration without resetting the system's graphics driver.
 pub fn requestDeviceLoss(self: *Direct3D11) !void {
     if (!build_config.renderer_test_tools) return error.RendererTestToolsDisabled;
-    try api.check(api.noctty_d3d11_request_device_loss(self.device));
+    try api.check(api.koreterm_d3d11_request_device_loss(self.device));
 }
 
 pub fn setTestFailures(self: *Direct3D11, hardware: bool, device: bool) !void {
     if (!build_config.renderer_test_tools) return error.RendererTestToolsDisabled;
-    try api.check(api.noctty_d3d11_set_test_failures(self.device, @intFromBool(hardware), @intFromBool(device)));
+    try api.check(api.koreterm_d3d11_set_test_failures(self.device, @intFromBool(hardware), @intFromBool(device)));
 }
 
 pub fn failNextPresent(self: *Direct3D11) !void {
     if (!build_config.renderer_test_tools) return error.RendererTestToolsDisabled;
-    try api.check(api.noctty_d3d11_fail_next_present(self.device));
+    try api.check(api.koreterm_d3d11_fail_next_present(self.device));
 }
 
 pub fn bufferOptions(self: Direct3D11) bufferpkg.Options {
@@ -193,21 +193,21 @@ pub fn initAtlasTexture(self: *const Direct3D11, atlas: *const Atlas) Texture.Er
 }
 
 pub fn beginFrame(self: *const Direct3D11, renderer: *Renderer, target: *Target) !Frame {
-    try api.check(api.noctty_d3d11_begin(self.device));
+    try api.check(api.koreterm_d3d11_begin(self.device));
     return Frame.begin(.{}, renderer, target);
 }
 
 pub fn isOccluded(self: *const Direct3D11) bool {
-    return api.noctty_d3d11_occluded(self.device) != 0;
+    return api.koreterm_d3d11_occluded(self.device) != 0;
 }
 pub fn recoveryPending(self: *const Direct3D11) bool {
-    return api.noctty_d3d11_recovery_pending(self.device) != 0;
+    return api.koreterm_d3d11_recovery_pending(self.device) != 0;
 }
 
 /// Detach the presentation surface before WGL touches the same HWND. GPU
 /// resources and the device remain usable if OpenGL construction fails.
 pub fn suspendPresentation(self: *Direct3D11) !void {
-    try api.check(api.noctty_d3d11_suspend_presentation(self.device));
+    try api.check(api.koreterm_d3d11_suspend_presentation(self.device));
 }
 
 pub fn backendLabel(self: *const Direct3D11) [:0]const u8 {

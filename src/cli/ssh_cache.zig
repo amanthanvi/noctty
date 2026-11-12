@@ -25,7 +25,7 @@ pub const Options = struct {
 /// Manage the SSH terminfo cache for automatic remote host setup.
 ///
 /// When SSH integration is enabled with `shell-integration-features = ssh-terminfo`,
-/// noctty automatically installs its terminfo on remote hosts. This command
+/// koreterm automatically installs its terminfo on remote hosts. This command
 /// manages the cache of successful installations to avoid redundant uploads.
 ///
 /// The cache stores hostnames (or user@hostname combinations) along with timestamps.
@@ -37,12 +37,12 @@ pub const Options = struct {
 /// multiple actions into separate commands.
 ///
 /// Examples:
-///   noctty +ssh-cache                          # List all cached hosts
-///   noctty +ssh-cache --host=example.com       # Check if host is cached
-///   noctty +ssh-cache --add=example.com        # Manually add host to cache
-///   noctty +ssh-cache --add=user@example.com   # Add user@host combination
-///   noctty +ssh-cache --remove=example.com     # Remove host from cache
-///   noctty +ssh-cache --clear                  # Clear entire cache
+///   koreterm +ssh-cache                          # List all cached hosts
+///   koreterm +ssh-cache --host=example.com       # Check if host is cached
+///   koreterm +ssh-cache --add=example.com        # Manually add host to cache
+///   koreterm +ssh-cache --add=user@example.com   # Add user@host combination
+///   koreterm +ssh-cache --remove=example.com     # Remove host from cache
+///   koreterm +ssh-cache --clear                  # Clear entire cache
 pub fn run(alloc_gpa: Allocator) !u8 {
     var arena = std.heap.ArenaAllocator.init(alloc_gpa);
     defer arena.deinit();
@@ -159,13 +159,13 @@ pub fn runInner(
 
         if (cached) {
             try stdout.print(
-                "'{s}' has noctty terminfo installed.\n",
+                "'{s}' has koreterm terminfo installed.\n",
                 .{host},
             );
             return 0;
         } else {
             try stdout.print(
-                "'{s}' does not have noctty terminfo installed.\n",
+                "'{s}' does not have koreterm terminfo installed.\n",
                 .{host},
             );
             return 1;
@@ -180,13 +180,13 @@ pub fn runInner(
 }
 
 fn defaultCachePath(alloc: Allocator) ![]const u8 {
-    // The full relative file name lets portable mode strip `noctty/`.
+    // The full relative file name lets portable mode strip `koreterm/`.
     return @import("../os/xdg.zig").state(alloc, .{
         .subdir = @import("../build_config.zig").data_dir_name ++ "/ssh_cache",
     });
 }
 
-test "PKG61 SSH cache uses noctty state path including portable layout" {
+test "PKG61 SSH cache uses koreterm state path including portable layout" {
     const alloc = std.testing.allocator;
     const expected = try @import("../os/xdg.zig").state(alloc, .{
         .subdir = @import("../build_config.zig").data_dir_name ++ "/ssh_cache",

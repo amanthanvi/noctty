@@ -21,7 +21,7 @@ pub const std_options: std.Options = if (@hasDecl(entrypoint, "std_options"))
 else
     .{};
 
-/// noctty.exe's panic handler (see process_shared.panic). The other
+/// koreterm.exe's panic handler (see process_shared.panic). The other
 /// entrypoints are build-time tools and keep Zig's default.
 pub const panic = if (build_config.exe_entrypoint == .ghostty)
     @import("process_shared.zig").panic

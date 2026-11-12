@@ -1,6 +1,17 @@
-noctty 1.3.140
+koreterm 1.3.141
 
-- Profiles load in the background as soon as the first window opens, so the
-  window menu (the arrow beside the tabs) lists them on its first opening.
-- While they are still loading, the menu says "Loading profiles..." instead
-  of opening empty.
+- noctty is now koreterm, with a new icon: a core linked to its connections.
+  The program is koreterm.exe; your config.ghostty and saved passwords stay
+  where they are.
+- Remote Desktop tabs no longer drop when left idle: the session now sends a
+  keep-alive every minute and reconnects by itself after a short network
+  drop. When a session really ends, the tab says so.
+- Remote Desktop no longer asks about a server whose certificate cannot be
+  checked: connecting without asking is now the default. Settings > Shell has
+  "Remote Desktop unverified server" to change it, and each RDP connection's
+  editor can set its own.
+- New in the window menu (the arrow beside the tabs): "Create Desktop and
+  Start Menu Shortcuts" puts a koreterm shortcut on the Desktop and in the
+  Start menu.
+- A profile opened as administrator now starts in its own starting folder,
+  not in the folder of the tab it was opened from.

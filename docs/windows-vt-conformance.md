@@ -12,7 +12,7 @@ not a bundled-versus-in-box transport baseline.
 Each capability line includes:
 
 - `category`: protocol family (`terminfo`, `osc`, `csi`, or `graphics`).
-- `direction`: whether noctty advertises, parses, or parses and emits it.
+- `direction`: whether koreterm advertises, parses, or parses and emits it.
 - `win32-runtime`: Win32 validation status.
 - `evidence`: harness or test family behind the status.
 
@@ -67,12 +67,12 @@ The generation boundary is
   The 1.22 release notes describe the rewrite and its direct VT forwarding.
   [Release notes](https://devblogs.microsoft.com/commandline/windows-terminal-preview-1-22-release/)
 
-The packaged noctty pair is v2. The first Windows build whose _in-box_ conhost
+The packaged koreterm pair is v2. The first Windows build whose _in-box_ conhost
 contains v2 could not be verified; do not infer the generation from the OS
-build number. Use `noctty +version` or the diagnostic-bundle manifest to see
-which source noctty selected.
+build number. Use `koreterm +version` or the diagnostic-bundle manifest to see
+which source koreterm selected.
 
-The redistributable covers only consoles noctty hosts itself. A nested console
+The redistributable covers only consoles koreterm hosts itself. A nested console
 launched through another host—for example, `cmd.exe` from inside a WSL
 shell—is redirected to the in-box conhost in System32, so bundling does not
 eliminate ConPTY mangling universally.
@@ -181,8 +181,8 @@ leave cells behind, so ask about a window resize or a pane-divider drag before
 treating such a report as a pure terminal bug.
 
 To separate the two sides, run the same scenario twice on a current build: once
-as shipped (bundled; confirm with the `ConPTY` line in `noctty +version`) and
-once with `NOCTTY_CONPTY=inbox`. Reproducing only under `inbox` implicates the
+as shipped (bundled; confirm with the `ConPTY` line in `koreterm +version`) and
+once with `KORETERM_CONPTY=inbox`. Reproducing only under `inbox` implicates the
 in-box **path**, which is not the same as implicating the transport: the in-box
 stream shape reaches terminal code the bundled stream never exercises (CUF at
 the right margin, ECH against pending wrap, LF at the bottom row), so a terminal
@@ -190,7 +190,7 @@ bug in exactly that code would also be inbox-only. Capture the failing stream
 and replay it through `libghostty-vt` before attributing it:
 
 - The replayed screen shows the corruption. The terminal mishandles that stream
-  shape; the divergence is in noctty, and the capture is the regression test.
+  shape; the divergence is in koreterm, and the capture is the regression test.
 - The replayed screen is correct. The core is consistent with the bytes it was
   given, so the divergence is either upstream (conhost's buffer already
   disagreed with the grid before the repaint) or in what a capture cannot hold:
@@ -214,12 +214,12 @@ FileVersion `10.0.26100.1`; bundled `conpty.dll` ProductVersion
 
 A program's terminal queries have a different responder on each source. A
 synthetic probe in cmd, PowerShell and WSL sent each query, waited 550 ms, and
-recorded every reply. Through the bundled pair noctty answered; the in-box
+recorded every reply. Through the bundled pair koreterm answered; the in-box
 conhost answered several itself and returned nothing for others. Replies were
 identical across the three shells, and no query was answered twice. The
 values describe the probe's 100x30 grid and configured colours.
 
-| Query                                                     | Bundled: replied by noctty    | In-box                                                        |
+| Query                                                     | Bundled: replied by koreterm    | In-box                                                        |
 | --------------------------------------------------------- | ----------------------------- | ------------------------------------------------------------- |
 | DA1 `CSI c`                                               | `CSI ?62;22;52c`              | conhost: `CSI ?61;6;7;21;22;23;24;28;32;42c`                  |
 | DA2 `CSI >c`                                              | `CSI >1;10;0c`                | conhost: `CSI >0;10;1c`                                       |
@@ -227,23 +227,23 @@ values describe the probe's 100x30 grid and configured colours.
 | DECRQM 2026, before and after `CSI ?2026h`                | `2`, then `1`                 | `0`, then `0`: synchronized output looks unsupported          |
 | DECRQM 1004 / 9001                                        | `1` / `1` (9001: see below)   | `2` / `2`                                                     |
 | XTGETTCAP `TN`, `Co`, `RGB`                               | three replies                 | none                                                          |
-| OSC 4 / 10 / 11 / 12 colour queries                       | noctty's palette and colours  | none                                                          |
+| OSC 4 / 10 / 11 / 12 colour queries                       | koreterm's palette and colours  | none                                                          |
 | Private CPR `CSI ?6n`                                     | `CSI ?row;col;1R` (see below) | conhost: `CSI ?1;15;1R`                                       |
 | XTVERSION, DECRQSS, `CSI ?u`, `CSI 14/16/18t`, DSR 5, CPR | answered                      | same bytes; conhost answers DSR, CPR, DECRQSS and size itself |
 
 So on the in-box path a program detects conhost's capabilities rather than
-noctty's, finds no synchronized output, and waits out its own timeout for
+koreterm's, finds no synchronized output, and waits out its own timeout for
 colour and terminfo replies. The bundled stream also carried the probe's
 output byte-for-byte, while the in-box stream re-rendered it. The 9001 half
 of the DECRQM row was `0` (unknown mode) when the table was measured and is
 `1` by code: the mode is now tracked (`modes.zig`, pinned by the `modeFromInt`
 test) and reported through the same `requestMode` path the measured 1004
 reply took; it was not re-measured through the pty. The private CPR row was
-`none` when measured, when noctty had no DECXCPR reply, and is
+`none` when measured, when koreterm had no DECXCPR reply, and is
 `CSI ?row;col;1R` (page 1) by code: the 2026-10 upstream merge took DECXCPR
 (upstream #14673), pinned by the termio `DECXCPR reports the cursor position
 with page 1` test. Whether the bundled ConPTY passes `CSI ?6n` through to
-noctty was not measured, so this reply was not measured through the pty
+koreterm was not measured, so this reply was not measured through the pty
 either.
 
 Measurement host: Windows `10.0.26300`; in-box `System32\conhost.exe`
@@ -253,7 +253,7 @@ FileVersion `10.0.26100.1`; bundled `conpty.dll` FileVersion
 ### Measured master-to-child key encoding differential
 
 The input direction has its own opt-in probe in `src/pty_transport_probe.zig`
-(`NOCTTY_CONPTY_KEY_INPUT_PROBE=1`). The child clears
+(`KORETERM_CONPTY_KEY_INPUT_PROBE=1`). The child clears
 `ENABLE_LINE_INPUT`, `ENABLE_ECHO_INPUT`, and `ENABLE_PROCESSED_INPUT`, sets
 `ENABLE_VIRTUAL_TERMINAL_INPUT`, and echoes every byte it reads back as hex.
 The parent writes one key encoding per case followed by a printable delimiter,
@@ -266,7 +266,7 @@ Measurement host: Windows `10.0.26200.0`; sources `inbox` and `bundled`
 
 A Kitty CSI-u key number is the key's own codepoint, so `Esc` is 27 and
 `Ctrl+[` is 91 with a Ctrl modifier; `CSI 27;5 u` is Ctrl+Esc, not Ctrl+[. The
-`CSI 27;129 u` row is the plain `Esc` noctty writes while Num Lock is on, since
+`CSI 27;129 u` row is the plain `Esc` koreterm writes while Num Lock is on, since
 the Kitty modifier field carries the lock modifiers. Both that form and
 `CSI 91;5 u` were captured from a real Claude Code session in issue #223.
 
@@ -288,7 +288,7 @@ ConPTY does not understand CSI-u, and on the two sources measured here it does
 not drop it either: an unrecognised sequence is flushed to the input queue
 character by character and re-synthesised for the child unchanged. A
 Kitty-encoded `Esc`, `Ctrl+[`, or `Ctrl+C` therefore reaches the application
-exactly as noctty wrote it on this host, and any loss of those keys is above or
+exactly as koreterm wrote it on this host, and any loss of those keys is above or
 below this layer, not in it. Older in-box conhosts — including the Windows 10
 build 19045 one in issue #223 — were not measured; do not generalise this row
 to every ConPTY. The measurement also covers only a child reading the byte
@@ -296,7 +296,7 @@ stream; a child that reads `INPUT_RECORD`s through the console API sees
 conhost's decoding of those same characters instead.
 
 Every ConPTY session opens by asking the terminal for Win32 input mode
-(`CSI ?9001h`, alongside `CSI ?1004h`). noctty tracks the mode and, while it is
+(`CSI ?9001h`, alongside `CSI ?1004h`). koreterm tracks the mode and, while it is
 set, sends each key event as the `CSI Vk;Sc;Uc;Kd;Cs;Rc _` record ConPTY turns
 back into a `KEY_EVENT_RECORD`, so a console-API reader (PSReadLine, crossterm,
 a cooked `ReadConsole`) sees the key the user pressed instead of conhost's
@@ -335,13 +335,13 @@ only after a RIS it parsed itself (`adaptDispatch.cpp` `HardReset`).
 
 `test/windows/hidden-win11-console-key-records.ps1` runs the same console-API
 observer (`console-input-records.c`, `ReadConsoleInputW` in mode 0x98, no
-protocol requests) inside noctty and in a `conhost.exe` window on the same
+protocol requests) inside koreterm and in a `conhost.exe` window on the same
 private desktop, posts the same key messages to both with no synthetic
 `WM_CHAR` (each target's own `TranslateMessage` produces the characters), and
 compares every record field. Measured on Windows `10.0.26300`, bundled
 OpenConsole `1.24.260710001`, US and German layouts:
 
-| Case                                               | noctty on this branch                                    | main `4faa5f851` (legacy VT, decoded by conhost)                                   |
+| Case                                               | koreterm on this branch                                    | main `4faa5f851` (legacy VT, decoded by conhost)                                   |
 | -------------------------------------------------- | -------------------------------------------------------- | ---------------------------------------------------------------------------------- |
 | `a`, Shift+a, Shift+Enter, Ctrl+Enter              | identical to conhost's records, key up included          | Shift+Enter arrives as plain Enter (`cs=0`); a synthetic Shift press/release pair   |
 | Ctrl+[, Ctrl+i, Ctrl+m, Ctrl+period, Ctrl+comma    | identical (`vk` of the key, `uc` 27 / 9 / 13 / 0 / 0)    | decoded as the Escape, Tab and Enter keys; `.` and `,` typed as text without Ctrl  |
@@ -358,7 +358,7 @@ translation reads the accent back twice and emits two release records for it
 (`kd=0 vk=221 sc=0 uc=180` then `kd=0 vk=221 sc=13 uc=180` after a Shift tap;
 without one the second is attributed to the following key, `kd=0 vk=69 sc=0
 uc=180` for the `e` that had not been pressed yet), and it zeroes the scan code
-of the accent a dead key flushes before Enter. noctty sends the accent once on
+of the accent a dead key flushes before Enter. koreterm sends the accent once on
 that release with the key's own scan code, as Windows Terminal's
 `_CharacterFromKeyEvent` does. Everything else in the table is identical
 record for record; what the table does not cover (a physical non-US keyboard,
@@ -368,7 +368,7 @@ IME composition, the in-box conhost as the pty source) is not measured.
 
 | Surface                                    | ConPTY v1 byte stream                                                                                                                                                                                                                                                                                                               | ConPTY v2 byte stream                                                                                                                                                                          | Status and mitigation                                                                                                                                                                                                                                                                                                                                                                                                              |
 | ------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| APC / Kitty graphics                       | APC, PM, and SOS are ignored; this machine emitted zero bytes for the measured Kitty APC. [Ignore change](https://github.com/microsoft/terminal/pull/7340)                                                                                                                                                                          | Original APC bytes are copied to the master pipe; the bundled measurement was byte-exact.                                                                                                      | **Transport fixed in v2.** Bundle v2 and use a Kitty-capable consumer such as noctty. Cursor resynchronization after unknown image sequences was fixed later by [#20009](https://github.com/microsoft/terminal/pull/20009); that fix first shipped in the 1.25 train, so it is not assumed for noctty's 1.24 pin.                                                                                                                  |
+| APC / Kitty graphics                       | APC, PM, and SOS are ignored; this machine emitted zero bytes for the measured Kitty APC. [Ignore change](https://github.com/microsoft/terminal/pull/7340)                                                                                                                                                                          | Original APC bytes are copied to the master pipe; the bundled measurement was byte-exact.                                                                                                      | **Transport fixed in v2.** Bundle v2 and use a Kitty-capable consumer such as koreterm. Cursor resynchronization after unknown image sequences was fixed later by [#20009](https://github.com/microsoft/terminal/pull/20009); that fix first shipped in the 1.25 train, so it is not assumed for koreterm's 1.24 pin.                                                                                                                  |
 | DCS / Sixel                                | Through 1.13 DCS was dropped; 1.14-1.21 forwarded only a whitelist. This machine emitted zero bytes for the measured Sixel DCS. [v1 report](https://github.com/microsoft/terminal/issues/17313)                                                                                                                                     | Original DCS bytes are copied; the bundled measurement was byte-exact.                                                                                                                         | **Transport fixed in v2; long-sequence resize interruption open.** The old mid-DCS SGR-reset bug was fixed by [#17194](https://github.com/microsoft/terminal/pull/17194). The current risk is CPR/DSR injection during an in-flight DCS/APC on resize, tracked by [#19621](https://github.com/microsoft/terminal/issues/19621); avoid resizing during a long transfer or retry it.                                                 |
 | Synchronized output (`CSI ?2026h/l`)       | The modes could be re-emitted out of order because v1 flushed renderer snapshots asynchronously. [#15230](https://github.com/microsoft/terminal/issues/15230)                                                                                                                                                                       | The bytes are forwarded in order. ConPTY does not answer `DECRQM`; the attached terminal owns the reply.                                                                                       | **Fixed in v2.** Use DEC mode 2026 through the bundled source. The iTerm2 `DCS =1s ST` form remains **unverified**: no handler or explicit support statement was found.                                                                                                                                                                                                                                                            |
 | OSC 10/11/12 colour queries                | Queries were swallowed, so the terminal could neither see nor answer them.                                                                                                                                                                                                                                                          | Queries are forwarded out and terminal replies are relayed back in. Responses larger than the old 4 KiB input buffer are preserved.                                                            | **Fixed in 1.22.** Use v2; the consumer terminal must answer. See [#17729](https://github.com/microsoft/terminal/pull/17729) and the long-response fix [#17738](https://github.com/microsoft/terminal/pull/17738). Short application escape timeouts remain an application-side reliability issue, not a ConPTY byte-stream limit.                                                                                                 |

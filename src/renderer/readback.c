@@ -4,9 +4,9 @@
 #include <stdint.h>
 /* A cross-process HDC can reject GDI drawing. Preserve the exact readback in a
    task-scoped BMP as a transparent fallback; this still bypasses composition. */
-int noctty_renderer_save_bgra(const unsigned char *pixels, uint32_t w, uint32_t h, int bottom_up) {
+int koreterm_renderer_save_bgra(const unsigned char *pixels, uint32_t w, uint32_t h, int bottom_up) {
     wchar_t path[32768];
-    DWORD len = GetEnvironmentVariableW(L"NOCTTY_RENDERER_CAPTURE_PATH", path, 32768);
+    DWORD len = GetEnvironmentVariableW(L"KORETERM_RENDERER_CAPTURE_PATH", path, 32768);
     if (!len || len >= 32768) return 0;
     HANDLE file = CreateFileW(path, GENERIC_WRITE, FILE_SHARE_READ, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
     if (file == INVALID_HANDLE_VALUE) return 0;
@@ -29,7 +29,7 @@ int noctty_renderer_save_bgra(const unsigned char *pixels, uint32_t w, uint32_t 
     CloseHandle(file);
     return ok;
 }
-int noctty_renderer_blit(void *dc, unsigned char *rgba, uint32_t w, uint32_t h, int bottom_up) {
+int koreterm_renderer_blit(void *dc, unsigned char *rgba, uint32_t w, uint32_t h, int bottom_up) {
     for (size_t i = 0; i < (size_t)w * h; ++i) {
         unsigned char r = rgba[i * 4];
         rgba[i * 4] = rgba[i * 4 + 2];
@@ -43,7 +43,7 @@ int noctty_renderer_blit(void *dc, unsigned char *rgba, uint32_t w, uint32_t h, 
     info.bmiHeader.biPlanes = 1;
     info.bmiHeader.biBitCount = 32;
     info.bmiHeader.biCompression = BI_RGB;
-    int saved = noctty_renderer_save_bgra(rgba, w, h, bottom_up);
+    int saved = koreterm_renderer_save_bgra(rgba, w, h, bottom_up);
     /* No DC (a direct D3D11 bridge caller) saves the BMP only. */
     int rows = dc ? StretchDIBits((HDC)dc, 0, 0, w, h, 0, 0, w, h, rgba, &info, DIB_RGB_COLORS, SRCCOPY) : 0;
     return saved || (rows != 0 && rows != GDI_ERROR);

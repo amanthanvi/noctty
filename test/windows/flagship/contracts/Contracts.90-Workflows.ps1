@@ -180,7 +180,7 @@ if ($conptyJob -notmatch '(?m)^    continue-on-error: true\s*$' -or
     $conptyStep -notmatch '-Dtest-filter=ConPTY --summary all') {
     throw 'Experimental ConPTY coverage must be optional, bounded, and retain the child dispatch test.'
 }
-foreach ($probeVariable in @('NOCTTY_RUN_CONPTY_TRANSPORT_TEST', 'NOCTTY_CONPTY_TRANSPORT_PROBE', 'NOCTTY_CONPTY_KEY_INPUT_PROBE')) {
+foreach ($probeVariable in @('KORETERM_RUN_CONPTY_TRANSPORT_TEST', 'KORETERM_CONPTY_TRANSPORT_PROBE', 'KORETERM_CONPTY_KEY_INPUT_PROBE')) {
     if ($conptyStep -notmatch ($probeVariable + ": '1'")) { throw "Missing scoped probe variable: $probeVariable" }
     if ($testWorkflowText.Replace($conptyJob, '') -match $probeVariable) { throw 'ConPTY probe variables must stay out of the required Windows jobs.' }
 }
@@ -460,7 +460,7 @@ Invoke-ContractTable -Contracts @(
         Content = {
             (Get-YamlStepBlock -Content $testWorkflowText -Name 'Verify default source-build shader mode' -Source $testWorkflow)
         }
-        Pattern = '(?ms)noctty\.com \+version.*?Build Config.*?custom shaders: disabled'
+        Pattern = '(?ms)koreterm\.com \+version.*?Build Config.*?custom shaders: disabled'
         Kind = 'Text'
         Description = 'default source build executes the CLI and reports custom shaders disabled'
     }
@@ -645,13 +645,13 @@ Invoke-ContractTable -Contracts @(
     }
     @{
         File = $accessibilityChecker
-        Pattern = "schema_version -ne 'noctty\.interactive-runner-provenance\.v1'"
+        Pattern = "schema_version -ne 'koreterm\.interactive-runner-provenance\.v1'"
         Kind = 'Workflow'
         Description = 'accessibility evidence rejects unsupported runner provenance schemas'
     }
     @{
         File = $runnerProvenanceChecker
-        Pattern = 'NOCTTY_EXPECTED_CHECKOUT_SHA'
+        Pattern = 'KORETERM_EXPECTED_CHECKOUT_SHA'
         Kind = 'Workflow'
         Description = 'interactive provenance can verify an exact PR head checkout instead of only GITHUB_SHA'
     }

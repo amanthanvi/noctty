@@ -306,7 +306,7 @@ pub const PipeServerIdentity = struct {
     /// SID plus the integrity level, and a peer that is already elevated as
     /// this user has crossed it. Requiring the image path narrows who can
     /// serve the predictable `.elevated` name to processes running our own
-    /// binary, at the cost of refusing a forward between two DIFFERENT noctty
+    /// binary, at the cost of refusing a forward between two DIFFERENT koreterm
     /// installations -- which then starts a local instance instead, so the
     /// only thing lost is single-instance coalescing across installs.
     ///
@@ -420,13 +420,13 @@ pub fn isTrustedElevatedPipeServer(identity: PipeServerIdentity) bool {
 }
 
 /// Allocate the effective window title, including the elevation marker when
-/// needed. A missing title uses the same `noctty` fallback as the Win32 host.
+/// needed. A missing title uses the same `koreterm` fallback as the Win32 host.
 pub fn allocPrefixedTitle(
     alloc: Allocator,
     title: ?[]const u8,
     elevated: bool,
 ) Allocator.Error![]u8 {
-    const base = title orelse "noctty";
+    const base = title orelse "koreterm";
     if (!elevated or std.mem.startsWith(u8, base, title_prefix)) {
         return alloc.dupe(u8, base);
     }
@@ -438,7 +438,7 @@ pub const RelaunchProfile = union(enum) {
     /// Nothing: the elevated window starts what its config gives it.
     none,
     /// A profile's command, and for a user profile defined only on
-    /// noctty's command line its variables: `--command=`, an empty
+    /// koreterm's command line its variables: `--command=`, an empty
     /// `--initial-command=` (a config file's `initial-command` would run in
     /// the first pane instead of the profile chosen), and one
     /// `--elevated-profile-env=KEY=VALUE` per variable. The elevated process
@@ -796,7 +796,7 @@ test "elevation launch boundary maps accepted UAC to launched" {
             self.saw_executable = std.mem.eql(
                 u16,
                 std.mem.span(info.file.?),
-                std.unicode.utf8ToUtf16LeStringLiteral("C:\\Noctty\\noctty.exe"),
+                std.unicode.utf8ToUtf16LeStringLiteral("C:\\Koreterm\\koreterm.exe"),
             );
             self.saw_parameters = std.mem.eql(
                 u16,
@@ -819,7 +819,7 @@ test "elevation launch boundary maps accepted UAC to launched" {
     var api: FakeShellApi = .{};
     const result = try launchElevatedWithShellApi(
         testing.allocator,
-        std.unicode.utf8ToUtf16LeStringLiteral("C:\\Noctty\\noctty.exe"),
+        std.unicode.utf8ToUtf16LeStringLiteral("C:\\Koreterm\\koreterm.exe"),
         "--working-directory=C:\\work",
         "C:\\work",
         &api,
@@ -849,7 +849,7 @@ test "elevation launch boundary maps UAC cancellation without an error" {
         LaunchResult.cancelled,
         try launchElevatedWithShellApi(
             std.testing.allocator,
-            std.unicode.utf8ToUtf16LeStringLiteral("C:\\Noctty\\noctty.exe"),
+            std.unicode.utf8ToUtf16LeStringLiteral("C:\\Koreterm\\koreterm.exe"),
             "",
             "C:\\work",
             &api,
@@ -873,7 +873,7 @@ test "elevation launch boundary maps non-cancellation Win32 failures to an error
         error.Unexpected,
         launchElevatedWithShellApi(
             std.testing.allocator,
-            std.unicode.utf8ToUtf16LeStringLiteral("C:\\Noctty\\noctty.exe"),
+            std.unicode.utf8ToUtf16LeStringLiteral("C:\\Koreterm\\koreterm.exe"),
             "",
             "C:\\work",
             &api,
@@ -920,7 +920,7 @@ test "elevation launch boundary omits lpDirectory when there is no host cwd" {
         LaunchResult.launched,
         try launchElevatedWithShellApi(
             testing.allocator,
-            std.unicode.utf8ToUtf16LeStringLiteral("C:\\Noctty\\noctty.exe"),
+            std.unicode.utf8ToUtf16LeStringLiteral("C:\\Koreterm\\koreterm.exe"),
             "--working-directory=/home/user",
             null,
             &api,
@@ -943,7 +943,7 @@ test "elevation title prefix handles elevated non-elevated null and prefixed tit
 
     const fallback = try allocPrefixedTitle(testing.allocator, null, true);
     defer testing.allocator.free(fallback);
-    try testing.expectEqualStrings("Administrator: noctty", fallback);
+    try testing.expectEqualStrings("Administrator: koreterm", fallback);
 
     const prefixed = try allocPrefixedTitle(
         testing.allocator,
@@ -1010,16 +1010,16 @@ test "elevation IPC image comparison is case-insensitive and length-exact" {
     const L = std.unicode.utf8ToUtf16LeStringLiteral;
 
     try std.testing.expect(imagePathsEqual(
-        L("C:\\Program Files\\noctty\\noctty.exe"),
-        L("c:\\program files\\noctty\\NOCTTY.EXE"),
+        L("C:\\Program Files\\koreterm\\koreterm.exe"),
+        L("c:\\program files\\koreterm\\KORETERM.EXE"),
     ));
     try std.testing.expect(!imagePathsEqual(
-        L("C:\\Program Files\\noctty\\noctty.exe"),
-        L("C:\\Program Files\\noctty\\noctty.exe.bak"),
+        L("C:\\Program Files\\koreterm\\koreterm.exe"),
+        L("C:\\Program Files\\koreterm\\koreterm.exe.bak"),
     ));
     try std.testing.expect(!imagePathsEqual(
-        L("C:\\noctty\\noctty.exe"),
-        L("C:\\attacker\\noctty.exe"),
+        L("C:\\koreterm\\koreterm.exe"),
+        L("C:\\attacker\\koreterm.exe"),
     ));
 
     // The fold stops at ASCII on purpose, so a non-ASCII case difference is
@@ -1045,7 +1045,7 @@ test "elevation session state exclusion fails closed on an unknown type" {
 test "elevation relaunch parameters forward config class and cwd exactly" {
     const testing = std.testing;
     const argv = [_][]const u8{
-        "C:\\noctty.exe",
+        "C:\\koreterm.exe",
         "--config-file",
         "C:\\configs\\one.conf",
         "--theme=Cobalt2",
@@ -1091,11 +1091,11 @@ test "elevation relaunch parameters pass on --visual-studio-profiles with a vs: 
     defer arena.deinit();
     const alloc = arena.allocator();
 
-    // The user's own config file sets `none`; noctty was started with
+    // The user's own config file sets `none`; koreterm was started with
     // `--visual-studio-profiles=all`, so its Visual Studio shells exist and a
     // pane runs one. The elevated process reads the same file, so without
     // the option the key it is given would name nothing.
-    const argv = [_][]const u8{ "C:\\noctty.exe", "--visual-studio-profiles=all", "--font-size=14" };
+    const argv = [_][]const u8{ "C:\\koreterm.exe", "--visual-studio-profiles=all", "--font-size=14" };
     const parameters = try buildRelaunchParameters(alloc, &argv, null, "C:\\work", "C:\\startup", .{ .selector = "vs:6bb7cfd9:cmd" });
     try testing.expectEqualStrings(
         "--visual-studio-profiles=all --working-directory=C:\\work --command= --initial-command= --default-profile=vs:6bb7cfd9:cmd",
@@ -1108,7 +1108,7 @@ test "elevation relaunch parameters pass on --visual-studio-profiles with a vs: 
     defer tmp.cleanup();
     try tmp.dir.writeFile(.{ .sub_path = "config.ghostty", .data = "visual-studio-profiles = none\n" });
     const path = try tmp.dir.realpathAlloc(alloc, "config.ghostty");
-    const line = try std.fmt.allocPrint(alloc, "noctty.exe {s}", .{parameters});
+    const line = try std.fmt.allocPrint(alloc, "koreterm.exe {s}", .{parameters});
     const child_argv = try configpkg.windows_shell.splitWindowsCommandLine(alloc, line);
     const args = try alloc.alloc([]const u8, child_argv.len - 1);
     for (child_argv[1..], args) |arg, *out| out.* = arg;
@@ -1123,7 +1123,7 @@ test "elevation relaunch parameters pass on --visual-studio-profiles with a vs: 
 
 test "elevation relaunch parameters serialize and outer-quote direct command" {
     const testing = std.testing;
-    const argv = [_][]const u8{"C:\\noctty.exe"};
+    const argv = [_][]const u8{"C:\\koreterm.exe"};
     const direct_args = [_][:0]const u8{
         "pwsh.exe",
         "-NoLogo",
@@ -1152,7 +1152,7 @@ test "elevation relaunch parameters carry a user profile's argv and env" {
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
-    const argv = [_][]const u8{"C:\\noctty.exe"};
+    const argv = [_][]const u8{"C:\\koreterm.exe"};
     // A user profile's argv as its Windows line splits (quotes kept inside
     // arguments), and its environment entries.
     const profile_argv = try configpkg.windows_shell.splitWindowsCommandLine(
@@ -1174,7 +1174,7 @@ test "elevation relaunch parameters carry a user profile's argv and env" {
     );
 
     // What the elevated process sees: its argv, then the config parsed from it.
-    const line = try std.fmt.allocPrint(alloc, "noctty.exe {s}", .{parameters});
+    const line = try std.fmt.allocPrint(alloc, "koreterm.exe {s}", .{parameters});
     const child_argv = try configpkg.windows_shell.splitWindowsCommandLine(alloc, line);
     try testing.expectEqual(@as(usize, 6), child_argv.len);
     try testing.expectEqualStrings("--working-directory=C:\\work", child_argv[1]);
@@ -1209,7 +1209,7 @@ test "elevated profile env wins over env in forwarded and included config files"
     try tmp.dir.writeFile(.{ .sub_path = "inner.ghostty", .data = "env = MODE=global\nenv = path=C:\\global\nenv = OTHER=include\nelevated-profile-env = MODE=file\n" });
     const outer = try tmp.dir.realpathAlloc(alloc, "outer.ghostty");
     const forwarded = try std.fmt.allocPrint(alloc, "--config-file={s}", .{outer});
-    const argv = [_][]const u8{ "C:\\noctty.exe", forwarded };
+    const argv = [_][]const u8{ "C:\\koreterm.exe", forwarded };
     const env = [_]configpkg.windows_shell.EnvEntry{
         .{ .key = "MODE", .value = "profile" },
         .{ .key = "PATH", .value = "C:\\profile" },
@@ -1218,7 +1218,7 @@ test "elevated profile env wins over env in forwarded and included config files"
 
     // The elevated process: its argv parsed as Config.load parses it, with
     // an ordinary --env beside the profile's for contrast.
-    const line = try std.fmt.allocPrint(alloc, "noctty.exe {s} --env=OTHER=cli", .{parameters});
+    const line = try std.fmt.allocPrint(alloc, "koreterm.exe {s} --env=OTHER=cli", .{parameters});
     const child_argv = try configpkg.windows_shell.splitWindowsCommandLine(alloc, line);
     const args = try alloc.alloc([]const u8, child_argv.len - 1);
     for (child_argv[1..], args) |arg, *out| out.* = arg;
@@ -1262,17 +1262,17 @@ test "an elevated window names a file-defined profile, which the elevated proces
     try tmp.dir.writeFile(.{ .sub_path = "inner.ghostty", .data = "command = vim.exe\ninitial-command = other.exe\n" });
     const outer = try tmp.dir.realpathAlloc(alloc, "outer.ghostty");
     const forwarded = try std.fmt.allocPrint(alloc, "--config-file={s}", .{outer});
-    const argv = [_][]const u8{ "C:\\noctty.exe", forwarded };
+    const argv = [_][]const u8{ "C:\\koreterm.exe", forwarded };
 
     const parameters = try buildRelaunchParameters(alloc, &argv, "work class", "C:\\work dir", "C:\\startup", .{ .selector = "user:py" });
     // Nothing of the profile but its key is on the elevated command line.
     for ([_][]const u8{ "s3cret", "TOKEN", "init.cmd", "elevated-profile-env", "direct:" }) |hidden| {
         try testing.expect(std.mem.indexOf(u8, parameters, hidden) == null);
     }
-    const child_line = try std.fmt.allocPrint(alloc, "noctty.exe {s}", .{parameters});
+    const child_line = try std.fmt.allocPrint(alloc, "koreterm.exe {s}", .{parameters});
     const child_argv = try configpkg.windows_shell.splitWindowsCommandLine(alloc, child_line);
     const want = [_][]const u8{
-        "noctty.exe",
+        "koreterm.exe",
         forwarded,
         "--class=work class",
         "--working-directory=C:\\work dir",
@@ -1307,7 +1307,7 @@ test "an elevated window names a file-defined profile, which the elevated proces
 
 test "elevation relaunch parameters double a trailing backslash before closing quote" {
     const testing = std.testing;
-    const argv = [_][]const u8{"C:\\noctty.exe"};
+    const argv = [_][]const u8{"C:\\koreterm.exe"};
     const direct_args = [_][:0]const u8{ "cmd.exe", "C:\\path\\" };
     const command: configpkg.Command = .{ .direct = &direct_args };
 
@@ -1328,7 +1328,7 @@ test "elevation relaunch parameters double a trailing backslash before closing q
 
 test "elevation relaunch parameters preserve shell command text" {
     const testing = std.testing;
-    const argv = [_][]const u8{"C:\\noctty.exe"};
+    const argv = [_][]const u8{"C:\\koreterm.exe"};
     const command: configpkg.Command = .{ .shell = "echo \"hello world\"" };
 
     const parameters = try buildRelaunchParameters(

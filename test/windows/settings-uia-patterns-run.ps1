@@ -21,11 +21,11 @@
     An inactive desktop can make that sample zero; it does not prove the
     foreground session's modifiers are up.
     Renderer selects d3d11 (default) or opengl. CPU load remains an external experiment.
-    Each launch gets a private NOCTTY_SETTINGS_OPEN_TRACE JSONL path; receipts
+    Each launch gets a private KORETERM_SETTINGS_OPEN_TRACE JSONL path; receipts
     summarize stage tags only and retain the original trace without printing it.
     -RequireTrace asserts a valid route-specific trace and successful Settings dispatch;
     leave it unset for a build without the optional product instrumentation.
-    NOCTTY_SETTINGS_COMBO_TRACE separately records native CB_SHOWDROPDOWN
+    KORETERM_SETTINGS_COMBO_TRACE separately records native CB_SHOWDROPDOWN
     delivery and return, keyed by control ID. Exercise receipts attach those
     records to the HRESULT and before/returned/100 ms popup observations.
     -RequireComboTrace rejects a missing diagnostic trace and successful enabled
@@ -41,7 +41,7 @@
     stops the owned job after 300 seconds without an updated individual receipt.
     Real Narrator/NVDA and performance measurements remain separate obligations.
 .EXAMPLE
-    ./settings-uia-patterns-run.ps1 -Run -PortableExe C:/task/stage/noctty.exe `
+    ./settings-uia-patterns-run.ps1 -Run -PortableExe C:/task/stage/koreterm.exe `
         -ExpectedExeSha256 <verified-sha256> -OutputDirectory C:/task/set91-run-01
 .EXAMPLE
     ./settings-uia-patterns-run.ps1 -CompileOnly
@@ -490,11 +490,11 @@ function Save-Diagnostics([string] $Stage, [string] $Reason) {
     $rows = if ($script:process) { @([Set91.Native]::Windows($script:process.Pid)) } else { @() }
     $script:attempt.windows = @($rows)
     $script:attempt.wmNull = @(foreach ($window in $rows) {
-        if ($window.Class -in 'noctty.win32.host','noctty.win32','noctty.win32.settings') {
+        if ($window.Class -in 'koreterm.win32.host','koreterm.win32','koreterm.win32.settings') {
             [Set91.Native]::Message([IntPtr]$window.Hwnd, 0, 0, 0, $true)
         }
     })
-    $script:attempt.settingsWindows = @($rows | Where-Object Class -eq 'noctty.win32.settings')
+    $script:attempt.settingsWindows = @($rows | Where-Object Class -eq 'koreterm.win32.settings')
     if ($script:process) {
         $script:attempt.process = [ordered]@{ pid = $script:process.Pid; exitCode = $script:process.ExitCode()
             waitResult = [Set91.Native]::WaitForSingleObject($script:process.Handle, 0) }
@@ -534,13 +534,13 @@ function Click([IntPtr] $Hwnd) {
     [void][Set91.Native]::Send($Hwnd, 0xF5, 0, 0)
 }
 function Get-GuardSnapshot {
-    # Metadata only for the maintainer's noctty profile and history files.
+    # Metadata only for the maintainer's koreterm profile and history files.
     # Shell jump-list hashes below remain a separate guard.
     $roam = [Environment]::GetFolderPath('ApplicationData')
     $local = [Environment]::GetFolderPath('LocalApplicationData')
     $docs = [Environment]::GetFolderPath('MyDocuments')
     $paths = [ordered]@{
-        startup = Join-Path $local 'noctty/startup-attempts.json'
+        startup = Join-Path $local 'koreterm/startup-attempts.json'
         psreadline = Join-Path $roam 'Microsoft/Windows/PowerShell/PSReadLine/ConsoleHost_history.txt'
         documentsHistory = Join-Path $docs 'PowerShell/PSReadLine/ConsoleHost_history.txt'
     }
@@ -577,14 +577,14 @@ if (-not $WorkerDesktop) {
     Assert-Contract (-not $PortableExe.Contains('\zig-out\')) 'Use an already staged portable copy, never zig-out.'
     Assert-Contract ((Get-FileHash -LiteralPath $PortableExe).Hash -eq $ExpectedExeSha256) 'Measurement exe SHA-256 mismatch.'
     $stage = Split-Path -Parent $PortableExe
-    Assert-Contract (Test-Path -LiteralPath (Join-Path $stage 'noctty.portable') -PathType Leaf) 'Portable marker missing.'
+    Assert-Contract (Test-Path -LiteralPath (Join-Path $stage 'koreterm.portable') -PathType Leaf) 'Portable marker missing.'
     foreach ($name in 'conpty.dll', 'OpenConsole.exe') {
         Assert-Contract (Test-Path -LiteralPath (Join-Path $stage $name) -PathType Leaf) "Stage is missing $name"
     }
     # A build identity check, not a substitute for the caller's measurement-patch verification.
     $binary = [Text.Encoding]::Unicode.GetString([IO.File]::ReadAllBytes($PortableExe))
-    Assert-Contract ($binary.Contains("io.github.amanthanvi.noctty.measure`0")) 'Measurement AUMID literal missing.'
-    Assert-Contract (-not $binary.Contains("io.github.amanthanvi.noctty`0")) `
+    Assert-Contract ($binary.Contains("io.github.amanthanvi.koreterm.measure`0")) 'Measurement AUMID literal missing.'
+    Assert-Contract (-not $binary.Contains("io.github.amanthanvi.koreterm`0")) `
         'Product AUMID literal remains (check the measurement toast AUMID as well).'
     $binary = $null
     Assert-Contract (-not $OutputDirectory.StartsWith($stage.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase)) `
@@ -683,7 +683,7 @@ if (-not $WorkerDesktop) {
         Write-Json (Join-Path $OutputDirectory 'guard-after.json') $after
         # Other apps may refresh existing jump lists while the maintainer uses
         # this shared host. Portable builds must create no destination, and the
-        # real noctty destination must stay unchanged (lead's D12/#417 contract).
+        # real koreterm destination must stay unchanged (lead's D12/#417 contract).
         $beforeNames = @($before.destinations | ForEach-Object { $_.name })
         $newDestinations = @($after.destinations | Where-Object { $_.name -notin $beforeNames })
         $realBefore = @($before.destinations | Where-Object name -eq 'c2214d6ebc43ff3f.customDestinations-ms')
@@ -764,7 +764,7 @@ function Start-Fixture {
     $script:surface = [IntPtr]::Zero
     $script:settings = [IntPtr]::Zero
     $script:openClock = $null
-    $class = 'noctty-test-set91-' + [guid]::NewGuid().ToString('N')
+    $class = 'koreterm-test-set91-' + [guid]::NewGuid().ToString('N')
     $tracePath = Join-Path $OutputDirectory ('settings-open-' + [guid]::NewGuid().ToString('N') + '.jsonl')
     $comboTracePath = Join-Path $OutputDirectory ('settings-combo-' + [guid]::NewGuid().ToString('N') + '.jsonl')
     $script:attemptClock.Restart()
@@ -785,18 +785,18 @@ function Start-Fixture {
     Assert-Contract (-not [IO.File]::Exists($tracePath)) 'Trace path must be NEW.'
     Assert-Contract (-not [IO.File]::Exists($comboTracePath)) 'Combo trace path must be NEW.'
     Assert-ClipboardGuard
-    $savedTrace = [Environment]::GetEnvironmentVariable('NOCTTY_SETTINGS_OPEN_TRACE', 'Process')
-    $savedComboTrace = [Environment]::GetEnvironmentVariable('NOCTTY_SETTINGS_COMBO_TRACE', 'Process')
+    $savedTrace = [Environment]::GetEnvironmentVariable('KORETERM_SETTINGS_OPEN_TRACE', 'Process')
+    $savedComboTrace = [Environment]::GetEnvironmentVariable('KORETERM_SETTINGS_COMBO_TRACE', 'Process')
     try {
-        [Environment]::SetEnvironmentVariable('NOCTTY_SETTINGS_OPEN_TRACE', $tracePath, 'Process')
-        [Environment]::SetEnvironmentVariable('NOCTTY_SETTINGS_COMBO_TRACE', $comboTracePath, 'Process')
+        [Environment]::SetEnvironmentVariable('KORETERM_SETTINGS_OPEN_TRACE', $tracePath, 'Process')
+        [Environment]::SetEnvironmentVariable('KORETERM_SETTINGS_COMBO_TRACE', $comboTracePath, 'Process')
         Add-Stage 'launch-requested' $null
         $script:process = [Set91.Native]::Launch($PortableExe,
             @('--single-instance=false', "--class=$class", '--command=cmd.exe /d /q'),
             $WorkerDesktop, $fixture, [IntPtr]::Zero)
     } finally {
-        [Environment]::SetEnvironmentVariable('NOCTTY_SETTINGS_OPEN_TRACE', $savedTrace, 'Process')
-        [Environment]::SetEnvironmentVariable('NOCTTY_SETTINGS_COMBO_TRACE', $savedComboTrace, 'Process')
+        [Environment]::SetEnvironmentVariable('KORETERM_SETTINGS_OPEN_TRACE', $savedTrace, 'Process')
+        [Environment]::SetEnvironmentVariable('KORETERM_SETTINGS_COMBO_TRACE', $savedComboTrace, 'Process')
     }
     $script:attempt.pid = $process.Pid
     Add-Stage 'launched' ([ordered]@{ pid = $process.Pid; priorityClass = 'BelowNormal'; exitCode = $process.ExitCode()
@@ -810,9 +810,9 @@ function Start-Fixture {
         }
         $script:attempt.startup.ready
     } 'startup-ready' 30)
-    $script:hostWindow = Wait-For { [Set91.Native]::Top($process.Pid, 'noctty.win32.host') } 'host window' 30
+    $script:hostWindow = Wait-For { [Set91.Native]::Top($process.Pid, 'koreterm.win32.host') } 'host window' 30
     [Set91.Native]::AssertDesktop($hostWindow, $WorkerDesktop)
-    $script:surface = Wait-For { [Set91.Native]::Child($hostWindow, -1, 'noctty.win32') } 'terminal surface'
+    $script:surface = Wait-For { [Set91.Native]::Child($hostWindow, -1, 'koreterm.win32') } 'terminal surface'
     [Set91.Native]::AssertDesktop($surface, $WorkerDesktop)
     $script:attempt.host = [Set91.Native]::Window($hostWindow)
     $script:attempt.surface = [Set91.Native]::Window($surface)
@@ -830,7 +830,7 @@ function Start-Fixture {
     } else {
         Open-SettingsCommand
     }
-    $script:settings = Wait-For { [Set91.Native]::Top($process.Pid, 'noctty.win32.settings') } 'Settings window'
+    $script:settings = Wait-For { [Set91.Native]::Top($process.Pid, 'koreterm.win32.settings') } 'Settings window'
     $script:openClock.Stop()
     $script:attempt.openElapsedMilliseconds = $script:openClock.Elapsed.TotalMilliseconds
     [Set91.Native]::AssertDesktop($settings, $WorkerDesktop)
@@ -868,7 +868,7 @@ function Open-SettingsCommand {
     [Set91.Native]::AssertDesktop($hostWindow, $WorkerDesktop)
     $hostIdentity = [Set91.Native]::Window($hostWindow)
     Assert-Contract ($hostIdentity.Exists -and $hostIdentity.Pid -eq $process.Pid -and
-        $hostIdentity.Class -eq 'noctty.win32.host' -and $hostIdentity.Desktop -eq $WorkerDesktop -and
+        $hostIdentity.Class -eq 'koreterm.win32.host' -and $hostIdentity.Desktop -eq $WorkerDesktop -and
         [Set91.Native]::WaitForSingleObject($process.Handle, 0) -ne 0) 'Settings command host identity mismatch.'
     Assert-ClipboardGuard
     Add-Stage 'palette-open-requested' $hostIdentity
@@ -966,7 +966,7 @@ function Select-Case($Case, [string] $Phase) {
     Click (Ctl $settings $Case[0])
     $hwnd = Ctl $settings $Case[1]
     # Focus scrolling is intentionally avoided; scroll the viewport with posted messages.
-    $viewport = [Set91.Native]::Child($settings, -1, 'noctty.win32.settings.viewport')
+    $viewport = [Set91.Native]::Child($settings, -1, 'koreterm.win32.settings.viewport')
     Assert-Contract ($viewport -ne [IntPtr]::Zero) 'Missing Settings viewport.'
     if ($viewport -ne [IntPtr]::Zero) {
         [Set91.Native]::AssertDesktop($viewport, $WorkerDesktop)

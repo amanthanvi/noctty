@@ -31,10 +31,10 @@ function Get-CommandFinishValidationDecision {
     )
 
     if ($RuntimeMs -lt $MinimumRuntimeMs) {
-        return [pscustomobject]@{ Valid = $false; Reason = "noctty exited too early for command-finish validation (exit code $ExitCode, runtime $($RuntimeMs)ms)" }
+        return [pscustomobject]@{ Valid = $false; Reason = "koreterm exited too early for command-finish validation (exit code $ExitCode, runtime $($RuntimeMs)ms)" }
     }
     if ($ExitCode -ne 0) {
-        return [pscustomobject]@{ Valid = $false; Reason = "noctty exited with code $ExitCode during command-finish validation" }
+        return [pscustomobject]@{ Valid = $false; Reason = "koreterm exited with code $ExitCode during command-finish validation" }
     }
     if ($UnexpectedToastFailureCount -gt 0) {
         return [pscustomobject]@{ Valid = $false; Reason = "unexpected WinRT toast failure while notifier setting is $SettingText" }
@@ -77,7 +77,7 @@ if ($ResetState) { $forwardedArgs += '-ResetState' }
 Invoke-InteractiveWin11HarnessMain `
     -RepoRoot $repoRoot `
     -LauncherPath $launcherPath `
-    -EnvironmentVariable 'NOCTTY_INTERACTIVE_WIN11_COMMAND_FINISH_BOOTSTRAPPED' `
+    -EnvironmentVariable 'KORETERM_INTERACTIVE_WIN11_COMMAND_FINISH_BOOTSTRAPPED' `
     -ArgumentList $forwardedArgs
 
 $harness = Initialize-InteractiveWin11Sandbox -RepoRoot $repoRoot -SandboxName 'command-finish' -ResetState:$ResetState -IncludeResourcesDir
@@ -137,7 +137,7 @@ Remove-Item -LiteralPath $stdoutPath, $stderrPath -ErrorAction SilentlyContinue
 $launchArgs = @(
     Get-InteractiveWin11ContainmentArguments
     '--single-instance=false'
-    "--class=noctty-command-finish-$($layout.SandboxId)"
+    "--class=koreterm-command-finish-$($layout.SandboxId)"
     "--config-file=$configPath"
     '-e'
     'powershell.exe'

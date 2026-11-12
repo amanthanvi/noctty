@@ -117,7 +117,7 @@ test "SET text editor uses resolved txt ProgID for ghostty and extensionless fil
             try std.testing.expectEqualSlices(u16, std.unicode.utf8ToUtf16LeStringLiteral(".txt"), std.mem.span(assoc));
             try std.testing.expectEqualSlices(u16, std.unicode.utf8ToUtf16LeStringLiteral("open"), std.mem.span(extra.?));
             try std.testing.expectEqual(@as(u32, 1024), len.*);
-            const prog_id = std.unicode.utf8ToUtf16LeStringLiteral("Noctty.Test.TextEditor");
+            const prog_id = std.unicode.utf8ToUtf16LeStringLiteral("Koreterm.Test.TextEditor");
             @memcpy(out.?[0..prog_id.len], prog_id);
             out.?[prog_id.len] = 0;
             len.* = prog_id.len + 1;
@@ -127,7 +127,7 @@ test "SET text editor uses resolved txt ProgID for ghostty and extensionless fil
             calls += 1;
             try std.testing.expectEqual(@as(windows.DWORD, @sizeOf(ShellExecuteInfo)), info.cbSize);
             try std.testing.expectEqual(@as(windows.ULONG, SEE_MASK_CLASSNAME | SEE_MASK_NOASYNC | SEE_MASK_FLAG_NO_UI), info.fMask);
-            try std.testing.expectEqualSlices(u16, std.unicode.utf8ToUtf16LeStringLiteral("Noctty.Test.TextEditor"), std.mem.span(info.lpClass.?));
+            try std.testing.expectEqualSlices(u16, std.unicode.utf8ToUtf16LeStringLiteral("Koreterm.Test.TextEditor"), std.mem.span(info.lpClass.?));
             try std.testing.expectEqualSlices(u16, std.unicode.utf8ToUtf16LeStringLiteral("open"), std.mem.span(info.lpVerb.?));
             try std.testing.expect(info.lpParameters == null);
             try std.testing.expect(info.hwnd == null);

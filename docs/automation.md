@@ -1,18 +1,18 @@
 # Automation
 
-noctty exposes a local, current-user command-line automation surface over
+koreterm exposes a local, current-user command-line automation surface over
 the running Windows instance. It provides versioned JSON state, explicit
 targets, and stable exit codes for PowerShell and other scripts.
 
 ## PowerShell quick start
 
 ```powershell
-noctty +list-windows | ConvertFrom-Json
+koreterm +list-windows | ConvertFrom-Json
 
-$state = noctty +list-windows --class=work | ConvertFrom-Json
+$state = koreterm +list-windows --class=work | ConvertFrom-Json
 $pane = $state.windows[0].tabs[0].panes[0]
-noctty +focus --class=work --surface-id=$($pane.surface_id)
-noctty +send-text --class=work --surface-id=$($pane.surface_id) 'git status'
+koreterm +focus --class=work --surface-id=$($pane.surface_id)
+koreterm +send-text --class=work --surface-id=$($pane.surface_id) 'git status'
 ```
 
 `+send-text` does not append Enter. Check `$LASTEXITCODE` after a command
@@ -57,7 +57,7 @@ target-not-found failure, never a request to use the focused target.
 `+focus` exit 0 means the target was selected and foreground activation was
 requested. In practice the activation does cross application boundaries:
 validated against a live instance with an unrelated foreground window in
-front, `+focus` brought noctty forward and the pane reported `focused` and
+front, `+focus` brought koreterm forward and the pane reported `focused` and
 `active`. Selection is what exit 0 guarantees, because Windows
 foreground-lock rules can still refuse the activation half in situations
 where the requesting process holds no foreground rights.
@@ -78,7 +78,7 @@ override for those verbs.
 
 ```json
 {
-  "schema": "noctty.windows.v3",
+  "schema": "koreterm.windows.v3",
   "api_version": 3,
   "instance": {
     "pid": 1234,
@@ -115,7 +115,7 @@ override for those verbs.
 }
 ```
 
-- `instance.pid` is the running noctty process ID, `instance.version` is its
+- `instance.pid` is the running koreterm process ID, `instance.version` is its
   build version, and `instance.class` is the effective sanitized pipe
   namespace captured when the server starts. That class can be passed back
   to `--class`.
@@ -164,7 +164,7 @@ denied until explicitly reviewed; a policy denial returns 4.
 
 `+send-text` accepts non-empty valid UTF-8 up to 16 KiB. It refuses every
 Unicode `Cc` control character, including NUL, TAB, CR, LF, ESC, DEL, and C1
-controls, and also applies noctty's unsafe-paste inspection. Refused control
+controls, and also applies koreterm's unsafe-paste inspection. Refused control
 text returns 4 and never reaches IPC; malformed or oversized input is a usage
 error. Printable shell metacharacters and mixed printable content remain
 allowed.
@@ -197,7 +197,7 @@ above; receiver-side validation prevents a direct pipe client from bypassing
 that policy.
 
 Terminal grid text, scrollback, selection, clipboard contents, and pending
-shell input are never included in the JSON payload. noctty intentionally
+shell input are never included in the JSON payload. koreterm intentionally
 exposes this metadata over a local, current-user automation channel.
 
 Wire request kind 8 carries `launch_layout` for

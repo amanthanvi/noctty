@@ -1,6 +1,6 @@
 //! A profile's login (user name and password), never in the config file.
-//! An installed noctty keeps it in the Windows Credential Manager (a generic
-//! credential per profile). A portable one (`noctty.portable` beside the
+//! An installed koreterm keeps it in the Windows Credential Manager (a generic
+//! credential per profile). A portable one (`koreterm.portable` beside the
 //! executable) keeps everything in its own folder: the login is a file,
 //! `credentials\<id>.cred`, encrypted with DPAPI for the Windows user, so it
 //! opens only for that user (on another computer, sign in again or import
@@ -46,11 +46,11 @@ extern "advapi32" fn CredFree(buffer: ?*anyopaque) callconv(.winapi) void;
 
 pub const max_password_len = CRED_MAX_CREDENTIAL_BLOB_SIZE;
 
-/// The credential's target for profile `id` (any case): `noctty:profile:<id>`
+/// The credential's target for profile `id` (any case): `koreterm:profile:<id>`
 /// in lower case.
 fn target(buf: []u16, id: []const u8) ?[:0]const u16 {
     var name: [128]u8 = undefined;
-    const prefix = "noctty:profile:";
+    const prefix = "koreterm:profile:";
     if (id.len == 0 or prefix.len + id.len > name.len) return null;
     @memcpy(name[0..prefix.len], prefix);
     for (id, name[prefix.len..][0..id.len]) |byte, *out| out.* = std.ascii.toLower(byte);
@@ -77,7 +77,7 @@ fn vaultStore(id: []const u8, user: []const u8, password: []const u8) Error!void
     const credential: CREDENTIALW = .{
         .Type = CRED_TYPE_GENERIC,
         .TargetName = name.ptr,
-        .Comment = std.unicode.utf8ToUtf16LeStringLiteral("noctty profile password"),
+        .Comment = std.unicode.utf8ToUtf16LeStringLiteral("koreterm profile password"),
         .CredentialBlobSize = @intCast(password.len),
         .CredentialBlob = if (password.len == 0) null else password.ptr,
         .Persist = CRED_PERSIST_LOCAL_MACHINE,
@@ -196,7 +196,7 @@ fn fileStore(id: []const u8, user: []const u8, password: []const u8) Error!void 
     @memcpy(plain[user.len + 1 ..], password);
     const in: DATA_BLOB = .{ .cbData = @intCast(plain.len), .pbData = plain.ptr };
     var out: DATA_BLOB = .{ .cbData = 0, .pbData = null };
-    if (CryptProtectData(&in, std.unicode.utf8ToUtf16LeStringLiteral("noctty profile login"), null, null, null, CRYPTPROTECT_UI_FORBIDDEN, &out) == 0) return error.Unexpected;
+    if (CryptProtectData(&in, std.unicode.utf8ToUtf16LeStringLiteral("koreterm profile login"), null, null, null, CRYPTPROTECT_UI_FORBIDDEN, &out) == 0) return error.Unexpected;
     defer _ = LocalFree(out.pbData);
     const blob = (out.pbData orelse return error.Unexpected)[0..out.cbData];
     if (std.fs.path.dirname(path)) |dir| std.fs.cwd().makePath(dir) catch return error.Unexpected;
@@ -243,10 +243,10 @@ test "profile credentials: CREDENTIALW matches the SDK" {
     try std.testing.expectEqual(@as(usize, 72), @offsetOf(CREDENTIALW, "UserName"));
 }
 
-test "profile credentials: the target is the lower-case id under noctty's prefix" {
+test "profile credentials: the target is the lower-case id under koreterm's prefix" {
     var buf: [160]u16 = undefined;
     const name = target(&buf, "Coletor-NF").?;
-    const expected = std.unicode.utf8ToUtf16LeStringLiteral("noctty:profile:coletor-nf");
+    const expected = std.unicode.utf8ToUtf16LeStringLiteral("koreterm:profile:coletor-nf");
     try std.testing.expectEqualSlices(u16, expected, name);
     try std.testing.expect(target(&buf, "") == null);
 }

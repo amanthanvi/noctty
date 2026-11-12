@@ -55,7 +55,7 @@ $conptyPin = Get-Content `
     -Raw | ConvertFrom-Json
 
 foreach ($architecture in (Get-WindowsPackageArchitectures)) {
-    $artifactDirectory = Join-Path $ArtifactRoot "noctty-$Version-windows-$architecture"
+    $artifactDirectory = Join-Path $ArtifactRoot "koreterm-$Version-windows-$architecture"
     $setup = Join-Path $artifactDirectory (
         New-WindowsPackageArtifactName `
             -Version $Version `
@@ -124,26 +124,26 @@ foreach ($architecture in (Get-WindowsPackageArchitectures)) {
         -AllowedPins $allowedPins `
         -TrustSelfSigned $TrustSelfSigned)
 
-    $extractDirectory = Join-Path $ExtractionRoot "noctty-release-verify-$architecture"
+    $extractDirectory = Join-Path $ExtractionRoot "koreterm-release-verify-$architecture"
     if (Test-Path -LiteralPath $extractDirectory) {
         Remove-Item -LiteralPath $extractDirectory -Recurse -Force
     }
     Expand-Archive -LiteralPath $portable -DestinationPath $extractDirectory
     Assert-PortableManifestMatchesPayload `
         -ManifestPath $manifest `
-        -PayloadRoot (Join-Path $extractDirectory 'noctty') `
+        -PayloadRoot (Join-Path $extractDirectory 'koreterm') `
         -Label "Portable manifest $architecture"
 
     # The PDBs must belong to the very PEs in the portable ZIP, signed copies
     # included: the GUID and age live in a debug directory that signing
     # leaves untouched.
-    $symbolsExtractDirectory = Join-Path $ExtractionRoot "noctty-release-verify-symbols-$architecture"
+    $symbolsExtractDirectory = Join-Path $ExtractionRoot "koreterm-release-verify-symbols-$architecture"
     if (Test-Path -LiteralPath $symbolsExtractDirectory) {
         Remove-Item -LiteralPath $symbolsExtractDirectory -Recurse -Force
     }
     [void](Assert-SymbolsArchiveMatchesPortable `
         -SymbolsZip $symbols `
-        -PayloadRoot (Join-Path $extractDirectory 'noctty') `
+        -PayloadRoot (Join-Path $extractDirectory 'koreterm') `
         -ExtractRoot $symbolsExtractDirectory `
         -Label "Symbols $architecture")
 
@@ -160,8 +160,8 @@ foreach ($architecture in (Get-WindowsPackageArchitectures)) {
     # instead of the updater publisher pins.
     $conptyArchitecture = $conptyPin.architectures.PSObject.Properties[$architecture].Value
     foreach ($payload in @(
-        @{ RelativePath = 'noctty/conpty.dll'; Pin = $conptyArchitecture.conptyDll },
-        @{ RelativePath = 'noctty/OpenConsole.exe'; Pin = $conptyArchitecture.openConsoleExe }
+        @{ RelativePath = 'koreterm/conpty.dll'; Pin = $conptyArchitecture.conptyDll },
+        @{ RelativePath = 'koreterm/OpenConsole.exe'; Pin = $conptyArchitecture.openConsoleExe }
     )) {
         $payloadPath = Join-Path $extractDirectory $payload.RelativePath
         $actualHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $payloadPath).Hash.ToLowerInvariant()

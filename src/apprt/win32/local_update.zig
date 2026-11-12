@@ -1,9 +1,9 @@
-//! Updating from an `update.zip` dropped beside `noctty.exe`, with no
+//! Updating from an `update.zip` dropped beside `koreterm.exe`, with no
 //! server: at start the app looks for one (`find`), and when it holds a newer
 //! version than this one it shows what is new and asks (`ask`). Update hands
-//! the swap to a small PowerShell script (`apply`) that waits for noctty to
+//! the swap to a small PowerShell script (`apply`) that waits for koreterm to
 //! close, copies the package's files over the program's, deletes the ZIP and
-//! starts noctty again. Ignore remembers the version in `update.ignored`, so
+//! starts koreterm again. Ignore remembers the version in `update.ignored`, so
 //! the same package does not ask again.
 //!
 //! The package holds the portable program files, `version.txt` (the new
@@ -119,13 +119,13 @@ pub const Answer = enum { update, ignore };
 pub fn ask(a: Allocator, owner: ?HWND, pending: Pending, current: []const u8) Answer {
     const notes = if (pending.notes.len == 0) "(no notes)" else pending.notes;
     const shown = notes[0..@min(notes.len, 3000)];
-    const text = std.fmt.allocPrint(a, "noctty {s} is ready to install (this is {s}).\n\nWhat's new:\n{s}\n\nUpdate now? noctty closes, updates and opens again.\nNo ignores this version.", .{ pending.version, current, shown }) catch return .ignore;
+    const text = std.fmt.allocPrint(a, "koreterm {s} is ready to install (this is {s}).\n\nWhat's new:\n{s}\n\nUpdate now? koreterm closes, updates and opens again.\nNo ignores this version.", .{ pending.version, current, shown }) catch return .ignore;
     const text_w = std.unicode.utf8ToUtf16LeAllocZ(a, text) catch return .ignore;
     const MB_YESNO: u32 = 0x4;
     const MB_ICONINFORMATION: u32 = 0x40;
     const MB_SETFOREGROUND: u32 = 0x10000;
     const IDYES: i32 = 6;
-    const answer = MessageBoxW(owner, text_w.ptr, std.unicode.utf8ToUtf16LeStringLiteral("noctty update"), MB_YESNO | MB_ICONINFORMATION | MB_SETFOREGROUND);
+    const answer = MessageBoxW(owner, text_w.ptr, std.unicode.utf8ToUtf16LeStringLiteral("koreterm update"), MB_YESNO | MB_ICONINFORMATION | MB_SETFOREGROUND);
     return if (answer == IDYES) .update else .ignore;
 }
 
@@ -140,12 +140,12 @@ const update_script =
     \\$ErrorActionPreference = 'Stop'
     \\try { Wait-Process -Id $ProcessId -Timeout 120 -ErrorAction SilentlyContinue } catch {}
     \\Start-Sleep -Milliseconds 700
-    \\$tmp = Join-Path ([System.IO.Path]::GetTempPath()) ('noctty-update-' + [guid]::NewGuid())
+    \\$tmp = Join-Path ([System.IO.Path]::GetTempPath()) ('koreterm-update-' + [guid]::NewGuid())
     \\try {
     \\  Expand-Archive -LiteralPath $Zip -DestinationPath $tmp -Force
     \\  $src = $tmp
-    \\  if (-not (Test-Path -LiteralPath (Join-Path $tmp 'noctty.exe'))) {
-    \\    $inner = Get-ChildItem -LiteralPath $tmp -Directory | Where-Object { Test-Path -LiteralPath (Join-Path $_.FullName 'noctty.exe') } | Select-Object -First 1
+    \\  if (-not (Test-Path -LiteralPath (Join-Path $tmp 'koreterm.exe'))) {
+    \\    $inner = Get-ChildItem -LiteralPath $tmp -Directory | Where-Object { Test-Path -LiteralPath (Join-Path $_.FullName 'koreterm.exe') } | Select-Object -First 1
     \\    if ($inner) { $src = $inner.FullName }
     \\  }
     \\  & robocopy.exe $src $Target /E /XF version.txt whats-new.txt /R:20 /W:1 /NFL /NDL /NJH /NJS /NP | Out-Null
@@ -153,6 +153,8 @@ const update_script =
     \\  Remove-Item -LiteralPath (Join-Path $Target 'update.ignored') -Force -ErrorAction SilentlyContinue
     \\} finally {
     \\  Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
+    \\  $current = Join-Path $Target 'koreterm.exe'
+    \\  if (Test-Path -LiteralPath $current) { $Exe = $current }
     \\  Start-Process -FilePath $Exe -WorkingDirectory $Target
     \\}
 ;
@@ -188,11 +190,11 @@ extern "kernel32" fn CloseHandle(h: ?*anyopaque) callconv(.winapi) BOOL;
 extern "kernel32" fn GetCurrentProcessId() callconv(.winapi) u32;
 
 /// Update: write the script to the temp folder and start it, hidden and
-/// detached. The caller quits noctty right after; the script waits for
+/// detached. The caller quits koreterm right after; the script waits for
 /// this process to end.
 pub fn apply(a: Allocator, pending: Pending) !void {
     const tmp_dir = std.process.getEnvVarOwned(a, "TEMP") catch try a.dupe(u8, pending.dir);
-    const script_path = try std.fmt.allocPrint(a, "{s}\\noctty-update-{d}.ps1", .{ tmp_dir, GetCurrentProcessId() });
+    const script_path = try std.fmt.allocPrint(a, "{s}\\koreterm-update-{d}.ps1", .{ tmp_dir, GetCurrentProcessId() });
     try std.fs.cwd().writeFile(.{ .sub_path = script_path, .data = update_script });
     const exe = try std.fs.selfExePathAlloc(a);
     const command = try std.fmt.allocPrint(
@@ -228,7 +230,7 @@ test "local update: a stored entry is read from the archive" {
     var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer out.deinit();
     try backup.writeZip(&out.writer, &.{
-        .{ .name = "noctty/noctty.exe", .data = "MZ..." },
+        .{ .name = "koreterm/koreterm.exe", .data = "MZ..." },
         .{ .name = "version.txt", .data = "1.3.139\r\n" },
         .{ .name = "whats-new.txt", .data = "- RDP tabs" },
     }, 1762900000);

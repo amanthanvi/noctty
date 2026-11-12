@@ -773,7 +773,7 @@ test "win32 palette MRU lines keep keys with line breaks and tabs, and read earl
 }
 
 pub const AppControls = struct {
-    /// Resolve `%LOCALAPPDATA%\noctty\palette-mru.txt`. Caller frees
+    /// Resolve `%LOCALAPPDATA%\koreterm\palette-mru.txt`. Caller frees
     /// with `core_app.alloc`.
     pub fn paletteMruPath(self: *const App) ?[]u8 {
         return self.localAppDataPath("palette-mru.txt");
@@ -1535,8 +1535,8 @@ pub const HostControls = struct {
                 },
                 .keyboard_shortcuts => self.showPaletteHelp("Keyboard shortcuts are configured in Settings > Keybindings."),
                 .configuration => self.showPaletteHelp("Open Settings, then Advanced, to edit the configuration file."),
-                .troubleshooting => self.showPaletteHelp("Run noctty +diagnostic-bundle when reporting a problem."),
-                .diagnostics => self.showPaletteHelp("Run noctty +diagnostic-bundle to export a redacted support bundle."),
+                .troubleshooting => self.showPaletteHelp("Run koreterm +diagnostic-bundle when reporting a problem."),
+                .diagnostics => self.showPaletteHelp("Run koreterm +diagnostic-bundle to export a redacted support bundle."),
                 .accessibility => self.showPaletteHelp("Keyboard: Ctrl+Page Up or Page Down changes tabs; Ctrl+Shift+Backslash splits right; Ctrl+Shift+E splits down; Alt+Arrow moves between panes."),
             },
             .recent_command => |payload| return self.invokePaletteAction(payload, false),

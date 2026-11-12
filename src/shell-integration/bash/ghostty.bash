@@ -18,7 +18,7 @@
 # We need to be in interactive mode to proceed.
 if [[ "$-" != *i* ]]; then builtin return; fi
 
-# noctty hands its shell the starting directory as a Windows path, and MSYS
+# koreterm hands its shell the starting directory as a Windows path, and MSYS
 # and Cygwin bash keep that as $PWD (so the first prompt shows `C:\Users/me`
 # instead of `~`) until the first cd. Let bash derive it from the real
 # directory it names in MSYS form (`/c/Users/me`), before any startup file
@@ -97,7 +97,7 @@ fi
 
 # Add Ghostty binary to PATH if the path feature is enabled. MSYS and Cygwin
 # split PATH on `:`, which cuts the Windows GHOSTTY_BIN_DIR (`C:\...`) into a
-# relative `C` entry and a stray tail. noctty already put its directory on the
+# relative `C` entry and a stray tail. koreterm already put its directory on the
 # Windows PATH, which Git for Windows' login shell inherits.
 if [[ "$GHOSTTY_SHELL_FEATURES" == *"path"* && -n "$GHOSTTY_BIN_DIR" &&
   "$OSTYPE" != msys* && "$OSTYPE" != cygwin* ]]; then
@@ -137,10 +137,10 @@ fi
 # SSH Integration
 if [[ "$GHOSTTY_SHELL_FEATURES" == *ssh-* ]]; then
   function __ghostty_ssh_cache {
-    if [[ -n "$GHOSTTY_BIN_DIR" && -x "$GHOSTTY_BIN_DIR/noctty" ]]; then
-      builtin command "$GHOSTTY_BIN_DIR/noctty" +ssh-cache "$@"
-    elif builtin command -v noctty >/dev/null 2>&1; then
-      builtin command noctty +ssh-cache "$@"
+    if [[ -n "$GHOSTTY_BIN_DIR" && -x "$GHOSTTY_BIN_DIR/koreterm" ]]; then
+      builtin command "$GHOSTTY_BIN_DIR/koreterm" +ssh-cache "$@"
+    elif builtin command -v koreterm >/dev/null 2>&1; then
+      builtin command koreterm +ssh-cache "$@"
     else
       return 127
     fi
@@ -281,7 +281,7 @@ function __ghostty_precmd() {
     _ghostty_last_reported_cwd="$PWD"
     builtin local cwd="$PWD"
     if [[ "$OSTYPE" == msys* || "$OSTYPE" == cygwin* ]]; then
-      # noctty reads a Windows directory in an OSC 7 as `/C:/Users/me`;
+      # koreterm reads a Windows directory in an OSC 7 as `/C:/Users/me`;
       # `/c/Users/me` would be taken for a WSL path. Rewrite the drive
       # mount here and only ask cygpath about the rest (/tmp, /home/...).
       # MSYS and Cygwin show the characters U+F001-U+F01F that a Windows

@@ -97,7 +97,7 @@ pub const SettingsOpenTrace = struct {
     /// Read the opt-in once per App lifetime. An inherited environment must
     /// not make unit tests write files; tests exercise initPath explicitly.
     pub fn init(alloc: Allocator) SettingsOpenTrace {
-        return initEnv(alloc, "NOCTTY_SETTINGS_OPEN_TRACE");
+        return initEnv(alloc, "KORETERM_SETTINGS_OPEN_TRACE");
     }
 
     fn initEnv(alloc: Allocator, name: []const u8) SettingsOpenTrace {
@@ -201,7 +201,7 @@ pub const SettingsComboTrace = struct {
     inner: SettingsOpenTrace = .{},
 
     pub fn init(alloc: Allocator) SettingsComboTrace {
-        return .{ .inner = SettingsOpenTrace.initEnv(alloc, "NOCTTY_SETTINGS_COMBO_TRACE") };
+        return .{ .inner = SettingsOpenTrace.initEnv(alloc, "KORETERM_SETTINGS_COMBO_TRACE") };
     }
 
     pub fn deinit(self: *SettingsComboTrace) void {
@@ -373,7 +373,7 @@ test "Settings creation stamps are written once, in order, within the record cap
 /// Resolve a trace output path against the current working directory.
 ///
 /// Every trace writer here opens its file with `createFileAbsolute`, which
-/// asserts the path is absolute, so a relative `NOCTTY_*_FILE` value has to
+/// asserts the path is absolute, so a relative `KORETERM_*_FILE` value has to
 /// be resolved once at init rather than at each write. Takes ownership of
 /// `owned` in every path, including the error paths.
 pub fn absolutizeTracePath(alloc: Allocator, owned: []const u8) ![]const u8 {
@@ -458,7 +458,7 @@ pub const MemoryStageTrace = struct {
     pub fn init(alloc: Allocator) MemoryStageTrace {
         const raw = std.process.getEnvVarOwned(
             alloc,
-            "NOCTTY_BENCH_MEMORY_STAGE_TRACE_FILE",
+            "KORETERM_BENCH_MEMORY_STAGE_TRACE_FILE",
         ) catch return .{};
         errdefer alloc.free(raw);
 

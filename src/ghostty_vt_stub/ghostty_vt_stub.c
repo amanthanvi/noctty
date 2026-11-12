@@ -3,7 +3,7 @@
  * libghostty-vt 0.1.0 library (scripts/package-windows.ps1 stages it from
  * zig-out\bin\ghostty-vt-stub\).
  *
- * The portable updater of noctty 1.3.125 to 1.3.136 refuses a payload without
+ * The portable updater of koreterm 1.3.125 to 1.3.136 refuses a payload without
  * a ghostty-vt.dll, and accepts one that is a signed PE of the right machine
  * with its line in the signed manifest. None of those updaters loads it. So
  * this file exists only to be present: it exports nothing, and it refuses to

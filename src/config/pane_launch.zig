@@ -55,7 +55,7 @@ pub const Origin = union(enum) {
     restored: ?[]const u8,
 
     pub const Fresh = struct {
-        /// The launch named its directory (`--working-directory=` on noctty's
+        /// The launch named its directory (`--working-directory=` on koreterm's
         /// command line, or in a forwarded new window's arguments), which
         /// wins over the one the default profile pins: the default replaces
         /// what runs, not where such a launch starts. An SSH profile keeps its
@@ -264,7 +264,7 @@ fn useUserLaunch(pane: *Config, user: ?windows_shell.UserLaunch) !?windows_shell
     try windows_shell.layerEnv(alloc, &env, launch.env);
     pane.env = env;
     // The profile's own zoom (Settings' profile window keeps it as
-    // `NOCTTY_FONT_SIZE`).
+    // `KORETERM_FONT_SIZE`).
     if (windows_shell.reservedEnv(launch.env, windows_shell.font_size_env)) |text| {
         if (std.fmt.parseFloat(f32, text)) |size| {
             if (size >= 4 and size <= 200) pane.@"font-size" = size;
@@ -275,7 +275,7 @@ fn useUserLaunch(pane: *Config, user: ?windows_shell.UserLaunch) !?windows_shell
 
 /// Home for a profile launch. A bare `.home` set on a pane's config after
 /// `Config.finalize` is not resolved again: Exec then starts the program in
-/// noctty's own current directory (measured: the directory noctty was
+/// koreterm's own current directory (measured: the directory koreterm was
 /// started in), so a profile gets the path itself. For a Start menu launch
 /// that directory is the install folder, the start folder of the installer's
 /// shortcut (read from the installed `.lnk`, not measured by a launch). Only
@@ -413,14 +413,14 @@ fn useAutomatic(config: *Config, machine: anytype) !void {
 /// Give a config with no `command` the one safe mode starts, so a recovery
 /// launch runs neither the user's PowerShell profile nor AutoRun. Call it before
 /// `Config.finalize`, which then has no default to look for: safe mode
-/// searches no `PATH`. The command is noctty's, from `.recovery`. A command
+/// searches no `PATH`. The command is koreterm's, from `.recovery`. A command
 /// already set stays.
 pub fn useRecovery(config: *Config) !void {
     if (config.command != null) return;
     setAutomaticCommand(config, .recovery, try windows_shell.recoveryCommand(config._arena.?.allocator()));
 }
 
-/// Set `command` to `cmd`, chosen by noctty rather than a config layer: the
+/// Set `command` to `cmd`, chosen by koreterm rather than a config layer: the
 /// automatic default or Safe Recovery's.
 fn setAutomaticCommand(config: *Config, comptime from: Ledger.CommandFrom, cmd: Command) void {
     const src = switch (from) {
@@ -436,7 +436,7 @@ fn setAutomaticCommand(config: *Config, comptime from: Ledger.CommandFrom, cmd: 
 /// The profile `default-profile` resolved to when the config was loaded. A
 /// launch that later replaces `command` (a chosen profile, an inherited
 /// one) leaves it set, so whether it is what a pane starts also needs
-/// `nocttyCommand`.
+/// `koretermCommand`.
 pub fn defaultProfile(config: *const Config) ?*const windows_shell.Profile {
     return if (config._launch.default_profile) |*profile| profile else null;
 }
@@ -451,10 +451,10 @@ pub fn defaultProfileForKey(config: *const Config, key: []const u8) ?*const wind
     return if (windows_shell.profileKeyEquals(profile.*, key)) profile else null;
 }
 
-/// The command noctty chose: the automatic default, Safe Recovery's or
+/// The command koreterm chose: the automatic default, Safe Recovery's or
 /// `default-profile`'s. Null when a config layer set `command`, or when none
 /// is set.
-pub fn nocttyCommand(config: *const Config) ?Command {
+pub fn koretermCommand(config: *const Config) ?Command {
     return if (config._launch.command_from != .layer) config.command else null;
 }
 
@@ -488,13 +488,13 @@ pub const Outcome = union(enum) {
 };
 
 /// The `default-profile` the config files give: the setting itself, unless
-/// noctty's command line named one, which wins in this process only.
+/// koreterm's command line named one, which wins in this process only.
 pub fn filesDefaultProfile(config: *const Config) ?[:0]const u8 {
     if (config._launch.default_profile_cli == null) return config.@"default-profile";
     return config._launch.default_profile_file;
 }
 
-/// Whether noctty's command line names a profile
+/// Whether koreterm's command line names a profile
 /// (`--default-profile=<reference>`, which a jump-list link to a user
 /// profile carries). An empty value names none.
 pub fn commandLineNamesProfile(config: *const Config) bool {
@@ -521,11 +521,11 @@ pub fn filesDefine(config: *const Config, key: []const u8) bool {
 }
 
 /// Make a copy of the app's config hold what the config files say, which is
-/// what Settings shows and saves: no `command` when noctty chose it (the
+/// what Settings shows and saves: no `command` when koreterm chose it (the
 /// automatic default, `default-profile`'s), and the files' `default-profile`
-/// when noctty's command line named another one for this process (a
+/// when koreterm's command line named another one for this process (a
 /// jump-list link's, an elevated window's). The copy then holds no choice
-/// of noctty's: a `command` an edit gives it is the user's, and it resolved
+/// of koreterm's: a `command` an edit gives it is the user's, and it resolved
 /// no `default-profile` (`defaultProfile` is null, `outcome` is `.untried`),
 /// since the load looked up another value or none.
 pub fn asWritten(config: *Config) void {
@@ -693,7 +693,7 @@ fn profilePlace(config: *const Config, key: []const u8, id: []const u8) cli.Loca
     return .none;
 }
 
-/// Whether any argument on noctty's command line wrote `id` for `key`
+/// Whether any argument on koreterm's command line wrote `id` for `key`
 /// (`--profile-env=<id>: ...`), or cleared every id (`--profile-env=`), which
 /// a process that reads only the config files would not see.
 fn profileWrittenOnCommandLine(config: *const Config, key: []const u8, id: []const u8) bool {
@@ -704,7 +704,7 @@ fn profileWrittenOnCommandLine(config: *const Config, key: []const u8, id: []con
     return false;
 }
 
-/// Whether noctty's command line has an `--env=` argument. A process that
+/// Whether koreterm's command line has an `--env=` argument. A process that
 /// reads only the config files (an elevated window) would not get it, and a
 /// user profile's `%NAME%` reads `env` entries first.
 fn commandLineSetsEnv(config: *const Config) bool {
@@ -837,7 +837,7 @@ fn sameDiagnostic(a: cli.Diagnostic, b: cli.Diagnostic) bool {
 /// `default-profile` once every layer has been read: a command-line value
 /// wins over the files (included ones are read after the command line), and
 /// one that a `command` from a config file overrides is a config problem.
-/// Safe mode starts with a `command` noctty chose, so this stays quiet there.
+/// Safe mode starts with a `command` koreterm chose, so this stays quiet there.
 fn finalizeDefaultProfileSetting(config: *Config) Allocator.Error!void {
     if (config._launch.default_profile_cli) |value| {
         config.@"default-profile" = if (value.len == 0) null else value;
@@ -911,7 +911,7 @@ fn applyDefaultProfile(config: *Config, host: anytype) !void {
 /// lists by value, so nothing appends to them there.
 pub const Ledger = struct {
     /// Which layer set `command`: a config layer (or a launch a pane
-    /// started), or noctty: its automatic default, Safe Recovery's, or
+    /// started), or koreterm: its automatic default, Safe Recovery's, or
     /// `default-profile`'s.
     command_from: CommandFrom = .layer,
 
@@ -940,7 +940,7 @@ pub const Ledger = struct {
 
     /// The last `default-profile` a config file gave (null for none, or for
     /// an empty value), whatever the command line says. Settings shows and
-    /// edits this one (`filesDefaultProfile`): in a window noctty started
+    /// edits this one (`filesDefaultProfile`): in a window koreterm started
     /// with `--default-profile` (a jump-list link, New Elevated Window) the
     /// setting holds the command line's value, which no file has.
     default_profile_file: ?[:0]const u8 = null,
@@ -1138,7 +1138,7 @@ pub const fixtures = struct {
 
     /// Where the config file of a fixture load is read from, which its
     /// problems name.
-    pub const config_path = "C:\\noctty-test\\config.ghostty";
+    pub const config_path = "C:\\koreterm-test\\config.ghostty";
 
     /// A load as `Config.load` makes it: the config file, the command line,
     /// then an included file (read after the command line), then `finalize`,
@@ -1152,7 +1152,7 @@ pub const fixtures = struct {
         try cfg.loadIter(alloc, &it);
         if (how.include) |include| {
             var included: std.Io.Reader = .fixed(include);
-            try cfg.loadReader(alloc, &included, "C:\\noctty-test\\profiles.ghostty");
+            try cfg.loadReader(alloc, &included, "C:\\koreterm-test\\profiles.ghostty");
         }
         try cfg.finalize();
         return cfg;
@@ -1197,13 +1197,13 @@ test "default-profile gives way to a command from any layer, and says so only fo
         \\
     ;
 
-    // Alone, it is the command (noctty's, from `.default_profile`) and the
+    // Alone, it is the command (koreterm's, from `.default_profile`) and the
     // profile.
     {
         var cfg = try fixtures.load(alloc, .{ .file = profile ++ "default-profile = PY\n" });
         defer cfg.deinit();
         try testing.expect(cfg._diagnostics.empty());
-        try testing.expect(nocttyCommand(&cfg) != null);
+        try testing.expect(koretermCommand(&cfg) != null);
         try testing.expectEqualStrings("cmd.exe", cfg.command.?.direct[0]);
         try testing.expectEqualStrings("C:\\Python 3\\init.cmd", cfg.command.?.direct[2]);
         try testing.expectEqualStrings("user:py", cfg._launch.default_profile.?.key);
@@ -1221,7 +1221,7 @@ test "default-profile gives way to a command from any layer, and says so only fo
         defer cfg.deinit();
         try testing.expectEqual(@as(usize, 1), testProblems(&cfg, "default-profile"));
         try testing.expect(cfg._launch.default_profile == null);
-        try testing.expect(nocttyCommand(&cfg) == null);
+        try testing.expect(koretermCommand(&cfg) == null);
     }
 
     // The command line's command wins quietly.
@@ -1254,7 +1254,7 @@ test "default-profile gives way to a command from any layer, and says so only fo
         defer cfg.deinit();
         try testing.expect(cfg._diagnostics.empty());
         try testing.expectEqualStrings("user:py", cfg._launch.default_profile.?.key);
-        try testing.expect(nocttyCommand(&cfg) != null);
+        try testing.expect(koretermCommand(&cfg) != null);
         try testing.expect(cfg.@"initial-command" == null);
         // And after a rebuild for a conditional state (a theme).
         cfg._conditional_set.insert(.theme);
@@ -1379,7 +1379,7 @@ test "a refused --command= does not replace an accepted one over an include" {
         defer cfg.deinit();
         try testing.expectEqualStrings("vim.exe", cfg.command.?.shell);
         try testing.expectEqualStrings("vim.exe", cfg._launch.command_cli.?);
-        try testing.expect(nocttyCommand(&cfg) == null);
+        try testing.expect(koretermCommand(&cfg) == null);
         try testing.expectEqual(@as(usize, 1), testProblems(&cfg, "command"));
         // The command line's command is quiet toward `default-profile`.
         try testing.expectEqual(@as(usize, 0), testProblems(&cfg, "default-profile"));
@@ -1451,7 +1451,7 @@ test "a refused command-line value after a reset leaves the reset" {
         defer cfg.deinit();
         try testing.expectEqualStrings("", cfg._launch.command_cli.?);
         try testing.expectEqualStrings("user:py", cfg._launch.default_profile.?.key);
-        try testing.expect(nocttyCommand(&cfg) != null);
+        try testing.expect(koretermCommand(&cfg) != null);
         try testing.expect(cfg.@"initial-command" == null);
     }
 }
@@ -1683,7 +1683,7 @@ test "visual-studio-profiles loads, and default-profile can name a Visual Studio
         try testing.expectEqualStrings("vs:6bb7cfd9:cmd", cfg._launch.default_profile.?.key);
         try testing.expectEqualStrings("cmd.exe", cfg.command.?.direct[0]);
         try testing.expectEqualStrings("/k", cfg.command.?.direct[1]);
-        try testing.expect(nocttyCommand(&cfg) != null);
+        try testing.expect(koretermCommand(&cfg) != null);
     }
     // `vs:newest:cmd` resolves to the concrete key, which the pane stores, so
     // a restore names the instance it ran; a value that names nothing yet is
@@ -1921,11 +1921,11 @@ test "Windows safe mode swaps only the automatic command for cmd.exe" {
     const alloc = testing.allocator;
 
     // With no command, recovery gives `cmd.exe /D` (no profile, no AutoRun),
-    // noctty's, before `finalize` has anything to look up.
+    // koreterm's, before `finalize` has anything to look up.
     var automatic = try Config.default(alloc);
     defer automatic.deinit();
     try useRecovery(&automatic);
-    try testing.expect(nocttyCommand(&automatic) != null);
+    try testing.expect(koretermCommand(&automatic) != null);
     try testing.expect(automatic.command.? == .direct);
     try testing.expect(std.ascii.eqlIgnoreCase(
         std.fs.path.basename(automatic.command.?.direct[0]),
@@ -1942,19 +1942,19 @@ test "Windows safe mode swaps only the automatic command for cmd.exe" {
     try testing.expectEqualStrings("pwsh.exe", explicit.command.?.shell);
 }
 
-test "what a load decided of default-profile: the profile, noctty's command and the outcome" {
+test "what a load decided of default-profile: the profile, koreterm's command and the outcome" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
     const testing = std.testing;
     const alloc = testing.allocator;
     const profile = "profile-command = py: cmd.exe /k init.cmd\n";
 
-    // Resolved: the profile, its command as noctty's, and the outcome of its
+    // Resolved: the profile, its command as koreterm's, and the outcome of its
     // own value only.
     {
         var cfg = try fixtures.load(alloc, .{ .file = profile ++ "default-profile = py\n" });
         defer cfg.deinit();
         try testing.expectEqualStrings("user:py", (defaultProfile(&cfg) orelse return error.TestUnexpectedResult).key);
-        try testing.expectEqualStrings("cmd.exe", (nocttyCommand(&cfg) orelse return error.TestUnexpectedResult).direct[0]);
+        try testing.expectEqualStrings("cmd.exe", (koretermCommand(&cfg) orelse return error.TestUnexpectedResult).direct[0]);
         try testing.expect(outcome(&cfg, "py") == .resolved);
         try testing.expect(outcome(&cfg, "pwsh") == .untried);
         try testing.expect(outcome(&cfg, null) == .untried);
@@ -1965,14 +1965,14 @@ test "what a load decided of default-profile: the profile, noctty's command and 
         var cfg = try fixtures.load(alloc, .{ .file = "default-profile = nosuch\n" });
         defer cfg.deinit();
         try testing.expect(defaultProfile(&cfg) == null);
-        try testing.expect(nocttyCommand(&cfg) == null);
+        try testing.expect(koretermCommand(&cfg) == null);
         try testing.expect(outcome(&cfg, "nosuch") == .not_found);
     }
-    // A config file's command won: not looked up, and not noctty's.
+    // A config file's command won: not looked up, and not koreterm's.
     {
         var cfg = try fixtures.load(alloc, .{ .file = profile ++ "default-profile = py\ncommand = vim.exe\n" });
         defer cfg.deinit();
-        try testing.expect(nocttyCommand(&cfg) == null);
+        try testing.expect(koretermCommand(&cfg) == null);
         try testing.expect(outcome(&cfg, "py") == .untried);
     }
     // The command line named another: the files' value was not looked up.
@@ -2077,7 +2077,7 @@ test "filesDefine: a profile the config files alone give" {
     try testing.expect(!filesDefine(&reloaded, "user:clionly"));
 }
 
-test "asWritten: a Settings copy holds what the files say, and no choice of noctty's" {
+test "asWritten: a Settings copy holds what the files say, and no choice of koreterm's" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
     const testing = std.testing;
     const alloc = testing.allocator;
@@ -2086,7 +2086,7 @@ test "asWritten: a Settings copy holds what the files say, and no choice of noct
         .argv = &.{"--default-profile=user:py"},
     });
     defer cfg.deinit();
-    try testing.expect(nocttyCommand(&cfg) != null);
+    try testing.expect(koretermCommand(&cfg) != null);
     asWritten(&cfg);
     try testing.expect(cfg.command == null);
     try testing.expectEqualStrings("pwsh", cfg.@"default-profile" orelse return error.TestUnexpectedResult);
@@ -2096,7 +2096,7 @@ test "asWritten: a Settings copy holds what the files say, and no choice of noct
     try testing.expect(outcome(&cfg, "pwsh") == .untried);
     // A command the user then types into the copy is the user's.
     cfg.command = .{ .shell = "pwsh.exe" };
-    try testing.expect(nocttyCommand(&cfg) == null);
+    try testing.expect(koretermCommand(&cfg) == null);
 
     // Nor one for a value the lookup found nothing for.
     var missing = try fixtures.load(alloc, .{ .file = "default-profile = nosuch\n" });
@@ -2171,7 +2171,7 @@ test "keepSources: a config built again from the files keeps the running launch"
         const kept = defaultProfile(&preview) orelse return error.TestUnexpectedResult;
         try testing.expectEqualStrings("old.exe", (kept.user orelse return error.TestUnexpectedResult).command_line);
         try testing.expectEqualStrings("old", kept.user.?.env[0].value);
-        try testing.expectEqualStrings("old.exe", (nocttyCommand(&preview) orelse return error.TestUnexpectedResult).direct[0]);
+        try testing.expectEqualStrings("old.exe", (koretermCommand(&preview) orelse return error.TestUnexpectedResult).direct[0]);
     }
 
     // With no `default-profile` running, files that add one start nothing
@@ -2185,7 +2185,7 @@ test "keepSources: a config built again from the files keeps the running launch"
     try keepSources(&added, &plain);
     try testing.expect(defaultProfile(&added) == null);
     try testing.expect(added.command == null);
-    try testing.expect(nocttyCommand(&added) == null);
+    try testing.expect(koretermCommand(&added) == null);
 
     // What Settings reads of the running value stays too: a command-line
     // value the lookup found nothing for, over the files' own, while the
@@ -2296,7 +2296,7 @@ test "prepare: a fresh pane runs default-profile's profile, except the first pan
         try testing.expect(!stamp.ssh and stamp.title == null);
         try testing.expectEqual(row.line, stamp.user != null);
         try testing.expectEqualStrings(row.directory, testDirectory(&pane));
-        // Started: no longer noctty's choice, so the default does not
+        // Started: no longer koreterm's choice, so the default does not
         // stack on it.
         if (row.key != null) try testing.expect(!defaultApplies(&pane, false));
     }
@@ -2373,7 +2373,7 @@ test "prepare: a chosen profile starts in home unless it pins a directory or inh
     const home = (try internal_os.home(&home_buf)) orelse return error.SkipZigTest;
 
     // Home as a path: a bare `.home` on a pane's config would start in
-    // noctty's own folder. A wsl.exe launch keeps `.home`, which gives
+    // koreterm's own folder. A wsl.exe launch keeps `.home`, which gives
     // `--cd ~` (the Linux home), not `/mnt/c/Users/<name>`.
     const pwsh = [_][:0]const u8{"C:\\Program Files\\PowerShell\\7\\pwsh.exe"};
     const powershell = [_][:0]const u8{"C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"};
@@ -2744,7 +2744,7 @@ test "prepare: a restored pane runs its saved profile, and never connects over S
         try testing.expect(pane.env.map.get("MODE") == null);
     }
 
-    // An SSH default: the automatic shell instead, marked as noctty's.
+    // An SSH default: the automatic shell instead, marked as koreterm's.
     {
         var ssh = try fixtures.loadWith(alloc, "default-profile = ssh:prod\n", .{ .ssh = true });
         defer ssh.deinit();
@@ -2755,7 +2755,7 @@ test "prepare: a restored pane runs its saved profile, and never connects over S
             var context: fixtures.Context = .{ .window = &window };
             const stamp = try prepare(&pane, .{ .restored = saved }, &context);
             try testing.expect(stamp.key == null and !stamp.ssh and stamp.title == null);
-            try testing.expectEqualStrings(fixtures.Context.automatic_argv[0], (try testDirectCommand(nocttyCommand(&pane)))[0]);
+            try testing.expectEqualStrings(fixtures.Context.automatic_argv[0], (try testDirectCommand(koretermCommand(&pane)))[0]);
             try testing.expectEqual(Config.ShellIntegration.detect, pane.@"shell-integration");
             try testing.expectEqualStrings("C:\\work", testDirectory(&pane));
         }
@@ -2802,7 +2802,7 @@ test "the automatic default is the shell the machine finds, where nothing else s
         problems: usize = 0,
     };
     for ([_]Row{
-        // Nothing set `command`: the machine's shell, noctty's.
+        // Nothing set `command`: the machine's shell, koreterm's.
         .{ .text = "", .from = .automatic, .program = "C:\\Program Files\\PowerShell\\7\\pwsh.exe" },
         // `default-profile` stands in for it.
         .{ .text = profile ++ "default-profile = py\n", .from = .default_profile, .program = "cmd.exe" },
@@ -2831,7 +2831,7 @@ test "the automatic default is the shell the machine finds, where nothing else s
         if (row.recovery) {
             try testing.expect(std.ascii.eqlIgnoreCase(std.fs.path.basename(program), row.program));
         } else try testing.expectEqualStrings(row.program, program);
-        try testing.expectEqual(row.from != .layer, nocttyCommand(&cfg) != null);
+        try testing.expectEqual(row.from != .layer, koretermCommand(&cfg) != null);
         try testing.expectEqual(row.problems, testProblems(&cfg, "default-profile"));
         // Finalized again (a new window's clone), it stays as it was.
         try finalizeWith(&cfg, machine);
@@ -2841,7 +2841,7 @@ test "the automatic default is the shell the machine finds, where nothing else s
     // A machine with no shell (the test one) leaves `command` unset.
     var bare = try fixtures.loadWith(alloc, "", .{});
     defer bare.deinit();
-    try testing.expect(bare.command == null and nocttyCommand(&bare) == null);
+    try testing.expect(bare.command == null and koretermCommand(&bare) == null);
 }
 
 test "a clone keeps the launch ledger, but not the elevated profile's variables" {

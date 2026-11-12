@@ -162,21 +162,21 @@ pub const compatibility = std.StaticStringMap(
     .{ "gtk-single-instance", compatGtkSingleInstance },
 });
 
-/// Set noctty's graphical user interface language to a language other than the
+/// Set koreterm's graphical user interface language to a language other than the
 /// system default language. For example:
 ///
 ///     language = de
 ///
-/// will force the strings in noctty's graphical user interface to be in German
+/// will force the strings in koreterm's graphical user interface to be in German
 /// rather than the system default.
 ///
-/// This will not affect the language used by programs run _within_ noctty.
+/// This will not affect the language used by programs run _within_ koreterm.
 /// Those will continue to use the default system language. There are also many
-/// non-GUI elements in noctty that are not translated - this setting will have
+/// non-GUI elements in koreterm that are not translated - this setting will have
 /// no effect on those.
 ///
 /// Warning: This setting cannot be reloaded at runtime. To change the language
-/// you must fully restart noctty.
+/// you must fully restart koreterm.
 ///
 /// Supported in the Windows-only fork.
 /// Available since 1.3.0.
@@ -193,7 +193,7 @@ language: ?[:0]const u8 = null,
 /// When OpenGL cannot start (no driver, a version below 4.3, or a failed WGL
 /// pixel format or context), `opengl`, set or left as the default, falls back
 /// to D3D11 (hardware, then WARP) with a banner, and later surfaces in the
-/// process start on D3D11 without trying OpenGL. noctty shows its startup
+/// process start on D3D11 without trying OpenGL. koreterm shows its startup
 /// error only when D3D11 cannot start either. Set `d3d11` to skip the initial
 /// OpenGL attempt unless custom shaders or a background image are configured.
 /// Kitty images received later can still request OpenGL.
@@ -206,7 +206,7 @@ renderer: RendererBackend = .opengl,
 ///
 /// You can generate the list of valid values using the CLI:
 ///
-///     noctty +list-fonts
+///     koreterm +list-fonts
 ///
 /// This configuration can be repeated multiple times to specify preferred
 /// fallback fonts when the requested codepoint is not available in the primary
@@ -220,10 +220,10 @@ renderer: RendererBackend = .opengl,
 /// The specific styles (bold, italic, bold italic) do not need to be
 /// explicitly set. If a style is not set, then the regular style (font-family)
 /// will be searched for stylistic variants. If a stylistic variant is not
-/// found, noctty will use the regular style. This prevents falling back to a
+/// found, koreterm will use the regular style. This prevents falling back to a
 /// different font family just to get a style such as bold. This also applies
 /// if you explicitly specify a font family for a style. For example, if you
-/// set `font-family-bold = FooBar` and "FooBar" cannot be found, noctty will
+/// set `font-family-bold = FooBar` and "FooBar" cannot be found, koreterm will
 /// use whatever font is set for `font-family` for the bold style.
 ///
 /// Finally, some styles may be synthesized if they are not supported.
@@ -271,10 +271,10 @@ renderer: RendererBackend = .opengl,
 @"font-style-italic": FontStyle = .{ .default = {} },
 @"font-style-bold-italic": FontStyle = .{ .default = {} },
 
-/// Control whether noctty should synthesize a style if the requested style is
+/// Control whether koreterm should synthesize a style if the requested style is
 /// not available in the specified font-family.
 ///
-/// noctty can synthesize bold, italic, and bold italic styles if the font
+/// koreterm can synthesize bold, italic, and bold italic styles if the font
 /// does not have a specific style. For bold, this is done by drawing an
 /// outline around the glyph of varying thickness. For italic, this is done by
 /// applying a slant to the glyph. For bold italic, both of these are applied.
@@ -316,7 +316,7 @@ renderer: RendererBackend = .opengl,
 ///
 /// The syntax is fairly loose, but invalid settings will be silently ignored.
 ///
-/// The font feature will apply to all fonts rendered by noctty. A future
+/// The font feature will apply to all fonts rendered by koreterm. A future
 /// enhancement will allow targeting specific faces.
 ///
 /// To disable programming ligatures, use `-calt` since this is the typical
@@ -608,11 +608,11 @@ renderer: RendererBackend = .opengl,
 @"freetype-load-flags": FreetypeLoadFlags = .{},
 
 /// A theme to use. This can be a built-in theme name, a custom theme
-/// name, or an absolute path to a custom theme file. noctty also supports
+/// name, or an absolute path to a custom theme file. koreterm also supports
 /// specifying a different theme to use for light and dark mode. Each
 /// option is documented below.
 ///
-/// If the theme is an absolute pathname, noctty will attempt to load that
+/// If the theme is an absolute pathname, koreterm will attempt to load that
 /// file as a theme. If that file does not exist or is inaccessible, an error
 /// will be logged and no other directories will be searched.
 ///
@@ -621,26 +621,26 @@ renderer: RendererBackend = .opengl,
 /// systems with case-sensitive filesystems. It is an error for a theme name to
 /// include path separators unless it is an absolute pathname.
 ///
-/// The first directory is the `themes` subdirectory of your noctty
-/// configuration directory. This is `$XDG_CONFIG_HOME/noctty/themes` or
-/// `~/.config/noctty/themes`.
+/// The first directory is the `themes` subdirectory of your koreterm
+/// configuration directory. This is `$XDG_CONFIG_HOME/koreterm/themes` or
+/// `~/.config/koreterm/themes`.
 ///
-/// The second directory is the `themes` subdirectory of the noctty resources
-/// directory. noctty ships with a multitude of themes that will be installed
+/// The second directory is the `themes` subdirectory of the koreterm resources
+/// directory. koreterm ships with a multitude of themes that will be installed
 /// into this directory. In this Windows fork, the bundled themes live in the
 /// `share/ghostty/themes` directory next to the built application. When
 /// running from the source tree, this is typically `zig-out/share/ghostty/themes`.
 ///
-/// To see a list of available themes, run `noctty +list-themes`.
+/// To see a list of available themes, run `koreterm +list-themes`.
 ///
-/// A theme file is simply another noctty configuration file. They share
+/// A theme file is simply another koreterm configuration file. They share
 /// the same syntax and can set most configuration options. A theme is not
 /// limited to colors, so only use theme files from sources you trust. The
 /// built-in themes are audited to only set safe configuration options.
 ///
 /// Some options cannot be set within theme files. The reason these are not
 /// supported should be self-evident. A theme file cannot set `theme` or
-/// `config-file`. At the time of writing this, noctty will not show any
+/// `config-file`. At the time of writing this, koreterm will not show any
 /// warnings or errors if you set these options in a theme file but they will
 /// be silently ignored.
 ///
@@ -675,11 +675,11 @@ foreground: Color = .{ .r = 0xFF, .g = 0xFF, .b = 0xFF },
 ///
 /// The background image is currently per-terminal, not per-window. If
 /// you are a heavy split user, the background image will be repeated across
-/// splits. A future improvement to noctty will address this.
+/// splits. A future improvement to koreterm will address this.
 ///
 /// WARNING: Background images are currently duplicated in VRAM per-terminal.
 /// For sufficiently large images, this could lead to a large increase in
-/// memory usage (specifically VRAM usage). A future noctty improvement
+/// memory usage (specifically VRAM usage). A future koreterm improvement
 /// will resolve this by sharing image textures across terminals.
 ///
 /// Available since: 1.2.0
@@ -1065,7 +1065,7 @@ palette: Palette = .{},
 @"mouse-wheel-zoom": bool = true,
 
 /// How a Remote Desktop pane (a profile that runs `mstsc.exe /v:<server>`,
-/// which noctty shows inside the tab) fits the remote desktop to the pane:
+/// which koreterm shows inside the tab) fits the remote desktop to the pane:
 ///
 ///   * `proportional` - scale it to the pane keeping its proportions, with
 ///     bars where the shapes differ.
@@ -1076,8 +1076,9 @@ palette: Palette = .{},
 
 /// Connect a Remote Desktop pane to a server whose identity cannot be
 /// checked (a self-signed certificate, a name that does not match) without
-/// asking. With `false`, Windows asks each time, as mstsc.exe does.
-@"rdp-trust-certificates": bool = false,
+/// asking (the default). With `false`, Windows asks each time, as mstsc.exe
+/// does.
+@"rdp-trust-certificates": bool = true,
 
 /// The colors a Remote Desktop pane asks the server for, in bits per pixel:
 /// `15`, `16`, `24` or `32`. Fewer colors send less over a slow link. A
@@ -1151,7 +1152,7 @@ palette: Palette = .{},
 ///     cause strange rendering and performance issues.
 ///
 /// In the Windows-only fork this setting is accepted but has no effect on
-/// any Windows build, and enabling it logs a warning. noctty asks DWM for no
+/// any Windows build, and enabling it logs a warning. koreterm asks DWM for no
 /// backdrop material such as Mica or Acrylic, so the background
 /// `background-opacity` makes translucent shows what is behind the window
 /// unblurred (and a window with a Direct3D 11 pane fades as a whole), and
@@ -1579,7 +1580,7 @@ link: RepeatableLink = .{},
 @"link-url": bool = true,
 
 /// Enable hyperlinks created with the OSC 8 escape sequence. When disabled,
-/// noctty does not use the target a program puts behind OSC 8 link text:
+/// koreterm does not use the target a program puts behind OSC 8 link text:
 /// Ctrl+hover, Ctrl+click, the context menu's link selection and
 /// `copy_url_to_clipboard` see only what `link` and `link-url` match in the
 /// text itself.
@@ -1635,8 +1636,8 @@ maximize: bool = false,
 ///   * `true` - Start in native fullscreen
 fullscreen: Fullscreen = .false,
 
-/// The title noctty will use for the window. This will force the title of the
-/// window to be this title at all times and noctty will ignore any set title
+/// The title koreterm will use for the window. This will force the title of the
+/// window to be this title at all times and koreterm will ignore any set title
 /// escape sequences programs (such as Neovim) may send.
 ///
 /// If you want a blank title, set this to one or more spaces by quoting
@@ -1651,23 +1652,23 @@ fullscreen: Fullscreen = .false,
 /// to get the new title.
 title: ?[:0]const u8 = null,
 
-/// The setting that controls the noctty instance namespace.
+/// The setting that controls the koreterm instance namespace.
 ///
 /// In this Windows fork, this value is used as the instance identifier for
 /// single-instance behavior and IPC routing. Changing it between invocations
-/// creates a separate noctty instance namespace, so commands such as
-/// `noctty +new-window` will only target processes launched with the same
+/// creates a separate koreterm instance namespace, so commands such as
+/// `koreterm +new-window` will only target processes launched with the same
 /// `class` value.
 ///
-/// The default is `io.github.amanthanvi.noctty`.
+/// The default is `io.github.amanthanvi.koreterm`.
 class: ?[:0]const u8 = null,
 
-/// If `true`, noctty will prefer reusing an existing instance namespace and
+/// If `true`, koreterm will prefer reusing an existing instance namespace and
 /// opening a new window inside it.
 ///
-/// If `false`, each new `noctty.exe` launch will prefer a dedicated process.
+/// If `false`, each new `koreterm.exe` launch will prefer a dedicated process.
 ///
-/// If `detect`, noctty assumes single-instance behavior unless the CLI
+/// If `detect`, koreterm assumes single-instance behavior unless the CLI
 /// invocation clearly carries custom configuration that should not be inherited
 /// by an already-running process.
 ///
@@ -1681,7 +1682,7 @@ class: ?[:0]const u8 = null,
 /// The directory to change to after starting the command.
 ///
 /// This setting is secondary to the `window-inherit-working-directory`
-/// setting. If a previous noctty terminal exists in the same process,
+/// setting. If a previous koreterm terminal exists in the same process,
 /// `window-inherit-working-directory` will take precedence. Otherwise, this
 /// setting will be used. Typically, this setting is used only for the first
 /// window.
@@ -1714,7 +1715,7 @@ class: ?[:0]const u8 = null,
 /// "Developer Command Prompt for VS 18", which runs `VsDevCmd.bat`, and
 /// "Developer PowerShell for VS 18", which runs `Enter-VsDevShell`. They are
 /// listed after your own profiles and before the SSH hosts, start in your
-/// home directory, and set up the tools for the architecture noctty runs on.
+/// home directory, and set up the tools for the architecture koreterm runs on.
 /// Their keys (for `default-profile`, `profile-order` and `profile-hidden`)
 /// are `vs:<instance id>:cmd` and `vs:<instance id>:pwsh`; the instance id
 /// survives Visual Studio updates.
@@ -1732,7 +1733,7 @@ class: ?[:0]const u8 = null,
 @"visual-studio-profiles": VisualStudioProfiles = .newest,
 
 /// Define a profile of your own: a named command the profile picker and the
-/// command palette list next to the shells noctty detects (after the local
+/// command palette list next to the shells koreterm detects (after the local
 /// shells, before the SSH hosts), and that session restore brings back.
 ///
 /// The value is `<id>: <command line>`. The id names the profile: 1 to 64
@@ -1751,8 +1752,8 @@ class: ?[:0]const u8 = null,
 /// unescaped. `%NAME%` is replaced by the value the shell would get without
 /// this profile: Windows' variables with your `env` lines applied (a name
 /// that is not set stays as written), so quote a path that holds a variable
-/// which may expand to spaces. noctty starts the program with that line,
-/// without a `cmd.exe /C` wrapper. When noctty has to change the arguments
+/// which may expand to spaces. koreterm starts the program with that line,
+/// without a `cmd.exe /C` wrapper. When koreterm has to change the arguments
 /// (PowerShell shell integration, the WSL directory option, the UTF-8
 /// preamble of a plain `cmd.exe`, `initial-command`), the changed arguments
 /// are quoted again in the standard way. The `direct:` and `shell:` forms of
@@ -1815,13 +1816,13 @@ class: ?[:0]const u8 = null,
 /// profile, so `profile-env = py: PATH=C:\Python312;%PATH%` puts a directory
 /// in front of the search path, `env` lines included. A profile cannot use a
 /// variable it sets itself. Like an `env` one, a profile `PATH` is the
-/// shell's whole `PATH`: noctty's own folder is no longer put first, and
-/// `%PATH%` holds it only if noctty's own `PATH` does (`GHOSTTY_BIN_DIR`
+/// shell's whole `PATH`: koreterm's own folder is no longer put first, and
+/// `%PATH%` holds it only if koreterm's own `PATH` does (`GHOSTTY_BIN_DIR`
 /// still names it). An elevated window of a profile defined in a config
 /// file (`new_window_elevated:user:<id>`, or New Elevated Window from a
 /// pane that runs it) names the profile and reads the same files, so these
 /// variables are not on its command line. For a profile defined only by a
-/// `--profile-command` option on noctty's command line, or given a variable
+/// `--profile-command` option on koreterm's command line, or given a variable
 /// by a `--profile-env` option there, or when that command line has an
 /// `--env` option, they are, and a command line is not private (process
 /// tools and process-creation auditing can show it).
@@ -1844,9 +1845,9 @@ class: ?[:0]const u8 = null,
 /// `profile-working-directory`. Without a directory of its own it starts
 /// where `working-directory` and the `*-inherit-working-directory` settings
 /// say, as `command` does. A directory the launch asks for with
-/// `--working-directory` (also on a second `noctty` that forwards to a
-/// running one), or the directory `noctty +new-window` runs in, wins over the
-/// profile's, except an SSH profile's; a second `noctty` that names none
+/// `--working-directory` (also on a second `koreterm` that forwards to a
+/// running one), or the directory `koreterm +new-window` runs in, wins over the
+/// profile's, except an SSH profile's; a second `koreterm` that names none
 /// opens in the profile's directory, as the first one did. The terminal
 /// remembers the profile, so its splits and a restored session run it again,
 /// and the profile picker opens on it until another profile is chosen there.
@@ -1870,7 +1871,7 @@ class: ?[:0]const u8 = null,
 /// repeat it to list several, in that order. A value names profiles as
 /// `default-profile` does, and a name such as `wsl` can name several. The
 /// other profiles keep their order after them. When this is set,
-/// `NOCTTY_WIN32_PROFILE_ORDER` is not used. `profile-order =` clears it. A
+/// `KORETERM_WIN32_PROFILE_ORDER` is not used. `profile-order =` clears it. A
 /// value that cannot name a profile (a typo, an id no `profile-command` line
 /// defines, a comment after the value) is reported as a config problem; one
 /// that names a shell this machine does not have (`wsl:docker-desktop`, an
@@ -1890,7 +1891,7 @@ class: ?[:0]const u8 = null,
 
 /// Key bindings. The format is `trigger=action`. Duplicate triggers will
 /// overwrite previously set values. The list of actions is available in
-/// the documentation or using the `noctty +list-actions` command.
+/// the documentation or using the `koreterm +list-actions` command.
 ///
 /// Trigger: `+`-separated list of keys and modifiers. Example: `ctrl+a`,
 /// `ctrl+shift+b`, `up`.
@@ -2021,7 +2022,7 @@ class: ?[:0]const u8 = null,
 ///     e.g. `text:\x15` sends Ctrl-U.
 ///
 ///   * All other actions can be found in the documentation or by using the
-///     `noctty +list-actions` command.
+///     `koreterm +list-actions` command.
 ///
 /// Some notes for the action:
 ///
@@ -2867,7 +2868,7 @@ keybind: Keybinds = .{},
 
 /// When this is true, the default configuration file paths will be loaded.
 /// The default configuration file paths are currently only the XDG
-/// config path ($XDG_CONFIG_HOME/noctty/config.ghostty).
+/// config path ($XDG_CONFIG_HOME/koreterm/config.ghostty).
 ///
 /// If this is false, the default configuration paths will not be loaded.
 /// This is targeted directly at using Ghostty from the CLI in a way
@@ -2949,8 +2950,8 @@ keybind: Keybinds = .{},
 @"initial-window": bool = true,
 
 /// Materialize a saved Windows layout instead of creating the ordinary
-/// initial window, for example `noctty --launch-layout=<name>` or
-/// `noctty +new-window --launch-layout=<name>`.
+/// initial window, for example `koreterm --launch-layout=<name>` or
+/// `koreterm +new-window --launch-layout=<name>`.
 ///
 /// This is a CLI-only configuration and it is one-shot. Setting it in a
 /// configuration file has no effect (it is not an error, but the value is
@@ -3214,7 +3215,7 @@ keybind: Keybinds = .{},
 ///     (Available since: 1.2.0)
 ///
 ///   * `ssh-terminfo` - Enable automatic terminfo installation on remote hosts.
-///     Attempts to install noctty's terminfo entry using `infocmp` and `tic` when
+///     Attempts to install koreterm's terminfo entry using `infocmp` and `tic` when
 ///     connecting to hosts that lack it. Requires `infocmp` to be available locally
 ///     and `tic` to be available on remote hosts. Once terminfo is installed on a
 ///     remote host, it will be automatically "cached" to avoid repeat installations.
@@ -3222,13 +3223,13 @@ keybind: Keybinds = .{},
 ///     cache manually using various arguments.
 ///     (Available since: 1.2.0)
 ///
-///   * `path` - Add noctty's binary directory to PATH. This ensures the `noctty`
+///   * `path` - Add koreterm's binary directory to PATH. This ensures the `koreterm`
 ///     command is available in the shell even if shell init scripts reset PATH.
 ///     This is particularly useful on macOS where PATH is often overridden by
 ///     system scripts. The directory is only added if not already present.
 ///
 /// SSH features work independently and can be combined for optimal experience:
-/// when both `ssh-env` and `ssh-terminfo` are enabled, noctty will install its
+/// when both `ssh-env` and `ssh-terminfo` are enabled, koreterm will install its
 /// terminfo on remote hosts and use `xterm-ghostty` as TERM, falling back to
 /// `xterm-256color` with environment variables if terminfo installation fails.
 @"shell-integration-features": ShellIntegrationFeatures = .{},
@@ -3254,7 +3255,7 @@ keybind: Keybinds = .{},
 /// command-palette-entry = title:Reset Font Style, action:csi:0m
 /// command-palette-entry = title:Crash on Main Thread,description:Causes a crash on the main (UI) thread.,action:crash:main
 /// command-palette-entry = title:Focus Split: Right,description:"Focus the split to the right, if it exists.",action:goto_split:right
-/// command-palette-entry = title:"noctty",description:"Add a little noctty to your terminal.",action:"text:\xf0\x9f\x91\xbb"
+/// command-palette-entry = title:"koreterm",description:"Add a little koreterm to your terminal.",action:"text:\xf0\x9f\x91\xbb"
 /// ```
 ///
 /// There are some additional special values that can be specified for
@@ -3279,7 +3280,7 @@ keybind: Keybinds = .{},
 /// Sets the reporting format for OSC sequences that request color information.
 /// The terminal core supports OSC 10 (foreground), OSC 11 (background), and
 /// OSC 4 (256 color palette) queries. On Windows, ConPTY may intercept OSC 10
-/// and OSC 11 queries before noctty receives them, so applications may receive
+/// and OSC 11 queries before koreterm receives them, so applications may receive
 /// no reply for those queries. By default, reported values are scaled-up RGB
 /// values, where each component is 16 bits. This is how most terminals report
 /// these values. However, some legacy applications may require 8-bit, unscaled,
@@ -3308,7 +3309,7 @@ keybind: Keybinds = .{},
 /// Custom shaders to run after the default shaders. This is a file path
 /// to a GLSL-syntax shader for all platforms.
 ///
-/// Official noctty packages include custom shader support. Source builds
+/// Official koreterm packages include custom shader support. Source builds
 /// disable shader compilation by default to keep ordinary developer builds
 /// lighter; pass `-Dcustom-shaders=true` to enable it.
 ///
@@ -3594,7 +3595,7 @@ keybind: Keybinds = .{},
 /// them; a `/c`, `/r`, or `/k` payload is left byte-for-byte unchanged.
 ///
 /// The PowerShell half is performed by the injected shell-integration script,
-/// not by noctty itself: it sets `[Console]::InputEncoding` and
+/// not by koreterm itself: it sets `[Console]::InputEncoding` and
 /// `[Console]::OutputEncoding` only when their live code pages differ. It
 /// therefore requires automatic shell-integration injection to have happened.
 /// With `shell-integration = none`, or with a PowerShell command line that
@@ -3668,7 +3669,7 @@ keybind: Keybinds = .{},
 /// If `true` (default), applications running in the terminal can show desktop
 /// notifications using certain escape sequences such as OSC 9 or OSC 777.
 ///
-/// This also covers the notification noctty shows when a program in a tab
+/// This also covers the notification koreterm shows when a program in a tab
 /// you are not looking at reports through the program status protocol
 /// (OSC 7501) that it is blocked on you, done, or failed.
 @"desktop-notifications": bool = true,
@@ -3750,7 +3751,7 @@ term: []const u8 = "xterm-ghostty",
 /// Available since: 1.2.0
 @"async-backend": AsyncBackend = .auto,
 
-/// Control the auto-update functionality of noctty.
+/// Control the auto-update functionality of koreterm.
 ///
 /// The Windows runtime supports stable update checks backed by GitHub
 /// Releases. Downloads are staged only after checksum verification and a
@@ -3766,15 +3767,15 @@ term: []const u8 = "xterm-ghostty",
 ///    stages only signed, checksum-matching installer releases and can launch
 ///    the verified staged installer after a user click.
 ///
-/// Unset, noctty checks for nothing on its own (the same as `off`).
+/// Unset, koreterm checks for nothing on its own (the same as `off`).
 @"auto-update": ?AutoUpdate = null,
 
 /// The HTTPS release-feed URL used for stable auto-update checks.
 ///
-/// The default is noctty's latest GitHub Release API endpoint. Changing the
+/// The default is koreterm's latest GitHub Release API endpoint. Changing the
 /// feed does not weaken checksum, Authenticode, or pinned-publisher-key
 /// verification of downloaded installers. For tests and diagnostics,
-/// `NOCTTY_UPDATE_FEED_URL` can override the default when this option is not
+/// `KORETERM_UPDATE_FEED_URL` can override the default when this option is not
 /// set. Precedence is explicit config, then the environment variable, then the
 /// compiled-in default.
 @"auto-update-feed-url": ?[:0]const u8 = null,
@@ -3782,9 +3783,9 @@ term: []const u8 = "xterm-ghostty",
 /// The release channel to use for auto-updates.
 ///
 /// The default value of this matches the release channel of the currently
-/// running noctty version. If you download a pre-release version of noctty
+/// running koreterm version. If you download a pre-release version of koreterm
 /// then this will be set to `tip` and you will receive pre-release updates.
-/// If you download a stable version of noctty then this will be set to
+/// If you download a stable version of koreterm then this will be set to
 /// `stable` and you will receive stable updates.
 ///
 /// Valid values are:
@@ -4017,14 +4018,14 @@ test "a config file whose read fails partway through is a problem, and what was 
     defer cfg.deinit();
     var buf: [16]u8 = undefined;
     var failing = cli.args.TestFailingReader.init("font-size = 13\nprofile-command = py: x\nfont-fam", &buf);
-    try cfg.loadReader(alloc, &failing.interface, "C:\\noctty-test\\more.conf");
+    try cfg.loadReader(alloc, &failing.interface, "C:\\koreterm-test\\more.conf");
     try testing.expect(cfg.@"font-size" == 13);
     try testing.expect(cfg.@"profile-command".get("py") != null);
     var found: usize = 0;
     for (cfg._diagnostics.items()) |diag| {
         if (!std.mem.startsWith(u8, diag.message, "error reading ")) continue;
         // The path and the error; never the file's text.
-        try testing.expectEqualStrings("error reading config-file C:\\noctty-test\\more.conf: error.ReadFailed", diag.message);
+        try testing.expectEqualStrings("error reading config-file C:\\koreterm-test\\more.conf: error.ReadFailed", diag.message);
         found += 1;
     }
     try testing.expectEqual(@as(usize, 1), found);
@@ -4032,7 +4033,7 @@ test "a config file whose read fails partway through is a problem, and what was 
     var whole = try Config.default(alloc);
     defer whole.deinit();
     var reader: std.Io.Reader = .fixed("font-size = 13\nprofile-command = py: x\n");
-    try whole.loadReader(alloc, &reader, "C:\\noctty-test\\more.conf");
+    try whole.loadReader(alloc, &reader, "C:\\koreterm-test\\more.conf");
     try testing.expect(whole._diagnostics.empty());
     try testing.expect(whole.@"font-size" == 13);
 }
@@ -4300,7 +4301,7 @@ test "launch-layout does not survive in the replay log once consumed" {
     defer cfg.deinit();
     const arena_alloc = cfg._arena.?.allocator();
 
-    // What `loadCliArgs` leaves behind for `noctty --launch-layout=<name>`.
+    // What `loadCliArgs` leaves behind for `koreterm --launch-layout=<name>`.
     try cfg._replay_steps.append(arena_alloc, .{
         .arg = .{ .value = try arena_alloc.dupeZ(u8, "--launch-layout=Project Alpha") },
     });
@@ -4946,7 +4947,7 @@ fn defaultConfigIsEmpty(path: []const u8) bool {
 }
 
 /// Load configurations from the default configuration files. The default
-/// configuration file is at `$XDG_CONFIG_HOME/noctty/config.ghostty`.
+/// configuration file is at `$XDG_CONFIG_HOME/koreterm/config.ghostty`.
 ///
 /// The legacy `config` file (without extension) is first loaded,
 /// then `config.ghostty`.
@@ -5046,9 +5047,9 @@ test "default config files: an edit to the edit-target takes effect on reload" {
             .target = "ghostty/config",
         },
         .{
-            .name = "ghostty/config.ghostty alone leaves the loader's new noctty file as the target",
+            .name = "ghostty/config.ghostty alone leaves the loader's new koreterm file as the target",
             .files = &.{.{ .path = "ghostty/config.ghostty", .content = "font-size = 17\n" }},
-            .target = "noctty/config.ghostty",
+            .target = "koreterm/config.ghostty",
         },
         .{
             .name = "winghostty is only a fallback, so ghostty/config wins",
@@ -5072,25 +5073,25 @@ test "default config files: an edit to the edit-target takes effect on reload" {
             .target = "winghostty/config.ghostty",
         },
         .{
-            .name = "noctty overrides ghostty/config",
+            .name = "koreterm overrides ghostty/config",
             .files = &.{
                 .{ .path = "ghostty/config", .content = "font-size = 11\n" },
-                .{ .path = "noctty/config.ghostty", .content = "font-size = 13\n" },
+                .{ .path = "koreterm/config.ghostty", .content = "font-size = 13\n" },
             },
-            .target = "noctty/config.ghostty",
+            .target = "koreterm/config.ghostty",
         },
         .{
-            .name = "noctty beside the unread ghostty/config.ghostty",
+            .name = "koreterm beside the unread ghostty/config.ghostty",
             .files = &.{
-                .{ .path = "noctty/config.ghostty", .content = "font-size = 13\n" },
+                .{ .path = "koreterm/config.ghostty", .content = "font-size = 13\n" },
                 .{ .path = "ghostty/config.ghostty", .content = "font-size = 17\n" },
             },
-            .target = "noctty/config.ghostty",
+            .target = "koreterm/config.ghostty",
         },
         .{
-            .name = "an empty noctty file does not hide a non-empty ghostty/config",
+            .name = "an empty koreterm file does not hide a non-empty ghostty/config",
             .files = &.{
-                .{ .path = "noctty/config.ghostty", .content = "" },
+                .{ .path = "koreterm/config.ghostty", .content = "" },
                 .{ .path = "ghostty/config", .content = "font-size = 11\n" },
             },
             .target = "ghostty/config",
@@ -5098,17 +5099,17 @@ test "default config files: an edit to the edit-target takes effect on reload" {
         .{
             .name = "no config at all",
             .files = &.{},
-            .target = "noctty/config.ghostty",
+            .target = "koreterm/config.ghostty",
         },
         .{
             .name = "a zero-byte default config gets the template",
-            .files = &.{.{ .path = "noctty/config.ghostty", .content = "" }},
-            .target = "noctty/config.ghostty",
+            .files = &.{.{ .path = "koreterm/config.ghostty", .content = "" }},
+            .target = "koreterm/config.ghostty",
         },
         .{
             .name = "a comment-only default config is preserved",
-            .files = &.{.{ .path = "noctty/config.ghostty", .content = "# user's config\n" }},
-            .target = "noctty/config.ghostty",
+            .files = &.{.{ .path = "koreterm/config.ghostty", .content = "# user's config\n" }},
+            .target = "koreterm/config.ghostty",
         },
     };
 
@@ -5146,13 +5147,13 @@ test "default config files: an edit to the edit-target takes effect on reload" {
             defer alloc.free(content);
             if (file.content.len == 0 and std.mem.eql(u8, case.target, file.path)) {
                 try testing.expect(content.len > 0);
-                try testing.expect(std.mem.indexOf(u8, content, "# This is the configuration file for noctty.") != null);
+                try testing.expect(std.mem.indexOf(u8, content, "# This is the configuration file for koreterm.") != null);
             } else {
                 try testing.expectEqualStrings(file.content, content);
             }
         }
 
-        // `xdg.config` joins the `noctty/config.ghostty` subdir verbatim, so
+        // `xdg.config` joins the `koreterm/config.ghostty` subdir verbatim, so
         // compare with one separator.
         const target_raw = try file_load.preferredDefaultFilePath(alloc);
         defer alloc.free(target_raw);
@@ -5872,7 +5873,7 @@ fn testLoadProfileText(alloc: Allocator, text: []const u8) !Config {
     var cfg = try Config.default(alloc);
     errdefer cfg.deinit();
     var reader: std.Io.Reader = .fixed(text);
-    try cfg.loadReader(alloc, &reader, "C:\\noctty-test\\config.ghostty");
+    try cfg.loadReader(alloc, &reader, "C:\\koreterm-test\\config.ghostty");
     try cfg.finalize();
     return cfg;
 }
@@ -6232,7 +6233,7 @@ test "profile keys: a line the loader refuses is reported at its line, without i
                 return err;
             };
             if (case.hidden) |hidden| try testing.expect(std.mem.indexOf(u8, diag.message, hidden) == null);
-            try testing.expectEqualStrings("C:\\noctty-test\\config.ghostty", diag.location.file.path);
+            try testing.expectEqualStrings("C:\\koreterm-test\\config.ghostty", diag.location.file.path);
             try testing.expectEqual(found + 2, diag.location.file.line);
             found += 1;
         }
@@ -6314,7 +6315,7 @@ test "a config line longer than the reader takes is reported once and the next l
     var reader: std.Io.Reader = .fixed(fits ++ "\n");
     var ok = try Config.default(alloc);
     defer ok.deinit();
-    try ok.loadReader(alloc, &reader, "C:\\noctty-test\\config.ghostty");
+    try ok.loadReader(alloc, &reader, "C:\\koreterm-test\\config.ghostty");
     try ok.finalize();
     try testing.expect(ok._diagnostics.empty());
     try testing.expectEqual(max - prefix.len, ok.env.map.get("LONG").?.len);
@@ -13136,7 +13137,7 @@ test "command-palette-entry in a config file: clear empties the palette, an empt
     var clear_reader: std.Io.Reader = .fixed(
         "command-palette-entry = clear\ncommand-palette-entry = title:Custom,action:open_config\n",
     );
-    try cleared.loadReader(alloc, &clear_reader, "C:\\noctty-test\\config.ghostty");
+    try cleared.loadReader(alloc, &clear_reader, "C:\\koreterm-test\\config.ghostty");
     try testing.expect(cleared._diagnostics.empty());
     try testing.expectEqual(@as(usize, 1), cleared.@"command-palette-entry".cval().len);
     try testing.expectEqualStrings("Custom", cleared.@"command-palette-entry".value.items[0].title);
@@ -13146,7 +13147,7 @@ test "command-palette-entry in a config file: clear empties the palette, an empt
     var restore_reader: std.Io.Reader = .fixed(
         "command-palette-entry = clear\ncommand-palette-entry =\n",
     );
-    try restored.loadReader(alloc, &restore_reader, "C:\\noctty-test\\config.ghostty");
+    try restored.loadReader(alloc, &restore_reader, "C:\\koreterm-test\\config.ghostty");
     try testing.expect(restored._diagnostics.empty());
     try testing.expectEqual(inputpkg.command.defaults.len, restored.@"command-palette-entry".cval().len);
 }
@@ -13163,7 +13164,7 @@ test "a config shared with upstream 1.4 on macOS or Linux loads its platform key
             "gtk-tabs-inverted = true\n" ++
             "gtk-horizontal-tab-scroll = false\n",
     );
-    try cfg.loadReader(alloc, &reader, "C:\\noctty-test\\config.ghostty");
+    try cfg.loadReader(alloc, &reader, "C:\\koreterm-test\\config.ghostty");
     try testing.expect(cfg._diagnostics.empty());
     try testing.expectEqual(DragHandle.never, cfg.@"drag-handle");
     try testing.expect(!cfg.@"scrollback-compression");

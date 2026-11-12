@@ -1,6 +1,6 @@
 # Windows
 
-Where noctty differs from upstream Ghostty's macOS and Linux documentation.
+Where koreterm differs from upstream Ghostty's macOS and Linux documentation.
 For a row-by-row mapping against upstream docs, see
 [windows-capability-matrix.md](windows-capability-matrix.md). For VT
 protocol coverage validated on the Win32 runtime, see
@@ -25,7 +25,7 @@ works when that opener shares delete access. A holder without
 `FILE_SHARE_DELETE`, and filesystems that need Zig's legacy rename fallback,
 still reject the replace.
 
-`noctty.exe` carries the build version in its PE version resource. Release
+`koreterm.exe` carries the build version in its PE version resource. Release
 builds use `-Dversion-string=major.minor.patch`; the fixed numeric version is
 `major.minor.patch.0`, matching the portable updater's downgrade guard and
 Inno Setup. Without that option, a development build uses the base version
@@ -35,10 +35,10 @@ the staged executable's version string and numeric fields to match `-Version`.
 
 ## D3D11 renderer beta
 
-OpenGL remains the default, and noctty switches to this renderer on its own
+OpenGL remains the default, and koreterm switches to this renderer on its own
 when OpenGL cannot start or cannot build its renderer (see
 [Starting without OpenGL](#starting-without-opengl)). The x64 and ARM64 release
-builds include both renderers; `noctty +version` prints a `D3D11 beta` line
+builds include both renderers; `koreterm +version` prints a `D3D11 beta` line
 that reads `available` (or `omitted` in a build made with `-Dd3d11=false`). To
 opt in, add this to your config and open a new window, tab, or split:
 
@@ -109,7 +109,7 @@ GPU has not been measured.
 For a visible check on your own desktop, build a normal ReleaseFast binary and run:
 
 ```powershell
-pwsh -NoProfile -File test/windows/renderer/Invoke-VisibleD3D11Check.ps1 -Binary .\zig-out\bin\noctty.exe
+pwsh -NoProfile -File test/windows/renderer/Invoke-VisibleD3D11Check.ps1 -Binary .\zig-out\bin\koreterm.exe
 ```
 
 The script stages a separate portable copy, redirects app data, records pass/fail
@@ -123,12 +123,12 @@ An automated readback alone is not a passing visible-desktop check.
 
 When OpenGL cannot start for a terminal (no OpenGL driver, only the
 `GDI Generic` OpenGL 1.1 that Windows falls back to, a version below 4.3, or a
-pixel format or context that WGL refuses), noctty draws that terminal with the
+pixel format or context that WGL refuses), koreterm draws that terminal with the
 [D3D11 renderer beta](#d3d11-renderer-beta) instead: hardware Direct3D 11
 first, then Microsoft's WARP software renderer. A banner says that OpenGL could
 not start, that custom shaders and images are not available, and that the
 `renderer` setting chooses the renderer. Later windows, tabs and splits in
-that noctty process start on Direct3D 11 without trying OpenGL and without the
+that koreterm process start on Direct3D 11 without trying OpenGL and without the
 banner. The cached decision applies to new terminals. A config reload retries
 OpenGL for configured custom shaders, background images or retained Kitty images;
 device-failure recovery also keeps its throttled OpenGL retries. This happens
@@ -136,18 +136,18 @@ whether `renderer` is unset or set to
 `opengl`, and in safe mode, which uses the built-in defaults and WARP for the
 Direct3D 11 fallback and its device recovery, avoiding a hardware driver that
 may have caused the crash. WARP can use a
-lot of CPU under heavy output. If OpenGL starts but noctty cannot build its
+lot of CPU under heavy output. If OpenGL starts but koreterm cannot build its
 renderer on it (for example, a `background-image` that does not decode), that
 terminal is also drawn by Direct3D 11, with a notice naming the error, and the
 next one tries OpenGL again.
 
 To skip the initial OpenGL attempt on such a machine, set `renderer = d3d11` (or
-`renderer = d3d11-warp` for WARP alone) in `%LOCALAPPDATA%\noctty\config.ghostty`,
-or in the `config.ghostty` beside `noctty.exe` in portable mode. Custom shaders
+`renderer = d3d11-warp` for WARP alone) in `%LOCALAPPDATA%\koreterm\config.ghostty`,
+or in the `config.ghostty` beside `koreterm.exe` in portable mode. Custom shaders
 or a background image still request OpenGL first; remove those settings too
 to skip that attempt. Kitty images received later can still request OpenGL.
 
-Only when Direct3D 11 cannot start either does noctty stop at the startup
+Only when Direct3D 11 cannot start either does koreterm stop at the startup
 dialog, which reports the OpenGL failure and the Direct3D 11 error. A build
 made with `-Dd3d11=false` has no fallback; its dialog says so. Earlier
 releases stopped at the dialog without trying Direct3D 11.
@@ -161,21 +161,21 @@ that switched to Direct3D 11 is a normal launch.
 Releases up to 1.3.132 counted those launches: after three within seven days
 they started in safe mode, which failed the same way and counted again. If
 you are stuck there, set `renderer` as above, then move `startup-attempts.json`
-(and any `startup-attempts.json.pending-*` beside it) out of the noctty data
-folder (`%LOCALAPPDATA%\noctty`, or the folder beside `noctty.exe` in portable
-mode; noctty writes a new one) and start noctty again.
+(and any `startup-attempts.json.pending-*` beside it) out of the koreterm data
+folder (`%LOCALAPPDATA%\koreterm`, or the folder beside `koreterm.exe` in portable
+mode; koreterm writes a new one) and start koreterm again.
 
 ## Install modes
 
 Each release publishes signed Windows artifacts for x64 and ARM64:
 
-- `noctty-<version>-windows-<arch>-setup.exe`: installed app with Start
+- `koreterm-<version>-windows-<arch>-setup.exe`: installed app with Start
   menu shortcuts and app identity metadata.
-- `noctty-<version>-windows-<arch>-portable.zip`: portable use without an
+- `koreterm-<version>-windows-<arch>-portable.zip`: portable use without an
   installer.
-- `noctty-<version>-windows-<arch>-portable.manifest.ps1`: signed hashes
+- `koreterm-<version>-windows-<arch>-portable.manifest.ps1`: signed hashes
   for the exact portable payload.
-- `noctty-<version>-windows-<arch>-symbols.zip` (v1.3.133 and later): the
+- `koreterm-<version>-windows-<arch>-symbols.zip` (v1.3.133 and later): the
   debug symbols (PDBs) for that architecture's binaries, for reading crash
   dumps. They are not in the installer or the portable ZIP.
 - `SHA256SUMS-windows-<arch>.txt`: architecture-specific checksums.
@@ -186,8 +186,8 @@ checksummed and bound to the canonical release workflow by GitHub build
 provenance. The legacy `SHA256SUMS.txt` file remains an x64 auto-update
 compatibility alias.
 
-The Chocolatey package (`noctty`) is approved on chocolatey.org:
-`choco install noctty` installs it (1.3.134 was approved on 2026-10-23). The
+The Chocolatey package (`koreterm`) is approved on chocolatey.org:
+`choco install koreterm` installs it (1.3.134 was approved on 2026-10-23). The
 release workflow builds it and pushes it after WinGet, and Chocolatey reviews
 each version before listing it, so a release can reach Chocolatey after the
 other channels. The package runs the release's setup program for the
@@ -202,45 +202,45 @@ covers checksum, provenance, and signature checks.
 
 ## Paths
 
-Runtime state lives under `%LOCALAPPDATA%\noctty\` by default. The shared
+Runtime state lives under `%LOCALAPPDATA%\koreterm\` by default. The shared
 XDG helpers still honor `XDG_CONFIG_HOME`, `XDG_STATE_HOME`, and
 `XDG_CACHE_HOME` when set on Windows; `%LOCALAPPDATA%` is the fallback in
 the normal packaged app environment.
 
 | Path                                       | Purpose                                                                                                                                                                                                                              |
 | ------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `%LOCALAPPDATA%\noctty\config.ghostty`     | User config, written on first launch.                                                                                                                                                                                                |
-| `%LOCALAPPDATA%\noctty\session-state.json` | Window, tab, split, profile, cwd, and title restore state, saved only by the noctty process that owns it (see Session restore and recovery), and never in safe mode, when elevated through UAC, or with `window-save-state = never`. |
-| `%LOCALAPPDATA%\noctty\layouts\`           | Named layouts, stored as one-window session-state JSON documents.                                                                                                                                                                    |
-| `%LOCALAPPDATA%\noctty\crash\`             | Local crash dumps. Nothing here is uploaded automatically.                                                                                                                                                                           |
-| `%LOCALAPPDATA%\noctty\shell-integration\` | Installed shell-integration payloads and manual fallbacks.                                                                                                                                                                           |
+| `%LOCALAPPDATA%\koreterm\config.ghostty`     | User config, written on first launch.                                                                                                                                                                                                |
+| `%LOCALAPPDATA%\koreterm\session-state.json` | Window, tab, split, profile, cwd, and title restore state, saved only by the koreterm process that owns it (see Session restore and recovery), and never in safe mode, when elevated through UAC, or with `window-save-state = never`. |
+| `%LOCALAPPDATA%\koreterm\layouts\`           | Named layouts, stored as one-window session-state JSON documents.                                                                                                                                                                    |
+| `%LOCALAPPDATA%\koreterm\crash\`             | Local crash dumps. Nothing here is uploaded automatically.                                                                                                                                                                           |
+| `%LOCALAPPDATA%\koreterm\shell-integration\` | Installed shell-integration payloads and manual fallbacks.                                                                                                                                                                           |
 
 [PRIVACY.md](../PRIVACY.md) describes the other files and registry entries
-noctty writes, including the jump list, command palette history, and update
+koreterm writes, including the jump list, command palette history, and update
 and startup records, and how to remove them.
 
 The portable ZIP carries the bundled resources next to the executable. Do
-not move `noctty.exe` alone out of the extracted tree; it needs the packaged
+not move `koreterm.exe` alone out of the extracted tree; it needs the packaged
 `share` resources for themes, terminfo, shell integration, and other data.
 
 ### Portable mode
 
-Place a regular file named `noctty.portable`, `portable.txt`, or
+Place a regular file named `koreterm.portable`, `portable.txt`, or
 `config.ghostty` beside the executable to opt into portable mode; a directory
 with one of those names is not a marker. A freshly extracted ZIP is not
 portable by default, because it ships `config-template.ghostty`, which is not
-a marker. An empty `noctty.portable` is enough.
+a marker. An empty `koreterm.portable` is enough.
 
 A lone `config.ghostty` is ignored when the setup installer's machine-wide
 uninstall entry records the executable's directory as its `InstallLocation`, so a config file dropped
-beside an installed `noctty.exe` does not move its data. `noctty.portable` and
+beside an installed `koreterm.exe` does not move its data. `koreterm.portable` and
 `portable.txt` still count in an installed directory.
 
 In portable mode, config, state, and cache live beside the executable
 (`config.ghostty`, `update-state.json`, session state, crash dumps, caches).
 That location takes precedence over `XDG_CONFIG_HOME`, `XDG_STATE_HOME`,
 `XDG_CACHE_HOME`, and `%LOCALAPPDATA%`, so the folder moves as one unit
-without leaving runtime data on the host. If `%LOCALAPPDATA%\noctty` already
+without leaving runtime data on the host. If `%LOCALAPPDATA%\koreterm` already
 holds data, startup warns that portable mode is using the adjacent data
 instead; nothing is migrated.
 
@@ -265,37 +265,37 @@ above:
   each pane was opened with, not the command running in it (typing `wsl` in a
   PowerShell tab saves PowerShell). Open the tab from the profile (palette `~`
   or the [▾] menu), then `save_layout:<name>` from a window with that one tab;
-  the layout then opens it on one key press, with no UAC prompt, in the noctty
-  that runs the binding (so at that noctty's own level). This works for
+  the layout then opens it on one key press, with no UAC prompt, in the koreterm
+  that runs the binding (so at that koreterm's own level). This works for
   profiles that restore, such as a shell or a WSL distribution. A layout never
   reconnects a detected `ssh:` profile: it is saved without its profile, and
   the pane comes back as whatever a new tab opens (your `command`, else
   `default-profile` unless that is SSH, else the automatic shell). A profile
   you define that runs `ssh.exe` is restored like any other.
-- A profile entry in the taskbar jump list launches noctty with that profile.
+- A profile entry in the taskbar jump list launches koreterm with that profile.
   `new_window_elevated:<profile-key>` bound to a key opens the profile in an
   elevated window, with a UAC prompt; use it only when you want that. See
   [Taskbar jump list](#taskbar-jump-list) and
   [Running elevated](#running-elevated).
-- From a shell, `noctty -e wsl.exe -d Ubuntu` starts a noctty process that runs
-  that command in its first window. Do not use `noctty +new-window -e ...`
-  while noctty is already running: the running instance refuses a forwarded
+- From a shell, `koreterm -e wsl.exe -d Ubuntu` starts a koreterm process that runs
+  that command in its first window. Do not use `koreterm +new-window -e ...`
+  while koreterm is already running: the running instance refuses a forwarded
   command and the call exits with an error (it only works when no instance is
   running, where it starts one). The installer, WinGet and Chocolatey do not put
-  `noctty` on `PATH` (Scoop does): run it from the install folder as
-  `.\noctty.com`, or by its full path.
+  `koreterm` on `PATH` (Scoop does): run it from the install folder as
+  `.\koreterm.com`, or by its full path.
 
 The [▾] menu prints `Ctrl+Shift+1` to `Ctrl+Shift+9` beside the first nine
 profiles. No default keybinding uses those chords, and nothing outside the
 profile picker overlay acts on them. That overlay, with its quick slots
 (`Alt+1` to `Alt+3`), has no keybinding or menu entry: it opens on the first
 window of a launch that restores no session, when the environment variable
-`NOCTTY_WIN32_STARTUP_PROFILE_PICKER` is `1`. Where this page says "profile
+`KORETERM_WIN32_STARTUP_PROFILE_PICKER` is `1`. Where this page says "profile
 picker", it means that overlay; the palette and the [▾] menu list the same
-profiles. The menu lists the profiles noctty has loaded, so its first opening
+profiles. The menu lists the profiles koreterm has loaded, so its first opening
 in a new window may show none.
 
-For commands launched through `cmd.exe /C`, noctty sets
+For commands launched through `cmd.exe /C`, koreterm sets
 `NoDefaultCurrentDirectoryInExePath` in that wrapper's environment when it is
 absent. This disables cmd's implicit executable search in the pane's current
 directory, so a planted `pwsh.cmd` cannot override a `pwsh` on PATH. The guard
@@ -324,7 +324,7 @@ so is a directory or a symlink named `pwsh.exe`. Windows PowerShell and
 `cmd.exe` come from the system directory rather than `PATH`, so an earlier
 `PATH` entry cannot replace them. The profile picker finds `pwsh.exe` with the
 same `PATH` search and takes those two shells from the same directory, so it
-lists the executable a new tab runs. `noctty --safe-mode` always starts
+lists the executable a new tab runs. `koreterm --safe-mode` always starts
 `cmd.exe /D`: recovery must work when the user's PowerShell profile is what
 broke, and Command Prompt loads no profile (`/D` also skips the `AutoRun`
 command that a registry value or Clink can hang there). The profile
@@ -359,7 +359,7 @@ The profile picker detects:
 
 A shell you open from the picker, the command palette or a quick slot starts
 in your home folder (a WSL one in its Linux home, `--cd ~`), whatever
-`working-directory` says and whichever folder noctty itself was started from
+`working-directory` says and whichever folder koreterm itself was started from
 (for the Start menu shortcut, the install folder). To start one somewhere
 else, define it as a [user profile](#user-profiles) with
 `profile-working-directory`. A restored pane goes back to the last folder its
@@ -370,7 +370,7 @@ Unix-like shells such as Git Bash. WSL sessions manage their own
 integration inside the distribution. PowerShell integration emits OSC 7
 working-directory updates and OSC 133 prompt markers.
 
-noctty injects no shell integration into `wsl.exe` profiles, so a WSL shell reports
+koreterm injects no shell integration into `wsl.exe` profiles, so a WSL shell reports
 no working directory until its startup file does, so a new tab or split from
 it starts in the profile's own directory (the home folder for the built-in WSL
 profiles, which launch with `--cd ~`), not where you were. To report the
@@ -386,7 +386,7 @@ keep_current_path() { printf "\e]9;9;%s\e\\" "$(wslpath -w "$PWD")" }
 precmd_functions+=(keep_current_path)
 ```
 
-`wslpath -w` prints `\\wsl.localhost\<distro>\home\me`, which noctty takes as
+`wslpath -w` prints `\\wsl.localhost\<distro>\home\me`, which koreterm takes as
 that distribution's `/home/me` (see the
 [capability matrix](windows-capability-matrix.md#shell-integration)). The
 parser accepts it (it has a unit test for exactly this form), but the snippet
@@ -394,13 +394,13 @@ was not run end to end through `wsl.exe` for this page. It reports the
 directory only; OSC 133 prompt and command marks still need a shell
 integration of their own.
 
-For `cmd.exe`, noctty wraps the inherited `PROMPT` (or cmd's `$P$G` default)
+For `cmd.exe`, koreterm wraps the inherited `PROMPT` (or cmd's `$P$G` default)
 so the shell emits OSC 133 A/B prompt marks and an OSC 9;9 working-directory
 report; a `PROMPT` set through `env = PROMPT=...` is applied afterward and
-replaces the wrapper. When the shipped `noctty-shell-integration.lua` is present,
-noctty prepends its Lua directory to `CLINK_PATH`, preserving existing entries.
+replaces the wrapper. When the shipped `koreterm-shell-integration.lua` is present,
+koreterm prepends its Lua directory to `CLINK_PATH`, preserving existing entries.
 That only makes the script discoverable once Clink is already active through
-autorun, `clink inject`, or an explicit Clink launch; noctty never injects or
+autorun, `clink inject`, or an explicit Clink launch; koreterm never injects or
 launches Clink. When loaded, the script adds OSC 133 C/D command marks and the
 exit code before the next prompt. It also wraps the final normal prompt after
 Clink filters, so themes which replace the prompt and stop the filter chain keep
@@ -417,17 +417,17 @@ to where its prompt starts after every resize, clears below and draws the
 prompt and the line you were typing again, and a theme that calls
 `clink.refilterafterterminalresize()` gets its prompt filters run again, and its
 prompt drawn again, once the size has held for 1.5 seconds. The prompt marks
-keep `redraw=0`, so noctty leaves the old prompt in place for Clink to draw
+keep `redraw=0`, so koreterm leaves the old prompt in place for Clink to draw
 over: measured with Clink 1.9.34, clearing it first (the OSC 133 default) made
 Clink start its redraw one row too high and overwrite the line above the
 prompt. One limit is Clink's own: with a prompt wider than the window and a
 line typed after it, narrowing makes Clink scroll the line sideways, and
 widening again can leave the prompt's first row on screen twice. ConPTY's own
-console buffer holds the same duplicate, so noctty shows what the console
+console buffer holds the same duplicate, so koreterm shows what the console
 holds.
 
 Caveats: on a UNC working directory `$P` yields `\\server\share\dir`, which
-noctty reports unchanged, but cmd.exe itself cannot use a UNC cwd (it warns and
+koreterm reports unchanged, but cmd.exe itself cannot use a UNC cwd (it warns and
 falls back), so a new cmd tab or split will generally not land on the share. A
 `PROMPT` ending in an odd number of `$` gets a `$S` (one space) inserted before
 the closing mark so cmd does not pair the dangling `$` with the mark's `$E`.
@@ -442,7 +442,7 @@ With OSC 133 shell integration active, the command palette also offers:
   command's output. Needs OSC 133;C and OSC 133;D boundaries.
 - `insert_last_command` (no default keybind): put the last recoverable
   single-line command back on the prompt without submitting it. Needs OSC
-  133;B and OSC 133;C boundaries; noctty never reads or modifies the shell's
+  133;B and OSC 133;C boundaries; koreterm never reads or modifies the shell's
   line editor. It refuses on the alternate screen, while a command is running,
   and when no OSC 133;B input mark is outstanding (pressing Enter, or pasting
   a line terminator, consumes the mark until the shell draws the next prompt,
@@ -482,13 +482,13 @@ command = wsl.exe
 
 A session that `wsl.exe` starts sees the same terminal as one that `cmd.exe`
 does. `wsl.exe` passes a Linux process only the Windows variables that
-`WSLENV` lists, so noctty adds `COLORTERM`, `TERM_PROGRAM` and
+`WSLENV` lists, so koreterm adds `COLORTERM`, `TERM_PROGRAM` and
 `TERM_PROGRAM_VERSION` to the `WSLENV` of a WSL launch, each with the `/u`
 flag so that a Windows program started from inside WSL does not get the Linux
 values back. It adds `TERM` too when the distribution has a terminfo entry for
-noctty's `term`, which noctty asks the distribution itself with `infocmp`; the
-answer is remembered until noctty exits, so install the entry first, then
-start noctty again. For an implicit distribution, noctty reads the current
+koreterm's `term`, which koreterm asks the distribution itself with `infocmp`; the
+answer is remembered until koreterm exits, so install the entry first, then
+start koreterm again. For an implicit distribution, koreterm reads the current
 default's ID from `HKCU\Software\Microsoft\Windows\CurrentVersion\Lxss`
 (`DefaultDistribution`) and includes it in the cache key. A different default
 ID uses a separate cache entry. The probe reads that registration's
@@ -502,13 +502,13 @@ characters), the launch uses an unpinned, uncached probe. No registry value is
 changed.
 The long name selector and `--exec` are documented since
 [Windows build 17666](https://learn.microsoft.com/en-us/windows/wsl/release-notes#build-17666),
-before noctty's Windows 10 1809 floor. Noctty does
+before koreterm's Windows 10 1809 floor. Koreterm does
 not inject `--distribution-id`, which was added in
 [WSL 2.4.4 (pre-release)](https://github.com/microsoft/WSL/releases/tag/2.4.4)
 and first shipped in a stable release with
 [WSL 2.4.10](https://github.com/microsoft/WSL/releases/tag/2.4.10).
 To give a distribution the entry, compile
-`share/terminfo/ghostty.terminfo` from the noctty folder with `tic -x` inside
+`share/terminfo/ghostty.terminfo` from the koreterm folder with `tic -x` inside
 it. Without the entry `TERM` stays `xterm-256color`, the value `wsl.exe` sets,
 and the other three are still forwarded. The first WSL tab of a stopped
 distribution waits up to 15 seconds for the probe, plus up to 5 seconds for
@@ -521,15 +521,15 @@ Entries already in `WSLENV`, their flags and their order are kept, and a
 `WSLENV` set with `env` in the configuration is the one extended. A `TERM` set
 with `env` is forwarded as it is. To keep one of these variables out of WSL,
 list it with `/w`, for example `env = WSLENV=TERM_PROGRAM/w`. A pane that
-noctty starts with WSL's older `bash.exe` launcher (the one in the Windows
+koreterm starts with WSL's older `bash.exe` launcher (the one in the Windows
 folder, or the WindowsApps alias; a bare `bash` counts when the first `bash` on
-the pane's `PATH` is that launcher) gets the same three variables, but noctty
+the pane's `PATH` is that launcher) gets the same three variables, but koreterm
 does not ask its distribution for a terminfo entry, so its `TERM` stays
 `xterm-256color` unless `env` sets one. Other ways into WSL are not changed: a
 distribution's own launcher such as `ubuntu.exe`, `cmd /c wsl`, and a WSL
 shell started from inside cmd or PowerShell.
 
-An existing `/w` entry stays Windows-only; noctty does not override that
+An existing `/w` entry stays Windows-only; koreterm does not override that
 choice. Automatic `TERM` probing uses the launch environment and working
 directory, including `--cd`, and caches answers separately for different
 environments or directories, including for implicit distribution selections.
@@ -543,7 +543,7 @@ commands and a bare `wsl` without `.exe`
 still receive the identity variables, but keep WSL's default terminal type.
 Shell-form launches also keep the fallback when a CMD AutoRun hook is present
 or cannot be checked: the hook may change the environment before WSL starts,
-and noctty preserves its normal execution rather than running it twice.
+and koreterm preserves its normal execution rather than running it twice.
 The probe uses the exact executable without `PATHEXT` script fallback and
 honors CMD's `NoDefaultCurrentDirectoryInExePath` choice. Per-tab surface IDs
 do not split the cache unless the user lists them in `WSLENV`.
@@ -558,7 +558,7 @@ variables travel only through the opt-in `ssh-env` shell integration feature
 
 ## SSH hosts
 
-noctty reads `%USERPROFILE%\.ssh\config` read-only whenever Windows
+koreterm reads `%USERPROFILE%\.ssh\config` read-only whenever Windows
 profiles are refreshed. Each concrete alias on a `Host` line appears as
 `SSH: <alias>` in the profile picker and `Connect to <alias>` in the
 universal palette. Opening either runs the system `ssh.exe` with the alias
@@ -588,7 +588,7 @@ as its only argument, in a new tab in your home directory. Set
 
 Activating an entry runs `ssh <alias>`, so whatever the alias resolves to in
 your SSH configuration takes effect, including any `ProxyCommand` or
-`LocalCommand`, which run locally. noctty adds no execution of its own; it
+`LocalCommand`, which run locally. koreterm adds no execution of its own; it
 turns the file into a one-click surface.
 
 SSH entries run without shell integration, which is injected into a local
@@ -601,7 +601,7 @@ your own [user profiles](#user-profiles) and the
 [Visual Studio developer shells](#visual-studio-developer-shells). `profile-order` can move any
 profile, an SSH entry included, and `profile-hidden` can take one out of the
 lists (see [Default profile, order and hidden profiles](#default-profile-order-and-hidden-profiles)).
-The older `NOCTTY_WIN32_PROFILE_ORDER` environment variable is used only when
+The older `KORETERM_WIN32_PROFILE_ORDER` environment variable is used only when
 `profile-order` is unset, and orders the detected shell profiles only. There
 is no bundled SSH client, secrets vault, or fleet/connection management.
 
@@ -624,14 +624,14 @@ The name ends in the product line (`2022`, `18`), then the instance's
 nickname in parentheses when it has one, else a channel other than Release in
 brackets (`[Preview]`). Both shells start in your home directory
 (`-startdir=none` and `-SkipAutomaticLocation` keep the scripts from moving
-it) and set up the tools for the architecture noctty runs on: x64, or on ARM64
+it) and set up the tools for the architecture koreterm runs on: x64, or on ARM64
 `-arch=arm64` with `-host_arch=arm64` from Visual Studio 17.4 (`x64` before,
 when its tools ran only under emulation). A shell is listed only when its
 script is there (`VsDevCmd.bat`; the DevShell module, which Developer
 PowerShell needs and which came with 16.2), and only for an install on a local
 drive, reached without a junction or symbolic link.
 
-noctty asks Visual Studio's Setup Configuration API (the one `vswhere` and
+koreterm asks Visual Studio's Setup Configuration API (the one `vswhere` and
 Windows Terminal use), which reads what the Visual Studio Installer recorded.
 Nothing is started to find the instances: not `vswhere`, `VsDevCmd.bat` or
 `Enter-VsDevShell`. A machine without Visual Studio lists none and reports
@@ -679,7 +679,7 @@ profile-hidden = vs:newest:pwsh
 New Elevated Window for one of these shells names it to the elevated process
 (`--default-profile=vs:<instance id>:cmd`), which finds the instance itself, so
 the `cmd.exe /k` line above reaches it as written. A `--visual-studio-profiles`
-option on noctty's command line is passed on with it. When UAC would run the
+option on koreterm's command line is passed on with it. When UAC would run the
 elevated window as another account (a standard user entering an
 administrator's credentials), that account reads its own config, which may
 say `visual-studio-profiles = none`, so the shell's command is passed instead
@@ -689,7 +689,7 @@ or `=`. That case was not run here (it needs a second account at the UAC
 prompt).
 
 The Developer Command Prompt gets cmd's shell integration. The Developer
-PowerShell gets PowerShell's, which Windows Terminal does not give it: noctty
+PowerShell gets PowerShell's, which Windows Terminal does not give it: koreterm
 runs the `-Command` script above first, exactly as it runs on its own, and
 loads the integration after it. Its prompts then carry OSC 133 marks and
 report the folder with OSC 7, so a split of it runs the same Developer
@@ -700,15 +700,15 @@ PowerShell profile sets `$ErrorActionPreference = 'Stop'` and the script fails
 (the module cannot be loaded, or `Enter-VsDevShell` reports an error), that
 error ends the `-Command` script before the integration loads.
 
-That script is the one `-Command` line noctty adds integration to, because
-noctty wrote it and it changes nothing the integration relies on (the prompt,
-the folder). noctty recognises it by its exact form, wherever the line comes
+That script is the one `-Command` line koreterm adds integration to, because
+koreterm wrote it and it changes nothing the integration relies on (the prompt,
+the folder). koreterm recognises it by its exact form, wherever the line comes
 from, so a user profile, a `command` line or `-e` that uses exactly the
 generated line also gets the integration (`shell-integration = none` turns it
 off). The recognised forms are the generated line for any install path and
-instance id with one of the three architecture pairs noctty generates
+instance id with one of the three architecture pairs koreterm generates
 (`-arch=x64 -host_arch=x64`, `-arch=arm64 -host_arch=arm64` and
-`-arch=arm64 -host_arch=x64`), whichever architecture noctty itself runs on.
+`-arch=arm64 -host_arch=x64`), whichever architecture koreterm itself runs on.
 Any other `-Command` line runs as written without marks, including the line
 Windows Terminal generates (which quotes with `"""`). To change a shell
 (another architecture, another start directory), define a
@@ -737,7 +737,7 @@ profile-working-directory = py312: %USERPROFILE%\src
 profile-env = py312: PATH=C:\Python312;C:\Python312\Scripts;%PATH%
 ```
 
-noctty lists [Visual Studio's developer shells](#visual-studio-developer-shells)
+koreterm lists [Visual Studio's developer shells](#visual-studio-developer-shells)
 by itself. To make one of them what new tabs open, write
 `default-profile = vs:newest:cmd`.
 
@@ -746,9 +746,9 @@ by itself. To make one of them what new tabs open, write
 - `profile-command` defines the profile. Its value is a Windows command line,
   the same text as the Command line of a Windows Terminal profile or a
   shortcut's Target. Everything after the id's colon is used exactly as
-  written: nothing is unquoted or unescaped. noctty starts the program with
+  written: nothing is unquoted or unescaped. koreterm starts the program with
   that line, without a `cmd.exe /C` wrapper, so cmd.exe's own quoting reaches
-  cmd.exe unchanged. When noctty has to change the arguments (PowerShell shell
+  cmd.exe unchanged. When koreterm has to change the arguments (PowerShell shell
   integration, the WSL directory option, the UTF-8 preamble of a plain
   `cmd.exe`), the changed arguments are quoted again in the standard way. The
   `direct:` and `shell:` forms of `command` are not accepted here.
@@ -763,7 +763,7 @@ by itself. To make one of them what new tabs open, write
   profile that runs `wsl.exe`, home is the Linux home folder (`--cd ~`), as
   for a detected WSL profile. `inherit` follows the current tab's folder where
   the `*-inherit-working-directory` settings allow it. With no tab to follow,
-  the `working-directory` setting decides (by default, the folder noctty was
+  the `working-directory` setting decides (by default, the folder koreterm was
   started from).
 - `profile-env` sets one environment variable for this profile,
   `<id>: KEY=VALUE`. Repeat it for more. Names are compared without case, as
@@ -772,9 +772,9 @@ by itself. To make one of them what new tabs open, write
   profile's `KEY`, for example one a shared file set. It does not remove a
   variable that `env` or Windows gives every shell. `<id>:` takes back all of
   the profile's variables. A profile `PATH`, like an `env` one, is the whole
-  `PATH` the shell gets: noctty no longer puts its own folder first, and
+  `PATH` the shell gets: koreterm no longer puts its own folder first, and
   `%PATH%` holds that folder only where your `PATH` already does. If you run
-  `noctty` from such a profile's shell, put the folder in the value yourself;
+  `koreterm` from such a profile's shell, put the folder in the value yourself;
   `GHOSTTY_BIN_DIR` still names it.
 - `%NAME%` in `profile-command`, `profile-working-directory` and `profile-env`
   values is replaced by the value the shell would get without this profile:
@@ -886,13 +886,13 @@ profile-working-directory = buildbox: C:\src
 
 The ids are the words before the colon on the shared file's `profile-command`
 lines. Everything you do not change, and whatever the team adds later, still
-comes from the team's file. On noctty's command line, `--profile-*` options
+comes from the team's file. On koreterm's command line, `--profile-*` options
 also lose to included files, so define profiles in files.
 
 Ghostty on macOS or Linux reports every line it does not know, in any file it
 reads, and `config-file = ?x` only skips a file that does not exist. If you
 share `ghostty\config` with Ghostty on another machine, put profile lines in
-`%LOCALAPPDATA%\noctty\config.ghostty`, which noctty reads after
+`%LOCALAPPDATA%\koreterm\config.ghostty`, which koreterm reads after
 `ghostty\config` and Ghostty never reads.
 
 ### Order, restore and limits
@@ -925,10 +925,10 @@ profile's command, its `profile-env` variables and its
 `profile-working-directory`; a profile without a directory of its own starts
 where `working-directory` and the `*-inherit-working-directory` settings say,
 as `command` does. A directory the launch asks for with `--working-directory`
-(Explorer's "Open noctty here", a jump-list recent folder, or the option on a
-second `noctty` that hands its arguments to a running one), or the directory
-`noctty +new-window` runs in, wins over the profile's
-`profile-working-directory`. A second `noctty` that names no directory (from
+(Explorer's "Open koreterm here", a jump-list recent folder, or the option on a
+second `koreterm` that hands its arguments to a running one), or the directory
+`koreterm +new-window` runs in, wins over the profile's
+`profile-working-directory`. A second `koreterm` that names no directory (from
 the Start menu, say) opens in the profile's directory, as the first one did.
 An SSH profile always starts in your user profile directory. The pane remembers the profile, so its splits
 and a restored session run it again (except a detected `ssh:` profile, which
@@ -973,7 +973,7 @@ or `user:py312`), a detected profile's key (`pwsh.exe`, `powershell.exe`,
 `powershell`, `git`, `cmd`, `wsl`). In `profile-order`
 and `profile-hidden`, `wsl` names every WSL profile. A WSL distribution is
 always written `wsl:<distribution>`. Labels are not references, because they
-can change. `noctty +list-profiles` prints the keys
+can change. `koreterm +list-profiles` prints the keys
 (see [Listing profiles](#listing-profiles)). A value that cannot name a profile (a typo, an id no
 `profile-command` line defines, a comment after the value) is reported as a
 config problem. One that names a shell this machine does not have
@@ -985,8 +985,8 @@ SSH config. A `default-profile` that names no profile that can start here is
 reported as a config problem, and the automatic shell runs. If Visual Studio's
 Setup Configuration fails when a `vs:` key is looked up, that is reported
 instead, and the automatic shell runs until the config is reloaded.
-`NOCTTY_WIN32_DEFAULT_PROFILE` still chooses where the picker starts when
-`default-profile` is unset, and `NOCTTY_WIN32_PROFILE_ORDER` still orders the
+`KORETERM_WIN32_DEFAULT_PROFILE` still chooses where the picker starts when
+`default-profile` is unset, and `KORETERM_WIN32_PROFILE_ORDER` still orders the
 detected shells when `profile-order` is unset.
 
 What a new terminal runs, highest first:
@@ -1002,7 +1002,7 @@ What a new terminal runs, highest first:
 
 Safe mode reads none of your config, so it never runs a default profile.
 `default-profile`, `profile-order` and `profile-hidden` are not accepted from
-a second `noctty` that hands its arguments to a running one (single-instance
+a second `koreterm` that hands its arguments to a running one (single-instance
 forwarding). On the command line, `default-profile`, `command` and
 `initial-command` win over those lines in a file included with
 `config-file`, which is otherwise read after the command line. A command-line
@@ -1030,10 +1030,10 @@ Limits:
   it, and none of them appear on the elevated command line. It applies to the
   whole elevated window, not only its first pane. `%NAME%` in the profile's
   lines then reads the elevated process's own environment, which Windows
-  builds for the elevated token rather than copying noctty's: a variable that
-  only the shell that started noctty set is not there (an `env` line is). A
+  builds for the elevated token rather than copying koreterm's: a variable that
+  only the shell that started koreterm set is not there (an `env` line is). A
   profile defined only by a
-  `--profile-command` option on noctty's command line, or given a variable by
+  `--profile-command` option on koreterm's command line, or given a variable by
   a `--profile-env` option there, or any profile when that command line has
   an `--env` option (which `%NAME%` may read), or any of your profiles when
   UAC would run the elevated window as another account (a standard user entering an
@@ -1053,7 +1053,7 @@ Limits:
 - PowerShell shell integration (OSC 133 and OSC 7 marks) is added only to an
   interactive PowerShell line. A line with `-Command` or `-File` runs as
   written without it, as in Windows Terminal, unless it is exactly the
-  Developer PowerShell line noctty builds (see
+  Developer PowerShell line koreterm builds (see
   [Visual Studio developer shells](#visual-studio-developer-shells)). A
   cmd.exe line gets cmd's integration.
 - A user profile's taskbar jump-list entry names the profile
@@ -1061,7 +1061,7 @@ Limits:
   carrying its command and variables, so the new process reads the profile
   from your config files; the empty values undo a `command` or
   `initial-command` line in any of them. A profile defined only in a file the
-  running noctty was given with `--config-file` is not known to it.
+  running koreterm was given with `--config-file` is not known to it.
 - A profile that runs `ssh.exe` is restored with the session like any other
   profile; a detected `ssh:` profile is not.
 - The Settings window edits the `profile-*` lines on its Profiles page (see
@@ -1089,7 +1089,7 @@ Settings refuses what loading would report (see
 line, a line break, a value too long for one line of the file, and a variable
 without a name or a value. The status line says why, without repeating the
 value. A field Settings refuses stays open with what you typed: switching
-pages stops at it, and closing Settings or quitting noctty asks about it as
+pages stops at it, and closing Settings or quitting koreterm asks about it as
 about any unsaved change. So does a new profile whose id you typed, until you
 type its command line or press Escape to drop it. Like any other setting, these changes are a draft
 until you Save, and Discard changes or closing without saving drops them.
@@ -1098,7 +1098,7 @@ Save writes only what changed, to the file Settings saves to. The line that
 sets a field is changed where it is, a new field goes after its profile's
 lines, and a new profile's lines go at the end of the file. A removed
 profile's lines are deleted. When something else still names its id
-(another file or noctty's command line defines it or sets one of its
+(another file or koreterm's command line defines it or sets one of its
 fields, or `profile-order`, `profile-hidden` or `default-profile` names
 it), its `profile-command` line becomes `profile-command = <id>:` instead,
 which removes the profile whatever the other lines say and keeps those
@@ -1110,7 +1110,7 @@ line wins.
 Removing the profile `default-profile` names leaves `default-profile` as it
 is: new tabs then open the automatic shell, and Shell > Default profile shows
 the value marked "(not found)" until you choose another. A profile defined on
-noctty's command line is shown and not changed. `profile-order` and
+koreterm's command line is shown and not changed. `profile-order` and
 `profile-hidden` are not edited there: a hidden profile is marked, and both
 are changed in the config file.
 
@@ -1119,19 +1119,19 @@ are changed in the config file.
 The Profiles page lists one row a profile. Enter (or a double click) on a
 profile of yours opens its window: name, command line, starting folder, font
 size (its zoom), **Open as administrator** and its variables, one
-`NAME=VALUE` a line. On a profile noctty finds (a shell, a WSL distribution,
+`NAME=VALUE` a line. On a profile koreterm finds (a shell, a WSL distribution,
 an SSH host), Enter opens a new profile's window based on it: its command
 line, to keep or change. The list's menu also has **New profile based on
 this one** and **Delete profile**: a profile of yours is deleted after a
-Windows dialog asks; one noctty finds cannot be, so Delete hides it from the
+Windows dialog asks; one koreterm finds cannot be, so Delete hides it from the
 picker (Show in the picker brings it back). Insert or Ctrl+N opens a blank
 new profile. Everything is a draft until you Save.
 
 The window keeps the font size and the administrator choice as the
-profile's own variables, `NOCTTY_FONT_SIZE` (points) and `NOCTTY_ELEVATED`
+profile's own variables, `KORETERM_FONT_SIZE` (points) and `KORETERM_ELEVATED`
 (`1`), so they save, export and back up with it. A profile set to open as
 administrator opens from the picker in an elevated window, after Windows' UAC
-prompt, unless noctty already runs elevated.
+prompt, unless koreterm already runs elevated.
 
 A tab's menu (right click on the tab) has **Create Profile from This Tab**:
 Settings opens a new profile's window filled in from the tab: its title as
@@ -1142,8 +1142,8 @@ page.
 ### Backing up all settings
 
 **Back up all settings (.zip)**, on the window menu (▾) and on the Profiles
-list's menu, writes one ZIP where you pick: noctty's config and state folders
-(in portable mode, the data files beside `noctty.exe`, the logins under
+list's menu, writes one ZIP where you pick: koreterm's config and state folders
+(in portable mode, the data files beside `koreterm.exe`, the logins under
 `credentials\` included; executables, libraries, bundled resources and the
 cache are left out) and `profiles-terminals.xml`, the Terminals export of the
 SSH and RDP profiles with their passwords in plain text. Keep it somewhere
@@ -1164,13 +1164,13 @@ three more items:
   unchecked. The profile's id comes from the connection's name (`Coletor NF`
   is `coletor-nf`, with `-2`, `-3` and so on when taken), and its label is
   the name. A connection's password never goes into the config file: it is
-  kept in the Windows Credential Manager as `noctty:profile:<id>`. Notes are
+  kept in the Windows Credential Manager as `koreterm:profile:<id>`. Notes are
   not read. The new profiles are a draft until you Save.
 - **Export to Terminals file (with passwords)...** writes every profile that
   runs `ssh` or `mstsc.exe` to a Terminals favorites XML you pick, with the
   password the Credential Manager keeps for it **in plain text**, as
   Terminals writes it. Keep that file somewhere safe.
-- **Back up config file...** copies noctty's config file where you pick.
+- **Back up config file...** copies koreterm's config file where you pick.
 
 In portable mode the logins are not in the Credential Manager: each is a file
 in the portable folder, `credentials\<id>.cred`, encrypted with DPAPI for the
@@ -1190,23 +1190,28 @@ splits, undo, close confirmation and session restore.
   credential prompt asks first; check **Remember** to keep that login.
 - Clipboard text goes both ways between this computer and the remote one.
 - Click inside the remote desktop and the mouse and keys work there.
-  **Ctrl+Alt+Home** gives the keyboard back to noctty, so its keybindings
+  **Ctrl+Alt+Home** gives the keyboard back to koreterm, so its keybindings
   (Ctrl+Tab, Ctrl+Shift+W, ...) work again; click inside to go back.
 - `rdp-scaling = proportional` (the default) scales the remote desktop to the
   tab keeping its proportions; `rdp-scaling = fill` stretches it over the
   whole tab, which may distort it. Its resolution is the tab's size when it
   connects.
-- `rdp-trust-certificates = true` connects to a server whose identity cannot
-  be checked (a self-signed certificate) without asking. With the default,
-  `false`, Windows asks as `mstsc.exe` does.
+- `rdp-trust-certificates = true` (the default; Settings > Shell, "Remote
+  Desktop unverified server") connects to a server whose identity cannot be
+  checked (a self-signed certificate) without asking. With `false`, Windows
+  asks as `mstsc.exe` does. A connection can set its own in its editor
+  (`/certificates:trust|ask` on its command line).
+- **Create Desktop and Start Menu Shortcuts** in the window menu (▾) puts a
+  `koreterm.lnk` pointing at this `koreterm.exe` on the Desktop and in the Start
+  menu.
 - When the session ends, the tab says so; close it, or open the profile again.
 - The tab is named after the connection (its profile's name).
 - Quality: Settings > Shell sets the defaults, `rdp-color-depth` (15, 16, 24
   or 32 bits), `rdp-compression` and `rdp-experience` (`fast`, `balanced`,
   `rich`: wallpaper, themes, animations and font smoothing). A connection can
   set its own on its command line, after `/v:`, as `/colors:16`,
-  `/compression:off` and `/experience:fast`; noctty never starts that
-  `mstsc.exe`, so the options are noctty's own.
+  `/compression:off` and `/experience:fast`; koreterm never starts that
+  `mstsc.exe`, so the options are koreterm's own.
 - Edit a connection on Settings > Profiles: Enter (or a double click) on its
   row opens a window with its name, server, port, user name, password and
   quality settings, each "Default" to follow Settings. The list's menu (and
@@ -1216,7 +1221,7 @@ splits, undo, close confirmation and session restore.
 
 ### Listing profiles
 
-`noctty +list-profiles` prints the profiles the picker and the palette offer,
+`koreterm +list-profiles` prints the profiles the picker and the palette offer,
 with the key each one has for `default-profile`, `profile-order` and
 `profile-hidden`:
 
@@ -1239,17 +1244,17 @@ command never prints a command line, an environment variable or a working
 directory.
 
 It reads your configuration files and searches for shells the way a new
-noctty does when it starts, with its own environment and for the light or dark
+koreterm does when it starts, with its own environment and for the light or dark
 scheme Windows reports for apps (a `theme = light:A,dark:B` can set profile
 keys, so a dark desktop can list other profiles than a light one), so it lists
 what a new window started from the same shell would: it asks `wsl.exe` for its
 distributions when `wsl.exe` is on `PATH`, reads your SSH config, and asks
 Visual Studio's Setup Configuration, which takes a fraction of a second. A
-running noctty may list differently: it keeps the environment and options it
+running koreterm may list differently: it keeps the environment and options it
 started with, and a quick slot you pin in it moves a profile to the front of
 its pickers until it exits, which the command, a separate process, does not
 see. A `profile-command` line the config reader rejects leaves its profile
-out; `noctty +validate-config` reports it.
+out; `koreterm +validate-config` reports it.
 
 On a terminal the output is the table above. When it is piped or redirected,
 or with `--plain`, each profile is one line of tab-separated fields (key,
@@ -1259,11 +1264,11 @@ text forms are UTF-8, and a control character in a label prints as `?`.
 `hidden` as true or false in place of the state:
 
 ```json
-{"schema":"noctty.profiles.v1","complete":true,"profiles":[{"key":"pwsh.exe","label":"PowerShell","source":"detected","hidden":false}]}
+{"schema":"koreterm.profiles.v1","complete":true,"profiles":[{"key":"pwsh.exe","label":"PowerShell","source":"detected","hidden":false}]}
 ```
 
 ```powershell
-noctty +list-profiles --format=json | ConvertFrom-Json | ForEach-Object profiles | Where-Object hidden
+koreterm +list-profiles --format=json | ConvertFrom-Json | ForEach-Object profiles | Where-Object hidden
 ```
 
 The JSON is ASCII (any other character is a `\u` escape), so a console code
@@ -1271,13 +1276,13 @@ page cannot garble it on its way through a pipeline.
 
 `complete` is `false`, and a note on stderr says so, when a search did not
 finish in time (WSL, the SSH config or Visual Studio) and profiles may be
-missing. A repeat usually settles it. Actions switch noctty's log off;
+missing. A repeat usually settles it. Actions switch koreterm's log off;
 `GHOSTTY_LOG=stderr` switches it on, and a log line says how big a command or
 a directory is (`<2 args, 32 bytes>`), never what it is.
 
 ## App identity
 
-Installed builds create Start menu shortcuts with noctty's AppUserModelID,
+Installed builds create Start menu shortcuts with koreterm's AppUserModelID,
 which Windows uses for taskbar grouping, and with its toast activator, which
 Action Center uses for a click on a toast (see
 [notifications and progress](#notifications-and-progress)).
@@ -1287,52 +1292,52 @@ after upgrading or switching between installed and portable builds, restart
 Explorer or clear the icon cache before assuming the build is broken.
 
 A portable copy uses the same AppUserModelID, so its taskbar button groups
-with an installed noctty. From 1.3.133 it leaves the installed copy's
+with an installed koreterm. From 1.3.133 it leaves the installed copy's
 per-user state alone. It builds no taskbar jump list, so the list Windows
 keeps for the AppUserModelID stays the installed app's (whose entries start
-the installed `noctty.exe`; inferred from the design, not observed). It
+the installed `koreterm.exe`; inferred from the design, not observed). It
 writes the
-`HKCU\Software\Classes\AppUserModelId\io.github.amanthanvi.noctty`
+`HKCU\Software\Classes\AppUserModelId\io.github.amanthanvi.koreterm`
 registration only when that key does not exist, with the same values an
-installed copy writes (its own `noctty.ico` as the icon). Microsoft documents
+installed copy writes (its own `koreterm.ico` as the icon). Microsoft documents
 that registration as required for toasts from an unpackaged app without a
 Start menu shortcut; whether a portable copy's toasts then show was not
 confirmed, since `ToastNotifier.Setting` and `Show()` report success with no
 registration at all. It changes an existing key in no way, even a broken
 one; an installed copy rewrites it at every start. A portable copy with no
-`noctty.ico` beside it creates nothing. If the folder that registration
+`koreterm.ico` beside it creates nothing. If the folder that registration
 points at is moved or deleted, toasts lose their icon until an installed copy
 runs. Releases up to 1.3.132 behave like an installed copy here: a portable
 copy replaces the installed app's jump list at every start and repairs a
 missing or broken registration.
 
-The icon in a toast's header comes from the `noctty.ico` next to
-`noctty.exe`; the installer, the portable ZIP, and `zig build` all stage it
+The icon in a toast's header comes from the `koreterm.ico` next to
+`koreterm.exe`; the installer, the portable ZIP, and `zig build` all stage it
 there. Windows does not read the icon out of the executable for toasts, and
 it caches the first icon it resolves per AppUserModelID, so a fix to the
 registered icon is not picked up by the running session. A reboot clears
 that cache; whether signing out alone does has not been measured. A copy of
-`noctty.exe` without its sibling `noctty.ico` leaves the registered icon
+`koreterm.exe` without its sibling `koreterm.ico` leaves the registered icon
 untouched rather than replacing it with one Windows cannot show.
 
 ## Default terminal
 
 > [!WARNING]
 > Default-terminal registration is experimental. A delegated console
-> application is now adopted into a visible noctty window, but noctty cannot
+> application is now adopted into a visible koreterm window, but koreterm cannot
 > appear in the Windows Settings picker and ships no console half of its own.
 > Register only on a machine you can restore, and unregister after testing.
 
 ```powershell
-noctty +register-default-terminal
-noctty +unregister-default-terminal
+koreterm +register-default-terminal
+koreterm +unregister-default-terminal
 ```
 
 Both commands are idempotent. Registration writes only per-user (`HKCU`)
-selection and COM proxy state; the installer registers noctty's owned COM
+selection and COM proxy state; the installer registers koreterm's owned COM
 local-server and proxy classes machine-wide but does not change any user's
 default terminal. Portable builds can register the absolute paths of the
-current `noctty.exe` and its sibling `noctty-terminal-handoff-proxy.dll`;
+current `koreterm.exe` and its sibling `koreterm-terminal-handoff-proxy.dll`;
 moving either file afterward requires registering again. Registration
 refuses to proceed when the proxy DLL is missing, or when
 `DelegationConsole` is missing, empty, or set to the inbox console host.
@@ -1345,28 +1350,28 @@ only (never `scoop update`), and only when the registration points into
 that app's Scoop folder and no process is running from it. Otherwise it
 skips and leaves the registration in place, as it does when the command
 fails to start or exits nonzero, which it reports without failing the
-uninstall. To be sure with Scoop, close noctty and run
-`noctty +unregister-default-terminal` before `scoop uninstall`. For a
+uninstall. To be sure with Scoop, close koreterm and run
+`koreterm +unregister-default-terminal` before `scoop uninstall`. For a
 portable ZIP, run it yourself before deleting the folder.
 
 The three shared Microsoft `ITerminalHandoff` Interface mappings are
-snapshotted before noctty changes them. Unregistration restores each prior
-raw value only while that mapping still points to noctty's proxy, so a newer
+snapshotted before koreterm changes them. Unregistration restores each prior
+raw value only while that mapping still points to koreterm's proxy, so a newer
 terminal's registration is preserved. A mapping that did not exist before
 registration is removed again, together with the `Interface\{IID}` key
 registration created for it, but only when nothing else has been added to
 those keys. It restores the `DelegationTerminal`
-value saved at registration only when noctty is still selected, then removes
-noctty's per-user COM registration. It never overwrites a default-terminal
-choice made after noctty was registered. Registration state written by an
+value saved at registration only when koreterm is still selected, then removes
+koreterm's per-user COM registration. It never overwrites a default-terminal
+choice made after koreterm was registered. Registration state written by an
 earlier build did not record which keys it created, so unregistering it
 leaves those keys in place, as before; registering again does not add the
-record while noctty's mapping is still in place.
+record while koreterm's mapping is still in place.
 
-A handoff never reaches the noctty you already have open. Windows activates
-noctty through COM by starting `noctty.exe -Embedding`, and only that process
-registers the handoff class object; a normally started noctty does not. Each
-handoff is therefore served by a separate noctty process (a later handoff
+A handoff never reaches the koreterm you already have open. Windows activates
+koreterm through COM by starting `koreterm.exe -Embedding`, and only that process
+registers the handoff class object; a normally started koreterm does not. Each
+handoff is therefore served by a separate koreterm process (a later handoff
 reuses it while it is running, and it exits once it has no windows and no
 pending handoff), and it opens its own top-level window for the adopted
 console, not a tab in your existing one. That process neither forwards to
@@ -1383,7 +1388,7 @@ Minimized` open the window minimized without taking focus, `SW_SHOWNOACTIVATE`
 opens it without taking focus, and a maximized start opens it maximized. The
 `maximize` and `fullscreen` settings do not apply to an adopted console.
 `powershell.exe -WindowStyle Hidden` hides its own console window after it
-starts. For an adopted console, noctty follows OpenConsole's show/hide
+starts. For an adopted console, koreterm follows OpenConsole's show/hide
 notifications as Windows Terminal does: hide minimizes the window, and show
 restores a minimized window. A title set in the configuration stays in force.
 A client that asked
@@ -1391,7 +1396,7 @@ for a hidden console gets a minimized window that takes no focus: Windows
 hands every such console to the terminal, and a window nobody can bring back
 would be worse. Only `CREATE_NO_WINDOW` keeps a console from being delegated.
 
-noctty implements the terminal half of Windows console delegation and needs
+koreterm implements the terminal half of Windows console delegation and needs
 a Windows Terminal OpenConsole installation to remain selected as the console
 half. It does not verify that the selected console CLSID still resolves to
 an installed application, so a value left behind by an uninstalled Windows
@@ -1401,16 +1406,16 @@ used by Windows Terminal 1.24 or newer. Older OpenConsole versions that
 request v1 or v2 are not supported; Windows falls back to a normal console
 window.
 
-noctty is an unpackaged application, so it does not appear in the Windows
+koreterm is an unpackaged application, so it does not appear in the Windows
 Settings default-terminal picker; the registration command writes the
 per-user registry values directly. Candidate enumeration accepts a console
 and terminal pair only when both come from the same package, and selecting
-anything in the picker overwrites noctty's pair. Package identity would be
+anything in the picker overwrites koreterm's pair. Package identity would be
 required to fix this.
 
-For a handoff trace, set `NOCTTY_HANDOFF_TRACE=1` before launching the
-delegated console application. noctty appends `event=` milestone lines and
-`reason=`/HRESULT rejection lines to `%LOCALAPPDATA%\noctty\handoff.log`,
+For a handoff trace, set `KORETERM_HANDOFF_TRACE=1` before launching the
+delegated console application. koreterm appends `event=` milestone lines and
+`reason=`/HRESULT rejection lines to `%LOCALAPPDATA%\koreterm\handoff.log`,
 which distinguishes "never activated" from "adopted, then lost on the way to
 a window". The opt-in file is truncated before an append would exceed 1 MiB.
 
@@ -1418,15 +1423,15 @@ a window". The opt-in file is truncated before an append would exceed 1 MiB.
 
 Registration creates a same-user activation surface, which is inherent to
 Windows console delegation. Once registered, any local process running as
-the same user at the same integrity level can activate noctty's handoff
+the same user at the same integrity level can activate koreterm's handoff
 class directly and call `EstablishPtyHandoff` with pipes and a window title
-it controls. The result is a real noctty window rendering that process's
+it controls. The result is a real koreterm window rendering that process's
 content, with the user's keystrokes flowing back to it: a phishing shape,
 for example a window titled `Administrator: Windows PowerShell`. No
 privilege boundary is crossed; such a process already runs as the user and
 could impersonate a terminal in other ways.
 
-The handoff rejects callers whose integrity level does not match noctty's
+The handoff rejects callers whose integrity level does not match koreterm's
 own. That rejection must stay: it stops an elevated console session from
 being rendered inside a medium-integrity terminal that the user's other
 processes can drive.
@@ -1440,7 +1445,7 @@ the handoff class directly, even before the registration command has run.
 `EstablishPtyHandoff` returns the two OpenConsole-side pipe ends as
 `[out] system_handle(sh_pipe)` parameters, and that marshaling transfers
 ownership: once the method returns `S_OK` the RPC stub duplicates each handle
-into the client and closes noctty's original. noctty therefore drops those
+into the client and closes koreterm's original. koreterm therefore drops those
 two handles at the point of return and never closes them again. Closing them
 afterwards is a double close, and `std.os.windows.CloseHandle` asserts that
 `NtClose` succeeded, so it aborts the process before the adopted session can
@@ -1449,13 +1454,13 @@ become a window.
 ## Taskbar jump list
 
 - Recent: up to 10 absolute local working directories reported by shell
-  pwd/OSC integration, newest first. Selecting one launches noctty in that
+  pwd/OSC integration, newest first. Selecting one launches koreterm in that
   directory. Entries persist in
-  `%LOCALAPPDATA%\noctty\jump-list-recents.json`. To clear them, close
-  noctty, delete that file, and start noctty once so Windows receives the
+  `%LOCALAPPDATA%\koreterm\jump-list-recents.json`. To clear them, close
+  koreterm, delete that file, and start koreterm once so Windows receives the
   empty list.
 - Profiles: the profiles the picker shows (`profile-hidden` ones are left
-  out). Selecting a detected one launches noctty with that profile's command.
+  out). Selecting a detected one launches koreterm with that profile's command.
   A [user profile](#user-profiles)'s entry names the profile instead
   (`--default-profile=user:<id>`): a jump-list entry is stored on disk and can
   roam with your Windows profile, so it never holds the profile's environment
@@ -1463,7 +1468,7 @@ become a window.
   [Visual Studio shell](#visual-studio-developer-shells)'s entry names it the
   same way (`--default-profile=vs:<instance id>:cmd`), and the new process asks
   Visual Studio for it again. That entry also passes on a
-  `--visual-studio-profiles` option noctty was started with, so a shell listed
+  `--visual-studio-profiles` option koreterm was started with, so a shell listed
   because of `--visual-studio-profiles=all` still starts from the jump list. A
   value from your config files is not copied into the entry, so a later edit
   of that line still applies to the windows it starts.
@@ -1477,11 +1482,11 @@ right-clicking its entries. See [App identity](#app-identity).
 
 | Explorer target   | Classic verb key                    |
 | ----------------- | ----------------------------------- |
-| Selected folder   | `Directory\shell\noctty`            |
-| Folder background | `Directory\Background\shell\noctty` |
-| Drive             | `Drive\shell\noctty`                |
+| Selected folder   | `Directory\shell\koreterm`            |
+| Folder background | `Directory\Background\shell\koreterm` |
+| Drive             | `Drive\shell\koreterm`                |
 
-Each verb is named `Open noctty here` and launches `noctty.exe` with
+Each verb is named `Open koreterm here` and launches `koreterm.exe` with
 `--single-instance=false --working-directory="%V\."`. The explicit new
 instance keeps the selected path in the launched process, so UNC folders do
 not cross the single-instance IPC boundary, which rejects UNC working
@@ -1495,19 +1500,19 @@ common Program Files directory; in non-administrative mode Inno Setup maps
 `HKA` to `HKCU` and `{autopf}` to the user Program Files directory.
 
 Portable users opt in per-user under `HKCU\Software\Classes` with
-`noctty +register-shell-menu` and remove the same six owned keys with
-`noctty +unregister-shell-menu`. The running app never registers these verbs
+`koreterm +register-shell-menu` and remove the same six owned keys with
+`koreterm +unregister-shell-menu`. The running app never registers these verbs
 itself and never writes them to `HKLM`. A per-user verb wins over a
 per-machine one, because `HKCU\Software\Classes` overrides `HKLM` in the
 merged `HKCR` view. So if you registered the verbs from a portable build and
-later install noctty per-machine, the per-user copy keeps pointing at the
+later install koreterm per-machine, the per-user copy keeps pointing at the
 portable executable until you remove it: before deleting a portable copy,
-run `.\noctty.com +unregister-shell-menu` as the user that registered the
+run `.\koreterm.com +unregister-shell-menu` as the user that registered the
 verbs. The installer's uninstaller removes only its own registration, and
 `+unregister-shell-menu` cannot remove the installer's all-users one (it never
 writes or deletes `HKLM`): on an installed copy it reports the current user's
 keys as already absent and then says the all-users entries remain, which only
-uninstalling noctty removes.
+uninstalling koreterm removes.
 
 On Windows 11 these classic verbs appear under **Show more options**;
 `Shift+F10` opens the classic menu directly. There is no top-level modern
@@ -1523,47 +1528,47 @@ package.
 
 Desktop notifications use WinRT toasts when available and fall back to
 in-app banners when Windows refuses a toast: when notifications are turned
-off for noctty or for the user, or when app identity or runtime availability
+off for koreterm or for the user, or when app identity or runtime availability
 prevents one. Under Focus Assist (Do not disturb) Windows may refuse the toast,
 which brings the banner, or file it in Action Center without a popup, which
-does not; which one happens has not been measured for noctty.
+does not; which one happens has not been measured for koreterm.
 `desktop-notifications` gates every
 toast, including command-finish toasts, which additionally need
 `notify-on-command-finish` and a `notify-on-command-finish-action` that
 includes `notify`, and [program status](#program-status-osc-7501) toasts.
 
 Every toast from a terminal pane (OSC 9, OSC 777, command finished, program
-status, and noctty's own "Copied ... to clipboard" notices) ends with a line
+status, and koreterm's own "Copied ... to clipboard" notices) ends with a line
 that names its tab: `Tab 2: <tab title>`, `Tab 2 of window 1: <tab title>`
 while more than one window is open, or `Tab 1 of the quick terminal: <tab
 title>`. The quick terminal is not counted as a window. A window's number
-appears nowhere else in noctty and can change when another window closes. The
+appears nowhere else in koreterm and can change when another window closes. The
 tab title is that of the tab's focused pane, without bidirectional overrides,
 invisible characters or control characters, and cut to 64 bytes. An OSC 9
 notification, which has no title, is titled by its tab. When the toast falls
 back to a banner, the banner ends with the same tab line. Clicking the toast's
-popup focuses the pane that sent it: noctty restores its window if it is
+popup focuses the pane that sent it: koreterm restores its window if it is
 minimized, switches to its tab and pane, and asks Windows to bring the window
 forward, which Windows may refuse.
 
 A click on a toast's entry in Action Center (or on a toast Focus Assist sent
-there without a popup) reaches noctty through a COM activator that only a
+there without a popup) reaches koreterm through a COM activator that only a
 copy installed with the installer has: the installer registers it and sets it
 on the Start menu and desktop shortcuts, and the installed copy names it in
 its AppUserModelID registration (`CustomActivator`) and listens for it while
 it runs, unless it runs as administrator, in safe mode, or as the process
-Windows starts to host a console while noctty is the default terminal. Such a click focuses the pane the
-same way, and a running noctty with no window open opens one for it. When the toast came from another noctty process (the toast's
-process has ended, or a second instance showed it), noctty brings its own
+Windows starts to host a console while koreterm is the default terminal. Such a click focuses the pane the
+same way, and a running koreterm with no window open opens one for it. When the toast came from another koreterm process (the toast's
+process has ended, or a second instance showed it), koreterm brings its own
 window forward instead of guessing at that process's tabs. When no installed
-noctty is running, Windows starts one, which hands the click to a running
-single-instance noctty together with its right to come to the foreground,
+koreterm is running, Windows starts one, which hands the click to a running
+single-instance koreterm together with its right to come to the foreground,
 or else opens as an ordinary launch would and brings
 its window forward. A portable copy registers nothing, so without an
 installed copy only its popup clicks focus a pane. Where one is installed, a
 click on a portable copy's entry in Action Center goes to the installed
 copy's activator, which hands it to the portable copy when that is the
-running single-instance noctty. Uninstalling removes the activator and its
+running single-instance koreterm. Uninstalling removes the activator and its
 `CustomActivator` value. None of this has been exercised against Windows'
 notification platform yet. Row W10-23 of the
 [Windows 10 manual checklist](windows10-release-checklist.md) checks most of
@@ -1573,19 +1578,19 @@ host.
 
 A pane keeps at most one toast in Action Center: a newer toast from the same
 pane that Windows takes replaces its older one (one Windows refuses, or one
-whose tag and group noctty cannot set, becomes a banner and leaves the older
-toast where it is). noctty takes a pane's toast
+whose tag and group koreterm cannot set, becomes a banner and leaves the older
+toast where it is). koreterm takes a pane's toast
 out of Action Center when you look at its tab (its window comes forward with
 that tab active, or a pane in the tab gets focus), when the pane closes, and
 when its tab is closed, also while that close can still be undone; an undo
 does not bring the toast back. A toast from a pane whose tab is in undo
-history is taken out right after Windows shows it. When noctty exits it removes
+history is taken out right after Windows shows it. When koreterm exits it removes
 every toast it showed for a pane. Toasts are grouped by process id, so a
-noctty never removes those of another noctty that is running. A noctty that
+koreterm never removes those of another koreterm that is running. A koreterm that
 ends without exiting (a crash, or Windows ending it at sign-out) leaves its
-toasts until you dismiss them, or until a later noctty that Windows happens to
+toasts until you dismiss them, or until a later koreterm that Windows happens to
 give the same process id shows a pane toast and then exits.
-noctty's own notices that come from no pane (configuration reloaded, Settings
+koreterm's own notices that come from no pane (configuration reloaded, Settings
 saved) are not removed.
 
 Terminal progress reports map to Windows taskbar progress for the active
@@ -1598,9 +1603,9 @@ support.
 
 Programs that speak the
 [program status protocol](https://www.superlogical.com/rex/docs/build/program-status),
-such as coding agents, build tools and deploy scripts, tell noctty whether
+such as coding agents, build tools and deploy scripts, tell koreterm whether
 they are idle, working (with optional progress), done, blocked on you (for a
-permission, an answer, or a sign-in), or failed. noctty answers the
+permission, an answer, or a sign-in), or failed. koreterm answers the
 protocol's support query (`OSC 7501 ; ?`) and advertises it with the `Pst`
 terminfo capability, so a program can check before it reports.
 
@@ -1614,7 +1619,7 @@ terminfo capability, so a program can check before it reports.
   reports when it ends.
 - **When it clears.** Working and blocked last until the program reports
   something else, or until it ends: a new shell prompt (OSC 133 A, which
-  noctty's shell integration emits) or the shell exiting. Done and failed
+  koreterm's shell integration emits) or the shell exiting. Done and failed
   stay until you look at the tab, meaning the tab is active and its window is
   in the foreground. A full reset (`ESC c`) clears everything.
 - **Taskbar.** The active pane's root status drives the taskbar button like
@@ -1624,10 +1629,10 @@ terminfo capability, so a program can check before it reports.
   taskbar until a full reset, as the protocol asks. `progress-style = false`
   turns this off too.
 - **Notifications.** When a tab you are not looking at becomes blocked,
-  done or failed, noctty shows a toast that names the program, the tab and,
+  done or failed, koreterm shows a toast that names the program, the tab and,
   with more than one window open, the window; clicking it focuses that pane.
   It follows `desktop-notifications`, and it is rate-limited: at most one
-  per pane every 5 seconds and three across noctty every 10 seconds. One the
+  per pane every 5 seconds and three across koreterm every 10 seconds. One the
   limit holds back arrives as soon as the limit allows, with what the pane
   shows then, if it still needs you and you haven't looked.
 - **Go to the tab that needs you.** The `goto_attention` action, also in the
@@ -1636,7 +1641,7 @@ terminfo capability, so a program can check before it reports.
   after the current tab, across windows. Done and failed clear once you
   look, so repeating it works through them. It has no default key binding;
   bind it with, for example,
-  `keybind = ctrl+shift+g=goto_attention`. `noctty +perform-action
+  `keybind = ctrl+shift+g=goto_attention`. `koreterm +perform-action
 goto_attention` runs it from scripts.
 - **Screen readers.** Each tab's UI Automation `ItemStatus` reads the status,
   such as "claude needs permission: Allow edit to main.rs?". A new state,
@@ -1645,16 +1650,16 @@ goto_attention` runs it from scripts.
 
 Program status text shown outside the terminal (in toasts and UI
 Automation) has bidirectional overrides and invisible formatting characters
-removed and is cut to 240 bytes. noctty never sends anything a program reported back to a
+removed and is cut to 240 bytes. koreterm never sends anything a program reported back to a
 program.
 
 With Windows' built-in console host, replies to OSC queries, including this
-one, don't reach Windows console programs; the ConPTY that noctty ships
+one, don't reach Windows console programs; the ConPTY that koreterm ships
 delivers them. Programs may also report without asking first.
 
 ## Power and battery
 
-noctty reads AC/battery and saver state from `GetSystemPowerStatus` and
+koreterm reads AC/battery and saver state from `GetSystemPowerStatus` and
 subscribes to Windows power-setting notifications for the power source
 (`GUID_ACDC_POWER_SOURCE`) and Battery Saver (`GUID_POWER_SAVING_STATUS`).
 It also registers for Windows 11 Energy Saver (`GUID_ENERGY_SAVER_STATUS`),
@@ -1695,7 +1700,7 @@ even though you can see them, so a split tailing fast output next to your
 active pane is capped at `unfocused-render-fps` (30 by default). Raise that
 value if you watch live output in a background split.
 
-Cloak and uncloak have no window message, so noctty hooks the documented
+Cloak and uncloak have no window message, so koreterm hooks the documented
 `EVENT_OBJECT_CLOAKED` / `EVENT_OBJECT_UNCLOAKED` WinEvents with a single
 `SetWinEventHook` scoped to this process and the UI thread. Without it, a
 virtual-desktop switch that uncloaks a background window need not send
@@ -1712,7 +1717,7 @@ Win32 contract and covered by unit tests over the pure event filter and the
 pure cloak-resolution policy. It has not been observed on hardware; see the
 [status caveats](status.md#known-caveats).
 
-Set `NOCTTY_RENDER_TRACE_FILE` to an absolute output path to write a JSON
+Set `KORETERM_RENDER_TRACE_FILE` to an absolute output path to write a JSON
 render trace when the first traced surface is destroyed. Presented fps is
 `(swap_buffers_count - 1) * 1000 / (last_swap_at_ms - first_swap_at_ms)`
 when at least two swaps are present and the time difference is positive.
@@ -1736,7 +1741,7 @@ variations were explicitly requested. A variable font's Regular name does
 not outrank the same family's static Bold. Regular and fallback queries
 retain their existing ordering.
 
-`noctty +list-fonts --family="Cascadia Code" --bold` lists matching installed
+`koreterm +list-fonts --family="Cascadia Code" --bold` lists matching installed
 faces. Discovery does not enumerate variable fonts' named instances or add
 localized family-name aliases. Scan cancellation is checked between files;
 one blocked font-file open, including an unreachable network path in an
@@ -1749,7 +1754,7 @@ cell fitting. `font-thicken-strength` ranges from `0` (the lightest positive
 stroke) to `255` (the default strength, approximately 1/32 em). The stroke
 scales with font size and DPI; the terminal's cell grid stays the same.
 Bitmap fonts and color emoji keep their original pixels. When a font needs
-synthetic bold, noctty uses the stronger stroke instead of stacking both.
+synthetic bold, koreterm uses the stronger stroke instead of stacking both.
 Thickening is off by default.
 
 ## Keyboard
@@ -1767,13 +1772,13 @@ apart. In ConPTY's Win32 input mode the keys travel as console key records
 instead; see [windows-vt-conformance.md](windows-vt-conformance.md#measured-win32-input-mode-records).
 
 AltGr is a layout shift, not a Ctrl+Alt chord. Windows synthesizes left Ctrl
-plus right Alt whenever AltGr is pressed, and noctty drops that synthetic
+plus right Alt whenever AltGr is pressed, and koreterm drops that synthetic
 pair so `AltGr+<key>` produces the layout character (or nothing) instead of
 a Ctrl+Alt terminal sequence. The collapse applies only on layouts that
 define AltGr mappings, the only layouts where Windows injects the synthetic
 Ctrl. On a layout without AltGr, such as plain US, left Ctrl plus right Alt
 can only be a chord you pressed and passes through as one. On a layout with
-AltGr, the modifier state noctty reads cannot tell the two apart, so left
+AltGr, the modifier state koreterm reads cannot tell the two apart, so left
 Ctrl plus right Alt is always read as AltGr there; use left Alt or right
 Ctrl for a deliberate Ctrl+Alt chord.
 
@@ -1806,7 +1811,7 @@ console key record. `[Console]::ReadKey()` therefore reports less than the
 terminal sent; applications that read the byte stream directly see
 everything. Measured on the in-box conhost of Windows `10.0.26200.0` and on
 the bundled OpenConsole `1.24.260710001`, an unrecognised CSI-u key encoding
-is not dropped: ConPTY hands the child the same bytes noctty wrote. Older
+is not dropped: ConPTY hands the child the same bytes koreterm wrote. Older
 in-box conhosts, including Windows 10 build 19045, were not measured. See the
 [key encoding differential](windows-vt-conformance.md#measured-master-to-child-key-encoding-differential).
 
@@ -1882,7 +1887,7 @@ The quick terminal is frameless on both, so it sits flush with its screen edge.
 
 `maximize = true` and `fullscreen = true` apply to every new window: the
 first one, `new_window`, a profile opened in a new window, a window forwarded
-from another launch (`noctty --maximize`, `noctty +new-window
+from another launch (`koreterm --maximize`, `koreterm +new-window
 --fullscreen=true`), a launched layout, and a window restored from the saved
 session (see [Session restore and recovery](#session-restore-and-recovery)).
 They do not apply to new tabs or splits, to the quick terminal, or to a
@@ -1939,7 +1944,7 @@ keeps it unsaved and still shown, and Discard changes or closing without
 saving takes it back. The one exception is a reload whose file now has the
 same value: Settings takes that as saved, and the preview ends with it in
 effect. The window's "Open in default editor" button, and
-`noctty +edit-config` when neither `VISUAL` nor `EDITOR`
+`koreterm +edit-config` when neither `VISUAL` nor `EDITOR`
 is set, open the config through the `.txt` association rather than the
 file's own; they refuse a network or mapped-drive path and a link (symlink
 or junction) whose target is not a local file, but follow a checked local
@@ -1949,7 +1954,7 @@ the CLI).
 Details for both
 are in the [capability matrix notes](windows-capability-matrix.md#notes).
 
-A Settings field whose value differs from noctty's built-in default has a bar
+A Settings field whose value differs from koreterm's built-in default has a bar
 in front of it (the accent color, or the text color in High Contrast) and a
 **Reset** button after it, and UI Automation reports its `ItemStatus` (MSAA
 its description) as "Changed from the default". The button, the field's context menu (right-click
@@ -1968,11 +1973,11 @@ previews, which Windows does not support, keep whatever the file says and
 offer no reset.
 
 A field's label also says, at its right end, where the saved value comes from
-when a line sets it: "Set in noctty.conf, line 4" for a line of a config file
+when a line sets it: "Set in koreterm.conf, line 4" for a line of a config file
 (the one Settings saves to, or a file `config-file` names, by its file name),
 "Set by the theme Nord, line 7" for a line of the theme's file, and "Set on
-the command line" for an argument noctty was started with. A field that no
-line sets says nothing there: its value is the default, or one noctty worked
+the command line" for an argument koreterm was started with. A field that no
+line sets says nothing there: its value is the default, or one koreterm worked
 out when it read the config. MSAA reads the same in the field's description,
 after "Changed from the default" when that applies. The label describes the
 saved value in effect, not an edit waiting for Save, so a field whose value
@@ -1982,7 +1987,7 @@ file. When a file read after it (one that `config-file` names) or the command
 line sets the same key, that value still wins, and Settings says so, naming
 each such setting with the line that wins: "overrides font-size (line 2 of
 included.conf)". The theme is read before the config file, so a value the
-config file sets wins over the theme's. When noctty's command line names a
+config file sets wins over the theme's. When koreterm's command line names a
 Default profile (a jump-list entry does), that choice is for that process
 only: Settings shows and saves the config files' value, and its label names
 the file and line that set that value, if any.
@@ -2016,7 +2021,7 @@ elsewhere names the file and line that set it (a file `config-file` names,
 the theme's file) or the command line, and says when a line of the config
 file sets the key too and does not take effect (for a key whose lines can add
 up, such as `font-family` or `keybind`, only that the file has a line for it
-too, since a later line can clear or replace it). Only a line noctty took when
+too, since a later line can clear or replace it). Only a line koreterm took when
 it read the file is said to set a key: a line whose value it refused, or one
 written since it last read the file, is said to mention the key and not to
 take effect. A command
@@ -2024,7 +2029,7 @@ line's `command` or `initial-command` wins over a file read after it, and is
 named as the command line's. A command line's `default-profile` is for that
 process only: the page shows the config files' value, as the Shell page does,
 and names the file and line that set it. A value no line sets but
-noctty worked out when it read the config (`click-repeat-interval`, from
+koreterm worked out when it read the config (`click-repeat-interval`, from
 Windows' double-click time) says that. The file is read
 for this only from a local drive, as UTF-8 or as UTF-16 with a byte order
 mark. It is never read through a symlink or junction, on the file or a folder
@@ -2056,7 +2061,7 @@ config file's `keybind` lines applied, key tables and sequences included. Each
 row shows the keys (with a key table's name and `/` first, and flags such as
 `global:`), the action, and the first sentence of what the action does; Up and
 Down select a binding, which opens to the action's whole description and says
-whether it is one of noctty's defaults or the config file's own. The list is
+whether it is one of koreterm's defaults or the config file's own. The list is
 read-only: Enter opens the config file, where bindings are changed, and Ctrl+C
 copies the binding as `keybind = ...` lines to paste there. The search covers
 the bindings too, by keys, action and description, and counts each as one
@@ -2082,15 +2087,15 @@ is a [Visual Studio shell](#visual-studio-developer-shells)
 (`new_window_elevated:vs:<instance id>:cmd`), unless UAC would run the window
 as another account (see [User profiles](#user-profiles), Limits).
 
-An elevated noctty is a separate process and a separate window. Its title is
+An elevated koreterm is a separate process and a separate window. Its title is
 prefixed with `Administrator: `. Elevated and non-elevated tabs cannot be
 mixed in one window: Windows isolates the processes with UIPI, and injecting a
 shell across that boundary is not a supported design.
 
 Single-instance IPC is scoped by integrity level. A normal launch and
-`+new-window` forward only to an existing noctty at the caller's integrity
+`+new-window` forward only to an existing koreterm at the caller's integrity
 level. From an elevated shell, `+new-window` therefore opens in the elevated
-group (and starts an elevated noctty when that group is absent). A
+group (and starts an elevated koreterm when that group is absent). A
 default-terminal handoff does not use this forwarding at all (see
 [Default terminal](#default-terminal)), so it never joins an integrity group.
 It has not been run from an elevated console, and whether COM would serve
@@ -2106,7 +2111,7 @@ process. They cannot activate into an existing elevated window and instead use
 or start the `.medium` group.
 
 A split-token elevated process (`TokenElevationTypeFull`) does not read or
-write `%LOCALAPPDATA%\noctty\session-state.json`. It never restores an earlier
+write `%LOCALAPPDATA%\koreterm\session-state.json`. It never restores an earlier
 workspace, overwrites the non-elevated saved workspace, or gets resurrected by
 session restore. With UAC disabled, or under the built-in Administrator
 account, Windows reports the process as elevated but uses the default token
@@ -2114,10 +2119,10 @@ elevation type. In that case the `Administrator: ` title prefix and
 `.elevated` pipe grouping still apply, while session restore remains enabled
 because there is no non-elevated split-token counterpart to protect.
 Configuration and other per-user state still resolve from the same
-`%LOCALAPPDATA%\noctty\` profile as the non-elevated process.
+`%LOCALAPPDATA%\koreterm\` profile as the non-elevated process.
 
-An elevated noctty loads the same config files as the non-elevated process:
-`%LOCALAPPDATA%\noctty\config.ghostty` (unless that process was started with
+An elevated koreterm loads the same config files as the non-elevated process:
+`%LOCALAPPDATA%\koreterm\config.ghostty` (unless that process was started with
 `--config-default-files=false`) and the same explicit `--config-file`
 overrides. Those files remain writable by the ordinary user account, so
 anything that can modify the configuration, including `command`,
@@ -2127,10 +2132,10 @@ credentials instead, the elevated process runs as that administrator and reads
 that account's `%LOCALAPPDATA%` config; a forwarded `--config-file` still names
 the same file.
 
-An elevated window started by noctty is given only a short command line: the
+An elevated window started by koreterm is given only a short command line: the
 config files above (`--config-file` and `--config-default-files`),
 `--visual-studio-profiles`, the working directory of the pane it was opened
-from (noctty's own when there is none), the `class` setting when one is set,
+from (koreterm's own when there is none), the `class` setting when one is set,
 and the profile it should run. Other command-line
 overrides are not forwarded, so `--env=NAME=value`, `--font-size` and the rest
 do not reach it. That is deliberate for `--env=`: a forwarded value would
@@ -2143,17 +2148,17 @@ command line, except in the cases listed under Limits in
 [User profiles](#user-profiles) and when Windows cannot say what kind of token
 the process has.
 
-At process startup, noctty restricts bare-name DLL resolution to the
+At process startup, koreterm restricts bare-name DLL resolution to the
 application directory, System32, and explicitly added DLL directories. The
 current directory and inherited `PATH` are excluded from that search order.
 
 UIPI also prevents files from being dragged from non-elevated Explorer into
-an elevated noctty window. No message-filter exception is installed; use a
+an elevated koreterm window. No message-filter exception is installed; use a
 shell command or an elevated file manager when the elevated terminal needs a
 path.
 
 Global bindings remain desktop-wide Win32 `RegisterHotKey` registrations.
-Whichever noctty process registers a chord first owns it, regardless of the
+Whichever koreterm process registers a chord first owns it, regardless of the
 process integrity level; a later process logs a registration conflict. The
 losing process retries on configuration synchronization or restart, not
 automatically when the winner exits.
@@ -2181,7 +2186,7 @@ shell's startup repaint cannot destroy it. Engaging `toggle_secure_input`
 once excludes that pane from snapshots for the rest of the session, even if
 the indicator is later turned off.
 
-One noctty process owns the saved session: the first one started normally,
+One koreterm process owns the saved session: the first one started normally,
 which restores it (or opens its first window when there is nothing to
 restore). Only that process saves it: as the session's last window goes, at
 sign-out, shutdown or reboot, when the display configuration changes, and one
@@ -2199,7 +2204,7 @@ shell exiting. A `quit`, `close_all_windows` or an update install saves every
 window it closes. The quick terminal is never a session window, and neither is
 a window left empty after its last tab closed, which stays only for undo. Undo
 history is never saved: a tab or pane closed while other tabs or windows stayed
-open does not come back on the next launch, even if noctty quits before its
+open does not come back on the next launch, even if koreterm quits before its
 undo time runs out. Undoing the close of the last tab, or opening a new tab or
 window, continues the session. No save deletes the file: with no window to
 record, a save writes nothing.
@@ -2213,7 +2218,7 @@ mouse wheel, a paste or drop, a command run from the command palette, or text
 sent by automation (`+send-text`). Opening a tab, pane, window or the quick
 terminal counts too. An action sent with `+perform-action` counts only when
 it opens one of those: it cannot send input to a program. A key pressed in a pane whose program has already ended only closes it,
-and does not count. When the session ends that way, noctty renames the saved
+and does not count. When the session ends that way, koreterm renames the saved
 session to `session-state.json.restore-ended` (or `.1` up to `.4`) instead of
 saving it, writes no checkpoint for it meanwhile, and the next launch opens a
 fresh window. Rename the file back to try that session again. Nothing is
@@ -2224,19 +2229,19 @@ ending the process from being moved aside.
 
 The save at sign-out, shutdown or reboot is the last one: the sign-out also
 ends the shells, and the panes they leave are not saved over it. A launch that forwards
-to a running noctty, a window opened with `--working-directory` (Explorer's
-"Open noctty here" and the jump list's recent folders), with
+to a running koreterm, a window opened with `--working-directory` (Explorer's
+"Open koreterm here" and the jump list's recent folders), with
 `--default-profile` (the jump list's user profiles and Visual Studio shells)
 or with `-e` or `initial-command`, the startup profile picker, a `--launch-layout` or
 `initial-window = false` run, a default terminal handoff and a second
 instance under `single-instance = false` start without the saved session and
-leave it untouched when they exit. When one of these is the first noctty
+leave it untouched when they exit. When one of these is the first koreterm
 running, windows later forwarded into it are not saved either, and the saved
-session stays as it was until a normally started noctty owns it again. The
+session stays as it was until a normally started koreterm owns it again. The
 owner holds `session-state.json.lock` while it runs, so a second instance
 does not restore the same windows again.
 
-If the session-state file is unreadable, noctty moves it aside to a sibling
+If the session-state file is unreadable, koreterm moves it aside to a sibling
 with a `.corrupt` suffix, logs the failure, and starts with a fresh window.
 When an earlier quarantine file already exists, a numeric suffix is added
 (`.corrupt.1` up to `.corrupt.4`). Once all five exist, the one written
@@ -2248,11 +2253,11 @@ one within the same schema version still restores, whether it sits on a window,
 a tab, a pane or beside a node's `pane` or `split`; a window `state` name it
 does not know restores as a normal window. A new kind of node or a new `axis`
 name is not additive and needs a new `schema_version`. A file with a newer
-`schema_version` is not unreadable, only not understood: noctty leaves it
+`schema_version` is not unreadable, only not understood: koreterm leaves it
 exactly as it is, starts with a fresh window, and does not save a session over
 it for the rest of that run. The startup history (`startup-attempts.json`) is
 read the same way, and `integration.ps1` is not replaced by a build whose copy
-declares an older `noctty-integration-revision`. Builds that predate this
+declares an older `koreterm-integration-revision`. Builds that predate this
 still parse strictly, so downgrading to one while a saved state contains
 `scrollback` can quarantine that file as `.corrupt`. For a saved fullscreen
 window, v1.3.132 and later restore it as normal at its saved rectangle if they
@@ -2296,7 +2301,7 @@ quarantine path instead, so that window's layout is not restored. Nothing is
 deleted either way.
 
 Three consecutive pre-ready startup failures select an ephemeral safe mode:
-built-in config, no session restore. `noctty --safe-mode` picks it for one
+built-in config, no session restore. `koreterm --safe-mode` picks it for one
 launch. Safe mode never overwrites your config or quarantined state. A launch
 that ends at the OpenGL startup dialog is recorded but not counted, and does
 not end a run of other failures either: safe mode still needs working OpenGL
@@ -2304,14 +2309,14 @@ or WARP, so it cannot help when both failed (see
 [Starting without OpenGL](#starting-without-opengl)). A crash, in OpenGL,
 Direct3D 11 or anywhere else, still counts.
 
-Each launch records in `startup-attempts.json` the noctty version that started
+Each launch records in `startup-attempts.json` the koreterm version that started
 it, when it began restoring the saved session and whether that restore
 finished. When all three failures ended during a restore, safe mode alone would
 only postpone the next three, so the safe-mode launch also renames
 `session-state.json` to `session-state.json.restore-failed` (or `.1` up to
 `.4` if earlier ones exist) and its notice says so; the next normal launch
 starts with a fresh window. Nothing is deleted or replaced: rename the file
-back to try that session again. A session another running noctty owns, or one
+back to try that session again. A session another running koreterm owns, or one
 with all five `.restore-failed` names already taken, is left where it is, and
 that safe-mode launch says only that the session was not loaded.
 
@@ -2321,7 +2326,7 @@ A named layout captures the focused window's tabs, split trees, selected
 profiles, working directories, and explicit pane and tab titles. It omits
 window position, size, and state. Each layout is the session-state JSON
 schema with exactly one window, stored as
-`%LOCALAPPDATA%\noctty\layouts\<name>.json`. Per-pane commands come from the
+`%LOCALAPPDATA%\koreterm\layouts\<name>.json`. Per-pane commands come from the
 saved profiles; layout files have no separate command field.
 
 - Names accept ASCII letters, digits, spaces, dots, underscores, and
@@ -2346,14 +2351,14 @@ next layout launch runs, exactly as they could by editing your config.
 Bind `save_layout:<name>` to save or atomically replace a layout, and
 `launch_layout:<name>` to open it in a new window. Saved layouts also appear
 in the command palette as `Launch layout: <name>`. From the command line,
-`noctty +new-window --launch-layout=<name>` forwards the request to a
+`koreterm +new-window --launch-layout=<name>` forwards the request to a
 running instance or launches cold when none is running.
 
 The warm (running-instance) half of that command is not a forwarded
 configuration argument. It is a dedicated IPC request whose whole payload
 is the layout name, revalidated on the receiving side against the same
 character, length, traversal, and reserved-device rules the CLI applies, and
-resolved server-side against `%LOCALAPPDATA%\noctty\layouts\`. So
+resolved server-side against `%LOCALAPPDATA%\koreterm\layouts\`. So
 `--launch-layout` cannot be combined with other `+new-window` arguments;
 mixing them is refused. `launch-layout` is not on the forwarded-argv
 allowlist and will not be added: a layout names a file that selects
@@ -2366,7 +2371,7 @@ all.
 configuration file is read on every start and the layout would replay on
 each launch. The layout module also exposes name enumeration and the
 `+new-window --launch-layout=<name>` argv builder for future jump-list
-integration; noctty does not currently add jump-list layout entries.
+integration; koreterm does not currently add jump-list layout entries.
 
 ## Updates
 
@@ -2378,10 +2383,10 @@ The updater checks the configured release feed when the app starts, unless a
 check succeeded in the last 24 hours, and never replaces binaries silently. A
 copy that stays open re-runs the same check every six hours while a window is
 open and no staged update is waiting; the 24 hour limit and a dismissed version
-still apply, so most of those ticks make no request. The feed defaults to noctty's GitHub
+still apply, so most of those ticks make no request. The feed defaults to koreterm's GitHub
 Releases API and can be changed with `auto-update-feed-url`; checksum,
 Authenticode, and pinned-publisher-key verification stay mandatory whatever
-the feed host. For tests and diagnostics, `NOCTTY_UPDATE_FEED_URL` overrides
+the feed host. For tests and diagnostics, `KORETERM_UPDATE_FEED_URL` overrides
 the compiled-in default when no explicit `auto-update-feed-url` is set. The
 precedence is explicit config, then the environment variable, then the
 compiled-in default; a blank or whitespace-only value at either level falls
@@ -2409,7 +2414,7 @@ re-points them if either moves.
 `auto-update = download` downloads only stable Windows releases that ship
 architecture-specific SHA256 metadata, verifies the selected installer or
 portable ZIP against that manifest, and requires a valid Windows Authenticode
-signature before staging it under the local noctty state directory. Portable
+signature before staging it under the local koreterm state directory. Portable
 updates additionally require a signed payload-manifest asset whose SHA-256
 entries cover every extracted file, and every extracted `.exe`, `.com`, and
 `.dll` must pass its own Authenticode check. The signature check is not
@@ -2417,7 +2422,7 @@ generic: the signer's public key must match a SHA-256 SPKI pin compiled into
 the app, so a binary signed by any other key is rejected even when its
 signature is otherwise valid. Unsigned binaries fail that verification too.
 The bundled Microsoft `conpty.dll` and `OpenConsole.exe` are the two
-exceptions, because noctty never re-signs them: each must match the SHA-256
+exceptions, because koreterm never re-signs them: each must match the SHA-256
 pinned in `dist/windows/conpty-redist.json` and carry a signature that chains
 to a trusted root, which is stricter about the chain than the pinned-publisher
 path. Every other PE keeps the publisher pin.
@@ -2425,7 +2430,7 @@ See
 [ADR 0005](adr/0005-pin-updater-publisher-public-keys.md) for the pinning
 and key-rotation rules.
 
-Only a setup-managed copy or one with the `noctty.portable` marker stages
+Only a setup-managed copy or one with the `koreterm.portable` marker stages
 anything. A copy installed another way (Scoop, a ZIP extracted without the
 marker) cannot apply a staged update, so `download` mode downloads nothing for
 it and its notice opens the release page. A version that is already staged and
@@ -2439,32 +2444,32 @@ that installing closes all windows and running sessions, and **Install**
 asks first, like quitting, when a terminal still has a running process. It
 then re-verifies the staged installer, records apply intent, launches the
 installer elevated (UAC may prompt), and exits the app. The silent setup
-starts noctty again when it finishes, through Explorer so that it is meant to
+starts koreterm again when it finishes, through Explorer so that it is meant to
 run as the logged-on user and not elevated, so an update that works ends with
-a new window. (The wizard's "Launch noctty" box starts it the same way.) That
+a new window. (The wizard's "Launch koreterm" box starts it the same way.) That
 de-elevation is the intended result and has not been measured on a real
 install. If a later
 start finds that the build is still the old one after an Install, and that
 Setup is no longer running, a banner says the update did not finish and names
-the setup log (`updates\<version>\logs\apply.log` under the noctty state
+the setup log (`updates\<version>\logs\apply.log` under the koreterm state
 directory); the staged installer is kept, so **Install** is offered again. A
 banner that says Setup left no log means it started but could not write one,
 or was stopped first. Only a setup-managed copy reports this, because the
 update state is shared by every copy of the user's. Declining the elevation
-prompt does not quit noctty or record anything: the banner just says the
+prompt does not quit koreterm or record anything: the banner just says the
 installer could not be launched.
 
 For portable installs, **Apply** re-verifies the staged ZIP payload, records the
-pending update, and exits noctty. On the next launch, noctty backs up the files
+pending update, and exits koreterm. On the next launch, koreterm backs up the files
 being replaced, swaps in the staged payload, and starts the new build. The new
 build confirms the update only when its version matches the staged target;
-otherwise noctty restores the backup. A new build that exits with an error
+otherwise koreterm restores the backup. A new build that exits with an error
 during the bounded startup check, or a swap that remains unconfirmed on a later
 launch, also rolls back and relaunches the previous build.
 
-If recovery files are lost after a swap, noctty abandons the unrecoverable
+If recovery files are lost after a swap, koreterm abandons the unrecoverable
 transaction, launches the installed build, and shows a warning with manual
-recovery guidance. `NOCTTY_PORTABLE_UPDATE_BYPASS=1` is the manual escape hatch
+recovery guidance. `KORETERM_PORTABLE_UPDATE_BYPASS=1` is the manual escape hatch
 for portable-update startup recovery: set it only for the process being
 launched to skip that recovery attempt. This bypass does not verify, complete,
 or roll back the update, so reinstall or update manually afterward if the
@@ -2474,51 +2479,51 @@ Portable apply fails closed until a release publishes that signed complete-file
 manifest. Releases without it are not downloaded or staged for portable apply;
 the update notice opens the normal GitHub release page for manual updating.
 
-### Installing and upgrading while noctty runs
+### Installing and upgrading while koreterm runs
 
-Setup (run by hand, by WinGet or by Chocolatey) asks a running noctty to close
-through Windows Restart Manager before it replaces the files. noctty agrees
+Setup (run by hand, by WinGet or by Chocolatey) asks a running koreterm to close
+through Windows Restart Manager before it replaces the files. koreterm agrees
 when quitting would ask nothing, and closes. The process that owns the saved
-session, the first noctty started normally, first saves its windows, tabs and
+session, the first koreterm started normally, first saves its windows, tabs and
 splits, as `quit` does; the quick terminal is not saved. It also asks Windows
 to let Setup start it again when Setup finishes, with the last
 `--config-file` and the `--class` it was started with (no other arguments,
 and no earlier `--config-file`), and that start restores the session; the
-programs that ran in its terminals are not started again. Any other noctty
+programs that ran in its terminals are not started again. Any other koreterm
 process closes without saving and is not started again; the session owner
 brings the session back. No process saves or is started again in safe mode,
 when elevated through UAC, or with `window-save-state = never`. Ownership
 is per process: a process started with `--working-directory` (Explorer's
-"Open noctty here"), `-e` or `initial-command`, the startup profile picker,
+"Open koreterm here"), `-e` or `initial-command`, the startup profile picker,
 `--launch-layout` or `initial-window = false`, or as a default terminal
 handoff, does not own the session, and windows forwarded into it are not
-saved either, but a later noctty started normally that does not forward to
+saved either, but a later koreterm started normally that does not forward to
 it (under `single-instance = false`) can still own the session
 ([Session restore and recovery](#session-restore-and-recovery)). Setup
-starts noctty before its last page, so in the setup wizard, leaving
-**Launch noctty** checked there opens one more window.
-Setup's restart of noctty itself has not been tried on a real install.
+starts koreterm before its last page, so in the setup wizard, leaving
+**Launch koreterm** checked there opens one more window.
+Setup's restart of koreterm itself has not been tried on a real install.
 
-With the default `confirm-close-surface = always`, noctty declines, without a
+With the default `confirm-close-surface = always`, koreterm declines, without a
 prompt, while any terminal is open; with `confirm-close-surface = true` it
 declines only while a terminal runs a program (the programs `confirm-close-surface` asks
 about), and it always declines while Settings has unsaved edits. The
 declining process stays open and loses nothing, but Setup cannot replace the
 files and stops; a silent Setup under a package manager exits with code 5.
-When several noctty processes run, one that agreed may already have closed
+When several koreterm processes run, one that agreed may already have closed
 (as described above); a Setup that stops does not start it again. Finish or
 close those programs and run the upgrade again. For the same reason an
-upgrade started from inside a noctty tab is declined: the package manager is
-a program running in that terminal, and closing noctty would end it. Run it
-from another terminal. With `confirm-close-surface = false`, noctty asks
+upgrade started from inside a koreterm tab is declined: the package manager is
+a program running in that terminal, and closing koreterm would end it. Run it
+from another terminal. With `confirm-close-surface = false`, koreterm asks
 about no program, so it agrees and closes even while a package manager runs
 in one of its tabs, which ends that upgrade.
 
 When the copy being upgraded is 1.3.134 or older, the running old version
 answers Setup, so it behaves as that version did: Setup may fail to close it,
 or close its windows one at a time so that the saved session keeps only the
-last one. Quit noctty before such an upgrade. The in-app **Install** is not
-affected: it quits noctty itself and Setup starts it again, through Explorer,
+last one. Quit koreterm before such an upgrade. The in-app **Install** is not
+affected: it quits koreterm itself and Setup starts it again, through Explorer,
 as described under [Updates](#updates).
 
 ## Quick select & copy mode
@@ -2547,7 +2552,7 @@ environment-variable expansion, or control bytes raises the paste
 confirmation.
 
 A Ctrl+click (or Ctrl in quick select) opens an `http`, `https` or `mailto`
-link at once. A link with one of the other schemes noctty opens (`ftp`,
+link at once. A link with one of the other schemes koreterm opens (`ftp`,
 `ssh`, `git`, `tel`, `magnet`, `ipfs`, `ipns`, `gemini`, `gopher`, `news`)
 asks first: the prompt shows the exact link and the app currently set to
 open it (or says no app is set), and starts on Cancel. Windows opens the
@@ -2590,7 +2595,7 @@ the pane's `PATH` is that launcher. There `/c/...` is a Linux path and is
 not opened. Some WSL sessions are not recognized, so a `/c/x` printed in
 them opens `C:\x` when that exists: WSL started by another program in the
 pane (`cmd /c wsl`, `wsl` typed at a prompt), a distribution's own launcher
-such as `ubuntu.exe`, and a session handed to noctty as the default
+such as `ubuntu.exe`, and a session handed to koreterm as the default
 terminal.
 
 A quick select with nothing to label, or with too many targets to label
@@ -2680,10 +2685,10 @@ files falls through to the empty paste below.
 When a paste finds no text and no copied files on the clipboard, such as an
 image copied from a screenshot tool, and the program has bracketed paste on in
 a writable pane,
-noctty sends an empty
+koreterm sends an empty
 bracketed paste, `ESC[200~ESC[201~`, the same twelve bytes Windows Terminal
 sends. A program can take that as "the user pasted" and read the clipboard
-itself, which is how herdr and opencode attach an image. noctty transfers no
+itself, which is how herdr and opencode attach an image. koreterm transfers no
 image bytes: the program reads the clipboard through its own means, so it
 works only where the program runs on this machine or has its own clipboard
 bridge. An empty text on the clipboard counts as no text.
@@ -2717,7 +2722,7 @@ folder or a network share) can stall the window for a moment.
 
 The quick terminal uses the same `toggle_quick_terminal` action and
 `quick-terminal-*` configuration family as Ghostty where the settings map to
-Windows. Global keybinds use Win32 `RegisterHotKey` while noctty is running.
+Windows. Global keybinds use Win32 `RegisterHotKey` while koreterm is running.
 Windows or other applications may reserve hotkeys first; check logs when a
 global binding does not register.
 
@@ -2726,18 +2731,18 @@ Windows. Global keyboard capture is intentionally not implemented.
 
 ## Automation
 
-noctty exposes a local automation surface over the same single-instance IPC
+koreterm exposes a local automation surface over the same single-instance IPC
 pipe that `+new-window` uses. The verbs, JSON schema, exit codes, and policy
 are in [automation.md](automation.md).
 
 ```powershell
-noctty +list-windows
-noctty +perform-action new_tab
-noctty +perform-action --surface-id=<surface_id> toggle_fullscreen
-noctty +new-tab --window-id=<window_id>
-noctty +new-split --surface-id=<surface_id> --direction=right
-noctty +focus --surface-id=<surface_id>
-noctty +send-text --surface-id=<surface_id> -- "hello"
+koreterm +list-windows
+koreterm +perform-action new_tab
+koreterm +perform-action --surface-id=<surface_id> toggle_fullscreen
+koreterm +new-tab --window-id=<window_id>
+koreterm +new-split --surface-id=<surface_id> --direction=right
+koreterm +focus --surface-id=<surface_id>
+koreterm +send-text --surface-id=<surface_id> -- "hello"
 ```
 
 ### Pipe security
@@ -2747,7 +2752,7 @@ The pipe accepts only processes running as the same user: it is created with
 owning token's SID alone, and a `NO_WRITE_UP` mandatory-integrity label at the
 process's exact integrity level. An elevated instance therefore refuses a
 non-elevated client of the same account at `CreateFileW` (`win32=5`); the
-client reports "No matching noctty instance is listening" and `+new-window`
+client reports "No matching koreterm instance is listening" and `+new-window`
 starts its own instance instead. An elevated client still reaches the
 elevated instance.
 
@@ -2766,7 +2771,7 @@ same occupancy behaviour still applies within one integrity level. An
 elevated client additionally requires the server to be elevated, owned by the
 same token user, and running the same executable image; the image check is
 defence in depth, not a boundary, and refuses a forward between two different
-noctty installations.
+koreterm installations.
 
 None of this is a privilege boundary. Code already running as your user can
 list your windows, perform allowlisted actions, and open new windows. Treat
@@ -2774,7 +2779,7 @@ the channel as you would your own shell.
 
 ### Commands
 
-`+list-windows` returns the `noctty.windows.v3` schema: instance, window,
+`+list-windows` returns the `koreterm.windows.v3` schema: instance, window,
 tab, and pane metadata, including nullable pane titles and working
 directories. It never includes terminal text, scrollback, selection, clipboard
 contents, pending shell input, or pane process IDs.
@@ -2787,7 +2792,7 @@ that inject terminal input or touch arbitrary files (`text`, `csi`, `esc`,
 captured action, and leaves new action variants disabled until reviewed.
 `launch_layout:<name>` and `save_layout:<name>` are allowed; saving is the
 one action that writes a file, limited to a validated name under
-`%LOCALAPPDATA%\noctty\layouts\`, written atomically, replacing an existing
+`%LOCALAPPDATA%\koreterm\layouts\`, written atomically, replacing an existing
 layout without prompting, and only for the focused target.
 
 ### Forwarded arguments
@@ -2804,8 +2809,8 @@ These settings apply to every window of the instance and are not forwarded:
 `--window-theme`, `--window-titlebar-background`,
 `--window-titlebar-foreground`, `--split-divider-color`,
 `--window-show-tab-bar` and `--window-new-tab-position`, and neither is
-`--accent-follow-system`, which no longer has any effect. A second `noctty` and
-`noctty +new-window` leave them out (with a warning on standard error, where
+`--accent-follow-system`, which no longer has any effect. A second `koreterm` and
+`koreterm +new-window` leave them out (with a warning on standard error, where
 there is one) and still open the window.
 
 The new window copies one of the running instance's windows, the way a
@@ -2846,15 +2851,15 @@ window. The running instance re-checks every argument regardless.
 
 ## Crash reports and diagnostics
 
-Crash dumps stay under `%LOCALAPPDATA%\noctty\crash`, and noctty never
+Crash dumps stay under `%LOCALAPPDATA%\koreterm\crash`, and koreterm never
 uploads anything from it. On Windows the Sentry initialization path is a
-no-op. Instead, noctty installs a local unhandled-exception filter that
+no-op. Instead, koreterm installs a local unhandled-exception filter that
 writes `.dmp` minidumps for process-level crash exceptions. Some hard-abort
 paths may still terminate before Windows can produce a dump.
 
 ```powershell
-noctty +crash-report
-noctty +diagnostic-bundle --output=noctty-diagnostics
+koreterm +crash-report
+koreterm +diagnostic-bundle --output=koreterm-diagnostics
 ```
 
 `+crash-report` reads whatever is there. Dumps can contain sensitive memory
@@ -2862,21 +2867,21 @@ from the crashed process; review them before sharing.
 
 To read a dump, use the symbols zip of the same release and architecture
 (v1.3.133 and later). Release binaries keep their unwind tables, so a debugger
-can walk noctty's stacks without symbols, but only the PDBs turn frames into
+can walk koreterm's stacks without symbols, but only the PDBs turn frames into
 function names and source lines. Extract the zip and add its `symbols` folder
 to the debugger's symbol path. A debugger accepts a PDB only when its GUID and
 age equal the ones recorded in the binary, so a PDB from another build is
 rejected rather than misread. With `cdb` or WinDbg, and the dump from
-`%LOCALAPPDATA%\noctty\crash` (`noctty-<pid>-<timestamp>.dmp`):
+`%LOCALAPPDATA%\koreterm\crash` (`koreterm-<pid>-<timestamp>.dmp`):
 
 ```text
-cdb -z <dump>.dmp -y <extracted folder>\symbols -i <folder that holds the release's noctty.exe>
+cdb -z <dump>.dmp -y <extracted folder>\symbols -i <folder that holds the release's koreterm.exe>
 0:000> .reload /f
 0:000> ~*k
 ```
 
 `-i` is the image path: a minidump holds no module images, and the debugger
-needs the release's own `noctty.exe` (from the portable ZIP of the same
+needs the release's own `koreterm.exe` (from the portable ZIP of the same
 release and architecture) for its unwind tables. The release workflow checks,
 before and after publishing, that every PDB in the zip has the GUID and age of
 the matching binary in the portable ZIP.
@@ -2907,9 +2912,9 @@ so Ctrl+Shift+C neither copies nor works in another terminal): another
 program has probably registered them as system-wide hotkeys. Windows hands a
 registered hotkey to the program that registered it before any window sees
 the key. Driver control panels (AMD Radeon Software, NVIDIA, Intel), screen
-recorders and clipboard tools are common owners. noctty registers a
+recorders and clipboard tools are common owners. koreterm registers a
 system-wide hotkey only for `global:` keybinds, so unless you bound one to
-that chord, noctty is not the owner.
+that chord, koreterm is not the owner.
 [Hotkey Detective](https://github.com/ITachiLab/hotkey-detective) is one tool
 that can find the owner.
 
@@ -2918,7 +2923,7 @@ verify the distribution starts in a normal PowerShell session first.
 
 ### A copy does not reach a Remote Desktop session
 
-noctty writes a copy in one Win32 clipboard transaction, owned by the
+koreterm writes a copy in one Win32 clipboard transaction, owned by the
 pane's window. `Surface.writeClipboardText` in
 `src/apprt/win32/terminal_window.zig` writes `CF_UNICODETEXT` for
 `copy_to_clipboard:plain` and a program's OSC 52
@@ -2926,7 +2931,7 @@ write. The default copy bindings (including Ctrl+Shift+C) and
 `copy-on-select` use the `mixed` format: `Surface.writeClipboardHtml`
 writes `HTML Format` and `CF_UNICODETEXT` together. `copy_to_clipboard:html`
 also uses that writer. Windows adds `CF_LOCALE`, `CF_TEXT` and
-`CF_OEMTEXT`. noctty never writes an OLE data object.
+`CF_OEMTEXT`. koreterm never writes an OLE data object.
 
 A program can replace that copy with its own clipboard write. Claude Code
 on Windows also runs Windows PowerShell 5.1 `Set-Clipboard` about a quarter
@@ -2942,15 +2947,15 @@ one, but that direction has not been measured.
 To check which write remains, inspect metadata only: list formats with
 `EnumClipboardFormats` and the owner with `GetClipboardOwner`, without
 reading the contents. `DataObject` plus `Ole Private Data` with no owner
-means the last writer was not noctty. A missing owner alone does not
+means the last writer was not koreterm. A missing owner alone does not
 identify the writer.
 
-Hold Shift while dragging so noctty makes the selection, then use noctty's
+Hold Shift while dragging so koreterm makes the selection, then use koreterm's
 copy binding (Ctrl+Shift+C by default). `mouse-shift-capture` controls
 whether Shift goes to the program; if the program overrides the default,
-set `mouse-shift-capture = never` to keep Shift selection in noctty.
+set `mouse-shift-capture = never` to keep Shift selection in koreterm.
 `copy-on-select` also works with a Shift selection. A copy binding with no
-noctty selection copies nothing, leaving the program's earlier write on
+koreterm selection copies nothing, leaving the program's earlier write on
 the clipboard.
 
 The clipboard writers were compared in an isolated window station. RDP
@@ -2969,7 +2974,7 @@ also sends no response; the program keeps its own timeout in those cases.
 Neovim's OSC 52 clipboard pastes by asking the terminal for the clipboard.
 Neovim uses it when `vim.g.clipboard = 'osc52'` is set, and falls back to it
 when it finds no other clipboard tool and `'clipboard'` is empty, which is
-common over SSH and in WSL. noctty answers with one escape sequence that
+common over SSH and in WSL. koreterm answers with one escape sequence that
 carries the clipboard as base64 and ends with `ESC \`. Neovim waits at most
 `'ttimeoutlen'` milliseconds for the next piece of an unfinished escape
 sequence. If a longer pause falls inside the answer, Neovim gives up and
@@ -2985,7 +2990,7 @@ waits for the rest of a sequence only while `'ttimeout'` is on and
 `'ttimeoutlen'` is 0 or more, and otherwise processes it immediately
 (`tk_getkeys` in `src/nvim/tui/input.c`, the same in 0.10 through 0.12).
 
-Otherwise, what runs between noctty and Neovim decides how long the pauses
+Otherwise, what runs between koreterm and Neovim decides how long the pauses
 are. Measured on Windows 11 with Neovim 0.10.4, 0.11.7 and 0.12.5:
 
 - Native Windows Neovim gets the answer from the bundled pseudo console
@@ -3003,7 +3008,7 @@ are. Measured on Windows 11 with Neovim 0.10.4, 0.11.7 and 0.12.5:
 - Over SSH to a distant host, the answer can also arrive in bursts about one
   round trip apart. `ssh.exe` sends it as many small packets, and after a
   quiet spell TCP sends only a few packets per round trip until its window
-  grows. noctty's clipboard prompt (`clipboard-read = ask`, the default)
+  grows. koreterm's clipboard prompt (`clipboard-read = ask`, the default)
   makes that quiet spell: the SSH connection sits idle while the prompt
   waits for you. With the paste typed through `ssh.exe` and Allow clicked 3
   seconds later over an emulated 60 or 100 ms round trip, the default
@@ -3029,7 +3034,7 @@ less over SSH, or 0 in WSL, the replies to Neovim's own startup queries
 arrive in pieces too and run as Normal-mode keys. One of them contains `r0`,
 which replaces the character under the cursor.
 
-noctty 1.3.130 and earlier could also drop part of a large answer when input
+koreterm 1.3.130 and earlier could also drop part of a large answer when input
 arrived while it was being sent, which caused the same symptom at any
 `'ttimeoutlen'` (#261).
 
@@ -3042,15 +3047,15 @@ clipboard response from the terminal`, and nothing is typed.
 ### ConPTY source
 
 Releases since 1.3.125 ship Microsoft's ConPTY pair, `conpty.dll` and
-`OpenConsole.exe`, beside `noctty.exe`, and `zig build` stages the same pinned
-pair in `zig-out\bin`. `noctty +version` reports `ConPTY : bundled (<DLL path>)`,
+`OpenConsole.exe`, beside `koreterm.exe`, and `zig build` stages the same pinned
+pair in `zig-out\bin`. `koreterm +version` reports `ConPTY : bundled (<DLL path>)`,
 or `ConPTY : inbox` with the reason, for example
-`inbox (conpty.dll is not next to noctty.exe)`. `+diagnostic-bundle` records
+`inbox (conpty.dll is not next to koreterm.exe)`. `+diagnostic-bundle` records
 the same selection and reason (`"fallback": "NotFound"`). Set
-`NOCTTY_CONPTY=inbox` before launch to force the in-box conhost for diagnosis.
+`KORETERM_CONPTY=inbox` before launch to force the in-box conhost for diagnosis.
 
-When noctty falls back on its own it shows a banner naming the reason, in
-every build. One fallback happens only inside a running noctty: if the
+When koreterm falls back on its own it shows a banner naming the reason, in
+every build. One fallback happens only inside a running koreterm: if the
 bundled pair loads but fails to create a pseudo console, that process moves to
 the in-box conhost for every terminal it opens from then on, and its banner
 says so, while `+version` and the bundle, which run as separate processes,
@@ -3073,7 +3078,7 @@ and the
   `ESC _ G ... ESC \`, an `OK` or an error, unless `q=1` (suppress success
   replies) or `q=2` (suppress all replies) is set. A successful delete never
   replies (`graphics_exec.zig`, `StreamHandler.apcEnd`).
-  noctty has no ConPTY-specific suppression. The 2026-10-10 audit measured the
+  koreterm has no ConPTY-specific suppression. The 2026-10-10 audit measured the
   bundled ConPTY handing a native console program (`[Console]::ReadKey` in
   pwsh, and `cmd`) a lone `\` for such a reply, while the same reply arrived
   intact through WSL's raw pty; this was not re-measured for this page. A tool
@@ -3099,7 +3104,7 @@ and the
 ### GPU floor and OpenGL driver issues
 
 The default OpenGL backend needs OpenGL 4.3 or newer through WGL. Below that
-floor, or when WGL fails, noctty switches to the D3D11 beta, which draws text
+floor, or when WGL fails, koreterm switches to the D3D11 beta, which draws text
 with feature level 11.0 hardware or WARP, without OpenGL (see
 [Starting without OpenGL](#starting-without-opengl)). Custom shaders,
 background images and Kitty images still need a working OpenGL 4.3 driver;
@@ -3109,7 +3114,7 @@ back to software GL (often `GDI Generic` at OpenGL 1.1), VMs without 3D
 acceleration or a guest GPU driver, and older integrated GPUs whose driver
 stops before 4.3.
 
-If Direct3D 11 cannot start either, noctty stops before showing its window and the startup
+If Direct3D 11 cannot start either, koreterm stops before showing its window and the startup
 dialog lists the required and detected OpenGL versions plus the renderer and
 vendor strings the driver reports. The dialog also prints an `Architecture:`
 line naming the process and native machine, so a bug report separates a
@@ -3118,13 +3123,13 @@ in OpenGL initialization use the same dialog to name the failed step and any
 Win32 or Zig error, and the Direct3D 11 error. To get OpenGL back (for
 custom shaders and images, or after that dialog), on x64 try in order:
 
-1. End the Remote Desktop session and launch noctty locally.
+1. End the Remote Desktop session and launch koreterm locally.
 2. In a VM, enable 3D acceleration and install the guest graphics driver.
 3. Update or reinstall the OEM graphics driver for the active GPU; on an
    AMD+NVIDIA hybrid system, the AMD driver first, then NVIDIA.
-4. On a hybrid-GPU system, force `noctty.exe` to the discrete or integrated
+4. On a hybrid-GPU system, force `koreterm.exe` to the discrete or integrated
    GPU in Windows Graphics settings.
-5. If OpenGL 4.3 is not available at all, noctty already draws text with the
+5. If OpenGL 4.3 is not available at all, koreterm already draws text with the
    [D3D11 renderer beta](#d3d11-renderer-beta); set `renderer = d3d11` (or
    `renderer = d3d11-warp`) and remove custom shaders and background images
    to start with it and skip the OpenGL attempt. See
@@ -3148,7 +3153,7 @@ step 3 before retrying.
 Qualcomm Snapdragon PCs ship no desktop OpenGL driver. No Qualcomm
 implementation has ever appeared in the Khronos OpenGL conformant-products
 register, so a fresh Snapdragon machine has no OpenGL ICD for WGL to load at
-all, whatever else its Adreno driver supports. noctty's startup dialog
+all, whatever else its Adreno driver supports. koreterm's startup dialog
 reports that as `Detected OpenGL version: 1.1`, `Detected renderer: GDI
 Generic`, and `Detected vendor: Microsoft Corporation`, alongside
 `Architecture: ARM64 process on ARM64 Windows`. Those GL strings are the GDI
@@ -3156,14 +3161,14 @@ software fallback Windows uses when no ICD is present, not a driver that
 stopped short of 4.3.
 
 Install the free **OpenCL, OpenGL, and Vulkan Compatibility Pack** from the
-Microsoft Store, then restart noctty. (Without the pack, noctty draws text
+Microsoft Store, then restart koreterm. (Without the pack, koreterm draws text
 with the [D3D11 renderer beta](#d3d11-renderer-beta) on its own; see the end
 of this section.) The pack installs Microsoft's
 GLon12 mapping layer, which implements desktop OpenGL on top of Direct3D 12 and
 supplies the ICD that is otherwise missing. Microsoft's own support statement
-for the pack promises OpenGL 3.3, below noctty's floor, but a measured report
+for the pack promises OpenGL 3.3, below koreterm's floor, but a measured report
 on an Adreno X1-85 shows it exposing a 4.6 core profile through the D3D12
-path, with the capabilities noctty's renderer needs (vertex-stage SSBOs,
+path, with the capabilities koreterm's renderer needs (vertex-stage SSBOs,
 `GL_ARB_texture_rectangle`, and `GL_ARB_framebuffer_sRGB`):
 
 ```text
@@ -3175,23 +3180,23 @@ The Mesa version is whatever the installed pack ships; only the `D3D12 (...)`
 renderer prefix and a version at or above 4.3 matter.
 
 On a Snapdragon PC, or any ARM64 PC whose GPU vendor ships no desktop
-OpenGL driver, the Compatibility Pack is required for noctty's default OpenGL
+OpenGL driver, the Compatibility Pack is required for koreterm's default OpenGL
 4.3 backend; an ARM64 PC with its vendor's own OpenGL driver does not need it.
 With the pack, OpenGL comes from a Microsoft mapping layer rather than a GPU
-vendor's driver, but noctty neither knows nor cares which supplied it.
+vendor's driver, but koreterm neither knows nor cares which supplied it.
 
-Without the pack, noctty switches to the D3D11 renderer (beta), which the
+Without the pack, koreterm switches to the D3D11 renderer (beta), which the
 ARM64 release build includes, when OpenGL cannot start, and says so in a
 banner. To start with it, add `renderer = d3d11`
 to the config file (hardware Direct3D 11, then Microsoft's WARP software
 renderer) or `renderer = d3d11-warp` (WARP only). The config file is
-`%LOCALAPPDATA%\noctty\config.ghostty`, or the `config.ghostty` beside
-`noctty.exe` in portable mode. With either setting, and no custom shader or
-background image configured, noctty creates no OpenGL context for a new
+`%LOCALAPPDATA%\koreterm\config.ghostty`, or the `config.ghostty` beside
+`koreterm.exe` in portable mode. With either setting, and no custom shader or
+background image configured, koreterm creates no OpenGL context for a new
 terminal, so a PC whose only OpenGL is the GDI software implementation can
 start (read from `Surface.init` and `renderer/Windows.zig`; the CI smoke on the
 ARM64 runner covers the WARP lifecycle, not a Snapdragon GPU). Custom shaders,
-background images and Kitty images are not drawn by the beta: noctty tries
+background images and Kitty images are not drawn by the beta: koreterm tries
 OpenGL for them and, if that fails, keeps drawing text with a visible notice.
 WARP can use a lot of CPU under heavy output.
 
@@ -3199,23 +3204,23 @@ See [starting without OpenGL](#starting-without-opengl) for how failed
 starts interact with safe mode.
 
 There is no AMD or NVIDIA driver to reinstall on ARM64 and no second GPU to
-select in Windows Graphics settings, so noctty's startup dialog leads with
+select in Windows Graphics settings, so koreterm's startup dialog leads with
 the Compatibility Pack when it detects an ARM64 native machine, and keeps the
 Remote Desktop and VM guidance, which applies on any architecture. That dialog
 now appears only when Direct3D 11 could not start either; the 1.3.132 dialog
 says the build has no software, DirectX, or ANGLE fallback renderer, which is
-out of date for builds that include the beta. The dialog and `noctty +version`
+out of date for builds that include the beta. The dialog and `koreterm +version`
 both report the architecture: `ARM64` for a native build, or
 `x64 (running on ARM64)` if you installed the x64 build by mistake. Prefer the
 ARM64 artifacts on a Snapdragon PC.
 
 ### Stale installed build
 
-When testing a local build, make sure the `noctty` you invoke is the current
+When testing a local build, make sure the `koreterm` you invoke is the current
 `zig-out\bin` binary rather than an older Scoop shim or a manually added
-install directory earlier on `PATH`. A `noctty.com` executable may be
-selected before `noctty.exe` for CLI invocations, because `.com` ranks
-before `.exe` in `PATHEXT`. `noctty.com` is the console launcher and the
-recommended way to run CLI actions. `noctty.exe +<action>` also works: the
+install directory earlier on `PATH`. A `koreterm.com` executable may be
+selected before `koreterm.exe` for CLI invocations, because `.com` ranks
+before `.exe` in `PATHEXT`. `koreterm.com` is the console launcher and the
+recommended way to run CLI actions. `koreterm.exe +<action>` also works: the
 Windows-subsystem binary attaches to the console it was launched from before
 running the action, and leaves redirected output alone.
